@@ -38,7 +38,7 @@ impl EventSink for Gate {
         let to = self.0.lock().unwrap().clone();
         match to {
             Some(w) => Sink(w).commit(batch).await,
-            None => Err(ApiError::new(ErrorCode::Offline, "no hub")),
+            None => Err(Error::new(Code::Unavailable, "no hub")),
         }
     }
 }
@@ -687,7 +687,7 @@ async fn failed_gateway_job_keeps_one_billed_attempt_without_reissuing() {
         let mut failed = build::done();
         failed.outcome = Outcome::Failed;
         failed.stop_reason = "error".into();
-        failed.error = Some(ApiError::new(ErrorCode::Internal, "503 busy"));
+        failed.error = Some(Error::new(Code::Internal, "503 busy"));
         node.finish(&first, failed).await.unwrap();
         let result = tokio::time::timeout(Duration::from_secs(5), task)
             .await

@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::common::{ApiError, ExecutionRef};
+use crate::common::{Error, ExecutionRef};
 use crate::ids::*;
 use crate::run::Part;
 
@@ -80,7 +80,7 @@ pub enum ToolResult {
     },
     /// Refused or failed; `is_error` for the harness.
     Failed {
-        error: ApiError,
+        error: Error,
     },
     /// An outside effect may have happened: look it up, do not retry under a new id.
     Unknown {

@@ -18,6 +18,7 @@ const ADDR: &str = "tcFAKEtarget0123456789_-x";
 const FAIL: &str = "tcFAILtarget0123456789_-x";
 /// The screenshot's failure: the probe succeeds, sending the archive exits 255.
 const FAIL_SEND: &str = "tcSENDtarget0123456789_-x";
+const MAC: &str = "tcMACtarget01234567890_-x";
 
 fn script(p: &Path, body: &str) {
     std::fs::write(p, format!("#!/bin/sh\n{body}")).unwrap();
@@ -105,7 +106,8 @@ async fn the_hub_installs_a_node_that_is_active_once_paired() {
     let releases = tempfile::tempdir().unwrap();
     release(releases.path());
     script(&tools.path().join("tailcat"), "exit 0\n");
-    // the last argument is the remote command; the target is this machine with another home
+    // The last argument is the remote command. Emulate a Linux peer regardless
+    // of the test host's OS; run its other commands with an isolated home.
     script(
         &tools.path().join("ssh"),
         &format!(
@@ -116,8 +118,10 @@ async fn the_hub_installs_a_node_that_is_active_once_paired() {
              # The real SSH mux identifies the peer by its private control socket.\n\
              d=$(dirname \"$socket\"); grep -F -- \"-S $socket -o ControlPersist=no -M -N\" '{log}' | tail -1 > \"$d/route\"; master=$(cat \"$d/route\");\n\
              case \"$master $*\" in\n\
+             *{MAC}*) case \"$cmd\" in *\"uname -sm\"*) echo 'Darwin arm64'; exit 0 ;; *) exit 99 ;; esac ;;\n\
              *{FAIL_SEND}*) case \"$cmd\" in *\"uname -sm\"*) ;; *) cat >/dev/null; echo 'transfer failed' >&2; exit 255 ;; esac ;;\n\
              *{FAIL}*\"setup node\"*) cat > '{home}/failed-code'; echo 'pairing code: Error: no pairing code' >&2; exit 1 ;; esac\n\
+             case \"$cmd\" in *\"uname -sm\"*) echo 'Linux x86_64'; exit 0 ;; esac\n\
              HOME='{home}' exec sh -c \"$cmd\"\n",
             log = tools.path().join("ssh.log").display(),
             home = target.path().display()
@@ -293,6 +297,40 @@ async fn the_hub_installs_a_node_that_is_active_once_paired() {
     assert!(!target.path().join(".steve-node-install").exists());
     // and the install's key with it
     assert!(!h.dir.path().join("tailcat/installs").join(&id).exists());
+
+    // A Mac needs an interactive administrator, so don't stage a pairing code
+    // or send an installer over the unattended path.
+    let (_, mac) = call(&h, reqwest::Method::POST, "u1", "", json!({})).await;
+    let mac = mac["id"].as_str().unwrap();
+    let (s, _) = call(
+        &h,
+        reqwest::Method::POST,
+        "u1",
+        &format!("/{mac}/run"),
+        json!({"address": MAC}),
+    )
+    .await;
+    assert_eq!(s, 200);
+    let refused = stopped(&h, mac).await;
+    assert_eq!(refused["state"], "failed", "{refused}");
+    assert_eq!(refused["failed_step"], "probe", "{refused}");
+    assert_eq!(refused["steps"].as_array().unwrap().len(), 1, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("steve node enable-boot"),
+        "{refused}"
+    );
+    let (s, _) = call(
+        &h,
+        reqwest::Method::DELETE,
+        "u1",
+        &format!("/{mac}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(s, 200);
 
     // a failed install says at which step and why, and keeps the address for a retry
     let (_, failing) = call(&h, reqwest::Method::POST, "u1", "", json!({})).await;

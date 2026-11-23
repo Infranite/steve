@@ -40,7 +40,7 @@ pub fn command_retry_at(store: &Store, key1: &str) -> Result<i64> {
 }
 
 pub fn fixture_prepare_state(store: &Store) -> Result<(String, bool, i64)> {
-    store.sqlite_read(|db| Ok(db.query_row("SELECT state,maybe_sent,lease_generation FROM node_commands WHERE operation_id='op_prep_s1'", rusqlite::params![], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?))
+    store.sqlite_read(|db| Ok(db.query_row("SELECT state,maybe_sent,lease_generation FROM node_commands WHERE operation_id='prepare:s1:r0'", rusqlite::params![], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?))
 }
 
 pub fn cancel_command_targets(store: &Store) -> Result<(String, String)> {

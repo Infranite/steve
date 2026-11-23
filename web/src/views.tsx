@@ -137,7 +137,7 @@ export function NewItemDialog({ project: pre, bot: preBot }: { project?: string;
           <Field><FieldLabel>{t("views:newItem.project")}</FieldLabel><Select testId="new-project" value={proj} onChange={setProj} options={[{ v: "auto", l: t("views:newItem.auto") }, ...st.projects.map((p) => ({ v: p.id, l: p.name })), { v: "none", l: t("views:newItem.noProject") }]} /></Field>
         </div>
         <Field><FieldLabel htmlFor="new-specialties">{t("manage:dispatch.requiredSpecialties")}</FieldLabel><Input id="new-specialties" value={specialties} onChange={e => setSpecialties(e.target.value)} placeholder={t("manage:dispatch.specialtyPlaceholder")} /></Field>
-        {placementError && <BlockedPlacement error={placementError} />}
+        {placementError && <BlockedPlacement blocked={placementError.blocked} />}
         {placementError?.proposal && <BotProposalCard key={placementError.proposal.id} proposal={placementError.proposal} onClose={() => setPlacementError(undefined)} />}
         {selected && <><RuntimeAvailability harness={selected.harness} /><RuntimePermissionNotice harness={selected.harness} mode={selected.permMode} /></>}
         {!selected && <div className="type-footnote text-muted-foreground"><p>{t("shell:runtimeSetup.chooseBot")} · {t("shell:runtimeSetup.targetPending")}</p><RuntimeSetupLink /></div>}
@@ -469,7 +469,7 @@ export function ItemView({ id }: { id: string }) {
               {i.workflow && <div className="max-sm:basis-full max-sm:pl-10"><WorkflowButtons at={at} /></div>}
             </div>
             {i.closeout && <CloseoutSummary value={i.closeout} className="mt-3 pl-10" />}
-            {(i.dispatch || i.placement) && <DispatchDetails dispatch={i.dispatch} placement={i.placement} />}
+            {(i.dispatch || i.placement) && <DispatchDetails dispatch={i.dispatch} placement={i.placement} unassigned={!i.b} />}
             {at.dialogs}
             {i.waits.length > 0 && <div className="mt-5 flex flex-col gap-3">{i.waits.map((w) => <DecisionCard key={w.decision} i={i} w={w} showItem={false} />)}</div>}
             {i.rel && <RelNote rel={i.rel} box={i.rel.tone !== "ok"} className="mt-3" onClose={i.rel.tone === "fail" ? () => closeRel(i) : undefined} />}
@@ -512,7 +512,7 @@ export function ItemView({ id }: { id: string }) {
           <section data-details>
             <h3 className="mb-2 type-label text-tertiary">{t("views:itemState.details")}</h3>
             <dl className="grid grid-cols-[minmax(64px,max-content)_minmax(0,1fr)] items-start gap-x-3 gap-y-2.5 [&_[data-select]]:-ml-2">
-            <Prop label={t("views:item.propBot")}><Select quiet testId="bot" value={i.b} onChange={(k) => reassign(i.id, k)} options={Object.keys(st.bots).filter((k) => st.bots[k].on || k === i.b).map((k) => ({ v: k, l: <BotName k={k} /> }))} /></Prop>
+            <Prop label={t("views:item.propBot")}><Select quiet testId="bot" value={i.b} placeholder={!i.b ? t("manage:dispatch.chooseBot") : undefined} onChange={(k) => reassign(i.id, k)} options={Object.keys(st.bots).filter((k) => (st.bots[k].on && (i.b || !i.dispatch?.team || !st.bots[k].main)) || k === i.b).map((k) => ({ v: k, l: <BotName k={k} /> }))} /></Prop>
             <Prop label={t("views:item.propSessions")}><div className="flex flex-col gap-2 pt-1">{i.ss.length ? i.ss.map((k) => <div key={k} className="flex min-w-0 flex-col gap-0.5" data-item-session={k}>
               <a href={"#/sessions/" + k} className="flex min-w-0 flex-wrap items-center gap-2 hover:underline"><span>#{getSession(k)?.n}</span>{getSession(k) && <SessionIdentity session={getSession(k)!} />}</a>
               <SessionApproval id={k} />

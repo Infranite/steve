@@ -50,13 +50,11 @@ impl Unavailable {
         };
         format!("{HINT}{reason}")
     }
-    fn from_node(e: ApiError) -> Self {
+    fn from_node(e: Error) -> Self {
         match e.code {
-            ErrorCode::Denied => Self::Scope,
-            ErrorCode::Offline | ErrorCode::Expired | ErrorCode::Stale | ErrorCode::Unsupported => {
-                Self::Offline
-            }
-            ErrorCode::Exhausted => Self::Limit,
+            Code::Forbidden => Self::Scope,
+            Code::Unavailable | Code::Stale | Code::Unsupported => Self::Offline,
+            Code::Exhausted => Self::Limit,
             _ => Self::Missing,
         }
     }
@@ -304,23 +302,17 @@ impl Service {
         q: ReplyCapture,
     ) -> ApiResult<String> {
         if q.markdown.len() > MAX_REPLY_CAPTURE || source.id() != caller {
-            return Err(ApiError::new(
-                ErrorCode::Denied,
-                "invalid reply capture scope",
-            ));
+            return Err(Error::new(Code::Forbidden, "invalid reply capture scope"));
         }
         let (session, _) = authorize(&self.store, caller, &q.execution, true)?;
         let binding = self
             .store
             .read(|r| steve_store::node_sessions::workspace_ref(r, &session.id))
             .map_err(internal)?
-            .ok_or_else(|| ApiError::new(ErrorCode::Denied, "reply has no workspace binding"))?;
+            .ok_or_else(|| Error::new(Code::Forbidden, "reply has no workspace binding"))?;
         let workspace: WorkspaceRef = serde_json::from_str(&binding).map_err(internal)?;
         if workspace.node != *caller {
-            return Err(ApiError::new(
-                ErrorCode::Denied,
-                "reply Node binding changed",
-            ));
+            return Err(Error::new(Code::Forbidden, "reply Node binding changed"));
         }
         let mut c = Capture {
             service: self,

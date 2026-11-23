@@ -64,7 +64,7 @@ impl NodeRuntime {
     /// no record of is held with a note (that work is never given up on its own). Returns how many
     /// things changed.
     pub async fn reconcile(&self) -> ApiResult<usize> {
-        let internal = |e: StoreError| ApiError::new(ErrorCode::Internal, e.to_string());
+        let internal = |e: StoreError| Error::new(Code::Internal, e.to_string());
         // the Node's ledger, all pages of one snapshot
         let NodeSnapshot { entries, heads } = read_snapshot(&*self.node, 200).await?;
         // its events up to that moment, applied before the ledger is compared
@@ -90,7 +90,7 @@ impl NodeRuntime {
             };
             match self.node.session(id).await {
                 Ok(v) => views.push((s, Some(v))),
-                Err(e) if e.code == ErrorCode::Invalid => views.push((s, None)),
+                Err(e) if e.code == Code::Invalid => views.push((s, None)),
                 Err(e) => return Err(e),
             }
         }
@@ -134,6 +134,7 @@ impl NodeRuntime {
             state,
             method,
             request,
+            maybe_sent,
         } in cmds
         {
             let digest = request.digest(&method).map_err(conflict)?;
@@ -148,8 +149,19 @@ impl NodeRuntime {
             let receipt = match entries.get(&op) {
                 Some(e) if e.digest == digest && e.method == method => e.receipt.clone(),
                 Some(_) => unknown("the Node holds another command under this id")?,
-                // never got there: the sender sends the very same command
-                None if state == "pending" => continue,
+                None if state == "pending" && !maybe_sent => {
+                    // A one-shot call whose waiter is gone can settle locally before admission.
+                    if method == "start_job"
+                        && let Some(attempt) = self
+                            .store
+                            .read(|r| steve_store::node_jobs::command_attempt(r, &op))?
+                        && !self.jobs.has(&attempt)
+                    {
+                        self.stop_job_in(tx, &attempt)?;
+                        *changed += 1;
+                    }
+                    continue;
+                }
                 None => unknown("the Node has no record of it")?,
             };
             let before = self
@@ -262,7 +274,7 @@ impl NodeRuntime {
                 "node {}: {} {op} ({:?}) is not the Hub's; held",
                 self.node_id,
                 e.method,
-                e.receipt.state.tag()
+                e.receipt.state.state_name()
             );
             let Some(session) = session else { continue };
             let ours = self

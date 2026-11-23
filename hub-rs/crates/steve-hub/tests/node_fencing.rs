@@ -69,8 +69,11 @@ async fn the_newer_link_wins_and_the_old_ones_calls_are_uncertain() {
         .unwrap();
     assert_eq!(code, steve_node_wire::close::FENCED);
     let e = call.await.unwrap().unwrap_err();
-    assert_eq!(e.code, ErrorCode::OutcomeUnknown);
-    assert_eq!(e.operation, Some(OperationId::new("op_t1").unwrap()));
+    assert_eq!(e.code, Code::OutcomeUnknown);
+    assert_eq!(
+        e.params.0["operation"],
+        OperationId::new("op_t1").unwrap().to_string().into()
+    );
     drop(release);
     // asked over the new link, not redone
     eventually_sync("B attached", || remote.generation() == Some(b.generation)).await;
@@ -91,7 +94,7 @@ async fn the_newer_link_wins_and_the_old_ones_calls_are_uncertain() {
         .conn
         .call("events.commit", json!({"events": []}), None)
         .await;
-    assert_eq!(late.unwrap_err().code, ErrorCode::Offline);
+    assert_eq!(late.unwrap_err().code, Code::Unavailable);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -117,7 +120,7 @@ async fn an_old_generation_is_stale_at_every_guard() {
         .commit(EventBatch::default())
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Stale);
+    assert_eq!(e.code, Code::Stale);
     let q = ToolCall {
         id: CallId::new("c1").unwrap(),
         execution: exec_turn("s_1", "t_1", "a_1"),
@@ -128,7 +131,7 @@ async fn an_old_generation_is_stale_at_every_guard() {
     };
     assert_eq!(
         GuardedTools(old).call(q.clone()).await.unwrap_err().code,
-        ErrorCode::Stale
+        Code::Stale
     );
     // the current link, after a revocation moved the generation in the store: stale as well
     let cur = LinkCtx {
@@ -146,6 +149,6 @@ async fn an_old_generation_is_stale_at_every_guard() {
         .unwrap();
     assert_eq!(
         GuardedTools(cur).call(q).await.unwrap_err().code,
-        ErrorCode::Stale
+        Code::Stale
     );
 }

@@ -81,6 +81,7 @@ function NodeDetail({ v }: { v: NodeView }) {
       <div className="flex min-w-0 flex-col gap-4">
         <TakeWork v={v} w={w} />
         <NodeContext v={v} editable={v.local || pairable} />
+        {remote && v.node?.host?.os === "macos" && <NodeFileAccess v={v} />}
         <NodeHarnesses v={v}>{v.local && <RuntimeSetupPanel>{v.device?.can_configure && !st.down && <AddHarness />}</RuntimeSetupPanel>}</NodeHarnesses>
         <NodeHarnessUpdates v={v} />
         <Identity v={v} />
@@ -96,6 +97,40 @@ function NodeDetail({ v }: { v: NodeView }) {
         <Button variant="destructive" disabled={busy} onClick={() => void revoke()} data-node-revoke-confirm>{t("devices:node.revoke")}</Button></DialogFooter>
     </DialogContent></Dialog>}
   </Page></div>
+}
+
+function NodeFileAccess({ v }: { v: NodeView }) {
+  const t = useT(), { reloadNodes } = useDevices()
+  const [busy, setBusy] = useState(false)
+  const report = v.linked ? v.node?.host?.file_access : undefined
+  const status = report?.status ?? "unknown"
+  const recheck = async () => {
+    setBusy(true)
+    try {
+      const checked = await api.recheckNodeFileAccess(v.id)
+      if (checked.status === "unknown") toast(t("devices:fileAccess.state.unknown"))
+      reloadNodes()
+    }
+    catch { toast(t("devices:fileAccess.checkFailed")) }
+    finally { setBusy(false) }
+  }
+  return <DCard icon={<FolderIcon />} title={t("devices:fileAccess.title")} data-node-file-access={status}>
+    <div className="space-y-2 px-5 pb-5 type-callout">
+      <p>{report?.status === "granted" && !report.locations.length
+        ? t("devices:fileAccess.noneNeeded") : t(`devices:fileAccess.state.${status}`)}</p>
+      {!!report?.locations.length && <ul className="text-muted-foreground">
+        {report.locations.map(({ location, status }) => <li key={location}>
+          {t(`devices:fileAccess.location.${location}`)} · {t(`devices:fileAccess.state.${status}`)}
+        </li>)}
+      </ul>}
+      {status === "missing" && <p className="text-muted-foreground">
+        {t("devices:fileAccess.repair")} <code className="type-code select-all">steve node file-access</code>
+      </p>}
+      <Button size="sm" variant="outline" disabled={busy || !v.linked} onClick={() => void recheck()} data-node-file-access-recheck>
+        {busy && <Spinner className="size-3.5" />}{t("devices:fileAccess.recheck")}
+      </Button>
+    </div>
+  </DCard>
 }
 
 /** who and what it is: its id, the fingerprint checked when it was paired, its owner, when it last connected */

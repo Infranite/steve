@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum TimeoutPhase {
     Queue,
@@ -30,6 +31,7 @@ impl std::fmt::Display for TimeoutPhase {
 
 /// Structured Node-side failure evidence. General operation error codes remain unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GatewayFailure {
     Timeout { phase: TimeoutPhase },

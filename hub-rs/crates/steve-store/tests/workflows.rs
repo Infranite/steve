@@ -7,6 +7,12 @@ use common::*;
 use serde_json::{Value, json};
 use steve_store::*;
 
+fn retry(t: &T, parent: &str, unit: &str, reason: &str) -> Result<Workflow> {
+    let workflows = t.store.workflows();
+    let current = workflows.get(parent)?.unwrap();
+    workflows.retry_unit(parent, current.revision, unit, reason)
+}
+
 fn setup() -> (T, String, Vec<UnitSpec>) {
     let t = fresh();
     for id in ["writer", "reviewer", "integrator"] {
@@ -577,11 +583,7 @@ fn replan_is_compare_and_swap_and_keeps_completed_or_running_specs_immutable() {
             .replace(&parent, graph.revision, "更新", &specs, 2, 3),
         "先取消或重置",
     );
-    let reset = t
-        .store
-        .workflows()
-        .reset(&parent, "a", "新需求使原结果失效")
-        .unwrap();
+    let reset = retry(&t, &parent, "a", "新需求使原结果失效").unwrap();
     let changed = t
         .store
         .workflows()
@@ -608,7 +610,7 @@ fn replan_is_compare_and_swap_and_keeps_completed_or_running_specs_immutable() {
         .unwrap()
         .unwrap();
     assert_eq!(archived.0, parent);
-    assert_eq!(archived.1.status, "cancelled");
+    assert_eq!(archived.1.status, "succeeded");
     assert!(!archived.1.outputs.as_array().unwrap().is_empty());
     assert!(
         t.store
@@ -626,40 +628,39 @@ fn replan_is_compare_and_swap_and_keeps_completed_or_running_specs_immutable() {
 }
 
 #[test]
-fn reset_invalidates_review_and_integration_and_keeps_their_evidence() {
+fn retry_waits_for_replacement_evidence_before_invalidating_dependents() {
     let (t, parent, specs) = setup();
     plan(&t, &parent, &specs);
     for id in ["a", "b", "review", "integrate"] {
         finish(&t, &start(&t, &parent, id), true);
     }
-    let reset = t
-        .store
-        .workflows()
-        .reset(&parent, "a", "发现实现缺陷")
-        .unwrap();
+    let reset = retry(&t, &parent, "a", "发现实现缺陷").unwrap();
     assert_eq!(
         reset
             .units
             .iter()
             .map(|u| u.status.as_str())
             .collect::<Vec<_>>(),
-        ["pending", "succeeded", "pending", "pending"]
+        ["pending", "succeeded", "succeeded", "succeeded"]
     );
     assert_eq!(reset.blockers().len(), 3);
-    let invalidated = reset.history.last().unwrap().detail["invalidated"]
-        .as_array()
-        .unwrap();
-    assert_eq!(invalidated.len(), 3);
-    assert!(
-        invalidated
+    assert!(!reset.dependency_ready("integrate"));
+    assert!(!reset.units[2].outputs.as_array().unwrap().is_empty());
+
+    let changed = finish(&t, &start(&t, &parent, "a"), true);
+    assert_eq!(
+        changed
+            .units
             .iter()
-            .all(|u| !u["outputs"].as_array().unwrap().is_empty())
+            .map(|u| u.status.as_str())
+            .collect::<Vec<_>>(),
+        ["succeeded", "succeeded", "pending", "succeeded"]
     );
-    assert!(
-        invalidated
-            .iter()
-            .all(|u| !u["checks"].as_array().unwrap().is_empty())
+    assert_eq!(
+        changed.units[2].reason.as_deref(),
+        Some("evidence_unverifiable")
     );
+    assert!(!changed.dependency_ready("integrate"));
 }
 
 #[test]
@@ -733,7 +734,7 @@ fn cancelled_required_work_blocks_acceptance_retry_preserves_budget_and_pausing_
     is_conflict(t.store.workflows().claim(&parent, "b"), "暂停");
     assert!(t.store.workflows().active().unwrap().is_empty());
     assert_eq!(t.store.workflows().all_open().unwrap().len(), 1);
-    is_conflict(t.store.workflows().reset(&parent, "a", "重试"), "仍在执行");
+    is_conflict(retry(&t, &parent, "a", "重试"), "仍在执行");
     t.store
         .workflows()
         .cancel(&parent, "a", "取消执行")
@@ -749,16 +750,13 @@ fn cancelled_required_work_blocks_acceptance_retry_preserves_budget_and_pausing_
         ),
         "失效",
     );
-    is_conflict(
-        t.store.workflows().reset(&parent, "a", "恢复尝试"),
-        "尝试预算",
-    );
+    is_conflict(retry(&t, &parent, "a", "恢复尝试"), "尝试预算");
     let graph = t.store.workflows().get(&parent).unwrap().unwrap();
     t.store
         .workflows()
         .replace(&parent, graph.revision, "增加重试预算", &specs, 2, 2)
         .unwrap();
-    t.store.workflows().reset(&parent, "a", "恢复尝试").unwrap();
+    retry(&t, &parent, "a", "恢复尝试").unwrap();
     t.store
         .workflows()
         .pause(&parent, false, "继续执行")
@@ -925,7 +923,7 @@ fn new_goal_or_cycle_archives_old_results_without_reusing_them() {
             .replace(&parent, graph.revision, "新目标", &specs, 2, 1),
         "先暂停",
     );
-    is_conflict(t.store.workflows().reset(&parent, "a", "重做"), "尝试预算");
+    is_conflict(retry(&t, &parent, "a", "重做"), "尝试预算");
     let paused = t
         .store
         .workflows()
@@ -992,17 +990,11 @@ fn an_exhausted_downstream_budget_does_not_erase_upstream_results_on_reset() {
     for id in ["a", "b", "review", "integrate"] {
         finish(&t, &start(&t, &parent, id), true);
     }
-    t.store
-        .workflows()
-        .reset(&parent, "review", "复审")
-        .unwrap();
+    retry(&t, &parent, "review", "复审").unwrap();
     finish(&t, &start(&t, &parent, "review"), true);
-    let before = t.store.workflows().get(&parent).unwrap().unwrap();
-    is_conflict(
-        t.store.workflows().reset(&parent, "a", "改动实现"),
-        "下游已达到",
-    );
-    assert_eq!(before, t.store.workflows().get(&parent).unwrap().unwrap());
+    let after = retry(&t, &parent, "a", "改动实现").unwrap();
+    assert_eq!(after.units[2].status, "succeeded");
+    assert!(!after.dependency_ready("review"));
 }
 
 #[test]
@@ -1090,7 +1082,7 @@ fn a_retired_failed_attempt_keeps_its_failure() {
             false,
         )
         .unwrap();
-    t.store.workflows().reset(&parent, "a", "重试").unwrap();
+    retry(&t, &parent, "a", "重试").unwrap();
     let child = a.item_id.as_deref().unwrap();
     let (_, old) = t.store.workflows().retired_of(child).unwrap().unwrap();
     assert_eq!(
@@ -1178,10 +1170,7 @@ fn a_retry_reuses_the_units_child_and_keeps_every_attempt() {
     let first = start(&t, &parent, "a");
     let child = first.item_id.clone().unwrap();
     fail(&t, &first, "第一次失败");
-    t.store
-        .workflows()
-        .reset(&parent, "a", "修复后重试")
-        .unwrap();
+    retry(&t, &parent, "a", "修复后重试").unwrap();
     let before = items(&t);
     is_conflict(t.store.workflows().claim(&parent, "a"), "新周期");
     let second = start(&t, &parent, "a");
@@ -1201,7 +1190,7 @@ fn a_retry_reuses_the_units_child_and_keeps_every_attempt() {
         "当前工作会话",
     );
     fail(&t, &second, "第二次失败");
-    t.store.workflows().reset(&parent, "a", "再试一次").unwrap();
+    retry(&t, &parent, "a", "再试一次").unwrap();
     let third = start(&t, &parent, "a");
     assert_eq!(
         (third.item_id.as_deref(), third.attempt),
@@ -1261,7 +1250,7 @@ fn a_retry_takes_the_replanned_spec_into_its_child() {
     let first = start(&t, &parent, "a");
     let child = first.item_id.clone().unwrap();
     fail(&t, &first, "需求理解有误");
-    let reset = t.store.workflows().reset(&parent, "a", "改目标").unwrap();
+    let reset = retry(&t, &parent, "a", "改目标").unwrap();
     specs[0].goal = "按新理解完成 a".into();
     specs[0].title = "工作 a（返工）".into();
     t.store
@@ -1443,4 +1432,185 @@ fn claiming_a_child_checks_inherited_categories_before_writing() {
         .collect::<Vec<_>>();
     assert_eq!(categories, ["feat"]);
     assert_eq!(s.items().get(&child).unwrap().unwrap().no, counter + 1);
+}
+
+fn review_artifact(t: &T, unit: &WorkUnit, digest: &str) -> String {
+    let id = format!("fixture-{}-{}", unit.spec.id, unit.attempt);
+    let url = format!("/d/{id}");
+    t.store
+        .write(|w| {
+            delivery_repo::insert(
+                w,
+                &delivery_repo::Delivery {
+                    id,
+                    item_id: unit.item_id.clone(),
+                    title: "Evidence".into(),
+                    name: "evidence.txt".into(),
+                    mime: "text/plain".into(),
+                    size: 10,
+                    created: 1,
+                    entrypoint: None,
+                    preview: json!({}),
+                    interactive: false,
+                    reply: false,
+                    workspace_id: WS.into(),
+                    owner_id: None,
+                    registered_url: url.clone(),
+                    sha256: digest.into(),
+                    manifest: Default::default(),
+                },
+                unit.session_id.as_deref(),
+            )
+        })
+        .unwrap();
+    url
+}
+
+#[test]
+fn review_findings_are_isolated_replayable_and_tied_to_the_current_scope() {
+    use steve_types::orchestration::{Finding, ReviewReceipt};
+    let (t, parent, specs) = setup();
+    plan(&t, &parent, &specs);
+    finish(&t, &start(&t, &parent, "a"), true);
+    finish(&t, &start(&t, &parent, "b"), true);
+    let reviewer = start(&t, &parent, "review");
+    let evidence = review_artifact(&t, &reviewer, "review-finding");
+    let graph = finish(&t, &reviewer, false);
+    let current = graph.units.iter().find(|u| u.spec.id == "review").unwrap();
+    let scope = graph.review_scope(current).unwrap();
+    let finding = Finding {
+        affected_unit: "a".into(),
+        criterion: "实际验证".into(),
+        evidence_ref: evidence,
+    };
+    let mut old = scope.clone();
+    old.graph_revision -= 1;
+    let apply = |scope, findings: &[Finding]| {
+        t.store
+            .workflows()
+            .apply_review_findings(&parent, scope, findings, "Check failed")
+            .unwrap()
+    };
+    assert_eq!(
+        apply(&old, std::slice::from_ref(&finding)),
+        ReviewReceipt::Unverified
+    );
+    let mut no_proof = finding.clone();
+    no_proof.evidence_ref = "/d/missing".into();
+    assert_eq!(apply(&scope, &[no_proof]), ReviewReceipt::Unverified);
+    assert_eq!(
+        apply(&scope, std::slice::from_ref(&finding)),
+        ReviewReceipt::Applied
+    );
+    assert_eq!(apply(&scope, &[finding]), ReviewReceipt::Replay);
+    let applied = t.store.workflows().get(&parent).unwrap().unwrap();
+    assert_eq!(applied.revision, graph.revision + 1);
+    assert_eq!(applied.units[0].status, "pending");
+    assert_eq!(applied.units[1], graph.units[1]);
+    assert_eq!(applied.units[2].status, "pending");
+}
+
+#[test]
+fn verified_immutable_output_preserves_downstream_success() {
+    for replacement in ["original", "changed"] {
+        let (t, parent, specs) = setup();
+        plan(&t, &parent, &specs);
+        let publish = |unit: &WorkUnit, digest| {
+            let url = review_artifact(&t, unit, digest);
+            t.store
+                .workflows()
+                .deliver(
+                    unit.item_id.as_deref().unwrap(),
+                    unit.session_id.as_deref().unwrap(),
+                    "Immutable result",
+                    &json!([{"kind":"file","title":"Result","location":url}]),
+                    &json!([{"name":"verified","passed":true}]),
+                    true,
+                )
+                .unwrap()
+        };
+        publish(&start(&t, &parent, "a"), "original");
+        for id in ["b", "review", "integrate"] {
+            finish(&t, &start(&t, &parent, id), true);
+        }
+        retry(&t, &parent, "a", "Review finding").unwrap();
+        let graph = publish(&start(&t, &parent, "a"), replacement);
+        assert_eq!(
+            graph.dependency_ready("integrate"),
+            replacement == "original"
+        );
+        assert_eq!(
+            graph.units[2].status,
+            if replacement == "original" {
+                "succeeded"
+            } else {
+                "pending"
+            }
+        );
+        assert_eq!(graph.units[3].status, "succeeded");
+    }
+}
+
+#[test]
+fn thirty_dag_shapes_block_only_the_transitive_dependents_of_a_reopened_unit() {
+    for size in 2..32 {
+        let mut units = Vec::new();
+        for n in 0..size {
+            let ids = if n < 2 {
+                Vec::new()
+            } else if n % 3 == 0 {
+                vec![format!("u{}", n - 1), format!("u{}", n - 2)]
+            } else {
+                vec![format!("u{}", n % 2)]
+            };
+            let deps: Vec<&str> = ids.iter().map(String::as_str).collect();
+            units.push(WorkUnit {
+                spec: unit(&format!("u{n}"), "writer", "work", &deps, &[]),
+                status: if n == 0 { "pending" } else { "succeeded" }.into(),
+                item_id: None,
+                session_id: None,
+                attempt: 1,
+                summary: String::new(),
+                outputs: json!([]),
+                checks: json!([]),
+                verified_output: None,
+                inputs: None,
+                reason: None,
+            });
+        }
+        let mut graph = Workflow {
+            item_id: "synthetic".into(),
+            revision: 2,
+            cycle: 1,
+            goal_version: 1,
+            paused: false,
+            max_parallel: 3,
+            max_attempts: 2,
+            units,
+            history: vec![],
+        };
+        let mut expected = vec![false, true];
+        for n in 2..size {
+            expected.push(if n % 3 == 0 {
+                expected[n - 1] && expected[n - 2]
+            } else {
+                expected[n % 2]
+            });
+        }
+        for (u, expected) in graph.units.iter().zip(expected) {
+            assert_eq!(
+                graph.dependency_ready(&u.spec.id),
+                expected,
+                "{size}/{}",
+                u.spec.id
+            );
+        }
+        graph.units[0].status = "succeeded".into();
+        assert!(
+            graph
+                .units
+                .iter()
+                .all(|u| graph.dependency_ready(&u.spec.id))
+        );
+    }
 }

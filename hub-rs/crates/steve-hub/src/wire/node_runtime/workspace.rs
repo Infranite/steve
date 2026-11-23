@@ -11,7 +11,10 @@
 //!   is sent, never sent blind twice, refused by the Node when the workspace changed since the
 //!   prepare it names or a harness in it would not stop.
 
-use super::*;
+use super::{
+    intent::{Advance, next_revision},
+    *,
+};
 use steve_store::node_commands::dispatch;
 use steve_store::node_sessions::worktree::{self, Tidy as TidyState};
 
@@ -26,7 +29,7 @@ pub enum WorkspaceFact {
     /// It could not be made: `error` is the Node's.
     PrepareFailed {
         session: String,
-        error: Option<ApiError>,
+        error: Option<Error>,
     },
     /// The tidy of the item's worktree is over: `removed`, or it is kept (dirty, changed since,
     /// refused). `note`: why it was kept, or what else could not be done.
@@ -84,6 +87,7 @@ impl NodeRuntime {
         &self,
         tx: &mut W<'_>,
         session: &str,
+        advance: Advance,
     ) -> Result<Option<String>, StoreError> {
         let node = self.node_id.as_str();
         let prepare = self.store.read(|r| {
@@ -101,7 +105,7 @@ impl NodeRuntime {
                     worktree::tidy_since(r, node, &workspace_id(&resource), last.rowid)?
                         == Some(TidyState::Removed)
                 }
-                "finished" | "rejected" => true,
+                "finished" | "rejected" => matches!(advance, Advance::ExplicitRetry),
                 _ => false,
             };
             Ok(again.then_some(last.body))
@@ -109,10 +113,12 @@ impl NodeRuntime {
         let Some(prepare) = prepare else {
             return Ok(None);
         };
-        let op = uid(&format!("op_prep_{session}"));
+        let key = next_revision(tx, Intent::Prepare(idv(session.to_string())?), advance)?;
+        let op = key.op().to_string();
         let (req, digest) = command(&op, prepare)?;
-        node_write::insert_command_in(
+        rt::insert_intent_in(
             tx,
+            &key,
             &rt::NewCommand {
                 operation: &op,
                 node,
@@ -150,45 +156,64 @@ impl NodeRuntime {
     ) -> Result<bool, StoreError> {
         self.running()?;
         let node = self.node_id.as_str();
-        let selected = self
-            .store
-            .read(|r| resource_in(r, session, node))?
-            .and_then(|(item, resource)| item.map(|item| (item, resource)));
-        let Some((item, resource)) = selected else {
-            return Ok(false);
-        };
-        let wid = workspace_id(&resource);
-        let plan = self.store.read(|r| -> Result<_, StoreError> {
-            let Some(last) = worktree::last_prepare(r, node, &resource)? else {
-                return Ok(None);
+        let result = self.write(|tx| {
+            let plan = self.store.read(|r| -> Result<_, StoreError> {
+                let Some((Some(item), resource)) = resource_in(r, session, node)? else {
+                    return Ok(None);
+                };
+                let Some(last) = worktree::last_prepare(r, node, &resource)? else {
+                    return Ok(None);
+                };
+                let (true, Some(view), PrepareKind::Worktree { .. }) =
+                    (last.success, last.view, &last.body.kind)
+                else {
+                    return Ok(None);
+                };
+                let prior = worktree::tidy_since(r, node, &workspace_id(&resource), last.rowid)?;
+                Ok(Some((item, view, prior)))
+            })?;
+            let Some((item, view, prior)) = plan else {
+                return Ok(false);
             };
-            let (true, Some(view), PrepareKind::Worktree { .. }) =
-                (last.success, last.view, &last.body.kind)
-            else {
-                return Ok(None);
-            };
-            match worktree::tidy_since(r, node, &wid, last.rowid)? {
-                Some(TidyState::Removed) => Ok(None),
-                Some(TidyState::Kept) => Ok(Some(None)),
-                None => Ok(Some(Some(view))),
+            match prior {
+                Some(TidyState::Removed) => return Ok(false),
+                Some(TidyState::Kept) => return Ok(true),
+                None => {}
             }
-        })?;
-        let view = match plan {
-            None => return Ok(false),
-            Some(None) => return Ok(true),
-            Some(Some(v)) => v,
-        };
-        self.submit(
-            &uid("op_tidy"),
-            &format!("tidy:{item}"),
-            "tidy_workspace",
-            Tidy {
+            let key = next_revision(
+                tx,
+                Intent::Tidy(view.workspace.clone()),
+                Advance::NewWorkspace,
+            )?;
+            let op = key.op().to_string();
+            let body = Tidy {
                 workspace: view.workspace,
                 expected: view.revision,
                 keep_branch,
-            },
-        )?;
-        Ok(true)
+            };
+            let (mut request, _) = command(&op, body)?;
+            request["subject"] = format!("tidy:{item}").into();
+            let digest = digest_of(&request).map_err(conflict)?.to_string();
+            rt::insert_intent_in(
+                tx,
+                &key,
+                &rt::NewCommand {
+                    operation: &op,
+                    node,
+                    method: "tidy_workspace",
+                    request: &request,
+                    digest: &digest,
+                    target_attempt: None,
+                    dependency: None,
+                },
+                self.clock.now(),
+            )?;
+            Ok(true)
+        })?;
+        if result {
+            self.wake_send.notify_one();
+        }
+        Ok(result)
     }
 
     /// A prepare finished: made (the session waiting on it hears so), or not.
@@ -230,7 +255,7 @@ impl NodeRuntime {
         &self,
         tx: &mut W<'_>,
         op: &str,
-        error: Option<&ApiError>,
+        error: Option<&Error>,
         detail: &str,
     ) -> Result<Option<End>, StoreError> {
         let Some(session) = command_any_session_in(&self.store, op)? else {

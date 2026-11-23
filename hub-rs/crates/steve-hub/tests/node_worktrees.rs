@@ -236,14 +236,14 @@ async fn a_failed_prepare_holds_its_queue_until_an_explicit_retry_prepares_again
     let h = hub();
     h.node.refuse_next(
         "prepare_workspace",
-        ApiError::new(ErrorCode::Invalid, "git worktree: not a worktree of repo"),
+        Error::new(Code::Invalid, "git worktree: not a worktree of repo"),
     );
     h.bind(worktree());
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
     eventually_sync("the failure", || {
         h.facts()
             .iter()
-            .any(|f| matches!(f, WorkspaceFact::PrepareFailed { session, error: Some(e) } if session == S && e.code == ErrorCode::Invalid))
+            .any(|f| matches!(f, WorkspaceFact::PrepareFailed { session, error: Some(e) } if session == S && e.code == Code::Invalid))
     })
     .await;
     // the open never goes (it would wait forever); the session is let go, the message stays

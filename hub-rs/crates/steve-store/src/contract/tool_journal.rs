@@ -8,9 +8,7 @@ use std::{
 };
 
 use rusqlite::{Connection, OptionalExtension, params};
-use steve_node_api::{
-    ApiError, ApiResult, Digest, ErrorCode, NodeId, OperationId, Revision, ToolResult,
-};
+use steve_node_api::{ApiResult, Code, Digest, Error, NodeId, OperationId, Revision, ToolResult};
 
 pub struct Journal {
     db: Mutex<Connection>,
@@ -35,9 +33,9 @@ pub struct Recorded {
     pub result: ToolResult,
 }
 
-fn internal(error: impl std::fmt::Display) -> ApiError {
+fn internal(error: impl std::fmt::Display) -> Error {
     tracing::error!("tool journal: {error}");
-    ApiError::new(ErrorCode::Internal, "Node host storage unavailable")
+    Error::new(Code::Internal, "Node host storage unavailable")
 }
 
 impl Journal {
@@ -50,7 +48,7 @@ impl Journal {
             .open(home.join("host-tools.lock"))
             .map_err(internal)?;
         lock.try_lock()
-            .map_err(|_| ApiError::new(ErrorCode::Busy, "another tool host owns this ledger"))?;
+            .map_err(|_| Error::new(Code::Busy, "another tool host owns this ledger"))?;
         let mut db = Connection::open(home.join("host-tools.sqlite3")).map_err(internal)?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
             .map_err(internal)?;
@@ -58,8 +56,8 @@ impl Journal {
         let version: i64 = tx
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(internal)?;
-        if version > 1 {
-            return Err(ApiError::new(ErrorCode::Unsupported, "newer tool journal"));
+        if version > 2 {
+            return Err(Error::new(Code::Unsupported, "newer tool journal"));
         }
         tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS calls (key TEXT PRIMARY KEY, digest TEXT NOT NULL, operation TEXT NOT NULL,
@@ -67,8 +65,22 @@ impl Journal {
                 catalog TEXT NOT NULL, deadline INTEGER NOT NULL, created INTEGER NOT NULL,
                 updated INTEGER NOT NULL, state TEXT NOT NULL, result TEXT, cancel_requested INTEGER NOT NULL DEFAULT 0);
              UPDATE calls SET state='unknown' WHERE state='running';
-             PRAGMA user_version=1;",
+             PRAGMA user_version=2;",
         ).map_err(internal)?;
+        if version == 1 {
+            tx.execute_batch(
+                "UPDATE calls SET result=json_set(result,'$.error',json_object(
+                   'code', CASE json_extract(result,'$.error.code')
+                       WHEN 'offline' THEN 'unavailable' WHEN 'denied' THEN 'forbidden'
+                       WHEN 'expired' THEN 'stale' WHEN 'downgrade' THEN 'invalid'
+                       ELSE json_extract(result,'$.error.code') END,
+                   'retry',json_object('kind','never'), 'reason',NULL, 'params',json_object(),
+                   'safe_detail',json_extract(result,'$.error.safe_detail')))
+                 WHERE json_extract(result,'$.status')='failed'
+                   AND json_type(result,'$.error.retry')='text';",
+            )
+            .map_err(internal)?;
+        }
         tx.commit().map_err(internal)?;
         Ok(Self {
             db: Mutex::new(db),
@@ -163,8 +175,8 @@ fn find(db: &Connection, key: &str, digest: Option<&Digest>) -> ApiResult<Option
         return Ok(None);
     };
     if digest.is_some_and(|digest| digest.as_str() != saved_digest) {
-        return Err(ApiError::new(
-            ErrorCode::Conflict,
+        return Err(Error::new(
+            Code::Conflict,
             "ToolKey reused with different name/arguments",
         ));
     }

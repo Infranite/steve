@@ -41,10 +41,10 @@ pub fn resolve(roots: &[Root], at: &RootPath, write: bool) -> ApiResult<PathBuf>
     let root = roots
         .iter()
         .find(|r| r.id == at.root)
-        .ok_or_else(|| ApiError::new(ErrorCode::Denied, "not a root this node allows"))?;
+        .ok_or_else(|| Error::new(Code::Forbidden, "not a root this node allows"))?;
     if write && root.access == RootAccess::ReadOnly {
-        return Err(ApiError::new(
-            ErrorCode::Denied,
+        return Err(Error::new(
+            Code::Forbidden,
             "a read-only root: no workspace there",
         ));
     }
@@ -53,21 +53,18 @@ pub fn resolve(roots: &[Root], at: &RootPath, write: bool) -> ApiResult<PathBuf>
         .components()
         .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir))
     {
-        return Err(ApiError::new(
-            ErrorCode::Invalid,
-            "a relative path inside the root",
-        ));
+        return Err(Error::new(Code::Invalid, "a relative path inside the root"));
     }
     let base = root
         .path
         .canonicalize()
-        .map_err(|e| ApiError::new(ErrorCode::Invalid, format!("root unavailable: {e}")))?;
+        .map_err(|e| Error::new(Code::Invalid, format!("root unavailable: {e}")))?;
     let p = base.join(rel);
     let real = p
         .canonicalize()
-        .map_err(|_| ApiError::new(ErrorCode::Invalid, "no such directory"))?;
+        .map_err(|_| Error::new(Code::Invalid, "no such directory"))?;
     if !real.starts_with(&base) {
-        return Err(ApiError::new(ErrorCode::Denied, "outside the root"));
+        return Err(Error::new(Code::Forbidden, "outside the root"));
     }
     Ok(real)
 }
@@ -77,12 +74,9 @@ pub fn resolve(roots: &[Root], at: &RootPath, write: bool) -> ApiResult<PathBuf>
 /// (symlinks included); the directory itself, when it is there, must resolve to the same place.
 pub(crate) fn target(roots: &[Root], at: &RootPath) -> ApiResult<PathBuf> {
     let rel = Path::new(at.rel.as_str());
-    let name = rel.file_name().ok_or_else(|| {
-        ApiError::new(
-            ErrorCode::Invalid,
-            "a directory inside the root, not the root",
-        )
-    })?;
+    let name = rel
+        .file_name()
+        .ok_or_else(|| Error::new(Code::Invalid, "a directory inside the root, not the root"))?;
     let parent = RootPath {
         root: at.root.clone(),
         rel: RelPath::new(
@@ -91,15 +85,15 @@ pub(crate) fn target(roots: &[Root], at: &RootPath) -> ApiResult<PathBuf> {
                 .unwrap_or_default()
                 .to_string(),
         )
-        .map_err(|e| ApiError::new(ErrorCode::Invalid, e.to_string()))?,
+        .map_err(|e| Error::new(Code::Invalid, e.to_string()))?,
     };
     let p = resolve(roots, &parent, true)?.join(name);
     if p.exists() {
         let real = p
             .canonicalize()
-            .map_err(|e| ApiError::new(ErrorCode::Invalid, e.to_string()))?;
+            .map_err(|e| Error::new(Code::Invalid, e.to_string()))?;
         if real != p {
-            return Err(ApiError::new(ErrorCode::Denied, "outside the root"));
+            return Err(Error::new(Code::Forbidden, "outside the root"));
         }
     }
     Ok(p)
@@ -115,20 +109,20 @@ pub(crate) fn below(base: &Path, rel: &RelPath) -> ApiResult<PathBuf> {
     if r.components()
         .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir))
     {
-        return Err(ApiError::new(
-            ErrorCode::Invalid,
+        return Err(Error::new(
+            Code::Invalid,
             "a relative path inside the workspace",
         ));
     }
     let real = base
         .join(r)
         .canonicalize()
-        .map_err(|_| ApiError::new(ErrorCode::Invalid, "no such directory"))?;
+        .map_err(|_| Error::new(Code::Invalid, "no such directory"))?;
     if !real.starts_with(base) {
-        return Err(ApiError::new(ErrorCode::Denied, "outside the workspace"));
+        return Err(Error::new(Code::Forbidden, "outside the workspace"));
     }
     if !real.is_dir() {
-        return Err(ApiError::new(ErrorCode::Invalid, "not a directory"));
+        return Err(Error::new(Code::Invalid, "not a directory"));
     }
     Ok(real)
 }
@@ -568,8 +562,9 @@ const FETCH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
 /// now, fetched right before (a local checkout may be far behind it, and work branched from there
 /// collides with what the remote already has). The remote is `origin`, else the only one there is.
 /// `HEAD` when the repository has no remote, it cannot be reached, or its default branch is not
-/// known: the work starts where it always did.
-pub(crate) fn fresh_base(commands: &Commands, repo: &Path) -> String {
+/// known: the work starts where it always did. An explicit authentication failure is surfaced
+/// instead of silently creating a branch at a potentially stale local HEAD.
+pub(crate) fn fresh_base(commands: &Commands, repo: &Path) -> ApiResult<String> {
     let remotes = commands.git(repo, &["remote"]).unwrap_or_default();
     let names: Vec<&str> = remotes
         .lines()
@@ -577,16 +572,25 @@ pub(crate) fn fresh_base(commands: &Commands, repo: &Path) -> String {
         .filter(|r| !r.is_empty())
         .collect();
     let remote = match names.as_slice() {
-        [] => return "HEAD".into(),
+        [] => return Ok("HEAD".into()),
         [one] => *one,
         many if many.contains(&"origin") => "origin",
-        _ => return "HEAD".into(),
+        _ => return Ok("HEAD".into()),
     };
-    let fetched = commands
-        .write_with(repo, &["fetch", "--quiet", remote], &[], FETCH_DEADLINE)
-        .is_ok_and(|r| r.code == Some(0));
-    if !fetched {
-        return "HEAD".into();
+    let fetch = |args: &[&str]| {
+        let Ok(r) = commands.write_with(repo, args, &[], FETCH_DEADLINE) else {
+            return Ok(false);
+        };
+        if r.code == Some(0) {
+            return Ok(true);
+        }
+        if let Some(error) = crate::git::authentication_error(&r.stderr) {
+            return Err(error);
+        }
+        Ok(false)
+    };
+    if !fetch(&["fetch", "--quiet", remote])? {
+        return Ok("HEAD".into());
     }
     let has = |r: &str| {
         commands
@@ -604,21 +608,16 @@ pub(crate) fn fresh_base(commands: &Commands, repo: &Path) -> String {
     let head = format!("refs/remotes/{remote}/HEAD");
     /* a clone knows its remote's default branch; a remote added by hand learns it once */
     if !has(&head) {
-        let _ = commands.write_with(
-            repo,
-            &["remote", "set-head", remote, "--auto"],
-            &[],
-            FETCH_DEADLINE,
-        );
+        fetch(&["remote", "set-head", remote, "--auto"])?;
     }
-    [
+    Ok([
         head,
         format!("refs/remotes/{remote}/main"),
         format!("refs/remotes/{remote}/master"),
     ]
     .into_iter()
     .find(|r| has(r))
-    .unwrap_or_else(|| "HEAD".into())
+    .unwrap_or_else(|| "HEAD".into()))
 }
 
 /// A worktree of `repo` at `path` on `branch` (created from `base`, else from [`fresh_base`], when
@@ -630,12 +629,13 @@ pub(crate) fn add_worktree(
     path: &Path,
     branch: &str,
     base: Option<&str>,
-) -> Result<(), String> {
+) -> ApiResult<()> {
+    let invalid = |e| Error::new(Code::Invalid, format!("git worktree: {e}"));
     if path.exists() {
-        return check_worktree(commands, repo, path, branch);
+        return check_worktree(commands, repo, path, branch).map_err(invalid);
     }
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(parent).map_err(|e| invalid(e.to_string()))?;
     }
     let p = path.to_string_lossy();
     if commands
@@ -645,10 +645,11 @@ pub(crate) fn add_worktree(
         commands
             .git(repo, &["worktree", "add", &p, branch])
             .map(|_| ())
+            .map_err(invalid)
     } else {
         let base = match base {
             Some(b) => b.to_string(),
-            None => fresh_base(commands, repo),
+            None => fresh_base(commands, repo)?,
         };
         /* `--no-track`: the item's branch is its own, not a copy of the remote's default one */
         commands
@@ -657,6 +658,7 @@ pub(crate) fn add_worktree(
                 &["worktree", "add", "--no-track", "-b", branch, &p, &base],
             )
             .map(|_| ())
+            .map_err(invalid)
     }
 }
 
@@ -690,13 +692,12 @@ pub(crate) fn add_worktree_above(
         && let Some(free) = free()
         && free < floor
     {
-        return Err(ApiError::new(
-            ErrorCode::Exhausted,
+        return Err(Error::new(
+            Code::Exhausted,
             format!("disk low: {free} bytes free, the floor is {floor}"),
         ));
     }
     add_worktree(commands, repo, path, branch, base)
-        .map_err(|e| ApiError::new(ErrorCode::Invalid, format!("git worktree: {e}")))
 }
 
 /// `path` is a worktree of `repo` with `branch` checked out.
@@ -776,10 +777,10 @@ pub(crate) fn remove(
 pub fn still_valid(path: &Path, roots: &[Root], under_root: bool) -> ApiResult<PathBuf> {
     let real = path
         .canonicalize()
-        .map_err(|_| ApiError::new(ErrorCode::Invalid, "the workspace directory is gone"))?;
+        .map_err(|_| Error::new(Code::Invalid, "the workspace directory is gone"))?;
     if !real.is_dir() {
-        return Err(ApiError::new(
-            ErrorCode::Invalid,
+        return Err(Error::new(
+            Code::Invalid,
             "the workspace is not a directory",
         ));
     }
@@ -790,10 +791,7 @@ pub fn still_valid(path: &Path, roots: &[Root], under_root: bool) -> ApiResult<P
             .filter_map(|r| r.path.canonicalize().ok())
             .any(|r| real.starts_with(r))
     {
-        return Err(ApiError::new(
-            ErrorCode::Denied,
-            "the workspace left its root",
-        ));
+        return Err(Error::new(Code::Forbidden, "the workspace left its root"));
     }
     Ok(real)
 }

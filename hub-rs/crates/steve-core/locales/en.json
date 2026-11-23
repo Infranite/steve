@@ -1,4 +1,5 @@
 {
+  "core.thread.choose_execution_bot": "No Bot was assigned. Choose an eligible Bot in the item details; check its Team and Node settings if needed.",
   "core.bot.invalid_selection": "Invalid Bot selection: %{field}",
   "core.bot.unsupported_selection": "%{harness} does not offer %{field} `%{value}`. Choose a reported value or reset it to default (null).",
   "core.item.closed": "This item has ended; start a new cycle if you need to",
@@ -30,6 +31,8 @@
   "core.error.invalid": "Invalid parameters: %{fields}",
   "core.project.dir_missing": "The project folder does not exist: %{path}",
   "core.item.dep_cycle": "Not added: it would create a circular dependency",
+  "core.decision.stall_owner": "Only you can resolve the stalled turn.",
+  "core.decision.stall_stop_unconfirmed": "The Node has not confirmed the stop. Wait for reconciliation before continuing.",
   "core.decision.handled": "This decision has already been handled",
   "core.decision.not_undoable": "This decision cannot be undone",
   "core.decision.undo_closed": "The item has ended, so this decision can no longer be undone; start a new cycle if you need to",

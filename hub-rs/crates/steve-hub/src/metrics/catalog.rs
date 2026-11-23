@@ -278,6 +278,31 @@ pub(super) fn describe() {
         "Reading a session's permission mode state. Labels: node."
     );
     describe_counter!(
+        "steve_orchestration_rework_total",
+        Count,
+        "Accepted changes to a work graph due to rework evidence. Labels: cause."
+    );
+    describe_counter!(
+        "steve_orchestration_stalls_total",
+        Count,
+        "Logical turns held by a repeated failure or lack of progress. Labels: reason."
+    );
+    describe_histogram!(
+        "steve_orchestration_stall_seconds",
+        Seconds,
+        "Time from the first observed stall evidence to the hold. Labels: reason."
+    );
+    describe_histogram!(
+        "steve_orchestration_stall_stop_seconds",
+        Seconds,
+        "Time from a stall hold to the observed end of the attempt. Labels: reason."
+    );
+    describe_counter!(
+        "steve_orchestration_stall_tokens_total",
+        Count,
+        "Positive accounting increments reported after a stall hold. Labels: reason, kind."
+    );
+    describe_counter!(
         "steve_node_command_retries_total",
         Count,
         "Commands to send again later. Labels: node, method."

@@ -7,10 +7,10 @@
 //!    and target the Hub asked for, both `bin/steve-node` and `bin/steve --build-info` included.
 //!    It is kept next to the current release as `<home>/releases/<version>`; nothing switches.
 //! 2. `switch` ([`UpgradeSwitch`]): refused while the Node runs work, unless forced. A helper
-//!    (`steve-node upgrade-switch <op>`, this binary, outside the service's process group and
-//!    systemd unit) stops the service, points it at the new release (`steve node update`'s own
-//!    path), starts it, and waits for the new Node to link to the Hub ([`note_linked`]). If it does
-//!    not within the time the Hub gave, it goes back to the release it switched from.
+//!    (`steve-node upgrade-switch <op>`, outside the service's process group and systemd unit)
+//!    selects the new release through `steve node update` and waits for it to link ([`note_linked`]).
+//!    The macOS boot supervisor restarts its own child. On Linux the helper stops and starts
+//!    the systemd job. If the new child fails to link, the helper selects the previous release.
 //!
 //! Every step is written to `<home>/updates/node/<op>.json` before it is taken; asking again
 //! answers what is written, never runs a step twice.
@@ -58,8 +58,8 @@ fn now() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
-fn err(code: ErrorCode, m: impl Into<String>) -> ApiError {
-    ApiError::new(code, m)
+fn err(code: Code, m: impl Into<String>) -> Error {
+    Error::new(code, m)
 }
 
 /// This binary's release identity; `None` for a development build, which is never upgraded.
@@ -80,7 +80,7 @@ fn op_name(op: &OperationId) -> ApiResult<&str> {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
     {
-        return Err(err(ErrorCode::Invalid, "bad upgrade operation id"));
+        return Err(err(Code::Invalid, "bad upgrade operation id"));
     }
     Ok(s)
 }
@@ -187,13 +187,37 @@ impl ServiceUpgrader {
 /// The release the Node's service record (`steve node install`) names, when this very process runs
 /// from it: `None` for a Node run by hand, or from another release than the installed one.
 pub(crate) fn service_release(home: &Path) -> Option<PathBuf> {
+    let supervised = boot_supervised();
     let record: serde_json::Value =
         serde_json::from_slice(&std::fs::read(home.join("services/node.json")).ok()?).ok()?;
+    let exe = std::env::current_exe().ok()?;
+    service_release_for(&record, &exe, cfg!(target_os = "macos"), supervised)
+}
+
+fn boot_supervised() -> bool {
+    cfg!(target_os = "macos")
+        && std::env::var_os(NODE_BOOT_SERVICE_ENV).as_deref() == Some("1".as_ref())
+}
+
+fn service_release_for(
+    record: &serde_json::Value,
+    executable: &Path,
+    macos: bool,
+    supervised: bool,
+) -> Option<PathBuf> {
     if record["uninstalled"] == true {
         return None;
     }
-    let release = PathBuf::from(record["release"].as_str()?);
-    let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
+    let key = if macos {
+        if !supervised || !record["code_requirement"].is_string() {
+            return None;
+        }
+        "boot_release"
+    } else {
+        "release"
+    };
+    let release = PathBuf::from(record[key].as_str()?);
+    let exe = executable.canonicalize().ok()?;
     let release = release.canonicalize().ok()?;
     if exe != release.join("bin/steve-node").canonicalize().ok()? {
         return None;
@@ -244,24 +268,19 @@ impl Upgrader for ServiceUpgrader {
     async fn stage(&self, node: &LocalNode, u: NodeUpgrade) -> ApiResult<NodeUpgradeState> {
         let op = op_name(&u.operation)?.to_string();
         let _g = self.lock.lock().await;
-        if let Some(r) =
-            load(&self.home, &op).map_err(|e| err(ErrorCode::Internal, e.to_string()))?
-        {
+        if let Some(r) = load(&self.home, &op).map_err(|e| err(Code::Internal, e.to_string()))? {
             if r.request != u {
-                return Err(err(
-                    ErrorCode::Conflict,
-                    "another upgrade under this operation",
-                ));
+                return Err(err(Code::Conflict, "another upgrade under this operation"));
             }
             return Ok(r.state);
         }
         if records(&self.home).iter().any(|r| !r.state.is_terminal()) {
-            return Err(err(ErrorCode::Busy, "another upgrade is unfinished"));
+            return Err(err(Code::Busy, "another upgrade is unfinished"));
         }
         check_request(&self.build, &u)?;
         let files = node
             .hub_files()
-            .ok_or_else(|| err(ErrorCode::Offline, "not linked to the hub"))?;
+            .ok_or_else(|| err(Code::Unavailable, "not linked to the hub"))?;
         let mut r = Record {
             state: NodeUpgradeState {
                 operation: u.operation.clone(),
@@ -275,7 +294,7 @@ impl Upgrader for ServiceUpgrader {
             release: None,
             previous_release: None,
         };
-        save(&self.home, &r).map_err(|e| err(ErrorCode::Internal, e.to_string()))?;
+        save(&self.home, &r).map_err(|e| err(Code::Internal, e.to_string()))?;
         let state = r.state.clone();
         let home = self.home.clone();
         tokio::spawn(async move {
@@ -297,8 +316,8 @@ impl Upgrader for ServiceUpgrader {
         let op = op_name(&s.operation)?.to_string();
         let _g = self.lock.lock().await;
         let mut r = load(&self.home, &op)
-            .map_err(|e| err(ErrorCode::Internal, e.to_string()))?
-            .ok_or_else(|| err(ErrorCode::Invalid, "no such upgrade"))?;
+            .map_err(|e| err(Code::Internal, e.to_string()))?
+            .ok_or_else(|| err(Code::Invalid, "no such upgrade"))?;
         if r.state.phase != "staged" {
             return Ok(r.state);
         }
@@ -315,10 +334,10 @@ impl Upgrader for ServiceUpgrader {
             &self.build.version,
             &r.request.build.version,
         )
-        .map_err(ApiError::from)?;
+        .map_err(Error::from)?;
         if running > 0 && !s.force {
             return Err(err(
-                ErrorCode::Busy,
+                Code::Busy,
                 format!("the node still runs {running} turns or commands"),
             ));
         }
@@ -338,9 +357,9 @@ impl Upgrader for ServiceUpgrader {
     fn status(&self, operation: &OperationId) -> ApiResult<NodeUpgradeState> {
         let op = op_name(operation)?;
         load(&self.home, op)
-            .map_err(|e| err(ErrorCode::Internal, e.to_string()))?
+            .map_err(|e| err(Code::Internal, e.to_string()))?
             .map(|r| r.state)
-            .ok_or_else(|| err(ErrorCode::Invalid, "no such upgrade"))
+            .ok_or_else(|| err(Code::Invalid, "no such upgrade"))
     }
 }
 
@@ -348,7 +367,7 @@ impl Upgrader for ServiceUpgrader {
 fn check_request(me: &BuildIdentity, u: &NodeUpgrade) -> ApiResult<()> {
     if u.build.target != me.target {
         return Err(err(
-            ErrorCode::Invalid,
+            Code::Invalid,
             format!(
                 "a release for {}, this node is {}",
                 u.build.target, me.target
@@ -356,10 +375,7 @@ fn check_request(me: &BuildIdentity, u: &NodeUpgrade) -> ApiResult<()> {
         ));
     }
     if u.build == *me {
-        return Err(err(
-            ErrorCode::Invalid,
-            "this node already runs that release",
-        ));
+        return Err(err(Code::Invalid, "this node already runs that release"));
     }
     if steve_node_api::upgrade_bridge::release_version(&u.build.version).is_err()
         || u.build.commit.len() != 40
@@ -369,7 +385,7 @@ fn check_request(me: &BuildIdentity, u: &NodeUpgrade) -> ApiResult<()> {
         || u.size == 0
         || u.size > ARCHIVE_MAX
     {
-        return Err(err(ErrorCode::Invalid, "not a release this node takes"));
+        return Err(err(Code::Invalid, "not a release this node takes"));
     }
     Ok(())
 }
@@ -389,8 +405,12 @@ async fn stage_release(
     let result = async {
         fetch(files, u, &archive).await?;
         let (a, s, b) = (archive.clone(), staging.clone(), u.build.clone());
+        let home = home.to_owned();
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             unpack(&a, &s)?;
+            if boot_supervised() {
+                InstalledService::open(&home)?.0.verify_boot_upgrade(&s)?;
+            }
             verify(&s, &b)
         })
         .await
@@ -445,7 +465,7 @@ async fn fetch(files: &dyn HubFiles, u: &NodeUpgrade, path: &Path) -> anyhow::Re
                 c
             }
             // the link came and went: the same chunk again, for a while
-            Err(e) if matches!(e.code, ErrorCode::Offline | ErrorCode::Expired) => {
+            Err(e) if matches!(e.code, Code::Unavailable | Code::Stale) => {
                 let since = *failing_since.get_or_insert_with(Instant::now);
                 anyhow::ensure!(since.elapsed() < FETCH_PATIENCE, "fetching: {e}");
                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -609,7 +629,9 @@ pub(crate) fn spawn_detached(home: &Path, args: &[&str], name: &str) -> std::io:
         // SAFETY: setsid only, between fork and exec
         unsafe {
             cmd.pre_exec(|| {
-                libc::setsid();
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
                 Ok(())
             });
         }
@@ -619,6 +641,9 @@ pub(crate) fn spawn_detached(home: &Path, args: &[&str], name: &str) -> std::io:
 
 /// What the switch does to the service, as `steve node stop|update|start` do it.
 pub trait ServiceOps {
+    fn supervised(&self) -> bool {
+        false
+    }
     fn stop(&mut self) -> anyhow::Result<()>;
     fn update(&mut self, release: &Path) -> anyhow::Result<()>;
     fn start(&mut self) -> anyhow::Result<()>;
@@ -636,6 +661,10 @@ impl InstalledService {
 }
 
 impl ServiceOps for InstalledService {
+    fn supervised(&self) -> bool {
+        boot_supervised()
+    }
+
     fn stop(&mut self) -> anyhow::Result<()> {
         self.0.dispatch("stop", None, 0).map(|_| ())
     }
@@ -709,8 +738,8 @@ fn start_staged_release(
     svc: &mut dyn ServiceOps,
     new: &Path,
 ) -> Option<anyhow::Result<()>> {
-    tracing::info!("node upgrade {op}: stopping the service");
-    if let Err(e) = svc.stop() {
+    let supervised = svc.supervised();
+    if !supervised && let Err(e) = svc.stop() {
         // still the old release, maybe still running: make sure it runs
         let _ = svc.start();
         set_phase(home, r, "failed", Some(format!("stopping the node: {e:#}")));
@@ -718,7 +747,9 @@ fn start_staged_release(
     }
     tracing::info!("node upgrade {op}: switching to {}", new.display());
     if let Err(e) = svc.update(new) {
-        let _ = svc.start();
+        if !supervised {
+            let _ = svc.start();
+        }
         set_phase(
             home,
             r,
@@ -727,7 +758,7 @@ fn start_staged_release(
         );
         return None;
     }
-    Some(svc.start())
+    Some(if supervised { Ok(()) } else { svc.start() })
 }
 
 /// Restore the old release after failed health admission, preserving short-circuit order.
@@ -740,10 +771,13 @@ fn rollback_release(
     why: String,
 ) {
     tracing::warn!("node upgrade {op}: {why}; going back to {}", old.display());
-    let back = svc
-        .stop()
-        .and_then(|_| svc.update(old))
-        .and_then(|_| svc.start());
+    let back = if svc.supervised() {
+        svc.update(old)
+    } else {
+        svc.stop()
+            .and_then(|_| svc.update(old))
+            .and_then(|_| svc.start())
+    };
     match back {
         Ok(()) => set_phase(home, r, "rolled_back", Some(why)),
         Err(e) => set_phase(
@@ -849,7 +883,7 @@ mod tests {
         ) -> ApiResult<ReadChunk> {
             match access {
                 FileAccess::Operation { operation } if operation == self.op => {}
-                _ => return Err(err(ErrorCode::Denied, "not granted")),
+                _ => return Err(err(Code::Forbidden, "not granted")),
             }
             let end = (offset as usize + max.min(1000) as usize).min(self.bytes.len());
             Ok(ReadChunk {
@@ -1157,8 +1191,13 @@ mod tests {
                 )
                 .await
                 .unwrap_err();
-            assert_eq!(error.code, ErrorCode::Downgrade);
-            assert!(error.safe_detail.contains("refusing downgrade"));
+            assert_eq!(error.code, Code::Invalid);
+            assert!(
+                error
+                    .reason
+                    .unwrap()
+                    .is(steve_node_api::NodeReason::Downgrade)
+            );
             let after = load(root, "nup_older").unwrap().unwrap();
             assert_eq!(after.state.phase, "staged");
             assert!(after.previous_release.is_none());
@@ -1173,10 +1212,23 @@ mod tests {
         op: String,
         calls: Vec<String>,
         links: bool,
+        supervised: bool,
         current: PathBuf,
     }
 
+    impl Fake {
+        fn report_link(&self) {
+            if self.links && self.current.ends_with("new") {
+                let mut r = load(&self.home, &self.op).unwrap().unwrap();
+                set_phase(&self.home, &mut r, "linked", None);
+            }
+        }
+    }
+
     impl ServiceOps for Fake {
+        fn supervised(&self) -> bool {
+            self.supervised
+        }
         fn stop(&mut self) -> anyhow::Result<()> {
             self.calls.push("stop".into());
             Ok(())
@@ -1184,15 +1236,15 @@ mod tests {
         fn update(&mut self, release: &Path) -> anyhow::Result<()> {
             self.calls.push(format!("update {}", release.display()));
             self.current = release.to_owned();
+            if self.supervised {
+                self.report_link();
+            }
             Ok(())
         }
         fn start(&mut self) -> anyhow::Result<()> {
             self.calls.push("start".into());
             // the started release links (as `note_linked` would mark it)
-            if self.links && self.current.ends_with("new") {
-                let mut r = load(&self.home, &self.op).unwrap().unwrap();
-                set_phase(&self.home, &mut r, "linked", None);
-            }
+            self.report_link();
             Ok(())
         }
     }
@@ -1217,46 +1269,83 @@ mod tests {
 
     #[test]
     fn a_switch_that_links_succeeds() {
-        let home = tempfile::tempdir().unwrap();
-        switching(home.path(), "nup_ok");
-        let mut svc = Fake {
-            home: home.path().into(),
-            op: "nup_ok".into(),
-            calls: vec![],
-            links: true,
-            current: home.path().join("releases/old"),
-        };
-        let s = run_switch(home.path(), "nup_ok", &mut svc, Duration::from_millis(10)).unwrap();
-        assert_eq!(s.phase, "succeeded");
-        let new = home.path().join("releases/new");
-        assert_eq!(
-            svc.calls,
-            vec![
-                "stop".into(),
-                format!("update {}", new.display()),
-                "start".into()
-            ]
-        );
-        // done once: asked again, the helper changes nothing
-        assert!(run_switch(home.path(), "nup_ok", &mut svc, Duration::from_millis(10)).is_err());
+        for supervised in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            switching(home.path(), "nup_ok");
+            let mut svc = Fake {
+                home: home.path().into(),
+                op: "nup_ok".into(),
+                calls: vec![],
+                links: true,
+                supervised,
+                current: home.path().join("releases/old"),
+            };
+            let s = run_switch(home.path(), "nup_ok", &mut svc, Duration::from_millis(10)).unwrap();
+            assert_eq!(s.phase, "succeeded");
+            let update = format!("update {}", home.path().join("releases/new").display());
+            let expected = if supervised {
+                vec![update]
+            } else {
+                vec!["stop".into(), update, "start".into()]
+            };
+            assert_eq!(svc.calls, expected);
+            // done once: asked again, the helper changes nothing
+            assert!(
+                run_switch(home.path(), "nup_ok", &mut svc, Duration::from_millis(10)).is_err()
+            );
+        }
     }
 
     #[test]
     fn a_switch_that_never_links_goes_back_to_the_previous_release() {
-        let home = tempfile::tempdir().unwrap();
-        switching(home.path(), "nup_back");
-        let mut svc = Fake {
-            home: home.path().into(),
-            op: "nup_back".into(),
-            calls: vec![],
-            links: false,
-            current: home.path().join("releases/old"),
-        };
-        let s = run_switch(home.path(), "nup_back", &mut svc, Duration::from_millis(10)).unwrap();
-        assert_eq!(s.phase, "rolled_back");
-        assert!(s.error.unwrap().contains("did not link"));
-        assert_eq!(svc.current, home.path().join("releases/old"));
-        assert_eq!(svc.calls.last().unwrap(), "start");
+        for supervised in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            switching(home.path(), "nup_back");
+            let old = home.path().join("releases/old");
+            let mut svc = Fake {
+                home: home.path().into(),
+                op: "nup_back".into(),
+                calls: vec![],
+                links: false,
+                supervised,
+                current: old.clone(),
+            };
+            let s =
+                run_switch(home.path(), "nup_back", &mut svc, Duration::from_millis(10)).unwrap();
+            assert_eq!(s.phase, "rolled_back");
+            assert!(s.error.unwrap().contains("did not link"));
+            assert_eq!(svc.current, old);
+            if supervised {
+                assert_eq!(
+                    svc.calls,
+                    [
+                        format!("update {}", home.path().join("releases/new").display()),
+                        format!("update {}", old.display()),
+                    ]
+                );
+            } else {
+                assert_eq!(svc.calls.last().unwrap(), "start");
+            }
+        }
+    }
+
+    #[test]
+    fn macos_upgrade_advertises_only_the_registered_signed_boot_runtime() {
+        let release = tempfile::tempdir().unwrap();
+        let bin = release.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let exe = bin.join("steve-node");
+        std::fs::write(&exe, b"fixture").unwrap();
+        let legacy = serde_json::json!({ "release": release.path() });
+        let boot = serde_json::json!({
+            "boot_release": release.path(), "code_requirement": "identifier \"node\""
+        });
+        assert!(service_release_for(&legacy, &exe, true, true).is_none());
+        assert!(service_release_for(&boot, &exe, true, false).is_none());
+        assert_eq!(
+            service_release_for(&boot, &exe, true, true),
+            release.path().canonicalize().ok()
+        );
     }
 
     #[test]

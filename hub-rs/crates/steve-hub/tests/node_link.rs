@@ -584,9 +584,8 @@ async fn the_dial_loop_reports_a_fault_and_links_once_it_clears() {
     n.task.abort();
 }
 
-/// An already reconciled coordinator keeps sending control and queued commands while new work
-/// is held. A protocol mismatch must leave those operations pending, then send the same IDs once
-/// a compatible Node returns, rather than permanently rejecting the user's work.
+/// A disconnected or upgrade-only Node leaves the queued command unleased. A compatible Node
+/// can then receive the registered operation once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pending_commands_survive_an_upgrade_mode_reconnect_and_resume_on_the_same_operation() {
     use std::sync::Arc;
@@ -611,14 +610,8 @@ async fn pending_commands_survive_an_upgrade_mode_reconnect_and_resume_on_the_sa
     .await;
     rt.prompt("s_pending", "queued across upgrade", "user", &[])
         .unwrap();
-    eventually_sync("ordinary call deferred offline", || {
-        node_checks::offline_pending_start_count(&h.store).unwrap() == 1
-    })
-    .await;
     let operation: String =
         node_checks::command_operation_id_by_method(&h.store, "start_turn").unwrap();
-    let generation: i64 =
-        node_checks::command_lease_generation_by_method(&h.store, "start_turn").unwrap();
     let incompatible = dial_url_as(
         &h.ws_url(),
         &h.svc.hub_id,
@@ -634,14 +627,13 @@ async fn pending_commands_survive_an_upgrade_mode_reconnect_and_resume_on_the_sa
         h.fleet.remote(&node).is_upgrade()
     })
     .await;
-    eventually_sync("send loop retried on upgrade link", || {
-        node_checks::upgrade_deferred_start_count(&h.store, generation).unwrap() == 1
-    })
-    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
     let state: String = node_checks::command_state_by_method(&h.store, "start_turn").unwrap();
-    let error: String = node_checks::command_last_error_code_start_turn(&h.store).unwrap();
     assert_eq!(state, "pending", "{}", h.dump());
-    assert_eq!(error, "offline");
+    assert_eq!(
+        node_checks::command_lease_generation_by_method(&h.store, "start_turn").unwrap(),
+        0
+    );
     assert_eq!(
         node_checks::command_maybe_sent_by_method(&h.store, "start_turn").unwrap(),
         0

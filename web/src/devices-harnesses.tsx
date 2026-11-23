@@ -32,6 +32,7 @@ export function NodeHarnesses({ v, children }: { v: NodeView; children?: ReactNo
         return <IntegrationSettings key={h.id} name={h.name} logo={<HarnessMark harness={h.id} className="size-5" />} data-node-harness-id={h.id}
           badge={<Badge tone={stale || state === "unknown" ? "neutral" : h.available ? "success" : "warning"} data-node-harness-state={stale ? "stale" : state}>{t(`devices:harness.state.${state}`)}{stale && ` · ${t("devices:harness.lastReport")}`}</Badge>}
           meta={<span className="flex flex-wrap gap-x-3 gap-y-1" data-node-harness-versions><span>CLI {h.version || t("devices:harness.versionUnknown")}</span><span>ACP {h.adapter_version || t("devices:harness.versionUnknown")}</span></span>}>
+          {h.degraded_reason && <p className="type-footnote text-muted-foreground" data-node-harness-degraded>{t(`devices:harness.degraded.${h.degraded_reason}`)}</p>}
           <IntegrationSection label={t(stale || !h.available ? "devices:harness.reportedModels" : "devices:harness.models")}>
             <p className="break-words type-footnote text-muted-foreground" data-node-harness-models>{h.models.length ? h.models.join(" · ") : t("devices:harness.noModels")}</p>
           </IntegrationSection>

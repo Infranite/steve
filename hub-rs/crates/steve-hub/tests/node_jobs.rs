@@ -1,5 +1,5 @@
 //! Steve's think calls on the local Node: streamed drafts and durable accounting, cancellation
-//! that reaps the harness, and Hub restarts that stop open jobs without replaying them.
+//! that reaps the harness, and Hub restarts that reconcile jobs without replaying them.
 #![cfg(unix)]
 
 use std::collections::HashMap;
@@ -98,7 +98,7 @@ impl EventSink for Gate {
         let to = self.0.lock().unwrap().clone();
         match to {
             Some(w) => Sink(w).commit(batch).await,
-            None => Err(ApiError::new(ErrorCode::Offline, "no hub")),
+            None => Err(Error::new(Code::Unavailable, "no hub")),
         }
     }
 }
@@ -683,11 +683,10 @@ fn outcome(store: &Store, attempt: &str) -> Option<String> {
     node_checks::runtime_job_attempts_outcome_by_attempt(store, &attempt).unwrap()
 }
 
-/// The Hub restarts with job attempts open: their callers are gone. One the Node never got ends
-/// here; a running one is cancelled; one the Node cannot tell the end of is abandoned. None is
-/// ever started again.
+/// After the Hub restarts without callers, a never-sent job settles locally, a running job can
+/// finish on the Node, and an unknown job remains held.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_hub_restart_stops_open_job_attempts_and_runs_none_again() {
+async fn a_hub_restart_reconciles_open_jobs_without_new_node_mutations() {
     let dir = tempfile::tempdir().unwrap();
     let store = open_store(dir.path());
     let node = FakeNode::new("n1");
@@ -699,7 +698,7 @@ async fn a_hub_restart_stops_open_job_attempts_and_runs_none_again() {
     eventually_sync("reconciled", || rt.is_reconciled()).await;
     // written by this process after its own boot (as its callers would)
     let (op_a, exec_a) = orphan(&store, "job_a", "ja_a");
-    let (_, exec_b) = orphan(&store, "job_b", "ja_b");
+    let (op_b, exec_b) = orphan(&store, "job_b", "ja_b");
     let starts = || node.log().iter().filter(|(m, _)| *m == "start_job").count();
     eventually_sync("both started", || starts() == 2).await;
     eventually_sync("both running", || {
@@ -725,30 +724,25 @@ async fn a_hub_restart_stops_open_job_attempts_and_runs_none_again() {
         node_checks::command_state_by_operation(&store, "op_ja_c").unwrap(),
         "rejected"
     );
-    eventually_sync("the running one asked to cancel", || {
-        node.cancel_requested(&op_a)
-    })
-    .await;
-    node.finish(&exec_a, {
-        let mut c = build::done();
-        c.outcome = Outcome::Cancelled;
-        c.stop_reason = "cancelled".into();
-        c
-    })
-    .await
-    .unwrap();
+    assert!(!node.cancel_requested(&op_a));
+    node.finish(&exec_a, build::done()).await.unwrap();
     eventually_sync("the running one ended", || {
-        outcome(&store, "ja_a").as_deref() == Some("cancelled")
+        outcome(&store, "ja_a").as_deref() == Some("succeeded")
     })
     .await;
-    eventually_sync("the unknown one abandoned", || {
-        outcome(&store, "ja_b").as_deref() == Some("interrupted")
-    })
-    .await;
-    assert!(node.log().iter().any(|(m, _)| *m == "abandon"));
+    assert_eq!(
+        node_checks::command_state_by_operation(&store, op_b.as_str()).unwrap(),
+        "unknown"
+    );
+    assert!(outcome(&store, "ja_b").is_none());
+    assert!(
+        !node
+            .log()
+            .iter()
+            .any(|(m, _)| matches!(*m, "cancel" | "abandon"))
+    );
     assert_eq!(starts(), 2, "nothing started again");
-    assert_eq!(node_checks::job_count_by_state(&store, "open").unwrap(), 0);
-    let _ = exec_b;
+    assert_eq!(node_checks::job_count_by_state(&store, "open").unwrap(), 1);
 }
 
 /// A fake clock plus the real Hub gateway, job coordinator and durable usage ledger.

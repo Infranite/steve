@@ -646,7 +646,7 @@ pub async fn item_thread_follow(
 async fn require_approval_owner(st: &AppState, c: &Ctx, d: &Obj) -> Result<(), ApiError> {
     if matches!(
         d.get("subject_type").and_then(Value::as_str),
-        Some("question" | "tool_call")
+        Some("question" | "tool_call" | steve_types::orchestration::TURN_STALL)
     ) && let Some(modules) = &st.modules
     {
         let db = modules.store.clone();
@@ -1216,11 +1216,11 @@ pub async fn system_harness_install(
         ));
     }
     st.runtimes.install(id).await.map_err(|e| {
-        use steve_node_api::ErrorCode;
+        use steve_node_api::Code;
         let code = match e.code {
-            ErrorCode::Denied => 403,
-            ErrorCode::Busy | ErrorCode::Conflict => 409,
-            ErrorCode::Offline | ErrorCode::OutcomeUnknown => 503,
+            Code::Forbidden => 403,
+            Code::Busy | Code::Conflict => 409,
+            Code::Unavailable | Code::OutcomeUnknown => 503,
             _ => 400,
         };
         ApiError::Json(code, e.safe_detail)

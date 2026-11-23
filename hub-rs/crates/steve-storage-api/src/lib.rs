@@ -93,13 +93,7 @@ pub trait DomainStore: Send + Sync {
 
 /// Construct a transport-neutral error without exposing backend details or private paths.
 pub fn error(code: steve_types::Code, detail: impl Into<String>) -> Error {
-    Error {
-        code,
-        retry: code.default_retry(),
-        reason: None,
-        params: Default::default(),
-        safe_detail: detail.into(),
-    }
+    Error::new(code, detail).retry(code.default_retry())
 }
 
 #[cfg(test)]

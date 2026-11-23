@@ -32,7 +32,10 @@ function DevicesPage({ tab, focus }: { tab: Tab; focus?: string }) {
   const t = useT(), { views, hubVersion, access } = useDevices(), { hubs } = useHubs()
   const cur = hubs?.find((h) => h.current)
   const live = views.filter((v) => v.state !== "revoked")
-  const warn = live.filter((v) => ["warn", "bad"].includes(nodeStatus(v, hubVersion).tone)).length
+  const warn = live.filter((v) => {
+    const s = nodeStatus(v, hubVersion)
+    return s.kind === "offline" || s.tone === "warn" || s.tone === "bad"
+  }).length
   /* the clients as the overview and the map count them: one per client, this browser included even when its sign-in
    * is no registered client; the head says how many are online now, the tab how many are signed in */
   const counted = access ? mapClients(access, t("devices:clients.browserSession")) : null

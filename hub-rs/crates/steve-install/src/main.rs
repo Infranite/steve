@@ -62,6 +62,10 @@ fn main() {
 }
 
 fn run(mut args: Vec<String>) -> Result<i32> {
+    if args == ["__node-boot-run"] {
+        steve_install::service::run_boot_node()?;
+        return Ok(0);
+    }
     /* the language of everything printed: --lang, else STEVE_LANG, the locale, the system's */
     let lang = match option(&mut args, "--lang")? {
         Some(tag) => {
@@ -136,6 +140,8 @@ fn service_command(command: &str, mut args: Vec<String>) -> Result<i32> {
     let action = args.remove(0);
     if ![
         "install",
+        "enable-boot",
+        "file-access",
         "start",
         "stop",
         "restart",
@@ -164,9 +170,26 @@ fn service_command(command: &str, mut args: Vec<String>) -> Result<i32> {
     if !args.is_empty() {
         bail!("unknown service arguments");
     }
+    anyhow::ensure!(
+        !matches!(action.as_str(), "enable-boot" | "file-access")
+            || (cfg!(target_os = "macos") && command == "node" && release.is_none()),
+        "{action} is only for a prepared macOS Node; it takes no --release"
+    );
+    if action == "file-access" {
+        steve_install::service::file_access::guide(&home, false, json)?;
+        return Ok(0);
+    }
     let mut service = steve_install::service::Service::new(&command, &home, label.as_deref())?;
     let mut report = service.dispatch(&action, release.as_deref(), wait)?;
+    let guide = action == "enable-boot"
+        && report["registered_now"] == true
+        && !json
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal();
     print_service_report(command, &action, &home, label.as_deref(), &mut report, json)?;
+    if guide {
+        steve_install::service::file_access::guide(&home, true, false)?;
+    }
     Ok(if report["ok"] == false { 1 } else { 0 })
 }
 

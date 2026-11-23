@@ -1,4 +1,23 @@
 // Domain-owned reason texts, grouped by the stable reason prefix.
 export default {
   "config.diagnostic_model_disabled": "此诊断副本已禁用模型执行。",
+  "node.downgrade": "Node 拒绝安装较旧的版本。",
+  "node.operation_not_found": "Node 没有这项操作的回执。",
+  "node.session_not_open": "会话在 Node 上已关闭。",
+  "node.tool_refused": "Node 拒绝了工具调用。",
+  "node.workspace_binding_conflict": "此资源已绑定到另一个工作区。",
+  "node_stop.adapter_exited": "适配器在启动时退出了。",
+  "node_stop.deadline": "运行达到时限，Node 已停止运行。",
+  "node_stop.frame_too_large": "harness 发来一条超过 16 MiB 的消息，Node 已停止运行。",
+  "node_stop.harness_gone": "harness 进程已退出。",
+  "node_stop.harness_idle": "harness 长时间没有输出，Node 已将其停止。",
+  "node_stop.hub_unreachable": "租约到期时 Node 仍连不上 Hub，已停止运行。",
+  "node_stop.ingress_stalled": "Node 连续 {{secs}} 秒无法接收 harness 输出，已停止运行。",
+  "node_stop.job_deadline": "作业达到时限，Node 已停止作业。",
+  "node_stop.journal_budget": "Node 的运行记录已达到数据上限，已停止运行。",
+  "node_stop.journal_fails": "Node 写入运行记录失败，已停止运行。",
+  "node_stop.not_recorded": "Node 无法记录 harness 输出，已停止运行。",
+  "node_stop.output_limit": "输出已达到上限，Node 已停止运行。",
+  "node_stop.research_budget": "研究已达到回合数或工具调用次数上限。",
+  "node_stop.stopped_by_node": "Node 已停止运行。",
 } as const

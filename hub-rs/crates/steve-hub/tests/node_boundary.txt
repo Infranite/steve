@@ -16,6 +16,7 @@ Dir	steve-hub/src/upgrades/mod.rs	1
 Dir	steve-install/src/common.rs	1
 Dir	steve-install/src/publish.rs	1
 Dir	steve-install/src/release.rs	3
+Dir	steve-install/src/service/boot.rs	1
 Dir	steve-install/src/setup.rs	1
 Dir	steve-install/src/signing.rs	2
 Dir	steve-knowledge/src/eval.rs	1
@@ -72,6 +73,7 @@ Fs	steve-install/src/common.rs	7
 Fs	steve-install/src/publish.rs	7
 Fs	steve-install/src/release.rs	16
 Fs	steve-install/src/service.rs	22
+Fs	steve-install/src/service/boot.rs	6
 Fs	steve-install/src/setup.rs	13
 Fs	steve-install/src/setup/reconfigure.rs	7
 Fs	steve-install/src/signing.rs	19
@@ -121,6 +123,8 @@ Spawn	steve-i18n/src/lib.rs	1
 Spawn	steve-install/src/common.rs	1
 Spawn	steve-install/src/release.rs	3
 Spawn	steve-install/src/service.rs	1
+Spawn	steve-install/src/service/boot.rs	2
+Spawn	steve-install/src/service/file_access.rs	1
 Spawn	steve-install/src/setup.rs	1
 Spawn	steve-install/src/setup/reconfigure.rs	1
 Spawn	steve-install/src/signing.rs	8

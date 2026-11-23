@@ -237,7 +237,7 @@ impl Core {
     /// Make an item from the conversation and remember where it came from (`thread_items`).
     pub(crate) fn thread_item(&self, n: ThreadItem<'_>) -> Result<Item> {
         let opening = Some(self.opening_for(n.ws, n.origin, &n.goal, n.answer)?);
-        let item = self.create_item(CreateItem {
+        let item = self.tx().create_chat_item(CreateItem {
             ws: n.ws.into(),
             goal: n.goal,
             title: n.title,
@@ -273,11 +273,12 @@ impl Core {
     ) -> Result<String> {
         meta.insert("origin".into(), json!(origin));
         let space = self.conv_of(origin);
+        let blocked = Self::unplaced_reply(item);
         let id = self.store().message_add_in(
             ws,
             &space,
             "steve",
-            text,
+            blocked.as_deref().unwrap_or(text),
             Some(&item.id),
             &Value::Object(meta),
         )?;
@@ -289,6 +290,16 @@ impl Core {
             th.route_reply(origin, &id, Some(&item.id))?;
         }
         Ok(id)
+    }
+
+    pub(super) fn unplaced_reply(item: &Item) -> Option<String> {
+        item.bot_id.is_none().then(|| {
+            format!(
+                "已做成事项 {}。{}",
+                item.id,
+                steve_i18n::t!("core.thread.choose_execution_bot")
+            )
+        })
     }
 
     /// “Steve 开发 Bot” / “Steve” for an item's bot.

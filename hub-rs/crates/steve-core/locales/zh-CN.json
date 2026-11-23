@@ -1,4 +1,5 @@
 {
+  "core.thread.choose_execution_bot": "事项尚未分配。请在事项详情选择合格的 Bot，必要时检查 Team 与 Node 设置。",
   "core.bot.invalid_selection": "Bot 配置值无效：%{field}",
   "core.bot.unsupported_selection": "%{harness} 未提供 %{field} `%{value}`；请选择实报值或重置为默认（null）。",
   "core.item.closed": "这个事项已经结束了，需要时先新建周期",
@@ -30,6 +31,8 @@
   "core.error.invalid": "参数不对：%{fields}",
   "core.project.dir_missing": "项目目录不存在：%{path}",
   "core.item.dep_cycle": "会形成循环依赖，没有添加",
+  "core.decision.stall_owner": "这张卡需要你处理。",
+  "core.decision.stall_stop_unconfirmed": "节点仍未确认停止，请等待对账后再继续。",
   "core.decision.handled": "这个决定已经处理过了",
   "core.decision.not_undoable": "这个决定不能撤销",
   "core.decision.undo_closed": "事项已经结束了，这个决定不能再撤销；需要时新建周期",

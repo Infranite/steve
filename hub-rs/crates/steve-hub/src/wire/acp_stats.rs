@@ -128,9 +128,10 @@ pub(crate) fn node_usage(
     session: &str,
     attempt: &str,
     report: &steve_node_api::UsageReport,
-) -> steve_store::Result<()> {
+    measure_increment: bool,
+) -> steve_store::Result<Option<[i64; 4]>> {
     let Some(o) = owner(store, session)? else {
-        return Ok(());
+        return Ok(None);
     };
     ensure_node_turn(store, session, attempt)?;
     if let Some(statistics::AgentTurn { id, started }) =
@@ -138,14 +139,25 @@ pub(crate) fn node_usage(
     {
         // Admission already rebased legacy context counters. Keep refusal/currency evidence
         // for the shared reducer; filtering it here would hide an unknown monetary sum.
-        store.stats().usage_report(
+        let before = if measure_increment {
+            Some(store.read(|r| statistics::accounted_tokens(r, &id))?)
+        } else {
+            None
+        };
+        let admitted = store.stats().usage_report(
             &id,
             report,
             &o.model(None),
             &day(store, &o.s.workspace_id, started),
         )?;
+        if let Some(before) = before.filter(|_| admitted) {
+            let after = store.read(|r| statistics::accounted_tokens(r, &id))?;
+            return Ok(Some(std::array::from_fn(|i| {
+                after[i].saturating_sub(before[i])
+            })));
+        }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// A Node attempt ended: its row gets what it did and what it cost.

@@ -29,16 +29,13 @@ pub struct LinkCtx {
     pub fleet: Arc<NodeFleet>,
 }
 
-fn stale() -> ApiError {
-    ApiError::new(
-        ErrorCode::Stale,
-        "this connection no longer speaks for the node",
-    )
+fn stale() -> Error {
+    Error::new(Code::Stale, "this connection no longer speaks for the node")
 }
 
-fn internal(e: impl std::fmt::Display) -> ApiError {
+fn internal(e: impl std::fmt::Display) -> Error {
     tracing::error!("node guard: {e}");
-    ApiError::new(ErrorCode::Internal, "node guard storage unavailable")
+    Error::new(Code::Internal, "node guard storage unavailable")
 }
 
 impl LinkCtx {
@@ -183,8 +180,8 @@ pub(crate) fn replay_check(store: Store, node: NodeId) -> crate::wire::node_runt
         if audited.is_err() {
             tracing::error!("node audit failed");
         }
-        Err(ApiError::new(
-            ErrorCode::Denied,
+        Err(Error::new(
+            Code::Forbidden,
             "replayed events about another node's work",
         ))
     })
@@ -233,8 +230,8 @@ impl EventSink for GuardedSink {
         l.fresh().await?;
         let bytes = serde_json::to_vec(&batch).map(|v| v.len()).unwrap_or(0);
         if !take_event_bytes(l.node.as_str(), bytes) {
-            return Err(ApiError::new(
-                ErrorCode::Exhausted,
+            return Err(Error::new(
+                Code::Exhausted,
                 "this node is sending events faster than the hub takes them",
             ));
         }
@@ -250,8 +247,8 @@ impl EventSink for GuardedSink {
             // that Node's sessions stand still
             tracing::warn!(node = %l.node, "events refused: {why}");
             l.audit("foreign_event", why).await;
-            return Err(ApiError::new(
-                ErrorCode::Denied,
+            return Err(Error::new(
+                Code::Forbidden,
                 "events about another node's work",
             ));
         }

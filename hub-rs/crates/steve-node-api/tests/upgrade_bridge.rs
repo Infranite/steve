@@ -35,30 +35,30 @@ fn release_order_is_numeric_and_an_unrecognized_version_cannot_switch() {
 
 #[test]
 fn wire_incompatible_defers_local_work_and_downgrade_keeps_its_code() {
-    use steve_node_api::{ApiError, ErrorCode, RetryClass};
+    use steve_node_api::{Code, Error, Retry};
     let wire = v1::Error::incompatible();
     assert!(!wire.code.retryable());
-    let local = ApiError::from(wire);
+    let local = Error::from(wire);
     assert_eq!(
         (local.code, local.retry),
-        (ErrorCode::Offline, RetryClass::SameOperation)
+        (Code::Unavailable, Retry::Later { after_ms: None })
     );
     let wire = v1::Error::new(v1::Code::Downgrade, "older journal reader");
-    assert_eq!(v1::Error::from(ApiError::from(wire.clone())), wire);
+    assert_eq!(v1::Error::from(Error::from(wire.clone())), wire);
 }
 
 #[test]
 fn uncertain_ordinary_outcomes_cannot_become_retryable_v1_answers() {
-    use steve_node_api::{ApiError, ErrorCode, OperationId, RetryClass};
+    use steve_node_api::{Code, Error, OperationId, Retry};
     for ordinary in [
-        ApiError::uncertain(&OperationId::new("op_switch").unwrap(), "response lost"),
-        ApiError::new(ErrorCode::Gap, "missing execution events"),
-        ApiError::new(ErrorCode::Internal, "execution outcome unavailable"),
+        Error::outcome_unknown(&OperationId::new("op_switch").unwrap(), "response lost"),
+        Error::new(Code::Gap, "missing execution events"),
+        Error::new(Code::Internal, "execution outcome unavailable"),
     ] {
         let wire = v1::Error::from(ordinary);
         assert_eq!(wire.code, v1::Code::Internal);
         assert!(!wire.code.retryable());
-        assert_eq!(ApiError::from(wire).retry, RetryClass::Never);
+        assert_eq!(Error::from(wire).retry, Retry::Never);
     }
 }
 

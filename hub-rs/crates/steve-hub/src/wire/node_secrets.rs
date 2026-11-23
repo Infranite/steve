@@ -247,38 +247,40 @@ struct Bound {
 #[async_trait]
 impl HubSecrets for Bound {
     async fn take(&self, operation: OperationId, id: String) -> ApiResult<SecretBytes> {
-        let err = |code, m: &str| Err(ApiError::new(code, m.to_string()).on(&operation));
+        let err = |code, m: &str| {
+            Err(Error::new(code, m.to_string()).with_param("operation", operation.to_string()))
+        };
         let values = {
             let mut held = self.all.held.lock().unwrap_or_else(|e| e.into_inner());
             let Some(h) = held.get_mut(operation.as_str()) else {
                 let ended = self.all.ended.lock().unwrap_or_else(|e| e.into_inner());
                 return if ended.iter().any(|o| o == operation.as_str()) {
-                    err(ErrorCode::Stale, "the operation ended")
+                    err(Code::Stale, "the operation ended")
                 } else {
-                    err(ErrorCode::Denied, "no secret for this operation")
+                    err(Code::Forbidden, "no secret for this operation")
                 };
             };
             if h.node != self.node {
-                return err(ErrorCode::Denied, "a secret of another Node");
+                return err(Code::Forbidden, "a secret of another Node");
             }
             if !h.ids.contains(&id) {
-                return err(ErrorCode::Denied, "no such secret for this operation");
+                return err(Code::Forbidden, "no such secret for this operation");
             }
             if !h.taken.insert(id.clone()) {
-                return err(ErrorCode::Stale, "already taken");
+                return err(Code::Stale, "already taken");
             }
             h.values.clone()
         };
         let label = id.clone();
         let v = tokio::task::spawn_blocking(move || values.value(&label))
             .await
-            .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
+            .map_err(|e| Error::new(Code::Internal, e.to_string()))?;
         match v {
             // the vault's bytes go as they are; its copy is wiped when it goes
             Ok(v) => Ok(SecretBytes::new(v.expose().to_vec())),
             Err(e) => {
                 tracing::warn!(%operation, "vault use: a value could not be read: {e}");
-                err(ErrorCode::Internal, "the value could not be read")
+                err(Code::Internal, "the value could not be read")
             }
         }
     }
@@ -603,7 +605,7 @@ mod tests {
         .unwrap();
         ws.refresh_roots().unwrap();
         let prep = Command {
-            id: OperationId::new(format!("op_prep_{SESSION}")).unwrap(),
+            id: OperationId::new(format!("prepare:{SESSION}:r0")).unwrap(),
             // one command whichever process of a test sends it
             issued_at: Timestamp(1),
             accept_before: Timestamp(i64::MAX),
@@ -691,16 +693,16 @@ mod tests {
         // another Node, another field, an operation given nothing
         assert_eq!(
             code(all.for_node(far).take(op("op_a"), "令牌".into()).await),
-            ErrorCode::Denied
+            Code::Forbidden
         );
         let mine = all.for_node(local);
         assert_eq!(
             code(mine.take(op("op_a"), "名称".into()).await),
-            ErrorCode::Denied
+            Code::Forbidden
         );
         assert_eq!(
             code(mine.take(op("op_b"), "令牌".into()).await),
-            ErrorCode::Denied
+            Code::Forbidden
         );
         assert_eq!(values.0.load(Ordering::SeqCst), 0, "nothing decrypted yet");
         // its own: once, decrypted then
@@ -710,12 +712,12 @@ mod tests {
         // a replay, and anything after it ended
         assert_eq!(
             code(mine.take(op("op_a"), "令牌".into()).await),
-            ErrorCode::Stale
+            Code::Stale
         );
         all.end("op_a");
         assert_eq!(
             code(mine.take(op("op_a"), "令牌".into()).await),
-            ErrorCode::Stale
+            Code::Stale
         );
         assert_eq!(values.0.load(Ordering::SeqCst), 1);
     }
@@ -750,12 +752,12 @@ mod tests {
         );
         assert!(refused.is_err());
         let error = take().await.unwrap_err();
-        assert_eq!(error.code, ErrorCode::Stale);
+        assert_eq!(error.code, Code::Stale);
         assert_eq!(error.safe_detail, "already taken");
         all.end("op_push");
         give();
         let error = take().await.unwrap_err();
-        assert_eq!(error.code, ErrorCode::Stale);
+        assert_eq!(error.code, Code::Stale);
         assert_eq!(error.safe_detail, "the operation ended");
         assert_eq!(values.0.load(Ordering::SeqCst), 1);
 
@@ -772,7 +774,7 @@ mod tests {
             .take(OperationId::new("op_retired").unwrap(), "token".into())
             .await
             .unwrap_err();
-        assert_eq!(error.code, ErrorCode::Stale);
+        assert_eq!(error.code, Code::Stale);
         assert_eq!(error.safe_detail, "the operation ended");
         assert_eq!(values.0.load(Ordering::SeqCst), 1);
 

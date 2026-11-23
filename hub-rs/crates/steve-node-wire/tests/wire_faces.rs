@@ -292,7 +292,7 @@ async fn a_hub_without_secrets_answers_unsupported() {
         .take(OperationId::new("op_1").unwrap(), "gh".into())
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unsupported);
+    assert_eq!(e.code, Code::Unsupported);
     assert!(w.remote.probe(false).await.is_ok(), "still up");
 }
 
@@ -332,8 +332,8 @@ async fn a_lost_secret_take_is_never_retried_as_the_same_operation() {
     eventually_sync("the hub gave the secret", || hub_secrets.taken().len() == 1).await;
     w.node_faults.cut_now();
     let e = run.await.unwrap().unwrap_err();
-    assert_eq!(e.code, ErrorCode::Stale, "{e}");
-    assert_eq!(e.retry, RetryClass::Never);
+    assert_eq!(e.code, Code::OutcomeUnknown, "{e}");
+    assert_eq!(e.retry, Retry::Never);
     assert_eq!(fake.log().len(), 1, "the exec was not accepted");
 
     // never written (no link): offline, nothing taken, safe to send again
@@ -342,8 +342,8 @@ async fn a_lost_secret_take_is_never_retried_as_the_same_operation() {
         .take(OperationId::new("op_x").unwrap(), "vault:k".into())
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Offline);
-    assert_eq!(e.retry, RetryClass::SameOperation);
+    assert_eq!(e.code, Code::Unavailable);
+    assert_eq!(e.retry, Retry::Later { after_ms: None });
 }
 
 // ── every new kind, as it crosses ──
@@ -633,9 +633,12 @@ async fn an_answer_of_a_newer_kind_is_uncertain_not_unsupported() {
         },
     };
     let e = remote.git_apply(cmd("op_a", apply)).await.unwrap_err();
-    assert_eq!(e.code, ErrorCode::OutcomeUnknown, "{e}");
-    assert_eq!(e.retry, RetryClass::AfterReconcile);
-    assert_eq!(e.operation, Some(OperationId::new("op_a").unwrap()));
+    assert_eq!(e.code, Code::OutcomeUnknown, "{e}");
+    assert_eq!(e.retry, Retry::Later { after_ms: None });
+    assert_eq!(
+        e.params.0["operation"],
+        OperationId::new("op_a").unwrap().to_string().into()
+    );
     // a read ran nothing: invalid, and never unsupported either
     let e = remote
         .git_facts(GitQuery {
@@ -648,8 +651,8 @@ async fn an_answer_of_a_newer_kind_is_uncertain_not_unsupported() {
         })
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Invalid, "{e}");
+    assert_eq!(e.code, Code::Invalid, "{e}");
     // while a request of a kind unknown here is unsupported
     let e = from_value::<GitRead>(json!({"type": "hologram"})).unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unsupported);
+    assert_eq!(e.code, Code::Unsupported);
 }

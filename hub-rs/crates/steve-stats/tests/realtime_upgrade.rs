@@ -180,19 +180,15 @@ fn a_new_terminal_receipt_closes_only_the_incomplete_baseline_and_replays_once()
 }
 
 #[test]
-fn a_new_unsent_cancel_or_rejection_never_adds_unknown_coverage() {
-    for payload in [
-        serde_json::json!({"reason":"cancelled before it was sent"}),
-        serde_json::json!({"code":"invalid_request","retry":"never"}),
-    ] {
+fn protocol_upgrade_does_not_add_unknown_coverage_for_commands_never_leased() {
+    for (sent, expected) in [(0, Quality::Idle), (1, Quality::Unavailable)] {
         let (_d, path, c) = old_db();
-        c.command("a", "pending", 0, serde_json::json!({}), AT);
+        c.command("a", "pending", sent, serde_json::Value::Null, AT);
         drop(c);
         let s = Store::open(path, NoPublisher).unwrap();
-        fixture::merge_unsent_rejection(&s, &payload, AT).unwrap();
         s.read(|c| {
-            assert_eq!(state(c, AT), Quality::Idle);
-            assert_eq!(state(c, AT - 99_000), Quality::Idle);
+            assert_eq!(state(c, AT), expected);
+            assert_eq!(state(c, AT - 99_000), expected);
             Ok::<_, steve_store::StoreError>(())
         })
         .unwrap();

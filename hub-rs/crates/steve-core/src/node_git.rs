@@ -52,7 +52,7 @@ pub enum Applied {
     Done(na::GitFacts),
     /// Refused or failed, the workspace as before (`stale`: it moved off the facts; `conflict`: a
     /// conflict backed out, the paths one per line; `busy`: uncommitted changes).
-    Failed(na::ApiError),
+    Failed(na::Error),
     /// It may or may not have happened: never retried, said so.
     Unknown(String),
 }
@@ -174,7 +174,7 @@ pub(crate) async fn gather(port: &dyn NodeGit, item: &str, want: Want) -> Gather
     {
         Ok(f) => f,
         // a workspace that is no git checkout with a commit
-        Err(e) if e.code == na::ErrorCode::Invalid => return Ok(None),
+        Err(e) if e.code == na::Code::Invalid => return Ok(None),
         Err(e) => return Err(e.safe_detail),
     };
     let Some(na::GitAnswer::Fingerprint { tree, own }) = first_answer(&f) else {
@@ -579,16 +579,16 @@ async fn rebase(port: &dyn NodeGit, item: &str, operation: &str) -> crate::git::
             moved: after.head != f.head,
         },
         Applied::Failed(e) => match e.code {
-            na::ErrorCode::Conflict => Rebase::Conflict(
+            na::Code::Conflict => Rebase::Conflict(
                 e.safe_detail
                     .lines()
                     .filter(|l| !l.is_empty())
                     .collect::<Vec<_>>()
                     .join("、"),
             ),
-            na::ErrorCode::Busy => Rebase::Dirty(e.safe_detail),
-            na::ErrorCode::Stale => Rebase::Error("核对之后分支又动了".into()),
-            na::ErrorCode::Offline => Rebase::Error("设备离线".into()),
+            na::Code::Busy => Rebase::Dirty(e.safe_detail),
+            na::Code::Stale => Rebase::Error("核对之后分支又动了".into()),
+            na::Code::Unavailable => Rebase::Error("设备离线".into()),
             _ => Rebase::Error(e.safe_detail),
         },
         Applied::Unknown(why) => Rebase::Error(format!("结果未知（{why}），不会自动重试")),

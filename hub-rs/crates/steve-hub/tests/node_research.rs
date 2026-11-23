@@ -1013,12 +1013,12 @@ async fn research_tools_answer_only_a_running_research_job() {
         other => panic!("{other:?}"),
     }
     let refused = tools.call(call("steve_update", 2)).await.unwrap_err();
-    assert_eq!(refused.code, ErrorCode::Denied);
+    assert_eq!(refused.code, Code::Forbidden);
     // the run is over (the thread wrote its end): nothing more for this job
     steve_store::testkit::hub::node_fixtures::set_thread_runs_status_done(&node.store).unwrap();
     assert_eq!(
         tools.catalog(exec.clone()).await.unwrap_err().code,
-        ErrorCode::Denied
+        Code::Forbidden
     );
     assert_eq!(
         tools
@@ -1026,7 +1026,7 @@ async fn research_tools_answer_only_a_running_research_job() {
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Denied
+        Code::Forbidden
     );
     stop.store(true, Ordering::SeqCst);
     assert_eq!(run.await.unwrap().end, RunEnd::Stopped);

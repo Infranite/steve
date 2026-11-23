@@ -122,9 +122,9 @@ pub(crate) enum Located {
     Git(String, String, String),
 }
 
-fn node_error(e: na::ApiError) -> ApiError {
+fn node_error(e: na::Error) -> ApiError {
     match e.code {
-        na::ErrorCode::Offline => offline(),
+        na::Code::Unavailable => offline(),
         _ => ApiError::internal(e.safe_detail),
     }
 }
@@ -207,7 +207,7 @@ impl Addr {
         &self,
         cursor: Option<na::Cursor>,
         limit: u32,
-    ) -> Result<na::Page<na::FileInfo>, na::ApiError> {
+    ) -> Result<na::Page<na::FileInfo>, na::Error> {
         let page = na::PageRequest { cursor, limit };
         match &self.at {
             Place::Root(at) => self.node.list_root(at.clone(), page).await,
@@ -225,9 +225,9 @@ impl Addr {
     /// What is there: the place itself is a directory when it lists; anything below is found in
     /// its directory's listing.
     async fn stat(&self) -> Result<Seen, ApiError> {
-        let seen = |e: na::ApiError| match e.code {
-            na::ErrorCode::Invalid => Ok(Seen::Gone),
-            na::ErrorCode::Denied => Ok(Seen::Outside),
+        let seen = |e: na::Error| match e.code {
+            na::Code::Invalid => Ok(Seen::Gone),
+            na::Code::Forbidden => Ok(Seen::Outside),
             _ => Err(node_error(e)),
         };
         let rel = self.rel().to_string();
@@ -274,7 +274,7 @@ impl Addr {
         loop {
             let page = match self.page(cursor, 1000).await {
                 Ok(p) => p,
-                Err(e) if matches!(e.code, na::ErrorCode::Invalid | na::ErrorCode::Denied) => {
+                Err(e) if matches!(e.code, na::Code::Invalid | na::Code::Forbidden) => {
                     return Ok(out);
                 }
                 Err(e) => return Err(node_error(e)),
@@ -296,7 +296,7 @@ impl Addr {
         expected: Option<na::Revision>,
         offset: u64,
         len: u64,
-    ) -> Result<Vec<u8>, na::ApiError> {
+    ) -> Result<Vec<u8>, na::Error> {
         let mut out = vec![];
         let mut step: Option<u64> = None;
         while (out.len() as u64) < len {
@@ -484,7 +484,7 @@ async fn workspace_base(
             at: Place::Ws(w.clone(), String::new()),
             shown: v.display,
         })),
-        Err(e) if e.code == na::ErrorCode::Offline => Err(offline()),
+        Err(e) if e.code == na::Code::Unavailable => Err(offline()),
         Err(_) => Ok(None),
     }
 }
@@ -623,9 +623,9 @@ async fn node_doc(o: &Out, v: &View, loc: &str) -> Result<Option<Located>, Fail>
                 let f = match facts(node, w, vec![], vec![read]).await {
                     Ok(f) => f,
                     Err(e) => match e.code {
-                        na::ErrorCode::Offline => return Err(Fail::Api(offline())),
+                        na::Code::Unavailable => return Err(Fail::Api(offline())),
                         // not there (or no checkout): the next revision, then the Hub's
-                        na::ErrorCode::Invalid | na::ErrorCode::Unsupported => continue,
+                        na::Code::Invalid | na::Code::Unsupported => continue,
                         _ => return Err(Fail::Missing(steve_i18n::t!("hub.output.git_failed"))),
                     },
                 };
@@ -650,7 +650,7 @@ async fn facts(
     w: &na::WorkspaceRef,
     refs: Vec<String>,
     reads: Vec<na::GitRead>,
-) -> Result<na::GitFacts, na::ApiError> {
+) -> Result<na::GitFacts, na::Error> {
     node.git_facts(na::GitQuery {
         workspace: w.clone(),
         refs,
@@ -744,7 +744,7 @@ async fn node_file(a: &Addr, e: &Entry) -> Result<Value, ApiError> {
             // a file that went or changed meanwhile reads as empty, as on the Hub's disk
             let buf = match a.read(e.version.clone(), 0, TEXT_MAX as u64 + 1).await {
                 Ok(b) => b,
-                Err(err) if err.code == na::ErrorCode::Offline => return Err(offline()),
+                Err(err) if err.code == na::Code::Unavailable => return Err(offline()),
                 Err(_) => vec![],
             };
             text_value(&name, &buf)
@@ -762,11 +762,11 @@ type Shown = Result<Value, String>;
 
 /// A git failure: offline fails the request; a Node with no git face, or git not finishing (its
 /// deadline), says so; git refusing (no checkout, no such revision) is `otherwise`.
-fn git_miss(e: na::ApiError, otherwise: String) -> Result<Shown, ApiError> {
+fn git_miss(e: na::Error, otherwise: String) -> Result<Shown, ApiError> {
     match e.code {
-        na::ErrorCode::Offline => Err(offline()),
-        na::ErrorCode::Unsupported => Ok(Ok(missing(steve_i18n::t!("hub.output.git_elsewhere")))),
-        na::ErrorCode::Invalid => Ok(Err(otherwise)),
+        na::Code::Unavailable => Err(offline()),
+        na::Code::Unsupported => Ok(Ok(missing(steve_i18n::t!("hub.output.git_elsewhere")))),
+        na::Code::Invalid => Ok(Err(otherwise)),
         _ => Ok(Ok(missing(steve_i18n::t!("hub.output.git_failed")))),
     }
 }
@@ -889,9 +889,9 @@ async fn node_branch(
     let answers = match facts(node, w, vec![], reads).await {
         Ok(f) => f.reads.into_iter().map(|r| r.answer).collect(),
         Err(e) => match e.code {
-            na::ErrorCode::Offline => return Err(offline()),
+            na::Code::Unavailable => return Err(offline()),
             // what git would not say is left empty, as on the Hub's disk
-            na::ErrorCode::Invalid | na::ErrorCode::Unsupported => vec![],
+            na::Code::Invalid | na::Code::Unsupported => vec![],
             // git not finishing is said, never shown as an empty log
             _ => return Ok(Ok(missing(steve_i18n::t!("hub.output.git_failed")))),
         },
@@ -1314,15 +1314,15 @@ mod tests {
 
     #[test]
     fn git_not_finishing_is_said_not_shown_as_a_rewritten_commit() {
-        let failed = |code| git_miss(na::ApiError::new(code, "x"), "gone".into());
-        for code in [na::ErrorCode::Internal, na::ErrorCode::Expired] {
+        let failed = |code| git_miss(na::Error::new(code, "x"), "gone".into());
+        for code in [na::Code::Internal, na::Code::Stale] {
             assert_eq!(
                 failed(code).unwrap(),
                 Ok(missing(steve_i18n::t!("hub.output.git_failed")))
             );
         }
-        assert_eq!(failed(na::ErrorCode::Invalid).unwrap(), Err("gone".into()));
-        assert_eq!(failed(na::ErrorCode::Offline).unwrap_err(), offline());
+        assert_eq!(failed(na::Code::Invalid).unwrap(), Err("gone".into()));
+        assert_eq!(failed(na::Code::Unavailable).unwrap_err(), offline());
         assert_eq!(
             short(&na::CommitInfo {
                 sha: "65c3f544aa".into(),
@@ -1416,10 +1416,10 @@ mod tests {
 
     #[test]
     fn an_offline_node_fails_the_request_with_device_offline() {
-        let e = node_error(na::ApiError::new(na::ErrorCode::Offline, "link down"));
+        let e = node_error(na::Error::new(na::Code::Unavailable, "link down"));
         assert_eq!(e, ApiError::Json(503, "设备离线".into()));
         assert_eq!(
-            node_error(na::ApiError::new(na::ErrorCode::Internal, "boom")),
+            node_error(na::Error::new(na::Code::Internal, "boom")),
             ApiError::internal("boom")
         );
     }

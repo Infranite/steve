@@ -923,7 +923,18 @@ fn a_reset_units_failed_attempt_closes_after_its_turn_and_the_retry_reuses_the_c
     k.db()
         .store()
         .workflows()
-        .reset(&parent, "a", "重试旧结果")
+        .retry_unit(
+            &parent,
+            k.db()
+                .store()
+                .workflows()
+                .get(&parent)
+                .unwrap()
+                .unwrap()
+                .revision,
+            "a",
+            "重试旧结果",
+        )
         .unwrap();
     assert_eq!(
         unit(&k, &parent, "a").item_id.as_deref(),
@@ -1008,7 +1019,18 @@ fn a_reset_units_cancelled_attempt_closes_cancelled_and_the_retry_reuses_the_chi
     k.db()
         .store()
         .workflows()
-        .reset(&parent, "b", "换一轮执行")
+        .retry_unit(
+            &parent,
+            k.db()
+                .store()
+                .workflows()
+                .get(&parent)
+                .unwrap()
+                .unwrap()
+                .revision,
+            "b",
+            "换一轮执行",
+        )
         .unwrap();
     k.rt.st().turning.remove(&sid);
     k.db()
@@ -1865,8 +1887,8 @@ fn the_coordinator_contract_ends_the_turn_and_a_unit_needs_no_get_for_its_upstre
         "{contract}"
     );
     assert!(
-        contract.contains("then retry that unit: its review and everything downstream rerun"),
-        "a retry already reruns the review: {contract}"
+        contract.contains("Successors wait for verified replacement outputs"),
+        "the coordination prompt describes evidence reuse: {contract}"
     );
     drop(t);
     plan(&k, &parent, &specs);

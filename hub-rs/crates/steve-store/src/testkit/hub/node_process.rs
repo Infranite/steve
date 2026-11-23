@@ -53,11 +53,6 @@ inspect!(
 );
 
 inspect!(
-    attempt_count_by_session_runtime_attempts(session: &str) -> i64,
-    "SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=?1 AND json_extract(a.completion,'$.stop_reason')='node_restarted'"
-);
-
-inspect!(
     attempt_count_by_turn(turn: &str) -> i64,
     "SELECT COUNT(*) FROM runtime_attempts WHERE turn_id=?1 AND json_extract(completion,'$.stop_reason')='node_restarted'"
 );
@@ -467,27 +462,6 @@ pub fn agent_output_count(path: &Path, session: &str, needle: &str) -> Result<i6
 
 pub fn make_unsent_turn_retry_due(path: &Path, session: &str) -> Result<usize> {
     Ok(super::api::writable(path)?.execute("UPDATE node_commands SET retry_at=0 WHERE method='start_turn' AND state='pending' AND maybe_sent=0 AND target_attempt=(SELECT active_attempt FROM runtime_sessions WHERE session_id=?)", [session])?)
-}
-
-pub fn capacity_retry(path: &Path, session: &str) -> Result<(i64, i64, String)> {
-    let db = super::inspect_database(path)?;
-    Ok(db.query_row("SELECT c.retry_at,a.updated,a.completion FROM node_commands c JOIN runtime_attempts a ON a.turn_id=(SELECT turn_id FROM runtime_attempts WHERE attempt_id=c.target_attempt) AND a.ordinal=0 WHERE c.target_attempt=(SELECT active_attempt FROM runtime_sessions WHERE session_id=?)", [session], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?)
-}
-
-pub fn attempt_observations(
-    path: &Path,
-    session: &str,
-) -> Result<Vec<(i64, String, Option<String>, i64)>> {
-    let db = super::inspect_database(path)?;
-    let mut q = db.prepare(
-        "SELECT a.ordinal,a.state,a.completion,a.updated \
-                   FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) \
-                   WHERE t.session_id=? ORDER BY a.ordinal",
-    )?;
-    Ok(q.query_map([session], |r| {
-        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-    })?
-    .collect::<rusqlite::Result<_>>()?)
 }
 
 pub fn decision_state(path: &Path, id: &str) -> Result<(String, String)> {

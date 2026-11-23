@@ -67,6 +67,8 @@ Official GitHub cache actions restore Rust dependencies under a key made of the 
 
 ## Changes and releases
 
+The macOS release job signs `steve` and `steve-node` before packaging. Configure `STEVE_MACOS_SIGNING_P12` (the base64-encoded Developer ID Application PKCS#12) and `STEVE_MACOS_SIGNING_PASSWORD` as release repository secrets, and configure `STEVE_MACOS_SIGNING_TEAM` as a repository variable containing that certificate's Team ID. Keep the same Team ID when renewing the certificate so registered Nodes can verify and keep their file-access grant across releases.
+
 A version is chosen when it is released, never ahead on a branch:
 
 - **What the three numbers mean.** Versions are `MAJOR.MINOR.PATCH`.
