@@ -39,7 +39,7 @@ pub fn for_session(
     session: &str,
 ) -> Result<Vec<(String, String)>, StoreError> {
     store.read(|r| {
-        let Some((ws, p)) = store.reader(|c| principal::of_session(c, session))? else {
+        let Some((ws, p)) = store.read(|c| principal::of_session(c, session))? else {
             return Ok(vec![]);
         };
         let Some(me) = p.user() else {

@@ -50,3 +50,38 @@ pub fn reservations(store: &Store, node: &str) -> Result<i64> {
 pub fn session_room(store: &Store, node: &str) -> Result<runtime::SessionRoom> {
     store.reader(|c| runtime::session_room(c, node))
 }
+
+pub fn clone_prepare(store: &Store, operation: &str, new_operation: &str) -> Result<()> {
+    store.transaction(|tx| {
+        tx.execute(
+            "INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,receipt,created,updated)
+             SELECT ?2,node_id,method,json_set(request,'$.id',?2),digest,state,receipt,created,updated
+             FROM node_commands WHERE operation_id=?1",
+            [operation, new_operation],
+        )?;
+        Ok(())
+    })
+}
+
+pub fn make_commands_due(store: &Store) -> Result<()> {
+    store.transaction(|tx| {
+        tx.execute("UPDATE node_commands SET retry_at=0,lease_until=NULL", [])?;
+        Ok(())
+    })
+}
+
+pub fn retire_control(w: &mut crate::W<'_>, target: &str) -> Result<()> {
+    use crate::contract::Q;
+    use sea_query::Values;
+    let conn = w.db();
+    conn.exec(
+        "INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated)
+         VALUES (?1,'n1','recover',json_object('body',json_object('target',?2)),'test','finished',1,1)",
+        &Values(vec![format!("recover_{target}").into(), target.into()]),
+    )?;
+    conn.batch("UPDATE runtime_sessions SET phase='opening'")?;
+    if target == "op_prep_s1" {
+        conn.batch("UPDATE node_commands SET state='pending' WHERE operation_id='op_open_s1'")?;
+    }
+    Ok(())
+}

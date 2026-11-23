@@ -60,7 +60,7 @@ impl NodeRuntime {
     /// control holds the session.
     pub(super) fn recover_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         session: &str,
         attempt: Option<&str>,
     ) -> Result<Option<bool>, StoreError> {
@@ -110,7 +110,7 @@ impl NodeRuntime {
     /// The `recover` of `target`, frozen now: the target's id and the digest the Node keeps of it.
     fn plan_recover_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         target: &str,
         method: &str,
         request: &str,
@@ -135,7 +135,7 @@ impl NodeRuntime {
                 reason: reason.into(),
             },
         )?;
-        rt::insert_command_in(
+        node_write::insert_command_in(
             tx,
             &rt::NewCommand {
                 operation: &op,
@@ -159,7 +159,7 @@ impl NodeRuntime {
     /// few times). True: one was planned now.
     pub(super) fn recover_exec_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         op: &str,
         reason: &str,
     ) -> Result<bool, StoreError> {
@@ -195,7 +195,7 @@ impl NodeRuntime {
     /// What the Node said about a recover (its answer or its stream).
     pub(super) fn recover_receipt_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         op: &str,
         state: ReceiptState,
         success: bool,
@@ -214,7 +214,7 @@ impl NodeRuntime {
     /// again on its own; the next Stop asks under a new id.
     pub(super) fn recover_failed_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         op: &str,
         detail: &str,
     ) -> Result<(), StoreError> {
@@ -236,7 +236,7 @@ impl NodeRuntime {
     /// False: nothing waits for the retired release.
     fn release_for_successor_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         session: &str,
         retired: &str,
     ) -> Result<bool, StoreError> {
@@ -272,7 +272,7 @@ impl NodeRuntime {
     }
 
     /// The Node retired the recover's target (interrupted, its effects kept as they are).
-    fn retired_in(&self, tx: &Tx, op: &str) -> Result<(), StoreError> {
+    fn retired_in(&self, tx: &mut W<'_>, op: &str) -> Result<(), StoreError> {
         let (target, method) = self.store.read(|r| recovery::retired_target(r, op))?;
         let Some(session) = command_any_session_in(&self.store, &target)? else {
             return Ok(());
@@ -291,7 +291,7 @@ impl NodeRuntime {
                 &steve_i18n::stored(|| steve_i18n::t!("hub.node.recovered_abandon", what = what)),
             )?,
             "resolve_permission" => {
-                if let Some(row) = rt::permission_of_answer_in(tx, &target)? {
+                if let Some(row) = node_write::permission_of_answer_in(tx, &target)? {
                     self.close_in(
                         tx,
                         &row,
@@ -314,7 +314,7 @@ impl NodeRuntime {
     /// Release the session held by a retired control, or preserve its successor's release fence.
     fn retired_session_control_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         session: &str,
         target: &str,
         method: &str,
@@ -335,7 +335,7 @@ impl NodeRuntime {
             return Ok(());
         }
         let rev = self.session_revision(session)?;
-        rt::session_cas_in(
+        node_write::session_cas_in(
             tx,
             session,
             rev,
@@ -367,7 +367,7 @@ impl NodeRuntime {
     /// Reject opens tied to the retired prepare and give their replacement a new dependency.
     fn retired_prepare_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         session: &str,
         target: &str,
         what: &str,
@@ -377,7 +377,7 @@ impl NodeRuntime {
             .store
             .read(|r| dispatch::pending_dependents(r, target))?;
         for o in &opens {
-            rt::merge_receipt_in(
+            node_write::merge_receipt_in(
                 tx,
                 o,
                 ReceiptState::Rejected,
@@ -396,7 +396,7 @@ impl NodeRuntime {
             let body = serde_json::from_str::<Command<Prepare>>(&req)?.body;
             let prep = uid(&format!("op_prep_{session}"));
             let (req, digest) = command(&prep, body)?;
-            rt::insert_command_in(
+            node_write::insert_command_in(
                 tx,
                 &rt::NewCommand {
                     operation: &prep,

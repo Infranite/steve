@@ -1,5 +1,6 @@
 use super::*;
 use steve_node_api::testkit::{FakeNode, build};
+use steve_store::{Tx, testkit::hub::node_planning as planning_fixture};
 
 use steve_runtime::FakeClock;
 
@@ -414,7 +415,7 @@ async fn a_settle_drained_before_its_commit_still_ends_its_row() {
         acted: false,
         job: None,
     };
-    rt.tx(|tx| {
+    rt.write(|tx| {
         rt.settle_in(tx, S, &attempt, &completion)?;
         // the upkeep worker drains between the settle and its commit
         rt.tell_later();
@@ -436,7 +437,7 @@ async fn a_settle_drained_before_its_commit_still_ends_its_row() {
     assert_eq!(*seen.ended.lock().unwrap(), [S.to_string()], "once");
 
     // a settle whose transaction rolls back is never booked
-    let r = rt.tx(|tx| {
+    let r = rt.write(|tx| {
         rt.settle_in(tx, S, &attempt, &completion)?;
         Err::<(), _>(StoreError::Conflict("rolled back".into()))
     });
@@ -821,17 +822,12 @@ fn retry_count(rt: &NodeRuntime, method: &str) -> i64 {
     retry_query(rt, &sql)
 }
 
-fn retry_sql(rt: &NodeRuntime, sql: &str) {
-    rt.tx(|tx| tx.execute_batch(sql).map_err(StoreError::from))
-        .unwrap();
-}
-
 fn retry_failed(rt: &NodeRuntime, op: String, error: ApiError) {
     let mut receipt = Receipt {
         operation: idv(op).unwrap(),
         state: Observed::Accepted,
     };
-    rt.tx(|tx| {
+    rt.write(|tx| {
         rt.receipt_in(tx, &receipt)?;
         receipt.state = Observed::Finished {
             outcome: Outcome::Failed,
@@ -874,9 +870,7 @@ async fn tidy_never_failure_holds_sweeps_until_new_prepare_but_retryable_failure
                 if retry == RetryClass::Never { 1 } else { 2 }
             );
             // A new prepare is a new cleanup generation, regardless of the older failure.
-            retry_sql(&rt, "INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,receipt,created,updated)
-                SELECT 'new_prepare',node_id,method,json_set(request,'$.id','new_prepare'),digest,state,receipt,created,updated
-                FROM node_commands WHERE operation_id='op_prep_s1'");
+            planning_fixture::clone_prepare(&rt.store, "op_prep_s1", "new_prepare").unwrap();
             let before = retry_count(&rt, "tidy_workspace");
             assert!(rt.tidy_session_workspace("s1", true).unwrap());
             assert_eq!(retry_count(&rt, "tidy_workspace"), before + 1);
@@ -916,23 +910,23 @@ async fn open_never_failure_blocks_all_reopen_callers_until_explicit_retry() {
         );
         for _ in 0..3 {
             assert_eq!(rt.flush("s1", None).unwrap(), Planned::Held); // plan.rs released + queued
-            rt.tx(|tx| rt.reopen_in(tx, "s1")).unwrap(); // refused-start caller's common guard
+            rt.write(|tx| rt.reopen_in(tx, "s1")).unwrap(); // refused-start caller's common guard
         }
         // Late successful recover callbacks must also respect the stop, for both target kinds.
         for target in [failed_op.as_str(), "op_prep_s1"] {
-            rt.tx(|tx| {
-                tx.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated)
-                    VALUES (?1,'n1','recover',json_object('body',json_object('target',?2)),'test','finished',1,1)",
-                    rusqlite::params![format!("recover_{target}"), target])?;
-                // Model the held control / dependent open that the recover is retiring.
-                tx.execute("UPDATE runtime_sessions SET phase='opening'", [])?;
-                if target == "op_prep_s1" {
-                    tx.execute("UPDATE node_commands SET state='pending' WHERE operation_id='op_open_s1'", [])?;
-                }
-                rt.recover_receipt_in(tx, &format!("recover_{target}"), ReceiptState::Finished, true, "")?;
+            rt.write(|tx| {
+                planning_fixture::retire_control(tx, target)?;
+                rt.recover_receipt_in(
+                    tx,
+                    &format!("recover_{target}"),
+                    ReceiptState::Finished,
+                    true,
+                    "",
+                )?;
                 assert!(super::plan::startup_blocked_in(tx, "s1")?);
                 Ok(())
-            }).unwrap();
+            })
+            .unwrap();
         }
         assert_eq!(retry_count(&rt, "open_session"), 2);
         rt.retry_open("s1", &build::choice()).unwrap();
@@ -949,7 +943,7 @@ async fn outcome_unknown_never_stops_leasing_and_can_be_settled_by_reconciliatio
     node.refuse_next("prepare_workspace", error);
     assert!(rt.send_one().await);
     for _ in 0..3 {
-        retry_sql(&rt, "UPDATE node_commands SET retry_at=0,lease_until=NULL");
+        planning_fixture::make_commands_due(&rt.store).unwrap();
         assert!(!rt.send_one().await);
     }
     let (state, maybe_sent, generation): (String, bool, i64) = rt.store.reader(|c| Ok::<_, StoreError>(c.query_row(

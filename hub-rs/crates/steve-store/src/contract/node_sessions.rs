@@ -416,7 +416,9 @@ pub fn workspace_ref(c: &mut impl Read, session: &str) -> Result<Option<String>>
 pub mod observations;
 pub mod startup;
 
+pub mod authority;
 pub mod lifecycle;
+pub mod placements;
 pub mod planning;
 pub mod reconcile;
 pub mod worktree;

@@ -15,12 +15,15 @@ impl NodeRuntime {
     /// meanwhile, or the runtime's timers and I/O wait with it, and so may the very writer it waits
     /// for. On a multi-thread runtime the worker hands its other tasks on while this blocks; the
     /// transaction still runs here and now, so nothing else happens between it and the send.
-    fn send_tx<T>(&self, f: impl FnOnce(&Tx) -> Result<T, StoreError>) -> Result<T, StoreError> {
+    fn send_tx<T>(
+        &self,
+        f: impl FnOnce(&mut W<'_>) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
         match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
             Ok(tokio::runtime::RuntimeFlavor::MultiThread) => {
-                tokio::task::block_in_place(|| self.tx(f))
+                tokio::task::block_in_place(|| self.write(f))
             }
-            _ => self.tx(f),
+            _ => self.write(f),
         }
     }
 
@@ -43,7 +46,7 @@ impl NodeRuntime {
         let lease = match self.send_tx(|tx| {
             self.expire_capacity_waits_in(tx)?;
             self.note_waiting_in(tx)?;
-            match rt::lease_command_in(
+            match node_write::lease_command_in(
                 tx,
                 self.node_id.as_str(),
                 &self.owner,
@@ -95,7 +98,7 @@ impl NodeRuntime {
                 } else {
                     1_000
                 };
-                rt::retry_command_in(
+                node_write::retry_command_in(
                     tx,
                     &lease,
                     self.clock.now(),
@@ -124,7 +127,7 @@ impl NodeRuntime {
                     && let Some(attempt) = self
                         .store
                         .read(|r| steve_store::node_jobs::command_attempt(r, &lease.operation))?
-                    && steve_store::jobs::attempt_in(tx, &attempt)?
+                    && steve_store::node_jobs::attempt_in(tx, &attempt)?
                         .is_some_and(|a| a.cancel_requested)
                 {
                     self.stop_job_in(tx, &attempt)?;
@@ -132,7 +135,7 @@ impl NodeRuntime {
                 Ok((None, None))
             }
             Err(e) => {
-                rt::merge_receipt_in(
+                node_write::merge_receipt_in(
                     tx,
                     &lease.operation,
                     ReceiptState::Rejected,
@@ -211,12 +214,12 @@ impl NodeRuntime {
     /// Turns waiting because this Node runs as many as its owner set ([`rt::session_room`]): each
     /// session is told once, with the numbers, and its turn goes by itself once one ends. The
     /// mark is on the command, so a restart does not tell it again.
-    fn note_waiting_in(&self, tx: &Tx) -> Result<(), StoreError> {
-        let room = rt::session_room(tx, self.node_id.as_str())?;
+    fn note_waiting_in(&self, tx: &mut W<'_>) -> Result<(), StoreError> {
+        let room = node_write::session_room(tx, self.node_id.as_str())?;
         if !room.full() || room.waiting == 0 {
             return Ok(());
         }
-        let fresh = rt::waiting_commands(tx, self.node_id.as_str())?;
+        let fresh = node_write::waiting_commands(tx, self.node_id.as_str())?;
         for (op, session) in fresh {
             self.store.write(|w| dispatch::mark_waiting(w, &op))?;
             if let Some(session) = session {
@@ -240,7 +243,7 @@ impl NodeRuntime {
     /// as an attempt again.
     fn exhausted_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         lease: &rt::CommandLease,
         e: &ApiError,
     ) -> Result<i64, StoreError> {
@@ -311,8 +314,7 @@ impl NodeRuntime {
                         .read(|r| {
                             let a = node_turns::started_by(r, &l.operation)?
                                 .ok_or_else(|| conflict("missing turn attempt"))?;
-                            self.store
-                                .reader(|c| self.disabled_workflow_in(c, &a.session))
+                            self.disabled_workflow_in(&a.session)
                         })
                         .map_err(|e| ApiError::new(ErrorCode::Offline, e.to_string()))?
                 };
@@ -361,7 +363,11 @@ impl NodeRuntime {
 
     /// What the Node says about a command, from its answer or its stream (the same either way):
     /// merged forward, and an open that finished makes the session ready (or released).
-    pub(super) fn receipt_in(&self, tx: &Tx, receipt: &Receipt) -> Result<Option<End>, StoreError> {
+    pub(super) fn receipt_in(
+        &self,
+        tx: &mut W<'_>,
+        receipt: &Receipt,
+    ) -> Result<Option<End>, StoreError> {
         let (state, success) = receipt_state(&receipt.state);
         let op = receipt.operation.as_str();
         let Some(method) = self
@@ -370,7 +376,7 @@ impl NodeRuntime {
         else {
             return Ok(None);
         };
-        let moved = rt::merge_receipt_in(
+        let moved = node_write::merge_receipt_in(
             tx,
             op,
             state,
@@ -463,7 +469,7 @@ impl NodeRuntime {
                     .filter(|a| a.state != "finished")
                 {
                     let (attempt, rev, s) = (a.id, a.revision, a.session);
-                    rt::attempt_cas_in(tx, &attempt, rev, "unknown", None, None, now())?;
+                    node_write::attempt_cas_in(tx, &attempt, rev, "unknown", None, None, now())?;
                     if detail == steve_node_api::RESTARTED {
                         // the Node restarted under it (#54): its harness is gone with the old
                         // process. Given up here, as Stop would; once the Node confirms it,
@@ -524,7 +530,13 @@ impl NodeRuntime {
     /// A release is over: the session is let go, or (refused, failed) still open as it was. What
     /// came in meanwhile goes now (opening it again if it was let go). Only the session's last
     /// release says so: an earlier one's receipt, come late, says nothing of the session now.
-    fn released_in(&self, tx: &Tx, s: &str, op: &str, success: bool) -> Result<(), StoreError> {
+    fn released_in(
+        &self,
+        tx: &mut W<'_>,
+        s: &str,
+        op: &str,
+        success: bool,
+    ) -> Result<(), StoreError> {
         if self.phase_in(s)?.is_none_or(|(p, _)| p != "releasing")
             || self
                 .store
@@ -535,7 +547,7 @@ impl NodeRuntime {
             return Ok(());
         }
         let rev = self.session_revision(s)?;
-        rt::session_cas_in(
+        node_write::session_cas_in(
             tx,
             s,
             rev,
@@ -556,7 +568,7 @@ impl NodeRuntime {
     /// the old harness is still open in the shared worktree, so the successor keeps waiting, now
     /// for a new release (after a delay doubling from 1 s up to a minute) that it is moved onto.
     /// The successor is told once. Nothing waits for it: it stays as it is (tidy asks again).
-    fn release_again_in(&self, tx: &Tx, s: &str, failed: &str) -> Result<(), StoreError> {
+    fn release_again_in(&self, tx: &mut W<'_>, s: &str, failed: &str) -> Result<(), StoreError> {
         let waiting = self
             .store
             .read(|r| dispatch::pending_dependents(r, failed))?;
@@ -598,7 +610,7 @@ impl NodeRuntime {
     /// stop. Only an explicit human retry clears it; queued input never opens it again.
     pub(super) fn opened_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         s: &str,
         ok: bool,
         detail: &str,
@@ -609,7 +621,7 @@ impl NodeRuntime {
         let waiting = self.store.read(|r| node_turns::waiting_to_open(r, s))?;
         if ok {
             if let Some(turn) = waiting {
-                if let Some(why) = self.workflow_blocker_in(tx, s)? {
+                if let Some(why) = self.workflow_blocker_in(s)? {
                     return self.after_attempt_in(
                         tx,
                         s,
@@ -631,7 +643,7 @@ impl NodeRuntime {
                 return Ok(None);
             }
             let rev = self.session_revision(s)?;
-            rt::session_cas_in(
+            node_write::session_cas_in(
                 tx,
                 s,
                 rev,
@@ -690,7 +702,7 @@ impl NodeRuntime {
             });
         }
         let rev = self.session_revision(s)?;
-        rt::session_cas_in(
+        node_write::session_cas_in(
             tx,
             s,
             rev,
@@ -761,7 +773,7 @@ impl NodeRuntime {
     /// reconciliation that made it unknown saw the same); it ends as interrupted, never sent again.
     fn abandon_failed_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         op: &str,
         e: Option<&ApiError>,
     ) -> Result<Option<End>, StoreError> {
@@ -808,7 +820,7 @@ impl NodeRuntime {
     /// (once). Otherwise the attempt ends as failed, its turn with it.
     fn refused_attempt_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         op: &str,
         e: &ApiError,
     ) -> Result<Option<End>, StoreError> {
@@ -820,10 +832,8 @@ impl NodeRuntime {
         let (attempt, rev, turn, session, cancelled) =
             (a.id, a.revision, a.turn, a.session, a.cancelled);
         let reopened_before = self.store.read(|r| node_turns::was_released(r, &turn))?;
-        let reopen = gone
-            && !reopened_before
-            && !cancelled
-            && self.workflow_blocker_in(tx, &session)?.is_none();
+        let reopen =
+            gone && !reopened_before && !cancelled && self.workflow_blocker_in(&session)?.is_none();
         let completion = Completion {
             outcome: Outcome::Failed,
             stop_reason: if reopen { "released" } else { "error" }.into(),
@@ -834,7 +844,7 @@ impl NodeRuntime {
             acted: false,
             job: None,
         };
-        rt::attempt_cas_in(
+        node_write::attempt_cas_in(
             tx,
             &attempt,
             rev,
@@ -848,7 +858,7 @@ impl NodeRuntime {
             // the turn keeps its messages and waits for the open (see opened_in)
             let trev = self.turn_revision(&turn)?;
             let ordinal = self.store.read(|r| node_turns::retry_ordinal(r, &turn))?;
-            rt::turn_cas_in(
+            node_write::turn_cas_in(
                 tx,
                 &turn,
                 trev,

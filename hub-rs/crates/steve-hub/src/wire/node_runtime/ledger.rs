@@ -78,7 +78,7 @@ impl NodeRuntime {
         // (the sender parses the request back into the Node's command)
         request["subject"] = Value::from(subject);
         let digest = digest_of(&request).map_err(conflict)?.to_string();
-        let fresh = self.tx(|tx| {
+        let fresh = self.write(|tx| {
             if let Some(c) = self.store.read(|r| node_commands::record(r, op, None))? {
                 let same = c.node == self.node_id.as_str()
                     && c.method == method
@@ -90,7 +90,7 @@ impl NodeRuntime {
                     Err(conflict("operation identity reused"))
                 };
             }
-            rt::insert_command_in(
+            node_write::insert_command_in(
                 tx,
                 &rt::NewCommand {
                     operation: op,
@@ -146,7 +146,7 @@ impl NodeRuntime {
     /// way or was planned now.
     pub fn stop_lost(&self, op: &str) -> Result<bool, StoreError> {
         self.running()?;
-        let planned = self.tx(|tx| {
+        let planned = self.write(|tx| {
             if self.recover_exec_in(tx, op, "a step whose command was lost is run again")? {
                 return Ok(true);
             }
@@ -173,7 +173,7 @@ impl NodeRuntime {
         })?;
         let mut n = 0;
         for op in due {
-            if self.tx(|tx| {
+            if self.write(|tx| {
                 self.recover_exec_in(
                     tx,
                     &op,

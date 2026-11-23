@@ -65,20 +65,22 @@ impl NodeRuntime {
             artifact_view: None,
             skills: vec![],
         };
-        let fresh = self.tx(|tx| {
+        let fresh = self.write(|tx| {
             if self.ended_in(&b.session)? {
                 return Err(conflict("已结束的会话不能绑定或重开。"));
             }
             self.session_owners_work_in(tx, &b.session)?;
             if !bound_strict(&self.store, &b.session)? {
-                super::super::bot_dispatch::commit_guard(
-                    tx,
-                    &b.session,
-                    self.node_id.as_str(),
-                    placement.is_some(),
-                )?;
+                self.store.reader(|c| {
+                    super::super::bot_dispatch::commit_guard(
+                        c,
+                        &b.session,
+                        self.node_id.as_str(),
+                        placement.is_some(),
+                    )
+                })?;
             }
-            let fresh = rt::bind_session_in(
+            let fresh = node_write::bind_session_in(
                 tx,
                 &rt::SessionBinding {
                     session: &b.session,
@@ -98,7 +100,7 @@ impl NodeRuntime {
                     .read(|r| node_sessions::startup::scope(r, &b.session))?
                     .item
                     .ok_or_else(|| StoreError::Rejected("placement has no item".into()))?;
-                steve_store::bot_dispatch::decision(tx, &item, placement)?;
+                node_write::record_placement(tx, &item, placement)?;
                 let ws = self
                     .store
                     .items()
@@ -131,7 +133,7 @@ impl NodeRuntime {
                 },
             )?;
             let prep_op = format!("op_prep_{}", b.session);
-            rt::insert_command_in(
+            node_write::insert_command_in(
                 tx,
                 &rt::NewCommand {
                     operation: &prep_op,
@@ -153,7 +155,7 @@ impl NodeRuntime {
                 &b.session,
             )?;
             // and its skills
-            open.skills = tx.write(|w| super::super::bot_skills::for_session(w, &b.session))?;
+            open.skills = super::super::bot_skills::for_session(tx, &b.session)?;
             if self.principal_state.load(Ordering::Relaxed) {
                 open.state = super::super::principal::harness_state_in(
                     &self.store,
@@ -164,7 +166,7 @@ impl NodeRuntime {
                 )?;
             }
             let (open_v, open_d) = command(&open_op, open.clone())?;
-            rt::insert_command_in(
+            node_write::insert_command_in(
                 tx,
                 &rt::NewCommand {
                     operation: &open_op,
@@ -179,7 +181,7 @@ impl NodeRuntime {
             )?;
             self.store.write(|w| sessions::reset_views(w, &b.session))?;
             let rev = self.session_revision(&b.session)?;
-            rt::session_cas_in(
+            node_write::session_cas_in(
                 tx,
                 &b.session,
                 rev,
@@ -209,7 +211,7 @@ impl NodeRuntime {
         let today = if self.is_remote() {
             None
         } else {
-            match self.store.reader(super::super::node_binding::root_paths_in) {
+            match self.store.read(|r| node_sessions::placements::roots(r)) {
                 Ok((rw, ro)) => {
                     let extra = self.configured_roots.get().cloned().unwrap_or_default();
                     Some(rw.into_iter().chain(ro).chain(extra).collect::<Vec<_>>())
@@ -222,7 +224,7 @@ impl NodeRuntime {
         };
         let node = self.node_id.as_str();
         if let Err(e) =
-            self.tx(|tx| super::super::view::record_in(tx, session, node, today.as_deref()))
+            self.write(|w| super::super::view::record_in(w, session, node, today.as_deref()))
         {
             tracing::warn!(session, "view shadow: {e}");
         }
@@ -236,14 +238,14 @@ impl NodeRuntime {
 
     /// The session's harness is gone on its Node (released, or abandoned there): open it again,
     /// continuing the same conversation where the Node can.
-    pub(super) fn reopen_in(&self, tx: &Tx, session: &str) -> Result<(), StoreError> {
+    pub(super) fn reopen_in(&self, tx: &mut W<'_>, session: &str) -> Result<(), StoreError> {
         self.reopen_after_in(tx, session, None)
     }
 
     /// [`Self::reopen_in`], the open waiting on `dependency` (a prepare) when there is one.
     pub(super) fn reopen_after_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         session: &str,
         dependency: Option<&str>,
     ) -> Result<(), StoreError> {
@@ -262,10 +264,10 @@ impl NodeRuntime {
         // the variables as they are now: a removed or changed one does not come back
         open.env =
             super::super::node_env::for_session(&self.store, self.node_id.as_str(), session)?;
-        open.skills = tx.write(|w| super::super::bot_skills::for_session(w, session))?;
+        open.skills = super::super::bot_skills::for_session(tx, session)?;
         let op = uid(&format!("op_open_{session}"));
         let (req, digest) = command(&op, open)?;
-        rt::insert_command_in(
+        node_write::insert_command_in(
             tx,
             &rt::NewCommand {
                 operation: &op,
@@ -280,7 +282,7 @@ impl NodeRuntime {
         )?;
         self.store.write(|w| sessions::reset_views(w, session))?;
         let rev = self.session_revision(session)?;
-        rt::session_cas_in(
+        node_write::session_cas_in(
             tx,
             session,
             rev,
@@ -298,7 +300,7 @@ impl NodeRuntime {
     /// clear the durable startup stop. No other harness is chosen on the user's behalf.
     pub fn retry_open(&self, session: &str, choice: &HarnessChoice) -> Result<(), StoreError> {
         self.running()?;
-        self.tx(|tx| {
+        self.write(|tx| {
             if self.ended_in(session)? {
                 return Err(conflict("已结束的会话不能重开，请使用当前会话。"));
             }
@@ -336,7 +338,7 @@ impl NodeRuntime {
     /// turn is over: its release is queued now and goes then ([`Release::Pending`] either way).
     pub fn release(&self, session: &str) -> Result<Release, StoreError> {
         self.running()?;
-        let r = self.tx(|tx| self.release_in(tx, session))?;
+        let r = self.write(|tx| self.release_in(tx, session))?;
         if matches!(r, Release::Pending(_)) {
             self.wake_send.notify_one();
         }
@@ -362,7 +364,7 @@ impl NodeRuntime {
         let mut n = 0;
         for s in idle {
             // checked again in the release's own transaction: a message may have come meanwhile
-            let r = self.tx(|tx| {
+            let r = self.write(|tx| {
                 let still = self
                     .store
                     .read(|r| sessions::idle(r, node, before, Some(&s)))?;
@@ -393,7 +395,7 @@ impl NodeRuntime {
     }
 
     /// [`Self::release`] inside `tx`.
-    pub(super) fn release_in(&self, tx: &Tx, session: &str) -> Result<Release, StoreError> {
+    pub(super) fn release_in(&self, tx: &mut W<'_>, session: &str) -> Result<Release, StoreError> {
         let Some((phase, active)) = self.phase_in(session)? else {
             return Ok(Release::Gone);
         };
@@ -403,7 +405,7 @@ impl NodeRuntime {
                 // nothing left to let go: a release that waited for the turn is done without
                 // going out (what waits for it may go)
                 if let Some(op) = waiting {
-                    rt::merge_receipt_in(
+                    node_write::merge_receipt_in(
                         tx,
                         &op,
                         ReceiptState::Finished,
@@ -435,7 +437,7 @@ impl NodeRuntime {
                     None => self.release_command_in(tx, session)?,
                 };
                 let rev = self.session_revision(session)?;
-                rt::session_cas_in(
+                node_write::session_cas_in(
                     tx,
                     session,
                     rev,
@@ -465,13 +467,17 @@ impl NodeRuntime {
     }
 
     /// A new `release_session` command for `session`, its id.
-    pub(super) fn release_command_in(&self, tx: &Tx, session: &str) -> Result<String, StoreError> {
+    pub(super) fn release_command_in(
+        &self,
+        tx: &mut W<'_>,
+        session: &str,
+    ) -> Result<String, StoreError> {
         let op = uid(&format!("op_release_{session}"));
         let (req, digest) = command(
             &op,
             SessionId::try_from(session.to_string()).map_err(conflict)?,
         )?;
-        rt::insert_command_in(
+        node_write::insert_command_in(
             tx,
             &rt::NewCommand {
                 operation: &op,
@@ -488,7 +494,11 @@ impl NodeRuntime {
     }
 
     /// An ended session is let go once it is idle (see [`Self::release`]).
-    pub(super) fn release_if_ended_in(&self, tx: &Tx, session: &str) -> Result<(), StoreError> {
+    pub(super) fn release_if_ended_in(
+        &self,
+        tx: &mut W<'_>,
+        session: &str,
+    ) -> Result<(), StoreError> {
         if self.ended_in(session)? {
             self.release_in(tx, session)?;
         }

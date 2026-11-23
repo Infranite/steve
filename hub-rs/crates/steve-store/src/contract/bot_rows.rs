@@ -227,3 +227,14 @@ impl<C: Read> BotRows<'_, C> {
             .is_some())
     }
 }
+
+pub fn harness(r: &mut impl Read, bot: &str) -> Result<Option<String>> {
+    r.one(
+        Query::select()
+            .column("harness")
+            .from("bots")
+            .and_where(Expr::col("id").eq(bot))
+            .and_where(Expr::col("deleted").eq(false)),
+        |row| row.get(0),
+    )
+}

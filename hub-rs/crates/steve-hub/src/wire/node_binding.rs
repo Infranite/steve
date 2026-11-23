@@ -288,22 +288,7 @@ fn item_worktree(
 /// The first specification sent for the legacy resource. Later failed or pending requests
 /// must not redefine that immutable identity (including failures from older Hubs).
 fn prepared_as(store: &Store, resource: &str) -> Result<Option<PrepareKind>, StoreError> {
-    let request: Option<String> =
-        store.reader(|c| {
-            use rusqlite::OptionalExtension;
-            c.query_row(
-            "SELECT request FROM node_commands WHERE node_id='local' AND method='prepare_workspace'
-             AND json_extract(request,'$.body.resource')=? ORDER BY rowid ASC LIMIT 1",
-            [resource], |r| r.get(0),
-        ).optional().map_err(StoreError::from)
-        })?;
-    request
-        .map(|r| {
-            serde_json::from_str::<Command<Prepare>>(&r)
-                .map(|c| c.body.kind)
-                .map_err(Into::into)
-        })
-        .transpose()
+    store.read(|r| steve_store::node_sessions::worktree::first_prepare(r, "local", resource))
 }
 
 fn workspace_resource(
@@ -342,14 +327,13 @@ pub fn remote_binding_for(
         return None;
     }
     let ok = store
-        .reader(|c| {
-            let takes = node_takes(c, node.as_str(), &s.workspace_id)?;
-            // earlier sessions of the item that are not on this Node (on the Hub, or elsewhere)
-            let elsewhere: bool = c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sessions x LEFT JOIN runtime_sessions r ON r.session_id=x.id
-                  WHERE x.item_id=?1 AND x.id<>?2 AND (r.node_id IS NULL OR r.node_id<>?3))",
-                rusqlite::params![item.id, session, node.as_str()],
-                |r| r.get(0),
+        .read(|r| {
+            let takes = store.reader(|c| node_takes(c, node.as_str(), &s.workspace_id))?;
+            let elsewhere = steve_store::node_sessions::placements::earlier_session_elsewhere(
+                r,
+                &item.id,
+                session,
+                node.as_str(),
             )?;
             Ok::<_, StoreError>(takes && !elsewhere)
         })
@@ -437,26 +421,6 @@ pub(crate) fn node_takes(
     Ok(remote_refusal(c, node, workspace)?.is_none())
 }
 
-/// The directories [`roots`] gives the local Node, before the configured ones: every workspace's
-/// projects, session and item directories (read-write) and knowledge folders (read-only).
-pub(crate) fn root_paths_in(
-    c: &rusqlite::Connection,
-) -> Result<(Vec<String>, Vec<String>), StoreError> {
-    let mut q = c.prepare("SELECT path FROM projects WHERE archived=0 AND device_id='hub'
-         UNION SELECT s.cwd FROM sessions s LEFT JOIN items i ON i.id=s.item_id LEFT JOIN projects p ON p.id=i.project_id
-          WHERE s.status<>'ended' AND s.readonly=0 AND s.source='Steve' AND s.device_id='hub' AND (p.id IS NULL OR p.archived=0)
-         UNION SELECT i.cwd FROM items i LEFT JOIN projects p ON p.id=i.project_id
-          WHERE i.cwd IS NOT NULL AND (p.id IS NULL OR p.archived=0)")?;
-    let rw = q
-        .query_map([], |r| r.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut q = c.prepare("SELECT json_extract(config,'$.path') FROM kb_sources WHERE kind='folder' AND json_type(config,'$.path')='text'")?;
-    let ro = q
-        .query_map([], |r| r.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok((rw, ro))
-}
-
 /// The local Node's allowlist: explicit configured roots (`extra`: the scratch and worktree
 /// directories) plus project and local session directories, read-write, and knowledge folders,
 /// read-only. No filesystem traversal and never `/`. A path that is both stays read-write. Built at
@@ -464,7 +428,7 @@ pub(crate) fn root_paths_in(
 /// project added after boot binds without a restart and an archived one is refused (with the
 /// directories of its items and their sessions).
 pub(crate) fn roots(store: &Store, extra: &[PathBuf]) -> Result<Vec<steve_node::Root>, StoreError> {
-    let (rw, ro) = store.reader(root_paths_in)?;
+    let (rw, ro) = store.read(|r| steve_store::node_sessions::placements::roots(r))?;
     let mut rw: Vec<PathBuf> = rw.into_iter().map(PathBuf::from).collect();
     rw.extend(extra.iter().cloned());
     rw.sort();

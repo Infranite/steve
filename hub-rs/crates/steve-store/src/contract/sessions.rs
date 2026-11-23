@@ -33,3 +33,14 @@ pub fn effective_model(c: &mut impl Read, ws: &str, session: &str) -> Result<Opt
         None => Ok(None),
     }
 }
+
+pub fn device(r: &mut impl Read, ws: &str, session: &str) -> Result<Option<String>> {
+    r.one(
+        Query::select()
+            .column("device_id")
+            .from("sessions")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("id").eq(session)),
+        |row| row.get(0),
+    )
+}

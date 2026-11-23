@@ -11,7 +11,7 @@ impl NodeRuntime {
     /// Nodes/adapters can report success with only a diagnostic in the final assistant text.
     pub(super) fn stream_completion_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         session: &str,
         attempt: &str,
         mut c: Completion,
@@ -30,7 +30,7 @@ impl NodeRuntime {
             .map(|e| e.safe_detail.as_str())
             .filter(|e| !e.trim().is_empty());
         let tail = if matches!(c.stop_reason.as_str(), "end_turn" | "error") && error.is_none() {
-            tx.write(|w| retry::assistant_tail(w, self.node_id.as_str(), session, attempt))?
+            retry::assistant_tail(tx, self.node_id.as_str(), session, attempt)?
         } else {
             String::new()
         };

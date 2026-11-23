@@ -23,9 +23,8 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use rusqlite::OptionalExtension;
 use steve_node_api::*;
-use steve_store::{Store, StoreError};
+use steve_store::{Read, Store, StoreError, node_sessions::placements};
 
 use super::node_binding::root_id;
 use super::node_runtime::NodeRuntime;
@@ -263,23 +262,11 @@ impl Workspaces {
     /// the local Node while it is on here or on a paired remote Node (reachable or not). A store
     /// read only.
     pub fn item_on_node(&self, item: &str) -> bool {
-        let bound = self.store.reader(|c| {
-            let latest: Option<String> = c
-                .query_row(
-                    "SELECT s.id FROM sessions s JOIN runtime_sessions r ON r.session_id=s.id
-                      WHERE s.item_id=? ORDER BY s.created DESC, s.rowid DESC LIMIT 1",
-                    [item],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            match latest {
-                Some(s) => bound_in(c, &s),
-                None => Ok(None),
-            }
-        });
+        let bound = self.store.read(|r| placements::latest_bound(r, item));
         match bound {
-            Ok(Some(Place::Bound(node, _))) => {
-                self.is_local(&node)
+            Ok(Some(workspace)) => {
+                let node = workspace.node.as_str();
+                self.is_local(node)
                     || (node != HUB_DEVICE && node != "local" && self.fleet.is_some())
             }
             _ => false,
@@ -299,20 +286,14 @@ impl Workspaces {
 
     /// The place of `what` and the workspace it belongs to.
     fn place(&self, what: Subject<'_>) -> Result<(Place, String), PlacementError> {
-        let (found, workspace) = self.store.reader(|c| {
-            let (table, id) = match what {
-                Subject::Project(id) => ("projects", id),
-                Subject::Session(id) => ("sessions", id),
-                Subject::Item(id) => ("items", id),
-                Subject::KbSource(id) => ("kb_sources", id),
+        let (found, workspace) = self.store.read(|c| {
+            let subject = match what {
+                Subject::Project(id) => placements::Subject::Project(id),
+                Subject::Session(id) => placements::Subject::Session(id),
+                Subject::Item(id) => placements::Subject::Item(id),
+                Subject::KbSource(id) => placements::Subject::KnowledgeSource(id),
             };
-            let workspace: Option<String> = c
-                .query_row(
-                    &format!("SELECT workspace_id FROM {table} WHERE id=?"),
-                    [id],
-                    |r| r.get(0),
-                )
-                .optional()?;
+            let workspace = placements::owner(c, subject)?;
             let found = match what {
                 Subject::Project(id) => project_in(c, id)?,
                 Subject::Session(id) => session_in(c, id)?,
@@ -465,109 +446,60 @@ fn dir_on(device: String, path: &str) -> Found {
     }
 }
 
-fn project_in(c: &rusqlite::Connection, id: &str) -> Result<Found, StoreError> {
-    let row: Option<(String, String, bool)> = c
-        .query_row(
-            "SELECT device_id, path, archived FROM projects WHERE id=?",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?;
-    Ok(match row {
+fn project_in(c: &mut impl Read, id: &str) -> Result<Found, StoreError> {
+    Ok(match placements::project(c, id)? {
         None => Found::Missing,
-        // an archived project's directory is no root any more
-        Some((_, _, true)) => Found::Nowhere,
-        Some((device, path, false)) => dir_on(device, &path),
+        Some(p) if p.archived => Found::Nowhere,
+        Some(p) => dir_on(p.device, &p.path),
     })
 }
 
-/// A session bound to a Node: its workspace there. Else its directory on its device.
-fn session_in(c: &rusqlite::Connection, id: &str) -> Result<Found, StoreError> {
-    if let Some(p) = bound_in(c, id)? {
-        return Ok(Found::At(p));
+/// A session bound to a Node uses its workspace there. Other sessions use their device directory.
+fn session_in(c: &mut impl Read, id: &str) -> Result<Found, StoreError> {
+    if let Some(workspace) = placements::bound(c, id)? {
+        return Ok(Found::At(Place::Bound(
+            workspace.node.to_string(),
+            workspace,
+        )));
     }
-    let row: Option<(String, String, bool)> = c
-        .query_row(
-            "SELECT s.device_id, s.cwd, COALESCE(p.archived, 0) FROM sessions s
-              LEFT JOIN items i ON i.id=s.item_id LEFT JOIN projects p ON p.id=i.project_id
-              WHERE s.id=?",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?;
-    Ok(match row {
+    Ok(match placements::session(c, id)? {
         None => Found::Missing,
-        // an archived project's directories are no roots any more, its items' included
-        Some((_, cwd, archived)) if cwd.is_empty() || archived => Found::Nowhere,
-        Some((device, cwd, _)) => dir_on(device, &cwd),
+        Some(p) if p.path.is_empty() || p.archived => Found::Nowhere,
+        Some(p) => dir_on(p.device, &p.path),
     })
 }
 
-fn bound_in(c: &rusqlite::Connection, session: &str) -> Result<Option<Place>, StoreError> {
-    let row: Option<(String, String)> = c
-        .query_row(
-            "SELECT node_id, workspace_ref FROM runtime_sessions WHERE session_id=?",
-            [session],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    Ok(row.and_then(|(node, w)| {
-        let w: WorkspaceRef = serde_json::from_str(&w).ok()?;
-        (w.node.as_str() == node).then_some(Place::Bound(node, w))
-    }))
-}
-
-/// An item's latest bound session's workspace; else its own directory (on the Hub); else its
-/// project's. An archived project's item has no directory any more (as [`project_in`]).
-fn item_in(c: &rusqlite::Connection, id: &str) -> Result<Found, StoreError> {
-    let row: Option<(Option<String>, Option<String>, bool)> = c
-        .query_row(
-            "SELECT i.cwd, i.project_id, COALESCE(p.archived, 0) FROM items i
-              LEFT JOIN projects p ON p.id=i.project_id WHERE i.id=?",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?;
-    let Some((cwd, project, archived)) = row else {
+/// An item's latest binding takes precedence over the item or project directory.
+fn item_in(c: &mut impl Read, id: &str) -> Result<Found, StoreError> {
+    let Some(item) = placements::item(c, id)? else {
         return Ok(Found::Missing);
     };
-    let latest: Option<String> = c
-        .query_row(
-            "SELECT s.id FROM sessions s JOIN runtime_sessions r ON r.session_id=s.id
-              WHERE s.item_id=? ORDER BY s.created DESC, s.rowid DESC LIMIT 1",
-            [id],
-            |r| r.get(0),
-        )
-        .optional()?;
-    if let Some(s) = latest
-        && let Some(p) = bound_in(c, &s)?
-    {
-        return Ok(Found::At(p));
+    if let Some(workspace) = placements::latest_bound(c, id)? {
+        return Ok(Found::At(Place::Bound(
+            workspace.node.to_string(),
+            workspace,
+        )));
     }
-    if archived {
+    if item.archived {
         return Ok(Found::Nowhere);
     }
-    if let Some(cwd) = cwd.filter(|p| !p.is_empty()) {
+    if let Some(cwd) = item.cwd.filter(|p| !p.is_empty()) {
         return Ok(dir_on(HUB_DEVICE.into(), &cwd));
     }
-    match project {
+    match item.project {
         Some(p) => project_in(c, &p),
         None => Ok(Found::Nowhere),
     }
 }
 
-/// A knowledge folder: a read-only root of the Hub's own device.
-fn kb_source_in(c: &rusqlite::Connection, id: &str) -> Result<Found, StoreError> {
-    let row: Option<(String, Option<String>)> = c
-        .query_row(
-            "SELECT kind, json_extract(config,'$.path') FROM kb_sources WHERE id=?",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    Ok(match row {
+/// A knowledge folder is a read-only root of the Hub's own device.
+fn kb_source_in(c: &mut impl Read, id: &str) -> Result<Found, StoreError> {
+    Ok(match placements::knowledge_source(c, id)? {
         None => Found::Missing,
-        Some((kind, Some(path))) if kind == "folder" => dir_on(HUB_DEVICE.into(), &path),
+        Some(placements::KnowledgeSource {
+            kind,
+            path: Some(path),
+        }) if kind == "folder" => dir_on(HUB_DEVICE.into(), &path),
         Some(_) => Found::Nowhere,
     })
 }

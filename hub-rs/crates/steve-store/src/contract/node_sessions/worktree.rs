@@ -200,3 +200,25 @@ pub fn latest_item_session(r: &mut impl Read, node: &str, item: &str) -> Result<
         |row| row.get(0),
     )
 }
+
+pub fn first_prepare(
+    r: &mut impl Read,
+    node: &str,
+    resource: &str,
+) -> Result<Option<steve_node_api::PrepareKind>> {
+    let d = r.db().dialect();
+    r.one(
+        Query::select()
+            .column("request")
+            .from("node_commands")
+            .and_where(Expr::col("node_id").eq(node))
+            .and_where(Expr::col("method").eq("prepare_workspace"))
+            .and_where(
+                d.json_path(Expr::col("request"), "$.body.resource")
+                    .eq(resource),
+            )
+            .order_by_expr(d.insertion_order(None), Order::Asc)
+            .limit(1),
+        |row| Ok(row.get::<Json<Command<Prepare>>>(0)?.0.body.kind),
+    )
+}

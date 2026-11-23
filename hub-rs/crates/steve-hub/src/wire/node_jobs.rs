@@ -138,7 +138,7 @@ impl NodeRuntime {
                 "" => steve_store::WS.to_string(),
                 w => w.to_string(),
             });
-        self.store.reader(|c| self.owners_work_in(c, &workspace))?;
+        self.owners_work_in(&workspace)?;
         let prompt = self.think_prompt(data_dir, t, &workspace, &files)?;
         let job = uid("job");
         let attempt = t.attempt.clone();
@@ -189,8 +189,8 @@ impl NodeRuntime {
             attempt: spec.run.attempt.clone(),
         };
         let (req, digest) = command(&op, spec.clone())?;
-        self.tx(|tx| {
-            jobs::create_job_in(
+        self.write(|tx| {
+            job_commands::create_job_in(
                 tx,
                 &jobs::NewJob {
                     id: &job,
@@ -287,11 +287,11 @@ impl NodeRuntime {
     /// record of is passed over.
     pub(super) fn job_event_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         ev: &NodeEvent,
         attempt: &str,
     ) -> Result<(), StoreError> {
-        let Some(row) = jobs::attempt_in(tx, attempt)? else {
+        let Some(row) = job_commands::attempt_in(tx, attempt)? else {
             // A retained journal Final can outlive the runtime Job's retention. Billing keeps its
             // own source binding, so it still repairs the original call after Job pruning.
             if let EventBody::Usage { report } = &ev.body {
@@ -318,7 +318,14 @@ impl NodeRuntime {
         }
         match &ev.body {
             EventBody::AttemptStarted => {
-                jobs::apply_attempt_in(tx, attempt, AttemptState::Running, None, None, now())?;
+                job_commands::apply_attempt_in(
+                    tx,
+                    attempt,
+                    AttemptState::Running,
+                    None,
+                    None,
+                    now(),
+                )?;
             }
             EventBody::Usage { report } => {
                 self.store
@@ -378,15 +385,20 @@ impl NodeRuntime {
 
     /// Job `attempt` is over: its row, its job and its `start_job` take the end (the first end
     /// stays: a later one changes nothing), and its caller hears it.
-    fn job_ended_in(&self, tx: &Tx, attempt: &str, c: &Completion) -> Result<(), StoreError> {
-        let Some(row) = jobs::attempt_in(tx, attempt)? else {
+    fn job_ended_in(
+        &self,
+        tx: &mut W<'_>,
+        attempt: &str,
+        c: &Completion,
+    ) -> Result<(), StoreError> {
+        let Some(row) = job_commands::attempt_in(tx, attempt)? else {
             return Ok(());
         };
         if row.state == AttemptState::Finished {
             return Ok(());
         }
         let completion = serde_json::to_value(c).map_err(conflict)?;
-        jobs::apply_attempt_in(
+        job_commands::apply_attempt_in(
             tx,
             attempt,
             AttemptState::Finished,
@@ -394,7 +406,7 @@ impl NodeRuntime {
             Some(&completion),
             now(),
         )?;
-        jobs::finish_job_in(tx, &row.job, now())?;
+        job_commands::finish_job_in(tx, &row.job, now())?;
         self.store.stats().gateway_job_end(
             attempt,
             c.outcome == Outcome::Succeeded,
@@ -414,7 +426,7 @@ impl NodeRuntime {
                 },
             };
             let (state, success) = receipt_state(&receipt.state);
-            rt::merge_receipt_in(
+            node_write::merge_receipt_in(
                 tx,
                 &row.operation,
                 state,
@@ -437,7 +449,7 @@ impl NodeRuntime {
     /// Node has no record of.
     pub(super) fn job_receipt_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         op: &str,
         method: &str,
         attempt: &str,
@@ -452,16 +464,16 @@ impl NodeRuntime {
                 } else {
                     AttemptState::Running
                 };
-                jobs::apply_attempt_in(tx, attempt, s, Some(&value), None, now())?;
+                job_commands::apply_attempt_in(tx, attempt, s, Some(&value), None, now())?;
                 // a cancel held back while the start's send was uncertain goes now
-                if jobs::attempt_in(tx, attempt)?
+                if job_commands::attempt_in(tx, attempt)?
                     .is_some_and(|a| a.cancel_requested && a.state != AttemptState::Unknown)
                 {
                     self.job_stop_in(tx, attempt, op, "cancel")?;
                 }
             }
             ("start_job", ReceiptState::Unknown) => {
-                jobs::apply_attempt_in(
+                job_commands::apply_attempt_in(
                     tx,
                     attempt,
                     AttemptState::Unknown,
@@ -498,14 +510,15 @@ impl NodeRuntime {
     /// did not run), an abandon of what the Node has no record of ends the attempt.
     pub(super) fn job_refused_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         method: &str,
         attempt: &str,
         e: &ApiError,
     ) -> Result<(), StoreError> {
         match method {
             "start_job" => {
-                let cancelled = jobs::attempt_in(tx, attempt)?.is_some_and(|a| a.cancel_requested);
+                let cancelled =
+                    job_commands::attempt_in(tx, attempt)?.is_some_and(|a| a.cancel_requested);
                 let c = if cancelled {
                     ended(Outcome::Cancelled, "cancelled", None)
                 } else {
@@ -523,14 +536,15 @@ impl NodeRuntime {
     /// its caller is gone either way).
     fn job_abandon_failed_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         attempt: &str,
         e: &ApiError,
     ) -> Result<(), StoreError> {
         let unknown_to_node =
             e.code == ErrorCode::Invalid && e.safe_detail.contains("no such operation");
         if unknown_to_node
-            && jobs::attempt_in(tx, attempt)?.is_some_and(|a| a.state == AttemptState::Unknown)
+            && job_commands::attempt_in(tx, attempt)?
+                .is_some_and(|a| a.state == AttemptState::Unknown)
         {
             let c = ended(
                 Outcome::Interrupted,
@@ -550,7 +564,7 @@ impl NodeRuntime {
     /// time.
     fn job_stop_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         attempt: &str,
         target: &str,
         method: &str,
@@ -584,7 +598,7 @@ impl NodeRuntime {
                 },
             )?
         };
-        jobs::insert_job_command_in(
+        job_commands::insert_job_command_in(
             tx,
             &jobs::NewJobCommand {
                 operation: &op,
@@ -603,14 +617,14 @@ impl NodeRuntime {
     /// A start that never left the Hub ends here, cancelled; one that may be on its way waits for
     /// the Node to hold it ([`Self::job_receipt_in`]); one the Node cannot tell the end of is
     /// abandoned; a running one is cancelled.
-    pub(super) fn stop_job_in(&self, tx: &Tx, attempt: &str) -> Result<(), StoreError> {
-        let Some(row) = jobs::attempt_in(tx, attempt)? else {
+    pub(super) fn stop_job_in(&self, tx: &mut W<'_>, attempt: &str) -> Result<(), StoreError> {
+        let Some(row) = job_commands::attempt_in(tx, attempt)? else {
             return Ok(());
         };
         if row.state == AttemptState::Finished {
             return Ok(());
         }
-        jobs::cancel_attempt_in(tx, attempt, now())?;
+        job_commands::cancel_attempt_in(tx, attempt, now())?;
         let job_commands::Start {
             operation: op,
             state,
@@ -628,8 +642,8 @@ impl NodeRuntime {
     }
 
     /// A start that is ended before the Node ran it: rejected here, the attempt cancelled.
-    fn job_unsent_in(&self, tx: &Tx, attempt: &str, op: &str) -> Result<(), StoreError> {
-        rt::merge_receipt_in(
+    fn job_unsent_in(&self, tx: &mut W<'_>, attempt: &str, op: &str) -> Result<(), StoreError> {
+        node_write::merge_receipt_in(
             tx,
             op,
             ReceiptState::Rejected,
@@ -642,7 +656,7 @@ impl NodeRuntime {
 
     /// [`Self::stop_job_in`] in its own transaction, then the send worker is woken.
     pub(super) fn stop_job(&self, attempt: &str) {
-        if let Err(e) = self.tx(|tx| self.stop_job_in(tx, attempt)) {
+        if let Err(e) = self.write(|tx| self.stop_job_in(tx, attempt)) {
             tracing::error!("cancel job attempt {attempt}: {e}");
         }
         self.wake_send.notify_one();
@@ -653,8 +667,8 @@ impl NodeRuntime {
     /// no record of is ended here (it never ran), a running one cancelled, an unknown one
     /// abandoned. Jobs left open with nothing open in them are closed.
     pub(super) fn settle_orphan_jobs(&self) -> usize {
-        let r = self.tx(|tx| {
-            let open = jobs::open_attempts_in(tx, self.node_id.as_str())?;
+        let r = self.write(|tx| {
+            let open = job_commands::open_attempts_in(tx, self.node_id.as_str())?;
             let mut n = 0;
             for a in open {
                 if self.jobs.has(&a.id) {
@@ -664,7 +678,7 @@ impl NodeRuntime {
                 self.store
                     .stats()
                     .gateway_job_cancel(&a.id, "Hub restart: caller unavailable")?;
-                jobs::cancel_attempt_in(tx, &a.id, now())?;
+                job_commands::cancel_attempt_in(tx, &a.id, now())?;
                 let job_commands::Start {
                     operation: op,
                     state,
@@ -691,7 +705,7 @@ impl NodeRuntime {
                 .store
                 .read(|r| job_commands::empty(r, self.node_id.as_str()))?;
             for j in empty {
-                jobs::finish_job_in(tx, &j, now())?;
+                job_commands::finish_job_in(tx, &j, now())?;
             }
             Ok(n)
         });
@@ -1067,8 +1081,7 @@ impl NodeRuntime {
         standalone: bool,
     ) -> Result<(), StoreError> {
         self.running()?;
-        self.store
-            .reader(|c| self.owners_work_in(c, &a.workspace))?;
+        self.owners_work_in(&a.workspace)?;
         let (prompt, earlier) = self.research_prompt(a)?;
         let job = uid("job");
         let op = format!("op_{attempt}");
@@ -1123,8 +1136,8 @@ impl NodeRuntime {
             attempt: spec.run.attempt.clone(),
         };
         let (req, digest) = command(&op, spec.clone())?;
-        self.tx(|tx| {
-            jobs::create_job_in(
+        self.write(|tx| {
+            job_commands::create_job_in(
                 tx,
                 &jobs::NewJob {
                     id: &job,

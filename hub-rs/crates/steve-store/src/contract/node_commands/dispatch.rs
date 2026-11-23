@@ -411,3 +411,15 @@ pub fn defer_release(w: &mut W<'_>, op: &str) -> Result<()> {
     )?;
     Ok(())
 }
+
+pub fn subject(r: &mut impl Read, op: &str) -> Result<Option<String>> {
+    let d = r.db().dialect();
+    Ok(r.one(
+        Query::select()
+            .expr(d.json_field(Expr::col("request"), "subject"))
+            .from(TABLE)
+            .and_where(Expr::col("operation_id").eq(op)),
+        |row| row.get::<Option<String>>(0),
+    )?
+    .flatten())
+}

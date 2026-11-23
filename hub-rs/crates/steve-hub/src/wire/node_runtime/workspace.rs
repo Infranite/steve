@@ -82,7 +82,7 @@ impl NodeRuntime {
     /// the same spec (the open waits for it). Its operation, or `None`: nothing to prepare.
     pub(super) fn prepare_again_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         session: &str,
     ) -> Result<Option<String>, StoreError> {
         let node = self.node_id.as_str();
@@ -111,7 +111,7 @@ impl NodeRuntime {
         };
         let op = uid(&format!("op_prep_{session}"));
         let (req, digest) = command(&op, prepare)?;
-        rt::insert_command_in(
+        node_write::insert_command_in(
             tx,
             &rt::NewCommand {
                 operation: &op,
@@ -194,7 +194,7 @@ impl NodeRuntime {
     /// A prepare finished: made (the session waiting on it hears so), or not.
     pub(super) fn prepared_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         op: &str,
         receipt: &Receipt,
         detail: &str,
@@ -228,7 +228,7 @@ impl NodeRuntime {
     /// (not as a turn end too).
     pub(super) fn prepare_failed_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         op: &str,
         error: Option<&ApiError>,
         detail: &str,
@@ -238,7 +238,7 @@ impl NodeRuntime {
         };
         let opens = self.store.read(|r| dispatch::pending_dependents(r, op))?;
         for o in &opens {
-            rt::merge_receipt_in(
+            node_write::merge_receipt_in(
                 tx,
                 o,
                 ReceiptState::Rejected,
@@ -270,19 +270,12 @@ impl NodeRuntime {
     /// A tidy finished or was refused (`removed`: it succeeded).
     pub(super) fn tidied_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         op: &str,
         removed: bool,
         detail: &str,
     ) -> Result<(), StoreError> {
-        let subject: Option<String> = tx
-            .query_row(
-                "SELECT json_extract(request,'$.subject') FROM node_commands WHERE operation_id=?",
-                [op],
-                |r| r.get(0),
-            )
-            .optional()?
-            .flatten();
+        let subject = dispatch::subject(tx, op)?;
         let Some(item) = subject.and_then(|s| s.strip_prefix("tidy:").map(String::from)) else {
             return Ok(());
         };

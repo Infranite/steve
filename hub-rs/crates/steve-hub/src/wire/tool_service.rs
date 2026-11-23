@@ -168,7 +168,7 @@ impl ToolService {
                 .filter(|row| row.workspace_id == ws && row.status != "ended")
                 .ok_or_else(|| "Connector session no longer exists".to_string())?;
             store
-                .reader(|c| {
+                .read(|c| {
                     let (session_ws, principal) = super::principal::of_session(c, &current.id)?
                         .filter(|(session_ws, _)| session_ws == &ws)
                         .ok_or(steve_modules::ApiError::Unauthenticated)?;

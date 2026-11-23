@@ -380,16 +380,7 @@ impl UseNodes for VaultNodes {
         };
         let in_ws = self
             .store
-            .reader(|c| {
-                Ok::<_, steve_store::StoreError>(
-                    c.query_row(
-                        "SELECT device_id FROM sessions WHERE id=? AND workspace_id=?",
-                        [session, ws],
-                        |r| r.get::<_, String>(0),
-                    )
-                    .ok(),
-                )
-            })
+            .read(|r| steve_store::session_device(r, ws, session))
             .map_err(|e| rule(e.to_string()))?;
         let Some(device) = in_ws else {
             // the vault answers a session it does not know itself

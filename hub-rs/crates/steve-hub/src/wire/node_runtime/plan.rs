@@ -32,7 +32,7 @@ impl NodeRuntime {
         files: &[FileRef],
     ) -> Result<Planned, StoreError> {
         self.running()?;
-        let planned = self.tx(|tx| {
+        let planned = self.write(|tx| {
             self.store
                 .write(|w| queue_in(w, session, text, via, files, now()))?;
             self.plan_in(tx, session)
@@ -56,7 +56,7 @@ impl NodeRuntime {
         lead: Option<(&str, &str)>,
     ) -> Result<(Planned, Option<String>), StoreError> {
         self.running()?;
-        let (planned, attempt) = self.tx(|tx| {
+        let (planned, attempt) = self.write(|tx| {
             // a released session takes the lead too: once something is queued it opens again
             let released = self.may_plan()
                 && !self.is_holding()
@@ -98,7 +98,7 @@ impl NodeRuntime {
 
     /// [`Self::plan_state_in`], and a released session with messages waiting is opened again
     /// (the open is what it waits for).
-    fn state_in(&self, tx: &Tx, session: &str) -> Result<Planned, StoreError> {
+    fn state_in(&self, tx: &mut W<'_>, session: &str) -> Result<Planned, StoreError> {
         let p = self.plan_state_in(tx, session)?;
         if p == Planned::Busy {
             let open = self.store.read(|r| {
@@ -117,7 +117,7 @@ impl NodeRuntime {
     }
 
     /// What [`Self::plan_in`] would answer, without planning (and without writing anything).
-    fn plan_state_in(&self, tx: &Tx, session: &str) -> Result<Planned, StoreError> {
+    fn plan_state_in(&self, tx: &mut W<'_>, session: &str) -> Result<Planned, StoreError> {
         if self.ended_in(session)? {
             self.store.sessions().retire_queue(session)?;
             return Ok(Planned::Held);
@@ -127,7 +127,7 @@ impl NodeRuntime {
         }
         // Node facts and reconciliation can schedule the next queued turn without going through
         // RoutedRuntime::flush. Recheck the durable graph in the same transaction as the claim.
-        if self.workflow_blocker_in(tx, session)?.is_some() {
+        if self.workflow_blocker_in(session)?.is_some() {
             return Ok(Planned::Held);
         }
         // the persisted upgrade maintenance holds too: after a restart mid-drain nobody calls hold
@@ -160,7 +160,7 @@ impl NodeRuntime {
     }
 
     /// T1 inside `tx`: claim, attempt, reservation, command.
-    fn plan_in(&self, tx: &Tx, session: &str) -> Result<Planned, StoreError> {
+    fn plan_in(&self, tx: &mut W<'_>, session: &str) -> Result<Planned, StoreError> {
         let p = self.state_in(tx, session)?;
         if p != Planned::Created {
             return Ok(p);
@@ -171,7 +171,7 @@ impl NodeRuntime {
         // a member joined the workspace since the session was bound, say: no new turn there
         self.session_owners_work_in(tx, session)?;
         let turn = uid("t");
-        let msgs = rt::claim_in(tx, session, &turn, now())?;
+        let msgs = node_write::claim_in(tx, session, &turn, now())?;
         if msgs.is_empty() {
             return Ok(Planned::Empty);
         }
@@ -206,13 +206,14 @@ impl NodeRuntime {
 
     /// [`Self::plan_in`] while applying a Node fact: a turn that cannot be planned (a bad
     /// attachment, say) must not keep the fact from being applied. Its messages stay queued.
-    pub(super) fn plan_after_in(&self, tx: &Tx, session: &str) -> Result<Planned, StoreError> {
+    pub(super) fn plan_after_in(
+        &self,
+        tx: &mut W<'_>,
+        session: &str,
+    ) -> Result<Planned, StoreError> {
         let mark = self.staged_mark();
         let mut plan_failed = false;
-        match tx.write(|_| {
-            self.plan_in(tx, session)
-                .inspect_err(|_| plan_failed = true)
-        }) {
+        match tx.scope(|w| self.plan_in(w, session).inspect_err(|_| plan_failed = true)) {
             Err(e) if plan_failed && !matches!(e, StoreError::Storage(_)) => {
                 self.unstage(mark);
                 tracing::error!("plan a turn of {session}: {e}");
@@ -225,7 +226,7 @@ impl NodeRuntime {
     /// A new attempt of `turn` with its own frozen request and its `start_turn` command.
     pub(super) fn attempt_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         session: &str,
         turn: &str,
         ordinal: i64,
@@ -264,7 +265,7 @@ impl NodeRuntime {
             attempt: spec.run.attempt.clone(),
         };
         let (req, digest) = command(&op, spec.clone())?;
-        rt::insert_attempt_in(
+        node_write::insert_attempt_in(
             tx,
             &rt::NewAttempt {
                 id: &attempt,
@@ -278,7 +279,7 @@ impl NodeRuntime {
             },
             now(),
         )?;
-        rt::insert_command_in(
+        node_write::insert_command_in(
             tx,
             &rt::NewCommand {
                 operation: &op,
@@ -292,7 +293,7 @@ impl NodeRuntime {
             self.clock.now(),
         )?;
         let trev = self.turn_revision(turn)?;
-        rt::turn_cas_in(
+        node_write::turn_cas_in(
             tx,
             turn,
             trev,
@@ -305,7 +306,7 @@ impl NodeRuntime {
             now(),
         )?;
         let srev = self.session_revision(session)?;
-        if !rt::session_cas_in(
+        if !node_write::session_cas_in(
             tx,
             session,
             srev,
@@ -373,7 +374,7 @@ impl NodeRuntime {
         stop: bool,
     ) -> Result<bool, StoreError> {
         self.running()?;
-        let r = self.tx(|tx| {
+        let r = self.write(|tx| {
             let row = match attempt {
                 Some(attempt) => self
                     .store
@@ -392,7 +393,7 @@ impl NodeRuntime {
                 }
                 return Ok(self.recover_in(tx, session, None)?.unwrap_or(false));
             };
-            rt::cancel_attempt_in(tx, &attempt, rev, now())?;
+            node_write::cancel_attempt_in(tx, &attempt, rev, now())?;
             let start = self.store.read(|r| dispatch::start_state(r, &target))?;
             match start {
                 // every send of it so far was refused before acceptance (or none was made): it
@@ -436,7 +437,7 @@ impl NodeRuntime {
     /// failed or was refused, a new one (a new intent of the user, never the old one sent again).
     pub(super) fn stop_command_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         attempt: &str,
         target: &str,
         method: &str,
@@ -454,7 +455,7 @@ impl NodeRuntime {
     /// marks one the Hub sent on its own after a Node restart).
     pub(super) fn stop_command_as_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         attempt: &str,
         target: &str,
         method: &str,
@@ -490,7 +491,7 @@ impl NodeRuntime {
                 },
             )?
         };
-        rt::insert_command_in(
+        node_write::insert_command_in(
             tx,
             &rt::NewCommand {
                 operation: &op,
@@ -511,12 +512,12 @@ impl NodeRuntime {
     /// rejected locally, the attempt ends cancelled, its turn with it, and what is queued goes next.
     pub(super) fn cancel_unsent_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         session: &str,
         attempt: &str,
         op: &str,
     ) -> Result<bool, StoreError> {
-        rt::merge_receipt_in(
+        node_write::merge_receipt_in(
             tx,
             op,
             ReceiptState::Rejected,
@@ -542,7 +543,7 @@ impl NodeRuntime {
     /// turn ends with it (never sent again), and what is queued goes next.
     pub(super) fn settle_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         session: &str,
         attempt: &str,
         completion: &Completion,
@@ -553,7 +554,7 @@ impl NodeRuntime {
             let (turn, _) = node_turns::for_attempt(r, attempt)?;
             Ok::<_, StoreError>((row.revision, turn))
         })?;
-        rt::attempt_cas_in(
+        node_write::attempt_cas_in(
             tx,
             attempt,
             rev,
@@ -566,9 +567,9 @@ impl NodeRuntime {
         self.turn_over_in(tx, session, &turn, completion)?;
         // the attempt's statistics row, if it had started, ends with this outcome (with the
         // runtime state); the business side hears it once this transaction committed (staged
-        // until then, see `Self::tx`)
+        // until then, see `Self::write`)
         let at = now();
-        let facts = tx.write(|w| super::apply::take_facts(w, attempt))?;
+        let facts = super::apply::take_facts(tx, attempt)?;
         let measure = super::super::acp_stats::try_node_attempt_finished(
             &self.store,
             session,
@@ -648,8 +649,8 @@ fn queue_in(
     node_sessions::changed_event(w, session)
 }
 
-pub(super) fn startup_blocked_in(tx: &Tx, session: &str) -> Result<bool, StoreError> {
-    tx.write(|w| node_sessions::startup::active(w, session))
+pub(super) fn startup_blocked_in(tx: &mut W<'_>, session: &str) -> Result<bool, StoreError> {
+    node_sessions::startup::active(tx, session)
 }
 
 /// Messages said to a session while its turn runs, handed to that turn through a Steve tool call's
@@ -662,21 +663,21 @@ pub(crate) fn deliver_mid_turn(
     turn: &str,
     attempt: &str,
 ) -> Result<Vec<String>, StoreError> {
-    store.transaction(|tx| {
+    store.write(|tx| {
         let session =
             store.read(|r| turns::session_for_live_attempt(r, node_session, turn, attempt))?;
         let Some(session) = session else {
             return Ok(vec![]);
         };
         let session = session.as_str();
-        let xs = rt::deliver_into_turn_in(tx, session, turn, now())?;
+        let xs = node_write::deliver_into_turn_in(tx, session, turn, now())?;
         for m in &xs {
             let mut ev = message_event(&m.text, &m.via, &[]);
             ev["mid_turn"] = json!(true);
             event_in(tx, session, "user", ev)?;
         }
         if !xs.is_empty() {
-            tx.write(|w| node_sessions::changed_event(w, session))?;
+            node_sessions::changed_event(tx, session)?;
         }
         Ok(xs.into_iter().map(|m| m.text).collect())
     })
@@ -705,8 +706,8 @@ fn message_event(text: &str, via: &str, files: &[FileRef]) -> Value {
 }
 
 /// An attachment for the Node to fetch from the Hub by hash (none when the Hub has no such file).
-fn file_part(tx: &Tx, f: &FileRef) -> Result<Option<Part>, StoreError> {
-    let Some((_, sha, _, mime, size)) = tx.write(|w| steve_store::file_row(w, &f.id))? else {
+fn file_part(tx: &mut W<'_>, f: &FileRef) -> Result<Option<Part>, StoreError> {
+    let Some((_, sha, _, mime, size)) = steve_store::file_row(tx, &f.id)? else {
         return Ok(None);
     };
     Ok(Some(Part::File {
@@ -726,11 +727,10 @@ fn file_part(tx: &Tx, f: &FileRef) -> Result<Option<Part>, StoreError> {
 
 /// The attempt (and its session) of a `start_turn` the user stopped, while it is not over.
 pub(super) fn cancelled_start_in(
-    tx: &Tx,
+    tx: &mut W<'_>,
     op: &str,
 ) -> Result<Option<(String, String)>, StoreError> {
-    Ok(tx
-        .write(|w| node_turns::started_by(w, op))?
+    Ok(node_turns::started_by(tx, op)?
         .filter(|a| a.cancelled && a.state != "finished")
         .map(|a| (a.id, a.session)))
 }
@@ -738,8 +738,8 @@ pub(super) fn cancelled_start_in(
 /// Manual pause gates new logical turns on the local coordinator. Capacity belongs to
 /// runtime::lease_command_in/session_room: counting active_attempt here would also count
 /// never-sent turns, hiding authoritative room waits and imposing a second limit.
-fn local_admission(tx: &Tx) -> Result<bool, StoreError> {
-    tx.write(|w| planning::local_admits_work(w))
+fn local_admission(tx: &mut W<'_>) -> Result<bool, StoreError> {
+    planning::local_admits_work(tx)
 }
 
 #[cfg(test)]

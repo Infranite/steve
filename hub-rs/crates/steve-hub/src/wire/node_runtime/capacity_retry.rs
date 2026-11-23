@@ -57,7 +57,7 @@ impl NodeRuntime {
     /// Expire only commands that provably never left this Hub, before leasing/sending them. If
     /// the advertised recovery lies beyond the ceiling, waiting ends here without an early call.
     /// A Hub restarted after the ceiling likewise raises the card instead of making a late call.
-    pub(super) fn expire_capacity_waits_in(&self, tx: &Tx) -> Result<(), StoreError> {
+    pub(super) fn expire_capacity_waits_in(&self, tx: &mut W<'_>) -> Result<(), StoreError> {
         let rows = self
             .store
             .read(|r| retry::unsent_capacity_waits(r, self.node_id.as_str()))?;
@@ -84,7 +84,7 @@ impl NodeRuntime {
             } else {
                 error
             };
-            rt::merge_receipt_in(
+            node_write::merge_receipt_in(
                 tx,
                 &op,
                 ReceiptState::Rejected,

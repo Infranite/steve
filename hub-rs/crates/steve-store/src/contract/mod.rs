@@ -387,4 +387,8 @@ impl sealed::Q for W<'_> {
 impl Read for W<'_> {}
 
 pub mod node_jobs;
+pub mod node_write;
 pub mod state_batches;
+pub use bot_rows::harness as bot_harness;
+
+pub use decisions::{expire_unapplied, settle_permission};

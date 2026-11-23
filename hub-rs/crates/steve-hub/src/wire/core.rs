@@ -773,13 +773,13 @@ impl RoutedRuntime {
         &self,
         f: impl FnOnce(
             &super::preflight::Preflight,
-            &rusqlite::Connection,
+            &mut steve_store::R<'_>,
         ) -> Result<(), super::preflight::Blocked>,
     ) -> Result<(), String> {
         let Some(p) = &self.preflight else {
             return Ok(());
         };
-        let r = self.store.reader(|c| {
+        let r = self.store.read(|c| {
             Ok::<_, steve_store::StoreError>(steve_i18n::stored(|| f(p, c).map_err(|b| b.reason)))
         });
         match r {
@@ -841,11 +841,11 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         // departed-member fallback. NULL requester is an explicit workspace service principal.
         let principal = self
             .store
-            .reader(|c| super::principal::of_item(c, item_id))?
+            .read(|c| super::principal::of_item(c, item_id))?
             .ok_or_else(|| CoreError::Msg("无法确认协作请求主体。".into()))?;
         let parent = self
             .store
-            .reader(|c| super::principal::of_item(c, &graph.item_id))?;
+            .read(|c| super::principal::of_item(c, &graph.item_id))?;
         if parent.as_ref() != Some(&principal) {
             return Err(CoreError::Msg("工作单元与主事项的请求主体不一致。".into()));
         }

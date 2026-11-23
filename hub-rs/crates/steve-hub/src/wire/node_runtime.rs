@@ -29,12 +29,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use steve_node_api::*;
 use steve_store::runtime::{self as rt, ReceiptState};
 use steve_store::{
-    FileRef, Ingest, Store, StoreError, StreamKey, Tx, W, node_sessions, node_turns,
+    FileRef, Ingest, Store, StoreError, StreamKey, W, node_sessions, node_turns, node_write,
 };
 
 mod apply;
@@ -400,12 +399,15 @@ impl NodeRuntime {
     /// ([`super::node_binding::remote_refusal`]): refused (a conflict saying why, in the current
     /// language) when `workspace`'s work may be someone else's. A Node paused or revoked is left
     /// to what pausing does (its work waits). The local Node takes everything.
-    fn owners_work_in(&self, c: &rusqlite::Connection, workspace: &str) -> Result<(), StoreError> {
+    fn owners_work_in(&self, workspace: &str) -> Result<(), StoreError> {
         use super::node_binding::{RemoteRefusal, remote_refusal};
         if !self.is_remote() {
             return Ok(());
         }
-        match remote_refusal(c, self.node_id.as_str(), workspace)? {
+        match self
+            .store
+            .reader(|c| remote_refusal(c, self.node_id.as_str(), workspace))?
+        {
             None | Some(RemoteRefusal::Inactive) => Ok(()),
             Some(r) => {
                 let why = steve_i18n::t!(
@@ -420,61 +422,36 @@ impl NodeRuntime {
     }
 
     /// Include startup policy at durable admission too: reconciliation bypasses RoutedRuntime.
-    fn workflow_blocker_in(
-        &self,
-        c: &rusqlite::Connection,
-        session: &str,
-    ) -> Result<Option<String>, StoreError> {
-        if let Some(why) = self.disabled_workflow_in(c, session)? {
+    fn workflow_blocker_in(&self, session: &str) -> Result<Option<String>, StoreError> {
+        if let Some(why) = self.disabled_workflow_in(session)? {
             return Ok(Some(why));
         }
-        steve_store::workflow_gate::session_blocker(c, session)
+        self.store
+            .reader(|c| steve_store::workflow_gate::session_blocker(c, session))
     }
 
-    fn disabled_workflow_in(
-        &self,
-        c: &rusqlite::Connection,
-        session: &str,
-    ) -> Result<Option<String>, StoreError> {
-        if !self.domain.dynamic_workflows() {
-            let child: bool = c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sessions s JOIN items i ON i.id=s.item_id WHERE s.id=?
-                  AND (json_extract(i.source,'$[1]')='workflow'
-                    OR EXISTS(SELECT 1 FROM workflow_units WHERE item_id=i.id)
-                    OR EXISTS(SELECT 1 FROM workflow_attempts WHERE item_id=i.id)))",
-                [session],
-                |r| r.get(0),
-            )?;
-            if child {
-                return Ok(Some(steve_i18n::t!("hub.workflow.disabled")));
-            }
-        }
-        Ok(None)
+    fn disabled_workflow_in(&self, session: &str) -> Result<Option<String>, StoreError> {
+        let disabled = !self.domain.dynamic_workflows()
+            && self
+                .store
+                .read(|r| node_sessions::authority::is_workflow_child(r, session))?;
+        Ok(disabled.then(|| steve_i18n::t!("hub.workflow.disabled")))
     }
 
-    /// [`Self::owners_work_in`] for the workspace of `session`.
-    fn session_owners_work_in(
-        &self,
-        c: &rusqlite::Connection,
-        session: &str,
-    ) -> Result<(), StoreError> {
-        if let Some(why) = steve_store::workflow_gate::session_authority_blocker(c, session)? {
+    /// Check the workflow authority and the workspace's Node admission together.
+    fn session_owners_work_in(&self, w: &mut W<'_>, session: &str) -> Result<(), StoreError> {
+        if let Some(why) = self
+            .store
+            .reader(|c| steve_store::workflow_gate::session_authority_blocker(c, session))?
+        {
             return Err(conflict(why));
         }
         if !self.is_remote() {
             return Ok(());
         }
-        let ws: Option<String> = c
-            .query_row(
-                "SELECT workspace_id FROM sessions WHERE id=?",
-                [session],
-                |r| r.get(0),
-            )
-            .optional()?;
-        match ws {
-            Some(w) => self.owners_work_in(c, &w),
-            None => Err(conflict(format!("no session {session}"))),
-        }
+        let s = node_sessions::authority::session(w, session)?
+            .ok_or_else(|| conflict(format!("no session {session}")))?;
+        self.owners_work_in(&s.workspace)
     }
 
     /// Attempts planned from now on get `ms` as their deadline (and their permissions with it).
@@ -651,10 +628,6 @@ impl NodeRuntime {
             self.release_idle();
         }
         more
-    }
-
-    fn tx<T>(&self, f: impl FnOnce(&Tx) -> Result<T, StoreError>) -> Result<T, StoreError> {
-        self.write(|w| f(&w.legacy()))
     }
 
     /// One write ([`Store::write`]); what the coordinator staged in it is told once it committed.
@@ -863,13 +836,13 @@ fn settled_status(stop_reason: &str) -> &'static str {
 }
 
 /// A `system` entry of the session, for the people reading it.
-fn system_in(tx: &Tx, session: &str, text: &str) -> Result<(), StoreError> {
+fn system_in(tx: &mut W<'_>, session: &str, text: &str) -> Result<(), StoreError> {
     event_in(tx, session, "system", json!({ "text": text }))
 }
 
 /// A session entry of the Hub's own (not one of a Node's events), in `tx`'s write.
-fn event_in(tx: &Tx, session: &str, kind: &str, data: Value) -> Result<(), StoreError> {
-    tx.write(|w| w.events().add(session, kind, data, None, now()))?;
+fn event_in(tx: &mut W<'_>, session: &str, kind: &str, data: Value) -> Result<(), StoreError> {
+    tx.events().add(session, kind, data, None, now())?;
     Ok(())
 }
 

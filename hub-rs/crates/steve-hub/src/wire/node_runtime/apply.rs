@@ -89,7 +89,6 @@ impl NodeRuntime {
         ev: &NodeEvent,
         received: i64,
     ) -> Result<(), StoreError> {
-        let tx = &w.legacy();
         // an attempt's end as the Hub reads it (a stream interruption it names otherwise)
         let ended;
         let ev = match (&ev.subject, &ev.body) {
@@ -100,7 +99,7 @@ impl NodeRuntime {
                 EventBody::AttemptEnded { completion },
             ) => {
                 let completion = self.stream_completion_in(
-                    tx,
+                    w,
                     session.as_str(),
                     attempt.as_str(),
                     completion.clone(),
@@ -113,7 +112,7 @@ impl NodeRuntime {
             }
             _ => ev,
         };
-        let mut after: Vec<After> = self.permission_event_in(tx, ev)?.into_iter().collect();
+        let mut after: Vec<After> = self.permission_event_in(w, ev)?.into_iter().collect();
         for a in &after {
             // in memory only, and before the card's commit is seen: the YOLO engine has the
             // tool's input from the first look at the card
@@ -122,9 +121,9 @@ impl NodeRuntime {
                     .permission_arming(&a.session, &a.decision, &a.request);
             }
         }
-        after.extend(self.facts_in(w, tx, ev)?);
+        after.extend(self.facts_in(w, ev)?);
         self.realtime_in(w, ev, received)?;
-        let end = self.apply_in(w, tx, ev)?;
+        let end = self.apply_in(w, ev)?;
         self.activity_in(w, ev, received)?;
         let mut staged = self.staged.lock().unwrap();
         staged.extend(
@@ -241,7 +240,7 @@ impl NodeRuntime {
     /// What an event means for the session row and for statistics, in `w` (before it is applied,
     /// so an attempt's start or end counts once): the context and cost it reports, the model in
     /// force, the tools and permissions of its attempt, and the attempts that begin and end.
-    fn facts_in(&self, w: &mut W<'_>, tx: &Tx, ev: &NodeEvent) -> Result<Vec<After>, StoreError> {
+    fn facts_in(&self, w: &mut W<'_>, ev: &NodeEvent) -> Result<Vec<After>, StoreError> {
         let Some(session) = ev_session(ev) else {
             return Ok(vec![]);
         };
@@ -297,8 +296,8 @@ impl NodeRuntime {
                         phase.name == "ready" && phase.active_attempt.is_none()
                     }) {
                         let rev = self.session_revision(&session)?;
-                        rt::session_cas_in(
-                            tx,
+                        node_write::session_cas_in(
+                            w,
                             &session,
                             rev,
                             &rt::SessionUpdate {
@@ -450,10 +449,10 @@ impl NodeRuntime {
         Ok(())
     }
 
-    /// One event's effects in `tx`. Returns a turn end to tell the business side after the commit.
-    fn apply_in(&self, w: &mut W<'_>, tx: &Tx, ev: &NodeEvent) -> Result<Option<End>, StoreError> {
+    /// One event's effects in `w`. Returns a turn end to tell the business side after the commit.
+    fn apply_in(&self, w: &mut W<'_>, ev: &NodeEvent) -> Result<Option<End>, StoreError> {
         if let Subject::Execution(ExecutionRef::Job { attempt, .. }) = &ev.subject {
-            self.job_event_in(tx, ev, attempt.as_str())?;
+            self.job_event_in(w, ev, attempt.as_str())?;
             return Ok(None);
         }
         let session = match &ev.subject {
@@ -463,7 +462,7 @@ impl NodeRuntime {
         };
         let mut end = None;
         match &ev.body {
-            EventBody::OperationChanged { receipt } => end = self.receipt_in(tx, receipt)?,
+            EventBody::OperationChanged { receipt } => end = self.receipt_in(w, receipt)?,
             EventBody::AttemptStarted => {
                 if let Subject::Execution(x) = &ev.subject
                     && let Some(node_turns::Attempt { revision: rev, state, .. }) = self.attempt_row(x.attempt().as_str())?
@@ -471,8 +470,8 @@ impl NodeRuntime {
                     // unknown until it ends or is settled (Stop abandons it, never cancels)
                     && state == "planned"
                 {
-                    rt::attempt_cas_in(
-                        tx,
+                    node_write::attempt_cas_in(
+                        w,
                         x.attempt().as_str(),
                         rev,
                         "running",
@@ -507,8 +506,8 @@ impl NodeRuntime {
                     completion.stop_reason = steve_node_api::NODE_RESTARTED.into();
                 }
                 let completion = &completion;
-                rt::attempt_cas_in(
-                    tx,
+                node_write::attempt_cas_in(
+                    w,
                     attempt,
                     rev,
                     "finished",
@@ -516,7 +515,7 @@ impl NodeRuntime {
                     Some(&serde_json::to_value(completion).map_err(conflict)?),
                     self.clock.now(),
                 )?;
-                self.close_cards_of_attempt_in(tx, attempt)?;
+                self.close_cards_of_attempt_in(w, attempt)?;
                 let (turn, s) = node_turns::for_attempt(w, attempt)?;
                 // the receipt the Node gives this start_turn from now on (unless the Node's own
                 // final receipt came first: terminal receipts are never rewritten)
@@ -529,7 +528,7 @@ impl NodeRuntime {
                 let terminal = matches!(terminal.as_str(), "finished" | "rejected");
                 if !terminal {
                     self.receipt_in(
-                        tx,
+                        w,
                         &Receipt {
                             operation: idv(op)?,
                             state: Observed::Finished {
@@ -541,7 +540,7 @@ impl NodeRuntime {
                     )?;
                 }
                 self.store_event_in(w, &s, ev)?;
-                end = self.after_attempt_in(tx, &s, &turn, completion)?;
+                end = self.after_attempt_in(w, &s, &turn, completion)?;
                 return Ok(end);
             }
             EventBody::Diagnostic { code, .. } if code == STEVE_TOOLS_MISSING => {
@@ -628,7 +627,7 @@ impl NodeRuntime {
     /// as new attempts of the same turn. Service failures resume safely even after tools ran.
     pub(super) fn after_attempt_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         session: &str,
         turn: &str,
         c: &Completion,
@@ -646,7 +645,7 @@ impl NodeRuntime {
             && ((service && self.stream_retry_allowed_in(session)?)
                 || (!service && c.transient && !c.acted))
             && !cancelled
-            && self.workflow_blocker_in(tx, session)?.is_none()
+            && self.workflow_blocker_in(session)?.is_none()
             && if capacity {
                 capacity_wait.is_some()
             } else {
@@ -667,7 +666,7 @@ impl NodeRuntime {
             let (spec, _) = self.store.read(|r| node_turns::latest_spec(r, turn))?;
             let srev = self.session_revision(session)?;
             // the slot is kept by the turn: the attempt is freed only to be replaced
-            rt::session_cas_in(
+            node_write::session_cas_in(
                 tx,
                 session,
                 srev,
@@ -777,14 +776,14 @@ impl NodeRuntime {
     /// The turn and its dispatch receipts are over; the session is free.
     pub(super) fn turn_over_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         session: &str,
         turn: &str,
         c: &Completion,
     ) -> Result<(), StoreError> {
         let rev = self.turn_revision(turn)?;
         let ordinal = self.store.read(|r| node_turns::retry_ordinal(r, turn))?;
-        rt::turn_cas_in(
+        node_write::turn_cas_in(
             tx,
             turn,
             rev,
@@ -796,7 +795,7 @@ impl NodeRuntime {
             },
             now(),
         )?;
-        rt::dispatch_receipt_in(
+        node_write::dispatch_receipt_in(
             tx,
             turn,
             match c.outcome {
@@ -817,7 +816,7 @@ impl NodeRuntime {
         // the next message opens it again rather than starting a turn on a released session
         let abandoned = self.store.read(|r| dispatch::abandoned_turn(r, turn))?;
         let srev = self.session_revision(session)?;
-        rt::session_cas_in(
+        node_write::session_cas_in(
             tx,
             session,
             srev,

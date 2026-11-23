@@ -118,6 +118,7 @@ pub fn remove_other_node_env_user(store: &Store) -> Result<()> {
     })
 }
 
+pub mod authority;
 pub mod deliveries;
 pub mod node_files;
 pub mod node_planning;

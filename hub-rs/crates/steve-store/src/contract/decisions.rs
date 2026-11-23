@@ -413,3 +413,28 @@ pub(crate) fn open_for_session_or_item(
         decode,
     )
 }
+
+/// Expire a Node permission even when the Hub had recorded an answer that never reached the Node.
+pub fn expire_unapplied(w: &mut W<'_>, id: &str, result: &Value) -> Result<bool> {
+    let n = w.exec(
+        Query::update()
+            .table("decisions")
+            .value("status", "expired")
+            .value("result", result.to_string())
+            .value("resolved", now())
+            .and_where(Expr::col("id").eq(id))
+            .and_where(Expr::col("status").is_in(["open", "resolved"])),
+    )?;
+    if let Some(d) = get(w, id)? {
+        emit(w, &d);
+    }
+    Ok(n > 0)
+}
+
+pub fn settle_permission(w: &mut W<'_>, id: &str, result: &Value, status: &str) -> Result<bool> {
+    let changed = DecisionRows(w).settle(id, result, status, &Value::Null)?;
+    if !changed && let Some(d) = get(w, id)? {
+        emit(w, &d);
+    }
+    Ok(changed)
+}

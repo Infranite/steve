@@ -6,7 +6,7 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 
 use super::{all, to_json};
-use crate::{Queued, Result, StoreError, Tx};
+use crate::{Queued, Result, StoreError};
 
 fn conflict(detail: &str) -> StoreError {
     StoreError::Conflict(detail.into())
@@ -35,7 +35,11 @@ pub fn released_idle(c: &rusqlite::Connection, session: &str) -> Result<bool> {
 }
 
 /// Idempotent insert; a reused session with a different binding is a conflict.
-pub fn bind_session_in(tx: &Tx<'_>, b: &SessionBinding<'_>, now: i64) -> Result<bool> {
+pub fn bind_session_in(
+    tx: &rusqlite::Connection,
+    b: &SessionBinding<'_>,
+    now: i64,
+) -> Result<bool> {
     let workspace = to_json(b.workspace)?;
     let old: Option<(String,String,String,String)> = tx.query_row(
         "SELECT node_id,workspace_ref,node_session_id,config_revision FROM runtime_sessions WHERE session_id=?",
@@ -65,7 +69,7 @@ pub struct SessionUpdate<'a> {
     pub release_pending: bool,
 }
 pub fn session_cas_in(
-    tx: &Tx<'_>,
+    tx: &rusqlite::Connection,
     session: &str,
     revision: i64,
     u: &SessionUpdate<'_>,
@@ -110,7 +114,12 @@ pub fn session_cas_in(
 /// Empty means no queued work. A retry with the same turn reads the same rows; another turn cannot
 /// claim while this session has an unfinished turn (including unknown). Caller inserts attempt and
 /// command in this same transaction. Holds and permission to dispatch are Hub policy, checked by caller.
-pub fn claim_in(tx: &Tx<'_>, session: &str, turn: &str, now: i64) -> Result<Vec<Queued>> {
+pub fn claim_in(
+    tx: &rusqlite::Connection,
+    session: &str,
+    turn: &str,
+    now: i64,
+) -> Result<Vec<Queued>> {
     let existing: Option<String> = tx
         .query_row(
             "SELECT session_id FROM runtime_turns WHERE turn_id=?",
@@ -153,7 +162,7 @@ pub fn claim_in(tx: &Tx<'_>, session: &str, turn: &str, now: i64) -> Result<Vec<
 /// the queue as the turn's own dispatch, already submitted, so they end with it (completed,
 /// interrupted…) and are never sent again as a turn of their own. The caller checks the turn runs.
 pub fn deliver_into_turn_in(
-    tx: &Tx<'_>,
+    tx: &rusqlite::Connection,
     session: &str,
     turn: &str,
     now: i64,
@@ -182,7 +191,7 @@ pub struct NewAttempt<'a> {
     pub spec: &'a Value,
     pub digest: &'a str,
 }
-pub fn insert_attempt_in(tx: &Tx<'_>, a: &NewAttempt<'_>, now: i64) -> Result<bool> {
+pub fn insert_attempt_in(tx: &rusqlite::Connection, a: &NewAttempt<'_>, now: i64) -> Result<bool> {
     let execution = to_json(a.execution)?;
     let spec = to_json(a.spec)?;
     let same: Option<bool> = tx.query_row("SELECT turn_id=? AND ordinal=? AND node_id=? AND operation_id=? AND execution=? AND spec=? AND digest=? FROM runtime_attempts WHERE attempt_id=?",
@@ -217,7 +226,7 @@ fn valid_execution_state(state: &str) -> bool {
 /// Caller supplies its observed revision; stale events cannot rewrite a newer projection. Terminal
 /// projections are immutable. Unknown can only be closed by explicit reconciliation to finished.
 pub fn attempt_cas_in(
-    tx: &Tx<'_>,
+    tx: &rusqlite::Connection,
     id: &str,
     revision: i64,
     state: &str,
@@ -232,7 +241,12 @@ pub fn attempt_cas_in(
         params![state,receipt.map(to_json).transpose()?,completion.map(to_json).transpose()?,now,id,revision,state])?==1)
 }
 /// Persist cancellation before the worker sends it. This never releases the attempt's reservation.
-pub fn cancel_attempt_in(tx: &Tx<'_>, id: &str, revision: i64, now: i64) -> Result<bool> {
+pub fn cancel_attempt_in(
+    tx: &rusqlite::Connection,
+    id: &str,
+    revision: i64,
+    now: i64,
+) -> Result<bool> {
     Ok(tx.execute("UPDATE runtime_attempts SET cancel_requested=1,revision=revision+1,updated=? WHERE attempt_id=? AND revision=? AND state<>'finished'",params![now,id,revision])?==1)
 }
 pub struct TurnUpdate<'a> {
@@ -242,7 +256,7 @@ pub struct TurnUpdate<'a> {
     pub applied: bool,
 }
 pub fn turn_cas_in(
-    tx: &Tx<'_>,
+    tx: &rusqlite::Connection,
     turn: &str,
     revision: i64,
     u: &TurnUpdate<'_>,
@@ -275,7 +289,12 @@ pub fn turn_cas_in(
         params![u.state,u.active_attempt,u.retry_ordinal,u.applied,now,turn,revision,u.state])?==1)
 }
 /// Node receipts are scoped to the claimed logical turn, never all rows of a session.
-pub fn dispatch_receipt_in(tx: &Tx<'_>, turn: &str, state: &str, now: i64) -> Result<usize> {
+pub fn dispatch_receipt_in(
+    tx: &rusqlite::Connection,
+    turn: &str,
+    state: &str,
+    now: i64,
+) -> Result<usize> {
     if ![
         "submitted",
         "completed",
@@ -300,7 +319,7 @@ pub struct NewCommand<'a> {
     pub dependency: Option<&'a str>,
 }
 /// Duplicate operation IDs must carry exactly the same immutable envelope, including method/target.
-pub fn insert_command_in(tx: &Tx<'_>, c: &NewCommand<'_>, now: i64) -> Result<bool> {
+pub fn insert_command_in(tx: &rusqlite::Connection, c: &NewCommand<'_>, now: i64) -> Result<bool> {
     if c.dependency == Some(c.operation) {
         return Err(conflict("self-dependent command"));
     }
@@ -481,7 +500,7 @@ pub fn waiting_commands(
 /// must have a successful final receipt; the caller explicitly sets success via merge_receipt_in.
 /// Only `node`'s commands: one coordinator per Node shares the store with the others.
 pub fn lease_command_in(
-    tx: &Tx<'_>,
+    tx: &rusqlite::Connection,
     node: &str,
     owner: &str,
     now: i64,
@@ -522,7 +541,7 @@ pub fn lease_command_in(
 /// nothing about the earlier send, which may still arrive. It goes back to 0 only while every send
 /// so far was refused.
 pub fn retry_command_in(
-    tx: &Tx<'_>,
+    tx: &rusqlite::Connection,
     lease: &CommandLease,
     now: i64,
     retry_at: i64,
@@ -558,7 +577,7 @@ impl ReceiptState {
 /// Terminal contradictions are conflicts. Late earlier receipts are ignored. The same terminal is
 /// idempotent; a distinct terminal payload is surfaced for reconciliation, never silently overwritten.
 pub fn merge_receipt_in(
-    tx: &Tx<'_>,
+    tx: &rusqlite::Connection,
     operation: &str,
     state: ReceiptState,
     success: bool,
@@ -644,7 +663,11 @@ pub struct NewPermission<'a> {
 }
 
 /// Inserts the request as `waiting`. False: this Node's attempt already has a request of that id.
-pub fn insert_permission_in(tx: &Tx<'_>, p: &NewPermission<'_>, now: i64) -> Result<bool> {
+pub fn insert_permission_in(
+    tx: &rusqlite::Connection,
+    p: &NewPermission<'_>,
+    now: i64,
+) -> Result<bool> {
     Ok(tx.execute(
         "INSERT INTO runtime_permissions(decision_id,node_id,session_id,attempt_id,permission_id,request,expires_at,state,created,updated)
            VALUES (?,?,?,?,?,?,?,'waiting',?,?) ON CONFLICT(node_id,attempt_id,permission_id) DO NOTHING",
@@ -668,7 +691,11 @@ pub struct PermissionRow {
 
 const PERMISSION: &str = "SELECT decision_id,node_id,session_id,attempt_id,permission_id,request,expires_at,state,answer_operation,revision FROM runtime_permissions";
 
-fn permissions(tx: &Tx<'_>, filter: &str, p: impl rusqlite::Params) -> Result<Vec<PermissionRow>> {
+fn permissions(
+    tx: &rusqlite::Connection,
+    filter: &str,
+    p: impl rusqlite::Params,
+) -> Result<Vec<PermissionRow>> {
     let mut st = tx.prepare_cached(&format!("{PERMISSION} {filter}"))?;
     let rows = st
         .query_map(p, |r| {
@@ -714,7 +741,7 @@ fn permissions(tx: &Tx<'_>, filter: &str, p: impl rusqlite::Params) -> Result<Ve
 }
 
 pub fn permission_in(
-    tx: &Tx<'_>,
+    tx: &rusqlite::Connection,
     node: &str,
     attempt: &str,
     permission: &str,
@@ -727,17 +754,23 @@ pub fn permission_in(
     .pop())
 }
 
-pub fn permission_of_decision_in(tx: &Tx<'_>, decision: &str) -> Result<Option<PermissionRow>> {
+pub fn permission_of_decision_in(
+    tx: &rusqlite::Connection,
+    decision: &str,
+) -> Result<Option<PermissionRow>> {
     Ok(permissions(tx, "WHERE decision_id=?", [decision])?.pop())
 }
 
-pub fn permission_of_answer_in(tx: &Tx<'_>, operation: &str) -> Result<Option<PermissionRow>> {
+pub fn permission_of_answer_in(
+    tx: &rusqlite::Connection,
+    operation: &str,
+) -> Result<Option<PermissionRow>> {
     Ok(permissions(tx, "WHERE answer_operation=?", [operation])?.pop())
 }
 
 /// Moves a request to `state` if it is still at `revision`; `answer_operation` is kept when `None`.
 pub fn permission_cas_in(
-    tx: &Tx<'_>,
+    tx: &rusqlite::Connection,
     decision: &str,
     revision: i64,
     state: &str,
@@ -752,7 +785,7 @@ pub fn permission_cas_in(
 
 /// `node`'s waiting requests whose expiry has come, oldest first.
 pub fn due_permissions_in(
-    tx: &Tx<'_>,
+    tx: &rusqlite::Connection,
     node: &str,
     now: i64,
     limit: i64,
@@ -765,7 +798,10 @@ pub fn due_permissions_in(
 }
 
 /// An attempt's requests that are still open (waiting or answering).
-pub fn permissions_of_attempt_in(tx: &Tx<'_>, attempt: &str) -> Result<Vec<PermissionRow>> {
+pub fn permissions_of_attempt_in(
+    tx: &rusqlite::Connection,
+    attempt: &str,
+) -> Result<Vec<PermissionRow>> {
     permissions(
         tx,
         "WHERE attempt_id=? AND state IN ('waiting','answering') ORDER BY created, rowid",

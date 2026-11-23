@@ -94,7 +94,7 @@ fn describe(c: &HarnessChoice, p: &ExecutionPolicy) -> String {
     s
 }
 
-fn system_in(tx: &Tx, session: &str, text: &str) -> Result<(), StoreError> {
+fn system_in(tx: &mut W<'_>, session: &str, text: &str) -> Result<(), StoreError> {
     event_in(tx, session, "system", json!({ "text": text }))?;
     Ok(())
 }
@@ -207,7 +207,7 @@ impl NodeRuntime {
         change: &ConfigChange,
     ) -> Result<Configured, StoreError> {
         self.running()?;
-        let r = self.tx(|tx| {
+        let r = self.write(|tx| {
             let binding = self
                 .store
                 .read(|r| node_sessions::phase(r, session, None))?
@@ -274,7 +274,7 @@ impl NodeRuntime {
 
     /// Writes the `configure_session` command of the desired config and marks the session
     /// `configuring`. False: nothing desired, or the Node's revision of the session is not known.
-    pub(super) fn configure_in(&self, tx: &Tx, session: &str) -> Result<bool, StoreError> {
+    pub(super) fn configure_in(&self, tx: &mut W<'_>, session: &str) -> Result<bool, StoreError> {
         let Some(mut d) = desired_in(&self.store, session)? else {
             return Ok(false);
         };
@@ -304,7 +304,7 @@ impl NodeRuntime {
                 policy: d.policy.clone(),
             },
         )?;
-        rt::insert_command_in(
+        node_write::insert_command_in(
             tx,
             &rt::NewCommand {
                 operation: &op,
@@ -320,7 +320,7 @@ impl NodeRuntime {
         d.expected = None;
         set_desired_in(&self.store, session, Some(&d))?;
         let rev = self.session_revision(session)?;
-        if !rt::session_cas_in(
+        if !node_write::session_cas_in(
             tx,
             session,
             rev,
@@ -340,7 +340,7 @@ impl NodeRuntime {
 
     /// At an idle boundary of a ready session: a desired config goes before any turn. True: the
     /// session is configuring now (or let go to carry a narrowing), no turn may be planned.
-    pub(super) fn boundary_in(&self, tx: &Tx, session: &str) -> Result<bool, StoreError> {
+    pub(super) fn boundary_in(&self, tx: &mut W<'_>, session: &str) -> Result<bool, StoreError> {
         if desired_in(&self.store, session)?.is_none() {
             return Ok(false);
         }
@@ -371,7 +371,7 @@ impl NodeRuntime {
     /// it narrows).
     pub(super) fn config_opened_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         session: &str,
         op: &str,
         success: bool,
@@ -406,7 +406,7 @@ impl NodeRuntime {
     /// nothing; finished applies it or not; unknown keeps the session held, never resent.
     pub(super) fn configure_receipt_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         op: &str,
         state: ReceiptState,
         success: bool,
@@ -417,7 +417,7 @@ impl NodeRuntime {
             ReceiptState::Finished if success => {
                 let sent: ConfigureSession = self.store.read(|r| commands::body(r, op))?;
                 let rev = self.session_revision(&session)?;
-                rt::session_cas_in(
+                node_write::session_cas_in(
                     tx,
                     &session,
                     rev,
@@ -466,7 +466,7 @@ impl NodeRuntime {
     /// revision, ask the Node for its view and send it again ([`Self::refresh_configure_in`]).
     pub(super) fn refused_configure_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         op: &str,
         e: &ApiError,
     ) -> Result<Option<String>, StoreError> {
@@ -488,7 +488,7 @@ impl NodeRuntime {
     /// operation (the refused one was never accepted).
     pub(super) fn refresh_configure_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         session: &str,
         op: &str,
         view: Option<SessionView>,
@@ -504,9 +504,9 @@ impl NodeRuntime {
         {
             return Ok(());
         }
-        let set_phase = |p: &str| -> Result<(), StoreError> {
+        let set_phase = |tx: &mut W<'_>, p: &str| -> Result<(), StoreError> {
             let rev = self.session_revision(session)?;
-            rt::session_cas_in(
+            node_write::session_cas_in(
                 tx,
                 session,
                 rev,
@@ -526,13 +526,13 @@ impl NodeRuntime {
                     set_desired_in(&self.store, session, Some(&d))?;
                 }
                 if !self.configure_in(tx, session)? {
-                    set_phase("ready")?;
+                    set_phase(tx, "ready")?;
                     self.plan_after_in(tx, session)?;
                 }
             }
-            Some(v) if v.phase == SessionPhase::Released => set_phase("released")?,
+            Some(v) if v.phase == SessionPhase::Released => set_phase(tx, "released")?,
             _ => {
-                set_phase("ready")?;
+                set_phase(tx, "ready")?;
                 self.plan_after_in(tx, session)?;
             }
         }
@@ -544,7 +544,7 @@ impl NodeRuntime {
     /// policy). A widening or a model change falls back to the config in force.
     pub(super) fn config_not_applied_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         session: &str,
         node_released: bool,
         detail: &str,
@@ -567,7 +567,7 @@ impl NodeRuntime {
                 &op,
                 SessionId::try_from(session.to_string()).map_err(conflict)?,
             )?;
-            rt::insert_command_in(
+            node_write::insert_command_in(
                 tx,
                 &rt::NewCommand {
                     operation: &op,
@@ -586,7 +586,7 @@ impl NodeRuntime {
             "ready"
         };
         let rev = self.session_revision(session)?;
-        rt::session_cas_in(
+        node_write::session_cas_in(
             tx,
             session,
             rev,
@@ -614,7 +614,7 @@ impl NodeRuntime {
 
     /// At start: a configure refused just before the Hub stopped (its refresh never came).
     pub(super) fn settle_configuring(&self) {
-        let r = self.tx(|tx| {
+        let r = self.write(|tx| {
             let sessions = self
                 .store
                 .read(|r| node_sessions::configuring_on(r, self.node_id.as_str()))?;

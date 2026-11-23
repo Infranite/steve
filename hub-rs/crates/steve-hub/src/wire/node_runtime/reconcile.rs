@@ -74,7 +74,7 @@ impl NodeRuntime {
             .read(|r| sessions::waiting_sessions(r, self.node_id.as_str()))
             .unwrap_or_default();
         for s in sessions {
-            if let Err(e) = self.tx(|tx| self.plan_after_in(tx, &s)) {
+            if let Err(e) = self.write(|tx| self.plan_after_in(tx, &s)) {
                 tracing::error!("plan {s} after reconciling: {e}");
             }
         }
@@ -127,7 +127,7 @@ impl NodeRuntime {
             .collect();
         let mut ends: Vec<End> = vec![];
         let changed = self
-            .tx(|tx| {
+            .write(|tx| {
                 let mut changed = 0;
                 self.reconcile_commands_in(tx, &entries, &mut ends, &mut changed)?;
                 self.reconcile_sessions_in(tx, &views, &mut changed)?;
@@ -147,7 +147,7 @@ impl NodeRuntime {
 
     fn reconcile_commands_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         entries: &HashMap<String, SnapshotEntry>,
         ends: &mut Vec<End>,
         changed: &mut usize,
@@ -197,7 +197,7 @@ impl NodeRuntime {
 
     fn reconcile_sessions_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         views: &[(String, Option<SessionView>)],
         changed: &mut usize,
     ) -> Result<(), StoreError> {
@@ -212,7 +212,7 @@ impl NodeRuntime {
                     .is_some_and(|(p, a)| p == "ready" && a.is_none())
             {
                 let rev = self.session_revision(s)?;
-                rt::session_cas_in(
+                node_write::session_cas_in(
                     tx,
                     s,
                     rev,
@@ -231,7 +231,7 @@ impl NodeRuntime {
 
     fn reconcile_permissions_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         waiting: &HashSet<String>,
         changed: &mut usize,
     ) -> Result<(), StoreError> {
@@ -244,12 +244,12 @@ impl NodeRuntime {
                 continue;
             }
             // a card with its row closes through it (an answer on its way was never applied)
-            if let Some(row) = rt::permission_of_decision_in(tx, &d)? {
+            if let Some(row) = node_write::permission_of_decision_in(tx, &d)? {
                 if matches!(row.state.as_str(), "waiting" | "answering") {
                     self.close_in(tx, &row, "Node 已不再等待这个授权")?;
                     *changed += 1;
                 }
-            } else if steve_store::decision_resolve_in(
+            } else if steve_store::settle_permission(
                 tx,
                 &d,
                 &json!({"superseded": "Node 已不再等待这个授权"}),
@@ -263,7 +263,7 @@ impl NodeRuntime {
 
     fn hold_stranger_work_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         entries: &HashMap<String, SnapshotEntry>,
         changed: &mut usize,
     ) -> Result<HashSet<String>, StoreError> {

@@ -7,7 +7,6 @@ use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::header;
 use axum::response::IntoResponse;
-use rusqlite::OptionalExtension;
 use serde_json::{Map, Value, json};
 
 use super::{
@@ -1643,17 +1642,9 @@ pub async fn device_patch(
         .map(|m| m.store.clone())
         .ok_or_else(|| ApiError::Json(503, "device_configuration_unavailable".into()))?;
     super::blocking(move || {
-        store.transaction(|tx| {
-            // BEGIN IMMEDIATE precedes this read: a Ctx captured before a competing
-            // revocation cannot retain permission while waiting for the SQLite writer.
-            let owner = tx
-                .query_row("SELECT role FROM users WHERE id=?", [&c.me], |r| {
-                    r.get::<_, String>(0)
-                })
-                .optional()
-                .map_err(steve_store::StoreError::from)?
-                .as_deref()
-                == Some("owner");
+        store.write(|w| {
+            // Check current ownership after taking the writer lock.
+            let owner = steve_store::UserRows(w).role(&c.me)?.as_deref() == Some("owner");
             if !owner {
                 return Err(ApiError::Json(403, "device_owner_required".into()));
             }
@@ -1676,7 +1667,7 @@ pub async fn device_patch(
                 .as_object()
                 .cloned()
                 .ok_or_else(|| ApiError::internal("invalid device"))?;
-            let room = steve_store::runtime::session_room(tx, steve_store::runtime::HUB_NODE)?;
+            let room = steve_store::node_write::session_room(w, steve_store::runtime::HUB_NODE)?;
             d.insert("running".into(), json!(room.running));
             d.insert("waiting".into(), json!(room.waiting));
             ok(json!({"device": device_facts(vec![d], owner, true, connected).remove(0)}))

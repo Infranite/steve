@@ -282,7 +282,7 @@ fn json_rpc(id: &Value, result: Value) -> Response {
 /// Revoked members retain only workspace service access, including recorded Node sessions.
 fn session_cx(store: &Store, s: &steve_store::Session) -> Result<mcp::McpCx, String> {
     let user = store
-        .reader(|c| {
+        .read(|c| {
             let (ws, principal) = super::principal::of_session(c, &s.id)?
                 .filter(|(ws, _)| ws == &s.workspace_id)
                 .ok_or_else(|| {
@@ -753,7 +753,7 @@ mod session_identity_tests {
             // Node sessions pin identity; a later requester edit cannot lend a different user's access.
             e.store().transaction(|tx| {
                 tx.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES (?,'node','{}',?,'r','ready',1)", rusqlite::params![session.id, session.id])?;
-                super::super::principal::record_in(tx, &session.id, None)?;
+                tx.write(|w| super::super::principal::record_in(w, &session.id, None))?;
                 Ok::<_, steve_store::StoreError>(())
             }).unwrap();
             let cx = session_cx(e.store(), &session).unwrap();
