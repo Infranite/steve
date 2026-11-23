@@ -160,3 +160,49 @@ impl VaultKeys<'_, W<'_>> {
         Ok(())
     }
 }
+
+/// One non-retired key and a wrapped item key to validate against it at upgrade startup.
+pub struct UpgradeProbe {
+    pub workspace: String,
+    pub version: i64,
+    pub keychain_account: String,
+    pub fingerprint: String,
+    pub sample: Option<WrappedItemKey>,
+}
+
+pub fn upgrade_probes(r: &mut impl Read) -> Result<Vec<UpgradeProbe>> {
+    let mut keys = r.all(
+        Query::select()
+            .columns(["workspace_id", "version", "keychain_account", "fingerprint"])
+            .from("vault_keys")
+            .and_where(Expr::col("status").ne(RETIRED)),
+        |row| {
+            Ok(UpgradeProbe {
+                workspace: row.get(0)?,
+                version: row.get(1)?,
+                keychain_account: row.get(2)?,
+                fingerprint: row.get(3)?,
+                sample: None,
+            })
+        },
+    )?;
+    for key in &mut keys {
+        key.sample = r.one(
+            Query::select()
+                .columns(["id", "dek_wrapped"])
+                .from("vault_items")
+                .and_where(Expr::col("workspace_id").eq(key.workspace.as_str()))
+                .and_where(Expr::col("kek_version").eq(key.version))
+                .and_where(Expr::col("dek_wrapped").is_not_null())
+                .limit(1),
+            |row| {
+                Ok(WrappedItemKey {
+                    item_id: row.get(0)?,
+                    dek_wrapped: row.get(1)?,
+                    kek_version: key.version,
+                })
+            },
+        )?;
+    }
+    Ok(keys)
+}

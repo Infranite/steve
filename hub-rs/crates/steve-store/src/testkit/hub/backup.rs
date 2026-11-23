@@ -41,3 +41,17 @@ pub fn kept(r: &mut R<'_>) -> Result<i64> {
     )?
     .unwrap_or(0))
 }
+
+/// A bare database standing in for the previous release in a supervisor fixture.
+pub fn seed_evidence(path: &std::path::Path, evidence: &str) -> Result<()> {
+    let c = rusqlite::Connection::open(path)?;
+    c.execute_batch("CREATE TABLE upgrade_evidence(value TEXT);")?;
+    c.execute("INSERT INTO upgrade_evidence VALUES (?)", [evidence])?;
+    Ok(())
+}
+
+pub fn evidence(path: &std::path::Path) -> Result<String> {
+    let c =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    Ok(c.query_row("SELECT value FROM upgrade_evidence", [], |r| r.get(0))?)
+}
