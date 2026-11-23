@@ -109,6 +109,7 @@ fn http_errors_keep_the_safe_message_and_all_retry_shapes() {
             reason: None,
             params: Params::default(),
             safe_detail: "safe detail".into(),
+            gateway: None,
         };
         let body = error.to_http();
         let expected = format!(

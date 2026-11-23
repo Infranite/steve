@@ -672,7 +672,7 @@ async fn the_shared_gateway_maps_tiers_and_reports_model_and_cost() {
         .run(steve_modules::Tier::Fast, "问", Duration::from_secs(1))
         .await
         .unwrap_err();
-    assert_eq!(e, "no fast model");
+    assert_eq!(e, "no fast model".into());
 }
 
 struct Boom {

@@ -16,6 +16,7 @@ local_transcript = true
 primary = true
 managed_by_default = true
 [adapters.properties]
+read_attached = true
 self_read_only = false
 nested_sandbox = true
 state = {"env" = "CLAUDE_CONFIG_DIR", "default" = ".claude", "import" = ["settings.json"], "context" = ["CLAUDE.md", "skills/*", "agents", "commands", "output-styles"], "login" = {"files" = [".credentials.json"], "renew" = [".storage-write.lock", ".credentials.json.tmp.*"], "store_env" = "CLAUDE_SECURESTORAGE_CONFIG_DIR", "settings" = "settings.json", "entries" = ["apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "forceLoginMethod", "forceLoginOrgUUID", "env.ANTHROPIC_*", "env.CLAUDE_CODE_USE_*", "env.AWS_*", "env.CLOUD_ML_REGION", "env.VERTEX_REGION_*"]}, "home_files" = [".claude.json"]}
@@ -64,6 +65,7 @@ local_transcript = true
 primary = false
 managed_by_default = true
 [adapters.properties]
+read_attached = true
 self_read_only = true
 nested_sandbox = false
 state = {"env" = "CODEX_HOME", "default" = ".codex", "import" = ["config.toml"], "context" = ["AGENTS.md", "AGENTS.override.md", "skills/*", "prompts"], "login" = {"files" = ["auth.json"], "renew" = ["auth.json.lock", ".auth-*"], "settings" = "config.toml", "entries" = ["model_provider", "model_providers", "forced_login_method", "forced_chatgpt_workspace_id", "chatgpt_base_url", "openai_base_url"]}}

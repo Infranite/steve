@@ -274,6 +274,7 @@ impl From<RpcError> for steve_types::Error {
             reason: None,
             params: Params::default(),
             safe_detail: error.message,
+            gateway: None,
         }
     }
 }

@@ -1,9 +1,7 @@
 //! Steve's think calls as streaming ACP jobs on the local Node.
 //!
-//! The Hub keeps everything that is policy: core's [`steve_core::Fallback`] chooses the models
-//! (设置 · 模型), tries them in turn, counts attempts and failures and books the statistics rows.
-//! [`NodePrint`] is its [`OneModel`]: each try of one model is one job with one attempt, run by
-//! the Node with exactly that model and never retried there.
+//! The gateway chooses one model; [`NodePrint`] checks capabilities on the selected Node before
+//! creating its one job. Transport may reconcile the same operation, never send a second prompt.
 //!
 //! - **Start**: the job, its attempt and the `start_job` command commit in one transaction; the
 //!   coordinator's send worker sends it and merges the receipt like any other command.
@@ -16,10 +14,9 @@
 //!   abandoned when the Node cannot tell their end) once the Hub has reconciled, and never run again.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use steve_core::gateway::{
-    OnText, OneCall, OneModel, OneShotError, ThinkTools, Tried, split_static,
+    GatewayError, OnText, OneCall, OneModel, OneShotError, ThinkTools, Tried, split_static,
 };
 use steve_store::jobs::{self, AttemptState};
 use steve_store::node_jobs as job_commands;
@@ -34,6 +31,7 @@ pub enum News {
     Text(String),
     /// A tool call's whole current view (research jobs).
     Tool(ToolView),
+    GatewayProgress(GatewayPhase),
     Usage(UsageReport),
     End(Completion),
 }
@@ -101,7 +99,8 @@ pub(super) struct Think {
     harness: String,
     model: String,
     effort: Option<String>,
-    timeout: Duration,
+    deadline: tokio::time::Instant,
+    wire_deadline: Timestamp,
 }
 
 /// The completion the Hub writes for an attempt it ends on its own word.
@@ -130,20 +129,13 @@ impl NodeRuntime {
     ) -> Result<(), StoreError> {
         self.running()?;
         let files = self.think_files(t)?;
-        // the attachments' workspace, else the call's (they read nothing of another)
-        let workspace = files
-            .first()
-            .map(|(row, _)| row.workspace_id.clone())
-            .unwrap_or_else(|| match t.workspace.as_str() {
-                "" => steve_store::WS.to_string(),
-                w => w.to_string(),
-            });
+        // The authorized call owns the workspace; an attachment never selects it.
+        let workspace = t.workspace.clone();
         self.owners_work_in(&workspace)?;
         let prompt = self.think_prompt(data_dir, t, &workspace, &files)?;
         let job = uid("job");
         let attempt = t.attempt.clone();
         let op = format!("op_{attempt}");
-        let deadline = now() + i64::try_from(t.timeout.as_millis()).unwrap_or(i64::MAX / 2);
         let spec = JobSpec {
             job: idv(job.clone())?,
             run: RunSpec {
@@ -167,8 +159,8 @@ impl NodeRuntime {
                     tools: idv("hub")?,
                 },
                 limits: Limits {
-                    deadline: Timestamp(deadline),
-                    offline_until: Timestamp(deadline),
+                    deadline: t.wire_deadline,
+                    offline_until: t.wire_deadline,
                     max_output_bytes: 256 << 20,
                     max_tokens: None,
                     max_cost: None,
@@ -190,6 +182,11 @@ impl NodeRuntime {
         };
         let (req, digest) = command(&op, spec.clone())?;
         self.write(|tx| {
+            if tokio::time::Instant::now() >= t.deadline || !self.jobs.has(&attempt) {
+                return Err(conflict(
+                    "think job's caller is gone or its deadline elapsed",
+                ));
+            }
             job_commands::create_job_in(
                 tx,
                 &jobs::NewJob {
@@ -347,6 +344,13 @@ impl NodeRuntime {
     /// Called only after the transaction that applied it committed, in its original event order.
     pub(super) fn notify_job(&self, attempt: &str, body: &EventBody) {
         match body {
+            EventBody::GatewayProgress { phase } => {
+                if *phase == GatewayPhase::Submitted {
+                    metrics::counter!("steve_gateway_requests_total").increment(1);
+                }
+                self.jobs
+                    .tell(attempt, |_| Some(News::GatewayProgress(*phase)));
+            }
             EventBody::MessageStarted { message, .. } => self.jobs.tell(attempt, |w| {
                 w.message = Some(message.clone());
                 w.text.clear();
@@ -520,6 +524,14 @@ impl NodeRuntime {
                     job_commands::attempt_in(tx, attempt)?.is_some_and(|a| a.cancel_requested);
                 let c = if cancelled {
                     ended(Outcome::Cancelled, "cancelled", None)
+                } else if e.code == Code::Stale {
+                    ended(
+                        Outcome::TimedOut,
+                        "timeout",
+                        Some(e.clone().for_gateway(GatewayFailure::Timeout {
+                            phase: TimeoutPhase::Queue,
+                        })),
+                    )
                 } else {
                     ended(Outcome::Failed, "refused", Some(e.clone()))
                 };
@@ -614,6 +626,35 @@ impl NodeRuntime {
         }
     }
 
+    fn stop_timed_out_think(
+        &self,
+        attempt: &str,
+        phase: Option<GatewayPhase>,
+    ) -> Result<TimeoutPhase, StoreError> {
+        let unsent = self.write(|tx| {
+            let unsent = match job_commands::attempt_in(tx, attempt)? {
+                // A start blocked before its transaction cannot commit after the deadline.
+                None => true,
+                Some(a) if a.state == AttemptState::Finished => false,
+                Some(_) => {
+                    let start = self.store.read(|r| job_commands::start(r, attempt))?;
+                    start.state == "pending" && !start.maybe_sent
+                }
+            };
+            self.stop_job_in(tx, attempt)?;
+            Ok(unsent)
+        });
+        self.wake_send.notify_one();
+        Ok(GatewayPhase::timeout(
+            phase,
+            if unsent? {
+                TimeoutPhase::Queue
+            } else {
+                TimeoutPhase::Unknown
+            },
+        ))
+    }
+
     /// A start that is ended before the Node ran it: rejected here, the attempt cancelled.
     fn job_unsent_in(&self, tx: &mut W<'_>, attempt: &str, op: &str) -> Result<(), StoreError> {
         node_write::merge_receipt_in(
@@ -636,8 +677,7 @@ impl NodeRuntime {
     }
 }
 
-/// Core's [`OneModel`] on the local Node: one think job per try of one model. Core's fallback
-/// around it keeps choosing, counting and booking exactly as it does in process.
+/// Core's [`OneModel`] on the selected Node: one think job per preflighted plan.
 pub struct NodePrint {
     pub runtime: Arc<NodeRuntime>,
     /// Where job-input images are kept (with the attachments, under their retention).
@@ -673,45 +713,35 @@ impl Drop for Waiting {
     }
 }
 
-/// A Node's completion of a failed call as the one-shot error it was (`stop_reason` and the
-/// adapter's words).
-fn call_error(c: &Completion, timeout: Duration) -> OneShotError {
-    if c.error.as_ref().and_then(NodeStop::of) == Some(NodeStop::OutputLimit) {
-        return OneShotError::OutputLimit;
-    }
-    if c.error
-        .as_ref()
-        .and_then(|e| e.reason.as_ref())
-        .is_some_and(|r| r.is(NodeReason::ToolRefused))
-    {
-        return OneShotError::ToolRefused;
-    }
+/// Preserve a Node's typed failure. Older journal entries without phase evidence stay unknown.
+fn call_error(c: &Completion, phase: Option<GatewayPhase>) -> OneShotError {
     let detail = c.error.as_ref().map(super::said).unwrap_or_default();
-    match (c.outcome, c.stop_reason.as_str()) {
-        (Outcome::TimedOut, _) | (_, "timeout") => OneShotError::Timeout(timeout),
-        (_, "error") => OneShotError::Harness {
-            text: detail,
-            code: None,
-            transient: c.transient,
+    match c.error.as_ref().and_then(|e| e.gateway) {
+        Some(GatewayFailure::Timeout { phase }) => return OneShotError::Timeout(phase),
+        Some(GatewayFailure::NeedsTools) => return OneShotError::ToolRefused,
+        Some(GatewayFailure::Startup) => return OneShotError::Failed(detail),
+        Some(GatewayFailure::OutputLimit) => return OneShotError::OutputLimit,
+        None => {}
+    }
+    if c.outcome == Outcome::TimedOut {
+        return OneShotError::Timeout(GatewayPhase::timeout(phase, TimeoutPhase::Unknown));
+    }
+    OneShotError::Harness {
+        text: if detail.is_empty() {
+            format!("the harness stopped: {}", c.stop_reason)
+        } else {
+            detail
         },
-        // the adapter ended the turn otherwise (`max_tokens`, `refusal`, `cancelled`)
-        (_, why) => OneShotError::Harness {
-            text: if detail.is_empty() {
-                format!("the harness stopped: {why}")
-            } else {
-                detail
-            },
-            code: None,
-            transient: false,
-        },
+        code: None,
+        transient: c.transient,
     }
 }
 
 /// Materialize the completed think answer and dollar total, or preserve its typed failure.
 fn think_reply(
     end: &Completion,
+    phase: Option<GatewayPhase>,
     usage: &[UsageReport],
-    timeout: Duration,
 ) -> Result<(String, Option<f64>), OneShotError> {
     if end.outcome == Outcome::Succeeded {
         let text = end
@@ -730,12 +760,53 @@ fn think_reply(
             .collect();
         Ok((text, (!costs.is_empty()).then(|| costs.iter().sum::<f64>())))
     } else {
-        Err(call_error(end, timeout))
+        Err(call_error(end, phase))
     }
 }
 
 #[async_trait]
 impl OneModel for NodePrint {
+    async fn preflight(&self, call: &OneCall<'_>) -> steve_core::Result<()> {
+        let ThinkTools::Read(required) = call.spec.required_tools else {
+            return Ok(());
+        };
+        let workspace = think_workspace();
+        self.runtime
+            .owners_work_in(&workspace)
+            .map_err(|_| GatewayError::ToolDenied)?;
+        for file in required {
+            let authorized = self
+                .runtime
+                .store
+                .files()
+                .get(&file.file_id)?
+                .is_some_and(|row| row.workspace_id == workspace && row.size >= 0);
+            if !authorized {
+                return Err(GatewayError::ToolDenied.into());
+            }
+        }
+        let supports = self
+            .runtime
+            .node
+            .probe(false)
+            .await
+            .map_err(|_| GatewayError::MissingCapability)?
+            .harnesses
+            .iter()
+            .any(|h| {
+                h.name == call.harness
+                    && h.jobs
+                    && h.read_attached
+                    && h.adapter
+                        .as_ref()
+                        .is_none_or(|a| a.status == AdapterStatus::Ready)
+            });
+        if !supports {
+            return Err(GatewayError::MissingCapability.into());
+        }
+        Ok(())
+    }
+
     async fn once(
         &self,
         call: &OneCall<'_>,
@@ -766,60 +837,89 @@ impl OneModel for NodePrint {
         };
         let t = Think {
             attempt,
-            purpose: tag.purpose,
-            workspace: if tag.workspace_id.is_empty() {
-                account.call.workspace.clone()
-            } else {
-                tag.workspace_id
-            },
+            purpose: call.spec.purpose,
+            workspace: think_workspace(),
             account,
             standalone,
             head: head.map(String::from),
             message: message.to_string(),
-            tools: call.tools.clone(),
+            tools: call.spec.required_tools.clone(),
             images: call.images.to_vec(),
             harness: call.harness.to_string(),
             model: model.to_string(),
             effort: effort.map(String::from),
-            timeout: call.timeout,
+            deadline: call.spec.deadline,
+            wire_deadline: Timestamp(
+                now().saturating_add(
+                    i64::try_from(
+                        call.spec
+                            .deadline
+                            .saturating_duration_since(tokio::time::Instant::now())
+                            .as_millis(),
+                    )
+                    .unwrap_or(i64::MAX),
+                ),
+            ),
         };
         // a few SQLite writes, and image files when there are any
         let (rt, dir) = (self.runtime.clone(), self.data_dir.clone());
-        match tokio::task::spawn_blocking(move || rt.start_think(&dir, &t)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
+        let start = tokio::task::spawn_blocking(move || rt.start_think(&dir, &t));
+        match tokio::time::timeout_at(call.spec.deadline, start).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(e))) if tokio::time::Instant::now() < call.spec.deadline => {
                 waiting.armed = false;
                 return fail(format!("Node 没能接下这次判断：{e}"));
             }
-            Err(e) => return fail(format!("Node 没能接下这次判断：{e}")),
+            Ok(Err(e)) => return fail(format!("Node 没能接下这次判断：{e}")),
+            // The blocking task can still wake up, but start_think checks the expired deadline
+            // before committing; if it did commit just before expiry, stop/reconcile as below.
+            _ => {}
         }
         let mut usage: Vec<UsageReport> = vec![];
         let mut shown: Option<String> = None;
-        // the Hub's own timer, as the in-process run's: the Node's deadline is the same moment
-        let timer = tokio::time::sleep(call.timeout);
-        tokio::pin!(timer);
+        let mut phase = None;
         let end = loop {
-            tokio::select! {
-                n = news.recv() => match n {
-                    Some(News::Text(t)) => {
-                        if shown.as_deref() != Some(t.as_str()) {
-                            if let Some(f) = on_text {
-                                f(&t);
-                            }
-                            shown = Some(t);
+            match next_think_news(&mut news, call.spec.deadline).await {
+                Ok(Some(News::GatewayProgress(next))) => phase = phase.max(Some(next)),
+                Ok(Some(News::Text(t))) => {
+                    if shown.as_deref() != Some(t.as_str()) {
+                        if let Some(f) = on_text {
+                            f(&t);
+                        }
+                        shown = Some(t);
+                    }
+                }
+                Ok(Some(News::Usage(r))) => usage.push(r),
+                Ok(Some(News::Tool(_))) => {}
+                Ok(Some(News::End(c))) => break c,
+                Ok(None) => {
+                    return Tried::of(
+                        Err(OneShotError::Failed("Node job event waiter closed".into())),
+                        normalized_usage(usage, model),
+                    );
+                }
+                Err(_) => {
+                    let (rt, attempt) = (waiting.runtime.clone(), waiting.attempt.clone());
+                    let phase = match tokio::task::spawn_blocking(move || {
+                        rt.stop_timed_out_think(&attempt, phase)
+                    })
+                    .await
+                    {
+                        Ok(Ok(phase)) => {
+                            waiting.armed = false;
+                            phase
+                        }
+                        _ => GatewayPhase::timeout(phase, TimeoutPhase::Unknown),
+                    };
+                    // Reports are already durable before we see them. Pick up any already queued
+                    // reports here as well; later Final reports still settle through the ledger.
+                    while let Ok(n) = news.try_recv() {
+                        if let News::Usage(r) = n {
+                            usage.push(r);
                         }
                     }
-                    Some(News::Usage(r)) => {
-                        usage.push(r);
-                    }
-                    Some(News::Tool(_)) => {}
-                    Some(News::End(c)) => break c,
-                    None => return fail("Node 没有回报这次判断的结果".into()),
-                },
-                _ = &mut timer => {
-                    // dropping `waiting` cancels the job on the Node
                     return Tried::of(
-                        Err(OneShotError::Timeout(call.timeout)),
+                        Err(OneShotError::Timeout(phase)),
                         normalized_usage(usage, model),
                     );
                 }
@@ -830,12 +930,28 @@ impl OneModel for NodePrint {
         // what the harness named itself, before a report without a name is booked under `model`
         let reported = steve_core::gateway::reported_model(&usage);
         let usage = normalized_usage(usage, model);
-        let reply = think_reply(&end, &usage, call.timeout);
+        let reply = think_reply(&end, phase, &usage);
         Tried {
             reported_model: reported,
             ..Tried::of(reply, usage)
         }
     }
+}
+
+fn think_workspace() -> String {
+    let workspace = steve_core::stats::current_tag().workspace_id;
+    if workspace.is_empty() {
+        steve_store::WS.to_string()
+    } else {
+        workspace
+    }
+}
+
+async fn next_think_news(
+    news: &mut mpsc::UnboundedReceiver<News>,
+    deadline: tokio::time::Instant,
+) -> Result<Option<News>, tokio::time::error::Elapsed> {
+    tokio::time::timeout_at(deadline, news.recv()).await
 }
 
 #[cfg(test)]
@@ -1207,19 +1323,25 @@ mod tests {
         let refused = ended(
             Outcome::Failed,
             "error",
-            Some(NodeReason::tool_refused(steve_acp::TOOL_REFUSED)),
+            Some(
+                NodeReason::tool_refused("any localized detail")
+                    .for_gateway(GatewayFailure::NeedsTools),
+            ),
         );
         assert!(matches!(
-            call_error(&refused, Duration::from_secs(1)),
+            call_error(&refused, None),
             OneShotError::ToolRefused
         ));
         let other = ended(
             Outcome::Failed,
             "error",
-            Some(Error::new(Code::Internal, "the provider said no")),
+            Some(Error::new(
+                Code::Internal,
+                "read-only policy refused a tool",
+            )),
         );
         assert!(matches!(
-            call_error(&other, Duration::from_secs(1)),
+            call_error(&other, None),
             OneShotError::Harness { .. }
         ));
     }

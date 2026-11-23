@@ -234,7 +234,7 @@ pub trait ConvHost: Send + Sync {
         ws: &str,
         space: &str,
         origin: &str,
-    ) -> std::result::Result<String, String>;
+    ) -> std::result::Result<String, steve_modules::gateway::GatewayError>;
     /// What research in this conversation must know about its audience.
     /// What research answering message `origin` in `space` is told about where it answers (the
     /// conversation card and the rules of the place).
@@ -762,15 +762,12 @@ impl Core {
         }
         let texts: Vec<String> = picked.iter().map(|(_, t, f)| routed_text(t, f)).collect();
         let r0 = now();
-        let Some(rs) = crate::stats::tagged(
+        let rs = crate::stats::tagged(
             "route",
             ws,
             gateway::route_many(self.gw(), &c, &texts, &history),
         )
-        .await
-        else {
-            return;
-        };
+        .await;
         let ms = (now() - r0) / picked.len() as i64;
         let pending = !c.pending.is_empty();
         for ((mid, text, _), route) in picked.into_iter().zip(rs) {

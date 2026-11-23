@@ -2264,6 +2264,7 @@ impl Discovery for FakeNode {
                     cancel: true,
                     permissions: true,
                     images: true,
+                    read_attached: false,
                     enforcement: vec![],
                     adapter: None,
                     setup: None,

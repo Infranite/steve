@@ -10,7 +10,7 @@ use steve_runtime::testkit::{eventually, eventually_sync};
 use steve_store::testkit::hub::node_checks;
 
 use serde_json::{Value, json};
-use steve_core::Fallback;
+use steve_core::SingleModelGateway;
 use steve_core::gateway::{ModelGateway, ThinkTools, Tier};
 use steve_core::stats::{RecordingGateway, tagged};
 use steve_hub::wire::node_files::NodeFiles;
@@ -157,7 +157,7 @@ impl Local {
     /// Steve's gateway over the local Node.
     fn node(&self, models: &[&str]) -> RecordingGateway {
         RecordingGateway::new(
-            Arc::new(Fallback {
+            Arc::new(SingleModelGateway {
                 one: NodePrint {
                     runtime: self.rt.clone(),
                     data_dir: self.root.join("data"),
@@ -367,7 +367,7 @@ async fn review_job_timeout_late_final() {
     rt.start();
     eventually_sync("ready", || rt.is_reconciled()).await;
     let gw = RecordingGateway::new(
-        Arc::new(Fallback {
+        Arc::new(SingleModelGateway {
             one: NodePrint {
                 runtime: rt.clone(),
                 data_dir: dir.path().into(),
@@ -557,7 +557,7 @@ async fn fake_gateway(
     rt.start();
     eventually_sync("ready", || rt.is_reconciled()).await;
     let gw = RecordingGateway::new(
-        Arc::new(Fallback {
+        Arc::new(SingleModelGateway {
             one: NodePrint {
                 runtime: rt.clone(),
                 data_dir: dir.into(),
@@ -662,7 +662,7 @@ async fn dropped_waiter_keeps_late_final_on_the_same_failed_bill() {
     rt.stop("done");
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn real_node_gateway_same_and_cross_model_retries_share_call_but_not_attempt() {
+async fn failed_gateway_job_keeps_one_billed_attempt_without_reissuing() {
     for second in ["first", "second"] {
         let dir = tempfile::tempdir().unwrap();
         let store = open_store(dir.path());
@@ -689,24 +689,16 @@ async fn real_node_gateway_same_and_cross_model_retries_share_call_but_not_attem
         failed.stop_reason = "error".into();
         failed.error = Some(Error::new(Code::Internal, "503 busy"));
         node.finish(&first, failed).await.unwrap();
-        eventually_sync("retry job accepted", || {
-            node.log().iter().filter(|(m, _)| *m == "start_job").count() == 2
-        })
-        .await;
-        let retry = exec(&store);
-        assert_ne!(first.attempt(), retry.attempt());
-        node.emit(
-            Subject::Execution(retry.clone()),
-            EventBody::Usage {
-                report: fake_report("final", second, 30, Measurement::Final),
-            },
-        )
-        .await
-        .unwrap();
-        node.finish(&retry, build::done()).await.unwrap();
-        let result = task.await.unwrap();
-        assert!(result.result.is_ok());
-        assert_eq!(result.attempts, 2);
+        let result = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the failed plan settles without waiting for another job")
+            .unwrap();
+        assert!(result.result.is_err());
+        assert_eq!(result.attempts, 1);
+        assert_eq!(
+            node.log().iter().filter(|(m, _)| *m == "start_job").count(),
+            1
+        );
         assert_eq!(result.failures.len(), 1);
         assert_eq!(
             node_checks::gateway_attempts_distinct_call_id_count(&store).unwrap(),
@@ -714,18 +706,16 @@ async fn real_node_gateway_same_and_cross_model_retries_share_call_but_not_attem
         );
         assert_eq!(
             node_checks::gateway_attempts_count_with_previous_attempt(&store).unwrap(),
-            1
+            0
         );
         assert_eq!(node_checks::first_usage_call_id(&store).unwrap(), call);
-        assert_eq!(snapshot(&store, &item)["summary"]["total"], 50);
+        assert_eq!(snapshot(&store, &item)["summary"]["total"], 20);
+        assert_eq!(node_checks::usage_records_ok(&store).unwrap(), 0);
         assert_eq!(
             node_checks::first_usage_records_attempts(&store).unwrap(),
-            2
+            1
         );
-        assert_eq!(
-            node_checks::usage_records_count(&store).unwrap(),
-            if second == "first" { 1 } else { 2 }
-        );
+        assert_eq!(node_checks::usage_records_count(&store).unwrap(), 1);
         rt.stop("done");
     }
 }

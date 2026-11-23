@@ -140,7 +140,7 @@ impl T {
                 declared: HashMap::from([(
                     FAKE.to_string(),
                     serde_json::from_value(json!({"properties": {
-                        "nested_sandbox": false, "self_read_only": true}}))
+                        "nested_sandbox": false, "self_read_only": true, "read_attached": true}}))
                     .unwrap(),
                 )]),
                 adapters: HashMap::from([
@@ -396,6 +396,9 @@ async fn a_think_job_streams_its_draft_and_ends_with_its_answer() {
         t.kinds(),
         [
             "attempt_started",
+            "gateway_progress",
+            "gateway_progress",
+            "gateway_progress",
             "message_started",
             "text_delta",
             "text_delta",
@@ -406,6 +409,21 @@ async fn a_think_job_streams_its_draft_and_ends_with_its_answer() {
         ]
     );
     let evs = t.sink.events();
+    let phases: Vec<_> = evs
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::GatewayProgress { phase } => Some(*phase),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        phases,
+        [
+            GatewayPhase::Submitting,
+            GatewayPhase::Submitted,
+            GatewayPhase::Responding
+        ]
+    );
     let deltas: Vec<(String, u64, String)> = evs
         .iter()
         .filter_map(|e| match &e.body {

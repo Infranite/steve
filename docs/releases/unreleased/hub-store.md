@@ -1,3 +1,0 @@
-- Hub metadata and storage diagnostics use the shared storage contract. Existing metadata and Node identities are preserved when upgrading.
-- Node event ingestion persists realtime samples with its stream checkpoint. Permission mode reads use the latest stored command and the latest successful command from one snapshot.
-- Node command receipts, queued turns, tool results, and deliveries use typed storage operations. Workspace state reads use the shared connection pool.

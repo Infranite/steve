@@ -1264,6 +1264,7 @@ mod tests {
             cancel: true,
             permissions: true,
             images: false,
+            read_attached: false,
             enforcement: vec![],
             setup: None,
             adapter: Some(steve_node_api::AdapterInfo {

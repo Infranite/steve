@@ -764,7 +764,10 @@ async fn rewrite_text(
 ) -> Option<String> {
     let prompt = disclosure::rewrite_prompt(audience, text, &r.spans);
     let out = match pinned {
-        Some(p) if !model.is_empty() => p.run(model, &prompt, compose::TIMEOUT).await,
+        Some(p) if !model.is_empty() => p
+            .run(model, &prompt, compose::TIMEOUT)
+            .await
+            .map_err(steve_modules::gateway::GatewayError::from),
         _ => {
             steve_modules::gateway::purpose(
                 "compose",

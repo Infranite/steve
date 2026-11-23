@@ -39,6 +39,7 @@ pub use ids::*;
 pub use intent::{Intent, IntentKey};
 pub use ports::*;
 pub use run::*;
+pub use steve_types::gateway::{GatewayFailure, TimeoutPhase};
 pub use steve_types::{Code, Error, Retry, devices::NodeReason};
 pub use stop::*;
 pub use tools::*;

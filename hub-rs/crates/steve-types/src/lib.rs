@@ -30,6 +30,7 @@ pub mod devices;
 pub mod error;
 pub mod event;
 pub mod fact;
+pub mod gateway;
 pub mod id;
 pub mod integrations;
 pub mod knowledge;

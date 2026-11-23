@@ -272,6 +272,7 @@ macro_rules! reasons {
                         (stringify!($param).to_owned(), $param.into()),
                     )*].into()),
                     safe_detail: detail.into(),
+                    gateway: None,
                 }
             })*
         }
@@ -363,6 +364,9 @@ pub struct Error {
     pub params: Params,
     /// Safe to show and log: no secrets or paths outside the workspace; never parsed by code.
     pub safe_detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub gateway: Option<crate::gateway::GatewayFailure>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -383,11 +387,17 @@ impl Error {
             reason: None,
             params: Params::default(),
             safe_detail: detail.into(),
+            gateway: None,
         }
     }
 
     pub fn later(code: Code, detail: impl Into<String>) -> Self {
         Self::new(code, detail).retry(Retry::Later { after_ms: None })
+    }
+
+    pub fn for_gateway(mut self, failure: crate::gateway::GatewayFailure) -> Self {
+        self.gateway = Some(failure);
+        self
     }
 
     pub fn with_param(mut self, name: &str, value: impl Into<Param>) -> Self {
