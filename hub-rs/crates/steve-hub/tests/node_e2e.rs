@@ -2328,12 +2328,14 @@ async fn local_service_exits_when_its_home_or_executable_disappears() {
 
 /// B1: with `STEVE_NODE_MODE=service` the Hub's own Node runs in a process of its own. A turn
 /// running there goes on while the Hub is killed (its process group only, as a service manager
-/// stops it) and started again; the restarted Hub catches up, and the turn is never sent twice.
+/// stops it) and started again on the same HTTP port; the Node must not hold the Hub's listener.
+/// The restarted Hub catches up, and the turn is never sent twice.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_service_node_turn_outlives_the_hub() {
     let h = Home::new();
     let hub = spawn_mode(&h, Some("service"), &[]);
     serving(&h).await;
+    let addr = h.address.lock().unwrap().expect("the first Hub's address");
     let c = Client::login(&h).await;
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
@@ -2405,9 +2407,6 @@ async fn a_service_node_turn_outlives_the_hub() {
         || h.got("存活验收-V6") == 1,
     )
     .await;
-    let started = std::time::Instant::now();
-    let mut hub = hub;
-    hub.kill_hub_group();
     let node_pid: i32 = std::fs::read_to_string(h.steve().join("data/node/service.pid"))
         .expect("the Node's pid")
         .lines()
@@ -2416,14 +2415,19 @@ async fn a_service_node_turn_outlives_the_hub() {
         .trim()
         .parse()
         .expect("pid");
+    let started = std::time::Instant::now();
+    let mut hub = hub;
+    hub.kill_hub_group();
     assert_eq!(
         unsafe { libc::kill(node_pid, 0) },
         0,
         "the Node outlived the Hub"
     );
 
-    let _hub = spawn_mode(&h, Some("service"), &[]);
+    let port = addr.port().to_string();
+    let _hub = spawn_mode(&h, Some("service"), &[("STEVE_PORT", &port)]);
     serving(&h).await;
+    assert_eq!(*h.address.lock().unwrap(), Some(addr));
     let tail = |p: PathBuf| {
         let s = std::fs::read_to_string(p).unwrap_or_default();
         let l: Vec<&str> = s.lines().collect();
