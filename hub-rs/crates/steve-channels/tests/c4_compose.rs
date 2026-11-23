@@ -318,7 +318,7 @@ async fn the_prompt_has_seven_layers_in_order() {
     // the space's summary memory, an item the sender raised, a knowledge note
     h.env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             mems::create(
                 tx,
                 WS,
@@ -442,15 +442,15 @@ async fn own_draft_uses_verified_connection_user_and_external_space_address() {
         FakeChannel::seed_connection(h.env.store(), &caller(WS, OTHER), Some("uother")).unwrap();
     h.env
         .store()
-        .transaction(|tx| -> steve_modules::ApiResult<()> {
+        .write(|tx| -> steve_modules::ApiResult<()> {
             // The connector is deliberately the workspace owner, not the verified account user.
-            tx.write(|w| seed::connections::set_fixture_connection_owner(w, &conn, ME))?;
+            tx.scope(|w| seed::connections::set_fixture_connection_owner(w, &conn, ME))?;
             for (user, key, value) in [
                 (ME, "call_external", "Workspace owner public"),
                 (OTHER, "call", "Member private nickname"),
                 (OTHER, "call_external", "Member public"),
             ] {
-                let me = tx.write(|w| contacts::service::ensure_base(w, &caller(WS, user)))?;
+                let me = tx.scope(|w| contacts::service::ensure_base(w, &caller(WS, user)))?;
                 contacts::repo::value_insert(
                     tx,
                     WS,
@@ -510,8 +510,8 @@ async fn own_draft_uses_verified_connection_user_and_external_space_address() {
         ));
     };
     assert_address("Member public");
-    h.env.store().transaction(|tx| -> steve_modules::ApiResult<()> {
-        let me = tx.write(|w| w.contacts().me(WS, OTHER))?.unwrap();
+    h.env.store().write(|tx| -> steve_modules::ApiResult<()> {
+        let me = tx.scope(|w| w.contacts().me(WS, OTHER))?.unwrap();
         contacts::repo::value_insert(tx, WS, &contacts::repo::NewValue {
             party_id: me.id, key: "call_ext_scope".into(), label: "call_ext_scope".into(),
             value: json!({"kind": "space", "id": plan.space_id, "name": "Member in this space"}).to_string(),

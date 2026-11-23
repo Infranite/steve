@@ -71,12 +71,7 @@ impl NodeRuntime {
             }
             self.session_owners_work_in(tx, &b.session)?;
             if !bound_strict(&self.store, &b.session)? && placement.is_some() {
-                super::super::bot_dispatch::commit_guard(
-                    &self.store,
-                    tx,
-                    &b.session,
-                    self.node_id.as_str(),
-                )?;
+                super::super::bot_dispatch::commit_guard(tx, &b.session, self.node_id.as_str())?;
             }
             let fresh = node_write::bind_session_in(
                 tx,

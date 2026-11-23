@@ -10,7 +10,7 @@ use serde_json::Value;
 use super::Change;
 use crate::repo::to_json;
 use crate::types::json_or;
-use crate::{Result, Tx, now, uid};
+use crate::{Result, W, now, uid};
 
 /// How long an applied changeset can be undone.
 pub const UNDO_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
@@ -86,7 +86,7 @@ pub struct NewChangeset {
     pub created_by: String,
 }
 
-pub fn get(c: &Connection, id: &str) -> Result<Option<Changeset>> {
+pub(crate) fn get_on(c: &Connection, id: &str) -> Result<Option<Changeset>> {
     let r = c
         .prepare_cached("SELECT * FROM changesets WHERE id = ?")?
         .query_row([id], Changeset::from_row);
@@ -112,9 +112,9 @@ pub fn recent(
 }
 
 /// Stores a draft (`chs_` id). Publishes `{type:"changeset"}`.
-pub fn create(tx: &Tx, ws: &str, p: &NewChangeset) -> Result<Changeset> {
+pub fn create(tx: &mut W<'_>, ws: &str, p: &NewChangeset) -> Result<Changeset> {
     let id = uid("chs");
-    tx.prepare_cached(
+    tx.conn.prepare_cached(
         "INSERT INTO changesets (id, workspace_id, target_type, target_id, target_revision, title, href, changes, ops, status, origin, request, basis, created_by, created)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?)",
     )?
@@ -135,11 +135,11 @@ pub fn create(tx: &Tx, ws: &str, p: &NewChangeset) -> Result<Changeset> {
         now()
     ])?;
     publish(tx, &id, ws);
-    crate::repo::must(get(tx, &id)?)
+    crate::repo::must(get_on(tx.conn, &id)?)
 }
 
-fn publish(tx: &Tx, id: &str, ws: &str) {
-    tx.publish(steve_types::DomainEvent::from(
+fn publish(tx: &mut W<'_>, id: &str, ws: &str) {
+    tx.emit(steve_types::DomainEvent::from(
         steve_types::ConfigEvent::Changeset {
             id: id.into(),
             ws: ws.into(),
@@ -149,8 +149,8 @@ fn publish(tx: &Tx, id: &str, ws: &str) {
 
 /// `draft → applied` with the operations' `before`; `false` if it was not a draft any more (a second
 /// apply racing the first).
-pub fn mark_applied(tx: &Tx, cs: &Changeset, before: &[Value]) -> Result<bool> {
-    let n = tx.run(
+pub fn mark_applied(tx: &mut W<'_>, cs: &Changeset, before: &[Value]) -> Result<bool> {
+    let n = tx.conn.run(
         "UPDATE changesets SET status = 'applied', before = ?, applied = ? WHERE id = ? AND status = 'draft'",
         params![to_json(&before)?, now(), cs.id],
     )?;
@@ -161,8 +161,8 @@ pub fn mark_applied(tx: &Tx, cs: &Changeset, before: &[Value]) -> Result<bool> {
 }
 
 /// `applied → undone`; `false` if it was not applied.
-pub fn mark_undone(tx: &Tx, cs: &Changeset) -> Result<bool> {
-    let n = tx.run(
+pub fn mark_undone(tx: &mut W<'_>, cs: &Changeset) -> Result<bool> {
+    let n = tx.conn.run(
         "UPDATE changesets SET status = 'undone', undone = ? WHERE id = ? AND status = 'applied'",
         params![now(), cs.id],
     )?;
@@ -173,8 +173,8 @@ pub fn mark_undone(tx: &Tx, cs: &Changeset) -> Result<bool> {
 }
 
 /// `draft → dropped | stale`; `false` if it was not a draft.
-pub fn close_draft(tx: &Tx, cs: &Changeset, status: &str) -> Result<bool> {
-    let n = tx.run(
+pub fn close_draft(tx: &mut W<'_>, cs: &Changeset, status: &str) -> Result<bool> {
+    let n = tx.conn.run(
         "UPDATE changesets SET status = ? WHERE id = ? AND status = 'draft'",
         params![status, cs.id],
     )?;
@@ -184,8 +184,8 @@ pub fn close_draft(tx: &Tx, cs: &Changeset, status: &str) -> Result<bool> {
     Ok(n > 0)
 }
 
+use crate::Read;
 use crate::contract::{Json, Row as ContractRow};
-use crate::{Read, W};
 use sea_query::{Expr, ExprTrait, Query};
 
 pub struct ChangeSets<'a, C>(pub &'a mut C);
@@ -337,4 +337,8 @@ impl ChangeSets<'_, W<'_>> {
     pub fn close_draft(&mut self, cs: &Changeset, status: &str) -> Result<bool> {
         self.transition(cs, "draft", status, |_| {})
     }
+}
+
+pub fn get(r: &mut impl crate::Read, id: &str) -> Result<Option<Changeset>> {
+    get_on(r.connection(), id)
 }

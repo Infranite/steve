@@ -43,7 +43,7 @@ async fn list(
             unread: q.unread.unwrap_or(false),
         };
         m.store
-            .transaction(|tx| {
+            .write(|tx| {
                 feed::list(
                     tx,
                     &who.ws,
@@ -66,7 +66,7 @@ async fn detail(
 ) -> ApiResult<Json<feed::Entry>> {
     m.blocking(move |m| {
         m.store
-            .reader(|c| feed::detail(c, &who.ws, &who.me, &id))
+            .read(|c| feed::detail(c, &who.ws, &who.me, &id))
             .map(Json)
             .map_err(error)
     })
@@ -93,7 +93,7 @@ async fn read(
     m.blocking(move |m| {
         let updated = m
             .store
-            .transaction(|tx| match b {
+            .write(|tx| match b {
                 Read::Ids { ids } => feed::read_ids(tx, &who.ws, &who.me, &ids, m.clock.now()),
                 Read::Snapshot {
                     snapshot,

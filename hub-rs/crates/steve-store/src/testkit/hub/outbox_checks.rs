@@ -191,7 +191,7 @@ pub fn seed_dead_deliveries(path: &Path) -> Result<()> {
 }
 
 pub fn notification_party(store: &crate::Store, ws: &str, user: &str) -> Result<String> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT id FROM parties WHERE workspace_id=? AND user_id=?",
             [ws, user],
@@ -201,8 +201,8 @@ pub fn notification_party(store: &crate::Store, ws: &str, user: &str) -> Result<
 }
 
 pub fn seed_notice_workspace(store: &crate::Store) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute(
+    store.write(|tx| {
+        tx.conn.execute(
             "INSERT INTO workspaces (id, name, created) VALUES ('default', '个人', 1)",
             [],
         )?;

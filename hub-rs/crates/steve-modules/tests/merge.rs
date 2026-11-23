@@ -483,7 +483,7 @@ async fn merge_rejections() {
 fn propose(t: &TestEnv) -> (String, String, String) {
     let got = t
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             identify(
                 tx,
                 WS,
@@ -605,7 +605,7 @@ async fn not_same_is_never_proposed_again() {
     let n = fixture::proposal_count(t.store()).unwrap();
     let again = t
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             identify(
                 tx,
                 WS,
@@ -662,7 +662,7 @@ async fn manual_merge_settles_the_open_proposal() {
 fn open_confirm(t: &TestEnv, subject_type: &str, subject_id: &str) -> String {
     let n: NewDecision = decisions::confirm(WS, subject_type, subject_id, "确认？", "steve");
     t.store()
-        .transaction(|tx| Ok::<_, steve_store::StoreError>(bd::open(tx, &n)?.id))
+        .write(|tx| Ok::<_, steve_store::StoreError>(bd::open(tx, &n)?.id))
         .unwrap()
 }
 

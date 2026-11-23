@@ -1152,7 +1152,7 @@ fn hold_writer(e: &FlowEnv) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHa
     let (release, resumed) = std::sync::mpsc::channel();
     let t = std::thread::spawn(move || {
         store
-            .transaction(|_| -> steve_store::Result<()> {
+            .write(|_| -> steve_store::Result<()> {
                 held.send(()).unwrap();
                 resumed.recv().unwrap();
                 Ok(())

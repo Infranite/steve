@@ -133,7 +133,7 @@ pub fn output_delivery_markdown_by_output_keep(store: &Store) -> Result<String> 
 }
 
 pub fn checking_basis_count(store: &Store) -> Result<i64> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         c.query_row(
             "SELECT count(*) FROM chan_messages m JOIN reply_basis b ON b.id = m.basis_id
                       WHERE m.status = 'draft' AND b.verdict = 'checking'",
@@ -145,7 +145,7 @@ pub fn checking_basis_count(store: &Store) -> Result<i64> {
 }
 
 pub fn decision_basis_is_checking(store: &Store, decision: &str) -> Result<bool> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
             Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM chan_messages m JOIN reply_basis b ON b.id=m.basis_id WHERE m.decision_id=? AND b.verdict='checking')",[decision],|r|r.get(0))?)
         })
 }

@@ -484,7 +484,7 @@ impl RoutedRuntime {
     fn check_workflow_session(&self, session_id: &str) -> steve_core::Result<()> {
         if let Some(why) = self
             .store
-            .reader(|c| steve_store::workflow_gate::session_blocker(c, session_id))?
+            .read(|c| steve_store::workflow_gate::session_blocker(c, session_id))?
         {
             return Err(CoreError::Msg(why));
         }
@@ -620,7 +620,7 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         }
         if let Some(why) = self
             .store
-            .reader(|c| steve_store::workflow_gate::item_blocker(c, item_id))?
+            .read(|c| steve_store::workflow_gate::item_blocker(c, item_id))?
         {
             return Err(CoreError::Msg(why));
         }
@@ -674,11 +674,9 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         let eligible = |node: &str| -> steve_core::Result<bool> {
             let tag = self
                 .store
-                .reader(|c| steve_store::nodes::item_tag(c, item_id))?;
+                .read(|c| steve_store::nodes::item_tag(c, item_id))?;
             if let Some(tag) = tag {
-                let nodes = self
-                    .store
-                    .reader(|c| steve_store::nodes::with_tag(c, &tag))?;
+                let nodes = self.store.read(|c| steve_store::nodes::with_tag(c, &tag))?;
                 if !nodes.iter().any(|n| n == node) {
                     return Ok(false);
                 }
@@ -2624,8 +2622,8 @@ mod prepared_dir_tests {
         };
         let request = serde_json::to_value(&c).unwrap();
         t.store
-            .transaction::<_, StoreError>(|tx| {
-                rt::insert_command_in(
+            .write::<_, StoreError>(|tx| {
+                steve_store::node_write::insert_command_in(
                     tx,
                     &rt::NewCommand {
                         operation: op,
@@ -2638,7 +2636,7 @@ mod prepared_dir_tests {
                     },
                     1,
                 )?;
-                rt::merge_receipt_in(
+                steve_store::node_write::merge_receipt_in(
                     tx,
                     op,
                     ReceiptState::Finished,

@@ -88,12 +88,11 @@ struct Admit {
 impl Admission for Admit {
     async fn key(&self, node: &NodeId) -> Result<Option<[u8; 32]>, String> {
         let (store, node) = (self.svc.store.clone(), node.to_string());
-        let row = tokio::task::spawn_blocking(move || {
-            store.reader(|c| steve_store::nodes::get(c, &node))
-        })
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
+        let row =
+            tokio::task::spawn_blocking(move || store.read(|c| steve_store::nodes::get(c, &node)))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
         Ok(row
             .filter(|r| matches!(r.state.as_str(), "active" | "paused"))
             .and_then(|r| r.pubkey.try_into().ok()))
@@ -103,7 +102,7 @@ impl Admission for Admit {
         let (store, node) = (self.svc.store.clone(), hello.node_id.to_string());
         let arrival = serde_json::to_string(&self.arrival).map_err(|e| e.to_string())?;
         let link = tokio::task::spawn_blocking(move || {
-            store.transaction::<_, StoreError>(|tx| {
+            store.write::<_, StoreError>(|tx| {
                 // An upgrade-only connection keeps its prior incarnation, including NULL.
                 let link = store.write(|w| {
                     steve_store::node_directory::admit_link(w, &node, &arrival, now())
@@ -286,7 +285,7 @@ async fn serve_after(
     // when it was last there: how long it has been away counts from here (B5)
     let (store, id) = (svc.store.clone(), node.to_string());
     let _ = tokio::task::spawn_blocking(move || {
-        store.transaction(|tx| steve_store::nodes::touch(tx, &id, now()))
+        store.write(|tx| steve_store::nodes::touch(tx, &id, now()))
     })
     .await;
     remote.detach(generation);
@@ -370,7 +369,7 @@ async fn remember_host(svc: &NodeService, node: &NodeId, host: HostInfo) {
     };
     let (store, id) = (svc.store.clone(), node.to_string());
     let r = tokio::task::spawn_blocking(move || {
-        store.transaction(|tx| steve_store::nodes::set_host(tx, &id, &text))
+        store.write(|tx| steve_store::nodes::set_host(tx, &id, &text))
     })
     .await;
     if !matches!(r, Ok(Ok(_))) {
@@ -455,7 +454,7 @@ pub async fn install_link(
 async fn suspect_takeover(svc: &NodeService, node: &NodeId) -> bool {
     let (store, id) = (svc.store.clone(), node.to_string());
     let r = tokio::task::spawn_blocking(move || {
-        let name = store.transaction::<_, StoreError>(|tx| {
+        let name = store.write::<_, StoreError>(|tx| {
             let name =
                 store.write(|w| steve_store::node_directory::pause_after_takeover(w, &id))?;
             if let Some(name) = &name {
@@ -473,7 +472,7 @@ async fn suspect_takeover(svc: &NodeService, node: &NodeId) -> bool {
                 )?;
                 // a paused Node nobody was told about would just look broken
                 let text = steve_i18n::t!("hub.node.takeover_suspected", name = name);
-                tx.write(|w| {
+                tx.scope(|w| {
                     steve_core::notify::notify_in(w, steve_store::WS, "system", "fail", &text, None)
                 })?;
             }

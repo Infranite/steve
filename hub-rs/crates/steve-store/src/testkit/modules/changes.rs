@@ -10,7 +10,7 @@ pub fn seed_contact(store: &Store) -> Result<()> {
 }
 
 pub fn state(store: &Store) -> Result<(String, i64, i64, i64)> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         let (name, revision) = c.query_row(
             "SELECT name, revision FROM parties WHERE id = 'ct_s'",
             [],

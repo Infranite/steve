@@ -164,10 +164,11 @@ pub fn fixture_attribute_status(path: &Path) -> Result<String> {
     )?)
 }
 
-pub fn configure_mcp_fixture_session(path: &Path, hash: &str, session: &str) -> Result<()> {
+pub fn seed_mcp_fixture_session(path: &Path, item: &str, hash: &str) -> Result<()> {
     writable(path)?.execute(
-        "UPDATE sessions SET token_hash = ?, status = 'idle' WHERE id = ?",
-        [hash, session],
+        "INSERT INTO sessions(id,workspace_id,item_id,bot_id,harness,cwd,status,token_hash,created,updated)
+         VALUES ('s_tools','default',?1,'steve','claude-code','','idle',?2,1,1)",
+        [item, hash],
     )?;
     Ok(())
 }
@@ -182,7 +183,7 @@ pub fn extension_systems(
     store: &crate::Store,
     id: &str,
 ) -> Result<Vec<(String, String, String, String)>> {
-    store.reader(|db| {
+    store.sqlite_read(|db| {
         let mut s =
             db.prepare("SELECT workspace_id, name, family, plugin FROM systems WHERE id = ?")?;
         Ok(
@@ -203,20 +204,20 @@ pub fn seed_attention_reply(
     let msg = format!("question_{suffix}");
     let reply = format!("reply_{suffix}");
     let run = format!("run_{suffix}");
-    store.transaction(|tx| -> Result<()> {
-            tx.execute("INSERT INTO messages(id,workspace_id,space,author,text,created) VALUES(?,?,?,'me','question',10)",rusqlite::params![msg,ws,space])?;
-            tx.execute("INSERT INTO thread_runs(id,workspace_id,message_id,user_id,status,created) VALUES(?,?,?,?,'running',10)",rusqlite::params![run,ws,msg,user])?;
-            tx.execute("INSERT INTO messages(id,workspace_id,space,author,text,meta,created) VALUES(?,?,?,'steve','final',?,20)",rusqlite::params![reply,ws,space,serde_json::json!({"run":run,"origin":msg,"run_receipt":true}).to_string()])?;
-            tx.execute("UPDATE thread_runs SET status=?,reply_id=?,ended=20 WHERE id=?",rusqlite::params![status,reply,run])?;
+    store.write(|tx| -> Result<()> {
+            tx.conn.execute("INSERT INTO messages(id,workspace_id,space,author,text,created) VALUES(?,?,?,'me','question',10)",rusqlite::params![msg,ws,space])?;
+            tx.conn.execute("INSERT INTO thread_runs(id,workspace_id,message_id,user_id,status,created) VALUES(?,?,?,?,'running',10)",rusqlite::params![run,ws,msg,user])?;
+            tx.conn.execute("INSERT INTO messages(id,workspace_id,space,author,text,meta,created) VALUES(?,?,?,'steve','final',?,20)",rusqlite::params![reply,ws,space,serde_json::json!({"run":run,"origin":msg,"run_receipt":true}).to_string()])?;
+            tx.conn.execute("UPDATE thread_runs SET status=?,reply_id=?,ended=20 WHERE id=?",rusqlite::params![status,reply,run])?;
             Ok(())
         })?;
     Ok(reply)
 }
 
 pub fn seed_feed_report(store: &crate::Store, ws: &str, user: &str) -> Result<()> {
-    store.transaction(|tx|->Result<()> {
-            tx.write(|w| w.publish_report(&crate::feed::RunReport { ws: ws, flow: "flow", run: "run", node: "n", content: &crate::feed::Content{title:"Report".into(),markdown:"Markdown".into(),..Default::default()}, result: &serde_json::json!({"text":"Markdown","digest":0}), now: 10 }))?;
-            tx.execute("INSERT INTO personal_notifications(id,workspace_id,user_id,event_id,delivery_key,mode,body,state,created) VALUES('private',?1,?2,'event','key','log','Private title\nPrivate body','held',10)",rusqlite::params![ws, user])?;
+    store.write(|tx|->Result<()> {
+            tx.scope(|w| w.publish_report(&crate::feed::RunReport { ws: ws, flow: "flow", run: "run", node: "n", content: &crate::feed::Content{title:"Report".into(),markdown:"Markdown".into(),..Default::default()}, result: &serde_json::json!({"text":"Markdown","digest":0}), now: 10 }))?;
+            tx.conn.execute("INSERT INTO personal_notifications(id,workspace_id,user_id,event_id,delivery_key,mode,body,state,created) VALUES('private',?1,?2,'event','key','log','Private title\nPrivate body','held',10)",rusqlite::params![ws, user])?;
             Ok(())
         })
 }

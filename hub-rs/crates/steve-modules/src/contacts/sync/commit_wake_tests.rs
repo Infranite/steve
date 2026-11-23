@@ -79,7 +79,7 @@ impl Env {
         self.env
             .store()
             .write(|w| -> ApiResult<()> {
-                crate::contacts::service::ensure_self_org_in(w, WS, ME)?;
+                crate::contacts::service::ensure_self_org(w, WS, ME)?;
                 Ok(())
             })
             .unwrap();

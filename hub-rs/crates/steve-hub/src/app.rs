@@ -259,7 +259,7 @@ fn health_routes(st: &AppState) -> Router {
                         let node = crate::wire::node_runtime::health(&s, local.as_deref(), remote)
                             .inspect_err(|e| tracing::warn!("healthz node: {e}"))
                             .ok();
-                        (s.reader(steve_store::outbox::stats).ok(), node)
+                        (s.read(|r| steve_store::outbox::stats(r)).ok(), node)
                     })
                     .await
                     .unwrap_or_default(),

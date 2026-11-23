@@ -145,7 +145,7 @@ pub fn set_test_emails(store: &Store) -> Result<()> {
 }
 
 pub fn last_party_patch(store: &Store) -> Result<String> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         Ok(c.query_row(
             "SELECT patch FROM revisions WHERE object_type = 'party' ORDER BY id DESC LIMIT 1",
             [],
@@ -155,7 +155,7 @@ pub fn last_party_patch(store: &Store) -> Result<String> {
 }
 
 pub fn party_deletion_audit(store: &Store) -> Result<String> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         Ok(c.query_row(
             "SELECT detail FROM audit WHERE action = 'party.delete'",
             [],
@@ -165,7 +165,7 @@ pub fn party_deletion_audit(store: &Store) -> Result<String> {
 }
 
 pub fn job_properties(store: &Store, org: &str) -> Result<String> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         Ok(c.query_row(
             "SELECT props FROM links WHERE predicate = 'works_at' AND object_id = ?",
             [org],
@@ -175,7 +175,7 @@ pub fn job_properties(store: &Store, org: &str) -> Result<String> {
 }
 
 pub fn workspace_name(store: &Store) -> Result<String> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         Ok(c.query_row(
             "SELECT name FROM workspaces WHERE id = 'default'",
             [],

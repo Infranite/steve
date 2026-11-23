@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, json};
 use steve_store::base::Viewer;
-use steve_store::{Accounts, Connections, Contacts, MatchRules, Read, Revisions, Systems, Tx, W};
+use steve_store::{Accounts, Connections, Contacts, MatchRules, Read, Revisions, Systems, W};
 
 use super::repo::{
     ACCOUNT, Account, AccountPatch, AccountQuery, ConnectionBrief, ItemRef, MatchRule, NewAccount,
@@ -408,11 +408,6 @@ pub(crate) fn taken(r: &mut impl Read, viewer: &Viewer, account: &str) -> ApiRes
         "modules.accounts.taken",
         name = name
     )))
-}
-
-/// Records an account for an owner the caller already checked. Handle conflicts are `409`.
-pub fn record_tx(tx: &Tx, viewer: &Viewer, actor: &str, r: &Record) -> ApiResult<Account> {
-    tx.write(|w| record(w, viewer, actor, r))
 }
 
 pub(crate) fn record(

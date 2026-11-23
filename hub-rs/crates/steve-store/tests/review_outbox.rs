@@ -1,4 +1,5 @@
 //! Independent review probes of the outbox (written by the review worker on an isolated snapshot).
+use steve_store::testkit::SqliteFixtures;
 mod common;
 use std::sync::{
     Arc,
@@ -50,11 +51,11 @@ fn probe(since: Since) -> Arc<Probe> {
     })
 }
 fn emit(s: &Store) -> Event {
-    s.transaction(|tx| outbox::emit(tx, "workspace-a", "test.done", 1, &serde_json::json!({})))
+    s.write(|tx| outbox::append(tx, "workspace-a", "test.done", 1, &serde_json::json!({})))
         .unwrap()
 }
 fn count(s: &Store, table: &str) -> i64 {
-    s.reader(|c| -> steve_store::Result<i64> {
+    s.fixture_read(|c| -> steve_store::Result<i64> {
         Ok(c.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))?)
     })
     .unwrap()
@@ -83,14 +84,14 @@ fn paused_delivery_survives_prune_and_can_resume() {
     let d = Dispatcher::new(vec![probe(Since::Start)]);
     d.register(&s).unwrap();
     let ev = emit(&s);
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         c.execute("UPDATE outbox_consumers SET enabled=0", [])?;
         Ok(())
     })
     .unwrap();
     assert_eq!(common::prune_outbox(&s, ev.created + 100, 0).unwrap(), 0);
     assert_eq!(d.pump(&s, 10).unwrap().done, 0);
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         c.execute("UPDATE outbox_consumers SET enabled=1", [])?;
         Ok(())
     })

@@ -11,7 +11,7 @@ pub fn auth_session(
     created: i64,
     expires: i64,
 ) -> Result<()> {
-    store.with_conn(|conn| {
+    store.write_locked(|conn| {
         conn.execute(
             "INSERT INTO auth_sessions (token_hash, user_id, created, expires) VALUES (?, ?, ?, ?)",
             params![crate::sha(token), user, created, expires],
@@ -26,7 +26,7 @@ pub fn use_count(
     actor: Option<&str>,
     status: Option<&str>,
 ) -> Result<i64> {
-    store.reader(|conn| {
+    store.sqlite_read(|conn| {
         Ok(conn.query_row(
             "SELECT count(*) FROM secret_uses
          WHERE (?1 IS NULL OR mode = ?1)
@@ -39,7 +39,7 @@ pub fn use_count(
 }
 
 pub fn seed_rotation_vaults(store: &Store, ws: &str) -> Result<()> {
-    store.with_conn(|conn| {
+    store.write_locked(|conn| {
         conn.execute(
             "INSERT INTO vaults (id, workspace_id, name, scope, created) VALUES ('vlt_s', ?, '共享', 'shared', 1), ('vlt_sys', ?, '系统', 'system', 1)",
             [ws, ws],
@@ -119,7 +119,7 @@ pub fn seed_encrypted_field(w: &mut crate::W<'_>, field: &EncryptedField<'_>) ->
 }
 
 pub fn encrypted_field(store: &Store, item: &str, field: &str) -> Result<(Vec<u8>, i64, Vec<u8>)> {
-    store.reader(|conn| {
+    store.sqlite_read(|conn| {
         Ok(conn.query_row(
             "SELECT i.dek_wrapped, i.kek_version, f.value_ct
            FROM vault_items i JOIN vault_fields f ON f.item_id = i.id
@@ -131,7 +131,7 @@ pub fn encrypted_field(store: &Store, item: &str, field: &str) -> Result<(Vec<u8
 }
 
 pub fn init_audit_count(store: &Store, ws: &str) -> Result<i64> {
-    store.reader(|conn| {
+    store.sqlite_read(|conn| {
         Ok(conn.query_row(
             "SELECT count(*) FROM audit WHERE action = 'vault.init' AND workspace_id = ?",
             [ws],
@@ -141,7 +141,7 @@ pub fn init_audit_count(store: &Store, ws: &str) -> Result<i64> {
 }
 
 pub fn make_system_item(store: &Store, item: &str) -> Result<()> {
-    store.with_conn(|conn| {
+    store.write_locked(|conn| {
         conn.execute(
             "UPDATE vault_items SET vault_id = 'vlt_sys' WHERE id = ?",
             [item],
@@ -151,21 +151,21 @@ pub fn make_system_item(store: &Store, item: &str) -> Result<()> {
 }
 
 pub fn copy_field_ciphertext(store: &Store, from: &str, to: &str) -> Result<()> {
-    store.with_conn(|conn| {
+    store.write_locked(|conn| {
         conn.execute("UPDATE vault_fields SET value_ct = (SELECT value_ct FROM vault_fields WHERE id = ?) WHERE id = ?", [from, to])?;
         Ok(())
     })
 }
 
 pub fn copy_wrapped_key(store: &Store, from: &str, to: &str) -> Result<()> {
-    store.with_conn(|conn| {
+    store.write_locked(|conn| {
         conn.execute("UPDATE vault_items SET dek_wrapped = (SELECT dek_wrapped FROM vault_items WHERE id = ?) WHERE id = ?", [from, to])?;
         Ok(())
     })
 }
 
 pub fn items_with_key_version(store: &Store, version: i64) -> Result<i64> {
-    store.reader(|conn| {
+    store.sqlite_read(|conn| {
         Ok(conn.query_row(
             "SELECT count(*) FROM vault_items WHERE kek_version = ?",
             [version],
@@ -175,7 +175,7 @@ pub fn items_with_key_version(store: &Store, version: i64) -> Result<i64> {
 }
 
 pub fn corrupt_wrapped_key(store: &Store, item: &str) -> Result<()> {
-    store.with_conn(|conn| {
+    store.write_locked(|conn| {
         conn.execute(
             "UPDATE vault_items SET dek_wrapped = zeroblob(72) WHERE id = ?",
             [item],
@@ -185,7 +185,7 @@ pub fn corrupt_wrapped_key(store: &Store, item: &str) -> Result<()> {
 }
 
 pub fn clear_wrapped_key(store: &Store, item: &str) -> Result<()> {
-    store.with_conn(|conn| {
+    store.write_locked(|conn| {
         conn.execute(
             "UPDATE vault_items SET dek_wrapped = NULL WHERE id = ?",
             [item],
@@ -195,7 +195,7 @@ pub fn clear_wrapped_key(store: &Store, item: &str) -> Result<()> {
 }
 
 pub fn seed_vault_search_account(store: &Store) -> Result<()> {
-    store.with_conn(|conn| {
+    store.write_locked(|conn| {
         conn.execute_batch(
             "INSERT INTO parties (id, workspace_id, type, name, created_by, created, updated) VALUES ('ct_me', 'default', 'contact', '我', 'usr_dev', 1, 1);
              INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, display_name, source, created, updated)
@@ -206,7 +206,7 @@ pub fn seed_vault_search_account(store: &Store) -> Result<()> {
 }
 
 pub fn seed_vault_workspace(store: &Store) -> Result<()> {
-    store.with_conn(|conn| {
+    store.write_locked(|conn| {
         conn.execute(
             "INSERT INTO workspaces (id, name, created) VALUES ('w3', 'x', 1)",
             [],
@@ -216,7 +216,7 @@ pub fn seed_vault_workspace(store: &Store) -> Result<()> {
 }
 
 pub fn audit_count(store: &Store, action: &str, target: &str) -> Result<i64> {
-    store.reader(|conn| {
+    store.sqlite_read(|conn| {
         Ok(conn.query_row(
             "SELECT count(*) FROM audit WHERE action = ? AND target = ?",
             [action, target],
@@ -226,14 +226,14 @@ pub fn audit_count(store: &Store, action: &str, target: &str) -> Result<i64> {
 }
 
 pub fn audit_detail(store: &Store, action: &str, target: Option<&str>) -> Result<String> {
-    store.reader(|conn| Ok(conn.query_row(
+    store.sqlite_read(|conn| Ok(conn.query_row(
         "SELECT detail FROM audit WHERE action = ?1 AND (?2 IS NULL OR target = ?2) ORDER BY id LIMIT 1",
         params![action, target], |row| row.get(0),
     )?))
 }
 
 pub fn all_audit_details(store: &Store) -> Result<String> {
-    store.reader(|conn| {
+    store.sqlite_read(|conn| {
         Ok(
             conn.query_row("SELECT group_concat(detail) FROM audit", [], |row| {
                 row.get(0)
@@ -243,7 +243,7 @@ pub fn all_audit_details(store: &Store) -> Result<String> {
 }
 
 pub fn revoked_grants(store: &Store, item: &str) -> Result<i64> {
-    store.reader(|conn| {
+    store.sqlite_read(|conn| {
         Ok(conn.query_row(
             "SELECT count(*) FROM grants WHERE resource_id = ? AND revoked IS NOT NULL",
             [item],
@@ -253,7 +253,7 @@ pub fn revoked_grants(store: &Store, item: &str) -> Result<i64> {
 }
 
 pub fn vault_item_count(store: &Store) -> Result<i64> {
-    store.reader(|conn| {
+    store.sqlite_read(|conn| {
         Ok(conn.query_row("SELECT count(*) FROM vault_items", [], |row| row.get(0))?)
     })
 }
@@ -261,7 +261,7 @@ pub fn vault_item_count(store: &Store) -> Result<i64> {
 pub type AccessLog = (String, String, String, String);
 
 pub fn access_log(store: &Store) -> Result<Vec<AccessLog>> {
-    store.reader(|conn| {
+    store.sqlite_read(|conn| {
         let mut stmt = conn.prepare(
             "SELECT actor_type, actor_id, mode, fields FROM secret_uses ORDER BY created, rowid",
         )?;
@@ -280,7 +280,7 @@ pub fn item_use_count(
     status: &str,
     actor: Option<&str>,
 ) -> Result<i64> {
-    store.reader(|conn| {
+    store.sqlite_read(|conn| {
         Ok(conn.query_row(
             "SELECT count(*) FROM secret_uses WHERE item_id = ?1 AND status = ?2
            AND (?3 IS NULL OR mode = ?3) AND (?4 IS NULL OR actor_id = ?4)",
@@ -291,14 +291,14 @@ pub fn item_use_count(
 }
 
 pub fn first_failed_use_finished(store: &Store, item: &str) -> Result<i64> {
-    store.reader(|conn| Ok(conn.query_row(
+    store.sqlite_read(|conn| Ok(conn.query_row(
         "SELECT finished FROM secret_uses WHERE item_id = ? AND status = 'failed' ORDER BY rowid LIMIT 1",
         [item], |row| row.get(0),
     )?))
 }
 
 pub fn corrupt_fields(store: &Store, item: &str) -> Result<()> {
-    store.with_conn(|conn| {
+    store.write_locked(|conn| {
         conn.execute(
             "UPDATE vault_fields SET value_ct = zeroblob(64) WHERE item_id = ?",
             [item],
@@ -308,14 +308,14 @@ pub fn corrupt_fields(store: &Store, item: &str) -> Result<()> {
 }
 
 pub fn age_uses(store: &Store, item: &str, age: i64) -> Result<()> {
-    store.with_conn(|conn| {
+    store.write_locked(|conn| {
         conn.execute("UPDATE secret_uses SET created = created - ?1, finished = finished - ?1 WHERE item_id = ?2", params![age, item])?;
         Ok(())
     })
 }
 
 pub fn checkpoint(store: &Store) -> Result<()> {
-    store.with_conn(|conn| {
+    store.write_locked(|conn| {
         conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
         Ok(())
     })
@@ -331,7 +331,7 @@ pub struct UseContext<'a> {
 }
 
 pub fn seed_use_context(store: &Store, ctx: &UseContext<'_>) -> Result<()> {
-    store.with_conn(|conn| {
+    store.write_locked(|conn| {
         conn.execute(
             "INSERT INTO bots (id, workspace_id, name, harness, updated) VALUES (?, ?, '前端', 'claude', 1)",
             params![ctx.bot, ctx.ws],
@@ -359,7 +359,7 @@ pub fn seed_use_context(store: &Store, ctx: &UseContext<'_>) -> Result<()> {
 }
 
 pub fn latest_use(store: &Store) -> Result<String> {
-    store.reader(|conn| {
+    store.sqlite_read(|conn| {
         Ok(conn.query_row(
             "SELECT id FROM secret_uses ORDER BY created DESC, rowid DESC LIMIT 1",
             [],
@@ -369,7 +369,7 @@ pub fn latest_use(store: &Store) -> Result<String> {
 }
 
 pub fn decision_count(store: &Store, subject_type: &str, status: Option<&str>) -> Result<i64> {
-    store.reader(|conn| {
+    store.sqlite_read(|conn| {
         Ok(conn.query_row(
         "SELECT count(*) FROM decisions WHERE subject_type = ?1 AND (?2 IS NULL OR status = ?2)",
         params![subject_type, status], |row| row.get(0),
@@ -378,7 +378,7 @@ pub fn decision_count(store: &Store, subject_type: &str, status: Option<&str>) -
 }
 
 pub fn other_grants(store: &Store, item: &str, ignored: &str) -> Result<i64> {
-    store.reader(|conn| {
+    store.sqlite_read(|conn| {
         Ok(conn.query_row(
             "SELECT count(*) FROM grants WHERE resource_id = ? AND id != ?",
             [item, ignored],
@@ -395,7 +395,7 @@ pub fn seed_use_retention(
     old: &str,
     day: i64,
 ) -> Result<()> {
-    store.with_conn(|conn| {
+    store.write_locked(|conn| {
         conn.execute("UPDATE secret_uses SET created = created - ? WHERE id = ?", params![2 * day, old])?;
         conn.execute(
             "INSERT INTO secret_uses (id, workspace_id, item_id, actor_type, actor_id, purpose, mode, status, created)

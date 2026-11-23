@@ -14,7 +14,7 @@ pub struct InboundMessage {
 }
 
 pub fn inbound_for_connection(store: &Store, connection: &str) -> Result<Vec<InboundMessage>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         let mut statement = c.prepare(
             "SELECT m.external_id, s.external_id, s.kind, m.text
              FROM chan_messages m JOIN spaces s ON s.id = m.space_id
@@ -43,7 +43,7 @@ pub struct Approval {
 }
 
 pub fn approvals_for_connection(store: &Store, connection: &str) -> Result<Vec<Approval>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         let mut statement = c.prepare(
             "SELECT m.status, m.on_behalf, d.kind, d.question
              FROM chan_messages m JOIN spaces s ON s.id = m.space_id
@@ -71,7 +71,7 @@ pub struct Signal {
 }
 
 pub fn signals(store: &Store, external_id: &str) -> Result<Vec<Signal>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         let mut statement =
             c.prepare("SELECT type, payload, outcome_label FROM ext_events WHERE external_id = ?")?;
         let rows = statement.query_map([external_id], |row| {
@@ -102,7 +102,7 @@ pub struct MessageDetails {
 }
 
 pub fn matching_messages(store: &Store, external_id: &str) -> Result<Vec<MessageDetails>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         let mut statement = c.prepare(
             "SELECT m.sender_account_id, coalesce(nullif(a.display_name, ''), a.handle_display),
                     m.thread_key, m.reply_to
@@ -125,7 +125,9 @@ fn message_details(row: &Row<'_>) -> rusqlite::Result<MessageDetails> {
 }
 
 pub fn total_messages(store: &Store) -> Result<i64> {
-    store.reader(|c| Ok(c.query_row("SELECT count(*) FROM chan_messages", [], |row| row.get(0))?))
+    store.sqlite_read(|c| {
+        Ok(c.query_row("SELECT count(*) FROM chan_messages", [], |row| row.get(0))?)
+    })
 }
 
 pub fn set_connection_permissions(
@@ -133,8 +135,8 @@ pub fn set_connection_permissions(
     connection: &str,
     permissions: &Value,
 ) -> Result<()> {
-    let count = store.transaction::<_, StoreError>(|tx| {
-        Ok(tx.execute(
+    let count = store.write::<_, StoreError>(|tx| {
+        Ok(tx.conn.execute(
             "UPDATE connections SET config = json_set(config, '$.permissions', json(?))
              WHERE id = ?",
             params![permissions.to_string(), connection],
@@ -149,8 +151,8 @@ pub fn set_connection_permissions(
 }
 
 pub fn set_workspace_text(store: &Store, ws: &str, key: &str, value: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute(
+    store.write(|tx| {
+        tx.conn.execute(
             "INSERT INTO settings (workspace_id, key, value, updated) VALUES (?, ?, ?, 1)
              ON CONFLICT (workspace_id, key) DO UPDATE SET value = excluded.value",
             params![ws, key, serde_json::to_string(value)?],

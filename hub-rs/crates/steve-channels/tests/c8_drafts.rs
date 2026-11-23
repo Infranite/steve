@@ -145,7 +145,7 @@ async fn draft(h: &H, kind: &str, id: &str, request: &str, reply: Value) -> Prop
 fn ops_of(h: &H, id: &str) -> Vec<Value> {
     h.env
         .store()
-        .reader(|c| changesets::get(c, id))
+        .read(|c| changesets::get(c, id))
         .expect("read")
         .expect("changeset")
         .ops

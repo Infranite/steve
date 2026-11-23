@@ -130,7 +130,7 @@ pub fn plan(
     // Work units use the ordinary execution policy only after positive same-principal
     // admission. State/attempt checks run again when the Node claims a turn.
     if let Some(why) = store
-        .reader(|c| steve_store::workflow_gate::session_authority_blocker(c, session))
+        .read(|c| steve_store::workflow_gate::session_authority_blocker(c, session))
         .map_err(|_| Unreadable)?
     {
         return Err(Workflow(why));

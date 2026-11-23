@@ -499,7 +499,7 @@ async fn mirror_releases_reader_connection_before_batch_write() {
 
     // `Store::open` sizes its r2d2 reader pool to `available_parallelism().clamp(4, 16)`.
     // If `Mirror::effect` still held a reader connection across `batch-write`, at most
-    // `pool_size - 1` concurrent `store.reader(...)` calls could hold connections at once.
+    // `pool_size - 1` concurrent `store.read(...)` calls could hold connections at once.
     let pool_size = std::thread::available_parallelism()
         .map_or(4, |n| n.get())
         .clamp(4, 16);

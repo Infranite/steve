@@ -213,7 +213,7 @@ pub fn count_ext_events_count_4(store: &Store) -> Result<i64> {
 }
 
 pub fn message_outcome(store: &Store, message: &str) -> Result<(Value, Value, Value, Value)> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT e.outcome, e.outcome_label, e.reason, e.decision_id
          FROM ext_events e JOIN chan_messages m ON m.event_id=e.id WHERE m.id=?",

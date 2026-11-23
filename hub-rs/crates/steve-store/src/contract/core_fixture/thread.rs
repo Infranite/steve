@@ -183,15 +183,15 @@ pub fn received_delivery(store: &Store, delivery: ReceivedDelivery<'_>) {
 
 pub fn default_team(store: &Store, ws: &str, bot: &str) {
     store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute(
+        .write::<_, StoreError>(|tx| {
+            tx.conn.execute(
                 "INSERT INTO bot_teams(id,workspace_id,name,members) VALUES ('team',?,'Preset',?)",
                 rusqlite::params![
                     ws,
                     serde_json::json!([{"bot": bot, "nodes": null}]).to_string()
                 ],
             )?;
-            tx.execute(
+            tx.conn.execute(
                 "INSERT INTO bot_team_defaults(workspace_id,team_id) VALUES (?,'team')",
                 [ws],
             )?;
@@ -202,7 +202,7 @@ pub fn default_team(store: &Store, ws: &str, bot: &str) {
 
 pub fn sarah_contact(store: &Store) {
     owner(store, crate::WS, "usr_dev", "dev", "Dev");
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute_batch(
             "INSERT INTO parties (id, workspace_id, type, name, aliases, created_by, created, updated)
              VALUES ('ct_sarah', 'default', 'contact', 'Sarah Chen', '[\"Sarah\"]', 'usr_dev', 1, 1);",
@@ -227,7 +227,7 @@ pub fn important_contact(store: &Store, id: &str) -> bool {
 }
 
 pub fn workflow_blocker(store: &crate::Store, session: &str) -> crate::Result<Option<String>> {
-    store.read_conn(|c| crate::workflow_gate::session_blocker(c, session))
+    store.read_conn(|c| crate::workflow_gate::session_blocker_on(c, session))
 }
 
 pub fn attention(
@@ -235,7 +235,7 @@ pub fn attention(
     ws: &str,
     user: &str,
 ) -> crate::Result<(Vec<crate::attention::Entry>, i64)> {
-    store.read_conn(|c| crate::attention::replies(c, ws, user))
+    store.read_conn(|c| crate::attention::replies_on(c, ws, user))
 }
 
 pub fn attention_target(
@@ -244,5 +244,5 @@ pub fn attention_target(
     user: &str,
     id: &str,
 ) -> crate::Result<(String, i64)> {
-    store.read_conn(|c| crate::attention::reply(c, ws, user, id))
+    store.read_conn(|c| crate::attention::reply_on(c, ws, user, id))
 }

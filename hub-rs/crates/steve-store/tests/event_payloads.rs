@@ -1,3 +1,4 @@
+use steve_store::testkit::SqliteFixtures;
 mod common;
 use common::fresh;
 use serde_json::{Value, json};
@@ -17,8 +18,10 @@ fn session(s: &Store) -> String {
         .id
 }
 fn count(s: &Store, table: &str) -> i64 {
-    s.with_conn(|c| Ok(c.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))?))
-        .unwrap()
+    s.fixture_write(
+        |c| Ok(c.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))?),
+    )
+    .unwrap()
 }
 fn payload() -> Value {
     let image = "Abc123".repeat(32_000);
@@ -84,7 +87,7 @@ fn mixed_legacy_rows_and_reference_lookalikes_are_not_interpreted() {
     assert_eq!(count(s, "event_payload_refs"), 0);
     let long = "legacy".repeat(20_000);
     let data = json!({"content":long});
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         c.execute(
             "INSERT INTO events(session_id,ts,kind,data) VALUES (?,1,'tool_call_update',?)",
             rusqlite::params![id, serde_json::to_string(&data).unwrap()],
@@ -100,7 +103,7 @@ fn event_and_payload_write_roll_back_together() {
     let t = fresh();
     let s = &t.store;
     let id = session(s);
-    s.with_conn(|c| { c.execute_batch("CREATE TRIGGER reject_payload BEFORE INSERT ON event_payload_refs BEGIN SELECT RAISE(ABORT, 'test rollback'); END;")?; Ok(()) }).unwrap();
+    s.fixture_write(|c| { c.execute_batch("CREATE TRIGGER reject_payload BEFORE INSERT ON event_payload_refs BEGIN SELECT RAISE(ABORT, 'test rollback'); END;")?; Ok(()) }).unwrap();
     assert!(s.events().add(&id, "tool_call_update", payload()).is_err());
     for table in ["events", "event_payloads", "event_payload_refs"] {
         assert_eq!(count(s, table), 0);
@@ -199,7 +202,7 @@ fn synthetic_total_storage_reduces_with_all_payload_tables_counted() {
             .add(&id, "tool_call_update", data.clone())
             .unwrap();
     }
-    let stored: i64=s.with_conn(|c|Ok(c.query_row("SELECT (SELECT SUM(length(CAST(data AS BLOB))) FROM events) + (SELECT SUM(length(CAST(data AS BLOB))) FROM event_payloads) + (SELECT SUM(length(path)+length(hash)+length(session_id)+8) FROM event_payload_refs)",[],|r|r.get(0))?)).unwrap();
+    let stored: i64=s.fixture_write(|c|Ok(c.query_row("SELECT (SELECT SUM(length(CAST(data AS BLOB))) FROM events) + (SELECT SUM(length(CAST(data AS BLOB))) FROM event_payloads) + (SELECT SUM(length(path)+length(hash)+length(session_id)+8) FROM event_payload_refs)",[],|r|r.get(0))?)).unwrap();
     let baseline = raw.len() * 30;
     println!(
         "synthetic events=30 original_json_bytes={baseline} normalized_total_payload_bytes={stored} ratio={:.4}",
@@ -210,7 +213,7 @@ fn synthetic_total_storage_reduces_with_all_payload_tables_counted() {
     let bid = session(&baseline_store.store);
     baseline_store
         .store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             let tx = c.unchecked_transaction()?;
             for _ in 0..30 {
                 tx.execute(
@@ -224,7 +227,7 @@ fn synthetic_total_storage_reduces_with_all_payload_tables_counted() {
         .unwrap();
     let pages = |store: &Store| {
         store
-            .with_conn(|c| {
+            .fixture_write(|c| {
                 Ok(c.query_row(
                     "SELECT page_count * page_size FROM pragma_page_count(),pragma_page_size()",
                     [],
@@ -261,7 +264,7 @@ fn corruption_does_not_return_another_sessions_payload_or_silent_preview() {
     let b = session(s);
     let seq = s.events().add(&a, "tool_call_update", payload()).unwrap();
     s.events().add(&b, "tool_call_update", payload()).unwrap();
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         c.execute(
             "UPDATE event_payload_refs SET session_id=? WHERE event_seq=?",
             rusqlite::params![b, seq],
@@ -290,13 +293,13 @@ fn event_only_retention_reclaims_last_reference() {
     let id = session(s);
     let a = s.events().add(&id, "tool_call_update", payload()).unwrap();
     let b = s.events().add(&id, "tool_call_update", payload()).unwrap();
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         c.execute("DELETE FROM events WHERE seq=?", [a])?;
         Ok(())
     })
     .unwrap();
     assert_eq!(count(s, "event_payloads"), 1);
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         c.execute("DELETE FROM events WHERE seq=?", [b])?;
         Ok(())
     })
@@ -317,7 +320,7 @@ fn standalone_database_snapshot_contains_every_payload() {
     let snapshot_dir = t.dir.path().join("snapshot");
     std::fs::create_dir(&snapshot_dir).unwrap();
     let snapshot = snapshot_dir.join("steve.sqlite3");
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         c.execute("VACUUM INTO ?", [snapshot.to_str().unwrap()])?;
         Ok(())
     })

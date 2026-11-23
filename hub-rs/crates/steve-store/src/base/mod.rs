@@ -2,12 +2,8 @@
 //! levels, memories, entity tags, generic links, persisted changesets, decisions opened inside a
 //! transaction, audit, revisions and messages.
 //!
-//! Everything here is a free function over `&Connection` (reads, usually from [`Store::reader`]) or
-//! [`Tx`] (writes, from [`Store::transaction`]), so a module service can combine its own SQL and these
-//! in one transaction. Writes queue their SSE event on the `Tx`; it goes out after the commit.
-//!
-//! [`Store::reader`]: crate::Store::reader
-//! [`Store::transaction`]: crate::Store::transaction
+//! Callers use typed repositories on a Store read or write. Events staged through the write
+//! handle are published after the commit.
 
 pub mod changesets;
 pub mod decisions;
@@ -22,7 +18,7 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Value, json};
 
-use crate::{Result, Tx, now};
+use crate::{Result, W, now};
 
 /// Who can see an object. Stored and sent as its code: `workspace`, `private`, `team:<id>`, `space:<id>`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -300,7 +296,7 @@ pub fn show(v: &str) -> String {
 /// `audit(ws, actor, action, target, detail)` inside a transaction. `action` is `<object>.<verb>`;
 /// `detail` must not contain secret values or message text.
 pub fn audit(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     actor: &str,
     action: &str,
@@ -308,7 +304,7 @@ pub fn audit(
     detail: &Value,
 ) -> Result<()> {
     let audit = crate::contract::audit::record_statement(ws, actor, action, target, detail)?;
-    crate::contract::exec_on(&mut crate::contract::Sqlite(tx), &audit)?;
+    crate::contract::exec_on(&mut crate::contract::Sqlite(tx.conn), &audit)?;
     Ok(())
 }
 
@@ -340,7 +336,7 @@ impl crate::W<'_> {
 
 /// A message written with the rest of the transaction (`Messages::add` on `tx`). Returns the id.
 pub fn message_add(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     author: &str,
     text: &str,
@@ -348,8 +344,8 @@ pub fn message_add(
     meta: &Value,
     space: &str,
 ) -> Result<String> {
-    let id = crate::repo::message_insert(tx, ws, author, text, item_id, meta, space)?;
-    tx.publish(steve_types::DomainEvent::from(
+    let id = crate::repo::message_insert(tx.conn, ws, author, text, item_id, meta, space)?;
+    tx.emit(steve_types::DomainEvent::from(
         steve_types::WorkEvent::Message {
             ws: ws.into(),
             id: id.clone().into(),
@@ -362,7 +358,7 @@ pub fn message_add(
 /// bumps the object's own `revision` column to `version` in the same transaction.
 #[allow(clippy::too_many_arguments)]
 pub fn revision(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     object_type: &str,
     object_id: &str,
@@ -372,7 +368,7 @@ pub fn revision(
     author: &str,
 ) -> Result<()> {
     crate::repo::revision(
-        tx,
+        tx.conn,
         ws,
         object_type,
         object_id,

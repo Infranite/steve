@@ -810,7 +810,7 @@ async fn a_sender_known_by_an_alias_lands_on_the_contact_holding_it() {
     let alice = h
         .env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             identify(
                 tx,
                 WS,
@@ -879,7 +879,7 @@ async fn a_sender_in_a_declared_system_lands_on_the_contact_holding_its_alias() 
     let alice = h
         .env
         .store()
-        .transaction(|tx| identify(tx, WS, ME, "mail", "alice@example.com", &Hints::default()))
+        .write(|tx| identify(tx, WS, ME, "mail", "alice@example.com", &Hints::default()))
         .expect("identify");
     let mut m = FakeChannel::message("G1", "m1", "u_int_1", "你好");
     m.sender = Sender::new(HandleRef::new("probe_internal", "U-Int-1"))

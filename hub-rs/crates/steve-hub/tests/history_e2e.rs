@@ -267,7 +267,7 @@ async fn imports_history_through_the_node() {
     }
     let session = |c: &Client, id: &str| node_process::imported_session(&c.db, id).unwrap();
     for id in &ids {
-        assert_eq!(session(&node, id.as_str().unwrap())[6], 1);
+        assert_eq!(session(&node, id.as_str().unwrap()).6, 1);
     }
 
     {

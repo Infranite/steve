@@ -640,8 +640,8 @@ fn orphan(store: &Store, job: &str, attempt: &str) -> (OperationId, ExecutionRef
     let req = serde_json::to_value(&c).unwrap();
     let digest = digest_of(&req).unwrap().to_string();
     store
-        .transaction::<_, StoreError>(|tx| {
-            create_job_in(
+        .write::<_, StoreError>(|tx| {
+            steve_store::node_jobs::create_job_in(
                 tx,
                 &NewJob {
                     id: job,

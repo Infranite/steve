@@ -142,7 +142,7 @@ async fn start(node: bool) -> Env {
             fixture_db::item(w, "foreign", "OTHER-1", 1)
         })
         .unwrap();
-    let cwd = cfg.scratch.join("ST-1");
+    let cwd = steve_hub::wire::output_files::directory(&cfg.home, "ST-1").unwrap();
     std::fs::create_dir_all(&cwd).unwrap();
     let session = store
         .sessions()

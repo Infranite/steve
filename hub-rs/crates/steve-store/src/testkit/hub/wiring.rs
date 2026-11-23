@@ -271,9 +271,9 @@ pub fn remove_connector_membership(path: &Path, user: &str) -> Result<()> {
 }
 
 pub fn seed_channel_owner(store: &crate::Store, ws: &str, user: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute("INSERT INTO users (id, workspace_id, subject, name, role, created) VALUES (?, ?, 'dev', 'Dev', 'owner', 1)", [user, ws])?;
-        tx.execute("INSERT INTO workspace_members (workspace_id, user_id, role, created) VALUES (?, ?, 'owner', 1)", [ws, user])?;
+    store.write(|tx| {
+        tx.conn.execute("INSERT INTO users (id, workspace_id, subject, name, role, created) VALUES (?, ?, 'dev', 'Dev', 'owner', 1)", [user, ws])?;
+        tx.conn.execute("INSERT INTO workspace_members (workspace_id, user_id, role, created) VALUES (?, ?, 'owner', 1)", [ws, user])?;
         Ok(())
     })
 }
@@ -294,11 +294,11 @@ pub fn set_channel_trigger(
 }
 
 pub fn item_count(store: &crate::Store) -> Result<i64> {
-    store.reader(|db| Ok(db.query_row("SELECT count(*) FROM items", [], |r| r.get(0))?))
+    store.sqlite_read(|db| Ok(db.query_row("SELECT count(*) FROM items", [], |r| r.get(0))?))
 }
 
 pub fn tool_route_count(store: &crate::Store) -> Result<i64> {
-    store.reader(|db| {
+    store.sqlite_read(|db| {
         Ok(db.query_row(
             "SELECT count(*) FROM route_log WHERE outcome = 'needs_tools' AND item_id IS NOT NULL",
             [],
@@ -308,11 +308,11 @@ pub fn tool_route_count(store: &crate::Store) -> Result<i64> {
 }
 
 pub fn steve_channel_item_messages(store: &crate::Store) -> Result<i64> {
-    store.reader(|db| Ok(db.query_row("SELECT count(*) FROM messages WHERE space LIKE 'chan:%' AND author = 'steve' AND item_id IS NOT NULL", [], |r| r.get(0))?))
+    store.sqlite_read(|db| Ok(db.query_row("SELECT count(*) FROM messages WHERE space LIKE 'chan:%' AND author = 'steve' AND item_id IS NOT NULL", [], |r| r.get(0))?))
 }
 
 pub fn outbound_channel_messages(store: &crate::Store) -> Result<i64> {
-    store.reader(|db| {
+    store.sqlite_read(|db| {
         Ok(db.query_row(
             "SELECT count(*) FROM chan_messages WHERE direction='out'",
             [],
@@ -322,7 +322,7 @@ pub fn outbound_channel_messages(store: &crate::Store) -> Result<i64> {
 }
 
 pub fn failed_reaction_clears(store: &crate::Store) -> Result<i64> {
-    store.reader(|db| {
+    store.sqlite_read(|db| {
         Ok(db.query_row(
             "SELECT count(*) FROM chan_reactions WHERE state='cleared' AND error IS NOT NULL",
             [],

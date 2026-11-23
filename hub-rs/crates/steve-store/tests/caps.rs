@@ -1,6 +1,7 @@
 //! Migration 65: the capabilities library, assigned per Bot; what a session gets; and the move of
 //! 62's and 63's per-Bot rows into it.
 
+use steve_store::testkit::SqliteFixtures;
 mod common;
 
 use common::*;
@@ -40,7 +41,7 @@ fn skill(id: &str, name: &str) -> skills::Skill {
 fn setup() -> T {
     let t = fresh();
     t.store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             c.execute_batch(
                 "INSERT OR IGNORE INTO bots (id, workspace_id, name, harness, updated) VALUES ('dev', 'default', '开发', 'claude-code', 1), ('doc', 'default', '文档', 'codex', 1);
                  INSERT INTO sessions (id, workspace_id, bot_id, harness, cwd, status, created, updated) VALUES ('s_dev', 'default', 'dev', 'claude-code', '.', 'active', 1, 1), ('s_none', 'default', NULL, 'claude-code', '.', 'active', 1, 1);",
@@ -136,7 +137,7 @@ fn a_secret_value_never_reaches_the_row() {
     t.store.write(|tx| mcp::Servers(tx).insert(&s)).unwrap();
     let raw: String = t
         .store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             Ok(
                 c.query_row("SELECT env FROM mcp_servers WHERE id = 'bmcp_1'", [], |r| {
                     r.get(0)
@@ -263,7 +264,7 @@ fn pins_follow_their_entries_and_usage_sums_by_tool() {
         .unwrap();
     let old: i64 = t
         .store
-        .reader(|c| -> steve_store::Result<_> {
+        .fixture_read(|c| -> steve_store::Result<_> {
             Ok(c.query_row(
                 "SELECT COUNT(*) FROM tool_usage WHERE tool = 'old'",
                 [],
@@ -279,7 +280,7 @@ fn pins_follow_their_entries_and_usage_sums_by_tool() {
     );
     assert_eq!(
         t.store
-            .reader(|c| Ok::<_, steve_store::StoreError>(count(
+            .fixture_read(|c| Ok::<_, steve_store::StoreError>(count(
                 c,
                 "SELECT count(*) FROM tool_usage WHERE tool='old'"
             )))

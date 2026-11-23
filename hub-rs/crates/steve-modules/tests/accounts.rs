@@ -81,7 +81,7 @@ fn works_at(t: &TestEnv, subject: &str, org: &str) -> usize {
 
 fn ident(t: &TestEnv, system: &str, handle: &str, hints: &Hints) -> Result<Identified, ApiError> {
     t.store()
-        .transaction(|tx| identify(tx, WS, ME, system, handle, hints))
+        .write(|tx| identify(tx, WS, ME, system, handle, hints))
 }
 
 fn named(n: &str) -> Hints {

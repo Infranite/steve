@@ -290,7 +290,7 @@ impl Inspect {
         }
     }
     pub fn read(self, store: &Store, args: &[&dyn FixtureValue]) -> Result<Value> {
-        store.reader(|c| {
+        store.sqlite_read(|c| {
             Ok(c.query_row(
                 self.statement(),
                 rusqlite::params_from_iter(bind(args)),
@@ -395,7 +395,7 @@ impl Seed {
 }
 
 pub fn app_connection(store: &Store) -> Result<String> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT id FROM connections WHERE adapter = 'github_app'",
             [],
@@ -405,7 +405,7 @@ pub fn app_connection(store: &Store) -> Result<String> {
 }
 
 pub fn open_decision(store: &Store, subject: &str) -> Result<Option<(String, String, String)>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT id, question, draft FROM decisions WHERE subject_type = ? AND status = 'open'",
             [subject],
@@ -416,7 +416,7 @@ pub fn open_decision(store: &Store, subject: &str) -> Result<Option<(String, Str
 }
 
 pub fn table_counts(store: &Store) -> Result<std::collections::BTreeMap<String, i64>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         let names = c
             .prepare(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",

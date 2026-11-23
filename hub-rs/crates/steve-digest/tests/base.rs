@@ -471,7 +471,7 @@ fn memory_index_validates_ids_ranges_and_unlinks_only_what_it_added() {
     msg(&e, "s1", "m1", NOW, None, None, "deadline tomorrow");
     let mem = e
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             mems::create(
                 tx,
                 WS,
@@ -1040,7 +1040,7 @@ async fn memory_index_undo_conflicts_with_later_ranges_without_partial_deletion(
     msg(&e, "s1", "range2", NOW + 1, None, None, "second");
     let mem = e
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             mems::create(
                 tx,
                 WS,
@@ -1385,7 +1385,7 @@ fn single_user_fulltext_candidates_include_private_memories_but_keep_workspace_a
     let e = env();
     let ids = e
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             let mut ids = Vec::new();
             for (ws, level, status, expired) in [
                 (WS, steve_store::base::Level::Conclusion, "confirmed", false),
@@ -1408,7 +1408,7 @@ fn single_user_fulltext_candidates_include_private_memories_but_keep_workspace_a
                         ..Default::default()
                     },
                 )?;
-                tx.write(|w| steve_knowledge::sync::sync_mem(w, &memory.id, NOW))?;
+                tx.scope(|w| steve_knowledge::sync::sync_mem(w, &memory.id, NOW))?;
                 // Simulate an index that has not yet caught up with source-state changes.
                 mems::patch(
                     tx,

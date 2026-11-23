@@ -8,7 +8,7 @@ use crate::{Result, Store};
 use rusqlite::params;
 
 pub fn outbox_payloads<T: DeserializeOwned>(store: &Store, topic: &str) -> Result<Vec<T>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         let mut query =
             c.prepare_cached("SELECT payload FROM outbox_events WHERE topic = ? ORDER BY seq")?;
         let raw = query
@@ -21,7 +21,7 @@ pub fn outbox_payloads<T: DeserializeOwned>(store: &Store, topic: &str) -> Resul
 }
 
 pub fn signal_without_connection(store: &Store, id: &str, visibility: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute(
             "UPDATE ext_events SET connection_id = NULL, visibility = ? WHERE id = ?",
             rusqlite::params![visibility, id],
@@ -43,7 +43,7 @@ pub struct FixtureItem<'a> {
 }
 
 pub fn create_item(store: &Store, req: FixtureItem<'_>) -> Result<String> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
                 let no: i64 = c.query_row(
                     "SELECT coalesce(max(no), 0) + 1 FROM items WHERE workspace_id = ?",
                     [&req.ws],
@@ -76,7 +76,7 @@ pub fn create_item(store: &Store, req: FixtureItem<'_>) -> Result<String> {
 }
 
 pub fn set_item_status(store: &Store, item: &str, status: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute("UPDATE items SET status = ? WHERE id = ?", (status, item))?;
         Ok(())
     })
@@ -84,7 +84,7 @@ pub fn set_item_status(store: &Store, item: &str, status: &str) -> Result<()> {
 
 pub fn seed_workspace(store: &Store) -> Result<()> {
     store
-            .with_conn(|c| {
+            .write_locked(|c| {
                 c.execute_batch(
                     "INSERT INTO bots (id, workspace_id, name, main, harness, enabled, updated) VALUES ('steve', 'default', 'Steve', 1, 'claude-code', 1, 1), ('ops', 'default', '运维', 0, 'claude-code', 1, 1), ('off', 'default', '停用的', 0, 'claude-code', 0, 1), ('w2bot', 'w2', '别处', 0, 'claude-code', 1, 1);
                      INSERT INTO bot_workspaces (bot_id, workspace_id, created) VALUES ('steve', 'default', 1), ('steve', 'w2', 1), ('ops', 'default', 1), ('off', 'default', 1), ('w2bot', 'w2', 1);
@@ -105,7 +105,7 @@ pub fn event_connection(
     let con = crate::uid("con");
     let acc = crate::uid("acc");
     let party = crate::uid("ct");
-    store.with_conn(|c| {
+    store.write_locked(|c| {
                 match owner {
                     Some(u) => c.execute(
                         "INSERT INTO parties (id, workspace_id, type, name, user_id, created_by, created, updated) VALUES (?, ?, 'contact', '我', ?, ?, 1, 1)",
@@ -154,11 +154,11 @@ pub fn decisions_for(
 }
 
 pub fn flow_count(store: &Store) -> Result<i64> {
-    store.reader(|c| Ok(c.query_row("SELECT count(*) FROM flows", [], |r| r.get(0))?))
+    store.sqlite_read(|c| Ok(c.query_row("SELECT count(*) FROM flows", [], |r| r.get(0))?))
 }
 
 pub fn enabled_trigger_count(store: &Store, id: &str) -> Result<i64> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT count(*) FROM flow_triggers WHERE flow_id = ? AND enabled = 1",
             [id],
@@ -175,7 +175,7 @@ pub struct Correction {
 }
 
 pub fn corrections(store: &Store, event: &str) -> Result<Vec<Correction>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         let mut query = c.prepare("SELECT action, scope, changeset_id, work_item_id FROM signal_corrections WHERE event_id = ? ORDER BY created")?;
         Ok(query.query_map([event], |r| Ok(Correction {
             action: r.get(0)?, scope: r.get(1)?, change: r.get(2)?, item: r.get(3)?,
@@ -184,7 +184,7 @@ pub fn corrections(store: &Store, event: &str) -> Result<Vec<Correction>> {
 }
 
 pub fn rule_texts(store: &Store) -> Result<Vec<String>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         let mut query = c.prepare("SELECT text FROM mems WHERE kind = 'rule' ORDER BY created")?;
         Ok(query
             .query_map([], |r| r.get(0))?
@@ -210,7 +210,7 @@ pub fn fixture_item(
     title: &str,
     status: &str,
 ) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute(
             "INSERT INTO items (id, workspace_id, no, title, status, stage, bot_id, created, updated) VALUES (?, ?, ?, ?, ?, '', 'steve', 1, 1)",
             params![id, ws, no, title, status],
@@ -220,7 +220,7 @@ pub fn fixture_item(
 }
 
 pub fn latest_receipt(store: &Store) -> Result<String> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT outcome FROM outbox_receipts ORDER BY event_seq DESC LIMIT 1",
             [],
@@ -239,7 +239,7 @@ pub fn applied_receipt(
 }
 
 pub fn event_ids(store: &Store) -> Result<Vec<String>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         let mut stmt = c.prepare("SELECT id FROM ext_events ORDER BY received, id")?;
         Ok(stmt
             .query_map([], |r| r.get(0))?
@@ -248,7 +248,7 @@ pub fn event_ids(store: &Store) -> Result<Vec<String>> {
 }
 
 pub fn runs_in_status(store: &Store, status: &str) -> Result<i64> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT count(*) FROM flow_runs WHERE status = ?",
             [status],
@@ -258,11 +258,11 @@ pub fn runs_in_status(store: &Store, status: &str) -> Result<i64> {
 }
 
 pub fn wait_count(store: &Store) -> Result<i64> {
-    store.reader(|c| Ok(c.query_row("SELECT count(*) FROM flow_waits", [], |r| r.get(0))?))
+    store.sqlite_read(|c| Ok(c.query_row("SELECT count(*) FROM flow_waits", [], |r| r.get(0))?))
 }
 
 pub fn waiting_for_item(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute_batch(
             "INSERT INTO flow_runs (id, workspace_id, flow_id, flow_version, trigger_kind, status, started) VALUES ('run_w', 'default', 'flw_w', 1, 'event', 'waiting', 1);
              INSERT INTO flow_waits (run_id, node_id, workspace_id, mode, match, created) VALUES ('run_w', 'w', 'default', 'event', '{\"source\":\"item\"}', 1);",
@@ -272,7 +272,7 @@ pub fn waiting_for_item(store: &Store) -> Result<()> {
 }
 
 pub fn set_run_table_available(store: &Store, available: bool) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute_batch(if available {
             "ALTER TABLE review_missing_runs RENAME TO flow_runs"
         } else {
@@ -283,21 +283,21 @@ pub fn set_run_table_available(store: &Store, available: bool) -> Result<()> {
 }
 
 pub fn require_initial_run_error(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute_batch("CREATE TRIGGER require_start_error BEFORE INSERT ON flow_runs WHEN NEW.status='failed' AND NEW.error IS NULL BEGIN SELECT RAISE(ABORT,'missing initial error'); END")?;
         Ok(())
     })
 }
 
 pub fn reject_run_updates(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute_batch("CREATE TRIGGER reject_run_update BEFORE UPDATE ON flow_runs BEGIN SELECT RAISE(ABORT,'history unavailable'); END")?;
         Ok(())
     })
 }
 
 pub fn startup_flow(store: &Store, ws: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute("INSERT INTO flows (id,workspace_id,kind,name,graph,origin,created_by,created,updated) VALUES ('flow_start',?,'schedule','fixture','{}','me','usr_dev',0,0)", [ws])?;
         Ok(())
     })
@@ -309,7 +309,7 @@ pub fn set_run_context_field(
     path: &str,
     value: &serde_json::Value,
 ) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute(
             "UPDATE flow_runs SET context=json_set(context,?1,json(?2)) WHERE id=?3",
             params![path, value.to_string(), id],
@@ -337,29 +337,29 @@ pub fn damage_startup_run(store: &Store, id: &str, column: DamagedRunColumn) -> 
         DamagedRunColumn::Id => "id=x'ff'",
         DamagedRunColumn::Context => "context=CAST(context AS BLOB)",
     };
-    store.transaction(|tx| {
-        tx.execute("UPDATE flow_runs SET context=json_set(context,'$.startup.attempts','broken') WHERE id=?", [id])?;
-        tx.execute(&format!("UPDATE flow_runs SET {change} WHERE id=?"), [id])?;
+    store.write(|tx| {
+        tx.conn.execute("UPDATE flow_runs SET context=json_set(context,'$.startup.attempts','broken') WHERE id=?", [id])?;
+        tx.conn.execute(&format!("UPDATE flow_runs SET {change} WHERE id=?"), [id])?;
         Ok(())
     })
 }
 
 pub fn set_raw_run_context(store: &Store, id: &str, context: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute("UPDATE flow_runs SET context=? WHERE id=?", [context, id])?;
         Ok(())
     })
 }
 
 pub fn set_raw_flow_graph(store: &Store, id: &str, graph: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute("UPDATE flows SET graph=? WHERE id=?", [graph, id])?;
         Ok(())
     })
 }
 
 pub fn set_run_event(store: &Store, id: &str, event: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute("UPDATE flow_runs SET event_id=? WHERE id=?", [event, id])?;
         Ok(())
     })
@@ -367,21 +367,21 @@ pub fn set_run_event(store: &Store, id: &str, event: &str) -> Result<()> {
 
 pub fn set_event_capability(store: &Store, id: &str, enabled: bool) -> Result<()> {
     let caps = if enabled { r#"["events"]"# } else { "[]" };
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute("UPDATE connections SET caps=? WHERE id=?", [caps, id])?;
         Ok(())
     })
 }
 
 pub fn set_connection_status(store: &Store, id: &str, status: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute("UPDATE connections SET status=? WHERE id=?", [status, id])?;
         Ok(())
     })
 }
 
 pub fn pause_source(store: &Store, id: &str, paused: bool) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute(
             "UPDATE source_settings SET paused=? WHERE connection_id=?",
             params![paused, id],
@@ -391,14 +391,14 @@ pub fn pause_source(store: &Store, id: &str, paused: bool) -> Result<()> {
 }
 
 pub fn touch_connection(store: &Store, id: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute("UPDATE connections SET updated=updated+1 WHERE id=?", [id])?;
         Ok(())
     })
 }
 
 pub fn set_connections_available(store: &Store, available: bool) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute_batch(if available {
             "ALTER TABLE offline_connections RENAME TO connections"
         } else {
@@ -409,7 +409,7 @@ pub fn set_connections_available(store: &Store, available: bool) -> Result<()> {
 }
 
 pub fn event_external_ids(store: &Store) -> Result<Vec<String>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         let mut stmt = c.prepare("SELECT external_id FROM ext_events ORDER BY external_id")?;
         Ok(stmt
             .query_map([], |r| r.get(0))?
@@ -418,7 +418,7 @@ pub fn event_external_ids(store: &Store) -> Result<Vec<String>> {
 }
 
 pub fn synced_connections(store: &Store) -> Result<Vec<String>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         let mut stmt =
             c.prepare("SELECT id FROM connections WHERE last_sync IS NOT NULL ORDER BY id")?;
         Ok(stmt
@@ -428,7 +428,7 @@ pub fn synced_connections(store: &Store) -> Result<Vec<String>> {
 }
 
 pub fn connection_last_sync(store: &Store, id: &str) -> Result<i64> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(
             c.query_row("SELECT last_sync FROM connections WHERE id=?", [id], |r| {
                 r.get(0)
@@ -438,18 +438,18 @@ pub fn connection_last_sync(store: &Store, id: &str) -> Result<i64> {
 }
 
 pub fn run_count(store: &Store) -> Result<i64> {
-    store.reader(|c| Ok(c.query_row("SELECT count(*) FROM flow_runs", [], |r| r.get(0))?))
+    store.sqlite_read(|c| Ok(c.query_row("SELECT count(*) FROM flow_runs", [], |r| r.get(0))?))
 }
 
 pub fn only_run(store: &Store) -> Result<crate::RunRow> {
-    let id: String = store.reader(|c| -> Result<_> {
+    let id: String = store.sqlite_read(|c| -> Result<_> {
         Ok(c.query_row("SELECT id FROM flow_runs", [], |r| r.get(0))?)
     })?;
     store.read(|r| crate::repo::must(crate::RunRows(r).get(&id)?))
 }
 
 pub fn set_triage_bot(store: &Store, ws: &str, id: &str, bot: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute(
             "INSERT INTO source_settings (connection_id, workspace_id, triage_bot, updated) VALUES (?, ?, ?, 1)",
             params![id, ws, bot],
@@ -459,7 +459,7 @@ pub fn set_triage_bot(store: &Store, ws: &str, id: &str, bot: &str) -> Result<()
 }
 
 pub fn revisions_by(store: &Store, kind: &str, id: &str, author: &str) -> Result<i64> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT count(*) FROM revisions WHERE object_type = ? AND object_id = ? AND author = ?",
             [kind, id, author],
@@ -469,7 +469,7 @@ pub fn revisions_by(store: &Store, kind: &str, id: &str, author: &str) -> Result
 }
 
 pub fn event_outcomes(store: &Store) -> Result<Vec<(String, String, String, String)>> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         let mut st = c.prepare(
             "SELECT external_id, type, outcome, outcome_label FROM ext_events ORDER BY rowid",
         )?;
@@ -481,7 +481,7 @@ pub fn event_outcomes(store: &Store) -> Result<Vec<(String, String, String, Stri
 }
 
 pub fn seed_handled_signal(store: &Store, id: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
             c.execute_batch(&format!(
                 "INSERT INTO flow_runs (id, workspace_id, flow_id, flow_version, trigger_kind, event_id, status, context, started) VALUES ('run_x', 'default', 'flw_x', 1, 'event', '{id}', 'done', '{{\"event\":{{\"payload\":\"secret text\"}}}}', 1);
                  INSERT INTO flow_run_steps (run_id, seq, workspace_id, node_id, status, input, output, ms, started) VALUES ('run_x', 1, 'default', 't', 'ok', '{{\"a\":1}}', '{{\"b\":2}}', 0.5, 1);"
@@ -491,7 +491,7 @@ pub fn seed_handled_signal(store: &Store, id: &str) -> Result<()> {
 }
 
 pub fn raw_retention_settings(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
             c.execute(
                 "INSERT INTO settings (workspace_id, key, value, updated) VALUES ('default', 'keepRaw', '\"30\"', 1), ('w2', 'keepRaw', '12', 1)",
                 [],
@@ -501,7 +501,7 @@ pub fn raw_retention_settings(store: &Store) -> Result<()> {
 }
 
 pub fn seed_signal_needs_reply(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
             c.execute(
                 "UPDATE ext_events SET outcome = 'need', outcome_label = '等你确认回复' WHERE external_id = 'a'",
                 [],
@@ -511,7 +511,7 @@ pub fn seed_signal_needs_reply(store: &Store) -> Result<()> {
 }
 
 pub fn signal_timezone_boundary(store: &Store, ws: &str, user: &str, now: i64) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute("UPDATE ext_events SET received = ?", [now - 12 * 3_600_000])?;
         c.execute("INSERT INTO settings (workspace_id,key,value,updated) VALUES (?, 'tz', '\"Europe/London\"',1)", [ws])?;
         c.execute("INSERT INTO notification_policies (workspace_id,user_id,timezone,enabled,mode,consented_at,consent_since_seq,updated) VALUES (?,?,'Asia/Tokyo',1,'now',1,0,1)", params![ws, user])?;
@@ -520,14 +520,14 @@ pub fn signal_timezone_boundary(store: &Store, ws: &str, user: &str, now: i64) -
 }
 
 pub fn clear_notification_policies(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute("DELETE FROM notification_policies", [])?;
         Ok(())
     })
 }
 
 pub fn clear_workspace_timezones(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute("DELETE FROM settings WHERE key = 'tz'", [])?;
         Ok(())
     })
@@ -539,7 +539,7 @@ pub fn seed_mail_trigger(
     types: &serde_json::Value,
     conns: &serde_json::Value,
 ) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
             c.execute(
                 "INSERT INTO flows (id, workspace_id, kind, name, enabled, graph, version, origin, created_by, created, updated) VALUES (?, 'default', 'flow', '邮件分诊', 1, '{\"nodes\":[{\"id\":\"t\",\"kind\":\"trigger\"}],\"edges\":[]}', 2, 'me', 'usr_dev', 1, 1)",
                 [id],
@@ -553,7 +553,7 @@ pub fn seed_mail_trigger(
 }
 
 pub fn seed_signal_run(store: &Store, row: &SignalRunFixture<'_>) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
                 c.execute(
                     "INSERT INTO flow_runs (id, workspace_id, flow_id, flow_version, trigger_kind, event_id, status, outcome, outcome_label, context, work_item_id, started) VALUES (?, 'default', ?, 1, 'event', ?, ?, ?, ?, ?, ?, 1)",
                     params![row.rid, format!("flw_{}",row.rid), row.id, row.status, row.outcome, row.label, row.ctx.to_string(), (row.outcome == Some("item")).then_some("ST-9")],
@@ -566,7 +566,7 @@ pub fn signal_settlement(
     store: &Store,
     id: &str,
 ) -> Result<(String, String, String, Option<String>, Option<String>)> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
                 Ok(c.query_row(
                     "SELECT outcome, outcome_label, reason, run_id, work_item_id FROM ext_events WHERE id = ?",
                     [&id],
@@ -584,7 +584,7 @@ pub fn signal_settlement(
 }
 
 pub fn reject_second_signal(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute_batch(
             "CREATE TRIGGER no_b BEFORE INSERT ON ext_events WHEN NEW.external_id = 'b'
                  BEGIN SELECT RAISE(ABORT, 'test store fault'); END",
@@ -594,14 +594,14 @@ pub fn reject_second_signal(store: &Store) -> Result<()> {
 }
 
 pub fn allow_second_signal(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute_batch("DROP TRIGGER no_b")?;
         Ok(())
     })
 }
 
 pub fn seed_mail_and_github_waits(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
             c.execute_batch(
                 "INSERT INTO flow_runs (id, workspace_id, flow_id, flow_version, trigger_kind, status, started) VALUES ('run_w', 'default', 'flw_w', 1, 'event', 'waiting', 1), ('run_v', 'default', 'flw_v', 1, 'event', 'waiting', 1);
                  INSERT INTO flow_waits (run_id, node_id, workspace_id, mode, match, created) VALUES ('run_w', 'w', 'default', 'event', '{\"source\":\"mail\",\"type\":\"mail.reply\"}', 1), ('run_v', 'v', 'default', 'event', '{\"source\":\"github\"}', 1);",
@@ -620,7 +620,7 @@ pub struct SignalRunFixture<'a> {
 }
 
 pub fn latest_open_decision(store: &Store, subject_type: &str) -> Result<Option<String>> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
             Ok(rusqlite::OptionalExtension::optional(c.query_row(
                 "SELECT id FROM decisions WHERE subject_type = ? AND status = 'open' ORDER BY created DESC, rowid DESC LIMIT 1",
                 [subject_type],
@@ -630,7 +630,7 @@ pub fn latest_open_decision(store: &Store, subject_type: &str) -> Result<Option<
 }
 
 pub fn trigger_types_enabled(store: &Store, id: &str) -> Result<(String, bool)> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         Ok(c.query_row(
             "SELECT types, enabled FROM flow_triggers WHERE flow_id = ?",
             [&id],
@@ -640,11 +640,11 @@ pub fn trigger_types_enabled(store: &Store, id: &str) -> Result<(String, bool)> 
 }
 
 pub fn decision_count(store: &Store) -> Result<i64> {
-    store.reader(|c| Ok(c.query_row("SELECT count(*) FROM decisions", [], |r| r.get(0))?))
+    store.sqlite_read(|c| Ok(c.query_row("SELECT count(*) FROM decisions", [], |r| r.get(0))?))
 }
 
 pub fn trigger_count(store: &Store, flow: &str) -> Result<i64> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT count(*) FROM flow_triggers WHERE flow_id = ?",
             [flow],
@@ -654,7 +654,7 @@ pub fn trigger_count(store: &Store, flow: &str) -> Result<i64> {
 }
 
 pub fn wait_mode(store: &Store, run: &str) -> Result<String> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(
             c.query_row("SELECT mode FROM flow_waits WHERE run_id = ?", [run], |r| {
                 r.get(0)
@@ -664,7 +664,7 @@ pub fn wait_mode(store: &Store, run: &str) -> Result<String> {
 }
 
 pub fn waits_for(store: &Store, run: &str) -> Result<i64> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT count(*) FROM flow_waits WHERE run_id = ?",
             [run],
@@ -674,7 +674,7 @@ pub fn waits_for(store: &Store, run: &str) -> Result<i64> {
 }
 
 pub fn digest_text(store: &Store, run: &str) -> Result<String> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT text FROM digest_entries WHERE run_id = ?",
             [run],
@@ -685,7 +685,7 @@ pub fn digest_text(store: &Store, run: &str) -> Result<String> {
 
 pub fn event_id_by_external(store: &Store, external: &str) -> Result<Option<String>> {
     use rusqlite::OptionalExtension;
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT id FROM ext_events WHERE external_id = ?",
             [external],
@@ -746,21 +746,21 @@ pub fn flow_grant_in(w: &mut crate::W<'_>, grant: FlowGrantFixture<'_>) -> Resul
 }
 
 pub fn restart_signal(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute("INSERT INTO ext_events (id, workspace_id, source, type, dedupe_key, occurred, received, summary) VALUES ('evt_x', 'default', 'mail', 'mail.new', 'x', 1, 1, '你好')", [])?;
         Ok(())
     })
 }
 
 pub fn successful_secret_uses(store: &Store, flow: &str, first: &str, second: &str) -> Result<i64> {
-    store.reader(|c| Ok(c.query_row(
+    store.sqlite_read(|c| Ok(c.query_row(
         "SELECT count(*) FROM secret_uses WHERE actor_type = 'flow' AND actor_id = ? AND status = 'ok' AND mode = 'internal' AND run_id IN (?, ?)",
         [flow, first, second], |r| r.get(0),
     )?))
 }
 
 pub fn secret_use_grant(store: &Store, run: &str) -> Result<Option<String>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT grant_id FROM secret_uses WHERE run_id = ?",
             [run],
@@ -775,7 +775,7 @@ pub fn host_and_secret_grants(
     decision: &str,
     secret: &str,
 ) -> Result<i64> {
-    store.reader(|c| Ok(c.query_row(
+    store.sqlite_read(|c| Ok(c.query_row(
         "SELECT COUNT(*) FROM grants WHERE subject_type = 'flow' AND subject_id = ? AND decision_id = ?
          AND ((capability = 'http.effect' AND resource_id = 'api.test')
            OR (capability = 'secret.use' AND resource_id = ?))",
@@ -784,7 +784,7 @@ pub fn host_and_secret_grants(
 }
 
 pub fn audit_count(store: &Store, action: &str) -> Result<i64> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT count(*) FROM audit WHERE action = ?",
             [action],
@@ -794,7 +794,7 @@ pub fn audit_count(store: &Store, action: &str) -> Result<i64> {
 }
 
 pub fn code_node_project(store: &Store, ws: &str, setting: &str, path: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
             c.execute(
                 "INSERT INTO settings (workspace_id, key, value, updated) VALUES (?, ?, ?, 1)",
                 params![ws, setting, serde_json::json!(["api.test", "other.test"]).to_string()],
@@ -808,7 +808,7 @@ pub fn code_node_project(store: &Store, ws: &str, setting: &str, path: &str) -> 
 }
 
 pub fn flow_grant_details(store: &Store, flow: &str) -> Result<(String, String, i64, String)> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
             Ok(c.query_row(
                 "SELECT capability, resource_id, json_extract(scope, '$.flow_version'), decision_id FROM grants WHERE subject_type = 'flow' AND subject_id = ?",
                 [flow],
@@ -823,7 +823,7 @@ pub fn secret_release_fault(
     second: &str,
     approval: bool,
 ) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
             let mutation=if approval {format!("UPDATE grants SET revoked=1 WHERE resource_id='{}';",second)}else{format!("UPDATE vault_items SET status='deleted' WHERE id='{}';",second)};
             c.execute_batch(&format!("CREATE TRIGGER ts5_second_release_fault AFTER INSERT ON secret_uses WHEN NEW.item_id='{}' BEGIN {mutation} END",first))?;Ok(())
         })
@@ -832,7 +832,7 @@ pub fn secret_release_fault(
 pub type SecretUseResult = (String, String, Option<i64>, Option<String>);
 
 pub fn secret_use_results(store: &Store) -> Result<Vec<SecretUseResult>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         let mut stmt =
             c.prepare("SELECT item_id,status,finished,run_id FROM secret_uses ORDER BY rowid")?;
         Ok(stmt
@@ -877,7 +877,7 @@ pub fn correction_signal(w: &mut crate::W<'_>, ws: &str, flow: Option<&str>) -> 
 }
 
 pub fn trigger_next_at(store: &Store, flow: &str) -> Result<Option<i64>> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         Ok(c.query_row(
             "SELECT next_at FROM flow_triggers WHERE flow_id = ?",
             [flow],
@@ -887,7 +887,7 @@ pub fn trigger_next_at(store: &Store, flow: &str) -> Result<Option<i64>> {
 }
 
 pub fn close_item(store: &Store, id: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute(
             "UPDATE items SET phase = 'closed', status = 'done' WHERE id = ?",
             [id],
@@ -897,7 +897,7 @@ pub fn close_item(store: &Store, id: &str) -> Result<()> {
 }
 
 pub fn timeline_text(store: &Store, item: &str) -> Result<Vec<String>> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         let mut q = c.prepare("SELECT text FROM timeline WHERE item_id = ? ORDER BY id")?;
         let v = q
             .query_map([item], |r| r.get::<_, String>(0))?
@@ -907,7 +907,7 @@ pub fn timeline_text(store: &Store, item: &str) -> Result<Vec<String>> {
 }
 
 pub fn scheduled_item_origin(store: &Store) -> Result<(Option<String>, String)> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         Ok(c.query_row(
             "SELECT accept_mode, source FROM items WHERE id = 'ST-1'",
             [],
@@ -917,7 +917,7 @@ pub fn scheduled_item_origin(store: &Store) -> Result<(Option<String>, String)> 
 }
 
 pub fn seed_session_cost(store: &Store, sid: &str, item: &str, cost: f64) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
             c.execute(
                 "INSERT INTO sessions (id, workspace_id, item_id, harness, cwd, status, cost, created, updated) VALUES (?, 'default', ?, 'claude-code', '/tmp', 'running', ?, 1, 1) ON CONFLICT(id) DO UPDATE SET cost = excluded.cost",
                 params![sid, item, cost],
@@ -927,7 +927,7 @@ pub fn seed_session_cost(store: &Store, sid: &str, item: &str, cost: f64) -> Res
 }
 
 pub fn seed_schedule_retention(store: &Store, a: &str, b: &str, now: i64, day: i64) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
             for i in 0..210 {
                 c.execute("INSERT INTO flow_runs (id, workspace_id, flow_id, flow_version, trigger_kind, status, started) VALUES (?, 'default', ?, 1, 'time', 'done', ?)", params![format!("run_a{i}"), a, now - 100 * day + i])?;
                 c.execute("INSERT INTO flow_run_steps (run_id, seq, workspace_id, node_id, status, started) VALUES (?, 1, 'default', 't', 'ok', 1)", [format!("run_a{i}")])?;
@@ -943,7 +943,7 @@ pub fn seed_schedule_retention(store: &Store, a: &str, b: &str, now: i64, day: i
 }
 
 pub fn item_requester(store: &Store, item: &str) -> Result<Option<String>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok::<_, crate::StoreError>(c.query_row(
             "SELECT requested_by FROM items WHERE id = ?",
             [&item],
@@ -953,7 +953,7 @@ pub fn item_requester(store: &Store, item: &str) -> Result<Option<String>> {
 }
 
 pub fn remove_workspace_member(store: &Store, ws: &str, user: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute(
             "DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
             params![ws, user],
@@ -963,18 +963,18 @@ pub fn remove_workspace_member(store: &Store, ws: &str, user: &str) -> Result<()
 }
 
 pub fn reject_digest_update(store: &Store) -> Result<()> {
-    store.with_conn(|c| {c.execute_batch("CREATE TRIGGER fail_digest BEFORE UPDATE ON digest_entries BEGIN SELECT RAISE(ABORT,'injected digest failure'); END;")?;Ok(())})
+    store.write_locked(|c| {c.execute_batch("CREATE TRIGGER fail_digest BEFORE UPDATE ON digest_entries BEGIN SELECT RAISE(ABORT,'injected digest failure'); END;")?;Ok(())})
 }
 
 pub fn allow_digest_update(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute_batch("DROP TRIGGER fail_digest")?;
         Ok(())
     })
 }
 
 pub fn schedule_retained_steps(store: &Store) -> Result<i64> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT count(*) FROM flow_run_steps WHERE run_id LIKE 'run_a%'",
             [],

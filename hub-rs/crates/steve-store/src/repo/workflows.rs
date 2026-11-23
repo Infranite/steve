@@ -912,7 +912,7 @@ impl Workflows<'_> {
     pub fn get(&self, parent: &str) -> Result<Option<Workflow>> {
         self.0.read_conn(|c| {
             // Header, units and history are one read snapshot even if another Hub process commits a
-            // new plan between these SELECTs. Free get() remains usable inside an existing Tx.
+            // new plan between these SELECTs. Free get() remains usable inside an existing write.
             crate::read_snapshot(c, |tx| get(tx, parent))
         })
     }

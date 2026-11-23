@@ -148,9 +148,10 @@ impl Stats<'_> {
     /// second call cannot count a turn twice.
     pub fn turn_finish(&self, f: &TurnFinish) -> Result<bool> {
         self.0.write_conn(|w| {
-            let tx = w.tx()?;
-            let ws = finish_in(&tx, f)?;
-            tx.commit()?;
+            let transaction = w.tx()?;
+            let tx = transaction.connection();
+            let ws = finish_in(tx, f)?;
+            transaction.commit()?;
             if let Some(ws) = &ws {
                 w.publish(stats_changed(ws, Some(&f.day)));
             }
@@ -164,7 +165,8 @@ impl Stats<'_> {
     /// row ends with the attempt's real outcome when the Node reports it or the Hub settles it.
     pub fn interrupt_open(&self, ended: i64, day: impl Fn(&str, i64) -> String) -> Result<usize> {
         self.0.write_conn(|w| {
-            let tx = w.tx()?;
+            let transaction = w.tx()?;
+            let tx = transaction.connection();
             // the turn stopped when its session last wrote something, not when the Hub came back up
             let open: Vec<(String, String, i64)> = tx
                 .prepare_cached(
@@ -179,7 +181,7 @@ impl Stats<'_> {
             for (id, ws, at) in &open {
                 let at = (*at).min(ended);
                 finish_in(
-                    &tx,
+                    tx,
                     &TurnFinish {
                         turn_id: id.clone(),
                         ended: at,
@@ -189,7 +191,7 @@ impl Stats<'_> {
                     },
                 )?;
             }
-            tx.commit()?;
+            transaction.commit()?;
             for ws in wss {
                 w.publish(stats_changed(ws, None));
             }
@@ -200,9 +202,10 @@ impl Stats<'_> {
     /// Writes one token record and books it into `stat_daily`; returns the row id.
     pub fn usage_add(&self, u: &NewUsage) -> Result<i64> {
         self.0.write_conn(|w| {
-            let tx = w.tx()?;
-            let id = usage_in(&tx, u)?;
-            tx.commit()?;
+            let transaction = w.tx()?;
+            let tx = transaction.connection();
+            let id = usage_in(tx, u)?;
+            transaction.commit()?;
             w.publish(stats_changed(&u.workspace_id, Some(&u.day)));
             Ok(id)
         })
@@ -211,9 +214,10 @@ impl Stats<'_> {
     /// Writes one item mark; returns the row id.
     pub fn mark_add(&self, m: &NewMark) -> Result<i64> {
         self.0.write_conn(|w| {
-            let tx = w.tx()?;
-            let id = mark_in(&tx, m)?;
-            tx.commit()?;
+            let transaction = w.tx()?;
+            let tx = transaction.connection();
+            let id = mark_in(tx, m)?;
+            transaction.commit()?;
             w.publish(stats_changed(&m.workspace_id, None));
             Ok(id)
         })

@@ -4,7 +4,7 @@ use rusqlite::params;
 
 fn scalar(store: &Store, sql: &str, args: impl rusqlite::Params) -> i64 {
     store
-        .reader(|c| Ok::<_, crate::StoreError>(c.query_row(sql, args, |r| r.get(0))?))
+        .sqlite_read(|c| Ok::<_, crate::StoreError>(c.query_row(sql, args, |r| r.get(0))?))
         .expect("fixture query")
 }
 
@@ -179,7 +179,7 @@ impl Drop for DigestAudit {
         if std::thread::panicking() {
             return;
         }
-        self.0.reader(|c| {
+        self.0.sqlite_read(|c| {
             let tx = c.unchecked_transaction()?;
             let workspaces = tx
                 .prepare("SELECT workspace_id FROM chan_messages UNION SELECT workspace_id FROM mail_messages UNION SELECT workspace_id FROM digest_pending UNION SELECT workspace_id FROM digest_pending_convs")?
@@ -195,7 +195,7 @@ impl Drop for DigestAudit {
 }
 
 pub fn approve_without_decision(store: &Store, id: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute(
             "UPDATE mail_drafts SET status = 'approved', send_at = 0 WHERE id = ?",
             [id],
@@ -205,7 +205,7 @@ pub fn approve_without_decision(store: &Store, id: &str) -> Result<()> {
 }
 
 pub fn edit_approved_body(store: &Store, id: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute(
             "UPDATE mail_drafts SET body = '换过的正文', send_at = 0 WHERE id = ?",
             [id],
@@ -215,7 +215,7 @@ pub fn edit_approved_body(store: &Store, id: &str) -> Result<()> {
 }
 
 pub fn set_draft_session(store: &Store, id: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute(
             "UPDATE mail_drafts SET session_id = 'ses_1' WHERE id = ?",
             [id],
@@ -225,7 +225,7 @@ pub fn set_draft_session(store: &Store, id: &str) -> Result<()> {
 }
 
 pub fn mark_sending(store: &Store, id: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute(
             "UPDATE mail_drafts SET status = 'sending' WHERE id = ?",
             [id],
@@ -235,7 +235,7 @@ pub fn mark_sending(store: &Store, id: &str) -> Result<()> {
 }
 
 pub fn add_mailbox_alias(store: &Store, ws: &str, conn: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
             let acc: String = c.query_row(
                 "SELECT account_id FROM connections WHERE id = ?",
                 [conn],
@@ -250,14 +250,14 @@ pub fn add_mailbox_alias(store: &Store, ws: &str, conn: &str) -> Result<()> {
 }
 
 pub fn reject_outgoing_record(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute_batch("CREATE TRIGGER reject_outgoing BEFORE INSERT ON mail_messages WHEN NEW.direction = 'out' BEGIN SELECT RAISE(ABORT, 'test outgoing record fault'); END")?;
         Ok(())
     })
 }
 
 pub fn reject_failure_record(store: &Store, conn: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         // The approval and the connection are still valid (so the draft is claimed), but its adapter
         // is gone, so preparing the submission fails after the claim.
         c.execute("UPDATE connections SET adapter = 'gone' WHERE id = ?", [conn])?;
@@ -267,7 +267,7 @@ pub fn reject_failure_record(store: &Store, conn: &str) -> Result<()> {
 }
 
 pub fn give_acme_basis(store: &Store, id: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
             c.execute_batch(
                 "INSERT INTO kb_chunks (workspace_id, obj_type, obj_id, seq, heading, text, visibility, level, created_by, source_kind, label, updated)
                  VALUES ('default', 'chunk', 'kd_acme', 3, '', 'Acme 的预算是 30万', 'private', 'reasoning', 'usr_dev', 'note', '笔记 · Acme', 1);",
@@ -284,7 +284,7 @@ pub fn give_acme_basis(store: &Store, id: &str) -> Result<()> {
 }
 
 pub fn remove_acme_basis(store: &Store, id: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
             c.execute_batch("DELETE FROM kb_chunks WHERE obj_id = 'kd_acme';")?;
             c.execute(
                 "UPDATE mail_drafts SET basis = json_set(basis, '$.entries', json(?)) WHERE id = ?",
@@ -298,7 +298,7 @@ pub fn remove_acme_basis(store: &Store, id: &str) -> Result<()> {
 }
 
 pub fn triage_bots(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
             c.execute_batch(
                 "INSERT INTO bots (id, workspace_id, name, role, main, harness, enabled, updated) VALUES ('steve', 'default', 'Steve', '', 1, 'claude-code', 1, 1), ('mail', 'default', '邮件', '处理邮件', 0, 'claude-code', 1, 1);
                  INSERT INTO bot_workspaces (bot_id, workspace_id, created) VALUES ('steve', 'default', 1), ('mail', 'default', 1);",
@@ -308,14 +308,14 @@ pub fn triage_bots(store: &Store) -> Result<()> {
 }
 
 pub fn delete_flow(store: &Store, flow: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute("UPDATE flows SET deleted = 1 WHERE id = ?", [flow])?;
         Ok(())
     })
 }
 
 pub fn enable_archive(store: &Store, conn: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute(
             "UPDATE mail_account_settings SET archive_on_done = 1 WHERE connection_id = ?",
             [conn],
@@ -325,7 +325,7 @@ pub fn enable_archive(store: &Store, conn: &str) -> Result<()> {
 }
 
 pub fn reset_mail_event_delivery(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute_batch(
             "DELETE FROM outbox_receipts WHERE consumer_id = 'mail.events';
                  DELETE FROM outbox_leases WHERE consumer_id = 'mail.events';
@@ -337,7 +337,7 @@ pub fn reset_mail_event_delivery(store: &Store) -> Result<()> {
 }
 
 pub fn link_agent_thread(store: &Store, thread: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute_batch("INSERT INTO bots (id,workspace_id,name,harness,model,updated) VALUES ('mail','default','Mail','fixture','writer',1);
             INSERT INTO items (id,workspace_id,no,kind,title,status,stage,created,updated,requested_by) VALUES ('ST-1','default',1,'task','Mail','open','',1,1,'usr_dev');
             INSERT INTO sessions (id,workspace_id,item_id,bot_id,harness,model,cwd,status,created,updated) VALUES ('ses_mail','default','ST-1','mail','fixture','writer','','running',1,1);")?;
@@ -347,7 +347,7 @@ pub fn link_agent_thread(store: &Store, thread: &str) -> Result<()> {
 }
 
 pub fn set_reviewer_model(store: &Store, id: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute(
             "UPDATE mail_drafts SET basis = ? WHERE id = ?",
             params![r#"{"answer_model":"reviewer"}"#, id],
@@ -357,7 +357,7 @@ pub fn set_reviewer_model(store: &Store, id: &str) -> Result<()> {
 }
 
 pub fn give_restricted_basis(store: &Store, id: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute_batch("INSERT INTO kb_chunks (workspace_id,obj_type,obj_id,seq,heading,text,visibility,level,created_by,source_kind,label,updated)
             VALUES ('default','chunk','restricted',0,'','内部预算 420万元','private','reasoning','usr_dev','note','Restricted',1)")?;
         c.execute("UPDATE mail_drafts SET basis = ? WHERE id = ?", params![r#"{"entries":[{"source_type":"chunk","source_id":"restricted","source_label":"Restricted","level":"reasoning","effective":"reasoning","used":true,"out":"reasoning","seq":0}]}"#,id])?;
@@ -366,7 +366,7 @@ pub fn give_restricted_basis(store: &Store, id: &str) -> Result<()> {
 }
 
 pub fn delete_restricted_note(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute("DELETE FROM kb_chunks WHERE obj_id='restricted'", [])?;
         Ok(())
     })
@@ -378,7 +378,7 @@ pub fn change_disclosure_inputs(
     id: &str,
     connection: &str,
 ) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         match mutation {
             "body" => {
                 c.execute(
@@ -423,7 +423,7 @@ pub fn change_disclosure_inputs(
 }
 
 pub fn set_thread_folders(store: &Store, needs_reply: &str, waiting: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute(
             "UPDATE mail_threads SET state = 'needs_reply' WHERE id = ?",
             [needs_reply],
@@ -437,7 +437,7 @@ pub fn set_thread_folders(store: &Store, needs_reply: &str, waiting: &str) -> Re
 }
 
 pub fn invalidate_doc(store: &Store, doc: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute("UPDATE kb_docs SET sha256 = '' WHERE id = ?", [doc])?;
         Ok(())
     })
@@ -450,7 +450,7 @@ pub fn new_session(
     item: &str,
     cwd: &std::path::Path,
 ) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
             c.execute(
                 "INSERT INTO sessions (id, workspace_id, item_id, no, bot_id, harness, cwd, status, created, updated) VALUES (?, ?, ?, 1, 'mail', 'claude', ?, 'running', 1, 1)",
                 params![id, ws, item, cwd.to_string_lossy()],
@@ -460,7 +460,7 @@ pub fn new_session(
 }
 
 pub fn mcp_bot(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
             c.execute_batch(
                 "INSERT INTO bots (id, workspace_id, name, harness, updated) VALUES ('mail', 'default', '邮件', 'claude-code', 1);
                  INSERT INTO bot_workspaces (bot_id, workspace_id, created) VALUES ('mail', 'default', 1);",
@@ -471,7 +471,7 @@ pub fn mcp_bot(store: &Store) -> Result<()> {
 
 pub fn party_name(store: &Store, id: &str) -> String {
     store
-        .reader(|c| {
+        .sqlite_read(|c| {
             Ok::<_, crate::StoreError>(c.query_row(
                 "SELECT name FROM parties WHERE id = ?",
                 [id],
@@ -483,7 +483,7 @@ pub fn party_name(store: &Store, id: &str) -> String {
 
 pub fn source_scopes(store: &Store, conn: &str) -> String {
     store
-        .reader(|c| {
+        .sqlite_read(|c| {
             Ok::<String, crate::StoreError>(c.query_row(
                 "SELECT scopes FROM source_settings WHERE connection_id = ?",
                 [conn],
@@ -495,7 +495,7 @@ pub fn source_scopes(store: &Store, conn: &str) -> String {
 
 pub fn event_ids(store: &Store) -> Vec<String> {
     store
-        .reader(|c| {
+        .sqlite_read(|c| {
             let mut st = c.prepare("SELECT id FROM ext_events ORDER BY received, rowid")?;
             let v = st
                 .query_map([], |r| r.get(0))?
@@ -506,7 +506,7 @@ pub fn event_ids(store: &Store) -> Vec<String> {
 }
 
 pub fn event(store: &Store, id: &str) -> serde_json::Value {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
                 Ok::<_, crate::StoreError>(c.query_row(
                     "SELECT id, type, outcome, outcome_label, decision_id, work_item_id, thread_key FROM ext_events WHERE id = ?",
                     [id],
@@ -525,7 +525,7 @@ pub fn event(store: &Store, id: &str) -> serde_json::Value {
 }
 
 pub fn message_with_subject(store: &Store, conn: &str, subject: &str) -> String {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
                 Ok::<_, crate::StoreError>(c.query_row(
                     "SELECT id FROM mail_messages WHERE connection_id = ?1 AND subject LIKE ?2 || '%' ORDER BY date LIMIT 1",
                     [conn, subject],
@@ -537,7 +537,7 @@ pub fn message_with_subject(store: &Store, conn: &str, subject: &str) -> String 
 
 pub fn flow_by_origin(store: &Store, origin: &str) -> String {
     store
-        .reader(|c| {
+        .sqlite_read(|c| {
             Ok::<_, crate::StoreError>(c.query_row(
                 "SELECT id FROM flows WHERE origin = ?",
                 [origin],
@@ -549,7 +549,7 @@ pub fn flow_by_origin(store: &Store, origin: &str) -> String {
 
 pub fn decision_state(store: &Store, id: &str) -> (String, String, String) {
     store
-        .reader(|c| {
+        .sqlite_read(|c| {
             Ok::<_, crate::StoreError>(c.query_row(
                 "SELECT kind, subject_type, status FROM decisions WHERE id = ?",
                 [id],
@@ -560,7 +560,7 @@ pub fn decision_state(store: &Store, id: &str) -> (String, String, String) {
 }
 
 pub fn event_steps(store: &Store, event: &str) -> Vec<String> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
             let mut st = c.prepare(
                 "SELECT s.node_id FROM flow_run_steps s JOIN flow_runs r ON r.id = s.run_id WHERE r.event_id = ? ORDER BY s.seq",
             )?;
@@ -574,7 +574,7 @@ pub fn event_steps(store: &Store, event: &str) -> Vec<String> {
 
 pub fn draft_step_output(store: &Store, run: &str) -> String {
     store
-        .reader(|c| {
+        .sqlite_read(|c| {
             Ok::<_, crate::StoreError>(c.query_row(
                 "SELECT output FROM flow_run_steps WHERE run_id = ? AND node_id = 'r'",
                 [run],
@@ -585,7 +585,7 @@ pub fn draft_step_output(store: &Store, run: &str) -> String {
 }
 
 pub fn item_link_count(store: &Store, item: &str, pred: &str, ty: &str, id: &str) -> i64 {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
                 Ok::<_, crate::StoreError>(c.query_row(
                     "SELECT COUNT(*) FROM links WHERE subject_type = 'item' AND subject_id = ?1 AND predicate = ?2 AND object_type = ?3 AND object_id = ?4",
                     [item, pred, ty, id],
@@ -597,7 +597,7 @@ pub fn item_link_count(store: &Store, item: &str, pred: &str, ty: &str, id: &str
 
 pub fn triage_bot(store: &Store, conn: &str) -> Option<String> {
     store
-        .reader(|c| {
+        .sqlite_read(|c| {
             Ok::<_, crate::StoreError>(c.query_row(
                 "SELECT triage_bot FROM source_settings WHERE connection_id = ?",
                 [conn],
@@ -609,7 +609,7 @@ pub fn triage_bot(store: &Store, conn: &str) -> Option<String> {
 
 pub fn item_drafts(store: &Store, item: &str) -> Vec<String> {
     store
-        .reader(|c| {
+        .sqlite_read(|c| {
             let mut st =
                 c.prepare("SELECT id FROM mail_drafts WHERE item_id = ? ORDER BY created, rowid")?;
             let v = st
@@ -622,7 +622,7 @@ pub fn item_drafts(store: &Store, item: &str) -> Vec<String> {
 
 pub fn attachment_file(store: &Store, part: &str) -> Option<String> {
     store
-        .reader(|c| {
+        .sqlite_read(|c| {
             Ok::<_, crate::StoreError>(c.query_row(
                 "SELECT file_id FROM mail_attachments WHERE id = ?",
                 [part],
@@ -633,7 +633,7 @@ pub fn attachment_file(store: &Store, part: &str) -> Option<String> {
 }
 
 pub fn candidate_mems(store: &Store) -> Vec<(String, String, String, String, String)> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
             let mut st = c.prepare(
                 "SELECT m.text, m.level, m.status, mc.origin, mc.origin_id FROM mems m JOIN mem_candidates mc ON mc.mem_id = m.id ORDER BY m.rowid",
             )?;
@@ -649,7 +649,7 @@ pub fn candidate_mems(store: &Store) -> Vec<(String, String, String, String, Str
 
 pub fn doc_count(store: &Store, thread: &str) -> i64 {
     store
-        .reader(|c| {
+        .sqlite_read(|c| {
             Ok::<_, crate::StoreError>(c.query_row(
                 "SELECT COUNT(*) FROM kb_docs WHERE ref = ?",
                 [thread],
@@ -661,7 +661,7 @@ pub fn doc_count(store: &Store, thread: &str) -> i64 {
 
 pub fn thread_patch_audits(store: &Store, thread: &str) -> i64 {
     store
-        .reader(|c| {
+        .sqlite_read(|c| {
             Ok::<_, crate::StoreError>(c.query_row(
                 "SELECT COUNT(*) FROM audit WHERE action = 'mail_thread.patch' AND target = ?",
                 [thread],
@@ -673,7 +673,7 @@ pub fn thread_patch_audits(store: &Store, thread: &str) -> i64 {
 
 pub fn mailbox_messages(store: &Store, conn: &str) -> Vec<String> {
     store
-        .reader(|c| {
+        .sqlite_read(|c| {
             let mut st = c.prepare(
                 "SELECT id FROM mail_messages WHERE connection_id = ? ORDER BY date, rowid",
             )?;
@@ -686,7 +686,7 @@ pub fn mailbox_messages(store: &Store, conn: &str) -> Vec<String> {
 }
 
 pub fn fail_cursor_message(store: &Store, fail: bool) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         let sql = if fail {
             "CREATE TRIGGER fail_cursor_message BEFORE INSERT ON mail_messages WHEN NEW.ext_id LIKE '%:52' BEGIN SELECT RAISE(FAIL, 'injected store failure'); END;"
         } else {
@@ -699,7 +699,7 @@ pub fn fail_cursor_message(store: &Store, fail: bool) -> Result<()> {
 
 pub fn open_failure(store: &Store, id: &str) -> String {
     store
-        .reader(|c| {
+        .sqlite_read(|c| {
             Ok::<_, crate::StoreError>(c.query_row(
                 "SELECT id FROM decisions WHERE subject_id=? AND kind='fail' AND status='open'",
                 [id],
@@ -719,7 +719,7 @@ pub fn pending_mail_events(store: &Store) -> i64 {
 }
 
 pub fn first_attachment(store: &Store, thread: &str) -> String {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok::<_, crate::StoreError>(c.query_row(
             "SELECT a.id FROM mail_attachments a JOIN mail_messages m ON m.id = a.message_id WHERE m.thread_id = ?",
             [thread], |r| r.get(0),
@@ -728,9 +728,10 @@ pub fn first_attachment(store: &Store, thread: &str) -> String {
 }
 
 pub fn disable_flow(store: &Store, origin: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute("UPDATE flows SET enabled = 0 WHERE origin = ?", [origin])?;
-        tx.execute(
+    store.write(|tx| {
+        tx.conn
+            .execute("UPDATE flows SET enabled = 0 WHERE origin = ?", [origin])?;
+        tx.conn.execute(
             "DELETE FROM flow_triggers WHERE flow_id IN (SELECT id FROM flows WHERE origin = ?)",
             [origin],
         )?;
@@ -739,8 +740,8 @@ pub fn disable_flow(store: &Store, origin: &str) -> Result<()> {
 }
 
 pub fn item(store: &Store, ws: &str, id: &str, no: i64, title: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute(
+    store.write(|tx| {
+        tx.conn.execute(
             "INSERT INTO items (id, workspace_id, no, kind, title, status, stage, created, updated)
             VALUES (?, ?, ?, 'task', ?, 'open', '', 1, 1)",
             params![id, ws, no, title],
@@ -751,7 +752,7 @@ pub fn item(store: &Store, ws: &str, id: &str, no: i64, title: &str) -> Result<(
 
 pub fn send_audits(store: &Store, action: &str) -> Vec<serde_json::Value> {
     store
-        .reader(|c| {
+        .sqlite_read(|c| {
             let mut st = c.prepare("SELECT detail FROM audit WHERE action = ? ORDER BY rowid")?;
             let details = st
                 .query_map([action], |r| r.get::<_, String>(0))?
@@ -768,8 +769,8 @@ pub fn send_audits(store: &Store, action: &str) -> Vec<serde_json::Value> {
 
 pub fn set_connection(store: &Store, conn: &str, status: &str, caps: &[&str]) -> Result<()> {
     let caps = serde_json::to_string(caps).unwrap();
-    store.transaction(|tx| {
-        tx.execute(
+    store.write(|tx| {
+        tx.conn.execute(
             "UPDATE connections SET status = ?, caps = ? WHERE id = ?",
             params![status, caps, conn],
         )?;
@@ -778,7 +779,7 @@ pub fn set_connection(store: &Store, conn: &str, status: &str, caps: &[&str]) ->
 }
 
 pub fn all_drafts(store: &Store) -> Result<Vec<String>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         let mut st = c.prepare("SELECT id FROM mail_drafts ORDER BY rowid")?;
         Ok(st
             .query_map([], |r| r.get(0))?
@@ -787,7 +788,7 @@ pub fn all_drafts(store: &Store) -> Result<Vec<String>> {
 }
 
 pub fn decisions_of_draft(store: &Store, id: &str) -> Result<Vec<crate::Decision>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         let mut st = c.prepare("SELECT id FROM decisions WHERE subject_id=? ORDER BY rowid")?;
         let ids = st
             .query_map([id], |r| r.get::<_, String>(0))?

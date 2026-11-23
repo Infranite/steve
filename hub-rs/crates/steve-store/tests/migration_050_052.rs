@@ -1,6 +1,7 @@
 //! 050/051/052 follow the published v0.2.66 schema (049): old data stays intact, collaboration and
 //! prerequisite waits are added once, and the completion gate applies to old items too.
 
+use steve_store::testkit::SqliteFixtures;
 mod common;
 
 use common::count;
@@ -50,7 +51,7 @@ fn published_v49_upgrades_and_reopens_with_existing_data_and_new_gates() {
 
     let store = Store::open(&path, NoPublisher).unwrap();
     store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             let compat = db::compat(c)?;
             assert_eq!(
                 (compat.schema, compat.min_reader),
@@ -98,7 +99,7 @@ fn published_v49_upgrades_and_reopens_with_existing_data_and_new_gates() {
     // resume state, rather than replaying them or resetting the published schema.
     let reopened = Store::open(&path, NoPublisher).unwrap();
     reopened
-        .with_conn(|c| {
+        .fixture_write(|c| {
             assert_eq!(count(c, "SELECT count(*) FROM workflows"), 1);
             assert_eq!(count(c, "SELECT count(*) FROM workflow_units"), 1);
             assert_eq!(

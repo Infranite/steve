@@ -18,7 +18,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use steve_modules::accounts::connections::Connections;
 use steve_modules::accounts::connections::EXTRA_SCOPES;
-use steve_modules::accounts::identify::{ExtraHandle, Hints, Identified, identify_handle};
+use steve_modules::accounts::identify::{ExtraHandle, Hints, Identified, identify};
 use steve_modules::vault::VaultResult;
 use steve_modules::{ApiError, ApiResult, Caller, Modules};
 use steve_store::W;
@@ -62,7 +62,7 @@ pub fn identify_sender(
         source_label: Some("飞书".into()),
         ..Default::default()
     };
-    identify_handle(w, ws, actor, USER_SYSTEM, handle, &hints)
+    identify(w, ws, actor, USER_SYSTEM, handle, &hints)
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -94,7 +94,7 @@ pub fn open_decision_count(store: &Store, key: &str) -> Result<serde_json::Value
 }
 
 pub fn revoke_connection(store: &Store, id: &str) -> Result<usize> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         Ok(c.execute(
             "UPDATE connections SET status = 'revoked' WHERE id = ?",
             [id],
@@ -103,11 +103,12 @@ pub fn revoke_connection(store: &Store, id: &str) -> Result<usize> {
 }
 
 pub fn enable_connection(store: &Store, id: &str) -> Result<usize> {
-    store.with_conn(|c| Ok(c.execute("UPDATE connections SET status = 'ok' WHERE id = ?", [id])?))
+    store
+        .write_locked(|c| Ok(c.execute("UPDATE connections SET status = 'ok' WHERE id = ?", [id])?))
 }
 
 pub fn confirm_contact(store: &Store, id: &str) -> Result<usize> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         Ok(c.execute(
             "UPDATE parties SET contact_kind = 'real', source = 'me' WHERE id = ?",
             [id],
@@ -116,7 +117,7 @@ pub fn confirm_contact(store: &Store, id: &str) -> Result<usize> {
 }
 
 pub fn clear_pair(store: &Store, id: &str) -> Result<usize> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         Ok(c.execute(
             "UPDATE connections SET config = json_set(config, '$.app_connection', '') WHERE id = ?",
             [id],
@@ -125,8 +126,8 @@ pub fn clear_pair(store: &Store, id: &str) -> Result<usize> {
 }
 
 pub fn unregister_adapter(store: &Store, id: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute(
+    store.write(|tx| {
+        tx.conn.execute(
             "UPDATE connections SET adapter = 'test_gone' WHERE id = ?",
             [id],
         )?;

@@ -14,7 +14,7 @@ use steve_store::base::links::{self, NewLink};
 use steve_store::base::{DecisionKind, ObjRef, Viewer, Visibility};
 use steve_store::{
     Accounts, Connections, DecisionRows, MatchRules, MergeProposals, NewDecision, NewMergeProposal,
-    Systems, Tx, W, uid,
+    Systems, W, uid,
 };
 
 use super::repo::{Account, NewAccount, System};
@@ -170,17 +170,6 @@ impl AccountTemplate<'_> {
 /// whose behalf it runs (the connection's owner): new contacts are created by them, and only contacts
 /// they can see are proposed as a match.
 pub fn identify(
-    tx: &Tx,
-    ws: &str,
-    actor: &str,
-    system_id: &str,
-    handle: &str,
-    hints: &Hints,
-) -> ApiResult<Identified> {
-    tx.write(|w| identify_handle(w, ws, actor, system_id, handle, hints))
-}
-
-pub fn identify_handle(
     w: &mut W<'_>,
     ws: &str,
     actor: &str,
@@ -408,7 +397,7 @@ pub fn identify_any(
     hints: &Hints,
 ) -> ApiResult<Identified> {
     if aliases.is_empty() {
-        return identify_handle(w, ws, actor, system_id, handle, hints);
+        return identify(w, ws, actor, system_id, handle, hints);
     }
     svc::ensure_seeds(w, ws)?;
     let system = own_system(w, ws, system_id)?;
@@ -451,7 +440,7 @@ pub fn identify_any(
             attach_handle(w, ws, actor, &p, system_id, handle, &hints.extra, &what)?;
         }
     }
-    let id = identify_handle(w, ws, actor, system_id, handle, hints)?;
+    let id = identify(w, ws, actor, system_id, handle, hints)?;
     for a in aliases {
         attach_handle(
             w,

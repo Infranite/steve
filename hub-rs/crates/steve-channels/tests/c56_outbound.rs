@@ -135,14 +135,10 @@ fn decide(h: &H, id: &str, choice: &str, text: &str) -> ApiResult<steve_store::D
         .expect("ours")
 }
 
-/// What steve-core's `undoDecision` does around the handler.
 fn undo(h: &H, id: &str) -> ApiResult<()> {
-    h.env.store().write(|tx| -> ApiResult<()> {
-        let d = steve_store::decision_repo::get(tx, id)?.expect("decision");
-        h.env.modules.registry.before_undo(tx, &d)?;
-        seed::decisions::reopen_fixture_decision(tx, id)?;
-        Ok(())
-    })
+    steve_modules::decisions::undo(&h.env.modules, id, ME, |_| true)
+        .expect("decision handler")
+        .map(|_| ())
 }
 
 fn status(h: &H, id: &str) -> String {
@@ -593,7 +589,7 @@ fn acme(h: &H) -> String {
     // what was said in Acme's own group: reasoning only
     h.env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             mems::create(
                 tx,
                 WS,
@@ -716,7 +712,7 @@ async fn inside_the_sources_scope_it_counts_as_public() {
     let mem = h
         .env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             mems::create(
                 tx,
                 WS,
@@ -1240,7 +1236,7 @@ fn item_from(h: &H, item: &str, message: &str) {
     seed::items::seed_item(h.env.store(), &item).unwrap();
     h.env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             links::add(
                 tx,
                 WS,
@@ -1271,7 +1267,7 @@ async fn a_finished_item_answers_in_its_thread_as_a_draft() {
     item_from(&h, "ST-1", &plan.message_id);
     h.env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             base::decisions::open(
                 tx,
                 &NewDecision {
@@ -2941,7 +2937,7 @@ async fn a_guessed_item_number_unlocks_nothing_outside_its_scope() {
     let item = |vis: Visibility| {
         h.env
             .store()
-            .transaction(|tx| {
+            .write(|tx| {
                 mems::create(
                     tx,
                     WS,
@@ -3900,7 +3896,7 @@ async fn untracked_or_as_you_text_to_your_own_people_is_checked_by_the_model() {
     let mem = h
         .env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             mems::create(
                 tx,
                 WS,
@@ -4129,7 +4125,7 @@ async fn output_pipeline_real_source_reply_uses_existing_outbox_and_stable_ledge
         .unwrap();
     h.env
         .store()
-        .transaction(|tx| -> ApiResult<_> {
+        .write(|tx| -> ApiResult<_> {
             links::add(
                 tx,
                 WS,
@@ -4479,13 +4475,13 @@ async fn notifications_reject_fake_self_service_and_keep_seen_personal() {
     let mine_entry = h
         .env
         .store()
-        .reader(|c| steve_store::feed::detail(c, WS, ME, &format!("feed_{}", mine[0].id)))
+        .read(|c| steve_store::feed::detail(c, WS, ME, &format!("feed_{}", mine[0].id)))
         .unwrap();
     assert!(mine_entry.read_at.is_some());
     assert_eq!(mine_entry.body.unwrap().references.len(), 1);
     h.env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             steve_store::feed::read_ids(
                 tx,
                 WS,
@@ -4662,7 +4658,7 @@ async fn notifications_manual_bot_dm_preference_and_body_cleanup_share_e1_receip
     let feed = h
         .env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             steve_store::feed::list(
                 tx,
                 WS,
@@ -4683,7 +4679,7 @@ async fn notifications_manual_bot_dm_preference_and_body_cleanup_share_e1_receip
     assert!(
         h.env
             .store()
-            .reader(|c| steve_store::feed::detail(c, WS, ME, &feed.entries[0].id))
+            .read(|c| steve_store::feed::detail(c, WS, ME, &feed.entries[0].id))
             .unwrap()
             .body
             .is_none()
@@ -5053,7 +5049,7 @@ async fn notification_thirty_day_source_sweep_cannot_leave_feed_body_or_title_co
     let e = h
         .env
         .store()
-        .reader(|c| steve_store::feed::detail(c, WS, ME, &format!("feed_{}", old[0].id)))
+        .read(|c| steve_store::feed::detail(c, WS, ME, &format!("feed_{}", old[0].id)))
         .unwrap();
     assert!(e.purged && e.title.is_empty() && e.excerpt.is_empty() && e.body.is_none());
     nothing_sent(&h);

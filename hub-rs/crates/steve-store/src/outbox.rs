@@ -1,7 +1,7 @@
 //! The durable outbox (migration 21): a message is written in the same transaction as the change that
 //! caused it and delivered at least once afterwards, so a crash between commit and send loses nothing.
 //!
-//! A domain records a fact in the same [`Store::transaction`] as the state change it describes
+//! A domain records a fact in the same [`Store::write`] as the state change it describes
 //! ([`emit`]); a [`Dispatcher`] hands it to every registered [`Consumer`] at least once, after the
 //! commit. What makes "at least once" safe is the receipt, not the lease:
 //!
@@ -37,7 +37,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{Result, Store, StoreError, Tx, uid};
+use crate::{Result, Store, StoreError, uid};
 
 /// How long [`ConsumeError::Retry`] failures may last before the delivery is dead.
 pub const DEAD_AFTER_MS: i64 = 24 * 3_600_000;
@@ -62,19 +62,6 @@ pub struct Event {
     pub version: i64,
     pub payload: Value,
     pub created: i64,
-}
-
-/// Records `payload` under `topic` in the caller's transaction; delivered only if it commits.
-pub fn emit(tx: &Tx, ws: &str, topic: &str, version: i64, payload: &Value) -> Result<Event> {
-    let event = append_on(
-        &mut crate::contract::Sqlite(tx),
-        ws,
-        topic,
-        version,
-        payload,
-    )?;
-    tx.mark_outbox();
-    Ok(event)
 }
 
 /// Records a durable fact inside the caller's write transaction.
@@ -399,7 +386,7 @@ pub struct Stats {
 }
 
 /// Owed deliveries over all registered consumers (a paused one still owes: pausing is not unsubscribing).
-pub fn stats(c: &Connection) -> Result<Stats> {
+pub(crate) fn stats_on(c: &Connection) -> Result<Stats> {
     let (pending, oldest): (i64, Option<i64>) = c.query_row(
         "SELECT count(*), min(e.created) FROM outbox_events e
            JOIN outbox_consumers k ON k.topic = e.topic AND e.seq > k.since_seq
@@ -421,7 +408,7 @@ pub fn stats(c: &Connection) -> Result<Stats> {
 }
 
 /// The dead deliveries, one group per consumer over every workspace, newest first.
-pub fn dead(c: &Connection) -> Result<Vec<DeadGroup>> {
+pub(crate) fn dead_on(c: &Connection) -> Result<Vec<DeadGroup>> {
     let mut st = c.prepare_cached(
         "SELECT l.consumer_id, coalesce(k.topic, ''), count(*), max(l.updated),
                 (SELECT x.last_error FROM outbox_leases x WHERE x.consumer_id = l.consumer_id AND x.dead = 1
@@ -453,7 +440,7 @@ pub fn revive(store: &Store, consumer: Option<&str>) -> Result<usize> {
 }
 
 /// Whether consumer `id` was ever registered (and not unregistered).
-pub fn is_registered(c: &Connection, id: &str) -> Result<bool> {
+pub(crate) fn is_registered_on(c: &Connection, id: &str) -> Result<bool> {
     Ok(c.query_row(
         "SELECT EXISTS (SELECT 1 FROM outbox_consumers WHERE id = ?)",
         [id],
@@ -490,4 +477,16 @@ pub(crate) fn record_test_receipt(
         return Err(StoreError::Rejected("outbox receipt already exists".into()));
     }
     receipts::outcome(w, consumer, event.seq, outcome)
+}
+
+pub fn stats(r: &mut impl crate::Read) -> Result<Stats> {
+    stats_on(r.connection())
+}
+
+pub fn dead(r: &mut impl crate::Read) -> Result<Vec<DeadGroup>> {
+    dead_on(r.connection())
+}
+
+pub fn is_registered(r: &mut impl crate::Read, id: &str) -> Result<bool> {
+    is_registered_on(r.connection(), id)
 }

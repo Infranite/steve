@@ -4,8 +4,8 @@ use crate::{Result, Store};
 use steve_node_api::WorkspaceRef;
 
 pub fn seed_item_session(store: &Store, c: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute_batch(&format!(
+    store.write(|tx| {
+        tx.conn.execute_batch(&format!(
                 "INSERT INTO items(id,workspace_id,no,title,status,stage,cwd,created,updated) VALUES ('i1','default',1,'t','run','执行','{c}',1,1);
                  INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','{c}','active',1,1);",
             ))?;
@@ -14,8 +14,8 @@ pub fn seed_item_session(store: &Store, c: &str) -> Result<()> {
 }
 
 pub fn seed_session_item_and_knowledge(store: &Store, c: &str, k: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute_batch(&format!(
+    store.write(|tx| {
+        tx.conn.execute_batch(&format!(
                 "INSERT INTO items(id,workspace_id,no,title,status,stage,cwd,created,updated) VALUES ('i1','default',1,'t','run','执行','{c}',1,1),('i2','default',2,'t','run','执行',NULL,1,1);
                  INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','{c}','active',1,1),('s2','default','i1','claude-code','','active',2,2);
                  INSERT INTO kb_sources(id,workspace_id,kind,name,config,created_by,created,updated) VALUES ('k1','default','folder','wiki','{{\"path\":\"{k}\"}}','u',1,1),('k2','default','notes','n','{{}}','u',1,1);",
@@ -25,8 +25,8 @@ pub fn seed_session_item_and_knowledge(store: &Store, c: &str, k: &str) -> Resul
 }
 
 pub fn seed_directory_project_item(store: &Store, c: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute_batch(&format!(
+    store.write(|tx| {
+        tx.conn.execute_batch(&format!(
                 "INSERT INTO items(id,workspace_id,no,title,status,stage,cwd,project_id,created,updated) VALUES ('i9','default',9,'t','run','执行','{c}','p9',1,1);
                  INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s9','default','i9','claude-code','{c}','active',1,1);",
             ))?;
@@ -35,8 +35,8 @@ pub fn seed_directory_project_item(store: &Store, c: &str) -> Result<()> {
 }
 
 pub fn seed_project(store: &Store, id: &str, device: &str, path: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute(
+    store.write(|tx| {
+        tx.conn.execute(
             "INSERT INTO projects(id,workspace_id,name,path,kind,device_id,created,updated)
                     VALUES(?1,'default',?1,?2,'dir',?3,1,1)",
             [id, path, device],
@@ -46,16 +46,17 @@ pub fn seed_project(store: &Store, id: &str, device: &str, path: &str) -> Result
 }
 
 pub fn set_project_path(store: &Store, id: &str, path: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute("UPDATE projects SET path=? WHERE id=?", [path, id])?;
+    store.write(|tx| {
+        tx.conn
+            .execute("UPDATE projects SET path=? WHERE id=?", [path, id])?;
         Ok(())
     })
 }
 
 pub fn bind_placement(store: &Store, session: &str, workspace: &WorkspaceRef) -> Result<()> {
-    store.transaction(|tx| {
+    store.write(|tx| {
         let json = serde_json::to_string(workspace)?;
-        tx.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated)
+        tx.conn.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated)
                     VALUES (?1,'local',?2,?1,'r','ready',0)", [session, &json])?;
         Ok(())
     })
@@ -66,16 +67,16 @@ pub fn record_existing_prepare(
     kind: &steve_node_api::PrepareKind,
     request: &str,
 ) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute("UPDATE node_commands SET request=json_set(request,'$.body.kind',json(?)) WHERE node_id='local' AND method='prepare_workspace' AND json_extract(request,'$.body.resource')='item:i1'", [serde_json::to_string(kind)?])?;
-        tx.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated) VALUES('op_prep_s0','local','prepare_workspace',?,'d','finished',1,1)", [request])?;
+    store.write(|tx| {
+        tx.conn.execute("UPDATE node_commands SET request=json_set(request,'$.body.kind',json(?)) WHERE node_id='local' AND method='prepare_workspace' AND json_extract(request,'$.body.resource')='item:i1'", [serde_json::to_string(kind)?])?;
+        tx.conn.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated) VALUES('op_prep_s0','local','prepare_workspace',?,'d','finished',1,1)", [request])?;
         Ok(())
     })
 }
 
 pub fn seed_remote_item(store: &Store, c: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute_batch(&format!(
+    store.write(|tx| {
+        tx.conn.execute_batch(&format!(
                 "INSERT INTO items(id,workspace_id,no,title,status,stage,cwd,created,updated) VALUES ('i1','default',1,'t','run','执行','{c}',1,1);
                  INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','{c}','active',1,1);
                  INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u','default','sub_u','u','owner',1),('m','default','sub_m','m','member',1);
@@ -109,16 +110,16 @@ pub fn seed_permission_modes(store: &Store, bots: &[Option<&str>]) -> Result<()>
                 );
         }
     }
-    store.transaction(|tx| {
-        tx.execute_batch(&sql)?;
+    store.write(|tx| {
+        tx.conn.execute_batch(&sql)?;
         Ok(())
     })
 }
 
 pub fn seed_item_and_active_session(store: &Store, item: &str, session: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES (?,'default',1,'t','run','执行',1,1)", [item])?;
-        tx.execute("INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES (?,'default',?,'claude-code','.','active',1,1)", [session, item])?;
+    store.write(|tx| {
+        tx.conn.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES (?,'default',1,'t','run','执行',1,1)", [item])?;
+        tx.conn.execute("INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES (?,'default',?,'claude-code','.','active',1,1)", [session, item])?;
         Ok(())
     })
 }

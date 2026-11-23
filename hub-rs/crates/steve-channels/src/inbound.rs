@@ -259,7 +259,7 @@ impl Channels {
 
 /// Identifies a handle in a savepoint: a failure leaves no half-created contact and does not stop
 /// the message.
-pub(crate) fn identify_handle(
+pub(crate) fn identify(
     w: &mut W<'_>,
     ws: &str,
     conn: &str,
@@ -271,7 +271,7 @@ pub(crate) fn identify_handle(
     identify_handle_as(w, ws, conn, actor, h, name, label, false)
 }
 
-/// [`identify_handle`] for a sender or member that may be a bot: a new bot becomes a bot party with
+/// [`identify`] for a sender or member that may be a bot: a new bot becomes a bot party with
 /// a `bot` account, not an unconfirmed person.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn identify_handle_as(
@@ -1164,8 +1164,7 @@ impl InboundWrite<'_> {
                 Some(facts.account_id.clone())
             } else {
                 m.handle.as_ref().and_then(|h| {
-                    identify_handle(w, ws, conn, actor, h, Some(&m.name), &label)
-                        .map(|i| i.account_id)
+                    identify(w, ws, conn, actor, h, Some(&m.name), &label).map(|i| i.account_id)
                 })
             };
             mentions.push(json!({ "account_id": account, "name": m.name }));

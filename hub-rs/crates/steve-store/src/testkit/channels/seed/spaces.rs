@@ -290,7 +290,7 @@ pub fn seed_cleanup_spaces(
 }
 
 pub fn attention_accounts(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute_batch("INSERT INTO parties(id,workspace_id,type,name,created_by,created,updated) VALUES('org','default','organization','Org','usr_dev',1,1);
         INSERT INTO parties(id,workspace_id,type,name,user_id,created_by,created,updated) VALUES('mine','default','person','Me','usr_dev','usr_dev',1,1);
         INSERT INTO accounts(id,workspace_id,system_id,family,party_id,kind,handle,handle_display,source,created,updated) VALUES
@@ -305,7 +305,7 @@ pub fn attention_accounts(store: &Store) -> Result<()> {
 }
 
 pub fn attention_preferences(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute_batch("INSERT INTO space_prefs(space_id,workspace_id,attention,updated) VALUES('dm','default','quiet',1),('blocked','default','blocked',1);
           INSERT INTO space_settings(space_id,workspace_id,muted,disclosure,updated) VALUES('dm','default',1,'{}',1);
           INSERT INTO conversation_preferences(workspace_id,user_id,space_id,closed) VALUES('default','usr_dev','closed',1);
@@ -316,14 +316,14 @@ pub fn attention_preferences(store: &Store) -> Result<()> {
 }
 
 pub fn keep_raw_for_30_days(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
             c.execute("INSERT INTO settings (workspace_id, key, value, updated) VALUES ('default', 'keepRaw', '\"30\"', 1)", [])?;
             Ok(())
         })
 }
 
 pub fn detach_fixture_space(store: &Store, space: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
             c.execute(
                 "UPDATE spaces SET status = 'left', account_id = (SELECT account_id FROM connections WHERE id = connection_id), connection_id = NULL WHERE id = ?",
                 [space],
@@ -338,7 +338,7 @@ pub fn detach_fixture_space(store: &Store, space: &str) -> Result<()> {
 }
 
 pub fn assign_missing_fixture_account(store: &Store, space: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute(
             "UPDATE spaces SET account_id = 'acc_gone' WHERE id = ?",
             [space],
@@ -348,18 +348,18 @@ pub fn assign_missing_fixture_account(store: &Store, space: &str) -> Result<()> 
 }
 
 pub fn revoke_connection_during_send(store: &Store, id: &str, connection: &str) -> Result<()> {
-    store.transaction(|tx| {
-            tx.execute(
+    store.write(|tx| {
+            tx.conn.execute(
                 "UPDATE spaces SET status = 'left', connection_id = NULL WHERE id = (SELECT space_id FROM chan_messages WHERE id = ?)",
                 [id],
             )?;
-            tx.execute("UPDATE connections SET status = 'revoked' WHERE id = ?", [connection])?;
+            tx.conn.execute("UPDATE connections SET status = 'revoked' WHERE id = ?", [connection])?;
             Ok(())
         })
 }
 
 pub fn detach_connection_spaces(store: &Store, connection: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
             c.execute(
                 "UPDATE spaces SET status = 'left', account_id = (SELECT account_id FROM connections WHERE id = ?1), connection_id = NULL WHERE connection_id = ?1",
                 [connection],
@@ -374,14 +374,14 @@ pub fn detach_connection_spaces(store: &Store, connection: &str) -> Result<()> {
 }
 
 pub fn clear_space_settings(store: &Store, space: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute("DELETE FROM space_settings WHERE space_id = ?", [space])?;
         Ok(())
     })
 }
 
 pub fn conversation_accounts(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute_batch("INSERT INTO parties (id, workspace_id, type, name, created_by, created, updated) VALUES ('org', 'default', 'organization', 'Org', 'usr_dev', 1, 1);
         INSERT INTO parties (id, workspace_id, type, name, user_id, created_by, created, updated) VALUES ('mine', 'default', 'person', 'Me', 'usr_dev', 'usr_dev', 1, 1);
         INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated) VALUES ('shared', 'default', 'feishu', 'feishu_app', 'org', 'app_bot', 'shared', 'shared', 'connect', 1, 1), ('private', 'default', 'feishu', 'feishu_user', 'mine', 'personal', 'me', 'me', 'connect', 1, 1);")?;
@@ -396,7 +396,7 @@ pub fn conversation_with_turn(
     account: Option<&str>,
     created: i64,
 ) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute("INSERT INTO spaces (id, workspace_id, system_id, kind, external_id, name, account_id, created, updated) VALUES (?1, ?2, 'feishu', 'group', ?1, ?1, ?3, 1, 1)", params![id, ws, account])?;
         c.execute("INSERT INTO messages (id, workspace_id, space, author, text, created) VALUES (?1, ?2, ?3, 'me', 'preserved message', ?4)", params![format!("msg_{id}"), ws, format!("chan:{id}"), created])?;
         Ok(())
@@ -404,7 +404,7 @@ pub fn conversation_with_turn(
 }
 
 pub fn connect_reply_fixtures(store: &Store, ws: &str, user: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
             c.execute("INSERT INTO connections (id, workspace_id, account_id, adapter, auth, created_by, created, updated)
                 VALUES ('test-channel', ?1, 'shared', 'feishu_app', 'none', ?2, 1, 1)", params![ws, user])?;
             c.execute(
@@ -418,8 +418,8 @@ pub fn connect_reply_fixtures(store: &Store, ws: &str, user: &str) -> Result<()>
 }
 
 pub fn leave_space_identity(store: &Store, space: &str, connection: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute(
+    store.write(|tx| {
+        tx.conn.execute(
             "UPDATE space_identities SET left_at=1 WHERE space_id=? AND connection_id=?",
             rusqlite::params![space, connection],
         )?;
@@ -428,8 +428,8 @@ pub fn leave_space_identity(store: &Store, space: &str, connection: &str) -> Res
 }
 
 pub fn leave_external_chat(store: &Store, chat: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute(
+    store.write(|tx| {
+        tx.conn.execute(
             "UPDATE spaces SET status = 'left' WHERE external_id = ?",
             [chat],
         )?;
@@ -438,7 +438,7 @@ pub fn leave_external_chat(store: &Store, chat: &str) -> Result<()> {
 }
 
 pub fn enable_fixture_collaboration(store: &Store, space: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute(
             "UPDATE space_settings SET collab=1 WHERE space_id=?",
             [space],
@@ -473,7 +473,7 @@ pub fn set_private_receive_identity(store: &Store, ws: &str, owner: &str) -> Res
 }
 
 pub fn drop_detached_account(store: &Store, space: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.pragma_update(None, "foreign_keys", false)?;
         let result = c.execute("DELETE FROM account_handles WHERE account_id IN (SELECT account_id FROM spaces WHERE id = ?)", [space])
             .and_then(|_| c.execute("DELETE FROM accounts WHERE id IN (SELECT account_id FROM spaces WHERE id = ?)", [space]));

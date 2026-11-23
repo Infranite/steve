@@ -464,7 +464,7 @@ async fn a_new_contact_with_your_name_and_your_domain_is_proposed_not_merged() {
     // “我” has a work email at corp.example
     h.env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             steve_modules::accounts::repo::insert(
                 tx,
                 WS,

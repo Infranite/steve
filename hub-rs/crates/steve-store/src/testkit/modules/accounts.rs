@@ -2,7 +2,7 @@ use crate::{Result, Store};
 use rusqlite::params;
 
 pub fn merge_marker(store: &Store, id: &str, into: Option<&str>) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         let status = if into.is_some() { "merged" } else { "active" };
         c.execute(
             "UPDATE parties SET status = ?, merged_into = ? WHERE id = ?",
@@ -13,14 +13,14 @@ pub fn merge_marker(store: &Store, id: &str, into: Option<&str>) -> Result<()> {
 }
 
 pub fn workspace_jira(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute("INSERT INTO systems (id, workspace_id, name, kind, family, handle_rule, created) VALUES ('jira', 'default', 'Jira', 'code', 'other', ?, 1)", ["{\"normalize\":\"lower\"}"])?;
         Ok(())
     })
 }
 
 pub fn gmail_connection(store: &Store, account: &str, read_mail: bool) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         let caps = if read_mail { "[\"mail.read\"]" } else { "[]" };
         c.execute("INSERT INTO connections (id, workspace_id, account_id, adapter, auth, caps, created_by, created, updated) VALUES ('con_1', 'default', ?, 'gmail', 'oauth', ?, 'usr_dev', 1, 1)", [account, caps])?;
         Ok(())
@@ -28,9 +28,9 @@ pub fn gmail_connection(store: &Store, account: &str, read_mail: bool) -> Result
 }
 
 pub fn linked_vault_items(store: &Store, account: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute_batch("INSERT INTO vaults (id, workspace_id, name, scope, owner_user, created) VALUES ('vlt_s', 'default', '共享', 'shared', NULL, 1), ('vlt_p', 'default', '个人', 'personal', 'usr_other', 1), ('vlt_x', 'default', '系统', 'system', NULL, 1)")?;
-        tx.execute("INSERT INTO vault_items (id, workspace_id, vault_id, template, title, account_id, sensitivity, created_by, created, updated) VALUES
+    store.write(|tx| {
+        tx.conn.execute_batch("INSERT INTO vaults (id, workspace_id, name, scope, owner_user, created) VALUES ('vlt_s', 'default', '共享', 'shared', NULL, 1), ('vlt_p', 'default', '个人', 'personal', 'usr_other', 1), ('vlt_x', 'default', '系统', 'system', NULL, 1)")?;
+        tx.conn.execute("INSERT INTO vault_items (id, workspace_id, vault_id, template, title, account_id, sensitivity, created_by, created, updated) VALUES
            ('vi_s', 'default', 'vlt_s', 'login', 'AWS 登录', ?1, 'sensitive', 'usr_dev', 1, 1),
            ('vi_p', 'default', 'vlt_p', 'login', '别人的', ?1, 'sensitive', 'usr_other', 2, 2),
            ('vi_x', 'default', 'vlt_x', 'connection_credential', '凭据', ?1, 'sensitive', 'usr_dev', 3, 3)",[account])?;
@@ -39,19 +39,21 @@ pub fn linked_vault_items(store: &Store, account: &str) -> Result<()> {
 }
 
 pub fn account_count(store: &Store) -> Result<i64> {
-    store.reader(|c| Ok(c.query_row("SELECT COUNT(*) FROM accounts", [], |r| r.get(0))?))
+    store.sqlite_read(|c| Ok(c.query_row("SELECT COUNT(*) FROM accounts", [], |r| r.get(0))?))
 }
 
 pub fn proposal_count(store: &Store) -> Result<i64> {
-    store.reader(|c| Ok(c.query_row("SELECT COUNT(*) FROM merge_proposals", [], |r| r.get(0))?))
+    store
+        .sqlite_read(|c| Ok(c.query_row("SELECT COUNT(*) FROM merge_proposals", [], |r| r.get(0))?))
 }
 
 pub fn handle_count(store: &Store) -> Result<i64> {
-    store.reader(|c| Ok(c.query_row("SELECT COUNT(*) FROM account_handles", [], |r| r.get(0))?))
+    store
+        .sqlite_read(|c| Ok(c.query_row("SELECT COUNT(*) FROM account_handles", [], |r| r.get(0))?))
 }
 
 pub fn vault_item_count(store: &Store, linked: bool) -> Result<i64> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT COUNT(*) FROM vault_items WHERE ? = 0 OR account_id IS NOT NULL",
             [linked],
@@ -71,7 +73,7 @@ pub struct Proposal {
 }
 
 pub fn proposal(store: &Store, id: &str) -> Result<Proposal> {
-    store.reader(|c| Ok(c.query_row(
+    store.sqlite_read(|c| Ok(c.query_row(
         "SELECT from_id, into_id, account_id, reason, confidence, status, decision_id FROM merge_proposals WHERE id = ?",
         [id], |r| Ok(Proposal { from_id:r.get(0)?, into_id:r.get(1)?, account:r.get(2)?,
             reason:r.get(3)?, confidence:r.get(4)?, status:r.get(5)?, decision:r.get(6)? }),
@@ -79,7 +81,7 @@ pub fn proposal(store: &Store, id: &str) -> Result<Proposal> {
 }
 
 pub fn sole_handle(store: &Store) -> Result<(String, String)> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(
             c.query_row("SELECT handle, handle_display FROM accounts", [], |r| {
                 Ok((r.get(0)?, r.get(1)?))
@@ -89,7 +91,7 @@ pub fn sole_handle(store: &Store) -> Result<(String, String)> {
 }
 
 pub fn account_storage_text(store: &Store) -> Result<String> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         let mut out = String::new();
         for table in ["accounts", "account_handles", "audit", "revisions"] {
             let mut statement = c.prepare(&format!("SELECT * FROM {table}"))?;
@@ -108,7 +110,7 @@ pub fn account_storage_text(store: &Store) -> Result<String> {
 }
 
 pub fn last_audit(store: &Store, target: Option<&str>) -> Result<(String, String)> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(c.query_row(
         "SELECT action, detail FROM audit WHERE ?1 IS NULL OR target = ?1 ORDER BY id DESC LIMIT 1",
         [target], |r| Ok((r.get(0)?,r.get(1)?)),
@@ -117,7 +119,7 @@ pub fn last_audit(store: &Store, target: Option<&str>) -> Result<(String, String
 }
 
 pub fn account_revision(store: &Store, id: &str) -> Result<String> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT patch FROM revisions WHERE object_type = 'account' AND object_id = ?",
             [id],
@@ -127,7 +129,7 @@ pub fn account_revision(store: &Store, id: &str) -> Result<String> {
 }
 
 pub fn phone_accounts(store: &Store) -> Result<Vec<(String, String, String, String)>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         let mut statement = c.prepare_cached(
             "SELECT handle, kind, source, source_label FROM accounts WHERE system_id = 'phone'",
         )?;

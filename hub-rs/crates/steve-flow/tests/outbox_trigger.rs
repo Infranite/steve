@@ -45,8 +45,8 @@ fn done(e: &FlowEnv, item: &str) -> Event {
     .unwrap();
     e.env
         .store()
-        .transaction(|tx| {
-            outbox::emit(
+        .write(|tx| {
+            outbox::append(
                 tx,
                 WS,
                 steve_work_api::ITEM_DONE,

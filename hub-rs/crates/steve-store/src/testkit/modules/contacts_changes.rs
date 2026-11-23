@@ -76,7 +76,7 @@ pub fn changeset_title(store: &Store, arg1: &str) -> Result<String> {
 }
 
 pub fn party_memory(store: &Store, party: &str) -> Result<(String, String, String)> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
             Ok(c.query_row(
                 "SELECT m.text, m.status, m.source_type FROM mems m JOIN mem_about a ON a.mem_id = m.id WHERE a.object_id = ?",
                 [party],
@@ -88,7 +88,7 @@ pub fn party_memory(store: &Store, party: &str) -> Result<(String, String, Strin
 pub fn snapshot(store: &Store) -> serde_json::Value {
     let rows = |sql: &str| -> Value {
         store
-            .with_conn(|c| {
+            .write_locked(|c| {
                 let mut st = c.prepare(sql)?;
                 let n = st.column_count();
                 let rows = st

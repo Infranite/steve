@@ -92,16 +92,17 @@ fn devices(store: &Store, cx: &mcp::McpCx, args: &Value) -> Result<String, Strin
             let since = crate::nodes::now() - 3 * 60 * 1000;
             let v = store
                 .read(|r| {
-                    let tags = store.reader(steve_store::nodes::all_tags)?;
+                    let tags = steve_store::nodes::all_tags(r)?;
                     let mut out = vec![json!({
                         "node": "local", "name": "Hub", "tags": tags.get("local").cloned().unwrap_or_default(),
                         "online": true
                     })];
-                    for device in steve_store::node_directory::device_summaries(r, since)? {
+                    for device in steve_store::node_directory::device_summaries(r)? {
                         out.push(json!({
                             "node": device.node, "name": device.name,
                             "tags": tags.get(&device.node).cloned().unwrap_or_default(),
-                            "online": device.online, "paused": device.paused
+                            "online": crate::metrics::latest_node(&device.node, since).is_some(),
+                            "paused": device.paused
                         }));
                     }
                     Ok::<_, steve_store::StoreError>(out)

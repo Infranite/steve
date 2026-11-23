@@ -168,9 +168,10 @@ impl Annotations<'_> {
     /// then (`again`); drafts another send took already are left out.
     pub fn claim(&self, item_id: &str, ids: &[String], key: &str) -> Result<Claim> {
         self.0.write_conn(|w| {
-            let tx = w.tx()?;
+            let transaction = w.tx()?;
+            let tx = transaction.connection();
             let before = all(
-                &tx,
+                tx,
                 "SELECT * FROM annotations WHERE item_id = ? AND send_key = ? ORDER BY created, id",
                 [item_id, key],
                 Annotation::from_row,
@@ -189,12 +190,12 @@ impl Annotations<'_> {
                 )?;
             }
             let taken = all(
-                &tx,
+                tx,
                 "SELECT * FROM annotations WHERE item_id = ? AND send_key = ? ORDER BY created, id",
                 [item_id, key],
                 Annotation::from_row,
             )?;
-            tx.commit()?;
+            transaction.commit()?;
             if !taken.is_empty() {
                 if let Some(ws) = crate::repo::one(
                     w.c,

@@ -167,7 +167,7 @@ pub fn attr_def_details(store: &Store) -> Result<String> {
 }
 
 pub fn status_and_merge_target(store: &Store, party: &str) -> Result<(String, String)> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         Ok(c.query_row(
             "SELECT status, merged_into FROM parties WHERE id = ?",
             [party],
@@ -178,7 +178,7 @@ pub fn status_and_merge_target(store: &Store, party: &str) -> Result<(String, St
 
 fn strings(store: &Store, sql: &str) -> Vec<String> {
     store
-        .with_conn(|c| {
+        .write_locked(|c| {
             let mut st = c.prepare(sql)?;
             let v = st
                 .query_map([], |r| r.get(0))?

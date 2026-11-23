@@ -314,9 +314,10 @@ impl Tags<'_> {
                     "store.tag.kind_delete"
                 )));
             }
-            let tx = w.tx()?;
+            let transaction = w.tx()?;
+            let tx = transaction.connection();
             let ws = one(
-                &tx,
+                tx,
                 "SELECT workspace_id FROM tags WHERE id = ?",
                 [id],
                 |r| r.get::<_, String>(0),
@@ -325,7 +326,7 @@ impl Tags<'_> {
             // migration 4: tags on contacts, teams, … reference the tag too
             tx.run("DELETE FROM entity_tags WHERE tag_id = ?", [id])?;
             tx.run("DELETE FROM tags WHERE id = ?", [id])?;
-            tx.commit()?;
+            transaction.commit()?;
             if let Some(ws) = ws {
                 w.publish(steve_types::DomainEvent::from(
                     steve_types::ConfigEvent::Tag {
@@ -346,13 +347,14 @@ impl Tags<'_> {
             if kinds::is_kind_tag(w.c, from)? || kinds::is_kind_tag(w.c, into)? {
                 return Err(StoreError::Conflict(steve_i18n::t!("store.tag.kind_merge")));
             }
-            let tx = w.tx()?;
+            let transaction = w.tx()?;
+            let tx = transaction.connection();
             tx.run("INSERT OR IGNORE INTO item_tags (item_id, tag_id) SELECT item_id, ? FROM item_tags WHERE tag_id = ?", [into, from])?;
             tx.run("DELETE FROM item_tags WHERE tag_id = ?", [from])?;
             tx.run("INSERT OR IGNORE INTO entity_tags (workspace_id, tag_id, object_type, object_id, created) SELECT workspace_id, ?, object_type, object_id, created FROM entity_tags WHERE tag_id = ?", [into, from])?;
             tx.run("DELETE FROM entity_tags WHERE tag_id = ?", [from])?;
             tx.run("DELETE FROM tags WHERE id = ?", [from])?;
-            tx.commit()?;
+            transaction.commit()?;
             if let Some(ws) = crate::repo::one(
                 w.c,
                 "SELECT workspace_id FROM tags WHERE id = ?",
@@ -408,9 +410,10 @@ impl Tags<'_> {
             } else {
                 ids.to_vec()
             };
-            let tx = w.tx()?;
-            put_item_tags(&tx, item, &ids)?;
-            tx.commit()?;
+            let transaction = w.tx()?;
+            let tx = transaction.connection();
+            put_item_tags(tx, item, &ids)?;
+            transaction.commit()?;
             w.publish(steve_types::DomainEvent::from(
                 steve_types::WorkEvent::Item {
                     ws: ws.into(),
@@ -476,7 +479,7 @@ impl Devices<'_> {
                 "device_max_sessions_out_of_range_1_256".into(),
             ));
         }
-        self.0.atomic(|| {
+        self.0.write(|_| {
             self.0.write_conn(|w| {
                 let current: i64 =
                     w.c.query_row("SELECT revision FROM devices WHERE id=?", [id], |r| {

@@ -450,7 +450,7 @@ pub fn ops_tag(store: &Store) -> Result<()> {
 }
 
 pub fn seed_ops_team(store: &Store, team: &str, ws: &str, owner: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
             c.execute(
                 "INSERT INTO parties (id, workspace_id, type, name, created_by, created, updated) VALUES (?, ?, 'team', '运维组', ?, 1, 1)",
                 rusqlite::params![team, ws, owner],
@@ -460,7 +460,7 @@ pub fn seed_ops_team(store: &Store, team: &str, ws: &str, owner: &str) -> Result
 }
 
 pub fn confirm_contact_kind(store: &Store, party: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute(
             "UPDATE parties SET contact_kind = 'real' WHERE id = ?",
             [party],
@@ -470,7 +470,7 @@ pub fn confirm_contact_kind(store: &Store, party: &str) -> Result<()> {
 }
 
 pub fn set_user_external_scope(store: &Store, user: &str, space: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         // Replace the scope with a valid current fact, not guessed prose.
         c.execute("UPDATE attr_values SET value = ? WHERE key = 'call_ext_scope' AND party_id IN (SELECT id FROM parties WHERE user_id = ?)", rusqlite::params![serde_json::json!({"kind": "space", "id": space, "name": "Member renamed here"}).to_string(), user])?;
         Ok(())
@@ -478,29 +478,29 @@ pub fn set_user_external_scope(store: &Store, user: &str, space: &str) -> Result
 }
 
 pub fn clear_user_external_name(store: &Store, user: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute("DELETE FROM attr_values WHERE key IN ('call_external', 'call_ext_scope') AND party_id IN (SELECT id FROM parties WHERE user_id = ?)", [user])?;
         Ok(())
     })
 }
 
 pub fn unverify_account(store: &Store, account: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute("UPDATE accounts SET verified = 0 WHERE id = ?", [account])?;
         Ok(())
     })
 }
 
 pub fn associate_verified_account_with_org(store: &Store, ws: &str, account: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute("UPDATE accounts SET verified = 1, party_id = (SELECT id FROM parties WHERE workspace_id = ?1 AND type = 'org' LIMIT 1) WHERE id = ?2", rusqlite::params![ws, account])?;
         Ok(())
     })
 }
 
 pub fn assign_lilei_contact(store: &Store, party: &str, ws: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute(
+    store.write(|tx| {
+        tx.conn.execute(
             "UPDATE accounts SET party_id=? WHERE handle='ulilei' AND workspace_id=?",
             rusqlite::params![party, ws],
         )?;
@@ -509,16 +509,16 @@ pub fn assign_lilei_contact(store: &Store, party: &str, ws: &str) -> Result<()> 
 }
 
 pub fn rename_ada_at_work(store: &Store, connection: &str) -> Result<usize> {
-    store.transaction(|tx| { Ok(tx.execute("UPDATE accounts SET display_name = 'Ada (work)' WHERE id = (SELECT account_id FROM connections WHERE id = ?)", [connection])?) })
+    store.write(|tx| { Ok(tx.conn.execute("UPDATE accounts SET display_name = 'Ada (work)' WHERE id = (SELECT account_id FROM connections WHERE id = ?)", [connection])?) })
 }
 
 pub fn replace_feishu_display_name(store: &Store, party: &str, name: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute(
+    store.write(|tx| {
+        tx.conn.execute(
             "UPDATE parties SET name = ? WHERE id = ?",
             rusqlite::params![name, party],
         )?;
-        tx.execute(
+        tx.conn.execute(
             "UPDATE accounts SET display_name = ? WHERE party_id = ? AND system_id = 'feishu'",
             rusqlite::params![name, party],
         )?;
@@ -527,8 +527,9 @@ pub fn replace_feishu_display_name(store: &Store, party: &str, name: &str) -> Re
 }
 
 pub fn clear_profile_retry_schedule(store: &Store) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute("UPDATE account_profiles SET next_check=NULL", [])?;
+    store.write(|tx| {
+        tx.conn
+            .execute("UPDATE account_profiles SET next_check=NULL", [])?;
         Ok::<_, crate::StoreError>(())
     })
 }

@@ -294,13 +294,13 @@ mod tests {
         let pending_path =
             crate::backup::root(home.path()).join(format!("{}.retiring", pending.id));
         std::fs::rename(&pending.directory, &pending_path).unwrap();
-        steve_store::testkit::hub::hub_fixtures::seed_node_vitals(&db).unwrap();
-        let now = 10 * 86_400_000;
+        steve_store::testkit::hub::hub_fixtures::seed_expired_tool_usage(&db).unwrap();
+        let now = 100 * 86_400_000;
         source(db.clone(), home.path().to_owned(), true, now)
             .run_due(now)
             .await
             .unwrap();
-        let remaining: i64 = steve_store::testkit::hub::node_fixtures::node_vitals_count(&db).unwrap();
+        let remaining: i64 = steve_store::testkit::hub::hub_fixtures::tool_usage_count(&db).unwrap();
         assert_eq!(
             remaining, 0,
             "NO_RESUME must not disable database row policies"

@@ -3,7 +3,7 @@ use crate::{Result, Store};
 use rusqlite::params;
 
 pub fn seed_active(s: &Store) -> Result<()> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
         Ok(c.execute_batch("INSERT INTO settings (workspace_id, key, value, updated) VALUES ('default', 'stats.tz', '\"Asia/Shanghai\"', 0);")?)
     })
 }
@@ -37,7 +37,7 @@ pub fn seed_events(s: &Store, m: impl Fn(i64) -> i64) -> Result<()> {
         k1 = m(20),
         k2 = m(40),
     );
-    s.with_conn(|c| Ok(c.execute_batch(&sql)?))
+    s.write_locked(|c| Ok(c.execute_batch(&sql)?))
 }
 
 /// (id, item, kind, created, resolved, decided by YOLO)
@@ -68,7 +68,7 @@ pub fn seed_time(s: &Store, cards: &[Card<'_>]) -> Result<()> {
              VALUES ('{id}', 'default', '{kind}', 'item', 'x', {item}, '?', '{status}', {result}, 'dev', {created}, {resolved});\n"
         ));
     }
-    s.with_conn(|c| Ok(c.execute_batch(&sql)?))
+    s.write_locked(|c| Ok(c.execute_batch(&sql)?))
 }
 
 pub fn seed_workflow(s: &Store, m: impl Fn(i64) -> i64, long_turn_ms: i64) -> Result<()> {
@@ -160,7 +160,7 @@ pub fn seed_workflow(s: &Store, m: impl Fn(i64) -> i64, long_turn_ms: i64) -> Re
         m(100), m(101), m(102), m(104), m(105),
         t0 = m(0),
     ));
-    s.with_conn(|c| Ok(c.execute_batch(&sql)?))
+    s.write_locked(|c| Ok(c.execute_batch(&sql)?))
 }
 
 pub fn seed_hourly(s: &Store, items: [(i64, i64, Option<i64>); 5]) -> Result<()> {
@@ -174,7 +174,7 @@ pub fn seed_hourly(s: &Store, items: [(i64, i64, Option<i64>); 5]) -> Result<()>
             "INSERT INTO items (id, workspace_id, no, title, status, stage, bot_id, created, updated) VALUES ('ST-{no}', 'default', {no}, 't{no}', '{status}', '执行', 'dev', {created}, {created});\n"
         ));
     }
-    s.with_conn(|c| Ok(c.execute_batch(&sql)?))
+    s.write_locked(|c| Ok(c.execute_batch(&sql)?))
 }
 
 /// `(day, source, purpose, harness, model, bot, turns, turn_ms, interrupted, calls, input)` of a cell.
@@ -194,7 +194,7 @@ pub type CubeRow = (
 
 /// `stat_daily` as the live writer left it, one [`CubeRow`] per cell.
 pub fn cube(s: &Store) -> Result<Vec<CubeRow>> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
         let mut st = c.prepare(
             "SELECT day, source, purpose, harness, model, bot_id, turns, turn_ms, interrupted, calls, input FROM stat_daily
               WHERE workspace_id = 'default' ORDER BY day, source, purpose, harness, model, bot_id, project_id",
@@ -527,11 +527,11 @@ pub fn seed_fixture(s: &Store, m: impl Fn(i64) -> i64) -> Result<()> {
     );
 
     sql.push_str(RECORDED);
-    s.with_conn(|c| Ok(c.execute_batch(&sql)?))
+    s.write_locked(|c| Ok(c.execute_batch(&sql)?))
 }
 
 pub fn snapshot(s: &Store) -> Result<String> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
         let q = |sql: &str| -> String {
             c.prepare(sql)
                 .unwrap()
@@ -560,7 +560,7 @@ pub fn snapshot(s: &Store) -> Result<String> {
 
 pub fn dropped_status_marks(s: &Store) -> Result<Vec<(Option<String>, Option<String>)>> {
     s
-        .with_conn(|c| {
+        .write_locked(|c| {
             Ok(c.prepare("SELECT from_v, to_v FROM item_marks WHERE item_id = 'ST-4' AND kind = 'status' ORDER BY ts")?
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<rusqlite::Result<_>>()?)
@@ -569,7 +569,7 @@ pub fn dropped_status_marks(s: &Store) -> Result<Vec<(Option<String>, Option<Str
 
 pub fn item_totals(s: &Store) -> Result<Vec<ItemTotals>> {
     s
-        .with_conn(|c| {
+        .write_locked(|c| {
             Ok(c.prepare("SELECT item_id, lead_ms, wait_ms, agent_ms, input + output + cache_read + cache_write FROM item_stats")?
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
                 .collect::<rusqlite::Result<_>>()?)
@@ -579,7 +579,7 @@ pub fn item_totals(s: &Store) -> Result<Vec<ItemTotals>> {
 pub type ItemTotals = (String, Option<i64>, Option<i64>, Option<i64>, i64);
 
 pub fn resolve_question(s: &Store) -> Result<()> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
         c.execute(
             "UPDATE decisions SET resolved = ? WHERE id = 'q1'",
             [crate::now()],
@@ -589,7 +589,7 @@ pub fn resolve_question(s: &Store) -> Result<()> {
 }
 
 pub fn seed_tree(s: &Store) -> Result<()> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
         Ok(c.execute_batch(
             r#"UPDATE items SET parent = '{"item":"ST-1"}' WHERE id IN ('ST-2', 'ST-3');
                UPDATE items SET parent = '{"item":"ST-3","session":"s3","at":2}' WHERE id = 'ST-5';
@@ -607,11 +607,11 @@ pub fn seed_tree_chain(s: &Store, depth: i64) -> Result<()> {
             )
         })
         .collect::<String>();
-    s.with_conn(|c| Ok(c.execute_batch(&chain)?))
+    s.write_locked(|c| Ok(c.execute_batch(&chain)?))
 }
 
 pub fn seed_old_meter(s: &Store, turn: &str, report: &impl serde::Serialize) -> Result<()> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
         c.execute(
             "UPDATE usage_meters SET payload=? WHERE turn_id=?",
             params![serde_json::to_string(report)?, turn],
@@ -629,7 +629,7 @@ pub fn realtime_attempt(
     bot: &str,
     start: i64,
 ) -> Result<()> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
             c.execute("INSERT OR IGNORE INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,?,'test','.','running',?,?)",params![session,ws,start,start])?;
             c.execute("INSERT OR IGNORE INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES (?,'n','{}',?,'r','busy',?)",params![session,session,start])?;
             c.execute("INSERT INTO runtime_turns(turn_id,session_id,state,created,updated) VALUES (?,?,'finished',?,?)",params![id,session,start,start])?;
@@ -648,14 +648,14 @@ pub fn realtime_sample(
     kind: &str,
     received: i64,
 ) -> Result<()> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
             c.execute("INSERT INTO realtime_output_samples(node_id,stream,epoch,seq,event_id,attempt_id,at,source_at,received_at,kind,units) VALUES ('n',?,'e',?,?,?,?,?,?,?,?)",params![id,seq,format!("{id}-{seq}"),id,at,at,received,kind,units])?;
             Ok(())
         })
 }
 
 pub fn realtime_end(s: &Store, id: &str, at: i64) -> Result<()> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
         c.execute(
             "UPDATE realtime_output_attempts SET ended=? WHERE attempt_id=?",
             params![at, id],
@@ -669,7 +669,7 @@ pub fn realtime_end(s: &Store, id: &str, at: i64) -> Result<()> {
 }
 
 pub fn move_session(s: &Store) -> Result<()> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
         c.execute(
             "UPDatE sessions SET workspace_id='elsewhere' WHERE id='s'",
             [],
@@ -679,7 +679,7 @@ pub fn move_session(s: &Store) -> Result<()> {
 }
 
 pub fn remove_baseline(s: &Store) -> Result<()> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
         c.execute(
             "DELETE FROM realtime_output_attempts WHERE attempt_id='b'",
             [],
@@ -689,7 +689,7 @@ pub fn remove_baseline(s: &Store) -> Result<()> {
 }
 
 pub fn settle_attempt(s: &Store, at: i64) -> Result<()> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
         c.execute(
             "UPDatE runtime_attempts SET state='finished',updated=? WHERE attempt_id='a'",
             [at],
@@ -699,7 +699,7 @@ pub fn settle_attempt(s: &Store, at: i64) -> Result<()> {
 }
 
 pub fn settle_baselineless_attempt(s: &Store, at: i64) -> Result<()> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
         c.execute(
             "DELETE FROM realtime_output_attempts WHERE attempt_id='old'",
             [],
@@ -713,14 +713,14 @@ pub fn settle_baselineless_attempt(s: &Store, at: i64) -> Result<()> {
 }
 
 pub fn seed_uninstrumented_session(s: &Store, at: i64) -> Result<()> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
         c.execute("INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('legacy','default','custom','.','running',?,?)", params![at-60_000,at-1_000])?;
         Ok(())
     })
 }
 
 pub fn end_uninstrumented_session(s: &Store) -> Result<()> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
         c.execute("UPDatE sessions SET status='ended' WHERE id='legacy'", [])?;
         Ok(())
     })
@@ -774,14 +774,14 @@ impl RealtimeV73 {
 }
 
 pub fn seed_baseline(s: &Store, started: i64, baseline: i64) -> Result<()> {
-    s.with_conn(|c|{c.execute("INSERT INTO realtime_output_attempts(attempt_id,session_id,workspace_id,node_id,started,baseline) VALUES('a','a','default','n',?1,?2)",params![started,baseline])?;Ok(())})
+    s.write_locked(|c|{c.execute("INSERT INTO realtime_output_attempts(attempt_id,session_id,workspace_id,node_id,started,baseline) VALUES('a','a','default','n',?1,?2)",params![started,baseline])?;Ok(())})
 }
 
 pub fn merge_terminal_receipt(s: &Store, payload: &serde_json::Value, at: i64) -> Result<()> {
     use crate::runtime::{self, ReceiptState};
-    s.transaction(|tx| {
+    s.write(|tx| {
         assert!(runtime::merge_receipt_in(
-            tx,
+            tx.conn,
             "a",
             ReceiptState::Finished,
             true,
@@ -789,7 +789,7 @@ pub fn merge_terminal_receipt(s: &Store, payload: &serde_json::Value, at: i64) -
             at - 20_000
         )?);
         assert!(!runtime::merge_receipt_in(
-            tx,
+            tx.conn,
             "a",
             ReceiptState::Finished,
             true,
@@ -802,14 +802,14 @@ pub fn merge_terminal_receipt(s: &Store, payload: &serde_json::Value, at: i64) -
 
 pub fn merge_unsent_rejection(s: &Store, payload: &serde_json::Value, at: i64) -> Result<()> {
     use crate::runtime::{self, ReceiptState};
-    s.transaction(|tx| {
-        runtime::merge_receipt_in(tx, "a", ReceiptState::Rejected, false, payload, at)?;
+    s.write(|tx| {
+        runtime::merge_receipt_in(tx.conn, "a", ReceiptState::Rejected, false, payload, at)?;
         Ok::<_, crate::StoreError>(())
     })
 }
 
 pub fn input_total(s: &Store) -> Result<i64> {
-    s.reader::<_, crate::StoreError>(|c| {
+    s.sqlite_read::<_, crate::StoreError>(|c| {
         Ok(c.query_row(
             "SELECT COALESCE(SUM(input),0) FROM usage_records",
             [],
@@ -819,7 +819,7 @@ pub fn input_total(s: &Store) -> Result<i64> {
 }
 
 pub fn gateway_identity_count(s: &Store) -> Result<(i64, i64)> {
-    s.reader(|c| {
+    s.sqlite_read(|c| {
         Ok((
             c.query_row("SELECT COUNT(*) FROM gateway_usage_reports", [], |r| {
                 r.get(0)
@@ -832,12 +832,12 @@ pub fn gateway_identity_count(s: &Store) -> Result<(i64, i64)> {
 }
 
 pub fn gateway_cancellation(s: &Store) -> Result<(bool, i64, i64)> {
-    s.reader(|c| Ok(c.query_row("SELECT ok,(SELECT COUNT(*) FROM usage_records),(SELECT source_at FROM gateway_usage_reports WHERE report_id='live') FROM gateway_calls", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?))
+    s.sqlite_read(|c| Ok(c.query_row("SELECT ok,(SELECT COUNT(*) FROM usage_records),(SELECT source_at FROM gateway_usage_reports WHERE report_id='live') FROM gateway_calls", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?))
 }
 
 pub type GatewayUsage = (String, i64, Option<i64>);
 pub fn gateway_usage(s: &Store) -> Result<Vec<GatewayUsage>> {
-    s.reader(|c| {
+    s.sqlite_read(|c| {
         Ok(
             c.prepare("SELECT detail,attempts,duration_ms FROM usage_records ORDER BY id")?
                 .query_map([], |r| {
@@ -853,7 +853,7 @@ pub fn gateway_usage(s: &Store) -> Result<Vec<GatewayUsage>> {
 }
 
 pub fn gateway_previous(s: &Store) -> Result<String> {
-    s.reader(|c| {
+    s.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT previous_attempt FROM gateway_attempts WHERE attempt_id='retry'",
             [],
@@ -863,7 +863,7 @@ pub fn gateway_previous(s: &Store) -> Result<String> {
 }
 
 pub fn gateway_call_count(s: &Store) -> Result<(i64, i64)> {
-    s.reader(|c| {
+    s.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT COUNT(DISTINCT json_extract(detail,'$.call_id')), MIN(ts) FROM usage_records",
             [],
@@ -873,7 +873,7 @@ pub fn gateway_call_count(s: &Store) -> Result<(i64, i64)> {
 }
 
 pub fn gateway_source_day(s: &Store) -> Result<String> {
-    s.reader(|c| {
+    s.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT day FROM gateway_calls WHERE call_id='not-dispatched'",
             [],
@@ -883,7 +883,7 @@ pub fn gateway_source_day(s: &Store) -> Result<String> {
 }
 
 pub fn gateway_daily(s: &Store) -> Result<(i64, i64)> {
-    s.reader(|c| {
+    s.sqlite_read(|c| {
         Ok((
             c.query_row(
                 "SELECT COUNT(*) FROM usage_records WHERE day='2026-10-31'",
@@ -896,8 +896,8 @@ pub fn gateway_daily(s: &Store) -> Result<(i64, i64)> {
 }
 
 pub fn assign_project(s: &Store, item: &str, project: &str) -> Result<()> {
-    s.transaction(|tx| {
-        tx.execute(
+    s.write(|tx| {
+        tx.conn.execute(
             "UPDATE items SET project_id=? WHERE id=?",
             params![project, item],
         )?;
@@ -906,8 +906,8 @@ pub fn assign_project(s: &Store, item: &str, project: &str) -> Result<()> {
 }
 
 pub fn reassign_bot(s: &Store, item: &str) -> Result<()> {
-    s.transaction(|tx| {
-        tx.execute(
+    s.write(|tx| {
+        tx.conn.execute(
             "UPDATE items SET project_id=NULL,bot_id='changed' WHERE id=?",
             [item],
         )?;
@@ -916,23 +916,23 @@ pub fn reassign_bot(s: &Store, item: &str) -> Result<()> {
 }
 
 pub fn install_fail_projection(s: &Store) -> Result<()> {
-    s.with_conn(|c| Ok(c.execute_batch("CREATE TRIGGER fail_projection BEFORE INSERT ON usage_records BEGIN SELECT RAISE(ABORT,'projection fault'); END")?))
+    s.write_locked(|c| Ok(c.execute_batch("CREATE TRIGGER fail_projection BEFORE INSERT ON usage_records BEGIN SELECT RAISE(ABORT,'projection fault'); END")?))
 }
 
 pub fn remove_fail_projection(s: &Store) -> Result<()> {
-    s.with_conn(|c| Ok(c.execute_batch("DROP TRIGGER fail_projection")?))
+    s.write_locked(|c| Ok(c.execute_batch("DROP TRIGGER fail_projection")?))
 }
 
 pub fn install_fail_first(s: &Store) -> Result<()> {
-    s.with_conn(|c| Ok(c.execute_batch("CREATE TRIGGER fail_first BEFORE INSERT ON gateway_usage_reports WHEN NEW.report_id='c' BEGIN SELECT RAISE(ABORT,'first report fault'); END")?))
+    s.write_locked(|c| Ok(c.execute_batch("CREATE TRIGGER fail_first BEFORE INSERT ON gateway_usage_reports WHEN NEW.report_id='c' BEGIN SELECT RAISE(ABORT,'first report fault'); END")?))
 }
 
 pub fn remove_fail_first(s: &Store) -> Result<()> {
-    s.with_conn(|c| Ok(c.execute_batch("DROP TRIGGER fail_first")?))
+    s.write_locked(|c| Ok(c.execute_batch("DROP TRIGGER fail_first")?))
 }
 
 pub fn gateway_unapplied(s: &Store) -> Result<(i64, i64, bool)> {
-    s.reader(|c| {
+    s.sqlite_read(|c| {
         Ok((
             c.query_row("SELECT COUNT(*) FROM gateway_usage_reports", [], |r| {
                 r.get(0)
@@ -948,7 +948,7 @@ pub fn gateway_unapplied(s: &Store) -> Result<(i64, i64, bool)> {
 }
 
 pub fn gateway_recovered(s: &Store) -> Result<(i64, i64, String, i64)> {
-    s.reader(|c| Ok(c.query_row(
+    s.sqlite_read(|c| Ok(c.query_row(
         "SELECT ok,(SELECT applied FROM gateway_local_inbox),json_extract(detail,'$.call_id'),(SELECT observed_at FROM gateway_local_inbox) FROM usage_records",
         [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))
     )?))

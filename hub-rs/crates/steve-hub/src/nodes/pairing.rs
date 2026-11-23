@@ -128,7 +128,7 @@ pub async fn new_code_until(
         "pairing_created"
     };
     tokio::task::spawn_blocking(move || {
-        store.transaction(|tx| {
+        store.write(|tx| {
             steve_store::nodes::create_pairing_as(tx, &hash, &me, t, expires, confirmed)?;
             steve_store::nodes::audit(tx, None, Some(&me), what, None, t)
         })
@@ -211,7 +211,7 @@ pub async fn claim(
     let fingerprint = identity::fingerprint(&pubkey);
     let (store, hash, id) = (svc.store.clone(), code_hash(&code), node_id.clone());
     let owner = blocking(move || {
-        store.transaction(|tx| {
+        store.write(|tx| {
             let n = steve_store::nodes::NewNode {
                 node_id: &id,
                 name: &name,
@@ -310,7 +310,7 @@ pub async fn rotate(
     let fingerprint = identity::fingerprint(&new);
     let (store, node, fp) = (svc.store.clone(), b.node_id.clone(), fingerprint.clone());
     let swapped = blocking(move || {
-        store.transaction(|tx| {
+        store.write(|tx| {
             let swapped = store
                 .write(|w| steve_store::node_directory::rotate_key(w, &node, &old, &new, &fp))?;
             if swapped {
@@ -369,7 +369,7 @@ pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Respon
     let store = svc.store.clone();
     // each with how many of its turns run and wait, against its `max_sessions`
     let rows = match blocking(move || {
-        store.reader(|c| {
+        store.read(|c| {
             let default = steve_store::nodes::upgrade_default(c)?;
             let rows = steve_store::nodes::list_for_owner(c, &caller.me)?
                 .into_iter()
@@ -485,7 +485,7 @@ pub async fn act(
     let detail_policy = policy.clone();
     let action2 = action.clone();
     let done = blocking(move || {
-        store.transaction(|tx| {
+        store.write(|tx| {
             use steve_store::nodes::*;
             let ok = match action2.as_str() {
                 "confirm" => set_state(tx, &node, &me, "pending", "active")?,

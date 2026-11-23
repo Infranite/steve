@@ -570,7 +570,7 @@ async fn delete_contact_drops_attrs_and_memories_keeps_links() {
     fixture::seed_contact_relations(t.store(), &cid).unwrap();
     let (only, shared) = t
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             let a = mems::create(
                 tx,
                 WS,
@@ -1737,7 +1737,7 @@ async fn owner_address_contexts_never_fall_back_to_each_other_and_scopes_do_not_
     assert_eq!(get(true, Some("p2"), Some("s2")), "Public name");
     assert_eq!(get(false, Some("p1"), Some("s1")), "Private nickname");
     t.store()
-        .transaction(|tx| {
+        .write(|tx| {
             contacts::repo::value_insert(
                 tx,
                 WS,

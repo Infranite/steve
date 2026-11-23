@@ -15,7 +15,7 @@ pub fn mark_node_attempt(store: &Store, turn: &str, attempt: &str) -> Result<()>
 }
 
 pub fn turn_end(store: &Store, turn: &str) -> Result<(Option<i64>, Option<String>)> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT ended, stop_reason FROM agent_turns WHERE id = ?",
             [turn],
@@ -25,7 +25,7 @@ pub fn turn_end(store: &Store, turn: &str) -> Result<(Option<i64>, Option<String
 }
 
 pub fn usage_count(store: &Store) -> Result<i64> {
-    store.reader(|c| Ok(c.query_row("SELECT count(*) FROM usage_records", [], |r| r.get(0))?))
+    store.sqlite_read(|c| Ok(c.query_row("SELECT count(*) FROM usage_records", [], |r| r.get(0))?))
 }
 
 use std::path::Path;
@@ -214,7 +214,7 @@ pub fn realtime_units(path: &Path, from: i64, to: i64) -> Result<i64> {
 }
 
 pub fn seed_session_token_windows(store: &Store) -> Result<()> {
-    store.with_conn(|tx| {
+    store.write_locked(|tx| {
         tx.execute_batch(
             "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES
                ('a','default','fixture','.','ended',0,0), ('b','default','fixture','.','ended',0,0);

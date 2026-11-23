@@ -1,7 +1,6 @@
 //! Durable Node registration, pairing, and link fencing.
 
-use sea_query::{Expr, ExprTrait, Func, JoinType, OnConflict, Query, Returning};
-use steve_node_api::NodeVitals;
+use sea_query::{Expr, ExprTrait, JoinType, OnConflict, Query, Returning};
 
 use crate::{Read, Result, W};
 
@@ -214,43 +213,6 @@ pub fn set_upgrade_artifact(
     Ok(())
 }
 
-pub struct RemoteVitals {
-    pub node: String,
-    pub name: String,
-    pub data: NodeVitals,
-}
-
-pub fn recent_remote_vitals(c: &mut impl Read, since: i64) -> Result<Vec<RemoteVitals>> {
-    let latest = Query::select()
-        .expr(Func::max(Expr::col(("w", "at"))))
-        .from_as("node_vitals", "w")
-        .and_where(Expr::col(("w", "node_id")).eq(Expr::col(("v", "node_id"))))
-        .take();
-    let rows = c.all(
-        Query::select()
-            .columns([("v", "node_id"), ("n", "name"), ("v", "data")])
-            .from_as("node_vitals", "v")
-            .join_as(
-                JoinType::InnerJoin,
-                "nodes",
-                "n",
-                Expr::col(("n", "node_id")).eq(Expr::col(("v", "node_id"))),
-            )
-            .and_where(Expr::col(("n", "local")).eq(false))
-            .and_where(Expr::col(("v", "at")).gte(since))
-            .and_where(Expr::col(("v", "at")).eq(Expr::from(latest))),
-        |r| Ok((r.get(0)?, r.get(1)?, r.get::<String>(2)?)),
-    )?;
-    Ok(rows
-        .into_iter()
-        .filter_map(|(node, name, data)| {
-            serde_json::from_str(&data)
-                .ok()
-                .map(|data| RemoteVitals { node, name, data })
-        })
-        .collect())
-}
-
 pub fn owner(r: &mut impl Read, node: &str) -> Result<Option<String>> {
     r.one(
         Query::select()
@@ -265,20 +227,12 @@ pub struct DeviceSummary {
     pub node: String,
     pub name: String,
     pub paused: bool,
-    pub online: bool,
 }
 
-pub fn device_summaries(r: &mut impl Read, since: i64) -> Result<Vec<DeviceSummary>> {
-    let recent = Query::select()
-        .column(("v", "node_id"))
-        .from_as("node_vitals", "v")
-        .and_where(Expr::col(("v", "node_id")).eq(Expr::col(("n", "node_id"))))
-        .and_where(Expr::col(("v", "at")).gte(since))
-        .take();
+pub fn device_summaries(r: &mut impl Read) -> Result<Vec<DeviceSummary>> {
     r.all(
         Query::select()
             .columns([("n", "node_id"), ("n", "name"), ("n", "state")])
-            .expr(Expr::exists(recent))
             .from_as("nodes", "n")
             .and_where(Expr::col(("n", "local")).eq(false))
             .and_where(Expr::col(("n", "state")).is_in(CONNECTABLE))
@@ -288,33 +242,9 @@ pub fn device_summaries(r: &mut impl Read, since: i64) -> Result<Vec<DeviceSumma
                 node: row.get(0)?,
                 name: row.get(1)?,
                 paused: row.get::<String>(2)? == "paused",
-                online: row.get(3)?,
             })
         },
     )
-}
-
-pub fn load_per_cpu(r: &mut impl Read, node: &str, since: i64) -> Result<Option<f64>> {
-    #[derive(serde::Deserialize)]
-    struct Load {
-        cpus: Option<f64>,
-        load: Option<Vec<f64>>,
-    }
-    let row: Option<String> = r.one(
-        Query::select()
-            .column("data")
-            .from("node_vitals")
-            .and_where(Expr::col("node_id").eq(node))
-            .and_where(Expr::col("at").gte(since))
-            .order_by("at", sea_query::Order::Desc)
-            .limit(1),
-        |row| row.get(0),
-    )?;
-    Ok(row.and_then(|raw| {
-        let sample: Load = serde_json::from_str(&raw).ok()?;
-        let cpus = sample.cpus.filter(|n| *n > 0.0)?;
-        Some(*sample.load?.first()? / cpus)
-    }))
 }
 
 fn workspace_access(ws: &str) -> (Expr, Expr) {

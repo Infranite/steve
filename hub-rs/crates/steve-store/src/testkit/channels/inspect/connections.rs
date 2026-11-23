@@ -358,7 +358,7 @@ pub fn connection_fails_by_con_a(store: &Store) -> Result<String> {
 }
 
 pub fn feishu_user_connection(store: &Store) -> Result<String> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok::<_, crate::StoreError>(c.query_row(
             "SELECT id FROM connections WHERE adapter = 'feishu_user'",
             [],

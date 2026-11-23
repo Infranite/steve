@@ -1,5 +1,6 @@
-//! Integration tests for re-entrant `Store::atomic` and `SAVEPOINT` isolation.
+//! Integration tests for re-entrant `Store::write` and `SAVEPOINT` isolation.
 
+use steve_store::testkit::SqliteFixtures;
 mod common;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -45,7 +46,7 @@ fn atomic_reads_uncommitted_writes_and_defers_events_until_outer_commit() {
     let wake = store.outbox_wake();
 
     let (item_id, dec_id) = store
-        .atomic(|| -> steve_store::Result<(String, String)> {
+        .write(|_| -> steve_store::Result<(String, String)> {
             let item = store
                 .items()
                 .create(
@@ -62,7 +63,7 @@ fn atomic_reads_uncommitted_writes_and_defers_events_until_outer_commit() {
 
             // Read-your-own-uncommitted-writes inside `atomic` (both `read` and `reader` paths).
             assert!(store.items().get(&item.id)?.is_some());
-            let seen_in_reader: i64 = store.reader(|c| {
+            let seen_in_reader: i64 = store.fixture_read(|c| {
                 Ok::<_, StoreError>(c.query_row(
                     "SELECT COUNT(*) FROM items WHERE id = ?",
                     [&item.id],
@@ -95,8 +96,8 @@ fn atomic_reads_uncommitted_writes_and_defers_events_until_outer_commit() {
                 .add(&item.id, "steve", "sys", "asked", None, &[])?;
 
             // Nested `transaction` emitting an outbox event must also wait for outer commit.
-            store.transaction(|tx| {
-                steve_store::outbox::emit(tx, WS, "test.topic", 1, &json!({"item": item.id}))?;
+            store.write(|tx| {
+                steve_store::outbox::append(tx, WS, "test.topic", 1, &json!({"item": item.id}))?;
                 Ok::<_, StoreError>(())
             })?;
 
@@ -165,7 +166,7 @@ fn atomic_rolls_back_all_tables_and_discards_events_on_err_and_panic() {
     let (_dir, store, events) = open_tracked();
     let wake = store.outbox_wake();
 
-    let err = store.atomic(|| -> steve_store::Result<()> {
+    let err = store.write(|_| -> steve_store::Result<()> {
         let item = store
             .items()
             .create(
@@ -185,8 +186,8 @@ fn atomic_rolls_back_all_tables_and_discards_events_on_err_and_panic() {
         store
             .timeline()
             .add(&item.id, "me", "sys", "step 1", None, &[])?;
-        store.transaction(|tx| {
-            steve_store::outbox::emit(tx, WS, "test.rollback", 1, &json!({"ok": false}))?;
+        store.write(|tx| {
+            steve_store::outbox::append(tx, WS, "test.rollback", 1, &json!({"ok": false}))?;
             Ok::<_, StoreError>(())
         })?;
         Err(StoreError::Conflict("abort".into()))
@@ -198,7 +199,7 @@ fn atomic_rolls_back_all_tables_and_discards_events_on_err_and_panic() {
 
     // Panic unwind must also roll back cleanly, drop staged events, and leave the Store usable.
     let panicked = catch_unwind(AssertUnwindSafe(|| {
-        let _ = store.atomic(|| -> steve_store::Result<()> {
+        let _ = store.write(|_| -> steve_store::Result<()> {
             let _ = store.items().create(
                 WS,
                 &NewItem {
@@ -253,7 +254,7 @@ fn nested_savepoint_rollback_keeps_outer_writes_and_drops_inner_events() {
     let (_dir, store, events) = open_tracked();
 
     let kept_id = store
-        .atomic(|| -> steve_store::Result<String> {
+        .write(|_| -> steve_store::Result<String> {
             let outer = store
                 .items()
                 .create(
@@ -269,7 +270,7 @@ fn nested_savepoint_rollback_keeps_outer_writes_and_drops_inner_events() {
                 .unwrap();
 
             // Inner `atomic` fails: its SQLite writes AND its staged typed events roll back via SAVEPOINT.
-            let inner_res = store.atomic(|| -> steve_store::Result<()> {
+            let inner_res = store.write(|_| -> steve_store::Result<()> {
                 let inner = store
                     .items()
                     .create(
@@ -350,7 +351,7 @@ fn separate_store_instances_on_same_thread_do_not_cross_talk() {
     let (_dir_a, store_a, events_a) = open_tracked();
     let (_dir_b, store_b, events_b) = open_tracked();
 
-    let res = store_a.atomic(|| -> steve_store::Result<()> {
+    let res = store_a.write(|_| -> steve_store::Result<()> {
         store_a.items().create(
             WS,
             &NewItem {
@@ -398,9 +399,9 @@ fn commit_listeners_wake_independently_only_after_outer_commit() {
     let b = store.commit_wake(&["settings"]);
     let unrelated = store.commit_wake(&["items"]);
     store
-        .atomic(|| -> steve_store::Result<()> {
-            store.transaction(|tx| -> steve_store::Result<()> {
-            tx.execute("INSERT INTO settings(workspace_id,key,value,updated) VALUES(?,'commit-wake','true',0) ON CONFLICT(workspace_id,key) DO UPDATE SET value='false'", [WS])?;
+        .write(|_| -> steve_store::Result<()> {
+            store.write(|tx| -> steve_store::Result<()> {
+            steve_store::testkit::sqlite_writer(tx).execute("INSERT INTO settings(workspace_id,key,value,updated) VALUES(?,'commit-wake','true',0) ON CONFLICT(workspace_id,key) DO UPDATE SET value='false'", [WS])?;
             Ok(())
         })?;
             assert!(!ready(&a));
@@ -411,9 +412,9 @@ fn commit_listeners_wake_independently_only_after_outer_commit() {
     assert!(ready(&a));
     assert!(ready(&b));
     assert!(!ready(&unrelated));
-    let rolled_back: steve_store::Result<()> = store.atomic(|| {
-        store.transaction(|tx| -> steve_store::Result<()> {
-            tx.execute("INSERT INTO settings(workspace_id,key,value,updated) VALUES(?,'commit-wake','true',0) ON CONFLICT(workspace_id,key) DO UPDATE SET value='false'", [WS])?;
+    let rolled_back: steve_store::Result<()> = store.write(|_| {
+        store.write(|tx| -> steve_store::Result<()> {
+            steve_store::testkit::sqlite_writer(tx).execute("INSERT INTO settings(workspace_id,key,value,updated) VALUES(?,'commit-wake','true',0) ON CONFLICT(workspace_id,key) DO UPDATE SET value='false'", [WS])?;
             Ok(())
         })?;
         Err(StoreError::Hook("rollback".into()))

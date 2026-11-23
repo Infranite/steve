@@ -140,7 +140,7 @@ fn real_work_producers_keep_scope_through_mutation_and_deletion() {
             .unwrap();
         sink.scoped(&ws);
 
-        s.transaction(|tx| -> Result<()> {
+        s.write(|tx| -> Result<()> {
             item_patch_in(
                 tx,
                 &item.id,
@@ -293,7 +293,7 @@ fn annotations_tags_and_rollback_preserve_the_changed_rows_workspace() {
         sink.scoped(&ws);
         s.tags().remove(&tag.id).unwrap();
         assert_eq!(sink.scoped(&ws)[0]["id"], tag.id);
-        let result: Result<()> = s.atomic(|| {
+        let result: Result<()> = s.write(|_| {
             s.items().set_design_gate(&item.id, true)?;
             s.messages()
                 .add(&ws, "me", "rolled back", None, &Value::Null, "steve")?;

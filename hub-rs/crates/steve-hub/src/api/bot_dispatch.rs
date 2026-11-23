@@ -53,7 +53,7 @@ pub async fn list(State(st): State<AppState>, Extension(cx): Extension<Ctx>) -> 
     let s = required_store(&st)?;
     operate(move || {
         s.read(|c| {
-            let mut teams = s.reader(|db| bot_dispatch::teams(db, &cx.ws))?;
+            let mut teams = bot_dispatch::teams(c, &cx.ws)?;
             // A previously private workspace can gain members. Hide stale remote grants in
             // preset reads too; do not turn an empty restricted list into "all bound Nodes".
             for member in teams.iter_mut().flat_map(|team| &mut team.members) {
@@ -154,7 +154,7 @@ pub async fn set_bindings(
             if !is_bot(tx, &cx.ws, &id)? {
                 return Err(StoreError::NotFound("Bot").into());
             }
-            let old = s.reader(|db| bot_dispatch::bindings(db, &cx.ws, &id))?;
+            let old = bot_dispatch::bindings(tx, &cx.ws, &id)?;
             for node in nodes.iter().filter(|id| !old.contains(id)) {
                 if (node != "local" && !crate::wire::node_binding::node_takes(tx, node, &cx.ws)?)
                     || !report["candidates"].as_array().is_some_and(|cs| {
@@ -265,7 +265,7 @@ async fn save(st: AppState, cx: Ctx, id: Option<String>, b: Preset) -> ApiResult
                     return Err(StoreError::NotFound("Bot").into());
                 }
                 if let Some(nodes) = &m.nodes {
-                    let bound = s.reader(|db| bot_dispatch::bindings(db, &cx.ws, &m.bot))?;
+                    let bound = bot_dispatch::bindings(tx, &cx.ws, &m.bot)?;
                     for id in nodes {
                         if !bound.contains(id)
                             || (id != "local"
@@ -341,13 +341,8 @@ pub async fn set_default(
 /// Item detail reports the actual binding, not a projection of the workspace's current default.
 pub(super) fn item_dispatch(store: &Store, id: &str, ws: &str) -> steve_store::Result<Value> {
     store.read(|c| {
-        let (team, last) = store.reader(|db| {
-            Ok::<_, StoreError>((
-                bot_dispatch::item_team(db, id)?,
-                bot_dispatch::last_decision(db, id)?,
-            ))
-        })?;
-        let mut placement = last.unwrap_or(Value::Null);
+        let team = bot_dispatch::item_team(c, id)?;
+        let mut placement = bot_dispatch::last_decision(c, id)?.unwrap_or(Value::Null);
         if let Some(node) = placement["node"].as_str().map(str::to_string)
             && node != "local"
         {

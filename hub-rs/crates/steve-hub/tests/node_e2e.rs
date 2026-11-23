@@ -2313,7 +2313,7 @@ async fn a_service_node_turn_outlives_the_hub() {
 }
 
 /// B7: tags on the Hub's own Node; an item asking for one the Hub has keeps its new sessions
-/// here, and one asking for a tag no device has is told so, placed as usual.
+/// here, and an unmatched tag prevents placement.
 #[tokio::test(flavor = "multi_thread")]
 async fn node_tags_send_work_where_it_fits() {
     let h = Home::new();
@@ -2405,23 +2405,16 @@ async fn node_tags_send_work_where_it_fits() {
             Some(json!({})),
         )
         .await;
-    assert_eq!(s, 200, "{v}");
-    let third = v["session"].as_str().expect("new session").to_string();
-    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
-        format!(
-            "The session explains that no available Node has the required tag; Hub log:\n{}",
-            hub_log(&h)
-        )
-    });
-    eventually_sync(diagnostic, || {
-        node_process::event_count_by_session_system_events(&h.db_path(), &third).unwrap() == 1
-    })
-    .await;
-    eventually_sync(
-        "The unpinned session is placed through the ordinary Node selection path.",
-        || node_process::binding_count_by_session(&h.db_path(), &third).unwrap() == 1,
-    )
-    .await;
+    assert_ne!(s, 200, "{v}");
+    assert!(
+        v["error"].as_str().is_some_and(|e| e.contains("标签")),
+        "{v}"
+    );
+    assert_eq!(
+        node_process::session_count_for_item(&h.db_path(), &item).unwrap(),
+        2,
+        "no third session"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

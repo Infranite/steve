@@ -27,7 +27,7 @@ fn internal(e: impl std::fmt::Display) -> ApiError {
 
 pub async fn list(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
     let s = store(&st)?;
-    let tags = tokio::task::spawn_blocking(move || s.reader(steve_store::nodes::all_tags))
+    let tags = tokio::task::spawn_blocking(move || s.read(|r| steve_store::nodes::all_tags(r)))
         .await
         .map_err(internal)?
         .map_err(internal)?;
@@ -56,7 +56,7 @@ pub async fn set(
     }
     let s = store(&st)?;
     let kept = tokio::task::spawn_blocking(move || {
-        s.transaction(|tx| steve_store::nodes::set_tags(tx, &node, &b.tags))
+        s.write(|tx| steve_store::nodes::set_tags(tx, &node, &b.tags))
     })
     .await
     .map_err(internal)?

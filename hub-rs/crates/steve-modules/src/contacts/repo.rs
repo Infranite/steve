@@ -1,7 +1,7 @@
 //! Contact and attribute types shared across modules.
 
 use steve_store::base::{Viewer, Visibility};
-use steve_store::{Attributes, Contacts, Read, Result, Tx};
+use steve_store::{Attributes, Contacts, Read, Result, W};
 
 use crate::Owned;
 pub use steve_store::{
@@ -41,12 +41,12 @@ impl Owned for Party {
     }
 }
 
-pub fn insert(tx: &Tx, ws: &str, p: &NewParty) -> Result<Party> {
-    tx.write(|w| w.contacts().insert(ws, p))
+pub fn insert(tx: &mut W<'_>, ws: &str, p: &NewParty) -> Result<Party> {
+    tx.contacts().insert(ws, p)
 }
 
-pub fn update(tx: &Tx, id: &str, p: &PartyPatch, revision: Option<i64>) -> Result<bool> {
-    tx.write(|w| w.contacts().update(id, p, revision))
+pub fn update(tx: &mut W<'_>, id: &str, p: &PartyPatch, revision: Option<i64>) -> Result<bool> {
+    tx.contacts().update(id, p, revision)
 }
 
 pub fn like(q: &str) -> String {
@@ -61,6 +61,6 @@ pub fn like(q: &str) -> String {
     s
 }
 
-pub fn value_insert(tx: &Tx, ws: &str, v: &NewValue) -> Result<AttrValue> {
-    tx.write(|w| Attributes(w).insert_value(ws, v))
+pub fn value_insert(tx: &mut W<'_>, ws: &str, v: &NewValue) -> Result<AttrValue> {
+    Attributes(tx).insert_value(ws, v)
 }

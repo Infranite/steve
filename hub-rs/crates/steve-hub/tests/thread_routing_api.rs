@@ -818,6 +818,19 @@ async fn research_runs_get_read_only_mcp() {
             )
         })
         .unwrap();
+    store
+        .write(|w| {
+            steve_store::thread_runs::patch(
+                w,
+                &grp.id,
+                &steve_store::RunPatch {
+                    status: Some("running".into()),
+                    token_hash: Some(Some(steve_store::sha("research-token-3"))),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
     let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": 12, "method": "tools/call", "params": {"name": "steve_items_search", "arguments": {"query": "改"}}}), "research-token-3").await;
     assert!(
         text(&v).contains(&item) && !text(&v).contains("现在："),

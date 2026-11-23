@@ -30,7 +30,7 @@ impl Handler for Nothing {
 /// What the handshake committed: generation + 1, as `Admit::admit` does.
 fn admitted(h: &Hub, node: &NodeId) -> u64 {
     h.store
-        .transaction::<_, StoreError>(|tx| {
+        .write::<_, StoreError>(|tx| {
             Ok(steve_store::nodes::begin_link(tx, node.as_str(), 1, 1)?
                 .unwrap()
                 .generation as u64)

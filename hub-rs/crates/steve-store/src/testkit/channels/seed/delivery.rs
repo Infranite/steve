@@ -23,8 +23,8 @@ pub fn set_output_preference_learned_space_id(store: &Store, one_space_id: &str)
 }
 
 pub fn expire_connector_reference(store: &Store, reference: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute(
+    store.write(|tx| {
+        tx.conn.execute(
             "UPDATE connector_refs SET expires=0 WHERE id=?",
             [reference],
         )?;

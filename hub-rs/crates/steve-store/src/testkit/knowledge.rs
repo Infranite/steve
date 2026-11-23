@@ -44,7 +44,7 @@ impl FtsFixture {
 
 pub fn seed_delivery(s: &Store) -> Result<()> {
     s
-        .with_conn(|c| {
+        .write_locked(|c| {
             c.execute_batch(
                 "INSERT INTO parties (id, workspace_id, type, name, aliases, created_by, created, updated) VALUES
                    ('ct_sarah', 'default', 'contact', 'Sarah Chen', '[\"Sarah\"]', 'usr_dev', 1, 1),
@@ -67,7 +67,7 @@ pub fn seed_delivery(s: &Store) -> Result<()> {
 }
 
 pub fn only_member(s: &Store, ws: &str, user: &str) -> Result<()> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
         c.execute(
             "DELETE FROM workspace_members WHERE workspace_id=? AND user_id<>?",
             params![ws, user],
@@ -77,14 +77,14 @@ pub fn only_member(s: &Store, ws: &str, user: &str) -> Result<()> {
 }
 
 pub fn set_delivery_stamp(s: &Store, at: i64) -> Result<()> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
         c.execute("UPDATE items SET updated=? WHERE id='ST-12'", [at])?;
         Ok(())
     })
 }
 
 pub fn decision_audits(s: &Store) -> Result<i64> {
-    s.reader(|c| {
+    s.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT COUNT(*) FROM audit WHERE action='decision.resolve'",
             [],
@@ -94,14 +94,14 @@ pub fn decision_audits(s: &Store) -> Result<i64> {
 }
 
 pub fn set_memory_created(s: &Store, id: &str, at: i64) -> Result<()> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
         c.execute("UPDATE mems SET created=? WHERE id=?", params![at, id])?;
         Ok(())
     })
 }
 
 pub fn seed_day_messages(s: &Store, start: i64) -> Result<()> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
         c.execute_batch(&format!(
                 "INSERT INTO messages (id, workspace_id, space, author, text, item_id, created) VALUES
                    ('msg_1', 'default', 'steve', 'me', '以后周五下午不安排部署', NULL, {a}),
@@ -115,7 +115,7 @@ pub fn seed_day_messages(s: &Store, start: i64) -> Result<()> {
 }
 
 pub fn notice_text(s: &Store) -> Result<Vec<String>> {
-    s.reader(|c| {
+    s.sqlite_read(|c| {
         let mut q = c.prepare_cached("SELECT text FROM messages WHERE space='notify'")?;
         Ok(q.query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?)
@@ -123,17 +123,17 @@ pub fn notice_text(s: &Store) -> Result<Vec<String>> {
 }
 
 pub fn clear_messages(s: &Store) -> Result<()> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
         c.execute("DELETE FROM messages", [])?;
         Ok(())
     })
 }
 
 pub fn seed_chat_catchup(s: &Store, messages: &[(&str, i64)]) -> Result<()> {
-    s.transaction(|tx| {
-        tx.execute("INSERT OR REPLACE INTO settings (workspace_id, key, value, updated) VALUES ('default','tz','\"UTC\"',0)",[])?;
+    s.write(|tx| {
+        tx.conn.execute("INSERT OR REPLACE INTO settings (workspace_id, key, value, updated) VALUES ('default','tz','\"UTC\"',0)",[])?;
         for (id, at) in messages {
-            tx.execute("INSERT INTO messages (id, workspace_id, space, author, text, created) VALUES (?, 'default', 'steve', 'me', '以后周五不部署', ?)",params![id,at])?;
+            tx.conn.execute("INSERT INTO messages (id, workspace_id, space, author, text, created) VALUES (?, 'default', 'steve', 'me', '以后周五不部署', ?)",params![id,at])?;
         }
         Ok(())
     })
@@ -149,7 +149,7 @@ pub fn seed_prompt_item(
     by: Option<&str>,
 ) -> Result<()> {
     s
-            .with_conn(|c| {
+            .write_locked(|c| {
                 c.execute(
                     "INSERT INTO items (id, workspace_id, no, kind, title, status, stage, created, updated, requested_by) VALUES (?, ?, (SELECT COUNT(*) + 1 FROM items), 'task', ?, 'run', '执行', 1, 1, ?)",
                     params![id, ws, title, by],
@@ -173,21 +173,21 @@ pub fn seed_prompt_item(
 }
 
 pub fn empty_chat_reply(s: &Store) -> Result<()> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
         c.execute("INSERT INTO messages (id, workspace_id, space, author, text, created) VALUES ('msg_1', 'w2', 'main', 'steve', '', 1)",[])?;
         Ok(())
     })
 }
 
 pub fn audit_item_creator(s: &Store, ws: &str, actor: &str, item: &str) -> Result<()> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
         c.execute("INSERT INTO audit (workspace_id, ts, actor, action, target) VALUES (?, 1, ?, 'item.create', ?)",params![ws,actor,item])?;
         Ok(())
     })
 }
 
 pub fn revoke_member(s: &Store, ws: &str, user: &str) -> Result<()> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
         c.execute(
             "DELETE FROM workspace_members WHERE workspace_id=? AND user_id=?",
             params![ws, user],
@@ -197,7 +197,7 @@ pub fn revoke_member(s: &Store, ws: &str, user: &str) -> Result<()> {
 }
 
 pub fn remove_user_memberships(s: &Store, user: &str) -> Result<()> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
         c.execute("DELETE FROM workspace_members WHERE user_id = ?", [user])?;
         Ok(())
     })
@@ -205,7 +205,7 @@ pub fn remove_user_memberships(s: &Store, user: &str) -> Result<()> {
 
 pub fn seed_sarah(s: &Store) -> Result<()> {
     s
-        .with_conn(|c| {
+        .write_locked(|c| {
             c.execute_batch(
                 "INSERT INTO parties (id, workspace_id, type, name, created_by, created, updated) VALUES ('ct_sarah', 'default', 'contact', 'Sarah Chen', 'usr_dev', 1, 1);",
             )?;
@@ -214,7 +214,7 @@ pub fn seed_sarah(s: &Store) -> Result<()> {
 }
 
 pub fn pause_source(s: &Store, source: &str) -> Result<()> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
         c.execute("UPDATE kb_sources SET paused = 1 WHERE id = ?", [source])?;
         Ok(())
     })
@@ -222,7 +222,7 @@ pub fn pause_source(s: &Store, source: &str) -> Result<()> {
 
 pub fn seed_bot_memory(s: &Store) -> Result<()> {
     s
-        .with_conn(|c| {
+        .write_locked(|c| {
             c.execute_batch(
                 "INSERT INTO bots (id, workspace_id, name, harness, updated) VALUES ('bot_k1', 'default', '小运', 'claude', 1);
                  INSERT OR IGNORE INTO bot_workspaces (bot_id, workspace_id, created) VALUES ('bot_k1', 'default', 1);
@@ -233,7 +233,7 @@ pub fn seed_bot_memory(s: &Store) -> Result<()> {
 }
 
 pub fn edit_bot_memory(s: &Store) -> Result<()> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
         c.execute(
             "UPDATE bot_memories SET text = '发布前要先跑回归测试' WHERE id = 'mem_1'",
             [],
@@ -243,7 +243,7 @@ pub fn edit_bot_memory(s: &Store) -> Result<()> {
 }
 
 pub fn clear_bot_memories(s: &Store) -> Result<()> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
         c.execute("DELETE FROM bot_memories", [])?;
         Ok(())
     })
@@ -251,7 +251,7 @@ pub fn clear_bot_memories(s: &Store) -> Result<()> {
 
 pub fn seed_item_doc(s: &Store, source: &str) -> Result<()> {
     s
-        .with_conn(|c| {
+        .write_locked(|c| {
             c.execute(
                 "INSERT INTO kb_docs (id, workspace_id, source_id, ref, title, created_by, created, updated) VALUES ('kd_item', 'default', ?, 'ST-12', '交付：部署脚本', 'usr_dev', 1, 1)",
                 [source],
@@ -261,14 +261,14 @@ pub fn seed_item_doc(s: &Store, source: &str) -> Result<()> {
 }
 
 pub fn edit_doc_without_indexing(s: &Store, doc: &str) -> Result<()> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
         c.execute("UPDATE kb_docs SET body = '第二版内容' WHERE id = ?", [doc])?;
         Ok(())
     })
 }
 
 pub fn seed_mail_threads(s: &Store) -> Result<()> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
         c.execute_batch("INSERT INTO parties (id, workspace_id, type, name, user_id, created_by, created, updated)
             VALUES ('mail_owner', 'default', 'person', 'Mail owner', 'usr_other', 'usr_other', 1, 1);
             INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated)
@@ -284,7 +284,7 @@ pub fn seed_mail_threads(s: &Store) -> Result<()> {
 }
 
 pub fn seed_scoped_mail_threads(s: &Store) -> Result<()> {
-    s.with_conn(|c| {
+    s.write_locked(|c| {
         c.execute_batch("INSERT INTO parties (id, workspace_id, type, name, created_by, created, updated)
             VALUES ('mail_party', 'default', 'person', 'Mailbox', 'usr_other', 1, 1);
             INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated)
@@ -299,7 +299,7 @@ pub fn seed_scoped_mail_threads(s: &Store) -> Result<()> {
 }
 
 pub fn stored_search_hits(s: &Store, user: &str) -> Result<(i64, String)> {
-    s.reader(|c| {
+    s.sqlite_read(|c| {
             Ok(c.query_row(
                 "SELECT COUNT(*), MAX(hits) FROM kb_uses WHERE consumer_type = 'search' AND consumer_id = ?",
                 [user],
@@ -309,7 +309,7 @@ pub fn stored_search_hits(s: &Store, user: &str) -> Result<(i64, String)> {
 }
 
 pub fn search_index_rows(s: &Store) -> Result<i64> {
-    s.reader(|c| {
+    s.sqlite_read(|c| {
             Ok(c.query_row(
                 "SELECT (SELECT COUNT(*) FROM kb_chunks) + (SELECT COUNT(*) FROM kb_fts WHERE kb_fts MATCH '\"九月\"')",
                 [],
@@ -319,7 +319,7 @@ pub fn search_index_rows(s: &Store) -> Result<i64> {
 }
 
 pub fn memory_chunk_scope(s: &Store, id: &str) -> Result<(String, String)> {
-    s.reader(|c| {
+    s.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT visibility, level FROM kb_chunks WHERE obj_type = 'mem' AND obj_id = ?",
             [id],
@@ -339,7 +339,7 @@ pub fn insert_upload(
     actor: &str,
 ) -> Result<()> {
     s
-        .with_conn(|c| {
+        .write_locked(|c| {
             c.execute(
                 "INSERT INTO files (id, workspace_id, sha256, name, mime, size, created_by, created) VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
                 params![id, ws, sha, name, mime, size, actor],
@@ -350,7 +350,7 @@ pub fn insert_upload(
 
 pub fn seed_steward_subjects(s: &Store) -> Result<()> {
     s
-        .with_conn(|c| {
+        .write_locked(|c| {
             c.execute_batch(
                 "INSERT INTO parties (id, workspace_id, type, name, aliases, created_by, created, updated) VALUES
                    ('ct_sarah', 'default', 'contact', 'Sarah Chen', '[\"Sarah\"]', 'usr_dev', 1, 1),
@@ -364,7 +364,7 @@ pub fn seed_steward_subjects(s: &Store) -> Result<()> {
 
 pub fn seed_steward_use(s: &Store, mem: &str) -> Result<()> {
     s
-        .with_conn(|c| {
+        .write_locked(|c| {
             c.execute(
                 "INSERT INTO kb_uses (id, workspace_id, consumer_type, consumer_id, query, hits, created) VALUES ('ku_1', 'default', 'session', 'ses_1', '邮件', ?, 50)",
                 [serde_json::json!([{"n": 1, "obj_type": "mem", "obj_id": mem, "level": "conclusion", "label": "偏好"}]).to_string()],
@@ -375,7 +375,7 @@ pub fn seed_steward_use(s: &Store, mem: &str) -> Result<()> {
 
 pub fn seed_draft_org(s: &Store) -> Result<()> {
     s
-        .with_conn(|c| {
+        .write_locked(|c| {
             c.execute_batch(
                 "INSERT INTO parties (id, workspace_id, type, name, aliases, created_by, created, updated) VALUES
                    ('org_acme', 'default', 'org', 'Acme', '[\"艾克米\"]', 'usr_dev', 1, 1);",
@@ -385,11 +385,11 @@ pub fn seed_draft_org(s: &Store) -> Result<()> {
 }
 
 pub fn memory_count(s: &Store) -> Result<i64> {
-    s.reader(|c| Ok(c.query_row("SELECT COUNT(*) FROM mems", [], |r| r.get(0))?))
+    s.sqlite_read(|c| Ok(c.query_row("SELECT COUNT(*) FROM mems", [], |r| r.get(0))?))
 }
 
 pub fn indexed_memory_count(s: &Store) -> Result<i64> {
-    s.reader(|c| {
+    s.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT COUNT(*) FROM kb_chunks WHERE obj_type = 'mem'",
             [],
@@ -399,11 +399,11 @@ pub fn indexed_memory_count(s: &Store) -> Result<i64> {
 }
 
 pub fn indexed_docs(s: &Store, id: &str) -> Result<i64> {
-    s.reader(|c| Ok(c.query_row("SELECT COUNT(*) FROM kb_docs WHERE source_id = ? AND status = 'active' AND indexed IS NOT NULL", [id], |r| r.get(0))?))
+    s.sqlite_read(|c| Ok(c.query_row("SELECT COUNT(*) FROM kb_docs WHERE source_id = ? AND status = 'active' AND indexed IS NOT NULL", [id], |r| r.get(0))?))
 }
 
 pub fn syncing_sources(s: &Store, id: &str) -> Result<i64> {
-    s.reader(|c| {
+    s.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT COUNT(*) FROM kb_sources WHERE id = ? AND status = 'syncing'",
             [id],
@@ -413,7 +413,7 @@ pub fn syncing_sources(s: &Store, id: &str) -> Result<i64> {
 }
 
 pub fn document_count(s: &Store, id: &str) -> Result<i64> {
-    s.reader(|c| {
+    s.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT COUNT(*) FROM kb_docs WHERE source_id = ?",
             [id],
@@ -423,7 +423,7 @@ pub fn document_count(s: &Store, id: &str) -> Result<i64> {
 }
 
 pub fn folder_chunks(s: &Store) -> Result<i64> {
-    s.reader(|c| {
+    s.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT COUNT(*) FROM kb_chunks WHERE source_kind = 'folder'",
             [],
@@ -433,7 +433,7 @@ pub fn folder_chunks(s: &Store) -> Result<i64> {
 }
 
 pub fn folder_sources(s: &Store) -> Result<i64> {
-    s.reader(|c| {
+    s.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT COUNT(*) FROM kb_sources WHERE kind = 'folder'",
             [],
@@ -443,7 +443,7 @@ pub fn folder_sources(s: &Store) -> Result<i64> {
 }
 
 pub fn never_chunks(s: &Store, id: &str) -> Result<i64> {
-    s.reader(|c| {
+    s.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT COUNT(*) FROM kb_chunks WHERE obj_id = ? AND level = 'never'",
             [id],
@@ -453,7 +453,7 @@ pub fn never_chunks(s: &Store, id: &str) -> Result<i64> {
 }
 
 pub fn candidate_count(s: &Store, origin: &str) -> Result<i64> {
-    s.reader(|c| {
+    s.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT COUNT(*) FROM mem_candidates WHERE origin_id = ?",
             [origin],

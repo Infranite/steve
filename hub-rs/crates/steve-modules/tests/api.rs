@@ -44,7 +44,7 @@ async fn create(
         .done()?;
     let mem = m
         .blocking(move |m| {
-            Ok(m.store.transaction(|tx| {
+            Ok(m.store.write(|tx| {
                 mems::create(
                     tx,
                     &who.ws,
@@ -75,14 +75,14 @@ async fn edit(
 ) -> ApiResult<Json<Value>> {
     m.blocking(move |m| {
         let viewer = m.viewer(&who)?;
-        let mem = own(m.store.reader(|c| mems::get(c, &id))?, &viewer, "记忆")?;
+        let mem = own(m.store.read(|c| mems::get(c, &id))?, &viewer, "记忆")?;
         if mem.text == "锁定" {
             return Err(ApiError::rule("这条记忆不能改"));
         }
         if b.text.as_deref() == Some(mem.text.as_str()) {
             return Err(ApiError::conflict("没有变化"));
         }
-        let m2 = m.store.transaction(|tx| {
+        let m2 = m.store.write(|tx| {
             mems::patch(
                 tx,
                 &id,
@@ -291,7 +291,7 @@ async fn ownership_and_domain_errors() {
     // workspace-visible memories are reachable by the other user
     let shared = t
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             mems::create(
                 tx,
                 WS,
@@ -318,7 +318,7 @@ async fn ownership_and_domain_errors() {
 
 fn candidate(t: &TestEnv) -> (String, Decision) {
     t.store()
-        .transaction(|tx| {
+        .write(|tx| {
             let m = mems::create(
                 tx,
                 WS,
@@ -393,7 +393,7 @@ async fn confirm_decisions_dispatch_to_the_module() {
     );
     assert_eq!(
         t.store()
-            .reader(|c| mems::get(c, &mid))
+            .read(|c| mems::get(c, &mid))
             .unwrap()
             .unwrap()
             .status,
@@ -407,7 +407,7 @@ async fn confirm_decisions_dispatch_to_the_module() {
         (409, "这个决定已经处理过了".to_string())
     );
     assert!(
-        t.store().reader(|c| mems::get(c, &mid)).unwrap().is_some(),
+        t.store().read(|c| mems::get(c, &mid)).unwrap().is_some(),
         "the second answer did nothing"
     );
 
@@ -416,7 +416,7 @@ async fn confirm_decisions_dispatch_to_the_module() {
     decisions::dispatch(&t.modules, &me, &d2.id, "no", "不对")
         .unwrap()
         .unwrap();
-    assert!(t.store().reader(|c| mems::get(c, &mid2)).unwrap().is_none());
+    assert!(t.store().read(|c| mems::get(c, &mid2)).unwrap().is_none());
     assert_eq!(
         t.store().decisions().get(&d2.id).unwrap().unwrap().result,
         json!({"choice": "no", "text": "不对"})
@@ -432,7 +432,7 @@ async fn confirm_decisions_dispatch_to_the_module() {
     );
     assert_eq!(
         t.store()
-            .reader(|c| mems::get(c, &mid3))
+            .read(|c| mems::get(c, &mid3))
             .unwrap()
             .unwrap()
             .status,

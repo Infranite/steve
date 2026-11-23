@@ -601,6 +601,38 @@ mod tests {
             work.to_str().unwrap(),
         )
         .unwrap();
+        ws.refresh_roots().unwrap();
+        let prep = Command {
+            id: OperationId::new(format!("op_prep_{SESSION}")).unwrap(),
+            // one command whichever process of a test sends it
+            issued_at: Timestamp(1),
+            accept_before: Timestamp(i64::MAX),
+            grant: GrantId::new("hub").unwrap(),
+            body: Prepare {
+                resource: format!("session:{SESSION}"),
+                kind: PrepareKind::Existing {
+                    dir: RootPath {
+                        root: super::super::node_binding::root_id(&work).unwrap(),
+                        rel: RelPath::new("").unwrap(),
+                    },
+                },
+            },
+        };
+        let op = node.prepare_workspace(prep).await.unwrap().operation;
+        let workspace = loop {
+            if let Observed::Finished {
+                result: Some(OperationResult::Workspace(v)),
+                ..
+            } = node.operation(op.clone()).await.unwrap().state
+            {
+                break v.workspace;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        steve_store::testkit::hub::node_fixtures::bind_vault_fixture_workspace(
+            &store, SESSION, &workspace,
+        )
+        .unwrap();
         T {
             uses: VaultNodes::new(store.clone(), ws, secrets),
             root: root.to_path_buf(),

@@ -224,22 +224,22 @@ pub fn seed_read_views_are_bound_to_one_connection(store: &Store) -> Result<()> 
 }
 
 pub fn pause_attention_bot(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute("UPDATE connections SET status='paused' WHERE id='bot'", [])?;
         Ok(())
     })
 }
 
 pub fn revoke_attention_owner(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute("UPDATE connections SET status='revoked' WHERE id='own'", [])?;
         Ok(())
     })
 }
 
 pub fn permit_receive_only(store: &Store, connection: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute(
+    store.write(|tx| {
+        tx.conn.execute(
             "UPDATE connections SET caps = '[\"msg.receive\"]' WHERE id = ?",
             [connection],
         )?;
@@ -248,8 +248,8 @@ pub fn permit_receive_only(store: &Store, connection: &str) -> Result<()> {
 }
 
 pub fn move_connection_to_other_workspace(store: &Store, connection: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute(
+    store.write(|tx| {
+        tx.conn.execute(
             "UPDATE connections SET workspace_id = 'w2' WHERE id = ?",
             [connection],
         )?;
@@ -258,8 +258,8 @@ pub fn move_connection_to_other_workspace(store: &Store, connection: &str) -> Re
 }
 
 pub fn return_connection_to_default_workspace(store: &Store, connection: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute(
+    store.write(|tx| {
+        tx.conn.execute(
             "UPDATE connections SET workspace_id = 'default' WHERE id = ?",
             [connection],
         )?;
@@ -268,7 +268,7 @@ pub fn return_connection_to_default_workspace(store: &Store, connection: &str) -
 }
 
 pub fn link_personal_connection(store: &Store, bot: &str, own: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute(
             "UPDATE connections SET config = json_object('app_connection', ?) WHERE id = ?",
             rusqlite::params![bot, own],
@@ -278,9 +278,11 @@ pub fn link_personal_connection(store: &Store, bot: &str, own: &str) -> Result<(
 }
 
 pub fn set_connection_seniority(store: &Store, earlier: &str, later: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute("UPDATE connections SET created=10 WHERE id=?", [earlier])?;
-        tx.execute("UPDATE connections SET created=20 WHERE id=?", [later])?;
+    store.write(|tx| {
+        tx.conn
+            .execute("UPDATE connections SET created=10 WHERE id=?", [earlier])?;
+        tx.conn
+            .execute("UPDATE connections SET created=20 WHERE id=?", [later])?;
         Ok::<_, crate::StoreError>(())
     })
 }
@@ -291,7 +293,7 @@ pub fn set_fixture_connection_adapter(
     adapter: &str,
     config: &str,
 ) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute(
             "UPDATE connections SET adapter = ?2, config = ?3 WHERE id = ?1",
             rusqlite::params![con, adapter, config],

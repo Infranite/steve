@@ -19,27 +19,27 @@ pub struct Outbound<'a> {
 
 pub fn outbound(store: &Store, fixture: Outbound<'_>) {
     store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute(
+        .write::<_, StoreError>(|tx| {
+            tx.conn.execute(
             "INSERT INTO spaces(id,workspace_id,system_id,kind,external_id,name,created,updated)
              VALUES (?, ?, ?, 'group', ?, ?, 1, 1)",
             params![fixture.space, WS, fixture.system, fixture.external, fixture.name],
         )?;
             if let Some(text) = fixture.text {
-                tx.execute(
+                tx.conn.execute(
                 "INSERT INTO chan_messages(id,workspace_id,space_id,direction,text,status,created)
                  VALUES (?, ?, ?, 'out', ?, ?, 1)",
                 params![fixture.message, WS, fixture.space, text, fixture.status],
             )?;
             } else {
-                tx.execute(
+                tx.conn.execute(
                     "INSERT INTO chan_messages(id,workspace_id,space_id,direction,status,created)
                  VALUES (?, ?, ?, 'out', ?, 1)",
                     params![fixture.message, WS, fixture.space, fixture.status],
                 )?;
             }
             if let Some((id, verdict)) = fixture.basis {
-                tx.execute(
+                tx.conn.execute(
                     "INSERT INTO reply_basis (id,workspace_id,message_id,entries,verdict,created)
                  VALUES (?, ?, ?, '[]', ?, 1)",
                     params![id, WS, fixture.message, verdict],
@@ -52,7 +52,7 @@ pub fn outbound(store: &Store, fixture: Outbound<'_>) {
 
 pub fn reject_action_settlement(store: &Store) {
     store
-        .with_conn(|c| {
+        .write_locked(|c| {
             c.execute_batch(
                 "CREATE TRIGGER yolo_no_decided BEFORE UPDATE OF outcome ON yolo_actions
             WHEN NEW.outcome = 'decided' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
@@ -64,7 +64,7 @@ pub fn reject_action_settlement(store: &Store) {
 
 pub fn corrupt_decision_options(store: &Store, id: &str) {
     store
-        .with_conn(|c| {
+        .write_locked(|c| {
             c.execute("UPDATE decisions SET options=x'80' WHERE id=?", [id])?;
             Ok(())
         })

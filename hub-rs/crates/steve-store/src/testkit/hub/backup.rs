@@ -97,7 +97,7 @@ pub fn admin_header(path: &std::path::Path) -> Result<Vec<(i64, i64)>> {
 }
 
 pub fn token_audit_actions(store: &Store) -> Result<Vec<String>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         let mut s =
             c.prepare("SELECT action FROM audit WHERE action LIKE 'token.%' ORDER BY action")?;
         Ok(s.query_map([], |r| r.get(0))?
@@ -119,10 +119,10 @@ pub fn seed_channel_cleanup(store: &Store) -> Result<()> {
              VALUES('backup-space','default','test','group','backup-space','Backup','left',1,1,'backup-account');
              INSERT INTO chan_messages(id,workspace_id,space_id,direction,status,text,created)
              VALUES('backup-message','default','backup-space','in','received','before cleanup',1);";
-    store.transaction(|tx| -> Result<(), crate::StoreError> {
-        tx.execute_batch(seed_sql)?;
+    store.write(|tx| -> Result<(), crate::StoreError> {
+        tx.conn.execute_batch(seed_sql)?;
         steve_store_sqlite::digest::sync_message(
-            tx,
+            tx.conn,
             steve_store_sqlite::digest::Source::ChanMessage,
             "backup-message",
             None,
@@ -144,7 +144,7 @@ pub fn snapshot_message(path: &std::path::Path) -> Result<Option<String>> {
 }
 
 pub fn channel_after_cleanup(store: &Store) -> Result<(Option<String>, bool)> {
-    store.reader(|db| {
+    store.sqlite_read(|db| {
         Ok((
             message(db)?,
             steve_store_sqlite::digest::verify_pending(db, "default")?.is_empty(),
@@ -153,7 +153,7 @@ pub fn channel_after_cleanup(store: &Store) -> Result<(Option<String>, bool)> {
 }
 
 pub fn checkpoint(store: &Store) -> Result<()> {
-    store.with_conn(|db| {
+    store.write_locked(|db| {
         db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
         Ok(())
     })

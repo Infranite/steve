@@ -104,17 +104,11 @@ pub fn seed_decision(store: &Store, text: &str, old: i64, id: &str) -> Result<()
 }
 
 pub fn resolve_all_approvals(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute(
             "UPDATE decisions SET status = 'resolved' WHERE kind = 'approve'",
             [],
         )?;
         Ok(())
     })
-}
-
-pub fn reopen_fixture_decision(w: &mut crate::W<'_>, id: &str) -> Result<()> {
-    w.fixture_connection()
-        .execute("UPDATE decisions SET status = 'open' WHERE id = ?", [id])?;
-    Ok(())
 }

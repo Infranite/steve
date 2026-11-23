@@ -1,6 +1,6 @@
 //! Durable reading entries, independent from delivery receipts and chat.
 
-use crate::{Result, StoreError, Tx, uid};
+use crate::{Result, StoreError, W, uid};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -96,7 +96,7 @@ pub struct Page {
     pub snapshot: String,
     pub unread_count: i64,
 }
-pub fn member(c: &Connection, ws: &str, user: &str) -> Result<()> {
+pub(crate) fn member_on(c: &Connection, ws: &str, user: &str) -> Result<()> {
     if !c.query_row(
         "SELECT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?)",
         params![ws, user],
@@ -170,8 +170,8 @@ fn entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
         },
     })
 }
-pub fn detail(c: &Connection, ws: &str, user: &str, id: &str) -> Result<Entry> {
-    member(c, ws, user)?;
+pub(crate) fn detail_on(c: &Connection, ws: &str, user: &str, id: &str) -> Result<Entry> {
+    member_on(c, ws, user)?;
     c.query_row(
         &format!("{SELECT} WHERE {SCOPE} AND e.id=?3"),
         params![ws, user, id],
@@ -181,7 +181,7 @@ pub fn detail(c: &Connection, ws: &str, user: &str, id: &str) -> Result<Entry> {
     .ok_or(StoreError::NotFound("feed entry"))
 }
 fn window(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     user: &str,
     f: &Filter,
@@ -190,9 +190,9 @@ fn window(
     now: i64,
 ) -> Result<String> {
     // Polling an unchanged page reuses its capability rather than accumulating a token per read.
-    if let Some(token)=tx.query_row("SELECT token FROM feed_windows WHERE workspace_id=? AND user_id=? AND kind IS ? AND source IS ? AND unread=? AND upper_seq=? AND before_seq IS ? AND expires>? LIMIT 1",params![ws,user,f.kind,f.source,f.unread,upper,before,now+3_600_000],|r|r.get::<_,String>(0)).optional()? { return Ok(token); }
+    if let Some(token)=tx.conn.query_row("SELECT token FROM feed_windows WHERE workspace_id=? AND user_id=? AND kind IS ? AND source IS ? AND unread=? AND upper_seq=? AND before_seq IS ? AND expires>? LIMIT 1",params![ws,user,f.kind,f.source,f.unread,upper,before,now+3_600_000],|r|r.get::<_,String>(0)).optional()? { return Ok(token); }
     let token = format!("{}{}", uid("fw"), uid(""));
-    tx.execute("INSERT INTO feed_windows(token,workspace_id,user_id,kind,source,unread,upper_seq,before_seq,expires) VALUES(?,?,?,?,?,?,?,?,?)",params![token,ws,user,f.kind,f.source,f.unread,upper,before,now+86_400_000])?;
+    tx.conn.execute("INSERT INTO feed_windows(token,workspace_id,user_id,kind,source,unread,upper_seq,before_seq,expires) VALUES(?,?,?,?,?,?,?,?,?)",params![token,ws,user,f.kind,f.source,f.unread,upper,before,now+86_400_000])?;
     Ok(token)
 }
 fn resolve(
@@ -221,7 +221,7 @@ fn resolve(
 }
 const FILTER: &str = "(?3 IS NULL OR e.kind=?3) AND (?4 IS NULL OR e.source_type=?4)";
 pub fn list(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     user: &str,
     f: &Filter,
@@ -229,16 +229,16 @@ pub fn list(
     limit: usize,
     now: i64,
 ) -> Result<Page> {
-    member(tx, ws, user)?;
+    member_on(tx.conn, ws, user)?;
     f.validate()?;
     if !(1..=100).contains(&limit) {
         return Err(StoreError::Conflict("Feed limit must be 1..100".into()));
     }
     let (upper, before) = if let Some(token) = cursor {
-        resolve(tx, ws, user, f, token, true, now)?
+        resolve(tx.conn, ws, user, f, token, true, now)?
     } else {
         (
-            tx.query_row(
+            tx.conn.query_row(
                 &format!("SELECT coalesce(max(e.seq),0) FROM feed_entries e WHERE {SCOPE}"),
                 params![ws, user],
                 |r| r.get(0),
@@ -246,7 +246,7 @@ pub fn list(
             None,
         )
     };
-    let mut st=tx.prepare(&format!("{SELECT} WHERE {SCOPE} AND {FILTER} AND (?5=0 OR r.read_at IS NULL) AND e.seq<=?6 AND (?7 IS NULL OR e.seq<?7) ORDER BY e.seq DESC LIMIT ?8"))?;
+    let mut st=tx.conn.prepare(&format!("{SELECT} WHERE {SCOPE} AND {FILTER} AND (?5=0 OR r.read_at IS NULL) AND e.seq<=?6 AND (?7 IS NULL OR e.seq<?7) ORDER BY e.seq DESC LIMIT ?8"))?;
     let mut entries = st
         .query_map(
             params![
@@ -280,7 +280,7 @@ pub fn list(
     for e in &mut entries {
         e.body = None;
     }
-    let unread_count=tx.query_row(&format!("SELECT count(*) FROM feed_entries e LEFT JOIN feed_reads r ON r.workspace_id=e.workspace_id AND r.user_id=?2 AND r.entry_id=e.id WHERE {SCOPE} AND {FILTER} AND r.read_at IS NULL"),params![ws,user,f.kind,f.source],|r|r.get(0))?;
+    let unread_count=tx.conn.query_row(&format!("SELECT count(*) FROM feed_entries e LEFT JOIN feed_reads r ON r.workspace_id=e.workspace_id AND r.user_id=?2 AND r.entry_id=e.id WHERE {SCOPE} AND {FILTER} AND r.read_at IS NULL"),params![ws,user,f.kind,f.source],|r|r.get(0))?;
     Ok(Page {
         entries,
         next_cursor,
@@ -288,33 +288,33 @@ pub fn list(
         unread_count,
     })
 }
-pub fn read_ids(tx: &Tx, ws: &str, user: &str, ids: &[String], now: i64) -> Result<usize> {
-    member(tx, ws, user)?;
+pub fn read_ids(tx: &mut W<'_>, ws: &str, user: &str, ids: &[String], now: i64) -> Result<usize> {
+    member_on(tx.conn, ws, user)?;
     if ids.is_empty() || ids.len() > 100 {
         return Err(StoreError::Conflict("Select 1..100 feed entries".into()));
     }
     // Validate the entire set before writing, including when the caller nests this transaction.
     for id in ids {
-        detail(tx, ws, user, id)?;
+        detail_on(tx.conn, ws, user, id)?;
     }
     let mut changed = 0;
     for id in ids {
-        changed+=tx.execute("INSERT INTO feed_reads(workspace_id,user_id,entry_id,read_at) VALUES(?,?,?,?) ON CONFLICT DO NOTHING",params![ws,user,id,now])?;
+        changed+=tx.conn.execute("INSERT INTO feed_reads(workspace_id,user_id,entry_id,read_at) VALUES(?,?,?,?) ON CONFLICT DO NOTHING",params![ws,user,id,now])?;
     }
     Ok(changed)
 }
 pub fn read_snapshot(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     user: &str,
     f: &Filter,
     token: &str,
     now: i64,
 ) -> Result<usize> {
-    member(tx, ws, user)?;
+    member_on(tx.conn, ws, user)?;
     f.validate()?;
-    let (upper, _) = resolve(tx, ws, user, f, token, false, now)?;
-    Ok(tx.execute(&format!("INSERT INTO feed_reads(workspace_id,user_id,entry_id,read_at) SELECT ?1,?2,e.id,?7 FROM feed_entries e LEFT JOIN feed_reads r ON r.workspace_id=e.workspace_id AND r.user_id=?2 AND r.entry_id=e.id WHERE {SCOPE} AND {FILTER} AND (?5=0 OR r.read_at IS NULL) AND e.seq<=?6 ON CONFLICT DO NOTHING"),params![ws,user,f.kind,f.source,f.unread,upper,now])?)
+    let (upper, _) = resolve(tx.conn, ws, user, f, token, false, now)?;
+    Ok(tx.conn.execute(&format!("INSERT INTO feed_reads(workspace_id,user_id,entry_id,read_at) SELECT ?1,?2,e.id,?7 FROM feed_entries e LEFT JOIN feed_reads r ON r.workspace_id=e.workspace_id AND r.user_id=?2 AND r.entry_id=e.id WHERE {SCOPE} AND {FILTER} AND (?5=0 OR r.read_at IS NULL) AND e.seq<=?6 ON CONFLICT DO NOTHING"),params![ws,user,f.kind,f.source,f.unread,upper,now])?)
 }
 /// Stable business identity includes the graph node, not only the run or content hash.
 fn report_key(run: &str, node: &str) -> String {
@@ -418,4 +418,12 @@ impl crate::FeedReads<'_, crate::W<'_>> {
         )?;
         Ok(true)
     }
+}
+
+pub fn member(r: &mut impl crate::Read, ws: &str, user: &str) -> Result<()> {
+    member_on(r.connection(), ws, user)
+}
+
+pub fn detail(r: &mut impl crate::Read, ws: &str, user: &str, id: &str) -> Result<Entry> {
+    detail_on(r.connection(), ws, user, id)
 }

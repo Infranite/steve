@@ -74,7 +74,7 @@ impl LinkCtx {
     async fn audit(&self, what: &'static str, detail: String) {
         let (store, node) = (self.store.clone(), self.node.to_string());
         let r = tokio::task::spawn_blocking(move || {
-            store.transaction::<_, StoreError>(|tx| {
+            store.write::<_, StoreError>(|tx| {
                 steve_store::nodes::audit(
                     tx,
                     Some(&node),
@@ -170,7 +170,7 @@ pub(crate) fn replay_check(store: Store, node: NodeId) -> crate::wire::node_runt
             .read(|c| foreign(c, node.as_str(), batch))
             .map_err(internal)?;
         let Some(why) = bad else { return Ok(()) };
-        let audited = store.transaction::<_, StoreError>(|tx| {
+        let audited = store.write::<_, StoreError>(|tx| {
             steve_store::nodes::audit(
                 tx,
                 Some(node.as_str()),

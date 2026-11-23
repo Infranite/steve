@@ -304,7 +304,7 @@ async fn bots_seen_in_chat_cards_tools_and_chat_proposals() {
     // another bot in a group: its own bot party, nobody's
     let got = t
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             identify(
                 tx,
                 WS,

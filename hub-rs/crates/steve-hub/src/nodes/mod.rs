@@ -123,7 +123,7 @@ pub fn identity_at(home: &std::path::Path) -> std::io::Result<steve_node_wire::I
 pub(crate) async fn tell(store: &Store, node: &str) {
     let (store, node) = (store.clone(), node.to_string());
     let r = tokio::task::spawn_blocking(move || {
-        store.transaction(|tx| steve_store::nodes::changed(tx, &node))
+        store.write(|tx| steve_store::nodes::changed(tx, &node))
     })
     .await;
     if !matches!(r, Ok(Ok(()))) {

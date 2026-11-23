@@ -2032,7 +2032,12 @@ async fn a_parked_session_queues_and_goes_once_the_node_is_back() {
     assert!(!steve_hub::wire::node_runtime::bound(&store, "other"));
     steve_hub::wire::node_runtime::park(&store, S, "while off", "user", &[]).unwrap();
     steve_hub::wire::node_runtime::park(&store, S, "and more", "user", &[]).unwrap();
-    assert_eq!(h.systems("STEVE_NODE_MODE"), 1, "told once");
+    assert_eq!(
+        steve_store::testkit::hub::node_process::event_count_by_session_system(store.path(), S)
+            .unwrap(),
+        1,
+        "told once"
+    );
     let queued: i64 = node_checks::queued_count(&h.store).unwrap();
     assert_eq!(queued, 2);
     assert_eq!(h.count("start_turn"), 1);
@@ -2216,7 +2221,7 @@ async fn a_refused_answer_is_not_an_answer() {
     assert_eq!(h.perm_state(&d), "answering");
     // as the orchestrator does after a true
     h.store
-        .transaction::<_, StoreError>(|tx| {
+        .write::<_, StoreError>(|tx| {
             steve_store::decision_resolve_in(
                 tx,
                 &d,
@@ -4546,7 +4551,7 @@ async fn saved_capacity_queues_and_increasing_it_dispatches_the_same_turn() {
     .await;
     eventually_sync("capacity reason projected", || {
         h.store
-            .reader(steve_store::runtime::sessions_waiting_for_room)
+            .read(|r| steve_store::runtime::sessions_waiting_for_room(r))
             .unwrap()
             .len()
             == 1
@@ -4566,7 +4571,7 @@ async fn saved_capacity_queues_and_increasing_it_dispatches_the_same_turn() {
         "actual limiter follows saved value"
     );
     h.store
-        .transaction::<_, StoreError>(|tx| {
+        .write::<_, StoreError>(|tx| {
             assert!(steve_store::nodes::set_max_sessions(tx, "n1", "u", 2)?);
             Ok(())
         })
@@ -4581,7 +4586,7 @@ async fn saved_capacity_queues_and_increasing_it_dispatches_the_same_turn() {
     );
     eventually_sync("capacity wait cleared", || {
         h.store
-            .reader(steve_store::runtime::sessions_waiting_for_room)
+            .read(|r| steve_store::runtime::sessions_waiting_for_room(r))
             .unwrap()
             .is_empty()
     })

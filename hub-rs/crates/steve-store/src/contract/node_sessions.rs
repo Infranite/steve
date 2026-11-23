@@ -228,11 +228,19 @@ pub fn set_desired_config<T: serde::Serialize>(
     config: Option<&T>,
     at: i64,
 ) -> Result<()> {
-    let config = config.map(serde_json::to_string).transpose()?;
+    let config = config.map(serde_json::to_value).transpose()?;
+    let mode = config
+        .as_ref()
+        .and_then(|config| config.pointer("/policy/permissions"))
+        .and_then(serde_json::Value::as_str);
     w.exec(
         Query::update()
             .table("runtime_sessions")
-            .value("desired_config", config)
+            .value(
+                "desired_config",
+                config.as_ref().map(serde_json::Value::to_string),
+            )
+            .value("desired_mode", mode)
             .value("updated", at)
             .and_where(Expr::col("session_id").eq(session)),
     )?;

@@ -109,7 +109,7 @@ fn authorize_steve_session(
     // A known ToolKey must still be readable when a wait/replan stops further work.
     let gated = gate
         && store
-            .reader(|c| steve_store::workflow_gate::session_blocker(c, &s.id))
+            .read(|c| steve_store::workflow_gate::session_blocker(c, &s.id))
             .map_err(internal)?
             .is_some();
     if gated

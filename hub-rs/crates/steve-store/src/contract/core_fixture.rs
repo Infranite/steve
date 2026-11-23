@@ -239,7 +239,7 @@ pub fn unbind_bot(store: &Store, id: &str) {
 }
 
 pub fn reject_tool_receipts(store: &Store) {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute_batch("CREATE TEMP TRIGGER receipt_failure BEFORE INSERT ON events WHEN NEW.kind='steve_tool_receipt' BEGIN SELECT RAISE(FAIL,'receipt write failed'); END")?;
         Ok(())
     }).unwrap();
@@ -260,7 +260,7 @@ pub fn skip_workflow_goal_version(store: &Store, item: &str) {
 
 pub fn resume_workflow_deliveries(store: &Store) {
     store
-        .with_conn(|c| {
+        .write_locked(|c| {
             c.execute_batch("DROP TRIGGER fail_workflow_delivery")?;
             Ok(())
         })

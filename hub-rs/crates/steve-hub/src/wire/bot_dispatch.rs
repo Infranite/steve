@@ -6,7 +6,7 @@ use steve_node_api::{
     AdapterStatus, HarnessCapability, HarnessChoice, NodeId, PermissionMode, SetupState,
 };
 use steve_store::{
-    Bot, Read, Store, StoreError, bot_admin,
+    Bot, Read, StoreError, bot_admin,
     bot_dispatch::{self, Scope},
     node_directory,
 };
@@ -107,7 +107,6 @@ fn compatible(
 /// Structural constraints shared by preflight and the binding transaction: authorization, the
 /// project's machine, the item's tag, and the Node the item's other sessions are bound to.
 pub(super) fn node_blocker(
-    store: &Store,
     c: &mut impl Read,
     ws: &str,
     item: &str,
@@ -123,9 +122,8 @@ pub(super) fn node_blocker(
             return Ok(Some("project"));
         }
     }
-    if let Some(tag) = store.reader(|db| steve_store::nodes::item_tag(db, item))?
-        && !store
-            .reader(|db| steve_store::nodes::with_tag(db, &tag))?
+    if let Some(tag) = steve_store::nodes::item_tag(c, item)?
+        && !steve_store::nodes::with_tag(c, &tag)?
             .iter()
             .any(|n| n == node)
     {
@@ -141,7 +139,6 @@ pub(super) fn node_blocker(
 /// Authorization is held through the same SQLite transaction that fixes the Node. Reject a
 /// legacy decision raced by an opt-in, and reject a strict decision raced by a revocation.
 pub(super) fn commit_guard(
-    store: &Store,
     c: &mut impl Read,
     session: &str,
     node: &str,
@@ -152,13 +149,13 @@ pub(super) fn commit_guard(
     let Some(item) = row.item else { return Ok(()) };
     let ws = row.workspace;
     let bot = row.bot.unwrap_or_else(|| "steve".into());
-    match store.reader(|db| bot_dispatch::scope(db, &ws, &item, &bot))? {
+    match bot_dispatch::scope(c, &ws, &item, &bot)? {
         Scope::Nodes(nodes) if nodes.iter().any(|n| n == node) => {
             let active = bot_admin::selectable(c, &ws, &bot, true)?;
             if !active {
                 return Err(StoreError::Conflict(text("bot")));
             }
-            if let Some(why) = node_blocker(store, c, &ws, &item, Some(session), node)? {
+            if let Some(why) = node_blocker(c, &ws, &item, Some(session), node)? {
                 return Err(StoreError::Conflict(text(why)));
             }
             Ok(())
@@ -230,9 +227,7 @@ impl RoutedRuntime {
             return Err(StoreError::NotFound("Bot not found").into());
         }
         let (bindings, names, configured) = self.store.read(|r| {
-            let bindings = self
-                .store
-                .reader(|db| bot_dispatch::bindings(db, ws, &bot.id))?;
+            let bindings = bot_dispatch::bindings(r, ws, &bot.id)?;
             let mut names = vec![("local".to_string(), None)];
             names.extend(
                 node_directory::workspace_candidates(r, ws)?
@@ -277,7 +272,7 @@ impl RoutedRuntime {
             .ok_or(StoreError::NotFound("Item not found"))?;
         let scope = self
             .store
-            .reader(|c| bot_dispatch::scope(c, &row.workspace_id, item, bot))?;
+            .read(|c| bot_dispatch::scope(c, &row.workspace_id, item, bot))?;
         let nodes = match scope {
             Scope::Nodes(nodes) => nodes,
             Scope::OutsideTeam => return Err(CoreError::Msg(text("outside_team"))),
@@ -292,7 +287,7 @@ impl RoutedRuntime {
             for n in nodes {
                 let why = self
                     .store
-                    .read(|c| node_blocker(&self.store, c, &row.workspace_id, item, None, &n))?;
+                    .read(|c| node_blocker(c, &row.workspace_id, item, None, &n))?;
                 // Local mode can be widened by the item's policy at actual bind time. Do not
                 // reject a mode here that may be made compatible then. The bind checks it exactly.
                 let report = self.report(&n, &choice, Some(&b.perm_mode)).0;
@@ -329,7 +324,7 @@ impl RoutedRuntime {
         let bot = s.bot_id.as_deref().unwrap_or("steve");
         let scope = self
             .store
-            .reader(|c| bot_dispatch::scope(c, &s.workspace_id, item, bot))?;
+            .read(|c| bot_dispatch::scope(c, &s.workspace_id, item, bot))?;
         match scope {
             Scope::OutsideTeam => {
                 self.save_dispatch(item, bot, Some(session), None, "outside_team", &[])?;
@@ -345,9 +340,9 @@ impl RoutedRuntime {
                 let mode = self.perm_mode(session);
                 let mut rejected = Vec::new();
                 for (i, node) in nodes.iter().enumerate() {
-                    let why = self.store.read(|c| {
-                        node_blocker(&self.store, c, &s.workspace_id, item, Some(session), node)
-                    })?;
+                    let why = self
+                        .store
+                        .read(|c| node_blocker(c, &s.workspace_id, item, Some(session), node))?;
                     if let Some(why) = why {
                         rejected.push(why);
                         continue;
@@ -452,7 +447,7 @@ impl RoutedRuntime {
         let item = s.item_id?;
         let reason = self
             .store
-            .reader(|c| {
+            .read(|c| {
                 let r = bot_dispatch::last_decision(c, &item)?;
                 Ok::<_, StoreError>(
                     r.filter(|v| v["session"] == session && v["node"].is_null())

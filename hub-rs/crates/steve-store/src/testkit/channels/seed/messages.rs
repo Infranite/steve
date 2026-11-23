@@ -245,53 +245,54 @@ pub fn seed_outbound_state(
     status: &str,
     at: i64,
 ) -> Result<()> {
-    store.transaction(|c| {
-                c.execute(
+    store.write(|c| {
+                c.conn.execute(
                     "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, text, status, created, sent)
                      VALUES (?1, 'default', ?2, ?3, 'out', '好的', ?4, ?5, ?5)",
                     params![id, space, format!("fm_{id}"), status, at],
                 )?;
-                steve_store_sqlite::digest::sync_message(c, steve_store_sqlite::digest::Source::ChanMessage, id, None)?;
+                steve_store_sqlite::digest::sync_message(c.conn, steve_store_sqlite::digest::Source::ChanMessage, id, None)?;
                 Ok(())
             })
 }
 
 pub fn seed_persona_reply(store: &Store, space: &str, account: &str) -> Result<()> {
-    store.transaction(|c| {
-            c.execute(
+    store.write(|c| {
+            c.conn.execute(
                 "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_account_id, on_behalf, text, status, created, sent)
                  VALUES ('cm_out1', 'default', ?, 'fm_1', 'out', ?, 'persona', '已处理', 'sent', 1, 1)",
                 params![space, account],
             )?;
-                steve_store_sqlite::digest::sync_message(c, steve_store_sqlite::digest::Source::ChanMessage, "cm_out1", None)?;
+                steve_store_sqlite::digest::sync_message(c.conn, steve_store_sqlite::digest::Source::ChanMessage, "cm_out1", None)?;
             Ok(())
         })
 }
 
 pub fn seed_recent_outbound(store: &Store, space: &str, now: i64) -> Result<()> {
-    store.transaction(|c| {
+    store.write(|c| {
             for i in 0..50 {
-                c.execute(
+                c.conn.execute(
                     "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, text, status, created, sent)
                      VALUES (?, 'default', ?, ?, 'out', 'x', 'sent', ?, ?)",
                     params![format!("cm_o{i}"), space, format!("fm_{i}"), now, now],
                 )?;
-                steve_store_sqlite::digest::sync_message(c, steve_store_sqlite::digest::Source::ChanMessage, &format!("cm_o{i}"), None)?;
+                steve_store_sqlite::digest::sync_message(c.conn, steve_store_sqlite::digest::Source::ChanMessage, &format!("cm_o{i}"), None)?;
             }
             Ok(())
         })
 }
 
 pub fn mark_message_purged(store: &Store, id: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute("UPDATE chan_messages SET purged=1 WHERE id=?", [id])?;
+    store.write(|tx| {
+        tx.conn
+            .execute("UPDATE chan_messages SET purged=1 WHERE id=?", [id])?;
         Ok(())
     })
 }
 
 pub fn clear_purged_message(store: &Store, id: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute(
+    store.write(|tx| {
+        tx.conn.execute(
             "UPDATE chan_messages SET text=NULL,attachments='[]',purged=1 WHERE id=?",
             [id],
         )?;
@@ -300,8 +301,8 @@ pub fn clear_purged_message(store: &Store, id: &str) -> Result<()> {
 }
 
 pub fn forget_seen_message(store: &Store, connection: &str, message: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute(
+    store.write(|tx| {
+        tx.conn.execute(
             "DELETE FROM chan_message_seen WHERE connection_id=? AND message_id=?",
             rusqlite::params![connection, message],
         )?;
@@ -310,7 +311,7 @@ pub fn forget_seen_message(store: &Store, connection: &str, message: &str) -> Re
 }
 
 pub fn reset_fixture_seen_by(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute(
             "UPDATE chan_messages SET seen_by = 4 WHERE text = '我先看一下'",
             [],
@@ -320,7 +321,7 @@ pub fn reset_fixture_seen_by(store: &Store) -> Result<()> {
 }
 
 pub fn mark_reaction_done(store: &Store, message: &str) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute(
             "UPDATE chan_reactions SET state='done',answer_id=NULL WHERE message_id=?",
             [message],

@@ -155,7 +155,7 @@ pub fn waiting_commands(w: &mut W<'_>, node: &str) -> Result<Vec<(String, Option
 }
 
 pub fn session_room(w: &mut W<'_>, node: &str) -> Result<SessionRoom> {
-    runtime::session_room(w.conn, node)
+    runtime::session_room_on(w.conn, node)
 }
 
 pub fn record_placement(w: &mut W<'_>, item: &str, placement: &Value) -> Result<()> {

@@ -3,8 +3,8 @@
 use crate::{Result, Store};
 
 fn workspaces(store: &Store) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute_batch(
+    store.write(|tx| {
+        tx.conn.execute_batch(
             "INSERT INTO workspaces(id,name,created) VALUES ('solo','solo',1),('team','team',1),('other','other',1);
              INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES
                ('u1','team','u1','u1','owner',1),('u2','team','u2','u2','member',1),('u3','other','u3','u3','owner',1);
@@ -17,8 +17,8 @@ fn workspaces(store: &Store) -> Result<()> {
 
 pub fn principals(store: &Store) -> Result<()> {
     workspaces(store)?;
-    store.transaction(|tx| {
-        tx.execute_batch(
+    store.write(|tx| {
+        tx.conn.execute_batch(
             "INSERT INTO items(id,workspace_id,requested_by,no,title,status,stage,created,updated) VALUES
                ('i1','solo',NULL,1,'i1','run','define',1,1),('i2','team','u2',2,'i2','run','define',1,1),
                ('i3','team',NULL,3,'i3','run','define',1,1),('i4','team','u9',4,'i4','run','define',1,1),
@@ -36,8 +36,8 @@ pub fn principals(store: &Store) -> Result<()> {
 
 pub fn views(store: &Store) -> Result<()> {
     workspaces(store)?;
-    store.transaction(|tx| {
-        tx.execute_batch(
+    store.write(|tx| {
+        tx.conn.execute_batch(
             "INSERT INTO projects(id,workspace_id,name,path,worktree,created,updated) VALUES
                ('pg','team','pg','/w/git-proj',1,1,1),('pd','team','pd','/w/dir-proj',0,1,1),
                ('po','other','po','/w/other-proj',1,1,1);
@@ -62,8 +62,8 @@ pub fn views(store: &Store) -> Result<()> {
 }
 
 pub fn remove_member(store: &Store, ws: &str, user: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute(
+    store.write(|tx| {
+        tx.conn.execute(
             "DELETE FROM workspace_members WHERE workspace_id=? AND user_id=?",
             [ws, user],
         )?;
@@ -72,8 +72,8 @@ pub fn remove_member(store: &Store, ws: &str, user: &str) -> Result<()> {
 }
 
 pub fn set_requester(store: &Store, item: &str, requester: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute(
+    store.write(|tx| {
+        tx.conn.execute(
             "UPDATE items SET requested_by=? WHERE id=?",
             [requester, item],
         )?;
@@ -91,7 +91,7 @@ pub struct Shadow {
 }
 
 pub fn shadow(store: &Store, session: &str) -> Result<Shadow> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT v.extra_count,v.extra,v.missing_count,v.missing,v.digest,r.view_digest
              FROM view_shadow v JOIN runtime_sessions r USING(session_id) WHERE v.session_id=?",
@@ -144,8 +144,8 @@ pub fn seed_principal_binding(
     principal: Option<&str>,
     directory: Option<&str>,
 ) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute("INSERT INTO runtime_sessions
+    store.write(|tx| {
+        tx.conn.execute("INSERT INTO runtime_sessions
                    (session_id, node_id, workspace_ref, node_session_id, config_revision, phase, updated, principal, state_dir)
                  VALUES (?1, ?2, '{}', ?1, 'r1', 'ready', 1, ?3, ?4)", rusqlite::params![session, node, principal, directory])?;
         Ok(())
@@ -153,8 +153,8 @@ pub fn seed_principal_binding(
 }
 
 pub fn set_fixture_acp_ids(store: &Store, local: &str, remote: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute(
+    store.write(|tx| {
+        tx.conn.execute(
             "UPDATE sessions SET acp_session_id = 'acp-123' WHERE id IN (?1, ?2)",
             [local, remote],
         )?;
@@ -163,8 +163,8 @@ pub fn set_fixture_acp_ids(store: &Store, local: &str, remote: &str) -> Result<(
 }
 
 pub fn seed_item_scope_workspace(store: &Store) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute(
+    store.write(|tx| {
+        tx.conn.execute(
             "INSERT INTO workspaces (id,name,created,item_prefix) VALUES ('other','Other',1,'OT')",
             [],
         )?;
@@ -173,8 +173,8 @@ pub fn seed_item_scope_workspace(store: &Store) -> Result<()> {
 }
 
 pub fn move_to_unverified_channel(store: &Store, message: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute(
+    store.write(|tx| {
+        tx.conn.execute(
             "UPDATE messages SET space='chan:unverified',meta=? WHERE id=?",
             [
                 &serde_json::json!({"chan":{"owner_only":true,"connection":"unverified"}})
@@ -187,8 +187,8 @@ pub fn move_to_unverified_channel(store: &Store, message: &str) -> Result<()> {
 }
 
 pub fn mark_workflow_item(store: &Store, item: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute(
+    store.write(|tx| {
+        tx.conn.execute(
             "UPDATE items SET source=? WHERE id=?",
             [r#"["collaboration","workflow"]"#, item],
         )?;
@@ -230,16 +230,17 @@ pub fn violate_session_scope(
             "UPDATE sessions SET device_id='external-device' WHERE id=?"
         }
     };
-    store.transaction(|tx| {
-        tx.execute(sql, [session])?;
+    store.write(|tx| {
+        tx.conn.execute(sql, [session])?;
         Ok(())
     })
 }
 
 pub fn seed_item_dependency(store: &Store, item: &str, upstream: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute("UPDATE items SET status='run' WHERE id=?", [item])?;
-        tx.execute(
+    store.write(|tx| {
+        tx.conn
+            .execute("UPDATE items SET status='run' WHERE id=?", [item])?;
+        tx.conn.execute(
             "INSERT INTO item_deps(item_id,dep_id,created) VALUES(?,?,1)",
             [item, upstream],
         )?;
@@ -266,17 +267,17 @@ pub fn set_item_condition(
     condition: ItemCondition,
     set: bool,
 ) -> Result<()> {
-    store.transaction(|tx| {
+    store.write(|tx| {
         match condition {
-            ItemCondition::Paused => tx.execute(
+            ItemCondition::Paused => tx.conn.execute(
                 "UPDATE items SET status=? WHERE id=?",
                 [if set { "pause" } else { "run" }, id],
             )?,
-            ItemCondition::Archived => tx.execute(
+            ItemCondition::Archived => tx.conn.execute(
                 "UPDATE items SET archived=? WHERE id=?",
                 rusqlite::params![set, id],
             )?,
-            ItemCondition::WorkflowUnit => tx.execute(
+            ItemCondition::WorkflowUnit => tx.conn.execute(
                 "UPDATE items SET source=? WHERE id=?",
                 [
                     if set {
@@ -313,21 +314,21 @@ pub fn limit_bot_scope(store: &Store, condition: BotCondition) -> Result<()> {
             "DELETE FROM bot_workspaces WHERE bot_id='bot_default' AND workspace_id='default'"
         }
     };
-    store.transaction(|tx| {
-        tx.execute(sql, [])?;
+    store.write(|tx| {
+        tx.conn.execute(sql, [])?;
         Ok(())
     })
 }
 
 pub fn seed_digest_identity_bot(store: &Store, ws: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute("INSERT INTO bots (id,workspace_id,name,harness,updated) VALUES ('steve',?,'Digest','fixture',1)", [ws])?;
+    store.write(|tx| {
+        tx.conn.execute("INSERT INTO bots (id,workspace_id,name,harness,updated) VALUES ('steve',?,'Digest','fixture',1)", [ws])?;
         Ok(())
     })
 }
 
 pub fn party_records(store: &Store, ws: &str, user: &str) -> Result<i64> {
-    store.reader(|db| {
+    store.sqlite_read(|db| {
         Ok(db.query_row(
             "SELECT COUNT(*) FROM parties WHERE workspace_id=? AND user_id=?",
             [ws, user],
@@ -337,13 +338,13 @@ pub fn party_records(store: &Store, ws: &str, user: &str) -> Result<i64> {
 }
 
 pub fn seed_thread_group(store: &Store, item: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute_batch(
+    store.write(|tx| {
+        tx.conn.execute_batch(
             "INSERT INTO messages (id, workspace_id, space, author, text, created) VALUES
                    ('msg_grp_1', 'default', 'chan:spc_t', 'u', '帮我把 X 改成 Y', 1),
                    ('msg_grp_2', 'default', 'chan:spc_t', 'u', '进展如何', 2)",
         )?;
-        tx.execute(
+        tx.conn.execute(
             "                 UPDATE thread_items SET origin_msg = 'msg_grp_1' WHERE item_id = ?;",
             [item],
         )?;

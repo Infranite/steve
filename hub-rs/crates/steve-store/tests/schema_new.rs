@@ -1,6 +1,7 @@
 //! Migrations 5–22 (slice M0, YOLO Y0, stats ST0, thread routing R0, reasoning effort, ownership, space attention, IM reactions): the new module tables appear on an empty database and on databases left
 //! at v2, v3 and v4, running them again changes nothing, and the bundled SQLite has what `kb_fts` needs.
 
+use steve_store::testkit::SqliteFixtures;
 mod common;
 
 use common::*;
@@ -128,7 +129,7 @@ fn usage_ledger_upgrade_preserves_published_device_revision_and_legacy_bill() {
     drop(c);
     let store = Store::open(&path, NoPublisher).unwrap();
     store
-        .reader(|c| {
+        .fixture_read(|c| {
             assert_pre_usage_ledger_facts(c);
             Ok::<_, steve_store::StoreError>(())
         })
@@ -212,7 +213,7 @@ fn reasoning_migration_accepts_columns_previously_added_by_ts_hub() {
 fn empty_database_migrates_to_v20() {
     let t = fresh();
     t.store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             assert_eq!(count(c, "SELECT v FROM schema_version"), db::SCHEMA_VERSION);
             for (name, _) in NEW_TABLES {
                 assert!(has_table(c, name), "{name}");
@@ -233,7 +234,7 @@ fn v2_v3_v4_databases_migrate_to_the_fresh_schema() {
     for v in [2, 3, 4, 12, 16, 17, 18, 19, 49] {
         let (_dir, path) = at_version(v);
         let s = Store::open(&path, NoPublisher).unwrap();
-        s.with_conn(|c| {
+        s.fixture_write(|c| {
             assert_eq!(
                 count(c, "SELECT v FROM schema_version"),
                 db::SCHEMA_VERSION,
@@ -295,7 +296,7 @@ fn each_migration_brings_its_own_tables() {
 fn kb_fts_writes_queries_and_deletes() {
     let t = fresh();
     t.store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             let ver: String = c.query_row("SELECT sqlite_version()", [], |r| r.get(0))?;
             assert!(
                 c.query_row("SELECT sqlite_compileoption_used('ENABLE_FTS5')", [], |r| r
@@ -375,7 +376,7 @@ fn yolo_migration_does_not_depend_on_013() {
     let want = yolo(&c);
     let (_c, path) = at_version(13);
     let s = Store::open(&path, NoPublisher).unwrap();
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         assert_eq!(count(c, "SELECT v FROM schema_version"), db::SCHEMA_VERSION);
         assert_eq!(yolo(c), want);
         Ok(())
@@ -735,7 +736,7 @@ fn capacity_migration_updates_old_display_defaults_preserves_custom_values_and_r
     let reopened = Store::open(&path, NoPublisher).unwrap();
     assert_eq!(
         reopened
-            .reader(|c| Ok::<_, steve_store::StoreError>(count(
+            .fixture_read(|c| Ok::<_, steve_store::StoreError>(count(
                 c,
                 "SELECT max_sessions FROM devices WHERE id='hub'"
             )))
@@ -780,7 +781,7 @@ fn device_revision_migration_preserves_existing_limits_and_reopens() {
     drop(c);
     let store = Store::open(path, NoPublisher).unwrap();
     store
-        .reader(|c| -> steve_store::Result<()> {
+        .fixture_read(|c| -> steve_store::Result<()> {
             assert_eq!(count(c, "SELECT revision FROM devices WHERE id='hub'"), 7);
             assert_eq!(
                 count(c, "SELECT max_sessions FROM devices WHERE id='custom'"),

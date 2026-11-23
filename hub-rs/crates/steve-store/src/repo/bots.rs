@@ -156,7 +156,8 @@ impl Bots<'_> {
     /// Makes the bot a member of exactly `wss` (existing duties are kept).
     pub fn set_workspaces(&self, id: &str, wss: &[String]) -> Result<()> {
         self.0.write_conn(|w| {
-            let tx = w.tx()?;
+            let transaction = w.tx()?;
+            let tx = transaction.connection();
             let marks = if wss.is_empty() { "''".to_string() } else { vec!["?"; wss.len()].join(",") };
             let mut ps: Vec<&str> = vec![id];
             ps.extend(wss.iter().map(String::as_str));
@@ -167,7 +168,7 @@ impl Bots<'_> {
             for ws in wss {
                 tx.run("INSERT OR IGNORE INTO bot_workspaces (bot_id, workspace_id, created) VALUES (?, ?, ?)", params![id, ws, now()])?;
             }
-            tx.commit()?;
+            transaction.commit()?;
             if let Some(ws) = crate::repo::one(
                 w.c,
                 "SELECT workspace_id FROM bots WHERE id = ?",

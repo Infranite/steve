@@ -38,7 +38,7 @@ fn session_token_windows_are_attributed_to_the_node_and_workspace() {
     let store = store_at(dir.path());
     steve_store::testkit::hub::node_statistics::seed_session_token_windows(&store).unwrap();
     let totals = store
-        .reader(|c| {
+        .read(|c| {
             steve_store::nodes::session_tokens(
                 c,
                 "default",

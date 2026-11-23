@@ -217,11 +217,6 @@ inspect!(
 );
 
 inspect!(
-    event_count_by_session_system_events(session: &str) -> i64,
-    "SELECT COUNT(*) FROM events WHERE session_id=?1 AND kind='system' AND instr(data,'cuda')>0"
-);
-
-inspect!(
     event_count_by_session_system_system(session: &str) -> i64,
     "SELECT COUNT(*) FROM events WHERE session_id=?1 AND kind='system' AND json_extract(data,'$.refused')=1 AND instr(data,'dontAsk')>0"
 );
@@ -385,6 +380,10 @@ inspect!(item_stats_count_with_dirty_for_selected_row() -> i64, "SELECT COUNT(*)
 
 inspect!(realtime_output_samples_count_end() -> i64, "SELECT COUNT(*) FROM realtime_output_samples WHERE kind='end'");
 
+inspect!(
+    session_count_for_item(item: &str) -> i64,
+    "SELECT COUNT(*) FROM sessions WHERE item_id=?1"
+);
 inspect!(session_count() -> i64, "SELECT COUNT(*) FROM sessions");
 
 inspect!(session_count_with_readonly() -> i64, "SELECT COUNT(*) FROM sessions WHERE readonly=1");

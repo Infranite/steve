@@ -20,7 +20,7 @@ pub struct SessionModes {
     pub refusal_detail: Option<String>,
 }
 
-pub fn session_modes(
+pub(crate) fn session_modes_on(
     c: &rusqlite::Connection,
     node: &str,
     session: &str,
@@ -483,7 +483,7 @@ impl SessionRoom {
 
 /// The owner's limit for `node`: [`HUB_NODE`] from the Hub's device row, any other from its Node
 /// row; [`SESSIONS_DEFAULT`] for one with no row (a Node not paired through the store, in tests).
-pub fn session_limit(c: &rusqlite::Connection, node: &str) -> Result<i64> {
+pub(crate) fn session_limit_on(c: &rusqlite::Connection, node: &str) -> Result<i64> {
     let v: Option<i64> = if node == HUB_NODE {
         c.query_row(
             "SELECT max_sessions FROM devices WHERE id=?",
@@ -509,8 +509,8 @@ const OCCUPYING: &str = "c.method='start_turn' AND (c.state IN ('accepted','acti
 const WAITING: &str = "c.method='start_turn' AND c.state='pending' AND c.maybe_sent=0 AND (c.dependency_operation IS NULL OR EXISTS(SELECT 1 FROM node_commands d WHERE d.operation_id=c.dependency_operation AND d.state='finished' AND json_extract(d.receipt,'$.success')=1))";
 
 /// `node`'s [`SessionRoom`].
-pub fn session_room(c: &rusqlite::Connection, node: &str) -> Result<SessionRoom> {
-    let max = session_limit(c, node)?;
+pub(crate) fn session_room_on(c: &rusqlite::Connection, node: &str) -> Result<SessionRoom> {
+    let max = session_limit_on(c, node)?;
     let (running, waiting): (i64, i64) = c.query_row(
         &format!("SELECT COALESCE(SUM({OCCUPYING}),0), COALESCE(SUM({WAITING}),0) FROM node_commands c WHERE c.node_id=? AND c.method='start_turn' AND c.state IN ('pending','accepted','active','unknown')"),
         [node],
@@ -535,7 +535,9 @@ pub struct SessionWait {
 
 /// Sessions awaiting device room or retrying a definite Node refusal. Dependencies not yet ready
 /// are not mislabeled as capacity waits; uncertain sends remain occupying, never "queued".
-pub fn sessions_waiting_for_room(c: &rusqlite::Connection) -> Result<Vec<(String, SessionWait)>> {
+pub(crate) fn sessions_waiting_for_room_on(
+    c: &rusqlite::Connection,
+) -> Result<Vec<(String, SessionWait)>> {
     let rows: Vec<(String, String, Option<String>)> = all(
         c,
         &format!(
@@ -556,7 +558,7 @@ pub fn sessions_waiting_for_room(c: &rusqlite::Connection) -> Result<Vec<(String
         let room = match rooms.get(&node) {
             Some(r) => *r,
             None => {
-                let r = session_room(c, &node)?;
+                let r = session_room_on(c, &node)?;
                 rooms.insert(node.clone(), r);
                 r
             }
@@ -606,7 +608,7 @@ pub fn lease_command_in(
     }
     // a turn never sent goes only while the Node has room by its owner's limit ([`session_room`]):
     // the rest wait here, in order, and every other command passes them
-    let full = session_room(tx, node)?.full();
+    let full = session_room_on(tx, node)?.full();
     let row: Option<(String,String,String,String,String,i64,bool)>=tx.query_row(
         &format!("SELECT c.operation_id,c.node_id,c.method,c.request,c.digest,c.lease_generation,c.maybe_sent FROM node_commands c WHERE c.node_id=? AND c.state='pending' AND c.retry_at<=? AND (c.lease_until IS NULL OR c.lease_until<=?) AND (c.dependency_operation IS NULL OR EXISTS(SELECT 1 FROM node_commands d WHERE d.operation_id=c.dependency_operation AND d.state='finished' AND json_extract(d.receipt,'$.success')=1)) AND NOT (?4 AND {WAITING}) ORDER BY c.created,c.rowid LIMIT 1"),
         params![node,now,now,full],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional()?;
@@ -911,4 +913,24 @@ pub fn permissions_of_attempt_in(
         "WHERE attempt_id=? AND state IN ('waiting','answering') ORDER BY created, rowid",
         [attempt],
     )
+}
+
+pub fn sessions_waiting_for_room(r: &mut impl crate::Read) -> Result<Vec<(String, SessionWait)>> {
+    sessions_waiting_for_room_on(r.connection())
+}
+
+pub fn session_room(r: &mut impl crate::Read, node: &str) -> Result<SessionRoom> {
+    session_room_on(r.connection(), node)
+}
+
+pub fn session_limit(r: &mut impl crate::Read, node: &str) -> Result<i64> {
+    session_limit_on(r.connection(), node)
+}
+
+pub fn session_modes(
+    r: &mut impl crate::Read,
+    node: &str,
+    session: &str,
+) -> Result<Option<SessionModes>> {
+    session_modes_on(r.connection(), node, session)
 }

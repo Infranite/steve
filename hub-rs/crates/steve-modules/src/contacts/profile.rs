@@ -441,7 +441,7 @@ pub fn supplement_me(
             },
         )?;
         if let Some(p) = w.contacts().party(party)? {
-            super::service::revise_in(
+            super::service::revise(
                 w,
                 &p,
                 &repo::PartyPatch::default(),

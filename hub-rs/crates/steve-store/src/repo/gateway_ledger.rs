@@ -31,16 +31,16 @@ pub struct CallFinish {
 
 impl Stats<'_> {
     pub fn gateway_begin(&self, b: &CallBegin) -> Result<()> {
-        self.0.transaction(|tx| {
+        self.0.write(|tx| {
             if let Some(item)=&b.item {
-                let foreign:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM items WHERE id=? AND workspace_id<>? AND ?<>'')",params![item,b.workspace,b.workspace],|r|r.get(0))?;
+                let foreign:bool=tx.conn.query_row("SELECT EXISTS(SELECT 1 FROM items WHERE id=? AND workspace_id<>? AND ?<>'')",params![item,b.workspace,b.workspace],|r|r.get(0))?;
                 if foreign {return Err(crate::StoreError::Hook("billing item belongs to another workspace".into()));}
             }
             let (bot, project): (Option<String>, Option<String>) = match &b.item {
-                Some(item) => tx.query_row("SELECT bot_id,project_id FROM items WHERE id=? AND workspace_id=?",params![item,b.workspace],|r| Ok((r.get(0)?,r.get(1)?))).optional()?.unwrap_or_default(),
+                Some(item) => tx.conn.query_row("SELECT bot_id,project_id FROM items WHERE id=? AND workspace_id=?",params![item,b.workspace],|r| Ok((r.get(0)?,r.get(1)?))).optional()?.unwrap_or_default(),
                 None => (None,None),
             };
-            tx.execute("INSERT INTO gateway_calls(call_id,workspace_id,item_id,bot_id,project_id,purpose,started,day) VALUES(?,?,?,?,?,?,?,?)",
+            tx.conn.execute("INSERT INTO gateway_calls(call_id,workspace_id,item_id,bot_id,project_id,purpose,started,day) VALUES(?,?,?,?,?,?,?,?)",
                 params![b.id,b.workspace,b.item,bot.or(b.bot.clone()),project.or(b.project.clone()),b.purpose,b.started,b.day])?;
             Ok(())
         })
@@ -55,11 +55,11 @@ impl Stats<'_> {
         harness: &str,
         model: &str,
     ) -> Result<()> {
-        self.0.transaction(|tx| {
-            let previous: Option<String> = tx.query_row("SELECT attempt_id FROM gateway_attempts WHERE call_id=? ORDER BY ordinal DESC LIMIT 1",[call],|r|r.get(0)).optional()?;
-            tx.execute("INSERT INTO gateway_attempts(attempt_id,call_id,ordinal,previous_attempt,harness,model,started) SELECT ?,?,COUNT(*),?,?,?,? FROM gateway_attempts WHERE call_id=?",
+        self.0.write(|tx| {
+            let previous: Option<String> = tx.conn.query_row("SELECT attempt_id FROM gateway_attempts WHERE call_id=? ORDER BY ordinal DESC LIMIT 1",[call],|r|r.get(0)).optional()?;
+            tx.conn.execute("INSERT INTO gateway_attempts(attempt_id,call_id,ordinal,previous_attempt,harness,model,started) SELECT ?,?,COUNT(*),?,?,?,? FROM gateway_attempts WHERE call_id=?",
                 params![attempt,call,previous,harness,model,now(),call])?;
-            tx.execute("UPDATE gateway_calls SET attempts=attempts+1,model=?,harness=? WHERE call_id=?", params![model,harness,call])?;
+            tx.conn.execute("UPDATE gateway_calls SET attempts=attempts+1,model=?,harness=? WHERE call_id=?", params![model,harness,call])?;
             project(self,call)
         })
     }
@@ -70,10 +70,10 @@ impl Stats<'_> {
         attempt: &str,
         standalone: bool,
     ) -> Result<()> {
-        self.0.transaction(|tx| {
-            let mismatch:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM gateway_attempts a JOIN gateway_calls c USING(call_id) JOIN runtime_job_attempts r ON r.attempt_id=? JOIN runtime_jobs j USING(job_id) WHERE a.attempt_id=? AND c.workspace_id<>'' AND c.workspace_id<>j.workspace_id)",params![job_attempt,attempt],|r|r.get(0))?;
+        self.0.write(|tx| {
+            let mismatch:bool=tx.conn.query_row("SELECT EXISTS(SELECT 1 FROM gateway_attempts a JOIN gateway_calls c USING(call_id) JOIN runtime_job_attempts r ON r.attempt_id=? JOIN runtime_jobs j USING(job_id) WHERE a.attempt_id=? AND c.workspace_id<>'' AND c.workspace_id<>j.workspace_id)",params![job_attempt,attempt],|r|r.get(0))?;
             if mismatch {return Err(crate::StoreError::Hook("billing and Job workspaces differ".into()));}
-            let linked=tx.execute(
+            let linked=tx.conn.execute(
                 "INSERT INTO gateway_job_accounts(job_attempt_id,attempt_id,finish_on_end,node_id,job_id) SELECT ?,?,?,node_id,job_id FROM runtime_job_attempts WHERE attempt_id=?",
                 params![job_attempt, attempt, standalone,job_attempt],
             )?;
@@ -83,7 +83,7 @@ impl Stats<'_> {
     }
 
     pub fn gateway_job_owner(&self, job_attempt: &str) -> Result<Option<(String, String)>> {
-        self.0.reader(|c|Ok(c.query_row("SELECT node_id,job_id FROM gateway_job_accounts WHERE job_attempt_id=? AND node_id IS NOT NULL AND job_id IS NOT NULL",[job_attempt],|r|Ok((r.get(0)?,r.get(1)?))).optional()?))
+        self.0.sqlite_read(|c|Ok(c.query_row("SELECT node_id,job_id FROM gateway_job_accounts WHERE job_attempt_id=? AND node_id IS NOT NULL AND job_id IS NOT NULL",[job_attempt],|r|Ok((r.get(0)?,r.get(1)?))).optional()?))
     }
 
     pub fn gateway_job_report(
@@ -92,8 +92,9 @@ impl Stats<'_> {
         report: &UsageReport,
         source_at: i64,
     ) -> Result<bool> {
-        self.0.transaction(|tx| {
+        self.0.write(|tx| {
             let attempt: Option<String> = tx
+                .conn
                 .query_row(
                     "SELECT attempt_id FROM gateway_job_accounts WHERE job_attempt_id=?",
                     [job_attempt],
@@ -116,16 +117,16 @@ impl Stats<'_> {
         if report.scope == UsageScope::Background {
             return Ok(false);
         }
-        self.0.transaction(|tx| {
-            let call: Option<String> = tx.query_row("SELECT call_id FROM gateway_attempts WHERE attempt_id=?",[attempt],|r|r.get(0)).optional()?;
+        self.0.write(|tx| {
+            let call: Option<String> = tx.conn.query_row("SELECT call_id FROM gateway_attempts WHERE attempt_id=?",[attempt],|r|r.get(0)).optional()?;
             let Some(call) = call else { return Ok(false); };
-            if tx.execute("INSERT OR IGNORE INTO gateway_usage_reports(attempt_id,report_id,source_at,payload) VALUES(?,?,?,?)",params![attempt,report.report_id,source_at,serde_json::to_string(report)?])?==0 { return Ok(false); }
-            let payloads=tx.prepare_cached("SELECT payload FROM gateway_usage_meters WHERE attempt_id=? ORDER BY rowid")?.query_map([attempt],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            if tx.conn.execute("INSERT OR IGNORE INTO gateway_usage_reports(attempt_id,report_id,source_at,payload) VALUES(?,?,?,?)",params![attempt,report.report_id,source_at,serde_json::to_string(report)?])?==0 { return Ok(false); }
+            let payloads=tx.conn.prepare_cached("SELECT payload FROM gateway_usage_meters WHERE attempt_id=? ORDER BY rowid")?.query_map([attempt],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
             let mut heads=payloads.iter().map(|p|serde_json::from_str::<UsageMeter>(p)).collect::<serde_json::Result<Vec<_>>>()?;
             accumulate_usage(&mut heads,report.clone());
-            tx.execute("DELETE FROM gateway_usage_meters WHERE attempt_id=?",[attempt])?;
+            tx.conn.execute("DELETE FROM gateway_usage_meters WHERE attempt_id=?",[attempt])?;
             for h in &heads { let r=&h.report;
-                tx.execute("INSERT INTO gateway_usage_meters(attempt_id,meter_epoch,model,scope,payload) VALUES(?,?,?,?,?)",params![attempt,r.meter_epoch.as_str(),r.model.as_deref().unwrap_or(""),serde_json::to_string(&r.scope)?,serde_json::to_string(h)?])?;
+                tx.conn.execute("INSERT INTO gateway_usage_meters(attempt_id,meter_epoch,model,scope,payload) VALUES(?,?,?,?,?)",params![attempt,r.meter_epoch.as_str(),r.model.as_deref().unwrap_or(""),serde_json::to_string(&r.scope)?,serde_json::to_string(h)?])?;
             }
             project(self,&call)?;
             Ok(true)
@@ -140,16 +141,16 @@ impl Stats<'_> {
         report: &UsageReport,
         observed_at: i64,
     ) -> Result<bool> {
-        self.0.transaction(|tx| {
-            let received=tx.execute("INSERT OR IGNORE INTO gateway_local_inbox(attempt_id,report_id,observed_at,payload) VALUES(?,?,?,?)",params![attempt,report.report_id,observed_at,serde_json::to_string(report)?])?!=0;
-            tx.execute("INSERT OR IGNORE INTO gateway_local_ready(attempt_id) SELECT ? WHERE EXISTS(SELECT 1 FROM gateway_local_inbox WHERE attempt_id=? AND applied=0)",params![attempt,attempt])?;
+        self.0.write(|tx| {
+            let received=tx.conn.execute("INSERT OR IGNORE INTO gateway_local_inbox(attempt_id,report_id,observed_at,payload) VALUES(?,?,?,?)",params![attempt,report.report_id,observed_at,serde_json::to_string(report)?])?!=0;
+            tx.conn.execute("INSERT OR IGNORE INTO gateway_local_ready(attempt_id) SELECT ? WHERE EXISTS(SELECT 1 FROM gateway_local_inbox WHERE attempt_id=? AND applied=0)",params![attempt,attempt])?;
             Ok(received)
         })
     }
     /// Bounded round-robin by attempt. A failed cumulative report must not be overtaken by that
     /// attempt's later delta, and a broken/backlogged attempt must not starve unrelated calls.
     pub fn gateway_apply_local(&self, limit: usize) -> Result<usize> {
-        let ready = self.0.reader::<_, crate::StoreError>(|c| {
+        let ready = self.0.sqlite_read::<_, crate::StoreError>(|c| {
             Ok(c.prepare_cached(
                 "SELECT attempt_id FROM gateway_local_ready ORDER BY tried,rowid LIMIT ?",
             )?
@@ -163,12 +164,12 @@ impl Stats<'_> {
             if budget == 0 {
                 break;
             }
-            let pending=self.0.reader::<_,crate::StoreError>(|c|Ok(c.prepare_cached("SELECT report_id,observed_at,payload FROM gateway_local_inbox WHERE attempt_id=? AND applied=0 ORDER BY rowid LIMIT ?")?.query_map(params![attempt,budget as i64],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?))?;
+            let pending=self.0.sqlite_read::<_,crate::StoreError>(|c|Ok(c.prepare_cached("SELECT report_id,observed_at,payload FROM gateway_local_inbox WHERE attempt_id=? AND applied=0 ORDER BY rowid LIMIT ?")?.query_map(params![attempt,budget as i64],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?))?;
             for (id, at, payload) in pending {
                 budget -= 1;
-                let result:Result<()>=self.0.transaction(|tx| {
+                let result:Result<()>=self.0.write(|tx| {
                     self.gateway_report(&attempt,&serde_json::from_str::<UsageReport>(&payload)?,at)?;
-                    tx.execute("UPDATE gateway_local_inbox SET applied=1 WHERE attempt_id=? AND report_id=?",params![attempt,id])?;
+                    tx.conn.execute("UPDATE gateway_local_inbox SET applied=1 WHERE attempt_id=? AND report_id=?",params![attempt,id])?;
                     Ok(())
                 });
                 match result {
@@ -179,9 +180,9 @@ impl Stats<'_> {
                     }
                 }
             }
-            self.0.transaction::<_,crate::StoreError>(|tx| {
-                tx.execute("UPDATE gateway_local_ready SET tried=? WHERE attempt_id=?",params![now(),attempt])?;
-                tx.execute("DELETE FROM gateway_local_ready WHERE attempt_id=? AND NOT EXISTS(SELECT 1 FROM gateway_local_inbox WHERE attempt_id=? AND applied=0)",params![attempt,attempt])?;
+            self.0.write::<_,crate::StoreError>(|tx| {
+                tx.conn.execute("UPDATE gateway_local_ready SET tried=? WHERE attempt_id=?",params![now(),attempt])?;
+                tx.conn.execute("DELETE FROM gateway_local_ready WHERE attempt_id=? AND NOT EXISTS(SELECT 1 FROM gateway_local_inbox WHERE attempt_id=? AND applied=0)",params![attempt,attempt])?;
                 Ok(())
             })?;
         }
@@ -190,16 +191,18 @@ impl Stats<'_> {
         // joins the tail; AUTOINCREMENT tickets do not depend on wall-clock resolution or uptime.
         // Concurrent workers serialize this step, then may harmlessly overlap idempotent projects
         // if there are fewer queued calls than their combined budgets. No crash-sensitive lease.
-        let dirty = self.0.transaction::<_, crate::StoreError>(|tx| {
+        let dirty = self.0.write::<_, crate::StoreError>(|tx| {
             let calls = tx
+                .conn
                 .prepare_cached("SELECT call_id FROM gateway_result_ready ORDER BY ticket LIMIT ?")?
                 .query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |r| {
                     r.get::<_, String>(0)
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             for call in &calls {
-                tx.execute("DELETE FROM gateway_result_ready WHERE call_id=?", [call])?;
-                tx.execute(
+                tx.conn
+                    .execute("DELETE FROM gateway_result_ready WHERE call_id=?", [call])?;
+                tx.conn.execute(
                     "INSERT INTO gateway_result_ready(call_id) VALUES(?)",
                     [call],
                 )?;
@@ -221,9 +224,9 @@ impl Stats<'_> {
     /// The first caller result stays final. Usage can still change afterwards. Never allow a
     /// delayed successful Node completion to erase a caller's timeout/cancelled result.
     pub fn gateway_finish(&self, call: &str, f: &CallFinish) -> Result<()> {
-        self.0.transaction::<_,crate::StoreError>(|tx| {
+        self.0.write::<_,crate::StoreError>(|tx| {
             let failures=if f.failures.is_empty(){attempt_failures(tx,call)?}else{f.failures.clone()};
-            tx.execute("UPDATE gateway_calls SET ended=?,ok=?,model=?,harness=?,attempts=MAX(attempts,?),duration_ms=?,failures=?,fallback_usage=?,projection_dirty=1 WHERE call_id=? AND ended IS NULL",
+            tx.conn.execute("UPDATE gateway_calls SET ended=?,ok=?,model=?,harness=?,attempts=MAX(attempts,?),duration_ms=?,failures=?,fallback_usage=?,projection_dirty=1 WHERE call_id=? AND ended IS NULL",
                 params![now(),f.ok,f.model,f.harness,f.attempts,i64::try_from(f.duration_ms).unwrap_or(i64::MAX),serde_json::to_string(&failures)?,serde_json::to_string(&f.usage)?,call])?;
             Ok(())
         })?;
@@ -237,12 +240,12 @@ impl Stats<'_> {
         error: Option<&str>,
         source_at: i64,
     ) -> Result<()> {
-        self.0.transaction(|tx| {
-            tx.execute("UPDATE gateway_attempts SET ended=?,ok=?,error=? WHERE attempt_id=? AND ended IS NULL",params![source_at,ok,error,attempt])?;
-            let call: Option<String>=tx.query_row("SELECT call_id FROM gateway_attempts WHERE attempt_id=?",[attempt],|r|r.get(0)).optional()?;
+        self.0.write(|tx| {
+            tx.conn.execute("UPDATE gateway_attempts SET ended=?,ok=?,error=? WHERE attempt_id=? AND ended IS NULL",params![source_at,ok,error,attempt])?;
+            let call: Option<String>=tx.conn.query_row("SELECT call_id FROM gateway_attempts WHERE attempt_id=?",[attempt],|r|r.get(0)).optional()?;
             if let Some(call)=call {
                 let failures=attempt_failures(tx,&call)?;
-                tx.execute("UPDATE gateway_calls SET failures=? WHERE call_id=? AND ended IS NULL",params![serde_json::to_string(&failures)?,call])?;
+                tx.conn.execute("UPDATE gateway_calls SET failures=? WHERE call_id=? AND ended IS NULL",params![serde_json::to_string(&failures)?,call])?;
                 project(self,&call)?;
             }
             Ok(())
@@ -250,15 +253,15 @@ impl Stats<'_> {
     }
 
     pub fn gateway_cancel(&self, call: &str, reason: &str) -> Result<()> {
-        self.0.transaction::<_, crate::StoreError>(|tx| {
+        self.0.write::<_, crate::StoreError>(|tx| {
             cancel_in(tx, call, reason)?;
             Ok(())
         })?;
         project(self, call)
     }
     pub fn gateway_job_cancel(&self, job_attempt: &str, reason: &str) -> Result<()> {
-        self.0.transaction(|tx| {
-            let call:Option<String>=tx.query_row("SELECT a.call_id FROM gateway_job_accounts j JOIN gateway_attempts a USING(attempt_id) WHERE j.job_attempt_id=?",[job_attempt],|r|r.get(0)).optional()?;
+        self.0.write(|tx| {
+            let call:Option<String>=tx.conn.query_row("SELECT a.call_id FROM gateway_job_accounts j JOIN gateway_attempts a USING(attempt_id) WHERE j.job_attempt_id=?",[job_attempt],|r|r.get(0)).optional()?;
             if let Some(call)=call { self.gateway_cancel(&call,reason)?; }
             Ok(())
         })
@@ -277,8 +280,9 @@ impl Stats<'_> {
                 }
             }
         }
-        let cancelled = self.0.transaction::<_, crate::StoreError>(|tx| {
+        let cancelled = self.0.write::<_, crate::StoreError>(|tx| {
             let calls = tx
+                .conn
                 .prepare_cached("SELECT call_id FROM gateway_calls WHERE ended IS NULL")?
                 .query_map([], |r| r.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -293,8 +297,8 @@ impl Stats<'_> {
         Ok(cancelled)
     }
     pub fn gateway_job_detach(&self, job_attempt: &str) -> Result<()> {
-        self.0.transaction(|tx| {
-            let own:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM gateway_job_accounts WHERE job_attempt_id=? AND finish_on_end=1)",[job_attempt],|r|r.get(0))?;
+        self.0.write(|tx| {
+            let own:bool=tx.conn.query_row("SELECT EXISTS(SELECT 1 FROM gateway_job_accounts WHERE job_attempt_id=? AND finish_on_end=1)",[job_attempt],|r|r.get(0))?;
             if own {self.gateway_job_cancel(job_attempt,"caller dropped")?;}
             Ok(())
         })
@@ -306,14 +310,14 @@ impl Stats<'_> {
         error: Option<&str>,
         source_at: i64,
     ) -> Result<()> {
-        self.0.transaction(|tx| {
-            let a:Option<(String,bool)>=tx.query_row("SELECT attempt_id,finish_on_end FROM gateway_job_accounts WHERE job_attempt_id=?",[job_attempt],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        self.0.write(|tx| {
+            let a:Option<(String,bool)>=tx.conn.query_row("SELECT attempt_id,finish_on_end FROM gateway_job_accounts WHERE job_attempt_id=?",[job_attempt],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
             if let Some((a,own))=a {
                 self.gateway_attempt_end(&a,ok,error,source_at)?;
                 if own {
-                    let call:String=tx.query_row("SELECT call_id FROM gateway_attempts WHERE attempt_id=?",[&a],|r|r.get(0))?;
+                    let call:String=tx.conn.query_row("SELECT call_id FROM gateway_attempts WHERE attempt_id=?",[&a],|r|r.get(0))?;
                     let failures=error.map(|e|vec![e]).unwrap_or_default();
-                    tx.execute("UPDATE gateway_calls SET ended=?,ok=?,duration_ms=MAX(0,?-started),failures=? WHERE call_id=? AND ended IS NULL",params![source_at,ok,source_at,serde_json::to_string(&failures)?,call])?;
+                    tx.conn.execute("UPDATE gateway_calls SET ended=?,ok=?,duration_ms=MAX(0,?-started),failures=? WHERE call_id=? AND ended IS NULL",params![source_at,ok,source_at,serde_json::to_string(&failures)?,call])?;
                     project(self,&call)?;
                 }
             }
@@ -323,27 +327,27 @@ impl Stats<'_> {
 }
 
 // Keep recovery and ordinary cancellation on the same durable-result/queue transition.
-fn cancel_in(tx: &crate::Tx, call: &str, reason: &str) -> Result<()> {
+fn cancel_in(tx: &mut crate::W<'_>, call: &str, reason: &str) -> Result<()> {
     let mut failures = attempt_failures(tx, call)?;
     failures.push(reason.to_string());
-    tx.execute("UPDATE gateway_calls SET ended=?,ok=0,duration_ms=MAX(0,?-started),failures=?,projection_dirty=1 WHERE call_id=? AND ended IS NULL",params![now(),now(),serde_json::to_string(&failures)?,call])?;
+    tx.conn.execute("UPDATE gateway_calls SET ended=?,ok=0,duration_ms=MAX(0,?-started),failures=?,projection_dirty=1 WHERE call_id=? AND ended IS NULL",params![now(),now(),serde_json::to_string(&failures)?,call])?;
     Ok(())
 }
 
-fn attempt_failures(tx: &crate::Tx, call: &str) -> Result<Vec<String>> {
-    Ok(tx.prepare_cached("SELECT model,error FROM gateway_attempts WHERE call_id=? AND ok=0 AND error IS NOT NULL ORDER BY ordinal")?.query_map([call],|r|Ok(format!("{}: {}",r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)
+fn attempt_failures(tx: &mut crate::W<'_>, call: &str) -> Result<Vec<String>> {
+    Ok(tx.conn.prepare_cached("SELECT model,error FROM gateway_attempts WHERE call_id=? AND ok=0 AND error IS NOT NULL ORDER BY ordinal")?.query_map([call],|r|Ok(format!("{}: {}",r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 fn project(stats: &Stats<'_>, call_id: &str) -> Result<()> {
-    stats.0.transaction(|tx| {
-        let (ws,item,bot_id,project_id,purpose,ts,day,ended,mut a): (String,Option<String>,Option<String>,Option<String>,String,i64,String,Option<i64>,CallFinish)=tx.query_row(
+    stats.0.write(|tx| {
+        let (ws,item,bot_id,project_id,purpose,ts,day,ended,mut a): (String,Option<String>,Option<String>,Option<String>,String,i64,String,Option<i64>,CallFinish)=tx.conn.query_row(
             "SELECT workspace_id,item_id,bot_id,project_id,purpose,started,day,ended,ok,model,harness,attempts,duration_ms,failures,fallback_usage FROM gateway_calls WHERE call_id=?",[call_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,CallFinish{ok:r.get(8)?,model:r.get(9)?,harness:r.get(10)?,attempts:r.get(11)?,duration_ms:r.get::<_,i64>(12)?.max(0) as u64,failures:vec![],usage:vec![]})))?;
-        let (failures,fallback):(String,String)=tx.query_row("SELECT failures,fallback_usage FROM gateway_calls WHERE call_id=?",[call_id],|r|Ok((r.get(0)?,r.get(1)?)))?;
+        let (failures,fallback):(String,String)=tx.conn.query_row("SELECT failures,fallback_usage FROM gateway_calls WHERE call_id=?",[call_id],|r|Ok((r.get(0)?,r.get(1)?)))?;
         a.failures=serde_json::from_str(&failures)?;
-        let attempts=tx.prepare_cached("SELECT attempt_id,model FROM gateway_attempts WHERE call_id=? ORDER BY ordinal")?.query_map([call_id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let attempts=tx.conn.prepare_cached("SELECT attempt_id,model FROM gateway_attempts WHERE call_id=? ORDER BY ordinal")?.query_map([call_id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
         let mut has_reports=false;
         for (id,model) in attempts {
-            let payloads=tx.prepare_cached("SELECT payload FROM gateway_usage_meters WHERE attempt_id=? ORDER BY rowid")?.query_map([&id],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            let payloads=tx.conn.prepare_cached("SELECT payload FROM gateway_usage_meters WHERE attempt_id=? ORDER BY rowid")?.query_map([&id],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
             has_reports |= !payloads.is_empty();
             let heads=payloads.iter().map(|p|serde_json::from_str::<UsageMeter>(p)).collect::<serde_json::Result<Vec<_>>>()?;
             let reports=accounting_usage(&heads,&model);
@@ -360,8 +364,8 @@ fn project(stats: &Stats<'_>, call_id: &str) -> Result<()> {
         // Pending calls have a concrete unknown row, so coverage is pending, never fabricated zero.
         let tag=CallProjection { purpose:&purpose, item_id:&item };
         write_projection(tx,call_id,&ws,ts,&day,bot_id,project_id,&tag,&a,ended.is_none())?;
-        tx.execute("UPDATE gateway_calls SET projection_dirty=0 WHERE call_id=?",[call_id])?;
-        tx.publish(stats_changed(&ws,Some(&day)));
+        tx.conn.execute("UPDATE gateway_calls SET projection_dirty=0 WHERE call_id=?",[call_id])?;
+        tx.emit(stats_changed(&ws,Some(&day)));
         Ok(())
     })
 }
@@ -372,7 +376,7 @@ struct CallProjection<'a> {
 
 #[allow(clippy::too_many_arguments)]
 fn write_projection(
-    tx: &crate::Tx,
+    tx: &mut crate::W<'_>,
     call_id: &str,
     ws: &str,
     ts: i64,
@@ -387,7 +391,7 @@ fn write_projection(
     let mut usages = a.usage.clone();
     fold_companion_costs(&mut usages);
     let ProjectionRows { rows, unspent } = projection_rows(a, usages);
-    remove_usage_in(tx, "live_call_id", call_id)?;
+    remove_usage_in(tx.conn, "live_call_id", call_id)?;
     {
         for (i, mut usage) in rows.into_iter().enumerate() {
             let first = i == 0;
@@ -433,7 +437,7 @@ fn write_projection(
                 usage.detail["accounting_tokens"] = json!(true);
             }
             let id = usage_in(
-                tx,
+                tx.conn,
                 &NewUsage {
                     workspace_id: ws.to_string(),
                     ts,
@@ -457,7 +461,7 @@ fn write_projection(
                     },
                 },
             )?;
-            tx.execute(
+            tx.conn.execute(
                 "UPDATE usage_records SET live_call_id=? WHERE id=?",
                 params![call_id, id],
             )?;

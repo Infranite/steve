@@ -427,7 +427,7 @@ impl NodeRuntime {
             return Ok(Some(why));
         }
         self.store
-            .reader(|c| steve_store::workflow_gate::session_blocker(c, session))
+            .read(|c| steve_store::workflow_gate::session_blocker(c, session))
     }
 
     fn disabled_workflow_in(&self, session: &str) -> Result<Option<String>, StoreError> {
@@ -442,7 +442,7 @@ impl NodeRuntime {
     fn session_owners_work_in(&self, w: &mut W<'_>, session: &str) -> Result<(), StoreError> {
         if let Some(why) = self
             .store
-            .reader(|c| steve_store::workflow_gate::session_authority_blocker(c, session))?
+            .read(|c| steve_store::workflow_gate::session_authority_blocker(c, session))?
         {
             return Err(conflict(why));
         }

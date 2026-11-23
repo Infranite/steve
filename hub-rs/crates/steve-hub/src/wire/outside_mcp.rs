@@ -380,7 +380,7 @@ fn resolve_team(store: &Store, ws: &str, args: &Value) -> Result<Option<String>,
             let wanted = text_arg(args, "team")
                 .ok_or("Invalid arguments: team must be a non-empty string.")?;
             let teams = store
-                .reader(|c| steve_store::bot_dispatch::teams(c, ws))
+                .read(|c| steve_store::bot_dispatch::teams(c, ws))
                 .map_err(|e| e.to_string())?;
             if wanted == steve_store::bot_dispatch::NO_TEAM || teams.iter().any(|t| t.id == wanted)
             {

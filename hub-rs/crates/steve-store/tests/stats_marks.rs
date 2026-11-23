@@ -1,5 +1,6 @@
 //! Status marks written by the item repository.
 
+use steve_store::testkit::SqliteFixtures;
 mod common;
 
 use common::*;
@@ -7,7 +8,7 @@ use steve_store::{ItemPatch, LifecycleWrite, NewBot, NewItem, StoreError, WS};
 
 fn status_marks(t: &T, item: &str) -> Vec<(Option<String>, Option<String>)> {
     t.store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             Ok(c.prepare("SELECT from_v, to_v FROM item_marks WHERE item_id = ? AND kind = 'status' ORDER BY id")?
                 .query_map([item], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<rusqlite::Result<_>>()?)

@@ -42,7 +42,7 @@ pub fn set_outbox_available(store: &Store, available: bool) {
         "ALTER TABLE outbox_events RENAME TO outbox_events_gone"
     };
     store
-        .with_conn(|c| {
+        .write_locked(|c| {
             c.execute_batch(sql)?;
             Ok(())
         })
@@ -114,7 +114,7 @@ pub fn audit_count(store: &Store, actions: &[&str], target: Option<&str>) -> i64
 
 pub fn closing_fingerprint(store: &Store, item: &str, fingerprint: Option<&str>) {
     store
-        .with_conn(|c| {
+        .write_locked(|c| {
             if let Some(fingerprint) = fingerprint {
                 c.execute(
                     "UPDATE items SET closing=json_set(closing,'$.fingerprint',?2) WHERE id=?1",
@@ -140,25 +140,25 @@ pub fn reviewed_workflow(
 ) {
     use rusqlite::params;
 
-    store.transaction::<_, crate::StoreError>(|tx| {
-        tx.execute(
+    store.write::<_, crate::StoreError>(|tx| {
+        tx.conn.execute(
             "INSERT INTO workflows (item_id, revision, cycle, goal_version, paused, max_parallel, max_attempts, created, updated)
              VALUES (?1, 1, ?2, ?3, 0, 1, 3, 0, 0)",
             params![item, cycle, goal],
         )?;
         for (position, (id, spec)) in units.iter().enumerate() {
-            tx.execute(
+            tx.conn.execute(
                 "INSERT INTO workflow_units (workflow_id, id, position, spec, status, attempt)
                  VALUES (?1, ?2, ?3, ?4, 'succeeded', 1)",
                 params![item, id, position as i64, spec],
             )?;
         }
-        tx.execute(
+        tx.conn.execute(
             "INSERT INTO workflow_history (workflow_id, revision, action, reason, detail, created)
              VALUES (?1, 1, 'plan', '评审', '{}', 0)",
             [item],
         )?;
-        tx.execute("UPDATE items SET closing=json_set(closing,'$.workflow_revision',1) WHERE id=?", [item])?;
+        tx.conn.execute("UPDATE items SET closing=json_set(closing,'$.workflow_revision',1) WHERE id=?", [item])?;
         Ok(())
     }).unwrap();
 }
@@ -190,7 +190,7 @@ pub fn operation_cycle(store: &Store, id: &str, cycle: i64) {
 
 pub fn reject_workflow_deliveries(store: &Store) {
     store
-        .with_conn(|c| {
+        .write_locked(|c| {
             c.execute_batch(
                 "CREATE TRIGGER fail_workflow_delivery BEFORE INSERT ON workflow_history
             WHEN NEW.action='deliver' BEGIN SELECT RAISE(ABORT,'simulated failure'); END;",
@@ -218,7 +218,7 @@ pub fn reserve_workflow_unit(store: &Store, workflow: &str, unit: &str) {
 }
 
 pub fn retire_as_cancelled(store: &Store, item: &str) {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute(
             "UPDATE workflow_attempts SET snapshot=json_set(snapshot,'$.status','cancelled','$.reason','尝试已失效：调整') WHERE item_id=?",
             [item],

@@ -30,7 +30,7 @@ use steve_store::{Attributes, Contacts, Read, Teams, W};
 use super::Ports;
 use super::repo::{ContactQuery, NewDef, NewParty, NewValue, Party, PartyPatch};
 use super::service::{
-    dedup, ensure_base, jobs_in, normalize_domain, own_party_in, pref, revise_in, this_month,
+    dedup, ensure_base, jobs_in, normalize_domain, own_party_in, pref, revise, this_month,
 };
 use super::teams::chart_readonly;
 use super::teams::repo::Details;
@@ -1467,7 +1467,7 @@ fn write_party(
         return Ok(Map::new());
     }
     let before: Map<String, Value> = after.keys().map(|k| (k.clone(), cur[k].clone())).collect();
-    revise_in(
+    revise(
         tx,
         p,
         &to_patch(p, &after)?,
@@ -1569,7 +1569,7 @@ fn purge_or_retire(tx: &mut W<'_>, cx: &OpCx, p: &Party, retired: &str) -> ApiRe
         status: Some(retired.into()),
         ..Default::default()
     };
-    revise_in(
+    revise(
         tx,
         p,
         &patch,
@@ -1857,7 +1857,7 @@ fn job_written(
     after: &Value,
     action: &str,
 ) -> ApiResult<()> {
-    revise_in(
+    revise(
         tx,
         p,
         &PartyPatch::default(),
@@ -2114,7 +2114,7 @@ impl ChangeOp for AttrSetOp {
             },
         )?;
         let staled = Attributes(tx).stale_siblings(&v)?;
-        revise_in(
+        revise(
             tx,
             &p,
             &PartyPatch::default(),
@@ -2166,7 +2166,7 @@ impl ChangeOp for AttrSetOp {
             Attributes(tx).delete_definition(&def)?;
         }
         if let Some(p) = party_in(tx, cx, &a.party)? {
-            revise_in(
+            revise(
                 tx,
                 &p,
                 &PartyPatch::default(),
@@ -2415,7 +2415,7 @@ impl TeamPatchOp {
             ..Default::default()
         };
         let fields: Vec<String> = after.keys().cloned().collect();
-        revise_in(
+        revise(
             tx,
             p,
             &patch,
@@ -2510,7 +2510,7 @@ impl TeamMembersOp {
     }
 
     fn record(tx: &mut W<'_>, cx: &OpCx, p: &Party, was: Value, now: Value) -> ApiResult<()> {
-        revise_in(
+        revise(
             tx,
             p,
             &PartyPatch::default(),

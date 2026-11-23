@@ -94,9 +94,9 @@ impl WouldDo<'_> {
                 w.action
             )));
         }
-        self.0.transaction(|tx| {
+        self.0.write(|tx| {
             let id = uid("wd");
-            let inserted = tx.execute(
+            let inserted = tx.conn.execute(
                 "INSERT INTO item_would_do(id,item_id,cycle,session_id,turn_id,scope_revision,target,action,reason,detail,row,code,due_at,first_seen)
                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                  ON CONFLICT(item_id,cycle,session_id,turn_id,scope_revision,action,reason,target) DO UPDATE
@@ -106,14 +106,14 @@ impl WouldDo<'_> {
                 params![id, w.item_id, w.cycle, w.session_id, w.turn_id, w.scope_revision, w.target,
                     w.action, w.reason, w.detail, w.row, w.code, w.due_at, at],
             )? > 0;
-            let id: String = tx.query_row(
+            let id: String = tx.conn.query_row(
                 "SELECT id FROM item_would_do WHERE item_id=? AND cycle=? AND session_id=? AND turn_id=?
                    AND scope_revision=? AND action=? AND reason=? AND target=?",
                 params![w.item_id, w.cycle, w.session_id, w.turn_id, w.scope_revision, w.action,
                     w.reason, w.target],
                 |r| r.get(0),
             )?;
-            tx.execute(
+            tx.conn.execute(
                 "UPDATE item_would_do SET cleared_at=? WHERE item_id=? AND cleared_at IS NULL AND id<>?",
                 params![at, w.item_id, id],
             )?;
@@ -123,8 +123,8 @@ impl WouldDo<'_> {
 
     /// The sweep would do nothing for `item` now: its open decisions are cleared. Returns how many.
     pub fn clear(&self, item: &str, at: i64) -> Result<usize> {
-        self.0.transaction(|tx| {
-            Ok::<_, StoreError>(tx.execute(
+        self.0.write(|tx| {
+            Ok::<_, StoreError>(tx.conn.execute(
                 "UPDATE item_would_do SET cleared_at=? WHERE item_id=? AND cleared_at IS NULL",
                 params![at, item],
             )?)
@@ -134,8 +134,8 @@ impl WouldDo<'_> {
     /// Clears the open decisions of items the sweep no longer looks at (closed, archived, or no
     /// longer a task). Returns how many.
     pub fn clear_gone(&self, at: i64) -> Result<usize> {
-        self.0.transaction(|tx| {
-            Ok::<_, StoreError>(tx.execute(
+        self.0.write(|tx| {
+            Ok::<_, StoreError>(tx.conn.execute(
                 "UPDATE item_would_do SET cleared_at=? WHERE cleared_at IS NULL AND item_id IN
                    (SELECT id FROM items WHERE phase='closed' OR archived<>0 OR kind<>'task')",
                 [at],

@@ -11,10 +11,6 @@
 //!   TEXT (`jsonb` on a server database), and values are never bound in a `SELECT` list (a server
 //!   database types such a parameter as text): read first, then write.
 //!
-//! Domains not on the contract yet still use [`crate::Tx`] and the repositories of [`Store`]; they
-//! share the transaction through [`W::legacy`], and a `write` inside one of their transactions
-//! joins it as a scope.
-
 pub mod account_profiles;
 pub mod account_rows;
 pub mod accounts;
@@ -148,11 +144,12 @@ pub use user_rows::{AuthSessions, UserRows};
 pub use workspace_settings::{HTTP_ALLOW_PRIVATE, WorkspaceSettings};
 pub use workspaces::{Members, Workspaces};
 
-use crate::{BusEvent, Result, Store, StoreError, Tx};
+use crate::{BusEvent, Result, Store, StoreError};
 
 /// A read snapshot.
 pub struct R<'a> {
     db: &'a mut dyn Backend,
+    conn: &'a Connection,
 }
 
 /// The write transaction (or a scope of it).
@@ -223,11 +220,15 @@ impl Store {
         f: impl FnOnce(&mut R<'_>) -> Result<T, E>,
     ) -> Result<T, E> {
         if let Some(c) = self.active_conn() {
-            return f(&mut R { db: &mut Sqlite(c) });
+            return f(&mut R {
+                db: &mut Sqlite(c),
+                conn: c,
+            });
         }
         if let Some(c) = self.active_snapshot() {
             return f(&mut R {
                 db: &mut Sqlite(&c),
+                conn: &c,
             });
         }
         let c = Rc::new(self.inner.readers.get().map_err(StoreError::from)?);
@@ -258,7 +259,10 @@ fn read_snapshot<T, E: From<StoreError>>(
     let mut db = Sqlite(c);
     db.begin_read()?;
     let _end = EndRead(c);
-    let out = f(&mut R { db: &mut db });
+    let out = f(&mut R {
+        db: &mut db,
+        conn: c,
+    });
     let end = db.batch("COMMIT");
     let v = out?;
     end?;
@@ -312,13 +316,6 @@ impl<'a> W<'a> {
         self.store.close_scope(self.db, scope, out)
     }
 
-    /// This transaction as the domains not on the contract yet take it: the same connection and
-    /// the same staging (what it publishes follows this write's commit or rollback, and the
-    /// scope it is in). Goes away with the last of them.
-    pub fn legacy(&self) -> Tx<'a> {
-        Tx::bound(self.conn, self.store)
-    }
-
     pub(crate) fn exec<S: QueryStatementWriter>(&mut self, s: &S) -> Result<u64> {
         exec_on(self.db, s)
     }
@@ -339,7 +336,9 @@ mod sealed {
     use super::*;
 
     /// Running statements: only this crate can name it, so no SQL outside the store.
-    pub trait Q {
+    pub(crate) trait Q {
+        fn connection(&self) -> &Connection;
+
         fn db(&mut self) -> &mut dyn Backend;
 
         fn scan<S: QueryStatementWriter>(
@@ -378,6 +377,7 @@ mod sealed {
 pub(crate) use sealed::Q;
 
 /// Both a read snapshot and the write transaction can read (the write sees its own writes).
+#[allow(private_bounds)]
 pub trait Read: sealed::Q {}
 
 fn next_deadline(
@@ -407,6 +407,10 @@ fn next_deadline(
 }
 
 impl sealed::Q for R<'_> {
+    fn connection(&self) -> &Connection {
+        self.conn
+    }
+
     fn db(&mut self) -> &mut dyn Backend {
         self.db
     }
@@ -414,6 +418,10 @@ impl sealed::Q for R<'_> {
 impl Read for R<'_> {}
 
 impl sealed::Q for W<'_> {
+    fn connection(&self) -> &Connection {
+        self.conn
+    }
+
     fn db(&mut self) -> &mut dyn Backend {
         self.db
     }

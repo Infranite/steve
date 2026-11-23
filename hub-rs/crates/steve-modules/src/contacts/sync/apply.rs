@@ -23,11 +23,11 @@ use steve_store::base::links::{LinkKey, Links, NewLink};
 use steve_store::{Accounts, SyncedTeam, Teams, W};
 
 use super::super::repo::{NewParty, Party, PartyPatch};
-use super::super::service::{ensure_self_org_in, pref, revise_in, this_month};
+use super::super::service::{ensure_self_org, pref, revise, this_month};
 use super::DirConnection;
 use super::adapter::{DirUser, Snapshot};
 use crate::accounts::service::{self as asvc, Record};
-use crate::accounts::{ExtraHandle, Hints, identify::identify_handle};
+use crate::accounts::{ExtraHandle, Hints, identify::identify};
 use crate::{ApiError, ApiResult};
 use steve_store::System;
 use steve_store::TeamDetails as Details;
@@ -132,7 +132,7 @@ pub fn apply(
     }
     asvc::ensure_seeds(tx, ws)?;
     let system = asvc::own_system(tx, ws, system_id)?;
-    let own = ensure_self_org_in(tx, ws, actor)?;
+    let own = ensure_self_org(tx, ws, actor)?;
     let mut r = SyncReport::default();
     let mut touched: BTreeSet<String> = BTreeSet::new();
 
@@ -295,7 +295,7 @@ fn refresh_team(
         r.restored += 1;
     }
     if !after.is_empty() {
-        revise_in(
+        revise(
             tx,
             &t.party,
             &patch,
@@ -382,7 +382,7 @@ fn teams(
         .iter()
         .filter(|t| t.party.status == "active" && !team_of.values().any(|v| *v == t.party.id))
     {
-        revise_in(
+        revise(
             tx,
             &t.party,
             &PartyPatch {
@@ -499,7 +499,7 @@ fn directory_account(
                 source_label: Some(label.into()),
                 ..Default::default()
             };
-            let got = identify_handle(tx, ws, actor, &system.id, &u.id, &hints)?;
+            let got = identify(tx, ws, actor, &system.id, &u.id, &hints)?;
             if got.is_ours {
                 return Ok(None);
             }
@@ -584,7 +584,7 @@ fn person(
         if new {
             tx.contacts().update(&p.id, &patch, None)?;
         } else {
-            revise_in(
+            revise(
                 tx,
                 &p,
                 &patch,

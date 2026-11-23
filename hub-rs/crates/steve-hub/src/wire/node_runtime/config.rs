@@ -162,7 +162,7 @@ impl NodeRuntime {
         let started = std::time::Instant::now();
         let modes = self
             .store
-            .reader(|c| steve_store::runtime::session_modes(c, self.node_id.as_str(), session));
+            .read(|c| steve_store::runtime::session_modes(c, self.node_id.as_str(), session));
         self.meters
             .mode_state
             .record(started.elapsed().as_secs_f64());

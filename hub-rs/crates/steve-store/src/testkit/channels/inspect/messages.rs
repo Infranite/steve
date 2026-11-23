@@ -841,7 +841,7 @@ pub fn outgoing_count(store: &Store) -> Result<i64> {
 }
 
 pub fn contract_messages_with_status(store: &Store, status: &str) -> Result<Vec<String>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         let mut st =
             c.prepare("SELECT id FROM chan_messages WHERE id LIKE 'contract-msg-%' AND status=?")?;
         Ok::<_, crate::StoreError>(
@@ -852,7 +852,7 @@ pub fn contract_messages_with_status(store: &Store, status: &str) -> Result<Vec<
 }
 
 pub fn raw_attachments(store: &Store, message: &str) -> Result<String> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok::<_, crate::StoreError>(c.query_row(
             "SELECT attachments FROM chan_messages WHERE id = ?",
             [message],
@@ -862,7 +862,7 @@ pub fn raw_attachments(store: &Store, message: &str) -> Result<String> {
 }
 
 pub fn outgoing_texts(store: &Store) -> Result<Vec<String>> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
             let mut st = c.prepare(
                 "SELECT coalesce(text, '') FROM chan_messages WHERE direction = 'out' ORDER BY created, rowid",
             )?;
@@ -875,7 +875,7 @@ pub fn outgoing_texts(store: &Store) -> Result<Vec<String>> {
 
 pub fn received_message(store: &Store, external: &str) -> Result<Option<String>> {
     use rusqlite::OptionalExtension;
-    store.reader(|c| {
+    store.sqlite_read(|c| {
             Ok::<_, crate::StoreError>(
                 c.query_row(
                     "SELECT id FROM chan_messages WHERE external_id = ? AND direction = 'in' AND event_id IS NOT NULL",

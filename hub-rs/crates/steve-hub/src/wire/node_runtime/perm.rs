@@ -369,7 +369,7 @@ impl NodeRuntime {
             }
             if let Some(why) = self
                 .store
-                .reader(|c| steve_store::workflow_gate::session_blocker(c, &row.session))?
+                .read(|c| steve_store::workflow_gate::session_blocker(c, &row.session))?
             {
                 // A pause/cancel/replan can precede a late human or YOLO answer. Commit the
                 // expired card and a rejection together; never grant the old attempt new access.

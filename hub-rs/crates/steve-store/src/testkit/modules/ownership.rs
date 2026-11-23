@@ -17,7 +17,7 @@ pub fn seed_feishu_system(store: &Store) -> Result<()> {
 }
 
 pub fn steward_rows(store: &Store) -> Result<Vec<String>> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
             let mut st = c.prepare(
                 "SELECT object_type || ' ' || object_id || ' ' || person_id || ' ' || role || ' ' || source || ' ' || status FROM stewards ORDER BY 1",
             )?;
@@ -29,7 +29,7 @@ pub fn steward_rows(store: &Store) -> Result<Vec<String>> {
 }
 
 pub fn changeset_status_and_changes(store: &Store, id: &str) -> Result<(String, String)> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         Ok(c.query_row(
             "SELECT status, changes FROM changesets WHERE id = ?",
             [id],
@@ -39,11 +39,11 @@ pub fn changeset_status_and_changes(store: &Store, id: &str) -> Result<(String, 
 }
 
 pub fn merge_id(store: &Store) -> Result<String> {
-    store.with_conn(|c| Ok(c.query_row("SELECT id FROM merges", [], |r| r.get(0))?))
+    store.write_locked(|c| Ok(c.query_row("SELECT id FROM merges", [], |r| r.get(0))?))
 }
 
 pub fn contact_kind(store: &Store, party: &str) -> Result<String> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         Ok(c.query_row(
             "SELECT contact_kind FROM parties WHERE id = ?",
             [party],
@@ -53,7 +53,7 @@ pub fn contact_kind(store: &Store, party: &str) -> Result<String> {
 }
 
 pub fn open_steward_decisions(store: &Store) -> Result<i64> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         Ok(c.query_row(
             "SELECT count(*) FROM decisions WHERE subject_type = 'steward' AND status = 'open'",
             [],
@@ -63,7 +63,7 @@ pub fn open_steward_decisions(store: &Store) -> Result<i64> {
 }
 
 pub fn latest_applied_changeset(store: &Store) -> Result<String> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
             Ok(c.query_row(
                 "SELECT id FROM changesets WHERE origin = 'steve' AND status = 'applied' ORDER BY created DESC LIMIT 1",
                 [],

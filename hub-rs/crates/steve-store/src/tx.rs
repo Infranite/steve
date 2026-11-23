@@ -1,7 +1,6 @@
-//! Public transactions for module crates and re-entrant atomic write scopes for domain workflows.
+//! SQLite transactions and staging for Store write scopes.
 
-use std::cell::{Cell, RefCell};
-use std::ops::Deref;
+use std::cell::RefCell;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -91,9 +90,8 @@ impl<'a> WriteTx<'a> {
     }
 }
 
-impl Deref for WriteTx<'_> {
-    type Target = Connection;
-    fn deref(&self) -> &Connection {
+impl WriteTx<'_> {
+    pub(crate) fn connection(&self) -> &Connection {
         match self {
             Self::Root(tx) => tx,
             Self::Savepoint(sp) => sp.c,
@@ -160,88 +158,6 @@ impl Drop for NestedFrameGuard {
                 let _ = entry.frames.pop();
             }
         });
-    }
-}
-
-/// One write transaction. Derefs to the connection; events published through it are held back and go
-/// out only after the commit, in order, so a rolled-back write never reaches a browser.
-pub struct Tx<'a> {
-    c: &'a Connection,
-    store: Option<&'a Store>,
-    events: RefCell<Vec<BusEvent>>,
-    diagnostics: RefCell<Vec<crate::diagnostics::Record>>,
-    /// New item capture windows become visible to producers only after commit.
-    /// An outbox event was emitted: wake the dispatcher after the commit.
-    outbox: Cell<bool>,
-}
-
-impl Tx<'_> {
-    /// Queues an event for after the commit.
-    pub fn publish(&self, e: impl Into<BusEvent>) {
-        let e = e.into();
-        if let Some(store) = self.store {
-            if let Err(e) = store.try_stage_event(e) {
-                self.events.borrow_mut().push(e);
-            }
-            return;
-        }
-        self.events.borrow_mut().push(e);
-    }
-
-    pub(crate) fn mark_outbox(&self) {
-        if let Some(store) = self.store
-            && store.try_stage_outbox()
-        {
-            return;
-        }
-        self.outbox.set(true);
-    }
-
-    /// Metadata is queued only after commit, never for a rolled-back business write.
-    pub(crate) fn diagnostic(&self, event: crate::diagnostics::Record) {
-        if let Some(store) = self.store {
-            if let Err(event) = store.try_stage_diagnostic(event) {
-                self.diagnostics.borrow_mut().push(event);
-            }
-            return;
-        }
-        self.diagnostics.borrow_mut().push(event);
-    }
-}
-
-impl Tx<'_> {
-    /// The storage contract's repositories in this transaction, as a scope of it
-    /// ([`Store::write`] inside a write), for the domains not on the contract yet.
-    pub fn write<T, E: From<StoreError>>(
-        &self,
-        f: impl FnOnce(&mut crate::W<'_>) -> Result<T, E>,
-    ) -> Result<T, E> {
-        match self.store {
-            Some(store) => store.write(f),
-            None => Err(StoreError::Hook(
-                "a repository hook's transaction cannot open a contract write".into(),
-            )
-            .into()),
-        }
-    }
-}
-
-impl<'a> Tx<'a> {
-    pub(crate) fn bound(c: &'a Connection, store: &'a Store) -> Self {
-        Tx {
-            c,
-            store: Some(store),
-            events: RefCell::new(Vec::new()),
-            diagnostics: RefCell::new(Vec::new()),
-            outbox: Cell::new(false),
-        }
-    }
-}
-
-impl Deref for Tx<'_> {
-    type Target = Connection;
-    fn deref(&self) -> &Connection {
-        self.c
     }
 }
 
@@ -405,7 +321,7 @@ impl Store {
     }
 
     /// The outermost write: the writer lock, one transaction on the write connection (`f` gets it
-    /// both as the legacy connection and as the contract's backend), committed if `f` returns `Ok`
+    /// as the SQLite connection and the query backend), committed if `f` returns `Ok`
     /// and rolled back otherwise (also on a panic). What was staged goes out after the commit.
     #[track_caller]
     pub(crate) fn root<T, E: From<StoreError>>(
@@ -413,21 +329,22 @@ impl Store {
         f: impl FnOnce(&Connection, &mut dyn Backend) -> Result<T, E>,
     ) -> Result<T, E> {
         let store_id = self.inner_id();
-        let c = self.lock();
+        let guard = self.lock();
+        let c = guard.connection();
         crate::instrumentation::transaction_started();
-        let mut db = Sqlite(&c);
+        let mut db = Sqlite(c);
         db.begin_write()?;
         ACTIVE_WRITES.with(|cell| {
             cell.borrow_mut().push((
                 store_id,
                 ActiveWrite {
-                    conn: NonNull::from(&*c),
+                    conn: NonNull::from(c),
                     frames: vec![Staged::default()],
                 },
             ));
         });
-        let root_guard = RootScopeGuard { store_id, conn: &c };
-        let out = f(&c, &mut db)?;
+        let root_guard = RootScopeGuard { store_id, conn: c };
+        let out = f(c, &mut db)?;
         // on failure the guard rolls back
         db.batch("COMMIT")?;
         let staged = ACTIVE_WRITES.with(|cell| {
@@ -455,49 +372,8 @@ impl Store {
         Ok(out)
     }
 
-    #[track_caller]
-    fn atomic_with<T, E: From<StoreError>>(
-        &self,
-        f: impl FnOnce(&Connection) -> Result<T, E>,
-    ) -> Result<T, E> {
-        if let Some(c) = self.active_conn() {
-            let mut db = Sqlite(c);
-            let scope = self.open_scope(&mut db)?;
-            let out = f(c);
-            return self.close_scope(&mut db, scope, out);
-        }
-        self.root(|c, _| f(c))
-    }
-
-    /// Runs `f` inside an atomic, re-entrant SQLite write scope.
-    ///
-    /// All `store.x()` repository reads and writes (as well as nested [`Store::atomic`] and
-    /// [`Store::transaction`] calls) inside `f` reuse the active write connection without
-    /// deadlocking, see uncommitted writes immediately, and isolate nested scopes with SQLite
-    /// `SAVEPOINT`s. `BusEvent`s, diagnostics, and outbox notifications are held back until the
-    /// outermost transaction commits, and discarded on error or panic.
-    #[track_caller]
-    pub fn atomic<T, E: From<StoreError>>(&self, f: impl FnOnce() -> Result<T, E>) -> Result<T, E> {
-        self.atomic_with(|_| f())
-    }
-
-    /// Runs `f` in one write transaction: committed if it returns `Ok`, rolled back otherwise.
-    ///
-    /// Re-entrant with [`Store::atomic`] and repository helpers; `f` must still avoid blocking on
-    /// external network or subprocess I/O while holding the write lock.
-    #[track_caller]
-    pub fn transaction<T, E: From<StoreError>>(
-        &self,
-        f: impl FnOnce(&Tx) -> Result<T, E>,
-    ) -> Result<T, E> {
-        self.atomic_with(|c| {
-            let t = Tx::bound(c, self);
-            f(&t)
-        })
-    }
-
-    /// Runs `f` on a pooled read-only connection (or the active write connection inside [`Store::atomic`]).
-    pub fn reader<T, E: From<StoreError>>(
+    /// Runs `f` on a pooled read-only connection (or the active write connection inside [`Store::write`]).
+    pub(crate) fn sqlite_read<T, E: From<StoreError>>(
         &self,
         f: impl FnOnce(&Connection) -> Result<T, E>,
     ) -> Result<T, E> {

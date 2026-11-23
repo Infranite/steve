@@ -117,7 +117,7 @@ pub fn related_source_and_confidence(
     item: &str,
     party: &str,
 ) -> Result<Option<(String, f64)>> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
             Ok(c.query_row(
                 "SELECT source, confidence FROM links WHERE subject_type = 'item' AND subject_id = ?1 AND predicate = 'related' AND object_id = ?2",
                 [item, party],

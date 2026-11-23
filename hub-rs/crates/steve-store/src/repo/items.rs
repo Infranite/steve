@@ -179,8 +179,9 @@ impl Items<'_> {
             } else {
                 p.tags.clone()
             };
-            let tx = w.tx()?;
-            let no = if task { next_counter(&tx, &format!("item:{prefix}"))? } else { 0 };
+            let transaction = w.tx()?;
+            let tx = transaction.connection();
+            let no = if task { next_counter(tx, &format!("item:{prefix}"))? } else { 0 };
             let id = if task { format!("{prefix}-{no}") } else { uid("chat") };
             let t = now();
             let source = match &p.source {
@@ -207,17 +208,17 @@ impl Items<'_> {
                     p.requested_by
                 ],
             )?;
-            super::put_item_tags(&tx, &id, &tags)?;
+            super::put_item_tags(tx, &id, &tags)?;
             tx.run("INSERT INTO item_goals (item_id, version, text, created) VALUES (?, 1, ?, ?)", params![id, p.goal, t])?;
             if task {
                 super::kinds::add_delivery_labels(
-                    &tx, ws, &id, &super::kinds::expected_deliveries(&p.title, &p.goal),
+                    tx, ws, &id, &super::kinds::expected_deliveries(&p.title, &p.goal),
                 )?;
                 // stats: the item's first status
-                status_mark(&tx, ws, &id, t, None, p.status.as_deref().unwrap_or("run"))?;
+                status_mark(tx, ws, &id, t, None, p.status.as_deref().unwrap_or("run"))?;
             }
-            let until = crate::diagnostics::capture_created(&tx, ws, &id, t);
-            tx.commit()?;
+            let until = crate::diagnostics::capture_created(tx, ws, &id, t);
+            transaction.commit()?;
             if let Some(until) = until {
                 self.0.stage_diagnostic_until(until);
             }
@@ -235,9 +236,10 @@ impl Items<'_> {
     pub fn patch(&self, id: &str, p: &ItemPatch) -> Result<Option<Item>> {
         self.0.write_conn(|w| {
             // stats: a status change leaves exactly one mark, in the same transaction as the change
-            let tx = w.tx()?;
-            let changed = patch_on(&tx, id, p)?;
-            tx.commit()?;
+            let transaction = w.tx()?;
+            let tx = transaction.connection();
+            let changed = patch_on(tx, id, p)?;
+            transaction.commit()?;
             if changed {
                 if let Some(ws) = crate::repo::one(
                     w.c,
@@ -497,8 +499,8 @@ impl Deps<'_> {
     }
 
     pub fn add(&self, item: &str, dep: &str) -> Result<()> {
-        self.0.transaction(|tx| {
-            let added = tx.execute(
+        self.0.write(|tx| {
+            let added = tx.conn.execute(
                 "INSERT OR IGNORE INTO item_deps (item_id, dep_id, created) VALUES (?, ?, ?)",
                 params![item, dep, now()],
             )?;
@@ -506,12 +508,12 @@ impl Deps<'_> {
                 super::dependency_waits::rearm_in(tx, item)?;
             }
             if let Some(ws) = crate::repo::one(
-                tx,
+                tx.conn,
                 "SELECT workspace_id FROM items WHERE id = ?",
                 [item],
                 |r| r.get::<_, String>(0),
             )? {
-                tx.publish(steve_types::DomainEvent::from(
+                tx.emit(steve_types::DomainEvent::from(
                     steve_types::WorkEvent::Item {
                         ws: ws.into(),
                         id: item.into(),
@@ -717,15 +719,15 @@ pub(super) fn status_mark(
 }
 
 /// [`Items::patch`] inside the caller's transaction (the event goes out after its commit).
-pub fn item_patch_in(tx: &crate::Tx, id: &str, p: &ItemPatch) -> Result<Option<Item>> {
-    if patch_on(tx, id, p)? {
+pub fn item_patch_in(tx: &mut crate::W<'_>, id: &str, p: &ItemPatch) -> Result<Option<Item>> {
+    if patch_on(tx.conn, id, p)? {
         if let Some(ws) = crate::repo::one(
-            tx,
+            tx.conn,
             "SELECT workspace_id FROM items WHERE id = ?",
             [id],
             |r| r.get::<_, String>(0),
         )? {
-            tx.publish(steve_types::DomainEvent::from(
+            tx.emit(steve_types::DomainEvent::from(
                 steve_types::WorkEvent::Item {
                     ws: ws.into(),
                     id: id.into(),
@@ -733,7 +735,7 @@ pub fn item_patch_in(tx: &crate::Tx, id: &str, p: &ItemPatch) -> Result<Option<I
             ));
         }
     }
-    one(tx, ITEM, [id], Item::from_row)
+    one(tx.conn, ITEM, [id], Item::from_row)
 }
 
 /// The patch's writes on a connection already in a transaction; `false` for an empty patch.

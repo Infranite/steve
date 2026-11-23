@@ -340,12 +340,13 @@ impl Thread<'_> {
     /// normal boot does not revive them).
     pub fn runs_interrupt(&self, resume: bool) -> Result<Vec<ThreadRun>> {
         self.0.write_conn(|w| {
-            let tx = w.tx()?;
+            let transaction = w.tx()?;
+            let tx = transaction.connection();
             // Reply persistence is the completion receipt even if the process died before the
             // subsequent run_patch. Do not generate a second local answer on the next boot.
             tx.run("UPDATE thread_runs SET status='done',token_hash=NULL,ended=?,reply_id=coalesce(reply_id,(SELECT m.id FROM messages m WHERE m.workspace_id=thread_runs.workspace_id AND json_valid(m.meta) AND json_extract(m.meta,'$.run')=thread_runs.id AND json_extract(m.meta,'$.run_receipt')=1 AND m.author='steve' ORDER BY m.created DESC,m.id DESC LIMIT 1)) WHERE status IN ('queued','running') AND EXISTS (SELECT 1 FROM messages m WHERE json_valid(m.meta) AND json_extract(m.meta,'$.run')=thread_runs.id AND json_extract(m.meta,'$.run_receipt')=1 AND m.author='steve')", [now()])?;
             let ids: Vec<String> = all(
-                &tx,
+                tx,
                 "SELECT id FROM thread_runs WHERE status IN ('queued', 'running') ORDER BY created, rowid",
                 [],
                 |r| r.get(0),
@@ -364,9 +365,9 @@ impl Thread<'_> {
             }
             let mut out = Vec::with_capacity(ids.len());
             for id in &ids {
-                out.push(must(one(&tx, RUN, [id], ThreadRun::from_row)?)?);
+                out.push(must(one(tx, RUN, [id], ThreadRun::from_row)?)?);
             }
-            tx.commit()?;
+            transaction.commit()?;
             Ok(out)
         })
     }

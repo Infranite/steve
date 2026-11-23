@@ -25,7 +25,7 @@ pub fn seed_waiting(
     created: i64,
 ) -> Result<String> {
     let id = crate::uid("notification");
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute(
             "INSERT INTO personal_notifications
                 (id,workspace_id,user_id,event_id,delivery_key,mode,body,state,next_attempt_at,created,topic)
@@ -263,7 +263,7 @@ impl DeliveryDeadline<'_> {
 }
 
 pub fn set_unavailable(store: &Store, unavailable: bool) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         let sql = if unavailable {
             "ALTER TABLE personal_notifications RENAME TO unavailable_notifications"
         } else {

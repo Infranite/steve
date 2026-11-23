@@ -214,10 +214,10 @@ impl HubHarnesses {
     ) -> steve_core::models::BotHarnessSource {
         let me = self.clone();
         Arc::new(move |bot| {
-            let (mut nodes, legacy) = store
+            let (mut nodes, unconfigured) = store
                 .read(|r| steve_store::bot_admin::harness_nodes(r, bot))
                 .unwrap_or_default();
-            if legacy {
+            if unconfigured {
                 nodes.extend(
                     steve_store::bot_dispatch::DEFAULT_NODES
                         .iter()

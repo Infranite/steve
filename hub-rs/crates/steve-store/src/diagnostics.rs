@@ -199,19 +199,20 @@ impl Recorder {
                     let count = batch.len() as u64;
                     epoch.fetch_add(1, Ordering::AcqRel);
                     let result: Result<u64> = store.write_conn(|w| {
-                        let tx = w.tx()?;
+                        let transaction = w.tx()?;
+                        let tx = transaction.connection();
                         let mut retention_budget =
                             steve_store_sqlite::retention::policies::DIAGNOSTIC_EVICT_ROWS;
                         for event in &batch {
-                            persist(&tx, event, &mut retention_budget)?;
+                            persist(tx, event, &mut retention_budget)?;
                         }
                         let pending = losses.load(Ordering::Relaxed);
                         tx.execute(
                             "UPDATE diagnostic_stats SET dropped=dropped+? WHERE id=1",
                             [pending.min(i64::MAX as u64) as i64],
                         )?;
-                        let until = active_until(&tx)?;
-                        tx.commit()?;
+                        let until = active_until(tx)?;
+                        transaction.commit()?;
                         // Keep the cache ordered with concurrent capture writes.
                         if let Some(recorder) = store.inner.diagnostics.get() {
                             recorder.active_until.store(until, Ordering::Relaxed);
@@ -322,7 +323,7 @@ impl Diagnostics<'_> {
     }
 
     fn snapshot<T>(&self, read: impl FnOnce(&Connection, Snapshot) -> Result<T>) -> Result<T> {
-        self.0.reader(|c| {
+        self.0.sqlite_read(|c| {
             // Sample before the first SELECT fixes the SQLite snapshot. Sampling
             // at the end can pair old rows with a worker's newly drained queue.
             let counters = self
@@ -387,8 +388,9 @@ impl Diagnostics<'_> {
             ));
         }
         self.0.write_conn(|w| {
-            let tx = w.tx()?;
-            own(&tx, ws, item)?;
+            let transaction = w.tx()?;
+            let tx = transaction.connection();
+            own(tx, ws, item)?;
             let at = now();
             tx.execute("INSERT OR IGNORE INTO diagnostic_item_stats(item_id) VALUES(?)", [item])?;
             if minutes == 0 {
@@ -400,9 +402,9 @@ impl Diagnostics<'_> {
                     expires_at=excluded.expires_at,stop_reason=NULL,stopped_at=NULL,bytes=0,dropped_at_start=excluded.dropped_at_start",
                     params![item,ws,actor,at,at+i64::from(minutes)*60_000,item])?;
             }
-            let result=json!({"observed_at":at,"capture":capture_view(&tx,item,at)?});
-            let until=active_until(&tx)?;
-            tx.commit()?;
+            let result=json!({"observed_at":at,"capture":capture_view(tx,item,at)?});
+            let until=active_until(tx)?;
+            transaction.commit()?;
             if let Some(recorder)=self.0.inner.diagnostics.get(){recorder.active_until.store(until,Ordering::Relaxed);}
             Ok(result)
         })
@@ -1001,7 +1003,7 @@ mod tests {
         let reader_store = store.clone();
         let reader_item = item.id.clone();
         let reader = store
-            .with_conn(|_| {
+            .write_locked(|_| {
                 // The worker cannot commit before the reader has fixed its old snapshot.
                 let mut invalid = event.clone();
                 invalid.kind = "invalid free text".into();

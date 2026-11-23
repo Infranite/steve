@@ -17,19 +17,19 @@ pub mod people;
 pub mod spaces;
 
 fn fixture_write<T>(store: &Store, apply: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
-    store.transaction(|tx| apply(tx))
+    store.write(|tx| apply(tx.conn))
 }
 
 fn unchecked_relations<T>(
     store: &Store,
     apply: impl FnOnce(&Connection) -> Result<T>,
 ) -> Result<T> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.pragma_update(None, "foreign_keys", false)?;
         Ok(())
     })?;
     let result = project_write(store, apply);
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.pragma_update(None, "foreign_keys", true)?;
         Ok(())
     })?;

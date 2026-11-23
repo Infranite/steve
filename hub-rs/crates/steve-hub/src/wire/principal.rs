@@ -183,7 +183,7 @@ pub fn harness_state_in(
     let import_owner = p.user().is_some() && owner.as_deref() == p.user();
     authority::set_state_dir(w, session, &dir)?;
     let owner_context =
-        import_owner && store.reader(|c| steve_store::nodes::owner_context(c, node))?;
+        import_owner && store.read(|c| steve_store::nodes::owner_context(c, node))?;
     Ok(Some(steve_node_api::HarnessState {
         dir,
         import_owner,

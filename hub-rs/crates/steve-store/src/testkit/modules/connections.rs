@@ -165,7 +165,7 @@ pub fn party_steward(store: &Store, key: &str) -> Result<Option<Vec<serde_json::
 }
 
 pub fn open_connection_decisions(store: &Store, con: &str) -> Result<Vec<serde_json::Value>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
             let mut st = c.prepare(
                 "SELECT question, options, kind FROM decisions WHERE subject_type = 'connection' AND subject_id = ? AND status = 'open'",
             )?;
@@ -177,7 +177,7 @@ pub fn open_connection_decisions(store: &Store, con: &str) -> Result<Vec<serde_j
 }
 
 pub fn open_decision(store: &Store, con: &str) -> Result<String> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT id FROM decisions WHERE subject_id = ? AND status = 'open'",
             [&con],
@@ -187,7 +187,7 @@ pub fn open_decision(store: &Store, con: &str) -> Result<String> {
 }
 
 pub fn enabled_at(store: &Store, con: &str) -> Result<Option<i64>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT enabled_at FROM connections WHERE id = ?",
             [&con],
@@ -197,7 +197,7 @@ pub fn enabled_at(store: &Store, con: &str) -> Result<Option<i64>> {
 }
 
 pub fn owned_handle_count(store: &Store, acc: &str, app_con: &str) -> Result<i64> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT COUNT(*) FROM account_handles WHERE account_id = ? AND connection_id = ?",
             rusqlite::params![acc, app_con],
@@ -207,7 +207,7 @@ pub fn owned_handle_count(store: &Store, acc: &str, app_con: &str) -> Result<i64
 }
 
 pub fn active_connection_credentials(store: &Store) -> Result<i64> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
             Ok(c.query_row(
                 "SELECT COUNT(*) FROM vault_items WHERE template = 'connection_credential' AND status = 'active'",
                 [],
@@ -217,7 +217,7 @@ pub fn active_connection_credentials(store: &Store) -> Result<i64> {
 }
 
 pub fn seed_contact_account(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
             c.execute_batch(
                 "INSERT INTO parties (id, workspace_id, type, name, contact_kind, created_by, created, updated) VALUES ('ct_zhang', 'default', 'contact', '张三', 'real', 'usr_dev', 1, 1);
                  INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated) VALUES ('acc_z', 'default', 'mail', 'email', 'ct_zhang', 'work_email', 'zhang@acme.com', 'zhang@acme.com', 'sync', 1, 1);

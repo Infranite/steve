@@ -10,7 +10,7 @@ use serde_json::{Map, Value, json};
 use steve_store::base::links::{self, LinkKey, Links, NewLink};
 use steve_store::base::{Level, ObjRef, Viewer, Visibility};
 use steve_store::knowledge::Memories;
-use steve_store::{Attributes, Contacts, Link, Read, TagRows, Teams, Tx, W};
+use steve_store::{Attributes, Contacts, Link, Read, TagRows, Teams, W};
 
 use super::Ports;
 use super::repo::{
@@ -246,20 +246,12 @@ pub fn ensure_base(w: &mut steve_store::W<'_>, who: &Caller) -> ApiResult<Party>
             me
         }
     };
-    ensure_self_org_in(w, &who.ws, &who.me)?;
+    ensure_self_org(w, &who.ws, &who.me)?;
     Ok(me)
 }
 
 /// The workspace's own organization, created on first need with the workspace's name.
-pub fn ensure_self_org(tx: &Tx, ws: &str, actor: &str) -> ApiResult<Party> {
-    tx.write(|w| ensure_self_org_in(w, ws, actor))
-}
-
-pub(crate) fn ensure_self_org_in(
-    w: &mut steve_store::W<'_>,
-    ws: &str,
-    actor: &str,
-) -> ApiResult<Party> {
+pub fn ensure_self_org(w: &mut steve_store::W<'_>, ws: &str, actor: &str) -> ApiResult<Party> {
     if let Some(o) = w.contacts().own_org(ws)? {
         return Ok(o);
     }
@@ -311,32 +303,8 @@ pub(crate) fn check_visibility(c: &mut impl Read, ws: &str, v: &Visibility) -> A
     }
 }
 
-/// Writes a revision and bumps the party's `revision`.
-/// [`revise`] for other modules' settling code (identification, enrichment): one revision with the
-/// given `before` / `after`, then the patch.
-pub fn revise_as(
-    tx: &Tx,
-    p: &Party,
-    patch: &PartyPatch,
-    before: Value,
-    after: Value,
-    author: &str,
-) -> ApiResult<()> {
-    revise(tx, p, patch, before, after, author)
-}
-
-pub(crate) fn revise(
-    tx: &Tx,
-    p: &Party,
-    patch: &PartyPatch,
-    before: Value,
-    after: Value,
-    author: &str,
-) -> ApiResult<()> {
-    tx.write(|w| revise_in(w, p, patch, before, after, author))
-}
-
-pub(crate) fn revise_in(
+/// Writes the given before/after revision and updates the party with the same write.
+pub fn revise(
     w: &mut steve_store::W<'_>,
     p: &Party,
     patch: &PartyPatch,
@@ -808,7 +776,7 @@ pub fn patch_contact(m: &Modules, who: &Caller, id: &str, b: ContactPatch) -> Ap
             after.insert("tags".into(), json!(new_tags));
         }
         if !after.is_empty() {
-            revise_in(
+            revise(
                 tx,
                 &p,
                 &patch,
@@ -854,7 +822,7 @@ pub fn set_avatar_file(
         if new == old {
             return Ok::<_, ApiError>(());
         }
-        revise_in(
+        revise(
             tx,
             &p,
             &PartyPatch::default(),
@@ -934,7 +902,7 @@ pub fn confirm_contact(m: &Modules, who: &Caller, id: &str) -> ApiResult<Contact
             contact_kind: Some("real".into()),
             ..Default::default()
         };
-        revise_in(
+        revise(
             tx,
             &p,
             &patch,
@@ -1010,7 +978,7 @@ pub fn delete_contact(m: &Modules, ports: &Ports, who: &Caller, id: &str) -> Api
             status: Some("deleted".into()),
             ..Default::default()
         };
-        revise_in(
+        revise(
             tx,
             &p,
             &patch,
@@ -1117,7 +1085,7 @@ pub fn add_job(m: &Modules, who: &Caller, id: &str, b: NewJob) -> ApiResult<Cont
                 Value::Null
             }
         };
-        revise_in(
+        revise(
             tx,
             &p,
             &PartyPatch::default(),
@@ -1212,7 +1180,7 @@ pub fn patch_job(
         }
         if props != l.props {
             Links(tx).set_props(&who.ws, &key, &props)?;
-            revise_in(
+            revise(
                 tx,
                 &p,
                 &PartyPatch::default(),
@@ -1242,7 +1210,7 @@ pub fn delete_job(m: &Modules, who: &Caller, id: &str, org_id: &str) -> ApiResul
         let p = own_party_in(tx, &viewer, &id, "contact", "联系人", true)?;
         let (key, l) = own_job(tx, &viewer, &p.id, org_id)?;
         Links(tx).remove(&who.ws, &key)?;
-        revise_in(
+        revise(
             tx,
             &p,
             &PartyPatch::default(),
@@ -1360,7 +1328,7 @@ pub fn add_attr(m: &Modules, who: &Caller, id: &str, b: NewAttr) -> ApiResult<Pa
             },
         )?;
         Attributes(tx).stale_siblings(&v)?;
-        revise_in(
+        revise(
             tx,
             &p,
             &PartyPatch::default(),
@@ -1432,7 +1400,7 @@ pub fn patch_attr(m: &Modules, who: &Caller, id: &str, b: AttrPatch) -> ApiResul
             Attributes(tx).stale_siblings(&after)?;
         }
         let snap = |x: &AttrValue| json!({ "id": x.id, "value": x.value, "level": x.level, "status": x.status });
-        revise_in(tx, &p, &PartyPatch::default(), json!({ "attr": snap(&v) }), json!({ "attr": snap(&after) }), &who.me)?;
+        revise(tx, &p, &PartyPatch::default(), json!({ "attr": snap(&v) }), json!({ "attr": snap(&after) }), &who.me)?;
         tx.audit(&who.ws, &who.me, "attr.update", &p.id, &json!({ "attr_id": v.id, "key": v.key }))?;
         tx.emit(crate::accounts::service::party_changed(&who.ws, &p.id));
         Ok(())
@@ -1445,7 +1413,7 @@ pub fn delete_attr(m: &Modules, who: &Caller, id: &str) -> ApiResult<()> {
     m.store.write(|tx| {
         let (v, p) = own_attr(tx, &viewer, id)?;
         Attributes(tx).delete_value(&v.id)?;
-        revise_in(
+        revise(
             tx,
             &p,
             &PartyPatch::default(),
@@ -1777,7 +1745,7 @@ pub fn patch_org(m: &Modules, who: &Caller, id: &str, b: OrgPatch) -> ApiResult<
             }
         }
         if !after.is_empty() {
-            revise_in(
+            revise(
                 tx,
                 &o,
                 &patch,
@@ -1838,7 +1806,7 @@ pub fn delete_org(m: &Modules, who: &Caller, id: &str) -> ApiResult<()> {
             status: Some("deleted".into()),
             ..Default::default()
         };
-        revise_in(
+        revise(
             tx,
             &o,
             &patch,

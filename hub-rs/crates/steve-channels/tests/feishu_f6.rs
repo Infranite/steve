@@ -324,10 +324,10 @@ async fn a_contact_the_names_run_made_real_is_still_merged_but_not_one_you_confi
     // confirmed by a person the way the contacts page does it: a revision of `kind` that is no sync
     h.env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             use steve_modules::contacts::{repo, service};
-            let p = tx.write(|w| repo::get(w, &first.party_id))?.expect("party");
-            service::revise_as(
+            let p = tx.scope(|w| repo::get(w, &first.party_id))?.expect("party");
+            service::revise(
                 tx,
                 &p,
                 &repo::PartyPatch {
@@ -338,7 +338,7 @@ async fn a_contact_the_names_run_made_real_is_still_merged_but_not_one_you_confi
                 json!({"kind": "real"}),
                 ME,
             )?;
-            tx.write(|w| seed::people::set_contact_source(w, &first.party_id, "chat"))?;
+            tx.scope(|w| seed::people::set_contact_source(w, &first.party_id, "chat"))?;
             Ok::<_, ApiError>(())
         })
         .expect("confirm");
@@ -416,8 +416,8 @@ async fn the_generic_start_route_merges_too_but_never_a_confirmed_contact() {
     let first = bot_sees(&h, &bot, &owner_ids());
     h.env
         .store()
-        .transaction(|tx| {
-            tx.write(|w| seed::people::set_contact_kind(w, &first.party_id, "real"))?;
+        .write(|tx| {
+            tx.scope(|w| seed::people::set_contact_kind(w, &first.party_id, "real"))?;
             Ok::<_, ApiError>(())
         })
         .expect("confirm");

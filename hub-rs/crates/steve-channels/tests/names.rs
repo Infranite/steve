@@ -416,7 +416,7 @@ async fn the_address_book_names_by_id_and_a_shared_union_id_merges() {
     let known = h
         .env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             let id = steve_modules::accounts::identify(
                 tx,
                 WS,
@@ -428,7 +428,7 @@ async fn the_address_book_names_by_id_and_a_shared_union_id_merges() {
                     ..Default::default()
                 },
             )?;
-            tx.write(|w| seed::people::set_contact_kind(w, &id.party_id, "real"))?;
+            tx.scope(|w| seed::people::set_contact_kind(w, &id.party_id, "real"))?;
             Ok::<_, steve_modules::ApiError>(id.party_id)
         })
         .expect("known bob");

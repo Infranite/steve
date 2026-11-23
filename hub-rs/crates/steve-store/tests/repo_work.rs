@@ -1,6 +1,7 @@
 #![allow(clippy::unit_arg, clippy::cloned_ref_to_slice_refs)] // terse assertions in tests
 //! Items, deps, timeline, artifacts, sessions, events, queued, decisions, messages.
 
+use steve_store::testkit::SqliteFixtures;
 mod common;
 
 use common::*;
@@ -131,7 +132,7 @@ fn item_numbers_are_global_per_prefix() {
             })
         )]
     );
-    s.with_conn(|c| Ok(c.execute("INSERT INTO workspaces (id, name, item_prefix, created) VALUES ('w2', 'B', 'ST', 1), ('w3', 'C', 'XY', 1)", [])?)).unwrap();
+    s.fixture_write(|c| Ok(c.execute("INSERT INTO workspaces (id, name, item_prefix, created) VALUES ('w2', 'B', 'ST', 1), ('w3', 'C', 'XY', 1)", [])?)).unwrap();
     assert_eq!(
         new_item(s, "w2", "b").id,
         "ST-2",
@@ -194,7 +195,7 @@ fn item_json_shape() {
             "closed_at": null, "closed_reason": null, "design_gate": false
         })
     );
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         let (src, parent): (String, String) =
             c.query_row("SELECT source, parent FROM items", [], |r| {
                 Ok((r.get(0)?, r.get(1)?))
@@ -593,7 +594,7 @@ fn events_paging_and_search() {
         ))
     );
     // the stored text keeps key order (preserve_order)
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         let d: String = c.query_row("SELECT data FROM events WHERE seq = ?", [first], |r| r.get(0))?;
         Ok(assert_eq!(d, r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"你好 needle"}}"#))
     })
@@ -824,8 +825,8 @@ fn imported_sessions() {
     assert!(s.queued().add(&id, "q", "me", &[]).is_err());
     assert!(s.queued().add_unless_waiting(&id, "q", "me", &[]).is_err());
     // Removal must clean up queues from older builds too, although new writes are refused.
-    s.transaction::<_, steve_store::StoreError>(|tx| {
-        tx.execute("INSERT INTO queued(id,session_id,text,via,created) VALUES ('legacy-import-queue',?,'q','me',1)", [&id])?;
+    s.write::<_, steve_store::StoreError>(|tx| {
+        steve_store::testkit::sqlite_writer(tx).execute("INSERT INTO queued(id,session_id,text,via,created) VALUES ('legacy-import-queue',?,'q','me',1)", [&id])?;
         Ok(())
     }).unwrap();
     t.events.take();
@@ -951,7 +952,7 @@ fn decisions() {
         (e.status.as_str(), e.undo.clone()),
         ("expired", Value::Null)
     );
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         Ok(assert_eq!(
             count(c, "SELECT count(*) FROM decisions WHERE undo IS NULL"),
             1
@@ -1379,7 +1380,7 @@ fn an_unapplied_answer_expires_its_card_open_or_resolved_only() {
     let resolved = s.decisions().create(&nd()).unwrap().unwrap();
     let expired = s.decisions().create(&nd()).unwrap().unwrap();
     let cancelled = s.decisions().create(&nd()).unwrap().unwrap();
-    s.transaction::<_, StoreError>(|tx| {
+    s.write::<_, StoreError>(|tx| {
         decision_resolve_in(
             tx,
             &resolved.id,

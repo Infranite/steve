@@ -1008,16 +1008,9 @@ fn decide(h: &H, id: &str, choice: &str) {
         .expect("decided");
 }
 
-/// What steve-core's `undoDecision` does around the handler.
 fn undo(h: &H, id: &str) {
-    h.env
-        .store()
-        .write(|tx| -> ApiResult<()> {
-            let d = steve_store::decision_repo::get(tx, id)?.expect("decision");
-            h.env.modules.registry.before_undo(tx, &d)?;
-            seed::decisions::reopen_fixture_decision(tx, id)?;
-            Ok(())
-        })
+    steve_modules::decisions::undo(&h.env.modules, id, ME, |_| true)
+        .expect("decision handler")
         .expect("undo");
 }
 
@@ -1115,9 +1108,9 @@ async fn your_private_chat_with_the_bot_is_owner_only() {
     let t = h.thread.clone().unwrap();
     h.env
         .store()
-        .transaction(|tx| -> ApiResult<()> {
+        .write(|tx| -> ApiResult<()> {
             let me =
-                tx.write(|w| steve_modules::contacts::service::ensure_base(w, &caller(WS, ME)))?;
+                tx.scope(|w| steve_modules::contacts::service::ensure_base(w, &caller(WS, ME)))?;
             for (key, value) in [
                 ("call", "Private nickname"),
                 ("call_external", "External name"),

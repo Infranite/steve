@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use super::{Level, ObjRef, Viewer, Visibility, bind};
 use crate::repo::Sets;
-use crate::{Result, Tx, now, uid};
+use crate::{Result, W, now, uid};
 
 /// A `mems` row with its `about` objects.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -150,7 +150,7 @@ fn with_about(c: &Connection, mut m: Mem) -> Result<Mem> {
 }
 
 /// Any memory by id, without a visibility check (for services that already checked, and handlers).
-pub fn get(c: &Connection, id: &str) -> Result<Option<Mem>> {
+pub(crate) fn get_on(c: &Connection, id: &str) -> Result<Option<Mem>> {
     let m = c
         .prepare_cached("SELECT * FROM mems WHERE id = ?")?
         .query_row([id], Mem::from_row);
@@ -163,7 +163,7 @@ pub fn get(c: &Connection, id: &str) -> Result<Option<Mem>> {
 
 /// The ownership check `own_mem(ws, me, id)`: exists, in the viewer's workspace, visible to them.
 pub fn visible(c: &Connection, viewer: &Viewer, id: &str) -> Result<Option<Mem>> {
-    Ok(get(c, id)?
+    Ok(get_on(c, id)?
         .filter(|m| m.workspace_id == viewer.ws && viewer.sees(&m.visibility, &m.created_by)))
 }
 
@@ -226,10 +226,10 @@ fn list(c: &Connection, sql: &str, p: Vec<Sql>) -> Result<Vec<Mem>> {
 }
 
 /// Writes a memory and its `about` rows. Publishes `{type:"mm"}`.
-pub fn create(tx: &Tx, ws: &str, m: &NewMem) -> Result<Mem> {
+pub fn create(tx: &mut W<'_>, ws: &str, m: &NewMem) -> Result<Mem> {
     let id = uid("mm");
     let t = now();
-    tx.prepare_cached(
+    tx.conn.prepare_cached(
         "INSERT INTO mems (id, workspace_id, kind, text, source_type, source_id, source_label, visibility, level, status, valid_until, writer, decision_id, created_by, created, updated)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )?
@@ -252,23 +252,23 @@ pub fn create(tx: &Tx, ws: &str, m: &NewMem) -> Result<Mem> {
         t
     ])?;
     for a in &m.about {
-        tx.prepare_cached(
+        tx.conn.prepare_cached(
             "INSERT OR IGNORE INTO mem_about (mem_id, workspace_id, object_type, object_id) VALUES (?, ?, ?, ?)",
         )?
         .execute(params![id, ws, a.kind, a.id])?;
     }
-    tx.publish(steve_types::DomainEvent::from(
+    tx.emit(steve_types::DomainEvent::from(
         steve_types::ConfigEvent::Mm {
             id: id.clone().into(),
             ws: ws.into(),
         },
     ));
-    crate::repo::must(get(tx, &id)?)
+    crate::repo::must(get_on(tx.conn, &id)?)
 }
 
 /// Applies a patch (bumping `updated`); `None` if there is no such memory. Publishes `{type:"mm"}`.
-pub fn patch(tx: &Tx, id: &str, p: &MemPatch) -> Result<Option<Mem>> {
-    let Some(old) = get(tx, id)? else {
+pub fn patch(tx: &mut W<'_>, id: &str, p: &MemPatch) -> Result<Option<Mem>> {
+    let Some(old) = get_on(tx.conn, id)? else {
         return Ok(None);
     };
     let mut s = Sets::default();
@@ -280,28 +280,29 @@ pub fn patch(tx: &Tx, id: &str, p: &MemPatch) -> Result<Option<Mem>> {
         .null("valid_until", p.valid_until);
     if !s.is_empty() {
         s.val("updated", Some(now()));
-        tx.run(
+        tx.conn.run(
             &format!("UPDATE mems SET {} WHERE id = ?", s.sql()),
             bind(s.params([Sql::Text(id.into())])),
         )?;
-        tx.publish(steve_types::DomainEvent::from(
+        tx.emit(steve_types::DomainEvent::from(
             steve_types::ConfigEvent::Mm {
                 id: id.into(),
                 ws: old.workspace_id.clone().into(),
             },
         ));
     }
-    get(tx, id)
+    get_on(tx.conn, id)
 }
 
 /// Deletes a memory and its `about` rows (physically). Returns whether it existed.
-pub fn delete(tx: &Tx, id: &str) -> Result<bool> {
-    let Some(old) = get(tx, id)? else {
+pub fn delete(tx: &mut W<'_>, id: &str) -> Result<bool> {
+    let Some(old) = get_on(tx.conn, id)? else {
         return Ok(false);
     };
-    tx.run("DELETE FROM mem_about WHERE mem_id = ?", [id])?;
-    tx.run("DELETE FROM mems WHERE id = ?", [id])?;
-    tx.publish(steve_types::DomainEvent::from(
+    tx.conn
+        .run("DELETE FROM mem_about WHERE mem_id = ?", [id])?;
+    tx.conn.run("DELETE FROM mems WHERE id = ?", [id])?;
+    tx.emit(steve_types::DomainEvent::from(
         steve_types::ConfigEvent::Mm {
             id: id.into(),
             ws: old.workspace_id.into(),
@@ -312,8 +313,8 @@ pub fn delete(tx: &Tx, id: &str) -> Result<bool> {
 
 /// Deletes the memories that are about `object` and nothing else (deleting a contact); memories
 /// shared with other objects stay. Returns how many were deleted (audit records only the count).
-pub fn delete_only_about(tx: &Tx, ws: &str, object: &ObjRef) -> Result<usize> {
-    let ids: Vec<String> = tx
+pub fn delete_only_about(tx: &mut W<'_>, ws: &str, object: &ObjRef) -> Result<usize> {
+    let ids: Vec<String> = tx.conn
         .prepare_cached(
             "SELECT a.mem_id FROM mem_about a WHERE a.workspace_id = ? AND a.object_type = ? AND a.object_id = ?
                AND NOT EXISTS (SELECT 1 FROM mem_about b WHERE b.mem_id = a.mem_id AND (b.object_type != a.object_type OR b.object_id != a.object_id))",
@@ -329,14 +330,14 @@ pub fn delete_only_about(tx: &Tx, ws: &str, object: &ObjRef) -> Result<usize> {
 /// Moves `about` rows from one object to another (merging parties) and returns the memory ids moved, for
 /// `merges.moved`. `only` limits the move to these memories (splitting a merge moves them back).
 pub fn retarget_about(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     object_type: &str,
     from: &str,
     into: &str,
     only: Option<&[String]>,
 ) -> Result<Vec<String>> {
-    let ids: Vec<String> = tx
+    let ids: Vec<String> = tx.conn
         .prepare_cached(
             "SELECT mem_id FROM mem_about WHERE workspace_id = ? AND object_type = ? AND object_id = ? ORDER BY mem_id",
         )?
@@ -346,15 +347,15 @@ pub fn retarget_about(
         .filter(|id| only.is_none_or(|o| o.contains(id)))
         .collect();
     for id in &ids {
-        tx.run(
+        tx.conn.run(
             "INSERT OR IGNORE INTO mem_about (mem_id, workspace_id, object_type, object_id) VALUES (?, ?, ?, ?)",
             params![id, ws, object_type, into],
         )?;
-        tx.run(
+        tx.conn.run(
             "DELETE FROM mem_about WHERE mem_id = ? AND object_type = ? AND object_id = ?",
             params![id, object_type, from],
         )?;
-        tx.publish(steve_types::DomainEvent::from(
+        tx.emit(steve_types::DomainEvent::from(
             steve_types::ConfigEvent::Mm {
                 id: id.clone().into(),
                 ws: ws.into(),
@@ -378,4 +379,8 @@ pub fn candidates_before(
     )?;
     let rows = st.query_map(params![ws, before], |r| Ok((r.get(0)?, r.get(1)?)))?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub fn get(r: &mut impl crate::Read, id: &str) -> Result<Option<Mem>> {
+    get_on(r.connection(), id)
 }

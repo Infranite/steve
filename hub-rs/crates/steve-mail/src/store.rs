@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use steve_modules::accounts::identify::{Hints, identify_handle};
+use steve_modules::accounts::identify::{Hints, identify};
 use steve_store::{Store, outbox, uid};
 
 use async_trait::async_trait;
@@ -212,7 +212,7 @@ impl StoreSink<'_> {
             )),
             ..Default::default()
         };
-        match identify_handle(
+        match identify(
             tx,
             &self.mailbox.ws,
             &self.mailbox.owner,

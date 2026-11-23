@@ -332,7 +332,7 @@ impl NodeRuntime {
                 }
                 let limit = self
                     .store
-                    .reader(|c| rt::session_limit(c, self.node_id.as_str()))
+                    .read(|c| rt::session_limit(c, self.node_id.as_str()))
                     .map_err(|e| {
                         ApiError::new(ErrorCode::Offline, format!("session capacity: {e}"))
                     })?;

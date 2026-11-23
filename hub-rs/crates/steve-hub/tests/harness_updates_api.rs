@@ -74,7 +74,7 @@ impl Env {
     fn register(&self, node: &str) {
         let owner = self.store.access().owner().unwrap().unwrap().id;
         self.store
-            .transaction(|tx| {
+            .write(|tx| {
                 let code = format!("code-{node}");
                 steve_store::nodes::create_pairing_as(tx, &code, &owner, 1, i64::MAX, true)?;
                 steve_store::nodes::claim_pairing(

@@ -1144,7 +1144,7 @@ async fn app_bot_connect_makes_an_owned_bot_party() {
     let got = h
         .env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             steve_modules::accounts::identify(
                 tx,
                 WS,

@@ -749,19 +749,9 @@ async fn agent_session(
         )
         .await;
     let id = item["id"].as_str().expect("item").to_string();
-    let mut sid = String::new();
-    for _ in 0..100 {
-        let (_, i) = c.call("GET", &format!("/api/items/{id}"), None, None).await;
-        if let Some(s) = i["sessionIds"][0].as_str() {
-            sid = s.to_string();
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(!sid.is_empty(), "no session");
     let db = hub.home.path().join("steve/data/steve.sqlite3");
     let hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"test-token"));
-    fixtures::configure_mcp_fixture_session(&db, &hash, &sid).unwrap();
+    fixtures::seed_mcp_fixture_session(&db, &id, &hash).unwrap();
     let (http, url) = (c.http.clone(), format!("{}/mcp", c.base));
     move |body: Value| {
         let (http, url) = (http.clone(), url.clone());

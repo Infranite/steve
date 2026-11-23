@@ -75,7 +75,7 @@ pub fn selected(r: &mut impl crate::Read, ws: &str, id: Option<&str>) -> Result<
     team.map(parse_team).transpose()
 }
 
-pub fn teams(c: &Connection, ws: &str) -> Result<Vec<Team>> {
+pub(crate) fn teams_on(c: &Connection, ws: &str) -> Result<Vec<Team>> {
     let mut q =
         c.prepare("SELECT id,name,members FROM bot_teams WHERE workspace_id=? ORDER BY name,id")?;
     q.query_map([ws], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
@@ -90,7 +90,7 @@ pub fn owner(c: &Connection, ws: &str, user: &str) -> Result<bool> {
 
 /// The Bot's execution Nodes in this workspace, in priority order ([`DEFAULT_NODES`] until
 /// configured). An empty list runs nothing.
-pub fn bindings(c: &Connection, ws: &str, bot: &str) -> Result<Vec<String>> {
+pub(crate) fn bindings_on(c: &Connection, ws: &str, bot: &str) -> Result<Vec<String>> {
     let row: Option<String> = c
         .query_row(
             "SELECT nodes FROM bot_node_bindings WHERE workspace_id=? AND bot_id=?",
@@ -104,7 +104,7 @@ pub fn bindings(c: &Connection, ws: &str, bot: &str) -> Result<Vec<String>> {
     }
 }
 
-pub fn item_team(c: &Connection, item: &str) -> Result<Option<(Team, String)>> {
+pub(crate) fn item_team_on(c: &Connection, item: &str) -> Result<Option<(Team, String)>> {
     // Workflow children are created by their own repository. The parent's snapshot is their ceiling.
     let row: Option<(String, String)> = c
         .query_row(
@@ -150,9 +150,9 @@ pub enum Scope {
 
 /// A Team cannot turn a candidate into an authorization. The current bindings are always the
 /// ceiling.
-pub fn scope(c: &Connection, ws: &str, item: &str, bot: &str) -> Result<Scope> {
-    let bound = bindings(c, ws, bot)?;
-    let Some((team, _)) = item_team(c, item)? else {
+pub(crate) fn scope_on(c: &Connection, ws: &str, item: &str, bot: &str) -> Result<Scope> {
+    let bound = bindings_on(c, ws, bot)?;
+    let Some((team, _)) = item_team_on(c, item)? else {
         return Ok(Scope::Nodes(bound));
     };
     let Some(member) = team.member(bot) else {
@@ -180,7 +180,7 @@ pub fn decision(c: &Connection, item: &str, value: &Value) -> Result<()> {
     Ok(())
 }
 
-pub fn last_decision(c: &Connection, item: &str) -> Result<Option<Value>> {
+pub(crate) fn last_decision_on(c: &Connection, item: &str) -> Result<Option<Value>> {
     let row: Option<String> = c
         .query_row(
             "SELECT last_decision FROM item_dispatch WHERE item_id=? AND last_decision IS NOT NULL",
@@ -208,7 +208,7 @@ mod tests {
                     VALUES ('worker','one','Worker','fixture',0);
                 INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated)
                     VALUES ('ITEM-1','one',1,'Test','wait','test',0,0);")?;
-            assert_eq!(scope(tx, "one", "ITEM-1", "worker")?, Scope::Nodes(vec!["local".into()]));
+            assert_eq!(scope(w, "one", "ITEM-1", "worker")?, Scope::Nodes(vec!["local".into()]));
             let team = Team { id:"team".into(), name:"Preset".into(), members:vec![Member {
                 bot:"worker".into(), nodes:Some(vec!["a".into(),"b".into(),"candidate".into()]),
             }] };
@@ -218,17 +218,37 @@ mod tests {
             assert_eq!(selected(w, "one", None)?, Some(team.clone()));
             assert!(selected(w, "two", Some(&team.id)).is_err());
             snapshot(w, "ITEM-1", &team, "default")?;
-            assert_eq!(scope(tx, "one", "ITEM-1", "worker")?, Scope::Nodes(vec![]));
+            assert_eq!(scope(w, "one", "ITEM-1", "worker")?, Scope::Nodes(vec![]));
             tx.execute("INSERT INTO bot_node_bindings(workspace_id,bot_id,nodes)
                 VALUES ('one','worker','[\"b\",\"other\",\"a\"]')", [])?;
             tx.execute("DELETE FROM bot_team_defaults WHERE workspace_id='one'", [])?;
             tx.execute("UPDATE bot_teams SET name='New name',members='[]' WHERE id='team'", [])?;
-            assert_eq!(item_team(tx, "ITEM-1")?.unwrap().0, team);
-            assert_eq!(scope(tx,"one","ITEM-1","worker")?, Scope::Nodes(vec!["b".into(),"a".into()]));
-            assert_eq!(scope(tx,"one","ITEM-1","steve")?, Scope::OutsideTeam);
+            assert_eq!(item_team(w, "ITEM-1")?.unwrap().0, team);
+            assert_eq!(scope(w,"one","ITEM-1","worker")?, Scope::Nodes(vec!["b".into(),"a".into()]));
+            assert_eq!(scope(w,"one","ITEM-1","steve")?, Scope::OutsideTeam);
             tx.execute("UPDATE bot_node_bindings SET nodes='[\"a\"]'", [])?;
-            assert_eq!(scope(tx,"one","ITEM-1","worker")?, Scope::Nodes(vec!["a".into()]));
+            assert_eq!(scope(w,"one","ITEM-1","worker")?, Scope::Nodes(vec!["a".into()]));
             Ok::<_, StoreError>(())
         }).unwrap();
     }
+}
+
+pub fn teams(r: &mut impl crate::Read, ws: &str) -> Result<Vec<Team>> {
+    teams_on(r.connection(), ws)
+}
+
+pub fn bindings(r: &mut impl crate::Read, ws: &str, bot: &str) -> Result<Vec<String>> {
+    bindings_on(r.connection(), ws, bot)
+}
+
+pub fn scope(r: &mut impl crate::Read, ws: &str, item: &str, bot: &str) -> Result<Scope> {
+    scope_on(r.connection(), ws, item, bot)
+}
+
+pub fn item_team(r: &mut impl crate::Read, item: &str) -> Result<Option<(Team, String)>> {
+    item_team_on(r.connection(), item)
+}
+
+pub fn last_decision(r: &mut impl crate::Read, item: &str) -> Result<Option<Value>> {
+    last_decision_on(r.connection(), item)
 }

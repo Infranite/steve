@@ -478,7 +478,7 @@ pub fn count_revisions_by_object_count(store: &Store, object_id: &str) -> Result
 }
 
 pub fn default_persona_count(store: &Store, ws: &str) -> Result<i64> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok::<_, crate::StoreError>(c.query_row(
             "SELECT count(*) FROM personas WHERE workspace_id = ? AND is_default = 1",
             [ws],
@@ -488,7 +488,7 @@ pub fn default_persona_count(store: &Store, ws: &str) -> Result<i64> {
 }
 
 pub fn persona_revisions(store: &Store, persona: &str) -> Result<Vec<i64>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
             let mut st = c.prepare(
                 "SELECT version FROM revisions WHERE object_type = 'persona' AND object_id = ? ORDER BY id",
             )?;
@@ -500,7 +500,7 @@ pub fn persona_revisions(store: &Store, persona: &str) -> Result<Vec<i64>> {
 }
 
 pub fn xiaoli_contact(store: &Store, ws: &str) -> Result<String> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
             Ok::<_, crate::StoreError>(c.query_row(
                 "SELECT id FROM parties WHERE workspace_id = ? AND type = 'contact' AND name = '王小丽'",
                 [ws],
@@ -510,7 +510,7 @@ pub fn xiaoli_contact(store: &Store, ws: &str) -> Result<String> {
 }
 
 pub fn self_party(store: &Store, ws: &str, user: &str) -> Result<String> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok::<_, crate::StoreError>(c.query_row(
             "SELECT id FROM parties WHERE workspace_id = ? AND user_id = ?",
             [ws, user],

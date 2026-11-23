@@ -418,7 +418,7 @@ async fn people_join_contacts_you_already_have() {
         .await;
     assert_eq!(s, 200, "{b}");
     // 王芳 is already known through chat (an unconfirmed contact from identify)
-    let wang = fx.t.store().transaction(|tx| {
+    let wang = fx.t.store().write(|tx| {
         accounts::identify(
             tx,
             WS,

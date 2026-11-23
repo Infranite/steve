@@ -270,7 +270,7 @@ pub struct Compat {
 impl crate::Store {
     /// Schema compatibility stamps from the same snapshot of the opened database.
     pub fn schema_compat(&self) -> Result<Compat> {
-        self.reader(|c| crate::read_snapshot(c, compat))
+        self.sqlite_read(|c| crate::read_snapshot(c, compat))
     }
 }
 

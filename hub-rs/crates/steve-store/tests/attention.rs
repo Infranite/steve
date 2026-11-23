@@ -1,3 +1,4 @@
+use steve_store::testkit::SqliteFixtures;
 mod common;
 use common::*;
 use rusqlite::params;
@@ -5,7 +6,7 @@ use serde_json::json;
 use steve_store::{Result, WS, attention, feed};
 
 fn seed(t: &T) {
-    t.store.with_conn(|c| {
+    t.store.fixture_write(|c| {
         c.execute_batch("INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES('u','default','u','User','owner',1),('other','default','other','Other','member',1);
           INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES('default','u','owner',1),('default','other','member',1);")?;
         Ok(())
@@ -19,7 +20,7 @@ fn pending_cards_exact_parity_with_web_selector_fixture() {
     // Exact selector fixture: status alone never creates a card; wait makes ANY status eligible;
     // all waits per item (not one/item); orphan waits; effective snooze label; expired snooze;
     // archive; and ONLY confirm/mem excluded (ask/mem remains actionable).
-    t.store.with_conn(|c| {
+    t.store.fixture_write(|c| {
         for (n,id,status,arch,snooze) in [
             (1,"wait","wait",false,None), (2,"prop","prop",false,None),
             (3,"run","run",false,None), (4,"done","done",false,None),
@@ -53,7 +54,7 @@ fn pending_cards_exact_parity_with_web_selector_fixture() {
     }).unwrap();
     let got = t
         .store
-        .reader(|c| attention::pending(c, WS, "u", 100))
+        .read(|c| attention::pending(c, WS, "u", 100))
         .unwrap();
     let mut ids = got.into_iter().map(|e| e.id).collect::<Vec<_>>();
     ids.sort();
@@ -74,7 +75,7 @@ fn pending_cards_exact_parity_with_web_selector_fixture() {
     );
     assert!(
         t.store
-            .reader(|c| attention::pending(c, WS, "stranger", 100))
+            .read(|c| attention::pending(c, WS, "stranger", 100))
             .is_err()
     );
 }
@@ -119,7 +120,7 @@ fn feed_projection_reuses_personal_audience_reads_and_snapshot_pages() {
         .unwrap();
     let first = t
         .store
-        .transaction(|tx| attention::feed_page(tx, WS, "u", None, None, 100, 100))
+        .write(|tx| attention::feed_page(tx, WS, "u", None, None, 100, 100))
         .unwrap();
     assert_eq!(first.count, 206);
     assert!(first.snapshot.is_none());
@@ -128,7 +129,7 @@ fn feed_projection_reuses_personal_audience_reads_and_snapshot_pages() {
     let partial = first.next_cursor.as_ref().unwrap().clone();
     assert!(
         t.store
-            .transaction(|tx| attention::feed_page(tx, WS, "u", None, Some(&partial), 100, 100))
+            .write(|tx| attention::feed_page(tx, WS, "u", None, Some(&partial), 100, 100))
             .is_err()
     );
     let mut cursor = first.next_cursor;
@@ -137,7 +138,7 @@ fn feed_projection_reuses_personal_audience_reads_and_snapshot_pages() {
     loop {
         let p = t
             .store
-            .transaction(|tx| attention::feed_page(tx, WS, "u", cursor.as_deref(), None, 100, 100))
+            .write(|tx| attention::feed_page(tx, WS, "u", cursor.as_deref(), None, 100, 100))
             .unwrap();
         assert_eq!(p.count, 206);
         seen.extend(p.entries);
@@ -159,13 +160,13 @@ fn feed_projection_reuses_personal_audience_reads_and_snapshot_pages() {
     );
     let u = t
         .store
-        .transaction(|tx| attention::feed_page(tx, WS, "u", None, Some(&snapshot), 100, 100))
+        .write(|tx| attention::feed_page(tx, WS, "u", None, Some(&snapshot), 100, 100))
         .unwrap();
     assert!(u.unchanged);
     assert!(u.entries.is_empty());
     assert_eq!(
         t.store
-            .transaction(|tx| attention::feed_page(tx, WS, "other", None, None, 100, 100))
+            .write(|tx| attention::feed_page(tx, WS, "other", None, None, 100, 100))
             .unwrap()
             .count,
         205
@@ -177,13 +178,13 @@ fn feed_projection_reuses_personal_audience_reads_and_snapshot_pages() {
     ] {
         assert!(
             t.store
-                .transaction(|tx| attention::feed_page(tx, WS, user, None, Some(token), 100, time))
+                .write(|tx| attention::feed_page(tx, WS, user, None, Some(token), 100, time))
                 .is_err()
         );
     }
     assert!(
         t.store
-            .transaction(|tx| attention::page(
+            .write(|tx| attention::page(
                 tx,
                 WS,
                 "u",
@@ -198,24 +199,24 @@ fn feed_projection_reuses_personal_audience_reads_and_snapshot_pages() {
             .is_err()
     );
     t.store
-        .transaction(|tx| feed::read_ids(tx, WS, "u", std::slice::from_ref(&notice_entry), 200))
+        .write(|tx| feed::read_ids(tx, WS, "u", std::slice::from_ref(&notice_entry), 200))
         .unwrap();
     // Read changes invalidate an in-flight keyset traversal, never silently skip membership.
     assert!(
         t.store
-            .transaction(|tx| attention::feed_page(tx, WS, "u", Some(&partial), None, 100, 201))
+            .write(|tx| attention::feed_page(tx, WS, "u", Some(&partial), None, 100, 201))
             .is_err()
     );
     let p = t
         .store
-        .transaction(|tx| attention::feed_page(tx, WS, "u", None, Some(&snapshot), 100, 201))
+        .write(|tx| attention::feed_page(tx, WS, "u", None, Some(&snapshot), 100, 201))
         .unwrap();
     assert!(!p.unchanged);
     assert_eq!(p.count, 205);
     assert!(p.snapshot.is_none());
     // Existing Feed reads are authoritative; update/delete/membership transitions maintain index.
     t.store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             c.execute("DELETE FROM feed_reads WHERE entry_id=?", [&notice_entry])?;
             c.execute(
                 "UPDATE feed_entries SET source_id='changed' WHERE id=?",
@@ -226,12 +227,12 @@ fn feed_projection_reuses_personal_audience_reads_and_snapshot_pages() {
         .unwrap();
     let p = t
         .store
-        .transaction(|tx| attention::feed_page(tx, WS, "u", None, None, 100, 202))
+        .write(|tx| attention::feed_page(tx, WS, "u", None, None, 100, 202))
         .unwrap();
     assert_eq!(p.count, 206);
     assert_eq!(p.entries[0].source_id, "changed");
     t.store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             c.execute("DELETE FROM feed_entries WHERE id=?", [&notice_entry])?;
             c.execute("DELETE FROM workspace_members WHERE user_id='u'", [])?;
             Ok(())
@@ -239,11 +240,11 @@ fn feed_projection_reuses_personal_audience_reads_and_snapshot_pages() {
         .unwrap();
     assert!(
         t.store
-            .transaction(|tx| attention::feed_page(tx, WS, "u", None, None, 100, 202))
+            .write(|tx| attention::feed_page(tx, WS, "u", None, None, 100, 202))
             .is_err()
     );
     t.store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             c.execute(
                 "INSERT INTO workspace_members VALUES('default','u','owner',1)",
                 [],
@@ -253,7 +254,7 @@ fn feed_projection_reuses_personal_audience_reads_and_snapshot_pages() {
         .unwrap();
     assert_eq!(
         t.store
-            .transaction(|tx| attention::feed_page(tx, WS, "u", None, None, 100, 202))
+            .write(|tx| attention::feed_page(tx, WS, "u", None, None, 100, 202))
             .unwrap()
             .count,
         205
@@ -264,7 +265,7 @@ fn feed_projection_reuses_personal_audience_reads_and_snapshot_pages() {
 fn feed_pages_and_unchanged_are_bounded_after_large_read_history() {
     let t = fresh();
     seed(&t);
-    t.store.with_conn(|c| {
+    t.store.fixture_write(|c| {
         c.execute_batch("BEGIN;
           WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<20000)
           INSERT INTO feed_entries(id,workspace_id,audience,kind,source_type,source_key,source_id,run_id,node_id,content,result,published_at)
@@ -280,7 +281,7 @@ fn feed_pages_and_unchanged_are_bounded_after_large_read_history() {
     loop {
         let p = t
             .store
-            .transaction(|tx| attention::feed_page(tx, WS, "u", cursor.as_deref(), None, 100, 100))
+            .write(|tx| attention::feed_page(tx, WS, "u", cursor.as_deref(), None, 100, 100))
             .unwrap();
         assert_eq!(p.count, 251);
         assert!(p.entries.len() <= 100);
@@ -297,7 +298,7 @@ fn feed_pages_and_unchanged_are_bounded_after_large_read_history() {
     for _ in 0..100 {
         let p = t
             .store
-            .transaction(|tx| attention::feed_page(tx, WS, "u", None, Some(&snapshot), 100, 100))
+            .write(|tx| attention::feed_page(tx, WS, "u", None, Some(&snapshot), 100, 100))
             .unwrap();
         assert!(p.unchanged);
         assert!(p.entries.is_empty());
@@ -315,9 +316,7 @@ fn feed_pages_and_unchanged_are_bounded_after_large_read_history() {
     loop {
         let p = t
             .store
-            .transaction(|tx| {
-                attention::feed_page(tx, WS, "other", cursor.as_deref(), None, 100, 100)
-            })
+            .write(|tx| attention::feed_page(tx, WS, "other", cursor.as_deref(), None, 100, 100))
             .unwrap();
         assert_eq!(p.count, 20000);
         assert_eq!(p.entries.len(), 100);
@@ -335,7 +334,7 @@ fn feed_pages_and_unchanged_are_bounded_after_large_read_history() {
         "Feed scaling: 20,000 unread complete 200-page traversal {:?}",
         started.elapsed()
     );
-    t.store.reader(|c| -> Result<()> {
+    t.store.fixture_read(|c| -> Result<()> {
         let sql="SELECT e.id FROM attention_feed_unread u JOIN feed_entries e ON e.id=u.entry_id WHERE u.workspace_id=?1 AND u.user_id=?2 AND u.seq<?3 ORDER BY u.seq DESC LIMIT ?4";
         let mut st=c.prepare(sql)?;
         let ids=st.query_map(params![WS,"u",20001,100],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -377,9 +376,9 @@ fn migration_is_prospective_and_assigns_final_commit_not_timestamp_order() {
         })
         .unwrap();
     t.store
-        .transaction(|tx| feed::read_ids(tx, WS, "u", &entries[..1], 11))
+        .write(|tx| feed::read_ids(tx, WS, "u", &entries[..1], 11))
         .unwrap();
-    t.store.with_conn(|c| {
+    t.store.fixture_write(|c| {
     let triggers = c.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'attention_feed_%'")?.query_map([],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
     for trigger in triggers { c.execute_batch(&format!("DROP TRIGGER {trigger}"))?; }
     c.execute_batch("DROP TABLE attention_feed_unread; DROP TABLE attention_feed_scopes; DROP TRIGGER attention_final_reply; DROP TABLE attention_windows; DROP TABLE thread_reply_reads; DROP TABLE thread_reply_commits; DROP TABLE attention_meta;")?;

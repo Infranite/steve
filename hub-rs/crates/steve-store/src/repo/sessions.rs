@@ -186,7 +186,7 @@ impl Sessions<'_> {
 
     /// Sets the given fields and `updated`; an empty patch does nothing.
     pub fn patch(&self, id: &str, p: &SessionPatch) -> Result<()> {
-        self.0.atomic(|| {
+        self.0.write(|_| {
             self.0.write_conn(|w| {
                 let mut s = Sets::default();
                 s.val("status", p.status.clone())
@@ -244,7 +244,7 @@ impl Sessions<'_> {
     /// a fresh protocol; replaying this queue would give it obsolete Bot/session instructions.
     /// Also used to repair queues left on ended sessions by earlier builds.
     pub fn retire_queue(&self, id: &str) -> Result<()> {
-        self.0.atomic(|| {
+        self.0.write(|_| {
             if self.get(id)?.is_none_or(|s| s.status != "ended") {
                 return Err(crate::StoreError::Conflict("只能清理已结束会话的旧队列。".into()));
             }
@@ -422,19 +422,20 @@ impl Sessions<'_> {
     /// Deletes a session with its events and queue (system.ts `removeImported`, after its readonly check).
     pub fn remove(&self, id: &str) -> Result<()> {
         self.0.write_conn(|w| {
-            let tx = w.tx()?;
+            let transaction = w.tx()?;
+            let tx = transaction.connection();
             tx.run("DELETE FROM events WHERE session_id = ?", [id])?;
             tx.run("DELETE FROM queued WHERE session_id = ?", [id])?;
             // its view in shadow names other directories of the machine: it goes with it
             tx.run("DELETE FROM view_shadow WHERE session_id = ?", [id])?;
             let ws = one(
-                &tx,
+                tx,
                 "SELECT workspace_id FROM sessions WHERE id = ?",
                 [id],
                 |r| r.get::<_, String>(0),
             )?;
             tx.run("DELETE FROM sessions WHERE id = ?", [id])?;
-            tx.commit()?;
+            transaction.commit()?;
             if let Some(ws) = ws {
                 w.publish(steve_types::DomainEvent::from(
                     steve_types::WorkEvent::Session {
@@ -615,7 +616,7 @@ impl Events<'_> {
         let Some(_due) = still_due() else {
             return Ok(None);
         };
-        self.0.with_conn(|c| {
+        self.0.write_locked(|c| {
             c.execute(
                 "INSERT INTO session_compactions(session_id,upto,events,at) VALUES(?,?,?,?)
                  ON CONFLICT(session_id) DO UPDATE SET upto=max(upto,excluded.upto),

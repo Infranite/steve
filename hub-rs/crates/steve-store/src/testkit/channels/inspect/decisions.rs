@@ -508,7 +508,7 @@ pub fn yolo_action_decision_id_by_ya1(store: &Store) -> Result<String> {
 }
 
 pub fn status(store: &Store, decision: &str) -> Result<String> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok::<_, crate::StoreError>(c.query_row(
             "SELECT status FROM decisions WHERE id = ?",
             [decision],

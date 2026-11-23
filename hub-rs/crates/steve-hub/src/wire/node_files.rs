@@ -469,8 +469,8 @@ mod tests {
                 serde_json::to_value(&spec).unwrap(),
             );
             store
-                .transaction::<_, StoreError>(|tx| {
-                    create_job_in(
+                .write::<_, StoreError>(|tx| {
+                    steve_store::node_jobs::create_job_in(
                         tx,
                         &NewJob {
                             id: job,
@@ -529,8 +529,15 @@ mod tests {
         }
         // a finished attempt reads nothing anymore
         store
-            .transaction::<_, StoreError>(|tx| {
-                apply_attempt_in(tx, "a_1", AttemptState::Finished, None, None, 2)
+            .write::<_, StoreError>(|tx| {
+                steve_store::node_jobs::apply_attempt_in(
+                    tx,
+                    "a_1",
+                    AttemptState::Finished,
+                    None,
+                    None,
+                    2,
+                )
             })
             .unwrap();
         assert_eq!(

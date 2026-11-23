@@ -1447,8 +1447,8 @@ pub async fn system_outbox(State(st): State<AppState>, Extension(c): Extension<C
     let store = outbox_store(&st)?;
     let (stats, dead) = tokio::task::spawn_blocking(move || {
         Ok::<_, steve_store::StoreError>((
-            store.reader(steve_store::outbox::stats)?,
-            store.reader(steve_store::outbox::dead)?,
+            store.read(|r| steve_store::outbox::stats(r))?,
+            store.read(|r| steve_store::outbox::dead(r))?,
         ))
     })
     .await

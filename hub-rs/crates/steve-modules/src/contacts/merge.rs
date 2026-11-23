@@ -265,7 +265,7 @@ pub fn merge_tx(
         moved.hooks.insert(h.name().to_string(), v);
     }
 
-    svc::revise_in(
+    svc::revise(
         tx,
         &from,
         &PartyPatch {
@@ -469,7 +469,7 @@ pub fn split_tx(
 
     restore_links_and_attributes(tx, ws, &from, &into, mv)?;
 
-    svc::revise_in(
+    svc::revise(
         tx,
         &from,
         &PartyPatch {

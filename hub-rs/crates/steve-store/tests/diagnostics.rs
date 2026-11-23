@@ -1,3 +1,4 @@
+use steve_store::testkit::SqliteFixtures;
 mod common;
 
 use std::time::{Duration, Instant};
@@ -120,7 +121,7 @@ fn critical_facts_survive_reopen_and_details_obey_the_capture_window() {
     s.diagnostics()
         .record(record(&item, &session, "dependency.checked", true));
     assert_eq!(events(s, &item)["events"].as_array().unwrap().len(), 2);
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         Ok(c.execute(
             "UPDATE diagnostic_captures SET expires_at=? WHERE item_id=?",
             params![steve_store::now() - 1, item],
@@ -169,7 +170,7 @@ fn new_items_capture_immediately_without_reads_or_owner_activation() {
     assert_eq!(capture["started_at"], created);
     assert_eq!(capture["expires_at"], created + 30 * 60_000);
     let actor: String = s
-        .reader(|c| {
+        .fixture_read(|c| {
             Ok::<_, steve_store::StoreError>(c.query_row(
                 "SELECT actor FROM diagnostic_captures WHERE item_id=?",
                 [&item],
@@ -226,7 +227,7 @@ fn default_capture_does_not_restart_after_expiry_manual_stop_or_legacy_reads() {
         assert_eq!(stopped["capture"]["stop_reason"], "manual");
         assert_eq!(stopped["capture"]["expires_at"], original["expires_at"]);
     }
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         c.execute("UPDATE diagnostic_captures SET stop_reason=NULL,stopped_at=NULL,expires_at=? WHERE item_id=?",
             params![steve_store::now() - 1, item])?;
         Ok(())
@@ -238,7 +239,7 @@ fn default_capture_does_not_restart_after_expiry_manual_stop_or_legacy_reads() {
         assert_eq!(expired["capture"]["stop_reason"], "expired");
     }
     // A pre-upgrade item has no capture row; neither opening the Store nor reading creates one.
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         c.execute("DELETE FROM diagnostic_captures WHERE item_id=?", [&item])?;
         Ok(())
     })
@@ -259,7 +260,7 @@ fn stable_cursor_pages_do_not_skip_same_time_events_or_absorb_new_events() {
     }
     settled(s, &item);
     let at = steve_store::now() - 100;
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         Ok(c.execute(
             "UPDATE diagnostic_events SET at=? WHERE item_id=?",
             params![at, item],
@@ -280,7 +281,7 @@ fn stable_cursor_pages_do_not_skip_same_time_events_or_absorb_new_events() {
     s.diagnostics()
         .record(record(&item, &session, "turn.ended", false));
     settled(s, &item);
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         Ok(c.execute(
             "UPDATE diagnostic_events SET at=? WHERE item_id=?",
             params![at, item],
@@ -331,7 +332,7 @@ fn a_full_capture_stops_instead_of_continuously_evicting_and_recording_details()
         .record(record(&item, &session, "dependency.checked", true));
     settled(s, &item);
     // A full retained budget is a resource state; no large fixture or thousands of inserts needed.
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         c.execute(
             "UPDATE diagnostic_events SET bytes=? WHERE item_id=?",
             params![MAX_ITEM_BYTES, item],
@@ -363,7 +364,7 @@ fn a_manual_stop_preserves_observations_already_queued_before_its_cutoff() {
     let s = &t.store;
     s.diagnostics().capture(WS, &item, "owner", None).unwrap();
     // Hold the writer to deterministically place manual stop between enqueue and consumption.
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         assert_eq!(
             s.diagnostics()
                 .record(record(&item, &session, "dependency.checked", true)),
@@ -400,7 +401,7 @@ fn retention_reports_a_real_gap_and_does_not_delete_business_history() {
         .record(record(&item, &session, "turn.ended", false));
     let first = events(s, &item);
     let cursor = first["events"][0]["cursor"].as_i64().unwrap();
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         Ok(c.execute(
             "UPDATE diagnostic_events SET at=? WHERE item_id=?",
             params![steve_store::now() - 8 * 86_400_000, item],
@@ -425,7 +426,7 @@ fn retention_reports_a_real_gap_and_does_not_delete_business_history() {
 fn recording_under_the_writer_lock_never_reenters_it_and_scope_is_rechecked() {
     let (t, item, session) = setup();
     let s = &t.store;
-    s.with_conn(|_| {
+    s.fixture_write(|_| {
         let mut event = record(&item, &session, "turn.ended", false);
         event.workspace_id.clear();
         event.item_id = None;
@@ -534,7 +535,7 @@ fn card_transitions_record_only_committed_changes_without_copying_card_content()
         .unwrap();
     s.decisions().reopen(&d.id).unwrap();
     s.decisions().reopen(&d.id).unwrap();
-    let rolled_back: Result<(), steve_store::StoreError> = s.transaction(|tx| {
+    let rolled_back: Result<(), steve_store::StoreError> = s.write(|tx| {
         steve_store::decision_create_in(tx, &spec)?;
         Err(steve_store::StoreError::Conflict("rollback fixture".into()))
     });
@@ -556,7 +557,7 @@ fn card_transitions_record_only_committed_changes_without_copying_card_content()
 
     // Refuse diagnostic persistence on the worker's writer connection, without
     // breaking the business table or requiring a full disk to reproduce the failure.
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         c.execute_batch(
             "CREATE TEMP TRIGGER reject_diagnostic_insert BEFORE INSERT ON main.diagnostic_events
              BEGIN SELECT RAISE(ABORT, 'diagnostic write failure fixture'); END;",
@@ -590,7 +591,7 @@ fn card_transitions_record_only_committed_changes_without_copying_card_content()
             .to_string()
             .contains("private question after diagnostic failure")
     );
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         c.execute_batch("DROP TRIGGER reject_diagnostic_insert")?;
         Ok(())
     })

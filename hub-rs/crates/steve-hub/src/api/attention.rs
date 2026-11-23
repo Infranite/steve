@@ -51,7 +51,7 @@ async fn list(
         ));
     }
     m.blocking(move |m| {
-        m.store.transaction(|tx| -> ApiResult<_> {
+        m.store.write(|tx| -> ApiResult<_> {
             steve_store::feed::member(tx,&who.ws,&who.me).map_err(error)?;
             let viewer=steve_store::base::Viewer::bare(&who.ws,&who.me);
             let now=m.clock.now();
@@ -65,7 +65,7 @@ async fn list(
                 let (entries,upper)=match kind {
                     "replies"=>attention::replies(tx,&who.ws,&who.me).map_err(error)?,
                     "pending"=>(attention::pending(tx,&who.ws,&who.me,now).map_err(error)?,0),
-                    _=>(tx.write(|w| steve_channels::conversations::attention(w,&who.ws,&viewer,now))?,0),
+                    _=>(steve_channels::conversations::attention(tx,&who.ws,&viewer,now)?,0),
                 };
                 categories.push(attention::page(tx,&who.ws,&who.me,kind,entries,upper,q.cursor.as_deref(),q.if_snapshot.as_deref(),limit,now).map_err(error)?);
             }
@@ -82,7 +82,7 @@ async fn reply(
     m.blocking(move |m| {
         let (id, created) = m
             .store
-            .reader(|c| attention::reply(c, &who.ws, &who.me, &id))
+            .read(|c| attention::reply(c, &who.ws, &who.me, &id))
             .map_err(error)?;
         Ok(Json(json!({"id":id,"created":created})))
     })
@@ -102,7 +102,7 @@ async fn read(
     m.blocking(move |m| {
         let updated = m
             .store
-            .transaction(|tx| {
+            .write(|tx| {
                 attention::read_replies(
                     tx,
                     &who.ws,

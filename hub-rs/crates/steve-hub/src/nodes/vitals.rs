@@ -92,7 +92,7 @@ pub async fn sample_once(local: Option<&Arc<dyn Node>>, svc: Option<&Arc<NodeSer
 /// Warn once per low-disk episode on a remote Node. The Hub already watches its own disk.
 async fn warn_low_disks(store: Store, mut warned: HashSet<String>, low: u64) -> HashSet<String> {
     tokio::task::spawn_blocking(move || {
-        let Ok(nodes) = store.reader(steve_store::nodes::list_live) else {
+        let Ok(nodes) = store.read(|r| steve_store::nodes::list_live(r)) else {
             return warned;
         };
         let since = super::now() - 5 * 60 * 1000;
@@ -142,28 +142,26 @@ pub async fn get(
         store
             .read(|r| {
                 let tz = steve_stats::refresh::timezone(r, &caller.ws)?;
-                store.reader(|c| {
-                    let mut ids = BTreeSet::from(["local".to_string()]);
-                    ids.extend(
-                        steve_store::nodes::list_for_owner(c, &caller.me)?
-                            .into_iter()
-                            .filter(|node| node.state == "active" || node.state == "paused")
-                            .map(|node| node.node_id),
-                    );
-                    let now = super::now();
-                    let today = steve_stats::day::day(now, tz);
-                    let minute = now - 60_000;
-                    let minute_day = steve_stats::day::day(minute, tz);
-                    let tokens = steve_store::nodes::session_tokens(
-                        c,
-                        &caller.ws,
-                        &today,
-                        &minute_day,
-                        minute,
-                        now,
-                    )?;
-                    Ok::<_, steve_store::StoreError>((ids, now, tokens))
-                })
+                let mut ids = BTreeSet::from(["local".to_string()]);
+                ids.extend(
+                    steve_store::nodes::list_for_owner(r, &caller.me)?
+                        .into_iter()
+                        .filter(|node| node.state == "active" || node.state == "paused")
+                        .map(|node| node.node_id),
+                );
+                let now = super::now();
+                let today = steve_stats::day::day(now, tz);
+                let minute = now - 60_000;
+                let minute_day = steve_stats::day::day(minute, tz);
+                let tokens = steve_store::nodes::session_tokens(
+                    r,
+                    &caller.ws,
+                    &today,
+                    &minute_day,
+                    minute,
+                    now,
+                )?;
+                Ok::<_, steve_store::StoreError>((ids, now, tokens))
             })
             .map_err(|e| {
                 tracing::error!("vitals: {e}");

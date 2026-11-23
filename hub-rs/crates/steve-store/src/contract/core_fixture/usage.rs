@@ -103,7 +103,7 @@ pub fn model_audit(store: &Store, actor: &str) -> (Vec<Value>, i64) {
 
 pub fn reject_model_settings(store: &Store) {
     store
-        .with_conn(|c| {
+        .write_locked(|c| {
             c.execute_batch(
                 "CREATE TRIGGER reject_model_settings BEFORE INSERT ON settings
                          BEGIN SELECT RAISE(ABORT, 'test settings failure'); END;",

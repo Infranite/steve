@@ -236,7 +236,7 @@ async fn targets(st: &AppState, caller: Caller) -> Result<Vec<Target>, ApiError>
     if let Some(svc) = &st.nodes {
         let store = svc.store.clone();
         let rows = tokio::task::spawn_blocking(move || {
-            store.reader(|c| steve_store::nodes::list_for_owner(c, &caller.me))
+            store.read(|c| steve_store::nodes::list_for_owner(c, &caller.me))
         })
         .await
         .map_err(|_| ApiError::Json(500, "internal".into()))?

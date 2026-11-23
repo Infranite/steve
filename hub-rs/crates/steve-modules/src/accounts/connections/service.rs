@@ -2785,7 +2785,7 @@ mod due_contract_tests {
             let account = self
                 .env
                 .store()
-                .transaction(|tx| -> ApiResult<_> {
+                .write(|tx| -> ApiResult<_> {
                     let party = crate::contacts::service::ensure_self_org(tx, WS, ME)?;
                     Ok(crate::accounts::repo::insert(
                         tx,

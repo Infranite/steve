@@ -16,7 +16,7 @@ use steve_store::{R, Read, TagRows, Teams, W};
 
 use super::Ports;
 use super::repo::{NewParty, Party, PartyPatch};
-use super::service::{check_visibility, jobs_in, nullable, own_party_in, pref, revise_in, start};
+use super::service::{check_visibility, jobs_in, nullable, own_party_in, pref, revise, start};
 use crate::{ApiError, ApiResult, Caller, Check, Modules};
 use repo::Details;
 
@@ -615,7 +615,7 @@ pub fn patch_team(
             ..Default::default()
         };
         let fields: Vec<String> = after.keys().cloned().collect();
-        revise_in(
+        revise(
             tx,
             &p,
             &patch,
@@ -678,7 +678,7 @@ pub fn put_members(
         if was.is_empty() && now.is_empty() {
             return Ok(());
         }
-        revise_in(
+        revise(
             tx,
             &p,
             &PartyPatch::default(),
@@ -711,7 +711,7 @@ pub fn dissolve_team(m: &Modules, who: &Caller, id: &str) -> ApiResult<()> {
             status: Some("dissolved".into()),
             ..Default::default()
         };
-        revise_in(
+        revise(
             tx,
             &p,
             &patch,

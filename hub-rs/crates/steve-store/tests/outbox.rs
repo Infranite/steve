@@ -2,6 +2,7 @@
 //! deliveries (by time, or at once when rejected), one notice per consumer, revive, paused consumers
 //! keeping what they owe, registration rules, wake-ups, and delivery after a restart.
 
+use steve_store::testkit::SqliteFixtures;
 mod common;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -82,12 +83,12 @@ impl Consumer for Counter {
 }
 
 fn emit(s: &Store, ws: &str, n: i64) -> Event {
-    s.transaction(|tx| outbox::emit(tx, ws, TOPIC, 1, &json!({ "n": n })))
+    s.write(|tx| outbox::append(tx, ws, TOPIC, 1, &json!({ "n": n })))
         .unwrap()
 }
 
 fn one<T: rusqlite::types::FromSql>(s: &Store, sql: &str) -> T {
-    s.with_conn(|c| Ok(c.query_row(sql, [], |r| r.get(0))?))
+    s.fixture_write(|c| Ok(c.query_row(sql, [], |r| r.get(0))?))
         .unwrap()
 }
 
@@ -102,8 +103,8 @@ fn disp(cs: &[Arc<Counter>]) -> Dispatcher {
 #[test]
 fn only_committed_facts_exist() {
     let t = common::fresh();
-    let r: Result<(), StoreError> = t.store.transaction(|tx| {
-        outbox::emit(tx, "default", TOPIC, 1, &json!({}))?;
+    let r: Result<(), StoreError> = t.store.write(|tx| {
+        outbox::append(tx, "default", TOPIC, 1, &json!({}))?;
         Err(StoreError::NotFound("rolled back"))
     });
     assert!(r.is_err());
@@ -205,7 +206,7 @@ fn a_failing_apply_rolls_back_and_backs_off_until_it_has_failed_for_a_day() {
         0,
         "dead is not retried"
     );
-    let st = t.store.reader(outbox::stats).unwrap();
+    let st = t.store.read(|r| outbox::stats(r)).unwrap();
     assert_eq!((st.pending, st.dead), (1, 1));
     assert_eq!(
         common::prune_outbox(&t.store, i64::MAX / 2, 0).unwrap(),
@@ -281,7 +282,7 @@ fn dead_deliveries_are_noticed_once_per_consumer_and_workspace_until_revived() {
     let p = d.pump(&t.store, 2).unwrap();
     assert_eq!((p.dead, p.newly_dead.len()), (1, 0), "{p:?}");
     // the view: one group per consumer over every workspace
-    let dead = t.store.reader(outbox::dead).unwrap();
+    let dead = t.store.read(|r| outbox::dead(r)).unwrap();
     assert_eq!(dead.len(), 1);
     assert_eq!(
         (
@@ -300,7 +301,7 @@ fn dead_deliveries_are_noticed_once_per_consumer_and_workspace_until_revived() {
     // revived: delivered again once the cause is gone
     *a.fail.lock().unwrap() = None;
     assert_eq!(outbox::revive(&t.store, Some("a")).unwrap(), 5);
-    assert!(t.store.reader(outbox::dead).unwrap().is_empty());
+    assert!(t.store.read(|r| outbox::dead(r)).unwrap().is_empty());
     assert_eq!(d.pump(&t.store, 3).unwrap().done, 5);
     assert_eq!(a.n(), 5);
     // a new failure after the revive is a new episode: noticed again
@@ -334,7 +335,9 @@ fn a_paused_consumer_keeps_what_it_owes_through_prune() {
     let d = disp(&[a.clone(), b.clone()]);
     d.register(&t.store).unwrap();
     t.store
-        .with_conn(|c| Ok(c.execute("UPDATE outbox_consumers SET enabled = 0 WHERE id = 'b'", [])?))
+        .fixture_write(|c| {
+            Ok(c.execute("UPDATE outbox_consumers SET enabled = 0 WHERE id = 'b'", [])?)
+        })
         .unwrap();
     emit(&t.store, "default", 1);
     assert_eq!(d.pump(&t.store, 1).unwrap().done, 1, "only a");
@@ -343,9 +346,11 @@ fn a_paused_consumer_keeps_what_it_owes_through_prune() {
         0,
         "b still owes it"
     );
-    assert_eq!(t.store.reader(outbox::stats).unwrap().pending, 1);
+    assert_eq!(t.store.read(|r| outbox::stats(r)).unwrap().pending, 1);
     t.store
-        .with_conn(|c| Ok(c.execute("UPDATE outbox_consumers SET enabled = 1 WHERE id = 'b'", [])?))
+        .fixture_write(|c| {
+            Ok(c.execute("UPDATE outbox_consumers SET enabled = 1 WHERE id = 'b'", [])?)
+        })
         .unwrap();
     assert_eq!(d.pump(&t.store, 2).unwrap().done, 1);
     assert_eq!(b.n(), 1);
@@ -406,8 +411,9 @@ async fn a_commit_that_emitted_wakes_the_dispatcher() {
     let t = common::fresh();
     let wake = t.store.outbox_wake();
     t.store
-        .transaction(|tx| -> Result<(), StoreError> {
-            tx.execute("UPDATE workspaces SET name = name", [])?;
+        .write(|tx| -> Result<(), StoreError> {
+            steve_store::testkit::sqlite_writer(tx)
+                .execute("UPDATE workspaces SET name = name", [])?;
             Ok(())
         })
         .unwrap();
@@ -446,7 +452,7 @@ fn an_idle_pass_takes_no_write_lock() {
     let (tx, rx) = std::sync::mpsc::channel();
     let held = std::thread::spawn(move || {
         store
-            .with_conn(|_| {
+            .fixture_write(|_| {
                 tx.send(()).unwrap();
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 Ok(())
@@ -472,9 +478,9 @@ fn prune_removes_more_than_one_batch() {
     d.register(&t.store).unwrap();
     // more than one prune batch (500), delivered, and one still owed at the end
     t.store
-        .transaction(|tx| {
+        .write(|tx| {
             for i in 0..1201 {
-                outbox::emit(tx, "default", TOPIC, 1, &json!({ "i": i }))?;
+                outbox::append(tx, "default", TOPIC, 1, &json!({ "i": i }))?;
             }
             Ok::<_, StoreError>(())
         })

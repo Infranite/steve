@@ -31,7 +31,7 @@ pub mod pragma_foreign_key_check;
 pub mod vault_items;
 
 fn cell<T: FromSql, const N: usize>(store: &Store, sql: &str, args: [&str; N]) -> Result<T> {
-    store.reader(|c| Ok(c.query_row(sql, params_from_iter(args), |row| row.get(0))?))
+    store.sqlite_read(|c| Ok(c.query_row(sql, params_from_iter(args), |row| row.get(0))?))
 }
 
 fn read_cell(row: &Row<'_>, index: usize) -> rusqlite::Result<Value> {
@@ -44,11 +44,11 @@ fn read_cell(row: &Row<'_>, index: usize) -> rusqlite::Result<Value> {
 }
 
 fn json_cell<const N: usize>(store: &Store, sql: &str, args: [&str; N]) -> Result<Value> {
-    store.reader(|c| Ok(c.query_row(sql, params_from_iter(args), |row| read_cell(row, 0))?))
+    store.sqlite_read(|c| Ok(c.query_row(sql, params_from_iter(args), |row| read_cell(row, 0))?))
 }
 
 fn row<const N: usize>(store: &Store, sql: &str, args: [&str; N]) -> Result<Vec<Value>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         let mut statement = c.prepare(sql)?;
         let columns = statement.column_count();
         Ok(statement.query_row(params_from_iter(args), |row| {
@@ -58,7 +58,7 @@ fn row<const N: usize>(store: &Store, sql: &str, args: [&str; N]) -> Result<Vec<
 }
 
 fn rows<const N: usize>(store: &Store, sql: &str, args: [&str; N]) -> Result<Vec<Vec<Value>>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         let mut statement = c.prepare(sql)?;
         let columns = statement.column_count();
         Ok(statement
@@ -70,7 +70,7 @@ fn rows<const N: usize>(store: &Store, sql: &str, args: [&str; N]) -> Result<Vec
 }
 
 fn texts<const N: usize>(store: &Store, sql: &str, args: [&str; N]) -> Result<Vec<String>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         let mut statement = c.prepare(sql)?;
         Ok(statement
             .query_map(params_from_iter(args), |row| row.get(0))?

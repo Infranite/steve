@@ -416,7 +416,7 @@ pub fn member_count(store: &Store, space: &str) -> Result<i64> {
 }
 
 pub fn latest_revision_patch(store: &Store, space: &str) -> Result<String> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
             Ok::<_, crate::StoreError>(c.query_row(
                 "SELECT patch FROM revisions WHERE object_type = 'space' AND object_id = ? ORDER BY id DESC LIMIT 1",
                 [space],
@@ -451,7 +451,7 @@ pub fn count_by_external(store: &Store, chat: &str) -> Result<i64> {
 }
 
 pub fn conversation_history(store: &Store, space: &str) -> Result<(String, String)> {
-    store.reader(|c| Ok(c.query_row(
+    store.sqlite_read(|c| Ok(c.query_row(
         "SELECT s.status, m.text FROM spaces s JOIN messages m ON m.space='chan:' || s.id WHERE s.id=?",
         [space], |r| Ok((r.get(0)?, r.get(1)?))
     )?))

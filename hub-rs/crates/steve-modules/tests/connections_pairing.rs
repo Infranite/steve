@@ -172,7 +172,7 @@ fn me_party(h: &H) -> String {
 fn seen_by_a_channel(h: &H, system: &str, handle: &str) -> String {
     h.env
         .store()
-        .transaction(|tx| identify(tx, WS, ME, system, handle, &Hints::default()))
+        .write(|tx| identify(tx, WS, ME, system, handle, &Hints::default()))
         .expect("identify")
         .party_id
 }

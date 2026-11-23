@@ -49,8 +49,8 @@ pub fn set_workflow_gate(store: &Store, gate: WorkflowGate, enabled: bool) -> Re
             "UPDATE sessions SET status='active' WHERE id='work'"
         }
     };
-    store.transaction(|tx| {
-        tx.execute_batch(sql)?;
+    store.write(|tx| {
+        tx.conn.execute_batch(sql)?;
         Ok(())
     })
 }
@@ -70,13 +70,13 @@ pub fn set_principal_gate(
     enabled: bool,
 ) -> Result<()> {
     let user = if enabled { "other" } else { "requester" };
-    store.transaction(|tx| {
+    store.write(|tx| {
         match gate {
-            PrincipalGate::Requester => tx.execute("UPDATE items SET requested_by=? WHERE id=?", [user, item])?,
-            PrincipalGate::Principal => tx.execute("UPDATE runtime_sessions SET principal=?", [user])?,
-            PrincipalGate::DisabledBot => tx.execute("UPDATE bots SET enabled=? WHERE id='writer'", [!enabled])?,
-            PrincipalGate::Membership if enabled => tx.execute("DELETE FROM workspace_members WHERE user_id='requester'", [])?,
-            PrincipalGate::Membership => tx.execute("INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','requester','member',1)", [])?,
+            PrincipalGate::Requester => tx.conn.execute("UPDATE items SET requested_by=? WHERE id=?", [user, item])?,
+            PrincipalGate::Principal => tx.conn.execute("UPDATE runtime_sessions SET principal=?", [user])?,
+            PrincipalGate::DisabledBot => tx.conn.execute("UPDATE bots SET enabled=? WHERE id='writer'", [!enabled])?,
+            PrincipalGate::Membership if enabled => tx.conn.execute("DELETE FROM workspace_members WHERE user_id='requester'", [])?,
+            PrincipalGate::Membership => tx.conn.execute("INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','requester','member',1)", [])?,
         };
         Ok(())
     })
@@ -103,28 +103,28 @@ pub fn seed_session_refusal(store: &Store, case: RefusalCase) -> Result<()> {
         RefusalCase::DetachedItem => "UPDATE sessions SET item_id=NULL",
         RefusalCase::ReadOnly => "UPDATE sessions SET readonly=1",
     };
-    store.transaction(|tx| {
-        tx.execute_batch(sql)?;
+    store.write(|tx| {
+        tx.conn.execute_batch(sql)?;
         Ok(())
     })
 }
 
 pub fn seed_open_permission(store: &Store) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute("INSERT INTO decisions(id,workspace_id,kind,subject_type,subject_id,session_id,question,status,requested_by,created)
+    store.write(|tx| {
+        tx.conn.execute("INSERT INTO decisions(id,workspace_id,kind,subject_type,subject_id,session_id,question,status,requested_by,created)
                      VALUES('d1','w','permission','session','s1','s1','?','open','agent',0)", [])?;
         Ok(())
     })
 }
 
 pub fn seed_remote_open_session(store: &Store, request: &serde_json::Value) -> Result<()> {
-    store.transaction::<_, crate::StoreError>(|tx| {
-                tx.execute(
+    store.write::<_, crate::StoreError>(|tx| {
+                tx.conn.execute(
                     "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('s1','default','claude-code','.','active',1,1)",
                     [],
                 )?;
                 crate::runtime::bind_session_in(
-                    tx,
+                    tx.conn,
                     &crate::runtime::SessionBinding {
                         session: "s1",
                         node: "n2",
@@ -135,7 +135,7 @@ pub fn seed_remote_open_session(store: &Store, request: &serde_json::Value) -> R
                     1,
                 )?;
                 crate::runtime::insert_command_in(
-                    tx,
+                    tx.conn,
                     &crate::runtime::NewCommand {
                         operation: "open_s1",
                         node: "n2",
@@ -147,22 +147,27 @@ pub fn seed_remote_open_session(store: &Store, request: &serde_json::Value) -> R
                     },
                     1,
                 )?;
-                tx.execute_batch(
-                    r#"UPDATE node_commands SET state='finished',receipt='{"success":true}' WHERE operation_id='open_s1';
-                       UPDATE runtime_sessions SET phase='ready' WHERE session_id='s1';"#,
+                crate::node_write::merge_receipt_in(
+                    tx,
+                    "open_s1",
+                    crate::runtime::ReceiptState::Finished,
+                    true,
+                    &serde_json::json!({}),
+                    2,
                 )?;
+                tx.conn.execute("UPDATE runtime_sessions SET phase='ready' WHERE session_id='s1'", [])?;
                 Ok(())
             })
 }
 
 pub fn seed_local_binding(store: &Store) -> Result<()> {
-    store.transaction::<_, crate::StoreError>(|tx| {
-                tx.execute(
+    store.write::<_, crate::StoreError>(|tx| {
+                tx.conn.execute(
                     "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('s1','default','claude-code','.','active',1,1)",
                     [],
                 )?;
                 crate::runtime::bind_session_in(
-                    tx,
+                    tx.conn,
                     &crate::runtime::SessionBinding {
                         session: "s1",
                         node: "local",

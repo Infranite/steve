@@ -45,14 +45,14 @@ async fn committed_batches_share_rev_and_rollback_does_not_allocate_one() {
     let mut rx = bus.subscribe();
     let start = bus.cursor();
     store
-        .transaction(|tx| {
-            tx.publish(item("first"));
-            store.atomic(|| {
+        .write(|tx| {
+            tx.emit(item("first"));
+            store.write(|_| {
                 store.publish(item("nested"));
                 Ok::<_, StoreError>(())
             })?;
-            tx.publish(thinking());
-            tx.publish(item("third"));
+            tx.emit(thinking());
+            tx.emit(item("third"));
             Ok::<_, StoreError>(())
         })
         .unwrap();
@@ -62,14 +62,14 @@ async fn committed_batches_share_rev_and_rollback_does_not_allocate_one() {
     }
     assert_eq!(next(&mut rx).await.1["rev"], 1);
     assert_eq!(next(&mut rx).await.1["rev"], 1);
-    let rolled_back: Result<(), StoreError> = store.transaction(|tx| {
-        tx.publish(item("rolled-back"));
+    let rolled_back: Result<(), StoreError> = store.write(|tx| {
+        tx.emit(item("rolled-back"));
         Err(StoreError::NotFound("test".into()))
     });
     assert!(rolled_back.is_err());
     store
-        .transaction(|tx| {
-            tx.publish(item("second"));
+        .write(|tx| {
+            tx.emit(item("second"));
             Ok::<_, StoreError>(())
         })
         .unwrap();

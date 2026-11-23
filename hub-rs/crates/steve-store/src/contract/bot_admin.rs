@@ -5,22 +5,27 @@ use sea_query::{Expr, ExprTrait, JoinType, OnConflict, Query};
 use crate::{Read, Result, W, bot_dispatch::Member};
 
 pub fn selectable(r: &mut impl Read, ws: &str, bot: &str, binding: bool) -> Result<bool> {
+    let member = Expr::col(("w", "bot_id")).is_not_null();
+    let main = Expr::col(("b", "main"));
     let eligible = if binding {
-        Expr::col(("b", "enabled")).eq(true)
+        Expr::col(("b", "enabled"))
+            .eq(true)
+            .and(main.eq(true).or(member))
     } else {
-        Expr::col(("b", "main")).eq(false)
+        main.eq(false).and(member)
     };
     Ok(r.one(
         Query::select()
             .column(("b", "id"))
             .from_as("bots", "b")
             .join_as(
-                JoinType::InnerJoin,
+                JoinType::LeftJoin,
                 "bot_workspaces",
                 "w",
-                Expr::col(("w", "bot_id")).eq(Expr::col(("b", "id"))),
+                Expr::col(("w", "bot_id"))
+                    .eq(Expr::col(("b", "id")))
+                    .and(Expr::col(("w", "workspace_id")).eq(ws)),
             )
-            .and_where(Expr::col(("w", "workspace_id")).eq(ws))
             .and_where(Expr::col(("b", "id")).eq(bot))
             .and_where(Expr::col(("b", "deleted")).eq(false))
             .and_where(eligible),

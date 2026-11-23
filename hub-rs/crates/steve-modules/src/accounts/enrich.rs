@@ -27,7 +27,7 @@ use super::repo::{self, AccountPatch};
 use super::service::{self as svc, Record, account_event, own_system, party_changed};
 use crate::contacts::PartyHooks;
 use crate::contacts::repo::{NewParty, PARTY, Party, PartyPatch};
-use crate::contacts::service::ensure_self_org_in;
+use crate::contacts::service::ensure_self_org;
 use crate::{ApiError, ApiResult};
 
 /// The accounts system of organization keys (Feishu `tenant_key`).
@@ -120,7 +120,7 @@ fn revise(
 ) -> ApiResult<()> {
     let mut after = after;
     after.insert("source".into(), json!("sync"));
-    crate::contacts::service::revise_in(
+    crate::contacts::service::revise(
         tx,
         p,
         patch,
@@ -529,7 +529,7 @@ pub fn tenant_org(tx: &mut W<'_>, ws: &str, actor: &str, t: &TenantHint) -> ApiR
         return Ok(p.id);
     }
     let org = if t.own {
-        let o = ensure_self_org_in(tx, ws, actor)?;
+        let o = ensure_self_org(tx, ws, actor)?;
         if let Some(n) = &name
             && o.name != *n
             && placeholder(tx, ws, &o)?

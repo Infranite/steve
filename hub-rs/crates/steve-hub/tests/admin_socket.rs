@@ -294,7 +294,7 @@ async fn token_list_finishes_during_back_to_back_in_process_write_transactions()
         let mut count = 0;
         while !done.load(Ordering::SeqCst) {
             writer
-                .transaction(|_| {
+                .write(|_| {
                     writer.audit(
                         "test",
                         "admin.pressure",
@@ -472,7 +472,7 @@ async fn a_pinned_writer_blocks_create_but_not_online_list_and_create_runs_after
     let (release, resume) = mpsc::sync_channel(1);
     let held = std::thread::spawn(move || {
         writer
-            .transaction(|_| {
+            .write(|_| {
                 ready.send(()).unwrap();
                 resume.recv().unwrap();
                 Ok::<_, steve_store::StoreError>(())

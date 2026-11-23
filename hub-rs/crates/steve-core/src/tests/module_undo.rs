@@ -62,7 +62,7 @@ async fn a_merge_answered_through_dispatch_is_split_by_undo_decision() {
     let got = m
         .store
         .write(|w| {
-            steve_modules::accounts::identify::identify_handle(
+            steve_modules::accounts::identify::identify(
                 w,
                 WS,
                 ME,

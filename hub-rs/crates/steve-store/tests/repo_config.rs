@@ -1,6 +1,7 @@
 #![allow(clippy::unit_arg, clippy::cloned_ref_to_slice_refs)] // terse assertions in tests
 //! Workspaces, users, auth, settings, counters, bots, memories, projects, tags, devices, links.
 
+use steve_store::testkit::SqliteFixtures;
 mod common;
 
 use common::*;
@@ -91,7 +92,7 @@ fn helpers() {
 fn ensure_workspace_renames_and_carries_counter() {
     let t = fresh();
     let s = &t.store;
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         c.execute_batch("UPDATE workspaces SET name = '默认工作空间'; INSERT INTO counters VALUES ('default', 'item', 5), ('*', 'item:ST', 9);")?;
         Ok(())
     })
@@ -111,7 +112,7 @@ fn ensure_workspace_renames_and_carries_counter() {
         9,
         "carry-over keeps the larger value"
     );
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         Ok(assert_eq!(
             count(
                 c,
@@ -217,7 +218,7 @@ fn workspaces_users_auth() {
     s.auth_sessions().create(&me, "old", -1).unwrap();
     assert_eq!(s.auth_sessions().user("tok").unwrap().unwrap().id, me);
     assert!(s.auth_sessions().user("old").unwrap().is_none(), "expired");
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         Ok(assert_eq!(
             count(
                 c,
@@ -235,7 +236,7 @@ fn workspaces_users_auth() {
 
     s.audit("me", "user.create", &me, &json!({"role": "owner"}), WS)
         .unwrap();
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         Ok(assert_eq!(
             count(
                 c,
@@ -284,7 +285,7 @@ fn settings() {
         serde_json::to_value(s.settings().all(WS).unwrap()).unwrap(),
         json!({"archDays": "7", "handoff": {"a": 1}})
     );
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         c.execute("INSERT INTO settings VALUES ('default', 'bad', 'not json', 0)", [])?;
         Ok(assert_eq!(count(c, r#"SELECT count(*) FROM revisions WHERE object_type = 'settings' AND patch = '{"archDays":"7","handoff":{"a":1}}' AND version = 0"#), 1))
     })
@@ -355,7 +356,7 @@ fn bots_seed_create_patch() {
             })
         )]
     );
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         Ok(assert_eq!(
             count(
                 c,
@@ -399,7 +400,7 @@ fn bots_seed_create_patch() {
             })
         )]
     );
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         let (v, patch): (i64, String) = c.query_row("SELECT version, patch FROM revisions WHERE object_type = 'bot'", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
         assert_eq!(v, 2);
         assert_eq!(patch, r#"{"before":{"name":"Dev","model":null,"enabled":true},"after":{"name":"开发","model":null,"enabled":false}}"#);
@@ -428,7 +429,7 @@ fn bots_seed_create_patch() {
         "usr_none",
     );
     assert!(w2.is_err(), "membership needs a real user (foreign key)");
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         Ok(c.execute(
             "INSERT INTO workspaces (id, name, created) VALUES ('w2', 'B', 1)",
             [],
@@ -607,7 +608,7 @@ fn projects() {
     assert!(q.release.is_none() && q.archived);
     assert!(s.projects().list(WS, false).unwrap().is_empty());
     assert_eq!(s.projects().list(WS, true).unwrap().len(), 1);
-    s.with_conn(|c| Ok(assert_eq!(count(c, r#"SELECT count(*) FROM revisions WHERE object_type = 'project' AND patch = '{"release":null,"archived":true}'"#), 1))).unwrap();
+    s.fixture_write(|c| Ok(assert_eq!(count(c, r#"SELECT count(*) FROM revisions WHERE object_type = 'project' AND patch = '{"release":null,"archived":true}'"#), 1))).unwrap();
     assert_eq!(
         s.projects()
             .patch("prj_x", &ProjectPatch::default(), "me")

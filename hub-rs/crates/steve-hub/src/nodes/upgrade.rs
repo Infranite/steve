@@ -278,7 +278,7 @@ impl Upgrades {
         };
         let store = self.store.clone();
         let inserted = tokio::task::spawn_blocking(move || {
-            store.transaction(|tx| store_nodes::upgrade_insert(tx, &row))
+            store.write(|tx| store_nodes::upgrade_insert(tx, &row))
         })
         .await
         .map_err(|e| e.to_string())?
@@ -299,7 +299,7 @@ impl Upgrades {
     pub async fn switch_now(&self, node: &str) -> Result<String, String> {
         let (store, node2) = (self.store.clone(), node.to_string());
         let open = tokio::task::spawn_blocking(move || {
-            store.transaction(|tx| {
+            store.write(|tx| {
                 let Some(row) = store_nodes::upgrade_latest(tx, &node2)? else {
                     return Ok(Err("not_upgrading"));
                 };
@@ -328,7 +328,7 @@ impl Upgrades {
 
     async fn row(&self, op: &str) -> Option<UpgradeRow> {
         let (store, op) = (self.store.clone(), op.to_string());
-        tokio::task::spawn_blocking(move || store.reader(|c| store_nodes::upgrade_get(c, &op)))
+        tokio::task::spawn_blocking(move || store.read(|c| store_nodes::upgrade_get(c, &op)))
             .await
             .ok()?
             .ok()?
@@ -337,9 +337,7 @@ impl Upgrades {
     async fn phase(&self, op: &str, phase: &str, error: Option<String>) {
         let (store, op2, phase2) = (self.store.clone(), op.to_string(), phase.to_string());
         let r = tokio::task::spawn_blocking(move || {
-            store.transaction(|tx| {
-                store_nodes::upgrade_phase(tx, &op2, &phase2, error.as_deref(), now())
-            })
+            store.write(|tx| store_nodes::upgrade_phase(tx, &op2, &phase2, error.as_deref(), now()))
         })
         .await;
         if !matches!(r, Ok(Ok(_))) {
@@ -365,7 +363,7 @@ impl Upgrades {
         }
         let (store, node) = (self.store.clone(), node.to_string());
         tokio::task::spawn_blocking(move || {
-            store.reader(|c| steve_store::runtime::session_room(c, &node))
+            store.read(|c| steve_store::runtime::session_room(c, &node))
         })
         .await
         .ok()
@@ -602,11 +600,12 @@ impl Upgrades {
     /// Settles upgrades a Hub restart left unfinished, from the Node's own state.
     pub async fn settle_open(self: &Arc<Self>) {
         let store = self.store.clone();
-        let open = tokio::task::spawn_blocking(move || store.reader(store_nodes::upgrades_open))
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or_default();
+        let open =
+            tokio::task::spawn_blocking(move || store.read(|r| store_nodes::upgrades_open(r)))
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or_default();
         for row in open {
             let me = self.clone();
             tokio::spawn(async move { me.settle(row).await });
@@ -667,7 +666,7 @@ impl Upgrades {
         let Some(hub) = self.hub.clone() else { return };
         let store = self.store.clone();
         let rows = tokio::task::spawn_blocking(move || {
-            store.reader(|c| {
+            store.read(|c| {
                 let default = store_nodes::upgrade_default(c)?;
                 store_nodes::list_live(c)?
                     .into_iter()
@@ -810,7 +809,7 @@ pub fn read_chunk(
     use std::io::{Read, Seek, SeekFrom};
     let denied = || ApiError::new(ErrorCode::Denied, "artifact not granted to this operation");
     let row = store
-        .reader(|c| store_nodes::upgrade_get(c, operation.as_str()))
+        .read(|c| store_nodes::upgrade_get(c, operation.as_str()))
         .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?
         .ok_or_else(denied)?;
     let path = PathBuf::from(&row.file);
@@ -892,7 +891,7 @@ pub async fn start(
     };
     let (store, me, node) = (svc.store.clone(), caller.me.clone(), id.clone());
     let mine = tokio::task::spawn_blocking(move || {
-        store.reader(|c| store_nodes::get(c, &node)).ok().flatten()
+        store.read(|c| store_nodes::get(c, &node)).ok().flatten()
     })
     .await
     .ok()
@@ -932,7 +931,8 @@ pub async fn switch_now(
 /// (`drain_secs`, `health_secs`).
 pub async fn get_default(State(svc): State<Arc<NodeService>>, _caller: Caller) -> Response {
     let store = svc.store.clone();
-    match tokio::task::spawn_blocking(move || store.reader(store_nodes::upgrade_default)).await {
+    match tokio::task::spawn_blocking(move || store.read(|r| store_nodes::upgrade_default(r))).await
+    {
         Ok(Ok(p)) => {
             let up = svc.upgrades.get();
             json_response(
@@ -967,7 +967,7 @@ pub async fn put_default(
     let store = svc.store.clone();
     let p = b.policy.clone();
     match tokio::task::spawn_blocking(move || {
-        store.transaction(|tx| store_nodes::set_upgrade_default(tx, &p, now()))
+        store.write(|tx| store_nodes::set_upgrade_default(tx, &p, now()))
     })
     .await
     {
@@ -1212,7 +1212,7 @@ mod tests {
         f.up.look("n_a").await.unwrap();
         let row = f
             .store
-            .reader(|db| store_nodes::get(db, "n_a"))
+            .read(|db| store_nodes::get(db, "n_a"))
             .unwrap()
             .unwrap();
         let view = f.up.view(&row, "notify", None);
@@ -1395,7 +1395,7 @@ mod tests {
         f.up.look("n_a").await.unwrap();
         let row = f
             .store
-            .reader(|db| store_nodes::get(db, "n_a"))
+            .read(|db| store_nodes::get(db, "n_a"))
             .unwrap()
             .unwrap();
         let view = f.up.view(&row, "notify", None);
@@ -1433,13 +1433,13 @@ mod tests {
         f.up.sweep().await;
         assert!(f.node.staged_upgrades().is_empty());
         f.store
-            .transaction(|tx| store_nodes::set_upgrade_default(tx, "auto", 1))
+            .write(|tx| store_nodes::set_upgrade_default(tx, "auto", 1))
             .unwrap();
         f.node.set_upgrade_outcome("rolled_back", Some("no link"));
         f.up.sweep().await;
         let first = f
             .store
-            .reader(|c| store_nodes::upgrade_latest(c, "n_a"))
+            .read(|c| store_nodes::upgrade_latest(c, "n_a"))
             .unwrap()
             .unwrap();
         ended(&f, &first.operation_id).await;
@@ -1451,17 +1451,17 @@ mod tests {
         );
         // a node's own policy wins over the hub's
         f.store
-            .transaction(|tx| store_nodes::set_upgrade_policy(tx, "n_a", "u", Some("off")))
+            .write(|tx| store_nodes::set_upgrade_policy(tx, "n_a", "u", Some("off")))
             .unwrap();
         let row = f
             .store
-            .reader(|c| store_nodes::get(c, "n_a"))
+            .read(|c| store_nodes::get(c, "n_a"))
             .unwrap()
             .unwrap();
         assert_eq!(row.upgrade_policy.as_deref(), Some("off"));
         assert!(
             !f.store
-                .transaction(|tx| store_nodes::set_upgrade_policy(tx, "n_a", "u", Some("always")))
+                .write(|tx| store_nodes::set_upgrade_policy(tx, "n_a", "u", Some("always")))
                 .unwrap()
         );
     }
@@ -1492,7 +1492,7 @@ mod tests {
             updated: 1,
         };
         f.store
-            .transaction(|tx| store_nodes::upgrade_insert(tx, &row))
+            .write(|tx| store_nodes::upgrade_insert(tx, &row))
             .unwrap();
         let (n, op, id) = (
             NodeId::new("n_a").unwrap(),
@@ -1511,7 +1511,7 @@ mod tests {
         let wrong_op = OperationId::new("nup_y").unwrap();
         assert!(read_chunk(&f.store, &f.data, &n, &wrong_op, &id, 0, 4).is_err());
         f.store
-            .transaction(|tx| store_nodes::upgrade_phase(tx, "nup_x", "staged", None, 2))
+            .write(|tx| store_nodes::upgrade_phase(tx, "nup_x", "staged", None, 2))
             .unwrap();
         assert_eq!(
             read_chunk(&f.store, &f.data, &n, &op, &id, 0, 4)

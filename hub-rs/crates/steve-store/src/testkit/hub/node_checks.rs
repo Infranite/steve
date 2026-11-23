@@ -5,7 +5,7 @@ use crate::{Result, Store};
 macro_rules! scalar {
     ($name:ident($($arg:ident: $ty:ty),* $(,)?) -> $ret:ty, $sql:literal $(,)?) => {
         pub fn $name(store: &Store, $($arg: $ty),*) -> Result<$ret> {
-            store.reader(|db| Ok(db.query_row($sql, rusqlite::params![$($arg),*], |row| row.get(0))?))
+            store.sqlite_read(|db| Ok(db.query_row($sql, rusqlite::params![$($arg),*], |row| row.get(0))?))
         }
     };
 }
@@ -713,7 +713,7 @@ scalar!(usage_reports_count() -> i64, "SELECT COUNT(*) FROM usage_reports");
 use crate::StoreError;
 
 pub fn pairing_storage_values(store: &Store) -> Result<Vec<String>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         let mut out = vec![];
         for t in ["nodes", "node_pairings", "node_audit"] {
             let mut st = c.prepare(&format!("SELECT * FROM {t}"))?;
@@ -755,7 +755,7 @@ scalar!(
 );
 
 pub fn usage_token_totals(store: &Store) -> Result<[Option<i64>; 4]> {
-    store.reader(|db| {
+    store.sqlite_read(|db| {
         Ok(db.query_row(
             "SELECT SUM(input), SUM(output), SUM(cache_read), SUM(cache_write) FROM usage_records",
             [],

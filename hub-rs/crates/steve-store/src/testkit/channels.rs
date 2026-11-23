@@ -124,16 +124,16 @@ fn project_write<T>(
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect()
     }
-    store.transaction(|tx| {
-        let before = rows(tx)?;
-        let old_receipts = receipts(tx)?;
-        let result = write(tx)?;
-        let after = rows(tx)?;
+    store.write(|tx| {
+        let before = rows(tx.conn)?;
+        let old_receipts = receipts(tx.conn)?;
+        let result = write(tx.conn)?;
+        let after = rows(tx.conn)?;
         let removed = before
             .iter()
             .filter(|(key, _)| !after.contains_key(*key))
             .map(|((_, id), (scope, _, _))| (scope.clone(), id.clone()));
-        digest::remove_message(tx, removed)?;
+        digest::remove_message(tx.conn, removed)?;
         for ((kind, id), row) in &after {
             if before.get(&(*kind, id.clone())) != Some(row) {
                 let source = if *kind == 0 {
@@ -142,7 +142,7 @@ fn project_write<T>(
                     Source::MailMessage
                 };
                 digest::sync_message(
-                    tx,
+                    tx.conn,
                     source,
                     id,
                     before.get(&(*kind, id.clone())).map(|r| &r.0),
@@ -150,14 +150,14 @@ fn project_write<T>(
             }
         }
         let mut acknowledgements: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
-        for (ws, conv, id) in receipts(tx)?.difference(&old_receipts) {
+        for (ws, conv, id) in receipts(tx.conn)?.difference(&old_receipts) {
             acknowledgements
                 .entry((ws.clone(), conv.clone()))
                 .or_default()
                 .push(id.clone());
         }
         for ((ws, conv), ids) in acknowledgements {
-            digest::dequeue_on_receipt(tx, &ws, &conv, ids)?;
+            digest::dequeue_on_receipt(tx.conn, &ws, &conv, ids)?;
         }
         Ok(result)
     })
@@ -172,9 +172,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("fixture.sqlite3"), crate::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
-        store.transaction(|tx| {
-        tx.execute("INSERT INTO spaces(id,workspace_id,system_id,kind,external_id,name,created,updated) VALUES('s','default','test','group','s','S',1,1)",[])?;
-        tx.execute("INSERT INTO chan_messages(id,workspace_id,space_id,direction,status,created) VALUES('omitted','default','s','in','received',1)",[])?;
+        store.write(|tx| {
+        tx.conn.execute("INSERT INTO spaces(id,workspace_id,system_id,kind,external_id,name,created,updated) VALUES('s','default','test','group','s','S',1,1)",[])?;
+        tx.conn.execute("INSERT INTO chan_messages(id,workspace_id,space_id,direction,status,created) VALUES('omitted','default','s','in','received',1)",[])?;
         Ok::<_,crate::StoreError>(())
     }).unwrap();
         project_write(&store, |c| {
@@ -186,12 +186,12 @@ mod tests {
         })
         .unwrap();
         store
-            .transaction(|tx| {
+            .write(|tx| {
                 assert_eq!(
-                    digest::verify_pending(tx, "default")?[0].kind,
+                    digest::verify_pending(tx.conn, "default")?[0].kind,
                     digest::MismatchKind::Missing
                 );
-                digest::sync_message(tx, Source::ChanMessage, "omitted", None)?;
+                digest::sync_message(tx.conn, Source::ChanMessage, "omitted", None)?;
                 Ok::<_, crate::StoreError>(())
             })
             .unwrap();

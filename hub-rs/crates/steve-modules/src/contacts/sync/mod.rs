@@ -856,7 +856,7 @@ mod due_contract_tests {
             let id = format!("{}-{}", if poison { "poison" } else { "ok" }, uid("due"));
             self.env
                 .store()
-                .transaction(|tx| -> ApiResult<_> {
+                .write(|tx| -> ApiResult<_> {
                     let party = crate::contacts::service::ensure_self_org(tx, WS, ME)?;
                     let account = crate::accounts::repo::insert(
                         tx,
@@ -875,7 +875,7 @@ mod due_contract_tests {
                             source_label: "test".into(),
                         },
                     )?;
-                    tx.write(|w| {
+                    tx.scope(|w| {
                         steve_store::Connections(w).insert(&steve_store::ConnRow {
                             id: id.clone(),
                             workspace_id: WS.into(),

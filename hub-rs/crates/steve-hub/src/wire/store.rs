@@ -340,7 +340,7 @@ impl Repo for StoreBackend {
         harnesses: &[steve_core::harnesses::Harness],
     ) -> BResult<Obj> {
         self.0
-            .atomic(|| -> anyhow::Result<Obj> {
+            .write(|_| -> anyhow::Result<Obj> {
                 let b = self.bot_get(id)?.ok_or_else(|| gone("bot"))?;
                 steve_core::models::validate_bot_patch(Some(&b), p, harnesses).map_err(
                     |message| BackendError {
@@ -755,7 +755,7 @@ impl Repo for StoreBackend {
         let mut out = objs(self.0.devices().list().map_err(err)?)?;
         // the Hub's machine runs the Hub's own Node: how many of its turns run and wait, against
         // the limit on this row
-        let room = self.0.reader(|c| session_room(c, HUB_NODE)).map_err(err)?;
+        let room = self.0.read(|c| session_room(c, HUB_NODE)).map_err(err)?;
         for d in out
             .iter_mut()
             .filter(|d| d.get("id").and_then(Value::as_str) == Some(HUB_DEVICE))
@@ -768,7 +768,7 @@ impl Repo for StoreBackend {
     fn waiting_for_room(&self) -> BResult<HashMap<String, Value>> {
         let rows = self
             .0
-            .reader(steve_store::runtime::sessions_waiting_for_room)
+            .read(|r| steve_store::runtime::sessions_waiting_for_room(r))
             .map_err(err)?;
         rows.into_iter()
             .map(|(s, r)| {
@@ -884,7 +884,7 @@ mod event_page_tests {
             })
             .unwrap()
             .id;
-        s::testkit::hub::state::unsupported_events(&store, &id, &["legacy.acp", "future.v2"])
+        s::testkit::hub::state::unsupported_events(&store, &id, &["retired.acp", "future.v2"])
             .unwrap();
         let last = store
             .events()

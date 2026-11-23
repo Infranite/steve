@@ -5,7 +5,7 @@ use steve_store_sqlite::digest::{self, Source};
 use crate::{Result, Store, W};
 
 pub fn audit(store: &Store) -> Result<()> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         let tx = c.unchecked_transaction()?;
         let workspaces = tx.prepare(
             "SELECT workspace_id FROM chan_messages UNION SELECT workspace_id FROM mail_messages
@@ -54,8 +54,8 @@ pub fn seed_segment(
 }
 
 pub fn change_sender(store: &Store, id: Option<&str>) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute(
+    store.write(|tx| {
+        tx.conn.execute(
             "UPDATE chan_messages SET sender_account_id = 'bot_acc', sender_party_id = 'bob', mentions = '[]'
              WHERE ?1 IS NULL OR id = ?1",
             [id],
@@ -74,7 +74,7 @@ pub fn set_batching(w: &mut W<'_>, ws: &str, settings: &Value, now: i64) -> Resu
 }
 
 pub fn pending_positions(store: &Store, ws: &str) -> Result<(i64, Option<i64>, Option<i64>)> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(c.query_row(
         "SELECT count(*), min(position), max(position) FROM digest_pending WHERE workspace_id = ?",
         [ws],
@@ -84,7 +84,7 @@ pub fn pending_positions(store: &Store, ws: &str) -> Result<(i64, Option<i64>, O
 }
 
 pub fn receipt_count(store: &Store, ws: &str) -> Result<i64> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT count(*) FROM digest_receipts WHERE workspace_id = ?",
             [ws],
@@ -132,7 +132,7 @@ pub fn remove_message(w: &mut W<'_>, id: &str) -> Result<()> {
 }
 
 pub fn set_packet_candidates(store: &Store, id: &str, candidates: &Value) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute(
             "UPDATE digest_packets SET candidates = ? WHERE id = ?",
             params![candidates.to_string(), id],
@@ -142,7 +142,7 @@ pub fn set_packet_candidates(store: &Store, id: &str, candidates: &Value) -> Res
 }
 
 pub fn summary_depth(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute(
             "UPDATE digest_packets SET facts = json_set(facts, '$.conv.depth', 'summary')",
             [],
@@ -160,7 +160,7 @@ pub fn seed_workspace(w: &mut W<'_>, id: &str) -> Result<()> {
 }
 
 pub fn packet_ids(store: &Store, state: &str) -> Result<Vec<String>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(
             c.prepare("SELECT id FROM digest_packets WHERE state = ? ORDER BY id")?
                 .query_map([state], |r| r.get(0))?
@@ -170,7 +170,7 @@ pub fn packet_ids(store: &Store, state: &str) -> Result<Vec<String>> {
 }
 
 pub fn exhaust_packet(store: &Store, id: &str, attempts: i64) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute(
             "UPDATE digest_packets SET attempts = ? WHERE id = ?",
             params![attempts, id],
@@ -180,7 +180,7 @@ pub fn exhaust_packet(store: &Store, id: &str, attempts: i64) -> Result<()> {
 }
 
 pub fn supersedes(store: &Store, mem: &str) -> Result<Option<String>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(c.query_row(
             "SELECT supersedes FROM mem_candidates WHERE mem_id = ?",
             [mem],
@@ -192,7 +192,7 @@ pub fn supersedes(store: &Store, mem: &str) -> Result<Option<String>> {
 }
 
 pub fn conversations(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute_batch("INSERT INTO spaces (id, workspace_id, system_id, kind, external_id, name, created, updated)
             VALUES ('s1', 'default', 'test', 'group', 'g1', 'Project', 1, 1), ('s2', 'default', 'test', 'dm', 'g2', 'DM', 1, 1),
                    ('foreign', 'w2', 'test', 'group', 'g3', 'Foreign', 1, 1);
@@ -207,8 +207,8 @@ pub fn conversations(store: &Store) -> Result<()> {
 }
 
 pub fn mail_thread(store: &Store) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute_batch("INSERT INTO connections (id, workspace_id, account_id, adapter, auth, created_by, created, updated)
+    store.write(|tx| {
+        tx.conn.execute_batch("INSERT INTO connections (id, workspace_id, account_id, adapter, auth, created_by, created, updated)
             VALUES ('mailconn', 'default', 'owner_acc', 'fixture', 'none', 'usr_dev', 1, 1);
             INSERT INTO mail_threads (id, workspace_id, connection_id, thread_key, subject, last_at, created_by, created, updated)
             VALUES ('mt1', 'default', 'mailconn', 'thread', 'Contract', 1, 'usr_dev', 1, 1);
@@ -222,14 +222,14 @@ pub fn mail_thread(store: &Store) -> Result<()> {
             INSERT INTO mail_attachments (id, workspace_id, message_id, part, name, mime, size, created)
             VALUES ('attachment', 'default', 'mail2', '1.2', 'contract.pdf', 'application/pdf', 1024, 10);")?;
         for id in ["mail1", "mail2"] {
-            digest::sync_message(tx, Source::MailMessage, id, None)?;
+            digest::sync_message(tx.conn, Source::MailMessage, id, None)?;
         }
         Ok(())
     })
 }
 
 pub fn alert_sender(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute_batch("INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated)
             VALUES ('bot_acc', 'default', 'test', 'other', 'bob', 'bot', 'bot', 'Bot', 'me', 1, 1);")?;
         Ok(())
@@ -237,7 +237,7 @@ pub fn alert_sender(store: &Store) -> Result<()> {
 }
 
 pub fn other_account(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute_batch("INSERT INTO parties (id, workspace_id, type, name, user_id, created_by, created, updated)
             VALUES ('other_person', 'default', 'person', 'Other', 'usr_other', 'usr_other', 1, 1);
             INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated)
@@ -248,7 +248,7 @@ pub fn other_account(store: &Store) -> Result<()> {
 }
 
 pub fn ts5_space(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute_batch("INSERT INTO spaces(id,workspace_id,system_id,kind,external_id,name,created,updated) VALUES('ts5-space','default','test','group','ts5','TS5',1,1);
         INSERT INTO parties(id,workspace_id,type,name,user_id,created_by,created,updated) VALUES('ts5-owner','default','person','Owner','usr_dev','usr_dev',1,1),('ts5-bot','default','person','',NULL,'usr_dev',1,1);
         INSERT INTO accounts(id,workspace_id,system_id,family,party_id,kind,handle,handle_display,display_name,source,created,updated) VALUES('ts5-bot-account','default','test','other','ts5-bot','app_bot','bot','fallback','Persona','fixture',1,1); ")?;
@@ -257,7 +257,7 @@ pub fn ts5_space(store: &Store) -> Result<()> {
 }
 
 pub fn ts5_channels(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute_batch("INSERT INTO connections(id,workspace_id,account_id,adapter,auth,created_by,created,updated) VALUES('ts5-channel-conn','default','ts5-bot-account','fixture','none','usr_dev',1,1);
         INSERT INTO bots(id,workspace_id,name,harness,enabled,updated) VALUES('ts5-bot','default','TS5','claude-code',1,1);
         INSERT INTO bot_workspaces(bot_id,workspace_id,created) VALUES('ts5-bot','default',1);")?;
@@ -378,7 +378,7 @@ pub fn ts5_mail(store: &Store, at: i64) -> Result<()> {
 }
 
 pub fn goal_items(store: &Store) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute_batch("INSERT INTO items (id, workspace_id, no, kind, title, status, stage, created, updated) VALUES
                     ('ST-1', 'default', 1, 'task', 'draft the outline', 'run', '执行', 1, 1),
                     ('ST-2', 'default', 2, 'task', 'collect numbers', 'done', '完成', 1, 1),
@@ -395,7 +395,7 @@ pub fn notification_policy(
     tz: &str,
     quiet: Option<(u16, u16)>,
 ) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute("INSERT INTO notification_policies (workspace_id, user_id, enabled, mode, timezone, quiet_start, quiet_end, consented_at, consent_since_seq, updated)
             VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, 1)
             ON CONFLICT(workspace_id, user_id) DO UPDATE SET timezone=excluded.timezone,quiet_start=excluded.quiet_start,quiet_end=excluded.quiet_end",
@@ -421,7 +421,7 @@ pub fn team_followup(store: &Store, at: i64) -> Result<()> {
 }
 
 pub fn save_counts(store: &Store) -> Result<(i64, i64, i64)> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok((
             c.query_row("SELECT count(*) FROM digest_segments", [], |r| r.get(0))?,
             c.query_row("SELECT count(*) FROM matters", [], |r| r.get(0))?,
@@ -435,7 +435,7 @@ pub fn create_memory(
     ws: &str,
     memory: &crate::base::mems::NewMem,
 ) -> Result<crate::base::mems::Mem> {
-    store.transaction(|tx| crate::base::mems::create(tx, ws, memory))
+    store.write(|tx| crate::base::mems::create(tx, ws, memory))
 }
 
 pub fn duplicate_hidden_packets(w: &mut W<'_>, packet: &str, count: usize) -> Result<()> {
@@ -449,7 +449,7 @@ pub fn duplicate_hidden_packets(w: &mut W<'_>, packet: &str, count: usize) -> Re
 }
 
 pub fn change_all_batching(store: &Store, settings: &Value) -> Result<()> {
-    store.with_conn(|c| {
+    store.write_locked(|c| {
         c.execute(
             "UPDATE settings SET value = ? WHERE key = 'digest'",
             [settings.to_string()],
@@ -468,7 +468,7 @@ pub fn force_todo_sources(w: &mut W<'_>, ws: &str, todo: &str, matter: &str) -> 
 }
 
 pub fn schedule_counts(store: &Store, id: &str) -> Result<(i64, i64)> {
-    store.reader(|c| Ok((
+    store.sqlite_read(|c| Ok((
         c.query_row("SELECT count(*) FROM flow_triggers WHERE flow_id = ?", [id], |r| r.get(0))?,
         c.query_row("SELECT count(*) FROM flows WHERE kind = 'schedule' AND json_extract(schedule, '$.mode') = 'brief'", [], |r| r.get(0))?,
     )))
@@ -477,7 +477,7 @@ pub fn schedule_counts(store: &Store, id: &str) -> Result<(i64, i64)> {
 pub type Notification = (String, String, String, String, String, String);
 
 pub fn notifications(store: &Store) -> Result<Vec<Notification>> {
-    store.reader(|c| {
+    store.sqlite_read(|c| {
         Ok(c.prepare(
         "SELECT n.user_id, n.topic, n.mode, n.state, n.body, f.kind FROM personal_notifications n
         JOIN feed_entries f ON f.notification_id = n.id ORDER BY n.created, n.id",
@@ -487,18 +487,18 @@ pub fn notifications(store: &Store) -> Result<Vec<Notification>> {
 }
 
 pub fn brief_runs(store: &Store, id: &str) -> Result<Vec<(String, String, String)>> {
-    store.reader(|c| Ok(c.prepare(
+    store.sqlite_read(|c| Ok(c.prepare(
         "SELECT trigger_kind, status, outcome_label FROM flow_runs WHERE flow_id = ? ORDER BY started, rowid",
     )?.query_map([id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?.collect::<rusqlite::Result<_>>()?))
 }
 
 pub fn brief_items(store: &Store, ws: &str, owner: &str, other: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute("INSERT INTO items (id, workspace_id, no, title, status, stage, requested_by, created, updated) VALUES
+    store.write(|tx| {
+        tx.conn.execute("INSERT INTO items (id, workspace_id, no, title, status, stage, requested_by, created, updated) VALUES
             ('ST-1', ?1, 1, '迁移脚本', 'run', '', ?2, 1, 1),
             ('ST-2', ?1, 2, '导出报表', 'fail', '', ?2, 1, 1),
             ('ST-3', ?1, 3, '别人的事项', 'fail', '', ?3, 1, 1)", params![ws,owner,other])?;
-        tx.execute("INSERT INTO decisions (id, workspace_id, item_id, kind, subject_type, subject_id, question, status, requested_by, created)
+        tx.conn.execute("INSERT INTO decisions (id, workspace_id, item_id, kind, subject_type, subject_id, question, status, requested_by, created)
             VALUES ('dec_1', ?, 'ST-2', 'ask', 'item', 'ST-2', '怎么办', 'open', 'steve', 1)", [ws])?;
         Ok(())
     })

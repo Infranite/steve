@@ -139,7 +139,7 @@ impl Store {
     /// `ensureWorkspace`: creates `default` (个人), renames the old default name, and carries the old
     /// per-workspace item counter over to the global `item:ST` once.
     pub fn ensure_workspace(&self) -> Result<()> {
-        self.atomic(|| self.write_conn(|w| {
+        self.write(|_| self.write_conn(|w| {
             let c = w.c;
             let name = crate::seeded::text(crate::seeded::WORKSPACE_NAME);
             let created = c.execute("INSERT OR IGNORE INTO workspaces (id, name, created) VALUES (?, ?, ?)", params![WS, name, now()])? == 1;
@@ -239,7 +239,7 @@ impl Workspaces<'_> {
 
     /// New workspace at the end of the sort order, `owner_id` as its owner.
     pub fn create(&self, p: &NewWorkspace, owner_id: &str) -> Result<Workspace> {
-        self.0.atomic(|| self.0.write_conn(|w| {
+        self.0.write(|_| self.0.write_conn(|w| {
             let (id, t) = (uid("ws"), now());
             w.c.run(
                 "INSERT INTO workspaces (id, name, description, item_prefix, sort, created) VALUES (?, ?, ?, ?, (SELECT coalesce(max(sort), 0) + 1 FROM workspaces), ?)",
@@ -416,7 +416,8 @@ impl Settings<'_> {
     /// Upserts every key in one transaction, records a revision and publishes `settings`.
     pub fn set(&self, ws: &str, p: &Map<String, Value>, author: &str) -> Result<()> {
         self.0.write_conn(|w| {
-            let tx = w.tx()?;
+            let transaction = w.tx()?;
+            let tx = transaction.connection();
             {
                 let mut st = tx.prepare_cached(
                     "INSERT INTO settings (workspace_id, key, value, updated) VALUES (?, ?, ?, ?) ON CONFLICT(workspace_id, key) DO UPDATE SET value = excluded.value, updated = excluded.updated",
@@ -425,7 +426,7 @@ impl Settings<'_> {
                     st.execute(params![ws, k, to_json(v)?, now()])?;
                 }
             }
-            tx.commit()?;
+            transaction.commit()?;
             revision(w.c, ws, "settings", ws, 0, p, author)?;
             w.publish(steve_types::DomainEvent::from(
                 steve_types::ConfigEvent::Settings {

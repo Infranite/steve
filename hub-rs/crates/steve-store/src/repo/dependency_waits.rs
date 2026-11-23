@@ -50,14 +50,20 @@ fn refuse(message: &str) -> StoreError {
 
 /// Ordinary UI/API dependency edits retain a cycle's explicit policy. An old completed wait must
 /// not swallow a later unblock or leave a stale "start now" decision while a new prerequisite runs.
-pub(super) fn rearm_in(tx: &crate::Tx, item: &str) -> Result<()> {
-    let Some(wait) = get(tx, item)? else {
+pub(super) fn rearm_in(tx: &mut crate::W<'_>, item: &str) -> Result<()> {
+    let Some(wait) = get(tx.conn, item)? else {
         return Ok(());
     };
-    let Some(i) = one(tx, "SELECT * FROM items WHERE id=?", [item], Item::from_row)? else {
+    let Some(i) = one(
+        tx.conn,
+        "SELECT * FROM items WHERE id=?",
+        [item],
+        Item::from_row,
+    )?
+    else {
         return Ok(());
     };
-    let open:bool=tx.query_row(
+    let open:bool=tx.conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM item_deps d LEFT JOIN items p ON p.id=d.dep_id WHERE d.item_id=?
          AND (p.id IS NULL OR p.status<>'done' OR p.phase<>'closed' OR p.outcome IS NOT 'completed'))",
         [item],|r|r.get(0))?;
@@ -65,12 +71,12 @@ pub(super) fn rearm_in(tx: &crate::Tx, item: &str) -> Result<()> {
         return Ok(());
     }
     let at = now();
-    tx.execute(
+    tx.conn.execute(
         "UPDATE item_dependency_waits SET state='waiting',updated=? WHERE item_id=? AND cycle=?",
         params![at, item, wait.cycle],
     )?;
     for id in all(
-        tx,
+        tx.conn,
         "SELECT id FROM decisions WHERE item_id=? AND status='open' AND kind='propose'
          AND requested_by='steve' AND question='前置事项都已完成，现在开始？'",
         [item],
@@ -79,11 +85,11 @@ pub(super) fn rearm_in(tx: &crate::Tx, item: &str) -> Result<()> {
         crate::decision_resolve_in(tx, &id, &json!({"superseded":"前置事项已变化"}), "expired")?;
     }
     if i.status != "pause" {
-        tx.execute(
+        tx.conn.execute(
             "UPDATE items SET status='block',now='前置事项已变化，继续等待',updated=? WHERE id=?",
             params![at, item],
         )?;
-        super::items::status_mark(tx, &i.workspace_id, item, at, Some(&i.status), "block")?;
+        super::items::status_mark(tx.conn, &i.workspace_id, item, at, Some(&i.status), "block")?;
     }
     Ok(())
 }

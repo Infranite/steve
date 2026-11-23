@@ -354,7 +354,7 @@ fn single_user_memory_links_keep_range_validation_and_existing_confirmation() {
     let e = env();
     let seed = |owner: &str| {
         e.store()
-            .transaction(|tx| {
+            .write(|tx| {
                 mems::create(
                     tx,
                     WS,

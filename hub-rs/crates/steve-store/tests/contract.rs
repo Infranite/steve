@@ -2,6 +2,7 @@
 //! write or a scope that rolled back stays or is published.
 
 use std::sync::{Arc, Mutex};
+use steve_store::testkit::SqliteFixtures;
 
 use serde_json::json;
 use steve_store::{
@@ -74,7 +75,7 @@ fn channel_write_refusals_keep_the_notice_window_across_lifts() {
 
     let f = open();
     f.store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             c.execute_batch(
                 "INSERT INTO parties(id,workspace_id,type,name,created_by,created,updated)
                  VALUES ('p_bot','default','bot','Bot','owner',1,1);

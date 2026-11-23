@@ -1,5 +1,6 @@
 //! The YOLO repository (migration 14): scope rows with revisions and events, windows, the ledger.
 
+use steve_store::testkit::SqliteFixtures;
 mod common;
 
 use common::*;
@@ -88,7 +89,7 @@ fn scope_put_bumps_revision_writes_revisions_and_publishes() {
     assert_eq!((a.mode.as_str(), a.paused.clone()), ("off", Some(paused)));
     let revs = t
         .store
-        .reader(|c| steve_store::base::revisions(c, WS, yolo::REVISION_TYPE, "item:ST-1"))
+        .fixture_read(|c| steve_store::base::revisions(c, WS, yolo::REVISION_TYPE, "item:ST-1"))
         .unwrap();
     assert_eq!(revs.len(), 1);
     assert_eq!(

@@ -157,10 +157,10 @@ fn insert(c: &rusqlite::Connection, p: &NewDecision) -> Result<Decision> {
 }
 
 /// [`Decisions::create`] inside the caller's transaction; published after the commit.
-pub fn decision_create_in(tx: &crate::Tx<'_>, p: &NewDecision) -> Result<Decision> {
-    let d = insert(tx, p)?;
+pub fn decision_create_in(tx: &mut crate::W<'_>, p: &NewDecision) -> Result<Decision> {
+    let d = insert(tx.conn, p)?;
     tx.diagnostic(crate::diagnostics::decision_event(&d, "created", None));
-    tx.publish(steve_types::DomainEvent::from(
+    tx.emit(steve_types::DomainEvent::from(
         steve_types::WorkEvent::Decision {
             ws: d.workspace_id.clone().into(),
             id: d.id.clone().into(),
@@ -175,27 +175,28 @@ pub fn decision_create_in(tx: &crate::Tx<'_>, p: &NewDecision) -> Result<Decisio
 
 /// [`Decisions::resolve`] inside the caller's transaction: settles it if it is open. `true`: it was.
 pub fn decision_resolve_in(
-    tx: &crate::Tx<'_>,
+    tx: &mut crate::W<'_>,
     id: &str,
     result: &Value,
     status: &str,
 ) -> Result<bool> {
-    let n = tx.execute(
+    let n = tx.conn.execute(
         "UPDATE decisions SET status = ?, result = ?, resolved = ? WHERE id = ? AND status = 'open'",
         params![status, to_json(result)?, now(), id],
     )?;
     let item: Option<Option<String>> = tx
+        .conn
         .query_row("SELECT item_id FROM decisions WHERE id = ?", [id], |r| {
             r.get(0)
         })
         .ok();
     if let Some(ws) = crate::repo::one(
-        tx,
+        tx.conn,
         "SELECT workspace_id FROM decisions WHERE id = ?",
         [id],
         |r| r.get::<_, String>(0),
     )? {
-        tx.publish(steve_types::DomainEvent::from(
+        tx.emit(steve_types::DomainEvent::from(
             steve_types::WorkEvent::Decision {
                 ws: ws.into(),
                 id: id.into(),
@@ -207,7 +208,7 @@ pub fn decision_resolve_in(
         ));
     }
     if n > 0
-        && let Ok(Some(d)) = one(tx, DECISION, [id], Decision::from_row)
+        && let Ok(Some(d)) = one(tx.conn, DECISION, [id], Decision::from_row)
     {
         tx.diagnostic(crate::diagnostics::decision_event(
             &d,
@@ -220,23 +221,28 @@ pub fn decision_resolve_in(
 
 /// A card whose answer was never applied (the Node refused it, or the request ended first) is
 /// expired, even if it was already marked resolved: it never claims an answer that did not happen.
-pub fn decision_expire_unapplied_in(tx: &crate::Tx<'_>, id: &str, result: &Value) -> Result<bool> {
-    let n = tx.execute(
+pub fn decision_expire_unapplied_in(
+    tx: &mut crate::W<'_>,
+    id: &str,
+    result: &Value,
+) -> Result<bool> {
+    let n = tx.conn.execute(
         "UPDATE decisions SET status = 'expired', result = ?, resolved = ? WHERE id = ? AND status IN ('open','resolved')",
         params![to_json(result)?, now(), id],
     )?;
     let item: Option<Option<String>> = tx
+        .conn
         .query_row("SELECT item_id FROM decisions WHERE id = ?", [id], |r| {
             r.get(0)
         })
         .ok();
     if let Some(ws) = crate::repo::one(
-        tx,
+        tx.conn,
         "SELECT workspace_id FROM decisions WHERE id = ?",
         [id],
         |r| r.get::<_, String>(0),
     )? {
-        tx.publish(steve_types::DomainEvent::from(
+        tx.emit(steve_types::DomainEvent::from(
             steve_types::WorkEvent::Decision {
                 ws: ws.into(),
                 id: id.into(),
@@ -580,9 +586,13 @@ impl Messages<'_> {
 
 /// Settles the item's open decisions as `expired` with `result`, inside the caller's transaction
 /// (`Decisions::resolve` for each, like a finished item's “nothing left to decide”). Returns how many.
-pub fn decisions_expire_open_in(tx: &crate::Tx, item_id: &str, result: &Value) -> Result<usize> {
+pub fn decisions_expire_open_in(
+    tx: &mut crate::W<'_>,
+    item_id: &str,
+    result: &Value,
+) -> Result<usize> {
     let ids: Vec<(String, String)> = {
-        let mut st = tx.prepare_cached(
+        let mut st = tx.conn.prepare_cached(
             "SELECT id, workspace_id FROM decisions WHERE item_id = ? AND status = 'open' ORDER BY created",
         )?;
         st.query_map([item_id], |r| Ok((r.get(0)?, r.get(1)?)))?
@@ -590,11 +600,11 @@ pub fn decisions_expire_open_in(tx: &crate::Tx, item_id: &str, result: &Value) -
     };
     let result = to_json(result)?;
     for (id, ws) in &ids {
-        tx.run(
+        tx.conn.run(
             "UPDATE decisions SET status = 'expired', result = ?, resolved = ?, undo = NULL WHERE id = ? AND status = 'open'",
             params![result, now(), id],
         )?;
-        tx.publish(steve_types::DomainEvent::from(
+        tx.emit(steve_types::DomainEvent::from(
             steve_types::WorkEvent::Decision {
                 ws: ws.clone().into(),
                 id: id.clone().into(),

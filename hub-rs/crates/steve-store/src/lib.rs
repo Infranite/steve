@@ -116,7 +116,6 @@ pub use contract::{
 pub use ingest::*;
 pub use repo::*;
 pub use steve_types::BusEvent;
-pub use tx::Tx;
 pub use types::*;
 
 /// The default workspace id (`WS` in repo.ts).
@@ -265,8 +264,7 @@ struct CommitWakes {
     committed: std::collections::BTreeSet<String>,
 }
 
-/// The write connection plus the publisher, handed to the legacy repositories' write closures so
-/// events go out under the lock.
+/// The private SQLite writer lease and its event publisher.
 pub(crate) struct WriteConn<'a> {
     pub c: &'a Connection,
     store: &'a Store,
@@ -277,7 +275,7 @@ impl WriteConn<'_> {
         self.store.emit_event(e.into())
     }
 
-    /// A write transaction on the write connection (or a nested `SAVEPOINT` inside [`Store::atomic`]).
+    /// A write transaction on the write connection (or a nested `SAVEPOINT` inside [`Store::write`]).
     pub fn tx(&self) -> rusqlite::Result<tx::WriteTx<'_>> {
         tx::WriteTx::begin(self.c)
     }
@@ -424,7 +422,7 @@ impl Store {
             pending.extend(tables.iter().map(|t| (*t).to_owned()));
         } else {
             let c = self.lock();
-            register(&c);
+            register(c.connection());
         }
         wake
     }
@@ -541,15 +539,18 @@ impl Store {
             return f(&WriteConn { c, store: self });
         }
         let c = self.lock();
-        let result = f(&WriteConn { c: &c, store: self });
-        if c.is_autocommit() {
+        let result = f(&WriteConn {
+            c: c.connection(),
+            store: self,
+        });
+        if c.connection().is_autocommit() {
             self.notify_committed();
         }
         result
     }
 
     pub(crate) fn read_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
-        self.reader(f)
+        self.sqlite_read(f)
     }
 
     /// Refreshes the query planner's statistics where they went stale (`PRAGMA optimize`, bounded), on
@@ -559,19 +560,19 @@ impl Store {
         if let Some(c) = self.active_conn() {
             return Ok(db::optimize(c, false)?);
         }
-        Ok(db::optimize(&self.lock(), false)?)
+        Ok(db::optimize(self.lock().connection(), false)?)
     }
 
     /// Runs `f` on the write connection under the write lock, for one-off maintenance and tests.
     /// Prefer a repository method; this exists so callers never need a second connection.
     #[track_caller]
-    pub fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+    pub(crate) fn write_locked<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         if let Some(c) = self.active_conn() {
             return f(c);
         }
         let c = self.lock();
-        let result = f(&c);
-        if c.is_autocommit() {
+        let result = f(c.connection());
+        if c.connection().is_autocommit() {
             self.notify_committed();
         }
         result
@@ -579,7 +580,7 @@ impl Store {
 }
 
 /// Runs a multi-statement read under a single snapshot. When `c` is already inside an active
-/// transaction (such as a read inside [`Store::atomic`]), reuses that transaction instead of
+/// transaction (such as a read inside [`Store::write`]), reuses that transaction instead of
 /// starting a nested `BEGIN DEFERRED`.
 pub(crate) fn read_snapshot<T>(
     c: &Connection,
@@ -866,9 +867,8 @@ pub(crate) struct WriteGuard<'a> {
     timing: Option<LockTiming>,
 }
 
-impl std::ops::Deref for WriteGuard<'_> {
-    type Target = Connection;
-    fn deref(&self) -> &Self::Target {
+impl WriteGuard<'_> {
+    pub(crate) fn connection(&self) -> &Connection {
         &self.conn
     }
 }
@@ -896,7 +896,7 @@ pub mod retention {
             after: Option<i64>,
         ) -> Result<SliceReport<i64>> {
             let policy = kind.policy();
-            self.with_conn(|c| {
+            self.write_locked(|c| {
                 Ok(steve_store_sqlite::retention::run_slice(
                     c,
                     policy.as_ref(),
@@ -930,7 +930,7 @@ pub mod retention {
                 .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
             };
             let policy = r::policies::SessionEvents::new(session, upper, &action);
-            let prepared = self.reader(|c| {
+            let prepared = self.sqlite_read(|c| {
                 super::read_snapshot(c, |snapshot| {
                     let candidates =
                         r::before_candidates(snapshot, &policy, now, budget, after.as_ref())?;
@@ -948,8 +948,8 @@ pub mod retention {
             let Some(_guard) = guard() else {
                 return Ok(None);
             };
-            let report =
-                self.with_conn(|c| Ok(r::run_slice(c, &prepared, now, budget, after.as_ref())?))?;
+            let report = self
+                .write_locked(|c| Ok(r::run_slice(c, &prepared, now, budget, after.as_ref())?))?;
             Ok(Some(report))
         }
     }
