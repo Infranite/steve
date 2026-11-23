@@ -219,69 +219,26 @@ async fn branch_outside_the_list_follows_on_fail() {
 }
 
 #[tokio::test]
-async fn gateway_timeout_retries_once_ten_minutes_later() {
+async fn gateway_timeout_fails_the_plan_without_scheduling_another_model_call() {
+    use steve_modules::gateway::{GatewayError, TimeoutPhase};
     let e = env();
     flow(&e, triage(bot_cfg())).await;
-    // first: times out twice → retried once, then failed
-    e.env.gateway.fail("timeout");
-    e.env.gateway.fail("timeout");
+    e.env
+        .gateway
+        .fail_with(GatewayError::Timeout(TimeoutPhase::Execution));
     let evt = ingest(&e, "m5", "Sarah：在吗", "").await;
-    let run = {
-        eventually_sync(
-            "The event-triggered flow run persists its waiting state.",
-            || {
-                e.event_runs(&evt)
-                    .iter()
-                    .filter(|run| run.status == "waiting")
-                    .count()
-                    == 1
-            },
-        )
-        .await;
-        run_of(&e, &evt)
-    };
-    let now = e.flow.now();
-    let retry_at = e.run_row(&run).retry_at.unwrap();
-    assert_eq!(retry_at, now + 10 * 60 * 1000);
-    assert_eq!(outcome(&e, &evt), "pending");
-    // not yet due
-    e.env.clock.advance(9 * 60 * 1000);
-    assert!(steve_flow::testkit::claim_due(&e.flow).unwrap().is_empty());
-    e.env.clock.advance(60 * 1000);
-    for id in steve_flow::testkit::claim_due(&e.flow).unwrap() {
-        steve_flow::scheduler::drive(&e.flow, &id).await.unwrap();
-    }
-    let status = e.run_row(&run).status;
-    assert_eq!(status, "failed");
-    assert_eq!(outcome(&e, &evt), "failed");
-    assert_eq!(e.env.gateway.calls.lock().unwrap().len(), 2);
-    let label = e.run_row(&run).outcome_label;
-    assert_eq!(label, "Steve 没有及时给出判断");
-    // second: the retry answers → the run goes on
-    e.env.gateway.fail("timeout");
-    e.env.gateway.reply(r#"{"branch":"其他","reason":"闲聊"}"#);
-    let evt = ingest(&e, "m6", "周末愉快", "").await;
-    eventually_sync(
-        "The event-triggered flow run persists its retry deadline.",
-        || {
-            e.event_runs(&evt)
-                .iter()
-                .filter(|run| run.retry_at.is_some())
-                .count()
-                == 1
-        },
-    )
+    eventually_sync("the failed gateway plan settles", || {
+        outcome(&e, &evt) == "failed"
+    })
     .await;
+    let run = run_of(&e, &evt);
+    let row = e.run_row(&run);
+    assert_eq!(row.status, "failed");
+    assert!(row.retry_at.is_none());
+    assert!(row.error.unwrap().contains("execution"));
     e.env.clock.advance(10 * 60 * 1000);
-    for id in steve_flow::testkit::claim_due(&e.flow).unwrap() {
-        steve_flow::scheduler::drive(&e.flow, &id).await.unwrap();
-    }
-    assert_eq!(outcome(&e, &evt), "ignored");
-    assert_eq!(
-        e.signal_row(&evt).reason,
-        "不用管",
-        "the ignore action's reason comes last"
-    );
+    assert!(steve_flow::testkit::claim_due(&e.flow).unwrap().is_empty());
+    assert_eq!(e.env.gateway.calls.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]

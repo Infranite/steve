@@ -55,6 +55,10 @@ pub enum EventBody {
         view: SessionView,
     },
     AttemptStarted,
+    /// A think job crossed the ACP prompt/first-response boundary. Not a keepalive.
+    GatewayProgress {
+        phase: GatewayPhase,
+    },
     /// The attempt is over; whether the turn is, the Hub decides.
     AttemptEnded {
         completion: Completion,
@@ -113,6 +117,31 @@ pub enum EventBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         details: Option<DiagnosticDetails>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GatewayPhase {
+    /// The prompt is being handed to the writer; a partial/in-flight write is uncertain.
+    Submitting,
+    /// The complete prompt was written to the adapter's input.
+    Submitted,
+    /// The adapter delivered a meaningful update for this prompt.
+    Responding,
+}
+
+impl GatewayPhase {
+    pub fn timeout(
+        phase: Option<Self>,
+        before_submission: crate::TimeoutPhase,
+    ) -> crate::TimeoutPhase {
+        match phase {
+            None => before_submission,
+            Some(Self::Submitting) => crate::TimeoutPhase::Unknown,
+            Some(Self::Submitted) => crate::TimeoutPhase::FirstByte,
+            Some(Self::Responding) => crate::TimeoutPhase::Execution,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

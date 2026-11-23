@@ -400,6 +400,27 @@ impl Conn {
         params: Value,
         timeout: Option<Duration>,
     ) -> Result<Value, RpcError> {
+        self.request_inner(method, params, timeout, None).await
+    }
+
+    /// A one-shot prompt counts as submitted only after its frame is flushed to the adapter.
+    pub(crate) async fn request_submitted(
+        &self,
+        method: &str,
+        params: Value,
+        submitted: &(dyn Fn() + Send + Sync),
+    ) -> Result<Value, RpcError> {
+        self.request_inner(method, params, None, Some(submitted))
+            .await
+    }
+
+    async fn request_inner(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Option<Duration>,
+        submitted: Option<&(dyn Fn() + Send + Sync)>,
+    ) -> Result<Value, RpcError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = oneshot::channel();
         if let Ok(mut p) = self.pending.lock() {
@@ -412,7 +433,22 @@ impl Conn {
         m.insert("id".into(), json!(id));
         m.insert("method".into(), json!(method));
         m.insert("params".into(), params);
-        self.send(m);
+        if let Some(submitted) = submitted {
+            m.insert("jsonrpc".into(), json!("2.0"));
+            let (tx, written) = oneshot::channel();
+            self.out
+                .send(Outbound {
+                    line: format!("{}\n", Value::Object(m)),
+                    written: Some(tx),
+                })
+                .map_err(|_| RpcError::msg("adapter request pipe is closed"))?;
+            written
+                .await
+                .map_err(|_| RpcError::msg("adapter request write interrupted"))??;
+            submitted();
+        } else {
+            self.send(m);
+        }
         let gone = || RpcError::msg("adapter exited (null)");
         match timeout {
             None => rx.await.unwrap_or_else(|_| Err(gone())),

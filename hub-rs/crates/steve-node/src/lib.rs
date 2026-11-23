@@ -4379,6 +4379,7 @@ impl Discovery for LocalNode {
                     permissions: self.0.cfg.acp.adapter_properties(h).permission_policy
                         == steve_harness_spec::PermissionPolicy::Acp,
                     images: true,
+                    read_attached: self.0.cfg.acp.adapter_properties(h).read_attached,
                     enforcement: vec![],
                     adapter: None,
                     setup: None,

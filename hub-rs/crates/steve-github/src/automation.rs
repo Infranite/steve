@@ -583,7 +583,7 @@ async fn run_analysis_model(
     match model {
         Ok(out) if !out.text.trim().is_empty() => Ok(out),
         Ok(_) => return fail("Bot 分析", "模型没有返回报告".into()),
-        Err(e) => return fail("Bot 分析", e),
+        Err(e) => return fail("Bot 分析", e.to_string()),
     }
 }
 

@@ -418,6 +418,26 @@ pub(super) fn describe() {
         Count,
         "Agent turns and gateway calls finished. Labels: source (agent, gateway), harness, model, result (ok or reason code)."
     );
+    describe_counter!(
+        "steve_gateway_timeout_total",
+        Count,
+        "Gateway calls that timed out. Labels: phase (queue, first_byte, execution, unknown)."
+    );
+    describe_counter!(
+        "steve_gateway_preflight_rejections_total",
+        Count,
+        "Gateway calls stopped before dispatch. Labels: reason (missing_capability, tool_denied)."
+    );
+    describe_counter!(
+        "steve_gateway_handoffs_total",
+        Count,
+        "Controlled gateway handoffs that created a work item."
+    );
+    describe_counter!(
+        "steve_gateway_requests_total",
+        Count,
+        "Think prompts confirmed submitted by a Node's adapter transport."
+    );
     describe_histogram!(
         "steve_model_call_seconds",
         Seconds,

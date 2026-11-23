@@ -83,6 +83,7 @@ pub(crate) async fn run(inner: Arc<Inner>, op: OperationId, spec: JobSpec, cance
     // Final reports survive a failed streaming write and the dropping of a cancelled call's
     // return value. They join the retryable terminal transaction if still uncommitted.
     let pending_usage = Mutex::new(Vec::<UsageReport>::new());
+    let phase = Mutex::new(None);
     let lim = spec.run.limits.clone();
 
     let spawned = |pid: u32| record_job_group(&inner, &key, &group, pid);
@@ -109,6 +110,7 @@ pub(crate) async fn run(inner: Arc<Inner>, op: OperationId, spec: JobSpec, cance
             &spawned,
             &on_message,
             &pending_usage,
+            &phase,
             &stop_execution,
             &broken,
         )
@@ -129,7 +131,16 @@ pub(crate) async fn run(inner: Arc<Inner>, op: OperationId, spec: JobSpec, cance
     let mut work = Box::pin(work);
     let ended = tokio::select! {
         biased;
-        s = stop => Err(s),
+        s = stop => Err(match s {
+            Stop::End(Outcome::TimedOut, Some(error), why) => Stop::End(
+                Outcome::TimedOut,
+                Some(error.for_gateway(GatewayFailure::Timeout {
+                    phase: GatewayPhase::timeout(*phase.lock().unwrap(), TimeoutPhase::Queue),
+                })),
+                why,
+            ),
+            other => other,
+        }),
         r = &mut work => Ok(r),
     };
     // Do not drop a stopped ACP run: it owns source settlement and the Final callback.
@@ -320,6 +331,7 @@ async fn acp_think(
     spawned: &(dyn Fn(u32) -> bool + Send + Sync),
     on_message: &(dyn Fn(u32, &str) + Send + Sync),
     pending_usage: &Mutex<Vec<UsageReport>>,
+    phase: &Mutex<Option<GatewayPhase>>,
     stop_execution: &Notify,
     broken: &AtomicBool,
 ) -> Ran {
@@ -360,12 +372,18 @@ async fn acp_think(
     let mut prompt = vec![json!({"type": "text", "text": message})];
     prompt.extend(images.iter().map(Image::block));
     let properties = inner.cfg.acp.adapter_properties(&spec.run.choice.harness);
+    if think.tools == ThinkToolMode::ReadAttached && !properties.read_attached {
+        return failed(OneShotError::ToolRefused);
+    }
     let sandbox = match think_sandbox(inner, dir, &properties) {
         Ok(sandbox) => sandbox,
         Err(error) => return failed(error),
     };
     let state = Mutex::new((None::<String>, 0u32, String::new()));
     let event = |ev: EventBody| {
+        if let EventBody::GatewayProgress { phase: next } = &ev {
+            *phase.lock().unwrap() = Some(*next);
+        }
         record_think_event(inner, spec, &state, on_message, pending_usage, broken, ev);
     };
     let wrap = crate::acp_job::wrap(
@@ -492,25 +510,22 @@ fn record_think_event(
             state.2.push_str(&text);
             on_message(state.1, &state.2);
         }
-        diagnostic @ EventBody::Diagnostic { .. } => {
+        progress @ (EventBody::Diagnostic { .. } | EventBody::GatewayProgress { .. }) => {
             let exec = ExecutionRef::Job {
                 job: spec.job.clone(),
                 attempt: spec.run.attempt.clone(),
             };
             if let Err(error) = inner
                 .j
-                .events(vec![(Subject::Execution(exec), diagnostic)], None)
+                .events(vec![(Subject::Execution(exec), progress)], None)
             {
                 event_failed(inner, broken, &error);
             }
             inner.wake.notify_one();
         }
         EventBody::Usage { report } => {
-            let final_id =
-                (report.measurement == Measurement::Final).then(|| report.report_id.clone());
-            if final_id.is_some() {
-                pending_usage.lock().unwrap().push(report.clone());
-            }
+            let id = report.report_id.clone();
+            pending_usage.lock().unwrap().push(report.clone());
             let exec = ExecutionRef::Job {
                 job: spec.job.clone(),
                 attempt: spec.run.attempt.clone(),
@@ -520,7 +535,7 @@ fn record_think_event(
                 None,
             ) {
                 event_failed(inner, broken, &error);
-            } else if let Some(id) = final_id {
+            } else {
                 pending_usage.lock().unwrap().retain(|r| r.report_id != id);
             }
             inner.wake.notify_one();
@@ -690,7 +705,15 @@ fn why_stop(
             "timeout",
         ))
     } else if output.load(Ordering::SeqCst) > lim.max_output_bytes {
-        exhausted(NodeStop::OutputLimit)
+        Some(Stop::End(
+            Outcome::Cancelled,
+            Some(
+                NodeStop::OutputLimit
+                    .error()
+                    .for_gateway(GatewayFailure::OutputLimit),
+            ),
+            "error",
+        ))
     } else if broken.load(Ordering::SeqCst)
         || inner.over_limit()
         || inner.j.budget_epoch() != budget_epoch
@@ -747,30 +770,55 @@ async fn end(
         },
         Err(e) => {
             let transient = e.transient();
-            let (outcome, code, kind, detail) = match e {
+            let (outcome, code, kind, detail, failure) = match e {
                 OneShotError::OutputLimit => (
                     Outcome::Cancelled,
                     ErrorCode::Exhausted,
                     "error",
                     NodeStop::OutputLimit.detail(),
+                    Some(GatewayFailure::OutputLimit),
                 ),
-                OneShotError::Timeout(_) => (
+                OneShotError::Timeout(phase) => (
                     Outcome::TimedOut,
                     ErrorCode::Expired,
                     "timeout",
                     NodeStop::Deadline.detail(),
+                    Some(GatewayFailure::Timeout { phase }),
+                ),
+                e @ OneShotError::ToolRefused => (
+                    Outcome::Failed,
+                    ErrorCode::Denied,
+                    "error",
+                    e.to_string(),
+                    Some(GatewayFailure::NeedsTools),
+                ),
+                e @ (OneShotError::Failed(_) | OneShotError::Io(_)) => (
+                    Outcome::Failed,
+                    ErrorCode::Internal,
+                    "error",
+                    e.to_string(),
+                    Some(GatewayFailure::Startup),
                 ),
                 e @ OneShotError::Unsupported(_) => (
                     Outcome::Failed,
                     ErrorCode::Unsupported,
                     "error",
                     e.to_string(),
+                    Some(GatewayFailure::Startup),
                 ),
-                e => (Outcome::Failed, ErrorCode::Internal, "error", e.to_string()),
+                e => (
+                    Outcome::Failed,
+                    ErrorCode::Internal,
+                    "error",
+                    e.to_string(),
+                    None,
+                ),
             };
+            let mut error = ApiError::new(code, detail);
+            error.gateway = failure;
             Completion {
                 outcome,
-                error: Some(ApiError::new(code, detail)),
+                error: Some(error),
                 transient,
                 ..ended_with(outcome, kind)
             }

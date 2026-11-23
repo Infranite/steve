@@ -2,11 +2,11 @@
 //!
 //! Steve is a bot: every judgment (routing, chat answers, research, titles, extraction, disclosure,
 //! YOLO answers, drafts…) runs on the main Steve bot's harness and model, with its reasoning effort, as
-//! set on its Bot page. A purpose may override that ("高级"): another harness, an ordered fallback list
+//! set on its Bot page. A purpose may override that ("高级"): another harness, an ordered model list
 //! of models, an effort. Overrides are stored per workspace in the settings table (`models.<purpose>`);
 //! both are read on every call, so a change takes effect without a restart.
 //!
-//! Every model call goes through [`Models::for_call`]: [`crate::Fallback`] asks it with the call's
+//! Every model call goes through [`Models::for_call`]: [`crate::SingleModelGateway`] asks it with the call's
 //! [`crate::stats::CallTag`] (purpose and workspace). The agent-session default per harness
 //! (`models.agent.<harness>`) is unchanged.
 //!
@@ -353,7 +353,7 @@ pub struct Steve {
     pub bot_effort: Option<String>,
     /// What its judgments run on: its harness (judgments fail while that adapter is missing).
     pub runs_on: String,
-    /// The models its judgments try, in order (the bot's model first, then the harness's fallbacks).
+    /// Model preferences (the Bot's model first). The gateway only dispatches the first.
     pub models: Vec<String>,
     /// The effort passed to the harness (the bot's, when the harness takes it).
     pub effort: Option<String>,

@@ -15,12 +15,15 @@ use serde_json::{Value, json};
 use steve_store::ModelUsage;
 use steve_store::Store;
 
+use crate::CoreError;
 use crate::error::Result;
-use crate::gateway::{Attempt, ModelGateway, OnText, Printed, ThinkTools, Tier};
+use crate::gateway::{
+    Attempt, GatewayError, ModelGateway, OnText, Printed, ThinkTools, Tier, TimeoutPhase,
+};
 
 pub use steve_modules::gateway::{CallTag, current_tag, for_item, purpose, tagged};
 
-/// One logical call, persisted before dispatch and carried through every fallback.
+/// One logical call, persisted before dispatch.
 #[derive(Clone)]
 pub struct CallAccount {
     pub store: Store,
@@ -129,13 +132,18 @@ impl CallAccount {
                 usage: a.usage.clone(),
             },
         )?;
+        gateway_outcome(&a.result);
         steve_store::instrumentation::ModelCall {
             source: "gateway",
             harness,
             model: a.model.clone(),
             result: match &a.result {
                 Ok(_) => "ok",
-                Err(crate::error::CoreError::NeedsTools) => "needs_tools",
+                Err(CoreError::Gateway(GatewayError::NeedsTools)) => "needs_tools",
+                Err(CoreError::Gateway(GatewayError::Timeout(_))) => "timeout",
+                Err(CoreError::Gateway(GatewayError::MissingCapability)) => "missing_capability",
+                Err(CoreError::Gateway(GatewayError::ToolDenied)) => "tool_denied",
+                Err(CoreError::Gateway(GatewayError::Startup(_))) => "startup",
                 Err(_) => "error",
             },
             seconds: a.duration_ms as f64 / 1000.0,
@@ -148,6 +156,22 @@ impl CallAccount {
         self.store.stats().gateway_cancel(&self.id, reason)
     }
 }
+fn gateway_outcome(result: &Result<Printed>) {
+    match result {
+        Err(CoreError::Gateway(GatewayError::Timeout(phase))) => {
+            metrics::counter!("steve_gateway_timeout_total", "phase" => phase.as_str())
+                .increment(1);
+        }
+        Err(CoreError::Gateway(GatewayError::MissingCapability)) => {
+            metrics::counter!("steve_gateway_preflight_rejections_total", "reason" => "missing_capability").increment(1);
+        }
+        Err(CoreError::Gateway(GatewayError::ToolDenied)) => {
+            metrics::counter!("steve_gateway_preflight_rejections_total", "reason" => "tool_denied").increment(1);
+        }
+        _ => {}
+    }
+}
+
 impl AttemptAccount {
     pub async fn scope<F: std::future::Future>(&self, f: F) -> F::Output {
         ATTEMPT.scope(self.clone(), f).await
@@ -215,28 +239,45 @@ impl ModelGateway for RecordingGateway {
         tools: &ThinkTools,
         on_text: Option<OnText<'_>>,
     ) -> Attempt {
-        // Background callers share the durable upgrade gate with conversations. Keep one
-        // permit across every fallback so maintenance cannot seal between model attempts;
-        // an already-admitted conversation may still finish its nested calls.
-        let _activity = self.store.activity("model").await;
+        // The deadline starts before waiting for the maintenance admission gate. An admitted
+        // conversation can still make its one nested call while the gate drains.
+        let start = tokio::time::Instant::now();
+        let deadline = start + timeout;
+        let admission = tokio::time::timeout_at(deadline, self.store.activity("model")).await;
         let account = match CallAccount::begin(&self.store, &current_tag()) {
             Ok(c) => c,
             Err(e) => {
-                return Attempt {
-                    result: Err(crate::error::msg(format!("usage ownership: {e}"))),
-                    attempts: 0,
-                    duration_ms: 0,
-                    usage: vec![],
-                    model: String::new(),
-                    failures: vec![],
-                    harness: String::new(),
-                };
+                return Attempt::before_dispatch(
+                    crate::error::msg(format!("usage ownership: {e}")),
+                    0,
+                );
             }
         };
         let mut guard = CallGuard(Some(account.clone()));
-        let a = account
-            .scope(self.inner.attempt(prompt, tier, timeout, tools, on_text))
-            .await;
+        let mut a = if admission.is_err() || tokio::time::Instant::now() >= deadline {
+            Attempt::before_dispatch(
+                GatewayError::Timeout(TimeoutPhase::Queue).into(),
+                u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+            )
+        } else {
+            account
+                .scope(async {
+                    self.inner
+                        .attempt(
+                            prompt,
+                            tier,
+                            deadline.saturating_duration_since(tokio::time::Instant::now()),
+                            tools,
+                            on_text,
+                        )
+                        .await
+                })
+                .await
+        };
+        a.duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        if let Ok(printed) = &mut a.result {
+            printed.duration_ms = a.duration_ms;
+        }
         match account.finish(&a) {
             Ok(()) => guard.0 = None,
             Err(e) => tracing::warn!("stats: gateway result not recorded: {e}"),
@@ -263,9 +304,9 @@ mod tests {
     }
 
     fn fake() -> Arc<dyn ModelGateway> {
-        Arc::new(crate::Fallback {
+        Arc::new(crate::SingleModelGateway {
             one: Scripted::default(),
-            fast: vec!["busy".into(), "haiku".into()],
+            fast: vec!["haiku".into(), "busy".into()],
             smart: vec!["slow".into(), "broken".into()],
             models: None,
         })
@@ -343,7 +384,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_call_that_falls_back_is_one_row_with_two_attempts() {
+    async fn a_successful_call_is_one_usage_row_with_one_attempt() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         let gw = RecordingGateway::new(fake(), s.clone());
@@ -360,9 +401,9 @@ mod tests {
             Some(0.000829045),
             "the module budget figure is unchanged"
         );
-        assert_eq!(p.attempts, 2);
+        assert_eq!(p.attempts, 1);
         let r = rows(&s);
-        assert_eq!(r.len(), 1, "the 503 try spent nothing: {r:?}");
+        assert_eq!(r.len(), 1, "one planned request: {r:?}");
         assert_eq!(
             (
                 r[0].model.as_str(),
@@ -371,12 +412,12 @@ mod tests {
                 r[0].purpose.as_str(),
                 r[0].ws.as_str()
             ),
-            ("haiku", 2, true, "route", "default")
+            ("haiku", 1, true, "route", "default")
         );
         assert_eq!((r[0].tokens, r[0].cost), (haiku(), Some(0.000829045)));
         assert_eq!(
             r[0].detail,
-            json!({"scope": "main", "failures": ["busy: API Error: 503 upstream unavailable"], "call_id": r[0].detail["call_id"], "pending": false, "accounting_tokens": true})
+            json!({"scope": "main", "call_id": r[0].detail["call_id"], "pending": false, "accounting_tokens": true})
         );
         /* the daily cube agrees */
         let daily = steve_store::core_fixture::usage::gateway_daily(&s, Some("route"));
@@ -391,7 +432,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         let gw = RecordingGateway::new(fake(), s.clone());
-        // A timeout ends fallback before the next model.
         let e = gw
             .call(
                 "hi",
@@ -401,7 +441,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert_eq!(e.to_string(), "Command timed out after 1500 ms");
+        assert_eq!(e.to_string(), "网关在 first_byte 阶段超时");
         let r = rows(&s);
         assert_eq!(r.len(), 1, "{r:?}");
         assert_eq!(
@@ -419,7 +459,7 @@ mod tests {
         );
         assert_eq!(
             r[0].detail,
-            json!({"scope": "none", "failures": ["slow: [timeout] Command timed out after 1500 ms"], "call_id": r[0].detail["call_id"], "pending": false, "accounting_tokens": true})
+            json!({"scope": "none", "failures": ["slow: 网关在 first_byte 阶段超时"], "call_id": r[0].detail["call_id"], "pending": false, "accounting_tokens": true})
         );
         let daily = steve_store::core_fixture::usage::gateway_daily(&s, None);
         assert_eq!(daily.failures, 1);
@@ -447,13 +487,13 @@ mod tests {
         .unwrap();
         assert_eq!(
             (o.text.as_str(), o.cost_usd, o.attempts),
-            ("ok", Some(0.000829045), 2)
+            ("ok", Some(0.000829045), 1)
         );
         assert_eq!(o.usage.last().map(|u| u.tokens), Some(haiku()));
         /* a chat answer, streamed */
         let seen = std::sync::Mutex::new(0);
         let fast_only = RecordingGateway::new(
-            Arc::new(crate::Fallback {
+            Arc::new(crate::SingleModelGateway {
                 one: Scripted::default(),
                 fast: vec!["haiku".into()],
                 smart: vec!["haiku".into()],
@@ -507,7 +547,10 @@ mod tests {
                 model.to_string(),
                 effort.map(str::to_string),
                 call.harness.to_string(),
-                call.timeout.as_millis(),
+                call.spec
+                    .deadline
+                    .saturating_duration_since(tokio::time::Instant::now())
+                    .as_millis(),
                 on_text.is_some(),
             ));
             let (reply, usage) = match model {
@@ -524,12 +567,12 @@ mod tests {
                     Err(crate::error::msg("API Error: 503 upstream unavailable")),
                     vec![],
                 ),
-                "tool" => (Err(crate::error::CoreError::NeedsTools), vec![]),
+                "tool" => (
+                    Err(steve_modules::gateway::GatewayError::NeedsTools.into()),
+                    vec![],
+                ),
                 "slow" => (
-                    Err(crate::error::msg(format!(
-                        "Command timed out after {} ms",
-                        call.timeout.as_millis()
-                    ))),
+                    Err(GatewayError::Timeout(TimeoutPhase::FirstByte).into()),
                     vec![],
                 ),
                 _ => (
@@ -542,68 +585,36 @@ mod tests {
             if let (Some(on_text), Ok((text, _))) = (on_text, &reply) {
                 on_text(text);
             }
-            let timed_out = model == "slow";
             crate::gateway::Tried {
                 reply,
                 usage,
-                timed_out,
                 reported_model: None,
             }
         }
     }
 
-    /// A model that reached for a tool the call does not allow, for a caller that hands such a
-    /// request on (a trigger word's answer): the chain ends like on a timeout, the next model has
-    /// no tools either.
     #[tokio::test]
-    async fn a_request_that_needs_tools_is_not_tried_on_the_next_model_when_handed_on() {
-        let scripted = crate::gateway::Fallback {
-            one: Scripted {
-                tries: Default::default(),
-            },
-            fast: vec!["tool".into(), "haiku".into()],
-            smart: vec![],
-            models: None,
-        };
-        let a = steve_modules::gateway::hands_on_needs_tools(scripted.attempt(
-            "hi",
-            Tier::Fast,
-            Duration::from_secs(10),
-            &ThinkTools::None,
-            None,
-        ))
-        .await;
-        assert!(matches!(a.result, Err(crate::error::CoreError::NeedsTools)));
-        assert_eq!(a.attempts, 1);
-        assert_eq!(tries(&scripted).len(), 1, "haiku is not tried");
-    }
-
-    /// Every other caller (the router, mail triage, a summary, a config draft) falls back to the
-    /// next model as for any fast error: that one may answer without a tool.
-    #[tokio::test]
-    async fn a_request_that_needs_tools_falls_back_for_other_callers() {
-        let scripted = crate::gateway::Fallback {
-            one: Scripted {
-                tries: Default::default(),
-            },
-            fast: vec!["tool".into(), "haiku".into()],
-            smart: vec![],
-            models: None,
-        };
-        let a = crate::stats::purpose(
-            "route",
-            scripted.attempt(
-                "hi",
-                Tier::Fast,
-                Duration::from_secs(10),
-                &ThinkTools::None,
-                None,
-            ),
-        )
-        .await;
-        assert_eq!(a.result.expect("haiku answers").model, "haiku");
-        assert_eq!(a.attempts, 2);
-        assert_eq!(tries(&scripted).len(), 2);
+    async fn tool_refusal_and_fast_failures_never_route_to_a_second_model() {
+        for first in ["tool", "busy"] {
+            let scripted = crate::gateway::SingleModelGateway {
+                one: Scripted::default(),
+                fast: vec![first.into(), "haiku".into()],
+                smart: vec![],
+                models: None,
+            };
+            let a = scripted
+                .attempt(
+                    "hi",
+                    Tier::Fast,
+                    Duration::from_secs(10),
+                    &ThinkTools::None,
+                    None,
+                )
+                .await;
+            assert!(a.result.is_err());
+            assert_eq!(a.attempts, 1);
+            assert_eq!(tries(&scripted).len(), 1);
+        }
     }
 
     /// The adapter a call that chose none runs on.
@@ -611,7 +622,7 @@ mod tests {
         steve_harness_spec::DEFAULT_ADAPTER.0.into()
     }
 
-    fn tries(f: &crate::gateway::Fallback<Scripted>) -> Vec<Try> {
+    fn tries(f: &crate::gateway::SingleModelGateway<Scripted>) -> Vec<Try> {
         f.one.tries.lock().unwrap().clone()
     }
 
@@ -845,8 +856,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn consumed_failure_and_retry_keep_usage_and_count_metadata_on_the_first_model() {
-        let gateway = crate::gateway::Fallback {
+    async fn consumed_failure_keeps_all_usage_without_a_retry() {
+        let gateway = crate::gateway::SingleModelGateway {
             one: Metered,
             fast: vec!["failed".into(), "answer".into()],
             smart: vec![],
@@ -861,30 +872,24 @@ mod tests {
                 None,
             )
             .await;
-        assert!(a.result.is_ok());
-        assert_eq!(a.attempts, 2);
+        assert!(a.result.is_err());
+        assert_eq!(a.attempts, 1);
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         record(&s, &a, &CallTag::default()).unwrap();
         let r = rows(&s);
-        assert_eq!(r.len(), 2);
+        assert_eq!(r.len(), 1);
         assert_eq!(
             (r[0].model.as_str(), r[0].tokens.output, r[0].attempts),
-            ("failed", Some(6), 2)
-        );
-        assert_eq!(
-            (r[1].model.as_str(), r[1].tokens.output, r[1].attempts),
-            ("answer", Some(12), 1)
+            ("failed", Some(6), 1)
         );
         assert!(r[0].duration_ms.is_some());
-        assert_eq!(r[1].duration_ms, None);
         assert_eq!(
             counts(&s),
-            (2, 0, 18, 9),
+            (1, 1, 6, 3),
             "reasoning is already part of output"
         );
         assert_eq!(r[0].detail["failures"].as_array().unwrap().len(), 1);
-        assert!(r[1].detail.get("failures").is_none());
     }
 
     #[test]
