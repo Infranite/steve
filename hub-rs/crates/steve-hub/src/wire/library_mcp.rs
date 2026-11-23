@@ -308,12 +308,14 @@ impl LibraryMcp {
     /// Closes the connections no call used for [`IDLE`], and those of servers changed since.
     pub fn sweep(&self) {
         let ids: Vec<String> = self.conns.lock().unwrap().keys().cloned().collect();
-        let current = self.caps.vault().store().reader(|c| {
+        let current = self.caps.vault().store().read(|c| {
             ids.iter()
                 .map(|id| {
                     Ok((
                         id.clone(),
-                        steve_store::caps::mcp::get(c, id)?.map(|s| s.updated),
+                        steve_store::caps::mcp::Servers(c)
+                            .get(id)?
+                            .map(|s| s.updated),
                     ))
                 })
                 .collect::<Result<HashMap<_, _>, steve_store::StoreError>>()

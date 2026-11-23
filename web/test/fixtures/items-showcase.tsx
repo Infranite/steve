@@ -2,12 +2,14 @@ import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { Toaster } from "@/components/ui/toaster"
 import { stats } from "../../src/api/stats"
-import { api, type RDecision, type RItem, type RItemDetail, type RSession, type State } from "../../src/api"
+import { api, type RDecision, type RItem, type RItemDetail, type RSession, type Shell } from "../../src/api"
 import { SidebarProvider, SidebarInset } from "../../src/components/ui/sidebar"
 import { TooltipProvider } from "../../src/components/ui/tooltip"
 import { setLang } from "../../src/i18n"
 import { refresh, useStore } from "../../src/store"
-import { InboxView, ItemsView, ItemView } from "../../src/views"
+import { InboxView } from "../../src/inbox"
+import { ItemsView } from "../../src/items-list"
+import { ItemView } from "../../src/views"
 
 /* the items module in states the dev Hub rarely has at once: an item waiting on two decisions with plan rounds,
  * dependencies, tags and two children; an inbox with decisions; every status in the list and board.
@@ -60,10 +62,10 @@ const state = { version: "test", web_version: "test", workspace: { id: "default"
   projects: [{ id: "p1", workspace_id: "default", name: "Steve", path: "/srv/code/steve", description: "", kind: "git", worktree: true, default_bot: "dev", release: null, archived: false, device_id: "hub", created: 0, updated: 0 }],
   tags: [{ id: "t1", name: "设计", cat: "领域", desc: "视觉与交互" }, { id: "t2", name: "Web", cat: "领域", desc: "web 客户端" }, { id: "t3", name: "原型", cat: "领域", desc: "" }], tagUses: {}, thread: [], settings: {},
   sessions: [sess("s1", 1, "ended", "ST-9"), sess("s2", 2, "running", "ST-9"), sess("s3", 1, "running", "ST-12"), sess("s4", 1, "running", "ST-4")],
-  devices: [{ id: "hub", name: "Hub", roles: ["Hub"], os: "", version: "", status: "online", max_sessions: 4, seen: 0, created: 0 }], runtimes: [] } as unknown as State
-api.state = async () => structuredClone(state)
+  devices: [{ id: "hub", name: "Hub", roles: ["Hub"], os: "", version: "", status: "online", max_sessions: 4, seen: 0, created: 0 }], runtimes: [] } as unknown as Shell
+api.shell = async () => structuredClone(state)
 api.item = async (id: string) => structuredClone(detail(items.find((i) => i.id === id) ?? items[0]))
-api.events = async () => []
+api.transcript = async () => ({ events: [], next: null })
 /* no Hub behind the fixture: the item's figures are simply absent (a 401 would send the page to sign in) */
 stats.item = async () => { throw new Error("no stats in the fixture") }
 stats.tree = async () => { throw new Error("no stats in the fixture") }

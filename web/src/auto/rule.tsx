@@ -8,9 +8,9 @@ import { Input } from "@/components/ui/input"
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
-import { Page, Row, Segmented, StatusDot, Meta, Empty, Composer, go, Panel, SectionLabel, Pill } from "@/ui"
+import { Page, Row, Segmented, StatusDot, Meta, Empty, go, Panel, SectionLabel, Pill } from "@/ui"
+import { Composer } from "@/composer"
 import { tm, toast } from "@/store"
-import { Unwired } from "@/unwired"
 import { flowApi, useLoad, errText, type Flow, type GNode, type Graph, type Run } from "@/api/flow"
 import { HubError } from "@/api"
 import { traceOf } from "@/auto/trace"
@@ -48,7 +48,6 @@ export function RuleView({ id }: { id: string }) {
   /* #/auto/rule/<id>?run=<run>: show that run's path */
   useEffect(() => { const r = runParam(); if (r) void openRun(r) }, [id])
 
-  if (L.unwired) return <Unwired id="auto" />
   if (L.error && !f) return L.error instanceof HubError && L.error.status === 404
     ? <Page title={t("auto:rule.page")} back={BACK}><Empty title={t("auto:rule.notFound")} sub={t("auto:rule.notFoundSub")} /></Page>
     : <Failed title={t("auto:rule.page")} back={BACK} msg={errText(L.error)} retry={() => void L.reload()} />

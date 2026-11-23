@@ -21,9 +21,9 @@
 
 use std::collections::HashMap;
 
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use steve_store::Store;
 use steve_store::base::Viewer;
 
 use crate::conversations::{MAIN_CONV, NO_REPLY, conv_space, out_state, shown_space};
@@ -49,7 +49,7 @@ const BOOKKEEPING: [&str; 3] = [
 const ERROR_CHARS: usize = 300;
 
 /// The newest a message may be and still be new for a viewer whose marker is `read_up_to`.
-fn new_since(read_up_to: Option<i64>, now: i64) -> i64 {
+pub(crate) fn new_since(read_up_to: Option<i64>, now: i64) -> i64 {
     read_up_to
         .unwrap_or(i64::MIN)
         .max(now.saturating_sub(UNREAD_HORIZON_MS))
@@ -59,23 +59,19 @@ fn new_since(read_up_to: Option<i64>, now: i64) -> i64 {
 /// [`UNREAD_MAX`]: received ones the user may see, live (not history read back), newer than the
 /// marker, not sent by the user themselves.
 pub fn unread(
-    c: &Connection,
+    r: &mut impl steve_store::Read,
     space: &str,
     user: &str,
     read_up_to: Option<i64>,
     now: i64,
 ) -> ChannelResult<i64> {
-    count_new(c, space, user, new_since(read_up_to, now), UNREAD_MAX)
-}
-
-fn count_new(c: &Connection, space: &str, user: &str, since: i64, cap: i64) -> ChannelResult<i64> {
-    let mut st = c.prepare_cached(&format!(
-        "SELECT count(*) FROM (SELECT 1 FROM chan_messages m
-           WHERE m.space_id = ?1 AND m.direction = 'in' AND m.history IS NULL AND m.created > ?3
-             AND NOT EXISTS (SELECT 1 FROM parties pp WHERE pp.id = m.sender_party_id AND pp.user_id = ?2)
-           LIMIT ?4)"
-    ))?;
-    Ok(st.query_row(params![space, user, since, cap], |r| r.get(0))?)
+    Ok(steve_store::channel_spaces::conversations::count_unseen(
+        r,
+        space,
+        user,
+        new_since(read_up_to, now),
+        UNREAD_MAX as u64,
+    )?)
 }
 
 /// What Steve did with a received message, as the record shows it.
@@ -224,24 +220,11 @@ struct Turns {
 }
 
 /// One message of a conversation as [`turns`] reads it.
-struct Row {
-    id: String,
-    author: String,
-    text: String,
-    item: Option<String>,
-    /// `meta.chan.message`: the channel message a turn stands for
-    chan: Option<String>,
-    /// `meta.chan_out.message`: the channel message an answer was sent as
-    out: Option<String>,
-    /// `meta.origin`: the turn an answer is to
-    origin: Option<String>,
-    /// `meta.error`
-    error: bool,
-}
+use steve_store::channel_message_repo::records::{self as repo, Turn};
 
 impl Turns {
     /// Takes in the rows of one conversation; `main`: they are your web conversation's.
-    fn add(&mut self, rows: Vec<Row>, main: bool) {
+    fn add(&mut self, rows: Vec<Turn>, main: bool) {
         for r in rows {
             if r.author == "me"
                 && let Some(cm) = r.chan
@@ -276,141 +259,83 @@ impl Turns {
     }
 }
 
-const ROW_COLS: &str = "id, author, text, item_id, json_extract(meta, '$.chan.message'),
-    json_extract(meta, '$.chan_out.message'), json_extract(meta, '$.origin'),
-    coalesce(json_extract(meta, '$.error'), 0)";
-
-fn row(r: &rusqlite::Row) -> rusqlite::Result<Row> {
-    Ok(Row {
-        id: r.get(0)?,
-        author: r.get(1)?,
-        text: r.get(2)?,
-        item: r.get(3)?,
-        chan: r.get(4)?,
-        out: r.get(5)?,
-        origin: r.get(6)?,
-        error: r.get::<_, i64>(7)? != 0,
-    })
+fn turns(r: &mut impl steve_store::Read, ws: &str, space: &str) -> ChannelResult<Turns> {
+    let mut turns = Turns::default();
+    turns.add(repo::channel_turns(r, ws, &conv_space(space))?, false);
+    turns.add(repo::web_turns(r, ws, MAIN_CONV, space)?, true);
+    Ok(turns)
 }
 
-/// The turns of space `space`: its conversation's, and those of its messages in your web conversation
-/// (only those turns and what Steve said to them are read from there).
-fn turns(c: &Connection, ws: &str, space: &str) -> ChannelResult<Turns> {
-    let mut t = Turns::default();
-    let mut st = c.prepare_cached(&format!(
-        "SELECT {ROW_COLS} FROM messages WHERE workspace_id = ? AND space = ? ORDER BY created, rowid"
-    ))?;
-    let rows = st
-        .query_map(params![ws, conv_space(space)], row)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    t.add(rows, false);
-    let mut st = c.prepare_cached(&format!(
-        "SELECT {ROW_COLS} FROM messages WHERE workspace_id = ?1 AND space = ?3 AND (
-            (author = 'me' AND json_extract(meta, '$.chan.space') = ?2)
-            OR (author = 'steve' AND json_extract(meta, '$.origin') IN (
-                SELECT id FROM messages WHERE workspace_id = ?1 AND space = ?3 AND author = 'me'
-                   AND json_extract(meta, '$.chan.space') = ?2))) ORDER BY created, rowid"
-    ))?;
-    let rows = st
-        .query_map(params![ws, space, MAIN_CONV], row)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    t.add(rows, true);
-    Ok(t)
+fn decision_open(
+    r: &mut impl steve_store::Read,
+    ws: &str,
+    id: &str,
+) -> ChannelResult<Option<bool>> {
+    Ok(steve_store::decision_repo::get(r, id)?
+        .filter(|decision| decision.workspace_id == ws)
+        .map(|decision| decision.status == "open"))
 }
 
-/// Is decision `id` open (`Some(true)`), resolved (`Some(false)`) or unknown?
-fn decision_open(c: &Connection, ws: &str, id: &str) -> ChannelResult<Option<bool>> {
-    Ok(c.query_row(
-        "SELECT status = 'open' FROM decisions WHERE id = ? AND workspace_id = ?",
-        params![id, ws],
-        |r| r.get(0),
-    )
-    .optional()?)
-}
-
-/// The last error the provider gave for sending message `id`.
-fn send_error(c: &Connection, id: &str) -> ChannelResult<Option<String>> {
-    Ok(c.query_row(
-        "SELECT nullif(last_error, '') FROM chan_send_state WHERE message_id = ?",
-        [id],
-        |r| r.get(0),
-    )
-    .optional()?
-    .flatten())
-}
-
-/// Why sent message `id` did not go out: the provider's last error while it is unsettled, else
-/// the question of the card it failed with (what 待处理 shows).
-pub(crate) fn out_error(c: &Connection, ws: &str, id: &str) -> ChannelResult<Option<String>> {
-    if let Some(e) = send_error(c, id)? {
-        return Ok(Some(e));
+pub(crate) fn linked_decision(
+    r: &mut impl steve_store::Read,
+    ws: &str,
+    message: &str,
+) -> ChannelResult<Option<steve_store::Decision>> {
+    let Some(row) = steve_store::channel_message_repo::outbound::approval(r, ws, message)? else {
+        return Ok(None);
+    };
+    match row.decision {
+        Some(decision) => Ok(steve_store::decision_repo::get(r, &decision)?),
+        None => Ok(None),
     }
-    Ok(c.query_row(
-        "SELECT d.question FROM chan_messages m JOIN decisions d ON d.id = m.decision_id AND d.kind = ?3
-          WHERE m.id = ?1 AND m.workspace_id = ?2",
-        params![id, ws, steve_store::base::DecisionKind::Fail.code()],
-        |r| r.get(0),
-    )
-    .optional()?)
 }
 
-/// The open card a failed send waits on (retry or discard).
-fn open_fail(c: &Connection, ws: &str, id: &str) -> ChannelResult<Option<String>> {
-    Ok(c.query_row(
-        "SELECT d.id FROM chan_messages m JOIN decisions d ON d.id = m.decision_id AND d.status = 'open'
-          WHERE m.id = ?1 AND m.workspace_id = ?2",
-        params![id, ws],
-        |r| r.get(0),
-    )
-    .optional()?)
+/// The provider's last error, or the question on its failure card.
+pub(crate) fn out_error(
+    r: &mut impl steve_store::Read,
+    ws: &str,
+    id: &str,
+) -> ChannelResult<Option<String>> {
+    if let Some(error) = steve_store::channel_sends::last_error(r, id)? {
+        return Ok(Some(error));
+    }
+    Ok(linked_decision(r, ws, id)?
+        .filter(|decision| decision.kind == steve_store::base::DecisionKind::Fail.code())
+        .map(|decision| decision.question))
 }
 
-/// The event of a received message: `(outcome, label, reason, item, decision)`.
-type Event = (String, String, String, Option<String>, Option<String>);
-
-fn event_of(c: &Connection, ws: &str, id: &str) -> ChannelResult<Option<Event>> {
-    Ok(c.query_row(
-        "SELECT outcome, outcome_label, reason, work_item_id, decision_id FROM ext_events
-          WHERE id = ? AND workspace_id = ?",
-        params![id, ws],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-    )
-    .optional()?)
+fn open_fail(r: &mut impl steve_store::Read, ws: &str, id: &str) -> ChannelResult<Option<String>> {
+    Ok(linked_decision(r, ws, id)?
+        .filter(|decision| decision.status == "open")
+        .map(|decision| decision.id))
 }
 
 /// `handling` of received message `m`: `{state, label, reason, error, item, decision, main_turn}`;
 /// `decision` is an open one waiting for you, `main_turn` its turn in your web conversation.
 fn received(
-    c: &Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     m: &messages::ChanMessage,
     t: &Turns,
 ) -> ChannelResult<Value> {
     let ev = match &m.event_id {
-        Some(e) => event_of(c, ws, e)?,
+        Some(e) => steve_store::SignalRows(r).triage(ws, e)?,
         None => None,
     };
-    let reaction = crate::reactions::get(c, &m.id)?;
+    let reaction = steve_store::channel_message_repo::reactions::get(r, &m.id)?;
     let main_turn = t.main_turn_of.get(&m.id);
     let turn = t.turn_of.get(&m.id).or(main_turn);
-    let answer_id: Option<String> = c
-        .query_row(
-            "SELECT id FROM chan_messages WHERE answer_to = ?1 AND workspace_id = ?2
-             ORDER BY created DESC, rowid DESC LIMIT 1",
-            params![m.id, ws],
-            |r| r.get(0),
-        )
-        .optional()?;
+    let answer_id = steve_store::channel_message_repo::outbound::latest_answer(r, ws, &m.id)?;
     let answer = match &answer_id {
-        Some(a) => out_state(c, ws, a)?,
+        Some(a) => out_state(r, ws, a)?,
         None => None,
     };
     let mut decisions: Vec<String> = Vec::new();
     decisions.extend(m.decision_id.clone());
-    decisions.extend(ev.as_ref().and_then(|e| e.4.clone()));
+    decisions.extend(ev.as_ref().and_then(|e| e.decision.clone()));
     let (mut open, mut closed) = (None, false);
     for d in &decisions {
-        match decision_open(c, ws, d)? {
+        match decision_open(r, ws, d)? {
             Some(true) => open = open.or(Some(d.clone())),
             Some(false) => closed = true,
             None => {}
@@ -419,16 +344,16 @@ fn received(
     if let Some((_, Some(d))) = &answer {
         open = open.or(Some(d.clone()));
     } else if let Some(id) = &answer_id {
-        open = open.or(open_fail(c, ws, id)?);
+        open = open.or(open_fail(r, ws, id)?);
     }
     let turn_error = turn.and_then(|x| t.failed.get(x));
     let item = m
         .work_item_id
         .clone()
-        .or_else(|| ev.as_ref().and_then(|e| e.3.clone()))
+        .or_else(|| ev.as_ref().and_then(|e| e.item.clone()))
         .or_else(|| turn.and_then(|x| t.item_of.get(x)).cloned());
     let (outcome, label, reason) = match &ev {
-        Some((o, l, r, _, _)) => (Some(o.clone()), l.clone(), r.clone()),
+        Some(e) => (Some(e.outcome.clone()), e.label.clone(), e.reason.clone()),
         None => (None, String::new(), String::new()),
     };
     let facts = Facts {
@@ -450,7 +375,7 @@ fn received(
         Handling::Failed | Handling::Blocked | Handling::Unknown
     ) {
         match &answer_id {
-            Some(a) => out_error(c, ws, a)?.or_else(|| turn_error.cloned()),
+            Some(a) => out_error(r, ws, a)?.or_else(|| turn_error.cloned()),
             None => turn_error.cloned(),
         }
     } else {
@@ -472,79 +397,81 @@ fn received(
 /// `GET /conversations/:space/record`: a page of the space's record, oldest first, and the cursor of
 /// the page before it (`next`, `null` at the start).
 pub fn record(
-    c: &Connection,
+    store: &Store,
     ws: &str,
     viewer: &Viewer,
     conv: &str,
     q: &RecordQuery,
 ) -> ChannelResult<Value> {
-    let space = shown_space(c, ws, viewer, conv)?;
-    let limit = q.limit.unwrap_or(RECORD_PAGE);
-    if !(1..=RECORD_MAX).contains(&limit) {
-        return Err(steve_modules::ApiError::invalid("limit"));
-    }
-    let cursor = match (q.before, q.before_id.as_deref()) {
-        (Some(at), Some(id)) => Some((at, id)),
-        (None, None) => None,
-        _ => return Err(steve_modules::ApiError::invalid("before")),
-    };
-    let mut page = messages::page_before(c, space, &viewer.user, cursor, limit + 1)?;
-    let has_more = page.len() > limit;
-    page.truncate(limit);
-    page.reverse();
-    let t = turns(c, ws, space)?;
-    let mut out = Vec::with_capacity(page.len());
-    for m in &page {
-        let mut v = serde_json::to_value(m).map_err(steve_modules::ApiError::from)?;
-        if m.direction == "in" {
-            v["turn"] = json!(t.turn_of.get(&m.id));
-            v["handling"] = received(c, ws, m, &t)?;
-        } else {
-            v["turn"] = json!(t.said_by.get(&m.id));
-            let (status, mut decision) =
-                out_state(c, ws, &m.id)?.unwrap_or_else(|| (m.status.clone(), None));
-            let error = if matches!(status.as_str(), "failed" | "blocked" | "unknown") {
-                if decision.is_none() {
-                    decision = open_fail(c, ws, &m.id)?;
-                }
-                out_error(c, ws, &m.id)?
-            } else {
-                None
-            };
-            v["out"] = json!({"status": status, "decision": decision, "error": error});
+    store.read(|r| {
+        let space = shown_space(r, ws, viewer, conv)?;
+        let limit = q.limit.unwrap_or(RECORD_PAGE);
+        if !(1..=RECORD_MAX).contains(&limit) {
+            return Err(steve_modules::ApiError::invalid("limit"));
         }
-        out.push(v);
-    }
-    let next = if has_more {
-        page.first()
-            .map(|m| json!({"before": m.created, "before_id": m.id}))
-    } else {
-        None
-    };
-    Ok(json!({"records": out, "has_more": has_more, "next": next}))
+        let cursor = match (q.before, q.before_id.as_deref()) {
+            (Some(at), Some(id)) => Some((at, id)),
+            (None, None) => None,
+            _ => return Err(steve_modules::ApiError::invalid("before")),
+        };
+        let mut page = messages::page_before(store, space, &viewer.user, cursor, limit + 1)?;
+        let has_more = page.len() > limit;
+        page.truncate(limit);
+        page.reverse();
+        let t = turns(r, ws, space)?;
+        let mut out = Vec::with_capacity(page.len());
+        for m in &page {
+            let mut v = serde_json::to_value(m).map_err(steve_modules::ApiError::from)?;
+            if m.direction == "in" {
+                v["turn"] = json!(t.turn_of.get(&m.id));
+                v["handling"] = received(r, ws, m, &t)?;
+            } else {
+                v["turn"] = json!(t.said_by.get(&m.id));
+                let (status, mut decision) =
+                    out_state(r, ws, &m.id)?.unwrap_or_else(|| (m.status.clone(), None));
+                let error = if matches!(status.as_str(), "failed" | "blocked" | "unknown") {
+                    if decision.is_none() {
+                        decision = open_fail(r, ws, &m.id)?;
+                    }
+                    out_error(r, ws, &m.id)?
+                } else {
+                    None
+                };
+                v["out"] = json!({"status": status, "decision": decision, "error": error});
+            }
+            out.push(v);
+        }
+        let next = if has_more {
+            page.first()
+                .map(|m| json!({"before": m.created, "before_id": m.id}))
+        } else {
+            None
+        };
+        Ok(json!({"records": out, "has_more": has_more, "next": next}))
+    })
 }
 
 /// `POST /conversations/:space/read`: the viewer was shown the conversation up to `at` (never
 /// later than `now`); the marker only moves forward.
 pub fn mark_read(
-    c: &Connection,
+    w: &mut steve_store::W<'_>,
     ws: &str,
     viewer: &Viewer,
     conv: &str,
     at: i64,
     now: i64,
 ) -> ChannelResult<()> {
-    let id = shown_space(c, ws, viewer, conv)?;
+    let id = shown_space(w, ws, viewer, conv)?;
     if at < 0 {
         return Err(steve_modules::ApiError::invalid("at"));
     }
-    c.execute(
-        "INSERT INTO conversation_preferences (workspace_id, user_id, space_id, read_up_to) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(workspace_id, user_id, space_id)
-         DO UPDATE SET read_up_to = max(coalesce(read_up_to, 0), excluded.read_up_to)",
-        params![ws, viewer.user, id, at.min(now)],
-    )?;
-    Ok(())
+    Ok(steve_store::channel_spaces::conversations::advance_read(
+        w,
+        ws,
+        &viewer.user,
+        id,
+        at.min(now),
+    )?)
 }
 
 /// One entry of the channel switcher.
@@ -565,44 +492,34 @@ pub struct ChannelEntry {
 /// `GET /conversations/channels`: the channel accounts the viewer sees, oldest first.
 pub fn channels(
     ch: &Channels,
-    c: &Connection,
+    store: &steve_store::Store,
     viewer: &Viewer,
     now: i64,
 ) -> ChannelResult<Vec<ChannelEntry>> {
-    crate::conversations::member(c, &viewer.ws, viewer)?;
-    let mut st = c.prepare_cached(&format!(
-        "SELECT s.id, p.read_up_to FROM spaces s
-           LEFT JOIN conversation_preferences p ON p.workspace_id = s.workspace_id AND p.user_id = ?2 AND p.space_id = s.id
-          WHERE s.workspace_id = ?1 AND coalesce(p.closed, 0) = 0
-            AND EXISTS (SELECT 1 FROM space_identities li
-              WHERE li.space_id = s.id AND li.connection_id = ?3 AND li.left_at IS NULL)
-            AND (EXISTS (SELECT 1 FROM messages x WHERE x.workspace_id = ?1 AND x.space = 'chan:' || s.id)
-              OR EXISTS (SELECT 1 FROM chan_messages m WHERE m.space_id = s.id))"
-    ))?;
-    let mut out = Vec::new();
-    for a in crate::channel_accounts::list(ch, c, viewer)? {
-        let rows = st
-            .query_map(params![viewer.ws, viewer.user, a.connection_id], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut unread = 0;
-        for (space, read) in &rows {
-            if count_new(c, space, &viewer.user, new_since(*read, now), 1)? > 0 {
-                unread += 1;
+    use steve_store::channel_spaces::conversations as repo;
+    store.read(|r| {
+        crate::conversations::member(r, &viewer.ws, viewer)?;
+        let mut out = Vec::new();
+        for account in crate::channel_accounts::list(ch, r, viewer)? {
+            let rows = repo::channel_spaces(r, &viewer.ws, &viewer.user, &account.connection_id)?;
+            let mut unread = 0;
+            for (space, read) in &rows {
+                if repo::latest_unseen(r, space, &viewer.user, new_since(*read, now))?.is_some() {
+                    unread += 1;
+                }
             }
+            out.push(ChannelEntry {
+                connection: account.connection_id,
+                name: account.name,
+                provider: account.provider,
+                mode: account.mode,
+                status: account.status,
+                conversations: rows.len() as i64,
+                unread,
+            });
         }
-        out.push(ChannelEntry {
-            connection: a.connection_id,
-            name: a.name,
-            provider: a.provider,
-            mode: a.mode,
-            status: a.status,
-            conversations: rows.len() as i64,
-            unread,
-        });
-    }
-    Ok(out)
+        Ok(out)
+    })
 }
 
 #[cfg(test)]

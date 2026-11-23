@@ -7,7 +7,6 @@
 //! What isn't recorded is said to be unknown; nothing is inferred. The card is control information for
 //! the model; the tools still check every call on their own.
 
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
 use crate::spaces::SpaceRow;
@@ -66,50 +65,38 @@ pub struct Card {
 }
 
 /// The relation of contact `party` in workspace `ws`.
-pub fn relation(c: &Connection, ws: &str, party: Option<&str>) -> rusqlite::Result<Relation> {
+pub fn relation(
+    r: &mut impl steve_store::Read,
+    ws: &str,
+    party: Option<&str>,
+) -> steve_store::Result<Relation> {
     let Some(party) = party.filter(|p| !p.is_empty()) else {
         return Ok(Relation::Unknown);
     };
-    let role: Option<String> = c
-        .query_row(
-            "SELECT wm.role FROM parties p JOIN workspace_members wm ON wm.user_id = p.user_id AND wm.workspace_id = ?1
-              WHERE p.id = ?2 AND p.workspace_id = ?1",
-            params![ws, party],
-            |r| r.get(0),
-        )
-        .optional()?;
-    match role.as_deref() {
-        Some("owner") => return Ok(Relation::Owner),
-        Some(_) => return Ok(Relation::Colleague),
-        None => {}
+    if let Some(user) = steve_store::parties::linked_user(r, ws, party)?
+        && let Some(role) = steve_store::Members::new(r).role(ws, &user)?
+    {
+        return Ok(if role == "owner" {
+            Relation::Owner
+        } else {
+            Relation::Colleague
+        });
     }
-    // a current job (one that ended says nothing about now): the workspace's own organization makes a
-    // colleague, another one an outsider, named only when the whole workspace may see that organization
-    let job: Option<(String, Option<String>, String)> = c
-        .query_row(
-            "SELECT o.name, o.org_kind, o.visibility FROM links l
-               JOIN parties o ON o.id = l.object_id AND o.workspace_id = l.workspace_id
-              WHERE l.workspace_id = ?1 AND l.subject_type = 'party' AND l.subject_id = ?2
-                AND l.predicate = 'works_at' AND l.object_type = 'party' AND o.status = 'active'
-                AND json_extract(l.props, '$.to') IS NULL
-              ORDER BY l.created DESC LIMIT 1",
-            params![ws, party],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?;
-    Ok(match job {
-        Some((_, Some(kind), _)) if kind == "self" => Relation::Colleague,
-        Some((org, _, vis)) => Relation::External {
-            org: (vis == "workspace").then_some(org),
+    Ok(
+        match steve_store::link_repo::latest_active_employer(r, ws, party)? {
+            Some(org) if org.kind.as_deref() == Some("self") => Relation::Colleague,
+            Some(org) => Relation::External {
+                org: org.workspace_visible.then_some(org.name),
+            },
+            None => Relation::Unknown,
         },
-        None => Relation::Unknown,
-    })
+    )
 }
 
 /// The card for a turn in `space` sent by contact `asker` (with display name `asker_name`), Steve
 /// speaking as `speaker`.
 pub fn build(
-    c: &Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     space: &SpaceRow,
     asker: Option<&str>,
@@ -119,30 +106,20 @@ pub fn build(
 ) -> crate::ChannelResult<Card> {
     // members, Steve's own identities (bot accounts) left out; your own account is a connection too
     // (Steve reads your chats through it) and stays: you read the answer
-    let mut st = c.prepare_cached(
-        "SELECT a.party_id, coalesce(nullif(a.display_name, ''), p.name, a.handle_display)
-           FROM space_members sm JOIN accounts a ON a.id = sm.account_id LEFT JOIN parties p ON p.id = a.party_id
-          WHERE sm.space_id = ?1 AND a.kind NOT IN ('app_bot', 'bot')
-          ORDER BY sm.joined",
-    )?;
-    let members = st
-        .query_map(params![space.id], |r| {
-            Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let members = steve_store::channel_spaces::members::people(r, &space.id)?;
     // the provider counts people (Feishu `user_count`): set against the people recorded
     let recorded = members.len() as i64;
     let mut others = vec![];
-    for (party, name) in &members {
-        if asker.is_some() && party.as_deref() == asker {
+    for member in members {
+        if asker.is_some() && member.party.as_deref() == asker {
             continue;
         }
         others.push(Person {
-            name: name.clone(),
-            relation: relation(c, ws, party.as_deref())?,
+            name: member.name,
+            relation: relation(r, ws, member.party.as_deref())?,
         });
     }
-    let asker_rel = relation(c, ws, asker)?;
+    let asker_rel = relation(r, ws, asker)?;
     let may_start = asker_rel == Relation::Owner;
     let asker = asker.map(|_| Person {
         name: if asker_name.trim().is_empty() {
@@ -154,7 +131,7 @@ pub fn build(
     });
     let group = space.kind != "dm";
     Ok(Card {
-        place: crate::spaces::display_title(c, space)?,
+        place: crate::spaces::display_title(r, space)?,
         group,
         asker,
         others,

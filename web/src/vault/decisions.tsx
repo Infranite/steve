@@ -1,3 +1,4 @@
+import type { ModuleCardSubject } from "@/decision-options"
 /* 待处理 cards of the vault and connections (accounts-vault.md §4.3, §2.2, §8):
  * - `secret_use` (approve): “<Bot> 想用「<条目>」：<用途>”, the command / directory / injection shown verbatim; once, a
  *   1 / 8 / 24 h grant, or deny. High items and bank cards only offer once / deny (the Hub sends the options).
@@ -60,7 +61,7 @@ function ConnectionCard({ w, act, busy, head, foot }: P) {
   </>
 }
 
-export const MODULE_CARDS: Record<string, (p: P) => ReactNode> = {
+export const MODULE_CARDS: Record<ModuleCardSubject, (p: P) => ReactNode> = {
   secret_use: (p) => <SecretUseCard {...p} />,
   connection: (p) => <ConnectionCard {...p} />,
   space: (p) => <NewSpaceCard {...p} />,

@@ -8,7 +8,7 @@
 use rusqlite::{Connection, params};
 
 use super::{Cached, must, one};
-use crate::{Result, StoreError, Tag, W, now, uid};
+use crate::{Result, StoreError, Tag, WriteConn as W, now, uid};
 
 /// The tag category the six item categories live in, and only they.
 pub const KIND_CAT: &str = "类型";

@@ -4,16 +4,15 @@ import { XIcon } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { people } from "@/api/people"
-import { ContactAvatar, act, label, useLoad, usePeopleOn } from "@/people/common"
+import { ContactAvatar, act, label, useLoad } from "@/people/common"
 import { useT } from "@/i18n"
 
 const href = (type: string, id: string) => (type === "team" ? "#/teams/" : type === "org" ? "#/orgs/" : "#/contacts/") + id
 
-/** the 联系人 row of the item page; null when the Hub has no contacts module (`Prop` hides with it) */
+/** the 联系人 row of the item page */
 export function ItemPeopleProp({ id, Prop }: { id: string; Prop: (p: { label: string; children: React.ReactNode }) => React.ReactNode }) {
   const t = useT()
-  const on = usePeopleOn()
-  return on ? <>{Prop({ label: t("people:shared.contacts"), children: <ItemPeople id={id} /> })}</> : null
+  return <>{Prop({ label: t("people:shared.contacts"), children: <ItemPeople id={id} /> })}</>
 }
 
 export function ItemPeople({ id }: { id: string }) {

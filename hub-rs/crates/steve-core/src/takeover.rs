@@ -720,15 +720,20 @@ impl Tx<'_> {
             {
                 if op.evidence["own"] != json!(false) {
                     self.follow_pr(&op.id, &slug, &branch)?;
-                    self.db().store().transaction(|tx| {
-                        steve_store::operation_set_in(tx, &op.id, "pending", &json!({"own": false}))
+                    self.db().store().write(|tx| {
+                        steve_store::operation_repo::set(
+                            tx,
+                            &op.id,
+                            "pending",
+                            &json!({"own": false}),
+                        )
                     })?;
                 }
                 return Ok(Some(()));
             }
             let note = "事项分支上没有自己的提交，没有要合并的改动";
-            self.db().store().transaction(|tx| {
-                steve_store::operation_set_in(tx, &op.id, "waived", &json!({"note": note}))
+            self.db().store().write(|tx| {
+                steve_store::operation_repo::set(tx, &op.id, "waived", &json!({"note": note}))
             })?;
             self.db().timeline_add(
                 &i.id,
@@ -770,7 +775,7 @@ impl Tx<'_> {
             }
             self.db()
                 .store()
-                .transaction(|tx| steve_store::operation_set_in(tx, &op.id, "pending", &carry))?;
+                .write(|tx| steve_store::operation_repo::set(tx, &op.id, "pending", &carry))?;
             if open {
                 self.db().timeline_add(
                     &i.id,
@@ -834,7 +839,7 @@ impl Tx<'_> {
             });
             self.db()
                 .store()
-                .transaction(|tx| steve_store::operation_set_in(tx, &op.id, "succeeded", &ev))?;
+                .write(|tx| steve_store::operation_repo::set(tx, &op.id, "succeeded", &ev))?;
             self.db().timeline_add(
                 &i.id,
                 "steve",
@@ -854,8 +859,8 @@ impl Tx<'_> {
         /* not there yet: the agent hears once what is missing; Steve keeps looking while it waits and,
          * on GitHub, follows the branch's pull request (`pull`: CI, conflicts, Steve's own merge) */
         if op.evidence.get("asked").is_none() {
-            self.db().store().transaction(|tx| {
-                steve_store::operation_set_in(tx, &op.id, "pending", &json!({"asked": true}))
+            self.db().store().write(|tx| {
+                steve_store::operation_repo::set(tx, &op.id, "pending", &json!({"asked": true}))
             })?;
             self.db().item_patch(
                 &i.id,
@@ -922,8 +927,8 @@ impl Tx<'_> {
         if op.evidence["unread_told"] == json!(true) {
             return Ok(());
         }
-        self.db().store().transaction(|tx| {
-            steve_store::operation_set_in(
+        self.db().store().write(|tx| {
+            steve_store::operation_repo::set(
                 tx,
                 &op.id,
                 "pending",
@@ -1091,7 +1096,7 @@ impl Tx<'_> {
         let changed = self
             .db()
             .store()
-            .transaction(|tx| steve_store::operation_set_in(tx, op, status, &ev))?;
+            .write(|tx| steve_store::operation_repo::set(tx, op, status, &ev))?;
         self.st.build_checked.remove(op);
         if !changed {
             return Ok(());
@@ -1371,12 +1376,14 @@ mod tests {
                     assert!(k.core.tx().dependency_waiting(&item).unwrap());
                 }
 
-                k.db()
-                    .exec(
-                        "UPDATE items SET status='done',phase='closed',outcome='completed' WHERE id=?",
-                        &[&dep],
-                    )
-                    .unwrap();
+                steve_store::core_fixture::item(
+                    k.db().store(),
+                    &dep,
+                    steve_store::core_fixture::ItemState::Finished {
+                        status: "done",
+                        outcome: "completed",
+                    },
+                );
                 k.core.lifecycle_tick().unwrap();
                 assert_eq!(k.status(&item).0, "run");
                 assert_eq!(k.rt.prompts_of(&sid).len(), 1);

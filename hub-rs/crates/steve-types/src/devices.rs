@@ -6,6 +6,37 @@ use serde::Serialize;
 
 pub const REASONS: &[ReasonSet] = &[];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum NodeOfflineReason {
+    AwaitingConfirmation,
+    Revoked,
+    ProtocolMismatch,
+    HandshakeFailed,
+    NeverConnected,
+    Unreachable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NodeOffline {
+    pub reason: NodeOfflineReason,
+    /// Unix milliseconds of the last observation (or when the link became expected).
+    pub since: i64,
+    pub duration_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum HarnessDegradedReason {
+    AuthenticationRequired,
+    AdapterMissing,
+    InitializeFailed,
+    SessionUnavailable,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, strum::EnumCount)]
 #[serde(tag = "type")]
 #[cfg_attr(test, derive(ts_rs::TS))]

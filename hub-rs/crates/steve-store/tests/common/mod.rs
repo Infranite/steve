@@ -2,6 +2,7 @@
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use steve_store::testkit::SqliteFixtures;
 
 use rusqlite::Connection;
 use steve_store::{BusEvent, FnPublisher, Store};
@@ -109,7 +110,7 @@ pub fn prune_outbox(store: &Store, now: i64, keep: i64) -> steve_store::Result<u
     let mut after = None;
     let mut total = 0;
     loop {
-        let report = store.with_conn(|c| {
+        let report = store.fixture_write(|c| {
             Ok(r::run_slice(
                 c,
                 &policy,

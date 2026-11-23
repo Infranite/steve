@@ -13,7 +13,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::Router;
 use data_encoding::BASE64;
-use rusqlite::params;
 use serde_json::{Value, json};
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, call, caller};
 use steve_modules::vault::grants::GRANT_HIGH;
@@ -24,6 +23,9 @@ use steve_modules::vault::mcp::{self, ToolOut};
 use steve_modules::vault::r#use::{NO_SUCH, SUBJECT, denied_message};
 use steve_modules::vault::{SecretUses, SessionSink, UseCx, Vault, use_api};
 use steve_modules::{Modules, Registry, decisions};
+use steve_store::secret_uses::{SecretUses as UseRows, UseRecord};
+use steve_store::testkit::vault as fixtures;
+use steve_store::{DecisionRows, GrantRows, NewVaultGrant};
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
@@ -142,33 +144,18 @@ impl Env {
         let mut reg = Registry::new();
         reg.decision(SUBJECT, uses.decision_handler());
         let modules = Modules::new(store.clone(), env.gateway.clone(), reg);
-        store
-            .with_conn(|c| {
-                c.execute(
-                    "INSERT INTO bots (id, workspace_id, name, harness, updated) VALUES (?, ?, '前端', 'claude', 1)",
-                    params![BOT, WS],
-                )?;
-                c.execute(
-                    "INSERT INTO bot_workspaces (bot_id, workspace_id, created) VALUES (?, ?, 1)",
-                    params![BOT, WS],
-                )?;
-                c.execute(
-                    "INSERT INTO projects (id, workspace_id, name, path, created, updated) VALUES (?, ?, 'steve', ?, 1, 1)",
-                    params![PROJECT, WS, work.path().to_string_lossy()],
-                )?;
-                c.execute(
-                    "INSERT INTO items (id, workspace_id, no, title, status, stage, bot_id, project_id, created, updated)
-                     VALUES (?, ?, 1, '推送分支', 'run', '执行', ?, ?, 1, 1)",
-                    params![WORK_ITEM, WS, BOT, PROJECT],
-                )?;
-                c.execute(
-                    "INSERT INTO sessions (id, workspace_id, item_id, bot_id, harness, cwd, status, created, updated)
-                     VALUES (?, ?, ?, ?, 'claude', ?, 'running', 1, 1)",
-                    params![SESSION, WS, WORK_ITEM, BOT, work.path().to_string_lossy()],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        fixtures::seed_use_context(
+            &store,
+            &fixtures::UseContext {
+                ws: WS,
+                bot: BOT,
+                item: WORK_ITEM,
+                project: PROJECT,
+                session: SESSION,
+                workdir: &work.path().to_string_lossy(),
+            },
+        )
+        .unwrap();
         uses.start();
         let r = use_api::routes(vault.clone());
         Self {
@@ -253,26 +240,24 @@ impl Env {
         mcp::call(&self.uses, &self.cx(), name, &args).await
     }
 
-    fn q<T: rusqlite::types::FromSql>(&self, sql: &str, p: impl rusqlite::Params) -> T {
+    fn use_row(&self, id: &str) -> UseRecord {
         self.env
             .store()
-            .with_conn(|c| Ok(c.query_row(sql, p, |r| r.get(0))?))
+            .read(|r| UseRows(r).get(id))
+            .unwrap()
             .unwrap()
     }
 
     fn open_decision(&self, use_id: &str) -> steve_store::Decision {
         self.env
             .store()
-            .reader(|c| steve_store::base::decisions::open_for(c, WS, SUBJECT, use_id))
+            .read(|r| DecisionRows(r).open_for(WS, SUBJECT, use_id))
             .unwrap()
             .expect("open decision")
     }
 
     fn last_use(&self) -> String {
-        self.q(
-            "SELECT id FROM secret_uses ORDER BY created DESC, rowid DESC LIMIT 1",
-            [],
-        )
+        fixtures::latest_use(self.env.store()).unwrap()
     }
 
     fn answer(&self, use_id: &str, choice: &str) -> Result<steve_store::Decision, String> {
@@ -338,7 +323,7 @@ async fn ask_then_grant_then_direct_run() {
             workdir.display()
         )
     );
-    let status: String = e.q("SELECT status FROM secret_uses WHERE id = ?", [&su]);
+    let status: String = e.use_row(&su).status;
     assert_eq!(status, "pending");
     assert_eq!(e.uses.waiting(), 1);
 
@@ -352,29 +337,16 @@ async fn ask_then_grant_then_direct_run() {
             BASE64.encode(TOKEN.as_bytes())
         )
     );
-    let (status, code): (String, i64) = e
-        .env
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT status, exit_code FROM secret_uses WHERE id = ?",
-                [&su],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?)
-        })
-        .unwrap();
+    let row = e.use_row(&su);
+    let (status, code) = (row.status, row.exit_code.unwrap());
     assert_eq!((status.as_str(), code), ("ok", 0));
-    let (scope, until): (String, i64) = e
+    let grant = e
         .env
         .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT scope, until FROM grants WHERE resource_id = ?",
-                [&item],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?)
-        })
-        .unwrap();
+        .read(|r| GrantRows(r).active_for_vault(WS, &item, steve_store::now()))
+        .unwrap()
+        .remove(0);
+    let (scope, until) = (grant.scope.to_string(), grant.until);
     assert_eq!(scope, json!({"project_id": PROJECT}).to_string());
     let left = until - steve_store::now();
     assert!(left > 3_590_000 && left <= 3_600_000, "{left}");
@@ -389,23 +361,11 @@ async fn ask_then_grant_then_direct_run() {
         .unwrap();
     assert!(!out.awaiting_approval);
     assert_eq!(out.text, format!("Exit code 4.\n{TOKEN}\n"));
-    let open: i64 = e.q(
-        "SELECT COUNT(*) FROM decisions WHERE subject_type = 'secret_use' AND status = 'open'",
-        [],
-    );
+    let open: i64 = fixtures::decision_count(e.env.store(), SUBJECT, Some("open")).unwrap();
     assert_eq!(open, 0);
     let su2 = e.last_use();
-    let (status, grant): (String, Option<String>) = e
-        .env
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT status, grant_id FROM secret_uses WHERE id = ?",
-                [&su2],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?)
-        })
-        .unwrap();
+    let row = e.use_row(&su2);
+    let (status, grant) = (row.status, row.grant_id);
     assert_eq!(status, "failed");
     assert!(grant.is_some());
 
@@ -438,7 +398,13 @@ async fn ask_then_grant_then_direct_run() {
     assert_eq!(code, 400);
 
     // revoking the grant: the next use asks again
-    let gid: String = e.q("SELECT id FROM grants WHERE resource_id = ?", [&item]);
+    let gid: String = e
+        .env
+        .store()
+        .read(|r| GrantRows(r).active_for_vault(WS, &item, steve_store::now()))
+        .unwrap()
+        .remove(0)
+        .id;
     let (code, body) = call(
         &e.r,
         Some(&caller(WS, ME)),
@@ -560,13 +526,18 @@ async fn high_items_and_bank_cards_always_ask() {
     // even a grant row written behind the API's back is not honoured
     e.env
         .store()
-        .with_conn(|c| {
-            c.execute(
-                "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, scope, until, created_by, created)
-                 VALUES ('gr_forged', ?, 'bot', ?, 'secret.use', 'vault_item', ?, ?, ?, 'x', 1)",
-                params![WS, BOT, card, json!({"project_id": PROJECT}).to_string(), i64::MAX],
-            )?;
-            Ok(())
+        .write(|w| {
+            GrantRows(w).insert_vault_grant(&NewVaultGrant {
+                id: "gr_forged",
+                ws: WS,
+                bot: BOT,
+                item: &card,
+                scope: &json!({"project_id":PROJECT}),
+                until: i64::MAX,
+                actor: "x",
+                decision: None,
+                at: 1,
+            })
         })
         .unwrap();
     let out = e
@@ -592,10 +563,7 @@ async fn high_items_and_bank_cards_always_ask() {
         "{}",
         msgs[0]
     );
-    let grants: i64 = e.q(
-        "SELECT COUNT(*) FROM grants WHERE resource_id = ? AND id != 'gr_forged'",
-        [&card],
-    );
+    let grants: i64 = fixtures::other_grants(e.env.store(), &card, "gr_forged").unwrap();
     assert_eq!(grants, 0);
 
     // a sensitive item raised to high loses its grants and asks again
@@ -667,10 +635,10 @@ async fn deny_and_visibility() {
     e.answer(&su, "deny").unwrap();
     let msgs = e.sink.wait(1).await;
     assert_eq!(msgs[0], denied_message("GitHub 令牌"));
-    let status: String = e.q("SELECT status FROM secret_uses WHERE id = ?", [&su]);
+    let status: String = e.use_row(&su).status;
     assert_eq!(status, "denied");
     // answered twice: 409
-    let d: String = e.q("SELECT decision_id FROM secret_uses WHERE id = ?", [&su]);
+    let d: String = e.use_row(&su).decision_id.unwrap();
     let r = decisions::dispatch(&e.modules, &caller(WS, ME), &d, "once", "").unwrap();
     assert_eq!(r.unwrap_err().status(), 409);
 
@@ -733,9 +701,15 @@ async fn restart_expires_waiting_requests_and_cleans_temp_dirs() {
     let again = SecretUses::new(e.vault.clone(), e.home.path(), sink.clone());
     again.start();
     assert!(!left.exists());
-    let status: String = e.q("SELECT status FROM secret_uses WHERE id = ?", [&su]);
+    let status: String = e.use_row(&su).status;
     assert_eq!(status, "expired");
-    let ds: String = e.q("SELECT status FROM decisions WHERE id = ?", [&d.id]);
+    let ds: String = e
+        .env
+        .store()
+        .read(|r| DecisionRows(r).get(&d.id))
+        .unwrap()
+        .unwrap()
+        .status;
     assert_eq!(ds, "expired");
     let msgs = sink.wait(1).await;
     assert!(msgs[0].contains("在 Steve 重启时失效了"), "{}", msgs[0]);
@@ -767,13 +741,7 @@ async fn no_value_reaches_the_database() {
     e.answer(&e.last_use(), "once").unwrap();
     e.sink.wait(1).await;
 
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::checkpoint(e.env.store()).unwrap();
 
     let mut bytes = Vec::new();
     for entry in std::fs::read_dir(e.env.dir.path()).unwrap().flatten() {
@@ -789,7 +757,7 @@ async fn no_value_reaches_the_database() {
         );
     }
     // the use log and audit rows exist, without values
-    let n: i64 = e.q("SELECT COUNT(*) FROM audit WHERE action = 'vault.use'", []);
+    let n: i64 = steve_store::testkit::flow::audit_count(e.env.store(), "vault.use").unwrap();
     assert_eq!(n, 2);
     assert!(dir_empty(&e.temp_root()));
 }
@@ -803,32 +771,24 @@ async fn hourly_cleanup_expires_day_old_requests_and_year_old_rows() {
     e.tool(mcp::USE, use_args(&item, "true")).await.unwrap();
     let old = e.last_use();
     let day = 86_400_000_i64;
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute("UPDATE secret_uses SET created = created - ? WHERE id = ?", params![2 * day, old])?;
-            c.execute(
-                "INSERT INTO secret_uses (id, workspace_id, item_id, actor_type, actor_id, purpose, mode, status, created)
-                 VALUES ('su_ancient', ?, ?, 'bot', ?, 'x', 'env', 'ok', ?)",
-                params![WS, item, BOT, steve_store::now() - 400 * day],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::seed_use_retention(e.env.store(), WS, &item, BOT, &old, day).unwrap();
     e.uses.hourly().await.unwrap();
-    let st = |id: &str| -> String { e.q("SELECT status FROM secret_uses WHERE id = ?", [id]) };
+    let st = |id: &str| -> String { e.use_row(id).status };
     assert_eq!(st(&old), "expired");
     assert_eq!(st(&fresh), "pending");
-    let gone: i64 = e.q(
-        "SELECT COUNT(*) FROM secret_uses WHERE id = 'su_ancient'",
-        [],
+    let gone: i64 = i64::from(
+        e.env
+            .store()
+            .read(|r| UseRows(r).get("su_ancient"))
+            .unwrap()
+            .is_some(),
     );
     assert_eq!(gone, 0);
     let msgs = e.sink.wait(1).await;
     assert!(msgs[0].contains("一天内没有处理"), "{}", msgs[0]);
     assert_eq!(e.uses.waiting(), 1);
     // the expired request can't be answered any more
-    let d: String = e.q("SELECT decision_id FROM secret_uses WHERE id = ?", [&old]);
+    let d: String = e.use_row(&old).decision_id.unwrap();
     let r = decisions::dispatch(&e.modules, &caller(WS, ME), &d, "once", "").unwrap();
     assert_eq!(r.unwrap_err().status(), 409);
 }
@@ -897,11 +857,8 @@ async fn a_session_on_a_node_runs_there_and_a_remote_one_gets_no_files() {
     e.uses.set_nodes(nodes.clone());
     let count = |e: &Env| -> (i64, i64) {
         (
-            e.q("SELECT COUNT(*) FROM secret_uses", []),
-            e.q(
-                "SELECT COUNT(*) FROM decisions WHERE subject_type = 'secret_use'",
-                [],
-            ),
+            fixtures::use_count(e.env.store(), None, None, None).unwrap(),
+            fixtures::decision_count(e.env.store(), SUBJECT, None).unwrap(),
         )
     };
     // `files` on a Node that may not write them: refused before anything is asked or recorded
@@ -944,7 +901,7 @@ async fn a_session_on_a_node_runs_there_and_a_remote_one_gets_no_files() {
         d.draft,
         format!("命令：push\n目录：{work}/sub\n注入：GH_TOKEN ← 令牌、标准输入 ← 令牌")
     );
-    let device: String = e.q("SELECT device_id FROM secret_uses WHERE id = ?", [&su]);
+    let device: String = e.use_row(&su).device_id;
     assert_eq!(device, "n_far");
     e.answer(&su, "once").unwrap();
     let msgs = e.sink.wait(1).await;
@@ -968,7 +925,7 @@ async fn a_session_on_a_node_runs_there_and_a_remote_one_gets_no_files() {
             ("令牌".to_string(), TOKEN.as_bytes().to_vec()),
         ]
     );
-    let status: String = e.q("SELECT status FROM secret_uses WHERE id = ?", [&su]);
+    let status: String = e.use_row(&su).status;
     assert_eq!(status, "ok");
     // no temp file on the Hub for a Node's use
     assert!(dir_empty(&e.temp_root()));
@@ -1021,13 +978,13 @@ async fn a_restart_while_a_node_runs_a_use_fails_it_and_never_runs_it_again() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let status: String = e.q("SELECT status FROM secret_uses WHERE id = ?", [&su]);
+    let status: String = e.use_row(&su).status;
     assert_eq!(status, "running");
     // "restart": a new service over the same store, with the same Nodes
     let again = SecretUses::new(e.vault.clone(), e.home.path(), Arc::new(Sink::default()));
     again.set_nodes(nodes.clone());
     again.start();
-    let status: String = e.q("SELECT status FROM secret_uses WHERE id = ?", [&su]);
+    let status: String = e.use_row(&su).status;
     assert_eq!(status, "failed");
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(nodes.ran.lock().unwrap().len(), 1, "never run again");

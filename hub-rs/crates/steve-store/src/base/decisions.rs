@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::repo::to_json;
 use crate::types::truthy;
-use crate::{Decision, NewDecision, Result, Tx, now, uid};
+use crate::{Decision, NewDecision, Result, W, now, uid};
 
 pub fn get(c: &Connection, id: &str) -> Result<Option<Decision>> {
     let r = c
@@ -21,9 +21,9 @@ pub fn get(c: &Connection, id: &str) -> Result<Option<Decision>> {
 }
 
 /// `steve_base::decisions::open(tx, NewDecision)`: same columns and defaults as `decisions.create`.
-pub fn open(tx: &Tx, p: &NewDecision) -> Result<Decision> {
+pub fn open(tx: &mut W<'_>, p: &NewDecision) -> Result<Decision> {
     let id = uid("dec");
-    tx.prepare_cached(
+    tx.conn.prepare_cached(
         "INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, item_id, session_id, question, draft, options, status, requested_by, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)",
     )?
     .execute(params![
@@ -40,7 +40,7 @@ pub fn open(tx: &Tx, p: &NewDecision) -> Result<Decision> {
         p.requested_by,
         now()
     ])?;
-    tx.publish(steve_types::DomainEvent::from(
+    tx.emit(steve_types::DomainEvent::from(
         steve_types::WorkEvent::Decision {
             ws: p.workspace_id.clone().into(),
             id: id.clone().into(),
@@ -50,7 +50,7 @@ pub fn open(tx: &Tx, p: &NewDecision) -> Result<Decision> {
             },
         },
     ));
-    let d = crate::repo::must(get(tx, &id)?)?;
+    let d = crate::repo::must(get(tx.conn, &id)?)?;
     tx.diagnostic(crate::diagnostics::decision_event(&d, "created", None));
     Ok(d)
 }
@@ -76,24 +76,30 @@ pub fn open_for(
 
 /// Settles an open decision (`resolved` or `expired`) like `decisions.resolve`; returns `false` if it
 /// was not open. `undo` is stored only if truthy.
-pub fn settle(tx: &Tx, id: &str, result: &Value, status: &str, undo: &Value) -> Result<bool> {
+pub fn settle(
+    tx: &mut W<'_>,
+    id: &str,
+    result: &Value,
+    status: &str,
+    undo: &Value,
+) -> Result<bool> {
     let undo = if truthy(undo) {
         Some(to_json(undo)?)
     } else {
         None
     };
-    let n = tx.run(
+    let n = tx.conn.run(
         "UPDATE decisions SET status = ?, result = ?, resolved = ?, undo = ? WHERE id = ? AND status = 'open'",
         params![status, to_json(result)?, now(), undo, id],
     )?;
     if n > 0 {
-        let d = crate::repo::must(get(tx, id)?)?;
+        let d = crate::repo::must(get(tx.conn, id)?)?;
         tx.diagnostic(crate::diagnostics::decision_event(
             &d,
             "resolved",
             Some("open"),
         ));
-        tx.publish(steve_types::DomainEvent::from(
+        tx.emit(steve_types::DomainEvent::from(
             steve_types::WorkEvent::Decision {
                 ws: d.workspace_id.into(),
                 id: id.into(),

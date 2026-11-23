@@ -10,7 +10,6 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { go, Page, Row, Meta, Empty, StatusDot, Panel, Section, Note, Blank, Notice, Pill, Tile, Chevron, Loading as Spin } from "@/ui"
 import { Select } from "@/view-shared"
-import { Unwired } from "@/unwired"
 import { tm, toast } from "@/store"
 import { accountsApi, capLabel, kindLabel, KIND_LABEL, CONN_STATUS, connStatusOf, type RAccount, type RAdapter, type RConnection, type RMatchRule, type RUsage } from "@/api/accounts"
 import { useLoad, useBusy, report } from "@/accounts/load"
@@ -71,7 +70,6 @@ function AccountsView() {
     return { mine, company, rules, systems, adapters }
   }, [], ["account", "connection"])
   const [dlg, setDlg] = useState<{ k: "new" } | { k: "connect"; a: RAdapter } | null>(null)
-  if (L.s === "unwired") return <Unwired id="accounts" />
   if (L.s === "loading") return <Loading title={t("accounts:page.title")} />
   if (L.s === "error") return <Failed title={t("accounts:page.title")} err={L.err} />
   const { mine, company, rules, systems, adapters } = L.data
@@ -139,7 +137,6 @@ function AccountDetail({ id }: { id: string }) {
     return { a, c, adapter: c ? adapters.find((x) => x.id === c.adapter) ?? null : null }
   }, [id], ["account", "connection", "vault"])
   const [rm, setRm] = useState(false), [edit, setEdit] = useState(false), [newItem, setNewItem] = useState(false), [busy, act] = useBusy()
-  if (L.s === "unwired") return <Unwired id="accounts" />
   if (L.s === "loading") return <Loading title={t("accounts:page.title")} back={["#/accounts", t("accounts:page.title")]} />
   if (L.s === "error") return <Failed title={t("accounts:page.title")} err={L.status === 404 ? t("accounts:detail.notFound") : L.err} back={["#/accounts", t("accounts:page.title")]} />
   const { a, c, adapter } = L.data

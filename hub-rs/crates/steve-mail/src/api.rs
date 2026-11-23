@@ -98,7 +98,7 @@ impl Mail {
             .0
             .m
             .store
-            .reader(|c| steve_modules::accounts::connections::repo::list(c, &who.ws))?;
+            .read(|c| steve_store::connections::workspace_sources(c, &who.ws))?;
         let mut out = Vec::new();
         for r in rows {
             if self.adapter(&r.adapter).is_none() || self.0.conns.get(who, &r.id).is_err() {
@@ -113,10 +113,10 @@ impl Mail {
     pub fn account(&self, who: &Caller, id: &str) -> MailResult<AccountOut> {
         let c = self.0.conns.get(who, id).map_err(MailError::from)?;
         let settings = self.settings(who, id)?;
-        let (address, unread) = self.0.m.store.reader(|c| -> MailResult<(String, i64)> {
-            let address = steve_modules::accounts::connections::repo::get(c, id)?
-                .and_then(|r| {
-                    r.config
+        let (address, unread) = self.0.m.store.read(|c| -> MailResult<(String, i64)> {
+            let address = steve_store::connections::config(c, id)?
+                .and_then(|config| {
+                    config
                         .get("address")
                         .and_then(Value::as_str)
                         .map(String::from)
@@ -296,7 +296,7 @@ impl Mail {
     /// read ([`Mail::mark_read`]). Returns how many changed.
     pub async fn read_for(&self, who: &Caller, thread_id: &str) -> MailResult<usize> {
         let t = self.visible_thread(who, thread_id).await?;
-        let msgs = self.0.m.store.reader(|c| repo::thread_messages(c, &t))?;
+        let msgs = self.0.m.store.read(|c| repo::thread_messages(c, &t))?;
         let mut n = 0;
         for m in msgs.iter().filter(|m| !m.flags.iter().any(|f| f == "seen")) {
             if self.mark_read(&who.ws, &m.id).await? {
@@ -312,7 +312,7 @@ impl Mail {
             let viewer = m.viewer_of(&w)?;
             m.0.m
                 .store
-                .reader(|c| m.own_thread(c, &viewer, &id))
+                .read(|c| m.own_thread(c, &viewer, &id))
                 .map(|t| t.id)
         })
         .await

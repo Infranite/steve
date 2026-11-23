@@ -4,13 +4,15 @@
 
 use serde_json::json;
 use steve_modules::Modules;
-use steve_store::base::{self, Level, ObjRef, Visibility};
-use steve_store::{Result, Tx, uid};
+use steve_store::base::{Level, ObjRef, Visibility};
+use steve_store::{Result, W, uid};
 
 use crate::extract_text::markdown;
 use crate::index::{self, BoxFuture, DocLoader, Loaded};
-use crate::repo::{self, DocRow, NewDoc, SourceRow};
 use crate::sources;
+use steve_store::Revisions;
+use steve_store::knowledge::Documents;
+use steve_store::knowledge::{DocRow, NewDoc, SourceRow};
 
 /// Reads a note's text from its row (for re-indexing through the queue).
 pub struct NotesLoader;
@@ -41,31 +43,26 @@ pub struct NewNote {
 }
 
 /// (Re)indexes a note from its stored body. Front matter tags are kept on the document.
-fn index_note(tx: &Tx, doc_id: &str, now: i64, force: bool) -> Result<()> {
-    let Some(doc) = repo::doc(tx, doc_id)? else {
+fn index_note(tx: &mut W<'_>, doc_id: &str, now: i64, force: bool) -> Result<()> {
+    let Some(doc) = Documents(tx).doc(doc_id)? else {
         return Ok(());
     };
-    let Some(src) = repo::source(tx, &doc.source_id)? else {
+    let Some(src) = Documents(tx).source(&doc.source_id)? else {
         return Ok(());
     };
     let ex = markdown(doc.body.as_deref().unwrap_or(""));
     if !ex.front.tags.is_empty() {
-        tx.prepare_cached("UPDATE kb_docs SET tags = ? WHERE id = ?")?
-            .execute(rusqlite::params![
-                serde_json::to_string(&ex.front.tags)?,
-                doc.id
-            ])?;
+        Documents(tx).set_tags(&doc.id, &ex.front.tags)?;
     }
-    index::index_doc(tx, &doc, &src, &ex, now, force)?;
+    index::index_document(tx, &doc, &src, &ex, now, force)?;
     Ok(())
 }
 
 /// Creates and indexes a note in `ws` written by `me`. Returns the document id.
-pub fn create(tx: &Tx, ws: &str, me: &str, n: &NewNote, now: i64) -> Result<String> {
+pub fn create(tx: &mut W<'_>, ws: &str, me: &str, n: &NewNote, now: i64) -> Result<String> {
     let src = sources::builtin(tx, ws, "notes", me, now)?;
     let id = uid("kd");
-    repo::insert_doc(
-        tx,
+    Documents(tx).insert_doc(
         ws,
         &NewDoc {
             id: id.clone(),
@@ -82,22 +79,15 @@ pub fn create(tx: &Tx, ws: &str, me: &str, n: &NewNote, now: i64) -> Result<Stri
         },
         now,
     )?;
-    repo::set_doc_about(tx, ws, &id, &n.about)?;
+    Documents(tx).set_doc_about(ws, &id, &n.about)?;
     index_note(tx, &id, now, true)?;
-    base::audit(
-        tx,
-        ws,
-        me,
-        "kb_note.create",
-        &id,
-        &json!({ "title": n.title }),
-    )?;
+    tx.audit(ws, me, "kb_note.create", &id, &json!({ "title": n.title }))?;
     Ok(id)
 }
 
 /// Changes title and/or body; writes a revision (`object_type=kb_note`) with both versions.
 pub fn update(
-    tx: &Tx,
+    tx: &mut W<'_>,
     doc: &DocRow,
     me: &str,
     title: Option<&str>,
@@ -110,27 +100,18 @@ pub fn update(
     if new_title == doc.title && new_body == old_body {
         return Ok(());
     }
-    repo::set_doc_text(tx, &doc.id, new_title, new_body, now)?;
-    let version = base::revisions(tx, &doc.workspace_id, "kb_note", &doc.id)?.len() as i64 + 1;
-    base::revision(
-        tx,
+    Documents(tx).set_doc_text(&doc.id, new_title, new_body, now)?;
+    let version = Revisions(tx).count(&doc.workspace_id, "kb_note", &doc.id)? + 1;
+    Revisions(tx).append(
         &doc.workspace_id,
         "kb_note",
         &doc.id,
         version,
-        &json!({ "title": doc.title, "body": old_body }),
-        &json!({ "title": new_title, "body": new_body }),
+        &json!({"before": {"title": doc.title, "body": old_body}, "after": {"title": new_title, "body": new_body}}),
         me,
     )?;
     // The title is part of every chunk's FTS row and label, so a title change re-chunks too.
     index_note(tx, &doc.id, now, new_title != doc.title)?;
-    base::audit(
-        tx,
-        &doc.workspace_id,
-        me,
-        "kb_note.update",
-        &doc.id,
-        &json!({}),
-    )?;
+    tx.audit(&doc.workspace_id, me, "kb_note.update", &doc.id, &json!({}))?;
     Ok(())
 }

@@ -170,23 +170,24 @@ pub async fn resolve_time(
 }
 
 fn view(cx: &FlowCx, ws: &str, id: &str) -> ApiResult<Json<Value>> {
-    cx.store().reader(|c| -> ApiResult<_> {
-        let s = schedules::own(c, ws, id)?;
+    cx.read(|r| {
+        let s = schedules::own(r, ws, id)?;
         Ok(Json(serde_json::to_value(schedules::view_checked(
             cx.core.as_ref(),
-            c,
+            cx.store(),
+            r,
             &s,
         )?)?))
     })
 }
 
 async fn list(Extension(cx): Cx, who: Caller) -> ApiResult<Json<Value>> {
-    cx.store().reader(|c| -> ApiResult<_> {
-        let out = schedules::list(c, &who.ws)?
+    cx.read(|r| {
+        let out = schedules::list(r, &who.ws)?
             .iter()
             .filter(|s| s.visible_to(&who.me))
-            .map(|s| schedules::view_checked(cx.core.as_ref(), c, s))
-            .collect::<ApiResult<Vec<_>>>()?;
+            .map(|s| schedules::view_checked(cx.core.as_ref(), cx.store(), r, s))
+            .collect::<steve_store::Result<Vec<_>>>()?;
         Ok(Json(serde_json::to_value(out)?))
     })
 }
@@ -201,7 +202,7 @@ async fn create(
         Some(t) => t.trim().to_string(),
         None => cx
             .store()
-            .reader(|c| schedules::person_tz(c, &who.ws, &who.me))?,
+            .read(|c| schedules::person_tz(c, &who.ws, Some(&who.me)))?,
     };
     let tz = zone(&tz_name)?;
     let (when, expr) = resolve_time(&cx, b.when.as_deref(), b.cron.as_deref(), tz).await?;
@@ -225,11 +226,11 @@ async fn create(
     };
     let name = b.name.clone().unwrap_or_default();
     let now = cx.now();
-    let id = cx.store().transaction(|tx| -> ApiResult<_> {
+    let id = cx.store().write(|tx| -> ApiResult<_> {
         schedules::check_refs(tx, &who.ws, &spec)?;
         schedules::check_can_run(
             cx.core.as_ref(),
-            tx,
+            cx.store(),
             &who.ws,
             &spec,
             b.enabled.unwrap_or(true),
@@ -307,9 +308,7 @@ async fn patch(
     Body(b): Body<ScheduleBody>,
 ) -> ApiResult<Json<Value>> {
     b.check(false)?;
-    let mut old = cx
-        .store()
-        .reader(|c| schedules::own_for(c, &who.ws, &id, &who.me))?;
+    let mut old = cx.read(|c| schedules::own_for(c, &who.ws, &id, &who.me))?;
     if b.mode
         .is_some_and(|m| (m == Mode::Brief) != (old.spec.mode == Mode::Brief))
     {
@@ -322,11 +321,11 @@ async fn patch(
         // its time is read on its requester's clock, whatever it was made with
         old.spec.tz = cx
             .store()
-            .reader(|c| schedules::person_tz(c, &who.ws, &who.me))?;
+            .read(|c| schedules::person_tz(c, &who.ws, Some(&who.me)))?;
     }
     let spec = patched_spec(&cx, &old.spec, &b).await?;
     let now = cx.now();
-    cx.store().transaction(|tx| -> ApiResult<_> {
+    cx.store().write(|tx| -> ApiResult<_> {
         // Re-read: the row may have changed while the model was thinking.
         let cur = schedules::own_for(tx, &who.ws, &id, &who.me)?;
         if cur.updated != old.updated {
@@ -337,7 +336,7 @@ async fn patch(
         schedules::check_refs(tx, &who.ws, &spec)?;
         schedules::check_can_run(
             cx.core.as_ref(),
-            tx,
+            cx.store(),
             &who.ws,
             &spec,
             b.enabled.unwrap_or(cur.enabled),
@@ -379,12 +378,17 @@ fn brief_patch(b: &ScheduleBody) -> bool {
 }
 
 async fn detail(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
-    cx.store().reader(|c| -> ApiResult<_> {
-        let s = schedules::own_for(c, &who.ws, &id, &who.me)?;
-        let mut v = serde_json::to_value(schedules::view_checked(cx.core.as_ref(), c, &s)?)?;
-        let recent: Vec<RunView> = runs::page(c, &s.workspace_id, &s.id, None, 10)?
+    cx.read(|r| {
+        let s = schedules::own_for(r, &who.ws, &id, &who.me)?;
+        let mut v = serde_json::to_value(schedules::view_checked(
+            cx.core.as_ref(),
+            cx.store(),
+            r,
+            &s,
+        )?)?;
+        let recent: Vec<RunView> = runs::page(r, &s.workspace_id, &s.id, None, 10)?
             .iter()
-            .map(|r| r.view())
+            .map(crate::runs::view)
             .collect();
         v["runs"] = serde_json::to_value(recent)?;
         Ok(Json(v))
@@ -393,7 +397,7 @@ async fn detail(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiRe
 
 async fn remove(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let now = cx.now();
-    cx.store().transaction(|tx| -> ApiResult<_> {
+    cx.store().write(|tx| -> ApiResult<_> {
         let s = schedules::own_for(tx, &who.ws, &id, &who.me)?;
         schedules::delete(tx, &s, now)
     })?;
@@ -402,9 +406,7 @@ async fn remove(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiRe
 }
 
 async fn run_now(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
-    let s = cx
-        .store()
-        .reader(|c| schedules::own_for(c, &who.ws, &id, &who.me))?;
+    let s = cx.read(|c| schedules::own_for(c, &who.ws, &id, &who.me))?;
     if s.spec.mode == Mode::Brief {
         return Err(ApiError::rule(steve_i18n::t!("flow.schedule.brief_run")));
     }
@@ -427,12 +429,12 @@ async fn history(
     Path(id): Path<String>,
     Query(q): Query<PageParams>,
 ) -> ApiResult<Json<Value>> {
-    cx.store().reader(|c| -> ApiResult<_> {
-        let s = schedules::own_for(c, &who.ws, &id, &who.me)?;
+    cx.read(|r| {
+        let s = schedules::own_for(r, &who.ws, &id, &who.me)?;
         let page: Vec<RunView> =
-            runs::page(c, &s.workspace_id, &s.id, q.before, q.limit.unwrap_or(20))?
+            runs::page(r, &s.workspace_id, &s.id, q.before, q.limit.unwrap_or(20))?
                 .iter()
-                .map(|r| r.view())
+                .map(crate::runs::view)
                 .collect();
         Ok(Json(serde_json::to_value(page)?))
     })
@@ -450,7 +452,7 @@ async fn parse(Extension(cx): Cx, who: Caller, Body(b): Body<ParseBody>) -> ApiR
         Some(t) => zone(t)?,
         None => zone(
             &cx.store()
-                .reader(|c| schedules::person_tz(c, &who.ws, &who.me))?,
+                .read(|c| schedules::person_tz(c, &who.ws, Some(&who.me)))?,
         )?,
     };
     let p = parse_phrase(&cx, &b.when, tz).await?;

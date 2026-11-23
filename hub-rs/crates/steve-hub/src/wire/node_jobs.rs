@@ -22,6 +22,7 @@ use steve_core::gateway::{
     OnText, OneCall, OneModel, OneShotError, ThinkTools, Tried, split_static,
 };
 use steve_store::jobs::{self, AttemptState};
+use steve_store::node_jobs as job_commands;
 use tokio::sync::mpsc;
 
 use super::*;
@@ -117,27 +118,6 @@ fn ended(outcome: Outcome, stop_reason: &str, error: Option<ApiError>) -> Comple
     }
 }
 
-/// The job attempt a command is about, if it is one.
-pub(super) fn job_attempt_of(tx: &Tx, op: &str) -> Result<Option<String>, StoreError> {
-    Ok(tx
-        .query_row(
-            "SELECT target_job_attempt FROM node_commands WHERE operation_id=?",
-            [op],
-            |r| r.get::<_, Option<String>>(0),
-        )
-        .optional()?
-        .flatten())
-}
-
-/// The `start_job` of an attempt: its operation, state and whether it may have left the Hub.
-fn start_of(tx: &Tx, attempt: &str) -> Result<(String, String, bool), StoreError> {
-    Ok(tx.query_row(
-        "SELECT c.operation_id, c.state, c.maybe_sent FROM runtime_job_attempts a JOIN node_commands c ON c.operation_id=a.operation_id WHERE a.attempt_id=?",
-        [attempt],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )?)
-}
-
 impl NodeRuntime {
     /// Commits a think job (one attempt, `t.model` only) with its `start_job`. Its caller's waiter
     /// is registered first; a caller gone before the commit (no waiter any more) has its job
@@ -158,7 +138,7 @@ impl NodeRuntime {
                 "" => steve_store::WS.to_string(),
                 w => w.to_string(),
             });
-        self.store.reader(|c| self.owners_work_in(c, &workspace))?;
+        self.owners_work_in(&workspace)?;
         let prompt = self.think_prompt(data_dir, t, &workspace, &files)?;
         let job = uid("job");
         let attempt = t.attempt.clone();
@@ -209,8 +189,8 @@ impl NodeRuntime {
             attempt: spec.run.attempt.clone(),
         };
         let (req, digest) = command(&op, spec.clone())?;
-        self.tx(|tx| {
-            jobs::create_job_in(
+        self.write(|tx| {
+            job_commands::create_job_in(
                 tx,
                 &jobs::NewJob {
                     id: &job,
@@ -307,11 +287,11 @@ impl NodeRuntime {
     /// record of is passed over.
     pub(super) fn job_event_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         ev: &NodeEvent,
         attempt: &str,
     ) -> Result<(), StoreError> {
-        let Some(row) = jobs::attempt_in(tx, attempt)? else {
+        let Some(row) = job_commands::attempt_in(tx, attempt)? else {
             // A retained journal Final can outlive the runtime Job's retention. Billing keeps its
             // own source binding, so it still repairs the original call after Job pruning.
             if let EventBody::Usage { report } = &ev.body {
@@ -338,7 +318,14 @@ impl NodeRuntime {
         }
         match &ev.body {
             EventBody::AttemptStarted => {
-                jobs::apply_attempt_in(tx, attempt, AttemptState::Running, None, None, now())?;
+                job_commands::apply_attempt_in(
+                    tx,
+                    attempt,
+                    AttemptState::Running,
+                    None,
+                    None,
+                    now(),
+                )?;
             }
             EventBody::Usage { report } => {
                 self.store
@@ -398,15 +385,20 @@ impl NodeRuntime {
 
     /// Job `attempt` is over: its row, its job and its `start_job` take the end (the first end
     /// stays: a later one changes nothing), and its caller hears it.
-    fn job_ended_in(&self, tx: &Tx, attempt: &str, c: &Completion) -> Result<(), StoreError> {
-        let Some(row) = jobs::attempt_in(tx, attempt)? else {
+    fn job_ended_in(
+        &self,
+        tx: &mut W<'_>,
+        attempt: &str,
+        c: &Completion,
+    ) -> Result<(), StoreError> {
+        let Some(row) = job_commands::attempt_in(tx, attempt)? else {
             return Ok(());
         };
         if row.state == AttemptState::Finished {
             return Ok(());
         }
         let completion = serde_json::to_value(c).map_err(conflict)?;
-        jobs::apply_attempt_in(
+        job_commands::apply_attempt_in(
             tx,
             attempt,
             AttemptState::Finished,
@@ -414,18 +406,16 @@ impl NodeRuntime {
             Some(&completion),
             now(),
         )?;
-        jobs::finish_job_in(tx, &row.job, now())?;
+        job_commands::finish_job_in(tx, &row.job, now())?;
         self.store.stats().gateway_job_end(
             attempt,
             c.outcome == Outcome::Succeeded,
             c.error.as_ref().map(|e| e.safe_detail.as_str()),
             now(),
         )?;
-        let terminal: bool = tx.query_row(
-            "SELECT state IN ('finished','rejected') FROM node_commands WHERE operation_id=?",
-            [&row.operation],
-            |r| r.get(0),
-        )?;
+        let terminal = self
+            .store
+            .read(|r| job_commands::terminal(r, &row.operation))?;
         if !terminal {
             let receipt = Receipt {
                 operation: idv(row.operation.clone())?,
@@ -436,7 +426,7 @@ impl NodeRuntime {
                 },
             };
             let (state, success) = receipt_state(&receipt.state);
-            rt::merge_receipt_in(
+            node_write::merge_receipt_in(
                 tx,
                 &row.operation,
                 state,
@@ -459,7 +449,7 @@ impl NodeRuntime {
     /// Node has no record of.
     pub(super) fn job_receipt_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         op: &str,
         method: &str,
         attempt: &str,
@@ -474,16 +464,16 @@ impl NodeRuntime {
                 } else {
                     AttemptState::Running
                 };
-                jobs::apply_attempt_in(tx, attempt, s, Some(&value), None, now())?;
+                job_commands::apply_attempt_in(tx, attempt, s, Some(&value), None, now())?;
                 // a cancel held back while the start's send was uncertain goes now
-                if jobs::attempt_in(tx, attempt)?
+                if job_commands::attempt_in(tx, attempt)?
                     .is_some_and(|a| a.cancel_requested && a.state != AttemptState::Unknown)
                 {
                     self.job_stop_in(tx, attempt, op, "cancel")?;
                 }
             }
             ("start_job", ReceiptState::Unknown) => {
-                jobs::apply_attempt_in(
+                job_commands::apply_attempt_in(
                     tx,
                     attempt,
                     AttemptState::Unknown,
@@ -520,14 +510,15 @@ impl NodeRuntime {
     /// did not run), an abandon of what the Node has no record of ends the attempt.
     pub(super) fn job_refused_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         method: &str,
         attempt: &str,
         e: &ApiError,
     ) -> Result<(), StoreError> {
         match method {
             "start_job" => {
-                let cancelled = jobs::attempt_in(tx, attempt)?.is_some_and(|a| a.cancel_requested);
+                let cancelled =
+                    job_commands::attempt_in(tx, attempt)?.is_some_and(|a| a.cancel_requested);
                 let c = if cancelled {
                     ended(Outcome::Cancelled, "cancelled", None)
                 } else {
@@ -545,14 +536,15 @@ impl NodeRuntime {
     /// its caller is gone either way).
     fn job_abandon_failed_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         attempt: &str,
         e: &ApiError,
     ) -> Result<(), StoreError> {
         let unknown_to_node =
             e.code == ErrorCode::Invalid && e.safe_detail.contains("no such operation");
         if unknown_to_node
-            && jobs::attempt_in(tx, attempt)?.is_some_and(|a| a.state == AttemptState::Unknown)
+            && job_commands::attempt_in(tx, attempt)?
+                .is_some_and(|a| a.state == AttemptState::Unknown)
         {
             let c = ended(
                 Outcome::Interrupted,
@@ -572,16 +564,14 @@ impl NodeRuntime {
     /// time.
     fn job_stop_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         attempt: &str,
         target: &str,
         method: &str,
     ) -> Result<(), StoreError> {
-        let (n, live): (i64, bool) = tx.query_row(
-            "SELECT COUNT(*), COALESCE(MAX(state NOT IN ('finished','rejected') OR json_extract(receipt,'$.success')=1), 0) FROM node_commands WHERE method=? AND target_job_attempt=?",
-            [method, attempt],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
+        let (n, live) = self
+            .store
+            .read(|r| job_commands::stop_commands(r, method, attempt))?;
         if live {
             return Ok(());
         }
@@ -608,7 +598,7 @@ impl NodeRuntime {
                 },
             )?
         };
-        jobs::insert_job_command_in(
+        job_commands::insert_job_command_in(
             tx,
             &jobs::NewJobCommand {
                 operation: &op,
@@ -627,15 +617,19 @@ impl NodeRuntime {
     /// A start that never left the Hub ends here, cancelled; one that may be on its way waits for
     /// the Node to hold it ([`Self::job_receipt_in`]); one the Node cannot tell the end of is
     /// abandoned; a running one is cancelled.
-    pub(super) fn stop_job_in(&self, tx: &Tx, attempt: &str) -> Result<(), StoreError> {
-        let Some(row) = jobs::attempt_in(tx, attempt)? else {
+    pub(super) fn stop_job_in(&self, tx: &mut W<'_>, attempt: &str) -> Result<(), StoreError> {
+        let Some(row) = job_commands::attempt_in(tx, attempt)? else {
             return Ok(());
         };
         if row.state == AttemptState::Finished {
             return Ok(());
         }
-        jobs::cancel_attempt_in(tx, attempt, now())?;
-        let (op, state, maybe_sent) = start_of(tx, attempt)?;
+        job_commands::cancel_attempt_in(tx, attempt, now())?;
+        let job_commands::Start {
+            operation: op,
+            state,
+            maybe_sent,
+        } = self.store.read(|r| job_commands::start(r, attempt))?;
         match state.as_str() {
             "pending" if !maybe_sent => self.job_unsent_in(tx, attempt, &op),
             "pending" => Ok(()),
@@ -648,8 +642,8 @@ impl NodeRuntime {
     }
 
     /// A start that is ended before the Node ran it: rejected here, the attempt cancelled.
-    fn job_unsent_in(&self, tx: &Tx, attempt: &str, op: &str) -> Result<(), StoreError> {
-        rt::merge_receipt_in(
+    fn job_unsent_in(&self, tx: &mut W<'_>, attempt: &str, op: &str) -> Result<(), StoreError> {
+        node_write::merge_receipt_in(
             tx,
             op,
             ReceiptState::Rejected,
@@ -662,7 +656,7 @@ impl NodeRuntime {
 
     /// [`Self::stop_job_in`] in its own transaction, then the send worker is woken.
     pub(super) fn stop_job(&self, attempt: &str) {
-        if let Err(e) = self.tx(|tx| self.stop_job_in(tx, attempt)) {
+        if let Err(e) = self.write(|tx| self.stop_job_in(tx, attempt)) {
             tracing::error!("cancel job attempt {attempt}: {e}");
         }
         self.wake_send.notify_one();
@@ -673,35 +667,30 @@ impl NodeRuntime {
     /// no record of is ended here (it never ran), a running one cancelled, an unknown one
     /// abandoned. Jobs left open with nothing open in them are closed.
     pub(super) fn settle_orphan_jobs(&self) -> usize {
-        let r = self.tx(|tx| {
-            let open = jobs::open_attempts_in(tx, self.node_id.as_str())?;
+        let r = self.write(|tx| {
+            let open = job_commands::open_attempts_in(tx, self.node_id.as_str())?;
             let mut n = 0;
             for a in open {
                 if self.jobs.has(&a.id) {
                     continue;
                 }
                 n += 1;
-                self.store.stats().gateway_job_cancel(&a.id,"Hub restart: caller unavailable")?;
-                jobs::cancel_attempt_in(tx, &a.id, now())?;
-                let (op, state, _) = start_of(tx, &a.id)?;
+                self.store
+                    .stats()
+                    .gateway_job_cancel(&a.id, "Hub restart: caller unavailable")?;
+                job_commands::cancel_attempt_in(tx, &a.id, now())?;
+                let job_commands::Start {
+                    operation: op,
+                    state,
+                    ..
+                } = self.store.read(|r| job_commands::start(r, &a.id))?;
                 match state.as_str() {
                     "pending" => self.job_unsent_in(tx, &a.id, &op)?,
                     "finished" | "rejected" => {
                         // its end came on the receipt but not on the stream
-                        let receipt: Option<String> = tx.query_row(
-                            "SELECT json_extract(receipt,'$.payload') FROM node_commands WHERE operation_id=?",
-                            [&op],
-                            |r| r.get(0),
-                        )?;
-                        let end = receipt
-                            .and_then(|r| serde_json::from_str::<Receipt>(&r).ok())
-                            .and_then(|r| match r.state {
-                                Observed::Finished {
-                                    result: Some(OperationResult::Execution(c)),
-                                    ..
-                                } => Some(c),
-                                _ => None,
-                            })
+                        let end = self
+                            .store
+                            .read(|r| job_commands::completion(r, &op))?
                             .unwrap_or_else(|| ended(Outcome::Interrupted, "error", None));
                         self.job_ended_in(tx, &a.id, &end)?;
                     }
@@ -712,15 +701,11 @@ impl NodeRuntime {
                     _ => self.job_stop_in(tx, &a.id, &op, "cancel")?,
                 }
             }
-            let empty: Vec<String> = {
-                let mut st = tx.prepare(
-                    "SELECT j.job_id FROM runtime_jobs j WHERE j.node_id=? AND j.state='open' AND NOT EXISTS(SELECT 1 FROM runtime_job_attempts a WHERE a.job_id=j.job_id AND a.state<>'finished')",
-                )?;
-                st.query_map([self.node_id.as_str()], |r| r.get(0))?
-                    .collect::<Result<_, _>>()?
-            };
+            let empty = self
+                .store
+                .read(|r| job_commands::empty(r, self.node_id.as_str()))?;
             for j in empty {
-                jobs::finish_job_in(tx, &j, now())?;
+                job_commands::finish_job_in(tx, &j, now())?;
             }
             Ok(n)
         });
@@ -1096,8 +1081,7 @@ impl NodeRuntime {
         standalone: bool,
     ) -> Result<(), StoreError> {
         self.running()?;
-        self.store
-            .reader(|c| self.owners_work_in(c, &a.workspace))?;
+        self.owners_work_in(&a.workspace)?;
         let (prompt, earlier) = self.research_prompt(a)?;
         let job = uid("job");
         let op = format!("op_{attempt}");
@@ -1152,8 +1136,8 @@ impl NodeRuntime {
             attempt: spec.run.attempt.clone(),
         };
         let (req, digest) = command(&op, spec.clone())?;
-        self.tx(|tx| {
-            jobs::create_job_in(
+        self.write(|tx| {
+            job_commands::create_job_in(
                 tx,
                 &jobs::NewJob {
                     id: &job,
@@ -1288,16 +1272,7 @@ impl ResearchJobRun {
         }
         runtime
             .store
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT state='unknown' OR (state<>'finished' AND EXISTS(
-                   SELECT 1 FROM node_commands WHERE target_job_attempt=?1
-                   AND method IN ('cancel','abandon') AND state='rejected'
-                 )) FROM runtime_job_attempts WHERE attempt_id=?1",
-                    [&self.waiting.attempt],
-                    |r| r.get(0),
-                )?)
-            })
+            .read(|r| job_commands::unavailable(r, &self.waiting.attempt))
             .map_err(|e| e.to_string())
     }
 

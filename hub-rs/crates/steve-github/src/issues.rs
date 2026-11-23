@@ -7,17 +7,17 @@ use axum::body::Bytes;
 use axum::extract::Path;
 use axum::routing::post;
 use axum::{Extension, Json, Router};
-use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use steve_flow::ItemRequest;
 use steve_modules::vault::{VaultError, VaultResult};
 use steve_modules::{ApiError, Caller, Modules, parse};
-use steve_store::base::links::{self, NewLink};
-use steve_store::base::{self, ObjRef};
+use steve_store::base::ObjRef;
+use steve_store::base::links::NewLink;
 
 use crate::GitHub;
-use crate::repo::{self, IssueRow, RepoRow};
+use steve_store::github::IssueRow;
+use steve_store::github::RepoRow;
 
 /// `links.object_type` of an issue.
 pub const ISSUE: &str = "gh_issue";
@@ -38,23 +38,6 @@ pub struct ToItem {
 
 fn cut(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
-}
-
-/// A bot of `ws` that is not deleted, by id.
-fn bot_in(c: &rusqlite::Connection, ws: &str, bot: &str) -> rusqlite::Result<bool> {
-    c.prepare_cached(
-        "SELECT 1 FROM bots b JOIN bot_workspaces w ON w.bot_id = b.id AND w.workspace_id = ?
-          WHERE b.id = ? AND b.deleted = 0",
-    )?
-    .query_row(params![ws, bot], |_| Ok(()))
-    .optional()
-    .map(|x| x.is_some())
-}
-
-fn main_bot(c: &rusqlite::Connection) -> rusqlite::Result<Option<String>> {
-    c.prepare_cached("SELECT id FROM bots WHERE main = 1 AND deleted = 0 ORDER BY updated LIMIT 1")?
-        .query_row([], |r| r.get(0))
-        .optional()
 }
 
 /// The goal: where it comes from, the body (cut), the link.
@@ -88,22 +71,22 @@ impl GitHub {
             Some(_) => return Err(ApiError::invalid("mode").into()),
         };
         let ws = who.ws.clone();
-        let prep = self.store().reader(|c| -> Result<Prep, ApiError> {
-            let i = repo::issue_get(c, id)?
+        let prep = self.store().read(|c| -> Result<Prep, ApiError> {
+            let i = steve_store::github::issue_get(c, id)?
                 .filter(|i| i.workspace_id == ws)
                 .ok_or_else(|| ApiError::not_found("Issue"))?;
             if let Some(item) = &i.item_id
-                && repo::item_brief(c, &ws, item)?.is_some()
+                && steve_store::item_repo::item_brief(c, &ws, item)?.is_some()
             {
                 return Ok(Prep::Existing(item.clone()));
             }
-            let r = repo::repo_get(c, &i.repo_id)?
+            let r = steve_store::github::repo_get(c, &i.repo_id)?
                 .filter(|r| r.workspace_id == ws)
                 .ok_or_else(|| ApiError::not_found("Issue"))?;
             let bot = match &p.bot {
-                Some(b) if bot_in(c, &ws, b)? => b.clone(),
+                Some(b) if steve_store::bots::scoped_bot(c, &ws, b)? => b.clone(),
                 Some(_) => return Err(ApiError::not_found("Bot")),
-                None => main_bot(c)?
+                None => steve_store::bots::main_bot(c)?
                     .ok_or_else(|| ApiError::rule(steve_i18n::t!("github.issue.no_main_bot")))?,
             };
             Ok(Prep::Make(Box::new((r, i, bot))))
@@ -147,21 +130,21 @@ impl GitHub {
             .await
             .map_err(|e| ApiError::rule(steve_i18n::t!("github.issue.create_failed", error = e)))?;
         let now = self.now();
-        self.store().transaction(|tx| -> Result<(), VaultError> {
-            links::add(
-                tx,
-                &ws,
-                &NewLink::new(
-                    ObjRef::new("item", &item),
-                    "from",
-                    ObjRef::new(ISSUE, &i.id),
-                    LINK_SOURCE,
-                ),
-            )
-            .map_err(ApiError::from)?;
-            repo::set_issue_item(tx, &i.id, Some(&item), now).map_err(ApiError::from)?;
-            base::audit(
-                tx,
+        self.store().write(|tx| -> Result<(), VaultError> {
+            steve_store::base::links::Links(tx)
+                .add(
+                    &ws,
+                    &NewLink::new(
+                        ObjRef::new("item", &item),
+                        "from",
+                        ObjRef::new(ISSUE, &i.id),
+                        LINK_SOURCE,
+                    ),
+                )
+                .map_err(ApiError::from)?;
+            steve_store::github::set_issue_item(tx, &i.id, Some(&item), now)
+                .map_err(ApiError::from)?;
+            tx.audit(
                 &ws,
                 &who.me,
                 "github.issue_to_item",
@@ -169,9 +152,9 @@ impl GitHub {
                 &json!({"item": item, "repo": r.full_name, "number": i.number}),
             )
             .map_err(ApiError::from)?;
+            crate::events::emit(tx, &ws, &i.id);
             Ok(())
         })?;
-        self.notifier().gh(&ws, &i.id);
         tracing::info!(issue = %i.id, item = %item, "github issue turned into an item");
         Ok(item)
     }

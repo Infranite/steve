@@ -1,9 +1,11 @@
 use rusqlite::Connection;
-use steve_store::{db, runtime};
+use steve_store::{Store, db, runtime};
 
 #[test]
 fn migrates_command_keys_and_permission_modes() {
-    let c = Connection::open_in_memory().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("migration.sqlite3");
+    let c = Connection::open(&path).unwrap();
     for migration in &db::MIGRATIONS[..117] {
         c.execute_batch(migration).unwrap();
     }
@@ -31,7 +33,9 @@ fn migrates_command_keys_and_permission_modes() {
     .unwrap();
     c.execute_batch(db::MIGRATIONS[117]).unwrap();
 
-    let s = runtime::session_modes(&c, "n", "s").unwrap().unwrap();
+    let s = Store::read_file(&path, |r| runtime::session_modes(r, "n", "s"))
+        .unwrap()
+        .unwrap();
     assert_eq!(s.applied.as_deref(), Some("ask"));
     assert_eq!(s.desired.as_deref(), Some("plan"));
     assert_eq!(s.refusal_detail.as_deref(), Some("Refused"));
@@ -44,7 +48,9 @@ fn migrates_command_keys_and_permission_modes() {
         )
         .unwrap();
     assert_eq!(code, "denied");
-    let other = runtime::session_modes(&c, "n", "other").unwrap().unwrap();
+    let other = Store::read_file(&path, |r| runtime::session_modes(r, "n", "other"))
+        .unwrap()
+        .unwrap();
     assert!(other.unknown && !other.sending && other.applied.is_none());
 
     assert_eq!(

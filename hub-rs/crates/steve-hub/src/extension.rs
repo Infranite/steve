@@ -155,6 +155,15 @@ impl Assembly {
         self.list.iter().map(|e| e.ext.id()).collect()
     }
 
+    pub(crate) fn optional_modules(&self) -> steve_types::integrations::OptionalModules {
+        steve_types::integrations::OptionalModules {
+            feishu_registration: self
+                .list
+                .iter()
+                .any(|e| e.builtin && e.ext.id() == builtin::FEISHU_BOT_ID),
+        }
+    }
+
     /// Unique ids and the API version, before anything is built.
     pub(crate) fn check(&self) -> Result<(), ExtensionError> {
         let mut seen = BTreeSet::new();
@@ -402,10 +411,7 @@ impl Declare<'_> {
                 "handle system {id} without a label"
             )));
         }
-        if steve_modules::accounts::repo::BUILTIN_SYSTEMS
-            .iter()
-            .any(|b| b.0 == id)
-        {
+        if steve_store::is_builtin_system(id) {
             return Err(ExtensionError::new(format!(
                 "handle system {id} is one of the Hub's own"
             )));
@@ -425,10 +431,8 @@ impl Declare<'_> {
     fn check_systems(&self) -> Result<(), ExtensionError> {
         for d in self.decls.values() {
             let s = d.handle_system.as_str();
-            let known = steve_modules::accounts::repo::BUILTIN_SYSTEMS
-                .iter()
-                .any(|b| b.0 == s)
-                || self.systems.iter().any(|(x, _, _)| x == s);
+            let known =
+                steve_store::is_builtin_system(s) || self.systems.iter().any(|(x, _, _)| x == s);
             if !known {
                 let owner = self.owners.get(&d.adapter).cloned().unwrap_or_default();
                 return Err(ExtensionError::new(format!(
@@ -677,7 +681,7 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         .with_target(false)
         .init();
 
-    crate::wire::tune_sqlite();
+    steve_store::db::tune_sqlite();
     // the Hub's own Node in a process of its own (STEVE_NODE_MODE=service, B1): started by the
     // Hub, it outlives Hub restarts and never creates a missing Hub home.
     if args.get(1).is_some_and(|arg| arg == "--local-node") {
@@ -732,16 +736,17 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
             }
         });
     }
-    crate::upgrades::startup_gate(&cfg).await?;
+    crate::upgrades::startup_gate(&cfg, &listeners).await?;
     let caches = Arc::new(steve_runtime::cache::Caches::new(cfg.cache));
     let bus = Bus::new(caches);
     let w =
         crate::wire::wire_assembly(&cfg, &bus, Arc::new(|k: &str| std::env::var(k).ok()), &asm)?;
     let st = crate::api::AppState::new(cfg.clone(), w.backend, w.domain, bus)
-        .with_modules(w.modules)
         .with_oidc(w.oidc.clone())
         .with_nodes(w.nodes)
         .with_node(w.node)
+        .with_modules(w.modules)
+        .with_optional_modules(asm.optional_modules())
         .with_history(w.history)
         .with_workspaces(Some(w.workspaces));
     *supervised_state.lock().unwrap_or_else(|e| e.into_inner()) = Some(st.clone());
@@ -966,6 +971,19 @@ mod tests {
             plugin.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn registration_capability_follows_builtin_extension() {
+        assert!(Assembly::builtin().optional_modules().feishu_registration);
+        assert!(
+            !Assembly::builtin()
+                .without(builtin::FEISHU_BOT_ID)
+                .unwrap()
+                .optional_modules()
+                .feishu_registration
+        );
+        assert!(!Assembly::empty().optional_modules().feishu_registration);
     }
 
     #[test]

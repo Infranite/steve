@@ -4,15 +4,16 @@ import { createRoot } from "react-dom/client"
 import { useEffect } from "react"
 import "../../src/index.css"
 import { Toaster } from "@/components/ui/toaster"
-import { DecisionCard } from "@/ui"
-import { refresh, st, useStore } from "@/store"
+import { DecisionCard } from "@/thread/decision-card"
+import { orphans, refresh, st, start, useStore } from "@/store"
+import { loadViews } from "@/data/sync"
 function App() {
   useStore()
-  useEffect(() => { void refresh() }, [])
+  useEffect(start, [])
   return <main className="mx-auto flex max-w-[640px] flex-col gap-4 px-4 py-6">
-    <button type="button" data-live-refresh onClick={() => void refresh()}>Refresh</button>
+    <button type="button" data-live-refresh onClick={() => void Promise.all([refresh(), loadViews()])}>Refresh</button>
     {st.error && <p role="alert">{st.error}</p>}
-    {st.orphans.map(({ i, w }) => <DecisionCard key={w.decision} i={i} showItem={false} />)}
+    {orphans().map(({ i, w }) => <DecisionCard key={w.decision} i={i} showItem={false} />)}
     <Toaster />
   </main>
 }

@@ -198,12 +198,14 @@ fn on_boot_reminders_left_on_finished_or_dropped_items_are_cleared() {
     let k = Kit::new();
     let (i, _) = waiting(&k, "fail");
     // dropped before the lifecycle existed (as migration 027 leaves such an item), its card still open
-    k.db()
-        .exec(
-            "UPDATE items SET status = 'drop', phase = 'closed', outcome = 'cancelled' WHERE id = ?",
-            &[&i as &dyn rusqlite::ToSql],
-        )
-        .unwrap();
+    steve_store::core_fixture::item(
+        k.db().store(),
+        &i,
+        steve_store::core_fixture::ItemState::Finished {
+            status: "drop",
+            outcome: "cancelled",
+        },
+    );
     k.core.recover().unwrap();
     assert!(k.open_kinds(&i).is_empty());
     let d = k.db().decisions_of_item(&i).unwrap().pop().unwrap();
@@ -215,12 +217,11 @@ fn on_boot_a_question_older_than_a_delivery_expires() {
     let k = Kit::new();
     let (i, question) = waiting(&k, "ask");
     let acc = k.decision(&i, None, "accept", "item", &["pass", "rework"]);
-    k.db()
-        .exec(
-            "UPDATE decisions SET created=(SELECT created+1 FROM decisions WHERE id=?) WHERE id=?",
-            &[&question, &acc],
-        )
-        .unwrap();
+    steve_store::core_fixture::decision(
+        k.db().store(),
+        &acc,
+        steve_store::core_fixture::DecisionState::CreatedAfter(&question),
+    );
     k.core.recover().unwrap();
     let open: Vec<String> = k
         .db()
@@ -328,12 +329,11 @@ fn no_resume_where_the_working_directory_is_gone() {
     let k = Kit::new();
     let i = k.item("run", "执行", None);
     let s = k.session(&i, "running");
-    k.db()
-        .exec(
-            "UPDATE sessions SET cwd = '/nonexistent/steve-test' WHERE id = ?",
-            &[&s],
-        )
-        .unwrap();
+    steve_store::core_fixture::session(
+        k.db().store(),
+        &s,
+        steve_store::core_fixture::SessionState::Workdir("/nonexistent/steve-test"),
+    );
     k.core.recover().unwrap();
     k.core.ready();
     assert!(k.rt.prompts_of(&s).is_empty());

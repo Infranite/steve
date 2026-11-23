@@ -5,12 +5,12 @@ pub mod files;
 pub mod folder;
 pub mod folder_node;
 
-use rusqlite::Connection;
 use serde_json::{Value, json};
 use steve_store::base::{Level, Visibility};
-use steve_store::{Result, Tx, uid};
+use steve_store::knowledge::Documents;
+use steve_store::{Read, Result, W, uid};
 
-use crate::repo::{self, SourceRow};
+use steve_store::knowledge::SourceRow;
 
 // K3
 pub mod chat;
@@ -62,26 +62,20 @@ pub fn is_builtin(kind: &str) -> bool {
 }
 
 /// Are all built-in sources there? (A read, so most requests skip the write transaction.)
-pub fn has_builtin(c: &Connection, ws: &str) -> Result<bool> {
-    let n: i64 = c
-        .prepare_cached(
-            "SELECT COUNT(DISTINCT kind) FROM kb_sources WHERE workspace_id = ? AND kind IN ('notes','files','items','chat','mems','bot_mems')",
-        )?
-        .query_row([ws], |r| r.get(0))?;
-    Ok(n as usize == BUILTIN.len())
+pub fn has_builtin(c: &mut impl Read, ws: &str) -> Result<bool> {
+    Documents(c).has_builtins(ws)
 }
 
 /// Creates the missing built-in sources of `ws` (deduplicated by `(workspace_id, kind)`).
 /// Returns the ids created.
-pub fn ensure_builtin(tx: &Tx, ws: &str, actor: &str, now: i64) -> Result<Vec<String>> {
+pub fn ensure_builtin(w: &mut W<'_>, ws: &str, actor: &str, now: i64) -> Result<Vec<String>> {
     let mut made = Vec::new();
     for (kind, name, vis, level) in BUILTIN {
-        if repo::source_of_kind(tx, ws, kind)?.is_some() {
+        if Documents(w).source_of_kind(ws, kind)?.is_some() {
             continue;
         }
         let id = uid("ks");
-        repo::insert_source(
-            tx,
+        Documents(w).insert_source(
             &id,
             ws,
             kind,
@@ -98,17 +92,19 @@ pub fn ensure_builtin(tx: &Tx, ws: &str, actor: &str, now: i64) -> Result<Vec<St
 }
 
 /// The source of a built-in kind, creating the built-ins if needed.
-pub fn builtin(tx: &Tx, ws: &str, kind: &str, actor: &str, now: i64) -> Result<SourceRow> {
-    if let Some(s) = repo::source_of_kind(tx, ws, kind)? {
+pub fn builtin(w: &mut W<'_>, ws: &str, kind: &str, actor: &str, now: i64) -> Result<SourceRow> {
+    if let Some(s) = Documents(w).source_of_kind(ws, kind)? {
         return Ok(s);
     }
-    ensure_builtin(tx, ws, actor, now)?;
-    repo::source_of_kind(tx, ws, kind)?.ok_or(steve_store::StoreError::NotFound("没有这个知识来源"))
+    ensure_builtin(w, ws, actor, now)?;
+    Documents(w)
+        .source_of_kind(ws, kind)?
+        .ok_or(steve_store::StoreError::NotFound("没有这个知识来源"))
 }
 
 /// `Source` with live document and chunk counts.
-pub fn source_json(c: &Connection, s: &SourceRow) -> Result<Value> {
-    let (docs, chunks) = repo::source_counts(c, s)?;
+pub fn source_json(c: &mut impl Read, s: &SourceRow) -> Result<Value> {
+    let (docs, chunks) = Documents(c).source_counts(s)?;
     let skipped = s.stats.get("skipped").and_then(Value::as_i64).unwrap_or(0);
     let mut stats = json!({"docs": docs, "chunks": chunks, "skipped": skipped});
     // set only by a folder scan that could not see everything (nothing was deleted)

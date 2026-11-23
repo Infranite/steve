@@ -110,10 +110,10 @@ export function CalendarView({ query, event }: { query?: string; event?: string 
   )
 
   let body
-  if (!sources) body = src.error && !src.unwired
+  if (!sources) body = src.error
     ? <Empty title={t("calendar:failed")} sub={src.error} action={<Button variant="outline" onClick={() => void loadSources()}>{t("common:action.retry")}</Button>} data-cal-error />
-    : src.unwired ? <Unconnected unwired /> : <Loading />
-  else if (!connected) body = <Unconnected unwired={false} />
+    : <Loading />
+  else if (!connected) body = <Unconnected />
   else if (!ag.agenda) body = ag.error
     ? <Empty title={t("calendar:failed")} sub={ag.error} action={<Button variant="outline" onClick={ag.reload}>{t("common:action.retry")}</Button>} data-cal-error />
     : <Loading />

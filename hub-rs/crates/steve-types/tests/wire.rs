@@ -152,6 +152,7 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
     workliveevent.insert("event");
     check(
         WorkEvent::Message {
+            space: "steve".into(),
             id: "entity-1".into(),
             ws: "workspace-a".into(),
         },

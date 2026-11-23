@@ -12,7 +12,6 @@ import { Switch } from "@/components/ui/switch"
 import { Spinner } from "@/components/ui/spinner"
 import { go, Page, Group, Row, SectionLabel, Segmented, Meta, Empty, Panel, Section, Note, Notice, Blank, Disclosure } from "@/ui"
 import { Select } from "@/view-shared"
-import { Unwired } from "@/unwired"
 import { botName, st, tm } from "@/store"
 import { useLoad, useBusy, report } from "@/accounts/load"
 import { channelsApi, ATTENTION, BOT_NOTICES, LEVEL, MSG_STATUS, REPLY_AS_YOU, ROLE, attentionOf, spaceTitle, type Attention, type BotNotices, type ChanMessage, type Level, type ReplyAsYou, type Rule, type SpacePatch } from "@/api/channels"
@@ -35,7 +34,6 @@ export function SpaceView({ id }: { id: string }) {
   const [duty, setDuty] = useState<string | null>(null), [rules, setRules] = useState<Rule[] | null>(null)
   const [older, setOlder] = useState<ChanMessage[]>([]), [more, setMore] = useState<"idle" | "loading" | "end">("idle"), [allMsgs, setAllMsgs] = useState(false)
   useEffect(() => { setOlder([]); setMore("idle") }, [id])
-  if (L.s === "unwired") return <Unwired id="accounts" />
   const home: [string, string] = ["#/channels", t("channels:list.title")]
   if (L.s === "loading") return <Page title={t("channels:space.title")} back={home}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
   if (L.s === "error") return <Page title={t("channels:space.title")} back={home}><Empty title={L.status === 404 ? t("channels:space.notFound") : L.err} sub={L.status === 404 ? t("channels:space.notFoundSub") : undefined} /></Page>

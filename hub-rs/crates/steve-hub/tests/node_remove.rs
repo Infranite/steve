@@ -7,6 +7,7 @@ mod node_harness;
 use std::sync::Arc;
 use std::time::Duration;
 use steve_runtime::testkit::eventually_sync;
+use steve_store::testkit::hub::node_checks;
 
 use node_harness::*;
 use serde_json::json;
@@ -65,13 +66,11 @@ async fn only_the_owner_removes_a_node_which_is_asked_over_its_link_then_unpaire
     assert_eq!(s, 202, "{v}");
     let op = v["operation"].as_str().unwrap().to_string();
     eventually_sync("unpaired", || {
-        h.q::<String>(&format!("SELECT state FROM nodes WHERE node_id='{node}'")) == "revoked"
+        node_checks::node_state_by_node_id(&h.store, node.as_str()).unwrap() == "revoked"
     })
     .await;
     eventually_sync("recorded", || {
-        h.q::<String>(&format!(
-            "SELECT phase FROM node_removals WHERE operation_id='{op}'"
-        )) == "removed"
+        node_checks::node_removals_phase_by_operation(&h.store, &op).unwrap() == "removed"
     })
     .await;
     let opid = OperationId::new(op.clone()).unwrap();
@@ -84,7 +83,7 @@ async fn only_the_owner_removes_a_node_which_is_asked_over_its_link_then_unpaire
         .expect("the link goes");
     assert_eq!(code, steve_node_wire::close::DENIED);
     assert_eq!(
-        h.q::<i64>("SELECT COUNT(*) FROM node_audit WHERE what='remove' AND actor='u1'"),
+        node_checks::node_audit_count_remove_u1(&h.store).unwrap(),
         1
     );
     let v = list(&h, "u1").await;
@@ -121,7 +120,7 @@ async fn an_offline_node_or_one_of_an_earlier_release_gets_the_command_to_run_th
     assert!(fake.removal_calls().is_empty());
     for n in [&away, &old] {
         assert_eq!(
-            h.q::<String>(&format!("SELECT state FROM nodes WHERE node_id='{n}'")),
+            node_checks::node_state_by_node_id(&h.store, n.as_str()).unwrap(),
             "active",
             "still paired"
         );

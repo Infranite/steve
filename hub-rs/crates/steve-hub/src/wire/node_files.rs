@@ -4,10 +4,9 @@
 //! its files must be of its job's workspace.
 use super::node_tools::{authorize, internal};
 use async_trait::async_trait;
-use rusqlite::OptionalExtension;
 use std::path::PathBuf;
 use steve_node_api::*;
-use steve_store::{Store, StoreError};
+use steve_store::Store;
 
 #[path = "node_uploads.rs"]
 pub(crate) mod uploads;
@@ -40,18 +39,17 @@ impl NodeFiles {
     fn execution(&self, access: FileAccess) -> ApiResult<ExecutionRef> {
         match access {
             FileAccess::Execution(exec) => Ok(exec),
-            FileAccess::Operation { operation } => {
-                let exec=self.store.reader(|c|Ok::<_,StoreError>(c.query_row(
-                    "SELECT a.execution FROM node_commands c JOIN runtime_attempts a ON a.attempt_id=c.target_attempt AND a.operation_id=c.operation_id WHERE c.operation_id=?1 AND c.node_id=?2 AND a.node_id=?2 AND c.method='start_turn' AND c.state NOT IN ('finished','rejected','unknown')",
-                    rusqlite::params![operation.as_str(),self.node.as_str()],|r|r.get::<_,String>(0)).optional()?)).map_err(internal)?;
-                let exec = match exec {
-                    Some(e) => Some(e),
-                    None => self.store.reader(|c|Ok::<_,StoreError>(c.query_row(
-                        "SELECT a.execution FROM node_commands c JOIN runtime_job_attempts a ON a.attempt_id=c.target_job_attempt AND a.operation_id=c.operation_id WHERE c.operation_id=?1 AND c.node_id=?2 AND a.node_id=?2 AND c.method='start_job' AND c.state NOT IN ('finished','rejected','unknown')",
-                        rusqlite::params![operation.as_str(),self.node.as_str()],|r|r.get::<_,String>(0)).optional()?)).map_err(internal)?,
-                };
-                serde_json::from_str(&exec.ok_or_else(denied)?).map_err(internal)
-            }
+            FileAccess::Operation { operation } => self
+                .store
+                .read(|r| {
+                    steve_store::file_repo::operation_execution(
+                        r,
+                        self.node.as_str(),
+                        operation.as_str(),
+                    )
+                })
+                .map_err(internal)?
+                .ok_or_else(denied),
         }
     }
 
@@ -65,25 +63,18 @@ impl NodeFiles {
             }
             ExecutionRef::Job { job, attempt } => (job, attempt),
         };
-        let row = self.store.reader(|c| {
-            Ok::<_, StoreError>(c.query_row(
-                "SELECT a.execution,a.spec,a.state,a.cancel_requested,j.workspace_id FROM runtime_job_attempts a JOIN runtime_jobs j ON j.job_id=a.job_id WHERE a.attempt_id=?1 AND a.job_id=?2 AND a.node_id=?3 AND j.node_id=?3 AND j.state='open'",
-                rusqlite::params![attempt.as_str(), job.as_str(), self.node.as_str()],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, bool>(3)?, r.get::<_, String>(4)?)),
-            ).optional()?)
-        }).map_err(internal)?.ok_or_else(denied)?;
-        let (saved, spec, state, cancelled, workspace) = row;
-        let saved: ExecutionRef = serde_json::from_str(&saved).map_err(internal)?;
-        let spec: JobSpec = serde_json::from_str(&spec).map_err(internal)?;
-        if saved != *exec
-            || spec.job != *job
-            || spec.run.attempt != *attempt
-            || cancelled
-            || matches!(state.as_str(), "finished" | "unknown")
+        let inputs = self
+            .store
+            .read(|r| steve_store::tool_admission::job_execution(r, &self.node, job, attempt, true))
+            .map_err(internal)?
+            .ok_or_else(denied)?;
+        if inputs.execution != *exec
+            || inputs.spec.job != *job
+            || inputs.spec.run.attempt != *attempt
         {
             return Err(denied());
         }
-        Ok((workspace, spec.run.prompt))
+        Ok((inputs.workspace, inputs.spec.run.prompt))
     }
 }
 
@@ -317,6 +308,7 @@ impl HubFiles for NodeFiles {
 mod tests {
     use super::super::node_tools::tests::fixture;
     use super::*;
+    use steve_store::{StoreError, testkit::hub::node_files as fixture_db};
 
     #[tokio::test]
     async fn granted_chunks_and_workspace_isolation() {
@@ -347,15 +339,7 @@ mod tests {
             },
             name: f.name.clone(),
         });
-        h.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute(
-                    "UPDATE runtime_attempts SET spec=?1",
-                    [serde_json::to_string(&spec).unwrap()],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        fixture_db::replace_turn_spec(&h.store, &spec).unwrap();
         let path = h.dir.path().join("files/default").join(&f.sha256[..2]);
         std::fs::create_dir_all(&path).unwrap();
         std::fs::write(path.join(&f.id), bytes).unwrap();
@@ -392,14 +376,10 @@ mod tests {
         );
         let op = h
             .store
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT operation_id FROM runtime_attempts",
-                    [],
-                    |r| r.get::<_, String>(0),
-                )?)
-            })
-            .unwrap();
+            .read(|r| steve_store::node_turns::attempt(r, h.exec.attempt().as_str()))
+            .unwrap()
+            .unwrap()
+            .operation;
         files
             .fetch(
                 FileAccess::Operation {
@@ -419,15 +399,7 @@ mod tests {
                 .code,
             ErrorCode::Denied
         );
-        h.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute(
-                    "UPDATE files SET workspace_id='foreign' WHERE id='fil_test'",
-                    [],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        fixture_db::file_workspace(&h.store, &f.id, "foreign").unwrap();
         assert_eq!(
             files
                 .fetch(access.clone(), id.clone(), 0, 1)
@@ -436,15 +408,7 @@ mod tests {
                 .code,
             ErrorCode::Denied
         );
-        h.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute(
-                    "UPDATE files SET workspace_id='default' WHERE id='fil_test'",
-                    [],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        fixture_db::file_workspace(&h.store, &f.id, "default").unwrap();
         std::fs::remove_file(path.join(&f.id)).unwrap();
         std::os::unix::fs::symlink("/etc/hosts", path.join(&f.id)).unwrap();
         assert!(files.fetch(access.clone(), id.clone(), 0, 1).await.is_err());
@@ -467,12 +431,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(e.code, ErrorCode::Conflict, "{e:?}");
-        h.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute("DELETE FROM files WHERE id='fil_test'", [])?;
-                Ok(())
-            })
-            .unwrap();
+        fixture_db::remove_file(&h.store, &f.id).unwrap();
         let e = files.fetch(access, id, 0, 1).await.unwrap_err();
         assert_eq!(e.code, ErrorCode::Conflict, "{e:?}");
     }
@@ -510,8 +469,8 @@ mod tests {
                 serde_json::to_value(&spec).unwrap(),
             );
             store
-                .transaction::<_, StoreError>(|tx| {
-                    create_job_in(
+                .write::<_, StoreError>(|tx| {
+                    steve_store::node_jobs::create_job_in(
                         tx,
                         &NewJob {
                             id: job,
@@ -570,8 +529,15 @@ mod tests {
         }
         // a finished attempt reads nothing anymore
         store
-            .transaction::<_, StoreError>(|tx| {
-                apply_attempt_in(tx, "a_1", AttemptState::Finished, None, None, 2)
+            .write::<_, StoreError>(|tx| {
+                steve_store::node_jobs::apply_attempt_in(
+                    tx,
+                    "a_1",
+                    AttemptState::Finished,
+                    None,
+                    None,
+                    2,
+                )
             })
             .unwrap();
         assert_eq!(

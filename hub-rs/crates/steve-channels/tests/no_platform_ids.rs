@@ -10,9 +10,10 @@
 mod digest_env;
 use digest_env::TestEnv;
 use std::sync::Arc;
+use steve_store::testkit::channels::inspect;
 
 use axum::Router;
-use serde_json::{Value, json};
+use serde_json::json;
 use steve_channels::channel::Sender;
 use steve_channels::ext::{ChannelDecl, MessageIds};
 use steve_channels::fake::channel::FakeChannel;
@@ -23,7 +24,7 @@ use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowSetup, LinearExecutor};
 use steve_modules::ApiError;
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
-use steve_modules::accounts::repo::{self as arepo, NewAccount};
+use steve_modules::accounts::repo::NewAccount;
 use steve_modules::contacts::service::ensure_base;
 use steve_modules::testkit::{ME, WS, call, caller};
 use steve_modules::vault::Vault;
@@ -90,10 +91,9 @@ fn setup(precision: i64) -> H {
     let (bot, _) = FakeChannel::seed_connection(env.store(), &caller(WS, ME), None).expect("bot");
     let mine = env
         .store()
-        .transaction(|tx| -> steve_modules::ApiResult<String> {
-            let me = ensure_base(tx, &caller(WS, ME))?;
-            let a = arepo::insert(
-                tx,
+        .write(|w| -> steve_modules::ApiResult<String> {
+            let me = ensure_base(w, &caller(WS, ME))?;
+            let a = steve_store::Accounts(w).insert(
                 WS,
                 &NewAccount {
                     system_id: FakeChannel::SYSTEM.into(),
@@ -110,18 +110,24 @@ fn setup(precision: i64) -> H {
                 },
             )?;
             let con = uid("con");
-            tx.execute(
-                "INSERT INTO connections (id, workspace_id, account_id, adapter, auth, caps, config, created_by, created, updated)
-                 VALUES (?, ?, ?, ?, 'none', '[\"msg.receive\",\"msg.send_as_user\"]', ?, ?, 1, 1)",
-                rusqlite::params![
-                    con,
-                    WS,
-                    a.id,
-                    SIDE,
-                    json!({ "app_connection": bot }).to_string(),
-                    ME
-                ],
-            )?;
+            steve_store::Connections(w).insert(&steve_store::ConnRow {
+                id: con.clone(),
+                workspace_id: WS.into(),
+                account_id: a.id,
+                adapter: SIDE.into(),
+                auth: "none".into(),
+                granted_scopes: vec![],
+                caps: vec!["msg.receive".into(), "msg.send_as_user".into()],
+                credential_item: None,
+                status: "ok".into(),
+                health: Default::default(),
+                config: json!({ "app_connection": bot }),
+                last_sync: None,
+                created_by: ME.into(),
+                revision: 1,
+                created: 1,
+                updated: 1,
+            })?;
             Ok(con)
         })
         .expect("your connection");
@@ -142,49 +148,13 @@ fn setup(precision: i64) -> H {
     }
 }
 
-fn rows(h: &H, sql: &str, p: &[&str]) -> Vec<Vec<Value>> {
-    let (sql, p): (String, Vec<String>) = (sql.into(), p.iter().map(|s| s.to_string()).collect());
-    h.env
-        .store()
-        .reader(move |c| {
-            let mut st = c.prepare(&sql)?;
-            let n = st.column_count();
-            let out = st
-                .query_map(rusqlite::params_from_iter(p.iter()), |r| {
-                    (0..n)
-                        .map(|i| {
-                            Ok(match r.get_ref(i)? {
-                                rusqlite::types::ValueRef::Null => Value::Null,
-                                rusqlite::types::ValueRef::Integer(x) => json!(x),
-                                rusqlite::types::ValueRef::Real(x) => json!(x),
-                                rusqlite::types::ValueRef::Text(t) => {
-                                    json!(String::from_utf8_lossy(t))
-                                }
-                                rusqlite::types::ValueRef::Blob(_) => Value::Null,
-                            })
-                        })
-                        .collect::<rusqlite::Result<Vec<_>>>()
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok::<_, steve_store::StoreError>(out)
-        })
-        .expect("rows")
-}
-
-fn count(h: &H, sql: &str, p: &[&str]) -> i64 {
-    rows(h, sql, p)[0][0].as_i64().expect("count")
-}
-
 /// The external ids of the stored messages, oldest first.
 fn stored(h: &H) -> Vec<String> {
-    rows(
-        h,
-        "SELECT external_id FROM chan_messages WHERE direction = 'in' ORDER BY created, rowid",
-        &[],
-    )
-    .into_iter()
-    .map(|r| r[0].as_str().unwrap_or_default().to_string())
-    .collect()
+    inspect::messages::message_external_id_by_incoming(h.env.store())
+        .unwrap()
+        .into_iter()
+        .map(|r| r[0].as_str().unwrap_or_default().to_string())
+        .collect()
 }
 
 /// Alice on the bot, with a provider id.
@@ -229,11 +199,7 @@ async fn a_redelivery_with_the_same_delivery_id_is_stored_once() {
     assert_eq!(again.message_id, first.message_id);
     assert_eq!(stored(&h).len(), 1);
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM ext_events WHERE source = 'im'",
-            &[]
-        ),
+        inspect::signals::count_ext_events_count_3(h.env.store()).unwrap(),
         1
     );
     // the connection knows it by that id, and acts on it through it

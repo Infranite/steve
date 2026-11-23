@@ -13,6 +13,8 @@
 //! check the answer and record the write ([`crate::effects`]); the runner does it after the commit,
 //! reconciling first when an earlier try may have happened.
 
+use steve_store::W;
+
 use std::sync::{Arc, OnceLock, Weak};
 
 use async_trait::async_trait;
@@ -21,16 +23,16 @@ use steve_modules::decisions::{DecisionCx, DecisionHandler, choice_result};
 use steve_modules::hooks::{ItemHooks, Takeover};
 use steve_modules::{ApiError, ApiResult, Registry};
 use steve_store::base::DecisionKind;
-use steve_store::base::decisions as base_decisions;
-use steve_store::{Decision, Item, NewDecision, Tx};
+use steve_store::{Decision, Item, NewDecision};
 
 use crate::api::GhError;
 use crate::effects::{self, Fail, Ran};
 use crate::push::{self, PushSpec};
-use crate::repo::{self, PrRow, RepoRow};
 use crate::repos::{Settings, check_state};
 use crate::sync::{Effects, latest_checks};
 use crate::{GitHub, Inner};
+use steve_store::github::PrRow;
+use steve_store::github::RepoRow;
 
 /// `subject_type` of “open a PR from this item's branch” (subject = the item).
 pub const PR_OPEN: &str = "gh_pr_open";
@@ -167,8 +169,12 @@ fn cut(s: &str, n: usize) -> String {
 }
 
 /// `✓ build` lines of a PR's latest checks.
-fn check_lines(c: &rusqlite::Connection, repo: &RepoRow, pr: &PrRow) -> rusqlite::Result<String> {
-    let rows = repo::checks_for_sha(c, &repo.id, &pr.head_sha)?;
+fn check_lines(
+    c: &mut impl steve_store::Read,
+    repo: &RepoRow,
+    pr: &PrRow,
+) -> steve_store::Result<String> {
+    let rows = steve_store::github::checks_for_sha(c, &repo.id, &pr.head_sha)?;
     Ok(latest_checks(&rows)
         .into_iter()
         .map(|k| {
@@ -196,7 +202,7 @@ impl GitHub {
     ) -> Result<(), String> {
         let status = self
             .store()
-            .reader(|c| repo::item_status(c, ws, item).map_err(ApiError::from))
+            .read(|c| steve_store::item_repo::item_status(c, ws, item).map_err(ApiError::from))
             .map_err(|e| e.to_string())?;
         if !matches!(status.as_deref(), Some(s) if s != "done" && s != "drop") {
             return Ok(());
@@ -209,17 +215,13 @@ impl GitHub {
 
     fn timeline(&self, item: &str, text: &str) {
         let now = self.now();
-        let r = self.store().transaction(|tx| {
-            repo::add_timeline(tx, item, text, now)?;
-            tx.publish(steve_types::DomainEvent::from(
+        let r = self.store().write(|tx| {
+            steve_store::item_repo::add_timeline(tx, item, text, now)?;
+            let ws = steve_store::item_repo::item_workspace(tx, item)?
+                .ok_or_else(|| ApiError::not_found("事项"))?;
+            tx.emit(steve_types::DomainEvent::from(
                 steve_types::WorkEvent::Item {
-                    ws: tx
-                        .query_row::<String, _, _>(
-                            "SELECT workspace_id FROM items WHERE id = ?",
-                            [item],
-                            |r| r.get(0),
-                        )?
-                        .into(),
+                    ws: ws.into(),
                     id: {
                         let value: String = item.into();
                         steve_types::ItemId::from(value)
@@ -248,23 +250,26 @@ impl GitHub {
         };
         let pre = self
             .store()
-            .reader(|c| {
-                let Some(r) = repo::repo_of_project(c, &ws, &project)?.filter(|r| r.enabled) else {
+            .read(|c| {
+                let Some(r) =
+                    steve_store::github::repo_of_project(c, &ws, &project)?.filter(|r| r.enabled)
+                else {
                     return Ok(None);
                 };
                 if !matches!(
                     Settings::of(&r.settings).after_accept.as_str(),
                     "ask_pr" | "open_pr"
-                ) || repo::project_release(c, &ws, &project)?.is_some()
-                    || repo::has_open_pr_from(c, &r.id, &branch)?
-                    || base_decisions::open_for(c, &ws, PR_OPEN, &item.id)?.is_some()
+                ) || steve_store::projects::project_release(c, &ws, &project)?.is_some()
+                    || steve_store::github::has_open_pr_from(c, &r.id, &branch)?
+                    || steve_store::decision_repo::open_for(c, &ws, PR_OPEN, &item.id)?.is_some()
                 {
                     return Ok(None);
                 }
-                let path = repo::project(c, &ws, &project)?.map(|p| p.path);
-                let summary = repo::delivery_summary(c, &item.id)?;
+                let path = steve_store::projects::project(c, &ws, &project)?.map(|p| p.path);
+                let summary = steve_store::decision_repo::delivery_summary(c, &item.id)?;
                 let (adapter, account, _) =
-                    repo::connection_label(c, &r.connection_id)?.unwrap_or_default();
+                    steve_store::connections::connection_label(c, &r.connection_id)?
+                        .unwrap_or_default();
                 let pat = (adapter == crate::adapters::github_pat::ID).then_some(account);
                 Ok::<_, ApiError>(Some((r, path, summary, pat)))
             })
@@ -343,24 +348,27 @@ impl GitHub {
             // and only the commit that passed the check is pushed (a branch that moved is refused)
             let now = self.now();
             self.store()
-                .transaction(|tx| {
-                    let opened = base_decisions::open(tx, &d)?;
-                    base_decisions::settle(
-                        tx,
+                .write(|tx| {
+                    let opened = steve_store::DecisionRows(tx).open(&d)?;
+                    steve_store::DecisionRows(tx).settle(
                         &opened.id,
                         &json!({"choice": "yes", "text": "", "auto": AUTO}),
                         "resolved",
                         &Value::Null,
                     )?;
                     effects::queue(tx, self, &ws, &opened.id, effects::OPEN)?;
-                    repo::effect_intent(tx, &opened.id, &json!({"sha": head, "branch": branch}))?;
-                    repo::add_timeline(
+                    steve_store::github::effect_intent(
+                        tx,
+                        &opened.id,
+                        &json!({"sha": head, "branch": branch}),
+                    )?;
+                    steve_store::item_repo::add_timeline(
                         tx,
                         &item.id,
                         &format!("验收后自动开草稿 PR（{}：私有仓库）", r.full_name),
                         now,
                     )?;
-                    tx.publish(steve_types::DomainEvent::from(
+                    tx.emit(steve_types::DomainEvent::from(
                         steve_types::WorkEvent::Item {
                             ws: item.workspace_id.clone().into(),
                             id: {
@@ -382,7 +390,11 @@ impl GitHub {
             return Ok(true);
         }
         self.store()
-            .transaction(|tx| base_decisions::open(tx, &d).map_err(ApiError::from))
+            .write(|tx| {
+                steve_store::DecisionRows(tx)
+                    .open(&d)
+                    .map_err(ApiError::from)
+            })
             .map_err(|e| e.to_string())?;
         if let Err(e) = self
             .core()
@@ -440,8 +452,8 @@ impl GitHub {
         };
         if let Some(private) = now.filter(|p| *p != r.private) {
             let at = self.now();
-            let w = self.store().transaction(|tx| {
-                repo::set_private(tx, &r.id, private, at)?;
+            let w = self.store().write(|tx| {
+                steve_store::github::set_private(tx, &r.id, private, at)?;
                 Ok::<_, ApiError>(())
             });
             if let Err(e) = w {
@@ -456,7 +468,7 @@ impl GitHub {
     pub(crate) async fn open_pr(
         &self,
         d: &Decision,
-        e: &crate::repo::EffectRow,
+        e: &steve_store::github::EffectRow,
         reconcile: bool,
     ) -> Ran {
         let ws = d.workspace_id.clone();
@@ -529,7 +541,7 @@ impl GitHub {
         &self,
         d: &Decision,
         item_id: &str,
-        e: &crate::repo::EffectRow,
+        e: &steve_store::github::EffectRow,
         reconcile: bool,
     ) -> Result<(PrRow, Settings), Fail> {
         let ws = d.workspace_id.clone();
@@ -551,9 +563,9 @@ impl GitHub {
             .ok_or("事项不属于项目".to_string())?;
         let (r, path) = self
             .store()
-            .reader(|c| {
-                let r = repo::repo_of_project(c, &ws, &project)?;
-                let p = repo::project(c, &ws, &project)?.map(|p| p.path);
+            .read(|c| {
+                let r = steve_store::github::repo_of_project(c, &ws, &project)?;
+                let p = steve_store::projects::project(c, &ws, &project)?.map(|p| p.path);
                 Ok::<_, ApiError>((r, p))
             })
             .map_err(|e| e.to_string())?;
@@ -679,7 +691,7 @@ impl GitHub {
         };
         // GitHub has it from here on: a local failure is unknown, the next run finds the PR
         let now = self.now();
-        let res = self.store().transaction(|tx| {
+        let res = self.store().write(|tx| {
             let mut fx = Effects::default();
             let pr = self
                 .sync_pr(
@@ -696,10 +708,9 @@ impl GitHub {
                 .ok_or_else(|| ApiError::Internal("GitHub 没有给出 PR 编号".into()))?;
             self.ask_merges(tx, &r, &fx)?;
             crate::after::emit(tx, &r.workspace_id, &r.connection_id, &mut fx)?;
-            Ok::<_, ApiError>((pr, fx))
+            Ok::<_, ApiError>(pr)
         });
-        let (pr, fx) = res.map_err(|e| Fail::unknown(e.to_string()))?;
-        self.after_commit(&ws, &r.connection_id, fx).await;
+        let pr = res.map_err(|e| Fail::unknown(e.to_string()))?;
         tracing::info!(repo = %r.full_name, number = pr.number, item = %item_id, "github PR opened");
         Ok((pr, settings))
     }
@@ -766,23 +777,28 @@ impl GitHub {
     /// acceptance, and the item is not finished?
     pub(crate) fn waits_for_merge(
         &self,
-        c: &rusqlite::Connection,
+        c: &mut impl steve_store::Read,
         repo: &RepoRow,
         item: &str,
     ) -> Result<bool, ApiError> {
         if Settings::of(&repo.settings).finish_on != "merged" {
             return Ok(false);
         }
-        let open = repo::item_status(c, &repo.workspace_id, item)?
+        let open = steve_store::item_repo::item_status(c, &repo.workspace_id, item)?
             .is_some_and(|s| s != "done" && s != "drop");
-        Ok(open && repo::wrap_up_by_pr(c, &repo.workspace_id, item)?)
+        Ok(open && steve_store::decision_repo::wrap_up_by_pr(c, &repo.workspace_id, item)?)
     }
 
     /// For every PR this transaction touched, ask to merge when it is ready (checks green,
     /// no changes requested, mergeable) and its item waits for it; once per head commit.
-    pub(crate) fn ask_merges(&self, tx: &Tx, repo: &RepoRow, fx: &Effects) -> Result<(), ApiError> {
+    pub(crate) fn ask_merges(
+        &self,
+        tx: &mut steve_store::W<'_>,
+        repo: &RepoRow,
+        fx: &Effects,
+    ) -> Result<(), ApiError> {
         for id in fx.gh.iter().filter(|i| i.starts_with("ghp_")) {
-            let Some(pr) = repo::pr_get(tx, id)? else {
+            let Some(pr) = steve_store::github::pr_get(tx, id)? else {
                 continue;
             };
             let Some(item) = pr.item_id.clone() else {
@@ -794,7 +810,12 @@ impl GitHub {
                 && pr.mergeable.as_deref() == Some("clean");
             if !ready
                 || !self.waits_for_merge(tx, repo, &item)?
-                || repo::merge_asked(tx, &repo.workspace_id, &pr.id, &pr.head_sha)?
+                || steve_store::decision_repo::merge_asked(
+                    tx,
+                    &repo.workspace_id,
+                    &pr.id,
+                    &pr.head_sha,
+                )?
             {
                 continue;
             }
@@ -807,21 +828,18 @@ impl GitHub {
             if s.delete_branch {
                 draft.push_str(&format!("，合并后删除分支 {}", pr.head_ref));
             }
-            base_decisions::open(
-                tx,
-                &NewDecision {
-                    workspace_id: repo.workspace_id.clone(),
-                    kind: DecisionKind::Approve.code().into(),
-                    subject_type: PR_MERGE.into(),
-                    subject_id: pr.id.clone(),
-                    item_id: Some(item),
-                    session_id: None,
-                    question: format!("合并 PR #{}（{}）？", pr.number, repo.full_name),
-                    draft: Some(draft),
-                    options: Some(OPTIONS.map(String::from).to_vec()),
-                    requested_by: STEVE.into(),
-                },
-            )?;
+            steve_store::DecisionRows(tx).open(&NewDecision {
+                workspace_id: repo.workspace_id.clone(),
+                kind: DecisionKind::Approve.code().into(),
+                subject_type: PR_MERGE.into(),
+                subject_id: pr.id.clone(),
+                item_id: Some(item),
+                session_id: None,
+                question: format!("合并 PR #{}（{}）？", pr.number, repo.full_name),
+                draft: Some(draft),
+                options: Some(OPTIONS.map(String::from).to_vec()),
+                requested_by: STEVE.into(),
+            })?;
         }
         Ok(())
     }
@@ -834,10 +852,11 @@ impl GitHub {
         let Some(sha) = d.result["sha"].as_str().map(String::from) else {
             return Ran::Failed("批准里没有要合并的提交".into());
         };
-        let loaded = self.store().reader(|c| {
-            let pr = repo::pr_get(c, &d.subject_id)?.filter(|p| p.workspace_id == ws);
+        let loaded = self.store().read(|c| {
+            let pr =
+                steve_store::github::pr_get(c, &d.subject_id)?.filter(|p| p.workspace_id == ws);
             let r = match &pr {
-                Some(p) => repo::repo_get(c, &p.repo_id)?,
+                Some(p) => steve_store::github::repo_get(c, &p.repo_id)?,
                 None => None,
             };
             Ok::<_, ApiError>(pr.zip(r))
@@ -933,7 +952,7 @@ impl GitHub {
             .map(|i| (i.clone(), format!("PR #{} 已合并", pr.number)));
         let fresh = conn.get_if_changed(&path, None).await.ok();
         let now = self.now();
-        let fx = self.store().transaction(|tx| {
+        let fx = self.store().write(|tx| {
             let mut fx = Effects::default();
             if let Some(v) = &fresh {
                 self.sync_pr(
@@ -950,10 +969,10 @@ impl GitHub {
             }
             fx.finish.extend(finish.clone());
             crate::after::emit(tx, &r.workspace_id, &r.connection_id, &mut fx)?;
-            Ok::<_, ApiError>(fx)
+            Ok::<_, ApiError>(())
         });
         match fx {
-            Ok(fx) => self.after_commit(&ws, &r.connection_id, fx).await,
+            Ok(()) => {}
             // merged on GitHub; what is left is ours: the next run sees it merged and does it
             Err(e) => return Ran::Unknown(e.to_string()),
         }
@@ -965,13 +984,13 @@ impl GitHub {
 struct PrOpenDecisions(Slot);
 
 impl DecisionHandler for PrOpenDecisions {
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
         let gh = self.0.need()?;
         let item = d
             .item_id
             .as_deref()
             .ok_or_else(|| ApiError::not_found("事项"))?;
-        if cx.choice == "yes" && repo::item_status(tx, cx.ws, item)?.is_none() {
+        if cx.choice == "yes" && steve_store::item_repo::item_status(tx, cx.ws, item)?.is_none() {
             return Err(ApiError::not_found("事项"));
         }
         effects::queue(tx, &gh, cx.ws, &d.id, effects::OPEN)?;
@@ -979,7 +998,7 @@ impl DecisionHandler for PrOpenDecisions {
     }
 
     /// The branch may be pushed and the PR open by now; there is nothing to take back.
-    fn before_undo(&self, _tx: &Tx, _d: &Decision) -> ApiResult<()> {
+    fn before_undo(&self, _tx: &mut W<'_>, _d: &Decision) -> ApiResult<()> {
         Err(ApiError::rule(steve_i18n::t!("github.decision.no_undo")))
     }
 }
@@ -989,9 +1008,9 @@ impl DecisionHandler for PrOpenDecisions {
 struct PrMergeDecisions(Slot);
 
 impl DecisionHandler for PrMergeDecisions {
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
         let gh = self.0.need()?;
-        let pr = repo::pr_get(tx, &d.subject_id)?
+        let pr = steve_store::github::pr_get(tx, &d.subject_id)?
             .filter(|p| p.workspace_id == cx.ws)
             .ok_or_else(|| ApiError::not_found("PR"))?;
         if pr.state != "open" {
@@ -1008,7 +1027,7 @@ impl DecisionHandler for PrMergeDecisions {
         Ok(out)
     }
 
-    fn before_undo(&self, _tx: &Tx, _d: &Decision) -> ApiResult<()> {
+    fn before_undo(&self, _tx: &mut W<'_>, _d: &Decision) -> ApiResult<()> {
         Err(ApiError::rule(steve_i18n::t!("github.decision.no_undo")))
     }
 }

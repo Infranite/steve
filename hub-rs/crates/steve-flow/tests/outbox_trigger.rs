@@ -9,6 +9,7 @@ use steve_flow::testkit::FlowEnv;
 use steve_flow::{FlowCx, FlowError, ItemTrigger, RunExecutor, RunStatus};
 use steve_modules::testkit::{ME, WS, call, caller};
 use steve_store::outbox::{self, ConsumeError, Consumer, Dispatcher, Event};
+use steve_store::{SignalRows, testkit::flow as fixtures};
 
 async fn flow(e: &FlowEnv, graph: Value) {
     let (s, v) = call(
@@ -32,28 +33,20 @@ async fn flow(e: &FlowEnv, graph: Value) {
     assert_eq!(s, 200, "{v}");
 }
 
-fn q<T: rusqlite::types::FromSql>(e: &FlowEnv, sql: &str) -> T {
-    e.env
-        .store()
-        .with_conn(|c| Ok(c.query_row(sql, [], |r| r.get(0))?))
-        .unwrap()
-}
-
 fn done(e: &FlowEnv, item: &str) -> Event {
+    fixtures::fixture_item(
+        e.env.store(),
+        WS,
+        item,
+        item.trim_start_matches("ST-").parse().unwrap(),
+        "写周报",
+        "done",
+    )
+    .unwrap();
     e.env
         .store()
-        .with_conn(|c| {
-            c.execute(
-                "INSERT INTO items (id, workspace_id, no, title, status, stage, bot_id, created, updated) VALUES (?1, ?2, ?3, '写周报', 'done', '', 'steve', 1, 1)",
-                rusqlite::params![item, WS, item.trim_start_matches("ST-").parse::<i64>().unwrap()],
-            )?;
-            Ok(())
-        })
-        .unwrap();
-    e.env
-        .store()
-        .transaction(|tx| {
-            outbox::emit(
+        .write(|tx| {
+            outbox::append(
                 tx,
                 WS,
                 steve_work_api::ITEM_DONE,
@@ -77,30 +70,34 @@ async fn delivered_once_with_its_outcome_on_the_receipt() {
     done(&e, "ST-1");
     assert_eq!(d.pump(e.env.store(), 1).unwrap().done, 1);
     assert_eq!(
-        q::<String>(&e, "SELECT outcome FROM outbox_receipts"),
+        fixtures::latest_receipt(e.env.store()).unwrap(),
         "没有流程在听"
     );
-    assert_eq!(q::<i64>(&e, "SELECT count(*) FROM ext_events"), 0);
+    assert_eq!(fixtures::event_ids(e.env.store()).unwrap().len(), 0);
 
     flow(&e, serde_json::from_str(DIGEST).unwrap()).await;
     let ev = done(&e, "ST-2");
     assert_eq!(d.pump(e.env.store(), 2).unwrap().done, 1);
     assert_eq!(d.pump(e.env.store(), 3).unwrap().done, 0);
-    assert_eq!(q::<i64>(&e, "SELECT count(*) FROM ext_events"), 1);
-    assert_eq!(q::<i64>(&e, "SELECT count(*) FROM flow_runs"), 1);
-    let external: String = q(&e, "SELECT external_id FROM ext_events");
+    assert_eq!(fixtures::event_ids(e.env.store()).unwrap().len(), 1);
+    assert_eq!(fixtures::run_count(e.env.store()).unwrap(), 1);
+    let id = fixtures::event_ids(e.env.store()).unwrap().remove(0);
+    let external: String = e
+        .env
+        .store()
+        .read::<_, steve_store::StoreError>(|r| {
+            Ok(SignalRows(r).event(&id)?.unwrap().external_id.unwrap())
+        })
+        .unwrap();
     assert_eq!(external, format!("ST-2:item.done:{}", ev.id));
-    let outcome: String = q(
-        &e,
-        "SELECT outcome FROM outbox_receipts ORDER BY event_seq DESC LIMIT 1",
-    );
+    let outcome: String = fixtures::latest_receipt(e.env.store()).unwrap();
     assert!(outcome.contains("1 个流程"), "{outcome}");
     steve_runtime::testkit::eventually_sync("the triggered run finishes", || {
-        q::<String>(&e, "SELECT status FROM flow_runs") == "done"
+        fixtures::only_run(e.env.store()).unwrap().status == "done"
     })
     .await;
     assert_eq!(
-        q::<String>(&e, "SELECT status FROM flow_runs"),
+        fixtures::only_run(e.env.store()).unwrap().status,
         "done",
         "driven after the commit"
     );
@@ -114,11 +111,11 @@ async fn the_same_fact_twice_is_one_event() {
     let c = ItemTrigger::new(e.flow.clone());
     // applied twice without a receipt between (a receipt lost in a restore): the event's id dedupes
     for _ in 0..2 {
-        let a = e.env.store().transaction(|tx| c.apply(tx, &ev)).unwrap();
+        let a = e.env.store().write(|tx| c.apply(tx, &ev)).unwrap();
         drop(a.after);
     }
-    assert_eq!(q::<i64>(&e, "SELECT count(*) FROM ext_events"), 1);
-    assert_eq!(q::<i64>(&e, "SELECT count(*) FROM flow_runs"), 1);
+    assert_eq!(fixtures::event_ids(e.env.store()).unwrap().len(), 1);
+    assert_eq!(fixtures::run_count(e.env.store()).unwrap(), 1);
 }
 
 /// Resumes only after the commit, like an executor from before `wake_in`.
@@ -133,33 +130,18 @@ impl RunExecutor for AfterCommitOnly {
 
 #[tokio::test]
 async fn an_executor_that_cannot_wake_in_the_transaction_is_refused() {
-    let base = FlowEnv::new();
-    let fx = steve_flow::FlowSetup::new(base.core.clone())
-        .build(base.env.modules.clone(), Arc::new(AfterCommitOnly));
-    base.env
-        .store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "INSERT INTO flow_runs (id, workspace_id, flow_id, flow_version, trigger_kind, status, started) VALUES ('run_w', 'default', 'flw_w', 1, 'event', 'waiting', 1);
-                 INSERT INTO flow_waits (run_id, node_id, workspace_id, mode, match, created) VALUES ('run_w', 'w', 'default', 'event', '{\"source\":\"item\"}', 1);",
-            )?;
-            Ok(())
-        })
-        .unwrap();
-    let ev = done(&base, "ST-1");
+    let e = FlowEnv::new();
+    let fx = steve_flow::FlowSetup::new(e.core.clone())
+        .build(e.env.modules.clone(), Arc::new(AfterCommitOnly));
+    fixtures::waiting_for_item(e.env.store()).unwrap();
+    let ev = done(&e, "ST-1");
     let c = ItemTrigger::new(fx);
-    let r = base
-        .env
-        .store()
-        .transaction(|tx| c.apply(tx, &ev).map(|_| ()));
+    let r = e.env.store().write(|tx| c.apply(tx, &ev).map(|_| ()));
     assert!(matches!(r, Err(ConsumeError::Reject(_))), "{:?}", r.err());
     assert_eq!(
-        q::<i64>(&base, "SELECT count(*) FROM ext_events"),
+        fixtures::event_ids(e.env.store()).unwrap().len(),
         0,
         "rolled back"
     );
-    assert_eq!(
-        q::<String>(&base, "SELECT status FROM flow_runs WHERE id = 'run_w'"),
-        "waiting"
-    );
+    assert_eq!(e.run_row("run_w").status, "waiting");
 }

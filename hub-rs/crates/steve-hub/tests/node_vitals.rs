@@ -36,23 +36,9 @@ async fn a_linked_node_updates_the_metrics_recorder() {
 fn session_token_windows_are_attributed_to_the_node_and_workspace() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_at(dir.path());
-    store.transaction::<_, steve_store::StoreError>(|tx| {
-        tx.execute_batch(
-            "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES
-               ('a','default','fixture','.','ended',0,0), ('b','default','fixture','.','ended',0,0);
-             INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES
-               ('a','local','{}','a','r','idle',0), ('b','remote','{}','b','r','idle',0);
-             INSERT INTO usage_records(workspace_id,ts,day,source,purpose,harness,session_id,input,output,cache_read,cache_write,reasoning) VALUES
-               ('default',2000,'2026-11-01','agent','turn','fixture','a',10,6,3,1,4),
-               ('default',61000,'2026-11-02','agent','turn','fixture','a',10,5,NULL,NULL,3),
-               ('default',61000,'2026-11-02','agent','turn','fixture','b',50,5,NULL,NULL,2),
-               ('default',61000,'2026-11-02','gateway','think','fixture',NULL,100,50,NULL,NULL,0),
-               ('other',61000,'2026-11-02','agent','turn','fixture','a',500,50,NULL,NULL,0);"
-        )?;
-        Ok(())
-    }).unwrap();
+    steve_store::testkit::hub::node_statistics::seed_session_token_windows(&store).unwrap();
     let totals = store
-        .reader(|c| {
+        .read(|c| {
             steve_store::nodes::session_tokens(
                 c,
                 "default",

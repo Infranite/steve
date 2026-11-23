@@ -5,6 +5,7 @@
 mod support;
 
 use std::time::Duration;
+use steve_store::mail::fixtures as db;
 
 use steve_mail::fake::{ImapConfig, TlsMode, fixtures};
 use steve_mail::{FlagChange, SendMeta};
@@ -26,10 +27,7 @@ async fn verify_failures_are_400_in_chinese() {
         e => panic!("{e:?}"),
     }
     // nothing was created, the credential is gone
-    assert_eq!(
-        h.count("SELECT COUNT(*) FROM connections WHERE adapter = ?", "imap"),
-        0
-    );
+    assert_eq!(db::adapter_connections(h.env.store(), "imap"), 0);
 
     // a server that offers plain text only is refused before any password is sent
     let plain = steve_mail::fake::FakeImap::start(ImapConfig {
@@ -68,7 +66,7 @@ async fn starttls_and_163_id() {
 }
 
 fn inbox_synced(h: &H, conn: &str) -> bool {
-    h.count("SELECT COUNT(*) FROM mail_folders WHERE connection_id = ? AND ext_id = 'INBOX' AND synced IS NOT NULL AND last_uid IS NOT NULL", conn) == 1
+    db::inbox_synced(h.env.store(), conn) == 1
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -254,7 +252,7 @@ async fn very_large_mail_is_header_and_structure_only() {
     let atts = h
         .env
         .store()
-        .reader(|c| steve_mail::repo::attachments(c, &m.id))
+        .read(|c| steve_store::mail::attachments(c, &m.id))
         .unwrap();
     assert_eq!(atts.len(), 1);
     assert_eq!(atts[0].1, "scan.bin");

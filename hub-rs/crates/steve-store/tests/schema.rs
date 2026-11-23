@@ -1,5 +1,6 @@
 //! Migrations and the schema_version they leave.
 
+use steve_store::testkit::SqliteFixtures;
 mod common;
 
 use common::*;
@@ -64,7 +65,7 @@ fn compiled_migrations_match_the_release_lock() {
 fn pragmas_and_version() {
     let t = fresh();
     t.store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             let mode: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
             assert_eq!(mode, "wal");
             assert_eq!(
@@ -121,7 +122,7 @@ fn reopen_changes_nothing() {
     let before = schema_of(&path);
     let s = Store::open(&path, NoPublisher).unwrap();
     assert_eq!(schema_of(&path), before);
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         assert_eq!(count(c, "SELECT count(*) FROM schema_version"), 1);
         assert_eq!(count(c, "SELECT v FROM schema_version"), db::SCHEMA_VERSION);
         assert_eq!(count(c, "SELECT count(*) FROM items"), 1);
@@ -148,7 +149,7 @@ fn upgrades_a_version_1_database() {
     }
     let s = Store::open(&path, NoPublisher).unwrap();
     s.ensure_workspace().unwrap();
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         assert_eq!(count(c, "SELECT v FROM schema_version"), db::SCHEMA_VERSION);
         assert_eq!(count(c, "SELECT count(*) FROM workspace_members WHERE user_id = 'usr_1' AND role = 'owner' AND created = 2"), 1);
         assert_eq!(count(c, "SELECT count(*) FROM bot_workspaces WHERE bot_id = 'steve' AND workspace_id = 'default' AND created = 3"), 1);
@@ -166,7 +167,7 @@ fn newer_schema_is_opened_unchanged() {
     let t = fresh();
     let path = t.store.path().to_path_buf();
     t.store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             // what a newer build would have left behind
             c.execute(
                 "UPDATE schema_version SET v = ?",
@@ -184,7 +185,7 @@ fn newer_schema_is_opened_unchanged() {
     });
     assert_eq!(warns.load(Ordering::SeqCst), 1, "one warning");
     assert_eq!(schema_of(&path), before, "no migration ran");
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         assert_eq!(
             count(c, "SELECT v FROM schema_version"),
             db::SCHEMA_VERSION + 1,
@@ -381,7 +382,7 @@ fn upgrades_a_version_2_database_with_attachments() {
         .unwrap();
     }
     let s = Store::open(&path, NoPublisher).unwrap();
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         assert_eq!(count(c, "SELECT v FROM schema_version"), db::SCHEMA_VERSION);
         Ok(())
     })
@@ -438,7 +439,7 @@ fn upgrades_a_version_2_database_with_attachments() {
         s.queued().list("ses_1").unwrap()[1].files,
         std::slice::from_ref(&r)
     );
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         // stored as JSON FileRef[]; an empty list is NULL like TS
         let j: String = c.query_row("SELECT files FROM queued WHERE text = 'with'", [], |r| {
             r.get(0)

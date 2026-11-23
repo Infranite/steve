@@ -32,19 +32,22 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use steve_store::{Decision, NewDecision, Tx, base, now, uid};
+use steve_store::{
+    BotRows, Decision, DecisionRows, ItemReads, NewDecision, Read, SessionEvidence, W, now, uid,
+    vault_items::VaultItems,
+};
 use tokio::sync::mpsc;
 
 use super::grants::{self, add_grant};
 use super::inject::{
     self, DEFAULT_TIMEOUT_S, How, Injection, MAX_TIMEOUT_S, RunOutput, RunSpec, resolve_cwd,
 };
-use super::items::repo::{self as irepo, ItemRow};
 use super::items::templates::BANK_CARD;
-use super::use_repo::{self as urepo, UseRecord};
 use super::{Vault, VaultError, VaultResult};
 use crate::decisions::{DecisionCx, DecisionHandler, choice_result};
 use crate::{ApiError, ApiResult};
+use steve_store::secret_uses::{SecretUses as UseRows, UseRecord};
+use steve_store::vault_items::{FieldRow, ItemFilter, ItemRow};
 
 /// The decisions' `subject_type`.
 pub const SUBJECT: &str = "secret_use";
@@ -265,14 +268,14 @@ impl Pending {
 struct UseContext {
     session: String,
     item: ItemRow,
-    fields: Vec<irepo::FieldRow>,
+    fields: Vec<FieldRow>,
     workdir: String,
     work_item: Option<String>,
     project: Option<String>,
     bot_name: String,
 }
 
-fn request_injections(fields: &[irepo::FieldRow], r: &UseRequest) -> VaultResult<Vec<Injection>> {
+fn request_injections(fields: &[FieldRow], r: &UseRequest) -> VaultResult<Vec<Injection>> {
     // injections: every label must be a field of the item, every VAR valid and used once
     let mut injections = Vec::new();
     let mut vars: Vec<&str> = Vec::new();
@@ -416,6 +419,7 @@ fn pending_row(
         exit_code: None,
         created: at,
         finished: None,
+        run_id: None,
     }
 }
 
@@ -463,12 +467,12 @@ fn mode_of(inj: &[Injection]) -> &'static str {
 
 /// The item a bot names: an id, or an exact title, among the items `user` sees (never the system
 /// vault). Several items with that title → `400` listing their ids.
-fn find_item(c: &rusqlite::Connection, ws: &str, user: &str, name: &str) -> VaultResult<ItemRow> {
+fn find_item(c: &mut impl Read, ws: &str, user: &str, name: &str) -> VaultResult<ItemRow> {
     let name = name.trim();
     if let Ok((i, _)) = super::items::own_item(c, ws, user, name) {
         return Ok(i);
     }
-    let all = irepo::list_items(c, ws, user, &irepo::ItemFilter::default())?;
+    let all = VaultItems(c).list(ws, user, &ItemFilter::default())?;
     let hits: Vec<ItemRow> = all.into_iter().filter(|i| i.title == name).collect();
     match hits.len() {
         0 => Err(ApiError::not_found("条目").into()),
@@ -558,8 +562,8 @@ impl SecretUses {
             .blocking(move |v| {
                 inject::cleanup(&me.0.home, Some(SCRATCH_AGE));
                 let notes = me.expire_waiting(now() - PENDING_MS, false)?;
-                v.store().transaction(|tx| {
-                    Ok::<_, VaultError>(urepo::delete_uses_before(tx, now() - RETENTION_MS)?)
+                v.store().write(|tx| {
+                    Ok::<_, VaultError>(UseRows(tx).delete_before(now() - RETENTION_MS)?)
                 })?;
                 Ok(notes)
             })
@@ -590,25 +594,25 @@ impl SecretUses {
         startup: bool,
     ) -> VaultResult<Vec<(String, Option<String>, Option<String>, String)>> {
         let store = self.0.vault.store();
-        store.transaction(|tx| {
+        store.write(|tx| {
             let at = now();
             let mut notes = Vec::new();
             if startup {
-                for u in urepo::uses_in(tx, "running", i64::MAX)? {
-                    urepo::transition(tx, &u.id, "running", "failed", None, None, Some(at))?;
-                    base::audit(tx, &u.workspace_id, "steve", "vault.use_failed", &u.item_id, &json!({"use": u.id, "reason": "restart"}))?;
+                for u in UseRows(tx).in_status("running", i64::MAX)? {
+                    UseRows(tx).transition(&u.id, "running", "failed", None, None, Some(at))?;
+                    tx.audit(&u.workspace_id, "steve", "vault.use_failed", &u.item_id, &json!({"use": u.id, "reason": "restart"}))?;
                     publish(tx, &u);
                 }
             }
-            for u in urepo::uses_in(tx, "pending", before)? {
-                urepo::transition(tx, &u.id, "pending", "expired", None, None, Some(at))?;
+            for u in UseRows(tx).in_status("pending", before)? {
+                UseRows(tx).transition(&u.id, "pending", "expired", None, None, Some(at))?;
                 if let Some(d) = &u.decision_id {
-                    base::decisions::settle(tx, d, &json!({"expired": true}), "expired", &Value::Null)?;
+                    DecisionRows(tx).settle(d, &json!({"expired": true}), "expired", &Value::Null)?;
                 }
                 lock(&self.0.pending).remove(&u.id);
-                base::audit(tx, &u.workspace_id, "steve", "vault.use_expired", &u.item_id, &json!({"use": u.id}))?;
+                tx.audit(&u.workspace_id, "steve", "vault.use_expired", &u.item_id, &json!({"use": u.id}))?;
                 publish(tx, &u);
-                let title = irepo::item(tx, &u.item_id)?.map(|i| i.title).unwrap_or_default();
+                let title = VaultItems(tx).item(&u.item_id)?.map(|i| i.title).unwrap_or_default();
                 let text = if startup {
                     format!("请求使用「{title}」的审批在 Steve 重启时失效了。需要的话请重新调用 steve_secret_use。")
                 } else {
@@ -673,15 +677,16 @@ impl SecretUses {
         let mut row = pending_row(cx, r, place, &context, &pending);
         let store = self.0.vault.store();
         let item = &context.item;
-        let grant =
-            store.reader(|c| grants::covering(c, &cx.ws, item, &cx.bot_id, &pending.scope))?;
+        let grant = self
+            .0
+            .vault
+            .read(|r| grants::covering(r, &cx.ws, item, &cx.bot_id, &pending.scope))?;
         if let Some(g) = grant {
             row.status = "running".into();
             row.grant_id = Some(g.clone());
-            store.transaction(|tx| {
-                urepo::insert_use(tx, &row)?;
-                base::audit(
-                    tx,
+            store.write(|tx| {
+                UseRows(tx).insert(&row)?;
+                tx.audit(
                     &cx.ws,
                     &cx.bot_id,
                     "vault.use_start",
@@ -700,18 +705,20 @@ impl SecretUses {
     }
 
     fn use_context(&self, cx: &UseCx, r: &UseRequest, session: &str) -> VaultResult<UseContext> {
-        let store = self.0.vault.store();
-        let (item, fields, workdir, work_item, project, bot_name) = store.reader(|c| {
-            let (cwd, s_item, _) =
-                urepo::session(c, &cx.ws, session)?.ok_or_else(|| ApiError::not_found("会话"))?;
+        let (item, fields, workdir, work_item, project, bot_name) = self.0.vault.read(|c| {
+            let (cwd, s_item) = SessionEvidence(c)
+                .workdir(&cx.ws, session)?
+                .ok_or_else(|| ApiError::not_found("会话"))?;
             let item = find_item(c, &cx.ws, &cx.user, &r.item)?;
-            let fields = irepo::fields(c, &item.id)?;
+            let fields = VaultItems(c).fields(&item.id)?;
             let work_item = cx.item_id.clone().or(s_item);
             let project = match &work_item {
-                Some(w) => urepo::item_project(c, &cx.ws, w)?.flatten(),
+                Some(w) => ItemReads(c).project_id(&cx.ws, w)?.flatten(),
                 None => None,
             };
-            let bot = urepo::bot_name(c, &cx.bot_id)?.unwrap_or_else(|| cx.bot_id.clone());
+            let bot = BotRows(c)
+                .name(&cx.bot_id)?
+                .unwrap_or_else(|| cx.bot_id.clone());
             Ok::<_, VaultError>((item, fields, cwd, work_item, project, bot))
         })?;
         Ok(UseContext {
@@ -757,26 +764,22 @@ impl SecretUses {
             OPTIONS.iter().map(|s| s.to_string()).collect()
         };
         lock(&self.0.pending).insert(use_id.clone(), pending);
-        let opened = store.transaction(|tx| {
-            urepo::insert_use(tx, &row)?;
-            let d = base::decisions::open(
-                tx,
-                &NewDecision {
-                    workspace_id: cx.ws.clone(),
-                    kind: "approve".into(),
-                    subject_type: SUBJECT.into(),
-                    subject_id: use_id.clone(),
-                    item_id: work_item.clone(),
-                    session_id: Some(session.to_string()),
-                    question: question.clone(),
-                    draft: Some(draft.clone()),
-                    options: Some(options.clone()),
-                    requested_by: cx.bot_id.clone(),
-                },
-            )?;
-            urepo::set_decision(tx, &use_id, &d.id)?;
-            base::audit(
-                tx,
+        let opened = store.write(|tx| {
+            UseRows(tx).insert(&row)?;
+            let d = DecisionRows(tx).open(&NewDecision {
+                workspace_id: cx.ws.clone(),
+                kind: "approve".into(),
+                subject_type: SUBJECT.into(),
+                subject_id: use_id.clone(),
+                item_id: work_item.clone(),
+                session_id: Some(session.to_string()),
+                question: question.clone(),
+                draft: Some(draft.clone()),
+                options: Some(options.clone()),
+                requested_by: cx.bot_id.clone(),
+            })?;
+            UseRows(tx).set_decision(&use_id, &d.id)?;
+            tx.audit(
                 &cx.ws,
                 &cx.bot_id,
                 "vault.use_request",
@@ -845,15 +848,13 @@ impl SecretUses {
             .0
             .vault
             .blocking(move |v| {
-                v.store().transaction(|tx| {
+                v.store().write(|tx| {
                     let to = if o.ok() { "ok" } else { "failed" };
-                    let Some(u) = urepo::get_use(tx, &id)? else {
+                    let Some(u) = UseRows(tx).get(&id)? else {
                         return Ok(());
                     };
-                    urepo::transition(tx, &id, "running", to, None, Some(i64::from(o.code())), Some(now()))?;
-                    base::audit(
-                        tx,
-                        &u.workspace_id,
+                    UseRows(tx).transition(&id, "running", to, None, Some(i64::from(o.code())), Some(now()))?;
+                    tx.audit(&u.workspace_id,
                         &u.actor_id,
                         "vault.use",
                         &u.item_id,
@@ -879,10 +880,7 @@ impl SecretUses {
             let u = self
                 .0
                 .vault
-                .blocking(move |v| {
-                    v.store()
-                        .transaction(|tx| Ok::<_, VaultError>(urepo::get_use(tx, &id)?))
-                })
+                .blocking(move |v| Ok(v.store().read(|r| UseRows(r).get(&id))?))
                 .await
                 .ok()
                 .flatten()?;
@@ -955,8 +953,8 @@ enum Prepared {
     },
 }
 
-fn publish(tx: &Tx, u: &UseRecord) {
-    tx.publish(steve_types::DomainEvent::from(
+fn publish(tx: &mut W<'_>, u: &UseRecord) {
+    tx.emit(steve_types::DomainEvent::from(
         steve_types::VaultEvent::Vault {
             id: {
                 let value: String = u.item_id.clone();
@@ -974,9 +972,10 @@ fn publish(tx: &Tx, u: &UseRecord) {
 pub struct UseDecisions(SecretUses);
 
 impl DecisionHandler for UseDecisions {
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
         let inner = &self.0.0;
-        let u = urepo::get_use(tx, &d.subject_id)?
+        let u = UseRows(tx)
+            .get(&d.subject_id)?
             .filter(|u| u.workspace_id == cx.ws)
             .ok_or_else(|| ApiError::not_found("使用记录"))?;
         if u.status != "pending" {
@@ -994,9 +993,8 @@ impl DecisionHandler for UseDecisions {
         result["use"] = json!(u.id);
         let job = match cx.choice {
             "deny" => {
-                urepo::transition(tx, &u.id, "pending", "denied", None, None, Some(at))?;
-                base::audit(
-                    tx,
+                UseRows(tx).transition(&u.id, "pending", "denied", None, None, Some(at))?;
+                tx.audit(
                     cx.ws,
                     cx.actor,
                     "vault.use_denied",
@@ -1006,7 +1004,7 @@ impl DecisionHandler for UseDecisions {
                 Job::Denied(u.id.clone())
             }
             "once" => {
-                urepo::transition(tx, &u.id, "pending", "running", None, None, None)?;
+                UseRows(tx).transition(&u.id, "pending", "running", None, None, None)?;
                 Job::Run(u.id.clone())
             }
             c => {
@@ -1016,7 +1014,8 @@ impl DecisionHandler for UseDecisions {
                     "grant_24h" => 24,
                     _ => return Err(ApiError::invalid("choice")),
                 };
-                let item = irepo::item(tx, &u.item_id)?
+                let item = VaultItems(tx)
+                    .item(&u.item_id)?
                     .filter(|i| i.status == "active")
                     .ok_or_else(|| ApiError::not_found("条目"))?;
                 let g = add_grant(
@@ -1033,7 +1032,7 @@ impl DecisionHandler for UseDecisions {
                     VaultError::Api(a) => a,
                     e => ApiError::Rule(e.to_string()),
                 })?;
-                urepo::transition(tx, &u.id, "pending", "running", Some(&g), None, None)?;
+                UseRows(tx).transition(&u.id, "pending", "running", Some(&g), None, None)?;
                 result["grant"] = json!(g);
                 Job::Run(u.id.clone())
             }
@@ -1044,24 +1043,16 @@ impl DecisionHandler for UseDecisions {
         Ok(result)
     }
 
-    fn before_undo(&self, _: &Tx, _: &Decision) -> ApiResult<()> {
+    fn before_undo(&self, _: &mut W<'_>, _: &Decision) -> ApiResult<()> {
         Err(ApiError::rule(steve_i18n::t!(
             "modules.vault.use_not_undoable"
         )))
     }
 
-    fn expire(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
-        if urepo::transition(
-            tx,
-            &d.subject_id,
-            "pending",
-            "expired",
-            None,
-            None,
-            Some(now()),
-        )? {
+    fn expire(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
+        if UseRows(tx).transition(&d.subject_id, "pending", "expired", None, None, Some(now()))? {
             lock(&self.0.0.pending).remove(&d.subject_id);
-            if let Some(u) = urepo::get_use(tx, &d.subject_id)? {
+            if let Some(u) = UseRows(tx).get(&d.subject_id)? {
                 publish(tx, &u);
             }
         }

@@ -20,11 +20,14 @@ export function VaultSettingsPane() {
   const t = useT()
   const L = useLoad(async () => {
     const status = await vaultApi.status()
-    return { status, passkeys: status.initialized ? await vaultApi.passkeys().catch(() => null) : null }
+    const passkeys = status.initialized ? await vaultApi.passkeys().then(
+      (keys) => ({ keys, error: null }),
+      (e: Error) => ({ keys: [], error: e.message }),
+    ) : null
+    return { status, passkeys }
   }, [], ["vault"])
   const [busy, act] = useBusy(), [code, setCode] = useState(""), [rotated, setRotated] = useState<string | null>(null), [ask, setAsk] = useState(false), [rm, setRm] = useState<{ id: string; name: string } | null>(null)
   if (L.s === "loading") return <Loading />
-  if (L.s === "unwired") return <Empty title={t("vault:settings.unwired")} sub={t("vault:settings.unwiredSub")} />
   if (L.s === "error") return <Empty title={L.err} />
   const { status: s, passkeys } = L.data
   if (!s.initialized) return <Panel><Row title={t("vault:settings.notEnabled")} sub={t("vault:settings.notEnabledSub")} onClick={() => go("#/vault")} controls><Button size="sm" variant="outline" onClick={() => go("#/vault")}>{t("vault:settings.goEnable")}</Button></Row></Panel>
@@ -51,7 +54,7 @@ export function VaultSettingsPane() {
       {bad && recover}
       <Section label={t("vault:settings.localVerify")} note={t("vault:settings.passkeyNote")}>
         <Panel>
-          {passkeys?.length ? passkeys.map((p) => <Row key={p.id} title={p.name} sub={p.last_used ? t("vault:settings.passkeySubUsed", { rp: p.rp_id, created: tm(p.created), used: tm(p.last_used) }) : t("vault:settings.passkeySub", { rp: p.rp_id, created: tm(p.created) })} data-passkey={p.name}>
+          {passkeys?.error ? <Notice role="alert" tone="destructive" action={<Button size="xs" variant="outline" onClick={() => void L.reload()}>{t("common:action.retry")}</Button>}>{passkeys.error}</Notice> : passkeys?.keys.length ? passkeys.keys.map((p) => <Row key={p.id} title={p.name} sub={p.last_used ? t("vault:settings.passkeySubUsed", { rp: p.rp_id, created: tm(p.created), used: tm(p.last_used) }) : t("vault:settings.passkeySub", { rp: p.rp_id, created: tm(p.created) })} data-passkey={p.name}>
             <Button variant="ghost" size="icon-xs" aria-label={t("vault:settings.deletePasskey", { name: p.name })} className="text-muted-foreground" onClick={() => setRm(p)}><TrashIcon /></Button></Row>)
             : <div className="px-3 py-3 type-callout text-muted-foreground">{t("vault:settings.noPasskeys")}</div>}
           <RegisterPasskey row onDone={() => void L.reload()} />

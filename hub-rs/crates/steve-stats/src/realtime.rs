@@ -1,17 +1,16 @@
 //! Realtime output, independent of billing and calendar-day statistics. The collector writes
 //! quarter-token estimates from streamed text, never from chunk counts or final usage reports.
-//! Read an entire answer in one SQLite snapshot: late samples can revise the trend at their source
+//! Read an entire answer in one storage snapshot: late samples can revise the trend at their source
 //! time, but can never become a burst at the time they arrived.
 
 use std::collections::HashMap;
 
-use rusqlite::{Connection, params};
 use serde::Serialize;
-use steve_store::StoreError;
-
-#[cfg(test)]
-#[path = "realtime_query_tests.rs"]
-mod query_tests;
+pub use steve_store::statistics::RealtimeScope as Scope;
+use steve_store::{
+    Read, StoreError,
+    statistics::{Attempt, RealtimeReads},
+};
 
 pub const WINDOW_MS: i64 = 10_000;
 pub const STEP_MS: i64 = 1_000;
@@ -20,12 +19,6 @@ pub const POINTS: i64 = 60;
 pub const FRESH_MS: i64 = 3_000;
 pub const ESTIMATOR: &str = "text-v1";
 
-// Keep the persistent gap lookup and the bounded tail separate. An OR with the predecessor
-// defeats the lower index bound and makes every one-second poll scan the entire attempt.
-const GAP_SQL: &str =
-    "SELECT MIN(at) FROM realtime_output_samples WHERE attempt_id=? AND kind='gap'";
-const WINDOW_SQL: &str = "SELECT at,units FROM realtime_output_samples WHERE attempt_id=?1 AND at>?2 AND at<=?3 ORDER BY at,seq";
-const PRECEDING_SQL: &str = "SELECT at,0 FROM realtime_output_samples WHERE attempt_id=?1 AND at<=?2 ORDER BY at DESC LIMIT 1";
 /// A deliberately approximate, additive text estimator. ASCII scalars weigh 1/4 token; every
 /// other Unicode scalar weighs 1 token. Fractional tokens avoid dependence on stream chunking.
 /// Includes visible assistant/thought text, excludes tools, images and unexposed reasoning.
@@ -76,108 +69,11 @@ pub struct Realtime {
     pub observed_output_sessions: usize,
 }
 
-#[derive(Debug)]
-struct Sample {
-    at: i64,
-    units: i64,
-}
-
-struct Attempt {
-    session: String,
-    started: i64,
-    ended: Option<i64>,
-    tracked: bool,
-    baseline: bool,
-    confirmed_end: bool,
-    unknown_at: Option<i64>,
-    gap_at: Option<i64>,
-    samples: Vec<Sample>,
-}
-
-/// Already-authorized workspace and optional project/Bot references. There are deliberately no
-/// historical range, model, source, item, harness or client-supplied clock parameters.
-pub struct Scope<'a> {
-    pub workspace: &'a str,
-    pub project: Option<&'a str>,
-    pub bot: Option<&'a str>,
-}
-
-/// Reads from persisted Node collection records. The transaction also keeps stream health and
-/// attempt ends consistent with the samples when a collector commits concurrently.
-pub fn read(c: &Connection, scope: Scope<'_>, now: i64) -> Result<Realtime, StoreError> {
-    let tx = c.unchecked_transaction()?;
+/// Reads collector health, attempt ends and samples within one storage snapshot.
+pub fn read(c: &mut impl Read, scope: Scope<'_>, now: i64) -> Result<Realtime, StoreError> {
     let at = now.div_euclid(STEP_MS) * STEP_MS;
     let lo = at - (POINTS - 1) * STEP_MS - WINDOW_MS;
-    let mut stmt = tx.prepare_cached(
-        "SELECT a.attempt_id, t.session_id, COALESCE(r.started,a.created),
-                r.ended,
-                r.attempt_id IS NOT NULL, r.ended IS NOT NULL,
-                CASE WHEN a.state='unknown' OR
-                     (a.state='finished' AND r.attempt_id IS NOT NULL AND r.ended IS NULL) THEN a.updated END,
-                COALESCE(r.baseline,0)
-           FROM runtime_attempts a JOIN runtime_turns t USING(turn_id)
-           JOIN sessions s ON s.id=t.session_id
-           LEFT JOIN items i ON i.id=s.item_id AND i.workspace_id=s.workspace_id
-           LEFT JOIN realtime_output_attempts r ON r.attempt_id=a.attempt_id AND r.workspace_id=s.workspace_id
-          WHERE s.workspace_id=?1 AND s.readonly=0 AND COALESCE(r.not_started,0)=0
-            AND COALESCE(r.started,a.created)<=?4
-            AND (r.ended IS NULL OR r.ended>?5)
-            AND (?2 IS NULL OR (CASE WHEN r.attempt_id IS NULL THEN i.project_id ELSE r.project_id END)=?2)
-            AND (?3 IS NULL OR (CASE WHEN r.attempt_id IS NULL THEN s.bot_id ELSE r.bot_id END)=?3)",
-    )?;
-    let mut attempts = stmt
-        .query_map(
-            params![scope.workspace, scope.project, scope.bot, at, lo],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    Attempt {
-                        session: r.get(1)?,
-                        started: r.get(2)?,
-                        ended: r.get(3)?,
-                        tracked: r.get(4)?,
-                        baseline: r.get(7)?,
-                        confirmed_end: r.get(5)?,
-                        unknown_at: r.get(6)?,
-                        gap_at: None,
-                        samples: vec![],
-                    },
-                ))
-            },
-        )?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(stmt);
-    load_attempt_samples(&tx, &mut attempts, lo, at)?;
-    // Sessions never bound to a Node have no collection path. Their persisted ended lifecycle
-    // bounds the unknown interval, but does not erase its historical windows or prove coverage.
-    let mut st = tx.prepare_cached(
-        "SELECT s.id,s.created,CASE WHEN s.status='ended' THEN MAX(s.created,s.updated) END
-           FROM sessions s LEFT JOIN items i ON i.id=s.item_id AND i.workspace_id=s.workspace_id
-          WHERE s.workspace_id=?1 AND s.readonly=0 AND s.created<=?4
-            AND (s.status IN ('running','starting','busy') OR (s.status='ended' AND MAX(s.created,s.updated)>?5))
-            AND NOT EXISTS(SELECT 1 FROM runtime_turns t WHERE t.session_id=s.id)
-            AND (?2 IS NULL OR i.project_id=?2) AND (?3 IS NULL OR s.bot_id=?3)",
-    )?;
-    for a in st.query_map(
-        params![scope.workspace, scope.project, scope.bot, at, lo],
-        |r| {
-            Ok(Attempt {
-                session: r.get(0)?,
-                started: r.get(1)?,
-                ended: r.get(2)?,
-                tracked: false,
-                baseline: false,
-                confirmed_end: false,
-                unknown_at: None,
-                gap_at: None,
-                samples: vec![],
-            })
-        },
-    )? {
-        attempts.push((String::new(), a?));
-    }
-    drop(st);
-    tx.commit()?;
+    let attempts = RealtimeReads(c).attempts(scope, lo, at)?;
     let current = aggregate(&attempts, at);
     let series = (0..POINTS)
         .rev()
@@ -206,43 +102,6 @@ pub fn read(c: &Connection, scope: Scope<'_>, now: i64) -> Result<Realtime, Stor
     })
 }
 
-fn load_attempt_samples(
-    tx: &Connection,
-    attempts: &mut [(String, Attempt)],
-    lo: i64,
-    at: i64,
-) -> Result<(), StoreError> {
-    for (id, a) in attempts {
-        if !a.tracked {
-            continue; // no collection record in this workspace, including a moved session
-        }
-        a.gap_at = tx.query_row(GAP_SQL, [id.as_str()], |r| r.get(0))?;
-        // One preceding activity is enough for the first point's freshness check. No need to
-        // reread a long attempt's entire journal every second.
-        let mut st = tx.prepare_cached(WINDOW_SQL)?;
-        a.samples = st
-            .query_map(params![id.as_str(), lo, at], |r| {
-                Ok(Sample {
-                    at: r.get(0)?,
-                    units: r.get(1)?,
-                })
-            })?
-            .collect::<rusqlite::Result<_>>()?;
-        let mut preceding = tx.prepare_cached(PRECEDING_SQL)?;
-        a.samples.extend(
-            preceding
-                .query_map(params![id.as_str(), lo], |r| {
-                    Ok(Sample {
-                        at: r.get(0)?,
-                        units: 0,
-                    })
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?,
-        );
-    }
-    Ok(())
-}
-
 struct Aggregate {
     tps: Option<f64>,
     output_sessions: Option<usize>,
@@ -252,7 +111,7 @@ struct Aggregate {
     observed_output_sessions: usize,
 }
 
-fn aggregate(attempts: &[(String, Attempt)], at: i64) -> Aggregate {
+fn aggregate(attempts: &[Attempt], at: i64) -> Aggregate {
     #[derive(Default)]
     struct Session {
         missing: bool,
@@ -260,7 +119,7 @@ fn aggregate(attempts: &[(String, Attempt)], at: i64) -> Aggregate {
     }
     let lo = at - WINDOW_MS;
     let mut sessions: HashMap<&str, Session> = HashMap::new();
-    for (_, a) in attempts {
+    for a in attempts {
         if a.started > at || a.ended.is_some_and(|end| end <= lo) {
             continue;
         }

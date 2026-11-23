@@ -6,30 +6,28 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime};
 use chrono_tz::Tz;
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::{Value, json};
 use steve_modules::{ApiError, ApiResult};
 
-use crate::repo::{self, CalRow, EventRow};
-use crate::sync::me_party;
 use crate::{Settings, ics};
+use steve_store::calendar::{CalRow, CalendarRepo, EventRow};
+use steve_store::{
+    Read,
+    parties::Parties,
+    settings::{NotificationPolicies, Settings as WorkspaceSettings},
+};
 
 /// The reader's zone: their personal notification setting, else the workspace's.
-pub fn user_tz(c: &Connection, ws: &str, user: &str) -> ApiResult<Tz> {
-    let own: Option<String> = c
-        .query_row(
-            "SELECT timezone FROM notification_policies WHERE workspace_id = ? AND user_id = ?",
-            params![ws, user],
-            |r| r.get(0),
-        )
-        .optional()?;
+pub fn user_tz(c: &mut impl Read, ws: &str, user: &str) -> steve_store::Result<Tz> {
+    let own = NotificationPolicies::new(c).timezone(ws, user)?;
     if let Some(z) = own.as_deref().and_then(ics::zone) {
         return Ok(z);
     }
-    let w = steve_flow::schedules::workspace_tz(c, ws)
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-    Ok(ics::zone(&w).unwrap_or_else(steve_modules::zone::default_tz))
+    Ok(WorkspaceSettings::new(c)
+        .timezone(ws)?
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or_else(steve_modules::zone::default_tz))
 }
 
 /// `ms` as local `YYYY-MM-DD HH:MM` in `tz`.
@@ -149,10 +147,10 @@ pub struct Mine {
 }
 
 impl Mine {
-    pub fn load(c: &Connection, ws: &str, user: &str) -> ApiResult<Self> {
+    pub fn load(c: &mut impl Read, ws: &str, user: &str) -> ApiResult<Self> {
         Ok(Self {
-            me: me_party(c, ws, user)?,
-            all: repo::of_user(c, ws, user)?,
+            me: Parties::new(c).active_user(ws, user)?,
+            all: CalendarRepo::new(c).of_user(ws, user)?,
         })
     }
     /// Enabled calendars of `party` (none: the owner's own).
@@ -221,18 +219,15 @@ fn busy_for_me(e: &EventRow) -> bool {
 
 /// The owner's agenda over `r`: one row per meeting (the shown occurrence, `also_in` the other
 /// calendars), cancelled ones left out, and which timed events overlap (`conflicts_with`).
-pub fn agenda(c: &Connection, ws: &str, user: &str, r: &Range, tz: Tz) -> ApiResult<Value> {
+pub fn agenda(c: &mut impl Read, ws: &str, user: &str, r: &Range, tz: Tz) -> ApiResult<Value> {
     let mine = Mine::load(c, ws, user)?;
     let cals = mine.of(None);
     let (fd, td) = r.dates(tz);
-    let events = repo::in_range(c, &cals, r.from_ms, r.to_ms, &fd, &td)?;
-    let primaries: HashMap<String, String> = {
-        let mut st = c.prepare_cached(
-            "SELECT id, primary_event_id FROM cal_meetings WHERE workspace_id = ? AND owner_user = ?",
-        )?;
-        st.query_map(params![ws, user], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<rusqlite::Result<_>>()?
-    };
+    let events = CalendarRepo::new(c).in_range(&cals, r.from_ms, r.to_ms, &fd, &td)?;
+    let primaries: HashMap<_, _> = CalendarRepo::new(c)
+        .meeting_primaries(ws, user)?
+        .into_iter()
+        .collect();
     let present: HashSet<&str> = events.iter().map(|e| e.id.as_str()).collect();
     let mut also: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut shown: Vec<&EventRow> = Vec::new();
@@ -252,11 +247,7 @@ pub fn agenda(c: &Connection, ws: &str, user: &str, r: &Range, tz: Tz) -> ApiRes
         if let Some(a) = also.get(&e.id) {
             v["also_in"] = json!(a);
         }
-        let n: i64 = c.query_row(
-            "SELECT COUNT(*) FROM cal_attendees WHERE event_id = ?",
-            [&e.id],
-            |r| r.get(0),
-        )?;
+        let n = CalendarRepo::new(c).attendee_count(&e.id)?;
         if n > 0 {
             v["attendees"] = json!(n);
         }
@@ -291,7 +282,7 @@ fn status(mine: &Mine, ids: &[String], tz: Tz) -> Value {
 }
 
 pub fn search(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     user: &str,
     q: &str,
@@ -305,7 +296,7 @@ pub fn search(
     }
     let mine = Mine::load(c, ws, user)?;
     let cals = mine.of(None);
-    let found = repo::search(c, &cals, q, r.from_ms, r.to_ms, limit)?;
+    let found = CalendarRepo::new(c).search(&cals, q, r.from_ms, r.to_ms, limit)?;
     Ok(
         json!({"range": r, "query": q, "events": found.iter().map(|e| view(e, &mine, tz)).collect::<Vec<_>>()}),
     )
@@ -313,24 +304,21 @@ pub fn search(
 
 /// One event of the owner's, by event or meeting id, with its attendees.
 pub fn event(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     user: &str,
     id: &str,
     tz: Tz,
 ) -> ApiResult<(EventRow, Value)> {
     let id = if id.starts_with("mtg_") {
-        c.query_row(
-            "SELECT primary_event_id FROM cal_meetings WHERE id = ? AND workspace_id = ? AND owner_user = ?",
-            params![id, ws, user],
-            |r| r.get::<_, String>(0),
-        )
-        .optional()?
-        .ok_or_else(|| ApiError::not_found("日程"))?
+        CalendarRepo::new(c)
+            .meeting_primary(ws, user, id)?
+            .ok_or_else(|| ApiError::not_found("日程"))?
     } else {
         id.to_string()
     };
-    let e = repo::event(c, &id)?
+    let e = CalendarRepo::new(c)
+        .event(&id)?
         .filter(|e| e.workspace_id == ws && e.owner_user == user)
         .ok_or_else(|| ApiError::not_found("日程"))?;
     let mine = Mine::load(c, ws, user)?;
@@ -338,14 +326,10 @@ pub fn event(
     if e.deleted_ms.is_some() {
         v["deleted"] = json!(true);
     }
-    v["attendees"] = json!(repo::attendees(c, &e.id)?);
+    v["attendees"] = json!(CalendarRepo::new(c).attendees(&e.id)?);
     if let Some(m) = &e.meeting_id {
-        let mut st = c.prepare_cached(
-            "SELECT calendar_id FROM cal_events WHERE meeting_id = ? AND id != ? AND deleted_ms IS NULL",
-        )?;
-        let others: Vec<String> = st
-            .query_map(params![m, e.id], |r| r.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
+        let others: Vec<String> = CalendarRepo::new(c)
+            .other_occurrence_calendars(m, &e.id)?
             .iter()
             .map(|x| mine.name(x))
             .collect();
@@ -361,7 +345,7 @@ pub fn event(
 
 /// Busy times of a person (`None`: the owner) from the owner's calendars bound to them, merged.
 pub fn busy(
-    c: &Connection,
+    c: &mut impl Read,
     mine: &Mine,
     party: Option<&str>,
     from: i64,
@@ -372,7 +356,8 @@ pub fn busy(
         return Ok(None);
     }
     // all-day events do not make anyone busy: an empty date range leaves them out
-    let mut xs: Vec<(i64, i64)> = repo::in_range(c, &cals, from, to, "9999", "0000")?
+    let mut xs: Vec<(i64, i64)> = CalendarRepo::new(c)
+        .in_range(&cals, from, to, "9999", "0000")?
         .iter()
         .filter(|e| busy_for_me(e))
         .map(|e| (e.start_ms.max(from), e.end_ms.min(to)))
@@ -390,56 +375,35 @@ pub fn busy(
 }
 
 /// The name of a contact.
-fn party_name(c: &Connection, id: &str) -> ApiResult<String> {
-    Ok(
-        c.query_row("SELECT name FROM parties WHERE id = ?", [id], |r| {
-            r.get::<_, String>(0)
-        })
-        .optional()?
-        .unwrap_or_else(|| id.to_string()),
-    )
+fn party_name(c: &mut impl Read, id: &str) -> ApiResult<String> {
+    Ok(Parties::new(c).name(id)?.unwrap_or_else(|| id.to_string()))
 }
 
 /// A person as an agent names them: a contact id, `me`, or a name exactly one contact has.
-pub fn person(c: &Connection, ws: &str, who: &str) -> Result<Option<String>, String> {
+pub fn person(c: &mut impl Read, ws: &str, who: &str) -> ApiResult<Option<String>> {
     let who = who.trim();
     if who.is_empty() || who.eq_ignore_ascii_case("me") || who == "我" {
         return Ok(None);
     }
-    let by_id: Option<String> = c
-        .query_row(
-            "SELECT id FROM parties WHERE workspace_id = ? AND id = ? AND status != 'deleted'",
-            params![ws, who],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(|e| e.to_string())?;
-    if let Some(id) = by_id {
-        return crate::sync::current_party(c, id)
-            .map(Some)
-            .map_err(|e| e.to_string());
+    let mut parties = Parties::new(c);
+    if parties.is_present(ws, who)? {
+        return Ok(Some(parties.current(who.to_string())?));
     }
-    let mut st = c
-        .prepare_cached("SELECT id FROM parties WHERE workspace_id = ? AND status = 'active' AND name = ? COLLATE NOCASE LIMIT 2")
-        .map_err(|e| e.to_string())?;
-    let ids: Vec<String> = st
-        .query_map(params![ws, who], |r| r.get(0))
-        .and_then(|r| r.collect())
-        .map_err(|e| e.to_string())?;
+    let ids = parties.active_by_name(ws, who)?;
     match ids.as_slice() {
         [one] => Ok(Some(one.clone())),
-        [] => Err(format!(
+        [] => Err(ApiError::rule(format!(
             "找不到联系人「{who}」：先用 steve_contacts_find 查到 id"
-        )),
-        _ => Err(format!(
+        ))),
+        _ => Err(ApiError::rule(format!(
             "「{who}」有重名的联系人：用 steve_contacts_find 查到 id 再传"
-        )),
+        ))),
     }
 }
 
 /// Free/busy of one person over `r`.
 pub fn freebusy(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     user: &str,
     party: Option<&str>,
@@ -466,7 +430,7 @@ pub fn freebusy(
 /// [`Settings::slots`] that do not overlap each other, each with why it was chosen. People without
 /// a calendar are named in `unknown` and not counted.
 pub fn find_time(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     user: &str,
     people: &[Option<String>],

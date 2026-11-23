@@ -3,7 +3,8 @@
 use serde_json::{Value, json};
 use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc};
 use steve_hub::{api::AppState, bus::Bus, config::Config, deliveries::Service};
-use steve_store::{Store, StoreError};
+use steve_store::Store;
+use steve_store::testkit::hub::deliveries as fixture_db;
 
 struct Env {
     _home: tempfile::TempDir,
@@ -134,13 +135,13 @@ async fn start(node: bool) -> Env {
         .next()
         .unwrap()
         .to_string();
-    store.transaction(|t| {
-        t.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('ST-1','default',1,'delivery','run','work',1,1)",[])?;
-        t.execute("INSERT INTO workspaces(id,name,created) VALUES('foreign','Foreign',1)",[])?;
-        t.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('OTHER-1','foreign',1,'other','run','work',1,1)",[])?;
-        Ok::<_,StoreError>(())
-    }).unwrap();
-    // The item's Hub-owned outputs: what a session's tools deliver from over `/mcp`.
+    store
+        .write(|w| {
+            fixture_db::item(w, "default", "ST-1", 1)?;
+            steve_store::Workspaces(w).insert("foreign", "Foreign", 1)?;
+            fixture_db::item(w, "foreign", "OTHER-1", 1)
+        })
+        .unwrap();
     let cwd = steve_hub::wire::output_files::directory(&cfg.home, "ST-1").unwrap();
     std::fs::create_dir_all(&cwd).unwrap();
     let session = store
@@ -175,11 +176,7 @@ async fn malformed_bound_workspace_never_falls_back_to_the_hub_session_directory
         std::fs::create_dir_all(&scratch).unwrap();
         let path = scratch.join("report.md");
         std::fs::write(&path, b"Hub placeholder is not a bound workspace").unwrap();
-        e.store.transaction(|tx| {
-            tx.execute("UPDATE sessions SET cwd=?1 WHERE id=?2", [scratch.to_str().unwrap(), &e.session.id])?;
-            tx.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES (?1,'local','{}',?1,'r','active',0)", [&e.session.id])?;
-            Ok::<_, StoreError>(())
-        }).unwrap();
+        fixture_db::bind(&e.store, &e.session.id, "local", "{}", None).unwrap();
         for input in [path.display().to_string(), "report.md".into()] {
             let result = e.tool("steve_deliver_file", json!({"path":input})).await;
             assert_eq!(result["result"]["isError"], true, "{result}");
@@ -207,12 +204,7 @@ async fn mcp_requires_a_node_and_retains_every_received_version() {
                 "{result}"
             );
             assert!(e.store.artifacts().list("ST-1").unwrap().is_empty());
-            let count: i64 = e
-                .store
-                .reader::<_, StoreError>(|c| {
-                    Ok(c.query_row("SELECT COUNT(*) FROM deliveries", [], |r| r.get(0))?)
-                })
-                .unwrap();
+            let count: i64 = e.store.read(fixture_db::count).unwrap();
             assert_eq!(count, 0);
             continue;
         }
@@ -356,7 +348,9 @@ async fn mcp_requires_a_node_and_retains_every_received_version() {
         // Opening a stable link from another selected workspace still checks membership in
         // the delivery workspace; explicit selectors never silently change workspace.
         let owner = e.store.access().owner().unwrap().unwrap();
-        e.store.transaction(|t|{t.execute("INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES('foreign',?,'owner',1)",[owner.id])?;Ok::<_,StoreError>(())}).unwrap();
+        e.store
+            .write(|w| w.members().add("foreign", &owner.id, "owner", 1))
+            .unwrap();
         let cookies = e.switch_workspace("foreign").await;
         for tail in ["", "/raw", "/content/report.md"] {
             assert_eq!(
@@ -423,10 +417,18 @@ async fn artifact_contract_only_links_registered_urls_in_the_same_item_and_works
         .accept(&e.session, "Report", "report.md", b"report", None)
         .unwrap();
     let url = e.svc.url(&d.id, &d.workspace_id);
-    e.store.transaction(|t| {
-        t.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('ST-2','default',2,'another item','run','work',1,1)", [])?;
-        Ok::<_, StoreError>(())
-    }).unwrap();
+    // Simulate a pre-fix receipt: old registered full URLs must gain the safe association too.
+    let old = e
+        .svc
+        .accept(&e.session, "Old", "old.md", b"old", None)
+        .unwrap();
+    let old_url = format!("{}/deliveries/{}", e.base, old.id);
+    e.store
+        .write(|w| {
+            fixture_db::change_url(w, &old.id, &old_url)?;
+            fixture_db::item(w, "default", "ST-2", 2)
+        })
+        .unwrap();
     for (title, location) in [
         ("Registered", url.clone()),
         (
@@ -478,15 +480,7 @@ async fn artifact_contract_only_links_registered_urls_in_the_same_item_and_works
             .is_none()
     );
     // Moving the owning item must not keep a live association across workspace boundaries.
-    e.store
-        .transaction(|t| {
-            t.execute(
-                "UPDATE items SET workspace_id='foreign',no=2 WHERE id='ST-1'",
-                [],
-            )?;
-            Ok::<_, StoreError>(())
-        })
-        .unwrap();
+    fixture_db::move_item(&e.store, "ST-1", "foreign", 2).unwrap();
     assert!(
         e.store
             .artifacts()
@@ -528,13 +522,12 @@ async fn original_tool_page_url_binds_workspace_after_real_switch_and_still_chec
     assert_eq!(page.path(), format!("/deliveries/{id}"));
     assert_eq!(selector, "default");
     let owner = e.store.access().owner().unwrap().unwrap();
-    e.store.transaction(|t| {
-        t.execute("INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES('foreign',?,'owner',1)", [&owner.id])?;
-        Ok::<_, StoreError>(())
-    }).unwrap();
+    e.store
+        .write(|w| w.members().add("foreign", &owner.id, "owner", 1))
+        .unwrap();
     let cookies = e.switch_workspace("foreign").await;
     let state: Value = e
-        .request("GET", "/api/state", false)
+        .request("GET", "/api/shell", false)
         .header("cookie", &cookies)
         .send()
         .await
@@ -546,7 +539,7 @@ async fn original_tool_page_url_binds_workspace_after_real_switch_and_still_chec
     // The delivery frontend binds the page's ws before bootstrap. Emulate that exact header,
     // then assert the cookie really would select the other workspace without it.
     let bound: Value = e
-        .request("GET", "/api/state", false)
+        .request("GET", "/api/shell", false)
         .header("cookie", &cookies)
         .header("x-steve-ws", &selector)
         .send()
@@ -611,15 +604,7 @@ async fn original_tool_page_url_binds_workspace_after_real_switch_and_still_chec
             401
         );
     }
-    e.store
-        .transaction(|t| {
-            t.execute(
-                "DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=?",
-                [&owner.id],
-            )?;
-            Ok::<_, StoreError>(())
-        })
-        .unwrap();
+    steve_store::testkit::flow::remove_workspace_member(&e.store, "default", &owner.id).unwrap();
     for tail in [
         "",
         "/raw",
@@ -679,14 +664,7 @@ async fn both_delivery_tools_reject_dependency_build_and_checkout_paths() {
             );
         }
     }
-    let count = e
-        .store
-        .reader::<_, StoreError>(|c| {
-            Ok(c.query_row("SELECT count(*) FROM deliveries", [], |r| {
-                r.get::<_, i64>(0)
-            })?)
-        })
-        .unwrap();
+    let count = e.store.read(fixture_db::count).unwrap();
     assert_eq!(count, 0, "neither tool may publish rejected paths");
 }
 
@@ -856,15 +834,7 @@ async fn share_authorization_is_independent_expires_and_revokes_every_resource()
         )
         .unwrap();
     // Clock-independent boundary: equality is expired. This mutates only this isolated fixture.
-    e.store
-        .transaction(|t| {
-            t.execute(
-                "UPDATE delivery_shares SET expires_at=? WHERE token=?",
-                rusqlite::params![steve_store::now(), short.token],
-            )?;
-            Ok::<_, StoreError>(())
-        })
-        .unwrap();
+    fixture_db::expire_share(&e.store, &short.token, steve_store::now()).unwrap();
     for tail in ["", "/raw", "/content/site/next.html"] {
         assert_eq!(
             e.request(

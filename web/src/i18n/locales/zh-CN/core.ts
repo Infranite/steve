@@ -29,6 +29,9 @@ export default {
   tagDesc: { bug: "修复错误、故障或不符合预期的行为", feat: "新增能力、交互或功能改进", doc: "文档、方案、说明的编写与更新", refactor: "不改变外部行为的代码重构", ops: "部署、升级、运维与环境配置", chore: "依赖维护、工具配置等杂项", plan: "设计稿、原型或实施方案", code: "Git 管理的代码、配置或脚本", report: "调研、审计、测试或分析结论", content: "手册、图片、演示稿等成品内容", data: "表格、数据集或导出结果", operation: "部署、升级或配置变更等实际操作" },
   error: { generic: "出错了", loadRetry: "载入失败，正在重试：{{msg}}", network: "网络出错" },
   defaultModel: "默认模型",
+  unknownModel: "未知模型",
+  unknownBot: "未知 Bot",
+  unknownNode: "未知 Node",
   unknownHarness: "未知 harness",
   /* "Claude Code · 默认模型" */
   harnessModel: "{{harness}} · {{model}}",
@@ -317,6 +320,8 @@ export default {
     keysSteer: "回车插话，{{alt}} 回车排队；Esc 停止当前回合",
   },
   transcript: {
+    earlier: "加载更早的回合",
+    recentFiles: "已加载回合中改动的文件（{{count}}）",
     tool: { ToolSearch: "加载工具", TodoWrite: "更新待办", Task: "子任务", Agent: "子任务", Skill: "技能" },
     read: "读取",
     write: "写入",
@@ -494,7 +499,7 @@ export default {
     waitWhat: "有卡片等你决定，见对话末尾",
     took: "用时 {{dur}}",
     nodeWait: "排队：{{detail}}；会自动重试",
-    room: "排队：设备并行已满 {{running}}/{{max}}",
+    room: "排队：设备并行已满",
   },
   session: {
     no: "会话 #{{n}}",

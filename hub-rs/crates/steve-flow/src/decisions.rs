@@ -10,8 +10,8 @@ use serde_json::{Value, json};
 use steve_modules::decisions::{DecisionCx, DecisionHandler, choice_result};
 use steve_modules::{ApiError, ApiResult};
 use steve_store::base::ObjRef;
-use steve_store::base::links::{self, NewLink};
-use steve_store::{Decision, Tx};
+use steve_store::base::links::{Links, NewLink};
+use steve_store::{BotRows, Decision, DecisionRows, FlowSources, SignalRows, W};
 use tokio::sync::{Notify, mpsc};
 
 use crate::engine::{self, GATE_YES};
@@ -41,31 +41,21 @@ impl FlowStepDecisions {
 }
 
 impl DecisionHandler for FlowStepDecisions {
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
         let (run_id, node) = step_of(d)?;
-        let mut run = runs::get(tx, run_id)?
+        let mut run = steve_store::RunRows(tx)
+            .get(run_id)?
             .filter(|r| r.workspace_id == cx.ws)
             .ok_or_else(|| ApiError::not_found("运行"))?;
-        let waiting = engine::wait_row(tx, run_id, node)?;
-        let decision_of_wait: Option<String> = tx
-            .query_row(
-                "SELECT decision_id FROM flow_waits WHERE run_id = ? AND node_id = ?",
-                rusqlite::params![run_id, node],
-                |r| r.get(0),
-            )
-            .ok()
-            .flatten();
-        let Some((mode, matcher)) = waiting.filter(|_| decision_of_wait.as_deref() == Some(&d.id))
+        let wait = steve_store::FlowWaits(tx).get(run_id, node)?;
+        let Some(wait) =
+            wait.filter(|wait| wait.mode == "decision" && wait.decision.as_deref() == Some(&d.id))
         else {
             return Err(ApiError::conflict(steve_i18n::t!(
                 "flow.decision.not_waiting"
             )));
         };
-        if mode != "decision" {
-            return Err(ApiError::conflict(steve_i18n::t!(
-                "flow.decision.not_waiting"
-            )));
-        }
+        let matcher = wait.matcher;
         engine::release_held_outcome(&mut run);
         let resume = if matcher["kind"] == "gate" {
             if cx.choice == engine::GATE_ALWAYS {
@@ -93,14 +83,14 @@ impl DecisionHandler for FlowStepDecisions {
     }
 
     /// The run has moved on: an answer cannot be taken back.
-    fn before_undo(&self, _tx: &Tx, _d: &Decision) -> ApiResult<()> {
+    fn before_undo(&self, _tx: &mut W<'_>, _d: &Decision) -> ApiResult<()> {
         Err(ApiError::rule(steve_i18n::t!("flow.decision.no_undo")))
     }
 
     /// An approval nobody gave in time ends the run.
-    fn expire(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
+    fn expire(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
         let (run_id, _) = step_of(d)?;
-        if let Some(r) = runs::get(tx, run_id)? {
+        if let Some(r) = steve_store::RunRows(tx).get(run_id)? {
             engine::cancel(tx, &r, steve_store::now())?;
         }
         Ok(())
@@ -120,15 +110,11 @@ impl SignalDecisions {
 }
 
 impl DecisionHandler for SignalDecisions {
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
         match cx.choice {
             c if c == NOTIFY_OPTIONS[0] => {}
             c if c == NOTIFY_OPTIONS[1] => {
-                let exists: bool = tx.query_row(
-                    "SELECT EXISTS (SELECT 1 FROM ext_events WHERE id = ? AND workspace_id = ?)",
-                    rusqlite::params![d.subject_id, cx.ws],
-                    |r| r.get(0),
-                )?;
+                let exists = SignalRows(tx).source(cx.ws, &d.subject_id)?.is_some();
                 if !exists {
                     return Err(ApiError::not_found("信号"));
                 }
@@ -151,13 +137,11 @@ impl DecisionHandler for SignalDecisions {
 /// leaves it `open`).
 pub(crate) async fn committed(cx: &FlowCx, decision_id: &str) -> bool {
     let id = decision_id.to_string();
-    cx.blocking(move |s| {
-        s.transaction(|tx| -> FlowResult<_> { Ok(steve_store::base::decisions::get(tx, &id)?) })
-    })
-    .await
-    .ok()
-    .flatten()
-    .is_some_and(|d| d.status == "resolved")
+    cx.blocking(move |s| s.write(|w| -> FlowResult<_> { Ok(DecisionRows(w).get(&id)?) }))
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|d| d.status == "resolved")
 }
 
 /// Runs one follow-up after its decision committed.
@@ -195,25 +179,24 @@ pub(crate) async fn followup(cx: &FlowCx, f: Followup) {
 pub async fn to_item(cx: &FlowCx, ws: &str, event_id: &str) -> FlowResult<String> {
     let ev = cx
         .store()
-        .reader(|c| crate::ingest::event_json(c, event_id))?;
-    let bot = cx.store().reader(|c| -> FlowResult<String> {
-        let triage = match ev["connection_id"].as_str() {
-            Some(conn) => crate::sources::settings(c, ws, conn)?.triage_bot,
-            None => None,
-        };
-        let usable = |b: &str| -> FlowResult<bool> {
-            Ok(crate::schedules::bot_of(c, ws, b)?.is_some_and(|(_, ok)| ok))
-        };
-        if let Some(b) = triage.filter(|b| usable(b).unwrap_or(false)) {
-            return Ok(b);
-        }
-        rusqlite::OptionalExtension::optional(c.query_row(
-            "SELECT id FROM bots WHERE main = 1 AND deleted = 0 ORDER BY updated LIMIT 1",
-            [],
-            |r| r.get::<_, String>(0),
-        ))?
-        .ok_or_else(|| ApiError::rule(steve_i18n::t!("flow.decision.no_main_bot")))
-    })?;
+        .read(|c| crate::ingest::event_json(c, event_id))?;
+    let bot = cx
+        .store()
+        .read(|r| {
+            let triage = match ev["connection_id"].as_str() {
+                Some(conn) => FlowSources(r).triage(ws, conn)?,
+                None => None,
+            };
+            if let Some(bot) = triage
+                && BotRows(r)
+                    .local(ws, &bot)?
+                    .is_some_and(|(_, enabled)| enabled)
+            {
+                return Ok(Some(bot));
+            }
+            BotRows(r).main()
+        })?
+        .ok_or_else(|| ApiError::rule(steve_i18n::t!("flow.decision.no_main_bot")))?;
     let summary = ev["summary"].as_str().unwrap_or("").to_string();
     let text = ev["payload"]["text"].as_str().unwrap_or("");
     let goal = if text.is_empty() {
@@ -249,23 +232,28 @@ pub async fn to_item(cx: &FlowCx, ws: &str, event_id: &str) -> FlowResult<String
         })
         .await
         .map_err(|e| ApiError::rule(steve_i18n::t!("flow.decision.item_failed", error = e)))?;
-    cx.store().transaction(|tx| -> FlowResult<()> {
-        links::add(
-            tx,
+    cx.store().write(|w| -> FlowResult<()> {
+        Links(w).add(
             ws,
-            &NewLink::new(ObjRef::new("item", &item), "from", ObjRef::new("event", event_id), "sig"),
+            &NewLink::new(
+                ObjRef::new("item", &item),
+                "from",
+                ObjRef::new("event", event_id),
+                "sig",
+            ),
         )?;
         if let Some(p) = ev["actor_party_id"].as_str() {
-            links::add(
-                tx,
+            Links(w).add(
                 ws,
-                &NewLink::new(ObjRef::new("item", &item), "raised_by", ObjRef::new("party", p), "sig"),
+                &NewLink::new(
+                    ObjRef::new("item", &item),
+                    "raised_by",
+                    ObjRef::new("party", p),
+                    "sig",
+                ),
             )?;
         }
-        tx.execute(
-            "UPDATE ext_events SET outcome = 'item', outcome_label = ?, work_item_id = ? WHERE id = ?",
-            rusqlite::params![format!("转成了事项 {item}"), item, event_id],
-        )?;
+        SignalRows(w).mark_item(ws, event_id, &item, &format!("转成了事项 {item}"))?;
         Ok(())
     })?;
     cx.signals.signal(cx.store(), ws, event_id);
@@ -276,7 +264,7 @@ pub async fn to_item(cx: &FlowCx, ws: &str, event_id: &str) -> FlowResult<String
 /// approval for that step). The step is counted as run again (`context.reruns.<node>`): an effect
 /// that keys its operation on the run and the step (a `cmd` on a Node) runs anew, not the
 /// interrupted one's answer.
-pub(crate) fn retry(tx: &Tx, run: &mut runs::RunRow) -> FlowResult<()> {
+pub(crate) fn retry(tx: &mut W<'_>, run: &mut runs::RunRow) -> FlowResult<()> {
     if run.status != "failed" || run.cursor.is_none() {
         return Err(ApiError::conflict(steve_i18n::t!("flow.decision.no_retry")));
     }
@@ -296,5 +284,5 @@ pub(crate) fn retry(tx: &Tx, run: &mut runs::RunRow) -> FlowResult<()> {
     run.ended = None;
     run.outcome = None;
     run.outcome_label = String::new();
-    runs::save(tx, run)
+    Ok(runs::save(tx, run)?)
 }

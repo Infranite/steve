@@ -11,7 +11,6 @@
 
 use chrono::{Duration, NaiveDateTime, TimeZone, Timelike};
 use chrono_tz::Tz;
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
 /// The workspace default (`SETTINGS.tz.def`).
@@ -43,43 +42,32 @@ impl Zone {
         }
     }
 
-    /// `user`'s zone in `ws`: their notification policy's, else the workspace's.
-    pub fn of(c: &Connection, ws: &str, user: &str) -> rusqlite::Result<Self> {
-        let own: Option<String> = c
-            .query_row(
-                "SELECT timezone FROM notification_policies WHERE workspace_id = ? AND user_id = ?",
-                params![ws, user],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(tz) = own.and_then(|s| s.parse::<Tz>().ok()) {
+    /// Resolves the user's date rules inside a storage snapshot.
+    pub fn for_user(
+        r: &mut impl steve_store::Read,
+        ws: &str,
+        user: Option<&str>,
+    ) -> steve_store::Result<Self> {
+        let mut settings = steve_store::TimezoneSettings(r);
+        if let Some(user) = user
+            && let Some(tz) = settings
+                .person(ws, user)?
+                .and_then(|value| value.parse().ok())
+        {
             return Ok(Self {
                 tz,
                 from: ZoneFrom::Person,
             });
         }
         Ok(Self {
-            tz: workspace_tz(c, ws)?,
+            tz: workspace_tz(r, ws)?,
             from: ZoneFrom::Workspace,
         })
     }
 
-    /// The zone of the workspace owner (what runs for the workspace as a whole: `/汇报`, the digest).
-    pub fn of_owner(c: &Connection, ws: &str) -> rusqlite::Result<Self> {
-        let owner: Option<String> = c
-            .query_row(
-                "SELECT user_id FROM workspace_members WHERE workspace_id = ? AND role = 'owner' ORDER BY created LIMIT 1",
-                [ws],
-                |r| r.get(0),
-            )
-            .optional()?;
-        match owner {
-            Some(u) => Self::of(c, ws, &u),
-            None => Ok(Self {
-                tz: workspace_tz(c, ws)?,
-                from: ZoneFrom::Workspace,
-            }),
-        }
+    pub fn for_owner(r: &mut impl steve_store::Read, ws: &str) -> steve_store::Result<Self> {
+        let owner = steve_store::Members::new(r).owner(ws)?;
+        Self::for_user(r, ws, owner.as_deref())
     }
 
     pub fn name(&self) -> &'static str {
@@ -135,26 +123,15 @@ impl Zone {
 }
 
 /// The workspace's `tz` setting (a JSON string), else the system zone.
-pub fn workspace_tz(c: &Connection, ws: &str) -> rusqlite::Result<Tz> {
-    workspace_tz_with(c, ws, steve_runtime::tz::Zone::system)
+pub fn workspace_tz(r: &mut impl steve_store::Read, ws: &str) -> steve_store::Result<Tz> {
+    let value = steve_store::TimezoneSettings(r).workspace(ws)?;
+    Ok(resolve_workspace(value.as_deref(), default_tz))
 }
 
-fn workspace_tz_with(
-    c: &Connection,
-    ws: &str,
-    system: impl FnOnce() -> steve_runtime::tz::Zone,
-) -> rusqlite::Result<Tz> {
-    let v: Option<String> = c
-        .query_row(
-            "SELECT value FROM settings WHERE workspace_id = ? AND key = 'tz'",
-            [ws],
-            |r| r.get::<_, Option<String>>(0),
-        )
-        .optional()?
-        .flatten();
-    Ok(v.and_then(|v| serde_json::from_str::<String>(&v).ok())
-        .and_then(|t| t.trim().parse::<Tz>().ok())
-        .unwrap_or_else(|| system().name().parse().expect("runtime IANA zone")))
+fn resolve_workspace(value: Option<&str>, fallback: impl FnOnce() -> Tz) -> Tz {
+    value
+        .and_then(|zone| zone.trim().parse().ok())
+        .unwrap_or_else(fallback)
 }
 
 /// [`DEFAULT_TZ`], parsed.
@@ -217,20 +194,9 @@ impl Quiet {
 mod tests {
     #[test]
     fn missing_empty_and_system_settings_use_injected_system() {
-        let c = Connection::open_in_memory().unwrap();
-        c.execute_batch("CREATE TABLE settings(workspace_id TEXT, key TEXT, value TEXT)")
-            .unwrap();
-        for value in [None, Some("\"\""), Some("\"system\"")] {
-            c.execute("DELETE FROM settings", []).unwrap();
-            if let Some(v) = value {
-                c.execute("INSERT INTO settings VALUES ('w','tz',?)", [v])
-                    .unwrap();
-            }
+        for value in [None, Some(""), Some("system")] {
             assert_eq!(
-                workspace_tz_with(&c, "w", || steve_runtime::tz::Zone::parse("Europe/London")
-                    .unwrap())
-                .unwrap()
-                .name(),
+                resolve_workspace(value, || chrono_tz::Europe::London).name(),
                 "Europe/London"
             );
         }
@@ -302,33 +268,36 @@ mod tests {
 
     #[test]
     fn a_person_without_a_policy_reads_the_workspace_clock() {
-        let c = Connection::open_in_memory().unwrap();
-        c.execute_batch(
-            "CREATE TABLE notification_policies (workspace_id TEXT, user_id TEXT, timezone TEXT);
-             CREATE TABLE settings (workspace_id TEXT, key TEXT, value TEXT);
-             CREATE TABLE workspace_members (workspace_id TEXT, user_id TEXT, role TEXT, created INTEGER);
-             INSERT INTO notification_policies VALUES ('w', 'me', 'Europe/London');
-             INSERT INTO workspace_members VALUES ('w', 'boss', 'owner', 1);",
-        )
-        .unwrap();
-        let me = Zone::of(&c, "w", "me").unwrap();
-        assert_eq!((me.name(), me.from), ("Europe/London", ZoneFrom::Person));
-        let other = Zone::of(&c, "w", "other").unwrap();
+        let e = crate::testkit::TestEnv::new(|_| {});
+        use crate::testkit::{ME, OTHER, WS};
+        let store = e.store();
+        let zone = |user| store.read(|r| Zone::for_user(r, WS, Some(user))).unwrap();
+        steve_store::testkit::modules::notification_timezone(store, WS, OTHER, "Europe/London")
+            .unwrap();
         assert_eq!(
-            (other.name(), other.from),
+            (zone(OTHER).name(), zone(OTHER).from),
+            ("Europe/London", ZoneFrom::Person)
+        );
+        assert_eq!(
+            (zone(ME).name(), zone(ME).from),
             (default_tz().name(), ZoneFrom::Workspace)
         );
-        c.execute(
-            "INSERT INTO settings VALUES ('w', 'tz', '\"America/New_York\"')",
-            [],
-        )
-        .unwrap();
+        store
+            .settings()
+            .set(
+                WS,
+                &serde_json::json!({"tz":"America/New_York"})
+                    .as_object()
+                    .unwrap(),
+                ME,
+            )
+            .unwrap();
+        assert_eq!(zone(ME).name(), "America/New_York");
         assert_eq!(
-            Zone::of(&c, "w", "other").unwrap().name(),
+            store.read(|r| Zone::for_owner(r, WS)).unwrap().name(),
             "America/New_York"
         );
-        assert_eq!(Zone::of_owner(&c, "w").unwrap().name(), "America/New_York");
-        let z = Zone::of(&c, "w", "me").unwrap();
+        let z = zone(OTHER);
         assert_eq!(z.day(utc(2026, 11, 18, 23, 30)), "2026-11-18");
         assert_eq!(
             z.day_start(utc(2026, 11, 18, 23, 30)),

@@ -43,8 +43,14 @@ impl Env {
     }
 
     async fn thread(&self) -> Vec<Value> {
-        let (_, st) = self.call("GET", "/api/state", None).await;
-        st["thread"].as_array().cloned().unwrap_or_default()
+        let (_, st) = self.call("GET", "/api/views/page?kind=message", None).await;
+        st["views"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .rev()
+            .cloned()
+            .collect()
     }
 
     /// Wait (≤10 s) until the conversation has `n` messages.
@@ -394,7 +400,7 @@ async fn messages_wait_for_the_turn_and_stop_ends_it() {
     assert_eq!(s, 200);
     let mut busy = false;
     for _ in 0..100 {
-        let (_, st) = e.call("GET", "/api/state", None).await;
+        let (_, st) = e.call("GET", "/api/summary", None).await;
         if st["thinking"] == true {
             busy = true;
             break;
@@ -433,8 +439,8 @@ async fn messages_wait_for_the_turn_and_stop_ends_it() {
         )
         .await;
     assert_eq!(s, 200);
-    let (_, st) = e.call("GET", "/api/state", None).await;
-    let thread = st["thread"].to_string();
+    let (_, st) = e.call("GET", "/api/views/page?kind=message", None).await;
+    let thread = st["views"].to_string();
     assert!(thread.contains(&format!("排队一 {token}")), "{thread}");
     let (s, _) = e
         .call(
@@ -479,41 +485,58 @@ async fn research_runs_get_read_only_mcp() {
     let t = e.settle(2).await;
     let item = t[1]["item_id"].as_str().unwrap().to_string();
     let store = steve_store::Store::open(&e.db, steve_store::NoPublisher).unwrap();
-    let th = store.thread();
-    let run = th
-        .run_add(&steve_store::NewThreadRun {
-            workspace_id: "default".into(),
-            message_id: t[0]["id"].as_str().unwrap().into(),
-            ..Default::default()
+    let run = store
+        .write(|w| {
+            steve_store::thread_runs::add(
+                w,
+                &steve_store::NewThreadRun {
+                    workspace_id: "default".into(),
+                    message_id: t[0]["id"].as_str().unwrap().into(),
+                    ..Default::default()
+                },
+            )
         })
         .unwrap();
     let token = "research-token-1";
     // a run answering a message that is not the owner's own (unknown here) gets no sessions
-    let other = th
-        .run_add(&steve_store::NewThreadRun {
-            workspace_id: "default".into(),
-            message_id: "msg_elsewhere".into(),
-            ..Default::default()
+    let other = store
+        .write(|w| {
+            steve_store::thread_runs::add(
+                w,
+                &steve_store::NewThreadRun {
+                    workspace_id: "default".into(),
+                    message_id: "msg_elsewhere".into(),
+                    ..Default::default()
+                },
+            )
         })
         .unwrap();
-    th.run_patch(
-        &other.id,
-        &steve_store::RunPatch {
-            status: Some("running".into()),
-            token_hash: Some(Some(steve_store::sha("research-token-2"))),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    th.run_patch(
-        &run.id,
-        &steve_store::RunPatch {
-            status: Some("running".into()),
-            token_hash: Some(Some(steve_store::sha(token))),
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    store
+        .write(|w| {
+            steve_store::thread_runs::patch(
+                w,
+                &other.id,
+                &steve_store::RunPatch {
+                    status: Some("running".into()),
+                    token_hash: Some(Some(steve_store::sha("research-token-2"))),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
+    store
+        .write(|w| {
+            steve_store::thread_runs::patch(
+                w,
+                &run.id,
+                &steve_store::RunPatch {
+                    status: Some("running".into()),
+                    token_hash: Some(Some(steve_store::sha(token))),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
     let rpc = |body: Value, tok: &'static str| {
         let http = e.http.clone();
         let url = format!("{}/mcp", e.base);
@@ -676,11 +699,7 @@ async fn research_runs_get_read_only_mcp() {
         let (_, denied) = rpc(json!({"jsonrpc":"2.0","id":"invalid_debug","method":"tools/call","params":{"name":"steve_debug","arguments":args}}), token).await;
         assert_eq!(denied["result"]["isError"], true, "{denied}");
     }
-    store.with_conn(|c| {
-        c.execute("INSERT INTO workspaces(id,name,created) VALUES('elsewhere','Other workspace',1)", [])?;
-        c.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('foreign-item','elsewhere',1,'Private item','done','结束',1,1)", [])?;
-        Ok(())
-    }).unwrap();
+    steve_store::testkit::hub::hub_fixtures::seed_workspaces_and_items(&store).unwrap();
     for suffix in ["debug", "debug/events"] {
         assert_eq!(
             e.call("GET", &format!("/api/items/foreign-item/{suffix}"), None)
@@ -792,33 +811,32 @@ async fn research_runs_get_read_only_mcp() {
     let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": {"name": "steve_item_read", "arguments": {"id": item}}}), "research-token-2").await;
     assert_eq!(v["result"]["isError"], true, "{v}");
     // the item came from a group chat; a run answering in that chat sees it, title, status and goal only
+    steve_store::testkit::hub::authority::seed_thread_group(&store, &item).unwrap();
+    let grp = store
+        .write(|w| {
+            steve_store::thread_runs::add(
+                w,
+                &steve_store::NewThreadRun {
+                    workspace_id: "default".into(),
+                    message_id: "msg_grp_2".into(),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
     store
-        .with_conn(|c| {
-            c.execute_batch(&format!(
-                "INSERT INTO messages (id, workspace_id, space, author, text, created) VALUES
-                   ('msg_grp_1', 'default', 'chan:spc_t', 'u', '帮我把 X 改成 Y', 1),
-                   ('msg_grp_2', 'default', 'chan:spc_t', 'u', '进展如何', 2);
-                 UPDATE thread_items SET origin_msg = 'msg_grp_1' WHERE item_id = '{item}';"
-            ))?;
-            Ok(())
+        .write(|w| {
+            steve_store::thread_runs::patch(
+                w,
+                &grp.id,
+                &steve_store::RunPatch {
+                    status: Some("running".into()),
+                    token_hash: Some(Some(steve_store::sha("research-token-3"))),
+                    ..Default::default()
+                },
+            )
         })
         .unwrap();
-    let grp = th
-        .run_add(&steve_store::NewThreadRun {
-            workspace_id: "default".into(),
-            message_id: "msg_grp_2".into(),
-            ..Default::default()
-        })
-        .unwrap();
-    th.run_patch(
-        &grp.id,
-        &steve_store::RunPatch {
-            status: Some("running".into()),
-            token_hash: Some(Some(steve_store::sha("research-token-3"))),
-            ..Default::default()
-        },
-    )
-    .unwrap();
     let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": 12, "method": "tools/call", "params": {"name": "steve_items_search", "arguments": {"query": "改"}}}), "research-token-3").await;
     assert!(
         text(&v).contains(&item) && !text(&v).contains("现在："),
@@ -842,12 +860,7 @@ async fn research_runs_get_read_only_mcp() {
     let (_, denied) = rpc(json!({"jsonrpc":"2.0","id":"shared_events","method":"tools/call","params":{"name":"steve_debug","arguments":{"action":"events","item_id":item}}}), "research-token-3").await;
     assert_eq!(denied["result"]["isError"], true);
     // An ordinary workspace member can read the item, but cannot enable capture.
-    store
-        .with_conn(|c| {
-            c.execute("UPDATE users SET role='member' WHERE role='owner'", [])?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::hub_fixtures::demote_workspace_owners(&store).unwrap();
     let (status, member) = e.call("GET", &debug, None).await;
     assert_eq!(status, 200);
     assert_eq!(member["can_capture"], false);
@@ -857,27 +870,26 @@ async fn research_runs_get_read_only_mcp() {
             .0,
         403
     );
-    store
-        .with_conn(|c| {
-            c.execute("UPDATE users SET role='owner' WHERE role='member'", [])?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::hub_fixtures::set_users_role_owner(&store).unwrap();
     let (status, stopped) = e.call("POST", &debug, Some(json!({"enabled":false}))).await;
     assert_eq!(status, 200);
     assert_eq!(stopped["capture"]["active"], false);
     let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": 14, "method": "tools/call", "params": {"name": "steve_items_search", "arguments": {"query": "改"}}}), "research-token-2").await;
     assert_eq!(text(&v), "No items match.", "still not for a run elsewhere");
     /* the run ended: the token is dead */
-    th.run_patch(
-        &run.id,
-        &steve_store::RunPatch {
-            status: Some("done".into()),
-            token_hash: Some(None),
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    store
+        .write(|w| {
+            steve_store::thread_runs::patch(
+                w,
+                &run.id,
+                &steve_store::RunPatch {
+                    status: Some("done".into()),
+                    token_hash: Some(None),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
     let (s, _) = rpc(
         json!({"jsonrpc": "2.0", "id": 7, "method": "tools/list"}),
         token,
@@ -896,7 +908,7 @@ async fn retried_sends_go_once() {
         .await;
     assert_eq!(s, 200);
     for _ in 0..100 {
-        let (_, st) = e.call("GET", "/api/state", None).await;
+        let (_, st) = e.call("GET", "/api/summary", None).await;
         if st["thinking"] == true {
             break;
         }
@@ -935,7 +947,7 @@ async fn retried_sends_go_once() {
         .await;
     assert_eq!(s, 400, "an empty client_id is refused");
 
-    let (_, state) = e.call("GET", "/api/state", None).await;
+    let (_, state) = e.call("GET", "/api/shell", None).await;
     let bot = state["bots"][0]["id"].as_str().expect("bot").to_string();
     let form = json!({"goal": "做一个新页面", "title": "新页面", "bot": bot, "project": null,
         "mode": "propose", "client_id": "form-1"});
@@ -944,14 +956,14 @@ async fn retried_sends_go_once() {
     let (s, b) = e.call("POST", "/api/items", Some(form)).await;
     assert_eq!(s, 200, "{b}");
     assert_eq!(a["id"], b["id"]);
-    let (_, state) = e.call("GET", "/api/state", None).await;
-    let made = state["items"]
+    let (_, state) = e.call("GET", "/api/snapshot?kinds=item", None).await;
+    let made = state["views"]["item"]
         .as_array()
         .expect("items")
         .iter()
         .filter(|i| i["title"] == "新页面" || i["t"] == "新页面")
         .count();
-    assert_eq!(made, 1, "{:#?}", state["items"]);
+    assert_eq!(made, 1, "{:#?}", state["views"]);
 
     let (s, v) = e.call("POST", "/api/thread/stop", None).await;
     assert_eq!((s, v["ok"].as_bool()), (200, Some(true)));
@@ -972,37 +984,45 @@ async fn the_first_meeting_writes_through_its_own_tools() {
     );
     assert_eq!(t[0]["meta"]["onboard"], true);
     let onboard = || async {
-        let (_, st) = e.call("GET", "/api/state", None).await;
+        let (_, st) = e.call("GET", "/api/shell", None).await;
         st["settings"]["onboard"].clone()
     };
     assert_eq!(onboard().await, "pending");
-    assert_eq!(e.call("GET", "/api/state", None).await.1["owner"], true);
+    assert_eq!(e.call("GET", "/api/shell", None).await.1["owner"], true);
     let (_, v) = e.call("POST", "/api/onboard/start", None).await;
     assert_eq!(v["message"], hello.as_str(), "one meeting, one welcome");
     assert_eq!(e.thread().await.len(), 1);
 
     let store = steve_store::Store::open(&e.db, steve_store::NoPublisher).unwrap();
-    let th = store.thread();
     for (message, token) in [
         (hello.as_str(), "meet-token-1"),
         ("msg_elsewhere", "meet-token-2"),
     ] {
-        let run = th
-            .run_add(&steve_store::NewThreadRun {
-                workspace_id: "default".into(),
-                message_id: message.into(),
-                ..Default::default()
+        let run = store
+            .write(|w| {
+                steve_store::thread_runs::add(
+                    w,
+                    &steve_store::NewThreadRun {
+                        workspace_id: "default".into(),
+                        message_id: message.into(),
+                        ..Default::default()
+                    },
+                )
             })
             .unwrap();
-        th.run_patch(
-            &run.id,
-            &steve_store::RunPatch {
-                status: Some("running".into()),
-                token_hash: Some(Some(steve_store::sha(token))),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        store
+            .write(|w| {
+                steve_store::thread_runs::patch(
+                    w,
+                    &run.id,
+                    &steve_store::RunPatch {
+                        status: Some("running".into()),
+                        token_hash: Some(Some(steve_store::sha(token))),
+                        ..Default::default()
+                    },
+                )
+            })
+            .unwrap();
     }
     let rpc = |body: Value, tok: &'static str| {
         let http = e.http.clone();
@@ -1167,7 +1187,7 @@ async fn the_first_meeting_writes_through_its_own_tools() {
 
     /* the Bots: created as the Bots page creates them, once */
     let bots = || async {
-        let (_, st) = e.call("GET", "/api/state", None).await;
+        let (_, st) = e.call("GET", "/api/shell", None).await;
         st["bots"]
             .as_array()
             .unwrap()
@@ -1251,15 +1271,8 @@ async fn the_first_meeting_writes_through_its_own_tools() {
     .await;
     assert!(!failed && said.contains("Skipped"), "{said}");
     assert_eq!(bots().await.len(), before + 2);
-    let audited: i64 = store
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT count(*) FROM audit WHERE action IN ('bot.create', 'settings.models', 'mm.create')",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let audited: i64 =
+        steve_store::testkit::hub::hub_fixtures::audit_count_selected(&store).unwrap();
     assert_eq!(audited, 2 + 1 + 2, "every write is in the audit log");
 
     /* over: the tools close */
@@ -1340,15 +1353,7 @@ async fn the_first_meeting_writes_through_its_own_tools() {
     /* what another member keeps to themselves is not named for the owner: the entry stays, its
      * memory's text does not come with it */
     let theirs = saved["target"].as_str().unwrap().to_string();
-    store
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE mems SET visibility = 'private', created_by = 'usr_another' WHERE id = ?",
-                [&theirs],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::hub_fixtures::set_mems_visibility_private(&store, &theirs).unwrap();
     let (_, again) = e.call("GET", "/api/audit?limit=200", None).await;
     assert_eq!(again["entries"], page["entries"]);
     assert!(again["names"].get(&theirs).is_none(), "{again}");
@@ -1364,12 +1369,7 @@ async fn the_first_meeting_writes_through_its_own_tools() {
     let (_, second) = e.call("GET", &next, None).await;
     assert_eq!(second["entries"][0]["id"], entries[3]["id"]);
 
-    store
-        .with_conn(|c| {
-            c.execute("UPDATE users SET role='member' WHERE role='owner'", [])?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::hub_fixtures::demote_workspace_owners(&store).unwrap();
     assert_eq!(e.call("POST", "/api/onboard/start", None).await.0, 403);
     assert_eq!(e.call("POST", "/api/onboard/skip", None).await.0, 403);
     assert_eq!(e.call("GET", "/api/audit", None).await.0, 403);

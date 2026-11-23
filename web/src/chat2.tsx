@@ -1,3 +1,7 @@
+import { notices, useShellStore, useStoreSelector, useNotices } from "@/store"
+import { useChatLive } from "@/data/live"
+import { getItems, getItem } from "@/store"
+import { useWorkSummary } from "@/running-pill"
 /* Chat page, second pass (ST-6): what Steve did for each message, folded like an agent transcript; notifications and a
  * compact summary in a right rail (a sheet on narrow screens); failures also leave one short line in the conversation.
  * Also: the open cards a session waits on, shown inside the session page. */
@@ -13,9 +17,9 @@ import { steveToolIcon } from "@/tool-icons"
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { st, tm, botName, projectName, tagName, pendingCards, sessionCards, unreadNotices, readNotices, dismissNotice, closeRel, WT, type Msg, type Steps } from "@/store"
+import { st, tm, botName, projectName, tagName, decideCards, pendingCards, unreadNotices, readNotices, dismissNotice, WT, type Msg, type Steps } from "@/store"
 import { ChatThinking } from "@/thread/thinking"
-import { go, StatusDot, ItemNo, DecisionCard, SectionLabel, RelNote, SidePanel, PanelHead } from "@/ui"
+import { go, StatusDot, ItemNo, SectionLabel, SidePanel, PanelHead } from "@/ui"
 import type { RNotice } from "@/api"
 import { researchLiveItems, researchSummary, researchStep } from "@/thread/parts"
 import { t, useT } from "@/i18n"
@@ -84,7 +88,7 @@ export function TurnInterruption({ m }: { m: Msg }) {
 export function StepsBlock({ m, memory }: { m: Msg; memory: ProcessMemory }) {
   const s = m.steps ?? (m.stopped ? { tools: [] } : undefined), t = useT()
   const end = outcome(m)
-  const from = m.id === st.drafted && m.origin && st.draftedStart != null ? draftKeyOf(m.origin, st.draftedStart) : undefined
+  const from = useChatLive((live) => m.id === live.drafted && m.origin && live.draftedStart != null ? draftKeyOf(m.origin, live.draftedStart) : undefined)
   const process = useProcess(memory, s?.research?.run ? "run:" + s.research.run : "msg:" + m.id, from)
   const openFromRail = useRef(process.onOpenChange); openFromRail.current = process.onOpenChange
   useEffect(() => {
@@ -133,9 +137,9 @@ export function StepsBlock({ m, memory }: { m: Msg; memory: ProcessMemory }) {
 /** The summary uses reported categories, never the command, path, tool title or prompt text. */
 const ACTIVE_KIND = { read: "read", search: "search", exec: "exec", edit: "edit", fetch: "fetch" } as const
 export function LiveSteps({ memory }: { memory: ProcessMemory }) {
-  const d = st.draft, l = st.live, t = useT()
+  const { draft: d, live: l, phase: livePhase } = useChatLive((s) => s), t = useT()
   const items: TrailItem[] = l ? researchLiveItems(l) : d?.thought ? [{ t: "think", key: "thought", text: d.thought, live: !d.text, t0: d.t0 }] : []
-  const phase = d?.text ? "reply" : l ? "research" : st.phase || "start"
+  const phase = d?.text ? "reply" : l ? "research" : livePhase || "start"
   const kind = st.down ? undefined : l?.now?.kind
   const action = kind && Object.hasOwn(ACTIVE_KIND, kind) ? ACTIVE_KIND[kind as keyof typeof ACTIVE_KIND] : undefined
   const label = st.down ? t("thread:progress.unavailable") : d?.text ? t("pages:chat.doing.reply") : action ? t(`thread:progress.action.${action}`) : t("thread:thinking.working")
@@ -202,8 +206,10 @@ function Similar({ n, more, notice }: { n: RNotice; more: RNotice[]; notice: (n:
 
 /** 事项: what Steve is following for you (running, waiting on you) and the notices, in the rail */
 export function RailToggle({ className }: { className?: string }) {
-  const { railOpen: open } = useRail(), t = useT()
-  const n = unreadNotices().length, waiting = pendingCards().length, run = st.items.filter((i) => itemDisplayStatus(i) === "run" && !i.arch).length
+  const { railOpen: open, sheetOpen } = useRail(), t = useT()
+  useNotices(open || sheetOpen)
+  useStoreSelector(() => st.noticeSeen)
+  const n = unreadNotices().length, waiting = decideCards().length, run = getItems().filter((i) => itemDisplayStatus(i) === "run" && !i.arch).length
   const label = [t("shell:chat.railLabel.running", { count: run }), waiting && t("shell:chat.railLabel.waiting", { count: waiting }), n && t("shell:chat.railLabel.unread", { count: n })].filter(Boolean).join(t("shell:chat.railLabel.sep"))
   return (
     <Tooltip>
@@ -236,17 +242,38 @@ function Line({ children, onClick, test }: { children: ReactNode; onClick: () =>
 const NI: Record<string, any> = { release: MegaphoneIcon, archive: ArchiveIcon, system: InfoIcon }
 const DAY = 86400_000
 
+function deliveredItems() {
+  const cutoff = Date.now() - 7 * DAY
+  return getItems().filter((i) => i.st === "done" && !i.arch && i.updated > cutoff).sort((a, b) => b.updated - a.updated).slice(0, 5)
+}
+
+function RecentDeliveries() {
+  const t = useT()
+  const items = deliveredItems()
+  useStoreSelector(() => {
+    const now = Date.now()
+    return JSON.stringify(deliveredItems().map((i) => [i.id, i.t, now - i.updated < 60_000 ? 0 : Math.floor(i.updated / 60_000)]))
+  })
+  if (!items.length) return null
+  return <section data-rail-done><SectionLabel>{t("shell:chat.recentDone")}</SectionLabel>
+    {items.map((i) => <Line key={i.id} onClick={() => go("#/items/" + i.id)} test={"done-" + i.id}><CircleCheckIcon className="size-4 shrink-0 text-success" strokeWidth={1.75} /><ItemNo id={i.id} /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><span className="shrink-0 type-footnote tabular-nums text-tertiary">{i.up}</span></Line>)}
+  </section>
+}
+
 function RailBody() {
+  useNotices()
+  useShellStore()
+  useWorkSummary()
   const [older, setOlder] = useState(false), t = useT()
   const unread = unreadNotices()
   /* what is on screen counts as read, after a moment so the new ones are seen highlighted */
   useEffect(() => { if (!unread.length) return; const h = setTimeout(readNotices, 2500); return () => clearTimeout(h) }, [unread.length])
-  const run = st.items.filter((i) => itemDisplayStatus(i) === "run" && !i.arch), cards = pendingCards()
-  const delivered = st.items.filter((i) => i.st === "done" && !i.arch && Date.now() - i.updated < 7 * DAY).sort((a, b) => b.updated - a.updated).slice(0, 5)
-  const waiting = (n: RNotice) => !!n.item_id && !!st.items.find((i) => i.id === n.item_id)?.wait
+  const run = getItems().filter((i) => itemDisplayStatus(i) === "run" && !i.arch), cards = pendingCards()
+  const waiting = (n: RNotice) => !!n.item_id && !!getItem(n.item_id)?.wait
   /* failures stay on top until they are read and their item no longer waits on you, or until they are closed */
-  const pinned = st.notices.filter((n) => n.level === "fail" && !n.closed && (n.created > st.noticeSeen || waiting(n)))
-  const rest = st.notices.filter((n) => !pinned.includes(n)), fresh = rest.filter((n) => n.created > st.noticeSeen), seen = rest.filter((n) => n.created <= st.noticeSeen)
+  const rows = notices()
+  const pinned = rows.filter((n) => n.level === "fail" && !n.closed && (n.created > st.noticeSeen || waiting(n)))
+  const rest = rows.filter((n) => !pinned.includes(n)), fresh = rest.filter((n) => n.created > st.noticeSeen), seen = rest.filter((n) => n.created <= st.noticeSeen)
   /* read ones fold away once there is something new; with nothing new the latest few stay visible */
   const base = pinned.length || fresh.length ? 0 : 5
   const notice = (n: RNotice) => {
@@ -270,7 +297,7 @@ function RailBody() {
       {run.length > 0 && <section data-rail-run><SectionLabel>{t("shell:chat.runningHead", { count: run.length })}</SectionLabel>
         {run.slice(0, 5).map((i) => <Line key={i.id} onClick={() => go("#/items/" + i.id)} test={"run-" + i.id}><StatusDot s="run" /><ItemNo id={i.id} /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span>{i.rel?.tone === "fail" && <span className="shrink-0 type-footnote text-destructive" data-rel="fail">{i.rel.outcome === "not_released" ? t("shell:chat.notReleased") : t("shell:chat.releaseFailed")}</span>}</Line>)}</section>}
       <section data-rail-notices><SectionLabel>{unread.length ? t("shell:chat.noticesUnread", { count: unread.length }) : t("shell:chat.notices")}</SectionLabel>
-        {!st.notices.length && <div className="type-callout text-tertiary">{t("shell:chat.noticesEmpty")}</div>}
+        {!rows.length && <div className="type-callout text-tertiary">{t("shell:chat.noticesEmpty")}</div>}
         {pinned.map(notice)}{similar(fresh).map(([n, more]) => <Similar key={n.id} n={n} more={more} notice={notice} />)}{similar(seen.slice(0, base)).map(([n, more]) => <Similar key={n.id} n={n} more={more} notice={notice} />)}
         {/* the read ones fold like the similar ones: the same chevron under the text, the height easing open */}
         {seen.length > base && <Collapsible open={older} onOpenChange={setOlder}>
@@ -278,18 +305,7 @@ function RailBody() {
           <button type="button" className="mt-1 ml-6 flex items-center gap-1 type-footnote text-muted-foreground hover:text-foreground" onClick={() => setOlder(!older)} aria-expanded={older} data-older>{older ? t("shell:chat.hideRead") : t("shell:chat.olderRead", { count: seen.length - base })}<ChevronDownIcon className={cn("size-3.5 transition-transform duration-260 ease-(--ease-out)", older && "rotate-180")} /></button>
         </Collapsible>}
       </section>
-      {delivered.length > 0 && <section data-rail-done><SectionLabel>{t("shell:chat.recentDone")}</SectionLabel>
-        {delivered.map((i) => <Line key={i.id} onClick={() => go("#/items/" + i.id)} test={"done-" + i.id}><CircleCheckIcon className="size-4 shrink-0 text-success" strokeWidth={1.75} /><ItemNo id={i.id} /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><span className="shrink-0 type-footnote tabular-nums text-tertiary">{i.up}</span></Line>)}</section>}
+      <RecentDeliveries />
     </div>
   )
-}
-
-/* ───────── a session's open cards ───────── */
-/** decisions the session waits on, answerable here like in 待处理 (also for sessions without an item) */
-export function SessionCards({ k }: { k: string }) {
-  const cards = sessionCards(k)
-  /* after the release card is answered, what became of it stays under the conversation */
-  const item = st.S[k]?.item, it = item ? st.items.find((x) => x.id === item) : undefined, rel = it?.rel
-  if (!cards.length && !rel) return null
-  return <div className="mt-6 flex flex-col gap-3" data-session-cards={k}>{rel && <RelNote rel={rel} box={rel.tone !== "ok"} onClose={rel.tone === "fail" && it ? () => closeRel(it) : undefined} />}{cards.map(({ i, w }) => <DecisionCard key={w.decision} i={i} w={w} showItem={!!i.id} />)}</div>
 }

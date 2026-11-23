@@ -1,3 +1,5 @@
+import { seedItems } from "./view-data"
+import type { Item } from "../../src/store"
 /* 设置的几个窗格（工作空间、数据、通知）：真实的 SettingsView，接口由浏览器测试拦截。?theme=dark 切深色。
  * window.__land(patch) stands in for the state refresh a save starts: it puts new Hub values into the store. */
 import { StrictMode } from "react"
@@ -14,7 +16,7 @@ st.workspace = ws as typeof st.workspace
 st.workspaces = [ws] as typeof st.workspaces
 st.settings = { digestAt: "09:00", quiet: "关闭" }
 st.prefix = "ST"
-st.noSeq = 43
+seedItems([{ id: "ST-43", t: "Fixture" } as Item])
 Object.assign(window, {
   __land: (p: { workspace?: Partial<typeof ws>; settings?: Record<string, string> }) => {
     if (p.workspace) { st.workspace = { ...st.workspace!, ...p.workspace }; st.workspaces = [st.workspace] }

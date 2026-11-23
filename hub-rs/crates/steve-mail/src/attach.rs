@@ -8,7 +8,6 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
-use rusqlite::{Connection, OptionalExtension, params};
 use steve_modules::ApiError;
 use steve_store::FileRef;
 use steve_store::base::{Viewer, Visibility};
@@ -57,48 +56,14 @@ impl FileStore for NoFiles {
     }
 }
 
-/// One `mail_attachments` row.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AttachmentFull {
-    pub id: String,
-    pub workspace_id: String,
-    pub message_id: String,
-    pub part: String,
-    pub name: String,
-    pub mime: String,
-    pub size: i64,
-    pub file_id: Option<String>,
-}
-
-pub fn attachment(c: &Connection, id: &str) -> MailResult<Option<AttachmentFull>> {
-    Ok(c
-        .prepare_cached(
-            "SELECT id, workspace_id, message_id, part, name, mime, size, file_id FROM mail_attachments WHERE id = ?",
-        )?
-        .query_row([id], |r| {
-            Ok(AttachmentFull {
-                id: r.get(0)?,
-                workspace_id: r.get(1)?,
-                message_id: r.get(2)?,
-                part: r.get(3)?,
-                name: r.get(4)?,
-                mime: r.get(5)?,
-                size: r.get(6)?,
-                file_id: r.get(7)?,
-            })
-        })
-        .optional()?)
-}
-
-fn set_file_id(c: &Connection, id: &str, file: &str) -> MailResult<()> {
-    c.prepare_cached("UPDATE mail_attachments SET file_id = ? WHERE id = ?")?
-        .execute(params![file, id])?;
-    Ok(())
-}
-
 /// The `files` row of an id as a [`FileRef`], when it is in `ws` and its bytes are still there.
-fn existing_file(c: &Connection, home: &Path, ws: &str, id: &str) -> MailResult<Option<FileRef>> {
-    let Some((fws, sha, name, mime, size)) = repo::file_row(c, id)? else {
+fn existing_file(
+    c: &mut impl steve_store::Read,
+    home: &Path,
+    ws: &str,
+    id: &str,
+) -> MailResult<Option<FileRef>> {
+    let Some((fws, sha, name, mime, size)) = steve_store::file_repo::file_row(c, id)? else {
         return Ok(None);
     };
     let present =
@@ -116,12 +81,12 @@ impl Mail {
     /// (`404 没有这个附件` otherwise).
     pub(crate) fn own_attachment(
         &self,
-        c: &Connection,
+        c: &mut impl steve_store::Read,
         viewer: &Viewer,
         id: &str,
-    ) -> MailResult<(AttachmentFull, repo::MessageRow)> {
+    ) -> MailResult<(repo::PartRow, repo::MessageRow)> {
         let nf = || MailError::Api(ApiError::not_found("附件"));
-        let a = attachment(c, id)?
+        let a = repo::attachment(c, id)?
             .filter(|a| a.workspace_id == viewer.ws)
             .ok_or_else(nf)?;
         let m = repo::message(c, &a.message_id)?.ok_or_else(nf)?;
@@ -146,13 +111,13 @@ impl Mail {
             .0
             .m
             .store
-            .reader(|c| self.own_attachment(c, viewer, id))?;
+            .read(|c| self.own_attachment(c, viewer, id))?;
         if let Some(f) = &a.file_id
             && let Some(r) = self
                 .0
                 .m
                 .store
-                .reader(|c| existing_file(c, &home, &viewer.ws, f))?
+                .read(|c| existing_file(c, &home, &viewer.ws, f))?
         {
             return Ok(Ok(r));
         }
@@ -200,15 +165,15 @@ impl Mail {
         self.0
             .m
             .store
-            .transaction(|tx| set_file_id(tx, &a.id, &f.id))?;
+            .write(|tx| repo::set_file_id(tx, &a.id, &f.id))?;
         Ok(Ok(f))
     }
 
     /// The bytes of a stored attachment (`data/files/...`).
     pub(crate) fn file_path(&self, ws: &str, id: &str) -> MailResult<Option<PathBuf>> {
         let home = self.0.cfg.home().to_path_buf();
-        self.0.m.store.reader(|c| -> MailResult<Option<PathBuf>> {
-            Ok(repo::file_row(c, id)?
+        self.0.m.store.read(|c| -> MailResult<Option<PathBuf>> {
+            Ok(steve_store::file_repo::file_row(c, id)?
                 .filter(|r| r.0 == ws)
                 .and_then(|r| crate::send::files_dir(&home, ws, &r.1, id)))
         })

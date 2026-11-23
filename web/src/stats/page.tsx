@@ -1,5 +1,5 @@
-/* 统计页（stats.md §6）：#/stats 与下钻 #/stats/items/:id。
- * 拿不到这些接口时显示“还没有接入”，不显示示例数据。费用处处标“估”。
+/* 统计页（stats.md §6）：#/stats 与下钻 #/stats/items/:id。只有 Rust Hub 有这些接口；
+ * 费用处处标“估”。
  * stats v2 按用途从上到下：筛选（时间、项目、Bot）→ 一行“现在”（进行中 · 等你 · 失败，YOLO 状态）→ 关键数字（和上一段比）
  * → 每天的产出（完成数和费用）→ 钱和时间花在哪（构成 + 最贵的事项，点进费用去向）→ 工作流 → Bot 对比 → harness · 模型对比
  * → 事件浏览器（默认收起）。历史数字跟随时间范围、项目与 Bot；实时输出只跟随项目与 Bot。 */
@@ -106,8 +106,7 @@ export function StatsView() {
           </div>
           {nowDrill && <DrillPanel key={nowDrill} d={nowDrill} f={f} fkey={fkey} live={live} rangeName={NAME(f.range)} close={() => setDrill(null)} />}
         </div>
-        {s.s === "absent" ? <Empty title={t("stats:page.historyMissing")} sub={t("stats:page.historyMissingSub")} />
-          : s.s === "loading" ? <div className="flex justify-center py-24" role="status" aria-label={t("stats:word.loading")}><Spinner className="size-5 text-muted-foreground" /></div>
+        {s.s === "loading" ? <div className="flex justify-center py-24" role="status" aria-label={t("stats:word.loading")}><Spinner className="size-5 text-muted-foreground" /></div>
           : s.s === "error" ? <Empty title={t("stats:page.loadFailed")} sub={s.msg} />
           : <StatsBody s={s.v} f={f} setF={setF} fkey={fkey} live={live} drill={drill} setDrill={setDrill} />}
       </div>

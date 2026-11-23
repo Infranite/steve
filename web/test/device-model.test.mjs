@@ -5,7 +5,7 @@ import {
   hostOf, hostLine, linkRoute, rttOf, upgradeCard, nodeAlerts, UPGRADE_STEPS,
   FILL_WARN, FILL_BAD, CLIENT_STALE_MS, CLIENT_UNUSED_MS, LOCAL_NODE,
 } from "../src/device-model.ts"
-import { setLang } from "../src/i18n/index.ts"
+import i18n from "../src/i18n/index.ts"
 
 const NOW = Date.UTC(2026, 10, 17, 8)
 const hubDevice = { id: "hub", name: "Studio Mac", roles: ["Hub"], os: "macOS", version: "0.2.112", status: "正常", max_sessions: 32, seen: NOW, created: 0, node_id: LOCAL_NODE, connected: true, running: 3, waiting: 0 }
@@ -74,7 +74,7 @@ test("statuses read as plain words", () => {
   assert.equal(statusText({ kind: "upgrading", tone: "info", phase: "draining" }), "升级中 · 等运行中的工作结束")
 })
 
-test("offline duration and code win over older diagnostics and are localized", () => {
+test("offline duration and code win over diagnostic text and are localized", async () => {
   const n = node("remote", { linked: false, last_seen: NOW - 1000,
     offline: { reason: "protocol_mismatch", since: NOW - 3_600_000, duration_ms: 3_600_000 },
     link_error: { at: NOW - 1000, error: "raw fixture detail" } })
@@ -83,12 +83,12 @@ test("offline duration and code win over older diagnostics and are localized", (
   assert.equal(offlineReason(v), "协议不兼容，请升级 Hub")
   assert.equal(nodeAlerts(v, "", NOW)[0].text, offlineReason(v))
   try {
-    setLang("en")
+    await i18n.changeLanguage("en")
     assert.match(statusText(nodeStatus(v), NOW), /^Offline for 1 /)
     assert.equal(offlineReason(v), "Incompatible protocols; upgrade the Hub")
     assert.equal(offlineReason({ ...v, linked: true }), "")
   } finally {
-    setLang("zh-CN")
+    await i18n.changeLanguage("zh-CN")
   }
 })
 

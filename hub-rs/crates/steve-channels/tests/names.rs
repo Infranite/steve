@@ -10,6 +10,8 @@
 mod digest_env;
 use digest_env::TestEnv;
 use std::sync::Arc;
+use steve_store::testkit::channels::inspect;
+use steve_store::testkit::channels::seed;
 
 use axum::Router;
 use axum::body::Body;
@@ -189,13 +191,10 @@ async fn setup() -> H {
         .unwrap_or_else(|| panic!("not a success: {loc}"))
         .to_string();
     let self_con = str_of(
-        &q(
-            &env,
-            "SELECT id FROM connections WHERE account_id = ?",
-            &self_acc,
-        )[0][0],
+        &inspect::connections::connection_id_by_account_rows(env.store(), &self_acc).unwrap()[0][0],
     );
-    let caps = str_of(&q(&env, "SELECT caps FROM connections WHERE id = ?", &self_con)[0][0]);
+    let caps =
+        str_of(&inspect::connections::connection_caps_by_id(env.store(), &self_con).unwrap()[0][0]);
     assert!(caps.contains("msg.receive"), "{caps}");
     let _ = (user, self_acc);
     H {
@@ -208,33 +207,6 @@ async fn setup() -> H {
         bot_con,
         self_con,
     }
-}
-
-fn q(env: &TestEnv, sql: &str, p: &str) -> Vec<Vec<Value>> {
-    let (sql, p) = (sql.to_string(), p.to_string());
-    env.store()
-        .reader(move |c| {
-            let mut st = c.prepare(&sql)?;
-            let n = st.column_count();
-            let rows = st
-                .query_map([&p], |r| {
-                    (0..n)
-                        .map(|i| {
-                            Ok(match r.get_ref(i)? {
-                                rusqlite::types::ValueRef::Null => Value::Null,
-                                rusqlite::types::ValueRef::Integer(x) => json!(x),
-                                rusqlite::types::ValueRef::Text(t) => {
-                                    json!(String::from_utf8_lossy(t))
-                                }
-                                _ => Value::Null,
-                            })
-                        })
-                        .collect::<rusqlite::Result<Vec<_>>>()
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok::<_, steve_store::StoreError>(rows)
-        })
-        .expect("query")
 }
 
 fn str_of(v: &Value) -> String {
@@ -260,13 +232,8 @@ async fn hear(h: &H, chat: &str, kind: SpaceKind, name: &str, id: &str, who: &st
 
 /// The account with this handle: `(display_name, party name, contact_kind, party id)`.
 fn person(h: &H, handle: &str) -> (String, String, String, String) {
-    let r = q(
-        &h.env,
-        "SELECT a.display_name, p.name, coalesce(p.contact_kind, ''), p.id FROM account_handles x
-           JOIN accounts a ON a.id = x.account_id JOIN parties p ON p.id = a.party_id
-          WHERE x.handle = ?",
-        handle,
-    );
+    let r = inspect::people::handle_display_name_name_coalescep_id_by_handle(h.env.store(), handle)
+        .unwrap();
     assert!(!r.is_empty(), "no account for {handle}");
     (
         str_of(&r[0][0]),
@@ -278,19 +245,15 @@ fn person(h: &H, handle: &str) -> (String, String, String, String) {
 
 /// The organization a person works at: `(org name, link source)`.
 fn employer(h: &H, party: &str) -> Option<(String, String)> {
-    q(
-        &h.env,
-        "SELECT o.name, l.source FROM links l JOIN parties o ON o.id = l.object_id
-          WHERE l.subject_id = ? AND l.predicate = 'works_at'",
-        party,
-    )
-    .first()
-    .map(|r| (str_of(&r[0]), str_of(&r[1])))
+    inspect::people::link_name_source_by_subject_and_works_at(h.env.store(), party)
+        .unwrap()
+        .first()
+        .map(|r| (str_of(&r[0]), str_of(&r[1])))
 }
 
 /// `status` of a permission row on a connection.
 fn permission(h: &H, conn: &str, scope: &str) -> Option<String> {
-    let cfg = q(&h.env, "SELECT config FROM connections WHERE id = ?", conn);
+    let cfg = inspect::connections::connection_config_by_id(h.env.store(), conn).unwrap();
     let cfg: Value = serde_json::from_str(&str_of(&cfg[0][0])).expect("config");
     cfg["permissions"]
         .as_array()?
@@ -352,35 +315,19 @@ async fn your_identity_names_members_first_and_tenants_become_organizations() {
     let (org, src) = employer(&h, &alice).expect("works somewhere");
     assert_eq!((org.as_str(), src.as_str()), ("示例科技", "sync"));
     assert_eq!(
-        q(
-            &h.env,
-            "SELECT json_extract(props, '$.title') FROM links WHERE subject_id = ? AND predicate = 'works_at'",
-            &alice
-        )[0][0],
+        inspect::people::link_title_by_subject_and_works_at(h.env.store(), &alice).unwrap()[0][0],
         "后端工程师"
     );
     assert_eq!(
-        q(
-            &h.env,
-            "SELECT handle FROM accounts WHERE party_id = ? AND family = 'email'",
-            &alice
-        )[0][0],
+        inspect::people::account_handle_by_party(h.env.store(), &alice).unwrap()[0][0],
         "alice@corp.example.com"
     );
     assert_eq!(
-        q(
-            &h.env,
-            "SELECT gaps FROM account_profiles ap JOIN accounts a ON a.id = ap.account_id WHERE a.party_id = ?",
-            &alice
-        )[0][0],
+        inspect::people::profile_gaps_by_party(h.env.store(), &alice).unwrap()[0][0],
         "{}"
     );
     assert_eq!(
-        q(
-            &h.env,
-            "SELECT org_kind FROM parties WHERE name = ?",
-            "示例科技"
-        )[0][0],
+        inspect::people::party_org_kind_by_name(h.env.store(), "示例科技").unwrap()[0][0],
         "self"
     );
     // the external member: real, at an organization of their own tenant
@@ -389,11 +336,8 @@ async fn your_identity_names_members_first_and_tenants_become_organizations() {
     let (org, _) = employer(&h, &ext).expect("external org");
     assert_eq!(org, "外部组织（客户对接群 里的成员）");
     // their title and email: Feishu gives none for another organization's members; never retried
-    let row = &q(
-        &h.env,
-        "SELECT ap.gaps, ap.next_check, ap.source FROM account_profiles ap JOIN accounts a ON a.id = ap.account_id WHERE a.party_id = ?",
-        &ext,
-    )[0];
+    let row =
+        &inspect::people::profile_gaps_next_check_source_by_party(h.env.store(), &ext).unwrap()[0];
     let gaps: Value = serde_json::from_str(&str_of(&row[0])).unwrap();
     assert_eq!(
         gaps,
@@ -404,19 +348,12 @@ async fn your_identity_names_members_first_and_tenants_become_organizations() {
         (Value::Null, json!("chat"))
     );
     assert_eq!(
-        q(
-            &h.env,
-            "SELECT count(*) FROM account_handles WHERE family = 'feishu_tenant' AND handle = ?",
-            ids::EXTERNAL_TENANT_KEY
-        )[0][0],
+        inspect::people::handle_count_by_handle(h.env.store(), ids::EXTERNAL_TENANT_KEY).unwrap()
+            [0][0],
         1
     );
     // the change log says it was the sync
-    let rev = q(
-        &h.env,
-        "SELECT patch FROM revisions WHERE object_id = ? ORDER BY id DESC LIMIT 1",
-        &alice,
-    );
+    let rev = inspect::people::revision_patch_by_object(h.env.store(), &alice).unwrap();
     assert!(
         str_of(&rev[0][0]).contains(r#""source":"sync""#),
         "{:?}",
@@ -465,11 +402,9 @@ async fn the_bot_answers_when_you_lack_the_permission_and_that_is_recorded() {
         r.missing
             .contains(&(h.self_con.clone(), MEMBERS.to_string()))
     );
-    let cfg = q(
-        &h.env,
-        "SELECT json_extract(config, '$.missing_permissions') FROM connections WHERE id = ?",
-        &h.self_con,
-    );
+    let cfg =
+        inspect::connections::connection_missing_permissions_by_id(h.env.store(), &h.self_con)
+            .unwrap();
     assert!(str_of(&cfg[0][0]).contains(MEMBERS));
 }
 
@@ -481,7 +416,7 @@ async fn the_address_book_names_by_id_and_a_shared_union_id_merges() {
     let known = h
         .env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             let id = steve_modules::accounts::identify(
                 tx,
                 WS,
@@ -493,10 +428,7 @@ async fn the_address_book_names_by_id_and_a_shared_union_id_merges() {
                     ..Default::default()
                 },
             )?;
-            tx.execute(
-                "UPDATE parties SET contact_kind = 'real' WHERE id = ?",
-                [&id.party_id],
-            )?;
+            tx.scope(|w| seed::people::set_contact_kind(w, &id.party_id, "real"))?;
             Ok::<_, steve_modules::ApiError>(id.party_id)
         })
         .expect("known bob");
@@ -530,11 +462,11 @@ async fn the_address_book_names_by_id_and_a_shared_union_id_merges() {
     let (_, name, kind, alice) = person(&h, ids::ALICE.open_id);
     assert_eq!((name.as_str(), kind.as_str()), ("王小丽", "real"));
     assert_eq!(
-        q(&h.env, "SELECT source FROM parties WHERE id = ?", &alice)[0][0],
+        inspect::people::party_source_by_id(h.env.store(), &alice).unwrap()[0][0],
         "sync"
     );
     assert!(
-        str_of(&q(&h.env, "SELECT avatar FROM parties WHERE id = ?", &alice)[0][0])
+        str_of(&inspect::people::party_avatar_by_id(h.env.store(), &alice).unwrap()[0][0])
             .contains("https://")
     );
     assert_eq!(
@@ -611,11 +543,8 @@ async fn mentions_and_private_chats_name_people_without_any_lookup() {
     assert_eq!(r.orgs_linked, 2, "{r:?}");
     let alice = person(&h, ids::ALICE.open_id).3;
     assert_eq!(
-        q(
-            &h.env,
-            "SELECT o.org_kind FROM links l JOIN parties o ON o.id = l.object_id WHERE l.subject_id = ? AND l.predicate = 'works_at'",
-            &alice
-        )[0][0],
+        inspect::people::link_org_kind_by_subject_and_works_at(h.env.store(), &alice).unwrap()[0]
+            [0],
         "self"
     );
     let carol = person(&h, ids::CAROL.open_id).3;
@@ -690,18 +619,7 @@ async fn pending_shows_unknown_people_with_context_and_leaves_muted_spaces_out()
     .await;
     h.ch.resolve_names(WS).await.expect("names");
     // 需求讨论 is a notification group you set to 不提醒 (migration 019 of fix/channels-ux)
-    h.env
-        .store()
-        .transaction(|tx| {
-            tx.execute_batch(
-                "CREATE TABLE IF NOT EXISTS space_prefs (space_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL,
-                   attention TEXT NOT NULL DEFAULT 'realtime', voice TEXT, updated INTEGER NOT NULL);
-                 INSERT INTO space_prefs (space_id, workspace_id, attention, updated)
-                   SELECT id, workspace_id, 'quiet', 0 FROM spaces WHERE name = '需求讨论';",
-            )?;
-            Ok::<_, steve_store::StoreError>(())
-        })
-        .expect("prefs");
+    seed::spaces::quiet_named_space(h.env.store(), "需求讨论").expect("prefs");
     let mut ports = steve_modules::accounts::ports();
     ports.spaces = Some(Arc::new(steve_channels::spaces::Spaces));
     let p = steve_modules::contacts::merge::pending(&h.env.modules, &ports, &caller(WS, ME))
@@ -729,19 +647,17 @@ async fn the_directory_sync_reports_its_visibility_range_and_missing_permissions
     let conn = h
         .env
         .store()
-        .reader(|c| tables.get(c, WS, &h.bot_con))
+        .read::<_, steve_store::StoreError>(|r| Ok(tables.get(r, WS, &h.bot_con)))
         .expect("get")
-        .expect("a directory connection");
+        .expect("a directory connection")
+        .unwrap();
 
     // the app sees only the platform department: teams with the department path, and a note
     h.fake
         .world(|w| w.scope_department_ids = vec![ids::DEPT_PLATFORM.into()]);
     sync.sync_connection(&conn).await.expect("sync");
-    let state = q(
-        &h.env,
-        "SELECT json_extract(config, '$.directory') FROM connections WHERE id = ?",
-        &h.bot_con,
-    );
+    let state =
+        inspect::connections::connection_directory_by_id(h.env.store(), &h.bot_con).unwrap();
     let state: Value = serde_json::from_str(&str_of(&state[0][0])).expect("state");
     assert_eq!(state["ok"], true);
     assert_eq!(state["scope"]["whole"], false);
@@ -756,11 +672,7 @@ async fn the_directory_sync_reports_its_visibility_range_and_missing_permissions
     // the whole company, with the department path on the job
     h.fake.world(|w| w.scope_department_ids = vec!["0".into()]);
     sync.sync_connection(&conn).await.expect("sync");
-    let depts = q(
-        &h.env,
-        "SELECT json_extract(props, '$.dept') FROM links WHERE predicate = 'works_at' AND source = ?",
-        "sync",
-    );
+    let depts = inspect::people::link_dept_by_works_at_and_source(h.env.store(), "sync").unwrap();
     assert!(
         depts.iter().any(|d| str_of(&d[0]).contains(" / ")),
         "a department path: {depts:?}"
@@ -773,11 +685,8 @@ async fn the_directory_sync_reports_its_visibility_range_and_missing_permissions
         permission(&h, &h.bot_con, "contact:department.base:readonly").as_deref(),
         Some("missing")
     );
-    let state = q(
-        &h.env,
-        "SELECT json_extract(config, '$.directory.missing_scopes') FROM connections WHERE id = ?",
-        &h.bot_con,
-    );
+    let state =
+        inspect::connections::connection_missing_scopes_by_id(h.env.store(), &h.bot_con).unwrap();
     assert!(str_of(&state[0][0]).contains("contact:department.base:readonly"));
 }
 
@@ -803,11 +712,8 @@ async fn missing_reasons_come_from_the_calls_that_asked() {
     let r = h.ch.resolve_names(WS).await.expect("names");
     assert_eq!(r.nameless, 1, "{r:?}");
     let gaps_of = |h: &H| {
-        let row = q(
-            &h.env,
-            "SELECT ap.gaps, ap.checked FROM account_profiles ap JOIN account_handles x ON x.account_id = ap.account_id WHERE x.handle = ?",
-            ids::BOB.open_id,
-        );
+        let row = inspect::people::profile_gaps_checked_by_handle(h.env.store(), ids::BOB.open_id)
+            .unwrap();
         (
             serde_json::from_str::<Value>(&str_of(&row[0][0])).unwrap(),
             row[0][1].clone(),
@@ -858,11 +764,8 @@ async fn a_due_retry_is_made_and_nothing_else() {
     let (_, name, _, bob) = person(&h, ids::BOB.open_id);
     assert_eq!(name, "张伟");
     let record = |h: &H| {
-        let r = q(
-            &h.env,
-            "SELECT ap.checked, ap.next_check, ap.gaps FROM account_profiles ap JOIN accounts a ON a.id = ap.account_id WHERE a.party_id = ?",
-            &bob,
-        );
+        let r =
+            inspect::people::profile_checked_next_check_gaps_by_party(h.env.store(), &bob).unwrap();
         (
             r[0][0].as_i64(),
             r[0][1].as_i64(),
@@ -914,11 +817,7 @@ async fn a_due_retry_is_made_and_nothing_else() {
     let (_, next, gaps) = record(&h);
     assert_eq!((next, gaps), (None, json!({})), "complete: no retry");
     assert_eq!(
-        q(
-            &h.env,
-            "SELECT json_extract(props, '$.title') FROM links WHERE subject_id = ? AND predicate = 'works_at'",
-            &bob
-        )[0][0],
+        inspect::people::link_title_by_subject_and_works_at(h.env.store(), &bob).unwrap()[0][0],
         "销售"
     );
     // … and never asked about again
@@ -957,16 +856,7 @@ async fn a_due_retry_asks_the_address_book_through_its_cache() {
     .await;
     // the group is no longer active, so no member list is read: he is looked up by id in the address
     // book alone, whose answer is what the 24 h handle cache keeps
-    h.env
-        .store()
-        .transaction(|tx| -> Result<(), steve_store::StoreError> {
-            tx.execute(
-                "UPDATE spaces SET status = 'left' WHERE external_id = ?",
-                [ids::GROUP_CHAT],
-            )?;
-            Ok(())
-        })
-        .expect("space left");
+    seed::spaces::leave_external_chat(h.env.store(), ids::GROUP_CHAT).expect("space left");
     // the bot's address-book reads (tenant token) that found him
     let bots = |h: &H| {
         h.fake
@@ -979,11 +869,8 @@ async fn a_due_retry_asks_the_address_book_through_its_cache() {
     let (_, name, _, bob) = person(&h, ids::BOB.open_id);
     assert_eq!(name, "张伟");
     assert_eq!(bots(&h), 1, "answered: the 24 h cache is written");
-    let r = q(
-        &h.env,
-        "SELECT ap.checked, ap.next_check, ap.gaps, ap.source FROM account_profiles ap JOIN accounts a ON a.id = ap.account_id WHERE a.party_id = ?",
-        &bob,
-    );
+    let r = inspect::people::profile_checked_next_check_gaps_source_by_party(h.env.store(), &bob)
+        .unwrap();
     let t0 = r[0][0].as_i64().unwrap();
     assert_eq!(r[0][1].as_i64(), Some(t0 + 3_600_000));
     assert_eq!(
@@ -1048,20 +935,7 @@ async fn name_job_finishes_when_channels_is_released() {
 /// Make the same local DM name need completion again, without generating another inbound kick.
 fn forget_dm_name(h: &H) {
     let party = person(h, ids::CAROL.open_id).3;
-    h.env
-        .store()
-        .transaction(|tx| {
-            tx.execute(
-                "UPDATE parties SET name = ? WHERE id = ?",
-                rusqlite::params![ids::CAROL.open_id, party],
-            )?;
-            tx.execute(
-                "UPDATE accounts SET display_name = ? WHERE party_id = ? AND system_id = 'feishu'",
-                rusqlite::params![ids::CAROL.open_id, party],
-            )?;
-            Ok::<_, steve_store::StoreError>(())
-        })
-        .unwrap();
+    seed::people::replace_feishu_display_name(h.env.store(), &party, ids::CAROL.open_id).unwrap();
 }
 
 async fn name_job_tick(h: &H, ms: i64) {
@@ -1270,17 +1144,7 @@ impl steve_channels::ProfileAdapter for ScriptedProfiles {
 fn scripted_names(h: &H, script: Arc<LookupScript>) -> Channels {
     // The production tenant scan follows created/id, while each installation's member/directory
     // scan orders the personal identity first. Make those two distinct orders deterministic.
-    h.env
-        .store()
-        .transaction(|tx| {
-            tx.execute("UPDATE connections SET created=10 WHERE id=?", [&h.bot_con])?;
-            tx.execute(
-                "UPDATE connections SET created=20 WHERE id=?",
-                [&h.self_con],
-            )?;
-            Ok::<_, steve_store::StoreError>(())
-        })
-        .unwrap();
+    seed::connections::set_connection_seniority(h.env.store(), &h.bot_con, &h.self_con).unwrap();
     let app = Arc::new(FeishuApp::new());
     Channels::builder(h.env.modules.clone(), h.conns.clone(), h.sink.clone())
         .adapter(app.clone())
@@ -1464,11 +1328,7 @@ async fn resolution_query_order_and_directory_selection_table() {
         let (_, name, _, party) = person(&h, ids::BOB.open_id);
         assert_eq!(name, case.final_name, "{}", case.label);
         assert_eq!(
-            q(
-                &h.env,
-                "SELECT source FROM account_profiles WHERE account_id=(SELECT id FROM accounts WHERE party_id=? AND system_id='feishu')",
-                &party
-            )[0][0],
+            inspect::people::profile_source_by_party(h.env.store(), &party).unwrap()[0][0],
             case.source,
             "{}",
             case.label
@@ -1559,7 +1419,7 @@ async fn lookup_cache_success_failure_and_freshness_table() {
         );
         let (_, _, _, party) = person(&h, ids::BOB.open_id);
         let checked = || {
-            q(&h.env,"SELECT checked FROM account_profiles WHERE account_id=(SELECT id FROM accounts WHERE party_id=? AND system_id='feishu')",&party)[0][0].clone()
+            inspect::people::profile_checked_by_party(h.env.store(), &party).unwrap()[0][0].clone()
         };
         let before = checked();
         h.env.clock.advance(1);
@@ -1589,13 +1449,7 @@ async fn lookup_cache_success_failure_and_freshness_table() {
             "fresh kick: {label}"
         );
         // Keep a due persistent retry from overriding the TTLs being tested here.
-        h.env
-            .store()
-            .transaction(|tx| {
-                tx.execute("UPDATE account_profiles SET next_check=NULL", [])?;
-                Ok::<_, steve_store::StoreError>(())
-            })
-            .unwrap();
+        seed::people::clear_profile_retry_schedule(h.env.store()).unwrap();
         h.env.clock.advance(steve_channels::names::MEMBERS_TTL_MS);
         ch.resolve_names(WS).await.unwrap();
         assert_eq!(

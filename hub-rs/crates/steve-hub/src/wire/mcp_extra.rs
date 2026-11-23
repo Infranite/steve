@@ -78,7 +78,7 @@ fn devices(store: &Store, cx: &mcp::McpCx, args: &Value) -> Result<String, Strin
             let item = cx.item_id.as_deref().ok_or("这个会话不属于任何事项")?;
             let tag = args["tag"].as_str().filter(|t| !t.trim().is_empty());
             let ok = store
-                .transaction(|tx| steve_store::nodes::set_item_tag(tx, item, tag))
+                .write(|w| steve_store::nodes::set_item_tag(w, item, tag))
                 .map_err(|e| e.to_string())?;
             if !ok {
                 return Err(steve_i18n::t!("hub.node.tag_bad"));
@@ -91,23 +91,18 @@ fn devices(store: &Store, cx: &mcp::McpCx, args: &Value) -> Result<String, Strin
         _ => {
             let since = crate::nodes::now() - 3 * 60 * 1000;
             let v = store
-                .reader(|c| {
-                    let tags = steve_store::nodes::all_tags(c)?;
-                    let online = |id: &str| crate::metrics::latest_node(id, since).is_some();
+                .read(|r| {
+                    let tags = steve_store::nodes::all_tags(r)?;
                     let mut out = vec![json!({
                         "node": "local", "name": "Hub", "tags": tags.get("local").cloned().unwrap_or_default(),
                         "online": true
                     })];
-                    let mut st = c.prepare(
-                        "SELECT node_id, name, state FROM nodes WHERE local = 0 AND state IN ('active','paused') ORDER BY name",
-                    )?;
-                    let rows = st
-                        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?
-                        .collect::<Result<Vec<_>, _>>()?;
-                    for (id, name, state) in rows {
+                    for device in steve_store::node_directory::device_summaries(r)? {
                         out.push(json!({
-                            "node": id, "name": name, "tags": tags.get(&id).cloned().unwrap_or_default(),
-                            "online": online(&id), "paused": state == "paused"
+                            "node": device.node, "name": device.name,
+                            "tags": tags.get(&device.node).cloned().unwrap_or_default(),
+                            "online": crate::metrics::latest_node(&device.node, since).is_some(),
+                            "paused": device.paused
                         }));
                     }
                     Ok::<_, steve_store::StoreError>(out)
@@ -276,7 +271,7 @@ fn json_rpc(id: &Value, result: Value) -> Response {
 /// Revoked members retain only workspace service access, including recorded Node sessions.
 fn session_cx(store: &Store, s: &steve_store::Session) -> Result<mcp::McpCx, String> {
     let user = store
-        .reader(|c| {
+        .read(|c| {
             let (ws, principal) = super::principal::of_session(c, &s.id)?
                 .filter(|(ws, _)| ws == &s.workspace_id)
                 .ok_or_else(|| {
@@ -301,15 +296,7 @@ fn session_cx(store: &Store, s: &steve_store::Session) -> Result<mcp::McpCx, Str
 /// Personal tools must use the authenticated session principal.
 pub(crate) fn owner(store: &Store, ws: &str) -> Option<String> {
     store
-        .with_conn(|c| {
-            use rusqlite::OptionalExtension;
-            Ok(c.query_row(
-                "SELECT user_id FROM workspace_members WHERE workspace_id = ? AND role = 'owner' ORDER BY created LIMIT 1",
-                [ws],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?)
-        })
+        .read(|r| steve_store::Members::new(r).owner(ws))
         .ok()
         .flatten()
 }
@@ -604,7 +591,13 @@ async fn call_owned_inner(
 async fn call_upgrade(x: &Extra, cx: &mcp::McpCx, args: &Value) -> Result<String, String> {
     let ws = cx.ws.clone();
     let store = x.store.clone();
-    let may_request=tokio::task::spawn_blocking(move||store.reader(|c|{let (members,owners):(i64,i64)=c.query_row("SELECT COUNT(*),COALESCE(SUM(CASE WHEN u.role='owner' THEN 1 ELSE 0 END),0) FROM workspace_members wm JOIN users u ON u.id=wm.user_id WHERE wm.workspace_id=?",[ws],|r|Ok((r.get(0)?,r.get(1)?)))?;Ok::<_,steve_store::StoreError>(members==1&&owners==1)}).unwrap_or(false)).await.unwrap_or(false);
+    let may_request = tokio::task::spawn_blocking(move || {
+        store
+            .read(|r| steve_store::Workspaces(r).sole_instance_owner(&ws))
+            .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false);
     if args["action"] == "request" && !may_request {
         Err(
             "共享工作空间或非实例管理员的工作空间目前只能检查/查看升级；请实例管理员从设置发起升级"
@@ -692,13 +685,11 @@ pub(crate) fn module_tools() -> Vec<Value> {
 mod session_identity_tests {
     use super::*;
     use steve_modules::testkit::{ME, OTHER, TestEnv, WS};
+    use steve_store::testkit::hub::authority as fixtures;
     #[tokio::test]
     async fn digest_and_knowledge_preserve_personal_and_service_session_identity() {
         let e = TestEnv::new(|_| {});
-        e.store().with_conn(|c| {
-            c.execute("INSERT INTO bots (id,workspace_id,name,harness,updated) VALUES ('steve',?,'Digest','fixture',1)", [WS])?;
-            Ok(())
-        }).unwrap();
+        fixtures::seed_digest_identity_bot(e.store(), WS).unwrap();
         let kb = steve_knowledge::Knowledge::new(|_| {});
         let app = steve_knowledge::routes(kb).with_state(e.modules.clone());
         let mut docs = Vec::new();
@@ -746,11 +737,12 @@ mod session_identity_tests {
                 })
                 .unwrap();
             // Node sessions pin identity; a later requester edit cannot lend a different user's access.
-            e.store().transaction(|tx| {
-                tx.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES (?,'node','{}',?,'r','ready',1)", rusqlite::params![session.id, session.id])?;
-                super::super::principal::record_in(tx, &session.id, None)?;
-                Ok::<_, steve_store::StoreError>(())
-            }).unwrap();
+            e.store()
+                .write(|w| {
+                    fixtures::bind_session(w, &session.id, "node")?;
+                    super::super::principal::record_in(w, &session.id, None)
+                })
+                .unwrap();
             let cx = session_cx(e.store(), &session).unwrap();
             assert_eq!(cx.user, user.unwrap_or("svc:default"));
             assert!(
@@ -764,26 +756,12 @@ mod session_identity_tests {
                 .is_ok()
             );
             if user.is_none() {
-                assert_eq!(
-                    e.store()
-                        .reader(|c| c
-                            .query_row(
-                                "SELECT COUNT(*) FROM parties WHERE workspace_id=? AND user_id=?",
-                                rusqlite::params![WS, cx.user],
-                                |r| r.get::<_, i64>(0)
-                            )
-                            .map_err(steve_store::StoreError::from))
-                        .unwrap(),
-                    0
-                );
+                assert_eq!(fixtures::party_records(e.store(), WS, &cx.user).unwrap(), 0);
             }
             assert_eq!(
                 e.store()
-                    .reader(|c| steve_knowledge::context::item_user(
-                        c,
-                        WS,
-                        cx.item_id.as_deref().unwrap()
-                    ))
+                    .read(|c| steve_store::ItemEvidence(c)
+                        .requester(WS, cx.item_id.as_deref().unwrap()))
                     .unwrap()
                     .as_deref(),
                 user
@@ -808,26 +786,15 @@ mod session_identity_tests {
                 user == Some(ME)
             );
             if user == Some(OTHER) {
-                e.store()
-                    .transaction(|tx| {
-                        tx.execute(
-                            "DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
-                            rusqlite::params![WS, OTHER],
-                        )?;
-                        Ok::<_, steve_store::StoreError>(())
-                    })
-                    .unwrap();
+                fixtures::remove_member(e.store(), WS, OTHER).unwrap();
                 let cx = session_cx(e.store(), &session).unwrap();
                 assert_eq!(cx.user, "svc:default");
                 assert!(steve_knowledge::tools::read(&e.modules, &cx, &docs[1], 0.0).is_err());
                 assert!(steve_knowledge::tools::read(&e.modules, &cx, &docs[2], 0.0).is_ok());
                 assert!(
                     e.store()
-                        .reader(|c| steve_knowledge::context::item_user(
-                            c,
-                            WS,
-                            cx.item_id.as_deref().unwrap()
-                        ))
+                        .read(|c| steve_store::ItemEvidence(c)
+                            .requester(WS, cx.item_id.as_deref().unwrap()))
                         .unwrap()
                         .is_none()
                 );

@@ -1,3 +1,4 @@
+use steve_store::testkit::SqliteFixtures;
 mod common;
 
 steve_i18n::init!();
@@ -71,13 +72,37 @@ fn plan(t: &T, parent: &str, specs: &[UnitSpec]) -> Workflow {
 /// What the core does for a retry (#182): the unit's own child opens a new cycle (`ready`) and the
 /// unit claims it again, in one transaction.
 fn claim_retry(t: &T, parent: &str, id: &str) -> Result<WorkUnit> {
-    t.store.transaction(|tx| {
-        tx.execute(
-            "UPDATE items SET phase='ready',cycle=cycle+1
-             WHERE id=(SELECT item_id FROM workflow_units WHERE workflow_id=? AND id=?)",
-            [parent, id],
+    let child = t
+        .store
+        .workflows()
+        .get(parent)?
+        .unwrap()
+        .units
+        .into_iter()
+        .find(|unit| unit.spec.id == id)
+        .unwrap()
+        .item_id
+        .unwrap();
+    let item = t.store.items().get(&child)?.unwrap();
+    t.store.write(|w| {
+        lifecycle_write_in(
+            w,
+            &child,
+            &LifecycleWrite {
+                phase: "ready".into(),
+                cycle: item.cycle + 1,
+                revision: item.revision,
+                outcome: item.outcome,
+                acceptance: item.acceptance,
+                closing: item.closing,
+                closed_at: item.closed_at,
+                closed_reason: item.closed_reason,
+                status: None,
+                stage: None,
+                now: None,
+            },
         )?;
-        claim_in(tx, parent, id)
+        claim_in(w, parent, id)
     })
 }
 
@@ -230,7 +255,7 @@ fn child_capture_commits_with_claim_and_repeated_claim_does_not_renew_it() {
         .unwrap();
     // Fail after the child and capture were inserted, exercising the actual claim transaction.
     t.store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             c.execute_batch(
                 "CREATE TRIGGER reject_claim BEFORE UPDATE OF status ON workflow_units
             WHEN NEW.status='dispatching' BEGIN SELECT RAISE(ABORT,'fixture rejects claim'); END",
@@ -240,7 +265,7 @@ fn child_capture_commits_with_claim_and_repeated_claim_does_not_renew_it() {
         .unwrap();
     assert!(t.store.workflows().claim(&parent, "a").is_err());
     t.store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             assert_eq!(count(c, "SELECT count(*) FROM items"), 1);
             assert_eq!(count(c, "SELECT count(*) FROM diagnostic_captures"), 1);
             c.execute_batch("DROP TRIGGER reject_claim")?;
@@ -422,13 +447,14 @@ fn claiming_work_preserves_the_requester_and_never_rebinds_an_existing_attempt()
     for requested in [Some("requester"), None] {
         let (t, parent, specs) = setup();
         t.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute(
+            .write::<_, StoreError>(|tx| {
+                steve_store::testkit::sqlite_writer(tx).execute(
                     "UPDATE items SET requested_by=? WHERE id=?",
                     rusqlite::params![requested, parent],
                 )?;
                 // The Bot owner is not the requester, including for autonomous service work.
-                tx.execute("UPDATE bots SET owner='bot-owner'", [])?;
+                steve_store::testkit::sqlite_writer(tx)
+                    .execute("UPDATE bots SET owner='bot-owner'", [])?;
                 Ok(())
             })
             .unwrap();
@@ -436,7 +462,7 @@ fn claiming_work_preserves_the_requester_and_never_rebinds_an_existing_attempt()
         let claimed = t.store.workflows().claim(&parent, "a").unwrap();
         let requester = || {
             t.store
-                .reader::<_, StoreError>(|c| {
+                .fixture_read::<_, StoreError>(|c| {
                     Ok(c.query_row(
                         "SELECT requested_by FROM items WHERE id=?",
                         [claimed.item_id.as_deref().unwrap()],
@@ -447,8 +473,8 @@ fn claiming_work_preserves_the_requester_and_never_rebinds_an_existing_attempt()
         };
         assert_eq!(requester().as_deref(), requested);
         t.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute(
+            .write::<_, StoreError>(|tx| {
+                steve_store::testkit::sqlite_writer(tx).execute(
                     "UPDATE items SET requested_by='someone-else' WHERE id=?",
                     [&parent],
                 )?;
@@ -925,7 +951,7 @@ fn new_goal_or_cycle_archives_old_results_without_reusing_them() {
     let a = start(&t, &parent, "a");
     finish(&t, &a, true);
     t.store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             c.execute("UPDATE items SET cycle=cycle+1 WHERE id=?", [&parent])?;
             Ok(())
         })
@@ -989,7 +1015,7 @@ fn unit_delivery_artifacts_and_child_checkpoint_commit_or_roll_back_together() {
     let outputs = json!([{"kind":"文件","title":"成果","location":"result.txt"}]);
     let checks = json!([{"name":"验证","passed":true}]);
     t.events.take();
-    let failed: Result<()> = t.store.transaction(|tx| {
+    let failed: Result<()> = t.store.write(|tx| {
         workflows::deliver_in(tx, child, session, "交付", &outputs, &checks, true)?;
         artifact_add_in(
             tx,
@@ -1008,8 +1034,9 @@ fn unit_delivery_artifacts_and_child_checkpoint_commit_or_roll_back_together() {
     );
     assert!(t.store.artifacts().list(child).unwrap().is_empty());
     assert!(t.events.take().is_empty());
+    let before = t.store.items().get(child).unwrap().unwrap();
     t.store
-        .transaction::<_, StoreError>(|tx| {
+        .write::<_, StoreError>(|tx| {
             workflows::deliver_in(tx, child, session, "交付", &outputs, &checks, true)?;
             artifact_add_in(
                 tx,
@@ -1019,7 +1046,16 @@ fn unit_delivery_artifacts_and_child_checkpoint_commit_or_roll_back_together() {
                 Some("result.txt"),
                 Some("result"),
             )?;
-            tx.execute("UPDATE items SET phase='closing' WHERE id=?", [child])?;
+            lifecycle_write_in(
+                tx,
+                child,
+                &LifecycleWrite {
+                    phase: "closing".into(),
+                    cycle: before.cycle,
+                    revision: before.revision,
+                    ..Default::default()
+                },
+            )?;
             Ok(())
         })
         .unwrap();
@@ -1063,7 +1099,7 @@ fn a_retired_failed_attempt_keeps_its_failure() {
     );
     // archived as cancelled by an older build
     t.store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             c.execute(
                 "UPDATE workflow_attempts SET snapshot=json_set(snapshot,'$.status','cancelled','$.reason','尝试已失效：重试') WHERE item_id=?",
                 [child],
@@ -1136,7 +1172,7 @@ fn a_retry_reuses_the_units_child_and_keeps_every_attempt() {
     plan(&t, &parent, &specs);
     let items = |t: &T| {
         t.store
-            .with_conn(|c| Ok(count(c, "SELECT count(*) FROM items")))
+            .fixture_write(|c| Ok(count(c, "SELECT count(*) FROM items")))
             .unwrap()
     };
     let first = start(&t, &parent, "a");
@@ -1173,7 +1209,7 @@ fn a_retry_reuses_the_units_child_and_keeps_every_attempt() {
     );
     let rows: Vec<(i64, String, Option<String>)> = t
         .store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             let mut q = c.prepare(
                 "SELECT attempt,json_extract(snapshot,'$.status'),json_extract(snapshot,'$.reason')
                  FROM workflow_attempts WHERE item_id=? ORDER BY attempt",
@@ -1237,7 +1273,7 @@ fn a_retry_takes_the_replanned_spec_into_its_child() {
     assert_eq!(item.title, "工作 a（返工）");
     let goals: Vec<(i64, String)> = t
         .store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             let mut q =
                 c.prepare("SELECT version,text FROM item_goals WHERE item_id=? ORDER BY version")?;
             let rows = q
@@ -1343,7 +1379,7 @@ fn claiming_a_child_checks_inherited_categories_before_writing() {
     let count = s.items().all(WS).unwrap().len();
 
     // Historical corruption cannot be introduced through set_item, so model it only in this DB.
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         c.execute(
             "UPDATE tags SET cat=? WHERE id=?",
             [steve_store::kinds::KIND_CAT, &stray],
@@ -1361,7 +1397,7 @@ fn claiming_a_child_checks_inherited_categories_before_writing() {
         (vec![stray.clone()], missing),
         (vec![feat.clone(), bug], several),
     ] {
-        s.with_conn(|c| {
+        s.fixture_write(|c| {
             c.execute("DELETE FROM item_tags WHERE item_id=?", [&parent])?;
             for tag in &invalid {
                 c.execute(

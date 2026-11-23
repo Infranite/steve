@@ -8,13 +8,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use steve_knowledge::repo::{self, DocRow};
 use steve_knowledge::sources::folder::{self, FolderPolicy, SourceBody};
 use steve_knowledge::sources::folder_node::{DENIED, FolderPlace, FolderPlaces, OFFLINE, Unplaced};
 use steve_knowledge::{Knowledge, index};
 use steve_modules::testkit::{ME, TestEnv, WS, caller};
 use steve_node_api::testkit::FakeNode;
 use steve_node_api::*;
+use steve_store::knowledge::{DocRow, SourceRow};
 
 /// The FakeNode's files face, with a few faults: pages forced small, the link lost after some
 /// pages, a file rewritten just before its first read, every call refused as offline.
@@ -241,7 +241,7 @@ impl Env {
         let mut d = self
             .env
             .store()
-            .reader(|c| repo::docs_of_source(c, id))
+            .read(|c| steve_store::knowledge::Documents(c).docs_of_source(id))
             .unwrap();
         d.sort_by(|a, b| a.r#ref.cmp(&b.r#ref));
         d
@@ -252,10 +252,10 @@ impl Env {
             .find(|d| d.r#ref == r)
             .unwrap_or_else(|| panic!("no doc {r}"))
     }
-    fn source(&self, id: &str) -> repo::SourceRow {
+    fn source(&self, id: &str) -> SourceRow {
         self.env
             .store()
-            .reader(|c| repo::source(c, id))
+            .read(|c| steve_store::knowledge::Documents(c).source(id))
             .unwrap()
             .unwrap()
     }
@@ -263,13 +263,13 @@ impl Env {
         let s = self.source(id);
         self.env
             .store()
-            .reader(|c| repo::source_counts(c, &s))
+            .read(|c| steve_store::knowledge::Documents(c).source_counts(&s))
             .unwrap()
     }
     fn texts(&self, doc: &str) -> String {
         self.env
             .store()
-            .reader(|c| repo::doc_chunks(c, doc, 100))
+            .read(|c| steve_store::knowledge::Documents(c).doc_chunks(doc, 100))
             .unwrap()
             .into_iter()
             .map(|(_, _, t)| t)

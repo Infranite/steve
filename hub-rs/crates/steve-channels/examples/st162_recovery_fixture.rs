@@ -18,13 +18,12 @@ use steve_channels::{Channels, HandleRef, InboundMessage, Mention, Outbound, api
 use steve_flow::{FlowSetup, LinearExecutor, testkit::FakeCore};
 use steve_modules::accounts::{
     connections::{self, Connections, ConnectionsConfig},
-    repo,
     service::ensure_seeds,
 };
 use steve_modules::testkit::{ME, TestEnv, WS, caller};
 use steve_modules::vault::{Vault, keystore::FileKeyStore};
 use steve_modules::{ApiError, ApiResult};
-use steve_store::base::{self, Viewer};
+use steve_store::base::Viewer;
 use zeroize::Zeroizing;
 
 #[path = "support/recovery_yolo.rs"]
@@ -52,11 +51,7 @@ impl steve_channels::respond::Responder for Record {
     }
 }
 async fn state(Extension(f): F) -> ApiResult<Json<Value>> {
-    let messages = f.env.store().reader(|c| -> ApiResult<Vec<Value>> {
-        let mut stmt = c.prepare("SELECT id,status,text,decision_id,external_id FROM chan_messages WHERE direction='out'")?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,Option<String>>(4)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-        rows.into_iter().map(|(id,status,text,d,external)| Ok(json!({"id":id,"status":status,"text":text,"external_id":external,"decision":d.and_then(|id|base::decisions::get(c,&id).ok().flatten())}))).collect()
-    })?;
+    let messages = steve_store::testkit::channels::outbound(f.env.store())?;
     Ok(Json(
         json!({"messages":messages,"writes":f.fake.with(|w|w.writes.clone()),"calls":f.fake.calls("messages.reply"),
             "yolo": f.engine.lock().unwrap().yolo().status(WS)?}),
@@ -77,10 +72,7 @@ async fn request(Extension(f): F, Json(body): Json<Value>) -> ApiResult<Json<Val
         is_connection: true,
     });
     let stored = f.ch.on_message(WS, &f.conn, inbound).await?;
-    let plan = f
-        .env
-        .store()
-        .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &stored.message_id))?;
+    let plan = steve_channels::flow_actions::plan_of(f.env.store(), WS, &stored.message_id)?;
     let out = f.out.lock().unwrap().clone();
     let delivered = out
         .deliver(
@@ -184,10 +176,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         r#"{"text":"模型修改后的待审正文"}"#,
     );
     disclosure.bind(env.store().clone(), env.gateway.clone());
-    env.store().transaction(|tx| -> ApiResult<()> {
-        ensure_seeds(tx, WS)?;
-        repo::upsert_declared(tx, ext_ws::SYSTEM, ext_ws::SYSTEM_LABEL, "ext_ws")?;
-        Ok(())
+    env.store().write(|w| ensure_seeds(w, WS))?;
+    env.store().write(|w| {
+        steve_store::Systems(w).upsert_declared(
+            ext_ws::SYSTEM,
+            ext_ws::SYSTEM_LABEL,
+            "ext_ws",
+            steve_store::now(),
+        )
     })?;
     let keys = tempfile::tempdir()?;
     let vault = Vault::new(
@@ -219,7 +215,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create(&caller(WS, ME), ext_ws::BOT_ADAPTER, &fields, json!({}))
         .await?
         .id;
-    env.store().transaction(|tx| {
+    env.store().write(|tx| {
         spaces::set_account_rules(
             tx,
             &Viewer::bare(WS, ME),

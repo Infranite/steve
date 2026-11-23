@@ -1,6 +1,4 @@
-/* YOLO (modules/yolo.md §7, with the user's decisions of 2026-11-01: on/off without an end time, no budgets): the
- * workspace switch and its preview, project and item scopes, resuming after the breaker, and the ledger with undo
- * and the cool-down buttons. On a Hub without it, `NotWired` makes the YOLO UI stay hidden. */
+/** YOLO status, scopes, previews and action history. */
 import { modReq, qs as q } from "@/api"
 
 const e = encodeURIComponent
@@ -90,6 +88,7 @@ export const yoloApi = {
   item: (id: string) => modReq<RYoloItem>("GET", `/yolo/items/${e(id)}`),
   resume: () => modReq<RYolo>("POST", "/yolo/resume"),
   actions: (p: { window?: string; item?: string; outcome?: string } = {}) => modReq<RYoloDigest>("GET", "/yolo/actions" + q(p)),
+  decisionAction: (id: string, signal: AbortSignal) => modReq<RYoloAction | null>("GET", `/yolo/decisions/${e(id)}`, undefined, signal),
   undo: (id: string, text?: string) => modReq<RYoloAction>("POST", `/yolo/actions/${e(id)}/undo`, text === undefined ? {} : { text }),
   now: (id: string) => modReq<RYoloAction>("POST", `/yolo/actions/${e(id)}/now`),
   cancel: (id: string) => modReq<RYoloAction>("POST", `/yolo/actions/${e(id)}/cancel`),

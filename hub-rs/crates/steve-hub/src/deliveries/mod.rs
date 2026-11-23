@@ -14,26 +14,18 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use rusqlite::{OptionalExtension, params};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use steve_store::{Store, StoreError};
+pub use steve_store::delivery_repo::Delivery;
+use steve_store::delivery_repo::Object;
+use steve_store::{Read, Store, StoreError, delivery_repo as repo};
 
 pub const MAX_FILE: usize = 64 * 1024 * 1024;
 const HTML_WARNING: &str = "HTML is shown in a static sandbox: scripts, forms, frames and external connections are disabled. A user who manages the delivery can turn on its interactive preview, which runs the package's scripts in an isolated sandbox with no access to Steve and no network.";
 const INTERACTIVE_WARNING: &str = "HTML runs in the interactive preview: the package's scripts run in an isolated sandbox with no access to Steve, its cookies or storage, and no network beyond the package's own files.";
 const LOCAL_WARNING: &str = "The configured STEVE_PUBLIC_URL is a loopback or local-only address. This link cannot be used from another device; configure a browser-reachable installation address.";
 const REACHABILITY_WARNING: &str = "This URL uses the configured STEVE_PUBLIC_URL; reachability from other devices has not been verified.";
-const SESSION_SCOPE: &str = "SELECT EXISTS(SELECT 1 FROM sessions s JOIN items i ON i.id=s.item_id WHERE s.id=? AND i.id=? AND s.workspace_id=? AND i.workspace_id=s.workspace_id)";
-/// A session outside an item: it still belongs to the workspace it was created in.
-const LOOSE_SESSION_SCOPE: &str = "SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1 AND workspace_id=?2 AND item_id IS NULL AND status!='ended')";
-const MEMBER: &str =
-    "SELECT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=?1 AND user_id=?2)";
-/// Who manages a delivery a Bot made outside an item: the member its session works for, else the
-/// workspace's owner (the same rule as the workspace's other owner-less records).
-const SESSION_OWNER: &str = "SELECT COALESCE((SELECT m.user_id FROM runtime_sessions r JOIN workspace_members m ON m.user_id=r.principal AND m.workspace_id=?2 WHERE r.session_id=?1),(SELECT user_id FROM workspace_members WHERE workspace_id=?2 AND role='owner' ORDER BY created LIMIT 1))";
-const COLUMNS: &str = "d.id,d.workspace_id,d.item_id,d.title,d.name,d.mime,d.size,d.created,d.entrypoint,d.sha256,d.manifest,d.preview,d.url,d.owner_id,d.interactive,d.reply";
 /// A frame grant lives this long; the page asks for a new one each time it loads the metadata.
 const FRAME_TTL_MS: i64 = 12 * 3600 * 1000;
 const FRAME_GRANTS_MAX: usize = 10_000;
@@ -67,48 +59,10 @@ pub enum Publisher<'a> {
     User { id: &'a str, workspace: &'a str },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Object {
-    sha256: String,
-    size: u64,
-    mime: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Delivery {
-    pub id: String,
-    pub item_id: Option<String>,
-    pub title: String,
-    pub name: String,
-    pub mime: String,
-    pub size: u64,
-    pub created: i64,
-    pub entrypoint: Option<String>,
-    pub preview: Value,
-    /// Static is the default; only then do the package's scripts never run.
-    pub interactive: bool,
-    #[serde(skip)]
-    pub(crate) reply: bool,
-    #[serde(skip)]
-    pub workspace_id: String,
-    /// The user who manages a delivery made outside an item; item deliveries have none.
-    #[serde(skip)]
-    pub owner_id: Option<String>,
-    #[serde(skip)]
-    pub(crate) registered_url: String,
-    #[serde(skip)]
-    sha256: String,
-    #[serde(skip)]
-    manifest: BTreeMap<String, Object>,
-}
-
-impl Delivery {
-    /// Whether the previewed document (the package entry, or the file itself) is HTML.
-    pub fn html_entry(&self) -> bool {
-        match &self.entrypoint {
-            Some(e) => html_name(e),
-            None => self.mime == "text/html",
-        }
+fn html_entry(d: &Delivery) -> bool {
+    match &d.entrypoint {
+        Some(e) => html_name(e),
+        None => d.mime == "text/html",
     }
 }
 
@@ -189,7 +143,7 @@ impl Service {
     pub fn url(&self, id: &str, workspace: &str) -> String {
         let mut url = reqwest::Url::parse(&format!("{}/deliveries/{id}", self.base))
             .expect("configured public URL");
-        // The page must bind this selector BEFORE /api/state picks the remembered workspace.
+        // The page must bind this selector BEFORE the Web bootstrap picks the remembered workspace.
         // Headers or query selectors on API requests still go through normal membership checks.
         url.query_pairs_mut().append_pair("ws", workspace);
         url.into()
@@ -243,7 +197,7 @@ impl Service {
         } else {
             json!(content.as_str())
         };
-        let html = d.html_entry();
+        let html = html_entry(d);
         // Recorded when published; computed (bounded) only for versions published before that.
         let scripts = html
             && d.preview["scripts"]
@@ -274,7 +228,7 @@ impl Service {
 
     /// The interactive frame of a signed-in user's page: a fresh grant for this user and delivery.
     pub fn frame_url(&self, d: &Delivery, user: &str) -> Option<String> {
-        if !d.interactive || !d.html_entry() {
+        if !d.interactive || !html_entry(d) {
             return None;
         }
         let token = format!(
@@ -319,22 +273,20 @@ impl Service {
         let Some(g) = grant.filter(|g| g.expires > steve_store::now()) else {
             return Ok(None);
         };
-        let Some(d) = self.get(&g.delivery, None)? else {
-            return Ok(None);
-        };
-        let member = self.store.reader(|c| {
-            Ok::<_, StoreError>(c.query_row(MEMBER, params![d.workspace_id, g.user], |r| {
-                r.get::<_, bool>(0)
-            })?)
-        })?;
-        Ok((member && d.interactive).then_some(d))
+        self.store.read(|r| {
+            let Some(d) = repo::get(r, &g.delivery, None)? else {
+                return Ok(None);
+            };
+            let member = repo::member(r, &d.workspace_id, &g.user)?;
+            Ok((member && d.interactive).then_some(d))
+        })
     }
 
     /// The share's delivery, for its frame: only while the delivery is interactive.
     pub fn shared_frame(&self, token: &str) -> Result<Option<Delivery>, StoreError> {
         Ok(self
             .shared(token)?
-            .filter(|d| d.interactive && d.html_entry()))
+            .filter(|d| d.interactive && html_entry(d)))
     }
 
     /// The `frame-ancestors` and resource sources of an interactive frame below `prefix`.
@@ -380,44 +332,21 @@ impl Service {
         if d.owner_id.is_some() {
             return Ok(false);
         }
-        self.store.reader(|c| {
-            Ok(c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM items WHERE id=?1 AND requested_by=?3) OR EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=?2 AND user_id=?3 AND role='owner')",
-                params![d.item_id, d.workspace_id, user],
-                |r| r.get::<_, bool>(0),
-            )?)
-        })
+        self.store
+            .read(|r| repo::item_manager(r, &d.workspace_id, d.item_id.as_deref(), user))
     }
 
     pub fn set_interactive(&self, d: &Delivery, on: bool) -> Result<(), StoreError> {
-        self.store.transaction(|t| {
-            t.execute(
-                "UPDATE deliveries SET interactive=? WHERE id=?",
-                params![on, d.id],
-            )?;
-            Ok(())
-        })
+        self.store.write(|w| repo::set_interactive(w, &d.id, on))
     }
 
     /// The deliveries `user` manages in `workspace`, newest first.
     pub fn owned(&self, workspace: &str, user: &str) -> Result<Vec<Delivery>, StoreError> {
-        let ids: Vec<String> = self.store.reader(|c| {
-            let mut q = c.prepare("SELECT id FROM deliveries WHERE workspace_id=? AND owner_id=? ORDER BY created DESC, rowid DESC LIMIT 500")?;
-            let rows = q.query_map(params![workspace, user], |r| r.get(0))?;
-            Ok::<_, StoreError>(rows.collect::<Result<_, _>>()?)
-        })?;
-        Ok(ids
-            .iter()
-            .filter_map(|id| self.get(id, Some(workspace)).ok().flatten())
-            .collect())
+        self.store.read(|r| repo::owned(r, workspace, user))
     }
 
     pub fn get(&self, id: &str, ws: Option<&str>) -> Result<Option<Delivery>, StoreError> {
-        self.store.reader(|c| {
-            c.query_row(&format!("SELECT {COLUMNS} FROM deliveries d LEFT JOIN items i ON i.id=d.item_id LEFT JOIN sessions s ON s.id=d.session_id WHERE d.id=?1 AND (d.reply=0 OR (s.workspace_id=d.workspace_id AND s.item_id IS d.item_id)) AND (d.item_id IS NULL OR i.workspace_id=d.workspace_id) AND (?2 IS NULL OR d.workspace_id=?2)"), params![id,ws], |r| {
-                Ok((Delivery { id:r.get(0)?,workspace_id:r.get(1)?,item_id:r.get(2)?,title:r.get(3)?,name:r.get(4)?,mime:r.get(5)?,size:r.get::<_,i64>(6)? as u64,created:r.get(7)?,entrypoint:r.get(8)?,sha256:r.get(9)?,manifest:BTreeMap::new(),preview:Value::Null,registered_url:r.get(12)?,owner_id:r.get(13)?,interactive:r.get(14)?,reply:r.get(15)? },r.get::<_,String>(10)?,r.get::<_,String>(11)?))
-            }).optional()?.map(|(mut d,m,p)| { d.manifest=serde_json::from_str(&m)?;d.preview=serde_json::from_str(&p)?;Ok(d) }).transpose()
-        })
+        self.store.read(|r| repo::get(r, id, ws))
     }
 
     /// No update method exists: a new receive always creates a new version, even for the same name.
@@ -441,22 +370,11 @@ impl Service {
 
     /// Recheck the publisher's current scope: a Bot's session (and its item, when it has one) in its
     /// workspace, or a user's membership. No caller-supplied item or workspace is accepted.
-    fn in_scope(c: &rusqlite::Connection, p: Publisher) -> Result<bool, StoreError> {
-        Ok(match p {
-            Publisher::Session(s) => match s.item_id.as_deref() {
-                Some(item) => {
-                    c.query_row(SESSION_SCOPE, params![s.id, item, s.workspace_id], |r| {
-                        r.get::<_, bool>(0)
-                    })?
-                }
-                None => c.query_row(LOOSE_SESSION_SCOPE, params![s.id, s.workspace_id], |r| {
-                    r.get::<_, bool>(0)
-                })?,
-            },
-            Publisher::User { id, workspace } => {
-                c.query_row(MEMBER, params![workspace, id], |r| r.get::<_, bool>(0))?
-            }
-        })
+    fn in_scope(r: &mut impl Read, p: Publisher) -> Result<bool, StoreError> {
+        match p {
+            Publisher::Session(s) => repo::session_in_scope(r, s),
+            Publisher::User { id, workspace } => repo::member(r, workspace, id),
+        }
     }
 
     /// Validate and keep one immutable version. `interactive` is the publisher's choice at publish
@@ -487,7 +405,7 @@ impl Service {
         let changed = "delivery session/item workspace changed";
         if !self
             .store
-            .reader(|c| Self::in_scope(c, publisher))
+            .read(|r| Self::in_scope(r, publisher))
             .map_err(|e| e.to_string())?
         {
             return Err(changed.into());
@@ -523,21 +441,7 @@ impl Service {
         };
         let preview = Self::published_preview(shown, shown_bytes, entry.is_some(), archive);
         let id = format!("dlv_{}", uuid::Uuid::new_v4().simple());
-        let owner = match publisher {
-            Publisher::User { id, .. } => Some(id.to_string()),
-            Publisher::Session(s) if s.item_id.is_none() => self
-                .store
-                .reader(|c| {
-                    Ok::<_, StoreError>(c.query_row(
-                        SESSION_OWNER,
-                        params![s.id, s.workspace_id],
-                        |r| r.get::<_, Option<String>>(0),
-                    )?)
-                })
-                .map_err(|e| e.to_string())?,
-            Publisher::Session(_) => None,
-        };
-        let d = Delivery {
+        let mut d = Delivery {
             registered_url: self.url(&id, workspace),
             id,
             workspace_id: workspace.into(),
@@ -556,18 +460,23 @@ impl Service {
             manifest,
             preview,
             interactive,
-            owner_id: owner,
+            owner_id: None,
             reply: false,
         };
-        self.store.transaction(|t| {
-            // A scope change while copying or validating an archive must fail the receipt,
-            // rather than return a URL for a row its item no longer owns.
-            if !Self::in_scope(t, publisher)? {
-                return Err(StoreError::Conflict(changed.into()));
-            }
-            t.execute("INSERT INTO deliveries(id,url,workspace_id,item_id,session_id,owner_id,title,name,mime,size,created,entrypoint,sha256,manifest,preview,interactive) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",params![d.id,d.registered_url,d.workspace_id,d.item_id,session,d.owner_id,d.title,d.name,d.mime,d.size as i64,d.created,d.entrypoint,d.sha256,serde_json::to_string(&d.manifest)?,serde_json::to_string(&d.preview)?,d.interactive])?;
-            Ok::<_,StoreError>(())
-        }).map_err(|e|e.to_string())?;
+        self.store
+            .write(|w| {
+                // Recheck the scope and recipient after copying or unpacking the objects.
+                if !Self::in_scope(w, publisher)? {
+                    return Err(StoreError::Conflict(changed.into()));
+                }
+                d.owner_id = match publisher {
+                    Publisher::User { id, .. } => Some(id.into()),
+                    Publisher::Session(s) if s.item_id.is_none() => repo::session_owner(w, s)?,
+                    Publisher::Session(_) => None,
+                };
+                repo::insert(w, &d, session)
+            })
+            .map_err(|e| e.to_string())?;
         Ok(d)
     }
 
@@ -614,39 +523,43 @@ impl Service {
             uuid::Uuid::new_v4().simple(),
             uuid::Uuid::new_v4().simple()
         );
-        self.store.transaction(|t| {
-            t.execute("INSERT INTO delivery_shares(token,delivery_id,created_by,created,expires_at) VALUES(?,?,?,?,?)",params![token,d.id,user,now,expires_at])?;
-            Ok::<_,StoreError>(())
-        }).map_err(|e|e.to_string())?;
-        Ok(Share {
-            url: format!("{}/shares/{token}", self.base),
+        let row = repo::ShareRow {
             token,
             expires_at,
             created: now,
             revoked_at: None,
-        })
+        };
+        self.store
+            .write(|w| repo::create_share(w, &d.id, user, &row))
+            .map_err(|e| e.to_string())?;
+        Ok(self.share(row))
+    }
+
+    fn share(&self, row: repo::ShareRow) -> Share {
+        Share {
+            url: format!("{}/shares/{}", self.base, row.token),
+            token: row.token,
+            expires_at: row.expires_at,
+            created: row.created,
+            revoked_at: row.revoked_at,
+        }
     }
 
     pub fn shares(&self, d: &Delivery) -> Result<Vec<Share>, StoreError> {
-        self.store.reader(|c| {
-            let mut q=c.prepare("SELECT token,expires_at,created,revoked_at FROM delivery_shares WHERE delivery_id=? ORDER BY created,token")?;
-            let rows=q.query_map([&d.id],|r| {let token:String=r.get(0)?;Ok(Share{url:format!("{}/shares/{token}",self.base),token,expires_at:r.get(1)?,created:r.get(2)?,revoked_at:r.get(3)?})})?;
-            Ok(rows.collect::<Result<_,_>>()?)
-        })
+        self.store
+            .read(|r| repo::shares(r, &d.id))
+            .map(|rows| rows.into_iter().map(|row| self.share(row)).collect())
     }
 
     pub fn revoke(&self, d: &Delivery, token: &str) -> Result<bool, StoreError> {
-        self.store.transaction(|t| Ok(t.execute("UPDATE delivery_shares SET revoked_at=COALESCE(revoked_at,?) WHERE delivery_id=? AND token=?",params![steve_store::now(),d.id,token])? == 1))
+        self.store
+            .write(|w| repo::revoke(w, &d.id, token, steve_store::now()))
     }
 
-    /// Every metadata, original and resource request rechecks the live row and clock. No positive
-    /// authorization cache; revoked/expired tokens deliberately look like unknown ones.
+    /// Every metadata, original and resource request rechecks the live row and clock.
     pub fn shared(&self, token: &str) -> Result<Option<Delivery>, StoreError> {
-        let id=self.store.reader(|c| Ok::<_,StoreError>(c.query_row("SELECT delivery_id FROM delivery_shares WHERE token=? AND revoked_at IS NULL AND expires_at>?",params![token,steve_store::now()],|r|r.get::<_,String>(0)).optional()?))?;
-        match id {
-            Some(id) => Ok(self.get(&id, None)?.filter(|d| !d.reply)),
-            None => Ok(None),
-        }
+        self.store
+            .read(|r| repo::shared(r, token, steve_store::now()))
     }
 
     fn objects(&self) -> PathBuf {

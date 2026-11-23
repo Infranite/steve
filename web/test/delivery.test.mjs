@@ -86,7 +86,7 @@ test("Markdown images resolve inside the package only and keep the workspace sel
   const entry = "https://hub.example/api/file-deliveries/d/content/docs/guide/README.md?ws=w"
   assert.equal(packageUrl("img/a.png", entry, "docs/guide/README.md"), "https://hub.example/api/file-deliveries/d/content/docs/guide/img/a.png?ws=w")
   assert.equal(packageUrl("../../top.png", entry, "docs/guide/README.md"), "https://hub.example/api/file-deliveries/d/content/top.png?ws=w")
-  for (const ref of ["../../../raw", "../../../../../state", "/api/state", "//evil.example/x.png", "https://evil.example/x.png", "javascript:alert(1)", "data:image/png;base64,AA", "#top", ""]) {
+  for (const ref of ["../../../raw", "../../../../../state", "/api/shell", "//evil.example/x.png", "https://evil.example/x.png", "javascript:alert(1)", "data:image/png;base64,AA", "#top", ""]) {
     assert.equal(packageUrl(ref, entry, "docs/guide/README.md"), null, ref)
   }
   const shared = "https://hub.example/api/delivery-shares/t/content/README.md"

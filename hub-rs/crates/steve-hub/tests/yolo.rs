@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use steve_store::testkit::hub::yolo as fixtures;
 
 use serde_json::{Value, json};
 use steve_hub::api::AppState;
@@ -37,22 +37,6 @@ impl Hub {
             status,
             serde_json::from_str(&text).unwrap_or(Value::String(text)),
         )
-    }
-
-    fn query(&self, sql: &str) -> Vec<String> {
-        let c = rusqlite::Connection::open(&self.db).expect("db");
-        c.busy_timeout(Duration::from_secs(5)).expect("timeout");
-        let mut st = c.prepare(sql).expect("prepare");
-        st.query_map([], |r| r.get::<_, String>(0))
-            .expect("query")
-            .collect::<rusqlite::Result<_>>()
-            .expect("rows")
-    }
-
-    fn sql(&self, sql: &str) {
-        let c = rusqlite::Connection::open(&self.db).expect("db");
-        c.busy_timeout(Duration::from_secs(5)).expect("timeout");
-        c.execute_batch(sql).expect("sql");
     }
 }
 
@@ -242,7 +226,7 @@ async fn switch_scopes_and_resume() {
             json!({"error": "参数不对：mode", "code":"invalid", "retry":{"kind":"never"}, "reason":null, "params":{}})
         )
     );
-    h.sql(&format!("INSERT INTO workspaces (id, name, created) VALUES ('ws_b', 'b', 1); UPDATE projects SET workspace_id = 'ws_b' WHERE id = '{pid}'"));
+    fixtures::move_scope_project(&h.db, &pid).unwrap();
     let (s, v) = h
         .call(
             "PUT",
@@ -286,12 +270,12 @@ async fn switch_scopes_and_resume() {
     assert_eq!(s, 200, "{v}");
     assert_eq!(v["on"], false);
     assert_eq!(
-        h.query("SELECT action FROM audit WHERE action LIKE 'yolo.%' ORDER BY id"),
+        fixtures::audit_actions(&h.db).unwrap(),
         vec!["yolo.on", "yolo.scope", "yolo.off"]
     );
-    assert_eq!(h.query("SELECT ended_why FROM yolo_windows"), vec!["off"]);
+    assert_eq!(fixtures::window_end_reasons(&h.db).unwrap(), vec!["off"]);
     assert_eq!(
-        h.query("SELECT DISTINCT object_type FROM revisions WHERE object_type = 'yolo_scope'"),
+        fixtures::scope_revision_types(&h.db).unwrap(),
         vec!["yolo_scope"]
     );
 }
@@ -311,10 +295,7 @@ async fn forced_off_on_a_production_copy_and_by_the_master_switch() {
         );
         let (s, _) = h.call("PUT", "/api/yolo", Some(json!({"on": false}))).await;
         assert_eq!(s, 200);
-        assert!(
-            h.query("SELECT action FROM audit WHERE action = 'yolo.on'")
-                .is_empty()
-        );
+        assert!(fixtures::enable_audits(&h.db).unwrap().is_empty());
     }
 }
 
@@ -346,14 +327,17 @@ async fn the_ledger_routes() {
             .await;
         assert_eq!(s, 404, "{verb}: {v}");
     }
+    let (s, v) = h.call("GET", "/api/yolo/decisions/no-action", None).await;
+    assert_eq!((s, v), (200, Value::Null));
+    fixtures::seed_badge_actions(&h.db).unwrap();
+    let (s, action) = h
+        .call("GET", "/api/yolo/decisions/decision_badge", None)
+        .await;
+    assert_eq!(s, 200, "{action}");
+    assert_eq!(action["id"], "ya_badge_last");
+    assert_eq!(action["outcome"], "declined");
     // a declined row has nothing to undo
-    let c = rusqlite::Connection::open(&h.db).expect("db");
-    c.execute(
-        "INSERT INTO yolo_actions (id, workspace_id, kind, subject_type, rule, outcome, reason, created)
-         VALUES ('ya_x', 'default', 'approve', 'tool_call', 'limit.5', 'declined', '硬限制：x', 1)",
-        [],
-    )
-    .expect("row");
+    fixtures::seed_declined_action(&h.db).unwrap();
     let (s, v) = h.call("POST", "/api/yolo/actions/ya_x/undo", None).await;
     assert_eq!(
         (s, v),

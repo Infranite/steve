@@ -129,7 +129,7 @@ fn full_access_keeps_steve_data_and_what_it_promises() {
             exec(&format!("rm -rf {home}/worktrees/ST-9"), &cwd),
             "limit.4",
         ),
-        (exec("curl -s localhost:8440/api/state", &cwd), "limit.4"),
+        (exec("curl -s localhost:8440/api/summary", &cwd), "limit.4"),
         (exec("launchctl kickstart gui/501/steve", &cwd), "limit.4"),
         (exec("git push origin HEAD", &cwd), "limit.5"),
         (exec("gh pr create --fill", &cwd), "limit.5"),
@@ -288,10 +288,11 @@ fn stepping_down_or_a_read_only_session_is_judged_by_the_guard() {
     assert_eq!(look(&t, &d).0, "none");
     set(&t, true, true);
     let ro = t.kit.session(&item, "idle");
-    rusqlite::Connection::open(t.kit.home().join("data/steve.sqlite3"))
-        .unwrap()
-        .execute("UPDATE sessions SET readonly = 1 WHERE id = ?", [&ro])
-        .unwrap();
+    steve_store::core_fixture::session(
+        t.yolo.store(),
+        &ro,
+        steve_store::core_fixture::SessionState::Readonly,
+    );
     assert_eq!(t.kit.db().session(&ro).unwrap().unwrap().readonly, 1);
     let d = t.permission(&item, &ro, edit(&outside));
     assert_eq!(look(&t, &d), ("declined".into(), "limit.4".into()));

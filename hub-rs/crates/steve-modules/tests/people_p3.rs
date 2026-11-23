@@ -10,21 +10,11 @@ use steve_modules::contacts::{self, Ports};
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, caller};
 use steve_modules::{Caller, Modules};
 use steve_store::base::LEVELS_NOTE;
+use steve_store::testkit::modules::people_p3 as fixture;
 
 fn env() -> TestEnv {
     let t = TestEnv::new(|_| {});
-    exec(
-        &t,
-        "INSERT INTO bots (id, workspace_id, name, harness, updated) VALUES ('bot_dev', 'default', 'Dev Bot', 'claude', 1), ('bot_off', 'default', 'Off Bot', 'claude', 1);
-         UPDATE bots SET enabled = 0 WHERE id = 'bot_off';
-         INSERT INTO bot_workspaces (bot_id, workspace_id, created) VALUES ('bot_dev', 'default', 1), ('bot_off', 'default', 1);
-         INSERT INTO items (id, workspace_id, no, kind, title, status, stage, created, updated) VALUES
-           ('ST-1', 'default', 1, 'task', '报价单', 'run', '定义', 1, 1),
-           ('ST-2', 'default', 2, 'task', '交付', 'run', '定义', 2, 2),
-           ('ST-3', 'default', 3, 'task', '旧事', 'done', '完成', 3, 3),
-           ('W2-1', 'w2', 1, 'task', '别处', 'run', '定义', 4, 4);
-         UPDATE items SET archived = 1 WHERE id = 'ST-3';",
-    );
+    fixture::seed_items_and_bots(t.store()).unwrap();
     t
 }
 
@@ -52,24 +42,6 @@ async fn req(
     body: Option<Value>,
 ) -> (u16, Value) {
     call(r, Some(who), method, path, body.as_ref()).await
-}
-
-fn exec(t: &TestEnv, sql: &str) {
-    t.store()
-        .with_conn(|c| Ok(c.execute_batch(sql)?))
-        .expect("exec");
-}
-
-fn count(t: &TestEnv, sql: &str) -> i64 {
-    t.store()
-        .with_conn(|c| Ok(c.query_row(sql, [], |r| r.get(0))?))
-        .expect("count")
-}
-
-fn text(t: &TestEnv, sql: &str) -> String {
-    t.store()
-        .with_conn(|c| Ok(c.query_row(sql, [], |r| r.get(0))?))
-        .expect("text")
 }
 
 async fn contact(r: &Router, who: &Caller, body: Value) -> String {
@@ -102,16 +74,7 @@ fn cx(user: &str) -> McpCx {
 }
 
 fn link(t: &TestEnv, item: &str, party: &str) -> Option<(String, f64)> {
-    t.store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT source, confidence FROM links WHERE subject_type = 'item' AND subject_id = ?1 AND predicate = 'related' AND object_id = ?2",
-                [item, party],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .ok())
-        })
-        .unwrap()
+    fixture::related_source_and_confidence(t.store(), item, party).unwrap()
 }
 
 // ---------------------------------------------------------------- acceptance
@@ -228,10 +191,7 @@ async fn names_are_inferred_without_mentions() {
     let names = contacts::infer_item_people(m(&t), &me(), "ST-2", "Dev 自己来").unwrap();
     assert!(names.is_empty());
     // an existing link is not touched
-    exec(
-        &t,
-        "UPDATE links SET source = 'mention', confidence = 1 WHERE subject_id = 'ST-2'",
-    );
+    fixture::promote_mention(t.store()).unwrap();
     assert!(
         contacts::infer_item_people(m(&t), &me(), "ST-2", "李雷雷")
             .unwrap()
@@ -393,39 +353,18 @@ async fn remember_writes_a_candidate_with_a_decision() {
     )
     .unwrap();
     assert_eq!(out, "Saved as a candidate; the user will confirm it.");
-    let mm = text(&t, "SELECT id FROM mems WHERE text = '周五不开会'");
+    let mm = fixture::candidate_memory(t.store()).unwrap();
     assert_eq!(
-        text(
-            &t,
-            &format!(
-                "SELECT status || '|' || writer || '|' || visibility || '|' || created_by || '|' || source_type || '|' || source_id FROM mems WHERE id = '{mm}'"
-            )
-        ),
+        fixture::memory_details(t.store(), &mm).unwrap(),
         "candidate|bot_dev|private|usr_dev|item|ST-1"
     );
+    assert_eq!(fixture::memory_subject(t.store(), &mm).unwrap(), sarah);
     assert_eq!(
-        text(
-            &t,
-            &format!("SELECT object_id FROM mem_about WHERE mem_id = '{mm}'")
-        ),
-        sarah
-    );
-    assert_eq!(
-        text(
-            &t,
-            &format!(
-                "SELECT origin || '|' || origin_id || '|' || origin_label FROM mem_candidates WHERE mem_id = '{mm}'"
-            )
-        ),
+        fixture::memory_origin(t.store(), &mm).unwrap(),
         "tool|ST-1|ST-1 的会话"
     );
     assert_eq!(
-        text(
-            &t,
-            &format!(
-                "SELECT d.kind || '|' || d.subject_type || '|' || d.question || '|' || d.requested_by || '|' || d.options FROM decisions d JOIN mems m ON m.decision_id = d.id WHERE m.id = '{mm}'"
-            )
-        ),
+        fixture::memory_decision(t.store(), &mm).unwrap(),
         "confirm|mem|存为知识条目吗？周五不开会|bot_dev|[\"yes\",\"no\"]"
     );
     // a candidate is not confirmed knowledge: find does not show it
@@ -486,33 +425,15 @@ async fn remember_writes_a_candidate_with_a_decision() {
         )
         .unwrap();
     }
-    assert_eq!(
-        count(
-            &t,
-            "SELECT COUNT(*) FROM decisions WHERE subject_type = 'mem' AND status = 'open'"
-        ),
-        20
-    );
-    assert_eq!(
-        count(
-            &t,
-            "SELECT COUNT(*) FROM mems WHERE status = 'candidate' AND decision_id IS NULL"
-        ),
-        7
-    );
+    assert_eq!(fixture::open_memory_decisions(t.store()).unwrap(), 20);
+    assert_eq!(fixture::unbound_candidates(t.store()).unwrap(), 7);
 
     // deleting the contact deletes its candidates with their rows and closes their decisions
     let (s, b) = req(&r, &me(), "DELETE", &format!("/contacts/{sarah}"), None).await;
     assert_eq!(s, 200, "{b}");
-    assert_eq!(count(&t, "SELECT COUNT(*) FROM mems"), 0);
-    assert_eq!(count(&t, "SELECT COUNT(*) FROM mem_candidates"), 0);
-    assert_eq!(
-        count(
-            &t,
-            "SELECT COUNT(*) FROM decisions WHERE subject_type = 'mem' AND status = 'open'"
-        ),
-        0
-    );
+    assert_eq!(fixture::memory_count(t.store()).unwrap(), 0);
+    assert_eq!(fixture::candidate_count(t.store()).unwrap(), 0);
+    assert_eq!(fixture::open_memory_decisions(t.store()).unwrap(), 0);
 }
 
 // ---------------------------------------------------------------- memories
@@ -650,13 +571,7 @@ async fn memory_routes() {
     assert_eq!((s, b), (200, json!({"ok": true})));
     let (s, _) = req(&r, &me(), "DELETE", &format!("/mems/{mm}"), None).await;
     assert_eq!(s, 404);
-    assert_eq!(
-        count(
-            &t,
-            "SELECT COUNT(*) FROM audit WHERE action IN ('mm.create', 'mm.patch', 'mm.delete')"
-        ),
-        5
-    );
+    assert_eq!(fixture::memory_audits(t.store()).unwrap(), 5);
 }
 
 #[tokio::test]
@@ -672,7 +587,7 @@ async fn confirming_a_candidate_by_hand_settles_its_decision() {
         &json!({"who": sarah, "text": "周五不开会", "kind": "fact"}),
     )
     .unwrap();
-    let mm = text(&t, "SELECT id FROM mems");
+    let mm = fixture::only_memory(t.store()).unwrap();
     let (s, b) = req(
         &r,
         &me(),
@@ -683,10 +598,10 @@ async fn confirming_a_candidate_by_hand_settles_its_decision() {
     .await;
     assert_eq!(s, 200, "{b}");
     assert_eq!(
-        text(&t, "SELECT status || '|' || result FROM decisions"),
+        fixture::decision_result(t.store()).unwrap(),
         "resolved|{\"choice\":\"yes\",\"by\":\"edit\"}"
     );
-    assert_eq!(count(&t, "SELECT COUNT(*) FROM mem_candidates"), 0);
+    assert_eq!(fixture::candidate_count(t.store()).unwrap(), 0);
 }
 
 // ---------------------------------------------------------------- item people
@@ -728,10 +643,7 @@ async fn item_people_routes() {
     )
     .await;
     assert_eq!(
-        text(
-            &t,
-            "SELECT group_concat(actor || ' ' || kind || ' ' || text, ' / ') FROM timeline WHERE item_id = 'ST-1'"
-        ),
+        fixture::item_timeline(t.store()).unwrap(),
         "usr_dev sys 关联了 Sarah（在等） / usr_dev sys 关联了 Sarah（关于）"
     );
 
@@ -784,13 +696,7 @@ async fn item_people_routes() {
     .await;
     let (_, list) = req(&r, &me(), "GET", "/items/ST-1/people", None).await;
     assert_eq!(list, json!([]));
-    assert_eq!(
-        count(
-            &t,
-            "SELECT COUNT(*) FROM timeline WHERE text = '移除了 Sarah'"
-        ),
-        2
-    );
+    assert_eq!(fixture::removal_timeline_count(t.store()).unwrap(), 2);
     // nothing left to remove: no line
     req(
         &r,
@@ -800,13 +706,7 @@ async fn item_people_routes() {
         None,
     )
     .await;
-    assert_eq!(
-        count(
-            &t,
-            "SELECT COUNT(*) FROM timeline WHERE text = '移除了 Sarah'"
-        ),
-        2
-    );
+    assert_eq!(fixture::removal_timeline_count(t.store()).unwrap(), 2);
 
     // a deleted contact keeps its link and is named as such
     req(
@@ -994,7 +894,14 @@ async fn cards_keep_contacts_preferred_names_but_not_users_private_address_rules
     let viewer = t.modules.viewer(&me()).unwrap();
     let cards = t
         .store()
-        .reader(|c| contacts::contact_cards(c, &viewer, &[sarah.clone(), mine.clone()]))
+        .read::<_, steve_store::StoreError>(|c| {
+            Ok(contacts::contact_cards(
+                c,
+                &viewer,
+                &[sarah.clone(), mine.clone()],
+            ))
+        })
+        .unwrap()
         .unwrap();
     assert_eq!(cards.len(), 2);
     let contact = cards.iter().find(|c| c.party_id == sarah).unwrap();
@@ -1075,7 +982,10 @@ async fn contact_cards_for_prompts() {
     let viewer = t.modules.viewer(&me()).unwrap();
     let cards = t
         .store()
-        .reader(|c| contacts::item_contact_cards(c, &viewer, "ST-1"))
+        .read::<_, steve_store::StoreError>(|c| {
+            Ok(contacts::item_contact_cards(c, &viewer, "ST-1"))
+        })
+        .unwrap()
         .unwrap();
     assert_eq!(cards.len(), 2);
     assert_eq!(
@@ -1085,9 +995,14 @@ async fn contact_cards_for_prompts() {
     assert_eq!(cards[0].roles, ["raised_by"]);
     let cards = t
         .store()
-        .reader(|c| {
-            contacts::contact_cards(c, &viewer, &[sarah.clone(), hidden.clone(), sarah.clone()])
+        .read::<_, steve_store::StoreError>(|c| {
+            Ok(contacts::contact_cards(
+                c,
+                &viewer,
+                &[sarah.clone(), hidden.clone(), sarah.clone()],
+            ))
         })
+        .unwrap()
         .unwrap();
     assert_eq!(cards.len(), 2);
     assert_eq!(contacts::cards::render(&[]), "");

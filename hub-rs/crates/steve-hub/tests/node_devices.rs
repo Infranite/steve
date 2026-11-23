@@ -7,6 +7,7 @@ mod node_harness;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use steve_runtime::testkit::eventually_sync;
+use steve_store::testkit::hub::node_checks;
 
 use node_harness::*;
 use serde_json::{Value, json};
@@ -116,9 +117,7 @@ async fn no_common_upgrade_protocol_report_tells_devices_to_upgrade_the_hub() {
     assert_eq!(device["offline"]["reason"], "protocol_mismatch");
     assert!(h.svc.registry.current(node.as_str()).is_none());
     assert_eq!(
-        h.q::<i64>(&format!(
-            "SELECT generation FROM nodes WHERE node_id='{node}'"
-        )),
+        node_checks::node_generation_by_node_id(&h.store, node.as_str()).unwrap(),
         0
     );
 }
@@ -158,7 +157,7 @@ async fn a_linked_node_says_how_it_came_what_it_is_and_how_far_it_is() {
         .unwrap();
     eventually_sync("linked", || h.svc.registry.current(node.as_str()).is_some()).await;
     eventually_sync("its machine kept", || {
-        h.q::<i64>("SELECT host IS NOT NULL FROM nodes WHERE local=0") == 1
+        node_checks::node_host_is_not_null_with_local_with_value(&h.store).unwrap() == 1
     })
     .await;
     let v = row(&h, node.as_str()).await;
@@ -247,6 +246,22 @@ async fn every_change_of_a_node_tells_its_owner() {
     let l = dial(&h, &id, &node, FakeNode::new(n), 1).await.unwrap();
     // linked, and what its machine is
     eventually_sync("linked and described", || node_events(&seen, n) >= 4).await;
+    let initial = row(&h, n).await;
+    let generation = initial["generation"].as_i64().unwrap();
+    let at = initial["last_seen"].as_i64().unwrap() + 100;
+    let events = node_events(&seen, n);
+    for (generation, at, closed) in [
+        (generation, at, false),
+        (generation, at - 1, false),
+        (generation - 1, at + 1, true),
+    ] {
+        h.store
+            .write(|w| steve_store::node_directory::observe_link(w, n, generation, at, closed))
+            .unwrap();
+    }
+    assert_eq!(row(&h, n).await["last_seen"], at);
+    assert_eq!(node_events(&seen, n), events);
+
     let steps = [
         ("limit", json!({"max_sessions": 3})),
         ("pause", json!({})),

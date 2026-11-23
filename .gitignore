@@ -2,6 +2,8 @@ node_modules/
 .vite/
 dist/
 data/
+# the web client's data layer is source
+!web/src/data/
 *.log
 .DS_Store
 .claude/

@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use steve_store::testkit::hub::node_statistics as fixtures;
 
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -39,12 +40,6 @@ impl Env {
             status,
             serde_json::from_str(&text).unwrap_or(Value::String(text)),
         )
-    }
-
-    fn db(&self) -> rusqlite::Connection {
-        let c = rusqlite::Connection::open(&self.db).expect("db");
-        c.busy_timeout(Duration::from_secs(5)).expect("timeout");
-        c
     }
 }
 
@@ -286,42 +281,7 @@ async fn realtime_auth_filters_and_dates_are_independent() {
         (json!(0.0), json!("idle"))
     );
     let at = steve_store::now().div_euclid(1000) * 1000;
-    {
-        let c = e.db();
-        c.execute(
-            "INSERT INTO workspaces(id,name,created) VALUES ('private','private',?)",
-            [at],
-        )
-        .unwrap();
-        for (id, ws) in [("p1", "default"), ("p2", "default"), ("px", "private")] {
-            c.execute("INSERT INTO projects(id,workspace_id,name,path,created,updated) VALUES (?,?,?,'.',?4,?4)",rusqlite::params![id,ws,id,at]).unwrap();
-        }
-        for (id, ws) in [("b1", "default"), ("b2", "default"), ("bx", "private")] {
-            c.execute(
-                "INSERT INTO bots(id,workspace_id,name,harness,updated) VALUES (?,?,?,'fixture',?)",
-                rusqlite::params![id, ws, id, at],
-            )
-            .unwrap();
-            c.execute(
-                "INSERT INTO bot_workspaces(bot_id,workspace_id,created) VALUES (?,?,?)",
-                rusqlite::params![id, ws, at],
-            )
-            .unwrap();
-        }
-        for (id, ws, project, bot, units) in [
-            ("a", "default", "p1", "b1", 40),
-            ("b", "default", "p1", "b2", 80),
-            ("c", "default", "p2", "b1", 120),
-            ("x", "private", "px", "bx", 400000),
-        ] {
-            c.execute("INSERT INTO sessions(id,workspace_id,bot_id,harness,cwd,status,created,updated) VALUES (?,?,?,'fixture','.','idle',?4,?4)",rusqlite::params![id,ws,bot,at-2_000]).unwrap();
-            c.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES (?,'fixture','{}',?1,'r','ready',?)",rusqlite::params![id,at]).unwrap();
-            c.execute("INSERT INTO runtime_turns(turn_id,session_id,state,created,updated) VALUES (?,?1,'finished',?2,?2)",rusqlite::params![id,at-2_000]).unwrap();
-            c.execute("INSERT INTO runtime_attempts(attempt_id,turn_id,ordinal,node_id,operation_id,execution,spec,digest,state,created,updated) VALUES (?,?1,0,'fixture',?1,'{}','{}','d','finished',?2,?3)",rusqlite::params![id,at-2_000,at-1_000]).unwrap();
-            c.execute("INSERT INTO realtime_output_attempts(attempt_id,session_id,workspace_id,project_id,bot_id,node_id,started,ended) VALUES (?,?1,?,?,?,'fixture',?,?)",rusqlite::params![id,ws,project,bot,at-2_000,at-1_000]).unwrap();
-            c.execute("INSERT INTO realtime_output_samples(node_id,stream,epoch,seq,event_id,attempt_id,at,source_at,received_at,kind,units) VALUES ('fixture',?,'e',1,?1,?1,?2,?2,?2,'text',?3)",rusqlite::params![id,at-1_000,units]).unwrap();
-        }
-    }
+    fixtures::seed_realtime_filters(&e.db, at).unwrap();
     for (query, tps, output) in [
         ("", 6.0, 3),
         ("project=p1", 3.0, 2),
@@ -387,19 +347,7 @@ async fn stats_routes() {
     let e = start().await;
     let today = steve_stats::day(steve_store::now(), None);
     // two cube rows today, before anything is cached: 1M opus input = $4, and an unpriced model
-    {
-        let c = e.db();
-        c.execute_batch(&format!(
-            "INSERT INTO stat_daily (workspace_id, day, source, purpose, harness, model, input, output, cache_read, cache_write, hit_base, calls, turns, turn_ms, tools, tool_kinds)
-             VALUES ('default', '{today}', 'agent', 'turn', 'claude-code', 'claude-opus-5-5', 1000000, 0, 3000000, 0, 4000000, 1, 2, 60000, 3, '{{\"execute\":2,\"mcp:steve_deliver\":1,\"tool:Bash\":2}}'),
-                    ('default', '{today}', 'gateway', 'route', 'claude-cli', 'gpt-9', 100, 10, 0, 0, 0, 1, 0, 0, 0, '{{}}');
-             INSERT INTO usage_records (workspace_id,ts,day,source,purpose,harness,model,input,output,cache_read,cache_write)
-             VALUES ('default', {at}, '{today}', 'agent', 'turn', 'claude-code', 'claude-opus-5-5', 1000000, 0, 3000000, 0),
-                    ('default', {at}, '{today}', 'gateway', 'route', 'claude-cli', 'gpt-9', 100, 10, 0, 0);
-             INSERT INTO workspaces (id, name, created) VALUES ('elsewhere', '别处', 1);
-             INSERT INTO projects (id, workspace_id, name, path, created, updated) VALUES ('prj_other', 'elsewhere', '别处', '/nonexistent', 1, 1);", at=steve_store::now()))
-        .expect("seed");
-    }
+    fixtures::seed_usage_summary(&e.db, &today, steve_store::now()).unwrap();
 
     /* the summary and its previous range */
     let (s, v) = e.call("GET", "/api/stats/summary", None).await;
@@ -680,24 +628,8 @@ async fn stats_routes() {
     assert_eq!(s, 200);
     let (_, v) = e.call("GET", "/api/stats/prices", None).await;
     assert_eq!(v["custom"], json!(false));
-    {
-        let c = e.db();
-        let audits: i64 = c
-            .query_row(
-                "SELECT COUNT(*) FROM audit WHERE action = 'stats.prices'",
-                [],
-                |r| r.get(0),
-            )
-            .expect("audit");
-        let versions: Vec<i64> = c
-            .prepare("SELECT version FROM revisions WHERE object_type = 'stats_prices' ORDER BY id")
-            .expect("prep")
-            .query_map([], |r| r.get(0))
-            .expect("q")
-            .collect::<Result<_, _>>()
-            .expect("rows");
-        assert_eq!((audits, versions), (2, vec![1, 2]));
-    }
+    let (audits, versions) = fixtures::price_history(&e.db).unwrap();
+    assert_eq!((audits, versions), (2, vec![1, 2]));
     let (s, _) = e
         .call("PUT", "/api/stats/tz", Some(json!({"tz": "Mars/Base"})))
         .await;
@@ -802,17 +734,7 @@ async fn models_dev_prices() {
     let yesterday = steve_stats::day(now - 86_400_000, None);
     let tomorrow = steve_stats::day(now + 86_400_000, None);
     // 1M GPT-5 input yesterday and today, 1M Opus input today (the table has it: $4), an unknown model
-    {
-        let c = e.db();
-        c.execute_batch(&format!(
-            "INSERT INTO stat_daily (workspace_id, day, source, purpose, harness, model, input, output, cache_read, cache_write, hit_base, calls, turns, turn_ms, tools, tool_kinds)
-             VALUES ('default', '{yesterday}', 'agent', 'turn', 'codex', 'gpt-5', 1000000, 0, 0, 0, 0, 1, 1, 0, 0, '{{}}'),
-                    ('default', '{today}', 'agent', 'turn', 'codex', 'gpt-5', 1000000, 0, 0, 0, 0, 1, 1, 0, 0, '{{}}'),
-                    ('default', '{today}', 'agent', 'turn', 'claude-code', 'claude-opus-5-5', 1000000, 0, 0, 0, 0, 1, 1, 0, 0, '{{}}'),
-                    ('default', '{today}', 'agent', 'turn', 'claude-code', 'mystery-1', 500, 0, 0, 0, 0, 1, 1, 0, 0, '{{}}');"
-        ))
-        .expect("seed");
-    }
+    fixtures::seed_catalog_usage(&e.db, &today, &yesterday).unwrap();
     let est = |v: &Value| v["usage"]["est"].as_f64().unwrap_or(-1.0);
 
     /* before any sync: GPT-5 is unpriced, not free */
@@ -928,8 +850,10 @@ async fn models_dev_prices() {
     let (_, v) = e.call("GET", "/api/stats/summary", None).await;
     assert!((est(&v) - 6.5).abs() < 1e-9, "{}", v["spend"]);
     {
-        let c = e.db();
-        let book = steve_stats::PriceBook::new(vec![]).with_catalog(&c, None);
+        let book = steve_store::Store::read_file(&e.db, |r| {
+            steve_stats::PriceBook::new(vec![]).with_catalog(r, None, ["gpt-5"])
+        })
+        .unwrap();
         let at = |d: &str| book.quote("gpt-5", d).map(|q| q.price.input);
         assert_eq!(
             (at(&yesterday), at(&today), at(&tomorrow)),

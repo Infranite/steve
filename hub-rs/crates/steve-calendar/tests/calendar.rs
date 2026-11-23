@@ -44,17 +44,14 @@ fn cal_named<'a>(v: &'a Value, name: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("no calendar {name} in {v}"))
 }
 
-fn ids_and_versions(h: &H) -> Vec<(String, i64)> {
-    h.env
-        .store()
-        .reader(|c| {
-            let mut st = c.prepare("SELECT id, version FROM cal_events ORDER BY id")?;
-            let xs = st
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok::<_, steve_store::StoreError>(xs)
-        })
-        .unwrap()
+fn ids_and_versions(h: &H, conn: &str) -> Vec<(String, i64)> {
+    let mut versions: Vec<_> = h
+        .calendars(conn)
+        .iter()
+        .flat_map(|c| h.events(&c.id).into_iter().map(|e| (e.id, e.version)))
+        .collect();
+    versions.sort_unstable();
+    versions
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -62,7 +59,7 @@ async fn demo_calendar_mine_and_a_colleagues_free_busy() {
     let h = setup().await;
     // Wednesday morning in the reader's zone (the workspace default, UTC+8)
     h.env.clock.set(at("2026-11-18T08:00:00+08:00"));
-    h.contact("ct_chen", "陈默", steve_calendar::sources::DEMO_COLLEAGUE);
+    let chen = h.contact("陈默", steve_calendar::sources::DEMO_COLLEAGUE);
     let conn = h.connect("cal_demo", &[("tz", "Asia/Shanghai")]).await;
     let r = h.cal.sync_connection(WS, &conn, false).await.unwrap();
     assert!(r.source && r.errors.is_empty(), "{r:?}");
@@ -79,20 +76,18 @@ async fn demo_calendar_mine_and_a_colleagues_free_busy() {
     );
     let coll = cal_named(src, "示例 · 同事");
     // the source names its owner: resolved to the contact, someone else's, times only
-    assert_eq!(coll["party_id"], "ct_chen");
+    assert_eq!(coll["party_id"], chen);
     assert_eq!(coll["party_name"], "陈默");
     assert_eq!(
         (coll["mine"].as_bool(), coll["detail"].as_str()),
         (Some(false), Some("busy"))
     );
     let coll_id = coll["id"].as_str().unwrap().to_string();
-    let with_text: i64 = h.sql(
-        "SELECT COUNT(*) FROM cal_events WHERE calendar_id = ? AND (title IS NOT NULL OR busy_only = 0)",
-        &[&coll_id],
-    );
-    assert_eq!(
-        with_text, 0,
-        "nothing beyond free/busy is kept of someone else's calendar"
+    assert!(
+        h.events(&coll_id)
+            .iter()
+            .all(|e| e.title.is_none() && e.busy_only),
+        "only free/busy is kept of someone else's calendar"
     );
 
     // tomorrow's agenda: the two overlapping meetings are marked, the colleague's blocks are not in it
@@ -140,11 +135,11 @@ async fn demo_calendar_mine_and_a_colleagues_free_busy() {
     assert!(!titles(&v).contains(&"团建".to_string()));
 
     // a resync changes nothing: the same ids, the same versions
-    let before = ids_and_versions(&h);
+    let before = ids_and_versions(&h, &conn);
     h.env.clock.advance(10 * 60_000);
     let r = h.cal.sync_connection(WS, &conn, false).await.unwrap();
     assert_eq!((r.changed, r.deleted), (0, 0), "{r:?}");
-    assert_eq!(ids_and_versions(&h), before);
+    assert_eq!(ids_and_versions(&h, &conn), before);
     // asked for by hand right after: the cache answers
     let (s, v) = h
         .call("POST", &format!("/calendar/sources/{conn}/sync"), None)
@@ -169,9 +164,9 @@ async fn demo_calendar_mine_and_a_colleagues_free_busy() {
     );
     assert_eq!(v["checked"].as_array().unwrap().len(), 2);
     // someone without a calendar is named, not counted
-    h.contact("ct_lin", "林舟", "lin@partner.example");
+    let lin = h.contact("林舟", "lin@partner.example");
     let (_, v) = h
-        .call("POST", "/calendar/find-time", Some(json!({"people": ["ct_lin"], "duration_min": 30, "from": "2026-11-19T09:00", "to": "2026-11-19"})))
+        .call("POST", "/calendar/find-time", Some(json!({"people": [lin], "duration_min": 30, "from": "2026-11-19T09:00", "to": "2026-11-19"})))
         .await;
     assert_eq!(v["unknown"][0]["name"], "林舟", "{v}");
     assert_eq!(v["slots"][0]["start"], "2026-11-19 09:00");
@@ -179,7 +174,7 @@ async fn demo_calendar_mine_and_a_colleagues_free_busy() {
     let (_, v) = h
         .call(
             "GET",
-            "/calendar/freebusy?party=ct_chen&from=2026-11-19&to=2026-11-19",
+            &format!("/calendar/freebusy?party={chen}&from=2026-11-19&to=2026-11-19"),
             None,
         )
         .await;
@@ -226,7 +221,7 @@ async fn ics_subscription_versions_deletes_and_keeps_its_cache_on_failure() {
     assert_eq!(plan["start"], "2026-11-20 10:00");
     assert_eq!(plan["calendar"]["name"], "Team calendar");
     let id = plan["id"].as_str().unwrap().to_string();
-    let version = |h: &H| -> i64 { h.sql("SELECT version FROM cal_events WHERE id = ?", &[&id]) };
+    let version = |h: &H| h.event(&id).unwrap().version;
 
     // a new description: not a change that matters
     srv.set(
@@ -239,7 +234,7 @@ async fn ics_subscription_versions_deletes_and_keeps_its_cache_on_failure() {
     h.env.clock.advance(6 * 60_000);
     h.cal.sync_connection(WS, &conn, false).await.unwrap();
     assert_eq!(version(&h), 1);
-    let excerpt: String = h.sql("SELECT excerpt FROM cal_events WHERE id = ?", &[&id]);
+    let excerpt = h.event(&id).unwrap().excerpt.unwrap();
     assert_eq!(excerpt, "Agenda, then notes");
     // a new time: version 2, the same id
     srv.set(
@@ -384,7 +379,7 @@ fn ev(id: &str, uid: &str, start: &str, mins: i64, title: &str) -> RemoteEvent {
 async fn cursor_changes_one_meeting_in_two_calendars_settings_and_tools() {
     let h = setup().await;
     h.env.clock.set(at("2026-11-18T08:00:00+08:00"));
-    h.contact("ct_ada", "Ada", "ada@example.com");
+    let ada = h.contact("Ada", "ada@example.com");
     *h.script.calendars.lock().unwrap() = vec![
         RemoteCalendar {
             id: "work".into(),
@@ -457,15 +452,11 @@ async fn cursor_changes_one_meeting_in_two_calendars_settings_and_tools() {
     let conn = h.connect("cal_script", &[]).await;
     let r = h.cal.sync_connection(WS, &conn, false).await.unwrap();
     assert!(r.errors.is_empty(), "{r:?}");
-    let cached_zones: Vec<String> = h
-        .env
-        .store()
-        .reader(|c| -> Result<_, steve_store::StoreError> {
-            let mut q = c.prepare("SELECT tz FROM cal_calendars WHERE connection_id = ?")?;
-            Ok(q.query_map([&conn], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?)
-        })
-        .unwrap();
+    let cached_zones: Vec<_> = h
+        .calendars(&conn)
+        .into_iter()
+        .map(|c| c.tz.unwrap())
+        .collect();
     assert_eq!(cached_zones, vec!["Asia/Shanghai"; 2]);
     let (_, v) = h
         .call(
@@ -485,14 +476,14 @@ async fn cursor_changes_one_meeting_in_two_calendars_settings_and_tools() {
         "the one the owner may change"
     );
     assert_eq!(review["also_in"], json!(["Invites"]));
-    assert_eq!(review["organizer"]["party_id"], "ct_ada");
+    assert_eq!(review["organizer"]["party_id"], ada);
     assert_eq!(review["my_rsvp"], "accepted");
     let meeting = review["meeting_id"].as_str().unwrap().to_string();
     let (s, one) = h
         .call("GET", &format!("/calendar/events/{meeting}"), None)
         .await;
     assert_eq!(s, 200, "{one}");
-    assert_eq!(one["attendees"][1]["party_id"], "ct_ada");
+    assert_eq!(one["attendees"][1]["party_id"], ada);
     assert_eq!(one["attendees"][0]["is_self"], true);
 
     // the next sync asks with the cursors; a delta deletes one and moves another
@@ -624,7 +615,7 @@ async fn cursor_changes_one_meeting_in_two_calendars_settings_and_tools() {
         .call(
             "PATCH",
             &format!("/calendar/calendars/{work}"),
-            Some(json!({"party_id": "ct_ada"})),
+            Some(json!({"party_id": ada})),
         )
         .await;
     assert_eq!(s, 200, "{v}");
@@ -636,11 +627,7 @@ async fn cursor_changes_one_meeting_in_two_calendars_settings_and_tools() {
         ),
         (Some("busy"), Some(false), Some(true))
     );
-    let kept: i64 = h.sql(
-        "SELECT COUNT(*) FROM cal_events WHERE calendar_id = ? AND title IS NOT NULL",
-        &[&work],
-    );
-    assert_eq!(kept, 0);
+    assert!(h.events(&work).iter().all(|e| e.title.is_none()));
     let (_, v) = h
         .call(
             "GET",
@@ -684,18 +671,12 @@ async fn cursor_changes_one_meeting_in_two_calendars_settings_and_tools() {
     h.env.clock.advance(6 * 60_000);
     let r = h.cal.sync_connection(WS, &conn, false).await.unwrap();
     assert_eq!(r.errors.len(), 1);
-    let errs: i64 = h.sql(
-        "SELECT COUNT(*) FROM cal_calendars WHERE connection_id = ? AND sync_state = 'error'",
-        &[&conn],
-    );
-    assert_eq!(errs, 2);
-    // disconnecting drops everything of it
+    let calendars = h.calendars(&conn);
+    assert_eq!(calendars.len(), 2);
+    assert!(calendars.iter().all(|c| c.sync_state == "error"));
     h.conns.disconnect(&me(), &conn).await.unwrap();
-    let left: i64 = h.sql(
-        "SELECT (SELECT COUNT(*) FROM cal_calendars) + (SELECT COUNT(*) FROM cal_events)",
-        &[],
-    );
-    assert_eq!(left, 0);
+    assert!(h.calendars(&conn).is_empty());
+    assert!(calendars.iter().all(|c| h.events(&c.id).is_empty()));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -723,15 +704,16 @@ async fn a_cursor_source_is_pulled_whole_again_each_day_so_new_days_come_in() {
             }
         })
         .collect();
-    let cached = |k: i64| -> i64 {
-        h.sql(
-            "SELECT COUNT(*) FROM cal_events WHERE ext_id = ?",
-            &[&format!("standup-{k}")],
-        )
-    };
     let conn = h.connect("cal_script", &[]).await;
     let r = h.cal.sync_connection(WS, &conn, false).await.unwrap();
     assert!(r.errors.is_empty(), "{r:?}");
+    let calendar = h.calendars(&conn).pop().unwrap();
+    let cached = |k: i64| {
+        h.events(&calendar.id)
+            .iter()
+            .filter(|e| e.ext_id == format!("standup-{k}"))
+            .count()
+    };
     assert_eq!(
         (cached(179), cached(180)),
         (1, 0),
@@ -762,7 +744,7 @@ async fn a_cursor_source_is_pulled_whole_again_each_day_so_new_days_come_in() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_legacy_calendar_without_tz_reloads_cached_all_day_events() {
+async fn a_calendar_zone_change_reloads_cached_all_day_events() {
     let h = setup().await;
     h.env.clock.set(at("2026-03-07T12:00:00Z"));
     h.env
@@ -796,26 +778,12 @@ async fn a_legacy_calendar_without_tz_reloads_cached_all_day_events() {
     let conn = h.connect("cal_script", &[]).await;
     let r = h.cal.sync_connection(WS, &conn, false).await.unwrap();
     assert!(r.errors.is_empty(), "{r:?}");
-    // Simulate an old cache: no calendar zone and dates normalized as UTC, with a fresh cursor.
-    h.env
-        .store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "UPDATE cal_calendars SET tz = NULL;
-            UPDATE cal_events SET start_ms = start_ms - 18000000, fingerprint = 'legacy';",
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    h.script.calendars.lock().unwrap()[0].tz = Some("America/Los_Angeles".into());
     let r = h.cal.sync_connection(WS, &conn, false).await.unwrap();
     assert!(r.errors.is_empty(), "{r:?}");
     assert_eq!(*h.script.cursors.lock().unwrap(), vec![None, None]);
-    assert_eq!(
-        h.sql::<i64>("SELECT start_ms FROM cal_events WHERE ext_id = 'day'", &[]),
-        at("2026-03-08T00:00:00-05:00")
-    );
-    assert_eq!(
-        h.sql::<i64>("SELECT end_ms FROM cal_events WHERE ext_id = 'day'", &[]),
-        at("2026-03-09T00:00:00-04:00")
-    );
+    let calendar = h.calendars(&conn).pop().unwrap();
+    let event = h.events(&calendar.id).pop().unwrap();
+    assert_eq!(event.start_ms, at("2026-03-08T00:00:00-08:00"));
+    assert_eq!(event.end_ms, at("2026-03-09T00:00:00-07:00"));
 }

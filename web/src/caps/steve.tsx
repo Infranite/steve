@@ -11,7 +11,7 @@ import { TextField } from "@/components/ui/input"
 import { CodeBlock } from "@/components/ui/code-block"
 import { IntegrationSettings } from "@/components/affect/integration-settings-clean"
 import { Robot } from "@/robot"
-import { Section, Loading, Blank, Segmented, Notice, Pill, Panel, Disclosure, FieldRow } from "@/ui"
+import { Section, Loading, Segmented, Notice, Pill, Panel, Disclosure, FieldRow } from "@/ui"
 import { st, toast, useStore } from "@/store"
 import { capsApi, type SteveServer, type SteveTool } from "@/api/caps"
 import { errText, useList } from "./common"
@@ -50,7 +50,7 @@ export function SteveServerCard({ counts, open }: { counts?: Map<string, number>
       badge={<Pill tone="success" data-steve-always>{t("caps:steve.always")}</Pill>}
       meta={<span className="type-footnote">{d.s === "ok" ? t("caps:steve.meta", { count: tools.length }) : t("caps:steve.metaLoading")}</span>}>
       <div className="px-4 pb-3">
-        {d.s === "loading" ? <Loading className="py-4" /> : d.s !== "ok" ? <Blank>{t("caps:steve.unwired")}</Blank>
+        {d.s === "loading" ? <Loading className="py-4" /> : d.s === "error" ? <Notice tone="destructive" role="alert">{d.e}</Notice>
           : <Disclosure defaultOpen={open} label={t("caps:steve.show", { count: tools.length })} data-steve-fold><div className="pt-1"><ToolList tools={tools} counts={counts} /></div></Disclosure>}
       </div>
     </IntegrationSettings>
@@ -88,7 +88,7 @@ export function OutsideConnect() {
     try { const r = await capsApi.token(name.trim() || t("caps:outside.tokenNameDefault")); setToken(r.token); toast(t("caps:outside.made", { name: r.item.name })) } catch (e) { toast(errText(e)) } finally { setBusy(false) }
   }
   if (d.s === "loading") return <Section label={t("caps:outside.section")}><Loading className="py-8" /></Section>
-  if (d.s !== "ok") return <Section label={t("caps:outside.section")}><Blank>{t("caps:steve.unwired")}</Blank></Section>
+  if (d.s === "error") return <Section label={t("caps:outside.section")}><Notice tone="destructive" role="alert">{d.e}</Notice></Section>
   const v: SteveServer = d.v
   const ep = v.endpoints[Math.min(at, v.endpoints.length - 1)]
   const url = mcpUrl(ep.url, st.workspace?.id ?? null, st.workspaces.length > 1)

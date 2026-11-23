@@ -18,8 +18,7 @@ const key = (store: string, plugin: string) => `${store}/${plugin}`
 
 /** reads the installed theme plugins again and brings the registered themes in line with them */
 export async function syncPluginThemes(): Promise<void> {
-  let themes: PluginTheme[]
-  try { themes = (await modReq<{ themes: PluginTheme[] }>("GET", "/plugins/themes")).themes ?? [] } catch { return } // a Hub without plugins, or signed out: nothing to add
+  const { themes } = await modReq<{ themes: PluginTheme[] }>("GET", "/plugins/themes")
   const now = new Set<string>(), next: Record<string, ThemeState> = {}
   for (const t of themes) {
     const r = t.manifest == null ? { ok: false as const, errors: ["the manifest could not be read"] } : registerTheme(t.manifest)

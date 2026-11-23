@@ -5,6 +5,7 @@
 
 #[path = "../tests/support/mod.rs"]
 mod support;
+use steve_store::mail::fixtures as db;
 
 use std::sync::{
     Arc,
@@ -18,11 +19,12 @@ use axum::{
 };
 use serde_json::{Value, json};
 use steve_channels::disclosure::{CHECK_HEAD, Disclosure};
-use steve_mail::{DraftHooks, mcp, repo};
+use steve_mail::{DraftHooks, mcp};
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::outbound::{Audience, CheckCx, CheckResult, KnowledgeUse, OutboundCheck};
 use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::{ApiError, ApiResult, GatewayOut};
+use steve_store::mail as repo;
 
 use support::*;
 
@@ -59,11 +61,8 @@ struct Fixture {
 type F = Extension<Arc<Fixture>>;
 
 async fn state(Extension(f): F) -> ApiResult<Json<Value>> {
-    let drafts = f.h.env.store().reader(|c| -> ApiResult<Vec<Value>> {
-        let mut stmt = c.prepare("SELECT id FROM mail_drafts ORDER BY rowid")?;
-        let ids = stmt
-            .query_map([], |r| r.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+    let drafts = f.h.env.store().read(|c| -> ApiResult<Vec<Value>> {
+        let ids = db::all_drafts(f.h.env.store())?;
         ids.iter()
             .map(|id| {
                 let d = repo::draft(c, id)
@@ -72,17 +71,7 @@ async fn state(Extension(f): F) -> ApiResult<Json<Value>> {
                 let out = steve_mail::drafts::draft_out(c, &d)
                     .map_err(|e| ApiError::Internal(e.to_string()))?;
                 let mut v = json!(out);
-                let mut ds =
-                    c.prepare("SELECT id FROM decisions WHERE subject_id=? ORDER BY rowid")?;
-                let decisions = ds
-                    .query_map([id], |r| r.get::<_, String>(0))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                v["decisions"] = json!(
-                    decisions
-                        .iter()
-                        .map(|id| steve_store::base::decisions::get(c, id).unwrap())
-                        .collect::<Vec<_>>()
-                );
+                v["decisions"] = json!(db::decisions_of_draft(f.h.env.store(), id)?);
                 Ok(v)
             })
             .collect()
@@ -190,13 +179,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let conn = h.connect().await;
     h.sync(&conn).await;
     let thread = h.by_subject(&conn, "预算审批流程").thread_id;
-    h.env.store().with_conn(|c| {
-        c.execute_batch("INSERT INTO bots (id,workspace_id,name,harness,model,updated) VALUES ('mail','default','Mail','fixture','writer',1);
-            INSERT INTO items (id,workspace_id,no,kind,title,status,stage,created,updated,requested_by) VALUES ('ST-1','default',1,'task','Mail','open','',1,1,'usr_dev');
-            INSERT INTO sessions (id,workspace_id,item_id,bot_id,harness,model,cwd,status,created,updated) VALUES ('ses_mail','default','ST-1','mail','fixture','writer','','running',1,1);")?;
-        c.execute("INSERT INTO links (workspace_id,subject_type,subject_id,predicate,object_type,object_id,source,created) VALUES ('default','item','ST-1','about','mail_thread',?,'fixture',1)", [&thread])?;
-        Ok(())
-    })?;
+    db::link_agent_thread(h.env.store(), &thread)?;
     let modules = h.env.modules.clone();
     let routes = Router::new()
         .nest("/api", steve_mail::api::routes(h.mail.clone()))

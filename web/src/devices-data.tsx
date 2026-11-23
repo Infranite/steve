@@ -2,8 +2,8 @@
  * Node's vitals and the Hub's defaults for Nodes (upgrade policy and its waits, personal agent config). Each keeps its
  * last good answer (also across tab changes, which remount the page) and says when a later read failed, so a failure
  * is never shown as an empty list. The Hub's stream says when a Node or a client changed (`node`, `client` events) and
- * they are read again at once; besides, Nodes and devices are read every 10 seconds while the page is visible (a Hub
- * of an earlier release sends no such events). Per-Node harness reports are read with them and can be explicitly
+ * they are read again at once. Nodes and devices refresh every 10 seconds while visible for live counters that
+ * lack change events. Per-Node harness reports are read with them and can be explicitly
  * reprobed on a Node's page; vitals are read every minute (the Hub samples once a minute). */
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react"
 import { api, type RDevice, type RNode, type RNodeHarnessReport, type RUpgradeDefault, type RVitals } from "@/api"
@@ -82,7 +82,7 @@ export function DevicesProvider({ children }: { children: ReactNode }) {
   useHubEvents(["node", "device"], () => { nodes.reload(); devices.reload(); harnesses.reload() })
   useHubEvents(["client"], () => acc.reload())
   const hubVersion = st.version
-  const ds = devices.value ?? st.devices
+  const ds = devices.value ?? []
   const views = useMemo(() => nodeViews(ds, nodes.value?.nodes ?? null, hubVersion), [ds, nodes.value, hubVersion])
   const value: DevicesData = {
     views, nodesRead: nodes.value != null, nodesError: nodes.error, nodesOff: !!nodes.value?.off, devicesError: devices.error,

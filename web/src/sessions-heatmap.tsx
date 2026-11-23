@@ -3,7 +3,6 @@
  *   7 天 / 1 个月 / 3 个月   a bar per day, the stats page's own chart
  *   1 年                     GitHub's contribution calendar (react-activity-calendar), a column per week
  * The year's daily figures are fetched once per reading and serve every span. A Hub without stats shows nothing. */
-import { isNotWired } from "@/api"
 import { stats, type Metric } from "@/api/stats"
 import { useT } from "@/i18n"
 import { date, monthDay, weekday } from "@/i18n/format"
@@ -27,7 +26,6 @@ let span: Span = SPANS.includes(pref.span as Span) ? (pref.span as Span) : "1m"
 const save = () => { try { localStorage.setItem(PREF, JSON.stringify({ mode, span })) } catch { /* private mode */ } }
 /* per reading: the year by day, which serves every span */
 const daily: Partial<Record<Mode, { at: number; days: Map<string, number> | null }>> = {}
-let wired = true
 
 const pad = (n: number) => String(n).padStart(2, "0")
 const ymd = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
@@ -62,20 +60,17 @@ export function SessionsHeatmap() {
   useLayoutEffect(() => { const el = box.current; if (!el) return; const ro = new ResizeObserver(([e]) => setWidth(e.contentRect.width)); ro.observe(el); return () => ro.disconnect() }, [])
   const sp = span, m = mode
   useEffect(() => {
-    if (!wired) return
     let live = true
-    const fail = (e: unknown) => { if (isNotWired(e)) wired = false; return null }
     if (!fresh(daily[m])) {
       stats.series({ range: "custom", from: ymd(back(DAYS["1y"])), to: ymd(back(0)) }, m, "none")
         .then((s) => { const v = s.series[0]?.values ?? []; daily[m] = { at: Date.now(), days: new Map(s.buckets.map((b, i) => [b, v[i] ?? 0])) } })
-        .catch((e) => { fail(e); daily[m] = { at: Date.now() - FRESH + 60_000, days: null } })
+        .catch(() => { daily[m] = { at: Date.now() - FRESH + 60_000, days: null } })
         .finally(() => live && r())
     }
     return () => { live = false }
   }, [sp, m])
   /* when a year is wider than the screen, the latest weeks show first */
   useLayoutEffect(() => { const el = box.current?.querySelector<HTMLElement>(".react-activity-calendar__scroll-container"); if (el) el.scrollLeft = el.scrollWidth })
-  if (!wired) return null
 
   const amount = (v: number) => (m === "active" ? t("views:sessions.heat.dayTasks", { count: v }) : t("views:sessions.heat.dayTokens", { n: fmtN(v) }))
   const dayName = (d: Date) => `${monthDay(d)} ${weekday(d)}`

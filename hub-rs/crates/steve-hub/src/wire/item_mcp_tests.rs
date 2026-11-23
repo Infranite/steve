@@ -1,6 +1,6 @@
 use super::*;
-use rusqlite::params;
 use std::sync::{Mutex, MutexGuard};
+use steve_store::testkit::hub::authority as fixtures;
 use steve_store::{Item, ItemPatch, NewBot, NewDecision, NewItem, NewSession, PlanStep};
 
 // A Store opens a pooled set of connections. Bound these fixtures within this test binary so the
@@ -20,15 +20,7 @@ impl Fixture {
         let store =
             Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
-        store
-            .with_conn(|c| {
-                c.execute(
-                    "INSERT INTO workspaces (id,name,created,item_prefix) VALUES ('other','Other',1,'OT')",
-                    [],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        fixtures::seed_item_scope_workspace(&store).unwrap();
         for ws in ["default", "other"] {
             store
                 .bots()
@@ -289,18 +281,7 @@ fn changing_source_scope_revokes_cached_main_access_and_owner_marker_is_not_enou
     let origin = f.origin(&own, steve_core::thread::MAIN);
     let s = f.session(&own);
     assert!(scope(&f.store, &s).unwrap().1.sees(&hidden.id));
-    f.store
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE messages SET space='chan:unverified',meta=? WHERE id=?",
-                params![
-                    json!({"chan": {"owner_only": true, "connection": "unverified"}}).to_string(),
-                    origin
-                ],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::move_to_unverified_channel(&f.store, &origin).unwrap();
     let (_, view) = scope(&f.store, &s).unwrap();
     assert!(view.sees(&own.id));
     assert!(!view.sees(&hidden.id));
@@ -312,15 +293,7 @@ fn workflow_child_does_not_inherit_a_main_origin() {
     let own = f.item("default", "P1 child");
     let parent = f.item("default", "P1 parent");
     f.origin(&own, steve_core::thread::MAIN);
-    f.store
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE items SET source=? WHERE id=?",
-                params![json!(["collaboration", "workflow"]).to_string(), own.id],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::mark_workflow_item(&f.store, &own.id).unwrap();
     let (_, view) = scope(&f.store, &f.session(&own)).unwrap();
     assert!(view.sees(&own.id));
     assert!(!view.sees(&parent.id));
@@ -349,15 +322,7 @@ fn a_session_limited_to_its_own_item_is_told_so_and_a_unit_where_its_upstream_is
     );
 
     let unit = f.item("default", "P1 unit");
-    f.store
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE items SET source=? WHERE id=?",
-                params![json!(["collaboration", "workflow"]).to_string(), unit.id],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::mark_workflow_item(&f.store, &unit.id).unwrap();
     let (current, view) = scope(&f.store, &f.session(&unit)).unwrap();
     let said = only_own(&f.store, &current, &view, &other.id)
         .unwrap()
@@ -371,24 +336,12 @@ fn a_session_limited_to_its_own_item_is_told_so_and_a_unit_where_its_upstream_is
 
 #[test]
 fn stale_identity_and_non_agent_sessions_are_rejected_from_persisted_state() {
-    for mutation in [
-        "UPDATE sessions SET readonly=1 WHERE id=?",
-        "UPDATE sessions SET source='Imported session' WHERE id=?",
-        "UPDATE sessions SET status='ended' WHERE id=?",
-        "UPDATE sessions SET workspace_id='other' WHERE id=?",
-        "UPDATE sessions SET bot_id='bot_other' WHERE id=?",
-        "UPDATE sessions SET device_id='external-device' WHERE id=?",
-    ] {
+    for violation in fixtures::SESSION_VIOLATIONS {
         let f = Fixture::new();
         let own = f.item("default", "current");
         let s = f.session(&own);
-        f.store
-            .with_conn(|c| {
-                c.execute(mutation, [&s.id])?;
-                Ok(())
-            })
-            .unwrap();
-        assert!(scope(&f.store, &s).is_err(), "{mutation}");
+        fixtures::violate_session_scope(&f.store, &s.id, violation).unwrap();
+        assert!(scope(&f.store, &s).is_err(), "{violation:?}");
     }
 }
 
@@ -408,75 +361,37 @@ fn dependency_management_exception_is_only_for_a_current_waiting_parent() {
     let own = f.item("default", "current");
     let dep = f.item("default", "prerequisite");
     let s = f.session(&own);
-    f.store
-        .with_conn(|c| {
-            c.execute("UPDATE items SET status='run' WHERE id=?", [&own.id])?;
-            c.execute(
-                "INSERT INTO item_deps(item_id,dep_id,created) VALUES(?,?,1)",
-                params![own.id, dep.id],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::seed_item_dependency(&f.store, &own.id, &dep.id).unwrap();
     assert!(dependency_management_allowed(&f.store, &s).unwrap());
-    for (mutation, restore) in [
-        ("status='pause'", "status='run'"),
-        ("archived=1", "archived=0"),
-        ("source='[\"work\",\"workflow\"]'", "source='[\"\",\"\"]'"),
-    ] {
-        f.store
-            .with_conn(|c| {
-                c.execute(
-                    &format!("UPDATE items SET {mutation} WHERE id=?"),
-                    [&own.id],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+    for condition in fixtures::ITEM_CONDITIONS {
+        fixtures::set_item_condition(&f.store, &own.id, condition, true).unwrap();
         assert!(
             !dependency_management_allowed(&f.store, &s).unwrap(),
-            "{mutation}"
+            "{condition:?}"
         );
-        f.store
-            .with_conn(|c| {
-                c.execute(&format!("UPDATE items SET {restore} WHERE id=?"), [&own.id])?;
-                Ok(())
-            })
-            .unwrap();
+        fixtures::set_item_condition(&f.store, &own.id, condition, false).unwrap();
     }
     let replacement = f.session(&own);
     assert!(!dependency_management_allowed(&f.store, &s).unwrap());
     assert!(dependency_management_allowed(&f.store, &replacement).unwrap());
-    f.store
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE sessions SET workspace_id='other' WHERE id=?",
-                [&replacement.id],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::violate_session_scope(
+        &f.store,
+        &replacement.id,
+        fixtures::SessionViolation::ForeignWorkspace,
+    )
+    .unwrap();
     assert!(!dependency_management_allowed(&f.store, &replacement).unwrap());
 }
 
 #[test]
 fn disabled_or_removed_bot_no_longer_has_item_search_authority() {
-    for mutation in [
-        "UPDATE bots SET enabled=0 WHERE id='bot_default'",
-        "UPDATE bots SET deleted=1 WHERE id='bot_default'",
-        "DELETE FROM bot_workspaces WHERE bot_id='bot_default' AND workspace_id='default'",
-    ] {
+    for condition in fixtures::BOT_CONDITIONS {
         let f = Fixture::new();
         let own = f.item("default", "current");
         let s = f.session(&own);
         f.origin(&own, steve_core::thread::MAIN);
-        f.store
-            .with_conn(|c| {
-                c.execute(mutation, [])?;
-                Ok(())
-            })
-            .unwrap();
-        assert!(scope(&f.store, &s).is_err(), "{mutation}");
+        fixtures::limit_bot_scope(&f.store, condition).unwrap();
+        assert!(scope(&f.store, &s).is_err(), "{condition:?}");
     }
 }
 

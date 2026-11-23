@@ -8,6 +8,7 @@ mod conn_support;
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use steve_store::testkit::modules::connections_pairing as fixture;
 
 use async_trait::async_trait;
 use conn_support::*;
@@ -122,28 +123,8 @@ impl ConnectionProvider for Side {
     }
 }
 
-fn val(h: &H, sql: &str, p: &str) -> Value {
-    h.env
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(sql, [p], |r| {
-                Ok(match r.get_ref(0)? {
-                    rusqlite::types::ValueRef::Null => Value::Null,
-                    rusqlite::types::ValueRef::Integer(x) => json!(x),
-                    rusqlite::types::ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
-                    _ => Value::Null,
-                })
-            })?)
-        })
-        .expect("query")
-}
-
 fn pair_of(h: &H, conn: &str) -> Value {
-    val(
-        h,
-        "SELECT json_extract(config, '$.app_connection') FROM connections WHERE id = ?",
-        conn,
-    )
+    fixture::paired_app(h.env.store(), conn).unwrap()
 }
 
 async fn create(h: &H, adapter: &str, config: Value) -> (u16, Value) {
@@ -180,21 +161,18 @@ fn sides(me: Side) -> (H, Arc<Side>, Arc<Side>) {
 }
 
 fn me_party(h: &H) -> String {
-    val(
-        h,
-        "SELECT id FROM parties WHERE user_id = ? AND type = 'contact'",
-        ME,
-    )
-    .as_str()
-    .expect("me")
-    .to_string()
+    fixture::owner_contact(h.env.store(), ME)
+        .unwrap()
+        .as_str()
+        .expect("me")
+        .to_string()
 }
 
 /// A contact a channel made for `handle` of `system`, before anyone connected it.
 fn seen_by_a_channel(h: &H, system: &str, handle: &str) -> String {
     h.env
         .store()
-        .transaction(|tx| identify(tx, WS, ME, system, handle, &Hints::default()))
+        .write(|tx| identify(tx, WS, ME, system, handle, &Hints::default()))
         .expect("identify")
         .party_id
 }
@@ -209,10 +187,7 @@ async fn a_pair_is_checked_and_completed_on_the_way_in() {
         (s, v["error"].as_str()),
         (400, Some("要先接入「test_bot」，再接入这个连接"))
     );
-    assert_eq!(
-        val(&h, "SELECT COUNT(*) FROM connections WHERE 1 = ?", "1"),
-        json!(0)
-    );
+    assert_eq!(fixture::connection_count(h.env.store()).unwrap(), json!(0));
 
     // a provider that does not pair takes no pair
     let (s, v) = create(&h, "test_bot", json!({"app_connection": "con_x"})).await;
@@ -266,15 +241,7 @@ async fn a_pair_is_checked_and_completed_on_the_way_in() {
     let (s, _) = create(&h, "test_self", json!({"app_connection": 7})).await;
     assert_eq!(s, 400);
     // a revoked bot is no pair
-    h.env
-        .store()
-        .with_conn(|c| {
-            Ok(c.execute(
-                "UPDATE connections SET status = 'revoked' WHERE id = ?",
-                [&bot2],
-            )?)
-        })
-        .expect("revoke");
+    fixture::revoke_connection(h.env.store(), &bot2).expect("revoke");
     let (s, v) = create(&h, "test_self", json!({"app_connection": bot2})).await;
     assert_eq!(
         (s, v["error"].as_str()),
@@ -292,15 +259,7 @@ async fn the_pair_is_checked_again_in_the_commit() {
     let (_, v) = create(&h, "test_bot", json!({})).await;
     let bot = v["id"].as_str().expect("id").to_string();
     // the bot went between the start of a flow and its end: the connect refuses, nothing is kept
-    h.env
-        .store()
-        .with_conn(|c| {
-            Ok(c.execute(
-                "UPDATE connections SET status = 'revoked' WHERE id = ?",
-                [&bot],
-            )?)
-        })
-        .expect("revoke");
+    fixture::revoke_connection(h.env.store(), &bot).expect("revoke");
     let e = h
         .conns
         .connect(
@@ -316,30 +275,15 @@ async fn the_pair_is_checked_again_in_the_commit() {
         .expect_err("revoked pair");
     assert!(e.to_string().contains("要配对的连接已经断开了"), "{e}");
     assert_eq!(
-        val(
-            &h,
-            "SELECT COUNT(*) FROM connections WHERE adapter = ?",
-            "test_self"
-        ),
+        fixture::adapter_connections(h.env.store(), "test_self").unwrap(),
         json!(0)
     );
 
     // a new credential for a connection whose pair went is refused the same way
-    h.env
-        .store()
-        .with_conn(|c| Ok(c.execute("UPDATE connections SET status = 'ok' WHERE id = ?", [&bot])?))
-        .expect("back");
+    fixture::enable_connection(h.env.store(), &bot).expect("back");
     let (_, v) = create(&h, "test_self", json!({})).await;
     let mine = v["id"].as_str().expect("id").to_string();
-    h.env
-        .store()
-        .with_conn(|c| {
-            Ok(c.execute(
-                "UPDATE connections SET status = 'revoked' WHERE id = ?",
-                [&bot],
-            )?)
-        })
-        .expect("revoke");
+    fixture::revoke_connection(h.env.store(), &bot).expect("revoke");
     let (s, v, _) = send(
         &h.api,
         Some(&caller(WS, ME)),
@@ -374,11 +318,7 @@ async fn a_connection_is_paired_again_with_a_patch() {
     assert_eq!(s, 200, "{v}");
     assert_eq!(pair_of(&h, &mine), json!(bot2));
     assert_eq!(
-        val(
-            &h,
-            "SELECT COUNT(*) FROM audit WHERE action = 'connection.pair' AND target = ?",
-            &mine
-        ),
+        fixture::pairing_audits(h.env.store(), &mine).unwrap(),
         json!(1)
     );
     // a required pair is not dropped; the same checks as connecting
@@ -422,7 +362,7 @@ async fn a_credential_side_claims_into_me_only_when_it_attests_the_handle() {
     let (s, v) = create(&h, "test_self", json!({})).await;
     assert_eq!(s, 409, "{v}");
     assert_eq!(
-        val(&h, "SELECT status FROM parties WHERE id = ?", &seen),
+        fixture::party_status(h.env.store(), &seen).unwrap(),
         json!("active")
     );
 
@@ -443,23 +383,19 @@ async fn a_credential_side_claims_into_me_only_when_it_attests_the_handle() {
     for p in [&seen, &by_mail] {
         assert_eq!(
             (
-                val(&h, "SELECT status FROM parties WHERE id = ?", p),
-                val(&h, "SELECT merged_into FROM parties WHERE id = ?", p)
+                fixture::party_status(h.env.store(), p).unwrap(),
+                fixture::merged_into(h.env.store(), p).unwrap()
             ),
             (json!("merged"), json!(me_id))
         );
     }
     let acc = v["account_id"].as_str().expect("account").to_string();
     assert_eq!(
-        val(&h, "SELECT party_id FROM accounts WHERE id = ?", &acc),
+        fixture::party_for_account(h.env.store(), &acc).unwrap(),
         json!(me_id)
     );
     assert_eq!(
-        val(
-            &h,
-            "SELECT party_id FROM accounts WHERE system_id = 'github' AND handle = ?",
-            "lilei"
-        ),
+        fixture::github_party(h.env.store(), "lilei").unwrap(),
         json!(me_id),
         "an alias nobody held is 我's account now"
     );
@@ -467,19 +403,11 @@ async fn a_credential_side_claims_into_me_only_when_it_attests_the_handle() {
     // a contact someone confirmed by hand is never merged
     let (h, _bot, _me) = sides(Side::me("test_self", false, true, "on_me"));
     let seen = seen_by_a_channel(&h, "feishu", "on_me");
-    h.env
-        .store()
-        .with_conn(|c| {
-            Ok(c.execute(
-                "UPDATE parties SET contact_kind = 'real', source = 'me' WHERE id = ?",
-                [&seen],
-            )?)
-        })
-        .expect("confirm");
+    fixture::confirm_contact(h.env.store(), &seen).expect("confirm");
     let (s, _) = create(&h, "test_self", json!({})).await;
     assert_eq!(s, 409);
     assert_eq!(
-        val(&h, "SELECT status FROM parties WHERE id = ?", &seen),
+        fixture::party_status(h.env.store(), &seen).unwrap(),
         json!("active")
     );
 }
@@ -492,7 +420,7 @@ async fn a_bot_never_claims() {
     let (s, _) = create(&h, "test_bot", json!({})).await;
     assert_eq!(s, 409);
     assert_eq!(
-        val(&h, "SELECT status FROM parties WHERE id = ?", &seen),
+        fixture::party_status(h.env.store(), &seen).unwrap(),
         json!("active")
     );
 }
@@ -515,7 +443,7 @@ async fn finish_flow(h: &H, adapter: &str, config: Value, reauth_of: &str) {
 }
 
 fn config_of(h: &H, conn: &str) -> Value {
-    let raw = val(h, "SELECT config FROM connections WHERE id = ?", conn);
+    let raw = fixture::connection_config(h.env.store(), conn).unwrap();
     serde_json::from_str(raw.as_str().expect("config")).expect("json")
 }
 
@@ -562,15 +490,7 @@ async fn a_pair_dropped_while_a_flow_was_out_stays_dropped() {
     assert_eq!(pair_of(&h, &mine), Value::Null);
 
     // a pair the commit drops is gone from the row, not left from before (a blank one here)
-    h.env
-        .store()
-        .with_conn(|c| {
-            Ok(c.execute(
-                "UPDATE connections SET config = json_set(config, '$.app_connection', '') WHERE id = ?",
-                [&mine],
-            )?)
-        })
-        .expect("blank pair");
+    fixture::clear_pair(h.env.store(), &mine).expect("blank pair");
     finish_flow(&h, "test_self", flow, &mine).await;
     assert!(
         config_of(&h, &mine).get("app_connection").is_none(),
@@ -592,10 +512,7 @@ async fn the_provider_checks_the_config_on_the_way_in() {
         assert_eq!(s, 400, "{bad}: {v}");
         assert_eq!(v["error"], "连接配置不对：endpoint", "{bad}");
     }
-    assert_eq!(
-        val(&h, "SELECT COUNT(*) FROM connections WHERE 1 = ?", "1"),
-        json!(0)
-    );
+    assert_eq!(fixture::connection_count(h.env.store()).unwrap(), json!(0));
     let (s, v) = create(
         &h,
         "test_self",
@@ -627,15 +544,11 @@ async fn a_connection_stored_under_another_version_waits_for_a_new_authorization
     me.version.store(2, Ordering::SeqCst);
     assert_eq!(h.conns.check_versions().expect("check"), 1);
     assert_eq!(
-        val(&h, "SELECT status FROM connections WHERE id = ?", &mine),
+        fixture::connection_status(h.env.store(), &mine).unwrap(),
         json!("reauth")
     );
     assert_eq!(
-        val(
-            &h,
-            "SELECT COUNT(*) FROM decisions WHERE subject_id = ? AND status = 'open'",
-            &mine
-        ),
+        fixture::open_decision_count(h.env.store(), &mine).unwrap(),
         json!(1)
     );
     assert_eq!(h.conns.check_versions().expect("again"), 0, "marked once");
@@ -653,7 +566,7 @@ async fn a_connection_stored_under_another_version_waits_for_a_new_authorization
     assert_eq!(s, 200, "{v}");
     assert_eq!(config_of(&h, &mine)["_v"], json!(2));
     assert_eq!(
-        val(&h, "SELECT status FROM connections WHERE id = ?", &mine),
+        fixture::connection_status(h.env.store(), &mine).unwrap(),
         json!("ok")
     );
     assert_eq!(h.conns.check_versions().expect("check"), 0);
@@ -700,16 +613,7 @@ async fn a_connection_without_its_adapter_is_listed_as_not_installed() {
     assert_eq!(bot["pairing"], Value::Null);
 
     // the adapter goes away (another id took its place)
-    h.env
-        .store()
-        .transaction(|tx| {
-            tx.execute(
-                "UPDATE connections SET adapter = 'test_gone' WHERE id = ?",
-                [&mine],
-            )?;
-            Ok::<_, steve_store::StoreError>(())
-        })
-        .expect("update");
+    fixture::unregister_adapter(h.env.store(), &mine).expect("update");
     let (s, one) = get(format!("/connections/{mine}")).await;
     assert_eq!(s, 200, "{one}");
     assert_eq!(one["installed"], false);

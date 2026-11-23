@@ -1,61 +1,40 @@
-//! The contact page's “往来”: mail from a party
-//! or to it, newest first, only in threads the viewer may see. Mail recorded under a contact that was
-//! later merged into this one counts too.
+//! Mail sent to or received from a contact, including contacts merged into it.
 
-use rusqlite::{Connection, params};
 use steve_modules::ApiResult;
 use steve_modules::contacts::{TimelineEntry, TimelineSource};
-use steve_store::base::Viewer;
+use steve_store::{Store, base::Viewer, mail};
 
-/// Kind `mail`.
 pub struct MailTimeline;
 
 impl TimelineSource for MailTimeline {
     fn entries(
         &self,
-        c: &Connection,
+        store: &Store,
         viewer: &Viewer,
         party: &str,
         before: Option<i64>,
         limit: usize,
     ) -> ApiResult<Vec<TimelineEntry>> {
-        let sql =
-            "WITH RECURSIVE ids(id) AS (SELECT ?1 UNION SELECT p.id FROM parties p JOIN ids ON p.merged_into = ids.id)
-             SELECT m.thread_id, m.date, m.direction, m.subject FROM mail_messages m
-               JOIN mail_threads t ON t.id = m.thread_id
-              WHERE m.workspace_id = ?2 AND (?3 IS NULL OR m.date < ?3)
-                AND (m.from_party_id IN (SELECT id FROM ids)
-                  OR EXISTS (SELECT 1 FROM json_each(m.to_addrs) j WHERE json_extract(j.value, '$.party_id') IN (SELECT id FROM ids))
-                  OR EXISTS (SELECT 1 FROM json_each(m.cc_addrs) j WHERE json_extract(j.value, '$.party_id') IN (SELECT id FROM ids)))
-                AND (?5 = 0 OR t.visibility = 'workspace')
-              ORDER BY m.date DESC LIMIT ?4";
-        let mut st = c.prepare(sql).map_err(steve_store::StoreError::from)?;
-        let rows = st
-            .query_map(
-                params![party, viewer.ws, before, limit as i64, viewer.is_service()],
-                |r| {
-                    let (thread, ts, dir, subject): (String, i64, String, String) =
-                        (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
-                    let subject = if subject.is_empty() {
-                        steve_i18n::t!("mail.subject.none")
-                    } else {
-                        subject
-                    };
-                    Ok(TimelineEntry {
-                        ts,
-                        kind: "mail".into(),
-                        text: if dir == "out" {
-                            steve_i18n::t!("mail.timeline.sent", subject = subject)
-                        } else {
-                            steve_i18n::t!("mail.timeline.received", subject = subject)
-                        },
-                        href: format!("#/mail/t/{thread}"),
-                    })
-                },
-            )
-            .map_err(steve_store::StoreError::from)?;
+        let rows = store.read(|r| mail::party_timeline(r, viewer, party, before, limit as u64))?;
         Ok(rows
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(steve_store::StoreError::from)?)
+            .into_iter()
+            .map(|(thread, ts, direction, subject)| {
+                let subject = if subject.is_empty() {
+                    steve_i18n::t!("mail.subject.none")
+                } else {
+                    subject
+                };
+                TimelineEntry {
+                    ts,
+                    kind: "mail".into(),
+                    text: if direction == "out" {
+                        steve_i18n::t!("mail.timeline.sent", subject = subject)
+                    } else {
+                        steve_i18n::t!("mail.timeline.received", subject = subject)
+                    },
+                    href: format!("#/mail/t/{thread}"),
+                }
+            })
+            .collect())
     }
 }

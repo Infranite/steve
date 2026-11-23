@@ -21,7 +21,6 @@ use steve_modules::{
     Clock,
     accounts::{
         connections::{self, Connections, ConnectionsConfig},
-        repo,
         service::ensure_seeds,
     },
     testkit::{ME, TestEnv, WS, caller},
@@ -41,10 +40,7 @@ type F = Extension<Arc<Fixture>>;
 
 async fn state(Extension(f): F) -> Json<Value> {
     let conn = f.conns.get(&caller(WS, ME), &f.conn).unwrap();
-    let inbound = f.env.store().reader(|c| -> steve_modules::ApiResult<Vec<Value>> {
-        let mut st = c.prepare("SELECT m.text,m.history,e.outcome_label FROM chan_messages m LEFT JOIN ext_events e ON e.id=m.event_id WHERE direction='in' ORDER BY m.rowid")?;
-        Ok(st.query_map([], |r| Ok(json!({"text":r.get::<_,Option<String>>(0)?,"history":r.get::<_,Option<String>>(1)?,"label":r.get::<_,Option<String>>(2)?})))?.collect::<rusqlite::Result<Vec<_>>>()?)
-    }).unwrap();
+    let inbound = steve_store::testkit::channels::inbound_history(f.env.store()).unwrap();
     Json(
         json!({"connection":conn,"writes":f.fake.with(|w|w.writes.clone()),
         "write_calls":f.fake.with(|w|w.log.iter().filter(|(m,_)|m.starts_with("messages.") && m != "messages.history" && m != "messages.get" || m.starts_with("reactions.") || m == "connector.call").cloned().collect::<Vec<_>>()),
@@ -150,12 +146,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         connections::register(r);
     });
     fake.with(|w| w.now = Some(env.clock.now()));
-    env.store()
-        .transaction(|tx| -> steve_modules::ApiResult<()> {
-            ensure_seeds(tx, WS)?;
-            repo::upsert_declared(tx, ext_ws::SYSTEM, ext_ws::SYSTEM_LABEL, "ext_ws")?;
-            Ok(())
-        })?;
+    env.store().write(|w| ensure_seeds(w, WS))?;
+    env.store().write(|w| {
+        steve_store::Systems(w).upsert_declared(
+            ext_ws::SYSTEM,
+            ext_ws::SYSTEM_LABEL,
+            "ext_ws",
+            steve_store::now(),
+        )
+    })?;
     let keys = tempfile::tempdir()?;
     let vault = Vault::new(
         env.store().clone(),

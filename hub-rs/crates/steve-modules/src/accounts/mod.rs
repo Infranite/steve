@@ -31,9 +31,7 @@ pub mod service;
 
 use std::sync::Arc;
 
-use rusqlite::Connection;
 use serde_json::{Value, json};
-use steve_store::Tx;
 
 use crate::contacts::{HandleSearch, PartyHooks, Ports};
 use crate::{ApiError, ApiResult, Registry};
@@ -72,38 +70,53 @@ impl PartyHooks for AccountHooks {
 
     /// Deletes the party's accounts and their handles; linked vault items stay, unlinked. An account
     /// with a connection refuses (“我” and the own organization cannot be deleted anyway).
-    fn on_delete(&self, tx: &Tx, ws: &str, party_id: &str) -> ApiResult<()> {
-        let accounts = repo::of_party(tx, ws, party_id)?;
+    fn on_delete(&self, w: &mut steve_store::W<'_>, ws: &str, party_id: &str) -> ApiResult<()> {
+        let accounts = steve_store::Accounts(w).of_party(ws, party_id)?;
         for a in &accounts {
-            if repo::connection_of(tx, &a.id)?.is_some() {
+            if steve_store::Connections(w).brief(&a.id)?.is_some() {
                 return Err(ApiError::conflict(steve_i18n::t!(
                     "modules.accounts.disconnect_first"
                 )));
             }
         }
         for a in &accounts {
-            repo::delete(tx, &a.id)?;
-            service::event(tx, ws, &a.id);
+            steve_store::Accounts(w).delete(&a.id)?;
+            w.emit(service::account_event(ws, &a.id));
         }
         Ok(())
     }
 
     /// Moves `from`'s accounts to `into`.
-    fn on_merge(&self, tx: &Tx, ws: &str, from: &str, into: &str) -> ApiResult<Value> {
-        let ids: Vec<String> = repo::of_party(tx, ws, from)?
+    fn on_merge(
+        &self,
+        w: &mut steve_store::W<'_>,
+        ws: &str,
+        from: &str,
+        into: &str,
+    ) -> ApiResult<Value> {
+        let mut accounts = steve_store::Accounts(w);
+        let ids: Vec<_> = accounts
+            .of_party(ws, from)?
             .into_iter()
             .map(|a| a.id)
             .collect();
-        let moved = repo::move_party(tx, ws, &ids, from, into)?;
+        let moved = accounts.move_party(ws, &ids, from, into)?;
         for id in &moved {
-            service::event(tx, ws, id);
+            w.emit(service::account_event(ws, id));
         }
         Ok(json!({ "accounts": moved }))
     }
 
     /// Moves the accounts recorded by [`AccountHooks::on_merge`] back to `from`, if they are still on
     /// `into` (one moved by hand since stays where you put it).
-    fn on_split(&self, tx: &Tx, ws: &str, from: &str, into: &str, moved: &Value) -> ApiResult<()> {
+    fn on_split(
+        &self,
+        w: &mut steve_store::W<'_>,
+        ws: &str,
+        from: &str,
+        into: &str,
+        moved: &Value,
+    ) -> ApiResult<()> {
         let ids: Vec<String> = moved
             .get("accounts")
             .and_then(Value::as_array)
@@ -114,8 +127,8 @@ impl PartyHooks for AccountHooks {
                     .collect()
             })
             .unwrap_or_default();
-        for id in repo::move_party(tx, ws, &ids, into, from)? {
-            service::event(tx, ws, &id);
+        for id in steve_store::Accounts(w).move_party(ws, &ids, into, from)? {
+            w.emit(service::account_event(ws, &id));
         }
         Ok(())
     }
@@ -125,11 +138,11 @@ impl PartyHooks for AccountHooks {
 pub struct AccountHandles;
 
 impl HandleSearch for AccountHandles {
-    fn parties(&self, c: &Connection, ws: &str, q: &str) -> ApiResult<Vec<String>> {
-        Ok(repo::parties_by_handle(c, ws, q)?)
+    fn parties(&self, c: &mut steve_store::R<'_>, ws: &str, q: &str) -> ApiResult<Vec<String>> {
+        Ok(steve_store::Accounts(c).parties_by_handle(ws, q)?)
     }
 
-    fn count(&self, c: &Connection, ws: &str, party_id: &str) -> ApiResult<i64> {
-        Ok(repo::count_of(c, ws, party_id)?)
+    fn count(&self, c: &mut steve_store::R<'_>, ws: &str, party_id: &str) -> ApiResult<i64> {
+        Ok(steve_store::Accounts(c).count_of(ws, party_id)?)
     }
 }

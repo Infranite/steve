@@ -13,12 +13,12 @@
 //! `record` 只记录; each is `default`, `learned` (Steve, from what you open and ignore — phase E) or `you`.
 //! The role is the space's duty (`space_settings.duty`), edited where it always was.
 
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use steve_store::{StoreError, Tx};
+use steve_store::digest::Stored;
+use steve_store::{StoreError, W};
 
-use crate::conv::{self, ConvInfo, ConvRef};
+use crate::conv::{ConvInfo, ConvRef};
 
 type Result<T> = std::result::Result<T, StoreError>;
 
@@ -72,58 +72,6 @@ pub fn defaults(kind: &str) -> Settings {
     }
 }
 
-/// What is stored for a conversation (`None`: follows the kind).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct Stored {
-    pub kind: Option<String>,
-    pub kind_source: String,
-    pub window: Option<i64>,
-    pub quiet_ms: Option<i64>,
-    pub max_wait_ms: Option<i64>,
-    pub depth: Option<String>,
-    pub daily_budget: Option<i64>,
-    pub priority: Option<i64>,
-    pub notify: Option<String>,
-    pub notify_source: String,
-    pub revision: i64,
-}
-
-pub fn stored(c: &Connection, ws: &str, conv: &ConvRef) -> Result<Option<Stored>> {
-    Ok(c
-        .prepare_cached(
-            "SELECT kind, kind_source, window_size, quiet_ms, max_wait_ms, depth, daily_budget, priority, notify, notify_source, revision
-               FROM conv_profiles WHERE workspace_id = ? AND conv = ?",
-        )?
-        .query_row(params![ws, conv.key()], |r| {
-            Ok(Stored {
-                kind: r.get(0)?,
-                kind_source: r.get(1)?,
-                window: r.get(2)?,
-                quiet_ms: r.get(3)?,
-                max_wait_ms: r.get(4)?,
-                depth: r.get(5)?,
-                daily_budget: r.get(6)?,
-                priority: r.get(7)?,
-                notify: r.get(8)?,
-                notify_source: r.get(9)?,
-                revision: r.get(10)?,
-            })
-        })
-        .optional()?)
-}
-
-/// The rule's guess of a conversation's kind.
-pub fn guess(c: &Connection, ws: &str, info: &ConvInfo) -> Result<&'static str> {
-    Ok(match info.source_kind.as_str() {
-        "dm" => "dm",
-        "mail_thread" => "mail",
-        _ => match conv::bot_share(c, ws, &info.conv, 200)? {
-            Some(s) if s >= 0.6 => "feed",
-            _ => "team",
-        },
-    })
-}
-
 /// A conversation's profile as the page and the module read it.
 #[derive(Debug, Clone, Serialize)]
 pub struct Profile {
@@ -139,15 +87,19 @@ pub struct Profile {
 }
 
 /// The profile of `info`'s conversation: what is stored, else the rule's guess and the kind's defaults.
-pub fn profile(c: &Connection, ws: &str, info: &ConvInfo) -> Result<Profile> {
-    let s = stored(c, ws, &info.conv)?.unwrap_or_else(|| Stored {
+pub fn profile(
+    info: &ConvInfo,
+    stored: Option<Stored>,
+    guess: impl FnOnce() -> Result<&'static str>,
+) -> Result<Profile> {
+    let s = stored.unwrap_or_else(|| Stored {
         kind_source: "rule".into(),
         notify_source: "default".into(),
         ..Default::default()
     });
     let (kind, kind_source) = match (&s.kind, s.kind_source.as_str()) {
         (Some(k), src) if src != "rule" => (k.clone(), src.to_string()),
-        _ => (guess(c, ws, info)?.to_string(), "rule".to_string()),
+        _ => (guess()?.to_string(), "rule".to_string()),
     };
     let d = defaults(&kind);
     let mut own = Vec::new();
@@ -266,19 +218,19 @@ fn word(v: &Value, name: &'static str, of: &[&str]) -> std::result::Result<Optio
 /// Applies `p` (validated) on top of what is stored; returns the new revision. `Err(Ok(name))` for a field
 /// that does not fit, `Err(Err(_))` for a store error; `Ok(None)` when the revision moved.
 pub fn apply(
-    tx: &Tx,
+    w: &mut W<'_>,
     ws: &str,
     conv: &ConvRef,
     p: &Patch,
     now: i64,
 ) -> std::result::Result<Option<i64>, std::result::Result<Bad, StoreError>> {
-    let mut s = stored(tx, ws, conv)
-        .map_err(Err)?
-        .unwrap_or_else(|| Stored {
-            kind_source: "rule".into(),
-            notify_source: "default".into(),
-            ..Default::default()
-        });
+    let key = conv.key();
+    let mut repo = w.digest_profiles();
+    let mut s = repo.get(ws, &key).map_err(Err)?.unwrap_or_else(|| Stored {
+        kind_source: "rule".into(),
+        notify_source: "default".into(),
+        ..Default::default()
+    });
     if let Some(r) = p.revision
         && r != s.revision
     {
@@ -324,36 +276,7 @@ pub fn apply(
         }
         Ok(())
     })())?;
-    let rev = s.revision + 1;
-    tx.execute(
-        "INSERT INTO conv_profiles (workspace_id, conv, kind, kind_source, window_size, quiet_ms, max_wait_ms, depth,
-            daily_budget, priority, notify, notify_source, revision, updated)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT (workspace_id, conv) DO UPDATE SET kind = excluded.kind, kind_source = excluded.kind_source,
-            window_size = excluded.window_size, quiet_ms = excluded.quiet_ms, max_wait_ms = excluded.max_wait_ms,
-            depth = excluded.depth, daily_budget = excluded.daily_budget, priority = excluded.priority,
-            notify = excluded.notify, notify_source = excluded.notify_source, revision = excluded.revision,
-            updated = excluded.updated",
-        params![
-            ws,
-            conv.key(),
-            s.kind,
-            s.kind_source,
-            s.window,
-            s.quiet_ms,
-            s.max_wait_ms,
-            s.depth,
-            s.daily_budget,
-            s.priority,
-            s.notify,
-            s.notify_source,
-            rev,
-            now
-        ],
-    )
-    .map_err(|e| Err(e.into()))?;
-    crate::event(tx, ws, &conv.key());
-    Ok(Some(rev))
+    repo.set(ws, &key, &s, now).map(Some).map_err(Err)
 }
 
 /// The profile as JSON, with every kind's defaults so the page can say what “跟随类型” means.

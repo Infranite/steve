@@ -133,7 +133,7 @@ pub struct NewMark {
 impl Stats<'_> {
     /// Inserts the open `agent_turns` row and returns its id (`tn_…`).
     pub fn turn_begin(&self, b: &TurnBegin) -> Result<String> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let id = uid("tn");
             w.c.run(
                 "INSERT INTO agent_turns (id, workspace_id, session_id, item_id, bot_id, project_id, harness, user_seq, attempt, started) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -147,10 +147,11 @@ impl Stats<'_> {
     /// `false` (and nothing written) if the turn does not exist or was already finished, so a late
     /// second call cannot count a turn twice.
     pub fn turn_finish(&self, f: &TurnFinish) -> Result<bool> {
-        self.0.write(|w| {
-            let tx = w.tx()?;
-            let ws = finish_in(&tx, f)?;
-            tx.commit()?;
+        self.0.write_conn(|w| {
+            let transaction = w.tx()?;
+            let tx = transaction.connection();
+            let ws = finish_in(tx, f)?;
+            transaction.commit()?;
             if let Some(ws) = &ws {
                 w.publish(stats_changed(ws, Some(&f.day)));
             }
@@ -163,8 +164,9 @@ impl Stats<'_> {
     /// A turn run on a Node (`node_attempt_id` set) is left open: the restart did not cut it, and its
     /// row ends with the attempt's real outcome when the Node reports it or the Hub settles it.
     pub fn interrupt_open(&self, ended: i64, day: impl Fn(&str, i64) -> String) -> Result<usize> {
-        self.0.write(|w| {
-            let tx = w.tx()?;
+        self.0.write_conn(|w| {
+            let transaction = w.tx()?;
+            let tx = transaction.connection();
             // the turn stopped when its session last wrote something, not when the Hub came back up
             let open: Vec<(String, String, i64)> = tx
                 .prepare_cached(
@@ -179,7 +181,7 @@ impl Stats<'_> {
             for (id, ws, at) in &open {
                 let at = (*at).min(ended);
                 finish_in(
-                    &tx,
+                    tx,
                     &TurnFinish {
                         turn_id: id.clone(),
                         ended: at,
@@ -189,7 +191,7 @@ impl Stats<'_> {
                     },
                 )?;
             }
-            tx.commit()?;
+            transaction.commit()?;
             for ws in wss {
                 w.publish(stats_changed(ws, None));
             }
@@ -199,10 +201,11 @@ impl Stats<'_> {
 
     /// Writes one token record and books it into `stat_daily`; returns the row id.
     pub fn usage_add(&self, u: &NewUsage) -> Result<i64> {
-        self.0.write(|w| {
-            let tx = w.tx()?;
-            let id = usage_in(&tx, u)?;
-            tx.commit()?;
+        self.0.write_conn(|w| {
+            let transaction = w.tx()?;
+            let tx = transaction.connection();
+            let id = usage_in(tx, u)?;
+            transaction.commit()?;
             w.publish(stats_changed(&u.workspace_id, Some(&u.day)));
             Ok(id)
         })
@@ -210,10 +213,11 @@ impl Stats<'_> {
 
     /// Writes one item mark; returns the row id.
     pub fn mark_add(&self, m: &NewMark) -> Result<i64> {
-        self.0.write(|w| {
-            let tx = w.tx()?;
-            let id = mark_in(&tx, m)?;
-            tx.commit()?;
+        self.0.write_conn(|w| {
+            let transaction = w.tx()?;
+            let tx = transaction.connection();
+            let id = mark_in(tx, m)?;
+            transaction.commit()?;
             w.publish(stats_changed(&m.workspace_id, None));
             Ok(id)
         })
@@ -223,7 +227,7 @@ impl Stats<'_> {
     /// this snapshot is handled on the next pass, and a positive hint must be rechecked in the
     /// refresh transaction. `since == 0` preserves the initial dirty-row-only pass.
     pub fn refresh_pending(&self, since: i64) -> Result<bool> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             Ok(c.query_row(
                 // one EXISTS per column, so each is a range on its own index (decisions_created_item,
                 // decisions_resolved_item) and an idle poll reads nothing
@@ -238,7 +242,7 @@ impl Stats<'_> {
 
     /// Flags the item for the `item_stats` refresh (e.g. after a decision about it changed).
     pub fn touch_item(&self, item_id: &str) -> Result<()> {
-        self.0.write(|w| dirty_in(w.c, item_id))
+        self.0.write_conn(|w| dirty_in(w.c, item_id))
     }
 }
 
@@ -273,18 +277,6 @@ pub(crate) fn mark_in(c: &Connection, m: &NewMark) -> Result<i64> {
 
 /// The event kind of a tool call (`events.kind`), the first of which sets `sessions.first_tool_at`.
 pub const TOOL_CALL_EVENT: &str = "tool_call";
-
-/// Notes when a session made its first tool call (migration 92), with the event that records it, in
-/// the caller's transaction: how long a fresh session takes to start working. Later calls change nothing.
-pub(crate) fn first_tool_in(c: &Connection, session: &str, kind: &str, ts: i64) -> Result<()> {
-    if kind == TOOL_CALL_EVENT {
-        c.prepare_cached(
-            "UPDATE sessions SET first_tool_at = ?1 WHERE id = ?2 AND first_tool_at IS NULL",
-        )?
-        .execute(params![ts, session])?;
-    }
-    Ok(())
-}
 
 /// The `stats` change event of a workspace.
 pub fn stats_changed(ws: &str, day: Option<&str>) -> steve_types::DomainEvent {

@@ -8,6 +8,7 @@ use axum::Router;
 use axum::body::Body as HttpBody;
 use axum::http::{Request, header};
 use serde_json::{Value, json};
+use steve_store::testkit::{flow::audit_count, vault as fixtures};
 use tempfile::TempDir;
 use tower::ServiceExt;
 use webauthn_authenticator_rs::WebauthnAuthenticator;
@@ -46,15 +47,7 @@ struct Res {
 }
 
 fn session(env: &TestEnv, user: &str, token: &str, created: i64) {
-    env.store()
-        .with_conn(|c| {
-            c.execute(
-                "INSERT INTO auth_sessions (token_hash, user_id, created, expires) VALUES (?, ?, ?, ?)",
-                rusqlite::params![steve_store::sha(token), user, created, created + 86_400_000],
-            )?;
-            Ok(())
-        })
-        .expect("session");
+    fixtures::auth_session(env.store(), user, token, created, created + 86_400_000).unwrap();
 }
 
 async fn setup() -> Env {
@@ -239,11 +232,16 @@ impl Env {
         serde_json::to_value(a).expect("assertion json")
     }
 
-    fn count(&self, q: &str) -> i64 {
-        self.env
-            .store()
-            .with_conn(|c| Ok(c.query_row(q, [], |r| r.get(0))?))
-            .expect("sql")
+    fn passkey_count(&self) -> i64 {
+        self.env.store().read(|r| PasskeyRows(r).count(WS)).unwrap()
+    }
+
+    fn uses(&self, mode: Option<&str>, actor: Option<&str>, status: Option<&str>) -> i64 {
+        fixtures::use_count(self.env.store(), mode, actor, status).unwrap()
+    }
+
+    fn audit_count(&self, action: &str) -> i64 {
+        audit_count(self.env.store(), action).unwrap()
     }
 }
 
@@ -295,27 +293,26 @@ async fn register_then_reveal_with_a_software_passkey() {
     let f = e.reveal_finish(A_HOST, &a, true).await;
     assert_eq!(f.status, 200, "{}", f.body);
 
+    assert_eq!(e.uses(Some("view"), Some(ME), Some("ok")), 1);
+    assert_eq!(e.uses(Some("copy"), Some(ME), None), 1);
     assert_eq!(
-        e.count("SELECT count(*) FROM secret_uses WHERE actor_type = 'me' AND actor_id = 'usr_dev' AND mode = 'view' AND status = 'ok'"),
+        e.pk.list(WS, ME)
+            .unwrap()
+            .into_iter()
+            .filter(|key| key.last_used.is_some())
+            .count(),
         1
     );
-    assert_eq!(
-        e.count("SELECT count(*) FROM secret_uses WHERE actor_type = 'me' AND mode = 'copy'"),
-        1
-    );
-    assert_eq!(
-        e.count("SELECT count(*) FROM passkeys WHERE last_used IS NOT NULL"),
-        1
-    );
-    assert_eq!(
-        e.count("SELECT count(*) FROM audit WHERE action = 'passkey.add'"),
-        1
-    );
+    assert_eq!(e.audit_count("passkey.add"), 1);
     // the stored credential is the public key, never the field value
     assert_eq!(
-        e.count(&format!(
-            "SELECT count(*) FROM passkeys WHERE credential LIKE '%{PW}%'"
-        )),
+        e.env
+            .store()
+            .read(|r| PasskeyRows(r).registered_credentials(A_HOST))
+            .unwrap()
+            .into_iter()
+            .filter(|credential| credential.contains(PW))
+            .count(),
         0
     );
 }
@@ -369,11 +366,8 @@ async fn a_replayed_challenge_fails() {
         e.reveal_finish(A_HOST, &a2, false).await.body["error"],
         CHALLENGE_GONE
     );
-    assert_eq!(
-        e.count("SELECT count(*) FROM secret_uses WHERE mode = 'view'"),
-        1
-    );
-    assert!(e.count("SELECT count(*) FROM audit WHERE action = 'vault.reveal_refused'") >= 3);
+    assert_eq!(e.uses(Some("view"), None, None), 1);
+    assert!(e.audit_count("vault.reveal_refused") >= 3);
 }
 
 #[tokio::test]
@@ -459,8 +453,8 @@ async fn another_origin_fails() {
         )
         .await;
     assert_eq!(f.status, 400, "{}", f.body);
-    assert_eq!(e.count("SELECT count(*) FROM secret_uses"), 0);
-    assert_eq!(e.count("SELECT count(*) FROM passkeys"), 1);
+    assert_eq!(e.uses(None, None, None), 0);
+    assert_eq!(e.passkey_count(), 1);
 }
 
 #[tokio::test]
@@ -506,7 +500,7 @@ async fn registration_needs_a_recent_login() {
         )
         .await;
     assert_eq!(f.status, 401);
-    assert_eq!(e.count("SELECT count(*) FROM passkeys"), 0);
+    assert_eq!(e.passkey_count(), 0);
     // bad name
     let n = e
         .send(
@@ -534,10 +528,7 @@ async fn delete_only_own_passkeys() {
     assert_eq!(d.status, 200);
     assert_eq!(d.body, json!({"ok": true}));
     assert_eq!(e.reveal_start(A_HOST).await.body["error"], NEED_PASSKEY);
-    assert_eq!(
-        e.count("SELECT count(*) FROM audit WHERE action = 'passkey.delete'"),
-        1
-    );
+    assert_eq!(e.audit_count("passkey.delete"), 1);
 }
 
 #[tokio::test]

@@ -1,6 +1,4 @@
-/* GitHub module (steve-github): repos, PRs, issues, deliveries, the App manifest flow and PAT connections.
- * On a Hub without it, a 404, an HTML answer (its SPA fallback for unknown GETs) or a network error means
- * “not wired here”, and the page shows the Unwired placeholder instead. */
+/** GitHub installations, repositories, and their activity. */
 import { modReq as req, qs as q } from "@/api"
 
 export type GhSettings = { after_accept: "ask_pr" | "open_pr" | "none"; finish_on: "accepted" | "merged"; merge_method: "squash" | "merge" | "rebase"; delete_branch: boolean; ci_fail: "supplement" | "signal"; draft_pr: boolean; pr_review?: boolean; issue_triage?: boolean }

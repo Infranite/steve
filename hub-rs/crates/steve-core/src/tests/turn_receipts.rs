@@ -87,15 +87,19 @@ fn end(core: &Core, s: &Session, a: &str) {
 }
 
 fn logical(k: &Kit, s: &Session, turn: &str, a: &str, at: i64, ordinal: i64) {
-    k.db().store().transaction(|tx| {
-        tx.execute("INSERT OR IGNORE INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES (?,'fixture','ws','ns','r1','ready',?)",
-            rusqlite::params![s.id, at])?;
-        tx.execute("INSERT OR IGNORE INTO runtime_turns(turn_id,session_id,state,created,updated) VALUES (?,?,'finished',?,?)",
-            rusqlite::params![turn, s.id, at, at])?;
-        tx.execute("INSERT INTO runtime_attempts(attempt_id,turn_id,ordinal,node_id,operation_id,execution,spec,digest,state,created,updated) VALUES (?,?,?,'fixture',?,'{}','{}','d','finished',?,?)",
-            rusqlite::params![a, turn, ordinal, format!("op-{a}"), at, at])?;
-        Ok::<_, steve_store::StoreError>(())
-    }).unwrap();
+    steve_store::core_fixture::runtime::finished_turn(
+        k.db().store(),
+        steve_store::core_fixture::runtime::FinishedTurn {
+            session: &s.id,
+            turn,
+            attempt: a,
+            node: "fixture",
+            node_session: "ns",
+            ordinal,
+            operation: &format!("op-{a}"),
+            at,
+        },
+    );
 }
 
 #[test]
@@ -300,9 +304,11 @@ fn old_turn_and_cycle_and_goal_receipts_are_not_current_success() {
             }
             "logical_turn" => logical(&k, &s, "t2", "next", 2, 0),
             "cycle" => {
-                k.db()
-                    .exec("UPDATE items SET cycle=cycle+1 WHERE id=?", &[&id])
-                    .unwrap();
+                steve_store::core_fixture::item(
+                    k.db().store(),
+                    &id,
+                    steve_store::core_fixture::ItemState::BumpCycle,
+                );
             }
             "goal" => {
                 k.db().add_goal(&id, "changed goal").unwrap();
@@ -388,7 +394,7 @@ fn a_failed_receipt_write_rolls_back_business_state_and_memory_mark() {
     for ask in [false, true] {
         let k = Kit::new();
         let (id, s) = started(&k);
-        k.db().exec("CREATE TEMP TRIGGER receipt_failure BEFORE INSERT ON events WHEN NEW.kind='steve_tool_receipt' BEGIN SELECT RAISE(FAIL,'receipt write failed'); END", &[]).unwrap();
+        steve_store::core_fixture::reject_tool_receipts(k.db().store());
         let result = if ask {
             k.core.tool_ask(&s, "not committed", &[])
         } else {
@@ -477,7 +483,7 @@ fn failed_automatic_acceptance_does_not_dispatch_an_uncommitted_hook() {
         k.core.module_gateway(),
         registry,
     ));
-    k.db().exec("CREATE TEMP TRIGGER receipt_failure BEFORE INSERT ON events WHEN NEW.kind='steve_tool_receipt' BEGIN SELECT RAISE(FAIL,'receipt write failed'); END", &[]).unwrap();
+    steve_store::core_fixture::reject_tool_receipts(k.db().store());
     let mut tx = k.core.tx();
     assert!(
         tx.tool_deliver(&s, "automatic result", &[], &[], &[])

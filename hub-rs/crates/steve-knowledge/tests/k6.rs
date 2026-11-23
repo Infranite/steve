@@ -10,7 +10,8 @@ use steve_knowledge::candidates::{self, MemDecisions};
 use steve_knowledge::steward::{self, LIST, TIDY};
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::testkit::{ME, TestEnv, WS, call, caller};
-use steve_store::base::mems::{self, Mem};
+use steve_store::base::mems::Mem;
+use steve_store::testkit::knowledge as fixture;
 
 struct Env {
     env: TestEnv,
@@ -23,18 +24,7 @@ fn setup() -> Env {
     });
     let kb = Knowledge::new(|_| {});
     let app = steve_knowledge::routes(kb).with_state(env.modules.clone());
-    env.store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "INSERT INTO parties (id, workspace_id, type, name, aliases, created_by, created, updated) VALUES
-                   ('ct_sarah', 'default', 'contact', 'Sarah Chen', '[\"Sarah\"]', 'usr_dev', 1, 1),
-                   ('org_acme', 'default', 'org', 'Acme', '[]', 'usr_dev', 1, 1);
-                 INSERT INTO items (id, workspace_id, no, title, status, stage, cwd, created, updated)
-                   VALUES ('ST-12', 'default', 12, '整理知识', 'running', '进行中', NULL, 1, 100);",
-            )?;
-            Ok(())
-        })
-        .expect("seed");
+    fixture::seed_steward_subjects(env.store()).expect("seed");
     Env { env, app }
 }
 
@@ -64,7 +54,7 @@ fn memory_listing_only_attaches_a_live_members_personal_profile() {
     assert!(
         e.env
             .store()
-            .reader(|c| { steve_modules::contacts::repo::me_of(c, WS, &service.user) })
+            .read(|c| steve_modules::contacts::repo::me_of(c, WS, &service.user))
             .unwrap()
             .is_none()
     );
@@ -82,7 +72,10 @@ impl Env {
         .await
     }
     fn mem(&self, id: &str) -> Option<Mem> {
-        self.env.store().reader(|c| mems::get(c, id)).unwrap()
+        self.env
+            .store()
+            .read(|c| steve_store::knowledge::Memories(c).get(id))
+            .unwrap()
     }
     fn status(&self, id: &str) -> String {
         self.mem(id)
@@ -119,16 +112,7 @@ async fn memories_say_where_they_came_from_and_how_often_they_were_used() {
     let a = e
         .add("Sarah 喜欢简短的邮件", Some(("party", "ct_sarah")))
         .await;
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "INSERT INTO kb_uses (id, workspace_id, consumer_type, consumer_id, query, hits, created) VALUES ('ku_1', 'default', 'session', 'ses_1', '邮件', ?, 50)",
-                [json!([{"n": 1, "obj_type": "mem", "obj_id": a, "level": "conclusion", "label": "偏好"}]).to_string()],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::seed_steward_use(e.env.store(), &a).unwrap();
     let r = candidates::remember(
         &e.env.modules,
         &cx(),

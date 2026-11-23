@@ -26,8 +26,8 @@
 use std::collections::HashSet;
 
 use chrono::{Datelike, TimeZone};
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
+use steve_store::{Read, channel_message_repo::dialogue};
 
 use crate::ChannelResult;
 use crate::spaces::Mode;
@@ -50,15 +50,6 @@ pub const PENDING: usize = 5;
 const SCAN: usize = 400;
 /// Read after the message beyond [`AFTER`]: rows stored after it that were said before it.
 const AFTER_SLACK: usize = 20;
-/// When a message was said in the chat: the provider's time when known; what Steve sent counts from
-/// when it was sent (a draft on your own account waits for your approval), as in the fallback's
-/// order. The store reads by `created` (indexed); [`load`] orders and splits by this.
-macro_rules! at_sql {
-    () => {
-        "coalesce(m.ext_created, CASE WHEN m.direction = 'out' THEN coalesce(m.sent, m.created) ELSE m.created END)"
-    };
-}
-pub const AT: &str = at_sql!();
 /// A line, a folded bot line's sample, a pending draft, in characters.
 const LINE_MAX: usize = 500;
 const SAMPLE_MAX: usize = 80;
@@ -87,7 +78,7 @@ pub enum Side {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Msg {
     pub id: String,
-    /// When it was said in the chat (ms, [`AT`]): the provider's time when known; for what Steve
+    /// When it was said in the chat (ms): the provider's time when known; for what Steve
     /// sent, when it was sent, not when it was drafted.
     pub at: i64,
     /// The sender's name as shown, never a raw handle (empty: unknown).
@@ -623,57 +614,33 @@ pub fn arrange(
 
 // ---------------------------------------------------------------- the store
 
-/// Your contacts and accounts here ([`crate::presence`]'s set): the workspace owners' contacts (and
-/// those merged into them) and the account of the space's own connection when it speaks for you.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Mine {
-    pub parties: Vec<String>,
-    pub accounts: Vec<String>,
-}
+pub use steve_store::channel_message_repo::presence::Mine;
 
-pub fn mine(c: &Connection, ws: &str, space: &str) -> ChannelResult<Mine> {
-    let read = |tail: &str| -> ChannelResult<Vec<String>> {
-        let mut st = c.prepare_cached(&format!("{} {tail}", crate::presence::MINE))?;
-        let v = st
-            .query_map(params![ws, space], |r| r.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(v)
-    };
-    Ok(Mine {
-        parties: read("SELECT id FROM mine")?,
-        accounts: read("SELECT id FROM my_accounts")?,
-    })
+pub fn mine(r: &mut impl Read, ws: &str, space: &str) -> ChannelResult<Mine> {
+    Ok(steve_store::channel_message_repo::presence::mine(
+        r, ws, space,
+    )?)
 }
 
 /// Every name you go by here: `address` (what the reply calls you), your contacts' names and
 /// aliases, your accounts' display names. Ids and raw handles left out ([`raw_name`]), each once.
-pub fn owner_names(c: &Connection, mine: &Mine, address: &str) -> ChannelResult<Vec<String>> {
-    let mut all: Vec<String> = vec![address.to_string()];
+pub fn owner_names(r: &mut impl Read, mine: &Mine, address: &str) -> ChannelResult<Vec<String>> {
+    let mut all = vec![address.to_string()];
     for p in &mine.parties {
-        if let Some((name, aliases)) = c
-            .query_row(
-                "SELECT name, coalesce(aliases, '[]') FROM parties WHERE id = ? AND status <> 'deleted'",
-                [p],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-            )
-            .optional()?
+        if let Some(party) = steve_store::Contacts::new(r)
+            .party(p)?
+            .filter(|p| p.status != "deleted")
         {
-            all.push(name);
-            if let Ok(Value::Array(xs)) = serde_json::from_str::<Value>(&aliases) {
-                all.extend(xs.iter().filter_map(|x| x.as_str().map(String::from)));
-            }
+            all.push(party.name);
+            all.extend(party.aliases);
         }
     }
     for a in &mine.accounts {
-        if let Some(d) = c
-            .query_row(
-                "SELECT coalesce(display_name, '') FROM accounts WHERE id = ? AND status <> 'deleted'",
-                [a],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?
+        if let Some(account) = steve_store::Accounts(r)
+            .get(a)?
+            .filter(|a| a.status != "deleted")
         {
-            all.push(d);
+            all.push(account.display_name);
         }
     }
     let mut out: Vec<String> = Vec::new();
@@ -686,48 +653,28 @@ pub fn owner_names(c: &Connection, mine: &Mine, address: &str) -> ChannelResult<
     Ok(out)
 }
 
-/// Column 1 is [`AT`]; the last one (18) is `created`, the stored order.
-const COLS: &str = concat!(
-    "m.id, ",
-    at_sql!(),
-    ", m.direction, m.sender_account_id, m.sender_party_id, m.persona_id,
-       coalesce(m.on_behalf, 'none'), coalesce(m.text, ''), coalesce(m.attachments, '[]'), m.thread_key,
-       m.external_id, m.reply_to, coalesce(a.display_name, ''), coalesce(p.name, ''),
-       coalesce(a.handle_display, ''), coalesce(a.kind, ''), coalesce(p.contact_kind, ''),
-       coalesce(pe.name, ''), m.created
-  FROM chan_messages m LEFT JOIN accounts a ON a.id = m.sender_account_id
-  LEFT JOIN parties p ON p.id = m.sender_party_id
-  LEFT JOIN personas pe ON pe.id = m.persona_id"
-);
-
-/// Messages people can read: received or sent, not purged, with a text or an attachment.
-const VISIBLE: &str =
-    "m.space_id = ?1 AND m.id <> ?2 AND m.status IN ('received', 'sent') AND m.text IS NOT NULL
-   AND (m.text <> '' OR coalesce(json_array_length(m.attachments), 0) > 0)";
-
-fn msg_of(r: &rusqlite::Row<'_>, mine: &Mine, mode: Mode) -> rusqlite::Result<Msg> {
-    let dir: String = r.get(2)?;
-    let account: Option<String> = r.get(3)?;
-    let party: Option<String> = r.get(4)?;
-    let persona: Option<String> = r.get(5)?;
-    let on_behalf: String = r.get(6)?;
-    let text: String = r.get(7)?;
-    let atts: String = r.get(8)?;
-    let (display, party_name, handle, kind, contact_kind, persona_name): (
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-    ) = (
-        r.get(12)?,
-        r.get(13)?,
-        r.get(14)?,
-        r.get(15)?,
-        r.get(16)?,
-        r.get(17)?,
-    );
+fn msg_of(row: dialogue::Record, mine: &Mine, mode: Mode) -> Msg {
+    let dialogue::Record {
+        direction: dir,
+        account,
+        party,
+        persona,
+        on_behalf,
+        text,
+        attachments,
+        display_name: display,
+        party_name,
+        handle,
+        account_kind: kind,
+        contact_kind,
+        persona_name,
+        id,
+        at,
+        thread,
+        external,
+        reply_to,
+        ..
+    } = row;
     let yours = party.as_ref().is_some_and(|p| mine.parties.contains(p))
         || account.as_ref().is_some_and(|a| mine.accounts.contains(a));
     let side = if dir == "out" {
@@ -750,64 +697,51 @@ fn msg_of(r: &rusqlite::Row<'_>, mine: &Mine, mode: Mode) -> rusqlite::Result<Ms
     } else {
         shown_name([display.as_str(), party_name.as_str(), handle.as_str()])
     };
-    Ok(Msg {
-        id: r.get(0)?,
-        at: r.get(1)?,
+    Msg {
+        id,
+        at,
         name,
         side,
         bot: side == Side::Other
             && (matches!(kind.as_str(), "bot" | "app_bot") || contact_kind == "bot"),
-        text: typed(
-            &text,
-            &serde_json::from_str(&atts).unwrap_or(Value::Array(vec![])),
-        ),
-        thread_key: r.get(9)?,
-        external_id: r.get(10)?,
-        reply_to: r.get(11)?,
-    })
+        text: typed(&text, &attachments),
+        thread_key: thread,
+        external_id: external,
+        reply_to,
+    }
 }
 
 /// The target message, the messages before it and the messages after it ([`load`]).
 pub type Loaded = (Msg, Vec<Msg>, Vec<Msg>);
 
 /// The target message and the space's messages before (the latest [`SCAN`]) and after it (the
-/// first [`AFTER`]), all oldest first, by when they were said ([`AT`]). `None` when the target is
+/// first [`AFTER`]), all oldest first, by when they were said. `None` when the target is
 /// not in the space.
 ///
 /// The store is read around the target by `created`, which its index orders; the rows are then
-/// split and sorted by [`AT`]: a line Steve sent for you that was drafted before the message but
+/// split and sorted by when they were said: a line Steve sent for you that was drafted before the message but
 /// sent after it comes after it, at its sending time.
 pub fn load(
-    c: &Connection,
+    r: &mut impl Read,
     space: &str,
     target: &str,
     mine: &Mine,
     mode: Mode,
 ) -> ChannelResult<Option<Loaded>> {
-    let row = |r: &rusqlite::Row<'_>| -> rusqlite::Result<(Msg, i64)> {
-        Ok((msg_of(r, mine, mode)?, r.get(18)?))
-    };
-    let t = c
-        .query_row(
-            &format!("SELECT {COLS} WHERE m.id = ?1 AND m.space_id = ?2"),
-            params![target, space],
-            row,
-        )
-        .optional()?;
-    let Some((t, t_created)) = t else {
+    let Some((target, records)) =
+        dialogue::window(r, space, target, SCAN as u64, (AFTER + AFTER_SLACK) as u64)?
+    else {
         return Ok(None);
     };
-    let read = |cond: &str, order: &str, limit: usize| -> ChannelResult<Vec<(Msg, i64)>> {
-        let mut st = c.prepare_cached(&format!(
-            "SELECT {COLS} WHERE {VISIBLE} AND {cond} ORDER BY m.created {order}, m.id {order} LIMIT ?4"
-        ))?;
-        let v = st
-            .query_map(params![space, target, t_created, limit as i64], row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(v)
-    };
-    let mut rows = read("m.created <= ?3", "DESC", SCAN)?;
-    rows.extend(read("m.created > ?3", "ASC", AFTER + AFTER_SLACK)?);
+    let t_created = target.created;
+    let t = msg_of(target, mine, mode);
+    let mut rows: Vec<_> = records
+        .into_iter()
+        .map(|row| {
+            let created = row.created;
+            (msg_of(row, mine, mode), created)
+        })
+        .collect();
     rows.sort_by(|(a, ac), (b, bc)| (a.at, *ac, &a.id).cmp(&(b.at, *bc, &b.id)));
     let (before, after): (Vec<_>, Vec<_>) = rows
         .into_iter()
@@ -819,18 +753,8 @@ pub fn load(
 }
 
 /// Drafts in the space still waiting (not sent yet), newest first: `(when written, text)`.
-pub fn pending(c: &Connection, space: &str) -> ChannelResult<Vec<(i64, String)>> {
-    let mut st = c.prepare_cached(
-        "SELECT created, coalesce(text, '') FROM chan_messages
-          WHERE space_id = ? AND direction = 'out' AND status IN ('draft', 'pending') AND coalesce(text, '') <> ''
-          ORDER BY created DESC, id DESC LIMIT ?",
-    )?;
-    let v = st
-        .query_map(params![space, PENDING as i64], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(v)
+pub fn pending(r: &mut impl Read, space: &str) -> ChannelResult<Vec<(i64, String)>> {
+    Ok(dialogue::pending(r, space, PENDING as u64)?)
 }
 
 /// A pending draft as a line.
@@ -839,38 +763,24 @@ pub fn pending_line(at: i64, text: &str, clock: &Clock) -> String {
 }
 
 /// The rules' facts recorded with the message's event (`dm`, `mentioned`, `reply_to_me`).
-pub fn facts_of(c: &Connection, message: &str) -> ChannelResult<Value> {
-    Ok(c
-        .query_row(
-            "SELECT json_extract(e.payload, '$.facts') FROM chan_messages m JOIN ext_events e ON e.id = m.event_id
-              WHERE m.id = ?",
-            [message],
-            |r| r.get::<_, Option<String>>(0),
-        )
-        .optional()?
-        .flatten()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(Value::Null))
+pub fn facts_of(r: &mut impl Read, message: &str) -> ChannelResult<Value> {
+    Ok(dialogue::facts(r, message)?)
 }
 
 /// Keeps what the composer read in the message's images ([`DESCRIBED`]), so later conversations show
 /// it instead of an unread image. Only images not described yet; one line, at most
 /// [`DESCRIBED_MAX`] characters.
-pub fn remember_described(tx: &steve_store::Tx, message: &str, text: &str) -> ChannelResult<bool> {
+pub fn remember_described(
+    w: &mut steve_store::W<'_>,
+    message: &str,
+    text: &str,
+) -> ChannelResult<bool> {
     let d: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let d = cut(&d, DESCRIBED_MAX);
     if d.is_empty() {
         return Ok(false);
     }
-    let atts: Option<String> = tx
-        .query_row(
-            "SELECT attachments FROM chan_messages WHERE id = ? AND direction = 'in' AND purged IS NULL",
-            [message],
-            |r| r.get(0),
-        )
-        .optional()?
-        .flatten();
-    let Some(mut v) = atts.and_then(|s| serde_json::from_str::<Value>(&s).ok()) else {
+    let Some(mut v) = dialogue::describable(w, message)? else {
         return Ok(false);
     };
     let mut changed = false;
@@ -881,10 +791,7 @@ pub fn remember_described(tx: &steve_store::Tx, message: &str, text: &str) -> Ch
         }
     }
     if changed {
-        tx.execute(
-            "UPDATE chan_messages SET attachments = ? WHERE id = ?",
-            params![v.to_string(), message],
-        )?;
+        dialogue::set_attachments(w, message, &v)?;
     }
     Ok(changed)
 }
@@ -893,46 +800,36 @@ pub fn remember_described(tx: &steve_store::Tx, message: &str, text: &str) -> Ch
 /// empty, a number or a handle ([`raw_name`]) — what a provider gives for “me” — it takes the name of
 /// another account of the same contact (your Feishu account), else the contact's name. A name that
 /// is a real name is never touched. Returns whether it changed.
-pub fn settle_own_name(tx: &steve_store::Tx, account: &str) -> ChannelResult<bool> {
-    let row: Option<(String, Option<String>)> = tx
-        .query_row(
-            "SELECT coalesce(display_name, ''), party_id FROM accounts WHERE id = ?",
-            [account],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    let Some((current, Some(party))) = row else {
+
+pub fn settle_own_name(w: &mut steve_store::W<'_>, account: &str) -> ChannelResult<bool> {
+    use steve_store::Accounts;
+
+    let Some(current) = Accounts(w).get(account)? else {
         return Ok(false);
     };
-    if !raw_name(&current) {
+    if !raw_name(&current.display_name) {
         return Ok(false);
     }
-    let mut st = tx.prepare_cached(
-        "SELECT coalesce(display_name, '') FROM accounts
-          WHERE party_id = ?1 AND id <> ?2 AND status <> 'deleted' ORDER BY verified DESC, created",
-    )?;
-    let siblings = st
-        .query_map(params![party, account], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let party_name: String = tx
-        .query_row("SELECT name FROM parties WHERE id = ?", [&party], |r| {
-            r.get(0)
-        })
-        .optional()?
+    let mut siblings = Accounts(w).of_party(&current.workspace_id, &current.party_id)?;
+    siblings.retain(|a| a.id != account && a.status != "deleted");
+    siblings.sort_by_key(|a| (!a.verified, a.created));
+    let party_name = w
+        .contacts()
+        .party(&current.party_id)?
+        .map(|p| p.name)
         .unwrap_or_default();
     let name = shown_name(
         siblings
             .iter()
-            .map(String::as_str)
+            .map(|a| a.display_name.as_str())
             .chain([party_name.as_str()]),
     );
     if name.is_empty() {
         return Ok(false);
     }
-    steve_modules::accounts::repo::update(
-        tx,
+    Accounts(w).update(
         account,
-        &steve_modules::accounts::repo::AccountPatch {
+        &steve_store::account_rows::AccountPatch {
             display_name: Some(name),
             ..Default::default()
         },

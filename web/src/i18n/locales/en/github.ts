@@ -131,7 +131,6 @@ export default {
     unlinked: "Unlinked",
   },
   list: {
-    absent: "This Hub doesn't provide this data",
     open: "Open",
     all: "All",
   },

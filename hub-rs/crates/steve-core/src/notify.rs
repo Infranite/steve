@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 const SPACE: &str = "notify";
 
-/// One notification (`GET /api/state` `notifications[]`).
+/// One notification (`GET /api/notifications` entries).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Notice {
     pub id: String,
@@ -35,20 +35,20 @@ pub fn notify(
 ) -> Result<String> {
     Ok(db
         .store()
-        .transaction(|tx| notify_in(tx, ws, kind, level, text, item))?)
+        .write(|tx| notify_in(tx, ws, kind, level, text, item))?)
 }
 
 /// [`notify`] inside the caller's transaction: what happened and its notification are written
 /// together, or neither is.
 pub fn notify_in(
-    tx: &steve_store::Tx,
+    tx: &mut steve_store::W<'_>,
     ws: &str,
     kind: &str,
     level: &str,
     text: &str,
     item: Option<&str>,
 ) -> steve_store::Result<String> {
-    let id = steve_store::base::message_add(
+    let id = steve_store::append_message(
         tx,
         ws,
         "steve",
@@ -60,7 +60,7 @@ pub fn notify_in(
     /* notices stay in the notifications: an item's failure is already its fail card (the card in the
      * conversation, the pending strip), so only a failure without an item leaves a line here */
     if level == "fail" && item.is_none() {
-        steve_store::base::message_add(
+        steve_store::append_message(
             tx,
             ws,
             "steve",

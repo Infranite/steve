@@ -121,7 +121,7 @@ pub struct Release {
 pub const DONE_MERGE: &str = "merge";
 pub const DONE_TAG: &str = "tag";
 
-fn default_source() -> (String, String) {
+pub(crate) fn default_source() -> (String, String) {
     ("对话".into(), "chat".into())
 }
 

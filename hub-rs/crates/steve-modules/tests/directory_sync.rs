@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use steve_store::testkit::modules::directory as fixtures;
 
 use axum::Router;
 use serde_json::{Value, json};
@@ -102,38 +103,19 @@ impl Fx {
         call(&self.r, Some(&me()), method, path, body.as_ref()).await
     }
 
-    fn exec(&self, sql: &str) {
-        self.t
-            .store()
-            .with_conn(|c| Ok(c.execute_batch(sql)?))
-            .expect("exec");
-    }
-
-    fn count(&self, sql: &str) -> i64 {
-        self.t
-            .store()
-            .with_conn(|c| Ok(c.query_row(sql, [], |r| r.get(0))?))
-            .expect("count")
-    }
-
-    fn text(&self, sql: &str) -> String {
-        self.t
-            .store()
-            .with_conn(|c| Ok(c.query_row(sql, [], |r| r.get(0))?))
-            .expect("text")
-    }
-
     /// A Feishu app connection of the own organization in `ws`.
     async fn connect(&self, ws: &str, id: &str, caps: &str) {
         let (s, _) = call(&self.r, Some(&caller(ws, ME)), "GET", "/me/contact", None).await;
         assert_eq!(s, 200);
-        self.exec(&format!(
-            "INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated)
-               SELECT 'acc_{id}', '{ws}', 'feishu_app', 'feishu_app', id, 'app_bot', 'cli_{id}', 'cli_{id}', 'connect', 1, 1
-                 FROM parties WHERE workspace_id = '{ws}' AND org_kind = 'self';
-             INSERT INTO connections (id, workspace_id, account_id, adapter, auth, caps, created_by, created, updated)
-               VALUES ('{id}', '{ws}', 'acc_{id}', 'feishu', 'credential', '{caps}', 'usr_dev', 1, 1);"
-        ));
+        fixtures::seed_connection(
+            self.t.store(),
+            ws,
+            id,
+            &format!("acc_{id}"),
+            &format!("cli_{id}"),
+            caps,
+        )
+        .unwrap();
     }
 
     /// `POST /teams/sync`, then waits for the job.
@@ -156,15 +138,13 @@ impl Fx {
     }
 
     fn team_id(&self, ext: &str) -> String {
-        self.text(&format!(
-            "SELECT party_id FROM team_details WHERE external_id = '{ext}'"
-        ))
+        fixtures::team_id(self.t.store(), ext).unwrap()
     }
 
     fn contact_id(&self, union_id: &str) -> String {
-        self.text(&format!(
-            "SELECT a.party_id FROM account_handles h JOIN accounts a ON a.id = h.account_id WHERE h.family = 'feishu_user' AND h.handle = '{union_id}'"
-        ))
+        fixtures::handle_owner(self.t.store(), WS, "feishu_user", union_id)
+            .unwrap()
+            .party_id
     }
 
     async fn team(&self, ext: &str) -> Value {
@@ -218,7 +198,11 @@ async fn two_snapshots_dissolve_a_department_and_move_a_person() {
     assert_eq!(list["sync"]["connection_id"], CONN);
     assert_eq!(list["sync"]["label"], "飞书通讯录");
     let own =
-        fx.text("SELECT id FROM parties WHERE org_kind = 'self' AND workspace_id = 'default'");
+        fx.t.store()
+            .read(|r| r.contacts().own_org(WS))
+            .unwrap()
+            .unwrap()
+            .id;
     assert!(
         chart
             .iter()
@@ -254,21 +238,31 @@ async fn two_snapshots_dissolve_a_department_and_move_a_person() {
     assert_eq!(c["jobs"][0]["source"], "sync");
     assert_eq!(c["reports_to"][0]["name"], "李雷");
     assert_eq!(
-        fx.text("SELECT connection_id FROM account_handles WHERE handle = 'ou_wangfang'"),
+        fixtures::handle_connection(fx.t.store(), "ou_wangfang").unwrap(),
         CONN
     );
     assert_eq!(
-        fx.text(&format!(
-            "SELECT source FROM accounts WHERE party_id = '{wang}'"
-        )),
+        fx.t.store()
+            .read(|r| steve_store::Accounts(r).of_party(WS, &wang))
+            .unwrap()
+            .remove(0)
+            .source,
         "sync"
     );
     assert_eq!(
-        fx.count("SELECT COUNT(*) FROM decisions"),
+        fixtures::decision_count(fx.t.store()).unwrap(),
         0,
         "no proposals"
     );
-    assert!(fx.count("SELECT last_sync FROM connections WHERE id = 'con_fs'") > 0);
+    assert!(
+        fx.t.store()
+            .read(|r| steve_store::Connections(r).get(CONN))
+            .unwrap()
+            .unwrap()
+            .last_sync
+            .unwrap()
+            > 0
+    );
 
     // second snapshot: 销售部 gone, 张伟 moved to 研发部
     let zhang = fx.contact_id("on_zhangwei");
@@ -277,7 +271,7 @@ async fn two_snapshots_dissolve_a_department_and_move_a_person() {
         s.departments.retain(|d| d.id != "od-sales");
         s.users[3].department_ids = vec!["od-eng".into()];
     });
-    let contacts_before = fx.count("SELECT COUNT(*) FROM parties WHERE type = 'contact'");
+    let contacts_before = fixtures::party_count(fx.t.store(), "contact", None, None).unwrap();
     let job = fx.sync_now().await;
     assert_eq!(job.state, JobState::Done, "{:?}", job.errors);
     let r = &job.reports[0].1;
@@ -293,26 +287,28 @@ async fn two_snapshots_dissolve_a_department_and_move_a_person() {
     );
     assert_eq!(fx.team("od-eng").await["headcount"], 4);
     assert_eq!(
-        fx.count(&format!(
-            "SELECT COUNT(*) FROM team_members WHERE contact_id = '{zhang}' AND team_id = '{sales}'"
-        )),
+        if fx
+            .t
+            .store()
+            .read(|r| steve_store::Teams(r).has_member(&sales, &zhang))
+            .unwrap()
+        {
+            1
+        } else {
+            0
+        },
         0
     );
     assert_eq!(
-        fx.count("SELECT COUNT(*) FROM parties WHERE type = 'contact'"),
+        fixtures::party_count(fx.t.store(), "contact", None, None).unwrap(),
         contacts_before,
         "no contact deleted"
     );
     let (s, _) = fx.req("GET", &format!("/contacts/{zhang}"), None).await;
     assert_eq!(s, 200);
-    assert_eq!(
-        fx.count("SELECT COUNT(*) FROM audit WHERE action = 'team.sync'"),
-        2
-    );
-    let detail: Value = serde_json::from_str(
-        &fx.text("SELECT detail FROM audit WHERE action = 'team.sync' ORDER BY rowid DESC LIMIT 1"),
-    )
-    .unwrap();
+    assert_eq!(fixtures::audit_count(fx.t.store(), "team.sync").unwrap(), 2);
+    let detail: Value =
+        serde_json::from_str(&fixtures::audit_detail(fx.t.store(), "team.sync").unwrap()).unwrap();
     assert_eq!(detail["dissolved"], 1);
     assert_eq!(detail["added"], 1);
     assert_eq!(detail["removed"], 1);
@@ -350,9 +346,9 @@ async fn renames_departures_and_returns() {
     let han = fx.contact_id("on_hanmeimei");
     let li = fx.contact_id("on_lilei");
     // a name you set on a contact you created is not overwritten; a synced one follows the directory
-    fx.exec(&format!(
-        "UPDATE parties SET source = 'manual' WHERE id = '{li}'"
-    ));
+    fx.t.store()
+        .write(|w| w.contacts().set_source(&li, "manual"))
+        .unwrap();
     fx.dir.update(|s| {
         s.departments[1].name = "基础平台组".into();
         s.users[0].name = "李雷雷".into();
@@ -366,12 +362,7 @@ async fn renames_departures_and_returns() {
     let t = fx.team("od-plat").await;
     assert_eq!(t["name"], "基础平台组");
     assert_eq!(t["revision"], 2, "rename writes a revision");
-    assert_eq!(
-        fx.count(&format!(
-            "SELECT COUNT(*) FROM revisions WHERE object_id = '{plat}'"
-        )),
-        1
-    );
+    assert_eq!(fixtures::revision_count(fx.t.store(), &plat).unwrap(), 1);
     assert_eq!(
         fx.member_names("od-plat").await,
         vec![pair("王芳芳", "lead")]
@@ -387,9 +378,10 @@ async fn renames_departures_and_returns() {
     assert_eq!(c["teams"], json!([]));
     assert_eq!(c["reports_to"], json!([]));
     assert_eq!(
-        fx.count(&format!(
-            "SELECT COUNT(*) FROM accounts WHERE party_id = '{han}'"
-        )),
+        fx.t.store()
+            .read(|r| steve_store::Accounts(r).of_party(WS, &han))
+            .unwrap()
+            .len() as i64,
         1
     );
 
@@ -398,10 +390,8 @@ async fn renames_departures_and_returns() {
     fx.sync_now().await;
     let (_, c) = fx.req("GET", &format!("/contacts/{han}"), None).await;
     assert!(c["jobs"][0]["to"].is_null(), "{c}");
-    let props: Value = serde_json::from_str(&fx.text(&format!(
-        "SELECT props FROM links WHERE subject_id = '{han}' AND predicate = 'works_at'"
-    )))
-    .unwrap();
+    let props: Value =
+        serde_json::from_str(&fixtures::job_properties(fx.t.store(), &han, None).unwrap()).unwrap();
     assert_eq!(props["history"].as_array().map(Vec::len), Some(1));
     assert_eq!(
         fx.member_names("od-plat").await,
@@ -428,7 +418,7 @@ async fn people_join_contacts_you_already_have() {
         .await;
     assert_eq!(s, 200, "{b}");
     // 王芳 is already known through chat (an unconfirmed contact from identify)
-    let wang = fx.t.store().transaction(|tx| {
+    let wang = fx.t.store().write(|tx| {
         accounts::identify(
             tx,
             WS,
@@ -458,16 +448,16 @@ async fn people_join_contacts_you_already_have() {
     );
     // the email became a mail account of the same contact
     assert_eq!(
-        fx.text("SELECT a.party_id FROM account_handles h JOIN accounts a ON a.id = h.account_id WHERE h.handle = 'wang.fang@corp.example.com'"),
+        fixtures::handle_owner(fx.t.store(), WS, "email", "wang.fang@corp.example.com")
+            .unwrap()
+            .party_id,
         wang
     );
     // Directory membership remains stored, but read viewers no longer load its scopes.
     assert!(fx.t.modules.viewer(&me()).unwrap().scopes.is_empty());
     // the own organization's app bot account is not a person
     assert_eq!(
-        fx.count(
-            "SELECT COUNT(*) FROM parties WHERE type = 'contact' AND workspace_id = 'default'"
-        ),
+        fixtures::party_count(fx.t.store(), "contact", Some(WS), None).unwrap(),
         4
     );
 }
@@ -516,7 +506,7 @@ async fn failures_change_nothing() {
         .await;
     assert_eq!(s, 202);
     fx.wait(b["job_id"].as_str().unwrap()).await;
-    let teams = fx.count("SELECT COUNT(*) FROM parties WHERE type = 'team' AND status = 'active'");
+    let teams = fixtures::party_count(fx.t.store(), "team", None, Some("active")).unwrap();
     assert_eq!(teams, 3);
 
     // another workspace's connection is not ours
@@ -541,13 +531,10 @@ async fn failures_change_nothing() {
     assert_eq!(job.state, JobState::Failed);
     assert_eq!(job.errors[0].1, EMPTY_SNAPSHOT);
     assert_eq!(
-        fx.count("SELECT COUNT(*) FROM parties WHERE type = 'team' AND status = 'active'"),
+        fixtures::party_count(fx.t.store(), "team", None, Some("active")).unwrap(),
         teams
     );
-    assert_eq!(
-        fx.count("SELECT COUNT(*) FROM audit WHERE action = 'team.sync'"),
-        1
-    );
+    assert_eq!(fixtures::audit_count(fx.t.store(), "team.sync").unwrap(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -597,7 +584,7 @@ async fn daily_run_and_debounced_events() {
     }
     assert_eq!(fx.dir.reads(), 4);
     assert_eq!(
-        fx.count("SELECT COUNT(*) FROM parties WHERE type = 'team' AND workspace_id = 'w2'"),
+        fixtures::party_count(fx.t.store(), "team", Some(WS2), None).unwrap(),
         3
     );
 
@@ -653,12 +640,7 @@ async fn daily_runs_use_each_workspace_clock_before_the_system_or_owner_clock() 
     let fx = fixture_at(first(), Some(now));
     fx.connect(WS, CONN, r#"["directory.read"]"#).await;
     fx.connect(WS2, "con_w2", r#"["directory.read"]"#).await;
-    fx.exec(
-        "INSERT INTO settings (workspace_id,key,value,updated) VALUES
-        ('default','tz','\"America/New_York\"',1), ('w2','tz','\"Europe/London\"',1);
-        INSERT INTO notification_policies (workspace_id,user_id,timezone,enabled,mode,consented_at,consent_since_seq,updated)
-        VALUES ('default','usr_dev','Asia/Tokyo',1,'now',1,0,1)",
-    );
+    fixtures::daily_clocks(fx.t.store()).unwrap();
     // Finish the initial catch-up, so only daily jobs can appear below.
     for id in fx.sync.tick(now + CATCH_UP_FIRST_MS).unwrap() {
         fx.sync.run_job(&id).await;

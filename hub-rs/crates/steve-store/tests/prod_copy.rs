@@ -5,6 +5,7 @@
 //!
 //! The test copies that file again into its own temp dir, so the given copy is never written.
 
+use steve_store::testkit::SqliteFixtures;
 mod common;
 
 use std::path::{Path, PathBuf};
@@ -103,7 +104,7 @@ fn opens_prod_copy_unchanged_and_reads_everything() {
         schema_of(fresh().store.path()),
         "migrated prod schema equals a fresh schema"
     );
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         assert_eq!(
             c.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))?,
             "ok"

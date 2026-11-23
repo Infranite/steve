@@ -9,6 +9,7 @@ use steve_modules::changes::{self, Origin, Proposal};
 use steve_modules::contacts::{self, Ports};
 use steve_modules::testkit::{ME, TestEnv, WS, call, caller};
 use steve_modules::{ApiError, Caller, accounts};
+use steve_store::testkit::modules::contacts_changes as fixture;
 
 fn env_with(ports: Ports) -> TestEnv {
     TestEnv::new(move |reg| {
@@ -40,18 +41,6 @@ fn id(v: &Value) -> String {
     v["id"].as_str().expect("id").to_string()
 }
 
-fn scalar<T: rusqlite::types::FromSql>(t: &TestEnv, sql: &str) -> T {
-    t.store()
-        .with_conn(|c| Ok(c.query_row(sql, [], |r| r.get(0))?))
-        .expect("query")
-}
-
-fn exec(t: &TestEnv, sql: &str) {
-    t.store()
-        .with_conn(|c| Ok(c.execute_batch(sql)?))
-        .expect("exec");
-}
-
 /// Drafts with the model answering `ops`; returns the proposal.
 async fn draft(
     t: &TestEnv,
@@ -78,7 +67,7 @@ fn line(l: &str, f: &str, to: &str) -> (String, String, String) {
 }
 
 fn stored_ops(t: &TestEnv, cs: &str) -> Vec<Value> {
-    let s: String = scalar(t, &format!("SELECT ops FROM changesets WHERE id = '{cs}'"));
+    let s: String = fixture::changeset_ops(t.store(), &cs).unwrap();
     serde_json::from_str(&s).expect("ops json")
 }
 
@@ -125,43 +114,6 @@ async fn world(r: &Router) -> World {
 }
 
 /// Everything about the data the examples touch, to compare before/after an apply + undo.
-fn state(t: &TestEnv) -> Value {
-    let rows = |sql: &str| -> Value {
-        t.store()
-            .with_conn(|c| {
-                let mut st = c.prepare(sql)?;
-                let n = st.column_count();
-                let rows = st
-                    .query_map([], |r| {
-                        let mut row = Vec::new();
-                        for i in 0..n {
-                            let v: rusqlite::types::Value = r.get(i)?;
-                            row.push(match v {
-                                rusqlite::types::Value::Null => Value::Null,
-                                rusqlite::types::Value::Integer(i) => json!(i),
-                                rusqlite::types::Value::Real(f) => json!(f),
-                                rusqlite::types::Value::Text(s) => json!(s),
-                                rusqlite::types::Value::Blob(_) => json!("blob"),
-                            });
-                        }
-                        Ok(Value::Array(row))
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok(Value::Array(rows))
-            })
-            .expect("rows")
-    };
-    json!({
-        "parties": rows("SELECT id, type, name, aliases, rels, important, note, org_kind, status FROM parties ORDER BY id"),
-        "links": rows("SELECT subject_id, predicate, object_id, props FROM links ORDER BY subject_id, object_id"),
-        "mems": rows("SELECT id, kind, text FROM mems ORDER BY id"),
-        "attrs": rows("SELECT id, key, label, value, status FROM attr_values ORDER BY id"),
-        "defs": rows("SELECT key FROM attr_defs WHERE workspace_id != '*' ORDER BY key"),
-        "teams": rows("SELECT party_id, kind, purpose FROM team_details ORDER BY party_id"),
-        "members": rows("SELECT team_id, contact_id, role, source FROM team_members ORDER BY team_id, contact_id"),
-        "domains": rows("SELECT domain, org_id FROM org_domains ORDER BY domain"),
-    })
-}
 
 // ---------------------------------------------------------------- Example 1
 
@@ -170,7 +122,7 @@ async fn sarah_moves_to_globex() {
     let t = env();
     let r = app(&t);
     let w = world(&r).await;
-    let before = state(&t);
+    let before = fixture::snapshot(t.store());
     let p = draft(
         &t,
         "contact",
@@ -239,25 +191,21 @@ async fn sarah_moves_to_globex() {
         .find(|j| j["org_name"] == "Acme")
         .unwrap();
     assert_eq!(acme_job["to"], "2026-10");
-    let globex: String = scalar(&t, "SELECT org_kind FROM parties WHERE name = 'Globex'");
+    let globex: String = fixture::globex_kind(t.store()).unwrap();
     assert_eq!(globex, "partner");
-    let (text, status, st): (String, String, String) = t
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT m.text, m.status, m.source_type FROM mems m JOIN mem_about a ON a.mem_id = m.id WHERE a.object_id = ?",
-                [&w.sarah],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )?)
-        })
-        .unwrap();
+    let (text, status, st): (String, String, String) =
+        fixture::party_memory(t.store(), &w.sarah).unwrap();
     assert_eq!(
         (text.as_str(), status.as_str(), st.as_str()),
         ("Sarah 换到 Globex 做 PM", "confirmed", "me")
     );
 
     undo(&t, &p.id);
-    assert_eq!(state(&t), before, "undo puts everything back");
+    assert_eq!(
+        fixture::snapshot(t.store()),
+        before,
+        "undo puts everything back"
+    );
 }
 
 // ---------------------------------------------------------------- Example 2
@@ -268,7 +216,7 @@ async fn new_delivery_team_from_names() {
     let r = app(&t);
     let w = world(&r).await;
     let mine = id(&ok(&r, "GET", "/me/contact", Value::Null).await);
-    let before = state(&t);
+    let before = fixture::snapshot(t.store());
     let p = draft(
         &t,
         "team",
@@ -291,7 +239,7 @@ async fn new_delivery_team_from_names() {
     assert_eq!(ops[0]["members"], json!([w.lilei, w.wang, w.sarah]));
 
     apply(&t, &p.id).unwrap();
-    let tm: String = scalar(&t, "SELECT id FROM parties WHERE type = 'team'");
+    let tm: String = fixture::only_team(t.store()).unwrap();
     let team = ok(&r, "GET", &format!("/teams/{tm}"), Value::Null).await;
     assert_eq!(team["kind"], "virtual");
     assert_eq!(team["headcount"], 4);
@@ -301,7 +249,11 @@ async fn new_delivery_team_from_names() {
     assert!(members.iter().all(|m| m["source"] == "chat"));
 
     undo(&t, &p.id);
-    assert_eq!(state(&t), before, "the team is gone again");
+    assert_eq!(
+        fixture::snapshot(t.store()),
+        before,
+        "the team is gone again"
+    );
 }
 
 // ---------------------------------------------------------------- not guessing
@@ -412,7 +364,7 @@ async fn address_changes_undo_restores_values_with_different_labels() {
         if key == "call_ext_scope" {
             ok(&r, "POST", &format!("/parties/{mine}/attrs"), json!({"key":key,"label":"Other scope","value":json!({"kind":"persona","id":"space1","name":"Other alias"}).to_string()})).await;
         }
-        let before = state(&t);
+        let before = fixture::snapshot(t.store());
         let p = draft(
             &t,
             "contact",
@@ -445,7 +397,7 @@ async fn address_changes_undo_restores_values_with_different_labels() {
         }
         undo(&t, &p.id);
         assert_eq!(
-            state(&t),
+            fixture::snapshot(t.store()),
             before,
             "{key}: undo restores the exact prior values and statuses"
         );
@@ -471,7 +423,7 @@ async fn contact_fields_attributes_and_append() {
         json!({ "note": "老客户" }),
     )
     .await;
-    let before = state(&t);
+    let before = fixture::snapshot(t.store());
     let p = draft(
         &t,
         "contact",
@@ -538,7 +490,7 @@ async fn contact_fields_attributes_and_append() {
 
     undo(&t, &p.id);
     assert_eq!(
-        state(&t),
+        fixture::snapshot(t.store()),
         before,
         "old phone confirmed again, new definition gone"
     );
@@ -587,22 +539,10 @@ async fn me_keeps_its_relation_and_accounts_are_offered_with_the_module() {
     assert!(t.gateway.last_prompt().unwrap().contains("account.add · "));
     assert_eq!(lines(&p), vec![line("新账号", "—", "邮箱 sarah@acme.com")]);
     apply(&t, &p.id).unwrap();
-    let n: i64 = scalar(
-        &t,
-        &format!(
-            "SELECT COUNT(*) FROM accounts WHERE party_id = '{}'",
-            w.sarah
-        ),
-    );
+    let n: i64 = fixture::account_count(t.store(), &w.sarah).unwrap();
     assert_eq!(n, 1);
     undo(&t, &p.id);
-    let n: i64 = scalar(
-        &t,
-        &format!(
-            "SELECT COUNT(*) FROM accounts WHERE party_id = '{}'",
-            w.sarah
-        ),
-    );
+    let n: i64 = fixture::account_count(t.store(), &w.sarah).unwrap();
     assert_eq!(n, 0);
 }
 
@@ -667,18 +607,12 @@ async fn org_created_meanwhile_is_reused_and_kept_on_undo_when_referenced() {
     // someone creates Hooli by hand before the draft is applied: it is reused, not duplicated
     let hooli = id(&ok(&r, "POST", "/orgs", json!({ "name": "hooli" })).await);
     apply(&t, &p.id).unwrap();
-    let n: i64 = scalar(
-        &t,
-        "SELECT COUNT(*) FROM parties WHERE lower(name) = 'hooli'",
-    );
+    let n: i64 = fixture::hooli_count(t.store()).unwrap();
     assert_eq!(n, 1);
     let c = ok(&r, "GET", &format!("/contacts/{}", w.lilei), Value::Null).await;
     assert_eq!(c["org"]["id"], hooli);
     undo(&t, &p.id);
-    let status: String = scalar(
-        &t,
-        &format!("SELECT status FROM parties WHERE id = '{hooli}'"),
-    );
+    let status: String = fixture::party_status(t.store(), &hooli).unwrap();
     assert_eq!(status, "active", "a reused organization stays");
 
     // a created organization that got referenced meanwhile is retired, not purged
@@ -691,7 +625,7 @@ async fn org_created_meanwhile_is_reused_and_kept_on_undo_when_referenced() {
     )
     .await;
     apply(&t, &p.id).unwrap();
-    let pp: String = scalar(&t, "SELECT id FROM parties WHERE name = 'Pied Piper'");
+    let pp: String = fixture::pied_piper_id(t.store()).unwrap();
     ok(
         &r,
         "POST",
@@ -700,7 +634,7 @@ async fn org_created_meanwhile_is_reused_and_kept_on_undo_when_referenced() {
     )
     .await;
     undo(&t, &p.id);
-    let status: String = scalar(&t, &format!("SELECT status FROM parties WHERE id = '{pp}'"));
+    let status: String = fixture::party_status(t.store(), &pp).unwrap();
     assert_eq!(status, "deleted");
     let _ = w.acme;
 }
@@ -719,7 +653,7 @@ async fn org_fields_and_domains() {
         json!({ "name": "Globex", "domains": ["globex.com"] }),
     )
     .await;
-    let before = state(&t);
+    let before = fixture::snapshot(t.store());
     let p = draft(
         &t,
         "org",
@@ -751,7 +685,7 @@ async fn org_fields_and_domains() {
         (json!("partner"), json!(["acme.com", "acme.io"]))
     );
     undo(&t, &p.id);
-    assert_eq!(state(&t), before);
+    assert_eq!(fixture::snapshot(t.store()), before);
 
     // a domain of another organization is shown, not planned
     let p = draft(
@@ -785,7 +719,7 @@ async fn team_members_purpose_and_org_chart_limits() {
         json!({ "name": "前端小组", "purpose": "做 web", "members": [{ "contact_id": "me" }, { "contact_id": w.lilei }] }),
     )
     .await);
-    let before = state(&t);
+    let before = fixture::snapshot(t.store());
     let p = draft(
         &t,
         "team",
@@ -821,14 +755,10 @@ async fn team_members_purpose_and_org_chart_limits() {
     );
     assert_eq!(team["headcount"], 3);
     undo(&t, &p.id);
-    assert_eq!(state(&t), before);
+    assert_eq!(fixture::snapshot(t.store()), before);
 
     // org-chart team: only purpose
-    exec(
-        &t,
-        "INSERT INTO parties (id, workspace_id, type, name, source, created_by, created, updated) VALUES ('tm_rd', 'default', 'team', '研发', 'sync', 'usr_dev', 1, 1);
-         INSERT INTO team_details (party_id, workspace_id, kind, sync_connection, external_id, synced) VALUES ('tm_rd', 'default', 'chart', 'con_fs', 'dep_rd', 1);",
-    );
+    fixture::seed_synced_team(t.store()).unwrap();
     let p = draft(
         &t,
         "team",
@@ -864,10 +794,7 @@ async fn team_members_purpose_and_org_chart_limits() {
         vec![json!({ "op": "team.patch", "id": "tm_rd", "purpose": "负责 Steve" })]
     );
     apply(&t, &p.id).unwrap();
-    let purpose: String = scalar(
-        &t,
-        "SELECT purpose FROM team_details WHERE party_id = 'tm_rd'",
-    );
+    let purpose: String = fixture::synced_team_purpose(t.store()).unwrap();
     assert_eq!(purpose, "负责 Steve");
 }
 
@@ -928,10 +855,7 @@ async fn a_draft_is_stored_in_zh_cn_from_an_english_request() {
     .await;
     assert_eq!(p.title, "Sarah Chen 的资料");
     assert_eq!(lines(&p), vec![line("重要", "否", "是")]);
-    let title: String = scalar(
-        &t,
-        &format!("SELECT title FROM changesets WHERE id = '{}'", p.id),
-    );
+    let title: String = fixture::changeset_title(t.store(), &p.id).unwrap();
     assert_eq!(title, "Sarah Chen 的资料");
     let e = steve_i18n::scope(
         steve_i18n::EN,

@@ -30,7 +30,7 @@ pub struct Files<'a>(&'a Store);
 
 impl Files<'_> {
     pub fn get(&self, id: &str) -> Result<Option<FileRow>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             one(
                 c,
                 "SELECT * FROM files WHERE id = ?",
@@ -42,7 +42,7 @@ impl Files<'_> {
 
     /// The dedupe lookup: same workspace, content and (sanitized) name.
     pub fn same(&self, ws: &str, sha256: &str, name: &str) -> Result<Option<FileRow>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             one(
                 c,
                 "SELECT * FROM files WHERE workspace_id = ? AND sha256 = ? AND name = ? LIMIT 1",
@@ -53,7 +53,7 @@ impl Files<'_> {
     }
 
     pub fn create(&self, p: &NewFile) -> Result<FileRow> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             w.c.run(
                 "INSERT INTO files (id, workspace_id, sha256, name, mime, size, created_by, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 params![p.id, p.workspace_id, p.sha256, p.name, p.mime, p.size, p.created_by, now()],

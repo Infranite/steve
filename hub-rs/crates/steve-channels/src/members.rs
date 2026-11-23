@@ -11,15 +11,14 @@
 //!   organization, marked 客户 / 合作方 / 供应商, and for other organizations; `null` (unknown)
 //!   otherwise.
 
-use rusqlite::{Connection, params};
 use serde::Serialize;
-use steve_modules::accounts::service::{current_party, is_ours};
 use steve_modules::contacts::repo::{self as people, Party};
-use steve_modules::contacts::service::own_party;
 use steve_store::base::Viewer;
+use steve_store::channel_spaces::members::{self as repo, Member};
+use steve_store::{Read, Store, link_repo};
 
 use crate::ChannelResult;
-use crate::spaces::{self, SpaceRow};
+use crate::spaces::SpaceRow;
 
 pub const PAGE: usize = 50;
 /// Relations to you that make a contact one of us / not one of us (when no job says so).
@@ -70,98 +69,63 @@ pub struct MembersPage {
     pub members: Vec<MemberOut>,
 }
 
-struct Row {
-    account_id: String,
-    name: String,
-    handle: String,
-    role: String,
-    joined: i64,
-    party_id: String,
-}
-
-/// Current `works_at` organizations of a contact, oldest link first.
-fn jobs(c: &Connection, ws: &str, party: &str) -> ChannelResult<Vec<String>> {
-    let mut st = c.prepare_cached(
-        "SELECT object_id FROM links WHERE workspace_id = ? AND subject_type = 'party' AND subject_id = ?
-            AND predicate = 'works_at' AND object_type = 'party' AND json_extract(props, '$.to') IS NULL
-          ORDER BY created, object_id",
-    )?;
-    let rows = st
-        .query_map(params![ws, party], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
-}
-
-fn visible(c: &Connection, viewer: &Viewer, p: &Party) -> bool {
-    own_party(c, viewer, &p.id, &p.kind, "联系人", false).is_ok()
+fn visible(viewer: &Viewer, p: &Party) -> bool {
+    p.workspace_id == viewer.ws
+        && p.status != "deleted"
+        && viewer.sees(&p.visibility, &p.created_by)
 }
 
 /// One page of the members of space `id`: owners and admins first, then by name.
 pub fn page(
-    c: &Connection,
+    store: &Store,
     viewer: &Viewer,
     id: &str,
     offset: usize,
     limit: usize,
 ) -> ChannelResult<MembersPage> {
-    let space = spaces::own(c, viewer, id)?;
-    let total: i64 = c.query_row(
-        "SELECT count(*) FROM space_members WHERE space_id = ?",
-        [&space.id],
-        |r| r.get(0),
-    )?;
-    let mut st = c.prepare_cached(
-        "SELECT m.account_id, CASE WHEN a.display_name <> '' THEN a.display_name ELSE a.handle_display END,
-                a.handle_display, m.role, m.joined, a.party_id
-           FROM space_members m JOIN accounts a ON a.id = m.account_id
-          WHERE m.space_id = ?
-          ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 WHEN 'bot' THEN 3 ELSE 2 END,
-                   CASE WHEN a.display_name <> '' THEN a.display_name ELSE a.handle_display END, m.account_id
-          LIMIT ? OFFSET ?",
-    )?;
-    let rows = st
-        .query_map(params![space.id, limit as i64, offset as i64], |r| {
-            Ok(Row {
-                account_id: r.get(0)?,
-                name: r.get(1)?,
-                handle: r.get(2)?,
-                role: r.get(3)?,
-                joined: r.get(4)?,
-                party_id: r.get(5)?,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(st);
-    let self_org = people::self_org(c, &viewer.ws)?.map(|o| o.id);
-    let members = rows
-        .into_iter()
-        .map(|r| member(c, viewer, &space, self_org.as_deref(), r))
-        .collect::<ChannelResult<Vec<_>>>()?;
-    Ok(MembersPage {
-        total,
-        offset,
-        limit,
-        members,
+    store.read(|db| {
+        let space = steve_store::channel_spaces::rows::get_in_workspace(db, &viewer.ws, id)?
+            .ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
+        let total = repo::count(db, &space.id)?;
+        let rows = repo::page(db, &space.id, offset as u64, limit as u64)?;
+        let self_org = people::self_org(db, &viewer.ws)?.map(|o| o.id);
+        let members = rows
+            .into_iter()
+            .map(|row| member(db, viewer, &space, self_org.as_deref(), row))
+            .collect::<ChannelResult<Vec<_>>>()?;
+        Ok(MembersPage {
+            total,
+            offset,
+            limit,
+            members,
+        })
     })
 }
 
 fn member(
-    c: &Connection,
+    db: &mut impl Read,
     viewer: &Viewer,
     space: &SpaceRow,
     self_org: Option<&str>,
-    r: Row,
+    r: Member,
 ) -> ChannelResult<MemberOut> {
-    let party = current_party(c, &r.party_id)?.filter(|p| p.status != "deleted");
+    let party = steve_store::Contacts::new(db)
+        .current_party(&r.party_id)?
+        .filter(|p| p.status != "deleted");
     let jobs = match &party {
-        Some(p) if p.kind == "contact" => jobs(c, &viewer.ws, &p.id)?,
+        Some(p) if p.kind == "contact" => link_repo::current_employers(db, &viewer.ws, &p.id)?,
         _ => Vec::new(),
     };
     let external = match &party {
         _ if !space.has_external => Some(false),
         Some(p) if p.user_id.is_some() || Some(p.id.as_str()) == self_org => Some(false),
         // one of our own app bots (each is its own bot party)
-        Some(p) if is_ours(c, p)? => Some(false),
+        Some(p)
+            if p.contact_kind.as_deref() == Some("bot")
+                && steve_store::Connections(db).has_live_party(&p.id)? =>
+        {
+            Some(false)
+        }
         Some(p) if p.kind == "org" => Some(true),
         _ if self_org.is_some_and(|o| jobs.iter().any(|j| j == o)) => Some(false),
         _ if !jobs.is_empty() => Some(true),
@@ -169,12 +133,12 @@ fn member(
         Some(p) if p.rels.iter().any(|r| EXTERNAL_RELS.contains(&r.as_str())) => Some(true),
         _ => None,
     };
-    let shown = party.filter(|p| visible(c, viewer, p));
+    let shown = party.filter(|p| visible(viewer, p));
     let org = match &shown {
         Some(_) => {
             let mut org = None;
             for j in &jobs {
-                if let Some(o) = people::get(c, j)?.filter(|o| visible(c, viewer, o)) {
+                if let Some(o) = people::get(db, j)?.filter(|o| visible(viewer, o)) {
                     org = Some(OrgRef {
                         id: o.id,
                         name: o.name,

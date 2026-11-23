@@ -21,7 +21,7 @@ use steve_modules::accounts::connections::EXTRA_SCOPES;
 use steve_modules::accounts::identify::{ExtraHandle, Hints, Identified, identify};
 use steve_modules::vault::VaultResult;
 use steve_modules::{ApiError, ApiResult, Caller, Modules};
-use steve_store::Tx;
+use steve_store::W;
 
 use super::auth::{USER_ADAPTER, USER_SYSTEM};
 
@@ -37,7 +37,7 @@ pub struct FeishuIds {
 /// connection (a message with only the `open_id` still matches). Your own messages land on “我”
 /// once you authorized; `actor` is the bot connection's owner.
 pub fn identify_sender(
-    tx: &Tx,
+    w: &mut W<'_>,
     ws: &str,
     actor: &str,
     ids: &FeishuIds,
@@ -62,7 +62,7 @@ pub fn identify_sender(
         source_label: Some("飞书".into()),
         ..Default::default()
     };
-    identify(tx, ws, actor, USER_SYSTEM, handle, &hints)
+    identify(w, ws, actor, USER_SYSTEM, handle, &hints)
 }
 
 // ---------------------------------------------------------------------------------------------

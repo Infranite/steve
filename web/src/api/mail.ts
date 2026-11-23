@@ -1,7 +1,5 @@
 import { hubUrl } from "@/hub"
-/* Mail (email.md §9): the Hub's /api/mail/…. On a Hub without the module, `NotWired` (from modReq) tells a page to
- * fall back to its Unwired placeholder. Shapes follow steve-mail's api.rs / drafts.rs. Sending only ever happens through
- * a `mail_draft` decision: `POST /mail/drafts/:id/send` opens it and approves it as you, or the approval card's `send`. */
+/** Mailboxes, threads and drafts. */
 import { modReq, qs, type RFile } from "@/api"
 import { lazy } from "@/api/accounts"
 import { t } from "@/i18n"

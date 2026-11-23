@@ -159,6 +159,7 @@ struct TapSlot {
     filter: EventFilter,
     tx: tokio::sync::mpsc::Sender<Arc<Envelope<BusEvent>>>,
     overflow: VecDeque<(Option<u64>, Arc<Envelope<BusEvent>>)>,
+    /// Counts the events this tap lost to its full overflow, when its owner watches that.
     evicted_since_warn: u64,
     last_warn: Option<std::time::Instant>,
 }
@@ -262,11 +263,18 @@ fn hash_tap_key(k: &(&'static str, Option<steve_types::WorkspaceId>, String)) ->
     h.finish()
 }
 
+pub(crate) struct Commit {
+    pub rev: Rev,
+    pub at: std::time::Instant,
+    pub events: Vec<Arc<Envelope<BusEvent>>>,
+}
+
 struct Inner {
     caches: Arc<steve_runtime::cache::Caches>,
     reports: Arc<crate::system::RuntimeReports>,
     tx: std::sync::mpsc::Sender<(Arc<Envelope<BusEvent>>, std::time::Instant)>,
     revision: Mutex<u64>,
+    commits: broadcast::Sender<Arc<Commit>>,
     out: broadcast::Sender<Arc<Delivery>>,
     taps: Taps,
     log: Arc<Log>,
@@ -315,6 +323,7 @@ impl Bus {
             reports,
             tx,
             revision: Mutex::new(0),
+            commits: broadcast::channel(TAP_CAPACITY).0,
             out,
             taps,
             log,
@@ -333,6 +342,10 @@ impl Bus {
             .push(TapSlot::new(Box::new(filter), tx));
         rx
     }
+    /// Complete committed batches, for consumers that must catch up to a revision atomically.
+    pub(crate) fn commits(&self) -> broadcast::Receiver<Arc<Commit>> {
+        self.0.commits.subscribe()
+    }
     pub fn publish(&self, event: impl Into<BusEvent>) {
         self.publish_batch(vec![event.into()]);
     }
@@ -344,17 +357,46 @@ impl Bus {
         let mut revision = self.0.revision.lock().unwrap_or_else(|e| e.into_inner());
         if events.iter().any(|e| matches!(e, BusEvent::Domain(_))) {
             *revision += 1;
+            // a change of views: the request this commit is part of answers with it (`x-steve-rev`)
+            if events.iter().any(crate::projection::changes_views) {
+                steve_store::instrumentation::committed(*revision);
+            }
         }
+        let at = std::time::Instant::now();
+        let rev = Rev(*revision);
+        let watching = self.0.commits.receiver_count() > 0;
+        let mut committed = Vec::new();
         for event in events {
             self.caches().invalidate(&crate::cache_tags::tags(&event));
-            let _ = self.0.tx.send((
-                Arc::new(Envelope {
-                    event,
-                    rev: Rev(*revision),
-                }),
-                std::time::Instant::now(),
-            ));
+            let envelope = Arc::new(Envelope { event, rev });
+            if watching && envelope.event.as_domain().is_some() {
+                committed.push(envelope.clone());
+            }
+            let _ = self.0.tx.send((envelope, at));
         }
+        if !committed.is_empty() {
+            let _ = self.0.commits.send(Arc::new(Commit {
+                rev,
+                at,
+                events: committed,
+            }));
+        }
+    }
+    /// Publishes what changed in a workspace's views, as of `rev` (the revision the projection had
+    /// seen when it read them). Kept in the change log and sent to streams; no internal subscriber
+    /// gets it and it invalidates nothing.
+    pub fn publish_patch(&self, patch: steve_types::Patch, rev: Rev) {
+        let _ = self.0.tx.send((
+            Arc::new(Envelope {
+                event: BusEvent::Patch(patch),
+                rev,
+            }),
+            std::time::Instant::now(),
+        ));
+    }
+    /// The revision of the last committed batch published.
+    pub fn rev(&self) -> Rev {
+        Rev(*self.0.revision.lock().unwrap_or_else(|e| e.into_inner()))
     }
     pub fn caches(&self) -> &Arc<steve_runtime::cache::Caches> {
         &self.0.caches
@@ -362,12 +404,6 @@ impl Bus {
     pub(crate) fn reports(&self) -> Arc<crate::system::RuntimeReports> {
         self.0.reports.clone()
     }
-    /// Published state events, independent of dispatcher coalescing.
-    pub fn generation(&self) -> u64 {
-        self.caches()
-            .generation(&steve_runtime::cache::Tag::global("state-events"))
-    }
-
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<Delivery>> {
         self.0.out.subscribe()
     }
@@ -463,7 +499,7 @@ fn dispatch(
             .entry(kind)
             .or_insert_with(|| metrics::counter!("steve_bus_published_total", "type" => kind))
             .increment(1);
-        {
+        if !matches!(event.event, BusEvent::Patch(_)) {
             let mut t = taps.lock().unwrap_or_else(|e| e.into_inner());
             t.retain_mut(|slot| {
                 if slot.matches(&event.event) {
@@ -494,6 +530,10 @@ struct Sender {
 
 impl Sender {
     fn send(&mut self, event: Arc<Envelope<BusEvent>>, published: std::time::Instant) {
+        // its views reach clients as patches instead
+        if crate::projection::replaced(&event.event) {
+            return;
+        }
         let kept = !TRANSIENT.contains(&event.event.wire_type());
         let id = kept.then(|| {
             self.next_id += 1;
@@ -557,17 +597,13 @@ impl StatsThrottle {
 
 #[cfg(test)]
 mod tests {
-    fn state_generation(bus: &super::Bus, ws: &str) -> u64 {
-        bus.caches()
-            .generation(&steve_runtime::cache::Tag::of("state", ws))
-    }
-
     use super::*;
     use serde_json::Value;
     use std::time::Duration;
     use steve_types::*;
-    fn item(id: &str, ws: &str) -> BusEvent {
-        WorkEvent::Item {
+
+    fn project(id: &str, ws: &str) -> BusEvent {
+        ConfigEvent::Project {
             id: id.into(),
             ws: ws.into(),
         }
@@ -676,45 +712,14 @@ mod tests {
         assert_eq!(serde_json::to_value(&*due[0]).unwrap()["day"], "3");
         assert_eq!(t.deadline(), None);
     }
-    #[test]
-    fn generation_for_isolates_workspaces_and_keeps_global_monotonicity() {
-        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
-            Default::default(),
-        )));
-        bus.publish(item("a", "a"));
-        assert_eq!(
-            (state_generation(&bus, "a"), state_generation(&bus, "b")),
-            (1, 0)
-        );
-        bus.publish(item("b", "b"));
-        bus.publish(DomainEvent::from(DevicesEvent::Node {
-            id: "n".into(),
-            user: "u".into(),
-        }));
-        assert_eq!(
-            (state_generation(&bus, "a"), state_generation(&bus, "b")),
-            (2, 2)
-        );
-        let before = (state_generation(&bus, "a"), state_generation(&bus, "b"));
-        for i in 0..10_050 {
-            bus.publish(memory("m", &format!("w-{i}")));
-        }
-        // Bounded generation compaction is tested by steve-runtime/cache.
-        assert!(state_generation(&bus, "a") >= before.0 && state_generation(&bus, "b") >= before.1);
-        let b = state_generation(&bus, "b");
-        let a = state_generation(&bus, "a");
-        bus.publish(memory("m", "a"));
-        assert_eq!(state_generation(&bus, "a"), a + 1);
-        assert_eq!(state_generation(&bus, "b"), b);
-    }
     #[tokio::test]
     async fn fan_out_in_order_with_scopes() {
         let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
             Default::default(),
         )));
         let mut rx = bus.subscribe();
-        bus.publish(item("one", "a"));
-        bus.publish(item("two", "b"));
+        bus.publish(project("one", "a"));
+        bus.publish(project("two", "b"));
         let first = next(&mut rx).await;
         let second = next(&mut rx).await;
         assert_eq!(json(&first)["id"], "one");
@@ -893,7 +898,7 @@ mod tests {
                 matches!(e.event.as_live(),Some(LiveEvent::Work(WorkLiveEvent::Event {seq:actual,..})) if actual.0==seq)
             );
         }
-        bus.publish(item("next", "a"));
+        bus.publish(project("next", "a"));
         bus.live(
             WorkLiveEvent::SteveThinking {
                 on: true,
@@ -914,7 +919,7 @@ mod tests {
         let start = bus.cursor();
         bus.publish(stats("a", "1"));
         bus.publish(stats("a", "2"));
-        bus.publish(item("later", "a"));
+        bus.publish(project("later", "a"));
         let a = next(&mut rx).await;
         let b = next(&mut rx).await;
         let c = next(&mut rx).await;
@@ -952,7 +957,7 @@ mod tests {
             }
             .into(),
         );
-        bus.publish(item("kept", "a"));
+        bus.publish(project("kept", "a"));
         assert!(next(&mut rx).await.id.is_none());
         assert!(next(&mut rx).await.id.is_none());
         let kept = next(&mut rx).await;
@@ -962,7 +967,7 @@ mod tests {
     }
     async fn publish_items(bus: &Bus, rx: &mut broadcast::Receiver<Arc<Delivery>>, n: usize) {
         for i in 0..n {
-            bus.publish(item(&format!("ST-{i:03}"), "a"));
+            bus.publish(project(&format!("ST-{i:03}"), "a"));
         }
         for _ in 0..n {
             next(rx).await;
@@ -982,7 +987,7 @@ mod tests {
     }
     #[tokio::test]
     async fn eviction_by_bytes_resets_older_cursors() {
-        let one = retained_size(&enveloped(item("ST-000", "a")));
+        let one = retained_size(&enveloped(project("ST-000", "a")));
         let bus = Bus::with_window(1000, 2 * one + 1);
         let mut rx = bus.subscribe();
         publish_items(&bus, &mut rx, 4).await;
@@ -1043,7 +1048,7 @@ mod tests {
         assert!(frames(bus.replay(&bus.cursor())).0.is_empty());
         let mut rx = bus.subscribe();
         for i in 1..=20 {
-            bus.publish(item(&format!("{i}"), "a"));
+            bus.publish(project(&format!("{i}"), "a"));
             let e = next(&mut rx).await;
             assert_eq!(bus.cursor().n, e.id.unwrap());
             assert!(frames(bus.replay(&bus.cursor())).0.is_empty());

@@ -1,3 +1,4 @@
+import { getItems, getItem } from "@/store"
 /* 待办: what you yourself are to do, and your goals. Not 待处理 (cards waiting for your decision) and not 事项 (work a
  * Bot does): a todo handed to a Bot becomes an item and stays here, showing it. Every member sees only their own.
  *
@@ -15,7 +16,7 @@ import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Switch } from "@/components/ui/switch"
 import { useT } from "@/i18n"
-import { st, useHubEvents, useStore } from "@/store"
+import { useHubEvents, useStore } from "@/store"
 import { Blank, Card, Empty, go, Loading, Note, Panel, Row, Section, Segmented, SearchField, Status, Page } from "@/ui"
 import { Count, Select } from "@/view-shared"
 import { change, isTodoEvent, loadTodos, todosApi, useMinute, useTodos } from "./data"
@@ -35,7 +36,7 @@ function Tabs({ tab }: { tab: Tab }) {
 function useListState() {
   const t = useT(), s = useTodos()
   if (s.todos) return { todos: s.todos, gate: null }
-  if (s.error) return { todos: null, gate: <Empty title={s.unwired ? t("todos:list.unwired") : t("todos:list.failed")} sub={s.unwired ? t("todos:list.unwiredSub") : s.error} action={<Button variant="outline" onClick={() => void loadTodos()} data-todos-retry>{t("common:action.retry")}</Button>} data-todos-error /> }
+  if (s.error) return { todos: null, gate: <Empty title={t("todos:list.failed")} sub={s.error} action={<Button variant="outline" onClick={() => void loadTodos()} data-todos-retry>{t("common:action.retry")}</Button>} data-todos-error /> }
   return { todos: null, gate: <Loading /> }
 }
 
@@ -198,9 +199,9 @@ function TodoDetail({ x }: { x: Todo }) {
 function GoalPage({ g, reload }: { g: Goal; reload: () => void }) {
   const t = useT(), now = useMinute(), due = useDueText()
   const p = g.progress, left = daysLeft(g, now)
-  const items = g.items.map((id) => ({ id, i: st.items.find((x) => x.id === id) }))
+  const items = g.items.map((id) => ({ id, i: getItem(id) }))
   const mine = g.children.filter((c) => c.state !== "handed").length, bots = g.children.filter((c) => c.state === "handed").length + items.length
-  const running = items.filter((x) => x.i && x.i.st !== "done" && x.i.st !== "drop").length + g.children.filter((c) => c.state === "handed" && st.items.find((i) => i.id === c.item_id && i.st !== "done" && i.st !== "drop")).length
+  const running = items.filter((x) => x.i && x.i.st !== "done" && x.i.st !== "drop").length + g.children.filter((c) => c.state === "handed" && getItems().find((i) => i.id === c.item_id && i.st !== "done" && i.st !== "drop")).length
   const save = (patch: Parameters<typeof todosApi.patch>[1]) => change(todosApi.patch(g.id, patch), t("common:state.saved"))
   const open = g.state === "open"
   const children = [...g.children].sort((a, b) => Number(a.state !== "open") - Number(b.state !== "open"))
@@ -261,7 +262,7 @@ function LinkItem({ g, onDone }: { g: Goal; onDone: () => void }) {
   const t = useT(), [open, setOpen] = useState(false), [q, setQ] = useState("")
   const taken = new Set([...g.items, ...g.children.map((c) => c.item_id).filter(Boolean) as string[]])
   const x = q.trim().toLowerCase()
-  const list = st.items.filter((i) => !taken.has(i.id) && !i.arch && (!x || `${i.id} ${i.t}`.toLowerCase().includes(x))).slice(0, 8)
+  const list = getItems().filter((i) => !taken.has(i.id) && !i.arch && (!x || `${i.id} ${i.t}`.toLowerCase().includes(x))).slice(0, 8)
   return (
     <Popover open={open} onOpenChange={(o) => { setOpen(o); if (!o) setQ("") }}>
       <PopoverTrigger render={<Button size="sm" variant="ghost" className="h-7 gap-1 px-2 text-muted-foreground" data-goal-link />}><LinkIcon className="size-3.5" />{t("todos:goal.link")}</PopoverTrigger>

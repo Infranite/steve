@@ -9,7 +9,6 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use steve_modules::ApiError;
-use steve_store::Tx;
 use steve_store::outbox::{self, Applied, ConsumeError, Consumer, Event, Since};
 
 use crate::GitHub;
@@ -41,7 +40,15 @@ pub struct PrSupplement {
 
 /// Moves `fx`'s items to finish and signals into the outbox, in `tx` (the transaction that changed
 /// what they follow). Nothing when there are none.
-pub(crate) fn emit(tx: &Tx, ws: &str, connection: &str, fx: &mut Effects) -> Result<(), ApiError> {
+pub(crate) fn emit(
+    tx: &mut steve_store::W<'_>,
+    ws: &str,
+    connection: &str,
+    fx: &mut Effects,
+) -> Result<(), ApiError> {
+    for id in &fx.gh {
+        crate::events::emit(tx, ws, id);
+    }
     if fx.finish.is_empty() && fx.signals.is_empty() && fx.supplements.is_empty() {
         return Ok(());
     }
@@ -52,7 +59,7 @@ pub(crate) fn emit(tx: &Tx, ws: &str, connection: &str, fx: &mut Effects) -> Res
         supplements: std::mem::take(&mut fx.supplements),
     };
     let payload = serde_json::to_value(&a).map_err(|e| ApiError::Internal(e.to_string()))?;
-    outbox::emit(tx, ws, TOPIC, VERSION, &payload)?;
+    outbox::append(tx, ws, TOPIC, VERSION, &payload)?;
     Ok(())
 }
 
@@ -112,7 +119,7 @@ impl Consumer for GitHubAfter {
         .map_err(ConsumeError::Retry)
     }
 
-    fn apply(&self, _tx: &Tx, ev: &Event) -> Result<Applied, ConsumeError> {
+    fn apply(&self, _w: &mut steve_store::W<'_>, ev: &Event) -> Result<Applied, ConsumeError> {
         let a = after(ev)?;
         Ok(Applied::noted(format!(
             "{} 个事项，{} 个信号",
@@ -133,14 +140,7 @@ impl GitHub {
         let store = flow.store().clone();
         let (ws2, item, key2) = (ws.to_string(), s.item.clone(), key.clone());
         let done = store
-            .reader::<_, steve_store::StoreError>(move |c| {
-                Ok(c.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM links WHERE workspace_id = ? AND subject_type = 'item'
-                       AND subject_id = ? AND predicate = 'from' AND object_type = 'gh_signal' AND object_id = ?)",
-                    rusqlite::params![ws2, item, key2],
-                    |r| r.get::<_, bool>(0),
-                )?)
-            })
+            .read(|r| steve_store::link_repo::item_event_exists(r, &ws2, &item, "gh_signal", &key2))
             .map_err(|e| e.to_string())?;
         if done {
             return Ok(());
@@ -157,9 +157,8 @@ impl GitHub {
         }
         let (ws2, item) = (ws.to_string(), s.item.clone());
         store
-            .transaction(move |tx| {
-                steve_store::base::links::add(
-                    tx,
+            .write(move |tx| {
+                steve_store::base::links::Links(tx).add(
                     &ws2,
                     &steve_store::base::links::NewLink::new(
                         steve_store::base::ObjRef::new("item", &item),

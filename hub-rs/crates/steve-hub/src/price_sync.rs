@@ -8,7 +8,8 @@
 use std::time::Duration;
 
 use steve_stats::catalog;
-use steve_store::{Store, StoreError, now};
+use steve_store::statistics::Catalog;
+use steve_store::{Store, StoreError, Workspaces, now};
 
 const DAY: i64 = 24 * 3600 * 1000;
 const RETRY: i64 = 3600 * 1000;
@@ -93,12 +94,11 @@ pub async fn sync_once(
     url: &str,
 ) -> Result<Synced, String> {
     let s = store.clone();
-    let etag =
-        tokio::task::spawn_blocking(move || s.reader(|c| catalog::state(c, catalog::SOURCE)))
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())?
-            .etag;
+    let etag = tokio::task::spawn_blocking(move || s.read(|r| Catalog(r).state(catalog::SOURCE)))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?
+        .etag;
     let outcome = match fetch(client, url, etag.as_deref()).await {
         Ok(v) => v,
         Err(e) => return Err(record_err(store, e).await),
@@ -107,22 +107,19 @@ pub async fn sync_once(
     let done = tokio::task::spawn_blocking(move || -> Result<Synced, String> {
         let t = now();
         let Some((body, etag)) = outcome else {
-            s.transaction(|c| catalog::record_ok(c, catalog::SOURCE, t, None, None))
+            s.write(|w| Catalog(w).record_ok(catalog::SOURCE, t, None, None))
                 .map_err(|e| e.to_string())?;
             return Ok(Synced::Unchanged);
         };
         let entries = catalog::parse(&body).map_err(|e| format!("Models.dev 的数据读不懂：{e}"))?;
         let changed = s
-            .transaction(|c| {
-                let n = catalog::save(c, &entries, t)?;
-                catalog::record_ok(c, catalog::SOURCE, t, etag.as_deref(), Some(entries.len()))?;
+            .write(|w| {
+                let mut catalog = Catalog(w);
+                let n = catalog.save(&entries, t)?;
+                catalog.record_ok(catalog::SOURCE, t, etag.as_deref(), Some(entries.len()))?;
                 if n > 0 {
-                    let wss: Vec<String> = c
-                        .prepare("SELECT id FROM workspaces")?
-                        .query_map([], |r| r.get(0))?
-                        .collect::<rusqlite::Result<_>>()?;
-                    for ws in wss {
-                        c.publish(steve_store::stats_changed(&ws, None));
+                    for ws in Workspaces(w).ids()? {
+                        w.emit(steve_store::stats_changed(&ws, None));
                     }
                 }
                 Ok::<_, StoreError>(n)
@@ -145,7 +142,7 @@ async fn record_err(store: &Store, e: String) -> String {
     let s = store.clone();
     let msg = e.clone();
     let _ = tokio::task::spawn_blocking(move || {
-        s.transaction(|c| catalog::record_err(c, catalog::SOURCE, now(), &msg))
+        s.write(|w| Catalog(w).record_err(catalog::SOURCE, now(), &msg))
     })
     .await;
     tracing::warn!("price sync: {e}");
@@ -173,7 +170,7 @@ pub async fn run(store: Store, url: Option<String>) {
     loop {
         let s = store.clone();
         let state =
-            tokio::task::spawn_blocking(move || s.reader(|c| catalog::state(c, catalog::SOURCE)))
+            tokio::task::spawn_blocking(move || s.read(|r| Catalog(r).state(catalog::SOURCE)))
                 .await;
         if let Ok(Ok(state)) = state
             && due(&state, now())

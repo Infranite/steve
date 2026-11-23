@@ -1,6 +1,7 @@
 //! Durable state of a source-driven schedule start. Run retention must preserve its latest anchor.
 use super::*;
 use serde::Deserialize;
+use steve_store::{Read, RunRows, StartupRecord, W};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -137,21 +138,22 @@ fn diagnostic(
 
 /// The latest damaged record remains diagnosable even after a new configuration starts.
 pub fn startup_diagnostic(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     flow: &str,
     source: &str,
 ) -> FlowResult<Option<StartupDiagnostic>> {
     let revision = match crate::scheduler::startup_revision(c, ws, flow)? {
         Some(revision) => Some(revision),
-        None => inspect_records(c, ws, flow, source, false, Some)?
+        None => RunRows(c)
+            .inspect_startup(ws, flow, source, false, Some)?
             .filter(|row| !row.unreadable && metadata(&row.context).is_ok())
             .map(|row| row.context["startup"]["revision"].clone()),
     };
-    inspect_records(c, ws, flow, source, true, |row| {
+    Ok(RunRows(c).inspect_startup(ws, flow, source, true, |row| {
         (row.unreadable || metadata(&row.context).is_err())
             .then(|| diagnostic(&row, flow, source, revision.as_ref()))
-    })
+    })?)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -173,55 +175,8 @@ pub struct FailedStart<'a> {
     pub limit: i64,
 }
 
-struct StartupRecord {
-    id: String,
-    context: Value,
-    unreadable: bool,
-}
-
-// Only the identifiers and metadata are needed. Decode each column independently so unrelated
-// damaged columns (or a malformed context) cannot make the owner's diagnostic endpoint fail.
-fn inspect_records<T>(
-    c: &Connection,
-    ws: &str,
-    flow: &str,
-    source: &str,
-    include_unattributed: bool,
-    mut select: impl FnMut(StartupRecord) -> Option<T>,
-) -> FlowResult<Option<T>> {
-    let mut stmt = c.prepare_cached(
-        "SELECT rowid,id,context FROM flow_runs WHERE workspace_id=?1 AND flow_id=?2
-         AND CASE WHEN json_valid(CAST(context AS TEXT)) AND json_type(CAST(context AS TEXT))='object' THEN
-           json_extract(CAST(context AS TEXT),'$.source')=?3 AND json_type(CAST(context AS TEXT),'$.startup') IS NOT NULL
-         ELSE ?4 END ORDER BY rowid DESC",
-    )?;
-    let rows = stmt.query_map(params![ws, flow, source, include_unattributed], |r| {
-        let rowid: i64 = r.get(0)?;
-        let id = r.get::<_, String>(1).ok();
-        let raw = r.get_ref(2)?;
-        let context = match raw {
-            rusqlite::types::ValueRef::Text(bytes) | rusqlite::types::ValueRef::Blob(bytes) => {
-                serde_json::from_slice(bytes).ok()
-            }
-            _ => None,
-        };
-        let context_type_ok = matches!(raw, rusqlite::types::ValueRef::Text(_));
-        Ok(StartupRecord {
-            unreadable: id.is_none() || context.is_none() || !context_type_ok,
-            id: id.unwrap_or_else(|| format!("rowid:{rowid}")),
-            context: context.unwrap_or(Value::Null),
-        })
-    })?;
-    for row in rows {
-        if let Some(value) = select(row?) {
-            return Ok(Some(value));
-        }
-    }
-    Ok(None)
-}
-
 fn latest(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     flow: &str,
     source: &str,
@@ -229,12 +184,13 @@ fn latest(
 ) -> FlowResult<Option<StartupRecord>> {
     // Filter the configuration identity BEFORE decoding the budget. Keep the damaged old row
     // unchanged; a deliberate save has a new identity and must be able to start at zero.
-    Ok(inspect_records(c, ws, flow, source, false, Some)?
+    Ok(RunRows(c)
+        .inspect_startup(ws, flow, source, false, Some)?
         .filter(|row| row.context["startup"]["revision"] == *revision))
 }
 
 pub fn startup_check(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     flow: &str,
     source: &str,
@@ -261,7 +217,7 @@ pub fn startup_check(
 
 /// Only source-owned records in this configuration advance the budget.
 pub fn startup_state(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     flow: &str,
     source: &str,
@@ -278,7 +234,7 @@ pub fn startup_state(
 
 /// A successful start resets this source's budget in the same transaction as the new run.
 pub fn record_started(
-    tx: &Tx,
+    w: &mut W<'_>,
     run: &str,
     source: &str,
     revision: &Value,
@@ -287,7 +243,9 @@ pub fn record_started(
     if limit < 1 {
         return Err(crate::FlowError::invalid("startup limit"));
     }
-    let row = get(tx, run)?.ok_or_else(|| crate::FlowError::not_found("运行"))?;
+    let row = RunRows(w)
+        .get(run)?
+        .ok_or_else(|| crate::FlowError::not_found("运行"))?;
     let mut context = row.context;
     context["source"] = json!(source);
     context["startup"] = serde_json::to_value(Metadata {
@@ -298,28 +256,25 @@ pub fn record_started(
         limit,
     })
     .expect("startup metadata");
-    tx.execute(
-        "UPDATE flow_runs SET context=?1 WHERE id=?2",
-        params![context.to_string(), run],
-    )?;
+    RunRows(w).set_context(run, &context)?;
     // The run's insert already staged the ordinary Run/Flow notifications in this transaction.
     Ok(())
 }
 
 /// Coalesce only the latest matching error, but carry the budget across different error rows.
-pub fn record_start_failure(tx: &Tx, f: &FailedStart<'_>) -> FlowResult<String> {
-    record_start_rejection(tx, f, f.error)
+pub fn record_start_failure(w: &mut W<'_>, f: &FailedStart<'_>) -> FlowResult<String> {
+    record_start_rejection(w, f, f.error)
 }
 
 /// Store only a stable code/parameter object and a fingerprint of the internal rejection.
 /// Distinct errors still split history even when their safe user-facing explanation is identical.
 pub(crate) fn record_start_rejection(
-    tx: &Tx,
+    w: &mut W<'_>,
     f: &FailedStart<'_>,
     detail: &str,
 ) -> FlowResult<String> {
     let fingerprint = steve_store::sha(detail);
-    let state = startup_state(tx, f.ws, f.flow_id, f.source, f.revision)?;
+    let state = startup_state(w, f.ws, f.flow_id, f.source, f.revision)?;
     if let Some(s) = &state
         && s.state == StartupStatus::Dead
     {
@@ -332,14 +287,9 @@ pub(crate) fn record_start_rejection(
         .map_or(0, |s| s.attempts)
         .saturating_add(1)
         .min(f.limit);
-    let previous_id: Option<(Option<String>, Value)> = tx.query_row(
-        "SELECT id,context FROM flow_runs WHERE workspace_id=?1 AND flow_id=?2 ORDER BY rowid DESC LIMIT 1",
-        params![f.ws,f.flow_id], |r| {
-            let context = r.get::<_,String>(1).ok().and_then(|s|serde_json::from_str(&s).ok()).unwrap_or(Value::Null);
-            Ok((r.get(0)?,context))
-        }).optional()?;
+    let previous_id = RunRows(w).latest_context(f.ws, f.flow_id)?;
     let row = match previous_id.filter(|(_, ctx)| ctx["startup"]["revision"] == *f.revision) {
-        Some((Some(id), _)) => get(tx, &id)?,
+        Some((Some(id), _)) => RunRows(w).get(&id)?,
         _ => None,
     };
     let previous = row.filter(|r| {
@@ -385,34 +335,28 @@ pub(crate) fn record_start_rejection(
     let reused = previous.is_some();
     let run = match previous {
         Some(r) => r.id,
-        None => insert(
-            tx,
-            &NewRun {
-                ws: f.ws,
-                flow_id: f.flow_id,
-                flow_version: f.flow_version,
-                trigger_kind: "manual",
-                status: "failed",
-                outcome_label: START_REJECTED_CODE,
-                error: Some(START_REJECTED_CODE),
-                cursor: None,
-                context: &context,
-                now: f.now,
-            },
-        )?,
+        None => RunRows(w).insert(&NewRun {
+            ws: f.ws,
+            flow_id: f.flow_id,
+            flow_version: f.flow_version,
+            trigger_kind: "manual",
+            status: "failed",
+            outcome_label: START_REJECTED_CODE,
+            error: Some(START_REJECTED_CODE),
+            cursor: None,
+            context: &context,
+            now: f.now,
+        })?,
     };
     if reused {
-        tx.execute(
-            "UPDATE flow_runs SET error=?1,outcome_label=?1,context=?2,started=?3,ended=?3 WHERE id=?4",
-            params![START_REJECTED_CODE, context.to_string(), f.now, run],
+        RunRows(w).refresh_start_failure(
+            f.ws,
+            f.flow_id,
+            &run,
+            START_REJECTED_CODE,
+            &context,
+            f.now,
         )?;
-        publish(tx, f.ws, f.flow_id, &run);
     }
     Ok(run)
 }
-
-// One causal state anchor per live flow/source, including a successful reset. Do not resurrect
-// an older dead record by pruning its later reset. Superseded anchors use ordinary retention.
-pub(super) const ANCHORS: &str = "SELECT max(r.rowid) FROM flow_runs r JOIN flows f ON f.id=r.flow_id
-    WHERE f.deleted=0 AND CASE WHEN json_valid(r.context) THEN json_type(r.context,'$.startup') IS NOT NULL ELSE 0 END
-    GROUP BY r.workspace_id,r.flow_id,CASE WHEN json_valid(r.context) THEN json_extract(r.context,'$.source') END";

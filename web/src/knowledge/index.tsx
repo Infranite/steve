@@ -21,7 +21,7 @@ import { Page, SectionLabel, Group, Panel, Row, Segmented, Chips, Empty, Blank, 
 import { toast, tm } from "@/store"
 import { useUploads } from "@/attach"
 import { kb, levelLabel, visLabel, memKind, LONG_TERM, SOURCE_KIND, LEVEL_DOT, type Candidate, type ExpiredCandidate, type DocBrief, type Hit, type KbSource, type Mem, type MemProvider } from "@/api/knowledge"
-import { KbGate, LevelSel, META_SELECT, VisSel, errMsg } from "@/knowledge/fields"
+import { LevelSel, META_SELECT, VisSel, errMsg } from "@/knowledge/fields"
 import { DocView, NoteView } from "@/knowledge/doc"
 import { SubjectsTab, SubjectView } from "@/knowledge/subjects"
 import { StewardTab } from "@/knowledge/steward"
@@ -39,7 +39,7 @@ let tab: Tab = "长期记忆", query = "", tabHash = ""
 export function KnowledgeView({ sub, id }: { sub?: string; id?: string }) {
   const [docId] = (id ?? "").split("?")
   const subject = sub === "about" ? parseSubject(docId) : null
-  return <KbGate>{sub === "doc" && docId ? <DocView id={docId} /> : sub === "note" && docId ? <NoteView id={docId} /> : subject ? <SubjectView key={docId} type={subject.type} id={subject.id} /> : <KnowledgeHome />}</KbGate>
+  return sub === "doc" && docId ? <DocView id={docId} /> : sub === "note" && docId ? <NoteView id={docId} /> : subject ? <SubjectView key={docId} type={subject.type} id={subject.id} /> : <KnowledgeHome />
 }
 
 const hashParam = (k: string) => new URLSearchParams(location.hash.split("?")[1] ?? "").get(k)

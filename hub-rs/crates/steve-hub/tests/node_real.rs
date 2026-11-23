@@ -43,6 +43,7 @@ use std::time::Duration;
 use steve_runtime::testkit::eventually;
 use steve_runtime::testkit::eventually_sync;
 use steve_runtime::testkit::process::{Child, Command};
+use steve_store::testkit::hub::node_process;
 
 use serde_json::{Value, json};
 
@@ -143,31 +144,8 @@ impl Home {
         format!("http://127.0.0.1:{}", self.port)
     }
     /// The test's own database (in the temp home), read-only.
-    fn db(&self) -> rusqlite::Connection {
-        let c = rusqlite::Connection::open_with_flags(
-            self.steve().join("data/steve.sqlite3"),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .expect("db");
-        c.busy_timeout(Duration::from_secs(5)).expect("timeout");
-        c
-    }
-    fn count(&self, sql: &str, p: &[&dyn rusqlite::ToSql]) -> i64 {
-        self.db()
-            .query_row(sql, p, |r| r.get(0))
-            .unwrap_or_else(|e| panic!("{sql}: {e}"))
-    }
-    fn one(&self, sql: &str, p: &[&dyn rusqlite::ToSql]) -> Option<String> {
-        self.db().query_row(sql, p, |r| r.get(0)).ok()
-    }
-    /// The Node's tool journal (`data/node/host-tools.sqlite3`), read-only.
-    fn journal(&self, sql: &str, p: &[&dyn rusqlite::ToSql]) -> i64 {
-        rusqlite::Connection::open_with_flags(
-            self.steve().join("data/node/host-tools.sqlite3"),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .and_then(|c| c.query_row(sql, p, |r| r.get(0)))
-        .unwrap_or(0)
+    fn db_path(&self) -> std::path::PathBuf {
+        self.steve().join("data/steve.sqlite3")
     }
 }
 
@@ -332,24 +310,7 @@ fn hub_log(h: &Home) -> String {
     let lines: Vec<&str> = s.lines().collect();
     let mut out = lines[lines.len().saturating_sub(60)..].join("\n");
     // the Node's side, which the Hub's log may not tell: its commands and their receipts
-    if let Ok(db) = rusqlite::Connection::open_with_flags(
-        h.steve().join("data/steve.sqlite3"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    ) {
-        let rows = db
-            .prepare("SELECT method, state, COALESCE(receipt,'') FROM node_commands ORDER BY created, rowid")
-            .and_then(|mut q| {
-                q.query_map([], |r| {
-                    Ok(format!(
-                        "{} {} {}",
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?
-                    ))
-                })?
-                .collect::<Result<Vec<_>, _>>()
-            })
-            .unwrap_or_default();
+    if let Ok(rows) = node_process::command_trace(&h.db_path()) {
         out.push_str("\nnode_commands:\n");
         out.push_str(&rows.join("\n"));
     }
@@ -538,9 +499,7 @@ impl Real {
             )
         });
         eventually_sync(diagnostic, || {
-            sid = self
-                .h
-                .one("SELECT id FROM sessions WHERE item_id=?", &[&item]);
+            sid = node_process::session_id_by_item(&self.h.db_path(), &item).unwrap();
             sid.is_some()
         })
         .await;
@@ -552,10 +511,7 @@ impl Real {
             )
         });
         eventually_sync(diagnostic, || {
-            self.h.count(
-                "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=? AND node_id='local'",
-                &[&sid],
-            ) == 1
+            node_process::binding_count_by_session_local(&self.h.db_path(), &sid).unwrap() == 1
         })
         .await;
         sid
@@ -563,73 +519,58 @@ impl Real {
 
     /// The session's last event seq.
     fn seq(&self, sid: &str) -> i64 {
-        self.h.count(
-            "SELECT COALESCE(MAX(seq),0) FROM events WHERE session_id=?",
-            &[&sid],
-        )
+        node_process::event_coalesce_max_seq_0_by_session(&self.h.db_path(), &sid).unwrap()
     }
 
     /// steve.v1 events of `sid` after `since`, not the user's own, that contain `needle`. The
     /// harness's reply streams as `text` chunks (a token may be cut across two), so their texts
     /// count as one, joined in order.
     fn said(&self, sid: &str, since: i64, needle: &str) -> i64 {
-        let other = self.h.count(
-            "SELECT COUNT(*) FROM events WHERE session_id=? AND seq>? AND format='steve.v1' AND kind NOT IN ('user','queued','text') AND instr(data, ?) > 0",
-            &[&sid, &since, &needle],
-        );
-        let text = self
-            .h
-            .one(
-                "SELECT group_concat(t, '') FROM (SELECT COALESCE(json_extract(data,'$.text'),'') AS t FROM events WHERE session_id=? AND seq>? AND format='steve.v1' AND kind='text' ORDER BY seq)",
-                &[&sid, &since],
-            )
+        let other = node_process::event_count_by_session_by_seq_steve_v1_selected(
+            &self.h.db_path(),
+            &sid,
+            since,
+            &needle,
+        )
+        .unwrap();
+        let text = node_process::output_text_after(&self.h.db_path(), &sid, since)
+            .unwrap()
             .unwrap_or_default();
         other + i64::from(text.contains(needle))
     }
 
     fn turns(&self, sid: &str) -> i64 {
-        self.h.count(
-            "SELECT COUNT(*) FROM runtime_turns WHERE session_id=?",
-            &[&sid],
-        )
+        node_process::runtime_turns_count_by_session(&self.h.db_path(), &sid).unwrap()
     }
 
     /// `n` turns so far and none open.
     fn done(&self, sid: &str, n: i64) -> bool {
         self.turns(sid) >= n
-            && self.h.count(
-                "SELECT COUNT(*) FROM runtime_turns WHERE session_id=? AND state<>'finished'",
-                &[&sid],
-            ) == 0
+            && node_process::runtime_turns_count_by_session_not_finished(&self.h.db_path(), &sid)
+                .unwrap()
+                == 0
     }
 
     fn open_card(&self, sid: &str) -> Option<String> {
-        self.h.one(
-            "SELECT id FROM decisions WHERE session_id=? AND subject_type='tool_call' AND status='open'",
-            &[&sid],
-        )
+        node_process::decision_id_by_session_tool_call_open(&self.h.db_path(), &sid).unwrap()
     }
 
     fn cards(&self, sid: &str) -> i64 {
-        self.h.count(
-            "SELECT COUNT(*) FROM decisions WHERE session_id=? AND subject_type='tool_call'",
-            &[&sid],
-        )
+        node_process::decision_count_by_session_tool_call(&self.h.db_path(), &sid).unwrap()
     }
 
     fn attempts(&self, sid: &str, state: &str) -> i64 {
-        self.h.count(
-            "SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND a.state=?",
-            &[&sid, &state],
-        )
+        node_process::attempt_count_by_session_by_state(&self.h.db_path(), &sid, &state).unwrap()
     }
 
     /// `configure_session` commands of `sid` the Node finished with success, with `permissions`.
     fn configured(&self, sid: &str, permissions: &str) -> i64 {
-        self.h.count(
-            "SELECT COUNT(*) FROM node_commands WHERE method='configure_session' AND json_extract(request,'$.body.session')=? AND json_extract(request,'$.body.policy.permissions')=? AND state='finished' AND json_extract(receipt,'$.success')=1",
-            &[&sid, &permissions],
+        node_process::command_count_configure_session_finished(
+            &self.h.db_path(),
+            &sid,
+            &permissions,
         )
+        .unwrap()
     }
 
     /// Switches YOLO on for the workspace. An item in its own worktree already runs in
@@ -662,11 +603,8 @@ impl Real {
             )
         });
         eventually_sync(diagnostic, || {
-            self.h
-                .one(
-                    "SELECT phase FROM runtime_sessions WHERE session_id=?",
-                    &[&sid],
-                )
+            node_process::binding_phase_by_session(&self.h.db_path(), &sid)
+                .unwrap()
                 .as_deref()
                 == Some("ready")
         })
@@ -701,10 +639,8 @@ impl Real {
     /// after [`TURN`]. A turn that ends without a delivery opens a `fail` card too; that one is
     /// the item's business, not the session's, and does not count.
     fn failed(&self, sid: &str, since: i64) -> Option<String> {
-        self.h.one(
-            "SELECT d.question FROM decisions d JOIN sessions s ON s.item_id=d.item_id WHERE s.id=? AND d.kind='fail' AND d.status='open' AND d.created>=? AND instr(d.question, '会话出错')=1 ORDER BY d.created LIMIT 1",
-            &[&sid, &since],
-        )
+        node_process::first_decision_d_question_by_id_fail_open(&self.h.db_path(), &sid, since)
+            .unwrap()
     }
 
     /// Waits for a permission card of `sid`.
@@ -833,7 +769,8 @@ fn png(w: u32, h: u32, rgb: [u8; 3]) -> Vec<u8> {
 /// The session's working directory.
 fn cwd(r: &Real, sid: &str) -> PathBuf {
     PathBuf::from(
-        r.h.one("SELECT cwd FROM sessions WHERE id=?", &[&sid])
+        node_process::session_cwd_by_id(&r.h.db_path(), &sid)
+            .unwrap()
             .expect("cwd"),
     )
 }
@@ -850,10 +787,7 @@ async fn the_test_project_is_a_node_root_from_the_first_turn() {
     r.turn_over(&sid, 1, "first turn").await;
     assert!(r.said(&sid, 0, "rooted-A7") > 0, "the turn ran on the Node");
     assert_eq!(
-        r.h.count(
-            "SELECT COUNT(*) FROM node_commands WHERE method='prepare_workspace' AND state='finished' AND json_extract(receipt,'$.success')=1",
-            &[]
-        ),
+        node_process::command_count_prepare_workspace_finished(&r.h.db_path()).unwrap(),
         1,
         "the workspace prepared on the Node; log:\n{}",
         hub_log(&r.h)
@@ -895,10 +829,7 @@ async fn an_auto_bot_runs_on_the_node_and_yolo_sets_auto_back() {
     let sid = r.item("A7 自动 @say first-auto").await;
     r.turn_over(&sid, 1, "first turn").await;
     assert_eq!(
-        r.h.count(
-            "SELECT COUNT(*) FROM node_commands WHERE method='open_session' AND json_extract(request,'$.body.session')=? AND json_extract(request,'$.body.policy.permissions')='auto' AND state='finished' AND json_extract(receipt,'$.success')=1",
-            &[&sid]
-        ),
+        node_process::command_count_open_session_finished(&r.h.db_path(), &sid).unwrap(),
         1,
         "opened in auto; log:\n{}",
         hub_log(&r.h)
@@ -933,29 +864,18 @@ async fn a_hello_turn_is_steve_v1_with_usage_and_cost() {
     assert_eq!(r.cards(&sid), 0, "no permission asked");
     assert!(r.attempts(&sid, "finished") >= 1, "ran as a Node attempt");
     assert_eq!(
-        r.h.count(
-            "SELECT COUNT(*) FROM events WHERE session_id=? AND format<>'steve.v1'",
-            &[&sid]
-        ),
+        node_process::event_count_by_session_not_finished(&r.h.db_path(), &sid).unwrap(),
         0,
         "nothing in another format"
     );
     assert_eq!(
-        r.h.count(
-            "SELECT COUNT(*) FROM agent_turns WHERE session_id=? AND node_attempt_id IS NOT NULL AND ended IS NOT NULL",
-            &[&sid]
-        ),
+        node_process::completed_node_turn_count(&r.h.db_path(), &sid).unwrap(),
         1,
         "one statistics row for the attempt"
     );
-    let output = r.h.count(
-        "SELECT COALESCE(SUM(output),0) FROM usage_records WHERE session_id=?",
-        &[&sid],
-    );
-    let cost = r.h.one(
-        "SELECT CAST(MAX(COALESCE(u.cost_reported,0), COALESCE(s.cost,0)) AS TEXT) FROM sessions s LEFT JOIN usage_records u ON u.session_id=s.id WHERE s.id=?",
-        &[&sid],
-    );
+    let output =
+        node_process::usage_records_coalesce_sum_output_0_by_session(&r.h.db_path(), &sid).unwrap();
+    let cost = node_process::session_reported_cost_text(&r.h.db_path(), &sid).unwrap();
     eprintln!("case 1: output tokens {output}, cost {cost:?}");
     assert!(output > 0, "output tokens recorded");
     assert!(
@@ -979,18 +899,17 @@ async fn a_steve_tool_call_goes_through_tool_service() {
         ))
         .await;
     r.allowing_until_over(&sid, 1, "tool call").await;
-    let calls = r.h.journal(
-        "SELECT COUNT(*) FROM calls WHERE session=? AND instr(name,'steve_knowledge_search')>0",
-        &[&sid],
-    );
-    let done = r.h.journal(
-        "SELECT COUNT(*) FROM calls WHERE session=? AND instr(name,'steve_knowledge_search')>0 AND state='done'",
-        &[&sid],
-    );
-    let kinds = r.h.one(
-        "SELECT tool_kinds FROM agent_turns WHERE session_id=?",
-        &[&sid],
-    );
+    let calls = node_process::tool_journal_calls_count_by_session(
+        &r.h.steve().join("data/node/host-tools.sqlite3"),
+        &sid,
+    )
+    .unwrap();
+    let done = node_process::tool_journal_calls_count_by_session_done(
+        &r.h.steve().join("data/node/host-tools.sqlite3"),
+        &sid,
+    )
+    .unwrap();
+    let kinds = node_process::turn_tool_kinds_by_session(&r.h.db_path(), &sid).unwrap();
     eprintln!("case 2: journal calls {calls}, done {done}, tool kinds {kinds:?}");
     assert_eq!((calls, done), (1, 1), "one call, done, in the journal");
     assert!(
@@ -1016,7 +935,8 @@ async fn a_bash_card_allowed_runs_and_a_rejected_one_does_not() {
     r.c.answer(&card, "allow_once").await;
     r.turn_over(&sid, 1, "allowed").await;
     assert_eq!(
-        r.h.one("SELECT status FROM decisions WHERE id=?", &[&card])
+        node_process::decision_status_by_id(&r.h.db_path(), &card)
+            .unwrap()
             .as_deref(),
         Some("resolved")
     );
@@ -1036,7 +956,8 @@ async fn a_bash_card_allowed_runs_and_a_rejected_one_does_not() {
     r.c.answer(&card, "reject").await;
     r.turn_over(&sid, 2, "rejected").await;
     assert_eq!(
-        r.h.one("SELECT status FROM decisions WHERE id=?", &[&card])
+        node_process::decision_status_by_id(&r.h.db_path(), &card)
+            .unwrap()
             .as_deref(),
         Some("resolved")
     );
@@ -1119,12 +1040,8 @@ async fn a_change_at_idle_applies_and_the_bots_model_reaches_the_harness() {
         ))
         .await;
     r.turn_over(&sid, 1, "model").await;
-    let open = r
-        .h
-        .one(
-            "SELECT request FROM node_commands WHERE method='open_session' ORDER BY created LIMIT 1",
-            &[],
-        )
+    let open = node_process::first_command_request_open_session(&r.h.db_path())
+        .unwrap()
         .expect("an open_session");
     eprintln!("case 5: open {open}");
     assert!(open.contains(&model()), "the open carries the model");
@@ -1144,10 +1061,7 @@ async fn a_change_at_idle_applies_and_the_bots_model_reaches_the_harness() {
     // at idle: the mode change goes to the Node now, not with a later open
     r.full_on().await;
     r.configure_over(&sid, "full_access").await;
-    let opens = r.h.count(
-        "SELECT COUNT(*) FROM node_commands WHERE method='open_session'",
-        &[],
-    );
+    let opens = node_process::command_count_open_session(&r.h.db_path()).unwrap();
     assert_eq!(opens, 1, "configured in place, not reopened");
     let mark = token("A7EDIT");
     r.c.say(
@@ -1192,11 +1106,9 @@ async fn a_released_session_reopens_with_its_conversation() {
         )
     });
     eventually_sync(diagnostic, || {
-        r.h.one(
-            "SELECT phase FROM runtime_sessions WHERE session_id=?",
-            &[&sid],
-        )
-        .as_deref()
+        node_process::binding_phase_by_session(&r.h.db_path(), &sid)
+            .unwrap()
+            .as_deref()
             == Some("released")
     })
     .await;
@@ -1208,14 +1120,8 @@ async fn a_released_session_reopens_with_its_conversation() {
     )
     .await;
     r.turn_over(&sid, 2, "recall").await;
-    let opens = r.h.count(
-        "SELECT COUNT(*) FROM node_commands WHERE method='open_session'",
-        &[],
-    );
-    let last = r.h.one(
-        "SELECT request FROM node_commands WHERE method='open_session' ORDER BY created DESC LIMIT 1",
-        &[],
-    );
+    let opens = node_process::command_count_open_session(&r.h.db_path()).unwrap();
+    let last = node_process::latest_command_request_open_session(&r.h.db_path()).unwrap();
     eprintln!("case 6: {opens} opens, last {last:?}");
     assert!(opens >= 2, "opened again");
     assert!(
@@ -1244,10 +1150,8 @@ async fn an_image_attachment_arrives_via_hub_files() {
     .await;
     r.turn_over(&sid, 2, "image").await;
     assert!(
-        r.h.count(
-            "SELECT COUNT(*) FROM events WHERE session_id=? AND kind='user' AND format='steve.v1' AND instr(data, ?) > 0",
-            &[&sid, &file]
-        ) > 0,
+        node_process::event_count_by_session_user_steve_v1(&r.h.db_path(), &sid, &file).unwrap()
+            > 0,
         "the user's message carries the file"
     );
     assert!(
@@ -1271,11 +1175,8 @@ async fn a_hub_killed_mid_turn_is_unknown_never_rerun_and_stop_abandons_it() {
         .await;
     // a permission card: the turn is surely in flight
     r.card(&sid, "mid-turn").await;
-    let turn =
-        r.h.one(
-            "SELECT turn_id FROM runtime_turns WHERE session_id=? AND state<>'finished'",
-            &[&sid],
-        )
+    let turn = node_process::runtime_turns_turn_id_by_session_not_finished(&r.h.db_path(), &sid)
+        .unwrap()
         .expect("the open turn");
     r.hub.kill();
     r.restart().await;
@@ -1287,23 +1188,18 @@ async fn a_hub_killed_mid_turn_is_unknown_never_rerun_and_stop_abandons_it() {
             hub_log(&r.h)
         )
     });
-    eventually_sync(diagnostic, || r.h.count(
-            "SELECT COUNT(*) FROM runtime_attempts WHERE turn_id=? AND json_extract(completion,'$.stop_reason')='node_restarted'",
-            &[&turn],
-        ) == 1)
-        .await;
+    eventually_sync(diagnostic, || {
+        node_process::attempt_count_by_turn(&r.h.db_path(), &turn).unwrap() == 1
+    })
+    .await;
     eventually_sync(
         "The session records the reason its Node attempt was interrupted.",
         || r.said(&sid, 0, "Node 重启了") > 0,
     )
     .await;
     tokio::time::sleep(Duration::from_secs(10)).await;
-    let of_turn = || {
-        r.h.count(
-            "SELECT COUNT(*) FROM runtime_attempts WHERE turn_id=?",
-            &[&turn],
-        )
-    };
+    let of_turn =
+        || node_process::attempt_count_by_turn_runtime_attempts(&r.h.db_path(), &turn).unwrap();
     assert_eq!(of_turn(), 1, "never re-run");
     assert!(
         !cwd(&r, &sid).join("a7-mark-8.txt").exists(),
@@ -1434,22 +1330,7 @@ async fn an_upgrade_drain_waits_for_a_node_turn() {
 /// YOLO's word on the latest permission card of `sid` created since `since` (ms): (card, status,
 /// outcome, rule, reason, card question).
 fn yolo_word(r: &Real, sid: &str, since: i64) -> Option<[String; 6]> {
-    r.h.db()
-        .query_row(
-            "SELECT d.id, d.status, a.outcome, a.rule, a.reason, d.question FROM decisions d JOIN yolo_actions a ON a.decision_id=d.id WHERE d.session_id=? AND d.subject_type='tool_call' AND d.created>=? AND a.outcome IN ('decided','declined') ORDER BY d.created DESC, a.rowid DESC LIMIT 1",
-            rusqlite::params![sid, since],
-            |x| {
-                Ok([
-                    x.get(0)?,
-                    x.get(1)?,
-                    x.get(2)?,
-                    x.get(3)?,
-                    x.get(4)?,
-                    x.get(5)?,
-                ])
-            },
-        )
-        .ok()
+    node_process::latest_permission_verdict(&r.h.db_path(), sid, since).unwrap()
 }
 
 /// The pid of the process whose whole command line is `cmd`, if one runs.
@@ -1476,18 +1357,7 @@ fn alive(pid: u32) -> bool {
 #[ignore = "real claude: costs model calls"]
 async fn yolo_answers_a_node_session_from_the_nodes_facts() {
     let r = Real::start().await;
-    {
-        let db = rusqlite::Connection::open(r.h.steve().join("data/steve.sqlite3")).expect("db");
-        db.busy_timeout(Duration::from_secs(5)).expect("timeout");
-        db.execute(
-            "INSERT INTO settings (workspace_id, key, value, updated) VALUES ('default', 'yolo.policy', ?, ?) ON CONFLICT(workspace_id, key) DO UPDATE SET value=excluded.value",
-            rusqlite::params![
-                json!({"presence_s": 0, "continue_stalls": false}).to_string(),
-                now_ms()
-            ],
-        )
-        .expect("policy");
-    }
+    node_process::set_yolo_test_policy(&r.h.db_path(), now_ms()).unwrap();
     r.yolo_on().await;
     let secs = 86_400 + (now_ms() % 10_000);
     let bg = format!("sleep {secs}");

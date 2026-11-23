@@ -1,4 +1,5 @@
 use super::*;
+use steve_store::testkit::hub::node_checks;
 
 const ERROR: &str = "stream disconnected before completion: upstream stream interrupted";
 const STOP: &str = steve_core::runtime::MODEL_STREAM_INTERRUPTED;
@@ -35,7 +36,7 @@ pub(super) async fn say(h: &H, exec: &ExecutionRef, role: Role, parts: &[&str]) 
 }
 
 pub(super) fn retry_at(h: &H) -> i64 {
-    h.q("SELECT retry_at FROM node_commands WHERE target_attempt=(SELECT active_attempt FROM runtime_sessions WHERE session_id='s1')")
+    node_checks::session_one_active_attempt_retry_at(&h.store).unwrap()
 }
 
 /// Advance retry time across a coordinator restart without editing the command ledger: the Node
@@ -69,9 +70,9 @@ async fn provider_stream_interruption_retries_the_same_turn_after_tools_and_exha
             h.ends().is_empty(),
             "turn end must not reach the continue budget"
         );
-        assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM runtime_turns"), 1);
+        assert_eq!(node_checks::runtime_turns_count(&h.store).unwrap(), 1);
         assert_eq!(
-            h.q::<i64>("SELECT COUNT(*) FROM events WHERE kind='turn_end'"),
+            node_checks::event_count_by_kind(&h.store, "turn_end").unwrap(),
             0
         );
         assert_eq!(h.stat_rows().last().unwrap().1.as_deref(), Some(STOP));
@@ -81,7 +82,7 @@ async fn provider_stream_interruption_retries_the_same_turn_after_tools_and_exha
             "backoff was skipped: {at} vs {before}"
         );
         assert!(at <= h.clock().now() + delay);
-        let spec: String = h.q("SELECT spec FROM runtime_attempts ORDER BY ordinal DESC LIMIT 1");
+        let spec: String = node_checks::latest_attempt_spec(&h.store).unwrap();
         let spec: TurnSpec = serde_json::from_str(&spec).unwrap();
         assert_eq!(spec.turn, turn);
         assert_eq!(
@@ -139,11 +140,11 @@ async fn provider_stream_interruption_retries_the_same_turn_after_tools_and_exha
     assert!(end.2.unwrap().contains("已自动重试 2 次仍失败"));
     assert_eq!(h.attempts().len(), 3);
     assert_eq!(
-        h.q::<String>("SELECT status FROM sessions WHERE id='s1'"),
+        node_checks::session_status_by_id(&h.store, "s1").unwrap(),
         "error"
     );
     assert_eq!(
-        h.q::<i64>("SELECT COUNT(*) FROM events WHERE kind='turn_end'"),
+        node_checks::event_count_by_kind(&h.store, "turn_end").unwrap(),
         1
     );
     // A later user turn has a fresh execution-error budget and cannot inherit the old text.
@@ -160,7 +161,7 @@ async fn provider_stream_interruption_retries_the_same_turn_after_tools_and_exha
     .await;
     assert_ne!(turn_of(&next), turn);
     assert_eq!(
-        h.q::<i64>("SELECT retry_ordinal FROM runtime_turns ORDER BY rowid DESC LIMIT 1"),
+        node_checks::latest_runtime_turns_retry_ordinal(&h.store).unwrap(),
         1
     );
     assert_eq!(retry_at(&h), h.clock().now() + 20_000);
@@ -261,18 +262,7 @@ async fn provider_stream_interruption_honors_delivery_question_and_cancel_during
         let h = hub();
         h.bind();
         let exec = h.running("work").await;
-        h.store.transaction::<_, StoreError>(|tx| {
-            tx.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES ('i1','default',1,'test','run','执行',1,1)", [])?;
-            tx.execute("UPDATE sessions SET item_id='i1' WHERE id='s1'", [])?;
-            if state == "closing" {
-                tx.execute("UPDATE items SET phase='closing' WHERE id='i1'", [])?;
-            } else if state == "question" {
-                tx.execute("INSERT INTO decisions(id,workspace_id,item_id,session_id,kind,subject_type,subject_id,question,status,requested_by,created) VALUES ('d1','default','i1','s1','ask','item','i1','input','open','steve',1)", [])?;
-            } else if state == "ended" {
-                tx.execute("UPDATE sessions SET status='ended' WHERE id='s1'", [])?;
-            }
-            Ok(())
-        }).unwrap();
+        steve_store::testkit::hub::node_fixtures::seed_retry_blocker(&h.store, state).unwrap();
         let mut c = build::done();
         c.outcome = Outcome::Failed;
         c.stop_reason = "error".into();

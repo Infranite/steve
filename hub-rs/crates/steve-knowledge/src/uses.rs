@@ -2,60 +2,24 @@
 //! stored as ids and numbers only, so titles, labels and links are looked up again here under
 //! today's visibility. Whatever is gone, or no longer visible to the caller, shows as “已删除”.
 
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use steve_modules::{ApiError, ApiResult, Caller, Modules};
-use steve_store::Result;
-use steve_store::base::{Level, Viewer, bind};
+use steve_store::base::Viewer;
+use steve_store::knowledge::{BotMemories, ChunkFilter, Chunks, KnowledgeUses};
+pub use steve_store::knowledge::{UseHit, UseRow};
+use steve_store::{Read, References, Result};
 
 pub const CONSUMERS: [&str; 5] = ["session", "chat", "draft", "flow", "search"];
 
-/// One stored hit (`kb_uses.hits[]`).
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct UseHit {
-    pub n: usize,
-    pub obj_type: String,
-    pub obj_id: String,
-    #[serde(default)]
-    pub seq: i64,
-    #[serde(default)]
-    pub score: f32,
-    pub level: Level,
-    #[serde(default)]
-    pub label: String,
-}
-
-/// One `kb_uses` row.
-#[derive(Debug, Clone, PartialEq)]
-pub struct UseRow {
-    pub id: String,
-    pub query: String,
-    pub hits: Vec<UseHit>,
-    pub created: i64,
-}
-
 /// The uses of one consumer, oldest first.
-pub fn uses_of(c: &Connection, ws: &str, ctype: &str, cid: &str) -> Result<Vec<UseRow>> {
-    let mut st = c.prepare_cached(
-        "SELECT id, query, hits, created FROM kb_uses
-          WHERE workspace_id = ? AND consumer_type = ? AND consumer_id = ? ORDER BY created, rowid",
-    )?;
-    let rows = st.query_map(params![ws, ctype, cid], |r| {
-        let hits: String = r.get(2)?;
-        Ok(UseRow {
-            id: r.get(0)?,
-            query: r.get(1)?,
-            hits: serde_json::from_str(&hits).unwrap_or_default(),
-            created: r.get(3)?,
-        })
-    })?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+pub fn uses_of(c: &mut impl Read, ws: &str, ctype: &str, cid: &str) -> Result<Vec<UseRow>> {
+    KnowledgeUses(c).by_consumer(ws, ctype, cid)
 }
 
 /// The highest `n` a session has been given so far (opening prompt and earlier searches), so the
 /// next `steve_knowledge_search` continues the numbering.
-pub fn last_n(c: &Connection, ws: &str, session_id: &str) -> Result<usize> {
+pub fn last_n(c: &mut impl Read, ws: &str, session_id: &str) -> Result<usize> {
     Ok(uses_of(c, ws, "session", session_id)?
         .iter()
         .flat_map(|u| u.hits.iter().map(|h| h.n))
@@ -75,42 +39,33 @@ pub struct Current {
 
 /// Title, label, link and heading of an index entry as `viewer` may see it now; `None` = gone,
 /// `never` or not visible.
-pub fn current(c: &Connection, viewer: &Viewer, h: &UseHit) -> Result<Option<Current>> {
-    let scope = viewer.sql("c");
-    let sql = format!(
-        "SELECT c.label, c.source_kind, d.title, d.ref, c.heading FROM kb_chunks c
-           LEFT JOIN kb_docs d ON c.obj_type = 'chunk' AND d.id = c.obj_id
-          WHERE c.workspace_id = ? AND c.obj_type = ? AND c.obj_id = ? AND c.seq = ?
-            AND c.level <> 'never' AND {}",
-        scope.sql
-    );
-    let mut p: Vec<rusqlite::types::Value> = vec![
-        viewer.ws.clone().into(),
-        h.obj_type.clone().into(),
-        h.obj_id.clone().into(),
-        h.seq.into(),
-    ];
-    p.extend(scope.params);
-    type Row = (String, String, Option<String>, Option<String>, String);
-    let row: Option<Row> = c
-        .prepare(&sql)?
-        .query_row(bind(p), |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-        })
-        .optional()?;
-    let Some((label, source_kind, title, r#ref, heading)) = row else {
+pub fn current(c: &mut impl Read, viewer: &Viewer, h: &UseHit) -> Result<Option<Current>> {
+    let filter = ChunkFilter {
+        ws: &viewer.ws,
+        workspace_only: viewer.is_service(),
+        kinds: None,
+        paused_docs: &[],
+        paused_mems: false,
+        paused_bot_mems: false,
+    };
+    let Some(row) = Chunks(c).chunk_in_scope(&filter, &h.obj_type, &h.obj_id, h.seq)? else {
         return Ok(None);
     };
+    let steve_store::knowledge::Candidate {
+        label,
+        source_kind,
+        title,
+        doc_ref: r#ref,
+        heading,
+        ..
+    } = row;
     let (title, href) = match h.obj_type.as_str() {
         "mem" => (
             crate::sync::mem_title(&label).to_string(),
             format!("#/knowledge?mem={}", h.obj_id),
         ),
         "bot_mem" => {
-            let bot: Option<String> = c
-                .prepare_cached("SELECT bot_id FROM bot_memories WHERE id = ?")?
-                .query_row([&h.obj_id], |r| r.get(0))
-                .optional()?;
+            let bot = BotMemories(c).bot(&h.obj_id)?;
             (
                 label.clone(),
                 bot.map_or_else(|| "#/bots".into(), |b| format!("#/bots/{b}")),
@@ -134,21 +89,11 @@ pub fn current(c: &Connection, viewer: &Viewer, h: &UseHit) -> Result<Option<Cur
 }
 
 /// Does the consumer exist in the caller's workspace (and, for searches, is it the caller)?
-fn owns(c: &Connection, who: &Caller, ctype: &str, cid: &str) -> Result<bool> {
-    let table = match ctype {
-        "search" => return Ok(cid == who.me),
-        "session" => "sessions",
-        "chat" => "messages",
-        "draft" => "mail_drafts",
-        "flow" => "flow_runs",
-        _ => return Ok(false),
-    };
-    Ok(c.prepare_cached(&format!(
-        "SELECT 1 FROM {table} WHERE id = ? AND workspace_id = ?"
-    ))?
-    .query_row(params![cid, who.ws], |_| Ok(()))
-    .optional()?
-    .is_some())
+fn owns(c: &mut impl Read, who: &Caller, ctype: &str, cid: &str) -> Result<bool> {
+    if ctype == "search" {
+        return Ok(cid == who.me);
+    }
+    References(c).counted_in(&who.ws, ctype, cid)
 }
 
 fn noun(ctype: &str) -> &'static str {
@@ -184,7 +129,7 @@ pub fn list(m: &Modules, who: &Caller, p: UsesParams) -> ApiResult<Value> {
         return Err(ApiError::Invalid(bad));
     }
     let viewer = m.viewer(who)?;
-    m.store.reader(|c| {
+    crate::read_api(&m.store, |c| {
         if !owns(c, who, &ctype, &cid)? {
             return Err(ApiError::not_found(noun(&ctype)));
         }

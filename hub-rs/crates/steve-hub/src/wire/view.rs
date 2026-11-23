@@ -10,10 +10,9 @@
 
 use std::path::Path;
 
-use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 use sha2::Digest as _;
-use steve_store::StoreError;
+use steve_store::{Read, StoreError, W, node_sessions::authority};
 
 use steve_store::base::{Viewer, Visibility};
 
@@ -52,75 +51,31 @@ fn clean(mut v: Vec<String>) -> Vec<String> {
 }
 
 /// The view of `session` (an item's or a plain session's); `None`: no such session.
-pub fn of_session(c: &Connection, session: &str) -> Result<Option<View>, StoreError> {
-    let row: Option<(String, Option<String>, String)> = c
-        .query_row(
-            "SELECT workspace_id, item_id, cwd FROM sessions WHERE id=?",
-            [session],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?;
-    let Some((ws, item, cwd)) = row else {
+pub fn of_session(r: &mut impl Read, session: &str) -> Result<Option<View>, StoreError> {
+    let Some(s) = authority::session(r, session)? else {
         return Ok(None);
     };
-    let Some((_, p)) = principal::of_session(c, session)? else {
+    let Some((_, p)) = principal::of_session(r, session)? else {
         return Ok(None);
     };
-    let mut rw = vec![cwd];
-    if let Some(item) = &item {
-        let i: Option<(Option<String>, Option<String>, Option<i64>)> = c
-            .query_row(
-                "SELECT i.cwd, p.path, p.worktree FROM items i LEFT JOIN projects p ON p.id=i.project_id
-                  WHERE i.id=?",
-                [item],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .optional()?;
-        if let Some((icwd, ppath, worktree)) = i {
-            rw.extend(icwd);
-            // a directory project: the run works in the project itself
-            if worktree == Some(0) {
-                rw.extend(ppath);
-            }
+    let mut rw = vec![s.cwd];
+    if let Some(item) = s.item
+        && let Some(item) = authority::item(r, &item)?
+    {
+        rw.extend(item.cwd);
+        if item.worktree == Some(false) {
+            rw.extend(item.project_path);
         }
     }
-    let mut q = c.prepare(
-        "SELECT json_extract(config,'$.path'), visibility, created_by FROM kb_sources
-          WHERE workspace_id=? AND kind='folder' AND json_valid(config) AND json_type(config,'$.path')='text'
-            AND paused=0",
-    )?;
-    let folders = q
-        .query_map([&ws], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    // The shared Viewer rule preserves workspace-only service audiences and unconditional
-    // personal reads, without borrowing a personal identity for service sessions.
-    let viewer = Viewer::load(c, &ws, p.user().unwrap_or(""))?;
-    let ro: Vec<String> = folders
+    let viewer = Viewer::bare(&s.workspace, p.user().unwrap_or(""));
+    let ro = authority::knowledge_folders(r, &s.workspace)?
         .into_iter()
-        .filter(|(_, vis, by)| {
-            let vis = Visibility::from_db(vis);
-            viewer.sees(&vis, by)
-        })
-        .map(|(path, _, _)| path)
+        .filter(|folder| viewer.sees(&Visibility::from_db(&folder.visibility), &folder.creator))
+        .map(|folder| folder.path)
         .collect();
-    // who reads it, as recorded at bind (a remote Node's owner among them)
-    let recorded: Option<String> = c
-        .query_row(
-            "SELECT audience FROM runtime_sessions WHERE session_id=?",
-            [session],
-            |r| r.get(0),
-        )
-        .optional()?
-        .flatten();
-    let audience = match recorded.and_then(|a| serde_json::from_str(&a).ok()) {
+    let audience = match s.audience {
         Some(a) => a,
-        None => principal::audience(c, &ws, &p, None)?,
+        None => principal::audience(r, &s.workspace, &p, None)?,
     };
     let rw = clean(rw);
     let mut ro = clean(ro);
@@ -161,97 +116,55 @@ pub fn diff(view: &View, today: &[String]) -> (Vec<String>, Vec<String>) {
 /// Records `session`'s view on `node`, with its difference from `today` (`None`: today's roots are
 /// not known here, a remote Node's are its own).
 pub fn record_in(
-    c: &Connection,
+    w: &mut W<'_>,
     session: &str,
     node: &str,
     today: Option<&[String]>,
 ) -> Result<(), StoreError> {
-    let Some(v) = of_session(c, session)? else {
+    let Some(view) = of_session(w, session)? else {
         return Ok(());
     };
-    let digest = v.digest();
-    let sample = |p: &[String]| serde_json::to_string(&p[..p.len().min(SAMPLE)]).ok();
-    let (extra_n, extra, missing_n, missing) = match today {
-        Some(t) => {
-            let (e, m) = diff(&v, t);
-            (
-                Some(e.len() as i64),
-                sample(&e),
-                Some(m.len() as i64),
-                sample(&m),
-            )
-        }
-        None => (None, None, None, None),
-    };
-    // the kind of run: only sessions are bound to a Node so far (jobs and commands come later)
-    let kind = "session";
-    c.execute(
-        "INSERT INTO view_shadow(session_id,node_id,kind,at,digest,view,extra_count,extra,missing_count,missing)
-         VALUES (?,?,?,?,?,?,?,?,?,?)
-         ON CONFLICT(session_id) DO UPDATE SET node_id=excluded.node_id, kind=excluded.kind, at=excluded.at,
-           digest=excluded.digest, view=excluded.view, extra_count=excluded.extra_count, extra=excluded.extra,
-           missing_count=excluded.missing_count, missing=excluded.missing",
-        rusqlite::params![
+    let diff = today.map(|today| diff(&view, today));
+    let sample = |paths: &[String]| paths.len().min(SAMPLE);
+    let extra = diff.as_ref().map(|(extra, _)| authority::PathDifference {
+        total: extra.len(),
+        sample: &extra[..sample(extra)],
+    });
+    let missing = diff.as_ref().map(|(_, missing)| authority::PathDifference {
+        total: missing.len(),
+        sample: &missing[..sample(missing)],
+    });
+    authority::record_view(
+        w,
+        authority::ViewRecord {
             session,
             node,
-            kind,
-            steve_store::now(),
-            digest,
-            serde_json::to_string(&v).unwrap_or_default(),
-            extra_n,
+            at: steve_store::now(),
+            digest: &view.digest(),
+            view: &view,
             extra,
-            missing_n,
-            missing
-        ],
-    )?;
-    c.execute(
-        "UPDATE runtime_sessions SET view_digest=? WHERE session_id=?",
-        rusqlite::params![digest, session],
-    )?;
-    Ok(())
+            missing,
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn db() -> Connection {
-        let c = Connection::open_in_memory().unwrap();
-        c.execute_batch(
-            "CREATE TABLE workspace_members(workspace_id TEXT, user_id TEXT, role TEXT, created INTEGER);
-             CREATE TABLE items(id TEXT, workspace_id TEXT, requested_by TEXT, cwd TEXT, project_id TEXT);
-             CREATE TABLE projects(id TEXT, path TEXT, worktree INTEGER);
-             CREATE TABLE sessions(id TEXT, workspace_id TEXT, item_id TEXT, cwd TEXT);
-             CREATE TABLE runtime_sessions(session_id TEXT, principal TEXT, audience TEXT, view_digest TEXT);
-             CREATE TABLE kb_sources(id TEXT, workspace_id TEXT, kind TEXT, config TEXT, visibility TEXT, created_by TEXT, paused INTEGER);
-             CREATE TABLE parties(id TEXT, workspace_id TEXT, user_id TEXT, status TEXT);
-             CREATE TABLE team_members(workspace_id TEXT, team_id TEXT, contact_id TEXT);
-             CREATE TABLE team_details(party_id TEXT, parent_id TEXT);
-             INSERT INTO parties VALUES ('c1','team','u1','active');
-             INSERT INTO team_members VALUES ('team','t1','c1');
-             CREATE TABLE view_shadow(session_id TEXT PRIMARY KEY, node_id TEXT, kind TEXT, at INTEGER, digest TEXT, view TEXT,
-               extra_count INTEGER, extra TEXT, missing_count INTEGER, missing TEXT);
-             INSERT INTO workspace_members VALUES ('team','u1','owner',1),('team','u2','member',2),('other','u3','owner',1);
-             INSERT INTO projects VALUES ('pg','/w/git-proj',1),('pd','/w/dir-proj',0),('po','/w/other-proj',1);
-             INSERT INTO items VALUES ('i1','team','u2','/h/worktrees/ST-1','pg'),('i2','team',NULL,'/w/dir-proj','pd');
-             INSERT INTO sessions VALUES ('s1','team','i1','/h/worktrees/ST-1'),('s2','team','i2','/w/dir-proj/');
-             INSERT INTO runtime_sessions(session_id) VALUES ('s1'),('s2');
-             INSERT INTO kb_sources VALUES
-               ('k1','team','folder','{\"path\":\"/docs/shared\"}','workspace','u1',0),
-               ('k2','team','folder','{\"path\":\"/docs/u1-private\"}','private','u1',0),
-               ('k3','team','folder','{\"path\":\"/docs/u2-private\"}','private','u2',0),
-               ('k4','other','folder','{\"path\":\"/docs/elsewhere\"}','workspace','u3',0),
-               ('k5','team','folder','{\"path\":\"/docs/team-t1\"}','team:t1','u3',0),
-               ('k6','team','folder','not json','workspace','u1',0);",
-        )
-        .unwrap();
-        c
+    use steve_store::{NoPublisher, Store, testkit::hub::authority as fixture};
+
+    fn db() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("steve.sqlite3"), NoPublisher).unwrap();
+        fixture::views(&store).unwrap();
+        (dir, store)
     }
 
     #[test]
     fn an_items_session_sees_its_work_and_what_its_principal_may_read() {
-        let c = db();
-        let v = of_session(&c, "s1").unwrap().unwrap();
+        let (_dir, store) = db();
+        let v = store.read(|r| of_session(r, "s1")).unwrap().unwrap();
         assert_eq!(v.principal, "u2");
         assert_eq!(v.audience, ["workspace:team"]);
         // a git project's item works in its own worktree, not the project
@@ -264,7 +177,7 @@ mod tests {
             "/docs/u2-private",
         ];
         assert_eq!(v.ro, folders);
-        let v = of_session(&c, "s2").unwrap().unwrap();
+        let v = store.read(|r| of_session(r, "s2")).unwrap().unwrap();
         assert_eq!(v.principal, "svc:team");
         assert_eq!(v.rw, ["/w/dir-proj"], "a directory project's root, once");
         assert_eq!(
@@ -273,17 +186,23 @@ mod tests {
             "service audiences cannot read private or team folders"
         );
         // Changing the requester changes identity, not member read visibility.
-        c.execute("UPDATE items SET requested_by='u1' WHERE id='i2'", [])
-            .unwrap();
-        let v = of_session(&c, "s2").unwrap().unwrap();
+        fixture::set_requester(&store, "i2", "u1").unwrap();
+        let v = store.read(|r| of_session(r, "s2")).unwrap().unwrap();
         assert_eq!(v.principal, "u1");
         assert_eq!(v.ro, folders);
-        assert_ne!(v.digest(), of_session(&c, "s1").unwrap().unwrap().digest());
+        assert_ne!(
+            v.digest(),
+            store
+                .read(|r| of_session(r, "s1"))
+                .unwrap()
+                .unwrap()
+                .digest()
+        );
     }
 
     #[test]
     fn the_shadow_log_names_what_the_view_would_take_away() {
-        let c = db();
+        let (_dir, store) = db();
         let today: Vec<String> = [
             "/w/git-proj",
             "/w/other-proj",
@@ -294,44 +213,28 @@ mod tests {
         ]
         .map(String::from)
         .to_vec();
-        record_in(&c, "s1", "local", Some(&today)).unwrap();
-        let (n, extra, mn, missing, digest): (i64, String, i64, String, String) = c
-            .query_row(
-                "SELECT extra_count, extra, missing_count, missing, digest FROM view_shadow WHERE session_id='s1'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            )
+        store
+            .write(|w| record_in(w, "s1", "local", Some(&today)))
             .unwrap();
-        assert_eq!(n, 4);
+        let row = fixture::shadow(&store, "s1").unwrap();
+        assert_eq!(row.extra_count, Some(4));
+        let extra = row.extra.unwrap();
         assert_eq!(
             extra,
             r#"["/docs/elsewhere","/h/worktrees","/w/git-proj","/w/other-proj"]"#
         );
         // All same-workspace private/team folders are readable but absent from today's roots.
         assert_eq!(
-            (mn, missing.as_str()),
+            (row.missing_count.unwrap(), row.missing.as_deref().unwrap()),
             (
                 3,
                 r#"["/docs/team-t1","/docs/u1-private","/docs/u2-private"]"#
             )
         );
-        let recorded: String = c
-            .query_row(
-                "SELECT view_digest FROM runtime_sessions WHERE session_id='s1'",
-                [],
-                |r| r.get(0),
-            )
+        assert_eq!(row.session_digest, row.digest);
+        store
+            .write(|w| record_in(w, "s2", "n_remote", None))
             .unwrap();
-        assert_eq!(recorded, digest);
-        // a remote Node's roots are not known here: the view alone
-        record_in(&c, "s2", "n_remote", None).unwrap();
-        let n: Option<i64> = c
-            .query_row(
-                "SELECT extra_count FROM view_shadow WHERE session_id='s2'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(n, None);
+        assert_eq!(fixture::shadow(&store, "s2").unwrap().extra_count, None);
     }
 }

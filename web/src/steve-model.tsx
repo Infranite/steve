@@ -9,7 +9,7 @@ import { HarnessMark, ModelMark } from "@/components/harness-mark"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { modReq } from "@/api"
 import { ModelPicker as CatalogPicker, useCatalog, harnessName } from "@/model-picker"
-import { chatBusy, refresh, st, useStore } from "@/store"
+import { chatBusy, refresh, st, useShellStore } from "@/store"
 import { Select } from "@/view-shared"
 import { useT } from "@/i18n"
 import { Loading, Reveal, Turn } from "@/ui"
@@ -30,7 +30,7 @@ export const modelSetupApi = {
 }
 
 export function SteveModelForm({ first = false, onSaved, onDirty, afterSave }: { first?: boolean; onSaved?: () => void; onDirty?: () => void; afterSave?: () => Promise<unknown> }) {
-  useStore()
+  useShellStore()
   const t = useT(), ws = st.workspace?.id
   const [view, setView] = useState<View | null>(null), [error, setError] = useState("")
   const [harness, setHarness] = useState(""), [model, setModel] = useState("__unselected")
@@ -115,7 +115,7 @@ export function SteveModelForm({ first = false, onSaved, onDirty, afterSave }: {
 
 /** Owners can reach this even when setup or a provider is failing. No model call until explicit retry. */
 export function SteveModelControl({ retry, label }: { retry?: () => Promise<unknown>; label?: string }) {
-  useStore()
+  useShellStore()
   const t = useT(), [open, setOpen] = useState(false), ws = st.workspace?.id
   const bot = st.bots.steve
   useEffect(() => setOpen(false), [ws])

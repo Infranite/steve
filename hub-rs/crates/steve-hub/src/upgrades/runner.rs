@@ -6,6 +6,8 @@
 //! the managed supervisor uses. The page follows it across the restart by reading the journal.
 use super::*;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use steve_modules::vault::keystore::KeyStore;
 
 /// What the runner builds, recorded in the operation when it is requested (paths, never secrets).
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -213,23 +215,25 @@ pub fn local_missing(u: &Updates) -> Vec<String> {
     if !u.home.join("signing/steve-signing.keychain-db").is_file() {
         missing.push("signing/steve-signing.keychain-db".to_owned());
     }
-    let store = signing_store(u);
+    let store = signing_store(u, super::signing::helper);
     if !matches!(super::signing::password(store.as_deref()), Ok(Some(_))) {
         missing.push("signing password in the key store".to_owned());
     }
     missing
 }
 
+/// Both fake upgrade paths use the fixture's store, not process-wide vault settings.
 fn signing_store(
     u: &Updates,
-) -> Option<std::sync::Arc<dyn steve_modules::vault::keystore::KeyStore>> {
+    lookup: impl FnOnce(&Path) -> Option<Arc<dyn KeyStore>>,
+) -> Option<Arc<dyn KeyStore>> {
     #[cfg(test)]
     if matches!(u.launch, Launch::Fake(_)) {
         return steve_modules::vault::keystore::FileKeyStore::open(u.home.join("vault-keys"))
             .ok()
-            .map(|store| std::sync::Arc::new(store) as _);
+            .map(|store| Arc::new(store) as _);
     }
-    super::signing::helper(&u.home)
+    lookup(&u.home)
 }
 
 /// The runner part of a new local_release request: only a stable version newer than this Hub, only when
@@ -618,7 +622,7 @@ pub(super) fn prepare_bundle_with(
         bail!("{why}")
     }
     u.progress(op, "signing", None)?;
-    let store = super::signing::installed_helper(&u.home);
+    let store = signing_store(u, super::signing::installed_helper);
     let pass = super::signing::password(store.as_deref())?
         .context("no existing installation signing identity")?;
     prepare(&u.home, candidate, &op.version, commit, pass.as_str())

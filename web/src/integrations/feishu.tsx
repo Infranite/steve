@@ -12,7 +12,7 @@ import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { go, SectionLabel, DiscChevron, Disclosure, DISC_TRIGGER, SUMMARY } from "@/ui"
 import { Select, ChoiceCards } from "@/view-shared"
-import { toast } from "@/store"
+import { st, toast, useStoreSelector } from "@/store"
 import { HubError } from "@/api"
 import { t, useT } from "@/i18n"
 import { useBusy, report } from "@/accounts/load"
@@ -82,10 +82,10 @@ export const consoleSteps = () => (["s1", "s2", "s3", "s4", "s5", "s6"] as const
 /** fields the Hub asks for; without the adapter list, App ID and App Secret */
 const FALLBACK_FIELDS: RFieldDef[] = [{ key: "app_id", label: "App ID", secret: false, required: true, type: "text" }, { key: "app_secret", label: "App Secret", secret: true, required: true, type: "password" }]
 
-type Done = { connection_id: string; account_id: string; permissions: PermissionCheck[] | null; bound: boolean; webhook: boolean }
+type Done = { connection_id: string; account_id: string; permissions: PermissionCheck[] | null; webhook: boolean }
 
-/** `side`: the side acting as you through these bots (`null`: none, so only the bot is offered; absent: the built-in) */
-export function FeishuConnectDialog({ bots, onClose, initial = "bot", side }: { bots: { id: string; name: string }[]; onClose: () => void; initial?: "bot" | "self"; side?: IAdapter | null }) {
+/** `side`: the side acting as you through these bots (`null`: only the bot is offered) */
+export function FeishuConnectDialog({ bots, onClose, initial = "bot", side }: { bots: { id: string; name: string }[]; onClose: () => void; initial?: "bot" | "self"; side: IAdapter | null }) {
   const t = useT()
   const [kind, setKind] = useState<"bot" | "self">(side === null ? "bot" : initial), [vals, setVals] = useState<Record<string, string>>({}), [persona, setPersona] = useState("")
   const [fields, setFields] = useState<RFieldDef[]>(FALLBACK_FIELDS), [personas, setPersonas] = useState<Persona[]>([]), [noVault, setNoVault] = useState(false)
@@ -109,7 +109,7 @@ export function FeishuConnectDialog({ bots, onClose, initial = "bot", side }: { 
     <Modal title={t("integrations:feishu.connectTitle")} desc={t("integrations:feishu.noVaultDesc")} onClose={onClose} w={440}
       footer={<><Button variant="outline" onClick={onClose}>{t("common:action.cancel")}</Button><Button onClick={() => { onClose(); go("#/vault") }}>{t("integrations:feishu.vaultGo")}</Button></>}><span hidden /></Modal>
   )
-  if (done) return <Connected d={done} persona={personas.find((p) => p.id === persona)} onClose={onClose} side={side} />
+  if (done) return <Connected d={done} onClose={onClose} side={side} />
   return (
     <Modal title={t("integrations:feishu.connectTitle")} desc={t("integrations:feishu.connectDesc")} onClose={onClose}
       footer={<><Button variant="outline" onClick={onClose}>{t("common:action.cancel")}</Button>
@@ -146,7 +146,7 @@ export function FeishuConnectDialog({ bots, onClose, initial = "bot", side }: { 
   )
 }
 
-function Connected({ d, persona, onClose, side }: { d: Done; persona?: Persona; onClose: () => void; side?: IAdapter | null }) {
+function Connected({ d, onClose, side }: { d: Done; onClose: () => void; side: IAdapter | null }) {
   const t = useT()
   return (
     <Modal title={t("integrations:feishu.connectedTitle")} desc={t("integrations:feishu.connectedDesc")} onClose={onClose}
@@ -155,7 +155,6 @@ function Connected({ d, persona, onClose, side }: { d: Done; persona?: Persona; 
         <section><SectionLabel>{t("integrations:feishu.permCheck")}</SectionLabel>
           {d.permissions ? <PermissionList checks={d.permissions} /> : <div className="rounded-xl bg-muted/60 px-4 py-3 type-callout text-muted-foreground" data-permissions="none">{t("integrations:feishu.noPermCheck")}</div>}</section>
         <div className="type-callout text-muted-foreground">{t("integrations:feishu.longConn")}{d.webhook && <> {t("integrations:feishu.webhookNote")}</>}</div>
-        {!d.bound && <div className="type-footnote text-muted-foreground">{persona && !persona.is_default ? t("integrations:feishu.notBoundPersona", { name: persona.name }) : t("integrations:feishu.notBound")}</div>}
       </div>
     </Modal>
   )
@@ -164,9 +163,8 @@ function Connected({ d, persona, onClose, side }: { d: Done; persona?: Persona; 
 /** Device authorization works without a public URL. Redirect OAuth is advanced and opt-in. */
 const USER_READ_SCOPES = ["offline_access", "im:message", "im:message:readonly", "im:message.p2p_msg:get_as_user", "im:message.group_msg:get_as_user", "im:chat:read"]
 
-/** “授权你本人” through bot connection `app`, the ways `side` declares (absent: the built-in's, the device code first and
- * OAuth when `oauthAvailable`): a device code, OAuth, its credential form, or a page of its own */
-export function SelfButtons({ app, disabled, variant = "default", label, scopes, reauthOf, oauthAvailable = false, side }: { app: string; disabled?: boolean; variant?: "default" | "outline"; label?: string; scopes?: string[]; reauthOf?: string; oauthAvailable?: boolean; side?: IAdapter | null }) {
+/** “授权你本人” through bot connection `app`, the ways `side` declares: a device code, OAuth, its credential form, or a page of its own */
+export function SelfButtons({ app, disabled, variant = "default", label, scopes, reauthOf, oauthAvailable = false, side }: { app: string; disabled?: boolean; variant?: "default" | "outline"; label?: string; scopes?: string[]; reauthOf?: string; oauthAvailable?: boolean; side: IAdapter | null }) {
   const t = useT()
   const starts = startsOf(side), viaDevice = offers(starts, "device"), viaOAuth = offers(starts, "oauth") && (oauthAvailable || !viaDevice)
   const [form, setForm] = useState(false)
@@ -262,6 +260,8 @@ type GuideAdapter = IAdapter
 
 export function FeishuGuide({ adapters, bots, selfDone, callbackUrls, bare }: { adapters: GuideAdapter[]; bots: { id: string; name: string; domain?: "feishu" | "lark" }[]; selfDone: boolean; callbackUrls: string[]; bare?: boolean }) {
   const t = useT()
+  const registration = useStoreSelector(() => st.modules?.feishuRegistration)
+  const botAdapter = adapters.some((a) => a.id === FEISHU_APP)
   /* “授权你本人” only with a side acting as you that pairs with the bot; its buttons are the ways it declares */
   const side = selfSideOf(adapters) as IAdapter | null
   const [dlg, setDlg] = useState(false), [app, setApp] = useState(bots[0]?.id ?? "")
@@ -269,11 +269,12 @@ export function FeishuGuide({ adapters, bots, selfDone, callbackUrls, bare }: { 
   return <section className="flex flex-col gap-4" data-feishu-guide>
     {dlg && <FeishuConnectDialog bots={bots} onClose={() => setDlg(false)} side={side} />}
     {!bare && <SectionLabel>{bots.length ? t("integrations:feishu.moreApps") : t("integrations:feishu.connectFeishuLark")}</SectionLabel>}
-    <FeishuRegistrationPanel />
-    <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-card p-5 shadow-[var(--lift)]">
+    {registration === true && <FeishuRegistrationPanel />}
+    {registration === false && <p role="status" className="type-callout text-muted-foreground" data-registration-disabled>{t("integrations:reg.disabled")}</p>}
+    {botAdapter && <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-card p-5 shadow-[var(--lift)]">
       <div className="min-w-0"><div className="type-headline">{t("integrations:feishu.existingTitle")}</div><div className="mt-0.5 type-callout text-muted-foreground">{t("integrations:feishu.existingSub")}</div></div>
       <Button variant="outline" onClick={() => setDlg(true)} data-feishu-bot>{t("integrations:feishu.useExisting")}</Button>
-    </div>
+    </div>}
     {bots.length > 0 && side && !selfDone && <div className="flex flex-col gap-3 rounded-xl bg-card p-5 shadow-[var(--lift)]" data-self-optional>
       <div className="type-headline">{t("integrations:feishu.selfOptional")}</div>
       <p className="type-callout text-muted-foreground">{t("integrations:feishu.selfOptionalNote")}</p>

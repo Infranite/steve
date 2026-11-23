@@ -1,9 +1,8 @@
 /* 日历's data: the caller's calendar sources (shared by the page's sources list and its colours), the agenda of the days
  * a view shows, today's agenda for the sidebar's next-meeting time, and the free time of a day. Everything reloads on
  * the `calendar` stream event (a sync wrote to a calendar, or its settings changed); the sources also on `connection`
- * (a source added or removed). A Hub without the calendar routes leaves them `unwired`. */
+ * (a source added or removed). */
 import { useEffect, useRef, useState, useSyncExternalStore } from "react"
-import { isNotWired } from "@/api"
 import { calendarApi, type CalSource } from "@/api/calendar"
 import { t } from "@/i18n"
 import { st, useHubEvents } from "@/store"
@@ -17,19 +16,19 @@ const seen = (a: Agenda) => { lastTz = a.range.tz || lastTz; return a }
 const failure = (e: unknown) => (e as Error).message || t("core:error.generic")
 
 /* ───────── the sources: one list per workspace ───────── */
-type Shared = { ws: string | null; sources: CalSource[] | null; error: string | null; unwired: boolean; ver: number }
-const shared: Shared = { ws: null, sources: null, error: null, unwired: false, ver: 0 }
+type Shared = { ws: string | null; sources: CalSource[] | null; error: string | null; ver: number }
+const shared: Shared = { ws: null, sources: null, error: null, ver: 0 }
 const subs = new Set<() => void>()
 const bump = () => { shared.ver++; subs.forEach((f) => f()) }
 let inflight: Promise<void> | null = null, again = false
 export function loadSources(): Promise<void> {
   if (inflight) { again = true; return inflight }
   const ws = st.workspace?.id ?? null
-  if (shared.ws !== ws) { shared.ws = ws; shared.sources = null; shared.error = null; shared.unwired = false; bump() }
+  if (shared.ws !== ws) { shared.ws = ws; shared.sources = null; shared.error = null; bump() }
   inflight = calendarApi.sources().then((r) => {
     if (ws !== (st.workspace?.id ?? null)) return
-    shared.sources = r; shared.error = null; shared.unwired = false
-  }, (e) => { shared.unwired = isNotWired(e); shared.error = failure(e) }).finally(() => {
+    shared.sources = r; shared.error = null
+  }, (e) => { shared.error = failure(e) }).finally(() => {
     inflight = null; bump()
     if (again) { again = false; void loadSources() }
   })
@@ -45,11 +44,11 @@ export function useSources() {
 }
 
 /* ───────── the agenda of a view ───────── */
-export type AgendaState = { agenda: Agenda | null; error: string | null; unwired: boolean; loading: boolean }
+export type AgendaState = { agenda: Agenda | null; error: string | null; loading: boolean }
 /** the events of the days `view` shows around `day`, in the reader's zone. The query is whole days, which the Hub reads
  *  in that zone; until its first answer the browser's zone stands in, and the page reads again if they differ. */
 export function useAgenda(view: View, day: string | null, on = true): AgendaState & { reload: () => void } {
-  const [s, setS] = useState<AgendaState>({ agenda: null, error: null, unwired: false, loading: true })
+  const [s, setS] = useState<AgendaState>({ agenda: null, error: null, loading: true })
   const ws = st.workspace?.id ?? null
   const key = day ? `${ws}|${view}|${day}` : null
   const seq = useRef(0)
@@ -57,8 +56,8 @@ export function useAgenda(view: View, day: string | null, on = true): AgendaStat
     if (!day || !on) return
     const n = ++seq.current
     setS((x) => ({ ...x, loading: true }))
-    calendarApi.events(rangeOf(view, day)).then(seen).then((agenda) => { if (n === seq.current) setS({ agenda, error: null, unwired: false, loading: false }) },
-      (e) => { if (n === seq.current) setS((x) => ({ agenda: x.agenda, error: failure(e), unwired: isNotWired(e), loading: false })) })
+    calendarApi.events(rangeOf(view, day)).then(seen).then((agenda) => { if (n === seq.current) setS({ agenda, error: null, loading: false }) },
+      (e) => { if (n === seq.current) setS((x) => ({ agenda: x.agenda, error: failure(e), loading: false })) })
   }
   useEffect(() => { setS((x) => ({ ...x, agenda: x.agenda && key ? x.agenda : null })); load() }, [key, on]) // eslint-disable-line react-hooks/exhaustive-deps
   useHubEvents(["calendar"], load, 400)

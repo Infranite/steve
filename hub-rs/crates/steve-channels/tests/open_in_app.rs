@@ -13,6 +13,7 @@
 mod digest_env;
 use digest_env::TestEnv;
 use std::sync::Arc;
+use steve_store::testkit::channels::seed;
 
 use axum::Router;
 use serde_json::{Value, json};
@@ -107,16 +108,13 @@ impl H {
     /// The connection as another adapter / config would leave it.
     fn connection(&self, adapter: &str, config: Value) {
         let (con, config) = (self.con.clone(), config.to_string());
-        self.env
-            .store()
-            .with_conn(move |c| {
-                c.execute(
-                    "UPDATE connections SET adapter = ?2, config = ?3 WHERE id = ?1",
-                    rusqlite::params![con, adapter, config],
-                )?;
-                Ok(())
-            })
-            .expect("update");
+        seed::connections::set_fixture_connection_adapter(
+            self.env.store(),
+            &con,
+            &adapter,
+            &config,
+        )
+        .expect("update");
     }
 
     async fn get(&self, path: &str) -> Value {
@@ -131,11 +129,7 @@ impl H {
         let s = self.get(&format!("/spaces/{space}")).await;
         let m = self.get(&format!("/spaces/{space}/messages")).await;
         let viewer = Viewer::bare(WS, ME);
-        let list = self
-            .env
-            .store()
-            .reader(|c| conversations::list(c, WS, &viewer))
-            .expect("list");
+        let list = conversations::list(self.env.store(), WS, &viewer).expect("list");
         let row = list
             .iter()
             .find(|r| r["space_id"] == json!(space))
@@ -185,10 +179,7 @@ impl H {
         ids: &[String],
     ) -> std::collections::HashMap<String, String> {
         let viewer = Viewer::bare(WS, who);
-        self.env
-            .store()
-            .reader(|c| open_link::message_urls(c, &viewer, ids))
-            .expect("links")
+        open_link::message_urls(self.env.store(), &viewer, ids).expect("links")
     }
 }
 

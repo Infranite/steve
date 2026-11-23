@@ -12,9 +12,9 @@ use std::io::Write;
 use std::net::IpAddr;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
+use steve_store::testkit::flow as fixtures;
 
 use async_trait::async_trait;
-use rusqlite::params;
 use serde_json::{Value, json};
 use steve_flow::NodeKind;
 use steve_flow::nodes::cmd::{Cmd, CmdNode};
@@ -24,6 +24,7 @@ use steve_modules::testkit::{ME, WS, call, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::items::{NewField, NewItem};
 use steve_modules::vault::keystore::FileKeyStore;
+use steve_store::{DecisionRows, RunRows};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -259,20 +260,13 @@ fn env_with(node: impl FnOnce(&std::path::Path) -> Option<Arc<dyn CmdNode>>) -> 
         )
         .unwrap()
         .id;
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "INSERT INTO settings (workspace_id, key, value, updated) VALUES (?, ?, ?, 1)",
-                params![WS, ALLOW_PRIVATE, json!(["api.test", "other.test"]).to_string()],
-            )?;
-            c.execute(
-                "INSERT INTO projects (id, workspace_id, name, path, created, updated) VALUES ('prj_t', ?, 'T', ?, 1, 1)",
-                params![WS, work.path().to_string_lossy()],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::code_node_project(
+        e.env.store(),
+        WS,
+        ALLOW_PRIVATE,
+        &work.path().to_string_lossy(),
+    )
+    .unwrap();
     Env {
         e,
         vault,
@@ -327,15 +321,8 @@ async fn start(e: &FlowEnv, flow: &str, input: Value) -> String {
     v["run_id"].as_str().unwrap().to_string()
 }
 
-fn q<T: rusqlite::types::FromSql>(e: &FlowEnv, sql: &str, p: impl rusqlite::Params) -> T {
-    e.env
-        .store()
-        .with_conn(|c| Ok(c.query_row(sql, p, |r| r.get(0))?))
-        .unwrap()
-}
-
 fn status(e: &FlowEnv, run: &str) -> String {
-    q(e, "SELECT status FROM flow_runs WHERE id = ?", [run])
+    e.run_row(run).status
 }
 
 async fn settled(e: &FlowEnv, run: &str) -> String {
@@ -355,32 +342,30 @@ async fn settled(e: &FlowEnv, run: &str) -> String {
 
 /// `(status, output, error)` of the node `n`'s last step.
 fn step(e: &FlowEnv, run: &str) -> (String, Value, Option<String>) {
+    let row = step_row(e, run);
+    (row.status, row.output.unwrap_or_default(), row.error)
+}
+
+fn step_row(e: &FlowEnv, run: &str) -> steve_store::RunStep {
     e.env
         .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT status, output, error FROM flow_run_steps WHERE run_id = ? AND node_id = 'n' ORDER BY seq DESC LIMIT 1",
-                [run],
-                |r| {
-                    let o: String = r.get(1)?;
-                    Ok((r.get(0)?, serde_json::from_str(&o).unwrap_or(Value::Null), r.get(2)?))
-                },
-            )?)
-        })
+        .read(|r| RunRows(r).steps(run))
+        .unwrap()
+        .into_iter()
+        .rev()
+        .find(|step| step.node_id == "n")
         .unwrap()
 }
 
 fn open_gate(e: &FlowEnv, run: &str) -> Option<(String, String, String)> {
-    e.env
-        .store()
-        .with_conn(|c| {
-            Ok(rusqlite::OptionalExtension::optional(c.query_row(
-                "SELECT id, question, coalesce(draft, '') FROM decisions WHERE subject_type = 'flow_step' AND subject_id = ? AND status = 'open'",
-                [format!("{run}:n")],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            ))?)
-        })
+    open_decision(e, "flow_step", &format!("{run}:n")).map(|d| (d.id, d.question, d.draft))
+}
+
+fn open_decision(e: &FlowEnv, kind: &str, subject: &str) -> Option<steve_store::Decision> {
+    fixtures::decisions_for(e.env.store(), kind, subject)
         .unwrap()
+        .into_iter()
+        .find(|d| d.status == "open")
 }
 
 async fn answer(e: &FlowEnv, id: &str, choice: &str) {
@@ -391,13 +376,24 @@ async fn answer(e: &FlowEnv, id: &str, choice: &str) {
 }
 
 fn grant(e: &FlowEnv, flow: &str, capability: &str, rtype: &str, rid: &str) {
-    e.env
-        .store()
-        .with_conn(|c| Ok(c.execute(
-            "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, scope, until, created_by, created) VALUES (?, ?, 'flow', ?, ?, ?, ?, json_object('flow_version', 1), ?, ?, 1)",
-            params![steve_store::uid("gr"), WS, flow, capability, rtype, rid, i64::MAX, ME],
-        )?))
-        .unwrap();
+    grant_id(e, &steve_store::uid("gr"), flow, capability, rtype, rid);
+}
+
+fn grant_id(e: &FlowEnv, id: &str, flow: &str, capability: &str, rtype: &str, rid: &str) {
+    fixtures::flow_grant(
+        e.env.store(),
+        fixtures::FlowGrantFixture {
+            id,
+            ws: WS,
+            flow,
+            capability,
+            resource_type: rtype,
+            resource: rid,
+            until: i64::MAX,
+            actor: ME,
+        },
+    )
+    .unwrap();
 }
 
 fn logs() -> String {
@@ -575,13 +571,7 @@ async fn secrets_are_injected_but_never_stored_or_logged() {
     assert_eq!(got.lock().unwrap().len(), 1);
 
     // a grant for the flow: no approval the second time
-    e.env
-        .store()
-        .with_conn(|c| Ok(c.execute(
-            "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, scope, until, created_by, created) VALUES ('gr_s', ?, 'flow', ?, 'secret.use', 'vault_item', ?, json_object('flow_version', 1), ?, ?, 1)",
-            params![WS, f, item, i64::MAX, ME],
-        )?))
-        .unwrap();
+    grant_id(&e, "gr_s", &f, "secret.use", "vault_item", &item);
     let run2 = start(&e, &f, json!({"note": "hi"})).await;
     assert_eq!(settled(&e, &run2).await, "done");
     assert!(open_gate(&e, &run2).is_none());
@@ -593,13 +583,7 @@ async fn secrets_are_injected_but_never_stored_or_logged() {
         "headers": {"Authorization": format!("Bearer {{{{secrets.{item}.令牌}}}}")},
     });
     let f3 = create_flow(&e, "跳转", one_node("http", "查询报销单", cfg)).await;
-    e.env
-        .store()
-        .with_conn(|c| Ok(c.execute(
-            "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, scope, until, created_by, created) VALUES ('gr_r', ?, 'flow', ?, 'secret.use', 'vault_item', ?, json_object('flow_version', 1), ?, ?, 1)",
-            params![WS, f3, item, i64::MAX, ME],
-        )?))
-        .unwrap();
+    grant_id(&e, "gr_r", &f3, "secret.use", "vault_item", &item);
     let run3 = start(&e, &f3, json!({})).await;
     assert_eq!(settled(&e, &run3).await, "done");
     assert_eq!(step(&e, &run3).1["status"], 302);
@@ -608,26 +592,14 @@ async fn secrets_are_injected_but_never_stored_or_logged() {
     assert_eq!(got.lock().unwrap().len(), 3);
 
     // the use log: one row per release, the flow as the actor, the run linked, no value
-    let n: i64 = q(
-        &e,
-        "SELECT count(*) FROM secret_uses WHERE actor_type = 'flow' AND actor_id = ? AND status = 'ok' AND mode = 'internal' AND run_id IN (?, ?)",
-        params![f, run, run2],
-    );
+    let n: i64 = fixtures::successful_secret_uses(e.env.store(), &f, &run, &run2).unwrap();
     assert_eq!(n, 2);
-    let g: Option<String> = q(
-        &e,
-        "SELECT grant_id FROM secret_uses WHERE run_id = ?",
-        [&run2],
-    );
+    let g: Option<String> = fixtures::secret_use_grant(e.env.store(), &run2).unwrap();
     assert_eq!(g.as_deref(), Some("gr_s"));
 
     // Steve itself writes the value nowhere: the step input keeps the template, the logs never
     // have it (the step output is what the server answered, as it is)
-    let input: Option<String> = q(
-        &e,
-        "SELECT input FROM flow_run_steps WHERE run_id = ? AND node_id = 'n' ORDER BY seq DESC LIMIT 1",
-        [&run],
-    );
+    let input: Option<String> = step_row(&e, &run).input.map(|v| v.to_string());
     assert!(!input.unwrap_or_default().contains(TOKEN));
     assert!(!logs().contains(TOKEN), "a secret value is in the logs");
     drop(vault);
@@ -1030,11 +1002,7 @@ mod on_node {
         // the Hub restarts: the run stopped inside its cmd step, and you are asked
         assert!(steve_flow::engine::recover(&e.flow).unwrap().is_empty());
         assert_eq!(status(&e, &run), "failed");
-        let dec: String = q(
-            &e,
-            "SELECT id FROM decisions WHERE subject_type = 'flow_run' AND subject_id = ? AND status = 'open'",
-            [&run],
-        );
+        let dec: String = open_decision(&e, "flow_run", &run).unwrap().id;
         answer(&e, &dec, steve_flow::engine::RETRY).await;
         assert_eq!(settled(&e, &run).await, "done");
         let got = hangs.0.lock().unwrap().clone();
@@ -1110,8 +1078,12 @@ mod on_node {
 
 /// The options of an open decision.
 fn options_of(e: &FlowEnv, id: &str) -> Vec<String> {
-    let o: Option<String> = q(e, "SELECT options FROM decisions WHERE id = ?", [id]);
-    serde_json::from_str(&o.unwrap_or_default()).unwrap_or_default()
+    e.env
+        .store()
+        .read(|r| DecisionRows(r).get(id))
+        .unwrap()
+        .unwrap()
+        .options
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1135,17 +1107,8 @@ async fn always_on_the_gate_grants_the_current_version_only() {
     answer(&e, &dec, steve_flow::engine::GATE_ALWAYS).await;
     assert_eq!(settled(&e, &run).await, "done");
     // the grant: this flow, cmd.run on the project, version 1, from this decision
-    let (cap, rid, ver, by): (String, String, i64, String) = e
-        .env
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT capability, resource_id, json_extract(scope, '$.flow_version'), decision_id FROM grants WHERE subject_type = 'flow' AND subject_id = ?",
-                [&f],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )?)
-        })
-        .unwrap();
+    let (cap, rid, ver, by): (String, String, i64, String) =
+        fixtures::flow_grant_details(e.env.store(), &f).unwrap();
     assert_eq!((cap.as_str(), rid.as_str(), ver), ("cmd.run", "prj_t", 1));
     assert_eq!(by, dec);
 
@@ -1247,11 +1210,9 @@ async fn an_approve_node_on_the_path_releases_the_secrets() {
     let f = create_flow(&e, "查报销", graph).await;
     let run = start(&e, &f, json!({})).await;
     assert_eq!(settled(&e, &run).await, "waiting");
-    let dec: String = q(
-        &e,
-        "SELECT id FROM decisions WHERE subject_type = 'flow_step' AND subject_id = ? AND status = 'open'",
-        [format!("{run}:a")],
-    );
+    let dec: String = open_decision(&e, "flow_step", &format!("{run}:a"))
+        .unwrap()
+        .id;
     answer(&e, &dec, "查").await;
     assert_eq!(settled(&e, &run).await, "done");
     assert!(
@@ -1320,13 +1281,7 @@ async fn always_on_an_effect_with_secrets_grants_the_secrets_too() {
     );
     answer(&e, &dec, steve_flow::engine::GATE_ALWAYS).await;
     assert_eq!(settled(&e, &run).await, "done");
-    let n: i64 = q(
-        &e,
-        "SELECT COUNT(*) FROM grants WHERE subject_type = 'flow' AND subject_id = ? AND decision_id = ?
-           AND ((capability = 'http.effect' AND resource_id = 'api.test')
-             OR (capability = 'secret.use' AND resource_id = ?))",
-        params![f, dec, item],
-    );
+    let n: i64 = fixtures::host_and_secret_grants(e.env.store(), &f, &dec, &item).unwrap();
     assert_eq!(n, 2, "the host and the secret");
 
     // the next run of the same version: no card at all
@@ -1367,11 +1322,9 @@ async fn an_approve_node_does_not_release_a_high_item() {
     let f = create_flow(&e, "要紧", graph).await;
     let run = start(&e, &f, json!({})).await;
     assert_eq!(settled(&e, &run).await, "waiting");
-    let dec: String = q(
-        &e,
-        "SELECT id FROM decisions WHERE subject_type = 'flow_step' AND subject_id = ? AND status = 'open'",
-        [format!("{run}:a")],
-    );
+    let dec: String = open_decision(&e, "flow_step", &format!("{run}:a"))
+        .unwrap()
+        .id;
     answer(&e, &dec, "查").await;
     // the step's own card, naming the item
     assert_eq!(settled(&e, &run).await, "waiting");
@@ -1456,10 +1409,6 @@ async fn allow_private_is_a_setting_only_the_owner_writes() {
     )
     .await;
     assert_eq!(st, 403);
-    let n: i64 = q(
-        &e,
-        "SELECT count(*) FROM audit WHERE action = 'flow.allow_private'",
-        [],
-    );
+    let n: i64 = fixtures::audit_count(e.env.store(), "flow.allow_private").unwrap();
     assert_eq!(n, 2);
 }

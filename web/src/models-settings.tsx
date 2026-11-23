@@ -11,8 +11,8 @@ import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
-import { modReq, isNotWired } from "@/api"
-import { st, toast, useStore } from "@/store"
+import { modReq } from "@/api"
+import { st, toast, useStore, useRuntimes } from "@/store"
 import { Row, Segmented, Panel, Section, Card, Blank, Notice, Pill, Chevron, Loading, Reveal, Turn } from "@/ui"
 import { Select } from "@/view-shared"
 import { Robot } from "@/robot"
@@ -73,6 +73,7 @@ const failedOf = (p: Purpose) => p.recent?.used.reduce((n, u) => n + u.failed, 0
 const callsOf = (p: Purpose) => p.recent?.used.reduce((n, u) => n + u.calls, 0) ?? 0
 
 export function ModelsSettingsPane() {
+  const runtimes = useRuntimes()
   useStore()
   const t = useT()
   const [v, setV] = useState<View | null>(null)
@@ -84,9 +85,8 @@ export function ModelsSettingsPane() {
   const logRef = useRef<HTMLElement>(null)
   /* a change made elsewhere (the Bot page, a Steve draft, another tab) arrives as a settings or bot event */
   const b = st.bots.steve
-  const stamp = JSON.stringify([lang(), Object.entries(st.settings ?? {}).filter(([k]) => k.startsWith("models.")), b?.harness, b?.model, b?.reasoningEffort, st.workspace?.id, st.runtimes.map(r => [r.id, r.ok, r.version, r.adapter_version])])
-  useEffect(() => { let active = true; api.get().then((x) => { if (active) { setV(x); setErr(null) } }, (e) => { if (active) setErr(isNotWired(e) ? "absent" : e instanceof Error ? e.message : String(e)) }); return () => { active = false } }, [stamp])
-  if (err === "absent") return <Blank data-models-unwired>{t("pages:models.unwired")}</Blank>
+  const stamp = JSON.stringify([lang(), Object.entries(st.settings ?? {}).filter(([k]) => k.startsWith("models.")), b?.harness, b?.model, b?.reasoningEffort, st.workspace?.id, runtimes.map(r => [r.id, r.ok, r.version, r.adapter_version])])
+  useEffect(() => { let active = true; api.get().then((x) => { if (active) { setV(x); setErr(null) } }, (e) => { if (active) setErr(e instanceof Error ? e.message : String(e)) }); return () => { active = false } }, [stamp])
   if (err) return <Notice tone="destructive" role="alert">{err}</Notice>
   if (!v) return <Loading />
   const save = async (body: Parameters<typeof api.patch>[0], ok: string) => {
@@ -163,7 +163,7 @@ export function ModelsSettingsPane() {
             </Row>
           </div>
         ))}</Panel>
-        <div className="mt-3 flex flex-col gap-3">{st.runtimes.filter(r => !r.ok && !v.agents.some(a => a.harness === r.id)).map(r => <RuntimeAvailability key={r.id} harness={r.id} />)}<span className="self-start"><RuntimeSetupLink /></span></div>
+        <div className="mt-3 flex flex-col gap-3">{runtimes.filter(r => !r.ok && !v.agents.some(a => a.harness === r.id)).map(r => <RuntimeAvailability key={r.id} harness={r.id} />)}<span className="self-start"><RuntimeSetupLink /></span></div>
       </Section>
 
       </div></Reveal></div>

@@ -1,4 +1,3 @@
-import { readHubInfo } from "@/hub-management-api"
 /* Hubs and pairing, the same in a browser and inside the apps: the switcher in the sidebar, the list with its add
  * field (on the no-Hub, signed-out and cannot-connect screens, and in a dialog), the answer
  * to a pairing link, and the offer of the Hubs another page sent along. The list itself is `hubDirectory()`. */
@@ -13,7 +12,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { cn } from "cn"
 import { answerOffer, appPairLink, claimPair, currentHub, dropPairRequest, hubDirectory, HubError, hubsOffer, nativeBridge, onArrival, pairAddresses, pairPlan, pairRequest, type HubEntry } from "@/hub"
 import { t as tr, useT } from "@/i18n"
-import { st, toast } from "@/store"
+import { st, toast, useStoreSelector } from "@/store"
 import { closeSheet, go, openSheet, Row, Section, Panel, Tile, Chevron, LIFT } from "@/ui"
 
 /** why a Hub could not be used, in the page's words */
@@ -37,12 +36,6 @@ export function useHubs() {
   const [error, setError] = useState("")
   const reload = useCallback(() => dir.list().then((xs) => { setHubs(xs); setError("") }, (e) => { setHubs([]); setError(hubErrorText(e)) }), [dir])
   useEffect(() => { void reload(); return onArrival(() => void reload()) }, [reload])
-  useEffect(() => {
-    if (!st.ready || st.login) return
-    const read = () => { void readHubInfo().catch(() => {}) }
-    read(); const timer = window.setInterval(read, 30000)
-    return () => clearInterval(timer)
-  }, [])
   return { dir, hubs, error, reload }
 }
 
@@ -62,7 +55,7 @@ function hubSub(h: HubEntry): string {
 /** Said above every page while the live stream is broken: which Hub, that the page keeps trying, and the way to another. */
 export function HubLostBanner() {
   const t = useT(), { dir, hubs } = useHubs()
-  if (!st.down) return null
+  if (!useStoreSelector(() => st.down)) return null
   const name = hubs?.find((h) => h.current)?.name ?? (dir.native ? "Hub" : hostOf(currentHub()))
   return (
     <div role="status" className="flex shrink-0 items-center gap-2 border-b bg-attention/10 px-4 py-2 type-footnote text-foreground/80 sm:px-6" data-hub-lost>

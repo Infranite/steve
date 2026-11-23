@@ -16,17 +16,17 @@
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
-use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use steve_modules::{ApiError, ApiResult, Body, Caller, Modules};
 
 use crate::profile::Features;
 use crate::query::{self, Range};
-use crate::repo::{self, CalRow};
 use crate::sources::IcsSource;
-use crate::sync::{api, me_party};
+use crate::sync::api;
 use crate::{Calendar, ics};
+use steve_store::calendar::{CalRow, CalendarRepo, CalendarSettings};
+use steve_store::{Read, connections::Connections, parties::Parties};
 
 pub fn routes(cal: Calendar) -> Router<Modules> {
     Router::new()
@@ -48,12 +48,10 @@ pub fn routes(cal: Calendar) -> Router<Modules> {
 }
 
 /// A calendar with the name of its person.
-fn cal_view(c: &rusqlite::Connection, me: Option<&str>, x: &CalRow) -> ApiResult<Value> {
+fn cal_view(c: &mut impl Read, me: Option<&str>, x: &CalRow) -> ApiResult<Value> {
     let mut v = serde_json::to_value(x)?;
     let name: Option<String> = match &x.party_id {
-        Some(p) => c
-            .query_row("SELECT name FROM parties WHERE id = ?", [p], |r| r.get(0))
-            .optional()?,
+        Some(p) => Parties::new(c).name(p)?,
         None => None,
     };
     v["party_name"] = json!(name);
@@ -66,10 +64,9 @@ impl Calendar {
     async fn source_view(&self, who: &Caller, conn: &str, features: Features) -> ApiResult<Value> {
         let out = self.connections().get(who, conn).map_err(api)?;
         let ics = if out.adapter == IcsSource::ID {
-            let file: Option<String> = self
-                .modules()
-                .store
-                .reader(|c| Ok::<_, ApiError>(repo::ics_file(c, conn)?.map(|(n, _)| n)))?;
+            let file: Option<String> = self.modules().store.read(|c| {
+                Ok::<_, ApiError>(CalendarRepo::new(c).ics_file(conn)?.map(|(n, _)| n))
+            })?;
             let cx = self.connections().cx(&who.ws, conn).map_err(api)?;
             let subscribed = IcsSource::subscribed_cx(&cx).await;
             Some(json!({"subscribed": subscribed, "file": file}))
@@ -78,9 +75,10 @@ impl Calendar {
         };
         let (ws, me) = (who.ws.clone(), who.me.clone());
         let conn = conn.to_string();
-        let calendars = self.modules().store.reader(move |c| {
-            let mep = me_party(c, &ws, &me)?;
-            repo::of_connection(c, &conn)?
+        let calendars = self.modules().store.read(move |c| {
+            let mep = Parties::new(c).active_user(&ws, &me)?;
+            CalendarRepo::new(c)
+                .of_connection(&conn)?
                 .iter()
                 .filter(|x| x.owner_user == me)
                 .map(|x| cal_view(c, mep.as_deref(), x))
@@ -95,15 +93,11 @@ impl Calendar {
     async fn own_source(&self, who: &Caller, conn: &str) -> ApiResult<Features> {
         // visible to the caller and theirs
         let out = self.connections().get(who, conn).map_err(api)?;
-        let mine: bool = self.modules().store.reader(|c| {
+        let mine = self.modules().store.read(|r| {
             Ok::<_, ApiError>(
-                c.query_row(
-                    "SELECT created_by = ? FROM connections WHERE id = ? AND workspace_id = ?",
-                    params![who.me, conn, who.ws],
-                    |r| r.get(0),
-                )
-                .optional()?
-                .unwrap_or(false),
+                Connections::new(r)
+                    .source(&who.ws, conn)?
+                    .is_some_and(|c| c.created_by == who.me),
             )
         })?;
         if !mine {
@@ -181,13 +175,8 @@ async fn upload(
         .or(parsed.name.clone())
         .unwrap_or_else(|| "calendar.ics".into());
     let now = cal.modules().clock.now();
-    cal.modules().store.transaction(|tx| {
-        repo::put_ics_file(tx, &who.ws, &conn, &name, &b.text, now)?;
-        // a new file starts the calendar's cursor over
-        tx.execute(
-            "UPDATE cal_calendars SET sync_cursor = NULL, synced_at = NULL WHERE connection_id = ?",
-            [&conn],
-        )?;
+    cal.modules().store.write(|tx| {
+        CalendarRepo::new(tx).put_ics_file(&who.ws, &conn, &name, &b.text, now)?;
         Ok::<_, ApiError>(())
     })?;
     let report = cal.sync_connection(&who.ws, &conn, false).await?;
@@ -199,9 +188,10 @@ async fn upload(
 async fn calendars(State(cal): State<Calendar>, who: Caller) -> ApiResult<Json<Value>> {
     cal.modules()
         .blocking(move |m| {
-            m.store.reader(|c| {
-                let me = me_party(c, &who.ws, &who.me)?;
-                let xs = repo::of_user(c, &who.ws, &who.me)?
+            m.store.read(|c| {
+                let me = Parties::new(c).active_user(&who.ws, &who.me)?;
+                let xs = CalendarRepo::new(c)
+                    .of_user(&who.ws, &who.me)?
                     .iter()
                     .map(|x| cal_view(c, me.as_deref(), x))
                     .collect::<ApiResult<Vec<_>>>()?;
@@ -234,23 +224,20 @@ impl Calendar {
         let (cal, resync) = self
             .modules()
             .blocking(move |m| {
-                m.store.transaction(|tx| {
-                    let cur = repo::calendar(tx, &id2)?
+                m.store.write(|tx| {
+                    let cur = CalendarRepo::new(tx)
+                        .calendar(&id2)?
                         .filter(|c| c.workspace_id == who2.ws && c.owner_user == who2.me)
                         .ok_or_else(|| ApiError::not_found("日历"))?;
-                    let me = me_party(tx, &who2.ws, &who2.me)?;
+                    let me = Parties::new(tx).active_user(&who2.ws, &who2.me)?;
                     let (party, party_set) = match &e.party_id {
                         None => (cur.party_id.clone(), cur.party_set),
                         Some(Value::Null) => (me.clone(), true),
                         Some(Value::String(p)) => {
-                            let ok: Option<String> = tx
-                                .query_row(
-                                    "SELECT id FROM parties WHERE workspace_id = ? AND id = ? AND status = 'active'",
-                                    params![who2.ws, p],
-                                    |r| r.get(0),
-                                )
-                                .optional()?;
-                            (Some(ok.ok_or_else(|| ApiError::invalid("party_id"))?), true)
+                            if !Parties::new(tx).is_active(&who2.ws, p)? {
+                                return Err(ApiError::invalid("party_id"));
+                            }
+                            (Some(p.clone()), true)
                         }
                         Some(_) => return Err(ApiError::invalid("party_id")),
                     };
@@ -259,12 +246,18 @@ impl Calendar {
                         Some(d @ ("full" | "busy")) => d.to_string(),
                         Some(_) => return Err(ApiError::invalid("detail")),
                         None if e.party_id.is_some() && party != cur.party_id => {
-                            if mine { "full".into() } else { "busy".into() }
+                            if mine {
+                                "full".into()
+                            } else {
+                                "busy".into()
+                            }
                         }
                         None => cur.detail.clone(),
                     };
                     if detail == "full" && cur.role == "free_busy" {
-                        return Err(ApiError::rule(steve_i18n::t!("calendar.api.free_busy_only")));
+                        return Err(ApiError::rule(steve_i18n::t!(
+                            "calendar.api.free_busy_only"
+                        )));
                     }
                     let color = match &e.color {
                         None => cur.color.clone(),
@@ -273,13 +266,32 @@ impl Calendar {
                         Some(_) => return Err(ApiError::invalid("color")),
                     };
                     let enabled = e.enabled.unwrap_or(cur.enabled);
-                    repo::set_settings(tx, &cur.id, enabled, party.as_deref(), party_set, &detail, color.as_deref(), now)?;
+                    CalendarRepo::new(tx).set_settings(
+                        &cur.id,
+                        CalendarSettings {
+                            enabled,
+                            party: party.as_deref(),
+                            party_set,
+                            detail: &detail,
+                            color: color.as_deref(),
+                        },
+                        now,
+                    )?;
                     if detail == "busy" && cur.detail != "busy" {
-                        repo::strip_details(tx, &cur.id, now)?;
+                        CalendarRepo::new(tx).strip_details(&cur.id, now)?;
                     }
-                    tx.publish(steve_types::DomainEvent::from(steve_types::AutomationEvent::Calendar { id: cur.id.clone().into(), ws: who2.ws.clone().into() }));
-                    let resync = (detail == "full" && cur.detail != "full") || (enabled && !cur.enabled);
-                    Ok((repo::calendar(tx, &cur.id)?.expect("just updated"), resync))
+                    tx.emit(steve_types::AutomationEvent::Calendar {
+                        id: cur.id.clone().into(),
+                        ws: who2.ws.clone().into(),
+                    });
+                    let resync =
+                        (detail == "full" && cur.detail != "full") || (enabled && !cur.enabled);
+                    Ok((
+                        CalendarRepo::new(tx)
+                            .calendar(&cur.id)?
+                            .expect("just updated"),
+                        resync,
+                    ))
                 })
             })
             .await?;
@@ -293,9 +305,10 @@ impl Calendar {
             });
         }
         let (ws, user) = (who.ws.clone(), who.me.clone());
-        self.modules()
-            .store
-            .reader(|c| cal_view(c, me_party(c, &ws, &user)?.as_deref(), &cal))
+        self.modules().store.read(|r| {
+            let me = Parties::new(r).active_user(&ws, &user)?;
+            cal_view(r, me.as_deref(), &cal)
+        })
     }
 }
 
@@ -317,7 +330,7 @@ struct RangeQ {
 }
 
 fn resolve(
-    c: &rusqlite::Connection,
+    c: &mut impl Read,
     who: &Caller,
     q: &RangeQ,
     now: i64,
@@ -334,7 +347,7 @@ async fn events(
 ) -> ApiResult<Json<Value>> {
     cal.modules()
         .blocking(move |m| {
-            m.store.reader(|c| {
+            m.store.read(|c| {
                 let (tz, r) = resolve(c, &who, &q, m.clock.now())?;
                 Ok(Json(query::agenda(c, &who.ws, &who.me, &r, tz)?))
             })
@@ -349,7 +362,7 @@ async fn one(
 ) -> ApiResult<Json<Value>> {
     cal.modules()
         .blocking(move |m| {
-            m.store.reader(|c| {
+            m.store.read(|c| {
                 let tz = query::user_tz(c, &who.ws, &who.me)?;
                 Ok(Json(query::event(c, &who.ws, &who.me, &id, tz)?.1))
             })
@@ -366,7 +379,7 @@ async fn search(
     let ahead = cal.settings().future_days;
     cal.modules()
         .blocking(move |m| {
-            m.store.reader(|c| {
+            m.store.read(|c| {
                 let now = m.clock.now();
                 let tz = query::user_tz(c, &who.ws, &who.me)?;
                 let r =
@@ -402,10 +415,9 @@ async fn freebusy(
 ) -> ApiResult<Json<Value>> {
     cal.modules()
         .blocking(move |m| {
-            m.store.reader(|c| {
+            m.store.read(|c| {
                 let (tz, r) = resolve(c, &who, &q, m.clock.now())?;
-                let party = query::person(c, &who.ws, q.party.as_deref().unwrap_or("me"))
-                    .map_err(ApiError::Rule)?;
+                let party = query::person(c, &who.ws, q.party.as_deref().unwrap_or("me"))?;
                 Ok(Json(query::freebusy(
                     c,
                     &who.ws,
@@ -439,7 +451,7 @@ async fn find_time(
     let s = cal.settings().clone();
     cal.modules()
         .blocking(move |m| {
-            m.store.reader(|c| {
+            m.store.read(|c| {
                 let now = m.clock.now();
                 let tz = query::user_tz(c, &who.ws, &who.me)?;
                 let r = query::range(
@@ -457,8 +469,7 @@ async fn find_time(
                     .iter()
                     .take(20)
                     .map(|p| query::person(c, &who.ws, p))
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(ApiError::Rule)?;
+                    .collect::<Result<Vec<_>, _>>()?;
                 Ok(Json(query::find_time(
                     c,
                     &who.ws,

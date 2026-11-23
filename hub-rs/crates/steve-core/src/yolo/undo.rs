@@ -7,10 +7,9 @@
 
 use std::sync::Arc;
 
-use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use steve_modules::{ApiError, ApiResult};
-use steve_store::base::audit;
+use steve_store::audit_repo::record as audit;
 use steve_store::yolo::{self as repo, ActionRow};
 
 use super::engine::Engine;
@@ -88,20 +87,10 @@ impl Engine {
         {
             return false;
         }
-        let newest: Option<String> = self
+        let newest = self
             .yolo()
             .store()
-            .reader(|c| {
-                c.prepare_cached(
-                    "SELECT id FROM decisions WHERE workspace_id = ? AND kind = 'approve'
-                       AND subject_type IN ('release', 'delivery_batch') AND status = 'resolved'
-                       AND json_extract(result, '$.approved') = 1
-                     ORDER BY resolved DESC, rowid DESC LIMIT 1",
-                )?
-                .query_row([&d.workspace_id], |r| r.get(0))
-                .optional()
-                .map_err(ApiError::from)
-            })
+            .read(|r| steve_store::decision_repo::latest_approved_release(r, &d.workspace_id))
             .unwrap_or(None);
         newest.as_deref() == Some(d.id.as_str())
     }
@@ -109,7 +98,7 @@ impl Engine {
     fn own_action(&self, ws: &str, id: &str) -> ApiResult<ActionRow> {
         self.yolo()
             .store()
-            .reader(|c| repo::action_get(c, id))?
+            .read(|c| repo::action_get(c, id))?
             .filter(|a| a.workspace_id == ws)
             .ok_or_else(|| ApiError::not_found("记录"))
     }
@@ -177,7 +166,7 @@ impl Engine {
             }
             _ => return Err(ApiError::rule(cannot())),
         }
-        self.yolo().store().transaction(|tx| {
+        self.yolo().store().write(|tx| {
             audit(
                 tx,
                 ws,
@@ -194,7 +183,7 @@ impl Engine {
         }
         self.yolo()
             .store()
-            .reader(|c| repo::action_get(c, &a.id))?
+            .read(|c| repo::action_get(c, &a.id))?
             .ok_or_else(|| ApiError::not_found("记录"))
     }
 

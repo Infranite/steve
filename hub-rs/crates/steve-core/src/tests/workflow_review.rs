@@ -149,17 +149,7 @@ fn optional_claim_without_a_live_session_still_prevents_parent_completion() {
     );
     // The durable state at a crash between claim and session creation: a reserved optional unit,
     // no active process and no current session. Completion must not throw the reservation away.
-    k.db()
-        .store()
-        .transaction::<_, steve_store::StoreError>(|tx| {
-            tx.execute(
-                "UPDATE workflow_units SET status='dispatching',session_id=NULL
-                 WHERE workflow_id=? AND id='extra'",
-                [&parent],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::core_fixture::work::reserve_workflow_unit(k.db().store(), &parent, "extra");
     assert!(
         k.core.workflow_get(&parent).unwrap()["blockers"]
             .as_array()

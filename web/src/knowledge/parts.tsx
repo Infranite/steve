@@ -9,7 +9,6 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Textarea } from "@/components/ui/textarea"
 import { StatusDot, SectionLabel, go } from "@/ui"
 import { kb, levelLabel, LEVEL_DOT, type Cite, type Use } from "@/api/knowledge"
-import { NotWired } from "@/api"
 import { t, useT } from "@/i18n"
 
 /** `[n]` marks in an answer become links to their snippet; marks without a cite stay text */
@@ -42,14 +41,15 @@ export function Cites({ cites }: { cites?: Cite[] }) {
 
 /** session panel: what knowledge the session was given (`GET /kb/uses`): each document once, however many searches
  *  and snippets brought it – its title, where it comes from, its level, how many snippets; why it was looked up (the
- *  searches' queries) on hover. The first three, the rest on request; nothing on a Hub without the module or when the
- *  session used none */
+ *  searches' queries) on hover. The first three are shown, with the rest available on request. */
 export function SessionKnowledge({ id }: { id: string }) {
   const t = useT()
-  const [hits, setHits] = useState<Use[] | null | "absent">(null)
+  const [hits, setHits] = useState<Use[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
   const [all, setAll] = useState(false)
-  useEffect(() => { let on = true; kb.uses("session", id).then((r) => on && setHits(r.hits), (e) => on && setHits(e instanceof NotWired ? "absent" : [])); return () => { on = false } }, [id])
-  if (hits === "absent" || hits === null || !hits.length) return null
+  useEffect(() => { let on = true; setError(null); setHits(null); kb.uses("session", id).then((r) => on && setHits(r.hits), (e) => on && setError((e as Error).message)); return () => { on = false } }, [id])
+  if (error) return <p role="alert" className="type-footnote text-destructive">{error}</p>
+  if (!hits?.length) return null
   const docs = new Map<string, { h: Use; n: number; why: Set<string> }>()
   for (const h of hits) {
     const k = h.type === "chunk" ? h.id : h.type + h.id, d = docs.get(k)

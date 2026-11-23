@@ -29,9 +29,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Timelike;
-use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_modules::accounts::connections::ConnCx;
+use steve_store::channel_positions::{self, PollPosition};
+use steve_store::connections::Connections;
+use steve_store::settings::Settings;
+use steve_store::{Read, accounts, channel_message_repo, channel_spaces, connections};
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 use super::auth::{APP_ADAPTER, APP_SYSTEM, FeishuUser, USER_ADAPTER, USER_SYSTEM};
@@ -62,8 +65,7 @@ pub const MAX_THREADS: usize = 5;
 pub const THREAD_ACTIVE_MS: i64 = 3 * 24 * 3_600_000;
 /// A chat Feishu refused is tried again after this long.
 pub const ERROR_RETRY_MS: i64 = 3_600_000;
-/// The workspace setting with the quiet hours, and its default.
-pub const QUIET_SETTING: &str = "quiet";
+/// The default workspace quiet hours.
 pub const DEFAULT_QUIET: &str = "23:00 – 08:00";
 
 const CHATS_PAGE: &str = "20";
@@ -150,100 +152,22 @@ impl Quiet {
 }
 
 /// The workspace's quiet hours (`quiet`, a JSON string) in its `tz`; is `now` inside them?
-fn in_quiet_hours(c: &rusqlite::Connection, ws: &str, now: i64) -> ChannelResult<bool> {
-    let get = |key: &str| -> ChannelResult<Option<String>> {
-        let v: Option<String> = c
-            .query_row(
-                "SELECT value FROM settings WHERE workspace_id = ? AND key = ?",
-                params![ws, key],
-                |r| r.get(0),
-            )
-            .optional()?;
-        Ok(v.map(|v| serde_json::from_str::<String>(&v).unwrap_or(v)))
-    };
-    let quiet = get(QUIET_SETTING)?.unwrap_or_else(|| DEFAULT_QUIET.into());
+fn in_quiet_hours(r: &mut impl Read, ws: &str, now: i64) -> ChannelResult<bool> {
+    let mut settings = Settings::new(r);
+    let quiet = settings
+        .quiet_hours(ws)?
+        .unwrap_or_else(|| DEFAULT_QUIET.into());
     let Some(q) = Quiet::parse(&quiet) else {
         return Ok(false);
     };
-    let tz = get("tz")?
+    let tz = settings
+        .timezone(ws)?
         .and_then(|t| steve_runtime::tz::Zone::parse(&t).ok())
         .unwrap_or_else(steve_runtime::tz::Zone::system);
     let Ok(local) = tz.local(now) else {
         return Ok(false);
     };
     Ok(q.contains(local.hour() * 60 + local.minute()))
-}
-
-// ---------------------------------------------------------------------------------------------
-// Cursors.
-
-/// One `chan_cursors` row.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Cursor {
-    pub container: String,
-    pub kind: String,
-    pub chat_id: String,
-    /// `None`: never read successfully (the first read only sets it).
-    pub cursor: Option<i64>,
-    pub boundary: Vec<String>,
-    pub last_new: Option<i64>,
-    pub polled: Option<i64>,
-    pub error: Option<String>,
-    pub error_at: Option<i64>,
-}
-
-const CURSOR_COLS: &str =
-    "container, kind, chat_id, cursor, boundary, last_new, polled, error, error_at";
-
-fn cursor_row(r: &rusqlite::Row) -> rusqlite::Result<Cursor> {
-    let b: String = r.get(4)?;
-    Ok(Cursor {
-        container: r.get(0)?,
-        kind: r.get(1)?,
-        chat_id: r.get(2)?,
-        cursor: r.get(3)?,
-        boundary: serde_json::from_str(&b).unwrap_or_default(),
-        last_new: r.get(5)?,
-        polled: r.get(6)?,
-        error: r.get(7)?,
-        error_at: r.get(8)?,
-    })
-}
-
-/// The cursor of `container` on connection `conn`.
-pub fn cursor(
-    c: &rusqlite::Connection,
-    conn: &str,
-    container: &str,
-) -> ChannelResult<Option<Cursor>> {
-    Ok(c.query_row(
-        &format!(
-            "SELECT {CURSOR_COLS} FROM chan_cursors WHERE connection_id = ? AND container = ?"
-        ),
-        params![conn, container],
-        cursor_row,
-    )
-    .optional()?)
-}
-
-fn save_cursor(channels: &Channels, ws: &str, conn: &str, k: &Cursor) -> ChannelResult<()> {
-    let now = channels.now();
-    let boundary = serde_json::to_string(&k.boundary).unwrap_or_else(|_| "[]".into());
-    channels.store().transaction(|tx| -> ChannelResult<()> {
-        tx.execute(
-            "INSERT INTO chan_cursors (connection_id, workspace_id, container, kind, chat_id, cursor, boundary, last_new, polled, error, error_at, created, updated)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
-             ON CONFLICT (connection_id, container) DO UPDATE SET
-               cursor = excluded.cursor, boundary = excluded.boundary, last_new = excluded.last_new,
-               polled = excluded.polled, error = excluded.error, error_at = excluded.error_at,
-               updated = excluded.updated",
-            params![
-                conn, ws, k.container, k.kind, k.chat_id, k.cursor, boundary, k.last_new,
-                k.polled, k.error, k.error_at, now
-            ],
-        )?;
-        Ok(())
-    })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -384,7 +308,7 @@ impl SelfPoller {
         let quiet = self
             .channels
             .store()
-            .reader(|c| in_quiet_hours(c, &self.ws, now))
+            .read(|r| in_quiet_hours(r, &self.ws, now))
             .unwrap_or(false);
         delay(self.settings.interval, now < self.burst_until, quiet, r)
     }
@@ -416,7 +340,7 @@ impl SelfPoller {
         let (enabled, ids) = self
             .channels
             .store()
-            .reader(|c| facts(c, &conn, cx.config_str("app_connection")))
+            .read(|r| facts(r, &ws, &conn, cx.config_str("app_connection")))
             .map_err(|e| e.to_string())?;
         if !enabled {
             return Err("连接未启用或没有“接收消息”能力".into());
@@ -464,7 +388,7 @@ impl SelfPoller {
         let covered = self
             .channels
             .store()
-            .reader(|c| bot_spaces(c, &ws))
+            .read(|r| bot_spaces(r, &ws))
             .map_err(|e| e.to_string())?;
         let mut seen = HashSet::new();
         let mut picked = Vec::new();
@@ -482,20 +406,20 @@ impl SelfPoller {
         }
 
         // 3. read them
-        let mut new_threads: Vec<Cursor> = Vec::new();
+        let mut new_threads: Vec<PollPosition> = Vec::new();
         let mut rest = picked.into_iter();
         while let Some(chat) = rest.next() {
             let k = self
                 .channels
                 .store()
-                .reader(|c| cursor(c, &conn, &chat.chat_id))
+                .read(|r| channel_positions::poll(r, &conn, &chat.chat_id))
                 .map_err(|e| e.to_string())?;
             if let Some(k) = &k
                 && k.error_at.is_some_and(|t| now - t < ERROR_RETRY_MS)
             {
                 continue;
             }
-            let k = k.unwrap_or_else(|| Cursor {
+            let k = k.unwrap_or_else(|| PollPosition {
                 container: chat.chat_id.clone(),
                 kind: KIND_CHAT.into(),
                 chat_id: chat.chat_id.clone(),
@@ -526,7 +450,14 @@ impl SelfPoller {
         let more = self
             .channels
             .store()
-            .reader(|c| active_threads(c, &conn, now - THREAD_ACTIVE_MS))
+            .read(|r| {
+                channel_positions::active_threads(
+                    r,
+                    &conn,
+                    now - THREAD_ACTIVE_MS,
+                    MAX_THREADS as u64,
+                )
+            })
             .map_err(|e| e.to_string())?;
         for t in more {
             if !threads.iter().any(|x| x.container == t.container) {
@@ -564,9 +495,9 @@ impl SelfPoller {
         client: &FeishuClient,
         ids: &Ids,
         chat: &ChatRow,
-        mut k: Cursor,
+        mut k: PollPosition,
         r: &mut RoundReport,
-        new_threads: &mut Vec<Cursor>,
+        new_threads: &mut Vec<PollPosition>,
     ) -> Result<(), Stop> {
         let (ws, conn) = (self.ws.as_str(), self.conn.as_str());
         let now = self.channels.now();
@@ -664,7 +595,7 @@ impl SelfPoller {
                 let bot_has = self
                     .channels
                     .store()
-                    .reader(|c| bot_has(c, ws, &chat.chat_id, &id))
+                    .read(|r| bot_has(r, ws, &chat.chat_id, &id))
                     .unwrap_or(false);
                 if bot_has {
                     r.by_bot += 1;
@@ -694,7 +625,7 @@ impl SelfPoller {
                         }
                     }
                     if is_root && let Some(th) = opt(m, "thread_id") {
-                        new_threads.push(Cursor {
+                        new_threads.push(PollPosition {
                             container: th,
                             kind: KIND_THREAD.into(),
                             chat_id: chat.chat_id.clone(),
@@ -723,7 +654,7 @@ impl SelfPoller {
             let exists = self
                 .channels
                 .store()
-                .reader(|c| cursor(c, conn, &th.container))
+                .read(|r| channel_positions::poll(r, conn, &th.container))
                 .ok()
                 .flatten()
                 .is_some();
@@ -734,8 +665,13 @@ impl SelfPoller {
         Ok(())
     }
 
-    fn save(&self, k: &Cursor) {
-        if let Err(e) = save_cursor(&self.channels, &self.ws, &self.conn, k) {
+    fn save(&self, k: &PollPosition) {
+        let now = self.channels.now();
+        if let Err(e) = self
+            .channels
+            .store()
+            .write(|w| channel_positions::save_poll(w, &self.ws, &self.conn, k, now))
+        {
             tracing::warn!(conn = self.conn, "feishu self poll: cursor not saved: {e}");
         }
     }
@@ -776,46 +712,25 @@ fn delay(interval: Duration, burst: bool, quiet: bool, r: &RoundReport) -> Durat
 
 /// Is the connection on with `msg.receive`, and the ids the mapping needs.
 fn facts(
-    c: &rusqlite::Connection,
+    r: &mut impl Read,
+    ws: &str,
     conn: &str,
     app_conn: Option<&str>,
 ) -> ChannelResult<(bool, Ids)> {
-    let row: Option<(String, String, String)> = c
-        .query_row(
-            "SELECT status, caps, account_id FROM connections WHERE id = ?",
-            [conn],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?;
-    let Some((status, caps, account)) = row else {
+    let Some(source) = Connections::new(r).source(ws, conn)? else {
         return Ok((false, Ids::default()));
     };
-    let caps: Vec<String> = serde_json::from_str(&caps).unwrap_or_default();
-    let enabled =
-        matches!(status.as_str(), "ok" | "error") && caps.iter().any(|x| x == "msg.receive");
-    let me_open_id: String = c
-        .query_row(
-            "SELECT handle FROM account_handles WHERE account_id = ? AND handle LIKE 'ou\\_%' ESCAPE '\\' ORDER BY created LIMIT 1",
-            [&account],
-            |r| r.get(0),
-        )
-        .optional()?
-        .unwrap_or_default();
+    let enabled = matches!(source.status.as_str(), "ok" | "error")
+        && source.caps.iter().any(|cap| cap == "msg.receive");
     let mut ids = Ids {
-        me_open_id,
+        me_open_id: accounts::feishu_open_id(r, &source.account_id)?.unwrap_or_default(),
         ..Ids::default()
     };
-    if let Some(app) = app_conn {
-        let config: Option<String> = c
-            .query_row("SELECT config FROM connections WHERE id = ?", [app], |r| {
-                r.get(0)
-            })
-            .optional()?;
-        let v: Value = config
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or(Value::Null);
-        ids.app_id = s(&v, "app_id").to_string();
-        ids.bot_open_id = s(&v, "bot_open_id").to_string();
+    if let Some(app) = app_conn
+        && let Some(config) = connections::config(r, app)?
+    {
+        ids.app_id = s(&config, "app_id").to_owned();
+        ids.bot_open_id = s(&config, "bot_open_id").to_owned();
     }
     Ok((enabled, ids))
 }
@@ -824,30 +739,17 @@ fn facts(
 /// last permission check found `im:message.group_msg` granted. Without that scope a bot receives only the
 /// messages that @ it, so a group it merely sits in is still read here (what the bot did store is skipped
 /// message by message, [`bot_has`]); a bot in `error` may be offline. Unknown counts as not covered.
-fn bot_spaces(c: &rusqlite::Connection, ws: &str) -> ChannelResult<HashSet<String>> {
-    let mut st = c.prepare(
-        "SELECT s.external_id, c.config FROM spaces s JOIN space_identities i ON i.space_id = s.id AND i.left_at IS NULL
-           JOIN connections c ON c.id = i.connection_id
-          WHERE s.workspace_id = ? AND c.adapter = ? AND c.status = 'ok' AND s.status = 'active'",
-    )?;
-    let rows = st
-        .query_map(params![ws, APP_ADAPTER], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows
+fn bot_spaces(r: &mut impl Read, ws: &str) -> ChannelResult<HashSet<String>> {
+    let covered: Vec<_> = connections::healthy_configs(r, ws, APP_ADAPTER)?
         .into_iter()
-        .filter(|(_, config)| all_group_messages(config))
-        .map(|(chat, _)| chat)
+        .filter_map(|(id, config)| receives_all_groups(&config).then_some(id))
+        .collect();
+    Ok(channel_spaces::active_chats(r, ws, &covered)?
+        .into_iter()
         .collect())
 }
 
 /// The bot's recorded permission check says it receives every group message (`im:message.group_msg`).
-fn all_group_messages(config: &str) -> bool {
-    serde_json::from_str::<Value>(config).is_ok_and(|v| receives_all_groups(&v))
-}
-
-/// [`all_group_messages`] of a parsed bot `config`.
 pub(crate) fn receives_all_groups(config: &Value) -> bool {
     config
         .get("permissions")
@@ -861,27 +763,10 @@ pub(crate) fn receives_all_groups(config: &Value) -> bool {
 }
 
 /// The long connection already stored message `ext` of chat `chat`.
-fn bot_has(c: &rusqlite::Connection, ws: &str, chat: &str, ext: &str) -> ChannelResult<bool> {
-    Ok(c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM spaces s JOIN space_identities i ON i.space_id = s.id
-                          JOIN connections c ON c.id = i.connection_id
-                          JOIN chan_messages m ON m.space_id = s.id AND m.external_id = ?3
-                         WHERE s.workspace_id = ?1 AND s.external_id = ?2 AND c.adapter = ?4)",
-        params![ws, chat, ext, APP_ADAPTER],
-        |r| r.get(0),
-    )?)
-}
-
-/// Thread cursors with something new since `since`, least recently read first.
-fn active_threads(c: &rusqlite::Connection, conn: &str, since: i64) -> ChannelResult<Vec<Cursor>> {
-    let mut st = c.prepare(&format!(
-        "SELECT {CURSOR_COLS} FROM chan_cursors WHERE connection_id = ? AND kind = 'thread' AND last_new >= ?
-          ORDER BY coalesce(polled, 0), container LIMIT ?"
-    ))?;
-    let rows = st
-        .query_map(params![conn, since, MAX_THREADS as i64], cursor_row)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+fn bot_has(r: &mut impl Read, ws: &str, chat: &str, ext: &str) -> ChannelResult<bool> {
+    let bots = connections::ids_for_adapter(r, ws, APP_ADAPTER)?;
+    let spaces = channel_spaces::spaces_for_chat(r, ws, chat, &bots)?;
+    Ok(channel_message_repo::contains_external(r, &spaces, ext)?)
 }
 
 /// One item of `GET im/v1/messages` → [`InboundMessage`] (`via=poll`).
@@ -1101,17 +986,7 @@ impl SelfPollers {
         let conns = self
             .channels
             .store()
-            .reader(|c| -> ChannelResult<Vec<(String, String)>> {
-                let mut st = c.prepare(
-                    "SELECT id, workspace_id FROM connections
-                  WHERE adapter = ? AND status IN ('ok', 'error') AND caps LIKE '%\"msg.receive\"%'
-                  ORDER BY created, id",
-                )?;
-                let rows = st
-                    .query_map([USER_ADAPTER], |r| Ok((r.get(0)?, r.get(1)?)))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok(rows)
-            });
+            .read(|r| Connections::new(r).live_for_adapter(USER_ADAPTER));
         let conns = match conns {
             Ok(c) => c,
             Err(e) => {
@@ -1122,7 +997,11 @@ impl SelfPollers {
         let mut running = self.running.lock().await;
         running.retain(|_, r| !r.task.is_finished());
         let mut n = 0;
-        for (id, ws) in conns {
+        for conn in conns {
+            if !conn.caps.iter().any(|cap| cap == "msg.receive") {
+                continue;
+            }
+            let (id, ws) = (conn.id, conn.workspace_id);
             if running.contains_key(&id) {
                 continue;
             }

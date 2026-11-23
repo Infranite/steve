@@ -18,7 +18,6 @@ pub mod index;
 pub mod notes;
 pub mod openviking;
 pub mod port;
-pub mod repo;
 pub mod retrieve;
 pub mod service;
 pub mod sources;
@@ -38,7 +37,7 @@ pub use retrieve::{
 };
 pub use sources::files::FilesLoader;
 pub use sources::folder::{FolderLoader, FolderPolicy, scan_job};
-pub use state::{KbEvent, Knowledge};
+pub use state::{KbEvent, Knowledge, emit_change};
 
 // K4: prompts, citations, MCP tools, uses.
 pub mod cite;
@@ -55,3 +54,10 @@ pub mod drafts;
 pub mod provenance;
 pub mod steward;
 pub mod subjects;
+
+fn read_api<T>(
+    store: &steve_store::Store,
+    f: impl FnOnce(&mut steve_store::R<'_>) -> steve_modules::ApiResult<T>,
+) -> steve_modules::ApiResult<T> {
+    store.read(|r| Ok::<_, steve_store::StoreError>(f(r)))?
+}

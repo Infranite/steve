@@ -1,3 +1,4 @@
+import { getItems, useBotMemories } from "@/store"
 /* A Bot's page, the parts beyond its settings form (manage.tsx holds the page and the other tabs):
  *  - 概览: who it is, what it did in the last 30 days (GET /stats/summary?bot=), its items (running first, then the
  *    latest closed), and its capabilities and key settings, each leading to the tab where it is changed; a Bot with no
@@ -48,14 +49,15 @@ export function recentItems(k: string, items: Item[]) {
 }
 
 export function BotOverview({ k, go, labels }: { k: string; go: (tab: BotTab) => void; labels: BotLabels }) {
+  const memories = useBotMemories(k)
   const t = useT()
   const b = st.bots[k]
   const [d] = useStats(() => stats.summary({ range: "30d", bot: k }), [k])
   if (!b) return null
   const s = d.s === "ok" ? d.v : null
-  const { open, list, any } = recentItems(k, st.items)
+  const { open, list, any } = recentItems(k, getItems())
   /* a Bot with no history: nothing it was given, no turn in the statistics */
-  const fresh = !any && (d.s === "absent" || (!!s && s.agents.turns === 0 && s.throughput.done === 0))
+  const fresh = !any && !!s && s.agents.turns === 0 && s.throughput.done === 0
   const promptText = b.prompt == null ? t("manage:ov.promptAuto") : t("manage:ov.promptCustom", { count: b.prompt.length })
   return (
     <div className="flex flex-col gap-8 anim-in" data-bot-overview={fresh ? "fresh" : "active"}>
@@ -72,7 +74,7 @@ export function BotOverview({ k, go, labels }: { k: string; go: (tab: BotTab) =>
 
       {!fresh && (
         <Section label={t("manage:ov.recent")} right={<a href="#/stats" className="type-footnote font-normal text-muted-foreground hover:text-foreground" data-bot-stats-open>{t("manage:ov.openStats")}</a>}
-          note={d.s === "absent" ? t("manage:ov.statsAbsent") : undefined}>
+          note={d.s === "error" ? d.msg : undefined}>
           {d.s === "loading" ? <Loading className="py-8" /> : s && (
             <Card className="grid grid-cols-2 gap-0 p-1 sm:grid-cols-3" data-bot-figures>
               <Figure testId="turns" label={t("manage:ov.turns")} value={fmtN(s.agents.turns)} sub={s.agents.tools ? t("manage:ov.toolCalls", { n: fmtN(s.agents.tools) }) : undefined} />
@@ -100,7 +102,7 @@ export function BotOverview({ k, go, labels }: { k: string; go: (tab: BotTab) =>
             <Fact label={t("manage:ov.perm")} onClick={() => go("设置")} testId="perm">{labels.perm}</Fact>
             <Fact label={t("manage:ov.acc")} onClick={() => go("设置")} testId="acc">{labels.acc}</Fact>
             <Fact label={t("manage:detail.tabPrompt")} onClick={() => go("系统提示词")} testId="prompt">{promptText}</Fact>
-            <Fact label={t("manage:detail.tabMemory")} onClick={() => go("记忆")} testId="memory">{t("manage:ov.memCount", { count: b.memCount })}</Fact>
+            <Fact label={t("manage:detail.tabMemory")} onClick={() => go("记忆")} testId="memory">{t("manage:ov.memCount", { count: memories?.length ?? 0 })}</Fact>
         </Panel>
       </Section>
     </div>
@@ -216,10 +218,11 @@ function PromptAssistant({ k, field, base, onApplied, autoAsk }: { k: string; fi
 /** 系统提示词: generated or your own, and the drafting assistant above it */
 export function BotPrompt({ k }: { k: string }) {
   const t = useT()
+  const memories = useBotMemories(k)
   const b = st.bots[k]
   const [prompt, setPrompt] = useState<{ generated: string; custom: string | null } | null>(null), [pdraft, setPdraft] = useState<string | null>(null)
   const [auto, setAuto] = useState<{ text: string; n: number } | undefined>(undefined)
-  useEffect(() => { api.botPrompt(k).then(setPrompt).catch(() => {}) }, [k, b?.prompt, b?.memCount, b?.rule, b?.role, b?.pers, b?.pro])
+  useEffect(() => { api.botPrompt(k).then(setPrompt).catch(() => {}) }, [k, b?.prompt, memories, b?.rule, b?.role, b?.pers, b?.pro])
   if (!b) return null
   const custom = b.prompt != null || pdraft != null
   const text = pdraft ?? b.prompt ?? ""

@@ -4,7 +4,6 @@ import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { channelsApi, type FeishuRegistration } from "@/api/channels"
 import { vaultApi } from "@/api/vault"
-import { isNotWired } from "@/api"
 import { go } from "@/ui"
 import { Select } from "@/view-shared"
 import { t as tr, useT } from "@/i18n"
@@ -19,7 +18,7 @@ export function FeishuRegistrationPanel() {
   const [r, setRegistration] = useState<FeishuRegistration | null>(null)
   const [loading, setLoading] = useState(true), [busy, setBusy] = useState(false)
   const [vaultReady, setVaultReady] = useState<boolean | null>(null)
-  const [error, setError] = useState(""), [unavailable, setUnavailable] = useState(false)
+  const [error, setError] = useState("")
   const [now, setNow] = useState(Date.now()), [reload, setReload] = useState(0)
   const epoch = useRef(0), mounted = useRef(true)
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; epoch.current++ } }, [])
@@ -27,9 +26,9 @@ export function FeishuRegistrationPanel() {
     let stop = false
     setLoading(true)
     channelsApi.registrationCurrent().then((next) => {
-      if (!stop) { setRegistration(next); setError(""); setUnavailable(false) }
+      if (!stop) { setRegistration(next); setError("") }
     }).catch((e) => {
-      if (!stop) { setUnavailable(isNotWired(e)); setError(isNotWired(e) ? t("integrations:reg.unavailable") : errorText(e)) }
+      if (!stop) setError(errorText(e))
     }).finally(() => { if (!stop) setLoading(false) })
     return () => { stop = true }
   }, [reload])
@@ -68,7 +67,7 @@ export function FeishuRegistrationPanel() {
   }
   const url = officialConfirmationUrl(r?.verification_uri_complete)
   const left = remainingSeconds(r?.expires_at ?? 0, now)
-  const startAllowed = vaultReady !== false && !loading && !busy && !unavailable && !error && !pending && r?.state !== "credentials_saved"
+  const startAllowed = vaultReady !== false && !loading && !busy && !error && !pending && r?.state !== "credentials_saved"
   const terminal = r && !pending && r.state !== "credentials_saved" && r.state !== "succeeded"
   return <div className="flex flex-col gap-3 rounded-xl bg-card p-5 shadow-[var(--lift)]" data-app-registration>
     <div className="type-headline">{t("integrations:reg.title")}</div>
@@ -97,7 +96,7 @@ export function FeishuRegistrationPanel() {
       {r.state === "cancelled" && <p className="type-footnote text-muted-foreground">{t("integrations:reg.cancelledNote")}</p>}
     </div>}
     {error && <div role="alert" className="flex flex-col items-start gap-2 type-callout text-destructive">{error}
-      {<Button size="sm" variant="outline" disabled={busy || loading} onClick={() => { ++epoch.current; setReload((x) => x + 1) }}>{t("integrations:reg.reload")}</Button>}
+      <Button size="sm" variant="outline" disabled={busy || loading} onClick={() => { ++epoch.current; setReload((x) => x + 1) }}>{t("integrations:reg.reload")}</Button>
     </div>}
     {!pending && r?.state !== "credentials_saved" && <div className="flex flex-wrap items-center gap-2">
       <Select testId="registration-brand" value={brand} onChange={(v) => setBrand(v as "feishu" | "lark")} options={[{ v: "feishu", l: t("integrations:feishu.brand") }, { v: "lark", l: "Lark" }]} />

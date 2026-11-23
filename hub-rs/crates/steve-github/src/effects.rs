@@ -21,12 +21,11 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use steve_modules::ApiError;
-use steve_store::Tx;
 use steve_store::outbox;
 
 use crate::GitHub;
 use crate::api::GhError;
-use crate::repo::{self, EffectRow};
+use steve_store::github::EffectRow;
 
 pub const OPEN: &str = "open";
 pub const MERGE: &str = "merge";
@@ -39,13 +38,13 @@ const BATCH: i64 = 20;
 
 /// Records the write for `decision`, in the answer's transaction.
 pub(crate) fn queue(
-    tx: &Tx,
+    tx: &mut steve_store::W<'_>,
     gh: &GitHub,
     ws: &str,
     decision: &str,
     kind: &str,
 ) -> Result<(), ApiError> {
-    repo::insert_effect(tx, ws, decision, kind, gh.now())?;
+    steve_store::github::insert_effect(tx, ws, decision, kind, gh.now())?;
     gh.0.effect_wake.notify_one();
     Ok(())
 }
@@ -145,7 +144,7 @@ impl GitHub {
     ) -> Result<crate::api::GhConn, Fail> {
         let waits = self
             .store()
-            .reader(|c| {
+            .read(|c| {
                 steve_modules::accounts::connections::may_write_in(
                     c,
                     ws,
@@ -164,7 +163,7 @@ impl GitHub {
     /// Finishes `item` through the outbox (after the commit, at least once).
     pub(crate) fn finish_later(&self, ws: &str, item: &str, now: &str) -> Result<(), Fail> {
         self.store()
-            .transaction(|tx| {
+            .write(|tx| {
                 let mut fx = crate::sync::Effects {
                     finish: vec![(item.to_string(), now.to_string())],
                     ..Default::default()
@@ -196,7 +195,7 @@ impl GitHub {
         let now = self.now();
         let due = match self
             .store()
-            .reader(|c| repo::due_effects(c, now, BATCH).map_err(ApiError::from))
+            .read(|c| steve_store::github::due_effects(c, now, BATCH).map_err(ApiError::from))
         {
             Ok(d) => d,
             Err(e) => {
@@ -206,8 +205,9 @@ impl GitHub {
         };
         let mut n = 0;
         for e in due {
-            let claimed = self.store().transaction(|tx| {
-                repo::claim_effect(tx, &e.id, e.attempts, now).map_err(ApiError::from)
+            let claimed = self.store().write(|tx| {
+                steve_store::github::claim_effect(tx, &e.id, e.attempts, now)
+                    .map_err(ApiError::from)
             });
             if !matches!(claimed, Ok(true)) {
                 continue;
@@ -222,9 +222,9 @@ impl GitHub {
         // a run after one that sent its write (unknown, a restart) reconciles first; one after a
         // wait (nothing sent) does not
         let reconcile = tried(&e.result);
-        let d = self.store().reader(|c| {
-            steve_store::base::decisions::get(c, &e.decision_id).map_err(ApiError::from)
-        });
+        let d = self
+            .store()
+            .read(|c| steve_store::decision_repo::get(c, &e.decision_id).map_err(ApiError::from));
         let ran = match d {
             Ok(Some(d)) if d.status == "resolved" => match e.kind.as_str() {
                 OPEN => self.open_pr(&d, e, reconcile).await,
@@ -240,7 +240,7 @@ impl GitHub {
         // what an earlier step of this run wrote down (the commit it is about)
         let kept = self
             .store()
-            .reader(|c| repo::effect_of(c, &e.decision_id).map_err(ApiError::from))
+            .read(|c| steve_store::github::effect_of(c, &e.decision_id).map_err(ApiError::from))
             .ok()
             .flatten()
             .map(|r| r.result)
@@ -270,14 +270,20 @@ impl GitHub {
                 (back, Some(now + outbox::backoff(attempts)), Some(m), kept)
             }
         };
-        let r = self.store().transaction(|tx| {
-            repo::settle_effect(tx, &e.id, state, next, error.as_deref(), &result, now)
-                .map_err(ApiError::from)
+        let r = self.store().write(|tx| {
+            steve_store::github::settle_effect(
+                tx,
+                &e.id,
+                state,
+                next,
+                error.as_deref(),
+                &result,
+                now,
+            )
+            .map_err(ApiError::from)
         });
         if let Err(err) = r {
             tracing::error!(effect = %e.id, error = %err, "github effect result not recorded");
-        } else {
-            self.notifier().gh(&e.workspace_id, &e.decision_id);
         }
     }
 
@@ -298,9 +304,7 @@ impl GitHub {
         };
         let d = self
             .store()
-            .reader(|c| {
-                steve_store::base::decisions::get(c, &e.decision_id).map_err(ApiError::from)
-            })
+            .read(|c| steve_store::decision_repo::get(c, &e.decision_id).map_err(ApiError::from))
             .ok()
             .flatten();
         let (item, session) = d.map(|d| (d.item_id, d.session_id)).unwrap_or_default();
@@ -312,9 +316,9 @@ impl GitHub {
     pub fn recover_effects(&self) -> usize {
         let now = self.now();
         self.store()
-            .transaction(|tx| {
+            .write(|tx| {
                 let after = now + crate::api::REQUEST_TIMEOUT.as_millis() as i64;
-                repo::interrupted_effects(tx, now, after).map_err(ApiError::from)
+                steve_store::github::interrupted_effects(tx, now, after).map_err(ApiError::from)
             })
             .unwrap_or_else(|e| {
                 tracing::error!(error = %e, "github effects not recovered");
@@ -348,7 +352,9 @@ impl GitHub {
     /// from): a later run holds to it. Nothing sent yet if this fails: tried again.
     pub(crate) fn effect_intent(&self, decision: &str, intent: &Value) -> Result<(), Fail> {
         self.store()
-            .transaction(|tx| repo::effect_intent(tx, decision, intent).map_err(ApiError::from))
+            .write(|tx| {
+                steve_store::github::effect_intent(tx, decision, intent).map_err(ApiError::from)
+            })
             .map_err(|e| Fail::new(e.to_string(), Why::Wait))
     }
 

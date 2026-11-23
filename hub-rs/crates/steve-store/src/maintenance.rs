@@ -61,7 +61,7 @@ impl Store {
             .state
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        self.with_conn(|c| { c.execute("INSERT INTO settings(workspace_id,key,value,updated) VALUES('__system__','upgrade.maintenance',?,?) ON CONFLICT(workspace_id,key) DO UPDATE SET value=excluded.value,updated=excluded.updated", rusqlite::params![if on {"true"} else {"false"},crate::now()])?; Ok(()) })?;
+        self.write_locked(|c| { c.execute("INSERT INTO settings(workspace_id,key,value,updated) VALUES('__system__','upgrade.maintenance',?,?) ON CONFLICT(workspace_id,key) DO UPDATE SET value=excluded.value,updated=excluded.updated", rusqlite::params![if on {"true"} else {"false"},crate::now()])?; Ok(()) })?;
         // Retrying POST is idempotent: only DELETE may reopen a sealed drain.
         if !on || !g.active {
             g.sealed = false;

@@ -1,6 +1,6 @@
 //! Durable reading entries, independent from delivery receipts and chat.
 
-use crate::{Result, StoreError, Tx, uid};
+use crate::{Result, StoreError, W, uid};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -96,7 +96,7 @@ pub struct Page {
     pub snapshot: String,
     pub unread_count: i64,
 }
-pub fn member(c: &Connection, ws: &str, user: &str) -> Result<()> {
+pub(crate) fn member_on(c: &Connection, ws: &str, user: &str) -> Result<()> {
     if !c.query_row(
         "SELECT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?)",
         params![ws, user],
@@ -170,8 +170,8 @@ fn entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
         },
     })
 }
-pub fn detail(c: &Connection, ws: &str, user: &str, id: &str) -> Result<Entry> {
-    member(c, ws, user)?;
+pub(crate) fn detail_on(c: &Connection, ws: &str, user: &str, id: &str) -> Result<Entry> {
+    member_on(c, ws, user)?;
     c.query_row(
         &format!("{SELECT} WHERE {SCOPE} AND e.id=?3"),
         params![ws, user, id],
@@ -181,7 +181,7 @@ pub fn detail(c: &Connection, ws: &str, user: &str, id: &str) -> Result<Entry> {
     .ok_or(StoreError::NotFound("feed entry"))
 }
 fn window(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     user: &str,
     f: &Filter,
@@ -190,9 +190,9 @@ fn window(
     now: i64,
 ) -> Result<String> {
     // Polling an unchanged page reuses its capability rather than accumulating a token per read.
-    if let Some(token)=tx.query_row("SELECT token FROM feed_windows WHERE workspace_id=? AND user_id=? AND kind IS ? AND source IS ? AND unread=? AND upper_seq=? AND before_seq IS ? AND expires>? LIMIT 1",params![ws,user,f.kind,f.source,f.unread,upper,before,now+3_600_000],|r|r.get::<_,String>(0)).optional()? { return Ok(token); }
+    if let Some(token)=tx.conn.query_row("SELECT token FROM feed_windows WHERE workspace_id=? AND user_id=? AND kind IS ? AND source IS ? AND unread=? AND upper_seq=? AND before_seq IS ? AND expires>? LIMIT 1",params![ws,user,f.kind,f.source,f.unread,upper,before,now+3_600_000],|r|r.get::<_,String>(0)).optional()? { return Ok(token); }
     let token = format!("{}{}", uid("fw"), uid(""));
-    tx.execute("INSERT INTO feed_windows(token,workspace_id,user_id,kind,source,unread,upper_seq,before_seq,expires) VALUES(?,?,?,?,?,?,?,?,?)",params![token,ws,user,f.kind,f.source,f.unread,upper,before,now+86_400_000])?;
+    tx.conn.execute("INSERT INTO feed_windows(token,workspace_id,user_id,kind,source,unread,upper_seq,before_seq,expires) VALUES(?,?,?,?,?,?,?,?,?)",params![token,ws,user,f.kind,f.source,f.unread,upper,before,now+86_400_000])?;
     Ok(token)
 }
 fn resolve(
@@ -221,7 +221,7 @@ fn resolve(
 }
 const FILTER: &str = "(?3 IS NULL OR e.kind=?3) AND (?4 IS NULL OR e.source_type=?4)";
 pub fn list(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     user: &str,
     f: &Filter,
@@ -229,16 +229,16 @@ pub fn list(
     limit: usize,
     now: i64,
 ) -> Result<Page> {
-    member(tx, ws, user)?;
+    member_on(tx.conn, ws, user)?;
     f.validate()?;
     if !(1..=100).contains(&limit) {
         return Err(StoreError::Conflict("Feed limit must be 1..100".into()));
     }
     let (upper, before) = if let Some(token) = cursor {
-        resolve(tx, ws, user, f, token, true, now)?
+        resolve(tx.conn, ws, user, f, token, true, now)?
     } else {
         (
-            tx.query_row(
+            tx.conn.query_row(
                 &format!("SELECT coalesce(max(e.seq),0) FROM feed_entries e WHERE {SCOPE}"),
                 params![ws, user],
                 |r| r.get(0),
@@ -246,7 +246,7 @@ pub fn list(
             None,
         )
     };
-    let mut st=tx.prepare(&format!("{SELECT} WHERE {SCOPE} AND {FILTER} AND (?5=0 OR r.read_at IS NULL) AND e.seq<=?6 AND (?7 IS NULL OR e.seq<?7) ORDER BY e.seq DESC LIMIT ?8"))?;
+    let mut st=tx.conn.prepare(&format!("{SELECT} WHERE {SCOPE} AND {FILTER} AND (?5=0 OR r.read_at IS NULL) AND e.seq<=?6 AND (?7 IS NULL OR e.seq<?7) ORDER BY e.seq DESC LIMIT ?8"))?;
     let mut entries = st
         .query_map(
             params![
@@ -280,7 +280,7 @@ pub fn list(
     for e in &mut entries {
         e.body = None;
     }
-    let unread_count=tx.query_row(&format!("SELECT count(*) FROM feed_entries e LEFT JOIN feed_reads r ON r.workspace_id=e.workspace_id AND r.user_id=?2 AND r.entry_id=e.id WHERE {SCOPE} AND {FILTER} AND r.read_at IS NULL"),params![ws,user,f.kind,f.source],|r|r.get(0))?;
+    let unread_count=tx.conn.query_row(&format!("SELECT count(*) FROM feed_entries e LEFT JOIN feed_reads r ON r.workspace_id=e.workspace_id AND r.user_id=?2 AND r.entry_id=e.id WHERE {SCOPE} AND {FILTER} AND r.read_at IS NULL"),params![ws,user,f.kind,f.source],|r|r.get(0))?;
     Ok(Page {
         entries,
         next_cursor,
@@ -288,61 +288,142 @@ pub fn list(
         unread_count,
     })
 }
-pub fn read_ids(tx: &Tx, ws: &str, user: &str, ids: &[String], now: i64) -> Result<usize> {
-    member(tx, ws, user)?;
+pub fn read_ids(tx: &mut W<'_>, ws: &str, user: &str, ids: &[String], now: i64) -> Result<usize> {
+    member_on(tx.conn, ws, user)?;
     if ids.is_empty() || ids.len() > 100 {
         return Err(StoreError::Conflict("Select 1..100 feed entries".into()));
     }
     // Validate the entire set before writing, including when the caller nests this transaction.
     for id in ids {
-        detail(tx, ws, user, id)?;
+        detail_on(tx.conn, ws, user, id)?;
     }
     let mut changed = 0;
     for id in ids {
-        changed+=tx.execute("INSERT INTO feed_reads(workspace_id,user_id,entry_id,read_at) VALUES(?,?,?,?) ON CONFLICT DO NOTHING",params![ws,user,id,now])?;
+        changed+=tx.conn.execute("INSERT INTO feed_reads(workspace_id,user_id,entry_id,read_at) VALUES(?,?,?,?) ON CONFLICT DO NOTHING",params![ws,user,id,now])?;
     }
     Ok(changed)
 }
 pub fn read_snapshot(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     user: &str,
     f: &Filter,
     token: &str,
     now: i64,
 ) -> Result<usize> {
-    member(tx, ws, user)?;
+    member_on(tx.conn, ws, user)?;
     f.validate()?;
-    let (upper, _) = resolve(tx, ws, user, f, token, false, now)?;
-    Ok(tx.execute(&format!("INSERT INTO feed_reads(workspace_id,user_id,entry_id,read_at) SELECT ?1,?2,e.id,?7 FROM feed_entries e LEFT JOIN feed_reads r ON r.workspace_id=e.workspace_id AND r.user_id=?2 AND r.entry_id=e.id WHERE {SCOPE} AND {FILTER} AND (?5=0 OR r.read_at IS NULL) AND e.seq<=?6 ON CONFLICT DO NOTHING"),params![ws,user,f.kind,f.source,f.unread,upper,now])?)
+    let (upper, _) = resolve(tx.conn, ws, user, f, token, false, now)?;
+    Ok(tx.conn.execute(&format!("INSERT INTO feed_reads(workspace_id,user_id,entry_id,read_at) SELECT ?1,?2,e.id,?7 FROM feed_entries e LEFT JOIN feed_reads r ON r.workspace_id=e.workspace_id AND r.user_id=?2 AND r.entry_id=e.id WHERE {SCOPE} AND {FILTER} AND (?5=0 OR r.read_at IS NULL) AND e.seq<=?6 ON CONFLICT DO NOTHING"),params![ws,user,f.kind,f.source,f.unread,upper,now])?)
 }
 /// Stable business identity includes the graph node, not only the run or content hash.
-pub fn report_key(run: &str, node: &str) -> String {
+fn report_key(run: &str, node: &str) -> String {
     serde_json::to_string(&(run, node)).expect("string tuple")
 }
-pub fn report_result(c: &Connection, ws: &str, run: &str, node: &str) -> Result<Option<Value>> {
-    let raw:Option<String>=c.query_row("SELECT result FROM feed_entries WHERE workspace_id=? AND source_type='flow' AND source_key=?",params![ws,report_key(run,node)],|r|r.get(0)).optional()?;
-    raw.map(|s| serde_json::from_str(&s).map_err(StoreError::from))
-        .transpose()
-}
-/// The caller marks only its own digest material in the SAME transaction, and only if inserted.
-/// Losing publishers return the first persisted result instead of acknowledging their materials.
-pub fn publish_report(
-    tx: &Tx,
-    ws: &str,
-    flow: &str,
-    run: &str,
-    node: &str,
-    content: &Content,
-    result: &Value,
-    now: i64,
-) -> Result<(Value, bool)> {
-    if let Some(existing) = report_result(tx, ws, run, node)? {
-        return Ok((existing, false));
+impl<C: crate::Read> crate::FeedReads<'_, C> {
+    pub fn report_result(&mut self, ws: &str, run: &str, node: &str) -> Result<Option<Value>> {
+        use sea_query::{Expr, ExprTrait, Query};
+        self.0.one(
+            Query::select()
+                .column("result")
+                .from("feed_entries")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("source_type").eq("flow"))
+                .and_where(Expr::col("source_key").eq(report_key(run, node))),
+            |row| Ok(row.get::<crate::contract::Json<Value>>(0)?.0),
+        )
     }
-    let id = uid("feed");
-    let mut result = result.clone();
-    result["feed_entry_id"] = Value::String(id.clone());
-    tx.execute("INSERT INTO feed_entries(id,workspace_id,audience,kind,source_type,source_key,source_id,run_id,node_id,content,result,published_at) VALUES(?,?,'workspace','report','flow',?,?,?,?,?,?,?)",params![id,ws,report_key(run,node),flow,run,node,serde_json::to_string(content)?,serde_json::to_string(&result)?,now])?;
-    Ok((result, true))
+}
+
+/// A report's identity and payload, persisted when its run publishes.
+pub struct RunReport<'a> {
+    pub ws: &'a str,
+    pub flow: &'a str,
+    pub run: &'a str,
+    pub node: &'a str,
+    pub content: &'a Content,
+    pub result: &'a Value,
+    pub now: i64,
+}
+
+impl crate::W<'_> {
+    /// The caller acknowledges digest notes only when this inserts the report.
+    pub fn publish_report(&mut self, report: &RunReport<'_>) -> Result<(Value, bool)> {
+        use sea_query::Query;
+        if let Some(existing) =
+            crate::FeedReads(self).report_result(report.ws, report.run, report.node)?
+        {
+            return Ok((existing, false));
+        }
+        let id = uid("feed");
+        let mut result = report.result.clone();
+        result["feed_entry_id"] = Value::String(id.clone());
+        self.exec(
+            Query::insert()
+                .into_table("feed_entries")
+                .columns([
+                    "id",
+                    "workspace_id",
+                    "audience",
+                    "kind",
+                    "source_type",
+                    "source_key",
+                    "source_id",
+                    "run_id",
+                    "node_id",
+                    "content",
+                    "result",
+                    "published_at",
+                ])
+                .values_panic([
+                    id.into(),
+                    report.ws.into(),
+                    "workspace".into(),
+                    "report".into(),
+                    "flow".into(),
+                    report_key(report.run, report.node).into(),
+                    report.flow.into(),
+                    report.run.into(),
+                    report.node.into(),
+                    serde_json::to_string(report.content)?.into(),
+                    result.to_string().into(),
+                    report.now.into(),
+                ]),
+        )?;
+        Ok((result, true))
+    }
+}
+
+impl crate::FeedReads<'_, crate::W<'_>> {
+    /// Groups the notification lookup and its feed read receipt in one write.
+    pub fn mark_notification(&mut self, ws: &str, user: &str, id: &str, now: i64) -> Result<bool> {
+        use crate::contract::Q;
+        use sea_query::{Expr, ExprTrait, OnConflict, Query};
+        let entry = self.0.one(
+            Query::select()
+                .column("id")
+                .from("feed_entries")
+                .and_where(Expr::col("notification_id").eq(id))
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("recipient_id").eq(user)),
+            |row| row.get::<String>(0),
+        )?;
+        let Some(entry) = entry else { return Ok(false) };
+        self.0.exec(
+            Query::insert()
+                .into_table("feed_reads")
+                .columns(["workspace_id", "user_id", "entry_id", "read_at"])
+                .values_panic([ws.into(), user.into(), entry.into(), now.into()])
+                .on_conflict(OnConflict::new().do_nothing().to_owned()),
+        )?;
+        Ok(true)
+    }
+}
+
+pub fn member(r: &mut impl crate::Read, ws: &str, user: &str) -> Result<()> {
+    member_on(r.connection(), ws, user)
+}
+
+pub fn detail(r: &mut impl crate::Read, ws: &str, user: &str, id: &str) -> Result<Entry> {
+    detail_on(r.connection(), ws, user, id)
 }

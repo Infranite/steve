@@ -14,7 +14,7 @@ import { Badge } from "@/components/ui/badge"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { IntegrationRow, IntegrationSection, IntegrationSettings } from "@/components/affect/integration-settings-clean"
-import { Section, Empty, Loading, Blank, Segmented, Notice } from "@/ui"
+import { Section, Empty, Loading, Segmented, Notice } from "@/ui"
 import { toast } from "@/store"
 import { capsApi, type McpServer, type McpServerIn, type McpTransport, type McpVar } from "@/api/caps"
 import { AssignMenu, UsedBy, errText, useList } from "./common"
@@ -35,7 +35,6 @@ export function McpLibrary() {
   return (
     <Section label={t("caps:mcp.section")} note={t("caps:mcp.note")} right={d.s === "ok" && d.v.length > 0 ? add : undefined} data-mcp>
       {d.s === "loading" ? <Loading className="py-8" />
-        : d.s === "unwired" ? <Blank>{t("caps:mcp.unwired")}</Blank>
         : d.s === "error" ? <Notice tone="destructive">{d.e}</Notice>
         : d.v.length === 0 ? <Empty compact className="bg-muted/50" icon={<PlugIcon />} title={t("caps:mcp.emptyTitle")} sub={t("caps:mcp.emptySub")} data-mcp-empty
             action={<Button size="sm" onClick={() => setEditing("new")} data-mcp-add><PlusIcon />{t("caps:mcp.add")}</Button>} />

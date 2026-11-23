@@ -19,15 +19,16 @@ use steve_modules::contacts::mcp::McpCx;
 use steve_modules::vault::mcp::ToolOut;
 use steve_modules::vault::r#use::END;
 use steve_store::base::DecisionKind;
-use steve_store::base::decisions as base_decisions;
 use steve_store::{Item, NewDecision};
 
 use crate::GitHub;
 use crate::accept::{self, OPTIONS, PR_OPEN};
 use crate::comment::{self, BODY_MAX, Target};
-use crate::repo::{self, CheckRow, PrRow, RepoRow};
 use crate::repos::check_state;
 use crate::sync::latest_checks;
+use steve_store::github::CheckRow;
+use steve_store::github::PrRow;
+use steve_store::github::RepoRow;
 
 pub const STATUS: &str = "steve_github_status";
 pub const CI_LOG: &str = "steve_github_ci_log";
@@ -218,14 +219,14 @@ fn linked(gh: &GitHub, cx: &McpCx) -> Result<Option<Linked>, String> {
     let ws = cx.ws.clone();
     let (project_repo, prs) = gh
         .store()
-        .reader(|c| {
+        .read(|c| {
             let pr = match &item.project_id {
-                Some(p) => repo::repo_of_project(c, &ws, p)?.filter(|r| r.enabled),
+                Some(p) => steve_store::github::repo_of_project(c, &ws, p)?.filter(|r| r.enabled),
                 None => None,
             };
             let mut prs = Vec::new();
-            for p in repo::prs(c, &ws, None, false, Some(&item.id))? {
-                if let Some(r) = repo::repo_get(c, &p.repo_id)? {
+            for p in steve_store::github::prs(c, &ws, None, false, Some(&item.id))? {
+                if let Some(r) = steve_store::github::repo_get(c, &p.repo_id)? {
                     prs.push((r, p));
                 }
             }
@@ -313,7 +314,9 @@ fn status(gh: &GitHub, l: &Linked) -> Result<String, String> {
     for (r, p) in &l.prs {
         let rows = gh
             .store()
-            .reader(|c| repo::checks_for_sha(c, &r.id, &p.head_sha).map_err(ApiError::from))
+            .read(|c| {
+                steve_store::github::checks_for_sha(c, &r.id, &p.head_sha).map_err(ApiError::from)
+            })
             .map_err(internal)?;
         let state = if p.draft && p.state == "open" {
             "open (draft)"
@@ -357,7 +360,9 @@ fn find_check(
     for (r, p) in &l.prs {
         let rows = gh
             .store()
-            .reader(|c| repo::checks_for_sha(c, &r.id, &p.head_sha).map_err(ApiError::from))
+            .read(|c| {
+                steve_store::github::checks_for_sha(c, &r.id, &p.head_sha).map_err(ApiError::from)
+            })
             .map_err(internal)?;
         for k in latest_checks(&rows) {
             let hit = k.job_id.is_some_and(|j| j.to_string() == job)
@@ -476,17 +481,17 @@ fn comment_target(
     let number = number.map(|n| n as i64).filter(|n| *n > 0);
     let subject = gh
         .store()
-        .reader(|c| {
+        .read(|c| {
             Ok::<_, ApiError>(match (issue, number) {
                 (false, None) => l.prs.first().map(|(_, p)| p.id.clone()),
-                (true, None) => repo::issues_of_item(c, ws, &l.item.id)?
+                (true, None) => steve_store::github::issues_of_item(c, ws, &l.item.id)?
                     .into_iter()
                     .next()
                     .map(|i| i.id),
                 (false, Some(n)) => {
                     let mut hit = None;
                     for r in &repos {
-                        if let Some(p) = repo::pr_by_number(c, &r.id, n)? {
+                        if let Some(p) = steve_store::github::pr_by_number(c, &r.id, n)? {
                             hit = Some(p.id);
                             break;
                         }
@@ -496,7 +501,7 @@ fn comment_target(
                 (true, Some(n)) => {
                     let mut hit = None;
                     for r in &repos {
-                        if let Some(i) = repo::issue_by_number(c, &r.id, n)? {
+                        if let Some(i) = steve_store::github::issue_by_number(c, &r.id, n)? {
                             hit = Some(i.id);
                             break;
                         }
@@ -517,7 +522,7 @@ fn comment_target(
         });
     };
     gh.store()
-        .reader(|c| comment::target(c, ws, &subject))
+        .read(|c| comment::target(c, ws, &subject))
         .map_err(internal)?
         .ok_or_else(|| INTERNAL.to_string())
 }
@@ -589,19 +594,19 @@ fn open_pr(
     };
     let opened = gh
         .store()
-        .transaction(|tx| {
-            if repo::has_open_pr_from(tx, &r.id, branch)? {
+        .write(|tx| {
+            if steve_store::github::has_open_pr_from(tx, &r.id, branch)? {
                 return Ok(Err(format!(
                     "A pull request from {branch} is already open."
                 )));
             }
-            if base_decisions::open_for(tx, &ws, PR_OPEN, &l.item.id)?.is_some() {
+            if steve_store::decision_repo::open_for(tx, &ws, PR_OPEN, &l.item.id)?.is_some() {
                 return Ok(Err(
                     "The user has not answered the earlier request to open a pull request yet."
                         .to_string(),
                 ));
             }
-            base_decisions::open(tx, &d)?;
+            steve_store::DecisionRows(tx).open(&d)?;
             Ok::<_, ApiError>(Ok(()))
         })
         .map_err(internal)?;

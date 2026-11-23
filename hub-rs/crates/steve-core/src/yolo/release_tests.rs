@@ -79,13 +79,11 @@ fn releasing_item(t: &T, project: &str) -> (String, String, String) {
         "",
         &["yes", "no"],
     );
-    t.kit
-        .db()
-        .exec(
-            "UPDATE decisions SET subject_id = ? WHERE id = ?",
-            &[&branch, &d],
-        )
-        .unwrap();
+    steve_store::core_fixture::decision(
+        t.kit.db().store(),
+        &d,
+        steve_store::core_fixture::DecisionState::Subject(&branch),
+    );
     (item, sid, d)
 }
 
@@ -278,13 +276,11 @@ fn a_failed_release_goes_back_once_and_two_yolo_failures_trip_b1() {
         &["yes", "no"],
     );
     let branch = format!("steve/{}", item.to_lowercase());
-    t.kit
-        .db()
-        .exec(
-            "UPDATE decisions SET subject_id = ? WHERE id = ?",
-            &[&branch, &d],
-        )
-        .unwrap();
+    steve_store::core_fixture::decision(
+        t.kit.db().store(),
+        &d,
+        steve_store::core_fixture::DecisionState::Subject(&branch),
+    );
     t.kit.core.resolve(&d, "yes", "", "me").unwrap();
     steve_runtime::testkit::eventually_blocking(
         "A different open failure card is recorded after the next failed release.",
@@ -396,7 +392,7 @@ fn spacing_waits_and_rebase_returns_leave_the_card_with_you() {
     let w = t
         .yolo
         .store()
-        .reader(|c| repo::window_current(c, WS))
+        .read(|c| repo::window_current(c, WS))
         .unwrap()
         .unwrap();
     let a = t

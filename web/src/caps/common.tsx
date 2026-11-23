@@ -5,19 +5,18 @@ import { BotIcon } from "lucide-react"
 import { useT } from "@/i18n"
 import { Button } from "@/components/ui/button"
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuGroup, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
-import { isNotWired } from "@/api"
 import { st, toast, useHubEvents, useStore } from "@/store"
 import { BotAvatar } from "@/ui"
 import { capsApi, type CapKind, type CapUser } from "@/api/caps"
 
 export const errText = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
-export type Load<T> = { s: "loading" } | { s: "unwired" } | { s: "error"; e: string } | { s: "ok"; v: T }
+export type Load<T> = { s: "loading" } | { s: "error"; e: string } | { s: "ok"; v: T }
 
 /** a list from the Hub, again when a Bot changes (an assignment publishes the Bot's event) */
 export function useList<T>(f: () => Promise<T>, deps: unknown[]): [Load<T>, () => Promise<void>, (v: T) => void] {
   const [d, setD] = useState<Load<T>>({ s: "loading" })
-  const load = () => f().then((v) => setD({ s: "ok", v }), (e) => setD(isNotWired(e) ? { s: "unwired" } : { s: "error", e: errText(e) }))
+  const load = () => f().then((v) => setD({ s: "ok", v }), (e) => setD({ s: "error", e: errText(e) }))
   useEffect(() => { setD({ s: "loading" }); void load() }, deps)
   useHubEvents(["bot"], () => void load())
   return [d, load, (v: T) => setD({ s: "ok", v })]

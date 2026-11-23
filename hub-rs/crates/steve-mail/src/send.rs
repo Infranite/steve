@@ -8,6 +8,8 @@
 //!   edited draft and must be reopened);
 //! - the queue: [`Mail::send_due`] every 2 seconds ([`Mail::spawn_send_queue`]).
 
+use steve_store::W;
+
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -15,18 +17,15 @@ use std::time::Duration;
 use futures::stream::{self, StreamExt};
 use mail_builder::MessageBuilder;
 use mail_builder::headers::address::Address;
-use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::{Value, json};
 use steve_modules::accounts::connections::{WriteRefusal, may_write_in};
-use steve_modules::accounts::service::current_party;
 use steve_modules::contacts::people_repo;
 use steve_modules::decisions::{DecisionCx, DecisionHandler, choice_result};
 use steve_modules::outbound::Verdict;
 use steve_modules::outbound::{YOLO_ACTOR, decided_by_yolo, strip_ai_prefix, with_ai_prefix};
 use steve_modules::{ApiError, ApiResult, Clock, SystemClock};
-use steve_store::base;
-use steve_store::{Decision, NewDecision, Tx, uid};
+use steve_store::{Decision, NewDecision, uid};
 
 use crate::adapter::SendMeta;
 use crate::drafts::{self, FAIL_OPTIONS, SUBJECT_TYPE, content_hash};
@@ -150,9 +149,8 @@ impl DraftLink {
 /// The `mail_draft` decision handler.
 pub struct MailDraftHandler(DraftLink);
 
-fn own(tx: &Tx, ws: &str, id: &str) -> ApiResult<DraftRow> {
-    repo::draft(tx, id)
-        .map_err(api)?
+fn own(tx: &mut steve_store::W<'_>, ws: &str, id: &str) -> ApiResult<DraftRow> {
+    repo::draft(tx, id)?
         .filter(|d| d.workspace_id == ws)
         .ok_or_else(|| ApiError::not_found("草稿"))
 }
@@ -165,7 +163,12 @@ fn api(e: MailError) -> ApiError {
 }
 
 impl MailDraftHandler {
-    fn approve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> MailResult<Value> {
+    fn approve(
+        &self,
+        tx: &mut steve_store::W<'_>,
+        cx: &DecisionCx,
+        d: &Decision,
+    ) -> MailResult<Value> {
         let now = self.0.now();
         let mut draft = own(tx, cx.ws, &d.subject_id)?;
         if draft.status != "pending" || draft.decision_id.as_deref() != Some(d.id.as_str()) {
@@ -203,8 +206,7 @@ impl MailDraftHandler {
                     };
                     people_repo::timeline_add(tx, item, who, "sys", &line)?;
                 }
-                base::audit(
-                    tx,
+                tx.audit(
                     cx.ws,
                     cx.actor,
                     "mail_draft.approve",
@@ -222,8 +224,7 @@ impl MailDraftHandler {
                 if let Some(t) = &draft.thread_id {
                     repo::set_thread_state(tx, t, "open", now)?;
                 }
-                base::audit(
-                    tx,
+                tx.audit(
                     cx.ws,
                     cx.actor,
                     "mail_draft.reject",
@@ -249,7 +250,12 @@ impl MailDraftHandler {
         Ok(result)
     }
 
-    fn failed(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> MailResult<Value> {
+    fn failed(
+        &self,
+        tx: &mut steve_store::W<'_>,
+        cx: &DecisionCx,
+        d: &Decision,
+    ) -> MailResult<Value> {
         let now = self.0.now();
         let draft = own(tx, cx.ws, &d.subject_id)?;
         let uncertain = draft.status == "unknown";
@@ -259,10 +265,7 @@ impl MailDraftHandler {
         if uncertain {
             // Normal REST callers are authenticated users; autonomous decisions use synthetic actors.
             // Check membership as well as known actor names so arbitrary bot ids cannot opt in.
-            let member: bool = tx.query_row(
-                "SELECT EXISTS (SELECT 1 FROM users u JOIN workspace_members wm ON wm.user_id = u.id WHERE u.id = ?1 AND wm.workspace_id = ?2)",
-                [cx.actor, cx.ws], |r| r.get(0),
-            )?;
+            let member = steve_store::settings::user_is_member(tx, cx.ws, cx.actor)?;
             if cx.actor == YOLO_ACTOR || cx.actor == "steve" || !member {
                 return Err(
                     ApiError::rule(steve_i18n::t!("mail.decision.unknown_needs_user")).into(),
@@ -283,8 +286,7 @@ impl MailDraftHandler {
             }
             _ => return Err(ApiError::invalid("choice").into()),
         }
-        base::audit(
-            tx,
+        tx.audit(
             cx.ws,
             cx.actor,
             &format!("mail_draft.{}", cx.choice),
@@ -300,27 +302,30 @@ impl MailDraftHandler {
 }
 
 impl DecisionHandler for MailDraftHandler {
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
-        match d.kind.as_str() {
-            "approve" => self.approve(tx, cx, d),
-            "fail" => self.failed(tx, cx, d),
+    fn resolve(&self, w: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+        let result = match d.kind.as_str() {
+            "approve" => self.approve(w, cx, d),
+            "fail" => self.failed(w, cx, d),
             _ => Err(ApiError::rule(steve_i18n::t!("mail.decision.unknown_kind")).into()),
         }
-        .map_err(api)
+        .map_err(api)?;
+        if let Some(draft) = repo::draft(w, &d.subject_id)? {
+            drafts::emit_draft(w, &draft);
+        }
+        Ok(result)
     }
 
     /// Undo before the delay is over puts the draft back to `pending`; afterwards `409 邮件已经发出，不能撤回`.
-    fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
+    fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
         let now = self.0.now();
-        let Some(draft) = repo::draft(tx, &d.subject_id).map_err(api)? else {
+        let Some(draft) = repo::draft(tx, &d.subject_id)? else {
             return Ok(());
         };
         let choice = d.result.get("choice").and_then(Value::as_str).unwrap_or("");
         match (d.kind.as_str(), choice) {
             ("approve", "send") => undo_approval(tx, &draft, now).map_err(api),
             ("approve", "no") if draft.status == "discarded" => {
-                repo::draft_transition(tx, &draft.id, &["discarded"], "pending", now)
-                    .map_err(api)?;
+                repo::draft_transition(tx, &draft.id, &["discarded"], "pending", now)?;
                 Ok(())
             }
             ("fail", _) if ["approved", "discarded"].contains(&draft.status.as_str()) => {
@@ -329,9 +334,8 @@ impl DecisionHandler for MailDraftHandler {
                 } else {
                     "failed"
                 };
-                repo::draft_transition(tx, &draft.id, &["approved", "discarded"], previous, now)
-                    .map_err(api)?;
-                repo::set_draft_send_at(tx, &draft.id, None).map_err(api)?;
+                repo::draft_transition(tx, &draft.id, &["approved", "discarded"], previous, now)?;
+                repo::set_draft_send_at(tx, &draft.id, None)?;
                 Ok(())
             }
             _ if ["sending", "sent"].contains(&draft.status.as_str()) => Err(ApiError::conflict(
@@ -343,7 +347,7 @@ impl DecisionHandler for MailDraftHandler {
 }
 
 /// Approved and still inside the delay → back to `pending`; otherwise 409.
-pub(crate) fn undo_approval(tx: &Tx, d: &DraftRow, now: i64) -> MailResult<()> {
+pub(crate) fn undo_approval(tx: &mut steve_store::W<'_>, d: &DraftRow, now: i64) -> MailResult<()> {
     match d.status.as_str() {
         "approved" if d.send_at.is_some_and(|t| now < t) => {
             if !repo::draft_transition(tx, &d.id, &["approved"], "pending", now)? {
@@ -470,12 +474,17 @@ pub(crate) fn files_dir(
 }
 
 impl Mail {
-    fn blocked(&self, tx: &Tx, d: &DraftRow, reason: &str, detail: Value) -> MailResult<()> {
+    fn blocked(
+        &self,
+        tx: &mut steve_store::W<'_>,
+        d: &DraftRow,
+        reason: &str,
+        detail: Value,
+    ) -> MailResult<()> {
         let mut detail = detail;
         detail["draft"] = json!(d.id);
         detail["reason"] = json!(reason);
-        base::audit(
-            tx,
+        tx.audit(
             &d.workspace_id,
             "steve",
             "mail.send.blocked",
@@ -488,7 +497,7 @@ impl Mail {
     /// Step 1: `approved → sending` (conditional, so a mail goes out once) and the approval
     /// checked again — a resolved `send` decision about this draft for exactly this content.
     fn claim(&self, id: &str, now: i64) -> MailResult<Result<(DraftRow, Decision), SendOutcome>> {
-        self.0.m.store.transaction(|tx| {
+        self.0.m.store.write(|tx| {
             let Some(d) = repo::draft(tx, id)? else {
                 return Ok(Err(SendOutcome::Skipped));
             };
@@ -519,7 +528,7 @@ impl Mail {
             if !repo::draft_transition(tx, id, &["approved"], "sending", now)? {
                 return Ok(Err(SendOutcome::Skipped));
             }
-            let approval = repo::send_approval(tx, &d.workspace_id, id)?;
+            let approval = steve_store::decision_repo::send_approval(tx, &d.workspace_id, id)?;
             let current = content_hash(&d);
             let ok = approval.as_ref().is_some_and(|a| {
                 a.result.get("content_hash").and_then(Value::as_str)
@@ -533,7 +542,7 @@ impl Mail {
                     reason: ERR_NO_APPROVAL.into(),
                 }));
             };
-            base::audit(tx, &d.workspace_id, "steve", "mail.send.attempt", &d.id,
+            tx.audit( &d.workspace_id, "steve", "mail.send.attempt", &d.id,
                 &json!({"message_id": message_id(&d), "content_hash": d.content_hash, "decision": a.id}))?;
             let mut d = d;
             d.status = "sending".into();
@@ -543,26 +552,19 @@ impl Mail {
     }
 
     /// Step 2: the MIME message (`mail-builder`), the same for every adapter.
-    fn build(&self, c: &Connection, d: &DraftRow, now: i64) -> MailResult<Built> {
+    fn build(&self, c: &mut impl steve_store::Read, d: &DraftRow, now: i64) -> MailResult<Built> {
         let mailbox = Mailbox::load(c, &d.workspace_id, &d.connection_id)?;
-        let conn = steve_modules::accounts::connections::repo::get(c, &d.connection_id)?
+        let conn = steve_store::connections::config(c, &d.connection_id)?
             .ok_or_else(|| MailError::Api(ApiError::not_found("连接")))?;
         let from = conn
-            .config
             .get("address")
             .and_then(Value::as_str)
             .map(|s| s.trim().to_string())
             .or_else(|| mailbox.my_addrs.first().cloned())
             .ok_or_else(|| MailError::Other("这个邮箱没有发件地址".into()))?;
-        let party: Option<String> = {
-            use rusqlite::OptionalExtension;
-            c.prepare_cached("SELECT party_id FROM accounts WHERE id = ?")?
-                .query_row([&mailbox.account_id], |r| r.get(0))
-                .optional()?
-        };
+        let party = steve_store::accounts::Accounts::new(c).party(&mailbox.account_id)?;
         let from_name = match party {
-            Some(p) => current_party(c, &p)
-                .map_err(MailError::Api)?
+            Some(p) => steve_store::parties::current_audience(c, &p)?
                 .map(|p| p.name)
                 .unwrap_or_default(),
             None => String::new(),
@@ -603,7 +605,7 @@ impl Mail {
         }
         let mut total = 0i64;
         for f in &d.files {
-            let (ws, sha, name, mime, size) = repo::file_row(c, &f.id)?
+            let (ws, sha, name, mime, size) = steve_store::file_repo::file_row(c, &f.id)?
                 .filter(|r| r.0 == d.workspace_id)
                 .ok_or_else(|| MailError::Other(format!("附件「{}」不在了", f.name)))?;
             total += size;
@@ -670,7 +672,7 @@ impl Mail {
         } else {
             strip_ai_prefix(&d.body).to_string()
         };
-        let built = match self.0.m.store.reader(|c| self.build(c, &d, now)) {
+        let built = match self.0.m.store.read(|c| self.build(c, &d, now)) {
             Ok(b) => b,
             Err(e) => return self.fail(&d, &e.to_string()),
         };
@@ -712,35 +714,24 @@ impl Mail {
         if *recovered {
             return Ok(0);
         }
-        let drafts = self
-            .0
-            .m
-            .store
-            .transaction(|tx| -> MailResult<Vec<DraftRow>> {
-                let ids = {
-                    let mut st =
-                        tx.prepare("SELECT id FROM mail_drafts WHERE status = 'sending'")?;
-                    st.query_map([], |r| r.get::<_, String>(0))?
-                        .collect::<rusqlite::Result<Vec<_>>>()?
-                };
-                let mut drafts = Vec::new();
-                for id in ids {
-                    if let Some(d) = repo::draft(tx, &id)? {
-                        self.unknown_tx(tx, &d, "发送期间程序中断，未收到可靠的完成记录")?;
-                        drafts.push(d);
-                    }
-                }
-                Ok(drafts)
-            })?;
+        let drafts = self.0.m.store.write(|tx| -> MailResult<Vec<DraftRow>> {
+            let drafts = repo::sending_drafts(tx)?;
+            for d in &drafts {
+                self.unknown_tx(tx, d, "发送期间程序中断，未收到可靠的完成记录")?;
+            }
+            Ok(drafts)
+        })?;
         *recovered = true;
         drop(recovered);
-        for d in &drafts {
-            self.notify_thread(d);
-        }
         Ok(drafts.len())
     }
 
-    fn unknown_tx(&self, tx: &Tx, d: &DraftRow, reason: &str) -> MailResult<bool> {
+    fn unknown_tx(
+        &self,
+        tx: &mut steve_store::W<'_>,
+        d: &DraftRow,
+        reason: &str,
+    ) -> MailResult<bool> {
         if !repo::draft_transition(tx, &d.id, &["sending"], "unknown", self.now())? {
             return Ok(false);
         }
@@ -749,36 +740,33 @@ impl Mail {
         repo::set_draft_send_at(tx, &d.id, None)?;
         drafts::expire_open(tx, &d.workspace_id, &d.id)?;
         self.open_unknown_decision(tx, d)?;
-        base::audit(
-            tx,
+        tx.audit(
             &d.workspace_id,
             "steve",
             "mail.send.unknown",
             &d.id,
             &json!({"message_id": message_id(d), "content_hash": d.content_hash, "reason": reason}),
         )?;
+        drafts::emit_draft(tx, d);
         Ok(true)
     }
 
-    fn open_unknown_decision(&self, tx: &Tx, d: &DraftRow) -> MailResult<()> {
-        let decision = base::decisions::open(
-            tx,
-            &NewDecision {
-                workspace_id: d.workspace_id.clone(),
-                kind: "fail".into(),
-                subject_type: SUBJECT_TYPE.into(),
-                subject_id: d.id.clone(),
-                item_id: d.item_id.clone(),
-                session_id: d.session_id.clone(),
-                question: format!(
-                    "邮件「{}」发送结果不明，请核实。重试可能重复发送；放弃待办不会撤回邮件。",
-                    d.subject
-                ),
-                draft: Some(drafts::decision_text(d)),
-                options: Some(UNKNOWN_OPTIONS.map(String::from).to_vec()),
-                requested_by: "steve".into(),
-            },
-        )?;
+    fn open_unknown_decision(&self, tx: &mut steve_store::W<'_>, d: &DraftRow) -> MailResult<()> {
+        let decision = steve_store::DecisionRows(tx).open(&NewDecision {
+            workspace_id: d.workspace_id.clone(),
+            kind: "fail".into(),
+            subject_type: SUBJECT_TYPE.into(),
+            subject_id: d.id.clone(),
+            item_id: d.item_id.clone(),
+            session_id: d.session_id.clone(),
+            question: format!(
+                "邮件「{}」发送结果不明，请核实。重试可能重复发送；放弃待办不会撤回邮件。",
+                d.subject
+            ),
+            draft: Some(drafts::decision_text(d)),
+            options: Some(UNKNOWN_OPTIONS.map(String::from).to_vec()),
+            requested_by: "steve".into(),
+        })?;
         repo::set_draft_decision(tx, &d.id, Some(&decision.id), &d.content_hash)?;
         Ok(())
     }
@@ -787,104 +775,80 @@ impl Mail {
     /// reconciliation entry, including orphan drafts with no item/thread, until the user explicitly
     /// chooses confirmed_not_sent/discard. The read-only empty pass never takes the write lock.
     pub fn repair_unknown_decisions(&self) -> MailResult<usize> {
-        const MISSING: &str = "SELECT md.id FROM mail_drafts md WHERE md.status = 'unknown' AND NOT EXISTS (SELECT 1 FROM decisions d WHERE d.subject_type = 'mail_draft' AND d.subject_id = md.id AND d.workspace_id = md.workspace_id AND d.status = 'open') LIMIT 100";
-        let ids = self.0.m.store.reader(|c| -> MailResult<Vec<String>> {
-            let mut st = c.prepare(MISSING)?;
-            Ok(st
-                .query_map([], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?)
-        })?;
-        if ids.is_empty() {
-            return Ok(0);
-        }
-        let restored = self
+        let ids = self
             .0
             .m
             .store
-            .transaction(|tx| -> MailResult<Vec<DraftRow>> {
-                let mut restored = Vec::new();
-                for id in ids {
-                    let Some(d) = repo::draft(tx, &id)?.filter(|d| d.status == "unknown") else {
-                        continue;
-                    };
-                    if !repo::open_draft_decisions(tx, &d.workspace_id, &d.id)?.is_empty() {
-                        continue;
-                    }
-                    self.open_unknown_decision(tx, &d)?;
-                    base::audit(
-                        tx,
-                        &d.workspace_id,
-                        "steve",
-                        "mail.send.reconciliation_reopened",
-                        &d.id,
-                        &json!({}),
-                    )?;
-                    restored.push(d);
-                }
-                Ok(restored)
-            })?;
-        for d in &restored {
-            self.notify_thread(d);
+            .read(|r| repo::unknown_drafts_without_open_decision(r))?;
+        if ids.is_empty() {
+            return Ok(0);
         }
+        let restored = self.0.m.store.write(|tx| -> MailResult<Vec<DraftRow>> {
+            let mut restored = Vec::new();
+            for id in ids {
+                let Some(d) = repo::draft(tx, &id)?.filter(|d| d.status == "unknown") else {
+                    continue;
+                };
+                if !steve_store::decision_repo::open_draft_decisions(tx, &d.workspace_id, &d.id)?
+                    .is_empty()
+                {
+                    continue;
+                }
+                self.open_unknown_decision(tx, &d)?;
+                tx.audit(
+                    &d.workspace_id,
+                    "steve",
+                    "mail.send.reconciliation_reopened",
+                    &d.id,
+                    &json!({}),
+                )?;
+                drafts::emit_draft(tx, &d);
+                restored.push(d);
+            }
+            Ok(restored)
+        })?;
         Ok(restored.len())
     }
 
     fn unknown(&self, d: &DraftRow, reason: &str) -> MailResult<SendOutcome> {
-        let changed = self
-            .0
-            .m
-            .store
-            .transaction(|tx| self.unknown_tx(tx, d, reason))?;
-        if changed {
-            self.notify_thread(d);
-        }
+        self.0.m.store.write(|tx| self.unknown_tx(tx, d, reason))?;
         Ok(SendOutcome::Unknown {
             error: format!("{reason}。{ERR_UNKNOWN}"),
         })
     }
 
-    fn notify_thread(&self, d: &DraftRow) {
-        if let Some(t) = &d.thread_id {
-            self.0.notify.thread(&d.workspace_id, t);
-        }
-    }
-
     /// The provider (or building the message) failed: `failed` and a `fail` decision (retry / discard).
     fn fail(&self, d: &DraftRow, error: &str) -> MailResult<SendOutcome> {
         let now = self.now();
-        self.0.m.store.transaction(|tx| -> MailResult<()> {
+        self.0.m.store.write(|tx| -> MailResult<()> {
             if !repo::draft_transition(tx, &d.id, &["sending"], "failed", now)? {
                 return Ok(());
             }
             repo::set_draft_error(tx, &d.id, Some(error))?;
             drafts::expire_open(tx, &d.workspace_id, &d.id)?;
-            base::decisions::open(
-                tx,
-                &NewDecision {
-                    workspace_id: d.workspace_id.clone(),
-                    kind: "fail".into(),
-                    subject_type: SUBJECT_TYPE.into(),
-                    subject_id: d.id.clone(),
-                    item_id: d.item_id.clone(),
-                    session_id: d.session_id.clone(),
-                    question: format!("邮件「{}」没有发出去：{error}", d.subject),
-                    draft: Some(drafts::decision_text(d)),
-                    options: Some(FAIL_OPTIONS.map(String::from).to_vec()),
-                    requested_by: "steve".into(),
-                },
-            )?;
-            base::audit(
-                tx,
+            steve_store::DecisionRows(tx).open(&NewDecision {
+                workspace_id: d.workspace_id.clone(),
+                kind: "fail".into(),
+                subject_type: SUBJECT_TYPE.into(),
+                subject_id: d.id.clone(),
+                item_id: d.item_id.clone(),
+                session_id: d.session_id.clone(),
+                question: format!("邮件「{}」没有发出去：{error}", d.subject),
+                draft: Some(drafts::decision_text(d)),
+                options: Some(FAIL_OPTIONS.map(String::from).to_vec()),
+                requested_by: "steve".into(),
+            })?;
+            tx.audit(
                 &d.workspace_id,
                 "steve",
                 "mail.send.failed",
                 &d.id,
                 &json!({"draft": d.id}),
             )?;
+            drafts::emit_draft(tx, d);
             Ok(())
         })?;
         tracing::info!(draft = %d.id, error, "mail not sent");
-        self.notify_thread(d);
         Ok(SendOutcome::Failed {
             error: error.to_string(),
         })
@@ -904,7 +868,7 @@ impl Mail {
         let id = uid("ml");
         let raw_path = store::raw_rel_path(ws, &id);
         let raw_written = store::write_raw(self.0.cfg.home(), &raw_path, &b.mime).is_ok();
-        let thread_id = self.0.m.store.transaction(|tx| -> MailResult<String> {
+        self.0.m.store.write(|tx| -> MailResult<()> {
             let thread_id = match &d.thread_id {
                 Some(t) => t.clone(),
                 None => {
@@ -926,19 +890,14 @@ impl Mail {
                     t.id
                 }
             };
-            let who = |l: &[Rcpt]| -> MailResult<Value> {
+            let from_party = steve_store::accounts::Accounts::new(tx).party(&b.mailbox.account_id)?;
+            let mut who = |l: &[Rcpt]| -> MailResult<Value> {
                 let mut out = Vec::new();
                 for r in l {
                     let (party, _) = drafts::audience_of(tx, ws, &r.addr)?;
                     out.push(json!({"addr": r.addr, "name": r.name, "account_id": null, "party_id": party}));
                 }
                 Ok(Value::Array(out))
-            };
-            let from_party: Option<String> = {
-                use rusqlite::OptionalExtension;
-                tx.prepare_cached("SELECT party_id FROM accounts WHERE id = ?")?
-                    .query_row([&b.mailbox.account_id], |r| r.get(0))
-                    .optional()?
             };
             let m = MessageRow {
                 id: id.clone(),
@@ -979,23 +938,21 @@ impl Mail {
             repo::refresh_thread(tx, &thread_id, now)?;
             repo::set_thread_state(tx, &thread_id, "waiting", now)?;
             if d.thread_id.is_none() {
-                tx.prepare_cached("UPDATE mail_drafts SET thread_id = ? WHERE id = ?")?
-                    .execute([thread_id.as_str(), d.id.as_str()])?;
+                repo::set_draft_thread(tx, &d.id, &thread_id)?;
             }
             if let Some(item) = &d.item_id {
                 people_repo::timeline_add(tx, item, "steve", "sys", &format!("邮件已发出：{}", d.subject))?;
             }
-            base::audit(
-                tx,
+            tx.audit(
                 ws,
                 "steve",
                 "mail.send",
                 &d.id,
                 &json!({"draft": d.id, "to_count": d.to.len() + d.cc.len() + d.bcc.len(), "decision": decision}),
             )?;
-            Ok(thread_id)
+            crate::events::emit_thread(tx, ws, &thread_id);
+            Ok(())
         })?;
-        self.0.notify.thread(ws, &thread_id);
         Ok(id)
     }
 
@@ -1004,23 +961,19 @@ impl Mail {
         let mut n = 0;
         for id in self.0.link.take_stale() {
             let now = self.now();
-            let reopened = self
-                .0
-                .m
-                .store
-                .transaction(|tx| -> MailResult<Option<DraftRow>> {
-                    let Some(mut d) = repo::draft(tx, &id)? else {
-                        return Ok(None);
-                    };
-                    if d.status != "pending" || content_hash(&d) == d.content_hash {
-                        return Ok(None);
-                    }
-                    let author = d.author.clone();
-                    drafts::open_approval(tx, &mut d, &author, now)?;
-                    Ok(Some(d))
-                })?;
-            if let Some(d) = reopened {
-                self.notify_thread(&d);
+            let reopened = self.0.m.store.write(|tx| -> MailResult<Option<DraftRow>> {
+                let Some(mut d) = repo::draft(tx, &id)? else {
+                    return Ok(None);
+                };
+                if d.status != "pending" || content_hash(&d) == d.content_hash {
+                    return Ok(None);
+                }
+                let author = d.author.clone();
+                drafts::open_approval(tx, &mut d, &author, now)?;
+                drafts::emit_draft(tx, &d);
+                Ok(Some(d))
+            })?;
+            if reopened.is_some() {
                 n += 1;
             }
         }
@@ -1038,7 +991,7 @@ impl Mail {
             .0
             .m
             .store
-            .reader(|c| repo::due_drafts(c, self.now(), 20))?;
+            .read(|c| repo::due_drafts(c, self.now(), 20))?;
         // One stuck SMTP host must not hold up the other mailboxes: each mailbox sends its drafts in
         // order, a few mailboxes at a time.
         let mut groups: Vec<(String, Vec<(usize, String)>)> = Vec::new();

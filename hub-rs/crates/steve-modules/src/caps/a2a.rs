@@ -23,11 +23,11 @@ use std::time::{Duration, Instant};
 use axum::Json;
 use axum::extract::{Path, State};
 use regex::Regex;
-use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use steve_store::caps::a2a::{self as repo, Agent, Auth, SECRET_LABEL};
-use steve_store::{Tx, base, now, uid};
+use steve_store::caps::Assignments;
+use steve_store::caps::a2a::{Agent, Agents, Auth, SECRET_LABEL};
+use steve_store::{Read, W, now, uid};
 use zeroize::Zeroizing;
 
 use super::Capabilities;
@@ -121,7 +121,7 @@ pub(super) async fn update_h(
     let (ws, sid) = (who.ws.clone(), id.clone());
     let old = s
         .vault
-        .blocking(move |_| svc.vault.store().reader(|c| agent_of(c, &ws, &sid)))
+        .blocking(move |_| svc.read(|c| agent_of(c, &ws, &sid)))
         .await?;
     let card_url = b.card_url.clone().filter(|u| u.trim() != old.card_url);
     let fetched = if b.refresh == Some(true) || card_url.is_some() {
@@ -151,8 +151,9 @@ pub(super) async fn remove_h(
     Ok(Json(json!({ "ok": true })))
 }
 
-fn agent_of(c: &Connection, ws: &str, id: &str) -> VaultResult<Agent> {
-    repo::get(c, id)?
+fn agent_of(c: &mut impl Read, ws: &str, id: &str) -> VaultResult<Agent> {
+    Agents(c)
+        .get(id)?
         .filter(|a| a.workspace_id == ws)
         .ok_or_else(|| ApiError::not_found("远程 Agent").into())
 }
@@ -187,7 +188,7 @@ pub(crate) fn out(a: &Agent) -> Value {
     })
 }
 
-fn out_with_users(c: &Connection, a: &Agent) -> VaultResult<Value> {
+fn out_with_users(c: &mut impl Read, a: &Agent) -> VaultResult<Value> {
     let mut v = out(a);
     v["bots"] = super::users(c, "a2a", &a.id)?;
     Ok(v)
@@ -443,8 +444,9 @@ impl Capabilities {
     }
 
     pub fn a2a_list(&self, ws: &str) -> VaultResult<Vec<Value>> {
-        self.vault.store().reader(|c| {
-            repo::list(c, ws)?
+        self.read(|c| {
+            Agents(c)
+                .list(ws)?
                 .iter()
                 .map(|a| out_with_users(c, a))
                 .collect()
@@ -460,8 +462,8 @@ impl Capabilities {
         b: AgentIn,
     ) -> VaultResult<Value> {
         let at = now();
-        let (count, name) = self.vault.store().reader(|c| {
-            let list = repo::list(c, ws)?;
+        let (count, name) = self.read(|c| {
+            let list = Agents(c).list(ws)?;
             let base = suggested_name(card["name"].as_str().unwrap_or(""));
             let mut name = base.clone();
             let mut n = 2;
@@ -550,15 +552,15 @@ impl Capabilities {
             _ => None,
         };
         a.updated = now();
-        self.vault.store().transaction(|tx: &Tx| {
-            if repo::name_taken(tx, ws, &a.name, Some(&a.id))? {
+        self.vault.store().write(|tx: &mut W<'_>| {
+            if Agents(tx).name_taken(ws, &a.name, Some(&a.id))? {
                 return Err(ApiError::conflict(steve_i18n::t!(
                     "modules.caps.a2a_name_taken",
                     name = a.name
                 ))
                 .into());
             }
-            for x in steve_store::caps::of_entry(tx, "a2a", &a.id)? {
+            for x in Assignments(tx).of_entry("a2a", &a.id)? {
                 if super::clashes(tx, &x.bot_id, "a2a", &a.id, &a.name)? {
                     return Err(ApiError::conflict(steve_i18n::t!(
                         "modules.caps.name_used",
@@ -577,12 +579,11 @@ impl Capabilities {
                 };
             }
             if fresh {
-                repo::insert(tx, &a)?;
+                Agents(tx).insert(&a)?;
             } else {
-                repo::update(tx, &a)?;
+                Agents(tx).update(&a)?;
             }
-            base::audit(
-                tx,
+            tx.audit(
                 ws,
                 me,
                 if fresh {
@@ -602,21 +603,14 @@ impl Capabilities {
     }
 
     pub fn a2a_delete(&self, ws: &str, me: &str, id: &str) -> VaultResult<()> {
-        self.vault.store().transaction(|tx| {
+        self.vault.store().write(|tx| {
             let old = agent_of(tx, ws, id)?;
             if let Some(item) = &old.credential_item {
                 self.vault.destroy_item(tx, ws, me, item)?;
             }
             super::publish_users(tx, "a2a", id)?;
-            repo::delete(tx, id)?;
-            base::audit(
-                tx,
-                ws,
-                me,
-                "a2a_agent.delete",
-                id,
-                &json!({"name": old.name}),
-            )?;
+            Agents(tx).delete(id)?;
+            tx.audit(ws, me, "a2a_agent.delete", id, &json!({"name": old.name}))?;
             Ok::<_, VaultError>(())
         })
     }
@@ -625,7 +619,7 @@ impl Capabilities {
     pub fn a2a_tools(&self, session: &str) -> Vec<Value> {
         self.vault
             .store()
-            .reader(|c| repo::enabled_for_session(c, session))
+            .read(|c| Agents(c).enabled_for_session(session))
             .unwrap_or_default()
             .iter()
             .map(tool)
@@ -647,9 +641,10 @@ impl Capabilities {
             key.to_string(),
         );
         let found = tokio::task::spawn_blocking(move || {
-            store.reader(|c| {
-                let bot = steve_store::caps::bot_of_session(c, &session_id)?;
-                let agent = repo::enabled_for_session(c, &session_id)?
+            store.read(|c| {
+                let bot = Assignments(c).bot_of_session(&session_id)?;
+                let agent = Agents(c)
+                    .enabled_for_session(&session_id)?
                     .into_iter()
                     .find(|a| a.name == key_s);
                 Ok::<_, steve_store::StoreError>((agent, bot))

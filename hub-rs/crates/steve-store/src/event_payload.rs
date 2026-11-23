@@ -113,18 +113,42 @@ fn preview<'a>(
     }
 }
 
-pub(crate) fn save(c: &Connection, session: &str, seq: i64, payloads: &Payloads) -> Result<()> {
+/// Keeps an event's large strings and its references to them, in the write `db` is in.
+pub(crate) fn save(
+    db: &mut dyn crate::contract::Backend,
+    session: &str,
+    seq: i64,
+    payloads: &Payloads,
+) -> Result<()> {
+    use crate::ingest::schema::{EventPayloadRefs as Refs, EventPayloads as P};
+    use sea_query::{OnConflict, Query};
     for (hash, data) in &payloads.unique {
-        c.prepare_cached(
-            "INSERT OR IGNORE INTO event_payloads(session_id, hash, data) VALUES (?, ?, ?)",
-        )?
-        .execute(params![session, hash, data])?;
+        crate::contract::exec_on(
+            db,
+            Query::insert()
+                .into_table(P::Table)
+                .columns([P::SessionId, P::Hash, P::Data])
+                .values_panic([session.into(), hash.as_str().into(), data.as_str().into()])
+                .on_conflict(
+                    OnConflict::columns([P::SessionId, P::Hash])
+                        .do_nothing()
+                        .to_owned(),
+                ),
+        )?;
     }
     for r in &payloads.refs {
-        c.prepare_cached(
-            "INSERT INTO event_payload_refs(event_seq, path, session_id, hash) VALUES (?, ?, ?, ?)",
-        )?
-        .execute(params![seq, r.path, session, r.hash])?;
+        crate::contract::exec_on(
+            db,
+            Query::insert()
+                .into_table(Refs::Table)
+                .columns([Refs::EventSeq, Refs::Path, Refs::SessionId, Refs::Hash])
+                .values_panic([
+                    seq.into(),
+                    r.path.as_str().into(),
+                    session.into(),
+                    r.hash.as_str().into(),
+                ]),
+        )?;
     }
     Ok(())
 }
@@ -135,18 +159,26 @@ pub(crate) fn hydrate(c: &Connection, session: &str, seq: i64, data: &mut Value)
     while let Some(r) = rows.next()? {
         let path: String = r.get(0)?;
         let owner: String = r.get(2)?;
-        if owner != session {
-            return Err(StoreError::Hook("event payload session mismatch".into()));
-        }
-        let raw: String = r
-            .get::<_, Option<String>>(1)?
-            .ok_or_else(|| StoreError::Hook("missing event payload".into()))?;
-        let value: Value = serde_json::from_str(&raw)?;
-        let target = data
-            .pointer_mut(&path)
-            .ok_or_else(|| StoreError::Hook("invalid event payload reference".into()))?;
-        *target = value;
+        restore(session, data, &path, r.get(1)?, &owner)?;
     }
+    Ok(())
+}
+
+pub(crate) fn restore(
+    session: &str,
+    data: &mut Value,
+    path: &str,
+    raw: Option<String>,
+    owner: &str,
+) -> Result<()> {
+    if owner != session {
+        return Err(StoreError::Hook("event payload session mismatch".into()));
+    }
+    let raw = raw.ok_or_else(|| StoreError::Hook("missing event payload".into()))?;
+    let target = data
+        .pointer_mut(path)
+        .ok_or_else(|| StoreError::Hook("invalid event payload reference".into()))?;
+    *target = serde_json::from_str(&raw)?;
     Ok(())
 }
 

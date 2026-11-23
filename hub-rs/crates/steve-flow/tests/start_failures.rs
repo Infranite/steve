@@ -1,11 +1,12 @@
 //! Startup history belongs to Flow; fixtures use its real migrated store and public run API.
 use steve_flow::{runs, testkit::FlowEnv};
 use steve_modules::{ApiResult, testkit::WS};
+use steve_store::testkit::flow as fixtures;
 
 fn record(e: &FlowEnv, error: &str, version: i64, now: i64) -> String {
     e.env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             runs::record_start_failure(
                 tx,
                 &runs::FailedStart {
@@ -25,17 +26,14 @@ fn record(e: &FlowEnv, error: &str, version: i64, now: i64) -> String {
 fn history(e: &FlowEnv) -> Vec<runs::RunRow> {
     e.env
         .store()
-        .reader(|c| runs::page(c, WS, "flow_start", None, 50))
+        .read(|c| runs::page(c, WS, "flow_start", None, 50))
         .unwrap()
 }
 
 #[test]
 fn failure_insert_contains_error_and_repeats_only_the_latest_matching_record() {
     let e = FlowEnv::new();
-    e.env.store().with_conn(|c| {
-        c.execute_batch("CREATE TRIGGER require_start_error BEFORE INSERT ON flow_runs WHEN NEW.status='failed' AND NEW.error IS NULL BEGIN SELECT RAISE(ABORT,'missing initial error'); END")?;
-        Ok(())
-    }).unwrap();
+    fixtures::require_initial_run_error(e.env.store()).unwrap();
     let first = record(&e, "bad graph", 1, 1000);
     assert_eq!(record(&e, "bad graph", 1, 61_000), first);
     let repeated = history(&e).pop().unwrap();
@@ -64,14 +62,11 @@ fn a_rejected_history_write_rolls_back_the_whole_operation() {
     let e = FlowEnv::new();
     record(&e, "bad graph", 1, 1000);
     let before = history(&e);
-    e.env.store().with_conn(|c| {
-        c.execute_batch("CREATE TRIGGER reject_start_update BEFORE UPDATE ON flow_runs BEGIN SELECT RAISE(ABORT,'history unavailable'); END")?;
-        Ok(())
-    }).unwrap();
+    fixtures::reject_run_updates(e.env.store()).unwrap();
     let error = e
         .env
         .store()
-        .transaction(|tx| -> ApiResult<_> {
+        .write(|tx| -> ApiResult<_> {
             runs::record_start_failure(
                 tx,
                 &runs::FailedStart {
@@ -94,7 +89,7 @@ fn a_rejected_history_write_rolls_back_the_whole_operation() {
 fn bounded(e: &FlowEnv, error: &str, epoch: i64, now: i64) -> String {
     e.env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             runs::record_start_failure(
                 tx,
                 &runs::FailedStart {
@@ -114,36 +109,34 @@ fn bounded(e: &FlowEnv, error: &str, epoch: i64, now: i64) -> String {
 fn state(e: &FlowEnv, epoch: i64) -> Option<runs::StartupState> {
     e.env
         .store()
-        .reader(|c| {
-            runs::startup_state(
+        .read::<_, steve_store::StoreError>(|c| {
+            Ok(runs::startup_state(
                 c,
                 WS,
                 "flow_start",
                 "fixture.start",
                 &serde_json::json!({"epoch":epoch}),
-            )
+            ))
         })
+        .unwrap()
         .unwrap()
 }
 fn ordinary(e: &FlowEnv, at: i64) -> String {
     e.env
         .store()
-        .transaction(|tx| {
-            runs::insert(
-                tx,
-                &runs::NewRun {
-                    ws: WS,
-                    flow_id: "flow_start",
-                    flow_version: 1,
-                    trigger_kind: "manual",
-                    status: "done",
-                    error: None,
-                    outcome_label: "ordinary",
-                    cursor: None,
-                    context: &serde_json::json!({"at":at}),
-                    now: at,
-                },
-            )
+        .write(|tx| {
+            steve_store::RunRows(tx).insert(&runs::NewRun {
+                ws: WS,
+                flow_id: "flow_start",
+                flow_version: 1,
+                trigger_kind: "manual",
+                status: "done",
+                error: None,
+                outcome_label: "ordinary",
+                cursor: None,
+                context: &serde_json::json!({"at":at}),
+                now: at,
+            })
         })
         .unwrap()
 }
@@ -165,13 +158,14 @@ fn changing_errors_or_ordinary_history_cannot_reset_the_persisted_budget() {
         steve_store::Store::open(e.env.store().path(), steve_store::NoPublisher).unwrap();
     assert_eq!(
         reopened
-            .reader(|c| runs::startup_state(
+            .read::<_, steve_store::StoreError>(|c| Ok(runs::startup_state(
                 c,
                 WS,
                 "flow_start",
                 "fixture.start",
                 &serde_json::json!({"epoch":1})
-            ))
+            )))
+            .unwrap()
             .unwrap()
             .unwrap()
             .state,
@@ -185,10 +179,7 @@ fn changing_errors_or_ordinary_history_cannot_reset_the_persisted_budget() {
 #[test]
 fn a_successful_source_start_resets_the_budget_but_pruning_cannot_resurrect_old_state() {
     let e = FlowEnv::new();
-    e.env.store().with_conn(|c| {
-        c.execute("INSERT INTO flows (id,workspace_id,kind,name,graph,origin,created_by,created,updated) VALUES ('flow_start',?,'schedule','fixture','{}','me','usr_dev',0,0)",[WS])?;
-        Ok(())
-    }).unwrap();
+    fixtures::startup_flow(e.env.store(), WS).unwrap();
     for n in 0..3 {
         bounded(&e, "bad", 1, 1000 + n);
     }
@@ -199,21 +190,21 @@ fn a_successful_source_start_resets_the_budget_but_pruning_cannot_resurrect_old_
     let pruned = e
         .env
         .store()
-        .transaction(|tx| runs::prune(tx, 2 * runs::KEEP_MS))
+        .write(|tx| runs::prune(tx, 2 * runs::KEEP_MS))
         .unwrap();
     assert!(pruned > 0, "the test must exercise real retention");
     assert_eq!(state(&e, 1).unwrap().state, runs::StartupStatus::Dead);
     assert!(
         e.env
             .store()
-            .reader(|c| runs::get(c, &dead))
+            .read(|r| steve_store::RunRows(r).get(&dead))
             .unwrap()
             .is_some()
     );
     let success = ordinary(&e, 3000);
     e.env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             runs::record_started(
                 tx,
                 &success,
@@ -228,12 +219,12 @@ fn a_successful_source_start_resets_the_budget_but_pruning_cannot_resurrect_old_
     }
     e.env
         .store()
-        .transaction(|tx| runs::prune(tx, 2 * runs::KEEP_MS))
+        .write(|tx| runs::prune(tx, 2 * runs::KEEP_MS))
         .unwrap();
     assert!(
         e.env
             .store()
-            .reader(|c| runs::get(c, &dead))
+            .read(|r| steve_store::RunRows(r).get(&dead))
             .unwrap()
             .is_none()
     );
@@ -250,12 +241,12 @@ fn execution_failure_of_a_started_run_is_not_a_startup_rejection_to_coalesce() {
     let id = ordinary(&e, 1000);
     e.env
         .store()
-        .transaction(|tx| -> ApiResult<()> {
+        .write(|tx| -> ApiResult<()> {
             runs::record_started(tx, &id, "fixture.start", &serde_json::json!({"epoch":1}), 3)?;
-            let mut row = runs::get(tx, &id)?.unwrap();
+            let mut row = steve_store::RunRows(tx).get(&id)?.unwrap();
             row.status = "failed".into();
             row.error = Some("bad".into());
-            runs::save(tx, &row)
+            Ok(steve_store::RunRows(tx).save(&row)?)
         })
         .unwrap();
     let failed = bounded(&e, "bad", 1, 2000);
@@ -269,12 +260,12 @@ fn run_view_exposes_historical_counts_and_budget_without_internal_revision() {
     let e = FlowEnv::new();
     bounded(&e, "bad graph", 1, 1_795_180_000_000);
     bounded(&e, "bad graph", 1, 1_795_180_060_000);
-    let repeated = history(&e)[0].view();
+    let repeated = runs::view(&history(&e)[0]);
     assert_eq!(repeated.start_failures, Some(2));
     assert_eq!(repeated.first_at, Some(1_795_180_000_000));
     assert_eq!(repeated.started, 1_795_180_060_000);
     bounded(&e, "missing owner", 1, 1_795_180_120_000);
-    let dead = history(&e)[0].view();
+    let dead = runs::view(&history(&e)[0]);
     assert_eq!(dead.start_failures, Some(1));
     assert_eq!(dead.first_at, Some(dead.started));
     assert_eq!(
@@ -293,10 +284,10 @@ fn run_view_exposes_historical_counts_and_budget_without_internal_revision() {
     let plain = e
         .env
         .store()
-        .reader(|c| runs::get(c, &id))
+        .read(|r| steve_store::RunRows(r).get(&id))
         .unwrap()
         .unwrap();
-    let json = serde_json::to_value(plain.view()).unwrap();
+    let json = serde_json::to_value(runs::view(&plain)).unwrap();
     for key in ["first_at", "start_failures", "startup"] {
         assert!(json.get(key).is_none(), "ordinary runs omit {key}");
     }
@@ -311,22 +302,19 @@ fn ordinary_runs_and_new_versions_split_error_history_without_rewriting_earlier_
         if barrier != "version" {
             e.env
                 .store()
-                .transaction(|tx| {
-                    runs::insert(
-                        tx,
-                        &runs::NewRun {
-                            ws: WS,
-                            flow_id: "flow_start",
-                            flow_version: 1,
-                            trigger_kind: "manual",
-                            status: barrier,
-                            error: None,
-                            outcome_label: "other run",
-                            cursor: None,
-                            context: &serde_json::json!({"at":61_000}),
-                            now: 61_000,
-                        },
-                    )
+                .write(|tx| {
+                    steve_store::RunRows(tx).insert(&runs::NewRun {
+                        ws: WS,
+                        flow_id: "flow_start",
+                        flow_version: 1,
+                        trigger_kind: "manual",
+                        status: barrier,
+                        error: None,
+                        outcome_label: "other run",
+                        cursor: None,
+                        context: &serde_json::json!({"at":61_000}),
+                        now: 61_000,
+                    })
                 })
                 .unwrap();
         }
@@ -335,8 +323,8 @@ fn ordinary_runs_and_new_versions_split_error_history_without_rewriting_earlier_
         let rows = history(&e);
         assert_ne!(first, next, "{barrier}");
         assert_eq!(rows.len(), if barrier == "version" { 2 } else { 3 });
-        assert_eq!(rows[0].view().start_failures, Some(1));
-        assert_eq!(rows[0].view().first_at, Some(121_000));
+        assert_eq!(runs::view(&rows[0]).start_failures, Some(1));
+        assert_eq!(runs::view(&rows[0]).first_at, Some(121_000));
         assert_eq!(rows[0].flow_version, version);
         assert_eq!(rows.last().unwrap(), &before);
     }
@@ -345,13 +333,10 @@ fn ordinary_runs_and_new_versions_split_error_history_without_rewriting_earlier_
 #[test]
 fn inserting_a_new_failure_never_issues_a_redundant_update() {
     let e = FlowEnv::new();
-    e.env.store().with_conn(|c| {
-        c.execute_batch("CREATE TRIGGER deny_any_run_update BEFORE UPDATE ON flow_runs BEGIN SELECT RAISE(ABORT,'updates unavailable'); END")?;
-        Ok(())
-    }).unwrap();
+    fixtures::reject_run_updates(e.env.store()).unwrap();
     let first = record(&e, "bad graph", 1, 1000);
     assert_eq!(history(&e)[0].id, first);
-    assert_eq!(history(&e)[0].view().start_failures, Some(1));
+    assert_eq!(runs::view(&history(&e)[0]).start_failures, Some(1));
 }
 
 #[test]
@@ -360,25 +345,25 @@ fn changed_errors_start_new_history_with_view_counts_and_first_times() {
     let first = record(&e, "first error", 1, 1000);
     assert_eq!(record(&e, "first error", 1, 61_000), first);
     let repeated = history(&e)[0].clone();
-    assert_eq!(repeated.view().start_failures, Some(2));
-    assert_eq!(repeated.view().first_at, Some(1000));
+    assert_eq!(runs::view(&repeated).start_failures, Some(2));
+    assert_eq!(runs::view(&repeated).first_at, Some(1000));
     record(&e, "changed error", 1, 121_000);
     let changed = history(&e)[0].clone();
-    assert_eq!(changed.view().start_failures, Some(1));
+    assert_eq!(runs::view(&changed).start_failures, Some(1));
     assert_eq!(
-        changed.view().error.as_deref(),
+        runs::view(&changed).error.as_deref(),
         Some(steve_flow::scheduler::start_rejected().as_str())
     );
     assert_eq!(
         changed.context["error_fingerprint"],
         steve_store::sha("changed error")
     );
-    assert_eq!(changed.view().first_at, Some(121_000));
+    assert_eq!(runs::view(&changed).first_at, Some(121_000));
     record(&e, "first error", 1, 181_000);
     let rows = history(&e);
     assert_eq!(rows.len(), 3);
     assert_ne!(rows[0].id, first);
-    assert_eq!(rows[0].view().start_failures, Some(1));
+    assert_eq!(runs::view(&rows[0]).start_failures, Some(1));
     assert_eq!(rows[1], changed);
     assert_eq!(rows[2], repeated);
 }
@@ -393,35 +378,36 @@ fn corrupt_source_metadata_is_diagnosable_and_cannot_spend_or_erase_budget() {
     ] {
         let e = FlowEnv::new();
         let id = bounded(&e, "bad graph", 1, 1000);
-        e.env
-            .store()
-            .with_conn(|c| {
-                c.execute(
-                    "UPDATE flow_runs SET context=json_set(context,?1,json(?2)) WHERE id=?3",
-                    rusqlite::params![format!("$.startup.{key}"), value.to_string(), id],
-                )?;
-                Ok(())
-            })
+        fixtures::set_run_context_field(e.env.store(), &id, &format!("$.startup.{key}"), &value)
             .unwrap();
         let before = history(&e);
         let error = e
             .env
             .store()
-            .reader(|c| {
-                runs::startup_state(
+            .read::<_, steve_store::StoreError>(|c| {
+                Ok(runs::startup_state(
                     c,
                     WS,
                     "flow_start",
                     "fixture.start",
                     &serde_json::json!({"epoch":1}),
-                )
+                ))
             })
+            .unwrap()
             .unwrap_err();
         assert!(error.to_string().contains("Invalid startup"));
         let diagnostic = e
             .env
             .store()
-            .reader(|c| runs::startup_diagnostic(c, WS, "flow_start", "fixture.start"))
+            .read::<_, steve_store::StoreError>(|c| {
+                Ok(runs::startup_diagnostic(
+                    c,
+                    WS,
+                    "flow_start",
+                    "fixture.start",
+                ))
+            })
+            .unwrap()
             .unwrap()
             .unwrap();
         assert_eq!(diagnostic.code, "startup_metadata_invalid");
@@ -436,11 +422,17 @@ fn corrupt_source_metadata_is_diagnosable_and_cannot_spend_or_erase_budget() {
 fn an_edited_configuration_starts_at_zero_without_overwriting_damaged_history() {
     let e = FlowEnv::new();
     let id = bounded(&e, "bad", 1, 1000);
-    e.env.store().with_conn(|c|{c.execute("UPDATE flow_runs SET context=json_set(context,'$.startup.attempts','broken') WHERE id=?",[&id])?;Ok(())}).unwrap();
+    fixtures::set_run_context_field(
+        e.env.store(),
+        &id,
+        "$.startup.attempts",
+        &serde_json::json!("broken"),
+    )
+    .unwrap();
     let before = e
         .env
         .store()
-        .reader(|c| runs::get(c, &id))
+        .read(|r| steve_store::RunRows(r).get(&id))
         .unwrap()
         .unwrap();
     assert!(state(&e, 2).is_none());
@@ -450,7 +442,7 @@ fn an_edited_configuration_starts_at_zero_without_overwriting_damaged_history() 
     assert_eq!(
         e.env
             .store()
-            .reader(|c| runs::get(c, &id))
+            .read(|r| steve_store::RunRows(r).get(&id))
             .unwrap()
             .unwrap(),
         before
@@ -458,7 +450,15 @@ fn an_edited_configuration_starts_at_zero_without_overwriting_damaged_history() 
     let diagnostic = e
         .env
         .store()
-        .reader(|c| runs::startup_diagnostic(c, WS, "flow_start", "fixture.start"))
+        .read::<_, steve_store::StoreError>(|c| {
+            Ok(runs::startup_diagnostic(
+                c,
+                WS,
+                "flow_start",
+                "fixture.start",
+            ))
+        })
+        .unwrap()
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -471,30 +471,29 @@ fn an_edited_configuration_starts_at_zero_without_overwriting_damaged_history() 
 
 #[test]
 fn diagnostics_decode_columns_independently_instead_of_loading_a_full_run() {
-    for change in [
-        "cost=x'ff'",
-        "started=x'ff'",
-        "status=x'ff'",
-        "error=x'ff'",
-        "id=x'ff'",
-        "context=CAST(context AS BLOB)",
-    ] {
+    use fixtures::DamagedRunColumn::*;
+    for change in [Cost, Started, Status, Error, Id, Context] {
         let e = FlowEnv::new();
         let id = bounded(&e, "bad", 1, 1000);
-        e.env.store().with_conn(|c|{
-            c.execute("UPDATE flow_runs SET context=json_set(context,'$.startup.attempts','broken') WHERE id=?",[&id])?;
-            c.execute(&format!("UPDATE flow_runs SET {change} WHERE id=?"),[&id])?;Ok(())
-        }).unwrap();
+        fixtures::damage_startup_run(e.env.store(), &id, change).unwrap();
         let diagnostic = e
             .env
             .store()
-            .reader(|c| runs::startup_diagnostic(c, WS, "flow_start", "fixture.start"))
+            .read::<_, steve_store::StoreError>(|c| {
+                Ok(runs::startup_diagnostic(
+                    c,
+                    WS,
+                    "flow_start",
+                    "fixture.start",
+                ))
+            })
+            .unwrap()
             .unwrap()
             .unwrap();
-        assert_eq!(diagnostic.code, "startup_metadata_invalid", "{change}");
+        assert_eq!(diagnostic.code, "startup_metadata_invalid", "{change:?}");
         assert_eq!(diagnostic.flow_id, "flow_start");
         assert!(!diagnostic.run_id.is_empty());
-        if change != "id=x'ff'" {
+        if change != Id {
             assert_eq!(diagnostic.run_id, id);
         }
     }
@@ -508,21 +507,20 @@ fn unreadable_unrelated_history_cannot_replace_a_known_dead_source_budget() {
     }
     let dead = state(&e, 1).unwrap();
     let unrelated = ordinary(&e, 2000);
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE flow_runs SET context='not json' WHERE id=?",
-                [&unrelated],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::set_raw_run_context(e.env.store(), &unrelated, "not json").unwrap();
     assert_eq!(state(&e, 1).unwrap(), dead);
     let diagnostic = e
         .env
         .store()
-        .reader(|c| runs::startup_diagnostic(c, WS, "flow_start", "fixture.start"))
+        .read::<_, steve_store::StoreError>(|c| {
+            Ok(runs::startup_diagnostic(
+                c,
+                WS,
+                "flow_start",
+                "fixture.start",
+            ))
+        })
+        .unwrap()
         .unwrap()
         .unwrap();
     assert_eq!(diagnostic.run_id, unrelated);
@@ -546,11 +544,25 @@ fn startup_rejection_and_recovery_diagnostics_follow_the_readers_language() {
             assert!(steve_flow::scheduler::start_rejected().contains(rejected));
             let e = FlowEnv::new();
             let id = bounded(&e, "bad", 1, 1000);
-            e.env.store().with_conn(|c|{c.execute("UPDATE flow_runs SET context=json_set(context,'$.startup.limit',0) WHERE id=?",[&id])?;Ok(())}).unwrap();
+            fixtures::set_run_context_field(
+                e.env.store(),
+                &id,
+                "$.startup.limit",
+                &serde_json::json!(0),
+            )
+            .unwrap();
             let d = e
                 .env
                 .store()
-                .reader(|c| runs::startup_diagnostic(c, WS, "flow_start", "fixture.start"))
+                .read::<_, steve_store::StoreError>(|c| {
+                    Ok(runs::startup_diagnostic(
+                        c,
+                        WS,
+                        "flow_start",
+                        "fixture.start",
+                    ))
+                })
+                .unwrap()
                 .unwrap()
                 .unwrap();
             assert_eq!(d.code, "startup_metadata_invalid");
@@ -568,13 +580,7 @@ async fn r4g_startup_storage_is_language_neutral_and_views_follow_the_reader() {
     let (status,schedule)=call(&e.router(),Some(&caller(WS,ME)),"POST","/schedules",Some(&json!({"name":"startup","cron":"0 9 * * *","what":"report","bot":"steve","mode":"report"}))).await;
     assert_eq!(status, 200, "{schedule}");
     let flow = schedule["id"].as_str().unwrap();
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute("UPDATE flows SET graph='broken json' WHERE id=?", [flow])?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::set_raw_flow_graph(e.env.store(), flow, "broken json").unwrap();
     for (n, lang) in [steve_i18n::ZH_CN, steve_i18n::EN].into_iter().enumerate() {
         steve_i18n::with(lang, || {
             scheduler::start_from_source(
@@ -592,7 +598,7 @@ async fn r4g_startup_storage_is_language_neutral_and_views_follow_the_reader() {
     let rows = e
         .env
         .store()
-        .reader(|c| runs::page(c, WS, flow, None, 50))
+        .read(|c| runs::page(c, WS, flow, None, 50))
         .unwrap();
     assert_eq!(
         rows.len(),
@@ -607,12 +613,12 @@ async fn r4g_startup_storage_is_language_neutral_and_views_follow_the_reader() {
         json!({"code":"startup_rejected","params":{}})
     );
     assert_eq!(row.context["start_failures"], 2);
-    assert_eq!(row.view().startup.unwrap().attempts, 2);
+    assert_eq!(runs::view(&row).startup.unwrap().attempts, 2);
     for (lang, expected) in [
         (steve_i18n::ZH_CN, "此调度无法启动"),
         (steve_i18n::EN, "This schedule could not start"),
     ] {
-        let view = steve_i18n::with(lang, || row.view());
+        let view = steve_i18n::with(lang, || runs::view(&row));
         assert!(view.error.as_ref().unwrap().contains(expected));
         assert_eq!(view.error.as_deref(), Some(view.outcome_label.as_str()));
         let (status, body) = steve_i18n::scope(
@@ -633,7 +639,13 @@ async fn r4g_startup_storage_is_language_neutral_and_views_follow_the_reader() {
             "{lang}: {body}"
         );
     }
-    e.env.store().with_conn(|c| { c.execute("UPDATE flow_runs SET context=json_set(context,'$.startup.attempts','broken') WHERE id=?",[&row.id])?;Ok(()) }).unwrap();
+    fixtures::set_run_context_field(
+        e.env.store(),
+        &row.id,
+        "$.startup.attempts",
+        &serde_json::json!("broken"),
+    )
+    .unwrap();
     let (status, body) = call(
         &e.router(),
         Some(&caller(WS, ME)),
@@ -646,7 +658,10 @@ async fn r4g_startup_storage_is_language_neutral_and_views_follow_the_reader() {
     let diagnostic = e
         .env
         .store()
-        .reader(|c| runs::startup_diagnostic(c, WS, flow, "digest.bot"))
+        .read::<_, steve_store::StoreError>(|c| {
+            Ok(runs::startup_diagnostic(c, WS, flow, "digest.bot"))
+        })
+        .unwrap()
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -660,32 +675,45 @@ async fn r4g_startup_storage_is_language_neutral_and_views_follow_the_reader() {
 fn r4g_diagnostics_distinguish_recovered_and_unattributed_history() {
     let e = FlowEnv::new();
     let damaged = bounded(&e, "bad", 1, 1000);
-    e.env.store().with_conn(|c|{c.execute("UPDATE flow_runs SET context=json_set(context,'$.startup.attempts','broken') WHERE id=?",[&damaged])?;Ok(())}).unwrap();
+    fixtures::set_run_context_field(
+        e.env.store(),
+        &damaged,
+        "$.startup.attempts",
+        &serde_json::json!("broken"),
+    )
+    .unwrap();
     bounded(&e, "another configuration", 2, 61_000);
     let diagnostic = e
         .env
         .store()
-        .reader(|c| runs::startup_diagnostic(c, WS, "flow_start", "fixture.start"))
+        .read::<_, steve_store::StoreError>(|c| {
+            Ok(runs::startup_diagnostic(
+                c,
+                WS,
+                "flow_start",
+                "fixture.start",
+            ))
+        })
+        .unwrap()
         .unwrap()
         .unwrap();
     assert_eq!(diagnostic.code, "startup_metadata_recovered");
     assert!(!diagnostic.message.contains("修改调度或 Bot 即可恢复"));
     assert_eq!(diagnostic.run_id, damaged);
     let unattributed = ordinary(&e, 100_000);
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE flow_runs SET context='broken' WHERE id=?",
-                [&unattributed],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::set_raw_run_context(e.env.store(), &unattributed, "broken").unwrap();
     let diagnostic = e
         .env
         .store()
-        .reader(|c| runs::startup_diagnostic(c, WS, "flow_start", "fixture.start"))
+        .read::<_, steve_store::StoreError>(|c| {
+            Ok(runs::startup_diagnostic(
+                c,
+                WS,
+                "flow_start",
+                "fixture.start",
+            ))
+        })
+        .unwrap()
         .unwrap()
         .unwrap();
     assert_eq!(diagnostic.code, "startup_metadata_unattributed");
@@ -713,13 +741,16 @@ async fn readable_startup_fixture(mode: &str) -> (FlowEnv, String, String) {
     let revision = e
         .env
         .store()
-        .reader(|c| steve_flow::scheduler::startup_revision(c, WS, &flow))
+        .read::<_, steve_store::StoreError>(|c| {
+            Ok(steve_flow::scheduler::startup_revision(c, WS, &flow))
+        })
+        .unwrap()
         .unwrap()
         .unwrap();
     let id = e
         .env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             runs::record_start_failure(
                 tx,
                 &runs::FailedStart {
@@ -806,7 +837,13 @@ async fn r4g_fix_next_item_goal_quotes_the_previous_error_in_stored_language() {
 fn r4g_fix_damaged_error_projection_never_gives_a_stale_recovery_instruction() {
     let e = FlowEnv::new();
     let id = bounded(&e, "bad", 1, 1000);
-    e.env.store().with_conn(|c|{c.execute("UPDATE flow_runs SET context=json_set(context,'$.start_error.code','unknown') WHERE id=?",[&id])?;Ok(())}).unwrap();
+    fixtures::set_run_context_field(
+        e.env.store(),
+        &id,
+        "$.start_error.code",
+        &serde_json::json!("unknown"),
+    )
+    .unwrap();
     for saved in [false, true] {
         if saved {
             bounded(&e, "new configuration", 2, 61_000);
@@ -814,11 +851,11 @@ fn r4g_fix_damaged_error_projection_never_gives_a_stale_recovery_instruction() {
         let row = e
             .env
             .store()
-            .reader(|c| runs::get(c, &id))
+            .read(|r| steve_store::RunRows(r).get(&id))
             .unwrap()
             .unwrap();
         for (locale, forbidden) in [(steve_i18n::ZH_CN, "修改"), (steve_i18n::EN, "Edit")] {
-            let error = steve_i18n::with(locale, || row.view().error.unwrap());
+            let error = steve_i18n::with(locale, || runs::view(&row).error.unwrap());
             assert!(!error.contains(forbidden), "saved={saved}: {error}");
         }
     }
@@ -832,7 +869,7 @@ async fn r4g_fix_signal_run_projection_uses_the_same_readable_label() {
         let value = steve_i18n::with(locale, || {
             e.env
                 .store()
-                .reader(|c| steve_flow::signals::run_view(c, &id))
+                .read(|c| steve_flow::signals::run_view(c, &id))
         })
         .unwrap()
         .unwrap();
@@ -845,22 +882,13 @@ async fn r4g_fix_connector_projection_never_returns_the_persistence_code() {
     let (e, flow, id) = readable_startup_fixture("report").await;
     // The connector projection selects event-linked rows; seed its reference without creating
     // a parallel run representation or changing the canonical startup record.
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE flow_runs SET event_id='evt_reader_fixture' WHERE id=?",
-                [&id],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::set_run_event(e.env.store(), &id, "evt_reader_fixture").unwrap();
     for locale in [steve_i18n::ZH_CN, steve_i18n::EN] {
         let expected = steve_i18n::with(locale, steve_flow::scheduler::start_rejected);
         let rows = steve_i18n::with(locale, || {
             e.env
                 .store()
-                .reader(|c| runs::connector_runs(c, WS, "evt_reader_fixture"))
+                .read(|c| runs::connector_runs(c, WS, "evt_reader_fixture"))
         })
         .unwrap();
         assert_eq!(rows.len(), 1);

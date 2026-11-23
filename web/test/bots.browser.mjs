@@ -34,12 +34,13 @@ const run = async ({ width, height, scheme }) => {
   let statsBot = null
   await page.route('**/*', async (route) => {
     const u = new URL(route.request().url()); if (u.origin !== base) return route.abort()
-    if (u.pathname === '/auth/hello') return route.fulfill({ json: { name: 'steve', version: 'fixture', api: 1, login: { token: false, oidc: false } } })
+    if (u.pathname === '/auth/hello') return route.fulfill({ json: { name: 'steve', version: 'fixture', api: 2, login: { token: false, oidc: false } } })
     if (!u.pathname.startsWith('/api/')) return route.continue()
     const method = route.request().method(), p = u.pathname
     let data = {}
     if (await hub.handle(route, method, p)) return
-    if (p === '/api/state') data = state()
+    if (p === '/api/runtimes') data = state().runtimes
+    else if (p === '/api/shell') data = state()
     else if (p === '/api/stats/breakdown') { statsBot = u.searchParams.get('bot'); data = breakdown }
     else if (p.startsWith('/api/stats/')) return route.fulfill({ status: 404, contentType: 'application/json', body: '{}' })
     else if (/^\/api\/bots\/[^/]+$/.test(p) && method === 'PATCH') {

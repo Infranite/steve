@@ -4,6 +4,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use steve_runtime::testkit::eventually_sync;
+use steve_store::testkit::hub::node_checks;
+use steve_store::testkit::hub::node_fixtures as fixtures;
 
 use steve_hub::wire::acp_stats;
 use steve_hub::wire::node_runtime::{
@@ -144,15 +146,7 @@ fn hub_with_clock(clock: Option<Arc<FakeClock>>) -> H {
     )
     .unwrap();
     store.ensure_workspace().unwrap();
-    store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute(
-                "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','active',1,1)",
-                [S],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::node_fixtures::seed_sessions(&store, &S).unwrap();
     let node = FakeNode::new("n1");
     let ends = Arc::new(Ends::default());
     let _ = ends.4.set(store.clone());
@@ -206,16 +200,8 @@ impl H {
             .unwrap();
     }
 
-    fn q<T: rusqlite::types::FromSql>(&self, sql: &str) -> T {
-        self.store
-            .reader(|c| Ok::<_, StoreError>(c.query_row(sql, [], |r| r.get(0))?))
-            .unwrap()
-    }
-
     fn phase(&self) -> String {
-        self.q(&format!(
-            "SELECT phase FROM runtime_sessions WHERE session_id='{S}'"
-        ))
+        node_checks::binding_phase_by_session(&self.store, &S).unwrap()
     }
 
     fn methods(&self) -> Vec<&'static str> {
@@ -224,17 +210,7 @@ impl H {
 
     /// The attempts the Node took, in order.
     fn attempts(&self) -> Vec<ExecutionRef> {
-        let rows: Vec<String> = self
-            .store
-            .reader(|c| {
-                let mut st =
-                    c.prepare("SELECT execution FROM runtime_attempts ORDER BY created, rowid")?;
-                let v = st
-                    .query_map([], |r| r.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok::<_, StoreError>(v)
-            })
-            .unwrap();
+        let rows: Vec<String> = fixtures::ordered_attempt_executions(&self.store).unwrap();
         rows.iter()
             .map(|s| serde_json::from_str(s).unwrap())
             .collect()
@@ -292,11 +268,11 @@ async fn bind_prepares_opens_then_runs_what_is_queued() {
     assert_eq!(h.ends(), [(S.to_string(), "end_turn".to_string(), None)]);
     assert_eq!(h.phase(), "ready");
     assert!(!h.rt.is_busy(S));
-    let texts: i64 = h.q("SELECT COUNT(*) FROM events WHERE kind='text' AND format='steve.v1'");
+    let texts: i64 = node_checks::event_count_text_steve_v1(&h.store).unwrap();
     assert_eq!(texts, 1);
-    let receipt: String = h.q("SELECT state FROM node_commands WHERE method='start_turn'");
+    let receipt: String = node_checks::command_state_by_method(&h.store, "start_turn").unwrap();
     assert_eq!(receipt, "finished");
-    let dispatched: String = h.q("SELECT state FROM session_dispatch WHERE backend='node'");
+    let dispatched: String = node_checks::dispatch_state_node(&h.store).unwrap();
     assert_eq!(dispatched, "completed");
     assert_eq!(h.node.unacked(), 0, "every event was acknowledged");
 }
@@ -348,7 +324,7 @@ async fn a_passing_failure_with_no_tool_run_is_a_new_attempt_of_the_same_turn() 
     assert_ne!(first.attempt(), second.attempt(), "a new attempt");
     assert!(h.ends().is_empty());
     assert!(h.rt.is_busy(S), "the turn keeps its session while it waits");
-    let wait: i64 = h.q("SELECT retry_at - created FROM node_commands WHERE method='start_turn' ORDER BY created DESC, rowid DESC LIMIT 1");
+    let wait: i64 = node_checks::latest_command_retry_delay_start_turn(&h.store).unwrap();
     assert!(wait >= 19_000, "the retry waits ({wait} ms)");
 }
 
@@ -372,15 +348,7 @@ async fn the_turn_end_names_the_last_attempt_of_its_retry_chain() {
             .unwrap()
     );
     // the retry goes now instead of after its wait
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute(
-                "UPDATE node_commands SET retry_at=0 WHERE state='pending'",
-                [],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::node_fixtures::set_node_commands_retry_at(&h.store).unwrap();
     eventually_sync("retry sent", || h.count("start_turn") == 2).await;
     h.node.finish(&retry, build::done()).await.unwrap();
     eventually_sync("turn end", || !h.ends().is_empty()).await;
@@ -461,8 +429,7 @@ async fn cancel_attempt_with_an_old_attempt_queues_nothing() {
     .await;
     assert!(!h.rt.cancel_attempt(S, &a1).unwrap(), "a1 is over");
     assert!(!h.rt.cancel_attempt(S, "att_nobody").unwrap());
-    let cancels =
-        || h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE method IN ('cancel','abandon')");
+    let cancels = || node_checks::command_count_stops(&h.store).unwrap();
     assert_eq!(cancels(), 0, "no command for a stale attempt");
     assert!(h.rt.is_busy(S), "a2 still runs");
     assert!(h.rt.cancel_attempt(S, &a2).unwrap());
@@ -485,15 +452,13 @@ async fn cancel_attempt_reaches_the_retry_of_its_turn() {
     let retry = h.rt.active_attempt(S).unwrap().expect("the retry waits");
     assert_ne!(a1, retry);
     let op: String =
-        h.q("SELECT operation_id FROM node_commands WHERE method='start_turn' ORDER BY created DESC, rowid DESC LIMIT 1");
+        node_checks::latest_command_operation_id_by_method(&h.store, "start_turn").unwrap();
 
     assert!(
         h.rt.cancel_attempt(S, &a1).unwrap(),
         "the turn of a1 still runs"
     );
-    let state: String = h.q(&format!(
-        "SELECT state FROM node_commands WHERE operation_id='{op}'"
-    ));
+    let state: String = node_checks::command_state_by_operation(&h.store, &op).unwrap();
     assert_eq!(state, "rejected", "the retry is settled here, never sent");
     eventually_sync("turn end", || !h.ends().is_empty()).await;
     assert_eq!(h.ends(), [(S.to_string(), "cancelled".to_string(), None)]);
@@ -505,8 +470,7 @@ async fn cancel_attempt_reaches_the_retry_of_its_turn() {
     eventually_sync("the next turn", || h.count("start_turn") == 2).await;
     assert!(!h.rt.cancel_attempt(S, &a1).unwrap(), "a1's turn is over");
     assert!(!h.rt.cancel_attempt(S, &retry).unwrap());
-    let cancels: i64 =
-        h.q("SELECT COUNT(*) FROM node_commands WHERE method IN ('cancel','abandon')");
+    let cancels: i64 = node_checks::command_count_stops(&h.store).unwrap();
     assert_eq!(cancels, 0, "nothing queued for the next turn");
     assert!(h.rt.is_busy(S), "the next turn still runs");
 }
@@ -523,10 +487,10 @@ async fn the_same_events_again_are_stored_once() {
     // the Node did not hear the ack and sends what it kept again
     let replay = h.seen.seen.lock().unwrap().clone();
     eventually_sync("applied", || {
-        h.q::<i64>("SELECT COUNT(*) FROM events WHERE kind='text'") == 1
+        node_checks::event_count_by_kind(&h.store, "text").unwrap() == 1
     })
     .await;
-    let before: i64 = h.q("SELECT COUNT(*) FROM events");
+    let before: i64 = node_checks::event_count(&h.store).unwrap();
     let sink = Sink(Arc::downgrade(&h.rt));
     sink.commit(EventBatch {
         events: replay.clone(),
@@ -534,7 +498,7 @@ async fn the_same_events_again_are_stored_once() {
     .await
     .unwrap();
     sink.commit(EventBatch { events: replay }).await.unwrap();
-    assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM events"), before);
+    assert_eq!(node_checks::event_count(&h.store).unwrap(), before);
 }
 
 #[tokio::test]
@@ -545,12 +509,10 @@ async fn a_busy_node_gets_the_very_same_command_again() {
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
     eventually_sync("refused", || {
-        h.q::<i64>(
-            "SELECT COALESCE(MAX(lease_generation),0) FROM node_commands WHERE method='start_turn'",
-        ) >= 1
+        node_checks::command_coalesce_max_lease_generation_0_start_turn(&h.store).unwrap() >= 1
     })
     .await;
-    let state: String = h.q("SELECT state FROM node_commands WHERE method='start_turn'");
+    let state: String = node_checks::command_state_by_method(&h.store, "start_turn").unwrap();
     assert_eq!(
         state, "pending",
         "exhausted is sent again, never a new attempt"
@@ -567,19 +529,16 @@ async fn an_exhausted_node_backs_off_tells_the_session_once_and_runs_the_same_co
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
     let exhausted = || {
-        h.q::<Option<i64>>(
-            "SELECT MAX(json_extract(receipt,'$.exhausted')) FROM node_commands WHERE method='start_turn'",
-        )
-        .unwrap_or(0)
+        node_checks::command_max_json_extract_receipt_exhausted_start_turn(&h.store)
+            .unwrap()
+            .unwrap_or(0)
     };
     let mut delays = vec![];
     for n in 1..=3 {
         eventually_sync("refused again", || exhausted() == n).await;
         // the time between the refusal and the next send
-        delays.push(
-            h.q::<i64>("SELECT retry_at-updated FROM node_commands WHERE method='start_turn'"),
-        );
-        let at: i64 = h.q("SELECT retry_at FROM node_commands WHERE method='start_turn'");
+        delays.push(node_checks::start_turn_retry_delay_since_update(&h.store).unwrap());
+        let at: i64 = node_checks::command_retry_at_by_method(&h.store, "start_turn").unwrap();
         h.advance_to(at - 1).await;
         assert_eq!(exhausted(), n, "no resend before the persisted deadline");
         if n < 3 {
@@ -589,17 +548,16 @@ async fn an_exhausted_node_backs_off_tells_the_session_once_and_runs_the_same_co
     for (d, want) in delays.iter().zip([2_000, 4_000, 8_000]) {
         assert!((want..want + 50).contains(d), "{delays:?}");
     }
-    let notes: i64 =
-        h.q("SELECT COUNT(*) FROM events WHERE kind='system' AND data LIKE '%Node 暂不接新工作%'");
+    let notes: i64 = node_checks::node_refusal_notice_count(&h.store).unwrap();
     assert_eq!(notes, 1, "one note, not one per retry");
     assert_eq!(h.attempts().len(), 1, "never a new attempt");
-    let state: String = h.q("SELECT state FROM node_commands WHERE method='start_turn'");
+    let state: String = node_checks::command_state_by_method(&h.store, "start_turn").unwrap();
     assert_eq!(state, "pending");
     assert!(!h.methods().contains(&"start_turn"));
 
     // room again: the very same operation runs, once
     h.node.refuse("start_turn", None);
-    h.advance_to(h.q("SELECT retry_at FROM node_commands WHERE method='start_turn'"))
+    h.advance_to(node_checks::command_retry_at_by_method(&h.store, "start_turn").unwrap())
         .await;
     eventually_sync("start_turn", || h.methods().contains(&"start_turn")).await;
     eventually_sync("active", || h.phase() == "active").await;
@@ -610,9 +568,9 @@ async fn an_exhausted_node_backs_off_tells_the_session_once_and_runs_the_same_co
         .filter(|(m, _)| *m == "start_turn")
         .collect();
     assert_eq!(ran.len(), 1);
-    let op: String = h.q("SELECT operation_id FROM node_commands WHERE method='start_turn'");
+    let op: String = node_checks::command_operation_id_by_method(&h.store, "start_turn").unwrap();
     assert_eq!(ran[0].1.to_string(), op);
-    let commands: i64 = h.q("SELECT COUNT(*) FROM node_commands WHERE method='start_turn'");
+    let commands: i64 = node_checks::command_count_by_method(&h.store, "start_turn").unwrap();
     assert_eq!(commands, 1);
     assert_eq!(h.attempts().len(), 1);
 }
@@ -620,15 +578,7 @@ async fn an_exhausted_node_backs_off_tells_the_session_once_and_runs_the_same_co
 #[tokio::test]
 async fn steves_lead_goes_first_once_and_attachments_go_by_hash() {
     let h = hub();
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute(
-                "INSERT INTO files(id,workspace_id,sha256,name,mime,size,created_by,created) VALUES ('f1','default',?,'a.txt','text/plain',3,'u',1)",
-                ["a".repeat(64)],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::node_fixtures::seed_files(&h.store, &"a".repeat(64)).unwrap();
     h.bind();
     let f = FileRef {
         id: "f1".into(),
@@ -646,7 +596,7 @@ async fn steves_lead_goes_first_once_and_attachments_go_by_hash() {
     let _ = h.rt.flush(S, Some(("lead", "steve")));
     let _ = h.rt.flush(S, Some(("lead", "steve")));
     eventually_sync("attempt", || h.attempts().len() == 1).await;
-    let spec: String = h.q("SELECT spec FROM runtime_attempts");
+    let spec: String = node_checks::attempt_spec(&h.store).unwrap();
     let spec: TurnSpec = serde_json::from_str(&spec).unwrap();
     let Part::Text { text } = &spec.run.prompt[0] else {
         panic!("text first")
@@ -658,7 +608,7 @@ async fn steves_lead_goes_first_once_and_attachments_go_by_hash() {
             .iter()
             .any(|p| matches!(p, Part::File { name, .. } if name == "a.txt"))
     );
-    let users: i64 = h.q("SELECT COUNT(*) FROM events WHERE kind='user' AND format='steve.v1'");
+    let users: i64 = node_checks::event_count_user_steve_v1(&h.store).unwrap();
     assert!(users >= 1);
     let published = h.published.lock().unwrap();
     assert!(
@@ -684,14 +634,14 @@ async fn a_message_whose_file_is_gone_goes_without_it() {
     h.rt.prompt(S, "still here", "user", std::slice::from_ref(&f))
         .unwrap();
     eventually_sync("attempt", || h.attempts().len() == 1).await;
-    let spec: String = h.q("SELECT spec FROM runtime_attempts");
+    let spec: String = node_checks::attempt_spec(&h.store).unwrap();
     let spec: TurnSpec = serde_json::from_str(&spec).unwrap();
     assert!(
         matches!(&spec.run.prompt[..], [Part::Text { text }] if text == "still here"),
         "{:?}",
         spec.run.prompt
     );
-    let queued: i64 = h.q("SELECT COUNT(*) FROM queued");
+    let queued: i64 = node_checks::queued_count(&h.store).unwrap();
     assert_eq!(queued, 0, "not left queued");
 }
 
@@ -705,15 +655,13 @@ async fn a_permission_is_a_card_and_its_answer_goes_to_the_very_request() {
     let req = perm("p1", exec.clone(), "git push");
     h.node.ask_permission(req.clone()).await.unwrap();
     eventually_sync("card", || {
-        h.q::<i64>(
-            "SELECT COUNT(*) FROM decisions WHERE subject_type='tool_call' AND status='open'",
-        ) == 1
+        node_checks::decision_count_tool_call_open(&h.store).unwrap() == 1
     })
     .await;
-    let d: String = h.q("SELECT id FROM decisions WHERE subject_type='tool_call'");
-    let q: String = h.q("SELECT question FROM decisions WHERE subject_type='tool_call'");
+    let d: String = node_checks::decision_id_by_subject_type(&h.store, "tool_call").unwrap();
+    let q: String = node_checks::decision_question_by_subject_type(&h.store, "tool_call").unwrap();
     assert_eq!(q, "允许执行：git push");
-    let shown: i64 = h.q("SELECT COUNT(*) FROM events WHERE kind='permission'");
+    let shown: i64 = node_checks::event_count_by_kind(&h.store, "permission").unwrap();
     assert_eq!(shown, 1);
     // the same request again (a replay) makes no second card
     let replay = h.seen.seen.lock().unwrap().clone();
@@ -724,11 +672,11 @@ async fn a_permission_is_a_card_and_its_answer_goes_to_the_very_request() {
     assert!(h.rt.answer_permission(&d, Some("allow_once")).unwrap());
     eventually_sync("answered", || h.methods().contains(&"resolve_permission")).await;
     eventually_sync("card settled", || {
-        h.q::<String>(&format!("SELECT status FROM decisions WHERE id='{d}'")) == "resolved"
+        node_checks::decision_status_by_id(&h.store, &d).unwrap() == "resolved"
     })
     .await;
     assert_eq!(
-        h.q::<i64>("SELECT COUNT(*) FROM decisions WHERE subject_type='tool_call'"),
+        node_checks::decision_count_by_subject_type(&h.store, "tool_call").unwrap(),
         1
     );
     assert!(
@@ -739,55 +687,31 @@ async fn a_permission_is_a_card_and_its_answer_goes_to_the_very_request() {
 
 #[tokio::test]
 async fn workflow_pause_cancel_and_replan_expire_late_permission_allows() {
-    for change in [
-        "UPDATE workflows SET paused=1",
-        "UPDATE workflow_units SET status='cancelled'",
-        "UPDATE item_goals SET version=2 WHERE item_id='parent'",
-        "DELETE FROM workflow_units",
-    ] {
+    for change in fixtures::WORKFLOW_PERMISSION_CHANGES {
         let h = hub();
         h.bind();
         h.rt.prompt(S, "hello", "user", &[]).unwrap();
         eventually_sync("started", || h.methods().contains(&"start_turn")).await;
-        h.store.transaction::<_, StoreError>(|tx| {
-            tx.execute_batch(
-                "INSERT INTO items(id,workspace_id,no,title,status,stage,source,created,updated)
-                 VALUES ('parent','default',1,'主事项','run','执行','[\"测试\",\"test\"]',1,1),
-                        ('child','default',2,'工作','run','执行','[\"协作工作\",\"workflow\"]',1,1);
-                 INSERT INTO item_goals(item_id,version,text,created)
-                 VALUES ('parent',1,'验证旧授权失效',1);
-                 UPDATE sessions SET item_id='child' WHERE id='s1';
-                 INSERT INTO workflows(item_id,revision,max_parallel,max_attempts,created,updated)
-                 VALUES ('parent',1,2,3,1,1);
-                 INSERT INTO workflow_units(workflow_id,id,position,spec,status,item_id,session_id)
-                 VALUES ('parent','work',0,'{\"id\":\"work\",\"title\":\"工作\",\"goal\":\"测试\",\"bot_id\":\"dev\"}','running','child','s1');",
-            )?;
-            Ok(())
-        }).unwrap();
+        steve_store::testkit::hub::mutations::seed_items_item_id_child_id_s1(&h.store).unwrap();
         h.node
             .ask_permission(perm("p1", h.attempts()[0].clone(), "git push"))
             .await
             .unwrap();
         eventually_sync("permission card", || {
-            h.q::<i64>("SELECT COUNT(*) FROM decisions WHERE status='open'") == 1
+            node_checks::decision_count_by_status(&h.store, "open").unwrap() == 1
         })
         .await;
-        let decision: String = h.q("SELECT id FROM decisions WHERE status='open'");
-        h.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute_batch(change)?;
-                Ok(())
-            })
-            .unwrap();
+        let decision: String = node_checks::decision_id_by_status(&h.store, "open").unwrap();
+        fixtures::change_workflow_permission(&h.store, change).unwrap();
         assert!(
             !h.rt
                 .answer_permission(&decision, Some("allow_once"))
                 .unwrap(),
-            "{change}",
+            "{change:?}",
         );
         assert_eq!(h.perm_state(&decision), "expired");
         assert_eq!(
-            h.q::<String>("SELECT status FROM decisions WHERE subject_type='tool_call'"),
+            node_checks::decision_status_by_subject_type(&h.store, "tool_call").unwrap(),
             "expired",
         );
         eventually_sync("rejection reached Node", || {
@@ -795,7 +719,7 @@ async fn workflow_pause_cancel_and_replan_expire_late_permission_allows() {
         })
         .await;
         let request: String =
-            h.q("SELECT request FROM node_commands WHERE method='resolve_permission'");
+            node_checks::command_request_by_method(&h.store, "resolve_permission").unwrap();
         let command: Command<PermissionResolution> = serde_json::from_str(&request).unwrap();
         assert_eq!(command.body.decision, PermissionDecision::Reject);
     }
@@ -813,15 +737,15 @@ async fn a_card_expires_with_its_attempt() {
         .await
         .unwrap();
     eventually_sync("card", || {
-        h.q::<i64>("SELECT COUNT(*) FROM decisions WHERE subject_type='tool_call'") == 1
+        node_checks::decision_count_by_subject_type(&h.store, "tool_call").unwrap() == 1
     })
     .await;
     h.node.finish(&exec, build::done()).await.unwrap();
     eventually_sync("expired", || {
-        h.q::<String>("SELECT status FROM decisions WHERE subject_type='tool_call'") == "expired"
+        node_checks::decision_status_by_subject_type(&h.store, "tool_call").unwrap() == "expired"
     })
     .await;
-    let d: String = h.q("SELECT id FROM decisions WHERE subject_type='tool_call'");
+    let d: String = node_checks::decision_id_by_subject_type(&h.store, "tool_call").unwrap();
     assert_eq!(h.perm_state(&d), "expired");
     assert!(!h.rt.answer_permission(&d, Some("allow_once")).unwrap());
 }
@@ -882,12 +806,12 @@ async fn usage_and_tools_reach_the_session_and_the_attempts_statistics() {
         .unwrap();
     h.node.finish(&exec, build::done()).await.unwrap();
     eventually_sync("turn end", || !h.ends().is_empty()).await;
-    let cost: f64 = h.q(&format!("SELECT cost FROM sessions WHERE id='{S}'"));
+    let cost: f64 = node_checks::session_cost_by_id(&h.store, &S).unwrap();
     assert!(
         (cost - 0.8).abs() < 1e-9,
         "the running total, counted once: {cost}"
     );
-    let used: i64 = h.q(&format!("SELECT used FROM sessions WHERE id='{S}'"));
+    let used: i64 = node_checks::session_used_by_id(&h.store, &S).unwrap();
     assert_eq!(used, 1000);
     assert_eq!(h.ends.1.lock().unwrap().len(), 1, "started once");
     assert!(
@@ -931,13 +855,10 @@ async fn live_usage_survives_restart_report_replay_final_and_cancel() {
         .await
         .unwrap();
     eventually_sync("live booked before end", || {
-        h.q::<i64>("SELECT COALESCE(SUM(input),0) FROM usage_records") == 100
+        node_checks::usage_records_coalesce_sum_input_0(&h.store).unwrap() == 100
     })
     .await;
-    assert_eq!(
-        h.q::<i64>("SELECT COUNT(*) FROM agent_turns WHERE ended IS NULL"),
-        1
-    );
+    assert_eq!(node_checks::turn_count_without_ended(&h.store).unwrap(), 1);
     h.restart_hub().await;
     h.node
         .emit(
@@ -954,7 +875,7 @@ async fn live_usage_survives_restart_report_replay_final_and_cancel() {
         .await
         .unwrap();
     eventually_sync("snapshot replaces delta", || {
-        h.q::<i64>("SELECT SUM(input) FROM usage_records") == 120
+        node_checks::usage_records_sum_input(&h.store).unwrap() == 120
     })
     .await;
     h.node
@@ -965,7 +886,7 @@ async fn live_usage_survives_restart_report_replay_final_and_cancel() {
         .await
         .unwrap();
     eventually_sync("final replaces snapshot", || {
-        h.q::<i64>("SELECT SUM(input) FROM usage_records") == 140
+        node_checks::usage_records_sum_input(&h.store).unwrap() == 140
     })
     .await;
     h.node
@@ -976,7 +897,7 @@ async fn live_usage_survives_restart_report_replay_final_and_cancel() {
         .await
         .unwrap();
     eventually_sync("late report applied", || {
-        h.q::<i64>("SELECT COUNT(*) FROM usage_reports") == 4
+        node_checks::usage_reports_count(&h.store).unwrap() == 4
     })
     .await;
     assert!(h.rt.cancel(S).unwrap());
@@ -991,9 +912,9 @@ async fn live_usage_survives_restart_report_replay_final_and_cancel() {
         .commit(EventBatch { events: replay })
         .await
         .unwrap();
-    assert_eq!(h.q::<i64>("SELECT SUM(input) FROM usage_records"), 140);
-    assert_eq!(h.q::<i64>("SELECT SUM(input) FROM stat_daily"), 140);
-    assert_eq!(h.q::<i64>("SELECT SUM(turns) FROM stat_daily"), 1);
+    assert_eq!(node_checks::usage_records_sum_input(&h.store).unwrap(), 140);
+    assert_eq!(node_checks::stat_daily_sum_input(&h.store).unwrap(), 140);
+    assert_eq!(node_checks::stat_daily_sum_turns(&h.store).unwrap(), 1);
 }
 
 /// M3: what a Node reports as cost is checked before it reaches the session. NaN, inf, negative
@@ -1009,7 +930,7 @@ async fn bad_cost_reports_never_clear_lower_or_inflate_the_cost() {
     eventually_sync("started", || h.methods().contains(&"start_turn")).await;
     let exec = h.attempts()[0].clone();
     let sub = || Subject::Execution(exec.clone());
-    let cost = || h.q::<Option<f64>>(&format!("SELECT cost FROM sessions WHERE id='{S}'"));
+    let cost = || node_checks::optional_session_cost_by_id(&h.store, &S).unwrap();
     h.node.emit(sub(), usage("u1", "1")).await.unwrap();
     for (i, bad) in [
         "NaN", "inf", "-inf", "-1000", "-1e300", "1e300", "0x10", " 2",
@@ -1039,7 +960,7 @@ async fn bad_cost_reports_never_clear_lower_or_inflate_the_cost() {
     eventually_sync("turn end", || !h.ends().is_empty()).await;
     let c = cost().expect("never cleared");
     assert!((c - 3.0).abs() < 1e-9, "1, then 2 (11 to 13): {c}");
-    let used: i64 = h.q(&format!("SELECT used FROM sessions WHERE id='{S}'"));
+    let used: i64 = node_checks::session_used_by_id(&h.store, &S).unwrap();
     assert_eq!(used, 1000, "an impossible context size is ignored");
     let f = h.ends.2.lock().unwrap()[0].clone();
     assert!(
@@ -1052,19 +973,8 @@ async fn bad_cost_reports_never_clear_lower_or_inflate_the_cost() {
 impl H {
     /// Runs one turn to its end, leaving the session ready.
     async fn one_turn(&self, text: &str) {
-        let (before, n) = (self.ends().len(), self.attempts().len());
-        self.rt.prompt(S, text, "user", &[]).unwrap();
-        eventually_sync("attempt", || self.attempts().len() == n + 1).await;
-        let exec = self.attempts().last().unwrap().clone();
-        eventually_sync("started", || {
-            self.node
-                .log()
-                .iter()
-                .filter(|(m, _)| *m == "start_turn")
-                .count()
-                == self.attempts().len()
-        })
-        .await;
+        let before = self.ends().len();
+        let exec = self.running(text).await;
         self.node.finish(&exec, build::done()).await.unwrap();
         eventually_sync("turn end", || self.ends().len() > before).await;
         eventually_sync("ready", || self.phase() == "ready").await;
@@ -1094,7 +1004,8 @@ async fn release_lets_an_idle_session_go_and_only_an_idle_one() {
     );
     eventually_sync("released", || h.phase() == "released").await;
     assert_eq!(h.count("release_session"), 1);
-    let receipt: String = h.q("SELECT state FROM node_commands WHERE method='release_session'");
+    let receipt: String =
+        node_checks::command_state_by_method(&h.store, "release_session").unwrap();
     assert_eq!(receipt, "finished");
     assert_eq!(
         h.rt.release(S).unwrap(),
@@ -1129,13 +1040,9 @@ async fn a_released_session_opens_again_for_the_next_message_with_its_resume_han
             "start_turn"
         ]
     );
-    let resume: Option<String> = h.q(
-        "SELECT json_extract(request,'$.body.resume') FROM node_commands WHERE method='open_session' ORDER BY created DESC, rowid DESC LIMIT 1",
-    );
+    let resume: Option<String> = node_checks::latest_command_resume_open_session(&h.store).unwrap();
     assert!(resume.is_some(), "continues the same conversation");
-    let first: Option<String> = h.q(
-        "SELECT json_extract(request,'$.body.resume') FROM node_commands WHERE method='open_session' ORDER BY created, rowid LIMIT 1",
-    );
+    let first: Option<String> = node_checks::first_command_resume_open_session(&h.store).unwrap();
     assert!(first.is_none(), "the first open had nothing to resume");
 }
 
@@ -1150,9 +1057,7 @@ async fn a_message_queued_while_releasing_reopens_once_the_release_is_done() {
     eventually_sync("second turn", || h.count("start_turn") == 2).await;
     assert_eq!(h.count("release_session"), 1);
     assert_eq!(h.count("open_session"), 2, "opened again after the release");
-    let queued: i64 = h.q(&format!(
-        "SELECT COUNT(*) FROM queued WHERE session_id='{S}'"
-    ));
+    let queued: i64 = node_checks::queued_count_by_session(&h.store, &S).unwrap();
     assert_eq!(queued, 0, "the message went with the turn");
     let exec = h.attempts().last().unwrap().clone();
     h.node.finish(&exec, build::done()).await.unwrap();
@@ -1176,9 +1081,7 @@ async fn an_idle_session_is_let_go_once_and_the_next_message_resumes_it() {
     assert_eq!(h.rt.prompt(S, "again", "user", &[]).unwrap(), Planned::Busy);
     eventually_sync("second turn", || h.count("start_turn") == 2).await;
     assert_eq!(h.count("open_session"), 2);
-    let resume: Option<String> = h.q(
-        "SELECT json_extract(request,'$.body.resume') FROM node_commands WHERE method='open_session' ORDER BY created DESC, rowid DESC LIMIT 1",
-    );
+    let resume: Option<String> = node_checks::latest_command_resume_open_session(&h.store).unwrap();
     assert!(resume.is_some(), "continues the same conversation");
 }
 
@@ -1221,15 +1124,7 @@ async fn an_idle_session_on_a_faulted_stream_is_not_let_go() {
     h.bind();
     h.one_turn("hello").await;
     let stream = derived_id("session", S);
-    let n: usize = h
-        .store
-        .transaction::<_, StoreError>(|tx| {
-            Ok(tx.execute(
-                "UPDATE node_streams SET fault='failed' WHERE stream=?",
-                [&stream],
-            )?)
-        })
-        .unwrap();
+    let n = fixtures::fault_stream(&h.store, &stream).unwrap();
     assert_eq!(n, 1, "the session's stream is known");
     h.rt.set_idle_release(0);
     tokio::time::sleep(Duration::from_millis(1500)).await;
@@ -1250,9 +1145,7 @@ async fn a_session_with_an_open_card_is_not_let_go() {
         .await
         .unwrap();
     eventually_sync("card", || {
-        h.q::<i64>(
-            "SELECT COUNT(*) FROM decisions WHERE subject_type='tool_call' AND status='open'",
-        ) == 1
+        node_checks::decision_count_tool_call_open(&h.store).unwrap() == 1
     })
     .await;
     tokio::time::sleep(Duration::from_millis(1500)).await;
@@ -1291,7 +1184,7 @@ async fn an_unknown_attempt_keeps_its_session_and_cancel_abandons_it() {
         .await
         .unwrap();
     eventually_sync("unknown", || {
-        h.q::<String>("SELECT state FROM runtime_attempts") == "unknown"
+        node_checks::attempt_state(&h.store).unwrap() == "unknown"
     })
     .await;
     assert_eq!(
@@ -1310,9 +1203,7 @@ async fn an_unknown_attempt_keeps_its_session_and_cancel_abandons_it() {
     assert!(h.rt.cancel(S).unwrap());
     eventually_sync("abandon sent", || h.methods().contains(&"abandon")).await;
     assert!(!h.methods().contains(&"cancel"), "abandoned, not cancelled");
-    let target: String = h.q(
-        "SELECT json_extract(request,'$.body.target') FROM node_commands WHERE method='abandon'",
-    );
+    let target: String = node_checks::command_target_abandon(&h.store).unwrap();
     assert_eq!(
         target,
         start_op.as_str(),
@@ -1322,15 +1213,13 @@ async fn an_unknown_attempt_keeps_its_session_and_cancel_abandons_it() {
     // the Node proves it stopped: the turn is over, interrupted
     eventually_sync("turn end", || !h.ends().is_empty()).await;
     assert_eq!(h.ends()[0].1, "abandoned");
-    let dispatched: String =
-        h.q("SELECT state FROM session_dispatch WHERE backend='node' ORDER BY rowid LIMIT 1");
+    let dispatched: String = node_checks::first_dispatch_state_node(&h.store).unwrap();
     assert_eq!(dispatched, "interrupted");
     assert_eq!(h.count("abandon"), 1);
     // the harness went with it: what waited opens the session again before its turn
     eventually_sync("next turn", || h.count("start_turn") == 2).await;
     assert_eq!(h.count("open_session"), 2);
-    let refused: i64 =
-        h.q("SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND state='rejected'");
+    let refused: i64 = node_checks::command_count_start_turn_rejected(&h.store).unwrap();
     assert_eq!(refused, 0, "no turn on a released session");
     assert_eq!(h.attempts().len(), 2);
     assert_ne!(turn_of(&h.attempts()[0]), turn_of(&h.attempts()[1]));
@@ -1348,9 +1237,7 @@ async fn a_stopped_runtime_refuses_instead_of_queueing() {
     assert!(h.rt.flush(S, Some(("lead", "steve"))).is_err());
     assert!(h.rt.cancel(S).is_err());
     assert!(h.rt.release(S).is_err());
-    let queued: i64 = h.q(&format!(
-        "SELECT COUNT(*) FROM queued WHERE session_id='{S}'"
-    ));
+    let queued: i64 = node_checks::queued_count_by_session(&h.store, &S).unwrap();
     assert_eq!(queued, 0, "nothing waits for a sender that never runs");
     assert_eq!(h.count("start_turn"), 0);
     // a new session is not bound to it either
@@ -1364,7 +1251,7 @@ async fn a_stopped_runtime_refuses_instead_of_queueing() {
         })
         .unwrap_err();
     assert!(e.to_string().contains("not running"), "{e}");
-    let bound: i64 = h.q("SELECT COUNT(*) FROM runtime_sessions WHERE session_id='s2'");
+    let bound: i64 = node_checks::binding_count_by_session(&h.store, "s2").unwrap();
     assert_eq!(bound, 0);
 }
 
@@ -1409,15 +1296,12 @@ async fn a_refused_reopen_does_not_wedge_the_session() {
     );
     assert!(error.unwrap().contains("没能重新打开会话"));
     assert_eq!(h.phase(), "released", "back where it was, not opening");
-    let state: String = h.q(
-        "SELECT state FROM node_commands WHERE method='open_session' ORDER BY created DESC, rowid DESC LIMIT 1",
-    );
+    let state: String =
+        node_checks::latest_command_state_by_method(&h.store, "open_session").unwrap();
     assert_eq!(state, "rejected");
-    let opens: i64 = h.q("SELECT COUNT(*) FROM node_commands WHERE method='open_session'");
+    let opens: i64 = node_checks::command_count_by_method(&h.store, "open_session").unwrap();
     assert_eq!(opens, 2, "never sent again by itself");
-    let queued: i64 = h.q(&format!(
-        "SELECT COUNT(*) FROM queued WHERE session_id='{S}'"
-    ));
+    let queued: i64 = node_checks::queued_count_by_session(&h.store, &S).unwrap();
     assert_eq!(queued, 1, "the message still waits");
 
     // once the Node has really let it go, an explicit retry opens it and both go
@@ -1428,11 +1312,9 @@ async fn a_refused_reopen_does_not_wedge_the_session() {
     assert_eq!(h.rt.prompt(S, "third", "user", &[]).unwrap(), Planned::Held);
     h.rt.retry_open(S, &build::choice()).unwrap();
     eventually_sync("reopened turn", || h.count("start_turn") == 2).await;
-    let opens: i64 = h.q("SELECT COUNT(*) FROM node_commands WHERE method='open_session'");
+    let opens: i64 = node_checks::command_count_by_method(&h.store, "open_session").unwrap();
     assert_eq!(opens, 3);
-    let queued: i64 = h.q(&format!(
-        "SELECT COUNT(*) FROM queued WHERE session_id='{S}'"
-    ));
+    let queued: i64 = node_checks::queued_count_by_session(&h.store, &S).unwrap();
     assert_eq!(queued, 0);
 }
 
@@ -1450,17 +1332,8 @@ async fn an_event_delivered_again_is_acknowledged_and_not_applied_again() {
     h.node.emit(s, b).await.unwrap();
     h.node.finish(&exec, build::done()).await.unwrap();
     eventually_sync("turn end", || h.ends().len() == 1).await;
-    let events: i64 = h.q("SELECT COUNT(*) FROM events");
-    let marks: Vec<(String, i64)> = h
-        .store
-        .reader(|c| {
-            let mut st = c.prepare("SELECT stream,applied FROM node_streams ORDER BY stream")?;
-            let v = st
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok::<_, StoreError>(v)
-        })
-        .unwrap();
+    let events: i64 = node_checks::event_count(&h.store).unwrap();
+    let marks: Vec<(String, i64)> = fixtures::stream_watermarks(&h.store).unwrap();
 
     let replay = h.seen.seen.lock().unwrap().clone();
     let ack = h
@@ -1488,17 +1361,8 @@ async fn an_event_delivered_again_is_acknowledged_and_not_applied_again() {
         assert_eq!(w.seq, top);
     }
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM events"), events);
-    let again: Vec<(String, i64)> = h
-        .store
-        .reader(|c| {
-            let mut st = c.prepare("SELECT stream,applied FROM node_streams ORDER BY stream")?;
-            let v = st
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok::<_, StoreError>(v)
-        })
-        .unwrap();
+    assert_eq!(node_checks::event_count(&h.store).unwrap(), events);
+    let again: Vec<(String, i64)> = fixtures::stream_watermarks(&h.store).unwrap();
     assert_eq!(again, marks);
     assert_eq!(h.ends().len(), 1, "the turn ended once");
 }
@@ -1514,9 +1378,7 @@ async fn a_released_session_opens_again_with_its_resume_handle() {
     eventually_sync("released", || h.phase() == "released").await;
     h.rt.prompt(S, "again", "user", &[]).unwrap();
     eventually_sync("second turn", || h.count("start_turn") == 2).await;
-    let resume: Option<String> = h.q(
-        "SELECT json_extract(request,'$.body.resume') FROM node_commands WHERE method='open_session' ORDER BY created DESC, rowid DESC LIMIT 1",
-    );
+    let resume: Option<String> = node_checks::latest_command_resume_open_session(&h.store).unwrap();
     assert!(resume.is_some());
 }
 
@@ -1561,43 +1423,26 @@ impl H {
 
     /// The statistics rows of the attempts: (ended, stop_reason), in the attempts' order.
     fn stat_rows(&self) -> Vec<(Option<i64>, Option<String>)> {
-        self.store
-            .reader(|c| {
-                let mut st = c.prepare(
-                    "SELECT t.ended, t.stop_reason FROM agent_turns t LEFT JOIN runtime_attempts a ON a.attempt_id = t.node_attempt_id ORDER BY a.created, a.rowid",
-                )?;
-                let v = st
-                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok::<_, StoreError>(v)
-            })
-            .unwrap()
+        fixtures::attempt_statistics(&self.store).unwrap()
     }
 
     /// The prompt text of the n-th attempt.
     fn prompt_of(&self, n: usize) -> String {
-        self.q(&format!(
-            "SELECT json_extract(spec,'$.run.prompt[0].text') FROM runtime_attempts ORDER BY created, rowid LIMIT 1 OFFSET {n}"
-        ))
+        node_checks::nth_attempt_prompt_0_text(&self.store, n as i64).unwrap()
     }
 
     fn systems(&self, like: &str) -> i64 {
-        self.q(&format!(
-            "SELECT COUNT(*) FROM events WHERE session_id='{S}' AND kind='system' AND data LIKE '%{like}%'"
-        ))
+        node_checks::event_count_by_session_system_by_text(&self.store, &S, &format!("%{}%", like))
+            .unwrap()
     }
 
     /// The state of the latest command of `method` (open and release ids are random).
     fn last_state(&self, method: &str) -> String {
-        self.q(&format!(
-            "SELECT state FROM node_commands WHERE method='{method}' ORDER BY created DESC, rowid DESC LIMIT 1"
-        ))
+        node_checks::latest_command_state_by_method(&self.store, &method).unwrap()
     }
 
     fn state_of(&self, op: &str) -> String {
-        self.q(&format!(
-            "SELECT state FROM node_commands WHERE operation_id='{op}'"
-        ))
+        node_checks::command_state_by_operation(&self.store, &op).unwrap()
     }
 }
 
@@ -1611,7 +1456,7 @@ async fn a_restart_mid_turn_is_never_rerun_and_the_hub_gives_it_up() {
     h.bind();
     h.rt.prompt(S, "first", "user", &[]).unwrap();
     eventually_sync("running", || {
-        h.q::<i64>("SELECT COUNT(*) FROM runtime_attempts WHERE state='running'") == 1
+        node_checks::attempt_count_by_state(&h.store, "running").unwrap() == 1
     })
     .await;
     let first_op = h
@@ -1629,9 +1474,7 @@ async fn a_restart_mid_turn_is_never_rerun_and_the_hub_gives_it_up() {
     assert_eq!(h.systems("Node 重启了"), 1, "told why");
     assert_eq!(h.systems("等待对账"), 0, "nothing waits for a person");
     assert_eq!(h.count("start_turn"), 1, "never sent again");
-    let target: String = h.q(
-        "SELECT json_extract(request,'$.body.target') FROM node_commands WHERE method='abandon'",
-    );
+    let target: String = node_checks::command_target_abandon(&h.store).unwrap();
     assert_eq!(target, first_op.as_str(), "the frozen target");
     // L4: the restarts did not cut the attempt's statistics row; the abandon ended it
     let rows = h.stat_rows();
@@ -1651,9 +1494,7 @@ async fn a_restart_mid_turn_is_never_rerun_and_the_hub_gives_it_up() {
     h.rt.prompt(S, "second", "user", &[]).unwrap();
     eventually_sync("reopened and next turn", || h.count("start_turn") == 2).await;
     assert_eq!(h.count("open_session"), 2);
-    let first_turn: i64 = h.q(
-        "SELECT COUNT(*) FROM runtime_attempts WHERE turn_id=(SELECT turn_id FROM runtime_attempts ORDER BY created, rowid LIMIT 1)",
-    );
+    let first_turn: i64 = node_checks::first_attempt_count_for_selected_row(&h.store).unwrap();
     assert_eq!(first_turn, 1, "the first turn was never retried");
     assert!(h.prompt_of(1).contains("second"));
     assert!(!h.prompt_of(1).contains("first"));
@@ -1670,7 +1511,7 @@ async fn a_stop_pressed_on_a_restart_cut_turn_stays_a_stop() {
     h.bind();
     h.rt.prompt(S, "first", "user", &[]).unwrap();
     eventually_sync("running", || {
-        h.q::<i64>("SELECT COUNT(*) FROM runtime_attempts WHERE state='running'") == 1
+        node_checks::attempt_count_by_state(&h.store, "running").unwrap() == 1
     })
     .await;
     h.node.refuse_next(
@@ -1683,11 +1524,11 @@ async fn a_stop_pressed_on_a_restart_cut_turn_stays_a_stop() {
     h.node.restart();
     h.restart_hub().await;
     eventually_sync("the Hub's abandon refused", || {
-        h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE method='abandon' AND state IN ('finished','rejected')") == 1
+        node_checks::settled_abandon_command_count(&h.store).unwrap() == 1
     })
     .await;
     assert_eq!(
-        h.q::<String>("SELECT state FROM runtime_attempts"),
+        node_checks::attempt_state(&h.store).unwrap(),
         "unknown",
         "still unknown: yours"
     );
@@ -1709,8 +1550,7 @@ async fn a_restart_lets_an_idle_session_go_and_the_next_message_opens_it_again()
     h.rt.prompt(S, "again", "user", &[]).unwrap();
     eventually_sync("second turn", || h.count("start_turn") == 2).await;
     assert_eq!(h.count("open_session"), 2);
-    let refused: i64 =
-        h.q("SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND state='rejected'");
+    let refused: i64 = node_checks::command_count_start_turn_rejected(&h.store).unwrap();
     assert_eq!(refused, 0);
 }
 
@@ -1721,7 +1561,7 @@ async fn reconciling_expires_cards_nobody_waits_for() {
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
     eventually_sync("running", || {
-        h.q::<i64>("SELECT COUNT(*) FROM runtime_attempts WHERE state='running'") == 1
+        node_checks::attempt_count_by_state(&h.store, "running").unwrap() == 1
     })
     .await;
     let exec = h.attempts()[0].clone();
@@ -1730,12 +1570,12 @@ async fn reconciling_expires_cards_nobody_waits_for() {
         .await
         .unwrap();
     eventually_sync("card", || {
-        h.q::<i64>("SELECT COUNT(*) FROM decisions WHERE status='open'") == 1
+        node_checks::decision_count_by_status(&h.store, "open").unwrap() == 1
     })
     .await;
     h.node.restart();
     h.restart_hub().await;
-    assert_eq!(h.q::<String>("SELECT status FROM decisions"), "expired");
+    assert_eq!(node_checks::decision_status(&h.store).unwrap(), "expired");
 }
 
 /// Issue: a turn the Node refuses because it had let the session go was never accepted: it is not
@@ -1751,22 +1591,18 @@ async fn a_turn_refused_on_a_released_session_goes_again_after_a_reopen() {
     h.rt.prompt(S, "again", "user", &[]).unwrap();
     eventually_sync("second turn accepted", || h.count("start_turn") == 2).await;
     assert_eq!(h.count("open_session"), 2, "opened again");
-    let refused: i64 =
-        h.q("SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND state='rejected'");
+    let refused: i64 = node_checks::command_count_start_turn_rejected(&h.store).unwrap();
     assert_eq!(refused, 1);
-    let turns: i64 = h.q("SELECT COUNT(DISTINCT turn_id) FROM runtime_attempts");
+    let turns: i64 = node_checks::attempt_distinct_turn_id_count(&h.store).unwrap();
     assert_eq!(turns, 2, "the same turn, a new attempt");
     assert!(h.prompt_of(2).contains("again"));
-    let users: i64 = h.q(&format!(
-        "SELECT COUNT(*) FROM events WHERE session_id='{S}' AND kind='user' AND data LIKE '%again%'"
-    ));
+    let users: i64 = node_checks::event_count_by_session_user_matching_text(&h.store, &S).unwrap();
     assert_eq!(users, 1, "the message shows once");
     assert_eq!(h.ends().len(), 1, "no turn end for the refusal");
     let exec = h.attempts()[2].clone();
     h.node.finish(&exec, build::done()).await.unwrap();
     eventually_sync("end", || h.ends().len() == 2).await;
-    let dispatched: String =
-        h.q("SELECT state FROM session_dispatch WHERE backend='node' ORDER BY rowid DESC LIMIT 1");
+    let dispatched: String = node_checks::latest_dispatch_state_node(&h.store).unwrap();
     assert_eq!(dispatched, "completed");
 }
 
@@ -1835,7 +1671,7 @@ async fn a_second_stop_after_a_refused_abandon_asks_again() {
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
     eventually_sync("running", || {
-        h.q::<i64>("SELECT COUNT(*) FROM runtime_attempts WHERE state='running'") == 1
+        node_checks::attempt_count_by_state(&h.store, "running").unwrap() == 1
     })
     .await;
     let (_, op) = h
@@ -1858,10 +1694,10 @@ async fn a_second_stop_after_a_refused_abandon_asks_again() {
         .await
         .unwrap();
     eventually_sync("unknown", || {
-        h.q::<String>("SELECT state FROM runtime_attempts") == "unknown"
+        node_checks::attempt_state(&h.store).unwrap() == "unknown"
     })
     .await;
-    let a: String = h.q("SELECT attempt_id FROM runtime_attempts");
+    let a: String = node_checks::attempt_attempt_id(&h.store).unwrap();
     h.node
         .refuse_next("abandon", ApiError::new(ErrorCode::Conflict, "not now"));
     assert!(h.rt.cancel(S).unwrap());
@@ -1874,7 +1710,7 @@ async fn a_second_stop_after_a_refused_abandon_asks_again() {
 
     assert!(h.rt.cancel(S).unwrap());
     assert!(h.rt.cancel(S).unwrap(), "the one on its way is not doubled");
-    let n: i64 = h.q("SELECT COUNT(*) FROM node_commands WHERE method='abandon'");
+    let n: i64 = node_checks::command_count_by_method(&h.store, "abandon").unwrap();
     assert_eq!(n, 2);
     // The end event can arrive before the command receipt is persisted.
     let second_abandon = format!("op_abandon_{a}_1");
@@ -1915,12 +1751,7 @@ async fn a_late_release_view_does_not_let_a_reopened_session_go() {
     eventually_sync("released", || h.phase() == "released").await;
     // a message reopens it, then is withdrawn before its turn: the session ends up idle and ready
     h.rt.prompt(S, "x", "user", &[]).unwrap();
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute("DELETE FROM queued", [])?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::node_fixtures::clear_queued(&h.store).unwrap();
     eventually_sync("ready", || h.phase() == "ready").await;
     let late = h.seen.stash.lock().unwrap().take().unwrap();
     assert!(!late.is_empty());
@@ -1938,12 +1769,7 @@ async fn an_ended_session_is_let_go_when_its_turn_is_over() {
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
     eventually_sync("active", || h.phase() == "active").await;
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute("UPDATE sessions SET status='ended'", [])?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::node_fixtures::set_sessions_status_ended(&h.store).unwrap();
     assert!(
         matches!(h.rt.release(S).unwrap(), Release::Pending(_)),
         "ended: queued for when the turn is over"
@@ -1971,16 +1797,12 @@ impl H {
     /// The business side ends `S` for a successor `S2` (a rollover): `S`'s release, then `S2`
     /// bound after it, with a message waiting.
     fn hand_off(&self) -> String {
-        self.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute("UPDATE sessions SET status='ended' WHERE id=?", [S])?;
-                tx.execute(
-                    "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','starting',1,1)",
-                    [S2],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::set_sessions_status_ended_and_sessions(
+            &self.store,
+            &S,
+            &S2,
+        )
+        .unwrap();
         let Release::Pending(op) = self.rt.release(S).unwrap() else {
             panic!("an ended session's release is on its way");
         };
@@ -1990,9 +1812,7 @@ impl H {
     }
 
     fn phase_of(&self, s: &str) -> String {
-        self.q(&format!(
-            "SELECT phase FROM runtime_sessions WHERE session_id='{s}'"
-        ))
+        node_checks::binding_phase_by_session(&self.store, &s).unwrap()
     }
 }
 
@@ -2065,17 +1885,13 @@ async fn a_refused_release_on_a_handoff_is_asked_again_and_the_successor_opens_a
         1,
         "the refused one never reached it"
     );
-    let releases: i64 = h.q(&format!(
-        "SELECT COUNT(*) FROM node_commands WHERE method='release_session' AND json_extract(request,'$.body')='{S}'"
-    ));
+    let releases: i64 = node_checks::release_command_count_for_session(&h.store, &S).unwrap();
     assert_eq!(releases, 2, "asked again");
     assert_eq!(h.last_state("release_session"), "finished");
     assert_eq!(h.phase_of(S), "released");
     assert_eq!(h.node.most_open_in_a_workspace(), 1, "never two at once");
     assert_eq!(h.prompt_of(1), "continue");
-    let told: i64 = h.q(&format!(
-        "SELECT COUNT(*) FROM events WHERE session_id='{S2}' AND kind='system' AND data LIKE '%还没能在 Node 上释放%'"
-    ));
+    let told: i64 = node_checks::blocked_node_release_notice_count(&h.store, &S2).unwrap();
     assert_eq!(told, 1);
 }
 
@@ -2114,15 +1930,7 @@ async fn without_the_dependency_a_successor_opens_beside_the_old_harness() {
     h.rt.bind(&on_the_item(S)).unwrap();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
     eventually_sync("active", || h.phase() == "active").await;
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute(
-                "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','starting',1,1)",
-                [S2],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::node_fixtures::seed_starting_session(&h.store, &S2).unwrap();
     h.rt.bind(&on_the_item(S2)).unwrap();
     eventually_sync("opened", || h.phase_of(S2) == "ready").await;
     assert_eq!(h.node.most_open_in_a_workspace(), 2);
@@ -2153,22 +1961,19 @@ async fn a_command_that_waited_past_its_window_goes_issued_again() {
     eventually_sync("active", || h.phase() == "active").await;
     h.hand_off();
     let past = steve_store::now() - 1;
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute(
-                "UPDATE node_commands SET request=json_set(request,'$.issued_at',?1-1,'$.accept_before',?1) WHERE operation_id=?2",
-                rusqlite::params![past, format!("op_prep_{S2}")],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::node_planning::expire_command_window(
+        &h.store,
+        &format!("op_prep_{S2}"),
+        past,
+    )
+    .unwrap();
     h.node.set_now(steve_store::now());
     let exec = h.attempts()[0].clone();
     h.node.finish(&exec, build::done()).await.unwrap();
     eventually_sync("the successor's turn", || h.count("start_turn") == 2).await;
-    let issued: i64 = h.q(&format!(
-        "SELECT json_extract(request,'$.accept_before') FROM node_commands WHERE operation_id='op_prep_{S2}'"
-    ));
+    let issued: i64 =
+        node_checks::command_accept_before_by_operation(&h.store, &format!("op_prep_{}", S2))
+            .unwrap();
     assert!(issued > past);
 }
 
@@ -2192,14 +1997,7 @@ async fn a_stale_release_receipt_does_not_move_a_reopened_session() {
     assert_ne!(first, second);
     eventually_sync("unknown", || h.state_of(&second) == "unknown").await;
     // as if the first one's final receipt had never come in, and comes now
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute(
-                "UPDATE node_commands SET state='accepted' WHERE operation_id=?",
-                [&first],
-            )?;
-            Ok(())
-        })
+    steve_store::testkit::hub::node_fixtures::set_node_commands_state_accepted(&h.store, &first)
         .unwrap();
     let op: OperationId = first.clone().try_into().unwrap();
     h.node
@@ -2234,11 +2032,13 @@ async fn a_parked_session_queues_and_goes_once_the_node_is_back() {
     assert!(!steve_hub::wire::node_runtime::bound(&store, "other"));
     steve_hub::wire::node_runtime::park(&store, S, "while off", "user", &[]).unwrap();
     steve_hub::wire::node_runtime::park(&store, S, "and more", "user", &[]).unwrap();
-    let parked: i64 = h.q(&format!(
-        "SELECT COUNT(*) FROM events WHERE session_id='{S}' AND kind='system' AND json_extract(data,'$.parked')=1",
-    ));
-    assert_eq!(parked, 1, "told once");
-    let queued: i64 = h.q("SELECT COUNT(*) FROM queued");
+    assert_eq!(
+        steve_store::testkit::hub::node_process::event_count_by_session_system(store.path(), S)
+            .unwrap(),
+        1,
+        "told once"
+    );
+    let queued: i64 = node_checks::queued_count(&h.store).unwrap();
     assert_eq!(queued, 2);
     assert_eq!(h.count("start_turn"), 1);
     h.node.restart();
@@ -2274,18 +2074,18 @@ async fn a_replayed_permission_after_a_restart_is_neither_a_new_card_nor_answere
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let card: String = h.q("SELECT id FROM decisions WHERE subject_type='tool_call'");
+    let card: String = node_checks::decision_id_by_subject_type(&h.store, "tool_call").unwrap();
     assert_eq!(
         ends.3.lock().unwrap().as_slice(),
         [card],
         "offered once for the card still waited for; the replay adds nothing"
     );
     assert_eq!(
-        h.q::<i64>("SELECT COUNT(*) FROM decisions WHERE subject_type='tool_call'"),
+        node_checks::decision_count_by_subject_type(&h.store, "tool_call").unwrap(),
         1
     );
     assert_eq!(
-        h.q::<String>("SELECT status FROM decisions WHERE subject_type='tool_call'"),
+        node_checks::decision_status_by_subject_type(&h.store, "tool_call").unwrap(),
         "open"
     );
     assert!(!h.methods().contains(&"resolve_permission"));
@@ -2295,57 +2095,41 @@ async fn a_replayed_permission_after_a_restart_is_neither_a_new_card_nor_answere
 
 impl H {
     fn perm_state(&self, decision: &str) -> String {
-        self.q(&format!(
-            "SELECT state FROM runtime_permissions WHERE decision_id='{decision}'"
-        ))
+        node_checks::permission_state_by_decision(&self.store, &decision).unwrap()
     }
 
     fn status(&self, decision: &str) -> String {
-        self.q(&format!(
-            "SELECT status FROM decisions WHERE id='{decision}'"
-        ))
+        node_checks::decision_status_by_id(&self.store, &decision).unwrap()
     }
 
     fn commands(&self, method: &str) -> i64 {
-        self.q(&format!(
-            "SELECT COUNT(*) FROM node_commands WHERE method='{method}'"
-        ))
+        node_checks::command_count_by_method(&self.store, &method).unwrap()
     }
 
     fn cmd_state(&self, op: &str) -> String {
-        self.q(&format!(
-            "SELECT state FROM node_commands WHERE operation_id='{op}'"
-        ))
+        node_checks::command_state_by_operation(&self.store, &op).unwrap()
     }
 
     fn cards(&self) -> Vec<String> {
-        self.store
-            .reader(|c| {
-                let mut st = c.prepare(
-                    "SELECT id FROM decisions WHERE subject_type='tool_call' ORDER BY created, rowid",
-                )?;
-                let v = st
-                    .query_map([], |r| r.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok::<_, StoreError>(v)
-            })
-            .unwrap()
+        fixtures::permission_card_ids(&self.store).unwrap()
     }
 
-    /// A turn running on the Node (its start accepted).
+    /// A turn whose start is committed on the Hub.
     async fn running(&self, text: &str) -> ExecutionRef {
         let n = self.attempts().len();
         self.rt.prompt(S, text, "user", &[]).unwrap();
         eventually_sync("attempt", || self.attempts().len() == n + 1).await;
-        eventually_sync("started", || self.count("start_turn") == n + 1).await;
-        // the Hub has the Node's answer too (a stop before it waits for it)
-        eventually_sync("accepted", || {
-            self.q::<i64>(
-                "SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND state='pending'",
-            ) == 0
+        let exec = self.attempts().pop().unwrap();
+        self.wait_for_start(&exec).await;
+        exec
+    }
+
+    async fn wait_for_start(&self, exec: &ExecutionRef) {
+        // Observe the durable start and receipt before emitting an end or a stop.
+        eventually_sync("committed attempt start and receipt", || {
+            node_checks::attempt_start_committed(&self.store, exec.attempt().as_str()).unwrap()
         })
         .await;
-        self.attempts().last().unwrap().clone()
     }
 
     /// The Hub stops and another one starts on the same store and Node after `pause`.
@@ -2378,9 +2162,7 @@ async fn a_card_expires_at_its_expires_at() {
     let op = format!("op_answer_{d}");
     eventually_sync("reject sent", || h.cmd_state(&op) == "finished").await;
     assert_eq!(h.commands("resolve_permission"), 1);
-    let decided: String = h.q(&format!(
-        "SELECT json_extract(request,'$.body.decision') FROM node_commands WHERE operation_id='{op}'"
-    ));
+    let decided: String = node_checks::command_decision_by_operation(&h.store, &op).unwrap();
     assert_eq!(decided, "reject");
     assert_eq!(h.count("resolve_permission"), 1, "the Node took the reject");
     eventually_sync("Node's resolution applied", || h.node.unacked() == 0).await;
@@ -2439,7 +2221,7 @@ async fn a_refused_answer_is_not_an_answer() {
     assert_eq!(h.perm_state(&d), "answering");
     // as the orchestrator does after a true
     h.store
-        .transaction::<_, StoreError>(|tx| {
+        .write::<_, StoreError>(|tx| {
             steve_store::decision_resolve_in(
                 tx,
                 &d,
@@ -2459,9 +2241,7 @@ async fn a_refused_answer_is_not_an_answer() {
         "expired",
         "never claims an answer that was not applied"
     );
-    let refused: String = h.q(&format!(
-        "SELECT json_extract(result,'$.refused') FROM decisions WHERE id='{d}'"
-    ));
+    let refused: String = node_checks::decision_refused_by_id(&h.store, &d).unwrap();
     assert_eq!(refused, "expired");
 }
 
@@ -2577,19 +2357,9 @@ async fn an_old_cancel_never_hits_a_newer_attempt() {
     let a = h.running("one").await;
     assert!(h.rt.cancel(S).unwrap());
     let a_id = a.attempt().to_string();
-    let a_op: String = h.q(&format!(
-        "SELECT operation_id FROM runtime_attempts WHERE attempt_id='{a_id}'"
-    ));
-    let (target_attempt, target): (String, String) = h
-        .store
-        .reader(|c| {
-            Ok::<_, StoreError>(c.query_row(
-                "SELECT target_attempt, json_extract(request,'$.body.target') FROM node_commands WHERE method='cancel'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?)
-        })
-        .unwrap();
+    let a_op: String = node_checks::attempt_operation_id_by_attempt(&h.store, &a_id).unwrap();
+    let (target_attempt, target): (String, String) =
+        steve_store::testkit::hub::node_fixtures::cancel_command_targets(&h.store).unwrap();
     assert_eq!((target_attempt, target), (a_id, a_op));
     // A ends normally before the cancel gets through
     h.node.finish(&a, build::done()).await.unwrap();
@@ -2598,18 +2368,14 @@ async fn an_old_cancel_never_hits_a_newer_attempt() {
     let b = h.running("two").await;
     h.node.refuse("cancel", None);
     eventually_sync("cancel delivered", || h.count("cancel") == 1).await;
-    let b_op: String = h.q(&format!(
-        "SELECT operation_id FROM runtime_attempts WHERE attempt_id='{}'",
-        b.attempt()
-    ));
+    let b_op: String =
+        node_checks::attempt_operation_id_by_attempt(&h.store, b.attempt().as_str()).unwrap();
     assert!(
         !h.node
             .cancel_requested(&OperationId::try_from(b_op).unwrap())
     );
-    let flagged: i64 = h.q(&format!(
-        "SELECT cancel_requested FROM runtime_attempts WHERE attempt_id='{}'",
-        b.attempt()
-    ));
+    let flagged: i64 =
+        node_checks::attempt_cancel_requested_by_attempt(&h.store, b.attempt().as_str()).unwrap();
     assert_eq!(flagged, 0);
     h.node.finish(&b, build::done()).await.unwrap();
     eventually_sync("turn B end", || h.ends().len() == 2).await;
@@ -2622,9 +2388,7 @@ async fn an_old_cancel_never_hits_a_newer_attempt() {
 
 impl H {
     fn desired(&self) -> Option<String> {
-        self.q(&format!(
-            "SELECT desired_config FROM runtime_sessions WHERE session_id='{S}'"
-        ))
+        node_checks::binding_desired_config_by_session(&self.store, &S).unwrap()
     }
 
     fn mode(&self, p: PermissionMode) -> Configured {
@@ -2641,27 +2405,15 @@ impl H {
 
     /// The permission mode the last attempt was started with.
     fn last_mode(&self) -> String {
-        self.q("SELECT json_extract(spec,'$.run.policy.permissions') FROM runtime_attempts ORDER BY created DESC, rowid DESC LIMIT 1")
+        node_checks::latest_attempt_policy_permissions(&self.store).unwrap()
     }
 
     fn cfg_states(&self) -> Vec<String> {
-        self.store
-            .reader(|c| {
-                let mut st = c.prepare(
-                    "SELECT state FROM node_commands WHERE method='configure_session' ORDER BY created, rowid",
-                )?;
-                let v = st
-                    .query_map([], |r| r.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok::<_, StoreError>(v)
-            })
-            .unwrap()
+        fixtures::configuration_states(&self.store).unwrap()
     }
 
     fn said(&self, text: &str) -> bool {
-        self.q::<i64>(&format!(
-            "SELECT COUNT(*) FROM events WHERE kind='system' AND data LIKE '%{text}%'"
-        )) > 0
+        node_checks::event_count_system_by_text(&self.store, &format!("%{}%", text)).unwrap() > 0
     }
 
     async fn ready(&self) {
@@ -2675,19 +2427,19 @@ async fn an_idle_session_is_configured_through_the_node() {
     h.bind();
     h.ready().await;
     eventually_sync("revision kept", || {
-        h.q::<Option<String>>("SELECT node_revision FROM runtime_sessions")
+        node_checks::optional_binding_node_revision(&h.store)
+            .unwrap()
             .is_some()
     })
     .await;
-    let known: String = h.q("SELECT node_revision FROM runtime_sessions");
+    let known: String = node_checks::binding_node_revision(&h.store).unwrap();
     assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Sent);
     assert_eq!(h.phase(), "configuring");
     assert!(h.rt.is_busy(S));
     eventually_sync("applied", || h.cfg_states() == ["finished"]).await;
     h.ready().await;
     assert_eq!(h.desired(), None);
-    let expected: String =
-        h.q("SELECT json_extract(request,'$.body.expected') FROM node_commands WHERE method='configure_session'");
+    let expected: String = node_checks::command_expected_configure_session(&h.store).unwrap();
     assert_eq!(expected, known);
     assert!(h.said("已切换"));
     // the next turn carries the new mode and the Node takes it
@@ -2742,17 +2494,16 @@ async fn model_and_effort_changes_go_through_configure() {
     eventually_sync("applied", || h.cfg_states() == ["finished"]).await;
     h.ready().await;
     eventually_sync("model recorded", || {
-        h.q::<Option<String>>(&format!("SELECT model FROM sessions WHERE id='{S}'"))
+        node_checks::session_model_by_id(&h.store, &S)
+            .unwrap()
             .as_deref()
             == Some("m2")
     })
     .await;
-    let effort: String = h.q(&format!(
-        "SELECT reasoning_effort FROM sessions WHERE id='{S}'"
-    ));
+    let effort: String = node_checks::session_reasoning_effort_by_id(&h.store, &S).unwrap();
     assert_eq!(effort, "high");
     h.one_turn("hello").await;
-    let model: String = h.q("SELECT json_extract(spec,'$.run.choice.model') FROM runtime_attempts");
+    let model: String = node_checks::attempt_choice_model(&h.store).unwrap();
     assert_eq!(model, "m2");
     assert_eq!(h.last_mode(), "ask", "the mode stays");
 }
@@ -2766,7 +2517,7 @@ async fn a_lost_answer_sends_the_very_same_configure_again() {
     assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Sent);
     eventually_sync("applied", || h.cfg_states() == ["finished"]).await;
     let leases: i64 =
-        h.q("SELECT lease_generation FROM node_commands WHERE method='configure_session'");
+        node_checks::command_lease_generation_by_method(&h.store, "configure_session").unwrap();
     assert!(leases >= 2, "sent again: {leases}");
     assert_eq!(h.count("configure_session"), 1, "applied once");
     h.ready().await;
@@ -2799,11 +2550,7 @@ async fn a_stale_revision_is_refreshed_with_a_new_operation() {
     h.bind();
     h.ready().await;
     // the Hub's last view of the session is behind the Node's
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute("UPDATE runtime_sessions SET node_revision='r0'", [])?;
-            Ok(())
-        })
+    steve_store::testkit::hub::node_fixtures::set_runtime_sessions_node_revision_r0(&h.store)
         .unwrap();
     assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Sent);
     eventually_sync("refreshed", || h.cfg_states() == ["rejected", "finished"]).await;
@@ -2865,7 +2612,8 @@ async fn a_refused_widening_falls_back_and_a_refused_narrowing_releases() {
     assert!(h.desired().is_some(), "the narrowing holds");
     assert_eq!(h.count("release_session"), 1);
     let exec = h.running("two").await;
-    let opened: String = h.q("SELECT json_extract(request,'$.body.policy.permissions') FROM node_commands WHERE method='open_session' ORDER BY created DESC, rowid DESC LIMIT 1");
+    let opened: String =
+        node_checks::latest_command_policy_permissions_open_session(&h.store).unwrap();
     assert_eq!(opened, "ask");
     assert_eq!(h.last_mode(), "ask", "never a turn wider than asked");
     assert_eq!(h.desired(), None);
@@ -2883,7 +2631,8 @@ async fn a_released_session_takes_the_change_when_it_opens_again() {
     assert_eq!(h.mode(PermissionMode::FullAccess), Configured::OnReopen);
     h.one_turn("hello").await;
     assert_eq!(h.count("configure_session"), 0);
-    let opened: String = h.q("SELECT json_extract(request,'$.body.policy.permissions') FROM node_commands WHERE method='open_session' ORDER BY created DESC, rowid DESC LIMIT 1");
+    let opened: String =
+        node_checks::latest_command_policy_permissions_open_session(&h.store).unwrap();
     assert_eq!(opened, "full_access");
     assert_eq!(h.last_mode(), "full_access");
     assert_eq!(h.desired(), None);
@@ -2976,7 +2725,7 @@ async fn a_refused_change_reads_as_refused_with_the_nodes_reason() {
     assert_eq!(s.applied.as_deref(), Some("ask"));
     assert_eq!(s.desired, None, "a widening falls back");
     assert_eq!(
-        h.q::<String>("SELECT mode_refusal_code FROM runtime_sessions"),
+        node_checks::mode_refusal_code(&h.store).unwrap().unwrap(),
         "denied"
     );
     assert!(
@@ -2991,10 +2740,7 @@ async fn a_refused_change_reads_as_refused_with_the_nodes_reason() {
     let s = h.rt.mode_state(S).unwrap().unwrap();
     assert_eq!(s.applied.as_deref(), Some("full_access"));
     assert_eq!(s.refused, None);
-    assert_eq!(
-        h.q::<Option<String>>("SELECT mode_refusal_code FROM runtime_sessions"),
-        None
-    );
+    assert_eq!(node_checks::mode_refusal_code(&h.store).unwrap(), None);
 }
 
 /// 重连: a card the Node still waits for when the Hub starts again is handed to YOLO again once
@@ -3037,29 +2783,15 @@ async fn a_desired_change_survives_a_hub_restart() {
 impl H {
     /// The text of every `start_turn` the Hub wrote, in order (sent or not).
     fn turn_texts(&self) -> Vec<String> {
-        self.store
-            .reader(|c| {
-                let mut st = c.prepare(
-                    "SELECT json_extract(request,'$.body.run.prompt[0].text') FROM node_commands WHERE method='start_turn' ORDER BY created, rowid",
-                )?;
-                let v = st
-                    .query_map([], |r| r.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok::<_, StoreError>(v)
-            })
-            .unwrap()
+        fixtures::planned_prompt_texts(&self.store).unwrap()
     }
 
     fn queued(&self) -> i64 {
-        self.q(&format!(
-            "SELECT COUNT(*) FROM queued WHERE session_id='{S}'"
-        ))
+        node_checks::queued_count_by_session(&self.store, &S).unwrap()
     }
 
     fn queued_id(&self, text: &str) -> String {
-        self.q(&format!(
-            "SELECT id FROM queued WHERE session_id='{S}' AND text='{text}'"
-        ))
+        node_checks::queued_id_by_session_by_text(&self.store, &S, &text).unwrap()
     }
 
     async fn transient_failure(&self, exec: &ExecutionRef) {
@@ -3088,7 +2820,7 @@ async fn hold_keeps_the_queue_through_a_turn_end() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(h.count("start_turn"), 1, "nothing starts under the hold");
     assert_eq!(h.queued(), 1, "the queue is kept");
-    let dispatched: i64 = h.q("SELECT COUNT(*) FROM session_dispatch WHERE text='two'");
+    let dispatched: i64 = node_checks::dispatch_count_by_text(&h.store, "two").unwrap();
     assert_eq!(dispatched, 0);
     assert_eq!(h.phase(), "ready");
 
@@ -3179,8 +2911,7 @@ async fn a_claimed_message_cannot_be_edited_removed_or_moved() {
     assert!(queued.edit(S, &id, "changed").unwrap().is_none());
     assert!(queued.remove(S, &id).unwrap().is_none());
     assert!(queued.to_front(S, &id).unwrap().is_none());
-    let dispatched: String =
-        h.q("SELECT text FROM session_dispatch WHERE backend='node' ORDER BY rowid DESC LIMIT 1");
+    let dispatched: String = node_checks::latest_dispatch_text_node(&h.store).unwrap();
     assert_eq!(dispatched, "two");
     assert_eq!(h.turn_texts()[1], "two");
 
@@ -3238,8 +2969,7 @@ async fn an_uncertain_turn_reports_uncertain_and_nothing_abandons_it_implicitly(
     h.rt.prompt(S, "next", "user", &[]).unwrap();
     assert_ne!(h.rt.flush(S, None).unwrap(), Planned::Created);
     tokio::time::sleep(Duration::from_millis(50)).await;
-    let abandons: i64 =
-        h.q("SELECT COUNT(*) FROM node_commands WHERE method IN ('abandon','cancel')");
+    let abandons: i64 = node_checks::command_count_stops(&h.store).unwrap();
     assert_eq!(abandons, 0, "only an explicit cancel gives it up");
     assert_eq!(h.count("start_turn"), 1, "never sent again");
     assert_eq!(h.queued(), 1);
@@ -3254,19 +2984,15 @@ async fn cancel_in_retry_wait_never_sends_the_pending_attempt() {
     let first = h.attempts()[0].clone();
     h.transient_failure(&first).await;
     let retry: String =
-        h.q("SELECT operation_id FROM node_commands WHERE method='start_turn' ORDER BY created DESC, rowid DESC LIMIT 1");
+        node_checks::latest_command_operation_id_by_method(&h.store, "start_turn").unwrap();
     assert_eq!(h.rt.prompt(S, "two", "user", &[]).unwrap(), Planned::Busy);
 
     assert!(h.rt.cancel(S).unwrap(), "the waiting retry is cancelled");
-    let state: String = h.q(&format!(
-        "SELECT state FROM node_commands WHERE operation_id='{retry}'"
-    ));
+    let state: String = node_checks::command_state_by_operation(&h.store, &retry).unwrap();
     assert_eq!(state, "rejected", "settled here, never sent");
-    let cancels: i64 =
-        h.q("SELECT COUNT(*) FROM node_commands WHERE method IN ('cancel','abandon')");
+    let cancels: i64 = node_checks::command_count_stops(&h.store).unwrap();
     assert_eq!(cancels, 0);
-    let dispatched: String =
-        h.q("SELECT state FROM session_dispatch WHERE backend='node' AND text='one'");
+    let dispatched: String = node_checks::dispatch_state_node_one(&h.store).unwrap();
     assert_eq!(dispatched, "cancelled");
     // what waited goes next, a new turn
     eventually_sync("next turn", || h.count("start_turn") == 2).await;
@@ -3277,9 +3003,7 @@ async fn cancel_in_retry_wait_never_sends_the_pending_attempt() {
     );
     assert!(h.ends().is_empty(), "the item goes on with the next turn");
     // the cancelled retry never started: it has no statistics row
-    let retry_rows: i64 = h.q(&format!(
-        "SELECT COUNT(*) FROM agent_turns t JOIN runtime_attempts a ON a.attempt_id = t.node_attempt_id WHERE a.operation_id='{retry}'"
-    ));
+    let retry_rows: i64 = node_checks::turn_count_by_operation(&h.store, &retry).unwrap();
     assert_eq!(retry_rows, 0);
     let exec = h.attempts().last().unwrap().clone();
     h.node.finish(&exec, build::done()).await.unwrap();
@@ -3359,19 +3083,17 @@ async fn a_start_turn_refused_before_acceptance_is_settled_by_stop() {
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
     eventually_sync("leased", || {
-        h.q::<i64>(
-            "SELECT COALESCE(MAX(lease_generation),0) FROM node_commands WHERE method='start_turn'",
-        ) >= 1
+        node_checks::command_coalesce_max_lease_generation_0_start_turn(&h.store).unwrap() >= 1
     })
     .await;
     assert!(h.rt.cancel(S).unwrap());
     eventually_sync("cancelled", || !h.ends().is_empty()).await;
     assert_eq!(h.ends()[0].1, "cancelled");
     assert_eq!(
-        h.q::<String>("SELECT state FROM node_commands WHERE method='start_turn'"),
+        node_checks::command_state_by_method(&h.store, "start_turn").unwrap(),
         "rejected"
     );
-    let cancels: i64 = h.q("SELECT COUNT(*) FROM node_commands WHERE method='cancel'");
+    let cancels: i64 = node_checks::command_count_by_method(&h.store, "cancel").unwrap();
     assert_eq!(cancels, 0, "nothing to cancel on the Node");
     h.node.refuse("start_turn", None);
     tokio::time::sleep(Duration::from_millis(1_300)).await;
@@ -3393,7 +3115,7 @@ async fn a_cancel_after_an_uncertain_send_goes_once_the_node_holds_the_turn() {
     h.node.refuse("start_turn", Some(ErrorCode::OutcomeUnknown));
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
     eventually_sync("uncertain", || {
-        h.q::<i64>("SELECT COALESCE(MAX(maybe_sent),0) FROM node_commands WHERE method='start_turn' AND state='pending' AND lease_owner IS NULL") == 1
+        node_checks::possibly_sent_turn_count(&h.store).unwrap() == 1
     })
     .await;
     assert!(h.rt.cancel(S).unwrap());
@@ -3405,7 +3127,7 @@ async fn a_cancel_after_an_uncertain_send_goes_once_the_node_holds_the_turn() {
     assert!(h.rt.is_busy(S), "it may run: never settled here");
     h.node.refuse("start_turn", None);
     eventually_sync("cancel sent", || h.count("cancel") == 1).await;
-    let op: String = h.q("SELECT operation_id FROM node_commands WHERE method='start_turn'");
+    let op: String = node_checks::command_operation_id_by_method(&h.store, "start_turn").unwrap();
     assert!(h.node.cancel_requested(&OperationId::try_from(op).unwrap()));
 }
 
@@ -3421,10 +3143,12 @@ async fn a_refusal_after_an_uncertain_send_still_sends_the_cancel() {
     *h.seen.stash.lock().unwrap() = Some(vec![]);
     h.node.script_once("start_turn", Scripted::DropReply);
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    let uncertain = "SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND state='pending' AND lease_owner IS NULL AND maybe_sent=1";
-    eventually_sync("uncertain", || h.q::<i64>(uncertain) == 1).await;
+    eventually_sync("uncertain", || {
+        node_checks::uncertain_start_count(&h.store).unwrap() == 1
+    })
+    .await;
     let generation: i64 =
-        h.q("SELECT lease_generation FROM node_commands WHERE method='start_turn'");
+        node_checks::command_lease_generation_by_method(&h.store, "start_turn").unwrap();
     assert!(h.rt.cancel(S).unwrap());
     assert_eq!(
         h.commands("cancel"),
@@ -3433,12 +3157,14 @@ async fn a_refusal_after_an_uncertain_send_still_sends_the_cancel() {
     );
     h.node.refuse("start_turn", Some(ErrorCode::Busy));
     eventually_sync("refused", || {
-        h.q::<i64>(&format!(
-            "SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND lease_owner IS NULL AND lease_generation>{generation}"
-        )) == 1
+        node_checks::unleased_start_count_by_generation(&h.store, generation as i64).unwrap() == 1
     })
     .await;
-    assert_eq!(h.q::<i64>(uncertain), 1, "still maybe sent");
+    assert_eq!(
+        node_checks::uncertain_start_count(&h.store).unwrap(),
+        1,
+        "still maybe sent"
+    );
     assert!(h.ends().is_empty(), "never settled here");
     assert!(h.rt.is_busy(S));
     h.node.refuse("start_turn", None);
@@ -3447,7 +3173,7 @@ async fn a_refusal_after_an_uncertain_send_still_sends_the_cancel() {
         h.seen.to.commit(b).await.unwrap();
     }
     eventually_sync("cancel sent", || h.count("cancel") == 1).await;
-    let op: String = h.q("SELECT operation_id FROM node_commands WHERE method='start_turn'");
+    let op: String = node_checks::command_operation_id_by_method(&h.store, "start_turn").unwrap();
     assert!(h.node.cancel_requested(&OperationId::try_from(op).unwrap()));
     assert_eq!(h.count("start_turn"), 1, "it ran once");
 }
@@ -3462,8 +3188,7 @@ async fn a_second_stop_after_a_refused_cancel_asks_again() {
         .refuse_next("cancel", ApiError::new(ErrorCode::Invalid, "not now"));
     assert!(h.rt.cancel(S).unwrap());
     eventually_sync("refused", || {
-        h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE method='cancel' AND state='rejected'")
-            == 1
+        node_checks::command_count_cancel_rejected(&h.store).unwrap() == 1
     })
     .await;
     assert!(h.rt.cancel(S).unwrap());
@@ -3480,17 +3205,14 @@ async fn an_attempt_the_node_has_no_record_of_ends_on_stop() {
     h.bind();
     h.rt.prompt(S, "first", "user", &[]).unwrap();
     eventually_sync("running", || {
-        h.q::<i64>("SELECT COUNT(*) FROM runtime_attempts WHERE state='running'") == 1
+        node_checks::attempt_count_by_state(&h.store, "running").unwrap() == 1
     })
     .await;
-    let op: String = h.q("SELECT operation_id FROM node_commands WHERE method='start_turn'");
+    let op: String = node_checks::command_operation_id_by_method(&h.store, "start_turn").unwrap();
     h.node.restart();
     h.node.forget(&OperationId::try_from(op).unwrap());
     h.restart_hub().await;
-    assert_eq!(
-        h.q::<String>("SELECT state FROM runtime_attempts"),
-        "unknown"
-    );
+    assert_eq!(node_checks::attempt_state(&h.store).unwrap(), "unknown");
     assert!(h.rt.is_busy(S));
     assert!(h.rt.cancel(S).unwrap());
     eventually_sync("settled", || h.ends().len() == 1).await;
@@ -3519,27 +3241,16 @@ async fn a_new_node_journal_mid_session_is_taken_in_without_a_conflict() {
     h.one_turn("hello").await;
     h.rt.prompt(S, "second", "user", &[]).unwrap();
     eventually_sync("running", || {
-        h.q::<i64>("SELECT COUNT(*) FROM runtime_attempts WHERE state='running'") == 1
+        node_checks::attempt_count_by_state(&h.store, "running").unwrap() == 1
     })
     .await;
-    let old_epochs: Vec<String> = h
-        .store
-        .reader(|c| {
-            let mut st = c.prepare("SELECT DISTINCT epoch FROM node_streams")?;
-            let v = st
-                .query_map([], |r| r.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok::<_, StoreError>(v)
-        })
-        .unwrap();
+    let old_epochs: Vec<String> = fixtures::stream_epochs(&h.store).unwrap();
     assert_eq!(old_epochs, ["e1"]);
 
     h.node.reset_journal();
     h.restart_hub().await;
     assert_eq!(
-        h.q::<String>(
-            "SELECT state FROM runtime_attempts ORDER BY created DESC, rowid DESC LIMIT 1"
-        ),
+        node_checks::latest_attempt_state(&h.store).unwrap(),
         "unknown",
         "the Node has no record of the running attempt"
     );
@@ -3551,13 +3262,9 @@ async fn a_new_node_journal_mid_session_is_taken_in_without_a_conflict() {
     eventually_sync("delivered", || h.node.unacked() == 0).await;
     assert_eq!(h.node.delivery_failures(), failures, "no batch was refused");
     let stream = derived_id("session", S);
-    let fresh: i64 = h.q(&format!(
-        "SELECT applied FROM node_streams WHERE stream='{stream}' AND epoch='j1'"
-    ));
+    let fresh: i64 = node_checks::stream_applied_by_stream_j1(&h.store, &stream).unwrap();
     assert!(fresh >= 1, "the new epoch is applied");
-    let old: i64 = h.q(&format!(
-        "SELECT COUNT(*) FROM node_streams WHERE stream='{stream}' AND epoch='e1' AND fault IS NULL"
-    ));
+    let old: i64 = node_checks::stream_count_by_stream_e1_without_fault(&h.store, &stream).unwrap();
     assert_eq!(old, 1, "beside the old one");
     assert_eq!(
         h.count("start_turn"),
@@ -3573,15 +3280,7 @@ async fn a_new_node_journal_mid_session_is_taken_in_without_a_conflict() {
 async fn an_event_that_cannot_be_applied_faults_its_stream_and_the_others_go_on() {
     const B: &str = "s2";
     let h = hub();
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute(
-                "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','active',1,1)",
-                [B],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::node_fixtures::seed_sessions(&h.store, &B).unwrap();
     h.bind();
     h.rt.bind(&Binding {
         session: B.into(),
@@ -3592,17 +3291,7 @@ async fn an_event_that_cannot_be_applied_faults_its_stream_and_the_others_go_on(
     })
     .unwrap();
     let attempt_of = |session: &str| -> Option<ExecutionRef> {
-        h.store
-            .reader(|c| {
-                Ok::<_, StoreError>(
-                    c.query_row(
-                        "SELECT a.execution FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND a.state='running'",
-                        [session],
-                        |r| r.get::<_, String>(0),
-                    )
-                    .ok(),
-                )
-            })
+        fixtures::active_execution(&h.store, session)
             .unwrap()
             .map(|s| serde_json::from_str(&s).unwrap())
     };
@@ -3619,12 +3308,7 @@ async fn an_event_that_cannot_be_applied_faults_its_stream_and_the_others_go_on(
     assert!(!h.rt.is_uncertain(S));
 
     // the store refuses one of A's events
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute_batch("CREATE TRIGGER refuse BEFORE INSERT ON events WHEN NEW.data LIKE '%conflicting%' BEGIN SELECT RAISE(ABORT,'refused'); END;")?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::mutations::create_refuse(&h.store).unwrap();
     let failures = h.node.delivery_failures();
     let (s, t) = text(&a, "conflicting");
     h.node.emit(s, t).await.unwrap();
@@ -3636,30 +3320,18 @@ async fn an_event_that_cannot_be_applied_faults_its_stream_and_the_others_go_on(
     assert_eq!(h.node.delivery_failures(), failures, "no batch was refused");
 
     let stream = derived_id("session", S);
-    let (fault, session, reason): (String, String, String) = h
-        .store
-        .reader(|c| {
-            Ok::<_, StoreError>(c.query_row(
-                "SELECT fault, session_id, fault_reason FROM node_streams WHERE stream=? AND fault_event IS NOT NULL",
-                [&stream],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )?)
-        })
-        .unwrap();
+    let (fault, session, reason): (String, String, String) =
+        steve_store::testkit::hub::node_fixtures::stream_fault_record(&h.store, &stream).unwrap();
     assert_eq!((fault.as_str(), session.as_str()), ("failed", S));
     assert!(reason.contains("refused"), "{reason}");
     assert!(h.rt.is_uncertain(S), "A is never run again");
     assert!(!h.rt.is_uncertain(B));
     let note = |session: &str| -> i64 {
-        h.q(&format!(
-            "SELECT COUNT(*) FROM events WHERE session_id='{session}' AND kind='system' AND data LIKE '%无法应用%'"
-        ))
+        node_checks::unapplied_event_notice_count(&h.store, &session).unwrap()
     };
     assert_eq!((note(S), note(B)), (1, 0), "one note, on A");
     // U10: the note says it will not recover and the page offers the way forward
-    let flagged: i64 = h.q(&format!(
-        "SELECT COUNT(*) FROM events WHERE session_id='{S}' AND kind='system' AND json_extract(data,'$.faulted')=1 AND data LIKE '%新会话%'"
-    ));
+    let flagged: i64 = node_checks::faulted_session_notice_count(&h.store, &S).unwrap();
     assert_eq!(flagged, 1, "the note offers a new session");
 
     // A's stream applies nothing more: its end waits, and nothing is run again
@@ -3669,9 +3341,7 @@ async fn an_event_that_cannot_be_applied_faults_its_stream_and_the_others_go_on(
     assert!(!h.ends().iter().any(|e| e.0 == S));
     assert!(h.rt.is_busy(S));
     assert_eq!(note(S), 1, "still one note");
-    let tampered: i64 = h.q(&format!(
-        "SELECT COUNT(*) FROM events WHERE session_id='{S}' AND data LIKE '%conflicting%'"
-    ));
+    let tampered: i64 = node_checks::conflicting_replay_notice_count(&h.store, &S).unwrap();
     assert_eq!(
         tampered, 0,
         "the conflicting event never reached the conversation"
@@ -3688,15 +3358,7 @@ async fn an_event_that_cannot_be_applied_faults_its_stream_and_the_others_go_on(
 async fn an_idle_session_on_a_faulted_stream_plans_no_turn() {
     const B: &str = "s2";
     let h = hub();
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute(
-                "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','active',1,1)",
-                [B],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::node_fixtures::seed_sessions(&h.store, &B).unwrap();
     h.bind();
     h.rt.bind(&Binding {
         session: B.into(),
@@ -3739,12 +3401,7 @@ async fn an_idle_session_on_a_faulted_stream_plans_no_turn() {
             _ => None,
         })
         .unwrap();
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute_batch("CREATE TRIGGER refuse BEFORE UPDATE OF node_revision ON runtime_sessions BEGIN SELECT RAISE(ABORT,'refused'); END;")?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::mutations::create_refuse_for_an_idle_session_on_a_faulted_stream_plans_no_turn(&h.store).unwrap();
     h.node
         .emit(
             Subject::Session {
@@ -3757,9 +3414,7 @@ async fn an_idle_session_on_a_faulted_stream_plans_no_turn() {
     eventually_sync("delivered", || h.node.unacked() == 0).await;
     let stream = derived_id("session", S);
     assert_eq!(
-        h.q::<String>(&format!(
-            "SELECT fault FROM node_streams WHERE stream='{stream}'"
-        )),
+        node_checks::required_stream_fault_by_stream(&h.store, &stream).unwrap(),
         "failed"
     );
     assert!(h.rt.is_uncertain(S));
@@ -3772,9 +3427,7 @@ async fn an_idle_session_on_a_faulted_stream_plans_no_turn() {
     );
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(h.count("start_turn"), 1, "nothing new starts on A");
-    let queued: i64 = h.q(&format!(
-        "SELECT COUNT(*) FROM queued WHERE session_id='{S}' AND text='next'"
-    ));
+    let queued: i64 = node_checks::queued_count_by_session_next(&h.store, &S).unwrap();
     assert_eq!(queued, 1, "the message waits in the queue");
 
     assert_eq!(h.rt.prompt(B, "b", "user", &[]).unwrap(), Planned::Created);
@@ -3788,21 +3441,13 @@ async fn a_late_attempt_started_never_revives_an_unknown_attempt() {
     let h = hub();
     h.bind();
     let a = h.running("one").await;
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute("UPDATE runtime_attempts SET state='unknown'", [])?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::node_fixtures::set_runtime_attempts_state_unknown(&h.store).unwrap();
     h.node
         .emit(Subject::Execution(a.clone()), EventBody::AttemptStarted)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(
-        h.q::<String>("SELECT state FROM runtime_attempts"),
-        "unknown"
-    );
+    assert_eq!(node_checks::attempt_state(&h.store).unwrap(), "unknown");
     assert!(h.rt.is_uncertain(S));
 }
 
@@ -3810,13 +3455,11 @@ async fn a_late_attempt_started_never_revives_an_unknown_attempt() {
 
 impl H {
     fn session_status(&self) -> String {
-        self.q(&format!("SELECT status FROM sessions WHERE id='{S}'"))
+        node_checks::session_status_by_id(&self.store, &S).unwrap()
     }
 
     fn acp_id(&self) -> Option<String> {
-        self.q(&format!(
-            "SELECT acp_session_id FROM sessions WHERE id='{S}'"
-        ))
+        node_checks::session_acp_session_id_by_id(&self.store, &S).unwrap()
     }
 }
 
@@ -3893,12 +3536,7 @@ async fn an_ended_session_stays_ended_through_its_last_turn() {
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
     eventually_sync("running", || h.session_status() == "running").await;
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute("UPDATE sessions SET status='ended'", [])?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::node_fixtures::set_sessions_status_ended(&h.store).unwrap();
     let exec = h.attempts()[0].clone();
     h.node.finish(&exec, build::done()).await.unwrap();
     eventually_sync("released", || h.phase() == "released").await;
@@ -3924,13 +3562,10 @@ async fn an_unknown_attempt_keeps_the_session_running_until_it_is_abandoned() {
     h.node.restart();
     h.restart_hub().await;
     eventually_sync("the Hub's abandon refused", || {
-        h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE method='abandon' AND state IN ('finished','rejected')") == 1
+        node_checks::settled_abandon_command_count(&h.store).unwrap() == 1
     })
     .await;
-    assert_eq!(
-        h.q::<String>("SELECT state FROM runtime_attempts"),
-        "unknown"
-    );
+    assert_eq!(node_checks::attempt_state(&h.store).unwrap(), "unknown");
     assert_eq!(h.session_status(), "running");
     assert!(h.rt.cancel(S).unwrap());
     eventually_sync("abandoned", || h.ends().len() == 1).await;
@@ -3958,9 +3593,7 @@ async fn an_attempt_unknown_before_it_started_keeps_the_session_running() {
     );
     eventually_sync("sent", || h.count("start_turn") == 2).await;
     assert_eq!(
-        h.q::<String>(
-            "SELECT state FROM runtime_attempts ORDER BY created DESC, rowid DESC LIMIT 1"
-        ),
+        node_checks::latest_attempt_state(&h.store).unwrap(),
         "planned"
     );
     let late = h.seen.stash.lock().unwrap().take().unwrap();
@@ -3975,13 +3608,11 @@ async fn an_attempt_unknown_before_it_started_keeps_the_session_running() {
     h.node.restart();
     h.restart_hub().await;
     eventually_sync("the Hub's abandon refused", || {
-        h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE method='abandon' AND state IN ('finished','rejected')") == 1
+        node_checks::settled_abandon_command_count(&h.store).unwrap() == 1
     })
     .await;
     assert_eq!(
-        h.q::<String>(
-            "SELECT state FROM runtime_attempts ORDER BY created DESC, rowid DESC LIMIT 1"
-        ),
+        node_checks::latest_attempt_state(&h.store).unwrap(),
         "unknown"
     );
     assert!(h.rt.is_uncertain(S));
@@ -4003,12 +3634,7 @@ async fn an_attempt_unknown_before_it_started_keeps_the_session_running() {
 #[tokio::test]
 async fn a_first_turn_is_starting_until_its_attempt_starts() {
     let h = hub();
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute("UPDATE sessions SET status='idle'", [])?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::node_fixtures::set_sessions_status_idle(&h.store).unwrap();
     *h.seen.stash.lock().unwrap() = Some(vec![]);
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
@@ -4035,28 +3661,11 @@ async fn a_late_release_of_a_new_journal_does_not_let_a_reopened_session_go() {
     eventually_sync("released", || h.phase() == "released").await;
     let reopen = |h: &H, text: &str| {
         h.rt.prompt(S, text, "user", &[]).unwrap();
-        h.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute("DELETE FROM queued", [])?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::clear_queued(&h.store).unwrap();
     };
     reopen(&h, "x");
     eventually_sync("ready", || h.phase() == "ready").await;
-    let old: Vec<String> = h
-        .store
-        .reader(|c| {
-            let mut st = c.prepare(
-                "SELECT json_extract(request,'$.body.expected') FROM node_commands WHERE method='configure_session'
-                 UNION SELECT json_extract(receipt,'$.payload.state.result.revision') FROM node_commands WHERE method='open_session'",
-            )?;
-            let v = st
-                .query_map([], |r| r.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok::<_, StoreError>(v)
-        })
-        .unwrap();
+    let old: Vec<String> = fixtures::observed_revisions(&h.store).unwrap();
 
     // the same again on a new journal, its stream late from the release on
     h.node.reset_journal();
@@ -4076,9 +3685,8 @@ async fn a_late_release_of_a_new_journal_does_not_let_a_reopened_session_go() {
     eventually_sync("released", || h.phase() == "released").await;
     reopen(&h, "y");
     eventually_sync("ready", || h.phase() == "ready").await;
-    let opened: String = h.q(
-        "SELECT json_extract(receipt,'$.payload.state.result.revision') FROM node_commands WHERE method='open_session' ORDER BY created DESC, rowid DESC LIMIT 1",
-    );
+    let opened: String =
+        node_checks::latest_command_payload_state_result_revision_open_session(&h.store).unwrap();
     assert!(
         !old.contains(&opened),
         "a new journal's revision {opened} is none of the old journal's {old:?}"
@@ -4176,7 +3784,7 @@ async fn working_counts_an_unknown_attempt_until_it_is_abandoned() {
         .await
         .unwrap();
     eventually_sync("unknown", || {
-        h.q::<String>("SELECT state FROM runtime_attempts") == "unknown"
+        node_checks::attempt_state(&h.store).unwrap() == "unknown"
     })
     .await;
     assert_eq!(h.rt.working(), 1, "an unknown attempt holds the drain");
@@ -4215,7 +3823,7 @@ async fn a_stopped_node_holds_no_drain_with_an_open_or_unknown_turn() {
         .await
         .unwrap();
     eventually_sync("unknown", || {
-        h.q::<String>("SELECT state FROM runtime_attempts") == "unknown"
+        node_checks::attempt_state(&h.store).unwrap() == "unknown"
     })
     .await;
     assert_eq!(h.rt.working(), 1);
@@ -4223,10 +3831,7 @@ async fn a_stopped_node_holds_no_drain_with_an_open_or_unknown_turn() {
     assert!(h.rt.cancel(S).is_err(), "a stopped Node cannot abandon it");
     assert_eq!(h.rt.working(), 0, "a stopped Node runs nothing");
     // the turn itself is left as it was, unknown, for a Node that runs again
-    assert_eq!(
-        h.q::<String>("SELECT state FROM runtime_attempts"),
-        "unknown"
-    );
+    assert_eq!(node_checks::attempt_state(&h.store).unwrap(), "unknown");
 }
 
 /// A configure whose outcome is unknown keeps the session configuring: the drain waits for it.
@@ -4251,14 +3856,7 @@ async fn working_counts_only_this_nodes_sessions() {
     h.ready().await;
     let _exec = h.running("hello").await;
     assert_eq!(h.rt.working(), 1);
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute(
-                "UPDATE runtime_sessions SET node_id='elsewhere' WHERE session_id=?",
-                [S],
-            )?;
-            Ok(())
-        })
+    steve_store::testkit::hub::node_fixtures::set_runtime_sessions_node_id_elsewhere(&h.store, &S)
         .unwrap();
     assert_eq!(h.rt.working(), 0, "another Node's turn");
 }
@@ -4279,10 +3877,7 @@ impl H {
     /// One turn of `S` run to its end, every event delivered and acknowledged.
     async fn ended_turn(&self) {
         let before = self.ends().len();
-        self.rt.prompt(S, "hello", "user", &[]).unwrap();
-        eventually_sync("attempt", || self.attempts().len() > before).await;
-        let exec = self.attempts().last().unwrap().clone();
-        eventually_sync("running", || self.phase() == "active").await;
+        let exec = self.running("hello").await;
         let (s, b) = text(&exec, "x");
         self.node.emit(s, b).await.unwrap();
         self.node.finish(&exec, build::done()).await.unwrap();
@@ -4294,23 +3889,12 @@ impl H {
     /// which the Node has already acknowledged and dropped.
     fn forget_session_stream(&self) {
         let stream = derived_id("session", S);
-        self.store
-            .transaction::<_, StoreError>(|tx| {
-                let n = tx.execute(
-                    "UPDATE node_streams SET applied=0 WHERE stream=?",
-                    [&stream],
-                )?;
-                assert_eq!(n, 1, "the session's stream was held");
-                Ok(())
-            })
-            .unwrap();
+        let n = fixtures::forget_stream(&self.store, &stream).unwrap();
+        assert_eq!(n, 1, "the session's stream was held");
     }
 
     fn fault_of_session_stream(&self) -> Option<String> {
-        self.q(&format!(
-            "SELECT fault FROM node_streams WHERE stream='{}'",
-            derived_id("session", S)
-        ))
+        node_checks::stream_fault_by_stream(&self.store, &derived_id("session", S)).unwrap()
     }
 }
 
@@ -4339,22 +3923,17 @@ async fn reconcile_replays_what_the_hub_missed_before_the_first_new_plan() {
 
     h.restart_hub().await;
     eventually_sync("the second turn", || h.count("start_turn") == 2).await;
-    let texts: i64 = h.q("SELECT COUNT(*) FROM events WHERE kind='text' AND data LIKE '%missed%'");
+    let texts: i64 = node_checks::replayed_text_count(&h.store).unwrap();
     assert_eq!(texts, 1, "replayed once");
-    let first: bool = h.q(
-        "SELECT (SELECT MAX(rowid) FROM events WHERE kind='text') < (SELECT rowid FROM events WHERE kind='user' AND data LIKE '%second%')",
-    );
+    let first: bool = node_checks::text_before_second_user_message(&h.store).unwrap();
     assert!(first, "applied before the next turn was planned");
     // told after its event's commit: the next turn may be sent before that
     eventually_sync("turn end", || !h.ends().is_empty()).await;
     assert_eq!(h.ends(), [(S.to_string(), "end_turn".to_string(), None)]);
-    let dup: i64 = h.q("SELECT COUNT(*) FROM (SELECT 1 FROM events WHERE source_node IS NOT NULL GROUP BY source_node,source_stream,source_epoch,source_seq HAVING COUNT(*)>1)");
+    let dup: i64 = node_checks::duplicate_node_event_count(&h.store).unwrap();
     assert_eq!(dup, 0);
     eventually_sync("the journal drained", || h.node.unacked() == 0).await;
-    assert_eq!(
-        h.q::<i64>("SELECT COUNT(*) FROM node_streams WHERE fault IS NOT NULL"),
-        0
-    );
+    assert_eq!(node_checks::stream_count_with_value(&h.store).unwrap(), 0);
 }
 
 /// The Hub's database went back below what the Node already acknowledged and dropped: the stream
@@ -4422,7 +4001,7 @@ async fn node_work_the_hub_does_not_know_holds_the_session_and_sends_nothing() {
         !h.node.receipt(&op).unwrap().state.is_finished(),
         "never given up"
     );
-    let known: i64 = h.q("SELECT COUNT(*) FROM node_commands WHERE operation_id='op_stranger'");
+    let known: i64 = node_checks::command_count_by_operation(&h.store, "op_stranger").unwrap();
     assert_eq!(known, 0);
 
     // a Node restart reconciles again: still held, told once
@@ -4470,7 +4049,7 @@ async fn events_pushed_while_reconcile_reads_the_snapshot_do_not_fault_ahead() {
 
     h.node.finish(&exec, build::done()).await.unwrap();
     eventually_sync("turn end", || h.ends().len() == 1).await;
-    let during: i64 = h.q("SELECT COUNT(*) FROM events WHERE kind='text' AND data LIKE '%during%'");
+    let during: i64 = node_checks::text_during_disconnect_count(&h.store).unwrap();
     assert_eq!(during, 1);
     assert_eq!(
         h.rt.prompt(S, "next", "user", &[]).unwrap(),
@@ -4497,7 +4076,7 @@ async fn reconcile_replays_an_event_bigger_than_a_page() {
     assert!(h.node.unacked() >= 2, "kept for replay");
 
     h.restart_hub().await;
-    let bigs: i64 = h.q("SELECT COUNT(*) FROM events WHERE kind='text' AND data LIKE '%bigxxx%'");
+    let bigs: i64 = node_checks::large_text_count(&h.store).unwrap();
     assert_eq!(bigs, 1, "replayed once");
     // the end is told once its event's commit is over, which reconcile does not wait for
     eventually_sync("turn end", || !h.ends().is_empty()).await;
@@ -4510,9 +4089,7 @@ async fn reconcile_replays_an_event_bigger_than_a_page() {
 impl H {
     /// Rows of `method` the Hub planned.
     fn planned(&self, method: &str) -> i64 {
-        self.q(&format!(
-            "SELECT COUNT(*) FROM node_commands WHERE method='{method}'"
-        ))
+        node_checks::command_count_by_method(&self.store, &method).unwrap()
     }
 
     /// How often the Node accepted `op`.
@@ -4526,13 +4103,14 @@ impl H {
 
     /// The latest recover's target.
     fn recover_target(&self) -> String {
-        self.q("SELECT json_extract(request,'$.body.target') FROM node_commands WHERE method='recover' ORDER BY created DESC, rowid DESC LIMIT 1")
+        node_checks::latest_command_target_recover(&self.store).unwrap()
     }
 
     /// Runs the attempt the Node took last to its end; the session goes back to ready.
     async fn finish_last(&self) {
         let before = self.ends().len();
         let exec = self.attempts().last().unwrap().clone();
+        self.wait_for_start(&exec).await;
         self.node.finish(&exec, build::done()).await.unwrap();
         eventually_sync("turn end", || self.ends().len() > before).await;
     }
@@ -4561,9 +4139,7 @@ async fn stop_retires_an_unknown_open_once_and_the_queued_message_opens_it_again
     );
     assert_eq!(h.planned("recover"), 1);
     assert_eq!(h.recover_target(), format!("op_open_{S}"));
-    let expected: String = h.q(
-        "SELECT json_extract(request,'$.body.expected') FROM node_commands WHERE method='recover'",
-    );
+    let expected: String = node_checks::command_expected_recover(&h.store).unwrap();
     assert!(expected.starts_with("sha256:"), "frozen when planned");
     h.node.refuse("recover", None);
     eventually_sync("the queued turn", || h.count("start_turn") == 1).await;
@@ -4628,17 +4204,13 @@ async fn a_retired_unknown_release_on_a_handoff_is_asked_again_and_the_successor
     eventually_sync("the successor's turn", || h.count("start_turn") == 2).await;
     assert_eq!(h.count("recover"), 1);
     assert_eq!(h.sent(&op), 1, "the target is never sent again");
-    let releases: i64 = h.q(&format!(
-        "SELECT COUNT(*) FROM node_commands WHERE method='release_session' AND json_extract(request,'$.body')='{S}'"
-    ));
+    let releases: i64 = node_checks::release_command_count_for_session(&h.store, &S).unwrap();
     assert_eq!(releases, 2, "asked again under a new id");
     assert_eq!(h.last_state("release_session"), "finished");
     assert_eq!(h.phase_of(S), "released");
     assert_eq!(h.node.most_open_in_a_workspace(), 1, "never two at once");
     assert_eq!(h.prompt_of(1), "continue");
-    let told: i64 = h.q(&format!(
-        "SELECT COUNT(*) FROM events WHERE session_id='{S2}' AND kind='system' AND data LIKE '%还没能在 Node 上释放%'"
-    ));
+    let told: i64 = node_checks::blocked_node_release_notice_count(&h.store, &S2).unwrap();
     assert_eq!(told, 1);
 }
 
@@ -4732,9 +4304,8 @@ async fn an_unsupported_recover_keeps_the_session_held_and_the_next_stop_asks_ag
     h.node.refuse("recover", None);
     assert!(h.rt.user_stop(S).unwrap());
     assert_eq!(h.planned("recover"), 2);
-    let second: String = h.q(
-        "SELECT operation_id FROM node_commands WHERE method='recover' ORDER BY created DESC, rowid DESC LIMIT 1",
-    );
+    let second: String =
+        node_checks::latest_command_operation_id_by_method(&h.store, "recover").unwrap();
     assert_eq!(second, format!("op_recover_op_open_{S}_1"), "a new id");
     eventually_sync("the queued turn", || h.count("start_turn") == 1).await;
     assert_eq!(
@@ -4751,7 +4322,7 @@ async fn stop_retires_an_unknown_abandon_and_the_next_stop_abandons_anew() {
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
     eventually_sync("running", || {
-        h.q::<i64>("SELECT COUNT(*) FROM runtime_attempts WHERE state='running'") == 1
+        node_checks::attempt_count_by_state(&h.store, "running").unwrap() == 1
     })
     .await;
     let (_, op) = h
@@ -4774,10 +4345,10 @@ async fn stop_retires_an_unknown_abandon_and_the_next_stop_abandons_anew() {
         .await
         .unwrap();
     eventually_sync("unknown", || {
-        h.q::<String>("SELECT state FROM runtime_attempts") == "unknown"
+        node_checks::attempt_state(&h.store).unwrap() == "unknown"
     })
     .await;
-    let a: String = h.q("SELECT attempt_id FROM runtime_attempts");
+    let a: String = node_checks::attempt_attempt_id(&h.store).unwrap();
     h.node.script_once("abandon", Scripted::Unknown);
     assert!(h.rt.user_stop(S).unwrap());
     eventually_sync("abandon unknown", || {
@@ -4792,7 +4363,7 @@ async fn stop_retires_an_unknown_abandon_and_the_next_stop_abandons_anew() {
     assert_eq!(h.planned("abandon"), 1);
     assert_eq!(h.systems("已撤回结果未知的放弃操作"), 1);
     assert_eq!(
-        h.q::<String>("SELECT state FROM runtime_attempts"),
+        node_checks::attempt_state(&h.store).unwrap(),
         "unknown",
         "the attempt stays unknown"
     );
@@ -4825,12 +4396,10 @@ async fn stop_retires_an_unknown_answer_and_leaves_its_attempt_alone() {
         .await
         .unwrap();
     eventually_sync("card", || {
-        h.q::<i64>(
-            "SELECT COUNT(*) FROM decisions WHERE subject_type='tool_call' AND status='open'",
-        ) == 1
+        node_checks::decision_count_tool_call_open(&h.store).unwrap() == 1
     })
     .await;
-    let d: String = h.q("SELECT id FROM decisions WHERE subject_type='tool_call'");
+    let d: String = node_checks::decision_id_by_subject_type(&h.store, "tool_call").unwrap();
     h.node.script_once("resolve_permission", Scripted::Unknown);
     assert!(h.rt.answer_permission(&d, Some("allow_once")).unwrap());
     eventually_sync("answer unknown", || {
@@ -4838,16 +4407,16 @@ async fn stop_retires_an_unknown_answer_and_leaves_its_attempt_alone() {
     })
     .await;
     h.finish_last().await;
-    let completion: String = h.q("SELECT completion FROM runtime_attempts");
+    let completion: String = node_checks::attempt_completion(&h.store).unwrap();
 
     assert!(h.rt.user_stop(S).unwrap());
     eventually_sync("recovered", || h.last_state("recover") == "finished").await;
     assert_eq!(h.recover_target(), format!("op_answer_{d}"));
     assert_eq!(h.systems("已撤回结果未知的授权回复"), 1);
-    let card: String = h.q(&format!("SELECT status FROM decisions WHERE id='{d}'"));
+    let card: String = node_checks::decision_status_by_id(&h.store, &d).unwrap();
     assert_ne!(card, "open", "the card is closed");
     assert_eq!(
-        h.q::<String>("SELECT completion FROM runtime_attempts"),
+        node_checks::attempt_completion(&h.store).unwrap(),
         completion,
         "the attempt is unchanged"
     );
@@ -4921,24 +4490,9 @@ async fn a_lifecycle_cancel_never_retires_an_unknown_prepare() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_open_carries_the_principals_variables_on_this_node() {
     let h = hub();
-    h.store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute_batch(
-                "INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u','default','u','u','owner',1);
-                 INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1);
-                 INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n1','u','n1',zeroblob(32),'f1','active',1);
-                 INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated,requested_by) VALUES ('i1','default',1,'t','run','执行',1,1,'u');
-                 UPDATE sessions SET item_id='i1' WHERE id='s1';
-                 INSERT INTO node_env(node_id,principal,key,value,updated_by,updated) VALUES
-                   ('n1','u','NPM_TOKEN','tok','u',1),
-                   ('n2','u','ELSEWHERE','x','u',1),
-                   ('n1','someone','THEIRS','y','u',1);",
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::mutations::seed_users_item_id_i1_id_s1(&h.store).unwrap();
     h.bind();
-    let request: String = h.q("SELECT request FROM node_commands WHERE method='open_session'");
+    let request: String = node_checks::command_request_by_method(&h.store, "open_session").unwrap();
     let v: serde_json::Value = serde_json::from_str(&request).unwrap();
     assert_eq!(
         v["body"]["env"],
@@ -4953,21 +4507,11 @@ async fn the_open_carries_the_principals_variables_on_this_node() {
 async fn a_new_session_gets_its_principals_own_harness_directory() {
     for (node_owner, imports) in [("u", true), ("someone-else", false)] {
         let h = hub();
-        h.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute_batch(&format!(
-                    "INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u','default','u','u','owner',1);
-                     INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1);
-                     INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n1','{node_owner}','n1',zeroblob(32),'f1','active',1);
-                     INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated,requested_by) VALUES ('i1','default',1,'t','run','执行',1,1,'u');
-                     UPDATE sessions SET item_id='i1', bot_id='dev' WHERE id='s1';"
-                ))?;
-                Ok(())
-            })
-            .unwrap();
+        fixtures::seed_principal_session(&h.store, node_owner).unwrap();
         h.rt.set_principal_state(true);
         h.bind();
-        let request: String = h.q("SELECT request FROM node_commands WHERE method='open_session'");
+        let request: String =
+            node_checks::command_request_by_method(&h.store, "open_session").unwrap();
         let v: serde_json::Value = serde_json::from_str(&request).unwrap();
         let state = &v["body"]["state"];
         let dir = state["dir"].as_str().unwrap().to_string();
@@ -4977,7 +4521,7 @@ async fn a_new_session_gets_its_principals_own_harness_directory() {
             "{dir}"
         );
         assert_eq!(state["import_owner"], imports, "{v}");
-        let recorded: String = h.q("SELECT state_dir FROM runtime_sessions WHERE session_id='s1'");
+        let recorded: String = node_checks::binding_state_dir_by_session(&h.store, "s1").unwrap();
         assert_eq!(recorded, dir);
     }
 }
@@ -4985,11 +4529,7 @@ async fn a_new_session_gets_its_principals_own_harness_directory() {
 #[tokio::test]
 async fn saved_capacity_queues_and_increasing_it_dispatches_the_same_turn() {
     let h = hub();
-    h.store.transaction::<_,StoreError>(|tx| {
-        tx.execute("INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,max_sessions,created) VALUES ('n1','u','Node',zeroblob(32),'fp','active',1,1)", [])?;
-        tx.execute("INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('s2','default','claude-code','.','active',1,1)", [])?;
-        Ok(())
-    }).unwrap();
+    steve_store::testkit::hub::node_fixtures::seed_nodes_and_sessions(&h.store).unwrap();
     h.bind();
     h.rt.prompt(S, "first", "user", &[]).unwrap();
     eventually_sync("first active", || {
@@ -5006,28 +4546,32 @@ async fn saved_capacity_queues_and_increasing_it_dispatches_the_same_turn() {
     .unwrap();
     h.rt.prompt("s2", "second", "user", &[]).unwrap();
     eventually_sync("capacity queued", || {
-        h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE method='start_turn'") == 2
+        node_checks::command_count_by_method(&h.store, "start_turn").unwrap() == 2
     })
     .await;
     eventually_sync("capacity reason projected", || {
         h.store
-            .reader(steve_store::runtime::sessions_waiting_for_room)
+            .read(|r| steve_store::runtime::sessions_waiting_for_room(r))
             .unwrap()
             .len()
             == 1
     })
     .await;
     assert_eq!(h.count("start_turn"), 1);
-    let queued: String =
-        h.q("SELECT operation_id FROM node_commands WHERE method='start_turn' AND state='pending'");
-    assert_eq!(h.q::<i64>("SELECT lease_generation FROM node_commands WHERE operation_id=(SELECT operation_id FROM node_commands WHERE method='start_turn' AND state='pending')"),0,"never sent while full");
+    let queued: String = node_checks::command_operation_id_start_turn_pending(&h.store).unwrap();
+    assert_eq!(
+        node_checks::command_lease_generation_start_turn_pending_for_selected_row(&h.store)
+            .unwrap(),
+        0,
+        "never sent while full"
+    );
     assert_eq!(
         h.node.probe(false).await.unwrap().capacity.sessions,
         1,
         "actual limiter follows saved value"
     );
     h.store
-        .transaction::<_, StoreError>(|tx| {
+        .write::<_, StoreError>(|tx| {
             assert!(steve_store::nodes::set_max_sessions(tx, "n1", "u", 2)?);
             Ok(())
         })
@@ -5042,13 +4586,13 @@ async fn saved_capacity_queues_and_increasing_it_dispatches_the_same_turn() {
     );
     eventually_sync("capacity wait cleared", || {
         h.store
-            .reader(steve_store::runtime::sessions_waiting_for_room)
+            .read(|r| steve_store::runtime::sessions_waiting_for_room(r))
             .unwrap()
             .is_empty()
     })
     .await;
     assert_eq!(
-        h.q::<i64>("SELECT COUNT(*) FROM runtime_attempts"),
+        node_checks::attempt_count(&h.store).unwrap(),
         2,
         "no new retry attempt"
     );
@@ -5078,7 +4622,25 @@ async fn accounting_vectors_cross_node_admission_and_the_shared_gateway_boundary
         let h = hub();
         h.bind();
         h.rt.prompt(S, "accounting vector", "user", &[]).unwrap();
-        eventually_sync("started", || h.methods().contains(&"start_turn")).await;
+        // The command log precedes stream delivery. The real Node's stream sender
+        // preserves order, so wait for the fake Node's start to be durable before
+        // sending a separate usage batch on the same stream.
+        eventually_sync(
+            steve_runtime::testkit::on_timeout(|| async {
+                format!(
+                    "{}: start committed (phase {}, {} events unacked)",
+                    c.name,
+                    h.phase(),
+                    h.node.unacked()
+                )
+            }),
+            || {
+                h.methods().contains(&"start_turn")
+                    && h.node.unacked() == 0
+                    && h.phase() == "active"
+            },
+        )
+        .await;
         let exec = h.attempts()[0].clone();
         let mut seen = std::collections::HashSet::new();
         for r in &c.reports {
@@ -5093,7 +4655,7 @@ async fn accounting_vectors_cross_node_admission_and_the_shared_gateway_boundary
                 seen.insert(r.report_id.clone());
             }
             eventually_sync("durable report", || {
-                h.q::<i64>("SELECT COUNT(*) FROM usage_reports") == seen.len() as i64
+                node_checks::usage_reports_count(&h.store).unwrap() == seen.len() as i64
             })
             .await;
         }
@@ -5101,16 +4663,19 @@ async fn accounting_vectors_cross_node_admission_and_the_shared_gateway_boundary
             Ok(("ok".into(), None)),
             steve_core::gateway::merged_usage(c.reports, &c.fallback_model),
         );
-        for (column, want) in [
+        let totals = node_checks::usage_token_totals(&h.store).unwrap();
+        for ((column, want), got) in [
             ("input", c.tokens.input),
             ("output", c.tokens.output),
             ("cache_read", c.tokens.cache_read),
             ("cache_write", c.tokens.cache_write),
-        ] {
-            let got = h.q::<Option<i64>>(&format!("SELECT SUM({column}) FROM usage_records"));
+        ]
+        .into_iter()
+        .zip(totals)
+        {
             assert_eq!(got, want.map(|v| v as i64), "{} {column}", c.name);
         }
-        let cost = h.q::<Option<f64>>("SELECT SUM(cost_reported) FROM usage_records");
+        let cost = node_checks::usage_records_sum_cost_reported(&h.store).unwrap();
         assert_eq!(cost, c.cost_usd, "{} ledger cost", c.name);
         assert_eq!(
             cost,
@@ -5125,7 +4690,7 @@ async fn accounting_vectors_cross_node_admission_and_the_shared_gateway_boundary
         h.node.finish(&exec, build::done()).await.unwrap();
         eventually_sync("settled", || !h.ends().is_empty()).await;
         assert_eq!(
-            h.q::<Option<f64>>("SELECT SUM(cost_reported) FROM usage_records"),
+            node_checks::usage_records_sum_cost_reported(&h.store).unwrap(),
             cost,
             "{} end replay",
             c.name
@@ -5149,17 +4714,17 @@ async fn startup_failure_holds_the_queue_and_reuses_its_card_until_human_retry()
     })
     .await;
     assert_eq!(h.store.sessions().get(S).unwrap().unwrap().status, "error");
-    let card: String = h.q("SELECT id FROM decisions WHERE subject_type='session_start'");
-    assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM queued"), 1);
+    let card: String = node_checks::decision_id_by_subject_type(&h.store, "session_start").unwrap();
+    assert_eq!(node_checks::queued_count(&h.store).unwrap(), 1);
     for _ in 0..5 {
         assert_eq!(h.rt.flush(S, None).unwrap(), Planned::Held);
     }
     assert_eq!(
-        h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE method='open_session'"),
+        node_checks::command_count_by_method(&h.store, "open_session").unwrap(),
         1
     );
     assert_eq!(h.count("start_turn"), 0);
-    assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM decisions"), 1);
+    assert_eq!(node_checks::decision_count(&h.store).unwrap(), 1);
     // A fresh coordinator reads the same durable stop without being started or contacting a Node.
     let restarted = NodeRuntime::new(h.store.clone(), h.node.clone(), h.ends.clone());
     assert_eq!(restarted.flush(S, None).unwrap(), Planned::Held);
@@ -5178,11 +4743,11 @@ async fn startup_failure_holds_the_queue_and_reuses_its_card_until_human_retry()
     );
     h.rt.retry_open(S, &build::choice()).unwrap();
     eventually_sync("retry failed", || {
-        h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE method='open_session'") == 2
+        node_checks::command_count_by_method(&h.store, "open_session").unwrap() == 2
             && h.phase() == "released"
     })
     .await;
-    assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM decisions"), 1);
+    assert_eq!(node_checks::decision_count(&h.store).unwrap(), 1);
     assert_eq!(
         h.store.decisions().get(&card).unwrap().unwrap().status,
         "open"
@@ -5192,7 +4757,7 @@ async fn startup_failure_holds_the_queue_and_reuses_its_card_until_human_retry()
         h.count("start_turn") == 1
     })
     .await;
-    assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM queued"), 0);
+    assert_eq!(node_checks::queued_count(&h.store).unwrap(), 0);
     assert!(h.store.sessions().stop(S).unwrap().is_none());
 }
 
@@ -5212,7 +4777,7 @@ async fn startup_handoff_discards_queued_input_and_never_reopens_the_ended_sessi
     })
     .await;
     assert_eq!(
-        h.q::<i64>("SELECT COUNT(*) FROM decisions WHERE subject_type='session_start'"),
+        node_checks::decision_count_by_subject_type(&h.store, "session_start").unwrap(),
         1
     );
     h.store
@@ -5226,36 +4791,31 @@ async fn startup_handoff_discards_queued_input_and_never_reopens_the_ended_sessi
         )
         .unwrap();
     assert_eq!(h.rt.release(S).unwrap(), Release::Gone);
-    h.store.transaction::<_, StoreError>(|tx| {
-        tx.execute("INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','starting',1,1)", [S2])?;
-        Ok(())
-    }).unwrap();
+    steve_store::testkit::hub::node_fixtures::seed_starting_session(&h.store, &S2).unwrap();
     h.rt.bind(&on_the_item(S2)).unwrap();
     h.rt.prompt(S2, "successor protocol", "steve", &[]).unwrap();
     eventually_sync("successor", || h.count("start_turn") == 1).await;
     assert!(h.store.queued().list(S).unwrap().is_empty());
     assert_eq!(
-        h.q::<i64>("SELECT COUNT(*) FROM decisions WHERE subject_type='session_start'"),
+        node_checks::decision_count_by_subject_type(&h.store, "session_start").unwrap(),
         1
     );
     assert_eq!(
-        h.q::<i64>(
-            "SELECT COUNT(*) FROM decisions WHERE subject_type='session_start' AND status='open'"
-        ),
+        node_checks::decision_count_session_start_open(&h.store).unwrap(),
         0
     );
     assert!(h.rt.prompt(S, "late", "user", &[]).is_err());
     assert!(h.rt.retry_open(S, &build::choice()).is_err());
-    // A queue left on the ended session: reconciliation/flush retires it without opening.
-    h.store.transaction::<_, StoreError>(|tx| {
-        tx.execute("INSERT INTO queued(id,session_id,text,via,created) VALUES ('left',?,'old startup','steve',1)", [S])?;
-        Ok(())
-    }).unwrap();
+    // Inject a queue left by an older build; reconciliation/flush repairs it without opening.
+    steve_store::testkit::hub::node_fixtures::seed_queued(&h.store, &S).unwrap();
     for _ in 0..5 {
         assert_eq!(h.rt.flush(S, None).unwrap(), Planned::Held);
     }
     assert!(h.store.queued().list(S).unwrap().is_empty());
-    assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE method='open_session' AND json_extract(request,'$.body.session')='s1'"), 1);
+    assert_eq!(
+        node_checks::command_count_open_session(&h.store).unwrap(),
+        1
+    );
 }
 
 #[tokio::test]

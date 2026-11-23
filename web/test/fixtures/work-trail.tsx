@@ -1,11 +1,14 @@
+import { updateChat } from "../../src/data/live"
+import { seedMessages, seedSessions } from "./view-data"
+import { useEffect } from "react"
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
-import { api, type REvent, type RSession, type State } from "../../src/api"
+import { api, type REvent, type Shell } from "../../src/api"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
 import { TooltipProvider } from "../../src/components/ui/tooltip"
 import { Trail } from "../../src/components/work-trail"
 import { refresh, st, useStore, type Msg } from "../../src/store"
-import { Transcript } from "../../src/ui"
+import { Transcript } from "../../src/thread/transcript"
 import { LiveSteps, StepsBlock, openSteps } from "../../src/chat2"
 
 /* The work trail in both places: an agent's run (`?done`: the turn ended) and Steve's conversation — a finished
@@ -13,7 +16,8 @@ import { LiveSteps, StepsBlock, openSteps } from "../../src/chat2"
 const q = new URLSearchParams(location.search), done = q.has("done")
 document.documentElement.classList.toggle("dark", q.has("dark"))
 const T = Date.now(), s = (n: number) => T - (120 - n) * 1000
-const sessions: RSession[] = [{ id: "s1", workspace_id: "default", item_id: null, no: 1, bot_id: "dev", harness: "claude-code", model: "claude-opus-5-5", cwd: "/tmp/st-7", status: done ? "ended" : "running", used: 36000, size: 200000, cost: null, title: "瑞典上线调研", device_id: "hub", source: "item", readonly: false, busy: !done, queued: [], created: s(0), updated: s(60) } as RSession]
+seedSessions({ s1: { b: "dev", harness: "claude-code", m: "claude-opus-5-5", cwd: "/tmp/st-7", st: done ? "ended" : "run",
+  title: "瑞典上线调研", device: "hub", src: "item", busy: !done, since: s(0), at: s(60) } })
 let seq = 0
 const ev = (n: number, kind: string, data: any): REvent => ({ seq: ++seq, ts: s(n), kind, data })
 const tool = (n: number, v: any, open = false): REvent => ev(n, "tool", { tool: { id: "t" + seq, origin: "harness", phase: open ? "running" : "succeeded", ...v } })
@@ -37,9 +41,9 @@ const events: REvent[] = [
 ]
 const state = { version: "test", web_version: "test", workspace: { id: "default", name: "默认", description: "", item_prefix: "ST", sort: 0, created: 0 }, workspaces: [], items: [], decisions: [], recent: [], allBots: [],
   bots: [{ id: "dev", name: "Steve 开发 Bot", role: "", main: false, harness: "claude-code", model: null, rules: "", persona: "", proactive: 1, accept_mode: "manual", perm_mode: "auto", avatar: {}, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ["default"], memories: 0 }],
-  projects: [], tags: [], tagUses: {}, thread: [], settings: {}, sessions, devices: [{ id: "hub", name: "Hub", roles: [], os: "", version: "", status: "online", max_sessions: 4, seen: 0, created: 0 }], runtimes: [] } as unknown as State
-api.state = async () => structuredClone(state)
-api.events = async (_id: string, after = 0) => events.filter((e) => e.seq > after)
+  projects: [], tags: [], tagUses: {}, thread: [], settings: {}, devices: [{ id: "hub", name: "Hub", roles: [], os: "", version: "", status: "online", max_sessions: 4, seen: 0, created: 0 }], runtimes: [] } as unknown as Shell
+api.shell = async () => structuredClone(state)
+api.transcript = async () => ({ events, next: null })
 const research: Msg = { id: "r1", k: "steve", t: "", created: T, steps: { ms: 41000, research: { run: "x", model: null, ms: 41000, turns: 3, tools: 7 },
   route: { kind: "research", title: "", bot: "steve", project: null, tags: [], newTags: [], why: "要先读代码再回答", model: "fast", fallback: false, ms: 900 },
   tools: [
@@ -48,13 +52,13 @@ const research: Msg = { id: "r1", k: "steve", t: "", created: T, steps: { ms: 41
     { name: "Bash", kind: "exec", args: { brief: "git log --oneline -5" }, status: "failed", error: "transport", ms: 200 },
     { name: "mcp__steve__steve_knowledge_search", args: { brief: "思考过程展示" }, status: "ok", ms: 300 },
   ] } }
-st.thread = [research]
-st.live = { mid: "m", run: "live", startedAt: T - 14000, tools: [{ name: "Read", brief: "web/src/chat2.tsx", ok: true, kind: "read" }, { name: "Read", brief: "web/src/ui.tsx", ok: true, kind: "read" }, { name: "Grep", brief: "StepsBlock", ok: true, kind: "search" }], now: { name: "Grep", brief: "LiveSteps", kind: "search" } }
+seedMessages([research])
+updateChat({ live: { mid: "m", run: "live", startedAt: T - 14000, tools: [{ name: "Read", brief: "web/src/chat2.tsx", ok: true, kind: "read" }, { name: "Read", brief: "web/src/ui.tsx", ok: true, kind: "read" }, { name: "Grep", brief: "StepsBlock", ok: true, kind: "search" }], now: { name: "Grep", brief: "LiveSteps", kind: "search" } } })
 void refresh()
-setTimeout(() => openSteps("r1"), 300)
 const memory = new Map()
 function Fixture() {
   useStore()
+  useEffect(() => openSteps("r1"), [])
   return (
     <TooltipProvider><SidebarProvider>
       <main className="grid w-full grid-cols-1 gap-10 p-8 lg:grid-cols-2">

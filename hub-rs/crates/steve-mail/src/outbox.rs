@@ -68,13 +68,13 @@ impl Consumer for MailEventsOut {
                 .0
                 .m
                 .store
-                .transaction(|tx| repo::set_event(tx, &p.message_id, &id))
+                .write(|tx| repo::set_event(tx, &p.message_id, &id))
                 .map_err(|e| ConsumeError::Retry(e.to_string()))?;
         }
         Ok(())
     }
 
-    fn apply(&self, _tx: &steve_store::Tx, ev: &Event) -> Result<Applied, ConsumeError> {
+    fn apply(&self, _w: &mut steve_store::W<'_>, ev: &Event) -> Result<Applied, ConsumeError> {
         Ok(Applied::noted(pending(ev)?.message_id))
     }
 }

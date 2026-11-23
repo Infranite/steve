@@ -139,7 +139,7 @@ async fn an_old_generation_is_stale_at_every_guard() {
         fleet: h.fleet.clone(),
     };
     h.store
-        .transaction::<_, steve_store::StoreError>(|tx| {
+        .write::<_, steve_store::StoreError>(|tx| {
             steve_store::nodes::revoke(tx, node.as_str(), "u1", 1)?;
             Ok(())
         })

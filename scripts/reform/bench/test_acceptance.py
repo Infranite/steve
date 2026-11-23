@@ -27,11 +27,11 @@ class AcceptanceTests(unittest.TestCase):
                 path.write_text(json.dumps({"workload": mode, "auth": "bearer", "cli_runs": 0}))
                 config = run.configuration(path)
                 self.assertEqual(config["invalidate_rps"], 0)
-                self.assertEqual(config["load_path"], "/api/state" if mode == "read" else "/api/notifications/read")
+                self.assertEqual(config["load_path"], "/api/summary" if mode == "read" else "/api/notifications/read")
                 self.assertEqual(config["warmup_s"], 5)
                 self.assertEqual(config["load_body"], {"at": 1})
             path.write_text('{"workload":"write"}')
-            self.assertEqual(run.configuration(path, "read")["load_path"], "/api/state")
+            self.assertEqual(run.configuration(path, "read")["load_path"], "/api/summary")
             for override in ({"workload": "mixed"}, {"auth": "other"}, {"warmup_s": 0}, {"load_body": []}):
                 path.write_text(json.dumps(override))
                 with self.assertRaises(ValueError):
@@ -141,12 +141,12 @@ class AcceptanceTests(unittest.TestCase):
         phase.assert_not_called()
 
     def test_numeric_deltas_filter_route_and_sort_lock_callers(self):
-        labels = '{route="/api/state",method="GET",status="2xx"}'
+        labels = '{route="/api/summary",method="GET",status="2xx"}'
         before = f'steve_http_requests_total{labels} 10\nsteve_process_disk_written_bytes 100\n'
         after = f'steve_http_requests_total{labels} 25\nsteve_process_disk_written_bytes 300\n'
         for suffix, value in (("sum", .2), ("count", 15)):
             after += f'steve_http_request_duration_seconds_{suffix}{labels} {value}\n'
-            after += f'steve_http_store_calls_per_request_{suffix}{{route="/api/state"}} {value}\n'
+            after += f'steve_http_store_calls_per_request_{suffix}{{route="/api/summary"}} {value}\n'
         after += 'steve_http_requests_total{route="/other",method="GET",status="2xx"} 999\n'
         after += 'steve_metrics_collection_errors_total{source="io"} 2\n'
         for lock in ("store", "core"):
@@ -154,7 +154,7 @@ class AcceptanceTests(unittest.TestCase):
                 for kind in ("wait", "hold"):
                     after += f'steve_lock_{kind}_seconds_sum{{lock="{lock}",caller="file:{i}"}} {i}\n'
                     after += f'steve_lock_{kind}_seconds_count{{lock="{lock}",caller="file:{i}"}} 2\n'
-        delta = telemetry.difference(before, after, "/api/state", "GET")
+        delta = telemetry.difference(before, after, "/api/summary", "GET")
         self.assertEqual(delta["http"]["steve_http_requests_total"], 15)
         self.assertEqual(delta["disk_written_bytes"]["delta"], 200)
         self.assertEqual(delta["collection_errors"], [{"source": "io", "delta": 2}])
@@ -165,7 +165,7 @@ class AcceptanceTests(unittest.TestCase):
                 self.assertEqual(len(rows), 10)
                 self.assertEqual(rows[0]["caller"], "file:11")
                 self.assertEqual(rows[0]["mean_ms"], 5500)
-        self.assertIn("steve_http_requests_total", telemetry.difference("", "", "/api/state", "GET")["missing"])
+        self.assertIn("steve_http_requests_total", telemetry.difference("", "", "/api/summary", "GET")["missing"])
 
     def test_adapter_environment_is_shared_and_complete(self):
         self.assertEqual(len(run.isolation.ADAPTERS), 17)

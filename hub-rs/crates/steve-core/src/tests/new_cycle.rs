@@ -125,12 +125,11 @@ fn a_wait_without_a_card_ends_when_the_bot_reports_progress() {
     let k = Kit::new();
     /* as ST-49 was left: the cycle started, the bot at work, the item still saying it waits on you */
     let id = k.item("wait", "定义", None);
-    k.db()
-        .exec(
-            "UPDATE items SET phase = 'active', cycle = 2 WHERE id = ?",
-            &[&id],
-        )
-        .unwrap();
+    steve_store::core_fixture::item(
+        k.db().store(),
+        &id,
+        steve_store::core_fixture::ItemState::RestartCycle,
+    );
     k.db()
         .item_patch(&id, patch![now: "新周期，等你说要做什么"])
         .unwrap();

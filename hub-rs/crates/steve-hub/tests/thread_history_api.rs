@@ -1,5 +1,5 @@
-//! The conversation's older history and search over HTTP (ST-50): `/api/state` carries the latest 200 messages;
-//! `GET /api/thread/history` pages back before them (or fills the gap down to a search hit) and `GET
+//! The conversation's older history and search over HTTP (ST-50).
+//! The message view pages back by (created, id), and `GET
 //! /api/thread/search` finds what was said, both without the messages the conversation hides.
 
 use std::collections::HashMap;
@@ -127,87 +127,34 @@ async fn thread_history_and_search() {
     let e = start().await;
     let (_, me) = e.call("GET", "/api/me", None).await;
     let ws = me["workspace"].as_str().expect("workspace").to_string();
-    {
-        let c = rusqlite::Connection::open(&e.db).expect("db");
-        for i in 0..260i64 {
-            let (text, item, meta) = match i {
-                5 => ("讨论对话页的历史定位", None, None),
-                6 => (
-                    "这条被收进事项卡片了",
-                    None,
-                    Some(json!({ "hidden": true }).to_string()),
-                ),
-                7 => ("交给 ST-9 去做", Some("ST-9"), None),
-                8 => ("百分号 100% 完成", None, None),
-                _ => ("普通消息", None, None),
-            };
-            c.execute(
-                "INSERT INTO messages (id, workspace_id, space, author, text, item_id, meta, created) VALUES (?, ?, 'steve', ?, ?, ?, ?, ?)",
-                rusqlite::params![format!("m{i:03}"), ws, if i % 2 == 0 { "me" } else { "steve" }, text, item, meta, 1_000 + i],
-            )
-            .expect("insert");
-        }
-    }
-    let (_, st) = e.call("GET", "/api/state", None).await;
-    let thread = st["thread"].as_array().cloned().unwrap_or_default();
-    assert_eq!(thread.len(), 200);
-    let oldest = thread[0]["created"].as_i64().expect("created");
-    assert_eq!(oldest, 1_060);
+    steve_store::testkit::hub::api::seed_thread_history(&e.db, &ws).unwrap();
 
-    /* paging back: everything before the window, oldest first, the hidden one left out */
+    // The view supplies stored messages, including folded rows.
     let (s, page) = e
-        .call(
-            "GET",
-            &format!("/api/thread/history?before={oldest}&limit=100"),
-            None,
-        )
+        .call("GET", "/api/views/page?kind=message&limit=10", None)
         .await;
     assert_eq!(s, 200, "{page}");
-    let ids: Vec<&str> = page["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|m| m["id"].as_str().unwrap())
-        .collect();
-    assert_eq!(ids.len(), 59);
-    assert_eq!(ids[0], "m000");
-    assert!(!ids.contains(&"m006"));
-    assert_eq!(page["has_more"], json!(false));
+    assert_eq!(page["views"][0]["id"], "m259");
+    assert_eq!(page["views"][9]["id"], "m250");
+    let before = page["next"].as_str().unwrap();
     let (_, page) = e
         .call(
             "GET",
-            &format!("/api/thread/history?before={oldest}&limit=10"),
+            &format!("/api/views/page?kind=message&before={before}&limit=10"),
             None,
         )
         .await;
-    let ids: Vec<&str> = page["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|m| m["id"].as_str().unwrap())
-        .collect();
-    assert_eq!(ids.first(), Some(&"m050"));
-    assert_eq!(ids.last(), Some(&"m059"));
-    assert_eq!(page["has_more"], json!(true));
-    assert_eq!(page["oldest"], json!(1_050));
-
-    /* filling the gap down to a hit: from it up to the window, and whether there is more before it */
-    let (_, fill) = e
-        .call(
-            "GET",
-            &format!("/api/thread/history?before={oldest}&after=1005&limit=2000"),
-            None,
-        )
+    assert_eq!(page["views"][0]["id"], "m249");
+    assert_eq!(page["views"][9]["id"], "m240");
+    let (_, page) = e
+        .call("GET", "/api/views/page?kind=message&before=1007:m007", None)
         .await;
-    let ids: Vec<&str> = fill["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|m| m["id"].as_str().unwrap())
-        .collect();
-    assert_eq!(ids.first(), Some(&"m005"));
-    assert_eq!(ids.len(), 54);
-    assert_eq!(fill["has_more"], json!(true));
+    assert_eq!(page["views"][0]["id"], "m006");
+    assert_eq!(page["views"][0]["meta"]["hidden"], true);
+    assert!(page["next"].is_null());
+    let (_, shell) = e.call("GET", "/api/shell", None).await;
+    assert!(shell.get("thread").is_none());
+    assert!(shell.get("items").is_none());
 
     /* search: text and item number, newest first; the hidden message and LIKE wildcards stay out */
     let (_, hit) = e

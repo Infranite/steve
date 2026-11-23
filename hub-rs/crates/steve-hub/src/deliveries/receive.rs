@@ -162,6 +162,7 @@ impl Service {
         } else {
             // Bound workspace paths belong to the Node, not sessions.cwd (which may be a
             // Hub scratch placeholder). Only the authenticated current execution can name them.
+            workspaces.refresh_roots().map_err(|e| e.to_string())?;
             match workspaces.placement_of(Subject::Session(&session.id)) {
                 Ok(p) => match p.at {
                     At::Workspace(workspace) => {
@@ -424,9 +425,7 @@ mod tests {
         assert!(error.starts_with("delivery Node unavailable:"), "{error}");
         let count: i64 = svc
             .store
-            .reader::<_, steve_store::StoreError>(|c| {
-                Ok(c.query_row("SELECT COUNT(*) FROM deliveries", [], |r| r.get(0))?)
-            })
+            .read(steve_store::testkit::hub::deliveries::count)
             .unwrap();
         assert_eq!(count, 0);
     }

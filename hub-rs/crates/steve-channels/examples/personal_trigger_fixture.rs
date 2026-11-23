@@ -15,10 +15,11 @@ use support::Fixture;
 type F = Extension<Arc<Fixture>>;
 
 async fn state(Extension(f): F) -> Json<Value> {
-    let outbound=f.env.store().reader(|c| -> steve_modules::ApiResult<Vec<Value>> {
-        let mut st=c.prepare("SELECT id,status,text FROM chan_messages WHERE direction='out' ORDER BY rowid")?;
-        Ok(st.query_map([], |r|Ok(json!({"id":r.get::<_,String>(0)?,"status":r.get::<_,String>(1)?,"text":r.get::<_,String>(2)?})))?.collect::<rusqlite::Result<Vec<_>>>()?)
-    }).unwrap();
+    let outbound = steve_store::testkit::channels::outbound(f.env.store())
+        .unwrap()
+        .into_iter()
+        .map(|m| json!({"id":m.id,"status":m.status,"text":m.text}))
+        .collect::<Vec<_>>();
     Json(
         json!({"connections":{"me":f.me,"second":f.second,"other":f.other,"bot":f.bot},"sends":f.sends(),"outbound":outbound}),
     )
@@ -81,9 +82,13 @@ async fn record(
     Query(q): Query<steve_channels::conv_record::RecordQuery>,
 ) -> steve_modules::ApiResult<Json<Value>> {
     let viewer = f.env.modules.viewer(&caller(WS, ME))?;
-    Ok(Json(f.env.store().reader(|c| {
-        steve_channels::conv_record::record(c, WS, &viewer, &conv, &q)
-    })?))
+    Ok(Json(steve_channels::conv_record::record(
+        f.env.store(),
+        WS,
+        &viewer,
+        &conv,
+        &q,
+    )?))
 }
 
 #[tokio::main]

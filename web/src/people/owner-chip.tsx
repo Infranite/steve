@@ -1,6 +1,6 @@
 /* <OwnerChip objectType objectId/> — the 负责人 of a bot, device, persona, connection, account or bot party
  * (ownership.md §4): shows who it is and lets you pick someone else or clear it. Every change is a change
- * record, so the toast offers 撤销. Renders nothing on a Hub without the contacts module. */
+ * record, so the toast offers 撤销. */
 import { useEffect, useState, type MouseEvent } from "react"
 import { cn } from "cn"
 import { CheckIcon, UserRoundIcon, UserRoundXIcon } from "lucide-react"
@@ -12,7 +12,7 @@ import { toast, st } from "@/store"
 import { hubBase } from "@/hub"
 import { people, type ContactBrief } from "@/api/people"
 import { ownership, type Changed, type ObjectType, type Steward } from "@/api/ownership"
-import { act, joinList, useLoad, usePeopleOn } from "@/people/common"
+import { act, joinList, useLoad } from "@/people/common"
 import { t as tr, useT } from "@/i18n"
 
 /** the toast after a change, with 撤销 when the Hub recorded one */
@@ -25,21 +25,13 @@ export function changedToast(r: Changed | undefined, text: string) {
 
 const ownersOf = (xs: Steward[]) => xs.filter((s) => s.role === "owner")
 
-export function OwnerChip({ objectType, objectId, className, bare = false, showStatus = false }: { objectType: ObjectType; objectId: string; className?: string; bare?: boolean; showStatus?: boolean }) {
-  const on = usePeopleOn(), t = useT()
-  // Standalone labelled rows need a status; compact chips elsewhere can still disappear when unavailable.
-  if (!on) {
-    if (!showStatus) return null
-    return on === null
-      ? <Skeleton className={cn("inline-flex h-6 w-20 rounded-full", className)} aria-label={t("common:a11y.loading")} />
-      : <span className={cn("type-callout text-muted-foreground", className)} role="status">{t("people:owner.unavailable")}</span>
-  }
-  return <Chip key={JSON.stringify([hubBase(), st.workspace?.id, objectType, objectId])} objectType={objectType} objectId={objectId} className={className} bare={bare} showStatus={showStatus} />
+export function OwnerChip({ objectType, objectId, className, bare = false }: { objectType: ObjectType; objectId: string; className?: string; bare?: boolean }) {
+  return <Chip key={JSON.stringify([hubBase(), st.workspace?.id, objectType, objectId])} objectType={objectType} objectId={objectId} className={className} bare={bare} />
 }
 
-function Chip({ objectType, objectId, className, bare, showStatus }: { objectType: ObjectType; objectId: string; className?: string; bare: boolean; showStatus: boolean }) {
+function Chip({ objectType, objectId, className, bare }: { objectType: ObjectType; objectId: string; className?: string; bare: boolean }) {
   const t = useT()
-  const L = useLoad(() => ownership.of(objectType, objectId), [objectType, objectId], ["party", "decision"])
+  const L = useLoad(() => ownership.of(objectType, objectId), [objectType, objectId], ["party", "patch"])
   const [open, setOpen] = useState(false), [q, setQ] = useState(""), [busy, setBusy] = useState(false)
   const [found, setFound] = useState<ContactBrief[] | null>(null)
   useEffect(() => {
@@ -48,7 +40,7 @@ function Chip({ objectType, objectId, className, bare, showStatus }: { objectTyp
     const h = setTimeout(() => { people.contacts({ q: q.trim() || undefined, limit: 30 }).then((xs) => { if (live) setFound(xs) }, () => { if (live) setFound([]) }) }, q ? 150 : 0)
     return () => { live = false; clearTimeout(h) }
   }, [open, q])
-  if (L.err) return !showStatus ? null : <span className={cn("flex flex-wrap items-center justify-end gap-2 type-callout", className)} role="alert" data-owner-error><span className="text-destructive">{t("people:owner.loadFailed")}</span><Button size="xs" variant="outline" onClick={() => L.reload()}>{t("common:action.retry")}</Button></span>
+  if (L.err) return <span className={cn("flex flex-wrap items-center justify-end gap-2 type-callout", className)} role="alert" data-owner-error><span className="text-destructive">{t("people:owner.loadFailed")}</span><Button size="xs" variant="outline" onClick={() => L.reload()}>{t("common:action.retry")}</Button></span>
   if (!L.data) return <Skeleton className={cn("inline-flex h-6 w-20 rounded-full", className)} aria-hidden />
   const { object, stewards } = L.data
   const owners = ownersOf(stewards), confirmed = owners.filter((s) => s.status === "confirmed"), proposed = owners.filter((s) => s.status !== "confirmed")

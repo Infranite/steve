@@ -1,3 +1,4 @@
+import { getItem } from "@/store"
 /* The pieces the todo, goal and calendar pages share: quick add, a todo's row, a goal's card and progress, a deadline
  * in words, and the actions on a todo (done, snooze, hand to a Bot, drop). */
 import { useMemo, useRef, useState, type ReactNode } from "react"
@@ -173,7 +174,7 @@ export function GoalChip({ goal }: { goal: { id: string; text: string | null } }
  *  deadline. Hovering (or, on a phone, "…") offers 交给 Bot and 推迟. A todo handed to a Bot shows its item instead. */
 export function TodoRow({ x, now, showGoal = true }: { x: Todo; now: number; showGoal?: boolean }) {
   const t = useT(), due = useDueText()
-  const w = dueWhen(x, now), item = x.item_id ? st.items.find((i) => i.id === x.item_id) : undefined
+  const w = dueWhen(x, now), item = x.item_id ? getItem(x.item_id) : undefined
   if (x.state === "handed") return (
     <div role="listitem" className="group/todo relative flex min-h-12 items-center gap-3 rounded-lg px-3 py-2 hover:bg-accent" data-todo={x.id} data-todo-state="handed">
       <a href={"#/items/" + (x.item_id ?? "")} className="absolute inset-0 rounded-[inherit]" aria-label={t("todos:row.openItem", { id: x.item_id })} />

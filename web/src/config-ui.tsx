@@ -11,12 +11,13 @@ import { api } from "@/api"
 import { go } from "@/ui"
 import { diffWords } from "@/components/affect/inline-diff-clean"
 import { useT } from "@/i18n"
+import enShell from "@/i18n/locales/en/shell.ts"
 
 export type Ctx = { kind: "bot" | "project" | "settings" | "models" | "tags" | "global"; id?: string }
 
 export function ProposalCard({ p, inChat = false, disabled = false, settled }: { p: any; inChat?: boolean; disabled?: boolean; settled?: React.ReactNode }) {
   const [busy, setBusy] = useState(false), t = useT()
-  const empty = (v: string) => !v || v === t("shell:config.emptyValue", { lng: "zh-CN" }) || v === t("shell:config.emptyValue", { lng: "en" })
+  const empty = (v: string) => !v || v === t("shell:config.emptyValue", { lng: "zh-CN" }) || v === enShell.config.emptyValue
   const added = p.changes.filter((c: any) => empty(c.from) && !empty(c.to)).length
   const removed = p.changes.filter((c: any) => !empty(c.from) && empty(c.to)).length
   const modified = p.changes.length - added - removed

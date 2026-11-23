@@ -3,7 +3,7 @@ import { hubNavigationAllowed, nativeBridge } from "@/hub"
 import { NativeShellSession, nativeHubChrome, shellBridge, type ShellContext } from "@/native-shell"
 import { landAttentionTarget } from "@/native-attention-target"
 import { AttentionVisibilityPublisher } from "@/native-attention-visible"
-import { st, switchWorkspace } from "@/store"
+import { st, switchWorkspace, useStoreSelector } from "@/store"
 import { getSheet, getTheme, go } from "@/ui"
 
 /** App-level lifecycle: keyed pages can unmount without disposing pending navigation or focus listeners. */
@@ -15,8 +15,8 @@ export function useNativeShell(context: Omit<ShellContext, "visible" | "focused"
   const latest = useRef(context)
   const committedSheet = useRef(getSheet())
   const addHub = useRef(addHubVisible)
-  const sheet = getSheet()
-  const themePreference = getTheme()
+  const sheet = useStoreSelector(getSheet)
+  const themePreference = useStoreSelector(getTheme)
   useEffect(() => {
     latest.current = context
     refreshAppearance.current?.()

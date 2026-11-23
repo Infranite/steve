@@ -20,14 +20,16 @@
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::{ApiError, ApiResult, Body, Caller, Modules};
-use steve_store::base::mems::{self, Mem, MemFilter, MemPatch};
-use steve_store::base::{self, Level, ObjRef, Viewer};
-use steve_store::{Tx, uid};
+use steve_store::base::mems::{Mem, MemFilter, MemPatch};
+use steve_store::base::{Level, ObjRef, Viewer};
+use steve_store::knowledge::{
+    CandidateRows, Memories, MemoryChange, MemoryChanges, NewMemoryChange,
+};
+use steve_store::{ItemReads, Members, MemoryIndex, Read, References, W};
 
 use crate::candidates::{self, NewCandidate, Origin, OriginKind};
 use crate::extract::Names;
@@ -114,12 +116,10 @@ fn list_tool(m: &Modules, viewer: &Viewer, args: &Value) -> ApiResult<String> {
         limit: 0,
     };
     // Workspace service callers can list shared memories, but have no personal profile.
-    let member: bool = m.store.reader(|c| {
-        Ok::<_, steve_store::StoreError>(c.query_row(
-            "SELECT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?)",
-            params![viewer.ws, viewer.user],
-            |r| r.get(0),
-        )?)
+    let member = m.store.read(|c| {
+        Members::new(c)
+            .role(&viewer.ws, &viewer.user)
+            .map(|role| role.is_some())
     })?;
     let profile = if member {
         Some(steve_modules::contacts::service::me_contact(
@@ -132,25 +132,22 @@ fn list_tool(m: &Modules, viewer: &Viewer, args: &Value) -> ApiResult<String> {
     } else {
         None
     };
-    let out = m.store.reader(|c| {
+    let out = m.store.read(|c| {
         let used = provenance::use_counts(c, &viewer.ws, "mem")?;
-        let list = mems::all(c, viewer, &f)?;
+        let list = Memories(c).all(viewer, &f)?;
         let mut out = Vec::with_capacity(list.len());
         for x in &list {
             let about: Vec<String> = x
                 .about
                 .iter()
                 .map(|a| {
-                    crate::repo::ref_name_for(c, viewer, a)
+                    References(c).in_workspace(viewer,a)
                         .ok()
                         .flatten()
                         .unwrap_or_else(|| a.id.clone())
                 })
                 .collect();
-            let ranges: Vec<Value> = c.prepare_cached("SELECT conv, first_id, last_id, first_at, last_at, packet_id FROM mem_ranges WHERE workspace_id = ? AND mem_id = ? ORDER BY first_at, conv, first_id")?
-                .query_map(params![viewer.ws, x.id], |r| Ok(json!({"conv": r.get::<_, String>(0)?, "first_id": r.get::<_, String>(1)?, "last_id": r.get::<_, String>(2)?,
-                    "first_at": r.get::<_, i64>(3)?, "last_at": r.get::<_, i64>(4)?, "packet_id": r.get::<_, Option<String>>(5)?})))?
-                .collect::<rusqlite::Result<_>>()?;
+            let ranges = MemoryIndex::new(c).get(&viewer.ws,&x.id)?.ranges;
             let o = provenance::origin(c, x)?;
             let (n, last) = used.get(&x.id).copied().unwrap_or((0, 0));
             out.push(json!({
@@ -186,8 +183,9 @@ fn strs(args: &Value, k: &str) -> Vec<String> {
 }
 
 /// The memory `id`, visible to the viewer.
-fn own(c: &Connection, viewer: &Viewer, id: &str) -> ApiResult<Mem> {
-    mems::visible(c, viewer, id)?
+fn own(c: &mut impl Read, viewer: &Viewer, id: &str) -> ApiResult<Mem> {
+    Memories(c)
+        .visible(viewer, id)?
         .ok_or_else(|| ApiError::rule(format!("No memory {id}. Use ids from steve_memory_list.")))
 }
 
@@ -201,7 +199,7 @@ fn run_of(cx: &McpCx) -> String {
 
 #[allow(clippy::too_many_arguments)]
 fn record(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     run: &str,
     writer: &str,
@@ -213,29 +211,21 @@ fn record(
     reason: &str,
     state: &str,
 ) -> ApiResult<String> {
-    let id = uid("mch");
-    let now = steve_store::now();
-    tx.prepare_cached(
-        "INSERT INTO mem_changes (id, workspace_id, run_id, writer, op, mem_id, targets, before, after, reason, state, created, updated)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    )?
-    .execute(params![
-        id,
+    let id = MemoryChanges(tx).record(
         ws,
-        run,
-        writer,
-        op,
-        mem_id,
-        serde_json::to_string(targets).unwrap_or_default(),
-        before.to_string(),
-        after.to_string(),
-        reason,
-        state,
-        now,
-        now
-    ])?;
-    base::audit(
-        tx,
+        NewMemoryChange {
+            run,
+            writer,
+            op,
+            mem: mem_id,
+            targets,
+            before,
+            after,
+            reason,
+            state,
+        },
+    )?;
+    tx.audit(
         ws,
         writer,
         &format!("mm.{op}"),
@@ -245,9 +235,8 @@ fn record(
     Ok(id)
 }
 
-fn set_status(tx: &Tx, id: &str, status: &str) -> ApiResult<()> {
-    mems::patch(
-        tx,
+fn set_status(tx: &mut W<'_>, id: &str, status: &str) -> ApiResult<()> {
+    Memories(tx).patch(
         id,
         &MemPatch {
             status: Some(status.into()),
@@ -268,7 +257,7 @@ struct TidyRequest {
 }
 
 struct Tidying<'a, 'tx> {
-    tx: &'a Tx<'tx>,
+    tx: &'a mut W<'tx>,
     cx: &'a McpCx,
     viewer: &'a Viewer,
     request: &'a TidyRequest,
@@ -301,8 +290,8 @@ fn merge_text(list: &[Mem], args: &Value) -> ApiResult<String> {
 }
 
 impl Tidying<'_, '_> {
-    fn merge(&self) -> ApiResult<String> {
-        let tx = self.tx;
+    fn merge(&mut self) -> ApiResult<String> {
+        let tx = &mut *self.tx;
         let cx = self.cx;
         let args = self.args;
         let list = self.list;
@@ -337,7 +326,7 @@ impl Tidying<'_, '_> {
             .map(|x| x.level)
             .max_by_key(|l| level_rank(*l))
             .unwrap_or(Level::Conclusion);
-        let new = candidates::propose(
+        let new = candidates::propose_in(
             tx,
             &origin,
             &NewCandidate {
@@ -357,10 +346,7 @@ impl Tidying<'_, '_> {
             },
         )?;
         for x in list {
-            tx.prepare_cached(
-                "INSERT OR IGNORE INTO mem_supersedes (mem_id, old_id) VALUES (?, ?)",
-            )?
-            .execute(params![new.id, x.id])?;
+            CandidateRows(tx).supersede(&new.id, &x.id)?;
         }
         let id = record(
             tx,
@@ -382,8 +368,8 @@ impl Tidying<'_, '_> {
         ))
     }
 
-    fn resolve(&self) -> ApiResult<String> {
-        let tx = self.tx;
+    fn resolve(&mut self) -> ApiResult<String> {
+        let tx = &mut *self.tx;
         let viewer = self.viewer;
         let args = self.args;
         let list = self.list;
@@ -428,8 +414,8 @@ impl Tidying<'_, '_> {
         ))
     }
 
-    fn flag(&self) -> ApiResult<String> {
-        let tx = self.tx;
+    fn flag(&mut self) -> ApiResult<String> {
+        let tx = &mut *self.tx;
         let list = self.list;
         let ids = &self.request.ids;
         let ws = &self.request.ws;
@@ -459,8 +445,8 @@ impl Tidying<'_, '_> {
         ))
     }
 
-    fn stale(&self) -> ApiResult<String> {
-        let tx = self.tx;
+    fn stale(&mut self) -> ApiResult<String> {
+        let tx = &mut *self.tx;
         let list = self.list;
         let ws = &self.request.ws;
         let run = &self.request.run;
@@ -493,8 +479,8 @@ impl Tidying<'_, '_> {
         ))
     }
 
-    fn about(&self) -> ApiResult<String> {
-        let tx = self.tx;
+    fn about(&mut self) -> ApiResult<String> {
+        let tx = &mut *self.tx;
         let viewer = self.viewer;
         let args = self.args;
         let list = self.list;
@@ -513,8 +499,7 @@ impl Tidying<'_, '_> {
         if x.about.contains(&r) {
             return Ok(format!("{} is already about {name}.", x.id));
         }
-        tx.prepare_cached("INSERT OR IGNORE INTO mem_about (mem_id, workspace_id, object_type, object_id) VALUES (?, ?, ?, ?)")?
-            .execute(params![x.id, ws, r.kind, r.id])?;
+        Memories(tx).add_subject(ws, &x.id, &r)?;
         touch(tx, ws, &x.id)?;
         let id = record(
             tx,
@@ -532,8 +517,8 @@ impl Tidying<'_, '_> {
         Ok(format!("{} is now about {name} (change {id}).", x.id))
     }
 
-    fn source(&self) -> ApiResult<String> {
-        let tx = self.tx;
+    fn source(&mut self) -> ApiResult<String> {
+        let tx = &mut *self.tx;
         let args = self.args;
         let list = self.list;
         let ws = &self.request.ws;
@@ -554,20 +539,14 @@ impl Tidying<'_, '_> {
             .unwrap_or_default()
             .trim()
             .to_string();
-        let found: Option<String> = tx
-            .prepare_cached("SELECT title FROM items WHERE id = ? AND workspace_id = ?")?
-            .query_row(params![item, ws], |r| r.get(0))
-            .optional()?;
+        let found = ItemReads(tx).title(ws, &item)?;
         if item.is_empty() || found.is_none() {
             return Err(ApiError::rule(
                 "source: item is the id of the item it came from (ST-12).",
             ));
         }
         let label = format!("{item} 交付时");
-        tx.execute(
-            "UPDATE mems SET source_type = 'item', source_id = ?, source_label = ?, updated = ? WHERE id = ?",
-            params![item, label, steve_store::now(), x.id],
-        )?;
+        Memories(tx).set_source(&x.id, "item", Some(&item), &label)?;
         touch(tx, ws, &x.id)?;
         let before = json!({"type": x.source_type, "id": x.source_id, "label": x.source_label});
         let id = record(
@@ -628,13 +607,13 @@ fn tidy(m: &Modules, cx: &McpCx, viewer: &Viewer, args: &Value) -> ApiResult<Str
         ws,
         writer,
     };
-    let out = m.store.transaction(|tx| -> ApiResult<String> {
+    let out = m.store.write(|tx| -> ApiResult<String> {
         let list: Vec<Mem> = request
             .ids
             .iter()
             .map(|i| own(tx, viewer, i))
             .collect::<ApiResult<_>>()?;
-        let tidy = Tidying {
+        let mut tidy = Tidying {
             tx,
             cx,
             viewer,
@@ -665,9 +644,9 @@ fn level_rank(l: Level) -> u8 {
 }
 
 /// Re-indexes a memory whose `about` or source changed, and tells the pages.
-fn touch(tx: &Tx, ws: &str, id: &str) -> ApiResult<()> {
+fn touch(tx: &mut W<'_>, ws: &str, id: &str) -> ApiResult<()> {
     sync::sync_mem(tx, id, steve_store::now())?;
-    tx.publish(steve_types::DomainEvent::from(
+    tx.emit(steve_types::DomainEvent::from(
         steve_types::ConfigEvent::Mm {
             id: {
                 let value: String = id.into();
@@ -706,7 +685,7 @@ async fn steward_get(State(m): State<Modules>, who: Caller) -> ApiResult<Json<Va
     m.blocking(move |m| {
         let id = m
             .store
-            .reader(|c| crate::repo::mark(c, &who.ws, STEWARD_MARK))?;
+            .read(|c| steve_store::knowledge::Documents(c).mark(&who.ws, STEWARD_MARK))?;
         Ok(Json(json!({ "schedule_id": id.filter(|x| !x.is_empty()) })))
     })
     .await
@@ -723,8 +702,9 @@ async fn steward_put(
             return Err(ApiError::invalid("schedule_id"));
         }
         let now = m.clock.now();
-        m.store
-            .transaction(|tx| crate::repo::set_mark(tx, &who.ws, STEWARD_MARK, &id, now))?;
+        m.store.write(|tx| {
+            steve_store::knowledge::Documents(tx).set_mark(&who.ws, STEWARD_MARK, &id, now)
+        })?;
         Ok(Json(
             json!({ "schedule_id": (!id.is_empty()).then_some(id) }),
         ))
@@ -771,47 +751,19 @@ async fn keep_route(
         .await
 }
 
-struct Row {
-    id: String,
-    op: String,
-    mem_id: String,
-    targets: Vec<String>,
-    before: Value,
-    after: Value,
-    reason: String,
-    state: String,
-    created: i64,
-}
-
-fn from_row(r: &rusqlite::Row) -> rusqlite::Result<Row> {
-    let js = |s: String| serde_json::from_str::<Value>(&s).unwrap_or(Value::Null);
-    Ok(Row {
-        id: r.get("id")?,
-        op: r.get("op")?,
-        mem_id: r.get("mem_id")?,
-        targets: serde_json::from_str(&r.get::<_, String>("targets")?).unwrap_or_default(),
-        before: js(r.get("before")?),
-        after: js(r.get("after")?),
-        reason: r.get("reason")?,
-        state: r.get("state")?,
-        created: r.get("created")?,
-    })
-}
-
-fn row(c: &Connection, ws: &str, id: &str) -> ApiResult<Row> {
-    c.prepare_cached("SELECT * FROM mem_changes WHERE id = ? AND workspace_id = ?")?
-        .query_row([id, ws], from_row)
-        .optional()?
+fn row(c: &mut impl Read, ws: &str, id: &str) -> ApiResult<MemoryChange> {
+    MemoryChanges(c)
+        .get(ws, id)?
         .ok_or_else(|| ApiError::not_found("改动"))
 }
 
 /// A merge's state follows its candidate: `pending` until answered, `confirmed`, or `dismissed` once
 /// the candidate is gone; `undone` stays.
-fn live_state(c: &Connection, r: &Row) -> ApiResult<String> {
+fn live_state(c: &mut impl Read, r: &MemoryChange) -> ApiResult<String> {
     if r.op != "merge" || r.state == "undone" {
         return Ok(r.state.clone());
     }
-    Ok(match mems::get(c, &r.mem_id)?.map(|m| m.status) {
+    Ok(match Memories(c).get(&r.mem_id)?.map(|m| m.status) {
         Some(s) if s == "candidate" => "pending".into(),
         Some(s) if s == "confirmed" => "confirmed".into(),
         Some(_) => "stale".into(),
@@ -819,8 +771,8 @@ fn live_state(c: &Connection, r: &Row) -> ApiResult<String> {
     })
 }
 
-fn mem_or_gone(c: &Connection, viewer: &Viewer, id: &str) -> ApiResult<Option<Value>> {
-    Ok(match mems::get(c, id)? {
+fn mem_or_gone(c: &mut impl Read, viewer: &Viewer, id: &str) -> ApiResult<Option<Value>> {
+    Ok(match Memories(c).get(id)? {
         Some(x) if x.workspace_id == viewer.ws && viewer.sees(&x.visibility, &x.created_by) => {
             Some(mem_json_for(c, viewer, &x))
         }
@@ -829,11 +781,8 @@ fn mem_or_gone(c: &Connection, viewer: &Viewer, id: &str) -> ApiResult<Option<Va
     })
 }
 
-fn run_json(c: &Connection, ws: &str, run: &str, writer: &str, at: i64) -> ApiResult<Value> {
-    let item: Option<(String, String)> = c
-        .prepare_cached("SELECT id, title FROM items WHERE id = ? AND workspace_id = ?")?
-        .query_row(params![run, ws], |r| Ok((r.get(0)?, r.get(1)?)))
-        .optional()?;
+fn run_json(c: &mut impl Read, ws: &str, run: &str, writer: &str, at: i64) -> ApiResult<Value> {
+    let item = ItemReads(c).title(ws, run)?.map(|title| (run, title));
     let href = match (&item, run.starts_with("ses_")) {
         (Some((i, _)), _) => format!("#/items/{i}"),
         (None, true) => format!("#/sessions/{run}"),
@@ -850,26 +799,16 @@ fn run_json(c: &Connection, ws: &str, run: &str, writer: &str, at: i64) -> ApiRe
 /// targets, after, created}]}]`. Changes to memories the caller cannot see are left out.
 pub fn changes(m: &Modules, who: &Caller, run: Option<&str>) -> ApiResult<Value> {
     let viewer = m.viewer(who)?;
-    m.store.reader(|c| {
-        let runs: Vec<(String, String, i64)> = match run {
-            Some(r) => c
-                .prepare_cached("SELECT run_id, writer, MAX(created) FROM mem_changes WHERE workspace_id = ? AND run_id = ? GROUP BY run_id, writer")?
-                .query_map([&who.ws, r], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-                .collect::<rusqlite::Result<_>>()?,
-            None => c
-                .prepare_cached("SELECT run_id, writer, MAX(created) AS at FROM mem_changes WHERE workspace_id = ? GROUP BY run_id, writer ORDER BY at DESC LIMIT ?")?
-                .query_map(params![who.ws, RUNS_SHOWN as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-                .collect::<rusqlite::Result<_>>()?,
-        };
+    crate::read_api(&m.store, |c| {
+        let runs = MemoryChanges(c).runs(&who.ws, run, RUNS_SHOWN)?;
         let mut out = Vec::new();
         for (run_id, writer, at) in runs {
-            let rows: Vec<Row> = c
-                .prepare_cached("SELECT * FROM mem_changes WHERE workspace_id = ? AND run_id = ? AND writer = ? ORDER BY created, rowid")?
-                .query_map(params![who.ws, run_id, writer], from_row)?
-                .collect::<rusqlite::Result<_>>()?;
+            let rows = MemoryChanges(c).of_run(&who.ws, &run_id, &writer)?;
             let mut list = Vec::new();
             for r in &rows {
-                let Some(mem) = mem_or_gone(c, &viewer, &r.mem_id)? else { continue };
+                let Some(mem) = mem_or_gone(c, &viewer, &r.mem_id)? else {
+                    continue;
+                };
                 let targets: Vec<Value> = r
                     .targets
                     .iter()
@@ -891,26 +830,16 @@ pub fn changes(m: &Modules, who: &Caller, run: Option<&str>) -> ApiResult<Value>
     })
 }
 
-fn set_state(tx: &Tx, id: &str, state: &str, before: Option<&Value>) -> ApiResult<()> {
-    match before {
-        Some(b) => tx.execute(
-            "UPDATE mem_changes SET state = ?, before = ?, updated = ? WHERE id = ?",
-            params![state, b.to_string(), steve_store::now(), id],
-        )?,
-        None => tx.execute(
-            "UPDATE mem_changes SET state = ?, updated = ? WHERE id = ?",
-            params![state, steve_store::now(), id],
-        )?,
-    };
-    Ok(())
+fn set_state(tx: &mut W<'_>, id: &str, state: &str, before: Option<&Value>) -> ApiResult<()> {
+    Ok(MemoryChanges(tx).set_state(id, state, before)?)
 }
 
 /// Puts back what `before` says each memory's status was (only those still `stale`).
-fn restore_statuses(tx: &Tx, before: &Value) -> ApiResult<()> {
+fn restore_statuses(tx: &mut W<'_>, before: &Value) -> ApiResult<()> {
     if let Some(o) = before.as_object() {
         for (id, s) in o {
             if let Some(s) = s.as_str()
-                && mems::get(tx, id)?.is_some_and(|x| x.status == "stale")
+                && Memories(tx).get(id)?.is_some_and(|x| x.status == "stale")
             {
                 set_status(tx, id, s)?;
             }
@@ -923,7 +852,7 @@ fn restore_statuses(tx: &Tx, before: &Value) -> ApiResult<()> {
 /// (its candidate goes); a confirmed merge gives the merged memories back and removes the merge.
 pub fn undo(m: &Modules, who: &Caller, id: &str) -> ApiResult<Value> {
     let viewer = m.viewer(who)?;
-    let (r, state) = m.store.reader(|c| {
+    let (r, state) = crate::read_api(&m.store, |c| {
         let r = row(c, &who.ws, id)?;
         let s = live_state(c, &r)?;
         Ok::<_, ApiError>((r, s))
@@ -939,7 +868,7 @@ pub fn undo(m: &Modules, who: &Caller, id: &str) -> ApiResult<Value> {
             },
         )?;
     }
-    m.store.transaction(|tx| {
+    m.store.write(|tx| {
         let state = live_state(tx, &r)?;
         if r.op == "flag" && state == "dismissed" {
             set_state(tx, &r.id, "open", None)?;
@@ -950,7 +879,9 @@ pub fn undo(m: &Modules, who: &Caller, id: &str) -> ApiResult<Value> {
             return Ok(json!({"ok": true}));
         }
         if matches!(state.as_str(), "undone" | "dismissed" | "open") {
-            return Err(ApiError::conflict(steve_i18n::t!("knowledge.change.not_undoable")));
+            return Err(ApiError::conflict(steve_i18n::t!(
+                "knowledge.change.not_undoable"
+            )));
         }
         own(tx, &viewer, &r.mem_id).map_err(|_| ApiError::not_found(NOUN))?;
         match r.op.as_str() {
@@ -959,51 +890,52 @@ pub fn undo(m: &Modules, who: &Caller, id: &str) -> ApiResult<Value> {
                 // kept one: the others come back, and the question is open again
                 restore_statuses(tx, &r.before)?;
                 set_state(tx, &r.id, "open", Some(&json!({})))?;
-                base::audit(tx, &who.ws, &who.me, "mm.change_undo", &r.mem_id, &json!({"change": r.id}))?;
+                tx.audit(
+                    &who.ws,
+                    &who.me,
+                    "mm.change_undo",
+                    &r.mem_id,
+                    &json!({"change": r.id}),
+                )?;
                 return Ok(json!({"ok": true}));
             }
             "about" => {
                 if let Ok(a) = serde_json::from_value::<ObjRef>(r.after["about"].clone()) {
-                    tx.execute(
-                        "DELETE FROM mem_about WHERE mem_id = ? AND object_type = ? AND object_id = ?",
-                        params![r.mem_id, a.kind, a.id],
-                    )?;
+                    Memories(tx).remove_subject(&r.mem_id, &a)?;
                     touch(tx, &who.ws, &r.mem_id)?;
                 }
             }
             "source" => {
                 let b = &r.before;
-                tx.execute(
-                    "UPDATE mems SET source_type = ?, source_id = ?, source_label = ?, updated = ? WHERE id = ?",
-                    params![
-                        b["type"].as_str().unwrap_or("steve"),
-                        b["id"].as_str(),
-                        b["label"].as_str().unwrap_or_default(),
-                        steve_store::now(),
-                        r.mem_id
-                    ],
+                Memories(tx).set_source(
+                    &r.mem_id,
+                    b["type"].as_str().unwrap_or("steve"),
+                    b["id"].as_str(),
+                    b["label"].as_str().unwrap_or_default(),
                 )?;
                 touch(tx, &who.ws, &r.mem_id)?;
             }
             "merge" => {
-                let olds: Vec<String> = tx
-                    .prepare_cached("SELECT old_id FROM mem_supersedes WHERE mem_id = ?")?
-                    .query_map([&r.mem_id], |x| x.get(0))?
-                    .collect::<rusqlite::Result<_>>()?;
+                let olds = CandidateRows(tx).supersedes(&r.mem_id)?;
                 for o in &olds {
-                    if mems::get(tx, o)?.is_some_and(|x| x.status == "stale") {
+                    if Memories(tx).get(o)?.is_some_and(|x| x.status == "stale") {
                         set_status(tx, o, "confirmed")?;
                     }
                 }
-                tx.execute("DELETE FROM mem_supersedes WHERE mem_id = ?", [&r.mem_id])?;
-                tx.execute("DELETE FROM mem_candidates WHERE mem_id = ?", [&r.mem_id])?;
-                mems::delete(tx, &r.mem_id)?;
+                CandidateRows(tx).remove(&r.mem_id)?;
+                Memories(tx).delete(&r.mem_id)?;
                 sync::sync_mem(tx, &r.mem_id, steve_store::now())?;
             }
             _ => {}
         }
         set_state(tx, &r.id, "undone", None)?;
-        base::audit(tx, &who.ws, &who.me, "mm.change_undo", &r.mem_id, &json!({"change": r.id}))?;
+        tx.audit(
+            &who.ws,
+            &who.me,
+            "mm.change_undo",
+            &r.mem_id,
+            &json!({"change": r.id}),
+        )?;
         Ok(json!({"ok": true}))
     })
 }
@@ -1012,7 +944,7 @@ pub fn undo(m: &Modules, who: &Caller, id: &str) -> ApiResult<Value> {
 /// (undoable), or `null`: they all hold.
 pub fn keep(m: &Modules, who: &Caller, id: &str, keep: Option<&str>) -> ApiResult<Value> {
     let viewer = m.viewer(who)?;
-    m.store.transaction(|tx| {
+    m.store.write(|tx| {
         let r = row(tx, &who.ws, id)?;
         if r.op != "flag" || r.state != "open" {
             return Err(ApiError::conflict(steve_i18n::t!(
@@ -1038,8 +970,7 @@ pub fn keep(m: &Modules, who: &Caller, id: &str, keep: Option<&str>) -> ApiResul
             }
             Some(_) => return Err(ApiError::invalid("keep")),
         }
-        base::audit(
-            tx,
+        tx.audit(
             &who.ws,
             &who.me,
             "mm.flag_answer",

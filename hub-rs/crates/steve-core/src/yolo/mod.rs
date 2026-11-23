@@ -52,7 +52,7 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 use steve_modules::{ApiError, ApiResult, Clock, SystemClock};
-use steve_store::base::audit;
+use steve_store::audit_repo::record as audit;
 use steve_store::yolo::{self as repo, ITEM, PROJECT, ScopeChange, ScopeRow, WORKSPACE};
 
 use crate::repo::{Db, Decision, Project};
@@ -192,30 +192,26 @@ impl Yolo {
 
     fn ws_row(&self, ws: &str) -> ApiResult<Option<ScopeRow>> {
         self.store()
-            .reader(|c| repo::scope_get(c, ws, WORKSPACE, ws))
+            .read(|c| repo::scope_get(c, ws, WORKSPACE, ws))
             .map_err(store_err)
     }
 
     /// `GET /yolo`.
     pub fn status(&self, ws: &str) -> ApiResult<Value> {
         let projects = self.store().projects().list(ws, false).map_err(store_err)?;
-        let (row, scopes, window) = self
+        let (row, scopes, window, counts) = self
             .store()
-            .reader(|c| {
-                Ok::<_, steve_store::StoreError>((
-                    repo::scope_get(c, ws, WORKSPACE, ws)?,
-                    repo::scopes(c, ws)?,
-                    repo::window_current(c, ws)?,
-                ))
+            .read(|r| {
+                let row = repo::scope_get(r, ws, WORKSPACE, ws)?;
+                let scopes = repo::scopes(r, ws)?;
+                let window = repo::window_current(r, ws)?;
+                let counts = match &window {
+                    Some(window) => repo::counts(r, &window.id)?,
+                    None => repo::Counts::default(),
+                };
+                Ok::<_, steve_store::StoreError>((row, scopes, window, counts))
             })
             .map_err(store_err)?;
-        let counts = match &window {
-            Some(w) => self
-                .store()
-                .reader(|c| repo::counts(c, &w.id))
-                .map_err(store_err)?,
-            None => repo::Counts::default(),
-        };
         let mode = ws_mode(row.as_ref());
         let on = mode.yolo();
         let full = mode == Mode::Full;
@@ -279,7 +275,7 @@ impl Yolo {
             }
             let now = self.now();
             self.store()
-                .transaction(|tx| {
+                .write(|tx| {
                     repo::scope_put(
                         tx,
                         ws,
@@ -352,7 +348,7 @@ impl Yolo {
     fn disable_workspace(&self, ws: &str, me: &str, from: Mode) -> ApiResult<(i64, i64)> {
         let now = self.now();
         self.store()
-            .transaction(|tx| {
+            .write(|tx| {
                 repo::scope_put(
                     tx,
                     ws,
@@ -445,7 +441,7 @@ impl Yolo {
         }
         let now = self.now();
         self.store()
-            .transaction(|tx| {
+            .write(|tx| {
                 let (before, after) = repo::scope_put(
                     tx,
                     ws,
@@ -486,7 +482,7 @@ impl Yolo {
         };
         let now = self.now();
         self.store()
-            .transaction(|tx| {
+            .write(|tx| {
                 repo::scope_put(tx, ws, WORKSPACE, ws, &ScopeChange { paused: Some(None), ..Default::default() }, me, now)?;
                 let window = if Mode::parse(&row.mode).is_some_and(Mode::yolo) && repo::window_current(tx, ws)?.is_none() {
                     Some(repo::window_open(tx, ws, false, now)?.id)
@@ -507,7 +503,7 @@ impl Yolo {
         let now = self.now();
         let tripped = self
             .store()
-            .transaction(|tx| {
+            .write(|tx| {
                 if repo::scope_get(tx, ws, WORKSPACE, ws)?.is_some_and(|r| r.paused.is_some()) {
                     return Ok(false);
                 }
@@ -579,7 +575,7 @@ impl Yolo {
         let mode_of = |ty: &str, oid: &str| -> ApiResult<Option<Mode>> {
             Ok(self
                 .store()
-                .reader(|c| repo::scope_get(c, ws, ty, oid))
+                .read(|c| repo::scope_get(c, ws, ty, oid))
                 .map_err(store_err)?
                 .and_then(|r| Mode::parse(&r.mode)))
         };

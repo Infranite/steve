@@ -12,16 +12,12 @@
 
 use std::collections::{HashMap, HashSet};
 
-use rusqlite::types::Value as Sql;
-use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use steve_store::base::mems;
-use steve_store::base::{Level, ObjRef, Viewer, Visibility, bind};
-use steve_store::{Result, Tx, uid};
+use steve_store::base::{Level, ObjRef, Viewer, Visibility};
+use steve_store::knowledge::{BotMemories, Chunks, Documents, KnowledgeUses, Memories};
+use steve_store::{R, Read, Result, W};
 
 use crate::port::{Candidate, KnowledgeStore, Pass, Scope};
-use crate::repo;
 use crate::sync;
 use crate::sync::about_names;
 
@@ -115,30 +111,15 @@ pub struct Hit {
 }
 
 /// `about` objects of an index entry.
-fn about_of(c: &Connection, obj_type: &str, obj_id: &str) -> Result<Vec<ObjRef>> {
-    match obj_type {
-        "chunk" => repo::doc_about(c, obj_id),
-        "mem" => {
-            let mut st = c.prepare_cached(
-                "SELECT object_type, object_id FROM mem_about WHERE mem_id = ? ORDER BY rowid",
-            )?;
-            let rows = st.query_map([obj_id], |r| {
-                Ok(ObjRef {
-                    kind: r.get(0)?,
-                    id: r.get(1)?,
-                })
-            })?;
-            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-        }
-        "bot_mem" => {
-            let mut st = c.prepare_cached("SELECT bot_id FROM bot_memories WHERE id = ?")?;
-            let rows = st.query_map([obj_id], |r| r.get::<_, String>(0))?;
-            Ok(rows
-                .collect::<rusqlite::Result<Vec<_>>>()?
-                .into_iter()
-                .map(|b| ObjRef::new("bot", &b))
-                .collect())
-        }
+fn about_of(c: &mut impl Read, kind: &str, id: &str) -> Result<Vec<ObjRef>> {
+    match kind {
+        "chunk" => Documents(c).doc_about(id),
+        "mem" => Memories(c).subjects(id),
+        "bot_mem" => Ok(BotMemories(c)
+            .bot(id)?
+            .map(|id| ObjRef::new("bot", &id))
+            .into_iter()
+            .collect()),
         _ => Ok(Vec::new()),
     }
 }
@@ -196,20 +177,20 @@ pub struct Retrieved {
 
 /// Searches the knowledge base for `q.viewer`. Empty or unsearchable text gives no hits. The hits
 /// of [`retrieve_all`], for callers that do not show [`Retrieved::semantic_down`].
-pub fn retrieve(c: &Connection, q: &Query) -> Result<Vec<Hit>> {
+pub fn retrieve(c: &mut R<'_>, q: &Query) -> Result<Vec<Hit>> {
     retrieve_all(c, q).map(|r| r.hits)
 }
 
 /// [`retrieve`], and whether the semantic pass failed. A failed semantic pass does not fail the
 /// search: the keyword passes of the Hub's own index still answer.
-pub fn retrieve_all(c: &Connection, q: &Query) -> Result<Retrieved> {
+pub fn retrieve_all(c: &mut R<'_>, q: &Query) -> Result<Retrieved> {
     let k = q.k.clamp(1, MAX_K);
     let text = q.text.trim();
     if text.is_empty() {
         return Ok(Retrieved::default());
     }
     let scope = Scope::for_viewer(c, q.viewer, q.purpose, q.kinds)?;
-    let found = |pass| -> Result<Vec<Candidate>> {
+    let mut found = |pass| -> Result<Vec<Candidate>> {
         Ok(q.store
             .search(c, &scope, text, pass, CANDIDATES)?
             .into_iter()
@@ -299,7 +280,7 @@ pub fn retrieve_all(c: &Connection, q: &Query) -> Result<Retrieved> {
 /// The confirmed rules and preferences about any of `anchors`, newest first, independent of a
 /// query (prompt layer 6). Same visibility, `never` and paused-source rules as [`retrieve`].
 pub fn anchor_mems(
-    c: &Connection,
+    c: &mut impl Read,
     viewer: &Viewer,
     anchors: &[ObjRef],
     limit: usize,
@@ -308,39 +289,15 @@ pub fn anchor_mems(
     if anchors.is_empty() || limit == 0 {
         return Ok(Vec::new());
     }
-    if repo::paused(c, &viewer.ws)?
+    if Documents(c)
+        .paused(&viewer.ws)?
         .iter()
         .any(|(_, k)| k == "mems")
     {
         return Ok(Vec::new());
     }
-    let scope = viewer.sql("m");
-    let ors = vec!["(a.object_type = ? AND a.object_id = ?)"; anchors.len()].join(" OR ");
-    let sql = format!(
-        "SELECT m.id FROM mems m
-          WHERE m.workspace_id = ? AND m.status = 'confirmed' AND m.level <> 'never'
-            AND m.kind IN ('rule', 'preference') AND (m.valid_until IS NULL OR m.valid_until > ?)
-            AND {} AND EXISTS (SELECT 1 FROM mem_about a WHERE a.mem_id = m.id AND ({ors}))
-          ORDER BY m.updated DESC, m.id LIMIT ?",
-        scope.sql
-    );
-    let mut p = vec![Sql::Text(viewer.ws.clone()), Sql::Integer(now)];
-    p.extend(scope.params);
-    for a in anchors {
-        p.push(Sql::Text(a.kind.clone()));
-        p.push(Sql::Text(a.id.clone()));
-    }
-    p.push(Sql::Integer(limit as i64));
-    let ids: Vec<String> = {
-        let mut st = c.prepare(&sql)?;
-        st.query_map(bind(p), |r| r.get(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-    };
     let mut hits = Vec::new();
-    for id in ids {
-        let Some(m) = mems::get(c, &id)? else {
-            continue;
-        };
+    for m in Memories(c).anchors(viewer, anchors, limit, now)? {
         let names = about_names(c, &m.about)?;
         let label = sync::mem_label(&m.kind, &names);
         hits.push(Hit {
@@ -367,36 +324,29 @@ pub fn anchor_mems(
     Ok(hits)
 }
 
-/// Writes a `kb_uses` row: which hits a consumer (`session`, `chat`, `draft`, `flow`, `search`) got
-/// for which query. Ids and numbers only, never the text. Returns the `ku_…` id.
+pub(crate) fn use_hits(hits: &[Hit]) -> Vec<steve_store::knowledge::UseHit> {
+    hits.iter()
+        .map(|h| steve_store::knowledge::UseHit {
+            n: h.n,
+            obj_type: h.obj_type.clone(),
+            obj_id: h.obj_id.clone(),
+            seq: h.seq,
+            score: h.score,
+            level: h.level,
+            label: h.label.clone(),
+        })
+        .collect()
+}
+
+/// Records which pieces a consumer saw, using the surrounding transaction.
 pub fn record_use(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     consumer: (&str, &str),
     query: &str,
     hits: &[Hit],
 ) -> Result<String> {
-    let id = uid("ku");
-    let list: Vec<_> = hits
-        .iter()
-        .map(|h| {
-            json!({"n": h.n, "obj_type": h.obj_type, "obj_id": h.obj_id, "seq": h.seq,
-                   "score": h.score, "level": h.level, "label": h.label})
-        })
-        .collect();
-    tx.prepare_cached(
-        "INSERT INTO kb_uses (id, workspace_id, consumer_type, consumer_id, query, hits, created) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    )?
-    .execute(params![
-        id,
-        ws,
-        consumer.0,
-        consumer.1,
-        query,
-        serde_json::Value::Array(list).to_string(),
-        steve_store::now()
-    ])?;
-    Ok(id)
+    KnowledgeUses(tx).record(ws, consumer, query, &use_hits(hits))
 }
 
 /// The knowledge a disclosure basis names (`entries` of `reply_basis` / a mail draft's basis), read again
@@ -405,11 +355,10 @@ pub fn record_use(
 /// since, or a basis written before pieces were recorded) the later check has less than the first one
 /// had and must not pass on that ([`steve_modules::outbound::R_BASIS_GONE`]).
 pub fn knowledge_again(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     entries: &[serde_json::Value],
 ) -> Result<(Vec<steve_modules::outbound::KnowledgeUse>, bool)> {
-    use rusqlite::OptionalExtension;
     use steve_modules::outbound::KnowledgeUse;
     let mut out = Vec::new();
     let mut complete = true;
@@ -421,26 +370,22 @@ pub fn knowledge_again(
         let id = e["source_id"].as_str().unwrap_or("");
         let label = e["source_label"].as_str().unwrap_or("").to_string();
         let found = match e["seq"].as_i64() {
-            Some(seq) => c
-                .query_row(
-                    "SELECT text, level, visibility FROM kb_chunks
-                      WHERE workspace_id = ? AND obj_type = ? AND obj_id = ? AND seq = ?",
-                    params![ws, kind, id, seq],
-                    |r| {
-                        Ok(KnowledgeUse {
-                            source_type: kind.into(),
-                            source_id: id.into(),
-                            source_label: label.clone(),
-                            level: Level::from_db(&r.get::<_, String>(1)?),
-                            visibility: r.get(2)?,
-                            text: r.get(0)?,
-                            seq: Some(seq),
-                        })
-                    },
-                )
-                .optional()?,
+            Some(seq) => {
+                Chunks(c)
+                    .disclosure(ws, kind, id, seq)?
+                    .map(|(text, level, visibility)| KnowledgeUse {
+                        source_type: kind.into(),
+                        source_id: id.into(),
+                        source_label: label.clone(),
+                        level,
+                        visibility,
+                        text,
+                        seq: Some(seq),
+                    })
+            }
             None if kind == "mem" => {
-                mems::get(c, id)?
+                Memories(c)
+                    .get(id)?
                     .filter(|m| m.workspace_id == ws)
                     .map(|m| KnowledgeUse {
                         source_type: "mem".into(),

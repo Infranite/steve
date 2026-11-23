@@ -134,8 +134,6 @@ export default {
   settings: {
     cat: "保险箱",
     catSub: "通行密钥、恢复码、主密钥",
-    unwired: "还没有接入",
-    unwiredSub: "这个 Hub 还没有保险箱。",
     notEnabled: "保险箱还没有启用",
     notEnabledSub: "启用后可以登记通行密钥、管理恢复码",
     goEnable: "去启用",

@@ -591,13 +591,7 @@ mod tests {
             .touched = Instant::now() - TTL;
         assert!(files.upload_status(t.id).await.is_err());
         assert_eq!(
-            h.store
-                .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(
-                    "SELECT count(*) FROM files",
-                    [],
-                    |r| r.get::<_, i64>(0)
-                )?))
-                .unwrap(),
+            steve_store::testkit::hub::node_fixtures::file_count(&h.store).unwrap(),
             0
         );
         assert!(!h.dir.path().join("files").exists());
@@ -622,12 +616,10 @@ mod tests {
                 ids.push(t.id);
             }
             if cancel {
-                h.store
-                    .transaction::<_, steve_store::StoreError>(|tx| {
-                        tx.execute("UPDATE runtime_attempts SET cancel_requested=1", [])?;
-                        Ok(())
-                    })
-                    .unwrap();
+                steve_store::testkit::hub::node_fixtures::set_runtime_attempts_cancel_requested(
+                    &h.store,
+                )
+                .unwrap();
             } else {
                 for u in files.uploads.lock().unwrap().0.values_mut() {
                     u.touched = Instant::now() - TTL;
@@ -681,11 +673,7 @@ mod tests {
                 .unwrap();
             files.upload(chunk(&t.id, 0, &bytes[..20])).await.unwrap();
         }
-        h.store
-            .transaction::<_, steve_store::StoreError>(|tx| {
-                tx.execute("UPDATE runtime_attempts SET state='finished'", [])?;
-                Ok(())
-            })
+        steve_store::testkit::hub::node_fixtures::set_runtime_attempts_state_finished(&h.store)
             .unwrap();
         assert!(
             files
@@ -729,11 +717,7 @@ mod tests {
             files.begin_upload(changed).await.unwrap_err().code,
             ErrorCode::Conflict
         );
-        h.store
-            .transaction::<_, steve_store::StoreError>(|tx| {
-                tx.execute("UPDATE sessions SET workspace_id='foreign'", [])?;
-                Ok(())
-            })
+        steve_store::testkit::hub::node_fixtures::set_sessions_workspace_id_foreign(&h.store)
             .unwrap();
         assert!(files.upload(chunk(&t.id, 0, &bytes)).await.is_err());
         assert!(files.finish_upload(t.id).await.is_err());

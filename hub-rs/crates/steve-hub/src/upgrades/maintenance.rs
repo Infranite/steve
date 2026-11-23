@@ -25,7 +25,7 @@ fn dispatch(args: &[String]) -> Result<(i32, Value)> {
     if command == "schema-state" && args.len() == 2 {
         return Ok((
             0,
-            steve_install::release::schema_state(Path::new(&args[1]))?,
+            json!(steve_store::db::inspect_schema(Path::new(&args[1]))?),
         ));
     }
     if command == "schema-check" && args.len() == 3 {

@@ -11,7 +11,6 @@ import { Spinner } from "@/components/ui/spinner"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { fileUrl } from "@/api"
 import { Page, Empty, Meta, SectionLabel, ItemRef, ItemNo, go } from "@/ui"
-import { Unwired } from "@/unwired"
 import { refresh, tm } from "@/store"
 import { ContactAvatar } from "@/people/avatar"
 import { size } from "@/attach"
@@ -31,7 +30,6 @@ export function ThreadView({ id }: { id: string }) {
   const read = useRef(false)
   useEffect(() => { if (T.s === "ok" && T.data.unread > 0 && !read.current) { read.current = true; mailApi.read(id).catch(() => {}) } }, [T, id])
   const back: [string, string] = ["#/mail", t("mail:shared.title")]
-  if (T.s === "unwired") return <Unwired id="mail" />
   if (T.s === "loading") return <Page title={t("mail:shared.title")} back={back}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
   if (T.s === "error") return <Page title={t("mail:shared.title")} back={back}><Empty title={T.status === 404 ? t("mail:thread.notFound") : T.err} /></Page>
   return <ThreadPage t={T.data} reload={T.reload} back={back} />

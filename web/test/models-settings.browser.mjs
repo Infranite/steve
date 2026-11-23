@@ -53,7 +53,8 @@ const run = async ({ width, height, scheme, flow }) => {
       data = view()
     } else if (u.pathname === '/api/settings/models') data = view()
     else if (u.pathname === '/api/system/models') data = catalog(u.searchParams.get('harness'))
-    else if (u.pathname === '/api/state') data = state()
+    else if (u.pathname === '/api/runtimes') data = state().runtimes
+    else if (u.pathname === '/api/shell') data = state()
     return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(data) })
   })
   const fits = async () => assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `overflow at ${width}px`)

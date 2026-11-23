@@ -1,10 +1,12 @@
 //! Decisions opened by modules. A module opens one with
-//! `steve_store::base::decisions::open(tx, NewDecision)` and registers a [`DecisionHandler`] for its
+//! `DecisionRows(w).open(&NewDecision)` and registers a [`DecisionHandler`] for its
 //! `subject_type`; `POST /api/decisions/:id` reaches [`dispatch`] first.
 
 use serde_json::{Value, json};
-use steve_store::base::{self, CONFIRM_OPTIONS, DecisionKind};
-use steve_store::{Decision, NewDecision, Tx};
+use steve_store::base::{CONFIRM_OPTIONS, DecisionKind};
+use steve_store::views::{ABOUT_CHAT_MESSAGE, Views};
+use steve_store::{Decision, DecisionRows, NewDecision, W};
+use steve_types::DecisionTier;
 
 use crate::{ApiError, ApiResult, Caller, Modules};
 
@@ -23,11 +25,11 @@ pub trait DecisionHandler: Send + Sync {
     /// Acts on the answer inside the transaction that settles the decision; returns the `result` JSON
     /// stored on it (default `{"choice": …}` plus `text` when given). An error rolls everything back and
     /// leaves the decision open.
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value>;
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value>;
 
     /// Called in `undoDecision`'s transaction before a resolved decision is reopened: undo this
     /// module's side of the answer, or refuse with an error (the undo is rolled back). Default: nothing.
-    fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
+    fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
         let _ = (tx, d);
         Ok(())
     }
@@ -47,7 +49,7 @@ pub trait DecisionHandler: Send + Sync {
     }
 
     /// Called when a job expires the decision (e.g. 30-day candidates); default does nothing.
-    fn expire(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
+    fn expire(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
         let _ = (tx, d);
         Ok(())
     }
@@ -99,38 +101,82 @@ pub fn dispatch(
     choice: &str,
     text: &str,
 ) -> Option<ApiResult<Decision>> {
-    let d = m.store.reader(|c| base::decisions::get(c, id)).ok()??;
+    let d = m.store.read(|r| DecisionRows(r).get(id)).ok()??;
     let handler = m.registry.handlers.get(&d.subject_type)?;
-    Some(m.store.transaction(|tx| {
-        let d = base::decisions::get(tx, id)?
+    Some(m.store.write(|w| {
+        let d = DecisionRows(w)
+            .get(id)?
             .filter(|d| d.workspace_id == caller.ws)
             .ok_or_else(|| ApiError::not_found("决定"))?;
-        if d.status != "open" {
-            return Err(ApiError::conflict(steve_i18n::t!(
-                "modules.decision.already_handled"
-            )));
-        }
-        if !d.options.is_empty() && !d.options.iter().any(|o| o == choice) {
-            return Err(ApiError::invalid("choice"));
-        }
-        let cx = DecisionCx {
-            ws: &caller.ws,
-            actor: &caller.me,
-            choice,
-            text,
-        };
-        let result = handler.resolve(tx, &cx, &d)?;
-        base::decisions::settle(tx, id, &result, "resolved", &undo_marker(&d.subject_type))?;
-        base::audit(
-            tx,
-            &caller.ws,
-            &caller.me,
-            "decision.resolve",
-            id,
-            &json!({ "choice": choice, "text": text }),
-        )?;
-        base::decisions::get(tx, id)?.ok_or_else(|| ApiError::not_found("决定"))
+        answer(w, caller, handler.as_ref(), &d, choice, text)
     }))
+}
+
+/// Ignore the supplied quiet drafts. Check each tier under the same write lock that discards the
+/// draft: a contact starred since the inbox was rendered must keep their decision.
+pub fn dismiss_drafts(m: &Modules, caller: &Caller, ids: &[String]) -> ApiResult<Vec<String>> {
+    let handler = m
+        .registry
+        .handlers
+        .get(ABOUT_CHAT_MESSAGE)
+        .ok_or_else(|| ApiError::not_found("决定"))?;
+    m.store.write(|w| {
+        let views = w.decision_views().of(&caller.ws, ids)?;
+        let mut dismissed = Vec::new();
+        for v in views {
+            if v.status != "open"
+                || v.subject_type != ABOUT_CHAT_MESSAGE
+                || v.kind != "approve"
+                || v.tier != DecisionTier::Draft
+            {
+                continue;
+            }
+            let id = v.id.as_str();
+            let d = DecisionRows(w)
+                .get(id)?
+                .ok_or_else(|| ApiError::not_found("决定"))?;
+            answer(w, caller, handler.as_ref(), &d, "no", "")?;
+            dismissed.push(id.to_owned());
+        }
+        Ok(dismissed)
+    })
+}
+
+fn answer(
+    w: &mut W<'_>,
+    caller: &Caller,
+    handler: &dyn DecisionHandler,
+    d: &Decision,
+    choice: &str,
+    text: &str,
+) -> ApiResult<Decision> {
+    let id = &d.id;
+    if d.status != "open" {
+        return Err(ApiError::conflict(steve_i18n::t!(
+            "modules.decision.already_handled"
+        )));
+    }
+    if !d.options.is_empty() && !d.options.iter().any(|o| o == choice) {
+        return Err(ApiError::invalid("choice"));
+    }
+    let cx = DecisionCx {
+        ws: &caller.ws,
+        actor: &caller.me,
+        choice,
+        text,
+    };
+    let result = handler.resolve(w, &cx, d)?;
+    DecisionRows(w).settle(id, &result, "resolved", &undo_marker(&d.subject_type))?;
+    w.audit(
+        &caller.ws,
+        &caller.me,
+        "decision.resolve",
+        id,
+        &json!({ "choice": choice, "text": text }),
+    )?;
+    DecisionRows(w)
+        .get(id)?
+        .ok_or_else(|| ApiError::not_found("决定"))
 }
 
 /// The `undo` stored on a decision a module settled. Core only undoes decisions with a truthy `undo`
@@ -153,25 +199,17 @@ pub fn undo(
     actor: &str,
     undoable: impl FnOnce(&Decision) -> bool,
 ) -> Option<ApiResult<Decision>> {
-    let d = m.store.reader(|c| base::decisions::get(c, id)).ok()??;
+    let d = m.store.read(|r| DecisionRows(r).get(id)).ok()??;
     let handler = m.registry.handlers.get(&d.subject_type)?;
-    Some(m.store.transaction(|tx| {
-        let d = base::decisions::get(tx, id)?
+    Some(m.store.write(|w| {
+        let d = DecisionRows(w)
+            .get(id)?
             .filter(|d| undoable(d))
             .ok_or_else(|| ApiError::rule(steve_i18n::t!("modules.decision.not_undoable")))?;
-        handler.before_undo(tx, &d)?;
+        handler.before_undo(w, &d)?;
         let metadata = handler.reopen_result(&d);
-        let result = (!metadata.is_null()).then(|| metadata.to_string());
-        tx.execute(
-            "UPDATE decisions SET status = 'open', result = ?, resolved = NULL, undo = NULL WHERE id = ?",
-            rusqlite::params![result, id],
-        )?;
-        tx.publish(steve_types::DomainEvent::from(steve_types::WorkEvent::Decision {
-            ws: d.workspace_id.clone().into(),
-            id: id.into(),
-            item_id: Some(d.item_id.clone().map(Into::into)),
-        }));
-        base::audit(tx, &d.workspace_id, actor, "decision.undo", id, &json!({}))?;
+        DecisionRows(w).reopen(&d, &metadata)?;
+        w.audit(&d.workspace_id, actor, "decision.undo", id, &json!({}))?;
         Ok(d)
     }))
 }
@@ -179,19 +217,13 @@ pub fn undo(
 /// Expires an open module decision (jobs): the handler's `expire`, then `status=expired`. Returns
 /// whether it was open. Decisions of unregistered subject types are only marked expired.
 pub fn expire(m: &Modules, id: &str) -> ApiResult<bool> {
-    m.store.transaction(|tx| {
-        let Some(d) = base::decisions::get(tx, id)?.filter(|d| d.status == "open") else {
+    m.store.write(|w| {
+        let Some(d) = DecisionRows(w).get(id)?.filter(|d| d.status == "open") else {
             return Ok(false);
         };
         if let Some(h) = m.registry.handlers.get(&d.subject_type) {
-            h.expire(tx, &d)?;
+            h.expire(w, &d)?;
         }
-        Ok(base::decisions::settle(
-            tx,
-            id,
-            &json!({ "expired": true }),
-            "expired",
-            &Value::Null,
-        )?)
+        Ok(DecisionRows(w).settle(id, &json!({ "expired": true }), "expired", &Value::Null)?)
     })
 }

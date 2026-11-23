@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 use steve_runtime::testkit::process::Child;
+use steve_store::testkit::hub::api as fixtures;
 
 use futures::StreamExt;
 
@@ -331,7 +332,7 @@ async fn tz_setting() {
             json!({"error": "设置项不对：tz", "code":"invalid", "retry":{"kind":"never"}, "reason":null, "params":{}})
         )
     );
-    let (_, st) = c.call("GET", "/api/state", None, None).await;
+    let (_, st) = c.call("GET", "/api/shell", None, None).await;
     assert_eq!(st["settings"]["tz"], "UTC");
 }
 
@@ -440,7 +441,7 @@ async fn model_settings() {
         400
     );
     // in the workspace settings (bootstrap) too, so every client sees the change
-    let (_, st) = c.call("GET", "/api/state", None, None).await;
+    let (_, st) = c.call("GET", "/api/shell", None, None).await;
     assert_eq!(
         st["settings"]["models.route"]["models"],
         json!(["gpt-6-sol"])
@@ -702,24 +703,9 @@ async fn module_config_drafts_go_to_the_modules() {
 async fn a_module_decision_is_undone_through_the_route() {
     let hub = start().await;
     let c = Client::login(&hub).await;
-    let db =
-        rusqlite::Connection::open(hub.home.path().join("steve/data/steve.sqlite3")).expect("db");
-    db.busy_timeout(Duration::from_secs(5)).expect("timeout");
-    db.execute_batch(
-        "INSERT INTO attr_defs (id, workspace_id, applies, key, label, type, options, default_level, source, status, created)
-           VALUES ('ad_undo', 'default', 'contact', 'x_undo', '撤销测试', 'text', '[]', 'fact', 'agent', 'proposed', 1);
-         INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, question, options, status, requested_by, created)
-           VALUES ('dec_undo', 'default', 'confirm', 'attr_def', 'ad_undo', '加这个属性吗？', '[\"yes\",\"no\"]', 'open', 'steve', 1);",
-    )
-    .expect("seed");
-    let def = || -> String {
-        db.query_row(
-            "SELECT status FROM attr_defs WHERE id = 'ad_undo'",
-            [],
-            |r| r.get(0),
-        )
-        .expect("def")
-    };
+    let db = hub.home.path().join("steve/data/steve.sqlite3");
+    fixtures::seed_attribute_decision(&db).unwrap();
+    let def = || fixtures::fixture_attribute_status(&db).unwrap();
     let (s, d) = c
         .call(
             "POST",
@@ -763,16 +749,9 @@ async fn agent_session(
         )
         .await;
     let id = item["id"].as_str().expect("item").to_string();
-    let db =
-        rusqlite::Connection::open(hub.home.path().join("steve/data/steve.sqlite3")).expect("db");
-    db.busy_timeout(Duration::from_secs(5)).expect("timeout");
+    let db = hub.home.path().join("steve/data/steve.sqlite3");
     let hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"test-token"));
-    db.execute(
-        "INSERT INTO sessions(id,workspace_id,item_id,bot_id,harness,cwd,status,token_hash,created,updated)
-         VALUES ('s_tools','default',?1,'steve','claude-code','','idle',?2,1,1)",
-        [&id, &hash],
-    )
-    .expect("session");
+    fixtures::seed_mcp_fixture_session(&db, &id, &hash).unwrap();
     let (http, url) = (c.http.clone(), format!("{}/mcp", c.base));
     move |body: Value| {
         let (http, url) = (http.clone(), url.clone());
@@ -1027,16 +1006,19 @@ async fn knowledge_note_is_found_over_http_and_mcp() {
     );
 }
 
-/// Steve's reply to the `n`-th user message (counting from 1), from `/api/state`. The item's own
+/// Steve's reply to the `n`-th user message (counting from 1), from `/api/views/page?kind=message`. The item's own
 /// cards (卡住了, 完成 …) are posts of their own, not replies: the fake adapter fails at once, and on a
 /// busy machine its card can land before the reply.
 async fn steve_reply(c: &Client, n: usize) -> Value {
     for _ in 0..200 {
-        let (_, st) = c.call("GET", "/api/state", None, None).await;
-        let replies: Vec<Value> = st["thread"]
+        let (_, st) = c
+            .call("GET", "/api/views/page?kind=message", None, None)
+            .await;
+        let replies: Vec<Value> = st["views"]
             .as_array()
             .into_iter()
             .flatten()
+            .rev()
             .filter(|m| {
                 m["author"] == "steve" && !m["item_id"].is_null() && m["meta"]["card_only"] != true
             })
@@ -1329,7 +1311,7 @@ async fn web_dir_is_read_per_request() {
     let c = Client::login(&hub).await;
     let (_, me) = c.call("GET", "/api/me", None, None).await;
     assert_eq!(me["web_version"], "w2");
-    let (_, st) = c.call("GET", "/api/state", None, None).await;
+    let (_, st) = c.call("GET", "/api/shell", None, None).await;
     assert_eq!(st["web_version"], "w2");
 }
 
@@ -1439,10 +1421,8 @@ async fn ownership_routes_and_tools() {
 async fn conversation_preferences_and_pagination_are_wired() {
     let hub = start().await;
     let c = Client::login(&hub).await;
-    let db = rusqlite::Connection::open(hub.home.path().join("steve/data/steve.sqlite3")).unwrap();
-    db.busy_timeout(Duration::from_secs(5)).unwrap();
-    db.execute_batch("INSERT INTO spaces (id, workspace_id, system_id, kind, external_id, name, created, updated) VALUES ('spc_pref', 'default', 'feishu', 'group', 'pref', 'Conversation preference test', 1, 1);
-        INSERT INTO messages (id, workspace_id, space, author, text, created) VALUES ('msg_pref', 'default', 'chan:spc_pref', 'me', 'keep this history', 1);").unwrap();
+    fixtures::seed_conversation_preferences(&hub.home.path().join("steve/data/steve.sqlite3"))
+        .unwrap();
     let path = "/api/conversations/chan%3Aspc_pref/preferences";
     let anon = reqwest::Client::new()
         .patch(format!("{}{path}", hub.base))
@@ -1530,12 +1510,7 @@ async fn conversation_preferences_and_pagination_are_wired() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
-    db.execute(
-        "INSERT INTO chan_messages (id, workspace_id, space_id, direction, text, status, created)
-         VALUES ('cm_pref', 'default', 'spc_pref', 'in', 'hello from the chat', 'received', ?)",
-        [now],
-    )
-    .unwrap();
+    fixtures::seed_channel_record(&hub.home.path().join("steve/data/steve.sqlite3"), now).unwrap();
     let record = "/api/conversations/chan%3Aspc_pref/record";
     let (s, v) = c.call("GET", record, None, None).await;
     assert_eq!(s, 200, "{v}");

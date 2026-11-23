@@ -7,11 +7,13 @@
 //! - [`name_edited`] / [`manual_fields`]: what a person set by hand, which no sync overwrites;
 //! - [`record_lookup`] / [`due`]: the lookups' bookkeeping and retry schedule (1 h → 6 h → 24 h → 72 h).
 
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
-use steve_store::Tx;
 use steve_store::base::links;
+use steve_store::{
+    Accounts, Attributes, Connections, Read, Revisions, UserRows, Workspaces,
+    account_profiles::{AccountProfiles, Lookup, LookupUpdate},
+};
 
 use super::repo::{self, PARTY, Party};
 use crate::ApiResult;
@@ -26,27 +28,13 @@ pub const TENANT_SCOPE: &str = "tenant:tenant:readonly";
 pub const RETRY_MS: [i64; 4] = [3_600_000, 6 * 3_600_000, 24 * 3_600_000, 72 * 3_600_000];
 /// Has a person (not a sync) ever set this party's name? A revision whose `after` names a `name`
 /// without `"source": "sync"`.
-pub fn name_edited(c: &Connection, ws: &str, party: &str) -> ApiResult<bool> {
-    Ok(c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM revisions WHERE workspace_id = ?1 AND object_type = ?2 AND object_id = ?3
-            AND json_valid(patch) AND json_type(patch, '$.after.name') IS NOT NULL
-            AND coalesce(json_extract(patch, '$.after.source'), '') <> 'sync')",
-        params![ws, PARTY, party],
-        |r| r.get(0),
-    )?)
+pub fn name_edited(r: &mut impl Read, ws: &str, party: &str) -> ApiResult<bool> {
+    Ok(Revisions(r).field_written(ws, PARTY, party, "$.after.name", false)?)
 }
 
-/// A person set the party's kind (confirmed it as real, virtual …): a revision of `kind` that no
-/// sync or enrichment wrote. An unconfirmed contact the names run promoted on a provider's name was
-/// confirmed by nobody.
-pub fn kind_edited(c: &Connection, ws: &str, party: &str) -> ApiResult<bool> {
-    Ok(c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM revisions WHERE workspace_id = ?1 AND object_type = ?2 AND object_id = ?3
-            AND json_valid(patch) AND json_type(patch, '$.after.kind') IS NOT NULL
-            AND coalesce(json_extract(patch, '$.after.source'), '') <> 'sync')",
-        params![ws, PARTY, party],
-        |r| r.get(0),
-    )?)
+/// A person chose the contact's kind.
+pub fn kind_edited(r: &mut impl Read, ws: &str, party: &str) -> ApiResult<bool> {
+    Ok(Revisions(r).field_written(ws, PARTY, party, "$.after.kind", false)?)
 }
 
 /// The job fields a person edited (`props.manual`), which no sync overwrites.
@@ -63,22 +51,14 @@ pub fn manual_fields(props: &Value) -> Vec<String> {
 /// that was recorded — every `title` / `dept` a job revision (`PATCH /contacts/:id/jobs/:org`, which
 /// syncs never write) changed.
 pub fn job_manual_fields(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     party: &str,
     org: &str,
     props: &Value,
 ) -> ApiResult<Vec<String>> {
     let mut out = manual_fields(props);
-    let mut st = c.prepare_cached(
-        "SELECT patch FROM revisions WHERE workspace_id = ?1 AND object_type = ?2 AND object_id = ?3
-            AND json_valid(patch) AND json_extract(patch, '$.after.job.org_id') = ?4",
-    )?;
-    let rows = st
-        .query_map(params![ws, PARTY, party, org], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for patch in rows {
-        let v: Value = serde_json::from_str(&patch).unwrap_or(Value::Null);
+    for v in Revisions(c).job_patches(ws, party, org)? {
         for k in ["title", "dept"] {
             if v["before"]["job"]["props"][k] != v["after"]["job"]["props"][k]
                 && !out.iter().any(|m| m == k)
@@ -109,33 +89,13 @@ pub struct Tenant {
     pub own: bool,
 }
 
-/// The tenant key an organization stands for (its `feishu_tenant` account).
-fn tenant_of(c: &Connection, ws: &str, org: &str) -> ApiResult<Option<String>> {
-    Ok(c.query_row(
-        "SELECT handle FROM accounts WHERE workspace_id = ? AND party_id = ? AND family = ? AND status = 'active'
-          ORDER BY created LIMIT 1",
-        params![ws, org, TENANT_FAMILY],
-        |r| r.get(0),
-    )
-    .optional()?)
-}
-
-/// Is the own organization's name readable but refused (`tenant:tenant:readonly` noted missing on a
-/// connection of the workspace)?
-fn tenant_scope_missing(c: &Connection, ws: &str) -> ApiResult<bool> {
-    Ok(c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM connections cn, json_each(CASE WHEN json_valid(cn.config)
-                  THEN coalesce(json_extract(cn.config, '$.permissions'), '[]') ELSE '[]' END) j
-          WHERE cn.workspace_id = ? AND json_extract(j.value, '$.scope') = ?
-            AND json_extract(j.value, '$.status') = 'missing')",
-        params![ws, TENANT_SCOPE],
-        |r| r.get(0),
-    )?)
-}
-
 /// Where the organization's name comes from.
-pub fn org_name(c: &Connection, ws: &str, p: &Party) -> ApiResult<OrgName> {
-    let key = tenant_of(c, ws, &p.id)?;
+pub fn org_name(c: &mut impl Read, ws: &str, p: &Party) -> ApiResult<OrgName> {
+    let key = Accounts(c)
+        .of_party(ws, &p.id)?
+        .into_iter()
+        .find(|row| row.family == TENANT_FAMILY && row.status == "active")
+        .map(|row| row.handle);
     let tenant = key.map(|k| Tenant {
         key: k,
         own: p.is_self_org(),
@@ -150,17 +110,11 @@ pub fn org_name(c: &Connection, ws: &str, p: &Party) -> ApiResult<OrgName> {
     if edited {
         out.name_state = "manual";
     } else if p.is_self_org() {
-        let wn = repo::workspace_name(c, ws)?.unwrap_or_else(|| "本公司".into());
-        let synced: bool = c.query_row(
-            "SELECT EXISTS (SELECT 1 FROM revisions WHERE workspace_id = ?1 AND object_type = ?2 AND object_id = ?3
-                AND json_valid(patch) AND json_type(patch, '$.after.name') IS NOT NULL
-                AND json_extract(patch, '$.after.source') = 'sync')",
-            params![ws, PARTY, p.id],
-            |r| r.get(0),
-        )?;
+        let wn = Workspaces(c).name(ws)?.unwrap_or_else(|| "本公司".into());
+        let synced = Revisions(c).field_written(ws, PARTY, &p.id, "$.after.name", true)?;
         if !synced && (p.name == wn || p.name == "本公司") {
             out.name_state = "workspace";
-            if out.tenant.is_some() && tenant_scope_missing(c, ws)? {
+            if out.tenant.is_some() && Connections(c).permission_missing(ws, TENANT_SCOPE)? {
                 out.name_reason = Some("permission");
                 out.name_scope = Some(TENANT_SCOPE);
             }
@@ -177,7 +131,7 @@ pub fn org_name(c: &Connection, ws: &str, p: &Party) -> ApiResult<OrgName> {
 
 /// May a provider rename this organization? Only Steve's placeholder or the untouched own-organization
 /// name — never a name a person set (also one that happens to start with “外部组织”).
-pub fn org_name_replaceable(c: &Connection, ws: &str, p: &Party) -> ApiResult<bool> {
+pub fn org_name_replaceable(c: &mut impl Read, ws: &str, p: &Party) -> ApiResult<bool> {
     Ok(matches!(
         org_name(c, ws, p)?.name_state,
         "placeholder" | "workspace"
@@ -236,32 +190,6 @@ pub struct ContactProfile {
     pub fields: ProfileFields,
 }
 
-/// `(checked, next_check, source, gaps)` of a lookup row.
-type Lookup = (Option<i64>, Option<i64>, Option<String>, Value);
-
-/// The lookup rows of a person's accounts: `(checked, next_check, source, gaps)` of the most recent.
-fn lookup_of(c: &Connection, ws: &str, party: &str) -> ApiResult<Option<Lookup>> {
-    Ok(c.query_row(
-        "SELECT ap.checked, ap.next_check, ap.source, ap.gaps FROM account_profiles ap
-           JOIN accounts a ON a.id = ap.account_id AND a.workspace_id = ap.workspace_id
-          WHERE ap.workspace_id = ? AND a.party_id = ? AND a.status = 'active'
-          ORDER BY ap.checked IS NULL, ap.checked DESC LIMIT 1",
-        params![ws, party],
-        |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get::<_, String>(3)
-                    .ok()
-                    .and_then(|s| serde_json::from_str(&s).ok())
-                    .unwrap_or(Value::Null),
-            ))
-        },
-    )
-    .optional()?)
-}
-
 /// The identities that can look people up: `(connections.adapter, systems.id)`, the adapter's
 /// profile view and the system of the people it looks up. Registered when the channels are built
 /// (each channel side with a profile view, by its declared handle system); shared by every
@@ -280,18 +208,15 @@ pub fn register_lookup(adapter: &str, system: &str) {
 
 /// Can any identity of the workspace look this person up: they have an account in a system a
 /// registered profile view looks up, and the workspace a live connection of that adapter?
-fn reachable(c: &Connection, ws: &str, party: &str) -> ApiResult<bool> {
+fn reachable(r: &mut impl Read, ws: &str, party: &str) -> ApiResult<bool> {
     let lookups = LOOKUPS.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let accounts = Accounts(r).of_party(ws, party)?;
     for (adapter, system) in lookups {
-        let found: bool = c.query_row(
-            "SELECT EXISTS (SELECT 1 FROM accounts WHERE workspace_id = ?1 AND party_id = ?2 AND status = 'active'
-                              AND system_id = ?3)
-                AND EXISTS (SELECT 1 FROM connections WHERE workspace_id = ?1 AND status IN ('ok', 'error')
-                              AND adapter = ?4)",
-            params![ws, party, system, adapter],
-            |r| r.get(0),
-        )?;
-        if found {
+        if accounts
+            .iter()
+            .any(|a| a.status == "active" && a.system_id == system)
+            && Connections(r).usable_adapter(ws, &adapter)?
+        {
             return Ok(true);
         }
     }
@@ -301,13 +226,22 @@ fn reachable(c: &Connection, ws: &str, party: &str) -> ApiResult<bool> {
 /// What is known about `p` and why the rest is not. `visible_orgs`: the organizations of the jobs
 /// the viewer sees (the contact page); `None` counts every job (the lookups' own judgement).
 pub fn contact_profile(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     p: &Party,
     visible_orgs: Option<&[String]>,
 ) -> ApiResult<ContactProfile> {
-    let lookup = lookup_of(c, ws, &p.id)?;
-    let (checked, next_check, source, gaps) = lookup.unwrap_or((None, None, None, Value::Null));
+    let Lookup {
+        checked,
+        next_check,
+        source,
+        gaps,
+    } = AccountProfiles(c).latest(ws, &p.id)?.unwrap_or(Lookup {
+        checked: None,
+        next_check: None,
+        source: None,
+        gaps: Value::Null,
+    });
     let reachable = reachable(c, ws, &p.id)?;
     // a missing field: the reason the last lookup gave, else “not looked up yet” / “no source”
     let why = |field: &str| -> FieldState {
@@ -326,7 +260,8 @@ pub fn contact_profile(
     } else {
         FieldState::known(p.is_me() || name_edited(c, ws, &p.id)?)
     };
-    let job = links::from(c, ws, &super::service::pref(&p.id), Some("works_at"))?
+    let job = links::Links(c)
+        .from(ws, &super::service::pref(&p.id), Some("works_at"))?
         .into_iter()
         .filter(|l| l.props.get("to").is_none_or(Value::is_null))
         .filter(|l| visible_orgs.is_none_or(|v| v.contains(&l.object_id)))
@@ -350,17 +285,15 @@ pub fn contact_profile(
         }
         _ => why("title"),
     };
-    let mail: Option<String> = c
-        .query_row(
-            "SELECT source FROM accounts WHERE workspace_id = ? AND party_id = ? AND family = 'email' AND status = 'active'
-              ORDER BY created LIMIT 1",
-            params![ws, p.id],
-            |r| r.get(0),
-        )
-        .optional()?;
+    let mail = Accounts(c)
+        .of_party(ws, &p.id)?
+        .into_iter()
+        .find(|a| a.family == "email" && a.status == "active")
+        .map(|a| a.source);
     let email = match mail {
         Some(src) => FieldState::known(!matches!(src.as_str(), "sync" | "chat" | "identify")),
-        None => match repo::values(c, ws, &p.id)?
+        None => match Attributes(c)
+            .values(ws, &p.id)?
             .into_iter()
             .find(|v| v.key == "email" && v.status == "confirmed")
         {
@@ -408,30 +341,20 @@ impl Gap {
 /// Records one lookup of `account` at `now`: where the answer came from and the gaps it left. No gaps
 /// clears the retry; gaps schedule the next one (1 h, 6 h, 24 h, then 72 h).
 pub fn record_lookup(
-    tx: &Tx,
+    w: &mut steve_store::W<'_>,
     ws: &str,
     account: &str,
     now: i64,
     source: Option<&str>,
     gaps: &[(&str, Gap)],
 ) -> ApiResult<()> {
-    // only an account of this workspace
-    let mine: bool = tx.query_row(
-        "SELECT EXISTS (SELECT 1 FROM accounts WHERE id = ? AND workspace_id = ?)",
-        params![account, ws],
-        |r| r.get(0),
-    )?;
-    if !mine {
+    let account_row = Accounts(w)
+        .get(account)?
+        .filter(|row| row.workspace_id == ws);
+    if account_row.is_none() {
         return Err(crate::ApiError::not_found("账号"));
     }
-    let attempts: i64 = tx
-        .query_row(
-            "SELECT attempts FROM account_profiles WHERE account_id = ?",
-            [account],
-            |r| r.get(0),
-        )
-        .optional()?
-        .unwrap_or(0);
+    let attempts = AccountProfiles(w).attempts(account)?;
     let mut g = Map::new();
     for (f, gap) in gaps {
         let mut v = json!({"reason": gap.reason});
@@ -449,76 +372,60 @@ pub fn record_lookup(
     } else {
         (0, None)
     };
-    tx.execute(
-        "INSERT INTO account_profiles (account_id, workspace_id, checked, next_check, attempts, source, gaps)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-         ON CONFLICT(account_id) DO UPDATE SET checked = ?3, next_check = ?4, attempts = ?5,
-           source = coalesce(?6, account_profiles.source), gaps = ?7",
-        params![account, ws, now, next, attempts, source, Value::Object(g).to_string()],
-    )?;
+    AccountProfiles(w).upsert(&LookupUpdate {
+        account,
+        workspace: ws,
+        at: now,
+        next,
+        attempts,
+        source,
+        gaps: &Value::Object(g),
+    })?;
     Ok(())
 }
 
 /// Is `account` due for a lookup at `now` (never looked up, or its retry time has come)?
-pub fn due(c: &Connection, account: &str, now: i64) -> ApiResult<bool> {
-    let row: Option<Option<i64>> = c
-        .query_row(
-            "SELECT next_check FROM account_profiles WHERE account_id = ?",
-            [account],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(match row {
-        None => true,
-        Some(Some(n)) => n <= now,
-        Some(None) => false,
-    })
+pub fn due(r: &mut impl Read, account: &str, now: i64) -> ApiResult<bool> {
+    Ok(AccountProfiles(r)
+        .retry(account)?
+        .is_none_or(|row| row.is_some_and(|at| at <= now)))
 }
 
-/// Is a recorded retry of `account` due at `now` (a lookup left gaps and its `next_check` has come)?
-/// Such a retry is what the contact page promised: it is made even when a lookup cache says the
-/// last answer is still fresh. A person never looked up has no promise to keep.
-pub fn retry_due(c: &Connection, account: &str, now: i64) -> ApiResult<bool> {
-    Ok(c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM account_profiles WHERE account_id = ? AND next_check IS NOT NULL AND next_check <= ?)",
-        params![account, now],
-        |r| r.get(0),
-    )?)
+/// A recorded retry is due even when the provider cache still considers its answer fresh.
+pub fn retry_due(r: &mut impl Read, account: &str, now: i64) -> ApiResult<bool> {
+    Ok(AccountProfiles(r)
+        .retry(account)?
+        .flatten()
+        .is_some_and(|at| at <= now))
 }
 
 /// Everyone of `ws` with gaps is due now (a connection changed: a permission may have been granted).
-pub fn all_due(tx: &Tx, ws: &str, now: i64) -> ApiResult<usize> {
-    Ok(tx.execute(
-        "UPDATE account_profiles SET next_check = ?2, attempts = 0 WHERE workspace_id = ?1 AND gaps <> '{}'",
-        params![ws, now],
-    )?)
+pub fn all_due(w: &mut steve_store::W<'_>, ws: &str, now: i64) -> ApiResult<usize> {
+    Ok(AccountProfiles(w).mark_due(ws, now)?)
 }
 
 /// Fill only a missing email from the Hub's own user record. Connected account profiles and
 /// jobs are already synchronized by their modules; machine-local git/locale are not Hub data.
 /// Any existing value (including a rejected/stale one) suppresses automatic re-creation.
-pub fn supplement_me(tx: &Tx, ws: &str, user: &str, party: &str) -> ApiResult<()> {
-    if repo::values(tx, ws, party)?
+pub fn supplement_me(
+    w: &mut steve_store::W<'_>,
+    ws: &str,
+    user: &str,
+    party: &str,
+) -> ApiResult<()> {
+    if Attributes(w)
+        .values(ws, party)?
         .iter()
         .any(|a| a.key == "email")
     {
         return Ok(());
     }
-    let removed: bool = tx.query_row(
-        "SELECT EXISTS (SELECT 1 FROM revisions WHERE workspace_id = ?1 AND object_type = 'party' AND object_id = ?2
-         AND json_valid(patch) AND json_extract(patch, '$.before.attr.key') = 'email'
-         AND json_type(patch, '$.after.attr') = 'null')", params![ws, party], |r| r.get(0),
-    )?;
-    if removed {
+    if Revisions(w).removed_attribute(ws, party, "email")? {
         return Ok(());
     }
-    let email: Option<String> = tx
-        .query_row("SELECT email FROM users WHERE id = ?", [user], |r| r.get(0))
-        .optional()?
-        .flatten();
+    let email = UserRows(w).email(user)?;
     if let Some(email) = email.filter(|e| !e.trim().is_empty() && e.len() <= 500) {
-        let v = repo::value_insert(
-            tx,
+        let v = Attributes(w).insert_value(
             ws,
             &repo::NewValue {
                 party_id: party.into(),
@@ -533,9 +440,9 @@ pub fn supplement_me(tx: &Tx, ws: &str, user: &str, party: &str) -> ApiResult<()
                 decision_id: None,
             },
         )?;
-        if let Some(p) = repo::get(tx, party)? {
+        if let Some(p) = w.contacts().party(party)? {
             super::service::revise(
-                tx,
+                w,
                 &p,
                 &repo::PartyPatch::default(),
                 json!({"attr": null}),
@@ -543,7 +450,7 @@ pub fn supplement_me(tx: &Tx, ws: &str, user: &str, party: &str) -> ApiResult<()
                 user,
             )?;
         }
-        super::service::event(tx, ws, party);
+        w.emit(crate::accounts::service::party_changed(ws, party));
     }
     Ok(())
 }
@@ -554,7 +461,7 @@ pub fn supplement_me(tx: &Tx, ws: &str, user: &str, party: &str) -> ApiResult<()
 /// A conversation override wins over a persona override. Private/internal nicknames never
 /// become the external fallback; the contact name does.
 pub fn address(
-    c: &Connection,
+    c: &mut impl steve_store::Read,
     ws: &str,
     user: &str,
     external: bool,

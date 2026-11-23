@@ -34,6 +34,7 @@ export default {
   "state": {
     "loading": "正在读取共享信息…",
     "online": "已读取 Hub 共享信息",
-    "offline": "Hub 未连接 · 上次已知快照"
+    "offline": "Hub 未连接 · 上次已知快照",
+    "error": "无法读取 Hub 共享信息"
   }
 }

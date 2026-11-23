@@ -3,9 +3,8 @@
 //! the executor itself failing. B1 (releases) comes with the release slice. A trip pauses the whole workspace
 //! ([`Yolo::trip`]): scheduled actions are cancelled and a failure notice goes out.
 
-use rusqlite::{OptionalExtension, params};
 use steve_modules::ApiResult;
-use steve_store::yolo as repo;
+use steve_store::{decision_repo, item_repo, yolo as repo};
 
 use super::Yolo;
 
@@ -29,17 +28,13 @@ impl Yolo {
     /// has its own cap per item). True when it tripped (or the workspace was already paused).
     pub fn check_systemic(&self, ws: &str) -> ApiResult<bool> {
         let since = self.now() - B2_WINDOW_MS;
-        let items: i64 = self.store().reader(|c| {
-            c.prepare_cached(
-                "SELECT count(DISTINCT item_id) FROM decisions
-                  WHERE workspace_id = ?1 AND kind = 'fail' AND item_id IS NOT NULL AND created >= ?2
-                    AND (substr(question, 1, length(?3)) = ?3 OR substr(question, 1, length(?4)) = ?4)",
-            )?
-            .query_row(
-                params![ws, since, super::facts::SESSION_ERROR, super::facts::INTERRUPTED],
-                |r| r.get(0),
+        let items = self.store().read(|r| {
+            decision_repo::failed_item_count(
+                r,
+                ws,
+                since,
+                [super::facts::SESSION_ERROR, super::facts::INTERRUPTED],
             )
-            .map_err(steve_modules::ApiError::from)
         })?;
         if items >= B2_ITEMS {
             self.trip(
@@ -57,30 +52,27 @@ impl Yolo {
     /// recalls within an hour). True when it tripped.
     pub fn undone(&self, ws: &str, action: &str) -> ApiResult<bool> {
         let now = self.now();
-        let (n, item) = self.store().transaction(|tx| {
-            if !repo::action_undone(tx, action, now)? {
+        let (n, item) = self.store().write(|w| {
+            let Some(stamped) = repo::stamp_undone(w, action, now)? else {
                 return Ok::<_, steve_modules::ApiError>((repo::Undone::default(), None));
-            }
-            // an item already out of YOLO (a pause from the digest says so itself) stays as it is
-            let item = repo::action_get(tx, action)?
-                .and_then(|a| a.item_id)
-                .filter(|i| {
-                    !repo::scope_get(tx, ws, repo::ITEM, i)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|s| s.mode == "off")
-                });
-            Ok((repo::undone_since(tx, ws, now - B3_WINDOW_MS)?, item))
+            };
+            // An item already outside YOLO keeps the reason for the original exclusion.
+            let item = match stamped.item_id {
+                Some(id)
+                    if !repo::scope_get(w, ws, repo::ITEM, &id)?
+                        .is_some_and(|s| s.mode == "off") =>
+                {
+                    Some(id)
+                }
+                _ => None,
+            };
+            Ok((repo::undone_since(w, ws, now - B3_WINDOW_MS)?, item))
         })?;
         if let Some(item) = item {
-            let title: String = self
+            let title = self
                 .store()
-                .reader(|c| {
-                    c.prepare_cached("SELECT title FROM items WHERE id = ?")?
-                        .query_row([&item], |r| r.get(0))
-                        .optional()
-                        .map_err(steve_modules::ApiError::from)
-                })?
+                .read(|r| item_repo::item_brief(r, ws, &item))?
+                .map(|(title, _)| title)
                 .unwrap_or_default();
             self.item_off(ws, &item, &title, UNDONE_REASON)?;
         }

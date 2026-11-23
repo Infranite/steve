@@ -198,20 +198,21 @@ impl Recorder {
                     batch.extend(receiver.try_iter().take(31));
                     let count = batch.len() as u64;
                     epoch.fetch_add(1, Ordering::AcqRel);
-                    let result: Result<u64> = store.write(|w| {
-                        let tx = w.tx()?;
+                    let result: Result<u64> = store.write_conn(|w| {
+                        let transaction = w.tx()?;
+                        let tx = transaction.connection();
                         let mut retention_budget =
                             steve_store_sqlite::retention::policies::DIAGNOSTIC_EVICT_ROWS;
                         for event in &batch {
-                            persist(&tx, event, &mut retention_budget)?;
+                            persist(tx, event, &mut retention_budget)?;
                         }
                         let pending = losses.load(Ordering::Relaxed);
                         tx.execute(
                             "UPDATE diagnostic_stats SET dropped=dropped+? WHERE id=1",
                             [pending.min(i64::MAX as u64) as i64],
                         )?;
-                        let until = active_until(&tx)?;
-                        tx.commit()?;
+                        let until = active_until(tx)?;
+                        transaction.commit()?;
                         // Keep the cache ordered with concurrent capture writes.
                         if let Some(recorder) = store.inner.diagnostics.get() {
                             recorder.active_until.store(until, Ordering::Relaxed);
@@ -322,7 +323,7 @@ impl Diagnostics<'_> {
     }
 
     fn snapshot<T>(&self, read: impl FnOnce(&Connection, Snapshot) -> Result<T>) -> Result<T> {
-        self.0.reader(|c| {
+        self.0.sqlite_read(|c| {
             // Sample before the first SELECT fixes the SQLite snapshot. Sampling
             // at the end can pair old rows with a worker's newly drained queue.
             let counters = self
@@ -386,9 +387,10 @@ impl Diagnostics<'_> {
                 "diagnostic recorder unavailable".into(),
             ));
         }
-        self.0.write(|w| {
-            let tx = w.tx()?;
-            own(&tx, ws, item)?;
+        self.0.write_conn(|w| {
+            let transaction = w.tx()?;
+            let tx = transaction.connection();
+            own(tx, ws, item)?;
             let at = now();
             tx.execute("INSERT OR IGNORE INTO diagnostic_item_stats(item_id) VALUES(?)", [item])?;
             if minutes == 0 {
@@ -400,9 +402,9 @@ impl Diagnostics<'_> {
                     expires_at=excluded.expires_at,stop_reason=NULL,stopped_at=NULL,bytes=0,dropped_at_start=excluded.dropped_at_start",
                     params![item,ws,actor,at,at+i64::from(minutes)*60_000,item])?;
             }
-            let result=json!({"observed_at":at,"capture":capture_view(&tx,item,at)?});
-            let until=active_until(&tx)?;
-            tx.commit()?;
+            let result=json!({"observed_at":at,"capture":capture_view(tx,item,at)?});
+            let until=active_until(tx)?;
+            transaction.commit()?;
             if let Some(recorder)=self.0.inner.diagnostics.get(){recorder.active_until.store(until,Ordering::Relaxed);}
             Ok(result)
         })
@@ -729,6 +731,37 @@ pub(crate) fn active_until(c: &Connection) -> Result<i64> {
     )?)
 }
 
+pub struct ItemFailure {
+    pub seq: i64,
+    pub session: Option<String>,
+    pub kind: String,
+}
+
+pub fn latest_item_failure(
+    r: &mut impl crate::Read,
+    item: &str,
+    after: i64,
+) -> crate::Result<Option<ItemFailure>> {
+    use sea_query::{Expr, ExprTrait, Order, Query};
+    r.one(
+        Query::select()
+            .columns(["seq", "session_id", "kind"])
+            .from("diagnostic_events")
+            .and_where(Expr::col("item_id").eq(item))
+            .and_where(Expr::col("severity").eq("error"))
+            .and_where(Expr::col("seq").gt(after))
+            .order_by("seq", Order::Desc)
+            .limit(1),
+        |row| {
+            Ok(ItemFailure {
+                seq: row.get(0)?,
+                session: row.get(1)?,
+                kind: row.get(2)?,
+            })
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -970,7 +1003,7 @@ mod tests {
         let reader_store = store.clone();
         let reader_item = item.id.clone();
         let reader = store
-            .with_conn(|_| {
+            .write_locked(|_| {
                 // The worker cannot commit before the reader has fixed its old snapshot.
                 let mut invalid = event.clone();
                 invalid.kind = "invalid free text".into();

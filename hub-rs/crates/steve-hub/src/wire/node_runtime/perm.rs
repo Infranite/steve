@@ -4,6 +4,7 @@
 //! resolution are all bound to the request's own attempt.
 
 use super::*;
+use steve_store::node_commands::dispatch;
 use steve_store::runtime::PermissionRow;
 
 /// How a card closed by time reads.
@@ -19,15 +20,19 @@ impl NodeRuntime {
     /// still open.
     pub(super) fn permission_event_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         ev: &NodeEvent,
     ) -> Result<Option<After>, StoreError> {
         match &ev.body {
             EventBody::PermissionRequested { request } => self.requested_in(tx, request),
             EventBody::PermissionResolved { resolution } => {
                 let attempt = resolution.execution.attempt().as_str();
-                let Some(row) =
-                    rt::permission_in(tx, self.node_id.as_str(), attempt, resolution.id.as_str())?
+                let Some(row) = node_write::permission_in(
+                    tx,
+                    self.node_id.as_str(),
+                    attempt,
+                    resolution.id.as_str(),
+                )?
                 else {
                     tracing::warn!(permission = %resolution.id, attempt, "resolution of no known request");
                     return Ok(None);
@@ -41,7 +46,7 @@ impl NodeRuntime {
                 // is. Applied already: the answer's receipt came before this event, and the card
                 // is resolved now.
                 let moved = match row.state.as_str() {
-                    "waiting" | "answering" => rt::permission_cas_in(
+                    "waiting" | "answering" => node_write::permission_cas_in(
                         tx,
                         &row.decision,
                         row.revision,
@@ -57,7 +62,7 @@ impl NodeRuntime {
                         PermissionDecision::AllowOnce => Some(ALLOW),
                         PermissionDecision::Reject => None,
                     };
-                    steve_store::decision_resolve_in(
+                    steve_store::decision_repo::settle_permission(
                         tx,
                         &row.decision,
                         &json!({ "optionId": chose }),
@@ -68,7 +73,7 @@ impl NodeRuntime {
             }
             EventBody::PermissionExpired { id } => {
                 if let Subject::Execution(x) = &ev.subject
-                    && let Some(row) = rt::permission_in(
+                    && let Some(row) = node_write::permission_in(
                         tx,
                         self.node_id.as_str(),
                         x.attempt().as_str(),
@@ -85,32 +90,30 @@ impl NodeRuntime {
 
     fn requested_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         request: &PermissionRequest,
     ) -> Result<Option<After>, StoreError> {
         let Some(session) = exec_session(&request.execution) else {
             return Ok(None);
         };
         let attempt = request.execution.attempt().as_str();
-        if rt::permission_in(tx, self.node_id.as_str(), attempt, request.id.as_str())?.is_some() {
+        if node_write::permission_in(tx, self.node_id.as_str(), attempt, request.id.as_str())?
+            .is_some()
+        {
             // the same request again (a replay): its card is there
             return Ok(None);
         }
         // an attempt this Hub planned on this Node, of that very session (whatever the body says)
-        let planned: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM runtime_attempts a JOIN runtime_turns t ON t.turn_id=a.turn_id JOIN runtime_sessions s ON s.session_id=t.session_id WHERE a.attempt_id=?1 AND t.session_id=?2 AND a.node_id=?3 AND s.node_id=?3)",
-            rusqlite::params![attempt, session, self.node_id.as_str()],
-            |r| r.get(0),
-        )?;
+        let planned = self.store.read(|r| {
+            node_turns::planning::planned_here(r, self.node_id.as_str(), &session, attempt)
+        })?;
         if !planned {
             tracing::warn!(permission = %request.id, attempt, "request of an attempt the Hub never planned on this Node");
             return Ok(None);
         }
-        let (ws, item, bot): (String, Option<String>, Option<String>) = tx.query_row(
-            "SELECT workspace_id, item_id, bot_id FROM sessions WHERE id=?",
-            [&session],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?;
+        let scope = self
+            .store
+            .read(|r| node_sessions::startup::scope(r, &session))?;
         let options: Vec<String> = request
             .choices
             .iter()
@@ -119,37 +122,31 @@ impl NodeRuntime {
                 PermissionDecision::Reject => format!("{REJECT}|拒绝|reject_once"),
             })
             .collect();
-        let d = steve_store::decision_create_in(
-            tx,
-            &steve_store::NewDecision {
-                workspace_id: ws,
-                kind: "approve".into(),
-                subject_type: "tool_call".into(),
-                subject_id: request.id.to_string(),
-                item_id: item,
-                session_id: Some(session.clone()),
-                question: format!("允许执行：{}", request.title),
-                draft: Some(
-                    serde_json::to_string_pretty(&request.action)
-                        .unwrap_or_default()
-                        .chars()
-                        .take(2000)
-                        .collect(),
-                ),
-                options: Some(options),
-                requested_by: bot.unwrap_or_else(|| "agent".into()),
-            },
-        )?;
-        rt::add_event_in(
+        let d = steve_store::DecisionRows(tx).open(&steve_store::NewDecision {
+            workspace_id: scope.workspace,
+            kind: "approve".into(),
+            subject_type: "tool_call".into(),
+            subject_id: request.id.to_string(),
+            item_id: scope.item,
+            session_id: Some(session.clone()),
+            question: format!("允许执行：{}", request.title),
+            draft: Some(
+                serde_json::to_string_pretty(&request.action)
+                    .unwrap_or_default()
+                    .chars()
+                    .take(2000)
+                    .collect(),
+            ),
+            options: Some(options),
+            requested_by: scope.bot.unwrap_or_else(|| "agent".into()),
+        })?;
+        event_in(
             tx,
             &session,
             "permission",
             json!({ "decision": d.id, "title": request.title }),
-            V1,
-            None,
-            now(),
         )?;
-        rt::insert_permission_in(
+        node_write::insert_permission_in(
             tx,
             &rt::NewPermission {
                 decision: &d.id,
@@ -164,7 +161,7 @@ impl NodeRuntime {
         )?;
         if request.expires_at.0 <= now() {
             // already past its time when it came in: closed at once, never offered to YOLO
-            if let Some(row) = rt::permission_of_decision_in(tx, &d.id)? {
+            if let Some(row) = node_write::permission_of_decision_in(tx, &d.id)? {
                 self.expire_card_in(tx, &row, EXPIRED)?;
             }
             return Ok(None);
@@ -180,18 +177,13 @@ impl NodeRuntime {
     /// another attempt gets its own), bound to the very request: its attempt and action digest.
     fn answer_command_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         row: &PermissionRow,
         choice: PermissionDecision,
     ) -> Result<String, StoreError> {
         let request: PermissionRequest = serde_json::from_value(row.request.clone())?;
         let op = format!("op_answer_{}", row.decision);
-        let exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM node_commands WHERE operation_id=?)",
-            [&op],
-            |r| r.get(0),
-        )?;
-        if exists {
+        if self.store.read(|r| dispatch::exists(r, &op))? {
             return Ok(op);
         }
         let (req, digest) = command(
@@ -204,7 +196,7 @@ impl NodeRuntime {
                 decision: choice,
             },
         )?;
-        rt::insert_command_in(
+        node_write::insert_command_in(
             tx,
             &rt::NewCommand {
                 operation: &op,
@@ -222,17 +214,24 @@ impl NodeRuntime {
 
     /// A waiting card whose time is up: expired, and the Node (if its attempt still runs) is told
     /// to reject the request. True: a command was queued.
-    fn expire_card_in(&self, tx: &Tx, row: &PermissionRow, why: &str) -> Result<bool, StoreError> {
+    fn expire_card_in(
+        &self,
+        tx: &mut W<'_>,
+        row: &PermissionRow,
+        why: &str,
+    ) -> Result<bool, StoreError> {
         if row.state != "waiting" {
             return Ok(false);
         }
-        let running = attempt_row(tx, &row.attempt)?.is_some_and(|(_, s)| s != "finished");
+        let running = self
+            .attempt_row(&row.attempt)?
+            .is_some_and(|a| a.state != "finished");
         let op = if running {
             Some(self.answer_command_in(tx, row, PermissionDecision::Reject)?)
         } else {
             None
         };
-        if !rt::permission_cas_in(
+        if !node_write::permission_cas_in(
             tx,
             &row.decision,
             row.revision,
@@ -242,7 +241,7 @@ impl NodeRuntime {
         )? {
             return Err(conflict("the permission changed while expiring it"));
         }
-        steve_store::decision_resolve_in(
+        steve_store::decision_repo::settle_permission(
             tx,
             &row.decision,
             &json!({ "superseded": why }),
@@ -255,22 +254,22 @@ impl NodeRuntime {
     /// expired, with no command. An answer that was on its way was never applied.
     pub(super) fn close_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         row: &PermissionRow,
         why: &str,
     ) -> Result<(), StoreError> {
         if !matches!(row.state.as_str(), "waiting" | "answering") {
             return Ok(());
         }
-        rt::permission_cas_in(tx, &row.decision, row.revision, "expired", None, now())?;
+        node_write::permission_cas_in(tx, &row.decision, row.revision, "expired", None, now())?;
         if row.state == "answering" {
-            steve_store::decision_expire_unapplied_in(
+            steve_store::decision_repo::expire_unapplied(
                 tx,
                 &row.decision,
                 &json!({ "superseded": why, "unapplied": true }),
             )?;
         } else {
-            steve_store::decision_resolve_in(
+            steve_store::decision_repo::settle_permission(
                 tx,
                 &row.decision,
                 &json!({ "superseded": why }),
@@ -283,10 +282,10 @@ impl NodeRuntime {
     /// The attempt is over: nothing of it can be answered any more, whatever the Node said.
     pub(super) fn close_cards_of_attempt_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         attempt: &str,
     ) -> Result<(), StoreError> {
-        for row in rt::permissions_of_attempt_in(tx, attempt)? {
+        for row in node_write::permissions_of_attempt_in(tx, attempt)? {
             self.close_in(tx, &row, SUPERSEDED)?;
         }
         Ok(())
@@ -296,12 +295,12 @@ impl NodeRuntime {
     /// answer the Node did not take).
     pub(super) fn answer_receipt_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         op: &str,
         success: bool,
         error: Option<&ApiError>,
     ) -> Result<(), StoreError> {
-        let Some(row) = rt::permission_of_answer_in(tx, op)? else {
+        let Some(row) = node_write::permission_of_answer_in(tx, op)? else {
             return Ok(());
         };
         if row.state != "answering" {
@@ -309,14 +308,14 @@ impl NodeRuntime {
             return Ok(());
         }
         if success {
-            rt::permission_cas_in(tx, &row.decision, row.revision, "applied", None, now())?;
+            node_write::permission_cas_in(tx, &row.decision, row.revision, "applied", None, now())?;
             return Ok(());
         }
-        rt::permission_cas_in(tx, &row.decision, row.revision, "refused", None, now())?;
+        node_write::permission_cas_in(tx, &row.decision, row.revision, "refused", None, now())?;
         let code = error
             .map(|e| serde_json::to_value(e.code).unwrap_or(Value::Null))
             .unwrap_or(Value::Null);
-        steve_store::decision_expire_unapplied_in(
+        steve_store::decision_repo::expire_unapplied(
             tx,
             &row.decision,
             &json!({ "expired": true, "refused": code }),
@@ -326,9 +325,9 @@ impl NodeRuntime {
 
     /// Closes the cards whose `expires_at` has come (Hub clock). True: a reject was queued.
     pub(super) fn expire_due(&self) -> bool {
-        let r = self.tx(|tx| {
+        let r = self.write(|tx| {
             let mut queued = false;
-            for row in rt::due_permissions_in(tx, self.node_id.as_str(), now(), SWEEP)? {
+            for row in node_write::due_permissions_in(tx, self.node_id.as_str(), now(), SWEEP)? {
                 queued |= self.expire_card_in(tx, &row, EXPIRED)?;
             }
             Ok(queued)
@@ -356,18 +355,22 @@ impl NodeRuntime {
         option: Option<&str>,
     ) -> Result<bool, StoreError> {
         self.running()?;
-        let (answered, queued) = self.tx(|tx| {
-            let Some(row) = rt::permission_of_decision_in(tx, decision)? else {
+        let (answered, queued) = self.write(|tx| {
+            let Some(row) = node_write::permission_of_decision_in(tx, decision)? else {
                 return Ok((false, false));
             };
-            let status: String =
-                tx.query_row("SELECT status FROM decisions WHERE id=?", [decision], |r| {
-                    r.get(0)
-                })?;
-            if status != "open" || row.state != "waiting" {
+            let card = self
+                .store
+                .decisions()
+                .get(decision)?
+                .ok_or_else(|| StoreError::Rejected(format!("missing decision {decision}")))?;
+            if card.status != "open" || row.state != "waiting" {
                 return Ok((false, false));
             }
-            if let Some(why) = steve_store::workflow_gate::session_blocker(tx, &row.session)? {
+            if let Some(why) = self
+                .store
+                .read(|c| steve_store::workflow_gate::session_blocker(c, &row.session))?
+            {
                 // A pause/cancel/replan can precede a late human or YOLO answer. Commit the
                 // expired card and a rejection together; never grant the old attempt new access.
                 return Ok((false, self.expire_card_in(tx, &row, &why)?));
@@ -384,7 +387,7 @@ impl NodeRuntime {
                 _ => PermissionDecision::Reject,
             };
             let op = self.answer_command_in(tx, &row, choice)?;
-            if !rt::permission_cas_in(
+            if !node_write::permission_cas_in(
                 tx,
                 &row.decision,
                 row.revision,

@@ -6,6 +6,14 @@ use serde::Serialize;
 
 pub const REASONS: &[ReasonSet] = &[];
 
+/// Installation capabilities for features whose routes come from optional extensions.
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct OptionalModules {
+    pub feishu_registration: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, strum::EnumCount)]
 #[serde(tag = "type")]
 #[cfg_attr(test, derive(ts_rs::TS))]

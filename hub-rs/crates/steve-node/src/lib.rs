@@ -903,8 +903,7 @@ fn head_of(dir: &Path) -> ApiResult<Option<String>> {
 }
 
 fn head_with(dir: &Path, program: &Path, timeout: Duration) -> ApiResult<Option<String>> {
-    use std::io::Read;
-    use std::os::{fd::AsRawFd, unix::process::CommandExt};
+    use std::os::unix::process::CommandExt;
     let is_repo = dir.join(".git").exists();
     let mut child = std::process::Command::new(program)
         .args(["rev-parse", "HEAD"])
@@ -915,6 +914,16 @@ fn head_with(dir: &Path, program: &Path, timeout: Duration) -> ApiResult<Option<
         .stdout(std::process::Stdio::piped())
         .spawn()
         .map_err(internal)?;
+    collect_head_probe(&mut child, is_repo, timeout)
+}
+
+fn collect_head_probe(
+    child: &mut std::process::Child,
+    is_repo: bool,
+    timeout: Duration,
+) -> ApiResult<Option<String>> {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
     let mut pipe = child.stdout.take().expect("pipe");
     let flags = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
     if flags < 0
@@ -4574,20 +4583,44 @@ mod binding_tests {
 
     #[test]
     fn hanging_git_probe_is_bounded_and_reaped() {
-        use std::os::unix::fs::PermissionsExt;
+        use std::process::Stdio;
+        use steve_runtime::testkit::{eventually_blocking, process::Command};
+
         let d = tempfile::tempdir().unwrap();
-        let program = d.path().join("git");
-        std::fs::write(&program, "#!/bin/sh\necho $$ > pid\nexec sleep 30\n").unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let started = std::time::Instant::now();
-        assert!(head_with(d.path(), &program, Duration::from_millis(1000)).is_err());
-        assert!(started.elapsed() < Duration::from_secs(2));
-        let pid: i32 = std::fs::read_to_string(d.path().join("pid"))
-            .unwrap()
-            .trim()
-            .parse()
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", ": > ready && IFS= read -r line"])
+            .current_dir(d.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
             .unwrap();
-        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        let pid = child.id() as libc::pid_t;
+        // Keep stdin open so the fixture hangs until killed. Do not start the probe's budget
+        // until the shell has signalled readiness, even if launching it took a while.
+        assert!(eventually_blocking(
+            "hanging HEAD probe fixture to signal readiness",
+            || { d.path().join("ready").is_file() || child.try_wait().unwrap().is_some() }
+        ));
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "fixture exited before the probe"
+        );
+
+        let started = std::time::Instant::now();
+        let timeout = Duration::from_secs(1);
+        let error = collect_head_probe(&mut child, false, timeout).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Stale);
+        assert!(started.elapsed() >= timeout);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        // A killed but unreaped child would still be waitable.
+        assert_eq!(
+            unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
     }
 
     #[test]

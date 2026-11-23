@@ -43,11 +43,9 @@
 //! The window lengths were swept with the offline reply eval (`examples/reply_eval.rs sweep`) on the
 //! operator's cases; see the constants. They are provisional: one day of cases.
 
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::{Value, json};
-use steve_store::Tx;
-use steve_store::base;
+use steve_store::{Read, W, channel_message_repo::presence as repo};
 
 use crate::ChannelResult;
 use crate::respond::SUBJECT_MESSAGE;
@@ -84,9 +82,6 @@ pub const REASON_REPLIED: &str = "owner_replied";
 pub const REASON_LIVE: &str = "owner_live";
 pub const REASON_MERGED: &str = "merged";
 pub const REASON_SETTING: &str = "reply_as_you";
-/// The reply statuses that mean a message was answered in your name: approved and waiting, out, out
-/// or not (unknown), taken back after it went out.
-const ANSWERED: &str = "('pending', 'sent', 'unknown', 'recalled')";
 
 /// One message of a space, as the presence rules see it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -328,140 +323,63 @@ pub fn burst(target: &Said, before: &[Said], gap_ms: i64) -> Vec<String> {
 
 // ---------------------------------------------------------------- over the store
 
-/// Your contacts in `ws` (the workspace owners', and those merged into them) and the personal
-/// accounts of the space's own connection, as SQL: `?1` = ws, `?2` = space.
-pub(crate) const MINE: &str = "WITH RECURSIVE mine(id) AS (
-       SELECT p.id FROM parties p JOIN workspace_members wm
-           ON wm.user_id = p.user_id AND wm.workspace_id = ?1 AND wm.role = 'owner'
-        WHERE p.workspace_id = ?1
-       UNION SELECT a.party_id FROM spaces s JOIN connections c ON c.id = s.connection_id
-           JOIN accounts a ON a.id = c.account_id
-           JOIN channel_settings cs ON cs.connection_id = c.id AND cs.mode = 'self'
-        WHERE s.id = ?2
-       UNION SELECT p.id FROM parties p JOIN mine ON p.merged_into = mine.id
-     ), my_accounts(id) AS (SELECT a.id FROM accounts a WHERE a.party_id IN (SELECT id FROM mine))";
-
-/// A stored inbound message from your account or contact, as an SQL expression over `m` with
-/// [`MINE`] in scope (who sent it only: [`said_of`] also leaves out automatic replies).
-const IS_MINE: &str = "(m.sender_party_id IN (SELECT id FROM mine)
-       OR m.sender_account_id IN (SELECT id FROM my_accounts))";
-
-fn said_of(r: &rusqlite::Row<'_>, my: &[String]) -> rusqlite::Result<Said> {
-    let mentions: Option<String> = r.get(7)?;
-    let mentions: Vec<String> = mentions
-        .and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok())
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|m| m["account_id"].as_str().map(String::from))
-        .collect();
-    let from_you: bool = r.get(2)?;
-    let text: String = r.get(9)?;
-    Ok(Said {
-        id: r.get(0)?,
-        at: r.get(1)?,
-        // another assistant's automatic reply on your account is not you (as `inbound` records it)
-        owner: from_you && !crate::arbiter::looks_automated(&text),
-        sender: r.get(3)?,
-        sender_account: r.get(8)?,
-        thread_key: r.get(4)?,
-        external_id: r.get(5)?,
-        reply_to: r.get(6)?,
-        mentions_owner: mentions.iter().any(|a| my.contains(a)),
-        mentions,
-        answered: r.get(10)?,
-    })
+fn said_of(row: repo::Line, my: &[String]) -> Said {
+    Said {
+        id: row.id,
+        at: row.at,
+        owner: row.owner && !crate::arbiter::looks_automated(&row.text),
+        sender: row.sender,
+        sender_account: row.sender_account,
+        thread_key: row.thread,
+        external_id: row.external,
+        reply_to: row.reply_to,
+        mentions_owner: row.mentions.iter().any(|account| my.contains(account)),
+        mentions: row.mentions,
+        answered: row.answered,
+    }
 }
 
-const SAID_COLUMNS: &str = "m.id, m.created, {IS_MINE},
-       coalesce(m.sender_party_id, m.sender_account_id, ''), m.thread_key, m.external_id, m.reply_to, m.mentions,
-       m.sender_account_id, coalesce(m.text, ''),
-       EXISTS (SELECT 1 FROM chan_messages o WHERE o.space_id = m.space_id AND o.direction = 'out'
-                  AND o.reply_to = m.external_id AND o.status IN {ANSWERED}
-                  AND o.on_behalf = 'none' AND o.persona_id IS NULL
-                  AND o.sender_account_id IN (SELECT id FROM my_accounts))";
-
-fn columns() -> String {
-    SAID_COLUMNS
-        .replace("{IS_MINE}", IS_MINE)
-        .replace("{ANSWERED}", ANSWERED)
-}
-
-fn my_accounts(c: &Connection, ws: &str, space: &str) -> ChannelResult<Vec<String>> {
-    let mut st = c.prepare_cached(&format!("{MINE} SELECT id FROM my_accounts"))?;
-    let v = st
-        .query_map(params![ws, space], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(v)
-}
-
-/// An inbound message as [`Said`], with its space and whether that is a private chat; `None` when it
-/// is not an inbound message of `ws`.
-pub fn said(c: &Connection, ws: &str, id: &str) -> ChannelResult<Option<(Said, String, bool)>> {
-    let space: Option<(String, String)> = c
-        .query_row(
-            "SELECT m.space_id, coalesce(s.kind, '') FROM chan_messages m JOIN spaces s ON s.id = m.space_id
-              WHERE m.id = ? AND m.workspace_id = ? AND m.direction = 'in'",
-            params![id, ws],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    let Some((space, kind)) = space else {
+/// An inbound message, its space and whether it is a private chat.
+pub fn said(r: &mut impl Read, ws: &str, id: &str) -> ChannelResult<Option<(Said, String, bool)>> {
+    let Some((space, kind)) = repo::inbound_location(r, ws, id)? else {
         return Ok(None);
     };
-    let my = my_accounts(c, ws, &space)?;
-    let s = c
-        .query_row(
-            &format!(
-                "{MINE} SELECT {} FROM chan_messages m WHERE m.id = ?3",
-                columns()
-            ),
-            params![ws, space, id],
-            |r| said_of(r, &my),
-        )
-        .optional()?;
-    Ok(s.map(|s| (s, space, kind == "dm")))
+    let my = repo::accounts(r, ws, &space)?;
+    Ok(repo::line_for(r, ws, &space, id)?.map(|row| (said_of(row, &my), space, kind == "dm")))
 }
 
 /// The space's inbound messages written from `from` to `to` (ms), oldest first.
 fn lines(
-    c: &Connection,
+    r: &mut impl Read,
     ws: &str,
     space: &str,
     from: i64,
     to: i64,
     my: &[String],
 ) -> ChannelResult<Vec<Said>> {
-    let mut st = c.prepare_cached(&format!(
-        "{MINE} SELECT {} FROM chan_messages m
-          WHERE m.space_id = ?2 AND m.direction = 'in' AND m.created >= ?3 AND m.created <= ?4
-          ORDER BY m.created, m.rowid LIMIT {AROUND_MAX}",
-        columns()
-    ))?;
-    let v = st
-        .query_map(params![ws, space, from, to], |r| said_of(r, my))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(v)
+    Ok(repo::lines(r, ws, space, from, to, AROUND_MAX as i64)?
+        .into_iter()
+        .map(|line| said_of(line, my))
+        .collect())
 }
 
-/// Whether you said something yourself in `space` from `from` to `to` (ms): your own words only,
-/// not what another assistant posted on your account by itself ([`crate::arbiter::looks_automated`])
-/// nor what Steve sent as you.
-pub fn you_spoke(c: &Connection, ws: &str, space: &str, from: i64, to: i64) -> ChannelResult<bool> {
-    let mut st = c.prepare_cached(&format!(
-        "{MINE} SELECT coalesce(m.text, '') FROM chan_messages m
-          WHERE m.space_id = ?2 AND m.direction = 'in' AND m.created >= ?3 AND m.created <= ?4
-            AND {IS_MINE}"
-    ))?;
-    let texts = st
-        .query_map(params![ws, space, from, to], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(texts.iter().any(|t| !crate::arbiter::looks_automated(t)))
+/// Whether you wrote anything yourself in the space within this interval.
+pub fn you_spoke(
+    r: &mut impl Read,
+    ws: &str,
+    space: &str,
+    from: i64,
+    to: i64,
+) -> ChannelResult<bool> {
+    Ok(repo::own_words(r, ws, space, from, to)?
+        .iter()
+        .any(|text| !crate::arbiter::looks_automated(text)))
 }
 
 /// [`engaged`] for stored inbound message `target` at `now`, with [`OWNER_LIVE_MS`]. `None` also for
 /// a message that is yours or not found.
 pub fn owner_engaged(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     target: &str,
     now: i64,
@@ -472,7 +390,7 @@ pub fn owner_engaged(
     if t.owner {
         return Ok(None);
     }
-    let my = my_accounts(c, ws, &space)?;
+    let my = repo::accounts(c, ws, &space)?;
     // everything stored has happened: the moment judged is the later of the Hub's clock and the
     // newest time stored (a provider clock ahead of the Hub's does not hide your message)
     let around = lines(c, ws, &space, t.at - OWNER_LIVE_MS, i64::MAX, &my)?;
@@ -485,7 +403,7 @@ pub fn owner_engaged(
 /// once, in whichever came first). What a starred contact's notification asks
 /// ([`crate::starred`]): you may have answered through the other copy.
 pub fn owner_engaged_chat(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     target: &str,
     now: i64,
@@ -496,16 +414,10 @@ pub fn owner_engaged_chat(
     if t.owner {
         return Ok(None);
     }
-    let mut st = c.prepare_cached(
-        "SELECT o.id FROM spaces s JOIN spaces o ON o.workspace_id = s.workspace_id AND o.external_id = s.external_id
-          WHERE s.id = ?1 AND s.workspace_id = ?2 AND o.id <> ?1 ORDER BY o.id",
-    )?;
-    let others = st
-        .query_map(params![space, ws], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let others = steve_store::channel_spaces::rows::aliases(c, ws, &space)?;
     let (mut around, mut mine) = (Vec::new(), Vec::new());
     for sp in std::iter::once(space).chain(others) {
-        let my = my_accounts(c, ws, &sp)?;
+        let my = repo::accounts(c, ws, &sp)?;
         around.extend(lines(c, ws, &sp, t.at - OWNER_LIVE_MS, now.max(t.at), &my)?);
         mine.extend(my);
     }
@@ -514,19 +426,13 @@ pub fn owner_engaged_chat(
 }
 
 /// The later message whose turn took inbound message `id` ([`take_turn`]), if one did.
-pub fn merged_into(c: &Connection, id: &str) -> ChannelResult<Option<String>> {
-    Ok(c.query_row(
-        "SELECT turn_of FROM chan_messages WHERE id = ? AND direction = 'in'",
-        [id],
-        |r| r.get::<_, Option<String>>(0),
-    )
-    .optional()?
-    .flatten())
+pub fn merged_into(c: &mut impl Read, id: &str) -> ChannelResult<Option<String>> {
+    Ok(repo::turn_of(c, id)?)
 }
 
 /// Gates 1 to 4 for stored inbound message `target` at `now`: taken by a later message's turn, or
 /// you are there ([`owner_engaged`]).
-pub fn stop(c: &Connection, ws: &str, target: &str, now: i64) -> ChannelResult<Option<Stop>> {
+pub fn stop(c: &mut impl Read, ws: &str, target: &str, now: i64) -> ChannelResult<Option<Stop>> {
     if let Some(into) = merged_into(c, target)? {
         return Ok(Some(Stop::Merged { into }));
     }
@@ -536,11 +442,11 @@ pub fn stop(c: &Connection, ws: &str, target: &str, now: i64) -> ChannelResult<O
 /// The ids of the turn stored inbound message `target` ends ([`burst`]), oldest first, without marking
 /// anything: what the gates before drafting read ([`crate::decide::gate`]). Empty when it is not an
 /// inbound message of `ws`.
-pub fn turn(c: &Connection, ws: &str, target: &str) -> ChannelResult<Vec<String>> {
+pub fn turn(c: &mut impl Read, ws: &str, target: &str) -> ChannelResult<Vec<String>> {
     let Some((t, space, _)) = said(c, ws, target)? else {
         return Ok(Vec::new());
     };
-    let my = my_accounts(c, ws, &space)?;
+    let my = repo::accounts(c, ws, &space)?;
     let from = t.at - BURST_GAP_MS * BURST_MAX as i64;
     let before = lines(c, ws, &space, from, t.at, &my)?;
     Ok(burst(&t, &before, BURST_GAP_MS))
@@ -549,44 +455,25 @@ pub fn turn(c: &Connection, ws: &str, target: &str) -> ChannelResult<Vec<String>
 /// The turn stored inbound message `target` ends ([`burst`]): the ids and what each says (with the
 /// note on what Steve cannot read of its attachments), oldest first. The earlier messages are marked
 /// as taken by it (`turn_of`) in the same transaction, so from now on no reply of their own is
-/// opened, approved by YOLO or sent ([`stop`]); [`release_turn`] undoes it.
-pub fn take_turn(tx: &Tx, ws: &str, target: &str) -> ChannelResult<Vec<(String, String)>> {
+/// opened, approved by YOLO or sent ([`stop`]); Releasing the turn undoes it.
+pub fn take_turn(tx: &mut W<'_>, ws: &str, target: &str) -> ChannelResult<Vec<(String, String)>> {
     let Some((t, space, _)) = said(tx, ws, target)? else {
         return Ok(Vec::new());
     };
-    let my = my_accounts(tx, ws, &space)?;
+    let my = repo::accounts(tx, ws, &space)?;
     let from = t.at - BURST_GAP_MS * BURST_MAX as i64;
     let before = lines(tx, ws, &space, from, t.at, &my)?;
     let ids = burst(&t, &before, BURST_GAP_MS);
-    let mut out = Vec::new();
-    for id in ids {
-        let (text, att): (String, Option<String>) = tx.query_row(
-            "SELECT coalesce(text, ''), attachments FROM chan_messages WHERE id = ?",
-            [&id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        if id != target {
-            tx.execute(
-                "UPDATE chan_messages SET turn_of = ? WHERE id = ?",
-                params![target, id],
-            )?;
-        }
-        let att: Value = att
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or(Value::Null);
-        out.push((id, crate::media::with_unread_note(&text, &att)));
-    }
-    Ok(out)
-}
-
-/// Undoes [`take_turn`] for `target` (its composer gave no answer): the earlier messages are their
-/// own again.
-pub fn release_turn(tx: &Tx, target: &str) -> ChannelResult<()> {
-    tx.execute(
-        "UPDATE chan_messages SET turn_of = NULL WHERE turn_of = ?",
-        [target],
-    )?;
-    Ok(())
+    let messages = steve_store::channel_message_repo::turns::claim(tx, target, ids)?;
+    Ok(messages
+        .into_iter()
+        .map(|message| {
+            (
+                message.id,
+                crate::media::with_unread_note(&message.text, &message.attachments),
+            )
+        })
+        .collect())
 }
 
 /// What [`supersede`] closes.
@@ -605,53 +492,22 @@ pub enum Answering<'a> {
 /// else wrote: the draft is discarded, its card expires with `result.superseded = why`, `by` (your
 /// message, the later one, the setting) goes to the audit. Returns how many cards closed.
 pub fn supersede(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     space: &str,
     what: Answering<'_>,
     why: &str,
     by: &str,
 ) -> ChannelResult<usize> {
-    let (cond, arg): (&str, rusqlite::types::Value) = match &what {
-        Answering::YouThere { before, .. } => ("src.created < ?3", (*before).into()),
-        Answering::Messages(ids) => (
-            "src.id IN (SELECT value FROM json_each(?3))",
-            serde_json::to_string(ids)?.into(),
-        ),
-        Answering::All => ("?3 IS NOT NULL", 1i64.into()),
+    let filter = match &what {
+        Answering::YouThere { before, .. } => repo::Supersede::Before(*before),
+        Answering::Messages(ids) => repo::Supersede::Messages(ids),
+        Answering::All => repo::Supersede::All,
     };
-    // the drafts: in your name, answering someone else's message
-    let drafts: Vec<(String, String, String)> = {
-        let mut st = tx.prepare(&format!(
-            "{MINE} SELECT o.id, o.status, src.id FROM chan_messages o
-               JOIN chan_messages src ON src.space_id = o.space_id AND src.direction = 'in'
-                    AND src.external_id = o.reply_to
-               JOIN chan_messages m ON m.id = src.id
-              WHERE o.space_id = ?2 AND o.direction = 'out' AND o.status IN ('draft', 'failed')
-                AND o.on_behalf = 'none' AND o.persona_id IS NULL
-                AND o.sender_account_id IN (SELECT id FROM my_accounts)
-                AND NOT {IS_MINE} AND {cond}"
-        ))?;
-        st.query_map(params![ws, space, arg], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    // the hand-offs: “X 找你” about someone else's message
-    let asks: Vec<(String, String)> = {
-        let mut st = tx.prepare(&format!(
-            "{MINE} SELECT d.id, src.id FROM decisions d
-               JOIN chan_messages src ON src.id = d.subject_id AND src.direction = 'in'
-               JOIN chan_messages m ON m.id = src.id
-              WHERE d.workspace_id = ?1 AND d.subject_type = '{SUBJECT_MESSAGE}' AND d.kind = 'ask'
-                AND d.status = 'open' AND src.space_id = ?2 AND NOT {IS_MINE} AND {cond}"
-        ))?;
-        st.query_map(params![ws, space, arg], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-    };
+    let (drafts, asks) = repo::supersession(tx, ws, space, filter, SUBJECT_MESSAGE)?;
     // after your message: only what you are there for now (in a group, what you said is about it)
     let mut there = std::collections::HashMap::new();
-    let mut closes = |src: &str| -> ChannelResult<bool> {
+    let mut closes = |tx: &mut W<'_>, src: &str| -> ChannelResult<bool> {
         let Answering::YouThere { now, .. } = &what else {
             return Ok(true);
         };
@@ -663,22 +519,19 @@ pub fn supersede(
         Ok(v)
     };
     let mut closed = 0;
-    for (id, status, src) in &drafts {
-        if !closes(src)? {
+    for row in &drafts {
+        let id = &row.message;
+        if !closes(tx, &row.source)? {
             continue;
         }
-        crate::messages::set_status(
-            tx,
-            id,
-            "UPDATE chan_messages SET status = 'discarded' WHERE id = ? AND status = ?",
-            params![id, status],
-        )?;
-        // closed while its disclosure check still ran: the record says the check did not finish
+        use steve_store::channel_message_repo::delivery::{self, SentAt};
+        delivery::transition(tx, id, &[&row.status], "discarded", SentAt::Keep)?;
+        // A draft settled before its disclosure check completed.
         crate::basis::checking_stopped(tx, id, crate::outbound::R_DEALT_FIRST)?;
-        if let Some(d) = base::decisions::open_for(tx, ws, SUBJECT_MESSAGE, id)? {
+        if let Some(d) = steve_store::decision_repo::open_for(tx, ws, SUBJECT_MESSAGE, id)? {
             closed += settle(tx, &d.id, why)? as usize;
         }
-        base::audit(
+        steve_store::audit_repo::record(
             tx,
             ws,
             "steve",
@@ -686,12 +539,14 @@ pub fn supersede(
             id,
             &json!({"why": why, "by": by}),
         )?;
-        crate::messages::event(tx, ws, space, id);
+        steve_store::channel_message_repo::emit(tx, ws, space, id);
     }
-    for (d, src) in &asks {
-        if closes(src)? && settle(tx, d, why)? {
+    for row in &asks {
+        let src = &row.source;
+        let d = &row.decision;
+        if closes(tx, src)? && settle(tx, d, why)? {
             closed += 1;
-            base::audit(
+            steve_store::audit_repo::record(
                 tx,
                 ws,
                 "steve",
@@ -699,16 +554,15 @@ pub fn supersede(
                 src,
                 &json!({"why": why, "by": by, "decision": d}),
             )?;
-            crate::messages::event(tx, ws, space, src);
+            steve_store::channel_message_repo::emit(tx, ws, space, src);
         }
     }
     Ok(closed)
 }
 
 /// Closes one open card as superseded (`expired`, `result.superseded = why`).
-pub fn settle(tx: &Tx, decision: &str, why: &str) -> ChannelResult<bool> {
-    Ok(base::decisions::settle(
-        tx,
+pub fn settle(tx: &mut W<'_>, decision: &str, why: &str) -> ChannelResult<bool> {
+    Ok(steve_store::DecisionRows(tx).settle(
         decision,
         &json!({ "superseded": why }),
         "expired",
@@ -719,53 +573,38 @@ pub fn settle(tx: &Tx, decision: &str, why: &str) -> ChannelResult<bool> {
 /// The inbound message an outbound one answers (its `reply_to` in its space), when someone else wrote
 /// it: what the gates of a draft in your name ask about. `None` for anything else (a new message, an
 /// answer to your own `/bot`, a bot's reply).
-pub fn answered_message(c: &Connection, ws: &str, out: &str) -> ChannelResult<Option<String>> {
-    let row: Option<(
-        String,
-        Option<String>,
-        String,
-        Option<String>,
-        Option<String>,
-    )> = c
-        .query_row(
-            "SELECT space_id, reply_to, on_behalf, persona_id, sender_account_id FROM chan_messages
-              WHERE id = ? AND workspace_id = ? AND direction = 'out'",
-            params![out, ws],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-        )
-        .optional()?;
-    let Some((space, Some(reply_to), on_behalf, None, Some(sender))) = row else {
+pub fn answered_message(c: &mut impl Read, ws: &str, out: &str) -> ChannelResult<Option<String>> {
+    let Some(row) = steve_store::channel_message_repo::outbound::send_row(c, out)?
+        .filter(|row| row.ws == ws && row.on_behalf == "none" && row.persona_id.is_none())
+    else {
         return Ok(None);
     };
-    if on_behalf != "none" || !my_accounts(c, ws, &space)?.contains(&sender) {
+    let (Some(external), Some(sender)) = (row.reply_to, row.sender_account_id) else {
+        return Ok(None);
+    };
+    if !repo::accounts(c, ws, &row.space_id)?.contains(&sender) {
         return Ok(None);
     }
-    let src: Option<(String, bool)> = c
-        .query_row(
-            &format!(
-                "{MINE} SELECT m.id, {IS_MINE} FROM chan_messages m
-                  WHERE m.space_id = ?2 AND m.direction = 'in' AND m.external_id = ?3"
-            ),
-            params![ws, space, reply_to],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    Ok(src.filter(|(_, mine)| !mine).map(|(id, _)| id))
+    Ok(repo::another_senders_message(
+        c,
+        ws,
+        &row.space_id,
+        &external,
+    )?)
 }
 
 /// Gates 3 and 4 for outbound message `out` in your name answering someone else's message: the
 /// space's `reply_as_you` (a reply in your name is your own account speaking), then [`stop`]. `None`
 /// for anything else.
-pub fn stop_out(c: &Connection, ws: &str, out: &str, now: i64) -> ChannelResult<Option<Stop>> {
+pub fn stop_out(c: &mut impl Read, ws: &str, out: &str, now: i64) -> ChannelResult<Option<Stop>> {
     let Some(src) = answered_message(c, ws, out)? else {
         return Ok(None);
     };
-    let space: String = c.query_row(
-        "SELECT space_id FROM chan_messages WHERE id = ?",
-        [out],
-        |r| r.get(0),
-    )?;
-    let set = crate::spaces::reply_as_you(c, &space)?;
+    let space = steve_store::channel_message_repo::space_of(c, ws, out)?
+        .ok_or_else(|| steve_modules::ApiError::not_found("消息"))?;
+    let set = steve_store::channel_spaces::preferences::settings(c, &space)?
+        .and_then(|settings| settings.reply_as_you.as_deref().and_then(ReplyAsYou::parse))
+        .unwrap_or_default();
     if set != ReplyAsYou::Draft {
         return Ok(Some(Stop::Setting { reply_as_you: set }));
     }

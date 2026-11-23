@@ -2,8 +2,8 @@
 //! Typed deliveries are encoded here after visibility filtering; the stream also adds Hono's ping
 //! (`event: ping\ndata: \n\n` every 25 s).
 //!
-//! Resuming is opt-in. A client that sends a cursor (`?after=<epoch>:<n>`, from `/api/state`'s
-//! `x-steve-cursor` or the last `id:` it saw; or the `Last-Event-ID` header, the query wins) gets:
+//! Resuming is opt-in. A client that sends a cursor (`?after=<epoch>:<n>`, from the snapshot's
+//! `cursor` or the last `id:` it saw; or the `Last-Event-ID` header, the query wins) gets:
 //! - first, every kept frame after the cursor that its workspace may see, each preceded by
 //!   `id: <epoch>:<n>`, then one `{"type":"stream.gap"}` (no id): transcript chunks and drafts from the gap are
 //!   not replayed, the per-session events API has them;
@@ -176,6 +176,23 @@ fn with_id(epoch: &str, id: u64, bytes: &[u8]) -> Vec<u8> {
     b
 }
 
+#[derive(Clone, Copy)]
+enum FrameType {
+    Patch,
+    Live,
+    Event,
+    Control,
+}
+
+/// `steve_sse_frames_total{type}`, registered once.
+fn frames_total(t: FrameType) -> &'static metrics::Counter {
+    static ALL: std::sync::OnceLock<[metrics::Counter; 4]> = std::sync::OnceLock::new();
+    &ALL.get_or_init(|| {
+        ["patch", "live", "event", "control"]
+            .map(|t| metrics::counter!("steve_sse_frames_total", "type" => t))
+    })[t as usize]
+}
+
 fn gap_frame() -> &'static [u8] {
     b"data: {\"type\":\"stream.gap\"}\n\n"
 }
@@ -229,11 +246,13 @@ impl Sub {
                 }
                 self.pending
                     .push(Part::Bytes(Bytes::from_static(gap_frame())));
+                frames_total(FrameType::Control).increment(1);
                 r.last = r.last.max(head);
             }
             Replay::Reset { head } => {
                 self.pending
                     .push(Part::Bytes(Bytes::from(reset_frame(r.bus.epoch(), head))));
+                frames_total(FrameType::Control).increment(1);
                 r.last = head;
             }
         }
@@ -270,7 +289,12 @@ impl Sub {
             _ => visible.then(|| Frame::from(f).bytes),
         }?;
         // a live frame on its way out: from its publish after commit to here
-        crate::metrics::once!(counter "steve_sse_frames_total").increment(1);
+        frames_total(match &f.envelope.event {
+            BusEvent::Patch(_) => FrameType::Patch,
+            BusEvent::Live(_) => FrameType::Live,
+            BusEvent::Domain(_) => FrameType::Event,
+        })
+        .increment(1);
         crate::metrics::once!(histogram "steve_sse_delivery_seconds")
             .record(f.published.elapsed().as_secs_f64());
         Some(bytes)
@@ -310,6 +334,7 @@ impl Sub {
     }
 
     fn resync_frame(&self) -> Bytes {
+        frames_total(FrameType::Control).increment(1);
         let json = serde_json::to_string(&StreamControl::Reset).expect("stream control serializes");
         Bytes::from(format!("data: {json}\n\n"))
     }
@@ -441,7 +466,7 @@ mod tests {
     #[tokio::test]
     async fn visible_connections_and_replay_share_one_lazy_encoding() {
         let events: [BusEvent; 4] = [
-            steve_types::WorkEvent::Item {
+            steve_types::ConfigEvent::Project {
                 id: "item".into(),
                 ws: "a".into(),
             }
@@ -646,8 +671,8 @@ mod tests {
             String::from_utf8(out).expect("utf8")
         }
 
-        fn item(bus: &Bus, id: &str) {
-            bus.publish(steve_types::WorkEvent::Item {
+        fn project(bus: &Bus, id: &str) {
+            bus.publish(steve_types::ConfigEvent::Project {
                 id: id.into(),
                 ws: "a".into(),
             });
@@ -673,12 +698,12 @@ mod tests {
                 pending: Pending::default(),
             };
             let mut watch = bus.subscribe();
-            item(&bus, "ST-1");
+            project(&bus, "ST-1");
             in_ws(&bus, "p", "b");
             sent(&mut watch, 2).await;
             assert_eq!(
                 drain(&mut sub),
-                "data: {\"type\":\"item\",\"id\":\"ST-1\",\"ws\":\"a\",\"rev\":1}\n\n"
+                "data: {\"type\":\"project\",\"id\":\"ST-1\",\"ws\":\"a\",\"rev\":1}\n\n"
             );
         }
 
@@ -688,10 +713,10 @@ mod tests {
                 Default::default(),
             )));
             let mut watch = bus.subscribe();
-            item(&bus, "ST-1");
+            project(&bus, "ST-1");
             sent(&mut watch, 1).await;
             let c = bus.cursor();
-            item(&bus, "ST-2");
+            project(&bus, "ST-2");
             in_ws(&bus, "secret", "b");
             in_ws(&bus, "mine", "a");
             sent(&mut watch, 3).await;
@@ -701,7 +726,7 @@ mod tests {
             assert_eq!(
                 out,
                 format!(
-                    "id: {e}:{}\ndata: {{\"type\":\"item\",\"id\":\"ST-2\",\"ws\":\"a\",\"rev\":2}}\n\n\
+                    "id: {e}:{}\ndata: {{\"type\":\"project\",\"id\":\"ST-2\",\"ws\":\"a\",\"rev\":2}}\n\n\
                      id: {e}:{}\ndata: {{\"type\":\"project\",\"id\":\"mine\",\"ws\":\"a\",\"rev\":4}}\n\n\
                      data: {{\"type\":\"stream.gap\"}}\n\n",
                     c.n + 1,
@@ -709,7 +734,7 @@ mod tests {
                 )
             );
             // live frames carry their id; frames without one go out as they are
-            item(&bus, "ST-3");
+            project(&bus, "ST-3");
             bus.publish(steve_types::WorkLiveEvent::SteveDraft {
                 ws: "a".into(),
                 mid: "m".into(),
@@ -720,7 +745,7 @@ mod tests {
             assert_eq!(
                 drain(&mut sub),
                 format!(
-                    "id: {e}:{}\ndata: {{\"type\":\"item\",\"id\":\"ST-3\",\"ws\":\"a\",\"rev\":5}}\n\n\
+                    "id: {e}:{}\ndata: {{\"type\":\"project\",\"id\":\"ST-3\",\"ws\":\"a\",\"rev\":5}}\n\n\
                      data: {{\"type\":\"steve.draft\",\"ws\":\"a\",\"mid\":\"m\",\"thought\":\"\",\"text\":\"x\",\"rev\":5}}\n\n",
                     c.n + 4
                 )
@@ -735,7 +760,7 @@ mod tests {
             let c = bus.cursor();
             let rx = bus.subscribe();
             let mut watch = bus.subscribe();
-            item(&bus, "ST-1");
+            project(&bus, "ST-1");
             sent(&mut watch, 1).await;
             // ST-1 is now both waiting on `rx` and in the log the replay reads
             let mut sub = Sub::resumed_on(&bus, "a".into(), rx, &c.to_string());
@@ -752,7 +777,7 @@ mod tests {
             let bus = Bus::with_window(2, usize::MAX);
             let mut watch = bus.subscribe();
             for i in 0..4 {
-                item(&bus, &format!("ST-{i}"));
+                project(&bus, &format!("ST-{i}"));
             }
             sent(&mut watch, 4).await;
             let e = bus.epoch().to_string();
@@ -771,13 +796,13 @@ mod tests {
                 );
                 if after == "garbage" {
                     // later frames continue after the head, no second reset
-                    item(&bus, "ST-9");
+                    project(&bus, "ST-9");
                     sent(&mut watch, 1).await;
                     let out = drain(&mut sub);
                     assert_eq!(
                         out,
                         format!(
-                            "id: {e}:{}\ndata: {{\"type\":\"item\",\"id\":\"ST-9\",\"ws\":\"a\",\"rev\":5}}\n\n",
+                            "id: {e}:{}\ndata: {{\"type\":\"project\",\"id\":\"ST-9\",\"ws\":\"a\",\"rev\":5}}\n\n",
                             head + 1
                         )
                     );
@@ -793,7 +818,7 @@ mod tests {
             let mut watch = bus.subscribe();
             let c = bus.cursor();
             for i in 0..5 {
-                item(&bus, &format!("ST-{i}"));
+                project(&bus, &format!("ST-{i}"));
             }
             let frames = sent(&mut watch, 5).await;
             // a receiver that holds two frames: feeding it five makes it lag
@@ -871,15 +896,15 @@ mod tests {
         async fn replay_byte_limit_matches_encoded_utf8_and_escaped_frames_exactly() {
             let id = "quoted\"\n😀";
             let expected = format!(
-                "data: {{\"type\":\"item\",\"id\":{},\"ws\":\"a\",\"rev\":1}}\n\n",
+                "data: {{\"type\":\"project\",\"id\":{},\"ws\":\"a\",\"rev\":1}}\n\n",
                 serde_json::to_string(id).unwrap()
             );
             for (budget, kept) in [(expected.len() * 2, 2), (expected.len() * 2 - 1, 1)] {
                 let bus = Bus::with_window(10, budget);
                 let mut watch = bus.subscribe();
                 let start = bus.cursor();
-                item(&bus, id);
-                item(&bus, id);
+                project(&bus, id);
+                project(&bus, id);
                 let deliveries = sent(&mut watch, 2).await;
                 assert_eq!(
                     Frame::from(deliveries[0].as_ref()).bytes.as_ref(),

@@ -1,6 +1,8 @@
 //! Error codes, extractors, ownership and decision dispatch, through a small router the way P1/V1/A1
 //! routers will be built.
 
+use steve_store::W;
+
 use axum::Json;
 use axum::Router;
 use axum::extract::{Path, State};
@@ -10,9 +12,9 @@ use serde_json::{Value, json};
 use steve_modules::decisions::{self, DecisionCx, DecisionHandler};
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, call_raw, caller};
 use steve_modules::{ApiError, ApiResult, Body, Caller, Check, Modules, Registry, own};
+use steve_store::Decision;
 use steve_store::base::mems::{self, MemPatch, NewMem};
 use steve_store::base::{self, Level, ObjRef, Visibility};
-use steve_store::{Decision, Tx};
 
 #[derive(Deserialize)]
 struct NewNote {
@@ -42,7 +44,7 @@ async fn create(
         .done()?;
     let mem = m
         .blocking(move |m| {
-            Ok(m.store.transaction(|tx| {
+            Ok(m.store.write(|tx| {
                 mems::create(
                     tx,
                     &who.ws,
@@ -73,14 +75,14 @@ async fn edit(
 ) -> ApiResult<Json<Value>> {
     m.blocking(move |m| {
         let viewer = m.viewer(&who)?;
-        let mem = own(m.store.reader(|c| mems::get(c, &id))?, &viewer, "记忆")?;
+        let mem = own(m.store.read(|c| mems::get(c, &id))?, &viewer, "记忆")?;
         if mem.text == "锁定" {
             return Err(ApiError::rule("这条记忆不能改"));
         }
         if b.text.as_deref() == Some(mem.text.as_str()) {
             return Err(ApiError::conflict("没有变化"));
         }
-        let m2 = m.store.transaction(|tx| {
+        let m2 = m.store.write(|tx| {
             mems::patch(
                 tx,
                 &id,
@@ -105,11 +107,10 @@ fn router(m: Modules) -> Router {
 /// A memory candidate confirmed with a `confirm` decision (what P3/P4 will register for `mem`).
 struct MemConfirm;
 impl DecisionHandler for MemConfirm {
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
         match cx.choice {
             "yes" => {
-                mems::patch(
-                    tx,
+                steve_store::knowledge::Memories(tx).patch(
                     &d.subject_id,
                     &MemPatch {
                         status: Some("confirmed".into()),
@@ -118,14 +119,13 @@ impl DecisionHandler for MemConfirm {
                 )?;
             }
             _ => {
-                mems::delete(tx, &d.subject_id)?;
+                steve_store::knowledge::Memories(tx).delete(&d.subject_id)?;
             }
         }
         Ok(decisions::choice_result(cx))
     }
-    fn expire(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
-        mems::patch(
-            tx,
+    fn expire(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
+        steve_store::knowledge::Memories(tx).patch(
             &d.subject_id,
             &MemPatch {
                 status: Some("stale".into()),
@@ -291,7 +291,7 @@ async fn ownership_and_domain_errors() {
     // workspace-visible memories are reachable by the other user
     let shared = t
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             mems::create(
                 tx,
                 WS,
@@ -318,7 +318,7 @@ async fn ownership_and_domain_errors() {
 
 fn candidate(t: &TestEnv) -> (String, Decision) {
     t.store()
-        .transaction(|tx| {
+        .write(|tx| {
             let m = mems::create(
                 tx,
                 WS,
@@ -393,7 +393,7 @@ async fn confirm_decisions_dispatch_to_the_module() {
     );
     assert_eq!(
         t.store()
-            .reader(|c| mems::get(c, &mid))
+            .read(|c| mems::get(c, &mid))
             .unwrap()
             .unwrap()
             .status,
@@ -407,7 +407,7 @@ async fn confirm_decisions_dispatch_to_the_module() {
         (409, "这个决定已经处理过了".to_string())
     );
     assert!(
-        t.store().reader(|c| mems::get(c, &mid)).unwrap().is_some(),
+        t.store().read(|c| mems::get(c, &mid)).unwrap().is_some(),
         "the second answer did nothing"
     );
 
@@ -416,7 +416,7 @@ async fn confirm_decisions_dispatch_to_the_module() {
     decisions::dispatch(&t.modules, &me, &d2.id, "no", "不对")
         .unwrap()
         .unwrap();
-    assert!(t.store().reader(|c| mems::get(c, &mid2)).unwrap().is_none());
+    assert!(t.store().read(|c| mems::get(c, &mid2)).unwrap().is_none());
     assert_eq!(
         t.store().decisions().get(&d2.id).unwrap().unwrap().result,
         json!({"choice": "no", "text": "不对"})
@@ -432,7 +432,7 @@ async fn confirm_decisions_dispatch_to_the_module() {
     );
     assert_eq!(
         t.store()
-            .reader(|c| mems::get(c, &mid3))
+            .read(|c| mems::get(c, &mid3))
             .unwrap()
             .unwrap()
             .status,
@@ -470,7 +470,7 @@ async fn store_errors_map_to_codes() {
         (e.status(), e.to_string()),
         (404, "没有这个项目".to_string())
     );
-    let e: ApiError = rusqlite::Error::QueryReturnedNoRows.into();
+    let e: ApiError = steve_store::StoreError::Rejected("missing test row".into()).into();
     assert_eq!(e.status(), 500);
     let e = ApiError::Invalid(vec!["a".into(), "b.0".into()]);
     assert_eq!(e.to_string(), "参数不对：a、b.0");

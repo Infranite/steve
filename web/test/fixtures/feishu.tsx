@@ -1,13 +1,16 @@
 import { StrictMode, useEffect, useState } from "react"
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
+import { st } from "../../src/store"
 import { FeishuGuide, SelfButtons } from "../../src/integrations/feishu"
+
+st.modules = { feishuRegistration: !new URLSearchParams(location.search).has("disabled") }
 
 const existing = new URLSearchParams(location.search).has("existing")
 function RaceFixture() {
   const [app, setApp] = useState("app_a")
   useEffect(() => { const swap = () => setApp("app_b"); window.addEventListener("fixture-switch-app", swap); return () => window.removeEventListener("fixture-switch-app", swap) }, [])
-  return <div data-fixture-app={app}><SelfButtons app={app} /></div>
+  return <div data-fixture-app={app}><SelfButtons app={app} side={adapters[1]} /></div>
 }
 const race = new URLSearchParams(location.search).has("race")
 /* the Hub's two Feishu adapters: the bot, and the side acting as you that pairs with it (device code first, OAuth too) */

@@ -2,6 +2,8 @@ use serde_json::{Value, json};
 use steve_channels::deliver::{Auth, OutRequest, OutTarget, Outbound, Purpose};
 use steve_channels::{By, Mention, arbiter, conversations};
 use steve_modules::testkit::{ME, WS};
+use steve_store::testkit::channels::inspect;
+use steve_store::testkit::channels::seed;
 
 #[path = "../examples/support/personal_triggers.rs"]
 mod support;
@@ -85,16 +87,7 @@ async fn receiving_connection_and_its_author_define_personal_authority() {
     assert_eq!(handling(&f, &a)["state"], "answered");
     assert_eq!(f.sends(), 2);
     // Even a bot claiming mine cannot acquire the personal trigger privilege, with collab enabled.
-    f.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE space_settings SET collab=1 WHERE space_id=?",
-                [&a.space_id],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    seed::spaces::enable_fixture_collaboration(f.env.store(), &a.space_id).unwrap();
     let mut bot = f
         .message("bot-author", "external-bot", "/bot loop")
         .mine(true);
@@ -207,16 +200,7 @@ async fn real_outbound_rows_override_generation_and_reactions_in_both_read_apis(
             .as_ref()
             .unwrap();
         // Remove reaction's answer link: the conversation's durable outbound association suffices.
-        f.env
-            .store()
-            .with_conn(|c| {
-                c.execute(
-                    "UPDATE chan_reactions SET state='done',answer_id=NULL WHERE message_id=?",
-                    [&a.message_id],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        seed::messages::mark_reaction_done(f.env.store(), &a.message_id).unwrap();
         let h = handling(&f, &a);
         assert_eq!(h["state"], expected, "{scenario}: {h}");
         assert_eq!(h["out_message_id"], *out);
@@ -251,11 +235,7 @@ async fn send_time_rechecks_receiver_configuration_and_requires_its_receipt() {
         &f.me,
         json!({"on":true,"words":["/bot"],"ignore_prefixes":["/bot"]}),
     );
-    let plan = f
-        .env
-        .store()
-        .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &a.message_id))
-        .unwrap();
+    let plan = steve_channels::flow_actions::plan_of(f.env.store(), WS, &a.message_id).unwrap();
     let d = f
         .out
         .deliver(
@@ -292,12 +272,20 @@ async fn a_draft_becomes_sent_only_after_human_approval_and_the_undo_window() {
     assert_eq!(f.sends(), 0);
     let decision = a.response.as_ref().unwrap().decision_id.as_ref().unwrap();
     // Disclosure is asynchronous on drafts. Wait for its actual stored verdict before approval.
-    steve_runtime::testkit::eventually("the personal draft disclosure verdict is stored", || async {
-        let checking=f.env.store().reader(|c| -> steve_modules::ApiResult<bool> {
-            Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM chan_messages m JOIN reply_basis b ON b.id=m.basis_id WHERE m.decision_id=? AND b.verdict='checking')",[decision],|r|r.get(0))?)
-        }).unwrap();
-        if !checking { true } else { f.out.send_due(&f.ch).await; false }
-    }).await;
+    steve_runtime::testkit::eventually(
+        "the personal draft disclosure verdict is stored",
+        || async {
+            let checking =
+                inspect::delivery::decision_basis_is_checking(f.env.store(), decision).unwrap();
+            if !checking {
+                true
+            } else {
+                f.out.send_due(&f.ch).await;
+                false
+            }
+        },
+    )
+    .await;
     steve_modules::decisions::dispatch(
         &f.env.modules,
         &steve_modules::testkit::caller(WS, ME),
@@ -315,12 +303,10 @@ async fn a_draft_becomes_sent_only_after_human_approval_and_the_undo_window() {
     assert_eq!(f.sends(), 1);
 }
 
-#[path = "../../steve-store-sqlite/tests/digest_audit.rs"]
-mod digest_audit;
 impl Drop for Fixture {
     fn drop(&mut self) {
         if !std::thread::panicking() {
-            digest_audit::check(self.env.store());
+            steve_store::testkit::digest::audit(self.env.store()).unwrap();
         }
     }
 }

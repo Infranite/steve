@@ -262,6 +262,8 @@ export default {
     unconfirmed: "Reaction not confirmed: {{error}}",
   },
   chanOut: {
+    draftBubble: "Draft reply",
+    send: "Send",
     withReason: "{{label}}: {{reason}}",
     notSent: "Not sent to chat",
     blocked: "Channel restricted; not sent",

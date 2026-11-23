@@ -2,19 +2,22 @@
 //! alarms on their clock, fired once per day, made by rule from their todos, items and 待处理, and kept in
 //! their feed or sent under their policy. Synthetic data only.
 
-#[path = "../../steve-channels/tests/support/digest_env.rs"]
+#[path = "support/digest_env.rs"]
 mod digest_env;
 use digest_env::TestEnv;
 use std::sync::Arc;
 
 use chrono::{NaiveDate, TimeZone};
-use rusqlite::params;
 use steve_digest::brief::{self, BriefAlarms, BriefIntake};
 use steve_digest::todo;
 use steve_flow::alarms::{self, AlarmSources};
 use steve_flow::schedules::{self, Fields, Mode};
 use steve_modules::testkit::{ME, OTHER, WS};
 use steve_store::outbox::Dispatcher;
+use steve_store::{
+    digest::{TodoFilter, Todos},
+    testkit::digest as fixture,
+};
 
 const TZ: chrono_tz::Tz = chrono_tz::Asia::Taipei;
 const MIN: i64 = 60_000;
@@ -63,20 +66,10 @@ fn env() -> Env {
 }
 
 impl Env {
-    fn sql(&self, sql: &str, p: impl rusqlite::Params) {
-        self.e
-            .store()
-            .with_conn(|c| {
-                c.execute(sql, p)?;
-                Ok(())
-            })
-            .unwrap();
-    }
-
     fn add(&self, owner: &str, text: &str, f: impl FnOnce(&mut todo::NewTodo)) -> String {
         self.e
             .store()
-            .transaction(|tx| {
+            .write(|tx| {
                 let mut t = todo::NewTodo {
                     ws: WS,
                     owner,
@@ -92,18 +85,13 @@ impl Env {
     }
 
     fn policy(&self, user: &str, tz: &str, quiet: Option<(u16, u16)>) {
-        self.sql(
-            "INSERT INTO notification_policies (workspace_id, user_id, enabled, mode, timezone, quiet_start, quiet_end, consented_at, consent_since_seq, updated)
-             VALUES (?, ?, 1, 'now', ?, ?, ?, 1, 0, 1)
-             ON CONFLICT(workspace_id, user_id) DO UPDATE SET timezone = excluded.timezone, quiet_start = excluded.quiet_start, quiet_end = excluded.quiet_end",
-            params![WS, user, tz, quiet.map(|q| q.0), quiet.map(|q| q.1)],
-        );
+        fixture::notification_policy(self.e.store(), WS, user, true, tz, quiet).unwrap();
     }
 
     fn brief(&self, user: &str) -> Option<schedules::Schedule> {
         self.e
             .store()
-            .reader(|c| brief::brief_of(c, WS, user))
+            .read(|c| brief::brief_of(c, WS, user))
             .unwrap()
     }
 
@@ -122,7 +110,7 @@ impl Env {
     fn alarms(&self, id: &str) -> Vec<(i64, String)> {
         self.e
             .store()
-            .reader(|c| alarms::of_subject(c, WS, &format!("brief:{id}")))
+            .read(|c| alarms::of_subject(c, WS, &format!("brief:{id}")))
             .unwrap()
             .into_iter()
             .map(|v| {
@@ -144,37 +132,17 @@ impl Env {
 
     /// `(user, mode, state, body, feed kind)` of every brief notification.
     fn notes(&self) -> Vec<(String, String, String, String, String)> {
-        self.e
-            .store()
-            .reader(|c| {
-                let mut st = c.prepare(
-                    "SELECT n.user_id, n.mode, n.state, n.body, f.kind FROM personal_notifications n
-                       JOIN feed_entries f ON f.notification_id = n.id WHERE n.topic = 'briefing.ready' ORDER BY n.created, n.id",
-                )?;
-                let v = st
-                    .query_map([], |r| {
-                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok::<_, steve_store::StoreError>(v)
-            })
+        fixture::notifications(self.e.store())
             .unwrap()
+            .into_iter()
+            .filter(|(_, topic, ..)| topic == "briefing.ready")
+            .map(|(user, _, mode, state, body, kind)| (user, mode, state, body, kind))
+            .collect()
     }
 
     /// `(trigger_kind, status, outcome_label)` of a schedule's runs, oldest first.
     fn runs(&self, id: &str) -> Vec<(String, String, String)> {
-        self.e
-            .store()
-            .reader(|c| {
-                let mut st = c.prepare(
-                    "SELECT trigger_kind, status, outcome_label FROM flow_runs WHERE flow_id = ? ORDER BY started, rowid",
-                )?;
-                let v = st
-                    .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok::<_, steve_store::StoreError>(v)
-            })
-            .unwrap()
+        fixture::brief_runs(self.e.store(), id).unwrap()
     }
 }
 
@@ -201,34 +169,15 @@ fn a_members_first_own_todo_turns_their_brief_on_once_and_never_again_after_they
     // its own: listed to nobody else
     assert!(s.visible_to(ME) && !s.visible_to(OTHER));
     // no flow trigger: the scheduler never runs it
-    let triggers: i64 =
-        e.e.store()
-            .reader(|c| {
-                Ok::<_, steve_store::StoreError>(c.query_row(
-                    "SELECT count(*) FROM flow_triggers WHERE flow_id = ?",
-                    [&s.id],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap();
+    let (triggers, _) = fixture::schedule_counts(e.e.store(), &s.id).unwrap();
     assert_eq!(triggers, 0);
 
     e.add(ME, "第二个", |_| {});
-    let count: i64 = e
-        .e
-        .store()
-        .reader(|c| {
-            Ok::<_, steve_store::StoreError>(c.query_row(
-                "SELECT count(*) FROM flows WHERE kind = 'schedule' AND json_extract(schedule, '$.mode') = 'brief'",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let (_, count) = fixture::schedule_counts(e.e.store(), &s.id).unwrap();
     assert_eq!(count, 1);
 
     e.e.store()
-        .transaction(|tx| schedules::delete(tx, &s, now()))
+        .write(|tx| schedules::delete(tx, &s, now()))
         .unwrap();
     e.add(ME, "删了以后", |_| {});
     assert!(e.brief(ME).is_none(), "a deleted brief stays deleted");
@@ -256,7 +205,7 @@ fn a_brief_fires_once_at_its_time_with_the_members_day_and_is_sent_under_their_p
         t.target_date = Some("2027-02-05");
     });
     e.e.store()
-        .transaction(|tx| {
+        .write(|tx| {
             todo::create(
                 tx,
                 &todo::NewTodo {
@@ -273,18 +222,7 @@ fn a_brief_fires_once_at_its_time_with_the_members_day_and_is_sent_under_their_p
         })
         .unwrap();
     e.add(OTHER, "别人的事", |t| t.due_date = Some(today));
-    e.sql(
-        "INSERT INTO items (id, workspace_id, no, title, status, stage, requested_by, created, updated) VALUES
-           ('ST-1', ?1, 1, '迁移脚本', 'run', '', ?2, 1, 1),
-           ('ST-2', ?1, 2, '导出报表', 'fail', '', ?2, 1, 1),
-           ('ST-3', ?1, 3, '别人的事项', 'fail', '', ?3, 1, 1)",
-        params![WS, ME, OTHER],
-    );
-    e.sql(
-        "INSERT INTO decisions (id, workspace_id, item_id, kind, subject_type, subject_id, question, status, requested_by, created)
-         VALUES ('dec_1', ?, 'ST-2', 'ask', 'item', 'ST-2', '怎么办', 'open', 'steve', 1)",
-        params![WS],
-    );
+    fixture::brief_items(e.e.store(), WS, ME, OTHER).unwrap();
     let s = e.brief(ME).unwrap();
 
     e.round(now());
@@ -356,27 +294,35 @@ fn a_brief_fires_once_at_its_time_with_the_members_day_and_is_sent_under_their_p
     // the live view: the same until something changes
     let v =
         e.e.store()
-            .reader(|c| brief::today(c, WS, ME, at + HOUR))
+            .read(|c| brief::today(c, WS, ME, at + HOUR))
             .unwrap();
     assert_eq!(v["sent"]["pushed"], true);
     assert_eq!(v["sent"]["changes"], 0);
     assert_eq!(v["schedule"]["id"], s.id.as_str());
     let first =
         e.e.store()
-            .reader(|c| {
-                Ok::<_, steve_store::StoreError>(c.query_row(
-                    "SELECT id FROM todos WHERE text = '整理报销'",
-                    [],
-                    |r| r.get::<_, String>(0),
-                )?)
+            .read::<_, steve_store::StoreError>(|r| {
+                Ok(Todos(r)
+                    .list(
+                        WS,
+                        ME,
+                        &TodoFilter {
+                            limit: 20,
+                            ..Default::default()
+                        },
+                    )?
+                    .into_iter()
+                    .find(|todo| todo.fields.text == "整理报销")
+                    .unwrap()
+                    .id)
             })
             .unwrap();
     e.e.store()
-        .transaction(|tx| todo::complete(tx, WS, &first, "done", None, at + HOUR))
+        .write(|tx| todo::complete(tx, WS, &first, "done", None, at + HOUR))
         .unwrap();
     let v =
         e.e.store()
-            .reader(|c| brief::today(c, WS, ME, at + HOUR))
+            .read(|c| brief::today(c, WS, ME, at + HOUR))
             .unwrap();
     assert_eq!(v["sent"]["changes"], 1);
 }
@@ -472,7 +418,7 @@ fn a_moved_rezoned_or_switched_off_brief_is_planned_again() {
     let mut spec = s.spec.clone();
     spec.cron = "15 9 * * 1-5".into();
     e.e.store()
-        .transaction(|tx| {
+        .write(|tx| {
             schedules::update(
                 tx,
                 &s,
@@ -505,13 +451,14 @@ fn a_moved_rezoned_or_switched_off_brief_is_planned_again() {
     hourly.cron = "0 * * * *".into();
     let refused =
         e.e.store()
-            .reader(|c| schedules::check_refs(c, WS, &hourly));
+            .read::<_, steve_store::StoreError>(|c| Ok(schedules::check_refs(c, WS, &hourly)))
+            .unwrap();
     assert!(refused.is_err());
 
     // switched off: nothing planned
     let s = e.brief(ME).unwrap();
     e.e.store()
-        .transaction(|tx| {
+        .write(|tx| {
             schedules::update(
                 tx,
                 &s,
@@ -539,7 +486,7 @@ fn one_brief_per_member_and_day() {
     let mut spec = s.spec.clone();
     spec.cron = "45 8 * * 1-5".into();
     e.e.store()
-        .transaction(|tx| {
+        .write(|tx| {
             schedules::insert(
                 tx,
                 WS,

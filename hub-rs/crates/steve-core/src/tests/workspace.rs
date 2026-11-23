@@ -392,12 +392,11 @@ fn under_pressure_idle_open_items_give_back_their_caches_oldest_first() {
     let (r, p) = project(&k);
     let (idle, _, idle_wt) = item_with_caches(&k, &r, &p, "run");
     let (fresh, _, fresh_wt) = item_with_caches(&k, &r, &p, "run");
-    k.db()
-        .exec(
-            "UPDATE items SET updated = updated - 7200000 WHERE id = ?",
-            &[&idle],
-        )
-        .unwrap();
+    steve_store::core_fixture::item(
+        k.db().store(),
+        &idle,
+        steve_store::core_fixture::ItemState::ShiftUpdated(-7_200_000),
+    );
     let res = k.core.reclaim_workspaces().unwrap();
     if workspace::process_dirs().is_some() {
         assert!(freed_of(&res, &idle) >= 2 << 20, "{res:?}");

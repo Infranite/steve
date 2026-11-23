@@ -21,6 +21,7 @@ const inventory = page => page.locator("[data-runtime-inventory]")
 const fold = page => page.locator("[data-runtime-unavailable-toggle]")
 const visibleIds = page => page.locator("[data-runtime]:visible").evaluateAll(es => es.map(e => e.dataset.runtime))
 const unfold = async page => {
+  await inventory(page).waitFor()
   const toggle = fold(page)
   if (await toggle.count() && await toggle.getAttribute("aria-expanded") === "false") await toggle.click()
 }
@@ -37,24 +38,29 @@ async function fixture({ runtimes = [legacy, runtime("fixture-runtime", "not_ins
   const f = { page, errors, mutations, catalogs, runtimes, bots: [bot("dev", "legacy"), bot("pi-bot", "fixture-runtime")], devices: [device], items: [], sessions: [], probeStatus: 200, probes: 0, failInstall: false, rejectInstall: false, restart: false, installed: false, finishAt: Infinity }
   page.on("pageerror", e => errors.push(e.message))
   await page.addInitScript(lang => localStorage.setItem("steve-lang", lang), lang)
-  const state = () => ({ version: "fixture", web_version: "fixture", owner: false, workspace, workspaces: [workspace], items: f.items, decisions: [], recent: [], bots: f.bots, allBots: f.bots.map(b => ({ id: b.id, name: b.name, workspaces: b.workspaces })), projects: [], tags: [], tagUses: {}, thread: [], settings: {}, sessions: f.sessions, devices: f.devices, runtimes: f.runtimes })
+  const shell = () => ({ version: "fixture", web_version: "fixture", owner: false, workspace, workspaces: [workspace], bots: f.bots, allBots: f.bots.map(b => ({ id: b.id, name: b.name, workspaces: b.workspaces })), projects: [], tags: [], settings: {} })
   await page.route("**/*", async route => {
     const req = route.request(), u = new URL(req.url()), p = u.pathname, method = req.method()
     if (u.origin !== base) return route.abort("blockedbyclient")
-    if (p === "/auth/hello") return route.fulfill({ json: { name: "steve", version: "fixture", api: 1, login: { token: false, oidc: false } } })
+    if (p === "/auth/hello") return route.fulfill({ json: { name: "steve", version: "fixture", api: 2, login: { token: false, oidc: false } } })
     if (!p.startsWith("/api/")) return route.continue()
     if (method !== "GET") mutations.push({ method, path: p, body: req.postData() ? req.postDataJSON() : null })
     let data
-    if (p === "/api/state") data = state()
-    else if (p === "/api/devices") {
-      if (u.searchParams.get("fresh") !== "1") return route.fulfill({ json: { devices: f.devices, runtimes: f.runtimes } })
+    if (p === "/api/shell") data = shell()
+    else if (p === "/api/summary") data = { ws: workspace.id, thinking: false, hold: null }
+    else if (p === "/api/snapshot") data = { epoch: "e", rev: 1, cursor: "e:1", views: { item: f.items, session: f.sessions, decision: [] } }
+    else if (p === "/api/views") data = { rev: 2, views: u.searchParams.get("kind") === "session" ? f.sessions : f.items, missing: [] }
+    else if (p.endsWith("/queued")) data = []
+    else if (p === "/api/devices") data = { devices: f.devices }
+    else if (p === "/api/runtimes") {
+      if (u.searchParams.get("fresh") !== "1") return route.fulfill({ json: f.runtimes })
       f.probes++
       if (f.probeStatus !== 200) return route.fulfill({ status: f.probeStatus, json: { error: "fixture: Node probe unreachable" } })
       if (f.probes >= f.finishAt) {
         f.runtimes = f.runtimes.map(r => r.id === "fixture-runtime" ? runtime(r.id, "ready", [true, true]) : r)
         f.finishAt = Infinity
       }
-      data = { devices: f.devices, runtimes: f.runtimes }
+      data = f.runtimes
     } else if (p.endsWith("/install") && method === "POST") {
       assert.equal(p, "/api/system/harnesses/fixture-runtime/install")
       assert.deepEqual(req.postDataJSON(), {}, "installation accepts no arbitrary parameters")
@@ -80,12 +86,12 @@ async function fixture({ runtimes = [legacy, runtime("fixture-runtime", "not_ins
     else if (p === "/api/bots" && method === "POST") { const b = { ...bot("created-bot", "legacy"), ...req.postDataJSON() }; f.bots.push(b); data = b }
     else if (p === "/api/items" && method === "POST") {
       const body = req.postDataJSON(), b = f.bots.find(b => b.id === body.bot)
-      const item = { id: "ST-900", workspace_id: "fixture", no: 900, title: body.goal, status: "run", stage: "执行", bot_id: b.id, project_id: null, cwd: "/fixture", branch: null, plan: [], now: "Fixture: session dispatched", accept_mode: null, priority: "中", archived: false, star: false, due: null, snooze: null, source: ["web", ""], parent: null, created: 0, updated: 0, goal: body.goal, goals: 1, tags: [], deps: [], sessionIds: ["fixture-session"], open: [], queued: 0, live: false }
+      const item = { id: "ST-900", ws: "fixture", phase: "active", cycle: 1, revision: 0, op_blockers: [], active_operations: 0, detail_stamp: "fixture", plan_done: 0, plan_total: 0, no: 900, title: body.goal, status: "run", stage: "执行", bot_id: b.id, project_id: null, cwd: "/fixture", branch: null, plan: [], now: "Fixture: session dispatched", accept_mode: null, priority: "中", archived: false, star: false, due: null, snooze: null, source: ["web", ""], parent: null, created: 0, updated: 0, goal: body.goal, goals: 1, tags: [], deps: [], sessionIds: ["fixture-session"], open: [], queued: 0, live: false }
       f.items = [item]
-      f.sessions = [{ id: "fixture-session", workspace_id: "fixture", item_id: item.id, no: 1, bot_id: b.id, harness: b.harness, model: b.model, cwd: "/fixture", status: "starting", used: null, size: null, cost: null, title: body.goal, device_id: "hub", source: "Steve", readonly: false, busy: false, queued: [], created: 0, updated: 0 }]
+      f.sessions = [{ id: "fixture-session", ws: "fixture", item_id: item.id, no: 1, bot_id: b.id, harness: b.harness, model: b.model, cwd: "/fixture", status: "starting", used: null, size: null, cost: null, title: body.goal, device_id: "hub", source: "Steve", readonly: false, busy: false, queued: 0, created: 0, updated: 0 }]
       data = item
     } else if (p === "/api/items/ST-900") data = { ...f.items[0], goalsList: [{ version: 1, text: f.items[0].goal, created: 0 }], timeline: [], artifacts: [], decisions: [], dependents: [] }
-    else if (p.endsWith("/events")) data = []
+    else if (p.endsWith("/events")) data = { events: [], next: null }
     else return route.fulfill({ status: 404, json: {} })
     return route.fulfill({ json: data })
   })

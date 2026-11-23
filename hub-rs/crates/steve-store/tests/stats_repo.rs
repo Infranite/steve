@@ -1,6 +1,7 @@
 //! Statistics writes: turns, token records and marks keep `stat_daily` equal to
 //! the detail rows and flag the item for the `item_stats` refresh.
 
+use steve_store::testkit::SqliteFixtures;
 mod common;
 
 use std::collections::BTreeMap;
@@ -123,7 +124,7 @@ fn turn_writes_rows_per_model_and_books_the_cube() {
     let t = with_steve();
     let s = &t.store;
     let it = item(s);
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         // creating the item already left its first status mark (ST3), which flags the row
         assert_eq!(count(c, "SELECT count(*) FROM item_stats"), 1);
         c.execute("UPDATE item_stats SET dirty = 0", [])?;
@@ -180,7 +181,7 @@ fn turn_writes_rows_per_model_and_books_the_cube() {
         })
         .unwrap();
 
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         assert_eq!(count(c, "SELECT count(*) FROM usage_records WHERE turn_id IS NOT NULL"), 2);
         let (stop, perms, tk): (String, i64, String) = c.query_row(
             "SELECT stop_reason, permissions, tool_kinds FROM agent_turns WHERE id = ?",
@@ -259,7 +260,7 @@ fn usage_add_keeps_the_cube_equal_to_the_details() {
     other.purpose = "autonomous".into();
     other.bot_id = Some("steve".into());
     st.usage_add(&other).unwrap();
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         let (cube, detail) = cube_and_details(c);
         assert_eq!(cube.len(), 3);
         assert_eq!(cube, detail);
@@ -297,7 +298,7 @@ fn interrupt_open_closes_only_open_turns() {
         })
         .unwrap();
     // the session's last events before the restart; the Hub stayed down for hours after 400
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         c.execute_batch(
             "PRAGMA foreign_keys = OFF;
              INSERT INTO events (session_id, ts, kind, data) VALUES ('ses_1', 150, 'tool_call', '{}'), ('ses_1', 400, 'agent_message_chunk', '{}');
@@ -322,7 +323,7 @@ fn interrupt_open_closes_only_open_turns() {
             .unwrap(),
         0
     );
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         let (ended, reason): (i64, String) = c.query_row(
             "SELECT ended, stop_reason FROM agent_turns WHERE id = ?",
             [&open],
@@ -349,7 +350,7 @@ fn interrupt_open_leaves_node_turns_open() {
     let s = &t.store;
     let legacy = begin(s, None, 0, 100);
     let node = begin(s, None, 0, 100);
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         c.execute_batch("PRAGMA foreign_keys = OFF;")?;
         c.execute(
             "UPDATE agent_turns SET node_attempt_id = 'att_1' WHERE id = ?",
@@ -365,7 +366,7 @@ fn interrupt_open_leaves_node_turns_open() {
             .unwrap(),
         1
     );
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         let ended = |id: &str| -> rusqlite::Result<(Option<i64>, Option<String>)> {
             c.query_row(
                 "SELECT ended, stop_reason FROM agent_turns WHERE id = ?",
@@ -397,7 +398,7 @@ fn marks_flag_the_item_and_unknown_items_are_ignored() {
     let t = with_steve();
     let s = &t.store;
     let it = item(s);
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         // the row exists since the create mark (ST3); start from clean
         c.execute("UPDATE item_stats SET dirty = 0 WHERE item_id = ?", [&it])?;
         Ok(())
@@ -428,7 +429,7 @@ fn marks_flag_the_item_and_unknown_items_are_ignored() {
             ..NewMark::default()
         })
         .unwrap();
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         assert_eq!(
             count(
                 c,
@@ -450,13 +451,13 @@ fn marks_flag_the_item_and_unknown_items_are_ignored() {
         Ok(())
     })
     .unwrap();
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         c.execute("UPDATE item_stats SET dirty = 0", [])?;
         Ok(())
     })
     .unwrap();
     s.stats().touch_item(&it).unwrap();
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         assert_eq!(
             count(c, "SELECT count(*) FROM item_stats WHERE dirty = 1"),
             1

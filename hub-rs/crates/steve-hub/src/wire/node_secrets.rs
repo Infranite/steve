@@ -360,15 +360,9 @@ impl UseNodes for VaultNodes {
         };
         let in_ws = self
             .store
-            .reader(|c| {
-                Ok::<_, steve_store::StoreError>(c.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM sessions WHERE id=? AND workspace_id=?)",
-                    [session, ws],
-                    |r| r.get::<_, bool>(0),
-                )?)
-            })
+            .read(|r| steve_store::session_repo::device(r, ws, session))
             .map_err(|e| rule(e.to_string()))?;
-        if !in_ws {
+        if in_ws.is_none() {
             // the vault answers a session it does not know itself
             return Ok(None);
         }
@@ -601,15 +595,12 @@ mod tests {
         );
         let work = root.join("work");
         std::fs::create_dir_all(work.join("sub")).unwrap();
-        store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute(
-                    "INSERT OR IGNORE INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?1,'default','claude',?2,'running',1,1)",
-                    [SESSION, work.to_str().unwrap()],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::seed_sessions_for_hub_at(
+            &store,
+            &SESSION,
+            work.to_str().unwrap(),
+        )
+        .unwrap();
         ws.refresh_roots().unwrap();
         let prep = Command {
             id: OperationId::new(format!("op_prep_{SESSION}")).unwrap(),
@@ -638,15 +629,10 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
-        store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute(
-                    "INSERT OR IGNORE INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES (?1,'local',?2,?1,'r','ready',0)",
-                    [SESSION, &serde_json::to_string(&workspace).unwrap()],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::bind_vault_fixture_workspace(
+            &store, SESSION, &workspace,
+        )
+        .unwrap();
         T {
             uses: VaultNodes::new(store.clone(), ws, secrets),
             root: root.to_path_buf(),

@@ -1,6 +1,5 @@
 /* 邮件 (email.md §11): `#/mail`. Chips for 全部 / each mailbox, the five views (需要处理 · 收件箱 · 等对方 · 已发送 · 草稿)
- * and a search box over `GET /mail/threads`. No mailbox yet → the onboarding card; a Hub without the mail module (or
- * without the thread list) → the Unwired placeholder. */
+ * and a search box over `GET /mail/threads`. The onboarding card handles an installation with no mailbox. */
 import { useEffect, useMemo, useState } from "react"
 import { MailIcon, PaperclipIcon, PlusIcon } from "lucide-react"
 import { cn } from "cn"
@@ -8,7 +7,6 @@ import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Page, Group, Segmented, Empty, ItemNo, StatusDot, go, SearchField, ConnectPrompt } from "@/ui"
 import { Select } from "@/view-shared"
-import { Unwired } from "@/unwired"
 import { tm } from "@/store"
 import { ContactAvatar } from "@/people/avatar"
 import { useLoad } from "@/accounts/load"
@@ -26,7 +24,6 @@ const remember = (p: { view: MailView; account: string; q: string }) => {
 export function MailView() {
   const t = useT()
   const A = useLoad(() => mailApi.accounts(), [], ["mail", "connection"])
-  if (A.s === "unwired") return <Unwired id="mail" />
   if (A.s === "loading") return <Page title={t("mail:shared.title")}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
   if (A.s === "error") return <Page title={t("mail:shared.title")}><Empty title={A.err} /></Page>
   if (!A.data.length) return <Onboarding />
@@ -54,7 +51,6 @@ function Threads({ accounts }: { accounts: MailAccount[] }) {
   useEffect(() => remember({ view, account, q: qq }), [view, account, qq])
   const T = useLoad(() => mailApi.threads({ view, account: account || undefined, q: qq || undefined, limit: 100 }), [view, account, qq], ["mail"])
   const labels = useMemo(() => accounts.map((a) => a.address || a.connection_id), [accounts])
-  if (T.s === "unwired") return <Unwired id="mail" />
   const unread = accounts.reduce((n, a) => n + a.unread, 0)
   return (
     <Page title={tr("mail:shared.title")} sub={unread ? tr("mail:shared.unread", { count: unread }) : undefined} max={820}
