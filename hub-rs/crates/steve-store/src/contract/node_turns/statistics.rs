@@ -91,3 +91,24 @@ pub fn usage(r: &mut impl Read, turn: &str) -> Result<Vec<ModelUsage>> {
         },
     )
 }
+
+pub fn accounted_tokens(r: &mut impl Read, turn: &str) -> Result<[i64; 4]> {
+    let rows = r.all(
+        Query::select()
+            .columns(["input", "cache_read", "cache_write", "output"])
+            .from("usage_records")
+            .and_where(Expr::col("live_turn_id").eq(turn))
+            .and_where(Expr::cust("json_extract(detail,'$.accounting_tokens')=1")),
+        |row| {
+            Ok([
+                row.get::<Option<i64>>(0)?.unwrap_or_default(),
+                row.get::<Option<i64>>(1)?.unwrap_or_default(),
+                row.get::<Option<i64>>(2)?.unwrap_or_default(),
+                row.get::<Option<i64>>(3)?.unwrap_or_default(),
+            ])
+        },
+    )?;
+    Ok(rows.into_iter().fold([0_i64; 4], |total, row| {
+        std::array::from_fn(|i| total[i].saturating_add(row[i]))
+    }))
+}

@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub const TURN_STALL: &str = "turn_stall";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StallReason {

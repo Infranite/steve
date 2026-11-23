@@ -1,9 +1,10 @@
 //! Durable observation summaries scoped to the currently active execution.
 
 use rusqlite::{OptionalExtension, params};
+use sea_query::{Expr, ExprTrait, JoinType, Query};
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::{Result, StoreError, W};
+use crate::{Read, Result, StoreError, W};
 
 pub struct Active {
     pub turn: String,
@@ -54,11 +55,36 @@ pub fn running(w: &mut W<'_>, node: &str) -> Result<Vec<Active>> {
         .collect::<rusqlite::Result<_>>()?)
 }
 
+pub fn owns_workspace(
+    w: &mut W<'_>,
+    session: &str,
+    workspace: &steve_node_api::WorkspaceRef,
+) -> Result<bool> {
+    let stored: String = w.conn.query_row(
+        "SELECT workspace_ref FROM runtime_sessions WHERE session_id=?",
+        [session],
+        |row| row.get(0),
+    )?;
+    Ok(serde_json::from_str::<steve_node_api::WorkspaceRef>(&stored)? == *workspace)
+}
+
 pub fn read<T: DeserializeOwned>(w: &mut W<'_>, turn: &str) -> Result<Option<T>> {
     w.conn
         .query_row(
             "SELECT summary FROM runtime_turn_progress WHERE turn_id=?",
             [turn],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|raw| serde_json::from_str(&raw).map_err(StoreError::from))
+        .transpose()
+}
+
+pub fn read_by_attempt<T: DeserializeOwned>(w: &mut W<'_>, attempt: &str) -> Result<Option<T>> {
+    w.conn
+        .query_row(
+            "SELECT summary FROM runtime_turn_progress WHERE stalled_attempt=?",
+            [attempt],
             |row| row.get::<_, String>(0),
         )
         .optional()?
@@ -75,12 +101,49 @@ pub fn save(w: &mut W<'_>, turn: &str, summary: &impl Serialize) -> Result<()> {
     Ok(())
 }
 
-pub fn bind_decision(w: &mut W<'_>, turn: &str, decision: &str) -> Result<()> {
+pub fn bind_decision(w: &mut W<'_>, turn: &str, attempt: &str, decision: &str) -> Result<()> {
     w.conn.execute(
-        "UPDATE runtime_turn_progress SET decision_id=? WHERE turn_id=? AND decision_id IS NULL",
-        params![decision, turn],
+        "UPDATE runtime_turn_progress SET decision_id=?, stalled_attempt=?
+          WHERE turn_id=? AND decision_id IS NULL",
+        params![decision, attempt, turn],
     )?;
     Ok(())
+}
+
+pub fn held_attempt(r: &mut impl Read, attempt: &str) -> Result<bool> {
+    Ok(r.one(
+        Query::select()
+            .column(("p", "turn_id"))
+            .from_as("runtime_turn_progress", "p")
+            .join_as(
+                JoinType::InnerJoin,
+                "decisions",
+                "d",
+                Expr::col(("d", "id")).eq(Expr::col(("p", "decision_id"))),
+            )
+            .and_where(Expr::col(("p", "stalled_attempt")).eq(attempt))
+            .and_where(Expr::col(("d", "status")).eq("open")),
+        |_| Ok(()),
+    )?
+    .is_some())
+}
+
+pub fn stop_confirmed(r: &mut impl Read, decision: &str) -> Result<bool> {
+    Ok(r.one(
+        Query::select()
+            .column(("p", "turn_id"))
+            .from_as("runtime_turn_progress", "p")
+            .join_as(
+                JoinType::InnerJoin,
+                "runtime_attempts",
+                "a",
+                Expr::col(("a", "attempt_id")).eq(Expr::col(("p", "stalled_attempt"))),
+            )
+            .and_where(Expr::col(("p", "decision_id")).eq(decision))
+            .and_where(Expr::col(("a", "state")).eq("finished")),
+        |_| Ok(()),
+    )?
+    .is_some())
 }
 
 pub fn held(w: &mut W<'_>, session: &str) -> Result<bool> {

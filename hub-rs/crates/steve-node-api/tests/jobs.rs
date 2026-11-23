@@ -366,6 +366,7 @@ async fn a_job_streams_its_draft_and_ends_with_its_answer() {
         target: Some("src/lib.rs".into()),
         phase: ToolPhase::Succeeded,
         action: None,
+        evidence: None,
         result: vec![],
         error: None,
         duration_ms: Some(3),

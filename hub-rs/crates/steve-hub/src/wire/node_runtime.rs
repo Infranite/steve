@@ -576,6 +576,7 @@ impl NodeRuntime {
         // upkeep is SQLite writes and the Hub's callbacks: on a blocking thread, never on an
         // async worker
         let (weak, wake) = (Arc::downgrade(self), self.wake_upkeep.clone());
+        let clock = self.clock.clone();
         tokio::spawn(async move {
             let mut idled = std::time::Instant::now();
             loop {
@@ -584,11 +585,15 @@ impl NodeRuntime {
                 if idle {
                     idled = std::time::Instant::now();
                 }
+                let tick = clock.sleep(stall::POLL_INTERVAL);
                 let more = tokio::task::spawn_blocking(move || me.upkeep(idle))
                     .await
                     .unwrap_or(false);
                 if !more {
-                    let _ = tokio::time::timeout(Duration::from_secs(1), wake.notified()).await;
+                    tokio::select! {
+                        _ = tick => {},
+                        _ = wake.notified() => {},
+                    }
                 }
             }
         });
@@ -752,7 +757,9 @@ const REJECT: &str = "reject";
 enum Tell {
     After(After),
     End(End),
-    Stalled(steve_types::orchestration::StallReason),
+    Stalled(steve_types::orchestration::StallEvidence),
+    StalledUsage(steve_types::orchestration::StallReason, [i64; 4]),
+    StalledAttemptStopped(steve_types::orchestration::StallReason, i64),
     /// A diagnostic record of an applied event.
     Diagnostic(Box<steve_store::diagnostics::Record>),
 }

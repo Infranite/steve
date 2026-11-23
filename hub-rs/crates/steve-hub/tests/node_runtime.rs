@@ -794,6 +794,7 @@ async fn usage_and_tools_reach_the_session_and_the_attempts_statistics() {
         target: Some("ls".into()),
         phase: ToolPhase::Running,
         action: None,
+        evidence: None,
         result: vec![],
         error: None,
         duration_ms: None,
@@ -1487,16 +1488,9 @@ async fn a_stop_pressed_on_a_restart_cut_turn_stays_a_stop() {
         node_checks::attempt_count_by_state(&h.store, "running").unwrap() == 1
     })
     .await;
-    h.node.refuse_next(
-        "abandon",
-        Error::new(Code::Conflict, "this execution is being abandoned already"),
-    );
     h.node.restart();
     h.restart_hub().await;
-    eventually_sync("the Hub's abandon refused", || {
-        node_checks::settled_abandon_command_count(&h.store).unwrap() == 1
-    })
-    .await;
+    assert_eq!(h.planned("abandon"), 0);
     assert_eq!(
         node_checks::attempt_state(&h.store).unwrap(),
         "unknown",
@@ -1631,10 +1625,9 @@ async fn a_refused_reopen_leaves_the_session_released_until_a_human_retries() {
     assert!(h.prompt_of(1).contains("more") && h.prompt_of(1).contains("again"));
 }
 
-/// Issue: after an abandon the Node refused, a new stop asks again with a new operation; one that
-/// is on its way is not doubled.
+/// A refused abandon remains the receipt of repeated stops against the same attempt.
 #[tokio::test]
-async fn a_second_stop_after_a_refused_abandon_asks_again() {
+async fn a_second_stop_preserves_a_refused_abandon() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
@@ -1677,16 +1670,9 @@ async fn a_second_stop_after_a_refused_abandon_asks_again() {
     assert!(h.rt.is_busy(S));
 
     assert!(h.rt.cancel(S).unwrap());
-    assert!(h.rt.cancel(S).unwrap(), "the one on its way is not doubled");
-    let n: i64 = node_checks::command_count_by_method(&h.store, "abandon").unwrap();
-    assert_eq!(n, 2);
-    // The end event can arrive before the command receipt is persisted.
-    let second_abandon = format!("abandon:{a}:r1");
-    eventually_sync("abandoned and acknowledged", || {
-        h.ends().len() == 1 && h.state_of(&second_abandon) == "finished"
-    })
-    .await;
-    assert!(h.rt.cancel(S).is_ok_and(|x| !x), "nothing left to stop");
+    assert_eq!(h.planned("abandon"), 1);
+    assert!(h.ends().is_empty());
+    assert!(h.rt.is_uncertain(S));
 }
 
 /// Issue: Steve's lead on a released, idle session with nothing queued is queued and opens it.
@@ -2034,12 +2020,7 @@ async fn a_replayed_permission_after_a_restart_is_neither_a_new_card_nor_answere
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let card: String = node_checks::decision_id_by_subject_type(&h.store, "tool_call").unwrap();
-    assert_eq!(
-        ends.3.lock().unwrap().as_slice(),
-        [card],
-        "offered once for the card still waited for; the replay adds nothing"
-    );
+    assert!(ends.3.lock().unwrap().is_empty());
     assert_eq!(
         node_checks::decision_count_by_subject_type(&h.store, "tool_call").unwrap(),
         1
@@ -2705,10 +2686,9 @@ async fn a_refused_change_reads_as_refused_with_the_nodes_reason() {
     assert_eq!(node_checks::mode_refusal_code(&h.store).unwrap(), None);
 }
 
-/// 重连: a card the Node still waits for when the Hub starts again is handed to YOLO again once
-/// reconciled (its tool input lived in memory only): neither a second card nor an answer of its own.
+/// A restart restores the pending approval without redispatching it.
 #[tokio::test]
-async fn a_card_the_node_still_waits_for_is_offered_to_yolo_again_after_a_restart() {
+async fn a_card_the_node_still_waits_for_stays_open_after_a_restart() {
     let mut h = hub();
     h.bind();
     let exec = h.running("hello").await;
@@ -2719,8 +2699,8 @@ async fn a_card_the_node_still_waits_for_is_offered_to_yolo_again_after_a_restar
     eventually_sync("card", || h.ends.3.lock().unwrap().len() == 1).await;
     let d = h.cards()[0].clone();
     h.restart(Duration::ZERO).await;
-    eventually_sync("offered again", || h.ends.3.lock().unwrap().len() == 2).await;
-    assert_eq!(h.ends.3.lock().unwrap().as_slice(), [d.clone(), d.clone()]);
+    eventually_sync("reconciled", || h.rt.is_reconciled()).await;
+    assert_eq!(h.ends.3.lock().unwrap().as_slice(), [d.clone()]);
     assert_eq!(h.cards(), std::slice::from_ref(&d), "no second card");
     assert_eq!(h.status(&d), "open");
     assert!(!h.methods().contains(&"resolve_permission"));
@@ -3074,7 +3054,7 @@ async fn a_start_turn_refused_before_acceptance_is_settled_by_stop() {
 /// Issue: a start_turn whose send was uncertain may be at the Node: the cancel waits until the
 /// Node is known to hold it, then goes (never refused as an unknown target and lost).
 #[tokio::test]
-async fn a_cancel_after_an_uncertain_send_goes_once_the_node_holds_the_turn() {
+async fn an_unconfirmed_start_is_held_when_the_node_has_no_receipt() {
     let h = hub();
     h.bind();
     h.ready().await;
@@ -3087,17 +3067,13 @@ async fn a_cancel_after_an_uncertain_send_goes_once_the_node_holds_the_turn() {
         node_checks::possibly_sent_turn_count(&h.store).unwrap() == 1
     })
     .await;
-    assert!(h.rt.cancel(S).unwrap());
-    assert_eq!(
-        h.commands("cancel"),
-        0,
-        "held back: the Node may not know it yet"
-    );
-    assert!(h.rt.is_busy(S), "it may run: never settled here");
     h.node.refuse("start_turn", None);
-    eventually_sync("cancel sent", || h.count("cancel") == 1).await;
-    let op: String = node_checks::command_operation_id_by_method(&h.store, "start_turn").unwrap();
-    assert!(h.node.cancel_requested(&OperationId::try_from(op).unwrap()));
+    h.rt.reconcile_again().await.unwrap();
+    assert_ne!(h.rt.flush(S, None).unwrap(), Planned::Created);
+    assert!(h.rt.is_uncertain(S));
+    assert_eq!(h.commands("start_turn"), 1);
+    assert_eq!(h.commands("cancel"), 0);
+    assert!(h.ends().is_empty());
 }
 
 /// Issue: a start_turn whose first send was uncertain and whose next send was refused before
@@ -3132,11 +3108,8 @@ async fn a_refusal_after_an_uncertain_send_still_sends_the_cancel() {
         node_checks::unleased_start_count_by_generation(&h.store, generation as i64).unwrap() == 1
     })
     .await;
-    assert_eq!(
-        node_checks::uncertain_start_count(&h.store).unwrap(),
-        1,
-        "still maybe sent"
-    );
+    let op = node_checks::command_operation_id_by_method(&h.store, "start_turn").unwrap();
+    assert_eq!(h.sent(&op), 2);
     assert!(h.ends().is_empty(), "never settled here");
     assert!(h.rt.is_busy(S));
     h.node.refuse("start_turn", None);
@@ -3150,9 +3123,9 @@ async fn a_refusal_after_an_uncertain_send_still_sends_the_cancel() {
     assert_eq!(h.count("start_turn"), 1, "it ran once");
 }
 
-/// Issue: Stop after a cancel the Node refused asks again with a new operation.
+/// Repeated stops retain the original refusal.
 #[tokio::test]
-async fn a_second_stop_after_a_refused_cancel_asks_again() {
+async fn a_second_stop_preserves_a_refused_cancel() {
     let h = hub();
     h.bind();
     let _a = h.running("one").await;
@@ -3164,15 +3137,13 @@ async fn a_second_stop_after_a_refused_cancel_asks_again() {
     })
     .await;
     assert!(h.rt.cancel(S).unwrap());
-    assert_eq!(h.commands("cancel"), 2);
-    eventually_sync("cancel sent", || h.count("cancel") == 1).await;
+    assert_eq!(h.commands("cancel"), 1);
+    assert!(h.ends().is_empty());
 }
 
-/// Issue: an attempt reconciled as unknown because the Node holds no record of its start_turn is
-/// settled when the Node refuses its abandon for that reason: the session is free again and the
-/// attempt is never sent again.
+/// A missing journal entry and a refused abandon leave the attempt uncertain.
 #[tokio::test]
-async fn an_attempt_the_node_has_no_record_of_ends_on_stop() {
+async fn a_missing_node_record_does_not_prove_that_the_attempt_stopped() {
     let mut h = hub();
     h.bind();
     h.rt.prompt(S, "first", "user", &[]).unwrap();
@@ -3187,19 +3158,12 @@ async fn an_attempt_the_node_has_no_record_of_ends_on_stop() {
     assert_eq!(node_checks::attempt_state(&h.store).unwrap(), "unknown");
     assert!(h.rt.is_busy(S));
     assert!(h.rt.cancel(S).unwrap());
-    eventually_sync("settled", || h.ends().len() == 1).await;
-    assert_eq!(h.ends()[0].1, "error");
-    assert!(!h.rt.is_busy(S));
-    assert_eq!(h.rt.running_turns(), 0);
-    assert_eq!(h.systems("没有这次执行的记录"), 1);
-    // L4: settled by the Hub, the attempt's statistics row ends with that outcome
-    eventually_sync("stats row ended", || {
-        h.stat_rows().first().is_some_and(|r| r.0.is_some())
-    })
-    .await;
-    assert_eq!(h.stat_rows(), [(h.stat_rows()[0].0, Some("error".into()))]);
-    assert_eq!(h.count("start_turn"), 1, "never sent again");
-    assert!(h.rt.cancel(S).is_ok_and(|x| !x), "nothing left to stop");
+    eventually_sync("abandon refused", || h.last_state("abandon") == "rejected").await;
+    assert!(h.rt.is_uncertain(S));
+    assert_eq!(h.count("start_turn"), 1);
+    assert!(h.ends().is_empty());
+    assert!(h.rt.cancel(S).unwrap());
+    assert_eq!(h.planned("abandon"), 1);
 }
 
 /// N1-3: the Node's journal is made again mid-session (its home deleted). What the Hub sent is no
@@ -3524,17 +3488,9 @@ async fn an_unknown_attempt_keeps_the_session_running_until_it_is_abandoned() {
     h.bind();
     h.rt.prompt(S, "first", "user", &[]).unwrap();
     eventually_sync("running", || h.session_status() == "running").await;
-    // the Hub's own abandon (B6) is refused here, so the attempt stays unknown for this check
-    h.node.refuse_next(
-        "abandon",
-        Error::new(Code::Conflict, "this execution is being abandoned already"),
-    );
     h.node.restart();
     h.restart_hub().await;
-    eventually_sync("the Hub's abandon refused", || {
-        node_checks::settled_abandon_command_count(&h.store).unwrap() == 1
-    })
-    .await;
+    assert_eq!(h.planned("abandon"), 0);
     assert_eq!(node_checks::attempt_state(&h.store).unwrap(), "unknown");
     assert_eq!(h.session_status(), "running");
     assert!(h.rt.cancel(S).unwrap());
@@ -3567,17 +3523,9 @@ async fn an_attempt_unknown_before_it_started_keeps_the_session_running() {
         "planned"
     );
     let late = h.seen.stash.lock().unwrap().take().unwrap();
-    // the Hub's own abandon (B6) is refused here, so the attempt stays unknown for this check
-    h.node.refuse_next(
-        "abandon",
-        Error::new(Code::Conflict, "this execution is being abandoned already"),
-    );
     h.node.restart();
     h.restart_hub().await;
-    eventually_sync("the Hub's abandon refused", || {
-        node_checks::settled_abandon_command_count(&h.store).unwrap() == 1
-    })
-    .await;
+    assert_eq!(h.planned("abandon"), 0);
     assert_eq!(
         node_checks::latest_attempt_state(&h.store).unwrap(),
         "unknown"
@@ -4084,7 +4032,7 @@ impl H {
 }
 
 #[tokio::test]
-async fn stop_retires_an_unknown_open_once_and_the_queued_message_opens_it_again() {
+async fn stop_retires_an_unknown_open_once_and_preserves_the_queue() {
     let h = hub();
     h.node.script_once("open_session", Scripted::Unknown);
     h.bind();
@@ -4112,25 +4060,16 @@ async fn stop_retires_an_unknown_open_once_and_the_queued_message_opens_it_again
     let expected: String = node_checks::command_expected_recover(&h.store).unwrap();
     assert!(expected.starts_with("sha256:"), "frozen when planned");
     h.node.refuse("recover", None);
-    eventually_sync("the queued turn", || h.count("start_turn") == 1).await;
-    assert_eq!(h.count("recover"), 1, "exactly one recover");
-    assert_eq!(
-        h.sent(&format!("open:{S}:r0")),
-        1,
-        "the target is never sent again"
-    );
-    assert_eq!(h.count("open_session"), 2, "opened again under a new id");
-    // the target's end comes on the Node's event stream, not with the recover's answer that
-    // reopened the session: it may be applied after the queued turn started
-    eventually_sync("the target's end applied", || {
-        h.state_of(&format!("open:{S}:r0")) == "finished"
+    eventually_sync("recover completed", || {
+        h.last_state("recover") == "finished"
     })
     .await;
-    assert_eq!(h.systems("不算成功"), 1, "never said to have succeeded");
-    h.finish_last().await;
-    assert_eq!(h.ends().len(), 1);
-    assert_eq!(h.attempts().len(), 1, "the queued message ran once");
-    assert!(h.rt.user_stop(S).is_ok_and(|x| !x), "nothing left to stop");
+    assert_eq!(h.count("recover"), 1);
+    assert_eq!(h.sent(&format!("open:{S}:r0")), 1);
+    assert_eq!(h.planned("open_session"), 1);
+    assert_eq!(h.planned("start_turn"), 0);
+    assert_eq!(h.queued(), 1);
+    assert_eq!(h.systems("不算成功"), 1);
 }
 
 #[tokio::test]
@@ -4214,7 +4153,7 @@ async fn stop_retires_an_unknown_configure_and_the_reopen_carries_the_change() {
 }
 
 #[tokio::test]
-async fn stop_retires_an_unknown_prepare_with_a_new_prepare_and_open() {
+async fn stop_retires_an_unknown_prepare_and_rejects_the_dependent_open() {
     let h = hub();
     h.node.script_once("prepare_workspace", Scripted::Unknown);
     h.bind();
@@ -4226,26 +4165,16 @@ async fn stop_retires_an_unknown_prepare_with_a_new_prepare_and_open() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(h.count("open_session"), 0, "the open waits on its prepare");
     assert!(h.rt.user_stop(S).unwrap());
-    eventually_sync("the queued turn", || h.count("start_turn") == 1).await;
+    eventually_sync("dependent open rejected", || {
+        h.state_of(&format!("open:{S}:r0")) == "rejected"
+    })
+    .await;
     assert_eq!(h.count("recover"), 1);
-    assert_eq!(
-        h.sent(&format!("prepare:{S}:r0")),
-        1,
-        "the target is never sent again"
-    );
-    assert_eq!(
-        h.count("prepare_workspace"),
-        2,
-        "a new prepare under a new id"
-    );
-    assert_eq!(h.count("open_session"), 1);
-    assert_eq!(
-        h.state_of(&format!("open:{S}:r0")),
-        "rejected",
-        "never sent"
-    );
-    h.finish_last().await;
-    assert_eq!(h.attempts().len(), 1, "the queued message ran once");
+    assert_eq!(h.sent(&format!("prepare:{S}:r0")), 1);
+    assert_eq!(h.planned("prepare_workspace"), 1);
+    assert_eq!(h.count("open_session"), 0);
+    assert_eq!(h.planned("start_turn"), 0);
+    assert_eq!(h.queued(), 1);
 }
 
 #[tokio::test]
@@ -4274,20 +4203,16 @@ async fn an_unsupported_recover_keeps_the_session_held_and_the_next_stop_asks_ag
     h.node.refuse("recover", None);
     assert!(h.rt.user_stop(S).unwrap());
     assert_eq!(h.planned("recover"), 2);
-    let second: String =
-        node_checks::latest_command_operation_id_by_method(&h.store, "recover").unwrap();
-    assert_eq!(second, format!("op_recover_open:{S}:r0_1"), "a new id");
-    eventually_sync("the queued turn", || h.count("start_turn") == 1).await;
-    assert_eq!(
-        h.sent(&format!("open:{S}:r0")),
-        1,
-        "the target is never sent again"
-    );
-    h.finish_last().await;
+    let second = node_checks::latest_command_operation_id_by_method(&h.store, "recover").unwrap();
+    assert_eq!(second, format!("recover:open:{S}:r0:r1"));
+    eventually_sync("recover finished", || h.last_state("recover") == "finished").await;
+    assert_eq!(h.sent(&format!("open:{S}:r0")), 1);
+    assert_eq!(h.planned("start_turn"), 0);
+    assert_eq!(h.queued(), 1);
 }
 
 #[tokio::test]
-async fn stop_retires_an_unknown_abandon_and_the_next_stop_abandons_anew() {
+async fn stop_retires_an_unknown_abandon_without_arming_another() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
@@ -4339,19 +4264,11 @@ async fn stop_retires_an_unknown_abandon_and_the_next_stop_abandons_anew() {
     );
     assert!(h.rt.is_busy(S));
 
-    // its slot is free: a new Stop sends a new abandon, never the old one again
     assert!(h.rt.user_stop(S).unwrap());
-    assert_eq!(h.planned("abandon"), 2);
-    assert_eq!(h.planned("recover"), 1, "exactly one recover");
-    eventually_sync("the new abandon sent", || {
-        h.state_of(&format!("abandon:{a}:r1")) != "pending"
-    })
-    .await;
-    assert_eq!(
-        h.sent(&format!("abandon:{a}:r0")),
-        1,
-        "the target is never sent again"
-    );
+    assert_eq!(h.planned("abandon"), 1);
+    assert_eq!(h.planned("recover"), 1);
+    assert_eq!(h.sent(&format!("abandon:{a}:r0")), 1);
+    assert!(h.rt.is_uncertain(S));
 }
 
 #[tokio::test]
@@ -4423,13 +4340,12 @@ async fn a_target_end_pushed_before_the_recover_answer_is_merged_waits_for_the_r
     );
     assert_eq!(h.phase(), "opening", "not taken as a failed open");
     assert_eq!(h.count("start_turn"), 0);
-    // the same recover again: the Node answers what it did, and the queued message runs
-    eventually_sync("the queued turn", || h.count("start_turn") == 1).await;
-    assert_eq!(h.planned("recover"), 1, "exactly one recover");
-    assert_eq!(h.systems("不算成功"), 1, "never said to have succeeded");
-    assert_eq!(h.count("open_session"), 2, "opened again under a new id");
-    h.finish_last().await;
-    assert_eq!(h.attempts().len(), 1, "the queued message ran once");
+    eventually_sync("recover receipt", || h.last_state("recover") == "finished").await;
+    assert_eq!(h.planned("recover"), 1);
+    assert_eq!(h.systems("不算成功"), 1);
+    assert_eq!(h.planned("open_session"), 1);
+    assert_eq!(h.planned("start_turn"), 0);
+    assert_eq!(h.queued(), 1);
 }
 
 #[tokio::test]

@@ -110,7 +110,12 @@ pub trait WorkspaceExecutor: Send + Sync {
 #[async_trait]
 pub trait Discovery: Send + Sync {
     fn observes_execution(&self) -> bool {
-        true
+        self.execution_generation().is_some()
+    }
+
+    /// The current observable connection. A new connection never proves what happened in the gap.
+    fn execution_generation(&self) -> Option<u64> {
+        Some(0)
     }
 
     /// The frozen upgrade channel's minimal discovery; no ordinary capability payload crosses it.

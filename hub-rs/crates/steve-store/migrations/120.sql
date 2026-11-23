@@ -162,7 +162,9 @@ CREATE UNIQUE INDEX node_commands_intent ON node_commands(intent_purpose,intent_
 CREATE TABLE runtime_turn_progress (
  turn_id TEXT PRIMARY KEY REFERENCES runtime_turns(turn_id) ON DELETE CASCADE,
  summary TEXT NOT NULL,
- decision_id TEXT REFERENCES decisions(id)
+ decision_id TEXT UNIQUE REFERENCES decisions(id),
+ stalled_attempt TEXT UNIQUE REFERENCES runtime_attempts(attempt_id),
+ CHECK ((decision_id IS NULL) = (stalled_attempt IS NULL))
 );
 
 ALTER TABLE workflow_units ADD COLUMN verified_output TEXT;

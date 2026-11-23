@@ -98,7 +98,7 @@ impl NodeRuntime {
                     .permission_arming(&a.session, &a.decision, &a.request);
             }
         }
-        after.extend(self.facts_in(w, ev, received)?);
+        after.extend(self.facts_in(w, ev)?);
         self.realtime_in(w, ev, received)?;
         let end = self.apply_in(w, ev)?;
         self.activity_in(w, ev, received)?;
@@ -177,8 +177,40 @@ impl NodeRuntime {
                 }
                 Tell::After(a) => self.after(a),
                 Tell::End(end) => self.tell_end(end),
-                Tell::Stalled(reason) => {
-                    metrics::counter!("steve_orchestration_stalls_total", "reason" => reason.as_str()).increment(1);
+                Tell::Stalled(evidence) => {
+                    let reason = evidence.reason.as_str();
+                    metrics::counter!("steve_orchestration_stalls_total", "reason" => reason)
+                        .increment(1);
+                    metrics::histogram!("steve_orchestration_stall_seconds", "reason" => reason)
+                        .record(
+                            evidence
+                                .detected_at
+                                .saturating_sub(evidence.first_at)
+                                .max(0) as f64
+                                / 1000.0,
+                        );
+                }
+                Tell::StalledUsage(reason, tokens) => {
+                    for (kind, count) in ["input", "cache_read", "cache_write", "output"]
+                        .into_iter()
+                        .zip(tokens)
+                    {
+                        if count > 0 {
+                            metrics::counter!(
+                                "steve_orchestration_stall_tokens_total",
+                                "reason" => reason.as_str(),
+                                "kind" => kind,
+                            )
+                            .increment(count as u64);
+                        }
+                    }
+                }
+                Tell::StalledAttemptStopped(reason, elapsed_ms) => {
+                    metrics::histogram!(
+                        "steve_orchestration_stall_stop_seconds",
+                        "reason" => reason.as_str(),
+                    )
+                    .record(elapsed_ms as f64 / 1000.0);
                 }
             }
         }
@@ -220,12 +252,7 @@ impl NodeRuntime {
     /// What an event means for the session row and for statistics, in `w` (before it is applied,
     /// so an attempt's start or end counts once): the context and cost it reports, the model in
     /// force, the tools and permissions of its attempt, and the attempts that begin and end.
-    fn facts_in(
-        &self,
-        w: &mut W<'_>,
-        ev: &NodeEvent,
-        received: i64,
-    ) -> Result<Vec<After>, StoreError> {
+    fn facts_in(&self, w: &mut W<'_>, ev: &NodeEvent) -> Result<Vec<After>, StoreError> {
         let Some(session) = ev_session(ev) else {
             return Ok(vec![]);
         };
@@ -246,7 +273,7 @@ impl NodeRuntime {
                 let prior = k.tools.get(tool.id.as_str()).map(|fact| fact.phase);
                 if !matches!(prior, Some(ToolPhase::Succeeded | ToolPhase::Failed)) {
                     if prior != Some(tool.phase) {
-                        self.observe_tool_in(w, a, tool, ev, received)?;
+                        self.observe_tool_in(w, a, tool, ev)?;
                     }
                     k.tools.insert(
                         tool.id.to_string(),
@@ -258,6 +285,15 @@ impl NodeRuntime {
                     );
                 }
                 w.attempts().keep_facts(a, &k)?;
+            }
+            (
+                EventBody::WorkspaceChanged {
+                    workspace,
+                    revision,
+                },
+                Some(a),
+            ) => {
+                self.observe_workspace_in(w, a, workspace, revision)?;
             }
             (EventBody::PermissionRequested { .. }, Some(a)) => {
                 let mut k = facts_so_far(w, a)?;
@@ -382,12 +418,20 @@ impl NodeRuntime {
         let caps = *self.cost_caps.lock().unwrap();
         let delta = cost::admit(caps, report, kept.cost.unwrap_or(0.0), before);
         if let Some(a) = attempt {
-            super::super::acp_stats::node_usage(
+            let stall = self.stall_evidence_in(w, a)?;
+            let tokens = super::super::acp_stats::node_usage(
                 &self.store,
                 session,
                 a,
                 &cost::accounting_report(report, delta),
+                stall.is_some(),
             )?;
+            if let (Some(stall), Some(tokens)) = (stall, tokens) {
+                self.staged
+                    .lock()
+                    .unwrap()
+                    .push(Tell::StalledUsage(stall.reason, tokens));
+            }
             if report.model.is_some() {
                 kept.model = report.model.clone();
             }
@@ -461,7 +505,7 @@ impl NodeRuntime {
                     // unknown until it ends or is settled (Stop abandons it, never cancels)
                     && state == "planned"
                 {
-                    node_write::attempt_cas_in(
+                    if node_write::attempt_cas_in(
                         w,
                         x.attempt().as_str(),
                         rev,
@@ -469,7 +513,9 @@ impl NodeRuntime {
                         None,
                         None,
                         now(),
-                    )?;
+                    )? {
+                        self.observe_attempt_start(w, x.attempt().as_str())?;
+                    }
                 }
             }
             EventBody::AttemptEnded { completion } => {
@@ -487,6 +533,13 @@ impl NodeRuntime {
                 };
                 if state == "finished" {
                     return Ok(None);
+                }
+                if let Some(stall) = self.stall_evidence_in(w, attempt)? {
+                    let elapsed = self.clock.now().saturating_sub(stall.detected_at).max(0);
+                    self.staged
+                        .lock()
+                        .unwrap()
+                        .push(Tell::StalledAttemptStopped(stall.reason, elapsed));
                 }
                 node_write::attempt_cas_in(
                     w,

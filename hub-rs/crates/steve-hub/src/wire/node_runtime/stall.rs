@@ -2,12 +2,13 @@
 
 use super::*;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use steve_store::node_write::stall::{self, Active};
-use steve_types::orchestration::{StallEvidence, StallReason};
+use steve_types::orchestration::{StallEvidence, StallReason, TURN_STALL};
 
 const REPEAT_LIMIT: u8 = 5;
 const NO_PROGRESS_MS: i64 = 15 * 60_000;
-const SAMPLE_MS: i64 = 1_000;
+pub(super) const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SAMPLES: usize = 32;
 
 #[derive(Serialize, Deserialize)]
@@ -17,10 +18,18 @@ struct Failure {
     count: u8,
 }
 
+#[derive(Serialize, Deserialize)]
+struct Observation {
+    at: i64,
+    owner: String,
+    attempt: String,
+    generation: u64,
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct Progress {
-    at: i64,
-    observing: bool,
+    observation: Option<Observation>,
+    first_observed: Option<i64>,
     observed_ms: i64,
     progress: Vec<Digest>,
     failures: Vec<Failure>,
@@ -28,31 +37,55 @@ struct Progress {
 }
 
 impl Progress {
-    fn observe(&mut self, at: i64, observable: bool) -> Option<StallEvidence> {
+    fn observe(&mut self, at: i64, active: Option<(&str, &str, u64)>) -> Option<StallEvidence> {
         if self.evidence.is_some() {
             return None;
         }
-        if self.observing && observable {
-            self.observed_ms += at.saturating_sub(self.at).clamp(0, SAMPLE_MS);
-        }
-        self.at = at;
-        self.observing = observable;
+        self.observation = match (active, self.observation.take()) {
+            (Some((owner, attempt, generation)), Some(mut prior))
+                if prior.owner == owner
+                    && prior.attempt == attempt
+                    && prior.generation == generation =>
+            {
+                self.first_observed.get_or_insert(prior.at);
+                self.observed_ms = self
+                    .observed_ms
+                    .saturating_add(at.saturating_sub(prior.at).max(0));
+                prior.at = prior.at.max(at);
+                Some(prior)
+            }
+            (Some((owner, attempt, generation)), _) => Some(Observation {
+                at,
+                owner: owner.to_owned(),
+                attempt: attempt.to_owned(),
+                generation,
+            }),
+            (None, _) => None,
+        };
         (self.observed_ms >= NO_PROGRESS_MS).then(|| StallEvidence {
             reason: StallReason::NoProgress,
-            first_at: at - self.observed_ms,
+            first_at: self.first_observed.unwrap_or(at),
             detected_at: at,
             repetitions: 0,
             event: None,
         })
     }
 
-    fn advance(&mut self, digest: Digest) {
-        // Workspace facts already seen cannot turn retries or heartbeats into fresh progress.
-        if self.progress.contains(&digest) || self.progress.len() == SAMPLES {
+    fn advance(&mut self, digest: Digest, at: i64) {
+        if let Some(index) = self.progress.iter().position(|seen| *seen == digest) {
+            self.progress.remove(index);
+            self.progress.push(digest);
             return;
+        }
+        if self.progress.len() == SAMPLES {
+            self.progress.remove(0);
         }
         self.progress.push(digest);
         self.observed_ms = 0;
+        self.first_observed = None;
+        if let Some(observation) = &mut self.observation {
+            observation.at = observation.at.max(at);
+        }
         self.failures.clear();
     }
 
@@ -60,95 +93,134 @@ impl Progress {
         if self.evidence.is_some() {
             return None;
         }
-        if let Some(f) = self.failures.iter_mut().find(|f| f.digest == digest) {
-            f.count += 1;
-            return (f.count == REPEAT_LIMIT).then(|| StallEvidence {
-                reason: StallReason::RepeatedFailure,
-                first_at: f.first,
-                detected_at: at,
-                repetitions: f.count,
-                event: Some(event.to_string()),
-            });
-        }
-        if self.failures.len() < SAMPLES {
-            self.failures.push(Failure {
-                digest,
-                first: at,
-                count: 1,
-            });
-        }
-        None
+        let mut failure = match self.failures.iter().position(|f| f.digest == digest) {
+            Some(index) => self.failures.remove(index),
+            None => {
+                if self.failures.len() == SAMPLES {
+                    self.failures.remove(0);
+                }
+                Failure {
+                    digest,
+                    first: at,
+                    count: 0,
+                }
+            }
+        };
+        failure.count += 1;
+        let evidence = (failure.count == REPEAT_LIMIT).then(|| StallEvidence {
+            reason: StallReason::RepeatedFailure,
+            first_at: failure.first,
+            detected_at: at,
+            repetitions: failure.count,
+            event: Some(event.to_string()),
+        });
+        self.failures.push(failure);
+        evidence
     }
 }
 
 impl NodeRuntime {
+    pub(super) fn stall_evidence_in(
+        &self,
+        w: &mut W<'_>,
+        attempt: &str,
+    ) -> Result<Option<StallEvidence>, StoreError> {
+        let summary: Option<Progress> = stall::read_by_attempt(w, attempt)?;
+        Ok(summary.and_then(|s| s.evidence))
+    }
+
     pub(super) fn observe_tool_in(
         &self,
         w: &mut W<'_>,
         attempt: &str,
         tool: &ToolView,
         ev: &NodeEvent,
-        received: i64,
     ) -> Result<(), StoreError> {
-        let Some(action) = &tool.action else {
+        let Some(evidence) = &tool.evidence else {
             return Ok(());
         };
-        let signature = match (tool.phase, action) {
-            (
-                ToolPhase::Failed,
-                Action::Exec {
-                    command,
-                    cwd,
-                    network,
-                },
-            ) if !command.is_empty() => {
-                digest_of(&(&tool.name, tool.category, command, cwd, network))
-            }
-            (ToolPhase::Failed, Action::Read { paths }) if !paths.is_empty() => {
-                digest_of(&(&tool.name, tool.category, paths))
-            }
-            (
-                ToolPhase::Succeeded,
-                Action::Write {
-                    paths,
-                    change: Some(digest),
-                    ..
-                },
-            ) if !paths.is_empty() => digest_of(&(paths, digest)),
-            _ => return Ok(()),
-        }
-        .map_err(conflict)?;
         let Some(active) = stall::for_attempt(w, self.node_id.as_str(), attempt)? else {
             return Ok(());
         };
         let mut summary: Progress = stall::read(w, &active.turn)?.unwrap_or_default();
-        let evidence = if tool.phase == ToolPhase::Failed {
-            if active.waiting {
-                return Ok(());
+        let at = self.clock.now();
+        let evidence = match (tool.phase, evidence) {
+            (ToolPhase::Failed, ToolEvidence::Failed { signature }) if !active.waiting => {
+                summary.failed(signature.clone(), at, &ev.id)
             }
-            summary.failed(signature, received, &ev.id)
-        } else {
-            summary.advance(signature);
-            None
+            (ToolPhase::Succeeded, ToolEvidence::ContentChanged { signature }) => {
+                summary.advance(signature.clone(), at);
+                None
+            }
+            _ => return Ok(()),
         };
         self.save_progress(w, &active, summary, evidence)
     }
 
     pub(super) fn observe_turns(&self) -> Result<(), StoreError> {
-        let observable =
-            self.is_reconciled() && !self.is_holding() && self.node.observes_execution();
+        let generation = self.observation_generation();
         let at = self.clock.now();
         self.write(|w| {
             for active in stall::running(w, self.node_id.as_str())? {
-                let mut summary: Progress = stall::read(w, &active.turn)?.unwrap_or_default();
-                if summary.evidence.is_some() {
-                    continue;
-                }
-                let evidence = summary.observe(at, observable && !active.waiting);
-                self.save_progress(w, &active, summary, evidence)?;
+                self.observe_active_in(w, &active, generation, at)?;
             }
             Ok(())
         })
+    }
+
+    fn observation_generation(&self) -> Option<u64> {
+        (self.is_reconciled() && !self.is_holding() && !self.paused.load(Ordering::Acquire))
+            .then(|| self.node.execution_generation())
+            .flatten()
+    }
+
+    pub(super) fn observe_attempt_start(
+        &self,
+        w: &mut W<'_>,
+        attempt: &str,
+    ) -> Result<(), StoreError> {
+        if let Some(active) = stall::for_attempt(w, self.node_id.as_str(), attempt)? {
+            self.observe_active_in(w, &active, self.observation_generation(), self.clock.now())?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn observe_workspace_in(
+        &self,
+        w: &mut W<'_>,
+        attempt: &str,
+        workspace: &WorkspaceRef,
+        revision: &Revision,
+    ) -> Result<(), StoreError> {
+        let Some(active) = stall::for_attempt(w, self.node_id.as_str(), attempt)? else {
+            return Ok(());
+        };
+        if !stall::owns_workspace(w, &active.session, workspace)? {
+            return Ok(());
+        }
+        let mut summary: Progress = stall::read(w, &active.turn)?.unwrap_or_default();
+        let signature = digest_of(&(workspace, revision)).map_err(conflict)?;
+        summary.advance(signature, self.clock.now());
+        self.save_progress(w, &active, summary, None)
+    }
+
+    fn observe_active_in(
+        &self,
+        w: &mut W<'_>,
+        active: &Active,
+        generation: Option<u64>,
+        at: i64,
+    ) -> Result<(), StoreError> {
+        let generation = generation.filter(|_| !active.waiting);
+        let mut summary: Progress = stall::read(w, &active.turn)?.unwrap_or_default();
+        if summary.evidence.is_some() || (generation.is_none() && summary.observation.is_none()) {
+            return Ok(());
+        }
+        let evidence = summary.observe(
+            at,
+            generation.map(|g| (self.owner.as_str(), active.attempt.as_str(), g)),
+        );
+        self.save_progress(w, active, summary, evidence)
     }
 
     fn save_progress(
@@ -158,35 +230,34 @@ impl NodeRuntime {
         mut summary: Progress,
         evidence: Option<StallEvidence>,
     ) -> Result<(), StoreError> {
-        let reason = evidence.as_ref().map(|e| e.reason);
-        if evidence.is_some() {
-            summary.evidence = evidence;
+        if let Some(evidence) = &evidence {
+            summary.evidence = Some(evidence.clone());
         }
         stall::save(w, &a.turn, &summary)?;
-        let Some(reason) = reason else {
+        let Some(evidence) = evidence else {
             return Ok(());
         };
         let scope = node_sessions::startup::scope(w, &a.session)?;
-        let question = match reason {
+        let question = steve_i18n::stored(|| match evidence.reason {
             StallReason::RepeatedFailure => steve_i18n::t!("hub.node.stall.repeated_failure"),
             StallReason::NoProgress => steve_i18n::t!("hub.node.stall.no_progress"),
-        };
+        });
         let card = steve_store::DecisionRows(w).open(&steve_store::NewDecision {
             workspace_id: scope.workspace,
             kind: "fail".into(),
-            subject_type: "stall".into(),
+            subject_type: TURN_STALL.into(),
             subject_id: a.turn.clone(),
             item_id: scope.item,
             session_id: Some(a.session.clone()),
             question,
-            options: Some(vec!["continue".into(), "look".into(), "drop".into()]),
+            options: Some(vec!["continue".into(), "drop".into()]),
             requested_by: "steve".into(),
             ..Default::default()
         })?;
-        stall::bind_decision(w, &a.turn, &card.id)?;
+        stall::bind_decision(w, &a.turn, &a.attempt, &card.id)?;
         node_write::cancel_attempt_in(w, &a.attempt, a.revision, self.clock.now())?;
         self.stop_command_in(w, &a.attempt, &a.operation, "cancel")?;
-        self.staged.lock().unwrap().push(Tell::Stalled(reason));
+        self.staged.lock().unwrap().push(Tell::Stalled(evidence));
         Ok(())
     }
 }
@@ -214,21 +285,36 @@ mod tests {
     }
 
     #[test]
-    fn only_observed_time_counts_and_new_progress_resets_the_deadline() {
+    fn downtime_and_approval_do_not_spend_time_and_progress_keeps_extending_the_deadline() {
         let mut summary = Progress::default();
-        for n in 0..1_200 {
-            assert!(summary.observe(n * SAMPLE_MS, false).is_none());
+        let started = Some(("hub1", "a", 1));
+        let restarted = Some(("hub2", "a", 1));
+        assert!(summary.observe(0, started).is_none());
+        assert!(summary.observe(800_000, started).is_none());
+        assert!(summary.observe(2_000_000, restarted).is_none());
+        assert!(summary.observe(2_020_000, None).is_none());
+        assert!(summary.observe(3_000_000, restarted).is_none());
+        assert!(summary.observe(3_099_999, restarted).is_none());
+        assert_eq!(
+            summary.observe(3_100_000, restarted).unwrap().reason,
+            StallReason::NoProgress
+        );
+
+        let mut summary = Progress::default();
+        for i in 0_i64..40 {
+            let at = i * 800_000;
+            assert!(summary.observe(at, started).is_none());
+            summary.advance(Digest::sha256(&i.to_le_bytes()), at);
         }
-        let start = 1_200 * SAMPLE_MS;
-        assert!(summary.observe(start, true).is_none());
-        for n in 1..900 {
-            assert!(summary.observe(start + n * SAMPLE_MS, true).is_none());
-        }
-        summary.advance(Digest::sha256(b"new output"));
-        for n in 900..1_799 {
-            assert!(summary.observe(start + n * SAMPLE_MS, true).is_none());
-        }
-        let cause = summary.observe(start + 1_799 * SAMPLE_MS, true).unwrap();
-        assert_eq!(cause.reason, StallReason::NoProgress);
+        assert!(
+            summary
+                .observe(39 * 800_000 + NO_PROGRESS_MS - 1, started)
+                .is_none()
+        );
+        assert!(
+            summary
+                .observe(39 * 800_000 + NO_PROGRESS_MS, started)
+                .is_some()
+        );
     }
 }

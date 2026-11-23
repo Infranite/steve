@@ -1371,9 +1371,18 @@ impl Actor {
                             EventBody::Usage { report },
                         ));
                     }
-                    Fact::Event(e) => {
-                        if matches!(e, EventBody::ToolChanged { .. }) {
+                    Fact::Event(mut e) => {
+                        if let EventBody::ToolChanged { tool } = &mut e {
                             run.acted = true;
+                            if let RunDirectory::Workspace { workspace } = &run.spec.run.directory
+                                && let Some(fact) = u
+                                    .get("toolCallId")
+                                    .and_then(Value::as_str)
+                                    .and_then(|id| run.norm.fact(id))
+                            {
+                                tool.evidence =
+                                    crate::tool_evidence(fact, &run.image_scope.cwd, workspace);
+                            }
                         }
                         let files = self.inner.files.lock().unwrap().clone();
                         for e in run

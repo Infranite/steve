@@ -2422,6 +2422,18 @@ impl Tx<'_> {
             t.error.as_deref().filter(|e| !e.is_empty()),
             asked_yours,
         )?;
+        if let Some(attempt) = t.attempt.as_deref()
+            && self
+                .db()
+                .store()
+                .read(|r| steve_store::node_write::stall::held_attempt(r, attempt))?
+        {
+            self.st.pending.remove(&session.id);
+            if let Some(item) = session.item_id.as_deref() {
+                settle(self.db(), item)?;
+            }
+            return Ok(());
+        }
         let Some(item_id) = session.item_id.as_deref() else {
             self.st.pending.remove(&session.id);
             return Ok(());
@@ -3109,6 +3121,18 @@ impl Tx<'_> {
             .decision(id)?
             .filter(|d| d.status == "open")
             .ok_or_else(|| msg(steve_i18n::t!("core.decision.handled")))?;
+        if d.subject_type == steve_types::orchestration::TURN_STALL {
+            if actor == YOLO_ACTOR || !matches!(choice, "continue" | "drop") {
+                return Err(msg(steve_i18n::t!("core.decision.stall_owner")));
+            }
+            if choice == "continue"
+                && !db
+                    .store()
+                    .read(|r| steve_store::node_write::stall::stop_confirmed(r, id))?
+            {
+                return Err(msg(steve_i18n::t!("core.decision.stall_stop_unconfirmed")));
+            }
+        }
         db.audit(
             actor,
             "decision.resolve",

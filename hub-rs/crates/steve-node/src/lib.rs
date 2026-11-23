@@ -1104,6 +1104,80 @@ pub(crate) fn permission_context(
     })
 }
 
+/// Bind terminal evidence to a workspace and retain only its fingerprint.
+fn tool_evidence(
+    fact: &steve_acp::normalize::ToolFact,
+    dir: &Path,
+    workspace: &WorkspaceRef,
+) -> Option<ToolEvidence> {
+    use steve_acp::normalize::CommandFact;
+
+    let scoped = |path: &str| inside(dir, workspace, path).map(|(r, _)| r.rel);
+    match fact.phase {
+        ToolPhase::Failed => {
+            let target = match fact.category {
+                ToolCategory::Exec => {
+                    let cwd = fact
+                        .cwd
+                        .as_deref()
+                        .map_or_else(|| Some(None), |p| scoped(p).map(Some))?;
+                    match fact.command.as_ref()? {
+                        CommandFact::Shell(s) if !s.is_empty() => digest_of(&("shell", s, cwd)),
+                        CommandFact::Argv(a) if !a.is_empty() => digest_of(&("argv", a, cwd)),
+                        _ => return None,
+                    }
+                }
+                ToolCategory::Read | ToolCategory::Edit | ToolCategory::Delete
+                    if !fact.paths.is_empty() =>
+                {
+                    let paths = fact
+                        .paths
+                        .iter()
+                        .map(|p| scoped(p))
+                        .collect::<Option<Vec<_>>>()?;
+                    // Preserve line ranges or other input that affects what the tool reads.
+                    digest_of(&(paths, fact.input()))
+                }
+                _ => return None,
+            }
+            .ok()?;
+            let exit = fact
+                .raw
+                .pointer("/rawOutput/exitCode")
+                .and_then(serde_json::Value::as_i64);
+            let signature =
+                digest_of(&(workspace, &fact.name, fact.category, target, exit)).ok()?;
+            Some(ToolEvidence::Failed { signature })
+        }
+        ToolPhase::Succeeded if fact.category == ToolCategory::Edit => {
+            let mut changed = Vec::new();
+            for diff in fact
+                .raw
+                .get("content")?
+                .as_array()?
+                .iter()
+                .filter(|d| d["type"] == "diff")
+            {
+                let new = diff.get("newText")?.as_str()?;
+                let old = diff.get("oldText").and_then(serde_json::Value::as_str);
+                if old != Some(new) {
+                    changed.push((
+                        scoped(diff.get("path")?.as_str()?)?,
+                        Digest::sha256(new.as_bytes()),
+                    ));
+                }
+            }
+            if changed.is_empty() {
+                return None;
+            }
+            changed.sort_unstable_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+            let signature = digest_of(&(workspace, changed)).ok()?;
+            Some(ToolEvidence::ContentChanged { signature })
+        }
+        _ => None,
+    }
+}
+
 /// A harness's permission request as Steve's: its facts bound to this execution and workspace
 /// (paths inside it are typed, anything outside it or not fully known is said so: an explicit
 /// unknown), with what must still hold when the answer is used (the workspace's revision, HEAD of
@@ -4553,6 +4627,47 @@ impl Node for LocalNode {
 mod binding_tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn tool_evidence_preserves_arguments_and_requires_a_real_diff() {
+        use steve_acp::normalize::Normalizer;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut norm = Normalizer::new(dir.path(), "attempt", Epoch::new("process").unwrap());
+        let workspace = WorkspaceRef {
+            node: NodeId::new("local").unwrap(),
+            id: WorkspaceId::new("work").unwrap(),
+        };
+        let mut evidence = |input: Value, exit| {
+            norm.update(&json!({
+                "sessionUpdate": "tool_call_update", "toolCallId": "test", "kind": "execute",
+                "status": "failed", "rawInput": { "command": input },
+                "rawOutput": { "exitCode": exit },
+            }));
+            tool_evidence(norm.fact("test").unwrap(), dir.path(), &workspace)
+        };
+        let args = json!(["printf", "%s", "a b"]);
+        let original = evidence(args.clone(), 1);
+        assert!(matches!(original, Some(ToolEvidence::Failed { .. })));
+        assert_eq!(original, evidence(args.clone(), 1));
+        assert_ne!(original, evidence(args, 2));
+        assert_ne!(original, evidence(json!(["printf", "a b", "%s"]), 1));
+        assert_ne!(original, evidence(json!("printf '%s' 'a b'"), 1));
+
+        let mut edit = |old, new| {
+            norm.update(&json!({
+                "sessionUpdate": "tool_call_update", "toolCallId": "edit", "kind": "edit",
+                "status": "completed", "content": [{
+                    "type": "diff", "path": "README.md", "oldText": old, "newText": new,
+                }],
+            }));
+            tool_evidence(norm.fact("edit").unwrap(), dir.path(), &workspace)
+        };
+        assert_eq!(edit("open", "open"), None);
+        let changed = edit("open", "closed");
+        assert!(matches!(changed, Some(ToolEvidence::ContentChanged { .. })));
+        assert_eq!(changed, edit("pending", "closed"));
+    }
 
     #[test]
     fn hanging_git_probe_is_bounded_and_reaped() {

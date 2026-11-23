@@ -32,6 +32,8 @@
   "core.error.invalid": "Invalid parameters: %{fields}",
   "core.project.dir_missing": "The project folder does not exist: %{path}",
   "core.item.dep_cycle": "Not added: it would create a circular dependency",
+  "core.decision.stall_owner": "Only you can resolve the stalled turn.",
+  "core.decision.stall_stop_unconfirmed": "The Node has not confirmed the stop. Wait for reconciliation before continuing.",
   "core.decision.handled": "This decision has already been handled",
   "core.decision.not_undoable": "This decision cannot be undone",
   "core.decision.undo_closed": "The item has ended, so this decision can no longer be undone; start a new cycle if you need to",
