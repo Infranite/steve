@@ -353,7 +353,7 @@ impl super::node_runtime::NodeDomain for HubHost {
         // the binding, not `sessions.cwd`: a fresh Node workspace lives where only the Node knows
         let bound = self
             .store
-            .reader(|c| steve_store::runtime::workspace_ref_of(c, session))
+            .read(|r| steve_store::node_sessions::workspace_ref(r, session))
             .ok()
             .flatten()
             .and_then(|w| serde_json::from_str::<steve_node_api::WorkspaceRef>(&w).ok());

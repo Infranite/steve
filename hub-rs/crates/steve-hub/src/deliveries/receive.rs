@@ -166,7 +166,7 @@ impl Service {
             workspaces.refresh_roots().map_err(|e| e.to_string())?;
             let bound = self
                 .store
-                .reader(|c| steve_store::runtime::workspace_ref_of(c, &session.id))
+                .read(|r| steve_store::node_sessions::workspace_ref(r, &session.id))
                 .map_err(|e| e.to_string())?
                 .is_some();
             match workspaces.placement_of(Subject::Session(&session.id)) {
@@ -432,9 +432,7 @@ mod tests {
         assert!(error.starts_with("delivery Node unavailable:"), "{error}");
         let count: i64 = svc
             .store
-            .reader::<_, steve_store::StoreError>(|c| {
-                Ok(c.query_row("SELECT COUNT(*) FROM deliveries", [], |r| r.get(0))?)
-            })
+            .read(steve_store::testkit::hub::deliveries::count)
             .unwrap();
         assert_eq!(count, 0);
     }

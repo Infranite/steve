@@ -21,16 +21,6 @@ pub struct SessionBinding<'a> {
     pub config_revision: &'a str,
 }
 
-/// The workspace a session is bound to (the protocol's `WorkspaceRef` JSON), if it is bound.
-pub fn workspace_ref_of(c: &rusqlite::Connection, session: &str) -> Result<Option<String>> {
-    Ok(c.query_row(
-        "SELECT workspace_ref FROM runtime_sessions WHERE session_id=?",
-        [session],
-        |r| r.get(0),
-    )
-    .optional()?)
-}
-
 /// The session's binding was let go and nothing of it is in flight: its phase is `released`, no
 /// attempt is active and every turn has finished. Such a session holds no process on any Node, so
 /// it is idle even while that Node is not attached (a parked binding otherwise counts as busy).

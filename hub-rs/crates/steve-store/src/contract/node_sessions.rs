@@ -393,3 +393,25 @@ pub fn has_current_park_notice(c: &mut impl Read, session: &str) -> Result<bool>
     )?
     .is_some())
 }
+
+pub fn clear_queue(w: &mut crate::W<'_>, session: &str) -> Result<()> {
+    w.exec(
+        Query::delete()
+            .from_table("queued")
+            .and_where(Expr::col("session_id").eq(session)),
+    )?;
+    Ok(())
+}
+
+pub fn workspace_ref(c: &mut impl Read, session: &str) -> Result<Option<String>> {
+    c.one(
+        Query::select()
+            .column("workspace_ref")
+            .from("runtime_sessions")
+            .and_where(Expr::col("session_id").eq(session)),
+        |r| r.get(0),
+    )
+}
+
+pub mod observations;
+pub mod startup;

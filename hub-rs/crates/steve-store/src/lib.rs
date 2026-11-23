@@ -54,6 +54,7 @@ use sha2::{Digest, Sha256};
 pub use bus::{FnPublisher, NoPublisher, Publisher};
 pub use contract::alarms::{Alarm, Alarms, NewAlarm};
 pub use contract::automation::{ScheduleRow, Schedules};
+pub use contract::deliveries as delivery_repo;
 pub use contract::message_sources::{
     Attachment, ChannelMessage, ChannelSources, Connections, MailMessage, MailSources,
     MessageSelection,

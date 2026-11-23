@@ -394,3 +394,22 @@ pub fn record_via(w: &mut W<'_>, id: &str, via: &DecisionVia<'_>) -> Result<()> 
     )?;
     Ok(())
 }
+
+pub(crate) fn open_for_session_or_item(
+    c: &mut impl Read,
+    session: &str,
+    item: Option<&str>,
+) -> Result<Vec<Decision>> {
+    let mut target = Expr::col("session_id").eq(session);
+    if let Some(item) = item {
+        target = target.or(Expr::col("item_id").eq(item));
+    }
+    c.all(
+        Query::select()
+            .columns(COLUMNS)
+            .from("decisions")
+            .and_where(Expr::col("status").eq("open"))
+            .and_where(target),
+        decode,
+    )
+}

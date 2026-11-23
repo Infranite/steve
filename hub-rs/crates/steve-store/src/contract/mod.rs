@@ -29,6 +29,7 @@ mod connection_rows;
 pub mod connections;
 mod contacts;
 pub mod decisions;
+pub mod deliveries;
 mod digest_notes;
 pub mod files;
 mod flow_rows;
