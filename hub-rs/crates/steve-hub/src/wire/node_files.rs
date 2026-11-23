@@ -61,7 +61,7 @@ impl NodeFiles {
         };
         let inputs = self
             .store
-            .read(|r| steve_store::job_inputs(r, self.node.as_str(), job, attempt))
+            .read(|r| steve_store::tool_admission::job_execution(r, &self.node, job, attempt, true))
             .map_err(internal)?
             .ok_or_else(denied)?;
         if inputs.execution != *exec

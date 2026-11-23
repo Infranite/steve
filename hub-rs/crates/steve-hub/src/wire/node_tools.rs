@@ -4,11 +4,15 @@
 //! cannot share this transaction: a crash leaves Unknown, never an automatic second execution.
 use super::tool_service::ToolService;
 use async_trait::async_trait;
-use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use steve_node_api::*;
-use steve_store::{Session, Store, StoreError, ThreadRun};
+#[cfg(test)]
+use steve_store::StoreError;
+use steve_store::{
+    Session, Store, ThreadRun, tool_admission,
+    tool_journal::{Intent, Journal},
+};
 
 use super::node_runtime::RESEARCH_GRANT;
 
@@ -58,16 +62,12 @@ fn authorize_session(
     else {
         return Err(denied());
     };
-    let row = store.reader(|c| {
-        Ok::<_, StoreError>(c.query_row(
-            "SELECT a.execution,a.spec,a.state,a.cancel_requested,s.active_attempt,t.active_attempt FROM runtime_attempts a JOIN runtime_turns t ON t.turn_id=a.turn_id JOIN runtime_sessions s ON s.session_id=t.session_id WHERE a.attempt_id=?1 AND a.turn_id=?2 AND t.session_id=?3 AND a.node_id=?4 AND s.node_id=?4 AND s.node_session_id=?3",
-            params![attempt.as_str(), turn.as_str(), session.as_str(), node.as_str()],
-            |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,bool>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,Option<String>>(5)?)),
-        ).optional()?)
-    }).map_err(internal)?.ok_or_else(denied)?;
-    let saved: ExecutionRef = serde_json::from_str(&row.0).map_err(internal)?;
-    let spec: TurnSpec = serde_json::from_str(&row.1).map_err(internal)?;
-    if saved != *exec
+    let row = store
+        .read(|r| tool_admission::turn_execution(r, node, session, turn, attempt))
+        .map_err(internal)?
+        .ok_or_else(denied)?;
+    let spec = row.spec;
+    if row.execution != *exec
         || spec.session != *session
         || spec.turn != *turn
         || spec.run.attempt != *attempt
@@ -76,10 +76,10 @@ fn authorize_session(
         return Err(denied());
     }
     if active
-        && (row.3
-            || matches!(row.2.as_str(), "finished" | "unknown" | "rejected")
-            || row.4.as_deref() != Some(attempt.as_str())
-            || row.5.as_deref() != Some(attempt.as_str()))
+        && (row.cancelled
+            || matches!(row.state.as_str(), "finished" | "unknown" | "rejected")
+            || row.session_attempt.as_deref() != Some(attempt.as_str())
+            || row.turn_attempt.as_deref() != Some(attempt.as_str()))
     {
         return Err(denied());
     }
@@ -179,19 +179,14 @@ pub(crate) fn authorize_research(
     let ExecutionRef::Job { job, attempt } = exec else {
         return Err(denied());
     };
-    let row = store.reader(|c| {
-        Ok::<_, StoreError>(c.query_row(
-            "SELECT a.execution,a.spec,a.state,a.cancel_requested,j.kind,j.thread_run_id,j.workspace_id,j.state FROM runtime_job_attempts a JOIN runtime_jobs j ON j.job_id=a.job_id WHERE a.attempt_id=?1 AND a.job_id=?2 AND a.node_id=?3 AND j.node_id=?3",
-            params![attempt.as_str(), job.as_str(), node.as_str()],
-            |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,bool>(3)?,r.get::<_,String>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,String>(6)?,r.get::<_,String>(7)?)),
-        ).optional()?)
-    }).map_err(internal)?.ok_or_else(denied)?;
-    let (saved, spec, state, cancelled, kind, run, workspace, job_state) = row;
-    let saved: ExecutionRef = serde_json::from_str(&saved).map_err(internal)?;
-    let spec: JobSpec = serde_json::from_str(&spec).map_err(internal)?;
+    let row = store
+        .read(|r| tool_admission::job_execution(r, node, job, attempt, false))
+        .map_err(internal)?
+        .ok_or_else(denied)?;
+    let spec = row.spec;
     let steve_tools = matches!(&spec.work, JobWork::Research(r) if r.steve_tools);
-    if saved != *exec
-        || kind != "research"
+    if row.execution != *exec
+        || row.kind != "research"
         || !steve_tools
         || spec.job != *job
         || spec.run.attempt != *attempt
@@ -200,16 +195,18 @@ pub(crate) fn authorize_research(
         return Err(denied());
     }
     if active
-        && (cancelled || job_state != "open" || matches!(state.as_str(), "finished" | "unknown"))
+        && (row.cancelled
+            || row.job_state != "open"
+            || matches!(row.state.as_str(), "finished" | "unknown"))
     {
         return Err(denied());
     }
     let run = store
         .thread()
-        .run(run.as_deref().ok_or_else(denied)?)
+        .run(row.run.as_deref().ok_or_else(denied)?)
         .map_err(internal)?
         .ok_or_else(denied)?;
-    if run.workspace_id != workspace || (active && run.status != "running") {
+    if run.workspace_id != row.workspace || (active && run.status != "running") {
         return Err(denied());
     }
     Ok(run)
@@ -308,15 +305,10 @@ impl Service for ToolService {
         super::research_mcp::call_tool(&self.extra, run, name, args).await
     }
 }
-struct Ledger {
-    db: Mutex<Connection>,
-    // Exclusive process owner, so opening a second bridge cannot mark live calls Unknown.
-    _lock: std::fs::File,
-}
 pub struct NodeTools {
     store: Store,
     node: NodeId,
-    ledger: Arc<Ledger>,
+    ledger: Arc<Journal>,
     service: OnceLock<Arc<dyn Service>>,
     /// ToolService invocations in flight. A call past the bound is refused before its ledger
     /// row exists, so it is plainly not executed (never uncertain).
@@ -334,39 +326,10 @@ async fn blocking<T: Send + 'static>(
 }
 impl NodeTools {
     pub fn open(store: Store, node: NodeId, home: &Path) -> ApiResult<Arc<Self>> {
-        use std::os::fd::AsRawFd;
-        std::fs::create_dir_all(home).map_err(internal)?;
-        let lock = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(home.join("host-tools.lock"))
-            .map_err(internal)?;
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(ApiError::new(
-                ErrorCode::Busy,
-                "another tool host owns this ledger",
-            ));
-        }
-        let mut db = Connection::open(home.join("host-tools.sqlite3")).map_err(internal)?;
-        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
-            .map_err(internal)?;
-        let tx = db.transaction().map_err(internal)?;
-        let version: i64 = tx
-            .pragma_query_value(None, "user_version", |r| r.get(0))
-            .map_err(internal)?;
-        if version > 1 {
-            return Err(ApiError::new(ErrorCode::Unsupported, "newer tool journal"));
-        }
-        tx.execute_batch("CREATE TABLE IF NOT EXISTS calls (key TEXT PRIMARY KEY, digest TEXT NOT NULL, operation TEXT NOT NULL, node TEXT NOT NULL, session TEXT NOT NULL, workspace TEXT NOT NULL, name TEXT NOT NULL, catalog TEXT NOT NULL, deadline INTEGER NOT NULL, created INTEGER NOT NULL, updated INTEGER NOT NULL, state TEXT NOT NULL, result TEXT, cancel_requested INTEGER NOT NULL DEFAULT 0); UPDATE calls SET state='unknown' WHERE state='running'; PRAGMA user_version=1;").map_err(internal)?;
-        tx.commit().map_err(internal)?;
         Ok(Arc::new(Self {
             store,
             node,
-            ledger: Arc::new(Ledger {
-                db: Mutex::new(db),
-                _lock: lock,
-            }),
+            ledger: Arc::new(Journal::open(home)?),
             service: OnceLock::new(),
             permits: Arc::new(tokio::sync::Semaphore::new(MAX_CALLS)),
         }))
@@ -414,21 +377,14 @@ impl NodeTools {
         let (exec, encoded) = (key.execution.clone(), Self::key(key)?);
         blocking(move || {
             let current = caller(&store, &node, &exec, false)?;
-            let db = ledger.db.lock().unwrap();
-            let result = saved(&db, &encoded, digest.as_ref())?;
-            let diagnostic = db
-                .query_row("SELECT name FROM calls WHERE key=?", [&encoded], |r| {
-                    r.get::<_, String>(0)
-                })
-                .optional()
-                .map_err(internal)?
-                .is_some_and(|name| name == super::diagnostics::TOOL);
-            drop(db);
-            if diagnostic && let Some(ref result) = result {
-                super::diagnostics::authorize_cached(&store, &current, result)
+            let Some(row) = ledger.read(&encoded, digest.as_ref())? else {
+                return Ok(None);
+            };
+            if row.name == super::diagnostics::TOOL {
+                super::diagnostics::authorize_cached(&store, &current, &row.result)
                     .map_err(|_| denied())?;
             }
-            Ok(result)
+            Ok(Some(row.result))
         })
         .await
     }
@@ -450,38 +406,6 @@ fn session_caller((s, gated): (Session, bool)) -> Caller {
     } else {
         Caller::Session(s)
     }
-}
-fn saved(db: &Connection, key: &str, digest: Option<&Digest>) -> ApiResult<Option<ToolResult>> {
-    let row = db
-        .query_row(
-            "SELECT digest,operation,state,result FROM calls WHERE key=?",
-            [key],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, Option<String>>(3)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(internal)?;
-    let Some((d, op, state, result)) = row else {
-        return Ok(None);
-    };
-    if digest.is_some_and(|digest| digest.as_str() != d) {
-        return Err(ApiError::new(
-            ErrorCode::Conflict,
-            "ToolKey reused with different name/arguments",
-        ));
-    }
-    let operation = OperationId::new(op).map_err(internal)?;
-    Ok(Some(match result {
-        Some(r) => serde_json::from_str(&r).map_err(internal)?,
-        None if state == "running" => ToolResult::Running { operation },
-        None => ToolResult::Unknown { operation },
-    }))
 }
 #[async_trait]
 impl HubTools for NodeTools {
@@ -546,13 +470,19 @@ impl HubTools for NodeTools {
                 q.deadline.0,
             );
             blocking(move || {
-                let db = ledger.db.lock().unwrap();
-                if let Some(r) = saved(&db, &encoded, Some(&digest))? {
-                    return Ok(Some(r));
-                }
                 let (holder, workspace) = session.ids();
-                db.execute("INSERT INTO calls(key,digest,operation,node,session,workspace,name,catalog,deadline,created,updated,state) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?10,'running')",params![encoded,digest.as_str(),operation.as_str(),node.as_str(),holder,workspace,name,catalog.as_str(),deadline,steve_store::now()]).map_err(internal)?;
-                Ok(None)
+                ledger.reserve(Intent {
+                    key: &encoded,
+                    digest: &digest,
+                    operation: &operation,
+                    node: &node,
+                    holder,
+                    workspace,
+                    name: &name,
+                    catalog: &catalog,
+                    deadline,
+                    at: steve_store::now(),
+                })
             })
             .await?
         };
@@ -578,19 +508,7 @@ impl HubTools for NodeTools {
             // A cancel that landed between the fence and here wins: nothing has run yet, so the
             // outcome is a certain refusal rather than Unknown.
             let (check, key) = (ledger.clone(), encoded.clone());
-            let cancelled = blocking(move || {
-                check
-                    .db
-                    .lock()
-                    .unwrap()
-                    .query_row(
-                        "SELECT cancel_requested FROM calls WHERE key=?1",
-                        [&key],
-                        |r| r.get::<_, bool>(0),
-                    )
-                    .map_err(internal)
-            })
-            .await?;
+            let cancelled = blocking(move || check.cancelled(&key)).await?;
             let exec = q.execution.clone();
             let name = q.name.clone();
             let authorized = if cancelled {
@@ -682,17 +600,9 @@ impl HubTools for NodeTools {
                     },
                 },
             };
-            let encoded_result = serde_json::to_string(&result).map_err(internal)?;
-            blocking(move || {
-                ledger
-                    .db
-                    .lock()
-                    .unwrap()
-                    .execute(
-                        "UPDATE calls SET state='done',result=?2,updated=?3 WHERE key=?1",
-                        params![encoded, encoded_result, steve_store::now()],
-                    )
-                    .map_err(internal)
+            let result = blocking(move || {
+                ledger.complete(&encoded, &result, steve_store::now())?;
+                Ok(result)
             })
             .await?;
             Ok::<_, ApiError>(result)
@@ -701,10 +611,7 @@ impl HubTools for NodeTools {
             Ok(Ok(Ok(result))) => Ok(result),
             _ => {
                 let ledger = self.ledger.clone();
-                blocking(move || {
-                    ledger.db.lock().unwrap().execute("UPDATE calls SET state='unknown',updated=?2 WHERE key=?1 AND state='running'",params![status_key,steve_store::now()]).map_err(internal)
-                })
-                .await?;
+                blocking(move || ledger.unknown(&status_key, steve_store::now())).await?;
                 Ok(ToolResult::Unknown { operation: op })
             }
         }
@@ -719,18 +626,15 @@ impl HubTools for NodeTools {
         let encoded = Self::key(&key)?;
         let result = blocking(move || {
             let current = caller(&store, &node, &key.execution, false)?;
-            let db = ledger.db.lock().unwrap();
-            let result = saved(&db, &encoded, None)?
+            let row = ledger
+                .read(&encoded, None)?
                 .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "unknown ToolKey"))?;
-            let diagnostic = db.query_row("SELECT name FROM calls WHERE key=?", [&encoded], |r| r.get::<_, String>(0))
-                .map_err(internal)? == super::diagnostics::TOOL;
-            drop(db);
-            if diagnostic {
-                super::diagnostics::authorize_cached(&store, &current, &result).map_err(|_| denied())?;
+            if row.name == super::diagnostics::TOOL {
+                super::diagnostics::authorize_cached(&store, &current, &row.result)
+                    .map_err(|_| denied())?;
             }
-            let db = ledger.db.lock().unwrap();
-            db.execute("UPDATE calls SET cancel_requested=1,state=CASE WHEN state='running' THEN 'unknown' ELSE state END,updated=?2 WHERE key=?1",params![encoded,steve_store::now()]).map_err(internal)?;
-            Ok(result)
+            ledger.cancel(&encoded, steve_store::now())?;
+            Ok(row.result)
         })
         .await?;
         match result {
@@ -1440,14 +1344,21 @@ pub(crate) mod tests {
             .unwrap();
         let q = request(&tools, h.exec.clone()).await;
         // Crash fixture: accepted intent was durable, its execution/final commit was interrupted.
-        {
-            let db = tools.ledger.db.lock().unwrap();
-            db.execute(
-                "INSERT INTO calls VALUES (?1,?2,'tool_op','local','s1','default','test','rev',999,1,1,'running',NULL,0)",
-                params![NodeTools::key(&q.key()).unwrap(), q.args_digest().unwrap().as_str()],
-            )
+        tools
+            .ledger
+            .reserve(Intent {
+                key: &NodeTools::key(&q.key()).unwrap(),
+                digest: &q.args_digest().unwrap(),
+                operation: &OperationId::new("tool_op").unwrap(),
+                node: &NodeId::new("local").unwrap(),
+                holder: "s1",
+                workspace: "default",
+                name: "test",
+                catalog: &q.catalog,
+                deadline: 999,
+                at: 1,
+            })
             .unwrap();
-        }
         drop(tools);
         let tools =
             NodeTools::open(h.store.clone(), NodeId::new("local").unwrap(), h.dir.path()).unwrap();
@@ -1491,18 +1402,11 @@ pub(crate) mod tests {
             tools.call(over.clone()).await.unwrap_err().code,
             ErrorCode::Exhausted
         );
-        let rows: i64 = tools
+        let row = tools
             .ledger
-            .db
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT COUNT(*) FROM calls WHERE key=?",
-                [NodeTools::key(&over.key()).unwrap()],
-                |r| r.get(0),
-            )
+            .read(&NodeTools::key(&over.key()).unwrap(), None)
             .unwrap();
-        assert_eq!(rows, 0, "a refused call leaves nothing uncertain");
+        assert!(row.is_none(), "a refused call leaves nothing uncertain");
         for _ in 0..500 {
             if running.iter().all(|t| t.is_finished()) {
                 break;

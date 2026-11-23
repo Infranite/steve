@@ -1006,9 +1006,10 @@ pub mod retention {
 pub mod testkit;
 
 pub use contract::files::file_row;
-pub use contract::files::{job_inputs, operation_execution};
+pub use contract::files::operation_execution;
 pub use contract::node_jobs;
 pub use contract::sessions::device as session_device;
 pub use contract::state_batches;
 pub use contract::{bot_harness, node_write};
 pub use contract::{expire_unapplied, settle_permission};
+pub use contract::{tool_admission, tool_journal};
