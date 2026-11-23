@@ -5786,7 +5786,6 @@ dependencies = [
  "metrics-exporter-prometheus",
  "regex",
  "reqwest",
- "rusqlite",
  "rust-i18n",
  "semver",
  "serde",
