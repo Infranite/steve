@@ -45,7 +45,7 @@ impl std::ops::DerefMut for Handing {
 /// process: the child's id is the program's, the `LISTEN_PID` the Hub expects. No `pre_exec`, so
 /// std spawns with `posix_spawn`: a `fork` in a multithreaded test can crash on macOS before it
 /// gets to `exec`.
-pub fn command(program: &str, sockets: &[(&str, &Socket)]) -> Handing {
+pub fn command(program: impl AsRef<std::ffi::OsStr>, sockets: &[(&str, &Socket)]) -> Handing {
     let n = sockets.len() as libc::c_int;
     let copies: Vec<OwnedFd> = sockets
         .iter()

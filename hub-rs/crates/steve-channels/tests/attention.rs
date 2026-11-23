@@ -37,15 +37,17 @@ fn channel_attention_is_personal_visible_enabled_and_quiet_is_not_mute() {
         "quiet and role muted still surface unread; closed/blocked/left do not: {mine:?}"
     );
     assert!(mine.iter().any(|x| x.id == "chan:dm" && x.notify));
+    assert!(mine.iter().any(|x| x.id == "chan:private" && x.notify));
     assert!(mine.iter().any(|x| x.id == "chan:group" && !x.notify));
     assert!(mine.iter().all(|x| x.group_key.is_none()));
     let other = list(&e, OTHER);
     assert_eq!(
         other.len(),
-        4,
-        "single-user reads include the personal DM; closed state remains per identity"
+        3,
+        "attention is limited to shared or owned connections; closed state remains personal"
     );
-    assert!(other.iter().any(|x| x.id == "chan:private"));
+    assert!(other.iter().all(|x| x.id != "chan:private"));
+    assert!(other.iter().any(|x| x.id == "chan:closed"));
     assert!(
         e.store()
             .read(|c| conversations::attention(c, WS2, &Viewer::bare(WS2, OTHER), 200))

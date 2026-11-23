@@ -3,6 +3,7 @@ pub(crate) mod client;
 mod paths;
 mod routes;
 
+pub(crate) use paths::ReadyFile;
 pub use paths::socket_path;
 use std::{
     io,

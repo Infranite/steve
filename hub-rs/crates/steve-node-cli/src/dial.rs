@@ -259,19 +259,20 @@ pub async fn run(home: &Home) -> Result<()> {
 }
 
 /// [`run`] for a Node whose pairing and trust its host gives (the Hub's own Node in a process of
-/// its own, B1): linked until Ctrl-C or SIGTERM, then shut down as a `steve-node` is. `home`: where
-/// it notes why its last link failed ([`LINK_STATUS`]), for its Hub to show.
+/// its own, B1): linked until Ctrl-C, SIGTERM or the host retires the installation, then shut down
+/// as a `steve-node` is. `home` holds the last link failure ([`LINK_STATUS`]) for its Hub to show.
 pub async fn serve_until_stopped(
     node: LocalNode,
     home: Option<&Path>,
     p: &Pairing,
     id: &Identity,
     trust: &Trust,
+    retired: impl std::future::Future<Output = ()>,
 ) -> Result<()> {
     #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("installing the termination signal handler")?;
-    let stopping = async {
+    let signal = async {
         #[cfg(unix)]
         tokio::select! {
             r = tokio::signal::ctrl_c() => r.context("waiting for Ctrl-C"),
@@ -284,7 +285,12 @@ pub async fn serve_until_stopped(
     run_until(
         &node,
         serve_with(node.clone(), None, status, p, id, trust),
-        stopping,
+        async {
+            tokio::select! {
+                r = signal => r,
+                _ = retired => Ok(()),
+            }
+        },
     )
     .await
 }

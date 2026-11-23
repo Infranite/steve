@@ -109,7 +109,7 @@ struct Sub {
     ws: String,
     rx: Receiver<Arc<Delivery>>,
     ping: Interval,
-    /// `None`: a legacy subscriber (no cursor), served exactly as before
+    /// `None`: a subscriber without a cursor (it had no state to resume from)
     resume: Option<Resume>,
     /// what to write before anything else (a replay)
     pending: Pending,
@@ -239,7 +239,7 @@ impl Sub {
         }
     }
 
-    /// Fell behind the bus: a resumable subscriber continues from the log, a legacy one is told to refetch.
+    /// Fell behind the bus: a resumable subscriber continues from the log, a cursorless one is told to refetch.
     fn lagged(&mut self) -> Option<Bytes> {
         crate::metrics::once!(counter "steve_sse_lagged_total").increment(1);
         match &self.resume {
@@ -344,7 +344,7 @@ impl Sub {
 }
 
 /// The SSE byte stream for one subscriber in workspace `ws`; `after` is the cursor to resume from (`None`:
-/// the legacy stream).
+/// live frames only, without ids).
 pub fn events(
     st: &AppState,
     ws: String,

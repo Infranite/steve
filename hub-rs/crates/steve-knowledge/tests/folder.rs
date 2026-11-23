@@ -11,12 +11,12 @@ use steve_store::testkit::knowledge as fixture;
 
 use axum::Router;
 use serde_json::{Value, json};
-use steve_knowledge::repo;
 use steve_knowledge::sources::files::blob_path;
 use steve_knowledge::sources::folder::{self, FolderPolicy, OUTSIDE, check_path};
 use steve_knowledge::{FilesLoader, Knowledge, index};
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, caller};
 use steve_store::base::Visibility;
+use steve_store::knowledge::DocRow;
 
 const TOKEN: &str = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -120,7 +120,7 @@ impl Env {
         assert_eq!(s, 200, "{v}");
         v["hits"].as_array().cloned().unwrap_or_default()
     }
-    fn doc_by_ref(&self, source: &str, r: &str) -> repo::DocRow {
+    fn doc_by_ref(&self, source: &str, r: &str) -> DocRow {
         self.env
             .store()
             .read(|c| steve_store::knowledge::Documents(c).doc_by_ref(source, r))

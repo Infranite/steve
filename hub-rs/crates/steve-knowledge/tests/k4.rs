@@ -93,10 +93,7 @@ impl Env {
     }
 
     fn viewer(&self, ws: &str, who: &str) -> Viewer {
-        self.env
-            .store()
-            .reader(|c| Viewer::load(c, ws, who))
-            .unwrap()
+        Viewer::bare(ws, who)
     }
 
     fn uses(&self, ws: &str, ctype: &str, id: &str) -> Vec<uses::UseRow> {

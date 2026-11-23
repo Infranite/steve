@@ -565,21 +565,6 @@ impl Service {
         let owner = if self.system == System::Darwin {
             let definition: Value = plist::from_bytes(&fs::read(&self.config)?)
                 .context("existing service definition cannot establish its home")?;
-            let env = definition.get("EnvironmentVariables");
-            let legacy = self.home.join("current/ops/run.sh");
-            if self.component == "hub"
-                && self.signed
-                && env.is_none_or(|v| v.as_object().is_some_and(|o| o.is_empty()))
-                && self.home == resolve(&self.user_home.join(".steve"))?
-                && definition["Label"] == self.label
-                && definition["ProgramArguments"] == json!(["/bin/zsh", text(&legacy)?])
-                && ["Program", "RootDirectory", "UserName", "GroupName"]
-                    .iter()
-                    .all(|k| definition.get(k).is_none())
-                && legacy.is_file()
-            {
-                return Ok(());
-            }
             definition["EnvironmentVariables"]["STEVE_HOME"]
                 .as_str()
                 .map(str::to_owned)
@@ -2128,64 +2113,6 @@ esac
                 .contains("state is unknown")
         );
         assert!(s.config.exists());
-    }
-
-    #[test]
-    fn legacy_signed_home_inspection_checks_its_command_but_uninstall_requires_registration() {
-        let f = Fixture::new();
-        let home = f.root.join(".steve");
-        fs::create_dir_all(home.join("signing")).unwrap();
-        fs::write(
-            home.join("signing/identity.json"),
-            r#"{"label":"test.original.hub"}"#,
-        )
-        .unwrap();
-        symlink(&f.release, home.join("current")).unwrap();
-        let (mut s, m) = f.service_at(System::Darwin, "hub", &home, None);
-        let original = json!({"Label":s.label,"ProgramArguments":["/bin/zsh",text(&home.join("current/ops/run.sh")).unwrap()]});
-        let write = |value: &Value| {
-            let mut bytes = Vec::new();
-            plist::to_writer_xml(&mut bytes, value).unwrap();
-            atomic(&s.config, &bytes).unwrap();
-        };
-        write(&original);
-        assert_eq!(
-            s.status(None, true).unwrap()["configured_build"]["version"],
-            "0.2.0"
-        );
-        for (key, value) in [
-            ("Program", json!("/usr/bin/false")),
-            ("Label", json!("foreign.hub")),
-            ("UserName", json!("other")),
-            ("EnvironmentVariables", json!({"PATH":"/usr/bin"})),
-            ("ProgramArguments", json!(["/bin/zsh", "-c", "true"])),
-        ] {
-            let mut changed = original.clone();
-            changed[key] = value;
-            write(&changed);
-            assert!(
-                s.state()
-                    .unwrap_err()
-                    .to_string()
-                    .contains("another or unknown home")
-            );
-        }
-        write(&original);
-        m.lock().unwrap().calls.clear();
-        let identity = fs::read(home.join("signing/identity.json")).unwrap();
-        assert!(
-            s.uninstall()
-                .unwrap_err()
-                .to_string()
-                .contains("matching service registration required")
-        );
-        assert!(m.lock().unwrap().calls.is_empty());
-        assert!(s.config.is_file());
-        assert_eq!(
-            fs::read(home.join("signing/identity.json")).unwrap(),
-            identity
-        );
-        assert_eq!(fs::canonicalize(home.join("current")).unwrap(), f.release);
     }
 
     #[test]

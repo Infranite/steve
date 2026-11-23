@@ -16,8 +16,8 @@ use steve_store::knowledge::{Documents, Memories};
 use steve_store::{ItemEvidence, Read, References, StoreError};
 
 use crate::provenance::{self, add_used, use_counts};
-use crate::repo::{DocFilter, DocRow, SourceRow};
 use crate::service::{doc_brief, mem_json_for, prepare};
+use steve_store::knowledge::{DocFilter, DocRow, SourceRow};
 
 /// How many recent uses a subject shows.
 const USES_SHOWN: usize = 12;

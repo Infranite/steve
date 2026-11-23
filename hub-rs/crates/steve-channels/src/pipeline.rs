@@ -87,7 +87,8 @@ pub(crate) fn record(
 }
 
 /// The queue cannot silently reroute a stored intent to another voice/account, nor keep using an
-/// account after its requester leaves. Legacy outbound messages have no intent and keep C6 rules.
+/// account after its requester leaves. Outbound messages without an intent (rule replies, drafts)
+/// keep C6 rules.
 pub(crate) fn verify_route(
     r: &mut impl Read,
     message: &str,

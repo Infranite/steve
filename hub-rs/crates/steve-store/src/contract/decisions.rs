@@ -168,6 +168,16 @@ fn emit(w: &mut W<'_>, d: &Decision) {
 }
 
 impl DecisionRows<'_, W<'_>> {
+    pub fn set_draft(&mut self, id: &str, text: &str) -> Result<()> {
+        self.0.exec(
+            Query::update()
+                .table("decisions")
+                .value("draft", text)
+                .and_where(Expr::col("id").eq(id)),
+        )?;
+        Ok(())
+    }
+
     pub fn open(&mut self, d: &NewDecision) -> Result<Decision> {
         let id = uid("dec");
         let options = serde_json::to_string(d.options.as_deref().unwrap_or_default())?;
@@ -357,6 +367,32 @@ impl<C: Read> DecisionRows<'_, C> {
     }
 }
 
+pub fn failed_item_count(
+    c: &mut impl Read,
+    ws: &str,
+    since: i64,
+    reasons: [&str; 2],
+) -> Result<i64> {
+    let starts_with = |prefix: &str| {
+        Expr::cust_with_exprs(
+            "substr(?, 1, length(?))",
+            [Expr::col("question"), Expr::val(prefix)],
+        )
+        .eq(prefix)
+    };
+    Ok(c.one(
+        Query::select()
+            .expr(Expr::cust("count(DISTINCT item_id)"))
+            .from("decisions")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("kind").eq("fail"))
+            .and_where(Expr::col("created").gte(since))
+            .and_where(starts_with(reasons[0]).or(starts_with(reasons[1]))),
+        |r| r.get(0),
+    )?
+    .unwrap_or_default())
+}
+
 pub fn open_for(
     c: &mut impl Read,
     ws: &str,
@@ -467,4 +503,104 @@ pub fn reopen(w: &mut crate::W<'_>, id: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+pub fn open_count(c: &mut impl Read, ws: &str) -> Result<i64> {
+    Ok(c.one(
+        Query::select()
+            .expr(Expr::cust("count(*)"))
+            .from("decisions")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("status").eq("open")),
+        |r| r.get(0),
+    )?
+    .unwrap_or_default())
+}
+
+pub fn retry_count(c: &mut impl Read, kind: &str, id: &str, actor: &str) -> Result<u32> {
+    let dialect = c.db().dialect();
+    let count: i64 = c
+        .one(
+            Query::select()
+                .expr(Expr::cust("count(*)"))
+                .from("decisions")
+                .and_where(Expr::col("subject_type").eq(kind))
+                .and_where(Expr::col("subject_id").eq(id))
+                .and_where(Expr::col("kind").eq("fail"))
+                .and_where(Expr::col("status").eq("resolved"))
+                .and_where(
+                    dialect
+                        .json_field(Expr::col("result"), "choice")
+                        .eq("retry"),
+                )
+                .and_where(
+                    dialect
+                        .json_field(Expr::col("result"), "decided_by")
+                        .eq(actor),
+                ),
+            |r| r.get(0),
+        )?
+        .unwrap_or_default();
+    u32::try_from(count).map_err(|e| crate::StoreError::Rejected(e.to_string()))
+}
+
+pub fn latest_approved_release(c: &mut impl Read, ws: &str) -> Result<Option<String>> {
+    let dialect = c.db().dialect();
+    c.one(
+        Query::select()
+            .column("id")
+            .from("decisions")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("kind").eq("approve"))
+            .and_where(Expr::col("subject_type").is_in(["release", "delivery_batch"]))
+            .and_where(Expr::col("status").eq("resolved"))
+            .and_where(
+                dialect
+                    .json_field(Expr::col("result"), "approved")
+                    .eq(1_i64),
+            )
+            .order_by("resolved", Order::Desc)
+            .order_by_expr(dialect.insertion_order(Some("decisions")), Order::Desc)
+            .limit(1),
+        |r| r.get(0),
+    )
+}
+
+/// Settles the item's open decisions as `expired` with `result`, inside the caller's transaction
+/// (`Decisions::resolve` for each, like a finished item's “nothing left to decide”). Returns how many.
+pub fn expire_open_for_item(w: &mut crate::W<'_>, item_id: &str, result: &Value) -> Result<usize> {
+    use crate::contract::Q;
+
+    let ids = w.all(
+        Query::select()
+            .columns(["id", "workspace_id"])
+            .from("decisions")
+            .and_where(Expr::col("item_id").eq(item_id))
+            .and_where(Expr::col("status").eq("open"))
+            .order_by("created", Order::Asc),
+        |r| Ok((r.get::<String>(0)?, r.get::<String>(1)?)),
+    )?;
+    let result = result.to_string();
+    for (id, ws) in &ids {
+        w.exec(
+            Query::update()
+                .table("decisions")
+                .values([
+                    ("status", "expired".into()),
+                    ("result", result.as_str().into()),
+                    ("resolved", now().into()),
+                    ("undo", None::<String>.into()),
+                ])
+                .and_where(Expr::col("id").eq(id.as_str()))
+                .and_where(Expr::col("status").eq("open")),
+        )?;
+        w.emit(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::Decision {
+                ws: ws.clone().into(),
+                id: id.clone().into(),
+                item_id: Some(Some(item_id.into())),
+            },
+        ));
+    }
+    Ok(ids.len())
 }

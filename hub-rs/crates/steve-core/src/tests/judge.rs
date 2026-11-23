@@ -576,26 +576,19 @@ fn the_judge_keeps_off_the_workers_model_unless_you_chose_it() {
 
 /// A finished logical turn `turn` of session `sid` on the Node runtime's ledger.
 fn finished_turn(k: &Kit, sid: &str, turn: &str, at: i64) {
-    k.db()
-        .store()
-        .transaction(|tx| {
-            tx.execute(
-                "INSERT OR IGNORE INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated)
-                 VALUES (?,'node-a','ws','ns-1','r1','ready',?)",
-                rusqlite::params![sid, at],
-            )?;
-            tx.execute(
-                "INSERT INTO runtime_turns(turn_id,session_id,state,created,updated) VALUES (?,?,'finished',?,?)",
-                rusqlite::params![turn, sid, at, at],
-            )?;
-            tx.execute(
-                "INSERT INTO runtime_attempts(attempt_id,turn_id,ordinal,node_id,operation_id,execution,spec,digest,state,created,updated)
-                 VALUES (?,?,0,'node-a',?,'{}','{}','d','finished',?,?)",
-                rusqlite::params![attempt_of(turn), turn, format!("op-{turn}"), at, at],
-            )?;
-            Ok::<_, steve_store::StoreError>(())
-        })
-        .unwrap();
+    steve_store::core_fixture::runtime::finished_turn(
+        k.db().store(),
+        steve_store::core_fixture::runtime::FinishedTurn {
+            session: sid,
+            turn,
+            attempt: &attempt_of(turn),
+            node: "node-a",
+            node_session: "ns-1",
+            ordinal: 0,
+            operation: &format!("op-{turn}"),
+            at,
+        },
+    );
 }
 
 /// The one attempt of logical turn `turn` ([`finished_turn`]).
@@ -610,24 +603,13 @@ fn attempt_says(k: &Kit, sid: &str, attempt: &str, text: &str) {
     if text.is_empty() {
         return;
     }
-    let at = steve_store::now();
-    k.db()
-        .store()
-        .transaction(|tx| {
-            let seq: i64 = tx.query_row(
-                "SELECT COALESCE(MAX(source_seq),0)+1 FROM events WHERE source_node='node-a' AND source_stream='events' AND source_epoch='e1'",
-                [],
-                |r| r.get(0),
-            )?;
-            let data = json!({"role": "assistant", "text": text});
-            tx.execute(
-                "INSERT INTO events(session_id,ts,kind,data,format,source_node,source_stream,source_epoch,source_seq,source_attempt)
-                 VALUES (?,?,'text',?,'steve.v1','node-a','events','e1',?,?)",
-                rusqlite::params![sid, at, data.to_string(), seq, attempt],
-            )?;
-            Ok::<_, steve_store::StoreError>(())
-        })
-        .unwrap();
+    steve_store::core_fixture::runtime::reported_text(
+        k.db().store(),
+        sid,
+        attempt,
+        text,
+        steve_store::now(),
+    );
 }
 
 /// The end of `turn`'s attempt as the Hub keeps it (`session_stops`): its events so far are its own.
@@ -717,7 +699,7 @@ async fn a_settled_turn_is_judged_once_by_the_model_and_nothing_acts_on_it() {
 
     // shadow: today's state is what it was — nothing closed, asked, sent or noted
     assert_eq!(today(&k, &item, &sid), before);
-    let v = k.core.shadow_view(&item).unwrap().unwrap();
+    let v = k.core.derived_state(&item).unwrap().unwrap();
     assert_eq!(v["judge"]["judgement"]["verdict"], json!("done"));
     assert_eq!(v["judge"]["current"], json!(true));
     // the derived state shows the judged close behind its undo window, still only in shadow
@@ -743,20 +725,14 @@ async fn a_busy_or_unknown_turn_is_not_judged() {
     );
     assert!(c.next_check > steve_store::now(), "looked at again later");
     assert!(k.gw.calls.lock().unwrap().is_empty());
-    let v = k.core.shadow_view(&item).unwrap().unwrap();
+    let v = k.core.derived_state(&item).unwrap().unwrap();
     assert_eq!(v["judge"]["candidate"]["settled"], json!("busy"));
 
     // the card is answered and its time comes: now it is judged
     k.db()
         .decision_resolve(&d, json!({"choice": "a"}), "answered", None)
         .unwrap();
-    k.db()
-        .store()
-        .transaction(|tx| {
-            tx.execute("UPDATE item_judge_candidates SET next_check=0", [])?;
-            Ok::<_, steve_store::StoreError>(())
-        })
-        .unwrap();
+    steve_store::core_fixture::work::run_judges_now(k.db().store());
     assert_eq!(k.core.check_judges().await.unwrap(), 1);
 }
 
@@ -894,13 +870,7 @@ async fn an_invalid_reply_is_a_failure_and_the_judge_gives_up_after_the_cap() {
         if n < 3 {
             assert_eq!(c.state, "pending");
             assert!(c.next_check > steve_store::now());
-            k.db()
-                .store()
-                .transaction(|tx| {
-                    tx.execute("UPDATE item_judge_candidates SET next_check=0", [])?;
-                    Ok::<_, steve_store::StoreError>(())
-                })
-                .unwrap();
+            steve_store::core_fixture::work::run_judges_now(k.db().store());
         } else {
             assert_eq!(c.state, "failed", "given up after judge_failures");
         }
@@ -973,12 +943,11 @@ async fn the_turn_end_registers_the_candidate_and_the_sweep_only_what_is_missing
     // a conversation item has no candidate
     let k = Kit::new();
     let chat = k.item("run", "执行", None);
-    k.db()
-        .exec(
-            "UPDATE items SET kind='chat' WHERE id=?",
-            &[&chat as &dyn rusqlite::ToSql],
-        )
-        .unwrap();
+    steve_store::core_fixture::item(
+        k.db().store(),
+        &chat,
+        steve_store::core_fixture::ItemState::Kind("chat"),
+    );
     let sid = k.session(&chat, "idle");
     finished_turn(&k, &sid, "t1", steve_store::now());
     assert_eq!(k.core.tx().judge_sweep().unwrap(), 0);
@@ -1057,14 +1026,7 @@ async fn a_hanging_judge_call_never_holds_up_the_stall_watch() {
     let s = k.session(&stopped, "idle");
     crate::AgentRuntime::prompt(&*k.rt, &s, "做事", "me", &[]).unwrap();
     k.rt.end_turn(&k.core, &s, "cancelled", None);
-    k.db()
-        .store()
-        .transaction(|tx| {
-            tx.execute("UPDATE sessions SET updated=0 WHERE id=?", [&s])?;
-            tx.execute("UPDATE events SET ts=0 WHERE session_id=?", [&s])?;
-            Ok::<_, steve_store::StoreError>(())
-        })
-        .unwrap();
+    steve_store::core_fixture::runtime::retime_session(k.db().store(), &s, 0);
     let card = || {
         k.db()
             .decisions_of_item(&stopped)
@@ -1161,17 +1123,7 @@ async fn the_write_rechecks_turn_scope_inputs_and_evidence_in_its_own_transactio
     let (item, sid) = item_with_turn(&k, "做好了");
     // an operation of the cycle the derived state reads (the acceptance hooks, done)
     let t0 = steve_store::now();
-    k.db()
-        .exec(
-            "INSERT INTO item_operations(id,item_id,cycle,revision,kind,status,created,updated)
-             VALUES ('op1',?,1,0,'hooks','succeeded',?,?)",
-            &[
-                &item as &dyn rusqlite::ToSql,
-                &t0 as &dyn rusqlite::ToSql,
-                &t0 as &dyn rusqlite::ToSql,
-            ],
-        )
-        .unwrap();
+    steve_store::core_fixture::completed_hooks(k.db().store(), "op1", &item, t0);
     let p = k
         .core
         .tx()
@@ -1205,12 +1157,7 @@ async fn the_write_rechecks_turn_scope_inputs_and_evidence_in_its_own_transactio
     };
     // each change alone is caught: made from the last check to the first. The operation the
     // judgement read moved on (its status and when it changed): the evidence is another
-    k.db()
-        .exec(
-            "UPDATE item_operations SET status='failed',updated=updated+1 WHERE id='op1'",
-            &[],
-        )
-        .unwrap();
+    steve_store::core_fixture::fail_operation(k.db().store(), "op1");
     assert_eq!(write(), Judged::Stale("evidence"));
     facts
         .record_delivery(&NewDeliveryFact {
@@ -1234,12 +1181,11 @@ async fn the_write_rechecks_turn_scope_inputs_and_evidence_in_its_own_transactio
     // the item moved to another session: the candidate's is not its current one
     k.session(&item, "idle");
     assert_eq!(write(), Judged::Stale("session"));
-    k.db()
-        .exec(
-            "UPDATE items SET cycle=2 WHERE id=?",
-            &[&item as &dyn rusqlite::ToSql],
-        )
-        .unwrap();
+    steve_store::core_fixture::item(
+        k.db().store(),
+        &item,
+        steve_store::core_fixture::ItemState::Cycle(2),
+    );
     assert_eq!(write(), Judged::Stale("cycle"));
     // nothing was written, and the claim is still the pass's to give back
     assert!(facts.judgements(&item, 1).unwrap().is_empty());
@@ -1460,17 +1406,19 @@ async fn a_retried_turn_is_judged_on_its_last_attempts_own_words() {
         let at = steve_store::now() - 1_000;
         finished_turn(k, &sid, "t1", at);
         attempt_says(k, &sid, &attempt_of("t1"), "第一次的半截输出，");
-        k.db()
-            .store()
-            .transaction(|tx| {
-                tx.execute(
-                    "INSERT INTO runtime_attempts(attempt_id,turn_id,ordinal,node_id,operation_id,execution,spec,digest,state,created,updated)
-                     VALUES ('t1-b','t1',1,'node-a','op-t1-b','{}','{}','d','finished',?,?)",
-                    rusqlite::params![at, at],
-                )?;
-                Ok::<_, steve_store::StoreError>(())
-            })
-            .unwrap();
+        steve_store::core_fixture::runtime::finished_turn(
+            k.db().store(),
+            steve_store::core_fixture::runtime::FinishedTurn {
+                session: &sid,
+                turn: "t1",
+                attempt: "t1-b",
+                node: "node-a",
+                node_session: "ns-1",
+                ordinal: 1,
+                operation: "op-t1-b",
+                at,
+            },
+        );
         attempt_says(k, &sid, "t1-b", "重试后做好了");
         k.db()
             .store()

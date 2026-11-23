@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use steve_modules::vault::VaultResult;
 use steve_modules::{ApiError, Body, Caller, Modules};
-use steve_store::{base, uid};
+use steve_store::uid;
 use zeroize::Zeroizing;
 
 use crate::GitHub;
@@ -568,8 +568,7 @@ impl GitHub {
                 return Err(ApiError::conflict(steve_i18n::t!("github.repo.already_linked")).into());
             }
             steve_store::github::insert_repo(tx, row).map_err(ApiError::from)?;
-            base::audit(
-                &tx.legacy(),
+            tx.audit(
                 &ws,
                 &who.me,
                 "github.repo_link",
@@ -661,11 +660,8 @@ impl GitHub {
             item.to_string(),
         );
         let r = tokio::task::spawn_blocking(move || {
-            gh.store().write(|tx| {
-                gh.connections()
-                    .vault()
-                    .destroy_item(&tx.legacy(), &ws, &me, &item)
-            })
+            gh.store()
+                .write(|tx| gh.connections().vault().destroy_item(tx, &ws, &me, &item))
         })
         .await;
         if !matches!(r, Ok(Ok(_))) {
@@ -724,8 +720,7 @@ impl GitHub {
             .await;
         self.store().write(|tx| {
             steve_store::github::delete_repo(tx, &r.id).map_err(ApiError::from)?;
-            base::audit(
-                &tx.legacy(),
+            tx.audit(
                 &who.ws,
                 &who.me,
                 "github.repo_unlink",
@@ -964,18 +959,10 @@ pub fn patch_repo_tx(
         r.revision += 1;
         r.updated = now;
         steve_store::github::update_repo(tx, &r)?;
-        base::revision(
-            &tx.legacy(),
-            ws,
-            "gh_repo",
-            &r.id,
-            r.revision,
-            &before,
-            &after,
-            actor,
+        steve_store::audit_repo::revise(
+            tx, ws, "gh_repo", &r.id, r.revision, &before, &after, actor,
         )?;
-        base::audit(
-            &tx.legacy(),
+        tx.audit(
             ws,
             actor,
             "github.repo_patch",

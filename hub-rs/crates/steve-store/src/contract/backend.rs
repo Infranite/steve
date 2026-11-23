@@ -177,13 +177,6 @@ impl Dialect {
         }
     }
 
-    /// The database's insertion order for deliveries received in the same millisecond.
-    pub(crate) fn delivery_order(self, table: &'static str) -> Expr {
-        match self {
-            Dialect::Sqlite => Expr::col((table, "rowid")),
-        }
-    }
-
     pub(crate) fn json_integer(self, column: Expr, key: &'static str) -> Expr {
         match self {
             Dialect::Sqlite => {
@@ -362,7 +355,9 @@ pub(crate) struct Json<T>(pub T);
 impl<T: serde::de::DeserializeOwned> FromCol for Json<T> {
     fn from_col(c: Col<'_>) -> Result<Self> {
         match c {
-            Col::Text(v) => Ok(Json(serde_json::from_str(v)?)),
+            Col::Text(v) => serde_json::from_str(v)
+                .map(Json)
+                .map_err(|e| StoreError::Rejected(e.to_string())),
             _ => Err(wrong("JSON")),
         }
     }

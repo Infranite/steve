@@ -411,7 +411,7 @@ pub fn folders(c: &mut impl Read, conn: &str) -> Result<Vec<FolderState>> {
             ])
             .from(Table)
             .and_where(Expr::col(ConnectionId).eq(conn))
-            .order_by_expr(dialect.delivery_order("mail_folders"), Order::Asc),
+            .order_by_expr(dialect.insertion_order(Some("mail_folders")), Order::Asc),
         |r| {
             Ok(FolderState {
                 ext_id: r.get(0)?,
@@ -682,7 +682,7 @@ pub fn thread_brief_rows(c: &mut impl Read, thread: &str) -> Result<Vec<BriefMsg
             .from("mail_messages")
             .and_where(Expr::col("thread_id").eq(thread))
             .order_by("date", Order::Asc)
-            .order_by_expr(dialect.delivery_order("mail_messages"), Order::Asc),
+            .order_by_expr(dialect.insertion_order(Some("mail_messages")), Order::Asc),
         |r| {
             Ok(BriefMsg {
                 direction: r.get(0)?,
@@ -705,7 +705,7 @@ pub fn thread_messages(c: &mut impl Read, thread: &str) -> Result<Vec<MessageRow
             .from("mail_messages")
             .and_where(Expr::col("thread_id").eq(thread))
             .order_by("date", Order::Asc)
-            .order_by_expr(dialect.delivery_order("mail_messages"), Order::Asc),
+            .order_by_expr(dialect.insertion_order(Some("mail_messages")), Order::Asc),
         msg_row,
     )
 }
@@ -752,7 +752,7 @@ pub fn insert_message(tx: &mut W<'_>, m: &MessageRow) -> Result<()> {
             ]),
     )?;
     steve_store_sqlite::digest::sync_message(
-        &tx.legacy(),
+        tx.conn,
         steve_store_sqlite::digest::Source::MailMessage,
         &m.id,
         None,
@@ -883,7 +883,10 @@ pub fn attachments(c: &mut impl Read, message: &str) -> Result<Vec<AttachmentRow
             .columns(["id", "name", "mime", "size", "inline"])
             .from("mail_attachments")
             .and_where(Expr::col("message_id").eq(message))
-            .order_by_expr(dialect.delivery_order("mail_attachments"), Order::Asc),
+            .order_by_expr(
+                dialect.insertion_order(Some("mail_attachments")),
+                Order::Asc,
+            ),
         |r| {
             Ok((
                 r.get(0)?,
@@ -952,7 +955,7 @@ pub fn thread_drafts(c: &mut impl Read, thread: &str) -> Result<Vec<DraftRow>> {
             .and_where(Expr::col("thread_id").eq(thread))
             .and_where(Expr::col("status").ne("discarded"))
             .order_by("created", Order::Asc)
-            .order_by_expr(dialect.delivery_order("mail_drafts"), Order::Asc),
+            .order_by_expr(dialect.insertion_order(Some("mail_drafts")), Order::Asc),
         draft_row,
     )
 }
@@ -1185,7 +1188,7 @@ pub fn expired(
 pub fn delete_connection(w: &mut W<'_>, conn: &str) -> Result<()> {
     let digest_messages = steve_store_sqlite::digest::Source::MailMessage
         .messages(
-            &w.legacy(),
+            w.conn,
             steve_store_sqlite::digest::MessageFilter::Connection(conn),
         )?
         .into_iter()
@@ -1214,7 +1217,7 @@ pub fn delete_connection(w: &mut W<'_>, conn: &str) -> Result<()> {
                 .and_where(Expr::col("connection_id").eq(conn)),
         )?;
     }
-    steve_store_sqlite::digest::remove_message(&w.legacy(), digest_messages)?;
+    steve_store_sqlite::digest::remove_message(w.conn, digest_messages)?;
     Ok(())
 }
 
@@ -1382,7 +1385,7 @@ pub fn list_threads(
 }
 
 pub fn latest_draft(c: &mut impl Read, thread: &str) -> Result<Option<(String, String)>> {
-    let order = c.db().dialect().delivery_order("mail_drafts");
+    let order = c.db().dialect().insertion_order(Some("mail_drafts"));
     c.one(
         Query::select()
             .columns(["id", "status"])
@@ -1410,7 +1413,7 @@ pub fn draft_of_run(c: &mut impl Read, ws: &str, run: &str) -> Result<Option<Str
 }
 
 pub fn item_draft(c: &mut impl Read, item: &str, thread: &str) -> Result<Option<DraftRow>> {
-    let order = c.db().dialect().delivery_order("mail_drafts");
+    let order = c.db().dialect().insertion_order(Some("mail_drafts"));
     c.one(
         Query::select()
             .columns(DRAFT_COLS)
@@ -1562,7 +1565,7 @@ pub fn attachment(c: &mut impl Read, id: &str) -> Result<Option<PartRow>> {
 }
 
 pub fn parts_of(c: &mut impl Read, message: &str) -> Result<Vec<PartRow>> {
-    let order = c.db().dialect().delivery_order("mail_attachments");
+    let order = c.db().dialect().insertion_order(Some("mail_attachments"));
     c.all(
         Query::select()
             .columns(PART_COLS)
@@ -1639,3 +1642,40 @@ pub fn party_timeline(
 
 #[cfg(feature = "testkit")]
 pub mod fixtures;
+
+pub struct DraftAudience {
+    pub status: String,
+    pub verdict: Option<String>,
+    pub recipients: Vec<String>,
+}
+
+pub fn draft_audience(c: &mut impl Read, ws: &str, draft: &str) -> Result<Option<DraftAudience>> {
+    c.one(
+        Query::select()
+            .columns(["status", "basis", "to_addrs", "cc_addrs", "bcc_addrs"])
+            .from("mail_drafts")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("id").eq(draft)),
+        |row| {
+            let basis: Option<Value> = row
+                .get::<Option<String>>(1)?
+                .and_then(|v| serde_json::from_str(&v).ok());
+            let mut recipients = Vec::new();
+            for column in 2..5 {
+                let addresses = json_val(row.get(column)?);
+                if let Value::Array(addresses) = addresses {
+                    recipients.extend(
+                        addresses
+                            .iter()
+                            .filter_map(|r| r["addr"].as_str().map(|s| s.trim().to_lowercase())),
+                    );
+                }
+            }
+            Ok(DraftAudience {
+                status: row.get(0)?,
+                verdict: basis.and_then(|v| v["verdict"].as_str().map(str::to_owned)),
+                recipients,
+            })
+        },
+    )
+}

@@ -9,6 +9,8 @@
 //!
 //! Every agent's body passes B1's outbound check (v1: every repo's readers count as external).
 
+use steve_store::W;
+
 use axum::routing::post;
 use axum::{Extension, Json, Router};
 use serde_json::{Value, json};
@@ -19,8 +21,8 @@ use steve_modules::vault::VaultResult;
 use steve_modules::vault::mcp::ToolOut;
 use steve_modules::vault::r#use::END;
 use steve_modules::{ApiError, ApiResult, Body, Caller, Modules};
-use steve_store::base::{self, DecisionKind, decisions as base_decisions};
-use steve_store::{Decision, NewDecision, Tx};
+use steve_store::base::DecisionKind;
+use steve_store::{Decision, NewDecision};
 
 use crate::GitHub;
 use crate::accept::Slot;
@@ -189,7 +191,7 @@ impl GitHub {
             m.extend(extra);
         }
         let r = self.store().write(|tx| {
-            base::audit(&tx.legacy(), ws, actor, "github.comment", &t.subject, &d)?;
+            tx.audit(ws, actor, "github.comment", &t.subject, &d)?;
             if d["by"] == "me" {
                 crate::events::emit(tx, ws, &t.subject);
             }
@@ -314,7 +316,11 @@ impl GitHub {
             },
         };
         self.store()
-            .write(|tx| base_decisions::open(&tx.legacy(), &d).map_err(ApiError::from))
+            .write(|tx| {
+                steve_store::DecisionRows(tx)
+                    .open(&d)
+                    .map_err(ApiError::from)
+            })
             .map_err(|e| e.to_string())?;
         Ok(ToolOut {
             text: format!("Approval requested. {END}"),
@@ -420,8 +426,7 @@ impl DecisionHandler for CommentDecisions {
         d.kind == "approve" && d.requested_by == crate::automation::APPROVAL_ACTOR
     }
 
-    fn resolve(&self, outer: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
-        outer.write(|tx| {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
         let gh = self.0.need()?;
         let t = target(tx, cx.ws, &d.subject_id)?.ok_or_else(|| ApiError::not_found("PR"))?;
         let mut out = choice_result(cx);
@@ -448,24 +453,23 @@ impl DecisionHandler for CommentDecisions {
                 Some(&d.id),
                 now,
             )?;
-            base::audit(
-                &tx.legacy(),
+            steve_store::audit_repo::record(
+                tx,
                 cx.ws,
                 cx.actor,
                 "grant.add",
                 &t.repo.id,
                 &json!({"grant": id, "capability": steve_store::grants::COMMENT_CAP, "bot": d.requested_by,
-                        "hours": GRANT_HOURS, "decision": d.id}),
+                    "hours": GRANT_HOURS, "decision": d.id}),
             )?;
             out["grant"] = json!(id);
         }
         effects::queue(tx, &gh, cx.ws, &d.id, effects::COMMENT)?;
         Ok(out)
-        })
     }
 
     /// The comment may be out by now; there is nothing to take back.
-    fn before_undo(&self, _tx: &Tx, _d: &Decision) -> ApiResult<()> {
+    fn before_undo(&self, _tx: &mut W<'_>, _d: &Decision) -> ApiResult<()> {
         Err(ApiError::rule(steve_i18n::t!("github.decision.no_undo")))
     }
 }

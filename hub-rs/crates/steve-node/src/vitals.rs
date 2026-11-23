@@ -2,7 +2,8 @@
 //! the Hub asks. Each figure comes from the platform's own account of it; one it cannot give is
 //! left out.
 
-use steve_node_api::{NodeMeters, NodeVitals, ProcessMeters, RootVitals, Timestamp};
+use std::collections::BTreeMap;
+use steve_node_api::{NetworkBytes, NodeMeters, NodeVitals, ProcessMeters, RootVitals, Timestamp};
 
 use crate::journal::Journal;
 use crate::workspace::Root;
@@ -26,6 +27,7 @@ pub(crate) fn meters(j: &Journal) -> NodeMeters {
         adapters: groups.len() as u32,
         adapter_cpu_seconds: used.iter().map(|u| u.cpu_seconds).sum(),
         adapter_resident_bytes: used.iter().map(|u| u.resident_bytes).sum(),
+        network: network().unwrap_or_default(),
         process: steve_runtime::process::this().map(|u| ProcessMeters {
             cpu_seconds: u.cpu_seconds,
             resident_bytes: u.resident_bytes,
@@ -68,6 +70,90 @@ pub(crate) fn measure(roots: &[Root], sessions: u32) -> NodeVitals {
         sessions,
         meters: None,
     }
+}
+
+#[cfg(target_os = "linux")]
+fn network() -> Option<BTreeMap<String, NetworkBytes>> {
+    proc_network(&std::fs::read_to_string("/proc/net/dev").ok()?)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn proc_network(data: &str) -> Option<BTreeMap<String, NetworkBytes>> {
+    data.lines()
+        .skip(2)
+        .filter_map(|line| line.split_once(':'))
+        .filter(|(name, _)| name.trim() != "lo")
+        .map(|(name, counts)| {
+            let mut fields = counts.split_whitespace();
+            let received = fields.next()?.parse().ok()?;
+            let sent = fields.nth(7)?.parse().ok()?;
+            Some((name.trim().to_string(), NetworkBytes { received, sent }))
+        })
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn network() -> Option<BTreeMap<String, NetworkBytes>> {
+    let mib = [libc::CTL_NET, libc::PF_ROUTE, 0, 0, libc::NET_RT_IFLIST2, 0];
+    let mut size = 0;
+    let read = |out, size| {
+        // SAFETY: mib is a valid read-only route query. out is null for sizing or points to
+        // a buffer with the capacity given by size. No write to kernel state is requested.
+        unsafe {
+            libc::sysctl(
+                mib.as_ptr().cast_mut(),
+                mib.len() as _,
+                out,
+                size,
+                std::ptr::null_mut(),
+                0,
+            ) == 0
+        }
+    };
+    if !read(std::ptr::null_mut(), &mut size) {
+        return None;
+    }
+    let mut data = vec![0_u8; size];
+    if !read(data.as_mut_ptr().cast(), &mut size) {
+        return None;
+    }
+    let mut data = data.get(..size)?;
+    let mut counters = BTreeMap::new();
+    while !data.is_empty() {
+        let [low, high, _, kind, ..] = *data else {
+            return None;
+        };
+        let length = u16::from_ne_bytes([low, high]) as usize;
+        if length < 4 {
+            return None;
+        }
+        let (message, rest) = data.split_at_checked(length)?;
+        data = rest;
+        if kind == libc::RTM_IFINFO2 as u8 {
+            if message.len() < std::mem::size_of::<libc::if_msghdr2>() {
+                return None;
+            }
+            // SAFETY: this is a complete Darwin routing message of the matching type.
+            // The integer-only C header may be unaligned in the byte buffer.
+            let header = unsafe { message.as_ptr().cast::<libc::if_msghdr2>().read_unaligned() };
+            if header.ifm_flags & libc::IFF_LOOPBACK == 0 {
+                let index = header.ifm_index;
+                counters.insert(
+                    index.to_string(),
+                    NetworkBytes {
+                        received: header.ifm_data.ifi_ibytes,
+                        sent: header.ifm_data.ifi_obytes,
+                    },
+                );
+            }
+        }
+    }
+    Some(counters)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn network() -> Option<BTreeMap<String, NetworkBytes>> {
+    None
 }
 
 fn load() -> Option<[f64; 3]> {
@@ -167,6 +253,21 @@ mod tests {
         let mi = "MemTotal:       16000000 kB\nMemFree:  100 kB\nMemAvailable:    8000000 kB\n";
         assert_eq!(meminfo(mi, "MemTotal:"), Some(16_000_000 * 1024));
         assert_eq!(meminfo(mi, "MemAvailable:"), Some(8_000_000 * 1024));
+    }
+
+    #[test]
+    fn network_counts_use_receive_and_transmit_columns_and_skip_loopback() {
+        let data = "header\nheader\n  lo: 9 0 0 0 0 0 0 0 8\n eth0: 42 0 0 0 0 0 0 0 81\n";
+        let counters = proc_network(data).unwrap();
+        assert_eq!(counters.len(), 1);
+        assert_eq!(
+            counters["eth0"],
+            NetworkBytes {
+                received: 42,
+                sent: 81
+            }
+        );
+        assert!(proc_network("header\nheader\neth0: unreadable").is_none());
     }
 
     #[test]

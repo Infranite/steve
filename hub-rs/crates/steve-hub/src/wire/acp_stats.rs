@@ -151,7 +151,7 @@ pub(crate) fn node_usage(
         )
     })?;
     if let Some((id, started)) = turn {
-        // Admission already rebased legacy context counters. Keep refusal/currency evidence
+        // Admission already rebased context-only meters. Keep refusal/currency evidence
         // for the shared reducer; filtering it here would hide an unknown monetary sum.
         store.stats().usage_report(
             &id,

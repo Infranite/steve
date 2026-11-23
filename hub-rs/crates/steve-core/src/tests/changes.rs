@@ -81,7 +81,7 @@ async fn new_bot_card_cannot_create_an_unsupported_model() {
 }
 
 #[tokio::test]
-async fn bot_card_apply_checks_effort_but_notes_do_not_revalidate_legacy_selection() {
+async fn bot_card_apply_checks_effort_but_notes_do_not_revalidate_the_stored_selection() {
     let k = Kit::new();
     bot_catalogue(&k, &["allowed-model"], &["low", "high"]);
     k.gw.set(|_, _| Ok(r#"{"changes":[{"key":"reasoning_effort","value":"high"}]}"#.into()));
@@ -109,7 +109,7 @@ async fn bot_card_apply_checks_effort_but_notes_do_not_revalidate_legacy_selecti
     k.db()
         .bot_patch(
             "dev",
-            &crate::patch![model: "legacy-model", reasoning_effort: "legacy-effort"],
+            &crate::patch![model: "stored-model", reasoning_effort: "stored-effort"],
             "me",
         )
         .unwrap();
@@ -121,8 +121,8 @@ async fn bot_card_apply_checks_effort_but_notes_do_not_revalidate_legacy_selecti
         .unwrap();
     k.core.apply(&note.id, "me", WS).unwrap();
     let b = k.db().bot("dev").unwrap().unwrap();
-    assert_eq!(b.model.as_deref(), Some("legacy-model"));
-    assert_eq!(b.reasoning_effort.as_deref(), Some("legacy-effort"));
+    assert_eq!(b.model.as_deref(), Some("stored-model"));
+    assert_eq!(b.reasoning_effort.as_deref(), Some("stored-effort"));
     assert_eq!(b.role, "a note");
 }
 
@@ -478,17 +478,8 @@ async fn a_models_draft_sets_lists_effort_and_agent_defaults_and_undoes() {
     assert_eq!(m.for_purpose(WS, "research").effort, None);
     assert!(m.custom(WS, "research").is_none());
     assert_eq!(m.agent_model(WS, "codex"), None);
-    let n: i64 = k
-        .db()
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT count(*) FROM audit WHERE action = 'settings.models'",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let n =
+        steve_store::core_fixture::work::audit_count(k.db().store(), &["settings.models"], None);
     assert_eq!(n, 2, "apply and undo are both audited");
 }
 

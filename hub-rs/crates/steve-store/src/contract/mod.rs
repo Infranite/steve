@@ -26,6 +26,7 @@ mod backend;
 mod bot_rows;
 pub mod bots;
 mod catalog_rows;
+pub mod changesets;
 pub mod channel_feed;
 pub mod channel_messages;
 pub mod channel_names;
@@ -38,6 +39,10 @@ pub mod channel_write_policy;
 mod connection_rows;
 pub mod connections;
 mod contacts;
+#[cfg(feature = "testkit")]
+pub mod core_fixture;
+pub mod core_queue;
+pub mod core_usage;
 pub mod decisions;
 mod digest_notes;
 pub mod feishu_registration;
@@ -59,6 +64,7 @@ mod memory_index;
 mod merge_proposals;
 pub(crate) mod message_sources;
 pub mod notifications;
+pub mod operations;
 pub mod parties;
 mod party_rows;
 mod passkey_rows;
@@ -76,13 +82,17 @@ pub mod sources;
 mod sqlite;
 mod steward_rows;
 mod systems;
+pub mod tags;
 mod team_rows;
+pub mod thread_runs;
 mod thread_triggers;
 mod user_rows;
 pub mod vault_items;
 pub mod vault_keys;
+pub mod vault_uses;
 mod workspace_settings;
 mod workspaces;
+pub mod yolo;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -143,7 +153,8 @@ pub struct R<'a> {
 pub struct W<'a> {
     db: &'a mut dyn Backend,
     store: &'a Store,
-    conn: &'a Connection,
+    // SQLite repositories reuse the writer for SQLite-specific queries and fixtures.
+    pub(super) conn: &'a Connection,
 }
 
 type ReadConnection = PooledConnection<SqliteConnectionManager>;
@@ -172,7 +183,6 @@ impl Store {
                 .map(|(_, c)| Rc::clone(c))
         })
     }
-
     /// One write transaction: committed if `f` returns `Ok`, rolled back otherwise. What `f`
     /// emitted is published after the commit, in order. Inside another write on this thread it
     /// is a [`W::scope`] of that write. The closure can return domain errors alongside storage errors.
@@ -268,6 +278,12 @@ impl<'a> W<'a> {
     /// Published after the commit; dropped if this write, or the scope it is in, rolls back.
     pub fn emit(&mut self, e: impl Into<BusEvent>) {
         self.store.emit_event(e.into());
+    }
+
+    pub(crate) fn capture_created(&self, ws: &str, item: &str, created: i64) {
+        if let Some(until) = crate::diagnostics::capture_created(self.conn, ws, item, created) {
+            self.store.stage_diagnostic_until(until);
+        }
     }
 
     pub(crate) fn diagnostic(&self, event: crate::diagnostics::Record) {

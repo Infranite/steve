@@ -353,7 +353,7 @@ impl NodeRuntime {
     pub(super) fn stale_release_in(&self, tx: &Tx, session: &str) -> Result<bool, StoreError> {
         let r: Option<String> = tx
             .query_row(
-                "SELECT json_extract(receipt,'$.payload') FROM node_commands WHERE method='open_session' AND json_extract(request,'$.body.session')=? AND state='finished' AND json_extract(receipt,'$.success')=1 ORDER BY created DESC, rowid DESC LIMIT 1",
+                "SELECT json_extract(receipt,'$.payload') FROM node_commands WHERE method='open_session' AND session_id=? AND state='finished' AND json_extract(receipt,'$.success')=1 ORDER BY created DESC, rowid DESC LIMIT 1",
                 [session],
                 |r| r.get(0),
             )

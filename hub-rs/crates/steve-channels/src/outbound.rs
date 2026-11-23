@@ -54,7 +54,7 @@ use steve_modules::outbound::{self as b1, Audience, CheckCx, CheckResult, Knowle
 use steve_modules::{ApiError, ApiResult, Clock, SystemClock, Tier};
 use steve_store::base::DecisionKind;
 use steve_store::channel_message_repo::queue as queue_repo;
-use steve_store::{Decision, Item, NewDecision, Tx, uid};
+use steve_store::{Decision, Item, NewDecision, W, uid};
 
 use crate::adapters::feishu::send::reply_in_thread;
 use crate::basis::{self, NewBasis, Rewrite};
@@ -4100,8 +4100,8 @@ fn approved_by_you(r: &mut impl steve_store::Read, auth: &Auth) -> ChannelResult
 // ---------------------------------------------------------------- decisions
 
 /// The `chan_message` decision handler: a draft's approval (`yes` sends the possibly edited text
-/// after the delay, `no` discards), a failed send (`retry` / `rewrite` / `discard`), a handoff (`draft_reply`
-/// opens an empty draft to write, `to_item` makes an item, `done`).
+/// after the delay, `no` discards), a failed send (`retry` / `rewrite` / `discard`), a handoff
+/// (`send_draft`, `instruct`, `verbatim`, `to_item` makes an item, `done`).
 pub struct MessageDecisions(OutLink);
 
 impl MessageDecisions {
@@ -4378,12 +4378,6 @@ impl MessageDecisions {
                 }
                 plan_in(w, cx.ws, &d.subject_id)?;
             }
-            respond::DRAFT_REPLY => {
-                let plan = plan_in(w, cx.ws, &d.subject_id)?;
-                let (m, dd) = respond::open_draft(w, &plan, cx.text.trim(), now)?;
-                result["draft_message"] = json!(m);
-                result["draft_decision"] = json!(dd);
-            }
             "to_item" => {
                 plan_in(w, cx.ws, &d.subject_id)?;
                 result["source_message"] = json!(d.subject_id);
@@ -4442,123 +4436,115 @@ impl DecisionHandler for MessageDecisions {
         }
     }
 
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
-        tx.write(|w| match d.kind.as_str() {
+    fn resolve(&self, w: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+        match d.kind.as_str() {
             "approve" => self.approve(w, cx, d),
             "fail" => self.failed(w, cx, d),
             "ask" => self.handoff(w, cx, d),
             _ => Err(ApiError::rule(steve_i18n::t!(
                 "channels.error.unknown_decision"
             ))),
-        })
+        }
     }
 
     /// An approval nobody answered expired: its draft is not sent and counts as discarded, so the
     /// message it answers loses its “收到” reaction instead of keeping it for good.
-    fn expire(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
-        tx.write(|w| {
-            if d.kind != "approve" {
-                return Ok(());
-            }
-            let Some(row) = channel_message_repo::outbound::send_row(w, &d.subject_id)? else {
-                return Ok(());
-            };
-            if row.status == "draft" && row.decision_id.as_deref() == Some(d.id.as_str()) {
-                set_status(w, &row.id, &["draft"], DISCARDED)?;
-                self.0.push(After::Discarded {
-                    message_id: row.id.clone(),
-                });
-                steve_store::audit_repo::record(
-                    w,
-                    &row.ws,
-                    "steve",
-                    "chan_message.expired",
-                    &row.id,
-                    &json!({"decision": d.id}),
-                )?;
-                channel_message_repo::emit(w, &row.ws, &row.space_id, &row.id);
-            }
-            Ok(())
-        })
-    }
-
-    /// Undoing an approval within the delay puts the draft back; once it went out, `409`.
-    fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
-        tx.write(|w| {
-            let now = self.0.now();
-            if d.result["choice"] == "to_item" {
-                return Err(ApiError::conflict("转事项不能作为发送批准撤销"));
-            }
-            if d.kind == "ask" {
-                return Ok(());
-            }
-            let Some(row) = channel_message_repo::outbound::send_row(w, &d.subject_id)? else {
-                return Ok(());
-            };
-            if row.decision_id.as_deref() != Some(&d.id) {
-                return Err(ApiError::conflict(steve_i18n::t!("channels.error.handled")));
-            }
-            let choice = d.result["choice"].as_str().unwrap_or("");
-            let in_window = row.status == "pending"
-                && row.sent.is_none()
-                && d.result["send_at"].as_i64().is_some_and(|t| now < t);
-            match (d.kind.as_str(), choice) {
-                ("approve", "yes") if in_window => {
-                    set_status(w, &row.id, &["pending"], "draft")?;
-                }
-                // the rewrite has not replaced this card yet: it stays open as it was
-                ("approve", REWRITE)
-                    if row.status == "draft"
-                        && row.decision_id.as_deref() == Some(d.id.as_str()) => {}
-                ("fail", REWRITE) if row.status == "draft" => {
-                    set_status(w, &row.id, &["draft"], "failed")?;
-                }
-                ("approve", "no") if row.status == DISCARDED => {
-                    set_status(w, &row.id, &[DISCARDED], "draft")?;
-                }
-                ("fail", "retry") if row.status == "pending" && row.sent.is_none() => {
-                    let was =
-                        if d.result["was"] == "unknown" || d.options.iter().any(|o| o == "sent") {
-                            "unknown"
-                        } else {
-                            "failed"
-                        };
-                    set_status(w, &row.id, &["pending"], was)?;
-                }
-                ("fail", "discard") if row.status == DISCARDED => {
-                    let uncertain =
-                        d.result["was"] == "unknown" || d.options.iter().any(|o| o == "sent");
-                    if uncertain
-                        && send_state::get(w, &row.id)?.is_none_or(|s| s.first_at.is_none())
-                    {
-                        return Err(ApiError::conflict(
-                            "原发送结果未知且去重依据已不可用，不能撤销后重新发送",
-                        ));
-                    }
-                    set_status(
-                        w,
-                        &row.id,
-                        &[DISCARDED],
-                        if uncertain { "unknown" } else { "failed" },
-                    )?;
-                }
-                _ => {
-                    return Err(ApiError::conflict(steve_i18n::t!(
-                        "channels.error.already_sent"
-                    )));
-                }
-            }
+    fn expire(&self, w: &mut W<'_>, d: &Decision) -> ApiResult<()> {
+        if d.kind != "approve" {
+            return Ok(());
+        }
+        let Some(row) = channel_message_repo::outbound::send_row(w, &d.subject_id)? else {
+            return Ok(());
+        };
+        if row.status == "draft" && row.decision_id.as_deref() == Some(d.id.as_str()) {
+            set_status(w, &row.id, &["draft"], DISCARDED)?;
+            self.0.push(After::Discarded {
+                message_id: row.id.clone(),
+            });
             steve_store::audit_repo::record(
                 w,
                 &row.ws,
-                "me",
-                "chan_message.undo",
+                "steve",
+                "chan_message.expired",
                 &row.id,
                 &json!({"decision": d.id}),
             )?;
             channel_message_repo::emit(w, &row.ws, &row.space_id, &row.id);
-            Ok(())
-        })
+        }
+        Ok(())
+    }
+
+    /// Undoing an approval within the delay puts the draft back; once it went out, `409`.
+    fn before_undo(&self, w: &mut W<'_>, d: &Decision) -> ApiResult<()> {
+        let now = self.0.now();
+        if d.result["choice"] == "to_item" {
+            return Err(ApiError::conflict("转事项不能作为发送批准撤销"));
+        }
+        if d.kind == "ask" {
+            return Ok(());
+        }
+        let Some(row) = channel_message_repo::outbound::send_row(w, &d.subject_id)? else {
+            return Ok(());
+        };
+        if row.decision_id.as_deref() != Some(&d.id) {
+            return Err(ApiError::conflict(steve_i18n::t!("channels.error.handled")));
+        }
+        let choice = d.result["choice"].as_str().unwrap_or("");
+        let in_window = row.status == "pending"
+            && row.sent.is_none()
+            && d.result["send_at"].as_i64().is_some_and(|t| now < t);
+        match (d.kind.as_str(), choice) {
+            ("approve", "yes") if in_window => {
+                set_status(w, &row.id, &["pending"], "draft")?;
+            }
+            // the rewrite has not replaced this card yet: it stays open as it was
+            ("approve", REWRITE)
+                if row.status == "draft" && row.decision_id.as_deref() == Some(d.id.as_str()) => {}
+            ("fail", REWRITE) if row.status == "draft" => {
+                set_status(w, &row.id, &["draft"], "failed")?;
+            }
+            ("approve", "no") if row.status == DISCARDED => {
+                set_status(w, &row.id, &[DISCARDED], "draft")?;
+            }
+            ("fail", "retry") if row.status == "pending" && row.sent.is_none() => {
+                let was = if d.result["was"] == "unknown" || d.options.iter().any(|o| o == "sent") {
+                    "unknown"
+                } else {
+                    "failed"
+                };
+                set_status(w, &row.id, &["pending"], was)?;
+            }
+            ("fail", "discard") if row.status == DISCARDED => {
+                let uncertain =
+                    d.result["was"] == "unknown" || d.options.iter().any(|o| o == "sent");
+                if uncertain && send_state::get(w, &row.id)?.is_none_or(|s| s.first_at.is_none()) {
+                    return Err(ApiError::conflict(
+                        "原发送结果未知且去重依据已不可用，不能撤销后重新发送",
+                    ));
+                }
+                set_status(
+                    w,
+                    &row.id,
+                    &[DISCARDED],
+                    if uncertain { "unknown" } else { "failed" },
+                )?;
+            }
+            _ => {
+                return Err(ApiError::conflict(steve_i18n::t!(
+                    "channels.error.already_sent"
+                )));
+            }
+        }
+        steve_store::audit_repo::record(
+            w,
+            &row.ws,
+            "me",
+            "chan_message.undo",
+            &row.id,
+            &json!({"decision": d.id}),
+        )?;
+        channel_message_repo::emit(w, &row.ws, &row.space_id, &row.id);
+        Ok(())
     }
 }
 

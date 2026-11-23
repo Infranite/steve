@@ -25,7 +25,6 @@ mod thread;
 mod usage_ledger;
 pub mod workflows;
 pub mod would_do;
-pub mod yolo;
 
 pub use self::annotations::*;
 pub use self::bots::*;
@@ -47,7 +46,7 @@ use rusqlite::types::Value as Sql;
 use rusqlite::{Connection, OptionalExtension, Params, Row};
 use serde::Serialize;
 
-use crate::{Result, now};
+use crate::Result;
 
 /// Every statement goes through the connection's statement cache (TS re-prepares on each call; with the
 /// capacity raised in `db::pragmas` the hot statements stay compiled).
@@ -172,10 +171,9 @@ pub(crate) fn revision(
     patch: &impl Serialize,
     author: &str,
 ) -> Result<()> {
-    c.prepare_cached(
-        "INSERT INTO revisions (workspace_id, object_type, object_id, version, patch, author, created) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    )?
-    .execute(rusqlite::params![ws, kind, id, version, to_json(patch)?, author, now()])?;
+    let revision =
+        crate::contract::audit::revision_statement(ws, kind, id, version, patch, author)?;
+    crate::contract::exec_on(&mut crate::contract::Sqlite(c), &revision)?;
     Ok(())
 }
 

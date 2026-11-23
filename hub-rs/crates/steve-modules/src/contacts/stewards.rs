@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use steve_store::base::{Change, Viewer};
 use steve_store::{
     Accounts, BotRows, ChannelSources, Connections, Contacts, Decision, DecisionRows, DeviceRows,
-    Members, PersonaRows, Read, Stewards, Systems, Tx, W, account_rows::Account, now,
+    Members, PersonaRows, Read, Stewards, Systems, W, account_rows::Account, now,
 };
 
 use super::repo::{NewParty, Party};
@@ -1248,56 +1248,50 @@ pub fn propose(
 pub struct StewardConfirm;
 
 impl DecisionHandler for StewardConfirm {
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
-        tx.write(|tx| {
-            let s = Stewards(tx)
-                .by_decision(&d.id)?
-                .filter(|s| s.workspace_id == cx.ws)
-                .ok_or_else(|| ApiError::not_found("负责人提议"))?;
-            let mut result = decisions::choice_result(cx);
-            if cx.choice == "yes" {
-                let mut c = s.clone();
-                c.status = "confirmed".into();
-                c.confidence = 1.0;
-                c.updated = now();
-                put(tx, &c)?;
-            } else {
-                delete(tx, &s.workspace_id, &s.key())?;
-                result["steward"] = serde_json::to_value(&s)?;
-            }
-            Ok(result)
-        })
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+        let s = Stewards(tx)
+            .by_decision(&d.id)?
+            .filter(|s| s.workspace_id == cx.ws)
+            .ok_or_else(|| ApiError::not_found("负责人提议"))?;
+        let mut result = decisions::choice_result(cx);
+        if cx.choice == "yes" {
+            let mut c = s.clone();
+            c.status = "confirmed".into();
+            c.confidence = 1.0;
+            c.updated = now();
+            put(tx, &c)?;
+        } else {
+            delete(tx, &s.workspace_id, &s.key())?;
+            result["steward"] = serde_json::to_value(&s)?;
+        }
+        Ok(result)
     }
 
-    fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
-        tx.write(|tx| {
-            if let Some(v) = d.result.get("steward") {
-                let mut s: Steward = serde_json::from_value(v.clone())?;
-                s.status = "proposed".into();
-                if Contacts::new(tx).party(&s.person_id)?.is_some() {
-                    put(tx, &s)?;
-                }
-                return Ok(());
-            }
-            if let Some(mut s) = Stewards(tx).by_decision(&d.id)? {
-                s.status = "proposed".into();
-                s.confidence = CHAT_CONFIDENCE;
+    fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
+        if let Some(v) = d.result.get("steward") {
+            let mut s: Steward = serde_json::from_value(v.clone())?;
+            s.status = "proposed".into();
+            if Contacts::new(tx).party(&s.person_id)?.is_some() {
                 put(tx, &s)?;
             }
-            Ok(())
-        })
+            return Ok(());
+        }
+        if let Some(mut s) = Stewards(tx).by_decision(&d.id)? {
+            s.status = "proposed".into();
+            s.confidence = CHAT_CONFIDENCE;
+            put(tx, &s)?;
+        }
+        Ok(())
     }
 
-    fn expire(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
-        tx.write(|tx| {
-            if let Some(s) = Stewards(tx)
-                .by_decision(&d.id)?
-                .filter(|s| s.status == "proposed")
-            {
-                delete(tx, &s.workspace_id, &s.key())?;
-            }
-            Ok(())
-        })
+    fn expire(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
+        if let Some(s) = Stewards(tx)
+            .by_decision(&d.id)?
+            .filter(|s| s.status == "proposed")
+        {
+            delete(tx, &s.workspace_id, &s.key())?;
+        }
+        Ok(())
     }
 }
 

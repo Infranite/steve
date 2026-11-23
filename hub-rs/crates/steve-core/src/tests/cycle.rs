@@ -29,17 +29,7 @@ fn conflict(e: CoreError) -> String {
 }
 
 fn done_events(k: &Kit, item: &str) -> usize {
-    k.db()
-        .store()
-        .reader(|c| {
-            c.query_row(
-                "SELECT COUNT(*) FROM outbox_events WHERE topic = 'work.item.done' AND payload LIKE ?",
-                [format!("%{item}%")],
-                |r| r.get::<_, i64>(0),
-            )
-            .map_err(steve_store::StoreError::from)
-        })
-        .unwrap() as usize
+    steve_store::core_fixture::work::done_events(k.db().store(), item).len()
 }
 
 #[test]
@@ -329,15 +319,11 @@ fn after_a_crash_before_the_required_release_was_recorded_the_gate_records_it_fi
     let i = k.db().item(&x.id).unwrap().unwrap();
     let mut c = cycle::closing_of(&i).unwrap();
     c.accepted = true;
-    k.db()
-        .exec(
-            "UPDATE items SET closing = ? WHERE id = ?",
-            &[
-                &serde_json::to_string(&c).unwrap() as &dyn rusqlite::ToSql,
-                &x.id,
-            ],
-        )
-        .unwrap();
+    steve_store::core_fixture::item(
+        k.db().store(),
+        &x.id,
+        steve_store::core_fixture::ItemState::Closing(&serde_json::to_string(&c).unwrap()),
+    );
     assert!(ops(&k, &x.id).is_empty(), "the crash left no operation");
     k.core.recover().unwrap();
     assert_eq!(k.core.lifecycle_tick().unwrap(), 0);

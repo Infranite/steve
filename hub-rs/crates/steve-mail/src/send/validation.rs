@@ -28,7 +28,7 @@ impl Mail {
                 }));
             }
             repo::set_draft_basis(tx, &d.id, &basis)?;
-            base::audit(&tx.legacy(), &d.workspace_id, "steve", "mail.send.check", &d.id,
+            tx.audit( &d.workspace_id, "steve", "mail.send.check", &d.id,
                 &json!({"verdict": check.verdict, "check_model": check.check_model, "content_hash": d.content_hash, "checked_content_hash": checked_hash, "decision": approval.id}))?;
             if check.verdict != Verdict::Pass {
                 self.blocked(tx, d, "disclosure", json!({"verdict": check.verdict, "checked_content_hash": checked_hash}))?;

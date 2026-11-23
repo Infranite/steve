@@ -675,7 +675,7 @@ impl Channels {
         let composed = composed.filter(|c| c.says(&m.text));
         let system = system_text(&m.meta);
         if !system && composed.is_none() && !self.fixed_or_routed_answer(&m, origin)? {
-            // Never turn an unknown legacy question, skip or pending promise into a Bot reply.
+            // Never turn an unclassified question, skip or pending promise into a Bot reply.
             // The handoff only contains the inbound message, not this unclassified private text.
             self.store().write(|tx| -> ChannelResult<()> {
                 if claim_not_sent(
@@ -1202,8 +1202,8 @@ fn badge(r: &mut impl steve_store::Read, space: &crate::spaces::SpaceRow) -> Cha
     }))
 }
 
-/// Optional server-side search, state filter, channel account and pagination. No limit preserves
-/// the legacy list.
+/// Optional server-side search, state filter, channel account and pagination. No limit lists every
+/// conversation.
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct ListQuery {
     pub q: Option<String>,
@@ -1454,13 +1454,6 @@ pub fn messages_of(
                     } else {
                         Value::Null
                     };
-            } else if m.meta["chan_out"]["status"] == "sent" {
-                // Older notes could say sent after generation alone, with no outbound row. Do
-                // not keep presenting that legacy assertion as a confirmed provider result.
-                v["meta"]["chan_out"]["status"] = json!("unknown");
-                v["meta"]["chan_out"]["decision"] = Value::Null;
-                v["meta"]["chan_out"]["reason"] =
-                    json!(steve_i18n::t!("channels.notice.delivery_unconfirmed"));
             }
             out.push(v);
         }

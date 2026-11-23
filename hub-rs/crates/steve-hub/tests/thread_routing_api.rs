@@ -13,6 +13,8 @@ use steve_hub::api::AppState;
 use steve_hub::bus::Bus;
 use steve_hub::config::Config;
 
+const ADAPTER_MODELS: [&str; 2] = ["fixture-smart", "fixture-fast"];
+
 struct Env {
     _home: tempfile::TempDir,
     db: std::path::PathBuf,
@@ -79,10 +81,13 @@ serve((head, rest) => {{
     if (text.includes("强制补充")) return JSON.stringify({{kind:"supplement",confidence:0.95,item:text.match(/ST-\d+/)?.[0]}})
     return JSON.stringify(all.includes('User message: "帮我把') ? item : answer)
   }}
-  if (!all.includes("排队") && all.includes("慢慢说")) {{ const t = Date.now(); while (Date.now() - t < 20000) {{}} }}
+  if (!all.includes("排队") && all.includes("慢慢说")) {{
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20000)
+  }}
   return JSON.stringify(reply)
-}})
-"#
+}}, {models})
+"#,
+        models = json!(ADAPTER_MODELS)
     );
     std::fs::write(&p, body).expect("write adapter");
     std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).expect("chmod");
@@ -98,6 +103,11 @@ async fn start() -> Env {
         .expect("bind");
     let port = listener.local_addr().expect("addr").port();
     assert_ne!(port, 8440);
+    let service_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("reserve service port")
+        .local_addr()
+        .expect("service address")
+        .port();
     let adapter = fake_adapter(&h).display().to_string();
     let mut vars: HashMap<String, String> = HashMap::new();
     for (k, v) in [
@@ -110,12 +120,17 @@ async fn start() -> Env {
         ("STEVE_REPO", "/nonexistent".into()),
         ("STEVE_VAULT_KEYSTORE", "file".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
-        ("STEVE_NO_RESUME", "1".into()),
+        // Use the fake adapter for model jobs. The service Node remains unlinked in this fixture.
+        ("STEVE_NO_RESUME", "0".into()),
+        ("STEVE_LOCAL_NODE_PORT", service_port.to_string()),
+        ("STEVE_BACKUP", "off".into()),
         ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),
-        ("STEVE_MODELS_FAST", "claude-haiku-5-5".into()),
-        ("STEVE_MODELS_SMART", "claude-sonnet-5-5".into()),
+        ("CODEX_EXECUTABLE", "/usr/bin/false".into()),
+        ("STEVE_MODELS_FAST", ADAPTER_MODELS[1].into()),
+        ("STEVE_MODELS_SMART", ADAPTER_MODELS[0].into()),
         ("STEVE_ADAPTER_CLAUDE", adapter.clone()),
         ("STEVE_ADAPTER_CODEX", adapter),
+        ("STEVE_ADAPTER_PI", "/usr/bin/false".into()),
         ("STEVE_WEB_DIR", h.join("no-web").display().to_string()),
     ] {
         vars.insert(k.into(), v);
@@ -133,6 +148,10 @@ async fn start() -> Env {
         Default::default(),
     )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
+    w.domain
+        .harnesses(true)
+        .await
+        .expect("probe model catalogue");
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
     steve_hub::app::boot(&st).await.expect("boot");
     for job in w.jobs {
@@ -285,7 +304,7 @@ async fn thread_routing_api() {
         .await;
     assert_eq!(s, 400);
 
-    /* “改成在这里回答”: the item is dropped, the message answered here */
+    // The unlinked service Node has no running turn, so rerouting closes the item immediately.
     let (s, v) = e
         .call(
             "POST",
@@ -294,11 +313,14 @@ async fn thread_routing_api() {
         )
         .await;
     assert_eq!(s, 200, "{v}");
-    assert_eq!(v["item"]["status"], "drop");
+    assert_eq!(v["item"]["phase"], "closed", "{v}");
+    assert_eq!(v["item"]["outcome"], "cancelled", "{v}");
     let t = e.settle(3).await;
     assert_eq!(t[2]["meta"]["reply_to"], reply["id"]);
     let (s, v) = e.call("GET", &format!("/api/items/{item}"), None).await;
-    assert_eq!((s, v["status"].as_str()), (200, Some("drop")));
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["phase"], "closed", "{v}");
+    assert_eq!(v["outcome"], "cancelled", "{v}");
 
     /* a question is answered with an offer; taking it twice: the second is 409 with the same item
     (a request in it, so the router sees it: a plain question would be researched without it) */
@@ -361,7 +383,6 @@ async fn thread_routing_api() {
     assert_eq!(s, 404);
 }
 
-/// A research run's token sees only the four read-only tools; a session token or none gets nothing.
 /// While Steve answers, what is said waits (`meta.held`), can be changed or withdrawn, and goes after the
 /// turn; stop ends the answer at once and says so (ST-33).
 #[tokio::test]
@@ -445,6 +466,7 @@ async fn messages_wait_for_the_turn_and_stop_ends_it() {
     assert_eq!(s, 409, "gone once it went");
 }
 
+/// A research run's token sees only the four read-only tools; a session token or none gets nothing.
 #[tokio::test]
 async fn research_runs_get_read_only_mcp() {
     let e = start().await;
@@ -457,41 +479,58 @@ async fn research_runs_get_read_only_mcp() {
     let t = e.settle(2).await;
     let item = t[1]["item_id"].as_str().unwrap().to_string();
     let store = steve_store::Store::open(&e.db, steve_store::NoPublisher).unwrap();
-    let th = store.thread();
-    let run = th
-        .run_add(&steve_store::NewThreadRun {
-            workspace_id: "default".into(),
-            message_id: t[0]["id"].as_str().unwrap().into(),
-            ..Default::default()
+    let run = store
+        .write(|w| {
+            steve_store::thread_runs::add(
+                w,
+                &steve_store::NewThreadRun {
+                    workspace_id: "default".into(),
+                    message_id: t[0]["id"].as_str().unwrap().into(),
+                    ..Default::default()
+                },
+            )
         })
         .unwrap();
     let token = "research-token-1";
     // a run answering a message that is not the owner's own (unknown here) gets no sessions
-    let other = th
-        .run_add(&steve_store::NewThreadRun {
-            workspace_id: "default".into(),
-            message_id: "msg_elsewhere".into(),
-            ..Default::default()
+    let other = store
+        .write(|w| {
+            steve_store::thread_runs::add(
+                w,
+                &steve_store::NewThreadRun {
+                    workspace_id: "default".into(),
+                    message_id: "msg_elsewhere".into(),
+                    ..Default::default()
+                },
+            )
         })
         .unwrap();
-    th.run_patch(
-        &other.id,
-        &steve_store::RunPatch {
-            status: Some("running".into()),
-            token_hash: Some(Some(steve_store::sha("research-token-2"))),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    th.run_patch(
-        &run.id,
-        &steve_store::RunPatch {
-            status: Some("running".into()),
-            token_hash: Some(Some(steve_store::sha(token))),
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    store
+        .write(|w| {
+            steve_store::thread_runs::patch(
+                w,
+                &other.id,
+                &steve_store::RunPatch {
+                    status: Some("running".into()),
+                    token_hash: Some(Some(steve_store::sha("research-token-2"))),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
+    store
+        .write(|w| {
+            steve_store::thread_runs::patch(
+                w,
+                &run.id,
+                &steve_store::RunPatch {
+                    status: Some("running".into()),
+                    token_hash: Some(Some(steve_store::sha(token))),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
     let rpc = |body: Value, tok: &'static str| {
         let http = e.http.clone();
         let url = format!("{}/mcp", e.base);
@@ -781,22 +820,31 @@ async fn research_runs_get_read_only_mcp() {
             Ok(())
         })
         .unwrap();
-    let grp = th
-        .run_add(&steve_store::NewThreadRun {
-            workspace_id: "default".into(),
-            message_id: "msg_grp_2".into(),
-            ..Default::default()
+    let grp = store
+        .write(|w| {
+            steve_store::thread_runs::add(
+                w,
+                &steve_store::NewThreadRun {
+                    workspace_id: "default".into(),
+                    message_id: "msg_grp_2".into(),
+                    ..Default::default()
+                },
+            )
         })
         .unwrap();
-    th.run_patch(
-        &grp.id,
-        &steve_store::RunPatch {
-            status: Some("running".into()),
-            token_hash: Some(Some(steve_store::sha("research-token-3"))),
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    store
+        .write(|w| {
+            steve_store::thread_runs::patch(
+                w,
+                &grp.id,
+                &steve_store::RunPatch {
+                    status: Some("running".into()),
+                    token_hash: Some(Some(steve_store::sha("research-token-3"))),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
     let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": 12, "method": "tools/call", "params": {"name": "steve_items_search", "arguments": {"query": "改"}}}), "research-token-3").await;
     assert!(
         text(&v).contains(&item) && !text(&v).contains("现在："),
@@ -847,15 +895,19 @@ async fn research_runs_get_read_only_mcp() {
     let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": 14, "method": "tools/call", "params": {"name": "steve_items_search", "arguments": {"query": "改"}}}), "research-token-2").await;
     assert_eq!(text(&v), "No items match.", "still not for a run elsewhere");
     /* the run ended: the token is dead */
-    th.run_patch(
-        &run.id,
-        &steve_store::RunPatch {
-            status: Some("done".into()),
-            token_hash: Some(None),
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    store
+        .write(|w| {
+            steve_store::thread_runs::patch(
+                w,
+                &run.id,
+                &steve_store::RunPatch {
+                    status: Some("done".into()),
+                    token_hash: Some(None),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
     let (s, _) = rpc(
         json!({"jsonrpc": "2.0", "id": 7, "method": "tools/list"}),
         token,
@@ -930,6 +982,9 @@ async fn retried_sends_go_once() {
         .filter(|i| i["title"] == "新页面" || i["t"] == "新页面")
         .count();
     assert_eq!(made, 1, "{:#?}", state["items"]);
+
+    let (s, v) = e.call("POST", "/api/thread/stop", None).await;
+    assert_eq!((s, v["ok"].as_bool()), (200, Some(true)));
 }
 
 /// The first meeting: the owner starts it, its tools exist for the run answering them in Steve's
@@ -957,27 +1012,35 @@ async fn the_first_meeting_writes_through_its_own_tools() {
     assert_eq!(e.thread().await.len(), 1);
 
     let store = steve_store::Store::open(&e.db, steve_store::NoPublisher).unwrap();
-    let th = store.thread();
     for (message, token) in [
         (hello.as_str(), "meet-token-1"),
         ("msg_elsewhere", "meet-token-2"),
     ] {
-        let run = th
-            .run_add(&steve_store::NewThreadRun {
-                workspace_id: "default".into(),
-                message_id: message.into(),
-                ..Default::default()
+        let run = store
+            .write(|w| {
+                steve_store::thread_runs::add(
+                    w,
+                    &steve_store::NewThreadRun {
+                        workspace_id: "default".into(),
+                        message_id: message.into(),
+                        ..Default::default()
+                    },
+                )
             })
             .unwrap();
-        th.run_patch(
-            &run.id,
-            &steve_store::RunPatch {
-                status: Some("running".into()),
-                token_hash: Some(Some(steve_store::sha(token))),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        store
+            .write(|w| {
+                steve_store::thread_runs::patch(
+                    w,
+                    &run.id,
+                    &steve_store::RunPatch {
+                        status: Some("running".into()),
+                        token_hash: Some(Some(steve_store::sha(token))),
+                        ..Default::default()
+                    },
+                )
+            })
+            .unwrap();
     }
     let rpc = |body: Value, tok: &'static str| {
         let http = e.http.clone();
@@ -1080,6 +1143,9 @@ async fn the_first_meeting_writes_through_its_own_tools() {
     assert!(failed && said.contains("Nothing to save"), "{said}");
 
     /* the models: the list first, then a choice from it */
+    // Wait for the model-job Node's report so the tool uses the adapter's catalogue.
+    let (status, catalog) = e.call("GET", "/api/system/models?fresh=1", None).await;
+    assert_eq!(status, 200, "{catalog}");
     let (said, failed) = tool("meet-token-1", "steve_onboard_models", json!({})).await;
     assert!(!failed, "{said}");
     let seen: Value = serde_json::from_str(&said).unwrap();
@@ -1103,7 +1169,7 @@ async fn the_first_meeting_writes_through_its_own_tools() {
         .iter()
         .map(|m| m["id"].as_str().unwrap().to_string())
         .collect();
-    assert!(!offered.is_empty(), "{seen}");
+    assert_eq!(offered, ADAPTER_MODELS, "{seen}");
     let fast = offered.last().unwrap().clone();
     let (said, failed) = tool(
         "meet-token-1",

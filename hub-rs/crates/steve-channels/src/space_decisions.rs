@@ -1,5 +1,5 @@
 //! The “新群” decision: `{kind:"ask", subject_type:"space",
-//! options:["open","mute","quiet","block"]}` (older ones have only the first two), opened when a bot
+//! options:["open","mute","quiet","block"]}`, opened when a bot
 //! account finds itself in a new group.
 //!
 //! - `open` (去设置): the space counts as seen (`configured=1`); the result carries `space_id` so the
@@ -15,7 +15,7 @@
 use serde_json::{Value, json};
 use steve_modules::decisions::{DecisionCx, DecisionHandler};
 use steve_modules::{ApiError, ApiResult, Registry};
-use steve_store::{Decision, Tx};
+use steve_store::{Decision, W};
 
 use crate::ChannelResult;
 use crate::spaces::{self, Attention, SUBJECT_SPACE};
@@ -116,8 +116,7 @@ fn answered(choice: &str, was: Flags) -> Option<Flags> {
 }
 
 impl DecisionHandler for NewSpaceDecision {
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
-        tx.write(|w| {
+    fn resolve(&self, w: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
         let Some(s) = steve_store::channel_spaces::rows::get_in_workspace(w, cx.ws, &d.subject_id)?
         else {
             // the space went away meanwhile: nothing to do
@@ -132,53 +131,45 @@ impl DecisionHandler for NewSpaceDecision {
             "space_id": s.id,
             "was": {"muted": was.muted, "attention": was.attention.code(), "configured": was.configured},
         }))
-        })
     }
 
     /// Back to the flags the space had before the answer (only when nobody changed them since).
-    fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
-        tx.write(|w| {
-            let Some(s) = steve_store::channel_spaces::rows::get_in_workspace(
-                w,
-                &d.workspace_id,
-                &d.subject_id,
-            )?
-            else {
-                return Ok(());
-            };
-            let prior = &d.result["was"];
-            let (Some(muted), Some(configured)) =
-                (prior["muted"].as_bool(), prior["configured"].as_bool())
-            else {
-                return Ok(());
-            };
-            let was = Flags {
-                muted,
-                // answers recorded before 019 carry no attention
-                attention: prior["attention"]
-                    .as_str()
-                    .and_then(Attention::parse)
-                    .unwrap_or(Attention::Realtime),
-                configured,
-            };
-            let Some(to) = answered(d.result["choice"].as_str().unwrap_or(""), was) else {
-                return Ok(());
-            };
-            let now = flags_of(&crate::spaces::settings(w, &s.id)?);
-            if (now.muted, now.attention) != (to.muted, to.attention) {
-                // changed on the space page after the answer: keep what the user set there
-                return Ok(());
-            }
-            set_flags(
-                w,
-                &d.workspace_id,
-                "steve",
-                &s.id,
-                was,
-                &json!({"decision": d.id, "undo": true}),
-            )?;
-            Ok(())
-        })
+    fn before_undo(&self, w: &mut W<'_>, d: &Decision) -> ApiResult<()> {
+        let Some(s) =
+            steve_store::channel_spaces::rows::get_in_workspace(w, &d.workspace_id, &d.subject_id)?
+        else {
+            return Ok(());
+        };
+        let prior = &d.result["was"];
+        let (Some(muted), Some(configured), Some(attention)) = (
+            prior["muted"].as_bool(),
+            prior["configured"].as_bool(),
+            prior["attention"].as_str().and_then(Attention::parse),
+        ) else {
+            return Ok(());
+        };
+        let was = Flags {
+            muted,
+            attention,
+            configured,
+        };
+        let Some(to) = answered(d.result["choice"].as_str().unwrap_or(""), was) else {
+            return Ok(());
+        };
+        let now = flags_of(&crate::spaces::settings(w, &s.id)?);
+        if (now.muted, now.attention) != (to.muted, to.attention) {
+            // changed on the space page after the answer: keep what the user set there
+            return Ok(());
+        }
+        set_flags(
+            w,
+            &d.workspace_id,
+            "steve",
+            &s.id,
+            was,
+            &json!({"decision": d.id, "undo": true}),
+        )?;
+        Ok(())
     }
 }
 

@@ -51,13 +51,7 @@ pub trait ExecutionControl: Send + Sync {
     /// Give up an `unknown` execution once its processes are confirmed gone ([`Abandon`]).
     async fn abandon(&self, c: Command<Abandon>) -> ApiResult<Receipt>;
     /// Explicitly retire an unknown control operation; never implicitly re-executes it.
-    /// Default preserves compatibility with Nodes that do not implement control recovery.
-    async fn recover(&self, _c: Command<Recover>) -> ApiResult<Receipt> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
-            "control recovery unsupported",
-        ))
-    }
+    async fn recover(&self, c: Command<Recover>) -> ApiResult<Receipt>;
     /// Applies only to the request still waiting with this attempt and action digest; anything else
     /// is `stale`.
     async fn resolve_permission(&self, c: Command<PermissionResolution>) -> ApiResult<Receipt>;
@@ -86,18 +80,18 @@ pub trait WorkspaceExecutor: Send + Sync {
     /// Browse an allowed root (choosing a project directory).
     async fn list_root(&self, at: RootPath, page: PageRequest) -> ApiResult<Page<FileInfo>>;
     async fn read_file(&self, q: FileRead) -> ApiResult<ReadChunk>;
-    /// Immutable delivery transfer. Old peers fail closed, never fall back to `read_file`.
+    /// Immutable delivery transfer. A Node without it fails closed, never falls back to `read_file`.
     async fn read_delivery(&self, _q: FileRead) -> ApiResult<DeliveryChunk> {
         Err(ApiError::new(
             ErrorCode::Unsupported,
             "strict delivery reads unsupported",
         ))
     }
-    /// Current-execution delivery; old peers fail closed without a filesystem fallback.
+    /// Current-execution delivery; a Node without it fails closed without a filesystem fallback.
     async fn read_execution_delivery(&self, _q: ExecutionDeliveryRead) -> ApiResult<DeliveryChunk> {
         Err(ApiError::new(
             ErrorCode::Unsupported,
-            "execution-scoped delivery reads unsupported; upgrade the Node",
+            "execution-scoped delivery reads unsupported",
         ))
     }
     /// Strict, execution-scoped artifact read. Unsupported peers must never fall back to a
@@ -126,12 +120,7 @@ pub trait Discovery: Send + Sync {
     /// Idempotently replace the active-turn capacity (1–256). Running turns are never interrupted;
     /// lowering it defers new starts until enough finish. The Hub persists the setting and reapplies
     /// it before dispatching turns, including after reconnect/restart. Workspace-only Nodes refuse.
-    async fn set_session_capacity(&self, _sessions: u32) -> ApiResult<()> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
-            "live session capacity unsupported",
-        ))
-    }
+    async fn set_session_capacity(&self, sessions: u32) -> ApiResult<()>;
     async fn probe(&self, fresh: bool) -> ApiResult<Capabilities>;
     /// Stage the Hub's release on this Node ([`NodeUpgrade`]) when
     /// [`Discovery::probe_build`] reports it as upgradable.
@@ -189,7 +178,7 @@ pub trait Discovery: Send + Sync {
     async fn harness_updates(&self, _fresh: bool) -> ApiResult<HarnessUpdateReport> {
         Err(ApiError::new(
             ErrorCode::Unsupported,
-            "upgrade this Node to enable harness-updates-v1",
+            "harness updates unsupported",
         ))
     }
     /// Journaled upgrade of installed, managed components only. The authenticated instance
@@ -197,7 +186,7 @@ pub trait Discovery: Send + Sync {
     async fn upgrade_harness(&self, _c: Command<UpgradeHarness>) -> ApiResult<Receipt> {
         Err(ApiError::new(
             ErrorCode::Unsupported,
-            "upgrade this Node to enable harness-updates-v1",
+            "harness updates unsupported",
         ))
     }
     async fn history(&self, page: PageRequest) -> ApiResult<Page<HistoryEntry>>;

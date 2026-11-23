@@ -117,7 +117,7 @@ impl Tx<'_> {
             .and_then(|i| {
                 self.db()
                     .store()
-                    .read(|c| steve_modules::zone::workspace_tz(c, &i.workspace_id))
+                    .read(|r| steve_modules::zone::workspace_tz(r, &i.workspace_id))
                     .ok()
             })
             .and_then(|z| steve_runtime::tz::Zone::parse(z.name()).ok())

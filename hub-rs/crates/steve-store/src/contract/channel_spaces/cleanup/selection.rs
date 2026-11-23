@@ -117,17 +117,13 @@ pub fn spaces(r: &mut impl Read, ws: &str, target: Target<'_>) -> Result<Vec<(St
         Expr::exists(q.take())
     };
     let owned = match target {
-        Target::Connection(conn) => {
-            let identity = || Expr::col(("i", "space_id")).eq(Expr::col(("s", "id")));
-            observed(
-                "space_identities",
-                "i",
-                identity().and(Expr::col(("i", "connection_id")).eq(conn)),
-            )
-            .or(Expr::col(("s", "connection_id"))
-                .eq(conn)
-                .and(observed("space_identities", "i", identity()).not()))
-        }
+        Target::Connection(conn) => observed(
+            "space_identities",
+            "i",
+            Expr::col(("i", "space_id"))
+                .eq(Expr::col(("s", "id")))
+                .and(Expr::col(("i", "connection_id")).eq(conn)),
+        ),
         Target::Account(account) => Expr::col(("s", "connection_id"))
             .is_null()
             .and(Expr::col(("s", "account_id")).eq(account)),

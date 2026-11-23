@@ -29,11 +29,11 @@ test("a detail's ids go by their names, a model choice by its harness and models
 
 test("a before/after pair reads as what changed, one line a key, and names the purposes it touched", () => {
   const e = entry("settings.models", {
-    before: { "models.route": null, "models.title": { harness: "h1", models: ["a"] }, "models.v3": null },
-    after: { "models.route": { harness: "h1", models: ["quick"] }, "models.title": { harness: "h1", models: ["a"] }, "models.v3": 1 },
+    before: { "models.route": null, "models.title": { harness: "h1", models: ["a"] }, "models.seeded": null },
+    after: { "models.route": { harness: "h1", models: ["quick"] }, "models.title": { harness: "h1", models: ["a"] }, "models.seeded": true },
   })
-  assert.deepEqual(m.changed(e), ["models.route", "models.v3"])
-  assert.deepEqual(m.detailLines(e), [["models.route", "— → h1 · quick"], ["models.v3", "— → 1"]])
+  assert.deepEqual(m.changed(e), ["models.route", "models.seeded"])
+  assert.deepEqual(m.detailLines(e), [["models.route", "— → h1 · quick"], ["models.seeded", "— → true"]])
   assert.deepEqual(m.changed(e).map(m.purposeOf).filter(Boolean), ["route"])
 })
 

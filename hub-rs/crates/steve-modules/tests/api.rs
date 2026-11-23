@@ -1,6 +1,8 @@
 //! Error codes, extractors, ownership and decision dispatch, through a small router the way P1/V1/A1
 //! routers will be built.
 
+use steve_store::W;
+
 use axum::Json;
 use axum::Router;
 use axum::extract::{Path, State};
@@ -10,9 +12,9 @@ use serde_json::{Value, json};
 use steve_modules::decisions::{self, DecisionCx, DecisionHandler};
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, call_raw, caller};
 use steve_modules::{ApiError, ApiResult, Body, Caller, Check, Modules, Registry, own};
+use steve_store::Decision;
 use steve_store::base::mems::{self, MemPatch, NewMem};
 use steve_store::base::{self, Level, ObjRef, Visibility};
-use steve_store::{Decision, Tx};
 
 #[derive(Deserialize)]
 struct NewNote {
@@ -105,11 +107,10 @@ fn router(m: Modules) -> Router {
 /// A memory candidate confirmed with a `confirm` decision (what P3/P4 will register for `mem`).
 struct MemConfirm;
 impl DecisionHandler for MemConfirm {
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
         match cx.choice {
             "yes" => {
-                mems::patch(
-                    tx,
+                steve_store::knowledge::Memories(tx).patch(
                     &d.subject_id,
                     &MemPatch {
                         status: Some("confirmed".into()),
@@ -118,14 +119,13 @@ impl DecisionHandler for MemConfirm {
                 )?;
             }
             _ => {
-                mems::delete(tx, &d.subject_id)?;
+                steve_store::knowledge::Memories(tx).delete(&d.subject_id)?;
             }
         }
         Ok(decisions::choice_result(cx))
     }
-    fn expire(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
-        mems::patch(
-            tx,
+    fn expire(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
+        steve_store::knowledge::Memories(tx).patch(
             &d.subject_id,
             &MemPatch {
                 status: Some("stale".into()),

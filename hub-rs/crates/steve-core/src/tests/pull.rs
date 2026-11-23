@@ -136,16 +136,7 @@ fn accepted(gh: &Gh) -> (Kit, Remote) {
 /// The accepted result is what the worktree holds now (its fingerprint frozen with it).
 fn freeze(k: &Kit, x: &Remote) {
     let print = crate::cycle::fingerprint(Some(&x.wt.to_string_lossy())).unwrap();
-    k.db()
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE items SET closing = json_set(closing, '$.fingerprint', ?2) WHERE id = ?1",
-                [&x.item, &print],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::core_fixture::work::closing_fingerprint(k.db().store(), &x.item, Some(&print));
 }
 
 /// The result is void (a new message) and the same change is delivered and accepted again.
@@ -238,40 +229,20 @@ fn reviewed(gh: &Gh) -> (Kit, Remote) {
             "depends_on": deps, "resources": [], "required": true})
         .to_string()
     };
-    k.db()
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "INSERT INTO workflows (item_id, revision, cycle, goal_version, paused, max_parallel, max_attempts, created, updated)
-                 VALUES (?1, 1, ?2, ?3, 0, 1, 3, 0, 0)",
-                rusqlite::params![x.item, i.cycle, goal],
-            )?;
-            for (n, (id, s)) in [
-                ("work", spec("work", "dev", "work", &[])),
-                ("review", spec("review", "steve", "review", &["work"])),
-                ("integrate", spec("integrate", "dev", "integrate", &["review"])),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                c.execute(
-                    "INSERT INTO workflow_units (workflow_id, id, position, spec, status, attempt)
-                     VALUES (?1, ?2, ?3, ?4, 'succeeded', 1)",
-                    rusqlite::params![x.item, id, n as i64, s],
-                )?;
-            }
-            c.execute(
-                "INSERT INTO workflow_history (workflow_id, revision, action, reason, detail, created)
-                 VALUES (?1, 1, 'plan', '评审', '{}', 0)",
-                [&x.item],
-            )?;
-            c.execute(
-                "UPDATE items SET closing = json_set(closing, '$.workflow_revision', 1) WHERE id = ?1",
-                [&x.item],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::core_fixture::work::reviewed_workflow(
+        k.db().store(),
+        &x.item,
+        i.cycle,
+        goal,
+        &[
+            ("work", spec("work", "dev", "work", &[])),
+            ("review", spec("review", "steve", "review", &["work"])),
+            (
+                "integrate",
+                spec("integrate", "dev", "integrate", &["review"]),
+            ),
+        ],
+    );
     assert!(
         k.core
             .tx()
@@ -307,33 +278,18 @@ fn merge_cards(k: &Kit, x: &Remote) -> Vec<String> {
 
 /// `(to_v, detail)` of the item's `pr` marks, oldest first.
 fn pr_marks(k: &Kit, x: &Remote) -> Vec<(String, Value)> {
-    k.db()
-        .store()
-        .with_conn(|c| {
-            Ok(c.prepare(
-                "SELECT to_v, detail FROM item_marks WHERE item_id = ? AND kind = 'pr' ORDER BY id",
-            )?
-            .query_map([&x.item], |r| {
-                let d: String = r.get(1)?;
-                Ok((r.get(0)?, serde_json::from_str(&d).unwrap()))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?)
-        })
-        .unwrap()
+    steve_store::core_fixture::work::item_marks(k.db().store(), &x.item, Some("pr"))
+        .into_iter()
+        .map(|m| (m.to.unwrap(), m.detail.unwrap()))
+        .collect()
 }
 
 /// The `merge` marks of the item (the workflow statistics' accepted → merged time): `(to_v, ref)`.
 fn merge_marks(k: &Kit, x: &Remote) -> Vec<(String, String)> {
-    k.db()
-        .store()
-        .with_conn(|c| {
-            Ok(
-                c.prepare("SELECT to_v, ref FROM item_marks WHERE item_id = ? AND kind = 'merge'")?
-                    .query_map([&x.item], |r| Ok((r.get(0)?, r.get(1)?)))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?,
-            )
-        })
-        .unwrap()
+    steve_store::core_fixture::work::item_marks(k.db().store(), &x.item, Some("merge"))
+        .into_iter()
+        .map(|m| (m.to.unwrap(), m.reference.unwrap()))
+        .collect()
 }
 
 /// The release operation the pull request is followed on.
@@ -441,16 +397,7 @@ fn a_head_other_than_the_accepted_one_is_never_merged() {
 fn a_head_that_cannot_be_bound_to_the_accepted_result_is_not_merged_and_is_yours() {
     let gh = Gh::new();
     let (k, x) = reviewed(&gh);
-    k.db()
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE items SET closing = json_remove(closing, '$.fingerprint') WHERE id = ?",
-                [&x.item],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::core_fixture::work::closing_fingerprint(k.db().store(), &x.item, None);
     gh.prs(open_pr(&head(&x.wt), json!({})));
     look(&k);
     look(&k);
@@ -711,8 +658,8 @@ fn a_failed_merge_is_tried_again_later_and_becomes_a_card_after_a_few() {
         let op = release_op(&k, &x).id;
         k.db()
             .store()
-            .transaction(|tx| {
-                steve_store::operation_set_in(tx, &op, "pending", &json!({"pr_merge_after": 0}))
+            .write(|tx| {
+                steve_store::operation_repo::set(tx, &op, "pending", &json!({"pr_merge_after": 0}))
             })
             .unwrap();
         look(&k);
@@ -752,8 +699,8 @@ fn the_agent_is_woken_about_its_pull_request_only_so_often_a_cycle() {
     let op = release_op(&k, &x).id;
     k.db()
         .store()
-        .transaction(|tx| {
-            steve_store::operation_set_in(tx, &op, "pending", &json!({"pr_tells": PR_TELLS_MAX}))
+        .write(|tx| {
+            steve_store::operation_repo::set(tx, &op, "pending", &json!({"pr_tells": PR_TELLS_MAX}))
         })
         .unwrap();
     gh.prs(open_pr(
@@ -919,13 +866,11 @@ fn invalid_or_unverifiable_merge_consent_is_not_reused() {
         let card = approve_head(&k, &x, &gh);
         match change {
             "expired" => {
-                k.db()
-                    .store()
-                    .with_conn(|c| {
-                        c.execute("UPDATE decisions SET status='expired' WHERE id=?", [&card])?;
-                        Ok(())
-                    })
-                    .unwrap();
+                steve_store::core_fixture::decision(
+                    k.db().store(),
+                    &card,
+                    steve_store::core_fixture::DecisionState::Expired,
+                );
             }
             "reopened" => {
                 k.db().decision_reopen(&card).unwrap();
@@ -936,13 +881,7 @@ fn invalid_or_unverifiable_merge_consent_is_not_reused() {
                 k.db().decision_set_result(&card, &result).unwrap();
             }
             "missing" => {
-                k.db()
-                    .store()
-                    .with_conn(|c| {
-                        c.execute("DELETE FROM decisions WHERE id=?", [&card])?;
-                        Ok(())
-                    })
-                    .unwrap();
+                steve_store::core_fixture::work::remove_decision(k.db().store(), &card);
             }
             "legacy" => {
                 k.db()
@@ -960,45 +899,29 @@ fn invalid_or_unverifiable_merge_consent_is_not_reused() {
                 k.db().decision_set_result(&card, &result).unwrap();
             }
             "other-workspace" => {
-                k.db()
-                    .store()
-                    .with_conn(|c| {
-                        c.execute(
-                            "INSERT INTO workspaces(id,name,created) VALUES('foreign','Foreign',1)",
-                            [],
-                        )?;
-                        c.execute(
-                            "UPDATE decisions SET workspace_id='foreign' WHERE id=?",
-                            [&card],
-                        )?;
-                        Ok(())
-                    })
-                    .unwrap();
+                steve_store::core_fixture::workspace(
+                    k.db().store(),
+                    "foreign",
+                    "Foreign",
+                    "ST",
+                    0,
+                    1,
+                );
+                steve_store::core_fixture::decision(
+                    k.db().store(),
+                    &card,
+                    steve_store::core_fixture::DecisionState::Workspace("foreign"),
+                );
             }
             "other-cycle" => {
                 let op = release_op(&k, &x).id;
-                k.db()
-                    .store()
-                    .with_conn(|c| {
-                        c.execute("UPDATE item_operations SET cycle=0 WHERE id=?", [&op])?;
-                        Ok(())
-                    })
-                    .unwrap();
+                steve_store::core_fixture::work::operation_cycle(k.db().store(), &op, 0);
             }
             _ => {}
         }
         accepted_again(&k, &x);
         if change == "unknown-result" {
-            k.db()
-                .store()
-                .with_conn(|c| {
-                    c.execute(
-                        "UPDATE items SET closing=json_remove(closing,'$.fingerprint') WHERE id=?",
-                        [&x.item],
-                    )?;
-                    Ok(())
-                })
-                .unwrap();
+            steve_store::core_fixture::work::closing_fingerprint(k.db().store(), &x.item, None);
         }
         gh.prs(open_pr(&head(&x.wt), json!({})));
         if change == "unknown-host" {
@@ -1084,13 +1007,11 @@ fn merge_consent_is_rechecked_after_host_methods_and_before_the_merge_call() {
         "the host methods query is reached after the first consent check; repo.entered exists",
         || gh.dir.join("repo.entered").exists(),
     );
-    k.db()
-        .store()
-        .with_conn(|c| {
-            c.execute("UPDATE decisions SET status='expired' WHERE id=?", [&card])?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::core_fixture::decision(
+        k.db().store(),
+        &card,
+        steve_store::core_fixture::DecisionState::Expired,
+    );
     std::fs::remove_file(gh.dir.join("repo.wait")).unwrap();
     checking.join().unwrap().unwrap();
     assert!(

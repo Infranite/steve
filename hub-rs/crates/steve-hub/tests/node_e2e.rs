@@ -7,12 +7,11 @@
 //! - while held (upgrade drain), a message is queued and not drained, and goes once released;
 //! - the Hub killed mid-turn comes back with the attempt `unknown` (awaiting reconciliation),
 //!   which is never re-run;
-//! - with `STEVE_NODE_MODE` off, a Node-bound session is parked, and nothing runs on the Hub;
+//! - on a diagnostic Hub a Node-bound session is parked, and no adapter starts;
 //! - with `STEVE_NODE_MODE` unset the Node is on (the default); a `STEVE_NO_RESUME` copy boots
 //!   with it off instead, and its Node-bound sessions are parked.
 //!
-//! - B7: what an older Hub's legacy runner left moves to the Node at boot (or ends, with why), and
-//!   a new session no Node takes is refused visibly, never run on the Hub.
+//! - B7: a new session no Node takes is refused visibly, never run on the Hub.
 //!
 //! And on a second home, with a short attempt deadline, a card nobody answers expires; on a
 //! third, an idle Node session goes through two Hub restarts without a resume or a restart notice.
@@ -20,6 +19,8 @@
 //!
 //! No real host, no real agent, never `~/.steve` or the production port.
 
+use std::fs::{File, TryLockError};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 use steve_runtime::testkit::eventually;
@@ -43,10 +44,10 @@ fn log_lines(log: &std::path::Path) -> Vec<Value> {
 }
 
 struct Home {
+    // A fixture owns its detached Node across Hub launches. Retire it before TempDir is dropped.
+    service: std::sync::OnceLock<ServiceNodeGuard>,
     dir: tempfile::TempDir,
-    /// The Hub's port, held by the test for every Hub it starts on this home (#429).
-    socket: handed::Socket,
-    port: u16,
+    address: std::sync::Mutex<Option<SocketAddr>>,
     /// The service Node's loopback port: its own socket, not the Hub's port + 3, which on a host
     /// handing out ports in order is often another test's Hub.
     local: handed::Socket,
@@ -56,7 +57,10 @@ struct Home {
 
 impl Home {
     fn new() -> Home {
-        let dir = tempfile::tempdir().expect("tmp");
+        let dir = tempfile::Builder::new()
+            .prefix("steve-node-e2e-")
+            .tempdir()
+            .expect("tmp");
         let web = dir.path().join("web");
         std::fs::create_dir_all(&web).expect("web");
         std::fs::write(web.join("index.html"), "<html><head></head></html>").expect("index");
@@ -65,10 +69,9 @@ impl Home {
             json!({"version": VERSION}).to_string(),
         )
         .expect("web version");
-        let socket = handed::Socket::new();
         Home {
-            port: socket.port(),
-            socket,
+            service: Default::default(),
+            address: Default::default(),
             local: handed::Socket::new(),
             logs: std::sync::Mutex::new(vec![]),
             web,
@@ -78,8 +81,20 @@ impl Home {
     fn steve(&self) -> PathBuf {
         self.dir.path().join("steve")
     }
+    fn service_executable(&self) -> &std::path::Path {
+        &self
+            .service
+            .get_or_init(|| {
+                ServiceNodeGuard::new(self.dir.path(), self.steve())
+                    .expect("fixture service executable")
+            })
+            .executable
+    }
     fn base(&self) -> String {
-        format!("http://127.0.0.1:{}", self.port)
+        format!(
+            "http://{}",
+            self.address.lock().unwrap().expect("Hub is serving")
+        )
     }
     /// An immutable log destination inherited by adapters from exactly one Hub launch.
     fn adapter_log(&self) -> PathBuf {
@@ -156,11 +171,15 @@ impl Home {
 }
 
 /// A running Hub process and the adapter log owned by this launch.
-struct Hub(Option<Child>, PathBuf);
+struct Hub {
+    child: Option<Child>,
+    adapter_log: PathBuf,
+    service: bool,
+}
 
 impl Hub {
     fn spawns(&self) -> usize {
-        log_lines(&self.1)
+        log_lines(&self.adapter_log)
             .iter()
             .filter(|m| m.get("spawn").is_some())
             .count()
@@ -168,12 +187,21 @@ impl Hub {
     /// SIGKILL the Hub and observed direct agents, then reap the Hub. Agents in independent
     /// groups created after enumeration can outlive it; log attribution must not depend on teardown.
     fn kill(&mut self) {
-        if let Some(child) = self.0.take() {
-            Self::kill_child(child);
+        if self.service {
+            self.kill_hub_group();
+        } else if let Some(child) = self.child.take() {
+            Self::kill_child_after_scan(child, |_| {});
         }
     }
-    fn kill_child(child: Child) {
-        Self::kill_child_after_scan(child, |_| {});
+    /// Simulate a service manager restart, leaving the independent Node running.
+    fn kill_hub_group(&mut self) {
+        if let Some(mut child) = self.child.take()
+            && matches!(child.try_wait(), Ok(None))
+        {
+            // SAFETY: the unreaped child pins the group created by this fixture.
+            unsafe { libc::killpg(child.id() as i32, libc::SIGKILL) };
+            let _ = child.wait();
+        }
     }
     fn kill_child_after_scan(mut child: Child, after_scan: impl FnOnce(&[i32])) {
         // A completed child no longer pins its cached PID/group number.
@@ -209,9 +237,15 @@ impl Drop for Hub {
     }
 }
 
-/// The Hub with the local Node explicitly on (`local`) or off (`off`, the rollback).
+/// A runnable Hub with the in-process test Node, or an inert diagnostic Hub.
 fn spawn(h: &Home, node: bool, extra: &[(&str, &str)]) -> Hub {
-    spawn_mode(h, Some(if node { "local" } else { "off" }), extra)
+    if node {
+        spawn_mode(h, Some("local"), extra)
+    } else {
+        let mut diagnostic = vec![("STEVE_NO_RESUME", "1")];
+        diagnostic.extend_from_slice(extra);
+        spawn_mode(h, None, &diagnostic)
+    }
 }
 
 /// The Hub with `STEVE_NODE_MODE` set to `mode`, or unset (the default since B6) for `None`.
@@ -221,23 +255,34 @@ fn spawn_mode(h: &Home, mode: Option<&str>, extra: &[(&str, &str)]) -> Hub {
         env!("CARGO_MANIFEST_DIR"),
         "/../steve-acp/tests/fake-acp.js"
     );
+    *h.address.lock().unwrap() = None;
+    let ready = h.steve().join("run/hub-ready.json");
+    match std::fs::remove_file(ready) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        result => result.expect("clear the previous test Hub's readiness"),
+    }
     // tracing_subscriber writes to stdout by default. Capture both streams so a failed end-to-end
     // assertion retains the Hub's event/permission errors instead of showing an empty log.
     let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(h.dir.path().join("hub.log"))
+        .write(true)
+        .create_new(true)
+        .open(adapter_log.with_extension("hub.log"))
         .expect("hub log");
-    let mut c = handed::command(
-        env!("CARGO_BIN_EXE_steve-hub"),
-        &[("hub", &h.socket), ("local-node", &h.local)],
-    );
+    let service = mode != Some("local") && !extra.contains(&("STEVE_NO_RESUME", "1"));
+    let executable = if service {
+        h.service_executable()
+    } else {
+        std::path::Path::new(env!("CARGO_BIN_EXE_steve-hub"))
+    };
+    let mut c = handed::command(executable, &[("local-node", &h.local)]);
     c.env("HOME", h.dir.path())
         .env("STEVE_HOME", h.steve())
-        .env("STEVE_PORT", h.port.to_string())
+        .env("STEVE_PORT", "0")
+        .env_remove("STEVE_WEB_PORT")
         .env_remove("STEVE_LOCAL_NODE_PORT")
         .env("STEVE_HOST", "127.0.0.1")
-        .env("STEVE_PUBLIC_URL", h.base())
+        .env_remove("STEVE_PUBLIC_URL")
+        .env_remove("STEVE_PUBLIC_URLS")
         .env("STEVE_DEV_LOGIN", "1")
         .env("STEVE_REPO", "/nonexistent")
         .env("STEVE_VAULT_KEYSTORE", "file")
@@ -253,6 +298,7 @@ fn spawn_mode(h: &Home, mode: Option<&str>, extra: &[(&str, &str)]) -> Hub {
         .env_remove("STEVE_NODE_TURN_LIMIT_MS")
         .env_remove("STEVE_IDLE_RELEASE_MS")
         .env_remove("STEVE_NO_RESUME")
+        .env_remove("INVOCATION_ID")
         .env_remove("STEVE_UPGRADE_ID")
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("CODEX_HOME")
@@ -270,7 +316,16 @@ fn spawn_mode(h: &Home, mode: Option<&str>, extra: &[(&str, &str)]) -> Hub {
     for (k, v) in extra {
         c.env(k, v);
     }
-    Hub(Some(c.spawn().expect("spawn hub")), adapter_log)
+    Hub {
+        child: Some(c.spawn().expect("spawn hub")),
+        adapter_log,
+        service,
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct Ready {
+    hub: Vec<SocketAddr>,
 }
 
 /// Up and serving the full app.
@@ -278,18 +333,30 @@ async fn serving(h: &Home) {
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!("the Hub serves; log:\n{}", hub_log(h))
     });
+    let path = h.steve().join("run/hub-ready.json");
     eventually(diagnostic, || async {
+        let Some(addr) = std::fs::read(&path).ok().and_then(|bytes| {
+            let ready: Ready = serde_json::from_slice(&bytes).ok()?;
+            ready.hub.first().copied()
+        }) else {
+            return false;
+        };
         let Ok(r) = reqwest::Client::new()
-            .get(format!("{}/healthz", h.base()))
+            .get(format!("http://{addr}/healthz"))
             .timeout(Duration::from_secs(2))
             .send()
             .await
         else {
             return false;
         };
-        r.json::<Value>()
+        let ready = r
+            .json::<Value>()
             .await
-            .is_ok_and(|v| v["ok"] == true && v["maintenance"] != true)
+            .is_ok_and(|v| v["ok"] == true && v["maintenance"] != true);
+        if ready {
+            *h.address.lock().unwrap() = Some(addr);
+        }
+        ready
     })
     .await;
 }
@@ -324,8 +391,17 @@ async fn wait_node_health(h: &Home, ok: impl Fn(&Value) -> bool) -> Value {
     observed.into_inner().unwrap().unwrap()
 }
 
+fn hub_log_path(h: &Home) -> PathBuf {
+    h.logs
+        .lock()
+        .unwrap()
+        .last()
+        .expect("Hub launched")
+        .with_extension("hub.log")
+}
+
 fn hub_log(h: &Home) -> String {
-    let s = std::fs::read_to_string(h.dir.path().join("hub.log")).unwrap_or_default();
+    let s = std::fs::read_to_string(hub_log_path(h)).unwrap_or_default();
     s.lines()
         .rev()
         .take(40)
@@ -516,31 +592,30 @@ fn attempts(h: &Home, sid: &str, state: &str) -> i64 {
         .expect("attempts")
 }
 
-/// #429: the Hub serves on the port the test holds, and nothing else can take that port, neither
-/// before the Hub starts nor while it restarts.
+/// Each running Hub reports the port it bound itself.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_hubs_port_stays_the_tests_across_restarts() {
-    let h = Home::new();
-    let taken = |port: u16| {
-        std::net::TcpListener::bind(("127.0.0.1", port))
-            .is_err_and(|e| e.kind() == std::io::ErrorKind::AddrInUse)
+async fn concurrent_hubs_report_their_os_assigned_ports() {
+    let first = Home::new();
+    let second = Home::new();
+    let local = first.local.port();
+    let _first = spawn(&first, false, &[("STEVE_HOST", "127.0.0.1,::1")]);
+    let _second = spawn(&second, false, &[]);
+    tokio::join!(serving(&first), serving(&second));
+    assert_ne!(first.base(), second.base());
+    let ready: Ready =
+        serde_json::from_slice(&std::fs::read(first.steve().join("run/hub-ready.json")).unwrap())
+            .unwrap();
+    let [ipv4, ipv6] = ready.hub.as_slice() else {
+        panic!("expected one listener for each configured address");
     };
-    assert!(taken(h.port), "held before the Hub starts");
-    let mut hub = spawn(&h, true, &[]);
-    serving(&h).await;
-    let local = h.local.port();
-    for _ in 0..2 {
-        hub.kill();
-        assert!(taken(h.port) && taken(local), "held while no Hub runs");
-        hub = spawn(&h, true, &[]);
-        serving(&h).await;
-    }
-    let log = std::fs::read_to_string(h.dir.path().join("hub.log")).unwrap_or_default();
-    assert!(
-        !log.contains("Address already in use"),
-        "no Hub had to bind; log:\n{}",
-        hub_log(&h)
-    );
+    assert!(ipv4.is_ipv4() && ipv6.is_ipv6());
+    assert_eq!(ipv4.port(), ipv6.port());
+    assert_ne!(ipv4.port(), local);
+    assert_ne!(ipv4.port(), 8440);
+    let health = reqwest::get(format!("http://{ipv6}/healthz"))
+        .await
+        .unwrap();
+    assert!(health.status().is_success());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -826,7 +901,7 @@ async fn a_node_session_end_to_end() {
             &sid
         ),
         0,
-        "nothing in the legacy format"
+        "nothing in another format"
     );
 
     // ── a permission request becomes a card; its answer reaches the agent
@@ -970,11 +1045,11 @@ async fn a_node_session_end_to_end() {
     assert!(n["sessions"].as_i64() >= Some(1), "{n}");
     hub.kill();
 
-    // ── STEVE_NODE_MODE off: the Node-bound session is parked, never handed to the legacy runner
+    // With a diagnostic Hub, the Node-bound session stays parked.
     let hub = spawn(&h, false, &[]);
     serving(&h).await;
     let c = Client::login(&h).await;
-    let r = c.say(&sid, "回滚验收-R5 @say legacy").await;
+    let r = c.say(&sid, "回滚验收-R5 @say parked").await;
     assert_eq!(r["result"], "queued", "{r}");
     eventually_sync("The session records that it is parked on its required Node.", || {
             h.count(
@@ -986,7 +1061,7 @@ async fn a_node_session_end_to_end() {
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(h.got("回滚验收-R5"), 0, "no runner got it");
     assert_eq!(h.got("崩溃验收-K2"), 1, "still never re-run");
-    assert_eq!(hub.spawns(), 0, "no legacy adapter started for it");
+    assert_eq!(hub.spawns(), 0, "no adapter started on the Hub for it");
     let n = node_health(&h).await;
     assert_eq!(
         (&n["enabled"], &n["reconciled"], &n["fallbacks"]),
@@ -1117,7 +1192,7 @@ async fn an_idle_node_session_is_not_resumed_after_a_restart() {
     assert_eq!(fails(), fails_before, "no failure card");
 }
 
-/// A Node session's row shows its run like a legacy one (running during a turn, idle after), and
+/// A Node session's row shows its run (running during a turn, idle after), and
 /// ST-28's resume info names the harness's own session id.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_node_session_shows_its_status_and_harness_id() {
@@ -1409,14 +1484,12 @@ async fn an_idle_node_session_is_let_go_and_the_next_message_resumes_it() {
 }
 
 /// B6: with `STEVE_NODE_MODE` unset the local Node is on and a new session binds to it. A
-/// `STEVE_NO_RESUME` copy of that home boots with the Node off instead of failing, and parks the
-/// Node-bound session; an explicit `local` on such a copy refuses to boot.
+/// diagnostic Hub can open a copy of that home and park its Node-bound session.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_node_is_the_default() {
     let h = Home::new();
     // The default is a service Node. Stop this test's own service before reusing its home as
     // an inert copy, otherwise a queued continuation from the first Hub can spawn an adapter.
-    let service = ServiceNodeGuard(h.steve().join("data/node/service.pid"));
     let mut hub = spawn_mode(&h, None, &[]);
     serving(&h).await;
     let c = Client::login(&h).await;
@@ -1458,29 +1531,31 @@ async fn the_node_is_the_default() {
         h.spawns() >= 1,
         "the initial reply came from a started adapter"
     );
-    hub.kill();
-    drop(hub);
-    drop(service);
+    hub.kill_hub_group();
+    h.service
+        .get()
+        .unwrap()
+        .stop()
+        .expect("stop the fixture's Node");
 
-    // a STEVE_NO_RESUME copy: an explicit local is a boot error
-    let mut refused = spawn_mode(&h, Some("local"), &[("STEVE_NO_RESUME", "1")]);
-    eventually_sync(
-        "The explicitly requested local Node exits on a no-resume copy.",
-        || matches!(refused.0.as_mut().unwrap().try_wait(), Ok(Some(_))),
-    )
-    .await;
-    refused.0.take();
-    assert!(
-        hub_log(&h).contains("STEVE_NO_RESUME"),
-        "says why; log:\n{}",
-        hub_log(&h)
-    );
-    drop(refused);
-
-    // unset: it boots with the Node off, and the bound session is parked
-    let hub = spawn_mode(&h, None, &[("STEVE_NO_RESUME", "1")]);
+    // A diagnostic Hub ignores the copied session Node configuration.
+    let hub = spawn_mode(&h, Some("local"), &[("STEVE_NO_RESUME", "1")]);
     serving(&h).await;
     let c = Client::login(&h).await;
+    let (status, health) = c.call("GET", "/healthz", None).await;
+    assert_eq!(status, 200);
+    assert_eq!(health["mode"], "diagnostic");
+    let (status, refusal) = c
+        .call(
+            "POST",
+            "/api/bots/draft",
+            Some(json!({"desc": "a test bot"})),
+        )
+        .await;
+    assert_eq!(status, 403, "{refusal}");
+    assert_eq!(refusal["code"], "forbidden");
+    assert_eq!(refusal["reason"], "config.diagnostic_model_disabled");
+    assert_eq!(refusal["params"], json!({}));
     let n = node_health(&h).await;
     assert_eq!(
         n["enabled"], false,
@@ -1502,7 +1577,7 @@ async fn the_node_is_the_default() {
 
 /// B7: a new session the Node path cannot express (its bot's permission mode is one the Node has
 /// no mode for, `dontAsk`) is refused visibly, never run on the Hub: it ends at once, says why in
-/// it and on its item, and healthz counts it as a fallback since boot, never as a legacy session.
+/// it and on its item, and healthz counts it as a fallback since boot.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_session_no_node_takes_is_refused_visibly() {
     let h = Home::new();
@@ -1518,7 +1593,7 @@ async fn a_new_session_no_node_takes_is_refused_visibly() {
         [],
     )
     .expect("dontAsk");
-    let sid = c.item(&h, "回退验收 @say fallback-legacy-3F").await;
+    let sid = c.item(&h, "回退验收 @say fallback-unbound-3F").await;
     let n = wait_node_health(&h, |n| n["fallbacks"] == 1).await;
     assert_eq!(n["fallbacks"], 1, "{n}");
     assert_eq!(
@@ -1551,7 +1626,7 @@ async fn a_new_session_no_node_takes_is_refused_visibly() {
         "and on its item"
     );
     tokio::time::sleep(Duration::from_secs(2)).await;
-    assert_eq!(h.got("fallback-legacy-3F"), 0, "nothing ran it");
+    assert_eq!(h.got("fallback-unbound-3F"), 0, "nothing ran it");
     assert_eq!(hub.spawns(), 0, "no adapter started for it");
 }
 
@@ -1583,7 +1658,6 @@ async fn a_git_items_worktree_on_the_service_node() {
 
 async fn git_worktree_case(mode: &str) {
     let h = Home::new();
-    let _guard = ServiceNodeGuard(h.steve().join("data/node/service.pid"));
     let repo = h.dir.path().join("repo");
     std::fs::create_dir_all(&repo).expect("repo");
     git(&repo, &["init", "-q", "-b", "main"]);
@@ -2120,32 +2194,148 @@ fn walk(dir: &std::path::Path) -> Vec<PathBuf> {
     out
 }
 
-/// Stops the local Node a service-mode Hub started (its pid file), when the test ends either way.
-struct ServiceNodeGuard(PathBuf);
+/// The fixture retires its own executable, so it never signals an unowned or reused PID.
+struct ServiceNodeGuard {
+    executable: PathBuf,
+    node_lock: PathBuf,
+}
+
+impl ServiceNodeGuard {
+    fn new(dir: &std::path::Path, home: PathBuf) -> std::io::Result<Self> {
+        let source = env!("CARGO_BIN_EXE_steve-hub");
+        let executable = dir.join("steve-hub");
+        match std::fs::hard_link(source, &executable) {
+            Ok(()) => {}
+            Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+                std::fs::copy(source, &executable)?;
+            }
+            Err(e) => return Err(e),
+        }
+        Ok(Self {
+            executable,
+            node_lock: home.join("data/node/node.lock"),
+        })
+    }
+
+    fn stop(&self) -> std::io::Result<()> {
+        match std::fs::remove_file(&self.executable) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        let lock = match File::open(&self.node_lock) {
+            Ok(lock) => lock,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        // The Node holds its home lock until it shuts down. The executable is gone even if
+        // the fixture stopped the Hub before its Node had opened the lock.
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            match lock.try_lock() {
+                Ok(()) => return Ok(()),
+                Err(TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Err(TryLockError::WouldBlock) => {
+                    return Err(std::io::Error::other("local Node did not shut down"));
+                }
+                Err(TryLockError::Error(e)) => return Err(e),
+            }
+        }
+    }
+}
 
 impl Drop for ServiceNodeGuard {
     fn drop(&mut self) {
-        if let Some(pid) = std::fs::read_to_string(&self.0)
-            .ok()
-            .and_then(|s| s.lines().next()?.trim().parse::<i32>().ok())
-        {
-            unsafe {
-                libc::killpg(pid, libc::SIGKILL);
-                libc::kill(pid, libc::SIGKILL);
+        if let Err(e) = self.stop() {
+            if !std::thread::panicking() {
+                panic!("retiring the fixture's local Node: {e}");
             }
+            eprintln!("retiring the fixture's local Node: {e}");
+        }
+    }
+}
+
+async fn linked_service(h: &Home) -> (Hub, File) {
+    let hub = spawn_mode(
+        h,
+        Some("service"),
+        &[
+            ("STEVE_ADAPTER_CLAUDE", "/usr/bin/false"),
+            ("STEVE_LOG", "info"),
+        ],
+    );
+    serving(h).await;
+    wait_node_health(h, |n| n["reconciled"] == true).await;
+    let lock = File::open(h.steve().join("data/node/node.lock")).unwrap();
+    assert!(matches!(lock.try_lock(), Err(TryLockError::WouldBlock)));
+    (hub, lock)
+}
+
+#[tokio::test]
+async fn fixture_timeout_stops_its_detached_service_node() {
+    let h = Home::new();
+    let (hub, lock) = linked_service(&h).await;
+    let executable = h.service_executable().to_owned();
+    let mut log = File::open(h.steve().join("data/node/logs/local-node.log")).unwrap();
+    let timed_out = tokio::time::timeout(Duration::from_millis(10), async move {
+        let _home = h;
+        let _hub = hub;
+        std::future::pending::<()>().await;
+    })
+    .await;
+    assert!(timed_out.is_err());
+    assert!(!executable.exists());
+    lock.try_lock().expect("the fixture released the Node home");
+    let mut written = String::new();
+    std::io::Read::read_to_string(&mut log, &mut written).unwrap();
+    assert!(written.contains("node shutdown completed"), "{written}");
+}
+
+#[tokio::test]
+async fn local_service_exits_when_its_home_or_executable_disappears() {
+    for remove_home in [true, false] {
+        let h = Home::new();
+        let (mut hub, lock) = linked_service(&h).await;
+        hub.kill_hub_group();
+        assert!(matches!(lock.try_lock(), Err(TryLockError::WouldBlock)));
+        let executable = h.service_executable();
+        if remove_home {
+            std::fs::rename(h.steve(), h.dir.path().join("retired-home")).unwrap();
+            assert!(executable.exists());
+        } else {
+            std::fs::remove_file(executable).unwrap();
+            assert!(h.steve().is_dir());
+        }
+        eventually_sync(
+            "the local Node releases its home after being retired",
+            || match lock.try_lock() {
+                Ok(()) => true,
+                Err(TryLockError::WouldBlock) => false,
+                Err(e) => panic!("checking the Node home lock: {e}"),
+            },
+        )
+        .await;
+        if remove_home {
+            assert!(
+                !h.steve().exists(),
+                "the Node did not recreate its Hub home"
+            );
         }
     }
 }
 
 /// B1: with `STEVE_NODE_MODE=service` the Hub's own Node runs in a process of its own. A turn
 /// running there goes on while the Hub is killed (its process group only, as a service manager
-/// stops it) and started again; the restarted Hub catches up, and the turn is never sent twice.
+/// stops it) and started again on the same HTTP port; the Node must not hold the Hub's listener.
+/// The restarted Hub catches up, and the turn is never sent twice.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_service_node_turn_outlives_the_hub() {
     let h = Home::new();
-    let _guard = ServiceNodeGuard(h.steve().join("data/node/service.pid"));
     let hub = spawn_mode(&h, Some("service"), &[]);
     serving(&h).await;
+    let addr = h.address.lock().unwrap().expect("the first Hub's address");
     let c = Client::login(&h).await;
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
@@ -2194,7 +2384,7 @@ async fn a_service_node_turn_outlives_the_hub() {
         };
         format!(
             "hub:\n{}\nnode:\n{}",
-            tail(h.dir.path().join("hub.log")),
+            tail(hub_log_path(&h)),
             tail(h.steve().join("data/node/logs/local-node.log"))
         )
     };
@@ -2217,13 +2407,6 @@ async fn a_service_node_turn_outlives_the_hub() {
         || h.got("存活验收-V6") == 1,
     )
     .await;
-    let started = std::time::Instant::now();
-    let mut hub = hub;
-    let mut child = hub.0.take().unwrap();
-    let pid = child.id() as i32;
-    unsafe { libc::killpg(pid, libc::SIGKILL) };
-    let _ = child.wait();
-    drop(child);
     let node_pid: i32 = std::fs::read_to_string(h.steve().join("data/node/service.pid"))
         .expect("the Node's pid")
         .lines()
@@ -2232,14 +2415,19 @@ async fn a_service_node_turn_outlives_the_hub() {
         .trim()
         .parse()
         .expect("pid");
+    let started = std::time::Instant::now();
+    let mut hub = hub;
+    hub.kill_hub_group();
     assert_eq!(
         unsafe { libc::kill(node_pid, 0) },
         0,
         "the Node outlived the Hub"
     );
 
-    let _hub = spawn_mode(&h, Some("service"), &[]);
+    let port = addr.port().to_string();
+    let _hub = spawn_mode(&h, Some("service"), &[("STEVE_PORT", &port)]);
     serving(&h).await;
+    assert_eq!(*h.address.lock().unwrap(), Some(addr));
     let tail = |p: PathBuf| {
         let s = std::fs::read_to_string(p).unwrap_or_default();
         let l: Vec<&str> = s.lines().collect();
@@ -2249,7 +2437,7 @@ async fn a_service_node_turn_outlives_the_hub() {
         format!(
             "The turn finishes through the Hub restart and stores its reply; the turn finished through the Hub's restart; states {}; hub:\n{}\nnode:\n{}",
             states(&h),
-            tail(h.dir.path().join("hub.log")),
+            tail(hub_log_path(&h)),
             tail(h.steve().join("data/node/logs/local-node.log"))
         )
     });
@@ -2375,25 +2563,17 @@ async fn node_tags_send_work_where_it_fits() {
             Some(json!({})),
         )
         .await;
-    assert_eq!(s, 200, "{v}");
-    let third = v["session"].as_str().expect("new session").to_string();
-    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
-        format!(
-            "The session explains that no available Node has the required tag; Hub log:\n{}",
-            hub_log(&h)
-        )
-    });
-    eventually_sync(diagnostic, || h.count("SELECT COUNT(*) FROM events WHERE session_id=? AND kind='system' AND instr(data,'cuda')>0", &third) == 1).await;
-    eventually_sync(
-        "The unpinned session is placed through the ordinary Node selection path.",
-        || {
-            h.count(
-                "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=?",
-                &third,
-            ) == 1
-        },
-    )
-    .await;
+    // the tag narrows the Bot's execution Nodes; none of them has it, so nothing is placed
+    assert_ne!(s, 200, "{v}");
+    assert!(
+        v["error"].as_str().is_some_and(|e| e.contains("标签")),
+        "{v}"
+    );
+    assert_eq!(
+        h.count("SELECT COUNT(*) FROM sessions WHERE item_id=?", &item),
+        2,
+        "no third session"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

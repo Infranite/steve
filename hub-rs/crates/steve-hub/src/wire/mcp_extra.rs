@@ -93,13 +93,7 @@ fn devices(store: &Store, cx: &mcp::McpCx, args: &Value) -> Result<String, Strin
             let v = store
                 .reader(|c| {
                     let tags = steve_store::nodes::all_tags(c)?;
-                    let online = |id: &str| -> Result<bool, steve_store::StoreError> {
-                        Ok(c.query_row(
-                            "SELECT EXISTS(SELECT 1 FROM node_vitals WHERE node_id=? AND at>=?)",
-                            rusqlite::params![id, since],
-                            |r| r.get(0),
-                        )?)
-                    };
+                    let online = |id: &str| crate::metrics::latest_node(id, since).is_some();
                     let mut out = vec![json!({
                         "node": "local", "name": "Hub", "tags": tags.get("local").cloned().unwrap_or_default(),
                         "online": true
@@ -113,7 +107,7 @@ fn devices(store: &Store, cx: &mcp::McpCx, args: &Value) -> Result<String, Strin
                     for (id, name, state) in rows {
                         out.push(json!({
                             "node": id, "name": name, "tags": tags.get(&id).cloned().unwrap_or_default(),
-                            "online": online(&id)?, "paused": state == "paused"
+                            "online": online(&id), "paused": state == "paused"
                         }));
                     }
                     Ok::<_, steve_store::StoreError>(out)
@@ -303,7 +297,8 @@ fn session_cx(store: &Store, s: &steve_store::Session) -> Result<mcp::McpCx, Str
     })
 }
 
-/// Legacy owner-facing modules. New personal tools must use the authenticated session principal.
+/// The workspace owner: whom a research run's tools act for (a run has no session principal).
+/// Personal tools must use the authenticated session principal.
 pub(crate) fn owner(store: &Store, ws: &str) -> Option<String> {
     store
         .with_conn(|c| {
@@ -646,8 +641,8 @@ async fn reply_source(x: &Extra, cx: &mcp::McpCx, args: &Value) -> Result<String
                 ws: cx.ws.clone(),
                 me: cx.user.clone(),
             };
-            // Old clients need no new argument: the same update from this session has the
-            // same intent identity after a tool timeout or Hub restart, not a fresh UUID.
+            // Without a key, the same update from this session has the same intent identity
+            // after a tool timeout or Hub restart, not a fresh UUID.
             let key = args["key"].as_str().map(str::to_string).unwrap_or_else(|| {
                 format!(
                     "source:{}:{}:{}",

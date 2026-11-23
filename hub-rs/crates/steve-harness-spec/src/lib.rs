@@ -149,7 +149,7 @@ pub struct StateDir {
     /// Claude Code's `.claude.json`: written in ambient mode, hidden from non-owner principals.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub home_files: Vec<String>,
-    /// Optional auxiliary HOME for legacy external bridges.
+    /// Optional auxiliary HOME for the adapter process: a plain directory under the state one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home: Option<String>,
 }

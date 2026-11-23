@@ -1,5 +1,5 @@
-/* 统计页（stats.md §6）：#/stats 与下钻 #/stats/items/:id。只有 Rust Hub 有这些接口；
- * 拿不到（TS Hub）时显示“还没有接入”，不显示示例数据。费用处处标“估”。
+/* 统计页（stats.md §6）：#/stats 与下钻 #/stats/items/:id。
+ * 拿不到这些接口时显示“还没有接入”，不显示示例数据。费用处处标“估”。
  * stats v2 按用途从上到下：筛选（时间、项目、Bot）→ 一行“现在”（进行中 · 等你 · 失败，YOLO 状态）→ 关键数字（和上一段比）
  * → 每天的产出（完成数和费用）→ 钱和时间花在哪（构成 + 最贵的事项，点进费用去向）→ 工作流 → Bot 对比 → harness · 模型对比
  * → 事件浏览器（默认收起）。历史数字跟随时间范围、项目与 Bot；实时输出只跟随项目与 Bot。 */
@@ -117,13 +117,13 @@ export function StatsView() {
 
 function StatsBody({ s, f, setF, fkey, live, drill, setDrill }: { s: Summary; f: Filter; setF: (f: Filter) => void; fkey: string; live: boolean; drill: Drill | null; setDrill: (d: Drill | null) => void }) {
   const t = useT()
-  const nothing = !s.usage.coverage?.expected && s.usage.total === 0 && s.usage.reported === 0 && s.usage.turns === 0 && s.throughput.created === 0 && s.throughput.done === 0 && s.human.decisions === 0 && s.throughput.wip === 0
+  const nothing = !s.usage.coverage.expected && s.usage.total === 0 && s.usage.reported === 0 && s.usage.turns === 0 && s.throughput.created === 0 && s.throughput.done === 0 && s.human.decisions === 0 && s.throughput.wip === 0
   const since = s.since.tokens
   const rangeName = NAME(f.range), prevName = PREV(f.range)
   return (
     <div className="flex flex-col gap-10">
       <KeyNumbers s={s} prevName={prevName} />
-      <p className="px-3 type-footnote text-muted-foreground" data-stats-usage={s.usage.coverage?.state}>tokens · {fmtUsage(s.usage)}</p>
+      <p className="px-3 type-footnote text-muted-foreground" data-stats-usage={s.usage.coverage.state}>tokens · {fmtUsage(s.usage)}</p>
       {nothing ? <Empty title={t("stats:page.nothing")} sub={t("stats:page.nothingSub")} /> : <>
         <Section k="daily" title={t("stats:v2.daily.section")} sub={t("stats:v2.daily.sectionSub")}>
           <DailyChart s={s} f={f} fkey={fkey} live={live} drill={drill} setDrill={setDrill} rangeName={rangeName} />

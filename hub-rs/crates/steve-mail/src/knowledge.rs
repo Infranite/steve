@@ -15,9 +15,9 @@ use steve_knowledge::candidates::OriginKind;
 use steve_knowledge::chunk::TextKind;
 use steve_knowledge::extract_text::{Extracted, FrontMatter};
 use steve_knowledge::index::{self, BoxFuture, DocLoader, Loaded};
-use steve_knowledge::repo::{self as kb_repo, DocRow, NewDoc, SourceRow};
 use steve_modules::{Caller, Modules};
-use steve_store::base::{self, Level, ObjRef, Visibility};
+use steve_store::base::{Level, ObjRef, Visibility};
+use steve_store::knowledge::{DocRow, Documents, NewDoc, SourceRow};
 use steve_store::uid;
 
 use crate::Mail;
@@ -159,14 +159,8 @@ impl Mail {
         let now = self.now();
         let id = self.0.m.store.write(|tx| -> MailResult<String> {
             let msgs = repo::thread_messages(tx, &t.id)?;
-            let src = steve_knowledge::sources::builtin(
-                &tx.legacy(),
-                &who.ws,
-                SOURCE_KIND,
-                &who.me,
-                now,
-            )?;
-            let id = match kb_repo::doc_by_ref(&tx.legacy(), &src.id, &t.id)? {
+            let src = steve_knowledge::sources::builtin(tx, &who.ws, SOURCE_KIND, &who.me, now)?;
+            let id = match Documents(tx).doc_by_ref(&src.id, &t.id)? {
                 Some(d) => d.id,
                 None => {
                     let id = uid("kd");
@@ -175,8 +169,7 @@ impl Mail {
                     } else {
                         t.subject.chars().take(120).collect()
                     };
-                    kb_repo::insert_doc(
-                        &tx.legacy(),
+                    Documents(tx).insert_doc(
                         &who.ws,
                         &NewDoc {
                             id: id.clone(),
@@ -191,8 +184,7 @@ impl Mail {
                         },
                         now,
                     )?;
-                    base::audit(
-                        &tx.legacy(),
+                    tx.audit(
                         &who.ws,
                         &who.me,
                         "mail_thread.to_knowledge",
@@ -202,17 +194,11 @@ impl Mail {
                     id
                 }
             };
-            kb_repo::set_doc_about(&tx.legacy(), &who.ws, &id, &senders(&msgs))?;
-            let doc = kb_repo::doc(&tx.legacy(), &id)?
+            Documents(tx).set_doc_about(&who.ws, &id, &senders(&msgs))?;
+            let doc = Documents(tx)
+                .doc(&id)?
                 .ok_or(steve_store::StoreError::NotFound("文档"))?;
-            index::index_doc(
-                &tx.legacy(),
-                &doc,
-                &src,
-                &extracted(thread_text(&msgs)),
-                now,
-                false,
-            )?;
+            index::index_document(tx, &doc, &src, &extracted(thread_text(&msgs)), now, false)?;
             Ok(id)
         })?;
         if let Some(kb) = &self.0.kb {
@@ -234,7 +220,7 @@ impl Mail {
                 return Ok(None);
             };
             let msgs = repo::thread_messages(c, &t.id)?;
-            let done = self.0.m.store.reader(|c| kb_repo::mark(c, ws, &mark))?;
+            let done = Documents(c).mark(ws, &mark)?;
             Ok(Some((t, msgs, done)))
         })?;
         let Some((t, msgs, done)) = found else {
@@ -274,7 +260,7 @@ impl Mail {
         self.0
             .m
             .store
-            .write(|tx| kb_repo::set_mark(&tx.legacy(), ws, &mark, &last, now))?;
+            .write(|tx| Documents(tx).set_mark(ws, &mark, &last, now))?;
         Ok(n)
     }
 }

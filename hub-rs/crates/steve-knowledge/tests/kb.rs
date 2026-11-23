@@ -283,9 +283,8 @@ async fn never_memories_are_not_returned() {
     let id = keep["id"].as_str().unwrap().to_string();
     e.env
         .store()
-        .transaction(|tx| {
-            mems::patch(
-                tx,
+        .write(|tx| {
+            steve_store::knowledge::Memories(tx).patch(
                 &id,
                 &mems::MemPatch {
                     level: Some(Level::Never),
@@ -682,9 +681,8 @@ fn mem_rows_follow_their_memory_scope() {
     let now = steve_store::now();
     let id = env
         .store()
-        .transaction(|tx| {
-            let m = mems::create(
-                tx,
+        .write(|tx| {
+            let m = steve_store::knowledge::Memories(tx).create(
                 WS,
                 &NewMem {
                     text: "团队周会改到周二".into(),
@@ -694,7 +692,7 @@ fn mem_rows_follow_their_memory_scope() {
                     ..Default::default()
                 },
             )?;
-            tx.write(|w| sync::sync_mem(w, &m.id, now))?;
+            sync::sync_mem(tx, &m.id, now)?;
             Ok::<_, StoreError>(m.id)
         })
         .unwrap();

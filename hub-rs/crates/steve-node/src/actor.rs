@@ -273,6 +273,7 @@ struct Live {
     pgid: i64,
     started: Option<u64>,
     cumulative_prompt_tokens: Option<(u64, u64, u64, u64, u64)>,
+    cumulative_context_cost: f64,
 }
 
 impl Drop for Live {
@@ -293,6 +294,7 @@ impl From<LiveNew> for Live {
             pgid: l.pgid,
             started: l.started,
             cumulative_prompt_tokens: l.cumulative_prompt_tokens,
+            cumulative_context_cost: 0.0,
         }
     }
 }
@@ -1344,6 +1346,7 @@ impl Actor {
                 live.cumulative_prompt_tokens = Some(t);
             }
             let run = self.run.as_mut().expect("checked");
+            let process_cost = &mut self.live.as_mut().expect("checked").cumulative_context_cost;
             for f in run.norm.update(u) {
                 match f {
                     Fact::Event(EventBody::Usage { report })
@@ -1353,6 +1356,21 @@ impl Actor {
                             Subject::Session {
                                 session: session.clone(),
                             },
+                            EventBody::Usage { report },
+                        ));
+                    }
+                    Fact::Event(EventBody::Usage { mut report }) => {
+                        // ACP's context notification carries a process total. Publish the increment
+                        // of this attempt so it can be booked independently of earlier turns.
+                        report.measurement = Measurement::Delta;
+                        if let Some(cost) = &mut report.cost
+                            && let Some(total) = usage::decimal_amount(&cost.decimal)
+                        {
+                            cost.decimal = (total - *process_cost).max(0.0).to_string();
+                            *process_cost = process_cost.max(total);
+                        }
+                        evs.push((
+                            Subject::Execution(run.exec.clone()),
                             EventBody::Usage { report },
                         ));
                     }

@@ -547,16 +547,6 @@ async fn telling_it_how_to_reply_drafts_with_your_words_once() {
     assert_eq!(compose_prompts(&h).len(), n);
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_card_opened_before_keeps_its_reply_field() {
-    let h = setup().await;
-    let (_, d) = asked(&h, "a1", 0).await;
-    seed::decisions::set_decision_options(h.env.store(), &d).unwrap();
-    let r = decide_as(&h, ME, &d, "draft_reply", "我晚点回你").expect("drafted");
-    let out = r.result["draft_message"].as_str().unwrap().to_string();
-    assert_eq!(status(&h, &out), "draft", "still waits for your approval");
-}
-
 // ---------------------------------------------------------------- the card's life
 
 /// A's card at your @ in the dev group, with the composer's question `summary` and `reason`.

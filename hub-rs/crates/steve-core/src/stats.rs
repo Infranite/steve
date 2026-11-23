@@ -152,17 +152,6 @@ impl AttemptAccount {
     pub async fn scope<F: std::future::Future>(&self, f: F) -> F::Output {
         ATTEMPT.scope(self.clone(), f).await
     }
-    pub fn report(&self, r: &steve_node_api::UsageReport) -> steve_store::Result<bool> {
-        let received =
-            self.call
-                .store
-                .stats()
-                .gateway_local_receive(&self.id, r, steve_store::now())?;
-        if let Err(e) = self.call.store.stats().gateway_apply_local(128) {
-            tracing::warn!("stats: local report durably queued: {e}");
-        }
-        Ok(received)
-    }
 }
 struct CallGuard(Option<CallAccount>);
 impl Drop for CallGuard {
@@ -184,7 +173,8 @@ impl RecordingGateway {
         Self { inner, store }
     }
 }
-/// Compatibility entry for a completed external call. Live runners allocate CallAccount first.
+/// Records a completed external call made outside a [`CallAccount`] (live runners allocate one
+/// first and finish it themselves).
 pub fn record(store: &Store, a: &Attempt, tag: &CallTag) -> steve_store::Result<()> {
     if let Some(c) = current_call() {
         return c.finish(a);
@@ -272,12 +262,9 @@ mod tests {
         }
     }
 
-    /// The stand-in adapter ([`crate::testkit::FakeAcp`]): model `haiku` answers "ok" with its
-    /// usage and cost, `busy` with a 503, `slow` hangs, `broken` dies.
-    fn fake(dir: &std::path::Path) -> Arc<dyn ModelGateway> {
-        let acp = crate::testkit::FakeAcp::new(dir, "ok");
-        Arc::new(crate::InProcess {
-            one: acp.one(),
+    fn fake() -> Arc<dyn ModelGateway> {
+        Arc::new(crate::Fallback {
+            one: Scripted::default(),
             fast: vec!["busy".into(), "haiku".into()],
             smart: vec!["slow".into(), "broken".into()],
             models: None,
@@ -288,52 +275,13 @@ mod tests {
         Store::open(dir.join("steve.sqlite3"), steve_store::FnPublisher(|_| {})).unwrap()
     }
 
-    #[derive(Debug, PartialEq)]
-    struct Row {
-        ws: String,
-        purpose: String,
-        model: String,
-        tokens: Tokens,
-        cost: Option<f64>,
-        ok: bool,
-        attempts: i64,
-        duration_ms: Option<i64>,
-        item: Option<String>,
-        detail: Value,
-    }
-
-    fn rows(s: &Store) -> Vec<Row> {
-        s.with_conn(|c| {
-            let mut st = c.prepare(
-                "SELECT workspace_id, purpose, model, input, output, cache_read, cache_write, reasoning, cost_reported, ok, attempts, item_id, detail, source, harness, duration_ms FROM usage_records ORDER BY id",
-            )?;
-            let v = st
-                .query_map([], |r| {
-                    assert_eq!(r.get::<_, String>(13)?, "gateway");
-                    assert_eq!(r.get::<_, String>(14)?, "claude-code");
-                    Ok(Row {
-                        ws: r.get(0)?,
-                        purpose: r.get(1)?,
-                        model: r.get(2)?,
-                        tokens: Tokens {
-                            input: r.get(3)?,
-                            output: r.get(4)?,
-                            cache_read: r.get(5)?,
-                            cache_write: r.get(6)?,
-                            reasoning: r.get(7)?,
-                        },
-                        cost: r.get(8)?,
-                        ok: r.get(9)?,
-                        attempts: r.get(10)?,
-                        duration_ms: r.get(15)?,
-                        item: r.get(11)?,
-                        detail: serde_json::from_str(&r.get::<_, String>(12)?).unwrap(),
-                    })
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(v)
-        })
-        .unwrap()
+    fn rows(s: &Store) -> Vec<steve_store::core_fixture::usage::Usage> {
+        let rows = steve_store::core_fixture::usage::usage(s, None);
+        for row in &rows {
+            assert_eq!(row.source, "gateway");
+            assert_eq!(row.harness, "claude-code");
+        }
+        rows
     }
 
     #[tokio::test]
@@ -390,17 +338,15 @@ mod tests {
             assert_eq!(current_tag().item_id, Some(item_id));
         })
         .await;
-        s.reader::<_,steve_store::StoreError>(|db| {
-            let row:(String,Option<String>,i64)=db.query_row("SELECT workspace_id,bot_id,(SELECT COUNT(*) FROM gateway_attempts) FROM gateway_calls WHERE call_id=?",[&c.id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
-            assert_eq!(row,(steve_store::WS.into(),Some("owner".into()),0));Ok(())
-        }).unwrap();
+        let row = steve_store::core_fixture::usage::started_gateway_call(&s, &c.id);
+        assert_eq!(row, (steve_store::WS.into(), Some("owner".into()), 0));
     }
 
     #[tokio::test]
     async fn a_call_that_falls_back_is_one_row_with_two_attempts() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        let gw = RecordingGateway::new(fake(dir.path()), s.clone());
+        let gw = RecordingGateway::new(fake(), s.clone());
         let p = tagged(
             "route",
             "default",
@@ -433,25 +379,19 @@ mod tests {
             json!({"scope": "main", "failures": ["busy: API Error: 503 upstream unavailable"], "call_id": r[0].detail["call_id"], "pending": false, "accounting_tokens": true})
         );
         /* the daily cube agrees */
-        let (calls, input, hit_base): (i64, i64, i64) = s
-            .with_conn(|c| {
-                Ok(c.query_row(
-                    "SELECT SUM(calls), SUM(cache_read), SUM(hit_base) FROM stat_daily WHERE source = 'gateway' AND purpose = 'route'",
-                    [],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )?)
-            })
-            .unwrap();
-        assert_eq!((calls, input, hit_base), (1, 11_097, 2 + 11_097 + 5_727));
+        let daily = steve_store::core_fixture::usage::gateway_daily(&s, Some("route"));
+        assert_eq!(
+            (daily.calls, daily.cache_read, daily.hit_base),
+            (1, 11_097, 2 + 11_097 + 5_727)
+        );
     }
 
     #[tokio::test]
     async fn a_failed_untagged_call_is_still_a_row() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        let gw = RecordingGateway::new(fake(dir.path()), s.clone());
-        // `slow` times out, and a timeout ends the chain (#9): `dead` is not tried; the bound leaves room
-        // for a loaded test run to spawn the script (300 ms was flaky)
+        let gw = RecordingGateway::new(fake(), s.clone());
+        // A timeout ends fallback before the next model.
         let e = gw
             .call(
                 "hi",
@@ -481,20 +421,15 @@ mod tests {
             r[0].detail,
             json!({"scope": "none", "failures": ["slow: [timeout] Command timed out after 1500 ms"], "call_id": r[0].detail["call_id"], "pending": false, "accounting_tokens": true})
         );
-        let failed: i64 = s
-            .with_conn(
-                |c| Ok(c.query_row("SELECT failed_calls FROM stat_daily", [], |r| r.get(0))?),
-            )
-            .unwrap();
-        assert_eq!(failed, 1);
+        let daily = steve_store::core_fixture::usage::gateway_daily(&s, None);
+        assert_eq!(daily.failures, 1);
     }
 
     #[tokio::test]
     async fn module_calls_and_streaming_answers_are_recorded_too() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        let gw: Arc<dyn ModelGateway> =
-            Arc::new(RecordingGateway::new(fake(dir.path()), s.clone()));
+        let gw: Arc<dyn ModelGateway> = Arc::new(RecordingGateway::new(fake(), s.clone()));
         /* the modules' gateway, as a flow calls it */
         let o = tagged(
             "flow",
@@ -518,8 +453,8 @@ mod tests {
         /* a chat answer, streamed */
         let seen = std::sync::Mutex::new(0);
         let fast_only = RecordingGateway::new(
-            Arc::new(crate::InProcess {
-                one: crate::testkit::FakeAcp::new(dir.path(), "ok").one(),
+            Arc::new(crate::Fallback {
+                one: Scripted::default(),
                 fast: vec!["haiku".into()],
                 smart: vec!["haiku".into()],
                 models: None,
@@ -554,8 +489,7 @@ mod tests {
     /// One try as [`Scripted`] saw it: model, effort, harness, timeout in ms, streaming.
     type Try = (String, Option<String>, String, u128, bool);
 
-    /// A [`crate::gateway::OneModel`] that answers like [`fake`]'s script without a process, and notes
-    /// what each try was given.
+    #[derive(Default)]
     struct Scripted {
         tries: std::sync::Mutex<Vec<Try>>,
     }
@@ -583,7 +517,7 @@ mod tests {
                         model: model.into(),
                         tokens: haiku(),
                         cost_reported: Some(0.000829045),
-                        detail: json!({"scope": "main"}),
+                        detail: json!({"scope": "main", "accounting_tokens": true}),
                     }],
                 ),
                 "busy" => (
@@ -605,6 +539,9 @@ mod tests {
                     vec![],
                 ),
             };
+            if let (Some(on_text), Ok((text, _))) = (on_text, &reply) {
+                on_text(text);
+            }
             let timed_out = model == "slow";
             crate::gateway::Tried {
                 reply,
@@ -613,65 +550,6 @@ mod tests {
                 reported_model: None,
             }
         }
-    }
-
-    /// What the statistics see of an attempt, its wall time left out.
-    fn seen(a: &Attempt) -> String {
-        let result = match &a.result {
-            Ok(p) => format!(
-                "ok {:?} {} {:?} {} {:?}",
-                p.text, p.model, p.cost_usd, p.attempts, p.usage
-            ),
-            Err(e) => format!("err {e}"),
-        };
-        format!(
-            "{result} | {} {} {:?} {:?} {:?}",
-            a.attempts, a.model, a.failures, a.usage, a.harness
-        )
-    }
-
-    /// The fallback over a scripted single model gives the same attempts as over the CLI: model order,
-    /// failures, merged usage, the answer and its cost.
-    #[tokio::test]
-    async fn the_fallback_over_a_scripted_model_matches_the_cli() {
-        let dir = tempfile::tempdir().unwrap();
-        let cli = fake(dir.path());
-        let scripted = crate::gateway::Fallback {
-            one: Scripted {
-                tries: Default::default(),
-            },
-            fast: vec!["busy".into(), "haiku".into()],
-            smart: vec!["slow".into(), "broken".into()],
-            models: None,
-        };
-        let seen_text = std::sync::Mutex::new(0);
-        let on_text = |_: &str| *seen_text.lock().unwrap() += 1;
-        for (tier, timeout, streaming) in [
-            (Tier::Fast, Duration::from_secs(10), false),
-            (Tier::Fast, Duration::from_secs(10), true),
-            (Tier::Smart, Duration::from_millis(1500), false),
-        ] {
-            let text: Option<crate::gateway::OnText<'_>> = streaming.then_some(&on_text);
-            let want = cli
-                .attempt("hi", tier, timeout, &ThinkTools::None, text)
-                .await;
-            let got = scripted
-                .attempt("hi", tier, timeout, &ThinkTools::None, text)
-                .await;
-            assert_eq!(seen(&got), seen(&want), "{tier:?} streaming {streaming}");
-        }
-        let a = &tries(&scripted);
-        assert_eq!(
-            a,
-            &[
-                ("busy".to_string(), None, cc(), 10_000, false),
-                ("haiku".into(), None, cc(), 10_000, false),
-                ("busy".into(), None, cc(), 10_000, true),
-                ("haiku".into(), None, cc(), 10_000, true),
-                // #9: a timeout ends the chain, the next model is not tried
-                ("slow".into(), None, cc(), 1500, false),
-            ]
-        );
     }
 
     /// A model that reached for a tool the call does not allow, for a caller that hands such a
@@ -769,10 +647,8 @@ mod tests {
     }
 
     fn counts(s: &Store) -> (i64, i64, i64, i64) {
-        s.with_conn(|c| Ok(c.query_row(
-            "SELECT SUM(calls), SUM(failed_calls), SUM(output), SUM(reasoning) FROM stat_daily WHERE source = 'gateway'",
-            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )?)).unwrap()
+        let daily = steve_store::core_fixture::usage::gateway_daily(s, None);
+        (daily.calls, daily.failures, daily.output, daily.reasoning)
     }
 
     #[test]

@@ -297,21 +297,18 @@ fn item(h: &H, no: i64, branch: Option<&str>) -> String {
     h.env
         .store()
         .write(|tx| {
-            steve_store::base::decisions::open(
-                &tx.legacy(),
-                &NewDecision {
-                    workspace_id: WS.into(),
-                    kind: "accept".into(),
-                    subject_type: "item".into(),
-                    subject_id: id.clone(),
-                    item_id: Some(id.clone()),
-                    session_id: None,
-                    question: "做完了，请验收".into(),
-                    draft: Some("登录后回到原来的页面。\n✓ 单元测试".into()),
-                    options: Some(vec!["pass".into(), "rework".into()]),
-                    requested_by: "steve".into(),
-                },
-            )
+            steve_store::DecisionRows(tx).open(&NewDecision {
+                workspace_id: WS.into(),
+                kind: "accept".into(),
+                subject_type: "item".into(),
+                subject_id: id.clone(),
+                item_id: Some(id.clone()),
+                session_id: None,
+                question: "做完了，请验收".into(),
+                draft: Some("登录后回到原来的页面。\n✓ 单元测试".into()),
+                options: Some(vec!["pass".into(), "rework".into()]),
+                requested_by: "steve".into(),
+            })
         })
         .expect("accept decision");
     id
@@ -507,13 +504,7 @@ async fn accepting_asks_first_and_no_pushes_or_opens_nothing() {
         .env
         .store()
         .write(|tx| {
-            Ok::<_, steve_modules::ApiError>(
-                h.env
-                    .modules
-                    .registry
-                    .before_undo(&tx.legacy(), &d)
-                    .is_err(),
-            )
+            Ok::<_, steve_modules::ApiError>(h.env.modules.registry.before_undo(tx, &d).is_err())
         })
         .expect("tx");
     assert!(refused);

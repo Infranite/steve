@@ -216,11 +216,9 @@ pub fn agent_key(harness: &str) -> String {
     format!("models.agent.{harness}")
 }
 
-/// Set once per workspace by [`Models::migrate`].
-pub const MIGRATED_KEY: &str = "models.v2";
-
-/// Set once per workspace by [`Models::migrate`], when the cheap purposes got their fast model.
-pub const FAST_KEY: &str = "models.v3";
+/// Set once per workspace by [`Models::migrate`] (or an explicit selection): the environment's
+/// model lists are not seeded again.
+pub const SEEDED_KEY: &str = "models.seeded";
 
 fn default_adapter() -> String {
     steve_harness_spec::DEFAULT_ADAPTER.0.into()
@@ -229,8 +227,6 @@ fn default_adapter() -> String {
 /// The harness to run on, the models to try in order (empty: the harness's own default) and the effort.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Choice {
-    /// Values stored before Steve became a bot have none: they ran on the default adapter.
-    #[serde(default = "default_adapter")]
     pub harness: String,
     #[serde(default)]
     pub models: Vec<String>,
@@ -749,15 +745,11 @@ impl Models {
     /// stay intact; the owner can replace them together when saving an explicit role allocation.
     pub fn migrate(&self, ws: &str) -> steve_store::Result<bool> {
         let s = self.store.settings();
-        let done = |k: &str| {
-            Ok::<_, steve_store::StoreError>(s.get::<Option<Value>>(ws, k, None)?.is_some())
-        };
-        if done(FAST_KEY)? {
+        if s.get::<Option<Value>>(ws, SEEDED_KEY, None)?.is_some() {
             return Ok(false);
         }
         let mut values = Map::new();
-        // the environment's lists were written when `models.v2` was: not a second time
-        if self.named() && !done(MIGRATED_KEY)? {
+        if self.named() {
             for p in &PURPOSES {
                 let Some(r) = self.recommended(p) else {
                     continue;
@@ -769,8 +761,7 @@ impl Models {
             }
         }
         let wrote = !values.is_empty();
-        values.insert(MIGRATED_KEY.into(), json!(2));
-        values.insert(FAST_KEY.into(), json!(1));
+        values.insert(SEEDED_KEY.into(), json!(true));
         self.write(ws, &values, "steve", "settings.models.migrate")?;
         Ok(wrote)
     }
@@ -806,32 +797,22 @@ impl Models {
     /// What each purpose ran on recently (gateway and research calls since `since`): per purpose the
     /// last call and the calls per harness and model, busiest first. `intent` counts as `route`.
     pub fn recent(&self, ws: &str, since: i64) -> BTreeMap<String, Value> {
+        let day = day_floor(since);
         let rows = self
             .store
-            .reader::<_, steve_store::StoreError>(|c| {
-                let mut st = c.prepare(
-                    "SELECT purpose, harness, model, count(*), max(ts), sum(CASE WHEN ok = 0 THEN 1 ELSE 0 END) FROM usage_records
-                     WHERE workspace_id = ? AND day >= ? AND source = 'gateway' AND ts >= ? AND model != ''
-                     GROUP BY purpose, harness, model",
-                )?;
-                let v = st
-                    .query_map(rusqlite::params![ws, day_floor(since), since], |r| {
-                        Ok((
-                            r.get::<_, String>(0)?,
-                            r.get::<_, String>(1)?,
-                            r.get::<_, String>(2)?,
-                            r.get::<_, i64>(3)?,
-                            r.get::<_, i64>(4)?,
-                            r.get::<_, i64>(5)?,
-                        ))
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok(v)
-            })
+            .read(|r| steve_store::core_usage::recent_gateway_use(r, ws, &day, since))
             .unwrap_or_default();
         type Used = (String, String, i64, i64, i64);
         let mut by: BTreeMap<String, Vec<Used>> = BTreeMap::new();
-        for (p, h, m, n, at, failed) in rows {
+        for steve_store::core_usage::RecentUse {
+            purpose: p,
+            harness: h,
+            model: m,
+            calls: n,
+            at,
+            failed,
+        } in rows
+        {
             let p = purpose_of(&p).map_or(p, |x| x.key.to_string());
             let list = by.entry(p).or_default();
             match list.iter_mut().find(|x| x.0 == h && x.1 == m) {
@@ -860,23 +841,18 @@ impl Models {
     /// per model the calls, the last success and the last failure. A passive check of which models
     /// currently answer: no model is asked anything.
     pub fn used(&self, ws: &str, harness: &str, since: i64) -> BTreeMap<String, Value> {
+        let day = day_floor(since);
         self.store
-            .reader::<_, steve_store::StoreError>(|c| {
-                let mut st = c.prepare(
-                    "SELECT model, count(*), max(CASE WHEN ok = 1 THEN ts END), max(CASE WHEN ok = 0 THEN ts END) FROM usage_records
-                     WHERE workspace_id = ? AND day >= ? AND harness = ? AND ts >= ? AND model != '' GROUP BY model",
-                )?;
-                let v = st
-                    .query_map(rusqlite::params![ws, day_floor(since), harness, since], |r| {
-                        Ok((
-                            r.get::<_, String>(0)?,
-                            json!({"calls": r.get::<_, i64>(1)?, "ok_at": r.get::<_, Option<i64>>(2)?, "failed_at": r.get::<_, Option<i64>>(3)?}),
-                        ))
-                    })?
-                    .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
-                Ok(v)
-            })
+            .read(|r| steve_store::core_usage::harness_model_use(r, ws, &day, harness, since))
             .unwrap_or_default()
+            .into_iter()
+            .map(|row| {
+                (
+                    row.model,
+                    json!({"calls": row.calls, "ok_at": row.ok_at, "failed_at": row.failed_at}),
+                )
+            })
+            .collect()
     }
 
     /// `GET /api/settings/models`: Steve's runtime, every purpose with its override, what it resolves
@@ -984,7 +960,7 @@ impl Models {
             validate(&json!({"purposes": {"route": light}}), &self.harnesses())
                 .map_err(|_| invalid())?;
         }
-        self.store.atomic(|| {
+        self.store.write::<_, crate::CoreError>(|_w| {
             let bot = self.store.bots().main()?.ok_or_else(invalid)?;
             if !self.store.bots().in_workspace(&bot.id, ws)? {
                 return Err(CoreError::Status(
@@ -1012,8 +988,7 @@ impl Models {
                     values.insert(key(p.key), Value::Null);
                 }
                 // A later discovery must not silently put the initial fast-model overrides back.
-                values.insert(MIGRATED_KEY.into(), json!(2));
-                values.insert(FAST_KEY.into(), json!(1));
+                values.insert(SEEDED_KEY.into(), json!(true));
             }
             values.insert("models.lightweight".into(), json!(choice.lightweight));
             values.insert(agent_key(&choice.harness), json!(choice.model));
@@ -1429,20 +1404,6 @@ mod tests {
             m.for_purpose("default", "route"),
             ch(CLAUDE_CODE, &["claude-sonnet-5-5", "sonnet", "opus"], None)
         );
-        // a value stored before Steve was a bot (no harness) ran on Claude Code and still does
-        s.settings()
-            .set(
-                "default",
-                json!({"models.yolo": {"models": ["opus"], "effort": "high"}})
-                    .as_object()
-                    .unwrap(),
-                "me",
-            )
-            .unwrap();
-        assert_eq!(
-            m.for_purpose("default", "yolo"),
-            ch(CLAUDE_CODE, &["opus"], Some("high"))
-        );
         // agent defaults are unchanged
         m.apply(
             "default",
@@ -1475,7 +1436,7 @@ mod tests {
         s.settings()
             .set(
                 "default",
-                json!({"models.title": {"models": ["opus"]}})
+                json!({"models.title": {"harness": "claude-code", "models": ["opus"]}})
                     .as_object()
                     .unwrap(),
                 "me",
@@ -1687,25 +1648,10 @@ mod tests {
             "u1",
         )
         .unwrap();
-        let (audits, revs): (Vec<String>, i64) = s
-            .with_conn(|c| {
-                let mut st = c.prepare(
-                    "SELECT detail FROM audit WHERE action = 'settings.models' AND actor = 'u1' ORDER BY id",
-                )?;
-                let a = st
-                    .query_map([], |r| r.get::<_, String>(0))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                let n = c.query_row(
-                    "SELECT count(*) FROM revisions WHERE object_type = 'settings' AND author = 'u1'",
-                    [],
-                    |r| r.get(0),
-                )?;
-                Ok((a, n))
-            })
-            .unwrap();
+        let (audits, revs) = steve_store::core_fixture::usage::model_audit(&s, "u1");
         assert_eq!(revs, 2);
         assert_eq!(audits.len(), 2);
-        let last: Value = serde_json::from_str(&audits[1]).unwrap();
+        let last = &audits[1];
         assert_eq!(last["before"]["models.yolo"]["models"], json!(["opus"]));
         assert_eq!(
             last["after"]["models.yolo"],

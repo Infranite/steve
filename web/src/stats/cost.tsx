@@ -30,15 +30,15 @@ async function pooled<X, Y>(xs: X[], n: number, f: (x: X) => Promise<Y>): Promis
 }
 
 /** a usage's cost: the estimate; with no tokens counted, the adapter's own quote (a lower bound) */
-const costOf = (u: Usage) => (u.coverage?.total === null ? u.coverage.cost_reported ?? undefined : u.total > 0 || u.coverage?.state === "complete" ? u.est : u.reported > 0 ? u.reported : undefined)
+const costOf = (u: Usage) => (u.coverage.total === null ? u.coverage.cost_reported ?? undefined : u.total > 0 || u.coverage.state === "complete" ? u.est : u.reported > 0 ? u.reported : undefined)
 /** the waterfall's "In": everything read, cached or not (its column head says so; the details split it) */
 const inOf = (u: Usage) => u.input + u.cache_read + u.cache_write
 
 /** Keep numeric lower bounds for bars, but pass truthful labels to every cell. */
 function usageText(u:Usage) {
   const c=u.coverage
-  const inputKnown=c && [c.input,c.cache_read,c.cache_write].some((v)=>v!=null)
-  const input={...u,total:inOf(u),coverage:c ? {...c,total:inputKnown?inOf(u):null} : undefined}
+  const inputKnown=[c.input,c.cache_read,c.cache_write].some((v)=>v!=null)
+  const input={...u,total:inOf(u),coverage:{...c,total:inputKnown?inOf(u):null}}
   return {tokensInText:fmtUsage(input),tokensOutText:fmtUsage(u,"output"),tokensText:fmtUsage(u),costText:fmtUsageCost(u)}
 }
 
@@ -86,7 +86,7 @@ function stepsOf(id: string, detail: ItemDetail | undefined, tree: TreeStat[], d
       id: sid, kind: "agent", status, name: `${n.item_id} ${d?.title ?? item?.t ?? ""}`.trim(), model: [item?.b ? st.bots[item.b]?.n ?? item.b : "", (d ? d.usage.total === 0 && d.usage.reported > 0 : n.tokens === 0 && n.reported > 0) ? t("stats:cost.quote") : ""].filter(Boolean).join(" · ") || undefined,
       duration: n.agent_ms ?? undefined, children,
       /* its figures come from its turns; without them (not loaded) its own total from the tree, which has no in/out split */
-      ...(d ? {} : { costText:n.coverage?.total===null?fmtUsage({total:n.tokens,coverage:n.coverage}):undefined, tokensText:fmtUsage({total:n.tokens,coverage:n.coverage}), cost: n.tokens > 0 ? n.est : n.reported > 0 ? n.reported : undefined, tokens: n.tokens, unpriced: n.unpriced_tokens }),
+      ...(d ? {} : { costText:n.coverage.total===null?fmtUsage({total:n.tokens,coverage:n.coverage}):undefined, tokensText:fmtUsage({total:n.tokens,coverage:n.coverage}), cost: n.tokens > 0 ? n.est : n.reported > 0 ? n.reported : undefined, tokens: n.tokens, unpriced: n.unpriced_tokens }),
     }])
   }
   return own.sort((a, b) => a[0] - b[0]).map(([, s]) => s)
@@ -114,10 +114,10 @@ export function CostPanel({ d }: { d: ItemDetail }) {
   const kids = tree ? tree.nodes.filter((n) => n.depth > 0).length : 0
   const open = d.facts.done_at == null && d.facts.dropped_at == null
   const coverages=[d.usage.coverage,...(tree?.nodes.filter((n)=>n.depth>0).map((n)=>tree.details.get(n.item_id)?.usage.coverage??n.coverage)??[])]
-  const incomplete=coverages.some((c)=>!c || c.state!=="complete")
-  const anyKnown=coverages.some((c)=>c?.total!=null) || (!d.usage.coverage && d.usage.total>0)
-  const state=anyKnown ? incomplete?"partial":"complete" : coverages.some((c)=>c?.state==="not_reported")?"not_reported":"unavailable"
-  const summary=(total:number,est:number):Usage=>({...d.usage,total,est,coverage:d.usage.coverage?{...d.usage.coverage,state,total:anyKnown?total:null}:undefined})
+  const incomplete=coverages.some((c)=>c.state!=="complete")
+  const anyKnown=coverages.some((c)=>c.total!=null)
+  const state=anyKnown ? incomplete?"partial":"complete" : coverages.some((c)=>c.state==="not_reported")?"not_reported":"unavailable"
+  const summary=(total:number,est:number):Usage=>({...d.usage,total,est,coverage:{...d.usage.coverage,state,total:anyKnown?total:null}})
   return (
     <Panel k="cost" icon={<CoinsIcon />} title={t("stats:cwf.title")} sub={<>{kids ? t("stats:cost.subTree", { count: kids }) : t("stats:cost.sub")}{tree?.truncated && <> · {t("stats:cost.truncated")}</>}</>}
       right={<Segmented size="sm" value={mode} onChange={setMode} options={[["cost", t("stats:cwf.cost")], ["tokens", t("stats:cwf.tokens")]]} />} data-cost-waterfall>

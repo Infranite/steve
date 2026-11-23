@@ -242,27 +242,6 @@ public struct SteveWebView: NSViewRepresentableFallback {
                 bridge.notifiedShellGeneration = coordinator.shellState.generation
                 webView.evaluateJavaScript("window.dispatchEvent(new Event('steve:shell-invalidated'))", completionHandler: nil)
             }
-            applyPendingHashRouteIfNeeded(in: webView)
-        }
-    }
-
-    @MainActor
-    fileprivate func applyPendingHashRouteIfNeeded(in webView: WKWebView) {
-        // A new web client consumes scoped intents. Only an older bundled page gets hash fallback.
-        guard let intent = coordinator.shellState.intents.first,
-              intent.workspaceID == nil, intent.targetID == nil else { return }
-        let route = intent.route, id = intent.id
-        webView.evaluateJavaScript("!!window.__STEVE_SHELL_CONTEXT__") { [weak coordinator] value, error in
-            Task { @MainActor in
-                guard let coordinator, error == nil, (value as? Bool) != true,
-                      coordinator.shellContext == nil, coordinator.shellState.intents.first?.id == id else { return }
-                let encoded = (try? String(data: JSONEncoder().encode(route), encoding: .utf8)) ?? "null"
-                webView.evaluateJavaScript("window.location.hash = \(encoded)") { _, error in
-                    Task { @MainActor in
-                        if error == nil { coordinator.completeLegacyNavigation(id: id) }
-                    }
-                }
-            }
         }
     }
 
@@ -1020,7 +999,6 @@ public struct SteveWebView: NSViewRepresentableFallback {
             if let blankNavigation, navigation === blankNavigation { return }
             guard webView.url?.scheme?.lowercased() != "about" else { return }
             isPageLoaded = true
-            parent.applyPendingHashRouteIfNeeded(in: webView)
         }
 
         @MainActor

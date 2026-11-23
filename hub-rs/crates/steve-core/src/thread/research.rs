@@ -15,8 +15,17 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
-use steve_store::RunPatch;
+use steve_store::{RunPatch, W, thread_runs};
 use tokio::sync::mpsc;
+
+fn run_changed(w: &mut W<'_>, ws: &str, run: &str) {
+    w.emit(steve_types::DomainEvent::from(
+        steve_types::WorkEvent::ThreadRun {
+            id: run.to_owned().into(),
+            ws: ws.into(),
+        },
+    ));
+}
 
 /// How many answers or research runs may wait behind the running one.
 pub const MAX_WAITING: usize = 3;
@@ -573,32 +582,23 @@ impl Core {
     /// A run stopped before its lane started it ends `stopped`, and its message no longer says
     /// “排队中”. Nothing to do when it ended already.
     pub(crate) fn end_unstarted(&self, ws: &str, run: &str) -> Result<()> {
-        let th = self.store().store().thread();
-        let Some(r) = th.run(run)?.filter(|r| r.status == "queued") else {
-            return Ok(());
-        };
-        th.run_patch(
-            run,
-            &RunPatch {
-                status: Some("stopped".into()),
-                ended: Some(now()),
-                ..Default::default()
-            },
-        )?;
-        self.unmark_queued(&r.message_id)?;
-        self.store().store().publish(steve_types::DomainEvent::from(
-            steve_types::WorkEvent::ThreadRun {
-                id: {
-                    let value: String = run.into();
-                    steve_types::ThreadRunId::from(value)
+        self.store().store().write(|w| {
+            let Some(r) = thread_runs::get(w, run)?.filter(|r| r.status == "queued") else {
+                return Ok(());
+            };
+            thread_runs::patch(
+                w,
+                run,
+                &RunPatch {
+                    status: Some("stopped".into()),
+                    ended: Some(now()),
+                    ..Default::default()
                 },
-                ws: {
-                    let value: String = ws.into();
-                    steve_types::WorkspaceId::from(value)
-                },
-            },
-        ));
-        Ok(())
+            )?;
+            self.unmark_queued(&r.message_id)?;
+            run_changed(w, ws, run);
+            Ok(())
+        })
     }
 
     /// Stop one research run: the running one ends with its partial answer, a queued one is taken off
@@ -679,26 +679,35 @@ impl Core {
         };
         {
             // All inline work is durable, including a short direct answer.
-            let th = self.store().store().thread();
-            let r = if let Some(id) = &job.run {
-                th.run_patch(
-                    id,
-                    &RunPatch {
-                        status: Some("queued".into()),
-                        ..Default::default()
-                    },
-                )?
-                .ok_or_else(|| crate::error::msg(steve_i18n::t!("core.thread.resume_missing")))?
-            } else {
-                th.run_add(&steve_store::NewThreadRun {
-                    workspace_id: ws.into(),
-                    message_id: job.origin.clone(),
-                    user_id: job.user.clone(),
-                    project_id: job.project.clone(),
-                    prev_run: job.resume.as_ref().map(|r| r.run.clone()),
-                    ..Default::default()
-                })?
-            };
+            let r = self.store().store().write(|w| -> Result<_> {
+                let r = if let Some(id) = &job.run {
+                    thread_runs::patch(
+                        w,
+                        id,
+                        &RunPatch {
+                            status: Some("queued".into()),
+                            ..Default::default()
+                        },
+                    )?
+                    .ok_or_else(|| {
+                        crate::error::msg(steve_i18n::t!("core.thread.resume_missing"))
+                    })?
+                } else {
+                    thread_runs::add(
+                        w,
+                        &steve_store::NewThreadRun {
+                            workspace_id: ws.into(),
+                            message_id: job.origin.clone(),
+                            user_id: job.user.clone(),
+                            project_id: job.project.clone(),
+                            prev_run: job.resume.as_ref().map(|r| r.run.clone()),
+                            ..Default::default()
+                        },
+                    )?
+                };
+                run_changed(w, ws, &r.id);
+                Ok(r)
+            })?;
             if let Some(a) = lock(&lane.st)
                 .waiting
                 .iter_mut()
@@ -706,18 +715,6 @@ impl Core {
             {
                 a.run = Some(r.id.clone());
             }
-            self.store().store().publish(steve_types::DomainEvent::from(
-                steve_types::WorkEvent::ThreadRun {
-                    id: {
-                        let value: String = r.id.clone();
-                        steve_types::ThreadRunId::from(value)
-                    },
-                    ws: {
-                        let value: String = ws.into();
-                        steve_types::WorkspaceId::from(value)
-                    },
-                },
-            ));
             job.run = Some(r.id);
         }
         if queued {
@@ -839,36 +836,41 @@ impl Core {
         let r = match (j.kind, researcher) {
             (Inline::Research, Some(r)) => self.research_now(ws, j, r).await,
             _ => {
-                let th = self.store().store().thread();
                 if let Some(id) = &j.run {
-                    th.run_patch(
-                        id,
-                        &RunPatch {
-                            status: Some("running".into()),
-                            started: Some(now()),
-                            ..Default::default()
-                        },
-                    )?;
+                    self.store().store().write(|w| {
+                        thread_runs::patch(
+                            w,
+                            id,
+                            &RunPatch {
+                                status: Some("running".into()),
+                                started: Some(now()),
+                                ..Default::default()
+                            },
+                        )
+                    })?;
                 }
                 let answer = self.answer_now(ws, j).await;
                 if let Some(id) = &j.run {
-                    th.run_patch(
-                        id,
-                        &RunPatch {
-                            status: Some(
-                                if j.stop.is_stopped() {
-                                    "stopped"
-                                } else if answer.is_ok() {
-                                    "done"
-                                } else {
-                                    "failed"
-                                }
-                                .into(),
-                            ),
-                            ended: Some(now()),
-                            ..Default::default()
-                        },
-                    )?;
+                    self.store().store().write(|w| {
+                        thread_runs::patch(
+                            w,
+                            id,
+                            &RunPatch {
+                                status: Some(
+                                    if j.stop.is_stopped() {
+                                        "stopped"
+                                    } else if answer.is_ok() {
+                                        "done"
+                                    } else {
+                                        "failed"
+                                    }
+                                    .into(),
+                                ),
+                                ended: Some(now()),
+                                ..Default::default()
+                            },
+                        )
+                    })?;
                 }
                 answer
             }
@@ -931,13 +933,16 @@ impl Core {
         // Both short answers and research name their persisted final receipt. Attention assigns
         // commit order only when this run subsequently ends with a persisted final receipt, never to draft tokens.
         if let Some(run) = &j.run {
-            th.run_patch(
-                run,
-                &RunPatch {
-                    reply_id: Some(id.clone()),
-                    ..Default::default()
-                },
-            )?;
+            self.store().store().write(|w| {
+                thread_runs::patch(
+                    w,
+                    run,
+                    &RunPatch {
+                        reply_id: Some(id.clone()),
+                        ..Default::default()
+                    },
+                )
+            })?;
         }
         if th
             .route_of(&j.origin)?
@@ -1115,31 +1120,23 @@ impl Core {
 
     async fn research_now(&self, ws: &str, j: &InlineJob, r: Arc<dyn Researcher>) -> Result<()> {
         let db = self.store();
-        let th = db.store().thread();
         let run = j.run.clone().unwrap_or_default();
         let started = now();
         let token = crate::util::token();
-        th.run_patch(
-            &run,
-            &RunPatch {
-                status: Some("running".into()),
-                started: Some(started),
-                token_hash: Some(Some(crate::util::sha(&token))),
-                ..Default::default()
-            },
-        )?;
-        db.store().publish(steve_types::DomainEvent::from(
-            steve_types::WorkEvent::ThreadRun {
-                id: {
-                    let value: String = run.clone();
-                    steve_types::ThreadRunId::from(value)
+        db.store().write(|w| -> Result<()> {
+            thread_runs::patch(
+                w,
+                &run,
+                &RunPatch {
+                    status: Some("running".into()),
+                    started: Some(started),
+                    token_hash: Some(Some(crate::util::sha(&token))),
+                    ..Default::default()
                 },
-                ws: {
-                    let value: String = ws.into();
-                    steve_types::WorkspaceId::from(value)
-                },
-            },
-        ));
+            )?;
+            run_changed(w, ws, &run);
+            Ok(())
+        })?;
         if j.space == super::MAIN {
             self.phase(ws, "research");
         }
@@ -1335,35 +1332,28 @@ impl Core {
             meta["research_result"] = json!(raw);
         }
         let id = self.inline_reply(ws, j, &text, &meta)?;
-        th.run_patch(
-            &run,
-            &RunPatch {
-                status: Some(out.end.status().into()),
-                reply_id: Some(id.clone()),
-                model: out.model.clone(),
-                session: out.session.clone(),
-                harness: out.session.as_ref().map(|_| harness.clone()),
-                token_hash: Some(None),
-                tools: Some(tools),
-                turns: Some(out.turns),
-                first_text_ms: first,
-                error: out.error.clone(),
-                ended: Some(now()),
-                ..Default::default()
-            },
-        )?;
-        db.store().publish(steve_types::DomainEvent::from(
-            steve_types::WorkEvent::ThreadRun {
-                id: {
-                    let value: String = run;
-                    steve_types::ThreadRunId::from(value)
+        db.store().write(|w| -> Result<()> {
+            thread_runs::patch(
+                w,
+                &run,
+                &RunPatch {
+                    status: Some(out.end.status().into()),
+                    reply_id: Some(id.clone()),
+                    model: out.model.clone(),
+                    session: out.session.clone(),
+                    harness: out.session.as_ref().map(|_| harness.clone()),
+                    token_hash: Some(None),
+                    tools: Some(tools),
+                    turns: Some(out.turns),
+                    first_text_ms: first,
+                    error: out.error.clone(),
+                    ended: Some(now()),
+                    ..Default::default()
                 },
-                ws: {
-                    let value: String = ws.into();
-                    steve_types::WorkspaceId::from(value)
-                },
-            },
-        ));
+            )?;
+            run_changed(w, ws, &run);
+            Ok(())
+        })?;
         if let Some((provider, c)) = &cx
             && out.end == RunEnd::Done
             && let Err(e) = self.chat_done(ws, *provider, c, &id, &text)

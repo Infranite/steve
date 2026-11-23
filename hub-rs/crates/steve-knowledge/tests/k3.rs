@@ -25,11 +25,10 @@ fn private_address_is_not_injected_into_shared_workspace_chat() {
     let h = setup();
     h.env
         .store()
-        .transaction(|tx| -> steve_modules::ApiResult<()> {
+        .write(|tx| -> steve_modules::ApiResult<()> {
             let who = caller(WS, ME);
-            let me = tx.write(|w| steve_modules::contacts::service::ensure_base(w, &who))?;
-            steve_modules::contacts::repo::value_insert(
-                tx,
+            let me = steve_modules::contacts::service::ensure_base(tx, &who)?;
+            steve_store::Attributes(tx).insert_value(
                 WS,
                 &steve_modules::contacts::repo::NewValue {
                     party_id: me.id,
@@ -112,7 +111,7 @@ impl Env {
     fn decision(&self, id: &str) -> steve_store::Decision {
         self.env
             .store()
-            .reader(|c| steve_store::base::decisions::get(c, id))
+            .read(|r| steve_store::DecisionRows(r).get(id))
             .unwrap()
             .unwrap()
     }
@@ -452,9 +451,9 @@ async fn confirming_with_supersedes_makes_the_old_memory_stale() {
     // Undoing the yes puts it back and restores the old memory.
     e.env
         .store()
-        .transaction(|tx| {
-            let d = steve_store::base::decisions::get(tx, &dec)?.unwrap();
-            e.env.modules.registry.before_undo(tx, &d)
+        .write(|w| {
+            let d = steve_store::DecisionRows(w).get(&dec)?.unwrap();
+            e.env.modules.registry.before_undo(w, &d)
         })
         .unwrap();
     assert_eq!(e.mem(&new.id).unwrap().status, "candidate");

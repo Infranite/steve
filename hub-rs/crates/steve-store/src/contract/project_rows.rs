@@ -32,19 +32,6 @@ impl<C: Read> ProjectRows<'_, C> {
             |row| row.get(0),
         )
     }
-
-    pub fn local_path(&mut self, ws: &str, id: &str) -> Result<Option<String>> {
-        self.0.one(
-            Query::select()
-                .column("path")
-                .from("projects")
-                .and_where(Expr::col("id").eq(id))
-                .and_where(Expr::col("workspace_id").eq(ws))
-                .and_where(Expr::col("archived").eq(0_i64))
-                .and_where(Expr::col("device_id").eq("hub")),
-            |row| row.get(0),
-        )
-    }
 }
 
 impl<C: Read> TagRows<'_, C> {

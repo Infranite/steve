@@ -2,7 +2,6 @@
 //! `Takeover` wins), prompt context in the session protocol and in chat answers, `before_undo` of a
 //! module decision, and steve-core's gateway shared as the modules' `Gateway`.
 
-use crate::InProcess;
 use crate::error::msg;
 use crate::gateway::{ModelGateway, Printed, SharedGateway};
 use crate::repo::{Item, WS};
@@ -19,7 +18,7 @@ use steve_modules::decisions::{DecisionCx, DecisionHandler};
 use steve_modules::hooks::{ItemHooks, Takeover};
 use steve_modules::{ApiError, ApiResult, Gateway, Modules, Registry};
 use steve_store::base::Viewer;
-use steve_store::{Decision, Tx};
+use steve_store::{Decision, W};
 
 type Log = Arc<Mutex<Vec<String>>>;
 
@@ -382,7 +381,7 @@ fn session_context_goes_into_the_protocol_before_the_steve_tools() {
 fn router(k: &Kit, answer: &'static str) {
     k.gw.set(move |p, _| {
         if p.starts_with("You are the router of Steve") {
-            Ok(json!({"kind": "chat", "title": "问"}).to_string())
+            Ok(json!({"kind": "answer", "title": "问"}).to_string())
         } else if p.starts_with("You are Steve, the user's assistant.") {
             Ok(json!({"thought": "想", "answer": answer}).to_string())
         } else {
@@ -497,7 +496,12 @@ struct Undo {
 fn recovery_keeps_only_opted_in_cards_on_completed_items() {
     struct ResultCard;
     impl DecisionHandler for ResultCard {
-        fn resolve(&self, _: &Tx, _: &DecisionCx, _: &Decision) -> ApiResult<serde_json::Value> {
+        fn resolve(
+            &self,
+            _: &mut W<'_>,
+            _: &DecisionCx,
+            _: &Decision,
+        ) -> ApiResult<serde_json::Value> {
             Ok(json!({}))
         }
 
@@ -524,15 +528,12 @@ fn recovery_keeps_only_opted_in_cards_on_completed_items() {
 }
 
 impl DecisionHandler for Undo {
-    fn resolve(&self, _: &Tx, _: &DecisionCx, _: &Decision) -> ApiResult<serde_json::Value> {
+    fn resolve(&self, _: &mut W<'_>, _: &DecisionCx, _: &Decision) -> ApiResult<serde_json::Value> {
         Ok(json!({}))
     }
-    fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
+    fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
         /* the handler sees the decision still resolved, inside a write transaction */
-        let status: String =
-            tx.query_row("SELECT status FROM decisions WHERE id = ?", [&d.id], |r| {
-                r.get(0)
-            })?;
+        let status = steve_store::DecisionRows(tx).get(&d.id)?.unwrap().status;
         self.log
             .lock()
             .unwrap()
@@ -554,10 +555,15 @@ fn undo_asks_the_module_of_the_decision_first_and_its_refusal_changes_nothing() 
     });
     struct Shared(Arc<Undo>);
     impl DecisionHandler for Shared {
-        fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<serde_json::Value> {
+        fn resolve(
+            &self,
+            tx: &mut W<'_>,
+            cx: &DecisionCx,
+            d: &Decision,
+        ) -> ApiResult<serde_json::Value> {
             self.0.resolve(tx, cx, d)
         }
-        fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
+        fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
             self.0.before_undo(tx, d)
         }
     }
@@ -669,33 +675,6 @@ async fn the_shared_gateway_maps_tiers_and_reports_model_and_cost() {
     assert_eq!(e, "no fast model");
 }
 
-#[cfg(unix)]
-#[tokio::test]
-async fn the_gateway_falls_back_down_the_tier_and_reports_total_cost() {
-    let dir = tempfile::tempdir().unwrap();
-    let acp = crate::testkit::FakeAcp::new(dir.path(), "ok");
-    let cli: Arc<dyn ModelGateway> = Arc::new(InProcess {
-        one: acp.one(),
-        fast: vec!["broken".into(), "good".into()],
-        smart: vec![],
-        models: None,
-    });
-    let o = SharedGateway(cli.clone())
-        .run(steve_modules::Tier::Fast, "hi", Duration::from_secs(10))
-        .await
-        .unwrap();
-    assert_eq!(
-        (o.text.as_str(), o.model.as_str(), o.cost_usd),
-        ("ok", "good", Some(0.000829045))
-    );
-    // no model named: the adapter's own default answers
-    let o = SharedGateway(cli)
-        .run(steve_modules::Tier::Smart, "hi", Duration::from_secs(10))
-        .await
-        .unwrap();
-    assert_eq!((o.text.as_str(), o.model.as_str()), ("ok", ""));
-}
-
 struct Boom {
     on: &'static str,
 }
@@ -788,15 +767,11 @@ async fn after_a_crash_before_the_hooks_were_recorded_they_are_asked_before_the_
     let i = k.db().item(&x.id).unwrap().unwrap();
     let mut c = crate::cycle::closing_of(&i).unwrap();
     c.accepted = true;
-    k.db()
-        .exec(
-            "UPDATE items SET closing = ? WHERE id = ?",
-            &[
-                &serde_json::to_string(&c).unwrap() as &dyn rusqlite::ToSql,
-                &x.id,
-            ],
-        )
-        .unwrap();
+    steve_store::core_fixture::item(
+        k.db().store(),
+        &x.id,
+        steve_store::core_fixture::ItemState::Closing(&serde_json::to_string(&c).unwrap()),
+    );
     k.core.recover().unwrap();
     assert_eq!(
         k.core.lifecycle_tick().unwrap(),

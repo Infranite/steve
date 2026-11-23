@@ -1012,10 +1012,10 @@ fn decide(h: &H, id: &str, choice: &str) {
 fn undo(h: &H, id: &str) {
     h.env
         .store()
-        .transaction(|tx| -> ApiResult<()> {
-            let d = steve_store::base::decisions::get(tx, id)?.expect("decision");
+        .write(|tx| -> ApiResult<()> {
+            let d = steve_store::decision_repo::get(tx, id)?.expect("decision");
             h.env.modules.registry.before_undo(tx, &d)?;
-            tx.write(|w| seed::decisions::reopen_fixture_decision(w, id))?;
+            seed::decisions::reopen_fixture_decision(tx, id)?;
             Ok(())
         })
         .expect("undo");

@@ -141,6 +141,19 @@ pub fn system_handle(c: &mut impl Read, id: &str) -> Result<Option<(String, Stri
     )
 }
 
+pub fn by_email(c: &mut impl Read, ws: &str, handle: &str) -> Result<Option<String>> {
+    c.one(
+        Query::select()
+            .column("account_id")
+            .from("account_handles")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("family").eq("email"))
+            .and_where(Expr::col("handle").eq(handle))
+            .limit(1),
+        |r| r.get(0),
+    )
+}
+
 pub fn by_any_handle(c: &mut impl Read, ws: &str, handle: &str) -> Result<Option<String>> {
     c.one(
         Query::select()

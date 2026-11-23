@@ -18,15 +18,14 @@ pub struct BlobManifest {
 pub struct Transfer {
     pub id: TransferId,
     pub next_offset: u64,
-    /// Hub-owned workspace of the execution, for stable authenticated attachment URLs.
-    /// Optional for peers predating output uploads; never selected by the Node.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace: Option<String>,
+    /// Hub-owned workspace of the execution, for stable authenticated attachment URLs; never
+    /// selected by the Node.
+    pub workspace: String,
 }
 
 pub const MAX_INLINE_IMAGE: u64 = 20 * 1024 * 1024;
 pub const MAX_INLINE_IMAGES: usize = 10;
-/// Hex-encoded data plus its envelope fits the existing 48 KiB bulk frame on old peers too.
+/// Hex-encoded data plus its envelope fits the 48 KiB bulk frame.
 pub const INLINE_IMAGE_CHUNK: usize = 16 * 1024;
 
 /// Starts (or, with the same key, finds again) an upload: a lost answer never leaves an orphan.
@@ -94,15 +93,14 @@ pub(crate) mod hexbytes {
 mod tests {
     use super::*;
     #[test]
-    fn transfer_workspace_is_an_optional_backward_compatible_receipt() {
-        let old = serde_json::json!({"id":"tr_old","next_offset":12});
-        let mut transfer: Transfer = serde_json::from_value(old.clone()).unwrap();
-        assert_eq!(transfer.workspace, None);
-        assert_eq!(serde_json::to_value(&transfer).unwrap(), old);
-        transfer.workspace = Some("workspace".into());
-        assert_eq!(
-            serde_json::to_value(transfer).unwrap()["workspace"],
-            "workspace"
+    fn a_transfer_names_its_workspace() {
+        let v = serde_json::json!({"id":"tr_1","next_offset":12,"workspace":"workspace"});
+        let transfer: Transfer = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(transfer.workspace, "workspace");
+        assert_eq!(serde_json::to_value(&transfer).unwrap(), v);
+        assert!(
+            serde_json::from_value::<Transfer>(serde_json::json!({"id":"tr_1","next_offset":12}))
+                .is_err()
         );
     }
 }

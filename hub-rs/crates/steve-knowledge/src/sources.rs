@@ -8,9 +8,9 @@ pub mod folder_node;
 use serde_json::{Value, json};
 use steve_store::base::{Level, Visibility};
 use steve_store::knowledge::Documents;
-use steve_store::{Read, Result, Tx, W, uid};
+use steve_store::{Read, Result, W, uid};
 
-use crate::repo::SourceRow;
+use steve_store::knowledge::SourceRow;
 
 // K3
 pub mod chat;
@@ -92,17 +92,7 @@ pub fn ensure_builtin(w: &mut W<'_>, ws: &str, actor: &str, now: i64) -> Result<
 }
 
 /// The source of a built-in kind, creating the built-ins if needed.
-pub fn builtin(tx: &Tx, ws: &str, kind: &str, actor: &str, now: i64) -> Result<SourceRow> {
-    tx.write(|w| builtin_in(w, ws, kind, actor, now))
-}
-
-pub(crate) fn builtin_in(
-    w: &mut W<'_>,
-    ws: &str,
-    kind: &str,
-    actor: &str,
-    now: i64,
-) -> Result<SourceRow> {
+pub fn builtin(w: &mut W<'_>, ws: &str, kind: &str, actor: &str, now: i64) -> Result<SourceRow> {
     if let Some(s) = Documents(w).source_of_kind(ws, kind)? {
         return Ok(s);
     }

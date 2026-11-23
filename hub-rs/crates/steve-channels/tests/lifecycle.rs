@@ -16,7 +16,7 @@ use steve_store::testkit::channels::seed;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use steve_channels::channel::{MemberInfo, SendTarget, SpaceInfo};
+use steve_channels::channel::{ActTarget, MemberInfo, SendKey, Sent, SpaceInfo};
 use steve_channels::ext::Queries;
 use steve_channels::ext::{
     ChannelDecl, ConnRun, ConnSink, ConnState, ConnectionHook, Mode, Pairing, Receive,
@@ -83,12 +83,13 @@ impl ChannelAdapter for Provider {
     async fn members(&self, _cx: &ConnCx, _ext: &str) -> Result<Vec<MemberInfo>, AdapterError> {
         Err(ProviderError::Unsupported.into())
     }
-    async fn send(
+    async fn send_message(
         &self,
         _cx: &ConnCx,
-        _to: &SendTarget,
+        _to: &ActTarget,
         _content: &OutContent,
-    ) -> Result<String, AdapterError> {
+        _key: &SendKey,
+    ) -> Result<Sent, AdapterError> {
         Err(ProviderError::Unsupported.into())
     }
     async fn recall(&self, _cx: &ConnCx, _ext: &str) -> Result<(), AdapterError> {

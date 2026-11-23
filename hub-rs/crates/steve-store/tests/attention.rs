@@ -83,13 +83,40 @@ fn pending_cards_exact_parity_with_web_selector_fixture() {
 fn feed_projection_reuses_personal_audience_reads_and_snapshot_pages() {
     let t = fresh();
     seed(&t);
-    t.store.transaction(|tx| -> Result<()> {
-        for n in 0..205 {
-            tx.write(|w| w.publish_report(&feed::RunReport { ws: WS, flow: "flow", run: &format!("run{n}"), node: "node", content: &feed::Content{title:"Report".into(),..Default::default()}, result: &json!({}), now: 10 }))?;
-        }
-        tx.execute("INSERT INTO personal_notifications(id,workspace_id,user_id,event_id,delivery_key,mode,body,state,created) VALUES('private','default','u','event','key','log','Private body','held',10)",[])?;
-        Ok(())
-    }).unwrap();
+    t.store
+        .write(|w| -> Result<()> {
+            for n in 0..205 {
+                w.publish_report(&feed::RunReport {
+                    ws: WS,
+                    flow: "flow",
+                    run: &format!("run{n}"),
+                    node: "node",
+                    content: &feed::Content {
+                        title: "Report".into(),
+                        ..Default::default()
+                    },
+                    result: &json!({}),
+                    now: 10,
+                })?;
+            }
+            steve_store::notification_repo::insert(
+                w,
+                &steve_store::notification_repo::NewNotice {
+                    ws: WS,
+                    user: "u",
+                    event: "event",
+                    key: "key",
+                    mode: "log",
+                    body: "Private body",
+                    state: "held",
+                    topic: "work.item.done",
+                    message: None,
+                    created: 10,
+                },
+            )?;
+            Ok(())
+        })
+        .unwrap();
     let first = t
         .store
         .transaction(|tx| attention::feed_page(tx, WS, "u", None, None, 100, 100))
@@ -97,6 +124,7 @@ fn feed_projection_reuses_personal_audience_reads_and_snapshot_pages() {
     assert_eq!(first.count, 206);
     assert!(first.snapshot.is_none());
     assert_eq!(first.entries[0].group_key.as_deref(), Some("event"));
+    let notice_entry = first.entries[0].id.clone();
     let partial = first.next_cursor.as_ref().unwrap().clone();
     assert!(
         t.store
@@ -170,7 +198,7 @@ fn feed_projection_reuses_personal_audience_reads_and_snapshot_pages() {
             .is_err()
     );
     t.store
-        .transaction(|tx| feed::read_ids(tx, WS, "u", &["feed_private".into()], 200))
+        .transaction(|tx| feed::read_ids(tx, WS, "u", std::slice::from_ref(&notice_entry), 200))
         .unwrap();
     // Read changes invalidate an in-flight keyset traversal, never silently skip membership.
     assert!(
@@ -188,10 +216,10 @@ fn feed_projection_reuses_personal_audience_reads_and_snapshot_pages() {
     // Existing Feed reads are authoritative; update/delete/membership transitions maintain index.
     t.store
         .with_conn(|c| {
-            c.execute("DELETE FROM feed_reads WHERE entry_id='feed_private'", [])?;
+            c.execute("DELETE FROM feed_reads WHERE entry_id=?", [&notice_entry])?;
             c.execute(
-                "UPDATE feed_entries SET source_id='changed' WHERE id='feed_private'",
-                [],
+                "UPDATE feed_entries SET source_id='changed' WHERE id=?",
+                [&notice_entry],
             )?;
             Ok(())
         })
@@ -204,7 +232,7 @@ fn feed_projection_reuses_personal_audience_reads_and_snapshot_pages() {
     assert_eq!(p.entries[0].source_id, "changed");
     t.store
         .with_conn(|c| {
-            c.execute("DELETE FROM feed_entries WHERE id='feed_private'", [])?;
+            c.execute("DELETE FROM feed_entries WHERE id=?", [&notice_entry])?;
             c.execute("DELETE FROM workspace_members WHERE user_id='u'", [])?;
             Ok(())
         })
@@ -329,32 +357,27 @@ fn feed_pages_and_unchanged_are_bounded_after_large_read_history() {
 fn migration_is_prospective_and_assigns_final_commit_not_timestamp_order() {
     let t = fresh();
     seed(&t);
-    t.store
-        .transaction(|tx| -> Result<()> {
+    let entries: Vec<String> = t
+        .store
+        .write(|w| -> Result<_> {
+            let mut entries = Vec::new();
             for n in 0..2 {
-                let (entry, _) = tx.write(|w| {
-                    w.publish_report(&feed::RunReport {
-                        ws: WS,
-                        flow: "flow",
-                        run: &format!("old_run{n}"),
-                        node: "node",
-                        content: &feed::Content::default(),
-                        result: &json!({}),
-                        now: 10,
-                    })
+                let (entry, _) = w.publish_report(&feed::RunReport {
+                    ws: WS,
+                    flow: "flow",
+                    run: &format!("old_run{n}"),
+                    node: "node",
+                    content: &feed::Content::default(),
+                    result: &json!({}),
+                    now: 10,
                 })?;
-                if n == 0 {
-                    feed::read_ids(
-                        tx,
-                        WS,
-                        "u",
-                        &[entry["feed_entry_id"].as_str().unwrap().into()],
-                        11,
-                    )?;
-                }
+                entries.push(entry["feed_entry_id"].as_str().unwrap().into());
             }
-            Ok(())
+            Ok(entries)
         })
+        .unwrap();
+    t.store
+        .transaction(|tx| feed::read_ids(tx, WS, "u", &entries[..1], 11))
         .unwrap();
     t.store.with_conn(|c| {
     let triggers = c.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'attention_feed_%'")?.query_map([],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;

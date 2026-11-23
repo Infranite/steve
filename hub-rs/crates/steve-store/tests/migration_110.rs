@@ -2,7 +2,7 @@ use rusqlite::{Connection, params};
 use steve_store::{bot_dispatch, db};
 
 #[test]
-fn upgrades_a_109_database_without_granting_new_nodes_legacy_dispatch() {
+fn upgrades_a_109_database_to_one_dispatch_model() {
     assert_eq!(db::MIGRATIONS[109], include_str!("../migrations/110.sql"));
     let c = Connection::open_in_memory().unwrap();
     for migration in &db::MIGRATIONS[..109] {
@@ -69,36 +69,21 @@ fn upgrades_a_109_database_without_granting_new_nodes_legacy_dispatch() {
             min_reader: db::SCHEMA_VERSION,
         }
     );
-    insert("new", "active", false);
-    c.execute(
-        "UPDATE nodes SET state='active' WHERE node_id='pending'",
-        [],
-    )
-    .unwrap();
-    // Reopening must not backfill newly paired or newly confirmed Nodes.
-    db::migrate(&c).unwrap();
-    for (id, was_eligible) in [
-        ("existing", true),
-        ("paused", true),
-        ("pending", false),
-        ("revoked", false),
-        ("local", false),
-        ("new", false),
-    ] {
-        assert_eq!(
-            bot_dispatch::legacy_spread(&c, id).unwrap(),
-            was_eligible,
-            "{id}"
-        );
-    }
-    assert!(
-        bot_dispatch::selected(&c, "default", None)
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        bot_dispatch::bindings(&c, "default", "worker")
-            .unwrap()
-            .is_none()
+    // 116 retired the pre-Team spread list: no Node keeps a dispatch of its own.
+    let spread: bool = c
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='legacy_spread_nodes')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(!spread);
+    let defaults: i64 = c
+        .query_row("SELECT count(*) FROM bot_team_defaults", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(defaults, 0);
+    assert_eq!(
+        bot_dispatch::bindings(&c, "default", "worker").unwrap(),
+        ["local"]
     );
 }

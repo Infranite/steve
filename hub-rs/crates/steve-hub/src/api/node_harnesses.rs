@@ -97,15 +97,8 @@ fn harness(c: HarnessCapability) -> Value {
     {
         Some(false)
     } else {
-        // Older Nodes do not prove session readiness; a declared capability is not a probe.
-        a.and_then(|a| {
-            if a.status == AdapterStatus::Ready && a.session.is_none() && a.session_error.is_none()
-            {
-                None
-            } else {
-                Some(a.status == AdapterStatus::Ready && a.session.is_some())
-            }
-        })
+        // A declared capability is not a probe: without an adapter report readiness is unknown.
+        a.map(|a| a.status == AdapterStatus::Ready && a.session.is_some())
     };
     let models: Vec<String> = match a.and_then(|a| a.session.as_ref()) {
         Some(s) => s.models.iter().map(|m| m.id.clone()).collect(),

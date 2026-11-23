@@ -131,14 +131,14 @@ impl Engine {
         Ok(self
             .yolo()
             .store()
-            .reader(|c| repo::window_current(c, ws))?
+            .read(|c| repo::window_current(c, ws))?
             .map(|w| w.started)
             .unwrap_or(0))
     }
 
     /// YOLO's release approvals of `ws` (newest first), optionally only this window's.
     fn yolo_releases(&self, ws: &str, window: Option<&str>) -> ApiResult<Vec<repo::ActionRow>> {
-        Ok(self.yolo().store().reader(|c| {
+        Ok(self.yolo().store().read(|c| {
             repo::actions_where(
                 c,
                 &ActionFilter {
@@ -178,7 +178,7 @@ impl Engine {
     /// Another release card is already scheduled by YOLO: one release at a time, in the order they
     /// came up.
     pub(crate) fn release_queued(&self, d: &Decision) -> ApiResult<bool> {
-        let scheduled = self.yolo().store().reader(|c| {
+        let scheduled = self.yolo().store().read(|c| {
             repo::actions_where(
                 c,
                 &ActionFilter {
@@ -204,7 +204,7 @@ impl Engine {
         let Some(w) = self
             .yolo()
             .store()
-            .reader(|c| repo::window_current(c, &d.workspace_id))?
+            .read(|c| repo::window_current(c, &d.workspace_id))?
         else {
             return Ok(false);
         };

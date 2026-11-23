@@ -94,7 +94,7 @@ impl Core {
 
     /// Why the installed release `target` can't run on this Hub's database, if it can't. The rule of
     /// ops/schema_gate.py, which `release.sh --rollback` applies again: the database records the oldest
-    /// schema a Hub must know (`steve_store::db::compat`), the release's `release.json` the schema its Hub
+    /// schema a Hub must know (`steve_store::Store::schema_compat`), the release's `release.json` the schema its Hub
     /// knows (`schema.target`). A release that doesn't say is refused. Asked before a rollback is offered
     /// or started, so a refused one is neither shown as possible nor counted as undone.
     pub fn rollback_refusal(&self, target: &str) -> Option<String> {
@@ -111,7 +111,7 @@ impl Core {
             .ok()
             .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
             .and_then(|m| m.pointer("/schema/target").and_then(Value::as_i64));
-        let db = match self.store().store().with_conn(steve_store::db::compat) {
+        let db = match self.store().store().schema_compat() {
             Ok(c) => c,
             Err(e) => return Some(steve_i18n::t!("core.release.schema_unreadable", error = e)),
         };
@@ -815,10 +815,9 @@ impl Tx<'_> {
             self.db().timeline_add(&i.id, "steve", "sys", &text, None)?;
         }
         if ok && !s("action").is_empty() {
-            self.db().exec(
-                "UPDATE yolo_actions SET undone = ? WHERE id = ? AND undone IS NULL",
-                &[&now(), &s("action")],
-            )?;
+            self.db()
+                .store()
+                .write(|w| steve_store::yolo::stamp_undone(w, s("action"), now()))?;
         }
         let ws = item
             .as_ref()
@@ -1305,8 +1304,8 @@ impl Tx<'_> {
                         if !reason.is_empty() {
                             e["reason"] = json!(reason);
                         }
-                        self.db().store().transaction(|tx| {
-                            steve_store::operation_set_in(tx, &op.id, "waived", &e)
+                        self.db().store().write(|tx| {
+                            steve_store::operation_repo::set(tx, &op.id, "waived", &e)
                         })?;
                         self.db().timeline_add(
                             &i.id,

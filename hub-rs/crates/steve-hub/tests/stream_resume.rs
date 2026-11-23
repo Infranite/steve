@@ -359,8 +359,8 @@ async fn state_watermark_and_resumable_stream() {
         "{first:?}"
     );
 
-    // without a cursor: no ids and no new frame types, as before
-    let legacy = {
+    // without a cursor: no ids and no stream control frames
+    let cursorless = {
         let (subscribed, ready) = tokio::sync::oneshot::channel();
         let probe = e.frames_ready("default", "", 1200, Some(subscribed));
         let change = async {
@@ -381,16 +381,16 @@ async fn state_watermark_and_resumable_stream() {
         frames
     };
     assert!(
-        legacy
+        cursorless
             .iter()
             .any(|f| f.data["type"] == "item" && f.data["id"] == id.as_str()),
-        "{legacy:?}"
+        "{cursorless:?}"
     );
-    assert!(legacy.iter().all(|f| f.id.is_none()), "{legacy:?}");
+    assert!(cursorless.iter().all(|f| f.id.is_none()), "{cursorless:?}");
     assert!(
-        !legacy.iter().any(|f| f.data["type"]
+        !cursorless.iter().any(|f| f.data["type"]
             .as_str()
             .is_some_and(|t| t.starts_with("stream."))),
-        "{legacy:?}"
+        "{cursorless:?}"
     );
 }

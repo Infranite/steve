@@ -419,10 +419,7 @@ pub fn find_as(
     let mut candidates = Vec::new();
     for space in rows {
         let receivers = registration::receivers(r, &space.id)?;
-        let ids = receivers
-            .iter()
-            .map(|row| row.connection.as_str())
-            .chain(std::iter::once(space.via.as_str()).filter(|id| !id.is_empty()));
+        let ids = receivers.iter().map(|row| row.connection.as_str());
         for id in ids {
             if id == conn || installation_of(r, id)? == installation {
                 return Ok(Some(space));

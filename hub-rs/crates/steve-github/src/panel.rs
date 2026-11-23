@@ -10,7 +10,6 @@ use steve_modules::panels::{
     ActionOutcome, ItemPanel, Panel, PanelAction, PanelHead, PanelRow, RowState,
 };
 use steve_modules::{ApiError, ApiResult, Caller, Modules};
-use steve_store::base;
 
 use crate::accept::{PR_MERGE, Slot};
 use crate::repos::check_state;
@@ -277,8 +276,7 @@ impl ItemPanel for GhPanels {
             }
         }
         m.store.write(|tx| {
-            base::audit(
-                &tx.legacy(),
+            tx.audit(
                 &ws,
                 &caller.me,
                 "github.rerun",

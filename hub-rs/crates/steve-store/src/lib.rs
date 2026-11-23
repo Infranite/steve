@@ -67,14 +67,24 @@ use sha2::{Digest, Sha256};
 pub use bus::{FnPublisher, NoPublisher, Publisher};
 pub use contract::alarms::{Alarm, Alarms, NewAlarm};
 pub use contract::automation::{ScheduleRow, Schedules};
+pub use contract::changesets as changeset_repo;
+#[cfg(feature = "testkit")]
+pub use contract::core_fixture;
+pub use contract::core_queue;
+pub use contract::core_usage;
 pub use contract::message_sources::{
     Attachment, ChannelMessage, ChannelSources, Connections, MailMessage, MailSources,
     MessageSelection,
 };
+pub use contract::operations::{self as operation_repo, ItemOperation};
 pub use contract::read_models::{
     AttentionReads, FeedReads, ItemEventFields, ItemHead, ItemReads, NotificationPolicies,
     QuietPolicy, TimelineRows, TimezoneSettings,
 };
+pub use contract::tags as tag_repo;
+pub use contract::thread_runs;
+pub use contract::vault_uses as vault_use_repo;
+pub use contract::yolo;
 pub use contract::{
     AccountIdentity, AddedMemoryIndex, BotPrompt, BotRef, BotRows, Contacts, DecisionRows,
     DigestEntry, DigestNotes, DueTrigger, FileInfo, FileReads, FlowGrant, FlowRow, FlowRows,

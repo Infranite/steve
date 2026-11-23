@@ -163,7 +163,7 @@ impl Windows<'_, W<'_>> {
 
     /// Excludes historical messages on the first cut, without acknowledging them.
     pub fn exclude_before(&mut self, ws: &str, conv: &str, floor: i64) -> Result<()> {
-        digest::remove_before(&self.0.legacy(), ws, conv, floor).map_err(StoreError::from)
+        digest::remove_before(self.0.conn, ws, conv, floor).map_err(StoreError::from)
     }
 
     /// Records the receipts and updates the pending projection once for this conversation.
@@ -190,6 +190,6 @@ impl Windows<'_, W<'_>> {
                     ]),
             )?;
         }
-        digest::dequeue_on_receipt(&self.0.legacy(), ws, conv, ids).map_err(StoreError::from)
+        digest::dequeue_on_receipt(self.0.conn, ws, conv, ids).map_err(StoreError::from)
     }
 }

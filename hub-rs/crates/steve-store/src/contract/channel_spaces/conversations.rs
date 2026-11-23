@@ -14,7 +14,7 @@ const LIST: &str =
               ORDER BY m.created DESC, m.id DESC LIMIT 1) AS chan_id
           FROM spaces s LEFT JOIN grouped g ON g.space = 'chan:' || s.id
           WHERE s.workspace_id = ?1
-            AND (?7 = '' OR s.connection_id = ?7 OR EXISTS (SELECT 1 FROM space_identities li
+            AND (?7 = '' OR EXISTS (SELECT 1 FROM space_identities li
               WHERE li.space_id = s.id AND li.connection_id = ?7 AND li.left_at IS NULL))
             AND (?8 = 0 OR EXISTS (SELECT 1 FROM chan_messages m
               WHERE m.workspace_id = ?1 AND m.space_id = s.id AND m.direction = 'out'
@@ -53,13 +53,10 @@ const ATTENTION: &str =
          LEFT JOIN space_prefs pref ON pref.space_id=s.id AND pref.workspace_id=s.workspace_id
          WHERE s.workspace_id=?1 AND s.status='active' AND coalesce(p.closed,0)=0
            AND coalesce(pref.attention,'realtime')<>'blocked'
-           AND (EXISTS (SELECT 1 FROM space_identities si JOIN connections cn ON cn.id=si.connection_id
+           AND EXISTS (SELECT 1 FROM space_identities si JOIN connections cn ON cn.id=si.connection_id
              WHERE si.space_id=s.id AND si.left_at IS NULL AND cn.workspace_id=?1
                AND cn.status IN ('ok','error') AND EXISTS(SELECT 1 FROM json_each(cn.caps) cap WHERE cap.value='msg.receive')
-               AND (si.owner_user IS NULL OR si.owner_user=?2))
-             OR (NOT EXISTS (SELECT 1 FROM space_identities si WHERE si.space_id=s.id)
-               AND EXISTS (SELECT 1 FROM connections cn WHERE cn.id=s.connection_id AND cn.workspace_id=?1
-                 AND cn.status IN ('ok','error') AND EXISTS(SELECT 1 FROM json_each(cn.caps) cap WHERE cap.value='msg.receive'))))";
+               AND (si.owner_user IS NULL OR si.owner_user=?2))";
 
 pub struct Filter<'a> {
     pub workspace: &'a str,
@@ -163,8 +160,8 @@ pub fn channel_spaces(
            LEFT JOIN conversation_preferences p ON p.workspace_id = s.workspace_id
                AND p.user_id = ?2 AND p.space_id = s.id
           WHERE s.workspace_id = ?1 AND coalesce(p.closed, 0) = 0
-            AND (s.connection_id = ?3 OR EXISTS (SELECT 1 FROM space_identities li
-              WHERE li.space_id = s.id AND li.connection_id = ?3 AND li.left_at IS NULL))
+            AND EXISTS (SELECT 1 FROM space_identities li
+              WHERE li.space_id = s.id AND li.connection_id = ?3 AND li.left_at IS NULL)
             AND (EXISTS (SELECT 1 FROM messages x WHERE x.workspace_id = ?1 AND x.space = 'chan:' || s.id)
               OR EXISTS (SELECT 1 FROM chan_messages m WHERE m.space_id = s.id))",
         &Values(vec![ws.into(), user.into(), connection.into()]),

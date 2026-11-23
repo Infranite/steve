@@ -137,10 +137,10 @@ fn decide(h: &H, id: &str, choice: &str, text: &str) -> ApiResult<steve_store::D
 
 /// What steve-core's `undoDecision` does around the handler.
 fn undo(h: &H, id: &str) -> ApiResult<()> {
-    h.env.store().transaction(|tx| -> ApiResult<()> {
-        let d = base::decisions::get(tx, id)?.expect("decision");
+    h.env.store().write(|tx| -> ApiResult<()> {
+        let d = steve_store::decision_repo::get(tx, id)?.expect("decision");
         h.env.modules.registry.before_undo(tx, &d)?;
-        tx.write(|w| seed::decisions::reopen_fixture_decision(w, id))?;
+        seed::decisions::reopen_fixture_decision(tx, id)?;
         Ok(())
     })
 }
@@ -1736,7 +1736,7 @@ async fn nothing_reaches_the_adapter_without_a_valid_authorization() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_handoff_can_become_a_draft_reply() {
+async fn a_handoff_can_be_answered_verbatim() {
     let h = setup().await;
     checks_pass(&h);
     set_rules(
@@ -5285,10 +5285,7 @@ async fn recovery_review_undo_and_a_second_rewrite_do_not_remove_the_human_gate(
         assert_eq!(same, message, "unattempted review keeps its new UUID");
         let yes = decide(&h, &review, "yes", "").unwrap();
         assert_eq!(yes.result["recovery_review"], true);
-        // Exercise the real module undo; the old test helper did not clear result as production does.
-        steve_modules::decisions::undo(&h.env.modules, &review, ME, |_| true)
-            .unwrap()
-            .unwrap();
+        undo(&h, &review).unwrap();
         let reopened = h
             .env
             .store()
@@ -5482,9 +5479,7 @@ async fn recovery_review_undoing_discard_keeps_the_refusal_human_action_requirem
         let h = setup_yolo(None, None, true).await;
         let (old, fail) = review_refusal(&h, managed).await;
         decide(&h, &fail, "discard", "").unwrap();
-        steve_modules::decisions::undo(&h.env.modules, &fail, ME, |_| true)
-            .unwrap()
-            .unwrap();
+        undo(&h, &fail).unwrap();
         assert_eq!(status(&h, &old), "failed");
         let reopened = h
             .env

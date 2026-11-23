@@ -65,7 +65,7 @@ export default {
     moreRows_other: "Show {{count}} more rows",
     imageFailed: "Image failed to load. Check your connection or sign-in, then retry.",
     fileUnavailable: {
-      legacy: "Not retained by Steve; ask for a new reply with this file.",
+      unresolved: "Not retained by Steve; ask for a new reply with this file.",
       scope: "Not retained: outside the execution’s authorized files.",
       missing: "Not retained: file missing, unreadable or changed during capture.",
       offline: "Not retained: execution Node unavailable during capture.",

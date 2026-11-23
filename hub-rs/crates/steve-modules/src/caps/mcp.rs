@@ -312,8 +312,7 @@ impl Capabilities {
         let old = self.read(|c| server_of(c, ws, sid))?;
         self.vault.store().write(|tx| {
             if let Some(item) = &old.credential_item {
-                self.vault
-                    .destroy_item_in(tx, &old.workspace_id, me, item)?;
+                self.vault.destroy_item(tx, &old.workspace_id, me, item)?;
             }
             super::publish_users(tx, "mcp", sid)?;
             Servers(tx).delete(sid)?;
@@ -478,13 +477,13 @@ impl Capabilities {
         self.vault.store().write(|tx: &mut W<'_>| {
             let drop_old = |tx: &mut W<'_>| -> VaultResult<()> {
                 if let Some(item) = &old.credential_item {
-                    self.vault.destroy_item_in(tx, &ws, me, item)?;
+                    self.vault.destroy_item(tx, &ws, me, item)?;
                 }
                 Ok(())
             };
             if let Some(p) = &prepared {
                 drop_old(tx)?;
-                s.credential_item = Some(self.vault.insert_prepared_in(tx, p)?);
+                s.credential_item = Some(self.vault.insert_prepared(tx, p)?);
             } else if labels.is_empty() {
                 drop_old(tx)?;
                 s.credential_item = None;

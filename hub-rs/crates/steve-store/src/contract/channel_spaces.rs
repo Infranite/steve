@@ -248,11 +248,7 @@ fn affected(ws: &str, conn: &str) -> SelectStatement {
         .column(("s", "id"))
         .from_as("spaces", "s")
         .and_where(Expr::col(("s", "workspace_id")).eq(ws))
-        .and_where(
-            Expr::col(("s", "connection_id"))
-                .eq(conn)
-                .or(Expr::exists(from_identity)),
-        )
+        .and_where(Expr::exists(from_identity))
         .take()
 }
 

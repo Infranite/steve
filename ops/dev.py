@@ -24,6 +24,7 @@ Harness state (CLAUDE_CONFIG_DIR, CODEX_HOME) is in `<dev home>/harness`, seeded
 
 import argparse
 from contextlib import closing
+import ipaddress
 import json
 import os
 import shutil
@@ -244,10 +245,10 @@ def hub_env(mode):
     )
     if shutil.which("node"):
         env["STEVE_NODE"] = shutil.which("node")
-    if mode.startswith("snapshot"):
-        env["STEVE_NO_RESUME"] = "1"
     env["STEVE_CLIENT_ORIGINS"] = client_origins(mode)
     env.update(dev_env_file())
+    if mode.startswith("snapshot"):
+        env["STEVE_NO_RESUME"] = "1"
     return env
 
 
@@ -260,11 +261,28 @@ def ensure_adapters():
     own.mkdir(parents=True, exist_ok=True)
 
 
+def ready_hub(pid):
+    try:
+        ready = json.loads((RUN / "hub-ready.json").read_text())
+        if ready["pid"] != pid:
+            return None
+        fallback = None
+        for addr in ready["hub"]:
+            host, port = addr.rsplit(":", 1)
+            host = {"0.0.0.0": "127.0.0.1", "[::]": "[::1]"}.get(host, host)
+            url = f"http://{host}:{port}"
+            if ipaddress.ip_address(host.strip("[]")).is_loopback:
+                return url
+            fallback = fallback or url
+        return fallback
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    return None
+
+
 def start_hub():
     if not HUB_BIN.is_file():
         die(f"{HUB_BIN} is missing; run `dev.py up`")
-    if port_busy(PORT):
-        die(f"127.0.0.1:{PORT} is taken by something else; set STEVE_DEV_PORT")
     mode = MODE.read_text().strip() if MODE.is_file() else "fresh"
     RUN.mkdir(parents=True, exist_ok=True)
     seed_harness()
@@ -280,19 +298,26 @@ def start_hub():
             tail = (DEV / "hub.log").read_text(errors="replace").splitlines()[-20:]
             die("the Hub exited at start:\n" + "\n".join(tail))
         try:
-            urllib.request.urlopen(f"http://127.0.0.1:{PORT}/healthz", timeout=1)
-            say(f"Hub up on 127.0.0.1:{PORT} ({mode})")
-            return
+            if url := ready_hub(p.pid):
+                with urllib.request.urlopen(f"{url}/healthz", timeout=1):
+                    say(f"Hub up on {url} ({mode})")
+                    return url
         except OSError:
-            time.sleep(0.5)
+            pass
+        time.sleep(0.5)
     die(f"the Hub did not answer /healthz in 60s; see {DEV / 'hub.log'}")
 
 
-def start_web():
+def start_web(hub_url):
+    web_config = RUN / "web.config.json"
+    config = {"repo": str(REPO), "hub": hub_url}
     if read_pid(RUN / "web.pid", "npm"):
-        # the dev server of another checkout serves that checkout's web: replace it
-        if (RUN / "web.repo").is_file() and (RUN / "web.repo").read_text().strip() == str(REPO):
-            return
+        # Keep Vite only when both its checkout and proxy target are current.
+        try:
+            if json.loads(web_config.read_text()) == config:
+                return
+        except (OSError, ValueError):
+            pass
         stop_web()
     if port_busy(WEB_PORT):
         die(f"127.0.0.1:{WEB_PORT} is taken by something else; set STEVE_DEV_WEB_PORT")
@@ -300,14 +325,14 @@ def start_web():
         say("installing web dependencies (npm ci)")
         if subprocess.run(["npm", "ci"], cwd=REPO).returncode != 0:
             die("npm ci failed")
-    env = dict(os.environ, STEVE_HUB=f"http://127.0.0.1:{PORT}")
+    env = dict(os.environ, STEVE_HUB=hub_url)
     log = open(DEV / "web.log", "ab")
     p = subprocess.Popen(
         ["npm", "-w", "web", "run", "dev", "--", "--host", "127.0.0.1", "--port", str(WEB_PORT), "--strictPort"],
         cwd=REPO, env=env, stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True,
     )
     (RUN / "web.pid").write_text(f"{p.pid}\n")
-    (RUN / "web.repo").write_text(f"{REPO}\n")
+    web_config.write_text(json.dumps(config) + "\n")
     for _ in range(60):
         if p.poll() is not None:
             die(f"the web dev server exited; see {DEV / 'web.log'}")
@@ -332,8 +357,7 @@ def cmd_up(a):
         snapshot(Path(a.src).expanduser())
     elif not MODE.is_file():
         fresh()
-    start_hub()
-    start_web()
+    start_web(start_hub())
     show_url()
 
 
@@ -341,8 +365,7 @@ def cmd_restart(a):
     if not a.no_build:
         build()
     stop_hub()
-    start_hub()
-    start_web()
+    start_web(start_hub())
     show_url()
 
 
@@ -356,7 +379,11 @@ def cmd_status(_):
     hub = read_pid(RUN / "hub.pid", "steve-hub")
     web = read_pid(RUN / "web.pid", "npm")
     print(f"home    {DEV}\ndata    {mode}")
-    print(f"hub     {'running (' + str(hub) + ') on 127.0.0.1:' + str(PORT) if hub else 'stopped'}")
+    hub_status = "stopped"
+    if hub:
+        url = ready_hub(hub)
+        hub_status = f"running ({hub}) on {url}" if url else f"starting ({hub})"
+    print(f"hub     {hub_status}")
     print(f"web     {'running (' + str(web) + ') on http://127.0.0.1:' + str(WEB_PORT) if web else 'stopped'}")
     print(f"build   {HUB_BIN}")
 

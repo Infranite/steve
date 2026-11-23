@@ -10,7 +10,7 @@ import { OutDialog, type OutOpen } from "@/item-outputs"
 import { Disclosure } from "@/ui"
 import type { Out } from "@/store"
 
-/** Use the same artifacts as the item's outputs tab; local legacy outputs keep their workspace preview. */
+/** Use the same artifacts as the item's outputs tab; an output without a Hub delivery (a link) only previews. */
 export function DeliveryCards({ item, outs, anns }: { item: string; outs: Out[]; anns: RAnnotation[] }) {
   const t = useT(), [view, setView] = useState<OutOpen | null>(null)
   const rows = groupOuts(outs).final
@@ -19,7 +19,7 @@ export function DeliveryCards({ item, outs, anns }: { item: string; outs: Out[];
     <div className="mt-2 flex min-w-0 flex-col gap-2" data-delivery-cards>
       {rows.map(({ o }) => {
         const id = outputDeliveryId(o)
-        return <Card key={o[3]} data-delivery-card={id ?? "legacy"} data-artifact={o[3]} data-item={item}>
+        return <Card key={o[3]} data-delivery-card={id ?? "none"} data-artifact={o[3]} data-item={item}>
           <CardHeader title={o[1]} description={t("pages:delivery.fromItem", { item })} icon={<FileTextIcon />} />
           <CardContent className="flex min-w-0 flex-col gap-2">
             <div className="flex flex-wrap gap-2">
@@ -27,7 +27,6 @@ export function DeliveryCards({ item, outs, anns }: { item: string; outs: Out[];
               <Button size="sm" variant="outline" onClick={() => setView({ o })} data-delivery-preview><FileTextIcon />{t("pages:outputs.preview")}</Button>
               {id && <Button size="sm" variant="ghost" render={<a href={withWs(`/api/file-deliveries/${encodeURIComponent(id)}/raw`)} download />} nativeButton={false} data-delivery-download><DownloadIcon />{t("pages:delivery.download")}</Button>}
             </div>
-            {!id && <p className="type-footnote text-muted-foreground" data-legacy-delivery>{t("pages:delivery.legacy")}</p>}
           </CardContent>
         </Card>
       })}

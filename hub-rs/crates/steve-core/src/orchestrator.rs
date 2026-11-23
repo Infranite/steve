@@ -24,7 +24,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use steve_modules::outbound::YOLO_ACTOR;
 use steve_modules::outbound::{UNTRUSTED_CLOSE, UNTRUSTED_OPEN, quote_untrusted};
-use steve_store::seeded;
+use steve_store::{Ingest, bots, file_repo, seeded};
 
 const PRO: [&str; 3] = ["只在必要时", "适中", "积极"];
 const DAY: i64 = 24 * 3_600_000;
@@ -298,12 +298,8 @@ impl Core {
         }
         /* a Steve bot with no harness gets one, with no model: the harness's own default; one that has a
         harness is left as the user set it, model or not */
-        db.store().with_conn(|c| {
-            c.execute(
-                "UPDATE bots SET harness = ?1 WHERE id = 'steve' AND harness = ''",
-                [steve_harness_spec::DEFAULT_ADAPTER.0],
-            )?;
-            Ok(())
+        db.store().write(|w| {
+            bots::fill_missing_harness(w, "steve", steve_harness_spec::DEFAULT_ADAPTER.0)
         })?;
         /* bots seeded before projects existed: give them their project and a face once */
         db.bot_seed_fixups(steve_project.as_ref().map(|p| p.id.as_str()))?;
@@ -328,54 +324,37 @@ impl Core {
             return Ok(false);
         };
         let store = self.0.store.store();
-        let mut changed = Vec::new();
-        store.with_conn(|c| {
+        store.write(|w| {
+            let mut changed = false;
             for id in ["steve", "dev"] {
-                let row: Option<(String, Option<String>, Option<String>, i64, String)> = c
-                    .query_row(
-                        "SELECT harness, model, reasoning_effort, revision, workspace_id FROM bots WHERE id = ?1 AND deleted = 0",
-                        [id],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-                    )
-                    .ok();
-                let Some((cur_h, model, effort, rev, ws)) = row else {
+                let Some(bot) = bots::pristine_harness(w, id)? else {
                     continue;
                 };
-                if rev != 1 || model.is_some() || effort.is_some() {
-                    continue;
-                }
                 let unavailable = hs
                     .iter()
-                    .find(|h| h.id == cur_h)
-                    .is_some_and(|h| h.ready == Some(false));
-                if !unavailable || cur_h == target.id {
+                    .find(|h| h.id == bot.harness)
+                    .is_some_and(|h| h.ready == Some(false) && h.id != target.id);
+                if !unavailable {
                     continue;
                 }
-                let perm = if id == "dev" && target.offers_mode(steve_node_api::PermissionMode::Auto)
-                {
-                    "auto"
-                } else {
-                    target.default_perm_mode()
-                };
-                let n = c.execute(
-                    "UPDATE bots SET harness = ?1, perm_mode = ?2, updated = ?3 WHERE id = ?4 AND revision = 1",
-                    rusqlite::params![target.id, perm, steve_store::now(), id],
-                )?;
-                if n > 0 {
-                    changed.push((id, ws));
+                let perm =
+                    if id == "dev" && target.offers_mode(steve_node_api::PermissionMode::Auto) {
+                        "auto"
+                    } else {
+                        target.default_perm_mode()
+                    };
+                if bots::move_pristine_harness(w, id, &target.id, perm, steve_store::now())? {
+                    w.emit(steve_types::DomainEvent::from(
+                        steve_types::ConfigEvent::Bot {
+                            ws: bot.workspace.into(),
+                            id: id.into(),
+                        },
+                    ));
+                    changed = true;
                 }
             }
-            Ok(())
-        })?;
-        for (id, ws) in &changed {
-            store.publish(steve_types::DomainEvent::from(
-                steve_types::ConfigEvent::Bot {
-                    ws: ws.clone().into(),
-                    id: (*id).into(),
-                },
-            ));
-        }
-        Ok(!changed.is_empty())
+            Ok(changed)
+        })
     }
 
     /// The bot's own part of the prompt: written by the user, or generated from its settings.
@@ -633,8 +612,13 @@ impl Core {
     pub fn fail_item(&self, item: &str, why: &str) -> Result<()> {
         let mut t = self.tx();
         if let Some(op) = t.lc_open_op(item, crate::cycle::OP_HOOKS)? {
-            t.db().store().transaction(|tx| {
-                steve_store::operation_set_in(tx, &op.id, "running", &json!({"last_failure": why}))
+            t.db().store().write(|tx| {
+                steve_store::operation_repo::set(
+                    tx,
+                    &op.id,
+                    "running",
+                    &json!({"last_failure": why}),
+                )
             })?;
         }
         t.fail(item, why)
@@ -934,22 +918,16 @@ impl Tx<'_> {
         Ok(result)
     }
 
-    /// Only Steve-created sessions carry this protocol. Older sessions are recognized by
-    /// their original dispatch; imported sessions are not silently given a new owner.
+    /// Only Steve-created sessions carry this protocol (their dispatch records its hash);
+    /// imported sessions are not silently given a new owner.
     fn protocol_refresh(&self, sid: &str) -> Result<Option<(String, String)>> {
-        use rusqlite::OptionalExtension;
-        let (previous, legacy) = self.db().store().reader(|c| {
-            let previous: Option<String> = c.query_row(
-                "SELECT json_extract(data,'$.steve_protocol_hash') FROM events WHERE session_id=? AND json_type(data,'$.steve_protocol_hash')='text' ORDER BY seq DESC LIMIT 1",
-                [sid], |r| r.get(0)).optional()?;
-            let legacy: bool = c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM session_dispatch WHERE session_id=? AND text LIKE 'You are working for Steve,%')",
-                [sid], |r| r.get(0))?;
-            Ok::<_, steve_store::StoreError>((previous, legacy))
-        })?;
-        if previous.is_none() && !legacy {
+        let previous = self
+            .db()
+            .store()
+            .read(|r| r.events().latest_protocol_hash(sid))?;
+        let Some(previous) = previous else {
             return Ok(None);
-        }
+        };
         let Some(session) = self.db().session(sid)? else {
             return Ok(None);
         };
@@ -971,7 +949,7 @@ impl Tx<'_> {
         // No fresh retrieval here: policy refresh must not refill the session with old conversations.
         let protocol = self.protocol_body(&item, &bot, &session, false)?;
         let hash = crate::util::sha(&protocol);
-        Ok((previous.as_deref() != Some(hash.as_str())).then_some((protocol, hash)))
+        Ok((previous != hash).then_some((protocol, hash)))
     }
 
     pub(crate) fn active_session(&self, item: &str) -> Result<Option<Session>> {
@@ -1281,7 +1259,7 @@ impl Tx<'_> {
 
     pub(crate) fn create_item(&mut self, n: CreateItem) -> Result<Item> {
         let db = self.db();
-        let (item, bot, project, guessed) = db.atomic(|| {
+        let (item, bot, project, guessed) = db.store().write::<_, crate::CoreError>(|w| {
             let ws = n.ws.as_str();
             for dep in &n.deps {
                 let prerequisite = db.item(dep)?.filter(|i| i.workspace_id == ws && i.kind == "task")
@@ -1290,7 +1268,7 @@ impl Tx<'_> {
                     return Err(crate::cycle::conflict("工作单元不能作为事项的前置，请使用其主事项"));
                 }
             }
-            let team = db.store().reader(|c| steve_store::bot_dispatch::selected(c, ws, n.team.as_deref()))?;
+            let team = steve_store::bot_dispatch::selected(w, ws, n.team.as_deref())?;
             let selected_bot = n.bot.as_deref().filter(|b| !b.is_empty());
             let bot = match selected_bot {
                 Some(b) if db.bot_in_workspace(b, ws)? => db.bot(b)?,
@@ -1353,10 +1331,10 @@ impl Tx<'_> {
                 }
             }
             if let Some(team) = &team {
-                db.store().transaction(|c| {
-                    steve_store::bot_dispatch::snapshot(c, &item.id, team,
-                        if n.team.is_some() { "explicit" } else { "default" })
-                })?;
+                steve_store::bot_dispatch::snapshot(
+                    w, &item.id, team,
+                    if n.team.is_some() { "explicit" } else { "default" },
+                )?;
             }
             Ok((item, bot, project, guessed))
         })?;
@@ -1520,7 +1498,7 @@ impl Tx<'_> {
                 .agent_model(&item.workspace_id, &bot.harness)
         });
         // Preserve the user's choice for target-Node preflight. Silently dropping an effort
-        // masks an invalid legacy Bot configuration and can run work with unintended settings.
+        // masks an invalid Bot configuration and can run work with unintended settings.
         let reasoning_effort = bot.reasoning_effort.clone();
         let s = self.db().session_create(&NewSession {
             workspace_id: item.workspace_id.clone(),
@@ -1610,7 +1588,7 @@ impl Tx<'_> {
 
     pub(crate) fn fail(&mut self, item_id: &str, why: &str) -> Result<()> {
         let db = self.db().clone();
-        db.atomic(|| {
+        db.store().write::<_, crate::CoreError>(|_w| {
             let i = self.item(item_id)?;
             /* one card per trouble: the same one still open is not asked again; an older stop card gives way
              * to the new one (a card about an effect nobody knows stays, it waits on you) */
@@ -1667,7 +1645,7 @@ impl Tx<'_> {
             return Ok(());
         };
         let db = self.db().clone();
-        db.atomic(|| {
+        db.store().write::<_, crate::CoreError>(|_w| {
         let i = self.item(item)?;
         if i.phase == crate::cycle::CLOSED {
             /* the cycle is over: a plan sent after it is noted, never rewrites what closed */
@@ -1770,7 +1748,7 @@ impl Tx<'_> {
         draft: Option<String>,
     ) -> Result<()> {
         let db = self.db().clone();
-        db.atomic(|| {
+        db.store().write::<_, crate::CoreError>(|_w| {
             self.dependency_question_guard(item)?;
             supersede(&db, item, &["ask", "fail"], "Bot 提了新的问题")?;
             let d = db.decision_create(NewDecision {
@@ -1825,7 +1803,7 @@ impl Tx<'_> {
             return Ok(());
         };
         let db = self.db().clone();
-        db.atomic(|| {
+        db.store().write::<_, crate::CoreError>(|_w| {
             self.dependency_question_guard(item)?;
             supersede(&db, item, &["ask", "fail"], "Bot 继续往下做了")?;
             let d = db.decision_create(NewDecision {
@@ -2413,7 +2391,6 @@ impl Tx<'_> {
             if same {
                 asked_yours = true;
             } else if let Some(asked_at) = k.asked_seq
-                /* a Stop kept before its moment was (an older build's): not known to be newer */
                 && !self.db().sent_after(&session.id, asked_at)?
             {
                 self.graph_stop_drop(e)?;
@@ -3048,7 +3025,7 @@ impl Tx<'_> {
 
     pub(crate) fn add_dep(&mut self, item_id: &str, dep: &str) -> Result<()> {
         let db = self.db().clone();
-        db.atomic(|| {
+        db.store().write::<_, crate::CoreError>(|_w| {
             if item_id == dep || db.deps_of(item_id)?.iter().any(|d| d == dep) {
                 return Ok(());
             }
@@ -3086,7 +3063,7 @@ impl Tx<'_> {
 
     pub(crate) fn rm_dep(&mut self, item_id: &str, dep: &str) -> Result<()> {
         let db = self.db().clone();
-        db.atomic(|| {
+        db.store().write::<_, crate::CoreError>(|_w| {
             db.dep_remove(item_id, dep)?;
             db.timeline_add(item_id, "me", "sys", &format!("移除前置事项 {dep}"), None)?;
             Ok(())
@@ -3212,7 +3189,7 @@ impl Tx<'_> {
                     // identity immutable and use the ordinary handoff. Starting may refresh
                     // Node roots from another thread, so it must follow the store commit.
                     self.rt().can_run(&i, &bot.id, &selection.harness)?;
-                    db.atomic(|| {
+                    db.store().write::<_, crate::CoreError>(|_w| {
                         self.db().decision_resolve(
                             id,
                             json!({"choice":"retry"}),
@@ -3224,7 +3201,7 @@ impl Tx<'_> {
                     self.start_or_fail(&i, None, None)?;
                     return reget(self);
                 }
-                db.atomic(|| {
+                db.store().write::<_, crate::CoreError>(|_w| {
                     self.db()
                         .decision_resolve(id, json!({"choice":"retry"}), "resolved", None)?;
                     self.rt().retry_session(&session.id, &selection)?;
@@ -4042,7 +4019,7 @@ impl Tx<'_> {
             self.rt().answer_permission(id, None)?;
         }
         let db = self.db().clone();
-        db.atomic(|| {
+        db.store().write::<_, crate::CoreError>(|_w| {
         db.audit(actor, "decision.dismiss", id, &json!({}), &d.workspace_id)?;
         let i = match &d.item_id {
             Some(i) => db.item(i)?,
@@ -4412,7 +4389,7 @@ impl Tx<'_> {
 
     pub(crate) fn revise_goal(&mut self, id: &str, text: &str) -> Result<()> {
         let db = self.db().clone();
-        let v = db.atomic(|| {
+        let v = db.store().write::<_, crate::CoreError>(|_w| {
             self.lc_guard_open(id)?;
             let v = db.add_goal(id, text)?;
             db.timeline_add(id, "me", "sys", &format!("目标更新为 v{v}"), None)?;
@@ -4658,7 +4635,7 @@ impl Tx<'_> {
             .ok_or_else(|| msg(steve_i18n::t!("core.conversation.not_found")))?;
         if let Some(item) = s.item_id.as_deref() {
             let db = self.db().clone();
-            db.atomic(|| {
+            db.store().write::<_, crate::CoreError>(|_w| {
                 supersede(&db, item, &["ask", "fail"], "Bot 继续往下做了")?;
                 db.item_patch(item, patch![now: "在等你批准"])?;
                 settle(&db, item)
@@ -4920,26 +4897,26 @@ impl Tx<'_> {
                 }
             }
         }
-        self.db().bot_remove(id)?;
-        /* the modules' references (personas, flow nodes) move to the same heir, one transaction */
-        if let Some(m) = self.c.modules() {
-            let now = now();
-            m.store
-                .transaction(|tx| {
-                    for (w, heir) in &heirs {
-                        m.registry.on_bot_deleted(tx, w, id, heir, now)?;
-                    }
-                    Ok::<_, steve_modules::ApiError>(())
-                })
-                .map_err(|e| msg(e.to_string()))?;
-        }
-        self.db().audit(
-            actor,
-            "bot.delete",
-            id,
-            &json!({"to": to, "moved": moved}),
-            WS,
-        )?;
+        self.db().store().write(|w| -> Result<()> {
+            steve_store::bots::remove(w, id)?;
+            if let Some(m) = self.c.modules() {
+                let now = now();
+                for (ws, heir) in &heirs {
+                    m.registry
+                        .on_bot_deleted(w, ws, id, heir, now)
+                        .map_err(|e| msg(e.to_string()))?;
+                }
+            }
+            steve_store::audit_repo::record(
+                w,
+                WS,
+                actor,
+                "bot.delete",
+                id,
+                &json!({"to": to, "moved": moved}),
+            )?;
+            Ok(())
+        })?;
         Ok(moved)
     }
 
@@ -5141,22 +5118,18 @@ pub fn design_pending(store: &steve_store::Store, item: &Item) -> Result<bool> {
 /// Whether `location` is the exact URL of a file delivery this item received, of a kind the
 /// delivery page opens: HTML, Markdown or text, PDF, an image, or a ZIP with an entry.
 fn openable_delivery(store: &steve_store::Store, item: &str, location: &str) -> Result<bool> {
-    use rusqlite::OptionalExtension;
     if !(location.starts_with("https://") || location.starts_with("http://")) {
         return Ok(false);
     }
-    let row = store.reader::<_, steve_store::StoreError>(|c| {
-        Ok(c.query_row(
-            "SELECT d.name,d.mime,d.entrypoint FROM deliveries d JOIN items i ON i.id=d.item_id AND i.workspace_id=d.workspace_id WHERE d.item_id=? AND d.url=?",
-            rusqlite::params![item, location],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?)),
-        )
-        .optional()?)
-    })?;
-    let Some((name, mime, entry)) = row else {
+    let Some(delivery) = store.read(|r| file_repo::item_delivery(r, item, location))? else {
         return Ok(false);
     };
-    let shown = entry.as_deref().unwrap_or(&name).to_ascii_lowercase();
+    let shown = delivery
+        .entrypoint
+        .as_deref()
+        .unwrap_or(&delivery.name)
+        .to_ascii_lowercase();
+    let mime = delivery.mime;
     let ext = shown.rsplit_once('.').map(|(_, e)| e).unwrap_or_default();
     Ok(mime.starts_with("text/")
         || mime.starts_with("image/")
@@ -5184,30 +5157,27 @@ fn verify_design_file(
     item: &str,
     location: &str,
 ) -> Result<()> {
-    let (root, path, expected) = if location.starts_with("https://")
-        || location.starts_with("http://")
-    {
-        use rusqlite::OptionalExtension;
-        // Match the exact URL that the receiver recorded, never an arbitrary host with a
-        // similar-looking path. The item and current workspace must still own this version.
-        let hash = store.reader::<_,steve_store::StoreError>(|c| Ok(c.query_row(
-            "SELECT d.sha256 FROM deliveries d JOIN items i ON i.id=d.item_id AND i.workspace_id=d.workspace_id WHERE d.item_id=? AND d.url=?",
-            rusqlite::params![item,location],|r|r.get::<_,String>(0)).optional()?))?
-            .ok_or_else(||crate::cycle::conflict("设计文件没有已接收的交付记录"))?;
-        let root = home.join("deliveries").join("objects");
-        let path = root.join(&hash);
-        (root, path, hash)
-    } else {
-        let root = home.join("workspaces").join(item).join("outputs");
-        let path = Path::new(location).to_path_buf();
-        let expected = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .and_then(|s| s.strip_prefix("output-"))
-            .ok_or_else(|| crate::cycle::conflict("设计文件缺少内容校验"))?
-            .to_string();
-        (root, path, expected)
-    };
+    let (root, path, expected) =
+        if location.starts_with("https://") || location.starts_with("http://") {
+            // The receiver's exact URL must still belong to this item and workspace.
+            let hash = store
+                .read(|r| file_repo::item_delivery(r, item, location))?
+                .ok_or_else(|| crate::cycle::conflict("设计文件没有已接收的交付记录"))?
+                .sha256;
+            let root = home.join("deliveries").join("objects");
+            let path = root.join(&hash);
+            (root, path, hash)
+        } else {
+            let root = home.join("workspaces").join(item).join("outputs");
+            let path = Path::new(location).to_path_buf();
+            let expected = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.strip_prefix("output-"))
+                .ok_or_else(|| crate::cycle::conflict("设计文件缺少内容校验"))?
+                .to_string();
+            (root, path, expected)
+        };
     if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(crate::cycle::conflict("设计文件缺少内容校验"));
     }

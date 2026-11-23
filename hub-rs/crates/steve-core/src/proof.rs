@@ -372,7 +372,7 @@ impl Tx<'_> {
             let ev = json!({"tag": tag, "commit": commit, "version": version});
             self.db()
                 .store()
-                .transaction(|tx| steve_store::operation_set_in(tx, &op.id, "succeeded", &ev))?;
+                .write(|tx| steve_store::operation_repo::set(tx, &op.id, "succeeded", &ev))?;
             self.db().timeline_add(
                 &i.id,
                 "steve",

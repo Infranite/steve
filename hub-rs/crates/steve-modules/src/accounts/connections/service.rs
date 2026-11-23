@@ -1130,7 +1130,7 @@ impl Connections {
         tx: &mut W<'_>,
         p: &crate::vault::items::PreparedItem,
     ) -> VaultResult<String> {
-        self.0.vault.insert_prepared_in(tx, p)
+        self.0.vault.insert_prepared(tx, p)
     }
 
     /// Destroys a credential item in `tx` (missing or already destroyed is fine).
@@ -1141,7 +1141,7 @@ impl Connections {
         actor: &str,
         item: &str,
     ) -> VaultResult<()> {
-        self.0.vault.destroy_item_in(tx, ws, actor, item)?;
+        self.0.vault.destroy_item(tx, ws, actor, item)?;
         Ok(())
     }
 
@@ -1235,7 +1235,7 @@ impl Connections {
             .blocking(move |c| {
                 c.0.m.store.write(|tx| {
                     for i in &items {
-                        c.0.vault.destroy_item_in(tx, &ws, &actor, i)?;
+                        c.0.vault.destroy_item(tx, &ws, &actor, i)?;
                     }
                     Ok::<_, VaultError>(())
                 })
@@ -1908,8 +1908,7 @@ impl Connections {
                     u.on_disconnect(tx, &rr.workspace_id, &rr.id)?;
                 }
                 if let Some(item) = &rr.credential_item {
-                    c.0.vault
-                        .destroy_item_in(tx, &rr.workspace_id, &w.me, item)?;
+                    c.0.vault.destroy_item(tx, &rr.workspace_id, &w.me, item)?;
                 }
                 Accounts(tx).clear_connection_handles(&rr.id)?;
                 ConnectionRows(tx).delete(&rr.id)?;

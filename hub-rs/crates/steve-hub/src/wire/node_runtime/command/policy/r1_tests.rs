@@ -197,8 +197,8 @@ fn configuration_pending_is_only_reported_for_an_otherwise_permitted_retry() {
     }
 }
 
-/// The existing after_attempt_in retry predicate, with classification already supplied.
-fn legacy_retry(f: TurnFacts, service: bool, retryable: bool, ordinal: u32, limit: u32) -> bool {
+/// The retry rule written out directly, with classification already supplied.
+fn expected_retry(f: TurnFacts, service: bool, retryable: bool, ordinal: u32, limit: u32) -> bool {
     let service_gates =
         f.gates.session_open && f.gates.item_in_progress && f.gates.no_pending_decision;
     f.outcome == Outcome::Failed
@@ -213,7 +213,7 @@ fn legacy_retry(f: TurnFacts, service: bool, retryable: bool, ordinal: u32, limi
 fn service_and_gateway_decisions_match_the_existing_predicate_for_the_same_facts() {
     let intent = intent();
     for ordinal in 0..=3 {
-        // Each bit independently closes one of the legacy gates, including acted.
+        // Each bit independently closes one of the gates, including acted.
         for mask in 0..256 {
             let f = TurnFacts {
                 acted: mask & 1 != 0,
@@ -259,11 +259,11 @@ fn service_and_gateway_decisions_match_the_existing_predicate_for_the_same_facts
                     .decide(retry);
                     assert_eq!(
                         matches!(stream, Decision::Schedule { .. }),
-                        legacy_retry(f, true, true, ordinal, 2)
+                        expected_retry(f, true, true, ordinal, 2)
                     );
                     assert_eq!(
                         matches!(gateway, Decision::Schedule { .. }),
-                        legacy_retry(
+                        expected_retry(
                             f,
                             false,
                             retry != Retry::Never && settled_retry != Retry::Never,
@@ -273,7 +273,7 @@ fn service_and_gateway_decisions_match_the_existing_predicate_for_the_same_facts
                     );
                     assert_eq!(
                         matches!(capacity, Decision::Schedule { .. }),
-                        legacy_retry(f, true, true, ordinal, 3)
+                        expected_retry(f, true, true, ordinal, 3)
                     );
                     for decision in [stream, gateway] {
                         if let Decision::Schedule { at, .. } = decision {

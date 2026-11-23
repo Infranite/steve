@@ -303,7 +303,96 @@ pub struct EventSource<'a> {
 /// The format session events are written in: always Steve's own terms.
 const FORMAT: &str = "steve.v1";
 
+impl<C: Read> SessionEvents<'_, C> {
+    pub fn latest_protocol_hash(&mut self, session: &str) -> Result<Option<String>> {
+        let data = Expr::col(Events::Data);
+        let dialect = self.0.db().dialect();
+        self.0.one(
+            Query::select()
+                .expr(dialect.json_field(data.clone(), "steve_protocol_hash"))
+                .from(Events::Table)
+                .and_where(Expr::col(Events::SessionId).eq(session))
+                .and_where(
+                    Expr::cust_with_expr("json_type(?, '$.steve_protocol_hash')", data).eq("text"),
+                )
+                .order_by(Events::Seq, sea_query::Order::Desc)
+                .limit(1),
+            |row| row.get(0),
+        )
+    }
+
+    pub fn latest_timestamp(&mut self, session: &str) -> Result<Option<i64>> {
+        self.0.one(
+            Query::select()
+                .column(Events::Ts)
+                .from(Events::Table)
+                .and_where(Expr::col(Events::SessionId).eq(session))
+                .order_by(Events::Seq, sea_query::Order::Desc)
+                .limit(1),
+            |row| row.get(0),
+        )
+    }
+
+    pub fn has_since(&mut self, session: &str, ts: i64) -> Result<bool> {
+        self.0
+            .one(
+                Query::select()
+                    .column(Events::Seq)
+                    .from(Events::Table)
+                    .and_where(Expr::col(Events::SessionId).eq(session))
+                    .and_where(Expr::col(Events::Ts).gte(ts))
+                    .limit(1),
+                |_| Ok(()),
+            )
+            .map(|row| row.is_some())
+    }
+
+    pub fn latest_input_seq(&mut self, session: &str) -> Result<Option<i64>> {
+        self.0.one(
+            Query::select()
+                .column(Events::Seq)
+                .from(Events::Table)
+                .and_where(Expr::col(Events::SessionId).eq(session))
+                .and_where(Expr::col(Events::Kind).eq("user"))
+                .order_by(Events::Seq, sea_query::Order::Desc)
+                .limit(1),
+            |row| row.get(0),
+        )
+    }
+
+    pub fn latest_payload_after(
+        &mut self,
+        session: &str,
+        kind: &str,
+        seq: i64,
+    ) -> Result<Option<String>> {
+        self.0.one(
+            Query::select()
+                .column(Events::Data)
+                .from(Events::Table)
+                .and_where(Expr::col(Events::SessionId).eq(session))
+                .and_where(Expr::col(Events::Kind).eq(kind))
+                .and_where(Expr::col(Events::Seq).gt(seq))
+                .order_by(Events::Seq, sea_query::Order::Desc)
+                .limit(1),
+            |row| row.get(0),
+        )
+    }
+}
+
 impl SessionEvents<'_, W<'_>> {
+    /// Appends an event written by the Hub, with no Node stream position to deduplicate.
+    pub fn add_local(
+        &mut self,
+        session: &str,
+        kind: &str,
+        data: serde_json::Value,
+        at: i64,
+    ) -> Result<i64> {
+        self.add(session, kind, data, None, at)?
+            .ok_or_else(|| crate::StoreError::Rejected("session event not added".into()))
+    }
+
     /// Appends a session event (`at`: its time) and returns its `seq`; it is published after the
     /// commit, carrying `data` as given (large tool content is kept apart, see
     /// `event_payload`). With a source, the same Node event again is a no-op (`None`).

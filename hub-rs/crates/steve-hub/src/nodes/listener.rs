@@ -474,7 +474,7 @@ async fn suspect_takeover(svc: &NodeService, node: &NodeId) -> bool {
                 )?;
                 // a paused Node nobody was told about would just look broken
                 let text = steve_i18n::t!("hub.node.takeover_suspected", name = name);
-                steve_core::notify::notify_in(tx, steve_store::WS, "system", "fail", &text, None)?;
+                tx.write(|w| steve_core::notify::notify_in(w, steve_store::WS, "system", "fail", &text, None))?;
             }
             Ok(name)
         })?;

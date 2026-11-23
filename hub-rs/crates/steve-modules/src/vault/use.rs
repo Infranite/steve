@@ -33,8 +33,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use steve_store::{
-    BotRows, Decision, DecisionRows, ItemReads, NewDecision, Read, SessionEvidence, Tx, W, now,
-    uid, vault_items::VaultItems,
+    BotRows, Decision, DecisionRows, ItemReads, NewDecision, Read, SessionEvidence, W, now, uid,
+    vault_items::VaultItems,
 };
 use tokio::sync::mpsc;
 
@@ -972,101 +972,90 @@ fn publish(tx: &mut W<'_>, u: &UseRecord) {
 pub struct UseDecisions(SecretUses);
 
 impl DecisionHandler for UseDecisions {
-    fn resolve(&self, legacy: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
-        legacy.write(|tx| {
-            let inner = &self.0.0;
-            let u = UseRows(tx)
-                .get(&d.subject_id)?
-                .filter(|u| u.workspace_id == cx.ws)
-                .ok_or_else(|| ApiError::not_found("使用记录"))?;
-            if u.status != "pending" {
-                return Err(ApiError::conflict(steve_i18n::t!(
-                    "modules.vault.use_handled"
-                )));
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+        let inner = &self.0.0;
+        let u = UseRows(tx)
+            .get(&d.subject_id)?
+            .filter(|u| u.workspace_id == cx.ws)
+            .ok_or_else(|| ApiError::not_found("使用记录"))?;
+        if u.status != "pending" {
+            return Err(ApiError::conflict(steve_i18n::t!(
+                "modules.vault.use_handled"
+            )));
+        }
+        let Some(p) = lock(&inner.pending).get(&u.id).cloned() else {
+            return Err(ApiError::conflict(steve_i18n::t!(
+                "modules.vault.use_expired"
+            )));
+        };
+        let at = now();
+        let mut result = choice_result(cx);
+        result["use"] = json!(u.id);
+        let job = match cx.choice {
+            "deny" => {
+                UseRows(tx).transition(&u.id, "pending", "denied", None, None, Some(at))?;
+                tx.audit(
+                    cx.ws,
+                    cx.actor,
+                    "vault.use_denied",
+                    &u.item_id,
+                    &json!({"use": u.id, "decision": d.id}),
+                )?;
+                Job::Denied(u.id.clone())
             }
-            let Some(p) = lock(&inner.pending).get(&u.id).cloned() else {
-                return Err(ApiError::conflict(steve_i18n::t!(
-                    "modules.vault.use_expired"
-                )));
-            };
-            let at = now();
-            let mut result = choice_result(cx);
-            result["use"] = json!(u.id);
-            let job = match cx.choice {
-                "deny" => {
-                    UseRows(tx).transition(&u.id, "pending", "denied", None, None, Some(at))?;
-                    tx.audit(
-                        cx.ws,
-                        cx.actor,
-                        "vault.use_denied",
-                        &u.item_id,
-                        &json!({"use": u.id, "decision": d.id}),
-                    )?;
-                    Job::Denied(u.id.clone())
-                }
-                "once" => {
-                    UseRows(tx).transition(&u.id, "pending", "running", None, None, None)?;
-                    Job::Run(u.id.clone())
-                }
-                c => {
-                    let hours = match c {
-                        "grant_1h" => 1,
-                        "grant_8h" => 8,
-                        "grant_24h" => 24,
-                        _ => return Err(ApiError::invalid("choice")),
-                    };
-                    let item = VaultItems(tx)
-                        .item(&u.item_id)?
-                        .filter(|i| i.status == "active")
-                        .ok_or_else(|| ApiError::not_found("条目"))?;
-                    let g = add_grant(
-                        tx,
-                        cx.ws,
-                        &item,
-                        &p.bot_id,
-                        &p.scope,
-                        hours,
-                        cx.actor,
-                        Some(&d.id),
-                    )
-                    .map_err(|e| match e {
-                        VaultError::Api(a) => a,
-                        e => ApiError::Rule(e.to_string()),
-                    })?;
-                    UseRows(tx).transition(&u.id, "pending", "running", Some(&g), None, None)?;
-                    result["grant"] = json!(g);
-                    Job::Run(u.id.clone())
-                }
-            };
-            publish(tx, &u);
-            // runs after the commit: the job waits for the write lock and re-reads the row
-            let _ = inner.jobs.send(job);
-            Ok(result)
-        })
+            "once" => {
+                UseRows(tx).transition(&u.id, "pending", "running", None, None, None)?;
+                Job::Run(u.id.clone())
+            }
+            c => {
+                let hours = match c {
+                    "grant_1h" => 1,
+                    "grant_8h" => 8,
+                    "grant_24h" => 24,
+                    _ => return Err(ApiError::invalid("choice")),
+                };
+                let item = VaultItems(tx)
+                    .item(&u.item_id)?
+                    .filter(|i| i.status == "active")
+                    .ok_or_else(|| ApiError::not_found("条目"))?;
+                let g = add_grant(
+                    tx,
+                    cx.ws,
+                    &item,
+                    &p.bot_id,
+                    &p.scope,
+                    hours,
+                    cx.actor,
+                    Some(&d.id),
+                )
+                .map_err(|e| match e {
+                    VaultError::Api(a) => a,
+                    e => ApiError::Rule(e.to_string()),
+                })?;
+                UseRows(tx).transition(&u.id, "pending", "running", Some(&g), None, None)?;
+                result["grant"] = json!(g);
+                Job::Run(u.id.clone())
+            }
+        };
+        publish(tx, &u);
+        // runs after the commit: the job waits for the write lock and re-reads the row
+        let _ = inner.jobs.send(job);
+        Ok(result)
     }
 
-    fn before_undo(&self, _: &Tx, _: &Decision) -> ApiResult<()> {
+    fn before_undo(&self, _: &mut W<'_>, _: &Decision) -> ApiResult<()> {
         Err(ApiError::rule(steve_i18n::t!(
             "modules.vault.use_not_undoable"
         )))
     }
 
-    fn expire(&self, legacy: &Tx, d: &Decision) -> ApiResult<()> {
-        legacy.write(|tx| {
-            if UseRows(tx).transition(
-                &d.subject_id,
-                "pending",
-                "expired",
-                None,
-                None,
-                Some(now()),
-            )? {
-                lock(&self.0.0.pending).remove(&d.subject_id);
-                if let Some(u) = UseRows(tx).get(&d.subject_id)? {
-                    publish(tx, &u);
-                }
+    fn expire(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
+        if UseRows(tx).transition(&d.subject_id, "pending", "expired", None, None, Some(now()))? {
+            lock(&self.0.0.pending).remove(&d.subject_id);
+            if let Some(u) = UseRows(tx).get(&d.subject_id)? {
+                publish(tx, &u);
             }
-            Ok(())
-        })
+        }
+        Ok(())
     }
 }

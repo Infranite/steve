@@ -217,8 +217,7 @@ fn components(cfg: &AcpConfig, id: &str) -> Vec<HarnessComponent> {
                 id: c.id.into(),
                 name: c.name.into(),
                 package: c.package.into(),
-                installed: status == ComponentStatus::Installed,
-                status: Some(status),
+                status,
                 detected,
                 version,
                 path: path.map(|p| p.to_string_lossy().into_owned()),
@@ -290,7 +289,7 @@ pub(crate) fn setup(
     }) {
         s.state = SetupState::Unavailable;
         s.reason = Some(e.clone());
-    } else if managed && s.components.iter().any(|c| !c.installed) {
+    } else if managed && s.components.iter().any(|c| !c.installed()) {
         s.state = SetupState::NotInstalled;
         s.reason = Some("One or more required components are missing".into());
     } else if let Some((name, min)) = steve_harness_spec::components(id).iter().find_map(|c| {
@@ -339,7 +338,7 @@ pub(crate) fn setup(
 }
 
 pub(crate) fn complete(cfg: &AcpConfig, id: &str) -> Result<(), String> {
-    if components(cfg, id).iter().all(|c| c.installed) {
+    if components(cfg, id).iter().all(|c| c.installed()) {
         Ok(())
     } else {
         Err("npm exited successfully but required component entry points are missing; retry installation or inspect the Node's npm configuration".into())

@@ -307,13 +307,13 @@ export function OutPreview({ o, item, anns = [], focus: focus0, siblings = [], o
   const where = p && "path" in p ? p.path : loc
   /* what a branch or commit is known by, to paste into git */
   const ref = p?.type === "commit" ? p.hash : p?.type === "branch" ? p.branch : null
-  const legacy = p?.type === "binary" && /\.(doc|xls|ppt|pages|numbers|key|odt|ods|odp)$/i.test(p.name)
+  const binaryOffice = p?.type === "binary" && /\.(doc|xls|ppt|pages|numbers|key|odt|ods|odp)$/i.test(p.name)
   const body = err ? <Missing reason={err} />
     : !p ? <div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div>
     : p.type === "missing" ? <Missing reason={p.reason} />
     : p.type === "link" ? <div className="flex flex-col items-start gap-3 py-2"><span className="break-all type-code">{p.url}</span><Button size="sm" onClick={() => window.open(p.url, "_blank", "noopener")}><ExternalLinkIcon />{t("pages:outputs.openLink")}</Button></div>
     : p.type === "text" ? <TextView key={at} p={p} />
-    : p.type === "binary" ? <Missing reason={legacy ? t("pages:outputs.legacy", { name: p.name }) : t("pages:outputs.binary", { name: p.name, size: size(p.size ?? 0) })} />
+    : p.type === "binary" ? <Missing reason={binaryOffice ? t("pages:outputs.binaryOffice", { name: p.name }) : t("pages:outputs.binary", { name: p.name, size: size(p.size ?? 0) })} />
     : p.type === "office" ? (p.large ? <Missing reason={t("pages:outputs.tooLarge", { size: size(p.size ?? 0) })} /> : <OfficeView url={raw()} name={p.name} fallback={(r) => <Missing reason={r} />} />)
     : p.type === "dir" ? <Folder p={p} item={item} art={art} base={at} open={(s) => setPath(s.split("/"))} browse={() => { const e = p.entries.find((x) => x.form === "image"); if (e) { setMode("连续"); setPath([...path, e.name]) } }} />
     : p.type === "commit" ? <div className="flex flex-col gap-3" data-out-commit>

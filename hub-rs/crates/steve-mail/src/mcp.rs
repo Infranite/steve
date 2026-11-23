@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::outbound::{self, Audience, CheckCx, CheckResult};
 use steve_modules::{ApiError, Caller};
-use steve_store::base::{self, Viewer};
+use steve_store::base::Viewer;
 use steve_store::{FileRef, uid};
 
 use crate::Mail;
@@ -703,8 +703,7 @@ impl Mail {
             repo::set_draft_error(tx, &d.id, None)?;
             // the old card expires, a new one opens for this version
             drafts::open_approval(tx, &mut d, &author, now)?;
-            base::audit(
-                &tx.legacy(),
+            tx.audit(
                 &d.workspace_id,
                 &author,
                 "mail_draft.update",

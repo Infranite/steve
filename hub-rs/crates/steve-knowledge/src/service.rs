@@ -13,11 +13,11 @@ use steve_store::{Read, References, StoreError};
 
 use crate::index;
 use crate::notes::{self, NewNote};
-use crate::repo::{DocFilter, DocRow, SourceRow};
 use crate::retrieve::{self, Purpose, Query};
 use crate::sources;
 use crate::state::Knowledge;
 use crate::sync;
+use steve_store::knowledge::{DocFilter, DocRow, SourceRow};
 
 /// What a document and a note are called in messages.
 pub const NOUN_DOC: &str = "文档";

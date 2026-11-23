@@ -55,7 +55,7 @@ fn snapshot(a: &Args) -> Result<serde_json::Value> {
     if !a.db.is_file() {
         bail!("no database at {}", a.db.display());
     }
-    let schema = db::inspect_schema(&a.db)?.schema;
+    let schema = db::inspect_schema_version(&a.db)?;
     if schema > db::SCHEMA_VERSION {
         bail!(
             "the database has schema {schema}, newer than this build's {}: use the Hub release that wrote it",

@@ -20,7 +20,7 @@ use steve_modules::{ApiError, ApiResult, Body, Caller, Check, Modules};
 use steve_store::base::mems::{Mem, MemPatch, NewMem};
 use steve_store::base::{Level, ObjRef, Viewer, Visibility};
 use steve_store::knowledge::{CandidateInfo, CandidateOrigin, CandidateRows, Memories};
-use steve_store::{Decision, DecisionRows, Read, Tx, W, Workspaces};
+use steve_store::{Decision, DecisionRows, Read, W, Workspaces};
 
 use crate::extract::Names;
 use crate::service::{mem_json_for, prepare};
@@ -410,19 +410,19 @@ fn replaced(c: &mut impl Read, id: &str) -> ApiResult<Vec<String>> {
 pub struct MemDecisions;
 
 impl DecisionHandler for MemDecisions {
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
-        tx.write(|w| answer(w, cx.ws, cx.actor, &d.subject_id, cx.choice, cx.text))?;
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+        answer(tx, cx.ws, cx.actor, &d.subject_id, cx.choice, cx.text)?;
         Ok(decisions::choice_result(cx))
     }
 
     /// Undoing a `yes` puts the candidate back and restores the memory it replaced; a `no` deleted
     /// the memory, so it cannot be undone.
-    fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
-        tx.write(|w| undo_confirmation(w, d))
+    fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
+        undo_confirmation(tx, d)
     }
 
-    fn expire(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
-        tx.write(|w| stale_candidate(w, &d.subject_id))
+    fn expire(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
+        stale_candidate(tx, &d.subject_id)
     }
 }
 

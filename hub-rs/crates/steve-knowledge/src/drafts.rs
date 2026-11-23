@@ -602,11 +602,10 @@ fn patch_args(op: &Value) -> ApiResult<(String, SourcePatch)> {
 
 impl ChangeOp for SourcePatchOp {
     fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
-        let tx = &w.legacy();
         let (id, patch) = patch_args(op)?;
         folder::check_patch(&patch)?;
         let who = cx_caller(cx);
-        let p = tx.write(|w| -> ApiResult<_> {
+        let p = {
             let old = folder::own_source_in(w, &who, &id)?;
             if folder::owner_refuses_in(w, &who, &old, &patch)? {
                 return Err(ApiError::forbidden(folder::owner_only()));
@@ -614,8 +613,8 @@ impl ChangeOp for SourcePatchOp {
             folder::check_patch_include(self.0.folder_policy(), &old, &patch)?;
             let p = folder::patch_tx(w, &who, &id, &patch, now())?;
             crate::state::emit_change(w, cx.ws, &id);
-            Ok(p)
-        })?;
+            p
+        };
         if p.rescan {
             self.0.request_scan(&id);
         }
@@ -629,15 +628,14 @@ impl ChangeOp for SourcePatchOp {
         op: &Value,
         before: &Value,
     ) -> ApiResult<()> {
-        let tx = &w.legacy();
         let (id, _) = patch_args(op)?;
         let back: SourcePatch =
             serde_json::from_value(before.clone()).map_err(|_| ApiError::invalid("before"))?;
-        let p = tx.write(|w| -> ApiResult<_> {
+        let p = {
             let p = folder::patch_tx(w, &cx_caller(cx), &id, &back, now())?;
             crate::state::emit_change(w, cx.ws, &id);
-            Ok(p)
-        })?;
+            p
+        };
         if p.rescan {
             self.0.request_scan(&id);
         }
@@ -1255,15 +1253,14 @@ fn source_body(op: &Value) -> ApiResult<SourceBody> {
 
 impl ChangeOp for SourceCreateOp {
     fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
-        let tx = &w.legacy();
         let f = folder::check_new(self.0.folder_policy(), &source_body(op)?)?;
         let at = now();
-        let s = tx.write(|w| -> ApiResult<_> {
+        let s = {
             sources::ensure_builtin(w, cx.ws, cx.actor, at)?;
             let s = folder::insert_folder(w, cx.ws, cx.actor, &f, at)?;
             crate::state::emit_change(w, cx.ws, &s.id);
-            Ok(s)
-        })?;
+            s
+        };
         cx.bind("source", json!(s.id));
         self.0.request_scan(&s.id);
         Ok(json!({ "id": s.id }))
@@ -1276,19 +1273,16 @@ impl ChangeOp for SourceCreateOp {
         _: &Value,
         before: &Value,
     ) -> ApiResult<()> {
-        let tx = &w.legacy();
         let id = before["id"].as_str().unwrap_or("");
-        tx.write(|w| {
-            if let Some(s) = Documents(w).source(id)?.filter(|s| s.workspace_id == cx.ws) {
-                let owner = Caller {
-                    ws: cx.ws.into(),
-                    me: s.created_by,
-                };
-                folder::delete_tx(w, &owner, id)?;
-                crate::state::emit_change(w, cx.ws, id);
-            }
-            Ok(())
-        })
+        if let Some(s) = Documents(w).source(id)?.filter(|s| s.workspace_id == cx.ws) {
+            let owner = Caller {
+                ws: cx.ws.into(),
+                me: s.created_by,
+            };
+            folder::delete_tx(w, &owner, id)?;
+            crate::state::emit_change(w, cx.ws, id);
+        }
+        Ok(())
     }
 }
 
@@ -1347,9 +1341,8 @@ fn mem_args(op: &Value) -> ApiResult<MemArgs> {
 
 impl ChangeOp for MemAddOp {
     fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
-        let tx = &w.legacy();
         let a = mem_args(op)?;
-        let m = tx.write(|w| -> ApiResult<_> {
+        let m = {
             if !References(w).scope_exists(cx.ws, &a.visibility)? {
                 return Err(ApiError::not_found("团队"));
             }
@@ -1380,8 +1373,8 @@ impl ChangeOp for MemAddOp {
                 &m.id,
                 &json!({ "kind": a.kind, "changeset": cx.changeset_id }),
             )?;
-            Ok(m)
-        })?;
+            m
+        };
         cx.bind("mem", json!(m.id));
         Ok(json!({ "id": m.id }))
     }
@@ -1393,21 +1386,18 @@ impl ChangeOp for MemAddOp {
         _: &Value,
         before: &Value,
     ) -> ApiResult<()> {
-        let tx = &w.legacy();
-        tx.write(|w| {
-            if let Some(id) = before["id"].as_str() {
-                Memories(w).delete(id)?;
-                sync::sync_mem(w, id, now())?;
-                w.audit(
-                    cx.ws,
-                    cx.actor,
-                    "mem.delete",
-                    id,
-                    &json!({ "undo": cx.changeset_id }),
-                )?;
-            }
-            Ok(())
-        })
+        if let Some(id) = before["id"].as_str() {
+            Memories(w).delete(id)?;
+            sync::sync_mem(w, id, now())?;
+            w.audit(
+                cx.ws,
+                cx.actor,
+                "mem.delete",
+                id,
+                &json!({ "undo": cx.changeset_id }),
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -1416,7 +1406,6 @@ struct NoteCreateOp;
 
 impl ChangeOp for NoteCreateOp {
     fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
-        let tx = &w.legacy();
         let title = op["title"].as_str().unwrap_or("").trim();
         let body = op["body"].as_str().unwrap_or("");
         Check::new()
@@ -1424,7 +1413,7 @@ impl ChangeOp for NoteCreateOp {
             .len("body", body, 0, 200_000)
             .done()?;
         let visibility = scope_arg::<Visibility>(op, "visibility")?;
-        let id = tx.write(|w| -> ApiResult<_> {
+        let id = {
             if let Some(v) = &visibility
                 && !References(w).scope_exists(cx.ws, v)?
             {
@@ -1444,8 +1433,8 @@ impl ChangeOp for NoteCreateOp {
                 now(),
             )?;
             crate::state::emit_change(w, cx.ws, &id);
-            Ok(id)
-        })?;
+            id
+        };
         cx.bind("note", json!(id));
         Ok(json!({ "id": id }))
     }
@@ -1457,23 +1446,20 @@ impl ChangeOp for NoteCreateOp {
         _: &Value,
         before: &Value,
     ) -> ApiResult<()> {
-        let tx = &w.legacy();
-        tx.write(|w| {
-            if let Some(id) = before["id"].as_str()
-                && Documents(w).doc(id)?.is_some()
-            {
-                index::delete_doc(w, id)?;
-                w.audit(
-                    cx.ws,
-                    cx.actor,
-                    "kb_note.delete",
-                    id,
-                    &json!({ "undo": cx.changeset_id }),
-                )?;
-                crate::state::emit_change(w, cx.ws, id);
-            }
-            Ok(())
-        })
+        if let Some(id) = before["id"].as_str()
+            && Documents(w).doc(id)?.is_some()
+        {
+            index::delete_doc(w, id)?;
+            w.audit(
+                cx.ws,
+                cx.actor,
+                "kb_note.delete",
+                id,
+                &json!({ "undo": cx.changeset_id }),
+            )?;
+            crate::state::emit_change(w, cx.ws, id);
+        }
+        Ok(())
     }
 }
 
@@ -1516,9 +1502,8 @@ fn set_doc_scope(tx: &mut W<'_>, cx: &OpCx, doc_id: &str, set: &Value) -> ApiRes
 
 impl ChangeOp for DocPatchOp {
     fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
-        let tx = &w.legacy();
         let id = op["doc"].as_str().unwrap_or("");
-        tx.write(|w| set_doc_scope(w, cx, id, &op["set"]))
+        set_doc_scope(w, cx, id, &op["set"])
     }
 
     fn undo(
@@ -1528,13 +1513,10 @@ impl ChangeOp for DocPatchOp {
         op: &Value,
         before: &Value,
     ) -> ApiResult<()> {
-        let tx = &w.legacy();
         let id = op["doc"].as_str().unwrap_or("");
-        tx.write(|w| {
-            if Documents(w).doc(id)?.is_some() {
-                set_doc_scope(w, cx, id, before)?;
-            }
-            Ok(())
-        })
+        if Documents(w).doc(id)?.is_some() {
+            set_doc_scope(w, cx, id, before)?;
+        }
+        Ok(())
     }
 }

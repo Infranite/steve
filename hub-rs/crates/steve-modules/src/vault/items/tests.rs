@@ -983,7 +983,7 @@ async fn connection_credentials_in_the_system_vault() {
     let n = e
         .env
         .store()
-        .transaction(|tx| e.vault.destroy_item(tx, WS, ME, &id))
+        .write(|tx| e.vault.destroy_item(tx, WS, ME, &id))
         .unwrap();
     assert_eq!(n, 0);
     let w: Option<Vec<u8>> = e.item(&id).dek_wrapped;

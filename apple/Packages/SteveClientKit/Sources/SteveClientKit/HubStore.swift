@@ -180,7 +180,7 @@ public final class HubStore: ObservableObject {
             updated.id = existing.id
             updated.isLocalDefault = existing.isLocalDefault
             if updated.nameSource == .generatedLocalDefault || updated.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                // Rediscovery is not a user rename and cannot promote an ambiguous legacy alias.
+                // Rediscovery is not a user rename and never replaces the user's alias.
                 updated.name = existing.name
                 updated.nameSource = existing.nameSource
             }

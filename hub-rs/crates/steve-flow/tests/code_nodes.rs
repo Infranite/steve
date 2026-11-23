@@ -187,8 +187,9 @@ struct Env {
     _keys: TempDir,
 }
 
+/// `cmd` steps run on a local Node holding the project directory.
 fn env() -> Env {
-    env_with(|_| None)
+    env_with(|dir| Some(on_node::LocalCmd::open(dir) as Arc<dyn CmdNode>))
 }
 
 /// [`env`], with `cmd` steps on the Node `node` gives for the project directory.
@@ -218,7 +219,7 @@ fn env_with(node: impl FnOnce(&std::path::Path) -> Option<Arc<dyn CmdNode>>) -> 
                 .with_lookup(Arc::new(FakeDns))
                 .with_timeout(Duration::from_secs(5)),
         );
-        let cmd = Cmd::new(env.dir.path());
+        let cmd = Cmd::new();
         let cmd: Arc<dyn NodeKind> = Arc::new(match on_node {
             Some(n) => cmd.with_node(n),
             None => cmd,
@@ -774,7 +775,7 @@ async fn effect_approval_names_the_secrets_it_releases() {
 mod on_node {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use steve_flow::nodes::cmd::{CmdRan, CmdRequest, NO_SECRETS, OFFLINE, UNKNOWN};
+    use steve_flow::nodes::cmd::{CmdRan, CmdRequest, NO_NODE, NO_SECRETS, OFFLINE, UNKNOWN};
     use steve_node::{LocalNode, NodeConfig, Root, Storage};
     use steve_node_api::testkit::RecordingSink;
     use steve_node_api::testkit::build::policy;
@@ -1009,6 +1010,27 @@ mod on_node {
         assert_eq!((got[0].rerun, got[1].rerun), (0, 1));
         assert_eq!((&got[1].run_id, &got[1].step), (&run, &"n".to_string()));
         assert_eq!(step(&e, &run).1["stdout"], "again\n");
+    }
+
+    /// Without the local Node the Hub never runs a command itself: the step fails.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn without_a_node_the_step_fails() {
+        let Env { e, work, .. } = env_with(|_| None);
+        let f = create_flow(
+            &e,
+            "跑",
+            one_node(
+                "cmd",
+                "写",
+                json!({"command": "touch here", "project_id": "prj_t"}),
+            ),
+        )
+        .await;
+        grant(&e, &f, "cmd.run", "project", "prj_t");
+        let run = start(&e, &f, json!({})).await;
+        assert_eq!(settled(&e, &run).await, "failed");
+        assert_eq!(step(&e, &run).2.as_deref(), Some(NO_NODE));
+        assert!(!work.path().join("here").exists(), "not run on the Hub");
     }
 
     #[tokio::test(flavor = "multi_thread")]

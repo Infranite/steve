@@ -64,7 +64,6 @@ async fn start_with_node(node: Option<Arc<dyn steve_node_api::Node>>) -> Env {
         ("STEVE_VAULT_KEYSTORE", "file".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
         ("STEVE_NO_RESUME", "1".into()),
-        ("STEVE_NODE_MODE", "off".into()),
         ("STEVE_NODE_LISTEN", "0".into()),
         (
             "STEVE_ADAPTER_PI",

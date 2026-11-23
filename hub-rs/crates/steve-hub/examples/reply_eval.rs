@@ -2,7 +2,7 @@
 //! operator keeps outside the repository; writes no Steve database and sends nothing.
 //!
 //! ```text
-//! cargo run -p steve-channels --example reply_eval -- <command> [options]
+//! cargo run -p steve-hub --example reply_eval -- <command> [options]
 //!
 //! replay   --cases F --out F --owner NAME [--samples N] [--only id,id] [--concurrency N]
 //!          [--corpus F --style] [--bot-layer] [--alias A]... [--tz ZONE]
@@ -25,7 +25,7 @@
 //! duty, manner and rules rendered on your own account as before) and asks the model the composer
 //! asks, with its second try when the checks of writing as you send a reply back
 //! ([`compose::voice_verdict`], [`compose::settle_revised`]): the gateway's smart tier with the purpose `compose`, through
-//! Steve's own model resolver and one-shot driver. The route — the main Bot's harness, model and
+//! Steve's model resolver and a local Node. The route — the main Bot's harness, model and
 //! effort, and the `models.compose` override — is read from `--route-db` (opened read-only, as a
 //! SQLite URI with `mode=ro`) and given to the resolver over a throwaway store in a temporary
 //! directory; `--harness/--models/--effort` override it. `STEVE_MODELS_SMART` / `STEVE_MODELS_FAST`
@@ -244,7 +244,7 @@ fn gateway_for(
         smart: env_list("STEVE_MODELS_SMART"),
         ..Default::default()
     };
-    let resolver = steve_core::models::Models::new(store, defaults);
+    let resolver = steve_core::models::Models::new(store.clone(), defaults);
     let shown = resolver.for_call(
         ws,
         purpose,
@@ -254,11 +254,42 @@ fn gateway_for(
         },
     );
     let described = shown.describe();
-    let inner = Arc::new(steve_core::InProcess {
-        one: steve_core::LocalAcp {
+    use steve_hub::wire::node_runtime::{NodeDomain, NodePrint, NodeRuntime, Sink};
+    use steve_node_api::{Capacity, NodeId};
+    struct Offline;
+    impl NodeDomain for Offline {
+        fn turn_ended(&self, _: &str, _: Option<&str>, _: &str, _: Option<String>) {}
+    }
+    let id = NodeId::new("reply-eval").unwrap();
+    let node = Arc::new(
+        steve_node::LocalNode::open(steve_node::NodeConfig {
+            ceiling: steve_node::PolicyCeiling::unlimited(),
+            node: id.clone(),
+            home: scratch.join("node"),
             acp: steve_acp::AcpConfig::from_env(),
-            cwd: scratch.join("scratch"),
-        },
+            roots: vec![],
+            capacity: Capacity {
+                sessions: 0,
+                jobs: steve_hub::wire::LOCAL_JOB_CAPACITY,
+                execs: 0,
+            },
+            storage: steve_node::Storage::default(),
+        })
+        .unwrap_or_else(|e| fail(&format!("Node: {e}"))),
+    );
+    let data_dir = scratch.join("data");
+    let runtime = NodeRuntime::new(store.clone(), node.clone(), Arc::new(Offline));
+    node.connect(
+        Arc::new(Sink(Arc::downgrade(&runtime))),
+        Some(Arc::new(steve_hub::wire::node_files::NodeFiles::new(
+            store,
+            id,
+            data_dir.clone(),
+        ))),
+    );
+    runtime.start();
+    let inner = Arc::new(steve_core::Fallback {
+        one: NodePrint { runtime, data_dir },
         fast: vec![],
         smart: vec![],
         models: Some(resolver),
@@ -346,7 +377,7 @@ async fn replay(a: &Args, scratch: &Path) {
         owner: owner.clone(),
         aliases: list(a, "alias"),
         tz: one(a, "tz").map(|t| {
-            t.parse::<chrono_tz::Tz>()
+            t.parse()
                 .unwrap_or_else(|_| fail("--tz: an IANA time zone"))
         }),
         bot: route.bot.clone(),

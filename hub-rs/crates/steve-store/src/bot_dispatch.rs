@@ -1,11 +1,17 @@
-//! Workspace dispatch policy. Candidate evidence never writes an authorization.
+//! Workspace dispatch policy: a session of an item runs on the first eligible Node of its Bot's
+//! ordered execution Nodes, narrowed by the item's Team. Candidate evidence never writes an
+//! authorization.
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{Result, StoreError};
 
-pub const LEGACY: &str = "legacy";
+/// The Team choice that asks for no Team, even where the workspace has a default one.
+pub const NO_TEAM: &str = "none";
+
+/// The execution Nodes of a Bot nobody configured: the Hub's own Node.
+pub const DEFAULT_NODES: &[&str] = &["local"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,20 +42,37 @@ fn parse_team(row: (String, String, String)) -> Result<Team> {
     })
 }
 
-pub fn selected(c: &Connection, ws: &str, id: Option<&str>) -> Result<Option<Team>> {
-    let row = match id {
-        Some(LEGACY) => return Ok(None),
-        Some(id) => Some(c.query_row(
-            "SELECT id,name,members FROM bot_teams WHERE workspace_id=?1 AND id=?2",
-            params![ws, id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        ).optional()?.ok_or(StoreError::NotFound("Bot Team not found in this workspace"))?),
-        None => c.query_row(
-            "SELECT t.id,t.name,t.members FROM bot_team_defaults d JOIN bot_teams t ON t.id=d.team_id
-             WHERE d.workspace_id=?1 AND t.workspace_id=?1",
-            [ws], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        ).optional()?,
+pub fn selected(r: &mut impl crate::Read, ws: &str, id: Option<&str>) -> Result<Option<Team>> {
+    use sea_query::{Expr, ExprTrait, JoinType, Query};
+
+    if id == Some(NO_TEAM) {
+        return Ok(None);
+    }
+    let mut query = Query::select();
+    query
+        .columns([("t", "id"), ("t", "name"), ("t", "members")])
+        .from_as("bot_teams", "t")
+        .and_where(Expr::col(("t", "workspace_id")).eq(ws));
+    match id {
+        Some(id) => {
+            query.and_where(Expr::col(("t", "id")).eq(id));
+        }
+        None => {
+            query
+                .join_as(
+                    JoinType::InnerJoin,
+                    "bot_team_defaults",
+                    "d",
+                    Expr::col(("d", "team_id")).eq(Expr::col(("t", "id"))),
+                )
+                .and_where(Expr::col(("d", "workspace_id")).eq(ws));
+        }
     };
-    row.map(parse_team).transpose()
+    let team = r.one(&query, |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+    if id.is_some() && team.is_none() {
+        return Err(StoreError::NotFound("Bot Team not found in this workspace"));
+    }
+    team.map(parse_team).transpose()
 }
 
 pub fn teams(c: &Connection, ws: &str) -> Result<Vec<Team>> {
@@ -65,7 +88,9 @@ pub fn owner(c: &Connection, ws: &str, user: &str) -> Result<bool> {
         params![ws, user], |r| r.get(0))?)
 }
 
-pub fn bindings(c: &Connection, ws: &str, bot: &str) -> Result<Option<Vec<String>>> {
+/// The Bot's execution Nodes in this workspace, in priority order ([`DEFAULT_NODES`] until
+/// configured). An empty list runs nothing.
+pub fn bindings(c: &Connection, ws: &str, bot: &str) -> Result<Vec<String>> {
     let row: Option<String> = c
         .query_row(
             "SELECT nodes FROM bot_node_bindings WHERE workspace_id=? AND bot_id=?",
@@ -73,8 +98,10 @@ pub fn bindings(c: &Connection, ws: &str, bot: &str) -> Result<Option<Vec<String
             |r| r.get(0),
         )
         .optional()?;
-    row.map(|s| serde_json::from_str(&s).map_err(Into::into))
-        .transpose()
+    match row {
+        Some(s) => Ok(serde_json::from_str(&s)?),
+        None => Ok(DEFAULT_NODES.iter().map(|n| n.to_string()).collect()),
+    }
 }
 
 pub fn item_team(c: &Connection, item: &str) -> Result<Option<(Team, String)>> {
@@ -100,34 +127,39 @@ pub fn item_team(c: &Connection, item: &str) -> Result<Option<(Team, String)>> {
         .transpose()
 }
 
-pub fn snapshot(c: &Connection, item: &str, team: &Team, source: &str) -> Result<()> {
-    c.execute(
-        "INSERT INTO item_dispatch(item_id,team,source) VALUES (?,?,?)",
-        params![item, serde_json::to_string(team)?, source],
+pub fn snapshot(w: &mut crate::W<'_>, item: &str, team: &Team, source: &str) -> Result<()> {
+    w.exec(
+        sea_query::Query::insert()
+            .into_table("item_dispatch")
+            .columns(["item_id", "team", "source"])
+            .values_panic([
+                item.into(),
+                serde_json::to_string(team)?.into(),
+                source.into(),
+            ]),
     )?;
     Ok(())
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Scope {
-    Legacy,
-    Restricted(Vec<String>),
+    /// The Nodes the session may run on, in priority order.
+    Nodes(Vec<String>),
     OutsideTeam,
 }
 
 /// A Team cannot turn a candidate into an authorization. The current bindings are always the
-/// ceiling. When a Team is in use, an unconfigured Bot has no authorized Nodes.
+/// ceiling.
 pub fn scope(c: &Connection, ws: &str, item: &str, bot: &str) -> Result<Scope> {
     let bound = bindings(c, ws, bot)?;
     let Some((team, _)) = item_team(c, item)? else {
-        return Ok(bound.map_or(Scope::Legacy, Scope::Restricted));
+        return Ok(Scope::Nodes(bound));
     };
     let Some(member) = team.member(bot) else {
         return Ok(Scope::OutsideTeam);
     };
-    Ok(Scope::Restricted(
+    Ok(Scope::Nodes(
         bound
-            .unwrap_or_default()
             .into_iter()
             .filter(|node| {
                 member
@@ -160,14 +192,6 @@ pub fn last_decision(c: &Connection, item: &str) -> Result<Option<Value>> {
         .transpose()
 }
 
-pub fn legacy_spread(c: &Connection, node: &str) -> Result<bool> {
-    Ok(c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM legacy_spread_nodes WHERE node_id=?)",
-        [node],
-        |r| r.get(0),
-    )?)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,32 +201,33 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store =
             crate::Store::open(dir.path().join("steve.sqlite3"), crate::NoPublisher).unwrap();
-        store.transaction(|tx| {
+        store.write(|w| {
+            let tx = w.conn;
             tx.execute_batch("INSERT INTO workspaces(id,name,created) VALUES ('one','One',0),('two','Two',0);
                 INSERT INTO bots(id,workspace_id,name,harness,updated)
                     VALUES ('worker','one','Worker','fixture',0);
                 INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated)
                     VALUES ('ITEM-1','one',1,'Test','wait','test',0,0);")?;
-            assert_eq!(scope(tx, "one", "ITEM-1", "worker")?, Scope::Legacy);
+            assert_eq!(scope(tx, "one", "ITEM-1", "worker")?, Scope::Nodes(vec!["local".into()]));
             let team = Team { id:"team".into(), name:"Preset".into(), members:vec![Member {
                 bot:"worker".into(), nodes:Some(vec!["a".into(),"b".into(),"candidate".into()]),
             }] };
             tx.execute("INSERT INTO bot_teams(id,workspace_id,name,members) VALUES (?,'one',?,?)",
                 params![team.id, team.name, serde_json::to_string(&team.members)?])?;
             tx.execute("INSERT INTO bot_team_defaults(workspace_id,team_id) VALUES ('one',?)", [&team.id])?;
-            assert_eq!(selected(tx,"one",None)?, Some(team.clone()));
-            assert!(selected(tx,"two",Some(&team.id)).is_err());
-            snapshot(tx, "ITEM-1", &team, "default")?;
-            assert_eq!(scope(tx, "one", "ITEM-1", "worker")?, Scope::Restricted(vec![]));
+            assert_eq!(selected(w, "one", None)?, Some(team.clone()));
+            assert!(selected(w, "two", Some(&team.id)).is_err());
+            snapshot(w, "ITEM-1", &team, "default")?;
+            assert_eq!(scope(tx, "one", "ITEM-1", "worker")?, Scope::Nodes(vec![]));
             tx.execute("INSERT INTO bot_node_bindings(workspace_id,bot_id,nodes)
                 VALUES ('one','worker','[\"b\",\"other\",\"a\"]')", [])?;
             tx.execute("DELETE FROM bot_team_defaults WHERE workspace_id='one'", [])?;
             tx.execute("UPDATE bot_teams SET name='New name',members='[]' WHERE id='team'", [])?;
             assert_eq!(item_team(tx, "ITEM-1")?.unwrap().0, team);
-            assert_eq!(scope(tx,"one","ITEM-1","worker")?, Scope::Restricted(vec!["b".into(),"a".into()]));
+            assert_eq!(scope(tx,"one","ITEM-1","worker")?, Scope::Nodes(vec!["b".into(),"a".into()]));
             assert_eq!(scope(tx,"one","ITEM-1","steve")?, Scope::OutsideTeam);
             tx.execute("UPDATE bot_node_bindings SET nodes='[\"a\"]'", [])?;
-            assert_eq!(scope(tx,"one","ITEM-1","worker")?, Scope::Restricted(vec!["a".into()]));
+            assert_eq!(scope(tx,"one","ITEM-1","worker")?, Scope::Nodes(vec!["a".into()]));
             Ok::<_, StoreError>(())
         }).unwrap();
     }

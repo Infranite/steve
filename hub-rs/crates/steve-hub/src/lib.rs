@@ -53,7 +53,7 @@ pub mod upgrades;
 pub use extension::{Assembly, Extension, run};
 
 /// Release identity is compiled into the executable; runtime environment cannot forge it.
-/// Source/development builds retain the legacy runtime version and have no release identity.
+/// Source/development builds have no release identity.
 pub fn build_identity() -> Option<(&'static str, &'static str)> {
     option_env!("STEVE_BUILD_VERSION").zip(option_env!("STEVE_BUILD_COMMIT"))
 }

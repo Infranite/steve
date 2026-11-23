@@ -19,7 +19,7 @@ use steve_modules::{
     SystemClock, Tier,
 };
 use steve_store::base::{Level, Viewer};
-use steve_store::{Decision, Item, NewBot, NewDecision, NewItem, Tx};
+use steve_store::{Decision, Item, NewBot, NewDecision, NewItem, W};
 
 type Log = Arc<Mutex<Vec<String>>>;
 
@@ -460,10 +460,10 @@ async fn the_registered_outbound_check_is_used() {
 struct Undo(Log, bool);
 
 impl DecisionHandler for Undo {
-    fn resolve(&self, _: &Tx, cx: &DecisionCx, _: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, _: &mut W<'_>, cx: &DecisionCx, _: &Decision) -> ApiResult<Value> {
         Ok(json!({"choice": cx.choice}))
     }
-    fn before_undo(&self, _: &Tx, d: &Decision) -> ApiResult<()> {
+    fn before_undo(&self, _: &mut W<'_>, d: &Decision) -> ApiResult<()> {
         self.0.lock().unwrap().push(d.id.clone());
         if self.1 {
             Err(ApiError::conflict("已经发出，不能撤销"))
@@ -503,7 +503,7 @@ fn before_undo_goes_to_the_subject_types_handler() {
         decision(&t, "item"),
     );
     let r = &t.modules.registry;
-    let run = |d: &Decision| t.store().transaction(|tx| r.before_undo(tx, d));
+    let run = |d: &Decision| t.store().write(|w| r.before_undo(w, d));
     assert_eq!(run(&a), Ok(()));
     assert_eq!(run(&b), Err(ApiError::conflict("已经发出，不能撤销")));
     assert_eq!(

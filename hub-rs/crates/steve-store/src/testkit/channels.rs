@@ -1,5 +1,4 @@
 //! Storage fixtures shared by the channel integration tests and manual harnesses.
-pub mod evaluation;
 pub mod inspect;
 pub mod notifications;
 pub mod seed;

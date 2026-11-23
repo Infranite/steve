@@ -1,7 +1,7 @@
 # Edges to remove; only this segment ratchets.
 # removal wave<TAB>responsible group<TAB>edge-or-rusqlite key<TAB>count
 # c1 awaits context ownership at wave-4 C1; wave is the edge removal deadline.
-# g0/g2/g4 rows have active owners; g2 owns the legacy storage facade retirement.
+# g0/g2/g4 rows have active owners; g2 owns the storage facade retirement.
 # STEVE_GUARD_BLESS=1 rewrites after removals; new or growing edges always fail.
 w3	g4	edge steve-acp steve-i18n	1
 w3	g4	edge steve-acp steve-vault	1
@@ -44,7 +44,6 @@ w4	c1	edge steve-stats steve-acp	1
 w4	c1	edge steve-stats steve-i18n	1
 w4	c1	edge steve-stats steve-store	1
 w4	c1	rusqlite steve-hub	1
-w4	c1	rusqlite steve-knowledge	1
 w4	g0	edge steve-core steve-acp	1
 w4	g0	edge steve-core steve-modules	1
 w4	g0	edge steve-core steve-stats	1
@@ -53,7 +52,6 @@ w4	g0	edge steve-core steve-toolchains	1
 w4	g0	edge steve-core steve-transcript	1
 w4	g0	edge steve-hub steve-core	1
 w4	g0	edge steve-hub steve-transcript	1
-w4	g0	rusqlite steve-core	1
 w4	g2	edge steve-hub steve-store-sqlite	1
 w4	g2	edge steve-store steve-i18n	1
 w4	g2	edge steve-store steve-node-api	1

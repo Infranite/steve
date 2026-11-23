@@ -8,13 +8,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use steve_knowledge::repo::{self, DocRow};
 use steve_knowledge::sources::folder::{self, FolderPolicy, SourceBody};
 use steve_knowledge::sources::folder_node::{DENIED, FolderPlace, FolderPlaces, OFFLINE, Unplaced};
 use steve_knowledge::{Knowledge, index};
 use steve_modules::testkit::{ME, TestEnv, WS, caller};
 use steve_node_api::testkit::FakeNode;
 use steve_node_api::*;
+use steve_store::knowledge::{DocRow, SourceRow};
 
 /// The FakeNode's files face, with a few faults: pages forced small, the link lost after some
 /// pages, a file rewritten just before its first read, every call refused as offline.
@@ -252,7 +252,7 @@ impl Env {
             .find(|d| d.r#ref == r)
             .unwrap_or_else(|| panic!("no doc {r}"))
     }
-    fn source(&self, id: &str) -> repo::SourceRow {
+    fn source(&self, id: &str) -> SourceRow {
         self.env
             .store()
             .read(|c| steve_store::knowledge::Documents(c).source(id))

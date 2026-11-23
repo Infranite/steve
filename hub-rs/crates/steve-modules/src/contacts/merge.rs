@@ -26,7 +26,7 @@ use steve_store::base::{Level, ObjRef, Viewer};
 use steve_store::knowledge::Memories;
 use steve_store::{
     Attributes, ContactMerge, ContactMerges, Decision, DecisionRows, Link, MembershipRow,
-    MergeProposals, TagRows, Teams, Tx, now, uid,
+    MergeProposals, TagRows, Teams, now, uid,
 };
 
 use super::repo::{self, AttrDef, AttrValue, PARTY, Party, PartyPatch};
@@ -789,43 +789,39 @@ fn proposal(tx: &mut W<'_>, id: &str) -> ApiResult<Option<(String, String, Strin
 }
 
 impl DecisionHandler for PartyMerge {
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
-        tx.write(|tx| {
-            let (ws, from, into, status) = proposal(tx, &d.subject_id)?
-                .filter(|p| p.0 == cx.ws)
-                .ok_or_else(|| ApiError::not_found("合并提议"))?;
-            if status != "open" {
-                return Err(ApiError::conflict(steve_i18n::t!(
-                    "modules.merge.proposal_handled"
-                )));
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+        let (ws, from, into, status) = proposal(tx, &d.subject_id)?
+            .filter(|p| p.0 == cx.ws)
+            .ok_or_else(|| ApiError::not_found("合并提议"))?;
+        if status != "open" {
+            return Err(ApiError::conflict(steve_i18n::t!(
+                "modules.merge.proposal_handled"
+            )));
+        }
+        let mut result = decisions::choice_result(cx);
+        match cx.choice {
+            "merge" => {
+                // Marked first so that merge_tx leaves this decision to the dispatcher.
+                set_proposal(tx, &d.subject_id, "merged")?;
+                let viewer = Viewer::bare(&ws, cx.actor);
+                let id = merge_tx(tx, &self.hooks, &viewer, cx.actor, &from, &into)?;
+                result["merge_id"] = json!(id);
             }
-            let mut result = decisions::choice_result(cx);
-            match cx.choice {
-                "merge" => {
-                    // Marked first so that merge_tx leaves this decision to the dispatcher.
-                    set_proposal(tx, &d.subject_id, "merged")?;
-                    let viewer = Viewer::bare(&ws, cx.actor);
-                    let id = merge_tx(tx, &self.hooks, &viewer, cx.actor, &from, &into)?;
-                    result["merge_id"] = json!(id);
-                }
-                _ => set_proposal(tx, &d.subject_id, "rejected")?,
-            }
-            Ok(result)
-        })
+            _ => set_proposal(tx, &d.subject_id, "rejected")?,
+        }
+        Ok(result)
     }
 
-    fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
-        tx.write(|tx| {
-            let Some((ws, _, _, _)) = proposal(tx, &d.subject_id)? else {
-                return Ok(());
-            };
-            if let Some(mg) = d.result.get("merge_id").and_then(Value::as_str) {
-                let actor = d_actor(tx, mg)?;
-                let viewer = Viewer::bare(&ws, &actor);
-                split_tx(tx, &self.hooks, &viewer, &actor, mg)?;
-            }
-            set_proposal(tx, &d.subject_id, "open")
-        })
+    fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
+        let Some((ws, _, _, _)) = proposal(tx, &d.subject_id)? else {
+            return Ok(());
+        };
+        if let Some(mg) = d.result.get("merge_id").and_then(Value::as_str) {
+            let actor = d_actor(tx, mg)?;
+            let viewer = Viewer::bare(&ws, &actor);
+            split_tx(tx, &self.hooks, &viewer, &actor, mg)?;
+        }
+        set_proposal(tx, &d.subject_id, "open")
     }
 }
 
@@ -849,102 +845,96 @@ fn value_snapshot(v: &AttrValue) -> Value {
 pub struct AttrValueConfirm;
 
 impl DecisionHandler for AttrValueConfirm {
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
-        tx.write(|tx| {
-            let v = Attributes(tx)
-                .value(&d.subject_id)?
-                .filter(|v| v.workspace_id == cx.ws)
-                .ok_or_else(|| ApiError::not_found("属性"))?;
-            let mut result = decisions::choice_result(cx);
-            if cx.choice == "yes" {
-                let mut attrs = Attributes(tx);
-                attrs.update_value(&v.id, None, None, Some("confirmed"))?;
-                let staled = attrs.stale_siblings(&v)?;
-                result["staled"] = json!(staled);
-            } else {
-                Attributes(tx).delete_value(&v.id)?;
-                result["value"] = value_snapshot(&v);
-            }
-            tx.contacts().touch(&v.party_id)?;
-            tx.emit(crate::accounts::service::party_changed(cx.ws, &v.party_id));
-            Ok(result)
-        })
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+        let v = Attributes(tx)
+            .value(&d.subject_id)?
+            .filter(|v| v.workspace_id == cx.ws)
+            .ok_or_else(|| ApiError::not_found("属性"))?;
+        let mut result = decisions::choice_result(cx);
+        if cx.choice == "yes" {
+            let mut attrs = Attributes(tx);
+            attrs.update_value(&v.id, None, None, Some("confirmed"))?;
+            let staled = attrs.stale_siblings(&v)?;
+            result["staled"] = json!(staled);
+        } else {
+            Attributes(tx).delete_value(&v.id)?;
+            result["value"] = value_snapshot(&v);
+        }
+        tx.contacts().touch(&v.party_id)?;
+        tx.emit(crate::accounts::service::party_changed(cx.ws, &v.party_id));
+        Ok(result)
     }
 
-    fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
-        tx.write(|tx| {
-            if let Some(s) = d.result.get("value") {
-                let str_of = |k: &str| s.get(k).and_then(Value::as_str);
-                let party = str_of("party_id").unwrap_or_default();
-                if tx.contacts().party(party)?.is_none() {
-                    return Ok(());
-                }
-                if let (Some(key), Some(label), Some(value), Some(source)) = (
-                    str_of("key"),
-                    str_of("label"),
-                    str_of("value"),
-                    str_of("source"),
-                ) {
-                    Attributes(tx).restore_value(&AttrValue {
-                        id: d.subject_id.clone(),
-                        workspace_id: d.workspace_id.clone(),
-                        party_id: party.into(),
-                        key: key.into(),
-                        label: label.into(),
-                        value: value.into(),
-                        source: source.into(),
-                        source_label: str_of("source_label").unwrap_or_default().into(),
-                        source_ref: str_of("source_ref").map(String::from),
-                        level: Level::from_db(str_of("level").unwrap_or(Level::Reasoning.code())),
-                        status: "candidate".into(),
-                        decision_id: Some(d.id.clone()),
-                        created: s.get("created").and_then(Value::as_i64).unwrap_or_else(now),
-                        updated: now(),
-                    })?;
-                }
-                tx.emit(crate::accounts::service::party_changed(
-                    &d.workspace_id,
-                    party,
-                ));
+    fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
+        if let Some(s) = d.result.get("value") {
+            let str_of = |k: &str| s.get(k).and_then(Value::as_str);
+            let party = str_of("party_id").unwrap_or_default();
+            if tx.contacts().party(party)?.is_none() {
                 return Ok(());
             }
-            let Some(v) = Attributes(tx).value(&d.subject_id)? else {
-                return Ok(());
-            };
-            Attributes(tx).update_value(&v.id, None, None, Some("candidate"))?;
-            for id in d
-                .result
-                .get("staled")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-            {
-                Attributes(tx).restore_confirmed(id)?;
+            if let (Some(key), Some(label), Some(value), Some(source)) = (
+                str_of("key"),
+                str_of("label"),
+                str_of("value"),
+                str_of("source"),
+            ) {
+                Attributes(tx).restore_value(&AttrValue {
+                    id: d.subject_id.clone(),
+                    workspace_id: d.workspace_id.clone(),
+                    party_id: party.into(),
+                    key: key.into(),
+                    label: label.into(),
+                    value: value.into(),
+                    source: source.into(),
+                    source_label: str_of("source_label").unwrap_or_default().into(),
+                    source_ref: str_of("source_ref").map(String::from),
+                    level: Level::from_db(str_of("level").unwrap_or(Level::Reasoning.code())),
+                    status: "candidate".into(),
+                    decision_id: Some(d.id.clone()),
+                    created: s.get("created").and_then(Value::as_i64).unwrap_or_else(now),
+                    updated: now(),
+                })?;
             }
+            tx.emit(crate::accounts::service::party_changed(
+                &d.workspace_id,
+                party,
+            ));
+            return Ok(());
+        }
+        let Some(v) = Attributes(tx).value(&d.subject_id)? else {
+            return Ok(());
+        };
+        Attributes(tx).update_value(&v.id, None, None, Some("candidate"))?;
+        for id in d
+            .result
+            .get("staled")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            Attributes(tx).restore_confirmed(id)?;
+        }
+        tx.emit(crate::accounts::service::party_changed(
+            &d.workspace_id,
+            &v.party_id,
+        ));
+        Ok(())
+    }
+
+    /// 30 days without an answer: the candidate is dropped.
+    fn expire(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
+        if let Some(v) = Attributes(tx)
+            .value(&d.subject_id)?
+            .filter(|v| v.status == "candidate")
+        {
+            Attributes(tx).delete_value(&v.id)?;
             tx.emit(crate::accounts::service::party_changed(
                 &d.workspace_id,
                 &v.party_id,
             ));
-            Ok(())
-        })
-    }
-
-    /// 30 days without an answer: the candidate is dropped.
-    fn expire(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
-        tx.write(|tx| {
-            if let Some(v) = Attributes(tx)
-                .value(&d.subject_id)?
-                .filter(|v| v.status == "candidate")
-            {
-                Attributes(tx).delete_value(&v.id)?;
-                tx.emit(crate::accounts::service::party_changed(
-                    &d.workspace_id,
-                    &v.party_id,
-                ));
-            }
-            Ok(())
-        })
+        }
+        Ok(())
     }
 }
 
@@ -959,68 +949,57 @@ fn def_snapshot(x: &AttrDef) -> Value {
 pub struct AttrDefConfirm;
 
 impl DecisionHandler for AttrDefConfirm {
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
-        tx.write(|tx| {
-            let x = Attributes(tx)
-                .definition(&d.subject_id)?
-                .filter(|x| x.workspace_id == cx.ws)
-                .ok_or_else(|| ApiError::not_found("属性"))?;
-            let mut result = decisions::choice_result(cx);
-            if cx.choice == "yes" {
-                Attributes(tx).set_definition_status(&x.id, "active", None)?;
-            } else {
-                Attributes(tx).delete_definition(&x.id)?;
-                result["def"] = def_snapshot(&x);
-            }
-            Ok(result)
-        })
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+        let x = Attributes(tx)
+            .definition(&d.subject_id)?
+            .filter(|x| x.workspace_id == cx.ws)
+            .ok_or_else(|| ApiError::not_found("属性"))?;
+        let mut result = decisions::choice_result(cx);
+        if cx.choice == "yes" {
+            Attributes(tx).set_definition_status(&x.id, "active", None)?;
+        } else {
+            Attributes(tx).delete_definition(&x.id)?;
+            result["def"] = def_snapshot(&x);
+        }
+        Ok(result)
     }
 
-    fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
-        tx.write(|tx| {
-            if let Some(s) = d.result.get("def") {
-                let str_of = |k: &str| s.get(k).and_then(Value::as_str);
-                if let (
-                    Some(applies),
-                    Some(key),
-                    Some(label),
-                    Some(kind),
-                    Some(level),
-                    Some(source),
-                ) = (
-                    str_of("applies"),
-                    str_of("key"),
-                    str_of("label"),
-                    str_of("type"),
-                    str_of("default_level"),
-                    str_of("source"),
-                ) {
-                    Attributes(tx).restore_definition(&AttrDef {
-                        id: d.subject_id.clone(),
-                        workspace_id: d.workspace_id.clone(),
-                        applies: applies.into(),
-                        key: key.into(),
-                        label: label.into(),
-                        kind: kind.into(),
-                        options: s
-                            .get("options")
-                            .cloned()
-                            .and_then(|v| serde_json::from_value(v).ok())
-                            .unwrap_or_default(),
-                        default_level: Level::from_db(level),
-                        source: source.into(),
-                        status: "proposed".into(),
-                        builtin: d.workspace_id == "*",
-                        created: s.get("created").and_then(Value::as_i64).unwrap_or_else(now),
-                    })?;
-                }
-                return Ok(());
+    fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
+        if let Some(s) = d.result.get("def") {
+            let str_of = |k: &str| s.get(k).and_then(Value::as_str);
+            if let (Some(applies), Some(key), Some(label), Some(kind), Some(level), Some(source)) = (
+                str_of("applies"),
+                str_of("key"),
+                str_of("label"),
+                str_of("type"),
+                str_of("default_level"),
+                str_of("source"),
+            ) {
+                Attributes(tx).restore_definition(&AttrDef {
+                    id: d.subject_id.clone(),
+                    workspace_id: d.workspace_id.clone(),
+                    applies: applies.into(),
+                    key: key.into(),
+                    label: label.into(),
+                    kind: kind.into(),
+                    options: s
+                        .get("options")
+                        .cloned()
+                        .and_then(|v| serde_json::from_value(v).ok())
+                        .unwrap_or_default(),
+                    default_level: Level::from_db(level),
+                    source: source.into(),
+                    status: "proposed".into(),
+                    builtin: d.workspace_id == "*",
+                    created: s.get("created").and_then(Value::as_i64).unwrap_or_else(now),
+                })?;
             }
-            Ok(Attributes(tx).set_definition_status(&d.subject_id, "proposed", Some("active"))?)
-        })
+            return Ok(());
+        }
+        Ok(Attributes(tx).set_definition_status(&d.subject_id, "proposed", Some("active"))?)
     }
 
-    fn expire(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
-        tx.write(|tx| Ok(Attributes(tx).delete_proposal(&d.subject_id)?))
+    fn expire(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
+        Ok(Attributes(tx).delete_proposal(&d.subject_id)?)
     }
 }

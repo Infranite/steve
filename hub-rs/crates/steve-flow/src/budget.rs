@@ -11,7 +11,7 @@ use steve_modules::decisions::{DecisionCx, DecisionHandler, choice_result};
 use steve_modules::{ApiError, ApiResult};
 use steve_store::base::ObjRef;
 use steve_store::base::links::Links;
-use steve_store::{Decision, DecisionRows, FlowRows, NewDecision, RunRows, SessionEvidence, Tx};
+use steve_store::{Decision, DecisionRows, FlowRows, NewDecision, RunRows, SessionEvidence, W};
 use tokio::sync::{Notify, mpsc};
 
 use crate::runs::{self, RunRow};
@@ -130,15 +130,15 @@ impl FlowRunDecisions {
 }
 
 impl DecisionHandler for FlowRunDecisions {
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
-        let mut run = tx
-            .write(|w| steve_store::RunRows(w).get(&d.subject_id))?
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+        let mut run = steve_store::RunRows(tx)
+            .get(&d.subject_id)?
             .ok_or_else(|| ApiError::not_found("运行"))?;
         match cx.choice {
             CONTINUE_ONCE => {
                 let limit = limit_of(&run);
                 run.context[LIMIT] = json!(raised_limit(limit, run.cost));
-                tx.write(|w| runs::save(w, &run))?;
+                runs::save(tx, &run)?;
                 if let Some(item) = &d.item_id {
                     let _ = self.followups.send(Followup::Resume {
                         ws: cx.ws.into(),

@@ -1,4 +1,4 @@
-//! `/api/sessions*`, `/api/queued/:id`, `/api/local-sessions*`.
+//! `/api/sessions*`, `/api/local-sessions*`.
 
 use std::collections::HashMap;
 
@@ -68,15 +68,11 @@ pub async fn events(
     Query(q): Query<HashMap<String, String>>,
 ) -> ApiResult {
     let after = after_bound(q.get("after").map(String::as_str));
-    let bounded = q.get("page").is_some_and(|v| v == "bounded");
     st.read(move |r| {
         own(r.session_get(&id)?, &c.ws, Noun::Session)?;
         match after {
             Some(a) => {
                 let mut body = EventsBody::new();
-                if bounded && r.events_page_raw(&id, a, &mut |row| body.push(row))? {
-                    return Ok(body.finish());
-                }
                 if r.events_raw(&id, a, &mut |row| body.push(row))? {
                     return Ok(body.finish());
                 }
@@ -327,28 +323,6 @@ pub async fn link(
         ok_true()
     })
     .await
-}
-
-/// `DELETE /api/queued/:id` (the older route): a missing row is a 404 as in the TS Hub; a row a turn
-/// takes in between is a 409 like the session-scoped route.
-pub async fn drop_queued(
-    State(st): State<AppState>,
-    Extension(c): Extension<Ctx>,
-    Path(id): Path<String>,
-) -> ApiResult {
-    let (qid, ws) = (id.clone(), c.ws.clone());
-    let sid = st
-        .read(move |r| {
-            let sid = r
-                .queued_get(&qid)?
-                .map(|q| str_of(&q, "session_id"))
-                .unwrap_or_default();
-            own(r.session_get(&sid)?, &ws, Noun::Queued)?;
-            Ok(sid)
-        })
-        .await?;
-    st.domain.queued_remove(&sid, &id).await?;
-    ok_true()
 }
 
 /// `GET /api/sessions/:id/queued`: the rows waiting for the session's next turn, in order.
@@ -653,7 +627,7 @@ mod tests {
         assert_eq!(user, "该会话");
         let (zh, _) = text(page(steve_i18n::ZH_CN)).await;
         assert_eq!(zh, stored.as_str());
-        assert!(stored.starts_with("该会话绑定在 Node 上"));
+        assert_eq!(stored, "该会话绑定的 Node 当前不可用，消息已排队。");
     }
 
     #[tokio::test]
@@ -738,7 +712,6 @@ pub(crate) fn routes() -> axum::Router<super::AppState> {
             "/sessions/{id}/queued/{qid}/send-now",
             post(sessions::queued_send_now),
         )
-        .route("/queued/{id}", delete(sessions::drop_queued))
         .route("/local-sessions", get(sessions::local))
         .route("/local-sessions/import", post(sessions::import))
 }

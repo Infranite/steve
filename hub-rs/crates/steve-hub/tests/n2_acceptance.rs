@@ -1,8 +1,8 @@
-//! N2 acceptance on the real `steve-hub` binary with remote Nodes on (`STEVE_NODE_LISTEN=1`,
-//! `STEVE_NODE_BIND`), and a second Node in its own process with its own `STEVE_HOME`:
-//! - the Hub has no harness (its adapters are `/usr/bin/false`); a new item's session is bound to
-//!   the remote Node and runs a whole turn there over the real WebSocket (fake ACP), with a
-//!   permission card answered on the Hub;
+//! N2 acceptance on the real `steve-hub` binary with remote Nodes on (`STEVE_NODE_LISTEN=1`), and
+//! a second Node in its own process with its own `STEVE_HOME`:
+//! - the Hub has no harness (its adapters are `/usr/bin/false`); a new item of a Bot whose
+//!   execution Node is the remote one is bound there and runs a whole turn over the real
+//!   WebSocket (fake ACP), with a permission card answered on the Hub;
 //! - the Hub killed mid-turn: the Node keeps the turn going, the restarted Hub catches up and the
 //!   turn is never sent again; the Node killed mid-turn: the attempt is `unknown` afterwards and
 //!   never re-run;
@@ -139,8 +139,8 @@ impl Drop for Hub {
     }
 }
 
-/// The Hub with remote Nodes on and no harness of its own; new sessions go to `bind` if given.
-fn spawn_hub(h: &Home, bind: Option<&str>) -> Hub {
+/// The Hub with remote Nodes on and no harness of its own.
+fn spawn_hub(h: &Home) -> Hub {
     let mut c = handed::command(env!("CARGO_BIN_EXE_steve-hub"), &[("hub", &h.socket)]);
     c.env("HOME", h.dir.path())
         .env("STEVE_HOME", h.steve())
@@ -159,9 +159,7 @@ fn spawn_hub(h: &Home, bind: Option<&str>) -> Hub {
         .env("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false")
         .env_remove("STEVE_HARNESS_MANIFEST")
         .env_remove("FAKE_ACP_LOG")
-        // remote Nodes only: the local Node (the default since B6) stays off
-        .env("STEVE_NODE_MODE", "off")
-        .env_remove("STEVE_NODE_BIND")
+        .env("STEVE_NODE_MODE", "local")
         .env_remove("STEVE_NODE_TLS_PIN")
         .env_remove("STEVE_NODE_TURN_LIMIT_MS")
         .env_remove("STEVE_NO_RESUME")
@@ -190,9 +188,6 @@ fn spawn_hub(h: &Home, bind: Option<&str>) -> Hub {
         .process_group(0);
     for (_, var, _) in steve_acp::adapters::builtin_commands(Path::new("")) {
         c.env(var, "/usr/bin/false");
-    }
-    if let Some(b) = bind {
-        c.env("STEVE_NODE_BIND", b);
     }
     Hub(c.spawn().expect("spawn hub"))
 }
@@ -265,6 +260,29 @@ impl Client {
             serde_json::from_str(&text).unwrap_or(Value::String(text)),
         )
     }
+    async fn candidates_ready(&self, path: &str, nodes: &[&str]) -> bool {
+        let (status, value) = self.call("GET", path, None).await;
+        assert_eq!(status, 200, "{value}");
+        if value["candidates"].as_array().is_some_and(|rows| {
+            nodes.iter().all(|id| {
+                rows.iter()
+                    .any(|row| row["id"] == *id && row["state"] == "candidate")
+            })
+        }) {
+            return true;
+        }
+        // A cold probe can time out while the adapter starts. Refresh again while waiting for
+        // the reports rather than depending on the background polling interval.
+        let (status, report) = self
+            .call(
+                "GET",
+                "/api/system/models?harness=claude-code&fresh=1",
+                None,
+            )
+            .await;
+        assert_eq!(status, 200, "{report}");
+        false
+    }
     async fn say(&self, sid: &str, text: &str) {
         let (st, v) = self
             .call(
@@ -276,13 +294,14 @@ impl Client {
         assert_eq!(st, 200, "message: {v}");
     }
     /// A new item (no project) on the claude-code bot, and the session it opened.
+    /// A new item (no project) of the Bot [`setup`] bound to the second Node.
     async fn item(&self, h: &Home, goal: &str) -> String {
         let (_, state) = self.call("GET", "/api/state", None).await;
         let bot = state["bots"]
             .as_array()
-            .and_then(|bs| bs.iter().find(|b| b["harness"] == "claude-code"))
+            .and_then(|bs| bs.iter().find(|b| b["name"] == REMOTE_BOT))
             .and_then(|b| b["id"].as_str())
-            .expect("a claude-code bot")
+            .expect("the remote Bot")
             .to_string();
         self.item_on(h, goal, &bot).await
     }
@@ -524,13 +543,25 @@ async fn node_child() {
     }
 }
 
-/// A Hub whose new sessions go to a freshly paired second Node, which is running and linked.
+/// The worker Bot whose execution Node is the second Node ([`setup`]).
+const REMOTE_BOT: &str = "Remote worker";
+
+/// A Hub with a Bot whose new sessions go to a freshly paired second Node, which is running and
+/// linked.
 async fn setup() -> (Home, Hub, NodeHome, NodeProc, String) {
     let h = Home::new();
-    let mut hub = spawn_hub(&h, None);
+    let hub = spawn_hub(&h);
     serving(&h).await;
     let c = Client::login(&h).await;
     let n = NodeHome::new();
+    // the adapter offers its models and modes, so the Node can be a candidate for the Bot
+    let adapter = n.path().join("adapter.sh");
+    let plain = std::fs::read_to_string(&adapter).unwrap();
+    std::fs::write(
+        &adapter,
+        plain.replace("exec node", "export FAKE_ACP_SHAPE=claude099\nexec node"),
+    )
+    .unwrap();
     let code = c.code().await;
     let node = n.pair(&h, &code);
     // M1: pairing handed the Node the Hub's identity key; every welcome is checked against it
@@ -543,10 +574,6 @@ async fn setup() -> (Home, Hub, NodeHome, NodeProc, String) {
     .expect("pairing");
     assert_eq!(paired["hub_key"], hex::encode(hub_key));
     c.confirm(&node).await;
-    // the owner names the Node new sessions go to, and restarts the Hub with it
-    hub.kill();
-    let hub = spawn_hub(&h, Some(&node));
-    serving(&h).await;
     let p = n.run();
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
@@ -559,6 +586,31 @@ async fn setup() -> (Home, Hub, NodeHome, NodeProc, String) {
         h.count("SELECT generation FROM nodes WHERE node_id=?", &node) > 0
     })
     .await;
+    // the owner binds the Node as the Bot's execution Node once it is a candidate for it
+    let (st, bot) = c
+        .call(
+            "POST",
+            "/api/bots",
+            Some(json!({"name": REMOTE_BOT, "harness": "claude-code",
+                        "model": "kiro/claude-opus-5-5", "perm_mode": "default"})),
+        )
+        .await;
+    assert_eq!(st, 200, "{bot}");
+    let path = format!("/api/bots/{}/execution-nodes", bot["id"].as_str().unwrap());
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        let (status, candidates) = c.call("GET", &path, None).await;
+        format!(
+            "The second Node is a candidate for the Bot; {status} {candidates}\nHub:\n{}\nNode:\n{}",
+            h.log(),
+            n.log()
+        )
+    });
+    eventually(diagnostic, || async {
+        c.candidates_ready(&path, &[node.as_str()]).await
+    })
+    .await;
+    let (st, v) = c.call("PUT", &path, Some(json!({"nodes": [node]}))).await;
+    assert_eq!(st, 200, "{v}");
     (h, hub, n, p, node)
 }
 
@@ -648,7 +700,7 @@ async fn a_second_node_runs_a_whole_item() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn hub_restart_keeps_the_work_going_and_nothing_runs_twice() {
-    let (h, mut hub, n, mut p, node) = setup().await;
+    let (h, mut hub, n, mut p, _) = setup().await;
     let c = Client::login(&h).await;
     let sid = c
         .item(&h, "重启验收 @say one-8T @sleep 6000 @say two-8T")
@@ -663,7 +715,7 @@ async fn hub_restart_keeps_the_work_going_and_nothing_runs_twice() {
     eventually_sync(diagnostic, || said(&h, &sid, "one-8T") > 0).await;
     // the Hub goes away mid-turn; the Node keeps running the turn and comes back to the new Hub
     hub.kill();
-    let _hub = spawn_hub(&h, Some(&node));
+    let _hub = spawn_hub(&h);
     serving(&h).await;
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
@@ -868,7 +920,7 @@ async fn another_nodes_session_is_refused() {
     }
     // B has a session here now, so a Hub restart starts B's coordinator: B's events reach it
     hub.kill();
-    let _hub = spawn_hub(&h, Some(&node));
+    let _hub = spawn_hub(&h);
     serving(&h).await;
     let fb = FakeNode::new(b.as_str());
     let lb = node_harness::dial_url(&ws, &hub_id, &idb, &b, fb.clone(), 1)
@@ -1054,7 +1106,7 @@ async fn another_nodes_session_is_refused() {
 #[tokio::test(flavor = "multi_thread")]
 async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
     let h = Home::new();
-    let _hub = spawn_hub(&h, None);
+    let _hub = spawn_hub(&h);
     serving(&h).await;
     let c = Client::login(&h).await;
     let (_, bot) = c
@@ -1105,28 +1157,24 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
         },
     )
     .await;
-    let (_, report) = c
-        .call(
-            "GET",
-            "/api/system/models?harness=claude-code&fresh=1",
-            None,
-        )
-        .await;
     // A linked Node is pending until its first probe lands; wait for both to become candidates.
-    eventually("Both test Nodes are discovered as candidates.", || async {
-        let (_, v) = c.call("GET", &path, None).await;
-        [&id_a, &id_b].iter().all(|id| {
-            v["candidates"].as_array().is_some_and(|all| {
-                all.iter()
-                    .any(|n| n["id"] == id.as_str() && n["state"] == "candidate")
-            })
-        })
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        let (_, candidates) = c.call("GET", &path, None).await;
+        format!(
+            "Both test Nodes are candidates; {candidates}\nHub:\n{}",
+            h.log()
+        )
+    });
+    eventually(diagnostic, || async {
+        c.candidates_ready(&path, &[id_a.as_str(), id_b.as_str()])
+            .await
     })
     .await;
     let (status, discovery) = c.call("GET", &path, None).await;
     assert_eq!(status, 200, "{discovery}");
-    assert!(
-        discovery["bindings"].is_null(),
+    assert_eq!(
+        discovery["bindings"],
+        json!(["local"]),
         "discovery is not authorization: {discovery}"
     );
     for id in [&id_a, &id_b] {
@@ -1136,7 +1184,7 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
                 .unwrap()
                 .iter()
                 .any(|n| { n["id"] == id.as_str() && n["state"] == "candidate" }),
-            "{id}: {discovery}; {report}"
+            "{id}: {discovery}"
         );
     }
 

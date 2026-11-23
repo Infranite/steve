@@ -7,9 +7,9 @@ pub enum CoreError {
     #[error("{0}")]
     Msg(String),
     #[error(transparent)]
-    Store(#[from] steve_store::StoreError),
+    Contract(#[from] steve_types::Error),
     #[error(transparent)]
-    Db(#[from] rusqlite::Error),
+    Store(#[from] steve_store::StoreError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]

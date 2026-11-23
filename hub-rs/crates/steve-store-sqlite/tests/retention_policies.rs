@@ -27,12 +27,6 @@ fn slice(c: &Connection, kind: Kind, now: i64) -> r::SliceReport<i64> {
 fn age_days_and_window_expiry_boundaries_and_latest_64_turns() {
     let c = database();
     let now = 200 * DAY as i64 + 1234;
-    c.execute(
-        "INSERT INTO node_vitals(node_id,at,data) VALUES('n',?,'{}'),('n',?,'{}')",
-        params![now - DAY as i64 - 1, now - DAY as i64],
-    )
-    .unwrap();
-    assert_eq!(slice(&c, Kind::Vitals, now).affected, 1);
     c.execute_batch("INSERT INTO tool_usage(bot_id,tool,day,searched,called) VALUES('b','old',109,1,0),('b','boundary',110,1,0);").unwrap();
     assert_eq!(slice(&c, Kind::Tools, now).affected, 1);
     assert_eq!(one(&c, "SELECT day FROM tool_usage"), 110);

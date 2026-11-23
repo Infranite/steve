@@ -227,8 +227,8 @@ Steve 还没有运行时插件商店，“插件”页面目前只是占位。�
 
 ## 实验中与计划中
 
-- **会话在 Node 上运行**：Hub 不再自己拉起 agent 进程，所有会话、Steve 自己的判断调用和就地研究都在本机 Node 上运行，本机 Node 默认开启（`STEVE_NODE_MODE=off` 时会话只排队）。
-- **多设备**（实验中，默认关闭）：另一台机器上的 `steve-node` 可以和 Hub 配对，在那台机器上跑 harness。Node 总是主动向外连，配对用一次性码加指纹确认，每个 Node 都有执行日志用来对账。远程 Node 用 `STEVE_NODE_LISTEN=1` / `STEVE_NODE_BIND` 开启。在“设备”页生成配对码，按页面上的命令在目标机器上完成配对（[docs/deployment.md](docs/deployment.md)）。
+- **会话在 Node 上运行**：会话默认由 Hub 自带的 Node 执行。打开诊断副本时设置 `STEVE_NO_RESUME=1`，禁用 Node 连接和模型执行。
+- **多设备**（实验中）：另一台机器上的 `steve-node` 可以和 Hub 配对，在那台机器上跑 harness。监听默认开启，可用 `STEVE_NODE_LISTEN=0` 关闭，诊断模式也会关闭监听。Node 总是主动向外连，配对用一次性码加指纹确认，每个 Node 都有执行日志用来对账。配对后的 Node 只有被工作区所有者加进某个 Bot 的执行节点后才会接工作。在“设备”页生成配对码，按页面上的命令在目标机器上完成配对（[docs/deployment.md](docs/deployment.md)）。
 - **信息流**：Steve 不只是用来工作的。生活、兴趣和工作中的定时汇报有独立阅读入口，不再把新报告全文塞进对话；历史对话保持原样。报告对工作空间成员共享，每人已读独立；已授权的个人事项完成通知只对本人可见。支持未读与来源筛选、阅读全文、勾选已读、按快照全部已读和持续加载，不限于最近 100 条。阅读不等于处理“待处理”中的决策，也不会调用模型或重新外发通知，详见[信息流](docs/deployment.md#feed)。
 - **个人通知**：在“设置 → 通知”配置事项完成通知，在“信息流”集中阅读，默认关闭。保存并启用只从此刻开始，不补发旧事件；即时发送须明确选择已校验可达的本人 Bot 私聊，免打扰按 IANA 时区的当地时间计算。摘要和记录模式目前只积累，不生成或定时发送摘要。本人已读不影响其他成员或外部平台已读，详见[接口与限制](docs/deployment.md#personal-work-completion-notifications)。
 - **还没做的**：RSS 抓取、个人报告订阅、定时摘要生成、其他个人通知事件、Gmail 和 Outlook API 邮件适配器、飞书文档 / 日历 / 审批，以及外部保险箱后端（1Password、Bitwarden）。
@@ -334,12 +334,11 @@ Steve 从环境变量读取配置。作为服务运行时写在 `$STEVE_HOME/ste
 | `STEVE_YOLO` | 设为 `off` 在整个实例上关闭 YOLO |
 | `STEVE_KB_STORE` | 设为 `openviking` 使用可选的向量后端（默认 SQLite FTS） |
 | `STEVE_VAULT_KEYSTORE` | `auto`（钥匙串 / Secret Service）、`dir`（配合 `STEVE_VAULT_KEY_DIR`），或测试用的 `file` |
-| `STEVE_NODE_MODE` | `service`（默认）让 Hub 自己的 Node 在单独的进程里运行，Hub 重启或升级时正在跑的回合不受影响（见 [docs/deployment.md](docs/deployment.md#the-hubs-own-node-in-a-process-of-its-own)）；`local` 在 Hub 进程内运行；`off` 时会话只排队 |
+| `STEVE_NODE_MODE` | `service`（默认）让 Hub 自己的 Node 在单独的进程里运行，Hub 重启或升级时正在跑的回合不受影响（见 [docs/deployment.md](docs/deployment.md#the-hubs-own-node-in-a-process-of-its-own)）；`local` 在 Hub 进程内运行 |
 | `STEVE_LOCAL_NODE_PORT` | `STEVE_NODE_MODE=service` 时本机 Node 连接 Hub 使用的本机回环端口（默认 Hub 端口 + 3） |
 | `STEVE_CONFINE` | Node 启动的运行进程所在的系统沙箱（macOS 用 seatbelt；Linux 用 bubblewrap）。分级：<br>`0`/`off`：不隔离。<br>`1`/`on`（默认）：Steve 的密钥、数据库和程序不可访问；在工作目录里运行的进程只能写自己的工作目录及其所属仓库、harness 和工具链目录、临时目录、常用的工具缓存和 harness 自己的主目录；读取不受限制，只是 Node 主人以外的人的会话看不到主人的 harness 主目录（登录、令牌、历史，以适配器声明的为准）；环境变量保持用户系统原样。<br>`2`：在 1 的基础上，运行进程从用户全新的登录环境启动，再加上 Steve 为它设置的变量。<br>Codex 等自带 seatbelt 沙箱的 harness 继续使用自己的沙箱 |
 | `STEVE_CONFINE_WRITABLE` | 1、2 级下额外允许写入的位置（绝对路径，用 `:` 分隔） |
-| `STEVE_NODE_LISTEN`、`STEVE_NODE_BIND` | 实验中的多设备 Node，默认关闭 |
-| `STEVE_NODE_PLACEMENT` | `spread`（默认）：没有项目的事项开新会话时，交给负载明显更低的已连接远程 Node；`local`：新会话留在 Hub 所在机器，除非 `STEVE_NODE_BIND` 指定了 Node |
+| `STEVE_NODE_LISTEN` | 实验中的多设备 Node 监听，默认开启；`0` 关闭 |
 | `STEVE_NODE_HANDOFF_MIN` | 设备离线、又有消息在等它的会话时，过多少分钟后 Steve 在别处开新会话继续事项（默认 30；`0` 表示不转移） |
 | `STEVE_TAILCAT`、`STEVE_TAILCAT_PORT` | 经 tailcat 接入远程 Node（可选，在“设备”页开启）：`tailcat` 不在 `PATH` 上时指定程序位置，以及只提供 Node 接口的本机端口（默认 Hub 端口 + 2） |
 | `STEVE_NODE_INSTALLERS` | 远程安装 Node 时使用的本地目录，里面放发布的 `steve-installer.json` 和安装包，供访问不了 GitHub 的 Hub 使用 |

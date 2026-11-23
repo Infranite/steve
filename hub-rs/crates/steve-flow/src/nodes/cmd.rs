@@ -3,25 +3,22 @@
 //! the flow holds a `grants(subject_type='flow', capability='cmd.run', resource_type='project',
 //! resource_id=<project_id> | '*')`. Restarts never replay it; dry runs skip it.
 //!
-//! Execution is the vault's [`inject::run`] with nothing injected: `/bin/sh -c` in its own process
-//! group, the whole group killed on timeout and when the command ends, 64 KiB per stream.
 //! `{{…}}` in the command expand to single-quoted shell words, so event text can't inject shell
 //! syntax; `{{secrets.…}}` is refused (secrets go only into `http` headers and bodies).
 //!
-//! With a [`CmdNode`] (the Hub's local Node is on, `STEVE_NODE_MODE=local`), the command runs on
-//! the Node that holds the project's files instead, recorded once in the Hub's ledger for the run:
-//! same rules, same step results. A Node that is not there fails the step (`设备离线`), and one
-//! whose answer is lost (it restarted while the command ran) fails it as unknown: never run again
-//! on its own. A retry you choose after a Hub restart cut the step short is a new operation
+//! The command runs on the Node that holds the project's files ([`CmdNode`]), recorded once in the
+//! Hub's ledger for the run. The Hub never runs it itself: without the local Node the step fails
+//! ([`NO_NODE`]). A Node that is not there fails the step (`设备离线`), and one whose answer is
+//! lost (it restarted while the command ran) fails it as unknown: never run again on its own. A
+//! retry you choose after a Hub restart cut the step short is a new operation
 //! ([`CmdRequest::rerun`]).
 
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use steve_modules::vault::inject::{self, RunSpec};
+use steve_modules::vault::inject;
 
 use super::{Grant, NodeKind, NodeOutcome, Rule, RunCx, req_str};
 
@@ -34,6 +31,8 @@ const ERROR_TAIL: usize = 500;
 
 pub const NO_SECRETS: &str = "机密只能用在 http 节点的 headers 和 body 里";
 pub const NO_PROJECT: &str = "项目不存在或不在这台机器上";
+/// The Hub's local Node is off: nothing can run the command.
+pub const NO_NODE: &str = "本机 Node 未开启，命令无法运行";
 /// The project's Node is not there.
 pub const OFFLINE: &str = "设备离线";
 /// The Node's answer was lost: the command may or may not have run, and is not run again.
@@ -58,8 +57,8 @@ pub struct CmdRequest {
 /// What became of a [`CmdRequest`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CmdRan {
-    /// The project is not on a Node here (the local Node is off): the step runs as before.
-    Legacy,
+    /// The Hub's local Node is off.
+    NoNode,
     /// It ran to its end: the exit code (`None`: a signal ended it) and the bounded output.
     Ended {
         exit_code: Option<i32>,
@@ -81,30 +80,21 @@ pub trait CmdNode: Send + Sync {
     async fn run(&self, req: CmdRequest) -> CmdRan;
 }
 
-/// The node; `home` is `STEVE_HOME` (the vault's scratch root, unused without injections).
+/// The node; without a [`CmdNode`] (the local Node is off) every step fails with [`NO_NODE`].
+#[derive(Default)]
 pub struct Cmd {
-    home: PathBuf,
     node: Option<Arc<dyn CmdNode>>,
 }
 
 impl Cmd {
-    pub fn new(home: impl Into<PathBuf>) -> Self {
-        Self {
-            home: home.into(),
-            node: None,
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Runs on the project's Node whenever it says so ([`CmdRan::Legacy`]: as before).
+    /// Runs on the project's Node.
     pub fn with_node(mut self, node: Arc<dyn CmdNode>) -> Self {
         self.node = Some(node);
         self
-    }
-}
-
-impl Default for Cmd {
-    fn default() -> Self {
-        Self::new(std::env::temp_dir())
     }
 }
 
@@ -140,16 +130,6 @@ fn render_command(cx: &RunCx<'_>, tpl: &str, input: &Value) -> String {
     }
     out.push_str(rest);
     out
-}
-
-/// The project's directory, canonicalized: an unarchived project of `ws` on this Hub.
-fn project_dir(c: &mut impl steve_store::Read, ws: &str, id: &str) -> Option<PathBuf> {
-    let path = steve_store::ProjectRows(c)
-        .local_path(ws, id)
-        .ok()
-        .flatten();
-    let p = Path::new(&path?).canonicalize().ok()?;
-    p.is_dir().then_some(p)
 }
 
 fn tail(s: &str, n: usize) -> &str {
@@ -211,57 +191,32 @@ impl NodeKind for Cmd {
         if let Err(e) = self.validate(cfg) {
             return NodeOutcome::Fail(e);
         }
-        let project = cfg["project_id"].as_str().unwrap_or("").trim().to_string();
-        let ws = cx.ws().to_string();
-        if let Some(node) = &self.node {
-            let timeout = timeout_of(cfg).unwrap_or(DEFAULT_TIMEOUT_S);
-            let req = CmdRequest {
-                workspace_id: ws.clone(),
-                project_id: project.clone(),
-                run_id: cx.run.id.clone(),
-                step: cx.node.id.clone(),
-                rerun: cx.run.context["reruns"][&cx.node.id].as_u64().unwrap_or(0) as u32,
-                command: render_command(cx, cfg["command"].as_str().unwrap_or(""), input),
-                timeout: Duration::from_secs(timeout),
-            };
-            match node.run(req).await {
-                CmdRan::Legacy => {}
-                CmdRan::Ended {
-                    exit_code,
-                    stdout,
-                    stderr,
-                } => return ended(exit_code, stdout, stderr),
-                CmdRan::TimedOut => return timed_out(timeout),
-                CmdRan::NotRun(e) => return not_run(&e),
-                CmdRan::Offline => return NodeOutcome::Fail(OFFLINE.into()),
-                CmdRan::NoProject => return NodeOutcome::Fail(NO_PROJECT.into()),
-                CmdRan::Unknown => return NodeOutcome::Fail(UNKNOWN.into()),
-            }
-        }
-        let Ok(Some(dir)) = cx
-            .flow
-            .store()
-            .read::<_, steve_store::StoreError>(|c| Ok(project_dir(c, &ws, &project)))
-        else {
-            return NodeOutcome::Fail(NO_PROJECT.into());
+        let Some(node) = &self.node else {
+            return NodeOutcome::Fail(NO_NODE.into());
         };
         let timeout = timeout_of(cfg).unwrap_or(DEFAULT_TIMEOUT_S);
-        let command = render_command(cx, cfg["command"].as_str().unwrap_or(""), input);
-        let spec = RunSpec {
-            use_id: steve_store::uid("su"),
-            cwd: dir,
-            command,
-            injections: Vec::new(),
+        let req = CmdRequest {
+            workspace_id: cx.ws().to_string(),
+            project_id: cfg["project_id"].as_str().unwrap_or("").trim().to_string(),
+            run_id: cx.run.id.clone(),
+            step: cx.node.id.clone(),
+            rerun: cx.run.context["reruns"][&cx.node.id].as_u64().unwrap_or(0) as u32,
+            command: render_command(cx, cfg["command"].as_str().unwrap_or(""), input),
             timeout: Duration::from_secs(timeout),
         };
-        let out = inject::run(&self.home, &spec, &[]).await;
-        if out.timed_out {
-            return timed_out(timeout);
+        match node.run(req).await {
+            CmdRan::NoNode => NodeOutcome::Fail(NO_NODE.into()),
+            CmdRan::Ended {
+                exit_code,
+                stdout,
+                stderr,
+            } => ended(exit_code, stdout, stderr),
+            CmdRan::TimedOut => timed_out(timeout),
+            CmdRan::NotRun(e) => not_run(&e),
+            CmdRan::Offline => NodeOutcome::Fail(OFFLINE.into()),
+            CmdRan::NoProject => NodeOutcome::Fail(NO_PROJECT.into()),
+            CmdRan::Unknown => NodeOutcome::Fail(UNKNOWN.into()),
         }
-        if let Some(e) = &out.error {
-            return not_run(e);
-        }
-        ended(out.exit_code, out.stdout, out.stderr)
     }
 }
 

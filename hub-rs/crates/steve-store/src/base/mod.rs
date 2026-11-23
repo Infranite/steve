@@ -22,7 +22,6 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Value, json};
 
-use crate::repo::to_json;
 use crate::{Result, Tx, now};
 
 /// Who can see an object. Stored and sent as its code: `workspace`, `private`, `team:<id>`, `space:<id>`.
@@ -308,10 +307,8 @@ pub fn audit(
     target: &str,
     detail: &Value,
 ) -> Result<()> {
-    tx.prepare_cached(
-        "INSERT INTO audit (workspace_id, ts, actor, action, target, detail) VALUES (?, ?, ?, ?, ?, ?)",
-    )?
-    .execute(params![ws, now(), actor, action, target, to_json(detail)?])?;
+    let audit = crate::contract::audit::record_statement(ws, actor, action, target, detail)?;
+    crate::contract::exec_on(&mut crate::contract::Sqlite(tx), &audit)?;
     Ok(())
 }
 

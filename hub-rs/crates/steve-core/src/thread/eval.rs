@@ -4,33 +4,20 @@
 //! - `recorded_router_outputs_pass_the_bar` replays the model replies recorded from the last real run
 //!   (`tests/route_outputs.json`) through `parse_route` and `decide`: CI checks parsing and guards on
 //!   fixed outputs.
-//! - `route_eval_real_model` (ignored) asks the real fast tier; it needs `claude` and the gateway.
-//!
-//! ```text
-//! STEVE_ROUTE_EVAL_MODELS=claude-haiku-5-5,claude-sonnet-5-5 STEVE_ROUTE_EVAL_SAVE=1 \
-//!   cargo test -p steve-core route_eval_real_model -- --ignored --nocapture
-//! ```
-//!
 //! The bar: at least 90% of the cases hit, and no question becomes an item.
 //!
 //! The ahead eval (`tests/ahead_cases.json`, outputs in `tests/ahead_outputs.json`): messages said while
-//! Steve is still answering, each marked whether it may go ahead of the answer. Its bar: no message that
-//! needs the answer goes ahead. `ahead_eval_real_model` (ignored) asks the real fast tier:
-//!
-//! ```text
-//! STEVE_ROUTE_EVAL_SAVE=1 cargo test -p steve-core ahead_eval_real_model -- --ignored --nocapture
-//! ```
+//! Steve is still answering, each marked whether it may go ahead of the answer.
 //!
 //! The batch eval routes the 20 synthetic cases (no history) in bursts of [`BURST`], one call each
 //! ([`gateway::route_many`]), outputs in `tests/batch_outputs.json`. Same bar as one at a time.
 
 use super::decide::{DecideCtx, decide, for_main, now_while_answering, without_router};
-use crate::gateway::{self, FocusItem, ModelGateway, RouteCtx, Said, Tier};
+use crate::gateway::{self, FocusItem, RouteCtx};
 use crate::repo::{Bot, Project, Tag};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 const CASES: &str = include_str!("tests/route_cases.json");
 const OUTPUTS: &str = include_str!("tests/route_outputs.json");
@@ -144,16 +131,6 @@ fn routed(c: &Case) -> String {
             c.files.join("、")
         )
     }
-}
-
-fn history(c: &Case) -> Vec<Said> {
-    c.history
-        .iter()
-        .map(|h| Said {
-            author: s(h, "author"),
-            text: s(h, "text"),
-        })
-        .collect()
 }
 
 /// One scored case.
@@ -307,17 +284,6 @@ fn ahead_ctx(a: &Ahead, x: &AheadCase) -> RouteCtx {
     }
 }
 
-/// The conversation before an ahead case: the questions being answered, no answers yet.
-fn ahead_history(x: &AheadCase) -> Vec<Said> {
-    x.pending
-        .iter()
-        .map(|q| Said {
-            author: "me".into(),
-            text: q.clone(),
-        })
-        .collect()
-}
-
 /// Whether an ahead case goes ahead with this router reply, as the lane decides it ([`Core::ahead`]):
 /// a plain question waits without the router.
 fn goes_ahead(ctx: &RouteCtx, x: &AheadCase, raw: Option<&str>) -> bool {
@@ -377,165 +343,6 @@ fn recorded_ahead_outputs_never_go_ahead_of_an_answer_they_need() {
 /// The share of standalone messages that must go ahead of the answer.
 const AHEAD_BAR: f64 = 0.7;
 
-/// The real fast tier as the Hub calls it: models from STEVE_ROUTE_EVAL_MODELS through 设置 · 模型 (purpose
-/// `route`), the adapters as the environment names them. The directory lives as long as the gateway is used.
-fn real_gateway() -> (std::sync::Arc<crate::InProcess>, tempfile::TempDir) {
-    let models: Vec<String> = std::env::var("STEVE_ROUTE_EVAL_MODELS")
-        .unwrap_or_else(|_| "claude-haiku-5-5,claude-sonnet-5-5".into())
-        .split(',')
-        .map(|m| m.trim().to_string())
-        .filter(|m| !m.is_empty())
-        .collect();
-    assert!(
-        models.iter().all(|m| !m.starts_with("kiro/")),
-        "the kiro route has no upstream"
-    );
-    let dir = tempfile::tempdir().unwrap();
-    // the models come through 设置 · 模型 as in the Hub: purpose `route`, the eval's list as its default
-    let store = steve_store::Store::open(
-        dir.path().join("steve.sqlite3"),
-        steve_store::FnPublisher(|_| {}),
-    )
-    .unwrap();
-    store.ensure_workspace().unwrap();
-    let resolver = crate::models::Models::new(
-        store,
-        crate::models::Defaults {
-            fast: models.clone(),
-            smart: models.clone(),
-            ..Default::default()
-        },
-    );
-    let gw = std::sync::Arc::new(crate::InProcess {
-        one: crate::LocalAcp {
-            acp: steve_acp::AcpConfig::from_env(),
-            cwd: dir.path().to_path_buf(),
-        },
-        fast: models.clone(),
-        smart: models,
-        models: Some(resolver),
-    });
-    (gw, dir)
-}
-
-/// The real fast tier on every ahead case. Writes `tests/ahead_outputs.json` with STEVE_ROUTE_EVAL_SAVE=1.
-#[tokio::test]
-#[ignore = "calls the real model"]
-async fn ahead_eval_real_model() {
-    let a: Ahead = serde_json::from_str(AHEAD).unwrap();
-    let gw = real_gateway();
-    let mut tasks = vec![];
-    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(6));
-    for x in a.cases.clone() {
-        let (gw, ctx, sem) = (gw.0.clone(), ahead_ctx(&a, &x), sem.clone());
-        tasks.push(tokio::spawn(async move {
-            let _p = sem.acquire().await.unwrap();
-            if without_router(&x.text, false, false, &[]).is_some() {
-                return (x.id.clone(), None);
-            }
-            let prompt = gateway::route_prompt(&ctx, &x.text, &ahead_history(&x), false);
-            let r = gw
-                .call(
-                    &prompt,
-                    Tier::Fast,
-                    Duration::from_secs(60),
-                    &gateway::ThinkTools::None,
-                )
-                .await;
-            (x.id.clone(), r.ok().map(|p| (p.text, p.model)))
-        }));
-    }
-    let mut out = BTreeMap::new();
-    for t in tasks {
-        let (id, r) = t.await.unwrap();
-        out.insert(
-            id,
-            serde_json::json!({"raw": r.as_ref().map(|x| x.0.clone()), "model": r.map(|x| x.1)}),
-        );
-    }
-    let (wrong, rate) = ahead_report(&a, &out);
-    if std::env::var_os("STEVE_ROUTE_EVAL_SAVE").is_some() {
-        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/thread/tests/ahead_outputs.json");
-        std::fs::write(p, serde_json::to_string_pretty(&out).unwrap() + "\n").unwrap();
-    }
-    assert_eq!(wrong, 0, "a message went ahead of the answer it needs");
-    assert!(rate >= AHEAD_BAR, "standalone ahead {rate}");
-}
-
-/// The real fast tier on every case. Writes `tests/route_outputs.json` with STEVE_ROUTE_EVAL_SAVE=1.
-#[tokio::test]
-#[ignore = "calls the real model"]
-async fn route_eval_real_model() {
-    let c: Cases = serde_json::from_str(CASES).unwrap();
-    let ctx = route_ctx(&c.ctx);
-    let (gw, _dir) = real_gateway();
-    // STEVE_ROUTE_EVAL_PARALLEL=1 runs the cases one after another, as a conversation does (cache measurements)
-    let parallel = std::env::var("STEVE_ROUTE_EVAL_PARALLEL")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(6);
-    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(parallel));
-    let mut tasks = vec![];
-    for x in c.cases.clone() {
-        let (gw, ctx, sem) = (gw.clone(), ctx.clone(), sem.clone());
-        tasks.push(tokio::spawn(async move {
-            let _p = sem.acquire().await.unwrap();
-            let prompt = gateway::route_prompt(&ctx, &routed(&x), &history(&x), false);
-            let t0 = std::time::Instant::now();
-            let r = crate::stats::tagged(
-                "route",
-                "",
-                gw.call(
-                    &prompt,
-                    Tier::Fast,
-                    Duration::from_secs(60),
-                    &gateway::ThinkTools::None,
-                ),
-            )
-            .await;
-            let ms = t0.elapsed().as_millis() as u64;
-            (x.id.clone(), r.ok().map(|p| (p.text, p.model)), ms)
-        }));
-    }
-    let mut out = BTreeMap::new();
-    for t in tasks {
-        let (id, r, ms) = t.await.unwrap();
-        out.insert(
-            id,
-            serde_json::json!({"raw": r.as_ref().map(|x| x.0.clone()), "model": r.map(|x| x.1), "ms": ms}),
-        );
-    }
-    let all: Vec<Scored> = c
-        .cases
-        .iter()
-        .map(|x| score(&ctx, x, out.get(&x.id).and_then(|v| v["raw"].as_str())))
-        .collect();
-    let mut models: BTreeMap<String, usize> = BTreeMap::new();
-    for v in out.values() {
-        *models
-            .entry(v["model"].as_str().unwrap_or("failed").to_string())
-            .or_default() += 1;
-    }
-    println!("models: {models:?}");
-    let (rate, bad) = report(&all);
-    let prod: Vec<Scored> = c
-        .cases
-        .iter()
-        .filter(|x| !x.id.starts_with("syn_"))
-        .map(|x| score(&ctx, x, out.get(&x.id).and_then(|v| v["raw"].as_str())))
-        .collect();
-    println!("-- the 22 real messages --");
-    report(&prod);
-    if std::env::var_os("STEVE_ROUTE_EVAL_SAVE").is_some() {
-        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/thread/tests/route_outputs.json");
-        std::fs::write(p, serde_json::to_string_pretty(&out).unwrap() + "\n").unwrap();
-    }
-    assert_eq!(bad, 0, "a question became an item");
-    assert!(rate >= 0.9, "hit rate {rate}");
-}
-
 /// How many synthetic cases the batch eval routes in one call.
 const BURST: usize = 5;
 
@@ -586,42 +393,6 @@ fn recorded_batch_outputs_pass_the_bar() {
     let out: BTreeMap<String, Value> = serde_json::from_str(BATCH_OUTPUTS).unwrap();
     let ctx = route_ctx(&c.ctx);
     assert_eq!(out.len(), bursts(&c).len());
-    let (rate, bad) = batch_report(&ctx, &c, &out);
-    assert_eq!(bad, 0, "a question became an item");
-    assert!(rate >= 0.9, "hit rate {rate}");
-}
-
-/// The real fast tier on the bursts. Writes `tests/batch_outputs.json` with STEVE_ROUTE_EVAL_SAVE=1.
-#[tokio::test]
-#[ignore = "calls the real model"]
-async fn batch_eval_real_model() {
-    let c: Cases = serde_json::from_str(CASES).unwrap();
-    let ctx = route_ctx(&c.ctx);
-    let (gw, _dir) = real_gateway();
-    let mut out = BTreeMap::new();
-    for (id, b) in bursts(&c) {
-        let texts: Vec<String> = b.iter().map(routed).collect();
-        let prompt = gateway::route_prompt_for(&ctx, &texts, &[], false);
-        let t0 = std::time::Instant::now();
-        let r = gw
-            .call(
-                &prompt,
-                Tier::Fast,
-                Duration::from_secs(90),
-                &gateway::ThinkTools::None,
-            )
-            .await
-            .ok();
-        out.insert(
-            id,
-            serde_json::json!({"raw": r.as_ref().map(|p| p.text.clone()), "model": r.map(|p| p.model), "ms": t0.elapsed().as_millis() as u64}),
-        );
-    }
-    if std::env::var_os("STEVE_ROUTE_EVAL_SAVE").is_some() {
-        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/thread/tests/batch_outputs.json");
-        std::fs::write(p, serde_json::to_string_pretty(&out).unwrap() + "\n").unwrap();
-    }
     let (rate, bad) = batch_report(&ctx, &c, &out);
     assert_eq!(bad, 0, "a question became an item");
     assert!(rate >= 0.9, "hit rate {rate}");

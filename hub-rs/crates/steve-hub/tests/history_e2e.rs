@@ -41,7 +41,7 @@ impl Drop for Hub {
     }
 }
 
-fn spawn(home: &Path, name: &str, node: bool, no_resume: bool) -> Hub {
+fn spawn(home: &Path, name: &str, diagnostic: bool) -> Hub {
     let socket = handed::Socket::new();
     let port = socket.port();
     let steve = home.join(name);
@@ -83,10 +83,10 @@ fn spawn(home: &Path, name: &str, node: bool, no_resume: bool) -> Hub {
                 .expect("hub log"),
         )
         .process_group(0);
-    // Off keeps a jobs Node for history while local session execution stays disabled.
-    c.env("STEVE_NODE_MODE", if node { "local" } else { "off" });
-    if no_resume {
+    if diagnostic {
         c.env("STEVE_NO_RESUME", "1");
+    } else {
+        c.env("STEVE_NODE_MODE", "local");
     }
     Hub {
         child: c.spawn().expect("spawn hub"),
@@ -270,41 +270,17 @@ fn fixtures(home: &Path) -> (String, String, PathBuf) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn off_mode_imports_history_through_the_jobs_node() {
+async fn imports_history_through_the_node() {
     let dir = tempfile::tempdir().expect("tmp");
     let home = dir.path().canonicalize().expect("home");
     let (cc, cx, forged) = fixtures(&home);
-    let (off_hub, node_hub) = (
-        spawn(&home, "off", false, false),
-        spawn(&home, "node", true, false),
-    );
-    let (off, node) = (
-        Client::login(&off_hub).await,
-        Client::login(&node_hub).await,
-    );
-
-    assert!(off_hub.steve.join("data/node-jobs/node.sqlite3").is_file());
-    assert!(!off_hub.steve.join("data/node").exists());
-
-    // Both modes expose the same Node discovery list. Unlisted existing files below
-    // are refused in Off too, proving it cannot use the removed Hub path reader.
-    let (old_list, new_list) = (
-        off.ok("GET", "/api/local-sessions", None).await,
-        node.ok("GET", "/api/local-sessions", None).await,
-    );
-    assert_eq!(old_list.as_array().map(Vec::len), Some(2), "{old_list}");
-    assert_eq!(old_list, new_list);
-
-    // the same stored rows
-    let (old_ids, new_ids) = (
-        off.import(&[&cc, &cx]).await,
-        node.import(&[&cc, &cx]).await,
-    );
-    for (o, n) in old_ids.iter().zip(&new_ids) {
-        let (o, n) = (o.as_str().expect("an id"), n.as_str().expect("an id"));
-        let (old_rows, new_rows) = (off.rows(o), node.rows(n));
-        assert!(old_rows.len() >= 4, "{old_rows:?}");
-        assert_eq!(old_rows, new_rows);
+    let hub = spawn(&home, "node", false);
+    let node = Client::login(&hub).await;
+    let list = node.ok("GET", "/api/local-sessions", None).await;
+    assert_eq!(list.as_array().map(Vec::len), Some(2), "{list}");
+    let ids = node.import(&[&cc, &cx]).await;
+    for id in &ids {
+        assert!(node.rows(id.as_str().expect("an id")).len() >= 4);
     }
     let session = |c: &Client, id: &str| {
         c.db()
@@ -325,15 +301,13 @@ async fn off_mode_imports_history_through_the_jobs_node() {
             )
             .expect("session")
     };
-    for (o, n) in old_ids.iter().zip(&new_ids) {
-        assert_eq!(
-            session(&off, o.as_str().unwrap()),
-            session(&node, n.as_str().unwrap())
-        );
+    for id in &ids {
+        assert_eq!(session(&node, id.as_str().unwrap())[6], 1);
     }
 
-    for c in [&off, &node] {
-        // Once only, in both session modes.
+    {
+        let c = &node;
+        // A transcript can only be imported once.
         assert_eq!(
             c.import(&[&cc]).await,
             vec![json!({ "error": "已经导入过了" })]
@@ -371,7 +345,7 @@ async fn off_mode_imports_history_through_the_jobs_node() {
     }
 
     // resume: the Node finds the transcript by the harness's id
-    let id = new_ids[0].as_str().unwrap();
+    let id = ids[0].as_str().unwrap();
     let r = node
         .ok("GET", &format!("/api/sessions/{id}/resume"), None)
         .await;
@@ -382,25 +356,12 @@ async fn off_mode_imports_history_through_the_jobs_node() {
     );
     assert_eq!(r["transcript"]["matches"], true);
     assert_eq!(r["transcript"]["id"], CC_ID);
-    let old = off
-        .ok(
-            "GET",
-            &format!("/api/sessions/{}/resume", old_ids[0].as_str().unwrap()),
-            None,
-        )
-        .await;
-    assert_eq!(old["command"], r["command"]);
-    assert_eq!(old["transcript"]["updated"], r["transcript"]["updated"]);
-
     // the harnesses as the Node's probe reports them
     let devices = node.ok("GET", "/api/devices?fresh=1", None).await;
     let runtimes = devices["runtimes"].as_array().unwrap();
     let rt = |id: &str| runtimes.iter().find(|r| r["id"] == id).unwrap();
     assert_eq!(rt("claude-code")["version"], "2.1.0");
     assert_eq!(rt("codex")["version"], "0.80.0");
-    // Off disables session runtime observations while jobs discovery remains available.
-    let old = off.ok("GET", "/api/devices?fresh=1", None).await;
-    assert_eq!(old["runtimes"][0]["version"], "");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -408,7 +369,7 @@ async fn inert_hub_has_no_history_node_and_returns_unavailable() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().canonicalize().unwrap();
     let (cc, _, _) = fixtures(&home);
-    let hub = spawn(&home, "inert", false, true);
+    let hub = spawn(&home, "inert", true);
     let client = Client::login(&hub).await;
     for (method, path, body) in [
         ("GET", "/api/local-sessions", None),

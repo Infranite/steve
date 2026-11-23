@@ -73,6 +73,12 @@ pub fn for_messages(r: &mut impl Read, ids: &[String]) -> Result<Vec<String>> {
 }
 
 pub fn expect_answer(w: &mut W<'_>, message_id: &str, out_id: &str) -> Result<bool> {
+    w.exec(
+        Query::update()
+            .table("chan_messages")
+            .value("answer_to", message_id)
+            .and_where(Expr::col("id").eq(out_id)),
+    )?;
     Ok(w.exec(
         Query::update()
             .table("chan_reactions")

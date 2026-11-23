@@ -86,7 +86,7 @@ fn create_and_each_status_change_leave_one_mark() {
     );
     set(None, Some("z"));
     t.store
-        .transaction(|tx| {
+        .write(|tx| {
             steve_store::lifecycle_write_in(
                 tx,
                 &i,

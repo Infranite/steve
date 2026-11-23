@@ -111,25 +111,16 @@ fn set_desired_in(tx: &Tx, session: &str, d: Option<&Desired>) -> Result<(), Sto
     rt::set_desired_config_in(tx, session, v.as_ref(), now())
 }
 
-/// The latest `configure_session` command of the session: (op, state, body).
+/// The latest configure's operation, state and stored request.
 fn latest_configure_in(
     tx: &Tx,
     session: &str,
-) -> Result<Option<(String, String, ConfigureSession)>, StoreError> {
-    let r: Option<(String, String, String)> = match tx.query_row(
-        "SELECT operation_id, state, request FROM node_commands WHERE method='configure_session' AND json_extract(request,'$.body.session')=? ORDER BY created DESC, rowid DESC LIMIT 1",
+) -> Result<Option<(String, String, String)>, StoreError> {
+    Ok(tx.query_row(
+        "SELECT operation_id, state, request FROM node_commands WHERE method='configure_session' AND session_id=? ORDER BY created DESC, rowid DESC LIMIT 1",
         [session],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    ) {
-        Ok(x) => Some(x),
-        Err(rusqlite::Error::QueryReturnedNoRows) => None,
-        Err(e) => return Err(e.into()),
-    };
-    r.map(|(op, state, req)| {
-        let c: Command<ConfigureSession> = serde_json::from_str(&req)?;
-        Ok((op, state, c.body))
-    })
-    .transpose()
+    ).optional()?)
 }
 
 /// The session's config in force: the last open or configure the Node finished with success
@@ -140,9 +131,9 @@ pub(crate) fn config_in(
 ) -> Result<OpenSession, StoreError> {
     let latest_open = |only_ok: bool| -> Result<Option<OpenSession>, StoreError> {
         let sql = if only_ok {
-            "SELECT request FROM node_commands WHERE method='open_session' AND json_extract(request,'$.body.session')=? AND state='finished' AND json_extract(receipt,'$.success')=1 ORDER BY created DESC, rowid DESC LIMIT 1"
+            "SELECT request FROM node_commands WHERE method='open_session' AND session_id=? AND state='finished' AND json_extract(receipt,'$.success')=1 ORDER BY created DESC, rowid DESC LIMIT 1"
         } else {
-            "SELECT request FROM node_commands WHERE method='open_session' AND json_extract(request,'$.body.session')=? ORDER BY created DESC, rowid DESC LIMIT 1"
+            "SELECT request FROM node_commands WHERE method='open_session' AND session_id=? ORDER BY created DESC, rowid DESC LIMIT 1"
         };
         match tx.query_row(sql, [session], |r| r.get::<_, String>(0)) {
             Ok(req) => Ok(Some(
@@ -153,7 +144,7 @@ pub(crate) fn config_in(
         }
     };
     let last: Option<(String, String)> = match tx.query_row(
-        "SELECT method, request FROM node_commands WHERE method IN ('open_session','configure_session') AND json_extract(request,'$.body.session')=? AND state='finished' AND json_extract(receipt,'$.success')=1 ORDER BY created DESC, rowid DESC LIMIT 1",
+        "SELECT method, request FROM node_commands WHERE method IN ('open_session','configure_session') AND session_id=? AND state='finished' AND json_extract(receipt,'$.success')=1 ORDER BY created DESC, rowid DESC LIMIT 1",
         [session],
         |r| Ok((r.get(0)?, r.get(1)?)),
     ) {
@@ -167,9 +158,12 @@ pub(crate) fn config_in(
         }
         Some((_, req)) => {
             let c: Command<ConfigureSession> = serde_json::from_str(&req)?;
-            let mut open = latest_open(true)?
-                .or(latest_open(false)?)
-                .ok_or_else(|| conflict("configured but never opened"))?;
+            let mut open = match latest_open(true)? {
+                Some(o) => o,
+                None => {
+                    latest_open(false)?.ok_or_else(|| conflict("configured but never opened"))?
+                }
+            };
             open.choice = c.body.choice;
             open.policy = c.body.policy;
             Ok(open)
@@ -187,9 +181,10 @@ impl NodeRuntime {
         phase: &str,
     ) -> Result<(HarnessChoice, ExecutionPolicy), StoreError> {
         if phase == "configuring"
-            && let Some((_, state, body)) = latest_configure_in(tx, session)?
+            && let Some((_, state, request)) = latest_configure_in(tx, session)?
             && !matches!(state.as_str(), "finished" | "rejected" | "unknown")
         {
+            let Command { body, .. }: Command<ConfigureSession> = serde_json::from_str(&request)?;
             return Ok((body.choice, body.policy));
         }
         let o = config_in(tx, session)?;
@@ -214,84 +209,24 @@ impl NodeRuntime {
     /// that waits or is on its way, and what the Node or the harness said of a change after it
     /// that did not take. `None`: no such session on this Node.
     pub fn mode_state(&self, session: &str) -> Result<Option<steve_core::ModeState>, StoreError> {
-        self.tx(|tx| {
-            let Some((phase, active)): Option<(String, Option<String>)> = tx
-                .query_row(
-                    "SELECT phase, active_attempt FROM runtime_sessions WHERE session_id=? AND node_id=?",
-                    [session, self.node_id.as_str()],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?
-            else {
-                return Ok(None);
-            };
-            // opens and configures of the session, newest first: (rowid, method, state, success,
-            // request, what the Node said)
-            type Row = (i64, String, String, bool, String, Option<String>);
-            let rows: Vec<Row> = {
-                let mut st = tx.prepare(
-                    "SELECT rowid, method, state, coalesce(json_extract(receipt,'$.success'),0)=1, request,
-                            coalesce(json_extract(receipt,'$.payload.safe_detail'), json_extract(receipt,'$.payload.state.error.safe_detail'))
-                       FROM node_commands WHERE method IN ('open_session','configure_session') AND json_extract(request,'$.body.session')=?
-                      ORDER BY created DESC, rowid DESC",
-                )?;
-                st.query_map([session], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
-                })?
-                .collect::<Result<Vec<_>, _>>()?
-            };
-            let policy_of = |method: &str, req: &str| -> Result<PermissionMode, StoreError> {
-                Ok(if method == "open_session" {
-                    serde_json::from_str::<Command<OpenSession>>(req)?
-                        .body
-                        .policy
-                        .permissions
-                } else {
-                    serde_json::from_str::<Command<ConfigureSession>>(req)?
-                        .body
-                        .policy
-                        .permissions
-                })
-            };
-            let ok = rows.iter().position(|r| r.2 == "finished" && r.3);
-            let applied = ok
-                .map(|i| policy_of(&rows[i].1, &rows[i].4))
-                .transpose()?;
-            let busy = active.is_some()
-                || tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM runtime_turns WHERE session_id=? AND state<>'finished')",
-                    [session],
-                    |r| r.get::<_, bool>(0),
-                )?;
-            let mut s = steve_core::ModeState {
-                applied: applied.map(|p| mode_str(p).to_string()),
-                busy,
-                released: phase == "released",
-                ..Default::default()
-            };
-            // only the newest one after the last success says anything more
-            if let Some((_, method, state, _, req, detail)) =
-                rows.first().filter(|_| ok != Some(0))
-            {
-                match state.as_str() {
-                    "rejected" | "finished" => {
-                        s.refused = Some(detail.clone().unwrap_or_else(|| "没有生效".into()));
-                    }
-                    "unknown" => s.unknown = true,
-                    _ => {
-                        s.desired = Some(mode_str(policy_of(method, req)?).to_string());
-                        s.sending = true;
-                    }
-                }
-            }
-            if !s.sending
-                && let Some(d) = desired_in(tx, session)?
-            {
-                // waits for the next idle boundary or open (or a refused narrowing still holds)
-                s.desired = Some(mode_str(d.policy.permissions).to_string());
-            }
-            Ok(Some(s))
-        })
+        let started = std::time::Instant::now();
+        let modes = self
+            .store
+            .reader(|c| rt::session_modes(c, self.node_id.as_str(), session));
+        self.meters
+            .mode_state
+            .record(started.elapsed().as_secs_f64());
+        Ok(modes?.map(|m| steve_core::ModeState {
+            applied: m.applied,
+            desired: m.desired,
+            sending: m.sending,
+            busy: m.busy,
+            released: m.released,
+            unknown: m.unknown,
+            refused: m
+                .refused
+                .then(|| m.refusal_detail.unwrap_or_else(|| "没有生效".into())),
+        }))
     }
 
     /// Changes the session's harness config. It goes to the Node now if the session is idle,
@@ -389,7 +324,7 @@ impl NodeRuntime {
             return Ok(false);
         };
         let n: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM node_commands WHERE method='configure_session' AND json_extract(request,'$.body.session')=?",
+            "SELECT COUNT(*) FROM node_commands WHERE method='configure_session' AND session_id=?",
             [session],
             |r| r.get(0),
         )?;
@@ -525,7 +460,7 @@ impl NodeRuntime {
         receipt: &Receipt,
     ) -> Result<(), StoreError> {
         let session: String = tx.query_row(
-            "SELECT json_extract(request,'$.body.session') FROM node_commands WHERE operation_id=?",
+            "SELECT session_id FROM node_commands WHERE operation_id=?",
             [op],
             |r| r.get(0),
         )?;
@@ -595,7 +530,7 @@ impl NodeRuntime {
         e: &ApiError,
     ) -> Result<Option<String>, StoreError> {
         let session: String = tx.query_row(
-            "SELECT json_extract(request,'$.body.session') FROM node_commands WHERE operation_id=?",
+            "SELECT session_id FROM node_commands WHERE operation_id=?",
             [op],
             |r| r.get(0),
         )?;
@@ -690,7 +625,7 @@ impl NodeRuntime {
             "released"
         } else if narrowing {
             let n: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM node_commands WHERE method='release_session' AND json_extract(request,'$.body')=?",
+                "SELECT COUNT(*) FROM node_commands WHERE method='release_session' AND session_id=?",
                 [session],
                 |r| r.get(0),
             )?;

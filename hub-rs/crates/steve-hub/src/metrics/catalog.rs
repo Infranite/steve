@@ -186,6 +186,11 @@ pub(super) fn describe() {
         Seconds,
         "From sending a command to its receipt. Labels: node, method."
     );
+    describe_histogram!(
+        "steve_node_mode_state_seconds",
+        Seconds,
+        "Reading a session's permission mode state. Labels: node."
+    );
     describe_counter!(
         "steve_node_command_retries_total",
         Count,
@@ -212,6 +217,52 @@ pub(super) fn describe() {
         "How long a link lasted. Labels: node."
     );
     // Node meters, from each Node's vitals (nodes::vitals); totals count from the Node's start
+    describe_gauge!(
+        "steve_node_sample_timestamp_seconds",
+        Seconds,
+        "Hub receipt time of the latest observation. Label: node."
+    );
+    describe_gauge!(
+        "steve_node_cpu_load_ratio",
+        "One-minute machine load per logical CPU. Label: node."
+    );
+    describe_gauge!(
+        "steve_node_memory_total_bytes",
+        Bytes,
+        "Total memory on the Node. Label: node."
+    );
+    describe_gauge!(
+        "steve_node_memory_available_bytes",
+        Bytes,
+        "Memory available without swapping. Label: node."
+    );
+    describe_gauge!(
+        "steve_node_memory_used_ratio",
+        "Fraction of memory in use on the Node. Label: node."
+    );
+    describe_gauge!(
+        "steve_node_rtt_seconds",
+        Seconds,
+        "Round trip to a remote Node. Label: node."
+    );
+    describe_gauge!(
+        "steve_node_network_received_bytes_per_second",
+        "Receive rate across non-loopback interfaces. Label: node."
+    );
+    describe_gauge!(
+        "steve_node_network_sent_bytes_per_second",
+        "Send rate across non-loopback interfaces. Label: node."
+    );
+    describe_gauge!(
+        "steve_node_network_received_bytes",
+        Bytes,
+        "Bytes received by the host's non-loopback interfaces. Labels: node."
+    );
+    describe_gauge!(
+        "steve_node_network_sent_bytes",
+        Bytes,
+        "Bytes sent by the host's non-loopback interfaces. Labels: node."
+    );
     describe_gauge!(
         "steve_node_journal_bytes",
         Bytes,

@@ -95,13 +95,6 @@ pub fn set_decision_status_resolved(store: &Store, id: &str) -> Result<()> {
     })
 }
 
-pub fn set_decision_options(store: &Store, id: &str) -> Result<()> {
-    project_write(store, |c| {
-        c.execute(r#"UPDATE decisions SET options = '["draft_reply","to_item","done"]', draft = '' WHERE id = ?1"#, params![id])?;
-        Ok(())
-    })
-}
-
 pub fn seed_decision(store: &Store, text: &str, old: i64, id: &str) -> Result<()> {
     project_write(store, |c| {
         c.execute(r#"INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, question, status, requested_by, created)

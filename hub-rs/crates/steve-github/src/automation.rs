@@ -673,7 +673,7 @@ fn create_completed_report(
     let reason = "GitHub analysis recorded";
     let now = gh.now();
     steve_store::lifecycle_write_in(
-        &tx.legacy(),
+        tx,
         &item.id,
         &steve_store::LifecycleWrite {
             phase: "closed".into(),
@@ -686,7 +686,7 @@ fn create_completed_report(
         },
     )?;
     steve_store::item_cycle_add_in(
-        &tx.legacy(),
+        tx,
         &item.id,
         item.cycle,
         item.revision,
@@ -714,16 +714,15 @@ fn link_report_provenance(
     );
     // Target and draft are tied to the result, not to the expiring delivery/run.
     data.props = json!({"subject": subject, "report": report});
-    links::add(&tx.legacy(), &ws, &data)?;
+    links::Links(tx).add(&ws, &data)?;
     for (ty, id) in [("event", event), ("flow_run", input.run_id)] {
-        links::add(
-            &tx.legacy(),
+        links::Links(tx).add(
             &ws,
             &links::NewLink::new(result.clone(), "from", ObjRef::new(ty, id), "sig"),
         )?;
     }
     steve_store::timeline_add_in(
-        &tx.legacy(),
+        tx,
         &item.id,
         "steve",
         "sys",
@@ -937,21 +936,18 @@ pub(crate) async fn comment_draft(
         // Keep model output literal on GitHub. It must not become mentions, remote images, or
         // bot commands just because the user approved sharing a report.
         let body = format!("{prefix}{}", literal_report(&report));
-        let decision = steve_store::base::decisions::open(
-            &tx.legacy(),
-            &steve_store::NewDecision {
-                workspace_id: ws.clone(),
-                kind: "approve".into(),
-                subject_type: crate::comment::COMMENT.into(),
-                subject_id: target.subject,
-                item_id: Some(item.clone()),
-                session_id: None,
-                question: q,
-                draft: Some(body),
-                options: Some(vec!["yes".into(), "no".into()]),
-                requested_by: APPROVAL_ACTOR.into(),
-            },
-        )?;
+        let decision = steve_store::DecisionRows(tx).open(&steve_store::NewDecision {
+            workspace_id: ws.clone(),
+            kind: "approve".into(),
+            subject_type: crate::comment::COMMENT.into(),
+            subject_id: target.subject,
+            item_id: Some(item.clone()),
+            session_id: None,
+            question: q,
+            draft: Some(body),
+            options: Some(vec!["yes".into(), "no".into()]),
+            requested_by: APPROVAL_ACTOR.into(),
+        })?;
         crate::events::emit(tx, ws, &decision.subject_id);
         Ok::<_, ApiError>(decision)
     })?;

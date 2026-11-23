@@ -10,9 +10,9 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 
 use crate::index::DocLoader;
-use crate::repo::DocRow;
 use crate::sources::folder::FolderPolicy;
 use crate::sources::folder_node::{FolderPlaces, NodeFolders};
+use steve_store::knowledge::DocRow;
 
 /// `{type:"kb", id, ws}`: `id` is a document or source id. Sent after the commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

@@ -31,18 +31,13 @@ pub fn seed_only_spaces_no_other_live_identity_sees(
            VALUES ('acc_you', 'default', 'feishu', 'feishu', 'bob', 'personal', 'on_you', '你', 'connect', 1, 1);"#)?;
         c.execute(r#"INSERT INTO connections (id, workspace_id, account_id, adapter, auth, config, created_by, created, updated)
            VALUES ('con_you', 'default', 'acc_you', 'feishu_user', 'oauth', ?1, 'usr_dev', 1, 1);"#, params![text])?;
-        c.execute(
-            r#"INSERT INTO space_identities (space_id, connection_id, workspace_id, joined) VALUES
-           ('sp_a', ?1, 'default', 1), ('sp_a', 'con_you', 'default', 1),
-           ('sp_c', ?1, 'default', 1), ('sp_c', 'con_gone', 'default', 1);"#,
-            params![con],
-        )?;
         c.execute_batch(
-            r#"UPDATE space_identities SET left_at = 2 WHERE connection_id = 'con_gone';"#,
+            "INSERT INTO space_identities (space_id, connection_id, workspace_id, joined, ordinal, left_at) VALUES
+              ('sp_a', 'con_you', 'default', 1, 1, NULL), ('sp_c', 'con_gone', 'default', 1, 1, 2)",
         )?;
         c.execute_batch(r#"INSERT INTO spaces (id, workspace_id, system_id, connection_id, kind, external_id, name, status, created, updated) VALUES
            ('sp_d', 'default', 'feishu', NULL, 'group', 'oc_d', '先由旧连接看到', 'active', 1, 1);"#)?;
-        c.execute(r#"INSERT INTO space_identities (space_id, connection_id, workspace_id, joined) VALUES ('sp_d', ?1, 'default', 1);"#, params![con])?;
+        c.execute(r#"INSERT INTO space_identities (space_id, connection_id, workspace_id, joined, ordinal) VALUES ('sp_d', ?1, 'default', 1, 0);"#, params![con])?;
         Ok(())
     })
 }

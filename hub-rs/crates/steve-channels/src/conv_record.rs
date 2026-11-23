@@ -211,8 +211,6 @@ struct Turns {
     main_turn_of: HashMap<String, String>,
     /// sent channel message → Steve's conversation message it said
     said_by: HashMap<String, String>,
-    /// turn → the actual outbound answer linked by chan_out.message
-    answer_of: HashMap<String, String>,
     /// turn → the error its answer was
     failed: HashMap<String, String>,
     /// turns Steve said something to
@@ -248,9 +246,6 @@ impl Turns {
                     }
                 }
                 if let Some(o) = r.out {
-                    if let Some(origin) = &r.origin {
-                        self.answer_of.insert(origin.clone(), o.clone());
-                    }
                     self.said_by.insert(o, r.id.clone());
                 }
                 if r.error
@@ -330,12 +325,7 @@ fn received(
     let reaction = steve_store::channel_message_repo::reactions::get(r, &m.id)?;
     let main_turn = t.main_turn_of.get(&m.id);
     let turn = t.turn_of.get(&m.id).or(main_turn);
-    // The turn/outbound relation is persisted even when reactions fail or a draft is held. A
-    // reaction's answer id is only a legacy fallback; its lifecycle never establishes delivery.
-    let answer_id = turn
-        .and_then(|id| t.answer_of.get(id))
-        .cloned()
-        .or_else(|| reaction.as_ref().and_then(|r| r.answer_id.clone()));
+    let answer_id = steve_store::channel_message_repo::outbound::latest_answer(r, ws, &m.id)?;
     let answer = match &answer_id {
         Some(a) => out_state(r, ws, a)?,
         None => None,

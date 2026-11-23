@@ -1,7 +1,7 @@
 //! Item and party projections assembled inside one storage snapshot.
 
 use steve_store::base::links::Links;
-use steve_store::{ItemReads, Read, Result, Tx};
+use steve_store::{ItemReads, Read, Result, W};
 
 /// The item ↔ party roles of `links`.
 pub const ROLES: [&str; 5] = ["raised_by", "related", "waiting_on", "about", "attendee"];
@@ -54,11 +54,9 @@ pub fn item_links_to(
 }
 
 /// Adds a timeline line from a caller that still owns a legacy write transaction.
-pub fn timeline_add(tx: &Tx, item: &str, actor: &str, kind: &str, text: &str) -> Result<()> {
-    tx.write(|w| {
-        let row = steve_store::ItemReads(w)
-            .head(item)?
-            .ok_or_else(|| steve_store::StoreError::Rejected(format!("missing item {item}")))?;
-        steve_store::TimelineRows(w).add(&row.workspace_id, item, actor, kind, text)
-    })
+pub fn timeline_add(w: &mut W<'_>, item: &str, actor: &str, kind: &str, text: &str) -> Result<()> {
+    let row = steve_store::ItemReads(w)
+        .head(item)?
+        .ok_or_else(|| steve_store::StoreError::Rejected(format!("missing item {item}")))?;
+    steve_store::TimelineRows(w).add(&row.workspace_id, item, actor, kind, text)
 }

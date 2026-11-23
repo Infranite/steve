@@ -31,6 +31,18 @@ use steve_modules::vault::keystore::FileKeyStore;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
+/// The adapter's send as the outbox reaches it, addressed by a platform target.
+async fn send_to(
+    cx: &ConnCx,
+    to: &SendTarget,
+    c: &OutContent,
+) -> Result<String, steve_flow::AdapterError> {
+    send::send(cx, to, c)
+        .await
+        .map(|s| s.message_id)
+        .map_err(|e| connections::ProviderError::from(e).into())
+}
+
 const T: Duration = Duration::from_secs(10);
 
 struct H {
@@ -170,7 +182,7 @@ async fn group_reply_ats_the_sender_and_topics_reply_in_thread() {
         ext_msg_id: "om_botearlier00000000000000000001".into(),
         in_thread: false,
     };
-    let id = h.app.send(&cx, &to, &c).await.expect("sent");
+    let id = send_to(&cx, &to, &c).await.expect("sent");
     let sent = h.fake.sent();
     assert_eq!(sent.len(), 1);
     let s = &sent[0];
@@ -201,8 +213,7 @@ async fn group_reply_ats_the_sender_and_topics_reply_in_thread() {
             Some("omt_fake0000000001"),
         ),
     };
-    h.app
-        .send(&cx, &to, &OutContent::text("收到"))
+    send_to(&cx, &to, &OutContent::text("收到"))
         .await
         .expect("sent");
     let s = h.fake.sent().pop().expect("sent");
@@ -214,8 +225,7 @@ async fn group_reply_ats_the_sender_and_topics_reply_in_thread() {
     let to = SendTarget::Space {
         ext_id: ids::GROUP_CHAT.into(),
     };
-    h.app
-        .send(&cx, &to, &OutContent::text("字".repeat(5000)))
+    send_to(&cx, &to, &OutContent::text("字".repeat(5000)))
         .await
         .expect("sent");
     let s = h.fake.sent().pop().expect("sent");
@@ -227,8 +237,7 @@ async fn group_reply_ats_the_sender_and_topics_reply_in_thread() {
     let to = SendTarget::Space {
         ext_id: ids::ALICE.open_id.into(),
     };
-    h.app
-        .send(&cx, &to, &OutContent::text("单独和你说一下"))
+    send_to(&cx, &to, &OutContent::text("单独和你说一下"))
         .await
         .expect("sent");
     let s = h.fake.sent().pop().expect("sent");
@@ -267,9 +276,7 @@ async fn rate_limits_wait_and_retry_with_one_uuid() {
         ext_msg_id: r.message_id.clone(),
         in_thread: false,
     };
-    let e = h
-        .app
-        .send(&cx, &to, &OutContent::text("x"))
+    let e = send_to(&cx, &to, &OutContent::text("x"))
         .await
         .expect_err("limited");
     assert!(e.to_string().contains("限流"), "{e}");
@@ -284,9 +291,7 @@ async fn recall_deletes_the_bots_own_message() {
     let to = SendTarget::Space {
         ext_id: ids::GROUP_CHAT.into(),
     };
-    let id = h
-        .app
-        .send(&cx, &to, &OutContent::text("发错了"))
+    let id = send_to(&cx, &to, &OutContent::text("发错了"))
         .await
         .expect("sent");
     h.app.recall(&cx, &id).await.expect("recalled");

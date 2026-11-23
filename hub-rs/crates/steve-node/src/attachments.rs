@@ -2,8 +2,6 @@
 //! is fetched through `HubFiles` (checked against its hash), then put into
 //! `<workspace>/.steve/attachments` (ignored by git) and named in the prompt text; images that fit
 //! also go inline when the adapter takes them. The Hub never writes into the workspace.
-//!
-//! The text is the one the legacy runner wrote, so a session that moved to the Node reads the same.
 
 use std::fs;
 use std::io::Write as _;
@@ -191,7 +189,7 @@ pub(crate) fn publish_private(dst: &Path, bytes: &[u8]) -> Result<(), String> {
 
 /// Puts `files` into `<cwd>/.steve/attachments` and says where they are. Blocking.
 ///
-/// The directory gets a `.gitignore` of `*` (the same one the legacy runner wrote), so nothing
+/// The directory gets a `.gitignore` of `*`, so nothing
 /// placed here is committed. A file already there with the right bytes is left alone; one that is
 /// not (cut short, changed, a link) is replaced.
 pub(crate) fn place(
@@ -247,7 +245,7 @@ pub(crate) fn place(
 }
 
 /// The note for attachments the Hub could not hand over (gone or changed there): the turn goes on
-/// without them and the agent is told, as the legacy runner did.
+/// without them and the agent is told.
 pub(crate) fn missing_note(names: &[String]) -> String {
     if names.is_empty() {
         return String::new();
@@ -351,9 +349,9 @@ mod tests {
         assert_eq!(kb(1_310_720), "1.3 MB");
     }
 
-    /// The same text, files and ignore file the legacy runner made (steve-acp attachments.rs).
+    /// The text, files and ignore file a prompt's attachments make.
     #[test]
-    fn placed_like_the_legacy_runner() {
+    fn attachments_are_placed_and_named() {
         let t = tempfile::tempdir().unwrap();
         let cwd = t.path().join("work");
         fs::create_dir_all(&cwd).unwrap();

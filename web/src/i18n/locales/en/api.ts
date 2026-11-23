@@ -161,10 +161,6 @@ export default {
     event: "Event",
     summary: "Summary",
   },
-  record: {
-    longTerm: "Long-term memory",
-    knowledge: "Knowledge entry",
-  },
   sourceKind: {
     notes: "Notes",
     files: "Files",

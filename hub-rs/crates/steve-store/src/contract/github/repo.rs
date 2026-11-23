@@ -920,7 +920,7 @@ pub fn deliveries(
                     .or(Expr::col("event").is_in(["pull_request", "issues"])),
             )
             .order_by("received", Order::Desc)
-            .order_by_expr(dialect.delivery_order("gh_deliveries"), Order::Desc)
+            .order_by_expr(dialect.insertion_order(Some("gh_deliveries")), Order::Desc)
             .limit(limit as u64),
         delivery_row,
     )

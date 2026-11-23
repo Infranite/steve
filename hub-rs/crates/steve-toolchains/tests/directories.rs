@@ -52,13 +52,6 @@ detect = ["other.marker"]
             ("first-alphabetically", root.path().join("a").as_path()),
         ]
     );
-    assert_eq!(
-        defs.detect(root.path())
-            .iter()
-            .map(|t| t.id.as_str())
-            .collect::<Vec<_>>(),
-        ["second-alphabetically", "first-alphabetically"]
-    );
 }
 
 #[cfg(unix)]
@@ -90,27 +83,7 @@ fn discovery_ignores_linked_root_children_and_markers_but_keeps_directory_marker
 
 #[cfg(unix)]
 #[test]
-fn detect_retains_linked_root_and_marker_compatibility() {
-    use std::os::unix::fs::symlink;
-
-    let root = tempfile::tempdir().unwrap();
-    let defs = custom("");
-    let project = root.path().join("real");
-    let linked = root.path().join("linked");
-    std::fs::create_dir(&project).unwrap();
-    std::fs::write(project.join("project.xyz"), "").unwrap();
-    symlink(&project, &linked).unwrap();
-    assert_eq!(defs.detect(&linked).len(), 1);
-    assert!(defs.discover(&linked).is_empty());
-    std::fs::remove_file(project.join("project.xyz")).unwrap();
-    symlink(root.path().join("missing"), project.join("project.xyz")).unwrap();
-    assert_eq!(defs.detect(&project).len(), 1);
-    assert!(defs.discover(&project).is_empty());
-}
-
-#[cfg(unix)]
-#[test]
-fn detect_retains_lossy_non_utf8_marker_compatibility() {
+fn discovery_ignores_non_utf8_markers() {
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
 
@@ -121,7 +94,6 @@ fn detect_retains_lossy_non_utf8_marker_compatibility() {
         eprintln!("filesystem does not support this non-UTF-8 fixture: {error}");
         return;
     }
-    assert_eq!(defs.detect(root.path()).len(), 1);
     assert!(defs.discover(root.path()).is_empty());
 }
 
@@ -156,13 +128,12 @@ fn equals_are_path_characters_and_environment_semantics_are_unchanged() {
     );
     let tc = &defs.all()[0];
     let expected = PathBuf::from("/node/cache/person/陌生=工具/dir=with=value");
-    assert_eq!(tc.dirs_to_make(&places()), std::slice::from_ref(&expected));
     assert_eq!(
         tc.directory_plan(Path::new("/work"), &places())[0].path,
         Ok(expected.clone())
     );
     assert_eq!(
-        tc.env(&places(), &Default::default()),
+        tc.env(&places(), &Default::default()).unwrap(),
         [("STRANGE_CACHE".into(), expected.display().to_string())]
     );
 }
@@ -181,8 +152,11 @@ fn placeholders_are_expanded_only_in_templates_never_in_inserted_places_or_ids()
     };
     assert_eq!(tc.validate_places(&at), Ok(()));
     let plan = tc.directory_plan(Path::new("/work"), &at);
-    let env: std::collections::BTreeMap<_, _> =
-        tc.env(&at, &Default::default()).into_iter().collect();
+    let env: std::collections::BTreeMap<_, _> = tc
+        .env(&at, &Default::default())
+        .unwrap()
+        .into_iter()
+        .collect();
     let expected_item = at.item.join(&tc.id).join("dir=with=value");
     let expected_person = at.person.join(&tc.id).join("dir=with=value");
     assert_eq!(plan[0].path, Ok(expected_item.clone()));
@@ -284,7 +258,6 @@ fn malformed_and_unknown_declarations_are_retained_as_errors() {
         let plan = defs.all()[0].directory_plan(Path::new("/work"), &places());
         assert_eq!(plan.len(), 1, "{definition}");
         assert_eq!(plan[0].path, Err(error), "{definition}");
-        assert!(defs.all()[0].dirs_to_make(&places()).is_empty());
     }
 }
 
@@ -362,7 +335,7 @@ fn empty_directory_plans_still_require_valid_ids_and_places() {
 
 #[cfg(unix)]
 #[test]
-fn strict_paths_reject_non_utf8_while_legacy_env_documents_its_lossy_conversion() {
+fn directory_paths_and_environment_reject_non_utf8() {
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
 
@@ -389,12 +362,10 @@ fn strict_paths_reject_non_utf8_while_legacy_env_documents_its_lossy_conversion(
         item: invalid.clone(),
         ..places()
     };
-    let legacy = tc.env(&at, &Default::default());
     assert_eq!(
-        legacy[0].1,
-        invalid.join(&tc.id).join("target").to_string_lossy()
+        tc.env(&at, &Default::default()),
+        Err(DirectoryError::NonUtf8Path)
     );
-    assert!(legacy[0].1.contains('\u{fffd}'));
     let empty = custom("");
     assert_eq!(
         empty.all()[0].validate_places(&at),

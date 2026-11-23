@@ -1,10 +1,10 @@
 //! Decisions opened by modules. A module opens one with
-//! `steve_store::base::decisions::open(tx, NewDecision)` and registers a [`DecisionHandler`] for its
+//! `DecisionRows(w).open(&NewDecision)` and registers a [`DecisionHandler`] for its
 //! `subject_type`; `POST /api/decisions/:id` reaches [`dispatch`] first.
 
 use serde_json::{Value, json};
 use steve_store::base::{CONFIRM_OPTIONS, DecisionKind};
-use steve_store::{Decision, DecisionRows, NewDecision, Tx};
+use steve_store::{Decision, DecisionRows, NewDecision, W};
 
 use crate::{ApiError, ApiResult, Caller, Modules};
 
@@ -23,11 +23,11 @@ pub trait DecisionHandler: Send + Sync {
     /// Acts on the answer inside the transaction that settles the decision; returns the `result` JSON
     /// stored on it (default `{"choice": …}` plus `text` when given). An error rolls everything back and
     /// leaves the decision open.
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value>;
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value>;
 
     /// Called in `undoDecision`'s transaction before a resolved decision is reopened: undo this
     /// module's side of the answer, or refuse with an error (the undo is rolled back). Default: nothing.
-    fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
+    fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
         let _ = (tx, d);
         Ok(())
     }
@@ -47,7 +47,7 @@ pub trait DecisionHandler: Send + Sync {
     }
 
     /// Called when a job expires the decision (e.g. 30-day candidates); default does nothing.
-    fn expire(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
+    fn expire(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
         let _ = (tx, d);
         Ok(())
     }
@@ -120,7 +120,7 @@ pub fn dispatch(
             choice,
             text,
         };
-        let result = handler.resolve(&w.legacy(), &cx, &d)?;
+        let result = handler.resolve(w, &cx, &d)?;
         DecisionRows(w).settle(id, &result, "resolved", &undo_marker(&d.subject_type))?;
         w.audit(
             &caller.ws,
@@ -162,7 +162,7 @@ pub fn undo(
             .get(id)?
             .filter(|d| undoable(d))
             .ok_or_else(|| ApiError::rule(steve_i18n::t!("modules.decision.not_undoable")))?;
-        handler.before_undo(&w.legacy(), &d)?;
+        handler.before_undo(w, &d)?;
         let metadata = handler.reopen_result(&d);
         DecisionRows(w).reopen(&d, &metadata)?;
         w.audit(&d.workspace_id, actor, "decision.undo", id, &json!({}))?;
@@ -178,7 +178,7 @@ pub fn expire(m: &Modules, id: &str) -> ApiResult<bool> {
             return Ok(false);
         };
         if let Some(h) = m.registry.handlers.get(&d.subject_type) {
-            h.expire(&w.legacy(), &d)?;
+            h.expire(w, &d)?;
         }
         Ok(DecisionRows(w).settle(id, &json!({ "expired": true }), "expired", &Value::Null)?)
     })

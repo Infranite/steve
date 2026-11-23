@@ -5,7 +5,7 @@
 use serde_json::{Value, json};
 use steve_modules::ApiResult;
 use steve_modules::outbound::YOLO_ACTOR;
-use steve_store::base::audit;
+use steve_store::audit_repo::record as audit;
 use steve_store::yolo::{self as repo, ActionRow, ITEM, NewAction, ScopeChange};
 
 use super::Yolo;
@@ -133,27 +133,27 @@ impl Yolo {
     pub fn record(&self, a: &NewAction) -> ApiResult<ActionRow> {
         let now = self.now();
         self.store()
-            .transaction(|tx| repo::action_add(tx, a, now).map_err(Into::into))
+            .write(|tx| repo::action_add(tx, a, now).map_err(Into::into))
     }
 
     /// Moves a scheduled action to `due_at` (still scheduled); false when it was no longer scheduled.
     pub fn postpone(&self, id: &str, due_at: i64, reason: &str) -> ApiResult<bool> {
         self.store()
-            .transaction(|tx| repo::action_postpone(tx, id, due_at, reason).map_err(Into::into))
+            .write(|tx| repo::action_postpone(tx, id, due_at, reason).map_err(Into::into))
     }
 
     /// Settles a scheduled action; false when it was no longer scheduled.
     pub fn finish(&self, id: &str, outcome: &str, reason: Option<&str>) -> ApiResult<bool> {
         let now = self.now();
         self.store()
-            .transaction(|tx| repo::action_finish(tx, id, outcome, reason, now).map_err(Into::into))
+            .write(|tx| repo::action_finish(tx, id, outcome, reason, now).map_err(Into::into))
     }
 
     /// Takes one item out of YOLO (the item layer becomes `off` with `reason`), with audit, revision
     /// and a notice. Nothing happens when it is already off.
     pub fn item_off(&self, ws: &str, item: &str, title: &str, reason: &str) -> ApiResult<bool> {
         let now = self.now();
-        let changed = self.store().transaction(|tx| {
+        let changed = self.store().write(|tx| {
             let (before, after) = repo::scope_put(
                 tx,
                 ws,

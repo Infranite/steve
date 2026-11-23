@@ -112,7 +112,7 @@ pub fn builtin_catalog() -> Vec<ToolDescriptor> {
     super::tool_families::catalog(raw_builtin_catalog())
 }
 
-/// Original operation contracts retained for compatibility calls and family dispatch.
+/// Every operation's own contract, as the families dispatch to them.
 pub(super) fn raw_builtin_catalog() -> Vec<ToolDescriptor> {
     let mut out: Vec<ToolDescriptor> = steve_mcp::tools::list()
         .into_iter()
@@ -367,11 +367,13 @@ impl ToolService {
         args: Value,
         checked: bool,
     ) -> Result<String, String> {
-        let resolved = if super::tool_families::aliases(name).is_empty() {
-            None
-        } else {
-            super::tool_families::resolve(name, &args, &raw_builtin_catalog())?
-        };
+        // A family's operation is reached through the family only.
+        if super::tool_families::canonical(name) != name {
+            return Err(format!(
+                "MCP error -32602: Tool {name} not found. Find tools with {SEARCH}."
+            ));
+        }
+        let resolved = super::tool_families::resolve(name, &args, &raw_builtin_catalog())?;
         let (target, forwarded) = resolved
             .as_ref()
             .map(|(n, a)| (*n, a.clone()))
@@ -437,12 +439,7 @@ impl ToolService {
                 _ => Err(format!("MCP error -32602: Tool {name} not found")),
             }
         };
-        self.count(
-            &s,
-            vec![super::tool_families::canonical(name).to_string()],
-            0,
-            1,
-        );
+        self.count(&s, vec![name.to_string()], 0, 1);
         out
     }
 
@@ -538,7 +535,7 @@ impl steve_modules::context::PromptContext for CatalogContext {
         item: &steve_store::Item,
     ) -> Option<String> {
         store
-            .read::<_, steve_store::StoreError>(|c| Ok(self.session_summary(c, item)))
+            .read(|c| Ok::<_, steve_store::StoreError>(self.session_summary(c, item)))
             .ok()
             .flatten()
     }
@@ -597,7 +594,7 @@ impl CatalogContext {
             shown.push((x.name.clone(), names));
         }
         for p in pins.iter().filter(|p| p.kind == "tool") {
-            listed.push(super::tool_families::canonical(&p.target).to_string());
+            listed.push(p.target.clone());
         }
         for p in pins.iter().filter(|p| p.kind == "a2a") {
             if let Ok(Some(a)) = steve_store::caps::a2a::Agents(c).get(&p.target) {

@@ -8,7 +8,7 @@
 use serde::Serialize;
 use serde_json::{Value, json};
 use steve_store::vault_items::{FieldRow, ItemFilter, ItemRow, VaultItems, VaultRow};
-use steve_store::{Accounts, GrantRows, ItemReads, Read, Tx, W, now, uid};
+use steve_store::{Accounts, GrantRows, ItemReads, Read, W, now, uid};
 use zeroize::Zeroizing;
 
 use super::templates::{
@@ -826,11 +826,7 @@ impl Vault {
     }
 
     /// Writes a [`Self::prepare_credential`] item in `tx`; returns its id.
-    pub(crate) fn insert_prepared_in(
-        &self,
-        w: &mut W<'_>,
-        p: &PreparedItem,
-    ) -> VaultResult<String> {
+    pub(crate) fn insert_prepared(&self, w: &mut W<'_>, p: &PreparedItem) -> VaultResult<String> {
         write_prepared(w, p)?;
         Ok(p.item.id.clone())
     }
@@ -899,16 +895,6 @@ impl Vault {
     /// Disconnecting: destroys a credential item like `DELETE /vault/items/:id`, without the
     /// visibility check (system items are never visible). Missing or already deleted is fine.
     pub fn destroy_item(
-        &self,
-        tx: &Tx,
-        ws: &str,
-        actor: &str,
-        item_id: &str,
-    ) -> VaultResult<usize> {
-        tx.write(|w| self.destroy_item_in(w, ws, actor, item_id))
-    }
-
-    pub(crate) fn destroy_item_in(
         &self,
         w: &mut W<'_>,
         ws: &str,

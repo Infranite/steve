@@ -571,10 +571,10 @@ impl Capabilities {
             }
             if !keep_old {
                 if let Some(item) = &old.credential_item {
-                    self.vault.destroy_item_in(tx, ws, me, item)?;
+                    self.vault.destroy_item(tx, ws, me, item)?;
                 }
                 a.credential_item = match &prepared {
-                    Some(p) => Some(self.vault.insert_prepared_in(tx, p)?),
+                    Some(p) => Some(self.vault.insert_prepared(tx, p)?),
                     None => None,
                 };
             }
@@ -606,7 +606,7 @@ impl Capabilities {
         self.vault.store().write(|tx| {
             let old = agent_of(tx, ws, id)?;
             if let Some(item) = &old.credential_item {
-                self.vault.destroy_item_in(tx, ws, me, item)?;
+                self.vault.destroy_item(tx, ws, me, item)?;
             }
             super::publish_users(tx, "a2a", id)?;
             Agents(tx).delete(id)?;

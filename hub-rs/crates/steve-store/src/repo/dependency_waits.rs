@@ -103,7 +103,8 @@ impl DependencyWaits<'_> {
         resume: &str,
         reason: &str,
     ) -> Result<bool> {
-        self.0.transaction(|tx| {
+        self.0.write(|w| {
+            let tx = w.conn;
             let i = one(tx, "SELECT * FROM items WHERE id=?", [item], Item::from_row)?
                 .ok_or_else(|| refuse("没有这个事项"))?;
             if i.phase != "active" || i.archived {
@@ -178,13 +179,13 @@ impl DependencyWaits<'_> {
                         resume=excluded.resume,reason=excluded.reason,state='waiting',updated=excluded.updated",
                        params![item,i.cycle,session,resume,reason,at,at])?;
             for id in all(tx, "SELECT id FROM decisions WHERE item_id=? AND status='open' AND kind IN ('ask','fail')", [item], |r| r.get::<_,String>(0))? {
-                crate::decision_resolve_in(tx,&id,&json!({"superseded":"已登记前置等待"}),"expired")?;
+                crate::DecisionRows(w).settle(&id, &json!({"superseded":"已登记前置等待"}), "expired", &serde_json::Value::Null)?;
             }
             let text = format!("等待前置事项：{reason}");
             tx.execute("UPDATE items SET status='block',now=?,updated=? WHERE id=?", params![text,at,item])?;
             super::items::status_mark(tx,&i.workspace_id,item,at,Some(&i.status),"block")?;
-            super::items::timeline_on(tx,item,"steve","sys",&format!("登记前置等待（{resume}）：{reason}"),Some(session),&[])?;
-            tx.publish(steve_types::DomainEvent::from(
+            crate::item_repo::store_timeline(w,item,"steve","sys",&format!("登记前置等待（{resume}）：{reason}"),Some(session),None,crate::now())?;
+            w.emit(steve_types::DomainEvent::from(
                 steve_types::WorkEvent::Item {
                     ws: i.workspace_id.clone().into(),
                     id: item.into(),
@@ -197,7 +198,8 @@ impl DependencyWaits<'_> {
     /// Persist both the wake-up and the status change. `queued` is claimed by the existing runtime,
     /// whose Node command ledger already owns retries and attempt identity.
     pub fn ready(&self, item: &str, automatic: bool, session: &str, text: &str) -> Result<bool> {
-        self.0.transaction(|tx| {
+        self.0.write(|w| {
+            let tx = w.conn;
             let Some(wait) = get(tx,item)?.filter(|w| w.state=="waiting") else { return Ok(false); };
             let eligible: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM items i WHERE i.id=? AND i.status='block' AND i.phase='active'
@@ -222,7 +224,7 @@ impl DependencyWaits<'_> {
                 if !live { return Err(refuse("当前会话不可续跑")); }
                 tx.execute("INSERT INTO queued(id,session_id,text,via,created,files) VALUES(?,?,?,'steve',?,'[]')",
                            params![crate::uid("q"),session,text,at])?;
-                tx.publish(steve_types::DomainEvent::from(
+                w.emit(steve_types::DomainEvent::from(
                     steve_types::WorkEvent::Session {
                         ws: i.workspace_id.clone().into(),
                         id: session.into(),
@@ -233,7 +235,7 @@ impl DependencyWaits<'_> {
                     },
                 ));
             } else {
-                crate::decision_create_in(tx,&NewDecision {
+                crate::DecisionRows(w).open(&NewDecision {
                     workspace_id:i.workspace_id.clone(),kind:"propose".into(),subject_type:"item".into(),
                     subject_id:item.into(),item_id:Some(item.into()),question:"前置事项都已完成，现在开始？".into(),
                     options:Some(vec!["yes".into(),"no".into()]),requested_by:"steve".into(),..Default::default()
@@ -243,8 +245,8 @@ impl DependencyWaits<'_> {
                        params![state,at,item,wait.cycle])?;
             tx.execute("UPDATE items SET status=?,now=?,updated=? WHERE id=?",params![status,note,at,item])?;
             super::items::status_mark(tx,&i.workspace_id,item,at,Some("block"),status)?;
-            super::items::timeline_on(tx,item,"steve","sys",note,None,&[])?;
-            tx.publish(steve_types::DomainEvent::from(
+            crate::item_repo::store_timeline(w,item,"steve","sys",note,None,None,crate::now())?;
+            w.emit(steve_types::DomainEvent::from(
                 steve_types::WorkEvent::Item {
                     ws: i.workspace_id.clone().into(),
                     id: item.into(),

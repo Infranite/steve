@@ -92,7 +92,7 @@ function Figures({ s, turns, tot }: { s: Sess; turns: Turn[]; tot?: SessionTotal
   const worked = workedMs(turns, now), done = turns.filter((x) => x.end)
   const avg = done.length ? done.reduce((n, x) => n + (x.end! - x.start), 0) / done.length : 0
   const end = run ? now : (s.at ?? now)
-  const est = u && (u.est > 0 || (u.coverage?.state === "complete" && u.total === 0)) ? u.est : null, reported = u && u.reported > 0 ? u.reported : null
+  const est = u && (u.est > 0 || (u.coverage.state === "complete" && u.total === 0)) ? u.est : null, reported = u && u.reported > 0 ? u.reported : null
   const pct = Math.min(100, Math.max(0, s.ctx))
   return (
     <Rows>

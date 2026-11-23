@@ -271,6 +271,9 @@ pub fn seed_cleanup_spaces(
                ('{p}sp_a', 'default', 'feishu', {conn}, 'group', '{p}oc_a', '客户群', 'active', 1, 1, '{acc}'),
                ('{p}sp_b', 'default', 'feishu', {conn}, 'group', '{p}oc_b', '项目群', 'active', 1, 1, '{acc}'),
                ('{p}sp_c', 'default', 'feishu', {conn}, 'group', '{p}oc_c', '空群', 'active', 1, 1, '{acc}');
+             INSERT INTO space_identities (space_id, connection_id, workspace_id, joined, ordinal)
+               SELECT id, connection_id, workspace_id, created, 0 FROM spaces
+               WHERE id IN ('{p}sp_a', '{p}sp_b', '{p}sp_c') AND connection_id IS NOT NULL;
              INSERT INTO space_members (workspace_id, space_id, account_id, joined) VALUES
                ('default', '{p}sp_a', '{p}a_ann', 1), ('default', '{p}sp_a', '{p}a_bob', 1), ('default', '{p}sp_a', '{p}a_cat', 1),
                ('default', '{p}sp_b', '{p}a_cat', 1);
@@ -306,7 +309,8 @@ pub fn attention_preferences(store: &Store) -> Result<()> {
         c.execute_batch("INSERT INTO space_prefs(space_id,workspace_id,attention,updated) VALUES('dm','default','quiet',1),('blocked','default','blocked',1);
           INSERT INTO space_settings(space_id,workspace_id,muted,disclosure,updated) VALUES('dm','default',1,'{}',1);
           INSERT INTO conversation_preferences(workspace_id,user_id,space_id,closed) VALUES('default','usr_dev','closed',1);
-          UPDATE spaces SET status='left' WHERE id='left';")?;
+          UPDATE spaces SET status='left' WHERE id='left';
+          UPDATE space_identities SET left_at=1 WHERE space_id='left';")?;
         Ok(())
     })
 }
@@ -404,8 +408,10 @@ pub fn connect_reply_fixtures(store: &Store, ws: &str, user: &str) -> Result<()>
             c.execute("INSERT INTO connections (id, workspace_id, account_id, adapter, auth, created_by, created, updated)
                 VALUES ('test-channel', ?1, 'shared', 'feishu_app', 'none', ?2, 1, 1)", params![ws, user])?;
             c.execute(
-                "UPDATE spaces SET connection_id = 'test-channel' WHERE id LIKE 'replied-%'",
-                [],
+                "INSERT INTO space_identities (space_id, connection_id, workspace_id, joined, ordinal)
+                 SELECT id, 'test-channel', workspace_id, created, 0 FROM spaces
+                 WHERE workspace_id = ?1",
+                [ws],
             )?;
             Ok(())
         })
@@ -444,7 +450,10 @@ pub fn enable_fixture_collaboration(store: &Store, space: &str) -> Result<()> {
 pub fn seed_attention_space(store: &Store, id: &str, kind: &str, connection: &str) -> Result<()> {
     project_write(store, |c| {
         c.execute("INSERT INTO spaces(id,workspace_id,system_id,connection_id,kind,external_id,name,created,updated) VALUES(?1,'default','feishu',?2,?3,?1,?1,1,1)",params![id,connection,kind])?;
-        c.execute("INSERT INTO chan_messages(id,workspace_id,space_id,direction,text,created) VALUES(?1,'default',?2,'in','Private body',100)",params![format!("message_{id}"),id])?;
+        c.execute("INSERT INTO space_identities(space_id,connection_id,workspace_id,joined,ordinal,owner_user)
+          SELECT ?1,cn.id,cn.workspace_id,1,0,p.user_id FROM connections cn
+          JOIN accounts a ON a.id=cn.account_id JOIN parties p ON p.id=a.party_id WHERE cn.id=?2",params![id,connection])?;
+        c.execute("INSERT INTO chan_messages(id,workspace_id,space_id,direction,text,created,seen_by) VALUES(?1,'default',?2,'in','Private body',100,1)",params![format!("message_{id}"),id])?;
         Ok(())
     })
 }

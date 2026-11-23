@@ -394,9 +394,18 @@ impl Upgrades {
             error = error.as_deref().unwrap_or(""),
             "node upgrade"
         );
-        self.phase(op, &phase, error).await;
+        self.finish(op, &node, &phase, error).await;
+    }
+
+    async fn finish(&self, op: &str, node: &str, phase: &str, error: Option<String>) {
+        // Once the switch succeeds, the pre-upgrade observation is obsolete even if the
+        // follow-up probe cannot reach the Node. Publish the terminal phase after refreshing.
+        if phase == "succeeded" {
+            self.seen.lock().unwrap().remove(node);
+        }
+        self.look(node).await;
         self.switch_now.lock().unwrap().remove(op);
-        self.look(&node).await;
+        self.phase(op, phase, error).await;
     }
 
     /// The upgrade's steps; how it ended.
@@ -646,7 +655,7 @@ impl Upgrades {
                 ),
             },
         };
-        self.phase(&op, &phase, error).await;
+        self.finish(&op, &row.node_id, &phase, error).await;
     }
 
     /// One pass of the `auto` policy: every linked Node that may be upgraded on its own and runs
@@ -735,8 +744,8 @@ impl Upgrades {
     }
 }
 
-/// A Hub upgraded through a legacy runtime archive has no CLI in its release. In that case use
-/// the same verified installer source as for a different platform, never an older release's CLI.
+/// A Hub installed from a runtime archive has no CLI in its release. In that case use the same
+/// verified installer source as for a different platform, never an older release's CLI.
 /// The future is lazy: a complete local release needs neither network nor an installer mirror.
 async fn upgrade_archive(
     build: &BuildIdentity,
@@ -752,7 +761,7 @@ async fn upgrade_archive(
 }
 
 /// A Node bundle of the Hub's own release: the Node and maintenance CLI switch and roll back
-/// together. Keep the legacy runtime archive's allowlist unchanged.
+/// together. The runtime archive's allowlist is not changed by this.
 fn own_bundle(release: &Path, build: &BuildIdentity) -> anyhow::Result<Vec<u8>> {
     use anyhow::Context;
     let mut manifest: Value =

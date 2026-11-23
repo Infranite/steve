@@ -18,8 +18,8 @@ use steve_modules::{ApiResult, Caller};
 use steve_store::{Store, uid};
 
 use crate::channel::{
-    ChannelAdapter, ChannelFeatures, HandleRef, InboundMessage, MemberInfo, OutContent,
-    ReactionKind, SendTarget, SpaceInfo, SpaceKind,
+    ActTarget, ChannelAdapter, ChannelFeatures, HandleRef, InboundMessage, MemberInfo, OutContent,
+    ReactionKind, SendKey, SendTarget, Sent, SpaceInfo, SpaceKind,
 };
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -277,12 +277,14 @@ impl ChannelAdapter for FakeChannel {
         Ok(self.info(ext_id)?.1)
     }
 
-    async fn send(
+    async fn send_message(
         &self,
         _: &ConnCx,
-        to: &SendTarget,
+        to: &ActTarget,
         content: &OutContent,
-    ) -> Result<String, AdapterError> {
+        _key: &SendKey,
+    ) -> Result<Sent, AdapterError> {
+        let to = &crate::channel::send_target(to);
         lock(&self.send_calls).push((to.clone(), content.clone()));
         let failed = lock(&self.fail_send).clone();
         let blocked = lock(&self.block_send).clone();
@@ -315,14 +317,14 @@ impl ChannelAdapter for FakeChannel {
         if let Some(u) = &content.uuid
             && let Some((_, _, id)) = sent.iter().find(|(_, c, _)| c.uuid.as_ref() == Some(u))
         {
-            return Ok(id.clone());
+            return Ok(Sent::id(id.clone()));
         }
         let id = format!("fm_{}", sent.len() + 1);
         sent.push((to.clone(), content.clone(), id.clone()));
         if std::mem::take(&mut *lock(&self.lose_answer)) {
             return Err(ProviderError::Transient("没有收到回应".into()).into());
         }
-        Ok(id)
+        Ok(Sent::id(id))
     }
 
     async fn recall(&self, _: &ConnCx, ext_msg_id: &str) -> Result<(), AdapterError> {

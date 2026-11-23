@@ -158,8 +158,7 @@ impl GitHub {
         let (ws2, item) = (ws.to_string(), s.item.clone());
         store
             .write(move |tx| {
-                steve_store::base::links::add(
-                    &tx.legacy(),
+                steve_store::base::links::Links(tx).add(
                     &ws2,
                     &steve_store::base::links::NewLink::new(
                         steve_store::base::ObjRef::new("item", &item),

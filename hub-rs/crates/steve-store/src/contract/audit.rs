@@ -1,9 +1,11 @@
 //! Audit entries and revision history written with their domain changes.
 
-use sea_query::{Expr, ExprTrait, Order, Query};
+use sea_query::{Expr, ExprTrait, InsertStatement, Order, Query};
+use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::{Read, Result, Revisions, W};
+use crate::repo::to_json;
+use crate::{Read, Result, W, now};
 
 pub fn record(
     w: &mut W<'_>,
@@ -13,7 +15,29 @@ pub fn record(
     target: &str,
     detail: &Value,
 ) -> Result<()> {
-    w.audit(ws, actor, action, target, detail)
+    w.exec(&record_statement(ws, actor, action, target, detail)?)?;
+    Ok(())
+}
+
+pub(crate) fn record_statement(
+    ws: &str,
+    actor: &str,
+    action: &str,
+    target: &str,
+    detail: &Value,
+) -> Result<InsertStatement> {
+    Ok(Query::insert()
+        .into_table("audit")
+        .columns(["workspace_id", "ts", "actor", "action", "target", "detail"])
+        .values_panic([
+            ws.into(),
+            now().into(),
+            actor.into(),
+            action.into(),
+            target.into(),
+            to_json(detail)?.into(),
+        ])
+        .take())
 }
 
 /// Record the version assigned by the owner of the revised object in the same write.
@@ -28,14 +52,40 @@ pub fn revise(
     after: &Value,
     author: &str,
 ) -> Result<()> {
-    Revisions(w).append(
-        ws,
-        kind,
-        id,
-        version,
-        &json!({ "before": before, "after": after }),
-        author,
-    )
+    let patch = json!({ "before": before, "after": after });
+    w.exec(&revision_statement(ws, kind, id, version, &patch, author)?)?;
+    Ok(())
+}
+
+pub(crate) fn revision_statement(
+    ws: &str,
+    kind: &str,
+    id: &str,
+    version: i64,
+    patch: &impl Serialize,
+    author: &str,
+) -> Result<InsertStatement> {
+    Ok(Query::insert()
+        .into_table("revisions")
+        .columns([
+            "workspace_id",
+            "object_type",
+            "object_id",
+            "version",
+            "patch",
+            "author",
+            "created",
+        ])
+        .values_panic([
+            ws.into(),
+            kind.into(),
+            id.into(),
+            version.into(),
+            to_json(patch)?.into(),
+            author.into(),
+            now().into(),
+        ])
+        .take())
 }
 
 /// Provider explanation captured by the latest failed send of this message.

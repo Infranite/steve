@@ -1,4 +1,4 @@
-use crate::{Read, Result};
+use crate::{Read, Result, W};
 use sea_query::{Expr, ExprTrait, JoinType, Order, Query};
 
 /// A bot's display name.
@@ -54,6 +54,34 @@ pub fn bot_enabled(c: &mut impl Read, id: &str) -> Result<Option<bool>> {
             .and_where(Expr::col("id").eq(id)),
         |r| r.get(0),
     )
+}
+
+/// Soft-delete a bot. The main bot cannot be removed.
+pub fn remove(w: &mut W<'_>, id: &str) -> Result<()> {
+    use crate::contract::Q;
+    w.exec(
+        Query::update()
+            .table("bots")
+            .value("deleted", 1_i64)
+            .value("enabled", 0_i64)
+            .value("updated", crate::now())
+            .and_where(Expr::col("id").eq(id))
+            .and_where(Expr::col("main").eq(0_i64)),
+    )?;
+    let workspace: Option<String> = w.one(
+        Query::select()
+            .column("workspace_id")
+            .from("bots")
+            .and_where(Expr::col("id").eq(id)),
+        |row| row.get(0),
+    )?;
+    if let Some(ws) = workspace {
+        w.emit(steve_types::ConfigEvent::Bot {
+            ws: ws.into(),
+            id: id.into(),
+        });
+    }
+    Ok(())
 }
 
 pub fn named_bots(c: &mut impl Read, ws: &str, name: &str) -> Result<Vec<String>> {
@@ -172,4 +200,57 @@ pub(crate) fn model(c: &mut impl Read, id: &str) -> Result<Option<String>> {
         |r| r.get(0),
     )?
     .flatten())
+}
+
+pub fn fill_missing_harness(w: &mut W<'_>, id: &str, harness: &str) -> Result<()> {
+    w.exec(
+        Query::update()
+            .table("bots")
+            .value("harness", harness)
+            .and_where(Expr::col("id").eq(id))
+            .and_where(Expr::col("harness").eq("")),
+    )?;
+    Ok(())
+}
+
+pub struct SeededHarness {
+    pub harness: String,
+    pub workspace: String,
+}
+
+pub fn pristine_harness(c: &mut impl Read, id: &str) -> Result<Option<SeededHarness>> {
+    c.one(
+        Query::select()
+            .columns(["harness", "workspace_id"])
+            .from("bots")
+            .and_where(Expr::col("id").eq(id))
+            .and_where(Expr::col("deleted").eq(0_i64))
+            .and_where(Expr::col("revision").eq(1_i64))
+            .and_where(Expr::col("model").is_null())
+            .and_where(Expr::col("reasoning_effort").is_null()),
+        |r| {
+            Ok(SeededHarness {
+                harness: r.get(0)?,
+                workspace: r.get(1)?,
+            })
+        },
+    )
+}
+
+pub fn move_pristine_harness(
+    w: &mut W<'_>,
+    id: &str,
+    harness: &str,
+    permission: &str,
+    at: i64,
+) -> Result<bool> {
+    Ok(w.exec(
+        Query::update()
+            .table("bots")
+            .value("harness", harness)
+            .value("perm_mode", permission)
+            .value("updated", at)
+            .and_where(Expr::col("id").eq(id))
+            .and_where(Expr::col("revision").eq(1_i64)),
+    )? > 0)
 }

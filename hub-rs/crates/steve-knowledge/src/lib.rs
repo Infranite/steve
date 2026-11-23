@@ -18,7 +18,6 @@ pub mod index;
 pub mod notes;
 pub mod openviking;
 pub mod port;
-pub mod repo;
 pub mod retrieve;
 pub mod service;
 pub mod sources;
