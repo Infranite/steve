@@ -1,5 +1,5 @@
 //! The “新群” decision: `{kind:"ask", subject_type:"space",
-//! options:["open","mute","quiet","block"]}` (older ones have only the first two), opened when a bot
+//! options:["open","mute","quiet","block"]}`, opened when a bot
 //! account finds itself in a new group.
 //!
 //! - `open` (去设置): the space counts as seen (`configured=1`); the result carries `space_id` so the
@@ -141,17 +141,16 @@ impl DecisionHandler for NewSpaceDecision {
             return Ok(());
         };
         let w = &d.result["was"];
-        let (Some(muted), Some(configured)) = (w["muted"].as_bool(), w["configured"].as_bool())
-        else {
+        let (Some(muted), Some(configured), Some(attention)) = (
+            w["muted"].as_bool(),
+            w["configured"].as_bool(),
+            w["attention"].as_str().and_then(Attention::parse),
+        ) else {
             return Ok(());
         };
         let was = Flags {
             muted,
-            // answers recorded before 019 carry no attention
-            attention: w["attention"]
-                .as_str()
-                .and_then(Attention::parse)
-                .unwrap_or(Attention::Realtime),
+            attention,
             configured,
         };
         let Some(to) = answered(d.result["choice"].as_str().unwrap_or(""), was) else {

@@ -769,104 +769,75 @@ impl Drop for Kit {
     }
 }
 
-/// A stand-in ACP adapter for the in-process gateway ([`crate::LocalAcp`]), started for every
-/// built-in adapter id. Each prompt appends `{"harness", "model", "effort", "system", "prompt"}`
-/// to `runs.jsonl`. What it does is picked by the model: `broken` dies, `busy` answers a 503,
-/// `slow` hangs; any other answers with `reply.txt`, its usage and cost reported.
-pub struct FakeAcp {
-    pub dir: std::path::PathBuf,
-    pub acp: steve_acp::AcpConfig,
+/// Records model selection at the gateway boundary without launching an adapter.
+#[derive(Clone)]
+pub struct ModelScript {
+    reply: Arc<Mutex<String>>,
+    runs: Arc<Mutex<Vec<serde_json::Value>>>,
+    pub absent: Option<String>,
 }
 
-const FAKE_ACP: &str = r#"#!/usr/bin/env python3
-import json, os, sys, time
-here = os.path.dirname(os.path.abspath(__file__))
-harness = os.path.basename(sys.argv[0])[:-3]
-def send(v):
-    print(json.dumps(v, ensure_ascii=False), flush=True)
-def update(sid, u):
-    send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": sid, "update": u}})
-efforts = [{"value": e} for e in ["low", "medium", "high", "xhigh", "max"]]
-state = {"model": None, "effort": None, "system": None}
-def options():
-    return [{"id": "model", "category": "model", "type": "select", "currentValue": state["model"] or "default", "options": []},
-            {"id": "effort", "category": "thought_level", "type": "select", "currentValue": state["effort"] or "medium", "options": efforts}]
-for line in sys.stdin:
-    msg = json.loads(line)
-    m, p = msg.get("method"), msg.get("params") or {}
-    result = {}
-    if m == "initialize":
-        result = {"protocolVersion": 1, "agentCapabilities": {"promptCapabilities": {"image": True},
-            "sessionCapabilities": {"systemPrompt": {"mode": {"override": {}, "append": {}}}}}}
-    elif m == "session/new":
-        sp = p.get("systemPrompt")
-        state["system"] = sp and [sp["mode"], sp["content"][0]["text"]]
-        result = {"sessionId": "s1", "modes": {"currentModeId": "default", "availableModes": [{"id": "plan"}, {"id": "read-only"}]}, "configOptions": options()}
-    elif m == "session/set_config_option":
-        state[p["configId"]] = p["value"]
-        result = {"configOptions": options()}
-    elif m == "session/prompt":
-        with open(os.path.join(here, "runs.jsonl"), "a") as f:
-            f.write(json.dumps({"harness": harness, "model": state["model"], "effort": state["effort"],
-                "system": state["system"], "prompt": p["prompt"]}, ensure_ascii=False) + "\n")
-        sid, model = p["sessionId"], state["model"]
-        if model == "broken":
-            sys.exit(2)
-        if model == "slow":
-            time.sleep(30)
-        if model == "busy":
-            send({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32603, "message": "API Error: 503 upstream unavailable"}})
-            continue
-        reply = open(os.path.join(here, "reply.txt")).read()
-        update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": reply}})
-        update(sid, {"sessionUpdate": "usage_update", "used": 1, "size": 2, "cost": {"amount": 0.000829045, "currency": "USD"}})
-        result = {"stopReason": "end_turn", "usage": {"inputTokens": 2, "outputTokens": 4, "cachedReadTokens": 11097, "cachedWriteTokens": 5727}}
-    if "id" in msg:
-        send({"jsonrpc": "2.0", "id": msg["id"], "result": result})
-"#;
-
-impl FakeAcp {
-    /// The adapter in `dir`, answering `reply`.
-    pub fn new(dir: &std::path::Path, reply: &str) -> FakeAcp {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::write(dir.join("reply.txt"), reply).unwrap();
-        let mut adapters = HashMap::new();
-        for id in steve_harness_spec::builtin_ids() {
-            let p = dir.join(format!("{id}.py"));
-            std::fs::write(&p, FAKE_ACP).unwrap();
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-            adapters.insert(id.to_string(), p);
-        }
-        FakeAcp {
-            dir: dir.to_path_buf(),
-            acp: steve_acp::AcpConfig {
-                adapters,
-                declared: HashMap::new(),
-                node: "node".into(),
-                claude_executable: "claude".into(),
-                steve_home: dir.join("steve"),
-                codex_home: dir.join("codex-home"),
-                user_home: dir.to_path_buf(),
-                version: "test".into(),
-            },
+impl ModelScript {
+    pub fn new(reply: &str) -> Self {
+        Self {
+            reply: Arc::new(Mutex::new(reply.into())),
+            runs: Default::default(),
+            absent: None,
         }
     }
 
-    /// The in-process one-model runner on it.
-    pub fn one(&self) -> crate::LocalAcp {
-        crate::LocalAcp {
-            acp: self.acp.clone(),
-            cwd: self.dir.join("scratch"),
-        }
+    pub fn set_reply(&self, reply: String) {
+        *self.reply.lock().unwrap() = reply;
     }
 
-    /// The runs so far, then forgets them.
     pub fn runs(&self) -> Vec<serde_json::Value> {
-        let p = self.dir.join("runs.jsonl");
-        let log = std::fs::read_to_string(&p).unwrap_or_default();
-        let _ = std::fs::remove_file(&p);
-        log.lines()
-            .map(|l| serde_json::from_str(l).unwrap())
-            .collect()
+        std::mem::take(&mut *self.runs.lock().unwrap())
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::OneModel for ModelScript {
+    async fn once(
+        &self,
+        call: &crate::gateway::OneCall<'_>,
+        model: &str,
+        effort: Option<&str>,
+        on_text: Option<crate::gateway::OnText<'_>>,
+    ) -> crate::gateway::Tried {
+        use crate::gateway::Tried;
+        if self.absent.as_deref() == Some(call.harness) {
+            return Tried::failed(crate::error::msg(format!("{} unavailable", call.harness)));
+        }
+        self.runs.lock().unwrap().push(serde_json::json!({
+            "harness": call.harness,
+            "model": (!model.is_empty()).then_some(model),
+            "effort": effort,
+            "prompt": call.prompt,
+            "images": call.images.iter().map(crate::gateway::Image::block).collect::<Vec<_>>(),
+        }));
+        if matches!(model, "broken" | "busy") {
+            return Tried::failed(crate::error::msg("model unavailable"));
+        }
+        let text = self.reply.lock().unwrap().clone();
+        if let Some(on_text) = on_text {
+            on_text(&text);
+        }
+        Tried {
+            reply: Ok((text, Some(0.000829045))),
+            usage: vec![steve_store::ModelUsage {
+                model: model.into(),
+                tokens: steve_store::Tokens {
+                    input: Some(2),
+                    output: Some(4),
+                    cache_read: Some(11_097),
+                    cache_write: Some(5_727),
+                    reasoning: None,
+                },
+                cost_reported: Some(0.000829045),
+                detail: json!({"scope": "main"}),
+            }],
+            timed_out: false,
+            reported_model: (!model.is_empty()).then(|| model.to_string()),
+        }
     }
 }

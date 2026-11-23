@@ -1,6 +1,6 @@
 /* Devices · Nodes (#/devices/nodes): every computer that runs sessions for this Hub, one card each, its own Node first.
  * A card leads with what needs doing (at most two lines), then four figures with their last hour: CPU load, memory,
- * the round trip to the Hub and the sessions it runs, and at the foot what its agents are doing and its harnesses.
+ * network throughput and session tokens, and at the foot what its agents are doing and its harnesses.
  * The whole card opens the Node's page. Unpaired Nodes fold away under the cards. */
 import type { ReactNode } from "react"
 import { ChevronRightIcon, LaptopIcon, MonitorIcon, PlusIcon, ServerIcon } from "lucide-react"
@@ -12,12 +12,11 @@ import { HoverCard } from "@/components/affect/hover-card-clean"
 import { go, Loading, openSheet } from "@/ui"
 import { deviceWorkEvidence, useStore } from "@/store"
 import type { RVitals } from "@/api"
-import { hostLine, hostOf, linkRoute, loadPct, memPct, nodeAlerts, nodeStatus, one, rttOf, type HostKind, type NodeView } from "@/device-model"
+import { hostLine, hostOf, linkRoute, loadPct, memPct, nodeAlerts, nodeStatus, one, type HostKind, type NodeView } from "@/device-model"
 import { useDevices } from "@/devices-data"
 import { deviceGroups } from "@/devices-work"
 import { harnessSummary } from "@/node-harness-model"
 import { Alert, Chip, Spark, StatusBadge } from "@/devices-ui"
-import { Meter } from "@/panel"
 import { cn } from "cn"
 
 /** how many of the latest samples a card draws: the last hour at one a minute */
@@ -52,6 +51,13 @@ function Metric({ label, value, sub, children, ...rest }: { label: ReactNode; va
 
 const tail = <T,>(xs: T[]) => xs.slice(-SPARK_POINTS)
 
+function bytesPerSecond(bytes: number) {
+  const [unit, divisor] = bytes >= 1e6 ? ["MB/s", 1e6] : bytes >= 1e3 ? ["KB/s", 1e3] : ["B/s", 1]
+  return `${num(bytes / divisor, { maximumFractionDigits: 1 })} ${unit}`
+}
+
+const compactTokens = (n: number) => num(n, { notation: "compact", maximumFractionDigits: 1 })
+
 /** one Node as a card */
 export function NodeCard({ v }: { v: NodeView }) {
   const t = useT(), { hubVersion, vitals, harnesses, harnessesError } = useDevices()
@@ -60,8 +66,13 @@ export function NodeCard({ v }: { v: NodeView }) {
   const l = v.linked ? vit?.latest : undefined
   const s = nodeStatus(v, hubVersion), host = hostOf(v, vit?.latest), facts = hostLine(host)
   const alerts = nodeAlerts(v, hubVersion)
-  const lp = loadPct(l), mp = memPct(l), rtt = v.linked ? rttOf(v, l) : null, route = linkRoute(v)
+  const lp = loadPct(l), mp = memPct(l)
   const series = tail(vit?.series ?? [])
+  const network = l?.network
+  const received = series.map((p) => p.network?.rx_bytes_per_second ?? null)
+  const sent = series.map((p) => p.network?.tx_bytes_per_second ?? null)
+  const networkMax = Math.max(1, ...received.map((n) => n ?? 0), ...sent.map((n) => n ?? 0))
+  const tokens = vit?.tokens
   const agents = agentsLine(v), harness = harnessesError ? t("devices:harness.readFailed") : harnessSummary(v, harnesses?.[v.id])
   const name = v.local ? t("devices:map.localNode") : v.name
   const open = () => go(nodeHref(v.id))
@@ -89,14 +100,17 @@ export function NodeCard({ v }: { v: NodeView }) {
           sub={l?.mem_total && l.mem_available != null ? t("devices:vitals.memSub", { used: num((l.mem_total - l.mem_available) / GIB, { maximumFractionDigits: 1 }), total: num(l.mem_total / GIB, { maximumFractionDigits: 1 }) }) : undefined}>
           <Spark values={series.map((p) => p.mem)} max={1} color="var(--series-2)" />
         </Metric>
-        <Metric label={t("devices:vitals.rtt")} value={v.local ? t("devices:card.sameMachine") : rtt != null ? <>{rtt}<small className="ml-0.5 type-footnote font-normal text-muted-foreground">ms</small></> : "—"} sub={route ? t(`devices:route.${route}`) : undefined} data-metric="rtt">
-          {!v.local && <Spark values={series.map((p) => p.rtt)} color="var(--series-3)" />}
+        <Metric label={t("devices:vitals.network")} data-metric="network"
+          value={network ? <span title={t("devices:vitals.receive")}>↓ {bytesPerSecond(network.rx_bytes_per_second)}</span> : "—"}
+          sub={network && <span title={t("devices:vitals.send")}>↑ {bytesPerSecond(network.tx_bytes_per_second)}</span>}>
+          {series.some((p) => p.network) && <div className="relative">
+            <Spark values={received} max={networkMax} color="var(--series-3)" data-network="receive" />
+            <Spark values={sent} max={networkMax} color="var(--series-4)" className="absolute inset-0" data-network="send" />
+          </div>}
         </Metric>
-        <Metric label={t("devices:stat.sessions")} data-metric="sessions"
-          value={v.max != null && v.running != null ? <>{v.running}<small className="ml-0.5 type-footnote font-normal text-muted-foreground">/ {v.max}</small></> : "—"}
-          sub={(v.waiting ?? 0) > 0 ? <span className="text-attention">{t("devices:stat.queued", { n: v.waiting })}</span> : undefined}>
-          {v.max != null && v.running != null && <div className="pt-3"><Meter value={v.max ? v.running / v.max : 0} tone={v.running >= v.max ? "wait" : "run"} /></div>}
-        </Metric>
+        <Metric label={t("devices:vitals.tokens")} data-metric="tokens"
+          value={tokens ? t("devices:vitals.tokensMinute", { n: compactTokens(tokens.per_minute) }) : "—"}
+          sub={tokens && t("devices:vitals.tokensToday", { n: compactTokens(tokens.today) })} />
       </div>
       <footer className="-mx-4 -mb-4 mt-auto flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 border-t border-border/70 px-4 py-2.5 type-footnote text-muted-foreground">
         <span className="min-w-0 flex-1 truncate" data-node-agents={agents.n}>{agents.n ? t("devices:card.agents", { count: agents.n, working: agents.working }) : t("devices:card.noAgents")}</span>

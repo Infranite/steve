@@ -50,7 +50,7 @@ pub fn insert(w: &mut W<'_>, n: &NewMessage<'_>) -> Result<()> {
         Some(account) => super::super::channel_spaces::account_identity_mask(w, n.space, account)?,
         None => 0,
     };
-    insert_with_provenance(w, n, mask, None, None)
+    insert_with_provenance(w, n, mask, None, None, None)
 }
 
 fn insert_with_provenance(
@@ -59,6 +59,7 @@ fn insert_with_provenance(
     seen_by: i64,
     basis_id: Option<&str>,
     composed: Option<&str>,
+    answer_to: Option<&str>,
 ) -> Result<()> {
     w.exec(
         Query::insert()
@@ -79,6 +80,7 @@ fn insert_with_provenance(
                 "seen_by",
                 "basis_id",
                 "composed",
+                "answer_to",
             ])
             .values_panic([
                 n.id.into(),
@@ -96,6 +98,7 @@ fn insert_with_provenance(
                 seen_by.into(),
                 basis_id.into(),
                 composed.into(),
+                answer_to.into(),
             ]),
     )?;
     digest::sync_message(w.conn, Source::ChanMessage, n.id, None)?;
@@ -114,6 +117,7 @@ struct RecoverySource {
     seen_by: i64,
     basis_id: Option<String>,
     composed: Option<String>,
+    answer_to: Option<String>,
 }
 
 /// A rewritten payload must have a fresh id. Copy its basis and composer provenance with it.
@@ -133,6 +137,7 @@ pub fn copy_for_recovery(w: &mut W<'_>, id: &str, next: &str, now: i64) -> Resul
                     "seen_by",
                     "basis_id",
                     "composed",
+                    "answer_to",
                 ])
                 .from("chan_messages")
                 .and_where(Expr::col("id").eq(id))
@@ -150,6 +155,7 @@ pub fn copy_for_recovery(w: &mut W<'_>, id: &str, next: &str, now: i64) -> Resul
                     seen_by: r.get(8)?,
                     basis_id: r.get(9)?,
                     composed: r.get(10)?,
+                    answer_to: r.get(11)?,
                 })
             },
         )?
@@ -172,6 +178,7 @@ pub fn copy_for_recovery(w: &mut W<'_>, id: &str, next: &str, now: i64) -> Resul
         source.seen_by,
         source.basis_id.as_deref(),
         source.composed.as_deref(),
+        source.answer_to.as_deref(),
     )
 }
 
@@ -242,10 +249,10 @@ pub fn set_decision(w: &mut W<'_>, message: &str, decision: &str) -> Result<()> 
 }
 
 pub fn source(r: &mut impl Read, message: &OutRow) -> Result<Option<String>> {
-    let reactions = Query::select()
-        .column("message_id")
-        .from("chan_reactions")
-        .and_where(Expr::col("answer_id").eq(&message.id))
+    let answer = Query::select()
+        .column("answer_to")
+        .from("chan_messages")
+        .and_where(Expr::col("id").eq(&message.id))
         .take();
     let output = Query::select()
         .column("source_message_id")
@@ -262,7 +269,7 @@ pub fn source(r: &mut impl Read, message: &OutRow) -> Result<Option<String>> {
             .and_where(Expr::col("purged").is_null())
             .and_where(
                 Expr::col("id")
-                    .in_subquery(reactions)
+                    .in_subquery(answer)
                     .or(Expr::col("id").in_subquery(output))
                     .or(Expr::col("external_id").eq(message.reply_to.as_deref())),
             )

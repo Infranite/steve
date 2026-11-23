@@ -216,8 +216,6 @@ struct Turns {
     main_turn_of: HashMap<String, String>,
     /// sent channel message → Steve's conversation message it said
     said_by: HashMap<String, String>,
-    /// turn → the actual outbound answer linked by chan_out.message
-    answer_of: HashMap<String, String>,
     /// turn → the error its answer was
     failed: HashMap<String, String>,
     /// turns Steve said something to
@@ -266,9 +264,6 @@ impl Turns {
                     }
                 }
                 if let Some(o) = r.out {
-                    if let Some(origin) = &r.origin {
-                        self.answer_of.insert(origin.clone(), o.clone());
-                    }
                     self.said_by.insert(o, r.id.clone());
                 }
                 if r.error
@@ -400,12 +395,14 @@ fn received(
     let reaction = steve_store::channel_message_repo::reactions::get(r, &m.id)?;
     let main_turn = t.main_turn_of.get(&m.id);
     let turn = t.turn_of.get(&m.id).or(main_turn);
-    // The turn/outbound relation is persisted even when reactions fail or a draft is held. A
-    // reaction's answer id is only a legacy fallback; its lifecycle never establishes delivery.
-    let answer_id = turn
-        .and_then(|id| t.answer_of.get(id))
-        .cloned()
-        .or_else(|| reaction.as_ref().and_then(|r| r.answer_id.clone()));
+    let answer_id: Option<String> = c
+        .query_row(
+            "SELECT id FROM chan_messages WHERE answer_to = ?1 AND workspace_id = ?2
+             ORDER BY created DESC, rowid DESC LIMIT 1",
+            params![m.id, ws],
+            |r| r.get(0),
+        )
+        .optional()?;
     let answer = match &answer_id {
         Some(a) => out_state(c, ws, a)?,
         None => None,
@@ -583,12 +580,11 @@ pub fn channels(
     let mut st = c.prepare_cached(&format!(
         "SELECT s.id, p.read_up_to FROM spaces s
            LEFT JOIN conversation_preferences p ON p.workspace_id = s.workspace_id AND p.user_id = ?2 AND p.space_id = s.id
-          WHERE s.workspace_id = ?1 AND {visibility} AND coalesce(p.closed, 0) = 0
-            AND (s.connection_id = ?3 OR EXISTS (SELECT 1 FROM space_identities li
-              WHERE li.space_id = s.id AND li.connection_id = ?3 AND li.left_at IS NULL))
+          WHERE s.workspace_id = ?1 AND coalesce(p.closed, 0) = 0
+            AND EXISTS (SELECT 1 FROM space_identities li
+              WHERE li.space_id = s.id AND li.connection_id = ?3 AND li.left_at IS NULL)
             AND (EXISTS (SELECT 1 FROM messages x WHERE x.workspace_id = ?1 AND x.space = 'chan:' || s.id)
-              OR EXISTS (SELECT 1 FROM chan_messages m WHERE m.space_id = s.id))",
-        visibility = spaces::visible_sql("?2"),
+              OR EXISTS (SELECT 1 FROM chan_messages m WHERE m.space_id = s.id))"
     ))?;
     let mut out = Vec::new();
     for a in crate::channel_accounts::list(ch, r, viewer)? {

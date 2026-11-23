@@ -35,7 +35,7 @@ export type DependencyWait = {
   waiting: boolean; wait_state: string | null; reason: string | null; active_turn: boolean
   can_register: boolean; register_blocker: string | null
 }
-export type RItemDetail = RItem & { goalsList: { version: number; text: string; created: number }[]; planRounds?: { round: number; steps: PlanStep[]; end: "done" | "replaced"; created: number }[]; timeline: { id: number; ts: number; actor: string; kind: string; text: string; session_id: string | null; files?: RFile[]; via?: string }[]; artifacts: { id: string; kind: string; title: string; location: string | null; created: number; delivery_id?: string | null }[]; decisions: RDecision[]; dependents: string[]
+export type RItemDetail = RItem & { goalsList: { version: number; text: string; created: number }[]; planRounds?: { round: number; steps: PlanStep[]; end: "done" | "replaced"; created: number }[]; timeline: { id: number; ts: number; actor: string; kind: string; text: string; session_id: string | null; files?: RFile[]; via?: string }[]; artifacts: { id: string; kind: string; title: string; location: string | null; created: number; delivery_id: string | null }[]; decisions: RDecision[]; dependents: string[]
   workflow?: Workflow | null
   dependency_wait?: DependencyWait | null
   dispatch?: ItemDispatch
@@ -96,8 +96,8 @@ export type RNodeRemovalRun = { operation_id: string; phase: string; error?: str
  * unpaired), its latest removal, and the command to run on its machine instead */
 export type RNodeRemoval = { reason: string; latest?: RNodeRemovalRun | null; command: string; grace_secs?: number }
 export type RNode = { node_id: string; name: string; fingerprint: string; state: "pending" | "active" | "paused" | "revoked"; linked: boolean; local: boolean; last_seen?: number | null; link_error?: { at: number; error: string }; max_sessions?: number; running?: number; waiting?: number; owner_context?: boolean | null; upgrade?: RNodeUpgrade; removal?: RNodeRemoval; link?: RNodeLink | null; host?: RNodeHost | null }
-/** a Node machine's day (B3): the latest sample, and load per CPU, memory in use (0..1) and round trip over time */
-export type RVitals = { sampling?: { interval_ms: number; stale_after_ms: number; now: number }; gaps?: { from: number; to: number }[]; latest: { at: number; sampled_at?: number; cpus?: number; load?: [number, number, number]; mem_total?: number; mem_available?: number; roots?: { root: string; display?: string; free: number; total: number; inodes_free?: number }[]; sessions?: number; rtt_ms?: number | null }; series: { at: number; load: number | null; mem: number | null; rtt: number | null }[] }
+/** A Node's latest sample and day of vitals. Network rates are bytes per second. */
+export type RVitals = import("./gen/NodeVitalsDay").NodeVitalsDay
 export type RPairing = { code: string; expires: number; pin: string | null; hub_id: string }
 /** remote Nodes over tailcat (A6): `hub_url` is `tailcat:<address>:<port>` once it runs */
 /** a remote install over tailcat's SSH (A6b): the command for the target, then its steps */
@@ -118,13 +118,13 @@ export type RRuntime = {
   caps?: { sessions: boolean; jobs: boolean; images: boolean; resume: boolean; history: boolean; mcp_http: boolean; system_prompt: boolean; fork?: boolean } | null
   auth?: { id: string; name: string; description?: string | null }[]
   resume_command?: string | null; fork_command?: string | null
-  /** Registry-managed components and the local Node's setup result (absent on older Nodes). */
+  /** Registry-managed components and the local Node's setup result (absent: the harness has no managed components). */
   setup?: {
     state: "not_installed" | "installing" | "ready" | "unavailable" | "unknown"
     components: {
-      id: string; name: string; package: string; installed: boolean; version?: string | null; path?: string | null
-      /** Evidence for the expected component target; takes precedence over the legacy boolean. */
-      status?: "installed" | "missing" | "unknown"
+      id: string; name: string; package: string; version?: string | null; path?: string | null
+      /** Evidence for the expected component target. */
+      status: "installed" | "missing" | "unknown"
       /** Another discovered executable; does not establish that the expected target is complete. */
       detected?: { path: string; version?: string | null } | null
     }[]
@@ -155,7 +155,7 @@ export type State = {
   notifications?: RNotice[]; notifySeen?: number
   /* Steve is on a turn in the main conversation (routing, answering, or messages waiting their turn) */
   thinking?: boolean
-  /** the Hub holds new turns for a release (Rust Hub): the releasing item, turns it still waits for, since (ms) */
+  /** the Hub holds new turns for a release: the releasing item, turns it still waits for, since (ms) */
   hold?: RHold | null
 }
 export type RHold = { item: string; running: number; since: number }
@@ -266,8 +266,8 @@ const stateCursors = new WeakMap<object, string>()
 export const cursorOf = (s: State): string | null => stateCursors.get(s) ?? null
 
 /* ───────── module routes (contacts, knowledge, accounts, vault, signals, flows, GitHub …) ─────────
- * Only the Rust Hub serves them. The TS Hub answers an unknown GET /api/* with the SPA's index.html (200) and other
- * methods with a plain-text 404, so "this Hub has no such module" is: a network error, a non-JSON answer that is 200 /
+ * A Hub without a module answers its GET /api/* with the SPA's index.html (200) and other methods with a plain-text
+ * 404, so "this Hub has no such module" is: a network error, a non-JSON answer that is 200 /
  * 404 / 405, or a JSON 404 / 405 without an `error`. Every module client throws `NotWired` for these, and its page
  * shows the module's Unwired placeholder instead — never sample data. */
 export class NotWired extends Error { constructor() { super(t("shell:http.unreachable")) } }
@@ -298,7 +298,7 @@ export async function modReq<T>(method: string, path: string, body?: unknown, si
   const json = (r.headers.get("content-type") ?? "").includes("application/json")
   const j: any = json ? await r.json().catch(() => undefined) : undefined
   /* the session's own 401 carries `login`; a 401 from a module (e.g. 请重新登录后再登记) is an ordinary error */
-  if (r.status === 401 && (!j || j.error === "unauthenticated" || "login" in j)) { if (r.headers.get("x-steve-origin") === "refused") signIn.refused = true; throw new Unauthenticated(j?.login ?? null, j?.token === true) }
+  if (r.status === 401 && j?.error === "unauthenticated" && "login" in j) { if (r.headers.get("x-steve-origin") === "refused") signIn.refused = true; throw new Unauthenticated(j?.login ?? null, j?.token === true) }
   if (!json) {
     if (r.ok && method !== "GET") return {} as T // 204, or an empty body
     if (r.ok || r.status === 404 || r.status === 405) throw new NotWired()
@@ -363,7 +363,7 @@ export const api = {
   saveDependencyWait: (id: string, body: { expected_cycle: number; resume: DependencyWait["resume_override"]; reason: string }) => post<DependencyWait>(`/items/${id}/dependency-wait`, body),
   addDep: (id: string, dep: string) => post(`/items/${id}/deps`, { dep }), rmDep: (id: string, dep: string) => del(`/items/${id}/deps/${dep}`),
   snooze: (id: string, label: string | null, until: number | null) => post(`/items/${id}/snooze`, { label, until }),
-  events: (id: string, after = 0) => get<REvent[]>(`/sessions/${id}/events?after=${after}&page=bounded`), searchSessions: (q: string) => get<string[]>(`/sessions/search?q=${encodeURIComponent(q)}`),
+  events: (id: string, after = 0) => get<REvent[]>(`/sessions/${id}/events?after=${after}`), searchSessions: (q: string) => get<string[]>(`/sessions/search?q=${encodeURIComponent(q)}`),
   sessionSay: (id: string, text: string, mode: "插话" | "排队", files: string[] = []) => post(`/sessions/${id}/messages`, { text, mode, files }), cancel: (id: string) => post(`/sessions/${id}/cancel`), endSession: (id: string) => post(`/sessions/${id}/end`), continueSession: (id: string) => post<{ session: string }>(`/sessions/${id}/continue`),
   renameSession: (id: string, title: string) => patch(`/sessions/${id}`, { title }), removeSession: (id: string) => del(`/sessions/${id}`), dropQueued: (id: string) => del("/queued/" + id),
   queued: (sid: string) => get<RQueued[]>(`/sessions/${sid}/queued`), resumeInfo: (sid: string) => get<RResume>(`/sessions/${sid}/resume`),
@@ -400,7 +400,7 @@ export const api = {
   nodeHarnesses: () => get<{ nodes: Record<string, RNodeHarnessReport> }>("/node-harnesses"),
   refreshNodeHarnesses: (id: string) => get<{ node_id: string; report: RNodeHarnessReport }>(`/node-harnesses/${encodeURIComponent(id)}?fresh=1`),
   createPairing: () => post<RPairing>("/nodes/pairings"),
-  vitals: () => get<{ nodes: Record<string, RVitals> }>("/vitals"),
+  vitals: () => get<import("./gen/VitalsResponse").VitalsResponse>("/vitals"),
   nodeTags: () => get<{ tags: Record<string, string[]> }>("/node-tags"),
   setNodeTags: (node: string, tags: string[]) => req<{ tags: string[] }>("PUT", `/node-tags/${encodeURIComponent(node)}`, { tags }),
   setItemNodeTag: (item: string, tag: string | null) => req<{ ok: boolean }>("PUT", `/items/${encodeURIComponent(item)}/node-tag`, { tag }),

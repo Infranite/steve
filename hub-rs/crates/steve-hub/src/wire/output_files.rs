@@ -29,7 +29,7 @@ pub fn directory(home: &Path, item: &str) -> io::Result<PathBuf> {
         .join("outputs"))
 }
 
-/// Old agents sometimes used the prose label of their delivery as a file location.
+/// Agents sometimes use the prose label of their delivery as a file location.
 pub fn summary_reference(location: Option<&str>) -> bool {
     let Some(location) = location.map(str::trim) else {
         return false;

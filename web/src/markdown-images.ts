@@ -24,13 +24,14 @@ const UNAVAILABLE = "#steve-file-unavailable-"
 // rehype-harden refuses fragments in image src. A private render-only placeholder
 // survives that check; Image recognizes it before creating an <img> (no request).
 const IMAGE_UNAVAILABLE = "/api/steve-file-unavailable-"
-const REASONS = ["legacy", "scope", "missing", "offline", "limit", "type"] as const
+const REASONS = ["unresolved", "scope", "missing", "offline", "limit", "type"] as const
 export function replyFileReason(ref?: string) {
   return REASONS.find(reason => ref === UNAVAILABLE + reason || ref === IMAGE_UNAVAILABLE + reason)
 }
 
-/** Old transcripts only get a disabled reference; never request a Node path from the browser. */
-export function historicalReplyPath(ref: string, image: boolean): boolean {
+/** A file path the Hub did not replace with a stable delivery (text written before it was captured, or never
+ *  captured) only gets a disabled reference; never request a Node path from the browser. */
+export function unresolvedReplyPath(ref: string, image: boolean): boolean {
   if (/^file:/i.test(ref)) return true
   if (!ref || ref.startsWith("#") || ref.startsWith("//") || ref.includes(":")
     || /^\/(?:api|deliveries|shares|auth|assets)\//.test(ref)) return false
@@ -43,7 +44,7 @@ export function replyImageHint(ref: string): string {
   return reason ? IMAGE_UNAVAILABLE + reason : ref
 }
 
-export const historicalReplyMarker = UNAVAILABLE + "legacy"
+export const unresolvedReplyMarker = UNAVAILABLE + "unresolved"
 
 /** Use the Hub in this tab, not the web origin or another saved Hub. Keep the captured workspace. */
 export function replyDeliveryUrl(ref: string | undefined, hub: string): string | null {

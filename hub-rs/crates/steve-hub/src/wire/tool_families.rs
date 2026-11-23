@@ -1,5 +1,5 @@
-//! A few cohesive read operations share one public tool. The old operation names remain callable
-//! for existing sessions and pins; authorization and side effects stay in their original handlers.
+//! A few cohesive read operations share one public tool; only the family name is callable or
+//! pinnable. Authorization and side effects stay in each operation's own handler.
 use serde_json::{Value, json};
 use steve_node_api::ToolDescriptor;
 
@@ -50,14 +50,6 @@ pub fn canonical(name: &str) -> &str {
         .iter()
         .find(|f| f.operations.iter().any(|(_, old)| *old == name))
         .map_or(name, |f| f.name)
-}
-
-pub fn aliases(name: &str) -> Vec<&'static str> {
-    FAMILIES
-        .iter()
-        .find(|f| f.name == name)
-        .map(|f| f.operations.iter().map(|(_, old)| *old).collect())
-        .unwrap_or_default()
 }
 
 fn descriptor(f: &Family, raw: &[ToolDescriptor]) -> ToolDescriptor {
@@ -141,38 +133,25 @@ mod tests {
     use crate::wire::tool_service::raw_builtin_catalog;
 
     #[test]
-    fn old_pins_and_searches_resolve_to_one_read_entry() {
+    fn family_pins_and_searches_find_one_read_entry() {
         let entries = super::super::tool_registry::steve_entries(catalog(raw_builtin_catalog()));
         let mut r = super::super::tool_registry::Registry {
             entries,
             ..Default::default()
         };
-        let pins = aliases("steve_contacts")
-            .iter()
-            .map(|name| steve_store::caps::tools::Pin {
-                kind: "tool".into(),
-                target: (*name).into(),
-            })
-            .collect::<Vec<_>>();
-        r.list(&pins);
+        let pin = |target: &str| steve_store::caps::tools::Pin {
+            kind: "tool".into(),
+            target: target.into(),
+        };
+        r.list(&[pin("steve_contacts"), pin("steve_whois")]);
         assert_eq!(
             r.listed.iter().filter(|n| *n == "steve_contacts").count(),
             1
         );
-        for old in aliases("steve_contacts") {
-            let (found, _) = super::super::tool_registry::search(
-                &r.entries,
-                &[],
-                &super::super::tool_registry::Query {
-                    text: old.into(),
-                    limit: 1,
-                    ..Default::default()
-                },
-            );
-            assert_eq!(found[0].name, "steve_contacts");
-            assert!(found[0].read_only);
-            assert!(found[0].resources.iter().any(|r| r == "contact"));
-        }
+        assert!(
+            !r.listed.iter().any(|n| n == "steve_whois"),
+            "an operation of a family is not a tool of its own"
+        );
         for (query, expected) in [
             ("谁负责", "steve_contacts"),
             ("附件", "steve_mail_read"),
@@ -193,8 +172,9 @@ mod tests {
                 "{query} did not find {expected}"
             );
         }
-        assert!(
-            aliases("steve_github_comment").is_empty(),
+        assert_eq!(
+            canonical("steve_github_comment"),
+            "steve_github_comment",
             "outward writes remain separate"
         );
     }

@@ -8,8 +8,7 @@
 //!
 //! - [`Rule::Spawn`]: a process started (`Command::new`, `Command::from`, a renamed `Command`,
 //!   `fork`/`exec`/`posix_spawn`).
-//! - [`Rule::Harness`]: an entry point that starts a harness, or a handle on one: the legacy ACP
-//!   runner, the ACP adapter connection, the in-process print gateway, in-process research.
+//! - [`Rule::Harness`]: a harness execution entry point or a handle on one.
 //! - [`Rule::Dir`]: a directory listing or a folder walk (`read_dir`, `scan::walk`).
 //! - [`Rule::Fs`]: a file opened, read, written, copied, renamed or removed, or a directory created
 //!   or removed (`std::fs` and `tokio::fs`). Most are the Hub's own data; the rest are project
@@ -24,11 +23,9 @@
 //! Every count must equal its entry in `node_boundary.txt`; [`RATIONALE`] supplies reasons. A new call site fails the test: route it
 //! through the Node (a `WorkspaceExecutor`, `Discovery` or job face), or, if it is truly Hub-host
 //! work (the Hub's own data, the upgrader, the keychain, `gh` API calls), add it to the table with
-//! why. A removed call site fails too, so the table shrinks with the code. The legacy runner's
-//! entries went with it (B7): nothing outside the Node starts a session's harness. Those marked
-//! [`Until::NoNode`] serve items no Node holds and go with `STEVE_NODE_MODE=off`, those marked
-//! [`Until::N0d`] when think and research jobs are the only path, and [`Until::Later`] names the
-//! follow-up that moves the rest.
+//! why. A removed call site fails too, so the table shrinks with the code. Harness execution
+//! runs on the Node. Those marked [`Until::NoNode`] serve items no Node holds, including on
+//! a diagnostic Hub, and [`Until::Later`] names the follow-up that moves the rest.
 
 #[path = "support/ratchet.rs"]
 mod ratchet;
@@ -80,7 +77,6 @@ impl Rule {
                 "steve_acp::rpc",
                 "spawn_registered(",
                 "spawn_bounded(",
-                "LocalAcp {",
                 "steve_acp::oneshot",
                 "Researcher::new(",
                 "researcher.start(",
@@ -128,8 +124,6 @@ impl Rule {
                 ("steve_acp::Acp", Renamed),
                 ("steve_acp::rpc", Any),
                 ("steve_acp::oneshot", Any),
-                ("steve_core::LocalAcp", Renamed),
-                ("steve_core::gateway::LocalAcp", Renamed),
                 ("steve_research::Researcher", Any),
                 ("steve_research::run_attempt", Any),
                 ("steve_research::drive", Any),
@@ -184,13 +178,8 @@ const FS_IMPORTS: [(&str, Import); 30] = [
 enum Until {
     /// Never: Hub-host work, not a project's or a harness's.
     Hub,
-    /// Items no Node holds, read on the Hub host: with `STEVE_NODE_MODE=off` (the rollback), or
-    /// an item whose sessions all ended on the legacy runner before B7 removed it. They go with
-    /// the off mode. No session runs without a Node any more.
+    /// Hub-host access for items no Node holds, including on a diagnostic Hub.
     NoNode,
-    /// In-process think and research: a Hub with the Node off, and research whose directories the
-    /// Node does not hold (N0d).
-    N0d,
     /// A named follow-up moves it onto the Node.
     Later(&'static str),
     /// The harness libraries themselves; the Node calls them, and [`Rule::Harness`] bounds who
@@ -217,7 +206,7 @@ const fn e(rule: Rule, file: &'static str, until: Until, why: &'static str) -> E
 }
 
 use Rule::{Dir, Fs, Harness, Spawn};
-use Until::{Hub, Later, Library, N0d, NoNode};
+use Until::{Hub, Later, Library, NoNode};
 
 /// Reasons and removal milestones for the count inventory in node_boundary.txt.
 #[rustfmt::skip]
@@ -233,7 +222,7 @@ const RATIONALE: &[Entry] = &[
     e(Spawn, "steve-acp/src/config.rs", Hub, "`npm root -g`, to find the adapters"),
     e(Fs, "steve-acp/src/config.rs", Library, "extensionless npm bin shebang check (`#!/usr/bin/env node`), so Node runs JS adapters directly"),
     e(Fs, "steve-acp/src/adapters.rs", Library, "adapter package.json `bin` entry resolution under `<steve-home>/adapters` or `npm root -g`"),
-    e(Dir, "steve-toolchains/src/lib.rs", Library, "project marker listings for Node detection and per-project discovery; Hub callers use only the data definitions"),
+    e(Dir, "steve-toolchains/src/lib.rs", Library, "project marker listings for per-project discovery; Hub callers use only the data definitions"),
     e(Dir, "steve-knowledge/src/scan.rs", Library, "the folder walk the Node's scan reuses"),
     e(Spawn, "steve-acp/src/managed.rs", Library, "npm, to install and check the adapters Steve keeps (the Node's daily check, steve setup)"),
     e(Fs, "steve-acp/src/managed.rs", Library, "the installed adapters' package.json, selected ids, and own prefix directory/lease shared by Node execution and the operator CLI; never a workspace or client-chosen destination"),
@@ -243,9 +232,6 @@ const RATIONALE: &[Entry] = &[
     e(Fs, "steve-acp/src/transcript.rs", Library, "read-only assistant usage for that Node attempt, shared by sessions and one-shot calls; no Hub/project filesystem effects"),
     e(Fs, "steve-research/src/attach.rs", Library, "attachments in a research run's dir"),
     /* harness entry points outside the Node */
-    e(Harness, "steve-hub/src/wire/mod.rs", N0d, "LocalAcp: the in-process think gateway"),
-    e(Harness, "steve-core/src/gateway.rs", N0d, "LocalAcp and its owned one-shot settlement worker; the same legacy process path until Node-only calls"),
-    e(Fs, "steve-core/src/gateway.rs", N0d, "LocalAcp's scratch directory"),
     e(Harness, "steve-hub/src/wire/research.rs", Hub,
         "the steve_research import: the run's policy (its attempts, its answer); the runs are Node jobs"),
     e(Fs, "steve-hub/src/metrics.rs", Hub, "metrics socket mode 0600 and read-only /proc/self/io process counter on Linux; no workspace data"),
@@ -319,22 +305,21 @@ const RATIONALE: &[Entry] = &[
     e(Fs, "steve-install/src/publish.rs", Hub, "steve login keeps its own client credential (0600, atomic replace); steve publish reads the file or folder the operator names to upload it"),
     e(Spawn, "steve-install/src/signing.rs", Hub, "first-install signer and trusted Hub updater invoke system Keychain/codesign and verified Hub build identity"),
     e(Dir, "steve-install/src/signing.rs", Hub, "signer validates only this release's regular-file tree and refuses preexisting Hub data"),
-    e(Fs, "steve-install/src/signing.rs", Hub, "signer preserves the installation identity and immutable helper using private receipts and exclusive creation"),
+    e(Fs, "steve-install/src/signing.rs", Hub, "signer preserves the identity and helper, reads the installation key-store selection, and hands its private staging password to the signed Hub on stdin before removing it"),
     e(Spawn, "steve-install/src/release.rs", Hub, "trusted updater uses the installation's environment, launchd service and candidate maintenance probe"),
     e(Dir, "steve-install/src/release.rs", Hub, "trusted updater inventories owned backups, release receipts and failed probe database files"),
     e(Fs, "steve-install/src/release.rs", Hub, "trusted updater uses the release lock, verified SQLite backups, atomic links and protected rollback receipts"),
-    e(Spawn, "steve-hub/src/upgrades/signing.rs", Hub, "security -i: the signing keychain's new password"),
     e(Spawn, "steve-hub/src/upgrades/supervisor.rs", Hub, "the supervisor starts the Hub, and asks a candidate's binary about this environment first"),
     e(Spawn, "steve-keyhelper/src/mac.rs", Hub, "the keychain helper"),
     e(Spawn, "steve-modules/src/vault/keystore/helper.rs", Hub, "the vault keystore helper"),
     e(Spawn, "steve-modules/src/net.rs", Hub, "test support: reruns one test in a child"),
     e(Dir, "steve-hub/src/upgrades/mod.rs", Hub, "upgrade operations in the Hub data dir"),
     e(Fs, "steve-store-sqlite/src/backup/offline.rs", Hub, "the single backup implementation copies the Hub's own database file into its backups directory: a 0700 directory, a create_new 0600 partial, fsync, and a no-replace hard-link publish (replaces the daily copy's own file handling in W2a.9)"),
-    e(Dir, "steve-store-sqlite/src/backup/plan.rs", Hub, "the single backup implementation lists and prunes its own completed backup directories of one purpose, never anything else"),
-    e(Fs, "steve-store-sqlite/src/backup/plan.rs", Hub, "the single backup implementation stages private directories, writes and fsyncs manifests, verifies artifacts and publishes atomically; retiring retries sync the rename, unlink owned artifacts with manifest last, sync the directory, then remove it empty"),
-    e(Dir, "steve-hub/src/admin/backup.rs", Hub, "the one archive walks the parts of this installation's home (signing layout, workspace cache skipping) and measures the skipped regenerable directories for the log (moved here from the daily copy; the one tar implementation)"),
-    e(Fs, "steve-hub/src/admin/backup.rs", Hub, "the one tar of the Hub's own files (data/files, signing, secrets, workspaces, deliveries, steve.env) beside a backup, its cleanup and publication"),
-    e(Fs, "steve-hub/src/admin/paths.rs", Hub, "the Hub's own management socket: its private 0700 run directory (or a per-user fallback under TMPDIR when the path is too long), the 0600 pointer file to it, and removing only a stale socket of this user that no longer answers"),
+    e(Dir, "steve-store-sqlite/src/backup/plan.rs", Hub, "inventories installation-owned backup directories and their declared daily file trees for retention accounting"),
+    e(Fs, "steve-store-sqlite/src/backup/plan.rs", Hub, "stages private backup directories, verifies and publishes manifests atomically under the backup-root lock, and retires declared artifacts and file trees with the manifest last"),
+    e(Dir, "steve-hub/src/admin/backup.rs", Hub, "daily snapshots and tar archives walk only the installation parts of their backup scope, and measure skipped workspace caches for the log"),
+    e(Fs, "steve-hub/src/admin/backup.rs", Hub, "archives the Hub-owned backup scope or copies it into the daily tree; hard links reuse data only from the preceding backup, never from live installation files"),
+    e(Fs, "steve-hub/src/admin/paths.rs", Hub, "the Hub's own management socket: its private 0700 run directory (or a per-user fallback under TMPDIR when the path is too long), the 0600 pointer file to it, removing only a stale socket of this user that no longer answers, and clearing the installation-owned startup readiness record"),
     e(Dir, "steve-modules/src/vault/inject.rs", Hub, "the vault's scratch dirs in the Hub data dir"),
     e(Dir, "steve-knowledge/src/eval.rs", Hub, "the offline retrieval eval corpus"),
     e(Fs, "steve-knowledge/src/eval.rs", Hub, "the offline retrieval eval corpus"),
@@ -349,7 +334,6 @@ const RATIONALE: &[Entry] = &[
     e(Fs, "steve-hub/src/upgrades/client.rs", Hub, "the upgrader"),
     e(Fs, "steve-hub/src/upgrades/mod.rs", Hub, "the upgrader"),
     e(Fs, "steve-hub/src/upgrades/runner.rs", Hub, "the upgrader"),
-    e(Fs, "steve-hub/src/upgrades/signing.rs", Hub, "the signing keychain password file, moved into the key store; the rotation lock"),
     e(Fs, "steve-hub/src/upgrades/supervisor.rs", Hub, "the supervisor"),
     e(Fs, "steve-hub/src/web.rs", Hub, "the web assets"),
     e(Fs, "steve-hub/src/access.rs", Hub, "the single sign-on client secret the settings keep in the Hub's own data directory"),

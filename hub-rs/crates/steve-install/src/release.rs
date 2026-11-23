@@ -433,7 +433,6 @@ impl Runtime {
             .env("STEVE_HOST", "127.0.0.1")
             .env("STEVE_UPGRADE_ID", id.to_string())
             .env("STEVE_NO_RESUME", "1")
-            .env("STEVE_NODE_MODE", "off")
             .env("STEVE_REPO", self.home.join("probe-unused-repo"))
             .env("STEVE_ADAPTER_CLAUDE", "/usr/bin/false")
             .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")
@@ -1411,7 +1410,7 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
         );
     }
     #[test]
-    fn schema_gate_preserves_legacy_and_future_databases() {
+    fn schema_gate_refuses_unstamped_and_preserves_future_databases() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("data.sqlite3");
         assert_eq!(
@@ -1423,13 +1422,7 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
         );
         assert!(!db.exists());
         set_schema(&db, 55, None).unwrap();
-        assert_eq!(
-            inspect_schema(&db).unwrap(),
-            Compat {
-                schema: 55,
-                min_reader: 55
-            }
-        );
+        assert!(inspect_schema(&db).is_err());
         fs::write(
             dir.path().join("release.json"),
             r#"{"schema":{"target":54}}"#,

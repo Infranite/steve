@@ -8,9 +8,10 @@
 //! and is reported not ready.
 //!
 //! [`Preflight::can_run`] is the deterministic check `can_run(principal, bot, harness)`. It runs
-//! when a schedule is created or edited and when a Bot is given an item or a schedule (refused,
-//! saying why and where to fix it), when a schedule fires (no item is made; the run records the
-//! reason), and before a session is made (no session; one clear error on the item, no retry). It
+//! when a schedule is created or edited and when a Bot is given a schedule (refused, saying why
+//! and where to fix it) and when a schedule fires (no item is made; the run records the reason).
+//! An item's session is checked against its Bot's execution Nodes instead
+//! ([`super::bot_dispatch`]). It
 //! reads only the database and what the Nodes last reported; it decrypts nothing and calls no
 //! model. A Node that is linked but has not answered yet leaves its harnesses unknown, never
 //! refused (#234).
@@ -94,20 +95,6 @@ impl Preflight {
             });
         }
         Ok(())
-    }
-
-    /// [`Self::can_run_harness`] for `bot` given `item`: its principal is the item's.
-    pub fn can_run_item(
-        &self,
-        c: &Connection,
-        item: &str,
-        bot: &str,
-        harness: &str,
-    ) -> Result<(), Blocked> {
-        match principal::of_item(c, item) {
-            Ok(Some((_, p))) => self.can_run_harness(c, &p, bot, harness),
-            _ => Ok(()),
-        }
     }
 
     /// For a schedule: its principal is the named requester while a member, else the service one.

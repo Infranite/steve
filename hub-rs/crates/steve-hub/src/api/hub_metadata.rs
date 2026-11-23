@@ -3,14 +3,13 @@
 //! The reserved settings row needs no schema change. Permission, revision and write share
 //! one SQLite transaction. Identity reuses node.hub_id even with both Nodes disabled.
 //!
-//! `GET /api/hub-metadata` returns contract/capabilities v1, metadata, can_edit and
-//! edit_reason, and the Hub's addresses (`addresses: [{url, page, kind}]`, `capabilities.addresses: 1`). `PUT` accepts only revision, display_name and purpose_note. A stale
+//! `GET /api/hub-metadata` returns metadata, can_edit and edit_reason, and the Hub's addresses
+//! (`addresses: [{url, page, kind}]`). `PUT` accepts only revision, display_name and purpose_note. A stale
 //! revision is 409; revoked/non-owner access is 403; invalid fields are 400. No force
 //! overwrite exists. Times are Unix milliseconds; updated_by is the stable users.id.
 //! Names are trimmed, single-line, 1–64 Unicode scalars. Notes normalize CRLF/CR to
 //! LF, retain paragraphs, allow LF/tab and at most 500 scalars (empty clears).
-//! Clients treat both fields as plain text. /auth/hello declares hub_metadata: 1;
-//! neither API generation nor software version implies this capability.
+//! Clients treat both fields as plain text.
 use super::{AppState, Ctx, blocking};
 use crate::error::ApiError;
 use axum::http::HeaderMap;
@@ -137,16 +136,15 @@ fn store(st: &AppState) -> Result<Store, ApiError> {
 }
 
 fn reply(m: Metadata, can_edit: bool) -> Value {
-    json!({"contract": 1, "capabilities": {"shared_metadata": 1}, "metadata": m,
+    json!({"metadata": m,
         "can_edit": can_edit, "edit_reason": if can_edit { None } else { Some("owner_required") },
         // No trustworthy device mapping is available from the instance identity alone.
         "device_id": null})
 }
 
-/// `reply` with the Hub's addresses (G12, `capabilities.addresses`): `[{url, page, kind}]`, the public one
+/// `reply` with the Hub's addresses (G12): `[{url, page, kind}]`, the public one
 /// first, then `lan` / `tailnet`, then `loopback`.
 fn with_addresses(mut v: Value, st: &AppState, headers: &HeaderMap) -> Value {
-    v["capabilities"]["addresses"] = json!(1);
     v["addresses"] = json!(crate::access::hub_addresses(&st.cfg, headers));
     v
 }

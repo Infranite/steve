@@ -680,7 +680,7 @@ pub(crate) fn revoke_tools(inner: &Inner, session: &SessionId) {
 /// Prompt blocks: the text, attachments put into the workspace (fetched from the Hub for this
 /// execution and placed here, [`attachments::place`]), images inline. An attachment the Hub no
 /// longer has is left out and named in a note; one that cannot be
-/// placed in the workspace turns into a note too (the legacy runner's behaviour). Anything else
+/// placed in the workspace turns into a note too. Anything else
 /// (offline, past the deadline) fails the preparation.
 pub(crate) async fn prompt(
     inner: &Arc<Inner>,
@@ -903,8 +903,7 @@ fn head_of(dir: &Path) -> ApiResult<Option<String>> {
 }
 
 fn head_with(dir: &Path, program: &Path, timeout: Duration) -> ApiResult<Option<String>> {
-    use std::io::Read;
-    use std::os::{fd::AsRawFd, unix::process::CommandExt};
+    use std::os::unix::process::CommandExt;
     let is_repo = dir.join(".git").exists();
     let mut child = std::process::Command::new(program)
         .args(["rev-parse", "HEAD"])
@@ -915,6 +914,16 @@ fn head_with(dir: &Path, program: &Path, timeout: Duration) -> ApiResult<Option<
         .stdout(std::process::Stdio::piped())
         .spawn()
         .map_err(internal)?;
+    collect_head_probe(&mut child, is_repo, timeout)
+}
+
+fn collect_head_probe(
+    child: &mut std::process::Child,
+    is_repo: bool,
+    timeout: Duration,
+) -> ApiResult<Option<String>> {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
     let mut pipe = child.stdout.take().expect("pipe");
     let flags = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
     if flags < 0
@@ -2913,11 +2922,6 @@ impl ExecutionControl for LocalNode {
             if op.execution.is_some() {
                 return unsupported("recover execution: use abandon");
             }
-            if t.spec(&target)?.is_none()
-                && matches!(op.method.as_str(), "prepare_workspace" | "tidy_workspace")
-            {
-                return unsupported("legacy workspace control has no process evidence");
-            }
             session = t.session_of(&target)?;
             if session.is_none()
                 && op.method == "abandon"
@@ -3077,14 +3081,13 @@ impl ExecutionControl for LocalNode {
     }
 
     async fn snapshot(&self, page: PageRequest) -> ApiResult<Snapshot> {
-        // limit=0 opts into bounded head pages. Older Hubs still receive the original complete
-        // heads vector; a new Hub uses the cursor to request both entry and head pages.
+        // Entries and stream heads are both paged; 0 asks for the default page size.
         let limit = if page.limit == 0 {
             100
         } else {
             page.limit as usize
         };
-        let (token, offset, head_offset, paged_heads) = match &page.cursor {
+        let (token, offset, head_offset) = match &page.cursor {
             None => {
                 // the operations, their waits and the stream heads, as of one moment
                 let (entries, heads) = self.0.j.read(|t| {
@@ -3114,26 +3117,20 @@ impl ExecutionControl for LocalNode {
                         next: None,
                     },
                 );
-                (token, 0usize, 0usize, page.limit == 0)
+                (token, 0usize, 0usize)
             }
             Some(c) => {
                 let bad = || ApiError::new(ErrorCode::Invalid, "not a snapshot cursor");
-                let (t, rest) = c
+                let (t, o, h) = c
                     .as_str()
                     .strip_prefix("snap")
                     .and_then(|r| r.split_once('.'))
+                    .and_then(|(t, rest)| rest.split_once('.').map(|(o, h)| (t, o, h)))
                     .ok_or_else(bad)?;
-                let (o, h) = match rest.split_once('.') {
-                    Some((o, h)) => (o, Some(h)),
-                    None => (rest, None),
-                };
                 (
                     t.parse().map_err(|_| bad())?,
                     o.parse().map_err(|_| bad())?,
-                    h.map(|h| h.parse().map_err(|_| bad()))
-                        .transpose()?
-                        .unwrap_or(0),
-                    h.is_some(),
+                    h.parse().map_err(|_| bad())?,
                 )
             }
         };
@@ -3146,27 +3143,23 @@ impl ExecutionControl for LocalNode {
         };
         let entries: Vec<SnapshotEntry> =
             s.entries.iter().skip(offset).take(limit).cloned().collect();
-        let heads: Vec<StreamHead> = if paged_heads {
-            s.heads
-                .iter()
-                .skip(head_offset)
-                .take(limit)
-                .cloned()
-                .collect()
-        } else {
-            s.heads.clone()
-        };
-        let more = offset + entries.len() < s.entries.len()
-            || (paged_heads && head_offset + heads.len() < s.heads.len());
+        let heads: Vec<StreamHead> = s
+            .heads
+            .iter()
+            .skip(head_offset)
+            .take(limit)
+            .cloned()
+            .collect();
+        let more =
+            offset + entries.len() < s.entries.len() || head_offset + heads.len() < s.heads.len();
         let next_head = head_offset + heads.len();
         Ok(Snapshot {
             heads,
             next: if more {
-                Some(id(if paged_heads {
-                    format!("snap{token}.{}.{}", offset + entries.len(), next_head)
-                } else {
-                    format!("snap{token}.{}", offset + entries.len())
-                })?)
+                Some(id(format!(
+                    "snap{token}.{}.{next_head}",
+                    offset + entries.len()
+                ))?)
             } else {
                 None
             },
@@ -4426,11 +4419,7 @@ impl Discovery for LocalNode {
             },
             // a command's secret as a temp file on this machine
             features: {
-                let mut f = vec![
-                    FEATURE_SECRET_FILE.into(),
-                    FEATURE_ARTIFACT_READ.into(),
-                    FEATURE_HARNESS_UPDATES.into(),
-                ];
+                let mut f = vec![FEATURE_SECRET_FILE.into()];
                 if self.0.remover.get().is_some() {
                     f.push(FEATURE_NODE_REMOVE.into());
                 }
@@ -4590,20 +4579,44 @@ mod binding_tests {
 
     #[test]
     fn hanging_git_probe_is_bounded_and_reaped() {
-        use std::os::unix::fs::PermissionsExt;
+        use std::process::Stdio;
+        use steve_runtime::testkit::{eventually_blocking, process::Command};
+
         let d = tempfile::tempdir().unwrap();
-        let program = d.path().join("git");
-        std::fs::write(&program, "#!/bin/sh\necho $$ > pid\nexec sleep 30\n").unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let started = std::time::Instant::now();
-        assert!(head_with(d.path(), &program, Duration::from_millis(1000)).is_err());
-        assert!(started.elapsed() < Duration::from_secs(2));
-        let pid: i32 = std::fs::read_to_string(d.path().join("pid"))
-            .unwrap()
-            .trim()
-            .parse()
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", ": > ready && IFS= read -r line"])
+            .current_dir(d.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
             .unwrap();
-        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        let pid = child.id() as libc::pid_t;
+        // Keep stdin open so the fixture hangs until killed. Do not start the probe's budget
+        // until the shell has signalled readiness, even if launching it took a while.
+        assert!(eventually_blocking(
+            "hanging HEAD probe fixture to signal readiness",
+            || { d.path().join("ready").is_file() || child.try_wait().unwrap().is_some() }
+        ));
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "fixture exited before the probe"
+        );
+
+        let started = std::time::Instant::now();
+        let timeout = Duration::from_secs(1);
+        let error = collect_head_probe(&mut child, false, timeout).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Stale);
+        assert!(started.elapsed() >= timeout);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        // A killed but unreaped child would still be waitable.
+        assert_eq!(
+            unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
     }
 
     #[test]

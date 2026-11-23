@@ -1,6 +1,6 @@
 /* Signals, flows, schedules and event sources (steve-flow, signals-automation.md §4 and schedules.md §8).
- * Only the Rust Hub serves these. The TS Hub answers an unknown GET /api path with the SPA's index.html, and
- * other methods with a 404: both come back as NotWired, and the pages show the module's Unwired placeholder. */
+ * A Hub without the module answers an unknown GET /api path with the SPA's index.html, and other methods with a
+ * 404: both come back as NotWired, and the pages show the module's Unwired placeholder. */
 import { useCallback, useEffect, useRef, useState } from "react"
 import { modReq as req, Unauthenticated, NotWired, qs } from "@/api"
 import { refresh, useHubEvents } from "@/store"

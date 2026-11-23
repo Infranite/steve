@@ -1371,8 +1371,8 @@ impl Tx<'_> {
                     bot_id: item.bot_id.clone(),
                     project_id: item.project_id.clone(),
                     source: serde_json::to_value(&item.source)?,
-                    cycle: Some(cycle),
-                    revision: Some(rev),
+                    cycle,
+                    revision: rev,
                     acceptance: acceptance.clone(),
                 };
                 steve_store::outbox::append(

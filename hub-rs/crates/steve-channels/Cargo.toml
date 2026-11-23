@@ -92,7 +92,4 @@ steve-channels = { path = ".", features = ["fake"] }
 # F1 tests: a store in a temp dir, the vault, the connection routes.
 tempfile = "=3.27.0"
 tower = { version = "=0.5.3", features = ["util"] }
-# The reply eval (`examples/reply_eval.rs`): the model route and the one-shot driver the Hub uses,
-# and the router's own system texts.
 steve-core = { path = "../steve-core" }
-steve-acp = { path = "../steve-acp" }

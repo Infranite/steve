@@ -42,7 +42,7 @@ fn a_cycle_closes_once_and_a_new_cycle_emits_its_own_fact() {
         1,
         "no second fact for the same cycle"
     );
-    // a legacy status write cannot reopen it any more
+    // a write of the derived status cannot reopen it any more
     assert!(
         k.db()
             .item_patch(&id, crate::patch![status: "run"])

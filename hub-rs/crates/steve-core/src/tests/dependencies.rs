@@ -63,7 +63,7 @@ fn creation_saves_prerequisites_before_admission_and_starts_once_after_restart()
 }
 
 #[test]
-fn adding_a_prerequisite_to_a_running_legacy_item_blocks_questions_and_followups() {
+fn adding_a_prerequisite_to_a_running_item_blocks_questions_and_followups() {
     for asked_before_wait in [false, true] {
         let k = Kit::new();
         let (item, dep, s) = setup(&k);

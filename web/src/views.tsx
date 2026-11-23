@@ -5,7 +5,7 @@ import { itemState, type ItemState } from "@/item-state"
 import { clip } from "@/thread/topics"
 import { isAttachedWorkflowChild, isWorkflowChild, itemDisplayState, itemDisplayStatus, partitionSubtasks } from "@/item-workflow-relation"
 import { laneOf } from "@/item-lanes"
-import { DispatchDetails, LEGACY_TEAM, useBotTeams } from "@/bot-dispatch"
+import { DispatchDetails, NO_TEAM, useBotTeams } from "@/bot-dispatch"
 import { SetSelect } from "@/settings-controls"
 import { DependencyWaitPanel } from "@/dependency-wait-panel"
 import { ItemDebugDialog } from "@/debug-panel"
@@ -340,7 +340,7 @@ export function NewItemDialog({ project: pre, bot: preBot }: { project?: string;
       <FieldGroup className="gap-4">
         <Field><FieldLabel htmlFor="new-goal">{t("views:newItem.goal")}</FieldLabel><Textarea id="new-goal" autoFocus className="min-h-24 rounded-lg" placeholder={t("views:newItem.goalPlaceholder")} value={g} onChange={(e) => setG(e.target.value)} /></Field>
         {!!teams?.teams.length && <Field><FieldLabel>{t("manage:dispatch.teams")}</FieldLabel><SetSelect wide testId="new-item-team" label={t("manage:dispatch.teams")} value={team || "default"}
-          options={[{ v: "default", l: t("manage:dispatch.useDefault", { name: teams.teams.find(v => v.id === teams.default)?.name ?? t("manage:dispatch.legacy") }) }, { v: LEGACY_TEAM, l: t("manage:dispatch.legacy") }, ...teams.teams.map(v => ({ v: v.id, l: v.name }))]}
+          options={[{ v: "default", l: t("manage:dispatch.useDefault", { name: teams.teams.find(v => v.id === teams.default)?.name ?? t("manage:dispatch.noTeam") }) }, { v: NO_TEAM, l: t("manage:dispatch.noTeam") }, ...teams.teams.map(v => ({ v: v.id, l: v.name }))]}
           onChange={v => { setTeam(v === "default" ? "" : v); setBot("auto") }} /></Field>}
         {activeTeam && !allowed.length && <p role="status" className="type-footnote text-attention">{t("manage:dispatch.noMembers")}</p>}
         <div className="grid grid-cols-2 gap-3">

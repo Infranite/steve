@@ -32,7 +32,6 @@ pub struct Unspent {
 pub enum Attribution {
     Meter,
     CostOnly,
-    Uncertain,
 }
 
 pub struct Meter {
@@ -59,10 +58,6 @@ fn u(column: &'static str) -> Expr {
     Expr::col(("u", column))
 }
 
-fn peer(column: &'static str) -> Expr {
-    Expr::col(("p", column))
-}
-
 fn t(column: &'static str) -> Expr {
     Expr::col(("t", column))
 }
@@ -75,75 +70,12 @@ fn number(n: i64) -> Expr {
     Expr::Constant(n.into())
 }
 
-fn subquery(q: SelectStatement) -> Expr {
-    Expr::SubQuery(None, Box::new(q.into()))
-}
-
-fn without_empty(e: Expr) -> Expr {
-    Func::cust("nullif").arg(e).arg(text("")).into()
-}
-
-fn has_tokens(column: fn(&'static str) -> Expr) -> Expr {
-    column("input")
-        .is_not_null()
-        .or(column("output").is_not_null())
-        .or(column("cache_read").is_not_null())
-        .or(column("cache_write").is_not_null())
-}
-
-/// Stable turn/call IDs identify paired token and cost rows. Equal timestamps alone do not.
 fn token_role(dialect: Dialect) -> Expr {
-    let detail = |key| dialect.json_field(u("detail"), key);
-    let peer_detail = |key| dialect.json_field(peer("detail"), key);
-    let call = without_empty(detail("call_id"));
-    let peer_call = without_empty(peer_detail("call_id"));
-    let same_turn = u("turn_id")
-        .is_not_null()
-        .and(peer("turn_id").eq(u("turn_id")));
-    let same_call = call
-        .clone()
-        .is_not_null()
-        .and(peer_call.clone().eq(detail("call_id")));
-    let owned = same_turn.or(same_call);
-    let uncertain = u("turn_id")
-        .is_null()
-        .and(peer("turn_id").is_null())
-        .and(call.is_null())
-        .and(peer_call.is_null())
-        .and(peer("ts").eq(u("ts")));
-
-    let mut candidates = Query::select();
-    let certainty = Expr::case(owned.clone(), number(0)).finally(number(-1));
-    candidates
-        .expr(Func::max(certainty))
-        .from_as("usage_records", "p")
-        .and_where(peer("id").ne(u("id")))
-        .and_where(peer_detail("scope").eq(text("all")))
-        .and_where(has_tokens(peer))
-        .and_where(owned.or(uncertain));
-    for key in [
-        "workspace_id",
-        "day",
-        "source",
-        "purpose",
-        "harness",
-        "model",
-    ] {
-        candidates.and_where(peer(key).eq(u(key)));
-    }
-    for key in ["item_id", "session_id", "bot_id", "project_id"] {
-        candidates.and_where(dialect.null_safe_eq(peer(key), u(key)));
-    }
-    let cost_only = has_tokens(u)
-        .not()
-        .and(u("cost_reported").is_not_null())
-        .and(detail("scope").eq(text("main")));
-    let role = Expr::case(
-        cost_only,
-        Func::coalesce([subquery(candidates.take()), number(1)]),
-    )
-    .finally(number(1));
-    Func::coalesce([detail("accounting_tokens"), role.into()]).into()
+    Func::coalesce([
+        dialect.json_field(u("detail"), "accounting_tokens"),
+        number(1),
+    ])
+    .into()
 }
 
 fn entity_filter(entity: Entity<'_>, is_turn: bool) -> (&'static str, &str) {
@@ -252,7 +184,6 @@ impl<C: Read> CoverageRows<'_, C> {
                 at: r.get(13)?,
                 attribution: match r.get::<i64>(14)? {
                     0 => Attribution::CostOnly,
-                    n if n < 0 => Attribution::Uncertain,
                     _ => Attribution::Meter,
                 },
                 unspent: r

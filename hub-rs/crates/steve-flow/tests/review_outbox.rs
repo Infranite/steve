@@ -37,7 +37,22 @@ fn event(e: &FlowEnv, ws: &str) -> Event {
         "done",
     )
     .unwrap();
-    e.env.store().transaction(|tx|outbox::emit(tx,ws,"work.item.done",1,&json!({"item_id":"review-item","title":"snapshot title","status":"done","bot_id":"steve","project_id":null,"source":null}))).unwrap()
+    e.env
+        .store()
+        .write(|w| {
+            outbox::append(
+                w,
+                ws,
+                "work.item.done",
+                1,
+                &json!({
+                    "item_id": "review-item", "title": "snapshot title", "status": "done",
+                    "bot_id": "steve", "project_id": null, "source": null,
+                    "cycle": 1, "revision": 1
+                }),
+            )
+        })
+        .unwrap()
 }
 fn apply_without_after(e: &FlowEnv, ev: &Event) {
     let c = ItemTrigger::new(e.flow.clone());

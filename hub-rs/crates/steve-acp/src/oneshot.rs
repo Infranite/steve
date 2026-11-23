@@ -416,7 +416,8 @@ where
     Ok(end)
 }
 
-pub async fn run(
+#[cfg(test)]
+async fn run(
     req: Request<'_>,
     on_spawn: &(dyn Fn(u32) -> bool + Send + Sync),
     on_event: &(dyn Fn(EventBody) + Send + Sync),
@@ -428,7 +429,6 @@ pub async fn run(
 /// Cancellation must be awaited: no further handshake, prompt or tool permission is driven after
 /// the signal. Only process shutdown and bounded source sampling continue. The caller retains its
 /// cancellation/budget reason; this driver returns `Failed("cancelled")` for an external stop.
-/// `run` remains the compatible entry point for callers with only a request timeout.
 pub async fn run_cancellable(
     req: Request<'_>,
     on_spawn: &(dyn Fn(u32) -> bool + Send + Sync),

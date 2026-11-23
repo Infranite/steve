@@ -1,5 +1,5 @@
 use crate::{Read, Result};
-use sea_query::{Expr, ExprTrait, LikeExpr, Query};
+use sea_query::{Expr, ExprTrait, Query};
 
 pub fn cwd(c: &mut impl Read, ws: &str, session: &str) -> Result<Option<String>> {
     Ok(c.one(
@@ -49,23 +49,6 @@ pub fn with_queued_input(c: &mut impl Read) -> Result<Vec<String>> {
             .and_where(Expr::col(("s", "status")).ne("ended")),
         |row| row.get(0),
     )
-}
-
-pub fn has_dispatch_prefix(c: &mut impl Read, session: &str, prefix: &str) -> Result<bool> {
-    let literal = prefix
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_");
-    c.one(
-        Query::select()
-            .column("session_id")
-            .from("session_dispatch")
-            .and_where(Expr::col("session_id").eq(session))
-            .and_where(Expr::col("text").like(LikeExpr::new(format!("{literal}%")).escape('\\')))
-            .limit(1),
-        |_| Ok(()),
-    )
-    .map(|row| row.is_some())
 }
 
 pub fn item_cost(c: &mut impl Read, item: &str) -> Result<Option<f64>> {

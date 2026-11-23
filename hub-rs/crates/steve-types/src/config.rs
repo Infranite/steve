@@ -4,7 +4,14 @@
 use crate::*;
 use serde::Serialize;
 
-pub const REASONS: &[ReasonSet] = &[];
+reasons! {
+    pub enum ConfigReason = "config" {
+        DiagnosticModelDisabled = diagnostic_model_disabled [Forbidden] (),
+    }
+    retired {}
+}
+
+pub const REASONS: &[ReasonSet] = &[ConfigReason::SET];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, strum::EnumCount)]
 #[serde(tag = "type")]

@@ -27,8 +27,6 @@ pub struct Coverage {
     pub complete: i64,
     pub pending: i64,
     pub unavailable: i64,
-    /// Old cost-only rows with a same-time token peer but no stable call ownership.
-    pub uncertain: i64,
     /// Sums of known fields only. A partial sum is explicitly labelled by `state`.
     pub total: Option<i64>,
     pub input: Option<i64>,
@@ -51,7 +49,6 @@ impl Coverage {
         self.complete += b.complete;
         self.pending += b.pending;
         self.unavailable += b.unavailable;
-        self.uncertain += b.uncertain;
         self.total = sum(self.total, b.total);
         self.input = sum(self.input, b.input);
         self.output = sum(self.output, b.output);
@@ -60,7 +57,7 @@ impl Coverage {
         self.cost_reported = sum(self.cost_reported, b.cost_reported);
         self.state = if self.expected > 0 && self.complete == self.expected {
             CoverageState::Complete
-        } else if self.reported > 0 || self.uncertain > 0 {
+        } else if self.reported > 0 {
             CoverageState::Partial
         } else if self.pending > 0 || self.expected == 0 {
             CoverageState::NotReported
@@ -115,12 +112,6 @@ fn load(
                 Attribution::Meter => cell.observe(row.tokens, row.cost, row.pending),
                 Attribution::CostOnly => cell.add(&Coverage {
                     cost_reported: row.cost,
-                    ..Default::default()
-                }),
-                Attribution::Uncertain => cell.add(&Coverage {
-                    cost_reported: row.cost,
-                    expected: 1,
-                    uncertain: 1,
                     ..Default::default()
                 }),
             }

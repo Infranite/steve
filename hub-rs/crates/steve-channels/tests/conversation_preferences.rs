@@ -328,8 +328,10 @@ fn replied_is_filtered_before_pagination_and_combines_with_search_and_channel() 
             c.execute("INSERT INTO connections (id, workspace_id, account_id, adapter, auth, created_by, created, updated)
                 VALUES ('test-channel', ?1, 'shared', 'feishu_app', 'none', ?2, 1, 1)", params![WS, ME])?;
             c.execute(
-                "UPDATE spaces SET connection_id = 'test-channel' WHERE id LIKE 'replied-%'",
-                [],
+                "INSERT INTO space_identities (space_id, connection_id, workspace_id, joined, ordinal)
+                 SELECT id, 'test-channel', workspace_id, created, 0 FROM spaces
+                 WHERE workspace_id = ?1",
+                [WS],
             )?;
             Ok(())
         })

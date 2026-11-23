@@ -142,18 +142,6 @@ pub fn open_turn(store: &Store, session: &str) {
     }).unwrap();
 }
 
-pub fn clear_stop_sequence(store: &Store, session: &str) {
-    store
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE session_stops SET asked_seq = NULL WHERE session_id = ?",
-                [session],
-            )?;
-            Ok(())
-        })
-        .unwrap();
-}
-
 pub fn pending_start(
     w: &mut W<'_>,
     session: &str,

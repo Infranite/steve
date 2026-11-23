@@ -6,13 +6,10 @@ export default {
     "newTeam": "New Team",
     "teamName": "Team name",
     "teamHint": "Teams reuse existing Bots and can narrow their bound execution Nodes. Switching the default changes only new items.",
-    "legacy": "Original routing",
+    "noTeam": "No Team",
     "executionNodes": "Execution Nodes",
-    "bindingMode": "Execution Node policy",
-    "legacyHint": "Keeps the installation’s original routing outside named Teams. Candidates are not added to a Bot’s bound list automatically.",
-    "strictHint": "Only these Nodes may take new work for this Bot. The first is preferred; the rest are fallbacks in order. Leaving the list empty blocks new work.",
+    "nodesHint": "Only these Nodes may take new work for this Bot. The first is preferred; the rest are fallbacks in order. Leaving the list empty blocks new work. Until set, only the Hub’s local Node is used.",
     "probeHint": "Uses the saved Bot configuration. The Node opens a scratch session without sending a model prompt. This checks adapter readiness, not provider entitlement or quota.",
-    "restricted": "Use only bound Nodes",
     "local": "Hub’s local Node",
     "hiddenBindings": "Some bindings are no longer authorized. Saving the displayed list removes those bindings.",
     "refresh": "Refresh reports",
@@ -37,7 +34,6 @@ export default {
       "inherited": "Inherited from parent"
     },
     "reason": {
-      "legacy": "This session was bound by the original router.",
       "preferred": "Selected the first eligible Node in the allowed list.",
       "fallback": "Used a fallback within the allowed list.",
       "outside_team": "This Bot is not an enabled member of this Team.",
@@ -55,6 +51,7 @@ export default {
       "pending": "Waiting for a current compatibility report.",
       "unauthorized": "The Node is not authorized for this workspace.",
       "bot": "The Bot is disabled or no longer in the workspace.",
+      "local": "The Hub’s local Node cannot run this session (its directory, permission mode or item state).",
       "bind_failed": "Could not bind a Node in the allowed list. Check the Bot and Device settings, then retry."
     }
   },

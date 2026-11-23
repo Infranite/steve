@@ -588,7 +588,7 @@ pub fn owner_user(c: &Connection, ws: &str, conn: &str) -> ChannelResult<String>
     .ok_or_else(|| ApiError::not_found("连接"))
 }
 
-/// Preserve the connection owner's identity without loading legacy visibility scopes.
+/// The connection owner as a bare viewer (personal reads are unconditional).
 pub fn viewer(c: &Connection, ws: &str, conn: &str, _space: &str) -> ChannelResult<Viewer> {
     let user = owner_user(c, ws, conn)?;
     Ok(Viewer::bare(ws, &user))

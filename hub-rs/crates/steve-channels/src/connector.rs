@@ -93,8 +93,8 @@ pub struct Profile {
     pub features: Vec<String>,
 }
 
-/// An optional `connector` in the existing ext_ws v1 hello. The extension is versioned separately
-/// so a legacy messaging bridge is not mistaken for a generic connector. Version 2 adds `profiles`.
+/// An optional `connector` in the ext_ws v1 hello. The extension is versioned separately so a
+/// messaging bridge is not mistaken for a generic connector. Version 2 adds `profiles`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {

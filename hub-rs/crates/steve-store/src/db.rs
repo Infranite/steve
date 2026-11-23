@@ -244,6 +244,14 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/114.sql"),
     // 115: Node events are applied as they are received; the inbox and the quarantine go.
     include_str!("../migrations/115.sql"),
+    // 116: one dispatch model; the pre-Team automatic spread list goes.
+    include_str!("../migrations/116.sql"),
+    // 117: data older builds left in shapes nothing reads any more, rewritten or removed.
+    include_str!("../migrations/117.sql"),
+    // 118: typed command lookups and durable session permission modes.
+    include_str!("../migrations/118.sql"),
+    // 119: Node telemetry now lives only in the Hub's in-memory recorder.
+    include_str!("../migrations/119.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).
@@ -266,8 +274,7 @@ impl crate::Store {
     }
 }
 
-/// Inspect the schema on disk, including committed WAL frames. A missing file has schema 0.
-/// Used by offline release tooling, this never creates or migrates the database.
+/// Read the on-disk compatibility stamp, including committed WAL frames.
 pub fn inspect_schema(path: &Path) -> Result<Compat> {
     if !path
         .try_exists()
@@ -278,10 +285,30 @@ pub fn inspect_schema(path: &Path) -> Result<Compat> {
             min_reader: 0,
         });
     }
+    inspect_header(path, |c| {
+        let (schema, stamp) = read_schema(c)?;
+        if schema != 0 && stamp.is_none() {
+            return Err(StoreError::Storage(format!(
+                "database schema {schema} has no schema_compat stamp; nothing was changed"
+            )));
+        }
+        Ok(Compat {
+            schema,
+            min_reader: stamp.unwrap_or(0),
+        })
+    })
+}
+
+/// Identify the version of a database that will only be used to make a migrated copy.
+pub fn inspect_schema_version(path: &Path) -> Result<i64> {
+    inspect_header(path, schema_version)
+}
+
+fn inspect_header<T>(path: &Path, read: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
     let c = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    // The two schema stamps must come from the same snapshot, even during a concurrent upgrade.
+    // Read the table definitions and their stamps from one snapshot.
     let tx = c.unchecked_transaction()?;
-    compat(&tx)
+    read(&tx)
 }
 
 #[cfg(any(test, feature = "testkit"))]
@@ -334,30 +361,41 @@ fn inspect_schema_reads_uncheckpointed_commits() {
 /// Read [`Compat`] off a connection. A database no build stamped yet (before 0.2.14) is readable only by
 /// builds that know its schema.
 pub fn compat(c: &Connection) -> Result<Compat> {
-    let has = |t: &str| -> Result<bool> {
-        Ok(c.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
-            [t],
-            |r| r.get(0),
-        )?)
-    };
-    let schema: i64 = if has("schema_version")? {
-        c.query_row("SELECT v FROM schema_version", [], |r| r.get(0))
-            .optional()?
-            .unwrap_or(0)
-    } else {
-        0
-    };
-    let stamped: Option<i64> = if has("schema_compat")? {
+    let (schema, stamp) = read_schema(c)?;
+    Ok(Compat {
+        schema,
+        min_reader: stamp.unwrap_or(schema),
+    })
+}
+
+fn read_schema(c: &Connection) -> Result<(i64, Option<i64>)> {
+    let schema = schema_version(c)?;
+    let stamped = if has_table(c, "schema_compat")? {
         c.query_row("SELECT min_reader FROM schema_compat", [], |r| r.get(0))
             .optional()?
     } else {
         None
     };
-    Ok(Compat {
-        schema,
-        min_reader: stamped.unwrap_or(schema),
-    })
+    Ok((schema, stamped))
+}
+
+fn schema_version(c: &Connection) -> Result<i64> {
+    if !has_table(c, "schema_version")? {
+        return Ok(0);
+    }
+    Ok(
+        c.query_row("SELECT v FROM schema_version", [], |r| r.get(0))
+            .optional()?
+            .unwrap_or(0),
+    )
+}
+
+fn has_table(c: &Connection, name: &str) -> Result<bool> {
+    Ok(c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
+        [name],
+        |r| r.get(0),
+    )?)
 }
 
 /// Prepared statements kept per connection.

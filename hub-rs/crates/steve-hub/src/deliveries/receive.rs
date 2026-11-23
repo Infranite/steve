@@ -66,7 +66,7 @@ impl Service {
             .await
     }
 
-    /// Bot input is scoped to its current execution workspace (legacy: session directory) or, in an
+    /// Bot input is scoped to its current execution workspace or, in an
     /// item session, its item's Hub-owned outputs. Any session with a known working directory may
     /// deliver: chats, conversations and scheduled runs as well as items. The Node placement is
     /// taken from the current binding, never from a Bot-supplied node id.
@@ -97,7 +97,7 @@ impl Service {
             .and_then(|s| s.to_str())
             .ok_or("invalid delivery filename")?
             .to_string();
-        let src = self.source_for_delivery(session, path, cwd, &source, workspaces)?;
+        let src = self.source_for_delivery(session, path, &source, workspaces)?;
         let bytes = tokio::time::timeout(std::time::Duration::from_secs(300), read_source(&src))
             .await
             .map_err(|_| "delivery transfer timed out before complete receipt")??;
@@ -136,7 +136,6 @@ impl Service {
         &self,
         session: &Session,
         path: &str,
-        cwd: &Path,
         source: &Path,
         workspaces: &Workspaces,
     ) -> Result<Source, String> {
@@ -163,12 +162,6 @@ impl Service {
         } else {
             // Bound workspace paths belong to the Node, not sessions.cwd (which may be a
             // Hub scratch placeholder). Only the authenticated current execution can name them.
-            workspaces.refresh_roots().map_err(|e| e.to_string())?;
-            let bound = self
-                .store
-                .reader(|c| steve_store::runtime::workspace_ref_of(c, &session.id))
-                .map_err(|e| e.to_string())?
-                .is_some();
             match workspaces.placement_of(Subject::Session(&session.id)) {
                 Ok(p) => match p.at {
                     At::Workspace(workspace) => {
@@ -200,12 +193,8 @@ impl Service {
                             },
                         )
                     }
-                    At::Root(base) => {
-                        if bound {
-                            return Err("bound delivery has no valid Node workspace".into());
-                        }
-                        let rel = session_relative(cwd, &source)?;
-                        root_source(p.node, base, rel)?
+                    At::Root(_) => {
+                        return Err("delivery has no valid Node workspace".into());
                     }
                 },
                 Err(e) => return Err(format!("delivery Node unavailable: {e}")),
@@ -228,9 +217,9 @@ impl Service {
         if d.reply {
             return Err("reply resources belong to their original session".into());
         }
-        // Accept old receipts without a selector, and the exact new page URL. Do not infer
-        // an association from a path on an arbitrary origin, or swallow a wrong selector.
-        if location != format!("{prefix}{}", d.id) && location != self.url(&d.id, &d.workspace_id) {
+        // Only the exact page URL. Do not infer an association from a path on an arbitrary
+        // origin, or swallow a wrong selector.
+        if location != self.url(&d.id, &d.workspace_id) {
             return Err("invalid delivery URL or workspace selector".into());
         }
         // A coordinator may include an upstream child's delivery in its own outputs. Reuse
@@ -317,11 +306,11 @@ mod tests {
                 assert_eq!(
                     method,
                     steve_node_wire::methods::EXECUTION_DELIVERY_READ,
-                    "old Node must not fall back to workspace or general fs.read"
+                    "an execution delivery never falls back to workspace or general fs.read"
                 );
                 return Err(ApiError::new(
                     ErrorCode::Unsupported,
-                    "old Node lacks execution deliveries",
+                    "execution delivery refused",
                 ));
             }
             assert_eq!(
@@ -330,7 +319,10 @@ mod tests {
                 "no fallback to general fs.read"
             );
             if self.mode == 1 {
-                return Err(ApiError::new(ErrorCode::Unsupported, "old Node"));
+                return Err(ApiError::new(
+                    ErrorCode::Unsupported,
+                    "delivery read refused",
+                ));
             }
             let q: FileRead = steve_node_wire::conn::from_value(p)?;
             let FileAddress::Root(path) = q.path else {

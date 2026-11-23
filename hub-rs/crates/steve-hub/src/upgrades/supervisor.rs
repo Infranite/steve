@@ -231,24 +231,12 @@ pub(crate) fn backup(db: &Path, home: &Path, from: String, to: String) -> Result
     )?
     .database_path())
 }
-/// Existing upgrade status/journals use a fixed reference name. A symlink keeps that
-/// contract without holding a second database copy alive beyond bundle retention.
-fn journal_backup_link(saved: PathBuf, legacy: &Path) -> Result<PathBuf> {
-    let canonical = fs::canonicalize(&saved)?;
-    std::os::unix::fs::symlink(&canonical, legacy)?;
-    File::open(
-        legacy
-            .parent()
-            .context("journal reference needs a parent")?,
-    )?
-    .sync_all()?;
-    Ok(canonical)
-}
-fn saved_path(u: &Updates, op: &Operation) -> PathBuf {
+/// The verified copy the operation recorded before it switched.
+fn saved_path(op: &Operation) -> Result<PathBuf> {
     op.backup
         .as_ref()
         .map(PathBuf::from)
-        .unwrap_or_else(|| u.dir().join(format!("{}.sqlite3", op.id)))
+        .context("the operation recorded no database backup")
 }
 fn restore(db: &Path, saved: &Path, failed: &Path) -> Result<()> {
     // Child is stopped, so no open database/wal writers remain.
@@ -372,7 +360,7 @@ async fn apply(cfg: &Config, u: &Updates, child: &mut HubChild, op: &mut Operati
     stop(child, STOP_GRACE).await?;
     u.phase(op, "backing_up", None)?;
     let copied = backup(&cfg.db_path(), &cfg.home, from.version, op.version.clone())
-        .and_then(|saved| journal_backup_link(saved, &u.dir().join(format!("{}.sqlite3", op.id))));
+        .and_then(|saved| Ok(fs::canonicalize(saved)?));
     if let Err(e) = &copied {
         *child = spawn(cfg, &previous, None)?;
         let old: Manifest = read(&previous.join("release.json"))?;
@@ -467,7 +455,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                     PathBuf::from(op.previous.as_ref().context("missing rollback bundle")?);
                 restore(
                     &cfg.db_path(),
-                    &saved_path(&u, &op),
+                    &saved_path(&op)?,
                     &u.dir().join(format!("{}.failed.sqlite3", op.id)),
                 )?;
                 switch(&cfg.home, &previous)?;
@@ -536,10 +524,13 @@ pub async fn run(cfg: Config) -> Result<()> {
         {
             // If we crossed the switch but not commit, make a best-effort rollback under the closed gate.
             if matches!(op.phase.as_str(), "restarting" | "verifying") {
-                let backup = saved_path(&u, &op);
-                if let Err(rb) =
-                    rollback(&cfg, &u, &mut child, &mut op, &backup, format!("{e:#}")).await
-                {
+                let rolled = match saved_path(&op) {
+                    Ok(backup) => {
+                        rollback(&cfg, &u, &mut child, &mut op, &backup, format!("{e:#}")).await
+                    }
+                    Err(missing) => Err(missing),
+                };
+                if let Err(rb) = rolled {
                     u.phase(
                         &mut op,
                         "failed",
@@ -567,8 +558,10 @@ pub async fn run(cfg: Config) -> Result<()> {
         }
     }
 }
-/// Called before wire(), boot(), adapters and all background tasks. No business code runs here.
-pub async fn startup_gate(cfg: &Config) -> Result<()> {
+/// Serve maintenance on the Hub's existing listeners before starting any business code.
+pub async fn startup_gate(cfg: &Config, listeners: &[tokio::net::TcpListener]) -> Result<()> {
+    use std::os::fd::AsFd;
+
     let supervisor_pid = unsafe { libc::getppid() };
     let Ok(id) = std::env::var("STEVE_UPGRADE_ID") else {
         return Ok(());
@@ -644,7 +637,11 @@ pub async fn startup_gate(cfg: &Config) -> Result<()> {
     let app=axum::Router::new().route("/healthz",axum::routing::get(move||{let (version,id)=(version.clone(),gate_id.clone());async move{axum::Json(json!({"ok":true,"version":version,"web_version":version,"upgrade_id":id,"maintenance":true,"build_commit":option_env!("STEVE_BUILD_COMMIT")}))}})).fallback(||async{(axum::http::StatusCode::SERVICE_UNAVAILABLE,"升级验证中，请稍后重试")});
     let (done, rx) = tokio::sync::watch::channel(false);
     let mut servers = tokio::task::JoinSet::new();
-    for listener in cfg.listen.bind().await? {
+    for listener in listeners {
+        // Duplicate the descriptor with close-on-exec; the already nonblocking socket
+        // stays bound while the maintenance servers shut down and the business router starts.
+        let listener = std::net::TcpListener::from(listener.as_fd().try_clone_to_owned()?);
+        let listener = tokio::net::TcpListener::from_std(listener)?;
         let (app, mut rx) = (app.clone(), rx.clone());
         servers.spawn(async move {
             axum::serve(listener, app)
@@ -1016,17 +1013,6 @@ server.serve_forever()
         )
         .unwrap();
         assert_eq!(manifest.database_path(), saved);
-        let reference = t.path().join("operation.sqlite3");
-        assert_eq!(
-            journal_backup_link(saved.clone(), &reference).unwrap(),
-            fs::canonicalize(&saved).unwrap()
-        );
-        assert!(
-            fs::symlink_metadata(reference)
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
         assert!(
             matches!(manifest.reason,steve_store_sqlite::backup::Reason::PreUpgrade{from,to} if from=="old"&&to=="new")
         );

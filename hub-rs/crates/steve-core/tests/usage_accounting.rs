@@ -379,7 +379,7 @@ fn concurrent_calls_have_stable_separate_ownership_without_extra_request_rows() 
         .unwrap()
         .usage
         .coverage;
-        assert_eq!((cov.expected, cov.unavailable, cov.uncertain), (8, 4, 0));
+        assert_eq!((cov.expected, cov.unavailable), (8, 4));
         Ok(())
     })
     .unwrap();

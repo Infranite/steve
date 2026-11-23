@@ -4354,8 +4354,8 @@ fn approved_by_you(c: &Connection, auth: &Auth) -> ChannelResult<bool> {
 // ---------------------------------------------------------------- decisions
 
 /// The `chan_message` decision handler: a draft's approval (`yes` sends the possibly edited text
-/// after the delay, `no` discards), a failed send (`retry` / `rewrite` / `discard`), a handoff (`draft_reply`
-/// opens an empty draft to write, `to_item` makes an item, `done`).
+/// after the delay, `no` discards), a failed send (`retry` / `rewrite` / `discard`), a handoff
+/// (`send_draft`, `instruct`, `verbatim`, `to_item` makes an item, `done`).
 pub struct MessageDecisions(OutLink);
 
 impl MessageDecisions {
@@ -4631,12 +4631,6 @@ impl MessageDecisions {
                     return Err(ApiError::rule(steve_i18n::t!("channels.error.reply_empty")));
                 }
                 plan_in(tx, cx.ws, &d.subject_id)?;
-            }
-            respond::DRAFT_REPLY => {
-                let plan = plan_in(tx, cx.ws, &d.subject_id)?;
-                let (m, dd) = respond::open_draft(tx, &plan, cx.text.trim(), now)?;
-                result["draft_message"] = json!(m);
-                result["draft_decision"] = json!(dd);
             }
             "to_item" => {
                 plan_in(tx, cx.ws, &d.subject_id)?;

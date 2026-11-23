@@ -12,7 +12,7 @@ use crate::cycle::{OP_BUILD, OP_HOOKS, OP_RELEASE};
 use crate::derive::{Facts, derive};
 use crate::proof::OP_DEPLOY;
 use crate::repo::Decision;
-use crate::shadow::from_operations as shadow_ops;
+use crate::state_view::from_operations as operation_facts;
 use crate::sweep::{
     Action, Clock, EXECUTE, RULES, Signals, WouldDo, from_operations, label, pause_and_answer, plan,
 };
@@ -77,7 +77,7 @@ impl Case {
     /// What the sweep would do, gathered the way `Tx::sweep_signals` gathers it.
     fn plan(mut self) -> Option<WouldDo> {
         let closing = self.facts.item.phase == "closing";
-        let o = shadow_ops(self.facts.item.cycle, REVISION, closing, &self.ops);
+        let o = operation_facts(self.facts.item.cycle, REVISION, closing, &self.ops);
         self.facts.delivery.extend(o.delivery);
         self.facts.unknown_effects = o.unknown_effects;
         self.facts.closing_ops = o.closing_ops;
@@ -693,7 +693,7 @@ fn the_sweep_looks_at_every_open_item_and_the_views_show_what_it_would_do() {
     assert!(k.db().decisions_of_item(&closing).unwrap().is_empty());
 
     // the item API's shadow block and the debug view carry the would-do and the derived next step
-    let v = k.core.shadow_view(&run).unwrap().unwrap();
+    let v = k.core.derived_state(&run).unwrap().unwrap();
     assert_eq!(v["would_do"]["current"]["reason"], json!("follow_up"));
     assert_eq!(v["would_do"]["current"]["action"], json!("wake"));
     assert_eq!(v["would_do"]["current"]["executes"], json!(false));
@@ -702,7 +702,7 @@ fn the_sweep_looks_at_every_open_item_and_the_views_show_what_it_would_do() {
     assert!(v["next_step"].is_object());
     let snap = k.core.diagnostic_snapshot(&run).unwrap();
     assert_eq!(
-        snap["shadow"]["would_do"]["current"]["reason"],
+        snap["derived_state"]["would_do"]["current"]["reason"],
         json!("follow_up")
     );
 }

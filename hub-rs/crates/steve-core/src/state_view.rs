@@ -1,6 +1,6 @@
-//! The derived state in shadow (#327): the facts of an item gathered from the database and the
-//! runtime ([`Tx::item_facts`]), run through [`crate::derive::derive`], and shown next to today's
-//! state with whether the two agree. Read-only: nothing here writes, sends or decides.
+//! The derived state: the facts of an item gathered from the database and the
+//! runtime ([`Tx::item_facts`]), run through [`crate::derive::derive`], and shown for diagnosis.
+//! Read-only: nothing here writes, sends or decides.
 //!
 //! Delivery facts come from their own table and, until something writes it, from what the release
 //! of the current cycle already knows (its pull request, its build, its deploy), each with the
@@ -10,10 +10,10 @@
 use serde_json::{Value, json};
 use steve_store::item_facts::ItemFacts;
 
-use crate::cycle::{ACTIVE, CLOSED, CLOSING, OP_BUILD, OP_RELEASE};
+use crate::cycle::{ACTIVE, CLOSING, OP_BUILD, OP_RELEASE};
 use crate::derive::{
-    Card, Delivered, Derived, Dispatch, Facts, ItemState, Judged, Judging, Lane, OpenOperation,
-    Required, SessionState, VERIFIED, Wait, derive,
+    Card, Delivered, Derived, Dispatch, Facts, ItemState, Judged, Judging, OpenOperation, Required,
+    SessionState, VERIFIED, Wait, derive,
 };
 use crate::lifecycle::stop_card;
 use crate::proof::OP_DEPLOY;
@@ -21,21 +21,6 @@ use crate::repo::Item;
 use crate::work::{Work, held};
 use crate::work_policy::WorkPolicy;
 use crate::{Core, Result, Tx};
-
-/// Where today's state puts the item, in the derived state's lanes (`None`: today cannot say).
-fn legacy_lane(item: &Item, work: &Work) -> Option<Lane> {
-    if item.phase == CLOSED {
-        return Some(Lane::Done);
-    }
-    match work {
-        Work::Running(_) | Work::Queued(_) | Work::Blocked(_) | Work::Until(_) => {
-            Some(Lane::Running)
-        }
-        Work::User(_) | Work::Paused(_) | Work::Halted(_) | Work::Failed(_) => Some(Lane::NeedsYou),
-        Work::Idle if item.phase == CLOSING => Some(Lane::Running),
-        Work::Idle => None,
-    }
-}
 
 /// What the operations of the cycle say, as the derived state's facts.
 #[derive(Debug, Clone, Default)]
@@ -349,9 +334,9 @@ impl Tx<'_> {
         })
     }
 
-    /// The derived state of a task item next to today's, for the item API and the debug view.
+    /// The derived state of a task item, for the item API and the debug view.
     /// `None` for a conversation item (it has no lifecycle to derive).
-    pub(crate) fn shadow_view(&self, item: &Item) -> Result<Option<Value>> {
+    pub(crate) fn derived_state(&self, item: &Item) -> Result<Option<Value>> {
         if item.kind != "task" {
             return Ok(None);
         }
@@ -359,9 +344,7 @@ impl Tx<'_> {
         let policy = WorkPolicy::with(&self.db().store().item_facts().policy_overrides()?);
         let facts = self.item_facts(item, now)?;
         let d = derive(&facts, &policy);
-        let work = self.work(item)?;
-        let today = legacy_lane(item, &work);
-        let mut v = view(&d, item, &work, today, &policy);
+        let mut v = view(&d, &policy);
         /* what the sweep would do on it (#334), not carried out */
         v["would_do"] = self.sweep_view(item, &facts, &d, &policy)?;
         v["judge"] = self.judge_view(item, &facts)?;
@@ -369,15 +352,9 @@ impl Tx<'_> {
     }
 }
 
-fn view(d: &Derived, item: &Item, work: &Work, today: Option<Lane>, policy: &WorkPolicy) -> Value {
+fn view(d: &Derived, policy: &WorkPolicy) -> Value {
     let mut v = serde_json::to_value(d).unwrap_or(Value::Null);
     v["label"] = json!(label(d));
-    v["shadow"] = json!(true);
-    v["today"] = json!({
-        "phase": item.phase, "status": item.status, "work": work.code(), "why": work.text(),
-        "lane": today,
-    });
-    v["agrees"] = json!(today == Some(d.lane));
     if !policy.ignored.is_empty() {
         v["policy_ignored"] = json!(policy.ignored);
     }
@@ -425,12 +402,12 @@ pub fn label(d: &Derived) -> String {
 }
 
 impl Core {
-    /// See [`Tx::shadow_view`].
-    pub fn shadow_view(&self, item: &str) -> Result<Option<Value>> {
+    /// See [`Tx::derived_state`].
+    pub fn derived_state(&self, item: &str) -> Result<Option<Value>> {
         let t = self.tx();
         let Some(i) = t.db().item(item)? else {
             return Ok(None);
         };
-        t.shadow_view(&i)
+        t.derived_state(&i)
     }
 }

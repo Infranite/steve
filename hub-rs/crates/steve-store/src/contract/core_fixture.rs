@@ -238,25 +238,6 @@ pub fn unbind_bot(store: &Store, id: &str) {
         .unwrap();
 }
 
-pub fn legacy_queued(store: &Store, session: &str, id: &str, text: &str) {
-    store
-        .write(|w| {
-            w.exec(
-                Query::insert()
-                    .into_table("queued")
-                    .columns(["id", "session_id", "text", "via", "created"])
-                    .values_panic([
-                        id.into(),
-                        session.into(),
-                        text.into(),
-                        "me".into(),
-                        1_i64.into(),
-                    ]),
-            )
-        })
-        .unwrap();
-}
-
 pub fn reject_tool_receipts(store: &Store) {
     store.with_conn(|c| {
         c.execute_batch("CREATE TEMP TRIGGER receipt_failure BEFORE INSERT ON events WHEN NEW.kind='steve_tool_receipt' BEGIN SELECT RAISE(FAIL,'receipt write failed'); END")?;

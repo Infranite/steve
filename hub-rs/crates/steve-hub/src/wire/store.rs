@@ -276,15 +276,6 @@ impl Repo for StoreBackend {
         after: i64,
         each: &mut dyn FnMut(RawEvent),
     ) -> BResult<bool> {
-        self.events_page_raw(session, after, each)
-    }
-
-    fn events_page_raw(
-        &self,
-        session: &str,
-        after: i64,
-        each: &mut dyn FnMut(RawEvent),
-    ) -> BResult<bool> {
         self.0
             .events()
             .visit_page(session, after, |e| {
@@ -756,9 +747,6 @@ impl Repo for StoreBackend {
             .map_err(err)?;
         objs(out)
     }
-    fn queued_get(&self, id: &str) -> BResult<Option<Obj>> {
-        opt(self.0.queued().get(id).map_err(err)?)
-    }
     fn queued_list(&self, session: &str) -> BResult<Vec<Obj>> {
         objs(self.0.queued().list(session).map_err(err)?)
     }
@@ -1026,17 +1014,13 @@ mod event_page_tests {
                 .unwrap();
         }
         let backend = StoreBackend::new(store.clone()).unwrap();
-        let mut raw = Vec::new();
-        assert!(backend.events_raw(&id, 0, &mut |e| raw.push(e)).unwrap());
-        assert_eq!(raw.len(), 500);
         let mut bounded = Vec::new();
         assert!(
             backend
-                .events_page_raw(&id, 0, &mut |e| bounded.push(e))
+                .events_raw(&id, 0, &mut |e| bounded.push(e))
                 .unwrap()
         );
         assert_eq!(bounded.len(), 500);
-        assert_eq!(raw, bounded);
         let decoded = backend.events_after(&id, 0).unwrap();
         assert_eq!(decoded.len(), bounded.len());
         assert_eq!(decoded[0]["kind"], bounded[0].2);
@@ -1046,7 +1030,7 @@ mod event_page_tests {
         );
         let mut tail = Vec::new();
         backend
-            .events_page_raw(&id, bounded.last().unwrap().0, &mut |e| tail.push(e))
+            .events_raw(&id, bounded.last().unwrap().0, &mut |e| tail.push(e))
             .unwrap();
         assert_eq!(tail.len(), 1);
         let data = json!({"content":[{"type":"image","data":"base64".repeat(20_000)}]});
@@ -1079,7 +1063,7 @@ mod event_page_tests {
             .unwrap()
             .id;
         store.transaction(|tx| {
-            for format in ["legacy.acp", "future.v2"] {
+            for format in ["retired.acp", "future.v2"] {
                 tx.execute("INSERT INTO events(session_id, ts, kind, data, format) VALUES (?, 1, 'agent_message_chunk', ?, ?)",
                     rusqlite::params![id, r#"{"sessionUpdate":"agent_message_chunk","content":{"text":"not read"}}"#, format])?;
             }
@@ -1091,7 +1075,7 @@ mod event_page_tests {
             .unwrap();
         let backend = StoreBackend::new(store).unwrap();
         let entries = backend.events_after(&id, 0).unwrap();
-        for (entry, format) in entries.iter().zip(["legacy.acp", "future.v2"]) {
+        for (entry, format) in entries.iter().zip(["retired.acp", "future.v2"]) {
             assert_eq!(entry["kind"], "system");
             assert_eq!(entry["data"]["code"], "unsupported_format");
             assert_eq!(entry["data"]["format"], format);
@@ -1099,7 +1083,7 @@ mod event_page_tests {
         }
         let mut tail = vec![];
         backend
-            .events_page_raw(&id, entries[1]["seq"].as_i64().unwrap(), &mut |e| {
+            .events_raw(&id, entries[1]["seq"].as_i64().unwrap(), &mut |e| {
                 tail.push(e)
             })
             .unwrap();

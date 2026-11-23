@@ -57,7 +57,7 @@ pub struct ToolInput {
     /// `toolCall.locations[].path`.
     pub locations: Vec<String>,
     /// The executor's own directory (a worktree or scratch dir it made), as the executor reports
-    /// it. `None`: the legacy rule on the item's cwd decides.
+    /// it. `None`: the rule on the item's cwd decides.
     pub own_dir: Option<PathBuf>,
     /// `Some`: the processes the harness started, as its executor reports them, used as they are
     /// (a Node session; the Hub never reads another machine's process table). `None`: read here.

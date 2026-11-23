@@ -1,6 +1,6 @@
 /* 设置 · 统计（stats.md §4.1、§6.1）：价格（美元 / 百万 tokens）、切天的时区、重建统计。
  * 价格两个来源：价格表（自己的行或内置官方价，优先，可改、可恢复默认）和 Models.dev 自动同步的价格（表里没有的模型用它）。
- * 价格只用来估算，页面上的费用都标“估”。TS Hub 上这一节显示“还没有接入”。 */
+ * 价格只用来估算，页面上的费用都标“估”。没有统计接口时这一节显示“还没有接入”。 */
 import { useEffect, useState } from "react"
 import { ChartNoAxesColumnIcon, PlusIcon, RefreshCwIcon, TrashIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"

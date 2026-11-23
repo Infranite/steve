@@ -1,5 +1,5 @@
-/* GitHub module (Rust Hub, steve-github): repos, PRs, issues, deliveries, the App manifest flow and PAT connections.
- * The TS Hub has none of this: a 404, an HTML answer (its SPA fallback for unknown GETs) or a network error means
+/* GitHub module (steve-github): repos, PRs, issues, deliveries, the App manifest flow and PAT connections.
+ * On a Hub without it, a 404, an HTML answer (its SPA fallback for unknown GETs) or a network error means
  * “not wired here”, and the page shows the Unwired placeholder instead. */
 import { modReq as req, qs as q } from "@/api"
 

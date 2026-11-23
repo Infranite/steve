@@ -18,7 +18,7 @@ install! { install(reg, cx) [core, db, mode, model_node, mut node_jobs, workspac
         tracing::info!("research streams through local Node jobs");
         h.node.enable_research(research);
         // the jobs' Node follows the roots itself when the sessions' Node is another
-        let ws = if mode == NodeMode::Local {
+        let ws = if mode == Some(NodeMode::Local) {
             workspaces.clone()
         } else {
             let ws = workspaces::Workspaces::new(

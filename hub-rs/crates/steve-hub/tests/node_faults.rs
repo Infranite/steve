@@ -147,6 +147,7 @@ face!(Discovery {
     query history(page: PageRequest) -> Page<HistoryEntry>;
     query import_page(import: OperationId, page: PageRequest) -> ImportedPage;
     query locate(source: HistoryRef) -> HistoryLocation;
+    query set_session_capacity(sessions: u32) -> ();
 });
 
 impl Node for Faulty {

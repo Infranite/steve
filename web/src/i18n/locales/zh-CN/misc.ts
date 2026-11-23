@@ -67,7 +67,7 @@ export default {
     moreRows_other: "展开其余 {{count}} 行",
     imageFailed: "图片加载失败，请检查网络或登录状态后重试。",
     fileUnavailable: {
-      legacy: "Steve 未留存此文件，请让助手重新生成后回复。",
+      unresolved: "Steve 未留存此文件，请让助手重新生成后回复。",
       scope: "未留存：文件不在原执行允许读取的范围内。",
       missing: "未留存：文件已丢失、无法读取或在留存时发生变更。",
       offline: "未留存：留存时无法连接原执行 Node。",

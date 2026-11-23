@@ -1,6 +1,6 @@
 //! The Hub's health at a glance (`GET /api/system/health`): a few figures over the last window,
-//! each with its limit, computed from two snapshots of the recorder (now, and the oldest of the
-//! window). A figure past its limit is also a warning; the client words it. A figure without enough
+//! each with its limit, computed when the recorder captures a minute and compared with the oldest
+//! snapshot in the window. A figure past its limit is also a warning; the client words it. A figure without enough
 //! samples in the window to mean anything has no value and is never a warning.
 use std::collections::{BTreeSet, HashMap};
 
@@ -238,7 +238,7 @@ impl Check {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct Health {
     pub window_seconds: f64,
     pub checks: Vec<Check>,

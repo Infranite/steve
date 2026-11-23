@@ -938,7 +938,7 @@ async fn a_hello_turn_is_steve_v1_with_usage_and_cost() {
             &[&sid]
         ),
         0,
-        "nothing in the legacy format"
+        "nothing in another format"
     );
     assert_eq!(
         r.h.count(

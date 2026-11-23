@@ -13,6 +13,8 @@ pub struct ItemEventFields {
     pub bot_id: Option<String>,
     pub project_id: Option<String>,
     pub source: serde_json::Value,
+    pub cycle: i64,
+    pub revision: i64,
 }
 
 /// The item state needed when linking contacts or adding a timeline entry.
@@ -271,7 +273,15 @@ impl<C: Read> ItemReads<'_, C> {
     pub fn event_fields(&mut self, ws: &str, id: &str) -> Result<Option<ItemEventFields>> {
         self.0.one(
             Query::select()
-                .columns(["title", "status", "bot_id", "project_id", "source"])
+                .columns([
+                    "title",
+                    "status",
+                    "bot_id",
+                    "project_id",
+                    "source",
+                    "cycle",
+                    "revision",
+                ])
                 .from("items")
                 .and_where(Expr::col("workspace_id").eq(ws))
                 .and_where(Expr::col("id").eq(id)),
@@ -284,6 +294,8 @@ impl<C: Read> ItemReads<'_, C> {
                     source: row
                         .get::<Option<super::Json<_>>>(4)?
                         .map_or(serde_json::Value::Null, |json| json.0),
+                    cycle: row.get(5)?,
+                    revision: row.get(6)?,
                 })
             },
         )

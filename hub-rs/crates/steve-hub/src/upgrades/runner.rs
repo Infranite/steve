@@ -1,4 +1,4 @@
-//! One-click upgrade of a local_release install (ops/local-release.py). The Hub is the process the deploy
+//! One-click upgrade of a local_release install (a signed macOS Hub). The Hub is the process the deploy
 //! replaces, so the work runs in a one-shot launchd job (`steve-hub --upgrade-runner <home> <id>`): it
 //! downloads the published release bundle, verifies its identity, preserves the installation's signing
 //! identity and deploys through the native installation library. No interpreter, checkout or compiler is needed.
@@ -6,6 +6,8 @@
 //! the managed supervisor uses. The page follows it across the restart by reading the journal.
 use super::*;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use steve_modules::vault::keystore::KeyStore;
 
 /// What the runner builds, recorded in the operation when it is requested (paths, never secrets).
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -45,7 +47,7 @@ fn busy(p: &Path) -> bool {
 
 /// Whether a live process holds the fcntl lock on `p`: ops/release.sh and ops/local-release.py both take
 /// it on `releases/.release.lock` (`zsystem flock`, `fcntl.lockf`).
-pub(super) fn held(p: &Path) -> bool {
+fn held(p: &Path) -> bool {
     use std::os::fd::AsRawFd;
     let Ok(file) = OpenOptions::new().read(true).write(true).open(p) else {
         return false;
@@ -213,12 +215,25 @@ pub fn local_missing(u: &Updates) -> Vec<String> {
     if !u.home.join("signing/steve-signing.keychain-db").is_file() {
         missing.push("signing/steve-signing.keychain-db".to_owned());
     }
-    // the keychain's password: in the key store once the Hub moved it there, else still the file
-    let store = super::signing::helper(&u.home);
-    if !super::signing::present(&u.home, store.as_deref()) {
-        missing.push(super::signing::FILE.to_owned());
+    let store = signing_store(u, super::signing::helper);
+    if !matches!(super::signing::password(store.as_deref()), Ok(Some(_))) {
+        missing.push("signing password in the key store".to_owned());
     }
     missing
+}
+
+/// Both fake upgrade paths use the fixture's store, not process-wide vault settings.
+fn signing_store(
+    u: &Updates,
+    lookup: impl FnOnce(&Path) -> Option<Arc<dyn KeyStore>>,
+) -> Option<Arc<dyn KeyStore>> {
+    #[cfg(test)]
+    if matches!(u.launch, Launch::Fake(_)) {
+        return steve_modules::vault::keystore::FileKeyStore::open(u.home.join("vault-keys"))
+            .ok()
+            .map(|store| Arc::new(store) as _);
+    }
+    lookup(&u.home)
 }
 
 /// The runner part of a new local_release request: only a stable version newer than this Hub, only when
@@ -607,8 +622,8 @@ pub(super) fn prepare_bundle_with(
         bail!("{why}")
     }
     u.progress(op, "signing", None)?;
-    let store = super::signing::installed_helper(&u.home);
-    let pass = super::signing::password(&u.home, store.as_deref())?
+    let store = signing_store(u, super::signing::installed_helper);
+    let pass = super::signing::password(store.as_deref())?
         .context("no existing installation signing identity")?;
     prepare(&u.home, candidate, &op.version, commit, pass.as_str())
 }

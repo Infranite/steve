@@ -416,11 +416,6 @@ pub struct RoutedRuntime {
     pub node: Option<Arc<super::node_runtime::NodeRuntime>>,
     /// The remote Nodes' coordinators (enabled by default).
     pub fleet: Option<Arc<crate::nodes::NodeFleet>>,
-    /// The remote Node new sessions are bound to when they can be (`STEVE_NODE_BIND`); unset: none.
-    pub bind_remote: Option<steve_node_api::NodeId>,
-    /// `STEVE_NODE_PLACEMENT=spread` (B4): a new session without a fixed Node may go to a linked
-    /// remote Node that is clearly less loaded than this machine.
-    pub spread: bool,
     /// Where bindings are read.
     pub store: steve_store::Store,
     /// A binding starts in the mode the session is meant to have ([`HubHost::perm_mode`]), and in
@@ -431,9 +426,6 @@ pub struct RoutedRuntime {
     /// Steve's worktrees directory, where the local Node makes the items' worktrees (set with the
     /// local Node; unset, the core makes them).
     pub worktrees: Option<std::path::PathBuf>,
-    /// Whether a principal's Bot can run at all ([`super::preflight::Preflight`]), asked before
-    /// a session is made or a message opens one. `None`: not asked.
-    pub preflight: Option<Arc<super::preflight::Preflight>>,
     pub dispatch_harnesses: Option<Arc<crate::harnesses::HubHarnesses>>,
 }
 
@@ -453,7 +445,7 @@ fn bound_for_recovery(store: &steve_store::Store, session: &str) -> bool {
 /// Which backend a session goes to.
 enum Backend {
     Node(Arc<super::node_runtime::NodeRuntime>),
-    /// Bound to a Node that is not enabled here (STEVE_NODE_MODE or STEVE_NODE_LISTEN off): its
+    /// Bound to a Node that is unavailable here: its
     /// messages wait in the queue and nothing else happens.
     Parked,
     /// Bound to no Node: nothing runs it ([`RoutedRuntime::refused`]).
@@ -485,18 +477,6 @@ fn node_of_strict(
             .optional()?,
         )
     })
-}
-
-/// How much less loaded (load per CPU) a remote Node must be for a new session to go there.
-const SPREAD_MARGIN: f64 = 0.25;
-
-/// The least loaded of `there` if it is clearly less loaded than `here`.
-fn spread_pick<T>(here: f64, there: impl IntoIterator<Item = (T, f64)>) -> Option<T> {
-    there
-        .into_iter()
-        .filter(|(_, l)| l.is_finite() && *l + SPREAD_MARGIN < here)
-        .min_by(|a, b| a.1.total_cmp(&b.1))
-        .map(|(id, _)| id)
 }
 
 impl RoutedRuntime {
@@ -579,129 +559,11 @@ impl RoutedRuntime {
     pub(super) fn perm_mode(&self, session_id: &str) -> Option<String> {
         self.host.perm_mode(session_id)
     }
-
-    /// Binds a new session to the configured remote Node when it can run there. False: it was not
-    /// (not configured, not possible for this session, or the bind failed), nothing changed.
-    fn bind_remote(&self, session_id: &str, after: Option<&str>) -> bool {
-        let target = match &self.bind_remote {
-            Some(t) => t.clone(),
-            None if self.spread => match self.spread_target() {
-                Some(t) => t,
-                None => return false,
-            },
-            None => return false,
-        };
-        self.bind_remote_to(session_id, after, &target)
-    }
-
-    /// The tag the item of `session_id` asks of a Node (B7).
-    fn required_tag(&self, session_id: &str) -> Option<String> {
-        let item = self.store.sessions().get(session_id).ok()??.item_id?;
-        self.store
-            .reader(|c| steve_store::nodes::item_tag(c, &item))
-            .ok()?
-    }
-
-    /// The linked remote Node clearly less loaded than this machine (load per CPU, from the
-    /// vitals of the last few minutes, B3), if any: the least loaded of them.
-    fn spread_target(&self) -> Option<steve_node_api::NodeId> {
-        let f = self.fleet.as_ref()?;
-        let since = crate::nodes::now() - 5 * 60 * 1000;
-        let load = |id: &str| -> Option<f64> {
-            let data: String = self
-                .store
-                .reader(|c| {
-                    use rusqlite::OptionalExtension;
-                    c.query_row(
-                        "SELECT data FROM node_vitals WHERE node_id=? AND at>=? ORDER BY at DESC LIMIT 1",
-                        rusqlite::params![id, since],
-                        |r| r.get(0),
-                    )
-                    .optional()
-                    .map_err(steve_store::StoreError::from)
-                })
-                .ok()??;
-            let v: serde_json::Value = serde_json::from_str(&data).ok()?;
-            let cpus = v["cpus"].as_f64().filter(|c| *c > 0.0)?;
-            Some(v["load"][0].as_f64()? / cpus)
-        };
-        // this machine unknown: nothing to compare with, the work stays
-        let here = load("local")?;
-        let there = f
-            .nodes()
-            .into_iter()
-            .filter(|id| id != "local")
-            .filter_map(|id| steve_node_api::NodeId::new(id).ok())
-            .filter(|id| {
-                self.store
-                    .reader(|c| steve_store::bot_dispatch::legacy_spread(c, id.as_str()))
-                    .unwrap_or(false)
-            })
-            .filter(|id| f.remote(id).generation().is_some())
-            .filter_map(|id| load(id.as_str()).map(|l| (id, l)));
-        spread_pick(here, there)
-    }
-
-    fn bind_remote_to(
-        &self,
-        session_id: &str,
-        after: Option<&str>,
-        target: &steve_node_api::NodeId,
-    ) -> bool {
-        let Some(f) = &self.fleet else {
-            return false;
-        };
-        // H1: a remote Node runs only its owner's own work until runs there are sandboxed
-        let refusal = self
-            .store
-            .sessions()
-            .get(session_id)
-            .ok()
-            .flatten()
-            .map(|s| {
-                self.store.reader(|c| {
-                    super::node_binding::remote_refusal(c, target.as_str(), &s.workspace_id)
-                })
-            });
-        match refusal {
-            Some(Ok(None)) => {}
-            Some(Ok(Some(r))) => {
-                let why = steve_i18n::t!(
-                    "hub.node.remote.refused",
-                    node = target.as_str(),
-                    why = r.why()
-                );
-                tracing::info!("{session_id}: not bound to the remote Node: {why}");
-                return false;
-            }
-            _ => return false,
-        }
-        let perm = self.perm_mode(session_id);
-        let Some(b) = super::node_binding::remote_binding_for(
-            &self.store,
-            session_id,
-            perm.as_deref(),
-            target,
-        ) else {
-            tracing::info!("{session_id}: not bound to the remote Node {target}");
-            return false;
-        };
-        let Some(rt) = f.start(target) else {
-            return false;
-        };
-        match rt.bind_after(&b, after) {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::error!("bind {session_id} to the remote Node {target}: {e}");
-                false
-            }
-        }
-    }
 }
 
 /// Why the local Node cannot take a session, as text (in the current language: call it inside
 /// [`steve_i18n::stored`]). `None`: maybe only for now (a row unreadable, gone or ended).
-fn unbound_why(u: super::node_binding::Unbound) -> Option<String> {
+pub(super) fn unbound_why(u: super::node_binding::Unbound) -> Option<String> {
     use super::node_binding::Unbound;
     Some(match u {
         Unbound::Unreadable | Unbound::Missing | Unbound::Ended => return None,
@@ -750,7 +612,7 @@ impl RoutedRuntime {
         }
         steve_i18n::stored(|| {
             let why = match &self.node {
-                None => steve_i18n::t!("hub.node.unbound.off"),
+                None => steve_i18n::t!("hub.node.unbound.diagnostic"),
                 Some(n) if n.is_stopped() => steve_i18n::t!("hub.node.unbound.stopped"),
                 // a held work unit was never planned
                 Some(_) if self.check_workflow_session(session_id).is_err() => {
@@ -767,31 +629,6 @@ impl RoutedRuntime {
     }
 }
 
-impl RoutedRuntime {
-    /// [`super::preflight::Preflight`]'s answer, as stored text (zh-CN).
-    fn preflight(
-        &self,
-        f: impl FnOnce(
-            &super::preflight::Preflight,
-            &rusqlite::Connection,
-        ) -> Result<(), super::preflight::Blocked>,
-    ) -> Result<(), String> {
-        let Some(p) = &self.preflight else {
-            return Ok(());
-        };
-        let r = self.store.reader(|c| {
-            Ok::<_, steve_store::StoreError>(steve_i18n::stored(|| f(p, c).map_err(|b| b.reason)))
-        });
-        match r {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::error!("preflight: {e}");
-                Ok(())
-            }
-        }
-    }
-}
-
 impl steve_core::AgentRuntime for RoutedRuntime {
     fn retry_session(
         &self,
@@ -805,12 +642,8 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             )),
         }
     }
-    fn can_run(&self, item_id: &str, bot_id: &str, harness: &str) -> steve_core::Result<()> {
-        if self.check_dispatch(item_id, bot_id)? {
-            return Ok(());
-        }
-        self.preflight(|p, c| p.can_run_item(c, item_id, bot_id, harness))
-            .map_err(CoreError::Msg)
+    fn can_run(&self, item_id: &str, bot_id: &str, _harness: &str) -> steve_core::Result<()> {
+        self.check_dispatch(item_id, bot_id)
     }
     fn check_workflow_execution(&self, item_id: &str) -> steve_core::Result<()> {
         if !self
@@ -918,37 +751,10 @@ impl steve_core::AgentRuntime for RoutedRuntime {
                 fixed = true;
             }
         }
-        if fixed || self.check_dispatch(item_id, item.bot_id.as_deref().unwrap_or("steve"))? {
+        if fixed {
             return Ok(());
         }
-        if eligible("local")? {
-            return Ok(());
-        }
-        let mut targets = Vec::new();
-        if let Some(target) = &self.bind_remote {
-            targets.push(target.as_str().to_string());
-        }
-        if let Some(target) = self.spread_target().filter(|_| self.spread) {
-            targets.push(target.as_str().to_string());
-        }
-        if let Some(tag) = self
-            .store
-            .reader(|c| steve_store::nodes::item_tag(c, item_id))?
-        {
-            targets.extend(
-                self.store
-                    .reader(|c| steve_store::nodes::with_tag(c, &tag))?,
-            );
-        }
-        for node in targets {
-            if eligible(&node)? {
-                return Ok(());
-            }
-        }
-        Err(CoreError::Msg(
-            "协作工作没有可用且获授权的 Node；请检查设备连接、路由标签与项目 worktree 配置。"
-                .into(),
-        ))
+        self.check_dispatch(item_id, item.bot_id.as_deref().unwrap_or("steve"))
     }
     fn makes_worktrees(&self) -> bool {
         self.node.is_some() && self.worktrees.is_some()
@@ -973,11 +779,10 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         };
         Ok(n.tidy_session_workspace(session_id, keep_branch)?)
     }
-    /// A new session is bound to the remote Node named by `STEVE_NODE_BIND` when it can run there;
-    /// otherwise, with the local Node enabled here, to it when its binding can be planned.
-    /// Otherwise (the local Node off or stopped, a permission mode no Node can express, a
-    /// directory outside its roots, a failed bind) it is bound nowhere, and [`Self::refusal`]
-    /// says why. `after` (a predecessor's release on its way): it opens only once that is done.
+    /// A new session of an item is placed on its Bot's execution Nodes ([`Self::bind_dispatch`]);
+    /// a session of no item (forked or imported) on the local Node when its binding can be
+    /// planned. Otherwise it is bound nowhere, and [`Self::refusal`] says why. `after` (a
+    /// predecessor's release on its way): it opens only once that is done.
     fn created(&self, session_id: &str, after: Option<&str>) {
         // Workflow coordinates ordinary Node sessions. Confirm its authority before any binding
         // or preparation; no Hub execution fallback is available.
@@ -987,6 +792,7 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         }
         match self.bind_dispatch(session_id, after) {
             Ok(true) => return,
+            // a session of no item
             Ok(false) => {}
             Err(e) => {
                 tracing::warn!(
@@ -995,40 +801,6 @@ impl steve_core::AgentRuntime for RoutedRuntime {
                 );
                 return;
             }
-        }
-        // the tag its item asks of a Node (B7): a Node with it, the Hub's own first
-        let mut here = false;
-        if let Some(tag) = self.required_tag(session_id) {
-            let nodes = self
-                .store
-                .reader(|c| steve_store::nodes::with_tag(c, &tag))
-                .unwrap_or_default();
-            if self.node.is_some() && nodes.iter().any(|n| n == "local") {
-                here = true;
-            } else {
-                for n in nodes.iter().filter(|n| n.as_str() != "local") {
-                    if let Ok(id) = steve_node_api::NodeId::new(n.clone())
-                        && self.bind_remote_to(session_id, after, &id)
-                    {
-                        return;
-                    }
-                }
-                let text = steve_i18n::t!("hub.node.tag_unmet", tag = tag);
-                if let Err(e) =
-                    self.store
-                        .events()
-                        .add(session_id, "system", serde_json::json!({"text": text}))
-                {
-                    tracing::warn!("{session_id}: {e}");
-                }
-                // A workflow must not lose its required Node tag through the ordinary fallback.
-                if !matches!(self.workflow_item(session_id), Ok(None)) {
-                    return;
-                }
-            }
-        }
-        if !here && self.bind_remote(session_id, after) {
-            return;
         }
         let Some(n) = &self.node else { return };
         match self.local_binding(session_id) {
@@ -1583,9 +1355,9 @@ impl Domain for CoreDomain {
         let (c, id) = (self.core.clone(), id.to_string());
         blocking(move || c.lifecycle_view(&id).map(Some)).await
     }
-    async fn shadow_view(&self, id: &str) -> BResult<Option<Value>> {
+    async fn derived_state(&self, id: &str) -> BResult<Option<Value>> {
         let (c, id) = (self.core.clone(), id.to_string());
-        blocking(move || c.shadow_view(&id)).await
+        blocking(move || c.derived_state(&id)).await
     }
     async fn diagnostic_snapshot(&self, id: &str) -> BResult<Value> {
         let (c, id) = (self.core.clone(), id.to_string());
@@ -1969,7 +1741,7 @@ impl Domain for CoreDomain {
         prompt: &str,
         tier: Tier,
         timeout_ms: u64,
-    ) -> BResult<String> {
+    ) -> Result<String, crate::error::ApiError> {
         let t = match tier {
             Tier::Fast => steve_core::Tier::Fast,
             Tier::Smart => steve_core::Tier::Smart,
@@ -1985,7 +1757,10 @@ impl Domain for CoreDomain {
             ),
         )
         .await
-        .map_err(cerr)?;
+        .map_err(|error| match error {
+            CoreError::Contract(error) => crate::error::ApiError::Contract(error),
+            other => crate::error::ApiError::from(cerr(other)),
+        })?;
         Ok(p.text)
     }
 
@@ -2414,8 +2189,6 @@ mod routed_tests {
             host,
             node: None,
             fleet: None,
-            bind_remote: None,
-            spread: false,
             workspaces: super::super::workspaces::Workspaces::new(
                 store.clone(),
                 None,
@@ -2424,7 +2197,6 @@ mod routed_tests {
             ),
             store,
             worktrees: None,
-            preflight: None,
             dispatch_harnesses: None,
         }
     }
@@ -2515,10 +2287,15 @@ mod routed_tests {
                     },
                     1,
                 )?;
-                tx.execute_batch(
-                    r#"UPDATE node_commands SET state='finished',receipt='{"success":true}' WHERE operation_id='open_s1';
-                       UPDATE runtime_sessions SET phase='ready' WHERE session_id='s1';"#,
+                steve_store::runtime::merge_receipt_in(
+                    tx,
+                    "open_s1",
+                    steve_store::runtime::ReceiptState::Finished,
+                    true,
+                    &serde_json::json!({}),
+                    2,
                 )?;
+                tx.execute("UPDATE runtime_sessions SET phase='ready' WHERE session_id='s1'", [])?;
                 Ok(())
             })
             .unwrap();
@@ -2654,7 +2431,7 @@ mod routed_tests {
             .prompt("s1", "还在吗", "me", &[])
             .unwrap_err()
             .to_string();
-        assert!(e.contains("STEVE_NODE_MODE=off"), "{e}");
+        assert!(e.contains("诊断模式"), "{e}");
         assert!(!bound(&rt));
         assert_eq!(
             one::<i64>(
@@ -2887,22 +2664,6 @@ mod yolo_input_tests {
 mod prepared_dir_tests {
     use super::{display_path, prepared_dir, yolo_input};
 
-    #[test]
-    fn spread_goes_only_where_it_is_clearly_lighter() {
-        use super::spread_pick;
-        assert_eq!(
-            spread_pick(1.0, [("a", 0.9), ("b", 0.5), ("c", 0.6)]),
-            Some("b")
-        );
-        assert_eq!(spread_pick(1.0, [("a", 0.9)]), None, "not clearly lighter");
-        assert_eq!(
-            spread_pick(0.1, [("a", 0.0)]),
-            None,
-            "this machine is idle enough"
-        );
-        assert_eq!(spread_pick(1.0, [("a", f64::NAN)]), None);
-        assert_eq!(spread_pick::<&str>(1.0, []), None);
-    }
     use std::path::{Path, PathBuf};
     use std::time::Duration;
     use steve_node_api::testkit::build;

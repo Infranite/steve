@@ -30,7 +30,7 @@ impl Domain for Catalogue {
         _: &str,
         _: crate::backend::Tier,
         _: u64,
-    ) -> BResult<String> {
+    ) -> Result<String, crate::error::ApiError> {
         Ok(json!({"name":"Draft", "model":"claude-opus-5-5"}).to_string())
     }
 }

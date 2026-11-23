@@ -286,7 +286,7 @@ pub struct NodeRuntime {
     /// sets it ([`Self::set_turn_limit`]).
     turn_limit: std::sync::atomic::AtomicI64,
     /// How long an open session may sit idle before its harness is let go, in ms
-    /// ([`Self::set_idle_release`]; legacy's 10 minutes by default).
+    /// ([`Self::set_idle_release`]; 10 minutes by default).
     idle_release: std::sync::atomic::AtomicI64,
     /// New sessions bound nowhere since boot although this Node was on (no binding could be
     /// planned, or the bind failed), so refused: `/healthz` shows them, so they don't hide.
@@ -315,7 +315,7 @@ const IDLE_RELEASE_MS: i64 = 600_000;
 const IDLE_EVERY: Duration = Duration::from_secs(1);
 /// How often the upkeep worker looks for lost commands past their deadline.
 const LOST_EXECS_EVERY: Duration = Duration::from_secs(2);
-/// The most LocalAcp gateway usage rows the upkeep worker applies at once.
+/// The most pending gateway accounting rows the upkeep worker applies at once.
 const LOCAL_RUN: usize = 128;
 
 /// A command's envelope as the Node gets it, built once and stored verbatim.
@@ -632,8 +632,7 @@ impl NodeRuntime {
         });
     }
 
-    /// What the upkeep worker does: the LocalAcp gateway's usage (a durable inbox of its own; its
-    /// recovery never depends on the Node), what committed transactions tell the business side,
+    /// What the upkeep worker does: pending usage in the durable gateway inbox, what committed transactions tell the business side,
     /// cards past due, lost commands and idle sessions. True: more of the gateway's usage may wait.
     fn upkeep(&self, sweep: bool, idle: bool) -> bool {
         let more = match self.store.stats().gateway_apply_local(LOCAL_RUN) {
@@ -888,7 +887,7 @@ fn phase_in(tx: &Tx, session: &str) -> Result<Option<(String, Option<String>)>, 
         .optional()?)
 }
 
-/// `sessions.status` once a turn is over and nothing follows it: the legacy runner's values.
+/// `sessions.status` once a turn is over and nothing follows it: `error` after a failure, else `idle`.
 fn settled_status(stop_reason: &str) -> &'static str {
     if stop_reason == "error" || steve_core::runtime::is_model_service_failure(stop_reason) {
         "error"
@@ -897,7 +896,7 @@ fn settled_status(stop_reason: &str) -> &'static str {
     }
 }
 
-/// Sets `sessions.status` the way the legacy runner does (`running` from an attempt's start until
+/// Sets `sessions.status` (`running` from an attempt's start until
 /// the turn is over). A session the business side ended stays ended.
 fn status_in(tx: &Tx, session: &str, status: &str) -> Result<(), StoreError> {
     let n = tx.execute(

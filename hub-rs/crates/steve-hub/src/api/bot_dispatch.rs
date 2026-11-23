@@ -3,12 +3,12 @@ use axum::{
     Extension, Json,
     extract::{Path, State},
 };
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use steve_store::{
     Store, StoreError,
-    bot_dispatch::{self, LEGACY, Member},
+    bot_dispatch::{self, Member},
 };
 
 use super::{ApiResult, AppState, Ctx, ok};
@@ -54,29 +54,32 @@ fn is_bot(c: &rusqlite::Connection, ws: &str, id: &str) -> steve_store::Result<b
 pub async fn list(State(st): State<AppState>, Extension(cx): Extension<Ctx>) -> ApiResult {
     let s = required_store(&st)?;
     operate(move || {
-        s.read(|r| s.reader(|c| {
-            let mut teams = bot_dispatch::teams(c, &cx.ws)?;
-            // A previously private workspace can gain members. Hide stale remote grants in
-            // preset reads too; do not turn an empty restricted list into "all bound Nodes".
-            for member in teams.iter_mut().flat_map(|team| &mut team.members) {
-                if let Some(nodes) = &mut member.nodes {
-                    let mut visible = Vec::with_capacity(nodes.len());
-                    for node in nodes.drain(..) {
-                        if node == "local"
-                            || crate::wire::node_binding::node_takes(c, &node, &cx.ws)?
-                        {
-                            visible.push(node);
+        s.read(|r| {
+            s.reader(|c| {
+                let mut teams = bot_dispatch::teams(c, &cx.ws)?;
+                // A previously private workspace can gain members. Hide stale remote grants in
+                // preset reads too; do not turn an empty restricted list into "all bound Nodes".
+                for member in teams.iter_mut().flat_map(|team| &mut team.members) {
+                    if let Some(nodes) = &mut member.nodes {
+                        let mut visible = Vec::with_capacity(nodes.len());
+                        for node in nodes.drain(..) {
+                            if node == "local"
+                                || crate::wire::node_binding::node_takes(c, &node, &cx.ws)?
+                            {
+                                visible.push(node);
+                            }
                         }
+                        *nodes = visible;
                     }
-                    *nodes = visible;
                 }
-            }
-            Ok(json!({
-                "teams":teams,
-                "default":bot_dispatch::selected(r, &cx.ws, None)?.map_or_else(|| LEGACY.into(), |t| t.id),
-                "editable":bot_dispatch::owner(c, &cx.ws, &cx.me)?,
-            }))
-        })).map_err(error)
+                Ok(json!({
+                    "teams":teams,
+                    "default":bot_dispatch::selected(r, &cx.ws, None)?.map(|t| t.id),
+                    "editable":bot_dispatch::owner(c, &cx.ws, &cx.me)?,
+                }))
+            })
+        })
+        .map_err(error)
     })
     .await
 }
@@ -104,8 +107,8 @@ pub async fn candidates(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Bindings {
-    // Explicit null restores legacy; a missing property is invalid.
-    nodes: Value,
+    /// In priority order; empty: the Bot runs nowhere.
+    nodes: Vec<String>,
 }
 
 fn identifiers(choices: &[String]) -> bool {
@@ -132,8 +135,8 @@ pub async fn set_bindings(
     Json(b): Json<Bindings>,
 ) -> ApiResult {
     let s = required_store(&st)?;
-    let nodes: Option<Vec<String>> = serde_json::from_value(b.nodes).map_err(|_| bad())?;
-    if nodes.as_ref().is_some_and(|ids| !identifiers(ids)) {
+    let nodes = b.nodes;
+    if !identifiers(&nodes) {
         return Err(bad());
     }
     if !s
@@ -150,7 +153,7 @@ pub async fn set_bindings(
             "hub.dispatch.not_found"
         )));
     }
-    let report = if nodes.as_ref().is_some_and(|n| !n.is_empty()) {
+    let report = if !nodes.is_empty() {
         st.domain.bot_nodes(&cx.ws, &id).await?
     } else {
         Value::Null
@@ -161,38 +164,28 @@ pub async fn set_bindings(
             if !is_bot(tx, &cx.ws, &id)? {
                 return Err(StoreError::NotFound("Bot").into());
             }
-            let old = bot_dispatch::bindings(tx, &cx.ws, &id)?.unwrap_or_default();
-            if let Some(nodes) = &nodes {
-                for node in nodes.iter().filter(|id| !old.contains(id)) {
-                    if (node != "local"
-                        && !crate::wire::node_binding::node_takes(tx, node, &cx.ws)?)
-                        || !report["candidates"].as_array().is_some_and(|cs| {
-                            cs.iter()
-                                .any(|r| r["id"] == node.as_str() && r["state"] == "candidate")
-                        })
-                    {
-                        return Err(ApiError::Json(
-                            409,
-                            steve_i18n::t!("hub.dispatch.not_candidate"),
-                        )
-                        .into());
-                    }
+            let old = bot_dispatch::bindings(tx, &cx.ws, &id)?;
+            for node in nodes.iter().filter(|id| !old.contains(id)) {
+                if (node != "local" && !crate::wire::node_binding::node_takes(tx, node, &cx.ws)?)
+                    || !report["candidates"].as_array().is_some_and(|cs| {
+                        cs.iter()
+                            .any(|r| r["id"] == node.as_str() && r["state"] == "candidate")
+                    })
+                {
+                    return Err(
+                        ApiError::Json(409, steve_i18n::t!("hub.dispatch.not_candidate")).into(),
+                    );
                 }
-                tx.execute(
-                    "INSERT INTO bot_node_bindings(workspace_id,bot_id,nodes) VALUES (?,?,?)
-                     ON CONFLICT(workspace_id,bot_id) DO UPDATE SET nodes=excluded.nodes",
-                    params![
-                        cx.ws,
-                        id,
-                        serde_json::to_string(nodes).map_err(StoreError::from)?
-                    ],
-                )?;
-            } else {
-                tx.execute(
-                    "DELETE FROM bot_node_bindings WHERE workspace_id=? AND bot_id=?",
-                    params![cx.ws, id],
-                )?;
             }
+            tx.execute(
+                "INSERT INTO bot_node_bindings(workspace_id,bot_id,nodes) VALUES (?,?,?)
+                     ON CONFLICT(workspace_id,bot_id) DO UPDATE SET nodes=excluded.nodes",
+                params![
+                    cx.ws,
+                    id,
+                    serde_json::to_string(&nodes).map_err(StoreError::from)?
+                ],
+            )?;
             audit(tx, &cx, "bot.nodes", &id, &json!({"nodes":nodes}))?;
             tx.publish(steve_types::DomainEvent::from(
                 steve_types::ConfigEvent::Bot {
@@ -295,7 +288,7 @@ async fn save(st: AppState, cx: Ctx, id: Option<String>, b: Preset) -> ApiResult
                     return Err(StoreError::NotFound("Bot").into());
                 }
                 if let Some(nodes) = &m.nodes {
-                    let bound = bot_dispatch::bindings(tx, &cx.ws, &m.bot)?.unwrap_or_default();
+                    let bound = bot_dispatch::bindings(tx, &cx.ws, &m.bot)?;
                     for id in nodes {
                         if !bound.contains(id)
                             || (id != "local"
@@ -398,29 +391,16 @@ pub async fn set_default(
     .await
 }
 
-/// Item detail reports the actual binding, not a projection of the workspace's current default.
+/// Item detail reports the last placement decision, not a projection of the workspace's current
+/// default.
 pub(super) fn item_dispatch(
     c: &rusqlite::Connection,
     id: &str,
     ws: &str,
 ) -> steve_store::Result<Value> {
     let team = bot_dispatch::item_team(c, id)?;
-    let last = bot_dispatch::last_decision(c, id)?;
-    let actual: Option<(String, String, Option<String>, i64)> = c.query_row(
-        "SELECT r.node_id,s.id,s.bot_id,s.created FROM runtime_sessions r JOIN sessions s ON s.id=r.session_id
-         WHERE s.item_id=?1 AND s.workspace_id=?2 ORDER BY s.no DESC LIMIT 1",
-        params![id, ws], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-    ).optional()?;
-    let mut placement = match actual {
-        Some((node, session, bot, created))
-            if last.as_ref().is_none_or(|p| {
-                p["session"] != session && p["at"].as_i64().is_none_or(|at| created > at)
-            }) =>
-        {
-            json!({"node":node,"session":session,"bot":bot,"reason":"legacy"})
-        }
-        _ => last.unwrap_or(Value::Null),
-    };
+    // every session of an item is placed with its decision recorded in the binding's transaction
+    let mut placement = bot_dispatch::last_decision(c, id)?.unwrap_or(Value::Null);
     if let Some(node) = placement["node"].as_str().map(str::to_string)
         && node != "local"
     {

@@ -19,7 +19,7 @@ export type ModeLine = {
 /** the line for one session; read-only sessions and ones nothing runs are left out */
 export function modeLine(s: RYoloItemSession): ModeLine | null {
   if (s.readonly || s.status === "not_running") return null
-  /* a mode Steve cannot name is never in effect, whatever an older Hub says */
+  /* a mode Steve cannot name is never in effect */
   const key: ModeStatus = s.status === "applied" && !s.wanted ? "unknown" : s.status
   const tone = key === "applied" ? "ok" : key === "refused" || key === "unknown" ? "bad" : "wait"
   return { key, tone, wanted: s.wanted, from: s.wanted_from, applied: s.applied, reason: s.refused ?? "", residual: s.residual }

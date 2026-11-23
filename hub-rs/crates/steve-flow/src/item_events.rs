@@ -88,8 +88,8 @@ fn build(
         bot_id: fields.bot_id,
         project_id: fields.project_id,
         source: fields.source,
-        cycle: None,
-        revision: None,
+        cycle: fields.cycle,
+        revision: fields.revision,
         acceptance: None,
     };
     describe(

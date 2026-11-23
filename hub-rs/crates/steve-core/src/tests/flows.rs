@@ -1056,7 +1056,7 @@ fn a_late_end_drops_a_mark_of_its_own_turn() {
 
 /// B2b review: one end covers a turn and the follow-ups that took the queue behind it, and names
 /// the last of them. A mark made in an earlier link of that chain is still the chain's: its end,
-/// with nothing running, uses it (as the legacy runner always did), so no stall card.
+/// with nothing running, uses it, so no stall card.
 #[test]
 fn a_mark_made_before_a_follow_up_counts_for_the_end_of_the_chain() {
     let k = Kit::new();

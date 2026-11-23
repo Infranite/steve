@@ -385,16 +385,13 @@ impl TimelineSource for MessageTimeline {
              SELECT m.space_id, s.name, m.text, m.created FROM chan_messages m JOIN spaces s ON s.id = m.space_id
               WHERE m.workspace_id = ?2 AND m.direction = 'in' AND m.sender_party_id IN (SELECT id FROM ids)
                 AND (?3 IS NULL OR m.created < ?3)
-                AND {}
-              ORDER BY m.created DESC, m.id DESC LIMIT ?4",
-            crate::spaces::visible_sql("?5"),
+              ORDER BY m.created DESC, m.id DESC LIMIT ?4"
         );
         let ps = vec![
             Sql::Text(party.into()),
             Sql::Text(viewer.ws.clone()),
             before.map(Sql::Integer).unwrap_or(Sql::Null),
             Sql::Integer(limit as i64),
-            Sql::Text(viewer.user.clone()),
         ];
         let mut st = c.prepare_cached(&sql).map_err(StoreError::from)?;
         let rows = st

@@ -79,11 +79,9 @@ pub fn chat_connections(r: &mut impl Read, ws: &str, external: &str) -> Result<V
     )
 }
 
-/// Active spaces still visible to this connection. An untracked identity uses its space's original connection.
+/// Active spaces still visible to this connection.
 pub fn active_count(r: &mut impl Read, ws: &str, conn: &str) -> Result<i64> {
-    let identities = super::identities();
-    let still_sees = identities
-        .clone()
+    let still_sees = super::identities()
         .and_where(Expr::col(("i", "connection_id")).eq(conn))
         .and_where(Expr::col(("i", "left_at")).is_null())
         .take();
@@ -93,11 +91,7 @@ pub fn active_count(r: &mut impl Read, ws: &str, conn: &str) -> Result<i64> {
             .from_as("spaces", "s")
             .and_where(Expr::col(("s", "workspace_id")).eq(ws))
             .and_where(Expr::col(("s", "status")).eq("active"))
-            .and_where(
-                Expr::exists(still_sees).or(Expr::col(("s", "connection_id"))
-                    .eq(conn)
-                    .and(Expr::exists(identities).not())),
-            ),
+            .and_where(Expr::exists(still_sees)),
         |row| row.get(0),
     )?
     .unwrap_or(0))
@@ -116,11 +110,7 @@ pub fn list(
             .and_where(Expr::col(("i", "connection_id")).eq(conn))
             .and_where(Expr::col(("i", "left_at")).is_null())
             .take();
-        query.and_where(
-            Expr::col(("s", "connection_id"))
-                .eq(conn)
-                .or(Expr::exists(sees)),
-        );
+        query.and_where(Expr::exists(sees));
     }
     if let Some(search) = search.map(str::trim).filter(|s| !s.is_empty()) {
         let escaped = search

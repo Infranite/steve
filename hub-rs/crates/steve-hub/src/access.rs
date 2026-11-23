@@ -234,7 +234,6 @@ async fn hello(State(st): State<AppState>) -> axum::response::Response {
         StatusCode::OK,
         json!({
             "name": "steve",
-            "capabilities": { "hub_metadata": 1 },
             "version": st.cfg.version,
             "api": API_VERSION,
             "login": {
@@ -486,7 +485,7 @@ pub fn main(args: &[String]) -> i32 {
     output.code
 }
 
-/// Exact legacy CLI rendering, also carried by the local management transport.
+/// The CLI's exact rendering, also carried by the local management transport.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CliOutput {
     pub stdout: String,

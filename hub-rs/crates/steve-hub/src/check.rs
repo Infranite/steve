@@ -60,10 +60,11 @@ pub fn check(get: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> Re
         }
     }
     let mut warnings = Vec::new();
-    match crate::wire::local_node_mode(&vars, cfg.no_resume) {
+    match crate::wire::node_mode(&vars, cfg.diagnostic()) {
         Err(e) => errors.push(e.to_string()),
+        Ok(None) => {}
         // the local Node's runs in the OS sandbox (never a reason not to start)
-        Ok(true) => {
+        Ok(_) => {
             warnings.extend(local_node_warnings(&cfg, &vars));
             if let Err(why) = steve_confine::confinement(
                 &cfg.home,
@@ -73,7 +74,6 @@ pub fn check(get: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> Re
                 warnings.push(steve_i18n::t!("hub.check.unconfined", why = why));
             }
         }
-        Ok(false) => {}
     }
     if let Err(e) = crate::nodes::Ingress::from_vars(|k| vars(k)) {
         errors.push(e);
@@ -332,7 +332,7 @@ mod tests {
             r.warnings.iter().any(|w| w.starts_with("STEVE_CONFINE: ")),
             "{r:?}"
         );
-        let r = run(&[("STEVE_CONFINE", "off"), ("STEVE_NODE_MODE", "off")]);
+        let r = run(&[("STEVE_CONFINE", "off"), ("STEVE_NO_RESUME", "1")]);
         assert!(
             r.warnings.is_empty(),
             "no local Node, no runs of its own: {r:?}"

@@ -2,7 +2,6 @@
 //! `Takeover` wins), prompt context in the session protocol and in chat answers, `before_undo` of a
 //! module decision, and steve-core's gateway shared as the modules' `Gateway`.
 
-use crate::InProcess;
 use crate::error::msg;
 use crate::gateway::{ModelGateway, Printed, SharedGateway};
 use crate::repo::{Item, WS};
@@ -382,7 +381,7 @@ fn session_context_goes_into_the_protocol_before_the_steve_tools() {
 fn router(k: &Kit, answer: &'static str) {
     k.gw.set(move |p, _| {
         if p.starts_with("You are the router of Steve") {
-            Ok(json!({"kind": "chat", "title": "问"}).to_string())
+            Ok(json!({"kind": "answer", "title": "问"}).to_string())
         } else if p.starts_with("You are Steve, the user's assistant.") {
             Ok(json!({"thought": "想", "answer": answer}).to_string())
         } else {
@@ -674,33 +673,6 @@ async fn the_shared_gateway_maps_tiers_and_reports_model_and_cost() {
         .await
         .unwrap_err();
     assert_eq!(e, "no fast model");
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn the_gateway_falls_back_down_the_tier_and_reports_total_cost() {
-    let dir = tempfile::tempdir().unwrap();
-    let acp = crate::testkit::FakeAcp::new(dir.path(), "ok");
-    let cli: Arc<dyn ModelGateway> = Arc::new(InProcess {
-        one: acp.one(),
-        fast: vec!["broken".into(), "good".into()],
-        smart: vec![],
-        models: None,
-    });
-    let o = SharedGateway(cli.clone())
-        .run(steve_modules::Tier::Fast, "hi", Duration::from_secs(10))
-        .await
-        .unwrap();
-    assert_eq!(
-        (o.text.as_str(), o.model.as_str(), o.cost_usd),
-        ("ok", "good", Some(0.000829045))
-    );
-    // no model named: the adapter's own default answers
-    let o = SharedGateway(cli)
-        .run(steve_modules::Tier::Smart, "hi", Duration::from_secs(10))
-        .await
-        .unwrap();
-    assert_eq!((o.text.as_str(), o.model.as_str()), ("ok", ""));
 }
 
 struct Boom {

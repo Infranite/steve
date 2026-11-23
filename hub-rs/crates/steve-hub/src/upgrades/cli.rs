@@ -388,8 +388,8 @@ impl Owner {
         {
             bail!("signed Hub service ownership is ambiguous")
         }
-        let expected_legacy = json!(["/bin/zsh", home.join("current/ops/run.sh")]);
-        if definition["ProgramArguments"] != expected_legacy {
+        let entry = json!(["/bin/zsh", home.join("current/ops/run.sh")]);
+        if definition["ProgramArguments"] != entry {
             bail!("signed Hub service does not use its installed entry point")
         }
         let environment = definition
@@ -402,9 +402,7 @@ impl Owner {
         {
             bail!("invalid installed service environment")
         }
-        if environment
-            .get("STEVE_HOME")
-            .is_some_and(|p| p.as_str() != home.to_str())
+        if environment.get("STEVE_HOME").and_then(Value::as_str) != home.to_str()
             || environment
                 .get("HOME")
                 .is_some_and(|p| p.as_str() != self.account_home.to_str())

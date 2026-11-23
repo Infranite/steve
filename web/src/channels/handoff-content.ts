@@ -1,4 +1,4 @@
-/** Older Hubs store the handoff context as text. Recognize only the format emitted by
+/** The Hub writes the handoff context into the question as text. Recognize only the format emitted by
  * steve-channels/decide.rs; keep unfamiliar cards intact rather than guessing who spoke. */
 export function handoffContent(question: string) {
   const [head, ...lines] = question.split("\n")

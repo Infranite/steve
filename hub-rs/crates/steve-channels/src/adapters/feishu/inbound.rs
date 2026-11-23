@@ -27,8 +27,8 @@ use super::client::{self, FeishuClient};
 use super::ws::{self, WsError, WsHandle, WsHandler, WsOptions};
 use super::{chats, send};
 use crate::channel::{
-    ChannelAdapter, ChannelFeatures, HandleRef, InboundMessage, MemberInfo, Mention, OutContent,
-    ReactionKind, SendTarget, Sender, SpaceEvent, SpaceInfo, SpaceKind,
+    ActTarget, ChannelAdapter, ChannelFeatures, HandleRef, InboundMessage, MemberInfo, Mention,
+    OutContent, ReactionKind, SendKey, Sender, Sent, SpaceEvent, SpaceInfo, SpaceKind,
 };
 use crate::service::MessageSink;
 
@@ -94,15 +94,16 @@ impl ChannelAdapter for FeishuApp {
     }
 
     /// Only C6's `outbound::send` calls this, after approval (F3, [`send::send`]).
-    async fn send(
+    async fn send_message(
         &self,
         cx: &ConnCx,
-        to: &SendTarget,
+        to: &ActTarget,
         content: &OutContent,
-    ) -> Result<String, AdapterError> {
-        send::send(cx, to, content)
+        _key: &SendKey,
+    ) -> Result<Sent, AdapterError> {
+        send::send(cx, &crate::channel::send_target(to), content)
             .await
-            .map(|s| s.message_id)
+            .map(|s| Sent::id(s.message_id))
             .map_err(|e| ProviderError::from(e).into())
     }
 
