@@ -1040,9 +1040,17 @@ mod tests {
     }
 
     fn fixture(features: bool, hub: Option<BuildIdentity>, drain_ms: u64) -> Fixture {
+        fixture_with_publisher(features, hub, drain_ms, steve_store::NoPublisher)
+    }
+
+    fn fixture_with_publisher(
+        features: bool,
+        hub: Option<BuildIdentity>,
+        drain_ms: u64,
+        publisher: impl steve_store::Publisher + 'static,
+    ) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
-        let store =
-            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
+        let store = Store::open(dir.path().join("steve.sqlite3"), publisher).unwrap();
         store.ensure_workspace().unwrap();
         steve_store::testkit::hub::hub_fixtures::seed_nodes(&store).unwrap();
         let release = dir.path().join("release");
@@ -1245,10 +1253,33 @@ mod tests {
 
     #[tokio::test]
     async fn an_outdated_node_is_staged_drained_and_switched_to_the_hubs_own_build() {
-        let f = fixture(true, Some(build("2.0.0", 'b')), 1000);
+        let upgrades = Arc::new(std::sync::OnceLock::<std::sync::Weak<Upgrades>>::new());
+        let (send, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let publisher = steve_store::FnPublisher({
+            let upgrades = upgrades.clone();
+            move |_| {
+                let Some(up) = upgrades.get().and_then(std::sync::Weak::upgrade) else {
+                    return;
+                };
+                let latest = up
+                    .store
+                    .reader(|c| store_nodes::upgrade_latest(c, "n_a"))
+                    .unwrap();
+                if latest.is_some_and(|row| row.phase == "succeeded") {
+                    let _ = send.send(up.seen("n_a").and_then(|seen| seen.build));
+                }
+            }
+        });
+        let f = fixture_with_publisher(true, Some(build("2.0.0", 'b')), 1000, publisher);
+        assert!(upgrades.set(Arc::downgrade(&f.up)).is_ok());
         let op = f.up.start("n_a", "u", false).await.unwrap();
         let r = ended(&f, &op).await;
         assert_eq!(r.phase, "succeeded", "{:?}", r.error);
+        let build_at_commit = tokio::time::timeout(Duration::from_secs(1), received.recv())
+            .await
+            .expect("upgrade success was published")
+            .expect("publication carried the observed build");
+        assert_eq!(build_at_commit, Some(build("2.0.0", 'b')));
         assert_eq!(r.from_version.as_deref(), Some("1.0.0"));
         // what the node was asked to stage is the archive the hub kept, checksum and all
         let staged = f.node.staged_upgrades();
