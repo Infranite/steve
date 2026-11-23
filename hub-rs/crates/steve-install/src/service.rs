@@ -711,6 +711,7 @@ impl Service {
         };
         Ok(
             json!({"installed": config.is_file(), "loaded":result.code == 0,"running":running,"pid":pid,
+            "program":fields.get("program"),
             "state":fields.get("state").copied().unwrap_or(if absent {"stopped"} else {"unknown"})}),
         )
     }
@@ -1342,6 +1343,7 @@ mod tests {
         pending_dropin: String,
         stale: Option<String>,
         legacy: BTreeMap<String, PathBuf>,
+        legacy_programs: BTreeMap<String, PathBuf>,
         node_signatures: BTreeMap<PathBuf, String>,
     }
 
@@ -1405,6 +1407,11 @@ mod tests {
                             "\tpath = {}\n\tstate = running\n\tpid = 42\n",
                             path.display()
                         );
+                        if let Some(program) = self.legacy_programs.get(&args[2]) {
+                            result
+                                .stdout
+                                .push_str(&format!("\tprogram = {}\n", program.display()));
+                        }
                     }
                     ("print", None) => {
                         result.code = 113;
@@ -1955,7 +1962,7 @@ esac
                     plist["EnvironmentVariables"]["STEVE_HOME"],
                     text(&f.home).unwrap()
                 );
-                assert_eq!(plist["ProgramArguments"][0], "/bin/sh");
+                assert_eq!(plist["ProgramArguments"], s.boot_arguments().unwrap());
                 assert!(plist.get("StandardOutPath").is_none());
             } else {
                 let unit = fs::read_to_string(&s.config).unwrap();
@@ -2007,7 +2014,7 @@ esac
                     m.running = condition == "running";
                     m.calls.clear();
                 }
-                if system == System::Linux || condition == "unknown" {
+                if system == System::Linux {
                     assert!(
                         s.dispatch("update", Some(&f.next), 0)
                             .unwrap_err()
@@ -2189,6 +2196,51 @@ esac
         f.preserved();
     }
 
+    #[test]
+    fn migration_repairs_a_stale_receipt_from_the_live_job_or_latest_verified_bundle() {
+        for running in [true, false] {
+            let f = Fixture::new();
+            let (mut s, manager) = f.service(System::Darwin, "node");
+            let releases = f.home.join("releases");
+            fs::create_dir(&releases).unwrap();
+            let latest = Fixture::bundle(&releases, "0.2.2", "c");
+            let incomplete = Fixture::bundle(&releases, "0.2.3", "d");
+            fs::remove_file(incomplete.join("bin/steve-node")).unwrap();
+            let agent = s.legacy_config();
+            fs::create_dir_all(agent.parent().unwrap()).unwrap();
+            fs::write(&agent, s.definition(&f.release).unwrap()).unwrap();
+            let (_, build) = s.bundle(&f.release).unwrap();
+            atomic(
+                &s.record_path,
+                &json_bytes(&json!({
+                    "component": "node", "label": s.label, "release": f.release, "build": build
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            if running {
+                let domain = format!("user/{}/{}", unsafe { libc::getuid() }, s.label);
+                let mut manager = manager.lock().unwrap();
+                manager.legacy.insert(domain.clone(), agent);
+                manager
+                    .legacy_programs
+                    .insert(domain, f.next.join("bin/steve-node"));
+            }
+            let expected = if running { &f.next } else { &latest };
+            let report = s.dispatch("enable-boot", None, 0).unwrap();
+            assert_eq!(report["configured_release"], text(expected).unwrap());
+            assert_eq!(
+                report["configured_build"]["version"],
+                if running { "0.2.1" } else { "0.2.2" }
+            );
+            let receipt = object(&s.record_path).unwrap();
+            assert_eq!(receipt["boot_release"], report["configured_release"]);
+            assert_eq!(receipt["build"], report["configured_build"]);
+            assert!(receipt.get("release").is_none());
+            f.preserved();
+        }
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn mac_boot_entrypoint_reads_the_selected_release_and_private_pairing_without_launchd() {
@@ -2243,6 +2295,12 @@ printf 'headless fixture ran\n'
         ]);
         s.dispatch("install", Some(&f.release), 0).unwrap();
         s.dispatch("enable-boot", None, 0).unwrap();
+        let cli = "identifier \"io.github.infranite.steve.cli\" and anchor apple generic";
+        manager.lock().unwrap().node_signatures.extend([
+            (f.home.join(boot::RUNNER), cli.into()),
+            (f.next.join("bin/steve"), cli.into()),
+        ]);
+        assert!(s.verify_boot_upgrade(&f.next).is_err());
         let supervisor = fs::read(f.home.join(boot::RUNNER)).unwrap();
         let definition = fs::read(&s.config).unwrap();
         // Bundle verification uses the fake manager's own metadata, not these shell fixtures.
@@ -2264,7 +2322,11 @@ cd "${0%/*}"
 "#,
         )
         .unwrap();
-        manager.lock().unwrap().calls.clear();
+        {
+            let mut manager = manager.lock().unwrap();
+            manager.calls.clear();
+            manager.unknown = true;
+        }
         let home = f.home.clone();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -2290,6 +2352,7 @@ cd "${0%/*}"
                 .unwrap()
                 .node_signatures
                 .insert(f.next.join("bin/steve-node"), requirement.into());
+            s.verify_boot_upgrade(&f.next)?;
             s.dispatch("update", Some(&f.next), 0)?;
             done_rx.recv_timeout(Duration::from_secs(5))??;
             Ok(())
@@ -2307,7 +2370,7 @@ cd "${0%/*}"
                 .unwrap()
                 .calls
                 .iter()
-                .any(|call| call[0] == "/usr/bin/sudo")
+                .any(|call| matches!(call[0].as_str(), "/usr/bin/sudo" | "launchctl"))
         );
         boot::supervise(&f.home, || false).unwrap();
         assert_eq!(

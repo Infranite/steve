@@ -10,6 +10,19 @@ use steve_types::devices::NODE_BOOT_SERVICE_ENV;
 pub(super) const RUNNER: &str = "services/node-boot-runner";
 const RUNNER_ARG: &str = "__node-boot-run";
 
+struct LegacyAgent {
+    definition: Option<Vec<u8>>,
+    domains: Vec<String>,
+    installed: Option<PathBuf>,
+    running: Option<PathBuf>,
+}
+
+fn program_release(program: &str) -> Option<PathBuf> {
+    let path = Path::new(program);
+    let bin = path.parent()?;
+    (path.is_absolute() && path.ends_with("bin/steve-node")).then_some(bin.parent()?.to_owned())
+}
+
 // One sudo command, including migration over SSH. The shell never sources a user file or
 // executes the launcher. Only after launchctl detaches the old job does the unprivileged CLI
 // update its own files and acknowledge readiness. EOF (failure or interruption) aborts.
@@ -311,10 +324,8 @@ impl Service {
                         self.record["boot_release"].as_str() != release.to_str(),
                         "extract the candidate into a separate release directory; no files changed"
                     );
-                    ensure!(
-                        self.state()?["running"].is_boolean(),
-                        "cannot determine macOS Node service state; no files changed"
-                    );
+                    // The owner-checked supervisor observes the receipt even without a
+                    // GUI domain. A disabled system job stays disabled after the change.
                 } else {
                     self.wait_unloaded("system", &self.config, wait)?;
                 }
@@ -367,54 +378,75 @@ impl Service {
         Ok(())
     }
 
+    fn developer_requirement(&self, binary: &Path) -> Result<Option<String>> {
+        let signature = self.command(
+            vec![
+                "/usr/bin/codesign".into(),
+                "--display".into(),
+                "-r-".into(),
+                "--verbose=4".into(),
+                text(binary)?,
+            ],
+            false,
+        )?;
+        let developer_id = signature
+            .stderr
+            .lines()
+            .any(|line| line.starts_with("Authority=Developer ID Application:"));
+        if signature.code != 0 || !developer_id {
+            return Ok(None);
+        }
+        Ok(Some(
+            signature
+                .stderr
+                .lines()
+                .find_map(|line| line.strip_prefix("designated => "))
+                .context("signed executable has no designated code requirement")?
+                .to_owned(),
+        ))
+    }
+
+    fn require_code(&self, binary: &Path, requirement: &str) -> Result<()> {
+        self.command(
+            vec![
+                "/usr/bin/codesign".into(),
+                "--verify".into(),
+                "--strict".into(),
+                "-R".into(),
+                requirement.into(),
+                text(binary)?,
+            ],
+            true,
+        )
+        .context("candidate executable must satisfy the installation's designated requirement")?;
+        Ok(())
+    }
+
     fn node_requirement(&self, candidate: &Path) -> Result<Option<String>> {
-        let candidate = text(candidate)?;
-        let requirement = self.record["code_requirement"].as_str().map(str::to_owned);
-        let requirement = match requirement {
-            Some(requirement) => Some(requirement),
-            None => {
-                let signature = self.command(
-                    vec![
-                        "/usr/bin/codesign".into(),
-                        "--display".into(),
-                        "-r-".into(),
-                        "--verbose=4".into(),
-                        candidate.clone(),
-                    ],
-                    false,
-                )?;
-                let developer_id = signature
-                    .stderr
-                    .lines()
-                    .any(|line| line.starts_with("Authority=Developer ID Application:"));
-                if signature.code != 0 || !developer_id {
-                    return Ok(None);
-                }
-                Some(
-                    signature
-                        .stderr
-                        .lines()
-                        .find_map(|line| line.strip_prefix("designated => "))
-                        .context("signed Node has no designated code requirement")?
-                        .to_owned(),
-                )
-            }
+        let requirement = match self.record["code_requirement"].as_str() {
+            Some(requirement) => Some(requirement.to_owned()),
+            None => self.developer_requirement(candidate)?,
         };
         if let Some(requirement) = &requirement {
-            self.command(
-                vec![
-                    "/usr/bin/codesign".into(),
-                    "--verify".into(),
-                    "--strict".into(),
-                    "-R".into(),
-                    requirement.clone(),
-                    candidate,
-                ],
-                true,
-            )
-            .context("Node signature must satisfy the installation's designated requirement")?;
+            self.require_code(candidate, requirement)?;
         }
         Ok(requirement)
+    }
+
+    /// Check both staged executables before the updater runs either one's build-info command.
+    pub fn verify_boot_upgrade(&self, candidate: &Path) -> Result<()> {
+        ensure!(
+            self.boot_node() && self.record["boot_release"].is_string(),
+            "not a boot Node"
+        );
+        let node = self.record["code_requirement"]
+            .as_str()
+            .context("unverified Node signing identity")?;
+        let cli = self
+            .developer_requirement(&self.home.join(RUNNER))?
+            .context("unverified boot supervisor signing identity")?;
+        self.require_code(&candidate.join("bin/steve-node"), node)?;
+        self.require_code(&candidate.join("bin/steve"), &cli)
     }
 
     fn sudo(&self, arguments: &[&str]) -> Result<Output> {
@@ -474,14 +506,21 @@ impl Service {
             "finish uninstall and prepare an installation before enabling boot"
         );
         let account = self.account()?;
-        let release = configured_release(&self.record).context("Node has no prepared release")?;
-        let (release, info, requirement) = self.boot_bundle(Path::new(release))?;
+        let release = PathBuf::from(
+            configured_release(&self.record).context("Node has no prepared release")?,
+        );
         self.check_owner()?;
         if exists(&self.config) {
             self.require_no_agent()?;
+            self.boot_bundle(&release)?;
         } else {
             self.wait_unloaded("system", &self.config, 0)?;
-            let (before, loaded) = self.legacy_before()?;
+            let legacy = self.legacy_before()?;
+            let (release, info, requirement) = if self.record["boot_release"].is_null() {
+                self.migration_release(&legacy, &release)?
+            } else {
+                self.boot_bundle(&release)?
+            };
             let data = self.boot_definition(&account)?;
             let args = [
                 "/usr/bin/sudo".into(),
@@ -494,11 +533,11 @@ impl Service {
                 format!("system/{}", self.label),
             ]
             .into_iter()
-            .chain(loaded)
+            .chain(legacy.domains)
             .collect::<Vec<_>>();
             let register = self.boot_registrar.clone();
             register(&args, &mut || {
-                self.retire_agent(before.as_deref())?;
+                self.retire_agent(legacy.definition.as_deref())?;
                 self.wait_node_exit(15)?;
                 if self.record["boot_release"].is_null() {
                     self.write_boot_record(
@@ -536,20 +575,24 @@ impl Service {
         [format!("gui/{uid}"), format!("user/{uid}")]
     }
 
-    fn legacy_before(&self) -> Result<(Option<Vec<u8>>, Vec<String>)> {
+    fn legacy_before(&self) -> Result<LegacyAgent> {
         let agent = self.legacy_config();
-        let before = if exists(&agent) {
+        let (definition, installed) = if exists(&agent) {
             let bytes = maintenance_file(&agent)?;
             ensure!(
                 self.record["release"].is_string() && self.record["boot_release"].is_null(),
                 "unexpected LaunchAgent with this label; inspect it before enabling boot"
             );
-            self.check_launch_definition(&bytes)?;
-            Some(bytes)
+            let definition = self.check_launch_definition(&bytes)?;
+            let installed = definition["ProgramArguments"][0]
+                .as_str()
+                .and_then(program_release);
+            (Some(bytes), installed)
         } else {
-            None
+            (None, None)
         };
-        let mut loaded = Vec::new();
+        let mut domains = Vec::new();
+        let mut running = None;
         for domain in Self::legacy_domains() {
             let state = self.launch_state(&domain, &agent, true)?;
             ensure!(
@@ -558,13 +601,71 @@ impl Service {
             );
             if state["loaded"] == true {
                 ensure!(
-                    before.is_some(),
+                    definition.is_some(),
                     "found a legacy job without an owned definition; inspect it first"
                 );
-                loaded.push(format!("{domain}/{}", self.label));
+                domains.push(format!("{domain}/{}", self.label));
+                if state["running"] == true
+                    && let Some(actual) = state["program"].as_str().and_then(program_release)
+                {
+                    ensure!(
+                        running.as_ref().is_none_or(|path| path == &actual),
+                        "legacy jobs point to different running releases"
+                    );
+                    running = Some(actual);
+                }
             }
         }
-        Ok((before, loaded))
+        Ok(LegacyAgent {
+            definition,
+            installed,
+            domains,
+            running,
+        })
+    }
+
+    fn migration_release(
+        &self,
+        agent: &LegacyAgent,
+        receipt: &Path,
+    ) -> Result<(PathBuf, Value, Option<String>)> {
+        if let Some(running) = &agent.running
+            && let Ok(bundle) = self.boot_bundle(running)
+        {
+            return Ok(bundle);
+        }
+        let releases = match fs::read_dir(self.home.join("releases")) {
+            Ok(releases) => Some(releases),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e).context("read the Node's verified release directory"),
+        };
+        let discovered = releases.into_iter().flatten().filter_map(|entry| {
+            let entry = entry.ok()?;
+            (entry.file_type().ok()?.is_dir()
+                && !entry.file_name().as_encoded_bytes().starts_with(b"."))
+            .then(|| entry.path())
+        });
+        let candidates: std::collections::BTreeSet<_> =
+            [receipt.to_owned(), self.home.join("current")]
+                .into_iter()
+                .chain(agent.installed.clone())
+                .chain(discovered)
+                .collect();
+        let mut versions = candidates
+            .into_iter()
+            .filter_map(|path| {
+                let manifest: Value =
+                    serde_json::from_slice(&maintenance_file(&path.join("release.json")).ok()?)
+                        .ok()?;
+                let version = semver::Version::parse(manifest["version"].as_str()?).ok()?;
+                Some((version, path))
+            })
+            .collect::<Vec<_>>();
+        versions.sort_unstable_by(|a, b| b.cmp(a));
+        versions
+            .into_iter()
+            .find_map(|(_, path)| self.boot_bundle(&path).ok())
+            .context("no verified Node release available for boot migration")
     }
 
     fn retire_agent(&self, before: Option<&[u8]>) -> Result<()> {
