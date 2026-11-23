@@ -101,13 +101,20 @@ pub fn run_deadline(
     deadline: Duration,
 ) -> Result<(bool, String, String), RunError> {
     use std::os::unix::process::CommandExt;
-    let mut child = cmd
+    let child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0)
         .spawn()
         .map_err(RunError::Spawn)?;
+    collect_deadline(child, deadline)
+}
+
+fn collect_deadline(
+    mut child: std::process::Child,
+    deadline: Duration,
+) -> Result<(bool, String, String), RunError> {
     let end = Instant::now() + deadline;
     let group = child.id() as i32;
     let kill_group = || {
@@ -198,31 +205,47 @@ mod tests {
 
     #[test]
     fn a_command_and_what_it_started_end_at_the_deadline() {
-        let mark = tempfile::tempdir().unwrap();
-        let alive = mark.path().join("alive");
-        /* a wrapper that leaves a child holding its output open, and one that hangs itself */
-        for script in [
-            format!("(sleep 5; touch {}) & echo started", alive.display()),
-            format!("sleep 5; touch {}", alive.display()),
-        ] {
-            let mut cmd = Command::new("/bin/sh");
-            cmd.args(["-c", &script]);
+        use std::os::{fd::OwnedFd, unix::net::UnixStream, unix::process::CommandExt};
+
+        // One wrapper leaves a child holding its output open. The other hangs itself.
+        for stay in [false, true] {
+            let (mut observer, peer) = UnixStream::pair().unwrap();
+            observer
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut child = Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "exec 9<&0; /bin/sleep 30 & printf x >&9; if [ \"$1\" = wait ]; then wait; fi",
+                    "fixture",
+                    if stay { "wait" } else { "exit" },
+                ])
+                .process_group(0)
+                .stdin(OwnedFd::from(peer))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut ready = [0];
+            if let Err(err) = observer.read_exact(&mut ready) {
+                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+                let _ = child.wait();
+                panic!("deadline fixture did not start its descendant: {err}");
+            }
+            assert_eq!(ready, *b"x");
+
             let t = Instant::now();
-            assert!(
-                run_deadline(cmd, Duration::from_millis(300)).is_err(),
-                "{script}"
-            );
-            assert!(
-                t.elapsed() < Duration::from_secs(3),
-                "{script}: {:?}",
-                t.elapsed()
-            );
+            let result = collect_deadline(child, Duration::from_millis(300));
+            assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+            // Both the leader and the descendant inherit fd 9. EOF proves the group
+            // closed the socket (the observer did not close its own end to force an exit).
+            assert_eq!(observer.read(&mut [0]).expect("group must close socket"), 0);
+            if stay {
+                assert!(matches!(result, Err(RunError::Timeout(_))), "{result:?}");
+            } else {
+                assert!(matches!(result, Err(RunError::Held)), "{result:?}");
+            }
         }
-        std::thread::sleep(Duration::from_secs(6));
-        assert!(
-            !alive.exists(),
-            "what the command started was killed with it"
-        );
         let mut ok = Command::new("/bin/sh");
         ok.args(["-c", "echo out; echo err >&2; exit 3"]);
         assert_eq!(

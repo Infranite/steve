@@ -31,11 +31,10 @@ fn until(secs: u64, mut f: impl FnMut() -> bool) -> bool {
 fn a_release_script_does_not_outlive_its_test_kit() {
     let k = Kit::new();
     let script = k.home().join("release.sh");
-    /* ignores its directory going away (only the kit can stop it in time; it gives up after ~30 s so a failing
-     * run leaves nothing for long), with a child of its own in the group */
+    // The child of the script holds the group open but exits after 30 s if cleanup fails.
     std::fs::write(
         &script,
-        "n=0\nwhile [ $n -lt 600 ]; do n=$((n+1)); sleep 0.05 & wait; done\n",
+        "/bin/sleep 30 & child=$!\n: > \"$STEVE_HOME/running\"\nwait \"$child\"\n",
     )
     .unwrap();
     let rel = Release {
@@ -72,7 +71,10 @@ fn a_release_script_does_not_outlive_its_test_kit() {
     let groups = test_spawned::of(k.home());
     assert_eq!(groups.len(), 1, "one release script started");
     let g = groups[0];
-    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        until(5, || k.home().join("running").is_file()),
+        "the release script did not start its child"
+    );
     assert!(
         group_alive(g),
         "the script keeps running while the kit lives"
@@ -91,12 +93,21 @@ fn a_fake_release_script_stops_when_its_home_is_gone() {
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
     let script = dir.path().join("release.sh");
-    std::fs::write(&script, super::fake_release_script("exit 0\n")).unwrap();
-    let mut cmd = std::process::Command::new("/bin/zsh");
+    std::fs::write(
+        &script,
+        format!(
+            ": > \"$STEVE_HOME/waiting\" || exit 2\n{}",
+            super::fake_release_script("exit 0\n")
+        ),
+    )
+    .unwrap();
+    let mut cmd = steve_runtime::testkit::process::Command::new("/bin/zsh");
     cmd.arg(&script).env("STEVE_HOME", &home);
-    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     let mut child = cmd.spawn().unwrap();
-    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        until(3, || home.join("waiting").is_file()),
+        "the fake release script did not reach its wait loop"
+    );
     assert!(child.try_wait().unwrap().is_none(), "still waiting for go");
     std::fs::remove_dir_all(&home).unwrap();
     let mut status = child.try_wait().unwrap();
@@ -106,7 +117,6 @@ fn a_fake_release_script_stops_when_its_home_is_gone() {
         }
         status.is_some()
     }) {
-        let _ = child.kill();
         panic!("the script did not exit once its home was deleted");
     }
     assert_eq!(status.unwrap().code(), Some(1));

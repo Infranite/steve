@@ -102,16 +102,17 @@ class LifecycleTests(unittest.TestCase):
             env = run.isolated_environment(home, 18770)
             processes = run.Processes()
             child_code = ("import os,time;from pathlib import Path;"
-                          "Path(os.environ['STEVE_HOME'],'data/node/service.pid').write_text(str(os.getpid()));"
+                          "pid=Path(os.environ['STEVE_HOME'],'data/node/service.pid');"
+                          "tmp=pid.with_suffix('.tmp'); tmp.write_text(str(os.getpid())); tmp.replace(pid);"
                           "time.sleep(30)")
-            parent_code = ("import subprocess,sys,time;"
+            parent_code = ("import subprocess,sys;"
                            f"subprocess.Popen([sys.executable,'-c',{child_code!r},'--local-node'],"
                            "start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);"
-                           "time.sleep(1)")
-            child_pid = None
+                           "sys.stdin.readline()")
+            parent = None
             try:
                 parent = processes.start([sys.executable, "-c", parent_code], env,
-                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                         stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 pidfile = home / "data/node/service.pid"
                 deadline = time.perf_counter() + 5
                 while not pidfile.exists() and time.perf_counter() < deadline:
@@ -123,10 +124,14 @@ class LifecycleTests(unittest.TestCase):
                     meter = run.DiskMeter(parent.pid)
                     meter.sample(run.process_table(), baseline=True)
                     self.assertIn(child_pid, [r["pid"] for r in meter.result(1)["processes"]])
+                # Sample the live tree before letting the main process exit and orphan the Node.
+                parent.stdin.close()
                 parent.wait(timeout=5)
                 self.assertEqual(processes.cleanup()["process_groups_remaining"], [])
                 self.assertEqual(run.live_groups({child_pid}), set())
             finally:
+                if parent is not None:
+                    parent.stdin.close()
                 processes.cleanup()
                 if child_pid:
                     try:
