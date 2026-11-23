@@ -4,8 +4,8 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use sea_query::{Alias, Expr, ExprTrait, Query, SelectStatement};
 use serde::{Deserialize, Serialize};
 use steve_types::{
-    BotPlacement, ItemClosing, ItemParent, ItemSnooze, ItemView, ItemWorkflow, Millis,
-    OperationBlocker,
+    BotPlacement, CloseKind, ClosedBy, ItemOutcome, ItemParent, ItemSnooze, ItemState, ItemView,
+    ItemWait, ItemWorkflow, Millis, OperationBlocker,
 };
 
 use super::{Page, page, read_ids};
@@ -16,7 +16,7 @@ fn select() -> SelectStatement {
     let mut q = Query::select();
     q.from(Alias::new("items"))
         .columns([
-            "id", "workspace_id", "no", "title", "status", "stage", "phase", "cycle", "revision",
+            "id", "workspace_id", "no", "title", "status", "outcome", "phase", "cycle", "revision",
             "bot_id", "project_id", "parent", "priority", "star", "archived",
             "due", "snooze", "accept_mode", "design_gate", "source", "created", "updated",
         ].map(Alias::new))
@@ -43,6 +43,9 @@ fn select() -> SelectStatement {
             (SELECT follow FROM thread_items WHERE item_id=items.id)
         )"))
         .expr(Expr::cust("(SELECT fact FROM bot_placements WHERE item_id=items.id AND fact IS NOT NULL ORDER BY seq DESC LIMIT 1)"))
+        .expr(Expr::cust("(SELECT json_group_array(json_object('repository',repository,'number',number,'target',target,'head',head,'base',base,'required',json(CASE required WHEN 1 THEN 'true' ELSE 'false' END))) FROM (SELECT repository,number,target,head,base,required FROM item_delivery_refs WHERE item_id=items.id AND cycle=items.cycle AND scope=COALESCE((SELECT MAX(version) FROM item_goals WHERE item_id=items.id),0) ORDER BY repository,number))"))
+        .column(Alias::new("acceptance"))
+        .expr(Expr::cust("EXISTS (SELECT 1 FROM item_dependency_waits w WHERE w.item_id=items.id AND w.cycle=items.cycle AND w.state='waiting') OR EXISTS (SELECT 1 FROM item_deps d LEFT JOIN items p ON p.id=d.dep_id WHERE d.item_id=items.id AND (p.phase IS NOT 'closed' OR p.outcome IS NOT 'completed'))"))
         .and_where(Expr::col(Alias::new("kind")).eq("task"));
     q
 }
@@ -57,23 +60,24 @@ struct Operation {
 }
 
 fn apply_operations(v: &mut ItemView, revision: i64, ops: Vec<Operation>) {
-    if v.phase == "closed" {
-        return;
-    }
+    let closing = match v.state {
+        ItemState::Closing { request, .. } => Some(request),
+        ItemState::Closed { .. } | ItemState::Ready | ItemState::Active | ItemState::Paused => None,
+    };
     let mut waits = false;
     for op in ops {
         let build = op.kind == "release.build";
         let required = op.required != 0 && op.revision == revision;
         waits |= (!build && matches!(op.status.as_str(), "running" | "unknown"))
-            || (required && v.closing.as_ref().is_some_and(|c| c.kind == "complete"));
+            || (required && closing == Some(CloseKind::Complete));
         if !build && op.status == "running" {
             v.active_operations += 1;
         }
         let kind = match op.status.as_str() {
             "unknown" => "unknown_effect",
-            "failed" if required && v.closing.is_some() => "failure",
+            "failed" if required && closing.is_some() => "failure",
             "pending" | "running"
-                if required && v.closing.is_some() && (build || op.kind == "deploy") =>
+                if required && closing.is_some() && (build || op.kind == "deploy") =>
             {
                 "operation"
             }
@@ -85,10 +89,10 @@ fn apply_operations(v: &mut ItemView, revision: i64, ops: Vec<Operation>) {
             tag: op.tag,
         });
     }
-    if let Some(c) = &mut v.closing
+    if let ItemState::Closing { waits: reasons, .. } = &mut v.state
         && waits
     {
-        c.waiting.push("operation".into());
+        reasons.push(ItemWait::Operation);
     }
 }
 
@@ -134,6 +138,46 @@ fn row(r: &Row<'_>) -> Result<ItemView> {
     let mut stamp = DefaultHasher::new();
     revision.hash(&mut stamp);
     r.get::<String>(36)?.hash(&mut stamp);
+    let delivery: Vec<steve_types::DeliveryRef> = r.get::<Json<Vec<_>>>(38)?.0;
+    let status: String = r.get(4)?;
+    let outcome: Option<String> = r.get(5)?;
+    let acceptance: Option<String> = r.get(39)?;
+    let state = match phase.as_str() {
+        "closed" => ItemState::Closed {
+            outcome: match outcome.as_deref() {
+                Some("completed") => ItemOutcome::Finished,
+                Some("failed") => ItemOutcome::Failed,
+                _ => ItemOutcome::Cancelled,
+            },
+            by: match acceptance.as_deref() {
+                Some("owner") => ClosedBy::Owner,
+                Some("human" | "waived") => ClosedBy::Acceptance,
+                Some("automatic") => ClosedBy::Rule,
+                _ => ClosedBy::Unknown,
+            },
+        },
+        _ if status == "pause" => ItemState::Paused,
+        "closing" => ItemState::Closing {
+            request: match r.get::<Option<String>>(25)?.as_deref() {
+                Some("cancel") => CloseKind::Cancel,
+                Some("fail") => CloseKind::Fail,
+                _ => CloseKind::Complete,
+            },
+            waits: delivery
+                .iter()
+                .any(|reference| reference.required)
+                .then_some(ItemWait::Delivery)
+                .into_iter()
+                .collect(),
+        },
+        "ready" => ItemState::Ready,
+        _ => ItemState::Active,
+    };
+    let waits = if !matches!(state, ItemState::Closed { .. }) && r.get::<bool>(40)? {
+        vec![ItemWait::Prerequisite]
+    } else {
+        Vec::new()
+    };
     let mut v = ItemView {
         placement: r
             .get::<Option<Json<BotPlacement>>>(37)?
@@ -142,11 +186,10 @@ fn row(r: &Row<'_>) -> Result<ItemView> {
         ws: r.get::<String>(1)?.into(),
         no: r.get(2)?,
         title: r.get(3)?,
-        status: r.get(4)?,
-        stage: r.get(5)?,
-        phase,
+        state,
         cycle: r.get(7)?,
         revision,
+        delivery,
         bot_id: r.get::<Option<String>>(9)?.map(Into::into),
         project_id: r.get::<Option<String>>(10)?.map(Into::into),
         parent,
@@ -170,10 +213,7 @@ fn row(r: &Row<'_>) -> Result<ItemView> {
         deps: r.get::<Json<Vec<_>>>(28)?.0,
         workflow,
         closeout,
-        closing: r.get::<Option<String>>(25)?.map(|kind| ItemClosing {
-            kind,
-            waiting: Vec::new(),
-        }),
+        waits,
         op_blockers: Vec::new(),
         active_operations: 0,
         detail_stamp: stamp.finish() & ((1 << 53) - 1),

@@ -235,6 +235,21 @@ impl GitHub {
         }
     }
 
+    fn opening_on_acceptance(
+        c: &mut impl steve_store::Read,
+        item: &Item,
+    ) -> steve_store::Result<bool> {
+        let id = steve_types::ItemId::from(item.id.clone());
+        let scope = steve_store::item_delivery::scope(c, &item.id)?;
+        if steve_store::item_delivery::refs(c, &id, item.cycle, scope)?
+            .iter()
+            .any(|r| r.required)
+        {
+            return Ok(false);
+        }
+        steve_store::item_delivery::matches_closing(c, &id, item.cycle, item.revision)
+    }
+
     /// `on_item_accepted`: offers a PR (and takes the wrap-up over) when the item's project is
     /// linked, `after_accept` is `ask_pr` or `open_pr`, the item has a branch with commits the base
     /// lacks, the project has no release action, and no PR from that branch is open. Opens the
@@ -251,6 +266,9 @@ impl GitHub {
         let pre = self
             .store()
             .read(|c| {
+                if !Self::opening_on_acceptance(c, item)? {
+                    return Ok(None);
+                }
                 let Some(r) =
                     steve_store::github::repo_of_project(c, &ws, &project)?.filter(|r| r.enabled)
                 else {
@@ -347,8 +365,12 @@ impl GitHub {
             // your grant answers it: opened and answered together, the push is the effect queue's,
             // and only the commit that passed the check is pushed (a branch that moved is refused)
             let now = self.now();
-            self.store()
+            let queued = self
+                .store()
                 .write(|tx| {
+                    if !Self::opening_on_acceptance(tx, item)? {
+                        return Ok(false);
+                    }
                     let opened = steve_store::DecisionRows(tx).open(&d)?;
                     steve_store::DecisionRows(tx).settle(
                         &opened.id,
@@ -377,9 +399,12 @@ impl GitHub {
                             },
                         },
                     ));
-                    Ok::<_, ApiError>(())
+                    Ok::<_, ApiError>(true)
                 })
                 .map_err(|e| e.to_string())?;
+            if !queued {
+                return Ok(false);
+            }
             if let Err(e) = self
                 .core()
                 .progress(&ws, &item.id, "收尾", "验收通过，正在开草稿 PR")
@@ -389,13 +414,19 @@ impl GitHub {
             }
             return Ok(true);
         }
-        self.store()
+        let opened = self
+            .store()
             .write(|tx| {
-                steve_store::DecisionRows(tx)
-                    .open(&d)
-                    .map_err(ApiError::from)
+                if !Self::opening_on_acceptance(tx, item)? {
+                    return Ok(false);
+                }
+                steve_store::DecisionRows(tx).open(&d)?;
+                Ok::<_, ApiError>(true)
             })
             .map_err(|e| e.to_string())?;
+        if !opened {
+            return Ok(false);
+        }
         if let Err(e) = self
             .core()
             .progress(&ws, &item.id, "收尾", "验收通过，等你确认开 PR")

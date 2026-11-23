@@ -409,7 +409,13 @@ fn cancelled_graph_requires_explicit_human_single_session_acceptance() {
     }
     let before = graph(&k, &parent);
     assert!(parent_deliver(&k, &parent).is_err());
-    assert!(k.finish(&parent).is_err());
+    assert!(
+        !k.core
+            .tx()
+            .workflow_blockers(&parent, true)
+            .unwrap()
+            .is_empty()
+    );
     let sid = k.session(&parent, "idle");
     let s = k.db().session(&sid).unwrap().unwrap();
     let args = json!({"action":"single_session", "reason":"用户确认本次单会话验收，未做独立评审", "expected_revision":before.revision});
@@ -503,7 +509,13 @@ fn single_session_cancels_unfinished_units_and_replan_restores_review_gate() {
         .unwrap();
     assert!(!graph(&k, &parent).single_session());
     assert!(parent_deliver(&k, &parent).is_err());
-    assert!(k.finish(&parent).is_err());
+    assert!(
+        !k.core
+            .tx()
+            .workflow_blockers(&parent, true)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -549,7 +561,13 @@ fn single_session_never_ignores_unsettled_cancelled_execution() {
         assert!(parent_deliver(&k, &parent).is_ok());
         // A newly reported uncertain execution still blocks close even after mode confirmation.
         k.rt.st().uncertain.insert(sid.into());
-        assert!(k.finish(&parent).is_err());
+        assert!(
+            !k.core
+                .tx()
+                .workflow_blockers(&parent, true)
+                .unwrap()
+                .is_empty()
+        );
     }
 }
 
@@ -570,7 +588,13 @@ fn single_session_confirmation_cannot_waive_a_new_goal_or_cycle() {
             steve_store::core_fixture::skip_workflow_goal_version(k.db().store(), &parent);
         }
         assert!(parent_deliver(&k, &parent).is_err());
-        assert!(k.finish(&parent).is_err());
+        assert!(
+            !k.core
+                .tx()
+                .workflow_blockers(&parent, true)
+                .unwrap()
+                .is_empty()
+        );
         assert!(change(&k, &parent, "single_session", None).is_err());
         assert!(change(&k, &parent, "resume", None).is_err());
         assert!(change(&k, &parent, "cancel", Some("a")).is_err());
@@ -686,7 +710,13 @@ fn no_confined_node_plans_but_never_creates_or_runs_children() {
     }
     assert!(graph(&k, &parent).units.iter().all(|u| u.item_id.is_none()));
     assert!(k.rt.st().created.is_empty());
-    assert!(k.finish(&parent).is_err());
+    assert!(
+        !k.core
+            .tx()
+            .workflow_blockers(&parent, true)
+            .unwrap()
+            .is_empty()
+    );
     assert_ne!(k.phase(&parent), "closed");
 }
 
@@ -715,7 +745,13 @@ fn parallel_work_waits_for_turn_end_review_and_integration_before_parent_can_clo
     report(&k, &parent, "a").unwrap();
     finish(&k, &parent, "b");
     assert_eq!(unit(&k, &parent, "review").status, "pending");
-    assert!(k.finish(&parent).is_err());
+    assert!(
+        !k.core
+            .tx()
+            .workflow_blockers(&parent, true)
+            .unwrap()
+            .is_empty()
+    );
     k.rt.end_turn(&k.core, a.session_id.as_deref().unwrap(), "end_turn", None);
     let review = unit(&k, &parent, "review");
     assert_eq!(review.status, "running");
@@ -723,9 +759,21 @@ fn parallel_work_waits_for_turn_end_review_and_integration_before_parent_can_clo
         k.rt.prompts_of(review.session_id.as_deref().unwrap())
             .join("\n");
     assert!(prompt.contains("a 的成果") && prompt.contains("b 的成果"));
-    assert!(k.finish(&parent).is_err());
+    assert!(
+        !k.core
+            .tx()
+            .workflow_blockers(&parent, true)
+            .unwrap()
+            .is_empty()
+    );
     finish(&k, &parent, "review");
-    assert!(k.finish(&parent).is_err());
+    assert!(
+        !k.core
+            .tx()
+            .workflow_blockers(&parent, true)
+            .unwrap()
+            .is_empty()
+    );
     finish(&k, &parent, "integrate");
     assert!(
         k.core.workflow_get(&parent).unwrap()["blockers"]
@@ -846,7 +894,13 @@ fn review_failure_blocks_integration_and_child_token_cannot_replan_or_read_sibli
         Some("failed")
     );
     assert_eq!(unit(&k, &parent, "integrate").status, "pending");
-    assert!(k.finish(&parent).is_err());
+    assert!(
+        !k.core
+            .tx()
+            .workflow_blockers(&parent, true)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -864,7 +918,13 @@ fn a_work_unit_that_stops_without_delivery_closes_its_failed_child() {
         k.db().item(child).unwrap().unwrap().outcome.as_deref(),
         Some("failed")
     );
-    assert!(k.finish(&parent).is_err());
+    assert!(
+        !k.core
+            .tx()
+            .workflow_blockers(&parent, true)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -1120,7 +1180,13 @@ fn cancelled_required_work_is_not_completion_and_cancellation_reaches_children()
     let a = unit(&k, &parent, "a");
     change(&k, &parent, "cancel", Some("a")).unwrap();
     assert!(k.rt.st().cancelled.contains(a.session_id.as_ref().unwrap()));
-    assert!(k.finish(&parent).is_err());
+    assert!(
+        !k.core
+            .tx()
+            .workflow_blockers(&parent, true)
+            .unwrap()
+            .is_empty()
+    );
     k.core.item_action(&parent, ItemAction::Drop, "me").unwrap();
     assert_ne!(k.phase(&parent), "closed");
     for u in graph(&k, &parent).units {

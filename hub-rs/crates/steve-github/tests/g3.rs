@@ -316,8 +316,30 @@ fn item(h: &H, no: i64, branch: Option<&str>) -> String {
 
 /// `on_accepted`, as steve-core calls it after `resolve(accept, pass)`.
 async fn accepted(h: &H, id: &str) -> bool {
-    let i = h.env.store().items().get(id).expect("get").expect("item");
-    h.env.modules.registry.hooks().accepted(&i).await.is_some()
+    let store = h.env.store();
+    let item = store.items().get(id).unwrap().unwrap();
+    let item = store
+        .write(|w| {
+            steve_store::lifecycle_write_in(
+                w,
+                id,
+                &steve_store::LifecycleWrite {
+                    phase: "closing".into(),
+                    cycle: item.cycle,
+                    revision: item.revision + 1,
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap()
+        .unwrap();
+    h.env
+        .modules
+        .registry
+        .hooks()
+        .accepted(&item)
+        .await
+        .is_some()
 }
 
 fn open_decision(h: &H, subject_type: &str) -> Option<(String, String, String)> {

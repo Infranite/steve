@@ -157,7 +157,13 @@ fn optional_claim_without_a_live_session_still_prevents_parent_completion() {
             .iter()
             .any(|v| v.as_str().unwrap().contains("extra"))
     );
-    assert!(k.finish(&parent).is_err());
+    assert!(
+        !k.core
+            .tx()
+            .workflow_blockers(&parent, true)
+            .unwrap()
+            .is_empty()
+    );
     assert_ne!(k.phase(&parent), "closed");
 }
 

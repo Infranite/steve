@@ -377,7 +377,7 @@ export function ItemView({ id }: { id: string }) {
   const quick = (
     <div className="flex items-center gap-1.5" data-quick-actions>
       <Button variant="ghost" size="sm" className="text-muted-foreground max-sm:w-8 max-sm:px-0" aria-label={pl} title={pl} disabled={i.st === "prop"} onClick={pa} data-quick="pause"><PI /><span className="max-sm:sr-only">{pl}</span></Button>
-      <Button variant="outline" size="sm" className="max-sm:w-8 max-sm:px-0" aria-label={t("views:item.markDone")} title={t("views:item.markDone")} disabled={over || doneBusy} onClick={() => { setDoneBusy(true); void markDone(i.id).finally(() => setDoneBusy(false)) }} data-quick="done"><CircleCheckIcon /><span className="max-sm:sr-only">{t("views:item.markDone")}</span></Button>
+      <Button variant="outline" size="sm" className="max-sm:w-8 max-sm:px-0" aria-label={t("views:item.markDone")} title={t("views:item.markDone")} disabled={over || !st.owner || doneBusy} onClick={() => { setDoneBusy(true); void markDone(i.id).finally(() => setDoneBusy(false)) }} data-quick="done"><CircleCheckIcon /><span className="max-sm:sr-only">{t("views:item.markDone")}</span></Button>
     </div>
   )
   const tree = hasAgentTree(at)

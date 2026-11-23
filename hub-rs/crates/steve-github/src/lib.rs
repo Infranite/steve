@@ -87,6 +87,7 @@ pub mod automation;
 pub mod comment;
 pub mod config;
 pub mod core;
+mod delivery;
 pub mod effects;
 pub mod events;
 pub mod flow;

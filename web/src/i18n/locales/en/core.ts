@@ -158,7 +158,6 @@ export default {
     reopened: "Reopened",
     resumed: "Resumed",
     markedDone: "Marked {{id}} done",
-    backToBefore: "Undone, {{id}} is back where it was",
     archived_one: "Archived {{count}} item",
     archived_other: "Archived {{count}} items",
     restored_one: "Restored {{count}} item",

@@ -115,6 +115,17 @@ pub struct GhItems(pub Core);
 
 #[async_trait]
 impl steve_github::core::ItemCore for GhItems {
+    async fn delivery_verified(
+        &self,
+        baseline: steve_types::DeliveryBaseline,
+    ) -> Result<(), String> {
+        let core = self.0.clone();
+        blocking(move || {
+            core.delivery_verified(&baseline)
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
     async fn progress(
         &self,
         _ws: &str,

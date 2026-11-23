@@ -851,6 +851,9 @@ impl Tx<'_> {
             self.track_build(i, &p, required)?;
             return Ok(());
         }
+        if self.delivery_required(i)? {
+            return Ok(());
+        }
         /* the worktree or the remote can't be read: telling the agent to push would not help, and
          * nothing says what is missing; a card for you (#347). Steve keeps looking while it waits */
         if p.unread {

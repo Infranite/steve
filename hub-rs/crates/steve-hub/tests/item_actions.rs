@@ -473,7 +473,7 @@ async fn pause_finish_drop_and_new_cycles() {
         .as_array()
         .and_then(|xs| xs.iter().find(|x| x["id"] == iid.as_str()))
         .expect("item in state");
-    assert_eq!(row["phase"], "closed", "{row}");
+    assert_eq!(row["state"]["kind"], "closed", "{row}");
 
     assert_eq!(finish(&e, &iid).await.0, 409);
     assert_eq!(act(&e, &iid, "resume").await.0, 409);

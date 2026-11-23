@@ -30,6 +30,16 @@ pub(super) fn describe() {
         Count,
         "Requests with no eligible placement. Counted once for each distinct reason. Label: reason."
     );
+    describe_counter!(
+        "steve_item_automatic_delivery_total",
+        Count,
+        "Automatic delivery checks. Label: result (verified or unverified)."
+    );
+    describe_counter!(
+        "steve_item_stale_delivery_total",
+        Count,
+        "Delivery verification rejected because its item cycle or scope changed."
+    );
     // HTTP (metrics::http, the outermost layer)
     describe_counter!(
         "steve_http_requests_total",

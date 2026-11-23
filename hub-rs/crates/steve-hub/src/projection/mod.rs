@@ -344,6 +344,112 @@ mod tests {
         assert_eq!(f.p.reconcile().await, Some(0));
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_thousand_item_change_sequences_match_hot_reads_and_patches() {
+        let f = fixture();
+        let ws = "default";
+        let bot = f
+            .store
+            .bots()
+            .create(
+                ws,
+                &steve_store::NewBot {
+                    name: "Projection fixture".into(),
+                    ..Default::default()
+                },
+                "owner",
+            )
+            .unwrap()
+            .unwrap();
+        let item = f
+            .store
+            .items()
+            .create(
+                ws,
+                &steve_store::NewItem {
+                    title: "Repeated item changes".into(),
+                    goal: "Verify projection".into(),
+                    bot_id: bot.id,
+                    tags: vec![f.store.tags().kinds(ws).unwrap().remove(0).id],
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let mut rx = f.bus.subscribe();
+        let mut client = None;
+        let mut random = 7_u64;
+        for sequence in 0..1_000 {
+            random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let status = if random >> 63 == 0 { "run" } else { "pause" };
+            f.store
+                .items()
+                .patch(
+                    &item.id,
+                    &steve_store::ItemPatch {
+                        status: Some(status.into()),
+                        title: Some(format!("Item at step {sequence}")),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            if random & 1 == 0 {
+                let current = f.store.items().get(&item.id).unwrap().unwrap();
+                f.store
+                    .write(|w| {
+                        steve_store::lifecycle_write_in(
+                            w,
+                            &item.id,
+                            &steve_store::LifecycleWrite {
+                                phase: "closed".into(),
+                                cycle: current.cycle,
+                                revision: current.revision + 1,
+                                acceptance: Some("owner".into()),
+                                outcome: Some("completed".into()),
+                                status: Some("done".into()),
+                                ..Default::default()
+                            },
+                        )?;
+                        Ok::<_, steve_store::StoreError>(())
+                    })
+                    .unwrap();
+            }
+            let snap = f.p.snapshot(ws).await.unwrap().views.item.unwrap();
+            let read = f.store.read(|r| r.item_views().hot()).unwrap();
+            assert_eq!(snap, read, "full read at sequence {sequence}");
+            for frame in patches(&mut rx) {
+                for op in frame["ops"].as_array().unwrap() {
+                    if op["type"] == "item" && op["id"] == item.id {
+                        client = Some(op["view"].clone());
+                    }
+                }
+            }
+            assert_eq!(
+                client.as_ref(),
+                Some(&serde_json::to_value(&snap[0]).unwrap()),
+                "patch at sequence {sequence}"
+            );
+            if random & 1 == 0 {
+                f.store
+                    .write(|w| {
+                        steve_store::lifecycle_write_in(
+                            w,
+                            &item.id,
+                            &steve_store::LifecycleWrite {
+                                phase: "active".into(),
+                                cycle: snap[0].cycle + 1,
+                                status: Some("run".into()),
+                                ..Default::default()
+                            },
+                        )?;
+                        Ok::<_, steve_store::StoreError>(())
+                    })
+                    .unwrap();
+            }
+        }
+        assert_eq!(f.p.reconcile().await, Some(0));
+    }
+
     /// The frame format, and what a write that published no event looks like: reconciling counts
     /// it, corrects the view and sends the correction.
     #[tokio::test(flavor = "multi_thread")]

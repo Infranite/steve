@@ -9,6 +9,7 @@ mod flows;
 mod holds;
 mod i18n;
 mod inbox;
+mod item_delivery;
 mod kinds;
 mod lifecycle;
 mod models;

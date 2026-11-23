@@ -1572,6 +1572,9 @@ impl Tx<'_> {
         let db = self.db().clone();
         db.store().write::<_, crate::CoreError>(|_w| {
             let i = self.item(item_id)?;
+            if i.is_finished() {
+                return Ok(());
+            }
             /* one card per trouble: the same one still open is not asked again; an older stop card gives way
              * to the new one (a card about an effect nobody knows stays, it waits on you) */
             let open = self.db().decisions_of_item(item_id)?;

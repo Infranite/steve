@@ -47,7 +47,7 @@ export type Rel = { tone: "run" | "fail" | "ok"; text: string; /** the Hub's out
 export type Out = [string, string, string | null, string, number?, ("record" | "result")?, (string | null)?]
 export type PlanRound = { n: number; steps: [string, number][]; end: "done" | "replaced"; at: string }
 export type Item = {
-  id: string; t: string; b: string; st: "prop" | "run" | "wait" | "pause" | "done" | "drop" | "block" | "fail"; phase?: "ready" | "active" | "closing" | "closed"; cycle?: number; deps?: string[]; src: [string, string]; ws: string; project: string | null; up: string; star?: boolean; acc: string
+  id: string; t: string; b: string; st: "prop" | "run" | "wait" | "pause" | "done" | "drop" | "block" | "fail"; phase?: ItemView["state"]["kind"]; cycle?: number; deps?: string[]; src: [string, string]; ws: string; project: string | null; up: string; star?: boolean; acc: string
   /** the design gate (Q1): a delivery waits for the owner to confirm the design; off unless the owner turned it on */
   designGate?: boolean
   queued?: number
@@ -407,7 +407,6 @@ let releaseHistory: DecisionView[] | undefined, releases = new Map<string, Decis
  * went on or finished, or you closed it. Closed ones are remembered by the Hub with the closed notifications (setting
  * noticeDismissed: notification ids and decision ids), so a refresh or another device does not bring them back.
  * The failure itself stays in the item's timeline and in the notifications. */
-const finished = closedSt
 export function alertClosed(key?: string) {
   const xs = st.settings.noticeDismissed as unknown
   return !!key && Array.isArray(xs) && xs.includes(key)
@@ -415,7 +414,7 @@ export function alertClosed(key?: string) {
 /** the failed release still worth showing on the item, or undefined */
 function liveRel(i: ItemView, r?: Rel): Rel | undefined {
   if (r?.tone !== "fail") return r
-  if (finished(i.status) || alertClosed(r.key)) return undefined
+  if (i.state.kind === "closed" || alertClosed(r.key)) return undefined
   /* closed from the notifications: the item's newest release notice (they come newest first) */
   const n = noticeList().find((x) => x.item_id === i.id && x.kind === "release")
   return n?.level === "fail" && n.closed ? undefined : r
@@ -512,6 +511,23 @@ export function itemOf(i: ItemView, det?: RItemDetail): Item {
 }
 const itemModels = new WeakMap<ItemView, Item>()
 
+function itemStatus(item: ItemView) {
+  switch (item.state.kind) {
+    case "closed":
+      switch (item.state.outcome) {
+        case "finished": return "done"
+        case "cancelled": return "drop"
+        case "failed": return "fail"
+      }
+    case "paused": return "pause"
+    case "ready":
+    case "active":
+    case "closing":
+      if (item.waits?.includes("prerequisite")) return "block"
+      return decisionsForItem(item.id).length ? "wait" : "run"
+  }
+}
+
 function mapItem(i: ItemView, det?: RItemDetail): Item {
   const snooze = () => i.snooze && i.snooze.until > Date.now() ? i.snooze : undefined
   const ss = () => itemSessions(i.id)
@@ -536,7 +552,7 @@ function mapItem(i: ItemView, det?: RItemDetail): Item {
     const sk = started(lines[k]); tl.push(sk ? ["sess", sk] : ["reply", replies.get(lines[k].id)])
   })
   return {
-    id: i.id, t: i.title, b: i.bot_id ?? "steve", st: i.status as Item["st"], phase: i.phase as Item["phase"], cycle: i.cycle, deps: i.deps ?? [], src: det?.source ?? [i.source, i.source], get ws() { return st.projects.find((p) => p.id === i.project_id)?.name ?? "—" }, project: i.project_id ?? null, get up() { return tm(i.updated) }, star: !!i.star, get acc() { return ACC[i.accept_mode ?? "inherit"] ?? ACC.inherit }, designGate: !!i.design_gate,
+    id: i.id, t: i.title, b: i.bot_id ?? "steve", get st() { return itemStatus(i) }, phase: i.state.kind, cycle: i.cycle, deps: i.deps ?? [], src: det?.source ?? [i.source, i.source], get ws() { return st.projects.find((p) => p.id === i.project_id)?.name ?? "—" }, project: i.project_id ?? null, get up() { return tm(i.updated) }, star: !!i.star, get acc() { return ACC[i.accept_mode ?? "inherit"] ?? ACC.inherit }, designGate: !!i.design_gate,
     workflowPaused: i.workflow?.paused ?? undefined, workflowCycle: i.workflow?.cycle ?? undefined, workflowFailed: i.workflow?.failed, workflowAttempt: i.workflow?.attempt ?? undefined, workflowSuperseded: i.workflow?.superseded,
     goals: det?.goalsList.map((g) => g.text) ?? [], now: det?.now ?? "", plan: det?.plan.length ? steps(det.plan) : undefined, planDone: i.plan_done, planTotal: i.plan_total,
     rounds: (det?.planRounds ?? []).map((r) => ({ n: r.round, steps: steps(r.steps), end: r.end, at: tm(r.created) })),
@@ -966,7 +982,7 @@ export function useItemRuntime(id: string) {
     if (sessions.length !== stable.current.length || sessions.some((s, n) => s !== stable.current[n])) stable.current = sessions
     const revisions = (kind: string, rows: { id: string }[]) => rows.map((v) => t.rows.get(`${kind}:${v.id}`)?.rev).join(",")
     const deps = itemView(id)?.deps ?? []
-    return `${revisions("session", stable.current)}|${revisions("decision", decisionsForItem(id))}|${deps.map((d) => itemView(d)?.status).join(",")}`
+    return `${revisions("session", stable.current)}|${revisions("decision", decisionsForItem(id))}|${deps.map((d) => itemView(d)?.state.kind).join(",")}`
   })
   const scope = scopeKey()
   const v = itemView(id)
@@ -1024,7 +1040,7 @@ export const hm = (s: Sess) => t("core:harnessModel", { harness: s.h ?? t("core:
 export const isThinking = () => chatLive().thinking
 export const projectName = (id: string | null | undefined) => st.projects.find((p) => p.id === id)?.name ?? t("common:state.none")
 export const depsOpen = (i: Item) => (i.deps || []).filter((d) => getItem(d)?.st !== "done")
-export const stageOf = (i: Item) => itemView(i.id)?.stage || "执行"
+export const stageOf = (i: Item) => itemDetail(i.id)?.stage || "执行"
 
 /* ───────── actions: conversation ───────── */
 /** how long the conversation keeps talking to an item after the last message sent to it (§5.3) */
@@ -1106,7 +1122,7 @@ export function decisionDraft(id: string): string | undefined {
   return settled().find((d) => d.id === id)?.draft
 }
 /** notifications newer than the read cursor */
-export const notices = () => noticeList().map((n) => n.level === "fail" && !n.closed && n.item_id && finished(itemView(n.item_id)?.status) ? { ...n, closed: true } : n)
+export const notices = () => noticeList().map((n) => n.level === "fail" && !n.closed && n.item_id && itemView(n.item_id)?.state.kind === "closed" ? { ...n, closed: true } : n)
 export const unreadNotices = () => notices().filter((n) => n.created > st.noticeSeen)
 export function readNotices() {
   const at = noticeList()[0]?.created ?? 0; if (at <= st.noticeSeen) return

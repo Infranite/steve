@@ -9,6 +9,10 @@ use async_trait::async_trait;
 /// steve-core, as far as the GitHub wrap-up needs it. Errors are messages for the log.
 #[async_trait]
 pub trait ItemCore: Send + Sync {
+    async fn delivery_verified(&self, _: steve_types::DeliveryBaseline) -> Result<(), String> {
+        Ok(())
+    }
+
     /// `item_patch(stage, now)`; the item stays open (`run`) while Steve waits for you or for CI.
     async fn progress(&self, ws: &str, item_id: &str, stage: &str, now: &str)
     -> Result<(), String>;

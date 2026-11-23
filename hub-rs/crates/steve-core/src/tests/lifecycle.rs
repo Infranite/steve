@@ -234,7 +234,7 @@ fn a_no_to_the_release_holds_for_every_later_result_of_the_cycle() {
         let before = k.rt.prompts_of(&x.session).len();
         if by_user {
             k.finish(&x.id).unwrap();
-            // marking done stops the turn still at work; its end commits the close
+            assert_eq!(k.phase(&x.id), "closed");
             k.rt.end_turn(&k.core, &x.session, "cancelled", None);
         } else {
             let s = k.db().session(&x.session).unwrap().unwrap();
@@ -270,12 +270,14 @@ fn a_no_to_the_release_holds_for_every_later_result_of_the_cycle() {
             "nobody is asked to publish again"
         );
         let ops = k.db().store().items().operations(&x.id, 1).unwrap();
-        let rel = ops
-            .iter()
-            .find(|o| o.kind == "release" && o.revision == 2)
-            .unwrap();
-        assert_eq!(rel.status, "waived");
-        assert_eq!(rel.evidence["reason"], "走 PR 合并，不用发布");
+        let rel = ops.iter().find(|o| o.kind == "release" && o.revision == 2);
+        if by_user {
+            assert!(rel.is_none(), "owner finish creates no release requirement");
+        } else {
+            let rel = rel.unwrap();
+            assert_eq!(rel.status, "waived");
+            assert_eq!(rel.evidence["reason"], "走 PR 合并，不用发布");
+        }
     }
 }
 

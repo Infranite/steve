@@ -923,6 +923,21 @@ pub fn finish_item_dispatch_in(w: &mut crate::W<'_>, id: &str, cycle: i64) -> Re
          WHERE item_id=? AND cycle=? AND status='pending'",
         params![at, id, cycle],
     )?;
+    w.conn.execute(
+        "UPDATE runtime_attempts SET cancel_requested=1,revision=revision+1,updated=?
+         WHERE state<>'finished' AND cancel_requested=0 AND turn_id IN (
+          SELECT t.turn_id FROM runtime_turns t JOIN sessions s ON s.id=t.session_id
+          WHERE s.item_id=?
+         )",
+        params![at, id],
+    )?;
+    w.conn.execute(
+        "UPDATE gh_effects SET state=CASE WHEN state='pending' THEN 'failed' ELSE state END,
+         next_at=NULL,last_error='item cycle closed',updated=?
+         WHERE state IN ('pending','unknown') AND kind IN ('open','merge')
+           AND decision_id IN (SELECT id FROM decisions WHERE item_id=?)",
+        params![at, id],
+    )?;
     Ok(())
 }
 

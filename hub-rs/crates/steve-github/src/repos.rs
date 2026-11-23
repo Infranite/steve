@@ -1008,6 +1008,10 @@ pub fn routes(gh: GitHub) -> Router<Modules> {
         )
         .route("/github/repos/{id}/sync", post(sync_now))
         .route("/github/prs", get(prs))
+        .route(
+            "/github/items/{id}/delivery",
+            axum::routing::put(crate::delivery::declare),
+        )
         .route("/github/issues", get(issues))
         .route("/github/deliveries", get(deliveries))
         .route(

@@ -291,6 +291,7 @@ pub struct Gate {
     pub input: bool,
     pub operation: bool,
     pub acceptance: bool,
+    pub delivery: bool,
     /// A question or an approval raised after the closing request waits for an answer.
     pub decision: bool,
     /// The frozen result changed: the closing is void.
@@ -309,6 +310,9 @@ impl Gate {
         if self.acceptance {
             v.push("acceptance");
         }
+        if self.delivery {
+            v.push("delivery");
+        }
         if self.input {
             v.push("input");
         }
@@ -323,6 +327,7 @@ impl Gate {
             || self.operation
             || self.acceptance
             || self.decision
+            || self.delivery
             || self.changed)
     }
 }
@@ -619,7 +624,13 @@ impl Tx<'_> {
                 });
             }
         }
-        self.release_requirement(&i, &c)?;
+        // Declared PRs already describe what to deliver. Do not ask the agent to push or
+        // create a replacement PR from the item's branch.
+        if !self.delivery_required(&i)?
+            || self.done_rule(&i)?.as_deref() != Some(crate::upstream::DONE_MERGE)
+        {
+            self.release_requirement(&i, &c)?;
+        }
         /* what the item's own goal asks to be shown (ST-57): the result running here */
         self.deploy_requirement(&i, &c)?;
         Ok(())
@@ -947,7 +958,10 @@ impl Tx<'_> {
     /// [`Self::lc_gate`] with the worktree's fingerprint `now` already taken (`Some(None)`: no worktree);
     /// `None` leaves the worktree out, so `changed` then only sees a new revision.
     fn lc_gate_at(&self, i: &Item, c: &Closing, now: Option<Option<&str>>) -> Result<Gate> {
-        let mut g = Gate::default();
+        let mut g = Gate {
+            delivery: c.kind == COMPLETE && self.delivery_required(i)?,
+            ..Gate::default()
+        };
         if !self
             .workflow_blockers(&i.id, c.kind == COMPLETE)?
             .is_empty()
@@ -1058,6 +1072,27 @@ impl Tx<'_> {
 
     /// Commits the closing when nothing holds it any more. `true` when the item is closed now.
     pub(crate) fn lc_try_close(&mut self, item_id: &str) -> Result<bool> {
+        self.try_close(item_id, None)
+    }
+
+    fn delivery_refs(&self, item: &Item) -> Result<Vec<steve_types::DeliveryRef>> {
+        let id = steve_types::ItemId::from(item.id.clone());
+        let refs = self.db().store().read::<_, steve_store::StoreError>(|r| {
+            let scope = steve_store::item_delivery::scope(r, &item.id)?;
+            steve_store::item_delivery::refs(r, &id, item.cycle, scope)
+        })?;
+        Ok(refs.into_iter().filter(|pr| pr.required).collect())
+    }
+
+    pub(crate) fn delivery_required(&self, item: &Item) -> Result<bool> {
+        Ok(!self.delivery_refs(item)?.is_empty())
+    }
+
+    fn try_close(
+        &mut self,
+        item_id: &str,
+        proof: Option<&steve_types::DeliveryBaseline>,
+    ) -> Result<bool> {
         let Some(i) = self.db().item(item_id)? else {
             return Ok(false);
         };
@@ -1067,10 +1102,22 @@ impl Tx<'_> {
         let Some(mut c) = closing_of(&i) else {
             return Ok(false);
         };
+        if let Some(proof) = proof
+            && (proof.cycle != i.cycle
+                || proof.revision != i.revision
+                || proof.scope != self.scope_revision(item_id)?
+                || proof.refs.is_empty()
+                || proof.refs != self.delivery_refs(&i)?
+                || c.kind != COMPLETE
+                || !c.accepted)
+        {
+            metrics::counter!("steve_item_stale_delivery_total").increment(1);
+            return Ok(false);
+        }
         /* the pull request the accepted result is followed on merged with it: that is the result,
          * whatever became of the branch or the worktree since (deleted on merge, cleaned up), so
          * neither is looked at any more (#347) */
-        let merged = self.pr_merged_accepted(&i, &c)?.is_some();
+        let merged = proof.is_some() || self.pr_merged_accepted(&i, &c)?.is_some();
         /* on a Node the worktree's facts are gathered off the lock: until they are here (or while
          * its Node can't be reached) nothing is decided on them, the closing holds. Only when the
          * gate uses them: a frozen result to compare, one to freeze, an accepted one to release */
@@ -1169,10 +1216,14 @@ impl Tx<'_> {
         } else {
             g
         };
+        let mut g = g;
+        if proof.is_some() {
+            g.delivery = false;
+        }
         if !g.clear() {
             return Ok(false);
         }
-        self.commit_cycle(&i, &c, None)
+        self.commit_cycle(&i, &c, None, proof)
     }
 
     fn lc_closed_plan(&self, i: &Item, c: &Closing) -> Result<ClosedPlan> {
@@ -1348,13 +1399,19 @@ impl Tx<'_> {
             policy: Policy::Owner.as_str().into(),
             ..Closing::default()
         };
-        self.commit_cycle(item, &close, Some(actor))?;
+        self.commit_cycle(item, &close, Some(actor), None)?;
         metrics::histogram!("steve_item_owner_finish_seconds")
             .record(started.elapsed().as_secs_f64());
         self.item(&item.id)
     }
 
-    fn commit_cycle(&mut self, i: &Item, c: &Closing, owner: Option<&str>) -> Result<bool> {
+    fn commit_cycle(
+        &mut self,
+        i: &Item,
+        c: &Closing,
+        owner: Option<&str>,
+        proof: Option<&steve_types::DeliveryBaseline>,
+    ) -> Result<bool> {
         let ClosedPlan {
             outcome,
             acceptance,
@@ -1369,6 +1426,13 @@ impl Tx<'_> {
         let rev = i.revision + i64::from(owner.is_some());
         w.revision = rev;
         let committed = self.db().store().write(|tx| -> Result<bool> {
+            if let Some(proof) = proof {
+                steve_store::require_item_revision_in(tx, &id, cycle, i.revision)?;
+                if steve_store::item_delivery::scope(tx, &id)? != proof.scope {
+                    metrics::counter!("steve_item_stale_delivery_total").increment(1);
+                    return Ok(false);
+                }
+            }
             if let Some(actor) = owner {
                 steve_store::require_item_revision_in(tx, &id, cycle, i.revision)?;
                 steve_store::finish_item_dispatch_in(tx, &id, cycle)?;
@@ -1840,5 +1904,19 @@ mod tests {
             fingerprint_now(Some(&plain.path().to_string_lossy())),
             Ok(None)
         );
+    }
+}
+
+impl crate::Core {
+    /// A proof is usable only by the closing request whose complete manifest was read.
+    pub fn delivery_verified(&self, baseline: &steve_types::DeliveryBaseline) -> Result<()> {
+        let mut tx = self.tx();
+        let item = tx.db().item(baseline.item.as_str())?;
+        if !item.is_some_and(|i| i.phase == CLOSING) {
+            metrics::counter!("steve_item_stale_delivery_total").increment(1);
+            return Ok(());
+        }
+        tx.try_close(baseline.item.as_str(), Some(baseline))?;
+        Ok(())
     }
 }

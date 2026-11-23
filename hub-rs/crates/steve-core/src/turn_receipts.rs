@@ -25,7 +25,10 @@ struct Receipt {
 impl Tx<'_> {
     /// Goal version that was visible when a turn produced its result.
     pub(crate) fn scope_revision(&self, item: &str) -> Result<i64> {
-        Ok(self.db().goals(item)?.last().map_or(0, |g| g.version))
+        Ok(self
+            .db()
+            .store()
+            .read(|r| steve_store::item_delivery::scope(r, item))?)
     }
 
     /// Only call after validation. Failed saves roll back both the receipt and business writes,

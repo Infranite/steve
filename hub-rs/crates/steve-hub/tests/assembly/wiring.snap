@@ -322,6 +322,7 @@ api PUT /connections/x/credential
 api PUT /digest/bot
 api PUT /flow-settings/allow-private
 api PUT /flows/x
+api PUT /github/items/x/delivery
 api PUT /kb/notes/x
 api PUT /kb/steward
 api PUT /mail/drafts/x

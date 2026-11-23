@@ -21,7 +21,7 @@ export type DependencyWait = {
   waiting: boolean; wait_state: string | null; reason: string | null; active_turn: boolean
   can_register: boolean; register_blocker: string | null
 }
-export type RItemDetail = { id: string; status: ItemStatus; now?: string; source?: [string, string]; cwd?: string | null; branch?: string | null; plan: PlanStep[]; goalsList: { version: number; text: string; created: number }[]; planRounds?: { round: number; steps: PlanStep[]; end: "done" | "replaced"; created: number }[]; timeline: { id: number; ts: number; actor: string; kind: string; text: string; session_id: string | null; files?: RFile[]; via?: string }[]; artifacts: { id: string; kind: string; title: string; location: string | null; created: number; delivery_id: string | null }[]; decisions: DecisionView[]; dependents: string[]
+export type RItemDetail = { id: string; status: ItemStatus; stage?: string; now?: string; source?: [string, string]; cwd?: string | null; branch?: string | null; plan: PlanStep[]; goalsList: { version: number; text: string; created: number }[]; planRounds?: { round: number; steps: PlanStep[]; end: "done" | "replaced"; created: number }[]; timeline: { id: number; ts: number; actor: string; kind: string; text: string; session_id: string | null; files?: RFile[]; via?: string }[]; artifacts: { id: string; kind: string; title: string; location: string | null; created: number; delivery_id: string | null }[]; decisions: DecisionView[]; dependents: string[]
   workflow?: Workflow | null
   dependency_wait?: DependencyWait | null
   dispatch?: ItemDispatch

@@ -174,7 +174,6 @@ export default {
     reopened: "已重新打开",
     resumed: "继续处理",
     markedDone: "已标记完成 {{id}}",
-    backToBefore: "已撤销，{{id}} 回到之前的状态",
     archived_other: "已归档 {{count}} 件",
     restored_other: "已恢复 {{count}} 件",
     deletedItem: "已删除 {{id}}，编号不再使用；它的会话保留为未关联",

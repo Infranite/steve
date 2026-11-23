@@ -1635,7 +1635,8 @@ fn told_the_agent(k: &Kit, x: &Remote) -> usize {
 }
 
 #[test]
-fn your_finish_with_the_worktree_gone_and_the_session_in_error_is_a_card_not_a_queued_message() {
+fn automatic_close_with_the_worktree_gone_and_the_session_in_error_is_a_card_not_a_queued_message()
+{
     let k = kit(2);
     let x = remote(&k, upstream::DONE_MERGE, false);
     k.db()
@@ -1645,7 +1646,18 @@ fn your_finish_with_the_worktree_gone_and_the_session_in_error_is_a_card_not_a_q
         &x.repo,
         &["worktree", "remove", "--force", &x.wt.to_string_lossy()],
     );
-    k.finish(&x.item).unwrap();
+    k.core
+        .tx()
+        .lc_request_complete(
+            &x.item,
+            "dev",
+            crate::cycle::Policy::Automatic,
+            true,
+            "delivered",
+            None,
+            vec![],
+        )
+        .unwrap();
     steve_runtime::testkit::eventually_blocking("The item exposes an open failure card.", || {
         !k.open_fails(&x.item).is_empty()
     });
@@ -1655,7 +1667,7 @@ fn your_finish_with_the_worktree_gone_and_the_session_in_error_is_a_card_not_a_q
         fails[0].contains("Steve 核对不了是否已经PR 合并到默认分支"),
         "{fails:?}"
     );
-    assert_eq!(k.phase(&x.item), "closing", "your Finish stands");
+    assert_eq!(k.phase(&x.item), "closing");
     assert!(
         k.db().queued(&x.session).unwrap().is_empty(),
         "nothing queued"
@@ -1689,13 +1701,24 @@ fn your_finish_with_the_worktree_gone_and_the_session_in_error_is_a_card_not_a_q
 }
 
 #[test]
-fn your_finish_with_the_session_in_error_tells_you_what_is_missing_instead_of_queueing_it() {
+fn automatic_close_with_the_session_in_error_tells_you_what_is_missing_instead_of_queueing_it() {
     let k = kit(2);
     let x = remote(&k, upstream::DONE_MERGE, false);
     k.db()
         .session_patch(&x.session, crate::patch![status: "error"])
         .unwrap();
-    k.finish(&x.item).unwrap();
+    k.core
+        .tx()
+        .lc_request_complete(
+            &x.item,
+            "dev",
+            crate::cycle::Policy::Automatic,
+            true,
+            "delivered",
+            None,
+            vec![],
+        )
+        .unwrap();
     steve_runtime::testkit::eventually_blocking(
         "The completion probes have finished and the item exposes an open failure card.",
         || !k.open_fails(&x.item).is_empty() && k.core.tx().st.probing.is_empty(),
