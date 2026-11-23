@@ -1,7 +1,7 @@
 //! Personal read metadata and live projections, not another notification/event queue.
 //! Page capabilities pin the full projection digest: a changing source explicitly invalidates a
 //! traversal. Clients consume every page before replacing their baseline, and restart on conflict.
-use crate::{Result, StoreError, Tx, feed, sha, uid};
+use crate::{Result, StoreError, W, feed, sha, uid};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
@@ -59,7 +59,7 @@ pub struct Category {
     pub revision: String,
     pub unchanged: bool,
 }
-pub fn epoch(c: &Connection) -> Result<String> {
+pub(crate) fn epoch_on(c: &Connection) -> Result<String> {
     Ok(
         c.query_row("SELECT epoch FROM attention_meta WHERE id=1", [], |r| {
             r.get(0)
@@ -69,8 +69,8 @@ pub fn epoch(c: &Connection) -> Result<String> {
 
 /// Only committed terminal final receipts for this caller's own main-conversation run.
 /// Sequence is assigned at the run's final commit, not messages.rowid or a wall clock.
-pub fn replies(c: &Connection, ws: &str, user: &str) -> Result<(Vec<Entry>, i64)> {
-    feed::member(c, ws, user)?;
+pub(crate) fn replies_on(c: &Connection, ws: &str, user: &str) -> Result<(Vec<Entry>, i64)> {
+    feed::member_on(c, ws, user)?;
     let upper = c.query_row(
         "SELECT coalesce(max(seq),0) FROM thread_reply_commits WHERE workspace_id=? AND user_id=?",
         params![ws, user],
@@ -95,8 +95,8 @@ pub fn replies(c: &Connection, ws: &str, user: &str) -> Result<(Vec<Entry>, i64)
 
 /// Resolve a retained reply navigation identity even after it was read. This is not a general
 /// message lookup: unknown, foreign, channel and uncommitted/draft IDs all fail closed.
-pub fn reply(c: &Connection, ws: &str, user: &str, id: &str) -> Result<(String, i64)> {
-    feed::member(c, ws, user)?;
+pub(crate) fn reply_on(c: &Connection, ws: &str, user: &str, id: &str) -> Result<(String, i64)> {
+    feed::member_on(c, ws, user)?;
     c.query_row(
         "SELECT m.id,m.created FROM thread_reply_commits q
       JOIN messages m ON m.id=q.message_id JOIN thread_runs r ON r.id=q.run_id
@@ -113,8 +113,8 @@ pub fn reply(c: &Connection, ws: &str, user: &str, id: &str) -> Result<(String, 
 /// Exact pendingCards semantics: every open wait on an unsnoozed/unarchived item, plus
 /// orphan waits, excluding only confirm/mem. Status is immaterial once an item has a wait.
 /// This follows web/src/store.ts pending()/allCards()/pendingCards(), not openDecisions count.
-pub fn pending(c: &Connection, ws: &str, user: &str, now: i64) -> Result<Vec<Entry>> {
-    feed::member(c, ws, user)?;
+pub(crate) fn pending_on(c: &Connection, ws: &str, user: &str, now: i64) -> Result<Vec<Entry>> {
+    feed::member_on(c, ws, user)?;
     let mut st = c.prepare_cached("SELECT d.id,d.created FROM decisions d
        LEFT JOIN items i ON i.id=d.item_id AND i.workspace_id=d.workspace_id
        WHERE d.workspace_id=?1 AND d.status='open' AND NOT(d.kind='confirm' AND d.subject_type='mem')
@@ -135,7 +135,7 @@ pub fn pending(c: &Connection, ws: &str, user: &str, now: i64) -> Result<Vec<Ent
 /// of historical/read row count. The surrounding writer transaction performs bounded work only.
 #[allow(clippy::too_many_arguments)]
 pub fn feed_page(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     user: &str,
     cursor: Option<&str>,
@@ -143,16 +143,16 @@ pub fn feed_page(
     limit: usize,
     now: i64,
 ) -> Result<Category> {
-    feed::member(tx, ws, user)?;
+    feed::member_on(tx.conn, ws, user)?;
     if !(1..=100).contains(&limit) || (cursor.is_some() && if_snapshot.is_some()) {
         return Err(StoreError::Conflict("Invalid Feed attention page".into()));
     }
-    let (revision, count): (String, i64) = tx.query_row(
+    let (revision, count): (String, i64) = tx.conn.query_row(
         "SELECT revision,unread_count FROM attention_feed_scopes WHERE workspace_id=? AND user_id=?",
         params![ws,user], |r| Ok((r.get(0)?,r.get(1)?)),
     )?;
     let before = if let Some(token) = cursor {
-        let w = resolve(tx, ws, user, "feed", token, now)?;
+        let w = resolve(tx.conn, ws, user, "feed", token, now)?;
         if w.position <= 0 || w.revision != revision {
             return Err(StoreError::Conflict(
                 "Attention snapshot changed; restart this category".into(),
@@ -163,7 +163,7 @@ pub fn feed_page(
         None
     };
     let unchanged = if let Some(token) = if_snapshot {
-        let w = resolve(tx, ws, user, "feed", token, now)?;
+        let w = resolve(tx.conn, ws, user, "feed", token, now)?;
         if w.position != 0 {
             return Err(StoreError::Conflict("Expected completed snapshot".into()));
         }
@@ -182,7 +182,7 @@ pub fn feed_page(
         let sql=format!("SELECT e.id,e.seq,e.published_at,e.source_id,CASE WHEN e.source_type='notification' THEN json_extract(e.source_key,'$[1]') END
             FROM attention_feed_unread u JOIN feed_entries e ON e.id=u.entry_id
             WHERE u.workspace_id=?1 AND u.user_id=?2{bound} ORDER BY u.seq DESC LIMIT ?4");
-        let mut st = tx.prepare_cached(&sql)?;
+        let mut st = tx.conn.prepare_cached(&sql)?;
         entries = st
             .query_map(params![ws, user, before, limit as i64], |r| {
                 let id: String = r.get(0)?;
@@ -196,7 +196,7 @@ pub fn feed_page(
     }
     // Probe the indexed next key, not count/offset over earlier pages.
     let more = if let Some(last) = entries.last() {
-        tx.query_row("SELECT EXISTS(SELECT 1 FROM attention_feed_unread WHERE workspace_id=? AND user_id=? AND seq<?)",
+        tx.conn.query_row("SELECT EXISTS(SELECT 1 FROM attention_feed_unread WHERE workspace_id=? AND user_id=? AND seq<?)",
             params![ws,user,last.order],|r|r.get::<_,bool>(0))?
     } else {
         false
@@ -267,7 +267,7 @@ fn resolve(
 }
 #[allow(clippy::too_many_arguments)]
 fn window(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     user: &str,
     kind: &str,
@@ -276,9 +276,9 @@ fn window(
     position: i64,
     now: i64,
 ) -> Result<String> {
-    if let Some(t) = tx.query_row("SELECT token FROM attention_windows WHERE workspace_id=? AND user_id=? AND kind=? AND revision=? AND upper_seq=? AND position=? AND expires>? LIMIT 1",params![ws,user,kind,revision,upper,position,now+3_600_000], |r| r.get::<_,String>(0)).optional()? { return Ok(t); }
+    if let Some(t) = tx.conn.query_row("SELECT token FROM attention_windows WHERE workspace_id=? AND user_id=? AND kind=? AND revision=? AND upper_seq=? AND position=? AND expires>? LIMIT 1",params![ws,user,kind,revision,upper,position,now+3_600_000], |r| r.get::<_,String>(0)).optional()? { return Ok(t); }
     let token = format!("{}{}", uid("aw"), uid(""));
-    tx.execute(
+    tx.conn.execute(
         "INSERT INTO attention_windows VALUES(?,?,?,?,?,?,?,?)",
         params![token, ws, user, kind, revision, upper, position, now + TTL],
     )?;
@@ -286,7 +286,7 @@ fn window(
 }
 #[allow(clippy::too_many_arguments)]
 pub fn page(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     user: &str,
     kind: &str,
@@ -297,7 +297,7 @@ pub fn page(
     limit: usize,
     now: i64,
 ) -> Result<Category> {
-    feed::member(tx, ws, user)?;
+    feed::member_on(tx.conn, ws, user)?;
     if !KINDS.contains(&kind)
         || !(1..=100).contains(&limit)
         || (cursor.is_some() && if_snapshot.is_some())
@@ -308,7 +308,7 @@ pub fn page(
     }
     let revision = sha(&serde_json::to_string(&(ws, user, kind, upper, &entries))?);
     let position = if let Some(token) = cursor {
-        let w = resolve(tx, ws, user, kind, token, now)?;
+        let w = resolve(tx.conn, ws, user, kind, token, now)?;
         if w.position == 0 || w.revision != revision || w.upper != upper {
             return Err(StoreError::Conflict(
                 "Attention snapshot changed; restart this category".into(),
@@ -320,7 +320,7 @@ pub fn page(
         0
     };
     let unchanged = if let Some(token) = if_snapshot {
-        let w = resolve(tx, ws, user, kind, token, now)?;
+        let w = resolve(tx.conn, ws, user, kind, token, now)?;
         if w.position != 0 {
             return Err(StoreError::Conflict(
                 "Expected an attention snapshot, not page cursor".into(),
@@ -374,27 +374,43 @@ pub fn page(
 /// The client must supply the last reply actually shown, not merely the current head while a
 /// conversation is focused. This acknowledges the visible prefix only; it never approves a card.
 pub fn read_replies(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     user: &str,
     snapshot: &str,
     through_id: &str,
     now: i64,
 ) -> Result<bool> {
-    feed::member(tx, ws, user)?;
-    let w = resolve(tx, ws, user, "replies", snapshot, now)?;
+    feed::member_on(tx.conn, ws, user)?;
+    let w = resolve(tx.conn, ws, user, "replies", snapshot, now)?;
     if w.position != 0 {
         return Err(StoreError::Conflict("Expected replies snapshot".into()));
     }
-    let seq: Option<i64> = tx.query_row("SELECT q.seq FROM thread_reply_commits q
+    let seq: Option<i64> = tx.conn.query_row("SELECT q.seq FROM thread_reply_commits q
         JOIN thread_runs r ON r.id=q.run_id JOIN messages m ON m.id=q.message_id
         WHERE q.message_id=?1 AND q.workspace_id=?2 AND q.user_id=?3 AND q.seq<=?4
           AND r.workspace_id=?2 AND r.user_id=?3 AND r.status IN ('done','stopped','budget','violated','failed') AND m.space='steve' AND m.author='steve'",
         params![through_id,ws,user,w.upper], |r| r.get(0)).optional()?;
     let seq =
         seq.ok_or_else(|| StoreError::Conflict("Reply is not in this caller's snapshot".into()))?;
-    let changed = tx.execute("INSERT INTO thread_reply_reads(workspace_id,user_id,space,through_seq) VALUES(?,?,'steve',?)
+    let changed = tx.conn.execute("INSERT INTO thread_reply_reads(workspace_id,user_id,space,through_seq) VALUES(?,?,'steve',?)
         ON CONFLICT(workspace_id,user_id,space) DO UPDATE SET through_seq=excluded.through_seq
         WHERE excluded.through_seq>thread_reply_reads.through_seq",params![ws,user,seq])?;
     Ok(changed > 0)
+}
+
+pub fn epoch(r: &mut impl crate::Read) -> Result<String> {
+    epoch_on(r.connection())
+}
+
+pub fn replies(r: &mut impl crate::Read, ws: &str, user: &str) -> Result<(Vec<Entry>, i64)> {
+    replies_on(r.connection(), ws, user)
+}
+
+pub fn reply(r: &mut impl crate::Read, ws: &str, user: &str, id: &str) -> Result<(String, i64)> {
+    reply_on(r.connection(), ws, user, id)
+}
+
+pub fn pending(r: &mut impl crate::Read, ws: &str, user: &str, now: i64) -> Result<Vec<Entry>> {
+    pending_on(r.connection(), ws, user, now)
 }

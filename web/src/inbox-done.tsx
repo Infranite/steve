@@ -1,10 +1,12 @@
+import { getItem } from "@/store"
 import { useState } from "react"
+import { hasMoreSettled, loadMoreSettled } from "@/data/sync"
 import { ChevronRightIcon, RotateCcwIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useT } from "@/i18n"
 import { dayHeading, hm } from "@/i18n/format"
 import { cn } from "@/lib/utils"
-import { st, undoDecision, WT, type Done } from "@/store"
+import { done, toast, undoDecision, WT, type Done } from "@/store"
 import { clip } from "@/thread/topics"
 import { Chips, Empty, go, Group, ItemNo, permissionQuestion, RelNote, SectionLabel } from "@/ui"
 import { choiceText, YoloMark } from "@/yolo/badges"
@@ -16,7 +18,7 @@ import { choiceText, YoloMark } from "@/yolo/badges"
 
 type Who = "you" | "steve" | "lapsed"
 const whoOf = (d: Done): Who => (d.how === "expired" ? "lapsed" : d.yolo !== undefined ? "steve" : "you")
-type Entry = { d: Done; n: number; who: Who }
+type Entry = { d: Done; who: Who }
 
 let filter: "all" | Who = "all"
 
@@ -32,16 +34,16 @@ function Outcome({ d, who, line }: { d: Done; who: Who; line?: boolean }) {
 function ItemDay({ id, xs }: { id: string; xs: Entry[] }) {
   const t = useT()
   const [open, setOpen] = useState(false)
-  const last = xs[0], item = st.items.find((i) => i.id === id)
+  const last = xs[0], item = getItem(id)
   const title = item?.t ?? clip(permissionQuestion(last.d.q), 60)
   const more = xs.length - 1
   return (
-    <div role="listitem" data-done-row={id}>
+    <div role="listitem" data-done-row={id || last.d.decision}>
       <button type="button" onClick={() => setOpen(!open)} aria-expanded={open}
         className="flex w-full min-w-0 items-start gap-3 rounded-lg px-2 py-2.5 text-left transition-colors duration-120 hover:bg-accent">
         <ChevronRightIcon className={cn("mt-1 size-3.5 shrink-0 text-tertiary transition-transform duration-150", open && "rotate-90")} />
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <span className="flex min-w-0 items-baseline gap-2 type-body"><ItemNo id={id} /><span className="min-w-0 truncate">{title}</span></span>
+          <span className="flex min-w-0 items-baseline gap-2 type-body">{id && <ItemNo id={id} />}<span className="min-w-0 truncate">{title}</span></span>
           <span className="flex min-w-0 items-center gap-x-1 whitespace-nowrap type-footnote text-muted-foreground">
             <span className="shrink-0 text-tertiary">{WT[last.d.type]} ·</span><Outcome d={last.d} who={last.who} line />
             {more > 0 && <span className="shrink-0 text-tertiary">· {t("views:inbox.moreTimes", { count: more })}</span>}
@@ -50,7 +52,7 @@ function ItemDay({ id, xs }: { id: string; xs: Entry[] }) {
         <span className="mt-0.5 shrink-0 type-footnote tabular-nums text-tertiary">{last.d.at ? hm(last.d.at) : last.d.tm}</span>
       </button>
       {open && <div className="anim-in mb-2 ml-[1.625rem] flex flex-col gap-3 border-l border-border pl-4 pt-1">
-        {xs.map(({ d, n, who }) => (
+        {xs.map(({ d, who }) => (
           <div key={d.decision} className="flex min-w-0 items-start gap-3">
             <div className="flex min-w-0 flex-1 flex-col gap-0.5">
               <div className="type-callout text-foreground/85 [overflow-wrap:anywhere] line-clamp-3">{permissionQuestion(d.q)}</div>
@@ -61,7 +63,7 @@ function ItemDay({ id, xs }: { id: string; xs: Entry[] }) {
                 <span className="tabular-nums text-tertiary">· {d.at ? hm(d.at) : d.tm}</span>
               </div>
             </div>
-            {d.canUndo && <Button size="xs" variant="ghost" className="shrink-0 text-muted-foreground" onClick={() => undoDecision(n)} data-undo-decision><RotateCcwIcon />{t("views:inbox.undo")}</Button>}
+            {d.canUndo && <Button size="xs" variant="ghost" className="shrink-0 text-muted-foreground" onClick={() => undoDecision(d.decision)} data-undo-decision><RotateCcwIcon />{t("views:inbox.undo")}</Button>}
           </div>))}
         {item && <Button size="xs" variant="ghost" className="-ml-2 w-fit text-muted-foreground" onClick={() => go("#/items/" + id)}>{t("views:inbox.openItem")}<ChevronRightIcon /></Button>}
       </div>}
@@ -72,8 +74,14 @@ function ItemDay({ id, xs }: { id: string; xs: Entry[] }) {
 export function InboxDone() {
   const t = useT()
   const [, f] = useState(0)
-  const all: Entry[] = st.done.map((d, n) => ({ d, n, who: whoOf(d) })).sort((a, b) => b.d.at - a.d.at)
+  const [loading, setLoading] = useState(false)
+  const all: Entry[] = done().map((d) => ({ d, who: whoOf(d) })).sort((a, b) => b.d.at - a.d.at)
   if (!all.length) return <Empty title={t("views:inbox.doneEmpty")} />
+  async function more() {
+    setLoading(true)
+    try { await loadMoreSettled() } catch (e) { toast((e as Error).message) }
+    finally { setLoading(false) }
+  }
   const count = (w: Who) => all.filter((x) => x.who === w).length
   const keys = (["all", "you", "steve", "lapsed"] as const).filter((k) => k === "all" || count(k) > 0)
   const label = (k: (typeof keys)[number]) => (k === "all" ? t("views:inbox.all") : t(`views:inbox.who.${k}`, { count: count(k) }))
@@ -85,8 +93,9 @@ export function InboxDone() {
     const day = x.d.at ? dayHeading(x.d.at) : ""
     let g = days[days.length - 1]
     if (!g || g[0] !== day) days.push((g = [day, new Map()]))
-    const list = g[1].get(x.d.id)
-    if (list) list.push(x); else g[1].set(x.d.id, [x])
+    const key = x.d.id || x.d.decision
+    const list = g[1].get(key)
+    if (list) list.push(x); else g[1].set(key, [x])
   }
   return <>
     {keys.length > 2 && <Chips className="mb-6" value={label(cur)} onChange={(v) => { filter = keys.find((k) => label(k) === v) ?? "all"; f((n) => n + 1) }} options={keys.map(label)} />}
@@ -94,9 +103,10 @@ export function InboxDone() {
       {days.map(([day, items]) => (
         <section key={day} className="anim-in">
           {day && <SectionLabel className="mb-1 text-tertiary">{day}</SectionLabel>}
-          <Group>{[...items].map(([id, g]) => <ItemDay key={id} id={id} xs={g} />)}</Group>
+          <Group>{[...items].map(([id, g]) => <ItemDay key={id} id={g[0].d.id} xs={g} />)}</Group>
         </section>))}
     </div>
+    {hasMoreSettled() && <Button className="mt-4" variant="outline" disabled={loading} onClick={() => void more()}>{t("views:inbox.loadMore")}</Button>}
     <div className="mt-4 type-footnote text-tertiary">{t("views:inbox.doneNote")}</div>
   </>
 }

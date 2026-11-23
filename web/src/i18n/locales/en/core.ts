@@ -23,6 +23,9 @@ export default {
   tagDesc: { bug: "Fixing errors, failures or unexpected behavior", feat: "New capabilities, interactions or feature improvements", doc: "Writing and updating docs, proposals and explanations", refactor: "Code restructuring that doesn't change external behavior", ops: "Deployment, upgrades, operations and environment setup", chore: "Dependency upkeep, tool configuration and other chores", plan: "Designs, prototypes or implementation plans", code: "Code, configuration or scripts kept in Git", report: "Findings from research, audits, tests or analysis", content: "Finished content such as manuals, images or slides", data: "Spreadsheets, datasets or exports", operation: "Hands-on operations such as deploys, upgrades or configuration changes" },
   error: { generic: "Something went wrong", loadRetry: "Couldn't load, retrying: {{msg}}", network: "Network error" },
   defaultModel: "Default model",
+  unknownModel: "Unknown model",
+  unknownBot: "Unknown Bot",
+  unknownNode: "Unknown Node",
   unknownHarness: "Unknown harness",
   harnessModel: "{{harness}} · {{model}}",
   projectByItem: "Inferred from the item",
@@ -307,6 +310,8 @@ export default {
     keysSteer: "Enter steers the agent, {{alt}} Enter queues; Escape stops the turn",
   },
   transcript: {
+    earlier: "Load earlier turns",
+    recentFiles: "Files changed in loaded turns ({{count}})",
     tool: { ToolSearch: "Load tools", TodoWrite: "Update todos", Task: "Subtask", Agent: "Subtask", Skill: "Skill" },
     read: "Read",
     write: "Write",
@@ -508,7 +513,7 @@ export default {
     waitWhat: "A card is waiting for your decision at the end of the conversation",
     took: "Took {{dur}}",
     nodeWait: "Queued: {{detail}} — retries automatically",
-    room: "Queued: the device is at its limit, {{running}}/{{max}}",
+    room: "Queued: the device is at its limit",
   },
   session: {
     no: "Conversation #{{n}}",

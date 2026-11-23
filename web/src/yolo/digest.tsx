@@ -8,7 +8,6 @@ import { cn } from "cn"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
-import { NotWired } from "@/api"
 import { yoloApi, type RYoloAction, type RYoloDigest, type RYoloWindow, type UndoKind } from "@/api/yolo"
 import { tm, useHubEvents, yoloUndo } from "@/store"
 import { Chips, Empty, go, ItemNo, Meta, Page, permissionQuestion } from "@/ui"
@@ -134,7 +133,7 @@ function WindowBlock({ w, open, reload, filter }: { w: RYoloWindow; open: boolea
 export function YoloDigestView({ window }: { window?: string }) {
   const t = useT()
   const [d, setD] = useState<RYoloDigest | null>(null), [err, setErr] = useState(""), [filter, setFilter] = useState<Filter>(takeDigestStart)
-  const load = () => yoloApi.actions().then((x) => { setD(x); setErr("") }).catch((e) => setErr(e instanceof NotWired ? tr("yolo:digest.noYolo") : (e as Error).message))
+  const load = () => yoloApi.actions().then((x) => { setD(x); setErr("") }).catch((e) => setErr((e as Error).message))
   useEffect(() => { void load() }, [])
   useHubEvents(["yolo", "yolo_action"], () => void load())
   return (

@@ -50,12 +50,11 @@ fn asking(k: &Kit, p: &str, branch: &str, cwd: Option<&str>) -> (String, String,
 
 fn release_decision(k: &Kit, i: &str, s: &str, branch: &str) -> String {
     let d = k.decision(i, Some(s), "approve", "release", &["yes", "no"]);
-    k.db()
-        .exec(
-            "UPDATE decisions SET subject_id = ? WHERE id = ?",
-            &[&branch, &d],
-        )
-        .unwrap();
+    steve_store::core_fixture::decision(
+        k.db().store(),
+        &d,
+        steve_store::core_fixture::DecisionState::Subject(&branch),
+    );
     d
 }
 
@@ -413,24 +412,14 @@ fn a_rollback_result_is_noted_on_the_item_and_marks_its_undo() {
     let k = Kit::new();
     let i = k.item("done", "完成", None);
     std::fs::create_dir_all(k.home().join("releases")).unwrap();
-    k.db()
-        .exec(
-            "INSERT INTO yolo_actions (id, workspace_id, item_id, kind, subject_type, rule, outcome, reason, undo, created)
-             VALUES ('ya_1', ?, ?, 'approve', 'release', 'release.self', 'decided', '', '{\"kind\":\"rollback\"}', 1)",
-            &[&WS, &i],
-        )
-        .unwrap();
-    let undone = |k: &Kit| -> Option<i64> {
+    steve_store::core_fixture::rollback_yolo_action(k.db().store(), WS, &i, "ya_1");
+    let undone = |k: &Kit| {
         k.db()
             .store()
-            .with_conn(|c| {
-                Ok(c.query_row(
-                    "SELECT undone FROM yolo_actions WHERE id = 'ya_1'",
-                    [],
-                    |r| r.get(0),
-                )?)
-            })
+            .read(|r| steve_store::yolo::action_get(r, "ya_1"))
             .unwrap()
+            .unwrap()
+            .undone
     };
     let note = |k: &Kit| {
         k.db()

@@ -48,7 +48,7 @@ const open = async ({ width = 1440, theme = "light", owner = true } = {}) => {
     const r = route.request(), u = new URL(r.url())
     calls.push({ method: r.method(), path: u.pathname, ...(r.method() === "POST" ? { body: r.postDataJSON() } : {}) })
     const json = (body) => route.fulfill({ contentType: "application/json", body: JSON.stringify(body) })
-    if (u.pathname === "/api/state") return
+    if (u.pathname === "/api/shell") return
     if (u.pathname === "/api/plugins") return json(view(owner))
     if (u.pathname === "/api/plugins/themes") return json(themes)
     if (u.pathname === "/api/vault/status") return json({ initialized: true, keychain: "ok", kek_version: 1, passkeys: 0, rotating: false })

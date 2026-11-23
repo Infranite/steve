@@ -1,11 +1,12 @@
-import { useState } from "react"
+import { seedItems, seedSessions } from "./view-data"
+import { useEffect, useState } from "react"
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { DependencyWaitPanel } from "../../src/dependency-wait-panel"
 import { AgentDetailPanel, AgentTree, useAgentTree, useSelectedNode } from "../../src/agent-tree-view"
 import { stats } from "../../src/api/stats"
 import { RelationGraph } from "../../src/graph"
-import { st, type Item } from "../../src/store"
+import { st, useStore, type Item } from "../../src/store"
 import type { Workflow, WorkflowUnit } from "../../src/workflow"
 import { api, Unauthenticated, type DependencyWait } from "../../src/api"
 import { setLang } from "../../src/i18n"
@@ -76,15 +77,19 @@ function Fixture() {
     setWorkflow(next)
     return next
   }
-  if (query.has("wait")) return <main className="mx-auto max-w-3xl p-5"><DependencyWaitPanel item="ST-60" wait={wait} /></main>
-  if (query.has("graph")) {
-    st.items = [
+  useEffect(() => {
+    if (!query.has("graph")) return
+    seedItems([
       { id: "ST-60", t: "主事项", st: "run", b: "steve", project: "project", deps: ["ST-missing"], workflow },
       { id: "ST-61", t: "实现接口", st: "run", b: "steve", project: "project", deps: [], parent: { item: "ST-60", s: "session-old", at: 23 }, arch: true },
-    ] as Item[]
-    st.S = { "session-old": { title: "设计来源会话", st: "done", b: "steve", n: 1 } } as typeof st.S
+    ] as Item[])
+    seedSessions({ "session-old": { title: "设计来源会话", st: "ended", b: "steve", n: 1 } })
     st.projects = [{ id: "project", name: "示例项目" }] as typeof st.projects
     workflow.units[1].item_id = "ST-61"
+  }, [workflow])
+  useStore()
+  if (query.has("wait")) return <main className="mx-auto max-w-3xl p-5"><DependencyWaitPanel item="ST-60" wait={wait} /></main>
+  if (query.has("graph")) {
     return <main className="mx-auto max-w-4xl p-5"><RelationGraph focus="ST-60" scope="comp" onOpen={(n) => { (window as any).__graphOpened = n.id }} /></main>
   }
   return <TreeFixture workflow={workflow} fork={query.has("fork")} />
@@ -96,12 +101,13 @@ function TreeFixture({ workflow, fork }: { workflow: Workflow; fork: boolean }) 
   /* the api step's item keeps what it delivered, so the full view's detail can open it */
   const child = (id: string, t: string, unit: string, st: Item["st"]) => ({ id, t, st, b: workflow.units.find((u) => u.id === unit)!.bot_id, src: ["Steve", "workflow"], parent: { item: "ST-60" }, waits: unit === "web" ? [{}] : [], ss: [],
     outs: unit === "api" ? [["文件", "工作图 API", "src/workflow.ts", "art-api", 1, "result"]] : [], anns: [] })
-  st.items = [
+  useEffect(() => { seedItems([
     { id: "ST-60", t: "协作改造工作图", st: "run", b: "主控 Bot", src: ["Steve", "chat"], waits: [], ss: [] },
     child("ST-61", "实现接口与主体检查", "api", "done"), child("ST-62", "实现协作进度界面", "web", "run"), child("ST-63", "独立复核依赖门控与恢复", "review", "drop"),
     { id: "ST-old", t: "旧接口尝试", st: "drop", b: "开发 Bot", src: ["Steve", "workflow"], parent: { item: "ST-60" }, waits: [], ss: [], arch: true },
     ...(fork ? [{ id: "ST-64", t: "把进度界面拆成独立组件", st: "run", b: "开发 Bot", src: ["Steve", "fork"], parent: { item: "ST-62", s: "s-62", at: 9 }, waits: [], ss: [] }] : []),
-  ] as unknown as Item[]
+  ] as unknown as Item[]) }, [workflow, fork])
+  useStore()
   const ids: Record<string, string> = { api: "ST-61", web: "ST-62", review: "ST-63" }
   const wf = { ...workflow, units: workflow.units.map((u) => ids[u.id] && u.status !== "pending" ? { ...u, item_id: ids[u.id] } : u) }
   const T = Date.now()

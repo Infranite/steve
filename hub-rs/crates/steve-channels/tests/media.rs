@@ -10,11 +10,12 @@ mod digest_env;
 use digest_env::TestEnv;
 use std::sync::Arc;
 use std::time::Duration;
+use steve_store::testkit::channels::inspect;
+use steve_store::testkit::channels::seed;
 
 use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, header};
-use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use steve_channels::Channels;
 use steve_channels::adapters::feishu::inbound::LongConnection;
@@ -124,52 +125,11 @@ async fn setup() -> H {
     }
 }
 
-fn sql(h: &H, s: &str) {
-    let s = s.to_string();
-    digest_env::write(
-        h.env.store(),
-        move |tx| -> Result<(), steve_store::StoreError> {
-            tx.execute_batch(&s)?;
-            Ok(())
-        },
-    )
-    .expect("sql");
-}
-
-fn one(h: &H, s: &str) -> Value {
-    let s = s.to_string();
-    h.env
-        .store()
-        .reader(move |c| {
-            Ok::<_, steve_store::StoreError>(c.query_row(&s, [], |r| {
-                Ok(match r.get_ref(0)? {
-                    rusqlite::types::ValueRef::Null => Value::Null,
-                    rusqlite::types::ValueRef::Integer(x) => json!(x),
-                    rusqlite::types::ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
-                    _ => Value::Null,
-                })
-            })?)
-        })
-        .expect("query")
-}
-
 // The WebSocket ACK precedes asynchronous message persistence and its event link,
 // which is committed separately. Wait for both before inspecting resources or raw
 // events; an empty lookup is pending delivery, while other DB errors still fail.
 fn stored_message(h: &H, ext: &str) -> Option<String> {
-    h.env
-        .store()
-        .reader(|c| {
-            Ok::<_, steve_store::StoreError>(
-                c.query_row(
-                    "SELECT id FROM chan_messages WHERE external_id = ? AND direction = 'in' AND event_id IS NOT NULL",
-                    [ext],
-                    |r| r.get(0),
-                )
-                .optional()?,
-            )
-        })
-        .expect("message lookup")
+    inspect::messages::received_message(h.env.store(), ext).expect("message lookup")
 }
 
 /// Pushes an envelope over the long connection and waits for its message; its `cm_…` id.
@@ -206,13 +166,10 @@ fn envelope(ext: &str, ty: &str, content: &Value, event_id: &str) -> Value {
 }
 
 fn space_of(h: &H, msg: &str) -> String {
-    one(
-        h,
-        &format!("SELECT space_id FROM chan_messages WHERE id = '{msg}'"),
-    )
-    .as_str()
-    .unwrap()
-    .to_string()
+    inspect::messages::message_space_id(h.env.store(), msg).unwrap()[0]
+        .as_str()
+        .unwrap()
+        .to_string()
 }
 
 async fn shown(h: &H, msg: &str) -> Value {
@@ -294,13 +251,10 @@ async fn an_image_is_shown_and_fetched_through_its_own_message_only() {
     );
     assert!(!m.to_string().contains(IMG_KEY));
     assert!(
-        one(
-            &h,
-            &format!("SELECT attachments FROM chan_messages WHERE id = '{msg}'")
-        )
-        .as_str()
-        .unwrap()
-        .contains(IMG_KEY)
+        json!(inspect::messages::raw_attachments(h.env.store(), &msg).unwrap())
+            .as_str()
+            .unwrap()
+            .contains(IMG_KEY)
     );
 
     // fetched inline, as the bot, with the type and key of the stored entry
@@ -469,19 +423,12 @@ async fn a_purge_a_removal_or_a_move_while_downloading_drops_the_bytes() {
     let msg = push(&h, fixture("message_image").unwrap()).await;
     add_resource(&h, IMG_MSG, IMG_KEY, "image/png", PNG, None);
     let path = format!("/chan-messages/{msg}/resources/0");
-    let restore = format!(
-        "UPDATE chan_messages SET text = '', attachments = (SELECT json_array(json_object('type','image','source','message','key','{IMG_KEY}'))), purged = NULL WHERE id = '{msg}'"
-    );
     h.fake.resource_delay(Duration::from_secs(1));
 
     // purged mid-way: 410, no bytes
     let req = started(&h, (WS, ME), &path).await;
-    sql(
-        &h,
-        &format!(
-            "UPDATE chan_messages SET text = NULL, attachments = '[]', purged = 1 WHERE id = '{msg}'"
-        ),
-    );
+    seed::messages::clear_message_text_for_a_purge_a_removal_or_a_move_while_d(h.env.store(), &msg)
+        .unwrap();
     let (st, _, b) = req.await.unwrap();
     assert_eq!((st, reason(&b).as_str()), (410, "purged"));
     assert!(!b.starts_with(PNG));
@@ -500,30 +447,19 @@ async fn a_purge_a_removal_or_a_move_while_downloading_drops_the_bytes() {
     );
 
     // moved to another space the viewer also sees: 404
-    sql(&h, &restore);
+    seed::messages::set_image_for_retry(h.env.store(), &msg, IMG_KEY).unwrap();
     let group = push(&h, fixture("message_group_at_bot").unwrap()).await;
     let (home, other) = (space_of(&h, &msg), space_of(&h, &group));
     assert_ne!(home, other);
     let req = started(&h, (WS, ME), &path).await;
-    sql(
-        &h,
-        &format!("UPDATE chan_messages SET space_id = '{other}' WHERE id = '{msg}'"),
-    );
+    seed::messages::set_message_space_id(h.env.store(), &other, &msg).unwrap();
     let (st, _, b) = req.await.unwrap();
     assert_eq!((st, reason(&b).as_str()), (404, "not_found"));
-    sql(
-        &h,
-        &format!("UPDATE chan_messages SET space_id = '{home}' WHERE id = '{msg}'"),
-    );
+    seed::messages::set_message_space_id(h.env.store(), &home, &msg).unwrap();
 
     // a member removed mid-way: 404
     let req = started(&h, (WS, OTHER), &path).await;
-    sql(
-        &h,
-        &format!(
-            "DELETE FROM workspace_members WHERE workspace_id = '{WS}' AND user_id = '{OTHER}'"
-        ),
-    );
+    seed::people::remove_workspace_member(h.env.store(), WS, OTHER).unwrap();
     let (st, _, b) = req.await.unwrap();
     assert_eq!((st, reason(&b).as_str()), (404, "not_found"));
 
@@ -538,10 +474,8 @@ async fn purged_rows_left_by_an_older_sweep_show_nothing() {
     let h = setup().await;
     let msg = push(&h, fixture("message_image").unwrap()).await;
     // what the sweep before this change did: text gone, attachments kept
-    sql(
-        &h,
-        &format!("UPDATE chan_messages SET text = NULL, purged = 5 WHERE id = '{msg}'"),
-    );
+    seed::messages::clear_message_text_for_purged_rows_left_by_an_older_sweep(h.env.store(), &msg)
+        .unwrap();
     let m = shown(&h, &msg).await;
     assert_eq!(m["attachments"], json!([]));
     assert_eq!(
@@ -553,10 +487,7 @@ async fn purged_rows_left_by_an_older_sweep_show_nothing() {
     // the next sweep clears what was left
     steve_channels::messages::sweep(h.ch.modules(), 10).unwrap();
     assert_eq!(
-        one(
-            &h,
-            &format!("SELECT attachments FROM chan_messages WHERE id = '{msg}'")
-        ),
+        json!(inspect::messages::raw_attachments(h.env.store(), &msg).unwrap()),
         json!("[]")
     );
 }

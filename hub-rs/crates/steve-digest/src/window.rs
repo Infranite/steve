@@ -14,72 +14,19 @@
 //! queueing anything, `paused` leaves the messages waiting, `alerts` aggregates by rule and queues only the
 //! anomalies. A day's spend over the daily budget defers the rest to the next day.
 
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::json;
-use steve_store::{Store, StoreError, Tx};
+use steve_store::digest::{Cursor, NewSummary};
+use steve_store::{Store, StoreError, W};
 
 use crate::conv::{self, ConvInfo, ConvRef, Msg};
 use crate::profile::{self, Profile};
-use crate::queue::{self, Batching, NewPacket};
-use crate::{alerts, candidates, chunk, facts, summary};
+use crate::queue::{Batching, NewPacket};
+use crate::{alerts, candidates, chunk, facts};
 
 type Result<T> = std::result::Result<T, StoreError>;
 
 pub const DAY_MS: i64 = 24 * 3600 * 1000;
-
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct Cursor {
-    pub at: i64,
-    pub msg_id: String,
-    pub windows: i64,
-    pub day: String,
-    pub spent: i64,
-}
-
-pub fn cursor(c: &Connection, ws: &str, conv: &ConvRef) -> Result<Option<Cursor>> {
-    Ok(c
-        .prepare_cached("SELECT at, msg_id, windows, day, spent FROM digest_cursors WHERE workspace_id = ? AND conv = ?")?
-        .query_row(params![ws, conv.key()], |r| {
-            Ok(Cursor {
-                at: r.get(0)?,
-                msg_id: r.get(1)?,
-                windows: r.get(2)?,
-                day: r.get(3)?,
-                spent: r.get(4)?,
-            })
-        })
-        .optional()?)
-}
-
-// The retired NOT NULL column retains the initial exclusion for audits, never live intake.
-fn save_cursor(
-    tx: &Tx,
-    ws: &str,
-    conv: &ConvRef,
-    k: &Cursor,
-    now: i64,
-    initial_since: i64,
-) -> Result<()> {
-    tx.execute(
-        "INSERT OR REPLACE INTO digest_cursors (workspace_id, conv, at, msg_id, windows, day, spent, updated, since) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, coalesce((SELECT since FROM digest_cursors WHERE workspace_id=?1 AND conv=?2),?9))",
-        params![ws, conv.key(), k.at, k.msg_id, k.windows, k.day, k.spent, now, initial_since],
-    )?;
-    Ok(())
-}
-
-fn receipt(tx: &Tx, ws: &str, conv: &ConvRef, msgs: &[Msg], seq: i64, now: i64) -> Result<()> {
-    for m in msgs {
-        tx.execute("INSERT INTO digest_receipts (workspace_id, conv, message_id, seq, created) VALUES (?, ?, ?, ?, ?)", params![ws, conv.key(), m.id, seq, now])?;
-    }
-    steve_store_sqlite::digest::dequeue_on_receipt(
-        tx,
-        ws,
-        &conv.key(),
-        msgs.iter().map(|m| m.id.as_str()),
-    )?;
-    Ok(())
-}
 
 /// What one tick did.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -135,7 +82,7 @@ fn trigger(
 
 /// Cuts every window that is due in `conv`. `manual` cuts what waits even when nothing is due.
 pub fn run_conv(
-    tx: &Tx,
+    w: &mut W<'_>,
     ws: &str,
     conv: &ConvRef,
     now: i64,
@@ -143,7 +90,7 @@ pub fn run_conv(
     manual: bool,
     rep: &mut Report,
 ) -> Result<()> {
-    run_conv_step(tx, ws, conv, now, b, manual, rep, &mut || {})
+    run_conv_step(w, ws, conv, now, b, manual, rep, &mut |_| {})
 }
 
 fn backlog_floor(now: i64, days: i64) -> i64 {
@@ -156,26 +103,28 @@ fn backlog_floor(now: i64, days: i64) -> i64 {
 
 #[allow(clippy::too_many_arguments)]
 fn run_conv_step(
-    tx: &Tx,
+    w: &mut W<'_>,
     ws: &str,
     conv: &ConvRef,
     now: i64,
     b: &Batching,
     manual: bool,
     rep: &mut Report,
-    checkpoint: &mut impl FnMut(),
+    checkpoint: &mut impl FnMut(&mut W<'_>),
 ) -> Result<()> {
-    let Some(info) = conv::info(tx, ws, conv)? else {
+    let key = conv.key();
+    let Some(info) = conv::info(w, ws, conv)? else {
         return Ok(());
     };
-    let p = profile::profile(tx, ws, &info)?;
+    let stored = w.digest_profiles().get(ws, &key)?;
+    let p = profile::profile(&info, stored, || conv::guess_kind(w, ws, &info))?;
     let initial_since = backlog_floor(now, b.backlog_days);
-    let mut k = if let Some(k) = cursor(tx, ws, conv)? {
+    let mut k = if let Some(k) = w.digest_windows().cursor(ws, &key)? {
         k
     } else {
         // Apply lookback once. Later insertions are eligible even with older provider timestamps.
         if b.backlog_days > 0 {
-            steve_store_sqlite::digest::remove_before(tx, ws, &conv.key(), initial_since)?;
+            w.digest_windows().exclude_before(ws, &key, initial_since)?;
         }
         Cursor {
             at: i64::MIN,
@@ -183,36 +132,44 @@ fn run_conv_step(
         }
     };
     // the budget day, on the clock of the person the digest is for
-    let day = steve_modules::zone::Zone::of_owner(tx, ws)?.day(now);
+    let day = steve_modules::zone::Zone::for_owner(w, ws)?.day(now);
     if k.day != day {
         k.day = day;
         k.spent = 0;
     }
     // Persist initialization even when paused or budget-deferred.
-    save_cursor(tx, ws, conv, &k, now, initial_since)?;
+    w.digest_windows()
+        .save_cursor(ws, &key, &k, now, initial_since)?;
     rep.conversations += 1;
     match p.settings.depth.as_str() {
         "paused" => return Ok(()),
         "record" => {
             loop {
-                let msgs = conv::unread(tx, ws, conv, 500)?;
+                let msgs = conv::unread(w, ws, conv, 500)?;
                 let Some(last) = msgs.last() else {
                     break;
                 };
-                receipt(tx, ws, conv, &msgs, k.windows, now)?;
+                w.digest_windows().acknowledge(
+                    ws,
+                    &key,
+                    msgs.iter().map(|m| &m.id),
+                    k.windows,
+                    now,
+                )?;
                 rep.recorded += msgs.len();
                 if (last.at, last.id.as_str()) > (k.at, k.msg_id.as_str()) {
                     k.at = last.at;
                     k.msg_id = last.id.clone();
                 }
-                save_cursor(tx, ws, conv, &k, now, initial_since)?;
+                w.digest_windows()
+                    .save_cursor(ws, &key, &k, now, initial_since)?;
             }
             return Ok(());
         }
         _ => {}
     }
     loop {
-        let (n, oldest, newest) = conv::unread_stats(tx, ws, conv)?;
+        let (n, oldest, newest) = w.digest_windows().pending_stats(ws, &key)?;
         let Some(why) = trigger(
             n as usize,
             p.settings.window,
@@ -228,7 +185,7 @@ fn run_conv_step(
             rep.deferred += 1;
             break;
         }
-        let msgs = conv::unread(tx, ws, conv, p.settings.window.max(1) as usize)?;
+        let msgs = conv::unread(w, ws, conv, p.settings.window.max(1) as usize)?;
         let Some(last) = msgs.last().cloned() else {
             break;
         };
@@ -237,7 +194,7 @@ fn run_conv_step(
         } else {
             let first = &msgs[0];
             conv::read_before(
-                tx,
+                w,
                 ws,
                 conv,
                 first.at,
@@ -249,20 +206,22 @@ fn run_conv_step(
             .collect()
         };
         let seq = k.windows + 1;
-        let tokens = cut_window(tx, ws, &info, &p, seq, why, &context, &msgs, b, now, rep)?;
+        let tokens = cut_window(w, ws, &info, &p, seq, why, &context, &msgs, b, now, rep)?;
         rep.windows += 1;
         // The explicit receipt acknowledgement consumes the inbox positions. Packets, acknowledgement and the
         // display cursor share this transaction, so a crash here leaves the entire window pending.
-        checkpoint();
-        receipt(tx, ws, conv, &msgs, seq, now)?;
-        checkpoint();
+        checkpoint(w);
+        w.digest_windows()
+            .acknowledge(ws, &key, msgs.iter().map(|m| &m.id), seq, now)?;
+        checkpoint(w);
         if (last.at, last.id.as_str()) > (k.at, k.msg_id.as_str()) {
             k.at = last.at;
             k.msg_id = last.id;
         }
         k.windows = seq;
         k.spent += tokens;
-        save_cursor(tx, ws, conv, &k, now, initial_since)?;
+        w.digest_windows()
+            .save_cursor(ws, &key, &k, now, initial_since)?;
         if why != "size" {
             break;
         }
@@ -273,7 +232,7 @@ fn run_conv_step(
 /// One window: rolled up (alerts) and/or queued. Returns the tokens queued.
 #[allow(clippy::too_many_arguments)]
 fn cut_window(
-    tx: &Tx,
+    w: &mut W<'_>,
     ws: &str,
     info: &ConvInfo,
     p: &Profile,
@@ -288,8 +247,18 @@ fn cut_window(
     let conv = &info.conv;
     let (kind, msgs, context, alert_facts): (&str, Vec<Msg>, Vec<Msg>, Option<serde_json::Value>) =
         if p.settings.depth == "alerts" {
-            let o = alerts::aggregate(tx, ws, conv, msgs)?;
-            summary::write(tx, ws, conv, None, Some(&o.rollup), None, "steve", now)?;
+            let o = alerts::aggregate(w, ws, conv, msgs)?;
+            w.summaries().append(
+                ws,
+                &conv.key(),
+                NewSummary {
+                    text: None,
+                    rules: Some(&o.rollup),
+                    packet: None,
+                    writer: "steve",
+                    now,
+                },
+            )?;
             if o.anomalies.is_empty() {
                 rep.rolled += 1;
                 return Ok(0);
@@ -301,7 +270,7 @@ fn cut_window(
         } else {
             ("window", msgs.to_vec(), context.to_vec(), None)
         };
-    let built = facts::build(tx, ws, info, p, seq, why, &context, &msgs)?;
+    let built = facts::build(w, ws, info, p, seq, why, &context, &msgs)?;
     let mut facts = built.facts.clone();
     if let Some(a) = alert_facts {
         facts["alerts"] = a;
@@ -309,7 +278,7 @@ fn cut_window(
     let cands = if p.settings.depth == "summary" {
         Vec::new()
     } else {
-        candidates::find(tx, ws, conv, &built, now)?
+        candidates::find(w, ws, conv, &built, now)?
     };
     let role = if info.role.trim().is_empty() {
         String::new()
@@ -333,8 +302,7 @@ fn cut_window(
     let priority = (p.settings.priority + i64::from(built.mentions_me || p.kind == "dm")).min(3);
     let (first, last) = (&msgs[0], &msgs[msgs.len() - 1]);
     let tokens: i64 = chunks.iter().map(|c| c.tokens).sum();
-    let id = queue::insert(
-        tx,
+    let id = w.digest_packets().insert(
         &NewPacket {
             ws,
             conv: &conv.key(),
@@ -359,24 +327,24 @@ fn cut_window(
 
 /// One tick over every conversation of `ws` with new messages; one transaction per conversation.
 pub fn tick(store: &Store, ws: &str, now: i64) -> Result<Report> {
-    let b = store.reader(|c| queue::batching(c, ws))?;
+    let b = store.read(|r| r.digest_packets().batching(ws))?;
     let mut rep = Report::default();
     if !b.enabled {
         return Ok(rep);
     }
-    let convs = store.reader(|c| conv::with_news(c, ws))?;
+    let convs = conv::with_news(store, ws)?;
     for (conv, _) in convs {
-        store.transaction(|tx| run_conv(tx, ws, &conv, now, &b, false, &mut rep))?;
+        store.write(|w| run_conv(w, ws, &conv, now, &b, false, &mut rep))?;
     }
-    store.transaction(|tx| queue::release_expired(tx, ws, now).map(|_| ()))?;
+    store.write(|w| w.digest_packets().release_expired(ws, now))?;
     Ok(rep)
 }
 
 /// Cuts what waits in one conversation now, due or not.
 pub fn cut_now(store: &Store, ws: &str, conv: &ConvRef, now: i64) -> Result<Report> {
-    let b = store.reader(|c| queue::batching(c, ws))?;
+    let b = store.read(|r| r.digest_packets().batching(ws))?;
     let mut rep = Report::default();
-    store.transaction(|tx| run_conv(tx, ws, conv, now, &b, true, &mut rep))?;
+    store.write(|w| run_conv(w, ws, conv, now, &b, true, &mut rep))?;
     Ok(rep)
 }
 
@@ -386,110 +354,87 @@ mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use steve_modules::testkit::{TestEnv, WS};
 
+    use steve_store::testkit::digest as fixture;
+
     #[test]
     fn five_hundred_receipts_aggregate_the_conversation_once() {
-        use std::sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        };
-        use steve_store_sqlite::digest::{self, Source};
         let env = TestEnv::new(|_| {});
-        let count = Arc::new(AtomicUsize::new(0));
         env.store()
-            .transaction(|tx| -> Result<()> {
-                tx.execute(
-                    "INSERT INTO spaces(id,workspace_id,system_id,kind,external_id,name,created,updated)
-                     VALUES('receipt-batch','default','test','group','receipt-batch','Batch',1,1)",
-                    [],
-                )?;
+            .write(|w| {
+                fixture::bot_space(w)?;
+                let conv = ConvRef::new("space", "s1");
                 for n in 0..500 {
-                    let id = format!("batch-{n}");
-                    tx.execute(
-                        "INSERT INTO chan_messages(id,workspace_id,space_id,direction,status,text,created)
-                         VALUES(?1,'default','receipt-batch','in','received','body',?2)",
-                        rusqlite::params![id, n],
+                    fixture::seed_message(
+                        w,
+                        fixture::ChannelInput {
+                            id: &format!("batch-{n}"),
+                            space: "s1",
+                            at: n,
+                            reply: None,
+                            thread: None,
+                            text: "body",
+                            mentions: &serde_json::json!([]),
+                        },
                     )?;
-                    digest::sync_message(tx, Source::ChanMessage, &id, None)?;
                 }
-                let conv = ConvRef::new("space", "receipt-batch");
-                let msgs = conv::unread(tx, "default", &conv, 500)?;
-                assert_eq!(msgs.len(), 500);
-                let writes = count.clone();
-                tx.update_hook(Some(
-                    move |_: rusqlite::hooks::Action, _: &str, table: &str, _: i64| {
-                        if table == "digest_pending_convs" {
-                            writes.fetch_add(1, Ordering::SeqCst);
-                        }
-                    },
-                ))?;
-                receipt(tx, "default", &conv, &msgs, 1, 1)?;
-                assert_eq!(
-                    count.load(Ordering::SeqCst),
-                    1,
-                    "one empty-conversation deletion, not 500 aggregates"
-                );
-                assert!(digest::verify_pending(tx, "default")?.is_empty());
-                let receipts: i64 = tx.query_row(
-                    "SELECT count(*) FROM digest_receipts WHERE conv='space:receipt-batch'",
-                    [],
-                    |r| r.get(0),
-                )?;
-                assert_eq!(receipts, 500);
-                Ok(())
+                let ids: Vec<_> = conv::unread(w, WS, &conv, 500)?
+                    .into_iter()
+                    .map(|m| m.id)
+                    .collect();
+                assert_eq!(ids.len(), 500);
+                assert_eq!(fixture::acknowledge_counted(w, WS, &conv.key(), &ids)?, 1);
+                assert_eq!(fixture::receipt_count_in(w, WS)?, 500);
+                Ok::<_, StoreError>(())
             })
             .unwrap();
+        fixture::audit(env.store()).unwrap();
     }
 
     #[test]
     fn panic_before_or_after_acknowledgement_replays_once_after_reopen() {
         for fail_at in 1..=2 {
             let e = TestEnv::new(|_| {});
-            let sql = "INSERT INTO spaces (id, workspace_id, system_id, kind, external_id, name, created, updated)
-                VALUES ('s1', 'default', 'test', 'group', 's1', 'Group', 1, 1);
-                INSERT INTO chan_messages (id, workspace_id, space_id, direction, text, created)
-                VALUES ('m1', 'default', 's1', 'in', 'backfilled message', 1);";
             e.store()
-                .transaction(|c| {
-                    c.execute_batch(sql)?;
-                    steve_store_sqlite::digest::sync_message(
-                        c,
-                        steve_store_sqlite::digest::Source::ChanMessage,
-                        "m1",
-                        None,
-                    )?;
-                    Ok::<_, StoreError>(())
+                .write(|w| {
+                    fixture::bot_space(w)?;
+                    fixture::seed_message(
+                        w,
+                        fixture::ChannelInput {
+                            id: "m1",
+                            space: "s1",
+                            at: 1,
+                            reply: None,
+                            thread: None,
+                            text: "backfilled message",
+                            mentions: &serde_json::json!([]),
+                        },
+                    )
                 })
                 .unwrap();
             let conv = ConvRef::new("space", "s1");
             let mut checkpoints = 0;
             let panicked = catch_unwind(AssertUnwindSafe(|| {
-                let _: Result<()> = e.store().transaction(|tx| {
+                let _: Result<()> = e.store().write(|w| {
                     run_conv_step(
-                        tx,
+                        w,
                         WS,
                         &conv,
                         DAY_MS,
                         &Batching::default(),
                         true,
                         &mut Report::default(),
-                        &mut || {
+                        &mut |w| {
                             checkpoints += 1;
                             assert_eq!(
-                                tx.query_row("SELECT count(*) FROM digest_packets", [], |r| r
-                                    .get::<_, i64>(0))
-                                    .unwrap(),
+                                w.digest_packets().list(WS, None, None, 10).unwrap().len(),
                                 1
                             );
                             assert_eq!(
-                                tx.query_row("SELECT count(*) FROM digest_receipts", [], |r| r
-                                    .get::<_, i64>(0))
-                                    .unwrap(),
+                                fixture::receipt_count_in(w, WS).unwrap(),
                                 i64::from(checkpoints == 2)
                             );
                             assert_eq!(
-                                tx.query_row("SELECT count(*) FROM digest_pending", [], |r| r
-                                    .get::<_, i64>(0))
-                                    .unwrap(),
+                                w.digest_windows().pending_stats(WS, &conv.key()).unwrap().0,
                                 i64::from(checkpoints == 1)
                             );
                             if checkpoints == fail_at {
@@ -506,28 +451,27 @@ mod tests {
             )
             .unwrap();
             reopened
-                .reader(|c| {
-                    assert!(queue::list(c, WS, None, None, 50)?.is_empty());
-                    assert_eq!(conv::unread_stats(c, WS, &conv)?.0, 1);
-                    assert!(cursor(c, WS, &conv)?.is_none());
-                    Ok::<_, StoreError>(())
+                .read::<_, steve_store::StoreError>(|r| {
+                    assert!(r.digest_packets().list(WS, None, None, 50)?.is_empty());
+                    assert_eq!(r.digest_windows().pending_stats(WS, &conv.key())?.0, 1);
+                    assert!(r.digest_windows().cursor(WS, &conv.key())?.is_none());
+                    Ok(())
                 })
                 .unwrap();
             assert_eq!(cut_now(&reopened, WS, &conv, DAY_MS).unwrap().windows, 1);
             assert_eq!(cut_now(&reopened, WS, &conv, DAY_MS).unwrap().windows, 0);
             reopened
-                .reader(|c| {
-                    assert_eq!(queue::list(c, WS, None, None, 50)?.len(), 1);
+                .read::<_, steve_store::StoreError>(|r| {
+                    assert_eq!(r.digest_packets().list(WS, None, None, 50)?.len(), 1);
                     assert_eq!(
-                        c.query_row("SELECT count(*) FROM digest_receipts", [], |r| r
-                            .get::<_, i64>(0))?,
-                        1
+                        r.digest_windows().pending_stats(WS, &conv.key())?,
+                        (0, 0, 0)
                     );
-                    assert_eq!(conv::unread_stats(c, WS, &conv)?, (0, 0, 0));
-                    assert!(steve_store_sqlite::digest::verify_pending(c, WS)?.is_empty());
-                    Ok::<_, StoreError>(())
+                    Ok(())
                 })
                 .unwrap();
+            assert_eq!(fixture::receipt_count(&reopened, WS).unwrap(), 1);
+            fixture::audit(&reopened).unwrap();
         }
     }
 }

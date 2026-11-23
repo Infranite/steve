@@ -7,6 +7,8 @@
 mod digest_env;
 use digest_env::TestEnv;
 use std::sync::Arc;
+use steve_store::testkit::channels::inspect;
+use steve_store::testkit::channels::seed::people::{Bot, OPS};
 
 use axum::Router;
 use serde_json::{Value, json};
@@ -38,19 +40,24 @@ fn setup() -> H {
         flow_setup.register(r);
         connections::register(r);
     });
-    env.store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "INSERT INTO bots (id, workspace_id, name, main, harness, persona, updated) VALUES
-                    ('steve', 'default', 'Steve', 1, 'claude', '沉稳、简洁，先说结论；不客套。', 1),
-                    ('ops', 'default', '运维', 0, 'claude', '', 1),
-                    ('far', 'w2', '别处', 0, 'claude', '', 1);
-                 INSERT INTO bot_workspaces (bot_id, workspace_id, created) VALUES
-                    ('steve', 'default', 1), ('ops', 'default', 2), ('far', 'w2', 1);",
-            )?;
-            Ok(())
-        })
-        .expect("bots");
+    steve_store::testkit::channels::seed::people::bots(
+        env.store(),
+        &[
+            Bot {
+                persona: "沉稳、简洁，先说结论；不客套。",
+                ..Bot::default()
+            },
+            OPS,
+            Bot {
+                id: "far",
+                ws: "w2",
+                name: "别处",
+                joined: 1,
+                ..OPS
+            },
+        ],
+    )
+    .unwrap();
     let keys = tempfile::tempdir().expect("tmp");
     let vault = Vault::new(
         env.store().clone(),
@@ -125,7 +132,7 @@ fn set_default(h: &H, conn: &str, persona: &str) -> Result<(), steve_channels::C
     let now = h.ch.now();
     h.env
         .store()
-        .transaction(|tx| bindings::set_account_default(tx, &v, conn, persona, now))
+        .write(|tx| bindings::set_account_default(tx, &v, conn, persona, now))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -134,7 +141,7 @@ async fn default_persona_is_seeded_on_first_use() {
     assert!(
         h.env
             .store()
-            .reader(|c| personas::default_persona(c, WS))
+            .read(|c| personas::default_persona(c, WS))
             .expect("read")
             .is_none(),
         "nothing before channels are used"
@@ -172,17 +179,7 @@ async fn default_persona_is_seeded_on_first_use() {
     );
     // seeded once
     get(&h, "/personas").await;
-    let n: i64 = h
-        .env
-        .store()
-        .reader(|c| {
-            Ok::<_, steve_store::StoreError>(c.query_row(
-                "SELECT count(*) FROM personas WHERE workspace_id = ? AND is_default = 1",
-                [WS],
-                |r| r.get(0),
-            )?)
-        })
-        .expect("count");
+    let n: i64 = inspect::people::default_persona_count(h.env.store(), WS).expect("count");
     assert_eq!(n, 1);
     // a workspace without channels gets it from GET /personas, with its own Bot
     let (s, v) = call(&h.api, Some(&caller(WS2, ME)), "GET", "/personas", None).await;
@@ -202,7 +199,7 @@ async fn space_binding_overrides_the_account_default() {
     let acc = h
         .env
         .store()
-        .reader(|c| bindings::account_persona(c, WS, &h.con))
+        .read(|c| bindings::account_persona(c, WS, &h.con))
         .expect("account persona")
         .expect("bot");
     assert_eq!((acc.id.as_str(), acc.inherited), (oncall.as_str(), None));
@@ -238,17 +235,8 @@ async fn space_binding_overrides_the_account_default() {
         json!({"accounts": [], "spaces": [{"id": g1, "name": "运维群", "own": true}]})
     );
     // the revision records the binding
-    let patch: String = h
-        .env
-        .store()
-        .reader(|c| {
-            Ok::<_, steve_store::StoreError>(c.query_row(
-                "SELECT patch FROM revisions WHERE object_type = 'space' AND object_id = ? ORDER BY id DESC LIMIT 1",
-                [&g1],
-                |r| r.get(0),
-            )?)
-        })
-        .expect("revision");
+    let patch: String =
+        inspect::spaces::latest_revision_patch(h.env.store(), &g1).expect("revision");
     let patch: Value = serde_json::from_str(&patch).expect("json");
     assert_eq!(patch["before"]["persona_id"], Value::Null);
     assert_eq!(patch["after"]["persona_id"], json!(pm));
@@ -395,7 +383,7 @@ async fn deleting_a_persona_moves_accounts_to_default_and_spaces_to_following() 
     let acc = h
         .env
         .store()
-        .reader(|c| bindings::account_persona(c, WS, &h.con))
+        .read(|c| bindings::account_persona(c, WS, &h.con))
         .expect("read")
         .expect("bot");
     assert_eq!(json!(acc.id), steve);
@@ -480,7 +468,7 @@ async fn own_account_cannot_get_a_persona() {
     assert!(
         h.env
             .store()
-            .reader(|c| bindings::account_persona(c, WS, &mine))
+            .read(|c| bindings::account_persona(c, WS, &mine))
             .expect("read")
             .is_none()
     );
@@ -568,19 +556,7 @@ async fn persona_routes_validate_and_keep_revisions() {
     )
     .await;
     assert_eq!(s, 400);
-    let revs: Vec<i64> = h
-        .env
-        .store()
-        .reader(|c| {
-            let mut st = c.prepare(
-                "SELECT version FROM revisions WHERE object_type = 'persona' AND object_id = ? ORDER BY id",
-            )?;
-            Ok::<_, steve_store::StoreError>(
-                st.query_map([&id], |r| r.get(0))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?,
-            )
-        })
-        .expect("revisions");
+    let revs: Vec<i64> = inspect::people::persona_revisions(h.env.store(), &id).expect("revisions");
     assert_eq!(revs, vec![1, 2]);
 
     // another workspace, another user of this one
@@ -600,7 +576,7 @@ async fn deleted_bot_hands_its_personas_to_the_heir() {
     let n = h
         .env
         .store()
-        .transaction(|tx| personas::on_bot_deleted(tx, WS, "ops", "steve", now))
+        .write(|w| steve_store::channel_personas::reassign_bot(w, WS, "ops", "steve", now))
         .expect("moved");
     assert_eq!(n, 1);
     let p = get(&h, &format!("/personas/{id}")).await;

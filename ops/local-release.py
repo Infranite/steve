@@ -562,11 +562,11 @@ def probe(candidate, version):
                         if not h.get("version") == h.get("web_version") == version:
                             raise RuntimeError(f"probe health names {h.get('version')}/{h.get('web_version')}")
                         try:
-                            urllib.request.urlopen(f"http://127.0.0.1:{p_port}/api/state", timeout=2)
+                            urllib.request.urlopen(f"http://127.0.0.1:{p_port}/api/summary", timeout=2)
                             raise RuntimeError("business reachable during the probe")
                         except urllib.error.HTTPError as e:
                             if e.code != 503:
-                                raise RuntimeError(f"/api/state answered {e.code} during the probe")
+                                raise RuntimeError(f"/api/summary answered {e.code} during the probe")
                         return h
                 except OSError:
                     pass

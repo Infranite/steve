@@ -15,9 +15,11 @@ use super::{Declare, Extension, ExtensionError, Job, Mounted, Started};
 /// registrations started from Steve, and one long connection per bot connection.
 pub(crate) struct FeishuBot;
 
+pub(super) const FEISHU_BOT_ID: &str = "feishu.bot";
+
 impl Extension for FeishuBot {
     fn id(&self) -> &str {
-        "feishu.bot"
+        FEISHU_BOT_ID
     }
 
     fn declare(&self, d: &mut Declare<'_>) -> Result<(), ExtensionError> {

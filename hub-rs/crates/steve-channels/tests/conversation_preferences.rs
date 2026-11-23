@@ -2,7 +2,6 @@
 #[path = "support/digest_env.rs"]
 mod digest_env;
 use digest_env::TestEnv;
-use rusqlite::params;
 use serde_json::{Value, json};
 use steve_channels::conversations::{self, ListQuery};
 use steve_modules::{
@@ -10,33 +9,24 @@ use steve_modules::{
     testkit::{ME, OTHER, WS, WS2},
 };
 use steve_store::base::Viewer;
+use steve_store::testkit::channels::inspect;
+use steve_store::testkit::channels::seed;
 
 fn setup() -> TestEnv {
     let h = TestEnv::new(|_| {});
-    h.store().with_conn(|c| {
-        c.execute_batch("INSERT INTO parties (id, workspace_id, type, name, created_by, created, updated) VALUES ('org', 'default', 'organization', 'Org', 'usr_dev', 1, 1);
-        INSERT INTO parties (id, workspace_id, type, name, user_id, created_by, created, updated) VALUES ('mine', 'default', 'person', 'Me', 'usr_dev', 'usr_dev', 1, 1);
-        INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated) VALUES ('shared', 'default', 'feishu', 'feishu_app', 'org', 'app_bot', 'shared', 'shared', 'connect', 1, 1), ('private', 'default', 'feishu', 'feishu_user', 'mine', 'personal', 'me', 'me', 'connect', 1, 1);")?;
-        Ok(())
-    }).unwrap();
+    seed::spaces::conversation_accounts(h.store()).unwrap();
     h
 }
 
 fn add(h: &TestEnv, ws: &str, id: &str, account: Option<&str>, created: i64) {
-    h.store().with_conn(|c| {
-        c.execute("INSERT INTO spaces (id, workspace_id, system_id, kind, external_id, name, account_id, created, updated) VALUES (?1, ?2, 'feishu', 'group', ?1, ?1, ?3, 1, 1)", params![id, ws, account])?;
-        c.execute("INSERT INTO messages (id, workspace_id, space, author, text, created) VALUES (?1, ?2, ?3, 'me', 'preserved message', ?4)", params![format!("msg_{id}"), ws, conversations::conv_space(id), created])?;
-        Ok(())
-    }).unwrap();
+    seed::spaces::conversation_with_turn(h.store(), id, ws, account, created).unwrap();
 }
 fn close(h: &TestEnv, ws: &str, user: &str, conv: &str, closed: bool) -> ApiResult<()> {
     h.store()
-        .transaction(|c| conversations::set_closed(c, ws, &Viewer::bare(ws, user), conv, closed))
+        .write(|c| conversations::set_closed(c, ws, &Viewer::bare(ws, user), conv, closed))
 }
 fn list(h: &TestEnv, ws: &str, user: &str) -> Vec<Value> {
-    h.store()
-        .reader(|c| conversations::list(c, ws, &Viewer::bare(ws, user)))
-        .unwrap()
+    conversations::list(h.store(), ws, &Viewer::bare(ws, user)).unwrap()
 }
 
 #[test]
@@ -49,12 +39,13 @@ fn closure_is_persistent_personal_reversible_and_does_not_change_history() {
     assert_eq!(list(&h, WS, ME)[0]["closed"], true);
     assert_eq!(list(&h, WS, OTHER)[0]["closed"], false);
     // Independent connection sees durable state, not process memory.
-    let c = rusqlite::Connection::open(h.dir.path().join("steve.sqlite3")).unwrap();
+    let path = h.dir.path().join("steve.sqlite3");
+    let readback = steve_store::Store::open(&path, steve_store::NoPublisher).unwrap();
     assert_eq!(
-        conversations::list(&c, WS, &Viewer::bare(WS, ME)).unwrap()[0]["closed"],
+        conversations::list(&readback, WS, &Viewer::bare(WS, ME)).unwrap()[0]["closed"],
         true
     );
-    let state: (String, String) = c.query_row("SELECT s.status, m.text FROM spaces s JOIN messages m ON m.space = 'chan:' || s.id WHERE s.id = 'shared-space'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    let state = inspect::spaces::conversation_history(&readback, "shared-space").unwrap();
     assert_eq!(state, ("active".into(), "preserved message".into()));
     // New turns do not change a user's explicit closure.
     h.store()
@@ -78,27 +69,11 @@ fn single_user_preferences_keep_workspace_and_membership_checks() {
     assert!(close(&h, WS2, ME, "chan:private-space", true).is_err());
     assert!(close(&h, WS, ME, "steve", true).is_err());
     assert!(close(&h, WS, ME, "chan:missing", true).is_err());
-    assert!(
-        h.store()
-            .reader(|c| conversations::list(c, WS, &Viewer::bare(WS2, ME)))
-            .is_err()
-    );
+    assert!(conversations::list(h.store(), WS, &Viewer::bare(WS2, ME)).is_err());
     close(&h, WS, ME, "chan:private-space", true).unwrap();
-    h.store()
-        .with_conn(|c| {
-            c.execute(
-                "DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
-                params![WS, ME],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    seed::people::remove_workspace_member(h.store(), WS, ME).unwrap();
     assert!(close(&h, WS, ME, "chan:private-space", false).is_err());
-    assert!(
-        h.store()
-            .reader(|c| conversations::list(c, WS, &Viewer::bare(WS, ME)))
-            .is_err()
-    );
+    assert!(conversations::list(h.store(), WS, &Viewer::bare(WS, ME)).is_err());
 }
 
 #[test]
@@ -114,9 +89,7 @@ fn single_user_pagination_includes_shared_and_personal_conversations() {
     assert_eq!(list(&h, WS, OTHER).len(), 420);
     close(&h, WS, OTHER, "chan:shared-214", true).unwrap();
     let page = |q: ListQuery| {
-        h.store()
-            .reader(|c| conversations::list_page(c, WS, &Viewer::bare(WS, OTHER), &q, 1))
-            .unwrap()
+        conversations::list_page(h.store(), WS, &Viewer::bare(WS, OTHER), &q, 1).unwrap()
     };
     let mut all = Vec::new();
     let mut offset = 0;
@@ -211,42 +184,26 @@ fn invalid_query_is_rejected() {
             ..Default::default()
         },
     ] {
-        assert!(
-            h.store()
-                .reader(|c| conversations::list_page(c, WS, &Viewer::bare(WS, ME), &q, 1))
-                .is_err()
-        );
+        assert!(conversations::list_page(h.store(), WS, &Viewer::bare(WS, ME), &q, 1).is_err());
     }
 }
 
 fn outgoing(h: &TestEnv, space: &str, id: &str, status: &str, approval: Option<(&str, &str)>) {
-    digest_env::write(h.store(), |c| {
-        let decision = approval.map(|_| format!("decision-{id}"));
-        c.execute("INSERT INTO chan_messages (id, workspace_id, space_id, direction, text, status, decision_id, created)
-            VALUES (?1, ?2, ?3, 'out', 'reply', ?4, ?5, 2)", params![id, WS, space, status, decision])?;
-        if let Some((kind, state)) = approval {
-            c.execute("INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, question, requested_by, status, created)
-                VALUES (?1, ?2, ?3, 'chan_message', ?4, 'Send?', 'steve', ?5, 2)", params![decision, WS, kind, id, state])?;
-        }
-        Ok(())
-    }).unwrap();
+    seed::messages::seed_conversation_outbound(h.store(), WS, space, id, status, approval).unwrap();
 }
 
 fn replied(h: &TestEnv, user: &str, q: ListQuery) -> conversations::ListPage {
-    h.store()
-        .reader(|c| {
-            conversations::list_page(
-                c,
-                WS,
-                &Viewer::bare(WS, user),
-                &ListQuery {
-                    state: Some("replied".into()),
-                    ..q
-                },
-                100,
-            )
-        })
-        .unwrap()
+    conversations::list_page(
+        h.store(),
+        WS,
+        &Viewer::bare(WS, user),
+        &ListQuery {
+            state: Some("replied".into()),
+            ..q
+        },
+        100,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -289,16 +246,7 @@ fn replied_requires_a_sent_message_or_a_draft_still_awaiting_approval() {
         )
         .unwrap();
     close(&h, WS, ME, "chan:sent", true).unwrap();
-    digest_env::write(h.store(), |c| {
-        // Draft-only channel records need not have any internal conversation turns.
-        c.execute("DELETE FROM messages WHERE space = 'chan:draft'", [])?;
-        // Latest-author filtering would lose a conversation with a reply followed by incoming text.
-        c.execute("INSERT INTO chan_messages (id, workspace_id, space_id, direction, text, status, created)
-            VALUES ('new-incoming', ?1, 'sent', 'in', 'new incoming', 'received', 20)", [WS])?;
-        // Retaining the sending fact does not depend on retaining the message body.
-        c.execute("UPDATE chan_messages SET text = NULL, purged = 10 WHERE id = 'out-sent'", [])?;
-        Ok(())
-    }).unwrap();
+    seed::messages::seed_incoming_after_sent(h.store(), WS).unwrap();
     let p = replied(&h, ME, ListQuery::default());
     assert_eq!(p.total, 3);
     assert_eq!(
@@ -316,15 +264,7 @@ fn replied_requires_a_sent_message_or_a_draft_still_awaiting_approval() {
     assert!(!p.has_more);
     assert_eq!(p.next_offset, None);
     // Resolving approval removes a draft-only conversation, but not a previously sent one.
-    h.store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE decisions SET status = 'resolved' WHERE kind = 'approve'",
-                [],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    seed::decisions::resolve_all_approvals(h.store()).unwrap();
     assert_eq!(replied(&h, ME, ListQuery::default()).total, 2);
 }
 
@@ -340,19 +280,7 @@ fn replied_is_filtered_before_pagination_and_combines_with_search_and_channel() 
     for n in 0..60 {
         add(&h, WS, &format!("incoming-{n}"), Some("shared"), 1000 + n);
     }
-    h.store()
-        .with_conn(|c| {
-            c.execute("INSERT INTO connections (id, workspace_id, account_id, adapter, auth, created_by, created, updated)
-                VALUES ('test-channel', ?1, 'shared', 'feishu_app', 'none', ?2, 1, 1)", params![WS, ME])?;
-            c.execute(
-                "INSERT INTO space_identities (space_id, connection_id, workspace_id, joined, ordinal)
-                 SELECT id, 'test-channel', workspace_id, created, 0 FROM spaces
-                 WHERE workspace_id = ?1",
-                [WS],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    seed::spaces::connect_reply_fixtures(h.store(), WS, ME).unwrap();
     let p = replied(
         &h,
         ME,
@@ -421,14 +349,7 @@ fn single_user_replied_reads_include_all_receiving_identities() {
         Some(("approve", "open")),
     );
     outgoing(&h, "private-space", "own-out", "sent", None);
-    digest_env::write(h.store(), |c| {
-        // The groups are visible, but these two messages only reached ME's personal identity.
-        c.execute("INSERT INTO space_identities (space_id, connection_id, workspace_id, ordinal, owner_user, joined)
-            VALUES ('hidden-sent', 'mine', ?2, 0, ?1, 1), ('hidden-draft', 'mine', ?2, 0, ?1, 1),
-                ('hidden-sent', 'shared', ?2, 1, NULL, 1), ('hidden-draft', 'shared', ?2, 1, NULL, 1)", params![ME, WS])?;
-        c.execute("UPDATE chan_messages SET seen_by = 1 WHERE id IN ('private-out', 'private-draft')", [])?;
-        Ok(())
-    }).unwrap();
+    seed::spaces::set_private_receive_identity(h.store(), WS, ME).unwrap();
     let other = replied(&h, OTHER, ListQuery::default());
     assert_eq!(other.total, 4);
     assert_eq!(replied(&h, ME, ListQuery::default()).total, 4);

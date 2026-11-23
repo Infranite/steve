@@ -5,7 +5,7 @@ import { test } from "node:test"
 import ts from "typescript"
 
 const code = ts.transpileModule(readFileSync(new URL("../src/api.ts", import.meta.url), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2023 } }).outputText
-function client(status, body, contentType = "application/json") {
+function client(status, body, contentType = "application/json", failure) {
   const exports = {}
   runInNewContext(code, { exports, AbortSignal, URLSearchParams, require: (id) => {
     if (id === "@/i18n") return { lang: () => "en", t: (key) => key }
@@ -13,7 +13,10 @@ function client(status, body, contentType = "application/json") {
     if (id === "./stream-cursor") return {}
     if (id === "./hub") return { hubUrl: (path) => path }
     throw new Error(id)
-  }, fetch: async () => ({ ok: status < 400, status, headers: { get: (key) => key === "content-type" ? contentType : null }, json: async () => body }) })
+  }, fetch: async () => {
+    if (failure) throw failure
+    return { ok: status < 400, status, headers: { get: (key) => key === "content-type" ? contentType : null }, json: async () => body, text: async () => body ?? "" }
+  } })
   return exports
 }
 
@@ -34,9 +37,22 @@ test("module errors preserve code, status and display text", async () => {
   await assert.rejects(api.modReq("PATCH", "/people/p1", {}), e => e instanceof api.HubError && e.status === 409 && e.code === "conflict" && e.message === "Changed elsewhere")
 })
 
-test("plain-text unknown routes stay unwired and JSON not-found stays an ordinary error", async () => {
-  const unwired = client(404, undefined, "text/plain")
-  await assert.rejects(unwired.modReq("GET", "/unknown"), e => e instanceof unwired.NotWired)
+test("route and resource 404s are HTTP errors", async () => {
+  for (const [body, media] of [[undefined, "text/plain"], [{}, "application/json"]]) {
+    const api = client(404, body, media)
+    await assert.rejects(api.modReq("GET", "/unknown"), e => e instanceof api.HubError && e.status === 404)
+  }
   const existing = client(404, { error: "No such person", code: "not_found" })
   await assert.rejects(existing.modReq("GET", "/people/missing"), e => e instanceof existing.HubError && e.code === "not_found")
+})
+
+test("HTML and network failures cannot masquerade as module data", async () => {
+  const html = client(200, "<!doctype html>", "text/html")
+  for (const method of ["GET", "POST"]) {
+    await assert.rejects(html.modReq(method, "/channels"), /shell:http.incomplete/)
+  }
+  const failed = new TypeError("Failed to fetch")
+  await assert.rejects(client(0, null, null, failed).modReq("GET", "/channels"), e => e === failed)
+  const empty = client(204, undefined, null)
+  await empty.modReq("DELETE", "/channels/id")
 })

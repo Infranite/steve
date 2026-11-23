@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rusqlite::Connection;
 use serde_json::{Value, json};
 use steve_modules::context::{ChatCtx, ChatDone, Cite, PromptContext};
 use steve_modules::decisions::{DecisionCx, DecisionHandler};
@@ -20,7 +19,7 @@ use steve_modules::{
     SystemClock, Tier,
 };
 use steve_store::base::{Level, Viewer};
-use steve_store::{Decision, Item, NewBot, NewDecision, NewItem, Tx};
+use steve_store::{Decision, Item, NewBot, NewDecision, NewItem, W};
 
 type Log = Arc<Mutex<Vec<String>>>;
 
@@ -142,18 +141,17 @@ async fn nothing_registered_is_a_no_op() {
     assert_eq!(r.hooks().accepted(&i).await, None);
     r.hooks().finished(&i).await;
     r.hooks().dropped(&i).await;
-    t.store()
-        .reader(|c| {
-            assert_eq!(r.contexts().session(c, WS, &i), "");
-            assert!(
-                r.contexts()
-                    .chat(c, WS, &Viewer::bare(WS, ME), "hi")
-                    .is_none()
-            );
-            assert!(panels::panels(&t.modules, c, WS, ME, &i.id)?.is_empty());
-            Ok::<_, ApiError>(())
-        })
-        .unwrap();
+    assert_eq!(r.contexts().session(t.store(), WS, &i), "");
+    assert!(
+        r.contexts()
+            .chat(t.store(), WS, &Viewer::bare(WS, ME), "hi")
+            .is_none()
+    );
+    assert!(
+        panels::panels(&t.modules, WS, ME, &i.id)
+            .unwrap()
+            .is_empty()
+    );
     let err = panels::action(
         &t.modules,
         &caller(WS, ME),
@@ -191,10 +189,10 @@ fn hooks_with_the_same_name_panic() {
 struct Ctx(&'static str);
 
 impl PromptContext for Ctx {
-    fn session(&self, _: &Connection, _: &str, item: &Item) -> Option<String> {
+    fn session(&self, _: &steve_store::Store, _: &str, item: &Item) -> Option<String> {
         (!self.0.is_empty()).then(|| format!("{} · {}", self.0, item.title))
     }
-    fn chat(&self, _: &Connection, _: &str, v: &Viewer, text: &str) -> Option<ChatCtx> {
+    fn chat(&self, _: &steve_store::Store, _: &str, v: &Viewer, text: &str) -> Option<ChatCtx> {
         (!self.0.is_empty()).then(|| ChatCtx {
             text: format!("{}: {text} for {}", self.0, v.user),
             cites: vec![Cite {
@@ -207,7 +205,7 @@ impl PromptContext for Ctx {
     }
     fn chat_done(
         &self,
-        _: &Connection,
+        _: &steve_store::Store,
         _: &str,
         mid: &str,
         answer: &str,
@@ -232,23 +230,29 @@ fn prompt_contexts_join_sessions_and_take_the_first_chat() {
     });
     let i = item(&t);
     let cx = t.modules.registry.contexts();
-    t.store()
-        .reader(|c| {
-            assert_eq!(cx.session(c, WS, &i), "知识 · 修 bug\n\n卡片 · 修 bug");
-            let (n, chat) = cx.chat(c, WS, &Viewer::bare(WS, ME), "合同").unwrap();
-            assert_eq!(n, 1);
-            assert_eq!(chat.text, "知识: 合同 for usr_dev");
-            let done = cx.chat_done(n, c, WS, "msg_1", "好的 [1] [9]", &chat);
-            assert_eq!(done.text, "好的 [1]");
-            assert_eq!(
-                Value::Object(done.meta.unwrap()),
-                json!({"cites": [{"n": 1, "label": "笔记 · Acme", "href": "/kb/docs/kd_1", "level": "public"}], "mid": "msg_1"})
-            );
-            // an unknown provider index leaves the answer alone
-            assert_eq!(cx.chat_done(9, c, WS, "m", "a", &chat), ChatDone { text: "a".into(), meta: None });
-            Ok::<_, ApiError>(())
-        })
+    assert_eq!(
+        cx.session(t.store(), WS, &i),
+        "知识 · 修 bug\n\n卡片 · 修 bug"
+    );
+    let (n, chat) = cx
+        .chat(t.store(), WS, &Viewer::bare(WS, ME), "合同")
         .unwrap();
+    assert_eq!(n, 1);
+    assert_eq!(chat.text, "知识: 合同 for usr_dev");
+    let done = cx.chat_done(n, t.store(), WS, "msg_1", "好的 [1] [9]", &chat);
+    assert_eq!(done.text, "好的 [1]");
+    assert_eq!(
+        Value::Object(done.meta.unwrap()),
+        json!({"cites": [{"n": 1, "label": "笔记 · Acme", "href": "/kb/docs/kd_1", "level": "public"}], "mid": "msg_1"})
+    );
+    // an unknown provider index leaves the answer alone
+    assert_eq!(
+        cx.chat_done(9, t.store(), WS, "m", "a", &chat),
+        ChatDone {
+            text: "a".into(),
+            meta: None
+        }
+    );
 }
 
 /// The GitHub panel example, with the alternatives resolved.
@@ -287,7 +291,13 @@ impl ItemPanel for Gh {
     fn id(&self) -> &'static str {
         "github"
     }
-    fn panels(&self, _: &Connection, ws: &str, _: &str, item_id: &str) -> ApiResult<Vec<Panel>> {
+    fn panels(
+        &self,
+        _: &steve_store::Store,
+        ws: &str,
+        _: &str,
+        item_id: &str,
+    ) -> ApiResult<Vec<Panel>> {
         assert_eq!(ws, WS);
         let mut p: Panel = serde_json::from_value(github_panel_json())?;
         p.title = format!("PR 与检查 {item_id}");
@@ -322,7 +332,7 @@ impl ItemPanel for Mail {
     fn id(&self) -> &'static str {
         "mail"
     }
-    fn panels(&self, _: &Connection, _: &str, _: &str, _: &str) -> ApiResult<Vec<Panel>> {
+    fn panels(&self, _: &steve_store::Store, _: &str, _: &str, _: &str) -> ApiResult<Vec<Panel>> {
         Ok(vec![serde_json::from_value(
             json!({"id":"mail.thread:mt_1","plugin":"mail","title":"邮件往来","updated":1}),
         )?])
@@ -349,7 +359,8 @@ async fn panels_list_in_order_and_actions_go_to_their_provider() {
     let i = item(&t);
     let ps = t
         .store()
-        .reader(|c| panels::panels(&t.modules, c, WS, ME, &i.id))
+        .read::<_, steve_store::StoreError>(|_| Ok(panels::panels(&t.modules, WS, ME, &i.id)))
+        .unwrap()
         .unwrap();
     let ids: Vec<_> = ps.iter().map(|p| p.id.as_str()).collect();
     assert_eq!(ids, ["github.pr:ghp_1", "mail.thread:mt_1"]);
@@ -449,12 +460,11 @@ async fn the_registered_outbound_check_is_used() {
 struct Undo(Log, bool);
 
 impl DecisionHandler for Undo {
-    fn resolve(&self, _: &Tx, cx: &DecisionCx, _: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, _: &mut W<'_>, cx: &DecisionCx, _: &Decision) -> ApiResult<Value> {
         Ok(json!({"choice": cx.choice}))
     }
-    fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
+    fn before_undo(&self, _: &mut W<'_>, d: &Decision) -> ApiResult<()> {
         self.0.lock().unwrap().push(d.id.clone());
-        tx.execute("UPDATE parties SET note = 'undone' WHERE 0", [])?;
         if self.1 {
             Err(ApiError::conflict("已经发出，不能撤销"))
         } else {
@@ -493,7 +503,7 @@ fn before_undo_goes_to_the_subject_types_handler() {
         decision(&t, "item"),
     );
     let r = &t.modules.registry;
-    let run = |d: &Decision| t.store().transaction(|tx| r.before_undo(tx, d));
+    let run = |d: &Decision| t.store().write(|w| r.before_undo(w, d));
     assert_eq!(run(&a), Ok(()));
     assert_eq!(run(&b), Err(ApiError::conflict("已经发出，不能撤销")));
     assert_eq!(

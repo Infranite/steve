@@ -3,7 +3,6 @@
 
 use std::time::Duration;
 
-use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -26,7 +25,7 @@ pub(crate) struct Inputs {
     draft_model: Option<String>,
 }
 
-pub(crate) fn inputs(c: &Connection, d: &DraftRow) -> MailResult<Inputs> {
+pub(crate) fn inputs(c: &mut impl steve_store::Read, d: &DraftRow) -> MailResult<Inputs> {
     let entries = d
         .basis
         .as_ref()
@@ -46,16 +45,7 @@ pub(crate) fn inputs(c: &Connection, d: &DraftRow) -> MailResult<Inputs> {
     if draft_model.is_none()
         && let Some(session) = &d.session_id
     {
-        draft_model = c
-            .query_row(
-                "SELECT COALESCE(NULLIF(s.model, ''), NULLIF(b.model, ''))
-                   FROM sessions s LEFT JOIN bots b ON b.id = s.bot_id
-                  WHERE s.id = ? AND s.workspace_id = ?",
-                [session, &d.workspace_id],
-                |r| r.get(0),
-            )
-            .optional()?
-            .flatten();
+        draft_model = steve_store::session_repo::effective_model(c, &d.workspace_id, session)?;
     }
     Ok(Inputs {
         audience: audience_of_draft(c, d)?,
@@ -115,7 +105,7 @@ pub(crate) fn basis(d: &DraftRow, check: &CheckResult) -> Value {
 
 impl Mail {
     pub(crate) async fn full_check(&self, d: &DraftRow) -> MailResult<(CheckResult, Inputs)> {
-        let inputs = self.0.m.store.reader(|c| inputs(c, d))?;
+        let inputs = self.0.m.store.read(|c| inputs(c, d))?;
         let cx = CheckCx {
             ws: d.workspace_id.clone(),
             actor: d.author.clone(),

@@ -14,7 +14,6 @@ use std::time::Duration;
 use axum::Json;
 use axum::extract::State;
 use axum::response::Response;
-use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use steve_modules::Caller;
@@ -299,16 +298,9 @@ pub async fn put(
 /// The instance's owner (`users.role`).
 pub async fn is_owner(store: &steve_store::Store, me: &str) -> bool {
     let (store, me) = (store.clone(), me.to_string());
-    let owner = tokio::task::spawn_blocking(move || {
-        store.reader(|c| {
-            c.query_row("SELECT role FROM users WHERE id=?", [&me], |r| {
-                r.get::<_, String>(0)
-            })
-            .optional()
-            .map_err(steve_store::StoreError::from)
-        })
-    })
-    .await;
+    let owner =
+        tokio::task::spawn_blocking(move || store.read(|r| steve_store::UserRows(r).role(&me)))
+            .await;
     matches!(owner, Ok(Ok(Some(ref r))) if r == "owner")
 }
 

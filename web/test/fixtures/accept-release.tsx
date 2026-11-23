@@ -1,9 +1,10 @@
+import { seedItems } from "./view-data"
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { Toaster } from "@/components/ui/toaster"
 import { api, type RProject } from "../../src/api"
 import { st, useStore, type Item, type Wait } from "../../src/store"
-import { DecisionCard } from "../../src/ui"
+import { DecisionCard } from "../../src/thread/decision-card"
 /* an acceptance card of an item in a project with a release (`?norelease`: a project without one; `?donewhen`: one done by its merge rule) */
 document.documentElement.classList.toggle("dark", matchMedia("(prefers-color-scheme: dark)").matches)
 const release = !location.search.includes("norelease"), doneWhen = location.search.includes("donewhen")
@@ -15,10 +16,10 @@ st.projects = [p]
 if (location.search.includes("lane-failed")) {
   w.type = "fail"; w.subject = "lane_unit"; w.options = ["retry", "drop"]; w.q = "MQ-5 已合并，但发布失败"
 }
-st.items = [i]
+seedItems([i])
 const calls: unknown[] = ((window as any).__calls = [])
 api.decide = async (id, choice, text) => { calls.push({ id, choice, text }); if (location.search.includes("lane-failed")) { const out = document.createElement("output"); out.textContent = JSON.stringify({ id, choice }); document.body.append(out) }; return { id, status: "resolved", result: text === "release" ? { choice, release: "started" } : { choice } } as any }
 /* what the item reads after the answer: releasing, or (`__done`) finished without a release */
 api.item = async () => ((window as any).__done ? { ...i, status: "done", now: "完成" } : { ...i, status: "wait", now: "正在发布" }) as any
-function App() { useStore(); return <main className="mx-auto max-w-[640px] px-4 py-6"><DecisionCard i={st.items[0] ?? i} /><Toaster /></main> }
+function App() { useStore(); return <main className="mx-auto max-w-[640px] px-4 py-6"><DecisionCard i={i} /><Toaster /></main> }
 createRoot(document.getElementById("root")!).render(<App />)

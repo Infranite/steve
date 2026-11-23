@@ -12,12 +12,11 @@
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-use rusqlite::{Connection, OptionalExtension, params};
 use steve_modules::contacts::{self, ContactCard};
 use steve_modules::context::{ChatCtx, ChatDone, Cite, PromptContext};
 use steve_modules::{ApiError, ApiResult};
 use steve_store::base::{Level, ObjRef, Viewer};
-use steve_store::{Item, Store};
+use steve_store::{Contacts, Item, ItemEvidence, Members, R, Read, SessionEvidence, Store};
 
 use crate::cite;
 use crate::retrieve::{
@@ -118,45 +117,24 @@ fn merge(first: Vec<Hit>, then: Vec<Hit>) -> Vec<Hit> {
 
 /// The member who requested the item, matching the Hub's principal contract. Missing or revoked
 /// requesters mean workspace service access, even in a one-person workspace; audit is not authority.
-pub fn item_user(c: &Connection, ws: &str, item_id: &str) -> ApiResult<Option<String>> {
-    Ok(c.query_row(
-        "SELECT i.requested_by FROM items i JOIN workspace_members w
-         ON w.workspace_id = i.workspace_id AND w.user_id = i.requested_by
-         WHERE i.workspace_id = ? AND i.id = ?",
-        params![ws, item_id],
-        |r| r.get(0),
-    )
-    .optional()?)
+pub fn item_user(
+    c: &mut impl Read,
+    ws: &str,
+    item_id: &str,
+) -> steve_store::Result<Option<String>> {
+    ItemEvidence(c).requester(ws, item_id)
 }
 
 /// The viewer an item's session (opening prompt, MCP tools) filters for.
-pub fn item_viewer(c: &Connection, ws: &str, item_id: &str) -> ApiResult<Viewer> {
-    Ok(match item_user(c, ws, item_id)? {
-        Some(u) => Viewer::load(c, ws, &u)?,
-        None => Viewer::bare(ws, ""),
-    })
-}
-
-fn latest_goal(c: &Connection, item_id: &str) -> ApiResult<String> {
-    Ok(c.prepare_cached(
-        "SELECT text FROM item_goals WHERE item_id = ? ORDER BY version DESC LIMIT 1",
-    )?
-    .query_row([item_id], |r| r.get(0))
-    .optional()?
-    .unwrap_or_default())
+pub fn item_viewer(c: &mut impl Read, ws: &str, item_id: &str) -> steve_store::Result<Viewer> {
+    let user = item_user(c, ws, item_id)?.unwrap_or_default();
+    Ok(Viewer::bare(ws, &user))
 }
 
 /// The session the opening prompt being built belongs to: steve-core creates the row just before.
-pub fn latest_session(c: &Connection, item_id: &str) -> ApiResult<Option<String>> {
-    Ok(c
-        .prepare_cached(
-            "SELECT id FROM sessions WHERE item_id = ? ORDER BY no DESC, created DESC, rowid DESC LIMIT 1",
-        )?
-        .query_row([item_id], |r| r.get(0))
-        .optional()?)
+pub fn latest_session(c: &mut impl Read, item_id: &str) -> ApiResult<Option<String>> {
+    Ok(SessionEvidence(c).latest(item_id)?)
 }
-
-// ---------------------------------------------------------------- sessions
 
 /// What an opening prompt gets: `text` (`""` = nothing at all) and the numbered hits in it, for
 /// `kb_uses(session)`.
@@ -175,15 +153,28 @@ pub struct SessionCtx {
 /// and preferences about the item, its project and those people, and `retrieve(title + latest goal,
 /// k=8, Agent)`; all as the item's user sees them. ≤[`SESSION_MAX`] characters.
 pub fn session_context(
-    c: &Connection,
+    store: &Store,
     kb: &Knowledge,
     item: &Item,
     now: i64,
 ) -> ApiResult<SessionCtx> {
     let ws = item.workspace_id.as_str();
-    let viewer = item_viewer(c, ws, &item.id)?;
-    let cards = contacts::item_contact_cards(c, &viewer, &item.id)?;
+    crate::read_api(store, |c| {
+        let viewer = item_viewer(c, ws, &item.id)?;
+        let cards = contacts::cards::item_prompt_cards(store, &viewer, &item.id)?;
+        session_snippets(c, kb, item, now, viewer, cards)
+    })
+}
 
+fn session_snippets(
+    c: &mut R<'_>,
+    kb: &Knowledge,
+    item: &Item,
+    now: i64,
+    viewer: Viewer,
+    cards: Vec<ContactCard>,
+) -> ApiResult<SessionCtx> {
+    let ws = item.workspace_id.as_str();
     let mut anchors = vec![ObjRef::new("item", &item.id)];
     if let Some(p) = item.project_id.as_deref().filter(|p| !p.is_empty()) {
         anchors.push(ObjRef::new("project", p));
@@ -191,7 +182,11 @@ pub fn session_context(
     anchors.extend(cards.iter().map(|k| ObjRef::new("party", &k.party_id)));
     let rules = anchor_mems(c, &viewer, &anchors, ANCHOR_MEMS, now)?;
 
-    let query = query_text(&format!("{} {}", item.title, latest_goal(c, &item.id)?));
+    let query = query_text(&format!(
+        "{} {}",
+        item.title,
+        ItemEvidence(c).latest_goal(&item.id)?.unwrap_or_default()
+    ));
     let mut q = Query::new(kb.store(), &viewer, &query, Purpose::Agent);
     q.anchors = &anchors;
     q.k = SESSION_K;
@@ -211,7 +206,8 @@ pub fn session_context(
     } else {
         format!("{CARDS_HEAD}\n{cards_text}")
     };
-    let address = contacts::profile::address(c, ws, &viewer.user, false, None, None)?
+    let address = Contacts::new(c)
+        .internal_address(ws, &viewer.user)?
         .map(|name| format!("对本人说话时称呼：{name}。对外介绍须使用对外称呼，不沿用这个昵称。"))
         .unwrap_or_default();
     let build = |hits: &[Hit]| {
@@ -267,7 +263,7 @@ pub fn cite_of(h: &Hit) -> Cite {
 /// “我”, then `retrieve(text, k=6, Chat)`; numbered `[1] [2]`. In a workspace with more than
 /// one member only workspace-visible knowledge is used. `None` = nothing found.
 pub fn chat_context(
-    c: &Connection,
+    c: &mut R<'_>,
     kb: &Knowledge,
     viewer: &Viewer,
     text: &str,
@@ -276,11 +272,11 @@ pub fn chat_context(
     let query = query_text(text);
     let mut rules = Vec::new();
     if !viewer.user.is_empty()
-        && let Some(me) = contacts::repo::me_of(c, &viewer.ws, &viewer.user)?
+        && let Some(me) = Contacts::new(c).user_party(&viewer.ws, &viewer.user)?
     {
-        rules = anchor_mems(c, viewer, &[ObjRef::new("party", &me.id)], ANCHOR_MEMS, now)?;
+        rules = anchor_mems(c, viewer, &[ObjRef::new("party", &me)], ANCHOR_MEMS, now)?;
         // anchor memories ignore the query, so the shared-thread rule is applied here too
-        if crate::repo::member_count(c, &viewer.ws)? > 1 {
+        if Members::new(c).count(&viewer.ws)? > 1 {
             rules.retain(|h| h.visibility == steve_store::base::Visibility::Workspace);
         }
     }
@@ -291,8 +287,8 @@ pub fn chat_context(
     let hits = merge(rules, found.hits);
     // This context is used by the shared workspace chat. Keep its existing workspace-only
     // rule for multi-member workspaces: a member's private nickname must not enter it.
-    let address = if crate::repo::member_count(c, &viewer.ws)? <= 1 {
-        contacts::profile::address(c, &viewer.ws, &viewer.user, false, None, None)?
+    let address = if Members::new(c).count(&viewer.ws)? <= 1 {
+        Contacts::new(c).internal_address(&viewer.ws, &viewer.user)?
     } else {
         None
     };
@@ -341,14 +337,14 @@ pub fn chat_finish(answer: &str, cx: &ChatCtx) -> ChatDone {
 /// [`render_snippets`] and record them in `reply_basis`.
 #[allow(clippy::too_many_arguments)]
 pub fn reply_hits(
-    c: &Connection,
+    c: &mut R<'_>,
     store: &dyn crate::port::KnowledgeStore,
     viewer: &Viewer,
     message: &str,
     recent: &[String],
     anchors: &[ObjRef],
     now: i64,
-) -> ApiResult<Retrieved> {
+) -> steve_store::Result<Retrieved> {
     let start = recent.len().saturating_sub(3);
     let mut text = message.to_string();
     for r in &recent[start..] {
@@ -360,7 +356,7 @@ pub fn reply_hits(
     q.anchors = anchors;
     q.k = REPLY_K;
     q.now = now;
-    Ok(retrieve_all(c, &q)?)
+    retrieve_all(c, &q)
 }
 
 // ---------------------------------------------------------------- the B1 provider
@@ -393,7 +389,7 @@ impl KnowledgeContext {
     fn record(&self, ws: &str, consumer: (&str, &str), query: &str, hits: &[Hit]) {
         if let Err(e) = self
             .store
-            .transaction(|tx| record_use(tx, ws, consumer, query, hits))
+            .write(|tx| record_use(tx, ws, consumer, query, hits))
         {
             tracing::warn!(consumer = consumer.0, id = consumer.1, "kb_uses: {e}");
         }
@@ -401,12 +397,12 @@ impl KnowledgeContext {
 }
 
 impl PromptContext for KnowledgeContext {
-    fn session(&self, c: &Connection, _ws: &str, item: &Item) -> Option<String> {
-        let cx = session_context(c, &self.kb, item, steve_store::now())
+    fn session(&self, store: &Store, _ws: &str, item: &Item) -> Option<String> {
+        let cx = session_context(store, &self.kb, item, steve_store::now())
             .map_err(|e: ApiError| tracing::warn!(item = %item.id, "session knowledge: {e}"))
             .ok()?;
         if !cx.hits.is_empty() {
-            match latest_session(c, &item.id) {
+            match crate::read_api(store, |c| latest_session(c, &item.id)) {
                 Ok(Some(sid)) => {
                     self.record(&item.workspace_id, ("session", &sid), &cx.query, &cx.hits)
                 }
@@ -417,10 +413,12 @@ impl PromptContext for KnowledgeContext {
         Some(cx.text).filter(|t| !t.is_empty())
     }
 
-    fn chat(&self, c: &Connection, _ws: &str, viewer: &Viewer, text: &str) -> Option<ChatCtx> {
-        let k = chat_context(c, &self.kb, viewer, text, steve_store::now())
-            .map_err(|e| tracing::warn!(ws = %viewer.ws, "chat knowledge: {e}"))
-            .ok()??;
+    fn chat(&self, store: &Store, _ws: &str, viewer: &Viewer, text: &str) -> Option<ChatCtx> {
+        let k = crate::read_api(store, |c| {
+            chat_context(c, &self.kb, viewer, text, steve_store::now())
+        })
+        .map_err(|e| tracing::warn!(ws = %viewer.ws, "chat knowledge: {e}"))
+        .ok()??;
         let mut p = self.pending();
         if p.len() >= PENDING {
             p.pop_front();
@@ -431,7 +429,7 @@ impl PromptContext for KnowledgeContext {
 
     fn chat_done(
         &self,
-        _c: &Connection,
+        _store: &Store,
         ws: &str,
         message_id: &str,
         answer: &str,

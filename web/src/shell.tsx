@@ -7,13 +7,13 @@
 import { useEffect, useState } from "react"
 import { cn } from "cn"
 import { api } from "@/api"
-import { usePeopleOn, useMyAvatar } from "@/api/people"
+import { useMyAvatar } from "@/api/people"
 import { nativeBridge } from "@/hub"
 import { nativeHubChrome } from "@/native-shell"
 import { HubSwitcher } from "@/hub-ui"
 import { useT } from "@/i18n"
 import { RunningNowPill } from "@/running-pill"
-import { LOADED_WEB_VERSION, pendingCards, st } from "@/store"
+import { LOADED_WEB_VERSION, decisionBadgeCount, st, useStoreSelector } from "@/store"
 import { Initials, useMe } from "@/mine"
 import { useMinute, useTodos } from "@/todos/data"
 import { dueCount } from "@/todos/model"
@@ -83,7 +83,7 @@ function ThemeCycle({ className }: { className?: string }) {
 /** The account at the bottom of the sidebar: who is signed in, and behind it (affectUI Profile Menu) the places that are
  *  theirs – 我, devices, accounts, settings – and signing out. Its row is marked while one of those places is open. */
 function Account({ route, meOn }: { route: string; meOn: boolean }) {
-  const t = useT(), me = useMe(), people = usePeopleOn(), pic = useMyAvatar(), { state, isMobile } = useSidebar()
+  const t = useT(), me = useMe(), pic = useMyAvatar(), { state, isMobile } = useSidebar()
   const [open, setOpen] = useState(false)
   const leave = (h: string) => { setOpen(false); go(h) }
   const name = me?.name || t("core:sidebar.account")
@@ -93,7 +93,7 @@ function Account({ route, meOn }: { route: string; meOn: boolean }) {
   const place = (id: string, h: string, label: string, I: any, current: boolean): ProfileMenuItem =>
     ({ id, label, icon: <I strokeWidth={1.75} />, current, onSelect: () => leave("#/" + h), data: { "data-nav": h } })
   const items: ProfileMenuItem[] = [
-    ...(people ? [place("me", "contacts/me", t("core:nav.me"), UserRoundIcon, meOn)] : []),
+    place("me", "contacts/me", t("core:nav.me"), UserRoundIcon, meOn),
     place("devices", "devices", t("core:nav.devices"), ServerIcon, route === "devices"),
     place("accounts", "accounts", t("core:nav.accounts"), KeyRoundIcon, route === "accounts" || route === "vault"),
     place("settings", "settings", t("core:nav.settings"), SettingsIcon, route === "settings"),
@@ -121,7 +121,12 @@ function Account({ route, meOn }: { route: string; meOn: boolean }) {
 export function Sidebar({ route: full }: { route: string }) {
   const t = useT()
   const route = full.split("?")[0] // #/knowledge?mem=… still highlights 知识
-  const n = pendingCards().length, now = useMinute(), todos = useTodos().todos, next = useNextMeetingAt(now)
+  useStoreSelector(() => st.workspace)
+  useStoreSelector(() => st.workspaces)
+  useStoreSelector(() => st.yolo)
+  useStoreSelector(() => st.version)
+  useStoreSelector(() => st.webVersion)
+  const n = useStoreSelector(decisionBadgeCount), now = useMinute(), todos = useTodos().todos, next = useNextMeetingAt(now)
   const meOn = route === "contacts" && location.hash.startsWith("#/contacts/me")
   /* what is in progress is the running-status pill's, under the header; the inbox keeps its count of open cards, in
    * the reminder color; 待办 a gray count of what is due today or overdue, which is never pushed */
@@ -194,9 +199,10 @@ export function Sidebar({ route: full }: { route: string }) {
 /** A newer Steve release the Hub found on its own: leads to Settings · 关于, where it is installed. */
 export function HubUpdateNotice() {
   const t = useT()
-  if (!st.update) return null
-  return <a href="#/settings/about" className="flex items-center gap-2 rounded-lg px-1.5 py-1 type-footnote text-primary hover:bg-sidebar-accent group-data-[collapsible=icon]:hidden" data-sidebar-hub-update={st.update.version}>
-    <span className="size-1.5 shrink-0 rounded-full bg-attention" aria-hidden />{t("core:sidebar.hubUpdate", { version: st.update.version })}
+  const update = useStoreSelector(() => st.update)
+  if (!update) return null
+  return <a href="#/settings/about" className="flex items-center gap-2 rounded-lg px-1.5 py-1 type-footnote text-primary hover:bg-sidebar-accent group-data-[collapsible=icon]:hidden" data-sidebar-hub-update={update.version}>
+    <span className="size-1.5 shrink-0 rounded-full bg-attention" aria-hidden />{t("core:sidebar.hubUpdate", { version: update.version })}
   </a>
 }
 /** a phone's tab bar: 对话, 待处理 with its count, 日历, 待办, 事项. 我的 (every other place) is the avatar at the top left
@@ -204,7 +210,7 @@ export function HubUpdateNotice() {
 export function MobileTabs({ route: full }: { route: string }) {
   const tr = useT()
   const route = full.split("?")[0]
-  const n = pendingCards().length
+  const n = useStoreSelector(decisionBadgeCount)
   const tabs = [{ h: "", l: tr("core:nav.chat"), I: MessageCircleIcon }, { h: "inbox", l: tr("core:nav.inbox"), I: InboxIcon, b: n }, { h: "calendar", l: tr("core:nav.calendar"), I: CalendarIcon }, { h: "todos", l: tr("core:nav.todos"), I: ListChecksIcon }, { h: "items", l: tr("core:nav.items"), I: ListTodoIcon }]
   return (
     <nav aria-label={tr("core:sidebar.tabs")} className="fixed inset-x-0 bottom-0 z-40 flex h-15 border-t border-sidebar-border bg-sidebar/95 pb-[env(safe-area-inset-bottom)] backdrop-blur-2xl backdrop-saturate-180 md:hidden" data-mobile-tabs>

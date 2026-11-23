@@ -3,7 +3,7 @@ import "../../src/index.css"
 import { api } from "../../src/api"
 import { modelSetupApi } from "../../src/steve-model"
 import { Onboarding } from "../../src/onboarding"
-import { st, useStore, meeting } from "../../src/store"
+import { st, useStore, meeting, setRuntimes } from "../../src/store"
 
 /* first-run tour: ?member for someone who is not the owner, ?bare for a machine without runtimes or projects */
 document.documentElement.classList.toggle("dark", matchMedia("(prefers-color-scheme: dark)").matches)
@@ -15,10 +15,11 @@ api.onboardSkip = async () => { calls.push("skip"); st.settings = { ...st.settin
 st.owner = !q.includes("member")
 st.workspace = { id: "w1", name: "个人", description: "", item_prefix: "ST", sort: 0, created: now }
 const rt = (id: string, name: string, ok: boolean, models: string[], extra = {}) => ({ id, name, ok, version: "", path: "", models, note: "通过 ACP 适配器运行", ...extra })
-st.runtimes = q.includes("bare") ? [] : [rt("claude-code", "Claude Code", true, ["opus", "sonnet", "haiku"]), rt("codex", "Codex", true, []), rt("gemini", "Gemini CLI", false, [], { error: "没有找到 gemini 命令", install_hint: "@google/gemini-cli" })]
+const runtimes = q.includes("bare") ? [] : [rt("claude-code", "Claude Code", true, ["opus", "sonnet", "haiku"]), rt("codex", "Codex", true, []), rt("gemini", "Gemini CLI", false, [], { error: "没有找到 gemini 命令", install_hint: "@google/gemini-cli" })]
+setRuntimes(runtimes)
 let view = {
   steve: { harness: "claude-code", model: null as string | null, models: [] as string[] }, bot_revision: 1,
-  harnesses: st.runtimes.map((r) => ({ id: r.id, name: r.name, ready: r.ok, judgments: true })),
+  harnesses: runtimes.map((r) => ({ id: r.id, name: r.name, ready: r.ok, judgments: true })),
   purposes: [{ key: "route", label: "分流", follows: false, effective: { harness: "claude-code", models: ["haiku"] } }],
 }
 modelSetupApi.get = async () => structuredClone(view)

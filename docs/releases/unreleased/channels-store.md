@@ -1,0 +1,1 @@
+Channel messages, account and space settings, and output approvals use the Hub storage contract. A background event's receipt and its effects on stored state commit together, so a retry cannot apply them twice.

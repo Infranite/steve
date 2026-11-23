@@ -223,17 +223,14 @@ async fn hub_texts_follow_accept_language() {
         (400, "No such harness: nope".into())
     );
 
-    // `/api/state` is cached per language: the runtimes' notes (cached as codes) come out in each
+    // The runtime catalogue keeps codes in cache and presents notes in the request language.
     let state = |lang: &'static str| {
         let r = e
-            .req(Method::GET, "/api/state")
+            .req(Method::GET, "/api/runtimes")
             .header("accept-language", lang);
         async move {
             let v: Value = r.send().await.expect("state").json().await.expect("json");
-            v["runtimes"][0]["note"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string()
+            v[0]["note"].as_str().unwrap_or_default().to_string()
         }
     };
     // no local Node answers in this Hub, so every runtime is "not reported yet", in each language
@@ -279,7 +276,7 @@ async fn seeded_defaults_follow_the_language_until_edited() {
             .unwrap()
     };
     let welcome = |s: &Value| {
-        s["thread"]
+        s["views"]
             .as_array()
             .unwrap()
             .iter()
@@ -296,15 +293,19 @@ async fn seeded_defaults_follow_the_language_until_edited() {
     )
     .await;
 
-    let zh = get("/api/state", "zh-CN").await;
+    let zh = get("/api/shell", "zh-CN").await;
     assert_eq!(zh["workspace"]["name"], "个人");
     assert_eq!(zh["workspaces"][0]["name"], "个人");
     assert_eq!(steve(&zh)["role"], "你的助手：理解需求、分派、汇报");
     assert_eq!(steve(&zh)["persona"], "沉稳、简洁，先说结论；不客套");
     let rules_zh = steve(&zh)["rules"].clone();
-    assert!(welcome(&zh).unwrap().starts_with("你好，我是 Steve。"));
+    assert!(
+        welcome(&get("/api/views/page?kind=message", "zh-CN").await)
+            .unwrap()
+            .starts_with("你好，我是 Steve。")
+    );
 
-    let en = get("/api/state", "en").await;
+    let en = get("/api/shell", "en").await;
     assert_eq!(en["workspace"]["name"], "Personal");
     assert_eq!(en["workspaces"][0]["name"], "Personal");
     assert_eq!(steve(&en)["name"], "Steve");
@@ -317,7 +318,10 @@ async fn seeded_defaults_follow_the_language_until_edited() {
         "Calm and concise; conclusion first; no pleasantries"
     );
     assert!(steve(&en)["rules"].as_str().unwrap().is_ascii());
-    assert!(welcome(&en).unwrap().starts_with("Hi, I'm Steve."));
+    assert_eq!(
+        welcome(&get("/api/views/page?kind=message", "en").await),
+        welcome(&get("/api/views/page?kind=message", "zh-CN").await)
+    );
     let me = get("/api/me", "en").await;
     assert_eq!(me["workspaces"][0]["name"], "Personal");
 
@@ -357,7 +361,7 @@ async fn seeded_defaults_follow_the_language_until_edited() {
         json!({"intro": intro, "soul": personas[0]["soul"]}),
     )
     .await;
-    let zh = get("/api/state", "zh-CN").await;
+    let zh = get("/api/shell", "zh-CN").await;
     assert_eq!(zh["workspace"]["name"], "个人");
     assert_eq!(steve(&zh)["role"], "你的助手：理解需求、分派、汇报");
     assert_eq!(steve(&zh)["rules"], rules_zh);
@@ -388,7 +392,7 @@ async fn seeded_defaults_follow_the_language_until_edited() {
     )
     .await;
     for lang in ["zh-CN", "en"] {
-        let s = get("/api/state", lang).await;
+        let s = get("/api/shell", lang).await;
         assert_eq!(s["workspace"]["name"], "家里", "{lang}");
         assert_eq!(steve(&s)["role"], "我的管家", "{lang}");
         assert_eq!(steve(&s)["persona"], "Cheerful", "{lang}");

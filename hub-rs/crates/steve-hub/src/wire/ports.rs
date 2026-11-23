@@ -244,13 +244,13 @@ pub struct BotHeirs;
 impl steve_modules::BotDeleted for BotHeirs {
     fn on_bot_deleted(
         &self,
-        tx: &steve_store::Tx,
+        tx: &mut steve_store::W<'_>,
         ws: &str,
         bot: &str,
         heir: &str,
         now: i64,
     ) -> steve_modules::ApiResult<()> {
-        steve_channels::personas::on_bot_deleted(tx, ws, bot, heir, now)?;
+        steve_store::channel_personas::reassign_bot(tx, ws, bot, heir, now)?;
         steve_flow::on_bot_deleted(tx, ws, bot, heir, now)?;
         Ok(())
     }

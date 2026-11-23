@@ -68,8 +68,6 @@ impl From<MailError> for AdapterError {
 pub enum MailError {
     #[error(transparent)]
     Store(#[from] StoreError),
-    #[error("sqlite: {0}")]
-    Sql(#[from] rusqlite::Error),
     #[error(transparent)]
     Api(#[from] ApiError),
     #[error("io: {0}")]

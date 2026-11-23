@@ -5,6 +5,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
+use steve_store::testkit::knowledge as fixture;
 
 use axum::Router;
 use serde_json::{Value, json};
@@ -38,15 +39,7 @@ fn setup() -> Env {
     )
     .unwrap();
     assert!(kb.set_folder_policy(FolderPolicy::new(&home, home.join(".steve"))));
-    env.store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "INSERT INTO parties (id, workspace_id, type, name, aliases, created_by, created, updated) VALUES
-                   ('org_acme', 'default', 'org', 'Acme', '[\"艾克米\"]', 'usr_dev', 1, 1);",
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::seed_draft_org(env.store()).unwrap();
     let app = steve_knowledge::routes(kb.clone()).with_state(env.modules.clone());
     Env {
         env,
@@ -86,7 +79,7 @@ impl Env {
     fn ops(&self, id: &str) -> Vec<Value> {
         self.env
             .store()
-            .reader(|c| changesets::get(c, id))
+            .read(|r| changesets::ChangeSets(r).get(id))
             .unwrap()
             .unwrap()
             .ops
@@ -105,14 +98,6 @@ impl Env {
         let (s, v) = call(&self.app, Some(&caller(WS, who)), "GET", path, None).await;
         assert_eq!(s, 200, "{path}: {v}");
         v
-    }
-    fn count(&self, sql: &str) -> i64 {
-        self.env
-            .store()
-            .reader(|c| {
-                Ok::<_, steve_store::StoreError>(c.query_row(sql, [], |r| r.get::<_, i64>(0))?)
-            })
-            .unwrap()
     }
     async fn source(&self, kind: &str) -> Value {
         let list = self.get(ME, "/kb/sources").await;
@@ -159,7 +144,7 @@ async fn remember_for_reasoning_only() {
         })]
     );
     assert_eq!(
-        e.count("SELECT COUNT(*) FROM mems"),
+        fixture::memory_count(e.env.store()).unwrap(),
         0,
         "nothing before apply"
     );
@@ -193,11 +178,8 @@ async fn remember_for_reasoning_only() {
     assert_eq!(other["hits"].as_array().unwrap().len(), 1);
 
     e.undo(ME, &p.id);
-    assert_eq!(e.count("SELECT COUNT(*) FROM mems"), 0);
-    assert_eq!(
-        e.count("SELECT COUNT(*) FROM kb_chunks WHERE obj_type = 'mem'"),
-        0
-    );
+    assert_eq!(fixture::memory_count(e.env.store()).unwrap(), 0);
+    assert_eq!(fixture::indexed_memory_count(e.env.store()).unwrap(), 0);
 }
 
 #[tokio::test]
@@ -239,12 +221,8 @@ async fn about_names_resolve_only_exactly() {
 
 async fn wait_docs(e: &Env, source: &str, n: i64) {
     for _ in 0..250 {
-        let docs = e.count(&format!(
-            "SELECT COUNT(*) FROM kb_docs WHERE source_id = '{source}' AND status = 'active' AND indexed IS NOT NULL"
-        ));
-        let syncing = e.count(&format!(
-            "SELECT COUNT(*) FROM kb_sources WHERE id = '{source}' AND status = 'syncing'"
-        ));
+        let docs = fixture::indexed_docs(e.env.store(), source).unwrap();
+        let syncing = fixture::syncing_sources(e.env.store(), source).unwrap();
         if docs == n && syncing == 0 {
             return;
         }
@@ -328,16 +306,8 @@ async fn add_wiki_folder_private() {
 
     e.undo(ME, &p.id);
     assert_eq!(e.source("folder").await, Value::Null);
-    assert_eq!(
-        e.count(&format!(
-            "SELECT COUNT(*) FROM kb_docs WHERE source_id = '{sid}'"
-        )),
-        0
-    );
-    assert_eq!(
-        e.count("SELECT COUNT(*) FROM kb_chunks WHERE source_kind = 'folder'"),
-        0
-    );
+    assert_eq!(fixture::document_count(e.env.store(), &sid).unwrap(), 0);
+    assert_eq!(fixture::folder_chunks(e.env.store()).unwrap(), 0);
     scans.abort();
 }
 
@@ -391,10 +361,7 @@ async fn refused_paths_give_one_line_and_no_change() {
         assert!(e.ops(&p.id).is_empty(), "{path}");
         // applying it changes nothing
         assert_eq!(e.apply(ME, &p.id).unwrap()["ok"], true);
-        assert_eq!(
-            e.count("SELECT COUNT(*) FROM kb_sources WHERE kind = 'folder'"),
-            0
-        );
+        assert_eq!(fixture::folder_sources(e.env.store()).unwrap(), 0);
     }
     // no path at all
     let p = e
@@ -547,12 +514,7 @@ async fn note_create_and_doc_patch() {
     assert_eq!(d["level"], "never");
     let hits = e.get(ME, "/kb/search?q=e2e").await;
     assert_eq!(hits["hits"], json!([]), "never is not retrieved");
-    assert_eq!(
-        e.count(&format!(
-            "SELECT COUNT(*) FROM kb_chunks WHERE obj_id = '{doc}' AND level = 'never'"
-        )),
-        1
-    );
+    assert_eq!(fixture::never_chunks(e.env.store(), &doc).unwrap(), 1);
     e.undo(ME, &p.id);
     let d = e.get(ME, &format!("/kb/docs/{doc}")).await;
     assert_eq!(

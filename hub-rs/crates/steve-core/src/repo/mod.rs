@@ -2,8 +2,8 @@
 //! orchestrator uses (one method per repo.ts call).
 
 use crate::error::Result;
-use rusqlite::OptionalExtension;
 use serde_json::{Map, Value};
+use steve_store::Ingest;
 
 pub use steve_store::{
     Bot, BusEvent, Decision, Event, FileRef, FileRow, Goal, Item, Memory, Message, NewDecision,
@@ -76,17 +76,6 @@ impl Db {
 
     pub fn publish(&self, e: BusEvent) {
         self.s.publish(e)
-    }
-
-    /// Runs `f` inside one re-entrant SQLite transaction on the underlying store; all repository
-    /// writes and their `BusEvent`s commit or roll back together.
-    pub fn atomic<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
-        self.s.atomic(f)
-    }
-
-    /// Raw SQL on the write connection (tests).
-    pub fn exec(&self, sql: &str, p: &[&dyn rusqlite::ToSql]) -> Result<usize> {
-        Ok(self.s.with_conn(|c| Ok(c.execute(sql, p)?))?)
     }
 
     pub fn audit(
@@ -216,9 +205,6 @@ impl Db {
         self.s.bots().patch(id, &decode(p.clone())?, author)?;
         Ok(())
     }
-    pub fn bot_remove(&self, id: &str) -> Result<()> {
-        Ok(self.s.bots().remove(id)?)
-    }
     pub fn memories(&self, bot: &str, ws: &str) -> Result<Vec<Memory>> {
         Ok(self.s.memories().list(bot, ws)?)
     }
@@ -258,13 +244,7 @@ impl Db {
     }
     /// How many items and other objects (contacts, teams, spaces…) carry the tag.
     pub fn tag_used(&self, id: &str) -> Result<i64> {
-        Ok(self.s.reader::<_, steve_store::StoreError>(|c| {
-            Ok(c.query_row(
-                "SELECT (SELECT count(*) FROM item_tags WHERE tag_id = ?1) + (SELECT count(*) FROM entity_tags WHERE tag_id = ?1)",
-                [id],
-                |r| r.get(0),
-            )?)
-        })?)
+        Ok(self.s.read(|r| steve_store::tag_repo::use_count(r, id))?)
     }
     pub fn tag_remove(&self, id: &str) -> Result<()> {
         Ok(self.s.tags().remove(id)?)
@@ -295,14 +275,9 @@ impl Db {
     }
     /// Ids of the task items of `ws` at work (`run`, active, not archived), most recently updated first.
     pub fn items_running(&self, ws: &str) -> Result<Vec<String>> {
-        Ok(self.s.reader::<_, steve_store::StoreError>(|c| {
-            let mut st = c.prepare(
-                "SELECT id FROM items WHERE workspace_id = ? AND kind = 'task' AND status = 'run' AND archived = 0
-                   AND phase = 'active' ORDER BY updated DESC",
-            )?;
-            let v = st.query_map([ws], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
-            Ok(v)
-        })?)
+        Ok(self
+            .s
+            .read(|r| steve_store::item_repo::running_tasks(r, ws))?)
     }
     pub fn item_create(&self, ws: &str, p: &NewItem) -> Result<Item> {
         self.s
@@ -423,7 +398,10 @@ impl Db {
         Ok(self.s.sessions().rotate_token(id, token)?)
     }
     pub fn event_add(&self, session: &str, kind: &str, data: Value) -> Result<i64> {
-        Ok(self.s.events().add(session, kind, data)?)
+        Ok(self.s.write(|w| {
+            w.events()
+                .add_local(session, kind, data, steve_store::now())
+        })?)
     }
     pub fn events_after(&self, session: &str, after: i64) -> Result<Vec<Event>> {
         Ok(self.s.events().after(session, after, 5000)?)
@@ -537,38 +515,18 @@ impl Db {
     }
     /// `ts` of the session's newest event.
     pub fn last_event_ts(&self, session: &str) -> Result<Option<i64>> {
-        Ok(self.s.reader::<_, steve_store::StoreError>(|c| {
-            Ok(c.query_row(
-                "SELECT ts FROM events WHERE session_id = ? ORDER BY seq DESC LIMIT 1",
-                [session],
-                |r| r.get(0),
-            )
-            .optional()?)
-        })?)
+        Ok(self.s.read(|r| r.events().latest_timestamp(session))?)
     }
     /// Any event of the session at or after `ts`.
     pub fn has_events_since(&self, session: &str, ts: i64) -> Result<bool> {
-        Ok(self.s.reader::<_, steve_store::StoreError>(|c| {
-            Ok(c.query_row(
-                "SELECT 1 FROM events WHERE session_id = ? AND ts >= ? LIMIT 1",
-                rusqlite::params![session, ts],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some())
-        })?)
+        Ok(self.s.read(|r| r.events().has_since(session, ts))?)
     }
     /// A message was sent to the session (a turn of its own began) after its event `seq`.
     pub fn sent_after(&self, session: &str, seq: i64) -> Result<bool> {
-        Ok(self.s.reader::<_, steve_store::StoreError>(|c| {
-            Ok(c.query_row(
-                "SELECT 1 FROM events WHERE session_id = ? AND kind = 'user' AND seq > ? LIMIT 1",
-                rusqlite::params![session, seq],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some())
-        })?)
+        Ok(self
+            .s
+            .read(|r| r.events().latest_input_seq(session))?
+            .is_some_and(|latest| latest > seq))
     }
     pub fn queued(&self, session: &str) -> Result<Vec<Queued>> {
         Ok(self.s.queued().list(session)?)
@@ -612,13 +570,9 @@ impl Db {
     }
     /// Sessions that are not ended and have queued rows.
     pub fn sessions_with_queue(&self) -> Result<Vec<String>> {
-        Ok(self.s.reader::<_, steve_store::StoreError>(|c| {
-            let mut st = c.prepare(
-                "SELECT DISTINCT q.session_id id FROM queued q JOIN sessions s ON s.id = q.session_id WHERE s.status != 'ended'",
-            )?;
-            let v = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
-            Ok(v)
-        })?)
+        Ok(self
+            .s
+            .read(|r| steve_store::session_repo::with_queued_input(r))?)
     }
 
     /* ── decisions ── */

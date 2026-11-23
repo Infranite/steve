@@ -1,3 +1,4 @@
+import { memo } from "react"
 import { lazy, Suspense } from "react"
 import { cn } from "cn"
 
@@ -6,10 +7,10 @@ const Impl = lazy(() => import("@/components/markdown-impl"))
 
 /** Markdown for messages, drafts and item text: GFM, Shiki code, Mermaid, sandboxed HTML preview */
 /** `resolve`: how a relative image or link of this document is found (a package's own files); null drops it */
-export function Markdown({ text, className, streaming, resolve, replyFiles }: { text: string; className?: string; streaming?: boolean; replyFiles?: boolean; resolve?: (ref: string) => string | null }) {
+export const Markdown = memo(function Markdown({ text, className, streaming, resolve, replyFiles }: { text: string; className?: string; streaming?: boolean; replyFiles?: boolean; resolve?: (ref: string) => string | null }) {
   return (
     <Suspense fallback={<div className={cn("whitespace-pre-wrap", className)}>{text}</div>}>
       <Impl text={text} className={className} streaming={streaming} resolve={resolve} replyFiles={replyFiles} />
     </Suspense>
   )
-}
+})

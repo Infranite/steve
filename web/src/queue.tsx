@@ -1,3 +1,7 @@
+import { useSyncExternalStore } from "react"
+import { useChatLive } from "@/data/live"
+import { onViews } from "@/data/sync"
+import { getItems } from "@/store"
 /* The queue in a composer's card (affectUI Run Controls' queue): every message waiting for the session's next turn is its own row,
  * with 编辑 (inline), 撤回 (back into the composer when it is empty, else an undo toast) and 立即发送 (interrupts the
  * running turn; the queue, this message first, is the next turn). Attachments stay with the message.
@@ -6,20 +10,20 @@
  * The main conversation has the same strip (ChatQueue): what you say while Steve is on a turn waits for it.
  * On an item page the queue is shown on the comments instead (QueuedComment); the strip keeps only what pairs with none. */
 import { useState, type ReactNode } from "react"
-import { ClockIcon, RocketIcon } from "lucide-react"
+import { ClockIcon } from "lucide-react"
 import { IconEdit, IconSteer, IconUndo, RunAct, RunQueue, RunQueued } from "@/components/affect/run-controls-clean"
 import { Spinner } from "@/components/ui/spinner"
 import { Textarea } from "@/components/ui/textarea"
 import { Files } from "@/attach"
 import { Markdown } from "@/components/markdown"
 import type { RQueued } from "@/api"
-import { chatBusy, qEdit, qSendNow, qWithdraw, st, threadQueuedEdit, threadQueuedWithdraw, type Sess } from "@/store"
-import { Brief, type ComposerHandle } from "@/ui"
-import { Trans } from "react-i18next"
+import { chatQueue, qEdit, qSendNow, qWithdraw, st, threadQueuedEdit, threadQueuedWithdraw, type Sess } from "@/store"
+import { Brief } from "@/thread/brief"
+import type { ComposerHandle } from "@/composer"
 import { t, useT } from "@/i18n"
 
 /** A startup failure holds queued input until the user explicitly retries its card. */
-const startupBlocked = (sid: string) => st.items.some(i => i.waits.some(w => w.subject === "session_start" && w.session === sid))
+const startupBlocked = (sid: string) => getItems().some(i => i.waits.some(w => w.subject === "session_start" && w.session === sid))
 
 /** when the queue goes, in the strip's header */
 export function queueNote(s: Sess | null) {
@@ -55,9 +59,11 @@ export function QueueStrip({ sid, rows, note, composer, prefix = "", starting, n
 
 /** the main conversation's queue: messages said while Steve was on a turn, sent one by one once it ends */
 export function ChatQueue({ composer }: { composer?: { current: ComposerHandle | null } }) {
-  const rows = st.queue, t = useT()
+  const held = useSyncExternalStore(onViews, chatQueue)
+  const sending = useChatLive((s) => s.sending), working = useChatLive((s) => s.thinking || !!s.live)
+  const rows = [...held, ...sending.filter((m) => m.held)], t = useT()
   if (!rows.length) return null
-  const note = st.hold ? t("shell:queue.afterRelease") : chatBusy() && (st.thinking || st.live) ? t("shell:queue.afterTurnInOrder") : t("shell:queue.now")
+  const note = st.hold ? t("shell:queue.afterRelease") : working ? t("shell:queue.afterTurnInOrder") : t("shell:queue.now")
   return (
     <RunQueue label={t("shell:queue.region")} data-sq data-chat-queue note={t("shell:queue.queuedN", { count: rows.length, note })}>
       {rows.map((m, n) => <Row key={m.id ?? m.clientId} q={{ id: m.id ?? "", text: m.t ?? "", files: m.files, via: "me" }} shown={m.t ?? ""} place={n} ops={m.id ? {
@@ -167,17 +173,4 @@ export function QueuedComment({ sid, q, prefix = "", composer, note, starting, a
       <span className="ui-rclc -ml-1.5 inline-flex items-center gap-0.5 sm:ml-0"><Actions e={e} shown={shown} ops={ops} via={q.via} /></span>
     </div>
   </div>
-}
-
-/** while the Hub holds new turns for a release: what it waits for, and that new messages go after it */
-export function HoldBanner() {
-  const h = st.hold, t = useT()
-  if (!h) return null
-  const wait = h.running > 0 ? t("shell:queue.waitTurns", { count: h.running }) : t("shell:queue.restartNow")
-  return (
-    <div role="status" className="flex shrink-0 items-center gap-2 border-b bg-blue/8 px-4 py-2 type-footnote text-foreground/80 sm:px-6" data-hold>
-      <RocketIcon className="size-3.5 shrink-0 text-blue" aria-hidden />
-      <span className="min-w-0"><Trans t={t} i18nKey="shell:queue.hold" values={{ item: h.item, wait }} components={{ link: <a href={"#/items/" + h.item} className="font-mono tabular-nums underline-offset-2 hover:underline" /> }} /></span>
-    </div>
-  )
 }

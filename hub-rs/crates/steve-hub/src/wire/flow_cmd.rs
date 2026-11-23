@@ -10,7 +10,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use rusqlite::OptionalExtension;
 use steve_flow::nodes::cmd::{CmdNode, CmdRan, CmdRequest};
 use steve_node_api::*;
 use steve_store::{Store, StoreError};
@@ -78,15 +77,7 @@ pub(super) fn command<B>(op: &str, body: B, within: Duration) -> Result<Command<
 
 /// An unarchived project of the flow's workspace (on any device).
 fn project_in(store: &Store, ws: &str, id: &str) -> Result<bool, StoreError> {
-    store.reader(|c| {
-        Ok(c.query_row(
-            "SELECT 1 FROM projects WHERE id=? AND workspace_id=? AND archived=0",
-            [id, ws],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some())
-    })
+    store.read(|r| Ok(steve_store::projects::project(r, ws, id)?.is_some_and(|p| !p.archived)))
 }
 
 impl FlowCmd {
@@ -319,15 +310,6 @@ mod tests {
         cmd: Arc<FlowCmd>,
     }
 
-    fn exec(store: &Store, sql: &str) {
-        store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute_batch(sql)?;
-                Ok(())
-            })
-            .unwrap();
-    }
-
     /// A Hub with its local Node on (commands allowed) and its coordinator running.
     fn hub() -> T {
         let tmp = tempfile::tempdir().unwrap();
@@ -389,12 +371,8 @@ mod tests {
     }
 
     fn project(t: &T, id: &str, device: &str, path: &str) {
-        exec(
-            &t.store,
-            &format!(
-                "INSERT INTO projects(id,workspace_id,name,path,kind,device_id,created,updated) VALUES ('{id}','default','{id}','{path}','dir','{device}',1,1)"
-            ),
-        );
+        steve_store::testkit::hub::workspace_cases::seed_project(&t.store, id, device, path)
+            .unwrap();
     }
 
     fn req(project: &str, run: &str, command: &str) -> CmdRequest {
@@ -455,7 +433,7 @@ mod tests {
         project(&t, "p1", "hub", p.to_str().unwrap());
         project(&t, "p2", "n_far", "work/repo");
         project(&t, "p3", "hub", p.to_str().unwrap());
-        exec(&t.store, "UPDATE projects SET archived=1 WHERE id='p3'");
+        steve_store::testkit::hub::mutations::update_projects_id_p3(&t.store).unwrap();
         assert_eq!(t.cmd.run(req("p2", "r1", "true")).await, CmdRan::Offline);
         assert_eq!(t.cmd.run(req("p3", "r1", "true")).await, CmdRan::NoProject);
         assert_eq!(
@@ -494,16 +472,20 @@ mod tests {
             stderr: String::new(),
         };
         assert_eq!(t.cmd.run(req("p1", "r1", "pwd")).await, pwd(&a));
-        exec(
+        steve_store::testkit::hub::workspace_cases::set_project_path(
             &t.store,
-            &format!("UPDATE projects SET path='{}' WHERE id='p1'", b.display()),
-        );
+            "p1",
+            b.to_str().unwrap(),
+        )
+        .unwrap();
         assert_eq!(t.cmd.run(req("p1", "r2", "pwd")).await, pwd(&b));
         // and back again: the first directory's workspace is the one there is
-        exec(
+        steve_store::testkit::hub::workspace_cases::set_project_path(
             &t.store,
-            &format!("UPDATE projects SET path='{}' WHERE id='p1'", a.display()),
-        );
+            "p1",
+            a.to_str().unwrap(),
+        )
+        .unwrap();
         assert_eq!(t.cmd.run(req("p1", "r3", "pwd")).await, pwd(&a));
     }
 

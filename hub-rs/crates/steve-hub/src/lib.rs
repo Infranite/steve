@@ -39,6 +39,7 @@ pub mod notify;
 pub mod plugins;
 pub mod presence;
 pub mod price_sync;
+pub mod projection;
 pub mod recovery;
 pub mod resume;
 pub mod settings;

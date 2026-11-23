@@ -18,8 +18,8 @@
 
 use std::sync::Arc;
 
-use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
+use steve_store::Read;
 
 use super::principal::{self, Principal};
 
@@ -60,16 +60,8 @@ impl Preflight {
 
     /// `can_run(principal, bot, harness)` in `c`'s view. A Bot that is not there is not refused
     /// here (the callers' own checks say that).
-    pub fn can_run(&self, c: &Connection, p: &Principal, bot: &str) -> Result<(), Blocked> {
-        let harness: Option<String> = c
-            .query_row(
-                "SELECT harness FROM bots WHERE id=? AND deleted=0",
-                [bot],
-                |r| r.get(0),
-            )
-            .optional()
-            .ok()
-            .flatten();
+    pub fn can_run(&self, c: &mut impl Read, p: &Principal, bot: &str) -> Result<(), Blocked> {
+        let harness = steve_store::BotRows(c).harness(bot).ok().flatten();
         let Some(harness) = harness else {
             return Ok(());
         };
@@ -80,7 +72,7 @@ impl Preflight {
     /// principal's session on a Node uses the harness's sign-in there.
     pub fn can_run_harness(
         &self,
-        _c: &Connection,
+        _c: &mut impl Read,
         _p: &Principal,
         bot: &str,
         harness: &str,
@@ -97,10 +89,24 @@ impl Preflight {
         Ok(())
     }
 
+    /// [`Self::can_run_harness`] for `bot` given `item`: its principal is the item's.
+    pub fn can_run_item(
+        &self,
+        c: &mut impl Read,
+        item: &str,
+        bot: &str,
+        harness: &str,
+    ) -> Result<(), Blocked> {
+        match principal::of_item(c, item) {
+            Ok(Some((_, p))) => self.can_run_harness(c, &p, bot, harness),
+            _ => Ok(()),
+        }
+    }
+
     /// For a schedule: its principal is the named requester while a member, else the service one.
     pub fn can_run_schedule(
         &self,
-        c: &Connection,
+        c: &mut impl Read,
         ws: &str,
         requester: Option<&str>,
         bot: &str,

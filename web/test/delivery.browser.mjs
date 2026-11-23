@@ -140,7 +140,7 @@ try {
 
   // Exercise a real workspace switch endpoint in this fixture rather than faking a cookie name.
   assert.equal((await owner.request.post(base + "/api/workspaces/other/switch", { headers: { "x-steve-ws": "fixture" }, data: {} })).status(), 200)
-  assert.equal((await (await owner.request.get(base + "/api/state")).json()).workspace.id, "other")
+  assert.equal((await (await owner.request.get(base + "/api/shell")).json()).workspace.id, "other")
   const switchedAt = fixture.requests.length
   await page.goto(base + "/deliveries/html")
   await frame.getByRole("heading", { name: "Design entry" }).waitFor()
@@ -148,7 +148,7 @@ try {
   const firstMeta = afterSwitch.find((r) => r.path === "/api/file-deliveries/html")
   assert.equal(firstMeta.ws, undefined, "ownership discovery must precede state binding")
   assert.equal(firstMeta.query, "")
-  assert.ok(afterSwitch.some((r) => r.path === "/api/state" && r.ws === "fixture"))
+  assert.ok(afterSwitch.some((r) => r.path === "/api/shell" && r.ws === "fixture"))
   await frame.getByRole("link", { name: "Open details" }).click()
   await frame.getByRole("heading", { name: "Design details" }).waitFor()
   assert.equal(await frame.locator("img").evaluate((el) => el.naturalWidth), 1)

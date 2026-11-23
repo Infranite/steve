@@ -5,12 +5,10 @@
 //! Visibility is the connections module's: a connection of someone's “我” (your own Feishu account)
 //! is theirs alone (`404 没有这个连接` for everybody else); the bot's are the workspace's.
 
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_modules::{ApiError, Check};
-use steve_store::Tx;
-use steve_store::base::{self, Viewer};
+use steve_store::base::Viewer;
 
 use crate::adapters::feishu;
 use crate::bindings::{self, PersonaRef};
@@ -52,6 +50,14 @@ pub fn decl_summary(d: &ChannelDecl) -> Value {
         "created_precision_ms": d.created_precision_ms,
         "start": d.start,
     })
+}
+
+pub(crate) fn can_manage(
+    r: &mut impl steve_store::Read,
+    viewer: &Viewer,
+    conn: &str,
+) -> ChannelResult<()> {
+    own_conn(r, viewer, conn).map(|_| ())
 }
 
 /// The `ChannelAccount` shape, plus the connection's permission check (`verify`):
@@ -188,57 +194,55 @@ struct ConnFacts {
     name: String,
 }
 
-/// The connection `conn` of the viewer's workspace if the viewer may see it (`404 没有这个连接`).
-pub(crate) fn can_manage(c: &Connection, viewer: &Viewer, conn: &str) -> ChannelResult<()> {
-    own_conn(c, viewer, conn).map(|_| ())
-}
-
-fn own_conn(c: &Connection, viewer: &Viewer, conn: &str) -> ChannelResult<ConnFacts> {
-    let row = c
-        .query_row(
-            "SELECT c.account_id, c.adapter, c.status, c.caps, c.config,
-                    CASE WHEN a.display_name <> '' THEN a.display_name ELSE a.handle_display END, p.user_id
-               FROM connections c JOIN accounts a ON a.id = c.account_id LEFT JOIN parties p ON p.id = a.party_id
-              WHERE c.id = ? AND c.workspace_id = ?",
-            params![conn, viewer.ws],
-            |r| {
-                Ok((
-                    ConnFacts {
-                        account_id: r.get(0)?,
-                        adapter: r.get(1)?,
-                        status: r.get(2)?,
-                        caps: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or_default(),
-                        config: serde_json::from_str(&r.get::<_, String>(4)?)
-                            .unwrap_or(Value::Null),
-                        name: r.get(5)?,
-                    },
-                    r.get::<_, Option<String>>(6)?,
-                ))
-            },
-        )
-        .optional()?;
-    match row {
-        Some((f, owner)) if owner.as_ref().is_none_or(|u| u == &viewer.user) => Ok(f),
-        _ => Err(ApiError::not_found("连接")),
+fn own_conn(
+    r: &mut impl steve_store::Read,
+    viewer: &Viewer,
+    conn: &str,
+) -> ChannelResult<ConnFacts> {
+    use steve_store::{Accounts, Connections, parties};
+    let row = Connections(r)
+        .get(conn)?
+        .filter(|row| row.workspace_id == viewer.ws)
+        .ok_or_else(|| ApiError::not_found("连接"))?;
+    let account = Accounts(r)
+        .get(&row.account_id)?
+        .ok_or_else(|| ApiError::not_found("连接"))?;
+    if parties::user_id(r, &account.party_id)?.is_some_and(|user| user != viewer.user) {
+        return Err(ApiError::not_found("连接"));
     }
+    Ok(ConnFacts {
+        account_id: row.account_id,
+        adapter: row.adapter,
+        status: row.status,
+        caps: row.caps,
+        config: row.config,
+        name: if account.display_name.is_empty() {
+            account.handle_display
+        } else {
+            account.display_name
+        },
+    })
 }
 
 /// The `ChannelAccount` of `conn` (no settings row yet: the mode's defaults, nothing written).
 pub fn out(
     ch: &Channels,
-    c: &Connection,
+    r: &mut impl steve_store::Read,
     viewer: &Viewer,
     conn: &str,
 ) -> ChannelResult<AccountOut> {
-    let f = own_conn(c, viewer, conn)?;
+    let f = own_conn(r, viewer, conn)?;
     if !is_channel_adapter(ch, &f.adapter) {
         return Err(ApiError::not_found("连接"));
     }
     let ws = &viewer.ws;
-    let (_, mode) = bindings::connection_account(c, ws, conn)?;
-    let settings = spaces::channel_settings(c, ws, conn)?;
+    let (_, mode) = bindings::connection_account(r, ws, conn)?;
+    let settings = spaces::channel_settings(r, ws, conn)?;
     let send_delay_s = settings.as_ref().and_then(|s| s.send_delay_s);
     let card_ttl_h = settings.as_ref().and_then(|s| s.card_ttl_h);
+    let (late_ms, before, late, at) = settings.as_ref().map_or((None, 0, 0, None), |s| {
+        (s.late_ms, s.before, s.late, s.history_at)
+    });
     let (duty, rules, trigger, revision) = match settings {
         Some(s) => (s.duty, s.rules, s.trigger, s.revision),
         None => (
@@ -255,21 +259,7 @@ pub fn out(
         Mode::Bot => None,
         Mode::Own => Some(normal_trigger(&trigger)),
     };
-    let spaces: i64 = c.query_row(
-        "SELECT count(*) FROM spaces s WHERE s.workspace_id = ?1 AND s.status = 'active'
-            AND (EXISTS (SELECT 1 FROM space_identities i WHERE i.space_id = s.id AND i.connection_id = ?2 AND i.left_at IS NULL)
-                 OR (s.connection_id = ?2 AND NOT EXISTS (SELECT 1 FROM space_identities i WHERE i.space_id = s.id)))",
-        params![ws, conn],
-        |r| r.get(0),
-    )?;
-    let (late_ms, before, late, at): (Option<i64>, i64, i64, Option<i64>) = c
-        .query_row(
-            "SELECT late_ms, history_before, history_late, history_at FROM channel_settings WHERE connection_id = ?",
-            [conn],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )
-        .optional()?
-        .unwrap_or((None, 0, 0, None));
+    let spaces = steve_store::channel_spaces::rows::active_count(r, ws, conn)?;
     let late_minutes = late_ms
         .filter(|l| crate::inbound::LATE_MS.contains(l))
         .unwrap_or(crate::inbound::DEFAULT_LATE_MS)
@@ -298,7 +288,7 @@ pub fn out(
     Ok(AccountOut {
         connection_id: conn.to_string(),
         account_id: f.account_id,
-        persona: bindings::account_persona(c, ws, conn)?,
+        persona: bindings::account_persona(r, ws, conn)?,
         adapter: f.adapter.clone(),
         system,
         provider,
@@ -330,22 +320,22 @@ pub fn out(
 }
 
 /// Every channel account the viewer sees (not disconnected), oldest first.
-pub fn list(ch: &Channels, c: &Connection, viewer: &Viewer) -> ChannelResult<Vec<AccountOut>> {
-    let mut st = c.prepare_cached(
-        "SELECT id, adapter FROM connections WHERE workspace_id = ? AND status <> 'revoked' ORDER BY created, id",
-    )?;
-    let ids = st
-        .query_map([&viewer.ws], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(st);
+pub fn list(
+    ch: &Channels,
+    r: &mut impl steve_store::Read,
+    viewer: &Viewer,
+) -> ChannelResult<Vec<AccountOut>> {
+    let ids = steve_store::Connections(r)
+        .list(&viewer.ws)?
+        .into_iter()
+        .filter(|conn| conn.status != "revoked")
+        .map(|conn| (conn.id, conn.adapter));
     let mut out = Vec::new();
     for (id, adapter) in ids {
         if !is_channel_adapter(ch, &adapter) {
             continue;
         }
-        match out_or_hidden(ch, c, viewer, &id)? {
+        match out_or_hidden(ch, r, viewer, &id)? {
             Some(a) => out.push(a),
             None => continue,
         }
@@ -355,11 +345,11 @@ pub fn list(ch: &Channels, c: &Connection, viewer: &Viewer) -> ChannelResult<Vec
 
 fn out_or_hidden(
     ch: &Channels,
-    c: &Connection,
+    r: &mut impl steve_store::Read,
     viewer: &Viewer,
     id: &str,
 ) -> ChannelResult<Option<AccountOut>> {
-    match out(ch, c, viewer, id) {
+    match out(ch, r, viewer, id) {
         Ok(a) => Ok(Some(a)),
         Err(ApiError::NotFound(_)) => Ok(None),
         Err(e) => Err(e),
@@ -520,7 +510,7 @@ impl ChannelPatch {
 /// `/^\/[A-Za-z0-9_]{1,20}$/` (≤10), `where` = `*`, `dm:*` or spaces of this account (none = `*`).
 pub fn patch(
     ch: &Channels,
-    tx: &Tx,
+    tx: &mut steve_store::W<'_>,
     viewer: &Viewer,
     conn: &str,
     p: &ChannelPatch,
@@ -586,13 +576,13 @@ pub fn patch(
                     // `/bot` is your command anywhere: any space of the workspace you can see
                     let ok = w == ALL_DMS
                         || w == crate::rules::WHERE_EVERYWHERE
-                        || (spaces::get(tx, w)?.is_some_and(|s| s.workspace_id == *ws)
-                            && spaces::visible(tx, viewer, w)?);
+                        || steve_store::channel_spaces::rows::get_in_workspace(tx, ws, w)?
+                            .is_some();
                     if !ok {
                         return Err(ApiError::invalid(format!("trigger.where.{i}")));
                     }
                     // 屏蔽 wins over trigger words: choosing a blocked space would never work
-                    if let Some(s) = spaces::get(tx, w)?
+                    if let Some(s) = steve_store::channel_spaces::rows::get(tx, w)?
                         && spaces::settings(tx, &s.id)
                             .is_ok_and(|x| x.attention == spaces::Attention::Blocked)
                     {
@@ -617,11 +607,9 @@ pub fn patch(
                     // you, anyone, or a contact of this workspace
                     let ok = w == crate::rules::WHO_ME
                         || w == crate::rules::WHO_ANYONE
-                        || tx.query_row(
-                            "SELECT EXISTS (SELECT 1 FROM parties WHERE id = ? AND workspace_id = ?)",
-                            params![w, ws],
-                            |r| r.get::<_, bool>(0),
-                        )?;
+                        || steve_store::Contacts::new(tx)
+                            .party(w)?
+                            .is_some_and(|party| party.workspace_id == *ws);
                     if !ok {
                         return Err(ApiError::invalid(format!("trigger.who.{i}")));
                     }
@@ -666,40 +654,27 @@ pub fn patch(
     let persona_after = bindings::account_persona(tx, ws, conn)?.map(|x| x.id);
     let revision = before.revision + 1;
     let send_delay_s = p.send_delay_s.unwrap_or(before.send_delay_s);
-    tx.execute(
-        "UPDATE channel_settings SET duty = ?, rules = ?, trigger = ?, send_delay_s = ?, revision = ?, updated = ? WHERE connection_id = ?",
-        params![
-            duty,
-            rules.to_string(),
-            match mode {
-                Mode::Own => trigger.to_string(),
-                // bots keep the column's default; it is never read for them
-                Mode::Bot => before.trigger_raw(),
-            },
-            send_delay_s,
-            revision,
-            now,
-            conn
-        ],
-    )?;
-    if let Some(h) = p.card_ttl_h {
-        tx.execute(
-            "UPDATE channel_settings SET card_ttl_h = ? WHERE connection_id = ?",
-            params![h, conn],
-        )?;
-    }
-    if let Some(m) = p.late_minutes {
-        tx.execute(
-            "UPDATE channel_settings SET late_ms = ? WHERE connection_id = ?",
-            params![m * 60_000, conn],
-        )?;
-    }
+    let stored_trigger = match mode {
+        Mode::Own => trigger.clone(),
+        Mode::Bot if before.trigger.is_null() => default_trigger(),
+        Mode::Bot => before.trigger.clone(),
+    };
+    let fields_patch = steve_store::channel_spaces::account_settings::SettingsPatch {
+        duty: Some(&duty),
+        rules: Some(&rules),
+        trigger: Some(&stored_trigger),
+        send_delay_s: Some(send_delay_s),
+        revision,
+        card_ttl_h: p.card_ttl_h,
+        late_ms: p.late_minutes.map(|m| m * 60_000),
+    };
+    steve_store::channel_spaces::account_settings::patch(tx, conn, &fields_patch, now)?;
     let snap = |persona: &Option<String>,
                 duty: &str,
                 rules: &Value,
                 trigger: &Value,
                 delay: Option<i64>| json!({"persona_id": persona, "duty": duty, "rules": rules, "trigger": trigger, "send_delay_s": delay});
-    base::revision(
+    steve_store::audit_repo::revise(
         tx,
         ws,
         "channel",
@@ -715,7 +690,7 @@ pub fn patch(
         &snap(&persona_after, &duty, &rules, &trigger, send_delay_s),
         &viewer.user,
     )?;
-    base::audit(
+    steve_store::audit_repo::record(
         tx,
         ws,
         &viewer.user,
@@ -723,7 +698,7 @@ pub fn patch(
         conn,
         &json!({ "fields": fields }),
     )?;
-    tx.publish(steve_types::DomainEvent::from(
+    tx.emit(steve_types::DomainEvent::from(
         steve_types::ChannelsEvent::Channel {
             id: conn.into(),
             ws: ws.clone().into(),
@@ -732,22 +707,11 @@ pub fn patch(
     Ok(())
 }
 
-impl spaces::ChannelSettings {
-    /// The stored `trigger` as text (the column is NOT NULL).
-    fn trigger_raw(&self) -> String {
-        if self.trigger.is_null() {
-            default_trigger().to_string()
-        } else {
-            self.trigger.to_string()
-        }
-    }
-}
-
 /// After `POST /channels` made a connection from a credential form: its
 /// `channel_settings(mode)`, the default persona bound (a bot's, when given; else the account
 /// speaks as the default persona “Steve”), audit `channel.create`, SSE `channel`.
 pub fn created(
-    tx: &Tx,
+    tx: &mut steve_store::W<'_>,
     viewer: &Viewer,
     conn: &str,
     mode: Mode,
@@ -759,7 +723,7 @@ pub fn created(
     if let Some(p) = persona {
         bindings::set_account_default(tx, viewer, conn, p, now)?;
     }
-    base::audit(
+    steve_store::audit_repo::record(
         tx,
         ws,
         &viewer.user,
@@ -767,7 +731,7 @@ pub fn created(
         conn,
         &json!({"mode": mode.code(), "persona_id": persona}),
     )?;
-    tx.publish(steve_types::DomainEvent::from(
+    tx.emit(steve_types::DomainEvent::from(
         steve_types::ChannelsEvent::Channel {
             id: conn.into(),
             ws: ws.clone().into(),

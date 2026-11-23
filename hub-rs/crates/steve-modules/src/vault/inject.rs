@@ -24,10 +24,10 @@ use regex::Regex;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use super::crypto::open_field;
-use super::items::repo;
 use super::secret::SecretBytes;
 use super::{Vault, VaultError, VaultResult};
 use crate::ApiError;
+use steve_store::vault_items::VaultItems;
 
 /// `400` when `cwd` leaves the session's workspace, verbatim.
 pub const CWD_OUTSIDE: &str = "目录不在这个会话的工作区里";
@@ -382,12 +382,14 @@ impl Vault {
         item_id: &str,
         labels: &[String],
     ) -> VaultResult<Vec<(String, SecretBytes)>> {
-        let item = self
-            .store()
-            .reader(|c| repo::item(c, item_id))?
-            .filter(|i| i.workspace_id == ws && i.status == "active")
-            .ok_or_else(|| ApiError::not_found("条目"))?;
-        let rows = self.store().reader(|c| repo::fields(c, item_id))?;
+        let (item, rows) = self.read(|r| {
+            let mut repo = VaultItems(r);
+            let item = repo
+                .item(item_id)?
+                .filter(|i| i.workspace_id == ws && i.status == "active")
+                .ok_or_else(|| ApiError::not_found("条目"))?;
+            Ok((item, repo.fields(item_id)?))
+        })?;
         let mut dek = None;
         let mut out = Vec::new();
         for label in labels {

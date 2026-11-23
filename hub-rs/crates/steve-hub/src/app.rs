@@ -259,7 +259,7 @@ fn health_routes(st: &AppState) -> Router {
                         let node = crate::wire::node_runtime::health(&s, local.as_deref(), remote)
                             .inspect_err(|e| tracing::warn!("healthz node: {e}"))
                             .ok();
-                        (s.reader(steve_store::outbox::stats).ok(), node)
+                        (s.read(|r| steve_store::outbox::stats(r)).ok(), node)
                     })
                     .await
                     .unwrap_or_default(),
@@ -505,7 +505,7 @@ pub async fn boot(st: &AppState) -> anyhow::Result<()> {
                     // linked when “我” is created)
                     if let Some(m) = dev.modules.clone() {
                         let r = tokio::task::spawn_blocking(move || {
-                            m.store.transaction(|tx| {
+                            m.store.write(|tx| {
                                 steve_modules::contacts::stewards::adopt_everywhere(
                                     tx, "device", "hub",
                                 )
@@ -522,6 +522,12 @@ pub async fn boot(st: &AppState) -> anyhow::Result<()> {
             }
         })
     });
+    if let Some(p) = st.projection.clone() {
+        st.jobs.start("hub.projection", || {
+            p.start()
+                .unwrap_or_else(|| steve_runtime::spawn("hub.projection", async {}))
+        });
+    }
     // recover() reports a finished release first, as in TS
     boot_step("recover", st.domain.recover().await)?;
     st.domain.spawn_background();
@@ -535,7 +541,7 @@ pub async fn boot(st: &AppState) -> anyhow::Result<()> {
             steve_runtime::spawn("hub.presence", st.presence.clone().sweep(m.store.clone()))
         });
     }
-    // warm the runtimes cache so the first /api/state doesn't wait for `claude --version`
+    // warm the runtimes cache so the first /api/runtimes doesn't wait for `claude --version`
     let rt = st.clone();
     st.jobs.start("hub.runtimes", || {
         steve_runtime::spawn("hub.runtimes", async move {

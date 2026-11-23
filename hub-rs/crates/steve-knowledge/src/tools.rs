@@ -8,15 +8,13 @@
 
 use std::sync::LazyLock;
 
-use rusqlite::Connection;
 use serde_json::{Value, json};
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::{ApiError, ApiResult, Modules};
 use steve_store::base::{Level, Viewer};
 
 use crate::context::query_text;
-use crate::retrieve::{Hit, Purpose, Query, SEMANTIC_DOWN_NOTE, record_use, retrieve_all};
-use crate::service::own_doc;
+use crate::retrieve::{Hit, Purpose, Query, SEMANTIC_DOWN_NOTE, retrieve_all};
 use crate::state::Knowledge;
 use crate::uses::last_n;
 
@@ -179,8 +177,8 @@ fn validate(tool: &str, args: &Value, fields: &[(&str, bool, &str)]) -> Result<(
 
 /// The session principal resolved by the integrator, not a guess from the item's audit. Service
 /// callers see workspace objects; personal callers use the single-user read rule.
-pub fn session_viewer(m: &Modules, cx: &McpCx) -> ApiResult<Viewer> {
-    m.store.reader(|c| Ok(Viewer::load(c, &cx.ws, &cx.user)?))
+pub fn session_viewer(_m: &Modules, cx: &McpCx) -> ApiResult<Viewer> {
+    Ok(Viewer::bare(&cx.ws, &cx.user))
 }
 
 /// One search result: `[K<n>] <title> · <label> · level: <code>`, the document id when there
@@ -218,22 +216,14 @@ pub fn search(
     let viewer = session_viewer(m, cx)?;
     let text = query_text(q);
     let now = m.clock.now();
-    let (hits, semantic_down) = m.store.reader(|c| {
+    let found = m.store.read(|c| {
         let mut query = Query::new(kb.store(), &viewer, &text, Purpose::Agent);
         query.k = k;
         query.now = now;
-        let found = retrieve_all(c, &query)?;
-        let semantic_down = found.semantic_down;
-        let mut hits = found.hits;
-        let base = match cx.session_id.as_deref() {
-            Some(sid) => last_n(c, &cx.ws, sid)?,
-            None => 0,
-        };
-        for h in &mut hits {
-            h.n += base;
-        }
-        Ok::<_, ApiError>((hits, semantic_down))
+        retrieve_all(c, &query)
     })?;
+    let semantic_down = found.semantic_down;
+    let mut hits = found.hits;
     let note = if semantic_down {
         format!("\n\n{SEMANTIC_DOWN_NOTE}")
     } else {
@@ -243,25 +233,23 @@ pub fn search(
         return Ok(format!("No knowledge matches \"{q}\".{note}"));
     }
     if let Some(sid) = cx.session_id.as_deref() {
-        m.store
-            .transaction(|tx| record_use(tx, &cx.ws, ("session", sid), &text, &hits))?;
+        m.store.write(|w| -> steve_store::Result<()> {
+            let base = last_n(w, &cx.ws, sid)?;
+            for hit in &mut hits {
+                hit.n += base;
+            }
+            steve_store::knowledge::KnowledgeUses(w).record(
+                &cx.ws,
+                ("session", sid),
+                &text,
+                &crate::retrieve::use_hits(&hits),
+            )?;
+            Ok(())
+        })?;
     }
     let mut blocks: Vec<String> = hits.iter().map(entry).collect();
     blocks.push(LEVELS.into());
     Ok(format!("{}{note}", blocks.join("\n\n")))
-}
-
-type Piece = (i64, String, Option<i64>, Option<i64>);
-
-fn pieces(c: &Connection, doc: &str, from: i64) -> ApiResult<Vec<Piece>> {
-    let mut st = c.prepare_cached(
-        "SELECT seq, text, start_at, end_at FROM kb_chunks
-          WHERE obj_type = 'chunk' AND obj_id = ? AND seq >= ? AND level <> 'never' ORDER BY seq",
-    )?;
-    let rows = st.query_map(rusqlite::params![doc, from], |r| {
-        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-    })?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 /// `steve_knowledge_read`: the chunks from `from` on, joined without their overlaps, ≤20000
@@ -271,8 +259,11 @@ pub fn read(m: &Modules, cx: &McpCx, id: &str, from: f64) -> ApiResult<String> {
     let viewer = session_viewer(m, cx)?;
     let missing = || ApiError::rule(format!("No document {id}."));
     let from = from.max(0.0) as i64;
-    m.store.reader(|c| {
-        let (d, s) = own_doc(c, &viewer, id, "文档").map_err(|_| missing())?;
+    crate::read_api(&m.store, |c| {
+        let (d, s) = steve_store::knowledge::Documents(c)
+            .visible_doc(&viewer, id)
+            .map_err(|_| missing())?
+            .ok_or_else(missing)?;
         let level = d.eff_level(&s);
         if level == Level::Never {
             return Err(missing());
@@ -281,7 +272,9 @@ pub fn read(m: &Modules, cx: &McpCx, id: &str, from: f64) -> ApiResult<String> {
         let mut len = 0usize;
         let mut prev_end: Option<i64> = None;
         let mut next: Option<i64> = None;
-        for (seq, text, start, end) in pieces(c, &d.id, from)? {
+        for (seq, text, start, end) in
+            steve_store::knowledge::Chunks(c).document_pieces(&d.id, from)?
+        {
             let skip = match (prev_end, start) {
                 (Some(p), Some(s)) if s < p => (p - s) as usize,
                 _ => 0,

@@ -16,6 +16,7 @@ use chrono_tz::Tz;
 use steve_modules::accounts::connections::{
     AccountInfo, AuthKind, ConnCx, ConnectionProvider, FieldDef, Health, Integration, ProviderError,
 };
+use steve_store::calendar::CalendarRepo;
 
 use crate::ics;
 use crate::profile::{
@@ -173,7 +174,7 @@ impl IcsSource {
             let store = cx.connections().modules().store.clone();
             let id = cx.id().to_string();
             let file = store
-                .reader(|c| crate::repo::ics_file(c, &id).map_err(steve_store::StoreError::from))
+                .read(|c| CalendarRepo::new(c).ics_file(&id))
                 .map_err(|e| SourceError::Transient(e.to_string()))?;
             return file
                 .map(|(_, b)| {

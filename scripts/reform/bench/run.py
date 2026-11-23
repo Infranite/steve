@@ -106,7 +106,7 @@ _spec.loader.exec_module(isolation)
 
 DEFAULT = {
     "endpoints": [{"path": p, "requests": 20} for p in (
-        "/api/state", "/api/stats/summary", "/api/hub-metadata", "/api/personas",
+        "/api/summary", "/api/stats/summary", "/api/hub-metadata", "/api/personas",
         "/api/spaces", "/api/channels", "/api/me/attention", "/api/devices")],
     "workload": None,  # None preserves the original mixed GET + invalidation workload.
     "auth": "cookie",
@@ -119,7 +119,7 @@ DEFAULT = {
     "idle_s": 30,
     "load_s": 60,
     "clients": 4,
-    "load_path": "/api/state",
+    "load_path": "/api/summary",
     "invalidate_rps": 2,
     "invalidate_path": "/api/notifications/read",
     "invalidate_body": {},

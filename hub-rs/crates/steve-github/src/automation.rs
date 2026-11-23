@@ -5,7 +5,6 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_flow::nodes::{NodeOutcome, RunCx, bot::pick_bot};
@@ -13,13 +12,13 @@ use steve_flow::{Action, DropReason, FlowCx, IngestCommit, Ingested, RawEvent, i
 use steve_modules::gateway::{self, Tier};
 use steve_modules::outbound::quote_untrusted;
 use steve_modules::{ApiError, ApiResult};
+use steve_store::NewItem;
 use steve_store::base::{ObjRef, links};
-use steve_store::{NewItem, Tx};
 
 use crate::GitHub;
-use crate::repo::{self, RepoRow};
 use crate::repos::Settings;
 use crate::sync::ts;
+use steve_store::github::RepoRow;
 
 pub const PR_TYPE: &str = "github.pr_review";
 pub const ISSUE_TYPE: &str = "github.issue_triage";
@@ -132,7 +131,7 @@ fn valid_sha(v: &Value) -> Option<&str> {
 /// One candidate per PR/Issue delivery. Historic observations, edits, and old state are explicit
 /// skips; even a skipped receipt is not reevaluated if processing is replayed after a crash.
 pub(crate) fn stage(
-    tx: &Tx,
+    tx: &mut steve_store::W<'_>,
     flow: Option<&std::sync::Arc<FlowCx>>,
     repo: &RepoRow,
     delivery: &str,
@@ -145,12 +144,7 @@ pub(crate) fn stage(
         "issues" => (Kind::IssueTriage, &payload["issue"]),
         _ => return Ok(None),
     };
-    let existing: Option<String> = tx.query_row(
-        "SELECT automation FROM gh_deliveries WHERE delivery_id = ?",
-        [delivery],
-        |r| r.get(0),
-    )?;
-    if existing.is_some() {
+    if steve_store::github::automation(tx, delivery, None)?.is_some() {
         return Ok(None);
     }
     let action = payload["action"].as_str().unwrap_or("");
@@ -170,16 +164,9 @@ pub(crate) fn stage(
         skip_reason(tx, repo, &subject, v, action)?
     };
     let key = ineligible.is_none().then(|| subject.key(repo.gh_id));
-    let seen_disabled: bool = if let Some(key) = &key {
-        tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM gh_deliveries WHERE repo_id = ? AND automation IS NOT NULL
-             AND json_extract(automation, '$.key') = ?
-             AND json_extract(automation, '$.reason') IN ('disabled', 'repo_disabled'))",
-            params![repo.id, key],
-            |r| r.get(0),
-        )?
-    } else {
-        false
+    let seen_disabled = match &key {
+        Some(key) => steve_store::github::previously_disabled(tx, &repo.id, key)?,
+        None => false,
     };
     let mut commit = None;
     let (state, reason, event_id) = if let Some(reason) = if !repo.enabled {
@@ -229,18 +216,21 @@ pub(crate) fn stage(
     } else {
         ("failed", "flow_unavailable", None)
     };
-    tx.execute(
-        "UPDATE gh_deliveries SET workspace_id = ?, repo_id = ?, automation = ? WHERE delivery_id = ?",
-        params![repo.workspace_id, repo.id, json!({
+    steve_store::github::set_automation(
+        tx,
+        &repo.workspace_id,
+        &repo.id,
+        delivery,
+        &json!({
             "state": state, "reason": reason, "kind": kind, "number": number,
             "head": head, "base": base, "event_id": event_id, "key": key,
-        }).to_string(), delivery],
+        }),
     )?;
     Ok(commit)
 }
 
 fn skip_reason(
-    c: &Connection,
+    c: &mut impl steve_store::Read,
     repo: &RepoRow,
     subject: &Subject,
     v: &Value,
@@ -266,7 +256,7 @@ fn skip_reason(
             if subject.head.is_none() || subject.base.is_none() {
                 return Ok(Some("invalid_revision"));
             }
-            let prev = repo::pr_by_number(c, &repo.id, number)?;
+            let prev = steve_store::github::pr_by_number(c, &repo.id, number)?;
             match &prev {
                 _ if action == "opened" && !new_since_link => Some("historic"),
                 Some(p)
@@ -286,7 +276,9 @@ fn skip_reason(
                 Some("action")
             } else if !new_since_link {
                 Some("historic")
-            } else if action == "poll" && repo::issue_by_number(c, &repo.id, number)?.is_some() {
+            } else if action == "poll"
+                && steve_store::github::issue_by_number(c, &repo.id, number)?.is_some()
+            {
                 Some("unchanged")
             } else {
                 None
@@ -313,14 +305,14 @@ impl Analyze {
     }
 }
 
-fn existing_item(c: &Connection, ws: &str, event: &str) -> ApiResult<Option<String>> {
-    Ok(c.query_row(
-        "SELECT l.subject_id FROM links l WHERE l.workspace_id = ? AND l.subject_type = 'item'
-         AND l.predicate = ? AND l.object_type = 'event' AND l.object_id = ? LIMIT 1",
-        params![ws, RESULT, event],
-        |r| r.get(0),
-    )
-    .optional()?)
+fn existing_item(
+    c: &mut impl steve_store::Read,
+    ws: &str,
+    event: &str,
+) -> ApiResult<Option<String>> {
+    Ok(steve_store::link_repo::subject_for_object(
+        c, ws, "item", RESULT, "event", event,
+    )?)
 }
 
 fn skipped(cx: &mut RunCx<'_>, why: &str) -> NodeOutcome {
@@ -464,18 +456,12 @@ fn read_analysis_admission(
     subject: &Subject,
     event_data: &Value,
 ) -> ApiResult<(Option<RepoRow>, Option<String>, bool)> {
-    store.reader(|c| {
-        let repo = repo::repo_get(c, &subject.repo_id)?
+    store.read(|c| {
+        let repo = steve_store::github::repo_get(c, &subject.repo_id)?
             .filter(|r| r.workspace_id == ws && event_data["connection_id"] == r.connection_id);
         let item = existing_item(c, &ws, &event)?;
         // Only the adapter's event, not a hand-built/random event with the same type.
-        let admitted: bool = c.query_row(
-            "SELECT EXISTS(SELECT 1 FROM gh_deliveries WHERE workspace_id = ? AND repo_id = ?
-                 AND automation IS NOT NULL AND json_extract(automation, '$.state') = 'matched'
-                 AND json_extract(automation, '$.event_id') = ?)",
-            params![ws, subject.repo_id, event],
-            |r| r.get(0),
-        )?;
+        let admitted = steve_store::github::admits_event(c, ws, &subject.repo_id, event)?;
         Ok::<_, ApiError>((repo, item, admitted))
     })
 }
@@ -487,13 +473,10 @@ fn pick_analysis_bot(
     event_data: &Value,
 ) -> Result<steve_flow::nodes::bot::BotInfo, NodeOutcome> {
     let fail = |stage, message| Err(analysis_failed(stage, message));
-    match store.reader(|c| {
+    match store.read(|c| {
         let bot = pick_bot(c, &ws, None, event_data)?;
         if let Some(bot) = bot {
-            let enabled: bool =
-                c.query_row("SELECT enabled FROM bots WHERE id = ?", [&bot.id], |r| {
-                    r.get(0)
-                })?;
+            let enabled = steve_store::bots::bot_enabled(c, &bot.id)?.unwrap_or(false);
             Ok::<_, ApiError>(enabled.then_some(bot))
         } else {
             Ok(None)
@@ -531,9 +514,9 @@ async fn analysis_evidence(
         }
         Kind::IssueTriage => {
             // Recent local records only; explicitly not a claim of exhaustive duplicate search.
-            match store
-                .reader(|c| repo::issues(c, &ws, Some(&repo.id), None).map_err(ApiError::from))
-            {
+            match store.read(|c| {
+                steve_store::github::issues(c, &ws, Some(&repo.id), None).map_err(ApiError::from)
+            }) {
                 Ok(rows) => rows
                     .into_iter()
                     .filter(|i| i.number != subject.number)
@@ -621,11 +604,11 @@ struct ReportInput<'a> {
 fn save_analysis_report(gh: &GitHub, input: &ReportInput<'_>) -> ApiResult<Option<String>> {
     let store = gh.store();
     let (ws, event, subject, repo) = (input.ws, input.event, input.subject, input.repo);
-    store.transaction(|tx| {
+    store.write(|tx| {
         if let Some(item) = existing_item(tx, &ws, &event)? {
             return Ok(Some(item));
         }
-        let Some(current) = repo::repo_get(tx, &repo.id)?.filter(|r| {
+        let Some(current) = steve_store::github::repo_get(tx, &repo.id)?.filter(|r| {
             r.workspace_id == ws
                 && r.connection_id == repo.connection_id
                 && r.enabled
@@ -642,7 +625,7 @@ fn save_analysis_report(gh: &GitHub, input: &ReportInput<'_>) -> ApiResult<Optio
 /// Create the report as a completed item without running the ordinary task's acceptance hooks.
 fn create_completed_report(
     gh: &GitHub,
-    tx: &Tx,
+    tx: &mut steve_store::W<'_>,
     input: &ReportInput<'_>,
     current: RepoRow,
 ) -> ApiResult<steve_store::Item> {
@@ -717,7 +700,7 @@ fn create_completed_report(
 
 /// Link the result to the immutable subject, event and run, then record its local-only timeline.
 fn link_report_provenance(
-    tx: &Tx,
+    tx: &mut steve_store::W<'_>,
     input: &ReportInput<'_>,
     item: &steve_store::Item,
 ) -> ApiResult<()> {
@@ -731,10 +714,9 @@ fn link_report_provenance(
     );
     // Target and draft are tied to the result, not to the expiring delivery/run.
     data.props = json!({"subject": subject, "report": report});
-    links::add(tx, &ws, &data)?;
+    links::Links(tx).add(&ws, &data)?;
     for (ty, id) in [("event", event), ("flow_run", input.run_id)] {
-        links::add(
-            tx,
+        links::Links(tx).add(
             &ws,
             &links::NewLink::new(result.clone(), "from", ObjRef::new(ty, id), "sig"),
         )?;
@@ -795,20 +777,16 @@ fn review_evidence(v: &Value) -> String {
 }
 
 pub(crate) fn delivery_trace(
-    c: &Connection,
+    c: &mut impl steve_store::Read,
     ws: &str,
-    d: &repo::DeliveryRow,
+    d: &steve_store::github::DeliveryRow,
 ) -> ApiResult<Option<Value>> {
     if !matches!(d.event.as_str(), "pull_request" | "issues") {
         return Ok(None);
     }
-    let saved: Option<String> = c.query_row(
-        "SELECT automation FROM gh_deliveries WHERE delivery_id = ? AND workspace_id = ?",
-        params![d.delivery_id, ws],
-        |r| r.get(0),
-    )?;
-    let Some(saved) = saved else { return Ok(None) };
-    let mut trace: Value = serde_json::from_str(&saved)?;
+    let Some(mut trace) = steve_store::github::automation(c, &d.delivery_id, Some(ws))? else {
+        return Ok(None);
+    };
     let runs = match trace["event_id"].as_str() {
         Some(event) => steve_flow::runs::connector_runs(c, ws, event)?,
         None => vec![],
@@ -830,12 +808,12 @@ pub(crate) fn delivery_trace(
     Ok(Some(trace))
 }
 
-fn publication(c: &Connection, ws: &str, item: &str) -> ApiResult<Option<Value>> {
+fn publication(c: &mut impl steve_store::Read, ws: &str, item: &str) -> ApiResult<Option<Value>> {
     let Some((subject, _)) = item_result(c, ws, item)? else {
         return Ok(None);
     };
     if let Some(d) = result_decision(c, ws, item)? {
-        let effect = repo::effect_of(c, &d.id)?;
+        let effect = steve_store::github::effect_of(c, &d.id)?;
         let state = if d.result["choice"] == "no" {
             "declined"
         } else if let Some(e) = &effect {
@@ -860,58 +838,52 @@ fn publication(c: &Connection, ws: &str, item: &str) -> ApiResult<Option<Value>>
     ))
 }
 
-fn item_result(c: &Connection, ws: &str, item: &str) -> ApiResult<Option<(Subject, String)>> {
-    let l = links::from(c, ws, &ObjRef::new("item", item), Some(RESULT))?;
-    l.into_iter()
-        .next()
-        .map(|l| {
-            let subject = serde_json::from_value(l.props["subject"].clone())?;
-            Ok((
-                subject,
-                l.props["report"].as_str().unwrap_or("").to_string(),
-            ))
+fn item_result(
+    c: &mut impl steve_store::Read,
+    ws: &str,
+    item: &str,
+) -> ApiResult<Option<(Subject, String)>> {
+    steve_store::link_repo::item_props(c, ws, item, RESULT)?
+        .map(|props| {
+            let subject = serde_json::from_value(props["subject"].clone())?;
+            Ok((subject, props["report"].as_str().unwrap_or("").to_owned()))
         })
         .transpose()
 }
 
 fn result_decision(
-    c: &Connection,
+    c: &mut impl steve_store::Read,
     ws: &str,
     item: &str,
 ) -> ApiResult<Option<steve_store::Decision>> {
-    let id: Option<String> = c
-        .query_row(
-            "SELECT id FROM decisions WHERE workspace_id = ? AND item_id = ? AND subject_type = ?
-           AND requested_by = ? ORDER BY created LIMIT 1",
-            params![ws, item, crate::comment::COMMENT, APPROVAL_ACTOR],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(match id {
-        Some(id) => steve_store::base::decisions::get(c, &id)?,
-        None => None,
-    })
+    Ok(steve_store::decision_repo::for_item_actor(
+        c,
+        ws,
+        item,
+        crate::comment::COMMENT,
+        APPROVAL_ACTOR,
+    )?)
 }
 
 fn local_target(
-    c: &Connection,
+    c: &mut impl steve_store::Read,
     ws: &str,
     subject: &Subject,
 ) -> ApiResult<Option<crate::comment::Target>> {
-    let Some(repo) =
-        repo::repo_get(c, &subject.repo_id)?.filter(|r| r.workspace_id == ws && r.enabled)
+    let Some(repo) = steve_store::github::repo_get(c, &subject.repo_id)?
+        .filter(|r| r.workspace_id == ws && r.enabled)
     else {
         return Ok(None);
     };
     let id = match subject.kind {
-        Kind::PrReview => repo::pr_by_number(c, &repo.id, subject.number)?
+        Kind::PrReview => steve_store::github::pr_by_number(c, &repo.id, subject.number)?
             .filter(|pr| {
                 pr.state == "open"
                     && !pr.draft
                     && Some(pr.head_sha.as_str()) == subject.head.as_deref()
             })
             .map(|p| p.id),
-        Kind::IssueTriage => repo::issue_by_number(c, &repo.id, subject.number)?
+        Kind::IssueTriage => steve_store::github::issue_by_number(c, &repo.id, subject.number)?
             .filter(|i| i.state == "open")
             .map(|i| i.id),
     };
@@ -929,9 +901,9 @@ pub(crate) async fn comment_draft(
     caller: steve_modules::Caller,
     axum::extract::Path(item): axum::extract::Path<String>,
 ) -> ApiResult<axum::Json<Value>> {
-    let result = gh.store().transaction(|tx| {
+    let result = gh.store().write(|tx| {
         let ws = &caller.ws;
-        if repo::item_brief(tx, ws, &item)?.is_none() {
+        if steve_store::item_repo::item_brief(tx, ws, &item)?.is_none() {
             return Err(ApiError::not_found("事项"));
         }
         if let Some(d) = result_decision(tx, ws, &item)? {
@@ -951,7 +923,8 @@ pub(crate) async fn comment_draft(
             target.label()
         );
         let (adapter, account, _) =
-            repo::connection_label(tx, &target.repo.connection_id)?.unwrap_or_default();
+            steve_store::connections::connection_label(tx, &target.repo.connection_id)?
+                .unwrap_or_default();
         if adapter == crate::adapters::github_pat::ID {
             q.push_str(&crate::accept::pat_note(&account));
         }
@@ -963,28 +936,28 @@ pub(crate) async fn comment_draft(
         // Keep model output literal on GitHub. It must not become mentions, remote images, or
         // bot commands just because the user approved sharing a report.
         let body = format!("{prefix}{}", literal_report(&report));
-        let decision = steve_store::base::decisions::open(
-            tx,
-            &steve_store::NewDecision {
-                workspace_id: ws.clone(),
-                kind: "approve".into(),
-                subject_type: crate::comment::COMMENT.into(),
-                subject_id: target.subject,
-                item_id: Some(item.clone()),
-                session_id: None,
-                question: q,
-                draft: Some(body),
-                options: Some(vec!["yes".into(), "no".into()]),
-                requested_by: APPROVAL_ACTOR.into(),
-            },
-        )?;
+        let decision = steve_store::DecisionRows(tx).open(&steve_store::NewDecision {
+            workspace_id: ws.clone(),
+            kind: "approve".into(),
+            subject_type: crate::comment::COMMENT.into(),
+            subject_id: target.subject,
+            item_id: Some(item.clone()),
+            session_id: None,
+            question: q,
+            draft: Some(body),
+            options: Some(vec!["yes".into(), "no".into()]),
+            requested_by: APPROVAL_ACTOR.into(),
+        })?;
+        crate::events::emit(tx, ws, &decision.subject_id);
         Ok::<_, ApiError>(decision)
     })?;
-    gh.notifier().gh(&caller.ws, &result.subject_id);
     Ok(axum::Json(json!({"id": result.id})))
 }
 
-pub(crate) fn check_approval(c: &Connection, d: &steve_store::Decision) -> ApiResult<()> {
+pub(crate) fn check_approval(
+    c: &mut impl steve_store::Read,
+    d: &steve_store::Decision,
+) -> ApiResult<()> {
     let ws = &d.workspace_id;
     let item = d.item_id.as_deref().unwrap_or("");
     let (subject, _) =
@@ -1006,7 +979,7 @@ pub(crate) async fn check_before_send(
 ) -> Result<(), crate::effects::Fail> {
     let subject = gh
         .store()
-        .reader(|c| {
+        .read(|c| {
             check_approval(c, d)?;
             item_result(c, &d.workspace_id, d.item_id.as_deref().unwrap_or(""))
         })

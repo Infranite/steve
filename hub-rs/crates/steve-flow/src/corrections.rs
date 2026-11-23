@@ -17,14 +17,14 @@ use std::sync::Arc;
 use axum::extract::Path;
 use axum::routing::post;
 use axum::{Extension, Json, Router};
-use rusqlite::{Connection, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use steve_modules::changes::{self, ChangeOp, OpCx, Origin, Plan, Prepared};
 use steve_modules::{ApiError, ApiResult, Body, Caller, Clock, Modules, Registry};
-use steve_store::Tx;
-use steve_store::base::mems::{self, NewMem};
+use steve_store::base::mems::NewMem;
 use steve_store::base::{Change, ObjRef, Viewer, Visibility};
+use steve_store::knowledge::Memories;
+use steve_store::{NewCorrection, SignalRows};
 
 use crate::graph::{Edge, Graph, Node};
 use crate::signals::source_label;
@@ -178,31 +178,30 @@ struct Ev {
     flow_id: Option<String>,
 }
 
-fn load_event(c: &Connection, viewer: &Viewer, id: &str) -> FlowResult<Ev> {
-    // the visibility check (404 没有这个信号) is the signal page's
+fn load_event(
+    c: &mut impl steve_store::Read,
+    viewer: &Viewer,
+    id: &str,
+) -> steve_store::Result<Ev> {
     let s = crate::signals::own(c, viewer, id)?;
-    let (thread_key, group_key, actor_account_id): (
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    ) = c.query_row(
-        "SELECT thread_key, group_key, actor_account_id FROM ext_events WHERE id = ?",
-        [id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )?;
-    let str_of = |v: &Value| v.as_str().map(String::from);
+    let actor_name = match s.party {
+        Some(party) => steve_store::Contacts::new(c)
+            .party_names([party.as_str()])?
+            .remove(&party),
+        None => None,
+    };
     Ok(Ev {
-        id: id.into(),
-        source: str_of(&s["source"]).unwrap_or_default(),
-        type_key: str_of(&s["type"]).unwrap_or_default(),
-        connection_id: str_of(&s["connection"]["id"]),
-        thread_key: thread_key.filter(|k| !k.is_empty()),
-        group_key: group_key.filter(|k| !k.is_empty()),
-        actor_account_id: actor_account_id.filter(|k| !k.is_empty()),
-        actor_name: str_of(&s["actor"]["name"]).filter(|n| !n.is_empty()),
-        summary: str_of(&s["summary"]).unwrap_or_default(),
-        outcome: str_of(&s["outcome"]).unwrap_or_default(),
-        flow_id: str_of(&s["flow"]["id"]),
+        id: s.id,
+        source: s.source,
+        type_key: s.kind,
+        connection_id: s.connection,
+        thread_key: s.thread.filter(|k| !k.is_empty()),
+        group_key: s.group.filter(|k| !k.is_empty()),
+        actor_account_id: s.actor_account.filter(|k| !k.is_empty()),
+        actor_name: actor_name.filter(|n| !n.is_empty()),
+        summary: s.summary,
+        outcome: s.outcome,
+        flow_id: s.flow,
     })
 }
 
@@ -364,7 +363,7 @@ pub async fn correct(
     scope: Scope,
 ) -> FlowResult<Corrected> {
     let viewer = cx.modules.viewer(who)?;
-    let ev = cx.store().reader(|c| load_event(c, &viewer, event_id))?;
+    let ev = cx.store().read(|c| load_event(c, &viewer, event_id))?;
     if action == Action::ToItem {
         if ev.outcome == "item" {
             return Err(ApiError::conflict(steve_i18n::t!(
@@ -382,15 +381,13 @@ pub async fn correct(
     }
     // the card (title, preview lines) is stored with the changeset and read by every member: zh-CN
     let (when, describe, describe_shown) = changes::stored(|| condition(&ev, scope))?;
-    let target = cx
-        .store()
-        .reader(|c| -> FlowResult<Option<flows::FlowRow>> {
-            Ok(match &ev.flow_id {
-                Some(f) => flows::get(c, f)?
-                    .filter(|f| f.workspace_id == who.ws && !f.deleted && f.kind != "schedule"),
-                None => None,
-            })
-        })?;
+    let target = cx.read(|c| -> FlowResult<Option<flows::FlowRow>> {
+        Ok(match &ev.flow_id {
+            Some(f) => flows::get(c, f)?
+                .filter(|f| f.workspace_id == who.ws && !f.deleted && f.kind != "schedule"),
+            None => None,
+        })
+    })?;
     let CorrectionPlan {
         prepared,
         plan,
@@ -414,8 +411,8 @@ pub async fn correct(
     let proposal = changes::store_plan(m, who, "flow", &prepared, plan, origin)?;
     changes::apply(m, who, &proposal.id)
         .ok_or_else(|| ApiError::Internal("correction changeset vanished".into()))??;
-    let mem_id = cx.store().reader(|c| -> FlowResult<Option<String>> {
-        let cs = steve_store::base::changesets::get(c, &proposal.id)?;
+    let mem_id = cx.store().read::<_, steve_store::StoreError>(|c| {
+        let cs = steve_store::base::changesets::ChangeSets(c).get(&proposal.id)?;
         Ok(cs.and_then(|cs| cs.before).and_then(|b| {
             b.iter()
                 .find(|e| e["op"]["op"] == OP_RULE)
@@ -589,13 +586,21 @@ fn record(
 ) -> FlowResult<String> {
     let id = steve_store::uid("cor");
     let now = cx.now();
-    cx.store().transaction(|tx| -> FlowResult<()> {
-        tx.execute(
-            "INSERT INTO signal_corrections (id, workspace_id, event_id, scope, action, flow_id, changeset_id, mem_id, work_item_id, created_by, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![id, who.ws, ev.id, scope.code(), action.code(), flow_id, changeset_id, mem_id, item_id, who.me, now],
-        )?;
-        steve_store::base::audit(
-            tx,
+    cx.store().write(|w| -> FlowResult<()> {
+        SignalRows(w).correct(&NewCorrection {
+            id: &id,
+            ws: &who.ws,
+            event: &ev.id,
+            scope: scope.code(),
+            action: action.code(),
+            flow: flow_id,
+            change: changeset_id,
+            memory: mem_id,
+            item: item_id,
+            actor: &who.me,
+            at: now,
+        })?;
+        w.audit(
             &who.ws,
             &who.me,
             "signal.correct",
@@ -605,30 +610,6 @@ fn record(
         Ok(())
     })?;
     Ok(id)
-}
-
-/// The corrections of an event, oldest first (`{id, action, scope, flow_id, changeset_id, mem_id,
-/// work_item_id, created_by, created}`).
-pub fn list(c: &Connection, ws: &str, event_id: &str) -> FlowResult<Vec<Value>> {
-    let mut st = c.prepare_cached(
-        "SELECT id, action, scope, flow_id, changeset_id, mem_id, work_item_id, created_by, created FROM signal_corrections WHERE workspace_id = ? AND event_id = ? ORDER BY created, rowid",
-    )?;
-    let rows = st
-        .query_map(params![ws, event_id], |r| {
-            Ok(json!({
-                "id": r.get::<_, String>(0)?,
-                "action": r.get::<_, String>(1)?,
-                "scope": r.get::<_, String>(2)?,
-                "flow_id": r.get::<_, Option<String>>(3)?,
-                "changeset_id": r.get::<_, Option<String>>(4)?,
-                "mem_id": r.get::<_, Option<String>>(5)?,
-                "work_item_id": r.get::<_, Option<String>>(6)?,
-                "created_by": r.get::<_, String>(7)?,
-                "created": r.get::<_, i64>(8)?,
-            }))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
 }
 
 /// `correction.flow {flow_id, graph, version}` saves a new version of an existing flow (author
@@ -650,7 +631,7 @@ fn op_graph(op: &Value) -> ApiResult<Graph> {
 }
 
 impl ChangeOp for FlowOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, c: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
         let id = op_str(op, "flow_id")?;
         if op.get("create").is_some() {
             if flows::get(c, id)?.is_some() {
@@ -665,7 +646,7 @@ impl ChangeOp for FlowOp {
         op_graph(op).map(|_| ())
     }
 
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, tx: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
         let id = op_str(op, "flow_id")?;
         let graph = op_graph(op)?;
         let now = self.clock.now();
@@ -686,11 +667,8 @@ impl ChangeOp for FlowOp {
                     origin_label: flows::origin_label("correction"),
                     enabled: true,
                 },
+                ("steve", NOTE),
                 now,
-            )?;
-            tx.execute(
-                "UPDATE flow_versions SET author = 'steve', note = ? WHERE flow_id = ? AND version = 1",
-                params![NOTE, id],
             )?;
             return Ok(json!({ "created": true, "version": 1 }));
         }
@@ -699,7 +677,13 @@ impl ChangeOp for FlowOp {
         Ok(json!({ "created": false, "graph": f.graph, "version": version }))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        tx: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
         let id = op_str(op, "flow_id")?;
         let f = flows::own(tx, cx.ws, id)?;
         if Some(f.version) != before["version"].as_i64() {
@@ -721,14 +705,13 @@ impl ChangeOp for FlowOp {
 struct RuleOp;
 
 impl ChangeOp for RuleOp {
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
         let text = op["text"].as_str().unwrap_or("").to_string();
         let about = op["connection_id"]
             .as_str()
             .map(|c| vec![ObjRef::new("connection", c)])
             .unwrap_or_default();
-        let m = mems::create(
-            tx,
+        let m = Memories(w).create(
             cx.ws,
             &NewMem {
                 kind: "rule".into(),
@@ -746,9 +729,15 @@ impl ChangeOp for RuleOp {
         Ok(json!({ "mem_id": m.id }))
     }
 
-    fn undo(&self, tx: &Tx, _cx: &OpCx, _op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        _cx: &OpCx,
+        _op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
         if let Some(id) = before["mem_id"].as_str() {
-            mems::delete(tx, id)?;
+            Memories(w).delete(id)?;
         }
         Ok(())
     }

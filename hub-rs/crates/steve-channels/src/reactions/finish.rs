@@ -1,4 +1,5 @@
 use super::*;
+use steve_store::channel_message_repo::reactions::Reaction;
 
 pub(super) struct FinishedReaction {
     pub(super) id: Option<String>,
@@ -25,7 +26,7 @@ impl Channels {
         message_id: &str,
         how: Finish,
         t: &Target,
-        row: &ReactionRow,
+        row: &Reaction,
     ) -> FinishedReaction {
         // Clearing an acknowledgement that the provider never accepted performs no successful
         // provider action. Retain its refusal instead of erasing the only persisted evidence.
@@ -75,7 +76,7 @@ impl Channels {
 fn finish_result(
     message_id: &str,
     how: Finish,
-    row: &ReactionRow,
+    row: &Reaction,
     added: Option<Result<Added, String>>,
     mut err: Option<String>,
 ) -> FinishedReaction {

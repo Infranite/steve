@@ -6,7 +6,7 @@
 use serde_json::json;
 #[cfg(test)]
 use steve_store::{ModelUsage, Tokens};
-use steve_store::{Session, Store};
+use steve_store::{Session, Store, node_turns::statistics};
 
 /// Session attribution of a turn: workspace, item, bot, project, and the fallback model.
 struct Owner {
@@ -115,14 +115,8 @@ pub(crate) fn try_node_attempt_started(
 }
 
 fn ensure_node_turn(store: &Store, session: &str, attempt: &str) -> steve_store::Result<()> {
-    let missing: Option<(i64,i64)> = store.reader(|db| {
-        use rusqlite::OptionalExtension;
-        Ok::<_,steve_store::StoreError>(db.query_row(
-            "SELECT a.ordinal,a.created FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE a.attempt_id=?1 AND t.session_id=?2 AND NOT EXISTS(SELECT 1 FROM agent_turns WHERE node_attempt_id=?1)",
-            [attempt,session], |r|Ok((r.get(0)?,r.get(1)?))).optional()?)
-    })?;
-    if let Some((ordinal, started)) = missing {
-        try_node_attempt_started(store, session, attempt, ordinal, None, started)?;
+    if let Some(start) = store.read(|r| statistics::missing_turn(r, session, attempt))? {
+        try_node_attempt_started(store, session, attempt, start.ordinal, None, start.at)?;
     }
     Ok(())
 }
@@ -139,19 +133,10 @@ pub(crate) fn node_usage(
         return Ok(());
     };
     ensure_node_turn(store, session, attempt)?;
-    let turn: Option<(String, i64)> = store.reader(|c| {
-        use rusqlite::OptionalExtension;
-        Ok::<_, steve_store::StoreError>(
-            c.query_row(
-                "SELECT id,started FROM agent_turns WHERE node_attempt_id=?",
-                [attempt],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?,
-        )
-    })?;
-    if let Some((id, started)) = turn {
-        // Admission already rebased context-only meters. Keep refusal/currency evidence
+    if let Some(statistics::AgentTurn { id, started }) =
+        store.read(|r| statistics::turn(r, attempt))?
+    {
+        // Admission already rebased legacy context counters. Keep refusal/currency evidence
         // for the shared reducer; filtering it here would hide an unknown monetary sum.
         store.stats().usage_report(
             &id,
@@ -192,18 +177,11 @@ pub(crate) fn try_node_attempt_finished(
     let Some(o) = owner(store, session)? else {
         return Ok(None);
     };
-    let turn: Option<(String, i64)> = store.reader(|db| {
-        use rusqlite::OptionalExtension;
-        Ok::<_, steve_store::StoreError>(
-            db.query_row(
-                "SELECT id, started FROM agent_turns WHERE node_attempt_id=?",
-                [attempt],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?,
-        )
-    })?;
-    let Some((turn_id, started)) = turn else {
+    let Some(statistics::AgentTurn {
+        id: turn_id,
+        started,
+    }) = store.read(|r| statistics::turn(r, attempt))?
+    else {
         return Ok(None);
     };
     let ws = &o.s.workspace_id;
@@ -214,7 +192,7 @@ pub(crate) fn try_node_attempt_finished(
         model: model.clone(),
         result: turn_result(c),
         seconds: at.saturating_sub(started).max(0) as f64 / 1000.0,
-        usage: turn_usage(store, &turn_id)?,
+        usage: store.read(|r| statistics::usage(r, &turn_id))?,
     };
     store.stats().turn_finish(&steve_store::TurnFinish {
         turn_id,
@@ -246,38 +224,12 @@ fn turn_result(c: &steve_node_api::Completion) -> &'static str {
     }
 }
 
-/// The turn's tokens and cost by model, as its usage reports left them.
-fn turn_usage(store: &Store, turn: &str) -> steve_store::Result<Vec<steve_store::ModelUsage>> {
-    store.reader(|db| {
-        let mut st = db.prepare_cached(
-            "SELECT model, input, output, cache_read, cache_write, reasoning, cost_reported FROM usage_records WHERE live_turn_id=?",
-        )?;
-        let rows = st
-            .query_map([turn], |r| {
-                Ok(steve_store::ModelUsage {
-                    model: r.get(0)?,
-                    tokens: steve_store::Tokens {
-                        input: r.get(1)?,
-                        output: r.get(2)?,
-                        cache_read: r.get(3)?,
-                        cache_write: r.get(4)?,
-                        reasoning: r.get(5)?,
-                    },
-                    cost_reported: r.get(6)?,
-                    detail: serde_json::Value::Null,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok::<_, steve_store::StoreError>(rows)
-    })
-}
-
 #[cfg(test)]
 #[allow(clippy::type_complexity)]
 mod tests {
     use super::*;
-    use rusqlite::Connection;
     use std::collections::BTreeMap;
+    use steve_store::testkit::hub::node_statistics as fixture;
     use steve_store::{NewBot, NewSession, NoPublisher, WS};
 
     struct T {
@@ -324,10 +276,6 @@ mod tests {
             .id
     }
 
-    fn db(t: &T) -> Connection {
-        Connection::open(t.dir.path().join("steve.sqlite3")).unwrap()
-    }
-
     fn begin(t: &T, sid: &str) -> String {
         let s = t.store.sessions().get(sid).unwrap().unwrap();
         t.store
@@ -353,30 +301,13 @@ mod tests {
         let id = begin(&t, &sid);
         // a turn run on a Node: the restart did not cut it
         let node = begin(&t, &sid);
-        let c = db(&t);
-        c.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
-        c.execute(
-            "UPDATE agent_turns SET node_attempt_id = 'att_1' WHERE id = ?",
-            [&node],
-        )
-        .unwrap();
-        drop(c);
+        fixture::mark_node_attempt(&t.store, &node, "att_1").unwrap();
         interrupt_open(&t.store, 9_000);
-        let open: Option<i64> = db(&t)
-            .query_row("SELECT ended FROM agent_turns WHERE id = ?", [&node], |r| {
-                r.get(0)
-            })
-            .unwrap();
+        let (open, _) = fixture::turn_end(&t.store, &node).unwrap();
         assert_eq!(open, None, "a Node turn is left to its attempt's end");
-        let (ended, stop): (i64, String) = db(&t)
-            .query_row(
-                "SELECT ended, stop_reason FROM agent_turns WHERE id = ?",
-                [&id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
+        let (ended, stop) = fixture::turn_end(&t.store, &id).unwrap();
         // no event of the session before the boot: it ends where it started, not at the boot
-        assert_eq!((ended, stop.as_str()), (1_000, "interrupted"));
+        assert_eq!((ended, stop.as_deref()), (Some(1_000), Some("interrupted")));
         // a late finish of the cut turn books nothing twice
         let _ = t.store.stats().turn_finish(&steve_store::TurnFinish {
             turn_id: id.clone(),
@@ -397,9 +328,7 @@ mod tests {
                 detail: json!({ "scope": "main" }),
             }],
         });
-        let n: i64 = db(&t)
-            .query_row("SELECT count(*) FROM usage_records", [], |r| r.get(0))
-            .unwrap();
+        let n = fixture::usage_count(&t.store).unwrap();
         assert_eq!(n, 0);
     }
 }

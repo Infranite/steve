@@ -9,7 +9,6 @@ import { Switch } from "@/components/ui/switch"
 import { Page, Row, Segmented, Empty, go, Panel, Section, Chevron, FieldRow, Tile, Pill, Notice, Disclosure } from "@/ui"
 import { cn } from "cn"
 import { toast, tm } from "@/store"
-import { Unwired } from "@/unwired"
 import { flowApi, useLoad, errText, sourceLabel, type FlowSummary, type Load, type Schedule, type Signal, type Source } from "@/api/flow"
 import { srcIcon, Failed } from "@/auto/common"
 import { NewRuleDialog } from "@/auto/new-rule"
@@ -38,7 +37,6 @@ export function AutomationView({ tab }: { tab: Tab }) {
   const src = useLoad(() => flowApi.sources(), [], ["signal"])
   const [dialog, setDialog] = useState<null | "rule" | "schedule">(null)
   const t = useT()
-  if (flows.unwired) return <Unwired id="auto" />
   /* today's signals, in one line under the title: the way to 信号 and the count that matters there */
   const st = sig.data?.stats, failed = (sig.data?.items ?? []).filter((s) => s.outcome === "failed").length
   const pulse = st ? (st.total
@@ -179,7 +177,16 @@ function SourceList({ L }: { L: Load<Source[]> }) {
 function AllowPrivate() {
   const t = useT()
   const [v, setV] = useState<string | null>(null), [saved, setSaved] = useState<string[]>([]), [busy, setBusy] = useState(false)
-  useEffect(() => { flowApi.allowPrivate().then((x) => { setV(x.hosts.join(", ")); setSaved(x.hosts) }, () => setV(null)) }, [])
+  const [error, setError] = useState("")
+  useEffect(() => {
+    let live = true
+    flowApi.allowPrivate().then(
+      (x) => { if (live) { setV(x.hosts.join(", ")); setSaved(x.hosts) } },
+      (e) => { if (live) setError(errText(e)) },
+    )
+    return () => { live = false }
+  }, [])
+  if (error) return <Section label={t("auto:allowPrivate.title")}><p role="alert" className="type-callout text-destructive">{error}</p></Section>
   if (v === null) return null
   const save = async () => {
     setBusy(true)

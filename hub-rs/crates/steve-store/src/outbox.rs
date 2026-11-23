@@ -1,7 +1,7 @@
 //! The durable outbox (migration 21): a message is written in the same transaction as the change that
 //! caused it and delivered at least once afterwards, so a crash between commit and send loses nothing.
 //!
-//! A domain records a fact in the same [`Store::transaction`] as the state change it describes
+//! A domain records a fact in the same [`Store::write`] as the state change it describes
 //! ([`emit`]); a [`Dispatcher`] hands it to every registered [`Consumer`] at least once, after the
 //! commit. What makes "at least once" safe is the receipt, not the lease:
 //!
@@ -28,13 +28,16 @@
 //! A consumer receives the events created after its first registration ([`Dispatcher::register`],
 //! `since_seq`); history is replayed only by an explicit backfill. Register before anything can emit.
 
+mod leases;
+mod receipts;
+
 use std::sync::Arc;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{Result, Store, StoreError, Tx, uid};
+use crate::{Result, Store, StoreError, uid};
 
 /// How long [`ConsumeError::Retry`] failures may last before the delivery is dead.
 pub const DEAD_AFTER_MS: i64 = 24 * 3_600_000;
@@ -61,17 +64,57 @@ pub struct Event {
     pub created: i64,
 }
 
-/// Records `payload` under `topic` in the caller's transaction; delivered only if it commits.
-pub fn emit(tx: &Tx, ws: &str, topic: &str, version: i64, payload: &Value) -> Result<Event> {
+/// Records a durable fact inside the caller's write transaction.
+pub fn append(
+    w: &mut crate::W<'_>,
+    ws: &str,
+    topic: &str,
+    version: i64,
+    payload: &Value,
+) -> Result<Event> {
+    use crate::contract::Q;
+    let event = append_on(w.db(), ws, topic, version, payload)?;
+    w.outbox_changed();
+    Ok(event)
+}
+
+fn append_on(
+    db: &mut dyn crate::contract::Backend,
+    ws: &str,
+    topic: &str,
+    version: i64,
+    payload: &Value,
+) -> Result<Event> {
     let id = uid("evt");
     let created = crate::now();
-    tx.execute(
-        "INSERT INTO outbox_events (id, workspace_id, topic, version, payload, created) VALUES (?, ?, ?, ?, ?, ?)",
-        params![id, ws, topic, version, payload.to_string(), created],
-    )?;
-    tx.mark_outbox();
+    let statement = sea_query::Query::insert()
+        .into_table("outbox_events")
+        .columns([
+            "id",
+            "workspace_id",
+            "topic",
+            "version",
+            "payload",
+            "created",
+        ])
+        .values_panic([
+            id.as_str().into(),
+            ws.into(),
+            topic.into(),
+            version.into(),
+            payload.to_string().into(),
+            created.into(),
+        ])
+        .returning_col("seq")
+        .take();
+    let (sql, values) = db.dialect().render(&statement)?;
+    let mut seq = None;
+    db.query(&sql, &values, &mut |row| {
+        seq = Some(row.get(0)?);
+        Ok(())
+    })?;
     Ok(Event {
-        seq: tx.last_insert_rowid(),
+        seq: crate::repo::must(seq)?,
         id,
         workspace_id: ws.into(),
         topic: topic.into(),
@@ -151,22 +194,15 @@ pub trait Consumer: Send + Sync {
     fn effect(&self, _ev: &Event) -> std::result::Result<(), ConsumeError> {
         Ok(())
     }
-    /// In the receipt's transaction: only `tx`, no other store call (the write lock is held), no I/O.
-    fn apply(&self, _tx: &Tx, _ev: &Event) -> std::result::Result<Applied, ConsumeError> {
+    /// In the receipt's transaction: only `w`, no other store call (the write lock is held), no I/O.
+    fn apply(
+        &self,
+        _w: &mut crate::W<'_>,
+        _ev: &Event,
+    ) -> std::result::Result<Applied, ConsumeError> {
         Ok(Applied::noted(""))
     }
 }
-
-/// The due deliveries of consumer `?1` (topic `?2`) at `?3`: not received, not dead, not backing off;
-/// `?4` binds the caller's LIMIT.
-const DUE: &str = "SELECT e.seq, e.id, e.workspace_id, e.topic, e.version, e.payload, e.created
-       FROM outbox_events e JOIN outbox_consumers k ON k.id = ?1 AND k.enabled = 1
-      WHERE e.topic = ?2 AND e.seq > k.since_seq
-        AND NOT EXISTS (SELECT 1 FROM outbox_receipts r WHERE r.event_seq = e.seq AND r.consumer_id = ?1)
-        AND NOT EXISTS (SELECT 1 FROM outbox_leases l WHERE l.event_seq = e.seq AND l.consumer_id = ?1
-                          AND (l.dead = 1 OR l.next_at > ?3))
-        AND ?4 = ?4
-      ORDER BY e.seq";
 
 /// What one [`Dispatcher::pump`] did.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -227,39 +263,9 @@ impl Dispatcher {
     /// A known id with another topic is refused: a consumer that changes what it means takes a new id
     /// (or an explicit migration), so claiming and pruning never disagree about what it owes.
     pub fn register(&self, store: &Store) -> Result<()> {
-        store.transaction(|tx| {
-            for c in &self.consumers {
-                let known: Option<String> = tx
-                    .query_row(
-                        "SELECT topic FROM outbox_consumers WHERE id = ?",
-                        [c.id()],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
-                match known {
-                    Some(t) if t == c.topic() => {}
-                    Some(t) => {
-                        return Err(StoreError::Hook(format!(
-                            "outbox consumer {} is registered for {t}, not {}",
-                            c.id(),
-                            c.topic()
-                        )));
-                    }
-                    None => {
-                        let since: i64 = match c.since() {
-                            Since::Start => 0,
-                            Since::Now => tx.query_row(
-                                "SELECT coalesce(max(seq), 0) FROM outbox_events",
-                                [],
-                                |r| r.get(0),
-                            )?,
-                        };
-                        tx.execute(
-                            "INSERT INTO outbox_consumers (id, topic, since_seq, enabled, registered) VALUES (?, ?, ?, 1, ?)",
-                            params![c.id(), c.topic(), since, crate::now()],
-                        )?;
-                    }
-                }
+        store.write(|w| {
+            for consumer in &self.consumers {
+                leases::register(w, consumer.as_ref())?;
             }
             Ok(())
         })
@@ -283,30 +289,10 @@ impl Dispatcher {
     /// attempt before it is made, so one cut short by a crash still counts.
     fn claim(&self, store: &Store, c: &dyn Consumer, now: i64) -> Result<Vec<Event>> {
         // idle passes stay off the write lock: a pooled read first, the claim re-checks under the lock
-        let due = store.reader(|r| -> Result<bool> {
-            let mut st = r.prepare_cached(&format!("SELECT EXISTS ({DUE} LIMIT 1)"))?;
-            Ok(st.query_row(params![c.id(), c.topic(), now, 1_i64], |r| r.get(0))?)
-        })?;
-        if !due {
+        if !store.read(|r| leases::has_due(r, c, now))? {
             return Ok(Vec::new());
         }
-        store.transaction(|tx| {
-            let evs = {
-                let mut st = tx.prepare_cached(&format!("{DUE} LIMIT ?4"))?;
-                st.query_map(params![c.id(), c.topic(), now, BATCH as i64], event_row)?
-                    .collect::<rusqlite::Result<Vec<_>>>()?
-            };
-            for e in &evs {
-                tx.execute(
-                    "INSERT INTO outbox_leases (event_seq, consumer_id, attempts, updated)
-                     VALUES (?1, ?2, 1, ?3)
-                     ON CONFLICT (event_seq, consumer_id) DO UPDATE
-                       SET attempts = attempts + 1, updated = ?3",
-                    params![e.seq, c.id(), now],
-                )?;
-            }
-            Ok(evs)
-        })
+        store.write(|w| leases::claim(w, c, now))
     }
 
     fn deliver(
@@ -320,30 +306,16 @@ impl Dispatcher {
         if let Err(e) = c.effect(ev) {
             return self.failed(store, c, ev, e, now, out);
         }
-        let done = store.transaction(|tx| -> std::result::Result<Option<AfterCommit>, Failed> {
-            let fresh = tx
-                .execute(
-                    "INSERT OR IGNORE INTO outbox_receipts (event_seq, consumer_id, workspace_id, done, outcome) VALUES (?, ?, ?, ?, '')",
-                    params![ev.seq, c.id(), ev.workspace_id, now],
-                )
-                .map_err(StoreError::from)?
-                == 1;
+        let done = store.write(|w| -> std::result::Result<Option<AfterCommit>, Failed> {
+            let fresh = receipts::claim(w, c.id(), ev, now)?;
             let after = if fresh {
-                let a = c.apply(tx, ev).map_err(Failed::Consume)?;
-                tx.execute(
-                    "UPDATE outbox_receipts SET outcome = ? WHERE event_seq = ? AND consumer_id = ?",
-                    params![a.outcome, ev.seq, c.id()],
-                )
-                .map_err(StoreError::from)?;
+                let a = c.apply(w, ev).map_err(Failed::Consume)?;
+                receipts::outcome(w, c.id(), ev.seq, &a.outcome)?;
                 a.after
             } else {
                 None
             };
-            tx.execute(
-                "DELETE FROM outbox_leases WHERE event_seq = ? AND consumer_id = ?",
-                params![ev.seq, c.id()],
-            )
-            .map_err(StoreError::from)?;
+            receipts::release(w, c.id(), ev.seq)?;
             Ok(after)
         });
         match done {
@@ -375,34 +347,7 @@ impl Dispatcher {
             ConsumeError::Reject(m) => (true, m.clone()),
             ConsumeError::Retry(m) => (false, m.clone()),
         };
-        let (dead, first) = store.transaction(|tx| -> Result<(bool, bool)> {
-            let row: Option<(i64, Option<i64>)> = tx
-                .query_row(
-                    "SELECT attempts, failing_since FROM outbox_leases WHERE event_seq = ? AND consumer_id = ?",
-                    params![ev.seq, c.id()],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?;
-            let (attempts, since) = row.unwrap_or((1, None));
-            let since = since.unwrap_or(now);
-            let dead = reject || now - since >= DEAD_AFTER_MS;
-            // the first dead delivery of this consumer in this workspace since the last revive
-            let first = dead
-                && !tx.query_row(
-                    "SELECT EXISTS (SELECT 1 FROM outbox_leases l JOIN outbox_events e ON e.seq = l.event_seq
-                      WHERE l.consumer_id = ? AND l.dead = 1 AND e.workspace_id = ? AND l.event_seq <> ?)",
-                    params![c.id(), ev.workspace_id, ev.seq],
-                    |r| r.get::<_, bool>(0),
-                )?;
-            tx.execute(
-                "INSERT INTO outbox_leases (event_seq, consumer_id, attempts, last_error, next_at, dead, failing_since, updated)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                 ON CONFLICT (event_seq, consumer_id) DO UPDATE
-                   SET last_error = ?4, next_at = ?5, dead = ?6, failing_since = ?7, updated = ?8",
-                params![ev.seq, c.id(), attempts, msg, now + backoff(attempts), dead, since, now],
-            )?;
-            Ok((dead, first))
-        })?;
+        let (dead, first) = store.write(|w| leases::fail(w, c.id(), ev, now, reject, &msg))?;
         if dead {
             out.dead += 1;
             if first {
@@ -430,19 +375,6 @@ pub fn backoff(attempts: i64) -> i64 {
     (s * 1000).min(BACKOFF_MAX_MS)
 }
 
-fn event_row(r: &rusqlite::Row) -> rusqlite::Result<Event> {
-    let payload: String = r.get(5)?;
-    Ok(Event {
-        seq: r.get(0)?,
-        id: r.get(1)?,
-        workspace_id: r.get(2)?,
-        topic: r.get(3)?,
-        version: r.get(4)?,
-        payload: serde_json::from_str(&payload).unwrap_or(Value::Null),
-        created: r.get(6)?,
-    })
-}
-
 /// The outbox as healthz and the release check see it.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stats {
@@ -454,7 +386,7 @@ pub struct Stats {
 }
 
 /// Owed deliveries over all registered consumers (a paused one still owes: pausing is not unsubscribing).
-pub fn stats(c: &Connection) -> Result<Stats> {
+pub(crate) fn stats_on(c: &Connection) -> Result<Stats> {
     let (pending, oldest): (i64, Option<i64>) = c.query_row(
         "SELECT count(*), min(e.created) FROM outbox_events e
            JOIN outbox_consumers k ON k.topic = e.topic AND e.seq > k.since_seq
@@ -476,7 +408,7 @@ pub fn stats(c: &Connection) -> Result<Stats> {
 }
 
 /// The dead deliveries, one group per consumer over every workspace, newest first.
-pub fn dead(c: &Connection) -> Result<Vec<DeadGroup>> {
+pub(crate) fn dead_on(c: &Connection) -> Result<Vec<DeadGroup>> {
     let mut st = c.prepare_cached(
         "SELECT l.consumer_id, coalesce(k.topic, ''), count(*), max(l.updated),
                 (SELECT x.last_error FROM outbox_leases x WHERE x.consumer_id = l.consumer_id AND x.dead = 1
@@ -504,21 +436,11 @@ pub fn dead(c: &Connection) -> Result<Vec<DeadGroup>> {
 /// Sends the dead deliveries (of `consumer`, or all) again: attempts and the failure clock start
 /// over, so a delivery that keeps failing has another [`DEAD_AFTER_MS`]. Returns how many.
 pub fn revive(store: &Store, consumer: Option<&str>) -> Result<usize> {
-    store.transaction(|tx| -> Result<usize> {
-        let n = tx.execute(
-            "UPDATE outbox_leases SET dead = 0, attempts = 0, next_at = 0, failing_since = NULL, updated = ?1
-              WHERE dead = 1 AND (?2 IS NULL OR consumer_id = ?2)",
-            params![crate::now(), consumer],
-        )?;
-        if n > 0 {
-            tx.mark_outbox();
-        }
-        Ok(n)
-    })
+    store.write(|w| leases::revive(w, consumer, crate::now()))
 }
 
 /// Whether consumer `id` was ever registered (and not unregistered).
-pub fn is_registered(c: &Connection, id: &str) -> Result<bool> {
+pub(crate) fn is_registered_on(c: &Connection, id: &str) -> Result<bool> {
     Ok(c.query_row(
         "SELECT EXISTS (SELECT 1 FROM outbox_consumers WHERE id = ?)",
         [id],
@@ -529,10 +451,42 @@ pub fn is_registered(c: &Connection, id: &str) -> Result<bool> {
 /// Removes consumer `id` with everything it owed and its receipts: a consumer the Hub no longer
 /// runs, whose backlog would otherwise be kept forever. Registering it again starts it afresh.
 pub fn unregister(store: &Store, id: &str) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute("DELETE FROM outbox_leases WHERE consumer_id = ?", [id])?;
-        tx.execute("DELETE FROM outbox_receipts WHERE consumer_id = ?", [id])?;
-        tx.execute("DELETE FROM outbox_consumers WHERE id = ?", [id])?;
-        Ok(())
-    })
+    store.write(|w| leases::unregister(w, id))
+}
+
+pub(crate) fn latest_sequence(r: &mut impl crate::Read) -> Result<i64> {
+    use sea_query::{Expr, Func, Query};
+    Ok(r.one(
+        Query::select()
+            .expr(Func::max(Expr::col("seq")))
+            .from("outbox_events"),
+        |row| row.get::<Option<i64>>(0),
+    )?
+    .flatten()
+    .unwrap_or_default())
+}
+
+#[cfg(feature = "testkit")]
+pub(crate) fn record_test_receipt(
+    w: &mut crate::W<'_>,
+    event: &Event,
+    consumer: &str,
+    outcome: &str,
+) -> Result<()> {
+    if !receipts::claim(w, consumer, event, 1)? {
+        return Err(StoreError::Rejected("outbox receipt already exists".into()));
+    }
+    receipts::outcome(w, consumer, event.seq, outcome)
+}
+
+pub fn stats(r: &mut impl crate::Read) -> Result<Stats> {
+    stats_on(r.connection())
+}
+
+pub fn dead(r: &mut impl crate::Read) -> Result<Vec<DeadGroup>> {
+    dead_on(r.connection())
+}
+
+pub fn is_registered(r: &mut impl crate::Read, id: &str) -> Result<bool> {
+    is_registered_on(r.connection(), id)
 }

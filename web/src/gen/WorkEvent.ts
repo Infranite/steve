@@ -7,4 +7,4 @@ import type { SessionId } from "./SessionId";
 import type { ThreadRunId } from "./ThreadRunId";
 import type { WorkspaceId } from "./WorkspaceId";
 
-export type WorkEvent = { "type": "item", id: ItemId, ws: WorkspaceId, } | { "type": "decision", id: DecisionId, item_id?: ItemId | null, ws: WorkspaceId, } | { "type": "session", id: SessionId, item_id?: ItemId | null, ws: WorkspaceId, } | { "type": "message", id: MessageId, ws: WorkspaceId, } | { "type": "thread.run", id: ThreadRunId, ws: WorkspaceId, };
+export type WorkEvent = { "type": "item", id: ItemId, ws: WorkspaceId, } | { "type": "decision", id: DecisionId, item_id?: ItemId | null, ws: WorkspaceId, } | { "type": "session", id: SessionId, item_id?: ItemId | null, ws: WorkspaceId, } | { "type": "message", id: MessageId, ws: WorkspaceId, space: string, } | { "type": "thread.run", id: ThreadRunId, ws: WorkspaceId, };

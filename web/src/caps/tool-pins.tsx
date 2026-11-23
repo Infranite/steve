@@ -6,7 +6,7 @@ import { useT } from "@/i18n"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { SkillGrid, type Skill } from "@/components/affect/agent-skills"
-import { Section, Loading, Blank, Notice, Disclosure } from "@/ui"
+import { Section, Loading, Notice, Disclosure } from "@/ui"
 import { capsApi, type BotCaps, type ToolPin } from "@/api/caps"
 import { errText, useList } from "./common"
 import { toolDescKey } from "./tool-catalog"
@@ -23,7 +23,6 @@ export function BotToolPins({ bot, caps }: { bot: string; caps: BotCaps | null }
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   if (data.s === "loading") return <Loading className="py-4" />
-  if (data.s === "unwired") return <Blank>{t("caps:pins.unwired")}</Blank>
   if (data.s === "error") return <Notice tone="destructive">{data.e}<Button variant="ghost" size="xs" onClick={() => void load()}>{t("caps:pins.retry")}</Button></Notice>
   const [tools, server] = data.v
   const core = new Set(tools.core), pinned = new Set(tools.pins.map(key))

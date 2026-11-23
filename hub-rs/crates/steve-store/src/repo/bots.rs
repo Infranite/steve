@@ -99,7 +99,7 @@ const BOT: &str = "SELECT * FROM bots WHERE id = ? AND deleted = 0";
 impl Bots<'_> {
     /// Non-deleted bots, main first then by name; with `ws`, only members of that workspace.
     pub fn list(&self, ws: Option<&str>) -> Result<Vec<Bot>> {
-        self.0.read(|c| match ws {
+        self.0.read_conn(|c| match ws {
             Some(ws) => all(
                 c,
                 "SELECT b.* FROM bots b JOIN bot_workspaces m ON m.bot_id = b.id WHERE m.workspace_id = ? AND b.deleted = 0 ORDER BY b.main DESC, b.name",
@@ -112,12 +112,12 @@ impl Bots<'_> {
 
     /// A non-deleted bot.
     pub fn get(&self, id: &str) -> Result<Option<Bot>> {
-        self.0.read(|c| one(c, BOT, [id], Bot::from_row))
+        self.0.read_conn(|c| one(c, BOT, [id], Bot::from_row))
     }
 
     /// The main bot (Steve).
     pub fn main(&self) -> Result<Option<Bot>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             one(
                 c,
                 "SELECT * FROM bots WHERE main = 1 AND deleted = 0 ORDER BY updated LIMIT 1",
@@ -128,7 +128,7 @@ impl Bots<'_> {
     }
 
     pub fn workspaces(&self, id: &str) -> Result<Vec<BotWorkspace>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT workspace_id, duty FROM bot_workspaces WHERE bot_id = ?",
@@ -144,7 +144,7 @@ impl Bots<'_> {
     }
 
     pub fn in_workspace(&self, id: &str, ws: &str) -> Result<bool> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             exists(
                 c,
                 "SELECT 1 FROM bot_workspaces WHERE bot_id = ? AND workspace_id = ?",
@@ -155,8 +155,9 @@ impl Bots<'_> {
 
     /// Makes the bot a member of exactly `wss` (existing duties are kept).
     pub fn set_workspaces(&self, id: &str, wss: &[String]) -> Result<()> {
-        self.0.write(|w| {
-            let tx = w.tx()?;
+        self.0.write_conn(|w| {
+            let transaction = w.tx()?;
+            let tx = transaction.connection();
             let marks = if wss.is_empty() { "''".to_string() } else { vec!["?"; wss.len()].join(",") };
             let mut ps: Vec<&str> = vec![id];
             ps.extend(wss.iter().map(String::as_str));
@@ -167,7 +168,7 @@ impl Bots<'_> {
             for ws in wss {
                 tx.run("INSERT OR IGNORE INTO bot_workspaces (bot_id, workspace_id, created) VALUES (?, ?, ?)", params![id, ws, now()])?;
             }
-            tx.commit()?;
+            transaction.commit()?;
             if let Some(ws) = crate::repo::one(
                 w.c,
                 "SELECT workspace_id FROM bots WHERE id = ?",
@@ -187,12 +188,12 @@ impl Bots<'_> {
 
     /// Seed-only insert: never overwrites what the user changed. Also joins `ws`. No event.
     pub fn seed(&self, id: &str, main: bool, b: &NewBot, ws: &str) -> Result<()> {
-        self.0.write(|w| seed(w.c, id, main, b, ws))
+        self.0.write_conn(|w| seed(w.c, id, main, b, ws))
     }
 
     /// A new (non-main) bot in `ws`; audited as `bot.create`.
     pub fn create(&self, ws: &str, b: &NewBot, author: &str) -> Result<Option<Bot>> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let id = uid("bot");
             seed(w.c, &id, false, b, ws)?;
             w.c.run(
@@ -212,7 +213,7 @@ impl Bots<'_> {
     /// Fails with `没有这个 Bot`. Bumps `revision` when something changed and always records
     /// a revision row `{before, after}` with the given keys.
     pub fn patch(&self, id: &str, p: &BotPatch, author: &str) -> Result<Option<Bot>> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let cur =
                 one(w.c, BOT, [id], Bot::from_row)?.ok_or(StoreError::NotFound("没有这个 Bot"))?;
             let avatar = p.avatar.as_ref().map(to_json).transpose()?;
@@ -271,30 +272,11 @@ impl Bots<'_> {
 
     /// Soft delete; the main bot cannot be removed.
     pub fn remove(&self, id: &str) -> Result<()> {
-        self.0.write(|w| {
-            w.c.run(
-                "UPDATE bots SET deleted = 1, enabled = 0, updated = ? WHERE id = ? AND main = 0",
-                params![now(), id],
-            )?;
-            if let Some(ws) = crate::repo::one(
-                w.c,
-                "SELECT workspace_id FROM bots WHERE id = ?",
-                [id],
-                |r| r.get::<_, String>(0),
-            )? {
-                w.publish(steve_types::DomainEvent::from(
-                    steve_types::ConfigEvent::Bot {
-                        ws: ws.into(),
-                        id: id.into(),
-                    },
-                ));
-            }
-            Ok(())
-        })
+        self.0.write(|w| crate::bots::remove(w, id))
     }
 
     pub fn restore(&self, id: &str) -> Result<()> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             w.c.run(
                 "UPDATE bots SET deleted = 0, enabled = 1, updated = ? WHERE id = ?",
                 params![now(), id],
@@ -319,7 +301,7 @@ impl Bots<'_> {
     /// The raw SQL `seed()` in orchestrator.ts runs after seeding `steve` and `dev`: link `dev` to the
     /// Steve project if it has none, and give both their colours if their avatar is still `{}`. No event.
     pub fn seed_fixups(&self, steve_project: Option<&str>) -> Result<()> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             if let Some(p) = steve_project {
                 w.c.run("UPDATE bots SET default_project = ? WHERE id = 'dev' AND default_project IS NULL", [p])?;
             }
@@ -371,7 +353,7 @@ pub struct Memories<'a>(&'a Store);
 
 impl Memories<'_> {
     pub fn get(&self, id: &str) -> Result<Option<Memory>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             one(
                 c,
                 "SELECT * FROM bot_memories WHERE id = ?",
@@ -383,13 +365,13 @@ impl Memories<'_> {
 
     /// Newest first.
     pub fn list(&self, bot: &str, ws: &str) -> Result<Vec<Memory>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(c, "SELECT * FROM bot_memories WHERE bot_id = ? AND workspace_id = ? ORDER BY created DESC", [bot, ws], Memory::from_row)
         })
     }
 
     pub fn count(&self, bot: &str, ws: &str) -> Result<i64> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             Ok(c.prepare_cached(
                 "SELECT count(*) n FROM bot_memories WHERE bot_id = ? AND workspace_id = ?",
             )?
@@ -398,7 +380,7 @@ impl Memories<'_> {
     }
 
     pub fn add(&self, bot: &str, ws: &str, text: &str, source: &str) -> Result<String> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let id = uid("mem");
             w.c.run(
                 "INSERT INTO bot_memories (id, bot_id, workspace_id, text, source, created) VALUES (?, ?, ?, ?, ?, ?)",
@@ -415,7 +397,7 @@ impl Memories<'_> {
     }
 
     pub fn edit(&self, id: &str, text: &str) -> Result<()> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let bot: Option<(String, String)> = one(
                 w.c,
                 "UPDATE bot_memories SET text = ? WHERE id = ? RETURNING bot_id, workspace_id",
@@ -435,7 +417,7 @@ impl Memories<'_> {
     }
 
     pub fn remove(&self, id: &str) -> Result<()> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let bot: Option<(String, String)> = one(
                 w.c,
                 "DELETE FROM bot_memories WHERE id = ? RETURNING bot_id, workspace_id",
@@ -456,7 +438,7 @@ impl Memories<'_> {
 
     /// Forgets everything bots remember in `ws`; publishes `bot` with id `*`.
     pub fn clear(&self, ws: &str) -> Result<()> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             w.c.run("DELETE FROM bot_memories WHERE workspace_id = ?", [ws])?;
             w.publish(steve_types::DomainEvent::from(
                 steve_types::ConfigEvent::Bot {
@@ -470,7 +452,7 @@ impl Memories<'_> {
 
     /// All memories of one bot in every workspace (`DELETE /api/bots/:id` with `memory: "delete"`). No event.
     pub fn remove_of_bot(&self, bot: &str) -> Result<()> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             w.c.run("DELETE FROM bot_memories WHERE bot_id = ?", [bot])?;
             Ok(())
         })

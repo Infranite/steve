@@ -1,3 +1,6 @@
+import { SessionIdentity } from "@/components/session-identity"
+import { useItemRuntime } from "@/store"
+import { getItems, getItem } from "@/store"
 import { CloseoutSummary } from "@/item-closeout"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -10,7 +13,7 @@ import { itemDisplayStatus, workflowRelation, workflowRelationText } from "@/ite
 import { BotAvatar, go, ItemNo, Meta, RelNote, StatusDot } from "@/ui"
 import { cn } from "cn"
 import { FolderIcon, GitBranchIcon, StarIcon } from "lucide-react"
-import { type ReactNode } from "react"
+import { memo, type ReactNode } from "react"
 import { t as tr, useT } from "@/i18n"
 
 /* the due presets the web writes are stored as these Chinese values; only their labels are translated */
@@ -46,28 +49,30 @@ export const Count = ({ n }: { n: number }) => (n ? <span className="ml-2 font-n
 /** plan progress as a count with a short bar; on a finished item only when steps were left open, which is worth a look */
 export function PlanBar({ i, warn }: { i: Item; warn?: boolean }) {
   const t = useT()
-  if (!i.plan?.length) return null
-  const dn = i.plan.filter((x) => x[1] === 1).length
-  return <span className={cn("inline-flex items-center gap-1.5 tabular-nums", warn && "text-attention")} title={t("shell:item.plan", { done: dn, total: i.plan.length })} data-plan>{dn}/{i.plan.length}<Progress value={(dn / i.plan.length) * 100} className={cn("hidden w-8 sm:flex [&_[data-slot=progress-track]]:h-1", warn ? "[&_[data-slot=progress-indicator]]:bg-attention" : "[&_[data-slot=progress-indicator]]:bg-foreground/60")} /></span>
+  const total = i.planTotal ?? i.plan?.length ?? 0
+  const dn = i.planDone ?? i.plan?.filter((x) => x[1] === 1).length ?? 0
+  if (!total) return null
+  return <span className={cn("inline-flex items-center gap-1.5 tabular-nums", warn && "text-attention")} title={t("shell:item.plan", { done: dn, total })} data-plan>{dn}/{total}<Progress value={(dn / total) * 100} className={cn("hidden w-8 sm:flex [&_[data-slot=progress-track]]:h-1", warn ? "[&_[data-slot=progress-indicator]]:bg-attention" : "[&_[data-slot=progress-indicator]]:bg-foreground/60")} /></span>
 }
 
 /** one item in a list. Open items take two lines: the title with what tells it apart on the right (tags, due, plan,
  *  bot, time), then what it is doing now. Finished and dropped items fold into one line, their outcome after the title.
  *  `proj` / `bot` off: the list is already about one project or bot, so the row doesn't repeat it */
-export function ItemRow({ i, pick, proj = true, bot = true, nested = false, badge }: { i: Item; pick?: () => void; proj?: boolean; bot?: boolean; nested?: boolean; badge?: ReactNode }) {
+export const ItemRow = memo(function ItemRow({ i, pick, proj = true, bot = true, nested = false, badge }: { i: Item; pick?: () => void; proj?: boolean; bot?: boolean; nested?: boolean; badge?: ReactNode }) {
   const t = useT()
   const on = selected.has(i.id), closed = closedSt(i.st), w = i.wait
-  const rawRelation = workflowRelation(i, st.items)
+  const rawRelation = workflowRelation(i, getItems())
   const relation = nested && rawRelation?.kind === "child" ? null : rawRelation
-  const planOpen = !!i.plan?.length && i.plan.some((x) => x[1] !== 1)
+  const executions = useItemRuntime(i.id)
+  const planOpen = (i.planTotal ?? 0) > (i.planDone ?? 0) || !!i.plan?.some((x) => x[1] !== 1)
   const extra = [
     nested && (i.workflowAttempt ?? 0) > 1 && <span key="att" className="shrink-0 whitespace-nowrap rounded bg-muted px-1.5 py-0.5 type-footnote tabular-nums text-muted-foreground" data-subtask-attempt={i.workflowAttempt}>{t("views:agentTree.attempt", { n: i.workflowAttempt })}</span>,
     nested && i.workflowSuperseded && <span key="sup" className="shrink-0 whitespace-nowrap type-footnote text-tertiary" data-subtask-superseded>{t("shell:item.supersededTry")}</span>,
     i.ss.length > 1 && <span key="ss" className="shrink-0 whitespace-nowrap">{t("shell:item.sessions", { count: i.ss.length })}</span>,
-    i.q.length > 0 && <span key="q" className="shrink-0 whitespace-nowrap">{t("shell:item.queued", { count: i.q.length })}</span>,
+    (i.queued ?? i.q.length) > 0 && <span key="q" className="shrink-0 whitespace-nowrap">{t("shell:item.queued", { count: i.queued ?? i.q.length })}</span>,
     i.parent && (!nested || i.src[1] !== "workflow") && <span key="p" className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap"><GitBranchIcon className="size-3" />{t("shell:item.forked")}</span>,
     /* an open item names what it is still waiting for; once nothing is in its way the relation is history and stays on the item page */
-    !closed && depsOpen(i).length > 0 && <span key="d" className="shrink-0 whitespace-nowrap" title={depsOpen(i).map((d) => `${d} ${st.items.find((x) => x.id === d)?.t ?? ""}`).join("\n")} data-waits-on>{depsOpen(i).length > 1 ? t("shell:item.waitsOnMany", { id: depsOpen(i)[0], count: depsOpen(i).length }) : t("shell:item.waitsOn", { id: depsOpen(i)[0] })}</span>,
+    !closed && depsOpen(i).length > 0 && <span key="d" className="shrink-0 whitespace-nowrap" title={depsOpen(i).map((d) => `${d} ${getItem(d)?.t ?? ""}`).join("\n")} data-waits-on>{depsOpen(i).length > 1 ? t("shell:item.waitsOnMany", { id: depsOpen(i)[0], count: depsOpen(i).length }) : t("shell:item.waitsOn", { id: depsOpen(i)[0] })}</span>,
   ].filter(Boolean)
   /* a list row carries one tag, its kind, as quiet text (colour stays for status); the rest are in its hover title and
    * on the item page */
@@ -80,7 +85,9 @@ export function ItemRow({ i, pick, proj = true, bot = true, nested = false, badg
       {i.due && !closed && <span className={cn("whitespace-nowrap", /今天/.test(i.due) && "text-foreground/80")}>{t("shell:item.due", { due: dueLabel(i.due) })}</span>}
       {proj && i.project && <span className="hidden max-w-28 md:inline-flex"><ProjectChip id={i.project} plain /></span>}
       {(!closed || planOpen) && <PlanBar i={i} warn={closed} />}
-      {bot && i.b && <span title={botName(i.b)} className="hidden sm:inline-flex"><BotAvatar k={i.b} size={18} /></span>}
+      {executions.length > 0 && <SessionIdentity session={executions[0]} compact />}
+      {executions.length > 1 && <span title={executions.map((s) => [botName(s.b), s.h ?? t("core:unknownHarness"), s.m ?? t("core:unknownModel")].join(" · ")).join("\n")}>+{executions.length - 1}</span>}
+      {!executions.length && bot && i.b && <span title={botName(i.b)} className="hidden sm:inline-flex"><BotAvatar k={i.b} size={18} /></span>}
       <span className="min-w-11 whitespace-nowrap text-right tabular-nums text-tertiary">{i.up}</span>
     </span>
   )
@@ -118,7 +125,7 @@ export function ItemRow({ i, pick, proj = true, bot = true, nested = false, badg
       </div>
     </div>
   )
-}
+})
 
 export const ItemRowExport = ItemRow
 

@@ -1,6 +1,7 @@
 #![allow(clippy::unit_arg, clippy::cloned_ref_to_slice_refs)] // terse assertions in tests
 //! Items, deps, timeline, artifacts, sessions, events, queued, decisions, messages.
 
+use steve_store::testkit::SqliteFixtures;
 mod common;
 
 use common::*;
@@ -131,7 +132,7 @@ fn item_numbers_are_global_per_prefix() {
             })
         )]
     );
-    s.with_conn(|c| Ok(c.execute("INSERT INTO workspaces (id, name, item_prefix, created) VALUES ('w2', 'B', 'ST', 1), ('w3', 'C', 'XY', 1)", [])?)).unwrap();
+    s.fixture_write(|c| Ok(c.execute("INSERT INTO workspaces (id, name, item_prefix, created) VALUES ('w2', 'B', 'ST', 1), ('w3', 'C', 'XY', 1)", [])?)).unwrap();
     assert_eq!(
         new_item(s, "w2", "b").id,
         "ST-2",
@@ -194,7 +195,7 @@ fn item_json_shape() {
             "closed_at": null, "closed_reason": null, "design_gate": false
         })
     );
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         let (src, parent): (String, String) =
             c.query_row("SELECT source, parent FROM items", [], |r| {
                 Ok((r.get(0)?, r.get(1)?))
@@ -593,7 +594,7 @@ fn events_paging_and_search() {
         ))
     );
     // the stored text keeps key order (preserve_order)
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         let d: String = c.query_row("SELECT data FROM events WHERE seq = ?", [first], |r| r.get(0))?;
         Ok(assert_eq!(d, r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"你好 needle"}}"#))
     })
@@ -612,6 +613,19 @@ fn events_paging_and_search() {
     assert_eq!(s.events().after(&ses.id, 0, 1).unwrap()[0].data, data);
     assert_eq!(s.sessions().search(WS, "needle").unwrap(), [ses.id.clone()]);
     assert!(s.sessions().search("other", "needle").unwrap().is_empty());
+}
+
+fn queue_session_changed(
+    id: &str,
+    item_id: Option<Option<steve_types::ItemId>>,
+) -> steve_types::BusEvent {
+    steve_types::BusEvent::from(steve_types::DomainEvent::from(
+        steve_types::WorkEvent::Session {
+            id: id.into(),
+            item_id,
+            ws: WS.into(),
+        },
+    ))
 }
 
 #[test]
@@ -634,20 +648,8 @@ fn queued() {
     );
     s.queued().drop(&q[0].id).unwrap();
     s.queued().drop("q_missing").unwrap();
-    let ev = steve_types::BusEvent::from(steve_types::DomainEvent::from(
-        steve_types::WorkEvent::Session {
-            ws: steve_types::WorkspaceId::from(steve_store::WS),
-            id: {
-                let value: String = ses.id.clone();
-                steve_types::SessionId::from(value)
-            },
-            item_id: {
-                let value: Option<Option<String>> = None;
-                value.map(|value| value.map(Into::into))
-            },
-        },
-    ));
-    assert_eq!(t.events.take(), vec![ev.clone(), ev.clone(), ev]);
+    let ev = queue_session_changed(&ses.id, None);
+    assert_eq!(t.events.take(), [ev.clone(), ev.clone(), ev.clone()]);
     assert_eq!(
         serde_json::to_string(&steve_types::BusEvent::Domain(
             steve_types::DomainEvent::Work(steve_types::WorkEvent::Session {
@@ -667,7 +669,11 @@ fn queued() {
     );
     let taken = s.queued().take(&ses.id).unwrap();
     assert_eq!(taken.len(), 1);
-    assert!(s.queued().list(&ses.id).unwrap().is_empty() && t.events.take().is_empty());
+    assert!(s.queued().list(&ses.id).unwrap().is_empty());
+    assert_eq!(
+        t.events.take(),
+        [queue_session_changed(&ses.id, Some(None))]
+    );
 }
 
 /// Edit, remove and move-to-front touch only a row still waiting in that session's queue: once a turn
@@ -735,6 +741,10 @@ fn queued_edit_remove_front() {
     assert_eq!(
         taken.iter().map(|q| q.text.as_str()).collect::<Vec<_>>(),
         ["三", "二改"]
+    );
+    assert_eq!(
+        t.events.take(),
+        [queue_session_changed(&ses.id, Some(None))]
     );
     assert!(
         s.queued()
@@ -824,8 +834,8 @@ fn imported_sessions() {
     assert!(s.queued().add(&id, "q", "me", &[]).is_err());
     assert!(s.queued().add_unless_waiting(&id, "q", "me", &[]).is_err());
     // Removal must clean up queues from older builds too, although new writes are refused.
-    s.transaction::<_, steve_store::StoreError>(|tx| {
-        tx.execute("INSERT INTO queued(id,session_id,text,via,created) VALUES ('legacy-import-queue',?,'q','me',1)", [&id])?;
+    s.write::<_, steve_store::StoreError>(|tx| {
+        steve_store::testkit::sqlite_writer(tx).execute("INSERT INTO queued(id,session_id,text,via,created) VALUES ('legacy-import-queue',?,'q','me',1)", [&id])?;
         Ok(())
     }).unwrap();
     t.events.take();
@@ -951,7 +961,7 @@ fn decisions() {
         (e.status.as_str(), e.undo.clone()),
         ("expired", Value::Null)
     );
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         Ok(assert_eq!(
             count(c, "SELECT count(*) FROM decisions WHERE undo IS NULL"),
             1
@@ -983,6 +993,33 @@ fn decisions() {
         t.events.take().is_empty(),
         "a missing decision has no workspace"
     );
+
+    use steve_store::views::{DecisionPage, Views};
+    s.decisions()
+        .resolve(&free.id, &Value::Null, "resolved", &Value::Null)
+        .unwrap()
+        .unwrap();
+    s.write(|tx| -> Result<()> {
+        steve_store::testkit::sqlite_writer(tx).execute(
+            "UPDATE decisions SET resolved = 100 WHERE id IN (?, ?)",
+            [&d.id, &free.id],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let mut expected = [d.id, free.id];
+    expected.sort_unstable_by(|a, b| b.cmp(a));
+    let mut query = DecisionPage {
+        since: 0,
+        before: None,
+        limit: 1,
+    };
+    let (first, next) = s.read(|r| r.decision_views().settled(WS, &query)).unwrap();
+    assert_eq!(first[0].id.as_str(), expected[0]);
+    query.before = Some(next.unwrap());
+    let (second, next) = s.read(|r| r.decision_views().settled(WS, &query)).unwrap();
+    assert_eq!(second[0].id.as_str(), expected[1]);
+    assert!(next.is_none());
 }
 
 #[test]
@@ -1010,6 +1047,7 @@ fn messages() {
             .map(
                 |id| steve_types::BusEvent::Domain(steve_types::DomainEvent::Work(
                     steve_types::WorkEvent::Message {
+                        space: "steve".into(),
                         id: {
                             let value: String = id.clone();
                             steve_types::MessageId::from(value)
@@ -1117,11 +1155,7 @@ fn item_deleted_hook_runs_in_the_delete_transaction() {
     let (log, refuse) = (seen.clone(), keep.id.clone());
     assert!(s.on_item_deleted(move |tx, ws, id| {
         // the row is already gone inside the same transaction
-        let n: i64 = tx
-            .query_row("SELECT COUNT(*) FROM items WHERE id = ?", [id], |r| {
-                r.get(0)
-            })
-            .unwrap();
+        let n = usize::from(steve_store::ItemReads(tx).title(ws, id).unwrap().is_some());
         log.lock()
             .unwrap()
             .push((ws.to_string(), id.to_string(), n));
@@ -1383,7 +1417,7 @@ fn an_unapplied_answer_expires_its_card_open_or_resolved_only() {
     let resolved = s.decisions().create(&nd()).unwrap().unwrap();
     let expired = s.decisions().create(&nd()).unwrap().unwrap();
     let cancelled = s.decisions().create(&nd()).unwrap().unwrap();
-    s.transaction::<_, StoreError>(|tx| {
+    s.write::<_, StoreError>(|tx| {
         decision_resolve_in(
             tx,
             &resolved.id,

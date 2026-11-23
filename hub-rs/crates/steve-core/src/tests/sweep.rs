@@ -501,12 +501,11 @@ fn a_decision_is_recorded_once_per_key_cleared_when_it_stops_and_never_carried_o
     assert_eq!((rows[0].episodes, rows[0].cleared_at), (2, None));
 
     // the item closes: the sweep no longer looks at it and its open decisions are cleared
-    k.db()
-        .exec(
-            "UPDATE items SET phase='closed' WHERE id=?",
-            &[&item as &dyn rusqlite::ToSql],
-        )
-        .unwrap();
+    steve_store::core_fixture::item(
+        k.db().store(),
+        &item,
+        steve_store::core_fixture::ItemState::Phase("closed"),
+    );
     k.db()
         .store()
         .would_do()
@@ -640,12 +639,11 @@ fn a_dismissed_card_and_an_answer_on_a_paused_item_are_cards_from_the_real_store
         .resolved
         .unwrap()
         .max(paused_at + 1);
-    k.db()
-        .exec(
-            "UPDATE decisions SET resolved = ? WHERE id = ?",
-            &[&resolved_at, &q],
-        )
-        .unwrap();
+    steve_store::core_fixture::decision(
+        k.db().store(),
+        &q,
+        steve_store::core_fixture::DecisionState::Resolved(resolved_at),
+    );
     assert_eq!(k.db().item(&asked).unwrap().unwrap().status, "pause");
     let w = k
         .core
@@ -669,12 +667,22 @@ fn the_sweep_looks_at_every_open_item_and_the_views_show_what_it_would_do() {
     let closing = k.item("run", "收尾", None);
     let archived = k.item("run", "执行", None);
     let done = k.item("done", "完成", None);
-    let set = |id: &str, sql: &str| {
-        k.db().exec(sql, &[&id as &dyn rusqlite::ToSql]).unwrap();
-    };
-    set(&ready, "UPDATE items SET phase='ready' WHERE id=?");
-    set(&closing, "UPDATE items SET phase='closing' WHERE id=?");
-    set(&archived, "UPDATE items SET archived=1 WHERE id=?");
+    let store = k.db().store();
+    steve_store::core_fixture::item(
+        store,
+        &ready,
+        steve_store::core_fixture::ItemState::Phase("ready"),
+    );
+    steve_store::core_fixture::item(
+        store,
+        &closing,
+        steve_store::core_fixture::ItemState::Phase("closing"),
+    );
+    steve_store::core_fixture::item(
+        store,
+        &archived,
+        steve_store::core_fixture::ItemState::Archive(None),
+    );
     let open = k.db().store().would_do().open_items().unwrap();
     for id in [&run, &ready, &closing] {
         assert!(open.contains(id), "{id} is open");

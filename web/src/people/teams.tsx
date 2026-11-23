@@ -1,3 +1,4 @@
+import { getItem } from "@/store"
 /* 团队: the 团队 tab of #/contacts, #/teams/:id, the new-team dialog (prototype people.tsx TeamsTab, TeamRow, TeamView, NewTeamDialog) */
 import { useEffect, useState } from "react"
 import { itemDisplayStatus } from "@/item-workflow-relation"
@@ -10,13 +11,13 @@ import { Field, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { st, tm } from "@/store"
+import { tm } from "@/store"
 import { modReq as req } from "@/api"
 import { go, Page, Group, Row, SectionLabel, Empty, ItemNo, Status, Meta } from "@/ui"
 import { Select } from "@/view-shared"
 import { AskSteve } from "@/config-ui"
-import { myContactId, people, type DirectoryStatus, type Team } from "@/api/people"
-import { ContactAvatar, Loading, PeopleGate, Section, act, codes, label, useLoad, visLabel } from "@/people/common"
+import { people, type DirectoryStatus, type Team } from "@/api/people"
+import { ContactAvatar, Loading, Section, act, codes, label, useLoad, visLabel } from "@/people/common"
 import { useT } from "@/i18n"
 import { MemSection, ctxOf } from "@/people/contact"
 
@@ -63,8 +64,7 @@ export function DirectoryNotes({ ds }: { ds?: DirectoryStatus[] }) {
     </div>))}</div>
 }
 
-export function TeamView({ id }: { id: string }) { return <PeopleGate>{() => <TeamPage id={id} />}</PeopleGate> }
-function TeamPage({ id }: { id: string }) {
+export function TeamView({ id }: { id: string }) {
   const t = useT()
   const { data: g, err } = useLoad(() => people.team(id), [id])
   const all = useLoad(() => people.teams(), [])
@@ -103,7 +103,7 @@ function TeamPage({ id }: { id: string }) {
         {subs.length > 0 && <Section label={t("people:team.subs")}><Group>{subs.map((x) => <TeamRow key={x.id} g={x} spaces={spaces.data} />)}</Group></Section>}
         {spaces.data && <Section label={t("people:team.space")}><Group><Row title={spaces.data.find((x) => x.id === g.space_id)?.name ?? t("people:team.noSpace")} sub={t("people:team.spaceSub")}>
           <Select align="end" testId="team-space" value={g.space_id ?? "none"} onChange={(x) => void act(people.patchTeam(g.id, { space_id: x === "none" ? null : x }))} options={[{ v: "none", l: t("people:team.unbind") }, ...spaces.data.map((x) => ({ v: x.id, l: x.name }))]} /></Row></Group></Section>}
-        <Section label={t("people:team.items", { n: items.data?.length ?? 0 })}>{!items.data ? <Loading /> : items.data.length ? <Group>{[...new Map(items.data.map((x) => [x.item_id, x])).values()].map((x) => { const i = st.items.find((y) => y.id === x.item_id); return <Row key={x.item_id} title={<span><ItemNo id={x.item_id} className="mr-2" />{i?.t ?? x.title ?? ""}</span>} sub={label("itemRole", x.role)} onClick={() => go("#/items/" + x.item_id)}>{i && <Status s={itemDisplayStatus(i)} />}</Row> })}</Group> : <Empty title={t("people:shared.noRelatedItems")} />}</Section>
+        <Section label={t("people:team.items", { n: items.data?.length ?? 0 })}>{!items.data ? <Loading /> : items.data.length ? <Group>{[...new Map(items.data.map((x) => [x.item_id, x])).values()].map((x) => { const i = getItem(x.item_id); return <Row key={x.item_id} title={<span><ItemNo id={x.item_id} className="mr-2" />{i?.t ?? x.title ?? ""}</span>} sub={label("itemRole", x.role)} onClick={() => go("#/items/" + x.item_id)}>{i && <Status s={itemDisplayStatus(i)} />}</Row> })}</Group> : <Empty title={t("people:shared.noRelatedItems")} />}</Section>
         <MemSection party={g.id} mems={mems.data} label={t("people:shared.steveRemembers")} />
         <div className="type-footnote text-muted-foreground">{t("people:team.visNote", { vis: visLabel(g.visibility), name: g.name })}</div>
       </div>
@@ -129,7 +129,7 @@ function AddMember({ have, onPick }: { have: string[]; onPick: (cid: string) => 
 
 export function NewTeamDialog({ onClose }: { onClose: () => void }) {
   const t = useT()
-  const me = myContactId()
+  const me = useLoad(people.me, []).data?.id
   const [n, setN] = useState(""), [pur, setPur] = useState(""), [pick, setPick] = useState<string[]>(me ? [me] : []), [busy, setBusy] = useState(false)
   const cs = useLoad(() => people.contacts({ limit: 500 }), [])
   const xs = (cs.data ?? []).filter((c) => c.kind !== "unconfirmed").sort((a, b) => Number(b.is_me) - Number(a.is_me))

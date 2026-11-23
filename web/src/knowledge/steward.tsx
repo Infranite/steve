@@ -47,7 +47,7 @@ export function StewardTab() {
   const loadRuns = useCallback(() => kb.changes().then(setRuns, (e) => setErr(errMsg(e))), [])
   useEffect(() => { void loadS(); void loadRuns() }, [loadS, loadRuns])
   useHubEvents(["mm"], () => void loadRuns())
-  useHubEvents(["flow", "schedule", "item"], () => void loadS(), 800)
+  useHubEvents(["flow", "schedule", "patch"], () => void loadS(), 800, { filter: (e) => e.type !== "patch" || e.ops.some((op) => op.type === "item") })
   const act = async (key: string, f: () => Promise<unknown>, ok?: string) => {
     if (busy) return
     setBusy(key)

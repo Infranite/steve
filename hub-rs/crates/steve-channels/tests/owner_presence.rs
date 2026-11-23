@@ -9,6 +9,9 @@ mod digest_env;
 use digest_env::TestEnv;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
+use steve_store::testkit::channels::inspect;
+use steve_store::testkit::channels::seed;
+use steve_store::testkit::channels::seed::people::Bot;
 
 use async_trait::async_trait;
 use axum::Router;
@@ -125,16 +128,14 @@ async fn setup() -> H {
     disclosure.bind(env.store().clone(), env.gateway.clone());
     link.bind_clock(env.clock.clone());
     *core.store.lock().unwrap() = Some(env.store().clone());
-    env.store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "INSERT INTO bots (id, workspace_id, name, main, harness, persona, role, rules, model, updated) VALUES
-                    ('steve', 'default', 'Steve', 1, 'claude', '', '', '', 'fixture-model', 1);
-                 INSERT INTO bot_workspaces (bot_id, workspace_id, created) VALUES ('steve', 'default', 1);",
-            )?;
-            Ok(())
-        })
-        .expect("bots");
+    steve_store::testkit::channels::seed::people::bots(
+        env.store(),
+        &[Bot {
+            model: Some("fixture-model"),
+            ..Bot::default()
+        }],
+    )
+    .unwrap();
     let keys = tempfile::tempdir().expect("tmp");
     let vault = Vault::new(
         env.store().clone(),
@@ -195,7 +196,7 @@ async fn setup() -> H {
     let v = Viewer::bare(WS, ME);
     h.env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             spaces::set_account_rules(
                 tx,
                 &v,
@@ -235,51 +236,12 @@ async fn push(h: &H, conn: &str, m: InboundMessage) -> Inbound {
     h.ch.on_message(WS, conn, m).await.expect("message")
 }
 
-fn row(h: &H, sql: &str, p: &[&str]) -> Vec<Value> {
-    let (sql, p): (String, Vec<String>) = (sql.into(), p.iter().map(|s| s.to_string()).collect());
-    h.env
-        .store()
-        .reader(move |c| {
-            let mut st = c.prepare(&sql)?;
-            let n = st.column_count();
-            let v = st.query_row(rusqlite::params_from_iter(p.iter()), |r| {
-                (0..n)
-                    .map(|i| {
-                        Ok(match r.get_ref(i)? {
-                            rusqlite::types::ValueRef::Null => Value::Null,
-                            rusqlite::types::ValueRef::Integer(x) => json!(x),
-                            rusqlite::types::ValueRef::Real(x) => json!(x),
-                            rusqlite::types::ValueRef::Text(t) => {
-                                json!(String::from_utf8_lossy(t))
-                            }
-                            rusqlite::types::ValueRef::Blob(_) => Value::Null,
-                        })
-                    })
-                    .collect::<rusqlite::Result<Vec<_>>>()
-            })?;
-            Ok::<_, steve_store::StoreError>(v)
-        })
-        .expect("row")
-}
-
-fn count(h: &H, sql: &str, p: &[&str]) -> i64 {
-    row(h, sql, p)[0].as_i64().expect("count")
-}
-
 fn drafts(h: &H) -> i64 {
-    count(
-        h,
-        "SELECT count(*) FROM chan_messages WHERE direction = 'out' AND status = 'draft'",
-        &[],
-    )
+    inspect::messages::count_chan_messages_by_outgoing_and_draft(h.env.store()).unwrap()
 }
 
 fn decision(h: &H, id: &str) -> (String, Value) {
-    let r = row(
-        h,
-        "SELECT status, result FROM decisions WHERE id = ?",
-        &[id],
-    );
+    let r = inspect::decisions::decision_status_result(h.env.store(), id).unwrap();
     (
         r[0].as_str().unwrap().to_string(),
         serde_json::from_str(r[1].as_str().unwrap_or("null")).unwrap(),
@@ -287,7 +249,7 @@ fn decision(h: &H, id: &str) -> (String, Value) {
 }
 
 fn status(h: &H, id: &str) -> String {
-    row(h, "SELECT status FROM chan_messages WHERE id = ?", &[id])[0]
+    inspect::messages::message_status(h.env.store(), id).unwrap()[0]
         .as_str()
         .unwrap()
         .to_string()
@@ -302,41 +264,18 @@ fn you_said_elsewhere(h: &H, space_ext: &str, secs: i64) {
 /// [`you_said_elsewhere`] as a closure that stores your line with the time it is given (to run while
 /// the composer “thinks”).
 fn your_line_in(h: &H, space_ext: &str) -> impl Fn(i64) + Send + 'static {
-    let space: String = row(
-        h,
-        "SELECT id FROM spaces WHERE external_id = ?",
-        &[space_ext],
-    )[0]
-    .as_str()
-    .unwrap()
-    .into();
-    let party: String = row(
-        h,
-        "SELECT party_id FROM accounts WHERE id = ?",
-        &[&h.my_account],
-    )[0]
-    .as_str()
-    .unwrap()
-    .into();
+    let space: String = inspect::spaces::space_id_by_external_row(h.env.store(), space_ext)
+        .unwrap()[0]
+        .as_str()
+        .unwrap()
+        .into();
+    let party: String = inspect::people::account_party_id(h.env.store(), &h.my_account).unwrap()[0]
+        .as_str()
+        .unwrap()
+        .into();
     let (store, account) = (h.env.store().clone(), h.my_account.clone());
     move |now| {
-        digest_env::write(&store, |c| {
-                c.execute(
-                    "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_account_id,
-                        sender_party_id, text, status, created)
-                     VALUES (?, ?, ?, ?, 'in', ?, ?, '我来吧', 'received', ?)",
-                    rusqlite::params![
-                        steve_store::uid("cm"),
-                        WS,
-                        space,
-                        format!("elsewhere_{now}"),
-                        account,
-                        party,
-                        now
-                    ],
-                )?;
-                Ok(())
-            })
+        seed::messages::seed_owner_message(&store, WS, &space, &account, &party, now)
             .expect("your message");
     }
 }
@@ -372,19 +311,7 @@ async fn drafted(h: &H, id: &str) -> (String, String) {
 /// Runs the queue until no draft's disclosure check is still running.
 async fn checked(h: &H) {
     steve_runtime::testkit::eventually("all draft disclosure checks finish", || async {
-        let waiting: i64 = h
-            .env
-            .store()
-            .reader(|c| {
-                c.query_row(
-                    "SELECT count(*) FROM chan_messages m JOIN reply_basis b ON b.id = m.basis_id
-                      WHERE m.status = 'draft' AND b.verdict = 'checking'",
-                    [],
-                    |r| r.get(0),
-                )
-                .map_err(steve_store::StoreError::from)
-            })
-            .unwrap();
+        let waiting: i64 = inspect::delivery::checking_basis_count(h.env.store()).unwrap();
         if waiting == 0 {
             true
         } else {
@@ -515,7 +442,7 @@ async fn your_own_message_closes_older_drafts_and_cards() {
     let now = h.ch.now();
     h.env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             spaces::patch(
                 tx,
                 &Viewer::bare(WS, ME),
@@ -603,14 +530,10 @@ async fn yolo_never_retries_what_you_answered_yourself() {
     h.env.clock.advance(11_000);
     h.outbox.send_due(&h.ch).await;
     assert_eq!(status(&h, &draft), "failed");
-    let fail: String = row(
-        &h,
-        "SELECT decision_id FROM chan_messages WHERE id = ?",
-        &[&draft],
-    )[0]
-    .as_str()
-    .unwrap()
-    .into();
+    let fail: String = inspect::messages::message_decision_id(h.env.store(), &draft).unwrap()[0]
+        .as_str()
+        .unwrap()
+        .into();
     *h.fake.fail_send.lock().unwrap() = None;
     you_said_elsewhere(&h, "D_LI", 1);
     h.env.clock.advance(5_000);
@@ -735,11 +658,8 @@ async fn in_a_busy_group_answering_one_person_leaves_the_others_draft() {
     assert_eq!(status(&h, &han_draft), "draft", "not the other one");
     // YOLO, judging again once its disclosure check is done, still may approve it
     checked(&h).await;
-    let card: String = row(
-        &h,
-        "SELECT decision_id FROM chan_messages WHERE id = ?",
-        &[&han_draft],
-    )[0]
+    let card: String = inspect::messages::message_decision_id(h.env.store(), &han_draft).unwrap()
+        [0]
     .as_str()
     .unwrap()
     .into();
@@ -882,24 +802,14 @@ async fn record_only_starts_no_flow_on_someone_elses_message() {
     )
     .await;
     assert_eq!(s, 200, "{v}");
-    let runs = |id: &str| {
-        count(
-            &h,
-            "SELECT count(*) FROM flow_runs r JOIN chan_messages m ON m.event_id = r.event_id WHERE m.id = ?",
-            &[id],
-        )
-    };
+    let runs = |id: &str| inspect::flows::count_flow_runs_by_id(h.env.store(), id).unwrap();
     let i = push(&h, &me, msg(&h, "D_LI", "l0", "ulilei", "早", -60)).await;
     assert_eq!(runs(&i.message_id), 1, "the space's flow takes a message");
     assert_eq!(set_reply(&h, &space, "record").await.0, 200);
     let i = push(&h, &me, msg(&h, "D_LI", "l1", "ulilei", "帮我看下", 0)).await;
     assert_eq!(runs(&i.message_id), 0, "under 只记录 it does not");
     let ev = i.event.as_ref().and_then(|e| e.id()).expect("event");
-    let r = row(
-        &h,
-        "SELECT outcome, outcome_label FROM ext_events WHERE id = ?",
-        &[ev],
-    );
+    let r = inspect::signals::signal_outcome_outcome_label(h.env.store(), ev).unwrap();
     assert_eq!(r, [json!("recorded"), json!(LABEL_REPLY_RECORD)]);
 }
 
@@ -917,14 +827,10 @@ async fn off_leaves_the_space_alone_on_your_account() {
     assert!(h.model.prompts.lock().unwrap().is_empty());
     // the message is kept, and its event wakes nothing
     let ev = i.event.as_ref().and_then(|e| e.id()).expect("event");
-    let r = row(&h, "SELECT outcome FROM ext_events WHERE id = ?", &[ev]);
+    let r = inspect::signals::signal_outcome(h.env.store(), ev).unwrap();
     assert_eq!(r[0], "recorded");
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM chan_messages WHERE id = ?",
-            &[&i.message_id]
-        ),
+        inspect::messages::count_chan_messages_by_id(h.env.store(), &i.message_id).unwrap(),
         1
     );
 }
@@ -974,18 +880,7 @@ async fn the_setting_does_not_apply_where_a_bot_speaks() {
 fn stored_in(store: &steve_store::Store, like: &str, ext: &str, secs: i64) -> String {
     let id = steve_store::uid("cm");
     let (like, ext, idc) = (like.to_string(), ext.to_string(), id.clone());
-    digest_env::write(store, move |c| {
-            c.execute(
-                "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_account_id,
-                    sender_party_id, text, status, created)
-                 SELECT ?, workspace_id, space_id, ?, 'in', sender_account_id, sender_party_id, '还有个事', 'received',
-                        created + ?
-                   FROM chan_messages WHERE external_id = ? AND direction = 'in'",
-                rusqlite::params![idc, ext, secs * 1000, like],
-            )?;
-            Ok(())
-        })
-        .expect("stored");
+    seed::messages::seed_followup_copy(store, &idc, &like, &ext, secs).expect("stored");
     id
 }
 
@@ -993,7 +888,7 @@ fn handoff_here(h: &H, space: &str) {
     let now = h.ch.now();
     h.env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             spaces::patch(
                 tx,
                 &Viewer::bare(WS, ME),
@@ -1184,7 +1079,7 @@ async fn a_draft_whose_message_a_later_turn_took_while_it_drafted_never_opens() 
     *h.model.during.lock().unwrap() = Some(Box::new(move || {
         let later = stored_in(&store, "l1", "l2", 20);
         store
-            .transaction(|tx| presence::take_turn(tx, WS, &later))
+            .write(|tx| presence::take_turn(tx, WS, &later))
             .expect("turn");
     }));
     let r = push(&h, &me, msg(&h, "D_LI", "l1", "ulilei", "在吗", 0))
@@ -1203,14 +1098,10 @@ async fn a_draft_whose_message_a_later_turn_took_while_it_drafted_never_opens() 
 async fn the_setting_holds_drafts_made_before_it_changed() {
     let h = setup().await;
     let (draft1, card1) = drafted(&h, "l1").await;
-    let space: String = row(
-        &h,
-        "SELECT space_id FROM chan_messages WHERE id = ?",
-        &[&draft1],
-    )[0]
-    .as_str()
-    .unwrap()
-    .into();
+    let space: String = inspect::messages::message_space_id(h.env.store(), &draft1).unwrap()[0]
+        .as_str()
+        .unwrap()
+        .into();
     h.env.clock.advance(120_000);
     let (draft2, card2) = drafted(&h, "l2").await;
     assert_eq!(
@@ -1222,9 +1113,7 @@ async fn the_setting_holds_drafts_made_before_it_changed() {
     let now = h.ch.now();
     h.env
         .store()
-        .transaction(|tx| {
-            spaces::write_reply_as_you(tx, WS, &space, spaces::ReplyAsYou::Record, now)
-        })
+        .write(|tx| spaces::write_reply_as_you(tx, WS, &space, spaces::ReplyAsYou::Record, now))
         .expect("set");
     let d = yolo(&h, &card1, "yes").expect("answered");
     assert_eq!(d.status, "expired");
@@ -1238,9 +1127,7 @@ async fn the_setting_holds_drafts_made_before_it_changed() {
     // set from the page: what is still open closes at once
     h.env
         .store()
-        .transaction(|tx| {
-            spaces::write_reply_as_you(tx, WS, &space, spaces::ReplyAsYou::Draft, now)
-        })
+        .write(|tx| spaces::write_reply_as_you(tx, WS, &space, spaces::ReplyAsYou::Draft, now))
         .expect("set");
     h.env.clock.advance(120_000);
     let (draft3, card3) = drafted(&h, "l3").await;

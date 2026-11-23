@@ -10,8 +10,9 @@ use crate::{ModelUsage, NewUsage, Result, Tokens, TurnBegin, stats_changed};
 impl Stats<'_> {
     /// Beginning and linking an attempt are atomic and repeatable, including after Hub restart.
     pub fn node_turn_begin(&self, b: &TurnBegin, attempt: &str) -> Result<String> {
-        self.0.transaction(|tx| {
+        self.0.write(|tx| {
             if let Some(id) = tx
+                .conn
                 .query_row(
                     "SELECT id FROM agent_turns WHERE node_attempt_id=?",
                     [attempt],
@@ -22,11 +23,11 @@ impl Stats<'_> {
                 return Ok(id);
             }
             let id = self.turn_begin(b)?;
-            tx.execute(
+            tx.conn.execute(
                 "UPDATE agent_turns SET node_attempt_id=? WHERE id=?",
                 params![attempt, id],
             )?;
-            tx.publish(stats_changed(&b.workspace_id, None));
+            tx.emit(stats_changed(&b.workspace_id, None));
             Ok(id)
         })
     }
@@ -44,16 +45,16 @@ impl Stats<'_> {
         if report.scope == UsageScope::Background {
             return Ok(false);
         }
-        self.0.transaction(|tx| {
-            let owner = tx.query_row(
+        self.0.write(|tx| {
+            let owner = tx.conn.query_row(
                 "SELECT workspace_id, session_id, item_id, bot_id, project_id, harness, started FROM agent_turns WHERE id=?",
                 [turn], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,Option<String>>(2)?, r.get::<_,Option<String>>(3)?, r.get::<_,Option<String>>(4)?, r.get::<_,String>(5)?, r.get::<_,i64>(6)?))
             ).optional()?;
             let Some((ws,session,item,bot,project,harness,started)) = owner else { return Ok(false); };
-            if tx.execute("INSERT OR IGNORE INTO usage_reports(turn_id,report_id,payload) VALUES(?,?,?)", params![turn,report.report_id,serde_json::to_string(report)?])? == 0 {
+            if tx.conn.execute("INSERT OR IGNORE INTO usage_reports(turn_id,report_id,payload) VALUES(?,?,?)", params![turn,report.report_id,serde_json::to_string(report)?])? == 0 {
                 return Ok(false);
             }
-            let payloads = tx.prepare_cached("SELECT payload FROM usage_meters WHERE turn_id=? ORDER BY rowid")?
+            let payloads = tx.conn.prepare_cached("SELECT payload FROM usage_meters WHERE turn_id=? ORDER BY rowid")?
                 .query_map([turn], |r| r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
             let mut heads = payloads.iter().map(|v| serde_json::from_str::<UsageMeter>(v)).collect::<serde_json::Result<Vec<_>>>();
             if let Ok(heads) = &mut heads {
@@ -61,24 +62,24 @@ impl Stats<'_> {
             } else {
                 // Pre-shared-reducer heads lacked independent token/cost state. Rebuild them
                 // once from durable source reports, preserving original anonymous model identity.
-                let reports = tx.prepare_cached("SELECT payload FROM usage_reports WHERE turn_id=? ORDER BY rowid")?
+                let reports = tx.conn.prepare_cached("SELECT payload FROM usage_reports WHERE turn_id=? ORDER BY rowid")?
                     .query_map([turn], |r| r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
                 let mut replay = vec![];
                 for p in reports { accumulate_usage(&mut replay, serde_json::from_str(&p)?); }
                 heads = Ok(replay);
             }
             let heads = heads?;
-            tx.execute("DELETE FROM usage_meters WHERE turn_id=?", [turn])?;
+            tx.conn.execute("DELETE FROM usage_meters WHERE turn_id=?", [turn])?;
             for h in &heads {
                 let r = &h.report;
-                tx.execute("INSERT INTO usage_meters(turn_id,meter_epoch,model,scope,payload) VALUES(?,?,?,?,?)",
+                tx.conn.execute("INSERT INTO usage_meters(turn_id,meter_epoch,model,scope,payload) VALUES(?,?,?,?,?)",
                     params![turn,r.meter_epoch.as_str(),r.model.as_deref().unwrap_or(""),serde_json::to_string(&r.scope)?,serde_json::to_string(h)?])?;
             }
-            remove_turn_usage_in(tx, turn)?;
+            remove_turn_usage_in(tx.conn, turn)?;
             let snapshot = accounting_usage(&heads, fallback_model);
             for r in &snapshot {
                 let n = |v:Option<u64>| v.and_then(steve_node_api::usage::token_count);
-                let id = usage_in(tx, &NewUsage {
+                let id = usage_in(tx.conn, &NewUsage {
                     workspace_id:ws.clone(), ts:started, day:day.into(), source:"agent".into(), purpose:"turn".into(), harness:harness.clone(),
                     turn_id:Some(turn.into()), session_id:Some(session.clone()), item_id:item.clone(), bot_id:bot.clone(), project_id:project.clone(),
                     usage:ModelUsage {
@@ -88,9 +89,9 @@ impl Stats<'_> {
                         detail:serde_json::json!({"scope":r.scope,"meter_epoch":r.meter_epoch,"measurement":r.measurement,"accounting_tokens":steve_node_api::usage::accounting_tokens(r,&snapshot),"call_id":turn}),
                     }, duration_ms:None, ok:true, attempts:1,
                 })?;
-                tx.execute("UPDATE usage_records SET live_turn_id=? WHERE id=?", params![turn,id])?;
+                tx.conn.execute("UPDATE usage_records SET live_turn_id=? WHERE id=?", params![turn,id])?;
             }
-            tx.publish(stats_changed(&ws, Some(day)));
+            tx.emit(stats_changed(&ws, Some(day)));
             Ok(true)
         })
     }

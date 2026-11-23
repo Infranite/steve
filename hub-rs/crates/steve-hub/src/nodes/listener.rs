@@ -11,7 +11,6 @@ use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use futures::{SinkExt, StreamExt, future};
-use rusqlite::OptionalExtension;
 use serde_json::Value;
 use steve_node_api::*;
 use steve_node_wire::envelope::{Frame, FrameSink, FrameStream, MAX_FRAME};
@@ -89,12 +88,11 @@ struct Admit {
 impl Admission for Admit {
     async fn key(&self, node: &NodeId) -> Result<Option<[u8; 32]>, String> {
         let (store, node) = (self.svc.store.clone(), node.to_string());
-        let row = tokio::task::spawn_blocking(move || {
-            store.reader(|c| steve_store::nodes::get(c, &node))
-        })
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
+        let row =
+            tokio::task::spawn_blocking(move || store.read(|c| steve_store::nodes::get(c, &node)))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
         Ok(row
             .filter(|r| matches!(r.state.as_str(), "active" | "paused"))
             .and_then(|r| r.pubkey.try_into().ok()))
@@ -104,16 +102,12 @@ impl Admission for Admit {
         let (store, node) = (self.svc.store.clone(), hello.node_id.to_string());
         let arrival = serde_json::to_string(&self.arrival).map_err(|e| e.to_string())?;
         let link = tokio::task::spawn_blocking(move || {
-            store.transaction::<_, StoreError>(|tx| {
-                // Bootstrap allocates a generation without inventing ordinary restart metadata.
-                // In particular a first upgrade-only connection must leave NULL incarnation NULL.
-                let link: Option<(i64, Option<i64>)> = tx.query_row(
-                    "UPDATE nodes SET generation=generation+1, last_seen=?2
-                     WHERE node_id=?1 AND state IN ('active','paused') RETURNING generation, incarnation",
-                    rusqlite::params![node, now()], |row| Ok((row.get(0)?, row.get(1)?)),
-                ).optional()?;
+            store.write::<_, StoreError>(|tx| {
+                // An upgrade-only connection keeps its prior incarnation, including NULL.
+                let link = store.write(|w| {
+                    steve_store::node_directory::admit_link(w, &node, &arrival, now())
+                })?;
                 if let Some((generation, _)) = &link {
-                    steve_store::nodes::set_link(tx, &node, &arrival)?;
                     steve_store::nodes::audit(
                         tx,
                         Some(&node),
@@ -149,11 +143,20 @@ impl Admission for Admit {
             hello.node_id.clone(),
             admitted.generation,
         );
-        let changed = tokio::task::spawn_blocking(move || store.transaction::<_, StoreError>(|tx| {
-            tx.execute("UPDATE nodes SET incarnation=?1 WHERE node_id=?2 AND generation=?3 AND state IN ('active','paused')",
-                rusqlite::params![incarnation as i64, node, generation as i64]).map_err(Into::into)
-        })).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
-        if changed != 1 {
+        let changed = tokio::task::spawn_blocking(move || {
+            store.write(|w| {
+                steve_store::node_directory::introduce_link(
+                    w,
+                    node.as_str(),
+                    generation as i64,
+                    incarnation as i64,
+                )
+            })
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+        if !changed {
             return Err("ordinary introduction was fenced".into());
         }
         *self.incarnation.lock().unwrap() = Some(incarnation);
@@ -282,7 +285,7 @@ async fn serve_after(
     // when it was last there: how long it has been away counts from here (B5)
     let (store, id) = (svc.store.clone(), node.to_string());
     let _ = tokio::task::spawn_blocking(move || {
-        store.transaction(|tx| steve_store::nodes::touch(tx, &id, now()))
+        store.write(|tx| steve_store::nodes::touch(tx, &id, now()))
     })
     .await;
     remote.detach(generation);
@@ -366,7 +369,7 @@ async fn remember_host(svc: &NodeService, node: &NodeId, host: HostInfo) {
     };
     let (store, id) = (svc.store.clone(), node.to_string());
     let r = tokio::task::spawn_blocking(move || {
-        store.transaction(|tx| steve_store::nodes::set_host(tx, &id, &text))
+        store.write(|tx| steve_store::nodes::set_host(tx, &id, &text))
     })
     .await;
     if !matches!(r, Ok(Ok(_))) {
@@ -390,7 +393,7 @@ pub async fn install_link(
     let _g = svc.links.lock().await;
     let (store, id) = (svc.store.clone(), node.to_string());
     let state = tokio::task::spawn_blocking(move || {
-        store.reader(|c| steve_store::nodes::link_state(c, &id))
+        store.read(|c| steve_store::node_directory::link_state(c, &id))
     })
     .await;
     let paused = match state {
@@ -451,14 +454,9 @@ pub async fn install_link(
 async fn suspect_takeover(svc: &NodeService, node: &NodeId) -> bool {
     let (store, id) = (svc.store.clone(), node.to_string());
     let r = tokio::task::spawn_blocking(move || {
-        let name = store.transaction::<_, StoreError>(|tx| {
-            let name: Option<String> = tx
-                .query_row(
-                    "UPDATE nodes SET state='paused' WHERE node_id=? AND state='active' RETURNING name",
-                    [&id],
-                    |r| r.get(0),
-                )
-                .optional()?;
+        let name = store.write::<_, StoreError>(|tx| {
+            let name =
+                store.write(|w| steve_store::node_directory::pause_after_takeover(w, &id))?;
             if let Some(name) = &name {
                 steve_store::nodes::audit(
                     tx,
@@ -474,7 +472,9 @@ async fn suspect_takeover(svc: &NodeService, node: &NodeId) -> bool {
                 )?;
                 // a paused Node nobody was told about would just look broken
                 let text = steve_i18n::t!("hub.node.takeover_suspected", name = name);
-                steve_core::notify::notify_in(tx, steve_store::WS, "system", "fail", &text, None)?;
+                tx.scope(|w| {
+                    steve_core::notify::notify_in(w, steve_store::WS, "system", "fail", &text, None)
+                })?;
             }
             Ok(name)
         })?;

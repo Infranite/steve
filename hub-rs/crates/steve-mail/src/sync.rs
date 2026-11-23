@@ -18,9 +18,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::adapter::{FolderState, MailAdapter, ScopeMode, SyncReport, SyncState};
 use crate::error::{AdapterError, MailError, MailResult};
-use crate::repo::{self, ScopeEntry};
+use crate::repo;
 use crate::store::{Mailbox, OffloadSink};
 use crate::{Mail, lock};
+use steve_store::sources::ScopeEntry;
 
 /// Polling interval of a mailbox (and of folders other than the watched inbox).
 pub const POLL: Duration = Duration::from_secs(120);
@@ -165,22 +166,23 @@ impl Mail {
             res.is_ok(),
         );
         tokio::task::spawn_blocking(move || -> MailResult<()> {
-            m.0.m.store.transaction(|tx| -> MailResult<()> {
+            m.0.m.store.write(|tx| -> MailResult<()> {
                 for f in &state.folders {
                     repo::save_folder(tx, &conn_s, f)?;
                 }
-                repo::set_cursor(tx, &conn_s, state.cursor.as_deref())
+                steve_store::sources::set_cursor(tx, &conn_s, state.cursor.as_deref())?;
+                if ok && let Err(e) = m.0.conns.touch_sync(&ws_s, &conn_s) {
+                    tracing::warn!(connection = %conn_s, error = %e, "touch_sync failed");
+                }
+                for t in &changed {
+                    crate::events::emit_thread(tx, &ws_s, t);
+                }
+                Ok(())
             })?;
-            if ok && let Err(e) = m.0.conns.touch_sync(&ws_s, &conn_s) {
-                tracing::warn!(connection = %conn_s, error = %e, "touch_sync failed");
-            }
             Ok(())
         })
         .await
         .map_err(|e| MailError::Other(format!("task failed: {e}")))??;
-        for t in &changed {
-            self.0.notify.thread(ws, t);
-        }
         match res {
             Ok(r) => {
                 cx.report(Health::Ok).await;
@@ -204,12 +206,12 @@ impl Mail {
         checks: &HashMap<String, i64>,
     ) -> MailResult<Option<(SyncState, Mailbox)>> {
         let store = &self.0.m.store;
-        store.transaction(|tx| -> MailResult<()> {
+        store.write(|tx| -> MailResult<()> {
             repo::ensure_settings(tx, ws, conn, now)?;
             for f in folders {
                 repo::upsert_folder(tx, ws, conn, f)?;
             }
-            let (_, mut scopes, _) = repo::source(tx, conn)?.unwrap_or_default();
+            let (_, mut scopes, _) = steve_store::sources::source(tx, conn)?.unwrap_or_default();
             let before = scopes.len();
             for f in folders {
                 if !scopes.iter().any(|s| s.ext_id == f.ext_id) {
@@ -220,13 +222,14 @@ impl Mail {
                     });
                 }
             }
-            if scopes.len() != before || repo::source(tx, conn)?.is_none() {
-                repo::set_scopes(tx, ws, conn, &scopes, now)?;
+            if scopes.len() != before || steve_store::sources::source(tx, conn)?.is_none() {
+                steve_store::sources::set_scopes(tx, ws, conn, &scopes, now)?;
             }
             Ok(())
         })?;
-        store.reader(|c| {
-            let (paused, scopes, cursor) = repo::source(c, conn)?.unwrap_or_default();
+        store.read(|c| {
+            let (paused, scopes, cursor) =
+                steve_store::sources::source(c, conn)?.unwrap_or_default();
             if paused {
                 return Ok(None);
             }
@@ -376,7 +379,7 @@ impl Mail {
             .0
             .m
             .store
-            .reader(steve_modules::accounts::connections::repo::live)?;
+            .read(|r| steve_store::connections::Connections::new(r).live_sources())?;
         Ok(rows
             .into_iter()
             .filter(|r| self.0.adapters.contains_key(&r.adapter))

@@ -2,10 +2,10 @@
 //! each tool came up in its searches and was called (`tool_usage`). Steve's core tools are always
 //! loaded; the rest are found with `steve_tools_search` and run with `steve_tool_call`.
 
-use rusqlite::{Connection, params};
+use sea_query::{Expr, ExprTrait, Func, OnConflict, Order, Query};
 use serde::Serialize;
 
-use crate::Result;
+use crate::{Read, Result, W};
 
 /// The kinds of pin: a tool by name, every tool of a library MCP server, a remote agent's tool.
 pub const PIN_KINDS: &[&str] = &["tool", "mcp", "a2a"];
@@ -20,77 +20,9 @@ pub struct Pin {
     pub target: String,
 }
 
-/// A Bot's pins, oldest first.
-pub fn pins(c: &Connection, bot: &str) -> Result<Vec<Pin>> {
-    let mut st = c.prepare_cached(
-        "SELECT kind, target FROM bot_tool_pins WHERE bot_id = ? ORDER BY created, kind, target",
-    )?;
-    let v = st
-        .query_map([bot], |r| {
-            Ok(Pin {
-                kind: r.get(0)?,
-                target: r.get(1)?,
-            })
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    Ok(v)
-}
-
-/// Pins (`on`) or unpins one; whether anything changed.
-pub fn set_pin(
-    c: &Connection,
-    bot: &str,
-    kind: &str,
-    target: &str,
-    on: bool,
-    now: i64,
-) -> Result<bool> {
-    let n = if on {
-        c.execute(
-            "INSERT OR IGNORE INTO bot_tool_pins (bot_id, kind, target, created) VALUES (?1, ?2, ?3, ?4)",
-            params![bot, kind, target, now],
-        )?
-    } else {
-        c.execute(
-            "DELETE FROM bot_tool_pins WHERE bot_id = ? AND kind = ? AND target = ?",
-            [bot, kind, target],
-        )?
-    };
-    Ok(n > 0)
-}
-
-/// A library entry is gone: no Bot pins it any more.
-pub fn drop_target(c: &Connection, kind: &str, target: &str) -> Result<usize> {
-    Ok(c.execute(
-        "DELETE FROM bot_tool_pins WHERE kind = ? AND target = ?",
-        [kind, target],
-    )?)
-}
-
 /// The day (since the Unix epoch, UTC) of a millisecond timestamp.
 pub fn day_of(ms: i64) -> i64 {
     ms.div_euclid(86_400_000)
-}
-
-/// Counts `searched` appearances in a search and `called` calls of each tool for `bot` on `day`;
-/// background retention removes rows older than [`KEEP_DAYS`].
-pub fn record(
-    c: &Connection,
-    bot: &str,
-    day: i64,
-    tools: &[&str],
-    searched: i64,
-    called: i64,
-) -> Result<()> {
-    let mut st = c.prepare_cached(
-        "INSERT INTO tool_usage (bot_id, tool, day, searched, called) VALUES (?1, ?2, ?3, ?4, ?5)
-           ON CONFLICT (bot_id, tool, day) DO UPDATE SET searched = searched + excluded.searched,
-             called = called + excluded.called",
-    )?;
-    for t in tools {
-        st.execute(params![bot, t, day, searched, called])?;
-    }
-    Ok(())
 }
 
 /// One tool's use by a Bot over some days.
@@ -101,20 +33,127 @@ pub struct Usage {
     pub called: i64,
 }
 
-/// `bot`'s use of each tool on the `days` days up to and including `today`, most called first.
-pub fn usage(c: &Connection, bot: &str, today: i64, days: i64) -> Result<Vec<Usage>> {
-    let mut st = c.prepare_cached(
-        "SELECT tool, SUM(searched), SUM(called) FROM tool_usage WHERE bot_id = ? AND day > ?
-          GROUP BY tool ORDER BY SUM(called) DESC, SUM(searched) DESC, tool",
-    )?;
-    let v = st
-        .query_map(params![bot, today - days], |r| {
-            Ok(Usage {
-                tool: r.get(0)?,
-                searched: r.get(1)?,
-                called: r.get(2)?,
-            })
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    Ok(v)
+pub struct ToolRows<'a, C>(pub &'a mut C);
+
+impl<C: Read> ToolRows<'_, C> {
+    pub fn pins(&mut self, bot: &str) -> Result<Vec<Pin>> {
+        self.0.all(
+            Query::select()
+                .from("bot_tool_pins")
+                .columns(["kind", "target"])
+                .and_where(Expr::col("bot_id").eq(bot))
+                .order_by("created", Order::Asc)
+                .order_by("kind", Order::Asc)
+                .order_by("target", Order::Asc),
+            |row| {
+                Ok(Pin {
+                    kind: row.get(0)?,
+                    target: row.get(1)?,
+                })
+            },
+        )
+    }
+
+    pub fn usage(&mut self, bot: &str, today: i64, days: i64) -> Result<Vec<Usage>> {
+        let searched = Func::sum(Expr::col("searched"));
+        let called = Func::sum(Expr::col("called"));
+        self.0.all(
+            Query::select()
+                .from("tool_usage")
+                .column("tool")
+                .expr(searched.clone())
+                .expr(called.clone())
+                .and_where(Expr::col("bot_id").eq(bot))
+                .and_where(Expr::col("day").gt(today - days))
+                .group_by_col("tool")
+                .order_by_expr(called.into(), Order::Desc)
+                .order_by_expr(searched.into(), Order::Desc)
+                .order_by("tool", Order::Asc),
+            |row| {
+                Ok(Usage {
+                    tool: row.get(0)?,
+                    searched: row.get(1)?,
+                    called: row.get(2)?,
+                })
+            },
+        )
+    }
+}
+
+impl ToolRows<'_, W<'_>> {
+    pub fn set_pin(
+        &mut self,
+        bot: &str,
+        kind: &str,
+        target: &str,
+        on: bool,
+        now: i64,
+    ) -> Result<bool> {
+        let n = if on {
+            self.0.exec(
+                Query::insert()
+                    .into_table("bot_tool_pins")
+                    .columns(["bot_id", "kind", "target", "created"])
+                    .values_panic([bot.into(), kind.into(), target.into(), now.into()])
+                    .on_conflict(
+                        OnConflict::columns(["bot_id", "kind", "target"])
+                            .do_nothing()
+                            .to_owned(),
+                    ),
+            )?
+        } else {
+            self.0.exec(
+                Query::delete()
+                    .from_table("bot_tool_pins")
+                    .and_where(Expr::col("bot_id").eq(bot))
+                    .and_where(Expr::col("kind").eq(kind))
+                    .and_where(Expr::col("target").eq(target)),
+            )?
+        };
+        Ok(n != 0)
+    }
+
+    pub(super) fn drop_target(&mut self, kind: &str, target: &str) -> Result<()> {
+        self.0.exec(
+            Query::delete()
+                .from_table("bot_tool_pins")
+                .and_where(Expr::col("kind").eq(kind))
+                .and_where(Expr::col("target").eq(target)),
+        )?;
+        Ok(())
+    }
+
+    pub fn record(
+        &mut self,
+        bot: &str,
+        day: i64,
+        tools: &[&str],
+        searched: i64,
+        called: i64,
+    ) -> Result<()> {
+        fn combined(column: &'static str) -> Expr {
+            Expr::col(("tool_usage", column)).add(Expr::col(("excluded", column)))
+        }
+        for tool in tools {
+            self.0.exec(
+                Query::insert()
+                    .into_table("tool_usage")
+                    .columns(["bot_id", "tool", "day", "searched", "called"])
+                    .values_panic([
+                        bot.into(),
+                        (*tool).into(),
+                        day.into(),
+                        searched.into(),
+                        called.into(),
+                    ])
+                    .on_conflict(
+                        OnConflict::columns(["bot_id", "tool", "day"])
+                            .value("searched", combined("searched"))
+                            .value("called", combined("called"))
+                            .to_owned(),
+                    ),
+            )?;
+        }
+        Ok(())
+    }
 }

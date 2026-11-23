@@ -12,8 +12,10 @@ use std::time::Duration;
 use axum::http::{HeaderMap, header};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
-use steve_store::base::{self, DecisionKind, Viewer};
-use steve_store::{NewDecision, Tx, uid};
+use steve_store::base::{DecisionKind, Viewer};
+use steve_store::{
+    Accounts, Connections as ConnectionRows, DecisionRows, NewDecision, Read, Store, W, uid,
+};
 use zeroize::Zeroizing;
 
 use super::cx::{
@@ -26,16 +28,14 @@ use super::provider::{
     AccountInfo, AuthKind, CONFIG_VERSION_KEY, ConnectionProvider, Health, Owner, PAIR_KEY, Paired,
     ProviderError, StewardHint, TokenKind,
 };
-use super::repo::{self, ConnRow, HealthState};
+use super::repo::{ConnRow, HealthState};
 use crate::accounts::claim::claim_self;
 use crate::accounts::identify::{Attach, attach_handle};
 use crate::accounts::repo as arepo;
 use crate::accounts::service::{
-    self as asvc, Record, current_party, default_label, may_connect, normalize, own_account,
-    own_system,
+    self as asvc, Record, default_label, may_connect, normalize, own_account, own_system,
 };
 use crate::contacts::PartyHooks;
-use crate::contacts::repo as people;
 use crate::contacts::stewards;
 use crate::vault::{Vault, VaultError, VaultResult};
 use crate::{ApiError, Caller, Check, Modules};
@@ -135,10 +135,10 @@ pub struct Usage {
 
 /// What other modules (flows, channels, mail, GitHub) tell about their use of a connection.
 pub trait ConnectionUsage: Send + Sync {
-    fn usage(&self, c: &rusqlite::Connection, ws: &str, connection_id: &str) -> VaultResult<Usage>;
+    fn usage(&self, store: &Store, ws: &str, connection_id: &str) -> VaultResult<Usage>;
     /// Called in the disconnect transaction before the row is deleted: drop or detach rows that
     /// reference it (foreign keys are on).
-    fn on_disconnect(&self, tx: &Tx, ws: &str, connection_id: &str) -> VaultResult<()> {
+    fn on_disconnect(&self, tx: &mut W<'_>, ws: &str, connection_id: &str) -> VaultResult<()> {
         let _ = (tx, ws, connection_id);
         Ok(())
     }
@@ -373,12 +373,13 @@ pub fn may_write(r: &ConnRow, cap: Option<&str>) -> Result<(), WriteRefusal> {
 
 /// [`may_write`] for connection `id` of `ws`, read in the caller's transaction.
 pub fn may_write_in(
-    c: &rusqlite::Connection,
+    c: &mut impl Read,
     ws: &str,
     id: &str,
     cap: Option<&str>,
 ) -> Result<Result<(), WriteRefusal>, ApiError> {
-    let r = repo::get(c, id)?
+    let r = ConnectionRows(c)
+        .get(id)?
         .filter(|r| r.workspace_id == ws)
         .ok_or_else(|| ApiError::not_found("连接"))?;
     Ok(may_write(&r, cap))
@@ -651,8 +652,9 @@ impl Connections {
     }
 
     /// The connection `id` if its account is visible to the viewer; `404 没有这个连接` otherwise.
-    fn own(&self, c: &rusqlite::Connection, viewer: &Viewer, id: &str) -> VaultResult<ConnRow> {
-        let r = repo::get(c, id)?
+    fn own(&self, c: &mut impl Read, viewer: &Viewer, id: &str) -> VaultResult<ConnRow> {
+        let r = ConnectionRows(c)
+            .get(id)?
             .filter(|r| r.workspace_id == viewer.ws)
             .ok_or_else(|| ApiError::not_found("连接"))?;
         let a = own_account(c, viewer, &r.account_id).map_err(|_| ApiError::not_found("连接"))?;
@@ -664,8 +666,9 @@ impl Connections {
 
     /// A connection of someone's “我” (their mailbox, their user token) is theirs alone, even though
     /// the account is visible to the workspace; the own organization's and teams' are shared.
-    fn mine(c: &rusqlite::Connection, viewer: &Viewer, party: &str) -> VaultResult<bool> {
-        Ok(current_party(c, party)?
+    fn mine(c: &mut impl Read, viewer: &Viewer, party: &str) -> VaultResult<bool> {
+        Ok(steve_store::Contacts::new(c)
+            .current_party(party)?
             .and_then(|p| p.user_id)
             .is_none_or(|u| u == viewer.user))
     }
@@ -678,17 +681,19 @@ impl Connections {
     /// The connections the caller may see, with their accounts (the list and 接入).
     pub(super) fn visible(&self, who: &Caller) -> VaultResult<Vec<(ConnRow, arepo::Account)>> {
         let viewer = self.viewer(who)?;
-        self.0.m.store.reader(|c| {
-            let mut out = Vec::new();
-            for r in repo::list(c, &who.ws)? {
-                if let Ok(a) = own_account(c, &viewer, &r.account_id)
-                    && Self::mine(c, &viewer, &a.party_id)?
-                {
-                    out.push((r, a));
+        self.0.m.store.read::<_, steve_store::StoreError>(|c| {
+            Ok((|| {
+                let mut out = Vec::new();
+                for r in ConnectionRows(c).list(&who.ws)? {
+                    if let Ok(a) = own_account(c, &viewer, &r.account_id)
+                        && Self::mine(c, &viewer, &a.party_id)?
+                    {
+                        out.push((r, a));
+                    }
                 }
-            }
-            Ok::<_, VaultError>(out)
-        })
+                Ok::<_, VaultError>(out)
+            })())
+        })?
     }
 
     /// Every registered adapter, managed ones included, by id.
@@ -716,7 +721,11 @@ impl Connections {
 
     pub fn get(&self, who: &Caller, id: &str) -> VaultResult<ConnectionOut> {
         let viewer = self.viewer(who)?;
-        let r = self.0.m.store.reader(|c| self.own(c, &viewer, id))?;
+        let r = self
+            .0
+            .m
+            .store
+            .read::<_, steve_store::StoreError>(|c| Ok(self.own(c, &viewer, id)))??;
         Ok(self.out(&r))
     }
 
@@ -726,7 +735,7 @@ impl Connections {
             .0
             .m
             .store
-            .reader(|c| repo::get(c, id))?
+            .read(|r| steve_store::Connections(r).get(id))?
             .filter(|r| r.workspace_id == ws)
             .ok_or_else(|| ApiError::not_found("连接"))?;
         Ok(self.cx_of(&r))
@@ -741,7 +750,7 @@ impl Connections {
             .0
             .m
             .store
-            .reader(|c| repo::get(c, id))?
+            .read(|r| steve_store::Connections(r).get(id))?
             .filter(|r| r.workspace_id == ws)
             .ok_or_else(|| ApiError::not_found("连接"))?;
         may_write(&r, cap).map_err(ApiError::from)?;
@@ -781,7 +790,11 @@ impl Connections {
         let Some(with) = config.get(PAIR_KEY).and_then(Value::as_str) else {
             return Ok(None);
         };
-        let row = self.0.m.store.reader(|c| repo::get(c, with))?;
+        let row = self
+            .0
+            .m
+            .store
+            .read(|r| steve_store::Connections(r).get(with))?;
         Ok(row
             .filter(|r| r.workspace_id == ws && pairing.with.contains(&r.adapter))
             .map(|r| Paired {
@@ -800,7 +813,7 @@ impl Connections {
     ///   those adapters); a required pair that cannot be found refuses.
     fn check_pair(
         &self,
-        c: &rusqlite::Connection,
+        c: &mut impl Read,
         viewer: &Viewer,
         p: &dyn ConnectionProvider,
         config: &mut Value,
@@ -849,7 +862,7 @@ impl Connections {
             }
             None if auto => {
                 let mut found = Vec::new();
-                for r in repo::list(c, &viewer.ws)? {
+                for r in ConnectionRows(c).list(&viewer.ws)? {
                     if pairing.with.contains(&r.adapter)
                         && r.status != "revoked"
                         && this != Some(r.id.as_str())
@@ -916,7 +929,7 @@ impl Connections {
     ) -> VaultResult<ConnectionOut> {
         let viewer = self.viewer(who)?;
         let now = self.now();
-        let r = self.0.m.store.transaction(|tx| {
+        let r = self.0.m.store.write(|tx| {
             let mut r = self.own(tx, &viewer, id)?;
             let p = self.provider_or_404(&r.adapter)?;
             if p.pairing().is_none() {
@@ -937,16 +950,15 @@ impl Connections {
             self.check_pair(tx, &viewer, p.as_ref(), &mut config, Some(&r.id), false)?;
             if config.get(PAIR_KEY) != r.config.get(PAIR_KEY) {
                 r.config = config;
-                repo::update(tx, &r, now)?;
-                base::audit(
-                    tx,
+                ConnectionRows(tx).update(&r, now)?;
+                tx.audit(
                     &viewer.ws,
                     &who.me,
                     "connection.pair",
                     &r.id,
                     &json!({"adapter": r.adapter, PAIR_KEY: r.config.get(PAIR_KEY)}),
                 )?;
-                tx.publish(steve_types::DomainEvent::from(
+                tx.emit(steve_types::DomainEvent::from(
                     steve_types::ChannelsEvent::Connection {
                         id: {
                             let value: String = r.id.clone();
@@ -967,17 +979,19 @@ impl Connections {
 
     pub fn usage(&self, who: &Caller, id: &str) -> VaultResult<Usage> {
         let viewer = self.viewer(who)?;
-        self.0.m.store.reader(|c| {
-            let r = self.own(c, &viewer, id)?;
-            let mut u = Usage::default();
-            for x in &self.0.usage {
-                let v = x.usage(c, &r.workspace_id, &r.id)?;
-                u.flows.extend(v.flows);
-                u.spaces += v.spaces;
-                u.sources.extend(v.sources);
-            }
-            Ok(u)
-        })
+        self.0.m.store.read::<_, steve_store::StoreError>(|c| {
+            Ok((|| {
+                let r = self.own(c, &viewer, id)?;
+                let mut u = Usage::default();
+                for x in &self.0.usage {
+                    let v = x.usage(&self.0.m.store, &r.workspace_id, &r.id)?;
+                    u.flows.extend(v.flows);
+                    u.spaces += v.spaces;
+                    u.sources.extend(v.sources);
+                }
+                Ok(u)
+            })())
+        })?
     }
 
     // ------------------------------------------------------------ connecting
@@ -1045,7 +1059,7 @@ impl Connections {
         let res = self
             .blocking(move |c| {
                 let viewer = c.viewer(&w)?;
-                c.0.m.store.transaction(|tx| {
+                c.0.m.store.write(|tx| {
                     c.upsert_tx(
                         tx,
                         &viewer,
@@ -1113,14 +1127,20 @@ impl Connections {
     /// Writes a [`Self::prepare_credential`] item in `tx`; returns its id.
     pub fn insert_prepared(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         p: &crate::vault::items::PreparedItem,
     ) -> VaultResult<String> {
         self.0.vault.insert_prepared(tx, p)
     }
 
     /// Destroys a credential item in `tx` (missing or already destroyed is fine).
-    pub fn destroy_item_tx(&self, tx: &Tx, ws: &str, actor: &str, item: &str) -> VaultResult<()> {
+    pub fn destroy_item(
+        &self,
+        tx: &mut W<'_>,
+        ws: &str,
+        actor: &str,
+        item: &str,
+    ) -> VaultResult<()> {
         self.0.vault.destroy_item(tx, ws, actor, item)?;
         Ok(())
     }
@@ -1144,7 +1164,7 @@ impl Connections {
         guard: G,
     ) -> VaultResult<Connected>
     where
-        G: FnOnce(&Tx, &Connected) -> VaultResult<()> + Send + 'static,
+        G: FnOnce(&mut W<'_>, &Connected) -> VaultResult<()> + Send + 'static,
     {
         let p = self.provider_or_404(adapter)?;
         let config = self.clean_config(who, p.as_ref(), config, None)?;
@@ -1176,7 +1196,7 @@ impl Connections {
         let res = self
             .blocking(move |c| {
                 let viewer = c.viewer(&w)?;
-                c.0.m.store.transaction(|tx| {
+                c.0.m.store.write(|tx| {
                     let (done, _) = c.upsert_tx(
                         tx,
                         &viewer,
@@ -1213,7 +1233,7 @@ impl Connections {
         let (ws, actor) = (ws.to_string(), actor.to_string());
         let r = self
             .blocking(move |c| {
-                c.0.m.store.transaction(|tx| {
+                c.0.m.store.write(|tx| {
                     for i in &items {
                         c.0.vault.destroy_item(tx, &ws, &actor, i)?;
                     }
@@ -1249,64 +1269,68 @@ impl Connections {
     /// stewards already keep them.
     fn link_stewards(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         ws: &str,
         actor: &str,
         account: &arepo::Account,
         connection: &str,
         info: &AccountInfo,
     ) -> VaultResult<()> {
+        let bot = tx
+            .contacts()
+            .current_party(&account.party_id)?
+            .filter(|p| p.contact_kind.as_deref() == Some("bot"));
+        let hinted = match (&bot, &info.steward_hint) {
+            (Some(_), Some(h)) => self.hinted_person(tx, ws, h)?,
+            _ => None,
+        };
         if !stewards::has_any(tx, ws, "connection", connection)?
             && let Some(p) = stewards::connection_owner(tx, ws, &account.party_id, actor)?
         {
             stewards::link(tx, ws, "connection", connection, &p, "connect", None)?;
         }
-        let Some(bot) = current_party(tx, &account.party_id)?
-            .filter(|p| p.contact_kind.as_deref() == Some("bot"))
-        else {
-            return Ok(());
-        };
-        let hinted = match &info.steward_hint {
-            Some(h) => self.hinted_person(tx, ws, h)?,
-            None => None,
-        };
-        match hinted {
-            Some(p) => {
+        if let Some(bot) = bot {
+            if let Some(p) = hinted {
                 stewards::link(tx, ws, "party", &bot.id, &p, "sync", Some(connection))?;
+            } else if !stewards::has_any(tx, ws, "party", &bot.id)?
+                && let Some(me) = tx.contacts().me(ws, actor)?
+            {
+                stewards::link(
+                    tx,
+                    ws,
+                    "party",
+                    &bot.id,
+                    &me.id,
+                    "connect",
+                    Some(connection),
+                )?;
             }
-            None if !stewards::has_any(tx, ws, "party", &bot.id)? => {
-                if let Some(me) = people::me_of(tx, ws, actor)? {
-                    stewards::link(
-                        tx,
-                        ws,
-                        "party",
-                        &bot.id,
-                        &me.id,
-                        "connect",
-                        Some(connection),
-                    )?;
-                }
-            }
-            None => {}
         }
         Ok(())
     }
 
     /// The person behind a provider-named handle, if that handle is a known person's account.
-    fn hinted_person(&self, tx: &Tx, ws: &str, h: &StewardHint) -> VaultResult<Option<String>> {
+    fn hinted_person(
+        &self,
+        tx: &mut W<'_>,
+        ws: &str,
+        h: &StewardHint,
+    ) -> VaultResult<Option<String>> {
         let Ok(system) = own_system(tx, ws, &h.system) else {
             return Ok(None);
         };
         let Some(n) = normalize(&system, &h.handle) else {
             return Ok(None);
         };
-        let Some(id) = arepo::by_handle(tx, ws, &system.family, &n.handle)? else {
+        let Some(id) = Accounts(tx).by_handle(ws, &system.family, &n.handle)? else {
             return Ok(None);
         };
-        let Some(a) = arepo::get(tx, &id)? else {
+        let Some(a) = Accounts(tx).get(&id)? else {
             return Ok(None);
         };
-        Ok(current_party(tx, &a.party_id)?
+        Ok(tx
+            .contacts()
+            .current_party(&a.party_id)?
             .filter(|p| {
                 p.kind == "contact"
                     && p.status == "active"
@@ -1320,42 +1344,41 @@ impl Connections {
     /// undone and only logged (the connect then says who holds the account).
     fn claim_into_me(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         viewer: &Viewer,
         actor: &str,
         system: &str,
         info: &AccountInfo,
     ) -> VaultResult<()> {
-        let Some(me) = people::me_of(tx, &viewer.ws, actor)? else {
+        let Some(me) = tx.contacts().me(&viewer.ws, actor)? else {
             return Ok(());
         };
-        tx.execute_batch("SAVEPOINT conn_claim")
-            .map_err(steve_store::StoreError::from)?;
-        let run = || -> crate::ApiResult<Vec<String>> {
+        let outcome = tx.scope(|tx| -> crate::ApiResult<()> {
             let hooks = &self.0.party_hooks;
             let mut handles: Vec<&str> = vec![info.handle.as_str()];
             handles.extend(info.extra_handles.iter().map(String::as_str));
-            let mut merged = claim_self(tx, hooks, viewer, actor, &me, system, &handles)?;
+            claim_self(tx, hooks, viewer, actor, &me, system, &handles)?;
             for (sys, h) in &info.aliases {
-                merged.extend(claim_self(tx, hooks, viewer, actor, &me, sys, &[h])?);
+                claim_self(tx, hooks, viewer, actor, &me, sys, &[h])?;
             }
-            Ok(merged)
-        };
-        match run() {
-            Ok(_) => tx.execute_batch("RELEASE conn_claim"),
-            Err(e) => {
-                tracing::warn!(error = %e, "connection: could not merge your contact into 我");
-                tx.execute_batch("ROLLBACK TO conn_claim; RELEASE conn_claim")
-            }
+            Ok(())
+        });
+        if let Err(error) = outcome {
+            tracing::warn!(%error, "connection: could not merge your contact into 我");
         }
-        .map_err(steve_store::StoreError::from)?;
         Ok(())
     }
 
     /// Settles the open `reauth` decision of a connection, if any.
-    fn settle_decision(&self, tx: &Tx, ws: &str, id: &str, result: Value) -> VaultResult<()> {
-        if let Some(d) = base::decisions::open_for(tx, ws, SUBJECT, id)? {
-            base::decisions::settle(tx, &d.id, &result, "resolved", &Value::Null)?;
+    fn settle_decision(
+        &self,
+        tx: &mut W<'_>,
+        ws: &str,
+        id: &str,
+        result: Value,
+    ) -> VaultResult<()> {
+        if let Some(d) = DecisionRows(tx).open_for(ws, SUBJECT, id)? {
+            DecisionRows(tx).settle(&d.id, &result, "resolved", &Value::Null)?;
         }
         Ok(())
     }
@@ -1648,10 +1671,9 @@ impl Connections {
             )))
         })?;
         let viewer = self.viewer(who)?;
-        self.0
-            .m
-            .store
-            .reader(|c| self.check_pair(c, &viewer, p, &mut config, this, true))?;
+        self.0.m.store.read::<_, steve_store::StoreError>(|c| {
+            Ok(self.check_pair(c, &viewer, p, &mut config, this, true))
+        })??;
         Ok(config)
     }
 
@@ -1721,7 +1743,11 @@ impl Connections {
         fields: &BTreeMap<String, Zeroizing<String>>,
     ) -> VaultResult<ConnectionOut> {
         let viewer = self.viewer(who)?;
-        let r = self.0.m.store.reader(|c| self.own(c, &viewer, id))?;
+        let r = self
+            .0
+            .m
+            .store
+            .read::<_, steve_store::StoreError>(|c| Ok(self.own(c, &viewer, id)))??;
         let p = self.provider_or_404(&r.adapter)?;
         if !matches!(p.auth(), AuthKind::Credential | AuthKind::Managed) {
             return Err(ApiError::rule(steve_i18n::t!("modules.connections.needs_reauth")).into());
@@ -1744,7 +1770,11 @@ impl Connections {
     /// `POST /connections/:id/reauth`: OAuth → `{url}`; credential → `{fields}` to fill again.
     pub async fn reauth(&self, who: &Caller, origin: &str, id: &str) -> VaultResult<Value> {
         let viewer = self.viewer(who)?;
-        let r = self.0.m.store.reader(|c| self.own(c, &viewer, id))?;
+        let r = self
+            .0
+            .m
+            .store
+            .read::<_, steve_store::StoreError>(|c| Ok(self.own(c, &viewer, id)))??;
         let p = self.provider_or_404(&r.adapter)?;
         match p.auth() {
             AuthKind::OAuth => {
@@ -1778,7 +1808,7 @@ impl Connections {
     ) -> VaultResult<ConnectionOut> {
         let viewer = self.viewer(who)?;
         let now = self.now();
-        let r = self.0.m.store.transaction(|tx| {
+        let r = self.0.m.store.write(|tx| {
             let mut r = self.own(tx, &viewer, id)?;
             let before = (r.status.clone(), r.caps.clone());
             if let Some(c) = &caps {
@@ -1812,21 +1842,20 @@ impl Connections {
                 _ => {}
             }
             if (r.status.clone(), r.caps.clone()) != before {
-                repo::update(tx, &r, now)?;
+                ConnectionRows(tx).update(&r, now)?;
                 // resumed, or a capability turned on: what comes from before now is history
                 let resumed = before.0 == "paused" && r.status != "paused";
                 if resumed || r.caps.iter().any(|c| !before.1.contains(c)) {
-                    repo::set_enabled_at(tx, &r.id, now)?;
+                    ConnectionRows(tx).set_enabled_at(&r.id, now)?;
                 }
-                base::audit(
-                    tx,
+                tx.audit(
                     &viewer.ws,
                     &who.me,
                     "connection.patch",
                     &r.id,
                     &json!({"status": r.status, "caps": r.caps}),
                 )?;
-                tx.publish(steve_types::DomainEvent::from(
+                tx.emit(steve_types::DomainEvent::from(
                     steve_types::ChannelsEvent::Connection {
                         id: {
                             let value: String = r.id.clone();
@@ -1838,7 +1867,7 @@ impl Connections {
                         },
                     },
                 ));
-                tx.publish(steve_types::DomainEvent::from(
+                tx.emit(steve_types::DomainEvent::from(
                     steve_types::PeopleEvent::Account {
                         id: {
                             let value: String = r.account_id.clone();
@@ -1861,7 +1890,11 @@ impl Connections {
     pub async fn disconnect(&self, who: &Caller, id: &str) -> VaultResult<Usage> {
         let usage = self.usage(who, id)?;
         let viewer = self.viewer(who)?;
-        let r = self.0.m.store.reader(|c| self.own(c, &viewer, id))?;
+        let r = self
+            .0
+            .m
+            .store
+            .read::<_, steve_store::StoreError>(|c| Ok(self.own(c, &viewer, id)))??;
         if let Some(p) = self.provider(&r.adapter)
             && r.credential_item.is_some()
             && let Err(e) = p.revoke(&self.cx_of(&r)).await
@@ -1870,24 +1903,24 @@ impl Connections {
         }
         let (w, rr) = (who.clone(), r.clone());
         self.blocking(move |c| {
-            c.0.m.store.transaction(|tx| {
+            c.0.m.store.write(|tx| {
                 for u in &c.0.usage {
                     u.on_disconnect(tx, &rr.workspace_id, &rr.id)?;
                 }
                 if let Some(item) = &rr.credential_item {
                     c.0.vault.destroy_item(tx, &rr.workspace_id, &w.me, item)?;
                 }
-                repo::delete(tx, &rr.id)?;
+                Accounts(tx).clear_connection_handles(&rr.id)?;
+                ConnectionRows(tx).delete(&rr.id)?;
                 c.settle_decision(tx, &rr.workspace_id, &rr.id, json!({"disconnected": true}))?;
-                base::audit(
-                    tx,
+                tx.audit(
                     &rr.workspace_id,
                     &w.me,
                     "connection.delete",
                     &rr.id,
                     &json!({"adapter": rr.adapter, "account": rr.account_id}),
                 )?;
-                tx.publish(steve_types::DomainEvent::from(
+                tx.emit(steve_types::DomainEvent::from(
                     steve_types::ChannelsEvent::Connection {
                         id: {
                             let value: String = rr.id.clone();
@@ -1899,7 +1932,7 @@ impl Connections {
                         },
                     },
                 ));
-                tx.publish(steve_types::DomainEvent::from(
+                tx.emit(steve_types::DomainEvent::from(
                     steve_types::PeopleEvent::Account {
                         id: {
                             let value: String = rr.account_id.clone();
@@ -1922,10 +1955,13 @@ impl Connections {
     /// Marks a sync done (other modules).
     pub fn touch_sync(&self, ws: &str, id: &str) -> VaultResult<()> {
         let now = self.now();
-        self.0.m.store.transaction(|tx| {
-            if repo::get(tx, id)?.is_some_and(|r| r.workspace_id == ws) {
-                repo::set_last_sync(tx, id, now)?;
-                tx.publish(steve_types::DomainEvent::from(
+        self.0.m.store.write(|tx| {
+            if ConnectionRows(tx)
+                .get(id)?
+                .is_some_and(|r| r.workspace_id == ws)
+            {
+                ConnectionRows(tx).set_last_sync(id, now)?;
+                tx.emit(steve_types::DomainEvent::from(
                     steve_types::ChannelsEvent::Connection {
                         id: {
                             let value: String = id.into();
@@ -2094,8 +2130,8 @@ impl Connections {
             .blocking(move |c| {
                 c.0.vault.replace_credential(&ws, &id, &item, fields)?;
                 if !pending {
-                    c.0.m.store.transaction(|tx| {
-                        if let Some(mut r) = repo::get(tx, &id)? {
+                    c.0.m.store.write(|tx| {
+                        if let Some(mut r) = ConnectionRows(tx).get(&id)? {
                             r.health.expires_at = exp;
                             r.health.refresh_expires_at = rexp;
                             if let Some(s) = &scope {
@@ -2105,9 +2141,9 @@ impl Connections {
                                     .map(String::from)
                                     .collect();
                             }
-                            repo::set_health(tx, &id, &r.status, &r.health, c.now())?;
+                            ConnectionRows(tx).set_health(&id, &r.status, &r.health, c.now())?;
                             if scope.is_some() {
-                                repo::update(tx, &r, c.now())?;
+                                ConnectionRows(tx).update(&r, c.now())?;
                             }
                         }
                         Ok::<_, VaultError>(())
@@ -2178,16 +2214,19 @@ impl Connections {
         let r = self
             .blocking(move |c| {
                 let now = c.now();
-                c.0.m.store.transaction(|tx| {
-                    let Some(mut r) = repo::get(tx, &id)?.filter(|r| r.workspace_id == ws) else {
+                c.0.m.store.write(|tx| {
+                    let Some(mut r) = ConnectionRows(tx)
+                        .get(&id)?
+                        .filter(|r| r.workspace_id == ws)
+                    else {
                         return Ok(());
                     };
                     if matches!(r.status.as_str(), "paused" | "revoked") || !f(&mut r.config) {
                         return Ok(());
                     }
                     // learned, not edited: no revision bump (see repo::set_config)
-                    repo::set_config(tx, &id, &r.config, now)?;
-                    tx.publish(steve_types::DomainEvent::from(
+                    ConnectionRows(tx).set_config(&id, &r.config, now)?;
+                    tx.emit(steve_types::DomainEvent::from(
                         steve_types::ChannelsEvent::Connection {
                             id: {
                                 let value: String = id;
@@ -2214,9 +2253,9 @@ impl Connections {
     /// before connections run. Returns how many were marked.
     pub fn check_versions(&self) -> VaultResult<usize> {
         let now = self.now();
-        self.0.m.store.transaction(|tx| {
+        self.0.m.store.write(|tx| {
             let mut n = 0;
-            for mut r in repo::authorized(tx)? {
+            for mut r in ConnectionRows(tx).authorized()? {
                 let Some(p) = self.provider(&r.adapter) else {
                     continue;
                 };
@@ -2228,9 +2267,9 @@ impl Connections {
                 r.status = "reauth".into();
                 r.health.last_error = steve_i18n::t!("modules.connections.config_version");
                 r.health.error_at = now;
-                repo::set_health(tx, &r.id, &r.status, &r.health, now)?;
+                ConnectionRows(tx).set_health(&r.id, &r.status, &r.health, now)?;
                 self.open_reauth(tx, &r)?;
-                tx.publish(steve_types::DomainEvent::from(steve_types::ChannelsEvent::Connection { id: { let value: String = r.id.clone(); steve_types::ConnectionId::from(value) },
+                tx.emit(steve_types::DomainEvent::from(steve_types::ChannelsEvent::Connection { id: { let value: String = r.id.clone(); steve_types::ConnectionId::from(value) },
                 ws: { let value: String = r.workspace_id.clone(); steve_types::WorkspaceId::from(value) }, }));
                 n += 1;
             }
@@ -2240,8 +2279,8 @@ impl Connections {
 
     fn record_sync(&self, ws: &str, id: &str, h: &Health) -> VaultResult<()> {
         let now = self.now();
-        self.0.m.store.transaction(|tx| {
-            let Some(mut r) = repo::get(tx, id)?.filter(|r| r.workspace_id == ws) else {
+        self.0.m.store.write(|tx| {
+            let Some(mut r) = ConnectionRows(tx).get(id)?.filter(|r| r.workspace_id == ws) else {
                 return Ok(());
             };
             if matches!(r.status.as_str(), "paused" | "revoked") {
@@ -2274,12 +2313,12 @@ impl Connections {
                     }
                 }
             }
-            repo::set_health(tx, id, &r.status, &r.health, now)?;
+            ConnectionRows(tx).set_health(id, &r.status, &r.health, now)?;
             if (r.status.clone(), r.health.fails) != before {
                 if r.status != before.0 {
                     tracing::info!(connection = %id, status = %r.status, "connection status changed");
                 }
-                tx.publish(steve_types::DomainEvent::from(steve_types::ChannelsEvent::Connection { id: { let value: String = id.into(); steve_types::ConnectionId::from(value) },
+                tx.emit(steve_types::DomainEvent::from(steve_types::ChannelsEvent::Connection { id: { let value: String = id.into(); steve_types::ConnectionId::from(value) },
                 ws: { let value: String = ws.into(); steve_types::WorkspaceId::from(value) }, }));
             }
             Ok(())
@@ -2287,11 +2326,15 @@ impl Connections {
     }
 
     /// The “需要重新授权” decision; at most one open per connection.
-    fn open_reauth(&self, tx: &Tx, r: &ConnRow) -> VaultResult<()> {
-        if base::decisions::open_for(tx, &r.workspace_id, SUBJECT, &r.id)?.is_some() {
+    fn open_reauth(&self, tx: &mut W<'_>, r: &ConnRow) -> VaultResult<()> {
+        if DecisionRows(tx)
+            .open_for(&r.workspace_id, SUBJECT, &r.id)?
+            .is_some()
+        {
             return Ok(());
         }
-        let account = arepo::get(tx, &r.account_id)?
+        let account = Accounts(tx)
+            .get(&r.account_id)?
             .map(|a| {
                 if a.display_name.is_empty() {
                     a.handle_display
@@ -2304,28 +2347,29 @@ impl Connections {
             Some(p) => p.reauth_question(&account),
             None => format!("{account} 的授权过期了"),
         };
-        base::decisions::open(
-            tx,
-            &NewDecision {
-                workspace_id: r.workspace_id.clone(),
-                kind: DecisionKind::Fail.code().into(),
-                subject_type: SUBJECT.into(),
-                subject_id: r.id.clone(),
-                item_id: None,
-                session_id: None,
-                question,
-                draft: None,
-                options: Some(REAUTH_OPTIONS.map(String::from).to_vec()),
-                requested_by: "steve".into(),
-            },
-        )?;
+        DecisionRows(tx).open(&NewDecision {
+            workspace_id: r.workspace_id.clone(),
+            kind: DecisionKind::Fail.code().into(),
+            subject_type: SUBJECT.into(),
+            subject_id: r.id.clone(),
+            item_id: None,
+            session_id: None,
+            question,
+            draft: None,
+            options: Some(REAUTH_OPTIONS.map(String::from).to_vec()),
+            requested_by: "steve".into(),
+        })?;
         Ok(())
     }
 
     /// `POST /connections/:id/test`: one health check now.
     pub async fn test(&self, who: &Caller, id: &str) -> VaultResult<ConnectionOut> {
         let viewer = self.viewer(who)?;
-        let r = self.0.m.store.reader(|c| self.own(c, &viewer, id))?;
+        let r = self
+            .0
+            .m
+            .store
+            .read::<_, steve_store::StoreError>(|c| Ok(self.own(c, &viewer, id)))??;
         let Some(p) = self.provider(&r.adapter) else {
             return Err(ApiError::rule(steve_i18n::t!(
                 "modules.connections.not_installed",
@@ -2357,7 +2401,7 @@ impl Connections {
     /// Returns how many were refreshed.
     pub async fn refresh_due(&self) -> usize {
         let now = self.now();
-        let rows = match self.0.m.store.reader(repo::live) {
+        let rows = match self.0.m.store.read(|r| steve_store::Connections(r).live()) {
             Ok(r) => r,
             Err(_) => return 0,
         };
@@ -2381,7 +2425,7 @@ impl Connections {
     /// `vault.health`: every `ok`/`error` connection not in backoff. Returns how many were checked.
     pub async fn check_health(&self) -> usize {
         let now = self.now();
-        let rows = match self.0.m.store.reader(repo::live) {
+        let rows = match self.0.m.store.read(|r| steve_store::Connections(r).live()) {
             Ok(r) => r,
             Err(_) => return 0,
         };
@@ -2480,7 +2524,7 @@ impl steve_runtime::due::DueSource for ConnectionJob {
         let c = self.c.clone();
         let rows =
             c.0.m
-                .blocking(|m| Ok(m.store.reader(repo::live)?))
+                .blocking(|m| Ok(m.store.read(|r| steve_store::Connections(r).live())?))
                 .await
                 .map_err(|e| steve_runtime::due::DueError(e.to_string()))?;
         // Reuse exactly the same eligibility calculation for both operations.
@@ -2491,7 +2535,7 @@ impl steve_runtime::due::DueSource for ConnectionJob {
             .c
             .0
             .m
-            .blocking(|m| Ok(m.store.reader(repo::live)?))
+            .blocking(|m| Ok(m.store.read(|r| steve_store::Connections(r).live())?))
             .await
             .map_err(|e| steve_runtime::due::DueError(e.to_string()))?;
         for (_, r) in self
@@ -2741,7 +2785,7 @@ mod due_contract_tests {
             let account = self
                 .env
                 .store()
-                .transaction(|tx| -> ApiResult<_> {
+                .write(|tx| -> ApiResult<_> {
                     let party = crate::contacts::service::ensure_self_org(tx, WS, ME)?;
                     Ok(crate::accounts::repo::insert(
                         tx,
@@ -2780,32 +2824,29 @@ mod due_contract_tests {
                 .unwrap();
             self.env
                 .store()
-                .with_conn(|c| {
-                    repo::insert(
-                        c,
-                        &ConnRow {
-                            id: id.clone(),
-                            workspace_id: WS.into(),
-                            account_id: account.id,
-                            adapter: "due-test".into(),
-                            auth: "oauth".into(),
-                            granted_scopes: vec![],
-                            caps: vec![],
-                            credential_item: Some(item),
-                            status: "ok".into(),
-                            health: HealthState {
-                                next_at: at,
-                                expires_at: Some(expiry),
-                                ..Default::default()
-                            },
-                            config: json!({}),
-                            last_sync: None,
-                            created_by: ME.into(),
-                            revision: 1,
-                            created: 1,
-                            updated: 1,
+                .write(|w| {
+                    steve_store::Connections(w).insert(&ConnRow {
+                        id: id.clone(),
+                        workspace_id: WS.into(),
+                        account_id: account.id,
+                        adapter: "due-test".into(),
+                        auth: "oauth".into(),
+                        granted_scopes: vec![],
+                        caps: vec![],
+                        credential_item: Some(item),
+                        status: "ok".into(),
+                        health: HealthState {
+                            next_at: at,
+                            expires_at: Some(expiry),
+                            ..Default::default()
                         },
-                    )
+                        config: json!({}),
+                        last_sync: None,
+                        created_by: ME.into(),
+                        revision: 1,
+                        created: 1,
+                        updated: 1,
+                    })
                 })
                 .unwrap();
             id
@@ -2813,9 +2854,10 @@ mod due_contract_tests {
         fn done(&self) -> Vec<String> {
             self.env
                 .store()
-                .reader(|c| {
+                .read(|r| {
                     Ok::<_, steve_store::StoreError>(
-                        repo::live(c)?
+                        steve_store::Connections(r)
+                            .live()?
                             .into_iter()
                             .filter(|r| r.health.last_ok > 0 && r.health.fails == 0)
                             .map(|r| r.id)

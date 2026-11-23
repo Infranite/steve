@@ -25,11 +25,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rusqlite::{Connection, params};
 use serde::Serialize;
 use steve_modules::accounts::connections::repo as conn_repo;
 use steve_modules::accounts::{self, Enrichment, ExtraHandle, TenantHint, looks_like_handle};
 use steve_runtime::policy::{Limiter, RateLimit};
+use steve_store::channel_names as repo;
 
 use crate::channel::{HandleRef, Profile, ProfileAnswer, ProfileQuery, TenantInfo};
 use crate::{ChannelResult, Channels};
@@ -233,11 +233,11 @@ impl Names {
 pub const MAX_PROFILE_CHECKS: usize = 200;
 
 /// Does the person still miss an organization, a job title or an email (contacts `profile`)?
-fn incomplete(c: &Connection, ws: &str, party: &str) -> ChannelResult<bool> {
-    let Some(p) = steve_modules::contacts::repo::get(c, party)? else {
+fn incomplete(r: &mut impl steve_store::Read, ws: &str, party: &str) -> ChannelResult<bool> {
+    let Some(p) = steve_store::Contacts::new(r).party(party)? else {
         return Ok(false);
     };
-    let f = steve_modules::contacts::profile::contact_profile(c, ws, &p, None)?.fields;
+    let f = steve_modules::contacts::profile::contact_profile(r, ws, &p, None)?.fields;
     Ok([f.org, f.title, f.email]
         .iter()
         .any(|x| x.state == "missing"))
@@ -248,56 +248,54 @@ fn incomplete(c: &Connection, ws: &str, party: &str) -> ChannelResult<bool> {
 /// ([`steve_modules::contacts::profile::due`]) — a missing
 /// organization, title or email (at most [`MAX_PROFILE_CHECKS`]).
 fn candidates(
-    c: &Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     now: i64,
     lookups: &[String],
 ) -> ChannelResult<Vec<Candidate>> {
-    let mut st = c.prepare(
-        "SELECT a.id, a.party_id, p.created_by, a.system_id, a.handle, a.display_name, p.name, p.contact_kind
-           FROM accounts a JOIN parties p ON p.id = a.party_id
-          WHERE a.workspace_id = ? AND a.status = 'active' AND p.type = 'contact' AND p.status = 'active'
-            AND p.user_id IS NULL AND coalesce(p.contact_kind, '') <> 'bot'
-            AND a.kind NOT IN ('bot', 'app_bot')
-          ORDER BY a.created, a.id",
-    )?;
-    let rows = st
-        .query_map(params![ws], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, String>(4)?,
-                r.get::<_, String>(5)?,
-                r.get::<_, String>(6)?,
-                r.get::<_, Option<String>>(7)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let accounts = steve_store::Accounts(r).identification_candidates(ws)?;
+    let parties: Vec<_> = accounts.iter().map(|a| a.party_id.as_str()).collect();
+    let parties = steve_store::Contacts::new(r).by_ids(&parties)?;
     let mut out = Vec::new();
     let mut checks = 0;
-    for (acc, party, actor, system, handle, display, pname, kind) in rows {
+    for account in accounts {
+        let Some(party) = parties.get(&account.party_id).filter(|p| {
+            p.kind == "contact"
+                && p.status == "active"
+                && p.user_id.is_none()
+                && p.contact_kind.as_deref() != Some("bot")
+        }) else {
+            continue;
+        };
+        let (acc, actor, system, handle, display, pname, kind) = (
+            account.id,
+            party.created_by.clone(),
+            account.system_id,
+            account.handle,
+            account.display_name,
+            &party.name,
+            &party.contact_kind,
+        );
         let raw = |n: &str| looks_like_handle(n) || n.trim() == handle;
         let account_named = !raw(&display);
-        let party_named = !raw(&pname);
+        let party_named = !raw(pname);
         let unconfirmed = kind.as_deref() == Some("unconfirmed");
         if account_named && party_named && !unconfirmed {
             if !lookups.contains(&system)
                 || checks >= MAX_PROFILE_CHECKS
-                || !steve_modules::contacts::profile::due(c, &acc, now)?
-                || !incomplete(c, ws, &party)?
+                || !steve_modules::contacts::profile::due(r, &acc, now)?
+                || !incomplete(r, ws, &party.id)?
             {
                 continue;
             }
             checks += 1;
         }
         let mut h = HandleRef::new(system, handle);
-        for (x, _) in accounts::repo::handles_of(c, &acc)? {
+        for (x, _) in steve_store::Accounts(r).handles_of(&acc)? {
             h = h.with_extra(x);
         }
         out.push(Candidate {
-            retry: steve_modules::contacts::profile::retry_due(c, &acc, now)?,
+            retry: steve_modules::contacts::profile::retry_due(r, &acc, now)?,
             account_id: acc,
             actor,
             handle: h,
@@ -308,132 +306,49 @@ fn candidates(
 }
 
 /// Step 2a: the newest non-raw name each account was @-mentioned with.
-fn mention_names(c: &Connection, ws: &str) -> ChannelResult<HashMap<String, String>> {
-    let mut st = c.prepare(
-        "SELECT json_extract(j.value, '$.account_id'), json_extract(j.value, '$.name')
-           FROM chan_messages m, json_each(CASE WHEN json_valid(m.mentions) THEN m.mentions ELSE '[]' END) j
-          WHERE m.workspace_id = ? AND json_extract(j.value, '$.account_id') IS NOT NULL
-          ORDER BY m.created DESC",
-    )?;
-    let mut out: HashMap<String, String> = HashMap::new();
-    let rows = st.query_map(params![ws], |r| {
-        Ok((
-            r.get::<_, Option<String>>(0)?,
-            r.get::<_, Option<String>>(1)?,
-        ))
-    })?;
-    for row in rows {
-        let (Some(a), Some(n)) = row? else { continue };
-        let n = n.trim().trim_start_matches('@').trim().to_string();
-        if !n.is_empty() && !looks_like_handle(&n) && n != "所有人" {
-            out.entry(a).or_insert(n);
-        }
-    }
-    Ok(out)
-}
-
-/// Step 2b: a private chat named after the other party, whose inbound messages all came from one
-/// account that is not the connection's own: that account has the chat's name.
-fn dm_names(c: &Connection, ws: &str) -> ChannelResult<HashMap<String, String>> {
-    let mut st = c.prepare(
-        "SELECT s.name, min(m.sender_account_id), count(DISTINCT m.sender_account_id)
-           FROM spaces s JOIN chan_messages m ON m.space_id = s.id AND m.direction = 'in'
-          WHERE s.workspace_id = ? AND s.kind = 'dm' AND m.sender_account_id IS NOT NULL
-            AND m.sender_account_id NOT IN (SELECT cn.account_id FROM space_identities si
-                  JOIN connections cn ON cn.id = si.connection_id WHERE si.space_id = s.id
-                 UNION SELECT cn.account_id FROM connections cn WHERE cn.id = s.connection_id)
-          GROUP BY s.id",
-    )?;
+fn mention_names(
+    r: &mut impl steve_store::Read,
+    ws: &str,
+) -> ChannelResult<HashMap<String, String>> {
     let mut out = HashMap::new();
-    let rows = st.query_map(params![ws], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, i64>(2)?,
-        ))
-    })?;
-    for row in rows {
-        let (name, acc, n) = row?;
-        let name = name.trim().to_string();
-        if n == 1 && !name.is_empty() && name != "私聊" && !looks_like_handle(&name) {
-            out.insert(acc, name);
+    for (account, name) in repo::mentions(r, ws)? {
+        let (Some(account), Some(name)) = (account, name) else {
+            continue;
+        };
+        let name = name.trim().trim_start_matches('@').trim();
+        if !name.is_empty() && !looks_like_handle(name) && name != "所有人" {
+            out.entry(account).or_insert_with(|| name.to_owned());
         }
     }
     Ok(out)
 }
 
-/// Step 2c: the organization key each person carried in the stored payloads — as a sender
-/// (`sender.tenant_key`; the long connection keeps the whole envelope, the poller the message) or
-/// as someone @-mentioned (`mentions[].tenant_key`) — with the space it was last seen in:
-/// `account → (tenant_key, space name, party, who created the party)`. Bots and people who
-/// already have a job are left out.
-fn local_tenants(c: &Connection, ws: &str) -> ChannelResult<HashMap<String, SeenTenant>> {
-    let mut out: HashMap<String, SeenTenant> = HashMap::new();
-    let mut st = c.prepare(
-        "SELECT m.sender_account_id,
-                coalesce(json_extract(e.payload, '$.raw.event.sender.tenant_key'), json_extract(e.payload, '$.raw.sender.tenant_key')),
-                coalesce(json_extract(e.payload, '$.raw.event.sender.sender_type'), json_extract(e.payload, '$.raw.sender.sender_type')),
-                s.name, p.id, p.created_by
-           FROM chan_messages m JOIN ext_events e ON e.id = m.event_id JOIN spaces s ON s.id = m.space_id
-           JOIN accounts a ON a.id = m.sender_account_id JOIN parties p ON p.id = a.party_id
-          WHERE m.workspace_id = ?1 AND m.direction = 'in' AND e.payload IS NOT NULL
-            AND a.kind NOT IN ('bot', 'app_bot') AND coalesce(p.contact_kind, '') <> 'bot'
-            AND NOT EXISTS (SELECT 1 FROM links l WHERE l.subject_id = a.party_id
-                             AND l.predicate = 'works_at' AND l.workspace_id = ?1)
-          ORDER BY m.created DESC",
-    )?;
-    let rows = st.query_map(params![ws], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, Option<String>>(1)?,
-            r.get::<_, Option<String>>(2)?,
-            SeenTenant {
-                tenant: String::new(),
-                space: r.get(3)?,
-                party: r.get(4)?,
-                actor: r.get(5)?,
-            },
-        ))
-    })?;
-    for row in rows {
-        let (acc, tk, kind, seen) = row?;
-        if kind.as_deref() == Some("app") {
-            continue;
-        }
-        if let Some(tk) = tk.filter(|t| !t.trim().is_empty()) {
-            out.entry(acc).or_insert(SeenTenant { tenant: tk, ..seen });
+fn dm_names(r: &mut impl steve_store::Read, ws: &str) -> ChannelResult<HashMap<String, String>> {
+    let mut out = HashMap::new();
+    for row in repo::direct_names(r, ws)? {
+        let name = row.name.trim();
+        if row.senders == 1 && !name.is_empty() && name != "私聊" && !looks_like_handle(name) {
+            out.insert(row.account, name.into());
         }
     }
-    // the people @-mentioned: their handle, through the account that has it
-    let mut st = c.prepare(
-        "SELECT h.account_id, json_extract(j.value, '$.tenant_key'), s.name, p.id, p.created_by
-           FROM chan_messages m JOIN ext_events e ON e.id = m.event_id JOIN spaces s ON s.id = m.space_id,
-                json_each(coalesce(json_extract(e.payload, '$.raw.event.message.mentions'), json_extract(e.payload, '$.raw.mentions'), '[]')) j
-           JOIN account_handles h ON h.workspace_id = m.workspace_id
-            AND h.handle = coalesce(json_extract(j.value, '$.id.open_id'), json_extract(j.value, '$.id'))
-           JOIN accounts a ON a.id = h.account_id JOIN parties p ON p.id = a.party_id
-          WHERE m.workspace_id = ?1 AND e.payload IS NOT NULL AND json_type(j.value, '$.id') IS NOT NULL
-            AND a.kind NOT IN ('bot', 'app_bot') AND coalesce(p.contact_kind, '') <> 'bot'
-            AND NOT EXISTS (SELECT 1 FROM links l WHERE l.subject_id = a.party_id
-                             AND l.predicate = 'works_at' AND l.workspace_id = ?1)
-          ORDER BY m.created DESC",
-    )?;
-    let rows = st.query_map(params![ws], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, Option<String>>(1)?,
-            SeenTenant {
-                tenant: String::new(),
-                space: r.get(2)?,
-                party: r.get(3)?,
-                actor: r.get(4)?,
-            },
-        ))
-    })?;
-    for row in rows {
-        let (acc, tk, seen) = row?;
-        if let Some(tk) = tk.filter(|t| !t.trim().is_empty()) {
-            out.entry(acc).or_insert(SeenTenant { tenant: tk, ..seen });
+    Ok(out)
+}
+
+fn local_tenants(
+    r: &mut impl steve_store::Read,
+    ws: &str,
+) -> ChannelResult<HashMap<String, SeenTenant>> {
+    let mut out = HashMap::new();
+    let sent = repo::sender_tenants(r, ws)?;
+    let mentioned = repo::mentioned_tenants(r, ws)?;
+    for row in sent.into_iter().chain(mentioned) {
+        if let Some(tenant) = row.tenant.filter(|key| !key.trim().is_empty()) {
+            out.entry(row.account).or_insert(SeenTenant {
+                tenant,
+                space: row.space,
+                party: row.party,
+                actor: row.actor,
+            });
         }
     }
     Ok(out)
@@ -450,56 +365,33 @@ struct SeenTenant {
 }
 
 /// Whether the account's party works somewhere in `ws`.
-fn has_job(store: &steve_store::Store, ws: &str, acc: &str) -> ChannelResult<bool> {
-    store.reader(|c| -> ChannelResult<bool> {
-        Ok(c.query_row(
-            "SELECT EXISTS (SELECT 1 FROM accounts a JOIN links l ON l.subject_id = a.party_id
-               WHERE a.id = ? AND l.predicate = 'works_at' AND l.workspace_id = ?)",
-            params![acc, ws],
-            |r| r.get(0),
-        )?)
-    })
+fn has_job(store: &steve_store::Store, ws: &str, account: &str) -> ChannelResult<bool> {
+    Ok(store.read(|r| repo::has_job(r, ws, account))?)
 }
 
-/// The organization keys of the workspace's own connections (`config.tenant_key`, written when you
-/// connected yourself).
-fn own_tenants(c: &Connection, ws: &str) -> ChannelResult<Vec<String>> {
-    let mut st = c.prepare(
-        "SELECT DISTINCT json_extract(config, '$.tenant_key') FROM connections
-          WHERE workspace_id = ? AND json_extract(config, '$.tenant_key') IS NOT NULL",
-    )?;
-    let rows = st
-        .query_map(params![ws], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows.into_iter().filter(|t| !t.trim().is_empty()).collect())
+fn own_tenants(r: &mut impl steve_store::Read, ws: &str) -> ChannelResult<Vec<String>> {
+    Ok(steve_store::connections::lifecycle::tenant_keys(r, ws)?
+        .into_iter()
+        .filter(|key| !key.trim().is_empty())
+        .collect())
 }
 
 /// The spaces the candidates were seen in (member or sender), most candidates first.
-fn seen_spaces(c: &Connection, ws: &str, cands: &[Candidate]) -> ChannelResult<Vec<SeenSpace>> {
+fn seen_spaces(
+    r: &mut impl steve_store::Read,
+    ws: &str,
+    cands: &[Candidate],
+) -> ChannelResult<Vec<SeenSpace>> {
     let ids: BTreeSet<&str> = cands.iter().map(|x| x.account_id.as_str()).collect();
-    let mut st = c.prepare(
-        "SELECT x.account_id, s.external_id, s.name, coalesce(s.connection_id,
-                  (SELECT si.connection_id FROM space_identities si WHERE si.space_id = s.id
-                    ORDER BY si.left_at IS NOT NULL, si.joined, si.connection_id LIMIT 1), '')
-           FROM (SELECT account_id, space_id FROM space_members WHERE workspace_id = ?1
-                 UNION SELECT sender_account_id, space_id FROM chan_messages
-                        WHERE workspace_id = ?1 AND direction = 'in' AND sender_account_id IS NOT NULL) x
-           JOIN spaces s ON s.id = x.space_id
-          WHERE s.status = 'active'
-          ORDER BY s.last_message DESC",
-    )?;
     let mut by: BTreeMap<(String, String), SeenSpace> = BTreeMap::new();
     let mut order: Vec<(String, String)> = Vec::new();
-    let rows = st.query_map(params![ws], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-        ))
-    })?;
-    for row in rows {
-        let (acc, ext, name, conn) = row?;
+    for repo::SeenSpace {
+        account: acc,
+        external: ext,
+        name,
+        connection: conn,
+    } in repo::seen_spaces(r, ws)?
+    {
         if !ids.contains(acc.as_str()) || conn.is_empty() {
             continue;
         }
@@ -523,41 +415,37 @@ fn seen_spaces(c: &Connection, ws: &str, cands: &[Candidate]) -> ChannelResult<V
 }
 
 /// The identities of `ws` that have a profile adapter, live.
-fn identities(c: &Connection, ws: &str, adapters: &[String]) -> ChannelResult<Vec<Identity>> {
-    let mut st = c.prepare(
-        "SELECT cn.id, cn.adapter, cn.config, p.user_id IS NOT NULL
-           FROM connections cn JOIN accounts a ON a.id = cn.account_id LEFT JOIN parties p ON p.id = a.party_id
-          WHERE cn.workspace_id = ? AND cn.status IN ('ok', 'error')
-          ORDER BY cn.created, cn.id",
-    )?;
-    let rows = st
-        .query_map(params![ws], |r| {
-            let id: String = r.get(0)?;
-            let config: serde_json::Value = r
-                .get::<_, Option<String>>(2)?
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_default();
-            Ok(Identity {
-                ws: ws.to_string(),
-                installation: steve_modules::accounts::connections::installation_key(&id, &config),
-                id,
-                adapter: r.get(1)?,
-                own: r.get(3)?,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows
+fn identities(
+    r: &mut impl steve_store::Read,
+    ws: &str,
+    adapters: &[String],
+) -> ChannelResult<Vec<Identity>> {
+    Ok(repo::identities(r, ws)?
         .into_iter()
-        .filter(|i| adapters.contains(&i.adapter))
+        .filter(|identity| adapters.contains(&identity.adapter))
+        .map(|identity| Identity {
+            ws: ws.into(),
+            installation: steve_modules::accounts::connections::installation_key(
+                &identity.id,
+                &identity.config,
+            ),
+            id: identity.id,
+            adapter: identity.adapter,
+            own: identity.personal,
+        })
         .collect())
 }
 
 /// The installation key of a connection (one of `ids`, else [`crate::spaces::installation_of`]).
-fn installation_of(ids: &[Identity], c: &Connection, conn: &str) -> ChannelResult<String> {
+fn installation_of(
+    ids: &[Identity],
+    r: &mut impl steve_store::Read,
+    conn: &str,
+) -> ChannelResult<String> {
     if let Some(i) = ids.iter().find(|i| i.id == conn) {
         return Ok(i.installation.clone());
     }
-    crate::spaces::installation_of(c, conn)
+    crate::spaces::installation_of(r, conn)
 }
 
 /// The identities of one installation: yours first, then the bot.
@@ -611,7 +499,7 @@ impl Channels {
             let now = self.now();
             if let Err(e) = self
                 .store()
-                .transaction(|tx| steve_modules::contacts::profile::all_due(tx, ws, now))
+                .write(|tx| steve_modules::contacts::profile::all_due(tx, ws, now))
             {
                 tracing::warn!(ws, "names: retries not reset: {e}");
             }
@@ -640,52 +528,47 @@ impl Channels {
         let running = std::sync::Arc::new(Running(self.downgrade()));
         let me = self.downgrade();
         let ended = me.clone().closed();
-        Some(steve_runtime::every_after(
-            "channels.names",
-            self.modules().clock.clone(),
-            Duration::from_secs(5),
-            steve_runtime::FirstRun::AfterPeriod,
-            move || {
-                let (me, running) = (me.clone(), running.clone());
-                async move {
-                    let _running = running;
-                    let Some(ch) = me.upgrade() else { return };
-                    let adapters = ch.profile_adapter_ids();
-                    if adapters.is_empty() {
-                        return;
-                    }
-                    let all = ch
-                    .store()
-                    .reader(|c| -> ChannelResult<Vec<String>> {
-                        let mut st = c.prepare(
-                            "SELECT DISTINCT workspace_id FROM connections WHERE status IN ('ok', 'error')",
-                        )?;
-                        let rows = st
-                            .query_map([], |r| r.get::<_, String>(0))?
-                            .collect::<rusqlite::Result<Vec<_>>>()?;
-                        Ok(rows)
-                    })
-                    .unwrap_or_default();
-                    for ws in ch.names().take_due(ch.now(), &all) {
-                        match ch.resolve_names(&ws).await {
-                            Ok(r) if r.candidates > 0 || r.orgs_linked > 0 => tracing::info!(
-                                ws,
-                                candidates = r.candidates,
-                                named_local = r.named_local,
-                                named_remote = r.named_remote,
-                                promoted = r.promoted,
-                                merged = r.merged,
-                                orgs_linked = r.orgs_linked,
-                                nameless = r.nameless,
-                                "names: run"
-                            ),
-                            Ok(_) => {}
-                            Err(e) => tracing::warn!(ws, "names: run failed: {e}"),
+        Some(
+            steve_runtime::every_after(
+                "channels.names",
+                self.modules().clock.clone(),
+                Duration::from_secs(5),
+                steve_runtime::FirstRun::AfterPeriod,
+                move || {
+                    let (me, running) = (me.clone(), running.clone());
+                    async move {
+                        let _running = running;
+                        let Some(ch) = me.upgrade() else { return };
+                        let adapters = ch.profile_adapter_ids();
+                        if adapters.is_empty() {
+                            return;
+                        }
+                        let all = ch
+                            .store()
+                            .read(|r| steve_store::connections::lifecycle::live_workspaces(r))
+                            .unwrap_or_default();
+                        for ws in ch.names().take_due(ch.now(), &all) {
+                            match ch.resolve_names(&ws).await {
+                                Ok(r) if r.candidates > 0 || r.orgs_linked > 0 => tracing::info!(
+                                    ws,
+                                    candidates = r.candidates,
+                                    named_local = r.named_local,
+                                    named_remote = r.named_remote,
+                                    promoted = r.promoted,
+                                    merged = r.merged,
+                                    orgs_linked = r.orgs_linked,
+                                    nameless = r.nameless,
+                                    "names: run"
+                                ),
+                                Ok(_) => {}
+                                Err(e) => tracing::warn!(ws, "names: run failed: {e}"),
+                            }
                         }
                     }
-                }
-            },
-        ).until(ended))
+                },
+            )
+            .until(ended),
+        )
     }
 
     /// One run over `ws` (module doc). Safe to call any time; the provider lookups are cached.
@@ -705,15 +588,14 @@ impl Channels {
     ) -> ChannelResult<()> {
         use steve_modules::contacts::profile::{self as prof, Gap};
         let contact = crate::adapters::feishu::profiles::CONTACT_SCOPE;
-        self.store().transaction(|tx| -> ChannelResult<()> {
-            let Some(party) = accounts::repo::get(tx, &cand.account_id)?.and_then(|a| {
-                steve_modules::contacts::repo::get(tx, &a.party_id)
-                    .ok()
-                    .flatten()
-            }) else {
+        self.store().write(|w| -> ChannelResult<()> {
+            let Some(account) = steve_store::Accounts(w).get(&cand.account_id)? else {
                 return Ok(());
             };
-            let f = prof::contact_profile(tx, ws, &party, None)?.fields;
+            let Some(party) = w.contacts().party(&account.party_id)? else {
+                return Ok(());
+            };
+            let f = prof::contact_profile(w, ws, &party, None)?.fields;
             let external = p
                 .and_then(|p| p.tenant_key.as_ref())
                 .is_some_and(|k| !ev.own_keys.is_empty() && !ev.own_keys.contains(k));
@@ -763,7 +645,7 @@ impl Channels {
                 None if f.name.state == "known" => Some("local"),
                 None => None,
             };
-            prof::record_lookup(tx, ws, &cand.account_id, now, source, &gaps)?;
+            prof::record_lookup(w, ws, &cand.account_id, now, source, &gaps)?;
             Ok(())
         })
     }
@@ -818,7 +700,7 @@ impl Channels {
             let (id, now) = (i.id.clone(), self.now());
             if let Err(e) = self
                 .store()
-                .transaction(|tx| conn_repo::note_permissions(tx, &id, &missing, &granted, now))
+                .write(|tx| conn_repo::note_permissions(tx, &id, &missing, &granted, now))
             {
                 tracing::warn!(conn = i.id, "names: permissions not noted: {e}");
             }
@@ -836,7 +718,7 @@ impl Channels {
         let hooks = self.party_hooks();
         let r = self
             .store()
-            .transaction(|tx| accounts::enrich(tx, hooks, ws, &cand.actor, &cand.account_id, e));
+            .write(|tx| accounts::enrich(tx, hooks, ws, &cand.actor, &cand.account_id, e));
         match r {
             Ok(r) => {
                 rep.renamed += r.renamed as usize;
@@ -856,7 +738,9 @@ impl Channels {
     fn count_nameless(&self, ws: &str) -> ChannelResult<usize> {
         let now = self.now();
         let lookups = self.profile_systems();
-        let cands = self.store().reader(|c| candidates(c, ws, now, &lookups))?;
+        let cands = self
+            .store()
+            .read::<_, steve_store::StoreError>(|r| Ok(candidates(r, ws, now, &lookups)))??;
         Ok(cands.iter().filter(|c| !c.named).count())
     }
 }

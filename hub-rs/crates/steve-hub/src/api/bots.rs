@@ -261,7 +261,7 @@ pub async fn create(
     // the user who creates a Bot is its 负责人 (best effort: the Bot exists either way)
     if let (Some(m), Some(id)) = (st.modules.clone(), id) {
         let done = tokio::task::spawn_blocking(move || {
-            m.store.transaction(|tx| {
+            m.store.write(|tx| {
                 steve_modules::contacts::stewards::adopt(tx, &ws, "bot", &id, Some(&me), "seed")
             })
         })

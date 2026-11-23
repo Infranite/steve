@@ -2,6 +2,7 @@
 //! refusal/outcome transitions.
 
 use super::*;
+use steve_store::node_commands::dispatch;
 
 /// A worker's hold on a command it sends.
 const LEASE_MS: i64 = 60_000;
@@ -14,12 +15,15 @@ impl NodeRuntime {
     /// meanwhile, or the runtime's timers and I/O wait with it, and so may the very writer it waits
     /// for. On a multi-thread runtime the worker hands its other tasks on while this blocks; the
     /// transaction still runs here and now, so nothing else happens between it and the send.
-    fn send_tx<T>(&self, f: impl FnOnce(&Tx) -> Result<T, StoreError>) -> Result<T, StoreError> {
+    fn send_tx<T>(
+        &self,
+        f: impl FnOnce(&mut W<'_>) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
         match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
             Ok(tokio::runtime::RuntimeFlavor::MultiThread) => {
-                tokio::task::block_in_place(|| self.tx(f))
+                tokio::task::block_in_place(|| self.write(f))
             }
-            _ => self.tx(f),
+            _ => self.write(f),
         }
     }
 
@@ -27,10 +31,10 @@ impl NodeRuntime {
     /// Clock sleep is a full elapsed wait; it does not promise an early wake on wall changes.
     pub(super) fn sender_delay(&self) -> std::time::Duration {
         let now = self.clock.now();
-        let next=self.store.reader::<_,StoreError>(|c| Ok(c.query_row(
-            "SELECT min(retry_at) FROM node_commands WHERE node_id=?1 AND state='pending' AND retry_at>?2",
-            rusqlite::params![self.node_id.as_str(),now],|r|r.get::<_,Option<i64>>(0)
-        )?)).unwrap_or(None);
+        let next = self
+            .store
+            .read(|r| dispatch::next_retry(r, self.node_id.as_str(), now))
+            .unwrap_or(None);
         let ms = next.map_or(1_000, |at| {
             at.saturating_sub(self.clock.now()).clamp(0, 1_000)
         });
@@ -42,14 +46,16 @@ impl NodeRuntime {
         let lease = match self.send_tx(|tx| {
             self.expire_capacity_waits_in(tx)?;
             self.note_waiting_in(tx)?;
-            match rt::lease_command_in(
+            match node_write::lease_command_in(
                 tx,
                 self.node_id.as_str(),
                 &self.owner,
                 self.clock.now(),
                 self.clock.now() + LEASE_MS,
             )? {
-                Some(l) if !l.maybe_sent => fresh_envelope_in(tx, l, self.clock.now()).map(Some),
+                Some(l) if !l.maybe_sent => {
+                    fresh_envelope_in(&self.store, l, self.clock.now()).map(Some)
+                }
                 l => Ok(l),
             }
         }) {
@@ -73,10 +79,14 @@ impl NodeRuntime {
             Err(e) if e.code == ErrorCode::OutcomeUnknown && e.retry == RetryClass::Never => {
                 // Leasing already persisted maybe_sent=1. Do not resend or call this a refusal:
                 // the Node may have executed it. A later receipt/reconcile can settle unknown.
-                self.receipt_in(tx, &Receipt {
-                    operation: idv(lease.operation.clone())?,
-                    state: Observed::Unknown { reason: said(e) },
-                }).map(|end| (end, None))
+                self.receipt_in(
+                    tx,
+                    &Receipt {
+                        operation: idv(lease.operation.clone())?,
+                        state: Observed::Unknown { reason: said(e) },
+                    },
+                )
+                .map(|end| (end, None))
             }
             Err(e)
                 if e.retry == RetryClass::SameOperation || e.code == ErrorCode::OutcomeUnknown =>
@@ -88,13 +98,17 @@ impl NodeRuntime {
                 } else {
                     1_000
                 };
-                rt::retry_command_in(tx, &lease, self.clock.now(), self.clock.now() + delay, uncertain)?;
+                node_write::retry_command_in(
+                    tx,
+                    &lease,
+                    self.clock.now(),
+                    self.clock.now() + delay,
+                    uncertain,
+                )?;
                 self.meters.retry(&lease.method);
                 if !uncertain && !lease.maybe_sent {
-                    tx.execute(
-                        "UPDATE node_commands SET receipt=json_set(COALESCE(receipt,'{}'),'$.last_error',json(?)) WHERE operation_id=? AND state='pending'",
-                        rusqlite::params![serde_json::to_string(e).map_err(conflict)?, lease.operation],
-                    )?;
+                    self.store
+                        .write(|w| dispatch::record_retry_error(w, &lease.operation, e))?;
                 }
                 // a start_turn the user stopped meanwhile, refused before acceptance every time
                 // it went: it provably never ran, so it ends here instead of going out again. One
@@ -110,8 +124,10 @@ impl NodeRuntime {
                 if !uncertain
                     && !lease.maybe_sent
                     && lease.method == "start_job"
-                    && let Some(attempt) = node_jobs::job_attempt_of(tx, &lease.operation)?
-                    && steve_store::jobs::attempt_in(tx, &attempt)?
+                    && let Some(attempt) = self
+                        .store
+                        .read(|r| steve_store::node_jobs::command_attempt(r, &lease.operation))?
+                    && steve_store::node_jobs::attempt_in(tx, &attempt)?
                         .is_some_and(|a| a.cancel_requested)
                 {
                     self.stop_job_in(tx, &attempt)?;
@@ -119,7 +135,7 @@ impl NodeRuntime {
                 Ok((None, None))
             }
             Err(e) => {
-                rt::merge_receipt_in(
+                node_write::merge_receipt_in(
                     tx,
                     &lease.operation,
                     ReceiptState::Rejected,
@@ -128,19 +144,22 @@ impl NodeRuntime {
                     now(),
                 )?;
                 // refused before it was accepted: it certainly did not run
-                if let Some(attempt) = node_jobs::job_attempt_of(tx, &lease.operation)? {
+                if let Some(attempt) = self
+                    .store
+                    .read(|r| steve_store::node_jobs::command_attempt(r, &lease.operation))?
+                {
                     self.job_refused_in(tx, &lease.method, &attempt, e)?;
                     return Ok((None, None));
                 }
                 let end = match lease.method.as_str() {
                     "start_turn" => self.refused_attempt_in(tx, &lease.operation, e)?,
                     "release_session" => {
-                        let s = command_session_in(tx, &lease.operation)?;
+                        let s = command_session_in(&self.store, &lease.operation)?;
                         self.released_in(tx, &s, &lease.operation, false)?;
                         None
                     }
                     "open_session" => {
-                        let s = command_session_in(tx, &lease.operation)?;
+                        let s = command_session_in(&self.store, &lease.operation)?;
                         self.config_opened_in(tx, &s, &lease.operation, false)?;
                         self.opened_in(tx, &s, false, &said(e))?
                     }
@@ -195,17 +214,14 @@ impl NodeRuntime {
     /// Turns waiting because this Node runs as many as its owner set ([`rt::session_room`]): each
     /// session is told once, with the numbers, and its turn goes by itself once one ends. The
     /// mark is on the command, so a restart does not tell it again.
-    fn note_waiting_in(&self, tx: &Tx) -> Result<(), StoreError> {
-        let room = rt::session_room(tx, self.node_id.as_str())?;
+    fn note_waiting_in(&self, tx: &mut W<'_>) -> Result<(), StoreError> {
+        let room = node_write::session_room(tx, self.node_id.as_str())?;
         if !room.full() || room.waiting == 0 {
             return Ok(());
         }
-        let fresh = rt::waiting_commands(tx, self.node_id.as_str())?;
+        let fresh = node_write::waiting_commands(tx, self.node_id.as_str())?;
         for (op, session) in fresh {
-            tx.execute(
-                "UPDATE node_commands SET receipt=json_set(COALESCE(receipt,'{}'),'$.waiting',1) WHERE operation_id=?",
-                [&op],
-            )?;
+            self.store.write(|w| dispatch::mark_waiting(w, &op))?;
             if let Some(session) = session {
                 system_in(
                     tx,
@@ -227,25 +243,15 @@ impl NodeRuntime {
     /// as an attempt again.
     fn exhausted_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         lease: &rt::CommandLease,
         e: &ApiError,
     ) -> Result<i64, StoreError> {
-        let before: Option<i64> = tx
-            .query_row(
-                "SELECT json_extract(receipt,'$.exhausted') FROM node_commands WHERE operation_id=? AND state='pending'",
-                [&lease.operation],
-                |r| r.get(0),
-            )
-            .optional()?
-            .flatten();
-        let n = before.unwrap_or(0) + 1;
-        tx.execute(
-            "UPDATE node_commands SET receipt=json_set(COALESCE(receipt,'{}'),'$.success',json('false'),'$.payload',json(?),'$.exhausted',?) WHERE operation_id=? AND state='pending'",
-            rusqlite::params![serde_json::to_string(e).map_err(conflict)?, n, lease.operation],
-        )?;
+        let n = self
+            .store
+            .write(|w| dispatch::record_exhausted(w, &lease.operation, e))?;
         if n == 1
-            && let Some(session) = command_any_session_in(tx, &lease.operation)?
+            && let Some(session) = command_any_session_in(&self.store, &lease.operation)?
         {
             system_in(
                 tx,
@@ -304,13 +310,13 @@ impl NodeRuntime {
                 let blocked = if self.domain.dynamic_workflows() {
                     None
                 } else {
-                    self.store.reader(|c| {
-                        let session: String = c.query_row(
-                            "SELECT t.session_id FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE a.operation_id=?",
-                            [&l.operation], |r| r.get(0),
-                        )?;
-                        self.disabled_workflow_in(c, &session)
-                    }).map_err(|e| ApiError::new(ErrorCode::Offline, e.to_string()))?
+                    self.store
+                        .read(|r| {
+                            let a = node_turns::started_by(r, &l.operation)?
+                                .ok_or_else(|| conflict("missing turn attempt"))?;
+                            self.disabled_workflow_in(&a.session)
+                        })
+                        .map_err(|e| ApiError::new(ErrorCode::Offline, e.to_string()))?
                 };
                 if let Some(why) = blocked {
                     // A prior uncertain send may already be running: only reconciliation can
@@ -326,7 +332,7 @@ impl NodeRuntime {
                 }
                 let limit = self
                     .store
-                    .reader(|c| rt::session_limit(c, self.node_id.as_str()))
+                    .read(|c| rt::session_limit(c, self.node_id.as_str()))
                     .map_err(|e| {
                         ApiError::new(ErrorCode::Offline, format!("session capacity: {e}"))
                     })?;
@@ -352,20 +358,20 @@ impl NodeRuntime {
 
     /// What the Node says about a command, from its answer or its stream (the same either way):
     /// merged forward, and an open that finished makes the session ready (or released).
-    pub(super) fn receipt_in(&self, tx: &Tx, receipt: &Receipt) -> Result<Option<End>, StoreError> {
+    pub(super) fn receipt_in(
+        &self,
+        tx: &mut W<'_>,
+        receipt: &Receipt,
+    ) -> Result<Option<End>, StoreError> {
         let (state, success) = receipt_state(&receipt.state);
         let op = receipt.operation.as_str();
-        let Some(method) = tx
-            .query_row(
-                "SELECT method FROM node_commands WHERE operation_id=? AND node_id=?",
-                [op, self.node_id.as_str()],
-                |r| r.get::<_, String>(0),
-            )
-            .ok()
+        let Some(method) = self
+            .store
+            .read(|r| dispatch::method(r, op, self.node_id.as_str()))?
         else {
             return Ok(None);
         };
-        let moved = rt::merge_receipt_in(
+        let moved = node_write::merge_receipt_in(
             tx,
             op,
             state,
@@ -376,7 +382,10 @@ impl NodeRuntime {
         if !moved {
             return Ok(None);
         }
-        if let Some(attempt) = node_jobs::job_attempt_of(tx, op)? {
+        if let Some(attempt) = self
+            .store
+            .read(|r| steve_store::node_jobs::command_attempt(r, op))?
+        {
             self.job_receipt_in(tx, op, &method, &attempt, receipt)?;
             return Ok(None);
         }
@@ -397,7 +406,7 @@ impl NodeRuntime {
                 ..
             }
         );
-        if self.retiring_in(tx, op, interrupted)? {
+        if self.retiring_in(op, interrupted)? {
             return Ok(None);
         }
         if method == "resolve_permission" && state == ReceiptState::Finished {
@@ -418,11 +427,11 @@ impl NodeRuntime {
                 self.tidied_in(tx, op, success, &detail)?;
             }
             ("release_session", ReceiptState::Finished) => {
-                let s = command_session_in(tx, op)?;
+                let s = command_session_in(&self.store, op)?;
                 self.released_in(tx, &s, op, success)?;
             }
             ("open_session", ReceiptState::Finished) => {
-                let s = command_session_in(tx, op)?;
+                let s = command_session_in(&self.store, op)?;
                 self.config_opened_in(tx, &s, op, success)?;
                 return self.opened_in(tx, &s, success, &detail);
             }
@@ -436,12 +445,12 @@ impl NodeRuntime {
             ("start_turn", ReceiptState::Accepted | ReceiptState::Active) => {
                 // a cancel held back while the start_turn's send was uncertain goes now
                 if let Some((attempt, _)) = cancelled_start_in(tx, op)? {
-                    let state: String = tx.query_row(
-                        "SELECT state FROM runtime_attempts WHERE attempt_id=?",
-                        [&attempt],
-                        |r| r.get(0),
-                    )?;
-                    if state != "unknown" {
+                    if self
+                        .attempt_row(&attempt)?
+                        .ok_or_else(|| conflict("missing cancelled attempt"))?
+                        .state
+                        != "unknown"
+                    {
                         self.stop_command_in(tx, &attempt, op, "cancel")?;
                     }
                 }
@@ -449,40 +458,37 @@ impl NodeRuntime {
             ("start_turn", ReceiptState::Unknown) => {
                 // the Node cannot tell what the attempt did: it keeps its session until it is
                 // settled, and is never sent again
-                match tx.query_row(
-                    "SELECT a.attempt_id, a.revision, t.session_id FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE a.operation_id=? AND a.state<>'finished'",
-                    [op],
-                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?)),
-                ) {
-                    Ok((attempt, rev, s)) => {
-                        rt::attempt_cas_in(tx, &attempt, rev, "unknown", None, None, now())?;
-                        if detail == steve_node_api::RESTARTED {
-                            // the Node restarted under it (#54): its harness is gone with the old
-                            // process. Given up here, as Stop would; once the Node confirms it,
-                            // the agent is continued (NODE_RESTARTED), never the turn resent
-                            self.stop_command_as_in(tx, &attempt, op, "abandon", RESTART_ABANDON)?;
-                            system_in(
-                                tx,
-                                &s,
-                                &steve_i18n::stored(|| steve_i18n::t!("hub.node.restart_abandon")),
-                            )?;
-                        } else {
-                            system_in(
-                                tx,
-                                &s,
-                                &format!(
-                                    "Node 无法确定这次执行的结果（{detail}），等待对账，不会自动重跑。点停止可放弃这次执行。"
-                                ),
-                            )?;
-                        }
+                if let Some(a) = self
+                    .store
+                    .read(|r| node_turns::started_by(r, op))?
+                    .filter(|a| a.state != "finished")
+                {
+                    let (attempt, rev, s) = (a.id, a.revision, a.session);
+                    node_write::attempt_cas_in(tx, &attempt, rev, "unknown", None, None, now())?;
+                    if detail == steve_node_api::RESTARTED {
+                        // the Node restarted under it (#54): its harness is gone with the old
+                        // process. Given up here, as Stop would; once the Node confirms it,
+                        // the agent is continued (NODE_RESTARTED), never the turn resent
+                        self.stop_command_as_in(tx, &attempt, op, "abandon", RESTART_ABANDON)?;
+                        system_in(
+                            tx,
+                            &s,
+                            &steve_i18n::stored(|| steve_i18n::t!("hub.node.restart_abandon")),
+                        )?;
+                    } else {
+                        system_in(
+                            tx,
+                            &s,
+                            &format!(
+                                "Node 无法确定这次执行的结果（{detail}），等待对账，不会自动重跑。点停止可放弃这次执行。"
+                            ),
+                        )?;
                     }
-                    Err(rusqlite::Error::QueryReturnedNoRows) => {}
-                    Err(e) => return Err(e.into()),
                 }
             }
             ("open_session" | "release_session", ReceiptState::Unknown) => {
                 // never sent again: the session waits (busy) until it is reconciled
-                let s = command_session_in(tx, op)?;
+                let s = command_session_in(&self.store, op)?;
                 system_in(
                     tx,
                     &s,
@@ -495,7 +501,7 @@ impl NodeRuntime {
             }
             ("prepare_workspace" | "abandon", ReceiptState::Unknown) => {
                 // never sent again: what waits on it waits until it is retired
-                if let Some(s) = command_any_session_in(tx, op)? {
+                if let Some(s) = command_any_session_in(&self.store, op)? {
                     system_in(
                         tx,
                         &s,
@@ -519,14 +525,24 @@ impl NodeRuntime {
     /// A release is over: the session is let go, or (refused, failed) still open as it was. What
     /// came in meanwhile goes now (opening it again if it was let go). Only the session's last
     /// release says so: an earlier one's receipt, come late, says nothing of the session now.
-    fn released_in(&self, tx: &Tx, s: &str, op: &str, success: bool) -> Result<(), StoreError> {
-        if phase_in(tx, s)?.is_none_or(|(p, _)| p != "releasing")
-            || last_release_in(tx, s)?.as_deref() != Some(op)
+    fn released_in(
+        &self,
+        tx: &mut W<'_>,
+        s: &str,
+        op: &str,
+        success: bool,
+    ) -> Result<(), StoreError> {
+        if self.phase_in(s)?.is_none_or(|(p, _)| p != "releasing")
+            || self
+                .store
+                .read(|r| dispatch::release(r, s, false))?
+                .as_deref()
+                != Some(op)
         {
             return Ok(());
         }
-        let rev = session_revision(tx, s)?;
-        rt::session_cas_in(
+        let rev = self.session_revision(s)?;
+        node_write::session_cas_in(
             tx,
             s,
             rev,
@@ -547,39 +563,31 @@ impl NodeRuntime {
     /// the old harness is still open in the shared worktree, so the successor keeps waiting, now
     /// for a new release (after a delay doubling from 1 s up to a minute) that it is moved onto.
     /// The successor is told once. Nothing waits for it: it stays as it is (tidy asks again).
-    fn release_again_in(&self, tx: &Tx, s: &str, failed: &str) -> Result<(), StoreError> {
-        let waiting: Vec<String> = tx
-            .prepare(
-                "SELECT operation_id FROM node_commands WHERE dependency_operation=? AND state='pending'",
-            )?
-            .query_map([failed], |r| r.get(0))?
-            .collect::<Result<_, _>>()?;
-        if waiting.is_empty() || !ended_in(tx, s)? {
+    fn release_again_in(&self, tx: &mut W<'_>, s: &str, failed: &str) -> Result<(), StoreError> {
+        let waiting = self
+            .store
+            .read(|r| dispatch::pending_dependents(r, failed))?;
+        if waiting.is_empty() || !self.ended_in(s)? {
             return Ok(());
         }
         let Release::Pending(op) = self.release_in(tx, s)? else {
             return Ok(());
         };
-        let failures: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM node_commands WHERE method='release_session' AND session_id=? AND state IN ('finished','rejected') AND json_extract(receipt,'$.success')=0",
-            [s],
-            |r| r.get(0),
-        )?;
-        tx.execute(
-            "UPDATE node_commands SET retry_at=?, updated=? WHERE operation_id=? AND state='pending'",
-            rusqlite::params![
-                self.clock.now() + (1_000i64 << (failures - 1).clamp(0, 6)).min(60_000),
-                self.clock.now(),
-                op
-            ],
-        )?;
+        let failures = self.store.read(|r| dispatch::release_failures(r, s))?;
+        self.store.write(|w| {
+            let at = self.clock.now();
+            dispatch::postpone(
+                w,
+                &op,
+                at + (1_000i64 << (failures - 1).clamp(0, 6)).min(60_000),
+                at,
+            )
+        })?;
         for w in &waiting {
-            tx.execute(
-                "UPDATE node_commands SET dependency_operation=?, updated=? WHERE operation_id=? AND state='pending'",
-                rusqlite::params![op, now(), w],
-            )?;
+            self.store
+                .write(|handle| dispatch::retarget_dependency(handle, w, &op, now()))?;
             if failures == 1
-                && let Some(next) = command_any_session_in(tx, w)?
+                && let Some(next) = command_any_session_in(&self.store, w)?
             {
                 system_in(
                     tx,
@@ -597,24 +605,18 @@ impl NodeRuntime {
     /// stop. Only an explicit human retry clears it; queued input never opens it again.
     pub(super) fn opened_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         s: &str,
         ok: bool,
         detail: &str,
     ) -> Result<Option<End>, StoreError> {
-        if phase_in(tx, s)?.is_none_or(|(p, _)| p != "opening") {
+        if self.phase_in(s)?.is_none_or(|(p, _)| p != "opening") {
             return Ok(None);
         }
-        let waiting: Option<String> = tx
-            .query_row(
-                "SELECT turn_id FROM runtime_turns WHERE session_id=? AND state<>'finished' AND active_attempt IS NULL ORDER BY created LIMIT 1",
-                [s],
-                |r| r.get(0),
-            )
-            .optional()?;
+        let waiting = self.store.read(|r| node_turns::waiting_to_open(r, s))?;
         if ok {
             if let Some(turn) = waiting {
-                if let Some(why) = self.workflow_blocker_in(tx, s)? {
+                if let Some(why) = self.workflow_blocker_in(s)? {
                     return self.after_attempt_in(
                         tx,
                         s,
@@ -631,17 +633,12 @@ impl NodeRuntime {
                         },
                     );
                 }
-                let (spec, ordinal): (String, i64) = tx.query_row(
-                    "SELECT spec, ordinal FROM runtime_attempts WHERE turn_id=? ORDER BY ordinal DESC LIMIT 1",
-                    [&turn],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )?;
-                let spec: TurnSpec = serde_json::from_str(&spec)?;
+                let (spec, ordinal) = self.store.read(|r| node_turns::latest_spec(r, &turn))?;
                 self.attempt_in(tx, s, &turn, ordinal + 1, spec.run.prompt)?;
                 return Ok(None);
             }
-            let rev = session_revision(tx, s)?;
-            rt::session_cas_in(
+            let rev = self.session_revision(s)?;
+            node_write::session_cas_in(
                 tx,
                 s,
                 rev,
@@ -654,7 +651,10 @@ impl NodeRuntime {
             )?;
             // an item paused while its session was opening (its workspace being prepared, say)
             // starts nothing: what is queued waits for it to continue
-            let planned = if workspace::item_paused_in(tx, s)? {
+            let planned = if self
+                .store
+                .read(|r| node_sessions::worktree::item_paused(r, s))?
+            {
                 Planned::Empty
             } else {
                 self.plan_after_in(tx, s)?
@@ -691,13 +691,13 @@ impl NodeRuntime {
             self.turn_over_in(tx, s, &turn, &c)?;
             end = Some(End {
                 session: s.to_string(),
-                attempt: Some(last_attempt_in(tx, &turn)?),
+                attempt: Some(self.last_attempt_in(&turn)?),
                 stop: steve_store::SESSION_START_FAILURE.to_string(),
                 error: Some(text),
             });
         }
-        let rev = session_revision(tx, s)?;
-        rt::session_cas_in(
+        let rev = self.session_revision(s)?;
+        node_write::session_cas_in(
             tx,
             s,
             rev,
@@ -716,92 +716,50 @@ impl NodeRuntime {
             ),
         )?;
         self.release_if_ended_in(tx, s)?;
-        if ended_in(tx, s)? {
-            tx.execute("DELETE FROM queued WHERE session_id=?", [s])?;
+        if self.ended_in(s)? {
+            self.store.write(|w| node_sessions::clear_queue(w, s))?;
             return Ok(None);
         }
-        status_in(tx, s, "error")?;
-        self.startup_failed_in(tx, s, detail)?;
+        self.status_in(s, "error")?;
+        self.startup_failed_in(s, detail)?;
         Ok(end)
     }
 
-    pub(super) fn startup_failed_in(
-        &self,
-        tx: &Tx,
-        session: &str,
-        detail: &str,
-    ) -> Result<(), StoreError> {
+    pub(super) fn startup_failed_in(&self, session: &str, detail: &str) -> Result<(), StoreError> {
+        use node_sessions::startup;
         let reason = steve_store::SESSION_START_FAILURE;
-        let (ws, item, bot): (String, Option<String>, Option<String>) = tx.query_row(
-            "SELECT workspace_id,item_id,bot_id FROM sessions WHERE id=?",
-            [session],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?;
         let question = format!("会话启动失败：{detail}");
-        // A changed cause replaces the previous startup blocker, and so does a generic stop card
-        // of this session; unknown-effect/release cards remain untouched.
-        let previous = tx
-            .prepare(
-                "SELECT id FROM decisions WHERE status='open' AND (session_id=?1 OR item_id=?2)",
-            )?
-            .query_map(rusqlite::params![session, item], |r| r.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        for id in previous {
-            let Some(d) = self.store.decisions().get(&id)? else {
-                continue;
-            };
-            let obsolete = (d.subject_type == reason
-                && d.session_id.as_deref() == Some(session)
-                && d.question != question)
-                || (steve_core::lifecycle::stop_card(&d)
-                    && d.session_id.as_deref().is_none_or(|id| id == session));
-            if obsolete {
-                steve_store::decision_resolve_in(
-                    tx,
-                    &d.id,
-                    &json!({"superseded":"已保留当前会话启动失败的原因和重试入口"}),
-                    "expired",
-                )?;
+        self.store.write(|w| {
+            let scope = startup::scope(w, session)?;
+            for d in startup::open_decisions(w, session, scope.item.as_deref())? {
+                let obsolete = (d.subject_type == reason
+                    && d.session_id.as_deref() == Some(session)
+                    && d.question != question)
+                    || (steve_core::lifecycle::stop_card(&d)
+                        && d.session_id.as_deref().is_none_or(|id| id == session));
+                if obsolete {
+                    steve_store::DecisionRows(w).settle(
+                        &d.id,
+                        &json!({"superseded":"已保留当前会话启动失败的原因和重试入口"}),
+                        "expired",
+                        &Value::Null,
+                    )?;
+                }
             }
-        }
-        tx.execute("INSERT INTO session_stops(session_id,stop_reason,error,ended,updated) VALUES (?1,?2,?3,?4,?4) ON CONFLICT(session_id) DO UPDATE SET stop_reason=?2,error=?3,ended=?4,updated=?4", rusqlite::params![session, reason, detail, now()])?;
-        let existing: Option<String> = tx.query_row("SELECT id FROM decisions WHERE session_id=? AND subject_type=? AND question=? ORDER BY created LIMIT 1", [session, reason, &question], |r| r.get(0)).optional()?;
-        if let Some(id) = existing {
-            tx.execute("UPDATE decisions SET status='open',result=NULL,resolved=NULL,undo=NULL WHERE id=? AND status<>'open'", [&id])?;
-            tx.publish(steve_types::DomainEvent::from(
-                steve_types::WorkEvent::Decision {
-                    ws: ws.clone().into(),
-                    id: {
-                        let value: String = id;
-                        steve_types::DecisionId::from(value)
-                    },
-                    item_id: {
-                        let value: Option<Option<String>> = Some(item.clone());
-                        value.map(|value| value.map(Into::into))
-                    },
-                },
-            ));
-        } else {
-            steve_store::decision_create_in(tx, &steve_store::NewDecision {
-                workspace_id: ws.clone(), kind: "fail".into(), subject_type: reason.into(),
-                subject_id: bot.unwrap_or_default(), item_id: item.clone(), session_id: Some(session.into()),
-                question: question.clone(), draft: Some("自动重试已停止。请先修正 Bot 的模型或思考强度，再点击重试；你修改执行器后，重试会创建新会话。".into()),
-                options: Some(vec!["retry".into()]), requested_by: "steve".into(),
-            })?;
-        }
-        if let Some(item) = item {
-            tx.execute("UPDATE items SET status='wait',now=?,updated=? WHERE id=? AND phase<>'closed' AND status<>'pause'", rusqlite::params![question,now(),item])?;
-            tx.publish(steve_types::DomainEvent::from(
-                steve_types::WorkEvent::Item {
-                    ws: ws.clone().into(),
-                    id: {
-                        let value: String = item;
-                        steve_types::ItemId::from(value)
-                    },
-                },
-            ));
-        }
-        Ok(())
+            startup::record_stop(w, session, detail, now())?;
+            if !startup::reopen_matching(w, session, &scope, &question)? {
+                steve_store::DecisionRows(w).open(&steve_store::NewDecision {
+                    workspace_id: scope.workspace.clone(), kind: "fail".into(), subject_type: reason.into(),
+                    subject_id: scope.bot.unwrap_or_default(), item_id: scope.item.clone(), session_id: Some(session.into()),
+                    question: question.clone(), draft: Some("自动重试已停止。请先修正 Bot 的模型或思考强度，再点击重试；你修改执行器后，重试会创建新会话。".into()),
+                    options: Some(vec!["retry".into()]), requested_by: "steve".into(),
+                })?;
+            }
+            if let Some(item) = scope.item {
+                startup::hold_item(w, &scope.workspace, &item, &question, now())?;
+            }
+            Ok(())
+        })
     }
 
     /// An abandon the Node refused or could not finish: the attempt stays unknown, its session
@@ -810,20 +768,14 @@ impl NodeRuntime {
     /// reconciliation that made it unknown saw the same); it ends as interrupted, never sent again.
     fn abandon_failed_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         op: &str,
         e: Option<&ApiError>,
     ) -> Result<Option<End>, StoreError> {
-        let row: Option<(String, String, String)> = tx
-            .query_row(
-                "SELECT t.session_id, a.attempt_id, a.state FROM node_commands c JOIN runtime_attempts a ON a.attempt_id=c.target_attempt JOIN runtime_turns t ON t.turn_id=a.turn_id WHERE c.operation_id=?",
-                [op],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .optional()?;
-        let Some((s, attempt, state)) = row else {
+        let Some(a) = self.store.read(|r| node_turns::targeted_by(r, op))? else {
             return Ok(None);
         };
+        let (s, attempt, state) = (a.session, a.id, a.state);
         let detail = e.map(|e| e.safe_detail.clone()).unwrap_or_default();
         let unknown_to_node = e.is_some_and(|e| {
             e.code == ErrorCode::Invalid && e.safe_detail.contains("no such operation")
@@ -863,36 +815,20 @@ impl NodeRuntime {
     /// (once). Otherwise the attempt ends as failed, its turn with it.
     fn refused_attempt_in(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         op: &str,
         e: &ApiError,
     ) -> Result<Option<End>, StoreError> {
-        let row: Option<(String, i64, String, String)> = tx
-            .query_row(
-                "SELECT a.attempt_id, a.revision, a.turn_id, t.session_id FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE a.operation_id=?",
-                [op],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-            .optional()?;
-        let Some((attempt, rev, turn, session)) = row else {
+        let Some(a) = self.store.read(|r| node_turns::started_by(r, op))? else {
             return Ok(None);
         };
         let gone = e.code == ErrorCode::Invalid
             && (e.safe_detail.contains("open it again") || e.safe_detail.contains("not open"));
-        let reopened_before: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM runtime_attempts WHERE turn_id=? AND json_extract(completion,'$.stop_reason')='released')",
-            [&turn],
-            |r| r.get(0),
-        )?;
-        let cancelled: bool = tx.query_row(
-            "SELECT cancel_requested FROM runtime_attempts WHERE attempt_id=?",
-            [&attempt],
-            |r| r.get(0),
-        )?;
-        let reopen = gone
-            && !reopened_before
-            && !cancelled
-            && self.workflow_blocker_in(tx, &session)?.is_none();
+        let (attempt, rev, turn, session, cancelled) =
+            (a.id, a.revision, a.turn, a.session, a.cancelled);
+        let reopened_before = self.store.read(|r| node_turns::was_released(r, &turn))?;
+        let reopen =
+            gone && !reopened_before && !cancelled && self.workflow_blocker_in(&session)?.is_none();
         let completion = Completion {
             outcome: Outcome::Failed,
             stop_reason: if reopen { "released" } else { "error" }.into(),
@@ -903,7 +839,7 @@ impl NodeRuntime {
             acted: false,
             job: None,
         };
-        rt::attempt_cas_in(
+        node_write::attempt_cas_in(
             tx,
             &attempt,
             rev,
@@ -915,13 +851,9 @@ impl NodeRuntime {
         self.close_cards_of_attempt_in(tx, &attempt)?;
         if reopen {
             // the turn keeps its messages and waits for the open (see opened_in)
-            let trev = turn_revision(tx, &turn)?;
-            let ordinal: i64 = tx.query_row(
-                "SELECT retry_ordinal FROM runtime_turns WHERE turn_id=?",
-                [&turn],
-                |r| r.get(0),
-            )?;
-            rt::turn_cas_in(
+            let trev = self.turn_revision(&turn)?;
+            let ordinal = self.store.read(|r| node_turns::retry_ordinal(r, &turn))?;
+            node_write::turn_cas_in(
                 tx,
                 &turn,
                 trev,
@@ -955,7 +887,7 @@ pub(super) fn receipt_state(s: &Observed) -> (ReceiptState, bool) {
 /// prepare behind its predecessor's turn) is issued again now, so the Node does not refuse it as
 /// past `accept_before`. Only one no send can have reached: the Node knows nothing of it yet.
 fn fresh_envelope_in(
-    tx: &Tx,
+    store: &Store,
     mut l: rt::CommandLease,
     at: i64,
 ) -> Result<rt::CommandLease, StoreError> {
@@ -967,27 +899,15 @@ fn fresh_envelope_in(
     c.accept_before = Timestamp(at + ACCEPT_WINDOW_MS);
     let v = serde_json::to_value(&c).map_err(conflict)?;
     let digest = digest_of(&v).map_err(conflict)?.to_string();
-    tx.execute(
-        "UPDATE node_commands SET request=?, digest=?, updated=? WHERE operation_id=? AND state='pending'",
-        rusqlite::params![
-            serde_json::to_string(&v).map_err(conflict)?,
-            digest,
-            at,
-            l.operation
-        ],
-    )?;
+    store.write(|w| dispatch::refresh_envelope(w, &l.operation, &c, &digest, at, None))?;
     l.request = v;
     l.digest = digest;
     Ok(l)
 }
 
 /// The session an open or a release command is for.
-fn command_session_in(tx: &Tx, op: &str) -> Result<String, StoreError> {
-    Ok(tx.query_row(
-        "SELECT session_id FROM node_commands WHERE operation_id=?",
-        [op],
-        |r| r.get(0),
-    )?)
+fn command_session_in(store: &Store, op: &str) -> Result<String, StoreError> {
+    store.read(|r| dispatch::session(r, op))
 }
 
 /// The delay before the `n`th send after as many Exhausted refusals in a row.
@@ -997,19 +917,9 @@ pub(super) fn exhausted_delay(n: i64) -> i64 {
 
 /// The session any command is for: its own, its target attempt's, or (a workspace) the open
 /// waiting on it. `None`: none of them.
-pub(super) fn command_any_session_in(tx: &Tx, op: &str) -> Result<Option<String>, StoreError> {
-    Ok(tx
-        .query_row(
-            "SELECT COALESCE(
-                c.session_id,
-                (SELECT t.session_id FROM runtime_attempts a JOIN runtime_turns t ON t.turn_id=a.turn_id
-                  WHERE a.attempt_id=c.target_attempt),
-                (SELECT d.session_id FROM node_commands d
-                  WHERE d.dependency_operation=c.operation_id ORDER BY d.created, d.rowid LIMIT 1))
-             FROM node_commands c WHERE c.operation_id=?",
-            [op],
-            |r| r.get::<_, Option<String>>(0),
-        )
-        .optional()?
-        .flatten())
+pub(super) fn command_any_session_in(
+    store: &Store,
+    op: &str,
+) -> Result<Option<String>, StoreError> {
+    store.read(|r| dispatch::any_session(r, op))
 }

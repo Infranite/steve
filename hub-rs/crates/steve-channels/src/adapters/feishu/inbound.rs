@@ -750,14 +750,8 @@ impl LongConnections {
     /// Starts one for every `feishu_app` connection that is `ok` or `error` and not running yet.
     /// Returns how many were started.
     pub async fn start_all(&self) -> usize {
-        let conns = self.channels.store().reader(|c| -> crate::ChannelResult<Vec<(String, String)>> {
-            let mut st = c.prepare(
-                "SELECT id, workspace_id FROM connections WHERE adapter = ? AND status IN ('ok', 'error') ORDER BY created, id",
-            )?;
-            let rows = st
-                .query_map([super::auth::APP_ADAPTER], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(rows)
+        let conns = self.channels.store().read(|r| {
+            steve_store::connections::Connections::new(r).live_for_adapter(super::auth::APP_ADAPTER)
         });
         let conns = match conns {
             Ok(c) => c,
@@ -768,7 +762,8 @@ impl LongConnections {
         };
         let mut running = self.running.lock().await;
         let mut n = 0;
-        for (id, ws) in conns {
+        for conn in conns {
+            let (id, ws) = (conn.id, conn.workspace_id);
             if running.contains_key(&id) {
                 continue;
             }

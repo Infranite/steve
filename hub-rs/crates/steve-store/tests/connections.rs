@@ -1,6 +1,7 @@
 //! How the store's connections behave: write transactions take the write lock at BEGIN, the pragmas
 //! each connection gets, and the maintenance gate's continuation check running outside its lock.
 
+use steve_store::testkit::SqliteFixtures;
 mod common;
 
 use rusqlite::Connection;
@@ -18,9 +19,9 @@ fn a_write_transaction_holds_the_write_lock_from_its_start() {
     let t = common::fresh();
     let o = other(t.store.path());
     t.store
-        .transaction(|tx| {
+        .write(|tx| {
             // read first, as most repository writes do
-            let n: i64 = tx.query_row("SELECT count(*) FROM audit", [], |r| r.get(0))?;
+            let n: i64 = steve_store::testkit::sqlite_writer(tx).query_row("SELECT count(*) FROM audit", [], |r| r.get(0))?;
             assert_eq!(n, 0);
             // another process cannot slip a commit in between (with BEGIN DEFERRED it could, and
             // the write below would then fail at once with SQLITE_BUSY_SNAPSHOT)
@@ -31,7 +32,7 @@ fn a_write_transaction_holds_the_write_lock_from_its_start() {
                 )
                 .unwrap_err();
             assert_eq!(err.sqlite_error_code(), Some(rusqlite::ErrorCode::DatabaseBusy));
-            tx.execute(
+            steve_store::testkit::sqlite_writer(tx).execute(
                 "INSERT INTO audit (workspace_id, ts, actor, action, target) VALUES ('default', 1, 'x', 'ours', 'y')",
                 [],
             )?;
@@ -53,7 +54,7 @@ fn connections_get_the_pragmas() {
     let t = common::fresh();
     let writer = t
         .store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             let get = |p: &str| c.query_row(&format!("PRAGMA {p}"), [], |r| r.get::<_, i64>(0));
             Ok((
                 get("temp_store")?,
@@ -66,7 +67,7 @@ fn connections_get_the_pragmas() {
     assert_eq!(writer, (2, -32_768, 64 * 1024 * 1024));
     let reader = t
         .store
-        .reader(|c| {
+        .fixture_read(|c| {
             let get = |p: &str| c.query_row(&format!("PRAGMA {p}"), [], |r| r.get::<_, i64>(0));
             Ok::<_, StoreError>((get("temp_store")?, get("cache_size")?, get("busy_timeout")?))
         })

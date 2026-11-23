@@ -20,7 +20,7 @@ export type Tone = "run" | "wait" | "pause" | "done" | "fail" | "neutral"
 export type ItemState = { kind: StateKind; tone: Tone; /** whose move: you, Steve, the agents, or nobody (closed) */ move: "you" | "steve" | "agents" | "none"; detail?: string }
 
 /** the fields of a store `Item` this reads */
-export type StateItem = { st: string; closeout?: Closeout; now?: string; waits?: { q: string }[]; q?: unknown[] | null }
+export type StateItem = { st: string; closeout?: Closeout; now?: string; waits?: { q: string }[]; queued?: number; q?: unknown[] | null }
 
 const TONE: Record<StateKind, Tone> = {
   done: "done", dropped: "neutral", failed: "fail", proposed: "wait", asking: "wait", unavailable: "fail",
@@ -53,6 +53,6 @@ export function itemState(i: StateItem, workflow: Workflow | null | undefined, r
   }
   if (i.st === "pause") return make("paused")
   if (i.st === "block") return make("blocked", i.now)
-  if (i.q?.length) return make("queued")
+  if (i.queued ?? i.q?.length) return make("queued")
   return make("idle", i.now)
 }

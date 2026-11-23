@@ -3,7 +3,7 @@
 //! model catalogue, the bot pages and the runtimes list choose from. Refreshed in the background
 //! from the Node (whose probe caches its adapters' answers); read without waiting.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -214,38 +214,16 @@ impl HubHarnesses {
     ) -> steve_core::models::BotHarnessSource {
         let me = self.clone();
         Arc::new(move |bot| {
-            // a Bot not made yet runs where an unconfigured one does
-            let default = || {
-                steve_store::bot_dispatch::DEFAULT_NODES
-                    .iter()
-                    .map(|n| n.to_string())
-            };
-            let nodes: BTreeSet<String> = store
-                .reader(|c| {
-                    let Some(bot) = bot else {
-                        return Ok(default().collect());
-                    };
-                    let mut q = c.prepare(
-                    "SELECT r.node_id FROM runtime_sessions r JOIN sessions s ON s.id=r.session_id
-                       WHERE s.bot_id=?1 AND s.status<>'ended'",
-                )?;
-                    let mut nodes = q
-                        .query_map([bot], |r| r.get(0))?
-                        .collect::<Result<BTreeSet<String>, _>>()?;
-                    let mut q =
-                        c.prepare("SELECT workspace_id FROM bot_workspaces WHERE bot_id=?1")?;
-                    let workspaces = q
-                        .query_map([bot], |r| r.get::<_, String>(0))?
-                        .collect::<Result<Vec<_>, _>>()?;
-                    if workspaces.is_empty() {
-                        nodes.extend(default());
-                    }
-                    for ws in workspaces {
-                        nodes.extend(steve_store::bot_dispatch::bindings(c, &ws, bot)?);
-                    }
-                    Ok::<_, steve_store::StoreError>(nodes)
-                })
+            let (mut nodes, unconfigured) = store
+                .read(|r| steve_store::bot_admin::harness_nodes(r, bot))
                 .unwrap_or_default();
+            if unconfigured {
+                nodes.extend(
+                    steve_store::bot_dispatch::DEFAULT_NODES
+                        .iter()
+                        .map(ToString::to_string),
+                );
+            }
             if nodes.is_empty() {
                 // Placement is not fixed yet; another Node's offer must not certify this one.
                 return me.for_node("");
@@ -849,13 +827,21 @@ mod tests {
                 .unwrap();
         store.ensure_workspace().unwrap();
         store
-            .transaction::<_, steve_store::StoreError>(|tx| {
-                tx.execute_batch(
-                    "INSERT INTO bots(id,workspace_id,name,harness,updated) VALUES ('b','default','B','claude-code',1);
-                     INSERT INTO bot_workspaces(bot_id,workspace_id,created) VALUES ('b','default',1);
-                     INSERT INTO bot_node_bindings(workspace_id,bot_id,nodes) VALUES ('default','b','[\"remote\"]');",
-                )?;
-                Ok(())
+            .bots()
+            .seed(
+                "b",
+                false,
+                &steve_store::NewBot {
+                    name: "B".into(),
+                    harness: "claude-code".into(),
+                    ..Default::default()
+                },
+                steve_store::WS,
+            )
+            .unwrap();
+        store
+            .write(|w| {
+                steve_store::bot_admin::set_bindings(w, steve_store::WS, "b", &["remote".into()])
             })
             .unwrap();
         let source = hs.bot_source(store);

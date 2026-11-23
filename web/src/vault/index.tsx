@@ -10,10 +10,8 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { go, Page, Row, Segmented, Meta, Empty, Chips, BotAvatar, Panel, Section, Note, Blank, Notice, Pill, Tile, Chevron, Loading, LIFT } from "@/ui"
 import { cn } from "cn"
 import { Select } from "@/view-shared"
-import { Unwired } from "@/unwired"
 import { st, tm, botName, toast } from "@/store"
 import { accountsApi, type RAccount } from "@/api/accounts"
-import { NotWired } from "@/api"
 import { vaultApi, keyStoreState, SENS_LABEL, MODE_LABEL, USE_STATUS, type RItem, type RField, type RUse, type RVaultStatus, type Sensitivity } from "@/api/vault"
 import { useLoad, useBusy, report } from "@/accounts/load"
 import { NewVaultDialog } from "@/vault/new-item"
@@ -29,8 +27,6 @@ const backVault = (): [string, string] => ["#/vault", tr("vault:title")]
 /** the vault's templates have Chinese names in the API; here the ids map to the prototype's names, in the UI language */
 const TPL_IDS = ["login", "bank_card", "api_credential", "id_document", "secure_note", "ssh_key", "recovery_codes"] as const
 const tplName = (id: string) => ((TPL_IDS as readonly string[]).includes(id) ? tr(`vault:tpl.${id as (typeof TPL_IDS)[number]}`) : id)
-/** uses come from V4; a Hub without it shows the items without a use log */
-const usesOr = (p: Promise<RUse[]>) => p.catch((e) => { if (e instanceof NotWired) return null; throw e })
 
 export function VaultRoute({ id }: { id?: string }) { return id ? <VaultItemView key={id} id={id} /> : <VaultView /> }
 
@@ -96,10 +92,9 @@ function VaultView() {
   const L = useLoad(async () => {
     const status = await vaultApi.status()
     if (!status.initialized) return { status, items: [] as RItem[], uses: null as RUse[] | null }
-    const [items, uses] = await Promise.all([vaultApi.items(), usesOr(vaultApi.uses({ limit: 6 }))])
+    const [items, uses] = await Promise.all([vaultApi.items(), vaultApi.uses({ limit: 6 })])
     return { status, items, uses }
   }, [], ["vault"])
-  if (L.s === "unwired") return <Unwired id="vault" />
   if (L.s === "loading") return <Page title={t("vault:title")} back={back()}><Loading /></Page>
   if (L.s === "error") return <Page title={t("vault:title")} back={back()}><Empty title={L.err} /></Page>
   const { status, items, uses } = L.data
@@ -135,14 +130,13 @@ function VaultView() {
 function VaultItemView({ id }: { id: string }) {
   const t = useT()
   const L = useLoad(async () => {
-    const [item, uses] = await Promise.all([vaultApi.item(id), usesOr(vaultApi.uses({ item: id, limit: 50 }))])
+    const [item, uses] = await Promise.all([vaultApi.item(id), vaultApi.uses({ item: id, limit: 50 })])
     return { item, uses }
   }, [id], ["vault"])
   const [del, setDel] = useState(false), [edit, setEdit] = useState<RField | null>(null), [, act] = useBusy()
   const reload = L.reload
   const used = useCallback(() => void reload(), [reload])
   const R = useReveal(id, used)
-  if (L.s === "unwired") return <Unwired id="vault" />
   if (L.s === "loading") return <Page title={t("vault:title")} back={backVault()}><Loading /></Page>
   if (L.s === "error") return <Page title={t("vault:title")} back={backVault()}><Empty title={L.status === 404 ? t("vault:item.notFound") : L.err} /></Page>
   const { item: v, uses } = L.data
@@ -205,7 +199,7 @@ function EditField({ item, f, onClose, onDone }: { item: string; f: RField; onCl
 function LinkedAccount({ v, onChange }: { v: RItem; onChange: () => void }) {
   const t = useT()
   const [opts, setOpts] = useState<RAccount[] | null>(null), [busy, act] = useBusy()
-  const load = () => { if (!opts) accountsApi.accounts({ scope: "mine" }).then(setOpts, (e) => { if (!(e instanceof NotWired)) report(e); setOpts([]) }) }
+  const load = () => { if (!opts) accountsApi.accounts({ scope: "mine" }).then(setOpts, (e) => { report(e) }) }
   const set = async (acc: string) => { if (await act(() => vaultApi.patchItem(v.id, { account_id: acc || null }), acc ? t("vault:account.linked") : t("vault:account.unlinked"))) onChange() }
   return (
     <Section label={t("vault:account.section")} right={opts === null ? <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={load} data-change-account>{v.account ? t("vault:account.change") : t("vault:account.link")}</Button> : undefined}>

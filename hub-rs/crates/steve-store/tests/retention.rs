@@ -1,3 +1,4 @@
+use steve_store::testkit::SqliteFixtures;
 mod common;
 use common::*;
 use std::time::Duration;
@@ -7,7 +8,7 @@ use steve_store_sqlite::retention::{Budget, policies::Kind};
 fn another_writer_completes_between_retention_slices() {
     let t = fresh();
     t.store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             for n in 0..1200 {
                 c.execute(
                     "INSERT INTO tool_usage(bot_id,tool,day,searched,called) VALUES('bot',?,0,1,0)",
@@ -30,7 +31,7 @@ fn another_writer_completes_between_retention_slices() {
         let store = t.store.clone();
         let (done, wait) = std::sync::mpsc::channel();
         let writer = std::thread::spawn(move || {
-            store.with_conn(|c| { c.execute("INSERT OR REPLACE INTO settings(workspace_id,key,value,updated) VALUES('default','writer','true',0)",[])?; Ok(()) }).unwrap();
+            store.fixture_write(|c| { c.execute("INSERT OR REPLACE INTO settings(workspace_id,key,value,updated) VALUES('default','writer','true',0)",[])?; Ok(()) }).unwrap();
             done.send(()).unwrap();
         });
         wait.recv_timeout(Duration::from_secs(5))
@@ -47,7 +48,7 @@ fn another_writer_completes_between_retention_slices() {
 fn reused_feed_and_attention_capabilities_are_read_only_and_expiry_is_background_work() {
     use steve_store::{Result, WS, attention, feed};
     let t = fresh();
-    t.store.with_conn(|c| {
+    t.store.fixture_write(|c| {
         c.execute_batch("INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES('u','default','u','User','owner',0);
             INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES('default','u','owner',0);
             INSERT INTO feed_windows(token,workspace_id,user_id,unread,upper_seq,expires) VALUES('expired','default','u',0,0,0);
@@ -56,7 +57,7 @@ fn reused_feed_and_attention_capabilities_are_read_only_and_expiry_is_background
     }).unwrap();
     let read = || {
         t.store
-            .transaction(|tx| -> Result<_> {
+            .write(|tx| -> Result<_> {
                 let f = feed::list(tx, WS, "u", &feed::Filter::default(), None, 10, 100)?;
                 let a = attention::page(tx, WS, "u", "feed", vec![], 0, None, None, 10, 100)?;
                 Ok((f, a))
@@ -66,7 +67,7 @@ fn reused_feed_and_attention_capabilities_are_read_only_and_expiry_is_background
     // First issuance persists the existing opaque-capability contract; repeated reads reuse it.
     read();
     t.store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
             Ok(())
         })
@@ -76,10 +77,10 @@ fn reused_feed_and_attention_capabilities_are_read_only_and_expiry_is_background
         .unwrap()
         .modified()
         .unwrap();
-    let changes = t.store.with_conn(|c| Ok(c.total_changes())).unwrap();
+    let changes = t.store.fixture_write(|c| Ok(c.total_changes())).unwrap();
     read();
     assert_eq!(
-        t.store.with_conn(|c| Ok(c.total_changes())).unwrap(),
+        t.store.fixture_write(|c| Ok(c.total_changes())).unwrap(),
         changes,
         "read request issues no INSERT/UPDATE/DELETE for reusable windows"
     );
@@ -97,7 +98,7 @@ fn reused_feed_and_attention_capabilities_are_read_only_and_expiry_is_background
     ] {
         assert_eq!(
             t.store
-                .reader(|c| Ok::<_, steve_store::StoreError>(count(
+                .fixture_read(|c| Ok::<_, steve_store::StoreError>(count(
                     c,
                     &format!("SELECT count(*) FROM {table} WHERE token='expired'")
                 )))
@@ -108,7 +109,7 @@ fn reused_feed_and_attention_capabilities_are_read_only_and_expiry_is_background
         assert_eq!(retain(&t.store, kind, 100), 1);
         assert_eq!(
             t.store
-                .reader(|c| Ok::<_, steve_store::StoreError>(count(
+                .fixture_read(|c| Ok::<_, steve_store::StoreError>(count(
                     c,
                     &format!("SELECT count(*) FROM {table} WHERE token='expired'")
                 )))
@@ -166,7 +167,7 @@ fn only_the_core_compaction_guard_can_compress_payloads_and_advance_upto() {
     assert_eq!(t.store.events().compacted_upto(&session.id).unwrap(), upto);
     assert_eq!(
         t.store
-            .reader(|c| Ok::<_, steve_store::StoreError>(count(
+            .fixture_read(|c| Ok::<_, steve_store::StoreError>(count(
                 c,
                 "SELECT count(*) FROM event_payload_refs"
             )))

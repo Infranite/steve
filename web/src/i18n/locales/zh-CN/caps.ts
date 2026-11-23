@@ -10,7 +10,6 @@ export default {
   pins: {
     title: "工具加载",
     note: "8 个核心工具常驻，其余按需发现。常用的可钉住直接加载；钉住不是授权，不改变账号或工具权限。",
-    unwired: "这个 Hub 尚不支持工具钉住。",
     retry: "重试",
     builtin: "内置",
     coreTool: "每个会话都会加载的核心工具。",
@@ -45,7 +44,6 @@ export default {
     show_other: "查看 {{count}} 个工具",
     uses_other: "30 天 {{count}} 次",
     unused: "30 天没用过",
-    unwired: "这个 Hub 还不能列出 Steve 的工具。",
   },
   outside: {
     section: "从外部连接 Steve",
@@ -130,7 +128,6 @@ export default {
     secretMark: "机密",
     noVars: "没有环境变量",
     noHeaders: "没有请求头",
-    unwired: "这个 Hub 还不能管理 MCP 服务器。",
   },
   skills: {
     section: "技能",
@@ -167,7 +164,6 @@ export default {
     importTitle: "粘贴 SKILL.md",
     importDesc: "粘贴整份 SKILL.md：开头的 name 和 description 填进表单，后面的正文是内容。其他头字段不保留。",
     importNext: "下一步",
-    unwired: "这个 Hub 还不能管理技能。",
   },
   a2a: {
     section: "远程 Agent",
@@ -215,7 +211,6 @@ export default {
     ownNote: "别的 Agent 可以照这份 Card 把任务交给 Steve：每个任务成为一个事项，用你的访问令牌认证，之后按任务 ID 查进度和结果。",
     ownCard: "Agent Card",
     ownEndpoint: "A2A 接收地址",
-    unwired: "这个 Hub 还不能管理远程 Agent。",
   },
   bot: {
     steveNote: "始终可通过 Steve 使用。这里查看工具说明和这个 Bot 近 30 天的用量，直接加载的工具在下方选择。",
@@ -242,7 +237,6 @@ export default {
     change: "修改",
     libraryLead: "所有 MCP 服务器、技能和远程 Agent，以及从外部连接 Steve：",
     library: "能力",
-    unwired: "这个 Hub 还不能管理 Bot 的能力。",
   },
   tool: {
     contacts: "查找联系人、账号归属和一个人负责的资源",

@@ -94,9 +94,9 @@ impl WouldDo<'_> {
                 w.action
             )));
         }
-        self.0.transaction(|tx| {
+        self.0.write(|tx| {
             let id = uid("wd");
-            let inserted = tx.execute(
+            let inserted = tx.conn.execute(
                 "INSERT INTO item_would_do(id,item_id,cycle,session_id,turn_id,scope_revision,target,action,reason,detail,row,code,due_at,first_seen)
                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                  ON CONFLICT(item_id,cycle,session_id,turn_id,scope_revision,action,reason,target) DO UPDATE
@@ -106,14 +106,14 @@ impl WouldDo<'_> {
                 params![id, w.item_id, w.cycle, w.session_id, w.turn_id, w.scope_revision, w.target,
                     w.action, w.reason, w.detail, w.row, w.code, w.due_at, at],
             )? > 0;
-            let id: String = tx.query_row(
+            let id: String = tx.conn.query_row(
                 "SELECT id FROM item_would_do WHERE item_id=? AND cycle=? AND session_id=? AND turn_id=?
                    AND scope_revision=? AND action=? AND reason=? AND target=?",
                 params![w.item_id, w.cycle, w.session_id, w.turn_id, w.scope_revision, w.action,
                     w.reason, w.target],
                 |r| r.get(0),
             )?;
-            tx.execute(
+            tx.conn.execute(
                 "UPDATE item_would_do SET cleared_at=? WHERE item_id=? AND cleared_at IS NULL AND id<>?",
                 params![at, w.item_id, id],
             )?;
@@ -123,8 +123,8 @@ impl WouldDo<'_> {
 
     /// The sweep would do nothing for `item` now: its open decisions are cleared. Returns how many.
     pub fn clear(&self, item: &str, at: i64) -> Result<usize> {
-        self.0.transaction(|tx| {
-            Ok::<_, StoreError>(tx.execute(
+        self.0.write(|tx| {
+            Ok::<_, StoreError>(tx.conn.execute(
                 "UPDATE item_would_do SET cleared_at=? WHERE item_id=? AND cleared_at IS NULL",
                 params![at, item],
             )?)
@@ -134,8 +134,8 @@ impl WouldDo<'_> {
     /// Clears the open decisions of items the sweep no longer looks at (closed, archived, or no
     /// longer a task). Returns how many.
     pub fn clear_gone(&self, at: i64) -> Result<usize> {
-        self.0.transaction(|tx| {
-            Ok::<_, StoreError>(tx.execute(
+        self.0.write(|tx| {
+            Ok::<_, StoreError>(tx.conn.execute(
                 "UPDATE item_would_do SET cleared_at=? WHERE cleared_at IS NULL AND item_id IN
                    (SELECT id FROM items WHERE phase='closed' OR archived<>0 OR kind<>'task')",
                 [at],
@@ -145,7 +145,7 @@ impl WouldDo<'_> {
 
     /// The open decisions of `item` (at most one, but read as many as there are).
     pub fn open(&self, item: &str) -> Result<Vec<WouldDoRow>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM item_would_do WHERE item_id=? AND cleared_at IS NULL ORDER BY rowid",
@@ -157,7 +157,7 @@ impl WouldDo<'_> {
 
     /// The newest decisions about `item`, open or cleared, newest first.
     pub fn log(&self, item: &str, limit: usize) -> Result<Vec<WouldDoRow>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM item_would_do WHERE item_id=? ORDER BY first_seen DESC,rowid DESC LIMIT ?",
@@ -169,7 +169,7 @@ impl WouldDo<'_> {
 
     /// Every open task item, in every workspace (`ready`, `active` or `closing`, not archived).
     pub fn open_items(&self) -> Result<Vec<String>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT id FROM items WHERE kind='task' AND phase<>'closed' AND archived=0 ORDER BY id",
@@ -181,7 +181,7 @@ impl WouldDo<'_> {
 
     /// When `item` was last paused with the item action (its audit record), if ever.
     pub fn paused_at(&self, item: &str) -> Result<Option<i64>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             one(
                 c,
                 "SELECT ts FROM audit WHERE target=? AND action='item.pause' ORDER BY id DESC LIMIT 1",

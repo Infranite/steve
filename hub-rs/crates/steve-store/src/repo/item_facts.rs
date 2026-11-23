@@ -9,7 +9,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::all;
-use crate::{Result, Store, StoreError, Tx, now, uid};
+use crate::{Result, Store, StoreError, W, now, uid};
 
 /// Kinds of a delivery fact.
 pub const DELIVERY_KINDS: [&str; 8] = [
@@ -307,12 +307,12 @@ fn candidate_row(r: &rusqlite::Row) -> rusqlite::Result<Candidate> {
 }
 
 /// Inserts a judgement (`None`: its key has one already).
-fn insert_judgement_in(tx: &Tx<'_>, j: &NewJudgement<'_>) -> Result<Option<String>> {
+fn insert_judgement_in(tx: &mut W<'_>, j: &NewJudgement<'_>) -> Result<Option<String>> {
     if !VERDICTS.contains(&j.verdict) {
         return Err(refuse("verdict", j.verdict));
     }
     let id = uid("jdg");
-    let n = tx.execute(
+    let n = tx.conn.execute(
         "INSERT OR IGNORE INTO item_judgements(id,item_id,cycle,session_id,turn_id,scope_revision,verdict,basis,harness,model,created,candidate_id,decided_by,would,independent,fingerprint)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         params![id, j.item_id, j.cycle, j.session_id, j.turn_id, j.scope_revision,
@@ -390,9 +390,9 @@ fn evidence_version_in(c: &rusqlite::Connection, item: &str, cycle: i64) -> Resu
 /// turn is another or not finished, the scope revision moved on, the session's input moved past
 /// the version it was claimed on, or the evidence version is not `evidence`. `None`: it all still
 /// holds.
-fn stale_in(tx: &Tx<'_>, c: &Candidate, evidence: &str) -> Result<Option<&'static str>> {
+fn stale_in(tx: &mut W<'_>, c: &Candidate, evidence: &str) -> Result<Option<&'static str>> {
     let cycle: Option<(i64, String)> = super::one(
-        tx,
+        tx.conn,
         "SELECT cycle,phase FROM items WHERE id=?",
         [&c.item_id],
         |r| Ok((r.get(0)?, r.get(1)?)),
@@ -402,7 +402,7 @@ fn stale_in(tx: &Tx<'_>, c: &Candidate, evidence: &str) -> Result<Option<&'stati
     }
     /* the item's current session: its newest one that has not ended */
     let session: Option<String> = super::one(
-        tx,
+        tx.conn,
         "SELECT id FROM sessions WHERE item_id=? AND status<>'ended' ORDER BY no DESC,rowid DESC LIMIT 1",
         [&c.item_id],
         |r| r.get(0),
@@ -411,7 +411,7 @@ fn stale_in(tx: &Tx<'_>, c: &Candidate, evidence: &str) -> Result<Option<&'stati
         return Ok(Some("session"));
     }
     let turn: Option<(String, String)> = super::one(
-        tx,
+        tx.conn,
         "SELECT turn_id,state FROM runtime_turns WHERE session_id=? ORDER BY created DESC,rowid DESC LIMIT 1",
         [&c.session_id],
         |r| Ok((r.get(0)?, r.get(1)?)),
@@ -419,7 +419,7 @@ fn stale_in(tx: &Tx<'_>, c: &Candidate, evidence: &str) -> Result<Option<&'stati
     if turn.is_none_or(|(t, state)| t != c.turn_id || state != "finished") {
         return Ok(Some("turn"));
     }
-    let scope: i64 = tx.query_row(
+    let scope: i64 = tx.conn.query_row(
         "SELECT COALESCE(MAX(version),0) FROM item_goals WHERE item_id=?",
         [&c.item_id],
         |r| r.get(0),
@@ -427,7 +427,7 @@ fn stale_in(tx: &Tx<'_>, c: &Candidate, evidence: &str) -> Result<Option<&'stati
     if scope != c.scope_revision {
         return Ok(Some("scope"));
     }
-    let input: i64 = tx.query_row(
+    let input: i64 = tx.conn.query_row(
         "SELECT COALESCE(MAX(seq),0) FROM events WHERE session_id=?",
         [&c.session_id],
         |r| r.get(0),
@@ -435,7 +435,7 @@ fn stale_in(tx: &Tx<'_>, c: &Candidate, evidence: &str) -> Result<Option<&'stati
     if c.input_seq != Some(input) {
         return Ok(Some("inputs"));
     }
-    if evidence_version_in(tx, &c.item_id, c.cycle)? != evidence {
+    if evidence_version_in(tx.conn, &c.item_id, c.cycle)? != evidence {
         return Ok(Some("evidence"));
     }
     Ok(None)
@@ -451,8 +451,8 @@ impl ItemFacts<'_> {
             return Err(refuse("provenance", f.provenance));
         }
         let id = uid("dlf");
-        self.0.transaction(|tx| {
-            tx.execute(
+        self.0.write(|tx| {
+            tx.conn.execute(
                 "INSERT INTO item_delivery_facts(id,item_id,cycle,session_id,turn_id,kind,head,ref,state,provenance,source,observed_at)
                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 params![id, f.item_id, f.cycle, f.session_id, f.turn_id, f.kind, f.head, f.ref_,
@@ -465,7 +465,7 @@ impl ItemFacts<'_> {
 
     /// The delivery facts of `item` in `cycle`, oldest first.
     pub fn deliveries(&self, item: &str, cycle: i64) -> Result<Vec<DeliveryFact>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM item_delivery_facts WHERE item_id=? AND cycle=? ORDER BY observed_at,rowid",
@@ -481,8 +481,8 @@ impl ItemFacts<'_> {
             return Err(refuse("wait", w.waits_on));
         }
         let (id, at) = (uid("wt"), now());
-        self.0.transaction(|tx| {
-            tx.execute(
+        self.0.write(|tx| {
+            tx.conn.execute(
                 "INSERT INTO item_waits(id,item_id,cycle,session_id,waits_on,what,ref,next_check,fallback_at,cap,created,updated)
                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 params![id, w.item_id, w.cycle, w.session_id, w.waits_on, w.what, w.ref_,
@@ -495,7 +495,7 @@ impl ItemFacts<'_> {
 
     /// The open waits of `item` in `cycle`.
     pub fn waits_open(&self, item: &str, cycle: i64) -> Result<Vec<ItemWait>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM item_waits WHERE item_id=? AND cycle=? AND resolved_at IS NULL ORDER BY next_check,rowid",
@@ -508,8 +508,8 @@ impl ItemFacts<'_> {
     /// Ends a wait with why; `false` when it was not open.
     pub fn resolve_wait(&self, id: &str, resolution: &str) -> Result<bool> {
         let at = now();
-        self.0.transaction(|tx| {
-            Ok::<_, StoreError>(tx.execute(
+        self.0.write(|tx| {
+            Ok::<_, StoreError>(tx.conn.execute(
                 "UPDATE item_waits SET resolved_at=?,resolution=?,updated=? WHERE id=? AND resolved_at IS NULL",
                 params![at, resolution, at, id],
             )? > 0)
@@ -519,12 +519,12 @@ impl ItemFacts<'_> {
     /// Records a judgement. One per (item, cycle, session, turn, scope revision): a second one for
     /// the same key changes nothing and answers `None`.
     pub fn record_judgement(&self, j: &NewJudgement<'_>) -> Result<Option<String>> {
-        self.0.transaction(|tx| insert_judgement_in(tx, j))
+        self.0.write(|tx| insert_judgement_in(tx, j))
     }
 
     /// The judgements of `item` in `cycle`, newest first.
     pub fn judgements(&self, item: &str, cycle: i64) -> Result<Vec<Judgement>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM item_judgements WHERE item_id=? AND cycle=? ORDER BY created DESC,rowid DESC",
@@ -536,7 +536,7 @@ impl ItemFacts<'_> {
 
     /// The operator's overrides of the work policy, by name.
     pub fn policy_overrides(&self) -> Result<Vec<(String, i64)>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT name,value FROM work_policy ORDER BY name",
@@ -548,8 +548,8 @@ impl ItemFacts<'_> {
 
     /// Sets an override of the work policy (the caller checks the name).
     pub fn set_policy(&self, name: &str, value: i64) -> Result<()> {
-        self.0.transaction(|tx| {
-            tx.execute(
+        self.0.write(|tx| {
+            tx.conn.execute(
                 "INSERT INTO work_policy(name,value,updated) VALUES (?,?,?)
                  ON CONFLICT(name) DO UPDATE SET value=excluded.value,updated=excluded.updated",
                 params![name, value, now()],
@@ -561,7 +561,7 @@ impl ItemFacts<'_> {
     /// The Node commands that start or carry the turns of `session` and whose outcome is not
     /// settled yet (neither finished nor rejected).
     pub fn open_dispatches(&self, session: &str) -> Result<Vec<OpenDispatch>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT c.operation_id,c.method,c.state,c.maybe_sent,c.receipt IS NOT NULL,c.retry_at,a.turn_id
@@ -587,7 +587,7 @@ impl ItemFacts<'_> {
 
     /// The newest logical turn of `session` on the Node runtime, if it has any.
     pub fn latest_turn(&self, session: &str) -> Result<Option<LatestTurn>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             super::one(
                 c,
                 "SELECT turn_id,state,updated FROM runtime_turns WHERE session_id=? ORDER BY created DESC,rowid DESC LIMIT 1",
@@ -605,7 +605,7 @@ impl ItemFacts<'_> {
 
     /// When the Node that runs `session` was last seen (`None`: not on a paired Node, or never).
     pub fn node_last_seen(&self, session: &str) -> Result<Option<i64>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             Ok(super::one(
                 c,
                 "SELECT n.last_seen FROM runtime_sessions r JOIN nodes n ON n.node_id=r.node_id WHERE r.session_id=?",
@@ -622,8 +622,8 @@ impl ItemFacts<'_> {
             return Err(refuse("registration", c.registered_by));
         }
         let (id, at) = (uid("jc"), now());
-        self.0.transaction(|tx| {
-            Ok::<_, StoreError>(tx.execute(
+        self.0.write(|tx| {
+            Ok::<_, StoreError>(tx.conn.execute(
                 "INSERT OR IGNORE INTO item_judge_candidates(id,item_id,cycle,session_id,turn_id,scope_revision,terminal_attempt,registered_by,next_check,created,updated)
                  VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 params![id, c.item_id, c.cycle, c.session_id, c.turn_id, c.scope_revision,
@@ -641,7 +641,7 @@ impl ItemFacts<'_> {
         turn: &str,
         scope_revision: i64,
     ) -> Result<Option<Candidate>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             super::one(
                 c,
                 "SELECT * FROM item_judge_candidates WHERE item_id=? AND cycle=? AND session_id=? AND turn_id=? AND scope_revision=?",
@@ -652,7 +652,7 @@ impl ItemFacts<'_> {
     }
 
     pub fn candidate(&self, id: &str) -> Result<Option<Candidate>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             super::one(
                 c,
                 "SELECT * FROM item_judge_candidates WHERE id=?",
@@ -664,7 +664,7 @@ impl ItemFacts<'_> {
 
     /// The candidates of `item` in `cycle`, newest first.
     pub fn candidates(&self, item: &str, cycle: i64) -> Result<Vec<Candidate>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM item_judge_candidates WHERE item_id=? AND cycle=? ORDER BY created DESC,rowid DESC",
@@ -682,7 +682,7 @@ impl ItemFacts<'_> {
         stale_before: i64,
         limit: usize,
     ) -> Result<Vec<Candidate>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM item_judge_candidates
@@ -707,8 +707,8 @@ impl ItemFacts<'_> {
         if !SETTLED.contains(&settled) {
             return Err(refuse("settled", settled));
         }
-        self.0.transaction(|tx| {
-            Ok::<_, StoreError>(tx.execute(
+        self.0.write(|tx| {
+            Ok::<_, StoreError>(tx.conn.execute(
                 "UPDATE item_judge_candidates SET settled=?,settled_reason=?,next_check=?,updated=? WHERE id=? AND state='pending'",
                 params![settled, reason, next_check, now(), id],
             )? > 0)
@@ -718,8 +718,8 @@ impl ItemFacts<'_> {
     /// A candidate that no longer stands for the current turn (another turn, session, cycle or scope
     /// came): never judged. `false` when it was judged or given up already.
     pub fn candidate_supersede(&self, id: &str, why: &str) -> Result<bool> {
-        self.0.transaction(|tx| {
-            Ok::<_, StoreError>(tx.execute(
+        self.0.write(|tx| {
+            Ok::<_, StoreError>(tx.conn.execute(
                 "UPDATE item_judge_candidates SET state='superseded',settled_reason=?,claim=NULL,updated=? WHERE id=? AND state IN ('pending','judging')",
                 params![why, now(), id],
             )? > 0)
@@ -737,8 +737,8 @@ impl ItemFacts<'_> {
         stale_before: i64,
     ) -> Result<bool> {
         let at = now();
-        self.0.transaction(|tx| {
-            Ok::<_, StoreError>(tx.execute(
+        self.0.write(|tx| {
+            Ok::<_, StoreError>(tx.conn.execute(
                 "UPDATE item_judge_candidates
                  SET state='judging',settled='evaluable',settled_reason=NULL,claim=?,claimed_at=?,input_seq=?,fingerprint=?,updated=?
                  WHERE id=? AND (state='pending' OR (state='judging' AND (claimed_at IS NULL OR claimed_at<?)))",
@@ -759,8 +759,8 @@ impl ItemFacts<'_> {
         next_check: i64,
     ) -> Result<bool> {
         let state = if give_up { "failed" } else { "pending" };
-        self.0.transaction(|tx| {
-            Ok::<_, StoreError>(tx.execute(
+        self.0.write(|tx| {
+            Ok::<_, StoreError>(tx.conn.execute(
                 "UPDATE item_judge_candidates
                  SET state=?,claim=NULL,claimed_at=NULL,failures=failures+?,last_error=COALESCE(?,last_error),next_check=?,updated=?
                  WHERE id=? AND state='judging' AND claim=?",
@@ -783,9 +783,9 @@ impl ItemFacts<'_> {
         evidence: &str,
         j: &NewJudgement<'_>,
     ) -> Result<Judged> {
-        self.0.transaction(|tx| {
+        self.0.write(|tx| {
             let Some(c) = super::one(
-                tx,
+                tx.conn,
                 "SELECT * FROM item_judge_candidates WHERE id=? AND state='judging' AND claim=?",
                 params![id, claim],
                 candidate_row,
@@ -797,13 +797,13 @@ impl ItemFacts<'_> {
                 return Ok(Judged::Stale(why));
             }
             let Some(jid) = insert_judgement_in(tx, j)? else {
-                tx.execute(
+                tx.conn.execute(
                     "UPDATE item_judge_candidates SET state='superseded',settled_reason='judged_already',claim=NULL,updated=? WHERE id=?",
                     params![now(), id],
                 )?;
                 return Ok(Judged::Already);
             };
-            tx.execute(
+            tx.conn.execute(
                 "UPDATE item_judge_candidates SET state='judged',claim=NULL,judgement_id=?,updated=? WHERE id=?",
                 params![jid, now(), id],
             )?;
@@ -827,7 +827,7 @@ impl ItemFacts<'_> {
     ) -> Result<Option<AttemptEvents>> {
         /// How many of the session's last events are looked at.
         const SCAN: i64 = 5000;
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             let rows: Vec<(i64, Option<String>, bool, bool)> = all(
                 c,
                 "SELECT seq, source_attempt, kind='text',
@@ -867,12 +867,12 @@ impl ItemFacts<'_> {
     /// changed), its result revision and its closing (with the checks the executor reported). Any
     /// fact recorded, output added, operation moved or closing changed gives another version.
     pub fn evidence_version(&self, item: &str, cycle: i64) -> Result<String> {
-        self.0.read(|c| evidence_version_in(c, item, cycle))
+        self.0.read_conn(|c| evidence_version_in(c, item, cycle))
     }
 
     /// The newest logical turn of `session` when it is finished, with its last attempt.
     pub fn terminal_turn(&self, session: &str) -> Result<Option<TerminalTurn>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             super::one(
                 c,
                 "SELECT t.turn_id,t.updated,t.created,(SELECT a.attempt_id FROM runtime_attempts a WHERE a.turn_id=t.turn_id ORDER BY a.ordinal DESC LIMIT 1)
@@ -893,7 +893,7 @@ impl ItemFacts<'_> {
 
     /// Open task items (being worked on or closing), not archived: what the judge's sweep looks at.
     pub fn open_task_items(&self) -> Result<Vec<String>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT id FROM items WHERE kind='task' AND phase IN ('active','closing') AND archived=0 ORDER BY rowid",
@@ -905,7 +905,7 @@ impl ItemFacts<'_> {
 
     /// The logical turn an attempt belongs to.
     pub fn turn_of_attempt(&self, attempt: &str) -> Result<Option<String>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             super::one(
                 c,
                 "SELECT turn_id FROM runtime_attempts WHERE attempt_id=?",
@@ -917,7 +917,7 @@ impl ItemFacts<'_> {
 
     /// The newest event of `session` (0: none): what the session's input and output have reached.
     pub fn last_event_seq(&self, session: &str) -> Result<i64> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             Ok(c.query_row(
                 "SELECT COALESCE(MAX(seq),0) FROM events WHERE session_id=?",
                 [session],

@@ -77,12 +77,11 @@ fn tidy_expires_questions_older_than_a_delivery_and_keeps_the_delivery() {
         .unwrap()
         .created
         .max(question_at + 1);
-    k.db()
-        .exec(
-            "UPDATE decisions SET created = ? WHERE id = ?",
-            &[&delivery_at, &acc],
-        )
-        .unwrap();
+    steve_store::core_fixture::decision(
+        k.db().store(),
+        &acc,
+        steve_store::core_fixture::DecisionState::Created(delivery_at),
+    );
     settle(k.db(), &i).unwrap();
     assert_eq!(tidy(k.db(), &i).unwrap(), 1);
     assert_eq!(k.db().decision(&a).unwrap().unwrap().status, "expired");

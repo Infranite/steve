@@ -31,12 +31,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use steve_knowledge::Hit;
 use steve_knowledge::context::{level_label, render_snippets, reply_hits};
 use steve_modules::{ApiError, GatewayOut, Tier};
-use steve_store::base::mems::{self, MemFilter};
+use steve_store::base::mems::MemFilter;
 use steve_store::base::{ObjRef, Viewer};
 
 use crate::context::{self, Clock, Msg, Occasion, Shown, Why};
@@ -178,18 +177,7 @@ pub trait PinnedModel: Send + Sync {
     }
 }
 
-/// The Bot a reply speaks for (layer 2).
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct BotInfo {
-    pub id: String,
-    pub name: String,
-    pub role: String,
-    pub persona: String,
-    pub rules: String,
-    /// The user's own prompt for the Bot, when written.
-    pub prompt: String,
-    pub model: Option<String>,
-}
+pub use steve_store::ReplyBot as BotInfo;
 
 /// Everything a reply prompt is made of, gathered from the store.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -527,146 +515,117 @@ pub fn self_layer(owner: &str) -> String {
     )
 }
 
-/// The Bot behind a reply: the persona's on a bot account; on your own account the space's
-/// `item_defaults.bot_id`, else the workspace's main Bot. Deleted or disabled Bots don't count.
-fn bot_info(c: &Connection, ws: &str, id: &str) -> ChannelResult<Option<BotInfo>> {
-    Ok(c.query_row(
-        "SELECT b.id, b.name, b.role, b.persona, b.rules, coalesce(b.prompt, ''), b.model FROM bots b
-           JOIN bot_workspaces w ON w.bot_id = b.id AND w.workspace_id = ?
-          WHERE b.id = ? AND b.deleted = 0 AND b.enabled = 1",
-        params![ws, id],
-        |r| {
-            Ok(BotInfo {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                role: r.get(2)?,
-                persona: r.get(3)?,
-                rules: r.get(4)?,
-                prompt: r.get(5)?,
-                model: r.get::<_, Option<String>>(6)?.filter(|m| !m.is_empty()),
-            })
-        },
-    )
-    .optional()?)
+fn pick_bot_info(
+    r: &mut impl steve_store::Read,
+    ws: &str,
+    ids: &[Option<&str>],
+) -> ChannelResult<Option<BotInfo>> {
+    let mut bots = steve_store::BotRows(r);
+    for id in ids.iter().flatten() {
+        if let Some(bot) = bots.reply_profile(ws, Some(id))? {
+            return Ok(Some(bot));
+        }
+    }
+    Ok(bots.reply_profile(ws, None)?)
 }
 
-/// The workspace's main Bot (enabled, not deleted).
-pub(crate) fn main_bot(c: &Connection, ws: &str) -> ChannelResult<Option<String>> {
-    Ok(c.query_row(
-        "SELECT b.id FROM bots b JOIN bot_workspaces w ON w.bot_id = b.id AND w.workspace_id = ?
-          WHERE b.main = 1 AND b.deleted = 0 AND b.enabled = 1 ORDER BY b.updated LIMIT 1",
-        [ws],
-        |r| r.get(0),
-    )
-    .optional()?)
-}
-
-/// The first usable Bot of `ids`, else the main Bot.
 pub(crate) fn pick_bot(
-    c: &Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     ids: &[Option<&str>],
 ) -> ChannelResult<Option<String>> {
-    for id in ids.iter().flatten() {
-        if bot_info(c, ws, id)?.is_some() {
-            return Ok(Some((*id).to_string()));
-        }
-    }
-    main_bot(c, ws)
+    Ok(pick_bot_info(r, ws, ids)?.map(|bot| bot.id))
 }
 
-/// The user whose view a reply is written with: the owner of a personal account, else whoever
-/// connected the bot account.
-pub fn owner_user(c: &Connection, ws: &str, conn: &str) -> ChannelResult<String> {
-    c.query_row(
-        "SELECT coalesce(p.user_id, c.created_by) FROM connections c JOIN accounts a ON a.id = c.account_id
-           LEFT JOIN parties p ON p.id = a.party_id WHERE c.id = ? AND c.workspace_id = ?",
-        params![conn, ws],
-        |r| r.get(0),
-    )
-    .optional()?
-    .ok_or_else(|| ApiError::not_found("连接"))
+/// The personal account's user, or the person who connected the bot.
+pub fn owner_user(r: &mut impl steve_store::Read, ws: &str, conn: &str) -> ChannelResult<String> {
+    let conn =
+        steve_store::connections::owner(r, ws, conn)?.ok_or_else(|| ApiError::not_found("连接"))?;
+    let acc = steve_store::Accounts(r)
+        .get(&conn.account)?
+        .ok_or_else(|| ApiError::not_found("账号"))?;
+    Ok(steve_store::parties::user_id(r, &acc.party_id)?.unwrap_or(conn.user))
 }
 
-/// The connection owner as a bare viewer (personal reads are unconditional).
-pub fn viewer(c: &Connection, ws: &str, conn: &str, _space: &str) -> ChannelResult<Viewer> {
-    let user = owner_user(c, ws, conn)?;
-    Ok(Viewer::bare(ws, &user))
+pub fn viewer(r: &mut impl steve_store::Read, ws: &str, conn: &str) -> ChannelResult<Viewer> {
+    Ok(Viewer::bare(ws, &owner_user(r, ws, conn)?))
 }
 
 /// The sender's items in progress (`raised_by` links): `编号 · 标题 · 状态 · 现在`.
-fn sender_items(c: &Connection, ws: &str, party: &str) -> ChannelResult<Vec<String>> {
-    let mut st = c.prepare_cached(
-        "SELECT i.id, i.title, i.status, i.now FROM links l JOIN items i ON i.id = l.subject_id AND i.workspace_id = l.workspace_id
-          WHERE l.workspace_id = ? AND l.subject_type = 'item' AND l.predicate = 'raised_by' AND l.object_type = 'party'
-            AND l.object_id = ? AND i.status NOT IN ('done', 'drop') AND i.archived = 0
-          ORDER BY i.updated DESC LIMIT ?",
-    )?;
-    let rows = st
-        .query_map(params![ws, party, ITEMS as i64], |r| {
-            let (id, title, status, now): (String, String, String, String) =
-                (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
-            let mut s = format!("- {id} · {title} · {status}");
-            if !now.trim().is_empty() {
-                s.push_str(&format!(" · 现在：{}", cut(&now, 120)));
-            }
-            Ok(s)
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+fn sender_items(
+    r: &mut impl steve_store::Read,
+    ws: &str,
+    party: &str,
+) -> ChannelResult<Vec<String>> {
+    Ok(
+        steve_store::item_repo::raised_open(r, ws, party, ITEMS as u64)?
+            .into_iter()
+            .map(|item| {
+                let mut line = format!("- {} · {} · {}", item.id, item.title, item.status);
+                if !item.current.trim().is_empty() {
+                    line.push_str(&format!(" · 现在：{}", cut(&item.current, 120)));
+                }
+                line
+            })
+            .collect(),
+    )
 }
 
-/// Draft-as-you uses the verified account's linked user, never the workspace owner or the
-/// connection creator. The existing profile resolver owns address scope and external fallback.
-pub(crate) fn own_name(c: &Connection, ws: &str, conn: &str, space: &str) -> ChannelResult<String> {
-    let user: String = c
-        .query_row(
-            "SELECT p.user_id FROM connections c
-               JOIN accounts a ON a.id = c.account_id AND a.workspace_id = c.workspace_id
-               JOIN parties p ON p.id = a.party_id AND p.workspace_id = c.workspace_id
-               JOIN workspace_members m ON m.workspace_id = c.workspace_id AND m.user_id = p.user_id
-              WHERE c.id = ?1 AND c.workspace_id = ?2 AND a.verified = 1
-                AND a.status = 'active' AND p.status <> 'deleted'",
-            params![conn, ws],
-            |r| r.get(0),
-        )
-        .optional()?
+/// A draft uses the verified personal account, scoped to this workspace.
+pub(crate) fn own_name(
+    r: &mut impl steve_store::Read,
+    ws: &str,
+    conn: &str,
+    space: &str,
+) -> ChannelResult<String> {
+    let user = steve_store::connections::lifecycle::verified_user(r, ws, conn)?
         .ok_or_else(|| ApiError::not_found("已验证的个人账号用户"))?;
-    steve_modules::contacts::profile::address(c, ws, &user, true, None, Some(space))?
+    steve_modules::contacts::profile::address(r, ws, &user, true, None, Some(space))?
         .ok_or_else(|| ApiError::not_found("个人资料"))
 }
 
 /// Gathers the layers for answering `plan`'s message.
 pub fn gather(
-    c: &Connection,
+    db: &steve_store::Store,
+    store: &dyn steve_knowledge::port::KnowledgeStore,
+    plan: &Plan,
+    opts: &ComposeOpts,
+    now: i64,
+) -> ChannelResult<Layers> {
+    db.read(|r| gather_from_snapshot(r, store, plan, opts, now))
+}
+
+fn gather_from_snapshot(
+    r: &mut steve_store::R<'_>,
     store: &dyn steve_knowledge::port::KnowledgeStore,
     plan: &Plan,
     opts: &ComposeOpts,
     now: i64,
 ) -> ChannelResult<Layers> {
     let ws = &plan.ws;
-    let space = spaces::get(c, &plan.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
-    let set = spaces::settings(c, &space.id)?;
+    let space = steve_store::channel_spaces::rows::get_in_workspace(r, ws, &plan.space_id)?
+        .ok_or_else(|| ApiError::not_found("空间"))?;
+    let set = spaces::settings(r, &space.id)?;
     let owner = match plan.mode {
-        Mode::Own => own_name(c, ws, &plan.connection_id, &plan.space_id)?,
-        Mode::Bot => personas::owner_name_in(c, ws, None, Some(&plan.space_id))?,
+        Mode::Own => own_name(r, ws, &plan.connection_id, &plan.space_id)?,
+        Mode::Bot => personas::owner_name_in(r, ws, None, Some(&plan.space_id))?,
     };
-    let internal_name = if crate::conversations::owner_only(c, ws, &space, &plan.connection_id)? {
-        Some(personas::owner_internal_name(c, ws, &plan.connection_id)?)
+    let internal_name = if crate::conversations::owner_only(r, ws, &space, &plan.connection_id)? {
+        Some(personas::owner_internal_name(r, ws, &plan.connection_id)?)
     } else {
         None
     };
-    let viewer = viewer(c, ws, &plan.connection_id, &space.id)?;
+    let viewer = viewer(r, ws, &plan.connection_id)?;
 
     // 2–3: the persona and the Bot behind it
     let GatheredIdentity {
         persona: persona_text,
         bot,
         model,
-    } = gather_identity(c, plan, opts, &space, &set, &owner)?;
+    } = gather_identity(r, plan, opts, &space, &set, &owner)?;
 
     // 4–5
-    let account_duty = spaces::channel_settings(c, ws, &plan.connection_id)?
+    let account_duty = spaces::channel_settings(r, ws, &plan.connection_id)?
         .map(|s| s.duty)
         .unwrap_or_default();
 
@@ -676,11 +635,11 @@ pub fn gather(
         lines: anchors,
         ids: anchor_ids,
         objects: objs,
-    } = gather_anchors(c, &viewer, plan, &space, internal_name, now)?;
+    } = gather_anchors(r, &viewer, plan, &space, internal_name, now)?;
 
     // the conversation and the message
     let talk = conversation(
-        c,
+        r,
         plan,
         &space,
         &owner,
@@ -692,7 +651,7 @@ pub fn gather(
     // 3, on your own account: your messages and habits in this situation, your verdicts on drafts
     let voice = match plan.mode {
         Mode::Own => Some(crate::voice::gather(
-            c,
+            r,
             ws,
             &plan.connection_id,
             &space.id,
@@ -704,7 +663,7 @@ pub fn gather(
     };
 
     // 7: retrieval as the owner, the sender and the space as anchors
-    let found = reply_hits(c, store, &viewer, &plan.text, &recent, &objs, now)
+    let found = reply_hits(r, store, &viewer, &plan.text, &recent, &objs, now)
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let kb_semantic_down = found.semantic_down;
     let hits = found
@@ -720,7 +679,7 @@ pub fn gather(
 
     // a trigger word: who speaks as whom, where, to whom, first
     let im_context = if plan.trigger.is_some() {
-        crate::im_context::render_for(c, plan)
+        crate::im_context::render_for(r, plan)
     } else {
         String::new()
     };
@@ -751,7 +710,7 @@ pub fn gather(
         unreadable: context::unreadable(&plan.text, &talk.attachments, false),
         message: talk.message,
         instruction: opts.instruction.clone(),
-        now: now_text(now, &crate::im_mcp::tz_of(c, ws)),
+        now: now_text(now, &crate::im_mcp::tz_of(r, ws)),
         own: plan.mode == Mode::Own,
         addressed: crate::decide::addressed(talk.why),
         question: crate::decide::asks(&plan.text),
@@ -766,7 +725,7 @@ struct GatheredIdentity {
 }
 
 fn gather_identity(
-    c: &Connection,
+    r: &mut impl steve_store::Read,
     plan: &Plan,
     opts: &ComposeOpts,
     space: &SpaceRow,
@@ -780,26 +739,22 @@ fn gather_identity(
         Mode::Bot => {
             let p = match &opts.persona_id {
                 Some(id) => Some(
-                    personas::get(c, id)?
+                    personas::get(r, id)?
                         .filter(|p| p.workspace_id == *ws && !p.deleted)
                         .ok_or_else(|| ApiError::not_found("对外身份"))?,
                 ),
-                None => bindings::effective(c, &space)?.map(|e| e.persona),
+                None => bindings::effective(r, space)?.map(|e| e.persona),
             };
             match p {
                 Some(p) => {
-                    let owner = personas::owner_name_in(c, ws, Some(&p.id), Some(&plan.space_id))?;
+                    let owner = personas::owner_name_in(r, ws, Some(&p.id), Some(&plan.space_id))?;
                     (persona_layer(&p, &owner), Some(p.bot_id))
                 }
                 None => (String::new(), None),
             }
         }
     };
-    let bot_id = pick_bot(c, ws, &[persona_bot.as_deref(), defaults_bot.as_deref()])?;
-    let bot = match bot_id {
-        Some(b) => bot_info(c, ws, &b)?,
-        None => None,
-    };
+    let bot = pick_bot_info(r, ws, &[persona_bot.as_deref(), defaults_bot.as_deref()])?;
     // on your own account the Bot only picks the model: the draft is you talking
     let model = bot.as_ref().and_then(|b| b.model.clone());
     let bot = bot.filter(|_| plan.mode == Mode::Bot);
@@ -818,7 +773,7 @@ struct GatheredAnchors {
 }
 
 fn gather_anchors(
-    c: &Connection,
+    r: &mut impl steve_store::Read,
     viewer: &Viewer,
     plan: &Plan,
     space: &SpaceRow,
@@ -832,7 +787,7 @@ fn gather_anchors(
     if let Some(party) = &plan.sender_party_id {
         objs.push(ObjRef::new("party", party));
         let cards =
-            steve_modules::contacts::contact_cards(c, &viewer, std::slice::from_ref(party))?;
+            steve_modules::contacts::contact_cards(r, &viewer, std::slice::from_ref(party))?;
         if let Some(card) = cards.first() {
             anchors.push(format!("发送人（括号里是披露级别）：\n{}", card.text));
             anchor_ids.push(format!("party:{}", card.party_id));
@@ -850,15 +805,15 @@ fn gather_anchors(
             "这里只与用户本人对话，称呼对方为：{name}。向别人介绍用户时仍用对外称呼。"
         ));
     }
-    let summary = mems::about(
-        c,
-        &viewer,
-        &ObjRef::new("space", &space.id),
-        &MemFilter::usable(),
-    )?
-    .into_iter()
-    .filter(|m| m.kind == "summary")
-    .max_by_key(|m| m.updated);
+    let summary = steve_store::knowledge::Memories(r)
+        .about(
+            &viewer,
+            &ObjRef::new("space", &space.id),
+            &MemFilter::usable(),
+        )?
+        .into_iter()
+        .filter(|m| m.kind == "summary")
+        .max_by_key(|m| m.updated);
     if let Some(m) = summary {
         anchors.push(format!(
             "这个空间的摘要（{}）：{}",
@@ -872,7 +827,7 @@ fn gather_anchors(
         .as_ref()
         .filter(|_| plan.mode == Mode::Bot)
     {
-        let items = sender_items(c, ws, party)?;
+        let items = sender_items(r, ws, party)?;
         if !items.is_empty() {
             anchors.push(format!(
                 "发送人提过、还在进行的事项：\n{}",
@@ -881,7 +836,7 @@ fn gather_anchors(
         }
     }
     let space_ref = [ObjRef::new("space", &space.id)];
-    let rules = steve_knowledge::anchor_mems(c, &viewer, &space_ref, ANCHOR_MEMS, now)
+    let rules = steve_knowledge::anchor_mems(r, &viewer, &space_ref, ANCHOR_MEMS, now)
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .into_iter()
         .filter(|h| !anchor_ids.contains(&format!("{}:{}", h.obj_type, h.obj_id)))
@@ -923,18 +878,18 @@ struct Talk {
 /// ids, the stretches of talk ([`context::arrange`], `n` lines by people; more than [`HISTORY`]:
 /// every stretch), what came after, the drafts waiting, where and why.
 fn conversation(
-    c: &Connection,
+    r: &mut impl steve_store::Read,
     plan: &Plan,
     space: &spaces::SpaceRow,
     owner: &str,
     n: usize,
     now: i64,
 ) -> ChannelResult<Talk> {
-    let mine = context::mine(c, &plan.ws, &space.id)?;
-    let names = context::owner_names(c, &mine, owner)?;
+    let mine = context::mine(r, &plan.ws, &space.id)?;
+    let names = context::owner_names(r, &mine, owner)?;
     let clock = Clock {
         now,
-        tz: crate::im_mcp::tz_of(c, &plan.ws),
+        tz: crate::im_mcp::tz_of(r, &plan.ws),
     };
     let mode = plan.mode;
     let label = |m: &Msg| context::label(&m.name, m.side, mode, owner);
@@ -943,7 +898,7 @@ fn conversation(
     } else {
         context::SEGMENTS
     };
-    let loaded = context::load(c, &space.id, &plan.message_id, &mine, mode)?;
+    let loaded = context::load(r, &space.id, &plan.message_id, &mine, mode)?;
     let (conversation, sender, at, replied) = match &loaded {
         Some((t, before, after)) => {
             let replied = t
@@ -968,9 +923,9 @@ fn conversation(
     };
     let replied = match replied {
         Some(r) => Some(r),
-        None => messages::replied_to(c, &space.id, &plan.message_id)?,
+        None => messages::replied_to(r, &space.id, &plan.message_id)?,
     };
-    let facts = context::facts_of(c, &plan.message_id)?;
+    let facts = context::facts_of(r, &plan.message_id)?;
     let why = Why::of(&facts, plan.trigger.is_some());
     let occasion = context::occasion_block(
         &Occasion {
@@ -985,19 +940,13 @@ fn conversation(
         mode,
         &clock,
     );
-    let pending = context::pending(c, &space.id)?
+    let pending = context::pending(r, &space.id)?
         .iter()
         .map(|(at, t)| context::pending_line(*at, t, &clock))
         .collect();
-    let attachments: Value = c
-        .query_row(
-            "SELECT coalesce(attachments, '[]') FROM chan_messages WHERE id = ?",
-            [&plan.message_id],
-            |r| r.get::<_, String>(0),
-        )
-        .optional()?
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(Value::Null);
+    let attachments = steve_store::channel_message_repo::media::get(r, &plan.message_id)?
+        .map(|row| row.attachments)
+        .unwrap_or_default();
     Ok(Talk {
         occasion,
         why,
@@ -1258,9 +1207,7 @@ impl Composer {
         opts: &ComposeOpts,
     ) -> ChannelResult<Once> {
         let now = ch.now();
-        let layers = ch
-            .store()
-            .reader(|c| gather(c, ch.knowledge_store(), plan, opts, now))?;
+        let layers = gather(ch.store(), ch.knowledge_store(), plan, opts, now)?;
         let media = crate::media_agent::prepare(ch, plan, self.media.as_deref()).await?;
         let mut p = prompt(&layers);
         if !media.text.is_empty() {
@@ -1292,7 +1239,7 @@ impl Composer {
             && let Some(d) = described(&out.text)
             && let Err(e) = ch
                 .store()
-                .transaction(|tx| context::remember_described(tx, &plan.message_id, &d))
+                .write(|tx| context::remember_described(tx, &plan.message_id, &d))
         {
             tracing::warn!(message = %plan.message_id, "image description not kept: {e}");
         }

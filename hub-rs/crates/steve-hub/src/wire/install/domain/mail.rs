@@ -14,18 +14,16 @@ install! { targets(reg, _cx) [mut registry] => [registry] {
     steve_mail::config::targets::register(&mut registry);
 }}
 
-install! { install(reg, cx) [conns, declared, draft_link, kb, mail_cfg, mail_hooks, modules] => [conns, declared, kb, mail, mail_events, modules, notices] {
-    let Env { core, backend, data_dir, bus, .. } = cx.clone();
+install! { install(reg, cx) [conns, declared, draft_link, kb, mail_cfg, mail_hooks, modules] => [conns, declared, kb, mail, mail_events, modules] {
+    let Env { core, backend, data_dir, .. } = cx.clone();
     // E1/E3/E4/E5: mail, before the flow (its triage actions hold it); events bound after
     let mail_events = steve_mail::flow_events::FlowEvents::new();
-    let notices = crate::wire::signals::Notices { bus: bus.clone() };
     let mut mail = steve_mail::Mail::builder(modules.clone(), conns.clone(), mail_cfg);
     for a in &declared.mail {
         mail = mail.adapter(a.clone());
     }
     let mail = mail
         .events(Arc::new(mail_events.clone()))
-        .notify(Arc::new(notices.clone()))
         .drafts(draft_link)
         .hooks(Arc::new(hp::MailDraftHooks(core.clone())))
         .files(Arc::new(hp::HubFiles {

@@ -261,39 +261,141 @@ pub const ITEM_LIFECYCLE: &str = include_str!("../migrations/027_items.sql");
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
 /// Where a database stands: its schema and the oldest schema a build must know to open it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct Compat {
     pub schema: i64,
     pub min_reader: i64,
 }
 
+impl crate::Store {
+    /// Schema compatibility stamps from the same snapshot of the opened database.
+    pub fn schema_compat(&self) -> Result<Compat> {
+        self.sqlite_read(|c| crate::read_snapshot(c, compat))
+    }
+}
+
+/// Read the on-disk compatibility stamp, including committed WAL frames.
+pub fn inspect_schema(path: &Path) -> Result<Compat> {
+    if !path
+        .try_exists()
+        .map_err(|e| StoreError::Storage(e.to_string()))?
+    {
+        return Ok(Compat {
+            schema: 0,
+            min_reader: 0,
+        });
+    }
+    inspect_header(path, |c| {
+        let (schema, stamp) = read_schema(c)?;
+        if schema != 0 && stamp.is_none() {
+            return Err(StoreError::Storage(format!(
+                "database schema {schema} has no schema_compat stamp; nothing was changed"
+            )));
+        }
+        Ok(Compat {
+            schema,
+            min_reader: stamp.unwrap_or(0),
+        })
+    })
+}
+
+/// Identify the version of a database that will only be used to make a migrated copy.
+pub fn inspect_schema_version(path: &Path) -> Result<i64> {
+    inspect_header(path, schema_version)
+}
+
+fn inspect_header<T>(path: &Path, read: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+    let c = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    // Read the table definitions and their stamps from one snapshot.
+    let tx = c.unchecked_transaction()?;
+    read(&tx)
+}
+
+#[cfg(any(test, feature = "testkit"))]
+pub mod testkit {
+    use super::*;
+
+    /// Write the schema header of a disposable upgrade fixture.
+    pub fn set_schema(path: &Path, schema: i64, min_reader: Option<i64>) -> Result<()> {
+        let mut c = Connection::open(path)?;
+        let tx = c.transaction()?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_version(v BIGINT NOT NULL);
+             CREATE TABLE IF NOT EXISTS schema_compat(min_reader BIGINT NOT NULL);
+             DELETE FROM schema_version;
+             DELETE FROM schema_compat;",
+        )?;
+        tx.execute("INSERT INTO schema_version VALUES(?)", [schema])?;
+        if let Some(min_reader) = min_reader {
+            tx.execute("INSERT INTO schema_compat VALUES(?)", [min_reader])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn inspect_schema_reads_uncheckpointed_commits() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.sqlite3");
+    testkit::set_schema(&path, 42, Some(42)).unwrap();
+    let mut writer = Connection::open(&path).unwrap();
+    writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+    let tx = writer.transaction().unwrap();
+    tx.execute_batch("UPDATE schema_version SET v=43; UPDATE schema_compat SET min_reader=43;")
+        .unwrap();
+    assert_eq!(inspect_schema(&path).unwrap().schema, 42);
+    tx.commit().unwrap();
+
+    assert_eq!(
+        inspect_schema(&path).unwrap(),
+        Compat {
+            schema: 43,
+            min_reader: 43
+        }
+    );
+    assert!(path.with_extension("sqlite3-wal").exists());
+}
+
 /// Read [`Compat`] off a connection. A database no build stamped yet (before 0.2.14) is readable only by
 /// builds that know its schema.
 pub fn compat(c: &Connection) -> Result<Compat> {
-    let has = |t: &str| -> Result<bool> {
-        Ok(c.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
-            [t],
-            |r| r.get(0),
-        )?)
-    };
-    let schema: i64 = if has("schema_version")? {
-        c.query_row("SELECT v FROM schema_version", [], |r| r.get(0))
-            .optional()?
-            .unwrap_or(0)
-    } else {
-        0
-    };
-    let stamped: Option<i64> = if has("schema_compat")? {
+    let (schema, stamp) = read_schema(c)?;
+    Ok(Compat {
+        schema,
+        min_reader: stamp.unwrap_or(schema),
+    })
+}
+
+fn read_schema(c: &Connection) -> Result<(i64, Option<i64>)> {
+    let schema = schema_version(c)?;
+    let stamped = if has_table(c, "schema_compat")? {
         c.query_row("SELECT min_reader FROM schema_compat", [], |r| r.get(0))
             .optional()?
     } else {
         None
     };
-    Ok(Compat {
-        schema,
-        min_reader: stamped.unwrap_or(schema),
-    })
+    Ok((schema, stamped))
+}
+
+fn schema_version(c: &Connection) -> Result<i64> {
+    if !has_table(c, "schema_version")? {
+        return Ok(0);
+    }
+    Ok(
+        c.query_row("SELECT v FROM schema_version", [], |r| r.get(0))
+            .optional()?
+            .unwrap_or(0),
+    )
+}
+
+fn has_table(c: &Connection, name: &str) -> Result<bool> {
+    Ok(c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
+        [name],
+        |r| r.get(0),
+    )?)
 }
 
 /// Prepared statements kept per connection.
@@ -412,6 +514,12 @@ pub(crate) fn open_writer(path: &Path, observer: Option<MigrationObserver>) -> R
 /// pragma cannot change inside a transaction, so it is switched around it and always restored.
 pub fn migrate(c: &Connection) -> Result<()> {
     migrate_observed(c, None)
+}
+
+/// Apply pending migrations to an existing offline database, such as a scratch backup copy.
+pub fn migrate_file(path: &Path) -> Result<()> {
+    let c = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    migrate(&c)
 }
 
 /// Actual SQLite execution progress, including inside a single long backfill statement. This is
@@ -688,5 +796,20 @@ mod migration_progress_tests {
             count,
             "observer leaked beyond the failed migration"
         );
+    }
+}
+
+/// Process-wide SQLite settings, before the first connection: no memory statistics. With them on (the
+/// default), every SQLite allocation takes one global mutex, which serializes the read pool.
+pub fn tune_sqlite() {
+    // SAFETY: sqlite3_config is only valid before sqlite3_initialize; this runs first thing in main
+    let rc = unsafe {
+        rusqlite::ffi::sqlite3_config(
+            rusqlite::ffi::SQLITE_CONFIG_MEMSTATUS,
+            0 as std::os::raw::c_int,
+        )
+    };
+    if rc != rusqlite::ffi::SQLITE_OK {
+        tracing::warn!("sqlite3_config(MEMSTATUS) = {rc}");
     }
 }

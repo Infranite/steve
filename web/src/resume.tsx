@@ -1,3 +1,4 @@
+import { getSession } from "@/store"
 /* The harness's own session behind a Steve session (ST-28): its id, the command that resumes it in the harness,
  * the working directory, and whether the harness's transcript of that id is on the Hub's machine. */
 import { HarnessMark } from "@/components/harness-mark"
@@ -5,7 +6,7 @@ import { api, type RResume } from "@/api"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { st, tm, toast, type Sess } from "@/store"
+import { runtimes, tm, toast, useRuntimes, type Sess } from "@/store"
 import { CircleAlertIcon, CircleCheckIcon, CopyIcon, SquareTerminalIcon } from "lucide-react"
 import { cn } from "cn"
 import { useEffect, useState, type ReactNode } from "react"
@@ -24,7 +25,7 @@ function CopyButton({ text, what, testId }: { text: string; what: string; testId
 
 /** one line for lists: the id's head, a copy button for the whole id, and a popover with the resume details */
 export function NativeIdLine({ k, label, className }: { k: string; label?: string; className?: string }) {
-  const s = st.S[k], t = useT()
+  const s = getSession(k), t = useT()
   if (!s) return null
   const name = label ?? s.h ?? s.harness
   if (!s.nativeId) return <span className={cn("type-footnote text-tertiary", className)} data-native-id="none">{t("shell:resume.pending", { label: label ?? t("shell:resume.idLabel", { name }) })}</span>
@@ -64,14 +65,15 @@ function Check({ r, h }: { r: RResume; h: string }) {
 
 /** the shell command template to fork a session in `harness`, with `{id}` filled in */
 const forkCmd = (harness: string, id: string | null): string | null => {
-  const tpl = st.runtimes.find((x) => x.id === harness)?.fork_command
+  const tpl = runtimes().find((x) => x.id === harness)?.fork_command
   const quoted = id ? (/^[\w./:@%+-][\w./=:@%+,-]*$/.test(id) ? id : `'${id.replace(/'/g, "'\\''")}'`) : ""
   return tpl && id ? tpl.replace("{id}", () => quoted) : null
 }
 
 /** the full resume details; fetched when shown, again when the session's id or state changes */
 export function ResumeCard({ k }: { k: string }) {
-  const s = st.S[k], t = useT()
+  useRuntimes()
+  const s = getSession(k), t = useT()
   const [r, setR] = useState<RResume | null>(null), [err, setErr] = useState("")
   const nid = s?.nativeId, state = s?.st
   useEffect(() => {

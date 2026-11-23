@@ -20,14 +20,7 @@ fn skill(v: Value) -> SkillIn {
 async fn a_bots_enabled_skills_go_into_open_session() {
     let h = Hub::start().await;
     let (_id, node) = h.paired("u1").await;
-    h.store
-        .transaction::<_, steve_store::StoreError>(|tx| {
-            tx.execute_batch(
-                "INSERT OR IGNORE INTO bots (id, workspace_id, name, harness, updated) VALUES ('dev', 'default', '开发', 'claude-code', 1);",
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::hub_fixtures::seed_bots(&h.store).unwrap();
     let keys = tempfile::tempdir().unwrap();
     let vault = Vault::new(
         h.store.clone(),
@@ -57,14 +50,11 @@ async fn a_bots_enabled_skills_go_into_open_session() {
     )
     .unwrap();
     h.session("s1");
-    h.store
-        .transaction::<_, steve_store::StoreError>(|tx| {
-            tx.execute("UPDATE sessions SET bot_id = 'dev' WHERE id = 's1'", [])?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::hub_fixtures::set_sessions_bot_id_dev(&h.store).unwrap();
     let _rt = h.bind(&node, "s1");
-    let open: String = h.q("SELECT request FROM node_commands WHERE method = 'open_session'");
+    let open: String =
+        steve_store::testkit::hub::node_checks::command_request_by_method(&h.store, "open_session")
+            .unwrap();
     let open: Value = serde_json::from_str(&open).unwrap();
     assert_eq!(
         open["body"]["skills"],

@@ -67,7 +67,6 @@ Fs	steve-hub/src/web.rs	3
 Fs	steve-hub/src/wire/host_node.rs	2
 Fs	steve-hub/src/wire/local_service.rs	9
 Fs	steve-hub/src/wire/node_files.rs	1
-Fs	steve-hub/src/wire/node_tools.rs	2
 Fs	steve-install/src/common.rs	7
 Fs	steve-install/src/publish.rs	7
 Fs	steve-install/src/release.rs	16
@@ -93,6 +92,7 @@ Fs	steve-node-wire/src/identity.rs	3
 Fs	steve-research/src/attach.rs	4
 Fs	steve-store-sqlite/src/backup/offline.rs	8
 Fs	steve-store-sqlite/src/backup/plan.rs	16
+Fs	steve-store/src/contract/tool_journal.rs	2
 Harness	steve-hub/src/wire/research.rs	1
 Spawn	steve-acp/src/config.rs	1
 Spawn	steve-acp/src/managed.rs	1

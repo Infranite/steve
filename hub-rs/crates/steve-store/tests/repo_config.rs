@@ -1,6 +1,7 @@
 #![allow(clippy::unit_arg, clippy::cloned_ref_to_slice_refs)] // terse assertions in tests
 //! Workspaces, users, auth, settings, counters, bots, memories, projects, tags, devices, links.
 
+use steve_store::testkit::SqliteFixtures;
 mod common;
 
 use common::*;
@@ -91,7 +92,7 @@ fn helpers() {
 fn ensure_workspace_renames_and_carries_counter() {
     let t = fresh();
     let s = &t.store;
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         c.execute_batch("UPDATE workspaces SET name = '默认工作空间'; INSERT INTO counters VALUES ('default', 'item', 5), ('*', 'item:ST', 9);")?;
         Ok(())
     })
@@ -111,7 +112,7 @@ fn ensure_workspace_renames_and_carries_counter() {
         9,
         "carry-over keeps the larger value"
     );
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         Ok(assert_eq!(
             count(
                 c,
@@ -134,7 +135,17 @@ fn workspaces_users_auth() {
         .users()
         .create("sub-1", "Lee", Some("lee@example.com"), "owner")
         .unwrap();
-    assert!(t.events.take().is_empty(), "users.create publishes nothing");
+    assert_eq!(
+        t.events.take(),
+        vec![
+            steve_types::DomainEvent::from(steve_types::ConfigEvent::Workspace {
+                id: WS.into(),
+                ws: WS.into(),
+            })
+            .into()
+        ],
+        "the new owner makes the workspace visible to projections"
+    );
     assert_eq!(s.users().by_subject("sub-1").unwrap().unwrap().id, me);
     assert_eq!(s.users().count().unwrap(), 1);
 
@@ -150,6 +161,7 @@ fn workspaces_users_auth() {
         )
         .unwrap();
     assert_eq!((w.sort, w.item_prefix.as_str()), (1, "WK"));
+    assert!(s.settings().get(&w.id, NOTIFY_SEEN, 0_i64).unwrap() >= w.created);
     // a new workspace comes with six item categories and six delivery tags
     let ev = t.events.take();
     assert_eq!(
@@ -217,7 +229,7 @@ fn workspaces_users_auth() {
     s.auth_sessions().create(&me, "old", -1).unwrap();
     assert_eq!(s.auth_sessions().user("tok").unwrap().unwrap().id, me);
     assert!(s.auth_sessions().user("old").unwrap().is_none(), "expired");
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         Ok(assert_eq!(
             count(
                 c,
@@ -235,7 +247,7 @@ fn workspaces_users_auth() {
 
     s.audit("me", "user.create", &me, &json!({"role": "owner"}), WS)
         .unwrap();
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         Ok(assert_eq!(
             count(
                 c,
@@ -280,11 +292,13 @@ fn settings() {
         0,
         "undecodable → default"
     );
+    let mut all = s.settings().all(WS).unwrap();
+    assert!(all.remove(NOTIFY_SEEN).and_then(|at| at.as_i64()).unwrap() > 0);
     assert_eq!(
-        serde_json::to_value(s.settings().all(WS).unwrap()).unwrap(),
+        serde_json::to_value(all).unwrap(),
         json!({"archDays": "7", "handoff": {"a": 1}})
     );
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         c.execute("INSERT INTO settings VALUES ('default', 'bad', 'not json', 0)", [])?;
         Ok(assert_eq!(count(c, r#"SELECT count(*) FROM revisions WHERE object_type = 'settings' AND patch = '{"archDays":"7","handoff":{"a":1}}' AND version = 0"#), 1))
     })
@@ -355,7 +369,7 @@ fn bots_seed_create_patch() {
             })
         )]
     );
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         Ok(assert_eq!(
             count(
                 c,
@@ -399,7 +413,7 @@ fn bots_seed_create_patch() {
             })
         )]
     );
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         let (v, patch): (i64, String) = c.query_row("SELECT version, patch FROM revisions WHERE object_type = 'bot'", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
         assert_eq!(v, 2);
         assert_eq!(patch, r#"{"before":{"name":"Dev","model":null,"enabled":true},"after":{"name":"开发","model":null,"enabled":false}}"#);
@@ -428,7 +442,7 @@ fn bots_seed_create_patch() {
         "usr_none",
     );
     assert!(w2.is_err(), "membership needs a real user (foreign key)");
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         Ok(c.execute(
             "INSERT INTO workspaces (id, name, created) VALUES ('w2', 'B', 1)",
             [],
@@ -607,7 +621,7 @@ fn projects() {
     assert!(q.release.is_none() && q.archived);
     assert!(s.projects().list(WS, false).unwrap().is_empty());
     assert_eq!(s.projects().list(WS, true).unwrap().len(), 1);
-    s.with_conn(|c| Ok(assert_eq!(count(c, r#"SELECT count(*) FROM revisions WHERE object_type = 'project' AND patch = '{"release":null,"archived":true}'"#), 1))).unwrap();
+    s.fixture_write(|c| Ok(assert_eq!(count(c, r#"SELECT count(*) FROM revisions WHERE object_type = 'project' AND patch = '{"release":null,"archived":true}'"#), 1))).unwrap();
     assert_eq!(
         s.projects()
             .patch("prj_x", &ProjectPatch::default(), "me")
@@ -656,42 +670,29 @@ fn tags() {
     s.tags()
         .set_item(&i2, &[b.id.clone(), feat.clone()])
         .unwrap();
-    assert_eq!(
-        t.events.take(),
-        vec![
-            steve_types::BusEvent::Domain(steve_types::DomainEvent::Work(
-                steve_types::WorkEvent::Item {
-                    id: {
-                        let value: String = i1.clone();
-                        steve_types::ItemId::from(value)
-                    },
-                    ws: steve_types::WorkspaceId::from(steve_store::WS)
-                }
-            )),
-            steve_types::BusEvent::Domain(steve_types::DomainEvent::Work(
-                steve_types::WorkEvent::Item {
-                    id: {
-                        let value: String = i2.clone();
-                        steve_types::ItemId::from(value)
-                    },
-                    ws: steve_types::WorkspaceId::from(steve_store::WS)
-                }
-            ))
-        ]
-    );
+    let item_changed = |id: &str| {
+        steve_types::BusEvent::from(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::Item {
+                id: id.into(),
+                ws: WS.into(),
+            },
+        ))
+    };
+    assert_eq!(t.events.take(), [item_changed(&i1), item_changed(&i2)]);
     assert_eq!(s.tags().uses(WS).unwrap()[&b.id], 2);
     s.tags().merge(&b.id, &a.id).unwrap();
     assert_eq!(
         t.events.take(),
-        vec![steve_types::BusEvent::Domain(
-            steve_types::DomainEvent::Config(steve_types::ConfigEvent::Tag {
-                id: {
-                    let value: String = a.id.clone();
-                    steve_types::TagId::from(value)
+        [
+            item_changed(&i1),
+            item_changed(&i2),
+            steve_types::BusEvent::from(steve_types::DomainEvent::from(
+                steve_types::ConfigEvent::Tag {
+                    id: a.id.clone().into(),
+                    ws: WS.into()
                 },
-                ws: steve_types::WorkspaceId::from(steve_store::WS)
-            })
-        )]
+            )),
+        ],
     );
     assert!(s.tags().get(&b.id).unwrap().is_none());
     assert_eq!(s.tags().of_item(&i2).unwrap(), [feat.clone(), a.id.clone()]);

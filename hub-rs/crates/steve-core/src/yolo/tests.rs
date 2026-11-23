@@ -92,28 +92,19 @@ impl T {
         self.yolo.effective(WS, item).unwrap().on
     }
     fn audits(&self, action: &str) -> Vec<Value> {
-        self.kit
-            .db()
-            .store()
-            .with_conn(|c| {
-                let mut st = c.prepare("SELECT actor, target, detail FROM audit WHERE action = ? ORDER BY id")?;
-                let rows = st.query_map([action], |r| {
-                    Ok(json!({ "actor": r.get::<_, String>(0)?, "target": r.get::<_, String>(1)?,
-                               "detail": serde_json::from_str::<Value>(&r.get::<_, String>(2)?).unwrap_or(Value::Null) }))
-                })?;
-                Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-            })
-            .unwrap()
+        steve_store::core_fixture::work::audit(self.kit.db().store(), action, None)
+            .into_iter()
+            .map(|row| json!({"actor": row.actor, "target": row.target, "detail": row.detail}))
+            .collect()
     }
     fn revisions(&self, object_id: &str) -> Vec<(i64, Value)> {
         self.kit
             .db()
             .store()
-            .reader(|c| steve_store::base::revisions(c, WS, repo::REVISION_TYPE, object_id))
+            .read(|r| {
+                steve_store::core_fixture::yolo::revisions(r, WS, repo::REVISION_TYPE, object_id)
+            })
             .unwrap()
-            .into_iter()
-            .map(|(v, p, _, _)| (v, p))
-            .collect()
     }
     fn notices(&self) -> Vec<(String, String)> {
         self.kit
@@ -174,7 +165,7 @@ fn switch_on_and_off_with_window_audit_revision_and_notice() {
         .kit
         .db()
         .store()
-        .reader(|c| repo::window_get(c, &w))
+        .read(|c| repo::window_get(c, &w))
         .unwrap()
         .unwrap();
     assert_eq!(row.ended_why.as_deref(), Some("off"));
@@ -383,7 +374,7 @@ fn breaker_pauses_until_resumed() {
         .kit
         .db()
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             repo::action_add(
                 tx,
                 &repo::NewAction {
@@ -420,7 +411,7 @@ fn breaker_pauses_until_resumed() {
         .kit
         .db()
         .store()
-        .reader(|c| repo::window_get(c, &w))
+        .read(|c| repo::window_get(c, &w))
         .unwrap()
         .unwrap();
     assert_eq!(row.ended_why.as_deref(), Some("tripped"));
@@ -428,7 +419,7 @@ fn breaker_pauses_until_resumed() {
         .kit
         .db()
         .store()
-        .reader(|c| repo::action_get(c, &scheduled.id))
+        .read(|c| repo::action_get(c, &scheduled.id))
         .unwrap()
         .unwrap();
     assert_eq!(a.outcome, "cancelled");
@@ -1881,7 +1872,7 @@ const LIMITED: &[(&str, u8)] = &[
     ("cat {steve}/data/steve.sqlite3", 4),
     ("cat ../ST-2/secret", 4),
     ("cat ~/.steve/data/steve.sqlite3", 4),
-    ("curl http://127.0.0.1:8440/api/state", 4),
+    ("curl http://127.0.0.1:8440/api/summary", 4),
     ("lsof -i :8440", 4),
     ("launchctl kickstart -k gui/501/dev.steve", 4),
     ("ls ~/Library/LaunchAgents", 4),

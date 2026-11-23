@@ -37,15 +37,7 @@ pub struct Outside {
 pub fn identify(store: &Store, token: &str, ws: Option<&str>) -> Option<Outside> {
     let (user, tok) = store.access().token_user(token).ok().flatten()?;
     let mine: Vec<String> = store
-        .reader(|c| {
-            let mut st = c.prepare(
-                "SELECT workspace_id FROM workspace_members WHERE user_id = ? ORDER BY created, workspace_id",
-            )?;
-            let v = st
-                .query_map([&user.id], |r| r.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok::<_, steve_store::StoreError>(v)
-        })
+        .read(|r| steve_store::Members::new(r).workspace_ids(&user.id))
         .ok()?;
     let ws = match ws.filter(|w| !w.is_empty()) {
         Some(w) => mine.iter().find(|m| *m == w)?.clone(),
@@ -388,7 +380,7 @@ fn resolve_team(store: &Store, ws: &str, args: &Value) -> Result<Option<String>,
             let wanted = text_arg(args, "team")
                 .ok_or("Invalid arguments: team must be a non-empty string.")?;
             let teams = store
-                .reader(|c| steve_store::bot_dispatch::teams(c, ws))
+                .read(|c| steve_store::bot_dispatch::teams(c, ws))
                 .map_err(|e| e.to_string())?;
             if wanted == steve_store::bot_dispatch::NO_TEAM || teams.iter().any(|t| t.id == wanted)
             {
@@ -416,16 +408,7 @@ async fn resolve_bot(store: &Store, ws: &str, args: &Value) -> Result<Option<Str
         Some(b) => {
             let (store, ws, b) = (store.clone(), ws.to_string(), b.to_string());
             let found = tokio::task::spawn_blocking(move || {
-                store.reader(|c| {
-                    let mut st = c.prepare(
-                        "SELECT b.id, b.name FROM bots b WHERE b.deleted = 0 AND b.enabled = 1 AND (b.workspace_id = ?1
-                           OR EXISTS (SELECT 1 FROM bot_workspaces w WHERE w.bot_id = b.id AND w.workspace_id = ?1)) ORDER BY b.name",
-                    )?;
-                    let v = st
-                        .query_map([&ws], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
-                        .collect::<Result<Vec<_>, _>>()?;
-                    Ok::<_, steve_store::StoreError>(v)
-                })
+                store.read(|r| steve_store::BotRows(r).enabled_names(&ws))
             })
             .await
             .map_err(|e| e.to_string())?

@@ -168,7 +168,7 @@ impl ToolService {
                 .filter(|row| row.workspace_id == ws && row.status != "ended")
                 .ok_or_else(|| "Connector session no longer exists".to_string())?;
             store
-                .reader(|c| {
+                .read(|c| {
                     let (session_ws, principal) = super::principal::of_session(c, &current.id)?
                         .filter(|(session_ws, _)| session_ws == &ws)
                         .ok_or(steve_modules::ApiError::Unauthenticated)?;
@@ -258,11 +258,11 @@ impl ToolService {
             s.bot_id.clone().unwrap_or_default(),
         );
         let found = tokio::task::spawn_blocking(move || {
-            store.reader(|c| {
+            store.read(|c| {
                 Ok::<_, steve_store::StoreError>((
-                    steve_store::caps::tools::pins(c, &bot)?,
-                    steve_store::caps::a2a::enabled_for_session(c, &sid)?,
-                    steve_store::caps::mcp::enabled_for_session(c, &sid)?,
+                    steve_store::caps::tools::ToolRows(c).pins(&bot)?,
+                    steve_store::caps::a2a::Agents(c).enabled_for_session(&sid)?,
+                    steve_store::caps::mcp::Servers(c).enabled_for_session(&sid)?,
                 ))
             })
         })
@@ -419,9 +419,10 @@ impl ToolService {
                 Source::Mcp { id, .. } => {
                     let (store, id, sid) = (self.mcp.store.clone(), id.clone(), s.id.clone());
                     let server = tokio::task::spawn_blocking(move || {
-                        store.reader(|c| {
+                        store.read(|c| {
                             Ok::<_, steve_store::StoreError>(
-                                steve_store::caps::mcp::enabled_for_session(c, &sid)?
+                                steve_store::caps::mcp::Servers(c)
+                                    .enabled_for_session(&sid)?
                                     .into_iter()
                                     .find(|server| server.id == id),
                             )
@@ -454,8 +455,8 @@ impl ToolService {
         tokio::task::spawn_blocking(move || {
             let names: Vec<&str> = tools.iter().map(String::as_str).collect();
             let day = steve_store::caps::tools::day_of(steve_store::now());
-            if let Err(e) = store.transaction(|tx| {
-                steve_store::caps::tools::record(tx, &bot, day, &names, searched, called)
+            if let Err(e) = store.write(|tx| {
+                steve_store::caps::tools::ToolRows(tx).record(&bot, day, &names, searched, called)
             }) {
                 tracing::warn!(bot, "tool usage: {e}");
             }
@@ -529,19 +530,34 @@ pub struct CatalogContext {
 impl steve_modules::context::PromptContext for CatalogContext {
     fn session(
         &self,
-        c: &rusqlite::Connection,
+        store: &steve_store::Store,
         _ws: &str,
         item: &steve_store::Item,
     ) -> Option<String> {
+        store
+            .read(|c| Ok::<_, steve_store::StoreError>(self.session_summary(c, item)))
+            .ok()
+            .flatten()
+    }
+}
+
+impl CatalogContext {
+    fn session_summary(
+        &self,
+        c: &mut impl steve_store::Read,
+        item: &steve_store::Item,
+    ) -> Option<String> {
         let bot = item.bot_id.as_deref().unwrap_or("steve");
-        let pins = steve_store::caps::tools::pins(c, bot).ok()?;
-        let servers: Vec<steve_store::caps::mcp::Server> = steve_store::caps::mcp::of_bot(c, bot)
+        let pins = steve_store::caps::tools::ToolRows(c).pins(bot).ok()?;
+        let servers: Vec<steve_store::caps::mcp::Server> = steve_store::caps::mcp::Servers(c)
+            .of_bot(bot)
             .ok()?
             .into_iter()
             .filter(|(_, on)| *on)
             .map(|(x, _)| x)
             .collect();
-        let agents: Vec<(String, String)> = steve_store::caps::a2a::of_bot(c, bot)
+        let agents: Vec<(String, String)> = steve_store::caps::a2a::Agents(c)
+            .of_bot(bot)
             .ok()?
             .into_iter()
             .filter(|(_, on)| *on)
@@ -581,7 +597,7 @@ impl steve_modules::context::PromptContext for CatalogContext {
             listed.push(p.target.clone());
         }
         for p in pins.iter().filter(|p| p.kind == "a2a") {
-            if let Ok(Some(a)) = steve_store::caps::a2a::get(c, &p.target) {
+            if let Ok(Some(a)) = steve_store::caps::a2a::Agents(c).get(&p.target) {
                 listed.push(format!(
                     "{}{}",
                     steve_modules::caps::a2a::TOOL_PREFIX,

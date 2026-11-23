@@ -830,14 +830,9 @@ fn check_theme(file: &Path) -> Result<()> {
 }
 
 fn connection_exists(modules: &Modules, id: &str) -> Result<bool, steve_store::StoreError> {
-    use rusqlite::OptionalExtension;
-    modules.store.reader(|c| {
-        Ok(
-            c.query_row("SELECT 1 FROM connections WHERE id = ?", [id], |_| Ok(()))
-                .optional()?
-                .is_some(),
-        )
-    })
+    modules
+        .store
+        .read(|r| steve_store::connections::exists(r, id))
 }
 
 #[cfg(test)]

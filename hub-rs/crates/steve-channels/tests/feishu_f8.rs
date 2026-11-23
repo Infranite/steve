@@ -32,6 +32,7 @@ use steve_modules::clock::Clock;
 use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
+use steve_store::channel_message_repo::fixtures;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -187,15 +188,22 @@ async fn setup() -> H {
         .strip_prefix("/#/accounts/")
         .unwrap_or_else(|| panic!("not a success: {loc}"))
         .to_string();
-    let self_con = str_of(
-        &q(
-            &env,
-            "SELECT id FROM connections WHERE account_id = ?",
-            &self_acc,
-        )[0][0],
+    let source = env
+        .store()
+        .read(|r| {
+            steve_store::connections::Connections::new(r)
+                .live_for_adapter(steve_channels::adapters::feishu::auth::USER_ADAPTER)
+        })
+        .unwrap()
+        .into_iter()
+        .find(|c| c.account_id == self_acc)
+        .expect("self connection");
+    let self_con = source.id;
+    assert!(
+        source.caps.iter().any(|cap| cap == "msg.receive"),
+        "{:?}",
+        source.caps
     );
-    let caps = str_of(&q(&env, "SELECT caps FROM connections WHERE id = ?", &self_con)[0][0]);
-    assert!(caps.contains("msg.receive"), "{caps}");
     H {
         env,
         _keys: keys,
@@ -208,49 +216,9 @@ async fn setup() -> H {
     }
 }
 
-fn q(env: &TestEnv, sql: &str, p: &str) -> Vec<Vec<Value>> {
-    let (sql, p) = (sql.to_string(), p.to_string());
-    env.store()
-        .reader(move |c| {
-            let mut st = c.prepare(&sql)?;
-            let n = st.column_count();
-            let rows = st
-                .query_map([&p], |r| {
-                    (0..n)
-                        .map(|i| {
-                            Ok(match r.get_ref(i)? {
-                                rusqlite::types::ValueRef::Null => Value::Null,
-                                rusqlite::types::ValueRef::Integer(x) => json!(x),
-                                rusqlite::types::ValueRef::Text(t) => {
-                                    json!(String::from_utf8_lossy(t))
-                                }
-                                _ => Value::Null,
-                            })
-                        })
-                        .collect::<rusqlite::Result<Vec<_>>>()
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok::<_, steve_store::StoreError>(rows)
-        })
-        .expect("query")
-}
-
-fn str_of(v: &Value) -> String {
-    v.as_str().unwrap_or_default().to_string()
-}
-
-fn count(h: &H, sql: &str, p: &str) -> i64 {
-    q(&h.env, sql, p)[0][0].as_i64().expect("count")
-}
-
 /// Messages stored in the self connection's spaces.
-fn self_messages(h: &H) -> Vec<Vec<Value>> {
-    q(
-        &h.env,
-        "SELECT m.external_id, s.external_id, s.kind, m.text FROM chan_messages m JOIN spaces s ON s.id = m.space_id
-          WHERE s.connection_id = ? AND m.direction = 'in' ORDER BY m.created, m.external_id",
-        &h.self_con,
-    )
+fn self_messages(h: &H) -> Vec<fixtures::InboundMessage> {
+    fixtures::inbound_for_connection(h.env.store(), &h.self_con).unwrap()
 }
 
 /// A new message in the fake, `secs` seconds after the newest one there.
@@ -326,7 +294,7 @@ async fn first_round_sets_cursors_without_backfill_then_a_dm_lands_within_a_roun
     let k = h
         .env
         .store()
-        .reader(|c| self_poll::cursor(c, &h.self_con, ids::USER_P2P_CHAT))
+        .read(|r| steve_store::channel_positions::poll(r, &h.self_con, ids::USER_P2P_CHAT))
         .expect("read")
         .expect("cursor");
     assert_eq!(k.cursor, Some(1_761_899_600_000));
@@ -369,42 +337,28 @@ async fn first_round_sets_cursors_without_backfill_then_a_dm_lands_within_a_roun
     assert_eq!((r.new_messages, r.new_dms), (1, 1), "{r:?}");
     let rows = self_messages(&h);
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0][0], json!("om_f8dm1"));
-    assert_eq!(rows[0][2], json!("dm"));
-    assert_eq!(rows[0][3], json!("合同改好了吗？"));
+    assert_eq!(rows[0].external_id.as_deref(), Some("om_f8dm1"));
+    assert_eq!(rows[0].kind, "dm");
+    assert_eq!(rows[0].text.as_deref(), Some("合同改好了吗？"));
     // the signal: im.dm, to be handled (the “私聊你” rule), via=poll
-    let ev = q(
-        &h.env,
-        "SELECT type, payload, outcome_label FROM ext_events WHERE external_id = ?",
-        "om_f8dm1",
-    );
+    let ev = fixtures::signals(h.env.store(), "om_f8dm1").unwrap();
     assert_eq!(ev.len(), 1, "{ev:?}");
-    assert_eq!(ev[0][0], json!("im.dm"));
-    let payload: Value = serde_json::from_str(&str_of(&ev[0][1])).expect("payload");
-    assert_eq!(payload["via"], json!("poll"));
+    assert_eq!(ev[0].kind, "im.dm");
+    assert_eq!(
+        ev[0].payload.as_ref().expect("payload")["via"],
+        json!("poll")
+    );
     // the “私聊你 → 起草” rule (C3): a pending draft as you, waiting for your approval; nothing sent
-    assert_eq!(ev[0][2], json!("等你确认回复"));
-    let draft = q(
-        &h.env,
-        "SELECT m.status, m.on_behalf, d.kind, d.question FROM chan_messages m JOIN spaces s ON s.id = m.space_id
-           JOIN decisions d ON d.id = m.decision_id WHERE s.connection_id = ? AND m.direction = 'out'",
-        &h.self_con,
-    );
+    assert_eq!(ev[0].outcome_label, "等你确认回复");
+    let draft = fixtures::approvals_for_connection(h.env.store(), &h.self_con).unwrap();
     assert_eq!(draft.len(), 1, "{draft:?}");
-    assert_eq!(draft[0][0], json!("draft"));
-    assert_eq!(draft[0][1], json!("none"));
-    assert_eq!(draft[0][2], json!("approve"));
-    assert!(
-        str_of(&draft[0][3]).starts_with("以你本人发到「"),
-        "{draft:?}"
-    );
+    assert_eq!(draft[0].status, "draft");
+    assert_eq!(draft[0].on_behalf, "none");
+    assert_eq!(draft[0].kind, "approve");
+    assert!(draft[0].question.starts_with("以你本人发到「"), "{draft:?}");
     // the sender is Bob, named after the p2p chat
-    let sender = q(
-        &h.env,
-        "SELECT coalesce(nullif(a.display_name, ''), a.handle_display) FROM chan_messages m JOIN accounts a ON a.id = m.sender_account_id WHERE m.external_id = ?",
-        "om_f8dm1",
-    );
-    assert_eq!(sender[0][0], json!("张伟"));
+    let sender = fixtures::matching_messages(h.env.store(), "om_f8dm1").unwrap();
+    assert_eq!(sender[0].sender_name.as_deref(), Some("张伟"));
 
     // the fast pace for five minutes
     let now = h.env.clock.now();
@@ -441,18 +395,14 @@ async fn your_own_messages_are_recorded_not_handled() {
     );
     let r = p.round().await;
     assert_eq!((r.new_messages, r.new_dms), (1, 0), "{r:?}");
-    let ev = q(
-        &h.env,
-        "SELECT outcome_label FROM ext_events WHERE external_id = ?",
-        "om_f8mine",
+    let ev = fixtures::signals(h.env.store(), "om_f8mine").unwrap();
+    assert_eq!(ev[0].outcome_label, steve_channels::inbound::LABEL_OWN);
+    let messages = fixtures::matching_messages(h.env.store(), "om_f8mine").unwrap();
+    assert_eq!(
+        messages[0].sender_account_id.as_deref(),
+        Some(h.self_acc.as_str()),
+        "your messages are yours"
     );
-    assert_eq!(ev[0][0], json!(steve_channels::inbound::LABEL_OWN));
-    let acc = q(
-        &h.env,
-        "SELECT sender_account_id FROM chan_messages WHERE external_id = ?",
-        "om_f8mine",
-    );
-    assert_eq!(acc[0][0], json!(h.self_acc), "your messages are yours");
     assert_eq!(p.burst_until(), 0, "your own message does not speed up");
 }
 
@@ -531,11 +481,9 @@ async fn the_long_connections_part_is_not_processed_twice() {
         "the bot's group is not read"
     );
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM chan_messages WHERE external_id = ?",
-            "om_f8tobot"
-        ),
+        fixtures::matching_messages(h.env.store(), "om_f8tobot")
+            .unwrap()
+            .len(),
         1
     );
 }
@@ -545,18 +493,12 @@ async fn the_long_connections_part_is_not_processed_twice() {
 #[tokio::test]
 async fn a_group_the_bot_only_hears_mentions_in_is_still_read() {
     let h = setup().await;
-    h.env
-        .modules
-        .store
-        .with_conn(|c| {
-            let n = c.execute(
-                "UPDATE connections SET config = json_set(config, '$.permissions', json('[{\"scope\":\"im:message.group_msg\",\"status\":\"missing\"}]')) WHERE id = ?",
-                [&h.bot_con],
-            )?;
-            assert_eq!(n, 1);
-            Ok(())
-        })
-        .unwrap();
+    fixtures::set_connection_permissions(
+        h.env.store(),
+        &h.bot_con,
+        &json!([{"scope":"im:message.group_msg","status":"missing"}]),
+    )
+    .unwrap();
     let mut p = poller(&h);
     p.round().await;
     // someone @-mentions the bot: the long connection gets that one
@@ -594,11 +536,9 @@ async fn a_group_the_bot_only_hears_mentions_in_is_still_read() {
     assert_eq!((r.by_bot, r.new_messages), (1, 1), "{r:?}");
     for id in ["om_f8at", "om_f8plain"] {
         assert_eq!(
-            count(
-                &h,
-                "SELECT count(*) FROM chan_messages WHERE external_id = ?",
-                id
-            ),
+            fixtures::matching_messages(h.env.store(), id)
+                .unwrap()
+                .len(),
             1,
             "{id}"
         );
@@ -647,18 +587,7 @@ async fn a_rate_limit_ends_the_round_and_carries_the_rest_over() {
 }
 
 fn set_setting(h: &H, key: &str, value: &str) {
-    let (k, v) = (key.to_string(), json!(value).to_string());
-    h.env
-        .store()
-        .with_conn(move |c| {
-            c.execute(
-                "INSERT INTO settings (workspace_id, key, value, updated) VALUES (?1, ?2, ?3, 1)
-                 ON CONFLICT (workspace_id, key) DO UPDATE SET value = excluded.value",
-                rusqlite::params![WS, k, v],
-            )?;
-            Ok(())
-        })
-        .expect("setting");
+    fixtures::set_workspace_text(h.env.store(), WS, key, value).expect("setting");
 }
 
 #[tokio::test]
@@ -728,19 +657,18 @@ async fn topic_replies_are_read_through_their_thread() {
     assert_eq!(r.new_messages, 1, "{r:?}");
     let rows = self_messages(&h);
     assert_eq!(
-        rows.iter().map(|r| str_of(&r[0])).collect::<Vec<_>>(),
+        rows.iter()
+            .map(|r| r.external_id.as_deref().expect("message ID"))
+            .collect::<Vec<_>>(),
         ["om_f8root", "om_f8reply"]
     );
     assert!(
-        rows.iter().all(|r| r[1] == json!(ids::NO_BOT_GROUP)),
+        rows.iter().all(|r| r.chat_id == ids::NO_BOT_GROUP),
         "the thread's messages are the chat's"
     );
-    let thr = q(
-        &h.env,
-        "SELECT thread_key, reply_to FROM chan_messages WHERE external_id = ?",
-        "om_f8reply",
-    );
-    assert_eq!(thr[0], vec![json!("omt_f8"), json!("om_f8root")]);
+    let thr = fixtures::matching_messages(h.env.store(), "om_f8reply").unwrap();
+    assert_eq!(thr[0].thread_key.as_deref(), Some("omt_f8"));
+    assert_eq!(thr[0].reply_to.as_deref(), Some("om_f8root"));
 }
 
 #[tokio::test]
@@ -753,7 +681,7 @@ async fn an_unreadable_group_is_recorded_and_left_alone() {
     let k = h
         .env
         .store()
-        .reader(|c| self_poll::cursor(c, &h.self_con, ids::NO_BOT_GROUP))
+        .read(|r| steve_store::channel_positions::poll(r, &h.self_con, ids::NO_BOT_GROUP))
         .expect("read")
         .expect("cursor");
     assert!(k.error.is_some() && k.cursor.is_none(), "{k:?}");
@@ -782,11 +710,11 @@ async fn pollers_start_for_connections_with_receive_and_stop() {
     steve_runtime::testkit::eventually_sync(
         "all self-poll cursors finish their first round",
         || {
-            if count(
-                &h,
-                "SELECT count(*) FROM chan_cursors WHERE connection_id = ?",
-                &h.self_con,
-            ) >= MY_CHATS as i64
+            if h.ch
+                .store()
+                .read(|r| steve_store::channel_positions::count(r, &h.self_con))
+                .unwrap()
+                >= MY_CHATS as i64
             {
                 true
             } else {
@@ -809,14 +737,7 @@ async fn your_account_reads_a_chats_history_on_demand() {
     use steve_channels::history::HistoryRead;
     let h = setup().await;
     let cx = h.ch.connections().cx(WS, &h.self_con).expect("cx");
-    let stored = |h: &H| {
-        q(
-            &h.env,
-            "SELECT count(*) FROM chan_messages WHERE id <> ?",
-            "-",
-        )[0][0]
-            .clone()
-    };
+    let stored = |h: &H| fixtures::total_messages(h.env.store()).unwrap();
     let before = stored(&h);
     let got = HistoryRead::read(
         h.user.as_ref(),

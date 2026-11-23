@@ -9,7 +9,6 @@ use crate::runtime::Check;
 use crate::testkit::Kit;
 use crate::{CreateItem, ItemAction, Tier};
 use async_trait::async_trait;
-use rusqlite::Connection;
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -19,7 +18,7 @@ use steve_modules::decisions::{DecisionCx, DecisionHandler};
 use steve_modules::hooks::{ItemHooks, Takeover};
 use steve_modules::{ApiError, ApiResult, Gateway, Modules, Registry};
 use steve_store::base::Viewer;
-use steve_store::{Decision, Tx};
+use steve_store::{Decision, W};
 
 type Log = Arc<Mutex<Vec<String>>>;
 
@@ -307,14 +306,14 @@ struct Ctx {
 }
 
 impl PromptContext for Ctx {
-    fn session(&self, _: &Connection, ws: &str, item: &Item) -> Option<String> {
+    fn session(&self, _: &steve_store::Store, ws: &str, item: &Item) -> Option<String> {
         self.seen
             .lock()
             .unwrap()
             .push(format!("session {ws} {}", item.id));
         Some(self.session.into())
     }
-    fn chat(&self, _: &Connection, ws: &str, v: &Viewer, text: &str) -> Option<ChatCtx> {
+    fn chat(&self, _: &steve_store::Store, ws: &str, v: &Viewer, text: &str) -> Option<ChatCtx> {
         self.seen
             .lock()
             .unwrap()
@@ -326,7 +325,7 @@ impl PromptContext for Ctx {
     }
     fn chat_done(
         &self,
-        _: &Connection,
+        _: &steve_store::Store,
         _: &str,
         message_id: &str,
         answer: &str,
@@ -497,7 +496,12 @@ struct Undo {
 fn recovery_keeps_only_opted_in_cards_on_completed_items() {
     struct ResultCard;
     impl DecisionHandler for ResultCard {
-        fn resolve(&self, _: &Tx, _: &DecisionCx, _: &Decision) -> ApiResult<serde_json::Value> {
+        fn resolve(
+            &self,
+            _: &mut W<'_>,
+            _: &DecisionCx,
+            _: &Decision,
+        ) -> ApiResult<serde_json::Value> {
             Ok(json!({}))
         }
 
@@ -524,15 +528,12 @@ fn recovery_keeps_only_opted_in_cards_on_completed_items() {
 }
 
 impl DecisionHandler for Undo {
-    fn resolve(&self, _: &Tx, _: &DecisionCx, _: &Decision) -> ApiResult<serde_json::Value> {
+    fn resolve(&self, _: &mut W<'_>, _: &DecisionCx, _: &Decision) -> ApiResult<serde_json::Value> {
         Ok(json!({}))
     }
-    fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
+    fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
         /* the handler sees the decision still resolved, inside a write transaction */
-        let status: String =
-            tx.query_row("SELECT status FROM decisions WHERE id = ?", [&d.id], |r| {
-                r.get(0)
-            })?;
+        let status = steve_store::DecisionRows(tx).get(&d.id)?.unwrap().status;
         self.log
             .lock()
             .unwrap()
@@ -554,10 +555,15 @@ fn undo_asks_the_module_of_the_decision_first_and_its_refusal_changes_nothing() 
     });
     struct Shared(Arc<Undo>);
     impl DecisionHandler for Shared {
-        fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<serde_json::Value> {
+        fn resolve(
+            &self,
+            tx: &mut W<'_>,
+            cx: &DecisionCx,
+            d: &Decision,
+        ) -> ApiResult<serde_json::Value> {
             self.0.resolve(tx, cx, d)
         }
-        fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
+        fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
             self.0.before_undo(tx, d)
         }
     }
@@ -761,15 +767,11 @@ async fn after_a_crash_before_the_hooks_were_recorded_they_are_asked_before_the_
     let i = k.db().item(&x.id).unwrap().unwrap();
     let mut c = crate::cycle::closing_of(&i).unwrap();
     c.accepted = true;
-    k.db()
-        .exec(
-            "UPDATE items SET closing = ? WHERE id = ?",
-            &[
-                &serde_json::to_string(&c).unwrap() as &dyn rusqlite::ToSql,
-                &x.id,
-            ],
-        )
-        .unwrap();
+    steve_store::core_fixture::item(
+        k.db().store(),
+        &x.id,
+        steve_store::core_fixture::ItemState::Closing(&serde_json::to_string(&c).unwrap()),
+    );
     k.core.recover().unwrap();
     assert_eq!(
         k.core.lifecycle_tick().unwrap(),

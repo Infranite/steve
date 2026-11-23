@@ -3,6 +3,7 @@
 //! and the last reply) once; the example yields the right change lines, applies and undoes. Plus
 //! the thread routes `archive`, `read` and `to-knowledge`. Fake IMAP/SMTP, a scripted gateway, temp dirs.
 
+use steve_store::mail::fixtures as db;
 mod support;
 
 use std::sync::{Arc, Mutex};
@@ -12,10 +13,11 @@ use steve_knowledge::extract::PROMPT_HEAD;
 use steve_knowledge::{Knowledge, Purpose, Query, retrieve};
 use steve_mail::config::targets::{KIND, OP_PATCH};
 use steve_mail::knowledge::ThreadLoader;
-use steve_mail::{ImapAdapter, Mail, nodes, repo};
+use steve_mail::{ImapAdapter, Mail, nodes};
 use steve_modules::changes::{self, Origin};
 use steve_modules::testkit::{ME, OTHER, WS, WS2, call, caller};
 use steve_store::base::{Level, Viewer};
+use steve_store::mail as repo;
 use support::*;
 
 struct E6 {
@@ -62,8 +64,8 @@ fn fixtures() -> [&'static [u8]; 3] {
 fn search(h: &H, user: &str, text: &str) -> Vec<steve_knowledge::Hit> {
     h.env
         .store()
-        .reader(|c| {
-            let viewer = Viewer::load(c, WS, user)?;
+        .read(|c| {
+            let viewer = Viewer::bare(WS, user);
             let q = Query::new(
                 &steve_knowledge::port::SqliteStore,
                 &viewer,
@@ -114,27 +116,11 @@ async fn a_thread_added_to_the_knowledge_base_is_searchable_for_reasoning_only()
 
     // adding again keeps one document
     assert_eq!(e.mail.to_knowledge(&me(), &e.thread).unwrap(), doc);
-    let n: i64 =
-        e.h.env
-            .store()
-            .reader(|c| {
-                Ok::<_, steve_store::StoreError>(c.query_row(
-                    "SELECT COUNT(*) FROM kb_docs WHERE ref = ?",
-                    [&e.thread],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap();
+    let n: i64 = db::doc_count(e.h.env.store(), &e.thread);
     assert_eq!(n, 1);
 
     // the index queue re-reads it through ThreadLoader, not the attachment loader
-    e.h.env
-        .store()
-        .with_conn(|c| {
-            c.execute("UPDATE kb_docs SET sha256 = '' WHERE id = ?", [&doc])?;
-            Ok(())
-        })
-        .unwrap();
+    db::invalidate_doc(e.h.env.store(), &doc).unwrap();
     let kb = Knowledge::with_loaders(
         |_| {},
         vec![
@@ -160,20 +146,7 @@ async fn a_thread_added_to_the_knowledge_base_is_searchable_for_reasoning_only()
 const CANDIDATES: &str = r#"{"items":[{"kind":"fact","text":"预算审批分三步：部门负责人、财务、CFO","about":[],"level":"public","evidence":"三步：部门负责人、财务、CFO","dup_of":null,"conflicts":null}]}"#;
 
 fn candidates(h: &H) -> Vec<(String, String, String, String, String)> {
-    h.env
-        .store()
-        .reader(|c| {
-            let mut st = c.prepare(
-                "SELECT m.text, m.level, m.status, mc.origin, mc.origin_id FROM mems m JOIN mem_candidates mc ON mc.mem_id = m.id ORDER BY m.rowid",
-            )?;
-            let v = st
-                .query_map([], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok::<_, steve_store::StoreError>(v)
-        })
-        .unwrap()
+    db::candidate_mems(h.env.store())
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -183,11 +156,8 @@ async fn a_done_thread_submits_candidates_once() {
     let msg = e.h.by_subject(&e.conn, "预算审批流程").id;
     e.h.env
         .store()
-        .transaction(|tx| -> Result<(), steve_mail::MailError> {
-            tx.execute(
-                "INSERT INTO items (id, workspace_id, no, kind, title, status, stage, created, updated) VALUES ('ST-7', ?, 7, 'task', '回复预算审批', 'open', '', 1, 1)",
-                [WS],
-            )?;
+        .write(|tx| -> Result<(), steve_mail::MailError> {
+            db::item(e.h.env.store(), WS, "ST-7", 7, "回复预算审批")?;
             nodes::link_item(tx, WS, "ST-7", &msg, &e.thread)
         })
         .unwrap();
@@ -196,7 +166,7 @@ async fn a_done_thread_submits_candidates_once() {
     let t =
         e.h.env
             .store()
-            .reader(|c| repo::thread(c, &e.thread))
+            .read(|c| repo::thread(c, &e.thread))
             .unwrap()
             .unwrap();
     assert_eq!(t.state, "done");
@@ -234,15 +204,9 @@ async fn a_failed_archive_on_done_still_submits_candidates() {
     let msg = e.h.by_subject(&e.conn, "预算审批流程").id;
     e.h.env
         .store()
-        .transaction(|tx| -> Result<(), steve_mail::MailError> {
-            tx.execute(
-                "INSERT INTO items (id, workspace_id, no, kind, title, status, stage, created, updated) VALUES ('ST-7', ?, 7, 'task', '回复预算审批', 'open', '', 1, 1)",
-                [WS],
-            )?;
-            tx.execute(
-                "UPDATE mail_account_settings SET archive_on_done = 1 WHERE connection_id = ?",
-                [&e.conn],
-            )?;
+        .write(|tx| -> Result<(), steve_mail::MailError> {
+            db::item(e.h.env.store(), WS, "ST-7", 7, "回复预算审批")?;
+            db::enable_archive(e.h.env.store(), &e.conn)?;
             nodes::link_item(tx, WS, "ST-7", &msg, &e.thread)
         })
         .unwrap();
@@ -318,7 +282,7 @@ async fn the_section_10_example_drafts_applies_and_undoes() {
     let ops: Vec<Value> =
         e.h.env
             .store()
-            .reader(|c| steve_store::base::changesets::get(c, &p.id))
+            .read(|r| steve_store::base::changesets::ChangeSets(r).get(&p.id))
             .unwrap()
             .unwrap()
             .ops;

@@ -30,7 +30,6 @@ pub mod ics;
 pub mod merge;
 pub mod profile;
 pub mod query;
-pub mod repo;
 pub mod sources;
 pub mod sync;
 pub mod tools;

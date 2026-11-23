@@ -7,12 +7,14 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use serde_json::json;
-use steve_store::{Store, Tx, base, now};
+use steve_store::{
+    Store, W, now,
+    vault_keys::{ACTIVE, RETIRED, RETIRING, VaultKey, VaultKeys},
+};
 
 use super::crypto::{self, fingerprint, recovery_code, unwrap_dek, wrap_dek};
 use super::error::{VaultError, VaultResult};
 use super::keystore::{KeyStore, KeyStoreError, account_name};
-use super::repo::{self, ACTIVE, RETIRED, RETIRING};
 use super::secret::{Dek, Kek, RecoveryCode};
 
 /// The vault service. Cheap to clone; one per Hub process (the KEK cache lives here).
@@ -87,8 +89,8 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// Fails with `Rotating` if `version` is no longer the active one. Slice V2 calls it inside the
 /// transaction that inserts an item wrapped with [`Vault::new_item_key`], so an item can't land on a
 /// version a concurrent rotation is about to retire.
-pub fn ensure_active(tx: &Tx, ws: &str, version: i64) -> VaultResult<()> {
-    match repo::active_version(tx, ws)? {
+pub fn ensure_active(tx: &mut W<'_>, ws: &str, version: i64) -> VaultResult<()> {
+    match VaultKeys(tx).active_version(ws)? {
         Some(v) if v == version => Ok(()),
         Some(_) => Err(VaultError::Rotating),
         None => Err(VaultError::NotInitialized),
@@ -99,7 +101,7 @@ pub fn ensure_active(tx: &Tx, ws: &str, version: i64) -> VaultResult<()> {
 /// opening each with its version's KEK from `old`. Returns how many moved and the items whose key did
 /// not open (they keep their old version).
 fn rewrap_all(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     old: &HashMap<i64, Arc<Kek>>,
     new: &Kek,
@@ -107,7 +109,7 @@ fn rewrap_all(
 ) -> VaultResult<(usize, Vec<String>)> {
     let mut failed = Vec::new();
     let mut moved = 0;
-    for it in repo::items_to_rewrap(tx, ws, target, &[], i64::MAX as usize)? {
+    for it in VaultKeys(tx).items_to_rewrap(ws, target)? {
         let dek = old
             .get(&it.kek_version)
             .ok_or(crypto::CryptoError::Open)
@@ -115,7 +117,7 @@ fn rewrap_all(
         match dek {
             Ok(dek) => {
                 let w = wrap_dek(new, ws, &it.item_id, target, &dek)?;
-                repo::set_item_dek(tx, &it.item_id, &w, target)?;
+                VaultKeys(tx).set_item_dek(&it.item_id, &w, target)?;
                 moved += 1;
             }
             Err(_) => {
@@ -135,6 +137,14 @@ impl Vault {
             cache: Mutex::default(),
             lifecycle: Mutex::new(()),
         }))
+    }
+
+    pub(super) fn read<T>(
+        &self,
+        f: impl FnOnce(&mut steve_store::R<'_>) -> VaultResult<T>,
+    ) -> VaultResult<T> {
+        self.store()
+            .read::<_, steve_store::StoreError>(|r| Ok(f(r)))?
     }
 
     pub fn store(&self) -> &Store {
@@ -161,7 +171,7 @@ impl Vault {
     }
 
     pub fn status(&self, ws: &str) -> VaultResult<Status> {
-        let rows = self.0.store.reader(|c| repo::keys(c, ws))?;
+        let rows = self.0.store.read(|r| VaultKeys(r).keys(ws))?;
         let rotating = rows.iter().any(|r| r.status == RETIRING);
         let Some(active) = rows.iter().rev().find(|r| r.status == ACTIVE) else {
             return Ok(Status {
@@ -180,14 +190,10 @@ impl Vault {
             Err(VaultError::Denied) => Keychain::Denied,
             Err(e) => return Err(e),
         };
-        let passkeys = self.0.store.reader(|c| {
-            c.query_row(
-                "SELECT count(*) FROM passkeys WHERE workspace_id = ?",
-                [ws],
-                |r| r.get::<_, i64>(0),
-            )
-            .map_err(VaultError::from)
-        })?;
+        let passkeys = self
+            .0
+            .store
+            .read(|r| steve_store::PasskeyRows(r).count(ws))?;
         Ok(Status {
             initialized: true,
             keychain,
@@ -202,14 +208,13 @@ impl Vault {
     /// recovery code (show once, never store).
     pub fn init(&self, ws: &str, actor: &str) -> VaultResult<RecoveryCode> {
         let _g = lock(&self.0.lifecycle);
-        let rows = self.0.store.reader(|c| repo::keys(c, ws))?;
+        let rows = self.0.store.read(|r| VaultKeys(r).keys(ws))?;
         if !rows.is_empty() {
             return Err(VaultError::AlreadyInitialized);
         }
         let kek = self.create_key(ws, 1, |tx, fp, _| {
-            repo::insert_key(tx, ws, 1, &account_name(ws, 1), fp, ACTIVE, now())?;
-            base::audit(
-                tx,
+            VaultKeys(tx).insert(ws, 1, &account_name(ws, 1), fp, ACTIVE, now())?;
+            tx.audit(
                 ws,
                 actor,
                 "vault.init",
@@ -226,7 +231,7 @@ impl Vault {
     /// version in `vault_keys`. Returns that version.
     pub fn recover(&self, ws: &str, code: &str, actor: &str) -> VaultResult<i64> {
         let _g = lock(&self.0.lifecycle);
-        let rows = self.0.store.reader(|c| repo::keys(c, ws))?;
+        let rows = self.0.store.read(|r| VaultKeys(r).keys(ws))?;
         if rows.is_empty() {
             return Err(VaultError::NotInitialized);
         }
@@ -244,9 +249,8 @@ impl Vault {
             }
             Err(e) => return Err(e.into()),
         }
-        self.0.store.transaction(|tx| {
-            base::audit(
-                tx,
+        self.0.store.write(|tx| {
+            tx.audit(
                 ws,
                 actor,
                 "vault.recover",
@@ -265,7 +269,7 @@ impl Vault {
     /// data key that does not open refuses the whole rotation, and nothing changes.
     pub fn rotate_now(&self, ws: &str, actor: &str) -> VaultResult<Rotation> {
         let _g = lock(&self.0.lifecycle);
-        let rows = self.0.store.reader(|c| repo::keys(c, ws))?;
+        let rows = self.0.store.read(|r| VaultKeys(r).keys(ws))?;
         let active = rows
             .iter()
             .rev()
@@ -274,7 +278,7 @@ impl Vault {
             .version;
         // every version that may still wrap a data key must be readable (an old background rotation
         // may have left one `retiring`)
-        let live: Vec<&repo::KeyRow> = rows.iter().filter(|r| r.status != RETIRED).collect();
+        let live: Vec<&VaultKey> = rows.iter().filter(|r| r.status != RETIRED).collect();
         let mut old: HashMap<i64, Arc<Kek>> = HashMap::new();
         for r in &live {
             old.insert(r.version, self.kek(ws, r.version)?);
@@ -282,9 +286,9 @@ impl Vault {
         let next = rows.iter().map(|r| r.version).max().unwrap_or(0) + 1;
         let kek = self.create_key(ws, next, |tx, fp, new| {
             for r in &live {
-                repo::set_key_status(tx, ws, r.version, RETIRED, Some(now()))?;
+                VaultKeys(tx).set_status(ws, r.version, RETIRED, Some(now()))?;
             }
-            repo::insert_key(tx, ws, next, &account_name(ws, next), fp, ACTIVE, now())?;
+            VaultKeys(tx).insert(ws, next, &account_name(ws, next), fp, ACTIVE, now())?;
             let (rewrapped, failed) = rewrap_all(tx, ws, &old, new, next)?;
             if !failed.is_empty() {
                 return Err(VaultError::Api(crate::ApiError::rule(steve_i18n::t!(
@@ -292,8 +296,7 @@ impl Vault {
                     n = failed.len()
                 ))));
             }
-            base::audit(
-                tx,
+            tx.audit(
                 ws,
                 actor,
                 "vault.rotate",
@@ -304,10 +307,10 @@ impl Vault {
         })?;
         tracing::info!(ws, from = active, to = next, "vault key rotated");
         // committed: the old entries (and any a crash left of earlier ones) leave the key store
-        let retired: Vec<repo::KeyRow> = self
+        let retired: Vec<VaultKey> = self
             .0
             .store
-            .reader(|c| repo::keys(c, ws))?
+            .read(|r| VaultKeys(r).keys(ws))?
             .into_iter()
             .filter(|r| r.status == RETIRED)
             .collect();
@@ -329,7 +332,7 @@ impl Vault {
     /// whose keys can't be read now (a locked keychain) is left for the next start.
     pub fn tidy_keys(&self) -> VaultResult<()> {
         let _g = lock(&self.0.lifecycle);
-        for ws in self.0.store.reader(repo::rotating_workspaces)? {
+        for ws in self.0.store.read(|r| VaultKeys(r).rotating_workspaces())? {
             if let Err(e) = self.finish_retiring(&ws) {
                 tracing::warn!(ws, error = %e, "vault: an interrupted rotation stays for the next start");
             }
@@ -338,26 +341,25 @@ impl Vault {
     }
 
     fn finish_retiring(&self, ws: &str) -> VaultResult<()> {
-        let rows = self.0.store.reader(|c| repo::keys(c, ws))?;
+        let rows = self.0.store.read(|r| VaultKeys(r).keys(ws))?;
         let active = rows
             .iter()
             .rev()
             .find(|r| r.status == ACTIVE)
             .ok_or(VaultError::NotInitialized)?
             .version;
-        let retiring: Vec<&repo::KeyRow> = rows.iter().filter(|r| r.status == RETIRING).collect();
+        let retiring: Vec<&VaultKey> = rows.iter().filter(|r| r.status == RETIRING).collect();
         let new = self.kek(ws, active)?;
         let mut old: HashMap<i64, Arc<Kek>> = HashMap::new();
         for r in &retiring {
             old.insert(r.version, self.kek(ws, r.version)?);
         }
-        let failed = self.0.store.transaction(|tx| {
+        let failed = self.0.store.write(|tx| {
             let (rewrapped, failed) = rewrap_all(tx, ws, &old, &new, active)?;
             if failed.is_empty() {
                 for r in &retiring {
-                    repo::set_key_status(tx, ws, r.version, RETIRED, Some(now()))?;
-                    base::audit(
-                        tx,
+                    VaultKeys(tx).set_status(ws, r.version, RETIRED, Some(now()))?;
+                    tx.audit(
                         ws,
                         "steve",
                         "vault.retire",
@@ -377,14 +379,14 @@ impl Vault {
             Ok::<_, VaultError>(failed)
         })?;
         if failed.is_empty() {
-            let retired: Vec<repo::KeyRow> = retiring.into_iter().cloned().collect();
+            let retired: Vec<VaultKey> = retiring.into_iter().cloned().collect();
             self.forget(ws, &retired);
         }
         Ok(())
     }
 
     /// Removes retired versions from the key store and the cache (a missing entry is fine).
-    fn forget(&self, ws: &str, retired: &[repo::KeyRow]) {
+    fn forget(&self, ws: &str, retired: &[VaultKey]) {
         for r in retired {
             if let Err(e) = self.0.keys.delete(&r.keychain_account) {
                 tracing::warn!(ws, version = r.version, error = %e, "vault: retired key not deleted from key store");
@@ -398,7 +400,7 @@ impl Vault {
         let version = self
             .0
             .store
-            .reader(|c| repo::active_version(c, ws))?
+            .read(|r| VaultKeys(r).active_version(ws))?
             .ok_or(VaultError::NotInitialized)?;
         let kek = self.kek(ws, version)?;
         let dek = Dek::generate()?;
@@ -427,7 +429,7 @@ impl Vault {
         if let Some(k) = lock(&self.0.cache).get(&(ws.to_string(), version)) {
             return Ok(k.clone());
         }
-        let rows = self.0.store.reader(|c| repo::keys(c, ws))?;
+        let rows = self.0.store.read(|r| VaultKeys(r).keys(ws))?;
         let row = rows
             .iter()
             .find(|r| r.version == version && r.status != RETIRED)
@@ -457,7 +459,7 @@ impl Vault {
         &self,
         ws: &str,
         version: i64,
-        record: impl FnOnce(&Tx, &str, &Kek) -> VaultResult<()>,
+        record: impl FnOnce(&mut W<'_>, &str, &Kek) -> VaultResult<()>,
     ) -> VaultResult<Kek> {
         let account = account_name(ws, version);
         match self.0.keys.get(&account) {
@@ -468,7 +470,7 @@ impl Vault {
         let kek = Kek::generate()?;
         self.0.keys.set(&account, &kek)?;
         let fp = fingerprint(&kek);
-        let res = self.0.store.transaction(|tx| record(tx, &fp, &kek));
+        let res = self.0.store.write(|tx| record(tx, &fp, &kek));
         if let Err(e) = res {
             if let Err(d) = self.0.keys.delete(&account) {
                 tracing::warn!(ws, version, error = %d, "vault: could not remove an unrecorded key");

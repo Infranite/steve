@@ -128,7 +128,7 @@ pub async fn new_code_until(
         "pairing_created"
     };
     tokio::task::spawn_blocking(move || {
-        store.transaction(|tx| {
+        store.write(|tx| {
             steve_store::nodes::create_pairing_as(tx, &hash, &me, t, expires, confirmed)?;
             steve_store::nodes::audit(tx, None, Some(&me), what, None, t)
         })
@@ -211,7 +211,7 @@ pub async fn claim(
     let fingerprint = identity::fingerprint(&pubkey);
     let (store, hash, id) = (svc.store.clone(), code_hash(&code), node_id.clone());
     let owner = blocking(move || {
-        store.transaction(|tx| {
+        store.write(|tx| {
             let n = steve_store::nodes::NewNode {
                 node_id: &id,
                 name: &name,
@@ -220,12 +220,9 @@ pub async fn claim(
             };
             // a key that is already paired is refused like a bad code (by the key itself: a
             // fingerprint stored before M4 is shorter)
-            let exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM nodes WHERE pubkey=? OR fingerprint=?)",
-                rusqlite::params![&pubkey[..], &fingerprint],
-                |r| r.get(0),
-            )?;
-            if exists {
+            if store.read(|r| {
+                steve_store::node_directory::registered_key(r, &pubkey, Some(&fingerprint))
+            })? {
                 return Ok(None);
             }
             let owner = steve_store::nodes::claim_pairing(tx, &hash, &n, now())?;
@@ -293,18 +290,8 @@ pub async fn rotate(
         return denied();
     };
     let (store, node) = (svc.store.clone(), b.node_id.clone());
-    let old = blocking(move || {
-        store.reader(|c| {
-            use rusqlite::OptionalExtension;
-            Ok(c.query_row(
-                "SELECT pubkey FROM nodes WHERE node_id=? AND state IN ('active','paused')",
-                [&node],
-                |r| r.get::<_, Vec<u8>>(0),
-            )
-            .optional()?)
-        })
-    })
-    .await;
+    let old =
+        blocking(move || store.read(|r| steve_store::node_directory::link_key(r, &node))).await;
     let old = match old {
         Ok(Some(k)) => match <[u8; 32]>::try_from(k.as_slice()) {
             Ok(k) => k,
@@ -323,24 +310,13 @@ pub async fn rotate(
     let fingerprint = identity::fingerprint(&new);
     let (store, node, fp) = (svc.store.clone(), b.node_id.clone(), fingerprint.clone());
     let swapped = blocking(move || {
-        store.transaction(|tx| {
-            let taken: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM nodes WHERE pubkey=?)",
-                [&new[..]],
-                |r| r.get(0),
-            )?;
-            if taken {
-                return Ok(false);
-            }
-            // only where the old key is still the current one: two rotations never both land
-            let n = tx.execute(
-                "UPDATE nodes SET pubkey=?, fingerprint=? WHERE node_id=? AND pubkey=? AND state IN ('active','paused')",
-                rusqlite::params![&new[..], fp, node, &old[..]],
-            )?;
-            if n == 1 {
+        store.write(|tx| {
+            let swapped = store
+                .write(|w| steve_store::node_directory::rotate_key(w, &node, &old, &new, &fp))?;
+            if swapped {
                 steve_store::nodes::audit(tx, Some(&node), None, "key_rotated", Some(&fp), now())?;
             }
-            Ok(n == 1)
+            Ok(swapped)
         })
     })
     .await;
@@ -393,7 +369,7 @@ pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Respon
     let store = svc.store.clone();
     // each with how many of its turns run and wait, against its `max_sessions`
     let rows = match blocking(move || {
-        store.reader(|c| {
+        store.read(|c| {
             let default = steve_store::nodes::upgrade_default(c)?;
             let rows = steve_store::nodes::list_for_owner(c, &caller.me)?
                 .into_iter()
@@ -509,7 +485,7 @@ pub async fn act(
     let detail_policy = policy.clone();
     let action2 = action.clone();
     let done = blocking(move || {
-        store.transaction(|tx| {
+        store.write(|tx| {
             use steve_store::nodes::*;
             let ok = match action2.as_str() {
                 "confirm" => set_state(tx, &node, &me, "pending", "active")?,

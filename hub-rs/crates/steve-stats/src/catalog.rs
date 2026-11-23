@@ -8,45 +8,14 @@
 //! A trailing release date (`-20250929`) is an alias of the id without it.
 
 use chrono_tz::Tz;
-use rusqlite::{Connection, OptionalExtension, params};
-use serde::Serialize;
 use serde_json::Value;
-use steve_store::Result;
 
 /// The `price_sync.source` of Models.dev.
 pub const SOURCE: &str = "models.dev";
 /// Where the catalog is fetched from.
 pub const URL: &str = "https://models.dev/api.json";
 
-/// One priced model of the catalog.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct Entry {
-    pub provider: String,
-    /// Lower-cased.
-    pub model: String,
-    pub name: String,
-    pub rates: Rates,
-}
-
-/// Prices of one catalog version, USD per million tokens.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
-pub struct Rates {
-    pub input: f64,
-    pub output: f64,
-    /// `None` = not listed: such tokens are priced as input (no discount assumed).
-    pub cache_read: Option<f64>,
-    pub cache_write: Option<f64>,
-    /// The catalog also lists long-context or tier prices; only the base price is applied.
-    pub tiered: bool,
-}
-
-/// A price as it was from `since` (ms; 0 = the first sync that listed it).
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct Version {
-    pub since: i64,
-    pub name: String,
-    pub rates: Rates,
-}
+pub use steve_store::statistics::{Entry, Rates, SyncState, Version};
 
 fn price(v: Option<&Value>) -> Option<f64> {
     v?.as_f64().filter(|x| x.is_finite() && *x >= 0.0)
@@ -95,136 +64,12 @@ pub fn parse(body: &[u8]) -> std::result::Result<Vec<Entry>, String> {
     Ok(out)
 }
 
-fn latest(c: &Connection, provider: &str, model: &str) -> Result<Option<Version>> {
-    Ok(c.prepare_cached(
-        "SELECT since, name, input, output, cache_read, cache_write, tiered FROM price_catalog
-         WHERE provider = ? AND model = ? ORDER BY since DESC LIMIT 1",
-    )?
-    .query_row([provider, model], row)
-    .optional()?)
-}
-
-fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Version> {
-    Ok(Version {
-        since: r.get(0)?,
-        name: r.get(1)?,
-        rates: Rates {
-            input: r.get(2)?,
-            output: r.get(3)?,
-            cache_read: r.get(4)?,
-            cache_write: r.get(5)?,
-            tiered: r.get(6)?,
-        },
-    })
-}
-
-/// Stores `entries` as seen at `now`, in the caller's transaction: a model seen for the first time gets
-/// `since` 0, a changed price a new row from `now`; unchanged ones and models no longer listed are left
-/// as they are. Returns how many rows were written.
-pub fn save(c: &Connection, entries: &[Entry], now: i64) -> Result<usize> {
-    let mut written = 0;
-    for e in entries {
-        let since = match latest(c, &e.provider, &e.model)? {
-            Some(v) if v.rates == e.rates => continue,
-            Some(_) => now,
-            None => 0,
-        };
-        let r = &e.rates;
-        written += c
-            .prepare_cached(
-                "INSERT OR REPLACE INTO price_catalog (provider, model, since, input, output, cache_read, cache_write, tiered, name)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            )?
-            .execute(params![
-                e.provider,
-                e.model,
-                since,
-                r.input,
-                r.output,
-                r.cache_read,
-                r.cache_write,
-                r.tiered,
-                e.name
-            ])?;
-    }
-    Ok(written)
-}
-
-/// Every version of one catalog model, oldest first.
-pub fn versions(c: &Connection, provider: &str, model: &str) -> Result<Vec<Version>> {
-    Ok(c.prepare_cached(
-        "SELECT since, name, input, output, cache_read, cache_write, tiered FROM price_catalog
-         WHERE provider = ? AND model = ? ORDER BY since",
-    )?
-    .query_map([provider, model], row)?
-    .collect::<rusqlite::Result<_>>()?)
-}
-
 /// The version that prices `day` (`YYYY-MM-DD` in `tz`): the newest one seen before that day. A change
 /// seen on a day applies from the next one, so a day's estimate does not move once it is over.
 pub fn version_for<'a>(vs: &'a [Version], day: &str, tz: Option<Tz>) -> Option<&'a Version> {
     vs.iter()
         .rfind(|v| v.since == 0 || crate::day(v.since, tz).as_str() < day)
         .or(vs.first())
-}
-
-/// The state of a source's sync.
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
-pub struct SyncState {
-    /// The last sync that worked (ms).
-    pub synced: Option<i64>,
-    /// The last try (ms).
-    pub tried: Option<i64>,
-    /// Why the last try failed; `None` when it worked.
-    pub error: Option<String>,
-    #[serde(skip)]
-    pub etag: Option<String>,
-    /// Priced models in the last sync.
-    pub models: i64,
-}
-
-pub fn state(c: &Connection, source: &str) -> Result<SyncState> {
-    Ok(c.prepare_cached(
-        "SELECT synced, tried, error, etag, models FROM price_sync WHERE source = ?",
-    )?
-    .query_row([source], |r| {
-        Ok(SyncState {
-            synced: r.get(0)?,
-            tried: r.get(1)?,
-            error: r.get(2)?,
-            etag: r.get(3)?,
-            models: r.get(4)?,
-        })
-    })
-    .optional()?
-    .unwrap_or_default())
-}
-
-/// Records a sync that worked: `models` priced models (`None` = unchanged since the last one, a `304`).
-pub fn record_ok(
-    c: &Connection,
-    source: &str,
-    now: i64,
-    etag: Option<&str>,
-    models: Option<usize>,
-) -> Result<()> {
-    c.execute(
-        "INSERT INTO price_sync (source, synced, tried, error, etag, models) VALUES (?1, ?2, ?2, NULL, ?3, COALESCE(?4, 0))
-         ON CONFLICT (source) DO UPDATE SET synced = ?2, tried = ?2, error = NULL,
-           etag = COALESCE(?3, etag), models = COALESCE(?4, models)",
-        params![source, now, etag, models.map(|n| n as i64)],
-    )?;
-    Ok(())
-}
-
-/// Records a failed try; the prices of the last sync stay in use.
-pub fn record_err(c: &Connection, source: &str, now: i64, error: &str) -> Result<()> {
-    c.execute(
-        "INSERT INTO price_sync (source, tried, error) VALUES (?1, ?2, ?3)
-         ON CONFLICT (source) DO UPDATE SET tried = ?2, error = ?3",
-        params![source, now, error],
-    )?;
-    Ok(())
 }
 
 /// The lab a model id belongs to, by its family prefix; the first is tried first.
@@ -438,12 +283,14 @@ mod tests {
     fn real_catalog() {
         let path = std::env::var("STEVE_MODELS_DEV_JSON").expect("STEVE_MODELS_DEV_JSON");
         let e = parse(&std::fs::read(path).unwrap()).unwrap();
-        let c = Connection::open_in_memory().unwrap();
-        c.execute_batch(include_str!("../../steve-store/migrations/032.sql"))
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            steve_store::Store::open(dir.path().join("catalog.sqlite3"), steve_store::NoPublisher)
+                .unwrap();
+        store
+            .write(|w| steve_store::statistics::Catalog(w).save(&e, 1))
             .unwrap();
-        save(&c, &e, 1).unwrap();
         println!("{} priced models", e.len());
-        let book = crate::PriceBook::new(vec![]).with_catalog(&c, None);
         for m in [
             "claude-opus-5-5",
             "claude-sonnet-5-5[1m]",
@@ -461,7 +308,13 @@ mod tests {
             "claude-sonnet-4-5-20250929",
             "my-local-model",
         ] {
-            let q = book.quote(m, "2026-11-05");
+            let q = store
+                .read::<_, steve_store::StoreError>(|c| {
+                    Ok(crate::PriceBook::new(vec![])
+                        .with_catalog(c, None, [m])?
+                        .quote(m, "2026-11-05"))
+                })
+                .unwrap();
             println!(
                 "{m:32} {:?}",
                 q.map(|q| (
@@ -479,42 +332,53 @@ mod tests {
 
     #[test]
     fn save_keeps_versions_and_state() {
-        let c = Connection::open_in_memory().unwrap();
-        c.execute_batch(include_str!("../../steve-store/migrations/032.sql"))
-            .unwrap();
+        use steve_store::statistics::Catalog;
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            steve_store::Store::open(dir.path().join("catalog.sqlite3"), steve_store::NoPublisher)
+                .unwrap();
+        let save = |entries: &[Entry], at| store.write(|w| Catalog(w).save(entries, at)).unwrap();
+        let versions = |provider: &str, model: &str| {
+            store
+                .read(|r| Catalog(r).versions(provider, model))
+                .unwrap()
+        };
+        let state = || store.read(|r| Catalog(r).state(SOURCE)).unwrap();
         let mut e = parse(SAMPLE.as_bytes()).unwrap();
-        assert_eq!(save(&c, &e, 1_000).unwrap(), 3);
-        assert_eq!(
-            save(&c, &e, 2_000).unwrap(),
-            0,
-            "unchanged prices write nothing"
-        );
+        assert_eq!(save(&e, 1_000), 3);
+        assert_eq!(save(&e, 2_000), 0, "unchanged prices write nothing");
         e[0].rates.input = 9.0;
         let opus = (e[0].provider.clone(), e[0].model.clone());
         e.truncate(1);
-        assert_eq!(save(&c, &e, 3_000).unwrap(), 1);
-        let vs = versions(&c, &opus.0, &opus.1).unwrap();
+        assert_eq!(save(&e, 3_000), 1);
+        let vs = versions(&opus.0, &opus.1);
         assert_eq!(
             vs.iter().map(|v| v.since).collect::<Vec<_>>(),
             vec![0, 3_000]
         );
         assert_eq!(
-            versions(&c, "openai", "gpt-5").unwrap().len(),
+            versions("openai", "gpt-5").len(),
             1,
             "an unlisted model keeps its price"
         );
 
-        assert_eq!(state(&c, SOURCE).unwrap(), SyncState::default());
-        record_ok(&c, SOURCE, 10, Some("\"e1\""), Some(3)).unwrap();
-        record_err(&c, SOURCE, 20, "超时").unwrap();
-        let s = state(&c, SOURCE).unwrap();
+        assert_eq!(state(), SyncState::default());
+        store
+            .write(|w| Catalog(w).record_ok(SOURCE, 10, Some("\"e1\""), Some(3)))
+            .unwrap();
+        store
+            .write(|w| Catalog(w).record_err(SOURCE, 20, "超时"))
+            .unwrap();
+        let s = state();
         assert_eq!(
             (s.synced, s.tried, s.error.as_deref(), s.models),
             (Some(10), Some(20), Some("超时"), 3)
         );
         assert_eq!(s.etag.as_deref(), Some("\"e1\""));
-        record_ok(&c, SOURCE, 30, None, None).unwrap();
-        let s = state(&c, SOURCE).unwrap();
+        store
+            .write(|w| Catalog(w).record_ok(SOURCE, 30, None, None))
+            .unwrap();
+        let s = state();
         assert_eq!(
             (s.synced, s.error, s.models, s.etag.as_deref()),
             (Some(30), None, 3, Some("\"e1\""))

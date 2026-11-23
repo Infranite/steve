@@ -3,6 +3,7 @@
 //! `backfill`), each invalidation with its reason code; a session's first tool call sets
 //! `sessions.first_tool_at`, and later ones leave it.
 
+use steve_store::testkit::SqliteFixtures;
 mod common;
 
 use common::fresh;
@@ -89,7 +90,7 @@ fn the_first_tool_call_of_a_session_is_kept() {
         .unwrap()
         .id;
     let first = || -> Option<i64> {
-        s.with_conn(|c| {
+        s.fixture_write(|c| {
             Ok(c.query_row(
                 "SELECT first_tool_at FROM sessions WHERE id = ?",
                 [&id],
@@ -109,7 +110,7 @@ fn the_first_tool_call_of_a_session_is_kept() {
         .unwrap();
     let at = first().expect("set by the first tool call");
     let ts: i64 = s
-        .with_conn(|c| {
+        .fixture_write(|c| {
             Ok(c.query_row(
                 "SELECT ts FROM events WHERE session_id = ? AND kind = 'tool_call'",
                 [&id],

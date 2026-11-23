@@ -61,13 +61,7 @@ impl Registrations {
                 .map(|()| PollControl::Wait),
             Poll::Switch(b) => {
                 let now = self.now();
-                self.tx(|tx| {
-                    tx.execute(
-                        "UPDATE chan_app_registrations SET brand = ?, switched = 1, updated = ? WHERE id = ? AND state = ?",
-                        params![b.code(), now, id, state::PENDING],
-                    )?;
-                    Ok(())
-                })?;
+                self.write(|w| Ok(repo::switch_brand(w, id, b.code(), now)?))?;
                 tracing::info!(registration = %id, brand = b.code(), "feishu app registration: tenant on another brand");
                 Ok(PollControl::Switched)
             }

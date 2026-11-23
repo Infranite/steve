@@ -2,6 +2,7 @@
 use rusqlite::params;
 use serde_json::{Value, json};
 use steve_node_api::{Epoch, Measurement, Money, Tokens, UsageReport, UsageScope};
+use steve_store::testkit::SqliteFixtures;
 use steve_store::{
     NoPublisher, Store, StoreError, WS, db,
     gateway_ledger::{CallBegin, CallFinish},
@@ -15,14 +16,14 @@ fn open(path: &std::path::Path) -> Store {
     s
 }
 fn sql(s: &Store, text: &str) {
-    s.transaction::<_, StoreError>(|tx| {
-        tx.execute_batch(text)?;
+    s.write::<_, StoreError>(|tx| {
+        steve_store::testkit::sqlite_writer(tx).execute_batch(text)?;
         Ok(())
     })
     .unwrap();
 }
 fn n(s: &Store, text: &str) -> i64 {
-    s.reader::<_, StoreError>(|c| Ok(c.query_row(text, [], |r| r.get(0))?))
+    s.fixture_read::<_, StoreError>(|c| Ok(c.query_row(text, [], |r| r.get(0))?))
         .unwrap()
 }
 fn begin(s: &Store, call: &str) {
@@ -103,7 +104,7 @@ fn end(s: &Store, call: &str, finish: bool) {
     assert!(result.is_err());
 }
 fn bill(s: &Store, call: &str) -> Value {
-    s.reader::<_,StoreError>(|c|Ok(c.query_row("SELECT input,cost_reported,ok,json_extract(detail,'$.pending'),attempts,duration_ms,json_extract(detail,'$.failures'),day FROM usage_records WHERE live_call_id=?",[call],|r|Ok(json!({"input":r.get::<_,i64>(0)?,"cost":r.get::<_,f64>(1)?,"ok":r.get::<_,bool>(2)?,"pending":r.get::<_,bool>(3)?,"attempts":r.get::<_,i64>(4)?,"duration":r.get::<_,i64>(5)?,"failures":r.get::<_,Option<String>>(6)?,"day":r.get::<_,String>(7)?})))?)).unwrap()
+    s.fixture_read::<_,StoreError>(|c|Ok(c.query_row("SELECT input,cost_reported,ok,json_extract(detail,'$.pending'),attempts,duration_ms,json_extract(detail,'$.failures'),day FROM usage_records WHERE live_call_id=?",[call],|r|Ok(json!({"input":r.get::<_,i64>(0)?,"cost":r.get::<_,f64>(1)?,"ok":r.get::<_,bool>(2)?,"pending":r.get::<_,bool>(3)?,"attempts":r.get::<_,i64>(4)?,"duration":r.get::<_,i64>(5)?,"failures":r.get::<_,Option<String>>(6)?,"day":r.get::<_,String>(7)?})))?)).unwrap()
 }
 fn settled(s: &Store, call: &str, finish: bool) {
     assert_eq!(
@@ -388,7 +389,7 @@ fn migration_seeds_old_dirty_calls_and_preserves_fifo_across_reopen() {
     outage(&s, None);
     assert!(s.stats().gateway_apply_local(1).is_err());
     let head = s
-        .reader::<_, StoreError>(|c| {
+        .fixture_read::<_, StoreError>(|c| {
             Ok(c.query_row(
                 "SELECT call_id FROM gateway_result_ready ORDER BY ticket LIMIT 1",
                 [],

@@ -13,14 +13,12 @@
 //!   user token; the tenant sets how long).
 
 use reqwest::Method;
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_modules::accounts::connections::ConnCx;
 use steve_modules::accounts::connections::oauth::random_token;
 
 use super::client::{FeishuClient, FeishuError, data};
 use super::ratelimit::{self, Limiter};
-use crate::ChannelResult;
 use crate::channel::{OutContent, ReactionKind, SendTarget, SpaceKind};
 
 /// The longest text sent, in characters.
@@ -86,23 +84,6 @@ pub fn receive_id_type(id: &str) -> &'static str {
 /// when the message is in a topic already (its `thread_key` is a Feishu thread id, `omt_…`).
 pub fn reply_in_thread(kind: SpaceKind, thread_key: Option<&str>) -> bool {
     kind == SpaceKind::Channel || thread_key.is_some_and(|t| t.starts_with("omt_"))
-}
-
-/// The id to @ an account by under bot connection `conn`: its `open_id` there (C6 puts it into
-/// [`OutContent::at`] for a group reply). `None` when the bot never saw one.
-pub fn at_handle(
-    c: &Connection,
-    ws: &str,
-    conn: &str,
-    account: &str,
-) -> ChannelResult<Option<String>> {
-    Ok(c.query_row(
-        "SELECT handle FROM account_handles WHERE workspace_id = ? AND account_id = ? AND handle LIKE 'ou\\_%' ESCAPE '\\'
-           ORDER BY connection_id = ? DESC, created LIMIT 1",
-        params![ws, account, conn],
-        |r| r.get(0),
-    )
-    .optional()?)
 }
 
 /// An id that goes into a path.

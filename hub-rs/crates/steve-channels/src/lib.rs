@@ -148,7 +148,7 @@ pub mod reply_eval;
 pub mod respond;
 pub mod rules;
 pub mod seen;
-pub mod send_state;
+pub use steve_store::channel_sends as send_state;
 mod service;
 pub mod space_decisions;
 pub mod spaces;

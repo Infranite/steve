@@ -7,7 +7,7 @@ import { HubUpdateNotice } from "../../src/shell"
 import { draftKey, readDraft, saveDraft } from "../../src/composer-draft"
 st.version = "fixture-hub-version"
 st.webVersion = ""
-// ?update=<version>: what /api/state says the Hub found on its own
+// ?update=<version>: what /api/shell says the Hub found on its own
 const found = new URLSearchParams(location.search).get("update")
 st.update = found ? { version: found, owner: true } : null
 function Fixture() {

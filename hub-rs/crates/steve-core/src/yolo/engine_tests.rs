@@ -119,19 +119,19 @@ impl T {
     pub(super) fn actions(&self, decision: &str) -> Vec<repo::ActionRow> {
         self.yolo
             .store()
-            .reader(|c| repo::actions_of_decision(c, decision))
+            .read(|c| repo::actions_of_decision(c, decision))
             .unwrap()
     }
 
     pub(super) fn audit_actor(&self, target: &str) -> Vec<String> {
-        let c = rusqlite::Connection::open(self.kit.home().join("data/steve.sqlite3")).unwrap();
-        let mut st = c
-            .prepare("SELECT actor FROM audit WHERE target = ? AND action = 'decision.resolve'")
-            .unwrap();
-        st.query_map([target], |r| r.get::<_, String>(0))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap()
+        steve_store::core_fixture::work::audit(
+            self.kit.db().store(),
+            "decision.resolve",
+            Some(target),
+        )
+        .into_iter()
+        .map(|row| row.actor)
+        .collect()
     }
 
     pub(super) fn paused(&self) -> Option<Value> {
@@ -841,13 +841,9 @@ fn many_failure_cards_at_once_trip_the_breaker() {
     let p = t.paused().expect("paused");
     assert_eq!(p["code"], "B2");
     // what was scheduled is cancelled, and one notice went out
-    let w = t.yolo.store().reader(|c| repo::windows(c, WS, 1)).unwrap();
+    let w = t.yolo.store().read(|c| repo::windows(c, WS, 1)).unwrap();
     assert_eq!(w[0].ended_why.as_deref(), Some("tripped"));
-    let n = t
-        .yolo
-        .store()
-        .reader(|c| repo::counts(c, &w[0].id))
-        .unwrap();
+    let n = t.yolo.store().read(|c| repo::counts(c, &w[0].id)).unwrap();
     assert_eq!(n.scheduled, 0);
     let ns = t.kit.core.notifications(WS).unwrap();
     assert_eq!(
@@ -1099,13 +1095,7 @@ fn an_error_recording_an_answer_already_given_trips_b5_at_once() {
         },
     );
     // the ledger cannot settle the action once the card is answered
-    rusqlite::Connection::open(t.kit.home().join("data/steve.sqlite3"))
-        .unwrap()
-        .execute_batch(
-            "CREATE TRIGGER yolo_no_decided BEFORE UPDATE OF outcome ON yolo_actions
-               WHEN NEW.outcome = 'decided' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
-        )
-        .unwrap();
+    steve_store::core_fixture::yolo::reject_action_settlement(t.yolo.store());
     let a = t.engine.consider(&d).unwrap().expect("an action");
     assert_ne!(a.outcome, "decided", "not settled");
     assert_eq!(
@@ -1485,14 +1475,19 @@ fn a_permission_of_a_node_item_asks_its_node_nothing() {
 #[test]
 fn a_failed_send_counts_yolos_earlier_retries() {
     let t = t();
-    let c = rusqlite::Connection::open(t.kit.home().join("data/steve.sqlite3")).unwrap();
-    c.execute_batch(&format!(
-        "INSERT INTO spaces(id,workspace_id,system_id,kind,external_id,name,created,updated)
-           VALUES ('sp','{WS}','slack','group','G1','g',1,1);
-         INSERT INTO chan_messages(id,workspace_id,space_id,direction,status,created)
-           VALUES ('cm','{WS}','sp','out','failed',1);"
-    ))
-    .unwrap();
+    steve_store::core_fixture::yolo::outbound(
+        t.yolo.store(),
+        steve_store::core_fixture::yolo::Outbound {
+            space: "sp",
+            system: "slack",
+            external: "G1",
+            name: "g",
+            message: "cm",
+            status: "failed",
+            text: None,
+            basis: None,
+        },
+    );
     let card = || {
         t.kit
             .db()
@@ -1512,11 +1507,11 @@ fn a_failed_send_counts_yolos_earlier_retries() {
             .id
     };
     let resolve = |id: &str, result: Value| {
-        c.execute(
-            "UPDATE decisions SET status = 'resolved', result = ? WHERE id = ?",
-            rusqlite::params![result.to_string(), id],
-        )
-        .unwrap();
+        steve_store::core_fixture::decision(
+            t.yolo.store(),
+            id,
+            steve_store::core_fixture::DecisionState::ResolvedResult(&result),
+        );
     };
     let retries = |d: &str| {
         let g = t.engine.gather(&t.decision(d), &Policy::default()).unwrap();

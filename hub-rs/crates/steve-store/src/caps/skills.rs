@@ -2,10 +2,12 @@
 //! assigned one reads as `<name>/SKILL.md`, written by the session's Node where the harness adapter
 //! declares it reads skills. Only the ones switched on for the Bot are given ([`super`]).
 
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use crate::contract::Row;
+use sea_query::{Expr, ExprTrait, Order, Query, SelectStatement};
 use serde::{Deserialize, Serialize};
 
-use crate::Result;
+use super::Assignments;
+use crate::{Read, Result, W};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Skill {
@@ -18,9 +20,19 @@ pub struct Skill {
     pub updated: i64,
 }
 
-const COLS: &str = "id, workspace_id, name, description, content, created, updated";
+pub struct Skills<'a, C>(pub &'a mut C);
 
-fn row(r: &Row) -> rusqlite::Result<Skill> {
+const COLS: [&str; 7] = [
+    "id",
+    "workspace_id",
+    "name",
+    "description",
+    "content",
+    "created",
+    "updated",
+];
+
+fn row(r: &Row<'_>) -> Result<Skill> {
     Ok(Skill {
         id: r.get(0)?,
         workspace_id: r.get(1)?,
@@ -33,84 +45,102 @@ fn row(r: &Row) -> rusqlite::Result<Skill> {
 }
 
 /// A workspace's skills, by name.
-pub fn list(c: &Connection, ws: &str) -> Result<Vec<Skill>> {
-    let mut st = c.prepare_cached(&format!(
-        "SELECT {COLS} FROM skills WHERE workspace_id = ? ORDER BY name"
-    ))?;
-    let v = st.query_map([ws], row)?.collect::<Result<_, _>>()?;
-    Ok(v)
+
+fn rows() -> SelectStatement {
+    Query::select().from("skills").columns(COLS).take()
 }
 
-pub fn get(c: &Connection, id: &str) -> Result<Option<Skill>> {
-    Ok(c.query_row(
-        &format!("SELECT {COLS} FROM skills WHERE id = ?"),
-        [id],
-        row,
-    )
-    .optional()?)
-}
-
-/// Another skill of `ws` named `name`, other than `except`.
-pub fn name_taken(c: &Connection, ws: &str, name: &str, except: Option<&str>) -> Result<bool> {
-    let n: i64 = c.query_row(
-        "SELECT COUNT(*) FROM skills WHERE workspace_id = ?1 AND name = ?2 AND id <> ?3",
-        params![ws, name, except.unwrap_or("")],
-        |r| r.get(0),
-    )?;
-    Ok(n > 0)
-}
-
-pub fn insert(c: &Connection, s: &Skill) -> Result<()> {
-    c.execute(
-        &format!("INSERT INTO skills ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"),
-        params![
-            s.id,
-            s.workspace_id,
-            s.name,
-            s.description,
-            s.content,
-            s.created,
-            s.updated,
-        ],
-    )?;
-    Ok(())
-}
-
-/// Writes every field but `id`, `workspace_id` and `created`.
-pub fn update(c: &Connection, s: &Skill) -> Result<()> {
-    c.execute(
-        "UPDATE skills SET name = ?2, description = ?3, content = ?4, updated = ?5 WHERE id = ?1",
-        params![s.id, s.name, s.description, s.content, s.updated],
-    )?;
-    Ok(())
-}
-
-/// The skill and who used it go.
-pub fn delete(c: &Connection, id: &str) -> Result<bool> {
-    super::remove_entry(c, "skill", id)?;
-    Ok(c.execute("DELETE FROM skills WHERE id = ?", [id])? > 0)
-}
-
-/// The skills `bot` is assigned, each with whether it is switched on for it, by name.
-pub fn of_bot(c: &Connection, bot: &str) -> Result<Vec<(Skill, bool)>> {
-    let mut out = vec![];
-    for a in super::of_bot(c, bot, "skill")? {
-        if let Some(s) = get(c, &a.entry_id)? {
-            out.push((s, a.enabled));
-        }
+impl<C: Read> Skills<'_, C> {
+    pub fn list(&mut self, ws: &str) -> Result<Vec<Skill>> {
+        self.0.all(
+            rows()
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .order_by("name", Order::Asc),
+            row,
+        )
     }
-    out.sort_by(|(a, _), (b, _)| a.name.cmp(&b.name));
-    Ok(out)
+
+    pub fn get(&mut self, id: &str) -> Result<Option<Skill>> {
+        self.0.one(rows().and_where(Expr::col("id").eq(id)), row)
+    }
+
+    pub fn name_taken(&mut self, ws: &str, name: &str, except: Option<&str>) -> Result<bool> {
+        let by_name = Expr::col("name").eq(name);
+        Ok(self
+            .0
+            .one(
+                Query::select()
+                    .from("skills")
+                    .column("id")
+                    .and_where(Expr::col("workspace_id").eq(ws))
+                    .and_where(by_name)
+                    .and_where(Expr::col("id").ne(except.unwrap_or_default()))
+                    .limit(1),
+                |_| Ok(()),
+            )?
+            .is_some())
+    }
+
+    pub fn of_bot(&mut self, bot: &str) -> Result<Vec<(Skill, bool)>> {
+        super::assigned(
+            self.0,
+            bot,
+            "skill",
+            |r, id| Skills(r).get(id),
+            |row| row.name.clone(),
+        )
+    }
+
+    pub fn enabled_for_session(&mut self, session: &str) -> Result<Vec<Skill>> {
+        let Some(bot) = Assignments(self.0).bot_of_session(session)? else {
+            return Ok(Vec::new());
+        };
+        Ok(self
+            .of_bot(&bot)?
+            .into_iter()
+            .filter_map(|(row, on)| on.then_some(row))
+            .collect())
+    }
 }
 
-/// The skills the Bot a session works as has switched on (none for a session without a Bot).
-pub fn enabled_for_session(c: &Connection, session: &str) -> Result<Vec<Skill>> {
-    match super::bot_of_session(c, session)? {
-        Some(b) => Ok(of_bot(c, &b)?
-            .into_iter()
-            .filter(|(_, on)| *on)
-            .map(|(s, _)| s)
-            .collect()),
-        None => Ok(vec![]),
+impl Skills<'_, W<'_>> {
+    pub fn insert(&mut self, s: &Skill) -> Result<()> {
+        self.0.exec(
+            Query::insert()
+                .into_table("skills")
+                .columns(COLS)
+                .values_panic([
+                    s.id.as_str().into(),
+                    s.workspace_id.as_str().into(),
+                    s.name.as_str().into(),
+                    s.description.as_str().into(),
+                    s.content.as_str().into(),
+                    s.created.into(),
+                    s.updated.into(),
+                ]),
+        )?;
+        Ok(())
+    }
+
+    pub fn update(&mut self, s: &Skill) -> Result<()> {
+        self.0.exec(
+            Query::update()
+                .table("skills")
+                .and_where(Expr::col("id").eq(s.id.as_str()))
+                .value("name", s.name.as_str())
+                .value("description", s.description.as_str())
+                .value("content", s.content.as_str())
+                .value("updated", s.updated),
+        )?;
+        Ok(())
+    }
+
+    pub fn delete(&mut self, id: &str) -> Result<bool> {
+        Assignments(self.0).remove_entry("skill", id)?;
+        Ok(self.0.exec(
+            Query::delete()
+                .from_table("skills")
+                .and_where(Expr::col("id").eq(id)),
+        )? != 0)
     }
 }

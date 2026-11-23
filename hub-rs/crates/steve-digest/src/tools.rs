@@ -1,14 +1,15 @@
 //! Tool-mediated digest sessions. All chunk effects and their acknowledgement commit together;
 //! the conversation summary commits only with packet_done. A stale worker cannot write anything.
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::{ApiError, ApiResult, Caller, Modules};
-use steve_store::StoreError;
-use steve_store::base::{Level, mems};
+use steve_store::base::Level;
+use steve_store::digest::NewChange;
+use steve_store::digest::NewSummary;
+use steve_store::{StoreError, W};
 
-use crate::{ConvRef, bot, changes, conv, matter, memindex, profile, queue, summary, todo};
+use crate::{ConvRef, bot, conv, matter, memindex, profile, queue, todo};
 
 pub const BATCH: &str = "steve_digest_batch";
 pub const READ: &str = "steve_digest_read";
@@ -131,34 +132,41 @@ fn refused(e: matter::Refused) -> ApiError {
 fn cv(p: &queue::Packet) -> ApiResult<ConvRef> {
     ConvRef::parse(&p.conv).ok_or_else(|| bad("invalid packet conversation"))
 }
-fn key(batch: &str) -> String {
-    format!("digest:batch:{batch}")
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Lease {
     packet: String,
     batch: String,
 }
-fn owned(c: &Connection, cx: &McpCx, l: &Lease, now: i64) -> ApiResult<queue::Packet> {
-    let p = queue::get(c, &cx.ws, &l.packet)?.ok_or_else(|| bad("packet not found"))?;
-    let run: Option<String> = c
-        .query_row(
-            "SELECT value FROM settings WHERE workspace_id = ? AND key = ?",
-            params![cx.ws, key(&l.batch)],
-            |r| r.get(0),
-        )
-        .optional()?;
+fn owned(w: &mut W<'_>, cx: &McpCx, l: &Lease, now: i64) -> ApiResult<queue::Packet> {
+    let p = w
+        .digest_packets()
+        .get(&cx.ws, &l.packet)?
+        .ok_or_else(|| bad("packet not found"))?;
+    let run = w.digest_packets().batch_owner(&cx.ws, &l.batch)?;
+    check_lease(cx, l, &p, run.as_deref(), now, |conv| {
+        conv::owner_sees(w, &cx.ws, conv)
+    })?;
+    Ok(p)
+}
+
+fn check_lease(
+    cx: &McpCx,
+    l: &Lease,
+    p: &queue::Packet,
+    run: Option<&str>,
+    now: i64,
+    visible: impl FnOnce(&ConvRef) -> Result<bool, StoreError>,
+) -> ApiResult<()> {
     if p.state != "leased"
         || p.batch_id.as_deref() != Some(l.batch.as_str())
         || p.lease_until.unwrap_or(0) <= now
-        || run.as_deref() != Some(bot::run(cx).map_err(storage)?)
-        || !conv::owner_sees(c, &cx.ws, &cv(&p)?)?
+        || run != Some(bot::run(cx).map_err(storage)?)
+        || !visible(&cv(p)?)?
     {
         return Err(bad("lease is expired, invisible or belongs to another run"));
     }
-    Ok(p)
+    Ok(())
 }
 
 pub async fn call(m: &Modules, cx: &McpCx, name: &str, args: &Value) -> Result<String, String> {
@@ -168,7 +176,7 @@ pub async fn call(m: &Modules, cx: &McpCx, name: &str, args: &Value) -> Result<S
         .map_err(|e| e.to_string())
 }
 pub fn call_sync(m: &Modules, cx: &McpCx, name: &str, args: &Value) -> ApiResult<String> {
-    let user = m.store.reader(|c| bot::user(c, cx)).map_err(storage)?;
+    let user = bot::user(&m.store, cx).map_err(storage)?;
     let run = bot::run(cx).map_err(storage)?;
     let now = m.clock.now();
     let out = match name {
@@ -185,12 +193,9 @@ pub fn call_sync(m: &Modules, cx: &McpCx, name: &str, args: &Value) -> ApiResult
                 after: usize,
             }
             let a: Args = parse(args)?;
-            let rows = m.store.reader(|c| {
-                let mut st = c.prepare_cached("SELECT id FROM digest_changes WHERE workspace_id = ? AND run_id = ? ORDER BY created, id LIMIT 101 OFFSET ?")?;
-                let ids = st.query_map(params![cx.ws, run, a.after.min(i64::MAX as usize) as i64], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
-                let mut out = Vec::new();
-                for id in ids { out.push(changes::get(c, &cx.ws, &id)?.unwrap()); }
-                Ok::<_, StoreError>(out)
+            let rows = m.store.read(|r| {
+                r.digest_changes()
+                    .list(&cx.ws, Some(run), None, 101, Some(a.after))
             })?;
             json!({"changes": rows.iter().take(100).collect::<Vec<_>>(), "more": rows.len() > 100, "next": a.after.saturating_add(100), "run": run})
         }
@@ -201,7 +206,7 @@ pub fn call_sync(m: &Modules, cx: &McpCx, name: &str, args: &Value) -> ApiResult
                 query: String,
             }
             let a: Args = parse(args)?;
-            json!({"matters": m.store.reader(|c| matter::list(c, &cx.ws, &matter::Filter {query: Some(a.query), limit: 20, ..Default::default()}))?})
+            json!({"matters": m.store.read(|c| matter::list(c, &cx.ws, &matter::Filter {query: Some(a.query), limit: 20, ..Default::default()}))?})
         }
         MATTER => {
             #[derive(Deserialize)]
@@ -215,7 +220,7 @@ pub fn call_sync(m: &Modules, cx: &McpCx, name: &str, args: &Value) -> ApiResult
                 me: user,
             })?;
             m.store
-                .reader(|c| matter::get_for(c, &viewer, &a.id))?
+                .read(|c| matter::get_for(c, &viewer, &a.id))?
                 .ok_or_else(|| bad("matter not found"))?
         }
         _ => return Err(bad("unknown digest tool")),
@@ -231,41 +236,36 @@ fn batch(m: &Modules, cx: &McpCx, args: &Value, now: i64) -> ApiResult<Value> {
     }
     let a: Args = parse(args)?;
     let run = bot::run(cx).map_err(storage)?;
-    m.store.transaction(|tx| {
-        queue::release_expired(tx, &cx.ws, now)?;
+    m.store.write(|w| {
+        w.digest_packets().release_expired(&cx.ws, now)?;
         // Batch ownership fences are only needed while one of that batch's leases is live.
-        tx.execute("DELETE FROM settings WHERE workspace_id = ? AND key LIKE 'digest:batch:%' AND NOT EXISTS (SELECT 1 FROM digest_packets p WHERE p.workspace_id = settings.workspace_id AND p.state = 'leased' AND settings.key = 'digest:batch:' || p.batch_id)", [&cx.ws])?;
-        let b = queue::batching(tx, &cx.ws)?;
+        w.digest_packets().prune_batch_owners(&cx.ws)?;
+        let b = w.digest_packets().batching(&cx.ws)?;
         // Resume, rather than leasing another batch in the same session.
         let mut resumed = Vec::new();
-        for p in queue::list(tx, &cx.ws, Some("leased"), None, 500)? {
+        for p in w.digest_packets().list(&cx.ws, Some("leased"), None, 500)? {
             let Some(id) = &p.batch_id else { continue };
-            let saved: Option<String> = tx.query_row("SELECT value FROM settings WHERE workspace_id = ? AND key = ?", params![cx.ws, key(id)], |r| r.get(0)).optional()?;
-            if saved.as_deref() == Some(run) && conv::owner_sees(tx, &cx.ws, &cv(&p)?)? {
+            let saved = w.digest_packets().batch_owner(&cx.ws, id)?;
+            if saved.as_deref() == Some(run) && conv::owner_sees(w, &cx.ws, &cv(&p)?)? {
                 resumed.push(json!({"packet": p.id, "batch": id, "conv": p.conv, "tokens": p.tokens, "lease_until": p.lease_until}));
             }
         }
         if !resumed.is_empty() { return Ok(json!({"packets": resumed, "resumed": true})); }
-        if !b.enabled || queue::due(tx, &cx.ws, now, &b)?.is_none() { return Ok(json!({"packets": [], "due": false})); }
-        let (id, ids) = queue::lease_matching(tx, &cx.ws, now, &b, a.limit.unwrap_or(5).clamp(1, 20), |p| {
+        if !b.enabled || w.digest_packets().due(&cx.ws, now, &b)?.is_none() { return Ok(json!({"packets": [], "due": false})); }
+        let (id, ids) = w.digest_packets().lease_matching(&cx.ws, now, &b, a.limit.unwrap_or(5).clamp(1, 20), |w, p| {
             let Some(conv) = ConvRef::parse(&p.conv) else { return Ok(false) };
-            conv::owner_sees(tx, &cx.ws, &conv)
+            conv::owner_sees(w, &cx.ws, &conv)
         })?;
-        tx.execute("INSERT OR REPLACE INTO settings (workspace_id, key, value, updated) VALUES (?, ?, ?, ?)", params![cx.ws, key(&id), run, now])?;
+        w.digest_packets().set_batch_owner(&cx.ws, &id, run, now)?;
         let mut out = Vec::new();
         for pid in ids {
-            let p = owned(tx, cx, &Lease { packet: pid, batch: id.clone() }, now)?;
+            let p = owned(w, cx, &Lease { packet: pid, batch: id.clone() }, now)?;
             out.push(json!({"packet": p.id, "batch": id, "conv": p.conv, "tokens": p.tokens, "lease_until": p.lease_until}));
         }
         Ok(json!({"packets": out, "due": true}))
     })
 }
 
-fn segments(c: &Connection, p: &queue::Packet) -> Result<Vec<Value>, StoreError> {
-    Ok(c.prepare_cached("SELECT id, chunk, first_pos, last_pos, summary, tags, matter_id, chains FROM digest_segments WHERE workspace_id = ? AND packet_id = ? ORDER BY chunk, first_pos, id")?
-        .query_map(params![p.ws, p.id], |r| Ok(json!({"id": r.get::<_, String>(0)?, "chunk": r.get::<_, i64>(1)?, "first": r.get::<_, i64>(2)?, "last": r.get::<_, i64>(3)?, "summary": r.get::<_, String>(4)?,
-            "tags": serde_json::from_str::<Value>(&r.get::<_, String>(5)?).unwrap_or(json!([])), "matter": r.get::<_, Option<String>>(6)?, "chains": serde_json::from_str::<Value>(&r.get::<_, String>(7)?).unwrap_or(json!([]))})))?.collect::<rusqlite::Result<_>>()?)
-}
 fn read(m: &Modules, cx: &McpCx, args: &Value, now: i64) -> ApiResult<Value> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -277,41 +277,113 @@ fn read(m: &Modules, cx: &McpCx, args: &Value, now: i64) -> ApiResult<Value> {
         segment_after: usize,
     }
     let a: Args = parse(args)?;
-    m.store.reader(|c| {
-        let p = owned(c, cx, &Lease { packet: a.packet, batch: a.batch }, now)?;
-        let mut chunks = serde_json::to_value(queue::chunks(c, &p.id)?)?;
-        for chunk in chunks.as_array_mut().unwrap() {
-            if a.chunk != chunk["n"].as_i64() { chunk.as_object_mut().unwrap().remove("text"); }
+    let lease = Lease {
+        packet: a.packet,
+        batch: a.batch,
+    };
+    let viewer = m.viewer(&Caller {
+        ws: cx.ws.clone(),
+        me: cx.user.clone(),
+    })?;
+    let (p, chunks, previous_summary, run, saved, candidates, visible) = m
+        .store
+        .read::<_, steve_store::StoreError>(|r| {
+            let mut packets = r.digest_packets();
+            let Some(p) = packets.get(&cx.ws, &lease.packet)? else {
+                return Ok(None);
+            };
+            let run = packets.batch_owner(&cx.ws, &lease.batch)?;
+            let chunks = packets.chunks(&p.id)?;
+            let summary = r.summaries().latest(&cx.ws, &p.conv)?;
+            let saved = r
+                .digest_segments()
+                .for_packet(&cx.ws, &p.id, a.segment_after, 101)?;
+            // Visibility can change after intake: filter private memories in the current snapshot.
+            let mut candidates = p.candidates.as_array().cloned().unwrap_or_default();
+            let mut index = r.memory_index();
+            candidates.retain(|v| {
+                v["type"] != "mem"
+                    || v["id"]
+                        .as_str()
+                        .is_some_and(|id| index.visible(&viewer, id).unwrap_or(false))
+            });
+            let visible = match ConvRef::parse(&p.conv) {
+                Some(conv) => conv::owner_sees(r, &cx.ws, &conv)?,
+                None => false,
+            };
+            Ok(Some((p, chunks, summary, run, saved, candidates, visible)))
+        })?
+        .ok_or_else(|| bad("packet not found"))?;
+    check_lease(cx, &lease, &p, run.as_deref(), now, |_| Ok(visible))?;
+    let mut chunks = serde_json::to_value(chunks)?;
+    for chunk in chunks.as_array_mut().unwrap() {
+        if a.chunk != chunk["n"].as_i64() {
+            chunk.as_object_mut().unwrap().remove("text");
         }
-        if a.chunk.is_some() && !chunks.as_array().unwrap().iter().any(|x| x["n"].as_i64() == a.chunk) { return Err(bad("unknown chunk")); }
-        let mut facts = p.facts.clone();
-        // Visibility can change after intake: never hand out a stale private memory candidate.
-        let viewer = m.viewer(&Caller { ws: cx.ws.clone(), me: cx.user.clone() })?;
-        let mut candidates = p.candidates.as_array().cloned().unwrap_or_default();
-        candidates.retain(|v| v["type"] != "mem" || v["id"].as_str().is_some_and(|id| mems::visible(c, &viewer, id).ok().flatten().is_some()));
-        // Overview never repeats all message metadata. A selected chunk includes its source
-        // references and people, plus a bounded overlap; the text identifies overlap as read-only.
-        let selected = chunks.as_array().unwrap().iter().find(|x| x["n"].as_i64() == a.chunk);
-        let low = selected.map(|ch| ch["first_pos"].as_i64().unwrap_or(1) - ch["overlap"].as_i64().unwrap_or(0));
-        let high = selected.map(|ch| ch["last_pos"].as_i64().unwrap_or(0));
-        let in_chunk = |v: &Value| v.as_i64().is_some_and(|n| low.zip(high).is_some_and(|(l,h)| n >= l && n <= h));
-        if let Some(msgs) = facts["messages"].as_array_mut() { msgs.retain(|v| in_chunk(&v["pos"])); }
-        let msgs = facts["messages"].as_array().cloned().unwrap_or_default();
-        let people = msgs.iter().flat_map(|v| std::iter::once(v["sender"].as_str()).chain(v["mentions"].as_array().into_iter().flatten().map(Value::as_str))).flatten().collect::<std::collections::BTreeSet<_>>();
-        if let Some(ps) = facts["parties"].as_array_mut() { ps.retain(|v| v["id"].as_str().is_some_and(|id| people.contains(id))); }
-        if let Some(rs) = facts["refs"].as_array_mut() { rs.retain(|v| in_chunk(&v["pos"])); }
-        if let Some(cs) = facts["chains"].as_array_mut() {
-            for chain in cs.iter_mut() { if let Some(ps) = chain["positions"].as_array_mut() { ps.retain(&in_chunk); } }
-            cs.retain(|v| v["positions"].as_array().is_some_and(|ps| !ps.is_empty()));
+    }
+    if a.chunk.is_some()
+        && !chunks
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["n"].as_i64() == a.chunk)
+    {
+        return Err(bad("unknown chunk"));
+    }
+    let mut facts = p.facts.clone();
+    // Overview never repeats all message metadata. A selected chunk includes its source
+    // references and people, plus a bounded overlap; the text identifies overlap as read-only.
+    let selected = chunks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["n"].as_i64() == a.chunk);
+    let low = selected
+        .map(|ch| ch["first_pos"].as_i64().unwrap_or(1) - ch["overlap"].as_i64().unwrap_or(0));
+    let high = selected.map(|ch| ch["last_pos"].as_i64().unwrap_or(0));
+    let in_chunk = |v: &Value| {
+        v.as_i64()
+            .is_some_and(|n| low.zip(high).is_some_and(|(l, h)| n >= l && n <= h))
+    };
+    if let Some(msgs) = facts["messages"].as_array_mut() {
+        msgs.retain(|v| in_chunk(&v["pos"]));
+    }
+    let msgs = facts["messages"].as_array().cloned().unwrap_or_default();
+    let people = msgs
+        .iter()
+        .flat_map(|v| {
+            std::iter::once(v["sender"].as_str()).chain(
+                v["mentions"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(Value::as_str),
+            )
+        })
+        .flatten()
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(ps) = facts["parties"].as_array_mut() {
+        ps.retain(|v| v["id"].as_str().is_some_and(|id| people.contains(id)));
+    }
+    if let Some(rs) = facts["refs"].as_array_mut() {
+        rs.retain(|v| in_chunk(&v["pos"]));
+    }
+    if let Some(cs) = facts["chains"].as_array_mut() {
+        for chain in cs.iter_mut() {
+            if let Some(ps) = chain["positions"].as_array_mut() {
+                ps.retain(&in_chunk);
+            }
         }
-        // Full candidate retrieval already has module limits; original item references are in refs.
-        facts.as_object_mut().unwrap().remove("items");
-        let saved = segments(c, &p)?;
-        let page = saved.iter().skip(a.segment_after).take(100).collect::<Vec<_>>();
-        Ok(json!({"packet": p.id, "conv": p.conv, "facts": facts, "candidates": candidates, "chunks": chunks,
-            "segments": page, "segments_more": saved.len() > a.segment_after.saturating_add(100),
-            "segment_next": a.segment_after.saturating_add(100), "previous_summary": summary::latest(c, &cx.ws, &cv(&p)?)?}))
-    })
+        cs.retain(|v| v["positions"].as_array().is_some_and(|ps| !ps.is_empty()));
+    }
+    // Full candidate retrieval already has module limits; original item references are in refs.
+    facts.as_object_mut().unwrap().remove("items");
+    let page = saved.iter().take(100).collect::<Vec<_>>();
+    Ok(
+        json!({"packet": p.id, "conv": p.conv, "facts": facts, "candidates": candidates, "chunks": chunks,
+        "segments": page, "segments_more": saved.len() > 100,
+        "segment_next": a.segment_after.saturating_add(100), "previous_summary": previous_summary}),
+    )
 }
 
 #[derive(Deserialize)]
@@ -416,16 +488,44 @@ fn commit_chunk(m: &Modules, cx: &McpCx, user: &str, args: &Value, now: i64) -> 
         ws: cx.ws.clone(),
         me: user.into(),
     })?;
-    m.store.transaction(|tx| {
-        let p = owned(tx, cx, &Lease { packet: a.packet, batch: a.batch }, now)?;
-        let ch = queue::chunks(tx, &p.id)?.into_iter().find(|ch| ch.n == a.chunk).ok_or_else(|| bad("chunk not found"))?;
-        if ch.state == "done" { return Ok(json!({"already_done": true, "chunk": a.chunk})); }
-        if a.segments.len() > 100 || a.todos.len() > 30 || a.memories.len() > 10 { return Err(bad("chunk write too large")); }
+    m.store.write(|w| {
+        let p = owned(
+            w,
+            cx,
+            &Lease {
+                packet: a.packet,
+                batch: a.batch,
+            },
+            now,
+        )?;
+        let ch = w
+            .digest_packets()
+            .chunks(&p.id)?
+            .into_iter()
+            .find(|ch| ch.n == a.chunk)
+            .ok_or_else(|| bad("chunk not found"))?;
+        if ch.state == "done" {
+            return Ok(json!({"already_done": true, "chunk": a.chunk}));
+        }
+        if a.segments.len() > 100 || a.todos.len() > 30 || a.memories.len() > 10 {
+            return Err(bad("chunk write too large"));
+        }
         let summary_only = p.facts["conv"]["depth"] == "summary";
-        if summary_only && (!a.todos.is_empty() || !a.memories.is_empty() || a.segments.iter().any(|s| s.matter.is_some() || s.new_matter.is_some())) { return Err(bad("summary-only packet")); }
+        if summary_only
+            && (!a.todos.is_empty()
+                || !a.memories.is_empty()
+                || a.segments
+                    .iter()
+                    .any(|s| s.matter.is_some() || s.new_matter.is_some()))
+        {
+            return Err(bad("summary-only packet"));
+        }
         let check_range = |first: i64, last: i64| -> ApiResult<()> {
-            if first < ch.first_pos.max(1) || last > ch.last_pos { return Err(bad("range not in this chunk")); }
-            messages(&p, first, last)?; Ok(())
+            if first < ch.first_pos.max(1) || last > ch.last_pos {
+                return Err(bad("range not in this chunk"));
+            }
+            messages(&p, first, last)?;
+            Ok(())
         };
         let mut covered = std::collections::BTreeSet::new();
         for s in &a.segments {
@@ -436,48 +536,166 @@ fn commit_chunk(m: &Modules, cx: &McpCx, user: &str, args: &Value, now: i64) -> 
             covered.extend(s.first..=s.last);
         }
         if (ch.first_pos.max(1)..=ch.last_pos).any(|n| !covered.contains(&n)) {
-            return Err(bad("segments must cover every positive position in the chunk"));
+            return Err(bad(
+                "segments must cover every positive position in the chunk",
+            ));
         }
         let mut out = json!({"segments": [], "todos": [], "memories": []});
         let mut targets = Vec::new();
         for s in a.segments {
             check_range(s.first, s.last)?;
-            if s.tags.iter().any(|t| !TAGS.contains(&t.as_str())) || (s.matter.is_some() && s.new_matter.is_some()) { return Err(bad("invalid tags or matter")); }
-            let msgs = messages(&p, s.first, s.last)?;
-            let chains = msgs.iter().filter_map(|v| v["chain"].as_str()).collect::<std::collections::BTreeSet<_>>();
-            let mut linked = std::collections::BTreeSet::new();
-            for chain in chains {
-                let mut st = tx.prepare_cached("SELECT DISTINCT s.matter_id FROM digest_segments s, json_each(s.chains) j WHERE s.workspace_id = ? AND s.conv = ? AND j.value = ? AND s.matter_id IS NOT NULL")?;
-                for id in st.query_map(params![cx.ws, p.conv, chain], |r| r.get::<_, String>(0))? { if let Some((id, _, _)) = matter::resolve(tx, &cx.ws, &id?)? { linked.insert(id); } }
+            if s.tags.iter().any(|t| !TAGS.contains(&t.as_str()))
+                || (s.matter.is_some() && s.new_matter.is_some())
+            {
+                return Err(bad("invalid tags or matter"));
             }
-            let explicit = s.matter.as_deref().map(|id| matter::resolve(tx, &cx.ws, id).map_err(ApiError::from)?.map(|x| x.0).ok_or_else(|| bad("matter not found"))).transpose()?;
-            let existing = if linked.len() == 1 { linked.first().cloned() } else { None };
-            if !summary_only && linked.len() > 1 { return Err(bad("source chains belong to different matters; split this segment")); }
-            if !summary_only && explicit.as_ref().zip(existing.as_ref()).is_some_and(|(a,b)| a != b) { return Err(bad("reply chain already belongs to another matter")); }
-            let opened = !summary_only && existing.is_none() && explicit.is_none() && s.new_matter.is_some();
-            let target = if summary_only { None } else { existing.or(explicit).or(match s.new_matter { Some(title) if opened => Some(matter::create(tx, &cx.ws, &title, &cx.bot_id, now).map_err(refused)?), _ => None }) };
-            let id = matter::segment(tx, &cx.ws, &matter::NewSegment { packet: &p.id, chunk: a.chunk, first: s.first, last: s.last, summary: &s.summary, tags: &s.tags, matter: target.as_deref() }, &cx.bot_id, now).map_err(refused)?;
+            let msgs = messages(&p, s.first, s.last)?;
+            let chains = msgs
+                .iter()
+                .filter_map(|v| v["chain"].as_str())
+                .collect::<std::collections::BTreeSet<_>>();
+            let mut linked = std::collections::BTreeSet::new();
+            for id in w
+                .digest_segments()
+                .matters_by_chains(&cx.ws, &p.conv, chains)?
+            {
+                if let Some((id, _, _)) = matter::resolve(w, &cx.ws, &id)? {
+                    linked.insert(id);
+                }
+            }
+            let explicit = s
+                .matter
+                .as_deref()
+                .map(|id| {
+                    matter::resolve(w, &cx.ws, id)
+                        .map_err(ApiError::from)?
+                        .map(|x| x.0)
+                        .ok_or_else(|| bad("matter not found"))
+                })
+                .transpose()?;
+            let existing = if linked.len() == 1 {
+                linked.first().cloned()
+            } else {
+                None
+            };
+            if !summary_only && linked.len() > 1 {
+                return Err(bad(
+                    "source chains belong to different matters; split this segment",
+                ));
+            }
+            if !summary_only
+                && explicit
+                    .as_ref()
+                    .zip(existing.as_ref())
+                    .is_some_and(|(a, b)| a != b)
+            {
+                return Err(bad("reply chain already belongs to another matter"));
+            }
+            let opened =
+                !summary_only && existing.is_none() && explicit.is_none() && s.new_matter.is_some();
+            let target = if summary_only {
+                None
+            } else {
+                existing.or(explicit).or(match s.new_matter {
+                    Some(title) if opened => {
+                        Some(matter::create(w, &cx.ws, &title, &cx.bot_id, now).map_err(refused)?)
+                    }
+                    _ => None,
+                })
+            };
+            let id = matter::segment(
+                w,
+                &cx.ws,
+                &matter::NewSegment {
+                    packet: &p.id,
+                    chunk: a.chunk,
+                    first: s.first,
+                    last: s.last,
+                    summary: &s.summary,
+                    tags: &s.tags,
+                    matter: target.as_deref(),
+                },
+                &cx.bot_id,
+                now,
+            )
+            .map_err(refused)?;
             // The storage contract records segment undo; attach it to this actual Bot run.
-            tx.execute("UPDATE digest_changes SET run_id = ?, after = json_set(after, '$.opened', json(?)) WHERE workspace_id = ? AND op = 'segment' AND target = ?", params![run, if opened {"true"} else {"false"}, cx.ws, id])?;
+            w.digest_changes()
+                .set_segment_run(&cx.ws, &id, run, opened)?;
             targets.push((s.first, s.last, target.clone()));
-            out["segments"].as_array_mut().unwrap().push(json!({"id": id, "matter": target, "opened": opened}));
+            out["segments"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"id": id, "matter": target, "opened": opened}));
         }
         let target_at = |explicit: Option<String>, at: Option<i64>| -> ApiResult<Option<String>> {
-            if explicit.is_some() && at.is_some() { return Err(bad("use matter or matter_at, not both")); }
+            if explicit.is_some() && at.is_some() {
+                return Err(bad("use matter or matter_at, not both"));
+            }
             let Some(at) = at else { return Ok(explicit) };
-            let ids = targets.iter().filter(|(first,last,_)| *first <= at && at <= *last).filter_map(|(_,_,id)| id.clone()).collect::<std::collections::BTreeSet<_>>();
-            if ids.len() != 1 { return Err(bad("matter_at must identify exactly one assigned matter")); }
+            let ids = targets
+                .iter()
+                .filter(|(first, last, _)| *first <= at && at <= *last)
+                .filter_map(|(_, _, id)| id.clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            if ids.len() != 1 {
+                return Err(bad("matter_at must identify exactly one assigned matter"));
+            }
             Ok(ids.into_iter().next())
         };
         let conversation = cv(&p)?;
         for t in a.todos {
-            if t.positions.is_empty() || t.positions.len() > 100 { return Err(bad("todo needs source positions")); }
+            if t.positions.is_empty() || t.positions.len() > 100 {
+                return Err(bad("todo needs source positions"));
+            }
             let mut ms = Vec::new();
-            for n in t.positions { check_range(n, n)?; ms.extend(messages(&p, n, n)?); }
-            let refs = ms.iter().map(|v| Ok((conversation.clone(), v["id"].as_str().ok_or_else(|| bad("source id missing"))?.to_string()))).collect::<ApiResult<Vec<_>>>()?;
+            for n in t.positions {
+                check_range(n, n)?;
+                ms.extend(messages(&p, n, n)?);
+            }
+            let refs = ms
+                .iter()
+                .map(|v| {
+                    Ok((
+                        conversation.clone(),
+                        v["id"]
+                            .as_str()
+                            .ok_or_else(|| bad("source id missing"))?
+                            .to_string(),
+                    ))
+                })
+                .collect::<ApiResult<Vec<_>>>()?;
             let target = target_at(t.matter, t.matter_at)?;
-            let id = todo::create(tx, &todo::NewTodo { ws: &cx.ws, owner: user, text: &t.text, matter: target.as_deref(), due: t.due, due_quote: t.due_quote.as_deref(), source: "steve", writer: &cx.bot_id, packet: Some(&p.id), refs, parties: parties(&ms), ..Default::default() }, now).map_err(storage)?;
-            changes::record(tx, &cx.ws, run, &cx.bot_id, "todo", &id, Some(&p.id), &json!({}), &json!({"todo": id, "updated": now}), now)?;
+            let id = todo::create(
+                w,
+                &todo::NewTodo {
+                    ws: &cx.ws,
+                    owner: user,
+                    text: &t.text,
+                    matter: target.as_deref(),
+                    due: t.due,
+                    due_quote: t.due_quote.as_deref(),
+                    source: "steve",
+                    writer: &cx.bot_id,
+                    packet: Some(&p.id),
+                    refs,
+                    parties: parties(&ms),
+                    ..Default::default()
+                },
+                now,
+            )
+            .map_err(storage)?;
+            w.digest_changes().record(NewChange {
+                ws: &cx.ws,
+                run,
+                writer: &cx.bot_id,
+                op: "todo",
+                target: &id,
+                packet: Some(&p.id),
+                before: &json!({}),
+                after: &json!({"todo": id, "updated": now}),
+                now,
+            })?;
             out["todos"].as_array_mut().unwrap().push(json!(id));
         }
         for mm in a.memories {
@@ -486,28 +704,109 @@ fn commit_chunk(m: &Modules, cx: &McpCx, user: &str, args: &Value, now: i64) -> 
             let people = parties(&messages(&p, mm.first, mm.last)?);
             let id = match mm.id {
                 Some(id) => {
-                    if mm.supersedes.is_some() || mm.text.is_some() || mm.kind.is_some() { return Err(bad("existing memory index cannot rewrite memory")); }
-                    mems::visible(tx, &viewer, &id)?.ok_or_else(|| bad("memory not visible"))?;
-                    out["memories"].as_array_mut().unwrap().push(json!({"id": id, "indexed": true})); id
+                    if mm.supersedes.is_some() || mm.text.is_some() || mm.kind.is_some() {
+                        return Err(bad("existing memory index cannot rewrite memory"));
+                    }
+                    if !w.memory_index().visible(&viewer, &id)? {
+                        return Err(bad("memory not visible"));
+                    }
+                    out["memories"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"id": id, "indexed": true}));
+                    id
                 }
                 None => {
-                    use steve_knowledge::candidates::{NewCandidate, Origin, OriginKind, propose};
-                    let text = mm.text.filter(|s| !s.trim().is_empty() && s.chars().count() <= 2000).ok_or_else(|| bad("new memory needs text"))?;
+                    use steve_knowledge::candidates::{
+                        NewCandidate, Origin, OriginKind, propose_in,
+                    };
+                    let text = mm
+                        .text
+                        .filter(|s| !s.trim().is_empty() && s.chars().count() <= 2000)
+                        .ok_or_else(|| bad("new memory needs text"))?;
                     let kind = mm.kind.unwrap_or_else(|| "fact".into());
-                    if !["fact", "preference", "rule", "event"].contains(&kind.as_str()) { return Err(bad("invalid memory kind")); }
-                    if let Some(old) = &mm.supersedes { mems::visible(tx, &viewer, old)?.filter(|x| x.status == "confirmed").ok_or_else(|| bad("superseded memory not visible or confirmed"))?; }
-                    let origin = Origin { ws: cx.ws.clone(), kind: OriginKind::Tool, id: p.id.clone(), label: p.conv.clone(), user: user.into(), writer: cx.bot_id.clone(), default_level: Level::Reasoning, item_id: cx.item_id.clone(), session_id: cx.session_id.clone() };
-                    let mem = propose(tx, &origin, &NewCandidate { kind, text, about: vec![], level: Level::Reasoning, evidence: format!("{} {}–{}", p.conv, r.first_id, r.last_id), supersedes: mm.supersedes, why: "Conversation digest".into(), scope: p.conv.clone(), owner_said: false })?;
-                    changes::record(tx, &cx.ws, run, &cx.bot_id, "mem_new", &mem.id, Some(&p.id), &json!({}), &json!({"mem": mem.id}), now)?;
-                    out["memories"].as_array_mut().unwrap().push(json!({"id": mem.id, "status": "candidate"})); mem.id
+                    if !["fact", "preference", "rule", "event"].contains(&kind.as_str()) {
+                        return Err(bad("invalid memory kind"));
+                    }
+                    if let Some(old) = &mm.supersedes {
+                        w.memory_index()
+                            .visible_status(&viewer, old)?
+                            .filter(|status| status == "confirmed")
+                            .ok_or_else(|| bad("superseded memory not visible or confirmed"))?;
+                    }
+                    let origin = Origin {
+                        ws: cx.ws.clone(),
+                        kind: OriginKind::Tool,
+                        id: p.id.clone(),
+                        label: p.conv.clone(),
+                        user: user.into(),
+                        writer: cx.bot_id.clone(),
+                        default_level: Level::Reasoning,
+                        item_id: cx.item_id.clone(),
+                        session_id: cx.session_id.clone(),
+                    };
+                    let mem = propose_in(
+                        w,
+                        &origin,
+                        &NewCandidate {
+                            kind,
+                            text,
+                            about: vec![],
+                            level: Level::Reasoning,
+                            evidence: format!("{} {}–{}", p.conv, r.first_id, r.last_id),
+                            supersedes: mm.supersedes,
+                            why: "Conversation digest".into(),
+                            scope: p.conv.clone(),
+                            owner_said: false,
+                        },
+                    )?;
+                    w.digest_changes().record(NewChange {
+                        ws: &cx.ws,
+                        run,
+                        writer: &cx.bot_id,
+                        op: "mem_new",
+                        target: &mem.id,
+                        packet: Some(&p.id),
+                        before: &json!({}),
+                        after: &json!({"mem": mem.id}),
+                        now,
+                    })?;
+                    out["memories"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"id": mem.id, "status": "candidate"}));
+                    mem.id
                 }
             };
             let target = target_at(mm.matter, mm.matter_at)?;
-            let added = memindex::link(tx, &cx.ws, &id, &conversation, target.as_deref(), &people, Some(&r), Some(&p.id)).map_err(storage)?;
-            changes::record(tx, &cx.ws, run, &cx.bot_id, "mem_link", &id, Some(&p.id), &json!({}), &json!(added), now)?;
+            let added = memindex::link(
+                w,
+                &cx.ws,
+                &id,
+                &conversation,
+                target.as_deref(),
+                &people,
+                Some(&r),
+                Some(&p.id),
+            )
+            .map_err(storage)?;
+            w.digest_changes().record(NewChange {
+                ws: &cx.ws,
+                run,
+                writer: &cx.bot_id,
+                op: "mem_link",
+                target: &id,
+                packet: Some(&p.id),
+                before: &json!({}),
+                after: &json!(added),
+                now,
+            })?;
         }
-        queue::chunk_done(tx, &p, a.chunk, true, None, now)?;
-        queue::renew(tx, &p, &queue::batching(tx, &cx.ws)?, now)?;
+        w.digest_packets()
+            .chunk_done(&p, a.chunk, true, None, now)?;
+        let mut packets = w.digest_packets();
+        let b = packets.batching(&cx.ws)?;
+        packets.renew(&p, &b, now)?;
         out["done"] = json!(true);
         Ok(out)
     })
@@ -527,9 +826,9 @@ fn finish(m: &Modules, cx: &McpCx, args: &Value, now: i64) -> ApiResult<Value> {
     if a.summary.trim().is_empty() || a.summary.chars().count() > 12000 {
         return Err(bad("invalid summary"));
     }
-    m.store.transaction(|tx| {
+    m.store.write(|w| {
         let p = owned(
-            tx,
+            w,
             cx,
             &Lease {
                 packet: a.packet,
@@ -538,40 +837,42 @@ fn finish(m: &Modules, cx: &McpCx, args: &Value, now: i64) -> ApiResult<Value> {
             now,
         )?;
         let conversation = cv(&p)?;
-        let before = summary::latest(tx, &cx.ws, &conversation)?;
+        let before = w.summaries().latest(&cx.ws, &p.conv)?;
         if before.as_ref().map_or(0, |s| s.version) != a.expected_version {
             return Err(bad("summary moved; reread before combining chunks"));
         }
         // packet_done validates all chunks before any summary version is published.
-        queue::packet_done(tx, &p, true, None, &queue::batching(tx, &cx.ws)?, now)?;
-        let version = summary::write(
-            tx,
+        let mut packets = w.digest_packets();
+        let b = packets.batching(&cx.ws)?;
+        packets.packet_done(&p, true, None, &b, now)?;
+        let version = w.summaries().append(
             &cx.ws,
-            &conversation,
-            Some(&a.summary),
-            None,
-            Some(&p.id),
-            &cx.bot_id,
-            now,
-        )?;
-        changes::record(
-            tx,
-            &cx.ws,
-            bot::run(cx).map_err(storage)?,
-            &cx.bot_id,
-            "summary",
             &p.conv,
-            Some(&p.id),
-            &json!(before),
-            &json!({"conv": p.conv, "version": version}),
-            now,
+            NewSummary {
+                text: Some(&a.summary),
+                rules: None,
+                packet: Some(&p.id),
+                writer: &cx.bot_id,
+                now,
+            },
         )?;
+        w.digest_changes().record(NewChange {
+            ws: &cx.ws,
+            run: bot::run(cx).map_err(storage)?,
+            writer: &cx.bot_id,
+            op: "summary",
+            target: &p.conv,
+            packet: Some(&p.id),
+            before: &json!(before),
+            after: &json!({"conv": p.conv, "version": version}),
+            now,
+        })?;
         if let Some(kind) = a.kind {
-            let stored = profile::stored(tx, &cx.ws, &conversation)?;
+            let stored = w.digest_profiles().get(&cx.ws, &p.conv)?;
             if stored.as_ref().is_none_or(|s| s.kind.is_none()) {
                 let patch: profile::Patch =
                     serde_json::from_value(json!({"kind": kind, "kind_source": "model"}))?;
-                profile::apply(tx, &cx.ws, &conversation, &patch, now)
+                profile::apply(w, &cx.ws, &conversation, &patch, now)
                     .map_err(|_| bad("invalid conversation kind"))?;
             }
         }
@@ -588,14 +889,13 @@ fn control(m: &Modules, cx: &McpCx, args: &Value, now: i64) -> ApiResult<Value> 
         error: Option<String>,
     }
     let a: Args = parse(args)?;
-    m.store.transaction(|tx| {
-        let p = owned(tx, cx, &Lease { packet: a.packet, batch: a.batch }, now)?;
-        let b = queue::batching(tx, &cx.ws)?;
+    m.store.write(|w| {
+        let p = owned(w, cx, &Lease { packet: a.packet, batch: a.batch }, now)?;
+        let b = w.digest_packets().batching(&cx.ws)?;
         match a.action.as_str() {
-            "renew" => { queue::renew(tx, &p, &b, now)?; Ok(json!({"renewed": true, "lease_until": now + b.lease_ms()})) }
-            "retry" => Ok(json!({"state": queue::packet_done(tx, &p, false, a.error.as_deref(), &b, now)?})),
-            "yield" => { queue::packet_done(tx, &p, false, Some("continued next session"), &b, now)?;
-                tx.execute("UPDATE digest_packets SET state = 'queued', attempts = max(0, attempts - 1), error = NULL WHERE workspace_id = ? AND id = ?", params![cx.ws, p.id])?;
+            "renew" => { w.digest_packets().renew(&p, &b, now)?; Ok(json!({"renewed": true, "lease_until": now + b.lease_ms()})) }
+            "retry" => Ok(json!({"state": w.digest_packets().packet_done(&p, false, a.error.as_deref(), &b, now)?})),
+            "yield" => { w.digest_packets().yield_lease(&p, now)?;
                 Ok(json!({"state": "queued", "yielded": true})) }
             _ => Err(bad("unknown lease action")),
         }

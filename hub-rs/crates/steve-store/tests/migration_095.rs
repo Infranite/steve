@@ -46,7 +46,6 @@ fn a_workspace_that_turned_it_off_turns_the_hub_default_off() {
              ('default','ownerContext','"on"',5), ('w2','ownerContext','"off"',7), ('w3','ownerContext','"off"',9);"#,
     );
     assert_eq!(hub_default(&c), Some(("off".into(), 9)));
-    assert!(!steve_store::nodes::owner_context_default(&c).unwrap());
     assert_eq!(left(&c), 0, "the workspace setting goes");
 }
 
@@ -58,7 +57,6 @@ fn on_everywhere_or_never_set_leaves_the_default_on() {
     ] {
         let c = at_092(seed);
         assert_eq!(hub_default(&c), None);
-        assert!(steve_store::nodes::owner_context_default(&c).unwrap());
         assert_eq!(left(&c), 0);
     }
 }

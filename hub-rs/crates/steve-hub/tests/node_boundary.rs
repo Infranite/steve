@@ -340,7 +340,7 @@ const RATIONALE: &[Entry] = &[
     e(Fs, "steve-hub/src/wire/node_files.rs", Hub, "granted attachment reads; writes use the shared blob store"),
     e(Fs, "steve-hub/src/deliveries/mod.rs", Hub,
         "immutable objects owned by the Hub, synced before publishing a delivery row; sources are read through steve-node and archive names are never filesystem paths"),
-    e(Fs, "steve-hub/src/wire/node_tools.rs", Hub, "a Node's tool ledger lock in the Hub data dir"),
+    e(Fs, "steve-store/src/contract/tool_journal.rs", Hub, "the host tool ledger lock stays in the Hub data directory with the journal it fences"),
     e(Fs, "steve-knowledge/src/sources/files.rs", Hub, "a blob read"),
     e(Fs, "steve-mail/src/attach.rs", Hub, "mail attachments in the Hub home"),
     e(Fs, "steve-mail/src/config.rs", Hub, "the test CA file"),

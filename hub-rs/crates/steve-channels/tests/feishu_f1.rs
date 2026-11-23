@@ -9,6 +9,7 @@ mod digest_env;
 use digest_env::TestEnv;
 use std::sync::Arc;
 use std::time::Duration;
+use steve_store::testkit::channels::inspect;
 
 use axum::Router;
 use axum::body::Body;
@@ -108,37 +109,6 @@ async fn send(
     (status, v, headers)
 }
 
-fn one(h: &H, sql: &str, p: &str) -> Vec<Value> {
-    let (sql, p) = (sql.to_string(), p.to_string());
-    h.env
-        .store()
-        .reader(move |c| {
-            let mut st = c.prepare(&sql)?;
-            let n = st.column_count();
-            let row = st.query_row([&p], |r| {
-                (0..n)
-                    .map(|i| {
-                        r.get::<_, Option<String>>(i)
-                            .map(|s| s.map(Value::String).unwrap_or(Value::Null))
-                            .or_else(|_| r.get::<_, i64>(i).map(Value::from))
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-            })?;
-            Ok::<_, steve_store::StoreError>(row)
-        })
-        .expect("row")
-}
-
-fn count(h: &H, sql: &str) -> i64 {
-    let sql = sql.to_string();
-    h.env
-        .store()
-        .reader(move |c| {
-            Ok::<_, steve_store::StoreError>(c.query_row(&sql, [], |r| r.get::<_, i64>(0))?)
-        })
-        .expect("count")
-}
-
 fn connect_body(base: &str) -> Value {
     json!({
         "adapter": "feishu_app",
@@ -171,12 +141,12 @@ async fn connect_bot(h: &H) -> (String, String) {
 }
 
 fn config_of(h: &H, con: &str) -> Value {
-    let c = one(h, "SELECT config FROM connections WHERE id = ?", con);
+    let c = inspect::connections::connection_config(h.env.store(), con).unwrap();
     serde_json::from_str(c[0].as_str().expect("config")).expect("json")
 }
 
 fn status_of(h: &H, con: &str) -> String {
-    one(h, "SELECT status FROM connections WHERE id = ?", con)[0]
+    inspect::connections::connection_status(h.env.store(), con).unwrap()[0]
         .as_str()
         .expect("status")
         .to_string()
@@ -200,11 +170,8 @@ async fn bot_connects_with_verify_and_secrets_only_as_ciphertext() {
     let (con, acc) = connect_bot(&h).await;
 
     // verify: handle app_id, display name app_name, the bot's open_id under this connection
-    let a = one(
-        &h,
-        "SELECT a.handle, a.display_name, a.kind, a.system_id FROM accounts a WHERE a.id = ?",
-        &acc,
-    );
+    let a =
+        inspect::people::account_handle_display_name_kind_system_id(h.env.store(), &acc).unwrap();
     assert_eq!(
         a,
         vec![
@@ -214,11 +181,8 @@ async fn bot_connects_with_verify_and_secrets_only_as_ciphertext() {
             json!("feishu_app")
         ]
     );
-    let handles = one(
-        &h,
-        "SELECT group_concat(handle) FROM account_handles WHERE connection_id = ?",
-        &con,
-    );
+    let handles =
+        inspect::people::handle_group_concathandle_by_connection(h.env.store(), &con).unwrap();
     assert!(
         handles[0]
             .as_str()
@@ -248,14 +212,10 @@ async fn bot_connects_with_verify_and_secrets_only_as_ciphertext() {
     assert_eq!(h.fake.tokens_issued(), 1);
 
     // the three secrets are in the system vault, readable only through it…
-    let item = one(
-        &h,
-        "SELECT credential_item FROM connections WHERE id = ?",
-        &con,
-    )[0]
-    .as_str()
-    .expect("item")
-    .to_string();
+    let item = inspect::connections::connection_credential_item(h.env.store(), &con).unwrap()[0]
+        .as_str()
+        .expect("item")
+        .to_string();
     let vals = h
         .vault
         .with_credential(WS, &item, "test", "测试", |c| {
@@ -271,7 +231,8 @@ async fn bot_connects_with_verify_and_secrets_only_as_ciphertext() {
         ]
     );
     // …and nowhere in plain text: not in config, not in any database file (WAL included)
-    let raw_cfg = one(&h, "SELECT config FROM connections WHERE id = ?", &con)[0].to_string();
+    let raw_cfg =
+        inspect::connections::connection_config(h.env.store(), &con).unwrap()[0].to_string();
     for s in [ids::APP_SECRET, VTOKEN, EKEY] {
         assert!(!raw_cfg.contains(s));
         assert!(
@@ -402,12 +363,12 @@ async fn store_apps_are_rejected() {
     .await;
     assert_eq!(s, 400);
     assert_eq!(v["error"], format!("验证没有通过：{NOT_SELF_BUILT}"));
-    assert_eq!(count(&h, "SELECT COUNT(*) FROM connections"), 0);
     assert_eq!(
-        count(
-            &h,
-            "SELECT COUNT(*) FROM vault_items WHERE template = 'connection_credential' AND status = 'active'"
-        ),
+        inspect::connections::count_connections(h.env.store()).unwrap(),
+        0
+    );
+    assert_eq!(
+        inspect::vault_items::count_vault_items_by_active(h.env.store()).unwrap(),
         0
     );
 
@@ -494,20 +455,14 @@ async fn user_connects_by_oauth_with_the_apps_client() {
         .strip_prefix("/#/accounts/")
         .unwrap_or_else(|| panic!("not a success: {loc}"))
         .to_string();
-    let a = one(
-        &h,
-        "SELECT a.handle, a.system_id, p.user_id FROM accounts a JOIN parties p ON p.id = a.party_id WHERE a.id = ?",
-        &acc,
-    );
+    let a = inspect::people::account_handle_system_id_user_id(h.env.store(), &acc).unwrap();
     assert_eq!(
         a,
         vec![json!(ids::OWNER.union_id), json!("feishu"), json!(ME)]
     );
-    let c = one(
-        &h,
-        "SELECT id, caps, credential_item FROM connections WHERE account_id = ?",
-        &acc,
-    );
+    let c =
+        inspect::connections::connection_id_caps_credential_item_by_account(h.env.store(), &acc)
+            .unwrap();
     let ucon = c[0].as_str().expect("id").to_string();
     let caps: Value = serde_json::from_str(c[1].as_str().expect("caps")).expect("json");
     assert_eq!(caps, json!(["msg.receive", "msg.send_as_user"]));
@@ -550,11 +505,7 @@ async fn user_without_some_scopes_or_refresh_is_flagged() {
     )
     .await;
     let acc = loc.strip_prefix("/#/accounts/").expect("ok").to_string();
-    let c = one(
-        &h,
-        "SELECT id, caps FROM connections WHERE account_id = ?",
-        &acc,
-    );
+    let c = inspect::connections::connection_id_caps_by_account(h.env.store(), &acc).unwrap();
     let caps: Value = serde_json::from_str(c[1].as_str().expect("caps")).expect("json");
     assert_eq!(
         caps,
@@ -617,17 +568,9 @@ async fn user_connects_by_device_code() {
     let last = last.into_inner().unwrap();
     assert_eq!(last["status"], "ok", "{last}");
     let acc = last["account_id"].as_str().expect("acc");
-    let a = one(
-        &h,
-        "SELECT handle, system_id FROM accounts WHERE id = ?",
-        acc,
-    );
+    let a = inspect::people::account_handle_system_id(h.env.store(), acc).unwrap();
     assert_eq!(a, vec![json!(ids::OWNER.union_id), json!("feishu")]);
-    let c = one(
-        &h,
-        "SELECT id, config FROM connections WHERE account_id = ?",
-        acc,
-    );
+    let c = inspect::connections::connection_id_config_by_account(h.env.store(), acc).unwrap();
     let cfg: Value = serde_json::from_str(c[1].as_str().expect("cfg")).expect("json");
     assert_eq!(cfg["app_connection"], app_con);
     // the device-code tokens refresh like the OAuth ones (the app's client from config)
@@ -677,7 +620,7 @@ async fn a_runtime_refusal_is_recorded_and_offered_as_one_link() {
     );
 
     // the members call of the inbound pipeline is refused: Feishu names the scopes and the link
-    let before = one(&h, "SELECT revision FROM connections WHERE id = ?", &con);
+    let before = inspect::connections::connection_revision(h.env.store(), &con).unwrap();
     h.fake.deny(Endpoint::ChatMembers);
     let cx = h.conns.cx(WS, &con).expect("cx");
     let path = format!("/open-apis/im/v1/chats/{}/members", ids::GROUP_CHAT);
@@ -718,13 +661,13 @@ async fn a_runtime_refusal_is_recorded_and_offered_as_one_link() {
     assert_eq!(cfg["permission_help"]["url"], link);
     // learned, not edited: no revision bump, so what acts on real connection changes (names,
     // the directory sync) doesn't run again because of a refusal
-    let revision = one(&h, "SELECT revision FROM connections WHERE id = ?", &con);
+    let revision = inspect::connections::connection_revision(h.env.store(), &con).unwrap();
     assert_eq!(revision, before);
 
     // the same refusal again changes nothing
     let _ = FeishuClient::for_cx(&cx).get(&cx, &path, &[]).await;
     assert_eq!(
-        one(&h, "SELECT revision FROM connections WHERE id = ?", &con),
+        inspect::connections::connection_revision(h.env.store(), &con).unwrap(),
         revision
     );
 

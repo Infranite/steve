@@ -1,5 +1,6 @@
 //! Migration 4 and the shared base repositories (B0 acceptance).
 
+use steve_store::testkit::SqliteFixtures;
 mod common;
 
 use common::*;
@@ -17,7 +18,7 @@ const B: &str = "usr_b";
 fn setup() -> T {
     let t = fresh();
     t.store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             c.execute_batch(
                 "INSERT INTO users (id, workspace_id, subject, name, role, created) VALUES ('usr_a', 'default', 'a', 'A', 'owner', 1), ('usr_b', 'default', 'b', 'B', 'member', 1);
                  INSERT INTO workspaces (id, name, created) VALUES ('w2', '另一个', 1);
@@ -29,12 +30,12 @@ fn setup() -> T {
     t
 }
 
-fn tx<T>(s: &Store, f: impl FnOnce(&steve_store::Tx) -> steve_store::Result<T>) -> T {
-    s.transaction(f).unwrap()
+fn tx<T>(s: &Store, f: impl FnOnce(&mut steve_store::W<'_>) -> steve_store::Result<T>) -> T {
+    s.write(f).unwrap()
 }
 
 fn party(s: &Store, id: &str, ws: &str, ty: &str, user: Option<&str>) {
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         c.execute(
             "INSERT INTO parties (id, workspace_id, type, name, user_id, created_by, created, updated) VALUES (?, ?, ?, ?, ?, 'usr_a', 1, 1)",
             rusqlite::params![id, ws, ty, id, user],
@@ -46,7 +47,7 @@ fn party(s: &Store, id: &str, ws: &str, ty: &str, user: Option<&str>) {
 
 fn team(s: &Store, id: &str, parent: Option<&str>, members: &[&str]) {
     party(s, id, "default", "team", None);
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         c.execute(
             "INSERT INTO team_details (party_id, workspace_id, kind, parent_id) VALUES (?, 'default', 'chart', ?)",
             rusqlite::params![id, parent],
@@ -66,7 +67,7 @@ fn team(s: &Store, id: &str, parent: Option<&str>, members: &[&str]) {
 fn empty_database_gets_the_current_version_with_builtin_attributes() {
     let t = fresh();
     t.store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             assert_eq!(count(c, "SELECT v FROM schema_version"), db::SCHEMA_VERSION);
             assert_eq!(
                 count(
@@ -111,7 +112,7 @@ fn ts_v3_database_with_data_upgrades_to_current() {
         .unwrap();
     }
     let s = Store::open(&path, NoPublisher).unwrap();
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         assert_eq!(count(c, "SELECT v FROM schema_version"), db::SCHEMA_VERSION);
         assert_eq!(count(c, "SELECT count(*) FROM schema_version"), 1);
         assert_eq!(count(c, "SELECT count(*) FROM decisions"), 1);
@@ -155,7 +156,7 @@ fn transaction_publishes_after_commit_and_rolls_back_on_error() {
             })
         )]
     );
-    let r: Result<(), StoreError> = s.transaction(|tx| {
+    let r: Result<(), StoreError> = s.write(|tx| {
         mems::create(
             tx,
             "default",
@@ -172,7 +173,7 @@ fn transaction_publishes_after_commit_and_rolls_back_on_error() {
         t.events.take().is_empty(),
         "no event for a rolled-back write"
     );
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         assert_eq!(count(c, "SELECT count(*) FROM mems"), 1);
         Ok(())
     })
@@ -246,7 +247,7 @@ fn single_user_reads_private_memory_without_crossing_workspaces_or_disclosure_le
     assert_eq!(private.writer, "me");
 
     let (a, b) = s
-        .reader(|c| {
+        .fixture_read(|c| {
             Ok::<_, StoreError>((
                 Viewer::load(c, "default", A)?,
                 Viewer::load(c, "default", B)?,
@@ -254,7 +255,7 @@ fn single_user_reads_private_memory_without_crossing_workspaces_or_disclosure_le
         })
         .unwrap();
     let texts = |v: &Viewer, f: &mems::MemFilter| -> Vec<String> {
-        s.reader(|c| mems::about(c, v, &about[0], f))
+        s.fixture_read(|c| mems::about(c, v, &about[0], f))
             .unwrap()
             .into_iter()
             .map(|m| m.text)
@@ -278,7 +279,7 @@ fn single_user_reads_private_memory_without_crossing_workspaces_or_disclosure_le
         3
     );
     // Workspace isolation and disclosure-level filtering remain independent.
-    s.reader(|c| {
+    s.fixture_read(|c| {
         assert!(mems::visible(c, &a, &private.id)?.is_some());
         assert!(mems::visible(c, &b, &private.id)?.is_some());
         assert!(mems::visible(c, &b, &shared.id)?.is_some());
@@ -322,7 +323,7 @@ fn service_cannot_read_its_own_private_memory_candidates() {
         let private = create(Visibility::Private);
         let shared = create(Visibility::Workspace);
         t.store
-            .reader(|c| {
+            .fixture_read(|c| {
                 let viewer = Viewer::bare("default", user);
                 assert!(mems::visible(c, &viewer, &private.id)?.is_none());
                 assert!(mems::visible(c, &viewer, &shared.id)?.is_some());
@@ -377,7 +378,10 @@ fn single_user_visibility_keeps_bindings_and_does_not_load_team_scopes() {
     party(&t.store, "ct_b", "default", "contact", Some(B));
     team(&t.store, "tm_top", None, &[]);
     team(&t.store, "tm_sub", Some("tm_top"), &["ct_b"]);
-    let viewer = t.store.reader(|c| Viewer::load(c, "default", B)).unwrap();
+    let viewer = t
+        .store
+        .fixture_read(|c| Viewer::load(c, "default", B))
+        .unwrap();
     assert!(viewer.scopes.is_empty());
     // Loading no longer needs any team or party schema at all.
     let c = Connection::open_in_memory().unwrap();
@@ -462,7 +466,7 @@ fn deleting_only_about_keeps_shared_memories_and_retarget_moves_them() {
     let both = mk(vec![x.clone(), y.clone()]);
     let only_y = mk(vec![y.clone()]);
     assert_eq!(tx(s, |tx| mems::delete_only_about(tx, "default", &x)), 1);
-    s.reader(|c| {
+    s.read(|c| {
         assert!(mems::get(c, &only_x.id)?.is_none());
         assert_eq!(
             mems::get(c, &both.id)?.unwrap().about,
@@ -479,7 +483,7 @@ fn deleting_only_about_keeps_shared_memories_and_retarget_moves_them() {
     let mut want = vec![both.id.clone(), only_y.id.clone()];
     want.sort();
     assert_eq!(moved, want);
-    s.reader(|c| {
+    s.read(|c| {
         assert_eq!(
             mems::get(c, &both.id)?.unwrap().about,
             std::slice::from_ref(&x)
@@ -503,10 +507,7 @@ fn deleting_only_about_keeps_shared_memories_and_retarget_moves_them() {
         )
     });
     assert_eq!(
-        s.reader(|c| mems::get(c, &only_y.id))
-            .unwrap()
-            .unwrap()
-            .about,
+        s.read(|c| mems::get(c, &only_y.id)).unwrap().unwrap().about,
         std::slice::from_ref(&y)
     );
 
@@ -537,7 +538,7 @@ fn deleting_only_about_keeps_shared_memories_and_retarget_moves_them() {
     );
     assert!(tx(s, |tx| mems::delete(tx, &both.id)));
     assert!(!tx(s, |tx| mems::delete(tx, &both.id)));
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         assert_eq!(
             count(
                 c,
@@ -574,13 +575,16 @@ fn entity_tags_filter_to_the_workspace_and_follow_tag_merges() {
     });
     assert_eq!(kept, ["tag_2", "tag_1"]);
     assert_eq!(
-        s.reader(|c| tags::of(c, "default", &x)).unwrap(),
+        s.fixture_read(|c| tags::of(c, "default", &x)).unwrap(),
         ["tag_2", "tag_1"]
     );
     tx(s, |tx| tags::set(tx, "default", &x, &["tag_1".into()]));
-    assert_eq!(s.reader(|c| tags::of(c, "default", &x)).unwrap(), ["tag_1"]);
     assert_eq!(
-        s.reader(|c| tags::objects(c, "default", "tag_1", "party"))
+        s.fixture_read(|c| tags::of(c, "default", &x)).unwrap(),
+        ["tag_1"]
+    );
+    assert_eq!(
+        s.fixture_read(|c| tags::objects(c, "default", "tag_1", "party"))
             .unwrap(),
         ["ct_x"]
     );
@@ -593,16 +597,27 @@ fn entity_tags_filter_to_the_workspace_and_follow_tag_merges() {
         tags::retarget(tx, "default", "party", "ct_y", "ct_x", None)
     });
     assert_eq!(moved, ["tag_1", "tag_2"]);
-    let mut on_x = s.reader(|c| tags::of(c, "default", &x)).unwrap();
+    let mut on_x = s.fixture_read(|c| tags::of(c, "default", &x)).unwrap();
     on_x.sort();
     assert_eq!(on_x, ["tag_1", "tag_2"]);
-    assert!(s.reader(|c| tags::of(c, "default", &y)).unwrap().is_empty());
+    assert!(
+        s.fixture_read(|c| tags::of(c, "default", &y))
+            .unwrap()
+            .is_empty()
+    );
 
     // the old tag management keeps working with entity tags pointing at the tag
     s.tags().merge("tag_2", "tag_1").unwrap();
-    assert_eq!(s.reader(|c| tags::of(c, "default", &x)).unwrap(), ["tag_1"]);
+    assert_eq!(
+        s.fixture_read(|c| tags::of(c, "default", &x)).unwrap(),
+        ["tag_1"]
+    );
     s.tags().remove("tag_1").unwrap();
-    assert!(s.reader(|c| tags::of(c, "default", &x)).unwrap().is_empty());
+    assert!(
+        s.fixture_read(|c| tags::of(c, "default", &x))
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(tx(s, |tx| tags::clear(tx, "default", &x)), 0);
 }
 
@@ -633,17 +648,17 @@ fn links_by_object_and_retarget_both_ends() {
         Ok(())
     });
     let to_y = s
-        .reader(|c| links::to(c, "default", &ct("ct_y"), None))
+        .fixture_read(|c| links::to(c, "default", &ct("ct_y"), None))
         .unwrap();
     assert_eq!(to_y.len(), 2);
     assert_eq!(
-        s.reader(|c| links::to(c, "default", &ct("ct_y"), Some("related")))
+        s.fixture_read(|c| links::to(c, "default", &ct("ct_y"), Some("related")))
             .unwrap()[0]
             .confidence,
         0.6
     );
     assert_eq!(
-        s.reader(|c| links::from(c, "default", &ct("ct_y"), Some("works_at")))
+        s.fixture_read(|c| links::from(c, "default", &ct("ct_y"), Some("works_at")))
             .unwrap()[0]
             .props["title"],
         "PM"
@@ -656,36 +671,36 @@ fn links_by_object_and_retarget_both_ends() {
     // ct_x reports_to ct_y becomes a self-link ct_x → ct_x
     assert_eq!(moved.len(), 2);
     assert!(
-        s.reader(|c| links::from(c, "default", &ct("ct_y"), None))
+        s.fixture_read(|c| links::from(c, "default", &ct("ct_y"), None))
             .unwrap()
             .is_empty()
     );
     assert!(
-        s.reader(|c| links::to(c, "default", &ct("ct_y"), None))
+        s.fixture_read(|c| links::to(c, "default", &ct("ct_y"), None))
             .unwrap()
             .is_empty()
     );
     let w = s
-        .reader(|c| links::from(c, "default", &ct("ct_x"), Some("works_at")))
+        .fixture_read(|c| links::from(c, "default", &ct("ct_x"), Some("works_at")))
         .unwrap();
     assert_eq!(w[0].props["title"], "PM");
     // split moves the recorded keys back
     let back = tx(s, |tx| links::restore(tx, "default", &moved));
     assert_eq!(back, 2);
     assert_eq!(
-        s.reader(|c| links::from(c, "default", &ct("ct_y"), Some("works_at")))
+        s.fixture_read(|c| links::from(c, "default", &ct("ct_y"), Some("works_at")))
             .unwrap()
             .len(),
         1
     );
     assert_eq!(
-        s.reader(|c| links::to(c, "default", &ct("ct_y"), Some("reports_to")))
+        s.fixture_read(|c| links::to(c, "default", &ct("ct_y"), Some("reports_to")))
             .unwrap()[0]
             .subject_id,
         "ct_x"
     );
     assert!(
-        s.reader(|c| links::from(c, "default", &ct("ct_x"), Some("works_at")))
+        s.fixture_read(|c| links::from(c, "default", &ct("ct_x"), Some("works_at")))
             .unwrap()
             .is_empty()
     );
@@ -702,7 +717,7 @@ fn links_by_object_and_retarget_both_ends() {
         &json!({"to": "2026-10"})
     )));
     assert_eq!(
-        s.reader(|c| links::get(c, "default", &k))
+        s.fixture_read(|c| links::get(c, "default", &k))
             .unwrap()
             .unwrap()
             .props["to"],
@@ -710,7 +725,7 @@ fn links_by_object_and_retarget_both_ends() {
     );
     assert!(tx(s, |tx| links::remove(tx, "default", &k)));
     assert!(
-        s.reader(|c| links::get(c, "default", &k))
+        s.fixture_read(|c| links::get(c, "default", &k))
             .unwrap()
             .is_none()
     );
@@ -763,7 +778,7 @@ fn changesets_apply_once_and_undo_within_24_hours() {
         !tx(s, |tx| changesets::mark_applied(tx, &cs, &[])),
         "second apply refused"
     );
-    let cs = s.reader(|c| changesets::get(c, &cs.id)).unwrap().unwrap();
+    let cs = s.read(|c| changesets::get(c, &cs.id)).unwrap().unwrap();
     assert_eq!(cs.before, Some(vec![json!({"name": "Sarah"})]));
     let at = cs.applied.unwrap();
     assert!(cs.undoable(at + changesets::UNDO_WINDOW_MS));
@@ -772,11 +787,11 @@ fn changesets_apply_once_and_undo_within_24_hours() {
     assert!(!tx(s, |tx| changesets::mark_undone(tx, &cs)));
     assert!(!tx(s, |tx| changesets::close_draft(tx, &cs, "dropped")));
     let r = s
-        .reader(|c| changesets::recent(c, "default", Some("undone"), 10))
+        .fixture_read(|c| changesets::recent(c, "default", Some("undone"), 10))
         .unwrap();
     assert_eq!(r.len(), 1);
     assert!(
-        s.reader(|c| changesets::recent(c, "w2", None, 10))
+        s.fixture_read(|c| changesets::recent(c, "w2", None, 10))
             .unwrap()
             .is_empty()
     );
@@ -824,7 +839,7 @@ fn confirm_decisions_without_an_item() {
     // the old repository sees it (待处理 lists every open decision)
     assert_eq!(s.decisions().open("default").unwrap().len(), 1);
     assert_eq!(
-        s.reader(|c| decisions::open_for(c, "default", "mem", "mm_1"))
+        s.fixture_read(|c| decisions::open_for(c, "default", "mem", "mm_1"))
             .unwrap()
             .unwrap()
             .id,
@@ -850,7 +865,7 @@ fn confirm_decisions_without_an_item() {
         ("resolved", json!({"choice": "yes"}))
     );
     assert!(
-        s.reader(|c| decisions::open_for(c, "default", "mem", "mm_1"))
+        s.fixture_read(|c| decisions::open_for(c, "default", "mem", "mm_1"))
             .unwrap()
             .is_none()
     );
@@ -881,7 +896,7 @@ fn audit_and_revisions() {
         )
     });
     let r = s
-        .reader(|c| base::revisions(c, "default", "party", "ct_x"))
+        .fixture_read(|c| base::revisions(c, "default", "party", "ct_x"))
         .unwrap();
     assert_eq!(r.len(), 1);
     assert_eq!(r[0].0, 2);
@@ -889,7 +904,7 @@ fn audit_and_revisions() {
         r[0].1,
         json!({"before": {"name": "a"}, "after": {"name": "b"}})
     );
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         assert_eq!(count(c, "SELECT count(*) FROM audit WHERE action = 'party.merge' AND detail = '{\"attrs\":2}'"), 1);
         Ok(())
     })

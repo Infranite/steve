@@ -51,10 +51,13 @@ pub trait EventSink: Send + Sync {
     async fn ingest(&self, ws: &str, connection_id: &str, ev: SignalEvent) -> Result<(), String>;
 }
 
-/// `{type:"gh", id, ws}`. Called after the commit. The integrator adds a
-/// `IntegrationsEvent::Gh { id, ws }` variant (and `"gh"` to `the typed event contract`) and publishes it.
-pub trait GhNotifier: Send + Sync {
-    fn gh(&self, ws: &str, id: &str);
+pub(crate) fn emit(w: &mut steve_store::W<'_>, ws: &str, id: &str) {
+    w.emit(steve_types::DomainEvent::from(
+        steve_types::IntegrationsEvent::Gh {
+            id: id.to_owned(),
+            ws: ws.into(),
+        },
+    ));
 }
 
 /// Drops everything (until the integrator wires the real ones).
@@ -67,17 +70,12 @@ impl EventSink for NoSink {
     }
 }
 
-impl GhNotifier for NoSink {
-    fn gh(&self, _: &str, _: &str) {}
-}
-
 /// Records what it gets, for tests. Dedupes on `(connection, external_id)` like S1 does, and keeps
 /// what it would have dropped in `duplicates`.
 #[derive(Default)]
 pub struct RecordingSink {
     events: Mutex<Vec<(String, String, SignalEvent)>>,
     duplicates: Mutex<Vec<SignalEvent>>,
-    notices: Mutex<Vec<(String, String)>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -102,14 +100,9 @@ impl RecordingSink {
     pub fn duplicates(&self) -> Vec<SignalEvent> {
         lock(&self.duplicates).clone()
     }
-    /// `(ws, id)` of the `gh` notices.
-    pub fn notices(&self) -> Vec<(String, String)> {
-        lock(&self.notices).clone()
-    }
     pub fn clear(&self) {
         lock(&self.events).clear();
         lock(&self.duplicates).clear();
-        lock(&self.notices).clear();
     }
 }
 
@@ -126,11 +119,5 @@ impl EventSink for RecordingSink {
         }
         all.push((ws.into(), connection_id.into(), ev));
         Ok(())
-    }
-}
-
-impl GhNotifier for RecordingSink {
-    fn gh(&self, ws: &str, id: &str) {
-        lock(&self.notices).push((ws.into(), id.into()));
     }
 }

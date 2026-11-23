@@ -26,6 +26,7 @@ use std::time::Duration;
 use steve_runtime::testkit::eventually;
 use steve_runtime::testkit::eventually_sync;
 use steve_runtime::testkit::process::{Child, Command};
+use steve_store::testkit::hub::node_process;
 
 use serde_json::{Value, json};
 
@@ -140,33 +141,15 @@ impl Home {
             .count()
     }
     /// The test's own database (in the temp home), read-only.
-    fn db(&self) -> rusqlite::Connection {
-        rusqlite::Connection::open_with_flags(
-            self.steve().join("data/steve.sqlite3"),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .expect("db")
+    fn db_path(&self) -> std::path::PathBuf {
+        self.steve().join("data/steve.sqlite3")
     }
     /// Stage an already-due command in this isolated fixture. Deadline calculation and restart
     /// recovery are exercised with an injected clock in node_runtime; this subprocess test keeps
     /// the real adapter/Node/Hub/client path without a production clock override.
     fn make_retry_due(&self, session: &str) {
-        let db = rusqlite::Connection::open(self.steve().join("data/steve.sqlite3")).unwrap();
-        db.busy_timeout(Duration::from_secs(5)).unwrap();
-        let changed = db.execute(
-            "UPDATE node_commands SET retry_at=0 WHERE method='start_turn' AND state='pending' AND maybe_sent=0 AND target_attempt=(SELECT active_attempt FROM runtime_sessions WHERE session_id=?)",
-            [session],
-        ).unwrap();
+        let changed = node_process::make_unsent_turn_retry_due(&self.db_path(), session).unwrap();
         assert_eq!(changed, 1, "exactly the fixture's unsent retry becomes due");
-    }
-
-    fn count(&self, sql: &str, p: &str) -> i64 {
-        self.db()
-            .query_row(sql, [p], |r| r.get(0))
-            .unwrap_or_else(|e| panic!("{sql}: {e}"))
-    }
-    fn one(&self, sql: &str, p: &str) -> Option<String> {
-        self.db().query_row(sql, [p], |r| r.get(0)).ok()
     }
 }
 
@@ -475,7 +458,7 @@ impl Client {
     }
     /// A new item on the claude-code bot, and the session it opened.
     async fn item(&self, h: &Home, goal: &str) -> String {
-        let (_, state) = self.call("GET", "/api/state", None).await;
+        let (_, state) = self.call("GET", "/api/shell", None).await;
         let bot = state["bots"]
             .as_array()
             .and_then(|bs| bs.iter().find(|b| b["harness"] == "claude-code"))
@@ -521,14 +504,12 @@ impl Client {
         let item = i["id"].as_str().expect("item").to_string();
         // Creation starts the session synchronously, or returns the item with a failure card.
         // Waiting cannot turn a refused start into a session; report the actual blocker now.
-        h.one("SELECT id FROM sessions WHERE item_id=?", &item)
+        node_process::session_id_by_item(&h.db_path(), &item)
+            .unwrap()
             .unwrap_or_else(|| {
                 panic!(
                     "item creation returned without a session: item={i}; failure={:?}; log:\n{}",
-                    h.one(
-                        "SELECT question FROM decisions WHERE item_id=? AND kind='fail' AND status='open'",
-                        &item,
-                    ),
+                    node_process::decision_question_by_item_fail_open(&h.db_path(), &item).unwrap(),
                     hub_log(h),
                 )
             })
@@ -559,37 +540,17 @@ async fn drain(h: &Home, method: &str, token: &str) -> Value {
 }
 
 fn steve_v1(h: &Home, sid: &str, needle: &str) -> i64 {
-    // The prompt is stored before the adapter starts. Matching it would let the test kill
-    // the Hub before a service Node has even spawned the adapter, then attribute that late
-    // spawn to the no-resume copy. Wait for output, not an echo of the input or queued text.
-    h.db()
-        .query_row(
-            "SELECT COUNT(*) FROM events WHERE session_id=? AND format='steve.v1'
-             AND kind NOT IN ('user','queued') AND COALESCE(json_extract(data,'$.role'),'') <> 'user'
-             AND instr(data, ?) > 0",
-            [sid, needle],
-            |r| r.get(0),
-        )
-        .expect("events")
+    node_process::agent_output_count(&h.db_path(), sid, needle).unwrap()
 }
 
 /// The open permission card of `sid`, if any.
 fn open_card(h: &Home, sid: &str) -> Option<String> {
-    h.one(
-        "SELECT id FROM decisions WHERE session_id=? AND subject_type='tool_call' AND status='open'",
-        sid,
-    )
+    node_process::decision_id_by_session_tool_call_open(&h.db_path(), sid).unwrap()
 }
 
 /// Attempts of `sid` in `state`.
 fn attempts(h: &Home, sid: &str, state: &str) -> i64 {
-    h.db()
-        .query_row(
-            "SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND a.state=?",
-            [sid, state],
-            |r| r.get(0),
-        )
-        .expect("attempts")
+    node_process::attempt_count(&h.db_path(), sid, state).unwrap()
 }
 
 /// Each running Hub reports the port it bound itself.
@@ -637,21 +598,12 @@ async fn provider_stream_interruption_is_retried_without_continues_then_shown_as
             "stream failure acceptance @tool execute Bash\n@streamfail 3",
         )
         .await;
-    let item = h
-        .one("SELECT item_id FROM sessions WHERE id=?", &sid)
+    let item = node_process::session_item_id_by_id(&h.db_path(), &sid)
+        .unwrap()
         .unwrap();
-    let retry_count = || {
-        h.count("SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=?", &sid)
-    };
-    let cards = || {
-        h.count(
-            "SELECT COUNT(*) FROM decisions WHERE item_id=? AND kind='fail' AND status='open'",
-            &item,
-        )
-    };
-    let continues = || {
-        h.count("SELECT COUNT(*) FROM timeline WHERE item_id=? AND actor='steve' AND text LIKE 'Steve 接手：%'", &item)
-    };
+    let retry_count = || node_process::attempt_count_by_session(&h.db_path(), &sid).unwrap();
+    let cards = || node_process::decision_count_by_item_fail_open(&h.db_path(), &item).unwrap();
+    let continues = || node_process::item_takeover_notice_count(&h.db_path(), &item).unwrap();
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
             "The first Node retry is scheduled after the failed attempt; first retry; {}",
@@ -663,10 +615,7 @@ async fn provider_stream_interruption_is_retried_without_continues_then_shown_as
     assert_eq!(continues(), 0);
     // At least one tool already ran; this is the mid-work interruption, not the old no-action retry.
     assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM events WHERE session_id=? AND kind='tool'",
-            &sid
-        ),
+        node_process::event_count_by_session_tool(&h.db_path(), &sid).unwrap(),
         2
     );
     h.make_retry_due(&sid);
@@ -697,11 +646,8 @@ async fn provider_stream_interruption_is_retried_without_continues_then_shown_as
     eventually_sync(diagnostic, || cards() == 1).await;
     assert_eq!(retry_count(), 3);
     assert_eq!(continues(), 0);
-    let question = h
-        .one(
-            "SELECT question FROM decisions WHERE item_id=? AND kind='fail' AND status='open'",
-            &item,
-        )
+    let question = node_process::decision_question_by_item_fail_open(&h.db_path(), &item)
+        .unwrap()
         .unwrap();
     assert!(
         question.starts_with("模型服务中断：") && question.contains("已自动重试 2 次仍失败"),
@@ -716,14 +662,15 @@ async fn provider_stream_interruption_is_retried_without_continues_then_shown_as
     assert_eq!(retries.len(), 2);
     assert!(retries.iter().all(|p| p.contains("不要重做")));
     assert_eq!(
-        h.one("SELECT status FROM items WHERE id=?", &item)
+        node_process::items_status_by_id(&h.db_path(), &item)
+            .unwrap()
             .as_deref(),
         Some("wait")
     );
-    let (status, state) = c.call("GET", "/api/state", None).await;
+    let (status, state) = c.call("GET", "/api/snapshot?kinds=decision", None).await;
     assert_eq!(status, 200);
     assert!(
-        state["decisions"]
+        state["views"]["decision"]
             .as_array()
             .unwrap()
             .iter()
@@ -751,18 +698,11 @@ async fn provider_capacity_waits_for_recovery_then_exhausts_as_one_service_card(
             "capacity failure acceptance @tool execute Bash\n@capacityfail 4 5",
         )
         .await;
-    let item = h
-        .one("SELECT item_id FROM sessions WHERE id=?", &sid)
+    let item = node_process::session_item_id_by_id(&h.db_path(), &sid)
+        .unwrap()
         .unwrap();
-    let retry_count = || {
-        h.count("SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=?", &sid)
-    };
-    let cards = || {
-        h.count(
-            "SELECT COUNT(*) FROM decisions WHERE item_id=? AND kind='fail' AND status='open'",
-            &item,
-        )
-    };
+    let retry_count = || node_process::attempt_count_by_session(&h.db_path(), &sid).unwrap();
+    let cards = || node_process::decision_count_by_item_fail_open(&h.db_path(), &item).unwrap();
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
             "The first capacity retry is saved; first capacity wait; {}",
@@ -771,10 +711,8 @@ async fn provider_capacity_waits_for_recovery_then_exhausts_as_one_service_card(
     });
     eventually_sync(diagnostic, || retry_count() == 2).await;
     assert_eq!(cards(), 0);
-    let (scheduled, observed, completion): (i64, i64, String) = h.db().query_row(
-        "SELECT c.retry_at,a.updated,a.completion FROM node_commands c JOIN runtime_attempts a ON a.turn_id=(SELECT turn_id FROM runtime_attempts WHERE attempt_id=c.target_attempt) AND a.ordinal=0 WHERE c.target_attempt=(SELECT active_attempt FROM runtime_sessions WHERE session_id=?)",
-        [&sid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    ).unwrap();
+    let (scheduled, observed, completion) =
+        node_process::capacity_retry(&h.db_path(), &sid).unwrap();
     let completion: steve_node_api::Completion = serde_json::from_str(&completion).unwrap();
     let recovery =
         steve_acp::capacity_recovery_at(&completion.error.unwrap().safe_detail, observed).unwrap();
@@ -783,10 +721,7 @@ async fn provider_capacity_waits_for_recovery_then_exhausts_as_one_service_card(
         "the advertised recovery must be respected"
     );
     assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM events WHERE session_id=? AND kind='tool'",
-            &sid
-        ),
+        node_process::event_count_by_session_tool(&h.db_path(), &sid).unwrap(),
         2,
         "the first attempt already ran a tool"
     );
@@ -800,17 +735,7 @@ async fn provider_capacity_waits_for_recovery_then_exhausts_as_one_service_card(
         h.make_retry_due(&sid);
     }
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
-        let sql = "SELECT a.ordinal,a.state,a.completion,a.updated \
-                   FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) \
-                   WHERE t.session_id=? ORDER BY a.ordinal";
-        let observed_attempts: Vec<(i64, String, Option<String>, i64)> = h
-            .db()
-            .prepare(sql)
-            .unwrap()
-            .query_map([&sid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap();
+        let observed_attempts = node_process::attempt_observations(&h.db_path(), &sid).unwrap();
         format!(
             "capacity retries reach the service-card ceiling; attempts={observed_attempts:?}; now={}; Hub log:\n{}",
             steve_store::now(),
@@ -819,12 +744,12 @@ async fn provider_capacity_waits_for_recovery_then_exhausts_as_one_service_card(
     });
     eventually_sync(diagnostic, || cards() == 1).await;
     assert_eq!(retry_count(), 4);
-    assert_eq!(h.count("SELECT COUNT(*) FROM timeline WHERE item_id=? AND actor='steve' AND text LIKE 'Steve 接手：%'", &item), 0);
-    let question = h
-        .one(
-            "SELECT question FROM decisions WHERE item_id=? AND kind='fail' AND status='open'",
-            &item,
-        )
+    assert_eq!(
+        node_process::item_takeover_notice_count(&h.db_path(), &item).unwrap(),
+        0
+    );
+    let question = node_process::decision_question_by_item_fail_open(&h.db_path(), &item)
+        .unwrap()
         .unwrap();
     assert!(
         question.starts_with("模型服务容量不足：")
@@ -845,14 +770,15 @@ async fn provider_capacity_waits_for_recovery_then_exhausts_as_one_service_card(
             .all(|p| p.contains("不要重做") && p.contains("模型服务容量不足"))
     );
     assert_eq!(
-        h.one("SELECT status FROM items WHERE id=?", &item)
+        node_process::items_status_by_id(&h.db_path(), &item)
+            .unwrap()
             .as_deref(),
         Some("wait")
     );
-    let (status, state) = c.call("GET", "/api/state", None).await;
+    let (status, state) = c.call("GET", "/api/snapshot?kinds=decision", None).await;
     assert_eq!(status, 200);
     assert!(
-        state["decisions"]
+        state["views"]["decision"]
             .as_array()
             .unwrap()
             .iter()
@@ -884,10 +810,7 @@ async fn a_node_session_end_to_end() {
     });
     eventually_sync(diagnostic, || steve_v1(&h, &sid, "hello-node-7Q") > 0).await;
     assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=? AND node_id='local'",
-            &sid
-        ),
+        node_process::binding_count_by_session_local(&h.db_path(), &sid).unwrap(),
         1,
         "bound to the local Node"
     );
@@ -896,10 +819,7 @@ async fn a_node_session_end_to_end() {
     })
     .await;
     assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM events WHERE session_id=? AND format<>'steve.v1'",
-            &sid
-        ),
+        node_process::event_count_by_session_not_finished(&h.db_path(), &sid).unwrap(),
         0,
         "nothing in another format"
     );
@@ -935,7 +855,8 @@ async fn a_node_session_end_to_end() {
     });
     eventually_sync(diagnostic, || steve_v1(&h, &sid, "perm:selected:") > 0).await;
     assert_eq!(
-        h.one("SELECT status FROM decisions WHERE id=?", &card)
+        node_process::decision_status_by_id(&h.db_path(), &card)
+            .unwrap()
             .as_deref(),
         Some("resolved")
     );
@@ -958,10 +879,7 @@ async fn a_node_session_end_to_end() {
         )
     });
     eventually_sync(diagnostic, || {
-        h.count(
-            "SELECT COUNT(*) FROM runtime_turns WHERE session_id=? AND state<>'finished'",
-            &sid,
-        ) == 0
+        node_process::runtime_turns_count_by_session_not_finished(&h.db_path(), &sid).unwrap() == 0
     })
     .await;
     assert!(
@@ -1023,12 +941,9 @@ async fn a_node_session_end_to_end() {
         )
     });
     eventually_sync(diagnostic, || {
-            h.count(
-                "SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND json_extract(a.completion,'$.stop_reason')='node_restarted'",
-                &sid,
-            ) == 1
-        })
-        .await;
+        node_process::attempt_count_by_session_runtime_attempts(&h.db_path(), &sid).unwrap() == 1
+    })
+    .await;
     eventually_sync(
         "The session records the reason its Node attempt was interrupted.",
         || steve_v1(&h, &sid, "Node 重启了") > 0,
@@ -1051,13 +966,11 @@ async fn a_node_session_end_to_end() {
     let c = Client::login(&h).await;
     let r = c.say(&sid, "回滚验收-R5 @say parked").await;
     assert_eq!(r["result"], "queued", "{r}");
-    eventually_sync("The session records that it is parked on its required Node.", || {
-            h.count(
-                "SELECT COUNT(*) FROM events WHERE session_id=? AND kind='system' AND json_extract(data,'$.parked')=1",
-                &sid,
-            ) > 0
-        })
-        .await;
+    eventually_sync(
+        "The session records that it is parked on its required Node.",
+        || node_process::event_count_by_session_system(&h.db_path(), &sid).unwrap() > 0,
+    )
+    .await;
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(h.got("回滚验收-R5"), 0, "no runner got it");
     assert_eq!(h.got("崩溃验收-K2"), 1, "still never re-run");
@@ -1099,18 +1012,12 @@ async fn a_permission_nobody_answers_expires() {
         )
     });
     eventually_sync(diagnostic, || {
-        h.one("SELECT status FROM decisions WHERE id=?", &card)
+        node_process::decision_status_by_id(&h.db_path(), &card)
+            .unwrap()
             .is_some_and(|s| s != "open")
     })
     .await;
-    let (status, result): (String, String) = h
-        .db()
-        .query_row(
-            "SELECT status, COALESCE(result,'') FROM decisions WHERE id=?",
-            [&card],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .expect("card");
+    let (status, result) = node_process::decision_state(&h.db_path(), &card).unwrap();
     eprintln!("expired card: {status} {result}");
     assert_eq!(status, "expired", "{result}");
     let (st, v) = c
@@ -1129,10 +1036,7 @@ async fn a_permission_nobody_answers_expires() {
 
 /// Events of `sid` (any format) mentioning a Hub restart.
 fn restart_notices(h: &Home, sid: &str) -> i64 {
-    h.count(
-        "SELECT COUNT(*) FROM events WHERE session_id=? AND instr(data, 'Hub 重启') > 0",
-        sid,
-    )
+    node_process::event_count_by_session(&h.db_path(), sid).unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1157,10 +1061,7 @@ async fn an_idle_node_session_is_not_resumed_after_a_restart() {
     })
     .await;
     let fails = || {
-        h.count(
-            "SELECT COUNT(*) FROM decisions WHERE item_id=(SELECT item_id FROM sessions WHERE id=?) AND kind='fail' AND status='open'",
-            &sid,
-        )
+        node_process::decision_count_by_id_fail_open_for_selected_row(&h.db_path(), &sid).unwrap()
     };
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
@@ -1210,14 +1111,7 @@ async fn a_node_session_shows_its_status_and_harness_id() {
     });
     eventually_sync(diagnostic, || steve_v1(&h, &sid, "status-node-5S") > 0).await;
     // its view under the path model, in shadow (S2), against the local Node's roots today
-    let (rw, extra): (String, Option<i64>) = h
-        .db()
-        .query_row(
-            "SELECT json_extract(view,'$.rw'), extra_count FROM view_shadow WHERE session_id=?",
-            [&sid],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .expect("the session's view is recorded at bind");
+    let (rw, extra) = node_process::recorded_session_view(&h.db_path(), &sid).unwrap();
     assert!(rw.contains("worktrees") || rw.contains("scratch"), "{rw}");
     assert!(extra.is_some(), "the local Node's roots are known");
     let status = |v: &Value| v["status"].as_str().unwrap_or_default().to_string();
@@ -1451,10 +1345,7 @@ async fn an_idle_node_session_is_let_go_and_the_next_message_resumes_it() {
     });
     eventually_sync(diagnostic, || !alive(pid)).await;
     assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM node_commands WHERE method='release_session' AND json_extract(request,'$.body')=?",
-            &sid
-        ),
+        node_process::command_count_release_session(&h.db_path(), &sid).unwrap(),
         1,
         "one release"
     );
@@ -1509,10 +1400,7 @@ async fn the_node_is_the_default() {
     });
     eventually_sync(diagnostic, || steve_v1(&h, &sid, "default-node-B6") > 0).await;
     assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=? AND node_id='local'",
-            &sid
-        ),
+        node_process::binding_count_by_session_local(&h.db_path(), &sid).unwrap(),
         1,
         "bound to the local Node"
     );
@@ -1525,8 +1413,11 @@ async fn the_node_is_the_default() {
             hub_log(&h)
         )
     });
-    eventually_sync(diagnostic, ||h.count("SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND a.state='finished'",&sid)>0
-        && h.count("SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND a.state<>'finished'",&sid)==0).await;
+    eventually_sync(diagnostic, || {
+        node_process::attempt_count_by_session_finished(&h.db_path(), &sid).unwrap() > 0
+            && node_process::attempt_count_by_session_not_finished(&h.db_path(), &sid).unwrap() == 0
+    })
+    .await;
     assert!(
         h.spawns() >= 1,
         "the initial reply came from a started adapter"
@@ -1563,13 +1454,11 @@ async fn the_node_is_the_default() {
     );
     let r = c.say(&sid, "副本验收-C6 @say copy").await;
     assert_eq!(r["result"], "queued", "{r}");
-    eventually_sync("The session records that it is parked on its required Node.", || {
-            h.count(
-                "SELECT COUNT(*) FROM events WHERE session_id=? AND kind='system' AND json_extract(data,'$.parked')=1",
-                &sid,
-            ) > 0
-        })
-        .await;
+    eventually_sync(
+        "The session records that it is parked on its required Node.",
+        || node_process::event_count_by_session_system(&h.db_path(), &sid).unwrap() > 0,
+    )
+    .await;
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(h.got("副本验收-C6"), 0, "no runner got it");
     assert_eq!(hub.spawns(), 0, "no adapter started for it");
@@ -1586,42 +1475,28 @@ async fn a_new_session_no_node_takes_is_refused_visibly() {
     let c = Client::login(&h).await;
     let before = wait_node_health(&h, |n| n["reconciled"] == true).await;
     assert_eq!(before["fallbacks"], 0, "{before}");
-    let db = rusqlite::Connection::open(h.steve().join("data/steve.sqlite3")).expect("db");
-    db.busy_timeout(Duration::from_secs(5)).expect("timeout");
-    db.execute(
-        "UPDATE bots SET perm_mode='dontAsk' WHERE harness='claude-code'",
-        [],
-    )
-    .expect("dontAsk");
-    let sid = c.item(&h, "回退验收 @say fallback-unbound-3F").await;
+    node_process::disable_claude_permission_prompts(&h.db_path()).unwrap();
+    let sid = c.item(&h, "回退验收 @say fallback-legacy-3F").await;
     let n = wait_node_health(&h, |n| n["fallbacks"] == 1).await;
     assert_eq!(n["fallbacks"], 1, "{n}");
     assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=?",
-            &sid
-        ),
+        node_process::binding_count_by_session(&h.db_path(), &sid).unwrap(),
         0,
         "not bound"
     );
     assert_eq!(
-        h.one("SELECT status FROM sessions WHERE id=?", &sid)
+        node_process::session_status_by_id(&h.db_path(), &sid)
+            .unwrap()
             .as_deref(),
         Some("ended")
     );
     assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM events WHERE session_id=? AND kind='system' AND json_extract(data,'$.refused')=1 AND instr(data,'dontAsk')>0",
-            &sid
-        ),
+        node_process::event_count_by_session_system_system(&h.db_path(), &sid).unwrap(),
         1,
         "it says why"
     );
     assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM decisions d JOIN sessions s ON s.item_id=d.item_id WHERE s.id=? AND d.kind='fail' AND d.status='open' AND instr(d.question,'dontAsk')>0",
-            &sid
-        ),
+        node_process::decision_count_by_id_fail_open(&h.db_path(), &sid).unwrap(),
         1,
         "and on its item"
     );
@@ -1679,7 +1554,7 @@ async fn git_worktree_case(mode: &str) {
         )
         .await;
     assert_eq!(st, 200, "{p}");
-    let (_, state) = c.call("GET", "/api/state", None).await;
+    let (_, state) = c.call("GET", "/api/shell", None).await;
     let bot = state["bots"]
         .as_array()
         .and_then(|bs| bs.iter().find(|b| b["harness"] == "claude-code"))
@@ -1697,7 +1572,7 @@ async fn git_worktree_case(mode: &str) {
     let item = i["id"].as_str().expect("item").to_string();
     let mut sid = None;
     eventually_sync("The item receives its session binding.", || {
-        sid = h.one("SELECT id FROM sessions WHERE item_id=?", &item);
+        sid = node_process::session_id_by_item(&h.db_path(), &item).unwrap();
         sid.is_some()
     })
     .await;
@@ -1712,7 +1587,9 @@ async fn git_worktree_case(mode: &str) {
     eventually_sync(diagnostic, || attempts(&h, &sid, "finished") >= 1).await;
     assert!(wt.join("a.txt").exists(), "the worktree is there");
     assert_eq!(
-        h.one("SELECT cwd FROM items WHERE id=?", &item).as_deref(),
+        node_process::items_cwd_by_id(&h.db_path(), &item)
+            .unwrap()
+            .as_deref(),
         Some(wt.to_string_lossy().as_ref())
     );
     assert_eq!(
@@ -1720,12 +1597,10 @@ async fn git_worktree_case(mode: &str) {
         format!("steve/{}", item.to_lowercase())
     );
     // the Node made it: its prepare names the place, and the agent opened there
-    let kind = h
-        .one(
-            "SELECT json_extract(request,'$.body.kind.type') FROM node_commands WHERE method='prepare_workspace' AND json_extract(request,'$.body.resource')=?",
-            &format!("item:{item}"),
-        )
-        .expect("a prepare");
+    let kind =
+        node_process::command_kind_type_prepare_workspace(&h.db_path(), &format!("item:{item}"))
+            .unwrap()
+            .expect("a prepare");
     assert_eq!(kind, "worktree");
     let real = wt
         .canonicalize()
@@ -1758,19 +1633,11 @@ async fn git_worktree_case(mode: &str) {
     .await;
     eventually_sync(
         "Removing the Node worktree records one cleanup event.",
-        || {
-            h.count(
-                "SELECT COUNT(*) FROM timeline WHERE item_id=? AND text LIKE '删除了工作区%'",
-                &item,
-            ) == 1
-        },
+        || node_process::timeline_count_by_item_matching_text(&h.db_path(), &item).unwrap() == 1,
     )
     .await;
     assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM node_commands WHERE method='tidy_workspace' AND json_extract(request,'$.subject')=?",
-            &format!("tidy:{item}")
-        ),
+        node_process::command_count_tidy_workspace(&h.db_path(), &format!("tidy:{item}")).unwrap(),
         1
     );
     // nothing was committed on it: its branch is merged, and goes with it, as without the Node
@@ -1786,10 +1653,7 @@ async fn git_worktree_case(mode: &str) {
         ""
     );
     assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM timeline WHERE item_id=? AND text LIKE '%删除了已合并的分支%'",
-            &item
-        ),
+        node_process::timeline_count_by_item_matching_text_timeline(&h.db_path(), &item).unwrap(),
         1
     );
 }
@@ -1869,18 +1733,22 @@ async fn reply_images_from_service_node_are_authenticated_durable_deliveries() {
         )
         .await;
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
-        format!("The Node reply publishes its authenticated file delivery link; Hub: {}\nNode: {}\nEvents: {:?}\nSource: {:?}",
-        hub_log(&h),
-        std::fs::read_to_string(h.steve().join("data/node/logs/local-node.log")).unwrap_or_default(),
-        h.one("SELECT group_concat(kind||':'||data,char(10)) FROM events WHERE session_id=? AND kind IN ('text','turn_end','system','error')", &sid),
-        std::fs::read_to_string(format!("{}.image", log.display()))
-    )
+        format!(
+            "The Node reply publishes its authenticated file delivery link; Hub: {}\nNode: {}\nEvents: {:?}\nSource: {:?}",
+            hub_log(&h),
+            std::fs::read_to_string(h.steve().join("data/node/logs/local-node.log"))
+                .unwrap_or_default(),
+            node_process::session_work_event_trace(&h.db_path(), &sid).unwrap(),
+            std::fs::read_to_string(format!("{}.image", log.display()))
+        )
     });
     eventually_sync(diagnostic, || {
         steve_v1(&h, &sid, "/api/file-deliveries/") > 0
     })
     .await;
-    let text = h.one("SELECT json_extract(data,'$.text') FROM events WHERE session_id=? AND kind='text' AND instr(data,'/api/file-deliveries/')>0 ORDER BY rowid DESC LIMIT 1", &sid).unwrap();
+    let text = node_process::latest_event_text_by_session_text(&h.db_path(), &sid)
+        .unwrap()
+        .unwrap();
     assert!(
         text.starts_with("![授权二维码](/api/file-deliveries/"),
         "{text}"
@@ -1929,10 +1797,7 @@ async fn reply_images_from_service_node_are_authenticated_durable_deliveries() {
         .unwrap();
     assert_eq!(wrong.status().as_u16(), 404);
     assert_eq!(
-        h.count(
-            "SELECT count(*) FROM deliveries WHERE workspace_id=? AND reply=1",
-            "default"
-        ),
+        node_process::deliveries_count_by_workspace_with_reply(&h.db_path(), "default").unwrap(),
         1
     );
     // Exercise multiple bulk frames too; a tiny QR alone cannot detect overlarge hex frames.
@@ -1967,9 +1832,10 @@ async fn reply_images_from_service_node_are_authenticated_durable_deliveries() {
         )
     });
     eventually_sync(diagnostic, || {
-        text = h.one("SELECT json_extract(data,'$.text') FROM events WHERE session_id=? AND kind='text' AND instr(data,'多块图片')>0 AND instr(data,'/api/file-deliveries/')>0 ORDER BY rowid DESC LIMIT 1", &sid);
+        text = node_process::latest_event_text_by_session_text_text(&h.db_path(), &sid).unwrap();
         text.is_some()
-    }).await;
+    })
+    .await;
     std::fs::remove_file(large_source).unwrap();
     let text = text.unwrap();
     let path = text.split_once("](").unwrap().1.split(')').next().unwrap();
@@ -2045,10 +1911,7 @@ async fn a_node_sessions_attachments_are_placed_by_the_node() {
     });
     eventually_sync(diagnostic, || steve_v1(&h, &sid, "ready-A1") > 0).await;
     assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=? AND node_id='local'",
-            &sid
-        ),
+        node_process::binding_count_by_session_local(&h.db_path(), &sid).unwrap(),
         1,
         "bound to the local Node"
     );
@@ -2073,8 +1936,8 @@ async fn a_node_sessions_attachments_are_placed_by_the_node() {
     .await;
     let blocks = blocks.expect("blocks");
     let text = blocks[0]["text"].as_str().expect("text").to_string();
-    let cwd = h
-        .one("SELECT cwd FROM sessions WHERE id=?", &sid)
+    let cwd = node_process::session_cwd_by_id(&h.db_path(), &sid)
+        .unwrap()
         .expect("cwd");
     let cwd = PathBuf::from(cwd).canonicalize().expect("cwd exists");
     assert!(
@@ -2132,14 +1995,7 @@ async fn a_node_sessions_attachments_are_placed_by_the_node() {
 
     // the blob is gone from the Hub: the turn goes on without it, and says so
     let lost = c.upload("lost.txt", b"never placed".to_vec()).await;
-    let (ws, sha): (String, String) = h
-        .db()
-        .query_row(
-            "SELECT workspace_id, sha256 FROM files WHERE id=?",
-            [&lost],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .expect("file row");
+    let (ws, sha) = node_process::file_location(&h.db_path(), &lost).unwrap();
     std::fs::remove_file(
         h.steve()
             .join("data/files")
@@ -2344,10 +2200,9 @@ async fn a_service_node_turn_outlives_the_hub() {
         )
     });
     eventually_sync(diagnostic, || {
-        h.count(
-            "SELECT COUNT(*) FROM nodes WHERE node_id=? AND local=1 AND generation>0",
-            "local",
-        ) == 1
+        node_process::node_count_by_node_id_with_local_with_generation(&h.db_path(), "local")
+            .unwrap()
+            == 1
     })
     .await;
     let sid = c.item(&h, "服务验收 @say hello-service-3S").await;
@@ -2359,21 +2214,14 @@ async fn a_service_node_turn_outlives_the_hub() {
     });
     eventually_sync(diagnostic, || steve_v1(&h, &sid, "hello-service-3S") > 0).await;
     assert_eq!(
-        h.count(
-            "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=? AND node_id='local'",
-            &sid
-        ),
+        node_process::binding_count_by_session_local(&h.db_path(), &sid).unwrap(),
         1
     );
 
     // the Hub goes away mid-turn, the way a service manager stops it
     let states = |h: &Home| -> String {
-        let db = h.db();
-        let mut st = db.prepare("SELECT a.state FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=?").unwrap();
-        st.query_map([&sid], |r| r.get::<_, String>(0))
+        node_process::attempt_states(&h.db_path(), &sid)
             .unwrap()
-            .map(|r| r.unwrap())
-            .collect::<Vec<_>>()
             .join(",")
     };
     let logs = |h: &Home| {
@@ -2441,11 +2289,10 @@ async fn a_service_node_turn_outlives_the_hub() {
             tail(h.steve().join("data/node/logs/local-node.log"))
         )
     });
-    eventually_sync(diagnostic, || h.count(
-            "SELECT COUNT(*) FROM events WHERE session_id=? AND kind NOT IN ('user','queued') AND instr(data,'survived-V6')>0",
-            &sid
-        ) > 0)
-        .await;
+    eventually_sync(diagnostic, || {
+        node_process::event_count_by_session_selected(&h.db_path(), &sid).unwrap() > 0
+    })
+    .await;
     assert!(
         started.elapsed() >= Duration::from_secs(10),
         "it ran its 12 s (seen from here a little later than it began), not cut short"
@@ -2466,7 +2313,7 @@ async fn a_service_node_turn_outlives_the_hub() {
 }
 
 /// B7: tags on the Hub's own Node; an item asking for one the Hub has keeps its new sessions
-/// here, and one asking for a tag no device has is told so, placed as usual.
+/// here, and an unmatched tag prevents placement.
 #[tokio::test(flavor = "multi_thread")]
 async fn node_tags_send_work_where_it_fits() {
     let h = Home::new();
@@ -2509,8 +2356,8 @@ async fn node_tags_send_work_where_it_fits() {
     assert_eq!(v["owner_context"], json!("off"));
 
     let sid = c.item(&h, "标签验收 @say hello-tags-5T").await;
-    let item = h
-        .one("SELECT item_id FROM sessions WHERE id=?", &sid)
+    let item = node_process::session_item_id_by_id(&h.db_path(), &sid)
+        .unwrap()
         .expect("item");
     let (s, _) = c
         .call(
@@ -2539,12 +2386,7 @@ async fn node_tags_send_work_where_it_fits() {
     let next = v["session"].as_str().expect("new session").to_string();
     eventually_sync(
         "The session is placed on the local Node matching its required tag.",
-        || {
-            h.count(
-                "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=? AND node_id='local'",
-                &next,
-            ) == 1
-        },
+        || node_process::binding_count_by_session_local(&h.db_path(), &next).unwrap() == 1,
     )
     .await;
 
@@ -2563,14 +2405,13 @@ async fn node_tags_send_work_where_it_fits() {
             Some(json!({})),
         )
         .await;
-    // the tag narrows the Bot's execution Nodes; none of them has it, so nothing is placed
     assert_ne!(s, 200, "{v}");
     assert!(
         v["error"].as_str().is_some_and(|e| e.contains("标签")),
         "{v}"
     );
     assert_eq!(
-        h.count("SELECT COUNT(*) FROM sessions WHERE item_id=?", &item),
+        node_process::session_count_for_item(&h.db_path(), &item).unwrap(),
         2,
         "no third session"
     );
@@ -2603,21 +2444,22 @@ async fn ordinary_reply_keeps_report_and_its_image_without_a_tool_call() {
         base64::engine::general_purpose::STANDARD.encode(&bytes)
     );
     let sid = c.item(&h, &prompt).await;
-    let sql = "SELECT group_concat(json_extract(data,'$.text'),'') FROM
-               (SELECT data FROM events WHERE session_id=? AND kind='text' ORDER BY seq)";
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
             "The reply stores a durable report link; Hub log: {}\nText: {:?}",
             hub_log(&h),
-            h.one(sql, &sid)
+            node_process::session_text(&h.db_path(), &sid).unwrap()
         )
     });
     eventually_sync(diagnostic, || {
-        h.one(sql, &sid)
+        node_process::session_text(&h.db_path(), &sid)
+            .unwrap()
             .is_some_and(|t| t.contains("[Report](/deliveries/"))
     })
     .await;
-    let text = h.one(sql, &sid).unwrap();
+    let text = node_process::session_text(&h.db_path(), &sid)
+        .unwrap()
+        .unwrap();
     assert_eq!(
         text.matches("#steve-file-unavailable-scope").count(),
         3,
@@ -2685,10 +2527,7 @@ async fn ordinary_reply_keeps_report_and_its_image_without_a_tool_call() {
         .await;
     assert!(matches!(status, 400 | 403));
     assert_eq!(
-        h.count(
-            "SELECT count(*) FROM deliveries WHERE session_id=? AND reply=1",
-            &sid
-        ),
+        node_process::deliveries_count_by_session_with_reply(&h.db_path(), &sid).unwrap(),
         2
     );
     let (status, _) = c
@@ -2713,15 +2552,17 @@ async fn ordinary_reply_keeps_report_and_its_image_without_a_tool_call() {
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
             "The reply keeps its own durable output and rejects the foreign output link; {:?} {}",
-            h.one(sql, &sid),
+            node_process::session_text(&h.db_path(), &sid).unwrap(),
             hub_log(&h)
         )
     });
     eventually_sync(diagnostic, || {
-        h.one(sql, &sid).is_some_and(|t| {
-            t.contains("[Durable](/deliveries/")
-                && t.contains("[Foreign output](#steve-file-unavailable-scope)")
-        })
+        node_process::session_text(&h.db_path(), &sid)
+            .unwrap()
+            .is_some_and(|t| {
+                t.contains("[Durable](/deliveries/")
+                    && t.contains("[Foreign output](#steve-file-unavailable-scope)")
+            })
     })
     .await;
 }

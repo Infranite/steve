@@ -22,13 +22,12 @@
  *   since the language can change while the page is open.
  * - Shared words (保存, 取消, 加载中…) are in the "common" namespace; reuse them instead of adding copies.
  *
- * The resources are bundled and init is synchronous, so importing this module (also from node --test) is enough.
+ * Chinese is bundled as the fallback. The English locale loads when selected.
  * Imports here use explicit .ts extensions so node can load the files without a bundler.
  */
-import i18n from "i18next"
+import i18n, { type BackendModule } from "i18next"
 import { initReactI18next, useTranslation } from "react-i18next"
 import zhCN from "./locales/zh-CN/index.ts"
-import en from "./locales/en/index.ts"
 
 export const NAMESPACES = ["hub", "device", "devices", "accounts", "api", "views", "manage", "core", "pages", "shell", "auto", "channels", "github", "integrations", "knowledge", "caps", "mail", "people", "stats", "thread", "vault", "yolo", "misc", "todos", "calendar", "reason", "common"] as const
 export type Namespace = (typeof NAMESPACES)[number]
@@ -64,8 +63,21 @@ export function detectLang(): Lang {
 const setHtmlLang = (l: string) => { if (typeof document !== "undefined") document.documentElement.lang = l }
 i18n.on("languageChanged", setHtmlLang)
 
-void i18n.use(initReactI18next).init({
-  resources: { "zh-CN": zhCN, en },
+const english: BackendModule = {
+  type: "backend",
+  init() {},
+  read(language, namespace, done) {
+    if (language !== "en") { done(null, {}); return }
+    void import("./locales/en/index.ts").then(
+      ({ default: resources }) => done(null, resources[namespace as Namespace]),
+      (error: Error) => done(error, false),
+    )
+  },
+}
+
+export const languageReady = i18n.use(english).use(initReactI18next).init({
+  resources: { "zh-CN": zhCN },
+  partialBundledLanguages: true,
   lng: detectLang(),
   fallbackLng: FALLBACK,
   supportedLngs: [...LANGS],
@@ -76,8 +88,7 @@ void i18n.use(initReactI18next).init({
   returnNull: false,
   interpolation: { escapeValue: false },
   react: { useSuspense: false },
-})
-setHtmlLang(i18n.language)
+}).then(() => setHtmlLang(i18n.language))
 
 /** the language the UI is in now */
 export const lang = (): Lang => (isLang(i18n.language) ? i18n.language : FALLBACK)

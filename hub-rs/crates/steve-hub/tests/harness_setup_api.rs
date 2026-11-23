@@ -163,8 +163,7 @@ async fn disconnect_after_ready_stays_unknown_in_state_and_model_catalogue() {
     node.set_harnesses(vec![ready]);
     let e = start_with_node(Some(node.clone())).await;
     let pi = |v: &Value| {
-        v["runtimes"]
-            .as_array()
+        v.as_array()
             .unwrap()
             .iter()
             .find(|r| r["id"] == "pi")
@@ -172,11 +171,11 @@ async fn disconnect_after_ready_stays_unknown_in_state_and_model_catalogue() {
             .clone()
     };
     for code in [ErrorCode::Offline, ErrorCode::Internal] {
-        let (status, devices) = e.call("GET", "/api/devices?fresh=1", None).await;
+        let (status, devices) = e.call("GET", "/api/runtimes?fresh=1", None).await;
         assert_eq!(status, 200, "{devices}");
         assert_eq!(pi(&devices)["ok"], true);
-        // Fill both the runtime cache and the two-second /api/state response cache.
-        let (status, state) = e.call("GET", "/api/state", None).await;
+        // Fill the runtime catalogue cache.
+        let (status, state) = e.call("GET", "/api/runtimes", None).await;
         assert_eq!(status, 200, "{state}");
         assert_eq!(pi(&state)["setup"]["state"], "ready");
         let (_, models) = e.call("GET", "/api/system/models?harness=pi", None).await;
@@ -186,10 +185,10 @@ async fn disconnect_after_ready_stays_unknown_in_state_and_model_catalogue() {
         for _ in 0..2 {
             node.refuse_next("probe", ApiError::new(code, "probe unavailable"));
         }
-        let (status, devices) = e.call("GET", "/api/devices?fresh=1", None).await;
+        let (status, devices) = e.call("GET", "/api/runtimes?fresh=1", None).await;
         assert_eq!(status, 200, "{devices}");
         assert_eq!(pi(&devices)["setup"]["state"], "unknown");
-        let (status, state) = e.call("GET", "/api/state", None).await;
+        let (status, state) = e.call("GET", "/api/runtimes", None).await;
         assert_eq!(status, 200, "{state}");
         assert_eq!(pi(&state)["ok"], false, "{state}");
         assert_eq!(pi(&state)["setup"]["state"], "unknown");
@@ -202,10 +201,10 @@ async fn disconnect_after_ready_stays_unknown_in_state_and_model_catalogue() {
         let (_, models) = e.call("GET", "/api/system/models?harness=pi", None).await;
         assert_eq!(models["models"], json!([]), "{models}");
     }
-    // A successful reconnect restores the same selectors immediately, even within STATE_TTL.
-    let (_, devices) = e.call("GET", "/api/devices?fresh=1", None).await;
+    // A successful reconnect restores the same selectors immediately, within the runtime cache TTL.
+    let (_, devices) = e.call("GET", "/api/runtimes?fresh=1", None).await;
     assert_eq!(pi(&devices)["setup"]["state"], "ready");
-    let (_, state) = e.call("GET", "/api/state", None).await;
+    let (_, state) = e.call("GET", "/api/runtimes", None).await;
     assert_eq!(pi(&state)["ok"], true);
 }
 
@@ -258,9 +257,9 @@ async fn installation_api_rejects_nonowners_arbitrary_targets_and_arguments() {
         .call("POST", "/api/system/harnesses/pi/install", Some(json!({})))
         .await;
     assert_eq!(code, 503, "no local Node must not accept an install: {v}");
-    let (code, v) = e.call("GET", "/api/devices?fresh=1", None).await;
+    let (code, v) = e.call("GET", "/api/runtimes?fresh=1", None).await;
     assert_eq!(code, 200, "{v}");
-    let pi = v["runtimes"]
+    let pi = v
         .as_array()
         .unwrap()
         .iter()
@@ -296,8 +295,7 @@ async fn accepted_installation_cannot_restore_old_devices_state_or_model_readine
     let node = setup_node::Delayed::new(base);
     let e = Arc::new(start_with_node(Some(node.clone())).await);
     let pi = |v: &Value| {
-        v["runtimes"]
-            .as_array()
+        v.as_array()
             .unwrap()
             .iter()
             .find(|r| r["id"] == "pi")
@@ -305,14 +303,14 @@ async fn accepted_installation_cannot_restore_old_devices_state_or_model_readine
             .clone()
     };
     assert_eq!(
-        pi(&e.call("GET", "/api/devices?fresh=1", None).await.1)["ok"],
+        pi(&e.call("GET", "/api/runtimes?fresh=1", None).await.1)["ok"],
         true
     );
     // Populate the response cache before installation, within its two-second TTL.
-    e.call("GET", "/api/state", None).await;
+    e.call("GET", "/api/runtimes", None).await;
     node.arm();
     let copy = e.clone();
-    let task = tokio::spawn(async move { copy.call("GET", "/api/devices?fresh=1", None).await });
+    let task = tokio::spawn(async move { copy.call("GET", "/api/runtimes?fresh=1", None).await });
     node.entered.notified().await;
     let (status, result) = e
         .call("POST", "/api/system/harnesses/pi/install", Some(json!({})))
@@ -320,12 +318,10 @@ async fn accepted_installation_cannot_restore_old_devices_state_or_model_readine
     assert_eq!(status, 200, "{result}");
     node.gate.add_permits(1);
     assert_eq!(pi(&task.await.unwrap().1)["setup"]["state"], "installing");
-    for path in ["/api/devices", "/api/state", "/api/state"] {
-        let (status, body) = e.call("GET", path, None).await;
-        assert_eq!(status, 200, "{body}");
-        assert_eq!(pi(&body)["setup"]["state"], "installing", "{path}");
-        assert_eq!(pi(&body)["ok"], false, "{path}");
-    }
+    let (status, body) = e.call("GET", "/api/runtimes", None).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(pi(&body)["setup"]["state"], "installing");
+    assert_eq!(pi(&body)["ok"], false);
     let (_, models) = e.call("GET", "/api/system/models?harness=pi", None).await;
     assert_eq!(models["models"], json!([]), "{models}");
 }
@@ -347,8 +343,7 @@ async fn persistent_disconnect_revokes_independent_follower_through_http() {
     let node = setup_node::Delayed::new(base);
     let e = start_with_node(Some(node.clone())).await;
     let pi = |v: &Value| {
-        v["runtimes"]
-            .as_array()
+        v.as_array()
             .unwrap()
             .iter()
             .find(|r| r["id"] == "pi")
@@ -357,10 +352,13 @@ async fn persistent_disconnect_revokes_independent_follower_through_http() {
     };
     for code in [ErrorCode::Offline, ErrorCode::Internal] {
         assert_eq!(
-            pi(&e.call("GET", "/api/devices?fresh=1", None).await.1)["ok"],
+            pi(&e.call("GET", "/api/runtimes?fresh=1", None).await.1)["ok"],
             true
         );
-        assert_eq!(pi(&e.call("GET", "/api/state", None).await.1)["ok"], true);
+        assert_eq!(
+            pi(&e.call("GET", "/api/runtimes", None).await.1)["ok"],
+            true
+        );
         assert_eq!(
             e.call("GET", "/api/system/models?harness=pi", None).await.1["models"][0]["id"],
             "fixture/test"
@@ -380,7 +378,7 @@ async fn persistent_disconnect_revokes_independent_follower_through_http() {
         );
         node.gate.add_permits(1);
         old.await.unwrap();
-        for path in ["/api/devices?fresh=1", "/api/state"] {
+        for path in ["/api/runtimes?fresh=1", "/api/runtimes"] {
             let (status, body) = e.call("GET", path, None).await;
             assert_eq!(status, 200);
             assert_eq!(pi(&body)["ok"], false);
@@ -395,14 +393,20 @@ async fn persistent_disconnect_revokes_independent_follower_through_http() {
             e.call("GET", "/api/system/models?harness=pi", None).await.1["models"],
             json!([])
         );
-        assert_eq!(pi(&e.call("GET", "/api/state", None).await.1)["ok"], false);
+        assert_eq!(
+            pi(&e.call("GET", "/api/runtimes", None).await.1)["ok"],
+            false
+        );
         // Explicitly reconnect, preserving the configured capabilities.
         node.reconnect();
         assert_eq!(
-            pi(&e.call("GET", "/api/devices?fresh=1", None).await.1)["ok"],
+            pi(&e.call("GET", "/api/runtimes?fresh=1", None).await.1)["ok"],
             true
         );
-        assert_eq!(pi(&e.call("GET", "/api/state", None).await.1)["ok"], true);
+        assert_eq!(
+            pi(&e.call("GET", "/api/runtimes", None).await.1)["ok"],
+            true
+        );
         assert_eq!(
             e.call("GET", "/api/system/models?harness=pi", None).await.1["models"][0]["id"],
             "fixture/test"

@@ -114,7 +114,6 @@ export default {
     /* the effort after a model choice: "思考高" */
     thinking: "思考{{effort}}",
     backups_other: "备用 {{count}} 个",
-    unwired: "这个 Hub 还不能设置模型，换成新版 Hub 后可以在这里改。",
     effortLine: "思考强度：{{effort}}",
     fallbackHint: "前一个模型出错或超时才换下一个",
     addOverride: "添加单独配置",
@@ -529,7 +528,6 @@ export default {
     noItems: "这个项目还没有事项",
     recent: "最近 7 天",
     openStats: "在统计里看",
-    statsAbsent: "这个 Hub 还没有统计。",
     quiet: "最近 7 天没有动静。",
     fig: {
       done: "完成事项",
@@ -613,7 +611,6 @@ export default {
   /* 插件 (plugins.tsx) */
   plugins: {
     loadFailed: "读不到插件",
-    absent: "连不上 Hub，或者这个 Hub 的版本还没有插件。",
     installedSection: "已安装",
     offeredSection: "可以安装",
     librariesSection: "插件库",

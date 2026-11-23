@@ -4,7 +4,6 @@
 
 use steve_runtime::testkit::eventually_sync;
 
-use rusqlite::params;
 use serde_json::{Value, json};
 use steve_flow::item_events::ItemEvent;
 use steve_flow::mcp::{self, EVENT_GET, NOT_LINKED, PURGED};
@@ -13,7 +12,8 @@ use steve_flow::{EventSink, Ingested, RawEvent, digest, ingest_item_event, on_bo
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::testkit::{ME, WS, WS2, call, caller};
 use steve_store::base::ObjRef;
-use steve_store::base::links::{self, NewLink};
+use steve_store::base::links::{Links, NewLink};
+use steve_store::{FlowRows, FlowSources, RunRows, SignalRows, testkit::flow as fixtures};
 
 async fn api(e: &FlowEnv, method: &str, path: &str, body: Option<Value>) -> (u16, Value) {
     call(
@@ -47,13 +47,6 @@ async fn create_flow(e: &FlowEnv, name: &str, graph: Value) -> String {
     id
 }
 
-fn q<T: rusqlite::types::FromSql>(e: &FlowEnv, sql: &str, p: impl rusqlite::Params) -> T {
-    e.env
-        .store()
-        .with_conn(|c| Ok(c.query_row(sql, p, |r| r.get(0))?))
-        .unwrap()
-}
-
 /// mail → bot(ops) → item.create(bot ops)
 fn ops_graph() -> Value {
     json!({
@@ -67,7 +60,7 @@ fn ops_graph() -> Value {
 }
 
 fn version(e: &FlowEnv, id: &str) -> i64 {
-    q(e, "SELECT version FROM flows WHERE id = ?", [id])
+    e.flow_row(id).version
 }
 
 #[tokio::test]
@@ -93,16 +86,7 @@ async fn bot_deleted_hands_flows_to_heir() {
                "edges": [{"from": "t", "to": "b"}, {"from": "b", "to": "i", "label": "忽略"}]}),
     )
     .await;
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "INSERT INTO source_settings (connection_id, workspace_id, triage_bot, updated) VALUES (?, ?, 'ops', 1)",
-                params![con, WS],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::set_triage_bot(e.env.store(), WS, &con, "ops").unwrap();
     let (st, sched) = api(
         &e,
         "POST",
@@ -139,7 +123,7 @@ async fn bot_deleted_hands_flows_to_heir() {
     let moved = e
         .env
         .store()
-        .transaction(|tx| on_bot_deleted(tx, WS, "ops", "steve", now))
+        .write(|tx| on_bot_deleted(tx, WS, "ops", "steve", now))
         .unwrap();
     assert_eq!(moved.flows, vec![used.clone()]);
     assert_eq!(moved.schedules, vec![sched_id.clone()]);
@@ -156,30 +140,27 @@ async fn bot_deleted_hands_flows_to_heir() {
     assert_eq!(f["versions"][0]["note"], "运维 已删除，交给 Steve");
     let (_, s) = api(&e, "GET", &format!("/schedules/{sched_id}"), None).await;
     assert_eq!(s["bot"], "steve");
-    let note: String = q(
-        &e,
-        "SELECT note FROM flow_versions WHERE flow_id = ? ORDER BY version DESC LIMIT 1",
-        [&sched_id],
-    );
+    let versions = e
+        .env
+        .store()
+        .read(|r| FlowRows(r).versions(&sched_id))
+        .unwrap();
+    let note = &versions[0].note;
     assert_eq!(note, "运维 已删除，交给 Steve");
-    let triage: Option<String> = q(
-        &e,
-        "SELECT triage_bot FROM source_settings WHERE connection_id = ?",
-        [&con],
-    );
+    let triage = e
+        .env
+        .store()
+        .read(|r| FlowSources(r).triage(WS, &con))
+        .unwrap();
     assert_eq!(triage, None);
-    let revs: i64 = q(
-        &e,
-        "SELECT count(*) FROM revisions WHERE object_type = 'flow' AND object_id = ? AND author = 'steve'",
-        [&used],
-    );
+    let revs = fixtures::revisions_by(e.env.store(), "flow", &used, "steve").unwrap();
     assert_eq!(revs, 1);
 
     // nothing left to move
     let again = e
         .env
         .store()
-        .transaction(|tx| on_bot_deleted(tx, WS, "ops", "steve", now))
+        .write(|tx| on_bot_deleted(tx, WS, "ops", "steve", now))
         .unwrap();
     assert!(again.flows.is_empty() && again.schedules.is_empty() && again.sources.is_empty());
     let (_, v) = api(&e, "GET", "/bots/ops/flows", None).await;
@@ -187,16 +168,7 @@ async fn bot_deleted_hands_flows_to_heir() {
 }
 
 fn item(e: &FlowEnv, ws: &str, id: &str, no: i64, status: &str) {
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "INSERT INTO items (id, workspace_id, no, title, status, stage, bot_id, created, updated) VALUES (?, ?, ?, '写周报', ?, '', 'steve', 1, 1)",
-                params![id, ws, no, status],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::fixture_item(e.env.store(), ws, id, no, "写周报", status).unwrap();
 }
 
 #[tokio::test]
@@ -210,7 +182,7 @@ async fn item_done_triggers_a_flow() {
             .unwrap(),
         None
     );
-    assert_eq!(q::<i64>(&e, "SELECT count(*) FROM ext_events", []), 0);
+    assert_eq!(fixtures::event_ids(e.env.store()).unwrap().len(), 0);
 
     let fid = create_flow(
         &e,
@@ -228,29 +200,29 @@ async fn item_done_triggers_a_flow() {
         panic!("not stored: {got:?}")
     };
     assert_eq!(runs.len(), 1);
-    let (source, ty, summary): (String, String, String) = e
+    let event = e
         .env
         .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT source, type, summary FROM ext_events WHERE id = ?",
-                [&id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )?)
-        })
+        .read(|r| SignalRows(r).event(&id))
+        .unwrap()
         .unwrap();
+    let (source, ty, summary) = (event.source, event.kind, event.summary);
     assert_eq!(
         (source.as_str(), ty.as_str(), summary.as_str()),
         ("item", "item.done", "ST-1「写周报」完成了")
     );
     let run = runs[0].clone();
     eventually_sync("The flow run records a done status.", || {
-        q::<String>(&e, "SELECT status FROM flow_runs WHERE id = ?", [&run]) == "done"
+        e.run_row(&run).status == "done"
     })
     .await;
-    let flow: String = q(&e, "SELECT flow_id FROM flow_runs WHERE id = ?", [&run]);
+    let flow: String = e.run_row(&run).flow_id;
     assert_eq!(flow, fid);
-    let notes = e.env.store().reader(|c| digest::pending(c, WS, 0)).unwrap();
+    let notes = e
+        .env
+        .store()
+        .read(|c| steve_store::DigestNotes(c).pending(WS, 0))
+        .unwrap();
     assert_eq!(notes[0].text, "ST-1 做完了");
 
     // dropped is another type: stored (a trigger listens to items) but starts nothing
@@ -293,19 +265,12 @@ async fn item_made_by_a_flow_does_not_restart_it() {
     };
     let run = runs[0].clone();
     eventually_sync("The flow run records a done status.", || {
-        q::<String>(&e, "SELECT status FROM flow_runs WHERE id = ?", [&run]) == "done"
+        e.run_row(&run).status == "done"
     })
     .await;
-    let made: String = q(
-        &e,
-        "SELECT work_item_id FROM flow_runs WHERE id = ?",
-        [&run],
-    );
+    let made = e.run_row(&run).work_item_id.unwrap();
     assert_eq!(made, "ST-2");
-    e.env
-        .store()
-        .with_conn(|c| Ok(c.execute("UPDATE items SET status = 'done' WHERE id = 'ST-2'", [])?))
-        .unwrap();
+    fixtures::set_item_status(e.env.store(), "ST-2", "done").unwrap();
     let got = ingest_item_event(&e.flow, WS, "ST-2", ItemEvent::Done)
         .await
         .unwrap()
@@ -315,11 +280,10 @@ async fn item_made_by_a_flow_does_not_restart_it() {
         "{got:?}"
     );
     assert_eq!(
-        q::<i64>(
-            &e,
-            "SELECT count(*) FROM flow_runs WHERE flow_id = ?",
-            [&fid]
-        ),
+        e.env
+            .store()
+            .read::<_, steve_store::StoreError>(|r| Ok(RunRows(r).activity(WS, &fid, 0)?.0))
+            .unwrap(),
         1
     );
 }
@@ -362,9 +326,8 @@ async fn event_get_reads_only_the_items_events() {
     item(&e, WS, "ST-2", 2, "run");
     e.env
         .store()
-        .transaction(|tx| -> steve_store::Result<()> {
-            links::add(
-                tx,
+        .write(|w| -> steve_store::Result<()> {
+            Links(w).add(
                 WS,
                 &NewLink::new(
                     ObjRef::new("item", "ST-1"),
@@ -373,8 +336,7 @@ async fn event_get_reads_only_the_items_events() {
                     "sig",
                 ),
             )?;
-            links::add(
-                tx,
+            Links(w).add(
                 WS,
                 &NewLink::new(
                     ObjRef::new("item", "ST-2"),
@@ -431,12 +393,7 @@ async fn event_get_reads_only_the_items_events() {
     // past retention only the summary is left
     e.env
         .store()
-        .with_conn(|c| {
-            Ok(c.execute(
-                "UPDATE ext_events SET payload = NULL, payload_purged = 1 WHERE id = ?",
-                [&a],
-            )?)
-        })
+        .write(|w| SignalRows(w).purge_payloads(&[a], e.now()))
         .unwrap();
     let out = mcp::call(&e.flow, &cx, EVENT_GET, &json!({}))
         .await
@@ -455,9 +412,9 @@ async fn digest_take_now_takes_once() {
     let now = e.now();
     e.env
         .store()
-        .transaction(|tx| {
-            digest::add(tx, WS, "Acme 回信了", None, None, now)?;
-            digest::add(tx, WS2, "别的空间", None, None, now)
+        .write(|tx| {
+            steve_store::DigestNotes(tx).add(WS, "Acme 回信了", None, None, now)?;
+            steve_store::DigestNotes(tx).add(WS2, "别的空间", None, None, now)
         })
         .unwrap();
     let got = digest::take_now(&e.flow, WS, 0).unwrap();

@@ -22,6 +22,7 @@ use steve_modules::accounts::connections::{
 use steve_modules::testkit::{ME, TestEnv, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
+use steve_store::calendar::{CalRow, CalendarRepo, EventRow};
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
@@ -187,13 +188,18 @@ pub async fn setup() -> H {
         )
         .unwrap();
     env.store()
-        .transaction(|tx| {
+        .write(|w| {
             for (id, label) in [
                 ("ics", "ICS"),
                 ("cal_demo", "Demo"),
                 ("cal_script", "Scripted"),
             ] {
-                steve_modules::accounts::repo::upsert_declared(tx, id, label, "calendar")?;
+                steve_store::Systems(w).upsert_declared(
+                    id,
+                    label,
+                    "calendar",
+                    steve_store::now(),
+                )?;
             }
             Ok::<_, steve_store::StoreError>(())
         })
@@ -260,30 +266,62 @@ impl H {
     pub fn now(&self) -> i64 {
         self.env.modules.clock.now()
     }
-    pub fn sql<T: rusqlite::types::FromSql>(&self, q: &str, p: &[&dyn rusqlite::ToSql]) -> T {
+    pub fn calendars(&self, conn: &str) -> Vec<CalRow> {
         self.env
             .store()
-            .reader(|c| {
-                c.query_row(q, p, |r| r.get(0))
-                    .map_err(steve_store::StoreError::from)
-            })
+            .read(|r| CalendarRepo::new(r).of_connection(conn))
             .unwrap()
     }
-    pub fn exec(&self, q: &str) {
+
+    pub fn events(&self, calendar: &str) -> Vec<EventRow> {
         self.env
             .store()
-            .with_conn(|c| c.execute_batch(q).map_err(steve_store::StoreError::from))
-            .unwrap();
+            .read(|r| CalendarRepo::new(r).events_of(calendar))
+            .unwrap()
     }
+
+    pub fn event(&self, id: &str) -> Option<EventRow> {
+        self.env
+            .store()
+            .read(|r| CalendarRepo::new(r).event(id))
+            .unwrap()
+    }
+
     /// A contact with an email address Steve knows.
-    pub fn contact(&self, id: &str, name: &str, email: &str) {
-        self.exec(&format!(
-            "INSERT INTO parties (id, workspace_id, type, name, contact_kind, created_by, created, updated) VALUES ('{id}', 'default', 'contact', '{name}', 'real', 'usr_dev', 1, 1);
-             INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated) VALUES ('acc_{id}', 'default', 'mail', 'email', '{id}', 'work_email', '{email}', '{email}', 'sync', 1, 1);
-             INSERT INTO account_handles (workspace_id, family, handle, account_id, created) VALUES ('default', 'email', '{email}', 'acc_{id}', 1);"
-        ));
-    }
-    pub fn me_party(&self) -> String {
-        self.sql("SELECT id FROM parties WHERE user_id = ? AND workspace_id = 'default' AND status = 'active'", &[&ME])
+    pub fn contact(&self, name: &str, email: &str) -> String {
+        use steve_modules::accounts::service::{self as accounts, NewAccountBody};
+        use steve_modules::contacts::service::{NewContact, create_contact};
+
+        let m = &self.env.modules;
+        let party = create_contact(
+            m,
+            &me(),
+            NewContact {
+                name: name.into(),
+                aliases: vec![],
+                rels: vec![],
+                org_id: None,
+                title: None,
+                kind: None,
+                note: None,
+                visibility: None,
+            },
+        )
+        .unwrap()
+        .head
+        .id;
+        accounts::create(
+            m,
+            &me(),
+            NewAccountBody {
+                system_id: "mail".into(),
+                party_id: Some(party.clone()),
+                kind: "work_email".into(),
+                handle: email.into(),
+                display_name: None,
+            },
+        )
+        .unwrap();
+        party
     }
 }

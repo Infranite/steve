@@ -20,19 +20,89 @@ pub(crate) fn message_insert(
     space: &str,
 ) -> Result<String> {
     let id = uid("msg");
-    let meta = if truthy(meta) {
-        Some(to_json(meta)?)
-    } else {
-        None
-    };
-    // strictly after the last message of its conversation: listings and their cursors go by `created` alone,
-    // and two messages written in the same millisecond would otherwise list in either order
-    c.run(
-        "INSERT INTO messages (id, workspace_id, space, author, text, item_id, meta, created)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, MAX(?8, COALESCE((SELECT MAX(m.created) + 1 FROM messages m
-           WHERE m.workspace_id = ?2 AND m.space = ?3), 0)))",
-        params![id, ws, space, author, text, item_id, meta, now()],
-    )?;
+    let mut db = crate::contract::Sqlite(c);
+    let statement = message_statement(
+        crate::contract::Dialect::Sqlite,
+        &id,
+        ws,
+        author,
+        text,
+        item_id,
+        meta,
+        space,
+    );
+    crate::contract::exec_on(&mut db, &statement)?;
+    Ok(id)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn message_statement(
+    dialect: crate::contract::Dialect,
+    id: &str,
+    ws: &str,
+    author: &str,
+    text: &str,
+    item_id: Option<&str>,
+    meta: &Value,
+    space: &str,
+) -> sea_query::InsertStatement {
+    use sea_query::{Expr, ExprTrait, Func, Query};
+    let last = Query::select()
+        .expr(Expr::from(Func::max(Expr::col("created"))).add(Expr::cust("1")))
+        .from("messages")
+        .and_where(Expr::col("workspace_id").eq(ws))
+        .and_where(Expr::col("space").eq(space))
+        .take();
+    // Created timestamps strictly increase in a conversation because they are the listing cursor.
+    let next = dialect.greatest(
+        Expr::val(now()),
+        Func::coalesce([Expr::from(last), Expr::cust("0")]).into(),
+    );
+    Query::insert()
+        .into_table("messages")
+        .columns([
+            "id",
+            "workspace_id",
+            "space",
+            "author",
+            "text",
+            "item_id",
+            "meta",
+            "created",
+        ])
+        .values_panic([
+            id.into(),
+            ws.into(),
+            space.into(),
+            author.into(),
+            text.into(),
+            item_id.into(),
+            truthy(meta).then(|| meta.to_string()).into(),
+            next,
+        ])
+        .take()
+}
+
+/// Add a message and publish it with the rest of the write.
+pub fn append_message(
+    w: &mut crate::W<'_>,
+    ws: &str,
+    author: &str,
+    text: &str,
+    item_id: Option<&str>,
+    meta: &Value,
+    space: &str,
+) -> Result<String> {
+    let id = uid("msg");
+    let stmt = message_statement(w.dialect(), &id, ws, author, text, item_id, meta, space);
+    w.exec(&stmt)?;
+    w.emit(steve_types::DomainEvent::from(
+        steve_types::WorkEvent::Message {
+            space: space.into(),
+            ws: ws.into(),
+            id: id.clone().into(),
+        },
+    ));
     Ok(id)
 }
 
@@ -88,10 +158,10 @@ fn insert(c: &rusqlite::Connection, p: &NewDecision) -> Result<Decision> {
 }
 
 /// [`Decisions::create`] inside the caller's transaction; published after the commit.
-pub fn decision_create_in(tx: &crate::Tx<'_>, p: &NewDecision) -> Result<Decision> {
-    let d = insert(tx, p)?;
+pub fn decision_create_in(tx: &mut crate::W<'_>, p: &NewDecision) -> Result<Decision> {
+    let d = insert(tx.conn, p)?;
     tx.diagnostic(crate::diagnostics::decision_event(&d, "created", None));
-    tx.publish(steve_types::DomainEvent::from(
+    tx.emit(steve_types::DomainEvent::from(
         steve_types::WorkEvent::Decision {
             ws: d.workspace_id.clone().into(),
             id: d.id.clone().into(),
@@ -106,27 +176,28 @@ pub fn decision_create_in(tx: &crate::Tx<'_>, p: &NewDecision) -> Result<Decisio
 
 /// [`Decisions::resolve`] inside the caller's transaction: settles it if it is open. `true`: it was.
 pub fn decision_resolve_in(
-    tx: &crate::Tx<'_>,
+    tx: &mut crate::W<'_>,
     id: &str,
     result: &Value,
     status: &str,
 ) -> Result<bool> {
-    let n = tx.execute(
+    let n = tx.conn.execute(
         "UPDATE decisions SET status = ?, result = ?, resolved = ? WHERE id = ? AND status = 'open'",
         params![status, to_json(result)?, now(), id],
     )?;
     let item: Option<Option<String>> = tx
+        .conn
         .query_row("SELECT item_id FROM decisions WHERE id = ?", [id], |r| {
             r.get(0)
         })
         .ok();
     if let Some(ws) = crate::repo::one(
-        tx,
+        tx.conn,
         "SELECT workspace_id FROM decisions WHERE id = ?",
         [id],
         |r| r.get::<_, String>(0),
     )? {
-        tx.publish(steve_types::DomainEvent::from(
+        tx.emit(steve_types::DomainEvent::from(
             steve_types::WorkEvent::Decision {
                 ws: ws.into(),
                 id: id.into(),
@@ -138,7 +209,7 @@ pub fn decision_resolve_in(
         ));
     }
     if n > 0
-        && let Ok(Some(d)) = one(tx, DECISION, [id], Decision::from_row)
+        && let Ok(Some(d)) = one(tx.conn, DECISION, [id], Decision::from_row)
     {
         tx.diagnostic(crate::diagnostics::decision_event(
             &d,
@@ -151,23 +222,28 @@ pub fn decision_resolve_in(
 
 /// A card whose answer was never applied (the Node refused it, or the request ended first) is
 /// expired, even if it was already marked resolved: it never claims an answer that did not happen.
-pub fn decision_expire_unapplied_in(tx: &crate::Tx<'_>, id: &str, result: &Value) -> Result<bool> {
-    let n = tx.execute(
+pub fn decision_expire_unapplied_in(
+    tx: &mut crate::W<'_>,
+    id: &str,
+    result: &Value,
+) -> Result<bool> {
+    let n = tx.conn.execute(
         "UPDATE decisions SET status = 'expired', result = ?, resolved = ? WHERE id = ? AND status IN ('open','resolved')",
         params![to_json(result)?, now(), id],
     )?;
     let item: Option<Option<String>> = tx
+        .conn
         .query_row("SELECT item_id FROM decisions WHERE id = ?", [id], |r| {
             r.get(0)
         })
         .ok();
     if let Some(ws) = crate::repo::one(
-        tx,
+        tx.conn,
         "SELECT workspace_id FROM decisions WHERE id = ?",
         [id],
         |r| r.get::<_, String>(0),
     )? {
-        tx.publish(steve_types::DomainEvent::from(
+        tx.emit(steve_types::DomainEvent::from(
             steve_types::WorkEvent::Decision {
                 ws: ws.into(),
                 id: id.into(),
@@ -181,7 +257,7 @@ pub fn decision_expire_unapplied_in(tx: &crate::Tx<'_>, id: &str, result: &Value
     Ok(n > 0)
 }
 
-fn changed(w: &crate::W, id: &str) -> Result<Option<Decision>> {
+fn changed(w: &crate::WriteConn, id: &str) -> Result<Option<Decision>> {
     let d = one(w.c, DECISION, [id], Decision::from_row)?;
     if let Some(row) = &d {
         w.publish(steve_types::DomainEvent::from(
@@ -196,14 +272,35 @@ fn changed(w: &crate::W, id: &str) -> Result<Option<Decision>> {
 }
 
 impl Decisions<'_> {
+    /// Records the client attribution and publishes the resulting view change in the same commit.
+    pub fn note_via(&self, ws: &str, id: &str, via: &Value) -> Result<()> {
+        self.0.write_conn(|tx| {
+            let row = tx.c.run(
+                "UPDATE decisions SET result = json_set(coalesce(result, '{}'), '$.via', json(?))
+                 WHERE workspace_id = ? AND id = ? AND status <> 'open'",
+                params![via.to_string(), ws, id],
+            )?;
+            if row > 0 {
+                tx.publish(steve_types::DomainEvent::from(
+                    steve_types::WorkEvent::Decision {
+                        ws: ws.into(),
+                        id: id.into(),
+                        item_id: None,
+                    },
+                ));
+            }
+            Ok(())
+        })
+    }
+
     /// Open decisions, oldest first.
     pub fn open(&self, ws: &str) -> Result<Vec<Decision>> {
-        self.0.read(|c| all(c, "SELECT * FROM decisions WHERE workspace_id = ? AND status = 'open' ORDER BY created", [ws], Decision::from_row))
+        self.0.read_conn(|c| all(c, "SELECT * FROM decisions WHERE workspace_id = ? AND status = 'open' ORDER BY created", [ws], Decision::from_row))
     }
 
     /// Settled decisions resolved after `since`, newest first, at most 100.
     pub fn recent(&self, ws: &str, since: i64) -> Result<Vec<Decision>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM decisions WHERE workspace_id = ? AND status != 'open' AND resolved > ? ORDER BY resolved DESC LIMIT 100",
@@ -214,11 +311,12 @@ impl Decisions<'_> {
     }
 
     pub fn get(&self, id: &str) -> Result<Option<Decision>> {
-        self.0.read(|c| one(c, DECISION, [id], Decision::from_row))
+        self.0
+            .read_conn(|c| one(c, DECISION, [id], Decision::from_row))
     }
 
     pub fn of_item(&self, item_id: &str) -> Result<Vec<Decision>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM decisions WHERE item_id = ? ORDER BY created",
@@ -229,7 +327,7 @@ impl Decisions<'_> {
     }
 
     pub fn create(&self, p: &NewDecision) -> Result<Option<Decision>> {
-        let result = self.0.write(|w| {
+        let result = self.0.write_conn(|w| {
             let d = insert(w.c, p)?;
             w.publish(steve_types::DomainEvent::from(
                 steve_types::WorkEvent::Decision {
@@ -259,7 +357,7 @@ impl Decisions<'_> {
         status: &str,
         undo: &Value,
     ) -> Result<Option<Decision>> {
-        let (result, changed_rows) = self.0.write(|w| {
+        let (result, changed_rows) = self.0.write_conn(|w| {
             let undo = if truthy(undo) { Some(to_json(undo)?) } else { None };
             let n = w.c.run(
                 "UPDATE decisions SET status = ?, result = ?, resolved = ?, undo = ? WHERE id = ? AND status = 'open'",
@@ -282,7 +380,7 @@ impl Decisions<'_> {
     /// Replaces the result of a decision already settled, e.g. what became of an approved release after it was
     /// answered. Status, resolved time and undo stay; publishes like any change.
     pub fn set_result(&self, id: &str, result: &Value) -> Result<Option<Decision>> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             w.c.run(
                 "UPDATE decisions SET result = ? WHERE id = ? AND status != 'open'",
                 params![to_json(result)?, id],
@@ -294,7 +392,7 @@ impl Decisions<'_> {
     /// Merge annotations into the current settled result under the writer lock. An answer snapshot
     /// may predate a background result (for example a release failure); never replace that result.
     pub fn merge_result(&self, id: &str, annotations: &Value) -> Result<Option<Decision>> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             w.c.run(
                 "UPDATE decisions SET result = json_patch(CASE WHEN json_type(result) = 'object' THEN result ELSE '{}' END, ?) WHERE id = ? AND status != 'open'",
                 params![to_json(annotations)?, id],
@@ -305,7 +403,7 @@ impl Decisions<'_> {
 
     /// Back to open, clearing result, resolved time and undo.
     pub fn reopen(&self, id: &str) -> Result<Option<Decision>> {
-        let (result, before) = self.0.write(|w| {
+        let (result, before) = self.0.write_conn(|w| {
             let before = one(w.c, DECISION, [id], Decision::from_row).ok().flatten();
             w.c.run("UPDATE decisions SET status = 'open', result = NULL, resolved = NULL, undo = NULL WHERE id = ?", [id])?;
             Ok((changed(w, id)?, before.map(|d| d.status)))
@@ -329,7 +427,7 @@ pub struct Messages<'a>(&'a Store);
 impl Messages<'_> {
     /// The last `limit` messages, oldest first (TS defaults: space `steve`, limit 200).
     pub fn list(&self, ws: &str, space: &str, limit: i64) -> Result<Vec<Message>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             let mut v = all(
                 c,
                 "SELECT * FROM messages WHERE workspace_id = ? AND space = ? ORDER BY created DESC LIMIT ?",
@@ -350,33 +448,11 @@ impl Messages<'_> {
         until: i64,
         limit: i64,
     ) -> Result<Vec<Message>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             let mut v = all(
                 c,
                 "SELECT * FROM messages WHERE workspace_id = ? AND space = ? AND created <= ? ORDER BY created DESC LIMIT ?",
                 params![ws, space, until, limit],
-                Message::from_row,
-            )?;
-            v.reverse();
-            Ok(v)
-        })
-    }
-
-    /// Older history, oldest first: messages created before `before` and from `after` on (inclusive), the newest
-    /// `limit` of them. Paging back is `after = 0`; filling the gap down to a message is `after = its created`.
-    pub fn list_before(
-        &self,
-        ws: &str,
-        space: &str,
-        before: i64,
-        after: i64,
-        limit: i64,
-    ) -> Result<Vec<Message>> {
-        self.0.read(|c| {
-            let mut v = all(
-                c,
-                "SELECT * FROM messages WHERE workspace_id = ? AND space = ? AND created < ? AND created >= ? ORDER BY created DESC LIMIT ?",
-                params![ws, space, before, after, limit],
                 Message::from_row,
             )?;
             v.reverse();
@@ -392,7 +468,7 @@ impl Messages<'_> {
                 .replace('%', "\\%")
                 .replace('_', "\\_")
         );
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             all(
                 c,
                 "SELECT * FROM messages WHERE workspace_id = ? AND space = ? AND (text LIKE ? ESCAPE '\\' OR upper(coalesce(item_id, '')) = upper(?)) ORDER BY created DESC LIMIT ?",
@@ -404,7 +480,7 @@ impl Messages<'_> {
 
     /// The answer an item was taken from (its offer, marked `promoted` with the item), if any.
     pub fn promoted_to(&self, ws: &str, item: &str) -> Result<Option<Message>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             one(
                 c,
                 "SELECT * FROM messages WHERE workspace_id = ? AND json_extract(meta, '$.promoted') = ? ORDER BY created LIMIT 1",
@@ -424,10 +500,11 @@ impl Messages<'_> {
         meta: &Value,
         space: &str,
     ) -> Result<String> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             let id = message_insert(w.c, ws, author, text, item_id, meta, space)?;
             w.publish(steve_types::DomainEvent::from(
                 steve_types::WorkEvent::Message {
+                    space: space.into(),
                     ws: ws.into(),
                     id: id.clone().into(),
                 },
@@ -437,7 +514,7 @@ impl Messages<'_> {
     }
 
     pub fn get(&self, id: &str) -> Result<Option<Message>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             one(
                 c,
                 "SELECT * FROM messages WHERE id = ?",
@@ -448,19 +525,20 @@ impl Messages<'_> {
     }
 
     pub fn patch_meta(&self, id: &str, meta: &Value) -> Result<()> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             w.c.run(
                 "UPDATE messages SET meta = ? WHERE id = ?",
                 params![to_json(meta)?, id],
             )?;
-            if let Some(ws) = crate::repo::one(
+            if let Some((ws, space)) = crate::repo::one(
                 w.c,
-                "SELECT workspace_id FROM messages WHERE id = ?",
+                "SELECT workspace_id, space FROM messages WHERE id = ?",
                 [id],
-                |r| r.get::<_, String>(0),
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
             )? {
                 w.publish(steve_types::DomainEvent::from(
                     steve_types::WorkEvent::Message {
+                        space: space.into(),
                         ws: ws.into(),
                         id: id.into(),
                     },
@@ -472,19 +550,20 @@ impl Messages<'_> {
 
     /// Rewrites a message's text and meta (thread flow-back merging a reply into the one before).
     pub fn patch_text_meta(&self, id: &str, text: &str, meta: &Value) -> Result<()> {
-        self.0.write(|w| {
+        self.0.write_conn(|w| {
             w.c.run(
                 "UPDATE messages SET text = ?, meta = ? WHERE id = ?",
                 params![text, to_json(meta)?, id],
             )?;
-            if let Some(ws) = crate::repo::one(
+            if let Some((ws, space)) = crate::repo::one(
                 w.c,
-                "SELECT workspace_id FROM messages WHERE id = ?",
+                "SELECT workspace_id, space FROM messages WHERE id = ?",
                 [id],
-                |r| r.get::<_, String>(0),
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
             )? {
                 w.publish(steve_types::DomainEvent::from(
                     steve_types::WorkEvent::Message {
+                        space: space.into(),
                         ws: ws.into(),
                         id: id.into(),
                     },
@@ -497,7 +576,7 @@ impl Messages<'_> {
     /// The newest message by `author` in the `steve` space. (TS returns `meta` unparsed here; nothing
     /// serializes this one, so it is parsed like everywhere else.)
     pub fn last_of(&self, ws: &str, author: &str) -> Result<Option<Message>> {
-        self.0.read(|c| {
+        self.0.read_conn(|c| {
             one(
                 c,
                 "SELECT * FROM messages WHERE workspace_id = ? AND space = 'steve' AND author = ? ORDER BY created DESC LIMIT 1",
@@ -510,9 +589,13 @@ impl Messages<'_> {
 
 /// Settles the item's open decisions as `expired` with `result`, inside the caller's transaction
 /// (`Decisions::resolve` for each, like a finished item's “nothing left to decide”). Returns how many.
-pub fn decisions_expire_open_in(tx: &crate::Tx, item_id: &str, result: &Value) -> Result<usize> {
+pub fn decisions_expire_open_in(
+    tx: &mut crate::W<'_>,
+    item_id: &str,
+    result: &Value,
+) -> Result<usize> {
     let ids: Vec<(String, String)> = {
-        let mut st = tx.prepare_cached(
+        let mut st = tx.conn.prepare_cached(
             "SELECT id, workspace_id FROM decisions WHERE item_id = ? AND status = 'open' ORDER BY created",
         )?;
         st.query_map([item_id], |r| Ok((r.get(0)?, r.get(1)?)))?
@@ -520,11 +603,11 @@ pub fn decisions_expire_open_in(tx: &crate::Tx, item_id: &str, result: &Value) -
     };
     let result = to_json(result)?;
     for (id, ws) in &ids {
-        tx.run(
+        tx.conn.run(
             "UPDATE decisions SET status = 'expired', result = ?, resolved = ?, undo = NULL WHERE id = ? AND status = 'open'",
             params![result, now(), id],
         )?;
-        tx.publish(steve_types::DomainEvent::from(
+        tx.emit(steve_types::DomainEvent::from(
             steve_types::WorkEvent::Decision {
                 ws: ws.clone().into(),
                 id: id.clone().into(),

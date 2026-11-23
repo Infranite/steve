@@ -89,48 +89,68 @@ fn a_message_is_routed_once_and_corrected_once() {
 fn runs_move_through_their_states_and_are_interrupted_at_boot() {
     let t = with_steve();
     let th = t.store.thread();
-    let r = th
-        .run_add(&NewThreadRun {
-            workspace_id: WS.into(),
-            message_id: "msg_1".into(),
-            ..Default::default()
+    let r = t
+        .store
+        .write(|w| {
+            steve_store::thread_runs::add(
+                w,
+                &NewThreadRun {
+                    workspace_id: WS.into(),
+                    message_id: "msg_1".into(),
+                    ..Default::default()
+                },
+            )
         })
         .unwrap();
     assert!(r.id.starts_with("tr_"));
     assert_eq!(r.status, "queued");
-    let r = th
-        .run_patch(
-            &r.id,
-            &RunPatch {
-                status: Some("running".into()),
-                token_hash: Some(Some("h".into())),
-                started: Some(5),
-                ..Default::default()
-            },
-        )
+    let r = t
+        .store
+        .write(|w| {
+            steve_store::thread_runs::patch(
+                w,
+                &r.id,
+                &RunPatch {
+                    status: Some("running".into()),
+                    token_hash: Some(Some("h".into())),
+                    started: Some(5),
+                    ..Default::default()
+                },
+            )
+        })
         .unwrap()
         .unwrap();
     assert_eq!(
         (r.status.as_str(), r.token_hash.as_deref()),
         ("running", Some("h"))
     );
-    let done = th
-        .run_add(&NewThreadRun {
-            workspace_id: WS.into(),
-            message_id: "msg_2".into(),
-            ..Default::default()
+    let done = t
+        .store
+        .write(|w| {
+            steve_store::thread_runs::add(
+                w,
+                &NewThreadRun {
+                    workspace_id: WS.into(),
+                    message_id: "msg_2".into(),
+                    ..Default::default()
+                },
+            )
         })
         .unwrap();
-    th.run_patch(
-        &done.id,
-        &RunPatch {
-            status: Some("done".into()),
-            tools: Some(4),
-            token_hash: Some(None),
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    t.store
+        .write(|w| {
+            steve_store::thread_runs::patch(
+                w,
+                &done.id,
+                &RunPatch {
+                    status: Some("done".into()),
+                    tools: Some(4),
+                    token_hash: Some(None),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
     assert_eq!(th.runs_active(WS).unwrap().len(), 1);
     let gone = th.runs_interrupt(true).unwrap();
     assert_eq!(gone.len(), 1);

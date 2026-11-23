@@ -22,6 +22,7 @@ fn bindings_match() {
         )+ };
     }
     export!(
+        integrations::OptionalModules,
         WorkspaceId,
         UserId,
         ItemId,
@@ -97,6 +98,31 @@ fn bindings_match() {
         KnowledgeEvent,
         IntegrationsEvent,
         WorkLiveEvent,
+        ViewKind,
+        DecisionView,
+        ItemView,
+        MessageView,
+        ItemParent,
+        ItemSnooze,
+        ItemWorkflow,
+        ItemClosing,
+        OperationBlocker,
+        SessionView,
+        SessionWaiting,
+        Closeout,
+        PullSnapshot,
+        PullChecks,
+        DecisionTier,
+        FoldReason,
+        View,
+        Op,
+        PatchOp,
+        Patch,
+        PatchTag,
+        Snapshot,
+        SnapshotViews,
+        ById,
+        PageOf<DecisionView>,
     );
     let index = files
         .keys()

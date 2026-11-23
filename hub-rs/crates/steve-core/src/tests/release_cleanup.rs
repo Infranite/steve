@@ -60,12 +60,11 @@ fn a_release_script_does_not_outlive_its_test_kit() {
     k.db().item_patch(&i, patch![branch: "steve/x"]).unwrap();
     let s = k.session(&i, "idle");
     let r = k.decision(&i, Some(&s), "approve", "release", &["yes", "no"]);
-    k.db()
-        .exec(
-            "UPDATE decisions SET subject_id = 'steve/x' WHERE id = ?",
-            &[&r],
-        )
-        .unwrap();
+    steve_store::core_fixture::decision(
+        k.db().store(),
+        &r,
+        steve_store::core_fixture::DecisionState::Subject("steve/x"),
+    );
     k.core.resolve(&r, "yes", "", "me").unwrap();
     assert_eq!(k.status(&i).2, "正在发布");
     let groups = test_spawned::of(k.home());
@@ -150,12 +149,7 @@ fn a_project_on_a_remote_device_is_refused_and_starts_no_script() {
         )
         .unwrap()
         .id;
-    k.db()
-        .exec(
-            "UPDATE projects SET device_id = 'mac-2' WHERE id = ?",
-            &[&p],
-        )
-        .unwrap();
+    steve_store::core_fixture::project_device(k.db().store(), &p, "mac-2");
     let i = k.item("wait", "收尾", Some(&p));
     let (name, wt) = branch_with(&r, &k.core.config().worktrees, &i, "b.txt", "b\n");
     std::fs::write(r.join("c.txt"), "c\n").unwrap();
@@ -170,12 +164,11 @@ fn a_project_on_a_remote_device_is_refused_and_starts_no_script() {
         .unwrap();
     let s = k.session(&i, "idle");
     let r = k.decision(&i, Some(&s), "approve", "release", &["yes", "no"]);
-    k.db()
-        .exec(
-            "UPDATE decisions SET subject_id = ? WHERE id = ?",
-            &[&name, &r],
-        )
-        .unwrap();
+    steve_store::core_fixture::decision(
+        k.db().store(),
+        &r,
+        steve_store::core_fixture::DecisionState::Subject(&name),
+    );
     k.core.resolve(&r, "yes", "", "me").unwrap();
 
     assert_eq!(

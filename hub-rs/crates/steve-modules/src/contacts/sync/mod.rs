@@ -18,16 +18,14 @@
 
 pub mod adapter;
 pub mod apply;
-pub mod repo;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use chrono::NaiveTime;
-use rusqlite::Connection;
 use serde::Serialize;
 use steve_runtime::tz::Zone;
-use steve_store::{Tx, uid};
+use steve_store::{DirectoryConnection, R, W, uid};
 use tokio::sync::mpsc;
 
 use super::TeamSync;
@@ -77,18 +75,18 @@ pub struct DirConnection {
 /// Which connections read a directory, and their adapters. Built by the integrator.
 pub trait DirectoryConnections: Send + Sync {
     /// Directory connections of `ws`, or of every workspace with `None`.
-    fn list(&self, c: &Connection, ws: Option<&str>) -> ApiResult<Vec<DirConnection>>;
+    fn list(&self, c: &mut R<'_>, ws: Option<&str>) -> ApiResult<Vec<DirConnection>>;
 
     /// One directory connection of `ws`; `Ok(None)` when it exists but cannot read a directory, and
     /// `404 没有这个连接` when `ws` has no such connection.
-    fn get(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<DirConnection>>;
+    fn get(&self, c: &mut R<'_>, ws: &str, id: &str) -> ApiResult<Option<DirConnection>>;
 
     /// The adapter reading this connection's directory.
     fn adapter(&self, conn: &DirConnection) -> ApiResult<Arc<dyn DirectoryAdapter>>;
 
     /// Called in the sync's transaction after a successful sync.
-    fn synced(&self, tx: &Tx, conn: &DirConnection, at: i64) -> ApiResult<()> {
-        let _ = (tx, conn, at);
+    fn synced(&self, w: &mut W<'_>, conn: &DirConnection, at: i64) -> ApiResult<()> {
+        let _ = (w, conn, at);
         Ok(())
     }
 }
@@ -117,7 +115,7 @@ impl TableConnections {
         self
     }
 
-    fn conn(&self, row: repo::ConnectionRow) -> Option<DirConnection> {
+    fn conn(&self, row: DirectoryConnection) -> Option<DirConnection> {
         let (name, _) = self.adapters.get(&row.adapter)?;
         Some(DirConnection {
             label: format!("{name}通讯录"),
@@ -130,17 +128,18 @@ impl TableConnections {
 }
 
 impl DirectoryConnections for TableConnections {
-    fn list(&self, c: &Connection, ws: Option<&str>) -> ApiResult<Vec<DirConnection>> {
-        Ok(repo::directory_connections(c, ws)?
+    fn list(&self, c: &mut R<'_>, ws: Option<&str>) -> ApiResult<Vec<DirConnection>> {
+        Ok(steve_store::Connections(c)
+            .directories(ws)?
             .into_iter()
             .filter_map(|r| self.conn(r))
             .collect())
     }
 
-    fn get(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<DirConnection>> {
-        match repo::directory_connection(c, ws, id)? {
+    fn get(&self, c: &mut R<'_>, ws: &str, id: &str) -> ApiResult<Option<DirConnection>> {
+        match steve_store::Connections(c).directory(ws, id)? {
             Some(r) => Ok(self.conn(r)),
-            None if repo::connection_exists(c, ws, id)? => Ok(None),
+            None if steve_store::Connections(c).contains(ws, id)? => Ok(None),
             None => Err(ApiError::not_found("连接")),
         }
     }
@@ -155,8 +154,8 @@ impl DirectoryConnections for TableConnections {
         }
     }
 
-    fn synced(&self, tx: &Tx, conn: &DirConnection, at: i64) -> ApiResult<()> {
-        repo::set_last_sync(tx, &conn.id, at)?;
+    fn synced(&self, w: &mut W<'_>, conn: &DirConnection, at: i64) -> ApiResult<()> {
+        steve_store::Connections(w).set_last_sync(&conn.id, at)?;
         Ok(())
     }
 }
@@ -366,12 +365,12 @@ impl DirectorySync {
     /// Isolate unreadable per-connection metadata just as the sync's due-row lookup does.
     fn connection_fact(
         &self,
-        c: &Connection,
+        r: &mut R<'_>,
         ws: &str,
         id: &str,
     ) -> ApiResult<(Option<String>, bool)> {
-        let signature = crate::accounts::connections::repo::change_signature(c, id)?;
-        let eligible = match self.conns.get(c, ws, id) {
+        let signature = steve_store::Connections(r).change_signature(id)?;
+        let eligible = match self.conns.get(r, ws, id) {
             Ok(row) => row.is_some(),
             Err(ApiError::NotFound(_)) => false,
             Err(error) => return Err(error),
@@ -381,13 +380,11 @@ impl DirectorySync {
 
     /// Recompute connection changes from authoritative rows, never from a commit hint's payload.
     fn observe_connections(&self) -> ApiResult<()> {
-        let facts = self.m.store.reader(|c| -> ApiResult<_> {
-            let mut st = c.prepare("SELECT workspace_id,id FROM connections ORDER BY id")?;
-            let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?,r.get::<_, String>(1)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+        let facts = self.m.store.read::<_, steve_store::StoreError>(|r| {
+            let rows = steve_store::Connections(r).change_keys()?;
             let mut facts = Vec::with_capacity(rows.len());
             for (ws, id) in rows {
-                match self.connection_fact(c, &ws, &id) {
+                match self.connection_fact(r, &ws, &id) {
                     Ok((signature, eligible)) => facts.push((ws, id, signature, Some(eligible))),
                     Err(error) => {
                         tracing::warn!(connection = %id, %error, "directory connection facts unavailable");
@@ -432,12 +429,13 @@ impl DirectorySync {
         let (ok, sig) = self
             .m
             .store
-            .reader(|c| -> ApiResult<_> {
-                Ok((
-                    self.conns.get(c, ws, connection_id)?.is_some(),
-                    crate::accounts::connections::repo::change_signature(c, connection_id)?,
-                ))
+            .read::<_, steve_store::StoreError>(|r| {
+                Ok(self
+                    .connection_fact(r, ws, connection_id)
+                    .map(|(sig, ok)| (ok, sig)))
             })
+            .ok()
+            .and_then(Result::ok)
             .unwrap_or((false, None));
         // health counters change on every failed call: only a real change counts
         let changed = {
@@ -495,13 +493,10 @@ impl DirectorySync {
     pub fn tick(&self, now: i64) -> ApiResult<Vec<String>> {
         // Re-read workspace clocks so changing settings.tz takes effect on the next tick.
         let since = lock(&self.state).daily_since;
-        let daily = self.m.store.reader(|c| -> ApiResult<_> {
-            let mut stmt = c.prepare("SELECT id FROM workspaces")?;
-            let workspaces = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let daily = self.m.store.read::<_, steve_store::StoreError>(|r| {
             let mut daily = std::collections::BTreeSet::new();
-            for ws in workspaces {
-                let ws = ws?;
-                let tz = crate::zone::workspace_tz(c, &ws)?;
+            for ws in steve_store::Workspaces(r).ids()? {
+                let tz = crate::zone::Zone::for_user(r, &ws, None)?.tz;
                 let zone = Zone::parse(tz.name()).expect("workspace IANA zone");
                 if next_daily_in(since, DAILY_HOUR, zone) <= now {
                     daily.insert(ws);
@@ -525,33 +520,10 @@ impl DirectorySync {
             return Ok(Vec::new());
         }
         let mut out = Vec::new();
-        let (all, events, failed) = self.m.store.reader(|c| {
-            let mut all = Vec::new();
-            if !daily.is_empty() || catch_up {
-                for x in self.conns.list(c, None)? {
-                    if daily.contains(&x.workspace_id)
-                        || (catch_up && repo::never_synced(c, &x.id)? && !self.queued_for(&x.id))
-                    {
-                        all.push(x);
-                    }
-                }
-            }
-            let mut events = Vec::new();
-            let mut failed = std::collections::BTreeSet::new();
-            for ((ws, id), _) in &due {
-                match self.conns.get(c, ws, id) {
-                    Ok(Some(conn)) => events.push(conn),
-                    Ok(None) | Err(ApiError::NotFound(_)) => {}
-                    Err(e) => {
-                        // A single connection must not hold up other event syncs. Its own
-                        // deadline advances; the source remains healthy.
-                        tracing::warn!(connection = %id, error = %e, "directory sync timer");
-                        failed.insert((ws.clone(), id.clone()));
-                    }
-                }
-            }
-            Ok::<_, ApiError>((all, events, failed))
-        })?;
+        let (all, events, failed) = self.m.store.read::<_, steve_store::StoreError>(|r| {
+            Ok(self.due_connections(r, &daily, catch_up, &due))
+        })??;
+
         // Commit the timer state only after successful source reads. Preserve events changed
         // concurrently with the read, and retain individual lookup failures with a later deadline.
         {
@@ -594,6 +566,45 @@ impl DirectorySync {
         Ok(out)
     }
 
+    fn due_connections(
+        &self,
+        r: &mut R<'_>,
+        daily: &std::collections::BTreeSet<String>,
+        catch_up: bool,
+        due: &[((String, String), i64)],
+    ) -> ApiResult<(
+        Vec<DirConnection>,
+        Vec<DirConnection>,
+        std::collections::BTreeSet<(String, String)>,
+    )> {
+        let mut all = Vec::new();
+        if !daily.is_empty() || catch_up {
+            for x in self.conns.list(r, None)? {
+                if daily.contains(&x.workspace_id)
+                    || (catch_up
+                        && steve_store::Connections(r).never_synced(&x.id)?
+                        && !self.queued_for(&x.id))
+                {
+                    all.push(x);
+                }
+            }
+        }
+        let mut events = Vec::new();
+        let mut failed = std::collections::BTreeSet::new();
+        for ((ws, id), _) in due {
+            match self.conns.get(r, ws, id) {
+                Ok(Some(conn)) => events.push(conn),
+                Ok(None) | Err(ApiError::NotFound(_)) => {}
+                Err(e) => {
+                    // A single connection must not hold up other event syncs. Its own
+                    // deadline advances; the source remains healthy.
+                    tracing::warn!(connection = %id, error = %e, "directory sync timer");
+                    failed.insert((ws.clone(), id.clone()));
+                }
+            }
+        }
+        Ok((all, events, failed))
+    }
     /// Runs a queued job now (the worker calls this; tests may too).
     pub async fn run_job(&self, id: &str) {
         let conns = {
@@ -659,9 +670,9 @@ impl DirectorySync {
             .m
             .blocking(move |m| {
                 let now = m.clock.now();
-                m.store.transaction(|tx| {
-                    let r = apply::apply(tx, &c2, &system, &snapshot, now)?;
-                    conns.synced(tx, &c2, now)?;
+                m.store.write(|w| {
+                    let r = apply::apply(w, &c2, &system, &snapshot, now)?;
+                    conns.synced(w, &c2, now)?;
                     Ok::<_, ApiError>(r)
                 })
             })
@@ -688,9 +699,20 @@ impl DirectorySync {
             Vec::new()
         };
         let now = self.m.clock.now();
-        let r = self.m.store.transaction(|tx| -> ApiResult<()> {
-            crate::accounts::connections::repo::set_config_key(tx, &id, STATE_KEY, &value)?;
-            crate::accounts::connections::repo::note_permissions(tx, &id, &missing, &granted, now)?;
+        let r = self.m.store.write(|w| -> ApiResult<()> {
+            let mut connections = steve_store::Connections(w);
+            if let Some(mut row) = connections.get(&id)? {
+                if let Some(config) = row.config.as_object_mut() {
+                    config.insert(STATE_KEY.into(), value);
+                    crate::accounts::connections::repo::note_permissions_in(
+                        &mut row.config,
+                        &missing,
+                        &granted,
+                        now,
+                    );
+                    connections.replace_config(&id, &row.config)?;
+                }
+            }
             Ok(())
         });
         if let Err(e) = r {
@@ -721,10 +743,9 @@ impl steve_runtime::due::DueSource for DirectoryDue {
                             .fold(st.next_catch_up, i64::min),
                     )
                 };
-                m.store.reader(|c| -> ApiResult<_> {
-                    let mut stmt = c.prepare("SELECT id FROM workspaces")?;
-                    for ws in stmt.query_map([], |r| r.get::<_, String>(0))? {
-                        let tz = crate::zone::workspace_tz(c, &ws?)?;
+                Ok(m.store.read::<_, steve_store::StoreError>(|r| {
+                    for ws in steve_store::Workspaces(r).ids()? {
+                        let tz = crate::zone::Zone::for_user(r, &ws, None)?.tz;
                         next = next.min(next_daily_in(
                             since,
                             DAILY_HOUR,
@@ -732,7 +753,7 @@ impl steve_runtime::due::DueSource for DirectoryDue {
                         ));
                     }
                     Ok(Some(next))
-                })
+                })?)
             })
             .await
             .map_err(|e| steve_runtime::due::DueError(e.to_string()))
@@ -749,7 +770,7 @@ impl steve_runtime::due::DueSource for DirectoryDue {
 }
 
 impl TeamSync for DirectorySync {
-    fn label(&self, c: &Connection, ws: &str, connection_id: &str) -> ApiResult<Option<String>> {
+    fn label(&self, c: &mut R<'_>, ws: &str, connection_id: &str) -> ApiResult<Option<String>> {
         match self.conns.get(c, ws, connection_id) {
             Ok(x) => Ok(x.map(|c| c.label)),
             Err(ApiError::NotFound(_)) => Ok(None),
@@ -759,7 +780,7 @@ impl TeamSync for DirectorySync {
 
     fn schedule(
         &self,
-        c: &Connection,
+        c: &mut R<'_>,
         ws: &str,
         _actor: &str,
         connection_id: Option<&str>,
@@ -783,10 +804,10 @@ mod due_contract_tests {
 
     struct Connections(TableConnections);
     impl DirectoryConnections for Connections {
-        fn list(&self, c: &Connection, ws: Option<&str>) -> ApiResult<Vec<DirConnection>> {
+        fn list(&self, c: &mut R<'_>, ws: Option<&str>) -> ApiResult<Vec<DirConnection>> {
             self.0.list(c, ws)
         }
-        fn get(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<DirConnection>> {
+        fn get(&self, c: &mut R<'_>, ws: &str, id: &str) -> ApiResult<Option<DirConnection>> {
             // A real per-connection lookup failure, not a fake DueSource or terminal marker.
             if id.starts_with("poison") {
                 return Err(ApiError::rule("directory metadata unavailable"));
@@ -833,19 +854,50 @@ mod due_contract_tests {
         }
         fn add(&self, at: i64, poison: bool) -> String {
             let id = format!("{}-{}", if poison { "poison" } else { "ok" }, uid("due"));
-            self.env.store().transaction(|tx| -> ApiResult<_> {
-                let party = crate::contacts::service::ensure_self_org(tx, WS, ME)?;
-                let account = crate::accounts::repo::insert(tx, WS, &crate::accounts::repo::NewAccount {
-                    system_id: "feishu_app".into(), family: "feishu_app".into(), party_id: party.id,
-                    kind: "app_bot".into(), handle: id.clone(), handle_display: id.clone(),
-                    display_name: id.clone(), verified: true, confidence: 1.0,
-                    source: "test".into(), source_label: "test".into(),
-                })?;
-                tx.execute("INSERT INTO connections (id, workspace_id, account_id, adapter, auth, caps, created_by, created, updated, last_sync)
-                    VALUES (?1, ?2, ?3, 'feishu', 'credential', ?5, ?4, 1, 1, 1)",
-                    rusqlite::params![id, WS, account.id, ME, serde_json::json!(["directory.read"]).to_string()])?;
-                Ok(())
-            }).unwrap();
+            self.env
+                .store()
+                .write(|tx| -> ApiResult<_> {
+                    let party = crate::contacts::service::ensure_self_org(tx, WS, ME)?;
+                    let account = crate::accounts::repo::insert(
+                        tx,
+                        WS,
+                        &crate::accounts::repo::NewAccount {
+                            system_id: "feishu_app".into(),
+                            family: "feishu_app".into(),
+                            party_id: party.id,
+                            kind: "app_bot".into(),
+                            handle: id.clone(),
+                            handle_display: id.clone(),
+                            display_name: id.clone(),
+                            verified: true,
+                            confidence: 1.0,
+                            source: "test".into(),
+                            source_label: "test".into(),
+                        },
+                    )?;
+                    tx.scope(|w| {
+                        steve_store::Connections(w).insert(&steve_store::ConnRow {
+                            id: id.clone(),
+                            workspace_id: WS.into(),
+                            account_id: account.id,
+                            adapter: "feishu".into(),
+                            auth: "credential".into(),
+                            granted_scopes: vec![],
+                            caps: vec!["directory.read".into()],
+                            credential_item: None,
+                            status: "ok".into(),
+                            health: Default::default(),
+                            config: serde_json::json!({}),
+                            last_sync: Some(1),
+                            created_by: ME.into(),
+                            revision: 1,
+                            created: 1,
+                            updated: 1,
+                        })
+                    })?;
+                    Ok(())
+                })
+                .unwrap();
             lock(&self.source.0.state)
                 .pending
                 .insert((WS.into(), id.clone()), at);
@@ -867,15 +919,7 @@ mod due_contract_tests {
     async fn r7b_directory_uses_workspace_deadlines_and_event_wakes() {
         let f = Fixture::new();
         let sync = &f.source.0;
-        f.env
-            .store()
-            .with_conn(|c| {
-                c.execute(
-                    "INSERT OR REPLACE INTO settings(workspace_id,key,value,updated) SELECT id,'tz',?1,1000 FROM workspaces",
-                    [serde_json::json!("UTC").to_string()],
-                )?;
-                Ok(())
-            })
+        steve_store::testkit::modules::directory::set_workspace_clocks(f.env.store(), "UTC")
             .unwrap();
         let daily = next_daily_in(1000, DAILY_HOUR, Zone::parse("UTC").unwrap());
         lock(&sync.state).next_catch_up = daily + 1;

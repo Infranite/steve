@@ -3,7 +3,6 @@ export default {
   page: {
     title: "Knowledge",
     sub: "What Steve remembers and can look up",
-    unavailable: "The knowledge base can't be opened right now",
     loading: "Loading",
   },
   field: {

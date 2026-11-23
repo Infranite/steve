@@ -11,9 +11,8 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { go, Group, Row, SectionLabel, Segmented, Empty } from "@/ui"
 import { looksLikeHandle, nameOf, people, type Contact, type MergeProposal, type PendingContact } from "@/api/people"
 import { tm, toast } from "@/store"
-import { ContactAvatar, Loading, act, joinList, useLoad } from "@/people/common"
+import { ContactAvatar, Loading, act, joinList, orgLine, useLoad } from "@/people/common"
 import { t as tr, useT } from "@/i18n"
-import { orgLine } from "@/people/contacts"
 import type { Wait } from "@/store"
 import { Select } from "@/view-shared"
 
@@ -180,7 +179,6 @@ export function MergeDialog({ from, onClose }: { from: Pick<Contact, "id" | "nam
 /** the line under the question, by subject_type (contacts.md §0.1 point 6) */
 const subjectLine = (s: string) => (s === "party_merge" || s === "attr_value" || s === "attr_def" || s === "mem" ? tr(`people:decision.${s}`) : undefined)
 /** party_merge, and every `confirm` (the one kind the modules add; other modules' subjects get the plain yes / no) */
-export const isPeopleDecision = (w: Pick<Wait, "type" | "subject">) => w.subject === "party_merge" || w.type === "confirm"
 /** the body and buttons of a contacts decision; DecisionCard draws the header */
 export function PeopleDecisionBody({ w, busy, act: choose }: { w: Wait; busy: boolean; act: (choice: string) => void }) {
   const t = useT()

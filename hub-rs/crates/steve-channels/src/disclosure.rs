@@ -47,7 +47,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use regex::Regex;
-use rusqlite::{Connection, params};
 use serde_json::Value;
 use steve_modules::outbound::{
     Audience, BasisEntry, CheckCx, CheckResult, KnowledgeUse, OutboundCheck, Span, Verdict,
@@ -343,37 +342,20 @@ pub struct Names {
 }
 
 impl Names {
-    pub fn load(c: &Connection, ws: &str) -> rusqlite::Result<Self> {
+    pub fn load(r: &mut impl steve_store::Read, ws: &str) -> steve_store::Result<Self> {
         let mut parties = Vec::new();
-        let mut st = c.prepare_cached(
-            "SELECT id, name, aliases FROM parties WHERE workspace_id = ? AND status = 'active' AND merged_into IS NULL",
-        )?;
-        let rows = st.query_map([ws], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })?;
-        for row in rows {
-            let (id, name, aliases) = row?;
-            parties.push((id.clone(), name));
-            if let Ok(Value::Array(a)) = serde_json::from_str::<Value>(&aliases) {
-                for x in a {
-                    if let Some(s) = x.as_str() {
-                        parties.push((id.clone(), s.to_string()));
-                    }
-                }
-            }
+        for party in steve_store::parties::active_names_and_aliases(r, ws)? {
+            parties.push((party.id.clone(), party.name));
+            parties.extend(
+                party
+                    .aliases
+                    .into_iter()
+                    .map(|name| (party.id.clone(), name)),
+            );
         }
-        let mut spaces = Vec::new();
-        let mut st =
-            c.prepare_cached("SELECT id, name FROM spaces WHERE workspace_id = ? AND name <> ''")?;
-        for row in st.query_map([ws], |r| Ok((r.get(0)?, r.get(1)?)))? {
-            spaces.push(row?);
-        }
-        parties.retain(|(_, n)| n.trim().chars().count() >= MIN_NAME);
-        spaces.retain(|(_, n): &(String, String)| n.trim().chars().count() >= MIN_NAME);
+        let mut spaces = steve_store::channel_spaces::rows::names(r, ws)?;
+        parties.retain(|(_, name)| name.trim().chars().count() >= MIN_NAME);
+        spaces.retain(|(_, name)| name.trim().chars().count() >= MIN_NAME);
         Ok(Self { parties, spaces })
     }
 
@@ -1064,14 +1046,13 @@ impl OutboundCheck for Disclosure {
             .filter(|k| k.level != Level::Never)
             .cloned()
             .collect();
-        let names =
-            match store.reader(|c| Names::load(c, &cx.ws).map_err(steve_store::StoreError::from)) {
-                Ok(n) => n,
-                Err(e) => {
-                    tracing::warn!("disclosure: names not loaded: {e}");
-                    Names::default()
-                }
-            };
+        let names = match store.read(|r| Names::load(r, &cx.ws)) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!("disclosure: names not loaded: {e}");
+                Names::default()
+            }
+        };
 
         // Only the workspace's owner reads it (their private chat with Steve). Nobody else hears anything, so
         // there is nothing to disclose: no names rule, no model check, no rewrite (it held or reworded answers
@@ -1164,78 +1145,58 @@ fn private(a: &Audience) -> bool {
 
 // ---------------------------------------------------------------- audiences of spaces
 
-/// `user` is an owner of workspace `ws`.
-fn workspace_owner(c: &Connection, ws: &str, user: &str) -> rusqlite::Result<bool> {
-    c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ? AND role = 'owner')",
-        params![ws, user],
-        |r| r.get(0),
-    )
-}
-
 /// The audience of a space: the owners of its member accounts (minus the sending account), whether
 /// it has outside members, and the scopes it is entirely inside (`space:<id>`; `workspace` when
 /// every member is a user of the workspace; `private` when it is `owner`'s one-to-one chat and `owner`
 /// owns the workspace).
 pub fn space_audience(
-    c: &Connection,
+    r: &mut impl steve_store::Read,
     space: &crate::spaces::SpaceRow,
     sender_account: &str,
     owner: &str,
-) -> rusqlite::Result<Audience> {
-    let mut st = c.prepare_cached(
-        "SELECT sm.account_id, a.party_id, p.user_id, coalesce(nullif(a.display_name, ''), p.name, a.handle_display)
-           FROM space_members sm JOIN accounts a ON a.id = sm.account_id LEFT JOIN parties p ON p.id = a.party_id
-          WHERE sm.space_id = ? AND sm.account_id <> ? ORDER BY sm.joined",
-    )?;
-    let rows = st
-        .query_map(params![space.id, sender_account], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, Option<String>>(1)?,
-                r.get::<_, Option<String>>(2)?,
-                r.get::<_, String>(3)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+) -> steve_store::Result<Audience> {
+    use steve_store::channel_spaces::members;
+    let rows = members::audience(r, &space.id, sender_account)?;
     let mut a = Audience {
         external: space.has_external,
         scopes: vec![format!("space:{}", space.id)],
         ..Audience::default()
     };
     let mut names = Vec::new();
-    for (acc, party, _, name) in &rows {
-        a.accounts.push(acc.clone());
-        if let Some(p) = party
+    for member in &rows {
+        a.accounts.push(member.account.clone());
+        if let Some(p) = &member.party
             && !a.parties.contains(p)
         {
             a.parties.push(p.clone());
         }
-        names.push(name.clone());
+        names.push(member.name.as_str());
     }
     // everyone recorded is a user of the workspace, and everyone is recorded: the provider's member count
     // is known and no more than the members on record (members nobody recorded could be anyone)
     // the provider counts people (Feishu `user_count`), not bots
-    let recorded: i64 = c.query_row(
-        "SELECT count(*) FROM space_members sm JOIN accounts a ON a.id = sm.account_id
-          WHERE sm.space_id = ? AND a.kind NOT IN ('app_bot', 'bot')",
-        [&space.id],
-        |r| r.get(0),
-    )?;
+    let recorded = members::people_count(r, &space.id)?;
     let complete = space.people() > 0 && recorded >= space.people();
-    if complete && !rows.is_empty() && !a.external && rows.iter().all(|r| r.2.is_some()) {
+    if complete
+        && !rows.is_empty()
+        && !a.external
+        && rows.iter().all(|member| member.user.is_some())
+    {
         a.scopes.push("workspace".into());
         // private: a one-to-one chat whose one other member is `owner` and `owner` owns the workspace. A group
         // whose member list could not be read (only the bot and its sender recorded) is never private.
         if space.kind == "dm"
             && rows.len() == 1
-            && rows[0].2.as_deref() == Some(owner)
-            && workspace_owner(c, &space.workspace_id, owner)?
+            && rows[0].user.as_deref() == Some(owner)
+            && steve_store::Members::new(r)
+                .role(&space.workspace_id, owner)?
+                .as_deref()
+                == Some("owner")
         {
             a.scopes.push("private".into());
         }
     }
-    let shown: Vec<&str> = names.iter().take(8).map(String::as_str).collect();
+    let shown: Vec<&str> = names.into_iter().take(8).collect();
     let space_name = if space.name.trim().is_empty() {
         "私聊"
     } else {

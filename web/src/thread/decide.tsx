@@ -1,3 +1,4 @@
+import { useOpenDecisions } from "@/data/sync"
 /* Steve's decisions drawn with affectUI's Decision Card and Approval Card (components/affect).
  * One mapping from a Hub decision (Item + Wait) to the card's question, rows and own-words field, and back to the
  * Hub's choice, used in three places: in the conversation, in 待处理 / an item's page, and above the chat composer.
@@ -13,17 +14,13 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuRadioG
 import { OutContext } from "@/channels/out-context"
 import { handoffContent } from "@/channels/handoff-content"
 import { HandoffPreview, ReplyDraft } from "@/channels/reply-preview"
-import { OpenInFeishu } from "@/channels/open-in-app"
+import { MessageOpenInFeishu } from "@/channels/open-in-app"
 import { SendRecovery } from "@/channels/send-recovery"
 import { t as tr, useT } from "@/i18n"
-import { FLOW_SUBJECTS } from "@/auto/decision"
-import { hasOptionIds, WITH_WORDS, WORDS_OPTIONS } from "@/decision-options"
-import { MODULE_CARDS } from "@/vault/decisions"
-import { isPeopleDecision } from "@/people/pending"
-import { acceptChoosesRelease, botName, channelAnswer, decide, dismiss, FAIL_CHOICE, optionLabel, pendingCards, PR_AWAITING_MERGE, setSt, SNOOZE_KEYS, snooze, snoozeLabel, st, WT, type Item, type Wait } from "@/store"
+import { FLOW_SUBJECTS, hasOptionIds, isModuleCard, isPeopleDecision, WITH_WORDS, WORDS_OPTIONS } from "@/decision-options"
+import { acceptChoosesRelease, botName, channelAnswer, decide, dismiss, FAIL_CHOICE, optionLabel, decideCards, PR_AWAITING_MERGE, setSt, SNOOZE_KEYS, snooze, snoozeLabel, st, WT, type Item, type Wait } from "@/store"
 import { permissionCommand } from "@/ui"
 import { YoloBadge } from "@/yolo/badges"
-import { editBot } from "@/manage"
 import { AlarmClockIcon, BanIcon, BellOffIcon, EllipsisIcon } from "lucide-react"
 import { useRef, useState, type ReactNode } from "react"
 
@@ -31,7 +28,7 @@ import { useRef, useState, type ReactNode } from "react"
 const FAIL_ORDER = ["retry", "release_live", "release_retry", "release_waive", "delivered", "tosteve", "drop", "look", "continue"]
 
 /** a decision whose subject draws its own body (Steve's card keeps it); a tool call is an Approval Card */
-export const hasOwnBody = (w: Wait) => FLOW_SUBJECTS.includes(w.subject) || (w.type === "confirm" && w.subject === "mem") || isPeopleDecision(w) || w.subject === "mail_draft" || !!MODULE_CARDS[w.subject]
+export const hasOwnBody = (w: Wait) => FLOW_SUBJECTS.includes(w.subject) || isPeopleDecision(w) || w.subject === "mail_draft" || isModuleCard(w.subject)
 export const isToolCall = (w: Wait) => w.type === "approve" && w.subject === "tool_call"
 
 const toolOptions = (w: Wait) => {
@@ -84,8 +81,8 @@ function Detail({ w, extra, reply = false }: { w: Wait; extra?: ReactNode; reply
   const t = useT()
   return <>
     {w.subject === "chan_message" && (w.type === "approve" || w.type === "fail") && <OutContext id={w.subjectId} />}
-    {w.subject === "chan_message" && <OpenInFeishu url={w.openUrl} className="-ml-2 self-start" />}
-    {w.subject === "session_start" && w.subjectId && <Button variant="outline" size="sm" data-session-config={w.subjectId} onClick={() => w.subjectId && editBot(w.subjectId)}>{t("core:card.fixBotConfig")}</Button>}
+    {w.subject === "chan_message" && <MessageOpenInFeishu message={w.subjectId} className="-ml-2 self-start" />}
+    {w.subject === "session_start" && w.subjectId && <Button variant="outline" size="sm" data-session-config={w.subjectId} onClick={() => { const id = w.subjectId; if (id) void import("@/manage").then(({ editBot }) => editBot(id)) }}>{t("core:card.fixBotConfig")}</Button>}
     {/* the draft's headings are text: a "## 交付" never outranks the question above it */}
     {w.draft && !isToolCall(w) && !reply && (w.subject === "chan_message" ? <ReplyDraft text={w.draft} /> : <div className="max-h-72 overflow-auto break-words text-muted-foreground [&_:is(h1,h2,h3,h4,h5,h6)]:mt-0! [&_:is(h1,h2,h3,h4,h5,h6)]:mb-1! [&_:is(h1,h2,h3,h4,h5,h6)]:[font:inherit]! [&_:is(h1,h2,h3,h4,h5,h6)]:font-medium! [&_:is(h1,h2,h3,h4,h5,h6)]:text-foreground"><Markdown text={w.draft} /></div>)}
     {extra}
@@ -309,7 +306,7 @@ export function InlineDecision({ m }: { m: Mapped }) {
 /** above the chat composer: every open decision in one card, paged, folded to a line until you open it */
 export function ComposerDecisions({ reveal, skip }: { reveal?: number; skip?: Set<string> }) {
   useT()
-  const cards = pendingCards().filter(({ w }) => !skip?.has(w.decision))
+  const cards = decideCards(useOpenDecisions()).filter(({ w }) => !skip?.has(w.decision))
   const mapped = cards.map(({ i, w }) => mapDecision(i, w, "composer", true)).filter(Boolean) as Mapped[]
   if (!mapped.length) return null
   const by = new Map(mapped.map((m) => [m.d.id, m]))

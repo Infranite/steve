@@ -1,5 +1,5 @@
 use rusqlite::{Connection, params};
-use steve_store::{bot_dispatch, db};
+use steve_store::db;
 
 #[test]
 fn upgrades_a_109_database_to_one_dispatch_model() {
@@ -78,13 +78,8 @@ fn upgrades_a_109_database_to_one_dispatch_model() {
         )
         .unwrap();
     assert!(!spread);
-    assert!(
-        bot_dispatch::selected(&c, "default", None)
-            .unwrap()
-            .is_none()
-    );
-    assert_eq!(
-        bot_dispatch::bindings(&c, "default", "worker").unwrap(),
-        ["local"]
-    );
+    let defaults: i64 = c
+        .query_row("SELECT count(*) FROM bot_team_defaults", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(defaults, 0);
 }

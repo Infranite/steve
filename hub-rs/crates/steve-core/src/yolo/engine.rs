@@ -323,7 +323,7 @@ impl Engine {
         let prior = self
             .yolo()
             .store()
-            .reader(|c| repo::actions_of_decision(c, id))?;
+            .read(|c| repo::actions_of_decision(c, id))?;
         if d.status != "open" {
             // the user (or something else) answered first: what was scheduled is moot
             for a in prior.iter().filter(|a| a.outcome == "scheduled") {
@@ -374,7 +374,7 @@ impl Engine {
         let window = self
             .yolo()
             .store()
-            .reader(|c| repo::window_current(c, &d.workspace_id))?;
+            .read(|c| repo::window_current(c, &d.workspace_id))?;
         // a tool request a runner still waits for (armed above) belongs to the turn full access now
         // applies to, however old: the window's start only keeps YOLO off other cards left from before
         if let Some(w) = &window
@@ -537,7 +537,7 @@ impl Engine {
     fn reread(&self, action: &str) -> ApiResult<ActionRow> {
         self.yolo()
             .store()
-            .reader(|c| repo::action_get(c, action))?
+            .read(|c| repo::action_get(c, action))?
             .ok_or_else(|| ApiError::not_found("记录"))
     }
 
@@ -635,11 +635,6 @@ impl Engine {
         out
     }
 
-    fn claimed_decisions(&self) -> String {
-        let claimed: Vec<String> = lock(&self.0.inflight).iter().cloned().collect();
-        serde_json::json!(claimed).to_string()
-    }
-
     /// The sole eligibility query for deadlines, batches and an unsettled row's retry.
     /// Optional filters only narrow this set; every filter is applied before LIMIT.
     fn scheduled_rows(
@@ -648,29 +643,10 @@ impl Engine {
         only: Option<&str>,
         limit: usize,
     ) -> steve_store::Result<Vec<ActionRow>> {
-        let claimed = self.claimed_decisions();
-        self.yolo().store().reader(|c| {
-            let ids = c
-                .prepare_cached(
-                    "SELECT id FROM yolo_actions
-                 WHERE outcome='scheduled' AND due_at IS NOT NULL
-                   AND (decision_id IS NULL OR decision_id NOT IN (SELECT value FROM json_each(?1)))
-                   AND (?2 IS NULL OR due_at<=?2) AND (?3 IS NULL OR id=?3)
-                 ORDER BY due_at, rowid LIMIT ?4",
-                )?
-                .query_map(
-                    rusqlite::params![claimed, through, only, limit as i64],
-                    |r| r.get::<_, String>(0),
-                )?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let mut rows = Vec::new();
-            for id in ids {
-                if let Some(row) = repo::action_get(c, &id)? {
-                    rows.push(row);
-                }
-            }
-            Ok(rows)
-        })
+        let claimed: Vec<String> = lock(&self.0.inflight).iter().cloned().collect();
+        self.yolo()
+            .store()
+            .read(|r| repo::scheduled_actions(r, &claimed, through, only, limit as u64))
     }
 
     fn scheduled_pass(
@@ -752,7 +728,7 @@ impl Engine {
             let scopes = self
                 .yolo()
                 .store()
-                .reader(|c| repo::scopes(c, &ws))
+                .read(|c| repo::scopes(c, &ws))
                 .unwrap_or_default();
             let paused = scopes
                 .iter()
@@ -914,7 +890,7 @@ mod due_contract_tests {
             let yolo = self.source.0.yolo();
             if yolo
                 .store()
-                .reader(|c| repo::window_current(c, ws))
+                .read(|c| repo::window_current(c, ws))
                 .unwrap()
                 .is_none()
             {
@@ -932,7 +908,7 @@ mod due_contract_tests {
             }
             let window = yolo
                 .store()
-                .reader(|c| repo::window_current(c, ws))
+                .read(|c| repo::window_current(c, ws))
                 .unwrap()
                 .unwrap();
             let decision_id = if poison {
@@ -952,14 +928,7 @@ mod due_contract_tests {
                     .unwrap();
                 // Corrupt a real decision: decoding really fails before execution. B5 must use
                 // the action's workspace even when the decision cannot be decoded.
-                self.source
-                    .0
-                    .yolo()
-                    .store()
-                    .with_conn(|c| {
-                        Ok(c.execute("UPDATE decisions SET options=x'80' WHERE id=?", [&d.id])?)
-                    })
-                    .unwrap();
+                steve_store::core_fixture::yolo::corrupt_decision_options(yolo.store(), &d.id);
                 assert!(self.source.0.core().store().decision(&d.id).is_err());
                 Some(d.id)
             } else {
@@ -988,19 +957,8 @@ mod due_contract_tests {
             a.id
         }
         fn terminal(&self, poison: bool) -> Vec<String> {
-            let ids = self
-                .source
-                .0
-                .yolo()
-                .store()
-                .reader(|c| {
-                    Ok::<_, steve_store::StoreError>(
-                        c.prepare("SELECT id FROM yolo_actions WHERE outcome<>'scheduled'")?
-                            .query_map([], |r| r.get::<_, String>(0))?
-                            .collect::<rusqlite::Result<Vec<_>>>()?,
-                    )
-                })
-                .unwrap();
+            let ids =
+                steve_store::core_fixture::yolo::terminal_action_ids(self.source.0.yolo().store());
             ids.into_iter()
                 .filter(|id| lock(&self.poison).contains(id) == poison)
                 .collect()
@@ -1059,18 +1017,7 @@ mod due_contract_tests {
             // Separate workspaces keep each below B5's workspace-wide threshold, so this
             // regression must make progress by row-local retry rather than mass cancellation.
             let ws = format!("poison-ws-{n}");
-            f.source
-                .0
-                .yolo()
-                .store()
-                .with_conn(|c| {
-                    c.execute(
-                        "INSERT INTO workspaces (id, name, created) VALUES (?1, ?1, 1)",
-                        [&ws],
-                    )?;
-                    Ok(())
-                })
-                .unwrap();
+            steve_store::core_fixture::workspace(f.source.0.yolo().store(), &ws, &ws, "ST", 0, 1);
             f.add_in(&ws, 999, true);
         }
         let good = contract::Fixture::add(&f, 1000, false);
@@ -1206,7 +1153,7 @@ mod due_contract_tests {
         let wake = &yolo.0.due_wake;
         assert!(!take_wake(wake));
         let id = store
-            .transaction(|_| -> ApiResult<_> {
+            .write(|_| -> ApiResult<_> {
                 let row = yolo.record(&repo::NewAction {
                     workspace_id: WS.into(),
                     outcome: "scheduled".into(),
@@ -1228,7 +1175,7 @@ mod due_contract_tests {
             .unwrap();
         assert!(take_wake(wake));
         assert!(!take_wake(wake));
-        let rolled_back = store.transaction(|_| -> ApiResult<()> {
+        let rolled_back = store.write(|_| -> ApiResult<()> {
             yolo.postpone(&id, 3000, "rolled back")?;
             assert!(!take_wake(wake));
             Err(ApiError::rule("rollback"))
@@ -1237,12 +1184,7 @@ mod due_contract_tests {
         assert!(!take_wake(wake), "a root rollback must not wake the source");
         assert_eq!(f.source.0.reread(&id).unwrap().due_at, Some(2000));
         // A write that bypasses ledger helpers must use the very same commit subscription.
-        store
-            .transaction(|tx| {
-                tx.execute("UPDATE yolo_actions SET due_at=4000 WHERE id=?", [&id])?;
-                Ok::<_, steve_store::StoreError>(())
-            })
-            .unwrap();
+        steve_store::core_fixture::yolo::change_due_at(store, &id, 4000);
         assert!(take_wake(wake));
         assert_eq!(f.source.next_due().await.unwrap(), Some(4000));
     }

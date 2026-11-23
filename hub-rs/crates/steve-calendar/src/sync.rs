@@ -21,9 +21,8 @@ use std::sync::Arc;
 
 use chrono::{NaiveDate, NaiveTime};
 use regex::Regex;
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
-use steve_modules::accounts::connections::{ConnCx, Health, repo as crepo};
+use steve_modules::accounts::connections::{ConnCx, Health};
 use steve_modules::vault::VaultError;
 use steve_modules::{ApiError, ApiResult};
 use steve_runtime::tz::Zone;
@@ -31,8 +30,11 @@ use steve_runtime::tz::Zone;
 use crate::profile::{
     Busy, Changes, RemoteCalendar, RemoteEvent, SourceError, When, Window, feature,
 };
-use crate::repo::{self, AttRow, CalRow, EventRow, Written};
 use crate::{Calendar, hash, ics, lock, merge};
+use steve_store::calendar::{AttRow, CalRow, CalendarRepo, EventRow, Meeting, Written};
+use steve_store::{
+    Read, StoreError, accounts::Accounts, connections::Connections, parties::Parties,
+};
 
 /// Text kept of an event: title and place, the description's start.
 const TITLE_MAX: usize = 500;
@@ -100,57 +102,18 @@ fn excerpt(s: Option<&str>) -> Option<String> {
     cut(Some(&flat), EXCERPT_MAX)
 }
 
-/// The contact holding a handle now (merged contacts followed).
-pub(crate) fn current_party(c: &Connection, mut id: String) -> rusqlite::Result<String> {
-    for _ in 0..32 {
-        let next: Option<(String, Option<String>)> = c
-            .query_row(
-                "SELECT status, merged_into FROM parties WHERE id = ?",
-                [&id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        match next {
-            Some((s, Some(n))) if s == "merged" => id = n,
-            _ => break,
-        }
-    }
-    Ok(id)
+/// The contact an email belongs to, following a merge when necessary.
+fn party_of_email(c: &mut impl Read, ws: &str, email: &str) -> steve_store::Result<Option<String>> {
+    let party = Accounts::new(c).party_by_email(ws, &email.trim().to_ascii_lowercase())?;
+    party.map(|id| Parties::new(c).current(id)).transpose()
 }
 
-/// The contact an email belongs to, when Steve knows it (never creates one).
-pub(crate) fn party_of_email(
-    c: &Connection,
-    ws: &str,
-    email: &str,
-) -> rusqlite::Result<Option<String>> {
-    let p: Option<String> = c
-        .query_row(
-            "SELECT a.party_id FROM account_handles h JOIN accounts a ON a.id = h.account_id
-              WHERE h.workspace_id = ? AND h.family = 'email' AND h.handle = ? AND a.status = 'active' LIMIT 1",
-            params![ws, email.trim().to_ascii_lowercase()],
-            |r| r.get(0),
-        )
-        .optional()?;
-    p.map(|p| current_party(c, p)).transpose()
-}
-
-/// The user's own contact (“我”).
-pub(crate) fn me_party(c: &Connection, ws: &str, user: &str) -> rusqlite::Result<Option<String>> {
-    c.query_row(
-        "SELECT id FROM parties WHERE workspace_id = ? AND user_id = ? AND status = 'active' ORDER BY created LIMIT 1",
-        params![ws, user],
-        |r| r.get(0),
-    )
-    .optional()
-}
-
-/// The zone of a calendar's dates and floating times.
-fn tz_of(c: &Connection, ws: &str, user: &str, name: Option<&str>) -> rusqlite::Result<Zone> {
+/// A source's zone when supplied, otherwise the owner's.
+fn tz_of(c: &mut impl Read, ws: &str, user: &str, name: Option<&str>) -> steve_store::Result<Zone> {
     if let Some(zone) = name.and_then(|n| Zone::parse(n).ok()) {
         return Ok(zone);
     }
-    let policy = steve_modules::zone::Zone::of(c, ws, user)?;
+    let policy = crate::query::user_tz(c, ws, user)?;
     Ok(Zone::parse(policy.name()).expect("policy IANA zone"))
 }
 
@@ -205,22 +168,34 @@ fn event_times(e: &RemoteEvent, zone: &Zone) -> Result<EventTimes, String> {
 }
 
 /// Who the people in an event are.
-pub(crate) struct People<'a> {
-    pub(crate) c: &'a Connection,
+pub(crate) struct People<'a, C> {
+    pub(crate) c: &'a mut C,
     pub(crate) ws: &'a str,
     pub(crate) me: Option<&'a str>,
     pub(crate) cache: HashMap<String, Option<String>>,
 }
 
-impl People<'_> {
-    fn of(&mut self, email: Option<&str>) -> Option<String> {
-        let e = email?.trim().to_ascii_lowercase();
-        if let Some(p) = self.cache.get(&e) {
-            return p.clone();
+impl<C: Read> People<'_, C> {
+    fn of(&mut self, email: Option<&str>) -> steve_store::Result<Option<String>> {
+        let Some(email) = email else { return Ok(None) };
+        let key = email.trim().to_ascii_lowercase();
+        if let Some(p) = self.cache.get(&key) {
+            return Ok(p.clone());
         }
-        let p = party_of_email(self.c, self.ws, &e).ok().flatten();
-        self.cache.insert(e, p.clone());
-        p
+        let party = party_of_email(self.c, self.ws, &key)?;
+        self.cache.insert(key, party.clone());
+        Ok(party)
+    }
+}
+
+pub(crate) enum NormalizeError {
+    Invalid(String),
+    Store(StoreError),
+}
+
+impl From<StoreError> for NormalizeError {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
     }
 }
 
@@ -229,27 +204,25 @@ pub(crate) fn normalize(
     cal: &CalRow,
     e: &RemoteEvent,
     busy: bool,
-    people: &mut People<'_>,
-) -> Result<(EventRow, Vec<AttRow>), String> {
+    people: &mut People<'_, impl Read>,
+) -> Result<(EventRow, Vec<AttRow>), NormalizeError> {
     let id = e.id.trim();
     if id.is_empty() || id.len() > 1024 {
-        return Err("event without a valid id".into());
+        return Err(NormalizeError::Invalid("event without a valid id".into()));
     }
-    // Old cache rows may have no zone; resolve them by the same policy as new calendars.
     let zone = tz_of(
         people.c,
         &cal.workspace_id,
         &cal.owner_user,
         cal.tz.as_deref(),
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
     let EventTimes {
         all_day,
         start_ms,
         end_ms,
         start_date,
         end_date,
-    } = event_times(e, &zone)?;
+    } = event_times(e, &zone).map_err(NormalizeError::Invalid)?;
     let status = match e.status.as_deref() {
         Some(s @ ("confirmed" | "tentative" | "cancelled")) => s.to_string(),
         _ => "confirmed".into(),
@@ -265,7 +238,7 @@ pub(crate) fn normalize(
     if !busy {
         if let Some(o) = &e.organizer {
             org_email = o.email.as_deref().map(|x| x.trim().to_ascii_lowercase());
-            org_party = people.of(org_email.as_deref());
+            org_party = people.of(org_email.as_deref())?;
             org_name = cut(o.name.as_deref(), 200);
             i_org = o.me || (org_party.is_some() && org_party.as_deref() == people.me);
         }
@@ -275,7 +248,7 @@ pub(crate) fn normalize(
                 .email
                 .as_deref()
                 .map(|x| x.trim().to_ascii_lowercase());
-            let party = people.of(email.as_deref());
+            let party = people.of(email.as_deref())?;
             let is_self = a.who.me || (party.is_some() && party.as_deref() == people.me);
             let rsvp = rsvp_ok(a.rsvp.as_deref());
             if is_self && my_rsvp.is_none() {
@@ -425,9 +398,7 @@ impl Calendar {
             .0
             .m
             .store
-            .reader(|c| crepo::get(c, conn))
-            .map_err(ApiError::from)?
-            .filter(|r| r.workspace_id == ws);
+            .read(|r| Connections::new(r).source(ws, conn))?;
         let Some(row) = row else { return Ok(None) };
         let Some(src) = self.source(&row.adapter) else {
             return Ok(None);
@@ -464,14 +435,11 @@ impl Calendar {
         let _held = guard.lock().await;
         let now = self.now();
         if manual {
-            let last: Option<i64> = self.0.m.store.reader(|c| {
-                c.query_row(
-                    "SELECT MAX(synced_at) FROM cal_calendars WHERE connection_id = ?",
-                    [conn],
-                    |r| r.get(0),
-                )
-                .map_err(steve_store::StoreError::from)
-            })?;
+            let last = self
+                .0
+                .m
+                .store
+                .read(|r| CalendarRepo::new(r).last_synced(conn))?;
             if last.is_some_and(|t| now - t < self.settings().manual_min_ms) {
                 return Ok(SyncReport {
                     source: true,
@@ -494,15 +462,13 @@ impl Calendar {
             Ok(r) => r,
             Err(e) => {
                 let msg = source_text(&e);
-                self.0.m.store.transaction(|tx| {
-                    for c in repo::of_connection(tx, conn)? {
-                        repo::set_failed(tx, &c.id, &msg, now)?;
-                        tx.publish(steve_types::DomainEvent::from(
-                            steve_types::AutomationEvent::Calendar {
-                                id: c.id.into(),
-                                ws: ws.into(),
-                            },
-                        ));
+                self.0.m.store.write(|tx| {
+                    for c in CalendarRepo::new(tx).of_connection(conn)? {
+                        CalendarRepo::new(tx).set_failed(&c.id, &msg, now)?;
+                        tx.emit(steve_types::AutomationEvent::Calendar {
+                            id: c.id.into(),
+                            ws: ws.into(),
+                        });
                     }
                     Ok::<_, ApiError>(())
                 })?;
@@ -550,14 +516,12 @@ impl Calendar {
                 }
                 Err(e) => {
                     let msg = source_text(&e);
-                    self.0.m.store.transaction(|tx| {
-                        repo::set_failed(tx, &cal.id, &msg, self.now())?;
-                        tx.publish(steve_types::DomainEvent::from(
-                            steve_types::AutomationEvent::Calendar {
-                                id: cal.id.clone().into(),
-                                ws: ws.into(),
-                            },
-                        ));
+                    self.0.m.store.write(|tx| {
+                        CalendarRepo::new(tx).set_failed(&cal.id, &msg, self.now())?;
+                        tx.emit(steve_types::AutomationEvent::Calendar {
+                            id: cal.id.clone().into(),
+                            ws: ws.into(),
+                        });
                         Ok::<_, ApiError>(())
                     })?;
                     report.errors.push((cal.name.clone(), msg));
@@ -589,19 +553,17 @@ impl Calendar {
         remotes: &[RemoteCalendar],
     ) -> ApiResult<Vec<CalRow>> {
         let now = self.now();
-        self.0.m.store.transaction(|tx| {
-            let row = crepo::get(tx, conn)?.ok_or_else(|| ApiError::not_found("连接"))?;
-            let owner = row.created_by.clone();
-            let me = me_party(tx, ws, &owner)?;
-            let account_party: Option<String> = tx
-                .query_row(
-                    "SELECT party_id FROM accounts WHERE id = ?",
-                    [&row.account_id],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            let account_party = account_party.map(|p| current_party(tx, p)).transpose()?;
-            let have = repo::of_connection(tx, conn)?;
+        self.0.m.store.write(|tx| {
+            let row = Connections::new(tx)
+                .source(ws, conn)?
+                .ok_or_else(|| ApiError::not_found("连接"))?;
+            let owner = row.created_by;
+            let me = Parties::new(tx).active_user(ws, &owner)?;
+            let account_party = Accounts::new(tx)
+                .party(&row.account_id)?
+                .map(|p| Parties::new(tx).current(p))
+                .transpose()?;
+            let have = CalendarRepo::new(tx).of_connection(conn)?;
             let mut seen = HashSet::new();
             for r in remotes.iter().take(crate::profile::MAX_CALENDARS) {
                 let ext = r.id.trim();
@@ -668,7 +630,7 @@ impl Calendar {
                 };
                 let differs = match have.iter().find(|h| h.id == cal.id) {
                     None => {
-                        repo::insert_calendar(tx, &cal, now)?;
+                        CalendarRepo::new(tx).insert_calendar(&cal, now)?;
                         true
                     }
                     Some(h) => {
@@ -685,7 +647,7 @@ impl Calendar {
                             cal.color = h.color.clone();
                         }
                         if cal.detail == "busy" && h.detail != "busy" {
-                            repo::strip_details(tx, &cal.id, now)?;
+                            CalendarRepo::new(tx).strip_details(&cal.id, now)?;
                         }
                         let differs = (
                             &h.name,
@@ -709,35 +671,27 @@ impl Calendar {
                             false,
                         );
                         if differs {
-                            repo::refresh_calendar(tx, &cal, now)?;
-                            if h.tz != cal.tz {
-                                // Re-normalize cached dates too; a delta may never resend them.
-                                tx.execute("UPDATE cal_calendars SET sync_cursor = NULL, full_at = NULL WHERE id = ?", [&cal.id])?;
-                            }
+                            CalendarRepo::new(tx).refresh_calendar(&cal, h.tz != cal.tz, now)?;
                         }
                         differs
                     }
                 };
                 // pages hear of a calendar only when something about it changed
                 if differs {
-                    tx.publish(steve_types::DomainEvent::from(
-                        steve_types::AutomationEvent::Calendar {
-                            id: cal.id.clone().into(),
-                            ws: ws.into(),
-                        },
-                    ));
+                    tx.emit(steve_types::AutomationEvent::Calendar {
+                        id: cal.id.clone().into(),
+                        ws: ws.into(),
+                    });
                 }
             }
             for h in have.iter().filter(|h| !h.gone && !seen.contains(&h.ext_id)) {
-                repo::set_gone(tx, &h.id, now)?;
-                tx.publish(steve_types::DomainEvent::from(
-                    steve_types::AutomationEvent::Calendar {
-                        id: h.id.clone().into(),
-                        ws: ws.into(),
-                    },
-                ));
+                CalendarRepo::new(tx).set_gone(&h.id, now)?;
+                tx.emit(steve_types::AutomationEvent::Calendar {
+                    id: h.id.clone().into(),
+                    ws: ws.into(),
+                });
             }
-            Ok(repo::of_connection(tx, conn)?)
+            Ok(CalendarRepo::new(tx).of_connection(conn)?)
         })
     }
 
@@ -745,8 +699,8 @@ impl Calendar {
     fn apply(&self, cal: &CalRow, busy: bool, p: Pulled, w: Window) -> ApiResult<(usize, usize)> {
         let now = self.now();
         let ws = cal.workspace_id.clone();
-        self.0.m.store.transaction(|tx| {
-            let me = me_party(tx, &ws, &cal.owner_user)?;
+        self.0.m.store.write(|tx| {
+            let me = Parties::new(tx).active_user(&ws, &cal.owner_user)?;
             let mut people = People {
                 c: tx,
                 ws: &ws,
@@ -762,55 +716,44 @@ impl Calendar {
             for e in events.iter().take(crate::profile::MAX_EVENTS) {
                 let (row, atts) = match normalize(cal, e, busy, &mut people) {
                     Ok(x) => x,
-                    Err(why) => {
+                    Err(NormalizeError::Invalid(why)) => {
                         tracing::debug!(calendar = %cal.id, "event skipped: {why}");
                         continue;
                     }
+                    Err(NormalizeError::Store(error)) => return Err(error.into()),
                 };
                 kept.insert(row.id.clone());
                 if matches!(
-                    repo::write_event(tx, &row, &atts, now)?,
+                    CalendarRepo::new(people.c).write_event(&row, &atts, now)?,
                     Written::New | Written::Changed
                 ) {
                     changed += 1;
                 }
             }
             if full {
-                for old in repo::events_of(tx, &cal.id)? {
+                for old in CalendarRepo::new(tx).events_of(&cal.id)? {
                     if !kept.contains(&old.id)
                         && old.start_ms < w.to_ms
                         && old.end_ms > w.from_ms
-                        && repo::delete_event(tx, &old.id, now)?
+                        && CalendarRepo::new(tx).delete_event(&old.id, now)?
                     {
                         deleted += 1;
                     }
                 }
             } else {
                 for ext in &gone {
-                    let ids: Vec<String> = {
-                        let mut st = tx.prepare_cached(
-                            "SELECT id FROM cal_events WHERE calendar_id = ? AND ext_id = ?",
-                        )?;
-                        st.query_map(params![cal.id, ext], |r| r.get(0))?
-                            .collect::<rusqlite::Result<_>>()?
-                    };
-                    for id in ids {
-                        if repo::delete_event(tx, &id, now)? {
-                            deleted += 1;
-                        }
-                    }
+                    deleted +=
+                        CalendarRepo::new(tx).delete_occurrences(&cal.id, ext, now)? as usize;
                 }
             }
-            repo::prune(tx, &cal.id, w.from_ms)?;
-            repo::set_synced(tx, &cal.id, cursor.as_deref(), full, now)?;
+            CalendarRepo::new(tx).prune(&cal.id, w.from_ms)?;
+            CalendarRepo::new(tx).set_synced(&cal.id, cursor.as_deref(), full, now)?;
             // a sync that found nothing new is not news, unless the calendar was failing or never synced
             if changed + deleted > 0 || cal.sync_state != "ok" {
-                tx.publish(steve_types::DomainEvent::from(
-                    steve_types::AutomationEvent::Calendar {
-                        id: cal.id.clone().into(),
-                        ws: ws.clone().into(),
-                    },
-                ));
+                tx.emit(steve_types::AutomationEvent::Calendar {
+                    id: cal.id.clone().into(),
+                    ws: ws.clone().into(),
+                });
             }
             Ok((changed, deleted))
         })
@@ -819,15 +762,22 @@ impl Calendar {
     /// Recomputes which occurrences of `owner`'s calendars are one meeting ([`merge`]).
     pub(crate) fn rematch(&self, ws: &str, owner: &str) -> ApiResult<()> {
         let now = self.now();
-        self.0.m.store.transaction(|tx| {
-            let cals = repo::of_user(tx, ws, owner)?;
+        self.0.m.store.write(|tx| {
+            let cals = CalendarRepo::new(tx).of_user(ws, owner)?;
             let party: HashMap<String, String> = cals
                 .iter()
-                .map(|c| (c.id.clone(), c.party_id.clone().unwrap_or_else(|| format!("cal:{}", c.id))))
+                .map(|c| {
+                    (
+                        c.id.clone(),
+                        c.party_id
+                            .clone()
+                            .unwrap_or_else(|| format!("cal:{}", c.id)),
+                    )
+                })
                 .collect();
             let mut items = Vec::new();
             for c in cals.iter().filter(|c| !c.gone) {
-                for e in repo::events_of(tx, &c.id)? {
+                for e in CalendarRepo::new(tx).events_of(&c.id)? {
                     items.push(merge::Item {
                         party: party[&c.id].clone(),
                         calendar: c.id.clone(),
@@ -844,26 +794,24 @@ impl Calendar {
                     });
                 }
             }
-            let not_same: HashSet<(String, String)> = {
-                let mut st = tx.prepare_cached("SELECT a, b FROM cal_not_same WHERE workspace_id = ? AND owner_user = ?")?;
-                st.query_map(params![ws, owner], |r| Ok((r.get(0)?, r.get(1)?)))?
-                    .collect::<rusqlite::Result<_>>()?
-            };
+            let mut repo = CalendarRepo::new(tx);
+            let not_same = repo.different_occurrences(ws, owner)?.into_iter().collect();
             let ms = merge::meetings(&items, &not_same);
             let ids: Vec<&str> = ms.iter().map(|m| m.id.as_str()).collect();
-            tx.execute(
-                "DELETE FROM cal_meetings WHERE workspace_id = ? AND owner_user = ? AND id NOT IN (SELECT value FROM json_each(?))",
-                params![ws, owner, serde_json::to_string(&ids).unwrap_or_default()],
-            )?;
+            repo.prune_meetings(ws, owner, &ids)?;
             for m in &ms {
-                tx.prepare_cached(
-                    "INSERT INTO cal_meetings (id, workspace_id, owner_user, primary_event_id, match_key, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?)
-                     ON CONFLICT(id) DO UPDATE SET primary_event_id = excluded.primary_event_id, match_key = excluded.match_key, updated = excluded.updated
-                     WHERE primary_event_id IS NOT excluded.primary_event_id OR match_key IS NOT excluded.match_key",
-                )?
-                .execute(params![m.id, ws, owner, m.primary, m.key, now, now])?;
+                repo.put_meeting(
+                    ws,
+                    owner,
+                    Meeting {
+                        id: &m.id,
+                        primary: &m.primary,
+                        key: &m.key,
+                    },
+                    now,
+                )?;
                 for e in &m.events {
-                    repo::set_meeting(tx, e, Some(&m.id))?;
+                    repo.set_meeting(e, &m.id)?;
                 }
             }
             Ok::<_, ApiError>(())
@@ -883,7 +831,7 @@ impl Calendar {
 
     /// One round of [`Calendar::run`]: syncs the connections that are due.
     pub async fn tick(&self) {
-        let rows = match self.0.m.store.reader(crepo::live) {
+        let rows = match self.0.m.store.read(|r| Connections::new(r).live_sources()) {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("calendar sync: connections not read: {e}");
@@ -927,43 +875,9 @@ fn health(e: &SourceError) -> Health {
 mod tests {
     use super::*;
 
-    fn test_calendar() -> CalRow {
-        CalRow {
-            id: "cal".into(),
-            workspace_id: "w".into(),
-            connection_id: "conn".into(),
-            owner_user: "me".into(),
-            ext_id: "cal".into(),
-            name: "Calendar".into(),
-            color: None,
-            kind: "primary".into(),
-            role: "owner".into(),
-            share: "private".into(),
-            party_id: None,
-            party_set: false,
-            detail: "full".into(),
-            enabled: true,
-            tz: None,
-            sync_cursor: None,
-            synced_at: None,
-            full_at: None,
-            sync_state: "ok".into(),
-            sync_error: None,
-            gone: false,
-        }
-    }
-
     #[test]
     fn event_time_normalization_preserves_existing_boundaries() {
-        let c = Connection::open_in_memory().unwrap();
-        let mut cal = test_calendar();
-        cal.tz = Some("UTC".into());
-        let mut people = People {
-            c: &c,
-            ws: "w",
-            me: None,
-            cache: HashMap::new(),
-        };
+        let zone = Zone::parse("UTC").unwrap();
         let timed = |end| Ok((false, 20, end, None, None));
         let all_day = Ok((
             true,
@@ -1048,10 +962,10 @@ mod tests {
                 end,
                 ..Default::default()
             };
-            let actual = normalize(&cal, &event, true, &mut people);
+            let actual = event_times(&event, &zone);
             match expected {
                 Ok(expected) => {
-                    let (row, _) = actual.unwrap_or_else(|e| panic!("{name}: {e}"));
+                    let row = actual.unwrap_or_else(|e| panic!("{name}: {e}"));
                     assert_eq!(
                         (
                             row.all_day,
@@ -1067,62 +981,6 @@ mod tests {
                 Err(expected) => assert_eq!(actual.err().as_deref(), Some(expected), "{name}"),
             }
         }
-    }
-
-    #[test]
-    fn missing_cached_calendar_zone_uses_owner_policy_then_workspace_then_system() {
-        let c = Connection::open_in_memory().unwrap();
-        c.execute_batch(
-            "CREATE TABLE notification_policies(workspace_id, user_id, timezone);
-            CREATE TABLE settings(workspace_id, key, value);
-            INSERT INTO settings VALUES ('w','tz','\"Europe/London\"');",
-        )
-        .unwrap();
-        let mut cal = test_calendar();
-        for (name, date) in [
-            ("America/New_York", "2026-03-08"),
-            ("Europe/London", "2026-10-25"),
-            ("America/Sao_Paulo", "2018-11-04"),
-        ] {
-            c.execute("DELETE FROM notification_policies", []).unwrap();
-            c.execute(
-                "INSERT INTO notification_policies VALUES ('w','me',?)",
-                [name],
-            )
-            .unwrap();
-            let event = RemoteEvent {
-                id: "event".into(),
-                start: When::day(date),
-                end: When::day(&day(date).unwrap().succ_opt().unwrap().to_string()),
-                ..Default::default()
-            };
-            let mut people = People {
-                c: &c,
-                ws: "w",
-                me: None,
-                cache: HashMap::new(),
-            };
-            let (row, _) = normalize(&cal, &event, false, &mut people).unwrap();
-            let zone = Zone::parse(name).unwrap();
-            assert_eq!(
-                row.start_ms,
-                zone.instant(day(date).unwrap().and_time(NaiveTime::MIN))
-                    .unwrap()
-            );
-            assert_eq!(row.end_ms, zone.day(row.start_ms).unwrap().1);
-        }
-        cal.tz = Some("Asia/Tokyo".into());
-        assert_eq!(
-            tz_of(&c, "w", "me", cal.tz.as_deref()).unwrap().name(),
-            "Asia/Tokyo"
-        );
-        c.execute("DELETE FROM notification_policies", []).unwrap();
-        assert_eq!(tz_of(&c, "w", "me", None).unwrap().name(), "Europe/London");
-        c.execute("DELETE FROM settings", []).unwrap();
-        assert_eq!(
-            tz_of(&c, "w", "me", None).unwrap().name(),
-            Zone::system().name()
-        );
     }
 
     #[test]

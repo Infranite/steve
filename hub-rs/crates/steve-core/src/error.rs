@@ -11,8 +11,6 @@ pub enum CoreError {
     #[error(transparent)]
     Store(#[from] steve_store::StoreError),
     #[error(transparent)]
-    Db(#[from] rusqlite::Error),
-    #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),

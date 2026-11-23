@@ -1,6 +1,8 @@
 # Existing Chinese comparisons; replace display text with domain code values. Only shrinks.
 # file under hub-rs/crates<TAB>JSON-escaped literal<TAB>count.
 # Rewrite after removals: STEVE_GUARD_BLESS=1
+# Provider automation markers moved from the arbiter so the decision view can recognize
+# the same messages within its read snapshot. The total count decreased by one.
 steve-acp/src/capacity.rs	"(?i)(?:expected to be available at|预计恢复时间[:：])\\s*<?"	1
 steve-acp/src/capacity.rs	"预计恢复时间："	1
 steve-calendar/src/query.rs	"我"	1
@@ -99,10 +101,6 @@ steve-channels/src/adapters/feishu/verify.rs	"通讯录同步：成员"	1
 steve-channels/src/adapters/feishu/verify.rs	"通讯录同步：成员的部门和上级"	1
 steve-channels/src/adapters/feishu/verify.rs	"通讯录同步：邮箱"	1
 steve-channels/src/adapters/feishu/verify.rs	"通讯录同步：部门"	1
-steve-channels/src/arbiter.rs	"AI 代答"	1
-steve-channels/src/arbiter.rs	"AI代答"	1
-steve-channels/src/arbiter.rs	"仅供参考"	1
-steve-channels/src/arbiter.rs	"（由 Steve 代发）"	2
 steve-channels/src/context.rs	"图片"	1
 steve-channels/src/context.rs	"文件"	1
 steve-channels/src/context.rs	"系统消息"	1
@@ -716,7 +714,6 @@ steve-hub/src/wire/core.rs	"规范"	2
 steve-hub/src/wire/core.rs	"设计"	2
 steve-hub/src/wire/core.rs	"评审"	2
 steve-hub/src/wire/core.rs	"调研"	1
-steve-hub/src/wire/node_runtime/plan.rs	"暂停接活"	1
 steve-hub/src/wire/output_files.rs	"交付摘要"	2
 steve-hub/src/wire/output_files.rs	"本次交付摘要"	1
 steve-hub/src/wire/output_files.rs	"本次交付正文"	1
@@ -865,13 +862,6 @@ steve-modules/src/accounts/connections/integration.rs	"渠道"	2
 steve-modules/src/accounts/connections/integration.rs	"表格/多维表格"	2
 steve-modules/src/accounts/connections/integration.rs	"通讯录"	2
 steve-modules/src/accounts/connections/integration.rs	"邮件"	2
-steve-modules/src/accounts/repo.rs	"Google 日历"	2
-steve-modules/src/accounts/repo.rs	"电话"	2
-steve-modules/src/accounts/repo.rs	"邮件"	2
-steve-modules/src/accounts/repo.rs	"银行卡"	2
-steve-modules/src/accounts/repo.rs	"飞书"	2
-steve-modules/src/accounts/repo.rs	"飞书应用"	2
-steve-modules/src/accounts/repo.rs	"飞书租户"	2
 steve-modules/src/contacts/changes.rs	"事件"	1
 steve-modules/src/contacts/changes.rs	"事实"	1
 steve-modules/src/contacts/changes.rs	"供应商"	2
@@ -969,19 +959,12 @@ steve-modules/src/outbound.rs	"<<<外部内容结束>>>"	1
 steve-modules/src/outbound.rs	"<外部内容开始>"	1
 steve-modules/src/outbound.rs	"<外部内容结束>"	1
 steve-modules/src/shown.rs	" · Agent 记下"	1
-steve-modules/src/shown.rs	"Google 日历"	1
 steve-modules/src/shown.rs	"你写的"	1
 steve-modules/src/shown.rs	"你填的"	1
 steve-modules/src/shown.rs	"你接入"	1
 steve-modules/src/shown.rs	"你说的"	1
-steve-modules/src/shown.rs	"电话"	1
 steve-modules/src/shown.rs	"通讯录同步"	1
-steve-modules/src/shown.rs	"邮件"	1
 steve-modules/src/shown.rs	"邮箱前缀规则"	1
-steve-modules/src/shown.rs	"银行卡"	1
-steve-modules/src/shown.rs	"飞书"	1
-steve-modules/src/shown.rs	"飞书应用"	1
-steve-modules/src/shown.rs	"飞书租户"	1
 steve-modules/src/shown.rs	"飞书通讯录"	1
 steve-modules/src/vault/items/service.rs	"个人"	1
 steve-modules/src/vault/items/service.rs	"共享"	1
@@ -1008,6 +991,7 @@ steve-modules/src/vault/items/templates.rs	"证件号"	2
 steve-modules/src/vault/items/templates.rs	"连接凭据"	2
 steve-modules/src/vault/items/templates.rs	"银行卡"	2
 steve-modules/src/vault/mcp.rs	"条目"	1
+steve-store/src/contract/node_sessions/planning.rs	"暂停接活"	1
 steve-store/src/repo/kinds.rs	"不改变外部行为的代码重构"	3
 steve-store/src/repo/kinds.rs	"交付正文"	1
 steve-store/src/repo/kinds.rs	"依赖维护、工具配置等杂项"	3
@@ -1049,3 +1033,7 @@ steve-store/src/repo/stats.rs	"它停下了"	1
 steve-store/src/repo/stats.rs	"开不了会话"	1
 steve-store/src/seeded.rs	" 的 AI 助手，帮他接收和分派事情。"	1
 steve-store/src/seeded.rs	"我是 Steve，"	1
+steve-store/src/views/decision_chat.rs	"AI 代答"	1
+steve-store/src/views/decision_chat.rs	"AI代答"	1
+steve-store/src/views/decision_chat.rs	"仅供参考"	1
+steve-store/src/views/decision_chat.rs	"（由 Steve 代发）"	1

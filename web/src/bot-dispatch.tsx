@@ -1,7 +1,7 @@
 /* Bot Team configuration and per-Bot execution grants, scoped to the workspace they were loaded in. */
 import { useEffect, useId, useState } from "react"
 import { ArrowDownIcon, ArrowUpIcon, PlusIcon, RefreshCwIcon } from "lucide-react"
-import { modReq, isNotWired, type ModuleScope, type RItemDetail } from "@/api"
+import { modReq, type ModuleScope, type RItemDetail } from "@/api"
 import { hubBase } from "@/hub"
 import { useT } from "@/i18n"
 import { botName, st } from "@/store"
@@ -38,7 +38,7 @@ function useDispatchLoad<T>(path: string, poll = 0) {
     const cancel = new AbortController()
     const load = () => modReq<T>("GET", path, undefined, cancel.signal, scope).then(
       value => { if (!cancel.signal.aborted) setResult({ key, value }) },
-      e => { if (!cancel.signal.aborted) setResult({ key, error: isNotWired(e) ? undefined : msg(e) }) },
+      e => { if (!cancel.signal.aborted) setResult({ key, error: msg(e) }) },
     )
     void load()
     const timer = poll ? window.setInterval(load, poll) : undefined

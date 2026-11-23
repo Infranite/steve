@@ -61,17 +61,20 @@ async fn blocking<T: Send + 'static>(
 impl steve_flow::Core for FlowCore {
     fn can_run(
         &self,
-        c: &rusqlite::Connection,
+        store: &steve_store::Store,
         ws: &str,
         requester: Option<&str>,
         bot: &str,
     ) -> Result<(), String> {
-        match &self.preflight {
-            Some(p) => p
-                .can_run_schedule(c, ws, requester, bot)
-                .map_err(|b| b.reason),
-            None => Ok(()),
-        }
+        let Some(preflight) = &self.preflight else {
+            return Ok(());
+        };
+        store
+            .read(|c| {
+                Ok::<_, steve_store::StoreError>(preflight.can_run_schedule(c, ws, requester, bot))
+            })
+            .map_err(|error| error.to_string())?
+            .map_err(|blocked| blocked.reason)
     }
     async fn create_item(&self, req: steve_flow::ItemRequest) -> Result<String, String> {
         let c = self.core.clone();

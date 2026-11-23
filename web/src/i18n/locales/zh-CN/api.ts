@@ -132,7 +132,6 @@ export default {
     manual: "手动",
   },
   error: {
-    unreachable: "连不上 Steve，稍后重试",
     generic: "出错了",
   },
   /* integrations (api/integrations.ts) */

@@ -4,11 +4,13 @@
 //! cannot share this transaction: a crash leaves Unknown, never an automatic second execution.
 use super::tool_service::ToolService;
 use async_trait::async_trait;
-use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use steve_node_api::*;
-use steve_store::{Session, Store, StoreError, ThreadRun};
+use steve_store::{
+    Session, Store, ThreadRun, tool_admission,
+    tool_journal::{Intent, Journal},
+};
 
 use super::node_runtime::RESEARCH_GRANT;
 
@@ -58,16 +60,12 @@ fn authorize_session(
     else {
         return Err(denied());
     };
-    let row = store.reader(|c| {
-        Ok::<_, StoreError>(c.query_row(
-            "SELECT a.execution,a.spec,a.state,a.cancel_requested,s.active_attempt,t.active_attempt FROM runtime_attempts a JOIN runtime_turns t ON t.turn_id=a.turn_id JOIN runtime_sessions s ON s.session_id=t.session_id WHERE a.attempt_id=?1 AND a.turn_id=?2 AND t.session_id=?3 AND a.node_id=?4 AND s.node_id=?4 AND s.node_session_id=?3",
-            params![attempt.as_str(), turn.as_str(), session.as_str(), node.as_str()],
-            |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,bool>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,Option<String>>(5)?)),
-        ).optional()?)
-    }).map_err(internal)?.ok_or_else(denied)?;
-    let saved: ExecutionRef = serde_json::from_str(&row.0).map_err(internal)?;
-    let spec: TurnSpec = serde_json::from_str(&row.1).map_err(internal)?;
-    if saved != *exec
+    let row = store
+        .read(|r| tool_admission::turn_execution(r, node, session, turn, attempt))
+        .map_err(internal)?
+        .ok_or_else(denied)?;
+    let spec = row.spec;
+    if row.execution != *exec
         || spec.session != *session
         || spec.turn != *turn
         || spec.run.attempt != *attempt
@@ -76,10 +74,10 @@ fn authorize_session(
         return Err(denied());
     }
     if active
-        && (row.3
-            || matches!(row.2.as_str(), "finished" | "unknown" | "rejected")
-            || row.4.as_deref() != Some(attempt.as_str())
-            || row.5.as_deref() != Some(attempt.as_str()))
+        && (row.cancelled
+            || matches!(row.state.as_str(), "finished" | "unknown" | "rejected")
+            || row.session_attempt.as_deref() != Some(attempt.as_str())
+            || row.turn_attempt.as_deref() != Some(attempt.as_str()))
     {
         return Err(denied());
     }
@@ -111,7 +109,7 @@ fn authorize_steve_session(
     // A known ToolKey must still be readable when a wait/replan stops further work.
     let gated = gate
         && store
-            .reader(|c| steve_store::workflow_gate::session_blocker(c, &s.id))
+            .read(|c| steve_store::workflow_gate::session_blocker(c, &s.id))
             .map_err(internal)?
             .is_some();
     if gated
@@ -152,14 +150,11 @@ fn authorize_steve_session(
 /// grant in force is the Hub's, authorized as a fresh call would be, but with no attempt needed.
 fn session_lister(store: &Store, node: &NodeId, session: &SessionId) -> ApiResult<Caller> {
     let config = store
-        .reader(|c| {
-            let here: bool = c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=?1 AND node_id=?2 AND node_session_id=?1)",
-                params![session.as_str(), node.as_str()],
-                |r| r.get(0),
-            )?;
-            here.then(|| super::node_runtime::config_in(c, session.as_str()))
-                .transpose()
+        .read(|r| {
+            if !steve_store::node_sessions::owns_session(r, node.as_str(), session)? {
+                return Ok(None);
+            }
+            super::node_runtime::config_in(r, session.as_str()).map(Some)
         })
         .map_err(internal)?
         .ok_or_else(denied)?;
@@ -182,19 +177,14 @@ pub(crate) fn authorize_research(
     let ExecutionRef::Job { job, attempt } = exec else {
         return Err(denied());
     };
-    let row = store.reader(|c| {
-        Ok::<_, StoreError>(c.query_row(
-            "SELECT a.execution,a.spec,a.state,a.cancel_requested,j.kind,j.thread_run_id,j.workspace_id,j.state FROM runtime_job_attempts a JOIN runtime_jobs j ON j.job_id=a.job_id WHERE a.attempt_id=?1 AND a.job_id=?2 AND a.node_id=?3 AND j.node_id=?3",
-            params![attempt.as_str(), job.as_str(), node.as_str()],
-            |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,bool>(3)?,r.get::<_,String>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,String>(6)?,r.get::<_,String>(7)?)),
-        ).optional()?)
-    }).map_err(internal)?.ok_or_else(denied)?;
-    let (saved, spec, state, cancelled, kind, run, workspace, job_state) = row;
-    let saved: ExecutionRef = serde_json::from_str(&saved).map_err(internal)?;
-    let spec: JobSpec = serde_json::from_str(&spec).map_err(internal)?;
+    let row = store
+        .read(|r| tool_admission::job_execution(r, node, job, attempt, false))
+        .map_err(internal)?
+        .ok_or_else(denied)?;
+    let spec = row.spec;
     let steve_tools = matches!(&spec.work, JobWork::Research(r) if r.steve_tools);
-    if saved != *exec
-        || kind != "research"
+    if row.execution != *exec
+        || row.kind != "research"
         || !steve_tools
         || spec.job != *job
         || spec.run.attempt != *attempt
@@ -203,16 +193,18 @@ pub(crate) fn authorize_research(
         return Err(denied());
     }
     if active
-        && (cancelled || job_state != "open" || matches!(state.as_str(), "finished" | "unknown"))
+        && (row.cancelled
+            || row.job_state != "open"
+            || matches!(row.state.as_str(), "finished" | "unknown"))
     {
         return Err(denied());
     }
     let run = store
         .thread()
-        .run(run.as_deref().ok_or_else(denied)?)
+        .run(row.run.as_deref().ok_or_else(denied)?)
         .map_err(internal)?
         .ok_or_else(denied)?;
-    if run.workspace_id != workspace || (active && run.status != "running") {
+    if run.workspace_id != row.workspace || (active && run.status != "running") {
         return Err(denied());
     }
     Ok(run)
@@ -311,15 +303,10 @@ impl Service for ToolService {
         super::research_mcp::call_tool(&self.extra, run, name, args).await
     }
 }
-struct Ledger {
-    db: Mutex<Connection>,
-    // Exclusive process owner, so opening a second bridge cannot mark live calls Unknown.
-    _lock: std::fs::File,
-}
 pub struct NodeTools {
     store: Store,
     node: NodeId,
-    ledger: Arc<Ledger>,
+    ledger: Arc<Journal>,
     service: OnceLock<Arc<dyn Service>>,
     /// ToolService invocations in flight. A call past the bound is refused before its ledger
     /// row exists, so it is plainly not executed (never uncertain).
@@ -337,39 +324,10 @@ async fn blocking<T: Send + 'static>(
 }
 impl NodeTools {
     pub fn open(store: Store, node: NodeId, home: &Path) -> ApiResult<Arc<Self>> {
-        use std::os::fd::AsRawFd;
-        std::fs::create_dir_all(home).map_err(internal)?;
-        let lock = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(home.join("host-tools.lock"))
-            .map_err(internal)?;
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(ApiError::new(
-                ErrorCode::Busy,
-                "another tool host owns this ledger",
-            ));
-        }
-        let mut db = Connection::open(home.join("host-tools.sqlite3")).map_err(internal)?;
-        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
-            .map_err(internal)?;
-        let tx = db.transaction().map_err(internal)?;
-        let version: i64 = tx
-            .pragma_query_value(None, "user_version", |r| r.get(0))
-            .map_err(internal)?;
-        if version > 1 {
-            return Err(ApiError::new(ErrorCode::Unsupported, "newer tool journal"));
-        }
-        tx.execute_batch("CREATE TABLE IF NOT EXISTS calls (key TEXT PRIMARY KEY, digest TEXT NOT NULL, operation TEXT NOT NULL, node TEXT NOT NULL, session TEXT NOT NULL, workspace TEXT NOT NULL, name TEXT NOT NULL, catalog TEXT NOT NULL, deadline INTEGER NOT NULL, created INTEGER NOT NULL, updated INTEGER NOT NULL, state TEXT NOT NULL, result TEXT, cancel_requested INTEGER NOT NULL DEFAULT 0); UPDATE calls SET state='unknown' WHERE state='running'; PRAGMA user_version=1;").map_err(internal)?;
-        tx.commit().map_err(internal)?;
         Ok(Arc::new(Self {
             store,
             node,
-            ledger: Arc::new(Ledger {
-                db: Mutex::new(db),
-                _lock: lock,
-            }),
+            ledger: Arc::new(Journal::open(home)?),
             service: OnceLock::new(),
             permits: Arc::new(tokio::sync::Semaphore::new(MAX_CALLS)),
         }))
@@ -417,21 +375,14 @@ impl NodeTools {
         let (exec, encoded) = (key.execution.clone(), Self::key(key)?);
         blocking(move || {
             let current = caller(&store, &node, &exec, false)?;
-            let db = ledger.db.lock().unwrap();
-            let result = saved(&db, &encoded, digest.as_ref())?;
-            let diagnostic = db
-                .query_row("SELECT name FROM calls WHERE key=?", [&encoded], |r| {
-                    r.get::<_, String>(0)
-                })
-                .optional()
-                .map_err(internal)?
-                .is_some_and(|name| name == super::diagnostics::TOOL);
-            drop(db);
-            if diagnostic && let Some(ref result) = result {
-                super::diagnostics::authorize_cached(&store, &current, result)
+            let Some(row) = ledger.read(&encoded, digest.as_ref())? else {
+                return Ok(None);
+            };
+            if row.name == super::diagnostics::TOOL {
+                super::diagnostics::authorize_cached(&store, &current, &row.result)
                     .map_err(|_| denied())?;
             }
-            Ok(result)
+            Ok(Some(row.result))
         })
         .await
     }
@@ -453,38 +404,6 @@ fn session_caller((s, gated): (Session, bool)) -> Caller {
     } else {
         Caller::Session(s)
     }
-}
-fn saved(db: &Connection, key: &str, digest: Option<&Digest>) -> ApiResult<Option<ToolResult>> {
-    let row = db
-        .query_row(
-            "SELECT digest,operation,state,result FROM calls WHERE key=?",
-            [key],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, Option<String>>(3)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(internal)?;
-    let Some((d, op, state, result)) = row else {
-        return Ok(None);
-    };
-    if digest.is_some_and(|digest| digest.as_str() != d) {
-        return Err(ApiError::new(
-            ErrorCode::Conflict,
-            "ToolKey reused with different name/arguments",
-        ));
-    }
-    let operation = OperationId::new(op).map_err(internal)?;
-    Ok(Some(match result {
-        Some(r) => serde_json::from_str(&r).map_err(internal)?,
-        None if state == "running" => ToolResult::Running { operation },
-        None => ToolResult::Unknown { operation },
-    }))
 }
 #[async_trait]
 impl HubTools for NodeTools {
@@ -549,13 +468,19 @@ impl HubTools for NodeTools {
                 q.deadline.0,
             );
             blocking(move || {
-                let db = ledger.db.lock().unwrap();
-                if let Some(r) = saved(&db, &encoded, Some(&digest))? {
-                    return Ok(Some(r));
-                }
                 let (holder, workspace) = session.ids();
-                db.execute("INSERT INTO calls(key,digest,operation,node,session,workspace,name,catalog,deadline,created,updated,state) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?10,'running')",params![encoded,digest.as_str(),operation.as_str(),node.as_str(),holder,workspace,name,catalog.as_str(),deadline,steve_store::now()]).map_err(internal)?;
-                Ok(None)
+                ledger.reserve(Intent {
+                    key: &encoded,
+                    digest: &digest,
+                    operation: &operation,
+                    node: &node,
+                    holder,
+                    workspace,
+                    name: &name,
+                    catalog: &catalog,
+                    deadline,
+                    at: steve_store::now(),
+                })
             })
             .await?
         };
@@ -581,19 +506,7 @@ impl HubTools for NodeTools {
             // A cancel that landed between the fence and here wins: nothing has run yet, so the
             // outcome is a certain refusal rather than Unknown.
             let (check, key) = (ledger.clone(), encoded.clone());
-            let cancelled = blocking(move || {
-                check
-                    .db
-                    .lock()
-                    .unwrap()
-                    .query_row(
-                        "SELECT cancel_requested FROM calls WHERE key=?1",
-                        [&key],
-                        |r| r.get::<_, bool>(0),
-                    )
-                    .map_err(internal)
-            })
-            .await?;
+            let cancelled = blocking(move || check.cancelled(&key)).await?;
             let exec = q.execution.clone();
             let name = q.name.clone();
             let authorized = if cancelled {
@@ -685,17 +598,9 @@ impl HubTools for NodeTools {
                     },
                 },
             };
-            let encoded_result = serde_json::to_string(&result).map_err(internal)?;
-            blocking(move || {
-                ledger
-                    .db
-                    .lock()
-                    .unwrap()
-                    .execute(
-                        "UPDATE calls SET state='done',result=?2,updated=?3 WHERE key=?1",
-                        params![encoded, encoded_result, steve_store::now()],
-                    )
-                    .map_err(internal)
+            let result = blocking(move || {
+                ledger.complete(&encoded, &result, steve_store::now())?;
+                Ok(result)
             })
             .await?;
             Ok::<_, ApiError>(result)
@@ -704,10 +609,7 @@ impl HubTools for NodeTools {
             Ok(Ok(Ok(result))) => Ok(result),
             _ => {
                 let ledger = self.ledger.clone();
-                blocking(move || {
-                    ledger.db.lock().unwrap().execute("UPDATE calls SET state='unknown',updated=?2 WHERE key=?1 AND state='running'",params![status_key,steve_store::now()]).map_err(internal)
-                })
-                .await?;
+                blocking(move || ledger.unknown(&status_key, steve_store::now())).await?;
                 Ok(ToolResult::Unknown { operation: op })
             }
         }
@@ -722,18 +624,15 @@ impl HubTools for NodeTools {
         let encoded = Self::key(&key)?;
         let result = blocking(move || {
             let current = caller(&store, &node, &key.execution, false)?;
-            let db = ledger.db.lock().unwrap();
-            let result = saved(&db, &encoded, None)?
+            let row = ledger
+                .read(&encoded, None)?
                 .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "unknown ToolKey"))?;
-            let diagnostic = db.query_row("SELECT name FROM calls WHERE key=?", [&encoded], |r| r.get::<_, String>(0))
-                .map_err(internal)? == super::diagnostics::TOOL;
-            drop(db);
-            if diagnostic {
-                super::diagnostics::authorize_cached(&store, &current, &result).map_err(|_| denied())?;
+            if row.name == super::diagnostics::TOOL {
+                super::diagnostics::authorize_cached(&store, &current, &row.result)
+                    .map_err(|_| denied())?;
             }
-            let db = ledger.db.lock().unwrap();
-            db.execute("UPDATE calls SET cancel_requested=1,state=CASE WHEN state='running' THEN 'unknown' ELSE state END,updated=?2 WHERE key=?1",params![encoded,steve_store::now()]).map_err(internal)?;
-            Ok(result)
+            ledger.cancel(&encoded, steve_store::now())?;
+            Ok(row.result)
         })
         .await?;
         match result {
@@ -780,11 +679,8 @@ pub(crate) mod tests {
         files: Vec<steve_store::FileRef>,
     ) -> Host {
         store.ensure_workspace().unwrap();
-        store.transaction::<_,StoreError>(|tx| {
-            tx.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES ('i1','default',1,'test','run','执行',1,1)",[])?;
-            tx.execute("INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','','active',1,1)",[])?;
-            Ok(())
-        }).unwrap();
+        steve_store::testkit::hub::node_fixtures::seed_items_and_sessions_for_turn_ended(&store)
+            .unwrap();
         let node = FakeNode::new("local");
         let rt = NodeRuntime::new(store.clone(), node.clone(), Arc::new(Ends));
         node.connect(Arc::new(Sink(Arc::downgrade(&rt))));
@@ -800,30 +696,16 @@ pub(crate) mod tests {
         })
         .unwrap();
         for _ in 0..200 {
-            let phase = store
-                .reader(|c| {
-                    Ok::<_, StoreError>(c.query_row(
-                        "SELECT phase FROM runtime_sessions WHERE session_id='s1'",
-                        [],
-                        |r| r.get::<_, String>(0),
-                    )?)
-                })
-                .unwrap();
+            let phase =
+                steve_store::testkit::hub::node_checks::binding_phase_by_session(&store, "s1")
+                    .unwrap();
             if phase == "ready" {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         rt.prompt("s1", "hello", "user", &files).unwrap();
-        let exec = store
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT execution FROM runtime_attempts LIMIT 1",
-                    [],
-                    |r| r.get::<_, String>(0),
-                )?)
-            })
-            .unwrap();
+        let exec = steve_store::testkit::hub::node_checks::attempt_execution(&store).unwrap();
         Host {
             dir,
             store,
@@ -924,12 +806,7 @@ pub(crate) mod tests {
             other.call_status(q.key()).await.unwrap_err().code,
             ErrorCode::Denied
         );
-        h.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute("UPDATE sessions SET status='ended' WHERE id='s1'", [])?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::end_tool_session(&h.store).unwrap();
         assert_eq!(
             tools.call_status(q.key()).await.unwrap_err().code,
             ErrorCode::Denied
@@ -950,15 +827,7 @@ pub(crate) mod tests {
             NodeTools::open(h.store.clone(), NodeId::new("local").unwrap(), h.dir.path()).unwrap();
         tools.install(mock()).unwrap();
         let q = request(&tools, h.exec.clone()).await;
-        h.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute_batch(
-                    "UPDATE runtime_attempts SET state='finished';
-                     UPDATE runtime_turns SET active_attempt=NULL;
-                     UPDATE runtime_sessions SET active_attempt=NULL;",
-                )?;
-                Ok(())
-            })
+        steve_store::testkit::hub::mutations::update_runtime_attempts_state_finished(&h.store)
             .unwrap();
         let s1 = SessionId::new("s1").unwrap();
         let listed = tools.session_catalog(s1.clone()).await.unwrap();
@@ -975,12 +844,7 @@ pub(crate) mod tests {
             other.session_catalog(s1.clone()).await.unwrap_err().code,
             ErrorCode::Denied
         );
-        h.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute("UPDATE sessions SET status='ended' WHERE id='s1'", [])?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::end_tool_session(&h.store).unwrap();
         assert_eq!(
             tools.session_catalog(s1).await.unwrap_err().code,
             ErrorCode::Denied
@@ -1048,11 +912,6 @@ pub(crate) mod tests {
         };
         answer.encode().expect("the answer fits in one frame");
     }
-    fn count(store: &Store, sql: &str) -> i64 {
-        store
-            .reader(|c| Ok::<_, StoreError>(c.query_row(sql, [], |r| r.get(0))?))
-            .unwrap()
-    }
     /// 2026-11-09: what you say while the agent works reaches it in its next Steve tool's result,
     /// once, as the running turn's own message; it is not queued for a turn of its own.
     #[tokio::test]
@@ -1065,10 +924,8 @@ pub(crate) mod tests {
             .prompt("s1", "顺便把 README 也改了", "me", &[])
             .unwrap();
         assert_eq!(
-            count(
-                &h.store,
-                "SELECT count(*) FROM queued WHERE session_id='s1'"
-            ),
+            steve_store::testkit::hub::node_checks::queued_count_by_session(&h.store, "s1")
+                .unwrap(),
             1
         );
         let q = request(&tools, h.exec.clone()).await;
@@ -1085,26 +942,21 @@ pub(crate) mod tests {
         assert!(text.starts_with("ok"), "{text}");
         assert!(text.contains("1. 顺便把 README 也改了"), "{text}");
         assert_eq!(
-            count(
-                &h.store,
-                "SELECT count(*) FROM queued WHERE session_id='s1'"
-            ),
+            steve_store::testkit::hub::node_checks::queued_count_by_session(&h.store, "s1")
+                .unwrap(),
             0
         );
         assert_eq!(
-            count(
+            steve_store::testkit::hub::node_fixtures::submitted_midturn_message_count(
                 &h.store,
-                "SELECT count(*) FROM session_dispatch WHERE session_id='s1' AND state='submitted'
-                   AND text='顺便把 README 也改了'"
-            ),
+                "s1",
+                "顺便把 README 也改了"
+            )
+            .unwrap(),
             1
         );
         assert_eq!(
-            count(
-                &h.store,
-                "SELECT count(*) FROM events WHERE session_id='s1' AND kind='user'
-                   AND json_extract(data,'$.mid_turn')=1"
-            ),
+            steve_store::testkit::hub::node_fixtures::midturn_event_count(&h.store, "s1").unwrap(),
             1
         );
         // the same call again gives the same result; another call has nothing new
@@ -1137,19 +989,11 @@ pub(crate) mod tests {
         ));
         // The running attempt has not ended or received cancellation yet. Both an ordinary
         // prerequisite wait and a detached old work unit must nevertheless revoke fresh calls.
-        for (index, change) in [
-            "UPDATE items SET status='block' WHERE id='i1'",
-            "UPDATE items SET status='run',source='[\"item\",\"workflow\"]' WHERE id='i1'",
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            h.store
-                .transaction::<_, StoreError>(|tx| {
-                    tx.execute(change, [])?;
-                    Ok(())
-                })
-                .unwrap();
+        for (index, blocked) in [true, false].into_iter().enumerate() {
+            steve_store::testkit::hub::node_fixtures::block_tools_for_prerequisite(
+                &h.store, blocked,
+            )
+            .unwrap();
             assert_eq!(
                 tools.catalog(h.exec.clone()).await.unwrap_err().code,
                 ErrorCode::Denied
@@ -1183,13 +1027,11 @@ pub(crate) mod tests {
         impl Service for Changes {
             fn catalog(&self) -> Vec<ToolDescriptor> {
                 if self.armed.swap(false, Ordering::SeqCst) {
-                    self.store.transaction::<_, StoreError>(|tx| {
-                        tx.execute("INSERT INTO item_deps(item_id,dep_id,created) VALUES('i1','dep',1)", [])?;
-                        if self.replace {
-                            tx.execute("INSERT INTO sessions(id,workspace_id,item_id,bot_id,no,harness,cwd,status,created,updated) VALUES('s2','default','i1','manager',2,'test-adapter','','active',2,2)", [])?;
-                        }
-                        Ok(())
-                    }).unwrap();
+                    steve_store::testkit::hub::node_fixtures::replace_prerequisite_manager(
+                        &self.store,
+                        self.replace,
+                    )
+                    .unwrap();
                 }
                 ["test", super::super::item_mcp::DEPENDENCIES]
                     .into_iter()
@@ -1230,12 +1072,8 @@ pub(crate) mod tests {
                     "default",
                 )
                 .unwrap();
-            h.store.transaction::<_, StoreError>(|tx| {
-                tx.execute("UPDATE items SET bot_id='manager' WHERE id='i1'", [])?;
-                tx.execute("UPDATE sessions SET bot_id='manager' WHERE id='s1'", [])?;
-                tx.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('dep','default',2,'prerequisite','run','执行',1,1)", [])?;
-                Ok(())
-            }).unwrap();
+            steve_store::testkit::hub::node_fixtures::seed_prerequisite_and_manager(&h.store)
+                .unwrap();
             let tools =
                 NodeTools::open(h.store.clone(), NodeId::new("local").unwrap(), h.dir.path())
                     .unwrap();
@@ -1265,15 +1103,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn bot_membership_authorizes_cross_home_tools_and_revokes_them() {
         let h = fixture(vec![]).await;
-        h.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute(
-                    "INSERT INTO workspaces(id,name,created,item_prefix) VALUES('other','Other',1,'OT')",
-                    [],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::seed_bot_foreign_workspace(&h.store).unwrap();
         h.store
             .bots()
             .seed(
@@ -1290,13 +1120,7 @@ pub(crate) mod tests {
             .bots()
             .set_workspaces("shared_bot", &["other".into(), "default".into()])
             .unwrap();
-        h.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute("UPDATE items SET bot_id='shared_bot' WHERE id='i1'", [])?;
-                tx.execute("UPDATE sessions SET bot_id='shared_bot' WHERE id='s1'", [])?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::assign_shared_bot(&h.store).unwrap();
         let tools =
             NodeTools::open(h.store.clone(), NodeId::new("local").unwrap(), h.dir.path()).unwrap();
         let service = Arc::new(Mock {
@@ -1327,12 +1151,7 @@ pub(crate) mod tests {
             .bots()
             .set_workspaces("shared_bot", &["other".into(), "default".into()])
             .unwrap();
-        h.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute("UPDATE bots SET enabled=0 WHERE id='shared_bot'", [])?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::set_bots_enabled(&h.store).unwrap();
         let mut disabled = q;
         disabled.id = CallId::new("bot_disabled").unwrap();
         assert_eq!(
@@ -1443,14 +1262,21 @@ pub(crate) mod tests {
             .unwrap();
         let q = request(&tools, h.exec.clone()).await;
         // Crash fixture: accepted intent was durable, its execution/final commit was interrupted.
-        {
-            let db = tools.ledger.db.lock().unwrap();
-            db.execute(
-                "INSERT INTO calls VALUES (?1,?2,'tool_op','local','s1','default','test','rev',999,1,1,'running',NULL,0)",
-                params![NodeTools::key(&q.key()).unwrap(), q.args_digest().unwrap().as_str()],
-            )
+        tools
+            .ledger
+            .reserve(Intent {
+                key: &NodeTools::key(&q.key()).unwrap(),
+                digest: &q.args_digest().unwrap(),
+                operation: &OperationId::new("tool_op").unwrap(),
+                node: &NodeId::new("local").unwrap(),
+                holder: "s1",
+                workspace: "default",
+                name: "test",
+                catalog: &q.catalog,
+                deadline: 999,
+                at: 1,
+            })
             .unwrap();
-        }
         drop(tools);
         let tools =
             NodeTools::open(h.store.clone(), NodeId::new("local").unwrap(), h.dir.path()).unwrap();
@@ -1494,18 +1320,11 @@ pub(crate) mod tests {
             tools.call(over.clone()).await.unwrap_err().code,
             ErrorCode::Exhausted
         );
-        let rows: i64 = tools
+        let row = tools
             .ledger
-            .db
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT COUNT(*) FROM calls WHERE key=?",
-                [NodeTools::key(&over.key()).unwrap()],
-                |r| r.get(0),
-            )
+            .read(&NodeTools::key(&over.key()).unwrap(), None)
             .unwrap();
-        assert_eq!(rows, 0, "a refused call leaves nothing uncertain");
+        assert!(row.is_none(), "a refused call leaves nothing uncertain");
         for _ in 0..500 {
             if running.iter().all(|t| t.is_finished()) {
                 break;
@@ -1590,16 +1409,7 @@ pub(crate) mod tests {
                 "default",
             )
             .unwrap();
-        store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute("UPDATE items SET bot_id='management_bot' WHERE id='i1'", [])?;
-                tx.execute(
-                    "UPDATE sessions SET bot_id='management_bot' WHERE id='s1'",
-                    [],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::assign_management_bot(&store).unwrap();
         let tools = NodeTools::open(store.clone(), NodeId::new("local").unwrap(), &home).unwrap();
         tools.install(w.tool_service.clone()).unwrap();
 
@@ -1670,7 +1480,7 @@ pub(crate) mod tests {
         assert!(matches!(called, ToolResult::Completed { .. }), "{called:?}");
         assert!(
             store
-                .reader(|c| steve_store::caps::tools::pins(c, "management_bot"))
+                .read(|c| steve_store::caps::tools::ToolRows(c).pins("management_bot"))
                 .unwrap()
                 .is_empty()
         );
@@ -1768,15 +1578,7 @@ pub(crate) mod tests {
         };
         let r = tools.call(call("u1")).await.unwrap();
         assert!(matches!(r, ToolResult::Completed { .. }), "{r:?}");
-        let now: String = store
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT now FROM items WHERE id='i1'",
-                    [],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap();
+        let now: String = steve_store::testkit::hub::node_fixtures::items_now_i1(&store).unwrap();
         assert_eq!(now, "bridging tools", "the tool ran for the bound item");
 
         // A prerequisite entered through the UI must not strand the current Node agent before it
@@ -1796,11 +1598,7 @@ pub(crate) mod tests {
             .thread()
             .item_add("i1", "default", &origin, None, false)
             .unwrap();
-        store.transaction::<_, StoreError>(|tx| {
-            tx.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('dep','default',2,'prerequisite','run','执行',1,1)", [])?;
-            tx.execute("INSERT INTO item_deps(item_id,dep_id,created) VALUES('i1','dep',123)", [])?;
-            Ok(())
-        }).unwrap();
+        steve_store::testkit::hub::node_fixtures::seed_items_and_item_deps(&store).unwrap();
         let restricted = tools.catalog(host.exec.clone()).await.unwrap();
         assert_eq!(
             restricted
@@ -1878,30 +1676,15 @@ pub(crate) mod tests {
         assert_eq!(wait.state, "waiting");
         assert_eq!(wait.resume, "automatic");
         assert_eq!(store.items().get("i1").unwrap().unwrap().status, "block");
-        let created: i64 = store
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT created FROM item_deps WHERE item_id='i1' AND dep_id='dep'",
-                    [],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap();
+        let created: i64 =
+            steve_store::testkit::hub::node_fixtures::item_deps_created_i1_dep(&store).unwrap();
         assert_eq!(
             created, 123,
             "registering the wait preserves the UI's original edge"
         );
         // A saved read remains a disclosure: changing the originating audience revokes full
         // diagnostic receipts, including replay/status/cancel paths that bypass ToolService.
-        store
-            .with_conn(|c| {
-                c.execute(
-                    "UPDATE messages SET space='chan:shared' WHERE id=?",
-                    [&origin],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::set_messages_space_chan(&store, &origin).unwrap();
         assert_eq!(
             tools.call(debug_query.clone()).await.unwrap_err().code,
             ErrorCode::Denied
@@ -1933,46 +1716,20 @@ pub(crate) mod tests {
             ToolResult::Failed { .. }
         ));
         // A detached old work unit cannot use the management exception even with the same deps.
-        store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute(
-                    "UPDATE items SET source='[\"work\",\"workflow\"]' WHERE id='i1'",
-                    [],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::set_items(&store).unwrap();
         assert_eq!(
             tools.catalog(host.exec.clone()).await.unwrap_err().code,
             ErrorCode::Denied
         );
-        store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute("UPDATE items SET source='[\"\",\"\"]' WHERE id='i1'", [])?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::assign_foreign_session_scope(&store).unwrap();
 
         let before_end = store.items().get("i1").unwrap().unwrap().now;
-        store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute("UPDATE sessions SET status='ended' WHERE id='s1'", [])?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::end_tool_session(&store).unwrap();
         let mut late = call("u2");
         late.args = json!({"now": "too late", "plan": []});
         let e = tools.call(late).await.unwrap_err();
         assert_eq!(e.code, ErrorCode::Denied, "{e:?}");
-        let now: String = store
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT now FROM items WHERE id='i1'",
-                    [],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap();
+        let now: String = steve_store::testkit::hub::node_fixtures::items_now_i1(&store).unwrap();
         assert_eq!(now, before_end, "nothing ran for an ended session");
     }
 }

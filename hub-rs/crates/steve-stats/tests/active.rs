@@ -5,6 +5,7 @@
 use steve_stats::metrics::{Query, bounds};
 use steve_stats::tz;
 use steve_stats::views::{self, Bucket, Metric};
+use steve_store::testkit::stats::seed_active;
 use steve_store::{NoPublisher, Store, TurnBegin, WS};
 
 const MIN: i64 = 60_000;
@@ -28,10 +29,7 @@ fn items_count_once_a_day_and_unlinked_conversations_on_their_own() {
     let dir = tempfile::tempdir().expect("tmp");
     let s = Store::open(dir.path().join("steve.sqlite3"), NoPublisher).expect("open");
     s.ensure_workspace().expect("ws");
-    s.with_conn(|c| {
-        Ok(c.execute_batch("INSERT INTO settings (workspace_id, key, value, updated) VALUES ('default', 'stats.tz', '\"Asia/Shanghai\"', 0);")?)
-    })
-    .expect("tz");
+    seed_active(&s).expect("tz");
     let (d1, _) = bounds("2026-11-05", "2026-11-05", tz(Some("Asia/Shanghai"))).expect("day");
     // 11-05: ST-1 in two sessions and three turns, ST-2 once, one unlinked conversation twice
     begin(&s, "a", Some("ST-1"), d1 + 60 * MIN);
@@ -49,7 +47,7 @@ fn items_count_once_a_day_and_unlinked_conversations_on_their_own() {
         ..Query::default()
     };
     let series = s
-        .with_conn(|c| views::series(c, &q, Metric::Active, "none", Bucket::Day))
+        .read(|c| views::series(c, &q, Metric::Active, "none", Bucket::Day))
         .expect("series");
     assert_eq!(series.buckets, ["2026-11-04", "2026-11-05", "2026-11-06"]);
     assert_eq!(series.series.len(), 1);

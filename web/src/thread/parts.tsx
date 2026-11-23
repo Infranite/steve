@@ -1,7 +1,8 @@
+import { getItems, getItem } from "@/store"
 /* Thread routing in the conversation (thread-routing.md §3.4–§5): the offer under an answer, suggestion cards, ask
  * options, the research being read, queued questions, quotes, flow-back from items and the focus bar. Built from the
  * existing parts (ItemRef, DecisionCard, Trace) — no new colours. */
-import { useEffect, useId, useLayoutEffect, useRef, useState } from "react"
+import { lazy, Suspense, useEffect, useId, useLayoutEffect, useRef, useState, type ComponentProps } from "react"
 import { CloseoutSummary } from "@/item-closeout"
 import { itemDisplayState } from "@/item-workflow-relation"
 import { cn } from "cn"
@@ -18,14 +19,18 @@ import { Markdown } from "@/components/markdown"
 import { Textarea } from "@/components/ui/textarea"
 import { clip as clipPlain } from "@/thread/topics"
 import { PR_AWAITING_MERGE, STEVE_TOOL, st, tm, emit, chatSend, takeOffer, chooseSuggest, cancelQueued, clearFocus, focusItem, quoteMsg, decisionDraft, decide, acceptChoosesRelease, botName, alertClosed, closeAlerts, type Msg, type SuggestChoice, type Steps, type Update, type Item, type ItemCardState, type LiveRun } from "@/store"
-import { ItemRef, DecisionCard, ItemNo, AlertClose, go, Pill } from "@/ui"
-import { jumpToMsg, threadMsg } from "@/thread/history"
+import { ItemRef, ItemNo, AlertClose, go, Pill } from "@/ui"
+import { jumpToMsg, threadMessages, threadMsg, useThreadIds, useThreadMessage } from "@/thread/history"
 import { Trans } from "react-i18next"
 import { t as tr, useT } from "@/i18n"
 import { toolClass, toolCounts, toolShort, meetStep, type ToolClass } from "@/thread/tools"
 import { steveToolIcon } from "@/tool-icons"
 import { DeliveryCards } from "@/delivery-card"
-import { loadItem } from "@/store"
+import { useItem, useItemDetail } from "@/store"
+const LazyDecision = lazy(() => import("@/thread/decision-card").then(({ DecisionCard }) => ({ default: DecisionCard })))
+function DecisionCard(props: ComponentProps<typeof LazyDecision>) {
+  return <Suspense fallback={null}><LazyDecision {...props} /></Suspense>
+}
 
 /* ───────── research ───────── */
 const secs = (ms: number) => tr("common:dur.seconds", { count: Math.max(1, Math.round(ms / 1000)) })
@@ -79,7 +84,7 @@ export function researchLiveItems(l: LiveRun): TrailItem[] {
 export function OfferLine({ m }: { m: Msg }) {
   const o = m.offer, [busy, setBusy] = useState(false), [open, setOpen] = useState(false), t = useT()
   if (!o) return null
-  if (o.state === "taken") return o.item ? (st.thread.some((x) => x.card?.item === o.item) ? <CardLink id={o.item} from={m.id} /> : <ItemRef id={o.item} />) : null
+  if (o.state === "taken") return o.item ? (threadMessages().some((x) => x.card?.item === o.item) ? <CardLink id={o.item} from={m.id} /> : <ItemRef id={o.item} />) : null
   if (o.state === "dismissed") return null
   const act = async (take: boolean) => { setBusy(true); try { await takeOffer(m, take) } finally { setBusy(false) } }
   if (o.folded && !open) return <button type="button" className="mt-2 self-start type-callout text-muted-foreground hover:text-foreground" onClick={() => setOpen(true)} data-offer-folded={m.id}>{t("thread:offer.folded", { title: o.title })}</button>
@@ -104,7 +109,7 @@ export function SuggestCard({ m }: { m: Msg }) {
         : <div className="flex flex-wrap gap-2">{s.choices.map((c) => (
           <Button key={c.id} size="sm" variant={(s.choices.some((x) => x.recommended) ? c.recommended : c.id === "here") ? "default" : "outline"} className="max-w-full rounded-full" disabled={busy} onClick={() => void act(c.id)} data-suggest-choice={c.id}><span className="truncate">{c.label}</span></Button>))}
           {s.state === "expired" && <span className="self-center type-footnote text-tertiary">{t("thread:suggest.expired")}</span>}</div>}
-      {s.item && (st.thread.some((x) => x.card?.item === s.item) ? <CardLink id={s.item} from={m.id} /> : <ItemRef id={s.item} />)}
+      {s.item && (threadMessages().some((x) => x.card?.item === s.item) ? <CardLink id={s.item} from={m.id} /> : <ItemRef id={s.item} />)}
     </div>
   )
 }
@@ -116,10 +121,12 @@ const answering = new Set<string>()
  *  not buttons that would speak in your own conversation */
 export function AskChips({ m, conv }: { m: Msg; conv?: boolean }) {
   const t = useT()
+  useThreadIds(!conv && !!m.ask?.options.length)
   if (!m.ask?.options?.length) return null
   if (conv) return <div className="mt-2 type-callout text-muted-foreground" data-ask={m.id} data-ask-readonly>{t("thread:ask.canReply", { options: m.ask.options.join(" / ") })}</div>
-  const at = st.thread.findIndex((x) => x === m || (!!m.id && x.id === m.id))
-  if ((at >= 0 ? st.thread.slice(at + 1) : st.thread.filter(x => (x.created ?? 0) > (m.created ?? 0))).some(x => x.k === "me")) return null
+  const messages = threadMessages()
+  const at = messages.findIndex((x) => x === m || (!!m.id && x.id === m.id))
+  if ((at >= 0 ? messages.slice(at + 1) : messages.filter(x => (x.created ?? 0) > (m.created ?? 0))).some(x => x.k === "me")) return null
   const key = m.id ?? ""
   const send = async (o: string) => {
     if (answering.has(key)) return
@@ -172,11 +179,10 @@ const clip = (t: string, n = 24) => clipPlain(t, n)
 /** "↳ 你 18:09 说的「…」": the message this one answers or quotes */
 export function QuoteHead({ id, className }: { id?: string; className?: string }) {
   const t = useT()
-  if (!id) return null
-  const q = threadMsg(id)
+  const q = useThreadMessage(id)
   if (!q) return null
   return (
-    <button type="button" onClick={() => jumpTo(id)} className={cn("flex max-w-full items-center gap-1 self-start truncate type-footnote text-muted-foreground hover:text-foreground", className)} data-quote={id}>
+    <button type="button" onClick={() => jumpTo(q.id!)} className={cn("flex max-w-full items-center gap-1 self-start truncate type-footnote text-muted-foreground hover:text-foreground", className)} data-quote={id}>
       <CornerDownRightIcon className="size-3.5 shrink-0" /><span className="truncate">{t(q.k === "me" ? "thread:quote.me" : "thread:quote.steve", { time: tm(q.created), text: clip(q.t ?? "") })}</span>
     </button>
   )
@@ -184,7 +190,7 @@ export function QuoteHead({ id, className }: { id?: string; className?: string }
 
 /* ───────── flow-back from an item (§5.2) ───────── */
 function UpdateRow({ u }: { u: Update }) {
-  const i = st.items.find((x) => x.id === u.item), [full, setFull] = useState(false), t = useT()
+  const i = getItem(u.item), [full, setFull] = useState(false), t = useT()
   const w = u.decision ? i?.waits.find((x) => x.decision === u.decision) : undefined
   if (u.kind === "done" || u.kind === "drop") {
     const I = u.kind === "done" ? CircleCheckIcon : BanIcon
@@ -217,9 +223,9 @@ export function Updates({ m }: { m: Msg }) {
 export function threadDecisions(list: Msg[]): Set<string> {
   const out = new Set<string>()
   for (const m of list) {
-    if (m.card) { const w = st.items.find((x) => x.id === m.card!.item)?.waits[0]; if (w) out.add(w.decision); continue }
+    if (m.card) { const w = getItems().find((x) => x.id === m.card!.item)?.waits[0]; if (w) out.add(w.decision); continue }
     for (const u of [...(m.updates ?? []), ...(m.update ? [m.update] : [])]) {
-      if (u.decision && (u.kind === "ask" || u.kind === "fail" || u.kind === "deliver") && st.items.find((x) => x.id === u.item)?.waits.some((w) => w.decision === u.decision)) out.add(u.decision)
+      if (u.decision && (u.kind === "ask" || u.kind === "fail" || u.kind === "deliver") && getItem(u.item)?.waits.some((w) => w.decision === u.decision)) out.add(u.decision)
     }
   }
   return out
@@ -312,9 +318,7 @@ function AcceptRow({ i, decision }: { i: Item; decision: string }) {
 /** One card per item made from the conversation: what it is doing now, its latest delivery (folded), the reply to what you
  * last sent it, and whatever it needs from you — answerable right here. Lifecycle events update it; they are not messages. */
 export function ItemCard({ c }: { c: ItemCardState }) {
-  const i = st.items.find((x) => x.id === c.item), t = useT()
-  // A new delivery must refresh artifact associations even when this item was already opened before it finished.
-  useEffect(() => { if (st.ready && (c.delivery || c.state === "deliver" || c.state === "done")) void loadItem(c.item, true) }, [c.item, c.delivery?.at, c.state, st.ready])
+  const i = useItemDetail(c.item, st.ready && (!!c.delivery || c.state === "deliver" || c.state === "done")), t = useT()
   if (!i) return null
   const look = cardLook(i, c), w = i.waits[0]
   /* what it is doing now, only while it does something: a stale line under a fresh status contradicts it */
@@ -354,14 +358,15 @@ export function ItemCard({ c }: { c: ItemCardState }) {
 const linksOf = (m: Msg) => [m.item, m.offer?.state === "taken" ? m.offer.item : undefined, m.suggest?.item].filter(Boolean)
 /** whether a Steve message before `from`, since you last spoke, already links to `id`: the way to its card is said once per answer */
 function linkedAbove(from: string | undefined, id: string) {
-  const at = from ? st.thread.findIndex((m) => m.id === from) : -1
-  for (let n = at - 1; n >= 0; n--) { const m = st.thread[n]; if (m.k === "me") return false; if (m.k === "steve" && (m.card?.item === id || linksOf(m).includes(id))) return true }
+  const messages = threadMessages()
+  const at = from ? messages.findIndex((m) => m.id === from) : -1
+  for (let n = at - 1; n >= 0; n--) { const m = messages[n]; if (m.k === "me") return false; if (m.k === "steve" && (m.card?.item === id || linksOf(m).includes(id))) return true }
   return false
 }
 /** an item whose card is elsewhere in the conversation (it moved, or this message only mentions the item): one quiet line to the card.
  *  `from`: the message it is under; when one just above already points to the same card, nothing */
 export function CardLink({ id, from }: { id: string; from?: string }) {
-  const i = st.items.find((x) => x.id === id), at = st.thread.findLast((m) => m.card?.item === id), t = useT()
+  const i = useItem(id), at = threadMessages().findLast((m) => m.card?.item === id), t = useT()
   if (!i || linkedAbove(from, id)) return null
   return (
     <button type="button" onClick={() => (at?.id ? jumpTo(at.id) : go("#/items/" + id))} className="mt-2 flex max-w-full items-center gap-1.5 self-start truncate type-callout text-muted-foreground hover:text-foreground" data-card-link={id}>
@@ -377,7 +382,7 @@ export function ComposerBars() {
   const [, tick] = useState(0), t = useT()
   useEffect(() => { if (!st.focus) return; const t = setInterval(() => { tick((x) => x + 1); if (st.focus && st.focus.until <= Date.now()) { st.focus = null; emit() } }, 30_000); return () => clearInterval(t) }, [st.focus?.item])
   if (!q && !f) return null
-  const it = f ? st.items.find((x) => x.id === f) : undefined
+  const it = f ? getItem(f) : undefined
   return (
     <div className="mb-2 flex flex-col gap-1.5" data-composer-bars>
       {q && <div className="flex min-h-9 min-w-0 items-center gap-2 rounded-lg bg-muted/60 px-3 py-1.5 type-callout text-muted-foreground anim-in" data-quote-bar>

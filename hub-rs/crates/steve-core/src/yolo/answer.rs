@@ -263,12 +263,12 @@ impl Engine {
         let window = self
             .yolo()
             .store()
-            .reader(|c| repo::window_current(c, ws))?
+            .read(|c| repo::window_current(c, ws))?
             .map(|w| w.id);
         let acts = self
             .yolo()
             .store()
-            .reader(|c| repo::actions_of_item(c, item, 500))?;
+            .read(|c| repo::actions_of_item(c, item, 500))?;
         let asked = |a: &&repo::ActionRow| {
             a.outcome == "decided"
                 && a.decision_id.as_deref() != Some(decision)

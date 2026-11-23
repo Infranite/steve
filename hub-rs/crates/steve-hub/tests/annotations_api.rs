@@ -64,10 +64,12 @@ impl Env {
             .collect()
     }
 
-    /// The open decision `id` as `/api/state` lists it.
+    /// The open decision `id` as `/api/views/page?kind=decision&status=open` lists it.
     async fn open_decision(&self, id: &str) -> Value {
-        let (_, st) = self.call("GET", "/api/state", None).await;
-        st["decisions"]
+        let (_, st) = self
+            .call("GET", &format!("/api/views?kind=decision&ids={id}"), None)
+            .await;
+        st["views"]
             .as_array()
             .and_then(|ds| ds.iter().find(|d| d["id"] == id))
             .cloned()
@@ -92,8 +94,8 @@ impl Env {
         let (_, v) = self
             .call("GET", &format!("/api/sessions/{id}/events"), None)
             .await;
-        v.as_array()
-            .or_else(|| v["events"].as_array())
+        v["events"]
+            .as_array()
             .cloned()
             .unwrap_or_default()
             .iter()
@@ -194,7 +196,7 @@ async fn start() -> Env {
 
 /// An item whose first turn runs `goal` on the fake agent; returns its session id.
 async fn item(e: &Env, goal: &str) -> String {
-    let (_, state) = e.call("GET", "/api/state", None).await;
+    let (_, state) = e.call("GET", "/api/shell", None).await;
     let bot = state["bots"]
         .as_array()
         .and_then(|bs| bs.iter().find(|b| b["harness"] == "claude-code"))
@@ -210,8 +212,10 @@ async fn item(e: &Env, goal: &str) -> String {
         .await;
     assert_eq!(s, 200, "{i}");
     let iid = i["id"].as_str().expect("item id").to_string();
-    let (_, ss) = e.call("GET", "/api/sessions", None).await;
-    let sid = ss
+    let (_, ss) = e
+        .call("GET", &format!("/api/views?kind=session&items={iid}"), None)
+        .await;
+    let sid = ss["views"]
         .as_array()
         .and_then(|ss| ss.iter().find(|s| s["item_id"] == iid.as_str()))
         .and_then(|s| s["id"].as_str())
@@ -232,15 +236,8 @@ async fn drafts_one_send_and_the_item_line() {
         .as_str()
         .expect("item")
         .to_string();
-    {
-        let c = rusqlite::Connection::open(&e.db).expect("db");
-        c.execute_batch(&format!(
-            "INSERT INTO artifacts (id, item_id, kind, title, location, created) VALUES
-               ('art_a', '{iid}', '文件', '截图', '/tmp/shots', 1), ('art_b', '{iid}', '文件', '截图', '/tmp/shots', 2);
-             INSERT INTO artifact_roles (artifact_id, role) VALUES ('art_a', 'record');"
-        ))
-        .expect("artifacts");
-    }
+    steve_store::testkit::hub::api::seed_annotations(&e.db, &iid).unwrap();
+
     let path = format!("/api/items/{iid}/annotations");
     let (s, v) = e
         .call("POST", &path, Some(json!({"art": "art_b", "path": "a.png", "anchor": {"type": "region", "x": 0.1, "y": 0.2, "w": 0.5, "h": 0.25}, "note": "按钮被裁掉了"})))

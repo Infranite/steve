@@ -7,6 +7,7 @@ mod node_harness;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use steve_runtime::testkit::eventually_sync;
+use steve_store::testkit::hub::node_checks;
 
 use node_harness::*;
 use serde_json::{Value, json};
@@ -115,9 +116,7 @@ async fn no_common_upgrade_protocol_report_tells_devices_to_upgrade_the_hub() {
     assert_eq!(device["link_error"]["error"], "版本不一致，需要升级 Hub");
     assert!(h.svc.registry.current(node.as_str()).is_none());
     assert_eq!(
-        h.q::<i64>(&format!(
-            "SELECT generation FROM nodes WHERE node_id='{node}'"
-        )),
+        node_checks::node_generation_by_node_id(&h.store, node.as_str()).unwrap(),
         0
     );
 }
@@ -157,7 +156,7 @@ async fn a_linked_node_says_how_it_came_what_it_is_and_how_far_it_is() {
         .unwrap();
     eventually_sync("linked", || h.svc.registry.current(node.as_str()).is_some()).await;
     eventually_sync("its machine kept", || {
-        h.q::<i64>("SELECT host IS NOT NULL FROM nodes WHERE local=0") == 1
+        node_checks::node_host_is_not_null_with_local_with_value(&h.store).unwrap() == 1
     })
     .await;
     let v = row(&h, node.as_str()).await;

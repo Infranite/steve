@@ -1,6 +1,7 @@
 //! One completed node's write, applied within the driver's existing transaction.
 use super::*;
 use crate::nodes::Effects;
+use steve_store::{DecisionRows, FlowWaits, NewWait, RunRows, W};
 
 pub(super) struct StepWrite {
     pub cursor: String,
@@ -15,12 +16,14 @@ pub(super) struct StepWrite {
     pub now: i64,
 }
 impl StepWrite {
-    pub(super) fn commit(&self, tx: &Tx, run_id: &str) -> FlowResult<RunStatus> {
-        let mut r = runs::get(tx, run_id)?.ok_or_else(|| ApiError::not_found("运行"))?;
+    pub(super) fn commit(&self, tx: &mut W<'_>, run_id: &str) -> FlowResult<RunStatus> {
+        let mut r = RunRows(tx)
+            .get(run_id)?
+            .ok_or_else(|| ApiError::not_found("运行"))?;
         let ours = r.status == "running";
         self.effects(&mut r);
         self.apply(tx, &mut r, ours)?;
-        runs::save(tx, &r)?;
+        RunRows(tx).save(&r)?;
         Ok(RunStatus::parse(&r.status))
     }
     fn effects(&self, r: &mut RunRow) {
@@ -55,20 +58,20 @@ impl StepWrite {
     }
     fn add(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         r: &RunRow,
         status: &str,
         out: &Value,
         branch: Option<&str>,
         err: Option<&str>,
     ) -> FlowResult<()> {
-        let seq = runs::add_step(
-            tx,
+        RunRows(tx).add_step(
             &r.workspace_id,
             &r.id,
             &NewStep {
                 node_id: &self.cursor,
                 status,
+                branch,
                 input: &self.input,
                 output: out,
                 ms: self.ms,
@@ -76,15 +79,9 @@ impl StepWrite {
                 started: self.started,
             },
         )?;
-        if let Some(b) = branch {
-            tx.execute(
-                "UPDATE flow_run_steps SET branch = ? WHERE run_id = ? AND seq = ?",
-                params![b, r.id, seq],
-            )?;
-        }
         Ok(())
     }
-    fn apply(&self, tx: &Tx, r: &mut RunRow, ours: bool) -> FlowResult<()> {
+    fn apply(&self, tx: &mut W<'_>, r: &mut RunRow, ours: bool) -> FlowResult<()> {
         let now = self.now;
         match &self.step {
             Step::Advance { .. } => self.advance(tx, r, ours, &self.step)?,
@@ -133,7 +130,7 @@ impl StepWrite {
         }
         Ok(())
     }
-    fn advance(&self, tx: &Tx, r: &mut RunRow, ours: bool, step: &Step) -> FlowResult<()> {
+    fn advance(&self, tx: &mut W<'_>, r: &mut RunRow, ours: bool, step: &Step) -> FlowResult<()> {
         if let Step::Advance {
             output,
             branch,
@@ -170,7 +167,7 @@ impl StepWrite {
         }
         Ok(())
     }
-    fn wait(&self, tx: &Tx, r: &mut RunRow, ours: bool, w: &WaitSpec) -> FlowResult<()> {
+    fn wait(&self, tx: &mut W<'_>, r: &mut RunRow, ours: bool, w: &WaitSpec) -> FlowResult<()> {
         // a run that ended while the node ran gets the step, not a decision or a wait
         if !ours {
             self.add(tx, r, "waiting", &w.output, None, None)?;
@@ -185,7 +182,7 @@ impl StepWrite {
         if let Some(d) = &w.decision {
             let mut d = d.clone();
             d.subject_id = format!("{run_id}:{cursor}");
-            let opened = steve_store::base::decisions::open(tx, &d)?;
+            let opened = DecisionRows(tx).open(&d)?;
             out["decision_id"] = json!(opened.id);
             decision_id = Some(opened.id.clone());
             r.context["decision_id"] = json!(opened.id);
@@ -194,10 +191,16 @@ impl StepWrite {
             }
         }
         self.add(tx, r, "waiting", &out, None, None)?;
-        tx.execute(
-            "INSERT OR REPLACE INTO flow_waits (run_id, node_id, workspace_id, mode, until, match, decision_id, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            params![run_id, cursor, r.workspace_id, w.mode, w.until, w.matcher.to_string(), decision_id, now],
-        )?;
+        FlowWaits(tx).put(&NewWait {
+            run: run_id,
+            node: cursor,
+            ws: &r.workspace_id,
+            mode: w.mode,
+            until: w.until,
+            matcher: &w.matcher,
+            decision: decision_id.as_deref(),
+            now,
+        })?;
         r.status = "waiting".into();
         Ok(())
     }

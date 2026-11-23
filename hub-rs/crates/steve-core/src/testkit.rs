@@ -103,10 +103,10 @@ pub struct FakeRuntime {
 
 impl FakeRuntime {
     fn workflow_blocker(&self, sid: &str) -> Result<Option<String>> {
-        Ok(self
-            .store
-            .store()
-            .reader(|c| steve_store::workflow_gate::session_blocker(c, sid))?)
+        Ok(steve_store::core_fixture::thread::workflow_blocker(
+            self.store.store(),
+            sid,
+        )?)
     }
 
     pub fn st(&self) -> std::sync::MutexGuard<'_, FakeState> {

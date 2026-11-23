@@ -462,12 +462,11 @@ fn release_project(k: &Kit, r: &Path) -> String {
 
 fn release_card(k: &Kit, i: &str, s: &str, branch: &str) -> String {
     let d = k.decision(i, Some(s), "approve", "release", &["yes", "no"]);
-    k.db()
-        .exec(
-            "UPDATE decisions SET subject_id = ? WHERE id = ?",
-            &[&branch, &d],
-        )
-        .unwrap();
+    steve_store::core_fixture::decision(
+        k.db().store(),
+        &d,
+        steve_store::core_fixture::DecisionState::Subject(&branch),
+    );
     d
 }
 
@@ -674,12 +673,7 @@ fn nothing_to_release_on_another_devices_node_asks_for_no_release() {
     let port = OnNode::new(&k);
     let r = repo(k.home());
     let p = release_project(&k, &r);
-    k.db()
-        .exec(
-            "UPDATE projects SET device_id = 'mac-2' WHERE id = ?",
-            &[&p],
-        )
-        .unwrap();
+    steve_store::core_fixture::project_device(k.db().store(), &p, "mac-2");
     let i = k.item("run", "交付与验收", Some(&p));
     let (name, wt) = branch_with(&r, &k.core.config().worktrees, &i, "b.txt", "b\n");
     g(&wt, &["reset", "-q", "--hard", "main"]);

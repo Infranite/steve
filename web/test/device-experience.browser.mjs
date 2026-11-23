@@ -14,12 +14,15 @@ const scale=async(root='body')=>page.locator(root).evaluate(el=>{const els=[el,.
 try {
  await page.goto(base+'/auth/dev')
  await goto('/devices/nodes/local')
- const state=await (await page.request.get(base+'/api/state')).json()
- await fs.writeFile(out+'/api-evidence.json',JSON.stringify({devices:state.devices,sessions:state.sessions.filter(s=>s.id.startsWith('case-')).map(s=>({id:s.id,item_id:s.item_id,status:s.status,device_id:s.device_id,readonly:s.readonly,busy:s.busy,queue:s.queued.map(q=>q.id)})),decisions:state.decisions.map(d=>({id:d.id,session_id:d.session_id,item_id:d.item_id,status:d.status}))},null,2))
- await check('real state retains idle/running requests, busy, startup, error and readonly evidence',()=>{
-  for(const [sid,status] of [['case-idle-request','idle'],['case-running','running'],['case-starting','starting'],['case-error','error']]) assert.equal(state.sessions.find(s=>s.id===sid).status,status)
-  assert.equal(state.sessions.find(s=>s.id==='case-busy').busy,true)
-  assert.equal(state.sessions.find(s=>s.id==='case-readonly').readonly,true)
+ const get = async path => (await page.request.get(base + path)).json()
+ const [{ devices }, { views: { session: sessions, decision: decisions } }] = await Promise.all([
+  get('/api/devices'), get('/api/snapshot?kinds=session,decision'),
+ ])
+ await fs.writeFile(out+'/api-evidence.json', JSON.stringify({ devices, sessions, decisions }, null, 2))
+ await check('projected rows retain idle/running requests, busy, startup, error and readonly evidence',()=>{
+  for(const [sid,status] of [['case-idle-request','idle'],['case-running','running'],['case-starting','starting'],['case-error','error']]) assert.equal(sessions.find(s=>s.id===sid).status,status)
+  assert.equal(sessions.find(s=>s.id==='case-busy').busy,true)
+  assert.equal(sessions.find(s=>s.id==='case-readonly').readonly,true)
  })
  await check('exclusive groups from the actual API: answer-first and current rows, nothing unassigned',async()=>{
   assert.equal(await page.locator('[data-node-work] > div [data-work-session]').count(),6)

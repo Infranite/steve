@@ -1,5 +1,5 @@
 /* 设置 · 外观 with the real store: the type size and reduced motion go to the Hub (the browser test answers /api/settings
- * and /api/state) and come back through the state refresh, which puts them on <html>. ?theme=dark switches to dark. */
+ * and /api/shell) and come back through the state refresh, which puts them on <html>. ?theme=dark switches to dark. */
 import { StrictMode } from "react"
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"

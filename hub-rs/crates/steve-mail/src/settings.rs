@@ -5,7 +5,6 @@
 use serde::Deserialize;
 use serde_json::json;
 use steve_modules::{ApiError, Caller};
-use steve_store::base;
 
 use crate::Mail;
 use crate::error::{MailError, MailResult};
@@ -82,7 +81,7 @@ impl Mail {
             .0
             .m
             .store
-            .reader(|c| repo::settings(c, connection_id))?
+            .read(|c| repo::settings(c, connection_id))?
             .unwrap_or_default())
     }
 
@@ -101,7 +100,7 @@ impl Mail {
         self.0
             .m
             .store
-            .transaction(|tx| patch_tx(tx, &who.ws, &who.me, connection_id, p, now))
+            .write(|tx| patch_tx(tx, &who.ws, &who.me, connection_id, p, now))
     }
 }
 
@@ -114,7 +113,7 @@ pub fn fields(s: &AccountSettings) -> serde_json::Value {
 /// [`Mail::patch_settings`] inside a transaction, without the ownership check (the caller did it):
 /// validates, writes, records the revision and the audit `mail_account.patch`. Unchanged → no write.
 pub fn patch_tx(
-    tx: &steve_store::Tx,
+    tx: &mut steve_store::W<'_>,
     ws: &str,
     actor: &str,
     connection_id: &str,
@@ -134,7 +133,7 @@ pub fn patch_tx(
 
 /// Writes `after` over `before` (revision + 1, revision row, audit `mail_account.patch`).
 pub(crate) fn write_tx(
-    tx: &steve_store::Tx,
+    tx: &mut steve_store::W<'_>,
     ws: &str,
     actor: &str,
     connection_id: &str,
@@ -143,7 +142,7 @@ pub(crate) fn write_tx(
     now: i64,
 ) -> MailResult<()> {
     repo::update_settings(tx, connection_id, after, now)?;
-    base::revision(
+    steve_store::audit_repo::revise(
         tx,
         ws,
         "mail_account",
@@ -153,8 +152,7 @@ pub(crate) fn write_tx(
         &fields(after),
         actor,
     )?;
-    base::audit(
-        tx,
+    tx.audit(
         ws,
         actor,
         "mail_account.patch",

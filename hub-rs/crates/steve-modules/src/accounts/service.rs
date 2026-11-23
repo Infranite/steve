@@ -3,15 +3,15 @@
 //! transaction, so the REST handlers, the conversational-config operations and identification share them.
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
-use steve_store::Tx;
-use steve_store::base::{self, Viewer};
+use serde_json::{Map, json};
+use steve_store::base::Viewer;
+use steve_store::{Accounts, Connections, Contacts, MatchRules, Read, Revisions, Systems, W};
 
 use super::repo::{
-    self, ACCOUNT, Account, AccountPatch, AccountQuery, ConnectionBrief, ItemRef, MatchRule,
-    NewAccount, System,
+    ACCOUNT, Account, AccountPatch, AccountQuery, ConnectionBrief, ItemRef, MatchRule, NewAccount,
+    System,
 };
-use crate::contacts::repo::{self as people, Party};
+use crate::contacts::repo::Party;
 use crate::contacts::service as contacts;
 use crate::{ApiError, ApiResult, Caller, Check, Modules, own};
 
@@ -42,35 +42,21 @@ pub fn default_label(source: &str) -> &'static str {
     }
 }
 
-pub(crate) fn event(tx: &Tx, ws: &str, id: &str) {
-    tx.publish(steve_types::DomainEvent::from(
-        steve_types::PeopleEvent::Account {
-            id: {
-                let value: String = id.into();
-                steve_types::AccountId::from(value)
-            },
-            ws: {
-                let value: String = ws.into();
-                steve_types::WorkspaceId::from(value)
-            },
-        },
-    ));
+pub(crate) fn account_event(ws: &str, id: &str) -> steve_types::DomainEvent {
+    steve_types::PeopleEvent::Account {
+        id: id.to_owned().into(),
+        ws: ws.to_owned().into(),
+    }
+    .into()
 }
 
 /// The party's page shows its accounts and counts them.
-pub(crate) fn party_event(tx: &Tx, ws: &str, id: &str) {
-    tx.publish(steve_types::DomainEvent::from(
-        steve_types::PeopleEvent::Party {
-            id: {
-                let value: String = id.into();
-                steve_types::PartyId::from(value)
-            },
-            ws: {
-                let value: String = ws.into();
-                steve_types::WorkspaceId::from(value)
-            },
-        },
-    ));
+pub(crate) fn party_changed(ws: &str, id: &str) -> steve_types::DomainEvent {
+    steve_types::PeopleEvent::Party {
+        id: id.to_owned().into(),
+        ws: ws.to_owned().into(),
+    }
+    .into()
 }
 
 // ---------------------------------------------------------------- handles
@@ -140,12 +126,14 @@ pub fn normalize(system: &System, raw: &str) -> Option<Handle> {
 // ---------------------------------------------------------------- seeds, start
 
 /// Seeds the built-in systems and the workspace's default match rule when missing.
-pub fn ensure_seeds(tx: &Tx, ws: &str) -> ApiResult<()> {
-    if !repo::builtins_seeded(tx)? {
-        repo::seed_builtins(tx)?;
+pub fn ensure_seeds(w: &mut W<'_>, ws: &str) -> ApiResult<()> {
+    let mut systems = Systems(w);
+    if !systems.seeded()? {
+        systems.seed()?;
     }
-    if repo::prefix_rule(tx, ws)?.is_none() {
-        repo::seed_rule(tx, ws)?;
+    let mut rules = MatchRules(w);
+    if rules.prefix(ws)?.is_none() {
+        rules.seed_prefix(ws)?;
     }
     Ok(())
 }
@@ -153,18 +141,20 @@ pub fn ensure_seeds(tx: &Tx, ws: &str) -> ApiResult<()> {
 /// Like contacts' `start`: “我” and the own organization exist, the seeds are there. Returns the
 /// caller's viewer and “我”.
 pub fn start(m: &Modules, who: &Caller) -> ApiResult<(Viewer, Party)> {
-    let seeded = m.store.reader(|c| {
-        Ok::<_, ApiError>(repo::builtins_seeded(c)? && repo::prefix_rule(c, &who.ws)?.is_some())
+    let seeded = m.store.read::<_, steve_store::StoreError>(|r| {
+        Ok(Systems(r).seeded()? && MatchRules(r).prefix(&who.ws)?.is_some())
     })?;
     if !seeded {
-        m.store.transaction(|tx| ensure_seeds(tx, &who.ws))?;
+        m.store.write(|w| ensure_seeds(w, &who.ws))?;
     }
     contacts::start(m, who)
 }
 
 /// The system `id` of `ws`, or `404 没有这个系统`.
-pub fn own_system(c: &rusqlite::Connection, ws: &str, id: &str) -> ApiResult<System> {
-    repo::system(c, ws, id)?.ok_or_else(|| ApiError::not_found("系统"))
+pub(crate) fn own_system(r: &mut impl Read, ws: &str, id: &str) -> ApiResult<System> {
+    Systems(r)
+        .get(ws, id)?
+        .ok_or_else(|| ApiError::not_found("系统"))
 }
 
 /// The noun of a party type in `404 没有这个<noun>`.
@@ -177,8 +167,11 @@ fn noun(kind: &str) -> &'static str {
 }
 
 /// An active contact, organization or team the viewer can see: an account's owner.
-pub fn own_owner(c: &rusqlite::Connection, viewer: &Viewer, id: &str) -> ApiResult<Party> {
-    let p = people::get(c, id)?;
+pub fn own_owner(r: &mut impl Read, viewer: &Viewer, id: &str) -> ApiResult<Party> {
+    visible_owner(Contacts::new(r).party(id)?, viewer)
+}
+
+fn visible_owner(p: Option<Party>, viewer: &Viewer) -> ApiResult<Party> {
     let n = p.as_ref().map(|p| noun(&p.kind)).unwrap_or("联系人");
     let p =
         p.filter(|p| p.status == "active" && matches!(p.kind.as_str(), "contact" | "org" | "team"));
@@ -186,53 +179,9 @@ pub fn own_owner(c: &rusqlite::Connection, viewer: &Viewer, id: &str) -> ApiResu
 }
 
 /// An account of the viewer's workspace whose owner the viewer can see; `404 没有这个账号` otherwise.
-pub fn own_account(c: &rusqlite::Connection, viewer: &Viewer, id: &str) -> ApiResult<Account> {
-    let a = repo::get(c, id)?.filter(|a| a.workspace_id == viewer.ws);
-    let Some(a) = a else {
-        return Err(ApiError::not_found("账号"));
-    };
-    let visible = people::get(c, &a.party_id)?
-        .is_some_and(|p| p.status != "deleted" && viewer.sees(&p.visibility, &p.created_by));
-    if visible {
-        Ok(a)
-    } else {
-        Err(ApiError::not_found("账号"))
-    }
-}
-
-/// Follows `merged_into` to the party that holds a merged contact's data now (at most 32 hops).
-pub fn current_party(c: &rusqlite::Connection, id: &str) -> ApiResult<Option<Party>> {
-    let mut p = people::get(c, id)?;
-    for _ in 0..32 {
-        match &p {
-            Some(x) if x.status == "merged" => match &x.merged_into {
-                Some(next) => p = people::get(c, next)?,
-                None => break,
-            },
-            _ => break,
-        }
-    }
-    Ok(p)
-}
-
 /// Can an account of this party have a connection (“我”, the own organization, a team)?
 pub fn may_connect(p: &Party) -> bool {
     p.is_me() || p.is_self_org() || p.kind == "team" || p.contact_kind.as_deref() == Some("bot")
-}
-
-/// Is this party one of ours — the own organization, or a bot party one of whose accounts is
-/// connected (an app bot of ours)?
-pub fn is_ours(c: &rusqlite::Connection, p: &Party) -> ApiResult<bool> {
-    if p.is_self_org() {
-        return Ok(true);
-    }
-    if p.contact_kind.as_deref() != Some("bot") {
-        return Ok(false);
-    }
-    Ok(c.prepare_cached(
-        "SELECT 1 FROM connections c JOIN accounts a ON a.id = c.account_id WHERE a.party_id = ? AND c.status != 'revoked'",
-    )?
-    .exists([&p.id])?)
 }
 
 // ---------------------------------------------------------------- shapes
@@ -272,8 +221,8 @@ pub struct AccountOut {
     pub revision: i64,
 }
 
-pub fn out(c: &rusqlite::Connection, viewer: &Viewer, a: &Account) -> ApiResult<AccountOut> {
-    let system = match repo::system(c, &a.workspace_id, &a.system_id)? {
+fn out(r: &mut impl Read, viewer: &Viewer, a: &Account) -> ApiResult<AccountOut> {
+    let system = match Systems(r).get(&a.workspace_id, &a.system_id)? {
         Some(s) => SystemRef {
             name: crate::shown::system_name(&s.id, s.builtin, &s.name),
             id: s.id,
@@ -285,7 +234,7 @@ pub fn out(c: &rusqlite::Connection, viewer: &Viewer, a: &Account) -> ApiResult<
             kind: "other".into(),
         },
     };
-    let party = match people::get(c, &a.party_id)? {
+    let party = match steve_store::Contacts::new(r).party(&a.party_id)? {
         Some(p) => PartyRef {
             is_me: p.is_me() && p.user_id.as_deref() == Some(viewer.user.as_str()),
             id: p.id,
@@ -314,8 +263,8 @@ pub fn out(c: &rusqlite::Connection, viewer: &Viewer, a: &Account) -> ApiResult<
         confidence: a.confidence,
         source: a.source.clone(),
         source_label: crate::shown::source_label(&a.source_label),
-        connection: repo::connection_of(c, &a.id)?,
-        vault_items: repo::vault_items_of(c, &a.id, &viewer.user)?,
+        connection: steve_store::Connections(r).brief(&a.id)?,
+        vault_items: steve_store::vault_items::VaultItems(r).account_items(&a.id, &viewer.user)?,
         revision: a.revision,
     })
 }
@@ -339,50 +288,90 @@ pub fn list(m: &Modules, who: &Caller, p: AccountsParams) -> ApiResult<Vec<Accou
             .one_of("scope", s, &["mine", "company", "others"])
             .done()?;
     }
-    m.store.reader(|c| {
-        let mut f = AccountQuery {
-            system: some(p.system),
-            ..Default::default()
-        };
-        if let Some(party) = some(p.party) {
-            let id = if party == "me" { me.id.clone() } else { party };
-            let p = people::get(c, &id)?.filter(|p| p.status != "deleted");
-            let n = p.as_ref().map(|p| noun(&p.kind)).unwrap_or("联系人");
-            f.party = Some(own(p, &viewer, n)?.id);
+    m.store.read::<_, steve_store::StoreError>(|r| {
+        Ok(list_in(
+            r,
+            who,
+            some(p.party),
+            some(p.system),
+            scope,
+            viewer,
+            me,
+        ))
+    })?
+}
+
+fn list_in(
+    r: &mut impl Read,
+    who: &Caller,
+    party: Option<String>,
+    system: Option<String>,
+    scope: Option<String>,
+    viewer: Viewer,
+    me: Party,
+) -> ApiResult<Vec<AccountOut>> {
+    let mut f = AccountQuery {
+        system,
+        ..Default::default()
+    };
+    if let Some(party) = party {
+        let id = if party == "me" { me.id.clone() } else { party };
+        let p = steve_store::Contacts::new(r)
+            .party(&id)?
+            .filter(|p| p.status != "deleted");
+        let n = p.as_ref().map(|p| noun(&p.kind)).unwrap_or("联系人");
+        f.party = Some(own(p, &viewer, n)?.id);
+    }
+    let self_org = steve_store::Contacts::new(r).own_org(&who.ws)?;
+    match scope.as_deref() {
+        Some("mine") => f.party = Some(me.id.clone()),
+        Some("company") => match &self_org {
+            Some(o) => f.party = Some(o.id.clone()),
+            None => return Ok(Vec::new()),
+        },
+        Some("others") => {
+            f.not_parties.push(me.id.clone());
+            f.not_parties.extend(self_org.map(|o| o.id));
         }
-        let self_org = people::self_org(c, &who.ws)?;
-        match scope.as_deref() {
-            Some("mine") => f.party = Some(me.id.clone()),
-            Some("company") => match &self_org {
-                Some(o) => f.party = Some(o.id.clone()),
-                None => return Ok(Vec::new()),
-            },
-            Some("others") => {
-                f.not_parties.push(me.id.clone());
-                f.not_parties.extend(self_org.map(|o| o.id));
-            }
-            _ => {}
-        }
-        repo::list(c, &viewer, &f)?
-            .iter()
-            .map(|a| out(c, &viewer, a))
-            .collect()
-    })
+        _ => {}
+    }
+    steve_store::Accounts(r)
+        .list(&viewer, &f)?
+        .iter()
+        .map(|a| out(r, &viewer, a))
+        .collect()
 }
 
 /// `GET /accounts/:id`.
 pub fn get(m: &Modules, who: &Caller, id: &str) -> ApiResult<AccountOut> {
     let (viewer, _) = start(m, who)?;
-    m.store.reader(|c| {
-        let a = own_account(c, &viewer, id)?;
-        out(c, &viewer, &a)
-    })
+    m.store
+        .read::<_, steve_store::StoreError>(|r| Ok(get_in(r, &viewer, id)))?
+}
+
+fn get_in(r: &mut impl Read, viewer: &Viewer, id: &str) -> ApiResult<AccountOut> {
+    let a = own_account(r, viewer, id)?;
+    out(r, viewer, &a)
+}
+
+pub fn own_account(r: &mut impl Read, viewer: &Viewer, id: &str) -> ApiResult<Account> {
+    let a = steve_store::Accounts(r)
+        .get(id)?
+        .filter(|a| a.workspace_id == viewer.ws)
+        .ok_or_else(|| ApiError::not_found("账号"))?;
+    let visible = steve_store::Contacts::new(r)
+        .party(&a.party_id)?
+        .is_some_and(|p| p.status != "deleted" && viewer.sees(&p.visibility, &p.created_by));
+    if !visible {
+        return Err(ApiError::not_found("账号"));
+    }
+    Ok(a)
 }
 
 /// `GET /systems`.
 pub fn systems(m: &Modules, who: &Caller) -> ApiResult<Vec<System>> {
     start(m, who)?;
-    let mut xs = m.store.reader(|c| repo::systems(c, &who.ws))?;
+    let mut xs = m.store.read(|r| Systems(r).list(&who.ws))?;
     for s in &mut xs {
         s.name = crate::shown::system_name(&s.id, s.builtin, &s.name);
     }
@@ -406,13 +395,9 @@ pub struct Record {
 }
 
 /// `409 这个账号已经记在「<主人>」名下`. The owner's name is shown only when the viewer may see it.
-pub(crate) fn taken(
-    c: &rusqlite::Connection,
-    viewer: &Viewer,
-    account: &str,
-) -> ApiResult<ApiError> {
-    let owner = match repo::get(c, account)? {
-        Some(a) => current_party(c, &a.party_id)?,
+pub(crate) fn taken(r: &mut impl Read, viewer: &Viewer, account: &str) -> ApiResult<ApiError> {
+    let owner = match Accounts(r).get(account)? {
+        Some(a) => Contacts::new(r).current_party(&a.party_id)?,
         None => None,
     };
     let name = owner
@@ -425,15 +410,18 @@ pub(crate) fn taken(
     )))
 }
 
-/// Records an account for an owner the caller already checked. Handle conflicts are `409`.
-pub fn record_tx(tx: &Tx, viewer: &Viewer, actor: &str, r: &Record) -> ApiResult<Account> {
-    let system = own_system(tx, &viewer.ws, &r.system_id)?;
+pub(crate) fn record(
+    w: &mut W<'_>,
+    viewer: &Viewer,
+    actor: &str,
+    r: &Record,
+) -> ApiResult<Account> {
+    let system = own_system(w, &viewer.ws, &r.system_id)?;
     let h = normalize(&system, &r.handle).ok_or_else(|| ApiError::invalid("handle"))?;
-    if let Some(existing) = repo::by_handle(tx, &viewer.ws, &system.family, &h.handle)? {
-        return Err(taken(tx, viewer, &existing)?);
+    if let Some(existing) = Accounts(w).by_handle(&viewer.ws, &system.family, &h.handle)? {
+        return Err(taken(w, viewer, &existing)?);
     }
-    let a = repo::insert(
-        tx,
+    let a = Accounts(w).insert(
         &viewer.ws,
         &NewAccount {
             system_id: system.id.clone(),
@@ -449,16 +437,15 @@ pub fn record_tx(tx: &Tx, viewer: &Viewer, actor: &str, r: &Record) -> ApiResult
             source_label: r.source_label.clone(),
         },
     )?;
-    base::audit(
-        tx,
+    w.audit(
         &viewer.ws,
         actor,
         "account.create",
         &a.id,
         &json!({ "system": a.system_id, "party": a.party_id, "source": a.source }),
     )?;
-    event(tx, &viewer.ws, &a.id);
-    party_event(tx, &viewer.ws, &a.party_id);
+    w.emit(account_event(&viewer.ws, &a.id));
+    w.emit(party_changed(&viewer.ws, &a.party_id));
     Ok(a)
 }
 
@@ -479,13 +466,13 @@ pub fn create(m: &Modules, who: &Caller, b: NewAccountBody) -> ApiResult<Account
         .len("handle", b.handle.trim(), 1, 200)
         .opt_len("display_name", b.display_name.as_deref(), 0, 200)
         .done()?;
-    let id = m.store.transaction(|tx| {
+    let id = m.store.write(|w| {
         let party = match b.party_id.as_deref() {
             None | Some("me") => me.clone(),
-            Some(id) => own_owner(tx, &viewer, id)?,
+            Some(id) => own_owner(w, &viewer, id)?,
         };
-        let a = record_tx(
-            tx,
+        let a = record(
+            w,
             &viewer,
             &who.me,
             &Record {
@@ -520,14 +507,14 @@ pub struct AccountPatchBody {
 
 /// Edits an account inside a transaction. Changing the owner is a manual correction of
 /// identification: the account becomes verified, audit `account.move`. Writes a revision.
-pub fn patch_tx(
-    tx: &Tx,
+pub(crate) fn patch_in(
+    w: &mut W<'_>,
     viewer: &Viewer,
     actor: &str,
     id: &str,
     b: &AccountPatchBody,
 ) -> ApiResult<Account> {
-    let a = own_account(tx, viewer, id)?;
+    let a = own_account(w, viewer, id)?;
     let mut ck = Check::new();
     if let Some(k) = &b.kind {
         ck.one_of("kind", k, &KINDS);
@@ -537,8 +524,8 @@ pub fn patch_tx(
         .done()?;
     let owner = match &b.party_id {
         Some(p) if *p != a.party_id => {
-            let p = own_owner(tx, viewer, p)?;
-            if repo::connection_of(tx, &a.id)?.is_some() && !may_connect(&p) {
+            let p = own_owner(w, viewer, p)?;
+            if Connections(w).brief(&a.id)?.is_some() && !may_connect(&p) {
                 return Err(ApiError::rule(steve_i18n::t!(
                     "modules.accounts.connected_owner"
                 )));
@@ -579,32 +566,28 @@ pub fn patch_tx(
         return Ok(a);
     }
     let version = a.revision + 1;
-    base::revision(
-        tx,
+    Revisions(w).append(
         &viewer.ws,
         ACCOUNT,
         &a.id,
         version,
-        &Value::Object(before),
-        &Value::Object(after.clone()),
+        &json!({ "before": before, "after": after }),
         actor,
     )?;
-    repo::update(tx, &a.id, &patch, Some(version))?;
+    Accounts(w).update(&a.id, &patch, Some(version))?;
     match &owner {
         Some(p) => {
-            base::audit(
-                tx,
+            w.audit(
                 &viewer.ws,
                 actor,
                 "account.move",
                 &a.id,
                 &json!({ "from": a.party_id, "to": p.id }),
             )?;
-            party_event(tx, &viewer.ws, &a.party_id);
-            party_event(tx, &viewer.ws, &p.id);
+            w.emit(party_changed(&viewer.ws, &a.party_id));
+            w.emit(party_changed(&viewer.ws, &p.id));
         }
-        None => base::audit(
-            tx,
+        None => w.audit(
             &viewer.ws,
             actor,
             "account.update",
@@ -612,45 +595,45 @@ pub fn patch_tx(
             &json!({ "fields": after.keys().collect::<Vec<_>>() }),
         )?,
     }
-    event(tx, &viewer.ws, &a.id);
-    repo::get(tx, &a.id)?.ok_or_else(|| ApiError::not_found("账号"))
+    w.emit(account_event(&viewer.ws, &a.id));
+    Accounts(w)
+        .get(&a.id)?
+        .ok_or_else(|| ApiError::not_found("账号"))
 }
 
 /// `PATCH /accounts/:id`.
 pub fn patch(m: &Modules, who: &Caller, id: &str, b: AccountPatchBody) -> ApiResult<AccountOut> {
     let (viewer, _) = start(m, who)?;
-    m.store
-        .transaction(|tx| patch_tx(tx, &viewer, &who.me, id, &b))?;
+    m.store.write(|w| patch_in(w, &viewer, &who.me, id, &b))?;
     get(m, who, id)
 }
 
 /// Removes an account inside a transaction: refused while connected, its vault items stay unlinked.
-pub fn delete_tx(tx: &Tx, ws: &str, actor: &str, a: &Account) -> ApiResult<()> {
-    if repo::connection_of(tx, &a.id)?.is_some() {
+pub(crate) fn delete_in(w: &mut W<'_>, ws: &str, actor: &str, a: &Account) -> ApiResult<()> {
+    if Connections(w).brief(&a.id)?.is_some() {
         return Err(ApiError::conflict(steve_i18n::t!(
             "modules.accounts.disconnect_first"
         )));
     }
-    repo::delete(tx, &a.id)?;
-    base::audit(
-        tx,
+    Accounts(w).delete(&a.id)?;
+    w.audit(
         ws,
         actor,
         "account.delete",
         &a.id,
         &json!({ "system": a.system_id, "party": a.party_id }),
     )?;
-    event(tx, ws, &a.id);
-    party_event(tx, ws, &a.party_id);
+    w.emit(account_event(ws, &a.id));
+    w.emit(party_changed(ws, &a.party_id));
     Ok(())
 }
 
 /// `DELETE /accounts/:id`.
 pub fn delete(m: &Modules, who: &Caller, id: &str) -> ApiResult<()> {
     let (viewer, _) = start(m, who)?;
-    m.store.transaction(|tx| {
-        let a = own_account(tx, &viewer, id)?;
-        delete_tx(tx, &who.ws, &who.me, &a)
+    m.store.write(|w| {
+        let a = own_account(w, &viewer, id)?;
+        delete_in(w, &who.ws, &who.me, &a)
     })
 }
 
@@ -659,7 +642,7 @@ pub fn delete(m: &Modules, who: &Caller, id: &str) -> ApiResult<()> {
 /// `GET /match-rules`.
 pub fn rules(m: &Modules, who: &Caller) -> ApiResult<Vec<MatchRule>> {
     start(m, who)?;
-    Ok(m.store.reader(|c| repo::rules(c, &who.ws))?)
+    Ok(m.store.read(|r| MatchRules(r).list(&who.ws))?)
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -695,8 +678,9 @@ pub fn patch_rule(m: &Modules, who: &Caller, id: &str, b: RulePatch) -> ApiResul
         ck.that("config.min_len", (1..=10).contains(&n));
     }
     ck.done()?;
-    m.store.transaction(|tx| {
-        let r = repo::rule(tx, id)?
+    m.store.write(|w| {
+        let r = MatchRules(w)
+            .get(id)?
             .filter(|r| r.workspace_id == who.ws)
             .ok_or_else(|| ApiError::not_found("规则"))?;
         let mut config = r.config.clone();
@@ -712,15 +696,16 @@ pub fn patch_rule(m: &Modules, who: &Caller, id: &str, b: RulePatch) -> ApiResul
             config.exclude = xs.clone();
         }
         let enabled = b.enabled.unwrap_or(r.enabled);
-        repo::rule_update(tx, &r.id, enabled, &config)?;
-        base::audit(
-            tx,
+        MatchRules(w).update(&r.id, enabled, &config)?;
+        w.audit(
             &who.ws,
             &who.me,
             "match_rule.update",
             &r.id,
             &json!({ "enabled": enabled, "config": config }),
         )?;
-        repo::rule(tx, &r.id)?.ok_or_else(|| ApiError::not_found("规则"))
+        MatchRules(w)
+            .get(&r.id)?
+            .ok_or_else(|| ApiError::not_found("规则"))
     })
 }

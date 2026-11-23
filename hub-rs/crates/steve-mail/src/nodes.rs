@@ -20,7 +20,6 @@
 use std::sync::{Arc, OnceLock, Weak};
 
 use async_trait::async_trait;
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_flow::nodes::Rule;
 use steve_flow::nodes::action::{ItemCreate, ItemLink};
@@ -88,7 +87,7 @@ impl Mail {
     /// The trigger message of `ws`, with the mailbox it is in.
     fn trigger_message(&self, ws: &str, ev: &Value) -> Result<(Mailbox, repo::MessageRow), String> {
         let (conn, mid) = trigger_mail(ev)?;
-        let found = self.0.m.store.reader(|c| -> MailResult<_> {
+        let found = self.0.m.store.read(|c| -> MailResult<_> {
             let mb = Mailbox::load(c, ws, &conn)?;
             let m =
                 repo::message(c, &mid)?.filter(|m| m.workspace_id == ws && m.connection_id == conn);
@@ -153,14 +152,14 @@ impl Action for DraftReply {
             .0
             .m
             .store
-            .reader(|c| draft_of_run(c, &ws, &run_id));
+            .read(|c| repo::draft_of_run(c, &ws, &run_id));
         let draft = match existing {
             Ok(Some(id)) => self
                 .mail
                 .0
                 .m
                 .store
-                .reader(|c| repo::draft(c, &id))
+                .read(|c| repo::draft(c, &id))
                 .ok()
                 .flatten()
                 .map(|d| (d.id, d.subject, d.author, d.decision_id)),
@@ -210,15 +209,6 @@ impl Action for DraftReply {
 
 fn cut(s: &str, n: usize) -> String {
     s.trim().chars().take(n).collect()
-}
-
-fn draft_of_run(c: &Connection, ws: &str, run: &str) -> MailResult<Option<String>> {
-    Ok(c.query_row(
-        "SELECT id FROM mail_drafts WHERE workspace_id = ? AND run_id = ? ORDER BY created LIMIT 1",
-        params![ws, run],
-        |r| r.get(0),
-    )
-    .optional()?)
 }
 
 // ---------------------------------------------------------------- mail.archive / mail.mark_read
@@ -286,7 +276,7 @@ impl Mail {
     /// moved out (IMAP: to the archive folder; Gmail: `INBOX` removed). The local copies follow.
     /// Returns how many messages moved.
     pub async fn archive_thread(&self, ws: &str, thread_id: &str) -> MailResult<usize> {
-        let (conn, msgs, folders) = self.0.m.store.reader(|c| -> MailResult<_> {
+        let (conn, msgs, folders) = self.0.m.store.read(|c| -> MailResult<_> {
             let t = repo::thread(c, thread_id)?
                 .filter(|t| t.workspace_id == ws)
                 .ok_or_else(|| MailError::Api(steve_modules::ApiError::not_found("往来")))?;
@@ -323,7 +313,7 @@ impl Mail {
         // the local copies follow the messages that moved
         let mut moved = 0;
         let mut first_err = None;
-        self.0.m.store.transaction(|tx| -> MailResult<()> {
+        self.0.m.store.write(|tx| -> MailResult<()> {
             for (m, r) in todo.iter().zip(results) {
                 if let Err(e) = r {
                     first_err.get_or_insert(e);
@@ -345,12 +335,10 @@ impl Mail {
             }
             if moved > 0 {
                 repo::refresh_thread(tx, thread_id, now)?;
+                crate::events::emit_thread(tx, ws, thread_id);
             }
             Ok(())
         })?;
-        if moved > 0 {
-            self.0.notify.thread(ws, thread_id);
-        }
         match first_err {
             Some(e) => Err(e.into()),
             None => Ok(moved),
@@ -363,7 +351,7 @@ impl Mail {
             .0
             .m
             .store
-            .reader(|c| repo::message(c, message_id))?
+            .read(|c| repo::message(c, message_id))?
             .filter(|m| m.workspace_id == ws)
             .ok_or_else(|| MailError::Api(steve_modules::ApiError::not_found("邮件")))?;
         if m.flags.iter().any(|f| f == "seen") {
@@ -383,11 +371,12 @@ impl Mail {
         let mut flags = m.flags.clone();
         flags.push("seen".into());
         let now = self.now();
-        self.0.m.store.transaction(|tx| -> MailResult<()> {
+        self.0.m.store.write(|tx| -> MailResult<()> {
             repo::set_flags(tx, &m.id, &flags)?;
-            repo::refresh_thread(tx, &m.thread_id, now)
+            repo::refresh_thread(tx, &m.thread_id, now)?;
+            crate::events::emit_thread(tx, ws, &m.thread_id);
+            Ok(())
         })?;
-        self.0.notify.thread(ws, &m.thread_id);
         Ok(true)
     }
 }
@@ -425,7 +414,7 @@ impl<A: Action> Action for WithMailLinks<A> {
             (&out, cx.effects.item_id.clone(), trigger_mail(cx.event()))
         {
             let ws = cx.ws().to_string();
-            let r = cx.flow.store().transaction(|tx| -> MailResult<()> {
+            let r = cx.flow.store().write(|tx| -> MailResult<()> {
                 let Some(m) = repo::message(tx, &mid)?.filter(|m| m.workspace_id == ws) else {
                     return Ok(());
                 };
@@ -441,20 +430,18 @@ impl<A: Action> Action for WithMailLinks<A> {
 
 /// Links an item to the mail it came from and to its thread.
 pub fn link_item(
-    tx: &steve_store::Tx,
+    tx: &mut steve_store::W<'_>,
     ws: &str,
     item: &str,
     message: &str,
     thread: &str,
 ) -> MailResult<()> {
     let it = || ObjRef::new("item", item);
-    links::add(
-        tx,
+    links::Links(tx).add(
         ws,
         &NewLink::new(it(), "from", ObjRef::new("mail_message", message), "sig"),
     )?;
-    links::add(
-        tx,
+    links::Links(tx).add(
         ws,
         &NewLink::new(it(), "about", ObjRef::new("mail_thread", thread), "sig"),
     )?;
@@ -463,24 +450,31 @@ pub fn link_item(
 
 /// The item a mail thread belongs to (`thread_key → item`): the latest item linked `about` it, open
 /// ones first. `thread` is the `mail_threads` id, which is the `thread_key` of mail events.
-pub fn item_of_thread(c: &Connection, ws: &str, thread: &str) -> MailResult<Option<String>> {
-    Ok(c.query_row(
-        "SELECT l.subject_id FROM links l JOIN items i ON i.id = l.subject_id AND i.workspace_id = l.workspace_id
-          WHERE l.workspace_id = ?1 AND l.subject_type = 'item' AND l.predicate = 'about'
-            AND l.object_type = 'mail_thread' AND l.object_id = ?2
-          ORDER BY (i.archived != 0 OR i.status IN ('done', 'drop')), l.created DESC, l.rowid DESC LIMIT 1",
-        params![ws, thread],
-        |r| r.get(0),
-    )
-    .optional()?)
+pub fn item_of_thread(
+    c: &mut impl steve_store::Read,
+    ws: &str,
+    thread: &str,
+) -> MailResult<Option<String>> {
+    use steve_store::{item_repo as items, link_repo as links};
+    let ids = links::item_subjects(c, ws, "about", "mail_thread", thread, true)?;
+    let items = items::linked_items(c, ws, &ids)?;
+    Ok(items
+        .iter()
+        .find(|item| item.is_open())
+        .or(items.first())
+        .map(|item| item.id.clone()))
 }
 
 /// The threads an item is about.
-pub fn threads_of_item(c: &Connection, ws: &str, item: &str) -> MailResult<Vec<String>> {
+pub fn threads_of_item(
+    c: &mut impl steve_store::Read,
+    ws: &str,
+    item: &str,
+) -> MailResult<Vec<String>> {
     Ok(
-        links::from(c, ws, &ObjRef::new("item", item), Some("about"))?
+        steve_store::link_repo::related(c, ws, &ObjRef::new("item", item), false)?
             .into_iter()
-            .filter(|l| l.object_type == "mail_thread")
+            .filter(|l| l.object_type == "mail_thread" && l.predicate == "about")
             .map(|l| l.object_id)
             .collect(),
     )
@@ -491,14 +485,21 @@ pub fn threads_of_item(c: &Connection, ws: &str, item: &str) -> MailResult<Vec<S
 pub struct ThreadItems;
 
 impl ItemFinder for ThreadItems {
-    fn find(&self, c: &Connection, ws: &str, event: &Value) -> FlowResult<Option<String>> {
+    fn find(
+        &self,
+        store: &steve_store::Store,
+        ws: &str,
+        event: &Value,
+    ) -> FlowResult<Option<String>> {
         if event["source"] != "mail" {
             return Ok(None);
         }
         let Some(t) = event["thread_key"].as_str().filter(|t| !t.is_empty()) else {
             return Ok(None);
         };
-        item_of_thread(c, ws, t).map_err(|e| steve_modules::ApiError::Internal(e.to_string()))
+        store
+            .read(|c| item_of_thread(c, ws, t))
+            .map_err(|e| steve_modules::ApiError::Internal(e.to_string()))
     }
 }
 
@@ -550,28 +551,27 @@ impl Mail {
     /// [`Mail::submit_done`]; failures are logged). Returns the archived thread ids.
     pub async fn on_item_finished(&self, ws: &str, item: &str) -> MailResult<Vec<String>> {
         let now = self.now();
-        let threads =
-            self.0
-                .m
-                .store
-                .transaction(|tx| -> MailResult<Vec<(String, bool, bool)>> {
-                    let mut out = Vec::new();
-                    for t in threads_of_item(tx, ws, item)? {
-                        let Some(row) = repo::thread(tx, &t)?.filter(|r| r.workspace_id == ws)
-                        else {
-                            continue;
-                        };
-                        let newly = row.state != "done";
-                        repo::set_thread_state(tx, &row.id, "done", now)?;
-                        let archive = repo::settings(tx, &row.connection_id)?
-                            .is_some_and(|s| s.archive_on_done);
-                        out.push((row.id, archive, newly));
-                    }
-                    Ok(out)
-                })?;
+        let threads = self
+            .0
+            .m
+            .store
+            .write(|tx| -> MailResult<Vec<(String, bool, bool)>> {
+                let mut out = Vec::new();
+                for t in threads_of_item(tx, ws, item)? {
+                    let Some(row) = repo::thread(tx, &t)?.filter(|r| r.workspace_id == ws) else {
+                        continue;
+                    };
+                    let newly = row.state != "done";
+                    repo::set_thread_state(tx, &row.id, "done", now)?;
+                    let archive =
+                        repo::settings(tx, &row.connection_id)?.is_some_and(|s| s.archive_on_done);
+                    crate::events::emit_thread(tx, ws, &row.id);
+                    out.push((row.id, archive, newly));
+                }
+                Ok(out)
+            })?;
         let mut archived = Vec::new();
         for (t, archive, _) in &threads {
-            self.0.notify.thread(ws, t);
             // one failing thread (mailbox down, auth paused) neither stops the others nor the
             // candidate memories below: the threads are already `done`, so there is no retry
             if *archive {

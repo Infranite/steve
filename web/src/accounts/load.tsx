@@ -1,11 +1,10 @@
-/* Loading module data from the Hub: one hook for the accounts and vault pages. A Hub without the module (or a network
- * error) turns into "unwired", which the page answers with its Unwired placeholder — never sample data. */
+/* Loading module data from the Hub, shared by the accounts and vault pages. */
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Unauthenticated, NotWired, HubError } from "@/api"
+import { Unauthenticated, HubError } from "@/api"
 import { st, emit, useHubEvents, toast } from "@/store"
 import { t } from "@/i18n"
 
-export type Load<T> = { s: "loading" } | { s: "unwired" } | { s: "error"; err: string; status: number } | { s: "ok"; data: T }
+export type Load<T> = { s: "loading" } | { s: "error"; err: string; status: number } | { s: "ok"; data: T }
 
 /** report an error from an action: a lost session goes to the login screen, anything else is a toast */
 export function report(e: unknown) {
@@ -24,8 +23,7 @@ export function useLoad<T>(fn: () => Promise<T>, deps: unknown[], types: string[
     catch (e) {
       if (n !== seq.current) return
       if (e instanceof Unauthenticated) { st.login = e.login ?? "/auth/login"; emit(); return }
-      if (e instanceof NotWired) setV({ s: "unwired" })
-      else setV({ s: "error", err: (e as Error).message, status: e instanceof HubError ? e.status : 0 })
+      setV({ s: "error", err: (e as Error).message, status: e instanceof HubError ? e.status : 0 })
     }
   }, deps)
   useEffect(() => { void run() }, [run])

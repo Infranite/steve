@@ -97,18 +97,7 @@ fn undoing_a_decision_reopens_it_and_counts_for_b3() {
     let (_, _, _, a2) = accepted(&t);
     t.engine.undo(WS, ME, &a2, None).unwrap();
     assert_eq!(t.paused().expect("B3")["code"], "B3");
-    let audits: i64 = t
-        .yolo
-        .store()
-        .reader(|c| {
-            c.query_row(
-                "SELECT count(*) FROM audit WHERE action = 'yolo.undo'",
-                [],
-                |r| r.get(0),
-            )
-            .map_err(steve_modules::ApiError::from)
-        })
-        .unwrap();
+    let audits = steve_store::core_fixture::work::audit_count(t.yolo.store(), &["yolo.undo"], None);
     assert_eq!(audits, 2);
 }
 
@@ -196,7 +185,7 @@ fn rollback_is_offered_only_for_the_newest_release() {
         t.yolo.finish(&a.id, "decided", None).unwrap();
         t.yolo
             .store()
-            .reader(|c| steve_store::yolo::action_get(c, &a.id))
+            .read(|c| steve_store::yolo::action_get(c, &a.id))
             .unwrap()
             .unwrap()
     };
@@ -341,17 +330,7 @@ fn the_report_gets_one_yolo_line_since_the_last_report() {
 }
 
 fn modules(t: &T) -> Modules {
-    t.kit
-        .db()
-        .store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "INSERT OR IGNORE INTO users (id, workspace_id, subject, name, role, created) VALUES ('usr_dev', 'default', 'dev', 'Dev', 'owner', 1);
-                 INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role, created) VALUES ('default', 'usr_dev', 'owner', 1);",
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::core_fixture::thread::owner(t.kit.db().store(), WS, "usr_dev", "dev", "Dev");
     let mut r = Registry::new();
     super::draft::register(&mut r, None);
     let m = Modules::new(t.kit.db().store().clone(), t.kit.core.module_gateway(), r);

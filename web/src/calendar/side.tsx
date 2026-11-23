@@ -8,7 +8,7 @@ import { Checkbox } from "@/components/ui/checkbox"
 import type { ReactNode } from "react"
 import { Button } from "@/components/ui/button"
 import { useT } from "@/i18n"
-import { pendingCards } from "@/store"
+import { decideCards } from "@/store"
 import { Card, Section } from "@/ui"
 import { useTodos } from "@/todos/data"
 import { isOverdue, type Todo } from "@/todos/model"
@@ -31,7 +31,7 @@ function Line({ label, children, href, k, open }: { label: string; children: Rea
 /** The day's summary: one sentence by template, then a line each for what is there. Quiet days say so. */
 export function DayCard({ s, day, today, tz, nav, events }: { s: DaySummary; day: string; today: string; tz: string; nav: Nav; events: CalEvent[] }) {
   const t = useT(), title = useTitle()
-  const isToday = day === today, waiting = isToday ? pendingCards().length : 0
+  const isToday = day === today, waiting = isToday ? decideCards().length : 0
   const free = useFreeTime(day >= today ? day : null, FREE_MIN, events.length + ":" + events.map((e) => e.version).join())
   const byId = new Map(events.map((e) => [e.id, e]))
   const clash = s.conflicts[0], other = clash ? byId.get(clash.conflicts_with![0]) : undefined

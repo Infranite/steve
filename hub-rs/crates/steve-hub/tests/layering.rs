@@ -6,7 +6,7 @@
 mod ratchet;
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const LIST: &str = "tests/layering.txt";
@@ -32,6 +32,21 @@ fn found() -> BTreeSet<String> {
         String::from_utf8_lossy(&out.stderr)
     );
     let meta: serde_json::Value = serde_json::from_slice(&out.stdout).expect("metadata JSON");
+    for package in meta["packages"].as_array().expect("packages") {
+        let name = package["name"].as_str().expect("package name");
+        // The Node process owns a separate local execution journal.
+        if matches!(name, "steve-store" | "steve-store-sqlite" | "steve-node") {
+            continue;
+        }
+        assert!(
+            package["dependencies"]
+                .as_array()
+                .expect("dependencies")
+                .iter()
+                .all(|dep| dep["name"] != "rusqlite"),
+            "{name} must use the Store contract for Hub data"
+        );
+    }
     collect_edges(&meta)
 }
 
@@ -252,4 +267,53 @@ fn dev_only_rusqlite_and_workspace_edges_are_exempt() {
         serde_json::json!({"name": "contract", "kind": "dev"}),
     ]);
     assert!(collect_edges(&meta).is_empty());
+}
+
+#[test]
+fn the_store_exposes_only_contract_transactions() {
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let retired_methods =
+        regex::Regex::new(r"\bfn\s+(legacy|transaction|atomic|with_conn|reader)\s*(?:<|\()")
+            .unwrap();
+    let retired_types = regex::Regex::new(r"\b(struct|enum|type)\s+Tx\b").unwrap();
+    for name in ["lib.rs", "tx.rs", "contract/mod.rs"] {
+        let path = crates.join("steve-store/src").join(name);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !retired_methods.is_match(&text)
+                && !retired_types.is_match(&text)
+                && !text.contains("type Target = Connection"),
+            "retired Store entry point in {}",
+            path.display()
+        );
+    }
+
+    let calls =
+        regex::Regex::new(r"\.\s*legacy\s*\(|\bTx\s*::\s*write\b|\bsteve_store\s*::\s*Tx\b")
+            .unwrap();
+    let fixture_calls =
+        regex::Regex::new(r"\b(?:fixture_(?:read|write)|sqlite_writer)\s*\(").unwrap();
+    let storage = crates.join("steve-store");
+    let mut paths: Vec<PathBuf> = vec![crates];
+    while let Some(path) = paths.pop() {
+        if path.is_dir() {
+            paths.extend(
+                std::fs::read_dir(path)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path()),
+            );
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            let source = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                !calls.is_match(&source),
+                "retired Store call in {}",
+                path.display()
+            );
+            assert!(
+                path.starts_with(&storage) || !fixture_calls.is_match(&source),
+                "SQLite engine fixture used outside Store in {}",
+                path.display()
+            );
+        }
+    }
 }

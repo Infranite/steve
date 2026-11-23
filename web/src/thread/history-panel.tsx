@@ -1,3 +1,4 @@
+import { getItem } from "@/store"
 /* ST-50 历史: finding something said earlier without leaving the conversation. A search over the whole conversation (and
  * item numbers), or its topics by day; a row jumps to the message, the conversation offers the way back. Beside the
  * conversation on wide screens (in place of the rail), a sheet otherwise. IM conversations are one row away. */
@@ -9,9 +10,9 @@ import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { setHistory, useRail, useWide, wide } from "@/chat2"
-import { st, useStore, type Msg } from "@/store"
+import { st, useShellStore, type Msg } from "@/store"
 import { openConversations } from "@/thread/conversations"
-import { historyState, jumpToMsg, loadOlder, mainThread, searchThread, useHistory } from "@/thread/history"
+import { jumpToMsg, loadOlder, searchThread, threadMessages, useHistory, useThreadIds } from "@/thread/history"
 import { snippet, topicsOf, type Topic } from "@/thread/topics"
 import { lang, t as tr, useT } from "@/i18n"
 import { date, hm } from "@/i18n/format"
@@ -58,7 +59,7 @@ export function HistoryPanel() {
 }
 
 function HistoryBody() {
-  useStore(); useHistory()
+  useShellStore()
   const t = useT()
   const [q, setQ] = useState(""), [hits, setHits] = useState<Msg[] | null>(null), [local, setLocal] = useState(false), [busy, setBusy] = useState(false), [at, setAt] = useState<string | null>(null)
   const input = useRef<HTMLInputElement>(null)
@@ -70,9 +71,9 @@ function HistoryBody() {
     const timer = setTimeout(() => searchThread(x, ac.signal).then((r) => { setHits(r.msgs); setLocal(r.local) }).catch(() => {}).finally(() => { if (!ac.signal.aborted) setBusy(false) }), 220)
     return () => { clearTimeout(timer); ac.abort() }
   }, [q])
-  const list = mainThread(st.thread)
-  const topics = useMemo(() => topicsOf(list, (id) => st.items.find((i) => i.id === id)?.t), [list, lang()])
-  const { more, ended, loading } = historyState()
+  const ids = useThreadIds()
+  const topics = useMemo(() => topicsOf(threadMessages(), (id) => getItem(id)?.t), [ids, lang()])
+  const { more, ended, loading } = useHistory()
   const open = (id: string, created?: number) => { setAt(id); jumpToMsg(id, created); if (!wide()) setHistory(false) }
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-history-body>

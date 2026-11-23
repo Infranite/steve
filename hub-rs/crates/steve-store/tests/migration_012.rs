@@ -2,6 +2,7 @@
 //! (`connection_id` nullable, `ON DELETE SET NULL`). Checked from v3 (production) and from v11 with
 //! channel data: rows survive, foreign keys hold, and deleting the connection keeps the history.
 
+use steve_store::testkit::SqliteFixtures;
 mod common;
 
 use common::*;
@@ -101,7 +102,7 @@ fn connection_id_nullable(c: &Connection) -> bool {
 fn spaces_reference_connections_with_set_null() {
     let t = fresh();
     t.store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             assert_eq!(
                 fks(c, "spaces"),
                 vec![(
@@ -142,7 +143,7 @@ fn spaces_reference_connections_with_set_null() {
 fn v3_database_migrates_with_foreign_keys_intact() {
     let (_dir, path) = at_version(3);
     let s = Store::open(&path, NoPublisher).unwrap();
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         assert_eq!(count(c, "SELECT v FROM schema_version"), db::SCHEMA_VERSION);
         assert_eq!(count(c, "SELECT count(*) FROM workspaces"), 1);
         assert!(connection_id_nullable(c));
@@ -167,7 +168,7 @@ fn v11_database_with_channel_data_keeps_every_row() {
     drop(c);
 
     let s = Store::open(&path, NoPublisher).unwrap();
-    s.with_conn(|c| {
+    s.fixture_write(|c| {
         assert_eq!(count(c, "SELECT v FROM schema_version"), db::SCHEMA_VERSION);
         assert_eq!(
             spaces(c, true),

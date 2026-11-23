@@ -10,7 +10,7 @@ use serde_json::Value;
 use super::Change;
 use crate::repo::to_json;
 use crate::types::json_or;
-use crate::{Result, Tx, now, uid};
+use crate::{Result, W, now, uid};
 
 /// How long an applied changeset can be undone.
 pub const UNDO_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
@@ -86,7 +86,7 @@ pub struct NewChangeset {
     pub created_by: String,
 }
 
-pub fn get(c: &Connection, id: &str) -> Result<Option<Changeset>> {
+pub(crate) fn get_on(c: &Connection, id: &str) -> Result<Option<Changeset>> {
     let r = c
         .prepare_cached("SELECT * FROM changesets WHERE id = ?")?
         .query_row([id], Changeset::from_row);
@@ -112,9 +112,9 @@ pub fn recent(
 }
 
 /// Stores a draft (`chs_` id). Publishes `{type:"changeset"}`.
-pub fn create(tx: &Tx, ws: &str, p: &NewChangeset) -> Result<Changeset> {
+pub fn create(tx: &mut W<'_>, ws: &str, p: &NewChangeset) -> Result<Changeset> {
     let id = uid("chs");
-    tx.prepare_cached(
+    tx.conn.prepare_cached(
         "INSERT INTO changesets (id, workspace_id, target_type, target_id, target_revision, title, href, changes, ops, status, origin, request, basis, created_by, created)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?)",
     )?
@@ -135,11 +135,11 @@ pub fn create(tx: &Tx, ws: &str, p: &NewChangeset) -> Result<Changeset> {
         now()
     ])?;
     publish(tx, &id, ws);
-    crate::repo::must(get(tx, &id)?)
+    crate::repo::must(get_on(tx.conn, &id)?)
 }
 
-fn publish(tx: &Tx, id: &str, ws: &str) {
-    tx.publish(steve_types::DomainEvent::from(
+fn publish(tx: &mut W<'_>, id: &str, ws: &str) {
+    tx.emit(steve_types::DomainEvent::from(
         steve_types::ConfigEvent::Changeset {
             id: id.into(),
             ws: ws.into(),
@@ -149,8 +149,8 @@ fn publish(tx: &Tx, id: &str, ws: &str) {
 
 /// `draft → applied` with the operations' `before`; `false` if it was not a draft any more (a second
 /// apply racing the first).
-pub fn mark_applied(tx: &Tx, cs: &Changeset, before: &[Value]) -> Result<bool> {
-    let n = tx.run(
+pub fn mark_applied(tx: &mut W<'_>, cs: &Changeset, before: &[Value]) -> Result<bool> {
+    let n = tx.conn.run(
         "UPDATE changesets SET status = 'applied', before = ?, applied = ? WHERE id = ? AND status = 'draft'",
         params![to_json(&before)?, now(), cs.id],
     )?;
@@ -161,8 +161,8 @@ pub fn mark_applied(tx: &Tx, cs: &Changeset, before: &[Value]) -> Result<bool> {
 }
 
 /// `applied → undone`; `false` if it was not applied.
-pub fn mark_undone(tx: &Tx, cs: &Changeset) -> Result<bool> {
-    let n = tx.run(
+pub fn mark_undone(tx: &mut W<'_>, cs: &Changeset) -> Result<bool> {
+    let n = tx.conn.run(
         "UPDATE changesets SET status = 'undone', undone = ? WHERE id = ? AND status = 'applied'",
         params![now(), cs.id],
     )?;
@@ -173,8 +173,8 @@ pub fn mark_undone(tx: &Tx, cs: &Changeset) -> Result<bool> {
 }
 
 /// `draft → dropped | stale`; `false` if it was not a draft.
-pub fn close_draft(tx: &Tx, cs: &Changeset, status: &str) -> Result<bool> {
-    let n = tx.run(
+pub fn close_draft(tx: &mut W<'_>, cs: &Changeset, status: &str) -> Result<bool> {
+    let n = tx.conn.run(
         "UPDATE changesets SET status = ? WHERE id = ? AND status = 'draft'",
         params![status, cs.id],
     )?;
@@ -182,4 +182,163 @@ pub fn close_draft(tx: &Tx, cs: &Changeset, status: &str) -> Result<bool> {
         publish(tx, &cs.id, &cs.workspace_id);
     }
     Ok(n > 0)
+}
+
+use crate::Read;
+use crate::contract::{Json, Row as ContractRow};
+use sea_query::{Expr, ExprTrait, Query};
+
+pub struct ChangeSets<'a, C>(pub &'a mut C);
+
+const COLUMNS: [&str; 18] = [
+    "id",
+    "workspace_id",
+    "target_type",
+    "target_id",
+    "target_revision",
+    "title",
+    "href",
+    "changes",
+    "ops",
+    "before",
+    "status",
+    "origin",
+    "request",
+    "basis",
+    "created_by",
+    "created",
+    "applied",
+    "undone",
+];
+
+fn read_changeset(row: &ContractRow<'_>) -> Result<Changeset> {
+    Ok(Changeset {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        target_type: row.get(2)?,
+        target_id: row.get(3)?,
+        target_revision: row.get(4)?,
+        title: row.get(5)?,
+        href: row.get(6)?,
+        changes: row.get::<Json<_>>(7)?.0,
+        ops: row.get::<Json<_>>(8)?.0,
+        before: row.get::<Option<Json<_>>>(9)?.map(|v| v.0),
+        status: row.get(10)?,
+        origin: row.get(11)?,
+        request: row.get(12)?,
+        basis: row.get(13)?,
+        created_by: row.get(14)?,
+        created: row.get(15)?,
+        applied: row.get(16)?,
+        undone: row.get(17)?,
+    })
+}
+
+impl<C: Read> ChangeSets<'_, C> {
+    pub fn get(&mut self, id: &str) -> Result<Option<Changeset>> {
+        self.0.one(
+            Query::select()
+                .columns(COLUMNS)
+                .from("changesets")
+                .and_where(Expr::col("id").eq(id)),
+            read_changeset,
+        )
+    }
+}
+
+impl ChangeSets<'_, W<'_>> {
+    pub fn create(&mut self, ws: &str, draft: &NewChangeset) -> Result<Changeset> {
+        let id = uid("chs");
+        self.0.exec(
+            Query::insert()
+                .into_table("changesets")
+                .columns([
+                    "id",
+                    "workspace_id",
+                    "target_type",
+                    "target_id",
+                    "target_revision",
+                    "title",
+                    "href",
+                    "changes",
+                    "ops",
+                    "status",
+                    "origin",
+                    "request",
+                    "basis",
+                    "created_by",
+                    "created",
+                ])
+                .values_panic([
+                    id.as_str().into(),
+                    ws.into(),
+                    draft.target_type.as_str().into(),
+                    draft.target_id.as_deref().into(),
+                    draft.target_revision.into(),
+                    draft.title.as_str().into(),
+                    draft.href.as_str().into(),
+                    to_json(&draft.changes)?.into(),
+                    to_json(&draft.ops)?.into(),
+                    "draft".into(),
+                    draft.origin.as_str().into(),
+                    draft.request.as_str().into(),
+                    draft.basis.as_str().into(),
+                    draft.created_by.as_str().into(),
+                    now().into(),
+                ]),
+        )?;
+        self.emit(&id, ws);
+        crate::repo::must(self.get(&id)?)
+    }
+
+    fn emit(&mut self, id: &str, ws: &str) {
+        self.0.emit(steve_types::DomainEvent::from(
+            steve_types::ConfigEvent::Changeset {
+                id: id.into(),
+                ws: ws.into(),
+            },
+        ));
+    }
+
+    fn transition(
+        &mut self,
+        cs: &Changeset,
+        expected: &str,
+        next: &str,
+        update: impl FnOnce(&mut sea_query::UpdateStatement),
+    ) -> Result<bool> {
+        let mut query = Query::update();
+        query
+            .table("changesets")
+            .value("status", next)
+            .and_where(Expr::col("id").eq(cs.id.as_str()))
+            .and_where(Expr::col("status").eq(expected));
+        update(&mut query);
+        let changed = self.0.exec(&query)? > 0;
+        if changed {
+            self.emit(&cs.id, &cs.workspace_id);
+        }
+        Ok(changed)
+    }
+
+    pub fn mark_applied(&mut self, cs: &Changeset, before: &[Value]) -> Result<bool> {
+        let before = to_json(&before)?;
+        self.transition(cs, "draft", "applied", move |query| {
+            query.value("before", before).value("applied", now());
+        })
+    }
+
+    pub fn mark_undone(&mut self, cs: &Changeset) -> Result<bool> {
+        self.transition(cs, "applied", "undone", |query| {
+            query.value("undone", now());
+        })
+    }
+
+    pub fn close_draft(&mut self, cs: &Changeset, status: &str) -> Result<bool> {
+        self.transition(cs, "draft", status, |_| {})
+    }
+}
+
+pub fn get(r: &mut impl crate::Read, id: &str) -> Result<Option<Changeset>> {
+    get_on(r.connection(), id)
 }

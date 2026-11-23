@@ -13,9 +13,9 @@ impl Mail {
         let checked_hash = crate::disclosure::checked_hash(d, inputs);
         let mut basis = crate::disclosure::basis(d, check);
         basis["checked_content_hash"] = json!(checked_hash);
-        self.0.m.store.transaction(|tx| -> MailResult<Option<SendOutcome>> {
+        self.0.m.store.write(|tx| -> MailResult<Option<SendOutcome>> {
             let current = repo::draft(tx, &d.id)?;
-            let decision = base::decisions::get(tx, &approval.id)?;
+            let decision = steve_store::decision_repo::get(tx, &approval.id)?;
             let unchanged = current.as_ref() == Some(stored)
                 && decision.as_ref().is_some_and(|a| {
                     a.status == "resolved" && a.result == approval.result
@@ -27,8 +27,8 @@ impl Mail {
                     reason: steve_i18n::t!("mail.disclosure.changed").to_string(),
                 }));
             }
-            tx.execute("UPDATE mail_drafts SET basis = ? WHERE id = ?", rusqlite::params![basis.to_string(), d.id])?;
-            base::audit(tx, &d.workspace_id, "steve", "mail.send.check", &d.id,
+            repo::set_draft_basis(tx, &d.id, &basis)?;
+            tx.audit( &d.workspace_id, "steve", "mail.send.check", &d.id,
                 &json!({"verdict": check.verdict, "check_model": check.check_model, "content_hash": d.content_hash, "checked_content_hash": checked_hash, "decision": approval.id}))?;
             if check.verdict != Verdict::Pass {
                 self.blocked(tx, d, "disclosure", json!({"verdict": check.verdict, "checked_content_hash": checked_hash}))?;

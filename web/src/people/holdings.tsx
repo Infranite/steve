@@ -20,7 +20,7 @@ const clip = (s: string, n = 24) => (s.length > n ? s.slice(0, n) + "…" : s)
 export const ObjIcon = ({ t }: { t: ObjectType }) => { const I = ICON[t] ?? BotIcon; return <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground"><I className="size-4" strokeWidth={1.5} aria-hidden /></span> }
 
 export function HoldingsSection({ person, name, isMe, isBot }: { person: string; name: string; isMe: boolean; isBot: boolean }) {
-  const L = useLoad(() => ownership.holdings(person), [person], ["party", "decision"])
+  const L = useLoad(() => ownership.holdings(person), [person], ["party", "patch"])
   if (L.err) return null
   const t = useT()
   const h = L.data
@@ -52,7 +52,7 @@ export function HoldingsSection({ person, name, isMe, isBot }: { person: string;
  *  nothing at all, and the section is not there (their accounts are the page's 关联账号) */
 export function ResponsibleSection({ person, name, isMe }: { person: string; name: string; isMe: boolean }) {
   const t = useT()
-  const L = useLoad(() => ownership.holdings(person), [person], ["party", "decision"])
+  const L = useLoad(() => ownership.holdings(person), [person], ["party", "patch"])
   const xs = L.data?.responsible ?? []
   if (L.err || !xs.length) return null
   return (
@@ -108,7 +108,7 @@ function AddHolding({ person, name, isMe }: { person: string; name: string; isMe
 /** 没有负责人 (the contacts overview): what nobody is responsible for yet, each with its chip */
 export function UnownedSection() {
   const t = useT()
-  const L = useLoad(() => ownership.unowned(), [], ["party", "decision", "bot", "persona", "connection"])
+  const L = useLoad(() => ownership.unowned(), [], ["party", "patch", "bot", "persona", "connection"])
   if (L.err || !L.data || !L.data.length) return null
   return (
     <section className="mt-8" data-unowned><Section label={t("people:holdings.unowned", { n: L.data.length })}>

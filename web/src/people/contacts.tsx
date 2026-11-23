@@ -9,8 +9,8 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { go, Page, Group, Row, Segmented, SectionLabel, Empty, Chips, Tags, Meta, SearchField } from "@/ui"
 import { Select } from "@/view-shared"
 import { AskSteve } from "@/config-ui"
-import { myContactId, nameOf, people, type ContactBrief } from "@/api/people"
-import { ContactAvatar, Loading, PeopleGate, act, codes, joinList, label, relLabel, useLoad } from "@/people/common"
+import { nameOf, people, type ContactBrief } from "@/api/people"
+import { ContactAvatar, Loading, act, codes, joinList, label, relLabel, useLoad } from "@/people/common"
 import { t as tr, useT } from "@/i18n"
 import { DirectoryNotes, TeamRow, TeamsTab } from "@/people/teams"
 import { PendingContacts } from "@/people/pending"
@@ -22,11 +22,8 @@ type Filter = "all" | "colleague" | "customer" | "partner" | "virtual"
 let ctab: Tab = "contacts", crel: Filter = "all", cq = ""
 const FILTERS: Record<Filter, { rel?: string; kind?: string }> = { all: {}, colleague: { rel: "colleague" }, customer: { rel: "customer" }, partner: { rel: "partner" }, virtual: { kind: "virtual" } }
 const FILTER_KEYS = Object.keys(FILTERS) as Filter[]
-/** “公司 · 部门路径 · 职位” */
-export const orgLine = (c: Pick<ContactBrief, "org">) => [c.org?.name, c.org?.dept, c.org?.title].filter(Boolean).join(" · ")
 
-export function ContactsView() { return <PeopleGate>{() => <Contacts />}</PeopleGate> }
-function Contacts() {
+export function ContactsView() {
   const t = useT()
   const [tab, setTab] = useState<Tab>(ctab), [rel, setRel] = useState<Filter>(crel), [q, setQ] = useState(cq), [dq, setDq] = useState(cq), [newOpen, setNewOpen] = useState(false)
   useEffect(() => { const h = setTimeout(() => setDq(q.trim()), 200); return () => clearTimeout(h) }, [q])
@@ -101,8 +98,6 @@ export function NewContactDialog({ onClose }: { onClose: () => void }) {
   const t = useT()
   const [n, setN] = useState(""), [rel, setRel] = useState("colleague"), [o, setO] = useState(""), [title, setTitle] = useState(""), [mail, setMail] = useState(""), [busy, setBusy] = useState(false)
   const orgs = useLoad(() => people.orgs(), [])
-  /* the mail field is an account of the accounts module: only offered when that module answers */
-  const accts = useLoad(() => people.accounts(myContactId() ?? "me").then(() => true, () => false), [])
   const create = async () => {
     setBusy(true)
     try {
@@ -121,7 +116,7 @@ export function NewContactDialog({ onClose }: { onClose: () => void }) {
           <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("people:newContact.rel")}</FieldLabel><Select testId="nc-rel" value={rel} onChange={setRel} options={[{ v: "", l: t("people:newContact.noRel") }, ...codes("rel").filter((r) => r !== "me").map((v) => ({ v, l: label("rel", v) }))]} /></Field>
           <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("people:shared.org")}</FieldLabel><Select testId="nc-org" value={o} onChange={setO} options={[{ v: "", l: t("common:state.none") }, ...(orgs.data ?? []).map((x) => ({ v: x.id, l: x.name }))]} /></Field>
           {o && <Field><FieldLabel htmlFor="nc-title">{t("people:newContact.title")}</FieldLabel><Input id="nc-title" className="rounded-lg" maxLength={80} value={title} onChange={(e) => setTitle(e.target.value)} data-nc-title /></Field>}
-          {accts.data && <Field><FieldLabel htmlFor="nc-mail">{t("people:newContact.email")}</FieldLabel><Input id="nc-mail" type="email" className="rounded-lg" value={mail} onChange={(e) => setMail(e.target.value)} placeholder={t("people:newContact.emailPh")} data-nc-mail /></Field>}
+          <Field><FieldLabel htmlFor="nc-mail">{t("people:newContact.email")}</FieldLabel><Input id="nc-mail" type="email" className="rounded-lg" value={mail} onChange={(e) => setMail(e.target.value)} placeholder={t("people:newContact.emailPh")} data-nc-mail /></Field>
         </FieldGroup>
         <DialogFooter className="gap-2"><Button variant="outline" onClick={onClose}>{t("common:action.cancel")}</Button><Button disabled={!n.trim() || busy} data-testid="nc-go" onClick={() => void create()}>{t("people:shared.create")}</Button></DialogFooter>
       </DialogContent>

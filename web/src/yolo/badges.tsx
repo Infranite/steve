@@ -1,3 +1,4 @@
+import { decisionView } from "@/data/sync"
 /* What YOLO did or will do with a card (modules/yolo.md §8), kept small and grey: one line under a decision card —
  * “YOLO 替你选了「…」” once answered, a countdown with 现在 / 我来定 in the cool-down, “YOLO 没接：<原因>” when it left
  * the card to you — plus the item's and the project's own setting (跟随全局 / 关 / YOLO / 完全放开) and the mark on
@@ -8,7 +9,7 @@ import { cn } from "cn"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { yoloApi, type PermMode, type RYoloItem, type YoloMode } from "@/api/yolo"
-import { st, useHubEvents, yoloCancel, yoloNow, yoloScope, type Item } from "@/store"
+import { st, useHubEvents, useStoreSelector, useYoloDecisionAction, yoloCancel, yoloNow, yoloScope, type Item } from "@/store"
 import { modeLines, newest } from "@/yolo/modes"
 import { Dot, fullGives, fullKeeps, levelOf, type YoloState } from "@/yolo/switch"
 import { t, useT } from "@/i18n"
@@ -42,9 +43,10 @@ const LINE = "col-span-full flex min-w-0 items-baseline gap-1.5 type-footnote te
 /** under a decision card: what YOLO did, will do, or left to you */
 export function YoloBadge({ decision, result, subject }: { decision: string; result?: any; subject?: string }) {
   const t = useT()
-  const a = st.yoloActs[decision]
+  const a = useYoloDecisionAction(decision)
+  const active = useStoreSelector(() => !!st.yolo?.active)
   /* forced off or paused, nothing scheduled will run: no countdown */
-  const scheduled = a?.outcome === "scheduled" && a.due_at != null && !!st.yolo?.active
+  const scheduled = a?.outcome === "scheduled" && a.due_at != null && active
   useTick(scheduled)
   const [busy, setBusy] = useState(false)
   if (result?.decided_by === "yolo") return (
@@ -175,9 +177,13 @@ export function YoloItemModes({ i }: { i: Item }) {
   const s = got?.id === i.id ? got.s : null
   const ids = new Set(s?.sessions.map((x) => x.session_id) ?? [])
   /* a streaming turn sends events all the time: the state is read again at most every few seconds then */
-  useHubEvents(["yolo", "yolo_action", "session", "decision", "event"], load, 1000, {
+  useHubEvents(["yolo", "yolo_action", "session", "patch", "event"], load, 1000, {
     maxWait: 5000,
-    filter: (e) => e.type === "yolo" || e.type === "yolo_action" || (e.type === "event" ? ids.has(e.session_id) : "item_id" in e && e.item_id === i.id),
+    filter: (e) => {
+      if (e.type === "patch") return e.ops.some((o) => (o.type === "item" ? o.id === i.id : o.view && "item_id" in o.view && o.view.item_id === i.id) || decisionView(o.id)?.item_id === i.id)
+      if (e.type === "event") return ids.has(e.session_id)
+      return e.type === "yolo" || e.type === "yolo_action" || ("item_id" in e && e.item_id === i.id)
+    },
   })
   const lines = s ? modeLines(s.sessions) : []
   if (!lines.length) return null

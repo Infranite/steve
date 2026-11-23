@@ -542,7 +542,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
-    use steve_store::{Store, StoreError};
+    use steve_store::Store;
 
     use super::super::node_runtime::Sink;
     use super::super::node_tools::tests::Ends;
@@ -661,20 +661,10 @@ mod tests {
         );
         if fresh {
             let w = work.to_str().unwrap();
-            store
-                .transaction::<_, StoreError>(|tx| {
-                    tx.execute(
-                        "INSERT INTO projects(id,workspace_id,name,path,kind,device_id,created,updated) VALUES ('p1','default','p1',?1,'git','hub',1,1)",
-                        [w],
-                    )?;
-                    tx.execute(
-                        "INSERT INTO items (id, workspace_id, no, title, status, stage, cwd, branch, project_id, created, updated)
-                         VALUES (?1, 'default', 1, 't', 'wait', 'x', ?2, ?3, 'p1', 1, 1)",
-                        [ITEM, w, BRANCH],
-                    )?;
-                    Ok(())
-                })
-                .unwrap();
+            steve_store::testkit::hub::hub_fixtures::seed_projects_and_items(
+                &store, &w, &ITEM, &w, &BRANCH,
+            )
+            .unwrap();
         }
         T {
             git: GitPush::new(ws, secrets),
@@ -710,16 +700,7 @@ mod tests {
                 .then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
         }
         fn pushes(&self) -> i64 {
-            self.store
-                .reader(|c| {
-                    c.query_row(
-                        "SELECT COUNT(*) FROM node_commands WHERE method='git_apply'",
-                        [],
-                        |r| r.get(0),
-                    )
-                    .map_err(StoreError::from)
-                })
-                .unwrap()
+            steve_store::testkit::hub::hub_fixtures::command_count_git_apply(&self.store).unwrap()
         }
     }
 
@@ -958,14 +939,7 @@ mod tests {
         assert_eq!(t.pushes(), 1);
 
         // No subsequent push/wait call: the observer must retire the original grant.
-        t.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute(
-                    "UPDATE node_commands SET state='finished' WHERE operation_id=?",
-                    [&op],
-                )?;
-                Ok(())
-            })
+        steve_store::testkit::hub::hub_fixtures::set_node_commands_state_finished(&t.store, &op)
             .unwrap();
         let until = Instant::now() + Duration::from_secs(5);
         loop {
@@ -997,15 +971,7 @@ mod tests {
         let (url, tip) = (t.url(), t.tip());
         let spec = spec("dec_submit_failure", &url, &tip);
         let op = op_of(spec.key, 0);
-        t.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute_batch(
-                    "CREATE TRIGGER refuse_push BEFORE INSERT ON node_commands
-                     BEGIN SELECT RAISE(ABORT, 'test submit failure'); END",
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::mutations::create_refuse_push(&t.store).unwrap();
         assert!(matches!(
             t.git.push(&spec).await.unwrap(),
             Err(PushError::Node(_))
@@ -1020,12 +986,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::Denied);
         assert_eq!(error.safe_detail, "no secret for this operation");
-        t.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute_batch("DROP TRIGGER refuse_push")?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::mutations::remove_refuse_push(&t.store).unwrap();
         t.runtime.start();
         assert_eq!(t.git.push(&spec).await.unwrap(), Ok(tip.clone()));
         assert_eq!(t.pushes(), 1);
@@ -1049,14 +1010,7 @@ mod tests {
         waiting.abort();
         assert!(waiting.await.unwrap_err().is_cancelled());
         assert_eq!(t.runtime.ledger(&op).unwrap().unwrap().state, "pending");
-        t.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute(
-                    "UPDATE node_commands SET state='finished' WHERE operation_id=?",
-                    [&op],
-                )?;
-                Ok(())
-            })
+        steve_store::testkit::hub::hub_fixtures::set_node_commands_state_finished(&t.store, &op)
             .unwrap();
 
         let secrets = t.git.secrets.for_node(NodeId::new("local").unwrap());

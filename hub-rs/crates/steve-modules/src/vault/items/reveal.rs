@@ -8,14 +8,15 @@
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use steve_store::{base, now, uid};
+use steve_store::vault_items::VaultItems;
+use steve_store::{now, uid};
 
-use super::repo::{self, UseRow};
 use super::service::own_item;
 use crate::ApiError;
 use crate::vault::crypto::open_field;
 use crate::vault::secret::SecretBytes;
 use crate::vault::{Vault, VaultError, VaultResult};
+use steve_store::secret_uses::{NewUseLog, SecretUses};
 
 /// `400` when the user has no passkey on this Hub, verbatim.
 pub const NEED_PASSKEY: &str = "先在这台设备上登记 Touch ID 或通行密钥";
@@ -74,9 +75,10 @@ impl RevealGate for NoPasskeys {
 impl Vault {
     /// Checks that `t` names a visible secret field, before a gate step runs.
     pub fn reveal_check(&self, t: &RevealTarget) -> VaultResult<()> {
-        self.store().reader(|c| {
+        self.read(|c| {
             own_item(c, &t.ws, &t.user, &t.item_id)?;
-            let f = repo::fields(c, &t.item_id)?
+            let f = VaultItems(c)
+                .fields(&t.item_id)?
                 .into_iter()
                 .find(|f| f.id == t.field_id)
                 .ok_or_else(|| ApiError::not_found("字段"))?;
@@ -91,9 +93,8 @@ impl Vault {
 
     /// An audit row for a reveal the gate refused (no value was read).
     pub fn reveal_refused(&self, t: &RevealTarget, why: &str) -> VaultResult<()> {
-        self.store().transaction(|tx| {
-            base::audit(
-                tx,
+        self.store().write(|tx| {
+            tx.audit(
                 &t.ws,
                 &t.user,
                 "vault.reveal_refused",
@@ -108,9 +109,10 @@ impl Vault {
     /// and an audit row. The value goes only into the `no-store` response.
     pub fn reveal(&self, v: Verified, copy: bool) -> VaultResult<SecretBytes> {
         let t = v.target;
-        let (item, field) = self.store().reader(|c| {
+        let (item, field) = self.read(|c| {
             let (i, _) = own_item(c, &t.ws, &t.user, &t.item_id)?;
-            let f = repo::fields(c, &t.item_id)?
+            let f = VaultItems(c)
+                .fields(&t.item_id)?
                 .into_iter()
                 .find(|f| f.id == t.field_id && f.secret)
                 .ok_or_else(|| ApiError::not_found("字段"))?;
@@ -126,32 +128,28 @@ impl Vault {
         let value = open_field(&dek, &t.ws, &t.item_id, &t.field_id, ct)?;
         let mode = if copy { "copy" } else { "view" };
         let at = now();
-        self.store().transaction(|tx| {
+        self.store().write(|tx| {
             let su = uid("su");
-            repo::insert_use(
-                tx,
-                &t.ws,
-                &UseRow {
-                    id: su.clone(),
-                    item_id: t.item_id.clone(),
-                    actor_type: "me".into(),
-                    actor_id: t.user.clone(),
-                    purpose: if copy { "复制原值" } else { "查看原值" }.into(),
-                    mode: mode.into(),
-                    fields: vec![field.label.clone()],
-                    status: "ok".into(),
-                    created: at,
-                },
-            )?;
-            base::audit(
-                tx,
+            SecretUses(tx).log(&NewUseLog {
+                ws: &t.ws,
+                id: &su,
+                item: &t.item_id,
+                actor_type: "me",
+                actor: &t.user,
+                purpose: if copy { "复制原值" } else { "查看原值" },
+                mode: mode,
+                fields: &[field.label.clone()],
+                status: "ok",
+                at,
+            })?;
+            tx.audit(
                 &t.ws,
                 &t.user,
                 "vault.reveal",
                 &t.item_id,
                 &json!({"field": t.field_id, "label": field.label, "mode": mode, "use": su}),
             )?;
-            tx.publish(steve_types::DomainEvent::from(
+            tx.emit(steve_types::DomainEvent::from(
                 steve_types::VaultEvent::Vault {
                     id: {
                         let value: String = t.item_id.clone();

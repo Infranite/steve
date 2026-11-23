@@ -3,14 +3,13 @@
 //! and memories, domain conflicts 409 — plus ownership and visibility.
 
 use std::sync::{Arc, Mutex};
+use steve_store::testkit::modules::contacts as fixture;
 
 use axum::Router;
-use rusqlite::Connection;
 use serde_json::{Value, json};
 use steve_modules::contacts::{self, HandleSearch, PartyHooks, Ports};
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, call_raw, caller};
 use steve_modules::{ApiResult, Caller};
-use steve_store::Tx;
 use steve_store::base::mems::{self, NewMem};
 use steve_store::base::{ObjRef, Visibility};
 
@@ -42,18 +41,6 @@ async fn req(
 
 fn err(msg: &str) -> Value {
     json!({ "error": msg })
-}
-
-fn count(t: &TestEnv, sql: &str) -> i64 {
-    t.store()
-        .with_conn(|c| Ok(c.query_row(sql, [], |r| r.get(0))?))
-        .expect("count")
-}
-
-fn exec(t: &TestEnv, sql: &str) {
-    t.store()
-        .with_conn(|c| Ok(c.execute_batch(sql)?))
-        .expect("exec");
 }
 
 async fn new_contact(r: &Router, who: &Caller, body: Value) -> Value {
@@ -105,28 +92,10 @@ async fn me_is_created_once_per_user_and_workspace() {
     for h in hs {
         assert_eq!(h.await.unwrap(), 200);
     }
-    assert_eq!(
-        count(
-            &t,
-            "SELECT COUNT(*) FROM parties WHERE user_id = 'usr_dev' AND workspace_id = 'default'"
-        ),
-        1
-    );
-    assert_eq!(
-        count(
-            &t,
-            "SELECT COUNT(*) FROM parties WHERE user_id = 'usr_other'"
-        ),
-        1
-    );
+    assert_eq!(fixture::owner_party_count(t.store()).unwrap(), 1);
+    assert_eq!(fixture::other_party_count(t.store()).unwrap(), 1);
     // one own organization per workspace, named after it
-    assert_eq!(
-        count(
-            &t,
-            "SELECT COUNT(*) FROM parties WHERE workspace_id = 'default' AND org_kind = 'self'"
-        ),
-        1
-    );
+    assert_eq!(fixture::workspace_org_count(t.store()).unwrap(), 1);
     let (_, orgs) = req(&r, &me(), "GET", "/orgs", None).await;
     assert_eq!(orgs[0]["kind"], "self");
 
@@ -257,13 +226,7 @@ async fn create_contact_with_job_and_validation() {
             })
         )]
     );
-    assert_eq!(
-        count(
-            &t,
-            "SELECT COUNT(*) FROM audit WHERE action = 'party.create' AND detail LIKE '%contact%' AND detail NOT LIKE '%me%'"
-        ),
-        1
-    );
+    assert_eq!(fixture::contact_create_audits(t.store()).unwrap(), 1);
 
     let bad = [
         (json!({"name": ""}), "参数不对：name"),
@@ -376,14 +339,8 @@ async fn list_filters_and_order() {
         Some(json!({"important": true})),
     )
     .await;
-    exec(
-        &t,
-        "INSERT INTO parties (id, workspace_id, type, name, contact_kind, created_by, created, updated) VALUES ('ct_unc', 'default', 'contact', 'sarah.c.design', 'unconfirmed', 'usr_dev', 1, 1);",
-    );
-    exec(
-        &t,
-        "INSERT INTO tags (id, workspace_id, name, cat, description, created_by, created) VALUES ('tag_vip', 'default', 'VIP', '客户', '', 'usr_dev', 1);",
-    );
+    fixture::seed_unconfirmed_designer(t.store()).unwrap();
+    fixture::seed_vip_tag(t.store()).unwrap();
     req(
         &r,
         &me(),
@@ -480,10 +437,7 @@ async fn patch_contact_writes_revision_tags_and_one_event() {
     let t = env();
     let r = app(&t, Ports::default());
     let c = new_contact(&r, &me(), json!({"name": "Sarah"})).await;
-    exec(
-        &t,
-        "INSERT INTO tags (id, workspace_id, name, cat, description, created_by, created) VALUES ('tag_a', 'default', 'A', '客户', '', 'usr_dev', 1), ('tag_w2', 'w2', 'B', '客户', '', 'usr_dev', 1);",
-    );
+    fixture::seed_cross_workspace_tags(t.store()).unwrap();
     t.take_events();
     let path = format!("/contacts/{}", id(&c));
     let (s, b) = req(
@@ -502,16 +456,7 @@ async fn patch_contact_writes_revision_tags_and_one_event() {
     assert_eq!(b["tags"], json!(["tag_a"]), "only tags of this workspace");
     assert_eq!(b["revision"], 2);
     assert_eq!(t.take_events().len(), 1);
-    let patch: String = t
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT patch FROM revisions WHERE object_type = 'party' ORDER BY id DESC LIMIT 1",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let patch: String = fixture::last_party_patch(t.store()).unwrap();
     let patch: Value = serde_json::from_str(&patch).unwrap();
     assert_eq!(patch["before"]["name"], "Sarah");
     assert_eq!(patch["after"]["name"], "Sarah Chen");
@@ -563,10 +508,7 @@ async fn confirm_unconfirmed_contact() {
     let t = env();
     let r = app(&t, Ports::default());
     req(&r, &me(), "GET", "/contacts", None).await;
-    exec(
-        &t,
-        "INSERT INTO parties (id, workspace_id, type, name, contact_kind, source, created_by, created, updated) VALUES ('ct_unc', 'default', 'contact', 'sarah.c', 'unconfirmed', 'identify', 'usr_dev', 1, 1);",
-    );
+    fixture::seed_unconfirmed_sender(t.store()).unwrap();
     let (s, b) = req(&r, &me(), "POST", "/contacts/ct_unc/confirm", None).await;
     assert_eq!(s, 200, "{b}");
     assert_eq!(b["kind"], "real");
@@ -590,12 +532,13 @@ impl PartyHooks for DeleteSpy {
     fn name(&self) -> &str {
         "spy"
     }
-    fn on_delete(&self, tx: &Tx, _ws: &str, party_id: &str) -> ApiResult<()> {
+    fn on_delete(&self, tx: &mut steve_store::W<'_>, _ws: &str, party_id: &str) -> ApiResult<()> {
         // runs inside the same transaction: the contact is still active here
-        let st: String =
-            tx.query_row("SELECT status FROM parties WHERE id = ?", [party_id], |r| {
-                r.get(0)
-            })?;
+        let st = tx
+            .contacts()
+            .party(party_id)?
+            .expect("active contact")
+            .status;
         self.0.lock().unwrap().push(format!("{party_id}:{st}"));
         Ok(())
     }
@@ -624,19 +567,10 @@ async fn delete_contact_drops_attrs_and_memories_keeps_links() {
         Some(json!({"key": "phone", "value": "+1 555"})),
     )
     .await;
-    exec(
-        &t,
-        &format!(
-            "INSERT INTO items (id, workspace_id, no, title, status, stage, created, updated) VALUES ('ST-1', 'default', 1, 't', 'open', 'new', 1, 1);
-             INSERT INTO links (workspace_id, subject_type, subject_id, predicate, object_type, object_id, source, created) VALUES ('default', 'item', 'ST-1', 'related', 'party', '{cid}', 'manual', 1);
-             INSERT INTO parties (id, workspace_id, type, name, created_by, created, updated) VALUES ('tm_1', 'default', 'team', 'T', 'usr_dev', 1, 1);
-             INSERT INTO team_details (party_id, workspace_id, kind) VALUES ('tm_1', 'default', 'virtual');
-             INSERT INTO team_members (workspace_id, team_id, contact_id, joined) VALUES ('default', 'tm_1', '{cid}', 1);"
-        ),
-    );
+    fixture::seed_contact_relations(t.store(), &cid).unwrap();
     let (only, shared) = t
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             let a = mems::create(
                 tx,
                 WS,
@@ -672,63 +606,25 @@ async fn delete_contact_drops_attrs_and_memories_keeps_links() {
     let (s, b) = req(&r, &me(), "DELETE", &format!("/contacts/{cid}"), None).await;
     assert_eq!((s, b), (200, json!({"ok": true})));
     assert_eq!(*spy.0.lock().unwrap(), vec![format!("{cid}:active")]);
+    assert_eq!(fixture::attr_count(t.store(), &cid).unwrap(), 0);
+    assert_eq!(fixture::memory_count(t.store(), &only).unwrap(), 0);
     assert_eq!(
-        count(
-            &t,
-            &format!("SELECT COUNT(*) FROM attr_values WHERE party_id = '{cid}'")
-        ),
-        0
-    );
-    assert_eq!(
-        count(
-            &t,
-            &format!("SELECT COUNT(*) FROM mems WHERE id = '{only}'")
-        ),
-        0
-    );
-    assert_eq!(
-        count(
-            &t,
-            &format!("SELECT COUNT(*) FROM mems WHERE id = '{shared}'")
-        ),
+        fixture::memory_count(t.store(), &shared).unwrap(),
         1,
         "shared memory stays"
     );
+    assert_eq!(fixture::team_membership_count(t.store(), &cid).unwrap(), 0);
     assert_eq!(
-        count(
-            &t,
-            &format!("SELECT COUNT(*) FROM team_members WHERE contact_id = '{cid}'")
-        ),
-        0
-    );
-    assert_eq!(
-        count(
-            &t,
-            &format!(
-                "SELECT COUNT(*) FROM links WHERE subject_id = '{cid}' OR object_id = '{cid}'"
-            )
-        ),
+        fixture::party_link_count(t.store(), &cid).unwrap(),
         2,
         "job and item links stay"
     );
     assert_eq!(
-        count(
-            &t,
-            &format!("SELECT COUNT(*) FROM parties WHERE id = '{cid}' AND status = 'deleted'")
-        ),
+        fixture::deleted_party_count(t.store(), &cid).unwrap(),
         1,
         "row kept"
     );
-    let detail: String = t
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT detail FROM audit WHERE action = 'party.delete'",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let detail: String = fixture::party_deletion_audit(t.store()).unwrap();
     let detail = serde_json::from_str::<Value>(&detail).unwrap();
     assert_eq!(
         (
@@ -766,7 +662,7 @@ async fn delete_contact_rolls_back_when_a_hook_fails() {
         fn name(&self) -> &str {
             "fails"
         }
-        fn on_delete(&self, _: &Tx, _: &str, _: &str) -> ApiResult<()> {
+        fn on_delete(&self, _: &mut steve_store::W<'_>, _: &str, _: &str) -> ApiResult<()> {
             Err(steve_modules::ApiError::rule("账号模块拒绝"))
         }
     }
@@ -923,19 +819,7 @@ async fn jobs_open_close_reopen_and_remove() {
     )
     .await;
     assert_eq!(s, 200, "{b}");
-    let props: String = t
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                &format!(
-                    "SELECT props FROM links WHERE predicate = 'works_at' AND object_id = '{}'",
-                    id(&acme)
-                ),
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let props: String = fixture::job_properties(t.store(), &id(&acme)).unwrap();
     let props: Value = serde_json::from_str(&props).unwrap();
     assert_eq!(props["to"], Value::Null);
     assert_eq!(props["title"], "总监");
@@ -1520,10 +1404,7 @@ async fn organizations_domains_and_people() {
     );
     assert_eq!(list.as_array().unwrap().len(), 3);
 
-    exec(
-        &t,
-        "INSERT INTO tags (id, workspace_id, name, cat, description, created_by, created) VALUES ('tag_a', 'default', 'A', '客户', '', 'usr_dev', 1);",
-    );
+    fixture::seed_contact_tag(t.store()).unwrap();
     t.take_events();
     let (s, b) = req(&r, &me(), "PATCH", &format!("/orgs/{}", id(&acme)), Some(json!({"name": "Acme Inc", "kind": "partner", "domains": ["acme.com"], "tags": ["tag_a"], "note": "改"}))).await;
     assert_eq!(s, 200, "{b}");
@@ -1601,16 +1482,7 @@ async fn own_organization_rules() {
     let (_, list) = req(&r, &me(), "GET", "/orgs", None).await;
     let own = list[0].clone();
     assert_eq!(own["kind"], "self");
-    let ws_name: String = t
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT name FROM workspaces WHERE id = 'default'",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let ws_name: String = fixture::workspace_name(t.store()).unwrap();
     assert_eq!(own["name"], ws_name);
     let path = format!("/orgs/{}", id(&own));
     let (s, b) = req(&r, &me(), "PATCH", &path, Some(json!({"kind": "customer"}))).await;
@@ -1637,9 +1509,7 @@ async fn delete_org_closes_jobs_and_frees_domains() {
             .unwrap()
             .timestamp_millis(),
     );
-    exec(&t, "INSERT INTO settings(workspace_id,key,value,updated) VALUES ('default','tz','\"Europe/London\"',1);
-        INSERT INTO notification_policies(workspace_id,user_id,enabled,mode,timezone,consented_at,consent_since_seq,updated)
-        VALUES ('default','usr_dev',1,'now','Asia/Tokyo',1,0,1)");
+    fixture::seed_clock_precedence(t.store()).unwrap();
     let r = app(&t, Ports::default());
     let acme = new_org(
         &r,
@@ -1667,13 +1537,7 @@ async fn delete_org_closes_jobs_and_frees_domains() {
     let (_, list) = req(&r, &me(), "GET", "/orgs", None).await;
     assert!(!ids(&list).contains(&id(&acme)));
     assert_eq!(
-        count(
-            &t,
-            &format!(
-                "SELECT COUNT(*) FROM parties WHERE id = '{}' AND status = 'deleted' AND note = '' AND aliases = '[]'",
-                id(&acme)
-            )
-        ),
+        fixture::scrubbed_org_count(t.store(), &id(&acme)).unwrap(),
         1
     );
     new_org(
@@ -1720,13 +1584,7 @@ async fn single_user_reads_private_contacts_and_organizations_in_the_same_worksp
     .await;
     assert_eq!(status, 404);
     let org = new_org(&r, &other(), json!({"name": "Previously hidden"})).await;
-    exec(
-        &t,
-        &format!(
-            "UPDATE parties SET visibility='private' WHERE id='{}'",
-            id(&org)
-        ),
-    );
+    fixture::privatize_org(t.store(), &id(&org)).unwrap();
     let (status, _) = req(&r, &me(), "GET", &format!("/orgs/{}", id(&org)), None).await;
     assert_eq!(status, 200);
     let (_, list) = req(&r, &me(), "GET", "/orgs", None).await;
@@ -1740,7 +1598,7 @@ async fn single_user_reads_private_contacts_and_organizations_in_the_same_worksp
 struct FakeHandles(Mutex<Vec<(String, String)>>);
 
 impl HandleSearch for FakeHandles {
-    fn parties(&self, _: &Connection, _: &str, q: &str) -> ApiResult<Vec<String>> {
+    fn parties(&self, _: &mut steve_store::R<'_>, _: &str, q: &str) -> ApiResult<Vec<String>> {
         let q = q.to_lowercase();
         Ok(self
             .0
@@ -1751,7 +1609,7 @@ impl HandleSearch for FakeHandles {
             .map(|(_, p)| p.clone())
             .collect())
     }
-    fn count(&self, _: &Connection, _: &str, party_id: &str) -> ApiResult<i64> {
+    fn count(&self, _: &mut steve_store::R<'_>, _: &str, party_id: &str) -> ApiResult<i64> {
         Ok(self
             .0
             .lock()
@@ -1776,12 +1634,7 @@ fn domains_are_normalized() {
 async fn owner_email_supplement_is_isolated_idempotent_and_never_overwrites_manual_or_rejected() {
     let t = env();
     let r = app(&t, Ports::default());
-    exec(
-        &t,
-        &format!(
-            "UPDATE users SET email = 'owner@example.test' WHERE id = '{ME}'; UPDATE users SET email = 'other@example.test' WHERE id = '{OTHER}'"
-        ),
-    );
+    fixture::set_test_emails(t.store()).unwrap();
     let (_, owner) = req(&r, &me(), "GET", "/me/contact", None).await;
     let (_, second) = req(&r, &other(), "GET", "/me/contact", None).await;
     assert!(
@@ -1844,7 +1697,9 @@ async fn owner_address_contexts_never_fall_back_to_each_other_and_scopes_do_not_
     .await;
     let get = |external, persona: Option<&str>, space: Option<&str>| {
         t.store()
-            .with_conn(|c| Ok(address(c, WS, ME, external, persona, space).unwrap()))
+            .read::<_, steve_store::StoreError>(|c| {
+                Ok(address(c, WS, ME, external, persona, space).unwrap())
+            })
             .unwrap()
             .unwrap()
     };
@@ -1882,7 +1737,7 @@ async fn owner_address_contexts_never_fall_back_to_each_other_and_scopes_do_not_
     assert_eq!(get(true, Some("p2"), Some("s2")), "Public name");
     assert_eq!(get(false, Some("p1"), Some("s1")), "Private nickname");
     t.store()
-        .transaction(|tx| {
+        .write(|tx| {
             contacts::repo::value_insert(
                 tx,
                 WS,
@@ -1907,7 +1762,9 @@ async fn owner_address_contexts_never_fall_back_to_each_other_and_scopes_do_not_
     req(&r, &other(), "GET", "/me/contact", None).await;
     let other_name = t
         .store()
-        .with_conn(|c| Ok(address(c, WS, OTHER, true, Some("p1"), Some("s1")).unwrap()))
+        .read::<_, steve_store::StoreError>(|c| {
+            Ok(address(c, WS, OTHER, true, Some("p1"), Some("s1")).unwrap())
+        })
         .unwrap()
         .unwrap();
     assert_ne!(other_name, "Space name");

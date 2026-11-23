@@ -7,7 +7,6 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use rusqlite::params;
 use serde_json::{Value, json};
 use steve_hub::api::AppState;
 use steve_hub::bus::Bus;
@@ -161,17 +160,10 @@ fn bind_runtime_session(
     principal: Option<&str>,
     state_dir: Option<&str>,
 ) {
-    store
-        .with_conn(|c| {
-            c.execute(
-                "INSERT INTO runtime_sessions
-                   (session_id, node_id, workspace_ref, node_session_id, config_revision, phase, updated, principal, state_dir)
-                 VALUES (?1, ?2, '{}', ?1, 'r1', 'ready', 1, ?3, ?4)",
-                params![session_id, node_id, principal, state_dir],
-            )?;
-            Ok(())
-        })
-        .expect("bind runtime session");
+    steve_store::testkit::hub::authority::seed_principal_binding(
+        store, session_id, node_id, principal, state_dir,
+    )
+    .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -426,15 +418,7 @@ async fn principal_state_reports_recorded_paths_and_enforces_owner_and_workspace
 
     // 6. `/api/sessions/:id/resume`: owner sees isolated principal state env; non-owner member and
     // remote-Node sessions never leak internal `state/.../harness` paths or check Hub-local transcripts.
-    store
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE sessions SET acp_session_id = 'acp-123' WHERE id IN (?1, ?2)",
-                params![s_local, s_remote],
-            )?;
-            Ok(())
-        })
-        .expect("set acp_session_id");
+    steve_store::testkit::hub::authority::set_fixture_acp_ids(&store, &s_local, &s_remote).unwrap();
 
     let (status, r_owner) = e
         .get(

@@ -284,6 +284,18 @@ pub(crate) fn assess(now: &Snapshot, base: Option<&Snapshot>) -> Health {
         )
         .max(0.5),
         Check::new(
+            "patch_delay_p95",
+            "seconds",
+            w.quantile("steve_projection_delay_seconds", 0.95, &all),
+        )
+        .max(0.5),
+        Check::new(
+            "reconcile_diff",
+            "count",
+            Some(w.delta("steve_projection_reconcile_diff_total", &all)),
+        )
+        .max(0.0),
+        Check::new(
             "ingest_p95",
             "seconds",
             w.quantile("steve_node_ingest_seconds", 0.95, &all),

@@ -28,16 +28,17 @@ const server = http.createServer(async (req, res) => {
     let bytes = ""; for await (const chunk of req) bytes += chunk
     requests.push({ method: req.method, path: req.url, body: bytes ? JSON.parse(bytes) : null })
     let data
-    if (p === "/auth/hello") data = { name: "steve", version: "fixture", api: 1, login: { token: false, oidc: false } }
-    else if (p === "/api/state") {
-      const g = f.stateGates.shift()
-      data = { version: "fixture", web_version: "fixture", owner: false, workspace: ws, workspaces: [ws], items: [], decisions: [], recent: [], bots: [], allBots: [], projects: [], tags: [], tagUses: {}, thread: [], settings: { onboard: "1" }, sessions: [], devices: [device], runtimes: clone(g?.rows || f.rows) }
-      if (g) { g.entered.resolve(); await g.release.promise }
-    } else if (p === "/api/devices") {
-      if (url.searchParams.get("fresh") !== "1") { res.writeHead(200, {"content-type":"application/json"}); res.end(JSON.stringify({devices:[device],runtimes:clone(f.rows)})); return }
+    if (p === "/auth/hello") data = { name: "steve", version: "fixture", api: 2, login: { token: false, oidc: false } }
+    else if (p === "/api/shell") {
+      data = { version: "fixture", web_version: "fixture", owner: false, workspace: ws, workspaces: [ws], bots: [], allBots: [], projects: [], tags: [], settings: { onboard: "1" } }
+    } else if (p === "/api/snapshot") data = { epoch: "fixture", rev: 1, cursor: "fixture:1", views: {} }
+    else if (p === "/api/summary") data = { thinking: false, hold: null }
+    else if (p === "/api/devices") data = { devices: [device] }
+    else if (p === "/api/runtimes") {
+      if (url.searchParams.get("fresh") !== "1") { res.writeHead(200, {"content-type":"application/json"}); res.end(JSON.stringify(clone(f.rows))); return }
       f.probes++
-      const g = f.deviceGates.shift()
-      data = { devices: [device], runtimes: clone(g?.rows || f.rows) }
+      const g = f.probeGates.shift()
+      data = clone(g?.rows || f.rows)
       if (g) { g.entered.resolve(); await g.release.promise }
     } else if (p.endsWith("/install") && req.method === "POST") {
       const target = f.rows.find(r => p === `/api/system/harnesses/${r.id}/install`)
@@ -56,7 +57,7 @@ const server = http.createServer(async (req, res) => {
 })
 await new Promise(resolve => server.listen(apiPort, "127.0.0.1", resolve))
 const open = async (rows, lang = "zh-CN", width = 375) => {
-  const f = current = { rows, probes: 0, installs: 0, deviceGates: [], stateGates: [] }
+  const f = current = { rows, probes: 0, installs: 0, probeGates: [] }
   const page = await browser.newPage({ viewport: { width, height: 900 }, locale: lang, reducedMotion: "reduce" })
   page.setDefaultTimeout(12000)
   f.errors = []; page.on("pageerror", e => f.errors.push(e.message))
@@ -127,17 +128,16 @@ try {
   }
   console.log("PASS: R4 probe JSON + optional status replay; unknown evidence remains while ready, R3 detected path/version + separate missing managed target; ready/provider-only no no-op install; installer error retry, interrupted retry; zh/en × 320/375px")
 
-  for (const phase of ["devices", "state"]) {
+  {
     const missing = runtime("not_installed", { ok: false, setup: { components: [{ id: "adapter", name: "ACP", package: "@example/acp", status: "missing" }] } })
     const f = await open([missing]), p = f.page
-    const old = gate([runtime("ready")]), fresh = gate(), staleState = gate([runtime("ready")])
+    const old = gate([runtime("ready")]), fresh = gate()
     try {
-      if (phase === "devices") { f.deviceGates.push(old); staleState.release.resolve(); f.stateGates.push(staleState) }
-      else f.stateGates.push(old)
+      f.probeGates.push(old)
       await p.locator("[data-runtime-refresh]").click()
       await entered(old)
       await p.locator("[data-runtime-unavailable-toggle]").click()
-      f.deviceGates.push(fresh)
+      f.probeGates.push(fresh)
       const accepted = p.waitForResponse(r => r.url().endsWith("/install") && r.request().method() === "POST")
       await card(p).locator("[data-runtime-install]").click()
       await accepted
@@ -148,7 +148,7 @@ try {
       assert.equal(await c.locator("[data-runtime-install]").isDisabled(), true, "stale ready must not clear pending")
       assert.equal(await c.locator("[data-runtime-use]").count(), 0, "cannot start while installing")
       assert.match(await c.innerText(), /正在提交安装请求|安装状态会自动刷新/)
-      await shot(p, `race-${phase}-stale-ready`)
+      await shot(p, "race-stale-runtime")
       fresh.release.resolve()
       await c.locator('[data-runtime-state="installing"]').waitFor()
       f.rows = [runtime("ready")]
@@ -159,10 +159,10 @@ try {
       assert.equal(await c.locator("[data-runtime-use]").count(), 1)
       assert.ok(f.probes >= 3)
       assert.deepEqual(f.errors, [])
-      observations.push({ scenario: `pre-install ${phase} read returns stale ready`, result: "pending retained; fresh post-install probe sees installing; ready clears pending only after completion", probes: f.probes, installs: f.installs })
+      observations.push({ scenario: "pre-install runtime probe returns stale ready", result: "pending retained; fresh post-install probe sees installing; ready clears pending only after completion", probes: f.probes, installs: f.installs })
     } finally { old.release.resolve(); fresh.release.resolve(); await p.close() }
   }
-  console.log("PASS: deterministic HTTP gates for old devices and old state responses after install acceptance; stale ready preserves pending/disabled install; new fresh probe + polling recover; no timing sleeps")
+  console.log("PASS: deterministic HTTP gates for old runtime responses after install acceptance; stale ready preserves pending/disabled install; new fresh probe + polling recover; no timing sleeps")
 } finally {
   if (shots) await writeFile(`${shots}/http-observations.json`, JSON.stringify({ data_source: "Running Web with isolated simulated HTTP API; no real Pi", observations, requests }, null, 2))
   await browser.close()

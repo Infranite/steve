@@ -8,6 +8,8 @@
 mod digest_env;
 use digest_env::TestEnv;
 use std::sync::Arc;
+use steve_store::testkit::channels::inspect;
+use steve_store::testkit::channels::seed;
 
 use serde_json::{Value, json};
 use steve_channels::channel::Sender;
@@ -17,7 +19,7 @@ use steve_channels::{Channels, HandleRef, Inbound, InboundMessage, SpaceKind, me
 use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowSetup, LinearExecutor};
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
-use steve_modules::accounts::repo::{self as arepo, NewAccount};
+use steve_modules::accounts::repo::NewAccount;
 use steve_modules::contacts::service::ensure_base;
 use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::vault::Vault;
@@ -82,10 +84,9 @@ fn setup(precision: i64, proxy_config: Value) -> H {
     let (bot, _) = FakeChannel::seed_connection(env.store(), &caller(WS, ME), None).expect("bot");
     let mine = env
         .store()
-        .transaction(|tx| -> steve_modules::ApiResult<String> {
-            let me = ensure_base(tx, &caller(WS, ME))?;
-            let a = arepo::insert(
-                tx,
+        .write(|w| -> steve_modules::ApiResult<String> {
+            let me = ensure_base(w, &caller(WS, ME))?;
+            let a = steve_store::Accounts(w).insert(
                 WS,
                 &NewAccount {
                     system_id: FakeChannel::SYSTEM.into(),
@@ -102,18 +103,24 @@ fn setup(precision: i64, proxy_config: Value) -> H {
                 },
             )?;
             let con = uid("con");
-            tx.execute(
-                "INSERT INTO connections (id, workspace_id, account_id, adapter, auth, caps, config, created_by, created, updated)
-                 VALUES (?, ?, ?, ?, 'none', '[\"msg.receive\",\"msg.send_as_user\"]', ?, ?, 1, 1)",
-                rusqlite::params![
-                    con,
-                    WS,
-                    a.id,
-                    SIDE,
-                    proxy_config.to_string(),
-                    ME
-                ],
-            )?;
+            steve_store::Connections(w).insert(&steve_store::ConnRow {
+                id: con.clone(),
+                workspace_id: WS.into(),
+                account_id: a.id,
+                adapter: SIDE.into(),
+                auth: "none".into(),
+                granted_scopes: vec![],
+                caps: vec!["msg.receive".into(), "msg.send_as_user".into()],
+                credential_item: None,
+                status: "ok".into(),
+                health: Default::default(),
+                config: proxy_config.clone(),
+                last_sync: None,
+                created_by: ME.into(),
+                revision: 1,
+                created: 1,
+                updated: 1,
+            })?;
             Ok(con)
         })
         .expect("your connection");
@@ -131,35 +138,6 @@ fn setup(precision: i64, proxy_config: Value) -> H {
         bot,
         mine,
     }
-}
-
-fn rows(h: &H, sql: &str, p: &[&str]) -> Vec<Vec<Value>> {
-    let (sql, p): (String, Vec<String>) = (sql.into(), p.iter().map(|s| s.to_string()).collect());
-    h.env
-        .store()
-        .reader(move |c| {
-            let mut st = c.prepare(&sql)?;
-            let n = st.column_count();
-            let out = st
-                .query_map(rusqlite::params_from_iter(p.iter()), |r| {
-                    (0..n)
-                        .map(|i| {
-                            Ok(match r.get_ref(i)? {
-                                rusqlite::types::ValueRef::Null => Value::Null,
-                                rusqlite::types::ValueRef::Integer(x) => json!(x),
-                                rusqlite::types::ValueRef::Real(x) => json!(x),
-                                rusqlite::types::ValueRef::Text(t) => {
-                                    json!(String::from_utf8_lossy(t))
-                                }
-                                rusqlite::types::ValueRef::Blob(_) => Value::Null,
-                            })
-                        })
-                        .collect::<rusqlite::Result<Vec<_>>>()
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok::<_, steve_store::StoreError>(out)
-        })
-        .expect("rows")
 }
 
 /// Alice on the bot, with a provider id.
@@ -185,33 +163,25 @@ async fn push(h: &H, conn: &str, m: InboundMessage) -> Inbound {
 }
 
 fn spaces_of_g1(h: &H) -> Vec<String> {
-    rows(
-        h,
-        "SELECT id FROM spaces WHERE external_id = 'G1' ORDER BY created",
-        &[],
-    )
-    .into_iter()
-    .map(|r| r[0].as_str().unwrap().to_string())
-    .collect()
+    inspect::spaces::space_id_by_g1_rows(h.env.store())
+        .unwrap()
+        .into_iter()
+        .map(|r| r[0].as_str().unwrap().to_string())
+        .collect()
 }
 
 /// `(text, seen_by)` of the stored messages, oldest first.
 fn seen(h: &H) -> Vec<(String, i64)> {
-    rows(
-        h,
-        "SELECT text, seen_by FROM chan_messages WHERE direction = 'in' ORDER BY created, rowid",
-        &[],
-    )
-    .into_iter()
-    .map(|r| (r[0].as_str().unwrap().to_string(), r[1].as_i64().unwrap()))
-    .collect()
+    inspect::messages::message_text_seen_by_by_incoming(h.env.store())
+        .unwrap()
+        .into_iter()
+        .map(|r| (r[0].as_str().unwrap().to_string(), r[1].as_i64().unwrap()))
+        .collect()
 }
 
 fn page_as(h: &H, space: &str, user: &str) -> Vec<String> {
     let (space, user) = (space.to_string(), user.to_string());
-    h.env
-        .store()
-        .reader(move |c| messages::page(c, &space, &user, None, 50))
+    messages::page(h.env.store(), &space, &user, None, 50)
         .expect("page")
         .into_iter()
         .rev()
@@ -229,11 +199,11 @@ async fn the_bot_and_your_account_through_a_service_share_one_space_and_one_copy
     push(&h, &h.mine, own_copy("我先看一下", T + 5_000, Some("ev2"))).await;
     let spaces = spaces_of_g1(&h);
     assert_eq!(spaces.len(), 1, "one space for the chat");
-    let ids = rows(
-        &h,
-        "SELECT connection_id, ordinal, owner_user FROM space_identities WHERE space_id = ? ORDER BY ordinal",
-        &[&spaces[0]],
-    );
+    let ids = inspect::spaces::space_identity_connection_id_ordinal_owner_user_by_space(
+        h.env.store(),
+        &spaces[0],
+    )
+    .unwrap();
     assert_eq!(ids.len(), 2);
     assert_eq!(
         (ids[0][0].as_str(), ids[0][1].as_i64(), &ids[0][2]),
@@ -255,7 +225,7 @@ async fn the_bot_and_your_account_through_a_service_share_one_space_and_one_copy
     let voice = h
         .env
         .store()
-        .reader(move |c| steve_channels::spaces::voice(c, &space))
+        .read(move |r| steve_channels::spaces::voice(r, &space))
         .expect("voice");
     assert_eq!(voice.as_deref(), Some(h.bot.as_str()));
     // Single-user reads include both identities; receipt and outbound voice identity stay intact.
@@ -267,11 +237,11 @@ async fn the_bot_and_your_account_through_a_service_share_one_space_and_one_copy
     let before_reads = seen(&h);
     h.env
         .store()
-        .reader(|c| -> steve_modules::ApiResult<()> {
-            let page = messages::page_before(c, &spaces[0], "someone_else", None, 50)?;
+        .read(|_| -> steve_modules::ApiResult<()> {
+            let page = messages::page_before(h.env.store(), &spaces[0], "someone_else", None, 50)?;
             assert_eq!(page.len(), 2);
             let older = messages::page_before(
-                c,
+                h.env.store(),
                 &spaces[0],
                 "someone_else",
                 Some((page[0].created, &page[0].id)),
@@ -288,16 +258,7 @@ async fn the_bot_and_your_account_through_a_service_share_one_space_and_one_copy
         "reads must not rewrite receiving identity bits"
     );
     // A historical bit with no remaining identity row must not hide the message either.
-    h.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE chan_messages SET seen_by = 4 WHERE text = '我先看一下'",
-                [],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    seed::messages::reset_fixture_seen_by(h.env.store()).unwrap();
     assert_eq!(page_as(&h, &spaces[0], "someone_else").len(), 2);
 }
 

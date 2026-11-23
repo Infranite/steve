@@ -34,6 +34,7 @@ export default {
   "state": {
     "loading": "Reading shared information…",
     "online": "Hub shared information read",
-    "offline": "Hub offline · last known snapshot"
+    "offline": "Hub offline · last known snapshot",
+    "error": "Could not read shared Hub information"
   }
 }

@@ -3,6 +3,7 @@
 //! few columns, which does not change the plan's access path), checked with EXPLAIN QUERY PLAN on a
 //! fresh database.
 
+use steve_store::testkit::SqliteFixtures;
 mod common;
 
 use common::*;
@@ -479,7 +480,7 @@ const CASES: &[(&str, &str, &str)] = &[
 fn each_new_index_serves_its_query() {
     let t = fresh();
     t.store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             let mut wrong = Vec::new();
             for (index, at, sql) in CASES {
                 let p = plan(c, sql);
@@ -513,7 +514,7 @@ const ANALYZED: &[(&str, &str, &str)] = &[
 fn indexes_that_need_statistics_serve_their_query_once_analyzed() {
     let t = fresh();
     t.store
-        .with_conn(|c| {
+        .fixture_write(|c| {
             // one workspace, many items, many timeline rows per item and few of them the user's own
             for i in 0..200 {
                 c.execute(

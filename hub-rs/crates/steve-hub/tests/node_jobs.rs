@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 use steve_runtime::testkit::eventually_sync;
+use steve_store::testkit::hub::node_checks;
 
 use serde_json::{Value, json};
 use steve_core::Fallback;
@@ -108,12 +109,7 @@ fn open_store(dir: &Path) -> Store {
     store
 }
 
-fn q<T: rusqlite::types::FromSql>(store: &Store, sql: &str) -> T {
-    store
-        .reader(|c| Ok::<_, StoreError>(c.query_row(sql, [], |r| r.get(0))?))
-        .unwrap()
-}
-
+/// A Hub with the local Node running think jobs on the stand-in adapter.
 struct Local {
     _dir: tempfile::TempDir,
     root: PathBuf,
@@ -237,7 +233,7 @@ async fn model_calls_wait_for_maintenance_before_starting() {
     {
         let gw = h.node(&["m1"]);
         let spawns = h.spawns();
-        let jobs: i64 = q(&h.store, "SELECT COUNT(*) FROM runtime_jobs");
+        let jobs: i64 = node_checks::job_count(&h.store).unwrap();
         h.store.maintenance_set(true).unwrap();
         let call = gw.call(
             "维护后再回答",
@@ -254,7 +250,7 @@ async fn model_calls_wait_for_maintenance_before_starting() {
         );
         assert_eq!(h.spawns(), spawns, "no harness starts behind the drain");
         assert_eq!(
-            q::<i64>(&h.store, "SELECT COUNT(*) FROM runtime_jobs"),
+            node_checks::job_count(&h.store).unwrap(),
             jobs,
             "no Node job is queued behind the drain"
         );
@@ -367,24 +363,15 @@ async fn a_busy_model_falls_back_and_books_each_try_under_the_call() {
             .any(|u| u.model == "m-busy" && u.cost_reported == Some(0.01))
     );
     assert_eq!(
-        q::<i64>(
-            &h.store,
-            "SELECT COUNT(DISTINCT json_extract(detail,'$.call_id')) FROM usage_records"
-        ),
+        node_checks::usage_records_distinct_json_extract_detail_call_id_count(&h.store).unwrap(),
         1
     );
     assert_eq!(
-        q::<i64>(
-            &h.store,
-            "SELECT COUNT(*) FROM runtime_jobs WHERE state='finished' AND kind='think' AND purpose='answer'"
-        ),
+        node_checks::job_count_finished_think_answer(&h.store).unwrap(),
         2
     );
     assert_eq!(
-        q::<i64>(
-            &h.store,
-            "SELECT COUNT(*) FROM runtime_job_attempts WHERE state='finished' AND ordinal=0"
-        ),
+        node_checks::runtime_job_attempts_count_finished_with_ordinal(&h.store).unwrap(),
         2
     );
 }
@@ -446,10 +433,7 @@ async fn images_and_attachments_reach_the_run() {
         "the image went in the prompt"
     );
     assert_eq!(
-        q::<String>(
-            &h.store,
-            "SELECT created_by FROM files WHERE name LIKE 'job-input-%'"
-        ),
+        node_checks::files_created_by_matching_text(&h.store).unwrap(),
         "job"
     );
 
@@ -512,19 +496,14 @@ async fn a_dropped_call_cancels_its_job_and_the_process_dies() {
     let _ = task.await;
     eventually_sync("the harness gone", || !alive(pid)).await;
     eventually_sync("the attempt ended cancelled", || {
-        q::<Option<String>>(
-            &h.store,
-            "SELECT json_extract(completion,'$.outcome') FROM runtime_job_attempts",
-        )
-        .as_deref()
+        node_checks::runtime_job_attempts_outcome(&h.store)
+            .unwrap()
+            .as_deref()
             == Some("cancelled")
     })
     .await;
     assert_eq!(
-        q::<i64>(
-            &h.store,
-            "SELECT COUNT(*) FROM node_commands WHERE method='cancel' AND target_job_attempt IS NOT NULL"
-        ),
+        node_checks::command_count_cancel_with_target_job_attempt(&h.store).unwrap(),
         1
     );
     assert_eq!(h.spawns(), 1);
@@ -597,11 +576,9 @@ async fn the_fake_node_contract_streams_and_answers() {
         node.log().iter().any(|(m, _)| *m == "start_job")
     })
     .await;
-    let exec: ExecutionRef = serde_json::from_str(&q::<String>(
-        &store,
-        "SELECT execution FROM runtime_job_attempts",
-    ))
-    .unwrap();
+    let exec: ExecutionRef =
+        serde_json::from_str(&node_checks::runtime_job_attempts_execution(&store).unwrap())
+            .unwrap();
     let spec = node.job_spec(exec.attempt()).unwrap();
     assert_eq!(spec.run.choice.model.as_deref(), Some("sonnet"));
     assert_eq!(spec.run.prompt, build::text("想"));
@@ -639,9 +616,9 @@ async fn the_fake_node_contract_streams_and_answers() {
     assert_eq!(*seen.lock().unwrap(), vec!["先", "先看", "答案"]);
     assert_eq!(p.usage.len(), 1);
     assert_eq!(p.usage[0].tokens.input, Some(7));
-    assert_eq!(q::<i64>(&store, "SELECT COUNT(*) FROM usage_records"), 1);
+    assert_eq!(node_checks::usage_records_count(&store).unwrap(), 1);
     assert_eq!(
-        q::<i64>(&store, "SELECT COUNT(*) FROM events"),
+        node_checks::event_count(&store).unwrap(),
         0,
         "a think call is no transcript"
     );
@@ -663,8 +640,8 @@ fn orphan(store: &Store, job: &str, attempt: &str) -> (OperationId, ExecutionRef
     let req = serde_json::to_value(&c).unwrap();
     let digest = digest_of(&req).unwrap().to_string();
     store
-        .transaction::<_, StoreError>(|tx| {
-            create_job_in(
+        .write::<_, StoreError>(|tx| {
+            steve_store::node_jobs::create_job_in(
                 tx,
                 &NewJob {
                     id: job,
@@ -695,12 +672,7 @@ fn orphan(store: &Store, job: &str, attempt: &str) -> (OperationId, ExecutionRef
 }
 
 fn outcome(store: &Store, attempt: &str) -> Option<String> {
-    q(
-        store,
-        &format!(
-            "SELECT json_extract(completion,'$.outcome') FROM runtime_job_attempts WHERE attempt_id='{attempt}'"
-        ),
-    )
+    node_checks::runtime_job_attempts_outcome_by_attempt(store, &attempt).unwrap()
 }
 
 /// The Hub restarts with job attempts open: their callers are gone. One the Node never got ends
@@ -723,10 +695,7 @@ async fn a_hub_restart_stops_open_job_attempts_and_runs_none_again() {
     let starts = || node.log().iter().filter(|(m, _)| *m == "start_job").count();
     eventually_sync("both started", || starts() == 2).await;
     eventually_sync("both running", || {
-        q::<i64>(
-            &store,
-            "SELECT COUNT(*) FROM runtime_job_attempts WHERE state='running'",
-        ) == 2
+        node_checks::runtime_job_attempts_count_by_state(&store, "running").unwrap() == 2
     })
     .await;
     node.lose_track(&exec_b).unwrap();
@@ -745,10 +714,7 @@ async fn a_hub_restart_stops_open_job_attempts_and_runs_none_again() {
     })
     .await;
     assert_eq!(
-        q::<String>(
-            &store,
-            "SELECT state FROM node_commands WHERE operation_id='op_ja_c'"
-        ),
+        node_checks::command_state_by_operation(&store, "op_ja_c").unwrap(),
         "rejected"
     );
     eventually_sync("the running one asked to cancel", || {
@@ -773,12 +739,6 @@ async fn a_hub_restart_stops_open_job_attempts_and_runs_none_again() {
     .await;
     assert!(node.log().iter().any(|(m, _)| *m == "abandon"));
     assert_eq!(starts(), 2, "nothing started again");
-    assert_eq!(
-        q::<i64>(
-            &store,
-            "SELECT COUNT(*) FROM runtime_jobs WHERE state='open'"
-        ),
-        0
-    );
+    assert_eq!(node_checks::job_count_by_state(&store, "open").unwrap(), 0);
     let _ = exec_b;
 }

@@ -44,12 +44,12 @@ impl Mail {
         let store = &self.0.m.store;
         let now = self.now();
         let mut purged = 0;
-        for ws in store.reader(repo::mail_workspaces)? {
+        for ws in store.read(|r| repo::mail_workspaces(r))? {
             let before = now - keep_days(store, &ws) * DAY_MS;
             // keyset paging: rows whose file could not be deleted stay behind the cursor
             let mut after: Option<(i64, String)> = None;
             loop {
-                let rows = store.reader(|c| {
+                let rows = store.read(|c| {
                     repo::expired(
                         c,
                         &ws,
@@ -82,7 +82,7 @@ impl Mail {
                 }
                 // one write transaction per page
                 if !done.is_empty() {
-                    store.transaction(|tx| {
+                    store.write(|tx| {
                         for id in &done {
                             repo::purge(tx, id, now)?;
                         }
@@ -95,11 +95,8 @@ impl Mail {
                 }
             }
         }
-        store.transaction(|tx| {
-            tx.prepare_cached(
-                "UPDATE mail_drafts SET body = '' WHERE status = 'sent' AND sent IS NOT NULL AND sent < ? AND body != ''",
-            )?
-            .execute([now - SENT_DRAFT_DAYS * DAY_MS])?;
+        store.write(|tx| {
+            repo::purge_sent_bodies(tx, now - SENT_DRAFT_DAYS * DAY_MS)?;
             Ok::<_, crate::MailError>(())
         })?;
         Ok(purged)

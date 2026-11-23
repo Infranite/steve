@@ -19,19 +19,18 @@
 
 mod api;
 mod credential;
-pub mod repo;
 mod reveal;
 mod service;
 pub mod templates;
 
 pub use api::routes;
 pub use credential::Credential;
-pub use repo::ItemFilter;
 pub use reveal::{NEED_PASSKEY, NoPasskeys, REVEAL_TTL_S, RevealGate, RevealTarget, Verified};
 pub(crate) use service::own_item;
 pub use service::{
     AccountRef, FieldOut, GrantOut, ItemOut, ItemPatch, NewField, NewItem, PreparedItem, VaultOut,
     VaultRef,
 };
+pub use steve_store::vault_items::ItemFilter;
 #[cfg(test)]
 mod tests;

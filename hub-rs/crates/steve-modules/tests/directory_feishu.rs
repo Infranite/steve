@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use steve_store::testkit::modules::directory as fixture;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -178,40 +179,17 @@ async fn feishu_departments_and_users_become_the_org_chart() {
     let r = contacts::routes(ports).with_state(t.modules.clone());
     let who = caller(WS, ME);
     call(&r, Some(&who), "GET", "/me/contact", None).await;
-    t.store()
-        .with_conn(|c| {
-            Ok(c.execute_batch(&format!(
-                "INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated)
-                   SELECT 'acc_bot', 'default', 'feishu_app', 'feishu_app', id, 'app_bot', '{app}', '{app}', 'connect', 1, 1
-                     FROM parties WHERE workspace_id = 'default' AND org_kind = 'self';
-                 INSERT INTO connections (id, workspace_id, account_id, adapter, auth, caps, created_by, created, updated)
-                   VALUES ('con_fs', 'default', 'acc_bot', 'feishu', 'credential', '[\"msg.receive\",\"directory.read\"]', 'usr_dev', 1, 1);",
-                app = ids::APP_ID
-            ))?)
-        })
-        .expect("connection");
-    let q = |sql: &str| -> String {
-        t.store()
-            .with_conn(|c| Ok(c.query_row(sql, [], |r| r.get::<_, String>(0))?))
-            .expect(sql)
-    };
-    let party_of = |union_id: &str| {
-        q(&format!(
-            "SELECT a.party_id FROM account_handles h JOIN accounts a ON a.id = h.account_id WHERE h.family = 'feishu_user' AND h.handle = '{union_id}'"
-        ))
-    };
-    let members = |team_ext: &str| -> Vec<(String, String)> {
-        t.store()
-            .with_conn(|c| {
-                let mut st = c.prepare(
-                    "SELECT p.name, m.role FROM team_members m JOIN parties p ON p.id = m.contact_id
-                      JOIN team_details d ON d.party_id = m.team_id WHERE d.external_id = ? ORDER BY m.role != 'lead', p.name",
-                )?;
-                let rows = st.query_map([team_ext], |r| Ok((r.get(0)?, r.get(1)?)))?;
-                Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-            })
-            .expect("members")
-    };
+    steve_store::testkit::modules::directory::seed_connection(
+        t.store(),
+        WS,
+        "con_fs",
+        "acc_bot",
+        ids::APP_ID,
+        r#"["msg.receive","directory.read"]"#,
+    )
+    .expect("connection");
+    let party_of = |union_id: &str| fixture::party(t.store(), union_id).unwrap();
+    let members = |team_ext: &str| fixture::members(t.store(), team_ext).unwrap();
     let sync_now = || async {
         let (s, b) = call(&r, Some(&who), "POST", "/teams/sync", None).await;
         assert_eq!(s, 202, "{b}");
@@ -249,16 +227,11 @@ async fn feishu_departments_and_users_become_the_org_chart() {
     // union_id is the account, open_id an extra handle of this connection; emails are mail accounts
     let alice = party_of(ids::ALICE.union_id);
     assert_eq!(
-        q(&format!(
-            "SELECT h.connection_id FROM account_handles h WHERE h.handle = '{}'",
-            ids::ALICE.open_id
-        )),
+        fixture::handle_connection(t.store(), ids::ALICE.open_id).unwrap(),
         "con_fs"
     );
     assert_eq!(
-        q(
-            "SELECT a.party_id FROM account_handles h JOIN accounts a ON a.id = h.account_id WHERE h.handle = 'alice@corp.example.com'"
-        ),
+        fixture::party(t.store(), "alice@corp.example.com").unwrap(),
         alice
     );
     let (_, c) = call(&r, Some(&who), "GET", &format!("/contacts/{alice}"), None).await;
@@ -295,10 +268,7 @@ async fn feishu_departments_and_users_become_the_org_chart() {
         "{rep:?}"
     );
     assert_eq!(
-        q(&format!(
-            "SELECT p.status FROM parties p JOIN team_details d ON d.party_id = p.id WHERE d.external_id = '{}'",
-            ids::DEPT_PLATFORM
-        )),
+        fixture::team_status(t.store(), ids::DEPT_PLATFORM).unwrap(),
         "dissolved"
     );
     assert_eq!(

@@ -5,12 +5,10 @@
 
 use std::collections::HashMap;
 
-use rusqlite::{Connection, OptionalExtension, params_from_iter};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use steve_modules::accounts::connections::repo as conn_repo;
 use steve_modules::{ApiError, Caller};
-use steve_store::base::{self, Viewer, Visibility};
+use steve_store::base::{Viewer, Visibility};
 
 use crate::attach::Refused;
 use crate::drafts::{DraftOut, draft_out};
@@ -28,44 +26,7 @@ pub const MAX_INLINE_TOTAL: usize = 15 * 1024 * 1024;
 /// The zh-CN text of `mail.original.purged`.
 pub const PURGED: &str = "原件已经过了本地保留期，请先重新取原件";
 
-/// The views of the list (需要处理 · 收件箱 · 等对方 · 已发送 · 草稿, and all).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum View {
-    /// Mail still in an inbox folder, not muted.
-    #[default]
-    Inbox,
-    /// `state = needs_reply`.
-    NeedsReply,
-    /// `state = waiting` (you replied last).
-    Waiting,
-    /// Threads with a message you sent.
-    Sent,
-    /// Threads with an unsent draft.
-    Drafts,
-    All,
-}
-
-impl View {
-    fn sql(self) -> &'static str {
-        match self {
-            View::Inbox => {
-                "t.state <> 'muted' AND EXISTS (SELECT 1 FROM mail_messages m JOIN mail_folders f
-                   ON f.connection_id = m.connection_id AND f.role = 'inbox'
-                   WHERE m.thread_id = t.id AND EXISTS (SELECT 1 FROM json_each(m.folders) j WHERE j.value = f.ext_id))"
-            }
-            View::NeedsReply => "t.state = 'needs_reply'",
-            View::Waiting => "t.state = 'waiting'",
-            View::Sent => {
-                "EXISTS (SELECT 1 FROM mail_messages m WHERE m.thread_id = t.id AND m.direction = 'out')"
-            }
-            View::Drafts => {
-                "EXISTS (SELECT 1 FROM mail_drafts d WHERE d.thread_id = t.id AND d.status IN ('draft', 'pending', 'approved', 'sending', 'failed', 'unknown'))"
-            }
-            View::All => "1",
-        }
-    }
-}
+pub use repo::View;
 
 /// `GET /mail/threads?account=&view=&q=&before=&limit=`.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -217,20 +178,9 @@ fn addr_list(v: &Value) -> Vec<AddrOut> {
 }
 
 /// The `LIKE` pattern of a search text (`%`, `_`, `\` escaped).
-fn like(q: &str) -> String {
-    let mut s = String::from("%");
-    for ch in q.chars() {
-        if matches!(ch, '%' | '_' | '\\') {
-            s.push('\\');
-        }
-        s.push(ch);
-    }
-    s.push('%');
-    s
-}
 
-fn current_org(c: &Connection, viewer: &Viewer, party: &str) -> Option<String> {
-    steve_modules::contacts::service::jobs(c, viewer, party)
+fn current_org(c: &mut impl steve_store::Read, viewer: &Viewer, party: &str) -> Option<String> {
+    steve_modules::contacts::service::jobs_in(c, viewer, party)
         .ok()?
         .into_iter()
         .find(|j| j.to.is_none())
@@ -238,13 +188,17 @@ fn current_org(c: &Connection, viewer: &Viewer, party: &str) -> Option<String> {
 }
 
 /// The brief of a thread the viewer sees.
-pub fn brief(c: &Connection, viewer: &Viewer, t: &ThreadRow) -> MailResult<ThreadBrief> {
+pub fn brief(
+    c: &mut impl steve_store::Read,
+    viewer: &Viewer,
+    t: &ThreadRow,
+) -> MailResult<ThreadBrief> {
     brief_with(c, viewer, t, &mut HashMap::new())
 }
 
 /// [`brief`] with the mailbox addresses looked up so far (a list shares a few mailboxes).
 fn brief_with(
-    c: &Connection,
+    c: &mut impl steve_store::Read,
     viewer: &Viewer,
     t: &ThreadRow,
     addresses: &mut HashMap<String, String>,
@@ -253,13 +207,8 @@ fn brief_with(
     let address = match addresses.get(&t.connection_id) {
         Some(a) => a.clone(),
         None => {
-            let a = conn_repo::get(c, &t.connection_id)?
-                .and_then(|r| {
-                    r.config
-                        .get("address")
-                        .and_then(Value::as_str)
-                        .map(String::from)
-                })
+            let a = steve_store::connections::config(c, &t.connection_id)?
+                .and_then(|r| r.get("address").and_then(Value::as_str).map(String::from))
                 .unwrap_or_default();
             addresses.insert(t.connection_id.clone(), a.clone());
             a
@@ -280,29 +229,15 @@ fn brief_with(
             .and_then(|p| current_org(c, viewer, p)),
     });
     let signal = match msgs.iter().rev().find_map(|m| m.event_id.clone()) {
-        Some(ev) => c
-            .prepare_cached(
-                "SELECT outcome_label FROM ext_events WHERE id = ? AND workspace_id = ?",
-            )?
-            .query_row([&ev, &t.workspace_id], |r| r.get::<_, String>(0))
-            .optional()?
-            .map(|label| SignalOut {
+        Some(ev) => {
+            steve_store::flow_repo::outcome_label(c, &t.workspace_id, &ev)?.map(|label| SignalOut {
                 event_id: ev,
                 outcome_label: label,
-            }),
+            })
+        }
         None => None,
     };
-    let draft = c
-        .prepare_cached(
-            "SELECT id, status FROM mail_drafts WHERE thread_id = ? AND status NOT IN ('sent', 'discarded') ORDER BY updated DESC, rowid DESC LIMIT 1",
-        )?
-        .query_row([&t.id], |r| {
-            Ok(DraftBrief {
-                id: r.get(0)?,
-                status: r.get(1)?,
-            })
-        })
-        .optional()?;
+    let draft = repo::latest_draft(c, &t.id)?.map(|(id, status)| DraftBrief { id, status });
     Ok(ThreadBrief {
         id: t.id.clone(),
         connection: ConnRef {
@@ -323,8 +258,8 @@ fn brief_with(
     })
 }
 
-fn message_out(c: &Connection, m: &MessageRow) -> MailResult<MessageOut> {
-    let attachments = parts_of(c, &m.id)?
+fn message_out(c: &mut impl steve_store::Read, m: &MessageRow) -> MailResult<MessageOut> {
+    let attachments = repo::parts_of(c, &m.id)?
         .into_iter()
         .map(|a| AttachmentOut {
             id: a.id,
@@ -355,60 +290,21 @@ fn message_out(c: &Connection, m: &MessageRow) -> MailResult<MessageOut> {
     })
 }
 
-/// A `mail_attachments` row with what serving inline parts needs.
-struct PartRow {
-    id: String,
-    part: String,
-    name: String,
-    mime: String,
-    size: i64,
-    content_id: Option<String>,
-    inline: bool,
-    file_id: Option<String>,
-}
-
-fn parts_of(c: &Connection, message: &str) -> MailResult<Vec<PartRow>> {
-    let mut st = c.prepare_cached(
-        "SELECT id, part, name, mime, size, content_id, inline, file_id FROM mail_attachments WHERE message_id = ? ORDER BY rowid",
-    )?;
-    Ok(st
-        .query_map([message], |r| {
-            Ok(PartRow {
-                id: r.get(0)?,
-                part: r.get(1)?,
-                name: r.get(2)?,
-                mime: r.get(3)?,
-                size: r.get(4)?,
-                content_id: r.get(5)?,
-                inline: r.get::<_, i64>(6)? != 0,
-                file_id: r.get(7)?,
-            })
-        })?
-        .collect::<rusqlite::Result<_>>()?)
-}
-
-fn linked_items(c: &Connection, ws: &str, thread: &str) -> MailResult<Vec<ItemRef>> {
-    let mut st = c.prepare_cached(
-        "SELECT i.id, i.title, i.status FROM links l JOIN items i ON i.id = l.subject_id AND i.workspace_id = l.workspace_id
-          WHERE l.workspace_id = ? AND l.subject_type = 'item' AND l.predicate = 'about'
-            AND l.object_type = 'mail_thread' AND l.object_id = ?
-          ORDER BY l.created, l.rowid",
-    )?;
-    let rows = st.query_map([ws, thread], |r| {
-        Ok(ItemRef {
-            id: r.get(0)?,
-            title: r.get(1)?,
-            status: r.get(2)?,
+fn linked_items(
+    c: &mut impl steve_store::Read,
+    ws: &str,
+    thread: &str,
+) -> MailResult<Vec<ItemRef>> {
+    use steve_store::{item_repo as items, link_repo as links};
+    let ids = links::item_subjects(c, ws, "about", "mail_thread", thread, false)?;
+    Ok(items::linked_items(c, ws, &ids)?
+        .into_iter()
+        .map(|item| ItemRef {
+            id: item.id,
+            title: item.title,
+            status: item.status,
         })
-    })?;
-    let mut out: Vec<ItemRef> = Vec::new();
-    for r in rows {
-        let r = r?;
-        if !out.iter().any(|x| x.id == r.id) {
-            out.push(r);
-        }
-    }
-    Ok(out)
+        .collect())
 }
 
 /// The Content-Security-Policy of a message's HTML: nothing loads, no scripts, inline styles
@@ -482,40 +378,16 @@ impl Mail {
             self.0.conns.get(who, a).map_err(MailError::from)?;
         }
         let viewer = self.viewer_of(who)?;
-        self.0.m.store.reader(|c| {
-            let mut sql = format!(
-                "SELECT {} FROM mail_threads t WHERE t.workspace_id = ?
-                   AND (? = 0 OR t.visibility = 'workspace') AND {}",
-                repo::THREAD_COLS,
-                q.view.sql()
-            );
-            let mut args: Vec<rusqlite::types::Value> =
-                vec![who.ws.clone().into(), i64::from(viewer.is_service()).into()];
-            if let Some(a) = &q.account {
-                sql.push_str(" AND t.connection_id = ?");
-                args.push(a.clone().into());
-            }
-            if let Some(s) = text {
-                sql.push_str(
-                    " AND (t.subject LIKE ?1x ESCAPE '\\' OR EXISTS (SELECT 1 FROM mail_messages m WHERE m.thread_id = t.id AND (m.from_name LIKE ?1x ESCAPE '\\' OR m.from_addr LIKE ?1x ESCAPE '\\' OR m.snippet LIKE ?1x ESCAPE '\\')))",
-                );
-                let p = like(s);
-                // positional parameters: one per placeholder
-                sql = sql.replace("?1x", "?");
-                for _ in 0..4 {
-                    args.push(p.clone().into());
-                }
-            }
-            if let Some(b) = q.before {
-                sql.push_str(" AND t.last_at < ?");
-                args.push(b.into());
-            }
-            sql.push_str(" ORDER BY t.last_at DESC, t.id DESC LIMIT ?");
-            args.push((limit as i64).into());
-            let threads: Vec<ThreadRow> = c
-                .prepare(&sql)?
-                .query_map(params_from_iter(args), repo::thread_row)?
-                .collect::<rusqlite::Result<_>>()?;
+        self.0.m.store.read(|c| {
+            let threads = repo::list_threads(
+                c,
+                &viewer,
+                q.view,
+                q.account.as_deref(),
+                text,
+                q.before,
+                limit as u64,
+            )?;
             let mut addresses = HashMap::new();
             threads
                 .iter()
@@ -527,7 +399,7 @@ impl Mail {
     /// `GET /mail/threads/:id`.
     pub fn thread_detail(&self, who: &Caller, id: &str) -> MailResult<ThreadDetail> {
         let viewer = self.viewer_of(who)?;
-        self.0.m.store.reader(|c| {
+        self.0.m.store.read(|c| {
             let t = self.own_thread(c, &viewer, id)?;
             let messages = repo::thread_messages(c, &t.id)?
                 .iter()
@@ -555,15 +427,14 @@ impl Mail {
         }
         let viewer = self.viewer_of(who)?;
         let now = self.now();
-        let (b, done) = self.0.m.store.transaction(|tx| -> MailResult<_> {
+        let (b, done) = self.0.m.store.write(|tx| -> MailResult<_> {
             let t = self.own_thread(tx, &viewer, id)?;
             let mut done = false;
             if let Some(s) = state
                 && s != t.state
             {
                 repo::set_thread_state(tx, &t.id, s, now)?;
-                base::audit(
-                    tx,
+                tx.audit(
                     &who.ws,
                     &who.me,
                     "mail_thread.patch",
@@ -573,9 +444,9 @@ impl Mail {
                 done = s == "done";
             }
             let t = repo::thread(tx, &t.id)?.ok_or_else(Self::nf_thread)?;
+            crate::events::emit_thread(tx, &who.ws, &t.id);
             Ok((brief(tx, &viewer, &t)?, done))
         })?;
-        self.0.notify.thread(&who.ws, &b.id);
         if done && tokio::runtime::Handle::try_current().is_ok() {
             let (m, ws, t) = (self.clone(), who.ws.clone(), b.id.clone());
             tokio::spawn(async move {
@@ -590,7 +461,7 @@ impl Mail {
     /// A message of a thread the caller sees, and its original's bytes (`410` when purged).
     fn own_message(&self, who: &Caller, id: &str) -> MailResult<(MessageRow, Option<Vec<u8>>)> {
         let viewer = self.viewer_of(who)?;
-        let m = self.0.m.store.reader(|c| -> MailResult<MessageRow> {
+        let m = self.0.m.store.read(|c| -> MailResult<MessageRow> {
             let m = repo::message(c, id)?
                 .filter(|m| m.workspace_id == who.ws)
                 .ok_or_else(|| MailError::from(ApiError::not_found("邮件")))?;
@@ -639,7 +510,7 @@ impl Mail {
             )));
         };
         let html = parse::html_body(&raw).ok_or_else(|| ApiError::not_found("HTML 正文"))?;
-        let atts = self.0.m.store.reader(|c| parts_of(c, &m.id))?;
+        let atts = self.0.m.store.read(|c| repo::parts_of(c, &m.id))?;
         let parts: Vec<(String, Part)> = atts
             .iter()
             .filter(|a| a.mime.starts_with("image/"))
@@ -675,7 +546,7 @@ impl Mail {
             .0
             .m
             .store
-            .reader(|c| parts_of(c, &m.id))?
+            .read(|c| repo::parts_of(c, &m.id))?
             .into_iter()
             .find(|a| a.content_id.as_deref() == Some(cid))
             .ok_or_else(|| MailError::from(ApiError::not_found("图片")))?;
@@ -756,6 +627,5 @@ mod tests {
             "default-src 'none'; style-src 'unsafe-inline'; img-src data: cid:; sandbox"
         );
         assert!(csp(true).contains("img-src data: cid: https:;"));
-        assert_eq!(like("50%_a\\"), "%50\\%\\_a\\\\%");
     }
 }

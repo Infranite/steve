@@ -12,6 +12,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
+use steve_store::github::fixtures::{FixtureValue, Inspect, Seed};
 
 use axum::Router;
 use axum::body::Body;
@@ -92,22 +93,8 @@ async fn nav(r: &Router, who: &Caller, uri: &str) -> (u16, String) {
     (res.status().as_u16(), loc)
 }
 
-fn q(h: &H, sql: &str, p: &[&dyn rusqlite::ToSql]) -> Value {
-    h.env
-        .store()
-        .reader(|c| {
-            c.query_row(sql, p, |r| {
-                Ok(match r.get_ref(0)? {
-                    rusqlite::types::ValueRef::Null => Value::Null,
-                    rusqlite::types::ValueRef::Integer(i) => json!(i),
-                    rusqlite::types::ValueRef::Real(f) => json!(f),
-                    rusqlite::types::ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
-                    rusqlite::types::ValueRef::Blob(_) => json!("<blob>"),
-                })
-            })
-            .map_err(steve_store::StoreError::from)
-        })
-        .expect(sql)
+fn q(h: &H, field: Inspect, p: &[&dyn FixtureValue]) -> Value {
+    field.read(h.env.store(), p).expect("fixture assertion")
 }
 
 fn assert_analysis_category(h: &H, item: &str) {
@@ -218,21 +205,18 @@ async fn setup() -> H {
     fake.set_webhook_target(&format!("http://{addr}/hooks/github"));
 
     env.store()
-        .with_conn(|c| {
-            c.execute(
-                "INSERT INTO projects (id, workspace_id, name, path, kind, created, updated) VALUES (?, ?, 'Demo', ?, 'git', 1, 1)",
-                rusqlite::params![PROJECT, WS, w.display().to_string()],
-            )?;
+        .write::<_, steve_store::StoreError>(|c| {
+            Seed::InsertProjects2.apply(c, &[&PROJECT, &WS, &w.display().to_string()])?;
             Ok(())
         })
         .expect("project");
 
-    env.store().with_conn(|c| {
-        c.execute_batch("INSERT INTO bots (id, workspace_id, name, main, harness, enabled, updated)
-            VALUES ('steve', 'default', 'Steve', 1, 'claude-code', 1, 1);
-            INSERT INTO bot_workspaces (bot_id, workspace_id, created) VALUES ('steve', 'default', 1);")?;
-        Ok(())
-    }).expect("main bot");
+    env.store()
+        .write::<_, steve_store::StoreError>(|c| {
+            Seed::InsertBots.apply(c, &[])?;
+            Ok(())
+        })
+        .expect("main bot");
 
     let mut h = H {
         env,
@@ -293,14 +277,10 @@ async fn install(h: &H) -> String {
     )
     .await;
     assert_eq!(s, 302);
-    q(
-        h,
-        "SELECT id FROM connections WHERE adapter = 'github_app'",
-        &[],
-    )
-    .as_str()
-    .expect("connection")
-    .to_string()
+    q(h, Inspect::ConnectionsId2, &[])
+        .as_str()
+        .expect("connection")
+        .to_string()
 }
 
 /// An item of the project, delivered: its acceptance decision carries the summary.
@@ -309,33 +289,26 @@ fn item(h: &H, no: i64, branch: Option<&str>) -> String {
     let cwd = h.work.path().display().to_string();
     h.env
         .store()
-        .with_conn(|c| {
-            c.execute(
-                "INSERT INTO items (id, workspace_id, no, title, status, stage, cwd, branch, project_id, created, updated)
-                 VALUES (?, ?, ?, '保留 return_to 参数', 'wait', '交付与验收', ?, ?, ?, 1, 1)",
-                rusqlite::params![id, WS, no, cwd, branch, PROJECT],
-            )?;
+        .write::<_, steve_store::StoreError>(|c| {
+            Seed::InsertItems.apply(c, &[&id, &WS, &no, &cwd, &branch, &PROJECT])?;
             Ok(())
         })
         .expect("item");
     h.env
         .store()
-        .transaction(|tx| {
-            steve_store::base::decisions::open(
-                tx,
-                &NewDecision {
-                    workspace_id: WS.into(),
-                    kind: "accept".into(),
-                    subject_type: "item".into(),
-                    subject_id: id.clone(),
-                    item_id: Some(id.clone()),
-                    session_id: None,
-                    question: "做完了，请验收".into(),
-                    draft: Some("登录后回到原来的页面。\n✓ 单元测试".into()),
-                    options: Some(vec!["pass".into(), "rework".into()]),
-                    requested_by: "steve".into(),
-                },
-            )
+        .write(|tx| {
+            steve_store::DecisionRows(tx).open(&NewDecision {
+                workspace_id: WS.into(),
+                kind: "accept".into(),
+                subject_type: "item".into(),
+                subject_id: id.clone(),
+                item_id: Some(id.clone()),
+                session_id: None,
+                question: "做完了，请验收".into(),
+                draft: Some("登录后回到原来的页面。\n✓ 单元测试".into()),
+                options: Some(vec!["pass".into(), "rework".into()]),
+                requested_by: "steve".into(),
+            })
         })
         .expect("accept decision");
     id
@@ -348,19 +321,7 @@ async fn accepted(h: &H, id: &str) -> bool {
 }
 
 fn open_decision(h: &H, subject_type: &str) -> Option<(String, String, String)> {
-    h.env
-        .store()
-        .reader(|c| {
-            Ok::<_, steve_store::StoreError>(
-                c.query_row(
-                    "SELECT id, question, draft FROM decisions WHERE subject_type = ? AND status = 'open'",
-                    [subject_type],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )
-                .ok(),
-            )
-        })
-        .expect("decision")
+    steve_store::github::fixtures::open_decision(h.env.store(), subject_type).expect("decision")
 }
 
 /// `POST /api/decisions/:id` for a module decision (what steve-hub does), then the effects.
@@ -434,7 +395,7 @@ async fn a_pr_is_linked_by_branch_and_by_reference() {
     let link = |n: u64| {
         q(
             &h,
-            "SELECT coalesce(item_id, '-') || '|' || coalesce(link_source, '-') FROM gh_prs WHERE number = ?",
+            Inspect::GhPrsCoalesceItemIdCoalesceLinkSource,
             &[&(n as i64)],
         )
     };
@@ -442,49 +403,23 @@ async fn a_pr_is_linked_by_branch_and_by_reference() {
     assert_eq!(link(n2), json!(format!("{b}|ref")));
     assert_eq!(link(n3), json!("-|-"));
     // the link, the artifact and the timeline line
+    assert_eq!(q(&h, Inspect::LinksCount, &[&a]), json!(1));
     assert_eq!(
-        q(
-            &h,
-            "SELECT count(*) FROM links WHERE subject_type = 'item' AND subject_id = ? AND predicate = 'output' AND object_type = 'gh_pr'",
-            &[&a]
-        ),
-        json!(1)
-    );
-    assert_eq!(
-        q(
-            &h,
-            "SELECT title FROM artifacts WHERE item_id = ? AND kind = 'PR'",
-            &[&a]
-        ),
+        q(&h, Inspect::ArtifactsTitle, &[&a]),
         json!(format!("#{n1} fix: return_to"))
     );
     assert_eq!(
-        q(
-            &h,
-            "SELECT actor || ' ' || kind || ' ' || text FROM timeline WHERE item_id = ?",
-            &[&b]
-        ),
+        q(&h, Inspect::TimelineActorKindText, &[&b]),
         json!(format!("steve sys 关联了 PR #{n2}（{REPO}）"))
     );
     // seeing it again changes nothing
     h.gh.poll_repo(&h.repo).await.expect("poll");
     h.gh.settle().await;
-    assert_eq!(
-        q(
-            &h,
-            "SELECT count(*) FROM timeline WHERE item_id IN (?, ?)",
-            &[&a, &b]
-        ),
-        json!(2)
-    );
+    assert_eq!(q(&h, Inspect::TimelineCount, &[&a, &b]), json!(2));
 
     // by hand: link the third to ST-1, then unlink the first (it stays unlinked)
     let me = caller(WS, ME);
-    let id3 = q(
-        &h,
-        "SELECT id FROM gh_prs WHERE number = ?",
-        &[&(n3 as i64)],
-    );
+    let id3 = q(&h, Inspect::GhPrsId, &[&(n3 as i64)]);
     let (s, v) = call(
         &h.api,
         Some(&me),
@@ -498,11 +433,7 @@ async fn a_pr_is_linked_by_branch_and_by_reference() {
         (v["item"]["id"].clone(), v["link_source"].clone()),
         (json!(a), json!("manual"))
     );
-    let id1 = q(
-        &h,
-        "SELECT id FROM gh_prs WHERE number = ?",
-        &[&(n1 as i64)],
-    );
+    let id1 = q(&h, Inspect::GhPrsId, &[&(n1 as i64)]);
     let (s, v) = call(
         &h.api,
         Some(&me),
@@ -566,13 +497,13 @@ async fn accepting_asks_first_and_no_pushes_or_opens_nothing() {
     let d = h
         .env
         .store()
-        .reader(|c| steve_store::base::decisions::get(c, &dec))
+        .read(|c| steve_store::decision_repo::get(c, &dec))
         .expect("get")
         .expect("decision");
     let refused = h
         .env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             Ok::<_, steve_modules::ApiError>(h.env.modules.registry.before_undo(tx, &d).is_err())
         })
         .expect("tx");
@@ -608,25 +539,17 @@ async fn yes_pushes_the_branch_and_opens_the_pr() {
     assert_eq!(
         q(
             &h,
-            "SELECT item_id || '|' || link_source || '|' || opened_by || '|' || head_sha FROM gh_prs WHERE number = ?",
+            Inspect::GhPrsItemIdLinkSourceOpenedByHeadSha,
             &[&(n as i64)]
         ),
         json!(format!("{id}|steve|steve|{sha}"))
     );
     assert_eq!(
-        q(
-            &h,
-            "SELECT title || ' ' || location FROM artifacts WHERE item_id = ? AND kind = 'PR'",
-            &[&id]
-        ),
+        q(&h, Inspect::ArtifactsTitleLocation, &[&id]),
         json!(format!("#{n} fix: 保留 return_to {}", pr_url(&h)))
     );
     assert_eq!(
-        q(
-            &h,
-            "SELECT text FROM timeline WHERE item_id = ? ORDER BY id DESC LIMIT 1",
-            &[&id]
-        ),
+        q(&h, Inspect::TimelineText, &[&id]),
         json!(format!("开了 PR #{n}"))
     );
     assert_eq!(
@@ -647,11 +570,7 @@ async fn yes_pushes_the_branch_and_opens_the_pr() {
 
 /// A `pull_request` webhook about PR `n` as the fake renders it.
 async fn pr_event(h: &H, n: u64, action: &str) {
-    let conn_id = q(
-        h,
-        "SELECT id FROM connections WHERE adapter = 'github_app'",
-        &[],
-    );
+    let conn_id = q(h, Inspect::ConnectionsId2, &[]);
     let conn = h.gh.conn(WS, conn_id.as_str().expect("id")).expect("conn");
     let pr = conn
         .get_if_changed(&format!("/repos/{REPO}/pulls/{n}"), None)
@@ -671,17 +590,13 @@ async fn pr_event(h: &H, n: u64, action: &str) {
 
 /// The number of the PR Steve opened.
 fn steve_pr(h: &H) -> u64 {
-    q(
-        h,
-        "SELECT number FROM gh_prs WHERE opened_by = 'steve'",
-        &[],
-    )
-    .as_u64()
-    .expect("Steve's PR")
+    q(h, Inspect::GhPrsNumber, &[])
+        .as_u64()
+        .expect("Steve's PR")
 }
 
 fn pr_url(h: &H) -> String {
-    q(h, "SELECT url FROM gh_prs WHERE opened_by = 'steve'", &[])
+    q(h, Inspect::GhPrsUrl, &[])
         .as_str()
         .unwrap_or_default()
         .to_string()
@@ -741,14 +656,7 @@ async fn finish_on_merged_asks_to_merge_when_green_and_409s_a_new_head() {
         draft,
         format!("✓ build\n合并方式：squash，合并后删除分支 {BRANCH}")
     );
-    assert_eq!(
-        q(
-            &h,
-            "SELECT count(*) FROM decisions WHERE subject_type = 'gh_pr_merge'",
-            &[]
-        ),
-        json!(1)
-    );
+    assert_eq!(q(&h, Inspect::DecisionsCount2, &[]), json!(1));
 
     // a new commit lands on the PR: its checks are not green → 409, nothing merged
     let w = h.work.path();
@@ -761,11 +669,7 @@ async fn finish_on_merged_asks_to_merge_when_green_and_409s_a_new_head() {
     h.fake.push_to_pr(REPO, n, new_sha);
     pr_event(&h, n, "synchronize").await;
     assert_eq!(
-        q(
-            &h,
-            "SELECT head_sha || '|' || checks_state FROM gh_prs WHERE number = ?",
-            &[&(n as i64)]
-        ),
+        q(&h, Inspect::GhPrsHeadShaChecksState2, &[&(n as i64)]),
         json!(format!("{new_sha}|none"))
     );
     let err = answer(&h, &merge, "yes", "").await.expect_err("409");
@@ -778,27 +682,13 @@ async fn finish_on_merged_asks_to_merge_when_green_and_409s_a_new_head() {
     h.fake.set_check(REPO, new_sha, "build", Some("success"));
     h.gh.poll_repo(&h.repo).await.expect("poll");
     h.gh.settle().await;
-    assert_eq!(
-        q(
-            &h,
-            "SELECT count(*) FROM decisions WHERE subject_type = 'gh_pr_merge'",
-            &[]
-        ),
-        json!(1)
-    );
+    assert_eq!(q(&h, Inspect::DecisionsCount2, &[]), json!(1));
     let r = answer(&h, &merge, "yes", "").await.expect("yes");
     assert_eq!(r["sha"], json!(new_sha));
     let pr = h.fake.pull(REPO, n).expect("pr");
     assert!(pr.merged);
     assert_eq!(pushed(&h), None, "branch deleted after the merge");
-    assert_eq!(
-        q(
-            &h,
-            "SELECT state FROM gh_prs WHERE number = ?",
-            &[&(n as i64)]
-        ),
-        json!("merged")
-    );
+    assert_eq!(q(&h, Inspect::GhPrsState2, &[&(n as i64)]), json!("merged"));
     let finishes: Vec<_> = h
         .core
         .calls()
@@ -825,11 +715,8 @@ async fn no_pr_question_for_a_release_project_or_without_new_commits() {
     // a release action: the release path wraps up, not GitHub
     h.env
         .store()
-        .with_conn(|c| {
-            Ok(c.execute(
-                "UPDATE projects SET release = './release.sh' WHERE id = ?",
-                [PROJECT],
-            )?)
+        .write::<_, steve_store::StoreError>(|c| {
+            Ok(Seed::UpdateProjectsRelease.apply(c, &[&PROJECT])?)
         })
         .expect("release");
     let b = item(&h, 1, Some(BRANCH));
@@ -843,11 +730,7 @@ async fn no_pr_question_for_a_release_project_or_without_new_commits() {
 async fn a_failed_check_supplements_the_item_through_the_template() {
     let h = setup().await;
     assert_eq!(
-        q(
-            &h,
-            "SELECT name || '|' || origin || '|' || enabled FROM flows WHERE origin = 'template:github'",
-            &[]
-        ),
+        q(&h, Inspect::FlowsNameOriginEnabled, &[]),
         json!("PR 检查失败|template:github|1")
     );
     let id = item(&h, 1, Some(BRANCH));
@@ -909,11 +792,7 @@ async fn a_worktree_whose_origin_is_elsewhere_is_not_pushed() {
 }
 
 fn effect(h: &H, dec: &str) -> (String, i64) {
-    let v = q(
-        h,
-        "SELECT state || '|' || attempts FROM gh_effects WHERE decision_id = ?",
-        &[&dec],
-    );
+    let v = q(h, Inspect::GhEffectsStateAttempts, &[&dec]);
     let s = v.as_str().expect("effect").to_string();
     let (st, n) = s.split_once('|').expect("pair");
     (st.to_string(), n.parse().expect("attempts"))
@@ -970,11 +849,8 @@ async fn a_write_a_restart_interrupted_is_reconciled() {
     // as if the Hub had stopped after GitHub opened it and before the row said so
     h.env
         .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE gh_effects SET state = 'running' WHERE decision_id = ?",
-                [&dec],
-            )?;
+        .write::<_, steve_store::StoreError>(|c| {
+            Seed::UpdateGhEffectsState.apply(c, &[&&dec])?;
             Ok(())
         })
         .unwrap();
@@ -1002,14 +878,7 @@ async fn no_answer_no_write() {
     assert!(accepted(&h, &id).await);
     let (dec, _, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
     h.gh.settle().await;
-    assert_eq!(
-        q(
-            &h,
-            "SELECT count(*) FROM gh_effects WHERE decision_id = ?",
-            &[&dec]
-        ),
-        json!(0)
-    );
+    assert_eq!(q(&h, Inspect::GhEffectsCount, &[&dec]), json!(0));
     assert_eq!(h.fake.pulls_of(REPO, BRANCH), 0);
 }
 
@@ -1057,16 +926,13 @@ async fn an_approved_write_waits_for_a_paused_connection() {
     let id = item(&h, 1, Some(BRANCH));
     assert!(accepted(&h, &id).await);
     let (dec, _, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
-    let conn = q(&h, "SELECT connection_id FROM gh_repos LIMIT 1", &[]);
+    let conn = q(&h, Inspect::GhReposConnectionId, &[]);
     let conn = conn.as_str().expect("connection").to_string();
     let set = |status: &str| {
         h.env
             .store()
-            .with_conn(|c| {
-                c.execute(
-                    "UPDATE connections SET status = ? WHERE id = ?",
-                    [status, &conn],
-                )?;
+            .write::<_, steve_store::StoreError>(|c| {
+                Seed::UpdateConnectionsStatus.apply(c, &[&status, &&conn])?;
                 Ok(())
             })
             .unwrap();
@@ -1267,19 +1133,12 @@ async fn open_pr_on_a_private_repo_opens_a_draft_without_a_card() {
     assert_eq!(
         q(
             &h,
-            "SELECT status || ' ' || json_extract(result, '$.choice') || ' ' || json_extract(result, '$.auto') FROM decisions WHERE subject_type = 'gh_pr_open'",
+            Inspect::DecisionsStatusJsonExtractResultChoiceJsonExtractResult,
             &[]
         ),
         json!("resolved yes after_accept")
     );
-    assert_eq!(
-        q(
-            &h,
-            "SELECT count(*) FROM timeline WHERE item_id = ? AND text LIKE '验收后自动开草稿 PR%'",
-            &[&id]
-        ),
-        json!(1)
-    );
+    assert_eq!(q(&h, Inspect::TimelineCount2, &[&id]), json!(1));
     assert_eq!(
         h.core.calls().last(),
         Some(&CoreCall::Finish {
@@ -1295,7 +1154,7 @@ async fn open_pr_on_a_public_repo_still_asks() {
     open_pr_on_accept(&h).await;
     h.env
         .store()
-        .with_conn(|c| Ok(c.execute("UPDATE gh_repos SET private = 0", [])?))
+        .write::<_, steve_store::StoreError>(|c| Ok(Seed::UpdateGhReposPrivate.apply(c, &[])?))
         .expect("public");
     let id = item(&h, 1, Some(BRANCH));
     assert!(accepted(&h, &id).await);
@@ -1320,7 +1179,7 @@ async fn open_pr_on_a_repo_made_public_since_linking_asks() {
     h.gh.settle().await;
     assert_eq!(pushed(&h), None);
     assert_eq!(pull_posts(&h), 0);
-    assert_eq!(q(&h, "SELECT private FROM gh_repos", &[]), json!(0));
+    assert_eq!(q(&h, Inspect::GhReposPrivate, &[]), json!(0));
 }
 
 /// GitHub not answering the visibility question is not "private": the card comes back.
@@ -1348,7 +1207,7 @@ async fn the_pr_card_through_a_pat_says_it_posts_as_your_account() {
     let h = setup().await;
     h.env
         .store()
-        .with_conn(|c| Ok(c.execute("UPDATE connections SET adapter = 'github_pat'", [])?))
+        .write::<_, steve_store::StoreError>(|c| Ok(Seed::UpdateConnectionsAdapter.apply(c, &[])?))
         .expect("pat");
     let id = item(&h, 1, Some(BRANCH));
     assert!(accepted(&h, &id).await);
@@ -1397,14 +1256,7 @@ async fn comments_on_a_linked_pr_reach_its_item_once() {
         .expect("pr");
     h.gh.poll_repo(&h.repo).await.expect("poll");
     h.gh.settle().await;
-    assert_eq!(
-        q(
-            &h,
-            "SELECT item_id FROM gh_prs WHERE number = ?",
-            &[&(n as i64)]
-        ),
-        json!(id)
-    );
+    assert_eq!(q(&h, Inspect::GhPrsItemId, &[&(n as i64)]), json!(id));
     let comment = |cid: i64, who: &str, assoc: &str, body: &str| {
         json!({
             "action": "created",
@@ -1497,7 +1349,7 @@ async fn github_object(h: &H, kind: &str, n: u64) -> Value {
     let repo = h
         .env
         .store()
-        .reader(|c| steve_github::repo::repo_get(c, &h.repo).map_err(steve_modules::ApiError::from))
+        .read(|c| steve_store::github::repo_get(c, &h.repo).map_err(steve_modules::ApiError::from))
         .unwrap()
         .unwrap();
     h.gh.conn(WS, &repo.connection_id)
@@ -1579,14 +1431,7 @@ async fn repo_analysis_has_independent_switches_dedupes_and_never_posts_without_
     assert_eq!(dup["reason"], "duplicate");
     assert_eq!(dup["runs"][0]["item_id"], item);
     assert_eq!(h.env.gateway.calls.lock().unwrap().len(), 1);
-    assert_eq!(
-        q(
-            &h,
-            "SELECT count(*) FROM sessions WHERE item_id = ?",
-            &[&item]
-        ),
-        0
-    );
+    assert_eq!(q(&h, Inspect::SessionsCount, &[&item]), 0);
 
     let path = format!("/github/analysis/{item}/comment-draft");
     let (status, d) = call(&h.api, Some(&me), "POST", &path, Some(&json!({}))).await;

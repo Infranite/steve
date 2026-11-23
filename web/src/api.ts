@@ -1,5 +1,6 @@
+import type { MessageView } from "@/gen"
 import type { Code, Reason, Params } from "./gen"
-import type { BusEvent, Envelope, StreamControl } from "./gen"
+import type { BusEvent, Envelope, StreamControl, ById, DecisionView, PageOf, Snapshot, ItemView, SessionView, OptionalModules } from "./gen"
 /* Hub API: raw shapes (as the Hub's store returns them) and calls. store.ts maps them onto the view model. */
 import { lang, t } from "@/i18n"
 import { reasonText } from "./i18n/reason.ts"
@@ -10,22 +11,7 @@ import type { Workflow } from "./workflow"
 import type { Delivery, DeliveryShare } from "./delivery"
 export type ItemStatus = "prop" | "run" | "wait" | "pause" | "done" | "drop" | "fail" | "block"
 export type PlanStep = { step: string; done: boolean; left?: boolean }
-export type Closeout = {
-  status: "syncing" | "sync_failed" | "no_pr" | "waiting_checks" | "checks_failed" | "conflict" | "behind" | "draft"
-    | "head" | "uncommitted" | "accepted_unknown" | "closed" | "waiting_github" | "waiting_result" | "ready"
-    | "merge_retry" | "merge_method" | "awaiting_approval" | "manual_merge" | "merged"
-  next_owner: "steve" | "agent" | "user" | "none"
-  pr: { number: number; url: string; head: string; state: string; checks: { passed: number; pending: number; failed: number; other: number; failing: string[] } | null } | null
-  last_success_at: number | null; sync_error: string | null; merge_error: string | null
-}
-export type RItem = {
-  id: string; workspace_id: string; no: number; title: string; status: ItemStatus; stage: string; bot_id: string | null; project_id: string | null; cwd: string | null; branch: string | null
-  plan: PlanStep[]; now: string; accept_mode: string | null; priority: string; archived: boolean; star: boolean; due: string | null; snooze: { label: string; until: number } | null
-  source: [string, string]; parent: { item?: string | null; session?: string | null; at?: number | null } | null; design_gate?: boolean; phase?: "ready" | "active" | "closing" | "closed"; cycle?: number; created: number; updated: number
-  goal: string; goals: number; tags: string[]; deps: string[]; sessionIds: string[]; open: string[]; queued: number; live: boolean
-  closeout?: Closeout
-  workflow_paused?: boolean; workflow_cycle?: number; workflow_failed?: string[]; workflow_attempt?: number; workflow_superseded?: boolean
-}
+export type { Closeout } from "./gen"
 export type DependencyWait = {
   item_id: string; status: ItemStatus; phase: string; cycle: number
   dependencies: { id: string; status: string | null; phase: string | null }[]; open_dependencies: string[]
@@ -35,7 +21,7 @@ export type DependencyWait = {
   waiting: boolean; wait_state: string | null; reason: string | null; active_turn: boolean
   can_register: boolean; register_blocker: string | null
 }
-export type RItemDetail = RItem & { goalsList: { version: number; text: string; created: number }[]; planRounds?: { round: number; steps: PlanStep[]; end: "done" | "replaced"; created: number }[]; timeline: { id: number; ts: number; actor: string; kind: string; text: string; session_id: string | null; files?: RFile[]; via?: string }[]; artifacts: { id: string; kind: string; title: string; location: string | null; created: number; delivery_id: string | null }[]; decisions: RDecision[]; dependents: string[]
+export type RItemDetail = { id: string; status: ItemStatus; now?: string; source?: [string, string]; cwd?: string | null; branch?: string | null; plan: PlanStep[]; goalsList: { version: number; text: string; created: number }[]; planRounds?: { round: number; steps: PlanStep[]; end: "done" | "replaced"; created: number }[]; timeline: { id: number; ts: number; actor: string; kind: string; text: string; session_id: string | null; files?: RFile[]; via?: string }[]; artifacts: { id: string; kind: string; title: string; location: string | null; created: number; delivery_id: string | null }[]; decisions: DecisionView[]; dependents: string[]
   workflow?: Workflow | null
   dependency_wait?: DependencyWait | null
   dispatch?: ItemDispatch
@@ -45,18 +31,12 @@ export type RItemDetail = RItem & { goalsList: { version: number; text: string; 
   annotations?: RAnnotation[]
   /** the item came from the main conversation (thread-routing §5): whether it reports back there */
   thread?: { follow: boolean; origin_msg: string } | null }
-export type RSession = { id: string; workspace_id: string; item_id: string | null; no: number; bot_id: string | null; harness: string; model: string | null; reasoning_effort?: string | null; cwd: string; harness_session_id?: string | null; status: "starting" | "running" | "idle" | "ended" | "error"; used: number | null; size: number | null; cost: number | null; title: string; device_id: string; source: string; readonly: boolean; busy: boolean; queued: RQueued[]; /** its next turn waits: its device runs as many as its owner set */ room?: RRoom | null; created: number; updated: number }
 /** a message waiting for the session's next turn */
 export type RQueued = { id: string; session_id?: string; text: string; via: string; created: number; files?: RFile[] }
 /** a suggestion card's choice: `here` answers in place, `item` makes the item (or, carrying `item`, appends to that one), `new` makes an item of its own */
 export type SuggestChoice = "here" | "item" | "new"
 export type SendNowResult = { result: "interrupted" | "sent" | "waiting"; reason?: string }
-export type RDecision = { id: string; kind: "accept" | "ask" | "approve" | "fail" | "propose" | "confirm"; subject_type: string; subject_id: string; item_id: string | null; session_id: string | null; question: string; draft: string; options: string[]; status: "open" | "resolved" | "expired"; result: any; requested_by: string; created: number; resolved: number | null; undo: any
-  /** opened from inside a turn that is still going: the answer reaches the agent once it stops */
-  agent_busy?: boolean
-  /** a decision about a chat message: opens it (or its chat) in the platform's own client (newer Hubs) */
-  open_url?: string }
-export type RBot = { selection_validation?: "supported" | "unsupported" | "unknown" | "default"; id: string; name: string; role: string; main: boolean; harness: string; model: string | null; reasoning_effort?: string | null; rules: string; persona: string; proactive: number; accept_mode: string; perm_mode: string; avatar: { color?: string; skin?: string | null; round?: number }; default_project: string | null; prompt: string | null; device: string | null; enabled: boolean; revision: number; updated: number; workspaces: string[]; memories: number }
+export type RBot = { selection_validation?: "supported" | "unsupported" | "unknown" | "default"; id: string; name: string; role: string; main: boolean; harness: string; model: string | null; reasoning_effort?: string | null; rules: string; persona: string; proactive: number; accept_mode: string; perm_mode: string; avatar: { color?: string; skin?: string | null; round?: number }; default_project: string | null; prompt: string | null; device: string | null; enabled: boolean; revision: number; updated: number; workspaces: string[] }
 /** GET /sessions/:id/resume: the harness's own session, how to resume it there, and whether its transcript is on the Hub's machine */
 export type RResume = { harness: string; id: string | null; cwd: string; cwd_exists: boolean; command: string | null; fork_command?: string | null; transcript_checked?: boolean; transcript: { path: string; updated: number | null; id: string | null; cwd: string | null; matches: boolean } | null }
 export type RProject = { id: string; workspace_id: string; name: string; description: string; device_id: string; path: string; kind: "git" | "dir"; worktree: boolean; default_bot: string | null; release: { kind: string; cmd: string; done_when?: "merge" | "tag" } | null; archived: boolean; created: number; updated: number }
@@ -68,9 +48,8 @@ export type ProjectSetup = Omit<NewProjectInput, "path"> & ProjectDestination & 
 export type CloneProgress = { phase: "connecting" | "receiving" | "resolving" | "checkout" | "registering"; percent?: number }
 export type RWorkspace = { id: string; name: string; description: string; item_prefix: string; sort: number; created: number; role?: string }
 export type RTag = { id: string; name: string; cat: string; description: string; created_by: string; created: number }
-export type RMessage = { id: string; author: "me" | "steve"; text: string; item_id: string | null; meta: any; created: number }
+export type ConversationMessage = { id: string; author: "me" | "steve"; text: string; item_id: string | null; meta: any; created: number }
 /** a device's room for sessions as the Hub keeps to it: running now, at most `max` (its saved concurrent-turn limit, 1–256), the rest waiting */
-export type RRoom = { running: number; max: number; waiting: number; reason?: "capacity" | "node"; /** actual Node refusal, not a guessed capacity cause */ detail?: string | null }
 /** the most a device may be set to run at once */
 export const SESSIONS_MAX = 256
 export type RDevice = { id: string; name: string; roles: string[]; os: string; version: string; status: string; max_sessions: number; seen: number; created: number; revision?: number; node_id?: string | null; can_configure?: boolean; connected?: boolean | null; config_reason?: string; eligibility?: { state: "eligible" | "ineligible" | "unknown"; reason: string }; occupancy?: number | null; running?: number; waiting?: number }
@@ -143,21 +122,20 @@ export type RNodeHarnessReport = {
   checked_at: number | null; attempted_at: number | null; stale: boolean; refreshing: boolean
   error: string | null; harnesses: RNodeHarness[]
 }
+export type RTranscriptPage = { events: REvent[]; next: number | null }
 export type REvent = { seq: number; ts: number; kind: string; data: any }
 export type Proposal = { id: string; title: string; target: { kind: string; id?: string }; href: string; changes: { label: string; from: string; to: string }[]; patch?: Record<string, unknown> }
 export type LocalSession = { key: string; harness: string; title: string; cwd: string; when: number; size: number; imported: boolean }
 /** a newer Steve release the Hub's last version check found (`owner`: this user may install it) */
 export type StateUpdate = { version: string; owner: boolean }
-export type State = {
-  version: string; web_version: string; /** the user is the instance's owner */ owner?: boolean; update?: StateUpdate | null; workspace: RWorkspace; workspaces: RWorkspace[]; items: RItem[]; decisions: RDecision[]; recent: RDecision[]; bots: RBot[]; allBots: { id: string; name: string; workspaces: string[] }[]
-  projects: RProject[]; tags: RTag[]; tagUses: Record<string, number>; thread: RMessage[]; settings: Record<string, string>; sessions: RSession[]; devices: RDevice[]; runtimes: RRuntime[]
-  /* notifications (release results, auto-archive, system notices), newest first; notifySeen = read cursor (ms) */
-  notifications?: RNotice[]; notifySeen?: number
-  /* Steve is on a turn in the main conversation (routing, answering, or messages waiting their turn) */
-  thinking?: boolean
-  /** the Hub holds new turns for a release: the releasing item, turns it still waits for, since (ms) */
-  hold?: RHold | null
+export type Shell = {
+  modules: OptionalModules
+  version: string; web_version: string; /** the user is the instance's owner */ owner?: boolean; update?: StateUpdate | null; workspace: RWorkspace; workspaces: RWorkspace[]; bots: RBot[]; allBots: { id: string; name: string; workspaces: string[] }[]
+  projects: RProject[]; tags: RTag[]; settings: Record<string, string>
+  harnessNames?: Record<string, string>
+  notifySeen?: number
 }
+export type Summary = { ws: string; workspace_name: string; thinking: boolean; hold: RHold | null }
 export type RHold = { item: string; running: number; since: number }
 export type RNotice = { id: string; kind: "release" | "archive" | "system"; level: "info" | "success" | "fail"; text: string; item_id: string | null; created: number; closed?: boolean }
 export type HubEvent = Envelope<BusEvent> | StreamControl
@@ -228,7 +206,22 @@ async function req<T>(method: string, path: string, body?: unknown, seen?: (r: R
   if (j === CUT) throw new Error(t("shell:http.incomplete")) // a cut-off body used to come back as {} and break the caller silently
   if (!r.ok) throw new Error(j.error ?? t("shell:http.failed", { status: r.status }))
   seen?.(r)
+  const rev = Number(r.headers.get("x-steve-rev"))
+  if (rev > 0 && j && typeof j === "object") writeRevs.set(j, rev)
   return j as T
+}
+/** what a command on a decision answers: the decision as it now stands */
+export type DecisionAnswer = { id: string; status: string; kind: string; subject_type: string; result?: any }
+/* the newest revision a command committed (`x-steve-rev`), by its answer: the views catch up to it (data/sync.ts) */
+const writeRevs = new WeakMap<object, number>()
+export const revOf = (answer: unknown): number => (answer && typeof answer === "object" ? writeRevs.get(answer) ?? 0 : 0)
+/** `GET /api/snapshot`: `null` when it did not change since `etag` (304) */
+async function snapshot(kinds: string, etag?: string): Promise<{ snapshot: Snapshot; etag: string } | null> {
+  const r = await fetch(hubUrl(`/api/snapshot?kinds=${kinds}`), { headers: wsHeaders(etag ? { "if-none-match": etag } : {}), credentials: "include", cache: "no-store", signal: AbortSignal.timeout(30_000) }).catch(refused)
+  if (r.status === 401) { const j = await r.json().catch(() => ({})); throw new Unauthenticated(j.login ?? null, j.token === true) }
+  if (r.status === 304) return null
+  if (!r.ok) throw new Error(t("shell:http.failed", { status: r.status }))
+  return { snapshot: await r.json(), etag: r.headers.get("etag") ?? "" }
 }
 async function setupProject(p: ProjectSetup, progress: (p: CloneProgress) => void): Promise<RProject> {
   const interrupted = () => new Error(t("pages:projects.setupInterrupted"))
@@ -261,17 +254,7 @@ async function setupProject(p: ProjectSetup, progress: (p: CloneProgress) => voi
     void reader.cancel().catch(() => {})
   }
 }
-/* the change-log watermark each /api/state body was read at (`x-steve-cursor`): the stream resumes after it */
-const stateCursors = new WeakMap<object, string>()
-export const cursorOf = (s: State): string | null => stateCursors.get(s) ?? null
-
-/* ───────── module routes (contacts, knowledge, accounts, vault, signals, flows, GitHub …) ─────────
- * A Hub without a module answers its GET /api/* with the SPA's index.html (200) and other methods with a plain-text
- * 404, so "this Hub has no such module" is: a network error, a non-JSON answer that is 200 /
- * 404 / 405, or a JSON 404 / 405 without an `error`. Every module client throws `NotWired` for these, and its page
- * shows the module's Unwired placeholder instead — never sample data. */
-export class NotWired extends Error { constructor() { super(t("shell:http.unreachable")) } }
-/** An error answer of an existing module route, with a synchronous translated display message. */
+/** A Hub HTTP failure, including a missing resource or route. */
 export class HubError extends Error {
   status: number
   code?: Code
@@ -285,27 +268,18 @@ export class HubError extends Error {
     this.params = params
   }
 }
-export const isNotWired = (e: unknown): e is NotWired => e instanceof NotWired
 
 /** A resource that outlives a workspace/Hub switch can bind requests to the scope it was loaded in. */
 export type ModuleScope = { workspace: string; hub: string }
 export async function modReq<T>(method: string, path: string, body?: unknown, signal?: AbortSignal, scope?: ModuleScope): Promise<T> {
-  let r: Response
-  try {
-    const headers = { ...wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), ...(scope ? { "x-steve-ws": scope.workspace } : {}) }
-    r = await fetch(scope ? scope.hub + "/api" + path : hubUrl("/api" + path), { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "include", cache: "no-store", signal: signal ?? (method === "GET" ? AbortSignal.timeout(30_000) : undefined) })
-  } catch { throw new NotWired() }
+  const headers = { ...wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), ...(scope ? { "x-steve-ws": scope.workspace } : {}) }
+  const r = await fetch(scope ? scope.hub + "/api" + path : hubUrl("/api" + path), { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "include", cache: "no-store", signal: signal ?? (method === "GET" ? AbortSignal.timeout(30_000) : undefined) })
   const json = (r.headers.get("content-type") ?? "").includes("application/json")
   const j: any = json ? await r.json().catch(() => undefined) : undefined
   /* the session's own 401 carries `login`; a 401 from a module (e.g. 请重新登录后再登记) is an ordinary error */
   if (r.status === 401 && j?.error === "unauthenticated" && "login" in j) { if (r.headers.get("x-steve-origin") === "refused") signIn.refused = true; throw new Unauthenticated(j?.login ?? null, j?.token === true) }
-  if (!json) {
-    if (r.ok && method !== "GET") return {} as T // 204, or an empty body
-    if (r.ok || r.status === 404 || r.status === 405) throw new NotWired()
-    throw new HubError(r.status, t("shell:http.failed", { status: r.status }))
-  }
-  if ((r.status === 404 || r.status === 405) && !j?.error) throw new NotWired()
   if (!r.ok) throw new HubError(r.status, j?.error ?? t("shell:http.failed", { status: r.status }), j?.code, j?.reason, j?.params)
+  if (!json && method !== "GET" && (await r.text()) === "") return {} as T
   if (j === undefined) throw new Error(t("shell:http.incomplete"))
   return j as T
 }
@@ -313,7 +287,22 @@ export async function modReq<T>(method: string, path: string, body?: unknown, si
 export const qs = (o: Record<string, string | number | boolean | undefined | null>) => { const s = new URLSearchParams(); for (const [k, v] of Object.entries(o)) if (v !== undefined && v !== null && v !== "") s.set(k, String(v)); const x = s.toString(); return x ? "?" + x : "" }
 const get = <T>(p: string) => req<T>("GET", p), post = <T = any>(p: string, b: unknown = {}) => req<T>("POST", p, b), patch = <T = any>(p: string, b: unknown) => req<T>("PATCH", p, b), del = <T = any>(p: string, b?: unknown) => req<T>("DELETE", p, b)
 export const api = {
-  state: () => { let c: string | null = null; return req<State>("GET", "/state", undefined, (r) => { c = r.headers.get("x-steve-cursor") }).then((s) => { if (c) stateCursors.set(s, c); return s }) },
+  snapshot,
+  messagePage: (before: string, signal?: AbortSignal) => req<PageOf<MessageView>>("GET", `/views/page${qs({ kind: "message", before })}`, undefined, undefined, signal),
+  archivedItems: (before?: string) => get<PageOf<ItemView>>(`/views/page${qs({ kind: "item", status: "archived", before })}`),
+  endedSessions: (before?: string) => get<PageOf<SessionView>>(`/views/page${qs({ kind: "session", status: "ended", before })}`),
+  itemSessions: (items: string[]) => get<ById>(`/views${qs({ kind: "session", items: items.join(",") })}`),
+  views: (kind: string, ids: string[]) => get<ById>(`/views${qs({ kind, ids: ids.join(",") })}`),
+  /** settled decisions (resolved or expired) after `since`, newest first */
+  settledDecisions: (since: number, limit = 100, before?: string) => get<PageOf<DecisionView>>(`/views/page${qs({ kind: "decision", status: "settled", since, limit, before })}`),
+  editReplyDraft: (id: string, previous: string, text: string) => patch(`/decisions/${encodeURIComponent(id)}/draft`, { previous, text }),
+  /** the link that opens a chat message in its platform's own client, asked when its card shows */
+  messageOpenUrl: (id: string) => get<{ url: string | null }>(`/chan-messages/${encodeURIComponent(id)}/open-url`),
+  shell: (signal?: AbortSignal) => req<Shell>("GET", "/shell", undefined, undefined, signal),
+  summary: () => get<Summary>("/summary"),
+  notifications: () => get<RNotice[]>("/notifications"),
+  runtimes: (fresh = false) => get<RRuntime[]>(`/runtimes${qs({ fresh: fresh ? 1 : undefined })}`),
+  tags: () => get<{ tags: RTag[]; uses: Record<string, number> }>("/tags?uses=1"),
   me: () => get<{ user: { id: string; name: string; email: string | null; role: string }; version: string; web_version: string }>("/me"),
   switchWs: (id: string) => post(`/workspaces/${id}/switch`), newWs: (p: { name: string; description?: string; item_prefix?: string }) => post<RWorkspace>("/workspaces", p), patchWs: (id: string, p: Partial<RWorkspace>) => patch(`/workspaces/${id}`, p),
   say: (text: string, files: string[] = [], mentions: { kind: "party" | "bot"; id: string }[] = [], to: { item?: string; reply_to?: string; client_id?: string } = {}) => post("/thread", { text, files, ...(mentions.length ? { mentions } : {}), ...(to.item ? { item: to.item } : {}), ...(to.reply_to ? { reply_to: to.reply_to } : {}), ...(to.client_id ? { client_id: to.client_id } : {}) }),
@@ -321,20 +310,20 @@ export const api = {
   /* a message said while Steve was on a turn waits for it; until then it can be changed or withdrawn (409 once it went) */
   threadQueuedEdit: (msg: string, text: string) => patch<{ ok: boolean }>(`/thread/queued/${msg}`, { text }),
   threadQueuedWithdraw: (msg: string) => del<{ text: string; files: RFile[] }>(`/thread/queued/${msg}`),
-  promote: (msg: string) => post<RItem>(`/thread/${msg}/promote`),
+  promote: (msg: string) => post<{ id: string }>(`/thread/${msg}/promote`),
   /* the first meeting (the instance owner's): Steve's welcome opens it in the main conversation; skip ends it or says there is none */
   onboardStart: () => post<{ message: string }>("/onboard/start"), onboardSkip: () => post("/onboard/skip"),
   /* thread routing (§3.4–3.5, §7.2): offers, suggestion cards, corrections, research runs */
-  offer: (msg: string, take: boolean) => post<{ message_id: string; item?: RItem }>(`/thread/${msg}/offer`, { take }),
-  suggest: (msg: string, choice: SuggestChoice) => post<{ message_id: string; item?: RItem }>(`/thread/${msg}/suggest`, { choice }),
+  offer: (msg: string, take: boolean) => post<{ message_id: string; item?: { id: string } }>(`/thread/${msg}/offer`, { take }),
+  suggest: (msg: string, choice: SuggestChoice) => post<{ message_id: string; item?: { id: string } }>(`/thread/${msg}/suggest`, { choice }),
   /* an A2UI button in a reply (ST-46): the Hub keeps one submission per surface and says it in the conversation */
   a2ui: (msg: string, a: A2uiSubmit) => post<{ already: boolean; message_id?: string; action: A2uiRecord }>(`/thread/${msg}/a2ui`, a),
-  reroute: (msg: string, to: string) => post<{ message_id: string; item?: RItem }>(`/thread/${msg}/reroute`, { to }),
+  reroute: (msg: string, to: string) => post<{ message_id: string; item?: { id: string } }>(`/thread/${msg}/reroute`, { to }),
   stopRun: (run: string) => post<{ ok: boolean }>(`/thread/runs/${run}/stop`), cancelRun: (run: string) => del<{ ok: boolean }>(`/thread/runs/${run}`),
   threadFollow: (item: string, follow: boolean) => patch(`/items/${item}/thread`, { follow }),
   readNotifications: (at?: number) => post<{ seen: number }>("/notifications/read", { at }),
   dismissNotice: (id: string) => post<{ ok: true }>(`/notifications/${encodeURIComponent(id)}/dismiss`, {}),
-  item: (id: string) => get<RItemDetail>("/items/" + id),
+  item: (id: string, signal?: AbortSignal) => req<RItemDetail>("GET", "/items/" + id, undefined, undefined, signal),
   workflow: (id: string) => get<Workflow | null>(`/items/${encodeURIComponent(id)}/workflow`),
   workflowChange: (id: string, p: { action: "pause" | "resume" | "retry" | "cancel" | "single_session"; expected_revision: number; reason: string; unit_id?: string }) => post<Workflow>(`/items/${encodeURIComponent(id)}/workflow`, p),
   outPreview: (id: string, art: string, path?: string) => get<ROutPreview>(`/items/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(art)}/preview${qs({ path })}`),
@@ -350,12 +339,12 @@ export const api = {
   annRemove: (id: string, ann: string) => del<{ ok: boolean }>(`/items/${encodeURIComponent(id)}/annotations/${encodeURIComponent(ann)}`),
   /* one send per key: the same key again (a second click, a retry) is answered `again` and sends nothing */
   annSend: (id: string, ids: string[], key: string) => post<{ ok: boolean; again: boolean; pending?: boolean; sent: number; timeline_id?: number | null; warning?: string }>(`/items/${encodeURIComponent(id)}/annotations/send`, { ids, key }),
-  newItem: (p: { goal: string; bot?: string; team?: string; project?: string | null; mode?: "start" | "propose"; client_id?: string }) => post<RItem>("/items", p),
+  newItem: (p: { goal: string; bot?: string; team?: string; project?: string | null; mode?: "start" | "propose"; client_id?: string }) => post<{ id: string }>("/items", p),
   itemAction: (id: string, action: string) => post(`/items/${id}/actions`, { action }), bulk: (ids: string[], op: string) => post<{ n: number }>("/items/bulk", { ids, op }),
   goal: (id: string, text: string) => post(`/items/${id}/goal`, { text }),
   patchItem: (id: string, p: Partial<{ title: string; priority: string; due: string | null; star: boolean; accept_mode: string; project_id: string | null; tags: string[] }>) => patch(`/items/${id}`, p),
   /* only the instance's owner switches it; nothing else writes it */
-  designGate: (id: string, on: boolean) => req<RItem>("PUT", `/items/${encodeURIComponent(id)}/design-gate`, { on }),
+  designGate: (id: string, on: boolean) => req<{ id: string }>("PUT", `/items/${encodeURIComponent(id)}/design-gate`, { on }),
   deleteItem: (id: string) => del(`/items/${id}`),
   supplement: (id: string, text: string, mode: "auto" | "steer" | "new", files: string[] = []) => post(`/items/${id}/supplement`, { text, mode, files }), deliver: (id: string) => post(`/items/${id}/deliver`),
   reassign: (id: string, bot: string) => post(`/items/${id}/reassign`, { bot }),
@@ -363,7 +352,12 @@ export const api = {
   saveDependencyWait: (id: string, body: { expected_cycle: number; resume: DependencyWait["resume_override"]; reason: string }) => post<DependencyWait>(`/items/${id}/dependency-wait`, body),
   addDep: (id: string, dep: string) => post(`/items/${id}/deps`, { dep }), rmDep: (id: string, dep: string) => del(`/items/${id}/deps/${dep}`),
   snooze: (id: string, label: string | null, until: number | null) => post(`/items/${id}/snooze`, { label, until }),
-  events: (id: string, after = 0) => get<REvent[]>(`/sessions/${id}/events?after=${after}`), searchSessions: (q: string) => get<string[]>(`/sessions/search?q=${encodeURIComponent(q)}`),
+  transcript: (id: string, before?: number, signal?: AbortSignal) =>
+    req<RTranscriptPage>("GET", `/sessions/${encodeURIComponent(id)}/events?align=turn${before == null ? "" : "&before=" + before}`, undefined, undefined, signal),
+  transcriptAfter: (id: string, after: number, through?: number, signal?: AbortSignal) =>
+    req<RTranscriptPage>("GET", `/sessions/${encodeURIComponent(id)}/events?after=${after}${through == null ? "" : "&through=" + through}`, undefined, undefined, signal),
+  transcriptMarks: (id: string) => get<{ marks: number[] }>(`/sessions/${encodeURIComponent(id)}/events/marks`),
+  searchSessions: (q: string) => get<string[]>(`/sessions/search?q=${encodeURIComponent(q)}`),
   sessionSay: (id: string, text: string, mode: "插话" | "排队", files: string[] = []) => post(`/sessions/${id}/messages`, { text, mode, files }), cancel: (id: string) => post(`/sessions/${id}/cancel`), endSession: (id: string) => post(`/sessions/${id}/end`), continueSession: (id: string) => post<{ session: string }>(`/sessions/${id}/continue`),
   renameSession: (id: string, title: string) => patch(`/sessions/${id}`, { title }), removeSession: (id: string) => del(`/sessions/${id}`), dropQueued: (id: string) => del("/queued/" + id),
   queued: (sid: string) => get<RQueued[]>(`/sessions/${sid}/queued`), resumeInfo: (sid: string) => get<RResume>(`/sessions/${sid}/resume`),
@@ -372,7 +366,8 @@ export const api = {
   queuedSendNow: (sid: string, qid: string) => post<SendNowResult>(`/sessions/${sid}/queued/${qid}/send-now`),
   fork: (id: string, seq: number, goal: string, asSession: boolean) => post<{ item?: string; session?: string }>(`/sessions/${id}/fork`, { seq, goal, asSession }), link: (id: string, item: string) => post(`/sessions/${id}/link`, { item }),
   localSessions: () => get<LocalSession[]>("/local-sessions"), importSessions: (keys: string[]) => post<(string | { error: string })[]>("/local-sessions/import", { keys }),
-  decide: (id: string, choice: string, text?: string) => post<RDecision>("/decisions/" + id, { choice, text }), undo: (id: string) => post(`/decisions/${id}/undo`), dismiss: (id: string) => post<RDecision>(`/decisions/${id}/dismiss`),
+  dismissDrafts: (ids: string[]) => post<{ ids: string[] }>("/decisions/dismiss-drafts", { ids }),
+  decide: (id: string, choice: string, text?: string) => post<DecisionAnswer>("/decisions/" + id, { choice, text }), undo: (id: string) => post<DecisionAnswer>(`/decisions/${id}/undo`), dismiss: (id: string) => post<DecisionAnswer>(`/decisions/${id}/dismiss`),
   newBot: (p: Partial<RBot> & { name: string }) => post<RBot>("/bots", p), draftBot: (desc: string) => post<RBot>("/bots/draft", { desc }), patchBot: (id: string, p: Partial<RBot>) => patch<RBot>("/bots/" + id, p),
   botWorkspaces: (id: string, ids: string[]) => req("PUT", `/bots/${id}/workspaces`, { ids }), dupBot: (id: string) => post<RBot>(`/bots/${id}/duplicate`), deleteBot: (id: string, to: string, memory: "delete" | "export") => del<{ moved: string[]; memories: any[] }>("/bots/" + id, { to, memory }), restoreBot: (id: string) => post(`/bots/${id}/restore`),
   botPrompt: (id: string) => get<{ generated: string; custom: string | null }>(`/bots/${id}/prompt`), memories: (id: string) => get<{ id: string; text: string; source: string; created: number }[]>(`/bots/${id}/memories`),
@@ -387,7 +382,7 @@ export const api = {
   settings: (p: Record<string, string>) => patch("/settings", p),
   /** `field` + `base` (bot targets): draft only the bot's working rules or own system prompt, from the text the editor shows */
   draft: (target: { kind: string; id?: string; field?: "rules" | "prompt"; base?: string }, text: string) => post<Proposal>("/config/draft", { target, text }), apply: (id: string) => post(`/config/${id}/apply`), undoConfig: (id: string) => post(`/config/${id}/undo`), dropConfig: (id: string) => post(`/config/${id}/drop`),
-  devices: (fresh = false) => get<{ devices: RDevice[]; runtimes: RRuntime[] }>("/devices" + (fresh ? "?fresh=1" : "")),
+  devices: () => get<{ devices: RDevice[] }>("/devices"),
   /** Installs only this registry entry's declared components, on its Node. */
   installHarness: (id: string) => post<{ accepted: boolean; restart?: boolean }>("/system/harnesses/" + encodeURIComponent(id) + "/install"),
   harnessUpdates: (node: string, fresh = false) => get<import("./harness-update-status").HarnessUpdates>("/node-harness-updates/" + encodeURIComponent(node) + (fresh ? "?fresh=1" : "")),

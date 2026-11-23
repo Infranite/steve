@@ -16,86 +16,53 @@
 //! with one user only; a remote Node runs only its owner's own work, H1). Anything else is kept
 //! and waits.
 
-use rusqlite::{Connection, OptionalExtension};
-use serde::Serialize;
-use steve_store::StoreError;
+use steve_store::{Members, Read, Store, StoreError, node_directory, node_environment as env};
 
 use super::principal::{self, Principal};
 
 /// The longest value kept (a token or a short list; not a file).
 pub const MAX_VALUE: usize = 16 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Row {
-    pub key: String,
-    pub value: Option<String>,
-    pub vault_ref: Option<String>,
-    pub note: String,
-    pub updated_by: String,
-    pub updated: i64,
+/// Who owns this Node for the purpose of forwarding a principal's environment.
+pub fn node_owner(r: &mut impl Read, node: &str) -> Result<Option<String>, StoreError> {
+    if node == "local" {
+        env::local_owner(r)
+    } else {
+        node_directory::owner_if_connectable(r, node)
+    }
 }
 
-/// Who owns `node`: the user who paired it, or for the Hub's local Node the instance's owner.
-pub fn node_owner(c: &Connection, node: &str) -> Result<Option<String>, StoreError> {
-    let sql = if node == "local" {
-        "SELECT id FROM users WHERE role='owner' ORDER BY created, id LIMIT 1"
-    } else {
-        "SELECT owner FROM nodes WHERE node_id=?1 AND state IN ('active','paused')"
-    };
-    let owner = if node == "local" {
-        c.query_row(sql, [], |r| r.get(0)).optional()?
-    } else {
-        c.query_row(sql, [node], |r| r.get(0)).optional()?
-    };
-    Ok(owner)
-}
-
-/// The variables `session`'s harness gets on `node`: its principal's rows with a value, when its
-/// principal owns the Node and is the only member of the session's workspace (see the module).
+/// The variables a session's harness gets when its principal is the Node's sole workspace member.
 pub fn for_session(
-    c: &Connection,
+    store: &Store,
     node: &str,
     session: &str,
 ) -> Result<Vec<(String, String)>, StoreError> {
-    let Some((ws, p)) = principal::of_session(c, session)? else {
-        return Ok(vec![]);
-    };
-    let Some(me) = p.user() else {
-        return Ok(vec![]);
-    };
-    let others: i64 = c.query_row(
-        "SELECT COUNT(*) FROM workspace_members WHERE workspace_id=? AND user_id<>?",
-        [ws.as_str(), me],
-        |r| r.get(0),
-    )?;
-    if node_owner(c, node)?.as_deref() != Some(me) || others > 0 {
-        return Ok(vec![]);
-    }
-    if node == "local" {
-        let users: i64 = c.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))?;
-        if users > 1 {
+    store.read(|r| {
+        let Some((ws, p)) = store.read(|c| principal::of_session(c, session))? else {
+            return Ok(vec![]);
+        };
+        let Some(me) = p.user() else {
+            return Ok(vec![]);
+        };
+        if node_owner(r, node)?.as_deref() != Some(me)
+            || env::has_other_member(r, &ws, me)?
+            || (node == "local" && env::has_multiple_users(r)?)
+        {
             return Ok(vec![]);
         }
-    }
-    let mut q = c.prepare(
-        "SELECT key, value FROM node_env WHERE node_id=? AND principal=? AND value IS NOT NULL ORDER BY key",
-    )?;
-    let rows = q
-        .query_map(rusqlite::params![node, p.key()], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(rows
-        .into_iter()
-        .filter(|(k, _)| steve_node_api::env::user_env_refusal(k).is_none())
-        .collect())
+        Ok(env::values(r, node, me)?
+            .into_iter()
+            .filter(|(key, _)| steve_node_api::env::user_env_refusal(key).is_none())
+            .collect())
+    })
 }
 
 /// Why `me`, working in `ws`, may not edit `principal`'s variables on `node` (`None`: they may).
 /// Their own; their workspace's service principal when they own the workspace. On the Hub's local
 /// Node, or on a Node they paired.
 pub fn refusal(
-    c: &Connection,
+    c: &mut impl Read,
     me: &str,
     ws: &str,
     node: &str,
@@ -104,12 +71,7 @@ pub fn refusal(
     match Principal::parse(principal) {
         Principal::User(u) if u == me => {}
         Principal::Svc(w) if w == ws => {
-            let owner: bool = c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=? AND role='owner')",
-                [ws, me],
-                |r| r.get(0),
-            )?;
-            if !owner {
+            if Members::new(c).role(ws, me)?.as_deref() != Some("owner") {
                 return Ok(Some(
                     "only the workspace's owner sets its service principal's".into(),
                 ));
@@ -120,38 +82,12 @@ pub fn refusal(
     if node == "local" {
         return Ok(None);
     }
-    let owner: Option<String> = c
-        .query_row(
-            "SELECT owner FROM nodes WHERE node_id=? AND state IN ('active','paused')",
-            [node],
-            |r| r.get(0),
-        )
-        .optional()?;
+    let owner = node_owner(c, node)?;
     Ok(match owner {
         Some(o) if o == me => None,
         Some(_) => Some("only on a Node you paired, until shared Nodes are sandboxed".into()),
         None => Some("no such Node".into()),
     })
-}
-
-pub fn list(c: &Connection, node: &str, principal: &str) -> Result<Vec<Row>, StoreError> {
-    let mut q = c.prepare(
-        "SELECT key, value, vault_ref, note, updated_by, updated FROM node_env
-          WHERE node_id=? AND principal=? ORDER BY key",
-    )?;
-    let rows = q
-        .query_map(rusqlite::params![node, principal], |r| {
-            Ok(Row {
-                key: r.get(0)?,
-                value: r.get(1)?,
-                vault_ref: r.get(2)?,
-                note: r.get(3)?,
-                updated_by: r.get(4)?,
-                updated: r.get(5)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(rows)
 }
 
 /// Why `key` = `value` may not be saved (`None`: it may).
@@ -165,62 +101,46 @@ pub fn value_refusal(key: &str, value: &str) -> Option<String> {
     None
 }
 
-pub fn put(
-    c: &Connection,
-    node: &str,
-    principal: &str,
-    key: &str,
-    value: &str,
-    note: &str,
-    by: &str,
-) -> Result<(), StoreError> {
-    c.execute(
-        "INSERT INTO node_env(node_id,principal,key,value,vault_ref,note,updated_by,updated)
-         VALUES (?,?,?,?,NULL,?,?,?)
-         ON CONFLICT(node_id,principal,key) DO UPDATE SET value=excluded.value, vault_ref=NULL,
-           note=excluded.note, updated_by=excluded.updated_by, updated=excluded.updated",
-        rusqlite::params![node, principal, key, value, note, by, steve_store::now()],
-    )?;
-    Ok(())
-}
-
-pub fn delete(c: &Connection, node: &str, principal: &str, key: &str) -> Result<bool, StoreError> {
-    Ok(c.execute(
-        "DELETE FROM node_env WHERE node_id=? AND principal=? AND key=?",
-        rusqlite::params![node, principal, key],
-    )? > 0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn db() -> Connection {
-        let c = Connection::open_in_memory().unwrap();
-        c.execute_batch(
-            "CREATE TABLE workspace_members(workspace_id TEXT, user_id TEXT, role TEXT, created INTEGER);
-             CREATE TABLE items(id TEXT, workspace_id TEXT, requested_by TEXT);
-             CREATE TABLE sessions(id TEXT, workspace_id TEXT, item_id TEXT);
-             CREATE TABLE runtime_sessions(session_id TEXT, principal TEXT, audience TEXT);
-             CREATE TABLE nodes(node_id TEXT, owner TEXT, state TEXT);
-             CREATE TABLE node_env(node_id TEXT, principal TEXT, key TEXT, value TEXT, vault_ref TEXT,
-               note TEXT NOT NULL DEFAULT '', updated_by TEXT, updated INTEGER, PRIMARY KEY(node_id,principal,key));
-             CREATE TABLE users(id TEXT, role TEXT, created INTEGER);
-             INSERT INTO users VALUES ('u1','owner',1),('u2','member',2);
-             INSERT INTO workspace_members VALUES ('team','u1','owner',1),('team','u2','member',2),
-               ('solo1','u1','owner',1),('solo2','u2','owner',1);
-             INSERT INTO items VALUES ('i1','team','u2'),('i2','team',NULL),('i3','solo1','u1'),('i4','solo2','u2'),('i5','team','u1');
-             INSERT INTO sessions VALUES ('s1','team','i1'),('s2','team','i2'),('s3','solo1','i3'),('s4','solo2','i4'),('s5','team','i5');
-             INSERT INTO runtime_sessions(session_id) VALUES ('s1'),('s2'),('s3'),('s4'),('s5');
-             INSERT INTO nodes VALUES ('n_u1','u1','active'),('n_u2','u2','active'),('n_old','u2','revoked');",
-        )
-        .unwrap();
-        c
+    fn db() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
+        steve_store::testkit::hub::node_env_fixture(&store).unwrap();
+        (dir, store)
+    }
+
+    fn put(
+        s: &Store,
+        node: &str,
+        principal: &str,
+        key: &str,
+        value: &str,
+        note: &str,
+        by: &str,
+    ) -> Result<(), StoreError> {
+        s.write(|w| {
+            env::put(
+                w,
+                env::Change {
+                    node,
+                    principal,
+                    key,
+                    value,
+                    note,
+                    actor: by,
+                },
+                1,
+            )
+        })
     }
 
     #[test]
     fn only_the_nodes_owner_alone_in_the_workspace_gets_them() {
-        let c = db();
+        let (_dir, c) = db();
         put(&c, "local", "u1", "NPM_TOKEN", "t1", "", "u1").unwrap();
         put(&c, "local", "u2", "NPM_TOKEN", "t2", "", "u2").unwrap();
         put(&c, "n_u2", "u2", "GOPRIVATE", "x", "", "u2").unwrap();
@@ -244,19 +164,26 @@ mod tests {
             "the service principal's: anyone's run"
         );
         // a Hub of one user: its owner's, on the local Node
-        c.execute("DELETE FROM users WHERE id='u2'", []).unwrap();
+        steve_store::testkit::hub::remove_other_node_env_user(&c).unwrap();
         assert_eq!(env("local", "s3"), one("NPM_TOKEN", "t1"));
         put(&c, "local", "u1", "NPM_TOKEN", "t1b", "new", "u1").unwrap();
         assert_eq!(env("local", "s3"), one("NPM_TOKEN", "t1b"));
-        assert!(delete(&c, "local", "u1", "NPM_TOKEN").unwrap());
-        assert!(!delete(&c, "local", "u1", "NPM_TOKEN").unwrap());
+        assert!(
+            c.write(|w| env::delete(w, "local", "u1", "NPM_TOKEN"))
+                .unwrap()
+        );
+        assert!(
+            !c.write(|w| env::delete(w, "local", "u1", "NPM_TOKEN"))
+                .unwrap()
+        );
         assert_eq!(env("local", "s3"), vec![]);
     }
 
     #[test]
     fn only_ones_own_and_the_owner_for_the_workspace() {
-        let c = db();
-        let why = |me: &str, node: &str, p: &str| refusal(&c, me, "team", node, p).unwrap();
+        let (_dir, c) = db();
+        let why =
+            |me: &str, node: &str, p: &str| c.read(|r| refusal(r, me, "team", node, p)).unwrap();
         assert_eq!(why("u2", "local", "u2"), None);
         assert_eq!(why("u2", "n_u2", "u2"), None);
         assert!(why("u2", "n_u1", "u2").is_some(), "someone else's Node");

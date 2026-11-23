@@ -1,4 +1,5 @@
 //! #247: the real C5 rule/model checker and fake SMTP, including the final send boundary.
+use steve_store::mail::fixtures as db;
 mod support;
 
 use std::sync::Arc;
@@ -7,12 +8,13 @@ use serde_json::json;
 use steve_channels::disclosure::{CHECK_HEAD, Disclosure};
 use steve_mail::compose::QuickDraft;
 use steve_mail::drafts::{DraftPatch, NewDraft, RcptIn};
-use steve_mail::{DraftHooks, SendOutcome, repo};
+use steve_mail::{DraftHooks, SendOutcome};
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::decisions::dispatch;
 use steve_modules::outbound::{Audience, CheckCx, CheckResult, KnowledgeUse, OutboundCheck};
 use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::{GatewayOut, Tier};
+use steve_store::mail as repo;
 use tokio::sync::Notify;
 
 use support::*;
@@ -80,11 +82,7 @@ fn new_draft(conn: &str, body: &str) -> NewDraft {
 }
 
 fn row(h: &H, id: &str) -> repo::DraftRow {
-    h.env
-        .store()
-        .reader(|c| repo::draft(c, id))
-        .unwrap()
-        .unwrap()
+    h.env.store().read(|c| repo::draft(c, id)).unwrap().unwrap()
 }
 
 fn prompts(h: &H) -> Vec<String> {
@@ -235,13 +233,7 @@ async fn direct_send_checks_edited_to_cc_bcc_and_body_and_never_sends_twice() {
 async fn mcp_draft_and_revision_use_the_same_final_send_check() {
     let h = real(false).await;
     let (_, thread) = thread(&h).await;
-    h.env.store().with_conn(|c| {
-        c.execute_batch("INSERT INTO bots (id,workspace_id,name,harness,model,updated) VALUES ('mail','default','Mail','fixture','writer',1);
-            INSERT INTO items (id,workspace_id,no,kind,title,status,stage,created,updated,requested_by) VALUES ('ST-1','default',1,'task','Mail','open','',1,1,'usr_dev');
-            INSERT INTO sessions (id,workspace_id,item_id,bot_id,harness,model,cwd,status,created,updated) VALUES ('ses_mail','default','ST-1','mail','fixture','writer','','running',1,1);")?;
-        c.execute("INSERT INTO links (workspace_id,subject_type,subject_id,predicate,object_type,object_id,source,created) VALUES ('default','item','ST-1','about','mail_thread',?,'fixture',1)", [&thread])?;
-        Ok(())
-    }).unwrap();
+    db::link_agent_thread(h.env.store(), &thread).unwrap();
     let cx = McpCx {
         ws: WS.into(),
         user: ME.into(),
@@ -255,17 +247,7 @@ async fn mcp_draft_and_revision_use_the_same_final_send_check() {
             .unwrap();
     }
     assert!(prompts(&h).is_empty());
-    let id: String = h
-        .env
-        .store()
-        .reader(|c| -> Result<String, steve_store::StoreError> {
-            Ok(
-                c.query_row("SELECT id FROM mail_drafts WHERE item_id='ST-1'", [], |r| {
-                    r.get(0)
-                })?,
-            )
-        })
-        .unwrap();
+    let id = db::item_drafts(h.env.store(), "ST-1").remove(0);
     approve(&h, &id, "MCP final owner edit", false);
     assert!(matches!(
         h.mail.execute(&id).await.unwrap(),
@@ -312,16 +294,7 @@ async fn model_failure_unreadable_leak_and_missing_second_model_all_hold_mail() 
             "unreadable" => script(&h, "no readable verdict", "reviewer"),
             "leak" => script(&h, r#"{"verdict":"leak","spans":[]}"#, "reviewer"),
             "same_model" => {
-                h.env
-                    .store()
-                    .with_conn(|c| {
-                        c.execute(
-                            "UPDATE mail_drafts SET basis = ? WHERE id = ?",
-                            rusqlite::params![r#"{"answer_model":"reviewer"}"#, id],
-                        )?;
-                        Ok(())
-                    })
-                    .unwrap();
+                db::set_reviewer_model(h.env.store(), &id).unwrap();
             }
             _ => {}
         }
@@ -351,26 +324,11 @@ async fn model_failure_unreadable_leak_and_missing_second_model_all_hold_mail() 
 }
 
 fn source(h: &H, id: &str) {
-    h.env.store().with_conn(|c| {
-        c.execute_batch("INSERT INTO kb_chunks (workspace_id,obj_type,obj_id,seq,heading,text,visibility,level,created_by,source_kind,label,updated)
-            VALUES ('default','chunk','restricted',0,'','内部预算 420万元','private','reasoning','usr_dev','note','Restricted',1)")?;
-        c.execute("UPDATE mail_drafts SET basis = ? WHERE id = ?", rusqlite::params![r#"{"entries":[{"source_type":"chunk","source_id":"restricted","source_label":"Restricted","level":"reasoning","effective":"reasoning","used":true,"out":"reasoning","seq":0}]}"#,id])?;
-        Ok(())
-    }).unwrap();
+    db::give_restricted_basis(h.env.store(), &id).unwrap();
 }
 
 fn retry(h: &H, id: &str) {
-    let dec: String = h
-        .env
-        .store()
-        .reader(|c| -> Result<String, steve_store::StoreError> {
-            Ok(c.query_row(
-                "SELECT id FROM decisions WHERE subject_id=? AND kind='fail' AND status='open'",
-                [id],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let dec = db::open_failure(h.env.store(), id);
     dispatch(&h.env.modules, &me(), &dec, "retry", "")
         .unwrap()
         .unwrap();
@@ -419,13 +377,7 @@ async fn rules_and_missing_knowledge_stay_blocked_even_after_repeated_checks_and
         let id = direct(&h, "预算为 420万元").await;
         source(&h, &id);
         if missing {
-            h.env
-                .store()
-                .with_conn(|c| {
-                    c.execute("DELETE FROM kb_chunks WHERE obj_id='restricted'", [])?;
-                    Ok(())
-                })
-                .unwrap();
+            db::delete_restricted_note(h.env.store()).unwrap();
         }
         for _ in 0..2 {
             assert!(matches!(
@@ -484,18 +436,7 @@ async fn changes_during_the_check_cannot_reuse_a_passing_verdict() {
         waiting.entered.notified().await;
         assert!(h.smtp.sent().is_empty());
         let connection = row(&h, &id).connection_id;
-        h.env.store().with_conn(|c| {
-            match mutation {
-                "body" => {c.execute("UPDATE mail_drafts SET body='changed during check' WHERE id=?", [&id])?;}
-                "to_addrs" | "cc_addrs" | "bcc_addrs" => {c.execute(&format!("UPDATE mail_drafts SET {mutation}=? WHERE id=?"), rusqlite::params![r#"[{"addr":"changed@outside.example"}]"#,id])?;}
-                "approval" => {c.execute("UPDATE decisions SET status='expired' WHERE subject_id=? AND kind='approve'", [&id])?;}
-                "caps" => {c.execute("UPDATE connections SET caps='[\"mail.read\"]' WHERE id=?", [&connection])?;}
-                "paused" => {c.execute("UPDATE connections SET status='paused' WHERE id=?", [&connection])?;}
-                "knowledge" => {c.execute("UPDATE kb_chunks SET level='never' WHERE obj_id='restricted'", [])?;}
-                _ => unreachable!()
-            }
-            Ok(())
-        }).unwrap();
+        db::change_disclosure_inputs(h.env.store(), mutation, &id, &connection).unwrap();
         waiting.release.notify_one();
         let outcome = task.await.unwrap().unwrap();
         assert!(

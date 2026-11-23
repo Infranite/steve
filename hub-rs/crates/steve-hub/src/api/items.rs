@@ -70,7 +70,7 @@ async fn create_now(
         let store =
             super::bot_dispatch::store(st).ok_or_else(|| ApiError::not_found("Bot Team"))?;
         store
-            .reader(|db| steve_store::bot_dispatch::selected(db, &c.ws, Some(id)))
+            .read(|db| steve_store::bot_dispatch::selected(db, &c.ws, Some(id)))
             .map_err(|e| match e {
                 steve_store::StoreError::NotFound(_) => {
                     ApiError::not_found(steve_i18n::t!("hub.dispatch.not_found"))
@@ -180,13 +180,22 @@ pub async fn get_one(
     let workflow = st.domain.workflow_get(&id).await?;
     let dependency_wait = dependency_shown(st.domain.dependency_get(&id).await?);
     let dispatch = super::bot_dispatch::store(&st).and_then(|s| {
-        s.reader(|db| super::bot_dispatch::item_dispatch(db, &id, &c.ws))
+        super::bot_dispatch::item_dispatch(s, &id, &c.ws)
             .inspect_err(|e| tracing::warn!(item = %id, "item dispatch detail unavailable: {e}"))
             .ok()
     });
     st.read(move |r| {
         let i = own(r.item_get(&id)?, &c.ws, Noun::Item)?;
         let mut out = summary(r, i)?;
+        let mut text = r
+            .item_text(&c.ws, &id)?
+            .ok_or_else(|| ApiError::not_found(Noun::Item.missing()))?;
+        if let Some(Value::String(now)) = text.get_mut("now")
+            && let std::borrow::Cow::Owned(shown) = steve_core::now_line::shown(now)
+        {
+            *now = shown;
+        }
+        out.extend(text);
         if let Some(dispatch) = dispatch {
             out.insert("dispatch".into(), dispatch);
         }
@@ -199,7 +208,6 @@ pub async fn get_one(
         out.insert("workflow".into(), workflow);
         out.insert("dependency_wait".into(), dependency_wait);
         out.insert("cycles".into(), objs(r.item_cycles(&id)?));
-        out.insert("goalsList".into(), objs(r.item_goals(&id)?));
         out.insert("planRounds".into(), objs(r.item_plan_rounds(&id)?));
         out.insert("timeline".into(), objs(r.timeline_list(&id)?));
         out.insert("artifacts".into(), objs(r.artifacts_list(&id)?));
@@ -210,7 +218,8 @@ pub async fn get_one(
         out.insert("annotations".into(), objs(r.annotations_list(&id)?));
         out.insert(
             "decisions".into(),
-            objs(crate::decision_text::all(r.decisions_of_item(&id)?)),
+            serde_json::to_value(r.decision_views_of_item(&c.ws, &id)?)
+                .map_err(|e| ApiError::internal(e.to_string()))?,
         );
         out.insert("dependents".into(), json!(r.deps_dependents(&id)?));
         out.insert("thread".into(), r.thread_item(&id)?.unwrap_or(Value::Null));
@@ -671,10 +680,7 @@ pub async fn panels(
         return ok(json!([]));
     };
     let r = m
-        .blocking(move |m| {
-            m.store
-                .reader(|conn| steve_modules::panels::panels(m, conn, &c.ws, &c.me, &id))
-        })
+        .blocking(move |m| steve_modules::panels::panels(m, &c.ws, &c.me, &id))
         .await;
     Ok(match r {
         Ok(p) => {

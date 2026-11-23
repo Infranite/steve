@@ -74,7 +74,7 @@ impl Env {
     fn register(&self, node: &str) {
         let owner = self.store.access().owner().unwrap().unwrap().id;
         self.store
-            .transaction(|tx| {
+            .write(|tx| {
                 let code = format!("code-{node}");
                 steve_store::nodes::create_pairing_as(tx, &code, &owner, 1, i64::MAX, true)?;
                 steve_store::nodes::claim_pairing(
@@ -400,16 +400,9 @@ async fn local_and_remote_upgrade_receipts_survive_disconnect_and_are_read_back_
     assert_eq!(r["receipt"]["state"]["outcome"], "succeeded");
     assert_eq!(local.installs(), 1);
     assert_eq!(remote.installs(), 1);
-    let saved: String = e
-        .store
-        .reader(|db| {
-            Ok::<String, steve_store::StoreError>(db.query_row(
-                "SELECT value FROM settings WHERE key='harness.updates.remote'",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let saved: String =
+        steve_store::testkit::hub::hub_fixtures::setting_value_harness_updates_remote(&e.store)
+            .unwrap();
     assert!(saved.contains("remote_upgrade") && saved.contains("succeeded"));
     n1.shutdown().await;
     n2.shutdown().await;
@@ -495,12 +488,7 @@ async fn authorization_policy_old_nodes_and_failed_installers_are_explicit() {
     assert_eq!(local.installs(), 1);
     // Real authorization is re-read from storage, not a capability reported by the Node.
     let owner = e.store.access().owner().unwrap().unwrap().id;
-    e.store
-        .transaction(|tx| {
-            tx.execute("UPDATE users SET role='member' WHERE id=?", [&owner])?;
-            Ok::<(), steve_store::StoreError>(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::set_user_role(&e.store, &owner, "member").unwrap();
     assert_eq!(
         e.call(
             "POST",

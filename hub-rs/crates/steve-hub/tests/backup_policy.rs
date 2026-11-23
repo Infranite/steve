@@ -64,7 +64,7 @@ fn channel_backup_does_not_acquire_the_store_writer_mutex() {
     let (release, wait) = mpsc::channel();
     let locked = store.clone();
     let owner = std::thread::spawn(move || {
-        locked.with_conn(|_| {
+        locked.write(|_| -> steve_store::Result<()> {
             held.send(()).unwrap();
             wait.recv().unwrap();
             Ok(())

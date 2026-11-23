@@ -29,8 +29,9 @@ try {
     assert.equal(await page.locator(".steve-rn-head:visible").count(), 0, "no second pill in the header beside the sidebar")
     // the same counts as the items page: one in progress, one waiting on you; paused items are under the pill, not in its count
     assert.equal((await side.innerText()).replace(/\s+/g, " ").trim(), "1 进行中 · 1 等你")
-    await side.click()
     const pill = page.locator("[data-sidebar-running]"), rows = pill.locator(".ui-rnc__row")
+    assert.equal(await page.locator(".ui-rnc__row").count(), 0, "closed panels do not mount rows in either layout")
+    await side.click()
     assert.deepEqual(await rows.evaluateAll((rs) => rs.map((r) => [r.dataset.id, r.dataset.state])), [["ST-53", "needs-you"], ["ST-48", "running"], ["ST-7", "paused"], ["ST-10", "paused"]], "what needs you, then what runs, then what is paused; nothing done")
     // a paused graph is opened, not resumed here, and is announced as paused, not as waiting on you
     const graph = pill.locator('.ui-rnc__row[data-id="ST-10"] .ui-rnc__act button')
@@ -44,7 +45,7 @@ try {
     // Open leads to the item and closes the pill; 全部事项 to the items
     await pill.locator('.ui-rnc__row[data-id="ST-53"] .ui-rnc__act button').click()
     assert.equal(new URL(page.url()).hash, "#/items/ST-53")
-    assert.equal(await page.locator(".ui-rnc__panel:visible").count(), 0)
+    assert.equal(await page.locator(".ui-rnc__row").count(), 0, "closing the panel removes its rows")
     await side.click()
     await pill.locator(".ui-rnc__all").click()
     assert.equal(new URL(page.url()).hash, "#/items")

@@ -4,9 +4,9 @@
 //! those fields or the state changes (the triggers of migration 102), so done, dropped, handed, deleted or
 //! moved todos lose the alarms they no longer have.
 
-use rusqlite::{Connection, OptionalExtension, params};
 use steve_flow::FlowResult;
 use steve_flow::alarms::{AlarmLine, AlarmSource, Want};
+use steve_store::{W, digest::Todos};
 
 use crate::todo::Zone;
 
@@ -54,54 +54,29 @@ impl AlarmSource for TodoAlarms {
         "todo"
     }
 
-    fn plan(&self, c: &Connection, ws: &str, id: &str, _now: i64) -> FlowResult<Vec<Want>> {
-        let p: Option<Plan> = c
-            .query_row(
-                "SELECT owner, state, remind_at, snooze_until FROM todos WHERE workspace_id = ? AND id = ?",
-                params![ws, id],
-                |r| {
-                    Ok(Plan {
-                        owner: r.get(0)?,
-                        state: r.get(1)?,
-                        remind_at: r.get(2)?,
-                        snooze_until: r.get(3)?,
-                    })
-                },
-            )
-            .optional()?;
+    fn plan(&self, c: &mut W<'_>, ws: &str, id: &str, _now: i64) -> FlowResult<Vec<Want>> {
+        let p = Todos(c).get(ws, id)?.map(|row| Plan {
+            owner: row.owner,
+            state: row.state,
+            remind_at: row.fields.remind_at,
+            snooze_until: row.fields.snooze_until,
+        });
         Ok(p.map(|p| wants(&p)).unwrap_or_default())
     }
 
     fn line(
         &self,
-        c: &Connection,
+        c: &mut W<'_>,
         ws: &str,
         id: &str,
         _kind: &str,
     ) -> FlowResult<Option<AlarmLine>> {
-        type Row = (
-            String,
-            String,
-            String,
-            Option<i64>,
-            Option<String>,
-            Option<String>,
-        );
-        let row: Option<Row> = c
-            .query_row(
-                "SELECT owner, state, text, due, due_date, target_date FROM todos WHERE workspace_id = ? AND id = ?",
-                params![ws, id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
-            )
-            .optional()?;
-        let Some((owner, state, text, due, due_date, target)) = row else {
+        let Some(row) = Todos(c).get(ws, id)?.filter(|row| row.state == "open") else {
             return Ok(None);
         };
-        if state != "open" {
-            return Ok(None);
-        }
-        let zone = Zone::of(c, ws, &owner)?;
-        let at = match (due_date, due, target) {
+        let zone = Zone::for_user(c, ws, Some(&row.owner))?;
+        let fields = row.fields;
+        let at = match (fields.due_date, fields.due, fields.target_date) {
             (Some(d), _, _) => Some(d),
             (None, Some(t), _) => Some(zone.format(t, "%m-%d %H:%M")),
             (None, None, Some(d)) => Some(d),
@@ -111,7 +86,7 @@ impl AlarmSource for TodoAlarms {
             at.map(|at| steve_i18n::stored(|| steve_i18n::t!("digest.alarm.due", at = at)));
         Ok(Some(AlarmLine {
             subject: format!("todo:{id}"),
-            text: crate::cut(text.trim(), LINE_MAX),
+            text: crate::cut(fields.text.trim(), LINE_MAX),
             detail,
             link: Some(format!("#/todos/{id}")),
             planned_for: None,

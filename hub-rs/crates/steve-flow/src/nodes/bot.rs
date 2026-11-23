@@ -16,13 +16,12 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Map, Value, json};
 use steve_modules::Tier;
 use steve_modules::changes::first_json;
 
 use super::{NodeKind, NodeOutcome, Rule, RunCx, one_of, opt_str, req_str, str_list};
-use crate::FlowResult;
+use steve_store::{BotRows, FlowSources, Read};
 
 /// The node kind's name.
 pub const KIND: &str = "bot";
@@ -46,80 +45,29 @@ const REASON_MAX: usize = 200;
 #[derive(Debug, Default, Clone, Copy)]
 pub struct BotNode;
 
-/// The bot a judgement runs as.
-#[derive(Debug, Clone, PartialEq)]
-pub struct BotInfo {
-    pub id: String,
-    pub name: String,
-    pub role: String,
-    pub rules: String,
-}
+pub use steve_store::BotPrompt as BotInfo;
 
-fn bot_row(c: &Connection, ws: &str, id: &str) -> FlowResult<Option<BotInfo>> {
-    Ok(c.query_row(
-        "SELECT b.id, b.name, b.role, b.rules FROM bots b JOIN bot_workspaces w ON w.bot_id = b.id AND w.workspace_id = ? WHERE b.id = ? AND b.deleted = 0 AND b.enabled = 1",
-        params![ws, id],
-        |r| {
-            Ok(BotInfo {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                role: r.get(2)?,
-                rules: r.get(3)?,
-            })
-        },
-    )
-    .optional()?)
-}
-
-fn main_bot(c: &Connection, ws: &str) -> FlowResult<Option<BotInfo>> {
-    let id: Option<String> = c
-        .query_row(
-            "SELECT b.id FROM bots b JOIN bot_workspaces w ON w.bot_id = b.id AND w.workspace_id = ? WHERE b.main = 1 AND b.deleted = 0 ORDER BY b.updated LIMIT 1",
-            [ws],
-            |r| r.get(0),
-        )
-        .optional()?;
-    match id {
-        Some(id) => Ok(c
-            .query_row(
-                "SELECT id, name, role, rules FROM bots WHERE id = ?",
-                [&id],
-                |r| {
-                    Ok(BotInfo {
-                        id: r.get(0)?,
-                        name: r.get(1)?,
-                        role: r.get(2)?,
-                        rules: r.get(3)?,
-                    })
-                },
-            )
-            .optional()?),
-        None => Ok(None),
-    }
-}
-
-/// Configured bot, else the source's triage bot, else the main bot (`None`: the workspace has none).
+/// Configured bot, else the source's triage bot, else the main bot.
 pub fn pick_bot(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     configured: Option<&str>,
     event: &Value,
-) -> FlowResult<Option<BotInfo>> {
+) -> steve_store::Result<Option<BotInfo>> {
     let triage = match event["connection_id"].as_str() {
-        Some(conn) => crate::sources::settings(c, ws, conn)?.triage_bot,
+        Some(conn) => FlowSources(c).triage(ws, conn)?,
         None => None,
     };
-    let want = configured
+    let wanted = configured
         .map(str::trim)
-        .filter(|b| !b.is_empty())
-        .map(String::from)
-        .or(triage);
-    if let Some(w) = want
-        && let Some(b) = bot_row(c, ws, &w)?
+        .filter(|name| !name.is_empty())
+        .or(triage.as_deref());
+    if let Some(name) = wanted
+        && let Some(bot) = BotRows(c).enabled_prompt(ws, name)?
     {
-        return Ok(Some(b));
+        return Ok(Some(bot));
     }
-    main_bot(c, ws)
+    BotRows(c).main_prompt(ws)
 }
 
 /// The branches: the configured ones, else the labels of the node's edges.
@@ -334,7 +282,7 @@ impl NodeKind for BotNode {
         let bot = match cx
             .flow
             .store()
-            .reader(|c| pick_bot(c, &ws, configured.as_deref(), &event))
+            .read(|c| pick_bot(c, &ws, configured.as_deref(), &event))
         {
             Ok(Some(b)) => b,
             Ok(None) => return NodeOutcome::Fail("没有主 Bot".into()),

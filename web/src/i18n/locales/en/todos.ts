@@ -5,8 +5,6 @@ export default {
   sub: "What you do yourself · hand one to a Bot and it becomes an item",
   tabs: { label: "Todo view", today: "Today", all: "All", goals: "Goals" },
   list: {
-    unwired: "This Hub has no todos yet",
-    unwiredSub: "Upgrade the Hub to keep todos and goals here.",
     failed: "Todos did not load",
     clearToday: "Nothing to do today",
     none: "No todos yet",

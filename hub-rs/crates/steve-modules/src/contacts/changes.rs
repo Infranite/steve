@@ -19,21 +19,21 @@
 use std::sync::LazyLock;
 
 use regex::Regex;
-use rusqlite::{Connection, params};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use steve_store::Tx;
-use steve_store::base::links::{self, LinkKey, NewLink};
-use steve_store::base::mems::{self, NewMem};
-use steve_store::base::{self, Change, Level, Viewer, show};
+use steve_store::base::links::{LinkKey, Links, NewLink};
+use steve_store::base::mems::NewMem;
+use steve_store::base::{Change, Level, Viewer, show};
+use steve_store::knowledge::Memories;
+use steve_store::{Attributes, Contacts, Read, Teams, W};
 
 use super::Ports;
-use super::repo::{self, ContactQuery, NewDef, NewParty, NewValue, Party, PartyPatch};
+use super::repo::{ContactQuery, NewDef, NewParty, NewValue, Party, PartyPatch};
 use super::service::{
-    dedup, ensure_base, event, jobs, normalize_domain, own_party, pref, revise, this_month,
+    dedup, ensure_base, jobs_in, normalize_domain, own_party_in, pref, revise, this_month,
 };
-use super::teams::repo::{self as trepo, Details};
-use super::teams::{chart_readonly, own_team};
+use super::teams::chart_readonly;
+use super::teams::repo::Details;
 use crate::changes::{Candidate, ChangeOp, DraftTarget, FieldSpec, OpCx, OpSpec, Plan, Prepared};
 use crate::{ApiError, ApiResult, Caller, Check, Registry, own, parse};
 
@@ -214,13 +214,13 @@ fn pick(mut xs: Vec<Party>) -> Found {
 }
 
 /// An active contact by exact name or alias; “我” / `me` is the caller.
-fn find_contact(c: &Connection, viewer: &Viewer, name: &str) -> ApiResult<Found> {
+fn find_contact(c: &mut impl Read, viewer: &Viewer, name: &str) -> ApiResult<Found> {
     let n = name.trim();
     if n.is_empty() {
         return Ok(Found::Missing);
     }
     if n == "我" || n.eq_ignore_ascii_case("me") {
-        return Ok(match repo::me_of(c, &viewer.ws, &viewer.user)? {
+        return Ok(match Contacts::new(c).me(&viewer.ws, &viewer.user)? {
             Some(me) => Found::One(Box::new(me)),
             None => Found::Missing,
         });
@@ -231,7 +231,8 @@ fn find_contact(c: &Connection, viewer: &Viewer, name: &str) -> ApiResult<Found>
         ..Default::default()
     };
     Ok(pick(
-        repo::contacts(c, viewer, &q)?
+        Contacts::new(c)
+            .contacts(viewer, &q)?
             .into_iter()
             .filter(|p| named(p, n))
             .collect(),
@@ -239,13 +240,14 @@ fn find_contact(c: &Connection, viewer: &Viewer, name: &str) -> ApiResult<Found>
 }
 
 /// An active organization by exact name or alias.
-fn find_org(c: &Connection, viewer: &Viewer, name: &str) -> ApiResult<Found> {
+fn find_org(c: &mut impl Read, viewer: &Viewer, name: &str) -> ApiResult<Found> {
     let n = name.trim();
     if n.is_empty() {
         return Ok(Found::Missing);
     }
     Ok(pick(
-        repo::orgs(c, viewer)?
+        Contacts::new(c)
+            .organizations(viewer)?
             .into_iter()
             .filter(|p| named(p, n))
             .collect(),
@@ -416,8 +418,9 @@ fn patch_op(op: &str, id: &str, fields: Map<String, Value>) -> Option<Value> {
 }
 
 /// A party of the viewer's workspace, active, for `revision()` and targets.
-fn active_revision(c: &Connection, ws: &str, id: &str, kind: &str) -> ApiResult<Option<i64>> {
-    Ok(repo::get(c, id)?
+fn active_revision(c: &mut impl Read, ws: &str, id: &str, kind: &str) -> ApiResult<Option<i64>> {
+    Ok(Contacts::new(c)
+        .party(id)?
         .filter(|p| p.workspace_id == ws && p.kind == kind && p.status == "active")
         .map(|p| p.revision))
 }
@@ -446,7 +449,7 @@ fn mem_op(d: &mut Draft, about: &str, kind: Option<String>, txt: &str, level: Op
 }
 
 fn attr_op(
-    c: &Connection,
+    c: &mut impl Read,
     d: &mut Draft,
     p: &Party,
     key: &str,
@@ -455,7 +458,7 @@ fn attr_op(
     level: Option<Level>,
 ) -> ApiResult<()> {
     let (key, value) = (key.trim(), value.trim());
-    let def = repo::def_by_key(c, &p.workspace_id, key)?;
+    let def = Attributes(c).definition_by_key(&p.workspace_id, key)?;
     let label = label
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())
@@ -475,7 +478,8 @@ fn attr_op(
         tracing::warn!("contacts draft: dropped attr.set {key}");
         return Ok(());
     }
-    let current = repo::values(c, &p.workspace_id, &p.id)?
+    let current = Attributes(c)
+        .values(&p.workspace_id, &p.id)?
         .into_iter()
         .rfind(|v| v.key == key && v.label == label && v.status == "confirmed");
     if current.as_ref().is_some_and(|v| v.value == value) {
@@ -506,13 +510,14 @@ pub struct ContactTarget {
     pub accounts: bool,
 }
 
-fn contact_of(c: &Connection, viewer: &Viewer, id: Option<&str>) -> ApiResult<Party> {
+fn contact_of(c: &mut impl Read, viewer: &Viewer, id: Option<&str>) -> ApiResult<Party> {
     let id = id.ok_or_else(|| ApiError::invalid("target.id"))?;
     if id == "me" {
-        return repo::me_of(c, &viewer.ws, &viewer.user)?
+        return Contacts::new(c)
+            .me(&viewer.ws, &viewer.user)?
             .ok_or_else(|| ApiError::not_found("联系人"));
     }
-    own_party(c, viewer, id, "contact", "联系人", true)
+    own_party_in(c, viewer, id, "contact", "联系人", true)
 }
 
 fn rel_labels(rels: &[String]) -> Vec<String> {
@@ -524,13 +529,13 @@ fn rels_shown(rels: &[String]) -> Vec<String> {
 }
 
 /// The open jobs of a contact with their organizations (for `job.close` and the prompt).
-fn current_jobs(c: &Connection, viewer: &Viewer, p: &Party) -> ApiResult<Vec<(Party, Value)>> {
+fn current_jobs(c: &mut impl Read, viewer: &Viewer, p: &Party) -> ApiResult<Vec<(Party, Value)>> {
     let mut out = Vec::new();
-    for j in jobs(c, viewer, &p.id)?
+    for j in jobs_in(c, viewer, &p.id)?
         .into_iter()
         .filter(|j| j.to.is_none())
     {
-        if let Some(o) = repo::get(c, &j.org_id)? {
+        if let Some(o) = Contacts::new(c).party(&j.org_id)? {
             out.push((o, json!({ "title": j.title, "dept": j.dept })));
         }
     }
@@ -545,7 +550,13 @@ fn job_text(org: &str, title: Option<&str>) -> String {
 }
 
 impl DraftTarget for ContactTarget {
-    fn prepare(&self, c: &Connection, viewer: &Viewer, id: Option<&str>) -> ApiResult<Prepared> {
+    fn prepare(
+        &self,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+        id: Option<&str>,
+    ) -> ApiResult<Prepared> {
         let p = contact_of(c, viewer, id)?;
         let jobs = current_jobs(c, viewer, &p)?;
         let works = jobs
@@ -572,7 +583,8 @@ impl DraftTarget for ContactTarget {
             .values(&["是", "否"]),
         );
         fields.push(FieldSpec::new("note", "备注", "text", json!(p.note)));
-        let keys = repo::defs(c, &viewer.ws)?
+        let keys = Attributes(c)
+            .definitions(&viewer.ws)?
             .into_iter()
             .filter(|d| d.applies_to("contact") && d.status == "active")
             .map(|d| format!("{}={}", d.key, d.label))
@@ -635,7 +647,8 @@ impl DraftTarget for ContactTarget {
 
     fn plan(
         &self,
-        c: &Connection,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
         viewer: &Viewer,
         prepared: &Prepared,
         raw: Vec<Value>,
@@ -651,12 +664,11 @@ impl DraftTarget for ContactTarget {
                 }
                 Raw::JobClose { org, to } => plan_job_close(&mut d, &p, &current, org, to),
                 Raw::JobOpen { org, title, dept } => JobPlan {
-                    c,
                     viewer,
                     party: &p,
                     current: &current,
                 }
-                .open(&mut d, org, title, dept)?,
+                .open(c, &mut d, org, title, dept)?,
                 Raw::AttrSet {
                     key,
                     label,
@@ -690,17 +702,28 @@ impl DraftTarget for ContactTarget {
         Ok(d.done(patch_op("party.patch", &p.id, fields)))
     }
 
-    fn revision(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<i64>> {
-        active_revision(c, ws, id, "contact")
+    fn revision(
+        &self,
+        _store: &steve_store::Store,
+        w: &mut steve_store::W<'_>,
+        ws: &str,
+        id: &str,
+    ) -> ApiResult<Option<i64>> {
+        active_revision(w, ws, id, "contact")
     }
 
     /// `contact:<id> — <名字>（<组织>）`, the 50 most recently updated contacts.
-    fn candidates(&self, c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Candidate>> {
+    fn candidates(
+        &self,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+    ) -> ApiResult<Vec<Candidate>> {
         let q = ContactQuery {
             limit: 500,
             ..Default::default()
         };
-        let mut xs = repo::contacts(c, viewer, &q)?;
+        let mut xs = Contacts::new(c).contacts(viewer, &q)?;
         xs.sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| a.id.cmp(&b.id)));
         let mut out = Vec::new();
         for p in xs.into_iter().take(50) {
@@ -748,7 +771,6 @@ fn plan_job_close(
 }
 
 struct JobPlan<'a> {
-    c: &'a Connection,
     viewer: &'a Viewer,
     party: &'a Party,
     current: &'a [(Party, Value)],
@@ -757,12 +779,13 @@ struct JobPlan<'a> {
 impl JobPlan<'_> {
     fn open(
         &self,
+        c: &mut impl Read,
         d: &mut Draft,
         org: String,
         title: Option<String>,
         dept: Option<String>,
     ) -> ApiResult<()> {
-        let (c, viewer, p, current) = (self.c, self.viewer, self.party, self.current);
+        let (viewer, p, current) = (self.viewer, self.party, self.current);
 
         let title = title
             .map(|t| t.trim().to_string())
@@ -916,9 +939,15 @@ fn set_party_field(
 pub struct OrgTarget;
 
 impl DraftTarget for OrgTarget {
-    fn prepare(&self, c: &Connection, viewer: &Viewer, id: Option<&str>) -> ApiResult<Prepared> {
+    fn prepare(
+        &self,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+        id: Option<&str>,
+    ) -> ApiResult<Prepared> {
         let id = id.ok_or_else(|| ApiError::invalid("target.id"))?;
-        let o = own_party(c, viewer, id, "org", "组织", true)?;
+        let o = own_party_in(c, viewer, id, "org", "组织", true)?;
         let mut fields = vec![
             FieldSpec::new("name", "名字", "text", json!(o.name)),
             FieldSpec::new("aliases", "别名", "list", json!(o.aliases)),
@@ -938,7 +967,7 @@ impl DraftTarget for OrgTarget {
             "domains",
             "域名",
             "list",
-            json!(repo::domains(c, &viewer.ws, &o.id)?),
+            json!(Contacts::new(c).domains(&viewer.ws, &o.id)?),
         ));
         fields.push(FieldSpec::new("note", "备注", "text", json!(o.note)));
         Ok(Prepared {
@@ -956,13 +985,14 @@ impl DraftTarget for OrgTarget {
 
     fn plan(
         &self,
-        c: &Connection,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
         viewer: &Viewer,
         prepared: &Prepared,
         raw: Vec<Value>,
     ) -> ApiResult<Plan> {
         let id = prepared.target_id.as_deref().unwrap_or_default();
-        let o = own_party(c, viewer, id, "org", "组织", true)?;
+        let o = own_party_in(c, viewer, id, "org", "组织", true)?;
         let mut d = Draft::default();
         let mut taken = false;
         let mut fields = Map::new();
@@ -977,13 +1007,19 @@ impl DraftTarget for OrgTarget {
             if new.len() > 20 || !new.iter().all(|x| x.len() <= 253 && DOMAIN.is_match(x)) {
                 continue;
             }
-            let old = repo::domains(c, &viewer.ws, &o.id)?;
+            let old = Contacts::new(c).domains(&viewer.ws, &o.id)?;
             if new == old {
                 continue;
             }
             for x in &new {
-                if let Some(owner) = repo::domain_owner(c, &viewer.ws, x)?.filter(|w| *w != o.id) {
-                    let name = repo::get(c, &owner)?.map(|p| p.name).unwrap_or_default();
+                if let Some(owner) = Contacts::new(c)
+                    .domain_owner(&viewer.ws, x)?
+                    .filter(|w| *w != o.id)
+                {
+                    let name = Contacts::new(c)
+                        .party(&owner)?
+                        .map(|p| p.name)
+                        .unwrap_or_default();
                     d.line(
                         steve_i18n::t!("modules.contacts_draft.label.domain_taken", domain = x),
                         "—",
@@ -1005,8 +1041,14 @@ impl DraftTarget for OrgTarget {
         Ok(d.done(patch_op("org.patch", &o.id, fields)))
     }
 
-    fn revision(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<i64>> {
-        active_revision(c, ws, id, "org")
+    fn revision(
+        &self,
+        _store: &steve_store::Store,
+        w: &mut steve_store::W<'_>,
+        ws: &str,
+        id: &str,
+    ) -> ApiResult<Option<i64>> {
+        active_revision(w, ws, id, "org")
     }
 }
 
@@ -1020,7 +1062,13 @@ fn is_new(id: Option<&str>) -> bool {
 }
 
 impl DraftTarget for TeamTarget {
-    fn prepare(&self, c: &Connection, viewer: &Viewer, id: Option<&str>) -> ApiResult<Prepared> {
+    fn prepare(
+        &self,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+        id: Option<&str>,
+    ) -> ApiResult<Prepared> {
         let member_ops = |verb: &str| {
             OpSpec::new(
                 &format!("members.{verb}"),
@@ -1043,7 +1091,7 @@ impl DraftTarget for TeamTarget {
                 context: json!({}),
             });
         }
-        let (p, d) = own_team(c, viewer, id.unwrap_or_default(), true)?;
+        let (p, d) = draft_team(c, viewer, id.unwrap_or_default(), true)?;
         let mut fields = Vec::new();
         let mut ops = Vec::new();
         if !d.is_chart() {
@@ -1052,7 +1100,8 @@ impl DraftTarget for TeamTarget {
             ops.push(member_ops("remove"));
         }
         fields.push(FieldSpec::new("purpose", "用途", "text", json!(d.purpose)));
-        let names: Vec<String> = trepo::members(c, &viewer.ws, &p.id)?
+        let names: Vec<String> = Teams(c)
+            .active_members(&viewer.ws, &p.id)?
             .into_iter()
             .map(|m| m.contact.name)
             .collect();
@@ -1076,7 +1125,8 @@ impl DraftTarget for TeamTarget {
 
     fn plan(
         &self,
-        c: &Connection,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
         viewer: &Viewer,
         prepared: &Prepared,
         raw: Vec<Value>,
@@ -1084,19 +1134,31 @@ impl DraftTarget for TeamTarget {
         match prepared.target_id.as_deref() {
             None => plan_new_team(c, viewer, raw),
             Some(id) => {
-                let (p, d) = own_team(c, viewer, id, true)?;
+                let (p, d) = draft_team(c, viewer, id, true)?;
                 plan_team(c, viewer, &p, &d, raw)
             }
         }
     }
 
-    fn revision(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<i64>> {
-        active_revision(c, ws, id, "team")
+    fn revision(
+        &self,
+        _store: &steve_store::Store,
+        w: &mut steve_store::W<'_>,
+        ws: &str,
+        id: &str,
+    ) -> ApiResult<Option<i64>> {
+        active_revision(w, ws, id, "team")
     }
 
     /// `team:<id> — <名字>` for every active team, then `team:new — 新建虚拟团队`.
-    fn candidates(&self, c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Candidate>> {
-        let mut out: Vec<Candidate> = trepo::teams(c, viewer)?
+    fn candidates(
+        &self,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+    ) -> ApiResult<Vec<Candidate>> {
+        let mut out: Vec<Candidate> = Teams(c)
+            .list(viewer)?
             .into_iter()
             .map(|(p, _)| Candidate {
                 code: format!("team:{}", p.id),
@@ -1113,7 +1175,7 @@ impl DraftTarget for TeamTarget {
 
 /// Resolves names to contacts; unresolved ones become lines. “我” is left out (`me_out`).
 fn resolve_names(
-    c: &Connection,
+    c: &mut impl Read,
     viewer: &Viewer,
     d: &mut Draft,
     names: &[String],
@@ -1132,7 +1194,7 @@ fn resolve_names(
     Ok(out)
 }
 
-fn plan_new_team(c: &Connection, viewer: &Viewer, raw: Vec<Value>) -> ApiResult<Plan> {
+fn plan_new_team(c: &mut impl Read, viewer: &Viewer, raw: Vec<Value>) -> ApiResult<Plan> {
     let mut d = Draft::default();
     let (mut name, mut purpose, mut names) = (None, None, Vec::new());
     for r in raw_ops(raw) {
@@ -1197,8 +1259,31 @@ fn plan_new_team(c: &Connection, viewer: &Viewer, raw: Vec<Value>) -> ApiResult<
     Ok(d.done(None))
 }
 
+fn draft_team(
+    c: &mut impl Read,
+    viewer: &Viewer,
+    id: &str,
+    active: bool,
+) -> ApiResult<(Party, Details)> {
+    let party = own_party_in(c, viewer, id, "team", "团队", active)?;
+    let details = Teams(c).details(&party.id)?;
+    Ok((party, details))
+}
+
+fn member_rows(
+    c: &mut impl Read,
+    ws: &str,
+    team: &str,
+) -> steve_store::Result<Vec<(String, String)>> {
+    Ok(Teams(c)
+        .members(ws, team)?
+        .into_iter()
+        .map(|(id, role, _)| (id, role))
+        .collect())
+}
+
 fn plan_team(
-    c: &Connection,
+    c: &mut impl Read,
     viewer: &Viewer,
     p: &Party,
     det: &Details,
@@ -1258,7 +1343,7 @@ fn plan_team(
             _ => {}
         }
     }
-    let rows = trepo::member_rows(c, &viewer.ws, &p.id)?;
+    let rows = member_rows(c, &viewer.ws, &p.id)?;
     let is_member = |id: &str| rows.iter().any(|(c, _)| c == id);
     let add: Vec<Party> = resolve_names(c, viewer, &mut d, &add)?
         .into_iter()
@@ -1269,7 +1354,7 @@ fn plan_team(
         .filter(|x| is_member(&x.id) && !add.iter().any(|a| a.id == x.id))
         .collect();
     if !add.is_empty() || !remove.is_empty() {
-        let before = trepo::headcount(c, &viewer.ws, &p.id, false)?;
+        let before = Teams(c).headcount(&viewer.ws, &p.id, false)?;
         let after = before + add.len() as i64 - remove.len() as i64;
         let mut what = Vec::new();
         if !add.is_empty() {
@@ -1308,18 +1393,26 @@ fn args<T: for<'de> Deserialize<'de>>(op: &Value) -> ApiResult<T> {
     parse(op.to_string().as_bytes())
 }
 
-fn viewer(c: &Connection, cx: &OpCx) -> ApiResult<Viewer> {
-    Ok(Viewer::load(c, cx.ws, cx.actor)?)
+fn viewer(cx: &OpCx) -> Viewer {
+    Viewer::bare(cx.ws, cx.actor)
 }
 
-fn audit(tx: &Tx, cx: &OpCx, action: &str, target: &str, mut detail: Value) -> ApiResult<()> {
+fn audit(
+    tx: &mut W<'_>,
+    cx: &OpCx,
+    action: &str,
+    target: &str,
+    mut detail: Value,
+) -> ApiResult<()> {
     detail["changeset"] = json!(cx.changeset_id);
-    Ok(base::audit(tx, cx.ws, cx.actor, action, target, &detail)?)
+    Ok(tx.audit(cx.ws, cx.actor, action, target, &detail)?)
 }
 
 /// A party of the changeset's workspace by id, whatever its state (undo puts things back regardless).
-fn party_in(c: &Connection, cx: &OpCx, id: &str) -> ApiResult<Option<Party>> {
-    Ok(repo::get(c, id)?.filter(|p| p.workspace_id == cx.ws))
+fn party_in(c: &mut impl Read, cx: &OpCx, id: &str) -> ApiResult<Option<Party>> {
+    Ok(Contacts::new(c)
+        .party(id)?
+        .filter(|p| p.workspace_id == cx.ws))
 }
 
 /// The editable columns of a party as JSON (`kind` = contact or org kind).
@@ -1358,7 +1451,7 @@ fn to_patch(p: &Party, m: &Map<String, Value>) -> ApiResult<PartyPatch> {
 
 /// Writes the columns of `want` that differ (revision, audit, event) and returns their old values.
 fn write_party(
-    tx: &Tx,
+    tx: &mut W<'_>,
     cx: &OpCx,
     p: &Party,
     want: &Map<String, Value>,
@@ -1390,7 +1483,7 @@ fn write_party(
         &p.id,
         json!({ "type": p.kind, "fields": fields }),
     )?;
-    event(tx, cx.ws, &p.id);
+    tx.emit(crate::accounts::service::party_changed(cx.ws, &p.id));
     Ok(before)
 }
 
@@ -1448,37 +1541,28 @@ fn check_party_fields(p: &Party, f: &Map<String, Value>) -> ApiResult<()> {
 
 /// Undoing a creation: the party row goes away when nothing else refers to it yet; otherwise it is
 /// retired (`deleted` / `dissolved`) so the references keep a name to show.
-fn purge_or_retire(tx: &Tx, cx: &OpCx, p: &Party, retired: &str) -> ApiResult<()> {
-    let soft_refs: i64 = tx.query_row(
-        "SELECT (SELECT COUNT(*) FROM links WHERE workspace_id = ?1 AND ((subject_type = 'party' AND subject_id = ?2) OR (object_type = 'party' AND object_id = ?2)))
-              + (SELECT COUNT(*) FROM mem_about WHERE workspace_id = ?1 AND object_type = 'party' AND object_id = ?2)
-              + (SELECT COUNT(*) FROM entity_tags WHERE workspace_id = ?1 AND object_type = 'party' AND object_id = ?2)
-              + (SELECT COUNT(*) FROM parties WHERE workspace_id = ?1 AND visibility = 'team:' || ?2)
-              + (SELECT COUNT(*) FROM mems WHERE workspace_id = ?1 AND visibility = 'team:' || ?2)",
-        params![cx.ws, p.id],
-        |r| r.get(0),
-    )?;
-    if soft_refs == 0 {
-        // rows with a foreign key to the party (attributes, members, domains, accounts…) make the
-        // delete fail; then the savepoint is rolled back and the party retired instead
-        tx.execute_batch("SAVEPOINT p5_purge")?;
-        let gone = (|| -> rusqlite::Result<()> {
-            tx.execute(
-                "DELETE FROM team_members WHERE workspace_id = ? AND team_id = ?",
-                params![cx.ws, p.id],
-            )?;
-            tx.execute("DELETE FROM team_details WHERE party_id = ?", [&p.id])?;
-            tx.execute("DELETE FROM parties WHERE id = ?", [&p.id])?;
-            Ok(())
-        })();
-        match gone {
+fn purge_or_retire(tx: &mut W<'_>, cx: &OpCx, p: &Party, retired: &str) -> ApiResult<()> {
+    let party = pref(&p.id);
+    let audience = format!("team:{}", p.id);
+    let has_refs = !Links(tx).from(cx.ws, &party, None)?.is_empty()
+        || !Links(tx).to(cx.ws, &party, None)?.is_empty()
+        || !Memories(tx).about_ids(cx.ws, &party)?.is_empty()
+        || !steve_store::TagRows(tx).of(cx.ws, &party)?.is_empty()
+        || tx.contacts().has_audience(cx.ws, &audience)?
+        || Memories(tx).has_audience(cx.ws, &audience)?;
+    if !has_refs {
+        // A foreign key can prevent hard deletion. The rollback also restores the team's rows.
+        match tx.scope(|w| {
+            Teams(w).clear_details(cx.ws, &p.id)?;
+            w.contacts().purge(cx.ws, &p.id)
+        }) {
             Ok(()) => {
-                tx.execute_batch("RELEASE p5_purge")?;
                 audit(tx, cx, "party.purge", &p.id, json!({ "type": p.kind }))?;
-                event(tx, cx.ws, &p.id);
+                tx.emit(crate::accounts::service::party_changed(cx.ws, &p.id));
                 return Ok(());
             }
-            Err(_) => tx.execute_batch("ROLLBACK TO p5_purge; RELEASE p5_purge")?,
+            Err(steve_store::StoreError::Rejected(_)) => {}
+            Err(error) => return Err(error.into()),
         }
     }
     let patch = PartyPatch {
@@ -1494,7 +1578,7 @@ fn purge_or_retire(tx: &Tx, cx: &OpCx, p: &Party, retired: &str) -> ApiResult<()
         cx.actor,
     )?;
     audit(tx, cx, "party.delete", &p.id, json!({ "type": p.kind }))?;
-    event(tx, cx.ws, &p.id);
+    tx.emit(crate::accounts::service::party_changed(cx.ws, &p.id));
     Ok(())
 }
 
@@ -1512,20 +1596,29 @@ struct IdArg {
 pub struct PartyPatchOp;
 
 impl ChangeOp for PartyPatchOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
+        let c = w;
         let a: IdArg = args(op)?;
-        let p = own_party(c, &viewer(c, cx)?, &a.id, "contact", "联系人", true)?;
+        let p = own_party_in(c, &viewer(cx), &a.id, "contact", "联系人", true)?;
         check_party_fields(&p, &fields_of(op, &CONTACT_FIELDS))
     }
 
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = w;
         let a: IdArg = args(op)?;
-        let p = own_party(tx, &viewer(tx, cx)?, &a.id, "contact", "联系人", true)?;
+        let p = own_party_in(tx, &viewer(cx), &a.id, "contact", "联系人", true)?;
         let before = write_party(tx, cx, &p, &fields_of(op, &CONTACT_FIELDS), "party.update")?;
         Ok(Value::Object(before))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = w;
         let a: IdArg = args(op)?;
         if let (Some(p), Some(b)) = (party_in(tx, cx, &a.id)?, before.as_object()) {
             let back = crate::changes::still_ours(
@@ -1567,7 +1660,7 @@ struct OrgCreate {
 pub struct OrgCreateOp;
 
 impl ChangeOp for OrgCreateOp {
-    fn validate(&self, _: &Connection, _: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, _: &mut steve_store::W<'_>, _: &OpCx, op: &Value) -> ApiResult<()> {
         let a: OrgCreate = args(op)?;
         let codes: Vec<&str> = ORG_KINDS.iter().map(|(c, _)| *c).collect();
         Check::new()
@@ -1576,28 +1669,36 @@ impl ChangeOp for OrgCreateOp {
             .done()
     }
 
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = w;
         let a: OrgCreate = args(op)?;
         let bind = |id: &str| {
             if let Some(v) = op.get("as").and_then(Value::as_str) {
                 cx.bind(v, json!(id));
             }
         };
-        if let Found::One(o) = find_org(tx, &viewer(tx, cx)?, &a.name)? {
+        if let Found::One(o) = find_org(tx, &viewer(cx), &a.name)? {
             bind(&o.id);
             return Ok(json!({ "id": null, "reused": o.id }));
         }
         let mut p = NewParty::new("org", a.name.trim(), cx.actor);
         p.org_kind = Some(a.kind.unwrap_or_else(|| "partner".into()));
         p.source = "chat".into();
-        let o = repo::insert(tx, cx.ws, &p)?;
+        let o = Contacts::new(tx).insert(cx.ws, &p)?;
         audit(tx, cx, "party.create", &o.id, json!({ "type": "org" }))?;
-        event(tx, cx.ws, &o.id);
+        tx.emit(crate::accounts::service::party_changed(cx.ws, &o.id));
         bind(&o.id);
         Ok(json!({ "id": o.id }))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, _: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        _: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = w;
         match before.get("id").and_then(Value::as_str) {
             Some(id) => match party_in(tx, cx, id)? {
                 Some(o) => purge_or_retire(tx, cx, &o, "deleted"),
@@ -1609,7 +1710,7 @@ impl ChangeOp for OrgCreateOp {
 }
 
 /// Normalized domains, each owned by no other organization (`409 这个域名已经属于「X」`).
-fn check_domains(c: &Connection, ws: &str, org: &str, raw: &Value) -> ApiResult<Vec<String>> {
+fn check_domains(c: &mut impl Read, ws: &str, org: &str, raw: &Value) -> ApiResult<Vec<String>> {
     let xs: Vec<String> =
         serde_json::from_value(raw.clone()).map_err(|_| ApiError::invalid("domains"))?;
     let out = dedup(xs.iter().map(|x| normalize_domain(x)).collect());
@@ -1623,8 +1724,11 @@ fn check_domains(c: &Connection, ws: &str, org: &str, raw: &Value) -> ApiResult<
     }
     ck.done()?;
     for d in &out {
-        if let Some(owner) = repo::domain_owner(c, ws, d)?.filter(|o| o != org) {
-            let name = repo::get(c, &owner)?.map(|o| o.name).unwrap_or_default();
+        if let Some(owner) = Contacts::new(c).domain_owner(ws, d)?.filter(|o| o != org) {
+            let name = Contacts::new(c)
+                .party(&owner)?
+                .map(|o| o.name)
+                .unwrap_or_default();
             return Err(ApiError::conflict(steve_i18n::t!(
                 "modules.contacts.domain_taken",
                 name = name
@@ -1638,9 +1742,10 @@ fn check_domains(c: &Connection, ws: &str, org: &str, raw: &Value) -> ApiResult<
 pub struct OrgPatchOp;
 
 impl ChangeOp for OrgPatchOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
+        let c = w;
         let a: IdArg = args(op)?;
-        let o = own_party(c, &viewer(c, cx)?, &a.id, "org", "组织", true)?;
+        let o = own_party_in(c, &viewer(cx), &a.id, "org", "组织", true)?;
         check_party_fields(&o, &fields_of(op, &ORG_FIELDS))?;
         if let Some(d) = op.get("domains") {
             check_domains(c, cx.ws, &o.id, d)?;
@@ -1648,16 +1753,17 @@ impl ChangeOp for OrgPatchOp {
         Ok(())
     }
 
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = w;
         let a: IdArg = args(op)?;
-        let o = own_party(tx, &viewer(tx, cx)?, &a.id, "org", "组织", true)?;
+        let o = own_party_in(tx, &viewer(cx), &a.id, "org", "组织", true)?;
         let mut before = write_party(tx, cx, &o, &fields_of(op, &ORG_FIELDS), "party.update")?;
         if let Some(d) = op.get("domains") {
             let new = check_domains(tx, cx.ws, &o.id, d)?;
-            let old = repo::domains(tx, cx.ws, &o.id)?;
+            let old = Contacts::new(tx).domains(cx.ws, &o.id)?;
             if new != old {
-                repo::set_domains(tx, cx.ws, &o.id, &new)?;
-                repo::touch(tx, &o.id)?;
+                Contacts::new(tx).set_domains(cx.ws, &o.id, &new)?;
+                Contacts::new(tx).touch(&o.id)?;
                 audit(
                     tx,
                     cx,
@@ -1665,14 +1771,21 @@ impl ChangeOp for OrgPatchOp {
                     &o.id,
                     json!({ "type": "org", "fields": ["domains"] }),
                 )?;
-                event(tx, cx.ws, &o.id);
+                tx.emit(crate::accounts::service::party_changed(cx.ws, &o.id));
                 before.insert("domains".into(), json!(old));
             }
         }
         Ok(Value::Object(before))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = w;
         let a: IdArg = args(op)?;
         let (Some(o), Some(b)) = (party_in(tx, cx, &a.id)?, before.as_object()) else {
             return Ok(());
@@ -1681,9 +1794,9 @@ impl ChangeOp for OrgPatchOp {
             crate::changes::still_ours(cx, b, &fields_of(op, &ORG_FIELDS), &snap(&o), field_label);
         if let Some(d) = b.remove("domains") {
             let old: Vec<String> = serde_json::from_value(d).unwrap_or_default();
-            repo::set_domains(tx, cx.ws, &o.id, &old)?;
-            repo::touch(tx, &o.id)?;
-            event(tx, cx.ws, &o.id);
+            Contacts::new(tx).set_domains(cx.ws, &o.id, &old)?;
+            Contacts::new(tx).touch(&o.id)?;
+            tx.emit(crate::accounts::service::party_changed(cx.ws, &o.id));
         }
         write_party(tx, cx, &o, &b, "party.update")?;
         Ok(())
@@ -1722,10 +1835,10 @@ impl JobArgs {
         }
         ck.done()
     }
-    fn owned(&self, c: &Connection, cx: &OpCx) -> ApiResult<(Party, Party)> {
-        let v = viewer(c, cx)?;
-        let p = own_party(c, &v, &self.contact, "contact", "联系人", true)?;
-        let o = own_party(c, &v, &self.org, "org", "组织", true)?;
+    fn owned(&self, c: &mut impl Read, cx: &OpCx) -> ApiResult<(Party, Party)> {
+        let v = viewer(cx);
+        let p = own_party_in(c, &v, &self.contact, "contact", "联系人", true)?;
+        let o = own_party_in(c, &v, &self.org, "org", "组织", true)?;
         Ok((p, o))
     }
 }
@@ -1736,7 +1849,7 @@ fn is_current(props: &Value) -> bool {
 
 /// Records a job change on the contact (revision, audit, event) like the REST job routes.
 fn job_written(
-    tx: &Tx,
+    tx: &mut W<'_>,
     cx: &OpCx,
     p: &Party,
     org: &str,
@@ -1753,7 +1866,7 @@ fn job_written(
         cx.actor,
     )?;
     audit(tx, cx, action, &p.id, json!({ "org_id": org }))?;
-    event(tx, cx.ws, &p.id);
+    tx.emit(crate::accounts::service::party_changed(cx.ws, &p.id));
     Ok(())
 }
 
@@ -1762,17 +1875,19 @@ fn job_written(
 pub struct JobOpenOp;
 
 impl ChangeOp for JobOpenOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
+        let c = w;
         let a: JobArgs = args(op)?;
         a.check()?;
         a.owned(c, cx).map(|_| ())
     }
 
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = w;
         let a: JobArgs = args(op)?;
         let (p, o) = a.owned(tx, cx)?;
         let key = a.key();
-        let (old, props) = match links::get(tx, cx.ws, &key)? {
+        let (old, props) = match Links(tx).get(cx.ws, &key)? {
             Some(l) if is_current(&l.props) => {
                 let mut props = if l.props.is_object() {
                     l.props.clone()
@@ -1785,7 +1900,7 @@ impl ChangeOp for JobOpenOp {
                 if let Some(d) = &a.dept {
                     props["dept"] = json!(d);
                 }
-                links::set_props(tx, cx.ws, &key, &props)?;
+                Links(tx).set_props(cx.ws, &key, &props)?;
                 (l.props, props)
             }
             Some(l) => {
@@ -1801,14 +1916,14 @@ impl ChangeOp for JobOpenOp {
                 }
                 history.push(past);
                 let props = json!({ "title": a.title, "dept": a.dept, "from": null, "to": null, "history": history });
-                links::set_props(tx, cx.ws, &key, &props)?;
+                Links(tx).set_props(cx.ws, &key, &props)?;
                 (l.props, props)
             }
             None => {
                 let mut l =
                     NewLink::new(key.subject.clone(), "works_at", key.object.clone(), "chat");
                 l.props = json!({ "title": a.title, "dept": a.dept, "from": null, "to": null });
-                links::add(tx, cx.ws, &l)?;
+                Links(tx).add(cx.ws, &l)?;
                 (Value::Null, l.props)
             }
         };
@@ -1816,17 +1931,25 @@ impl ChangeOp for JobOpenOp {
         Ok(json!({ "props": old }))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = w;
         let a: JobArgs = args(op)?;
         let key = a.key();
-        let now = links::get(tx, cx.ws, &key)?
+        let now = Links(tx)
+            .get(cx.ws, &key)?
             .map(|l| l.props)
             .unwrap_or(Value::Null);
         let old = before.get("props").cloned().unwrap_or(Value::Null);
         if old.is_null() {
-            links::remove(tx, cx.ws, &key)?;
+            Links(tx).remove(cx.ws, &key)?;
         } else {
-            links::set_props(tx, cx.ws, &key, &old)?;
+            Links(tx).set_props(cx.ws, &key, &old)?;
         }
         if let Some(p) = party_in(tx, cx, &a.contact)? {
             job_written(tx, cx, &p, &a.org, &now, &old, "party.job_update")?;
@@ -1839,21 +1962,24 @@ impl ChangeOp for JobOpenOp {
 pub struct JobCloseOp;
 
 impl ChangeOp for JobCloseOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
+        let c = w;
         let a: JobArgs = args(op)?;
         a.check()?;
         a.owned(c, cx)?;
-        match links::get(c, cx.ws, &a.key())? {
+        match Links(c).get(cx.ws, &a.key())? {
             Some(l) if is_current(&l.props) => Ok(()),
             _ => Err(ApiError::not_found("任职")),
         }
     }
 
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = w;
         let a: JobArgs = args(op)?;
         let (p, o) = a.owned(tx, cx)?;
         let key = a.key();
-        let l = links::get(tx, cx.ws, &key)?
+        let l = Links(tx)
+            .get(cx.ws, &key)?
             .filter(|l| is_current(&l.props))
             .ok_or_else(|| ApiError::not_found("任职"))?;
         let mut props = if l.props.is_object() {
@@ -1862,19 +1988,26 @@ impl ChangeOp for JobCloseOp {
             json!({})
         };
         props["to"] = json!(a.to.clone().unwrap_or_else(this_month));
-        links::set_props(tx, cx.ws, &key, &props)?;
+        Links(tx).set_props(cx.ws, &key, &props)?;
         job_written(tx, cx, &p, &o.id, &l.props, &props, "party.job_update")?;
         Ok(json!({ "props": l.props }))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = w;
         let a: JobArgs = args(op)?;
         let key = a.key();
-        let Some(now) = links::get(tx, cx.ws, &key)?.map(|l| l.props) else {
+        let Some(now) = Links(tx).get(cx.ws, &key)?.map(|l| l.props) else {
             return Ok(());
         };
         let old = before.get("props").cloned().unwrap_or_else(|| json!({}));
-        links::set_props(tx, cx.ws, &key, &old)?;
+        Links(tx).set_props(cx.ws, &key, &old)?;
         if let Some(p) = party_in(tx, cx, &a.contact)? {
             job_written(tx, cx, &p, &a.org, &now, &old, "party.job_update")?;
         }
@@ -1894,15 +2027,16 @@ struct AttrArgs {
 }
 
 /// A contact or organization the actor can write (`404 没有这个联系人` / `组织`).
-fn own_contact_or_org(c: &Connection, cx: &OpCx, id: &str) -> ApiResult<Party> {
-    let p = repo::get(c, id)?
+fn own_contact_or_org(c: &mut impl Read, cx: &OpCx, id: &str) -> ApiResult<Party> {
+    let p = Contacts::new(c)
+        .party(id)?
         .filter(|p| p.status == "active" && (p.kind == "contact" || p.kind == "org"));
     let noun = if p.as_ref().is_some_and(|p| p.kind == "org") {
         "组织"
     } else {
         "联系人"
     };
-    own(p, &viewer(c, cx)?, noun)
+    own(p, &viewer(cx), noun)
 }
 
 /// `attr.set {party, key, label?, value, level?}`: a value you said (`confirmed`, “你说的”); an unknown
@@ -1910,8 +2044,8 @@ fn own_contact_or_org(c: &Connection, cx: &OpCx, id: &str) -> ApiResult<Party> {
 pub struct AttrSetOp;
 
 impl AttrSetOp {
-    fn check(c: &Connection, cx: &OpCx, a: &AttrArgs, p: &Party) -> ApiResult<()> {
-        let def = repo::def_by_key(c, cx.ws, &a.key)?;
+    fn check(c: &mut impl Read, cx: &OpCx, a: &AttrArgs, p: &Party) -> ApiResult<()> {
+        let def = Attributes(c).definition_by_key(cx.ws, &a.key)?;
         let mut ck = Check::new();
         ck.pattern("key", &a.key, &KEY)
             .opt_len("label", a.label.as_deref().map(str::trim), 1, 20)
@@ -1929,22 +2063,23 @@ impl AttrSetOp {
 }
 
 impl ChangeOp for AttrSetOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
+        let c = w;
         let a: AttrArgs = args(op)?;
         let p = own_contact_or_org(c, cx, &a.party)?;
         Self::check(c, cx, &a, &p)
     }
 
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = w;
         let a: AttrArgs = args(op)?;
         let p = own_contact_or_org(tx, cx, &a.party)?;
         Self::check(tx, cx, &a, &p)?;
         let label = a.label.as_deref().map(str::trim);
-        let (def, made) = match repo::def_by_key(tx, cx.ws, &a.key)? {
+        let (def, made) = match Attributes(tx).definition_by_key(cx.ws, &a.key)? {
             Some(d) => (d, None),
             None => {
-                let d = repo::def_insert(
-                    tx,
+                let d = Attributes(tx).insert_definition(
                     cx.ws,
                     &NewDef {
                         applies: p.kind.clone(),
@@ -1963,8 +2098,7 @@ impl ChangeOp for AttrSetOp {
             }
         };
         let label = label.unwrap_or(&def.label).to_string();
-        let v = repo::value_insert(
-            tx,
+        let v = Attributes(tx).insert_value(
             cx.ws,
             &NewValue {
                 party_id: p.id.clone(),
@@ -1979,7 +2113,7 @@ impl ChangeOp for AttrSetOp {
                 decision_id: None,
             },
         )?;
-        let staled = repo::stale_others_recorded(tx, &v)?;
+        let staled = Attributes(tx).stale_siblings(&v)?;
         revise(
             tx,
             &p,
@@ -1995,15 +2129,22 @@ impl ChangeOp for AttrSetOp {
             &p.id,
             json!({ "attr_id": v.id, "key": v.key }),
         )?;
-        event(tx, cx.ws, &p.id);
+        tx.emit(crate::accounts::service::party_changed(cx.ws, &p.id));
         Ok(json!({ "id": v.id, "def": made, "staled": staled }))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = w;
         let a: AttrArgs = args(op)?;
         let s = |k: &str| before.get(k).and_then(Value::as_str).map(String::from);
         if let Some(id) = s("id") {
-            repo::value_delete(tx, &id)?;
+            Attributes(tx).delete_value(&id)?;
         }
         for id in before
             .get("staled")
@@ -2012,14 +2153,17 @@ impl ChangeOp for AttrSetOp {
             .flatten()
             .filter_map(Value::as_str)
         {
-            if repo::value_get(tx, id)?.is_some_and(|v| v.status == "stale") {
-                repo::value_update(tx, id, None, None, Some("confirmed"))?;
+            if Attributes(tx)
+                .value(id)?
+                .is_some_and(|v| v.status == "stale")
+            {
+                Attributes(tx).update_value(id, None, None, Some("confirmed"))?;
             }
         }
         if let Some(def) = s("def")
-            && repo::def_usage(tx, cx.ws, &a.key)? == 0
+            && Attributes(tx).definition_usage(cx.ws, &a.key)? == 0
         {
-            repo::def_delete(tx, &def)?;
+            Attributes(tx).delete_definition(&def)?;
         }
         if let Some(p) = party_in(tx, cx, &a.party)? {
             revise(
@@ -2030,7 +2174,7 @@ impl ChangeOp for AttrSetOp {
                 json!({ "attr": null }),
                 cx.actor,
             )?;
-            event(tx, cx.ws, &p.id);
+            tx.emit(crate::accounts::service::party_changed(cx.ws, &p.id));
         }
         Ok(())
     }
@@ -2049,27 +2193,30 @@ struct MemArgs {
 pub struct MemAddOp;
 
 impl MemAddOp {
-    fn owned(c: &Connection, cx: &OpCx, a: &MemArgs) -> ApiResult<Party> {
+    fn owned(c: &mut impl Read, cx: &OpCx, a: &MemArgs) -> ApiResult<Party> {
         let codes: Vec<&str> = MEM_KINDS.iter().map(|(c, _)| *c).collect();
         Check::new()
             .one_of("kind", &a.kind, &codes)
             .len("text", a.text.trim(), 1, 2000)
             .done()?;
-        let p = repo::get(c, &a.about)?.filter(|p| p.status == "active");
-        own(p, &viewer(c, cx)?, "联系人")
+        let p = Contacts::new(c)
+            .party(&a.about)?
+            .filter(|p| p.status == "active");
+        own(p, &viewer(cx), "联系人")
     }
 }
 
 impl ChangeOp for MemAddOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
+        let c = w;
         Self::owned(c, cx, &args(op)?).map(|_| ())
     }
 
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = w;
         let a: MemArgs = args(op)?;
         let p = Self::owned(tx, cx, &a)?;
-        let m = mems::create(
-            tx,
+        let m = Memories(tx).create(
             cx.ws,
             &NewMem {
                 kind: a.kind.clone(),
@@ -2090,16 +2237,23 @@ impl ChangeOp for MemAddOp {
             &m.id,
             json!({ "about": p.id, "kind": a.kind }),
         )?;
-        event(tx, cx.ws, &p.id);
+        tx.emit(crate::accounts::service::party_changed(cx.ws, &p.id));
         Ok(json!({ "id": m.id }))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = w;
         let a: MemArgs = args(op)?;
         if let Some(id) = before.get("id").and_then(Value::as_str) {
-            mems::delete(tx, id)?;
+            Memories(tx).delete(id)?;
         }
-        event(tx, cx.ws, &a.about);
+        tx.emit(crate::accounts::service::party_changed(cx.ws, &a.about));
         Ok(())
     }
 }
@@ -2119,7 +2273,7 @@ pub struct TeamCreateOp;
 
 impl TeamCreateOp {
     fn members(
-        c: &Connection,
+        c: &mut impl Read,
         cx: &OpCx,
         a: &TeamCreate,
         me: Option<&str>,
@@ -2129,10 +2283,10 @@ impl TeamCreateOp {
             .opt_len("purpose", a.purpose.as_deref(), 0, 400)
             .that("members", a.members.len() <= 500)
             .done()?;
-        let v = viewer(c, cx)?;
+        let v = viewer(cx);
         let mut out: Vec<Party> = Vec::new();
         for id in &a.members {
-            let p = own_party(c, &v, id, "contact", "联系人", true)?;
+            let p = own_party_in(c, &v, id, "contact", "联系人", true)?;
             if Some(p.id.as_str()) != me && !out.iter().any(|x| x.id == p.id) {
                 out.push(p);
             }
@@ -2145,13 +2299,15 @@ impl TeamCreateOp {
 }
 
 impl ChangeOp for TeamCreateOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
+        let c = w;
         let a: TeamCreate = args(op)?;
-        let me = repo::me_of(c, cx.ws, cx.actor)?.map(|p| p.id);
+        let me = Contacts::new(c).me(cx.ws, cx.actor)?.map(|p| p.id);
         Self::members(c, cx, &a, me.as_deref()).map(|_| ())
     }
 
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = w;
         let a: TeamCreate = args(op)?;
         let me = ensure_base(
             tx,
@@ -2163,9 +2319,8 @@ impl ChangeOp for TeamCreateOp {
         let members = Self::members(tx, cx, &a, Some(&me.id))?;
         let mut p = NewParty::new("team", a.name.trim(), cx.actor);
         p.source = "chat".into();
-        let t = repo::insert(tx, cx.ws, &p)?;
-        trepo::details_insert(
-            tx,
+        let t = Contacts::new(tx).insert(cx.ws, &p)?;
+        Teams(tx).insert_details(
             cx.ws,
             &t.id,
             &Details {
@@ -2174,9 +2329,9 @@ impl ChangeOp for TeamCreateOp {
                 ..Default::default()
             },
         )?;
-        trepo::member_add(tx, cx.ws, &t.id, &me.id, "lead", "chat")?;
+        Teams(tx).add_member(cx.ws, &t.id, &me.id, "lead", "chat")?;
         for m in &members {
-            trepo::member_add(tx, cx.ws, &t.id, &m.id, "member", "chat")?;
+            Teams(tx).add_member(cx.ws, &t.id, &m.id, "member", "chat")?;
         }
         audit(
             tx,
@@ -2185,14 +2340,21 @@ impl ChangeOp for TeamCreateOp {
             &t.id,
             json!({ "kind": "virtual", "members": members.len() + 1 }),
         )?;
-        event(tx, cx.ws, &t.id);
+        tx.emit(crate::accounts::service::party_changed(cx.ws, &t.id));
         if let Some(v) = op.get("as").and_then(Value::as_str) {
             cx.bind(v, json!(t.id));
         }
         Ok(json!({ "id": t.id }))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, _: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        _: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = w;
         match before.get("id").and_then(Value::as_str) {
             Some(id) => match party_in(tx, cx, id)? {
                 Some(t) => purge_or_retire(tx, cx, &t, "dissolved"),
@@ -2214,13 +2376,13 @@ struct TeamPatch {
 pub struct TeamPatchOp;
 
 impl TeamPatchOp {
-    fn owned(c: &Connection, cx: &OpCx, a: &TeamPatch) -> ApiResult<(Party, Details)> {
+    fn owned(c: &mut impl Read, cx: &OpCx, a: &TeamPatch) -> ApiResult<(Party, Details)> {
         let mut ck = Check::new();
         if let Some(n) = &a.name {
             ck.len("name", n.trim(), 1, 40);
         }
         ck.opt_len("purpose", a.purpose.as_deref(), 0, 400).done()?;
-        let (p, d) = own_team(c, &viewer(c, cx)?, &a.id, true)?;
+        let (p, d) = draft_team(c, &viewer(cx), &a.id, true)?;
         if d.is_chart() && a.name.as_ref().is_some_and(|n| n.trim() != p.name) {
             return Err(ApiError::rule(chart_readonly()));
         }
@@ -2228,7 +2390,7 @@ impl TeamPatchOp {
     }
 
     /// Writes name/purpose and returns their old values (only the changed ones).
-    fn write(tx: &Tx, cx: &OpCx, p: &Party, d: &Details, a: &TeamPatch) -> ApiResult<Value> {
+    fn write(tx: &mut W<'_>, cx: &OpCx, p: &Party, d: &Details, a: &TeamPatch) -> ApiResult<Value> {
         let name = a
             .name
             .as_ref()
@@ -2247,7 +2409,7 @@ impl TeamPatchOp {
         if after.is_empty() {
             return Ok(json!({}));
         }
-        trepo::details_update(tx, &p.id, purpose.as_deref(), None)?;
+        Teams(tx).update_details(&p.id, purpose.as_deref(), None)?;
         let patch = PartyPatch {
             name,
             ..Default::default()
@@ -2262,28 +2424,37 @@ impl TeamPatchOp {
             cx.actor,
         )?;
         audit(tx, cx, "team.update", &p.id, json!({ "fields": fields }))?;
-        event(tx, cx.ws, &p.id);
+        tx.emit(crate::accounts::service::party_changed(cx.ws, &p.id));
         Ok(Value::Object(before))
     }
 }
 
 impl ChangeOp for TeamPatchOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
+        let c = w;
         Self::owned(c, cx, &args(op)?).map(|_| ())
     }
 
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = w;
         let a: TeamPatch = args(op)?;
         let (p, d) = Self::owned(tx, cx, &a)?;
         Self::write(tx, cx, &p, &d, &a)
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = w;
         let id: IdArg = args(op)?;
         let Some(p) = party_in(tx, cx, &id.id)? else {
             return Ok(());
         };
-        let d = trepo::details(tx, &p.id)?;
+        let d = Teams(tx).details(&p.id)?;
         let mut written = Map::new();
         for k in ["name", "purpose"] {
             if let Some(v) = op.get(k).and_then(Value::as_str) {
@@ -2326,19 +2497,19 @@ struct TeamMembers {
 pub struct TeamMembersOp;
 
 impl TeamMembersOp {
-    fn owned(c: &Connection, cx: &OpCx, a: &TeamMembers) -> ApiResult<Party> {
-        let v = viewer(c, cx)?;
-        let (p, d) = own_team(c, &v, &a.id, true)?;
+    fn owned(c: &mut impl Read, cx: &OpCx, a: &TeamMembers) -> ApiResult<Party> {
+        let v = viewer(cx);
+        let (p, d) = draft_team(c, &v, &a.id, true)?;
         if d.is_chart() {
             return Err(ApiError::rule(chart_readonly()));
         }
         for id in &a.add {
-            own_party(c, &v, id, "contact", "联系人", true)?;
+            own_party_in(c, &v, id, "contact", "联系人", true)?;
         }
         Ok(p)
     }
 
-    fn record(tx: &Tx, cx: &OpCx, p: &Party, was: Value, now: Value) -> ApiResult<()> {
+    fn record(tx: &mut W<'_>, cx: &OpCx, p: &Party, was: Value, now: Value) -> ApiResult<()> {
         revise(
             tx,
             p,
@@ -2348,21 +2519,24 @@ impl TeamMembersOp {
             cx.actor,
         )?;
         audit(tx, cx, "team.members", &p.id, json!({}))?;
-        event(tx, cx.ws, &p.id);
+        tx.emit(crate::accounts::service::party_changed(cx.ws, &p.id));
         Ok(())
     }
 }
 
 impl ChangeOp for TeamMembersOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
+        let c = w;
         Self::owned(c, cx, &args(op)?).map(|_| ())
     }
 
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = w;
         let a: TeamMembers = args(op)?;
         let p = Self::owned(tx, cx, &a)?;
-        let rows = trepo::member_rows(tx, cx.ws, &p.id)?;
-        let sources: Vec<(String, String)> = trepo::members(tx, cx.ws, &p.id)?
+        let rows = member_rows(tx, cx.ws, &p.id)?;
+        let sources: Vec<(String, String)> = Teams(tx)
+            .active_members(cx.ws, &p.id)?
             .into_iter()
             .map(|m| (m.contact.id, m.source))
             .collect();
@@ -2375,13 +2549,13 @@ impl ChangeOp for TeamMembersOp {
                     .find(|(c, _)| c == id)
                     .map(|(_, s)| s.as_str())
                     .unwrap_or("manual");
-                trepo::member_remove(tx, cx.ws, &p.id, id)?;
+                Teams(tx).remove_member(cx.ws, &p.id, id)?;
                 removed.push(row(id, role, src));
             }
         }
         for id in &a.add {
             if !rows.iter().any(|(c, _)| c == id) && !added.contains(id) {
-                trepo::member_add(tx, cx.ws, &p.id, id, "member", "chat")?;
+                Teams(tx).add_member(cx.ws, &p.id, id, "member", "chat")?;
                 added.push(id.clone());
             }
         }
@@ -2392,12 +2566,19 @@ impl ChangeOp for TeamMembersOp {
         Ok(json!({ "added": added, "removed": removed }))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = w;
         let a: TeamMembers = args(op)?;
         let Some(p) = party_in(tx, cx, &a.id)? else {
             return Ok(());
         };
-        let rows = trepo::member_rows(tx, cx.ws, &p.id)?;
+        let rows = member_rows(tx, cx.ws, &p.id)?;
         let empty = Vec::new();
         let added = before
             .get("added")
@@ -2408,12 +2589,12 @@ impl ChangeOp for TeamMembersOp {
             .and_then(Value::as_array)
             .unwrap_or(&empty);
         for id in added.iter().filter_map(Value::as_str) {
-            trepo::member_remove(tx, cx.ws, &p.id, id)?;
+            Teams(tx).remove_member(cx.ws, &p.id, id)?;
         }
         for r in removed {
             let s = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or_default();
             if !rows.iter().any(|(c, _)| c == s("contact_id")) {
-                trepo::member_add(tx, cx.ws, &p.id, s("contact_id"), s("role"), s("source"))?;
+                Teams(tx).add_member(cx.ws, &p.id, s("contact_id"), s("role"), s("source"))?;
             }
         }
         if !added.is_empty() || !removed.is_empty() {

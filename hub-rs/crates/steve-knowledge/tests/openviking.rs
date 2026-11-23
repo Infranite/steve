@@ -204,7 +204,7 @@ impl H {
         let store = self.kb.store();
         self.env
             .store()
-            .reader(|c| retrieve(c, &Query::new(store, &viewer, q, Purpose::Search)))
+            .read(|c| retrieve(c, &Query::new(store, &viewer, q, Purpose::Search)))
             .unwrap()
             .into_iter()
             .map(|h| h.obj_id)
@@ -269,7 +269,7 @@ async fn the_index_is_mirrored_and_meaning_fills_in_under_the_scope() {
         let viewer = Viewer::bare(WS, ME);
         h.env
             .store()
-            .reader(|c| {
+            .read(|c| {
                 retrieve(
                     c,
                     &Query::new(&SqliteStore, &viewer, "关网州杭", Purpose::Search),
@@ -335,8 +335,8 @@ async fn single_user_semantic_reads_keep_workspace_and_shared_chat_audience_boun
     h.mirror().await;
     h.env
         .store()
-        .reader(|c| {
-            let search = |ws, user, purpose| {
+        .read(|c| {
+            let mut search = |ws, user, purpose| {
                 let scope = Scope::for_viewer(c, &Viewer::bare(ws, user), purpose, None)?;
                 let mut ids: Vec<_> =
                     h.ov.search(c, &scope, "关网州杭", Pass::Semantic, 20)?
@@ -400,7 +400,7 @@ async fn a_server_that_is_down_leaves_the_keywords_flagged_and_is_skipped_for_a_
     let search = || {
         h.env
             .store()
-            .reader(|c| retrieve_all(c, &Query::new(&store, &viewer, "部署", Purpose::Search)))
+            .read(|c| retrieve_all(c, &Query::new(&store, &viewer, "部署", Purpose::Search)))
     };
     // keywords still answer, and the result says the meaning search was not there
     let r = search().expect("no failure");
@@ -420,7 +420,7 @@ async fn a_server_that_is_down_leaves_the_keywords_flagged_and_is_skipped_for_a_
     let hits = h
         .env
         .store()
-        .reader(|c| retrieve(c, &Query::new(&store, &viewer, "部署", Purpose::Search)))
+        .read(|c| retrieve(c, &Query::new(&store, &viewer, "部署", Purpose::Search)))
         .unwrap();
     assert_eq!(hits.len(), 1);
     assert!(h.ov.ready().is_ok());
@@ -428,7 +428,7 @@ async fn a_server_that_is_down_leaves_the_keywords_flagged_and_is_skipped_for_a_
     let ok = h
         .env
         .store()
-        .reader(|c| {
+        .read(|c| {
             retrieve_all(
                 c,
                 &Query::new(h.kb.store(), &viewer, "部署", Purpose::Search),
@@ -446,8 +446,17 @@ async fn a_server_that_is_down_leaves_the_keywords_flagged_and_is_skipped_for_a_
     let chat = h
         .env
         .store()
-        .reader(|c| {
-            steve_knowledge::chat_context(c, &kb, &viewer, "完全无关的问题", steve_store::now())
+        .read(|c| {
+            Ok::<_, steve_store::StoreError>(
+                steve_knowledge::chat_context(
+                    c,
+                    &kb,
+                    &viewer,
+                    "完全无关的问题",
+                    steve_store::now(),
+                )
+                .unwrap(),
+            )
         })
         .unwrap()
         .expect("a context that says the search was partial");
@@ -490,7 +499,7 @@ async fn mirror_releases_reader_connection_before_batch_write() {
 
     // `Store::open` sizes its r2d2 reader pool to `available_parallelism().clamp(4, 16)`.
     // If `Mirror::effect` still held a reader connection across `batch-write`, at most
-    // `pool_size - 1` concurrent `store.reader(...)` calls could hold connections at once.
+    // `pool_size - 1` concurrent `store.read(...)` calls could hold connections at once.
     let pool_size = std::thread::available_parallelism()
         .map_or(4, |n| n.get())
         .clamp(4, 16);
@@ -515,9 +524,8 @@ async fn mirror_releases_reader_connection_before_batch_write() {
             let sync = sync.clone();
             handles.push(std::thread::spawn(move || {
                 store
-                    .reader(|c| -> steve_store::Result<()> {
-                        let one: i64 = c.query_row("SELECT 1", [], |r| r.get(0))?;
-                        assert_eq!(one, 1);
+                    .read(|c| -> steve_store::Result<()> {
+                        assert!(!steve_store::Workspaces(c).ids()?.is_empty());
                         let (lock, cv) = &*sync;
                         let mut g = lock.lock().unwrap();
                         if !g.timed_out {
