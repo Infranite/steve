@@ -25,11 +25,10 @@ fn private_address_is_not_injected_into_shared_workspace_chat() {
     let h = setup();
     h.env
         .store()
-        .transaction(|tx| -> steve_modules::ApiResult<()> {
+        .write(|tx| -> steve_modules::ApiResult<()> {
             let who = caller(WS, ME);
-            let me = steve_modules::contacts::service::ensure_base(tx, &who)?;
-            steve_modules::contacts::repo::value_insert(
-                tx,
+            let me = steve_modules::contacts::service::ensure_base_in(tx, &who)?;
+            steve_store::Attributes(tx).insert_value(
                 WS,
                 &steve_modules::contacts::repo::NewValue {
                     party_id: me.id,
@@ -112,7 +111,7 @@ impl Env {
     fn decision(&self, id: &str) -> steve_store::Decision {
         self.env
             .store()
-            .reader(|c| steve_store::base::decisions::get(c, id))
+            .read(|r| steve_store::DecisionRows(r).get(id))
             .unwrap()
             .unwrap()
     }

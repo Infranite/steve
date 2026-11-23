@@ -226,7 +226,7 @@ pub fn ensure_base(tx: &Tx, who: &Caller) -> ApiResult<Party> {
     tx.write(|w| ensure_base_in(w, who))
 }
 
-pub(crate) fn ensure_base_in(w: &mut steve_store::W<'_>, who: &Caller) -> ApiResult<Party> {
+pub fn ensure_base_in(w: &mut steve_store::W<'_>, who: &Caller) -> ApiResult<Party> {
     let me = match w.contacts().me(&who.ws, &who.me)? {
         Some(me) => me,
         None => {

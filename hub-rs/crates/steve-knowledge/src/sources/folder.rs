@@ -24,14 +24,13 @@ use steve_store::{Result, StoreError, W, uid};
 
 use crate::extract_text::{self, ExtractError, Format, FrontMatter};
 use crate::index::{self, BATCH, BoxFuture, DocLoader, Loaded};
-use crate::repo::{self, DocRow, NewDoc, SourceRow};
 use crate::scan::{self, MAX_FILE_BYTES, Rules};
 use crate::service;
 use crate::sources::folder_node::{self, NodeFolders, NodeRead};
 use crate::sources::{is_builtin, source_json};
 use crate::state::Knowledge;
-use rusqlite::{Connection, OptionalExtension};
 use steve_store::knowledge::Documents;
+use steve_store::knowledge::{DocRow, NewDoc, SourceRow};
 
 /// `kb_docs.error` of a file over 2 MB.
 pub const TOO_BIG: &str = "文件超过 2 MB，没有索引";
@@ -1233,47 +1232,4 @@ mod tests {
         );
         assert_eq!(en.2, "Only the workspace owner can change built-in sources");
     }
-}
-
-pub fn own_source(c: &Connection, who: &Caller, id: &str) -> ApiResult<SourceRow> {
-    match repo::source(c, id)? {
-        Some(s) if s.workspace_id == who.ws => {
-            if is_builtin(&s.kind) {
-                return Ok(s);
-            }
-            let viewer = base::Viewer::load(c, &who.ws, &who.me)?;
-            if viewer.sees(&s.visibility, &s.created_by) {
-                Ok(s)
-            } else {
-                Err(ApiError::not_found(NOUN_SOURCE))
-            }
-        }
-        _ => Err(ApiError::not_found(NOUN_SOURCE)),
-    }
-}
-
-pub fn overlap_reason(c: &Connection, ws: &str, path: &Path) -> Result<Option<String>> {
-    let others = repo::folder_sources(c, Some(ws))?;
-    Ok(overlap(path, &others).map(|o| steve_i18n::t!("knowledge.folder.overlap", name = o.name)))
-}
-
-pub fn is_owner(c: &Connection, ws: &str, user: &str) -> ApiResult<bool> {
-    let role: Option<String> = c
-        .prepare_cached(
-            "SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
-        )?
-        .query_row([ws, user], |r| r.get(0))
-        .optional()?;
-    Ok(role.as_deref() == Some("owner"))
-}
-
-pub fn owner_refuses(
-    c: &Connection,
-    who: &Caller,
-    old: &SourceRow,
-    b: &SourcePatch,
-) -> ApiResult<bool> {
-    let rescoping = b.visibility.as_ref().is_some_and(|v| *v != old.visibility)
-        || b.level.is_some_and(|l| l != old.level);
-    Ok(is_builtin(&old.kind) && rescoping && !is_owner(c, &who.ws, &who.me)?)
 }

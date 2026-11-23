@@ -79,7 +79,7 @@ impl Env {
     fn ops(&self, id: &str) -> Vec<Value> {
         self.env
             .store()
-            .reader(|c| changesets::get(c, id))
+            .read(|r| changesets::ChangeSets(r).get(id))
             .unwrap()
             .unwrap()
             .ops

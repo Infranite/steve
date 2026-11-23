@@ -17,7 +17,6 @@ rust-i18n = "=4.2.4"
 async-trait = "=0.1.92"
 chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
 axum = { version = "=0.8.9", default-features = false, features = ["json", "query"] }
-rusqlite = { version = "=0.40.2", features = ["bundled"] }
 # bounded, ordered loading in the index worker
 futures-util = { version = "=0.3.34", default-features = false, features = ["std"] }
 html2text = "=0.17.4"

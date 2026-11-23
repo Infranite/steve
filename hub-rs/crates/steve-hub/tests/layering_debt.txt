@@ -45,7 +45,6 @@ w4	c1	edge steve-stats steve-i18n	1
 w4	c1	edge steve-stats steve-store	1
 w4	c1	rusqlite steve-channels	1
 w4	c1	rusqlite steve-hub	1
-w4	c1	rusqlite steve-knowledge	1
 w4	g0	edge steve-core steve-acp	1
 w4	g0	edge steve-core steve-modules	1
 w4	g0	edge steve-core steve-stats	1
