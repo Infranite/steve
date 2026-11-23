@@ -230,21 +230,12 @@ impl HubFiles for RemoteFiles {
 
 #[async_trait]
 impl HubSecrets for RemoteSecrets {
-    /// Never resent: a lost answer may have used the secret up. Lost after it was written, the
-    /// take is `stale` with no retry, so the command that needed it fails instead of being sent
-    /// again into a second take; never sent at all (`offline`), it may be retried as is.
+    /// A lost answer may have consumed the credential. The transport marks it unknown
+    /// with no retry because this method has no durable receipt to replay.
     async fn take(&self, operation: OperationId, id: String) -> ApiResult<SecretBytes> {
         let op = operation.clone();
-        match self
-            .0
+        self.0
             .go(SECRET_TAKE, &SecretArgs { operation, id }, Some(&op))
             .await
-        {
-            Err(e) if e.code == Code::OutcomeUnknown => Err(Error::new(
-                Code::Stale,
-                "secret.take: the answer was lost, the secret may be used up",
-            )),
-            r => r,
-        }
     }
 }

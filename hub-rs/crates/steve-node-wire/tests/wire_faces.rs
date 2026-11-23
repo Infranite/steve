@@ -332,7 +332,7 @@ async fn a_lost_secret_take_is_never_retried_as_the_same_operation() {
     eventually_sync("the hub gave the secret", || hub_secrets.taken().len() == 1).await;
     w.node_faults.cut_now();
     let e = run.await.unwrap().unwrap_err();
-    assert_eq!(e.code, Code::Stale, "{e}");
+    assert_eq!(e.code, Code::OutcomeUnknown, "{e}");
     assert_eq!(e.retry, Retry::Never);
     assert_eq!(fake.log().len(), 1, "the exec was not accepted");
 
