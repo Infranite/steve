@@ -4,9 +4,12 @@
 import {
   Children,
   isValidElement,
+  memo,
+  startTransition,
   useEffect,
   useId,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ReactElement,
@@ -199,7 +202,8 @@ export function ToolCallCard({
 
       <div className="ui-tclc__body" id={`${id}-body`} inert={!open}>
         <div className="ui-tclc__clip">
-          {(!lazyDetails || open) && <div className="ui-tclc__sections">
+          {(!lazyDetails || open) && <CardDetails staged={!!lazyDetails} output={result === undefined ? undefined :
+            <CodeSection label={t("core:toolCard.result")} value={result} cap={maxCodeHeight} view={resultView} />}>
             {(status === "error" || recoveredLabel) && (
               <div className="ui-tclc__error">
                 <ErrorIcon />
@@ -216,21 +220,19 @@ export function ToolCallCard({
               </div>
             )}
             {args !== undefined && <CodeSection label={t("core:toolCard.args")} value={args} cap={maxCodeHeight} />}
-            {result !== undefined ? (
-              <CodeSection label={t("core:toolCard.result")} value={result} cap={maxCodeHeight} view={resultView} />
-            ) : status === "running" ? (
+            {result === undefined && status === "running" && (
               <div className="ui-tclc__section">
                 <div className="ui-tclc__section-head">
                   <span className="ui-tclc__label">{t("core:toolCard.result")}</span>
                 </div>
                 <p className="ui-tclc__pending">{t("core:toolCard.waiting")}</p>
               </div>
-            ) : null}
+            )}
             {missingResult && result === undefined && status !== "running" && <p className="ui-tclc__pending">{missingResult}</p>}
             {!missingResult && args === undefined && result === undefined && status === "success" && (
               <p className="ui-tclc__pending">{t("core:toolCard.empty")}</p>
             )}
-          </div>}
+          </CardDetails>}
         </div>
       </div>
     </div>
@@ -327,9 +329,28 @@ export function ToolCallGroup({
 
 const OPEN_MAX = 640;
 
-function CodeSection({ label, value, cap, view }: { label: string; value: unknown; cap: number; view?: ReactNode }) {
+function CardDetails({ staged, children, output }: { staged: boolean; children: ReactNode; output?: ReactNode }) {
+  const [stage, setStage] = useState(0);
+  useEffect(() => {
+    if (!staged || stage >= 2) return;
+    const next = () => startTransition(() => setStage(stage + 1));
+    let frame = requestAnimationFrame(() => {
+      // Keep the disclosure paint, argument formatting and result formatting
+      // in separate tasks. An urgent close can cancel an unmounted stage.
+      if (stage === 0) frame = requestAnimationFrame(next);
+      else next();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [staged, stage]);
+  if (staged && stage === 0) return null;
+  return <div className="ui-tclc__sections">{children}{(!staged || stage >= 2) && output}</div>;
+}
+
+const CodeSection = memo(function CodeSection({ label, value, cap, view }: { label: string; value: unknown; cap: number; view?: ReactNode }) {
   const t = useT();
-  const { text, json } = toText(value);
+  const { text, json } = useMemo(() => toText(value), [value]);
+  // Colour is optional; avoid creating tens of thousands of syntax spans on opening a large result.
+  const body = useMemo(() => view == null && json && text.length <= 16_384 ? highlight(text) : text, [text, json, view]);
   const pre = useRef<HTMLPreElement>(null);
   const [full, setFull] = useState(false);
   const [height, setHeight] = useState(0);
@@ -340,7 +361,6 @@ function CodeSection({ label, value, cap, view }: { label: string; value: unknow
     const inner = el?.firstElementChild;
     if (!el || !inner) return;
     const measure = () => setHeight(el.scrollHeight);
-    measure();
     const ro = new ResizeObserver(measure);
     ro.observe(inner);
     return () => ro.disconnect();
@@ -360,9 +380,9 @@ function CodeSection({ label, value, cap, view }: { label: string; value: unknow
         data-capped={(capped && !full) || undefined}
         data-scroll={(capped && full && height > OPEN_MAX) || undefined}
         // Open, a very long block stops at a few screens and scrolls inside – no 200,000px card
-        style={capped ? { maxHeight: full ? Math.min(height, OPEN_MAX) : cap } : undefined}
+        style={{ maxHeight: capped ? full ? Math.min(height, OPEN_MAX) : cap : height ? undefined : cap }}
       >
-        <code>{json ? highlight(text) : text}</code>
+        <code>{body}</code>
       </pre>
       {capped && (
         <button type="button" className="ui-tclc__more" aria-expanded={full} onClick={() => setFull(!full)}>
@@ -371,7 +391,7 @@ function CodeSection({ label, value, cap, view }: { label: string; value: unknow
       )}</>}
     </div>
   );
-}
+});
 
 function CopyButton({ text, label }: { text: string; label: string }) {
   const t = useT();
