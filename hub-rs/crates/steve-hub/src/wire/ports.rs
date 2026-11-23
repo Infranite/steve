@@ -166,7 +166,7 @@ impl steve_mail::items::MailItems for MailItems {
                 ws: req.ws,
                 goal: req.goal,
                 title: req.title,
-                bot: Some(req.bot),
+                bot: req.bot,
                 source: Some(req.source),
                 propose: req.propose,
                 actor: Some(req.by),

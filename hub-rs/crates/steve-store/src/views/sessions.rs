@@ -1,9 +1,9 @@
 //! Session views, including recorded execution identity and the queue's count.
 use sea_query::{Alias, Expr, ExprTrait, Order, Query, SelectStatement};
-use steve_types::{Millis, SessionView, SessionWaiting};
+use steve_types::{BotPlacement, Millis, SessionView, SessionWaiting};
 
 use super::{Page, page, read_ids};
-use crate::contract::Row;
+use crate::contract::{Json, Row};
 use crate::runtime::{HUB_DEVICE, HUB_NODE, OCCUPYING, SESSIONS_DEFAULT, SESSIONS_MAX, WAITING};
 use crate::{Read, Result};
 
@@ -33,7 +33,8 @@ fn select() -> SelectStatement {
         .expr(Expr::cust("EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=sessions.id AND (active_attempt IS NOT NULL OR phase IN ('opening','releasing','active','configuring')))
                        OR EXISTS(SELECT 1 FROM runtime_turns WHERE session_id=sessions.id AND state<>'finished')"))
         .expr(Expr::cust(format!("({waiting})")))
-        .expr(Expr::cust(format!("(SELECT json_extract(c.receipt,'$.last_error.safe_detail') FROM node_commands c WHERE c.node_id=(SELECT node_id FROM runtime_sessions WHERE session_id=sessions.id) AND c.session_id=sessions.id AND {WAITING} ORDER BY c.created,c.rowid LIMIT 1)")));
+        .expr(Expr::cust(format!("(SELECT json_extract(c.receipt,'$.last_error.safe_detail') FROM node_commands c WHERE c.node_id=(SELECT node_id FROM runtime_sessions WHERE session_id=sessions.id) AND c.session_id=sessions.id AND {WAITING} ORDER BY c.created,c.rowid LIMIT 1)")))
+        .expr(Expr::cust("(SELECT fact FROM bot_placements WHERE session_id=sessions.id)"));
     q
 }
 
@@ -54,6 +55,9 @@ fn row(r: &Row<'_>) -> Result<SessionView> {
         })
         .transpose()?;
     Ok(SessionView {
+        placement: r
+            .get::<Option<Json<BotPlacement>>>(26)?
+            .map(|Json(f)| f.explanation),
         id: r.get::<String>(0)?.into(),
         ws: r.get::<String>(1)?.into(),
         item_id: r.get::<Option<String>>(2)?.map(Into::into),

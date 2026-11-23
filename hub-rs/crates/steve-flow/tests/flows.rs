@@ -533,7 +533,7 @@ async fn r1_real_runs_ignore_and_create_items_linked_from_the_event() {
     let req = &e.core.created()[0];
     assert!(req.propose);
     assert_eq!(req.source, ("邮件".to_string(), "sig".to_string()));
-    assert_eq!(req.bot, "steve");
+    assert_eq!(req.bot, None);
     assert!(req.goal.contains("请在 11-05 前付款"));
     let item = req_item(&e, &evt);
     assert_eq!(item, "ST-1");

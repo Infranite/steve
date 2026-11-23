@@ -59,6 +59,7 @@ fn route_ctx(c: &Ctx) -> RouteCtx {
             .bots
             .iter()
             .map(|b| Bot {
+                specialties: vec![],
                 id: s(b, "id"),
                 workspace_id: "default".into(),
                 name: s(b, "id"),

@@ -766,10 +766,6 @@ pub struct Route {
     pub title: String,
     /// The task for the bot, self-contained (a follow-up like “按建议” restated from Steve's reply).
     pub goal: String,
-    pub bot: String,
-    /// The bot is the project's default bot in place of the router's “steve”: the router's `reply`
-    /// may name the wrong bot then, so the code writes the hand-over sentence itself.
-    pub bot_from_project: bool,
     pub project: Option<String>,
     pub tag_ids: Vec<String>,
     pub new_tags: Vec<NewTag>,
@@ -797,8 +793,6 @@ impl Default for Route {
             options: vec![],
             title: String::new(),
             goal: String::new(),
-            bot: "steve".into(),
-            bot_from_project: false,
             project: None,
             tag_ids: vec![],
             new_tags: vec![],
@@ -1004,8 +998,17 @@ fn route_instructions(c: &RouteCtx) -> Vec<String> {
         ROUTE_RULES.trim_end().to_string(),
         "Bots (id: role):".into(),
     ];
-    head.extend(c.bots.iter().map(|b| format!("  {}: {}", b.id, b.role)));
-    head.push("For an item, pick \"steve\" unless the task clearly needs a specialised bot; work in a project with a default bot goes to that bot. For other kinds the bot does not matter.".into());
+    head.extend(c.bots.iter().map(|b| {
+        format!(
+            "  {}: {} (specialties: {}; harness: {}; model: {})",
+            b.id,
+            b.role,
+            b.specialties.join(", "),
+            b.harness,
+            b.model.as_deref().unwrap_or("default"),
+        )
+    }));
+    head.push("For item proposals, use task tags that describe the work and do not assign or name a Bot in the reply.".into());
     head.push("Projects (id: name — description · default bot). For an item: the project whose directory the work happens in; for research: the project to read; null if none fits:".into());
     head.extend(c.projects.iter().map(|p| {
         format!(
@@ -1047,7 +1050,7 @@ fn route_instructions(c: &RouteCtx) -> Vec<String> {
             .map(|t| format!("  {}: {} · {} · {}", t.id, t.name, t.cat, t.description)),
     );
     head.push("goal: the task, self-contained, in the user language, written as short Markdown a person can scan: first one sentence saying what will be done and what counts as done; then only the sections that apply, each a few short bullets: **背景** (why, at most two lines), **要做**, **验收** (how to check it is done), **不做/约束**. Keep it under about 12 lines; never paste a wall of text, logs or file lists into it (the conversation keeps those). For a short ordinary message whose meaning is plain, the goal may be that one sentence. title: names the work concretely, never just “按建议” or “好的”.".into());
-    head.push("Reply with ONLY one JSON object: {\"kind\":\"answer\"|\"research\"|\"item\"|\"suggest\"|\"ask\"|\"supplement\"|\"status\"|\"config\"|\"reroute\",\"confidence\":0.0-1.0,\"signals\":[\"explicit\"|\"change\"|\"deliverable\"|\"long\"|\"question\"|\"lookup\"|\"vague\"],\"offer\":{\"title\":\"\",\"goal\":\"\"} or null,\"item\":\"<item id or null>\",\"options\":[\"\"],\"title\":\"<= 24 chars, user language\",\"goal\":\"\",\"bot\":\"<bot id>\",\"project\":\"<project id or null>\",\"tags\":[\"<tag id>\"],\"newTags\":[{\"name\":\"\",\"cat\":\"\",\"description\":\"\"}],\"reply\":\"one short sentence in the user language, without tags\",\"why\":\"one short sentence in the user language: why this kind\"}".into());
+    head.push("Reply with ONLY one JSON object: {\"kind\":\"answer\"|\"research\"|\"item\"|\"suggest\"|\"ask\"|\"supplement\"|\"status\"|\"config\"|\"reroute\",\"confidence\":0.0-1.0,\"signals\":[\"explicit\"|\"change\"|\"deliverable\"|\"long\"|\"question\"|\"lookup\"|\"vague\"],\"offer\":{\"title\":\"\",\"goal\":\"\"} or null,\"item\":\"<item id or null>\",\"options\":[\"\"],\"title\":\"<= 24 chars, user language\",\"goal\":\"\",\"project\":\"<project id or null>\",\"tags\":[\"<tag id>\"],\"newTags\":[{\"name\":\"\",\"cat\":\"\",\"description\":\"\"}],\"reply\":\"one short sentence in the user language, without tags\",\"why\":\"one short sentence in the user language: why this kind\"}".into());
     head
 }
 
@@ -1133,25 +1136,11 @@ fn parse_route_value(c: &RouteCtx, text: &str, r: &Value, promote: bool) -> Opti
         None if matches!(kind, "supplement" | "status") => return None,
         _ => None,
     };
-    let has_bot = |id: &str| c.bots.iter().any(|b| b.id == id);
     let project = r
         .get("project")
         .and_then(Value::as_str)
         .filter(|p| c.projects.iter().any(|x| x.id == *p))
         .map(String::from);
-    /* work in a project goes to the project's own bot unless a specialised one was picked; only items have a bot */
-    let own = project
-        .as_deref()
-        .and_then(|p| c.projects.iter().find(|x| x.id == p))
-        .and_then(|p| p.default_bot.clone())
-        .filter(|b| has_bot(b));
-    let picked = r.get("bot").and_then(Value::as_str).filter(|b| has_bot(b));
-    let (bot, bot_from_project) = match (kind, picked, &own) {
-        ("item", Some("steve"), Some(o)) => (o.clone(), o != "steve"),
-        ("item", None, Some(o)) => (o.clone(), true),
-        (_, Some(b), _) => (b.to_string(), false),
-        _ => ("steve".to_string(), false),
-    };
     let s_or = |k: &str| match r.get(k) {
         Some(v) if truthy(v) => jstr(v),
         _ => text.to_string(),
@@ -1197,8 +1186,6 @@ fn parse_route_value(c: &RouteCtx, text: &str, r: &Value, promote: bool) -> Opti
         options,
         title: js_head(&s_or("title"), 40).into(),
         goal: s_or("goal"),
-        bot,
-        bot_from_project,
         project,
         tag_ids,
         new_tags,
@@ -1978,6 +1965,7 @@ mod tests {
             workspace_id: "default".into(),
             name: id.into(),
             role: "r".into(),
+            specialties: vec![],
             main: id == "steve",
             harness: "claude-code".into(),
             model: None,
@@ -2065,7 +2053,6 @@ mod tests {
     fn route_validates_against_what_exists() {
         let c = ctx();
         let r = parse_route(&c, "做个东西", r#"{"kind":"item","title":"","bot":"ghost","project":"prj_x","tags":["tag_1","tag_9"],"newTags":[{"name":"x","cat":"类型","description":"d"},{"name":"n","cat":"领域","description":"d"},{"name":"m","cat":"领域","description":"d"}],"reply":"好"}"#, false).unwrap();
-        assert_eq!(r.bot, "steve");
         assert_eq!(r.project, None);
         assert_eq!(r.title, "做个东西");
         assert_eq!(r.goal, "做个东西");
@@ -2086,32 +2073,6 @@ mod tests {
         assert_eq!(r.tag_ids, vec!["tag_bug", "tag_1"]);
         assert!(parse_route(&c, "x", r#"{"kind":"nope"}"#, false).is_none());
         assert!(parse_route(&c, "x", "no json", false).is_none());
-    }
-
-    #[test]
-    fn project_work_goes_to_the_project_bot() {
-        let c = ctx();
-        let r = parse_route(
-            &c,
-            "x",
-            r#"{"kind":"item","bot":"steve","project":"prj_a"}"#,
-            false,
-        )
-        .unwrap();
-        assert_eq!(r.bot, "dev");
-        let r = parse_route(
-            &c,
-            "x",
-            r#"{"kind":"item","bot":"writer","project":"prj_a"}"#,
-            false,
-        )
-        .unwrap();
-        assert_eq!(r.bot, "writer");
-        let r = parse_route(&c, "x", r#"{"kind":"item","project":"prj_b"}"#, false).unwrap();
-        assert_eq!(r.bot, "steve");
-        let r = parse_route(&c, "x", r#"{"kind":"answer","project":"prj_a"}"#, true).unwrap();
-        assert_eq!(r.kind, "item");
-        assert_eq!((r.bot.as_str(), r.bot_from_project), ("dev", true));
     }
 
     #[test]
@@ -2377,8 +2338,6 @@ mod tests {
                 goal: "修评论渲染".into()
             })
         );
-        /* research does not pick a bot: steve stays steve (the ST-20 swap) */
-        assert_eq!((r.bot.as_str(), r.bot_from_project), ("steve", false));
         let r = parse_route(&c, "x", r#"{"kind":"answer"}"#, false).unwrap();
         assert_eq!((r.kind.as_str(), r.confidence), ("answer", 0.5));
         let r = parse_route(

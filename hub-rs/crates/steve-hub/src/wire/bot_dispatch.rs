@@ -1,39 +1,43 @@
-//! Strict placement for new sessions only. The legacy router is untouched when neither a
-//! workspace Bot binding nor a Team applies. Existing sessions keep their durable Node.
-use serde_json::{Value, json};
+//! Assess ordered Bot bindings against current authority and Node capabilities.
 use steve_core::{CoreError, Result};
 use steve_node_api::{
     AdapterStatus, HarnessCapability, HarnessChoice, NodeId, PermissionMode, SetupState,
 };
 use steve_store::{
-    Bot, Read, StoreError, bot_admin,
+    Bot, BotRows, Read, StoreError, bot_admin,
     bot_dispatch::{self, Scope},
     node_directory,
 };
 
 use super::{core::RoutedRuntime, node_binding};
+use crate::backend::{BotNodeCandidate, BotNodeCandidates, BotNodeState};
 
-type Reason = &'static str;
+use steve_types::{
+    BotPlacement, Millis, PlacementBlocked, PlacementBlocker, PlacementExplanation,
+    PlacementReason, PlacementRejection as Reason,
+};
 
-fn text(reason: &str) -> String {
+pub(crate) fn text(reason: Reason) -> String {
     match reason {
-        "outside_team" => steve_i18n::t!("hub.dispatch.outside_team"),
-        "no_bindings" => steve_i18n::t!("hub.dispatch.no_bindings"),
-        "offline" => steve_i18n::t!("hub.dispatch.offline"),
-        "permission" => steve_i18n::t!("hub.dispatch.permission"),
-        "project" => steve_i18n::t!("hub.dispatch.project"),
-        "affinity" => steve_i18n::t!("hub.dispatch.affinity"),
-        "tag" => steve_i18n::t!("hub.dispatch.tag"),
-        "model" => steve_i18n::t!("hub.dispatch.model"),
-        "effort" => steve_i18n::t!("hub.dispatch.effort"),
-        "harness" => steve_i18n::t!("hub.dispatch.harness"),
-        "signin" => steve_i18n::t!("hub.dispatch.signin"),
-        "session_probe" => steve_i18n::t!("hub.dispatch.session_probe"),
-        "pending" => steve_i18n::t!("hub.dispatch.pending"),
-        "unauthorized" => steve_i18n::t!("hub.dispatch.unauthorized"),
-        "bot" => steve_i18n::t!("hub.dispatch.bot"),
-        "local" => steve_i18n::t!("hub.dispatch.local"),
-        _ => steve_i18n::t!("hub.dispatch.bind_failed"),
+        Reason::NoCandidates => steve_i18n::t!("hub.dispatch.no_candidates"),
+        Reason::OutsideTeam => steve_i18n::t!("hub.dispatch.outside_team"),
+        Reason::Bot => steve_i18n::t!("hub.dispatch.bot"),
+        Reason::Specialty => steve_i18n::t!("hub.dispatch.specialty"),
+        Reason::NoBindings => steve_i18n::t!("hub.dispatch.no_bindings"),
+        Reason::Unauthorized => steve_i18n::t!("hub.dispatch.unauthorized"),
+        Reason::Project => steve_i18n::t!("hub.dispatch.project"),
+        Reason::Affinity => steve_i18n::t!("hub.dispatch.affinity"),
+        Reason::Tag => steve_i18n::t!("hub.dispatch.tag"),
+        Reason::Offline => steve_i18n::t!("hub.dispatch.offline"),
+        Reason::Harness => steve_i18n::t!("hub.dispatch.harness"),
+        Reason::SignIn => steve_i18n::t!("hub.dispatch.signin"),
+        Reason::SessionProbe => steve_i18n::t!("hub.dispatch.session_probe"),
+        Reason::Model => steve_i18n::t!("hub.dispatch.model"),
+        Reason::Effort => steve_i18n::t!("hub.dispatch.effort"),
+        Reason::Permission => steve_i18n::t!("hub.dispatch.permission"),
+        Reason::Pending => steve_i18n::t!("hub.dispatch.pending"),
+        Reason::Local => steve_i18n::t!("hub.dispatch.local"),
+        Reason::BindFailed => steve_i18n::t!("hub.dispatch.bind_failed"),
     }
 }
 
@@ -46,27 +50,27 @@ fn compatible(
     mode: Option<PermissionMode>,
 ) -> Option<Reason> {
     let Some(cap) = cap else {
-        return Some("harness");
+        return Some(Reason::Harness);
     };
     match cap.setup.as_ref().map(|s| s.state) {
-        Some(SetupState::Unknown) => return Some("pending"),
-        Some(SetupState::Installing | SetupState::NotInstalled) => return Some("harness"),
+        Some(SetupState::Unknown) => return Some(Reason::Pending),
+        Some(SetupState::Installing | SetupState::NotInstalled) => return Some(Reason::Harness),
         _ => {}
     }
     let Some(adapter) = &cap.adapter else {
-        return Some("pending");
+        return Some(Reason::Pending);
     };
     if adapter.status != AdapterStatus::Ready {
-        return Some("harness");
+        return Some(Reason::Harness);
     }
     if adapter.session_auth_required == Some(true) {
-        return Some("signin");
+        return Some(Reason::SignIn);
     }
     let Some(offer) = &adapter.session else {
         return Some(if adapter.session_error.is_some() {
-            "session_probe"
+            Reason::SessionProbe
         } else {
-            "pending"
+            Reason::Pending
         });
     };
     if cap
@@ -74,39 +78,38 @@ fn compatible(
         .as_ref()
         .is_some_and(|s| s.state != SetupState::Ready)
     {
-        return Some("session_probe");
+        return Some(Reason::SessionProbe);
     }
     if let Some(model) = &choice.model {
-        // an adapter that lists no models does not say which it takes
         if offer.models.is_empty() {
-            return Some("pending");
+            return Some(Reason::Pending);
         }
         if !offer.models.iter().any(|m| &m.id == model) {
-            return Some("model");
+            return Some(Reason::Model);
         }
     } else if offer.default_model.as_ref().is_none_or(|m| m.is_empty()) {
         // The actual default of an opaque offer is not known.
-        return Some("pending");
+        return Some(Reason::Pending);
     }
     if choice
         .effort
         .as_ref()
         .is_some_and(|e| !offer.efforts.contains(e))
     {
-        return Some("effort");
+        return Some(Reason::Effort);
     }
     let Some(modes) = &adapter.execution_modes else {
-        return Some("pending");
+        return Some(Reason::Pending);
     };
     if mode.is_none_or(|mode| !modes.contains(&mode) || !offer.modes.contains(&mode)) {
-        return Some("permission");
+        return Some(Reason::Permission);
     }
     None
 }
 
 /// Structural constraints shared by preflight and the binding transaction: authorization, the
 /// project's machine, the item's tag, and the Node the item's other sessions are bound to.
-pub(super) fn node_blocker(
+fn node_blocker(
     c: &mut impl Read,
     ws: &str,
     item: &str,
@@ -115,29 +118,37 @@ pub(super) fn node_blocker(
 ) -> steve_store::Result<Option<Reason>> {
     if node != "local" {
         if !node_binding::node_takes(c, node, ws)? {
-            return Ok(Some("unauthorized"));
+            return Ok(Some(Reason::Unauthorized));
         }
         let project = bot_admin::project_attached(c, item, ws)?;
         if project {
-            return Ok(Some("project"));
+            return Ok(Some(Reason::Project));
         }
     }
+    item_node_blocker(c, item, session, node)
+}
+
+fn item_node_blocker(
+    c: &mut impl Read,
+    item: &str,
+    session: Option<&str>,
+    node: &str,
+) -> steve_store::Result<Option<Reason>> {
     if let Some(tag) = steve_store::nodes::item_tag(c, item)?
         && !steve_store::nodes::with_tag(c, &tag)?
             .iter()
             .any(|n| n == node)
     {
-        return Ok(Some("tag"));
+        return Ok(Some(Reason::Tag));
     }
     let other = bot_admin::wrong_node(c, item, session, node)?;
     if other {
-        return Ok(Some("affinity"));
+        return Ok(Some(Reason::Affinity));
     }
     Ok(None)
 }
 
-/// Authorization is held through the same SQLite transaction that fixes the Node. Reject a
-/// legacy decision raced by an opt-in, and reject a strict decision raced by a revocation.
+/// Authorization stays current through the transaction that fixes the session Node.
 pub(super) fn commit_guard(
     c: &mut impl Read,
     session: &str,
@@ -149,25 +160,31 @@ pub(super) fn commit_guard(
     let Some(item) = row.item else { return Ok(()) };
     let ws = row.workspace;
     let bot = row.bot.unwrap_or_else(|| "steve".into());
+    let required = bot_dispatch::initial(c, &item)?.and_then(|p| p.required_node);
+    if required.as_ref().is_some_and(|id| id.as_str() != node) {
+        return Err(StoreError::Conflict(text(Reason::Unauthorized)));
+    }
     match bot_dispatch::scope(c, &ws, &item, &bot)? {
         Scope::Nodes(nodes) if nodes.iter().any(|n| n == node) => {
-            let active = bot_admin::selectable(c, &ws, &bot, true)?;
+            let active = BotRows(c)
+                .local(&ws, &bot)?
+                .is_some_and(|(_, enabled)| enabled);
             if !active {
-                return Err(StoreError::Conflict(text("bot")));
+                return Err(StoreError::Conflict(text(Reason::Bot)));
             }
             if let Some(why) = node_blocker(c, &ws, &item, Some(session), node)? {
                 return Err(StoreError::Conflict(text(why)));
             }
             Ok(())
         }
-        _ => Err(StoreError::Conflict(text("bind_failed"))),
+        _ => Err(StoreError::Conflict(text(Reason::BindFailed))),
     }
 }
 
 /// What keeps a session from a Node: a reported mismatch, never a report that is missing or says
 /// nothing (#234). A newly bound Node still needs a verified report ([`compatible`]).
 fn blocks(reason: Option<Reason>) -> Option<Reason> {
-    reason.filter(|r| *r != "pending")
+    reason.filter(|r| *r != Reason::Pending)
 }
 
 impl RoutedRuntime {
@@ -182,21 +199,21 @@ impl RoutedRuntime {
         Some(Some(self.fleet.as_ref()?.remote(&id).ready_generation()?))
     }
 
-    fn report(
+    pub(super) fn report(
         &self,
         node: &str,
         choice: &HarnessChoice,
         requested_mode: Option<&str>,
     ) -> (Option<Reason>, Option<i64>) {
         let Some(generation) = self.dispatch_probe_target(node) else {
-            return (Some("offline"), None);
+            return (Some(Reason::Offline), None);
         };
         let Some((at, cap)) = self
             .dispatch_harnesses
             .as_ref()
             .and_then(|h| h.target_report(node, generation, &choice.harness))
         else {
-            return (Some("pending"), None);
+            return (Some(Reason::Pending), None);
         };
         let mode = node_binding::permission_mode(requested_mode.unwrap_or("default"));
         let bad = compatible(cap.as_ref(), choice, mode);
@@ -216,7 +233,7 @@ impl RoutedRuntime {
         }
     }
 
-    pub(super) fn bot_candidates(&self, ws: &str, bot: &str) -> Result<Value> {
+    pub(super) fn bot_candidates(&self, ws: &str, bot: &str) -> Result<BotNodeCandidates> {
         let bot = self
             .store
             .bots()
@@ -245,243 +262,333 @@ impl RoutedRuntime {
             Ok::<_, StoreError>((bindings, names, configured))
         })?;
         let choice = self.bot_choice(ws, &bot);
-        let candidates: Vec<Value> = names
+        let candidates = names
             .into_iter()
             .map(|(id, name)| {
                 let (reason, checked_at) = self.report(&id, &choice, Some(&bot.perm_mode));
                 let state = match reason {
-                    None => "candidate",
-                    Some("pending") => "pending",
-                    _ => "unavailable",
+                    None => BotNodeState::Candidate,
+                    Some(Reason::Pending) => BotNodeState::Pending,
+                    _ => BotNodeState::Unavailable,
                 };
-                json!({"id":id,"name":name,"state":state,"reason":reason,"checked_at":checked_at,
-                   "provider_verified":false})
+                BotNodeCandidate {
+                    id,
+                    name,
+                    state,
+                    reason,
+                    checked_at,
+                    provider_verified: false,
+                }
             })
             .collect();
-        let hidden = bindings.len() - configured.len();
-        Ok(json!({"bindings": configured,"unavailable_bindings": hidden,"candidates": candidates}))
+        Ok(BotNodeCandidates {
+            unavailable_bindings: bindings.len() - configured.len(),
+            bindings: configured,
+            candidates,
+        })
     }
 
-    /// Preflight before the Core prepares any worktree or stops a session for a handoff: some Node
-    /// of the Bot's could take the item now.
-    pub(super) fn check_dispatch(&self, item: &str, bot: &str) -> Result<()> {
-        let row = self
-            .store
-            .items()
-            .get(item)?
-            .ok_or(StoreError::NotFound("Item not found"))?;
-        let scope = self
-            .store
-            .read(|c| bot_dispatch::scope(c, &row.workspace_id, item, bot))?;
-        let nodes = match scope {
-            Scope::Nodes(nodes) => nodes,
-            Scope::OutsideTeam => return Err(CoreError::Msg(text("outside_team"))),
-        };
-        let available = self.store.bots().get(bot)?.filter(|b| b.enabled);
-        // the main Bot works in every workspace
-        let in_workspace = available.as_ref().is_some_and(|b| b.main)
-            || self.store.bots().in_workspace(bot, &row.workspace_id)?;
-        let mut rejected = Vec::new();
-        if let Some(b) = available.filter(|_| in_workspace) {
-            let choice = self.bot_choice(&row.workspace_id, &b);
-            for n in nodes {
-                let why = self
-                    .store
-                    .read(|c| node_blocker(c, &row.workspace_id, item, None, &n))?;
-                // Local mode can be widened by the item's policy at actual bind time. Do not
-                // reject a mode here that may be made compatible then. The bind checks it exactly.
-                let report = self.report(&n, &choice, Some(&b.perm_mode)).0;
-                match why.or(blocks(report).filter(|r| *r != "permission")) {
-                    None => return Ok(()),
-                    Some(why) => rejected.push(why),
-                }
-            }
-        } else {
-            rejected.push("bot");
+    pub(super) fn assess_node(
+        &self,
+        ws: &str,
+        project: Option<&steve_store::Project>,
+        node: &str,
+        choice: &HarnessChoice,
+        mode: &str,
+    ) -> Result<Option<Reason>> {
+        if node_binding::permission_mode(mode).is_none() {
+            return Ok(Some(Reason::Permission));
         }
-        let why = rejected.first().copied().unwrap_or("no_bindings");
-        // An unsuccessful reassignment must not overwrite the placement of an active session.
+        if node != "local" && !self.store.read(|r| node_binding::node_takes(r, node, ws))? {
+            return Ok(Some(Reason::Unauthorized));
+        }
+        if project.is_some_and(|p| {
+            p.archived
+                || p.workspace_id != ws
+                || p.device_id != super::workspaces::HUB_DEVICE
+                || node != "local"
+                || node_binding::root_id(std::path::Path::new(&p.path)).is_none()
+        }) {
+            return Ok(Some(Reason::Project));
+        }
+        Ok(blocks(self.report(node, choice, Some(mode)).0))
+    }
+
+    fn item_routes(&self, item: &steve_store::Item, bot: &str) -> Result<Routes> {
+        let (scope, initial) = self.store.read(|r| {
+            Ok::<_, StoreError>((
+                bot_dispatch::scope(r, &item.workspace_id, &item.id, bot)?,
+                bot_dispatch::initial(r, &item.id)?,
+            ))
+        })?;
+        let Scope::Nodes(nodes) = scope else {
+            return Err(blocked(bot, &[Reason::OutsideTeam]));
+        };
         let active = self
             .store
-            .sessions()
-            .of_item(item)?
-            .iter()
-            .any(|s| s.status != "ended");
-        if !active {
-            self.save_dispatch(item, bot, None, None, why, &rejected)?;
-        }
-        Err(CoreError::Msg(text(why)))
+            .read(|r| BotRows(r).local(&item.workspace_id, bot))?
+            .is_some_and(|(_, enabled)| enabled);
+        let bot = self
+            .store
+            .bots()
+            .get(bot)?
+            .filter(|_| active)
+            .ok_or_else(|| blocked(bot, &[Reason::Bot]))?;
+        let project = item
+            .project_id
+            .as_deref()
+            .map(|id| self.store.projects().get(id))
+            .transpose()?
+            .flatten();
+        let nodes = nodes
+            .into_iter()
+            .enumerate()
+            .filter(|(_, node)| {
+                initial
+                    .as_ref()
+                    .and_then(|p| p.required_node.as_ref())
+                    .is_none_or(|id| id.as_str() == node)
+            })
+            .collect();
+        Ok(Routes {
+            bot,
+            initial,
+            project,
+            nodes,
+        })
     }
 
-    /// true: a session of an item, bound or refused; false: a session of no item.
+    fn route_blocker(&self, target: &Target<'_>, node: &str) -> Result<Option<Reason>> {
+        if let Some(why) = self
+            .store
+            .read(|r| item_node_blocker(r, &target.item.id, target.session, node))?
+        {
+            return Ok(Some(why));
+        }
+        self.assess_node(
+            &target.item.workspace_id,
+            target.project,
+            node,
+            target.choice,
+            target.mode,
+        )
+    }
+
+    /// Admission before preparing a worktree or interrupting another session for a handoff.
+    pub(super) fn check_dispatch(&self, item_id: &str, bot: &str) -> Result<()> {
+        let item = self
+            .store
+            .items()
+            .get(item_id)?
+            .ok_or(StoreError::NotFound("Item"))?;
+        let routes = self.item_routes(&item, bot)?;
+        let choice = self.bot_choice(&item.workspace_id, &routes.bot);
+        let target = Target {
+            item: &item,
+            session: None,
+            project: routes.project.as_ref(),
+            choice: &choice,
+            mode: &routes.bot.perm_mode,
+        };
+        let mut rejected = Vec::new();
+        for (_, node) in &routes.nodes {
+            match self.route_blocker(&target, node)? {
+                Some(why) => rejected.push(why),
+                None => return Ok(()),
+            }
+        }
+        Err(blocked(bot, &rejected))
+    }
+
+    /// Bind a new item session. The item selects its Bot only once, and a handoff names its Bot
+    /// explicitly. The admitted Bot's current grants and Node constraints are checked again here.
     pub(super) fn bind_dispatch(&self, session: &str, after: Option<&str>) -> Result<bool> {
         let Some(s) = self.store.sessions().get(session)? else {
             return Ok(true);
         };
-        let Some(item) = s.item_id.as_deref() else {
+        let Some(item_id) = s.item_id.as_deref() else {
             return Ok(false);
         };
-        let bot = s.bot_id.as_deref().unwrap_or("steve");
-        let scope = self
+        let item = self
             .store
-            .read(|c| bot_dispatch::scope(c, &s.workspace_id, item, bot))?;
-        match scope {
-            Scope::OutsideTeam => {
-                self.save_dispatch(item, bot, Some(session), None, "outside_team", &[])?;
-                self.refused_with_node_on();
-                return Ok(true);
-            }
-            Scope::Nodes(nodes) => {
-                let choice = HarnessChoice {
-                    harness: s.harness.clone(),
-                    model: s.model.clone(),
-                    effort: s.reasoning_effort.clone(),
-                };
-                let mode = self.perm_mode(session);
-                let mut rejected = Vec::new();
-                for (i, node) in nodes.iter().enumerate() {
-                    let why = self
-                        .store
-                        .read(|c| node_blocker(c, &s.workspace_id, item, Some(session), node))?;
-                    if let Some(why) = why {
-                        rejected.push(why);
-                        continue;
-                    }
-                    // the plan first: the local Node's own refusal says the most
-                    let planned = if node == "local" {
-                        match (self.node.as_ref(), self.local_plan(session)) {
-                            (Some(rt), Ok(plan)) => Ok((rt.clone(), plan)),
-                            // why is said from the plan when the refusal is read
-                            (Some(_), Err(_)) => Err("local"),
-                            (None, _) => Err("offline"),
-                        }
-                    } else {
-                        // Authorization, tag and same-Node affinity checked above and again in
-                        // bind_after_scoped. No Hub directory is translated to the remote.
-                        match node_binding::scoped_remote_plan(
-                            &self.store,
-                            session,
-                            mode.as_deref(),
-                        ) {
-                            None => Err("project"),
-                            Some(plan) => NodeId::new(node.clone())
-                                .ok()
-                                .and_then(|id| self.fleet.as_ref()?.start(&id))
-                                .map(|rt| (rt, plan))
-                                .ok_or("offline"),
-                        }
-                    };
-                    let (rt, plan) = match planned {
-                        Ok(p) => p,
-                        Err(why) => {
-                            rejected.push(why);
-                            continue;
-                        }
-                    };
-                    // the plan names the same harness choice, and the Node reports no mismatch
-                    if let Some(why) = (plan.choice != choice)
-                        .then_some("bind_failed")
-                        .or_else(|| blocks(self.report(node, &choice, mode.as_deref()).0))
-                    {
-                        rejected.push(why);
-                        continue;
-                    }
-                    let placement = placement(
-                        bot,
-                        Some(session),
-                        Some(node),
-                        if i == 0 { "preferred" } else { "fallback" },
-                        &rejected,
-                    );
-                    match rt.bind_after_scoped(&plan, after, &placement) {
-                        Ok(()) => return Ok(true),
-                        Err(e) => tracing::info!(session, node, "scoped binding refused: {e}"),
-                    }
-                    rejected.push("bind_failed");
-                }
-                let why = rejected.first().copied().unwrap_or("no_bindings");
-                self.save_dispatch(item, bot, Some(session), None, why, &rejected)?;
-                self.refused_with_node_on();
-            }
+            .items()
+            .get(item_id)?
+            .ok_or(StoreError::NotFound("Item"))?;
+        let error = match self.bind_item_session(&item, &s, after) {
+            Ok(()) => return Ok(true),
+            Err(CoreError::Placement(error)) => error,
+            Err(other) => return Err(other),
+        };
+        self.store.write(|w| {
+            bot_dispatch::record(w, &item.workspace_id, &item.id, Some(session), Err(&error))
+        })?;
+        if let Some(n) = self.node.as_ref().filter(|n| !n.is_stopped()) {
+            n.fell_back();
         }
         Ok(true)
     }
 
-    /// A new session bound nowhere although the local Node is on: counted on it.
-    fn refused_with_node_on(&self) {
-        if let Some(n) = self.node.as_ref().filter(|n| !n.is_stopped()) {
-            n.fell_back();
-        }
-    }
-
-    fn save_dispatch(
+    fn bind_item_session(
         &self,
-        item: &str,
-        bot: &str,
-        session: Option<&str>,
-        node: Option<&str>,
-        reason: Reason,
-        rejected: &[Reason],
+        item: &steve_store::Item,
+        s: &steve_store::Session,
+        after: Option<&str>,
     ) -> Result<()> {
-        self.store.write(|w| {
-            steve_store::node_write::record_placement(
-                w,
-                item,
-                &placement(bot, session, node, reason, rejected),
-            )?;
-            let row = steve_store::node_sessions::authority::item(w, item)?
-                .ok_or(StoreError::NotFound("Item"))?;
-            w.emit(steve_types::DomainEvent::from(
-                steve_types::WorkEvent::Item {
-                    ws: row.workspace.into(),
-                    id: item.into(),
-                },
-            ));
-            Ok::<_, StoreError>(())
-        })?;
-        Ok(())
+        let session = s.id.as_str();
+        let bot = s.bot_id.as_deref().unwrap_or("steve");
+        let routes = self.item_routes(item, bot)?;
+        let choice = HarnessChoice {
+            harness: s.harness.clone(),
+            model: s.model.clone(),
+            effort: s.reasoning_effort.clone(),
+        };
+        let mode = self.perm_mode(session);
+        let target = Target {
+            item,
+            session: Some(session),
+            project: routes.project.as_ref(),
+            choice: &choice,
+            mode: mode.as_deref().unwrap_or("default"),
+        };
+        let mut rejected = Vec::new();
+        for (priority, node) in &routes.nodes {
+            if let Some(why) = self.route_blocker(&target, node)? {
+                rejected.push(why);
+                continue;
+            }
+            let planned = if node == "local" {
+                self.node.as_ref().ok_or(Reason::Offline).and_then(|node| {
+                    self.local_plan(session)
+                        .map(|plan| (node.clone(), plan))
+                        .map_err(|_| Reason::Local)
+                })
+            } else {
+                node_binding::scoped_remote_plan(&self.store, session, mode.as_deref())
+                    .ok_or(Reason::Project)
+                    .and_then(|plan| {
+                        NodeId::new(node.clone())
+                            .ok()
+                            .and_then(|id| self.fleet.as_ref()?.start(&id))
+                            .map(|rt| (rt, plan))
+                            .ok_or(Reason::Offline)
+                    })
+            };
+            let (rt, plan) = match planned {
+                Ok(p) => p,
+                Err(why) => {
+                    rejected.push(why);
+                    continue;
+                }
+            };
+            if plan.choice != choice {
+                rejected.push(Reason::BindFailed);
+                continue;
+            }
+            let receipt = routes.placement(node, *priority, &choice, &rejected);
+            match rt.bind_after_scoped(&plan, after, &receipt) {
+                Ok(()) => return Ok(()),
+                Err(e) => tracing::info!(session, node, "scoped binding refused: {e}"),
+            }
+            rejected.push(Reason::BindFailed);
+        }
+        Err(blocked(bot, &rejected))
     }
 
     pub(super) fn dispatch_refusal(&self, session: &str) -> Option<String> {
-        let s = self.store.sessions().get(session).ok()??;
-        let item = s.item_id?;
-        let reason = self
+        let error = self
             .store
-            .read(|c| {
-                let r = bot_dispatch::last_decision(c, &item)?;
-                Ok::<_, StoreError>(
-                    r.filter(|v| v["session"] == session && v["node"].is_null())
-                        .and_then(|v| v["reason"].as_str().map(str::to_string)),
-                )
-            })
+            .read(|r| bot_dispatch::refusal(r, session))
             .ok()??;
-        Some(steve_i18n::stored(|| match reason.as_str() {
-            "local" => match self
+        Some(steve_i18n::stored(|| match error.reason {
+            Reason::Local => match self
                 .local_plan(session)
                 .err()
                 .and_then(super::core::unbound_why)
             {
                 Some(why) => steve_i18n::t!("hub.node.refused", why = why),
-                None => text("local"),
+                None => text(Reason::Local),
             },
-            r => text(r),
+            reason => text(reason),
         }))
     }
 }
 
-fn placement(
-    bot: &str,
-    session: Option<&str>,
-    node: Option<&str>,
-    reason: Reason,
-    skipped: &[Reason],
-) -> Value {
-    json!({"bot":bot,"session":session,"node":node,"reason":reason,"skipped":skipped,
-           "at":steve_store::now()})
+struct Target<'a> {
+    item: &'a steve_store::Item,
+    session: Option<&'a str>,
+    project: Option<&'a steve_store::Project>,
+    choice: &'a HarnessChoice,
+    mode: &'a str,
+}
+
+struct Routes {
+    bot: Bot,
+    initial: Option<BotPlacement>,
+    project: Option<steve_store::Project>,
+    nodes: Vec<(usize, String)>,
+}
+
+impl Routes {
+    fn placement(
+        &self,
+        node: &str,
+        priority: usize,
+        choice: &HarnessChoice,
+        rejected: &[Reason],
+    ) -> BotPlacement {
+        let mut explanation = self
+            .initial
+            .as_ref()
+            .filter(|p| p.explanation.bot.as_str() == self.bot.id)
+            .map(|p| p.explanation.clone())
+            .unwrap_or_else(|| PlacementExplanation {
+                bot: self.bot.id.clone().into(),
+                reason: PlacementReason::ExistingAssignment,
+                matched: vec![],
+                rejected: vec![],
+                fallback: None,
+            });
+        for reason in rejected {
+            let blocker = PlacementBlocker {
+                bot: Some(explanation.bot.clone()),
+                reason: *reason,
+            };
+            if !explanation.rejected.contains(&blocker) {
+                explanation.rejected.push(blocker);
+            }
+        }
+        BotPlacement {
+            rule_version: self.initial.as_ref().map_or(1, |p| p.rule_version),
+            bot_revision: self.bot.revision,
+            at: Millis(steve_store::now()),
+            node: node.into(),
+            required_node: self.initial.as_ref().and_then(|p| p.required_node.clone()),
+            node_priority: priority as u32,
+            harness: choice.harness.clone(),
+            model: choice.model.clone(),
+            reasoning_effort: choice.effort.clone(),
+            explanation,
+        }
+    }
+}
+
+fn blocked(bot: &str, rejected: &[Reason]) -> CoreError {
+    CoreError::Placement(PlacementBlocked {
+        reason: rejected.first().copied().unwrap_or(Reason::NoBindings),
+        rejected: rejected
+            .iter()
+            .map(|reason| PlacementBlocker {
+                bot: Some(bot.into()),
+                reason: *reason,
+            })
+            .collect(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     #[test]
@@ -501,35 +608,53 @@ mod tests {
         let check = |cap: &HarnessCapability, choice: &HarnessChoice, mode| {
             compatible(Some(cap), choice, Some(mode))
         };
-        assert_eq!(check(&cap, &choice, PermissionMode::Ask), Some("pending"));
+        assert_eq!(
+            check(&cap, &choice, PermissionMode::Ask),
+            Some(Reason::Pending)
+        );
         cap.adapter.as_mut().unwrap().session_auth_required = Some(true);
-        assert_eq!(check(&cap, &choice, PermissionMode::Ask), Some("signin"));
+        assert_eq!(
+            check(&cap, &choice, PermissionMode::Ask),
+            Some(Reason::SignIn)
+        );
         let a = cap.adapter.as_mut().unwrap();
         a.session_auth_required = None;
         a.session = Some(serde_json::from_value(json!({
             "modes":["ask","full_access"], "models":[{"id":"work"}], "default_model":"work", "efforts":["high"]
         })).unwrap());
-        assert_eq!(check(&cap, &choice, PermissionMode::Ask), Some("pending"));
+        assert_eq!(
+            check(&cap, &choice, PermissionMode::Ask),
+            Some(Reason::Pending)
+        );
         cap.adapter.as_mut().unwrap().execution_modes = Some(vec![PermissionMode::Ask]);
         assert_eq!(
             check(&cap, &choice, PermissionMode::FullAccess),
-            Some("permission")
+            Some(Reason::Permission)
         );
         assert_eq!(check(&cap, &choice, PermissionMode::Ask), None);
         choice.model = Some("different-subscription".into());
-        assert_eq!(check(&cap, &choice, PermissionMode::Ask), Some("model"));
+        assert_eq!(
+            check(&cap, &choice, PermissionMode::Ask),
+            Some(Reason::Model)
+        );
         choice.model = None;
         choice.effort = Some("max".into());
-        assert_eq!(check(&cap, &choice, PermissionMode::Ask), Some("effort"));
+        assert_eq!(
+            check(&cap, &choice, PermissionMode::Ask),
+            Some(Reason::Effort)
+        );
         choice.effort = None;
         assert_eq!(check(&cap, &choice, PermissionMode::Ask), None);
         // an adapter listing no models cannot verify one, nor refuse it
         let offer = cap.adapter.as_mut().unwrap().session.as_mut().unwrap();
         offer.models.clear();
         choice.model = Some("work".into());
-        assert_eq!(check(&cap, &choice, PermissionMode::Ask), Some("pending"));
+        assert_eq!(
+            check(&cap, &choice, PermissionMode::Ask),
+            Some(Reason::Pending)
+        );
         // what is only unverified does not keep a session from a Node; a mismatch does
-        assert_eq!(blocks(Some("pending")), None);
-        assert_eq!(blocks(Some("model")), Some("model"));
+        assert_eq!(blocks(Some(Reason::Pending)), None);
+        assert_eq!(blocks(Some(Reason::Model)), Some(Reason::Model));
     }
 }

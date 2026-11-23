@@ -394,6 +394,127 @@ mod tests {
         assert_eq!(f.p.reconcile().await, Some(0));
     }
     #[tokio::test]
+    async fn placement_facts_in_patches_match_a_fresh_read() {
+        use steve_store::{NewBot, NewItem, NewSession, bot_dispatch};
+        use steve_types::{BotPlacement, Millis, PlacementExplanation, PlacementReason};
+
+        let f = fixture();
+        let ws = "default";
+        let bot = f
+            .store
+            .bots()
+            .create(
+                ws,
+                &NewBot {
+                    name: "Review Bot".into(),
+                    harness: "fixture".into(),
+                    ..Default::default()
+                },
+                "owner",
+            )
+            .unwrap()
+            .unwrap();
+        let item = f
+            .store
+            .items()
+            .create(
+                ws,
+                &NewItem {
+                    title: "Review".into(),
+                    bot_id: bot.id.clone(),
+                    tags: vec![f.store.tags().kinds(ws).unwrap().remove(0).id],
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let session = f
+            .store
+            .sessions()
+            .create(&NewSession {
+                workspace_id: ws.into(),
+                item_id: Some(item.id.clone()),
+                bot_id: Some(bot.id.clone()),
+                harness: "recorded-harness".into(),
+                model: Some("recorded-model".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        f.p.snapshot(ws).await.unwrap();
+        let mut rx = f.bus.subscribe();
+        let fact = BotPlacement {
+            rule_version: 1,
+            bot_revision: bot.revision,
+            at: Millis(7),
+            node: "local".into(),
+            required_node: None,
+            node_priority: 0,
+            harness: session.harness.clone(),
+            model: session.model.clone(),
+            reasoning_effort: None,
+            explanation: PlacementExplanation {
+                bot: bot.id.as_str().into(),
+                reason: PlacementReason::Specialty,
+                matched: vec!["code review".into()],
+                rejected: vec![],
+                fallback: None,
+            },
+        };
+        f.store
+            .write(|w| bot_dispatch::record(w, ws, &item.id, Some(&session.id), Ok(&fact)))
+            .unwrap();
+        let (read_item, read_session) = f
+            .store
+            .read(|r| {
+                Ok::<_, steve_store::StoreError>((
+                    r.item_views()
+                        .of(ws, std::slice::from_ref(&item.id))?
+                        .remove(0),
+                    r.session_views()
+                        .of(ws, std::slice::from_ref(&session.id))?
+                        .remove(0),
+                ))
+            })
+            .unwrap();
+        assert_eq!(read_item.placement, Some(fact.explanation.clone()));
+        assert_eq!(read_session.placement, read_item.placement);
+        assert_eq!(read_session.model.as_deref(), Some("recorded-model"));
+        let snapshot = f.p.snapshot(ws).await.unwrap();
+        assert!(snapshot.views.item.unwrap().contains(&read_item));
+        assert!(snapshot.views.session.unwrap().contains(&read_session));
+        let expected = [
+            ("item", serde_json::to_value(read_item).unwrap()),
+            ("session", serde_json::to_value(read_session).unwrap()),
+        ];
+        let mut seen = std::collections::HashSet::new();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while seen.len() != expected.len() {
+                let delivery = rx.recv().await.unwrap();
+                if matches!(delivery.envelope.event, BusEvent::Patch(_)) {
+                    let patch: Value = serde_json::from_slice(&crate::api::stream::encode_event(
+                        &delivery.envelope,
+                    ))
+                    .unwrap();
+                    for op in patch["ops"].as_array().unwrap() {
+                        for (kind, view) in &expected {
+                            if op["type"] == *kind && op["view"] == *view {
+                                seen.insert(*kind);
+                            }
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("both placement views appear in SSE patches");
+        assert!(
+            f.store
+                .write(|w| bot_dispatch::record(w, ws, &item.id, Some(&session.id), Ok(&fact)))
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn changes_to_items_and_sessions_match_a_fresh_hot_read() {
         use steve_store::{ItemPatch, NewBot, NewItem, NewSession, SessionPatch};
         let f = fixture();

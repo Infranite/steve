@@ -26,6 +26,7 @@ pub struct NewBot {
     pub name: String,
     pub harness: String,
     pub role: Option<String>,
+    pub specialties: Option<Vec<String>>,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub rules: Option<String>,
@@ -44,6 +45,8 @@ pub struct BotPatch {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub specialties: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
     #[serde(
@@ -220,6 +223,10 @@ impl Bots<'_> {
             let mut s = Sets::default();
             s.val("name", p.name.clone())
                 .val("role", p.role.clone())
+                .val(
+                    "specialties",
+                    p.specialties.as_ref().map(to_json).transpose()?,
+                )
                 .val("harness", p.harness.clone())
                 .null("model", p.model.clone())
                 .null("reasoning_effort", p.reasoning_effort.clone())
@@ -315,8 +322,8 @@ impl Bots<'_> {
 fn seed(c: &rusqlite::Connection, id: &str, main: bool, b: &NewBot, ws: &str) -> Result<()> {
     let avatar = to_json(b.avatar.as_ref().unwrap_or(&Avatar::default()))?;
     c.prepare_cached(
-        "INSERT INTO bots (id, workspace_id, name, role, main, harness, model, reasoning_effort, rules, persona, proactive, accept_mode, perm_mode, avatar, default_project, enabled, revision, updated)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?) ON CONFLICT(id) DO NOTHING",
+        "INSERT INTO bots (id, workspace_id, name, role, main, harness, model, reasoning_effort, rules, persona, proactive, accept_mode, perm_mode, avatar, default_project, specialties, enabled, revision, updated)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?) ON CONFLICT(id) DO NOTHING",
     )?
     .execute(params![
         id,
@@ -334,6 +341,7 @@ fn seed(c: &rusqlite::Connection, id: &str, main: bool, b: &NewBot, ws: &str) ->
         b.perm_mode.as_deref().unwrap_or("default"),
         avatar,
         b.default_project,
+        to_json(&b.specialties.as_deref().unwrap_or_default())?,
         now(),
     ])?;
     c.run(

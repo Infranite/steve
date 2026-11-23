@@ -619,6 +619,17 @@ async fn an_answer_that_needs_tools_is_handed_to_an_item_once() {
     assert_eq!(ms[1].meta["handoff"]["why"], "needs_tools");
     let it = k.db().item(&id).unwrap().unwrap();
     assert_eq!(it.source.1, "chat", "yours: the work starts");
+    assert_eq!(k.db().goal(&id).unwrap(), "看下我现在磁盘情况");
+    let placement = k
+        .db()
+        .store()
+        .read(|r| steve_store::bot_dispatch::initial(r, &id))
+        .unwrap()
+        .expect("handoff records the chosen Bot");
+    assert_eq!(
+        it.bot_id.as_deref(),
+        Some(placement.explanation.bot.as_str())
+    );
     assert_eq!(
         k.db()
             .store()

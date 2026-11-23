@@ -891,7 +891,7 @@ async fn module_draft_kinds_are_reachable() {
 /// the user starts), and installing again adds nothing.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_issue_becomes_a_suggestion() {
-    let e = start().await;
+    let e = start_with_model(&[], true).await;
     let now = steve_store::now();
     let (me_id, me_party) = owner(&e).await;
     let gh = e.connection(&me_id, &me_party, "github_pat", "github", "octo");

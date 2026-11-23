@@ -759,8 +759,8 @@ async fn item_auto_creates_linked_auto_accept_item() {
         "汇报离开期间的事\n\n（定时任务「整理周报」，计划时间 2026-11-02 08:30）"
     );
     assert_eq!(
-        (req.bot.as_str(), req.project.as_deref(), req.propose),
-        ("steve", Some("prj_a"), false)
+        (req.bot.as_deref(), req.project.as_deref(), req.propose),
+        (Some("steve"), Some("prj_a"), false)
     );
     assert_eq!(req.tag_ids, vec!["tag_a".to_string()]);
     let (accept, source): (Option<String>, String) =
@@ -828,7 +828,7 @@ async fn item_auto_creates_linked_auto_accept_item() {
 }
 
 #[tokio::test]
-async fn propose_and_unavailable_bot() {
+async fn propose_keeps_the_configured_bot_for_dispatch() {
     let e = env();
     let mut b = daily("propose");
     b["bot"] = json!("off");
@@ -840,11 +840,8 @@ async fn propose_and_unavailable_bot() {
     let req = &e.core.created()[0];
     assert!(req.propose);
     assert!(!req.accept_auto);
-    assert_eq!(req.bot, "steve");
-    assert_eq!(
-        runs_of(&e, &id)[0].outcome_label,
-        "提了方案 ST-1（停用的 不可用，交给了 Steve）"
-    );
+    assert_eq!(req.bot.as_deref(), Some("off"));
+    assert_eq!(runs_of(&e, &id)[0].outcome_label, "提了方案 ST-1");
 }
 
 fn add_session(e: &FlowEnv, sid: &str, item: &str, cost: f64) {
