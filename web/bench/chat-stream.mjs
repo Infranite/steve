@@ -1,6 +1,7 @@
 // Sustained main-chat workload (#525). Use a private release Hub serving a production Web build;
 // see CONTRIBUTING's development checks. The browser can read only that loopback Hub and this SSE fixture.
 import assert from "node:assert/strict"
+import { open, writeFile } from "node:fs/promises"
 import { createServer } from "node:http"
 import { loadavg, platform } from "node:os"
 import { setTimeout as sleep } from "node:timers/promises"
@@ -11,6 +12,9 @@ assert.match(base, /^http:\/\/127\.0\.0\.1:\d+$/)
 assert.notEqual(new URL(base).port, "8440")
 const profile = process.argv.includes("--profile")
 const gate = process.argv.includes("--gate")
+const tracePath = process.env.BENCH_TRACE
+const dropLimit = process.env.BENCH_MAX_DROPPED === undefined ? undefined : Number(process.env.BENCH_MAX_DROPPED)
+assert.ok(dropLimit === undefined || (Number.isSafeInteger(dropLimit) && dropLimit >= 0), "BENCH_MAX_DROPPED must be a nonnegative integer")
 const seconds = 60
 const chapter = [
   "### Verification notes",
@@ -64,7 +68,7 @@ async function cool() {
   }
 }
 
-function instrument({ origin, sse, profile }) {
+function instrument({ origin, sse, profile, trace }) {
   // Substitute only live frames; keep EventSource, JSON decoding, the client reducers, actual
   // snapshot/history reads, and production rendering on their normal paths.
   localStorage.setItem("steve-onboarded", "1")
@@ -76,7 +80,10 @@ function instrument({ origin, sse, profile }) {
       super(sse)
       this.addEventListener("message", (e) => {
         if (!e.data.startsWith('{"type":"steve.draft",')) return
-        if (!bench.start) bench.start = performance.now()
+        if (!bench.start) {
+          bench.start = performance.now()
+          if (trace) performance.mark("w525-start")
+        }
         bench.received++
       })
     }
@@ -85,6 +92,7 @@ function instrument({ origin, sse, profile }) {
     start: 0, received: 0, commits: 0, draftCommits: 0, renders: {}, frames: [], long: [], events: [], shifts: [], jumpTimes: [],
     anchor: null, anchorDrift: 0, anchorLost: 0, jumps: 0, worstJump: 0, direction: 0, followGaps: [],
   }
+  if (trace) bench.frameTimes = []
   for (const [type, key] of [["longtask", "long"], ["event", "events"], ["layout-shift", "shifts"]]) {
     if (!PerformanceObserver.supportedEntryTypes.includes(type)) continue
     new PerformanceObserver((entries) => {
@@ -123,7 +131,10 @@ function instrument({ origin, sse, profile }) {
   function frame(t) {
     if (!bench.end) requestAnimationFrame(frame)
     if (bench.start && t > bench.start && !bench.end) {
-      if (prev) bench.frames.push(t - prev)
+      if (prev) {
+        bench.frames.push(t - prev)
+        if (trace) bench.frameTimes.push(t - bench.start)
+      }
       prev = t
       const scroller = bench.scroller
       if (scroller) {
@@ -167,6 +178,25 @@ function instrument({ origin, sse, profile }) {
   requestAnimationFrame(frame)
 }
 
+// Separate diagnostic run: timeline capture changes the cost of the workload.
+async function writeTrace(session, path, data) {
+  const done = new Promise(resolve => session.once("Tracing.tracingComplete", resolve))
+  await session.send("Tracing.end")
+  const { stream } = await done
+  const file = await open(path + ".json", "wx", 0o600)
+  try {
+    for (;;) {
+      const chunk = await session.send("IO.read", { handle: stream })
+      await file.write(Buffer.from(chunk.data, chunk.base64Encoded ? "base64" : "utf8"))
+      if (chunk.eof) break
+    }
+  } finally {
+    await file.close()
+    await session.send("IO.close", { handle: stream })
+  }
+  await writeFile(path + "-frames.json", JSON.stringify(data), { flag: "wx", mode: 0o600 })
+}
+
 let browser
 try {
   const flags = process.env.BENCH_SINGLE_PROCESS === "1" ? ["--single-process", "--no-zygote"] : []
@@ -176,7 +206,8 @@ try {
     const u = new URL(route.request().url())
     return u.origin === sse || u.origin === base ? route.continue() : route.abort()
   })
-  await context.addInitScript(instrument, { origin: base, sse, profile })
+  assert.ok(!(tracePath && (gate || profile)), "run BENCH_TRACE separately from --gate and --profile")
+  await context.addInitScript(instrument, { origin: base, sse, profile, trace: !!tracePath })
   const page = await context.newPage()
   let errors = 0
   page.on("pageerror", () => errors++)
@@ -207,16 +238,39 @@ try {
     const el = document.querySelector("[data-chat-scroll]")
     return el.scrollHeight - el.clientHeight > 4000 && el.scrollHeight - el.clientHeight - el.scrollTop < 4
   })
-  await page.evaluate(async () => {
+  await page.evaluate(async (trace) => {
     await document.fonts.ready
     chatBench.scroller = document.querySelector("[data-chat-scroll]")
     chatBench.scroller.addEventListener("wheel", (e) => {
       if (e.isTrusted && Math.sign(e.deltaY) === chatBench.wheelPhase) chatBench.direction = chatBench.wheelPhase
     }, { passive: true, capture: true })
+    chatBench.scroller.addEventListener("click", (e) => {
+      if (!e.isTrusted || !(e.target instanceof Element) || !e.target.closest("[data-live-steps]")) return
+      const key = e.target.closest("[data-steps-toggle]") ? "process" : e.target.closest("[data-card-row] button[aria-controls]") ? "card" : null
+      if (!key || chatBench[key + "Opened"] !== undefined) return
+      chatBench[key + "Opened"] = performance.now()
+      if (trace) performance.mark("w525-open-" + key)
+    }, { passive: true, capture: true })
     chatBench.follow = true
-  })
+  }, !!tracePath)
   const rect = await scroll.boundingBox()
   const load_before = await cool()
+  const cdp = tracePath ? await context.newCDPSession(page) : null
+  if (cdp) {
+    const diagnostics = await browser.newBrowserCDPSession()
+    try {
+      const { gpu } = await diagnostics.send("SystemInfo.getInfo")
+      console.error("Chromium rendering backend", JSON.stringify({
+        devices: gpu.devices.map(device => device.deviceString),
+        compositing: gpu.featureStatus.gpu_compositing,
+        rasterization: gpu.featureStatus.rasterization,
+      }))
+    } finally { await diagnostics.detach() }
+  }
+  if (cdp) await cdp.send("Tracing.start", {
+    transferMode: "ReturnAsStream",
+    categories: "toplevel,devtools.timeline,disabled-by-default-devtools.timeline.frame,blink.user_timing,benchmark",
+  })
   console.error("Streaming fixture: 60 s, pre-run load", load_before[0])
   const started = performance.now()
   const at = (ms) => sleep(Math.max(0, started + ms - performance.now()))
@@ -299,11 +353,13 @@ try {
   await at(seconds * 1000)
   await page.waitForFunction(({ last, tokenCount }) => chatBench.received === tokenCount &&
     document.querySelector("[data-chat-draft] [data-steve-msg]")?.textContent.includes(last), { last, tokenCount })
-  const data = await page.evaluate(() => {
+  const data = await page.evaluate((trace) => {
     const b = chatBench
     b.end = performance.now()
+    if (trace) performance.mark("w525-end")
     return { ...b, anchor: null, scroller: null, event_timing: PerformanceObserver.supportedEntryTypes.includes("event") }
-  })
+  }, !!tracePath)
+  if (cdp) await writeTrace(cdp, tracePath, data)
   patch(row(finalId, content, Date.now(), "steve", { origin: mid, steps: { research: { run: "bench-stream-run" }, tools } }))
   send({ type: "steve.thinking", ws, rev, on: false })
   await page.locator(`[data-msg="${finalId}"]`).waitFor()
@@ -317,8 +373,13 @@ try {
     chromium: browser.version(), platform: platform(), mode: flags.length ? "single-process" : "default", profile,
     load_before, load_after: loadavg(), duration_ms: round(data.end - data.start), tokens: tokenCount, drafts_received: data.received,
     frames: data.frames.length, p95_frame_ms: round(percentile(data.frames, .95)), dropped_frames: data.frames.reduce((n, t) => n + Math.max(0, Math.round(t / (1000 / 60)) - 1), 0),
+    ...(dropLimit !== undefined && { dropped_frames_limit: dropLimit }),
     long_tasks_gt_50ms: long.length, max_long_task_ms: Math.max(0, ...long.map(e => e.d)),
     long_task_offsets_ms: long.map(e => Math.round(e.t - data.start)),
+    ...(data.processOpened !== undefined && data.cardOpened !== undefined && {
+      process_open_at_ms: round(data.processOpened - data.start),
+      first_card_open_at_ms: round(data.cardOpened - data.start),
+    }),
     layout_shift_no_input: round(data.shifts.filter(e => e.t >= data.start && e.t <= data.end && !e.input).reduce((n, e) => n + e.shift, 0)),
     held_history_row: held, anchor_drift_px: round(data.anchorDrift), anchor_lost_samples: data.anchorLost,
     wheel_jumps: data.jumps, worst_wheel_jump_px: round(data.worstJump), wheel_jump_samples: data.jumpTimes,
@@ -332,6 +393,7 @@ try {
   console.log(JSON.stringify(result, null, 2))
   if (profile) assert.ok(data.draftCommits && data.renders.MarkdownImpl, "use a named production build for --profile")
   if (gate) assert.ok(!long.length && result.p95_frame_ms <= 16.7 && held && data.anchorDrift <= 2 && !data.anchorLost &&
+    (dropLimit === undefined || result.dropped_frames <= dropLimit) &&
     !data.jumps && result.follow_p95_gap_px <= 4 && data.event_timing && (result.typing_inp_ms ?? 16) <= 100 &&
     caret.value_ok && caret.selection_ok && caret.style_match && caret.mirror_error_px <= 1, "chat performance gate failed")
 } finally {

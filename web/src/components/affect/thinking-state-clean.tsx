@@ -1,7 +1,7 @@
 /* affectUI Pro – licensed under https://www.affectui.com/license, not under this project's open-source license. Don't copy it out of this project. */
 "use client";
 
-import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { memo, startTransition, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 /* Thinking State (Clean), adapted to Steve's event stream. Only authoritative incoming steps and
  * outcomes drive this panel. There is no demo playback timer and no inferred completion. */
@@ -49,7 +49,7 @@ export function ThinkingState({ steps, status, label, endLabel, summary, started
   useLayoutEffect(() => {
     if (opened && scroll.current && scrollPosition) scroll.current.scrollTop = scrollPosition.top;
   }, [opened, scrollPosition]);
-  const setOpen = (value: boolean) => { setOwnOpen(value); onOpenChange?.(value) };
+  const setOpen = (value: boolean) => { if (open === undefined) setOwnOpen(value); onOpenChange?.(value) };
   useEffect(() => {
     if (previous.current === "running" && !running && !touched.current) setOpen(false);
     previous.current = status;
@@ -75,18 +75,7 @@ export function ThinkingState({ steps, status, label, endLabel, summary, started
         tabIndex={disclosure && opened ? 0 : undefined} role={disclosure ? "region" : undefined} aria-label={scrollLabel}
         onScroll={scrollPosition ? e => { scrollPosition.top = e.currentTarget.scrollTop } : undefined}>
         {opened && <ol className="ui-thinkc__list">
-        {steps.map((step) => {
-          const active = running && step.status === "running", text = active ? step.activeLabel ?? step.label : step.label;
-          if (step.render) return <li key={step.id} className="ui-thinkc__item" data-card-row="" data-step-status={step.status} {...step.attrs}>{step.render}</li>;
-          return <li key={step.id} className="ui-thinkc__item" data-kind={step.kind} data-active={active || undefined} data-step-status={step.status} {...step.attrs}>
-            <span className="ui-thinkc__node" aria-hidden="true">{step.status === "error" ? <svg viewBox="0 0 16 16" className="ui-thinkc__outcome"><path d="m4 4 8 8m0-8-8 8" /></svg> : step.icon ?? <span className="ui-thinkc__dot" />}</span>
-            <div className="ui-thinkc__content">
-              <span className={active ? "ui-thinkc__label ui-thinkc__shimmer" : "ui-thinkc__label"} data-text={typeof text === "string" ? text : undefined} dir="auto">{text}</span>
-              {!!step.sources?.length && <div className="ui-thinkc__sources">{step.sources.map((source,j)=><Source key={source.label+j} source={source} delay={Math.min(j,12)*70} />)}</div>}
-              {step.body && <div className="ui-thinkc__detail">{step.body}</div>}
-            </div>
-          </li>
-        })}
+        <ThinkingRows steps={steps} running={running} staged={!!disclosure} />
         {!running && <li className="ui-thinkc__item" data-kind="done" data-outcome={status}>
           <span className="ui-thinkc__node" aria-hidden="true"><svg viewBox="0 0 16 16" className={status === "done" ? "ui-thinkc__check" : "ui-thinkc__outcome"}>
             <circle cx="8" cy="8" r="6.5" />{status === "done" ? <path d="M5.4 8.3l1.75 1.75L10.7 6.4" /> : status === "error" ? <path d="m5.5 5.5 5 5m0-5-5 5" /> : <path d="m4 12 8-8" />}
@@ -96,6 +85,43 @@ export function ThinkingState({ steps, status, label, endLabel, summary, started
     </div>
   </div>;
 }
+
+const STEP_BATCH = 6;
+function ThinkingRows({ steps, running, staged }: { steps: ThinkingStep[]; running: boolean; staged: boolean }) {
+  const [revealed, reveal] = useState(0);
+  const count = staged ? Math.min(revealed, steps.length) : steps.length;
+  useEffect(() => {
+    if (count >= steps.length) return;
+    let frame = requestAnimationFrame(() => {
+      const batch = () => startTransition(() => reveal(n => n + STEP_BATCH));
+      // Let the disclosure and its reserved viewport paint before mounting
+      // the first set of cards. Each later batch yields to another frame.
+      if (count === 0) frame = requestAnimationFrame(batch);
+      else batch();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [count, steps.length]);
+
+  const remaining = steps.length - count;
+  return <>
+    {steps.slice(0, count).map(step => <ThinkingRow key={step.id} step={step} running={running} />)}
+    {remaining > 0 && <li aria-hidden="true" role="presentation"
+      style={{ blockSize: `calc(${remaining * 2.25}rem * var(--type-scale, 1))` }} />}
+  </>;
+}
+
+const ThinkingRow = memo(function ThinkingRow({ step, running }: { step: ThinkingStep; running: boolean }) {
+  const active = running && step.status === "running", text = active ? step.activeLabel ?? step.label : step.label;
+  if (step.render) return <li className="ui-thinkc__item" data-card-row="" data-step-status={step.status} {...step.attrs}>{step.render}</li>;
+  return <li className="ui-thinkc__item" data-kind={step.kind} data-active={active || undefined} data-step-status={step.status} {...step.attrs}>
+    <span className="ui-thinkc__node" aria-hidden="true">{step.status === "error" ? <svg viewBox="0 0 16 16" className="ui-thinkc__outcome"><path d="m4 4 8 8m0-8-8 8" /></svg> : step.icon ?? <span className="ui-thinkc__dot" />}</span>
+    <div className="ui-thinkc__content">
+      <span className={active ? "ui-thinkc__label ui-thinkc__shimmer" : "ui-thinkc__label"} data-text={typeof text === "string" ? text : undefined} dir="auto">{text}</span>
+      {!!step.sources?.length && <div className="ui-thinkc__sources">{step.sources.map((source,j)=><Source key={source.label+j} source={source} delay={Math.min(j,12)*70} />)}</div>}
+      {step.body && <div className="ui-thinkc__detail">{step.body}</div>}
+    </div>
+  </li>;
+});
 
 /** A source chip: a link when it has one, with a tooltip on hover and focus */
 function Source({ source, delay }: { source: ThinkingSource; delay: number }) {

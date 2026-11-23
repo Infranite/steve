@@ -40,7 +40,7 @@ import { Composer, type ComposerHandle } from "@/composer"
 import { go, ItemRef, openSheet } from "@/ui"
 import { cn } from "cn"
 import { ArrowDownIcon, ListChecksIcon, MessageCircleIcon, MessageSquareReplyIcon, RouteIcon, Undo2Icon } from "lucide-react"
-import { Component, lazy, memo, Suspense, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react"
+import { Component, lazy, memo, startTransition, Suspense, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react"
 import { lang, t as tr, useT } from "@/i18n"
 
 
@@ -343,7 +343,9 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
       const toggle = (e.target as HTMLElement).closest?.<HTMLElement>("[data-steps-toggle]")
       if (!toggle) return
       const wasFollowing = stuck.current
-      if (wasFollowing) setBack("latest")
+      // Holding the scroll position is immediate; the jump affordance doesn't
+      // have to re-render the conversation and rail in the click task.
+      if (wasFollowing) startTransition(() => setBack(prev => prev ?? "latest"))
       hold()
       // Unfolding the latest run reveals its bounded panel before we hold the reading position.
       if (wasFollowing) requestAnimationFrame(() => {

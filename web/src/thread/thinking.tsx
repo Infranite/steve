@@ -1,6 +1,6 @@
 /* Steve's real work in affectUI Thinking State. The adapter translates steps, never schedules,
  * completes or invents them. The session transcript keeps its own detailed work timeline. */
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import { Markdown } from "@/components/markdown"
 import { ThinkingState, type ThinkingStep, type ThinkingStatus } from "@/components/affect/thinking-state-clean"
 import { ToolCallCard } from "@/components/affect/tool-call-card"
@@ -25,7 +25,7 @@ export function ChatThinking({ items, status = "running", label, startedAt, last
   open?: boolean; onOpenChange?: (open: boolean) => void; scrollPosition?: { top: number }; endLabel?: string; headerAttrs?: Record<string, string>
 }) {
   const t = useT(), live = status === "running"
-  const steps: ThinkingStep[] = items.map(item => {
+  const steps = useMemo<ThinkingStep[]>(() => items.map(item => {
     if (item.t === "tool") {
       const view = state(item.state, live), recovered = item.attrs?.recovered !== undefined
       const Icon = item.icon ?? item.chip?.icon
@@ -42,7 +42,7 @@ export function ChatThinking({ items, status = "running", label, startedAt, last
       render: <Reasoning text={item.text} live={live && item.live} completed={!live} />, attrs: { ...attrs(item.attrs), "data-thinking": live && item.live ? "" : undefined } }
     if (item.t === "note") return { id: item.key, kind: "step", status: "done", label: item.text }
     return { id: item.key, kind: "step", status: state(item.state, live), label: <>{item.label}{item.detail && <span className="ml-1.5">{item.detail}</span>}</>, body: item.body, attrs: attrs(item.attrs) }
-  })
+  }), [items, live, t])
   const terminal = endLabel ?? t(status === "error" ? "thread:thinking.failed" : status === "stopped" ? "thread:thinking.stopped" : "thread:thinking.done")
   return <ThinkingState steps={steps} status={status} label={label ?? (live ? t("thread:thinking.working") : t("thread:progress.process"))} endLabel={terminal}
     startedAt={startedAt} lastActivity={lastActivity} formatActivity={s => t("thread:progress.lastActivity", { time: clockDur(s * 1000) })}

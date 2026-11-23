@@ -39,9 +39,12 @@ export function VirtualList<T extends { id: string }>({ rows, scroll, render, es
     followOnAppend: end,
     scrollEndThreshold: handle ? 0 : 48,
     initialRect: { width: 0, height: 680 },
-    // Keep the measured positions and the scroll compensation on the same paint
-    // for chat. A second (deferred) layout pass makes newly mounted history jump.
+    // Commit the measured positions and scroll correction in the frame's
+    // animation callbacks. A scrollTop write during ResizeObserver delivery
+    // can take effect a paint before the row's new geometry in Chromium.
     directDomUpdates: !!handle,
+    directDomUpdatesMode: handle ? "position" : "transform",
+    useAnimationFrameWithResizeObserver: !!handle,
     useFlushSync: !handle,
   })
   const setList = useCallback((el: HTMLDivElement | null) => {
