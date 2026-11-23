@@ -1,6 +1,7 @@
 /* English strings for the "manage" namespace: the same keys as ../zh-CN/manage.ts. Conventions: web/src/i18n/index.ts */
 export default {
   dispatch: {
+    chooseBot: "Choose a Bot",
     recover: { bots: "Review Bot and Team settings", devices: "Check the execution Node" },
     requiredSpecialties: "Required specialties",
     specialtyPlaceholder: "Optional, separated by commas",
