@@ -27,7 +27,6 @@ ordered_installers! { MODULES: Install;
     mod connections; prepare,
     mod channels; scopes,
     flow::hooks,
-    mod yolo; prepare,
     mod knowledge; prepare,
     mod vault; prepare,
     mod caps; install,

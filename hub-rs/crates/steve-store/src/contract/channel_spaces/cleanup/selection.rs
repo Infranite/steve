@@ -402,26 +402,6 @@ pub fn removable_decisions(r: &mut impl Read, ws: &str, space: &str) -> Result<V
     ] {
         q.and_where(ref_to(table, kind, id, "decision", decision(), None).not());
     }
-    q.and_where(
-        observed(
-            "yolo_actions",
-            "y",
-            Expr::col(("y", "decision_id")).eq(decision()).and(
-                Expr::col(("y", "workspace_id"))
-                    .ne(ws)
-                    .or(Expr::col(("y", "item_id")).is_not_null())
-                    .or(Expr::col(("y", "session_id")).is_not_null())
-                    .or(Expr::col(("y", "outcome")).is_not_in([
-                        "decided",
-                        "declined",
-                        "muted",
-                        "cancelled",
-                        "failed",
-                    ])),
-            ),
-        )
-        .not(),
-    );
     q.order_by(("d", "id"), Order::Asc);
     r.all(&q, |row| row.get(0))
 }

@@ -133,6 +133,9 @@ impl NodeRuntime {
             let open_op = format!("op_open_{}", b.session);
             // the principal's own variables on this Node, as recorded just now (node_env)
             let mut open = open.clone();
+            if let Some(approval) = self.domain.approval(&b.session)? {
+                open.policy.permissions = approval.mode;
+            }
             open.env = super::super::node_env::for_session(
                 &self.store,
                 self.node_id.as_str(),

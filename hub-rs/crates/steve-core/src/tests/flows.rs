@@ -645,6 +645,13 @@ fn a_permission_answer_follows_the_runtime_outcome() {
     let p = k.decision(&i.id, Some(&s.id), "approve", "tool_call", &opts);
     k.rt.st().pending_permissions.insert(p.clone());
     k.core.resolve(&p, "ok", "", "me").unwrap();
+    assert_eq!(
+        k.db().decision(&p).unwrap().unwrap().status,
+        "open",
+        "a queued answer is not a Node receipt"
+    );
+    k.rt.st().permissions.insert(p.clone());
+    k.core.resolve(&p, "ok", "", "me").unwrap();
     let d = k.db().decision(&p).unwrap().unwrap();
     assert_eq!(
         (d.status.as_str(), d.result),
@@ -664,7 +671,7 @@ fn a_permission_answer_follows_the_runtime_outcome() {
     assert_eq!(expired(&k), 0);
 
     k.rt.st().answer_error = false;
-    k.rt.st().pending_permissions.insert(p.clone());
+    k.rt.st().permissions.insert(p.clone());
     k.core.resolve(&p, "no", "", "me").unwrap();
     assert_eq!(k.db().decision(&p).unwrap().unwrap().status, "resolved");
 
@@ -1964,7 +1971,7 @@ fn withdrawing_a_queued_refresh_does_not_mark_the_protocol_delivered() {
 }
 
 #[test]
-fn startup_blocker_survives_queued_input_and_cannot_be_continued_by_yolo() {
+fn startup_blocker_survives_queued_input() {
     let k = Kit::new();
     let i = k.item("run", "执行", None);
     let sid = k.session(&i, "error");
@@ -2003,11 +2010,6 @@ fn startup_blocker_survives_queued_input_and_cannot_be_continued_by_yolo() {
     crate::lifecycle::supersede(k.db(), &i, &["fail"], "background queue").unwrap();
     assert_eq!(k.db().decision(&card.id).unwrap().unwrap().status, "open");
     assert_eq!(k.status(&i).0, "wait");
-    assert!(
-        k.core
-            .resolve(&card.id, "retry", "", steve_modules::outbound::YOLO_ACTOR)
-            .is_err()
-    );
     k.db().session_patch(&sid, patch![status:"ended"]).unwrap();
     let before = k.db().store().sessions().stop(&sid).unwrap();
     k.core

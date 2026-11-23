@@ -313,7 +313,7 @@ mod tests {
         let r = Fake::default();
         let disk = steve_i18n::t!("hub.node.disk_low", name = "studio", free = "3 GB");
         notify(&r, "w", "disk", "info", &disk, None).expect("notify");
-        // as steve-core's YOLO writes it
+        // preserve the text of an existing historical notice
         notify(&r, "w", "system", "fail", "YOLO 已暂停：连续出错", None).expect("notify");
         notify(&r, "w", "release", "fail", "没有发布：冲突", Some("ST-1")).expect("notify");
         let en = steve_i18n::with(steve_i18n::EN, || closed_of(&r));
@@ -322,7 +322,7 @@ mod tests {
             texts,
             [
                 "没有发布：冲突",
-                "YOLO paused: 连续出错",
+                "YOLO 已暂停：连续出错",
                 "Device “studio” has only 3 GB left on its project disk. Free some space on that machine, or check it on the devices page."
             ]
         );

@@ -83,6 +83,10 @@ export default {
   list: {
     sub: "Steve 调用的能力。日常不用管它们，Steve 会选合适的 Bot；这里是管理入口。",
     newBot: "新建 Bot",
+    joinedTeams: "所属 Team",
+    noTeams: "未加入 Team",
+    teamsLoading: "正在加载 Team…",
+    teamsLoadFailed: "Team 加载失败",
     main: "主 Bot",
     filterAll: "全部",
     filterOn: "启用",

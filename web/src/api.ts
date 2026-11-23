@@ -1,5 +1,5 @@
 import type { MessageView } from "@/gen"
-import type { Code, Reason, Params } from "./gen"
+import type { Code, Reason, Params, NodeOffline, HarnessDegradedReason, FileAccessReport } from "./gen"
 import type { BusEvent, Envelope, StreamControl, ById, DecisionView, PageOf, Snapshot, ItemView, SessionView, OptionalModules, BotProposal, PlacementBlocked } from "./gen"
 /* Hub API: raw shapes (as the Hub's store returns them) and calls. store.ts maps them onto the view model. */
 import { lang, t } from "@/i18n"
@@ -67,14 +67,14 @@ export type RNodeUpgrade = { build?: RBuild | null; policy: RUpgradePolicy; own_
  * `route` where its machine is, `via` what it came through, `latency_ms` the latest round trip of a call while it is linked */
 export type RNodeLink = { route: "loopback" | "lan" | "tailnet" | "public" | "unknown"; tls: boolean; via: "direct" | "proxy" | "tailcat"; peer?: string; since: number; latency_ms: number | null; latency_at: number | null }
 /** what a Node's machine is, as the Node last said (`node.host`); `os`/`arch` as Rust names them (`macos`, `aarch64`) */
-export type RNodeHost = { hostname?: string; os: string; os_name?: string; os_version?: string; arch: string; cpus?: number; mem_total?: number }
+export type RNodeHost = { hostname?: string; os: string; os_name?: string; os_version?: string; arch: string; cpus?: number; mem_total?: number; file_access?: FileAccessReport }
 /** one removal of a Node from its machine, as the Hub records it: `requested` | `draining` | `cancelling` | `ready` |
  * `confirming`, then `removed` (unpaired), `unconfirmed` (it did not confirm), `failed` or `manual` (it cannot remove itself) */
 export type RNodeRemovalRun = { operation_id: string; phase: string; error?: string | null; requested_by: string; grace_secs: number; created: number; updated: number }
 /** whether the Hub can ask a Node to remove itself from its machine (`reason`: ok | offline | manual | unknown | local |
  * unpaired), its latest removal, and the command to run on its machine instead */
 export type RNodeRemoval = { reason: string; latest?: RNodeRemovalRun | null; command: string; grace_secs?: number }
-export type RNode = { node_id: string; name: string; fingerprint: string; state: "pending" | "active" | "paused" | "revoked"; linked: boolean; local: boolean; last_seen?: number | null; link_error?: { at: number; error: string }; max_sessions?: number; running?: number; waiting?: number; owner_context?: boolean | null; upgrade?: RNodeUpgrade; removal?: RNodeRemoval; link?: RNodeLink | null; host?: RNodeHost | null }
+export type RNode = { node_id: string; name: string; fingerprint: string; state: "pending" | "active" | "paused" | "revoked"; linked: boolean; local: boolean; last_seen?: number | null; offline?: NodeOffline | null; link_error?: { at: number; error: string }; max_sessions?: number; running?: number; waiting?: number; owner_context?: boolean | null; upgrade?: RNodeUpgrade; removal?: RNodeRemoval; link?: RNodeLink | null; host?: RNodeHost | null }
 /** A Node's latest sample and day of vitals. Network rates are bytes per second. */
 export type RVitals = import("./gen/NodeVitalsDay").NodeVitalsDay
 export type RPairing = { code: string; expires: number; pin: string | null; hub_id: string }
@@ -115,6 +115,7 @@ export type RRuntime = {
 /** Read-only report from one particular Node, never the Hub's merged model catalogue. */
 export type RNodeHarness = {
   id: string; name: string; available: boolean | null; version: string; adapter_version: string | null
+  degraded_reason: HarnessDegradedReason | null
   models: string[]; error: string | null; setup: RRuntime["setup"] | null
 }
 export type RNodeHarnessReport = {
@@ -429,6 +430,7 @@ export const api = {
   /** asks the Node to remove itself from its machine (stop, uninstall its service, delete its home), then unpairs it;
    *  refused with `offline`, `manual` (it cannot) or `busy` */
   removeNode: (id: string) => post<{ operation: string }>(`/nodes/${encodeURIComponent(id)}/remove`),
+  recheckNodeFileAccess: (id: string) => post<FileAccessReport>(`/nodes/${encodeURIComponent(id)}/file-access`),
   nodeLimit: (id: string, max_sessions: number) => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/limit`, { max_sessions }),
   nodeOwnerContext: (id: string, owner_context: "inherit" | "on" | "off") => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/context`, { owner_context }),
   nodeUpgradePolicy: (id: string, policy: RUpgradePolicy | "") => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/upgrade_policy`, { policy }),

@@ -79,7 +79,6 @@ pub struct ItemFacts {
     pub releases: i64,
     pub release_fails: i64,
     pub decisions: i64,
-    pub yolo_decided: i64,
     pub input: i64,
     pub output: i64,
     pub cache_read: i64,
@@ -323,7 +322,7 @@ impl<C: Read> ItemStats<'_, C> {
     }
 }
 
-const COLUMNS: [&str; 30] = [
+const COLUMNS: [&str; 29] = [
     "workspace_id",
     "created",
     "first_turn",
@@ -345,7 +344,6 @@ const COLUMNS: [&str; 30] = [
     "releases",
     "release_fails",
     "decisions",
-    "yolo_decided",
     "input",
     "output",
     "cache_read",
@@ -415,7 +413,6 @@ impl ItemStats<'_, W<'_>> {
                     f.releases.into(),
                     f.release_fails.into(),
                     f.decisions.into(),
-                    f.yolo_decided.into(),
                     f.input.into(),
                     f.output.into(),
                     f.cache_read.into(),

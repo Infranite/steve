@@ -20,6 +20,7 @@ read_attached = true
 self_read_only = false
 nested_sandbox = true
 state = {"env" = "CLAUDE_CONFIG_DIR", "default" = ".claude", "import" = ["settings.json"], "context" = ["CLAUDE.md", "skills/*", "agents", "commands", "output-styles"], "login" = {"files" = [".credentials.json"], "renew" = [".storage-write.lock", ".credentials.json.tmp.*"], "store_env" = "CLAUDE_SECURESTORAGE_CONFIG_DIR", "settings" = "settings.json", "entries" = ["apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "forceLoginMethod", "forceLoginOrgUUID", "env.ANTHROPIC_*", "env.CLAUDE_CODE_USE_*", "env.AWS_*", "env.CLOUD_ML_REGION", "env.VERTEX_REGION_*"]}, "home_files" = [".claude.json"]}
+native_approval = "ask_owner"
 modes = {"plan" = "plan", "ask" = "default", "accept_edits" = "acceptEdits", "auto" = "auto", "full_access" = "bypassPermissions"}
 blind_set_mode = false
 native_execution = false
@@ -69,6 +70,7 @@ read_attached = true
 self_read_only = true
 nested_sandbox = false
 state = {"env" = "CODEX_HOME", "default" = ".codex", "import" = ["config.toml"], "context" = ["AGENTS.md", "AGENTS.override.md", "skills/*", "prompts"], "login" = {"files" = ["auth.json"], "renew" = ["auth.json.lock", ".auth-*"], "settings" = "config.toml", "entries" = ["model_provider", "model_providers", "forced_login_method", "forced_chatgpt_workspace_id", "chatgpt_base_url", "openai_base_url"]}}
+native_approval = "ask_owner"
 modes = {"plan" = "read-only", "ask" = "read-only", "accept_edits" = "workspace-write", "auto" = "agent", "full_access" = "agent-full-access"}
 blind_set_mode = false
 native_execution = false
@@ -345,6 +347,7 @@ managed_by_default = false
 self_read_only = false
 nested_sandbox = true
 state = {"env" = "GOOSE_PATH_ROOT", "default" = ".config/goose", "import" = ["config.yaml"], "import_into" = "config", "extra_dirs" = [".local/share/goose", ".local/state/goose", "Library/Application Support/goose"]}
+native_approval = "ask_owner"
 modes = {"plan" = "", "ask" = "approve", "accept_edits" = "", "auto" = "smart_approve", "full_access" = "auto"}
 blind_set_mode = false
 native_execution = false
@@ -680,6 +683,7 @@ managed_by_default = false
 self_read_only = false
 nested_sandbox = true
 state = {"env" = "VIBE_HOME", "default" = ".vibe", "import" = ["config.toml"], "extra_dirs" = [".config/vibe"]}
+native_approval = "ask_owner"
 modes = {"plan" = "", "ask" = "ask", "accept_edits" = "accept-edits", "auto" = "smart-approve", "full_access" = "auto-approve"}
 blind_set_mode = false
 native_execution = false

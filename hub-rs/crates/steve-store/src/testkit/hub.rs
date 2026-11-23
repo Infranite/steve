@@ -24,7 +24,6 @@ pub mod views;
 pub mod wiring;
 pub mod workflow_cases;
 pub mod workspace_cases;
-pub mod yolo;
 
 pub fn set_user_role(store: &Store, user: &str, role: &str) -> Result<()> {
     store.write(|w| {

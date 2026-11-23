@@ -39,6 +39,10 @@ pub use ids::*;
 pub use intent::{Intent, IntentKey};
 pub use ports::*;
 pub use run::*;
+pub use steve_types::devices::{
+    FileAccessReport, FileAccessStatus, NODE_BOOT_SERVICE_ENV, NODE_FILE_ACCESS_SOCKET,
+    ProtectedAccess, ProtectedLocation,
+};
 pub use steve_types::gateway::{GatewayFailure, TimeoutPhase};
 pub use stop::*;
 pub use tools::*;

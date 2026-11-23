@@ -144,7 +144,7 @@ impl Replies {
         }
         // on your own account one sender's run of messages is one turn: answered together. The
         // earlier ones are marked as taken by it now, so whichever composer finishes first, no reply
-        // of theirs opens, is approved by YOLO or is sent (crate::presence::take_turn)
+        // of theirs opens or is sent (crate::presence::take_turn)
         let turn = if plan.mode == Mode::Own && plan.trigger.is_none() {
             ch.store()
                 .write(|tx| crate::presence::take_turn(tx, &plan.ws, &plan.message_id))?

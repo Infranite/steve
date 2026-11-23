@@ -9,9 +9,6 @@ use axum::{
 use steve_modules::ApiError;
 use tower::ServiceExt;
 
-#[path = "../../examples/support/recovery_yolo.rs"]
-mod actual_yolo;
-
 type F = Extension<Arc<Mutex<Option<Arc<H>>>>>;
 fn active(f: &F) -> ApiResult<Arc<H>> {
     f.0.lock()
@@ -153,21 +150,6 @@ async fn replay(f: F, Json(body): Json<Value>) -> ApiResult<Json<Value>> {
     ))
 }
 
-async fn yolo_tick(f: F) -> ApiResult<Json<Value>> {
-    let h = active(&f)?;
-    let engine = actual_yolo::engine(&h.env.modules, h.env.dir.path(), h.env.clock.clone());
-    actual_yolo::enable(&engine, true);
-    let first = engine.tick();
-    h.env.clock.advance(60_000);
-    let second = engine.tick();
-    // Reopen the real SQLite store with another Core/Engine, dropping the in-memory ledger.
-    drop(engine);
-    let cold = actual_yolo::engine(&h.env.modules, h.env.dir.path(), h.env.clock.clone());
-    let replay = cold.tick();
-    Ok(Json(
-        json!({"first":first,"after_cooling":second,"cold_replay":replay,"yolo":cold.yolo().status(WS)?}),
-    ))
-}
 async fn api_fallback(f: F, request: axum::extract::Request) -> axum::response::Response {
     let h = active(&f).unwrap();
     steve_channels::api::routes(h.ch.clone())
@@ -202,7 +184,6 @@ async fn serve_reply_review() {
         .route("/fixture/state", get(snapshot))
         .route("/fixture/tick", post(tick))
         .route("/fixture/replay", post(replay))
-        .route("/fixture/yolo_tick", post(yolo_tick))
         .route("/api/conversations/{conv}/record", get(record))
         .route("/api/decisions/{id}", post(decide))
         .nest("/api", Router::new().fallback(api_fallback))

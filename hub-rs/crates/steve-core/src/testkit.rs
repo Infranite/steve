@@ -4,9 +4,7 @@
 use crate::error::{Result, msg};
 use crate::gateway::{ModelGateway, Tier};
 use crate::repo::{BusEvent, Db as Store};
-use crate::runtime::{
-    AgentRuntime, Answered, Configured, Flushed, Prompted, Released, Running, Stop, TurnEnd,
-};
+use crate::runtime::{AgentRuntime, Answered, Flushed, Prompted, Released, Running, Stop, TurnEnd};
 use crate::{Core, CoreConfig};
 use async_trait::async_trait;
 use serde_json::json;
@@ -48,11 +46,8 @@ pub struct FakeState {
     pub answered: Vec<(String, Option<String>)>,
     pub holding: bool,
     /// `set_mode` calls: (session, mode)
-    pub modes: Vec<(String, String)>,
     /// Every `set_mode` fails (not recorded in `modes`).
-    pub mode_error: bool,
     /// Every `set_mode` is a mode the backend cannot express (recorded in `modes`).
-    pub mode_unsupported: bool,
     /// (session, files) of every prompt sent right away
     pub files: Vec<(String, Vec<crate::repo::FileRef>)>,
     /// Per `flush`: whether it ran inside a tokio runtime (the real runtime spawns the turn there).
@@ -361,34 +356,10 @@ impl AgentRuntime for FakeRuntime {
     fn hold(&self, on: bool) {
         self.st().holding = on;
     }
-    fn set_mode(&self, sid: &str, mode: &str) -> Result<Configured> {
-        let mut st = self.st();
-        if st.mode_error {
-            return Err(msg("store unavailable"));
-        }
-        st.modes.push((sid.into(), mode.into()));
-        Ok(if st.mode_unsupported {
-            Configured::Unsupported
-        } else {
-            Configured::Applied
-        })
-    }
     fn mode_state(&self, sid: &str) -> Option<crate::runtime::ModeState> {
         self.st().mode_states.get(sid).cloned()
     }
-    fn mode_name(&self, mode: &str) -> Option<String> {
-        Some(
-            match mode {
-                "plan" => "plan",
-                "default" => "ask",
-                "acceptEdits" => "accept_edits",
-                "auto" => "auto",
-                "bypassPermissions" => "full_access",
-                _ => return None,
-            }
-            .into(),
-        )
-    }
+
     fn is_holding(&self) -> bool {
         self.st().holding
     }

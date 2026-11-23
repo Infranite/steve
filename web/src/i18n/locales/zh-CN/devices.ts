@@ -56,7 +56,8 @@ export default {
     readFailed: "Harness 报告读取失败，请重新探测", lastReport: "上次报告", versionUnknown: "版本未知",
     models: "可用模型", reportedModels: "上次报告的模型（当前可用性未确认）", noModels: "未报告模型列表",
     componentInstalled: "已安装", manageLocal: "管理本机运行环境",
-    state: { ready: "可用", not_installed: "未安装", installing: "安装中", unavailable: "不可用", unknown: "可用性未知" },
+    state: { authentication_required: "需要身份验证", ready: "可用", not_installed: "未安装", installing: "安装中", unavailable: "不可用", unknown: "可用性未知" },
+    degraded: { authentication_required: "适配器未能完成身份验证。请在此节点配置非交互凭据后刷新；桌面登录前，登录钥匙串或交互提示可能不可用。", adapter_missing: "找不到适配器命令。", initialize_failed: "适配器未能初始化。", session_unavailable: "适配器未能开启探测会话。" },
   },
 
   map: {
@@ -108,6 +109,7 @@ export default {
   status: {
     online: "在线",
     offline: "离线 · {{ago}}",
+    offlineFor: "已离线 {{time}}",
     offlineNever: "离线",
     pending: "待确认指纹",
     paused: "已暂停接收",
@@ -151,9 +153,26 @@ export default {
     stale: "数据停在 {{ago}}",
     none: "还没有数据",
   },
+  fileAccess: {
+    title: "文件访问",
+    state: { granted: "已确认可访问", missing: "需要授权", unknown: "访问状态未知" },
+    location: { desktop: "桌面", documents: "文稿", downloads: "下载", volume: "可移动或网络宗卷", protected_library: "资源库受保护文件夹" },
+    noneNeeded: "当前配置未使用受保护文件夹。",
+    repair: "在节点所在的 Mac 运行此命令，为开机服务打开「完全磁盘访问权限」设置。",
+    recheck: "重新检查文件访问",
+    checkFailed: "无法检查节点的文件访问权限。",
+  },
+  offlineReason: {
+    awaiting_confirmation: "等待确认指纹",
+    revoked: "配对已撤销",
+    protocol_mismatch: "协议不兼容，请升级 Hub",
+    handshake_failed: "最近一次连接尝试失败",
+    never_connected: "尚未成功连接",
+    unreachable: "Hub 未收到在线连接",
+  },
   attn: {
     outdated: "{{name}} 运行 {{v}}，Hub 是 {{hub}}",
-    offline: "{{name}} 离线 · {{ago}}",
+    nodeStatus: "{{name}} · {{status}}",
     pending: "{{name}} 请求加入，需要核对指纹",
     failed: "{{name}} 升级到 {{to}} 失败，已自动回到 {{from}}，仍在正常接活",
     upgrading: "{{name}} 正在升级到 {{to}}",

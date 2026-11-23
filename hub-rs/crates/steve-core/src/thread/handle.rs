@@ -469,7 +469,7 @@ impl Core {
 
     /// A standing setting said in words (router kind `config`): every configuration it touches is
     /// drafted as a card to apply — Steve's own settings, bots, projects and tags, and with a known user
-    /// the modules' (YOLO, schedules, flows, knowledge sources, mailboxes…) — or, when the user only asks,
+    /// the modules' (schedules, flows, knowledge sources, mailboxes…) — or, when the user only asks,
     /// shown as it is now.
     async fn on_config(
         &self,

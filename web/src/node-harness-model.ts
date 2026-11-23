@@ -2,7 +2,8 @@ import type { RNodeHarness, RNodeHarnessReport } from "./api.ts"
 import type { NodeView } from "./device-model.ts"
 import { t } from "./i18n/index.ts"
 
-export function harnessState(h: RNodeHarness): "ready" | "unknown" | "not_installed" | "installing" | "unavailable" {
+export function harnessState(h: RNodeHarness): "ready" | "authentication_required" | "unknown" | "not_installed" | "installing" | "unavailable" {
+  if (h.degraded_reason === "authentication_required") return "authentication_required"
   if (h.available) return "ready"
   if (h.available == null) return "unknown"
   return h.setup?.state === "not_installed" ? "not_installed" : h.setup?.state === "installing" ? "installing" : "unavailable"

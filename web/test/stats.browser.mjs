@@ -1,5 +1,5 @@
 // Vite-only fixture (ST-40, stats v2): the stats page by purpose. All /api calls are answered here.
-// Checks the slim 现在 line (with the YOLO run state) and its lists, the historical key numbers, the daily
+// Checks the slim 现在 line and its lists, the historical key numbers, the daily
 // output chart (done bars + cost line, day drill), the cost / time split and the most expensive items, the sortable Bot
 // and harness · model tables (a Bot row filters the page), the folded event explorer with its counts said once,
 // and that nothing overflows on a phone.
@@ -25,7 +25,7 @@ const core = {
   throughput: { created: sum(created), created_by_source: {}, done: sum(done), dropped: 1, drop_rate: 0.14, wip: 7, delivered: 7, delivered_auto: 2, delivered_manual: 5, net: 2 },
   time: { lead: P(5 * H, 20 * H), cycle: P(3 * H, 9 * H), first_deliver: P(2 * H, 6 * H), wait: P(1.5 * H, 8 * H), agent: P(2 * H, 5 * H), other: P(1 * H, 3 * H), releases: 4, released: 3, release_success_rate: 0.75, not_released: 0, accept_to_release: P(H / 4, H) },
   quality: { first_pass: 0.66, first_pass_n: 6, reworks: 2, reworks_per_done: 0.33, unit_retries: 3, fails: { stall: 1, error: 2, restart: 0, release: 1, other: 0 }, stalled_then_done: 0, rollbacks: 0, release_unknown: 0, turn_error_rate: 0.017, reopened: 0 },
-  human: { decisions: 14, by_kind: {}, response: P(H / 3, 2 * H), response_by_kind: {}, expired: 1, yolo: { decided: 3, declined: 1, undone: 0, rate: 0.75 }, messages: 9, per_done: 2.3 },
+  human: { decisions: 14, by_kind: {}, response: P(H / 3, 2 * H), response_by_kind: {}, expired: 1, approval: { sessions: 3, turns: 8, permissions: 2, questions: 5, permissions_by_resolver: { ask_owner: { allowed: 1, expired: 1 } } }, messages: 9, per_done: 2.3 },
   agents: { turns: 120, turn_ms: P(4 * 60000, 12 * 60000), tools: 900, tool_error_rate: 0.013, tool_kinds: {}, retries: 1, retry_success: 1, gateway_fallbacks: 0, gateway_failed: 0, permissions: 5, interrupted: 0, cancelled: 1, tokens_per_turn: 50000, tools_per_turn: 7.5 },
   per_item: { tokens: P(800000, 2_000_000), est_p50: 2, est_avg: 2.6, est_top: [] },
   /* #242: one graph whose review failed once; the two kinds of rework side by side */
@@ -116,14 +116,9 @@ try {
     await page.locator("[data-stats]").waitFor()
     await page.locator('[data-chart="group"]').waitFor()
 
-    /* the YOLO run state, now on the slim “现在” line */
-    const run = page.locator("[data-run-state]")
-    assert.equal(await run.getAttribute("data-run-state"), "full")
-    assert.match(await run.innerText(), /完全放开[\s\S]*Agent 不再请求权限[\s\S]*这次替你做了\s*3[\s\S]*留给你\s*1/)
-    assert.equal(await run.locator("[data-run-digest]").getAttribute("href"), "#/yolo")
-    await run.locator("[data-run-adjust]").click()
-    assert.equal(await page.locator("output[data-sheet]").getAttribute("data-sheet"), "yolo")
-
+    const approval = page.locator("[data-stats-approval]")
+    await approval.waitFor()
+    assert.deepEqual(await approval.locator("dd").allTextContents(), ["3", "8", "2", "5"])
     /* 现在: counts from the item list, each opening its list; it sits above the key numbers, not in their place */
     const kpi = async (k) => (await page.locator(`[data-kpi="${k}"]`).innerText()).replace(/\s+/g, " ").trim()
     // ST-3 runs but a card of it waits for you: its state is yours, not in progress (item-state.ts)
@@ -139,7 +134,7 @@ try {
     await page.locator("[data-now]").evaluate((el) => { for (let p = el.parentElement; p; p = p.parentElement) p.scrollTop = 0 })
     const nowBox = await page.locator("[data-now]").boundingBox(), keyBox = await page.locator("[data-key-numbers]").boundingBox()
     assert.ok(nowBox.y < keyBox.y && keyBox.y < (width === 390 ? 844 : 1000), "history begins on the first screen below Now")
-    assert.equal(await page.locator("[data-overview] > *").count(), 1, "no extra panel or placeholder below Now and YOLO")
+    assert.equal(await page.locator("[data-overview] > *").count(), 1, "no extra panel or placeholder below Now")
     assert.equal(await page.getByText("实时输出", { exact: true }).count(), 0)
 
     /* key numbers: the summary's, each against the range before */
@@ -398,7 +393,7 @@ try {
     page.on("pageerror", (e) => errors.push(e.message))
     const t0 = Date.now() - 5 * H, U = (input, output, est, x = {}) => ({ input, output, cache_read: 0, cache_write: 0, total: input + output, hit_rate: null, est, reported: 0, unpriced_tokens: 0, rough: false, ...x })
     const turn = (id, at, min, usage, x = {}) => ({ id, session_id: "ses_" + id, started: t0 + at * 60000, ended: t0 + (at + min) * 60000, stop_reason: "end_turn", attempt: 0, transient: false, tools: 3, tool_errors: 0, usage, ...x })
-    const facts = { created: t0, first_turn: t0, first_deliver: null, last_deliver: null, accepted: null, done_at: null, dropped_at: null, lead_ms: null, cycle_ms: null, wait_ms: 0, agent_ms: 60000, turns: 2, delivers: 0, reworks: 0, first_pass: null, fails: 0, stalls: 0, releases: 0, release_fails: 0, decisions: 0, yolo_decided: 0 }
+    const facts = { created: t0, first_turn: t0, first_deliver: null, last_deliver: null, accepted: null, done_at: null, dropped_at: null, lead_ms: null, cycle_ms: null, wait_ms: 0, agent_ms: 60000, turns: 2, delivers: 0, reworks: 0, first_pass: null, fails: 0, stalls: 0, releases: 0, release_fails: 0, decisions: 0 }
     const detail = {
       "ST-1": { item_id: "ST-1", no: 1, title: "重整统计页图表", status: "run", facts, usage: U(3000, 300, 0.5, { unpriced_tokens: 500000, reported: 2.5 }), age_ms: 5 * H, turns: [turn("a", 0, 2, U(1000, 100, 0.2)), turn("b", 30, 3, U(2000, 200, 0.3, { unpriced_tokens: 500000, reported: 2.5 }), { stop_reason: "error", tool_errors: 1 })], marks: [], decisions: [], by_model: [] },
       "ST-2": { item_id: "ST-2", no: 2, title: "整理发布脚本", status: "done", facts: { ...facts, done_at: t0 + 3 * H }, usage: U(10000, 1000, 1.25), age_ms: 3 * H, turns: [turn("c", 10, 5, U(10000, 1000, 1.25))], marks: [], decisions: [], by_model: [] },
@@ -441,20 +436,6 @@ try {
     await page.close()
   }
 
-  /* paused: the breaker's alert with 恢复 */
-  const page = await browser.newPage({ locale: "zh-CN", viewport: { width: 390, height: 844 } })
-  await page.route((u) => u.pathname.startsWith("/api/"), (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify(route.request().url().includes("summary") ? summary : { buckets: days, series: [], rows: [], total: 0, next: null }) }))
-  await page.goto(base + "/test/fixtures/stats.html?yolo=paused")
-  await page.locator('[data-run-state="paused"]').waitFor()
-  assert.equal(await page.locator('[data-run-state="paused"]').getAttribute("role"), "alert")
-  assert.match(await page.locator("[data-run-state]").innerText(), /YOLO 已暂停[\s\S]*1 小时内撤销了 2 次[\s\S]*恢复/)
-  // and on the inbox, where the cards it stopped deciding now wait
-  await page.goto(base + "/test/fixtures/stats.html?yolo=paused&view=inbox")
-  await page.locator('[data-run-state="paused"] [data-run-resume]').waitFor()
-  assert.equal(await page.locator('[data-yolo-pill="paused"]:visible').count(), 1, "the pill shows on a phone too")
-  if (shots) await page.screenshot({ path: `${shots}/inbox-paused-390.png`, animations: "disabled" })
-  await page.close()
-
   /* A Hub without historical statistics still shows Now and only the history-specific fallback. */
   const absent = await browser.newPage({ locale: "zh-CN" })
   await absent.route((u) => u.pathname.startsWith("/api/"), (route) => route.fulfill({ status: 404, contentType: "application/json", body: "{}" }))
@@ -464,5 +445,5 @@ try {
   assert.equal(await absent.getByText(/实时输出/).count(), 0)
   await absent.close()
   assert.deepEqual(errors, [])
-  console.log(JSON.stringify({ passed: true, scenarios: ["1440/390px × light/dark", "现在 line + YOLO run state; counts = drill lists", "no realtime section or polling; historical key numbers and missing-history fallback", "project and Bot selectors combine and reset", "daily output: done bars + cost/turns line, day drill", "where: split by Bot/model, cost/time; top items open the cost drill", "Bot table: per-Bot summaries, sortable, row filters the page", "harness · model table: agent turns per harness × model", "event explorer folded, counts said once, window + kind + zoom", "paused alert with 恢复", "no horizontal overflow", "item drill: cost waterfall of turns and sub-items", "今天 by hour: 24 local hours, current marked, future empty, table sums = day totals, hour drill"] }))
+  console.log(JSON.stringify({ passed: true, scenarios: ["1440/390px × light/dark", "现在 line; counts = drill lists", "no realtime section or polling; historical key numbers and missing-history fallback", "project and Bot selectors combine and reset", "daily output: done bars + cost/turns line, day drill", "where: split by Bot/model, cost/time; top items open the cost drill", "Bot table: per-Bot summaries, sortable, row filters the page", "harness · model table: agent turns per harness × model", "event explorer folded, counts said once, window + kind + zoom", "no horizontal overflow", "item drill: cost waterfall of turns and sub-items", "今天 by hour: 24 local hours, current marked, future empty, table sums = day totals, hour drill"] }))
 } finally { await browser.close() }

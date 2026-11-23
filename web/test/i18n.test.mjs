@@ -129,7 +129,7 @@ const ALLOW = {
   "device-model.ts": [["暂停接活"], `the device status of a Node that takes no new work: ${HUB}`],
   "devices-config.tsx": [["暂停接活", "正常"], `persisted device status values: ${HUB}`],
   "store.ts": [["高", "中", "低", "你", "开始会话", "执行", "不", "排队", "插话", "删除", "导出", "项目", "类型", "交付", "领域", "客户", "主题", "交接", "依赖", "派生"], `priorities, tag categories, stage and edge ids, and timeline text: ${HUB}`],
-  "views.tsx": [["接收", "分流", "定义", "规划", "准备", "执行", "交付与验收", "收尾", "高", "中", "低", "无", "今天", "明天", "周五", "下周一", "动态", "产出", "补充信息：", "（附件）", "："], `stage, priority and due values (labels via t()), tab ids, timeline keywords, queued-comment prefix: ${HUB}`],
+  "views.tsx": [["接收", "分流", "定义", "规划", "准备", "执行", "交付与验收", "收尾", "高", "中", "低", "无", "今天", "明天", "周五", "下周一", "动态", "产出", "补充信息：", "（附件）"], `stage, priority and due values (labels via t()), tab ids, timeline keywords, queued-comment prefix: ${HUB}`],
   "view-shared.tsx": [["高", "今天", "无", "明天", "周五", "下周一"], `priority and due values (labels via t()): ${HUB}`],
   "items-list.tsx": [["高", "中", "低"], `existing stored priority values moved with the list sort: ${HUB}`],
   "knowledge/index.tsx": [["搜索", "长期记忆", "知识条目", "笔记与文档", "来源", "待确认"], "tab ids (labels via t()); 长期记忆/知识条目 are the Hub's record names"],

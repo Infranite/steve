@@ -9,7 +9,7 @@ use rusqlite::Connection;
 use steve_store::{NoPublisher, Store, db};
 
 /// One table of each module migration, in migration order.
-const NEW_TABLES: [(&str, i64); 31] = [
+const NEW_TABLES: [(&str, i64); 30] = [
     ("connections", 5),
     ("ext_events", 6),
     ("spaces", 7),
@@ -17,9 +17,6 @@ const NEW_TABLES: [(&str, i64); 31] = [
     ("mail_drafts", 9),
     ("gh_prs", 10),
     ("chan_cursors", 11),
-    ("yolo_scopes", 14),
-    ("yolo_windows", 14),
-    ("yolo_actions", 14),
     ("agent_turns", 15),
     ("usage_records", 15),
     ("item_marks", 15),
@@ -41,6 +38,8 @@ const NEW_TABLES: [(&str, i64); 31] = [
     ("session_resume", 24),
     ("session_dispatch", 24),
     ("thread_resume", 24),
+    ("approval_policies", 121),
+    ("approval_turns", 121),
 ];
 
 fn has_table(c: &Connection, name: &str) -> bool {
@@ -273,6 +272,14 @@ fn rerunning_the_module_migrations_changes_nothing() {
         .find(|m| m.contains("DROP TABLE IF EXISTS lanes;"))
         .unwrap();
     c.execute_batch(dropped).unwrap();
+    // Replaying the early module SQL also recreates the tables retired by 121. Replay only
+    // their drops here; production never reapplies those migrations to an up-to-date store.
+    c.execute_batch(
+        "DROP TABLE IF EXISTS yolo_actions;
+         DROP TABLE IF EXISTS yolo_windows;
+         DROP TABLE IF EXISTS yolo_scopes;",
+    )
+    .unwrap();
     drop(c);
     assert_eq!(schema_of(&path), before);
     db::migrate(&Connection::open(&path).unwrap()).unwrap();
@@ -366,19 +373,11 @@ fn yolo_migration_does_not_depend_on_013() {
     c.execute_batch(db::MIGRATIONS[13]).unwrap();
     assert_eq!(yolo(&c), want);
 
-    // the full run also adds 035's indexes on yolo_actions
-    for l in db::MIGRATIONS[34]
-        .lines()
-        .filter(|l| l.contains(" ON yolo_"))
-    {
-        c.execute_batch(l).unwrap();
-    }
-    let want = yolo(&c);
     let (_c, path) = at_version(13);
     let s = Store::open(&path, NoPublisher).unwrap();
     s.fixture_write(|c| {
         assert_eq!(count(c, "SELECT v FROM schema_version"), db::SCHEMA_VERSION);
-        assert_eq!(yolo(c), want);
+        assert!(yolo(c).is_empty(), "obsolete engine tables are gone");
         Ok(())
     })
     .unwrap();
@@ -790,4 +789,127 @@ fn device_revision_migration_preserves_existing_limits_and_reopens() {
             Ok(())
         })
         .unwrap();
+}
+
+#[test]
+fn replacing_legacy_approval_preserves_human_and_external_facts() {
+    let before = db::MIGRATIONS
+        .iter()
+        .position(|sql| sql.contains("CREATE TABLE approval_policies"))
+        .unwrap();
+    let (_dir, path) = at_version(before);
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch(
+        r#"INSERT INTO settings VALUES ('default','yolo.policy','{}',1),
+               ('default','models.yolo','{}',1), ('default','models.draft','{}',1);
+           INSERT INTO yolo_scopes(workspace_id,object_type,object_id,mode,set_by,updated)
+               VALUES ('default','workspace','default','full','owner',1);
+           INSERT INTO yolo_windows(id,workspace_id,started)
+               VALUES ('old-window','default',1);
+           INSERT INTO yolo_actions(id,workspace_id,window_id,kind,subject_type,rule,outcome,reason,created)
+               VALUES ('old-action','default','old-window','approve','tool_call','legacy','scheduled','fixture',1);
+           INSERT INTO decisions(id,workspace_id,kind,subject_type,subject_id,question,status,result,requested_by,created)
+               VALUES ('old','default','approve','mail_draft','x','old','resolved','{"decided_by":"yolo"}','steve',1),
+                      ('human','default','approve','mail_draft','y','human','resolved','{"decided_by":"owner"}','steve',1),
+                      ('unsent','default','approve','tool_call','r1','old','open','{"decided_by":"yolo"}','steve',1),
+                      ('maybe','default','approve','tool_call','r2','old','open','{"decided_by":"yolo"}','steve',1);
+           INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated)
+               VALUES ('s1','default','mock','/fixture','running',1,1);
+           INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated)
+               VALUES ('s1','local','{}','s1','r1','active',1);
+           INSERT INTO runtime_turns(turn_id,session_id,state,created,updated)
+               VALUES ('t1','s1','active',1,1);
+           INSERT INTO runtime_attempts(attempt_id,turn_id,ordinal,node_id,operation_id,execution,spec,digest,state,created,updated)
+               VALUES ('a1','t1',0,'local','start','{}','{}','hash','active',1,1);
+           INSERT INTO node_commands(operation_id,node_id,method,request,digest,target_attempt,state,maybe_sent,created,updated)
+               VALUES ('never-sent','local','resolve_permission','{}','hash','a1','pending',0,1,1),
+                      ('possibly-sent','local','resolve_permission','{}','hash','a1','pending',1,1,1);
+           INSERT INTO runtime_permissions(decision_id,node_id,session_id,attempt_id,permission_id,request,expires_at,state,answer_operation,created,updated)
+               VALUES ('unsent','local','s1','a1','r1','{}',100,'answering','never-sent',1,1),
+                      ('maybe','local','s1','a1','r2','{}',100,'answering','possibly-sent',1,1);
+           INSERT INTO item_stats(item_id,workspace_id,created,updated,yolo_decided,decisions)
+               VALUES ('old-stat','default',1,1,4,7);
+           INSERT INTO mail_drafts(id,workspace_id,connection_id,mode,to_addrs,subject,body,author,
+               decision_id,content_hash,status,send_at,created,updated,sent)
+             VALUES ('queued','default','test','new','[]','q','queued','bot','old','hash','approved',10,1,1,NULL),
+               ('claimed','default','test','new','[]','q','claimed','bot','old','hash','sending',10,1,1,10),
+               ('sent','default','test','new','[]','q','sent','bot','old','hash','sent',10,1,1,10),
+               ('owner','default','test','new','[]','q','owner','bot','human','hash','approved',10,1,1,NULL);"#,
+    )
+    .unwrap();
+    drop(c);
+    let store = Store::open(&path, NoPublisher).unwrap();
+    assert_eq!(
+        store
+            .read(|r| steve_store::approval::policy(r, "default"))
+            .unwrap(),
+        steve_types::ApprovalPolicy::default(),
+    );
+    store.fixture_write(|c| {
+        assert_eq!(count(c, "SELECT COUNT(*) FROM decisions WHERE status='resolved'"), 2);
+        assert_eq!(count(c, "SELECT COUNT(*) FROM settings WHERE key IN ('yolo.policy','models.yolo')"), 0);
+        assert_eq!(count(c, "SELECT COUNT(*) FROM settings WHERE key='models.draft'"), 1);
+        assert_eq!(count(c, "SELECT COUNT(*) FROM mail_drafts WHERE id='queued' AND status='discarded' AND send_at IS NULL"), 1);
+        assert_eq!(count(c, "SELECT COUNT(*) FROM mail_drafts WHERE id='claimed' AND status='sending' AND sent=10"), 1);
+        assert_eq!(count(c, "SELECT COUNT(*) FROM mail_drafts WHERE id='sent' AND status='sent' AND sent=10"), 1);
+        assert_eq!(count(c, "SELECT COUNT(*) FROM mail_drafts WHERE id='owner' AND status='approved' AND send_at=10"), 1);
+        assert_eq!(count(c, "SELECT COUNT(*) FROM node_commands WHERE operation_id='never-sent' AND state='rejected'"), 1);
+        assert_eq!(count(c, "SELECT COUNT(*) FROM decisions WHERE id='unsent' AND status='expired'"), 1);
+        assert_eq!(count(c, "SELECT COUNT(*) FROM runtime_permissions WHERE decision_id='unsent' AND state='expired'"), 1);
+        assert_eq!(count(c, "SELECT COUNT(*) FROM node_commands WHERE operation_id='possibly-sent' AND state='pending' AND maybe_sent=1"), 1);
+        assert_eq!(count(c, "SELECT COUNT(*) FROM runtime_permissions WHERE decision_id='maybe' AND state='answering' AND resolver='legacy'"), 1);
+        assert_eq!(count(c, "SELECT decisions FROM item_stats WHERE item_id='old-stat'"), 7);
+        assert_eq!(count(c, "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'yolo_%'"), 0);
+        assert_eq!(count(c, "SELECT COUNT(*) FROM pragma_foreign_key_check"), 0);
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn approval_policy_is_an_owner_cas_and_only_emits_changes() {
+    use steve_types::ApprovalMode::*;
+    let dir = tempfile::tempdir().unwrap();
+    let (bus, mut receiver) = tokio::sync::broadcast::channel::<steve_types::BusEvent>(16);
+    let store = Store::open(dir.path().join("approval.sqlite3"), bus).unwrap();
+    store.ensure_workspace().unwrap();
+    store.fixture_write(|c| {
+        c.execute_batch(
+            "INSERT INTO users(id,workspace_id,subject,name,role,created)
+               VALUES ('o','default','o','Owner','owner',1),('m','default','m','Member','member',1);
+             INSERT INTO workspace_members VALUES ('default','o','owner',1),('default','m','member',1);",
+        )?;
+        Ok(())
+    }).unwrap();
+    while receiver.try_recv().is_ok() {}
+    let set = |who, revision, mode| {
+        store.write(|w| steve_store::approval::set(w, "default", who, revision, mode))
+    };
+    assert!(matches!(
+        set("m", 0, HarnessAuto),
+        Err(steve_store::StoreError::Rejected(_))
+    ));
+    assert!(receiver.try_recv().is_err());
+    let policy = set("o", 0, HarnessAuto).unwrap();
+    assert_eq!(
+        (
+            policy.mode,
+            policy.revision,
+            policy.actor.as_ref().map(|s| s.as_str())
+        ),
+        (HarnessAuto, 1, Some("o"))
+    );
+    assert_eq!(set("o", 1, HarnessAuto).unwrap(), policy);
+    assert!(matches!(
+        set("o", 0, AskOwner),
+        Err(steve_store::StoreError::Conflict(_))
+    ));
+    assert_eq!(set("o", 1, AskOwner).unwrap().revision, 2);
+    let mut emitted = Vec::new();
+    while let Ok(ev) = receiver.try_recv() {
+        let value = serde_json::to_value(ev).unwrap();
+        if value["type"] == "approval_policy" {
+            emitted.push(value["policy"]["revision"].as_i64().unwrap());
+        }
+    }
+    assert_eq!(emitted, [1, 2]);
 }

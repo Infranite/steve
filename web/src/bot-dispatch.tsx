@@ -167,8 +167,9 @@ function TeamEditor({ team, scope, onSaved, onCancel }: { team?: BotTeam; scope:
   </Card>
 }
 
-export function TeamsSection() {
-  const t = useT(), load = useBotTeams()
+/** Share this load with the Bot cards so a Team edit updates both views together. */
+export function TeamsSection({ load }: { load: ReturnType<typeof useBotTeams> }) {
+  const t = useT()
   const { value } = load
   const [edit, setEdit] = useState<string | null>(null)
   const [busy, setBusy] = useState(false), [error, setError] = useState("")

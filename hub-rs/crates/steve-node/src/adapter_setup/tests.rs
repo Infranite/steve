@@ -328,12 +328,11 @@ async fn failure_is_safe_to_show_and_retry_then_provider_setup_is_still_required
     wait_finished(&n, &c.id).await;
     let h = n.probe(false).await.unwrap().harnesses.remove(0);
     assert_eq!(h.setup.unwrap().state, SetupState::Unavailable);
-    assert!(
-        h.adapter
-            .unwrap()
-            .session_error
-            .unwrap()
-            .contains("Configure an API key")
+    let adapter = h.adapter.unwrap();
+    assert_eq!(adapter.session_auth_required, Some(true));
+    assert_eq!(
+        adapter.session_error.as_deref(),
+        Some("adapter requires authentication")
     );
     t.mark("provider");
     assert_eq!(

@@ -30,14 +30,9 @@ use support::*;
 
 #[derive(Default)]
 struct Controls {
-    yolo: AtomicBool,
     hang: AtomicBool,
 }
-impl DraftHooks for Controls {
-    fn yolo_on(&self, _: &str, _: Option<&str>) -> bool {
-        self.yolo.load(Ordering::SeqCst)
-    }
-}
+impl DraftHooks for Controls {}
 struct Check {
     real: Disclosure,
     controls: Arc<Controls>,
@@ -81,7 +76,7 @@ async fn state(Extension(f): F) -> ApiResult<Json<Value>> {
         json!({"from":s.from,"rcpt":s.rcpt,"subject":parsed.subject,"body":parsed.text,"message_id":parsed.message_id})
     }).collect();
     Ok(Json(json!({"connection_id":f.conn,"thread_id":f.thread,
-        "yolo":f.controls.yolo.load(Ordering::SeqCst),"drafts":drafts,"smtp":sent,
+        "drafts":drafts,"smtp":sent,
         "check_prompts":f.h.env.gateway.prompts.lock().unwrap().iter().filter(|p|p.starts_with(CHECK_HEAD)).collect::<Vec<_>>()})))
 }
 
@@ -90,7 +85,6 @@ async fn model(Extension(f): F, Json(b): Json<Value>) -> ApiResult<Json<Value>> 
     if !["pass", "error", "unreadable", "leak", "same", "hang"].contains(&mode) {
         return Err(ApiError::invalid("model"));
     }
-    f.controls.yolo.store(b["yolo"] == true, Ordering::SeqCst);
     f.controls.hang.store(mode == "hang", Ordering::SeqCst);
     f.h.env.gateway.unscript(CHECK_HEAD);
     if mode == "error" {
@@ -112,7 +106,7 @@ async fn model(Extension(f): F, Json(b): Json<Value>) -> ApiResult<Json<Value>> 
             },
         );
     }
-    Ok(Json(json!({"model":mode,"yolo":b["yolo"]==true})))
+    Ok(Json(json!({"model":mode})))
 }
 
 async fn decide(
@@ -120,7 +114,7 @@ async fn decide(
     Path(id): Path<String>,
     Json(b): Json<Value>,
 ) -> ApiResult<Json<Value>> {
-    let who = caller(WS, if b["yolo"] == true { "yolo" } else { ME });
+    let who = caller(WS, ME);
     let decision = steve_modules::decisions::dispatch(
         &f.h.env.modules,
         &who,

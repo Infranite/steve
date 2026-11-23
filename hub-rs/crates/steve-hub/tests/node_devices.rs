@@ -114,6 +114,7 @@ async fn no_common_upgrade_protocol_report_tells_devices_to_upgrade_the_hub() {
     let device = row(&h, node.as_str()).await;
     assert_eq!(device["linked"], false);
     assert_eq!(device["link_error"]["error"], "版本不一致，需要升级 Hub");
+    assert_eq!(device["offline"]["reason"], "protocol_mismatch");
     assert!(h.svc.registry.current(node.as_str()).is_none());
     assert_eq!(
         node_checks::node_generation_by_node_id(&h.store, node.as_str()).unwrap(),
@@ -141,6 +142,35 @@ fn node_events(seen: &Mutex<Vec<BusEvent>>, node: &str) -> usize {
         .iter()
         .filter(|e| matches!(e, steve_types::BusEvent::Domain(steve_types::DomainEvent::Devices(steve_types::DevicesEvent::Node { id, user })) if id.as_str() == node && user.as_str() == "u1"))
         .count()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn only_the_node_owner_can_recheck_file_access_and_devices_read_it_back() {
+    use steve_node_api::{FileAccessReport, FileAccessStatus};
+    let (h, seen) = watched().await;
+    let (identity, node) = h.paired("u1").await;
+    let fake = FakeNode::new(node.as_str());
+    fake.set_file_access(FileAccessReport::unknown());
+    let _link = dial(&h, &identity, &node, fake.clone(), 1).await.unwrap();
+    eventually_sync("initial host observation", || {
+        node_events(&seen, node.as_str()) >= 4
+    })
+    .await;
+    assert_eq!(
+        row(&h, node.as_str()).await["host"]["file_access"]["status"],
+        "unknown"
+    );
+    fake.set_file_access(FileAccessReport {
+        status: FileAccessStatus::Granted,
+        locations: vec![],
+    });
+    let path = format!("/api/nodes/{node}/file-access");
+    assert_eq!(h.post("u2", &path, json!({})).await.0, 404);
+    let (status, report) = h.post("u1", &path, json!({})).await;
+    assert_eq!(status, 200);
+    assert_eq!(report["status"], "granted");
+    assert_eq!(row(&h, node.as_str()).await["host"]["file_access"], report);
+    assert_eq!(node_events(&seen, node.as_str()), 5);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -245,6 +275,22 @@ async fn every_change_of_a_node_tells_its_owner() {
     let l = dial(&h, &id, &node, FakeNode::new(n), 1).await.unwrap();
     // linked, and what its machine is
     eventually_sync("linked and described", || node_events(&seen, n) >= 4).await;
+    let initial = row(&h, n).await;
+    let generation = initial["generation"].as_i64().unwrap();
+    let at = initial["last_seen"].as_i64().unwrap() + 100;
+    let events = node_events(&seen, n);
+    for (generation, at, closed) in [
+        (generation, at, false),
+        (generation, at - 1, false),
+        (generation - 1, at + 1, true),
+    ] {
+        h.store
+            .write(|w| steve_store::node_directory::observe_link(w, n, generation, at, closed))
+            .unwrap();
+    }
+    assert_eq!(row(&h, n).await["last_seen"], at);
+    assert_eq!(node_events(&seen, n), events);
+
     let steps = [
         ("limit", json!({"max_sessions": 3})),
         ("pause", json!({})),

@@ -558,21 +558,6 @@ pub fn command_trace(path: &Path) -> Result<Vec<String>> {
     .collect::<rusqlite::Result<_>>()?)
 }
 
-pub fn latest_permission_verdict(
-    path: &Path,
-    session: &str,
-    since: i64,
-) -> Result<Option<[String; 6]>> {
-    let db = super::inspect_database(path)?;
-    Ok(db.query_row("SELECT d.id, d.status, a.outcome, a.rule, a.reason, d.question FROM decisions d JOIN yolo_actions a ON a.decision_id=d.id WHERE d.session_id=? AND d.subject_type='tool_call' AND d.created>=? AND a.outcome IN ('decided','declined') ORDER BY d.created DESC, a.rowid DESC LIMIT 1", rusqlite::params![session, since], |r| Ok([r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?])).ok())
-}
-
-pub fn set_yolo_test_policy(path: &Path, at: i64) -> Result<()> {
-    let policy = serde_json::json!({"presence_s": 0, "continue_stalls": false}).to_string();
-    super::api::writable(path)?.execute("INSERT INTO settings (workspace_id, key, value, updated) VALUES ('default', 'yolo.policy', ?, ?) ON CONFLICT(workspace_id, key) DO UPDATE SET value=excluded.value", rusqlite::params![policy, at])?;
-    Ok(())
-}
-
 pub fn history_events(path: &Path, session: &str) -> Result<Vec<(String, String)>> {
     let db = super::inspect_database(path)?;
     let mut q = db.prepare("SELECT kind, data FROM events WHERE session_id=? ORDER BY seq")?;
