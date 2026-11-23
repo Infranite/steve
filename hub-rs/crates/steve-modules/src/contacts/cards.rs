@@ -6,16 +6,16 @@
 //! The text is Chinese like the rest of the prompts; levels are written as the knowledge
 //! module's prompts do (可以引用 / 可转述结论 / 仅用于推理).
 
-use rusqlite::Connection;
-use steve_store::base::links;
-use steve_store::base::mems::{self, MemFilter};
+use steve_store::base::links::Links;
+use steve_store::base::mems::MemFilter;
 use steve_store::base::{Level, ObjRef, Viewer};
 
 use super::item_people::{ITEM, role_label};
-use super::people_repo::{self as prepo, ROLES};
-use super::repo::{self, PARTY, Party};
-use super::service::jobs;
+use super::people_repo::ROLES;
+use super::repo::{PARTY, Party};
+use super::service::jobs_in;
 use crate::ApiResult;
+use steve_store::{Attributes, Contacts, Read, Teams, knowledge::Memories};
 
 /// Memories per card, newest first.
 pub const CARD_MEMS: i64 = 10;
@@ -101,7 +101,7 @@ pub struct ContactCard {
 /// The cards of `party_ids` (in that order, duplicates once), as `viewer` may see them. Parties that are
 /// gone, in another workspace or not visible are skipped.
 pub fn contact_cards(
-    c: &Connection,
+    c: &mut impl Read,
     viewer: &Viewer,
     party_ids: &[String],
 ) -> ApiResult<Vec<ContactCard>> {
@@ -122,17 +122,17 @@ pub fn item_prompt_cards(
     viewer: &Viewer,
     item: &str,
 ) -> ApiResult<Vec<ContactCard>> {
-    store.reader(|c| item_contact_cards(c, viewer, item))
+    store.read(|c| Ok(item_contact_cards(c, viewer, item)))?
 }
 
 /// The cards of everyone linked to an item, in the order they were linked, with their roles.
 pub fn item_contact_cards(
-    c: &Connection,
+    c: &mut impl Read,
     viewer: &Viewer,
     item_id: &str,
 ) -> ApiResult<Vec<ContactCard>> {
     let mut order: Vec<(String, Vec<String>)> = Vec::new();
-    for l in links::from(c, &viewer.ws, &ObjRef::new(ITEM, item_id), None)? {
+    for l in Links(c).from(&viewer.ws, &ObjRef::new(ITEM, item_id), None)? {
         if l.object_type != PARTY || !ROLES.contains(&l.predicate.as_str()) {
             continue;
         }
@@ -160,12 +160,12 @@ pub fn render(cards: &[ContactCard]) -> String {
 }
 
 fn card(
-    c: &Connection,
+    c: &mut impl Read,
     viewer: &Viewer,
     id: &str,
     roles: &[String],
 ) -> ApiResult<Option<ContactCard>> {
-    let Some(p) = repo::get(c, id)?.filter(|p| {
+    let Some(p) = Contacts::new(c).party(id)?.filter(|p| {
         p.workspace_id == viewer.ws
             && p.status == "active"
             && viewer.sees(&p.visibility, &p.created_by)
@@ -175,7 +175,8 @@ fn card(
     let attrs: Vec<CardAttr> = if p.kind == "team" {
         Vec::new()
     } else {
-        repo::values(c, &viewer.ws, &p.id)?
+        Attributes(c)
+            .values(&viewer.ws, &p.id)?
             .into_iter()
             .filter(|v| v.status == "confirmed" && v.level != Level::Never)
             // Only a Hub user's own card has separate internal/external names. Ordinary
@@ -194,7 +195,8 @@ fn card(
         limit: CARD_MEMS,
         ..MemFilter::usable()
     };
-    let mems: Vec<CardMem> = mems::about(c, viewer, &ObjRef::new(PARTY, &p.id), &f)?
+    let mems: Vec<CardMem> = Memories(c)
+        .about(viewer, &ObjRef::new(PARTY, &p.id), &f)?
         .into_iter()
         .map(|m| CardMem {
             id: m.id,
@@ -237,7 +239,7 @@ fn card(
     }))
 }
 
-fn header(c: &Connection, viewer: &Viewer, p: &Party, roles: &[String]) -> ApiResult<String> {
+fn header(c: &mut impl Read, viewer: &Viewer, p: &Party, roles: &[String]) -> ApiResult<String> {
     let is_bot = p.contact_kind.as_deref() == Some("bot");
     let mut what = match p.kind.as_str() {
         "org" => "组织".to_string(),
@@ -258,19 +260,19 @@ fn header(c: &Connection, viewer: &Viewer, p: &Party, roles: &[String]) -> ApiRe
             if let Some(k) = &p.org_kind {
                 parts.push(org_kind_label(k).to_string());
             }
-            let ds = repo::domains(c, &viewer.ws, &p.id)?;
+            let ds = Contacts::new(c).domains(&viewer.ws, &p.id)?;
             if !ds.is_empty() {
                 parts.push(format!("域名 {}", ds.join("、")));
             }
         }
         "team" => {
-            let d = super::teams::repo::details(c, &p.id)?;
+            let d = Teams(c).details(&p.id)?;
             if !d.purpose.is_empty() {
                 parts.push(format!("目的：{}", d.purpose));
             }
         }
         _ => {
-            for j in jobs(c, viewer, &p.id)?
+            for j in jobs_in(c, viewer, &p.id)?
                 .into_iter()
                 .filter(|j| j.to.is_none())
             {
@@ -305,18 +307,20 @@ fn header(c: &Connection, viewer: &Viewer, p: &Party, roles: &[String]) -> ApiRe
     Ok(format!("{}（{}）", p.name, parts.join("；")))
 }
 
-fn member_names(c: &Connection, viewer: &Viewer, team: &Party) -> ApiResult<Vec<String>> {
-    let ids = if prepo::is_chart(c, &team.id)? {
-        prepo::team_member_ids(c, &viewer.ws, &team.id)?
+fn member_names(c: &mut impl Read, viewer: &Viewer, team: &Party) -> ApiResult<Vec<String>> {
+    let ids = if Teams(c).details(&team.id)?.is_chart() {
+        Teams(c).chart_member_ids(&viewer.ws, &team.id)?
     } else {
-        super::teams::repo::member_rows(c, &viewer.ws, &team.id)?
+        Teams(c)
+            .members(&viewer.ws, &team.id)?
             .into_iter()
-            .map(|(id, _)| id)
+            .map(|(id, _, _)| id)
             .collect()
     };
     let mut names = Vec::new();
     for id in ids {
-        if let Some(p) = repo::get(c, &id)?
+        if let Some(p) = Contacts::new(c)
+            .party(&id)?
             .filter(|p| p.status == "active" && viewer.sees(&p.visibility, &p.created_by))
         {
             names.push(p.name);

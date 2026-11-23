@@ -15,10 +15,15 @@
 //! share the transaction through [`W::legacy`], and a `write` inside one of their transactions
 //! joins it as a scope.
 
+pub mod account_profiles;
+pub mod account_rows;
 pub(crate) mod alarms;
+mod attribute_rows;
 pub(crate) mod automation;
 mod backend;
 mod bot_rows;
+mod catalog_rows;
+mod connection_rows;
 mod contacts;
 mod decisions;
 mod digest_notes;
@@ -28,14 +33,25 @@ mod flow_triggers;
 mod flow_waits;
 mod grant_rows;
 mod knowledge_references;
+mod match_rules;
 mod memory_index;
+mod merge_proposals;
 pub(crate) mod message_sources;
+mod party_rows;
+mod passkey_rows;
 mod project_rows;
 pub(crate) mod read_models;
 mod revisions;
 mod run_rows;
+pub mod secret_uses;
 mod signal_rows;
 mod sqlite;
+mod steward_rows;
+mod systems;
+mod team_rows;
+mod user_rows;
+pub mod vault_items;
+pub mod vault_keys;
 mod workspace_settings;
 mod workspaces;
 
@@ -48,8 +64,12 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;
 use sea_query::QueryStatementWriter;
 
+pub use account_rows::Accounts;
+pub use attribute_rows::{AttrDef, AttrValue, Attributes, NewDef, NewValue};
 pub(crate) use backend::{Backend, Dialect, Json, Row};
-pub use bot_rows::{BotPrompt, BotRows};
+pub use bot_rows::{BotPrompt, BotRef, BotRows};
+pub use catalog_rows::{DeviceIdentity, DeviceRows, PersonaIdentity, PersonaRows};
+pub use connection_rows::{ConnRow, ConnectionBrief, DirectoryConnection, HealthState};
 pub use contacts::{AccountIdentity, Contacts};
 pub use decisions::DecisionRows;
 pub use digest_notes::{DigestEntry, DigestNotes};
@@ -57,14 +77,18 @@ pub use flow_rows::{FlowRow, FlowRows, NewFlowRow, NewTrigger, SchedulePatch};
 pub use flow_sources::{FlowSources, SourceConfig};
 pub use flow_triggers::{DueTrigger, FlowTriggers};
 pub use flow_waits::{FlowWaits, NewWait};
-pub use grant_rows::{FlowGrant, GrantRows};
+pub use grant_rows::{FlowGrant, GrantRows, NewVaultGrant, VaultGrant, VaultGrantRecord};
 pub use knowledge_references::{
     FileInfo, FileReads, ItemEvidence, MessageEvidence, References, SessionEvidence,
 };
+pub use match_rules::{MatchRule, MatchRules, PrefixConfig};
 pub use memory_index::{
     Added as AddedMemoryIndex, Index as MemoryIndexData, IndexedRange, MemoryIndex,
     Range as MemoryRange,
 };
+pub use merge_proposals::{ContactMerge, ContactMerges, MergeProposals, NewMergeProposal};
+pub use party_rows::{ContactQuery, NewParty, Party, PartyPatch};
+pub use passkey_rows::{PasskeyInfo, PasskeyRows};
 pub use project_rows::{ProjectRows, TagRows};
 pub use revisions::Revisions;
 pub use run_rows::{NewRun, NewStep, RunRow, RunRows, RunStep, StartupRecord};
@@ -72,6 +96,10 @@ pub use signal_rows::{
     NewCorrection, NewSignal, SignalFilter, SignalRow, SignalRows, SignalTriage,
 };
 pub(crate) use sqlite::Sqlite;
+pub use steward_rows::{Key as StewardKey, Steward, Stewards};
+pub use systems::{System, Systems, builtin_system_name, is_builtin_system};
+pub use team_rows::{Details as TeamDetails, MembershipRow, SyncedTeam, TeamRef, Teams};
+pub use user_rows::{AuthSessions, UserRows};
 pub use workspace_settings::{HTTP_ALLOW_PRIVATE, WorkspaceSettings};
 pub use workspaces::{Members, Workspaces};
 

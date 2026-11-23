@@ -88,7 +88,7 @@ fn bot_connection(h: &TestEnv, handle: &str, name: &str) -> String {
         .transaction(|tx| -> steve_modules::ApiResult<String> {
             ensure_seeds(tx, WS)?;
             steve_modules::contacts::service::ensure_base(tx, &c)?;
-            let org = steve_modules::contacts::repo::self_org(tx, WS)?.expect("self org");
+            let org = tx.write(|w| w.contacts().own_org(WS))?.expect("self org");
             let a = arepo::insert(
                 tx,
                 WS,
@@ -218,7 +218,8 @@ fn reply_prompts(h: &H) -> Vec<String> {
 fn owner(h: &H) -> String {
     h.env
         .store()
-        .reader(|c| personas::owner_name(c, WS))
+        .read(|c| Ok(personas::owner_name(c, WS)))
+        .unwrap()
         .expect("owner")
 }
 
@@ -611,7 +612,7 @@ async fn own_draft_uses_verified_connection_user_and_external_space_address() {
     };
     assert_address("Member public");
     h.env.store().transaction(|tx| -> steve_modules::ApiResult<()> {
-        let me = contacts::repo::me_of(tx, WS, OTHER)?.unwrap();
+        let me = tx.write(|w| w.contacts().me(WS, OTHER))?.unwrap();
         contacts::repo::value_insert(tx, WS, &contacts::repo::NewValue {
             party_id: me.id, key: "call_ext_scope".into(), label: "call_ext_scope".into(),
             value: json!({"kind": "space", "id": plan.space_id, "name": "Member in this space"}).to_string(),

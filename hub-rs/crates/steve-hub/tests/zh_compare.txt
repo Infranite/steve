@@ -865,13 +865,6 @@ steve-modules/src/accounts/connections/integration.rs	"渠道"	2
 steve-modules/src/accounts/connections/integration.rs	"表格/多维表格"	2
 steve-modules/src/accounts/connections/integration.rs	"通讯录"	2
 steve-modules/src/accounts/connections/integration.rs	"邮件"	2
-steve-modules/src/accounts/repo.rs	"Google 日历"	2
-steve-modules/src/accounts/repo.rs	"电话"	2
-steve-modules/src/accounts/repo.rs	"邮件"	2
-steve-modules/src/accounts/repo.rs	"银行卡"	2
-steve-modules/src/accounts/repo.rs	"飞书"	2
-steve-modules/src/accounts/repo.rs	"飞书应用"	2
-steve-modules/src/accounts/repo.rs	"飞书租户"	2
 steve-modules/src/contacts/changes.rs	"事件"	1
 steve-modules/src/contacts/changes.rs	"事实"	1
 steve-modules/src/contacts/changes.rs	"供应商"	2
@@ -969,19 +962,12 @@ steve-modules/src/outbound.rs	"<<<外部内容结束>>>"	1
 steve-modules/src/outbound.rs	"<外部内容开始>"	1
 steve-modules/src/outbound.rs	"<外部内容结束>"	1
 steve-modules/src/shown.rs	" · Agent 记下"	1
-steve-modules/src/shown.rs	"Google 日历"	1
 steve-modules/src/shown.rs	"你写的"	1
 steve-modules/src/shown.rs	"你填的"	1
 steve-modules/src/shown.rs	"你接入"	1
 steve-modules/src/shown.rs	"你说的"	1
-steve-modules/src/shown.rs	"电话"	1
 steve-modules/src/shown.rs	"通讯录同步"	1
-steve-modules/src/shown.rs	"邮件"	1
 steve-modules/src/shown.rs	"邮箱前缀规则"	1
-steve-modules/src/shown.rs	"银行卡"	1
-steve-modules/src/shown.rs	"飞书"	1
-steve-modules/src/shown.rs	"飞书应用"	1
-steve-modules/src/shown.rs	"飞书租户"	1
 steve-modules/src/shown.rs	"飞书通讯录"	1
 steve-modules/src/vault/items/service.rs	"个人"	1
 steve-modules/src/vault/items/service.rs	"共享"	1

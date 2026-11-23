@@ -483,3 +483,16 @@ impl MessageEvidence<'_, crate::W<'_>> {
         Ok(id)
     }
 }
+
+impl<C: Read> SessionEvidence<'_, C> {
+    pub fn workdir(&mut self, ws: &str, session: &str) -> Result<Option<(String, Option<String>)>> {
+        self.0.one(
+            Query::select()
+                .from("sessions")
+                .columns(["cwd", "item_id"])
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("id").eq(session)),
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+    }
+}

@@ -90,7 +90,7 @@ fn bot_connection(h: &TestEnv, handle: &str, name: &str) -> (String, String) {
         .transaction(|tx| -> ApiResult<(String, String)> {
             ensure_seeds(tx, WS)?;
             steve_modules::contacts::service::ensure_base(tx, &caller(WS, ME))?;
-            let org = steve_modules::contacts::repo::self_org(tx, WS)?.expect("self org");
+            let org = tx.write(|w| w.contacts().own_org(WS))?.expect("self org");
             let a = arepo::insert(
                 tx,
                 WS,
@@ -1293,9 +1293,11 @@ async fn your_private_chat_with_the_bot_is_owner_only() {
     assert!(!context.contains("External name"), "{context}");
     h.env
         .store()
-        .reader(|c| {
+        .reader(|_| {
             assert_eq!(
-                steve_channels::personas::owner_name(c, WS)?,
+                h.env
+                    .store()
+                    .read(|r| Ok(steve_channels::personas::owner_name(r, WS)))??,
                 "External name"
             );
             Ok::<_, steve_modules::ApiError>(())
@@ -4345,7 +4347,8 @@ async fn own_identity_answer_is_a_reviewable_reply_not_a_private_meta_question()
     let owner = h
         .env
         .store()
-        .reader(|c| steve_channels::personas::owner_name(c, WS))
+        .read(|c| Ok(steve_channels::personas::owner_name(c, WS)))
+        .unwrap()
         .unwrap();
     let text = format!("我是{owner}。");
     h.env.gateway.unscript(H_SAFETY);

@@ -9,15 +9,14 @@
 pub mod api;
 pub mod repo;
 
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use steve_store::Tx;
-use steve_store::base::{self, Viewer, Visibility, tags};
+use steve_store::base::{Viewer, Visibility};
+use steve_store::{R, Read, TagRows, Teams, W};
 
 use super::Ports;
-use super::repo::{self as prepo, NewParty, Party, PartyPatch};
-use super::service::{check_visibility, event, jobs, nullable, own_party, pref, revise, start};
+use super::repo::{NewParty, Party, PartyPatch};
+use super::service::{check_visibility, jobs_in, nullable, own_party_in, pref, revise_in, start};
 use crate::{ApiError, ApiResult, Caller, Check, Modules};
 use repo::Details;
 
@@ -37,17 +36,22 @@ const ROLES: [&str; 2] = ["lead", "member"];
 /// accepted.
 pub trait SpacePort: Send + Sync {
     /// Is `space_id` a space of the viewer's workspace they can see?
-    fn visible(&self, c: &Connection, viewer: &Viewer, space_id: &str) -> ApiResult<bool>;
+    fn visible(
+        &self,
+        store: &steve_store::Store,
+        viewer: &Viewer,
+        space_id: &str,
+    ) -> ApiResult<bool>;
 
     /// Where each of these contacts was seen (the spaces the viewer can see, the last message), for
     /// telling unknown people apart in 待确认. Contacts never seen are left out.
     fn seen(
         &self,
-        c: &Connection,
+        store: &steve_store::Store,
         viewer: &Viewer,
         parties: &[String],
     ) -> ApiResult<Vec<(String, Seen)>> {
-        let _ = (c, viewer, parties);
+        let _ = (store, viewer, parties);
         Ok(Vec::new())
     }
 }
@@ -89,14 +93,14 @@ pub struct SeenMessage {
 /// The directory sync (slice P6, `people.directory_sync`), as far as the team routes need it.
 pub trait TeamSync: Send + Sync {
     /// Display name of a directory connection (“飞书通讯录”) for `GET /teams`'s `sync.label`.
-    fn label(&self, c: &Connection, ws: &str, connection_id: &str) -> ApiResult<Option<String>>;
+    fn label(&self, r: &mut R<'_>, ws: &str, connection_id: &str) -> ApiResult<Option<String>>;
 
     /// Queues one sync of `connection_id` (or of every directory connection) and returns the job id;
     /// `Ok(None)` when the workspace has no connection with `directory.read`. An unknown connection id
     /// is the implementation's `404 没有这个连接`.
     fn schedule(
         &self,
-        c: &Connection,
+        r: &mut R<'_>,
         ws: &str,
         actor: &str,
         connection_id: Option<&str>,
@@ -201,18 +205,18 @@ fn local(ms: i64, fmt: &str, zone: crate::zone::Zone) -> String {
     zone.format(ms, fmt)
 }
 
-fn sync_label(c: &Connection, ports: &Ports, ws: &str, conn: &str) -> ApiResult<String> {
+fn sync_label(r: &mut R<'_>, ports: &Ports, ws: &str, conn: &str) -> ApiResult<String> {
     let l = match &ports.sync {
-        Some(s) => s.label(c, ws, conn)?,
+        Some(s) => s.label(r, ws, conn)?,
         None => None,
     };
     Ok(l.unwrap_or_else(|| steve_i18n::t!("modules.teams.directory")))
 }
 
 /// “你建的 · 10-08”, “飞书通讯录 · 10-31 06:00 同步” (prototype `people-data.ts`).
-fn source_label(c: &Connection, ports: &Ports, p: &Party, d: &Details) -> ApiResult<String> {
+fn source_label(r: &mut R<'_>, ports: &Ports, p: &Party, d: &Details) -> ApiResult<String> {
     if let (Some(conn), true) = (&d.sync_connection, d.is_chart()) {
-        let label = sync_label(c, ports, &p.workspace_id, conn)?;
+        let label = sync_label(r, ports, &p.workspace_id, conn)?;
         return Ok(match d.synced {
             Some(t) => steve_i18n::t!(
                 "modules.teams.source.synced_at",
@@ -220,7 +224,7 @@ fn source_label(c: &Connection, ports: &Ports, p: &Party, d: &Details) -> ApiRes
                 at = local(
                     t,
                     "%m-%d %H:%M",
-                    crate::zone::Zone::of_owner(c, &p.workspace_id)?
+                    crate::zone::Zone::for_owner(r, &p.workspace_id)?
                 )
             ),
             None => label,
@@ -238,19 +242,19 @@ fn source_label(c: &Connection, ports: &Ports, p: &Party, d: &Details) -> ApiRes
         at = local(
             p.created,
             "%m-%d",
-            crate::zone::Zone::of_owner(c, &p.workspace_id)?
+            crate::zone::Zone::for_owner(r, &p.workspace_id)?
         )
     ))
 }
 
-fn members(c: &Connection, viewer: &Viewer, team: &str) -> ApiResult<Vec<TeamMember>> {
-    let own = prepo::self_org(c, &viewer.ws)?.map(|o| o.id);
+fn members(r: &mut R<'_>, viewer: &Viewer, team: &str) -> ApiResult<Vec<TeamMember>> {
+    let own = r.contacts().own_org(&viewer.ws)?.map(|o| o.id);
     let mut out = Vec::new();
-    for m in repo::members(c, &viewer.ws, team)? {
+    for m in Teams(r).active_members(&viewer.ws, team)? {
         if !viewer.sees(&m.contact.visibility, &m.contact.created_by) {
             continue;
         }
-        let primary = jobs(c, viewer, &m.contact.id)?
+        let primary = jobs_in(r, viewer, &m.contact.id)?
             .into_iter()
             .find(|j| j.to.is_none());
         out.push(TeamMember {
@@ -266,8 +270,8 @@ fn members(c: &Connection, viewer: &Viewer, team: &str) -> ApiResult<Vec<TeamMem
 }
 
 /// Builds the `Team` shape; `with_members` for the detail.
-pub fn team(
-    c: &Connection,
+fn team(
+    r: &mut R<'_>,
     viewer: &Viewer,
     ports: &Ports,
     p: &Party,
@@ -283,16 +287,16 @@ pub fn team(
         org_id: d.org_id.clone(),
         purpose: d.purpose.clone(),
         space_id: d.space_id.clone(),
-        tags: tags::of(c, &viewer.ws, &pref(&p.id))?,
+        tags: TagRows(r).of(&viewer.ws, &pref(&p.id))?,
         visibility: p.visibility.clone(),
-        source_label: source_label(c, ports, p, d)?,
-        headcount: repo::headcount(c, &viewer.ws, &p.id, d.is_chart())?,
+        source_label: source_label(r, ports, p, d)?,
+        headcount: Teams(r).headcount(&viewer.ws, &p.id, d.is_chart())?,
         members: if with_members {
-            Some(members(c, viewer, &p.id)?)
+            Some(members(r, viewer, &p.id)?)
         } else {
             None
         },
-        children: repo::children(c, viewer, &p.id)?,
+        children: Teams(r).children(viewer, &p.id)?,
         depth: None,
         revision: p.revision,
     })
@@ -300,21 +304,26 @@ pub fn team(
 
 /// A team the viewer owns; `active` for writes. `404 没有这个团队`.
 pub fn own_team(
-    c: &Connection,
+    c: &mut impl Read,
     viewer: &Viewer,
     id: &str,
     active: bool,
 ) -> ApiResult<(Party, Details)> {
-    let p = own_party(c, viewer, id, "team", "团队", active)?;
-    let d = repo::details(c, &p.id)?;
+    let p = own_party_in(c, viewer, id, "team", "团队", active)?;
+    let d = Teams(c).details(&p.id)?;
     Ok((p, d))
 }
 
 fn team_by_id(m: &Modules, viewer: &Viewer, ports: &Ports, id: &str) -> ApiResult<Team> {
-    m.store.reader(|c| {
-        let (p, d) = own_team(c, viewer, id, false)?;
-        team(c, viewer, ports, &p, &d, true)
-    })
+    m.store.read(|r| {
+        let party = r
+            .contacts()
+            .party(id)?
+            .filter(|p| p.kind == "team" && p.status != "deleted");
+        let details = Teams(r).details(id)?;
+        Ok(crate::own(party, viewer, "团队")
+            .and_then(|p| team(r, viewer, ports, &p, &details, true)))
+    })?
 }
 
 /// Org-chart teams in tree order (parents before children, siblings by name), each with its depth. A
@@ -354,43 +363,49 @@ fn tree_order(chart: Vec<Team>) -> Vec<Team> {
 /// `GET /teams`: `{chart (tree order, with depth), virtual, sync}`, without members.
 pub fn list_teams(m: &Modules, ports: &Ports, who: &Caller) -> ApiResult<TeamList> {
     let (viewer, _) = start(m, who)?;
-    m.store.reader(|c| {
-        let (mut chart, mut virtual_) = (Vec::new(), Vec::new());
-        for (p, d) in repo::teams(c, &viewer)? {
-            let t = team(c, &viewer, ports, &p, &d, false)?;
-            if d.is_chart() {
-                chart.push(t);
-            } else {
-                virtual_.push(t);
-            }
+    m.store.read(|r| Ok(list_teams_in(r, ports, who, viewer)))?
+}
+
+fn list_teams_in(
+    r: &mut R<'_>,
+    ports: &Ports,
+    who: &Caller,
+    viewer: Viewer,
+) -> ApiResult<TeamList> {
+    let (mut chart, mut virtual_) = (Vec::new(), Vec::new());
+    for (p, d) in Teams(r).list(&viewer)? {
+        let t = team(r, &viewer, ports, &p, &d, false)?;
+        if d.is_chart() {
+            chart.push(t);
+        } else {
+            virtual_.push(t);
         }
-        let sync = match repo::last_sync(c, &who.ws)? {
-            Some((conn, at)) => Some(SyncInfo {
-                label: sync_label(c, ports, &who.ws, &conn)?,
-                connection_id: conn,
-                at,
-            }),
-            None => None,
+    }
+    let sync = match Teams(r).last_sync(&who.ws)? {
+        Some((conn, at)) => Some(SyncInfo {
+            label: sync_label(r, ports, &who.ws, &conn)?,
+            connection_id: conn,
+            at,
+        }),
+        None => None,
+    };
+    let mut directory = Vec::new();
+    for (conn, raw) in steve_store::Connections(r).directory_states(&who.ws)? {
+        let Ok(state) = serde_json::from_str::<crate::contacts::sync::DirectoryState>(&raw) else {
+            continue;
         };
-        let mut directory = Vec::new();
-        for (conn, raw) in crate::contacts::sync::repo::directory_states(c, &who.ws)? {
-            let Ok(state) = serde_json::from_str::<crate::contacts::sync::DirectoryState>(&raw)
-            else {
-                continue;
-            };
-            directory.push(DirectoryStatus {
-                label: sync_label(c, ports, &who.ws, &conn)?,
-                note: directory_note(&state),
-                connection_id: conn,
-                state,
-            });
-        }
-        Ok(TeamList {
-            chart: tree_order(chart),
-            virtual_,
-            sync,
-            directory,
-        })
+        directory.push(DirectoryStatus {
+            label: sync_label(r, ports, &who.ws, &conn)?,
+            note: directory_note(&state),
+            connection_id: conn,
+            state,
+        });
+    }
+    Ok(TeamList {
+        chart: tree_order(chart),
+        virtual_,
+        sync,
+        directory,
     })
 }
 
@@ -411,7 +426,7 @@ pub struct MemberIn {
 /// Checks a member list (`field.<i>.role`, duplicates at `field.<i>.contact_id`) and resolves each
 /// contact (`404 没有这个联系人`). With `me_leads`, “我” without a role becomes `lead`.
 fn resolve_members(
-    tx: &Tx,
+    tx: &mut W<'_>,
     viewer: &Viewer,
     me: &Party,
     field: &str,
@@ -439,7 +454,7 @@ fn resolve_members(
         } else {
             x.contact_id.as_str()
         };
-        let c = own_party(tx, viewer, id, "contact", "联系人", true)?;
+        let c = own_party_in(tx, viewer, id, "contact", "联系人", true)?;
         let role = match &x.role {
             Some(r) => r.clone(),
             None if me_leads && c.id == me.id => "lead".into(),
@@ -452,7 +467,7 @@ fn resolve_members(
 
 /// `space_id` through the channels module; without it only `null`.
 fn check_space(
-    c: &Connection,
+    store: &steve_store::Store,
     viewer: &Viewer,
     ports: &Ports,
     space: Option<&str>,
@@ -460,7 +475,7 @@ fn check_space(
     match (space, &ports.spaces) {
         (None, _) => Ok(()),
         (Some(_), None) => Err(ApiError::invalid("space_id")),
-        (Some(s), Some(p)) if p.visible(c, viewer, s)? => Ok(()),
+        (Some(s), Some(p)) if p.visible(store, viewer, s)? => Ok(()),
         (Some(_), Some(_)) => Err(ApiError::not_found("群")),
     }
 }
@@ -481,15 +496,14 @@ pub fn create_team(m: &Modules, ports: &Ports, who: &Caller, b: NewTeam) -> ApiR
         .opt_len("purpose", b.purpose.as_deref(), 0, 400)
         .that("members", b.members.len() >= 2);
     ck.done()?;
-    let id = m.store.transaction(|tx| {
+    let id = m.store.write(|tx| {
         let members = resolve_members(tx, &viewer, &me, "members", &b.members, true)?;
         let vis = b.visibility.clone().unwrap_or(Visibility::Workspace);
         check_visibility(tx, &who.ws, &vis)?;
         let mut p = NewParty::new("team", b.name.trim(), &who.me);
         p.visibility = vis;
-        let p = prepo::insert(tx, &who.ws, &p)?;
-        repo::details_insert(
-            tx,
+        let p = tx.contacts().insert(&who.ws, &p)?;
+        Teams(tx).insert_details(
             &who.ws,
             &p.id,
             &Details {
@@ -499,17 +513,16 @@ pub fn create_team(m: &Modules, ports: &Ports, who: &Caller, b: NewTeam) -> ApiR
             },
         )?;
         for (cid, role) in &members {
-            repo::member_add(tx, &who.ws, &p.id, cid, role, "manual")?;
+            Teams(tx).add_member(&who.ws, &p.id, cid, role, "manual")?;
         }
-        base::audit(
-            tx,
+        tx.audit(
             &who.ws,
             &who.me,
             "team.create",
             &p.id,
             &json!({ "kind": "virtual", "members": members.len() }),
         )?;
-        event(tx, &who.ws, &p.id);
+        tx.emit(crate::accounts::service::party_changed(&who.ws, &p.id));
         Ok::<_, ApiError>(p.id)
     })?;
     team_by_id(m, &viewer, ports, &id)
@@ -535,7 +548,7 @@ pub fn patch_team(
     b: TeamPatch,
 ) -> ApiResult<Team> {
     let (viewer, _) = start(m, who)?;
-    m.store.transaction(|tx| {
+    m.store.write(|tx| {
         let (p, d) = own_team(tx, &viewer, id, true)?;
         let mut ck = Check::new();
         if let Some(n) = &b.name {
@@ -561,7 +574,7 @@ pub fn patch_team(
         let purpose = b.purpose.clone().filter(|x| *x != d.purpose);
         let space = b.space_id.clone().filter(|s| *s != d.space_id);
         if let Some(s) = &space {
-            check_space(tx, &viewer, ports, s.as_deref())?;
+            check_space(&m.store, &viewer, ports, s.as_deref())?;
         }
         let (mut before, mut after) = (Map::new(), Map::new());
         let mut put = |k: &str, old: Value, new: Value| {
@@ -581,8 +594,8 @@ pub fn patch_team(
             put("space_id", json!(d.space_id), json!(s));
         }
         if let Some(t) = &b.tags {
-            let old = tags::of(tx, &who.ws, &pref(&p.id))?;
-            let new = tags::set(tx, &who.ws, &pref(&p.id), t)?;
+            let old = TagRows(tx).of(&who.ws, &pref(&p.id))?;
+            let new = TagRows(tx).replace(&who.ws, &pref(&p.id), t)?;
             if new != old {
                 put("tags", json!(old), json!(new));
             }
@@ -590,8 +603,7 @@ pub fn patch_team(
         if after.is_empty() {
             return Ok(());
         }
-        repo::details_update(
-            tx,
+        Teams(tx).update_details(
             &p.id,
             purpose.as_deref(),
             space.as_ref().map(|s| s.as_deref()),
@@ -602,7 +614,7 @@ pub fn patch_team(
             ..Default::default()
         };
         let fields: Vec<String> = after.keys().cloned().collect();
-        revise(
+        revise_in(
             tx,
             &p,
             &patch,
@@ -610,15 +622,14 @@ pub fn patch_team(
             Value::Object(after),
             &who.me,
         )?;
-        base::audit(
-            tx,
+        tx.audit(
             &who.ws,
             &who.me,
             "team.update",
             &p.id,
             &json!({ "fields": fields }),
         )?;
-        event(tx, &who.ws, &p.id);
+        tx.emit(crate::accounts::service::party_changed(&who.ws, &p.id));
         Ok::<_, ApiError>(())
     })?;
     team_by_id(m, &viewer, ports, id)
@@ -634,23 +645,23 @@ pub fn put_members(
     b: Vec<MemberIn>,
 ) -> ApiResult<Team> {
     let (viewer, me) = start(m, who)?;
-    m.store.transaction(|tx| {
+    m.store.write(|tx| {
         let (p, d) = own_team(tx, &viewer, id, true)?;
         if d.is_chart() {
             return Err(ApiError::rule(chart_readonly()));
         }
         let new = resolve_members(tx, &viewer, &me, "members", &b, false)?;
-        let old = repo::member_rows(tx, &who.ws, &p.id)?;
+        let old = Teams(tx).members(&who.ws, &p.id)?;
         let row = |c: &str, r: &str| json!({ "contact_id": c, "role": r });
         let (mut was, mut now) = (Vec::new(), Vec::new());
-        for (c, r) in &old {
+        for (c, r, _) in &old {
             match new.iter().find(|(n, _)| n == c) {
                 None => {
-                    repo::member_remove(tx, &who.ws, &p.id, c)?;
+                    Teams(tx).remove_member(&who.ws, &p.id, c)?;
                     was.push(row(c, r));
                 }
                 Some((_, nr)) if nr != r => {
-                    repo::member_role(tx, &who.ws, &p.id, c, nr)?;
+                    Teams(tx).set_member_role(&who.ws, &p.id, c, nr)?;
                     was.push(row(c, r));
                     now.push(row(c, nr));
                 }
@@ -658,15 +669,15 @@ pub fn put_members(
             }
         }
         for (c, r) in &new {
-            if !old.iter().any(|(o, _)| o == c) {
-                repo::member_add(tx, &who.ws, &p.id, c, r, "manual")?;
+            if !old.iter().any(|(o, _, _)| o == c) {
+                Teams(tx).add_member(&who.ws, &p.id, c, r, "manual")?;
                 now.push(row(c, r));
             }
         }
         if was.is_empty() && now.is_empty() {
             return Ok(());
         }
-        revise(
+        revise_in(
             tx,
             &p,
             &PartyPatch::default(),
@@ -674,15 +685,14 @@ pub fn put_members(
             json!({ "members": now }),
             &who.me,
         )?;
-        base::audit(
-            tx,
+        tx.audit(
             &who.ws,
             &who.me,
             "team.members",
             &p.id,
             &json!({ "count": new.len() }),
         )?;
-        event(tx, &who.ws, &p.id);
+        tx.emit(crate::accounts::service::party_changed(&who.ws, &p.id));
         Ok::<_, ApiError>(())
     })?;
     team_by_id(m, &viewer, ports, id)
@@ -691,7 +701,7 @@ pub fn put_members(
 /// `DELETE /teams/:id`: a virtual team becomes `dissolved` (members and references stay).
 pub fn dissolve_team(m: &Modules, who: &Caller, id: &str) -> ApiResult<()> {
     let (viewer, _) = start(m, who)?;
-    m.store.transaction(|tx| {
+    m.store.write(|tx| {
         let (p, d) = own_team(tx, &viewer, id, true)?;
         if d.is_chart() {
             return Err(ApiError::rule(chart_readonly()));
@@ -700,7 +710,7 @@ pub fn dissolve_team(m: &Modules, who: &Caller, id: &str) -> ApiResult<()> {
             status: Some("dissolved".into()),
             ..Default::default()
         };
-        revise(
+        revise_in(
             tx,
             &p,
             &patch,
@@ -708,8 +718,8 @@ pub fn dissolve_team(m: &Modules, who: &Caller, id: &str) -> ApiResult<()> {
             json!({ "status": "dissolved" }),
             &who.me,
         )?;
-        base::audit(tx, &who.ws, &who.me, "team.dissolve", &p.id, &json!({}))?;
-        event(tx, &who.ws, &p.id);
+        tx.audit(&who.ws, &who.me, "team.dissolve", &p.id, &json!({}))?;
+        tx.emit(crate::accounts::service::party_changed(&who.ws, &p.id));
         Ok(())
     })
 }
@@ -726,6 +736,6 @@ pub fn sync_teams(m: &Modules, ports: &Ports, who: &Caller, b: SyncBody) -> ApiR
         return Err(ApiError::rule(steve_i18n::t!("modules.teams.no_directory")));
     };
     m.store
-        .reader(|c| sync.schedule(c, &who.ws, &who.me, b.connection_id.as_deref()))?
+        .read(|r| Ok(sync.schedule(r, &who.ws, &who.me, b.connection_id.as_deref())))??
         .ok_or_else(|| ApiError::rule(steve_i18n::t!("modules.teams.no_directory")))
 }

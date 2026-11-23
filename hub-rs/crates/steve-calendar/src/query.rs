@@ -16,21 +16,8 @@ use crate::sync::me_party;
 use crate::{Settings, ics};
 
 /// The reader's zone: their personal notification setting, else the workspace's.
-pub fn user_tz(c: &Connection, ws: &str, user: &str) -> ApiResult<Tz> {
-    let own: Option<String> = c
-        .query_row(
-            "SELECT timezone FROM notification_policies WHERE workspace_id = ? AND user_id = ?",
-            params![ws, user],
-            |r| r.get(0),
-        )
-        .optional()?;
-    if let Some(z) = own.as_deref().and_then(ics::zone) {
-        return Ok(z);
-    }
-    let w = steve_modules::zone::workspace_tz(c, ws)
-        .map(|zone| zone.name().to_string())
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-    Ok(ics::zone(&w).unwrap_or_else(steve_modules::zone::default_tz))
+pub fn user_tz(c: &mut impl steve_store::Read, ws: &str, user: &str) -> ApiResult<Tz> {
+    Ok(steve_modules::zone::Zone::for_user(c, ws, Some(user))?.tz)
 }
 
 /// `ms` as local `YYYY-MM-DD HH:MM` in `tz`.

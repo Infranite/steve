@@ -18,7 +18,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use steve_modules::ApiError;
-use steve_modules::accounts::{Hints, identify};
+use steve_modules::accounts::{Hints, identify::identify_handle};
 use steve_runtime::due::{DueError, DueSource, RowDeadlines, due_loop};
 use steve_runtime::policy::{Backoff, Jitter, Limiter, RateLimit};
 use steve_store::{Contacts, W, uid};
@@ -128,7 +128,7 @@ fn identify_actor(
                 signature_org: signature_org.clone(),
                 ..Hints::default()
             };
-            match tx.scope(|w| identify(&w.legacy(), ws, user, system, handle, &hints)) {
+            match tx.scope(|w| identify_handle(w, ws, user, system, handle, &hints)) {
                 Ok(id) => (Some(id.account_id), Some(id.party_id)),
                 Err(e) => {
                     tracing::warn!(ws, system, "flow ingest: sender not identified: {e}");

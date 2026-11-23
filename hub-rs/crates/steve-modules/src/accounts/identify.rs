@@ -8,15 +8,17 @@
 //!    by the mail signature) → a new unconfirmed contact plus a merge proposal, never a silent merge;
 //! 4. otherwise a new unconfirmed contact, working at the domain's organization when there is one.
 
-use rusqlite::OptionalExtension;
 use serde::Serialize;
 use serde_json::json;
 use steve_store::base::links::{self, NewLink};
-use steve_store::base::{self, DecisionKind, ObjRef, Viewer, Visibility};
-use steve_store::{NewDecision, Tx, uid};
+use steve_store::base::{DecisionKind, ObjRef, Viewer, Visibility};
+use steve_store::{
+    Accounts, Connections, DecisionRows, MatchRules, MergeProposals, NewDecision, NewMergeProposal,
+    Systems, Tx, W, uid,
+};
 
-use super::repo::{self, Account, NewAccount, System};
-use super::service::{self as svc, current_party, event, normalize, own_system, party_event};
+use super::repo::{Account, NewAccount, System};
+use super::service::{self as svc, normalize, own_system};
 use crate::contacts::repo::{self as people, NewParty, PARTY, Party};
 use crate::contacts::service as contacts;
 use crate::{ApiError, ApiResult};
@@ -68,35 +70,58 @@ pub struct Identified {
 }
 
 fn exact_account(
-    tx: &Tx,
+    w: &mut W<'_>,
     ws: &str,
     system: &System,
     h: &svc::Handle,
     hints: &Hints,
 ) -> ApiResult<Option<Identified>> {
     // 1. exact handle: the primary, then the extra ones
-    let mut hit = repo::by_handle(tx, ws, &system.family, &h.handle)?;
+    let mut hit = Accounts(w).by_handle(ws, &system.family, &h.handle)?;
     for x in &hints.extra {
         if hit.is_some() {
             break;
         }
-        hit = repo::by_handle(tx, ws, &system.family, x.handle.trim())?;
+        hit = Accounts(w).by_handle(ws, &system.family, x.handle.trim())?;
     }
     if let Some(account_id) = hit {
-        let a = repo::get(tx, &account_id)?.ok_or_else(|| ApiError::not_found("账号"))?;
+        let a = Accounts(w)
+            .get(&account_id)?
+            .ok_or_else(|| ApiError::not_found("账号"))?;
         // remember the handles seen with it, so a message carrying only one of them still matches
-        repo::add_handle(tx, ws, &system.family, &h.handle, &a.id, None)?;
-        add_extra(tx, ws, system, &a.id, hints)?;
-        let p = current_party(tx, &a.party_id)?.ok_or_else(|| ApiError::not_found("联系人"))?;
+        Accounts(w).add_handle(ws, &system.family, &h.handle, &a.id, None)?;
+        add_extra(w, ws, system, &a.id, hints)?;
+        let p = w
+            .contacts()
+            .current_party(&a.party_id)?
+            .ok_or_else(|| ApiError::not_found("联系人"))?;
         return Ok(Some(Identified {
             account_id: a.id,
-            is_ours: svc::is_ours(tx, &p)?,
+            is_ours: is_ours(w, &p)?,
             party_id: p.id,
             created: false,
             proposal: None,
         }));
     }
     Ok(None)
+}
+
+fn is_ours(w: &mut W<'_>, party: &Party) -> ApiResult<bool> {
+    if party.is_self_org() {
+        return Ok(true);
+    }
+    if party.contact_kind.as_deref() != Some("bot") {
+        return Ok(false);
+    }
+    for account in Accounts(w).of_party(&party.workspace_id, &party.id)? {
+        if Connections(w)
+            .brief(&account.id)?
+            .is_some_and(|connection| connection.status != "revoked")
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn identified_kind(system: &System, org: Option<&str>, hints: &Hints) -> String {
@@ -152,16 +177,27 @@ pub fn identify(
     handle: &str,
     hints: &Hints,
 ) -> ApiResult<Identified> {
-    svc::ensure_seeds(tx, ws)?;
-    let system = own_system(tx, ws, system_id)?;
+    tx.write(|w| identify_handle(w, ws, actor, system_id, handle, hints))
+}
+
+pub fn identify_handle(
+    w: &mut W<'_>,
+    ws: &str,
+    actor: &str,
+    system_id: &str,
+    handle: &str,
+    hints: &Hints,
+) -> ApiResult<Identified> {
+    svc::seed(w, ws)?;
+    let system = own_system(w, ws, system_id)?;
     let h = normalize(&system, handle).ok_or_else(|| ApiError::invalid("handle"))?;
 
-    if let Some(known) = exact_account(tx, ws, &system, &h, hints)? {
+    if let Some(known) = exact_account(w, ws, &system, &h, hints)? {
         return Ok(known);
     }
 
     let org = match (system.family.as_str(), h.handle.split_once('@')) {
-        ("email", Some((_, domain))) => people::domain_owner(tx, ws, domain)?,
+        ("email", Some((_, domain))) => w.contacts().domain_owner(ws, domain)?,
         _ => None,
     };
     let kind = identified_kind(&system, org.as_deref(), hints);
@@ -185,10 +221,9 @@ pub fn identify(
 
     // 2. the email prefix rule
     if system.family == "email"
-        && let Some(owner) = by_prefix(tx, ws, &h.handle, org.as_deref())?
+        && let Some(owner) = by_prefix(w, ws, &h.handle, org.as_deref())?
     {
-        let a = repo::insert(
-            tx,
+        let a = Accounts(w).insert(
             ws,
             &new_account.for_party(
                 &owner.id,
@@ -198,10 +233,10 @@ pub fn identify(
                 svc::default_label("rule:email_prefix"),
             ),
         )?;
-        created(tx, ws, actor, &a, &system, hints)?;
+        created(w, ws, actor, &a, &system, hints)?;
         return Ok(Identified {
             account_id: a.id,
-            is_ours: svc::is_ours(tx, &owner)?,
+            is_ours: is_ours(w, &owner)?,
             party_id: owner.id,
             created: true,
             proposal: None,
@@ -215,13 +250,12 @@ pub fn identify(
     };
     // a bot is not a person: its own bot party, nobody's yet
     if matches!(kind.as_str(), "bot" | "app_bot") {
-        let bot = crate::contacts::stewards::new_bot_party(tx, ws, actor, &name, "identify")?;
-        let a = repo::insert(
-            tx,
+        let bot = crate::contacts::stewards::new_bot_party(w, ws, actor, &name, "identify")?;
+        let a = Accounts(w).insert(
             ws,
             &new_account.for_party(&bot.id, true, 1.0, &source, &label),
         )?;
-        created(tx, ws, actor, &a, &system, hints)?;
+        created(w, ws, actor, &a, &system, hints)?;
         return Ok(Identified {
             account_id: a.id,
             party_id: bot.id,
@@ -232,22 +266,21 @@ pub fn identify(
     }
 
     // 3. a fuzzy clue: same name, same organization → proposal; 4. nothing → a new unconfirmed contact
-    let viewer = Viewer::load(tx, ws, actor)?;
-    let clue = same_name(tx, &viewer, &display_name, org.as_deref(), hints)?;
-    let contact = new_contact(tx, ws, actor, &name, org.as_deref(), hints)?;
+    let viewer = Viewer::bare(ws, actor);
+    let clue = same_name(w, &viewer, &display_name, org.as_deref(), hints)?;
+    let contact = new_contact(w, ws, actor, &name, org.as_deref(), hints)?;
     let (verified, confidence) = if clue.is_some() {
         (false, PROPOSAL_CONFIDENCE)
     } else {
         (true, 1.0)
     };
-    let a = repo::insert(
-        tx,
+    let a = Accounts(w).insert(
         ws,
         &new_account.for_party(&contact.id, verified, confidence, &source, &label),
     )?;
-    created(tx, ws, actor, &a, &system, hints)?;
+    created(w, ws, actor, &a, &system, hints)?;
     let proposal = match clue {
-        Some((into, reason)) => propose(tx, ws, &contact, &into, &a, &reason)?,
+        Some((into, reason)) => propose(w, ws, &contact, &into, &a, &reason)?,
         None => None,
     };
     Ok(Identified {
@@ -272,21 +305,21 @@ pub struct AnyHandle {
 
 /// The account holding `handle` of `system` or one of `extra` (normalized), if any.
 fn held(
-    tx: &Tx,
+    w: &mut W<'_>,
     ws: &str,
     system: &System,
     handle: &str,
     extra: &[ExtraHandle],
 ) -> ApiResult<Option<String>> {
     if let Some(h) = normalize(system, handle)
-        && let Some(a) = repo::by_handle(tx, ws, &system.family, &h.handle)?
+        && let Some(a) = Accounts(w).by_handle(ws, &system.family, &h.handle)?
     {
         return Ok(Some(a));
     }
     for x in extra {
         let x = x.handle.trim();
         if !x.is_empty()
-            && let Some(a) = repo::by_handle(tx, ws, &system.family, x)?
+            && let Some(a) = Accounts(w).by_handle(ws, &system.family, x)?
         {
             return Ok(Some(a));
         }
@@ -307,7 +340,7 @@ pub(crate) struct Attach<'a> {
 /// account is that party's. Unknown systems and handles that do not normalize are skipped (`None`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn attach_handle(
-    tx: &Tx,
+    w: &mut W<'_>,
     ws: &str,
     actor: &str,
     party: &str,
@@ -316,7 +349,7 @@ pub(crate) fn attach_handle(
     extra: &[ExtraHandle],
     what: &Attach<'_>,
 ) -> ApiResult<Option<String>> {
-    let Some(system) = repo::system(tx, ws, system_id)? else {
+    let Some(system) = Systems(w).get(ws, system_id)? else {
         return Ok(None);
     };
     let Some(h) = normalize(&system, handle) else {
@@ -326,16 +359,20 @@ pub(crate) fn attach_handle(
         extra: extra.to_vec(),
         ..Hints::default()
     };
-    if let Some(id) = held(tx, ws, &system, handle, extra)? {
-        let a = repo::get(tx, &id)?.ok_or_else(|| ApiError::not_found("账号"))?;
-        if current_party(tx, &a.party_id)?.is_some_and(|p| p.id == party) {
-            repo::add_handle(tx, ws, &system.family, &h.handle, &a.id, None)?;
-            add_extra(tx, ws, &system, &a.id, &hints)?;
+    if let Some(id) = held(w, ws, &system, handle, extra)? {
+        let a = Accounts(w)
+            .get(&id)?
+            .ok_or_else(|| ApiError::not_found("账号"))?;
+        if w.contacts()
+            .current_party(&a.party_id)?
+            .is_some_and(|p| p.id == party)
+        {
+            Accounts(w).add_handle(ws, &system.family, &h.handle, &a.id, None)?;
+            add_extra(w, ws, &system, &a.id, &hints)?;
         }
         return Ok(Some(id));
     }
-    let a = repo::insert(
-        tx,
+    let a = Accounts(w).insert(
         ws,
         &NewAccount {
             system_id: system.id.clone(),
@@ -351,7 +388,7 @@ pub(crate) fn attach_handle(
             source_label: what.source_label.into(),
         },
     )?;
-    created(tx, ws, actor, &a, &system, &hints)?;
+    created(w, ws, actor, &a, &system, &hints)?;
     Ok(Some(a.id))
 }
 
@@ -370,68 +407,79 @@ pub fn identify_any(
     aliases: &[AnyHandle],
     hints: &Hints,
 ) -> ApiResult<Identified> {
-    if aliases.is_empty() {
-        return identify(tx, ws, actor, system_id, handle, hints);
-    }
-    svc::ensure_seeds(tx, ws)?;
-    let system = own_system(tx, ws, system_id)?;
-    normalize(&system, handle).ok_or_else(|| ApiError::invalid("handle"))?;
-    let source = hints.source.clone().unwrap_or_else(|| "identify".into());
-    let label = hints
-        .source_label
-        .clone()
-        .unwrap_or_else(|| svc::default_label(&source).into());
-    let kind = hints.kind.clone().unwrap_or_else(|| "personal".into());
-    let display_name = hints.display_name.clone().unwrap_or_default();
-    let what = Attach {
-        kind: &kind,
-        display_name: &display_name,
-        source: &source,
-        source_label: &label,
-    };
-    if held(tx, ws, &system, handle, &hints.extra)?.is_none() {
-        let mut found = None;
-        for a in aliases {
-            let Some(sys) = repo::system(tx, ws, &a.system)? else {
-                continue;
-            };
-            let Some(id) = held(tx, ws, &sys, &a.handle, &a.extra)? else {
-                continue;
-            };
-            let Some(acc) = repo::get(tx, &id)? else {
-                continue;
-            };
-            if let Some(p) = current_party(tx, &acc.party_id)?.filter(|p| p.status == "active") {
-                found = Some(p.id);
-                break;
+    tx.write(|w| {
+        if aliases.is_empty() {
+            return identify_handle(w, ws, actor, system_id, handle, hints);
+        }
+        svc::seed(w, ws)?;
+        let system = own_system(w, ws, system_id)?;
+        normalize(&system, handle).ok_or_else(|| ApiError::invalid("handle"))?;
+        let source = hints.source.clone().unwrap_or_else(|| "identify".into());
+        let label = hints
+            .source_label
+            .clone()
+            .unwrap_or_else(|| svc::default_label(&source).into());
+        let kind = hints.kind.clone().unwrap_or_else(|| "personal".into());
+        let display_name = hints.display_name.clone().unwrap_or_default();
+        let what = Attach {
+            kind: &kind,
+            display_name: &display_name,
+            source: &source,
+            source_label: &label,
+        };
+        if held(w, ws, &system, handle, &hints.extra)?.is_none() {
+            let mut found = None;
+            for a in aliases {
+                let Some(sys) = Systems(w).get(ws, &a.system)? else {
+                    continue;
+                };
+                let Some(id) = held(w, ws, &sys, &a.handle, &a.extra)? else {
+                    continue;
+                };
+                let Some(acc) = Accounts(w).get(&id)? else {
+                    continue;
+                };
+                if let Some(p) = w
+                    .contacts()
+                    .current_party(&acc.party_id)?
+                    .filter(|p| p.status == "active")
+                {
+                    found = Some(p.id);
+                    break;
+                }
+            }
+            if let Some(p) = found {
+                attach_handle(w, ws, actor, &p, system_id, handle, &hints.extra, &what)?;
             }
         }
-        if let Some(p) = found {
-            attach_handle(tx, ws, actor, &p, system_id, handle, &hints.extra, &what)?;
+        let id = identify_handle(w, ws, actor, system_id, handle, hints)?;
+        for a in aliases {
+            attach_handle(
+                w,
+                ws,
+                actor,
+                &id.party_id,
+                &a.system,
+                &a.handle,
+                &a.extra,
+                &what,
+            )?;
         }
-    }
-    let id = identify(tx, ws, actor, system_id, handle, hints)?;
-    for a in aliases {
-        attach_handle(
-            tx,
-            ws,
-            actor,
-            &id.party_id,
-            &a.system,
-            &a.handle,
-            &a.extra,
-            &what,
-        )?;
-    }
-    Ok(id)
+        Ok(id)
+    })
 }
 
-fn add_extra(tx: &Tx, ws: &str, system: &System, account: &str, hints: &Hints) -> ApiResult<()> {
+fn add_extra(
+    w: &mut W<'_>,
+    ws: &str,
+    system: &System,
+    account: &str,
+    hints: &Hints,
+) -> ApiResult<()> {
     for x in &hints.extra {
         let handle = x.handle.trim();
         if !handle.is_empty() {
-            repo::add_handle(
-                tx,
+            Accounts(w).add_handle(
                 ws,
                 &system.family,
                 handle,
@@ -445,30 +493,29 @@ fn add_extra(tx: &Tx, ws: &str, system: &System, account: &str, hints: &Hints) -
 
 /// The bookkeeping after a new account: extra handles, audit, events.
 fn created(
-    tx: &Tx,
+    w: &mut W<'_>,
     ws: &str,
     actor: &str,
     a: &Account,
     system: &System,
     hints: &Hints,
 ) -> ApiResult<()> {
-    add_extra(tx, ws, system, &a.id, hints)?;
-    base::audit(
-        tx,
+    add_extra(w, ws, system, &a.id, hints)?;
+    w.audit(
         ws,
         actor,
         "account.create",
         &a.id,
         &json!({ "system": a.system_id, "party": a.party_id, "source": a.source }),
     )?;
-    event(tx, ws, &a.id);
-    party_event(tx, ws, &a.party_id);
+    w.emit(svc::account_event(ws, &a.id));
+    w.emit(svc::party_changed(ws, &a.party_id));
     Ok(())
 }
 
 /// Step 2: the one owner of an email with the same local part, if the rule allows it.
-fn by_prefix(tx: &Tx, ws: &str, email: &str, org: Option<&str>) -> ApiResult<Option<Party>> {
-    let Some(rule) = repo::prefix_rule(tx, ws)?.filter(|r| r.enabled) else {
+fn by_prefix(w: &mut W<'_>, ws: &str, email: &str, org: Option<&str>) -> ApiResult<Option<Party>> {
+    let Some(rule) = MatchRules(w).prefix(ws)?.filter(|r| r.enabled) else {
         return Ok(None);
     };
     let Some((local, _)) = email.split_once('@') else {
@@ -482,17 +529,20 @@ fn by_prefix(tx: &Tx, ws: &str, email: &str, org: Option<&str>) -> ApiResult<Opt
         return Ok(None);
     }
     let mut owners: Vec<Party> = Vec::new();
-    for (handle, account) in repo::emails_with_local(tx, ws, local)? {
+    for (handle, account) in Accounts(w).emails_with_local(ws, local)? {
         if cfg.same_org_only {
             let domain = handle.split_once('@').map(|(_, d)| d).unwrap_or("");
-            if people::domain_owner(tx, ws, domain)?.as_deref() != org {
+            if w.contacts().domain_owner(ws, domain)?.as_deref() != org {
                 continue;
             }
         }
-        let Some(a) = repo::get(tx, &account)? else {
+        let Some(a) = Accounts(w).get(&account)? else {
             continue;
         };
-        if let Some(p) = current_party(tx, &a.party_id)?.filter(|p| p.status == "active")
+        if let Some(p) = w
+            .contacts()
+            .current_party(&a.party_id)?
+            .filter(|p| p.status == "active")
             && !owners.iter().any(|o| o.id == p.id)
         {
             owners.push(p);
@@ -509,7 +559,7 @@ fn by_prefix(tx: &Tx, ws: &str, email: &str, org: Option<&str>) -> ApiResult<Opt
 /// who works at the handle's organization or at the organization of the signature. Returns it and the
 /// reason shown on the proposal. Ambiguous clues (two such contacts) propose nothing.
 fn same_name(
-    tx: &Tx,
+    w: &mut W<'_>,
     viewer: &Viewer,
     display_name: &str,
     org: Option<&str>,
@@ -524,8 +574,7 @@ fn same_name(
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    let named = people::contacts(
-        tx,
+    let named = w.contacts().contacts(
         viewer,
         &people::ContactQuery {
             q: Some(display_name.to_string()),
@@ -541,7 +590,7 @@ fn same_name(
             continue;
         }
         let mut why = None;
-        for j in contacts::jobs(tx, viewer, &p.id)?
+        for j in contacts::jobs_in(w, viewer, &p.id)?
             .into_iter()
             .filter(|j| j.to.is_none())
         {
@@ -553,7 +602,9 @@ fn same_name(
                 break;
             }
             if let Some(s) = sig {
-                let aliases = people::get(tx, &j.org_id)?
+                let aliases = w
+                    .contacts()
+                    .party(&j.org_id)?
                     .map(|o| o.aliases)
                     .unwrap_or_default();
                 if j.org_name.to_lowercase() == s.to_lowercase()
@@ -576,7 +627,7 @@ fn same_name(
 
 /// A new `unconfirmed` contact, with a `works_at` link when the organization is known.
 fn new_contact(
-    tx: &Tx,
+    w: &mut W<'_>,
     ws: &str,
     actor: &str,
     name: &str,
@@ -588,7 +639,7 @@ fn new_contact(
     p.contact_kind = Some("unconfirmed".into());
     p.source = "identify".into();
     p.visibility = hints.visibility.clone().unwrap_or(Visibility::Workspace);
-    let p = people::insert(tx, ws, &p)?;
+    let p = w.contacts().insert(ws, &p)?;
     if let Some(o) = org {
         let mut l = NewLink::new(
             ObjRef::new(PARTY, &p.id),
@@ -597,17 +648,16 @@ fn new_contact(
             "infer",
         );
         l.props = json!({ "title": null, "dept": null, "from": null, "to": null });
-        links::add(tx, ws, &l)?;
+        links::Links(w).add(ws, &l)?;
     }
-    base::audit(
-        tx,
+    w.audit(
         ws,
         actor,
         "party.create",
         &p.id,
         &json!({ "type": "contact", "unconfirmed": true }),
     )?;
-    party_event(tx, ws, &p.id);
+    w.emit(svc::party_changed(ws, &p.id));
     Ok(p)
 }
 
@@ -626,7 +676,20 @@ pub fn propose_if_me(
     name: Option<&str>,
     handles: &[&str],
 ) -> ApiResult<Option<String>> {
-    let (Some(me), Some(from)) = (people::get(tx, me)?, current_party(tx, party)?) else {
+    tx.write(|w| propose_if_me_in(w, ws, me, party, account, name, handles))
+}
+
+fn propose_if_me_in(
+    w: &mut W<'_>,
+    ws: &str,
+    me: &str,
+    party: &str,
+    account: &str,
+    name: Option<&str>,
+    handles: &[&str],
+) -> ApiResult<Option<String>> {
+    let (Some(me), Some(from)) = (w.contacts().party(me)?, w.contacts().current_party(party)?)
+    else {
         return Ok(None);
     };
     if !me.is_me()
@@ -636,7 +699,7 @@ pub fn propose_if_me(
     {
         return Ok(None);
     }
-    let Some(a) = repo::get(tx, account)? else {
+    let Some(a) = Accounts(w).get(account)? else {
         return Ok(None);
     };
     let emails: Vec<String> = handles
@@ -650,15 +713,9 @@ pub fn propose_if_me(
     if emails.is_empty() {
         return Ok(None);
     }
-    let user_email: Option<String> = tx
-        .query_row(
-            "SELECT email FROM users WHERE id = ?",
-            [me.user_id.as_deref().unwrap_or_default()],
-            |r| r.get::<_, Option<String>>(0),
-        )
-        .optional()?
-        .flatten()
-        .map(|e| e.trim().to_lowercase());
+    let user_email = steve_store::UserRows(w)
+        .email(me.user_id.as_deref().unwrap_or_default())?
+        .map(|email| email.trim().to_lowercase());
     let aliases: Vec<String> = me.aliases.iter().map(|x| x.trim().to_lowercase()).collect();
     let reason = if let Some(e) = emails
         .iter()
@@ -671,13 +728,10 @@ pub fn propose_if_me(
             && (me.name.trim().to_lowercase() == key || aliases.contains(&key));
         let mut domains: Vec<String> = Vec::new();
         if same_name {
-            let mut st = tx.prepare_cached(
-                "WITH RECURSIVE ids(id) AS (SELECT ?2 UNION SELECT p.id FROM parties p JOIN ids ON p.merged_into = ids.id)
-                 SELECT a.handle FROM accounts a WHERE a.workspace_id = ?1 AND a.family = 'email' AND a.party_id IN (SELECT id FROM ids)",
-            )?;
-            for h in st.query_map(rusqlite::params![ws, me.id], |r| r.get::<_, String>(0))? {
-                if let Some((_, d)) = h?.trim().to_lowercase().split_once('@') {
-                    domains.push(d.to_string());
+            let owners = w.contacts().merged_party_ids(&me.id)?;
+            for handle in Accounts(w).primary_emails(ws, &owners)? {
+                if let Some((_, domain)) = handle.trim().to_lowercase().split_once('@') {
+                    domains.push(domain.to_owned());
                 }
             }
             if let Some(d) = user_email.as_ref().and_then(|e| e.split_once('@')) {
@@ -698,7 +752,7 @@ pub fn propose_if_me(
             })
     };
     match reason {
-        Some(r) => propose(tx, ws, &from, &me, &a, &r),
+        Some(r) => propose(w, ws, &from, &me, &a, &r),
         None => Ok(None),
     }
 }
@@ -706,44 +760,41 @@ pub fn propose_if_me(
 /// Writes the merge proposal and opens its decision; the `party_merge` handler (P4)
 /// acts on the answer. A pair rejected before is not proposed again.
 fn propose(
-    tx: &Tx,
+    w: &mut W<'_>,
     ws: &str,
     from: &Party,
     into: &Party,
     a: &Account,
     reason: &str,
 ) -> ApiResult<Option<String>> {
-    if repo::pair_rejected(tx, ws, &from.id, &into.id)? {
+    let mut proposals = MergeProposals(w);
+    if proposals.rejected(ws, &from.id, &into.id)? {
         return Ok(None);
     }
     let id = uid("mp");
-    if !repo::proposal_insert(
-        tx,
-        &id,
-        ws,
-        &from.id,
-        &into.id,
-        &a.id,
+    if !proposals.insert(&NewMergeProposal {
+        id: &id,
+        workspace: ws,
+        from: &from.id,
+        into: &into.id,
+        account: &a.id,
         reason,
-        PROPOSAL_CONFIDENCE,
-    )? {
+        confidence: PROPOSAL_CONFIDENCE,
+    })? {
         return Ok(None);
     }
-    let d = base::decisions::open(
-        tx,
-        &NewDecision {
-            workspace_id: ws.into(),
-            kind: DecisionKind::Propose.code().into(),
-            subject_type: "party_merge".into(),
-            subject_id: id.clone(),
-            item_id: None,
-            session_id: None,
-            question: format!("{} 可能是 {}", a.handle_display, into.name),
-            draft: Some(reason.into()),
-            options: Some(vec!["merge".into(), "not_same".into()]),
-            requested_by: "steve".into(),
-        },
-    )?;
-    repo::proposal_set_decision(tx, &id, &d.id)?;
+    let d = DecisionRows(w).open(&NewDecision {
+        workspace_id: ws.into(),
+        kind: DecisionKind::Propose.code().into(),
+        subject_type: "party_merge".into(),
+        subject_id: id.clone(),
+        item_id: None,
+        session_id: None,
+        question: format!("{} 可能是 {}", a.handle_display, into.name),
+        draft: Some(reason.into()),
+        options: Some(vec!["merge".into(), "not_same".into()]),
+        requested_by: "steve".into(),
+    })?;
+    MergeProposals(w).set_decision(&id, &d.id)?;
     Ok(Some(id))
 }

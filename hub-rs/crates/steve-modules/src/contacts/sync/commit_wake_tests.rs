@@ -7,6 +7,7 @@ use std::task::Poll;
 use std::time::Duration;
 use steve_runtime::testkit::eventually_sync;
 use steve_runtime::{Clock, FakeClock};
+use steve_store::testkit::modules::directory as fixture;
 
 struct CountedClock {
     time: Arc<FakeClock>,
@@ -33,7 +34,7 @@ impl Env {
     fn new() -> Self {
         let env = TestEnv::new(crate::accounts::register);
         env.clock.set(1000);
-        env.store().with_conn(|c| {c.execute("INSERT OR REPLACE INTO settings(workspace_id,key,value,updated) SELECT id,'tz','\"UTC\"',1000 FROM workspaces",[])?;Ok(())}).unwrap();
+        fixture::set_workspace_clocks(env.store(), "UTC").unwrap();
         let adapter = Arc::new(FakeDirectory::new(
             "feishu",
             Snapshot {
@@ -75,17 +76,26 @@ impl Env {
     }
     fn connection(&self, readable: bool) -> String {
         let id = uid("directory");
-        self.env.store().transaction(|tx| -> ApiResult<()> {
-            let party=crate::contacts::service::ensure_self_org(tx,WS,ME)?;
-            let account=crate::accounts::repo::insert(tx,WS,&crate::accounts::repo::NewAccount {
-                system_id:"feishu_app".into(),family:"feishu_app".into(),party_id:party.id,
-                kind:"app_bot".into(),handle:id.clone(),handle_display:id.clone(),display_name:id.clone(),
-                verified:true,confidence:1.0,source:"test".into(),source_label:"test".into(),
-            })?;
-            tx.execute("INSERT INTO connections(id,workspace_id,account_id,adapter,auth,caps,created_by,created,updated) VALUES(?1,?2,?3,'feishu','credential',?4,?5,1,1)",
-                rusqlite::params![id,WS,account.id,serde_json::to_string(&if readable {vec!["directory.read"]} else {vec![]}).unwrap(),ME])?;
-            Ok(())
-        }).unwrap();
+        self.env
+            .store()
+            .write(|w| -> ApiResult<()> {
+                crate::contacts::service::ensure_self_org_in(w, WS, ME)?;
+                Ok(())
+            })
+            .unwrap();
+        fixture::seed_connection(
+            self.env.store(),
+            WS,
+            &id,
+            &format!("acc_{id}"),
+            &id,
+            if readable {
+                r#"["directory.read"]"#
+            } else {
+                "[]"
+            },
+        )
+        .unwrap();
         id
     }
     async fn start(&self) -> (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>) {
@@ -127,16 +137,7 @@ async fn real_connection_and_permission_commits_schedule_the_five_second_sync() 
             })
             .await;
             assert!(lock(&e.sync.state).pending.is_empty());
-            e.env
-                .store()
-                .with_conn(|c| {
-                    c.execute(
-                        "UPDATE connections SET caps='[\"directory.read\"]' WHERE id=?",
-                        [&id],
-                    )?;
-                    Ok(())
-                })
-                .unwrap();
+            fixture::allow_directory(e.env.store(), &id).unwrap();
         }
         eventually_sync("committed directory connection is due soon", || {
             lock(&e.sync.state).pending.get(&(WS.into(), id.clone())) == Some(&6000)
@@ -215,16 +216,7 @@ async fn workspace_timezone_commit_replans_without_a_directory_event_or_job() {
     lock(&e.sync.state).next_catch_up = 100_000_000;
     let (source, watcher) = e.start().await;
     assert_eq!(lock(&e.clock.waits).last(), Some(&Duration::from_secs(15)));
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE settings SET value='\"Asia/Tokyo\"' WHERE key='tz'",
-                [],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::set_workspace_clocks(e.env.store(), "Asia/Tokyo").unwrap();
     eventually_sync("timezone fact recomputes the daily deadline", || {
         lock(&e.clock.waits).last() == Some(&steve_runtime::due::FALLBACK)
     })
@@ -266,16 +258,7 @@ async fn material_commits_extend_their_quiet_window_but_preserve_explicit_pendin
     })
     .await;
     e.env.clock.advance(1000);
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE connections SET revision=revision+1 WHERE id=?",
-                [&id],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::bump_connection_revision(e.env.store(), &id).unwrap();
     eventually_sync(
         "material commit extends its own five-second quiet period",
         || lock(&e.sync.state).pending.get(&key) == Some(&7000),
@@ -286,20 +269,11 @@ async fn material_commits_extend_their_quiet_window_but_preserve_explicit_pendin
         lock(&e.sync.state).pending.get(&key),
         Some(&(2000 + DEBOUNCE_MS))
     );
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE connections SET revision=revision+1 WHERE id=?",
-                [&id],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::bump_connection_revision(e.env.store(), &id).unwrap();
     let signature = e
         .env
         .store()
-        .reader(|c| crate::accounts::connections::repo::change_signature(c, &id))
+        .read(|c| crate::accounts::connections::repo::change_signature(c, &id))
         .unwrap()
         .unwrap();
     eventually_sync("new connection fact is observed", || {
@@ -326,16 +300,7 @@ async fn workspace_commits_requery_and_cancelling_the_watch_releases_its_subscri
     let e = Env::new();
     let (source, watcher) = e.start().await;
     let before = lock(&e.clock.waits).len();
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE workspaces SET name='changed workspace' WHERE id=?",
-                [WS],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::rename_workspace(e.env.store(), WS, "changed workspace").unwrap();
     eventually_sync(
         "workspace commit makes the source prepare a new wait",
         || lock(&e.clock.waits).len() > before,
@@ -348,16 +313,7 @@ async fn workspace_commits_requery_and_cancelling_the_watch_releases_its_subscri
     assert!(watcher.await.unwrap_err().is_cancelled());
     let waits = lock(&e.clock.waits).len();
     let reads = e.clock.reads.load(Ordering::SeqCst);
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE workspaces SET name='after watch stopped' WHERE id=?",
-                [WS],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::rename_workspace(e.env.store(), WS, "after watch stopped").unwrap();
     // This is a paused Tokio negative window: a leaked forwarding task and the blocking
     // requery it wakes must get polled before the absence of another wait is asserted.
     steve_runtime::testkit::quiet_for(Duration::from_millis(20)).await;
@@ -396,13 +352,7 @@ async fn one_unreadable_connection_signature_does_not_block_other_due_connection
     let due = DirectoryDue(e.sync.clone());
     due.next_due().await.unwrap();
     let bad = e.connection(false);
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute("UPDATE connections SET config='{' WHERE id=?", [&bad])?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::damage_config(e.env.store(), &bad).unwrap();
     let good = e.connection(true);
     assert_eq!(due.next_due().await.unwrap(), Some(6000));
     let state = lock(&e.sync.state);

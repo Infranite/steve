@@ -612,12 +612,13 @@ fn cut(s: &str, max: usize) -> String {
 impl TimelineSource for MessageTimeline {
     fn entries(
         &self,
-        c: &Connection,
+        store: &steve_store::Store,
         viewer: &Viewer,
         party: &str,
         before: Option<i64>,
         limit: usize,
     ) -> ApiResult<Vec<TimelineEntry>> {
+        store.reader(|c| {
         let sql = format!("WITH RECURSIVE ids(id) AS (SELECT ?1 UNION SELECT p.id FROM parties p JOIN ids ON p.merged_into = ids.id)
              SELECT m.space_id, s.name, m.text, m.created FROM chan_messages m JOIN spaces s ON s.id = m.space_id
               WHERE m.workspace_id = ?2 AND m.direction = 'in' AND m.sender_party_id IN (SELECT id FROM ids)
@@ -660,6 +661,7 @@ impl TimelineSource for MessageTimeline {
         Ok(rows
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(StoreError::from)?)
+        })
     }
 }
 

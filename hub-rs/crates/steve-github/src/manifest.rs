@@ -185,7 +185,7 @@ impl GitHub {
         self.vault_ready(&who.ws).map_err(ApiError::rule)?;
         let ws_name = self
             .store()
-            .reader(|c| steve_modules::contacts::repo::workspace_name(c, &who.ws))
+            .read(|r| steve_store::Workspaces(r).name(&who.ws))
             .map_err(ApiError::from)?
             .ok_or_else(|| ApiError::not_found("工作空间"))?;
         let public = self.public_url();

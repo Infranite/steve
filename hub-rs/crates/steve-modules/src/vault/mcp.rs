@@ -7,10 +7,10 @@ use std::sync::LazyLock;
 
 use serde_json::{Map, Value, json};
 
-use super::items::repo as irepo;
 use super::r#use::{END, NO_SUCH, SecretUses, UseCx, UseOutcome, UseRequest};
 use super::{VaultError, VaultResult};
 use crate::ApiError;
+use steve_store::vault_items::{ItemFilter, VaultItems};
 
 pub const LIST: &str = "steve_secret_list";
 pub const USE: &str = "steve_secret_use";
@@ -204,17 +204,18 @@ pub async fn call(
 fn list(uses: &SecretUses, cx: &UseCx, query: Option<&str>) -> VaultResult<String> {
     let v = uses.vault();
     v.ensure_vaults(&cx.ws, &cx.user)?;
-    let f = irepo::ItemFilter {
+    let f = ItemFilter {
         q: query
             .map(str::trim)
             .filter(|q| !q.is_empty())
             .map(String::from),
         ..Default::default()
     };
-    let lines = v.store().reader(|c| {
+    let lines = v.read(|c| {
         let mut lines = Vec::new();
-        for i in irepo::list_items(c, &cx.ws, &cx.user, &f)? {
-            let labels: Vec<String> = irepo::fields(c, &i.id)?
+        for i in VaultItems(c).list(&cx.ws, &cx.user, &f)? {
+            let labels: Vec<String> = VaultItems(c)
+                .fields(&i.id)?
                 .into_iter()
                 .map(|f| f.label)
                 .collect();

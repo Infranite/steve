@@ -129,12 +129,15 @@ pub async fn call(cal: &Calendar, cx: &McpCx, name: &str, a: &Value) -> Result<S
             let a: RangeArgs = args(a)?;
             cal.modules()
                 .blocking(move |m| {
-                    m.store.reader(|c| {
-                        let tz = query::user_tz(c, &ws, &user)?;
-                        let r = query::range(a.from.as_deref(), a.to.as_deref(), tz, m.clock.now())
-                            .map_err(ApiError::Rule)?;
-                        query::agenda(c, &ws, &user, &r, tz)
-                    })
+                    m.store.read(|r| {
+                        Ok(m.store.reader(|c| {
+                            let tz = query::user_tz(r, &ws, &user)?;
+                            let r =
+                                query::range(a.from.as_deref(), a.to.as_deref(), tz, m.clock.now())
+                                    .map_err(ApiError::Rule)?;
+                            query::agenda(c, &ws, &user, &r, tz)
+                        }))
+                    })?
                 })
                 .await
                 .map_err(text)?
@@ -143,24 +146,34 @@ pub async fn call(cal: &Calendar, cx: &McpCx, name: &str, a: &Value) -> Result<S
             let a: SearchArgs = args(a)?;
             cal.modules()
                 .blocking(move |m| {
-                    m.store.reader(|c| {
-                        let now = m.clock.now();
-                        let tz = query::user_tz(c, &ws, &user)?;
-                        let from = match &a.from {
-                            Some(f) => query::parse_time(f, tz, now, false),
-                            None => Ok(now - s.past_days * 86_400_000),
-                        }
-                        .map_err(ApiError::Rule)?;
-                        let to = match &a.to {
-                            Some(t) => query::parse_time(t, tz, now, true),
-                            None => Ok(now + s.future_days * 86_400_000),
-                        }
-                        .map_err(ApiError::Rule)?;
-                        if to <= from {
-                            return Err(ApiError::Rule("结束时间要晚于开始时间".into()));
-                        }
-                        query::search(c, &ws, &user, &a.query, &Range::new(from, to, tz), tz, 50)
-                    })
+                    m.store.read(|r| {
+                        Ok(m.store.reader(|c| {
+                            let now = m.clock.now();
+                            let tz = query::user_tz(r, &ws, &user)?;
+                            let from = match &a.from {
+                                Some(f) => query::parse_time(f, tz, now, false),
+                                None => Ok(now - s.past_days * 86_400_000),
+                            }
+                            .map_err(ApiError::Rule)?;
+                            let to = match &a.to {
+                                Some(t) => query::parse_time(t, tz, now, true),
+                                None => Ok(now + s.future_days * 86_400_000),
+                            }
+                            .map_err(ApiError::Rule)?;
+                            if to <= from {
+                                return Err(ApiError::Rule("结束时间要晚于开始时间".into()));
+                            }
+                            query::search(
+                                c,
+                                &ws,
+                                &user,
+                                &a.query,
+                                &Range::new(from, to, tz),
+                                tz,
+                                50,
+                            )
+                        }))
+                    })?
                 })
                 .await
                 .map_err(text)?
@@ -173,25 +186,38 @@ pub async fn call(cal: &Calendar, cx: &McpCx, name: &str, a: &Value) -> Result<S
             let a: FindArgs = args(a)?;
             cal.modules()
                 .blocking(move |m| {
-                    m.store.reader(|c| {
-                        let now = m.clock.now();
-                        let tz = query::user_tz(c, &ws, &user)?;
-                        let to_default = query::local(now + 7 * 86_400_000, tz).replace(' ', "T");
-                        let r = query::range(
-                            Some(a.from.as_deref().unwrap_or("now")),
-                            Some(a.to.as_deref().unwrap_or(&to_default)),
-                            tz,
-                            now,
-                        )
-                        .map_err(ApiError::Rule)?;
-                        let people = a
-                            .people
-                            .iter()
-                            .map(|p| query::person(c, &ws, p))
-                            .collect::<Result<Vec<_>, _>>()
+                    m.store.read(|r| {
+                        Ok(m.store.reader(|c| {
+                            let now = m.clock.now();
+                            let tz = query::user_tz(r, &ws, &user)?;
+                            let to_default =
+                                query::local(now + 7 * 86_400_000, tz).replace(' ', "T");
+                            let r = query::range(
+                                Some(a.from.as_deref().unwrap_or("now")),
+                                Some(a.to.as_deref().unwrap_or(&to_default)),
+                                tz,
+                                now,
+                            )
                             .map_err(ApiError::Rule)?;
-                        query::find_time(c, &ws, &user, &people, a.duration_min, &r, tz, now, &s)
-                    })
+                            let people = a
+                                .people
+                                .iter()
+                                .map(|p| query::person(c, &ws, p))
+                                .collect::<Result<Vec<_>, _>>()
+                                .map_err(ApiError::Rule)?;
+                            query::find_time(
+                                c,
+                                &ws,
+                                &user,
+                                &people,
+                                a.duration_min,
+                                &r,
+                                tz,
+                                now,
+                                &s,
+                            )
+                        }))
+                    })?
                 })
                 .await
                 .map_err(text)?
@@ -209,10 +235,12 @@ impl Calendar {
         let (row, tz) = self
             .modules()
             .blocking(move |m| {
-                m.store.reader(|c| {
-                    let tz = query::user_tz(c, &w2, &u2)?;
-                    Ok((query::event(c, &w2, &u2, &i2, tz)?.0, tz))
-                })
+                m.store.read(|r| {
+                    Ok(m.store.reader(|c| {
+                        let tz = query::user_tz(r, &w2, &u2)?;
+                        Ok((query::event(c, &w2, &u2, &i2, tz)?.0, tz))
+                    }))
+                })?
             })
             .await?;
         let cal = self
@@ -266,6 +294,9 @@ impl Calendar {
             let me = me_party(tx, ws, user)?;
             let mut people = People {
                 c: tx,
+                zone: tx.write(|w| {
+                    crate::sync::tz_of(w, &cal.workspace_id, &cal.owner_user, cal.tz.as_deref())
+                })?,
                 ws,
                 me: me.as_deref(),
                 cache: HashMap::new(),

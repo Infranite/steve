@@ -270,3 +270,27 @@ impl<C: Read> Contacts<'_, C> {
         ))
     }
 }
+
+impl<C: Read> Contacts<'_, C> {
+    pub fn visible_parties<'a>(
+        &mut self,
+        viewer: &crate::base::Viewer,
+        ids: impl IntoIterator<Item = &'a str>,
+    ) -> Result<std::collections::HashSet<String>> {
+        let ids: Vec<_> = ids.into_iter().collect();
+        let mut visible = std::collections::HashSet::new();
+        for batch in ids.chunks(500) {
+            let mut q = Query::select();
+            q.from("parties")
+                .column("id")
+                .and_where(Expr::col("workspace_id").eq(viewer.ws.as_str()))
+                .and_where(Expr::col("status").ne("deleted"))
+                .and_where(Expr::col("id").is_in(batch.iter().copied()));
+            if viewer.is_service() {
+                q.and_where(Expr::col("visibility").eq("workspace"));
+            }
+            visible.extend(self.0.all(&q, |row| row.get::<String>(0))?);
+        }
+        Ok(visible)
+    }
+}

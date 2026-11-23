@@ -350,8 +350,8 @@ pub fn unknown_block() -> String {
 
 /// The block for answering `plan`'s message: [`build`] rendered, or, when its facts can't be told,
 /// logged and [`unknown_block`].
-pub fn render_for(c: &Connection, plan: &Plan) -> String {
-    match build(c, plan) {
+pub fn render_for(c: &Connection, r: &mut impl steve_store::Read, plan: &Plan) -> String {
+    match build(c, r, plan) {
         Ok(x) => x.render(),
         Err(e) => {
             tracing::warn!(message = %plan.message_id, "identity block not built, identity unknown: {e}");
@@ -361,7 +361,11 @@ pub fn render_for(c: &Connection, plan: &Plan) -> String {
 }
 
 /// The identity block's facts for answering `plan`'s message.
-pub fn build(c: &Connection, plan: &Plan) -> ChannelResult<ImContext> {
+pub fn build(
+    c: &Connection,
+    r: &mut impl steve_store::Read,
+    plan: &Plan,
+) -> ChannelResult<ImContext> {
     let ws = &plan.ws;
     let space = spaces::get(c, &plan.space_id)?
         .filter(|s| s.workspace_id == *ws)
@@ -387,8 +391,8 @@ pub fn build(c: &Connection, plan: &Plan) -> ChannelResult<ImContext> {
     // on your own account the reply is that account's user speaking: when who that is can't be
     // told, there is no block ([`unknown_block`] instead), never the workspace owner's name in its place
     let owner = match plan.mode {
-        Mode::Own => crate::compose::own_name(c, ws, &plan.connection_id, &space.id)?,
-        Mode::Bot => personas::owner_name_for_space(c, ws, &space.id)?,
+        Mode::Own => crate::compose::own_name(c, r, ws, &plan.connection_id, &space.id)?,
+        Mode::Bot => personas::owner_name_for_space(c, r, ws, &space.id)?,
     };
     let owner_only = crate::conversations::owner_only(c, ws, &space, &plan.connection_id)?;
     let AudienceFacts {

@@ -78,15 +78,9 @@ impl From<ApiError> for VaultError {
     }
 }
 
-impl From<steve_store::StoreError> for VaultError {
-    fn from(e: steve_store::StoreError) -> Self {
-        Self::Api(e.into())
-    }
-}
-
-impl From<rusqlite::Error> for VaultError {
-    fn from(e: rusqlite::Error) -> Self {
-        Self::Api(e.into())
+impl<E: Into<steve_store::StoreError>> From<E> for VaultError {
+    fn from(error: E) -> Self {
+        Self::Api(ApiError::from(error))
     }
 }
 

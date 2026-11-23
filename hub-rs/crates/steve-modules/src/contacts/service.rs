@@ -7,9 +7,10 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value, json};
-use steve_store::base::links::{self, LinkKey, NewLink};
-use steve_store::base::{self, Level, ObjRef, Viewer, Visibility, tags};
-use steve_store::{Link, Tx};
+use steve_store::base::links::{self, LinkKey, Links, NewLink};
+use steve_store::base::{Level, ObjRef, Viewer, Visibility};
+use steve_store::knowledge::Memories;
+use steve_store::{Attributes, Contacts, Link, Read, TagRows, Teams, Tx, W};
 
 use super::Ports;
 use super::repo::{
@@ -54,21 +55,6 @@ fn month_at(zone: steve_runtime::tz::Zone, now: i64) -> String {
 
 pub(crate) fn pref(id: &str) -> ObjRef {
     ObjRef::new(PARTY, id)
-}
-
-pub(crate) fn event(tx: &Tx, ws: &str, id: &str) {
-    tx.publish(steve_types::DomainEvent::from(
-        steve_types::PeopleEvent::Party {
-            id: {
-                let value: String = id.into();
-                steve_types::PartyId::from(value)
-            },
-            ws: {
-                let value: String = ws.into();
-                steve_types::WorkspaceId::from(value)
-            },
-        },
-    ));
 }
 
 // ---------------------------------------------------------------- shapes
@@ -221,83 +207,97 @@ pub enum PartyView {
 /// Creates “我” for the caller and the workspace's own organization when missing, and returns the
 /// caller's viewer and “我”.
 pub fn start(m: &Modules, who: &Caller) -> ApiResult<(Viewer, Party)> {
-    let found = m.store.reader(|c| {
-        Ok::<_, ApiError>((
-            repo::me_of(c, &who.ws, &who.me)?,
-            repo::self_org(c, &who.ws)?.is_some(),
+    let found = m.store.read(|r| {
+        let mut contacts = r.contacts();
+        Ok((
+            contacts.me(&who.ws, &who.me)?,
+            contacts.own_org(&who.ws)?.is_some(),
         ))
     })?;
     let me = match found {
         (Some(me), true) => me,
-        _ => m.store.transaction(|tx| ensure_base(tx, who))?,
+        _ => m.store.write(|w| ensure_base_in(w, who))?,
     };
     Ok((m.viewer(who)?, me))
 }
 
-/// [`start`]'s write part, also usable inside another transaction.
+/// [`start`]'s write part for callers that still own a legacy transaction.
 pub fn ensure_base(tx: &Tx, who: &Caller) -> ApiResult<Party> {
-    let me = match repo::me_of(tx, &who.ws, &who.me)? {
+    tx.write(|w| ensure_base_in(w, who))
+}
+
+pub(crate) fn ensure_base_in(w: &mut steve_store::W<'_>, who: &Caller) -> ApiResult<Party> {
+    let me = match w.contacts().me(&who.ws, &who.me)? {
         Some(me) => me,
         None => {
-            let name = repo::user_name(tx, &who.me)?.unwrap_or_else(|| "我".into());
+            let name = steve_store::UserRows(w)
+                .name(&who.me)?
+                .unwrap_or_else(|| "我".into());
             let mut p = NewParty::new("contact", &name, &who.me);
             p.contact_kind = Some("real".into());
             p.user_id = Some(who.me.clone());
             p.rels = vec!["me".into()];
-            let me = repo::insert(tx, &who.ws, &p)?;
-            base::audit(
-                tx,
+            let me = w.contacts().insert(&who.ws, &p)?;
+            w.audit(
                 &who.ws,
                 &who.me,
                 "party.create",
                 &me.id,
                 &json!({ "type": "contact", "me": true }),
             )?;
-            event(tx, &who.ws, &me.id);
-            // Steve's bots, personas, the Hub device and connections are “我”'s
-            super::stewards::seed_defaults(tx, &who.ws, &me)?;
+            w.emit(crate::accounts::service::party_changed(&who.ws, &me.id));
+            super::stewards::seed_defaults(w, &who.ws, &me)?;
             me
         }
     };
-    ensure_self_org(tx, &who.ws, &who.me)?;
+    ensure_self_org_in(w, &who.ws, &who.me)?;
     Ok(me)
 }
 
-/// The workspace's own organization (`org_kind = self`), created on first need with the workspace's name.
-/// At most one per workspace: callers hold the write transaction.
+/// The workspace's own organization, created on first need with the workspace's name.
 pub fn ensure_self_org(tx: &Tx, ws: &str, actor: &str) -> ApiResult<Party> {
-    if let Some(o) = repo::self_org(tx, ws)? {
+    tx.write(|w| ensure_self_org_in(w, ws, actor))
+}
+
+pub(crate) fn ensure_self_org_in(
+    w: &mut steve_store::W<'_>,
+    ws: &str,
+    actor: &str,
+) -> ApiResult<Party> {
+    if let Some(o) = w.contacts().own_org(ws)? {
         return Ok(o);
     }
-    let name = repo::workspace_name(tx, ws)?.unwrap_or_else(|| "本公司".into());
+    let name = steve_store::Workspaces(w)
+        .name(ws)?
+        .unwrap_or_else(|| "本公司".into());
     let mut p = NewParty::new("org", &name, actor);
     p.org_kind = Some("self".into());
-    let o = repo::insert(tx, ws, &p)?;
-    base::audit(
-        tx,
+    let o = w.contacts().insert(ws, &p)?;
+    w.audit(
         ws,
         actor,
         "party.create",
         &o.id,
         &json!({ "type": "org", "self": true }),
     )?;
-    event(tx, ws, &o.id);
+    w.emit(crate::accounts::service::party_changed(ws, &o.id));
     Ok(o)
 }
 
 /// `own_<x>`: a party of `kind` that exists, is in the viewer's workspace, visible, and not deleted;
 /// with `active`, also not merged (writes). `404 没有这个<noun>` otherwise.
-pub fn own_party(
-    c: &rusqlite::Connection,
+pub fn own_party_in(
+    r: &mut impl steve_store::Read,
     viewer: &Viewer,
     id: &str,
     kind: &str,
     noun: &str,
     active: bool,
 ) -> ApiResult<Party> {
-    let p = repo::get(c, id)?
+    let party = steve_store::Contacts::new(r)
+        .party(id)?
         .filter(|p| p.kind == kind && p.status != "deleted" && (!active || p.status == "active"));
-    own(p, viewer, noun)
+    own(party, viewer, noun)
 }
 
 /// `me` in a path means “我”.
@@ -307,13 +307,9 @@ fn resolve<'a>(id: &'a str, me: &'a Party) -> &'a str {
 
 /// `visibility` of a body: `team:<id>` must name a team of the workspace; `space:` needs the channels
 /// module, which is not installed with this slice.
-pub(crate) fn check_visibility(
-    c: &rusqlite::Connection,
-    ws: &str,
-    v: &Visibility,
-) -> ApiResult<()> {
+pub(crate) fn check_visibility(c: &mut impl Read, ws: &str, v: &Visibility) -> ApiResult<()> {
     match v {
-        Visibility::Team(id) if !repo::team_exists(c, ws, id)? => Err(ApiError::not_found("团队")),
+        Visibility::Team(id) if !Teams(c).exists(ws, id)? => Err(ApiError::not_found("团队")),
         Visibility::Space(_) => Err(ApiError::invalid("visibility")),
         _ => Ok(()),
     }
@@ -341,28 +337,41 @@ pub(crate) fn revise(
     after: Value,
     author: &str,
 ) -> ApiResult<()> {
+    tx.write(|w| revise_in(w, p, patch, before, after, author))
+}
+
+pub(crate) fn revise_in(
+    w: &mut steve_store::W<'_>,
+    p: &Party,
+    patch: &PartyPatch,
+    before: Value,
+    after: Value,
+    author: &str,
+) -> ApiResult<()> {
     let version = p.revision + 1;
-    base::revision(
-        tx,
+    steve_store::Revisions(w).append(
         &p.workspace_id,
         PARTY,
         &p.id,
         version,
-        &before,
-        &after,
+        &json!({ "before": before, "after": after }),
         author,
     )?;
-    repo::update(tx, &p.id, patch, Some(version))?;
+    w.contacts().update(&p.id, patch, Some(version))?;
     Ok(())
 }
 
 // ---------------------------------------------------------------- building the shapes
 
-fn job_of(c: &rusqlite::Connection, viewer: &Viewer, l: &Link) -> ApiResult<Option<Job>> {
+fn job_of(
+    viewer: &Viewer,
+    l: &Link,
+    party: &mut impl FnMut(&str) -> steve_store::Result<Option<Party>>,
+) -> ApiResult<Option<Job>> {
     if l.object_type != PARTY {
         return Ok(None);
     }
-    let Some(o) = repo::get(c, &l.object_id)? else {
+    let Some(o) = party(&l.object_id)? else {
         return Ok(None);
     };
     if o.workspace_id != viewer.ws || !viewer.sees(&o.visibility, &o.created_by) {
@@ -381,8 +390,20 @@ fn job_of(c: &rusqlite::Connection, viewer: &Viewer, l: &Link) -> ApiResult<Opti
 }
 
 /// Jobs of a contact: current ones first, each group by `from` descending (unknown last), then newest link.
-pub fn jobs(c: &rusqlite::Connection, viewer: &Viewer, contact: &str) -> ApiResult<Vec<Job>> {
-    let mut ls = links::from(c, &viewer.ws, &pref(contact), Some("works_at"))?;
+pub fn jobs_in(
+    r: &mut impl steve_store::Read,
+    viewer: &Viewer,
+    contact: &str,
+) -> ApiResult<Vec<Job>> {
+    let links = links::Links(r).from(&viewer.ws, &pref(contact), Some("works_at"))?;
+    job_list(links, viewer, |id| steve_store::Contacts::new(r).party(id))
+}
+
+fn job_list(
+    mut ls: Vec<Link>,
+    viewer: &Viewer,
+    mut party: impl FnMut(&str) -> steve_store::Result<Option<Party>>,
+) -> ApiResult<Vec<Job>> {
     ls.sort_by(|a, b| {
         let k = |l: &Link| {
             (
@@ -400,7 +421,7 @@ pub fn jobs(c: &rusqlite::Connection, viewer: &Viewer, contact: &str) -> ApiResu
     });
     let mut out = Vec::new();
     for l in &ls {
-        if let Some(j) = job_of(c, viewer, l)? {
+        if let Some(j) = job_of(viewer, l, &mut party)? {
             out.push(j);
         }
     }
@@ -408,7 +429,7 @@ pub fn jobs(c: &rusqlite::Connection, viewer: &Viewer, contact: &str) -> ApiResu
 }
 
 fn head(
-    c: &rusqlite::Connection,
+    c: &mut impl steve_store::Read,
     viewer: &Viewer,
     p: &Party,
     jobs: &[Job],
@@ -427,7 +448,7 @@ fn head(
         rels: p.rels.clone(),
         important: p.important,
         org,
-        tags: tags::of(c, &viewer.ws, &pref(&p.id))?,
+        tags: steve_store::TagRows(c).of(&viewer.ws, &pref(&p.id))?,
         visibility: p.visibility.clone(),
         is_me: p.is_me(),
         avatar: p.avatar.clone(),
@@ -435,33 +456,36 @@ fn head(
     })
 }
 
-pub fn brief(
-    c: &rusqlite::Connection,
+pub(crate) fn brief(
+    c: &mut steve_store::R<'_>,
     viewer: &Viewer,
     ports: &Ports,
     p: &Party,
 ) -> ApiResult<ContactBrief> {
-    let js = jobs(c, viewer, &p.id)?;
+    let js = jobs_in(c, viewer, &p.id)?;
     Ok(ContactBrief {
         head: head(c, viewer, p, &js)?,
         accounts: match &ports.handles {
             Some(h) => h.count(c, &viewer.ws, &p.id)?,
             None => 0,
         },
-        items: repo::items_count(c, &viewer.ws, &p.id)?,
+        items: steve_store::ItemReads(c).active_count_for_party(&viewer.ws, &p.id)?,
     })
 }
 
-pub fn contact(c: &rusqlite::Connection, viewer: &Viewer, p: &Party) -> ApiResult<Contact> {
-    let js = jobs(c, viewer, &p.id)?;
+pub fn contact(c: &mut impl steve_store::Read, viewer: &Viewer, p: &Party) -> ApiResult<Contact> {
+    let js = jobs_in(c, viewer, &p.id)?;
     let visible_orgs: Vec<String> = js.iter().map(|j| j.org_id.clone()).collect();
     let mut reports_to = Vec::new();
-    for l in links::from(c, &viewer.ws, &pref(&p.id), Some("reports_to"))? {
-        if let Some(b) = repo::get(c, &l.object_id)?.filter(|b| {
-            b.workspace_id == viewer.ws
-                && b.status != "deleted"
-                && viewer.sees(&b.visibility, &b.created_by)
-        }) {
+    for l in links::Links(c).from(&viewer.ws, &pref(&p.id), Some("reports_to"))? {
+        if let Some(b) = steve_store::Contacts::new(c)
+            .party(&l.object_id)?
+            .filter(|b| {
+                b.workspace_id == viewer.ws
+                    && b.status != "deleted"
+                    && viewer.sees(&b.visibility, &b.created_by)
+            })
+        {
             reports_to.push(NameRef {
                 id: b.id,
                 name: b.name,
@@ -469,7 +493,9 @@ pub fn contact(c: &rusqlite::Connection, viewer: &Viewer, p: &Party) -> ApiResul
         }
     }
     let mut merges = Vec::new();
-    for (id, from_name, created, split) in repo::merges_into(c, &viewer.ws, &p.id)? {
+    for (id, from_name, created, split) in
+        steve_store::ContactMerges(c).of_contact(&viewer.ws, &p.id)?
+    {
         if split.is_none() {
             merges.push(MergeRef {
                 id,
@@ -488,11 +514,12 @@ pub fn contact(c: &rusqlite::Connection, viewer: &Viewer, p: &Party) -> ApiResul
         revision: p.revision,
         created: p.created,
         jobs: js,
-        attrs: repo::values(c, &viewer.ws, &p.id)?
+        attrs: steve_store::Attributes(c)
+            .values(&viewer.ws, &p.id)?
             .iter()
             .map(Attr::from)
             .collect(),
-        teams: repo::teams_of(c, viewer, &p.id)?,
+        teams: steve_store::Teams(c).of_member(viewer, &p.id)?,
         reports_to,
         merges,
         profile: super::profile::contact_profile(c, &viewer.ws, p, Some(&visible_orgs))?,
@@ -500,14 +527,15 @@ pub fn contact(c: &rusqlite::Connection, viewer: &Viewer, p: &Party) -> ApiResul
 }
 
 pub fn org(
-    c: &rusqlite::Connection,
+    c: &mut impl steve_store::Read,
     viewer: &Viewer,
     p: &Party,
     with_people: bool,
 ) -> ApiResult<Org> {
     let people = if with_people {
         Some(
-            repo::org_people(c, viewer, &p.id)?
+            steve_store::Contacts::new(c)
+                .organization_people(viewer, &p.id)?
                 .into_iter()
                 .map(|(id, name, title)| OrgPerson { id, name, title })
                 .collect(),
@@ -520,10 +548,11 @@ pub fn org(
         name: p.name.clone(),
         aliases: p.aliases.clone(),
         kind: p.org_kind.clone(),
-        domains: repo::domains(c, &viewer.ws, &p.id)?,
+        domains: steve_store::Contacts::new(c).domains(&viewer.ws, &p.id)?,
         note: p.note.clone(),
-        tags: tags::of(c, &viewer.ws, &pref(&p.id))?,
-        attrs: repo::values(c, &viewer.ws, &p.id)?
+        tags: steve_store::TagRows(c).of(&viewer.ws, &pref(&p.id))?,
+        attrs: steve_store::Attributes(c)
+            .values(&viewer.ws, &p.id)?
             .iter()
             .map(Attr::from)
             .collect(),
@@ -534,17 +563,19 @@ pub fn org(
 }
 
 fn contact_by_id(m: &Modules, viewer: &Viewer, id: &str) -> ApiResult<Contact> {
-    m.store.reader(|c| {
-        let p = own_party(c, viewer, id, "contact", "联系人", false)?;
-        contact(c, viewer, &p)
-    })
+    m.store.read(|r| {
+        Ok(own_party_in(r, viewer, id, "contact", "联系人", false)
+            .and_then(|p| contact(r, viewer, &p)))
+    })?
 }
 
 fn org_by_id(m: &Modules, viewer: &Viewer, id: &str) -> ApiResult<Org> {
-    m.store.reader(|c| {
-        let p = own_party(c, viewer, id, "org", "组织", false)?;
-        org(c, viewer, &p, true)
-    })
+    m.store.read(|r| {
+        Ok(
+            own_party_in(r, viewer, id, "org", "组织", false)
+                .and_then(|p| org(r, viewer, &p, true)),
+        )
+    })?
 }
 
 fn party_view(m: &Modules, viewer: &Viewer, p: &Party) -> ApiResult<PartyView> {
@@ -590,26 +621,33 @@ pub fn list_contacts(
             .one_of("kind", k, &["real", "virtual", "unconfirmed"])
             .done()?;
     }
-    m.store.reader(|c| {
-        let q = some(p.q);
-        let handle_ids = match (&q, &ports.handles) {
-            (Some(q), Some(h)) => h.parties(c, &who.ws, q)?,
-            _ => Vec::new(),
-        };
-        let f = ContactQuery {
-            q,
-            rel: some(p.rel),
-            kind,
-            org: some(p.org),
-            tag: some(p.tag),
-            handle_ids,
-            limit,
-        };
-        repo::contacts(c, &viewer, &f)?
-            .iter()
-            .map(|p| brief(c, &viewer, ports, p))
-            .collect()
-    })
+    let f = ContactQuery {
+        q: some(p.q),
+        rel: some(p.rel),
+        kind,
+        org: some(p.org),
+        tag: some(p.tag),
+        limit,
+        ..Default::default()
+    };
+    m.store
+        .read(|r| Ok(list_contacts_in(r, ports, &viewer, f)))?
+}
+
+fn list_contacts_in(
+    r: &mut steve_store::R<'_>,
+    ports: &Ports,
+    viewer: &Viewer,
+    mut filters: ContactQuery,
+) -> ApiResult<Vec<ContactBrief>> {
+    if let (Some(query), Some(handles)) = (&filters.q, &ports.handles) {
+        filters.handle_ids = handles.parties(r, &viewer.ws, query)?;
+    }
+    r.contacts()
+        .contacts(viewer, &filters)?
+        .iter()
+        .map(|p| brief(r, viewer, ports, p))
+        .collect()
 }
 
 /// `GET /contacts/:id` (`me` = “我”).
@@ -617,7 +655,7 @@ pub fn get_contact(m: &Modules, who: &Caller, id: &str) -> ApiResult<Contact> {
     let (viewer, me) = start(m, who)?;
     if id == "me" || id == me.id {
         m.store
-            .transaction(|tx| super::profile::supplement_me(tx, &who.ws, &who.me, &me.id))?;
+            .write(|tx| super::profile::supplement_me(tx, &who.ws, &who.me, &me.id))?;
     }
     contact_by_id(m, &viewer, resolve(id, &me))
 }
@@ -671,9 +709,9 @@ pub fn create_contact(m: &Modules, who: &Caller, b: NewContact) -> ApiResult<Con
         ck.one_of("kind", k, &CONTACT_KINDS);
     }
     ck.done()?;
-    let id = m.store.transaction(|tx| {
+    let id = m.store.write(|tx| {
         let org = match &b.org_id {
-            Some(o) => Some(own_party(tx, &viewer, o, "org", "组织", true)?),
+            Some(o) => Some(own_party_in(tx, &viewer, o, "org", "组织", true)?),
             None => None,
         };
         let vis = b.visibility.clone().unwrap_or(Visibility::Workspace);
@@ -684,21 +722,20 @@ pub fn create_contact(m: &Modules, who: &Caller, b: NewContact) -> ApiResult<Con
         p.note = b.note.clone().unwrap_or_default();
         p.contact_kind = Some(b.kind.clone().unwrap_or_else(|| "real".into()));
         p.visibility = vis;
-        let p = repo::insert(tx, &who.ws, &p)?;
+        let p = Contacts::new(tx).insert(&who.ws, &p)?;
         if let Some(o) = org {
             let mut l = NewLink::new(pref(&p.id), "works_at", pref(&o.id), "manual");
             l.props = job_props(b.title.as_deref(), None, None);
-            links::add(tx, &who.ws, &l)?;
+            Links(tx).add(&who.ws, &l)?;
         }
-        base::audit(
-            tx,
+        tx.audit(
             &who.ws,
             &who.me,
             "party.create",
             &p.id,
             &json!({ "type": "contact" }),
         )?;
-        event(tx, &who.ws, &p.id);
+        tx.emit(crate::accounts::service::party_changed(&who.ws, &p.id));
         Ok::<_, ApiError>(p.id)
     })?;
     contact_by_id(m, &viewer, &id)
@@ -722,8 +759,8 @@ pub fn patch_contact(m: &Modules, who: &Caller, id: &str, b: ContactPatch) -> Ap
     let id = resolve(id, &me).to_string();
     let aliases = b.aliases.map(dedup);
     let rels = b.rels.map(dedup);
-    m.store.transaction(|tx| {
-        let p = own_party(tx, &viewer, &id, "contact", "联系人", true)?;
+    m.store.write(|tx| {
+        let p = own_party_in(tx, &viewer, &id, "contact", "联系人", true)?;
         let mut ck = Check::new();
         if let Some(n) = &b.name {
             ck.len("name", n.trim(), 1, 80);
@@ -764,9 +801,9 @@ pub fn patch_contact(m: &Modules, who: &Caller, id: &str, b: ContactPatch) -> Ap
             ..Default::default()
         };
         let (before, after) = diff(&p, &patch);
-        let old_tags = tags::of(tx, &who.ws, &pref(&p.id))?;
+        let old_tags = TagRows(tx).of(&who.ws, &pref(&p.id))?;
         let new_tags = match &b.tags {
-            Some(t) => tags::set(tx, &who.ws, &pref(&p.id), t)?,
+            Some(t) => TagRows(tx).replace(&who.ws, &pref(&p.id), t)?,
             None => old_tags.clone(),
         };
         let (mut before, mut after) = (before, after);
@@ -775,7 +812,7 @@ pub fn patch_contact(m: &Modules, who: &Caller, id: &str, b: ContactPatch) -> Ap
             after.insert("tags".into(), json!(new_tags));
         }
         if !after.is_empty() {
-            revise(
+            revise_in(
                 tx,
                 &p,
                 &patch,
@@ -784,15 +821,14 @@ pub fn patch_contact(m: &Modules, who: &Caller, id: &str, b: ContactPatch) -> Ap
                 &who.me,
             )?;
             let fields: Vec<&String> = after.keys().collect();
-            base::audit(
-                tx,
+            tx.audit(
                 &who.ws,
                 &who.me,
                 "party.update",
                 &p.id,
                 &json!({ "fields": fields }),
             )?;
-            event(tx, &who.ws, &p.id);
+            tx.emit(crate::accounts::service::party_changed(&who.ws, &p.id));
         }
         Ok::<_, ApiError>(())
     })?;
@@ -810,8 +846,8 @@ pub fn set_avatar_file(
 ) -> ApiResult<Contact> {
     let (viewer, me) = start(m, who)?;
     let id = resolve(id, &me).to_string();
-    m.store.transaction(|tx| {
-        let p = own_party(tx, &viewer, &id, "contact", "联系人", true)?;
+    m.store.write(|tx| {
+        let p = own_party_in(tx, &viewer, &id, "contact", "联系人", true)?;
         let mut av = p.avatar.as_object().cloned().unwrap_or_default();
         let old = av.get("file").cloned().unwrap_or(Value::Null);
         match file {
@@ -822,7 +858,7 @@ pub fn set_avatar_file(
         if new == old {
             return Ok::<_, ApiError>(());
         }
-        revise(
+        revise_in(
             tx,
             &p,
             &PartyPatch::default(),
@@ -830,16 +866,15 @@ pub fn set_avatar_file(
             json!({ "avatar": new }),
             &who.me,
         )?;
-        repo::set_avatar(tx, &p.id, &Value::Object(av))?;
-        base::audit(
-            tx,
+        Contacts::new(tx).set_avatar(&p.id, &Value::Object(av))?;
+        tx.audit(
             &who.ws,
             &who.me,
             "party.update",
             &p.id,
             &json!({ "fields": ["avatar"] }),
         )?;
-        event(tx, &who.ws, &p.id);
+        tx.emit(crate::accounts::service::party_changed(&who.ws, &p.id));
         Ok(())
     })?;
     contact_by_id(m, &viewer, &id)
@@ -892,8 +927,8 @@ fn diff(p: &Party, x: &PartyPatch) -> (Map<String, Value>, Map<String, Value>) {
 pub fn confirm_contact(m: &Modules, who: &Caller, id: &str) -> ApiResult<Contact> {
     let (viewer, me) = start(m, who)?;
     let id = resolve(id, &me).to_string();
-    m.store.transaction(|tx| {
-        let p = own_party(tx, &viewer, &id, "contact", "联系人", true)?;
+    m.store.write(|tx| {
+        let p = own_party_in(tx, &viewer, &id, "contact", "联系人", true)?;
         if p.contact_kind.as_deref() != Some("unconfirmed") {
             return Err(ApiError::conflict(steve_i18n::t!(
                 "modules.contacts.already_confirmed"
@@ -903,7 +938,7 @@ pub fn confirm_contact(m: &Modules, who: &Caller, id: &str) -> ApiResult<Contact
             contact_kind: Some("real".into()),
             ..Default::default()
         };
-        revise(
+        revise_in(
             tx,
             &p,
             &patch,
@@ -911,64 +946,45 @@ pub fn confirm_contact(m: &Modules, who: &Caller, id: &str) -> ApiResult<Contact
             json!({ "kind": "real" }),
             &who.me,
         )?;
-        base::audit(tx, &who.ws, &who.me, "party.confirm", &p.id, &json!({}))?;
-        event(tx, &who.ws, &p.id);
+        tx.audit(&who.ws, &who.me, "party.confirm", &p.id, &json!({}))?;
+        tx.emit(crate::accounts::service::party_changed(&who.ws, &p.id));
         Ok(())
     })?;
     contact_by_id(m, &viewer, &id)
 }
 
-/// The rows `sql` selects, each as a JSON object of its columns (for an audit record).
-fn rows_json(tx: &Tx, sql: &str, p: impl rusqlite::Params) -> ApiResult<Vec<Value>> {
-    let mut st = tx.prepare(sql)?;
-    let names: Vec<String> = st.column_names().iter().map(|n| n.to_string()).collect();
-    let rows = st
-        .query_map(p, |r| {
-            let mut o = Map::new();
-            for (i, n) in names.iter().enumerate() {
-                let v = match r.get_ref(i)? {
-                    rusqlite::types::ValueRef::Null => Value::Null,
-                    rusqlite::types::ValueRef::Integer(x) => json!(x),
-                    rusqlite::types::ValueRef::Real(x) => json!(x),
-                    rusqlite::types::ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
-                    rusqlite::types::ValueRef::Blob(_) => Value::Null,
-                };
-                o.insert(n.clone(), v);
-            }
-            Ok(Value::Object(o))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
-}
-
-/// What deleting a contact removes for good, as it was: its attribute values, the memories only about
-/// it (with their `mem_about` rows) and its team memberships. Kept in the `party.delete` audit, so
-/// a deletion can be put back by hand.
-fn deleted_rows(tx: &Tx, ws: &str, party: &str) -> ApiResult<Value> {
-    let mem_ids = super::people_repo::mems_only_about(tx, ws, PARTY, party)?;
+/// Rows needed to restore a contact deleted by the user.
+fn deleted_rows(r: &mut impl Read, ws: &str, party: &str) -> ApiResult<Value> {
+    let ids = Memories(r).only_about(ws, &ObjRef::new(PARTY, party))?;
     let mut mems = Vec::new();
     let mut about = Vec::new();
-    for id in &mem_ids {
-        mems.extend(rows_json(tx, "SELECT * FROM mems WHERE id = ?", [id])?);
-        about.extend(rows_json(
-            tx,
-            "SELECT * FROM mem_about WHERE mem_id = ? ORDER BY rowid",
-            [id],
-        )?);
+    for id in ids {
+        if let Some(mem) = Memories(r).get(&id)? {
+            about.extend(mem.about.iter().map(|object| json!({
+                "mem_id": id, "workspace_id": ws, "object_type": object.kind, "object_id": object.id,
+            })));
+            let mut row = serde_json::to_value(&mem)?;
+            if let Some(row) = row.as_object_mut() {
+                row.remove("about");
+            }
+            mems.push(row);
+        }
     }
+    let teams: Vec<Value> = Teams(r)
+        .memberships(ws, party)?
+        .into_iter()
+        .map(|row| {
+            json!({
+                "workspace_id": ws, "team_id": row.team, "contact_id":party, "role":row.role,
+                "source":row.source, "joined":row.joined,
+            })
+        })
+        .collect();
     Ok(json!({
-        "attr_values": rows_json(
-            tx,
-            "SELECT * FROM attr_values WHERE workspace_id = ? AND party_id = ? ORDER BY rowid",
-            rusqlite::params![ws, party],
-        )?,
+        "attr_values": Attributes(r).values(ws, party)?,
         "mems": mems,
         "mem_about": about,
-        "team_members": rows_json(
-            tx,
-            "SELECT * FROM team_members WHERE workspace_id = ? AND contact_id = ? ORDER BY rowid",
-            rusqlite::params![ws, party],
-        )?,
+        "team_members": teams,
     }))
 }
 
@@ -979,18 +995,18 @@ fn deleted_rows(tx: &Tx, ws: &str, party: &str) -> ApiResult<Value> {
 pub fn delete_contact(m: &Modules, ports: &Ports, who: &Caller, id: &str) -> ApiResult<()> {
     let (viewer, me) = start(m, who)?;
     let id = resolve(id, &me).to_string();
-    m.store.transaction(|tx| {
-        let p = own_party(tx, &viewer, &id, "contact", "联系人", true)?;
+    m.store.write(|tx| {
+        let p = own_party_in(tx, &viewer, &id, "contact", "联系人", true)?;
         if p.is_me() {
             return Err(ApiError::rule(steve_i18n::t!(
                 "modules.contacts.not_yourself"
             )));
         }
         let deleted = deleted_rows(tx, &who.ws, &p.id)?;
-        let attrs = repo::values_delete_of(tx, &who.ws, &p.id)?;
+        let attrs = Attributes(tx).delete_party_values(&who.ws, &p.id)?;
         let mems = super::memory::delete_only_about(tx, &who.ws, &p.id)?;
-        let teams = repo::memberships_delete_of(tx, &who.ws, &p.id)?;
-        super::stewards::forget_party(tx, &who.ws, &p.id)?;
+        let teams = Teams(tx).remove_memberships(&who.ws, &p.id)?;
+        steve_store::Stewards(tx).forget_party(&who.ws, &p.id)?;
         for h in &ports.hooks {
             h.on_delete(tx, &who.ws, &p.id)?;
         }
@@ -998,7 +1014,7 @@ pub fn delete_contact(m: &Modules, ports: &Ports, who: &Caller, id: &str) -> Api
             status: Some("deleted".into()),
             ..Default::default()
         };
-        revise(
+        revise_in(
             tx,
             &p,
             &patch,
@@ -1006,15 +1022,13 @@ pub fn delete_contact(m: &Modules, ports: &Ports, who: &Caller, id: &str) -> Api
             json!({ "status": "deleted" }),
             &who.me,
         )?;
-        base::audit(
-            tx,
-            &who.ws,
+        tx.audit(&who.ws,
             &who.me,
             "party.delete",
             &p.id,
             &json!({ "type": "contact", "attrs": attrs, "mems": mems, "teams": teams, "deleted": deleted }),
         )?;
-        event(tx, &who.ws, &p.id);
+        tx.emit(crate::accounts::service::party_changed(&who.ws, &p.id));
         Ok(())
     })
 }
@@ -1057,12 +1071,12 @@ pub fn add_job(m: &Modules, who: &Caller, id: &str, b: NewJob) -> ApiResult<Cont
         .opt_len("dept", b.dept.as_deref(), 0, 80);
     check_month(&mut ck, "from", b.from.as_deref());
     ck.done()?;
-    m.store.transaction(|tx| {
-        let p = own_party(tx, &viewer, &id, "contact", "联系人", true)?;
-        let o = own_party(tx, &viewer, &b.org_id, "org", "组织", true)?;
+    m.store.write(|tx| {
+        let p = own_party_in(tx, &viewer, &id, "contact", "联系人", true)?;
+        let o = own_party_in(tx, &viewer, &b.org_id, "org", "组织", true)?;
         let key = job_key(&p.id, &o.id);
         let mut props = job_props(b.title.as_deref(), b.dept.as_deref(), b.from.as_deref());
-        let before = match links::get(tx, &who.ws, &key)? {
+        let before = match Links(tx).get(&who.ws, &key)? {
             Some(old) if old.props.get("to").is_none_or(Value::is_null) => {
                 return Err(ApiError::conflict(steve_i18n::t!(
                     "modules.contacts.job_exists"
@@ -1092,7 +1106,7 @@ pub fn add_job(m: &Modules, who: &Caller, id: &str, b: NewJob) -> ApiResult<Cont
                 if !manual.is_empty() {
                     props["manual"] = json!(manual);
                 }
-                links::set_props(tx, &who.ws, &key, &props)?;
+                Links(tx).set_props(&who.ws, &key, &props)?;
                 old.props
             }
             None => {
@@ -1103,11 +1117,11 @@ pub fn add_job(m: &Modules, who: &Caller, id: &str, b: NewJob) -> ApiResult<Cont
                     "manual",
                 );
                 l.props = props.clone();
-                links::add(tx, &who.ws, &l)?;
+                Links(tx).add(&who.ws, &l)?;
                 Value::Null
             }
         };
-        revise(
+        revise_in(
             tx,
             &p,
             &PartyPatch::default(),
@@ -1115,15 +1129,14 @@ pub fn add_job(m: &Modules, who: &Caller, id: &str, b: NewJob) -> ApiResult<Cont
             json!({ "job": { "org_id": o.id, "props": props } }),
             &who.me,
         )?;
-        base::audit(
-            tx,
+        tx.audit(
             &who.ws,
             &who.me,
             "party.job_add",
             &p.id,
             &json!({ "org_id": o.id }),
         )?;
-        event(tx, &who.ws, &p.id);
+        tx.emit(crate::accounts::service::party_changed(&who.ws, &p.id));
         Ok::<_, ApiError>(())
     })?;
     contact_by_id(m, &viewer, &id)
@@ -1142,11 +1155,17 @@ pub struct JobPatch {
 }
 
 /// Finds the job link of a contact at an organization the viewer can see; `404 没有这个任职`.
-fn own_job(tx: &Tx, viewer: &Viewer, contact: &str, org: &str) -> ApiResult<(LinkKey, Link)> {
+fn own_job(
+    tx: &mut W<'_>,
+    viewer: &Viewer,
+    contact: &str,
+    org: &str,
+) -> ApiResult<(LinkKey, Link)> {
     let key = job_key(contact, org);
-    let visible = repo::get(tx, org)?
+    let visible = Contacts::new(tx)
+        .party(org)?
         .is_some_and(|o| o.workspace_id == viewer.ws && viewer.sees(&o.visibility, &o.created_by));
-    match links::get(tx, &viewer.ws, &key)? {
+    match Links(tx).get(&viewer.ws, &key)? {
         Some(l) if visible => Ok((key, l)),
         _ => Err(ApiError::not_found("任职")),
     }
@@ -1168,8 +1187,8 @@ pub fn patch_job(
     check_month(&mut ck, "from", b.from.clone().flatten().as_deref());
     check_month(&mut ck, "to", b.to.clone().flatten().as_deref());
     ck.done()?;
-    m.store.transaction(|tx| {
-        let p = own_party(tx, &viewer, &id, "contact", "联系人", true)?;
+    m.store.write(|tx| {
+        let p = own_party_in(tx, &viewer, &id, "contact", "联系人", true)?;
         let (key, l) = own_job(tx, &viewer, &p.id, org_id)?;
         let mut props = l.props.clone();
         if !props.is_object() {
@@ -1196,8 +1215,8 @@ pub fn patch_job(
             props["manual"] = json!(manual);
         }
         if props != l.props {
-            links::set_props(tx, &who.ws, &key, &props)?;
-            revise(
+            Links(tx).set_props(&who.ws, &key, &props)?;
+            revise_in(
                 tx,
                 &p,
                 &PartyPatch::default(),
@@ -1205,15 +1224,14 @@ pub fn patch_job(
                 json!({ "job": { "org_id": org_id, "props": props } }),
                 &who.me,
             )?;
-            base::audit(
-                tx,
+            tx.audit(
                 &who.ws,
                 &who.me,
                 "party.job_update",
                 &p.id,
                 &json!({ "org_id": org_id }),
             )?;
-            event(tx, &who.ws, &p.id);
+            tx.emit(crate::accounts::service::party_changed(&who.ws, &p.id));
         }
         Ok::<_, ApiError>(())
     })?;
@@ -1224,11 +1242,11 @@ pub fn patch_job(
 pub fn delete_job(m: &Modules, who: &Caller, id: &str, org_id: &str) -> ApiResult<()> {
     let (viewer, me) = start(m, who)?;
     let id = resolve(id, &me).to_string();
-    m.store.transaction(|tx| {
-        let p = own_party(tx, &viewer, &id, "contact", "联系人", true)?;
+    m.store.write(|tx| {
+        let p = own_party_in(tx, &viewer, &id, "contact", "联系人", true)?;
         let (key, l) = own_job(tx, &viewer, &p.id, org_id)?;
-        links::remove(tx, &who.ws, &key)?;
-        revise(
+        Links(tx).remove(&who.ws, &key)?;
+        revise_in(
             tx,
             &p,
             &PartyPatch::default(),
@@ -1236,15 +1254,14 @@ pub fn delete_job(m: &Modules, who: &Caller, id: &str, org_id: &str) -> ApiResul
             json!({ "job": { "org_id": org_id, "props": null } }),
             &who.me,
         )?;
-        base::audit(
-            tx,
+        tx.audit(
             &who.ws,
             &who.me,
             "party.job_remove",
             &p.id,
             &json!({ "org_id": org_id }),
         )?;
-        event(tx, &who.ws, &p.id);
+        tx.emit(crate::accounts::service::party_changed(&who.ws, &p.id));
         Ok(())
     })
 }
@@ -1260,8 +1277,9 @@ pub struct NewAttr {
 }
 
 /// A contact or organization by id for attribute writes (`404 没有这个联系人` / `组织`).
-fn own_contact_or_org(c: &rusqlite::Connection, viewer: &Viewer, id: &str) -> ApiResult<Party> {
-    let p = repo::get(c, id)?
+fn own_contact_or_org(c: &mut impl Read, viewer: &Viewer, id: &str) -> ApiResult<Party> {
+    let p = Contacts::new(c)
+        .party(id)?
         .filter(|p| p.status == "active" && (p.kind == "contact" || p.kind == "org"));
     let noun = if p.as_ref().is_some_and(|p| p.kind == "org") {
         "组织"
@@ -1285,9 +1303,9 @@ fn check_value(ck: &mut Check, key: &str, def: Option<&AttrDef>, value: &str) {
 pub fn add_attr(m: &Modules, who: &Caller, id: &str, b: NewAttr) -> ApiResult<PartyView> {
     let (viewer, me) = start(m, who)?;
     let id = resolve(id, &me).to_string();
-    let p = m.store.transaction(|tx| {
+    let p = m.store.write(|tx| {
         let p = own_contact_or_org(tx, &viewer, &id)?;
-        let def = repo::def_by_key(tx, &who.ws, &b.key)?;
+        let def = Attributes(tx).definition_by_key(&who.ws, &b.key)?;
         let mut ck = Check::new();
         ck.pattern("key", &b.key, &KEY)
             .opt_len("label", b.label.as_deref().map(str::trim), 1, 20)
@@ -1297,8 +1315,7 @@ pub fn add_attr(m: &Modules, who: &Caller, id: &str, b: NewAttr) -> ApiResult<Pa
         let def = match def {
             Some(d) => d,
             None => {
-                let d = repo::def_insert(
-                    tx,
+                let d = Attributes(tx).insert_definition(
                     &who.ws,
                     &NewDef {
                         applies: p.kind.clone(),
@@ -1316,8 +1333,7 @@ pub fn add_attr(m: &Modules, who: &Caller, id: &str, b: NewAttr) -> ApiResult<Pa
                         status: "active".into(),
                     },
                 )?;
-                base::audit(
-                    tx,
+                tx.audit(
                     &who.ws,
                     &who.me,
                     "attr_def.create",
@@ -1327,8 +1343,7 @@ pub fn add_attr(m: &Modules, who: &Caller, id: &str, b: NewAttr) -> ApiResult<Pa
                 d
             }
         };
-        let v = repo::value_insert(
-            tx,
+        let v = Attributes(tx).insert_value(
             &who.ws,
             &NewValue {
                 party_id: p.id.clone(),
@@ -1348,8 +1363,8 @@ pub fn add_attr(m: &Modules, who: &Caller, id: &str, b: NewAttr) -> ApiResult<Pa
                 decision_id: None,
             },
         )?;
-        repo::stale_others(tx, &v)?;
-        revise(
+        Attributes(tx).stale_siblings(&v)?;
+        revise_in(
             tx,
             &p,
             &PartyPatch::default(),
@@ -1357,15 +1372,14 @@ pub fn add_attr(m: &Modules, who: &Caller, id: &str, b: NewAttr) -> ApiResult<Pa
             json!({ "attr": { "id": v.id, "key": v.key, "label": v.label } }),
             &who.me,
         )?;
-        base::audit(
-            tx,
+        tx.audit(
             &who.ws,
             &who.me,
             "attr.set",
             &p.id,
             &json!({ "attr_id": v.id, "key": v.key }),
         )?;
-        event(tx, &who.ws, &p.id);
+        tx.emit(crate::accounts::service::party_changed(&who.ws, &p.id));
         Ok::<_, ApiError>(p)
     })?;
     party_view(m, &viewer, &p)
@@ -1379,10 +1393,14 @@ pub struct AttrPatch {
 }
 
 /// An attribute value whose party the viewer owns; `404 没有这个属性`.
-fn own_attr(tx: &Tx, viewer: &Viewer, id: &str) -> ApiResult<(AttrValue, Party)> {
-    let v = repo::value_get(tx, id)?.filter(|v| v.workspace_id == viewer.ws);
+fn own_attr(tx: &mut W<'_>, viewer: &Viewer, id: &str) -> ApiResult<(AttrValue, Party)> {
+    let v = Attributes(tx)
+        .value(id)?
+        .filter(|v| v.workspace_id == viewer.ws);
     let p = match &v {
-        Some(v) => repo::get(tx, &v.party_id)?.filter(|p| p.status == "active"),
+        Some(v) => Contacts::new(tx)
+            .party(&v.party_id)?
+            .filter(|p| p.status == "active"),
         None => None,
     };
     match (v, p) {
@@ -1394,33 +1412,33 @@ fn own_attr(tx: &Tx, viewer: &Viewer, id: &str) -> ApiResult<(AttrValue, Party)>
 /// `PATCH /attrs/:id`.
 pub fn patch_attr(m: &Modules, who: &Caller, id: &str, b: AttrPatch) -> ApiResult<()> {
     let (viewer, _) = start(m, who)?;
-    m.store.transaction(|tx| {
+    m.store.write(|tx| {
         let (v, p) = own_attr(tx, &viewer, id)?;
         let mut ck = Check::new();
         if let Some(val) = &b.value {
-            check_value(&mut ck, &v.key, repo::def_by_key(tx, &who.ws, &v.key)?.as_ref(), val);
+            check_value(&mut ck, &v.key, Attributes(tx).definition_by_key(&who.ws, &v.key)?.as_ref(), val);
         }
         if let Some(s) = &b.status {
             ck.one_of("status", s, &["confirmed", "stale"]);
         }
         ck.done()?;
         let value = b.value.as_deref().map(str::trim);
-        repo::value_update(tx, &v.id, value, b.level, b.status.as_deref())?;
+        Attributes(tx).update_value(&v.id, value, b.level, b.status.as_deref())?;
         if b.value.is_some() || b.status.as_deref() == Some("confirmed") {
             // Keep the original provenance in the label, but record that a person now stands
             // behind the value. Automatic supplementation must never replace it.
             let label = if b.value.is_some() { "你填的".to_string() }
                 else { format!("你确认 · {}", v.source_label) };
-            tx.execute("UPDATE attr_values SET source = 'me', source_label = ? WHERE id = ?", rusqlite::params![label, v.id])?;
+            Attributes(tx).set_manual_source(&v.id, &label)?;
         }
-        let after = repo::value_get(tx, &v.id)?.ok_or_else(|| ApiError::not_found("属性"))?;
+        let after = Attributes(tx).value(&v.id)?.ok_or_else(|| ApiError::not_found("属性"))?;
         if after.status == "confirmed" && (b.status.is_some() || b.value.is_some()) {
-            repo::stale_others(tx, &after)?;
+            Attributes(tx).stale_siblings(&after)?;
         }
         let snap = |x: &AttrValue| json!({ "id": x.id, "value": x.value, "level": x.level, "status": x.status });
-        revise(tx, &p, &PartyPatch::default(), json!({ "attr": snap(&v) }), json!({ "attr": snap(&after) }), &who.me)?;
-        base::audit(tx, &who.ws, &who.me, "attr.update", &p.id, &json!({ "attr_id": v.id, "key": v.key }))?;
-        event(tx, &who.ws, &p.id);
+        revise_in(tx, &p, &PartyPatch::default(), json!({ "attr": snap(&v) }), json!({ "attr": snap(&after) }), &who.me)?;
+        tx.audit(&who.ws, &who.me, "attr.update", &p.id, &json!({ "attr_id": v.id, "key": v.key }))?;
+        tx.emit(crate::accounts::service::party_changed(&who.ws, &p.id));
         Ok(())
     })
 }
@@ -1428,10 +1446,10 @@ pub fn patch_attr(m: &Modules, who: &Caller, id: &str, b: AttrPatch) -> ApiResul
 /// `DELETE /attrs/:id` (physical).
 pub fn delete_attr(m: &Modules, who: &Caller, id: &str) -> ApiResult<()> {
     let (viewer, _) = start(m, who)?;
-    m.store.transaction(|tx| {
+    m.store.write(|tx| {
         let (v, p) = own_attr(tx, &viewer, id)?;
-        repo::value_delete(tx, &v.id)?;
-        revise(
+        Attributes(tx).delete_value(&v.id)?;
+        revise_in(
             tx,
             &p,
             &PartyPatch::default(),
@@ -1439,15 +1457,14 @@ pub fn delete_attr(m: &Modules, who: &Caller, id: &str) -> ApiResult<()> {
             json!({ "attr": null }),
             &who.me,
         )?;
-        base::audit(
-            tx,
+        tx.audit(
             &who.ws,
             &who.me,
             "attr.delete",
             &p.id,
             &json!({ "attr_id": v.id, "key": v.key }),
         )?;
-        event(tx, &who.ws, &p.id);
+        tx.emit(crate::accounts::service::party_changed(&who.ws, &p.id));
         Ok(())
     })
 }
@@ -1455,7 +1472,7 @@ pub fn delete_attr(m: &Modules, who: &Caller, id: &str) -> ApiResult<()> {
 /// `GET /attr-defs`: built-in, then the workspace's.
 pub fn list_defs(m: &Modules, who: &Caller) -> ApiResult<Vec<AttrDef>> {
     start(m, who)?;
-    m.store.reader(|c| Ok(repo::defs(c, &who.ws)?))
+    Ok(m.store.read(|c| Attributes(c).definitions(&who.ws))?)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1488,14 +1505,13 @@ pub fn create_def(m: &Modules, who: &Caller, b: NewDefBody) -> ApiResult<AttrDef
         .one_of("type", &b.kind, &ATTR_TYPES);
     check_options(&mut ck, Some(&b.kind), &options);
     ck.done()?;
-    m.store.transaction(|tx| {
-        if repo::def_by_key(tx, &who.ws, &b.key)?.is_some() {
+    m.store.write(|tx| {
+        if Attributes(tx).definition_by_key(&who.ws, &b.key)?.is_some() {
             return Err(ApiError::conflict(steve_i18n::t!(
                 "modules.contacts.attr_exists"
             )));
         }
-        let d = repo::def_insert(
-            tx,
+        let d = Attributes(tx).insert_definition(
             &who.ws,
             &NewDef {
                 applies: b.applies.clone(),
@@ -1508,8 +1524,7 @@ pub fn create_def(m: &Modules, who: &Caller, b: NewDefBody) -> ApiResult<AttrDef
                 status: "active".into(),
             },
         )?;
-        base::audit(
-            tx,
+        tx.audit(
             &who.ws,
             &who.me,
             "attr_def.create",
@@ -1528,8 +1543,8 @@ pub struct DefPatch {
 }
 
 /// A definition of the caller's workspace for writes: missing or foreign → 404, built-in → 400.
-fn own_def(tx: &Tx, ws: &str, id: &str) -> ApiResult<AttrDef> {
-    match repo::def_get(tx, id)? {
+fn own_def(tx: &mut W<'_>, ws: &str, id: &str) -> ApiResult<AttrDef> {
+    match Attributes(tx).definition(id)? {
         Some(d) if d.builtin => Err(ApiError::rule(steve_i18n::t!(
             "modules.contacts.attr_builtin"
         ))),
@@ -1542,7 +1557,7 @@ fn own_def(tx: &Tx, ws: &str, id: &str) -> ApiResult<AttrDef> {
 pub fn patch_def(m: &Modules, who: &Caller, id: &str, b: DefPatch) -> ApiResult<AttrDef> {
     start(m, who)?;
     let options = b.options.map(dedup);
-    m.store.transaction(|tx| {
+    m.store.write(|tx| {
         let d = own_def(tx, &who.ws, id)?;
         let mut ck = Check::new();
         ck.opt_len("label", b.label.as_deref().map(str::trim), 1, 20);
@@ -1550,40 +1565,39 @@ pub fn patch_def(m: &Modules, who: &Caller, id: &str, b: DefPatch) -> ApiResult<
             check_options(&mut ck, Some(&d.kind), o);
         }
         ck.done()?;
-        repo::def_update(
-            tx,
+        Attributes(tx).update_definition(
             &d.id,
             b.label.as_deref().map(str::trim),
             options.as_deref(),
             b.default_level,
         )?;
-        base::audit(
-            tx,
+        tx.audit(
             &who.ws,
             &who.me,
             "attr_def.update",
             &d.id,
             &json!({ "key": d.key }),
         )?;
-        repo::def_get(tx, &d.id)?.ok_or_else(|| ApiError::not_found("属性"))
+        Attributes(tx)
+            .definition(&d.id)?
+            .ok_or_else(|| ApiError::not_found("属性"))
     })
 }
 
 /// `DELETE /attr-defs/:id`; still in use → `409 还有 <n> 个联系人在用这个属性`.
 pub fn delete_def(m: &Modules, who: &Caller, id: &str) -> ApiResult<()> {
     start(m, who)?;
-    m.store.transaction(|tx| {
+    m.store.write(|tx| {
         let d = own_def(tx, &who.ws, id)?;
-        let n = repo::def_usage(tx, &who.ws, &d.key)?;
+        let n = Attributes(tx).definition_usage(&who.ws, &d.key)?;
         if n > 0 {
             return Err(ApiError::conflict(steve_i18n::t!(
                 "modules.contacts.attr_in_use",
                 n = n
             )));
         }
-        repo::def_delete(tx, &d.id)?;
-        base::audit(
-            tx,
+        Attributes(tx).delete_definition(&d.id)?;
+        tx.audit(
             &who.ws,
             &who.me,
             "attr_def.delete",
@@ -1604,7 +1618,12 @@ pub fn normalize_domain(d: &str) -> String {
 }
 
 /// Normalized, deduplicated, checked domains; conflicts with another organization → 409.
-fn check_domains(tx: &Tx, ws: &str, org: Option<&str>, raw: &[String]) -> ApiResult<Vec<String>> {
+fn check_domains(
+    tx: &mut W<'_>,
+    ws: &str,
+    org: Option<&str>,
+    raw: &[String],
+) -> ApiResult<Vec<String>> {
     let mut ck = Check::new();
     ck.that("domains", raw.len() <= 20);
     let mut out: Vec<String> = Vec::new();
@@ -1620,8 +1639,14 @@ fn check_domains(tx: &Tx, ws: &str, org: Option<&str>, raw: &[String]) -> ApiRes
     }
     ck.done()?;
     for d in &out {
-        if let Some(owner) = repo::domain_owner(tx, ws, d)?.filter(|o| Some(o.as_str()) != org) {
-            let name = repo::get(tx, &owner)?.map(|o| o.name).unwrap_or_default();
+        if let Some(owner) = Contacts::new(tx)
+            .domain_owner(ws, d)?
+            .filter(|o| Some(o.as_str()) != org)
+        {
+            let name = Contacts::new(tx)
+                .party(&owner)?
+                .map(|o| o.name)
+                .unwrap_or_default();
             return Err(ApiError::conflict(steve_i18n::t!(
                 "modules.contacts.domain_taken",
                 name = name
@@ -1634,12 +1659,10 @@ fn check_domains(tx: &Tx, ws: &str, org: Option<&str>, raw: &[String]) -> ApiRes
 /// `GET /orgs` (without `people`).
 pub fn list_orgs(m: &Modules, who: &Caller) -> ApiResult<Vec<Org>> {
     let (viewer, _) = start(m, who)?;
-    m.store.reader(|c| {
-        repo::orgs(c, &viewer)?
-            .iter()
-            .map(|o| org(c, &viewer, o, false))
-            .collect()
-    })
+    m.store.read(|r| {
+        let rows = r.contacts().organizations(&viewer)?;
+        Ok(rows.iter().map(|p| org(r, &viewer, p, false)).collect())
+    })?
 }
 
 /// `GET /orgs/:id`.
@@ -1671,23 +1694,22 @@ pub fn create_org(m: &Modules, who: &Caller, b: NewOrg) -> ApiResult<Org> {
         ck.one_of("kind", k, &ORG_KINDS);
     }
     ck.done()?;
-    let id = m.store.transaction(|tx| {
+    let id = m.store.write(|tx| {
         let domains = check_domains(tx, &who.ws, None, &b.domains)?;
         let mut p = NewParty::new("org", b.name.trim(), &who.me);
         p.aliases = aliases;
         p.note = b.note.clone().unwrap_or_default();
         p.org_kind = Some(b.kind.clone().unwrap_or_else(|| "other".into()));
-        let o = repo::insert(tx, &who.ws, &p)?;
-        repo::set_domains(tx, &who.ws, &o.id, &domains)?;
-        base::audit(
-            tx,
+        let o = Contacts::new(tx).insert(&who.ws, &p)?;
+        Contacts::new(tx).set_domains(&who.ws, &o.id, &domains)?;
+        tx.audit(
             &who.ws,
             &who.me,
             "party.create",
             &o.id,
             &json!({ "type": "org" }),
         )?;
-        event(tx, &who.ws, &o.id);
+        tx.emit(crate::accounts::service::party_changed(&who.ws, &o.id));
         Ok::<_, ApiError>(o.id)
     })?;
     org_by_id(m, &viewer, &id)
@@ -1707,8 +1729,8 @@ pub struct OrgPatch {
 pub fn patch_org(m: &Modules, who: &Caller, id: &str, b: OrgPatch) -> ApiResult<Org> {
     let (viewer, _) = start(m, who)?;
     let aliases = b.aliases.map(dedup);
-    m.store.transaction(|tx| {
-        let o = own_party(tx, &viewer, id, "org", "组织", true)?;
+    m.store.write(|tx| {
+        let o = own_party_in(tx, &viewer, id, "org", "组织", true)?;
         let mut ck = Check::new();
         if let Some(n) = &b.name {
             ck.len("name", n.trim(), 1, 80);
@@ -1743,23 +1765,23 @@ pub fn patch_org(m: &Modules, who: &Caller, id: &str, b: OrgPatch) -> ApiResult<
         let (mut before, mut after) = diff(&o, &patch);
         if let Some(raw) = &b.domains {
             let new = check_domains(tx, &who.ws, Some(&o.id), raw)?;
-            let old = repo::domains(tx, &who.ws, &o.id)?;
+            let old = Contacts::new(tx).domains(&who.ws, &o.id)?;
             if new != old {
-                repo::set_domains(tx, &who.ws, &o.id, &new)?;
+                Contacts::new(tx).set_domains(&who.ws, &o.id, &new)?;
                 before.insert("domains".into(), json!(old));
                 after.insert("domains".into(), json!(new));
             }
         }
         if let Some(t) = &b.tags {
-            let old = tags::of(tx, &who.ws, &pref(&o.id))?;
-            let new = tags::set(tx, &who.ws, &pref(&o.id), t)?;
+            let old = TagRows(tx).of(&who.ws, &pref(&o.id))?;
+            let new = TagRows(tx).replace(&who.ws, &pref(&o.id), t)?;
             if new != old {
                 before.insert("tags".into(), json!(old));
                 after.insert("tags".into(), json!(new));
             }
         }
         if !after.is_empty() {
-            revise(
+            revise_in(
                 tx,
                 &o,
                 &patch,
@@ -1768,15 +1790,14 @@ pub fn patch_org(m: &Modules, who: &Caller, id: &str, b: OrgPatch) -> ApiResult<
                 &who.me,
             )?;
             let fields: Vec<&String> = after.keys().collect();
-            base::audit(
-                tx,
+            tx.audit(
                 &who.ws,
                 &who.me,
                 "party.update",
                 &o.id,
                 &json!({ "type": "org", "fields": fields }),
             )?;
-            event(tx, &who.ws, &o.id);
+            tx.emit(crate::accounts::service::party_changed(&who.ws, &o.id));
         }
         Ok::<_, ApiError>(())
     })?;
@@ -1787,20 +1808,20 @@ pub fn patch_org(m: &Modules, who: &Caller, id: &str, b: OrgPatch) -> ApiResult<
 /// this month; the row stays as `deleted`.
 pub fn delete_org(m: &Modules, who: &Caller, id: &str) -> ApiResult<()> {
     let (viewer, _) = start(m, who)?;
-    m.store.transaction(|tx| {
-        let o = own_party(tx, &viewer, id, "org", "组织", true)?;
+    m.store.write(|tx| {
+        let o = own_party_in(tx, &viewer, id, "org", "组织", true)?;
         if o.is_self_org() {
             return Err(ApiError::rule(steve_i18n::t!(
                 "modules.contacts.self_org_delete"
             )));
         }
-        let zone = crate::zone::Zone::of(tx, &who.ws, &who.me)?;
+        let zone = crate::zone::Zone::for_user(tx, &who.ws, Some(&who.me))?;
         let month = month_at(
             steve_runtime::tz::Zone::parse(zone.name()).expect("policy IANA zone"),
             m.clock.now(),
         );
         let mut closed = 0;
-        for l in links::to(tx, &who.ws, &pref(&o.id), Some("works_at"))? {
+        for l in Links(tx).to(&who.ws, &pref(&o.id), Some("works_at"))? {
             if l.subject_type != PARTY || !l.props.get("to").is_none_or(Value::is_null) {
                 continue;
             }
@@ -1810,18 +1831,18 @@ pub fn delete_org(m: &Modules, who: &Caller, id: &str) -> ApiResult<()> {
                 json!({})
             };
             props["to"] = json!(month);
-            links::set_props(tx, &who.ws, &job_key(&l.subject_id, &o.id), &props)?;
-            repo::touch(tx, &l.subject_id)?;
+            Links(tx).set_props(&who.ws, &job_key(&l.subject_id, &o.id), &props)?;
+            Contacts::new(tx).touch(&l.subject_id)?;
             closed += 1;
         }
-        repo::set_domains(tx, &who.ws, &o.id, &[])?;
+        Contacts::new(tx).set_domains(&who.ws, &o.id, &[])?;
         let patch = PartyPatch {
             aliases: Some(Vec::new()),
             note: Some(String::new()),
             status: Some("deleted".into()),
             ..Default::default()
         };
-        revise(
+        revise_in(
             tx,
             &o,
             &patch,
@@ -1829,15 +1850,14 @@ pub fn delete_org(m: &Modules, who: &Caller, id: &str) -> ApiResult<()> {
             json!({ "status": "deleted", "aliases": [], "note": "" }),
             &who.me,
         )?;
-        base::audit(
-            tx,
+        tx.audit(
             &who.ws,
             &who.me,
             "party.delete",
             &o.id,
             &json!({ "type": "org", "jobs_closed": closed }),
         )?;
-        event(tx, &who.ws, &o.id);
+        tx.emit(crate::accounts::service::party_changed(&who.ws, &o.id));
         Ok(())
     })
 }

@@ -246,6 +246,17 @@ impl<C: Read> ChannelSources<'_, C> {
         excerpt(self.0, "chan_messages", "space_id", "text", ws, space, id)
     }
 
+    pub fn named_spaces(&mut self, ws: &str) -> Result<Vec<(String, String, String)>> {
+        self.0.all(
+            Query::select()
+                .from("spaces")
+                .columns(["id", "name", "kind"])
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("status").ne("archived")),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+    }
+
     pub fn space(&mut self, ws: &str, id: &str) -> Result<Option<SpaceSource>> {
         self.0.one(
             Query::select()

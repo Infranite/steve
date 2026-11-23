@@ -52,7 +52,7 @@ fn bot_connection(env: &TestEnv, handle: &str, name: &str) -> String {
         .transaction(|tx| -> ApiResult<String> {
             ensure_seeds(tx, WS)?;
             steve_modules::contacts::service::ensure_base(tx, &caller(WS, ME))?;
-            let org = steve_modules::contacts::repo::self_org(tx, WS)?.expect("self org");
+            let org = tx.write(|w| w.contacts().own_org(WS))?.expect("self org");
             let a = arepo::insert(
                 tx,
                 WS,

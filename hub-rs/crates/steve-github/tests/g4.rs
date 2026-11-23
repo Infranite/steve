@@ -647,11 +647,7 @@ async fn the_panel_matches_section_7_and_reruns_failed_checks() {
     let h = setup().await;
     let id = item(&h, 1, Some(PROJECT), Some(BRANCH));
     let (n, job) = pr_with_failure(&h, "boom\n").await;
-    let ps = h
-        .env
-        .store()
-        .reader(|c| panels::panels(&h.env.modules, c, WS, ME, &id))
-        .expect("panels");
+    let ps = panels::panels(&h.env.modules, WS, ME, &id).expect("panels");
     assert_eq!(ps.len(), 1);
     let pr_id = q(&h, "SELECT id FROM gh_prs WHERE item_id = ?", &[&id]);
     let pr_id = pr_id.as_str().expect("id");
@@ -729,11 +725,7 @@ async fn the_panel_matches_section_7_and_reruns_failed_checks() {
         .await
         .expect("poll");
     exec(&h, "UPDATE items SET status = 'wait' WHERE id = ?", &[&id]);
-    let ps = h
-        .env
-        .store()
-        .reader(|c| panels::panels(&h.env.modules, c, WS, ME, &id))
-        .expect("panels");
+    let ps = panels::panels(&h.env.modules, WS, ME, &id).expect("panels");
     assert_eq!(ps[0].foot.as_deref(), Some("2 项检查通过 · 等你验收后合并"));
     assert_eq!(
         ps[0]

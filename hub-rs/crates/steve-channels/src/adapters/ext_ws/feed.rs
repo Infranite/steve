@@ -170,7 +170,7 @@ impl ExtWsHook {
                 )
                 .optional()?;
             match owner {
-                Some((account, actor)) => steve_modules::accounts::enrich(tx, hooks, ws, &actor, &account, &e).map(Some),
+                Some((account, actor)) => tx.write(|w| steve_modules::accounts::enrich(w, hooks, ws, &actor, &account, &e)).map(Some),
                 None => Ok(None),
             }
         });

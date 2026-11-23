@@ -329,7 +329,7 @@ async fn a_contact_the_names_run_made_real_is_still_merged_but_not_one_you_confi
     let promoted = h
         .env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             steve_modules::accounts::enrich(
                 tx,
                 &[],
@@ -374,7 +374,7 @@ async fn a_contact_the_names_run_made_real_is_still_merged_but_not_one_you_confi
         .store()
         .transaction(|tx| {
             use steve_modules::contacts::{repo, service};
-            let p = repo::get(tx, &first.party_id)?.expect("party");
+            let p = tx.write(|w| repo::get(w, &first.party_id))?.expect("party");
             service::revise_as(
                 tx,
                 &p,

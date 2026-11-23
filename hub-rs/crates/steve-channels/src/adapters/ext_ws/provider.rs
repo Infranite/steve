@@ -676,7 +676,7 @@ pub(crate) fn known_systems(cx: &ConnCx) -> HashSet<String> {
     cx.connections()
         .modules()
         .store
-        .reader(|c| steve_modules::accounts::repo::systems(c, cx.ws()))
+        .read(|r| steve_store::Systems(r).list(cx.ws()))
         .map(|v| v.into_iter().map(|s| s.id).collect())
         .unwrap_or_default()
 }

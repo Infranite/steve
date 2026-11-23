@@ -26,7 +26,6 @@ regex = "=1.13.1"
 # Connections (A2): token endpoints of OAuth providers.
 reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls", "rustls-tls-native-roots"] }
 url = "=2.5.8"
-rusqlite = { version = "=0.40.2", features = ["bundled"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 serde_path_to_error = "=0.1.20"
@@ -51,6 +50,7 @@ secret-service = { version = "=5.2.0", features = ["rt-tokio-crypto-rust"] }
 zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }
 
 [dev-dependencies]
+steve-store = { path = "../steve-store", features = ["testkit"] }
 steve-runtime = { path = "../steve-runtime", features = ["due-contract"] }
 # Software passkey for the V3 WebAuthn ceremonies.
 webauthn-authenticator-rs = { version = "=0.6.2", features = ["softpasskey"] }

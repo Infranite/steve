@@ -69,7 +69,7 @@ async fn local_candidates(
     let lookups = channels.profile_systems();
     let cands = channels
         .modules()
-        .blocking(move |m| m.store.reader(|c| candidates(c, &w, now, &lookups)))
+        .blocking(move |m| m.store.read(|r| Ok(candidates(r, &w, now, &lookups)))?)
         .await?;
     rep.candidates = cands.len();
 
@@ -205,7 +205,7 @@ async fn link_local_tenants(
             }
             given.insert(seen.party.clone());
             let ws2 = ws.to_string();
-            let org = match store.transaction(|tx| accounts::tenant_org(tx, &ws2, &actor, &hint)) {
+            let org = match store.write(|tx| accounts::tenant_org(tx, &ws2, &actor, &hint)) {
                 Ok(o) => o,
                 Err(e) => {
                     tracing::warn!(ws, "names: organization not recorded: {e}");
@@ -448,7 +448,7 @@ impl Lookup<'_> {
                     };
                     let actor = cand.actor.clone();
                     let ws2 = ws.to_string();
-                    match store.transaction(|tx| accounts::tenant_org(tx, &ws2, &actor, &hint)) {
+                    match store.write(|tx| accounts::tenant_org(tx, &ws2, &actor, &hint)) {
                         Ok(o) => Some(o),
                         Err(e) => {
                             tracing::warn!(ws, "names: organization not recorded: {e}");

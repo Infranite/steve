@@ -98,7 +98,7 @@ impl Mail {
             .0
             .m
             .store
-            .reader(|c| steve_modules::accounts::connections::repo::list(c, &who.ws))?;
+            .read(|c| steve_modules::accounts::connections::repo::list(c, &who.ws))?;
         let mut out = Vec::new();
         for r in rows {
             if self.adapter(&r.adapter).is_none() || self.0.conns.get(who, &r.id).is_err() {
@@ -113,8 +113,8 @@ impl Mail {
     pub fn account(&self, who: &Caller, id: &str) -> MailResult<AccountOut> {
         let c = self.0.conns.get(who, id).map_err(MailError::from)?;
         let settings = self.settings(who, id)?;
-        let (address, unread) = self.0.m.store.reader(|c| -> MailResult<(String, i64)> {
-            let address = steve_modules::accounts::connections::repo::get(c, id)?
+        let address = self.0.m.store.read(|r| {
+            let address = steve_modules::accounts::connections::repo::get(r, id)?
                 .and_then(|r| {
                     r.config
                         .get("address")
@@ -122,8 +122,9 @@ impl Mail {
                         .map(String::from)
                 })
                 .unwrap_or_default();
-            Ok((address, repo::unread_of(c, id)?))
+            Ok(address)
         })?;
+        let unread = self.0.m.store.reader(|c| repo::unread_of(c, id))?;
         Ok(AccountOut {
             connection_id: c.id,
             address,

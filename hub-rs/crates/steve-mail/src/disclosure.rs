@@ -26,7 +26,11 @@ pub(crate) struct Inputs {
     draft_model: Option<String>,
 }
 
-pub(crate) fn inputs(db: &steve_store::Store, c: &Connection, d: &DraftRow) -> MailResult<Inputs> {
+pub(crate) fn inputs(
+    r: &mut impl steve_store::Read,
+    c: &Connection,
+    d: &DraftRow,
+) -> MailResult<Inputs> {
     let entries = d
         .basis
         .as_ref()
@@ -34,7 +38,7 @@ pub(crate) fn inputs(db: &steve_store::Store, c: &Connection, d: &DraftRow) -> M
         .cloned()
         .unwrap_or_default();
     let (knowledge, complete) =
-        db.read(|r| steve_knowledge::retrieve::knowledge_again(r, &d.workspace_id, &entries))?;
+        steve_knowledge::retrieve::knowledge_again(r, &d.workspace_id, &entries)?;
     let mut draft_model = d
         .basis
         .as_ref()
@@ -58,7 +62,7 @@ pub(crate) fn inputs(db: &steve_store::Store, c: &Connection, d: &DraftRow) -> M
             .flatten();
     }
     Ok(Inputs {
-        audience: audience_of_draft(c, d)?,
+        audience: audience_of_draft(r, d)?,
         knowledge,
         complete,
         draft_model,
@@ -116,7 +120,7 @@ pub(crate) fn basis(d: &DraftRow, check: &CheckResult) -> Value {
 impl Mail {
     pub(crate) async fn full_check(&self, d: &DraftRow) -> MailResult<(CheckResult, Inputs)> {
         let db = &self.0.m.store;
-        let inputs = db.read(|_| Ok(db.reader(|c| inputs(db, c, d))))??;
+        let inputs = db.read(|r| Ok(db.reader(|c| inputs(r, c, d))))??;
         let cx = CheckCx {
             ws: d.workspace_id.clone(),
             actor: d.author.clone(),

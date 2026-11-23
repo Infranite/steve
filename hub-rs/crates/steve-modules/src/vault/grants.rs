@@ -5,12 +5,13 @@
 
 use serde::Deserialize;
 use serde_json::{Value, json};
-use steve_store::{Tx, base, now, uid};
+use steve_store::{
+    BotRows, GrantRows, ItemReads, NewVaultGrant, Read, W, now, uid,
+    vault_items::{ItemRow, VaultItems},
+};
 
 use super::items::GrantOut;
-use super::items::repo::{self as irepo, ItemRow};
 use super::items::templates::BANK_CARD;
-use super::use_repo as urepo;
 use super::{Vault, VaultError, VaultResult};
 use crate::ApiError;
 
@@ -36,12 +37,12 @@ pub fn grantable(item: &ItemRow) -> bool {
 }
 
 /// The scope in its stored form, or `400 参数不对：scope`. Projects must be in `ws`.
-fn normalize_scope(c: &rusqlite::Connection, ws: &str, scope: &Value) -> VaultResult<Value> {
+fn normalize_scope(c: &mut impl Read, ws: &str, scope: &Value) -> VaultResult<Value> {
     let bad = || VaultError::from(ApiError::invalid("scope"));
     let m = scope.as_object().filter(|m| m.len() == 1).ok_or_else(bad)?;
     if let Some(p) = m.get("project_id") {
         let p = p.as_str().filter(|p| !p.is_empty()).ok_or_else(bad)?;
-        if irepo::project_name(c, ws, p)?.is_none() {
+        if ItemReads(c).project_name(ws, p)?.is_none() {
             return Err(ApiError::not_found("项目").into());
         }
         return Ok(json!({ "project_id": p }));
@@ -63,7 +64,7 @@ fn normalize_scope(c: &rusqlite::Connection, ws: &str, scope: &Value) -> VaultRe
 /// Writes a grant inside `tx` after the item and duration checks. Returns its id.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn add_grant(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     item: &ItemRow,
     bot: &str,
@@ -80,27 +81,25 @@ pub(crate) fn add_grant(
     }
     let at = now();
     let id = uid("gr");
-    urepo::insert_grant(
-        tx,
-        &id,
+    GrantRows(tx).insert_vault_grant(&NewVaultGrant {
+        id: &id,
         ws,
         bot,
-        &item.id,
+        item: &item.id,
         scope,
-        at + hours * HOUR_MS,
+        until: at + hours * HOUR_MS,
         actor,
-        decision_id,
+        decision: decision_id,
         at,
-    )?;
-    base::audit(
-        tx,
+    })?;
+    tx.audit(
         ws,
         actor,
         "grant.add",
         &item.id,
         &json!({"grant": id, "bot": bot, "scope": scope, "hours": hours, "decision": decision_id}),
     )?;
-    tx.publish(steve_types::DomainEvent::from(
+    tx.emit(steve_types::DomainEvent::from(
         steve_types::VaultEvent::Vault {
             id: {
                 let value: String = item.id.clone();
@@ -118,7 +117,7 @@ pub(crate) fn add_grant(
 /// The open grant that lets `bot` use `item` in `scope` now, if any (never for site scopes, never on
 /// an item that is no longer grantable).
 pub(crate) fn covering(
-    c: &rusqlite::Connection,
+    c: &mut impl Read,
     ws: &str,
     item: &ItemRow,
     bot: &str,
@@ -127,9 +126,7 @@ pub(crate) fn covering(
     if !grantable(item) || scope.get("site").is_some() {
         return Ok(None);
     }
-    Ok(urepo::covering_grants(c, ws, &item.id, bot, scope, now())?
-        .into_iter()
-        .next())
+    Ok(GrantRows(c).vault_covering(ws, &item.id, bot, scope, now())?)
 }
 
 impl Vault {
@@ -141,12 +138,12 @@ impl Vault {
         item_id: &str,
         g: NewGrant,
     ) -> VaultResult<GrantOut> {
-        let id = self.store().transaction(|tx| {
+        let id = self.store().write(|tx| {
             let (item, _) = super::items::own_item(tx, ws, user, item_id)?;
             if !grantable(&item) {
                 return Err(ApiError::rule(steve_i18n::t!("modules.vault.grant_high")).into());
             }
-            if !urepo::bot_in(tx, ws, &g.bot_id)? {
+            if !BotRows(tx).serves(ws, &g.bot_id)? {
                 return Err(ApiError::not_found("Bot").into());
             }
             if !HOURS.contains(&g.hours) {
@@ -164,27 +161,28 @@ impl Vault {
 
     /// `DELETE /grants/:id`: `revoked` set; already revoked or expired is fine.
     pub fn revoke_grant(&self, ws: &str, user: &str, grant_id: &str) -> VaultResult<()> {
-        self.store().transaction(|tx| {
-            let g = urepo::grant(tx, grant_id)?
+        self.store().write(|tx| {
+            let g = GrantRows(tx)
+                .vault_grant(grant_id)?
                 .filter(|g| g.workspace_id == ws)
                 .ok_or_else(|| ApiError::not_found("授权"))?;
             // the item must be visible to the caller (a deleted item has no open grants anyway)
-            let visible = irepo::item(tx, &g.resource_id)?
-                .and_then(|i| irepo::vault(tx, &i.vault_id).ok().flatten())
+            let visible = VaultItems(tx)
+                .item(&g.resource_id)?
+                .and_then(|i| VaultItems(tx).vault(&i.vault_id).ok().flatten())
                 .is_some_and(|v| v.visible_to(ws, user));
             if !visible {
                 return Err(ApiError::not_found("授权").into());
             }
-            if urepo::revoke_grant(tx, grant_id, now())? {
-                base::audit(
-                    tx,
+            if GrantRows(tx).revoke_vault_grant(grant_id, now())? {
+                tx.audit(
                     ws,
                     user,
                     "grant.revoke",
                     &g.resource_id,
                     &json!({"grant": grant_id, "bot": g.subject_id}),
                 )?;
-                tx.publish(steve_types::DomainEvent::from(
+                tx.emit(steve_types::DomainEvent::from(
                     steve_types::VaultEvent::Vault {
                         id: {
                             let value: String = g.resource_id.clone();

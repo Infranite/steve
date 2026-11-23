@@ -296,11 +296,11 @@ fn thread(ch: &Channels, scope: &Scope, args: &Value) -> ChannelResult<String> {
     let q = args["message_id"]
         .as_str()
         .ok_or_else(|| bad("message_id"))?;
-    ch.store().reader(|c| -> ChannelResult<String> {
+    ch.store().read(|r| Ok(ch.store().reader(|c| -> ChannelResult<String> {
         let level = readable(c, scope)?;
         let id = resolve(c, scope, q)?;
         let target = one(c, &id)?;
-        let tz = crate::im_mcp::tz_of(c, &scope.ws);
+        let tz = crate::im_mcp::tz_of(r, &scope.ws);
         // the root, like the replies and the quoted message, only among messages anyone saw
         let root_id =
             crate::im_context::thread_root(c, &scope.space_id, &id)?.unwrap_or(id.clone());
@@ -387,7 +387,7 @@ fn thread(ch: &Channels, scope: &Scope, args: &Value) -> ChannelResult<String> {
         out.push('\n');
         out.push_str(steve_knowledge::tools::LEVELS);
         Ok(out)
-    })
+    })))?
 }
 
 async fn media(ch: &Channels, scope: &Scope, args: &Value) -> ChannelResult<Answer> {

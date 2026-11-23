@@ -19,7 +19,6 @@ use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::{Value, json};
 use steve_modules::accounts::connections::{WriteRefusal, may_write_in};
-use steve_modules::accounts::service::current_party;
 use steve_modules::contacts::people_repo;
 use steve_modules::decisions::{DecisionCx, DecisionHandler, choice_result};
 use steve_modules::outbound::Verdict;
@@ -506,7 +505,7 @@ impl Mail {
                 return Ok(Err(SendOutcome::Skipped));
             }
             // the connection as it is now, not as it was when you approved
-            match may_write_in(tx, &d.workspace_id, &d.connection_id, Some(SEND_CAP))? {
+            match tx.write(|w| may_write_in(w, &d.workspace_id, &d.connection_id, Some(SEND_CAP)))? {
                 Ok(()) => {}
                 Err(WriteRefusal::Later(_)) => return Ok(Err(SendOutcome::Skipped)),
                 Err(WriteRefusal::Never(why)) => {
@@ -543,9 +542,15 @@ impl Mail {
     }
 
     /// Step 2: the MIME message (`mail-builder`), the same for every adapter.
-    fn build(&self, c: &Connection, d: &DraftRow, now: i64) -> MailResult<Built> {
-        let mailbox = Mailbox::load(c, &d.workspace_id, &d.connection_id)?;
-        let conn = steve_modules::accounts::connections::repo::get(c, &d.connection_id)?
+    fn build(
+        &self,
+        c: &Connection,
+        r: &mut steve_store::R<'_>,
+        d: &DraftRow,
+        now: i64,
+    ) -> MailResult<Built> {
+        let mailbox = Mailbox::load(r, &d.workspace_id, &d.connection_id)?;
+        let conn = steve_modules::accounts::connections::repo::get(r, &d.connection_id)?
             .ok_or_else(|| MailError::Api(ApiError::not_found("连接")))?;
         let from = conn
             .config
@@ -561,8 +566,8 @@ impl Mail {
                 .optional()?
         };
         let from_name = match party {
-            Some(p) => current_party(c, &p)
-                .map_err(MailError::Api)?
+            Some(p) => steve_store::Contacts::new(r)
+                .current_party(&p)?
                 .map(|p| p.name)
                 .unwrap_or_default(),
             None => String::new(),
@@ -670,7 +675,14 @@ impl Mail {
         } else {
             strip_ai_prefix(&d.body).to_string()
         };
-        let built = match self.0.m.store.reader(|c| self.build(c, &d, now)) {
+        let built = match self
+            .0
+            .m
+            .store
+            .read(|r| Ok(self.0.m.store.reader(|c| self.build(c, r, &d, now))))
+            .map_err(MailError::from)
+            .and_then(|out| out)
+        {
             Ok(b) => b,
             Err(e) => return self.fail(&d, &e.to_string()),
         };
@@ -929,7 +941,7 @@ impl Mail {
             let who = |l: &[Rcpt]| -> MailResult<Value> {
                 let mut out = Vec::new();
                 for r in l {
-                    let (party, _) = drafts::audience_of(tx, ws, &r.addr)?;
+                    let (party, _) = tx.write(|w| drafts::audience_of(w, ws, &r.addr))?;
                     out.push(json!({"addr": r.addr, "name": r.name, "account_id": null, "party_id": party}));
                 }
                 Ok(Value::Array(out))

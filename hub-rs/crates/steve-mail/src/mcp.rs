@@ -582,28 +582,31 @@ impl Mail {
             .0
             .m
             .store
-            .reader(|c| -> MailResult<Audience> {
-                let mut au = Audience::default();
-                let mut names = Vec::new();
-                for r in to.iter().chain(cc.iter()) {
-                    let (party, internal) = audience_of(c, &cx.ws, &r.addr)?;
-                    au.external |= !internal;
-                    if let Some(p) = party {
-                        au.parties.push(p);
+            .read(|c| {
+                Ok((|| -> MailResult<Audience> {
+                    let mut au = Audience::default();
+                    let mut names = Vec::new();
+                    for r in to.iter().chain(cc.iter()) {
+                        let (party, internal) = audience_of(c, &cx.ws, &r.addr)?;
+                        au.external |= !internal;
+                        if let Some(p) = party {
+                            au.parties.push(p);
+                        }
+                        names.push(if r.name.is_empty() {
+                            r.addr.clone()
+                        } else {
+                            r.name.clone()
+                        });
                     }
-                    names.push(if r.name.is_empty() {
-                        r.addr.clone()
-                    } else {
-                        r.name.clone()
-                    });
-                }
-                au.description = format!(
-                    "邮件收件人：{}，{}",
-                    names.join("、"),
-                    if au.external { "外部" } else { "内部" }
-                );
-                Ok(au)
+                    au.description = format!(
+                        "邮件收件人：{}，{}",
+                        names.join("、"),
+                        if au.external { "外部" } else { "内部" }
+                    );
+                    Ok(au)
+                })())
             })
+            .map_err(internal)?
             .map_err(internal)?;
         Ok(Prepared {
             who,

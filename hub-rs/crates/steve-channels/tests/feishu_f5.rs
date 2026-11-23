@@ -118,7 +118,8 @@ impl H {
     fn dir_conn(&self) -> DirConnection {
         self.env
             .store()
-            .reader(|c| self.tables.get(c, WS, &self.con))
+            .read(|r| Ok(self.tables.get(r, WS, &self.con)))
+            .expect("read")
             .expect("get")
             .expect("a directory connection")
     }

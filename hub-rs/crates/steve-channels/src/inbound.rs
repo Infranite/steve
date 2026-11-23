@@ -690,7 +690,8 @@ impl Channels {
     ) -> ChannelResult<()> {
         let store = self.store();
         // What the rules look at; the event carries it too, for flows converted from rules.
-        let rf = store.reader(|c| rule_facts(c, ws, &facts, &inbound, &msg))?;
+        let rf = store
+            .read(|r| Ok(store.reader(|c| rule_facts(c, r, ws, &facts, &inbound, &msg))))??;
 
         // Step 2, second half: the signal.
         // a message without a provider id is its event by the Hub's message id
@@ -815,13 +816,15 @@ impl Channels {
         let mentions = input.identify_mentions(tx, &prepared.label)?;
         let key = {
             let want = fallback::key_system(self, &facts.adapter, &msg.sender.handle.system);
-            let (sys, handle) = fallback::key_sender(
-                tx,
-                ws,
-                identity.sender_party.as_deref(),
-                &want,
-                &msg.sender.handle,
-            )?;
+            let (sys, handle) = tx.write(|w| {
+                fallback::key_sender(
+                    w,
+                    ws,
+                    identity.sender_party.as_deref(),
+                    &want,
+                    &msg.sender.handle,
+                )
+            })?;
             fallback::key_of(&sys, &handle, &msg.text, &msg.attachments)
         };
         let first = input.find_existing_message(self, tx, space, &identity, &key)?;
@@ -1787,7 +1790,7 @@ fn suggest_me(
     sender: &Sender,
 ) -> ChannelResult<()> {
     let user = facts.owner_user.as_deref().unwrap_or(&facts.created_by);
-    let Some(me) = steve_modules::contacts::repo::me_of(tx, ws, user)? else {
+    let Some(me) = tx.write(|w| w.contacts().me(ws, user))? else {
         return Ok(());
     };
     let handles: Vec<&str> = std::iter::once(&sender.handle)
@@ -1842,6 +1845,7 @@ fn also(main: &str, msg: &InboundMessage) -> Vec<String> {
 /// The facts the rules' conditions look at (after step 1–2's writes).
 fn rule_facts(
     c: &rusqlite::Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     conn: &ConnFacts,
     inbound: &Inbound,
@@ -1889,7 +1893,7 @@ fn rule_facts(
         weekday: 0,
         minute: 0,
     };
-    let tz = steve_modules::zone::workspace_tz(c, ws).map(|zone| zone.name().to_string())?;
+    let tz = steve_modules::zone::workspace_tz(r, ws).map(|zone| zone.name().to_string())?;
     f.set_time(msg.created, &tz);
     Ok(f)
 }

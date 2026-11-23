@@ -19,28 +19,30 @@ impl Mail {
     ) -> MailResult<Audience> {
         let m = self.clone();
         tokio::task::spawn_blocking(move || {
-            m.0.m.store.reader(|c| -> MailResult<Audience> {
-                let mut a = Audience::default();
-                let mut names = Vec::new();
-                for r in &rc {
-                    let (party, internal) = audience_of(c, &ws, &r.addr)?;
-                    a.external |= !internal;
-                    if let Some(p) = party {
-                        a.parties.push(p);
+            m.0.m.store.read(|c| {
+                Ok((|| -> MailResult<Audience> {
+                    let mut a = Audience::default();
+                    let mut names = Vec::new();
+                    for r in &rc {
+                        let (party, internal) = audience_of(c, &ws, &r.addr)?;
+                        a.external |= !internal;
+                        if let Some(p) = party {
+                            a.parties.push(p);
+                        }
+                        names.push(if r.name.is_empty() {
+                            r.addr.clone()
+                        } else {
+                            r.name.clone()
+                        });
                     }
-                    names.push(if r.name.is_empty() {
-                        r.addr.clone()
-                    } else {
-                        r.name.clone()
-                    });
-                }
-                a.description = format!(
-                    "邮件收件人：{}，{}",
-                    names.join("、"),
-                    if a.external { "外部" } else { "内部" }
-                );
-                Ok(a)
-            })
+                    a.description = format!(
+                        "邮件收件人：{}，{}",
+                        names.join("、"),
+                        if a.external { "外部" } else { "内部" }
+                    );
+                    Ok(a)
+                })())
+            })?
         })
         .await
         .map_err(|e| MailError::Other(format!("task failed: {e}")))?

@@ -18,16 +18,16 @@ use std::sync::Arc;
 
 use serde::Serialize;
 use serde_json::{Map, Value, json};
-use steve_store::Tx;
-use steve_store::base::links::{self, LinkKey, NewLink};
+use steve_store::base::links::{LinkKey, Links, NewLink};
 use steve_store::base::{ObjRef, Viewer};
+use steve_store::{Accounts, Read, W};
 
 use super::identify::ExtraHandle;
 use super::repo::{self, AccountPatch};
-use super::service::{self as svc, Record, current_party, event, own_system, party_event};
+use super::service::{self as svc, Record, account_event, own_system, party_changed};
 use crate::contacts::PartyHooks;
-use crate::contacts::repo::{self as people, NewParty, PARTY, Party, PartyPatch};
-use crate::contacts::service::ensure_self_org;
+use crate::contacts::repo::{NewParty, PARTY, Party, PartyPatch};
+use crate::contacts::service::ensure_self_org_in;
 use crate::{ApiError, ApiResult};
 
 /// The accounts system of organization keys (Feishu `tenant_key`).
@@ -97,12 +97,12 @@ fn clip(s: &str, n: usize) -> String {
 
 /// A name equal to one of the account's handles, or to a handle's value (what follows its last
 /// `:` in a qualified handle such as `realm:id:value`), is a raw handle too.
-fn is_raw(c: &rusqlite::Connection, name: &str, account: &str) -> ApiResult<bool> {
+fn is_raw(c: &mut impl Read, name: &str, account: &str) -> ApiResult<bool> {
     if looks_like_handle(name) {
         return Ok(true);
     }
     let name = name.trim();
-    Ok(repo::handles_of(c, account)?.iter().any(|(h, _)| {
+    Ok(Accounts(c).handles_of(account)?.iter().any(|(h, _)| {
         h.eq_ignore_ascii_case(name)
             || h.rsplit_once(':')
                 .is_some_and(|(_, v)| v.eq_ignore_ascii_case(name))
@@ -111,7 +111,7 @@ fn is_raw(c: &rusqlite::Connection, name: &str, account: &str) -> ApiResult<bool
 
 /// Revises a person with `"source": "sync"` in the change log.
 fn revise(
-    tx: &Tx,
+    tx: &mut W<'_>,
     p: &Party,
     patch: &PartyPatch,
     before: Map<String, Value>,
@@ -120,7 +120,7 @@ fn revise(
 ) -> ApiResult<()> {
     let mut after = after;
     after.insert("source".into(), json!("sync"));
-    crate::contacts::service::revise_as(
+    crate::contacts::service::revise_in(
         tx,
         p,
         patch,
@@ -131,7 +131,7 @@ fn revise(
 }
 
 struct Enriching<'a, 'tx> {
-    tx: &'a Tx<'tx>,
+    tx: &'a mut W<'tx>,
     hooks: &'a [Arc<dyn PartyHooks>],
     ws: &'a str,
     actor: &'a str,
@@ -142,8 +142,8 @@ struct Enriching<'a, 'tx> {
 }
 
 impl Enriching<'_, '_> {
-    fn merge_owners(&self, party: &mut Party, out: &mut Enriched) -> ApiResult<()> {
-        let tx = self.tx;
+    fn merge_owners(&mut self, party: &mut Party, out: &mut Enriched) -> ApiResult<()> {
+        let tx = &mut *self.tx;
         let hooks = self.hooks;
         let ws = self.ws;
         let actor = self.actor;
@@ -158,12 +158,11 @@ impl Enriching<'_, '_> {
             if handle.is_empty() {
                 continue;
             }
-            match repo::by_handle(tx, ws, &system.family, handle)? {
+            match Accounts(tx).by_handle(ws, &system.family, handle)? {
                 Some(other) if other != acc.id => owners.push(other),
                 Some(_) => {}
                 None => {
-                    repo::add_handle(
-                        tx,
+                    Accounts(tx).add_handle(
                         ws,
                         &system.family,
                         handle,
@@ -181,16 +180,18 @@ impl Enriching<'_, '_> {
         {
             let ms = own_system(tx, ws, "mail")?;
             if let Some(h) = svc::normalize(&ms, mail)
-                && let Some(other) = repo::by_handle(tx, ws, &ms.family, &h.handle)?
+                && let Some(other) = Accounts(tx).by_handle(ws, &ms.family, &h.handle)?
             {
                 owners.push(other);
             }
         }
         for other in owners {
-            let Some(oa) = repo::get(tx, &other)? else {
+            let Some(oa) = Accounts(tx).get(&other)? else {
                 continue;
             };
-            let Some(op) = current_party(tx, &oa.party_id)?
+            let Some(op) = tx
+                .contacts()
+                .current_party(&oa.party_id)?
                 .filter(|p| p.status == "active" && p.kind == "contact")
             else {
                 continue;
@@ -213,15 +214,18 @@ impl Enriching<'_, '_> {
             }
             crate::contacts::merge::merge_tx(tx, hooks, &viewer, actor, &from, &into)?;
             out.merged_into = Some(into.clone());
-            *party = people::get(tx, &into)?.ok_or_else(|| ApiError::not_found("联系人"))?;
+            *party = tx
+                .contacts()
+                .party(&into)?
+                .ok_or_else(|| ApiError::not_found("联系人"))?;
         }
         out.party_id = party.id.clone();
 
         Ok(())
     }
 
-    fn name(&self, party: &Party, out: &mut Enriched) -> ApiResult<Option<String>> {
-        let tx = self.tx;
+    fn name(&mut self, party: &Party, out: &mut Enriched) -> ApiResult<Option<String>> {
+        let tx = &mut *self.tx;
         let ws = self.ws;
         let actor = self.actor;
         let acc = self.acc;
@@ -236,8 +240,7 @@ impl Enriching<'_, '_> {
             && is_raw(tx, &acc.display_name, &acc.id)?
             && acc.display_name != *n
         {
-            repo::update(
-                tx,
+            Accounts(tx).update(
                 &acc.id,
                 &AccountPatch {
                     display_name: Some(n.clone()),
@@ -245,7 +248,7 @@ impl Enriching<'_, '_> {
                 },
                 None,
             )?;
-            event(tx, ws, &acc.id);
+            tx.emit(account_event(ws, &acc.id));
             out.account_named = true;
         }
         let mut patch = PartyPatch::default();
@@ -271,15 +274,15 @@ impl Enriching<'_, '_> {
             revise(tx, &party, &patch, before, after, actor)?;
             if out.promoted {
                 let src = if e.directory { "sync" } else { "chat" };
-                people::set_source(tx, &party.id, src)?;
+                tx.contacts().set_source(&party.id, src)?;
             }
         }
 
         Ok(name)
     }
 
-    fn avatar(&self, party: &Party) -> ApiResult<()> {
-        let tx = self.tx;
+    fn avatar(&mut self, party: &Party) -> ApiResult<()> {
+        let tx = &mut *self.tx;
         let e = self.enrichment;
         // 3. avatar, when the person has none
         if let Some(url) = e
@@ -291,21 +294,22 @@ impl Enriching<'_, '_> {
         {
             let mut av = party.avatar.as_object().cloned().unwrap_or_default();
             av.insert("url".into(), json!(url));
-            people::set_avatar(tx, &party.id, &Value::Object(av))?;
+            tx.contacts().set_avatar(&party.id, &Value::Object(av))?;
         }
 
         Ok(())
     }
 
-    fn job(&self, party: &Party, out: &mut Enriched) -> ApiResult<()> {
-        let tx = self.tx;
+    fn job(&mut self, party: &Party, out: &mut Enriched) -> ApiResult<()> {
+        let tx = &mut *self.tx;
         let ws = self.ws;
         let e = self.enrichment;
         // 4. the organization, when the person works nowhere yet
         if let Some(org) = &e.org_id
             && *org != party.id
         {
-            let open = links::from(tx, ws, &ObjRef::new(PARTY, &party.id), Some("works_at"))?
+            let open = Links(tx)
+                .from(ws, &ObjRef::new(PARTY, &party.id), Some("works_at"))?
                 .into_iter()
                 .any(|l| l.props.get("to").is_none_or(Value::is_null));
             let key = LinkKey {
@@ -323,7 +327,7 @@ impl Enriching<'_, '_> {
                 .as_deref()
                 .map(|t| clip(t, 80))
                 .filter(|t| !t.is_empty());
-            match links::get(tx, ws, &key)? {
+            match Links(tx).get(ws, &key)? {
                 None if !open => {
                     let mut l = NewLink::new(
                         key.subject,
@@ -332,7 +336,7 @@ impl Enriching<'_, '_> {
                         if e.directory { "sync" } else { "infer" },
                     );
                     l.props = json!({ "title": title, "dept": dept, "from": null, "to": null });
-                    out.org_linked = links::add(tx, ws, &l)?;
+                    out.org_linked = Links(tx).add(ws, &l)?;
                 }
                 // a job Steve recorded there: fill what is empty, never what you set
                 Some(l) if l.source != "manual" && l.props.get("to").is_none_or(Value::is_null) => {
@@ -354,7 +358,7 @@ impl Enriching<'_, '_> {
                         }
                     }
                     if props != l.props {
-                        out.job_filled = links::set_props(tx, ws, &key, &props)?;
+                        out.job_filled = Links(tx).set_props(ws, &key, &props)?;
                     }
                 }
                 _ => {}
@@ -364,8 +368,8 @@ impl Enriching<'_, '_> {
         Ok(())
     }
 
-    fn email(&self, party: &Party, name: &Option<String>, out: &mut Enriched) -> ApiResult<()> {
-        let tx = self.tx;
+    fn email(&mut self, party: &Party, name: &Option<String>, out: &mut Enriched) -> ApiResult<()> {
+        let tx = &mut *self.tx;
         let ws = self.ws;
         let actor = self.actor;
         let viewer = self.viewer;
@@ -380,9 +384,9 @@ impl Enriching<'_, '_> {
         {
             let ms = own_system(tx, ws, "mail")?;
             if let Some(h) = svc::normalize(&ms, mail)
-                && repo::by_handle(tx, ws, &ms.family, &h.handle)?.is_none()
+                && Accounts(tx).by_handle(ws, &ms.family, &h.handle)?.is_none()
             {
-                svc::record_tx(
+                svc::record(
                     tx,
                     &viewer,
                     actor,
@@ -413,17 +417,21 @@ impl Enriching<'_, '_> {
 /// Applies `e` to account `account_id` of `ws` on behalf of `actor` (the connection's owner).
 /// `hooks` are the contacts ports' party hooks (merging moves accounts through them).
 pub fn enrich(
-    tx: &Tx,
+    tx: &mut W<'_>,
     hooks: &[Arc<dyn PartyHooks>],
     ws: &str,
     actor: &str,
     account_id: &str,
     e: &Enrichment,
 ) -> ApiResult<Enriched> {
-    let acc = repo::get(tx, account_id)?.ok_or_else(|| ApiError::not_found("账号"))?;
+    let acc = Accounts(tx)
+        .get(account_id)?
+        .ok_or_else(|| ApiError::not_found("账号"))?;
     let system = own_system(tx, ws, &acc.system_id)?;
-    let mut party =
-        current_party(tx, &acc.party_id)?.ok_or_else(|| ApiError::not_found("联系人"))?;
+    let mut party = tx
+        .contacts()
+        .current_party(&acc.party_id)?
+        .ok_or_else(|| ApiError::not_found("联系人"))?;
     let mut out = Enriched {
         party_id: party.id.clone(),
         ..Enriched::default()
@@ -431,9 +439,9 @@ pub fn enrich(
     if party.kind != "contact" || party.status != "active" {
         return Ok(out);
     }
-    let viewer = Viewer::load(tx, ws, actor)?;
+    let viewer = Viewer::bare(ws, actor);
 
-    let run = Enriching {
+    let mut run = Enriching {
         tx,
         hooks,
         ws,
@@ -457,7 +465,7 @@ pub fn enrich(
         || out.merged_into.is_some()
         || out.account_named
     {
-        party_event(tx, ws, &party.id);
+        tx.emit(party_changed(ws, &party.id));
     }
     Ok(out)
 }
@@ -478,21 +486,24 @@ pub struct TenantHint {
 /// The organization party of a tenant, created when new: the own organization for the own tenant,
 /// otherwise one organization per tenant named after what is known. A placeholder name is replaced
 /// by a real one later, a name you gave is kept.
-pub fn tenant_org(tx: &Tx, ws: &str, actor: &str, t: &TenantHint) -> ApiResult<String> {
+pub fn tenant_org(tx: &mut W<'_>, ws: &str, actor: &str, t: &TenantHint) -> ApiResult<String> {
     let key = t.key.trim();
     if key.is_empty() {
         return Err(ApiError::invalid("tenant_key"));
     }
-    svc::ensure_seeds(tx, ws)?;
+    svc::seed(tx, ws)?;
     let system = own_system(tx, ws, TENANT_SYSTEM)?;
     let name = t
         .name
         .as_deref()
         .map(|n| clip(n, 80))
         .filter(|n| !n.is_empty());
-    if let Some(a) = repo::by_handle(tx, ws, &system.family, key)?
-        && let Some(acc) = repo::get(tx, &a)?
-        && let Some(p) = current_party(tx, &acc.party_id)?.filter(|p| p.status == "active")
+    if let Some(a) = Accounts(tx).by_handle(ws, &system.family, key)?
+        && let Some(acc) = Accounts(tx).get(&a)?
+        && let Some(p) = tx
+            .contacts()
+            .current_party(&acc.party_id)?
+            .filter(|p| p.status == "active")
     {
         if let Some(n) = &name
             && p.name != *n
@@ -513,12 +524,12 @@ pub fn tenant_org(tx: &Tx, ws: &str, actor: &str, t: &TenantHint) -> ApiResult<S
                 after,
                 actor,
             )?;
-            party_event(tx, ws, &p.id);
+            tx.emit(party_changed(ws, &p.id));
         }
         return Ok(p.id);
     }
     let org = if t.own {
-        let o = ensure_self_org(tx, ws, actor)?;
+        let o = ensure_self_org_in(tx, ws, actor)?;
         if let Some(n) = &name
             && o.name != *n
             && placeholder(tx, ws, &o)?
@@ -543,8 +554,8 @@ pub fn tenant_org(tx: &Tx, ws: &str, actor: &str, t: &TenantHint) -> ApiResult<S
     } else {
         new_external_tenant(tx, ws, actor, key, t, &name)?
     };
-    let viewer = Viewer::load(tx, ws, actor)?;
-    svc::record_tx(
+    let viewer = Viewer::bare(ws, actor);
+    svc::record(
         tx,
         &viewer,
         actor,
@@ -564,18 +575,18 @@ pub fn tenant_org(tx: &Tx, ws: &str, actor: &str, t: &TenantHint) -> ApiResult<S
             },
         },
     )?;
-    party_event(tx, ws, &org.id);
+    tx.emit(party_changed(ws, &org.id));
     Ok(org.id)
 }
 
 /// A name nobody chose: Steve's “外部组织…” placeholder or the own organization still named after the
 /// workspace — and never one a person set, whatever it says ([`crate::contacts::profile::org_name`]).
-fn placeholder(c: &rusqlite::Connection, ws: &str, p: &Party) -> ApiResult<bool> {
-    crate::contacts::profile::org_name_replaceable(c, ws, p)
+fn placeholder(tx: &mut W<'_>, ws: &str, p: &Party) -> ApiResult<bool> {
+    crate::contacts::profile::org_name_replaceable(tx, ws, p)
 }
 
 fn new_external_tenant(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     actor: &str,
     key: &str,
@@ -591,9 +602,8 @@ fn new_external_tenant(
     let mut p = NewParty::new("org", &n, actor);
     p.source = "sync".into();
     p.source_ref = Some(key.to_string());
-    let o = people::insert(tx, ws, &p)?;
-    steve_store::base::audit(
-        tx,
+    let o = tx.contacts().insert(ws, &p)?;
+    tx.audit(
         ws,
         actor,
         "party.create",

@@ -275,7 +275,7 @@ for line in sys.stdin:
     let id = made["id"].as_str().unwrap();
     let get = || {
         h.store
-            .reader(|c| steve_store::caps::mcp::get(c, id))
+            .read(|c| steve_store::caps::mcp::Servers(c).get(id))
             .unwrap()
             .unwrap()
     };

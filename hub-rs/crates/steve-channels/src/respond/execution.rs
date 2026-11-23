@@ -69,9 +69,11 @@ impl Channels {
         let d = self.store().transaction(|tx| open_handoff(tx, plan))?;
         r.decision_id = Some(d);
         if !plan.muted {
-            let owner = self
-                .store()
-                .reader(|c| personas::owner_name_for_space(c, &plan.ws, &plan.space_id))?;
+            let owner = self.store().read(|r| {
+                Ok(self
+                    .store()
+                    .reader(|c| personas::owner_name_for_space(c, r, &plan.ws, &plan.space_id)))
+            })??;
             let text = crate::rules::handoff_ack(&owner);
             match self.responder().acknowledge(self, plan, &text).await {
                 Ok(_) => {}

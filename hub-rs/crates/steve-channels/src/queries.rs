@@ -9,7 +9,8 @@
 use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 use steve_modules::accounts::connections::ConnCx;
-use steve_modules::accounts::{repo as accounts, service as handles};
+use steve_modules::accounts::service as handles;
+use steve_store::{Accounts, Systems};
 
 use crate::channel::{HandleRef, InboundMessage, MessageRef};
 use crate::{ChannelResult, Channels};
@@ -220,19 +221,20 @@ impl ConnQueries {
         from: &HandleRef,
         want_system: &str,
     ) -> ChannelResult<Option<HandleRef>> {
-        self.channels.store().reader(|c| -> ChannelResult<_> {
-            let Some(sys) = accounts::system(c, &self.ws, &from.system)? else {
+        Ok(self.channels.store().read(|r| {
+            let Some(sys) = Systems(r).get(&self.ws, &from.system)? else {
                 return Ok(None);
             };
-            let Some(want) = accounts::system(c, &self.ws, want_system)? else {
+            let Some(want) = Systems(r).get(&self.ws, want_system)? else {
                 return Ok(None);
             };
+            let mut accounts = Accounts(r);
             let mut account = None;
             for raw in std::iter::once(&from.handle).chain(&from.extra) {
                 let Some(h) = handles::normalize(&sys, raw) else {
                     continue;
                 };
-                account = accounts::by_handle(c, &self.ws, &sys.family, &h.handle)?;
+                account = accounts.by_handle(&self.ws, &sys.family, &h.handle)?;
                 if account.is_some() {
                     break;
                 }
@@ -240,19 +242,17 @@ impl ConnQueries {
             let Some(account) = account else {
                 return Ok(None);
             };
-            let handle: Option<String> = c
-                .query_row(
-                    "SELECT h.handle FROM account_handles h JOIN accounts a ON a.id = h.account_id
-                      WHERE a.workspace_id = ?1 AND h.workspace_id = ?1 AND h.family = ?2
-                        AND a.party_id = (SELECT party_id FROM accounts WHERE id = ?3)
-                        AND (h.connection_id IS NULL OR h.connection_id = ?4)
-                      ORDER BY h.connection_id IS NULL, a.system_id <> ?5, h.handle <> a.handle, h.created, h.rowid
-                      LIMIT 1",
-                    params![self.ws, want.family, account, self.conn, want.id],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            Ok(handle.map(|h| HandleRef::new(want.id.clone(), h)))
-        })
+            let Some(owner) = accounts.get(&account)? else {
+                return Ok(None);
+            };
+            let handle = accounts.preferred_handle(
+                &self.ws,
+                &owner.party_id,
+                &want.family,
+                &want.id,
+                Some(&self.conn),
+            )?;
+            Ok(handle.map(|h| HandleRef::new(want.id, h)))
+        })?)
     }
 }

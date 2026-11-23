@@ -4,7 +4,6 @@
 
 use steve_modules::accounts::connections::{ConnectionUsage, Usage};
 use steve_modules::vault::VaultResult;
-use steve_store::Tx;
 
 use crate::config::MailConfig;
 use crate::repo;
@@ -21,12 +20,18 @@ impl MailUsage {
 }
 
 impl ConnectionUsage for MailUsage {
-    fn usage(&self, _: &rusqlite::Connection, _: &str, _: &str) -> VaultResult<Usage> {
+    fn usage(&self, _: &steve_store::Store, _: &str, _: &str) -> VaultResult<Usage> {
         // mail is not a flow, space or event source of its own; the signals module lists the source
         Ok(Usage::default())
     }
 
-    fn on_disconnect(&self, tx: &Tx, _ws: &str, connection_id: &str) -> VaultResult<()> {
+    fn on_disconnect(
+        &self,
+        w: &mut steve_store::W<'_>,
+        _ws: &str,
+        connection_id: &str,
+    ) -> VaultResult<()> {
+        let tx = &w.legacy();
         let paths = repo::raw_paths(tx, connection_id)?;
         repo::delete_connection(tx, connection_id)?;
         // created by the mail sync for the folder scopes; the signals module may delete it as well

@@ -1,4 +1,4 @@
-use sea_query::{Expr, ExprTrait, Order, Query};
+use sea_query::{Expr, ExprTrait, Func, JoinType, Order, Query};
 
 use crate::contract::WorkspaceSettings;
 use crate::{Read, Result};
@@ -15,7 +15,93 @@ pub struct ItemEventFields {
     pub source: serde_json::Value,
 }
 
+/// The item state needed when linking contacts or adding a timeline entry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ItemHead {
+    pub id: String,
+    pub workspace_id: String,
+    pub title: String,
+    pub archived: bool,
+}
+
 impl<C: Read> ItemReads<'_, C> {
+    pub fn active_count_for_party(&mut self, ws: &str, party: &str) -> Result<i64> {
+        let items = Query::select()
+            .from_as("links", "l")
+            .column(("l", "subject_id"))
+            .distinct()
+            .join_as(
+                JoinType::InnerJoin,
+                "items",
+                "i",
+                Expr::col(("i", "id"))
+                    .equals(("l", "subject_id"))
+                    .and(Expr::col(("i", "workspace_id")).equals(("l", "workspace_id"))),
+            )
+            .and_where(Expr::col(("l", "workspace_id")).eq(ws))
+            .and_where(Expr::col(("l", "subject_type")).eq("item"))
+            .and_where(Expr::col(("l", "object_type")).eq("party"))
+            .and_where(Expr::col(("l", "object_id")).eq(party))
+            .and_where(Expr::col(("i", "archived")).eq(0_i64))
+            .take();
+        Ok(self
+            .0
+            .one(
+                Query::select()
+                    .from_subquery(items, "active_items")
+                    .expr(Func::count(Expr::col("subject_id"))),
+                |row| row.get(0),
+            )?
+            .unwrap_or_default())
+    }
+
+    pub fn head(&mut self, id: &str) -> Result<Option<ItemHead>> {
+        self.0.one(
+            Query::select()
+                .from("items")
+                .columns(["id", "workspace_id", "title", "archived"])
+                .and_where(Expr::col("id").eq(id)),
+            |row| {
+                Ok(ItemHead {
+                    id: row.get(0)?,
+                    workspace_id: row.get(1)?,
+                    title: row.get(2)?,
+                    archived: row.get(3)?,
+                })
+            },
+        )
+    }
+
+    pub fn heads(
+        &mut self,
+        ws: &str,
+        ids: &[&str],
+    ) -> Result<std::collections::HashMap<String, ItemHead>> {
+        if ids.is_empty() {
+            return Ok(Default::default());
+        }
+        Ok(self
+            .0
+            .all(
+                Query::select()
+                    .from("items")
+                    .columns(["id", "workspace_id", "title", "archived"])
+                    .and_where(Expr::col("workspace_id").eq(ws))
+                    .and_where(Expr::col("id").is_in(ids.iter().copied())),
+                |row| {
+                    Ok(ItemHead {
+                        id: row.get(0)?,
+                        workspace_id: row.get(1)?,
+                        title: row.get(2)?,
+                        archived: row.get(3)?,
+                    })
+                },
+            )?
+            .into_iter()
+            .map(|row| (row.id.clone(), row))
+            .collect())
+    }
+
     pub fn unfinished(&mut self, ws: &str, ids: &[String]) -> Result<bool> {
         for batch in ids.chunks(500) {
             if self
@@ -423,6 +509,19 @@ impl<C: Read> ItemReads<'_, C> {
                     status: r.get(2)?,
                 })
             },
+        )
+    }
+}
+
+impl<C: Read> ItemReads<'_, C> {
+    pub fn project_id(&mut self, ws: &str, item: &str) -> Result<Option<Option<String>>> {
+        self.0.one(
+            Query::select()
+                .from("items")
+                .column("project_id")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("id").eq(item)),
+            |row| row.get(0),
         )
     }
 }

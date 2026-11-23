@@ -229,8 +229,8 @@ fn like(q: &str) -> String {
     s
 }
 
-fn current_org(c: &Connection, viewer: &Viewer, party: &str) -> Option<String> {
-    steve_modules::contacts::service::jobs(c, viewer, party)
+fn current_org(c: &mut impl steve_store::Read, viewer: &Viewer, party: &str) -> Option<String> {
+    steve_modules::contacts::service::jobs_in(c, viewer, party)
         .ok()?
         .into_iter()
         .find(|j| j.to.is_none())
@@ -238,13 +238,19 @@ fn current_org(c: &Connection, viewer: &Viewer, party: &str) -> Option<String> {
 }
 
 /// The brief of a thread the viewer sees.
-pub fn brief(c: &Connection, viewer: &Viewer, t: &ThreadRow) -> MailResult<ThreadBrief> {
-    brief_with(c, viewer, t, &mut HashMap::new())
+pub fn brief(
+    c: &Connection,
+    r: &mut impl steve_store::Read,
+    viewer: &Viewer,
+    t: &ThreadRow,
+) -> MailResult<ThreadBrief> {
+    brief_with(c, r, viewer, t, &mut HashMap::new())
 }
 
 /// [`brief`] with the mailbox addresses looked up so far (a list shares a few mailboxes).
 fn brief_with(
     c: &Connection,
+    r: &mut impl steve_store::Read,
     viewer: &Viewer,
     t: &ThreadRow,
     addresses: &mut HashMap<String, String>,
@@ -253,7 +259,7 @@ fn brief_with(
     let address = match addresses.get(&t.connection_id) {
         Some(a) => a.clone(),
         None => {
-            let a = conn_repo::get(c, &t.connection_id)?
+            let a = conn_repo::get(r, &t.connection_id)?
                 .and_then(|r| {
                     r.config
                         .get("address")
@@ -277,7 +283,7 @@ fn brief_with(
         org: m
             .from_party_id
             .as_deref()
-            .and_then(|p| current_org(c, viewer, p)),
+            .and_then(|p| current_org(r, viewer, p)),
     });
     let signal = match msgs.iter().rev().find_map(|m| m.event_id.clone()) {
         Some(ev) => c
@@ -482,7 +488,7 @@ impl Mail {
             self.0.conns.get(who, a).map_err(MailError::from)?;
         }
         let viewer = self.viewer_of(who)?;
-        self.0.m.store.reader(|c| {
+        self.0.m.store.read(|r| Ok(self.0.m.store.reader(|c| {
             let scope = base::visible_sql("t", &viewer);
             let mut sql = format!(
                 "SELECT {} FROM mail_threads t WHERE t.workspace_id = ? AND {} AND {}",
@@ -520,31 +526,33 @@ impl Mail {
             let mut addresses = HashMap::new();
             threads
                 .iter()
-                .map(|t| brief_with(c, &viewer, t, &mut addresses))
+                .map(|t| brief_with(c, r, &viewer, t, &mut addresses))
                 .collect()
-        })
+        })))?
     }
 
     /// `GET /mail/threads/:id`.
     pub fn thread_detail(&self, who: &Caller, id: &str) -> MailResult<ThreadDetail> {
         let viewer = self.viewer_of(who)?;
-        self.0.m.store.reader(|c| {
-            let t = self.own_thread(c, &viewer, id)?;
-            let messages = repo::thread_messages(c, &t.id)?
-                .iter()
-                .map(|m| message_out(c, m))
-                .collect::<MailResult<Vec<_>>>()?;
-            let drafts = repo::thread_drafts(c, &t.id)?
-                .iter()
-                .map(|d| draft_out(c, d))
-                .collect::<MailResult<Vec<_>>>()?;
-            Ok(ThreadDetail {
-                brief: brief(c, &viewer, &t)?,
-                messages,
-                drafts,
-                items: linked_items(c, &t.workspace_id, &t.id)?,
-            })
-        })
+        self.0.m.store.read(|r| {
+            Ok(self.0.m.store.reader(|c| {
+                let t = self.own_thread(c, &viewer, id)?;
+                let messages = repo::thread_messages(c, &t.id)?
+                    .iter()
+                    .map(|m| message_out(c, m))
+                    .collect::<MailResult<Vec<_>>>()?;
+                let drafts = repo::thread_drafts(c, &t.id)?
+                    .iter()
+                    .map(|d| draft_out(r, d))
+                    .collect::<MailResult<Vec<_>>>()?;
+                Ok(ThreadDetail {
+                    brief: brief(c, r, &viewer, &t)?,
+                    messages,
+                    drafts,
+                    items: linked_items(c, &t.workspace_id, &t.id)?,
+                })
+            }))
+        })?
     }
 
     /// `PATCH /mail/threads/:id {state}`: `muted` makes later mail of the thread `ignored`
@@ -574,7 +582,7 @@ impl Mail {
                 done = s == "done";
             }
             let t = repo::thread(tx, &t.id)?.ok_or_else(Self::nf_thread)?;
-            Ok((brief(tx, &viewer, &t)?, done))
+            Ok((tx.write(|w| brief(tx, w, &viewer, &t))?, done))
         })?;
         self.0.notify.thread(&who.ws, &b.id);
         if done && tokio::runtime::Handle::try_current().is_ok() {

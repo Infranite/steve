@@ -106,7 +106,7 @@ impl Env {
     fn open_confirms(&self) -> i64 {
         self.env
             .store()
-            .reader(|c| steve_modules::contacts::people_repo::open_mem_confirms(c, WS))
+            .read(|r| steve_store::DecisionRows(r).open_confirmations(WS, "mem"))
             .unwrap()
     }
     fn decision(&self, id: &str) -> steve_store::Decision {

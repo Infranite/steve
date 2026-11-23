@@ -48,7 +48,9 @@ impl Dialect {
 
     pub(crate) fn contains(self, text: Expr, needle: Expr) -> Expr {
         match self {
-            Self::Sqlite => Expr::cust_with_exprs("instr(?, ?) > 0", [text, needle]),
+            Self::Sqlite => Func::cust("instr")
+                .args([text, needle])
+                .gt(Expr::Constant(0_i64.into())),
         }
     }
 
@@ -61,6 +63,14 @@ impl Dialect {
     pub(crate) fn local_date(self, ms: Expr) -> Expr {
         match self {
             Dialect::Sqlite => Expr::cust_with_expr("date(? / 1000, 'unixepoch', 'localtime')", ms),
+        }
+    }
+
+    pub(crate) fn erased_blob(self, column: &'static str) -> Expr {
+        match self {
+            Self::Sqlite => Func::cust("zeroblob")
+                .arg(Func::cust("length").arg(Expr::col(column)))
+                .into(),
         }
     }
 
@@ -214,6 +224,7 @@ pub enum Col<'a> {
     Int(i64),
     Real(f64),
     Text(&'a str),
+    Blob(&'a [u8]),
 }
 
 impl Row<'_> {
@@ -272,6 +283,15 @@ impl FromCol for String {
         match c {
             Col::Text(v) => Ok(v.to_owned()),
             _ => Err(wrong("text")),
+        }
+    }
+}
+
+impl FromCol for Vec<u8> {
+    fn from_col(column: Col<'_>) -> Result<Self> {
+        match column {
+            Col::Blob(bytes) => Ok(bytes.to_vec()),
+            _ => Err(wrong("a blob")),
         }
     }
 }

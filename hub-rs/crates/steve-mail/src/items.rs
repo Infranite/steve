@@ -404,9 +404,15 @@ impl ItemPanel for MailPanel {
         "mail"
     }
 
-    fn panels(&self, c: &Connection, ws: &str, me: &str, item_id: &str) -> ApiResult<Vec<Panel>> {
-        let viewer = Viewer::load(c, ws, me)?;
-        item_panels(c, &viewer, item_id).map_err(api)
+    fn panels(
+        &self,
+        store: &steve_store::Store,
+        ws: &str,
+        me: &str,
+        item_id: &str,
+    ) -> ApiResult<Vec<Panel>> {
+        let viewer = Viewer::bare(ws, me);
+        store.reader(|c| item_panels(c, &viewer, item_id).map_err(api))
     }
 
     /// The only button is a link the web opens itself.

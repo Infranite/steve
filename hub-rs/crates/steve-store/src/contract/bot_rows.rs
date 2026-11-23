@@ -135,7 +135,11 @@ impl<C: Read> BotRows<'_, C> {
                     ("b", "main"),
                     ("b", "enabled"),
                 ])
-                .order_by_columns([(("b", "main"), Order::Desc), (("b", "name"), Order::Asc)]),
+                .order_by_columns([
+                    (("b", "main"), Order::Desc),
+                    (("b", "name"), Order::Asc),
+                    (("b", "id"), Order::Asc),
+                ]),
             |row| {
                 Ok(BotRef {
                     id: row.get(0)?,
@@ -146,5 +150,76 @@ impl<C: Read> BotRows<'_, C> {
                 })
             },
         )
+    }
+}
+
+impl<C: Read> BotRows<'_, C> {
+    pub fn owned_in(&mut self, ws: &str) -> Result<Vec<BotRef>> {
+        let memberships = Query::select()
+            .from("bot_workspaces")
+            .column("bot_id")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .take();
+        self.0.all(
+            Query::select()
+                .from("bots")
+                .columns(["id", "name", "role", "main", "enabled"])
+                .and_where(Expr::col("deleted").eq(0_i64))
+                .and_where(
+                    Expr::col("workspace_id")
+                        .eq(ws)
+                        .or(Expr::col("id").in_subquery(memberships)),
+                )
+                .order_by("main", Order::Desc)
+                .order_by("name", Order::Asc),
+            |r| {
+                Ok(BotRef {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    role: r.get(2)?,
+                    main: r.get(3)?,
+                    enabled: r.get(4)?,
+                })
+            },
+        )
+    }
+
+    pub fn home(&mut self, bot: &str) -> Result<Option<String>> {
+        self.0.one(
+            Query::select()
+                .from("bots")
+                .column("workspace_id")
+                .and_where(Expr::col("id").eq(bot)),
+            |row| row.get(0),
+        )
+    }
+
+    pub fn visible_in(&mut self, ws: &str, bot: &str) -> Result<bool> {
+        let Some(home) = self.0.one(
+            Query::select()
+                .from("bots")
+                .column("workspace_id")
+                .and_where(Expr::col("id").eq(bot))
+                .and_where(Expr::col("deleted").eq(0_i64)),
+            |row| row.get::<String>(0),
+        )?
+        else {
+            return Ok(false);
+        };
+        Ok(home == ws || self.serves(ws, bot)?)
+    }
+
+    pub fn serves(&mut self, ws: &str, bot: &str) -> Result<bool> {
+        Ok(self
+            .0
+            .one(
+                Query::select()
+                    .from("bot_workspaces")
+                    .column("bot_id")
+                    .and_where(Expr::col("workspace_id").eq(ws))
+                    .and_where(Expr::col("bot_id").eq(bot)),
+                |_| Ok(()),
+            )?
+            .is_some())
     }
 }

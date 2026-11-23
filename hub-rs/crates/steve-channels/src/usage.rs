@@ -11,7 +11,6 @@
 use rusqlite::params;
 use steve_modules::accounts::connections::{ConnectionUsage, Usage};
 use steve_modules::vault::VaultResult;
-use steve_store::Tx;
 
 pub struct ChannelUsage;
 
@@ -27,14 +26,25 @@ fn active_spaces(c: &rusqlite::Connection, ws: &str, conn: &str) -> VaultResult<
 }
 
 impl ConnectionUsage for ChannelUsage {
-    fn usage(&self, c: &rusqlite::Connection, ws: &str, connection_id: &str) -> VaultResult<Usage> {
+    fn usage(
+        &self,
+        store: &steve_store::Store,
+        ws: &str,
+        connection_id: &str,
+    ) -> VaultResult<Usage> {
         Ok(Usage {
-            spaces: active_spaces(c, ws, connection_id)?,
+            spaces: store.reader(|c| active_spaces(c, ws, connection_id))?,
             ..Usage::default()
         })
     }
 
-    fn on_disconnect(&self, tx: &Tx, ws: &str, connection_id: &str) -> VaultResult<()> {
+    fn on_disconnect(
+        &self,
+        w: &mut steve_store::W<'_>,
+        ws: &str,
+        connection_id: &str,
+    ) -> VaultResult<()> {
+        let tx = &w.legacy();
         let now = steve_store::now();
         // the spaces this identity sees (or, from before 019, was first seen through)
         let ids = tx

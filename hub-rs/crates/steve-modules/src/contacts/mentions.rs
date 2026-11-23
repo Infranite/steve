@@ -2,13 +2,11 @@
 //! Matching is case-insensitive over names and aliases; names that start with
 //! the query come before names that only contain it.
 
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use steve_store::base::Viewer;
+use steve_store::{BotRows, Contacts, Read, Teams, base::Viewer};
 
-use super::people_repo as prepo;
 use super::repo::Party;
-use super::service::{jobs, start};
+use super::service::{jobs_in, start};
 use crate::{ApiError, ApiResult, Caller, Modules};
 
 /// Entries per group of the `@` menu.
@@ -76,15 +74,19 @@ fn party_names(p: &Party) -> Vec<&str> {
 }
 
 /// The second line of a party in menus.
-pub fn sub(c: &Connection, viewer: &Viewer, p: &Party) -> ApiResult<String> {
+fn sub(c: &mut impl Read, viewer: &Viewer, p: &Party) -> ApiResult<String> {
     Ok(match p.kind.as_str() {
         "team" => {
-            let n =
-                super::teams::repo::headcount(c, &viewer.ws, &p.id, prepo::is_chart(c, &p.id)?)?;
+            let mut teams = Teams(c);
+            let chart = teams.details(&p.id)?.is_chart();
+            let n = teams.headcount(&viewer.ws, &p.id, chart)?;
             steve_i18n::t!("modules.mentions.team", n = n)
         }
         "org" => steve_i18n::t!("modules.mentions.org"),
-        _ => match jobs(c, viewer, &p.id)?.into_iter().find(|j| j.to.is_none()) {
+        _ => match jobs_in(c, viewer, &p.id)?
+            .into_iter()
+            .find(|j| j.to.is_none())
+        {
             Some(j) => match j.title.filter(|t| !t.is_empty()) {
                 Some(t) => format!("{} · {t}", j.org_name),
                 None => j.org_name,
@@ -94,7 +96,7 @@ pub fn sub(c: &Connection, viewer: &Viewer, p: &Party) -> ApiResult<String> {
     })
 }
 
-fn option(c: &Connection, viewer: &Viewer, p: &Party) -> ApiResult<PartyOption> {
+fn option(c: &mut impl Read, viewer: &Viewer, p: &Party) -> ApiResult<PartyOption> {
     Ok(PartyOption {
         id: p.id.clone(),
         name: p.name.clone(),
@@ -116,27 +118,35 @@ fn query(q: Q) -> ApiResult<String> {
 pub fn mention_options(m: &Modules, who: &Caller, q: Q) -> ApiResult<MentionOptions> {
     let (viewer, _) = start(m, who)?;
     let q = query(q)?;
-    m.store.reader(|c| {
-        let bots = prepo::bots(c, &who.ws)?
-            .into_iter()
-            .map(|(id, name)| BotOption { id, name })
-            .collect();
-        let bots = pick(
-            bots,
-            |b: &BotOption| vec![b.name.as_str()],
-            &q,
-            MENTION_LIMIT,
-        );
-        let ps: Vec<Party> = prepo::parties(c, &viewer, &["contact", "team"], true)?
-            .into_iter()
-            .filter(|p| !p.is_me())
-            .collect();
-        let parties = pick(ps, party_names, &q, MENTION_LIMIT)
-            .iter()
-            .map(|p| option(c, &viewer, p))
-            .collect::<ApiResult<_>>()?;
-        Ok(MentionOptions { bots, parties })
-    })
+    m.store.read(|r| Ok(mention_options_in(r, &viewer, &q)))?
+}
+
+fn mention_options_in(c: &mut impl Read, viewer: &Viewer, q: &str) -> ApiResult<MentionOptions> {
+    let bots = BotRows(c)
+        .workspace(&viewer.ws)?
+        .into_iter()
+        .filter(|bot| bot.enabled)
+        .map(|bot| BotOption {
+            id: bot.id,
+            name: bot.name,
+        })
+        .collect();
+    let bots = pick(
+        bots,
+        |b: &BotOption| vec![b.name.as_str()],
+        q,
+        MENTION_LIMIT,
+    );
+    let ps: Vec<Party> = Contacts::new(c)
+        .active(viewer, &["contact", "team"], true)?
+        .into_iter()
+        .filter(|p| !p.is_me())
+        .collect();
+    let parties = pick(ps, party_names, q, MENTION_LIMIT)
+        .iter()
+        .map(|p| option(c, viewer, p))
+        .collect::<ApiResult<_>>()?;
+    Ok(MentionOptions { bots, parties })
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -158,18 +168,20 @@ pub fn search(m: &Modules, who: &Caller, q: Q) -> ApiResult<SearchResult> {
             teams: vec![],
         });
     }
-    m.store.reader(|c| {
-        let group = |kind: &str| -> ApiResult<Vec<PartyOption>> {
-            let ps = prepo::parties(c, &viewer, &[kind], true)?;
-            pick(ps, party_names, &q, SEARCH_LIMIT)
-                .iter()
-                .map(|p| option(c, &viewer, p))
-                .collect()
-        };
-        Ok(SearchResult {
-            contacts: group("contact")?,
-            orgs: group("org")?,
-            teams: group("team")?,
-        })
+    m.store.read(|r| Ok(search_in(r, &viewer, &q)))?
+}
+
+fn search_in(c: &mut impl Read, viewer: &Viewer, q: &str) -> ApiResult<SearchResult> {
+    let mut group = |kind: &str| -> ApiResult<Vec<PartyOption>> {
+        let ps = Contacts::new(c).active(viewer, &[kind], true)?;
+        pick(ps, party_names, q, SEARCH_LIMIT)
+            .iter()
+            .map(|p| option(c, viewer, p))
+            .collect()
+    };
+    Ok(SearchResult {
+        contacts: group("contact")?,
+        orgs: group("org")?,
+        teams: group("team")?,
     })
 }

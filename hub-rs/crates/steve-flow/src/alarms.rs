@@ -340,7 +340,7 @@ pub struct Claimed {
 
 /// Whether the owner would hear a notification now, and if they are in quiet hours, when those end:
 /// only a policy that sends right away (`enabled`, `mode = now`) is held by its quiet hours. Read on the
-/// owner's clock ([`Zone::of`]).
+/// owner's clock ([`Zone::for_user`]).
 pub fn quiet_ends(c: &mut impl Read, ws: &str, user: &str, now: i64) -> FlowResult<Option<i64>> {
     let Some(p) = NotificationPolicies(c).quiet(ws, user)? else {
         return Ok(None);

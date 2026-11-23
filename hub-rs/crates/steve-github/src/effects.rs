@@ -145,14 +145,15 @@ impl GitHub {
     ) -> Result<crate::api::GhConn, Fail> {
         let waits = self
             .store()
-            .reader(|c| {
-                steve_modules::accounts::connections::may_write_in(
+            .read(|c| {
+                Ok(steve_modules::accounts::connections::may_write_in(
                     c,
                     ws,
                     connection,
                     Some(crate::adapters::WRITE_CAP),
-                )
+                ))
             })
+            .map_err(|e| Fail::unknown(e.to_string()))?
             .map_err(|e| Fail::unknown(e.to_string()))?;
         if let Err(steve_modules::accounts::connections::WriteRefusal::Later(m)) = waits {
             return Err(Fail::new(m, Why::Wait));

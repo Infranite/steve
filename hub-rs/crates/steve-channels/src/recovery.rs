@@ -7,10 +7,10 @@ use crate::{Channels, bindings, spaces};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use std::sync::Arc;
-use steve_modules::accounts::connections::repo::{self, ConnRow};
 use steve_modules::changes::{self, ChangeOp, DraftTarget, OpCx, Plan, Prepared};
 use steve_modules::{ApiError, ApiResult, Caller, Registry};
 use steve_store::base::{self, Change, Viewer};
+use steve_store::{ConnRow, Connections};
 
 const KIND: &str = "channel_send_permission";
 const OP: &str = "chan.send_permission.enable";
@@ -23,9 +23,16 @@ pub fn register(registry: &mut Registry, late: Arc<LateChannels>) {
 
 struct Permission(Arc<LateChannels>);
 
-fn own(c: &Connection, viewer: &Viewer, id: &str) -> ApiResult<ConnRow> {
+fn own(
+    c: &Connection,
+    r: &mut impl steve_store::Read,
+    viewer: &Viewer,
+    id: &str,
+) -> ApiResult<ConnRow> {
     crate::channel_accounts::can_manage(c, viewer, id)?;
-    let row = repo::get(c, id)?.ok_or_else(|| ApiError::not_found("连接"))?;
+    let row = Connections(r)
+        .get(id)?
+        .ok_or_else(|| ApiError::not_found("连接"))?;
     if bindings::connection_account(c, &viewer.ws, id)?.1 != spaces::Mode::Own
         || row.status == "revoked"
     {
@@ -58,13 +65,13 @@ impl DraftTarget for Permission {
     fn prepare(
         &self,
         store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         id: Option<&str>,
     ) -> ApiResult<Prepared> {
         store.reader(|c| {
             let id = id.ok_or_else(|| ApiError::invalid("target.id"))?;
-            let row = own(c, viewer, id)?;
+            let row = own(c, r, viewer, id)?;
             self.available(&row)?;
             Ok(Prepared {
                 target_id: Some(id.into()),
@@ -97,8 +104,8 @@ impl DraftTarget for Permission {
         ws: &str,
         id: &str,
     ) -> ApiResult<Option<i64>> {
-        let c = &w.legacy();
-        Ok(repo::get(c, id)?
+        Ok(Connections(w)
+            .get(id)?
             .filter(|r| r.workspace_id == ws)
             .map(|r| r.revision))
     }
@@ -108,7 +115,7 @@ impl ChangeOp for Permission {
     fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
         let c = &w.legacy();
         let viewer = Viewer::bare(cx.ws, cx.actor);
-        let row = own(c, &viewer, op["connection_id"].as_str().unwrap_or(""))?;
+        let row = own(c, w, &viewer, op["connection_id"].as_str().unwrap_or(""))?;
         self.available(&row)
     }
     fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
@@ -116,14 +123,15 @@ impl ChangeOp for Permission {
         let tx = &w.legacy();
         let mut row = own(
             tx,
+            w,
             &Viewer::bare(cx.ws, cx.actor),
             op["connection_id"].as_str().unwrap_or(""),
         )?;
         let enabled = row.caps.iter().any(|c| c == spaces::SEND_AS_USER_CAP);
         if !enabled {
             row.caps.push(spaces::SEND_AS_USER_CAP.into());
-            repo::update(tx, &row, steve_store::now())?;
-            repo::set_enabled_at(tx, &row.id, steve_store::now())?;
+            Connections(w).update(&row, steve_store::now())?;
+            Connections(w).set_enabled_at(&row.id, steve_store::now())?;
             tx.publish(steve_types::DomainEvent::from(
                 steve_types::ChannelsEvent::Connection {
                     id: row.id.clone().into(),
@@ -151,6 +159,7 @@ impl ChangeOp for Permission {
         let tx = &w.legacy();
         let mut row = own(
             tx,
+            w,
             &Viewer::bare(cx.ws, cx.actor),
             op["connection_id"].as_str().unwrap_or(""),
         )?;
@@ -160,7 +169,7 @@ impl ChangeOp for Permission {
                 return Ok(());
             }
             row.caps.retain(|c| c != spaces::SEND_AS_USER_CAP);
-            repo::update(tx, &row, steve_store::now())?;
+            Connections(w).update(&row, steve_store::now())?;
             tx.publish(steve_types::DomainEvent::from(
                 steve_types::ChannelsEvent::Connection {
                     id: row.id.clone().into(),
@@ -184,7 +193,7 @@ impl ChangeOp for Permission {
 /// A service refusal is deliberately rejected here even if a local permission is also disabled.
 pub fn propose(ch: &Channels, who: &Caller, message: &str) -> ApiResult<changes::Proposal> {
     let viewer = ch.modules().viewer(who)?;
-    let (prepared, plan) = ch.store().reader(|c| -> ApiResult<_> {
+    let (prepared, plan) = ch.store().read(|r| Ok(ch.store().reader(|c| -> ApiResult<_> {
         let (space, status, decision): (String, String, Option<String>) = c.query_row(
             "SELECT space_id,status,decision_id FROM chan_messages WHERE id=? AND workspace_id=? AND direction='out'",
             params![message, who.ws], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
@@ -194,7 +203,7 @@ pub fn propose(ch: &Channels, who: &Caller, message: &str) -> ApiResult<changes:
             .filter(|d| status == "failed" && d.status == "open" && d.result["recovery"]["kind"] == "missing_permission" && d.result["recovery"]["authorization_kind"] == "managed")
             .ok_or_else(|| ApiError::rule("这条拒绝需在渠道服务侧处理；Steve 没有它的授权管理 API"))?;
         let conn = d.result["recovery"]["connection_id"].as_str().unwrap_or("");
-        let row = own(c, &viewer, conn)?;
+        let row = own(c, r, &viewer, conn)?;
         let provider = ch.connections().provider(&row.adapter).ok_or_else(|| ApiError::rule("渠道服务不可用"))?;
         if row.caps.iter().any(|c| c == spaces::SEND_AS_USER_CAP)
             || !provider.available_caps(&row.granted_scopes).iter().any(|c| c == spaces::SEND_AS_USER_CAP) {
@@ -209,7 +218,7 @@ pub fn propose(ch: &Channels, who: &Caller, message: &str) -> ApiResult<changes:
             ops: vec![json!({"op": OP,"connection_id":conn})],
             changes: vec![Change::new("本地代发能力 msg.send_as_user（整个连接）", "关闭", "开启；平台授权及每条消息的审批仍分别校验；可撤销")],
         }))
-    })?;
+    })))??;
     changes::store_plan(
         ch.modules(),
         who,

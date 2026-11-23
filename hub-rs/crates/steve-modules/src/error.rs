@@ -159,25 +159,14 @@ impl ApiError {
     }
 }
 
-impl From<StoreError> for ApiError {
-    fn from(e: StoreError) -> Self {
-        match e {
-            // the store's own “没有这个…” messages are complete sentences already
-            StoreError::NotFound(m) => Self::NotFound(m.trim_start_matches("没有这个").to_string()),
-            e => Self::Internal(e.to_string()),
+impl<E: Into<StoreError>> From<E> for ApiError {
+    fn from(error: E) -> Self {
+        match error.into() {
+            StoreError::NotFound(message) => {
+                Self::NotFound(message.trim_start_matches("没有这个").to_string())
+            }
+            error => Self::Internal(error.to_string()),
         }
-    }
-}
-
-impl From<rusqlite::Error> for ApiError {
-    fn from(e: rusqlite::Error) -> Self {
-        Self::Internal(e.to_string())
-    }
-}
-
-impl From<serde_json::Error> for ApiError {
-    fn from(e: serde_json::Error) -> Self {
-        Self::Internal(e.to_string())
     }
 }
 

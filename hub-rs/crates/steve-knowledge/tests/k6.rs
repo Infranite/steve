@@ -54,7 +54,7 @@ fn memory_listing_only_attaches_a_live_members_personal_profile() {
     assert!(
         e.env
             .store()
-            .reader(|c| { steve_modules::contacts::repo::me_of(c, WS, &service.user) })
+            .read(|c| steve_modules::contacts::repo::me_of(c, WS, &service.user))
             .unwrap()
             .is_none()
     );

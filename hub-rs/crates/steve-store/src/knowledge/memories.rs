@@ -144,6 +144,57 @@ impl<C: Read> Memories<'_, C> {
         )
     }
 
+    pub fn has_audience(&mut self, ws: &str, audience: &str) -> Result<bool> {
+        Ok(self
+            .0
+            .one(
+                Query::select()
+                    .from("mems")
+                    .column("id")
+                    .and_where(Expr::col("workspace_id").eq(ws))
+                    .and_where(Expr::col("visibility").eq(audience))
+                    .limit(1),
+                |_| Ok(()),
+            )?
+            .is_some())
+    }
+
+    pub fn about_ids(&mut self, ws: &str, target: &ObjRef) -> Result<Vec<String>> {
+        self.0.all(
+            Query::select()
+                .from("mem_about")
+                .column("mem_id")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("object_type").eq(&target.kind))
+                .and_where(Expr::col("object_id").eq(&target.id)),
+            |row| row.get(0),
+        )
+    }
+
+    pub fn only_about(&mut self, ws: &str, target: &ObjRef) -> Result<Vec<String>> {
+        let other = Query::select()
+            .from_as("mem_about", "b")
+            .column(("b", "mem_id"))
+            .and_where(Expr::col(("b", "mem_id")).equals(("a", "mem_id")))
+            .and_where(
+                Expr::col(("b", "object_type"))
+                    .ne(Expr::col(("a", "object_type")))
+                    .or(Expr::col(("b", "object_id")).ne(Expr::col(("a", "object_id")))),
+            )
+            .take();
+        self.0.all(
+            Query::select()
+                .from_as("mem_about", "a")
+                .column(("a", "mem_id"))
+                .and_where(Expr::col(("a", "workspace_id")).eq(ws))
+                .and_where(Expr::col(("a", "object_type")).eq(&target.kind))
+                .and_where(Expr::col(("a", "object_id")).eq(&target.id))
+                .and_where(Expr::exists(other).not())
+                .order_by(("a", "mem_id"), Order::Asc),
+            |row| row.get(0),
+        )
+    }
+
     pub fn ids(&mut self, ws: &str) -> Result<Vec<String>> {
         self.0.all(
             Query::select()
@@ -369,6 +420,25 @@ impl Memories<'_, W<'_>> {
         self.0.exec(q.value("updated", now()))?;
         changed(self.0, &old.workspace_id, id);
         self.get(id)
+    }
+
+    pub fn move_subjects(
+        &mut self,
+        ws: &str,
+        from: &ObjRef,
+        into: &ObjRef,
+        only: Option<&[String]>,
+    ) -> Result<Vec<String>> {
+        let memories: Vec<_> = self
+            .about_ids(ws, from)?
+            .into_iter()
+            .filter(|id| only.is_none_or(|ids| ids.contains(id)))
+            .collect();
+        for id in &memories {
+            self.add_subject(ws, id, into)?;
+            self.remove_subject(id, from)?;
+        }
+        Ok(memories)
     }
 
     pub fn add_subject(&mut self, ws: &str, id: &str, target: &ObjRef) -> Result<()> {

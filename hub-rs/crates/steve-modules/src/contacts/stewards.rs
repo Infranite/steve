@@ -15,13 +15,15 @@
 //!   its `confirm` handler [`StewardConfirm`] stay for proposals opened before;
 //! - merges move the rows with the person ([`merge_move`], [`split_back`]).
 
-use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use steve_store::base::{self, Change, Viewer};
-use steve_store::{Cached, Decision, Tx, now};
+use steve_store::base::{Change, Viewer};
+use steve_store::{
+    Accounts, BotRows, ChannelSources, Connections, Contacts, Decision, DecisionRows, DeviceRows,
+    Members, PersonaRows, Read, Stewards, Systems, Tx, W, account_rows::Account, now,
+};
 
-use super::repo::{self, NewParty, Party};
+use super::repo::{NewParty, Party};
 use crate::changes::{self, ChangeOp, OpCx, Origin, Plan, Prepared};
 use crate::decisions::{self, DecisionCx, DecisionHandler};
 use crate::{ApiError, ApiResult, Caller, Modules};
@@ -47,7 +49,7 @@ pub const SUBJECT: &str = "steward";
 /// Confidence of a steward proposed from chat.
 pub const CHAT_CONFIDENCE: f64 = 0.6;
 /// Account kinds that are not somebody's own identity: listed under 没有负责人 when nobody is.
-const SERVICE_ACCOUNTS: &str = "'service','shared_mailbox'";
+const SERVICE_ACCOUNTS: [&str; 2] = ["service", "shared_mailbox"];
 
 pub fn type_label(t: &str) -> &str {
     OBJECT_TYPES
@@ -129,191 +131,40 @@ pub fn account_kind_label(k: &str) -> &str {
 // ---------------------------------------------------------------- rows
 
 /// A `stewards` row.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Steward {
-    pub workspace_id: String,
-    pub object_type: String,
-    pub object_id: String,
-    pub person_id: String,
-    pub role: String,
-    /// `manual` | `connect` | `sync` | `chat` | `inferred` | `seed`
-    pub source: String,
-    pub confidence: f64,
-    /// `confirmed` | `proposed`
-    pub status: String,
-    pub source_ref: Option<String>,
-    pub decision_id: Option<String>,
-    pub created: i64,
-    pub updated: i64,
+pub use steve_store::{Steward, StewardKey as Key};
+
+pub fn get(c: &mut impl Read, ws: &str, key: &Key) -> ApiResult<Option<Steward>> {
+    Ok(Stewards(c).get(ws, key)?)
 }
 
-impl Steward {
-    /// A confirmed row created now.
-    pub fn new(
-        ws: &str,
-        object_type: &str,
-        object_id: &str,
-        person: &str,
-        role: &str,
-        source: &str,
-    ) -> Self {
-        let t = now();
-        Self {
-            workspace_id: ws.into(),
-            object_type: object_type.into(),
-            object_id: object_id.into(),
-            person_id: person.into(),
-            role: role.into(),
-            source: source.into(),
-            confidence: 1.0,
-            status: "confirmed".into(),
-            source_ref: None,
-            decision_id: None,
-            created: t,
-            updated: t,
-        }
-    }
-
-    fn from_row(r: &Row) -> rusqlite::Result<Self> {
-        Ok(Self {
-            workspace_id: r.get(0)?,
-            object_type: r.get(1)?,
-            object_id: r.get(2)?,
-            person_id: r.get(3)?,
-            role: r.get(4)?,
-            source: r.get(5)?,
-            confidence: r.get(6)?,
-            status: r.get(7)?,
-            source_ref: r.get(8)?,
-            decision_id: r.get(9)?,
-            created: r.get(10)?,
-            updated: r.get(11)?,
-        })
-    }
-
-    pub fn key(&self) -> Key {
-        Key {
-            object_type: self.object_type.clone(),
-            object_id: self.object_id.clone(),
-            person_id: self.person_id.clone(),
-            role: self.role.clone(),
-        }
-    }
+pub fn of_object(c: &mut impl Read, ws: &str, kind: &str, id: &str) -> ApiResult<Vec<Steward>> {
+    Ok(Stewards(c).of_object(ws, kind, id)?)
 }
 
-/// The primary key of a row within a workspace.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Key {
-    pub object_type: String,
-    pub object_id: String,
-    pub person_id: String,
-    pub role: String,
-}
-
-const COLS: &str = "workspace_id, object_type, object_id, person_id, role, source, confidence, status, source_ref, decision_id, created, updated";
-
-pub fn get(c: &Connection, ws: &str, k: &Key) -> ApiResult<Option<Steward>> {
-    Ok(c.prepare_cached(&format!(
-        "SELECT {COLS} FROM stewards WHERE workspace_id = ? AND object_type = ? AND object_id = ? AND person_id = ? AND role = ?"
-    ))?
-    .query_row(
-        params![ws, k.object_type, k.object_id, k.person_id, k.role],
-        Steward::from_row,
-    )
-    .optional()?)
-}
-
-/// The rows of an object, owners first, then by age.
-pub fn of_object(
-    c: &Connection,
-    ws: &str,
-    object_type: &str,
-    object_id: &str,
-) -> ApiResult<Vec<Steward>> {
-    Ok(c.prepare_cached(&format!(
-        "SELECT {COLS} FROM stewards WHERE workspace_id = ? AND object_type = ? AND object_id = ?
-         ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'maintainer' THEN 1 ELSE 2 END, created"
-    ))?
-    .query_map(params![ws, object_type, object_id], Steward::from_row)?
-    .collect::<rusqlite::Result<_>>()?)
-}
-
-/// The rows naming a person.
-pub fn of_person(c: &Connection, ws: &str, person: &str) -> ApiResult<Vec<Steward>> {
-    Ok(c.prepare_cached(&format!(
-        "SELECT {COLS} FROM stewards WHERE workspace_id = ? AND person_id = ? ORDER BY object_type, created"
-    ))?
-    .query_map(params![ws, person], Steward::from_row)?
-    .collect::<rusqlite::Result<_>>()?)
-}
-
-pub fn by_decision(c: &Connection, decision: &str) -> ApiResult<Option<Steward>> {
-    Ok(c.prepare_cached(&format!(
-        "SELECT {COLS} FROM stewards WHERE decision_id = ?"
-    ))?
-    .query_row([decision], Steward::from_row)
-    .optional()?)
+pub fn of_person(c: &mut impl Read, ws: &str, id: &str) -> ApiResult<Vec<Steward>> {
+    Ok(Stewards(c).of_person(ws, id)?)
 }
 
 /// Inserts or replaces the row with `s`'s key (keeping its `created` when it existed).
-pub fn put(tx: &Tx, s: &Steward) -> ApiResult<()> {
-    tx.run(
-        "INSERT INTO stewards (workspace_id, object_type, object_id, person_id, role, source, confidence, status, source_ref, decision_id, created, updated)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT (workspace_id, object_type, object_id, person_id, role) DO UPDATE SET
-           source = excluded.source, confidence = excluded.confidence, status = excluded.status,
-           source_ref = excluded.source_ref, decision_id = excluded.decision_id, updated = excluded.updated",
-        params![
-            s.workspace_id,
-            s.object_type,
-            s.object_id,
-            s.person_id,
-            s.role,
-            s.source,
-            s.confidence,
-            s.status,
-            s.source_ref,
-            s.decision_id,
-            s.created,
-            s.updated
-        ],
-    )?;
-    changed(tx, &s.workspace_id, &s.person_id);
+pub fn put(tx: &mut W<'_>, s: &Steward) -> ApiResult<()> {
+    Stewards(tx).put(s)?;
+    tx.emit(crate::accounts::service::party_changed(
+        &s.workspace_id,
+        &s.person_id,
+    ));
     Ok(())
 }
 
-pub fn delete(tx: &Tx, ws: &str, k: &Key) -> ApiResult<bool> {
-    let n = tx.run(
-        "DELETE FROM stewards WHERE workspace_id = ? AND object_type = ? AND object_id = ? AND person_id = ? AND role = ?",
-        params![ws, k.object_type, k.object_id, k.person_id, k.role],
-    )?;
-    changed(tx, ws, &k.person_id);
-    Ok(n > 0)
-}
-
-/// The person's page (and a bot party's) shows the change.
-fn changed(tx: &Tx, ws: &str, person: &str) {
-    tx.publish(steve_types::DomainEvent::from(
-        steve_types::PeopleEvent::Party {
-            id: {
-                let value: String = person.into();
-                steve_types::PartyId::from(value)
-            },
-            ws: {
-                let value: String = ws.into();
-                steve_types::WorkspaceId::from(value)
-            },
-        },
-    ));
+pub fn delete(tx: &mut W<'_>, ws: &str, k: &Key) -> ApiResult<bool> {
+    let removed = Stewards(tx).delete(ws, k)?;
+    tx.emit(crate::accounts::service::party_changed(ws, &k.person_id));
+    Ok(removed)
 }
 
 /// Does the object have any steward row at all (confirmed or proposed)? Defaults only go to objects
 /// without one, so a 负责人 removed by hand is not put back.
-pub fn has_any(c: &Connection, ws: &str, object_type: &str, object_id: &str) -> ApiResult<bool> {
-    Ok(c.prepare_cached(
-        "SELECT 1 FROM stewards WHERE workspace_id = ? AND object_type = ? AND object_id = ?",
-    )?
-    .exists(params![ws, object_type, object_id])?)
+pub fn has_any(c: &mut impl Read, ws: &str, kind: &str, id: &str) -> ApiResult<bool> {
+    Ok(Stewards(c).has_any(ws, kind, id)?)
 }
 
 // ---------------------------------------------------------------- objects
@@ -349,170 +200,162 @@ impl ObjectInfo {
 }
 
 /// A system's name as the pages show it (a built-in one in the request's language).
-fn system_name(c: &Connection, ws: &str, system: &str) -> ApiResult<String> {
-    Ok(c.prepare_cached(
-        "SELECT name, workspace_id = '*' FROM systems WHERE id = ? AND workspace_id IN (?, '*') ORDER BY workspace_id = '*' LIMIT 1",
-    )?
-    .query_row(params![system, ws], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)))
-    .optional()?
-    .map(|(name, builtin)| crate::shown::system_name(system, builtin, &name))
-    .unwrap_or_else(|| system.to_string()))
+fn system_name(c: &mut impl Read, ws: &str, system: &str) -> ApiResult<String> {
+    Ok(Systems(c)
+        .get(ws, system)?
+        .map(|row| crate::shown::system_name(system, row.builtin, &row.name))
+        .unwrap_or_else(|| system.to_string()))
 }
 
-fn account_info(c: &Connection, ws: &str, id: &str) -> ApiResult<Option<ObjectInfo>> {
-    Ok(c.prepare_cached(
-        "SELECT kind, handle_display, display_name, party_id, system_id FROM accounts
-                 WHERE id = ? AND workspace_id = ? AND status != 'deleted'",
-    )?
-    .query_row(params![id, ws], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-            r.get::<_, String>(4)?,
-        ))
-    })
-    .optional()?
-    .map(
-        |(kind, handle, display, party, system)| -> ApiResult<ObjectInfo> {
-            let name = if display.trim().is_empty() {
-                handle.clone()
+fn account_info(c: &mut impl Read, ws: &str, row: Account) -> ApiResult<ObjectInfo> {
+    let name = if row.display_name.trim().is_empty() {
+        row.handle_display.clone()
+    } else {
+        row.display_name
+    };
+    let mut o = ObjectInfo::new("account", &row.id, name);
+    o.detail = format!(
+        "{} · {} · {}",
+        system_name(c, ws, &row.system_id)?,
+        account_kind_shown(&row.kind),
+        row.handle_display
+    );
+    o.kind = Some(row.kind);
+    o.party_id = Some(row.party_id);
+    Ok(o)
+}
+
+fn connection_info(c: &mut impl Read, row: steve_store::ConnRow) -> ApiResult<Option<ObjectInfo>> {
+    let Some(account) = Accounts(c).get(&row.account_id)? else {
+        return Ok(None);
+    };
+    let name = if account.display_name.trim().is_empty() {
+        account.handle_display.clone()
+    } else {
+        account.display_name
+    };
+    let mut o = ObjectInfo::new("connection", &row.id, name);
+    o.detail = format!("{} · {}", row.adapter, account.handle_display);
+    o.kind = Some(row.adapter);
+    o.party_id = Some(account.party_id);
+    Ok(Some(o))
+}
+
+fn device_info(row: steve_store::DeviceIdentity) -> ObjectInfo {
+    let mut o = ObjectInfo::new("device", &row.id, row.name);
+    o.detail = row
+        .roles
+        .into_iter()
+        .map(|role| {
+            if role == "执行节点" {
+                steve_i18n::t!("modules.stewards.device_runner")
             } else {
-                display
-            };
-            let mut o = ObjectInfo::new("account", id, name);
-            o.detail = format!(
-                "{} · {} · {}",
-                system_name(c, ws, &system)?,
-                account_kind_shown(&kind),
-                handle
-            );
-            o.kind = Some(kind);
-            o.party_id = Some(party);
-            Ok(o)
-        },
-    )
-    .transpose()?)
+                role
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(&steve_i18n::t!("modules.error.list_sep"));
+    o
 }
 
-fn connection_info(c: &Connection, ws: &str, id: &str) -> ApiResult<Option<ObjectInfo>> {
-    Ok(c.prepare_cached(
-        "SELECT c.adapter, a.handle_display, a.display_name, a.party_id FROM connections c
-                 JOIN accounts a ON a.id = c.account_id
-                 WHERE c.id = ? AND c.workspace_id = ? AND c.status != 'revoked'",
-    )?
-    .query_row(params![id, ws], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-        ))
-    })
-    .optional()?
-    .map(|(adapter, handle, display, party)| {
-        let name = if display.trim().is_empty() {
-            handle.clone()
-        } else {
-            display
+fn bot_info(row: steve_store::BotRef) -> ObjectInfo {
+    let mut o = ObjectInfo::new("bot", &row.id, row.name);
+    o.detail =
+        steve_store::seeded::shown(&row.role, steve_store::seeded::BOT[0].1).unwrap_or(row.role);
+    o
+}
+
+fn persona_info(row: steve_store::PersonaIdentity) -> ObjectInfo {
+    let mut o = ObjectInfo::new("persona", &row.id, row.name);
+    let intro = steve_store::seeded::shown(&row.intro, steve_store::seeded::PERSONA[0].1)
+        .unwrap_or(row.intro);
+    o.detail = intro.chars().take(60).collect();
+    o
+}
+
+fn space_info(id: &str, name: String, kind: String) -> ObjectInfo {
+    let mut o = ObjectInfo::new("space", id, name);
+    o.kind = Some(kind);
+    o
+}
+
+fn party_info(p: Party) -> ObjectInfo {
+    let mut o = ObjectInfo::new("party", &p.id, p.name);
+    if p.contact_kind.as_deref() != Some("bot") {
+        o.type_label = match p.kind.as_str() {
+            "org" => steve_i18n::t!("modules.stewards.type.org"),
+            "team" => steve_i18n::t!("modules.stewards.type.team"),
+            _ => steve_i18n::t!("modules.stewards.type.contact"),
         };
-        let mut o = ObjectInfo::new("connection", id, name);
-        o.detail = format!("{adapter} · {handle}");
-        o.kind = Some(adapter);
-        o.party_id = Some(party);
-        o
-    }))
+    }
+    o.kind = p.contact_kind.or(p.org_kind);
+    o.party_id = Some(p.id);
+    o
 }
 
-/// The object `object_type`/`object_id` in `ws`, or `None` when it does not exist there (deleted bots
-/// and personas, merged parties and revoked connections count as gone).
 pub fn object_info(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
-    object_type: &str,
+    kind: &str,
     id: &str,
 ) -> ApiResult<Option<ObjectInfo>> {
-    let info = match object_type {
-        "account" => account_info(c, ws, id)?,
-        "connection" => connection_info(c, ws, id)?,
-        "device" => c
-            .prepare_cached("SELECT name, roles FROM devices WHERE id = ?")?
-            .query_row([id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-            .optional()?
-            .map(|(name, roles)| {
-                let mut o = ObjectInfo::new("device", id, name);
-                // the Hub's own device is seeded with the roles `Hub` and `执行节点` (crates/steve-hub/src/system.rs)
-                o.detail = serde_json::from_str::<Vec<String>>(&roles)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|r| if r == "执行节点" { steve_i18n::t!("modules.stewards.device_runner") } else { r })
-                    .collect::<Vec<_>>()
-                    .join(&steve_i18n::t!("modules.error.list_sep"));
-                o
-            }),
-        "bot" => c
-            .prepare_cached(
-                "SELECT name, role FROM bots WHERE id = ?1 AND deleted = 0
-                   AND (workspace_id = ?2 OR EXISTS (SELECT 1 FROM bot_workspaces WHERE bot_id = ?1 AND workspace_id = ?2))",
-            )?
-            .query_row(params![id, ws], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-            .optional()?
-            .map(|(name, role)| {
-                let mut o = ObjectInfo::new("bot", id, name);
-                o.detail = steve_store::seeded::shown(&role, steve_store::seeded::BOT[0].1).unwrap_or(role);
-                o
-            }),
-        "persona" => c
-            .prepare_cached(
-                "SELECT name, intro FROM personas WHERE id = ? AND workspace_id = ? AND deleted = 0",
-            )?
-            .query_row(params![id, ws], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-            .optional()?
-            .map(|(name, intro)| {
-                let mut o = ObjectInfo::new("persona", id, name);
-                let intro = steve_store::seeded::shown(&intro, steve_store::seeded::PERSONA[0].1).unwrap_or(intro);
-                o.detail = intro.chars().take(60).collect();
-                o
-            }),
-        "party" => repo::get(c, id)?
+    Ok(match kind {
+        "account" => Accounts(c)
+            .get(id)?
+            .filter(|a| a.workspace_id == ws && a.status != "deleted")
+            .map(|a| account_info(c, ws, a))
+            .transpose()?,
+        "connection" => {
+            let row = Connections(c)
+                .get(id)?
+                .filter(|row| row.workspace_id == ws && row.status != "revoked");
+            match row {
+                Some(row) => connection_info(c, row)?,
+                None => None,
+            }
+        }
+        "party" => Contacts::new(c)
+            .party(id)?
             .filter(|p| p.workspace_id == ws && p.status == "active")
-            .map(|p| {
-                let mut o = ObjectInfo::new("party", id, p.name.clone());
-                if p.contact_kind.as_deref() != Some("bot") {
-                    o.type_label = match p.kind.as_str() {
-                        "org" => steve_i18n::t!("modules.stewards.type.org"),
-                        "team" => steve_i18n::t!("modules.stewards.type.team"),
-                        _ => steve_i18n::t!("modules.stewards.type.contact"),
-                    };
-                }
-                o.kind = p.contact_kind.clone().or(p.org_kind.clone());
-                o.party_id = Some(p.id);
-                o
-            }),
-        "space" => c
-            .prepare_cached("SELECT name, kind FROM spaces WHERE id = ? AND workspace_id = ? AND status != 'archived'")?
-            .query_row(params![id, ws], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-            .optional()?
-            .map(|(name, kind)| {
-                let mut o = ObjectInfo::new("space", id, name);
-                o.kind = Some(kind);
-                o
-            }),
+            .map(party_info),
+        "bot" | "device" | "persona" | "space" => named_objects(c, ws, kind)?
+            .into_iter()
+            .find(|o| o.object_id == id),
         _ => None,
-    };
-    Ok(info)
+    })
+}
+
+pub(super) fn named_objects(c: &mut impl Read, ws: &str, kind: &str) -> ApiResult<Vec<ObjectInfo>> {
+    Ok(match kind {
+        "bot" => BotRows(c).owned_in(ws)?.into_iter().map(bot_info).collect(),
+        "device" => DeviceRows(c)
+            .identities()?
+            .into_iter()
+            .map(device_info)
+            .collect(),
+        "persona" => PersonaRows(c)
+            .identities(ws)?
+            .into_iter()
+            .map(persona_info)
+            .collect(),
+        "space" => ChannelSources(c)
+            .named_spaces(ws)?
+            .into_iter()
+            .map(|(id, name, kind)| space_info(&id, name, kind))
+            .collect(),
+        _ => Vec::new(),
+    })
 }
 
 // ---------------------------------------------------------------- people
 
 /// A person who can be a steward: an active, visible contact that is not a bot. `me` is the viewer's
 /// “我”. `404 没有这个联系人` otherwise.
-pub fn person(c: &Connection, viewer: &Viewer, id: &str) -> ApiResult<Party> {
+pub fn person(c: &mut impl Read, viewer: &Viewer, id: &str) -> ApiResult<Party> {
     let p = if id == "me" {
-        repo::me_of(c, &viewer.ws, &viewer.user)?
+        Contacts::new(c).me(&viewer.ws, &viewer.user)?
     } else {
-        repo::get(c, id)?
+        Contacts::new(c).party(id)?
     };
     let p = crate::own(
         p.filter(|p| p.kind == "contact" && p.status == "active"),
@@ -527,22 +370,20 @@ pub fn person(c: &Connection, viewer: &Viewer, id: &str) -> ApiResult<Party> {
     Ok(p)
 }
 
-fn name_of(c: &Connection, id: &str) -> ApiResult<String> {
-    Ok(repo::get(c, id)?
+fn name_of(c: &mut impl Read, id: &str) -> ApiResult<String> {
+    Ok(Contacts::new(c)
+        .party(id)?
         .map(|p| p.name)
         .unwrap_or_else(|| id.to_string()))
 }
 
 /// “我” of a workspace's first owner (whom defaults go to when no user is at hand).
-pub fn owner_me(c: &Connection, ws: &str) -> ApiResult<Option<Party>> {
-    let user: Option<String> = c
-        .prepare_cached(
-            "SELECT user_id FROM workspace_members WHERE workspace_id = ? AND role = 'owner' ORDER BY created LIMIT 1",
-        )?
-        .query_row([ws], |r| r.get(0))
-        .optional()?;
+pub fn owner_me(c: &mut impl Read, ws: &str) -> ApiResult<Option<Party>> {
+    let user = Members::new(c).owner(ws)?;
     match user {
-        Some(u) => Ok(repo::me_of(c, ws, &u)?.filter(|p| p.status == "active")),
+        Some(u) => Ok(Contacts::new(c)
+            .me(ws, &u)?
+            .filter(|p| p.status == "active")),
         None => Ok(None),
     }
 }
@@ -564,8 +405,8 @@ pub struct StewardOut {
     pub updated: i64,
 }
 
-fn steward_out(c: &Connection, s: &Steward) -> ApiResult<StewardOut> {
-    let p = repo::get(c, &s.person_id)?;
+fn steward_out(c: &mut impl Read, s: &Steward) -> ApiResult<StewardOut> {
+    let p = Contacts::new(c).party(&s.person_id)?;
     Ok(StewardOut {
         person_id: s.person_id.clone(),
         person_name: p.as_ref().map(|p| p.name.clone()).unwrap_or_default(),
@@ -587,7 +428,11 @@ pub struct ObjectStewards {
     pub stewards: Vec<StewardOut>,
 }
 
-pub fn object_stewards(c: &Connection, ws: &str, object: ObjectInfo) -> ApiResult<ObjectStewards> {
+pub fn object_stewards(
+    c: &mut impl Read,
+    ws: &str,
+    object: ObjectInfo,
+) -> ApiResult<ObjectStewards> {
     let rows = of_object(c, ws, &object.object_type, &object.object_id)?;
     let mut stewards = Vec::with_capacity(rows.len());
     for s in &rows {
@@ -641,18 +486,24 @@ pub struct Holdings {
 }
 
 /// A party's accounts, grouped by system in the order the systems first appear.
-pub fn accounts_of(c: &Connection, ws: &str, party: &str) -> ApiResult<Vec<AccountGroup>> {
-    let rows: Vec<(String, String, String, String, String)> = c
-        .prepare_cached(
-            "SELECT id, system_id, handle_display, display_name, kind FROM accounts
-             WHERE workspace_id = ? AND party_id = ? AND status != 'deleted' ORDER BY system_id, created",
-        )?
-        .query_map(params![ws, party], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
+pub fn accounts_of(c: &mut impl Read, ws: &str, party: &str) -> ApiResult<Vec<AccountGroup>> {
+    let mut rows = Accounts(c).of_party(ws, party)?;
+    rows.retain(|row| row.status != "deleted");
+    rows.sort_by(|a, b| {
+        a.system_id
+            .cmp(&b.system_id)
+            .then_with(|| a.created.cmp(&b.created))
+    });
     let mut out: Vec<AccountGroup> = Vec::new();
-    for (id, system, handle, name, kind) in rows {
+    for row in rows {
+        let Account {
+            id,
+            system_id: system,
+            handle_display: handle,
+            display_name: name,
+            kind,
+            ..
+        } = row;
         let a = AccountRef {
             id,
             handle,
@@ -672,7 +523,7 @@ pub fn accounts_of(c: &Connection, ws: &str, party: &str) -> ApiResult<Vec<Accou
     Ok(out)
 }
 
-pub fn holdings_of(c: &Connection, viewer: &Viewer, p: &Party) -> ApiResult<Holdings> {
+pub fn holdings_of(c: &mut impl Read, viewer: &Viewer, p: &Party) -> ApiResult<Holdings> {
     let ws = viewer.ws.as_str();
     let mut responsible = Vec::new();
     for s in of_person(c, ws, &p.id)? {
@@ -712,83 +563,44 @@ pub fn holdings_of(c: &Connection, viewer: &Viewer, p: &Party) -> ApiResult<Hold
 pub fn holdings(m: &Modules, who: &Caller, id: &str) -> ApiResult<Holdings> {
     let (viewer, me) = super::service::start(m, who)?;
     let id = if id == "me" { me.id.as_str() } else { id };
-    m.store.reader(|c| {
-        let p = super::service::own_party(c, &viewer, id, "contact", "联系人", false)?;
-        holdings_of(c, &viewer, &p)
-    })
+    m.store.read(|c| {
+        Ok((|| {
+            let p = super::service::own_party_in(c, &viewer, id, "contact", "联系人", false)?;
+            holdings_of(c, &viewer, &p)
+        })())
+    })?
 }
 
 /// The objects nobody confirmed as 负责人: Steve's bots, personas, devices,
 /// connections, bot parties and service / shared-mailbox accounts.
-pub fn unowned_in(c: &Connection, ws: &str) -> ApiResult<Vec<ObjectInfo>> {
-    let none = |t: &str, col: &str| {
-        format!(
-            "NOT EXISTS (SELECT 1 FROM stewards s WHERE s.workspace_id = ?1 AND s.object_type = '{t}' AND s.object_id = {col} AND s.role = 'owner' AND s.status = 'confirmed')"
-        )
-    };
-    let queries = [
-        (
-            "bot",
-            format!(
-                "SELECT b.id FROM bots b WHERE b.deleted = 0 AND (b.workspace_id = ?1 OR EXISTS (SELECT 1 FROM bot_workspaces w WHERE w.bot_id = b.id AND w.workspace_id = ?1)) AND {} ORDER BY b.main DESC, b.name",
-                none("bot", "b.id")
-            ),
-        ),
-        (
-            "persona",
-            format!(
-                "SELECT x.id FROM personas x WHERE x.workspace_id = ?1 AND x.deleted = 0 AND {} ORDER BY x.is_default DESC, x.name",
-                none("persona", "x.id")
-            ),
-        ),
-        (
-            "device",
-            format!(
-                "SELECT d.id FROM devices d WHERE {} ORDER BY d.created",
-                none("device", "d.id")
-            ),
-        ),
-        (
-            "connection",
-            format!(
-                "SELECT c.id FROM connections c WHERE c.workspace_id = ?1 AND c.status != 'revoked' AND {} ORDER BY c.created",
-                none("connection", "c.id")
-            ),
-        ),
-        (
-            "party",
-            format!(
-                "SELECT p.id FROM parties p WHERE p.workspace_id = ?1 AND p.type = 'contact' AND p.contact_kind = 'bot' AND p.status = 'active' AND {} ORDER BY p.name",
-                none("party", "p.id")
-            ),
-        ),
-        (
-            "account",
-            format!(
-                "SELECT a.id FROM accounts a WHERE a.workspace_id = ?1 AND a.status != 'deleted' AND a.kind IN ({SERVICE_ACCOUNTS}) AND {} ORDER BY a.created",
-                none("account", "a.id")
-            ),
-        ),
-    ];
+pub fn unowned_in(c: &mut impl Read, ws: &str) -> ApiResult<Vec<ObjectInfo>> {
+    let owned = Stewards(c).confirmed_objects(ws)?;
     let mut out = Vec::new();
-    for (t, sql) in queries {
-        let ids: Vec<String> = c
-            .prepare_cached(&sql)?
-            .query_map([ws], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        for id in ids {
-            if let Some(o) = object_info(c, ws, t, &id)? {
-                out.push(o);
-            }
-        }
+    for kind in ["bot", "persona", "device"] {
+        out.extend(named_objects(c, ws, kind)?);
     }
+    for connection in Connections(c)
+        .list(ws)?
+        .into_iter()
+        .filter(|row| row.status != "revoked")
+    {
+        out.extend(connection_info(c, connection)?);
+    }
+    let mut parties = Contacts::new(c).active(&Viewer::bare(ws, "steve"), &["contact"], true)?;
+    parties.retain(|p| p.contact_kind.as_deref() == Some("bot"));
+    parties.sort_by(|a, b| a.name.cmp(&b.name));
+    out.extend(parties.into_iter().map(party_info));
+    for row in Accounts(c).service_identities(ws, &SERVICE_ACCOUNTS)? {
+        out.push(account_info(c, ws, row)?);
+    }
+    out.retain(|object| !owned.contains(&(object.object_type.clone(), object.object_id.clone())));
     Ok(out)
 }
 
 /// `GET /stewards/unowned`.
 pub fn unowned(m: &Modules, who: &Caller) -> ApiResult<Vec<ObjectInfo>> {
     super::service::start(m, who)?;
-    m.store.reader(|c| unowned_in(c, &who.ws))
+    m.store.read(|c| Ok(unowned_in(c, &who.ws)))?
 }
 
 /// `GET /stewards/:type/:id`.
@@ -799,14 +611,21 @@ pub fn list_object(
     id: &str,
 ) -> ApiResult<ObjectStewards> {
     super::service::start(m, who)?;
-    m.store.reader(|c| {
-        let o = own_object(c, &who.ws, object_type, id)?;
-        object_stewards(c, &who.ws, o)
-    })
+    m.store.read(|c| {
+        Ok((|| {
+            let o = own_object(c, &who.ws, object_type, id)?;
+            object_stewards(c, &who.ws, o)
+        })())
+    })?
 }
 
 /// The object or `404 没有这个<type label>` (`400` for an unknown type).
-pub fn own_object(c: &Connection, ws: &str, object_type: &str, id: &str) -> ApiResult<ObjectInfo> {
+pub fn own_object(
+    c: &mut impl Read,
+    ws: &str,
+    object_type: &str,
+    id: &str,
+) -> ApiResult<ObjectInfo> {
     if !OBJECT_TYPES.iter().any(|(t, _)| *t == object_type) {
         return Err(ApiError::invalid("object_type"));
     }
@@ -853,7 +672,7 @@ fn check_role(role: Option<&str>) -> ApiResult<String> {
     }
 }
 
-fn name_list(c: &Connection, rows: &[&Steward]) -> ApiResult<Vec<String>> {
+fn name_list(c: &mut impl Read, rows: &[&Steward]) -> ApiResult<Vec<String>> {
     rows.iter().map(|s| name_of(c, &s.person_id)).collect()
 }
 
@@ -866,7 +685,7 @@ fn shown_names(v: &[String]) -> String {
     }
 }
 
-fn names(c: &Connection, rows: &[&Steward]) -> ApiResult<String> {
+fn names(c: &mut impl Read, rows: &[&Steward]) -> ApiResult<String> {
     Ok(shown_names(&name_list(c, rows)?))
 }
 
@@ -939,53 +758,55 @@ pub fn set_from(
     let role = check_role(b.role.as_deref())?;
     // the preview line is stored with the changeset: zh-CN (changes::stored)
     let (o, plan, person) = changes::stored(|| {
-        m.store.reader(|c| {
-            let o = own_object(c, &who.ws, object_type, id)?;
-            let p = person(c, &viewer, b.person_id.trim())?;
-            if o.object_type == "party" && o.object_id == p.id {
-                return Err(ApiError::rule(steve_i18n::t!(
-                    "modules.stewards.not_own_steward"
-                )));
-            }
-            let rows = of_object(c, &who.ws, object_type, id)?;
-            let same: Vec<&Steward> = rows.iter().filter(|s| s.role == role).collect();
-            let mut plan = Plan::default();
-            if b.replace.unwrap_or(true) {
-                for s in same.iter().filter(|s| s.person_id != p.id) {
-                    plan.ops.push(remove_op(s));
+        m.store.read(|c| {
+            Ok((|| {
+                let o = own_object(c, &who.ws, object_type, id)?;
+                let p = person(c, &viewer, b.person_id.trim())?;
+                if o.object_type == "party" && o.object_id == p.id {
+                    return Err(ApiError::rule(steve_i18n::t!(
+                        "modules.stewards.not_own_steward"
+                    )));
                 }
-            }
-            let current = same.iter().find(|s| s.person_id == p.id);
-            if current.is_none_or(|s| s.status != "confirmed") {
-                plan.ops.push(set_op(&o, &p.id, &role, source));
-            }
-            if !plan.ops.is_empty() {
-                let after: Vec<&Steward> = if b.replace.unwrap_or(true) {
-                    Vec::new()
-                } else {
-                    same.iter()
-                        .filter(|s| s.person_id != p.id)
-                        .copied()
-                        .collect()
-                };
-                let mut to = name_list(c, &after)?;
-                to.push(p.name.clone());
-                let to = shown_names(&to);
-                plan.changes.push(Change::new(
-                    steve_i18n::t!(
-                        "modules.stewards.line",
-                        name = o.name,
-                        role = role_shown(&role)
-                    ),
-                    names(c, &same)?,
-                    to,
-                ));
-            }
-            Ok((o, plan, p))
-        })
+                let rows = of_object(c, &who.ws, object_type, id)?;
+                let same: Vec<&Steward> = rows.iter().filter(|s| s.role == role).collect();
+                let mut plan = Plan::default();
+                if b.replace.unwrap_or(true) {
+                    for s in same.iter().filter(|s| s.person_id != p.id) {
+                        plan.ops.push(remove_op(s));
+                    }
+                }
+                let current = same.iter().find(|s| s.person_id == p.id);
+                if current.is_none_or(|s| s.status != "confirmed") {
+                    plan.ops.push(set_op(&o, &p.id, &role, source));
+                }
+                if !plan.ops.is_empty() {
+                    let after: Vec<&Steward> = if b.replace.unwrap_or(true) {
+                        Vec::new()
+                    } else {
+                        same.iter()
+                            .filter(|s| s.person_id != p.id)
+                            .copied()
+                            .collect()
+                    };
+                    let mut to = name_list(c, &after)?;
+                    to.push(p.name.clone());
+                    let to = shown_names(&to);
+                    plan.changes.push(Change::new(
+                        steve_i18n::t!(
+                            "modules.stewards.line",
+                            name = o.name,
+                            role = role_shown(&role)
+                        ),
+                        names(c, &same)?,
+                        to,
+                    ));
+                }
+                Ok((o, plan, p))
+            })())
+        })?
     })?;
     let undo = record(m, who, &o, &person.id, plan, origin)?;
-    let now = m.store.reader(|c| object_stewards(c, &who.ws, o))?;
+    let now = m.store.read(|c| Ok(object_stewards(c, &who.ws, o)))??;
     Ok(Changed {
         ok: true,
         undo,
@@ -1004,48 +825,52 @@ pub fn remove(
     let (_, me) = super::service::start(m, who)?;
     let role = check_role(q.role.as_deref())?;
     let (o, plan, href) = changes::stored(|| {
-        m.store.reader(|c| {
-            let o = own_object(c, &who.ws, object_type, id)?;
-            let rows = of_object(c, &who.ws, object_type, id)?;
-            let person = q
-                .person_id
-                .as_deref()
-                .map(|p| if p == "me" { me.id.as_str() } else { p });
-            let gone: Vec<&Steward> = rows
-                .iter()
-                .filter(|s| s.role == role && person.is_none_or(|p| p == s.person_id))
-                .collect();
-            let mut plan = Plan::default();
-            for s in &gone {
-                plan.ops.push(remove_op(s));
-            }
-            if !gone.is_empty() {
-                let left: Vec<&Steward> = rows
+        m.store.read(|c| {
+            Ok((|| {
+                let o = own_object(c, &who.ws, object_type, id)?;
+                let rows = of_object(c, &who.ws, object_type, id)?;
+                let person = q
+                    .person_id
+                    .as_deref()
+                    .map(|p| if p == "me" { me.id.as_str() } else { p });
+                let gone: Vec<&Steward> = rows
                     .iter()
-                    .filter(|s| s.role == role && !gone.iter().any(|g| g.person_id == s.person_id))
+                    .filter(|s| s.role == role && person.is_none_or(|p| p == s.person_id))
                     .collect();
-                plan.changes.push(Change::new(
-                    steve_i18n::t!(
-                        "modules.stewards.line",
-                        name = o.name,
-                        role = role_shown(&role)
-                    ),
-                    names(
-                        c,
-                        &rows.iter().filter(|s| s.role == role).collect::<Vec<_>>(),
-                    )?,
-                    names(c, &left)?,
-                ));
-            }
-            let href = gone
-                .first()
-                .map(|s| s.person_id.clone())
-                .unwrap_or(me.id.clone());
-            Ok::<_, ApiError>((o, plan, href))
-        })
+                let mut plan = Plan::default();
+                for s in &gone {
+                    plan.ops.push(remove_op(s));
+                }
+                if !gone.is_empty() {
+                    let left: Vec<&Steward> = rows
+                        .iter()
+                        .filter(|s| {
+                            s.role == role && !gone.iter().any(|g| g.person_id == s.person_id)
+                        })
+                        .collect();
+                    plan.changes.push(Change::new(
+                        steve_i18n::t!(
+                            "modules.stewards.line",
+                            name = o.name,
+                            role = role_shown(&role)
+                        ),
+                        names(
+                            c,
+                            &rows.iter().filter(|s| s.role == role).collect::<Vec<_>>(),
+                        )?,
+                        names(c, &left)?,
+                    ));
+                }
+                let href = gone
+                    .first()
+                    .map(|s| s.person_id.clone())
+                    .unwrap_or(me.id.clone());
+                Ok::<_, ApiError>((o, plan, href))
+            })())
+        })?
     })?;
     let undo = record(m, who, &o, &href, plan, Origin::default())?;
-    let now = m.store.reader(|c| object_stewards(c, &who.ws, o))?;
+    let now = m.store.read(|c| Ok(object_stewards(c, &who.ws, o)))??;
     Ok(Changed {
         ok: true,
         undo,
@@ -1068,12 +893,12 @@ fn key_of(op: &Value) -> ApiResult<Key> {
     })
 }
 
-fn restore(tx: &Tx, before: &Value) -> ApiResult<()> {
+fn restore(tx: &mut W<'_>, before: &Value) -> ApiResult<()> {
     if before.is_null() {
         return Ok(());
     }
     let s: Steward = serde_json::from_value(before.clone())?;
-    if repo::get(tx, &s.person_id)?.is_some() {
+    if Contacts::new(tx).party(&s.person_id)?.is_some() {
         put(tx, &s)?;
     }
     Ok(())
@@ -1085,16 +910,16 @@ pub struct SetOp;
 
 impl ChangeOp for SetOp {
     fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
-        let c = &w.legacy();
+        let c = w;
         let k = key_of(op)?;
         own_object(c, cx.ws, &k.object_type, &k.object_id)?;
         check_role(Some(&k.role))?;
-        let viewer = Viewer::load(c, cx.ws, cx.actor)?;
+        let viewer = Viewer::bare(cx.ws, cx.actor);
         person(c, &viewer, &k.person_id).map(|_| ())
     }
 
     fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
-        let tx = &w.legacy();
+        let tx = w;
         let k = key_of(op)?;
         let before = get(tx, cx.ws, &k)?;
         let source = op.get("source").and_then(Value::as_str).unwrap_or("manual");
@@ -1110,10 +935,9 @@ impl ChangeOp for SetOp {
             s.created = b.created;
             // a proposal confirmed by hand: its card is settled too
             if let Some(d) = b.decision_id.as_deref().filter(|_| b.status == "proposed")
-                && base::decisions::get(tx, d)?.is_some_and(|d| d.status == "open")
+                && DecisionRows(tx).get(d)?.is_some_and(|d| d.status == "open")
             {
-                base::decisions::settle(
-                    tx,
+                DecisionRows(tx).settle(
                     d,
                     &json!({ "choice": "yes", "manual": true }),
                     "resolved",
@@ -1122,9 +946,7 @@ impl ChangeOp for SetOp {
             }
         }
         put(tx, &s)?;
-        base::audit(
-            tx,
-            cx.ws,
+        tx.audit(cx.ws,
             cx.actor,
             "steward.set",
             &k.object_id,
@@ -1143,7 +965,7 @@ impl ChangeOp for SetOp {
         op: &Value,
         before: &Value,
     ) -> ApiResult<()> {
-        let tx = &w.legacy();
+        let tx = w;
         let k = key_of(op)?;
         delete(tx, cx.ws, &k)?;
         restore(tx, before)
@@ -1155,13 +977,11 @@ pub struct RemoveOp;
 
 impl ChangeOp for RemoveOp {
     fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
-        let tx = &w.legacy();
+        let tx = w;
         let k = key_of(op)?;
         let before = get(tx, cx.ws, &k)?;
         delete(tx, cx.ws, &k)?;
-        base::audit(
-            tx,
-            cx.ws,
+        tx.audit(cx.ws,
             cx.actor,
             "steward.remove",
             &k.object_id,
@@ -1180,7 +1000,7 @@ impl ChangeOp for RemoveOp {
         _op: &Value,
         before: &Value,
     ) -> ApiResult<()> {
-        let tx = &w.legacy();
+        let tx = w;
         restore(tx, before)
     }
 }
@@ -1190,7 +1010,7 @@ impl ChangeOp for RemoveOp {
 /// Links `object` to `person` unless that row exists already; a proposed row is confirmed. Returns
 /// whether something was written. For system writes (connect, sync, seed), audited as `steward.link`.
 pub fn link(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     object_type: &str,
     object_id: &str,
@@ -1210,8 +1030,7 @@ pub fn link(
     let mut s = Steward::new(ws, object_type, object_id, person_id, "owner", source);
     s.source_ref = source_ref.map(str::to_string);
     put(tx, &s)?;
-    base::audit(
-        tx,
+    tx.audit(
         ws,
         "steve",
         "steward.link",
@@ -1225,7 +1044,7 @@ pub fn link(
 /// already. Nothing happens while that “我” does not exist yet: [`seed_defaults`] links it when it is
 /// created.
 pub fn adopt(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     object_type: &str,
     object_id: &str,
@@ -1236,7 +1055,9 @@ pub fn adopt(
         return Ok(false);
     }
     let me = match user {
-        Some(u) => repo::me_of(tx, ws, u)?.filter(|p| p.status == "active"),
+        Some(u) => Contacts::new(tx)
+            .me(ws, u)?
+            .filter(|p| p.status == "active"),
         None => owner_me(tx, ws)?,
     };
     match me {
@@ -1247,11 +1068,8 @@ pub fn adopt(
 
 /// [`adopt`] in every workspace, for objects that belong to none (devices): each workspace's owner
 /// gets it, where “我” exists and nobody has it yet.
-pub fn adopt_everywhere(tx: &Tx, object_type: &str, object_id: &str) -> ApiResult<usize> {
-    let wss: Vec<String> = tx
-        .prepare_cached("SELECT id FROM workspaces ORDER BY created")?
-        .query_map([], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+pub fn adopt_everywhere(tx: &mut W<'_>, object_type: &str, object_id: &str) -> ApiResult<usize> {
+    let wss = steve_store::Workspaces(tx).ids()?;
     let mut n = 0;
     for ws in wss {
         if adopt(tx, &ws, object_type, object_id, None, "seed")? {
@@ -1264,23 +1082,24 @@ pub fn adopt_everywhere(tx: &Tx, object_type: &str, object_id: &str) -> ApiResul
 /// The backfill of migration 18 for one workspace, run when its “我” (`me`) is created: Steve's bots,
 /// personas and the Hub device go to `me`; connections to the person whose account it is, else to the
 /// connecting user's “我”. Objects that have any steward already are left alone.
-pub fn seed_defaults(tx: &Tx, ws: &str, me: &Party) -> ApiResult<usize> {
+pub fn seed_defaults(tx: &mut W<'_>, ws: &str, me: &Party) -> ApiResult<usize> {
     let mut n = 0;
-    let bots: Vec<String> = tx
-        .prepare_cached(
-            "SELECT b.id FROM bots b WHERE b.deleted = 0
-               AND (b.workspace_id = ?1 OR EXISTS (SELECT 1 FROM bot_workspaces w WHERE w.bot_id = b.id AND w.workspace_id = ?1))",
-        )?
-        .query_map([ws], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    let personas: Vec<String> = tx
-        .prepare_cached("SELECT id FROM personas WHERE workspace_id = ? AND deleted = 0")?
-        .query_map([ws], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    let hub: Vec<String> = tx
-        .prepare_cached("SELECT id FROM devices WHERE id = 'hub'")?
-        .query_map([], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+    let bots = BotRows(tx)
+        .owned_in(ws)?
+        .into_iter()
+        .map(|b| b.id)
+        .collect::<Vec<_>>();
+    let personas = PersonaRows(tx)
+        .identities(ws)?
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
+    let hub = DeviceRows(tx)
+        .identities()?
+        .into_iter()
+        .filter(|d| d.id == "hub")
+        .map(|d| d.id)
+        .collect();
     for (t, ids) in [("bot", bots), ("persona", personas), ("device", hub)] {
         for id in ids {
             if !has_any(tx, ws, t, &id)? && link(tx, ws, t, &id, &me.id, "seed", None)? {
@@ -1288,19 +1107,19 @@ pub fn seed_defaults(tx: &Tx, ws: &str, me: &Party) -> ApiResult<usize> {
             }
         }
     }
-    let conns: Vec<(String, String, String)> = tx
-        .prepare_cached(
-            "SELECT c.id, a.party_id, c.created_by FROM connections c JOIN accounts a ON a.id = c.account_id
-             WHERE c.workspace_id = ? AND c.status != 'revoked'",
-        )?
-        .query_map([ws], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    for (id, party, by) in conns {
-        if has_any(tx, ws, "connection", &id)? {
+    for row in Connections(tx)
+        .list(ws)?
+        .into_iter()
+        .filter(|row| row.status != "revoked")
+    {
+        if has_any(tx, ws, "connection", &row.id)? {
             continue;
         }
-        if let Some(p) = connection_owner(tx, ws, &party, &by)?
-            && link(tx, ws, "connection", &id, &p, "seed", None)?
+        let Some(account) = Accounts(tx).get(&row.account_id)? else {
+            continue;
+        };
+        if let Some(p) = connection_owner(tx, ws, &account.party_id, &row.created_by)?
+            && link(tx, ws, "connection", &row.id, &p, "seed", None)?
         {
             n += 1;
         }
@@ -1310,26 +1129,33 @@ pub fn seed_defaults(tx: &Tx, ws: &str, me: &Party) -> ApiResult<usize> {
 
 /// Whose a connection is: the person whose account it is, else the connecting user's “我”.
 pub fn connection_owner(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     account_party: &str,
     created_by: &str,
 ) -> ApiResult<Option<String>> {
-    if let Some(p) = repo::get(c, account_party)?.filter(|p| {
+    if let Some(p) = Contacts::new(c).party(account_party)?.filter(|p| {
         p.kind == "contact"
             && p.status == "active"
             && !matches!(p.contact_kind.as_deref(), Some("bot" | "virtual"))
     }) {
         return Ok(Some(p.id));
     }
-    Ok(repo::me_of(c, ws, created_by)?
+    Ok(Contacts::new(c)
+        .me(ws, created_by)?
         .filter(|p| p.status == "active")
         .map(|p| p.id))
 }
 
 /// A new bot party (`contact_kind = bot`) for a non-person actor: an app bot on connect, another
 /// bot seen in a chat. Nobody owns it yet.
-pub fn new_bot_party(tx: &Tx, ws: &str, actor: &str, name: &str, source: &str) -> ApiResult<Party> {
+pub fn new_bot_party(
+    w: &mut steve_store::W<'_>,
+    ws: &str,
+    actor: &str,
+    name: &str,
+    source: &str,
+) -> ApiResult<Party> {
     let name: String = name.trim().chars().take(80).collect();
     let name = if name.is_empty() {
         "机器人".to_string()
@@ -1339,16 +1165,15 @@ pub fn new_bot_party(tx: &Tx, ws: &str, actor: &str, name: &str, source: &str) -
     let mut p = NewParty::new("contact", &name, actor);
     p.contact_kind = Some("bot".into());
     p.source = source.into();
-    let p = repo::insert(tx, ws, &p)?;
-    base::audit(
-        tx,
+    let p = w.contacts().insert(ws, &p)?;
+    w.audit(
         ws,
         actor,
         "party.create",
         &p.id,
         &json!({ "type": "contact", "bot": true }),
     )?;
-    super::service::event(tx, ws, &p.id);
+    w.emit(crate::accounts::service::party_changed(ws, &p.id));
     Ok(p)
 }
 
@@ -1368,7 +1193,7 @@ pub enum Proposed {
 /// A proposed steward (`source = chat`) plus a `confirm` decision the user answers with one click.
 #[allow(clippy::too_many_arguments)]
 pub fn propose(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     o: &ObjectInfo,
     person: &Party,
@@ -1404,7 +1229,7 @@ pub fn propose(
     if !basis.is_empty() {
         d.draft = Some(basis.chars().take(500).collect());
     }
-    let d = base::decisions::open(tx, &d)?;
+    let d = DecisionRows(tx).open(&d)?;
     let mut s = Steward::new(ws, &k.object_type, &k.object_id, &k.person_id, role, "chat");
     s.status = "proposed".into();
     s.confidence = CHAT_CONFIDENCE;
@@ -1419,45 +1244,55 @@ pub struct StewardConfirm;
 
 impl DecisionHandler for StewardConfirm {
     fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
-        let s = by_decision(tx, &d.id)?
-            .filter(|s| s.workspace_id == cx.ws)
-            .ok_or_else(|| ApiError::not_found("负责人提议"))?;
-        let mut result = decisions::choice_result(cx);
-        if cx.choice == "yes" {
-            let mut c = s.clone();
-            c.status = "confirmed".into();
-            c.confidence = 1.0;
-            c.updated = now();
-            put(tx, &c)?;
-        } else {
-            delete(tx, &s.workspace_id, &s.key())?;
-            result["steward"] = serde_json::to_value(&s)?;
-        }
-        Ok(result)
+        tx.write(|tx| {
+            let s = Stewards(tx)
+                .by_decision(&d.id)?
+                .filter(|s| s.workspace_id == cx.ws)
+                .ok_or_else(|| ApiError::not_found("负责人提议"))?;
+            let mut result = decisions::choice_result(cx);
+            if cx.choice == "yes" {
+                let mut c = s.clone();
+                c.status = "confirmed".into();
+                c.confidence = 1.0;
+                c.updated = now();
+                put(tx, &c)?;
+            } else {
+                delete(tx, &s.workspace_id, &s.key())?;
+                result["steward"] = serde_json::to_value(&s)?;
+            }
+            Ok(result)
+        })
     }
 
     fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
-        if let Some(v) = d.result.get("steward") {
-            let mut s: Steward = serde_json::from_value(v.clone())?;
-            s.status = "proposed".into();
-            if repo::get(tx, &s.person_id)?.is_some() {
+        tx.write(|tx| {
+            if let Some(v) = d.result.get("steward") {
+                let mut s: Steward = serde_json::from_value(v.clone())?;
+                s.status = "proposed".into();
+                if Contacts::new(tx).party(&s.person_id)?.is_some() {
+                    put(tx, &s)?;
+                }
+                return Ok(());
+            }
+            if let Some(mut s) = Stewards(tx).by_decision(&d.id)? {
+                s.status = "proposed".into();
+                s.confidence = CHAT_CONFIDENCE;
                 put(tx, &s)?;
             }
-            return Ok(());
-        }
-        if let Some(mut s) = by_decision(tx, &d.id)? {
-            s.status = "proposed".into();
-            s.confidence = CHAT_CONFIDENCE;
-            put(tx, &s)?;
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     fn expire(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
-        if let Some(s) = by_decision(tx, &d.id)?.filter(|s| s.status == "proposed") {
-            delete(tx, &s.workspace_id, &s.key())?;
-        }
-        Ok(())
+        tx.write(|tx| {
+            if let Some(s) = Stewards(tx)
+                .by_decision(&d.id)?
+                .filter(|s| s.status == "proposed")
+            {
+                delete(tx, &s.workspace_id, &s.key())?;
+            }
+            Ok(())
+        })
     }
 }
 
@@ -1477,77 +1312,76 @@ pub struct MovedStewards {
 }
 
 /// Moves `from`'s steward rows to `into` inside the merge transaction.
-pub fn merge_move(tx: &Tx, ws: &str, from: &str, into: &str) -> ApiResult<MovedStewards> {
+pub fn merge_move(tx: &mut W<'_>, ws: &str, from: &str, into: &str) -> ApiResult<MovedStewards> {
+    let w = tx;
     let mut mv = MovedStewards::default();
-    for s in of_person(tx, ws, from)? {
+    for s in Stewards(w).of_person(ws, from)? {
         let mut k = s.key();
         k.person_id = into.into();
-        if get(tx, ws, &k)?.is_some() {
-            delete(tx, ws, &s.key())?;
+        if Stewards(w).get(ws, &k)?.is_some() {
+            Stewards(w).delete(ws, &s.key())?;
+            w.emit(crate::accounts::service::party_changed(ws, from));
             mv.dropped.push(s);
         } else {
-            tx.run(
-                "UPDATE stewards SET person_id = ? WHERE workspace_id = ? AND object_type = ? AND object_id = ? AND person_id = ? AND role = ?",
-                params![into, ws, s.object_type, s.object_id, from, s.role],
-            )?;
+            Stewards(w).move_person(ws, &s.key(), into)?;
             mv.moved.push(k);
         }
     }
-    for s in of_object(tx, ws, "party", from)? {
+    for s in Stewards(w).of_object(ws, "party", from)? {
         let mut k = s.key();
         k.object_id = into.into();
-        if k.person_id == into || get(tx, ws, &k)?.is_some() {
-            delete(tx, ws, &s.key())?;
+        if k.person_id == into || Stewards(w).get(ws, &k)?.is_some() {
+            Stewards(w).delete(ws, &s.key())?;
+            w.emit(crate::accounts::service::party_changed(ws, &s.person_id));
             mv.objects_dropped.push(s);
         } else {
-            tx.run(
-                "UPDATE stewards SET object_id = ? WHERE workspace_id = ? AND object_type = 'party' AND object_id = ? AND person_id = ? AND role = ?",
-                params![into, ws, from, s.person_id, s.role],
-            )?;
+            Stewards(w).move_object(ws, &s.key(), into)?;
             mv.objects.push(k);
         }
     }
-    changed(tx, ws, into);
+    w.emit(crate::accounts::service::party_changed(ws, into));
     Ok(mv)
 }
 
-/// Undoes [`merge_move`] for the rows still where the merge put them.
-pub fn split_back(tx: &Tx, ws: &str, from: &str, into: &str, mv: &MovedStewards) -> ApiResult<()> {
+/// Undoes [`merge_move`] for rows still where the merge put them.
+pub fn split_back(
+    tx: &mut W<'_>,
+    ws: &str,
+    from: &str,
+    into: &str,
+    mv: &MovedStewards,
+) -> ApiResult<()> {
+    let w = tx;
     for k in &mv.moved {
-        tx.run(
-            "UPDATE OR IGNORE stewards SET person_id = ? WHERE workspace_id = ? AND object_type = ? AND object_id = ? AND person_id = ? AND role = ?",
-            params![from, ws, k.object_type, k.object_id, into, k.role],
-        )?;
-    }
-    for k in &mv.objects {
-        tx.run(
-            "UPDATE OR IGNORE stewards SET object_id = ? WHERE workspace_id = ? AND object_type = 'party' AND object_id = ? AND person_id = ? AND role = ?",
-            params![from, ws, into, k.person_id, k.role],
-        )?;
-    }
-    for s in mv.dropped.iter().chain(mv.objects_dropped.iter()) {
-        if get(tx, ws, &s.key())?.is_none() {
-            put(tx, s)?;
+        let mut dest = k.clone();
+        dest.person_id = from.into();
+        if Stewards(w).get(ws, &dest)?.is_none() {
+            Stewards(w).move_person(ws, k, from)?;
         }
     }
-    changed(tx, ws, from);
-    changed(tx, ws, into);
+    for k in &mv.objects {
+        let mut dest = k.clone();
+        dest.object_id = from.into();
+        if Stewards(w).get(ws, &dest)?.is_none() {
+            Stewards(w).move_object(ws, k, from)?;
+        }
+    }
+    for s in mv.dropped.iter().chain(mv.objects_dropped.iter()) {
+        if Stewards(w).get(ws, &s.key())?.is_none() {
+            Stewards(w).put(s)?;
+            w.emit(crate::accounts::service::party_changed(ws, &s.person_id));
+        }
+    }
+    w.emit(crate::accounts::service::party_changed(ws, from));
+    w.emit(crate::accounts::service::party_changed(ws, into));
     Ok(())
-}
-
-/// A deleted contact is nobody's steward any more, and a deleted bot party has none.
-pub fn forget_party(tx: &Tx, ws: &str, party: &str) -> ApiResult<usize> {
-    Ok(tx.run(
-        "DELETE FROM stewards WHERE workspace_id = ?1 AND (person_id = ?2 OR (object_type = 'party' AND object_id = ?2))",
-        params![ws, party],
-    )?)
 }
 
 // ---------------------------------------------------------------- for cards and tools
 
 /// The confirmed owners' names of an object (`张三、李四`), empty if none.
 pub fn owner_names(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     object_type: &str,
     object_id: &str,
@@ -1566,13 +1400,14 @@ pub fn owner_names(
 }
 
 /// The owners of a party: its own stewards, then those of its accounts (a bot's app account).
-pub fn party_owner_names(c: &Connection, ws: &str, party: &str) -> ApiResult<Vec<String>> {
+pub fn party_owner_names(c: &mut impl Read, ws: &str, party: &str) -> ApiResult<Vec<String>> {
     let mut out = owner_names(c, ws, "party", party)?;
-    let accounts: Vec<String> = c
-        .prepare_cached("SELECT id FROM accounts WHERE workspace_id = ? AND party_id = ? AND status != 'deleted'")?
-        .query_map(params![ws, party], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    for a in accounts {
+    for account in Accounts(c)
+        .of_party(ws, party)?
+        .into_iter()
+        .filter(|a| a.status != "deleted")
+    {
+        let a = account.id;
         for n in owner_names(c, ws, "account", &a)? {
             if !out.contains(&n) {
                 out.push(n);

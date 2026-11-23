@@ -536,9 +536,12 @@ impl Channels {
         let block = match self.turn_source(ws, origin) {
             Ok(Some((_, plan, _))) if plan.space_id == space_id => self
                 .store()
-                .reader(|c| -> ChannelResult<String> {
-                    Ok(crate::im_context::render_for(c, &plan))
+                .read(|r| {
+                    Ok(self.store().reader(|c| -> ChannelResult<String> {
+                        Ok(crate::im_context::render_for(c, r, &plan))
+                    }))
                 })
+                .unwrap_or_else(|e| Err(e.into()))
                 .map(|b| format!("{b}\n\n{CONV_TOOLS_NOTE}\n\n"))
                 .unwrap_or_else(|e| {
                     tracing::warn!(origin, "identity block not built, identity unknown: {e}");
@@ -559,7 +562,7 @@ impl Channels {
     /// [`Channels::conv_research_context`] after the identity block.
     fn conv_research_card(&self, ws: &str, space_id: &str, origin: &str) -> String {
         let turn = self.store().messages().get(origin).ok().flatten();
-        let r = self.store().reader(|c| -> ChannelResult<String> {
+        let r = self.store().read(|r| Ok(self.store().reader(|c| -> ChannelResult<String> {
             let Some(space) = spaces::get(c, space_id)? else {
                 return Ok(String::new());
             };
@@ -590,19 +593,19 @@ impl Channels {
             if own {
                 return Ok(format!(
                     "{card}\n\n这次的问题来自你和 {} 的私聊（{}），只有你本人能看到，回答会发回那里。需要时直接查事项、会话、知识和代码，照实回答。{note}",
-                    personas::owner_internal_name(c, ws, &space.connection_id)?,
+                    personas::owner_internal_name(c, r, ws, &space.connection_id)?,
                     crate::spaces::display_title(c, &space)?,
                 ));
             }
-            let owner = personas::owner_name_for_space(c, ws, &space.id)?;
+            let owner = personas::owner_name_for_space(c, r, ws, &space.id)?;
             Ok(format!(
                 "{card}\n\n这次的问题来自渠道「{}」（{where_}{}）。你{who}，回答会发回那里，发出前要过披露检查：\
                  只说结论，不提其他群、其他客户、内部事项编号、文件路径和代码细节；对方这次自己提到的事项编号或说法可以照着提、用来澄清，但它不代表能说这件事的内容，内容仍只按能说的部分说；拿不准能不能说的，就当不知道，或者说会请 {owner} 来看。查不到、查询失败或没有权限时，笼统地说明即可，不说是什么权限、哪里报错。",
                 crate::spaces::display_title(c, &space)?,
                 if space.has_external { "，有外部成员" } else { "" },
             ) + &note)
-        });
-        r.unwrap_or_default()
+        })));
+        r.ok().and_then(Result::ok).unwrap_or_default()
     }
 
     /// Steve stored message `mid` in conversation `conv`: take it out to the space when it answers a
@@ -782,7 +785,13 @@ impl Channels {
             if plan.mode == Mode::Bot {
                 let owner = self
                     .store()
-                    .reader(|c| personas::owner_name_for_space(c, ws, &plan.space_id))
+                    .read(|r| {
+                        Ok(self
+                            .store()
+                            .reader(|c| personas::owner_name_for_space(c, r, ws, &plan.space_id)))
+                    })
+                    .ok()
+                    .and_then(Result::ok)
                     .unwrap_or_default();
                 let d = out
                     .deliver(

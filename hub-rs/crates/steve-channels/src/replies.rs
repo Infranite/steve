@@ -599,41 +599,43 @@ fn prepare_item_request(
     ws: &str,
     mode: ItemMode,
 ) -> ChannelResult<(Option<ItemRequest>, String)> {
-    ch.store().reader(|c| -> ChannelResult<_> {
-        let space = spaces::get(c, &plan.space_id)?
-            .ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
-        let set = spaces::settings(c, &space.id)?;
-        let d = &set.item_defaults;
-        let persona_bot = match plan.mode {
-            Mode::Bot => bindings::effective(c, &space)?.map(|e| e.persona.bot_id),
-            Mode::Own => None,
-        };
-        let bot = compose::pick_bot(c, &ws, &[d["bot_id"].as_str(), persona_bot.as_deref()])?;
-        let context = messages::context_before(c, &space.id, &plan.message_id, ITEM_CONTEXT)?;
-        let from_owner = sender_is_owner(c, &ws, plan.sender_party_id.as_deref())?;
-        let goal = item_goal(&plan.text, &context, from_owner);
-        let space_name = spaces::display_title(c, &space)?;
-        let title = {
-            let flat = plan.text.split_whitespace().collect::<Vec<_>>().join(" ");
-            if flat.is_empty() {
-                format!("来自「{space_name}」的消息")
-            } else {
-                flat.chars().take(TITLE_MAX).collect()
-            }
-        };
-        let req = bot.map(|bot| ItemRequest {
-            requester: None,
-            ws: ws.to_string(),
-            title,
-            goal,
-            bot,
-            project: d["project_id"].as_str().map(String::from),
-            tag_ids: compose::str_list(&d["tags"]),
-            source: (space_name, LINK_SOURCE.into()),
-            propose: mode == ItemMode::Propose,
-            accept_auto: false,
-            run_id: String::new(),
-        });
-        Ok((req, personas::owner_name_for_space(c, &ws, &space.id)?))
-    })
+    ch.store().read(|r| {
+        Ok(ch.store().reader(|c| -> ChannelResult<_> {
+            let space = spaces::get(c, &plan.space_id)?
+                .ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
+            let set = spaces::settings(c, &space.id)?;
+            let d = &set.item_defaults;
+            let persona_bot = match plan.mode {
+                Mode::Bot => bindings::effective(c, &space)?.map(|e| e.persona.bot_id),
+                Mode::Own => None,
+            };
+            let bot = compose::pick_bot(c, &ws, &[d["bot_id"].as_str(), persona_bot.as_deref()])?;
+            let context = messages::context_before(c, &space.id, &plan.message_id, ITEM_CONTEXT)?;
+            let from_owner = sender_is_owner(c, &ws, plan.sender_party_id.as_deref())?;
+            let goal = item_goal(&plan.text, &context, from_owner);
+            let space_name = spaces::display_title(c, &space)?;
+            let title = {
+                let flat = plan.text.split_whitespace().collect::<Vec<_>>().join(" ");
+                if flat.is_empty() {
+                    format!("来自「{space_name}」的消息")
+                } else {
+                    flat.chars().take(TITLE_MAX).collect()
+                }
+            };
+            let req = bot.map(|bot| ItemRequest {
+                requester: None,
+                ws: ws.to_string(),
+                title,
+                goal,
+                bot,
+                project: d["project_id"].as_str().map(String::from),
+                tag_ids: compose::str_list(&d["tags"]),
+                source: (space_name, LINK_SOURCE.into()),
+                propose: mode == ItemMode::Propose,
+                accept_auto: false,
+                run_id: String::new(),
+            });
+            Ok((req, personas::owner_name_for_space(c, r, &ws, &space.id)?))
+        }))
+    })?
 }

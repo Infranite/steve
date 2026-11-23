@@ -2,7 +2,7 @@ use super::*;
 
 struct Upserting<'a, 'tx> {
     conns: &'a Connections,
-    tx: &'a Tx<'tx>,
+    tx: &'a mut W<'tx>,
     viewer: &'a Viewer,
     actor: &'a str,
     provider: &'a dyn ConnectionProvider,
@@ -23,7 +23,7 @@ impl Connections {
     /// to destroy after the commit when an existing connection got the new one.
     pub(super) fn upsert_tx(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         viewer: &Viewer,
         actor: &str,
         p: &dyn ConnectionProvider,
@@ -39,7 +39,7 @@ impl Connections {
         if u.reauth_of.is_none() && u.info.owner == Owner::Me && p.claims_self() {
             self.claim_into_me(tx, viewer, actor, &system.id, &u.info)?;
         }
-        let run = Upserting {
+        let mut run = Upserting {
             conns: self,
             tx,
             viewer,
@@ -85,20 +85,22 @@ impl Connections {
 
 impl Upserting<'_, '_> {
     fn account(
-        &self,
+        &mut self,
         u: &Upsert,
         h: &asvc::Handle,
     ) -> VaultResult<(arepo::Account, Option<String>)> {
-        let tx = self.tx;
+        let tx = &mut *self.tx;
         let viewer = self.viewer;
         let actor = self.actor;
         let system = self.system;
         let ws = self.viewer.ws.as_str();
-        let known = arepo::by_handle(tx, ws, &system.family, &h.handle)?;
+        let known = Accounts(tx).by_handle(ws, &system.family, &h.handle)?;
         let owner = match &u.info.owner {
-            Owner::Me => people::me_of(tx, ws, actor)?,
-            Owner::SelfOrg => people::self_org(tx, ws)?,
-            Owner::Team(id) => people::get(tx, id)?
+            Owner::Me => tx.contacts().me(ws, actor)?,
+            Owner::SelfOrg => tx.contacts().own_org(ws)?,
+            Owner::Team(id) => tx
+                .contacts()
+                .party(id)?
                 .filter(|t| t.kind == "team" && t.workspace_id == ws && t.status == "active"),
             // a new app bot gets its own bot party; a known one keeps its party
             Owner::Bot if known.is_none() => Some(stewards::new_bot_party(
@@ -112,14 +114,16 @@ impl Upserting<'_, '_> {
                 },
                 "connect",
             )?),
-            Owner::Bot => people::self_org(tx, ws)?,
+            Owner::Bot => tx.contacts().own_org(ws)?,
         }
         .ok_or_else(|| ApiError::not_found("联系人"))?;
         let mut personal_of: Option<String> = None;
         let account = match known {
             Some(id) => {
-                let a = arepo::get(tx, &id)?.ok_or_else(|| ApiError::not_found("账号"))?;
-                let party = current_party(tx, &a.party_id)?;
+                let a = Accounts(tx)
+                    .get(&id)?
+                    .ok_or_else(|| ApiError::not_found("账号"))?;
+                let party = tx.contacts().current_party(&a.party_id)?;
                 // Opt-in strict bot/self contracts never adopt a known account of the other
                 // kind. Other providers retain their existing account-adoption behavior.
                 let bot = party
@@ -153,7 +157,7 @@ impl Upserting<'_, '_> {
                     ))
                     .into());
                 }
-                asvc::record_tx(
+                asvc::record(
                     tx,
                     viewer,
                     actor,
@@ -175,15 +179,15 @@ impl Upserting<'_, '_> {
     }
 
     fn existing(
-        &self,
+        &mut self,
         account: &arepo::Account,
         personal_of: Option<String>,
         u: &Upsert,
         h: &asvc::Handle,
     ) -> VaultResult<Option<ConnRow>> {
-        let tx = self.tx;
+        let tx = &mut *self.tx;
         let actor = self.actor;
-        let existing = repo::of_account(tx, &account.id)?;
+        let existing = ConnectionRows(tx).of_account(&account.id)?;
         // …and a personal connection is replaced only by the person who made it
         if personal_of.is_some()
             && let Some(c) = &existing
@@ -205,9 +209,9 @@ impl Upserting<'_, '_> {
         Ok(existing)
     }
 
-    fn pair(&self, existing: Option<&ConnRow>, u: &mut Upsert) -> VaultResult<Option<Value>> {
+    fn pair(&mut self, existing: Option<&ConnRow>, u: &mut Upsert) -> VaultResult<Option<Value>> {
         let conns = self.conns;
-        let tx = self.tx;
+        let tx = &mut *self.tx;
         let viewer = self.viewer;
         let p = self.provider;
         // the pair again, in the commit: it may have gone since the flow started. A connection that
@@ -238,7 +242,7 @@ impl Upserting<'_, '_> {
     }
 
     fn reconnect(
-        &self,
+        &mut self,
         mut c: ConnRow,
         account: &arepo::Account,
         u: &Upsert,
@@ -252,7 +256,7 @@ impl Upserting<'_, '_> {
             available,
         } = verified;
         let conns = self.conns;
-        let tx = self.tx;
+        let tx = &mut *self.tx;
         let actor = self.actor;
         let p = self.provider;
         let now = self.now;
@@ -275,12 +279,11 @@ impl Upserting<'_, '_> {
         put_key(&mut c.config, PAIR_KEY, pair);
         put_key(&mut c.config, CONFIG_VERSION_KEY, version);
         c.health = health;
-        repo::update(tx, &c, now)?;
+        ConnectionRows(tx).update(&c, now)?;
         // connected again: what it missed meanwhile is history, not news
-        repo::set_enabled_at(tx, &c.id, now)?;
+        ConnectionRows(tx).set_enabled_at(&c.id, now)?;
         conns.settle_decision(tx, ws, &c.id, json!({"reauthorized": true}))?;
-        base::audit(
-            tx,
+        tx.audit(
             ws,
             actor,
             "connection.reauth",
@@ -298,7 +301,7 @@ impl Upserting<'_, '_> {
     }
 
     fn create(
-        &self,
+        &mut self,
         account: &arepo::Account,
         u: &Upsert,
         verified: VerifiedConfig,
@@ -309,7 +312,7 @@ impl Upserting<'_, '_> {
             available,
             ..
         } = verified;
-        let tx = self.tx;
+        let tx = &mut *self.tx;
         let actor = self.actor;
         let p = self.provider;
         let now = self.now;
@@ -332,9 +335,8 @@ impl Upserting<'_, '_> {
             created: now,
             updated: now,
         };
-        repo::insert(tx, &r)?;
-        base::audit(
-            tx,
+        ConnectionRows(tx).insert(&r)?;
+        tx.audit(
             ws,
             actor,
             "connection.create",
@@ -351,18 +353,22 @@ impl Upserting<'_, '_> {
         ))
     }
 
-    fn finish(&self, account: &arepo::Account, done: &Connected, u: &Upsert) -> VaultResult<()> {
+    fn finish(
+        &mut self,
+        account: &arepo::Account,
+        done: &Connected,
+        u: &Upsert,
+    ) -> VaultResult<()> {
         let conns = self.conns;
-        let tx = self.tx;
+        let tx = &mut *self.tx;
         let actor = self.actor;
         let system = self.system;
         let ws = self.viewer.ws.as_str();
-        repo::link_item(tx, &u.item, &account.id)?;
+        steve_store::vault_items::VaultItems(tx).link_account(&u.item, &account.id)?;
         conns.link_stewards(tx, ws, actor, &account, &done.connection_id, &u.info)?;
         for x in &u.info.extra_handles {
             if let Some(eh) = normalize(&system, x) {
-                arepo::add_handle(
-                    tx,
+                Accounts(tx).add_handle(
                     ws,
                     &system.family,
                     &eh.handle,
@@ -389,7 +395,7 @@ impl Upserting<'_, '_> {
                 },
             )?;
         }
-        tx.publish(steve_types::DomainEvent::from(
+        tx.emit(steve_types::DomainEvent::from(
             steve_types::ChannelsEvent::Connection {
                 id: {
                     let value: String = done.connection_id.clone();
@@ -401,7 +407,7 @@ impl Upserting<'_, '_> {
                 },
             },
         ));
-        tx.publish(steve_types::DomainEvent::from(
+        tx.emit(steve_types::DomainEvent::from(
             steve_types::PeopleEvent::Account {
                 id: {
                     let value: String = account.id.clone();

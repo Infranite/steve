@@ -239,8 +239,10 @@ async fn members_page(
     let limit =
         num(q.limit, "limit", |n| (1..=members::PAGE_MAX).contains(&n))?.unwrap_or(members::PAGE);
     let v = viewer(&a.ch, &who)?;
-    let page =
-        a.ch.store()
-            .reader(|c| members::page(c, &v, &id, offset, limit))?;
+    let page = a.ch.store().read(|r| {
+        Ok(a.ch
+            .store()
+            .reader(|c| members::page(c, r, &v, &id, offset, limit)))
+    })??;
     Ok(Json(serde_json::to_value(page)?))
 }

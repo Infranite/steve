@@ -20,8 +20,7 @@
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use steve_modules::accounts::repo as accounts;
-use steve_store::Tx;
+use steve_store::{Accounts, Read, Systems, Tx};
 
 use crate::channel::HandleRef;
 use crate::ext::PRECISION_MS;
@@ -67,28 +66,18 @@ pub fn key_of(system: &str, handle: &str, text: &str, attachments: &[Value]) -> 
 /// so every copy of a message names the same person the same way whichever handle its side
 /// reported; else the handle reported.
 pub fn key_sender(
-    c: &Connection,
+    r: &mut impl Read,
     ws: &str,
     party: Option<&str>,
     system: &str,
     reported: &HandleRef,
 ) -> ChannelResult<(String, String)> {
-    if let Some(p) = party
-        && let Some(sys) = accounts::system(c, ws, system)?
+    if let Some(party) = party
+        && let Some(system) = Systems(r).get(ws, system)?
+        && let Some(handle) =
+            Accounts(r).preferred_handle(ws, party, &system.family, &system.id, None)?
     {
-        let h: Option<String> = c
-            .query_row(
-                "SELECT h.handle FROM account_handles h JOIN accounts a ON a.id = h.account_id
-                  WHERE a.workspace_id = ?1 AND h.workspace_id = ?1 AND h.family = ?2 AND a.party_id = ?3
-                    AND h.connection_id IS NULL
-                  ORDER BY a.system_id <> ?4, h.handle <> a.handle, h.created, h.rowid LIMIT 1",
-                params![ws, sys.family, p, sys.id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(h) = h {
-            return Ok((sys.id, h));
-        }
+        return Ok((system.id, handle));
     }
     Ok((reported.system.clone(), reported.handle.trim().to_string()))
 }
@@ -105,12 +94,12 @@ pub fn key_system(ch: &Channels, adapter: &str, reported: &str) -> String {
 /// sender.
 pub fn out_key(
     ch: &Channels,
-    c: &Connection,
+    tx: &Tx,
     ws: &str,
     conn: &str,
     text: &str,
 ) -> ChannelResult<Option<String>> {
-    let row: Option<(String, String, String, Option<String>)> = c
+    let row: Option<(String, String, String, Option<String>)> = tx
         .query_row(
             "SELECT cn.adapter, a.system_id, a.handle, a.party_id FROM connections cn
                JOIN accounts a ON a.id = cn.account_id WHERE cn.id = ? AND cn.workspace_id = ?",
@@ -122,13 +111,15 @@ pub fn out_key(
         return Ok(None);
     };
     let want = key_system(ch, &adapter, &system);
-    let (s, h) = key_sender(
-        c,
-        ws,
-        party.as_deref(),
-        &want,
-        &HandleRef::new(system, handle),
-    )?;
+    let (s, h) = tx.write(|w| {
+        key_sender(
+            w,
+            ws,
+            party.as_deref(),
+            &want,
+            &HandleRef::new(system, handle),
+        )
+    })?;
     Ok(Some(key_of(&s, &h, text, &[])))
 }
 

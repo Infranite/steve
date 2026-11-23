@@ -12,6 +12,8 @@ use steve_modules::caps::{Capabilities, routes};
 use steve_modules::testkit::{ME, TestEnv, WS, WS2, call, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
+use steve_store::caps::{Assignments, mcp::Servers};
+use steve_store::testkit::{modules as fixtures, vault as vault_fixtures};
 
 struct H {
     env: TestEnv,
@@ -28,16 +30,7 @@ fn setup() -> H {
         Arc::new(FileKeyStore::open(keys.path()).unwrap()),
     );
     vault.init(WS, ME).unwrap();
-    env.store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "INSERT OR IGNORE INTO bots (id, workspace_id, name, harness, updated) VALUES ('dev', 'default', '开发', 'claude-code', 1), ('doc', 'default', '文档', 'codex', 1);
-                 INSERT INTO bot_workspaces (bot_id, workspace_id, created) VALUES ('dev', 'default', 1), ('doc', 'default', 1);
-                 INSERT INTO sessions (id, workspace_id, bot_id, harness, cwd, status, created, updated) VALUES ('s_dev', 'default', 'dev', 'claude-code', '.', 'active', 1, 1), ('s_doc', 'default', 'doc', 'codex', '.', 'active', 1, 1);",
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::capability_sessions(env.store()).unwrap();
     let svc = Capabilities::new(vault);
     let api = routes(svc.clone()).with_state(());
     H {
@@ -52,13 +45,6 @@ async fn req(h: &H, method: &str, path: &str, body: Option<Value>) -> (u16, Valu
     call(&h.api, Some(&caller(WS, ME)), method, path, body.as_ref()).await
 }
 
-fn q<T: rusqlite::types::FromSql>(h: &H, sql: &str) -> T {
-    h.env
-        .store()
-        .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(sql, [], |r| r.get(0))?))
-        .unwrap()
-}
-
 fn secret(h: &H, session: &str, id: &str) -> Option<String> {
     h.svc
         .mcp_secret(session, id)
@@ -68,13 +54,7 @@ fn secret(h: &H, session: &str, id: &str) -> Option<String> {
 
 /// Every file of the database holds none of `needles`.
 fn nowhere_on_disk(h: &H, needles: &[&str]) {
-    h.env
-        .store()
-        .with_conn(|c| {
-            c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
-            Ok(())
-        })
-        .unwrap();
+    vault_fixtures::checkpoint(h.env.store()).unwrap();
     for f in std::fs::read_dir(h.env.dir.path()).unwrap().flatten() {
         let bytes = std::fs::read(f.path()).unwrap();
         for n in needles {
@@ -169,10 +149,7 @@ async fn a_server_is_defined_once_and_its_secrets_go_to_the_bots_that_use_it() {
     assert_eq!(s, 200);
     assert_eq!(secret(&h, "s_dev", &sid).as_deref(), Some("ghp-SECRET-two"));
     assert_eq!(
-        q::<i64>(
-            &h,
-            "SELECT COUNT(*) FROM vault_items WHERE status = 'active' AND template = 'connection_credential'"
-        ),
+        fixtures::active_credentials(h.env.store()).unwrap(),
         1,
         "the replaced item is gone"
     );
@@ -186,13 +163,16 @@ async fn a_server_is_defined_once_and_its_secrets_go_to_the_bots_that_use_it() {
     )
     .await;
     assert_eq!(s, 200);
-    assert_eq!(q::<i64>(&h, "SELECT COUNT(*) FROM mcp_servers"), 1);
-    let actions: String = q(
-        &h,
-        &format!(
-            "SELECT group_concat(action, ',') FROM (SELECT action FROM audit WHERE target = '{id}' ORDER BY id)"
-        ),
+    assert_eq!(
+        h.env
+            .store()
+            .read(|r| Ok(Servers(r).list(WS)?.len()))
+            .unwrap(),
+        1
     );
+    let actions = fixtures::audit_actions(h.env.store(), &id)
+        .unwrap()
+        .join(",");
     assert_eq!(
         actions,
         "mcp_server.create,bot_capability.assign,bot_capability.assign,bot_capability.disable,mcp_server.update,mcp_server.update,bot_capability.unassign"
@@ -207,15 +187,21 @@ async fn a_server_is_defined_once_and_its_secrets_go_to_the_bots_that_use_it() {
     )
     .await;
     assert_eq!(s, 200);
-    assert_eq!(q::<i64>(&h, "SELECT COUNT(*) FROM mcp_servers"), 0);
-    assert_eq!(q::<i64>(&h, "SELECT COUNT(*) FROM bot_capabilities"), 0);
     assert_eq!(
-        q::<i64>(
-            &h,
-            "SELECT COUNT(*) FROM vault_items WHERE status = 'active' AND template = 'connection_credential'"
-        ),
+        h.env
+            .store()
+            .read(|r| Ok(Servers(r).list(WS)?.len()))
+            .unwrap(),
         0
     );
+    assert_eq!(
+        h.env
+            .store()
+            .read(|r| Ok(Assignments(r).all("mcp")?.len()))
+            .unwrap(),
+        0
+    );
+    assert_eq!(fixtures::active_credentials(h.env.store()).unwrap(), 0);
     assert_eq!(secret(&h, "s_dev", &sid), None);
     nowhere_on_disk(&h, &["ghp-SECRET-one", "ghp-SECRET-two"]);
 }
@@ -680,10 +666,7 @@ async fn bot_tool_pins_are_scoped_bounded_and_follow_enabled_capabilities() {
     );
     assert_eq!(req(&h, "DELETE", path, None).await.0, 200);
     assert_eq!(
-        q::<i64>(
-            &h,
-            "SELECT COUNT(*) FROM audit WHERE action = 'bot_tool.pin' AND target = 'steve_workflow'"
-        ),
+        vault_fixtures::audit_count(h.env.store(), "bot_tool.pin", "steve_workflow").unwrap(),
         1
     );
 }

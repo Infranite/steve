@@ -69,8 +69,11 @@ async fn state(Extension(f): F) -> ApiResult<Json<Value>> {
                 let d = repo::draft(c, id)
                     .map_err(|e| ApiError::Internal(e.to_string()))?
                     .unwrap();
-                let out = steve_mail::drafts::draft_out(c, &d)
-                    .map_err(|e| ApiError::Internal(e.to_string()))?;
+                let out =
+                    f.h.env
+                        .store()
+                        .read(|r| Ok(steve_mail::drafts::draft_out(r, &d)))?
+                        .map_err(|e| ApiError::Internal(e.to_string()))?;
                 let mut v = json!(out);
                 let mut ds =
                     c.prepare("SELECT id FROM decisions WHERE subject_id=? ORDER BY rowid")?;

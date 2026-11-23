@@ -199,8 +199,9 @@ fn named(p: &Party, n: &str) -> bool {
     same(&p.name, n) || p.aliases.iter().any(|a| same(a, n))
 }
 
-fn teams(c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Party>> {
-    Ok(steve_modules::contacts::teams::repo::teams(c, viewer)?
+fn teams(c: &mut impl steve_store::Read, viewer: &Viewer) -> ApiResult<Vec<Party>> {
+    Ok(steve_store::Teams(c)
+        .list(viewer)?
         .into_iter()
         .map(|(p, _)| p)
         .collect())
@@ -247,7 +248,12 @@ fn vis_text(c: &Connection, v: &Visibility) -> String {
 }
 
 /// A visibility by code, label or exact team name; `None` = not recognized (never guessed).
-fn parse_vis(c: &Connection, viewer: &Viewer, s: &str) -> ApiResult<Option<Visibility>> {
+fn parse_vis(
+    c: &Connection,
+    r: &mut impl steve_store::Read,
+    viewer: &Viewer,
+    s: &str,
+) -> ApiResult<Option<Visibility>> {
     let s = s.trim();
     match s {
         "只有我" | "仅我" | "我" | "只我" | "私有" | "自己" | "private" => {
@@ -264,7 +270,7 @@ fn parse_vis(c: &Connection, viewer: &Viewer, s: &str) -> ApiResult<Option<Visib
     let n = s
         .trim_start_matches("团队")
         .trim_matches(|ch| ch == '「' || ch == '」' || ch == ' ');
-    let found: Vec<Party> = teams(c, viewer)?
+    let found: Vec<Party> = teams(r, viewer)?
         .into_iter()
         .filter(|t| named(t, n))
         .collect();
@@ -350,7 +356,7 @@ impl DraftTarget for SourceTarget {
     fn prepare(
         &self,
         store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         id: Option<&str>,
     ) -> ApiResult<Prepared> {
@@ -361,7 +367,7 @@ impl DraftTarget for SourceTarget {
             };
             let s = folder::own_source(c, &caller_of(viewer), id)?;
             let mut vis_values = vec![PRIVATE.to_string(), WORKSPACE.to_string()];
-            vis_values.extend(teams(c, viewer)?.into_iter().map(|t| t.name));
+            vis_values.extend(teams(r, viewer)?.into_iter().map(|t| t.name));
             let levels: Vec<&str> = LEVELS.iter().map(|(_, l)| *l).collect();
             let mut fields = vec![
                 FieldSpec::new("name", "名字", "text", json!(s.name)),
@@ -408,14 +414,14 @@ impl DraftTarget for SourceTarget {
     fn plan(
         &self,
         store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         p: &Prepared,
         raw: Vec<Value>,
     ) -> ApiResult<Plan> {
         store.reader(|c| {
             let Some(id) = &p.target_id else {
-                return plan_ops(&self.0, c, viewer, raw, &["kb_source.create"]);
+                return plan_ops(&self.0, c, r, viewer, raw, &["kb_source.create"]);
             };
             let s = folder::own_source(c, &caller_of(viewer), id)?;
             let mut plan = Plan::default();
@@ -445,7 +451,7 @@ impl DraftTarget for SourceTarget {
                     }
                 };
                 for (key, v) in pairs {
-                    if let Some(line) = patch_field(c, viewer, &s, &key, &v, &mut patch)? {
+                    if let Some(line) = patch_field(c, r, viewer, &s, &key, &v, &mut patch)? {
                         plan.changes.push(line);
                     }
                 }
@@ -493,6 +499,7 @@ impl DraftTarget for SourceTarget {
 /// when the value is what it already is).
 fn patch_field(
     c: &Connection,
+    r: &mut impl steve_store::Read,
     viewer: &Viewer,
     s: &SourceRow,
     key: &str,
@@ -536,7 +543,7 @@ fn patch_field(
             ))
         }
         "visibility" => {
-            let Some(vis) = parse_vis(c, viewer, &raw)? else {
+            let Some(vis) = parse_vis(c, r, viewer, &raw)? else {
                 return Ok(Some(unknown(Field::Visibility, &raw)));
             };
             if vis == s.visibility {
@@ -737,12 +744,12 @@ impl DraftTarget for KnowledgeTarget {
     fn plan(
         &self,
         store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         _: &Prepared,
         raw: Vec<Value>,
     ) -> ApiResult<Plan> {
-        store.reader(|c| plan_ops(&self.0, c, viewer, raw, &KNOWLEDGE_OPS))
+        store.reader(|c| plan_ops(&self.0, c, r, viewer, raw, &KNOWLEDGE_OPS))
     }
 
     fn revision(
@@ -772,6 +779,7 @@ impl DraftTarget for KnowledgeTarget {
 fn plan_ops(
     kb: &Knowledge,
     c: &Connection,
+    r: &mut impl steve_store::Read,
     viewer: &Viewer,
     raw: Vec<Value>,
     allowed: &[&str],
@@ -785,10 +793,10 @@ fn plan_ops(
             continue;
         }
         let (stored, lines) = match name.as_str() {
-            "kb_source.create" => plan_create(kb, c, viewer, &op)?,
-            "mem.add" => plan_mem(c, viewer, &op)?,
-            "note.create" => plan_note(c, viewer, &op)?,
-            "doc.patch" => plan_doc(c, viewer, &op)?,
+            "kb_source.create" => plan_create(kb, c, r, viewer, &op)?,
+            "mem.add" => plan_mem(c, r, viewer, &op)?,
+            "note.create" => plan_note(c, r, viewer, &op)?,
+            "doc.patch" => plan_doc(c, r, viewer, &op)?,
             _ => (None, vec![]),
         };
         plan.changes.extend(lines);
@@ -804,14 +812,19 @@ type Scope = (Option<Visibility>, Option<Level>);
 type Abouts = Vec<(ObjRef, String)>;
 
 /// Optional `visibility` / `level` of a raw op: `Err(line)` when said but not recognized.
-fn scope_of(c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Result<Scope, Change>> {
+fn scope_of(
+    c: &Connection,
+    r: &mut impl steve_store::Read,
+    viewer: &Viewer,
+    op: &Value,
+) -> ApiResult<Result<Scope, Change>> {
     let vis = match op
         .get("visibility")
         .and_then(text_of)
         .filter(|s| !s.is_empty())
     {
         None => None,
-        Some(s) => match parse_vis(c, viewer, &s)? {
+        Some(s) => match parse_vis(c, r, viewer, &s)? {
             Some(v) => Some(v),
             None => return Ok(Err(unknown(Field::Visibility, &s))),
         },
@@ -846,7 +859,13 @@ fn folder_name(path: &std::path::Path) -> String {
 }
 
 /// `kb_source.create`: the path is checked now; a refusal is the only line, with no op.
-fn plan_create(kb: &Knowledge, c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> {
+fn plan_create(
+    kb: &Knowledge,
+    c: &Connection,
+    r: &mut impl steve_store::Read,
+    viewer: &Viewer,
+    op: &Value,
+) -> ApiResult<Planned> {
     let said = op.get("path").and_then(text_of).unwrap_or_default();
     if said.is_empty() {
         return Ok((
@@ -876,7 +895,7 @@ fn plan_create(kb: &Knowledge, c: &Connection, viewer: &Viewer, op: &Value) -> A
     if let Some(why) = folder::overlap_reason(c, &viewer.ws, &path)? {
         return refused(why);
     }
-    let (vis, level) = match scope_of(c, viewer, op)? {
+    let (vis, level) = match scope_of(c, r, viewer, op)? {
         Ok(x) => x,
         Err(line) => return Ok((None, vec![line])),
     };
@@ -925,6 +944,7 @@ fn plan_create(kb: &Knowledge, c: &Connection, viewer: &Viewer, op: &Value) -> A
 /// (exact name). Returns the references and a line per name that did not resolve to exactly one.
 fn resolve_about(
     c: &Connection,
+    r: &mut impl steve_store::Read,
     viewer: &Viewer,
     names: &[String],
 ) -> ApiResult<(Abouts, Vec<Change>)> {
@@ -937,7 +957,7 @@ fn resolve_about(
         }
         let mut found: Vec<(ObjRef, String)> = Vec::new();
         if n == "我" || n.eq_ignore_ascii_case("me") {
-            if let Some(me) = people::me_of(c, &viewer.ws, &viewer.user)? {
+            if let Some(me) = people::me_of(r, &viewer.ws, &viewer.user)? {
                 found.push((ObjRef::new("party", &me.id), me.name));
             }
         } else {
@@ -946,10 +966,10 @@ fn resolve_about(
                 limit: 500,
                 ..Default::default()
             };
-            let parties = people::contacts(c, viewer, &q)?
+            let parties = people::contacts(r, viewer, &q)?
                 .into_iter()
-                .chain(people::orgs(c, viewer)?)
-                .chain(teams(c, viewer)?);
+                .chain(people::orgs(r, viewer)?)
+                .chain(teams(r, viewer)?);
             for p in parties.filter(|p| named(p, n)) {
                 if !found.iter().any(|(r, _)| r.id == p.id) {
                     found.push((ObjRef::new("party", &p.id), p.name));
@@ -1006,7 +1026,12 @@ fn unclear() -> String {
 }
 
 /// `mem.add`: one line “新记忆 — <text> · <种类> · <级别> · <范围> · 关于 …”.
-fn plan_mem(c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> {
+fn plan_mem(
+    c: &Connection,
+    r: &mut impl steve_store::Read,
+    viewer: &Viewer,
+    op: &Value,
+) -> ApiResult<Planned> {
     let text = op.get("text").and_then(text_of).unwrap_or_default();
     if !(1..=2000).contains(&text.chars().count()) {
         return Ok((
@@ -1027,12 +1052,12 @@ fn plan_mem(c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> {
             None => return Ok((None, vec![unknown(Field::Kind, &kind_said)])),
         }
     };
-    let (vis, level) = match scope_of(c, viewer, op)? {
+    let (vis, level) = match scope_of(c, r, viewer, op)? {
         Ok(x) => x,
         Err(line) => return Ok((None, vec![line])),
     };
     let names = op.get("about").and_then(list_of).unwrap_or_default();
-    let (about, mut lines) = resolve_about(c, viewer, &names)?;
+    let (about, mut lines) = resolve_about(c, r, viewer, &names)?;
     let about = about.into_iter().take(10).collect::<Vec<_>>();
     let vis = vis.unwrap_or(Visibility::Private);
     let level = level.unwrap_or(Level::Conclusion);
@@ -1076,7 +1101,12 @@ fn plan_mem(c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> {
 }
 
 /// `note.create`: one line “新建笔记 — <title>”.
-fn plan_note(c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> {
+fn plan_note(
+    c: &Connection,
+    r: &mut impl steve_store::Read,
+    viewer: &Viewer,
+    op: &Value,
+) -> ApiResult<Planned> {
     let body = op.get("body").and_then(text_of).unwrap_or_default();
     let title = op
         .get("title")
@@ -1101,7 +1131,7 @@ fn plan_note(c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> 
             )],
         ));
     }
-    let (vis, level) = match scope_of(c, viewer, op)? {
+    let (vis, level) = match scope_of(c, r, viewer, op)? {
         Ok(x) => x,
         Err(line) => return Ok((None, vec![line])),
     };
@@ -1130,7 +1160,12 @@ fn is_follow(s: &str) -> bool {
 }
 
 /// `doc.patch`: the document by exact title among those the viewer sees; one line per field.
-fn plan_doc(c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> {
+fn plan_doc(
+    c: &Connection,
+    r: &mut impl steve_store::Read,
+    viewer: &Viewer,
+    op: &Value,
+) -> ApiResult<Planned> {
     let title = op
         .get("doc")
         .or_else(|| op.get("title"))
@@ -1189,7 +1224,7 @@ fn plan_doc(c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> {
         let new = if is_follow(&said) {
             Some(None)
         } else {
-            parse_vis(c, viewer, &said)?.map(Some)
+            parse_vis(c, r, viewer, &said)?.map(Some)
         };
         match new {
             None => lines.push(unknown(Field::Visibility, &said)),

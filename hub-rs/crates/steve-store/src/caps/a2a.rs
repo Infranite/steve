@@ -3,11 +3,13 @@
 //! (`steve_a2a_<name>`). The secret its requests carry is never here: it is the field `auth` of the
 //! agent's `credential_item` in the workspace's system vault.
 
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use crate::contract::Row;
+use sea_query::{Expr, ExprTrait, Order, Query, SelectStatement};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::Result;
+use super::Assignments;
+use crate::{Read, Result, W};
 
 /// How a request to the agent is authenticated.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -65,17 +67,29 @@ impl Agent {
     }
 }
 
-const COLS: &str =
-    "id, workspace_id, name, card_url, card, auth, credential_item, fetched, created, updated";
+pub struct Agents<'a, C>(pub &'a mut C);
 
-fn row(r: &Row) -> rusqlite::Result<Agent> {
+const COLS: [&str; 10] = [
+    "id",
+    "workspace_id",
+    "name",
+    "card_url",
+    "card",
+    "auth",
+    "credential_item",
+    "fetched",
+    "created",
+    "updated",
+];
+
+fn row(r: &Row<'_>) -> Result<Agent> {
     Ok(Agent {
         id: r.get(0)?,
         workspace_id: r.get(1)?,
         name: r.get(2)?,
         card_url: r.get(3)?,
-        card: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or(Value::Null),
-        auth: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
+        card: serde_json::from_str(&r.get::<String>(4)?).unwrap_or(Value::Null),
+        auth: serde_json::from_str(&r.get::<String>(5)?).unwrap_or_default(),
         credential_item: r.get(6)?,
         fetched: r.get(7)?,
         created: r.get(8)?,
@@ -83,97 +97,107 @@ fn row(r: &Row) -> rusqlite::Result<Agent> {
     })
 }
 
-pub fn list(c: &Connection, ws: &str) -> Result<Vec<Agent>> {
-    let mut st = c.prepare_cached(&format!(
-        "SELECT {COLS} FROM a2a_agents WHERE workspace_id = ? ORDER BY name"
-    ))?;
-    let v = st.query_map([ws], row)?.collect::<Result<_, _>>()?;
-    Ok(v)
+fn rows() -> SelectStatement {
+    Query::select().from("a2a_agents").columns(COLS).take()
 }
 
-pub fn get(c: &Connection, id: &str) -> Result<Option<Agent>> {
-    Ok(c.query_row(
-        &format!("SELECT {COLS} FROM a2a_agents WHERE id = ?"),
-        [id],
-        row,
-    )
-    .optional()?)
-}
-
-pub fn name_taken(c: &Connection, ws: &str, name: &str, except: Option<&str>) -> Result<bool> {
-    let n: i64 = c.query_row(
-        "SELECT COUNT(*) FROM a2a_agents WHERE workspace_id = ?1 AND name = ?2 AND id <> ?3",
-        params![ws, name, except.unwrap_or("")],
-        |r| r.get(0),
-    )?;
-    Ok(n > 0)
-}
-
-pub fn insert(c: &Connection, a: &Agent) -> Result<()> {
-    c.execute(
-        &format!(
-            "INSERT INTO a2a_agents ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
-        ),
-        params![
-            a.id,
-            a.workspace_id,
-            a.name,
-            a.card_url,
-            a.card.to_string(),
-            serde_json::to_string(&a.auth)?,
-            a.credential_item,
-            a.fetched,
-            a.created,
-            a.updated,
-        ],
-    )?;
-    Ok(())
-}
-
-/// Writes every field but `id`, `workspace_id` and `created`.
-pub fn update(c: &Connection, a: &Agent) -> Result<()> {
-    c.execute(
-        "UPDATE a2a_agents SET name = ?2, card_url = ?3, card = ?4, auth = ?5, credential_item = ?6,
-            fetched = ?7, updated = ?8 WHERE id = ?1",
-        params![
-            a.id,
-            a.name,
-            a.card_url,
-            a.card.to_string(),
-            serde_json::to_string(&a.auth)?,
-            a.credential_item,
-            a.fetched,
-            a.updated,
-        ],
-    )?;
-    Ok(())
-}
-
-pub fn delete(c: &Connection, id: &str) -> Result<bool> {
-    super::remove_entry(c, "a2a", id)?;
-    Ok(c.execute("DELETE FROM a2a_agents WHERE id = ?", [id])? > 0)
-}
-
-/// The agents `bot` is assigned, each with whether it is switched on for it, by name.
-pub fn of_bot(c: &Connection, bot: &str) -> Result<Vec<(Agent, bool)>> {
-    let mut out = vec![];
-    for a in super::of_bot(c, bot, "a2a")? {
-        if let Some(x) = get(c, &a.entry_id)? {
-            out.push((x, a.enabled));
-        }
+impl<C: Read> Agents<'_, C> {
+    pub fn list(&mut self, ws: &str) -> Result<Vec<Agent>> {
+        self.0.all(
+            rows()
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .order_by("name", Order::Asc),
+            row,
+        )
     }
-    out.sort_by(|(a, _), (b, _)| a.name.cmp(&b.name));
-    Ok(out)
+
+    pub fn get(&mut self, id: &str) -> Result<Option<Agent>> {
+        self.0.one(rows().and_where(Expr::col("id").eq(id)), row)
+    }
+
+    pub fn name_taken(&mut self, ws: &str, name: &str, except: Option<&str>) -> Result<bool> {
+        let by_name = Expr::col("name").eq(name);
+        Ok(self
+            .0
+            .one(
+                Query::select()
+                    .from("a2a_agents")
+                    .column("id")
+                    .and_where(Expr::col("workspace_id").eq(ws))
+                    .and_where(by_name)
+                    .and_where(Expr::col("id").ne(except.unwrap_or_default()))
+                    .limit(1),
+                |_| Ok(()),
+            )?
+            .is_some())
+    }
+
+    pub fn of_bot(&mut self, bot: &str) -> Result<Vec<(Agent, bool)>> {
+        super::assigned(
+            self.0,
+            bot,
+            "a2a",
+            |r, id| Agents(r).get(id),
+            |row| row.name.clone(),
+        )
+    }
+
+    pub fn enabled_for_session(&mut self, session: &str) -> Result<Vec<Agent>> {
+        let Some(bot) = Assignments(self.0).bot_of_session(session)? else {
+            return Ok(Vec::new());
+        };
+        Ok(self
+            .of_bot(&bot)?
+            .into_iter()
+            .filter_map(|(row, on)| on.then_some(row))
+            .collect())
+    }
 }
 
-/// The agents the Bot a session works as has switched on.
-pub fn enabled_for_session(c: &Connection, session: &str) -> Result<Vec<Agent>> {
-    match super::bot_of_session(c, session)? {
-        Some(b) => Ok(of_bot(c, &b)?
-            .into_iter()
-            .filter(|(_, on)| *on)
-            .map(|(a, _)| a)
-            .collect()),
-        None => Ok(vec![]),
+impl Agents<'_, W<'_>> {
+    pub fn insert(&mut self, a: &Agent) -> Result<()> {
+        self.0.exec(
+            Query::insert()
+                .into_table("a2a_agents")
+                .columns(COLS)
+                .values_panic([
+                    a.id.as_str().into(),
+                    a.workspace_id.as_str().into(),
+                    a.name.as_str().into(),
+                    a.card_url.as_str().into(),
+                    a.card.to_string().into(),
+                    serde_json::to_string(&a.auth)?.into(),
+                    a.credential_item.as_deref().into(),
+                    a.fetched.into(),
+                    a.created.into(),
+                    a.updated.into(),
+                ]),
+        )?;
+        Ok(())
+    }
+
+    pub fn update(&mut self, a: &Agent) -> Result<()> {
+        self.0.exec(
+            Query::update()
+                .table("a2a_agents")
+                .and_where(Expr::col("id").eq(a.id.as_str()))
+                .value("name", a.name.as_str())
+                .value("card_url", a.card_url.as_str())
+                .value("card", a.card.to_string())
+                .value("auth", serde_json::to_string(&a.auth)?)
+                .value("credential_item", a.credential_item.as_deref())
+                .value("fetched", a.fetched)
+                .value("updated", a.updated),
+        )?;
+        Ok(())
+    }
+
+    pub fn delete(&mut self, id: &str) -> Result<bool> {
+        Assignments(self.0).remove_entry("a2a", id)?;
+        Ok(self.0.exec(
+            Query::delete()
+                .from_table("a2a_agents")
+                .and_where(Expr::col("id").eq(id)),
+        )? != 0)
     }
 }

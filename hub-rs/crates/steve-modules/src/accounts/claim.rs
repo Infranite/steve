@@ -8,10 +8,10 @@
 
 use std::sync::Arc;
 
-use steve_store::Tx;
 use steve_store::base::Viewer;
+use steve_store::{Accounts, Systems, W};
 
-use super::{repo as arepo, service as asvc};
+use super::service as asvc;
 use crate::ApiResult;
 use crate::contacts::PartyHooks;
 use crate::contacts::merge::merge_tx;
@@ -22,7 +22,7 @@ use crate::contacts::repo::Party;
 /// hand — `unconfirmed` (made by `identify`), or made `real` only by a run on the provider's name
 /// (`source` chat / sync, no kind or name a person set): the names run promotes the contact a bot
 /// made for you some 20 s after your first message, long before you authorize.
-pub fn claimable(tx: &Tx, ws: &str, p: &Party) -> ApiResult<bool> {
+pub fn claimable(tx: &mut W<'_>, ws: &str, p: &Party) -> ApiResult<bool> {
     if p.kind != "contact" || p.status != "active" || p.is_me() {
         return Ok(false);
     }
@@ -40,7 +40,7 @@ pub fn claimable(tx: &Tx, ws: &str, p: &Party) -> ApiResult<bool> {
 /// one of them into `me`. Returns the merge ids (one per contact merged). Handles that do not
 /// normalize in `system`, or that nobody holds, are skipped; so is a contact `viewer` cannot see.
 pub fn claim_self(
-    tx: &Tx,
+    tx: &mut W<'_>,
     hooks: &[Arc<dyn PartyHooks>],
     viewer: &Viewer,
     actor: &str,
@@ -49,7 +49,7 @@ pub fn claim_self(
     handles: &[&str],
 ) -> ApiResult<Vec<String>> {
     let ws = viewer.ws.as_str();
-    let Some(system) = arepo::system(tx, ws, system)? else {
+    let Some(system) = Systems(tx).get(ws, system)? else {
         return Ok(Vec::new());
     };
     let mut merged = Vec::new();
@@ -57,13 +57,13 @@ pub fn claim_self(
         let Some(h) = asvc::normalize(&system, raw) else {
             continue;
         };
-        let Some(account) = arepo::by_handle(tx, ws, &system.family, &h.handle)? else {
+        let Some(account) = Accounts(tx).by_handle(ws, &system.family, &h.handle)? else {
             continue;
         };
-        let Some(a) = arepo::get(tx, &account)? else {
+        let Some(a) = Accounts(tx).get(&account)? else {
             continue;
         };
-        let Some(p) = asvc::current_party(tx, &a.party_id)? else {
+        let Some(p) = tx.contacts().current_party(&a.party_id)? else {
             continue;
         };
         if p.id == me.id || !claimable(tx, ws, &p)? || !viewer.sees(&p.visibility, &p.created_by) {

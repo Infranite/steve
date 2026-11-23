@@ -2,7 +2,6 @@
 //! or to it, newest first, only in threads the viewer may see. Mail recorded under a contact that was
 //! later merged into this one counts too.
 
-use rusqlite::Connection;
 use rusqlite::types::Value as Sql;
 use steve_modules::ApiResult;
 use steve_modules::contacts::{TimelineEntry, TimelineSource};
@@ -14,12 +13,13 @@ pub struct MailTimeline;
 impl TimelineSource for MailTimeline {
     fn entries(
         &self,
-        c: &Connection,
+        store: &steve_store::Store,
         viewer: &Viewer,
         party: &str,
         before: Option<i64>,
         limit: usize,
     ) -> ApiResult<Vec<TimelineEntry>> {
+        store.reader(|c| {
         let vis = visible_sql("t", viewer);
         let sql = format!(
             "WITH RECURSIVE ids(id) AS (SELECT ?1 UNION SELECT p.id FROM parties p JOIN ids ON p.merged_into = ids.id)
@@ -65,6 +65,7 @@ impl TimelineSource for MailTimeline {
         Ok(rows
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(steve_store::StoreError::from)?)
+        })
     }
 }
 

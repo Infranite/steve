@@ -40,7 +40,8 @@ async fn request(f: F, Json(body): Json<Value>) -> ApiResult<Json<Value>> {
         let owner = h
             .env
             .store()
-            .reader(|c| steve_channels::personas::owner_name(c, WS))?;
+            .read(|c| Ok(steve_channels::personas::owner_name(c, WS)))
+            .unwrap()?;
         let identity = format!("我是{owner}。");
         h.env.gateway.unscript(H_SAFETY);
         h.env.gateway.script(

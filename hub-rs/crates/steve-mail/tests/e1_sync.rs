@@ -165,10 +165,8 @@ async fn connect_backfill_then_live_mail() {
 
     // the contact's “往来”
     let viewer = Viewer::bare(WS, ME);
-    let lines = h
-        .env
-        .store()
-        .reader(|c| steve_mail::timeline::MailTimeline.entries(c, &viewer, &alice, None, 50))
+    let lines = steve_mail::timeline::MailTimeline
+        .entries(h.env.store(), &viewer, &alice, None, 50)
         .unwrap();
     assert_eq!(lines.len(), 3);
     assert!(lines.iter().all(|l| l.kind == "mail"));
@@ -176,17 +174,14 @@ async fn connect_backfill_then_live_mail() {
     assert!(lines[0].href.starts_with("#/mail/t/mt_"));
     // Single-user reads include private mail from other account identities.
     let other = Viewer::bare(WS, steve_modules::testkit::OTHER);
-    let other_lines = h
-        .env
-        .store()
-        .reader(|c| steve_mail::timeline::MailTimeline.entries(c, &other, &alice, None, 50))
+    let other_lines = steve_mail::timeline::MailTimeline
+        .entries(h.env.store(), &other, &alice, None, 50)
         .unwrap();
     assert_eq!(other_lines.len(), 3);
     let foreign = Viewer::bare(steve_modules::testkit::WS2, ME);
     assert!(
-        h.env
-            .store()
-            .reader(|c| steve_mail::timeline::MailTimeline.entries(c, &foreign, &alice, None, 50))
+        steve_mail::timeline::MailTimeline
+            .entries(h.env.store(), &foreign, &alice, None, 50)
             .unwrap()
             .is_empty()
     );

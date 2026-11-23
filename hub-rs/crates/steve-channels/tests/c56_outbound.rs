@@ -84,7 +84,7 @@ fn bot_connection(h: &TestEnv, handle: &str, name: &str) -> String {
         .transaction(|tx| -> ApiResult<String> {
             ensure_seeds(tx, WS)?;
             steve_modules::contacts::service::ensure_base(tx, &caller(WS, ME))?;
-            let org = steve_modules::contacts::repo::self_org(tx, WS)?.expect("self org");
+            let org = tx.write(|w| w.contacts().own_org(WS))?.expect("self org");
             let a = arepo::insert(
                 tx,
                 WS,
@@ -2937,7 +2937,8 @@ async fn a_reply_meant_for_you_becomes_a_question_in_your_inbox() {
     let owner = h
         .env
         .store()
-        .reader(|c| steve_channels::personas::owner_name(c, WS))
+        .read(|c| Ok(steve_channels::personas::owner_name(c, WS)))
+        .unwrap()
         .expect("owner");
     h.env.gateway.script(
         H_SAFETY,

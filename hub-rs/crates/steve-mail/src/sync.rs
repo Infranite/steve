@@ -225,36 +225,38 @@ impl Mail {
             }
             Ok(())
         })?;
-        store.reader(|c| {
-            let (paused, scopes, cursor) = repo::source(c, conn)?.unwrap_or_default();
-            if paused {
-                return Ok(None);
-            }
-            let settings = repo::settings(c, conn)?.unwrap_or_default();
-            let listed: Vec<&str> = folders.iter().map(|f| f.ext_id.as_str()).collect();
-            let folders: Vec<FolderState> = repo::folders(c, conn)?
-                .into_iter()
-                .filter(|f| listed.contains(&f.ext_id.as_str()))
-                .filter_map(|mut f| {
-                    let mode = scopes.iter().find(|s| s.ext_id == f.ext_id)?.mode;
-                    (mode != ScopeMode::Ignore).then(|| {
-                        f.mode = mode;
-                        f.flags_checked = checks.get(&f.ext_id).copied();
-                        f
+        store.read(|r| {
+            Ok(store.reader(|c| {
+                let (paused, scopes, cursor) = repo::source(c, conn)?.unwrap_or_default();
+                if paused {
+                    return Ok(None);
+                }
+                let settings = repo::settings(c, conn)?.unwrap_or_default();
+                let listed: Vec<&str> = folders.iter().map(|f| f.ext_id.as_str()).collect();
+                let folders: Vec<FolderState> = repo::folders(c, conn)?
+                    .into_iter()
+                    .filter(|f| listed.contains(&f.ext_id.as_str()))
+                    .filter_map(|mut f| {
+                        let mode = scopes.iter().find(|s| s.ext_id == f.ext_id)?.mode;
+                        (mode != ScopeMode::Ignore).then(|| {
+                            f.mode = mode;
+                            f.flags_checked = checks.get(&f.ext_id).copied();
+                            f
+                        })
                     })
-                })
-                .collect();
-            let mailbox = Mailbox::load(c, ws, conn)?;
-            Ok(Some((
-                SyncState {
-                    folders,
-                    cursor,
-                    sync_days: settings.sync_days,
-                    now,
-                },
-                mailbox,
-            )))
-        })
+                    .collect();
+                let mailbox = Mailbox::load(r, ws, conn)?;
+                Ok(Some((
+                    SyncState {
+                        folders,
+                        cursor,
+                        sync_days: settings.sync_days,
+                        now,
+                    },
+                    mailbox,
+                )))
+            }))
+        })?
     }
 
     /// Wakes a mailbox's runner (`POST /mail/accounts/:id/sync`); without a runner, syncs in a task.
@@ -376,7 +378,7 @@ impl Mail {
             .0
             .m
             .store
-            .reader(steve_modules::accounts::connections::repo::live)?;
+            .read(|r| steve_store::Connections(r).live())?;
         Ok(rows
             .into_iter()
             .filter(|r| self.0.adapters.contains_key(&r.adapter))

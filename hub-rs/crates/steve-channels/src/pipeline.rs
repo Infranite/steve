@@ -87,7 +87,7 @@ pub(crate) fn record(
 ) -> ChannelResult<()> {
     require_requester(tx, &e.who)?;
     let t = &req.target;
-    crate::notifications::verify_intent(tx, &e.who, &e.intent, now)?;
+    tx.write(|r| crate::notifications::verify_intent(tx, r, &e.who, &e.intent, now))?;
     crate::notifications::verify_pinned(tx, &e.who, &e.intent, &t.space_id)?;
     let delivery_id = uid("od");
     tx.execute(
@@ -110,7 +110,7 @@ pub(crate) fn record(
 /// The queue cannot silently reroute a stored intent to another voice/account, nor keep using an
 /// account after its requester leaves. Legacy outbound messages have no intent and keep C6 rules.
 pub(crate) fn verify_route(
-    c: &Connection,
+    c: &steve_store::Tx,
     message: &str,
     now: i64,
 ) -> ChannelResult<Result<(), String>> {
@@ -127,12 +127,13 @@ pub(crate) fn verify_route(
     }
     let viewer = Viewer::load(c, &who.ws, &who.me)?;
     let i: DeliveryIntent = serde_json::from_str(&intent)?;
-    if let Err(e) = crate::notifications::verify_intent(c, &who, &i, now)
+    if let Err(e) = c
+        .write(|r| crate::notifications::verify_intent(c, r, &who, &i, now))
         .and_then(|_| crate::notifications::verify_pinned(c, &who, &i, &space))
     {
         return Ok(Err(format!("personal notification consent/route: {e}")));
     }
-    match reachable(c, &viewer, &space, i.identity, i.party_id.as_deref()) {
+    match c.write(|r| reachable(c, r, &viewer, &space, i.identity, i.party_id.as_deref())) {
         Ok(t) if t.connection_id == conn => Ok(Ok(())),
         _ => Ok(Err("stored output route is no longer reachable".into())),
     }
@@ -140,6 +141,7 @@ pub(crate) fn verify_route(
 
 fn reachable(
     c: &Connection,
+    r: &mut impl steve_store::Read,
     viewer: &Viewer,
     id: &str,
     identity: Identity,
@@ -160,8 +162,8 @@ fn reachable(
         return Err(ApiError::not_found("reachable conversation"));
     }
     let (account, mode) = bindings::connection_account(c, &viewer.ws, &s.connection_id)?;
-    let a = steve_modules::accounts::service::own_account(c, viewer, &account)?;
-    let owner = steve_modules::accounts::service::current_party(c, &a.party_id)?;
+    let a = steve_modules::accounts::service::own_account(r, viewer, &account)?;
+    let owner = steve_store::Contacts::new(r).current_party(&a.party_id)?;
     if owner
         .and_then(|p| p.user_id)
         .is_some_and(|user| user != viewer.user)
@@ -181,7 +183,7 @@ fn reachable(
         }
     }
     if let Some(party) = party {
-        steve_modules::accounts::service::own_owner(c, viewer, party)?;
+        steve_modules::accounts::service::own_owner(r, viewer, party)?;
         let member:bool=c.query_row(
             "SELECT EXISTS(SELECT 1 FROM space_members sm JOIN accounts a ON a.id=sm.account_id JOIN parties p ON p.id=a.party_id
              WHERE sm.workspace_id=? AND sm.space_id=? AND p.workspace_id=? AND p.id=? AND p.status='active')",
@@ -206,6 +208,7 @@ fn reachable(
 
 pub(crate) fn route(
     c: &Connection,
+    r: &mut impl steve_store::Read,
     viewer: &Viewer,
     i: &DeliveryIntent,
 ) -> ChannelResult<OutTarget> {
@@ -236,7 +239,7 @@ pub(crate) fn route(
         } else {
             let learned = pref
                 .and_then(|(_, l)| l)
-                .filter(|id| reachable(c, viewer, id, i.identity, Some(p)).is_ok());
+                .filter(|id| reachable(c, r, viewer, id, i.identity, Some(p)).is_ok());
             if let Some(id) = learned {
                 id
             } else {
@@ -245,7 +248,7 @@ pub(crate) fn route(
                     .query_map(params![viewer.ws, p], |r| r.get::<_, String>(0))?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 ids.into_iter()
-                    .find(|id| reachable(c, viewer, id, i.identity, Some(p)).is_ok())
+                    .find(|id| reachable(c, r, viewer, id, i.identity, Some(p)).is_ok())
                     .ok_or_else(|| ApiError::not_found("reachable recipient"))?
             }
         }
@@ -254,7 +257,7 @@ pub(crate) fn route(
             "intent needs a source, conversation or person",
         ));
     };
-    let mut t = reachable(c, viewer, &id, i.identity, i.party_id.as_deref())?;
+    let mut t = reachable(c, r, viewer, &id, i.identity, i.party_id.as_deref())?;
     if let Some((source_space, external, thread)) = source {
         if source_space == id {
             t.reply_to = crate::fallback::platform(external);
@@ -296,11 +299,13 @@ impl Outbox {
             return Ok(d);
         }
         let viewer = ch.modules().viewer(who)?;
-        let target = ch.store().reader(|c| {
-            require_requester(c, who)?;
-            crate::notifications::verify_intent(c, who, &e.intent, ch.now())?;
-            route(c, &viewer, &e.intent)
-        })?;
+        let target = ch.store().read(|r| {
+            Ok(ch.store().reader(|c| {
+                require_requester(c, who)?;
+                crate::notifications::verify_intent(c, r, who, &e.intent, ch.now())?;
+                route(c, r, &viewer, &e.intent)
+            }))
+        })??;
         // Account visibility is stricter than a shared conversation: never borrow somebody else's
         // personal connection. The queue revalidates the pinned route before dispatch too.
         ch.connections()
@@ -411,11 +416,11 @@ pub fn set_preference(
     let viewer = ch.modules().viewer(who)?;
     ch.store().transaction(|tx| {
         require_requester(tx,who)?;
-        steve_modules::accounts::service::own_owner(tx,&viewer,party)?;
+        tx.write(|w| steve_modules::accounts::service::own_owner(w, &viewer, party))?;
         if let Some(space)=space {
             let s=spaces::own(tx,&viewer,space)?;
             let (_,mode)=bindings::connection_account(tx,&who.ws,&s.connection_id)?;
-            reachable(tx,&viewer,space,if mode==Mode::Bot {Identity::Bot}else{Identity::AsYou},Some(party))?;
+            tx.write(|w| reachable(tx,w,&viewer,space,if mode==Mode::Bot {Identity::Bot}else{Identity::AsYou},Some(party)))?;
             if s.kind!="dm" {return Err(ApiError::invalid("preference must be a direct conversation"));}
         }
         tx.execute("INSERT INTO output_channel_preferences(workspace_id,user_id,party_id,manual_space_id,updated) VALUES(?,?,?,?,?) ON CONFLICT(workspace_id,user_id,party_id) DO UPDATE SET manual_space_id=excluded.manual_space_id,updated=excluded.updated",params![who.ws,who.me,party,space,ch.now()])?;

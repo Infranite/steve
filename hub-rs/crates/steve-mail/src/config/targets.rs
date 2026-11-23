@@ -11,7 +11,7 @@
 use rusqlite::Connection;
 use serde_json::{Map, Value, json};
 use steve_modules::accounts::connections::repo::{self as conn_repo, ConnRow};
-use steve_modules::accounts::service::{current_party, own_account};
+use steve_modules::accounts::service::own_account;
 use steve_modules::changes::{Candidate, ChangeOp, DraftTarget, FieldSpec, OpCx, Plan, Prepared};
 use steve_modules::{ApiError, ApiResult, Registry};
 use steve_store::base::{Change, Viewer, show};
@@ -83,12 +83,17 @@ fn appended(old: &str, new: &str) -> String {
 
 /// A mailbox `viewer` may configure: a connection of the workspace with `mail.read` whose account
 /// they see and whose owner (if a person) is them — the same rule as `Connections::get`.
-pub fn own_mailbox(c: &Connection, viewer: &Viewer, id: &str) -> ApiResult<ConnRow> {
+pub fn own_mailbox(
+    c: &mut impl steve_store::Read,
+    viewer: &Viewer,
+    id: &str,
+) -> ApiResult<ConnRow> {
     let r = conn_repo::get(c, id)?
         .filter(|r| r.workspace_id == viewer.ws && r.caps.iter().any(|x| x == "mail.read"))
         .ok_or_else(|| ApiError::not_found(NOUN))?;
     let a = own_account(c, viewer, &r.account_id).map_err(|_| ApiError::not_found(NOUN))?;
-    let mine = current_party(c, &a.party_id)?
+    let mine = steve_store::Contacts::new(c)
+        .current_party(&a.party_id)?
         .and_then(|p| p.user_id)
         .is_none_or(|u| u == viewer.user);
     if mine {
@@ -118,13 +123,13 @@ impl DraftTarget for MailAccountTarget {
     fn prepare(
         &self,
         store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         id: Option<&str>,
     ) -> ApiResult<Prepared> {
         store.reader(|c| {
             let id = id.ok_or_else(|| ApiError::not_found(NOUN))?;
-            let r = own_mailbox(c, viewer, id)?;
+            let r = own_mailbox(r, viewer, id)?;
             let s = current(c, id)?;
             let addr = address(&r);
             let delays: Vec<String> = DELAYS.iter().map(|d| seconds(*d)).collect();
@@ -170,14 +175,14 @@ impl DraftTarget for MailAccountTarget {
     fn plan(
         &self,
         store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         p: &Prepared,
         raw: Vec<Value>,
     ) -> ApiResult<Plan> {
         store.reader(|c| {
             let id = p.target_id.as_deref().unwrap_or("");
-            own_mailbox(c, viewer, id)?;
+            own_mailbox(r, viewer, id)?;
             let cur = current(c, id)?;
             let mut next = cur.clone();
             let mut plan = Plan::default();
@@ -282,32 +287,31 @@ impl DraftTarget for MailAccountTarget {
         ws: &str,
         id: &str,
     ) -> ApiResult<Option<i64>> {
-        let c = &w.legacy();
-        let Some(r) = conn_repo::get(c, id)?.filter(|r| r.workspace_id == ws) else {
+        let Some(r) = conn_repo::get(w, id)?.filter(|r| r.workspace_id == ws) else {
             return Ok(None);
         };
-        Ok(Some(current(c, &r.id)?.revision))
+        Ok(Some(current(&w.legacy(), &r.id)?.revision))
     }
 
     fn candidates(
         &self,
-        store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        _store: &steve_store::Store,
+        r: &mut steve_store::R<'_>,
         viewer: &Viewer,
     ) -> ApiResult<Vec<Candidate>> {
-        store.reader(|c| {
+        {
             let mut out = Vec::new();
-            for r in conn_repo::list(c, &viewer.ws)? {
-                if r.status == "revoked" || own_mailbox(c, viewer, &r.id).is_err() {
+            for row in conn_repo::list(r, &viewer.ws)? {
+                if row.status == "revoked" || own_mailbox(r, viewer, &row.id).is_err() {
                     continue;
                 }
                 out.push(Candidate {
-                    code: format!("{KIND}:{}", r.id),
-                    label: format!("邮箱 {}", address(&r)),
+                    code: format!("{KIND}:{}", row.id),
+                    label: format!("邮箱 {}", address(&row)),
                 });
             }
             Ok(out)
-        })
+        }
     }
 }
 
@@ -321,23 +325,22 @@ fn conn_of(op: &Value) -> &str {
     op["connection_id"].as_str().unwrap_or("")
 }
 
-fn check(c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
-    let viewer = Viewer::load(c, cx.ws, cx.actor)?;
+fn check(c: &mut impl steve_store::Read, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    let viewer = Viewer::bare(cx.ws, cx.actor);
     own_mailbox(c, &viewer, conn_of(op))?;
     Ok(())
 }
 
 impl ChangeOp for PatchOp {
     fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
-        let c = &w.legacy();
-        check(c, cx, op)?;
+        check(w, cx, op)?;
         parse_patch(op).map(|_| ())
     }
 
     fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        check(w, cx, op)?;
         let tx = &w.legacy();
         let id = conn_of(op);
-        check(tx, cx, op)?;
         let before = current(tx, id)?;
         settings::patch_tx(tx, cx.ws, cx.actor, id, &parse_patch(op)?, now()).map_err(api)?;
         Ok(settings::fields(&before))

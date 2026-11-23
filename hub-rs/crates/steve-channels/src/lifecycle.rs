@@ -449,7 +449,7 @@ impl ConnectionRuntime {
             .inner
             .channels
             .store()
-            .reader(|c| steve_modules::accounts::connections::repo::change_signature(c, id))
+            .read(|c| steve_modules::accounts::connections::repo::change_signature(c, id))
             .ok()
             .flatten();
         let mut seen = lock(&self.inner.seen);

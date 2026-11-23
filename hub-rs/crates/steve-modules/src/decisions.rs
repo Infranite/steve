@@ -3,8 +3,8 @@
 //! `subject_type`; `POST /api/decisions/:id` reaches [`dispatch`] first.
 
 use serde_json::{Value, json};
-use steve_store::base::{self, CONFIRM_OPTIONS, DecisionKind};
-use steve_store::{Decision, NewDecision, Tx};
+use steve_store::base::{CONFIRM_OPTIONS, DecisionKind};
+use steve_store::{Decision, DecisionRows, NewDecision, Tx};
 
 use crate::{ApiError, ApiResult, Caller, Modules};
 
@@ -99,10 +99,11 @@ pub fn dispatch(
     choice: &str,
     text: &str,
 ) -> Option<ApiResult<Decision>> {
-    let d = m.store.reader(|c| base::decisions::get(c, id)).ok()??;
+    let d = m.store.read(|r| DecisionRows(r).get(id)).ok()??;
     let handler = m.registry.handlers.get(&d.subject_type)?;
-    Some(m.store.transaction(|tx| {
-        let d = base::decisions::get(tx, id)?
+    Some(m.store.write(|w| {
+        let d = DecisionRows(w)
+            .get(id)?
             .filter(|d| d.workspace_id == caller.ws)
             .ok_or_else(|| ApiError::not_found("决定"))?;
         if d.status != "open" {
@@ -119,17 +120,18 @@ pub fn dispatch(
             choice,
             text,
         };
-        let result = handler.resolve(tx, &cx, &d)?;
-        base::decisions::settle(tx, id, &result, "resolved", &undo_marker(&d.subject_type))?;
-        base::audit(
-            tx,
+        let result = handler.resolve(&w.legacy(), &cx, &d)?;
+        DecisionRows(w).settle(id, &result, "resolved", &undo_marker(&d.subject_type))?;
+        w.audit(
             &caller.ws,
             &caller.me,
             "decision.resolve",
             id,
             &json!({ "choice": choice, "text": text }),
         )?;
-        base::decisions::get(tx, id)?.ok_or_else(|| ApiError::not_found("决定"))
+        DecisionRows(w)
+            .get(id)?
+            .ok_or_else(|| ApiError::not_found("决定"))
     }))
 }
 
@@ -153,25 +155,17 @@ pub fn undo(
     actor: &str,
     undoable: impl FnOnce(&Decision) -> bool,
 ) -> Option<ApiResult<Decision>> {
-    let d = m.store.reader(|c| base::decisions::get(c, id)).ok()??;
+    let d = m.store.read(|r| DecisionRows(r).get(id)).ok()??;
     let handler = m.registry.handlers.get(&d.subject_type)?;
-    Some(m.store.transaction(|tx| {
-        let d = base::decisions::get(tx, id)?
+    Some(m.store.write(|w| {
+        let d = DecisionRows(w)
+            .get(id)?
             .filter(|d| undoable(d))
             .ok_or_else(|| ApiError::rule(steve_i18n::t!("modules.decision.not_undoable")))?;
-        handler.before_undo(tx, &d)?;
+        handler.before_undo(&w.legacy(), &d)?;
         let metadata = handler.reopen_result(&d);
-        let result = (!metadata.is_null()).then(|| metadata.to_string());
-        tx.execute(
-            "UPDATE decisions SET status = 'open', result = ?, resolved = NULL, undo = NULL WHERE id = ?",
-            rusqlite::params![result, id],
-        )?;
-        tx.publish(steve_types::DomainEvent::from(steve_types::WorkEvent::Decision {
-            ws: d.workspace_id.clone().into(),
-            id: id.into(),
-            item_id: Some(d.item_id.clone().map(Into::into)),
-        }));
-        base::audit(tx, &d.workspace_id, actor, "decision.undo", id, &json!({}))?;
+        DecisionRows(w).reopen(&d, &metadata)?;
+        w.audit(&d.workspace_id, actor, "decision.undo", id, &json!({}))?;
         Ok(d)
     }))
 }
@@ -179,19 +173,13 @@ pub fn undo(
 /// Expires an open module decision (jobs): the handler's `expire`, then `status=expired`. Returns
 /// whether it was open. Decisions of unregistered subject types are only marked expired.
 pub fn expire(m: &Modules, id: &str) -> ApiResult<bool> {
-    m.store.transaction(|tx| {
-        let Some(d) = base::decisions::get(tx, id)?.filter(|d| d.status == "open") else {
+    m.store.write(|w| {
+        let Some(d) = DecisionRows(w).get(id)?.filter(|d| d.status == "open") else {
             return Ok(false);
         };
         if let Some(h) = m.registry.handlers.get(&d.subject_type) {
-            h.expire(tx, &d)?;
+            h.expire(&w.legacy(), &d)?;
         }
-        Ok(base::decisions::settle(
-            tx,
-            id,
-            &json!({ "expired": true }),
-            "expired",
-            &Value::Null,
-        )?)
+        Ok(DecisionRows(w).settle(id, &json!({ "expired": true }), "expired", &Value::Null)?)
     })
 }

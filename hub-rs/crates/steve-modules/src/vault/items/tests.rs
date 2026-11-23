@@ -8,8 +8,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use axum::Router;
-use rusqlite::params;
 use serde_json::{Value, json};
+use steve_store::{
+    GrantRows, NewVaultGrant,
+    testkit::vault as fixtures,
+    vault_items::{FieldRow, ItemRow, VaultItems},
+};
 use tempfile::TempDir;
 
 use super::*;
@@ -130,37 +134,40 @@ impl Env {
         assert_eq!(s, 200, "{v}");
         v
     }
-    fn sql<T: rusqlite::types::FromSql>(&self, q: &str, p: &[&dyn rusqlite::ToSql]) -> T {
+    fn item(&self, id: &str) -> ItemRow {
         self.env
             .store()
-            .with_conn(|c| Ok(c.query_row(q, p, |r| r.get(0))?))
-            .expect("sql")
+            .read(|r| VaultItems(r).item(id))
+            .unwrap()
+            .unwrap()
+    }
+    fn fields(&self, id: &str) -> Vec<FieldRow> {
+        self.env.store().read(|r| VaultItems(r).fields(id)).unwrap()
+    }
+    fn vaults(&self) -> Vec<steve_store::vault_items::VaultRow> {
+        self.env.store().read(|r| VaultItems(r).vaults(WS)).unwrap()
     }
     fn grant(&self, item: &str) {
+        let at = steve_store::now();
         self.env
             .store()
-            .with_conn(|c| {
-                c.execute(
-                    "INSERT INTO grants (id, workspace_id, subject_type, subject_id, capability, resource_type, resource_id, scope, until, created_by, created)
-                     VALUES (?, ?, 'bot', 'fe', 'secret.use', 'vault_item', ?, '{\"scratch\":true}', ?, ?, ?)",
-                    params![steve_store::uid("gr"), WS, item, steve_store::now() + 3_600_000, ME, steve_store::now()],
-                )?;
-                Ok(())
+            .write(|w| {
+                GrantRows(w).insert_vault_grant(&NewVaultGrant {
+                    id: &steve_store::uid("gr"),
+                    ws: WS,
+                    bot: "fe",
+                    item,
+                    scope: &json!({"scratch":true}),
+                    until: at + 3_600_000,
+                    actor: ME,
+                    decision: None,
+                    at,
+                })
             })
             .expect("grant");
     }
     fn account(&self) -> String {
-        self.env
-            .store()
-            .with_conn(|c| {
-                c.execute_batch(
-                    "INSERT INTO parties (id, workspace_id, type, name, created_by, created, updated) VALUES ('ct_me', 'default', 'contact', '我', 'usr_dev', 1, 1);
-                     INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, display_name, source, created, updated)
-                     VALUES ('acc_gh', 'default', 'github', 'github_user', 'ct_me', 'personal', 'octo-handle', 'octo-handle', '', 'me', 1, 1);",
-                )?;
-                Ok(())
-            })
-            .expect("account");
+        fixtures::seed_vault_search_account(self.env.store()).expect("account");
         "acc_gh".into()
     }
 }
@@ -187,15 +194,16 @@ async fn vaults_and_templates_on_first_use() {
     assert_eq!(scopes, vec![json!("personal"), json!("shared")]);
     assert_eq!(v[0]["name"], "个人");
     // the system vault exists but is never listed; a second user gets their own personal vault
-    let n: i64 = e.sql(
-        "SELECT COUNT(*) FROM vaults WHERE workspace_id = ? AND scope = 'system'",
-        &[&WS],
-    );
+    let n: i64 = e
+        .vaults()
+        .into_iter()
+        .filter(|v| v.scope == "system")
+        .count() as i64;
     assert_eq!(n, 1);
     let (_, o) = e.as_(OTHER, "GET", "/vaults", None).await;
     assert_ne!(o[0]["id"], v[0]["id"]);
     assert_eq!(o[1]["id"], v[1]["id"]);
-    let n: i64 = e.sql("SELECT COUNT(*) FROM vaults WHERE workspace_id = ?", &[&WS]);
+    let n: i64 = e.vaults().len() as i64;
     assert_eq!(n, 4);
 
     let (s, t) = e.me("GET", "/vault/templates", None).await;
@@ -249,22 +257,25 @@ async fn create_masks_secrets_everywhere() {
     assert!(!l.to_string().contains(PW));
 
     // stored: ciphertext only, plain value only for the non-secret field
-    let plain: Option<String> = e.sql(
-        "SELECT value_plain FROM vault_fields WHERE item_id = ? AND label = '密码'",
-        &[&id],
-    );
+    let plain: Option<String> = e
+        .fields(&id)
+        .into_iter()
+        .find(|f| f.label == "密码")
+        .unwrap()
+        .value_plain;
     assert_eq!(plain, None);
-    let ct: Vec<u8> = e.sql(
-        "SELECT value_ct FROM vault_fields WHERE item_id = ? AND label = '密码'",
-        &[&id],
-    );
+    let ct: Vec<u8> = e
+        .fields(&id)
+        .into_iter()
+        .find(|f| f.label == "密码")
+        .unwrap()
+        .value_ct
+        .unwrap();
     assert!(ct.len() > 24 + 16 && !ct.windows(PW.len()).any(|w| w == PW.as_bytes()));
 
     // audit without values, one SSE event with ids only
-    let detail: String = e.sql(
-        "SELECT detail FROM audit WHERE action = 'vault_item.create' AND target = ?",
-        &[&id],
-    );
+    let detail: String =
+        fixtures::audit_detail(e.env.store(), "vault_item.create", Some(&id)).unwrap();
     assert!(detail.contains("密码") && !detail.contains(PW));
     let ev = e.env.take_events();
     assert_eq!(
@@ -318,10 +329,12 @@ async fn validation_and_template_rules() {
         )
         .await;
     assert_eq!((s, v["error"].as_str().unwrap()), (404, "没有这个账号"));
-    let sys: String = e.sql(
-        "SELECT id FROM vaults WHERE workspace_id = ? AND scope = 'system'",
-        &[&WS],
-    );
+    let sys: String = e
+        .vaults()
+        .into_iter()
+        .find(|v| v.scope == "system")
+        .unwrap()
+        .id;
     let (s, _) = e
         .me(
             "POST",
@@ -416,10 +429,7 @@ async fn patch_raising_to_high_revokes_grants() {
         )
         .await;
     assert_eq!(p["grants"], json!([]));
-    let revoked: i64 = e.sql(
-        "SELECT COUNT(*) FROM grants WHERE resource_id = ? AND revoked IS NOT NULL",
-        &[&id],
-    );
+    let revoked: i64 = fixtures::revoked_grants(e.env.store(), &id).unwrap();
     assert_eq!(revoked, 1);
     let (_, p) = e
         .me(
@@ -430,10 +440,7 @@ async fn patch_raising_to_high_revokes_grants() {
         .await;
     assert_eq!(p["account"], Value::Null);
     assert_eq!(p["title"], "GitHub 个人");
-    let n: i64 = e.sql(
-        "SELECT COUNT(*) FROM audit WHERE action = 'vault_item.patch' AND target = ?",
-        &[&id],
-    );
+    let n: i64 = fixtures::audit_count(e.env.store(), "vault_item.patch", &id).unwrap();
     assert_eq!(n, 3);
 }
 
@@ -443,7 +450,13 @@ async fn fields_change_by_whole_value() {
     let it = e.login("personal").await;
     let id = it["id"].as_str().unwrap().to_string();
     let fid = field(&it, "密码")["id"].as_str().unwrap().to_string();
-    let before: Vec<u8> = e.sql("SELECT value_ct FROM vault_fields WHERE id = ?", &[&fid]);
+    let before: Vec<u8> = e
+        .fields(&id)
+        .into_iter()
+        .find(|f| f.id == fid)
+        .unwrap()
+        .value_ct
+        .unwrap();
 
     let (s, p) = e
         .me(
@@ -454,7 +467,13 @@ async fn fields_change_by_whole_value() {
         .await;
     assert_eq!(s, 200, "{p}");
     assert_eq!(field(&p, "密码")["value"], Value::Null);
-    let after: Vec<u8> = e.sql("SELECT value_ct FROM vault_fields WHERE id = ?", &[&fid]);
+    let after: Vec<u8> = e
+        .fields(&id)
+        .into_iter()
+        .find(|f| f.id == fid)
+        .unwrap()
+        .value_ct
+        .unwrap();
     assert_ne!(before[..24], after[..24], "new nonce");
     let got = e
         .vault
@@ -520,7 +539,7 @@ async fn fields_change_by_whole_value() {
         "vault_field.add",
         "vault_field.delete",
     ] {
-        let d: String = e.sql("SELECT detail FROM audit WHERE action = ? LIMIT 1", &[&a]);
+        let d: String = fixtures::audit_detail(e.env.store(), a, None).unwrap();
         assert!(
             !d.contains("NEW-pw-55") && !d.contains("JBSWY3DP"),
             "{a}: {d}"
@@ -534,39 +553,31 @@ async fn delete_destroys_key_and_values() {
     let it = e.login("shared").await;
     let id = it["id"].as_str().unwrap().to_string();
     e.grant(&id);
-    let wrapped: Vec<u8> = e.sql("SELECT dek_wrapped FROM vault_items WHERE id = ?", &[&id]);
-    let ct: Vec<u8> = e.sql(
-        "SELECT value_ct FROM vault_fields WHERE item_id = ? AND secret = 1",
-        &[&id],
-    );
+    let wrapped = e.item(&id).dek_wrapped.unwrap();
+    let ct: Vec<u8> = e
+        .fields(&id)
+        .into_iter()
+        .find(|f| f.secret)
+        .unwrap()
+        .value_ct
+        .unwrap();
 
     let (s, v) = e.me("DELETE", &format!("/vault/items/{id}"), None).await;
     assert_eq!((s, v), (200, json!({"ok": true, "revoked_grants": 1})));
-    let (st, title): (String, String) = e
-        .env
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT status, title FROM vault_items WHERE id = ?",
-                [&id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?)
-        })
-        .unwrap();
+    let row = e.item(&id);
+    let (st, title) = (row.status, row.title);
     assert_eq!(
         (st.as_str(), title.as_str()),
         ("deleted", "GitHub"),
         "title kept for the use log"
     );
-    let nulls: i64 = e.sql(
-        "SELECT COUNT(*) FROM vault_items WHERE id = ? AND dek_wrapped IS NULL AND kek_version IS NULL",
-        &[&id],
-    );
-    assert_eq!(nulls, 1);
-    let left: i64 = e.sql(
-        "SELECT COUNT(*) FROM vault_fields WHERE item_id = ? AND (value_ct IS NOT NULL OR value_plain IS NOT NULL)",
-        &[&id],
-    );
+    let item = e.item(&id);
+    assert!(item.dek_wrapped.is_none() && item.kek_version.is_none());
+    let left: i64 = e
+        .fields(&id)
+        .into_iter()
+        .filter(|f| f.value_ct.is_some() || f.value_plain.is_some())
+        .count() as i64;
     assert_eq!(left, 0);
     let (s, _) = e.me("GET", &format!("/vault/items/{id}"), None).await;
     assert_eq!(s, 404);
@@ -575,13 +586,7 @@ async fn delete_destroys_key_and_values() {
     assert!(e.vault.with_credential(WS, &id, "t", "t", |_| ()).is_err());
 
     // neither the old wrapped key nor the ciphertext survives in the database files
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::checkpoint(e.env.store()).unwrap();
     let mut db = std::fs::read(e.env.store().path()).unwrap();
     db.extend(std::fs::read(format!("{}-wal", e.env.store().path().display())).unwrap_or_default());
     assert!(
@@ -751,12 +756,9 @@ async fn reveal_needs_local_verification() {
         )
         .await;
     assert_eq!((s, v["error"].as_str().unwrap()), (400, NEED_PASSKEY));
-    let n: i64 = e.sql(
-        "SELECT COUNT(*) FROM audit WHERE action = 'vault.reveal_refused' AND target = ?",
-        &[&id],
-    );
+    let n: i64 = fixtures::audit_count(e.env.store(), "vault.reveal_refused", &id).unwrap();
     assert_eq!(n, 1);
-    let n: i64 = e.sql("SELECT COUNT(*) FROM secret_uses", &[]);
+    let n: i64 = fixtures::use_count(e.env.store(), None, None, None).unwrap();
     assert_eq!(n, 0);
 
     // with a gate: a bad assertion fails, a good one returns the value, no-store, and is logged
@@ -792,15 +794,7 @@ async fn reveal_needs_local_verification() {
     .await
     .unwrap();
     assert_eq!(res.headers()["cache-control"], "no-store");
-    let uses: Vec<(String, String, String, String)> = e
-        .env
-        .store()
-        .with_conn(|c| {
-            let mut st = c.prepare("SELECT actor_type, actor_id, mode, fields FROM secret_uses ORDER BY created, rowid")?;
-            let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
-            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-        })
-        .unwrap();
+    let uses = fixtures::access_log(e.env.store()).unwrap();
     assert_eq!(
         uses,
         vec![
@@ -808,12 +802,9 @@ async fn reveal_needs_local_verification() {
             ("me".into(), ME.into(), "view".into(), "[\"密码\"]".into())
         ]
     );
-    let n: i64 = e.sql(
-        "SELECT COUNT(*) FROM audit WHERE action = 'vault.reveal' AND target = ?",
-        &[&id],
-    );
+    let n: i64 = fixtures::audit_count(e.env.store(), "vault.reveal", &id).unwrap();
     assert_eq!(n, 2);
-    let a: String = e.sql("SELECT group_concat(detail) FROM audit", &[]);
+    let a: String = fixtures::all_audit_details(e.env.store()).unwrap();
     assert!(!a.contains(PW));
 
     // a non-secret field needs no reveal; a locked keychain is a 503
@@ -867,20 +858,11 @@ async fn locked_or_uninitialized_vault() {
     )
     .await;
     assert_eq!(s, 503);
-    let n: i64 = e.sql("SELECT COUNT(*) FROM vault_items", &[]);
+    let n: i64 = fixtures::vault_item_count(e.env.store()).unwrap();
     assert_eq!(n, 0);
     // a workspace without a key: 400
     e.ks.locked.store(false, Ordering::SeqCst);
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "INSERT INTO workspaces (id, name, created) VALUES ('w3', 'x', 1)",
-                [],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::seed_vault_workspace(e.env.store()).unwrap();
     let v3 = e.vault.list_vaults("w3", ME).unwrap();
     let body = json!({"vault_id": v3[1].id, "template": "login", "title": "t"});
     let (s, v) = call(
@@ -916,10 +898,12 @@ async fn connection_credentials_in_the_system_vault() {
     assert_eq!(l, json!([]));
     let (s, _) = e.me("GET", &format!("/vault/items/{id}"), None).await;
     assert_eq!(s, 404);
-    let all_secret: i64 = e.sql(
-        "SELECT MIN(secret) FROM vault_fields WHERE item_id = ?",
-        &[&id],
-    );
+    let all_secret: i64 = e
+        .fields(&id)
+        .into_iter()
+        .map(|f| i64::from(f.secret))
+        .min()
+        .unwrap();
     assert_eq!(all_secret, 1);
 
     let got = e.vault.with_credential(WS, &id, "con_1", "刷新令牌", |c| {
@@ -933,7 +917,8 @@ async fn connection_credentials_in_the_system_vault() {
     e.vault
         .with_credential(WS, &id, "con_1", "刷新令牌", |_| ())
         .unwrap();
-    let n: i64 = e.sql("SELECT COUNT(*) FROM secret_uses WHERE item_id = ? AND mode = 'internal' AND status = 'ok'", &[&id]);
+    let n: i64 =
+        fixtures::item_use_count(e.env.store(), &id, Some("internal"), "ok", None).unwrap();
     assert_eq!(n, 1, "internal uses merge per day");
     assert!(
         e.vault
@@ -952,38 +937,19 @@ async fn connection_credentials_in_the_system_vault() {
     assert_eq!(got, 1);
 
     // a broken ciphertext: a failed use of its own
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE vault_fields SET value_ct = zeroblob(64) WHERE item_id = ?",
-                [&id],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::corrupt_fields(e.env.store(), &id).unwrap();
     assert!(matches!(
         e.vault.with_credential(WS, &id, "con_1", "x", |_| ()),
         Err(VaultError::Api(_))
     ));
-    let n: i64 = e.sql(
-        "SELECT COUNT(*) FROM secret_uses WHERE item_id = ? AND status = 'failed'",
-        &[&id],
-    );
+    let n: i64 = fixtures::item_use_count(e.env.store(), &id, None, "failed", None).unwrap();
     assert_eq!(n, 1);
     // the same connection failing again (a retry loop against a locked keychain): one row, its
     // finished moves on, no new audit line; another user of the item gets a row of its own
-    let audits = |e: &Env| -> i64 {
-        e.sql(
-            "SELECT COUNT(*) FROM audit WHERE action = 'vault.use' AND target = ?",
-            &[&id],
-        )
-    };
+    let audits =
+        |e: &Env| -> i64 { fixtures::audit_count(e.env.store(), "vault.use", &id).unwrap() };
     let before = audits(&e);
-    let first: i64 = e.sql(
-        "SELECT finished FROM secret_uses WHERE item_id = ? AND status = 'failed'",
-        &[&id],
-    );
+    let first: i64 = fixtures::first_failed_use_finished(e.env.store(), &id).unwrap();
     for _ in 0..5 {
         assert!(
             e.vault
@@ -991,15 +957,9 @@ async fn connection_credentials_in_the_system_vault() {
                 .is_err()
         );
     }
-    let n: i64 = e.sql(
-        "SELECT COUNT(*) FROM secret_uses WHERE item_id = ? AND status = 'failed'",
-        &[&id],
-    );
+    let n: i64 = fixtures::item_use_count(e.env.store(), &id, None, "failed", None).unwrap();
     assert_eq!(n, 1, "consecutive failures merge");
-    let last: i64 = e.sql(
-        "SELECT finished FROM secret_uses WHERE item_id = ? AND status = 'failed'",
-        &[&id],
-    );
+    let last: i64 = fixtures::first_failed_use_finished(e.env.store(), &id).unwrap();
     assert!(last >= first);
     assert_eq!(audits(&e), before);
     assert!(
@@ -1007,31 +967,17 @@ async fn connection_credentials_in_the_system_vault() {
             .with_credential(WS, &id, "con_2", "x", |_| ())
             .is_err()
     );
-    let n: i64 = e.sql(
-        "SELECT COUNT(*) FROM secret_uses WHERE item_id = ? AND status = 'failed'",
-        &[&id],
-    );
+    let n: i64 = fixtures::item_use_count(e.env.store(), &id, None, "failed", None).unwrap();
     assert_eq!(n, 2, "per actor");
     // an hour after the last failure, a new row
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE secret_uses SET created = created - 7200000, finished = finished - 7200000 WHERE item_id = ?",
-                [&id],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::age_uses(e.env.store(), &id, 7_200_000).unwrap();
     assert!(
         e.vault
             .with_credential(WS, &id, "con_1", "x", |_| ())
             .is_err()
     );
-    let n: i64 = e.sql(
-        "SELECT COUNT(*) FROM secret_uses WHERE item_id = ? AND status = 'failed' AND actor_id = 'con_1'",
-        &[&id],
-    );
+    let n: i64 =
+        fixtures::item_use_count(e.env.store(), &id, None, "failed", Some("con_1")).unwrap();
     assert_eq!(n, 2, "a new hour, a new row");
 
     let n = e
@@ -1040,7 +986,7 @@ async fn connection_credentials_in_the_system_vault() {
         .transaction(|tx| e.vault.destroy_item(tx, WS, ME, &id))
         .unwrap();
     assert_eq!(n, 0);
-    let w: Option<Vec<u8>> = e.sql("SELECT dek_wrapped FROM vault_items WHERE id = ?", &[&id]);
+    let w: Option<Vec<u8>> = e.item(&id).dek_wrapped;
     assert_eq!(w, None);
 }
 

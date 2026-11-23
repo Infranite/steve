@@ -537,6 +537,7 @@ fn verdict_code(r: &CheckResult, rewritten: bool) -> &'static str {
 /// and what was said after it, one `- 名字：text` line each. `None` when it is not there.
 fn seen_of(
     c: &Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     space: &str,
     source: &str,
@@ -551,7 +552,7 @@ fn seen_of(
     let label = |m: &cx::Msg| cx::label(&m.name, m.side, mode, "");
     let clock = cx::Clock {
         now,
-        tz: steve_modules::zone::Zone::of_owner(c, ws)?.tz,
+        tz: steve_modules::zone::Zone::for_owner(r, ws)?.tz,
     };
     let conv = cx::arrange(
         &t,
@@ -883,7 +884,7 @@ fn later_of(
         .map(|(_, t)| t.clone())
         .filter(|t| !t.trim().is_empty());
     let seen = match &source {
-        Some((id, _)) => seen_of(c, &row.ws, &row.space_id, id, p.mode, now)?,
+        Some((id, _)) => seen_of(c, r, &row.ws, &row.space_id, id, p.mode, now)?,
         None => None,
     };
     let (samples, composed) = composed_of(c, &row.id)?;
@@ -1640,12 +1641,14 @@ async fn send_chosen(
     let plan = ch.store().reader(|c| plan_of(c, ws, message))?;
     let t = OutTarget::reply(&plan);
     let now = ch.now();
-    let (p, audience, said, seen) = ch.store().reader(|c| -> ChannelResult<_> {
-        let p = place(c, &t.ws, &t.connection_id, &t.space_id, None)?;
-        let a = disclosure::space_audience(c, &p.space, &p.account, &p.owner_user)?;
-        let seen = seen_of(c, ws, &t.space_id, message, p.mode, now)?;
-        Ok((p, a, audience_said(c, &t)?, seen))
-    })?;
+    let (p, audience, said, seen) = ch.store().read(|r| {
+        Ok(ch.store().reader(|c| -> ChannelResult<_> {
+            let p = place(c, &t.ws, &t.connection_id, &t.space_id, None)?;
+            let a = disclosure::space_audience(c, &p.space, &p.account, &p.owner_user)?;
+            let seen = seen_of(c, r, ws, &t.space_id, message, p.mode, now)?;
+            Ok((p, a, audience_said(c, &t)?, seen))
+        }))
+    })??;
     let cx = CheckCx {
         ws: ws.into(),
         actor: match (&p.persona, p.mode) {
@@ -2320,7 +2323,9 @@ impl SendAttempt<'_> {
         // paused or to be authorized again: it waits (unclaimed) and goes out once resumed
         let waits = ch
             .store()
-            .reader(|c| may_write_in(c, &row.ws, &space.connection_id, cap))
+            .read(|c| Ok(may_write_in(c, &row.ws, &space.connection_id, cap)))
+            .map_err(ApiError::from)
+            .and_then(|result| result)
             .ok()
             .is_some_and(|r| matches!(r, Err(WriteRefusal::Later(_))));
         if waits {
@@ -2384,7 +2389,7 @@ impl SendAttempt<'_> {
             }
             if crate::notifications::deferred(tx, &row.id, now)?
                 || verify(tx, &row, auth, now)?.is_err()
-                || may_write_in(tx, &row.ws, &space.connection_id, cap)?.is_err()
+                || tx.write(|w| may_write_in(w, &row.ws, &space.connection_id, cap))?.is_err()
             {
                 crate::messages::set_status(
                     tx,
@@ -2605,23 +2610,25 @@ fn prepare_delivery(
     now: i64,
 ) -> ChannelResult<Option<PreparedDelivery>> {
     let t = &req.target;
-    let (p, audience, knowledge, said, seen) = ch.store().reader(|c| -> ChannelResult<_> {
-        let p = place(
-            c,
-            &t.ws,
-            &t.connection_id,
-            &t.space_id,
-            t.persona_id.as_deref(),
-        )?;
-        let a = disclosure::space_audience(c, &p.space, &p.account, &p.owner_user)?;
-        let k = knowledge_of(c, req.generation.as_ref())?;
-        let said = audience_said(c, t)?;
-        let seen = match &t.source_message_id {
-            Some(src) => seen_of(c, &t.ws, &t.space_id, src, p.mode, now)?,
-            None => None,
-        };
-        Ok((p, a, k, said, seen))
-    })?;
+    let (p, audience, knowledge, said, seen) = ch.store().read(|r| {
+        Ok(ch.store().reader(|c| -> ChannelResult<_> {
+            let p = place(
+                c,
+                &t.ws,
+                &t.connection_id,
+                &t.space_id,
+                t.persona_id.as_deref(),
+            )?;
+            let a = disclosure::space_audience(c, &p.space, &p.account, &p.owner_user)?;
+            let k = knowledge_of(c, req.generation.as_ref())?;
+            let said = audience_said(c, t)?;
+            let seen = match &t.source_message_id {
+                Some(src) => seen_of(c, r, &t.ws, &t.space_id, src, p.mode, now)?,
+                None => None,
+            };
+            Ok((p, a, k, said, seen))
+        }))
+    })??;
     // only the composer's reply speaks as you, and it waits for you (decided before any check runs)
     if let Some(why) = crate::deliver::not_as_you(p.mode, req) {
         tracing::info!(space = t.space_id, purpose = ?req.purpose, "not said: {why}");

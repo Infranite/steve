@@ -11,7 +11,6 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use steve_modules::accounts::service::current_party;
 use steve_modules::outbound::{Audience, CheckResult, Verdict};
 use steve_modules::{ApiError, Caller, decisions};
 use steve_store::base::{self, Viewer, Visibility};
@@ -245,34 +244,30 @@ pub struct DraftOut {
 
 /// `(party_id, internal)` of an address: its account's party; internal = has a user (me, a colleague),
 /// is the own organization, or the domain belongs to the own organization.
-pub fn audience_of(c: &Connection, ws: &str, addr: &str) -> MailResult<(Option<String>, bool)> {
-    use rusqlite::OptionalExtension;
-    let a = addr.trim().to_lowercase();
-    let party: Option<String> = c
-        .prepare_cached(
-            "SELECT a.party_id FROM account_handles h JOIN accounts a ON a.id = h.account_id
-              WHERE h.workspace_id = ? AND h.family = 'email' AND h.handle = ? LIMIT 1",
-        )?
-        .query_row([ws, a.as_str()], |r| r.get(0))
-        .optional()?;
-    let p = match &party {
-        Some(id) => current_party(c, id).map_err(MailError::Api)?,
+pub fn audience_of(
+    r: &mut impl steve_store::Read,
+    ws: &str,
+    addr: &str,
+) -> MailResult<(Option<String>, bool)> {
+    let addr = addr.trim().to_lowercase();
+    let party = match steve_store::Accounts(r).by_handle(ws, "email", &addr)? {
+        Some(account) => match steve_store::Accounts(r).get(&account)? {
+            Some(account) => steve_store::Contacts::new(r).current_party(&account.party_id)?,
+            None => None,
+        },
         None => None,
     };
-    let mut internal = p
+    let mut internal = party
         .as_ref()
         .is_some_and(|p| p.user_id.is_some() || p.org_kind.as_deref() == Some("self"));
-    if !internal && let Some((_, domain)) = a.rsplit_once('@') {
-        internal = c
-            .prepare_cached(
-                "SELECT 1 FROM org_domains d JOIN parties o ON o.id = d.org_id
-                  WHERE d.workspace_id = ? AND d.domain = ? AND o.org_kind = 'self' LIMIT 1",
-            )?
-            .query_row([ws, domain], |_| Ok(()))
-            .optional()?
-            .is_some();
+    if !internal && let Some((_, domain)) = addr.rsplit_once('@') {
+        let mut contacts = steve_store::Contacts::new(r);
+        internal = match contacts.own_org(ws)? {
+            Some(org) => contacts.domain_owner(ws, domain)?.as_deref() == Some(&org.id),
+            None => false,
+        };
     }
-    Ok((p.map(|p| p.id), internal))
+    Ok((party.map(|p| p.id), internal))
 }
 
 /// A check whose model part did not run (`skipped`) passed nothing: with no span from the local checks it
@@ -285,7 +280,7 @@ pub fn local_only(mut r: CheckResult, skipped: bool) -> CheckResult {
 }
 
 /// Who reads a draft, for the disclosure check.
-pub fn audience_of_draft(c: &Connection, d: &DraftRow) -> MailResult<Audience> {
+pub fn audience_of_draft(c: &mut impl steve_store::Read, d: &DraftRow) -> MailResult<Audience> {
     let mut a = Audience::default();
     let mut names = Vec::new();
     for r in d.to.iter().chain(d.cc.iter()).chain(d.bcc.iter()) {
@@ -308,7 +303,7 @@ pub fn audience_of_draft(c: &Connection, d: &DraftRow) -> MailResult<Audience> {
     Ok(a)
 }
 
-fn rcpt_out(c: &Connection, ws: &str, l: &[Rcpt]) -> MailResult<Vec<RcptOut>> {
+fn rcpt_out(c: &mut impl steve_store::Read, ws: &str, l: &[Rcpt]) -> MailResult<Vec<RcptOut>> {
     l.iter()
         .map(|r| {
             let (party_id, internal) = audience_of(c, ws, &r.addr)?;
@@ -322,7 +317,7 @@ fn rcpt_out(c: &Connection, ws: &str, l: &[Rcpt]) -> MailResult<Vec<RcptOut>> {
         .collect()
 }
 
-pub fn draft_out(c: &Connection, d: &DraftRow) -> MailResult<DraftOut> {
+pub fn draft_out(c: &mut impl steve_store::Read, d: &DraftRow) -> MailResult<DraftOut> {
     let ws = d.workspace_id.as_str();
     Ok(DraftOut {
         id: d.id.clone(),
@@ -566,7 +561,7 @@ impl Mail {
         let now = self.now();
         let done = self.0.m.store.transaction(|tx| -> MailResult<bool> {
             if repo::draft(tx, id)?.as_ref() != Some(&d)
-                || crate::disclosure::inputs(&self.0.m.store, tx, &d)? != inputs
+                || tx.write(|w| crate::disclosure::inputs(w, tx, &d))? != inputs
             {
                 return Ok(false);
             }
@@ -619,7 +614,7 @@ impl Mail {
         self.0
             .m
             .store
-            .reader(|c| Mailbox::load(c, &who.ws, connection_id))
+            .read(|c| Ok(Mailbox::load(c, &who.ws, connection_id)))?
     }
 
     /// A draft the caller may see: its mailbox is theirs (`404 没有这个草稿`).
@@ -638,7 +633,7 @@ impl Mail {
     }
 
     fn out(&self, d: &DraftRow) -> MailResult<DraftOut> {
-        self.0.m.store.reader(|c| draft_out(c, d))
+        self.0.m.store.read(|r| Ok(draft_out(r, d)))?
     }
 
     fn notify_draft(&self, d: &DraftRow) {
@@ -654,7 +649,7 @@ impl Mail {
             .0
             .m
             .store
-            .reader(|c| steve_modules::accounts::connections::repo::get(c, &d.connection_id))?
+            .read(|c| steve_modules::accounts::connections::repo::get(c, &d.connection_id))?
             .map(|r| r.adapter)
             .unwrap_or_default();
         self.0.m.store.reader(|c| -> MailResult<()> {
@@ -811,13 +806,15 @@ impl Mail {
     /// The drafts of a thread (not discarded).
     pub fn thread_drafts(&self, who: &Caller, thread: &str) -> MailResult<Vec<DraftOut>> {
         let viewer = self.viewer_of(who)?;
-        self.0.m.store.reader(|c| {
-            self.own_thread(c, &viewer, thread)?;
-            repo::thread_drafts(c, thread)?
-                .iter()
-                .map(|d| draft_out(c, d))
-                .collect()
-        })
+        self.0.m.store.read(|r| {
+            Ok(self.0.m.store.reader(|c| {
+                self.own_thread(c, &viewer, thread)?;
+                repo::thread_drafts(c, thread)?
+                    .iter()
+                    .map(|d| draft_out(r, d))
+                    .collect()
+            }))
+        })?
     }
 
     /// `DELETE /mail/drafts/:id`: `discarded`; an open decision about it expires. Not after sending

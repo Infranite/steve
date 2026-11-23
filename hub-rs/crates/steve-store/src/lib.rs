@@ -21,6 +21,12 @@ mod bus;
 pub mod caps;
 pub mod compact;
 mod contract;
+pub use contract::{
+    Accounts, AuthSessions, ConnRow, ConnectionBrief, HealthState, MatchRule, MatchRules, NewParty,
+    NewVaultGrant, Party, PartyPatch, PasskeyInfo, PasskeyRows, PrefixConfig, System, Systems,
+    UserRows, VaultGrant, VaultGrantRecord, account_profiles, account_rows, builtin_system_name,
+    is_builtin_system, secret_uses, vault_items, vault_keys,
+};
 pub mod db;
 pub mod diagnostics;
 pub mod digest;
@@ -52,18 +58,26 @@ pub use contract::message_sources::{
     MessageSelection,
 };
 pub use contract::read_models::{
-    AttentionReads, FeedReads, ItemEventFields, ItemReads, NotificationPolicies, QuietPolicy,
-    TimelineRows, TimezoneSettings,
+    AttentionReads, FeedReads, ItemEventFields, ItemHead, ItemReads, NotificationPolicies,
+    QuietPolicy, TimelineRows, TimezoneSettings,
 };
 pub use contract::{
-    AccountIdentity, AddedMemoryIndex, BotPrompt, BotRows, Contacts, DecisionRows, DigestEntry,
-    DigestNotes, DueTrigger, FileInfo, FileReads, FlowGrant, FlowRow, FlowRows, FlowSources,
-    FlowTriggers, FlowWaits, GrantRows, HTTP_ALLOW_PRIVATE, IndexedRange, ItemEvidence, Members,
-    MemoryIndex, MemoryIndexData, MemoryRange, MessageEvidence, NewCorrection, NewFlowRow, NewRun,
-    NewSignal, NewStep, NewTrigger, NewWait, ProjectRows, R, Read, References, Revisions, RunRow,
-    RunRows, RunStep, SchedulePatch, SessionEvidence, SignalFilter, SignalRow, SignalRows,
-    SignalTriage, SourceConfig, StartupRecord, TagRows, W, WorkspaceSettings, Workspaces,
+    AccountIdentity, AddedMemoryIndex, BotPrompt, BotRef, BotRows, Contacts, DecisionRows,
+    DigestEntry, DigestNotes, DueTrigger, FileInfo, FileReads, FlowGrant, FlowRow, FlowRows,
+    FlowSources, FlowTriggers, FlowWaits, GrantRows, HTTP_ALLOW_PRIVATE, IndexedRange,
+    ItemEvidence, Members, MemoryIndex, MemoryIndexData, MemoryRange, MessageEvidence,
+    NewCorrection, NewFlowRow, NewRun, NewSignal, NewStep, NewTrigger, NewWait, ProjectRows, R,
+    Read, References, Revisions, RunRow, RunRows, RunStep, SchedulePatch, SessionEvidence,
+    SignalFilter, SignalRow, SignalRows, SignalTriage, SourceConfig, StartupRecord, TagRows, W,
+    WorkspaceSettings, Workspaces,
 };
+pub use contract::{AttrDef, AttrValue, Attributes, ContactQuery, NewDef, NewValue};
+pub use contract::{
+    ContactMerge, ContactMerges, DirectoryConnection, MergeProposals, NewMergeProposal,
+};
+pub use contract::{DeviceIdentity, DeviceRows, PersonaIdentity, PersonaRows};
+pub use contract::{MembershipRow, SyncedTeam, TeamDetails, TeamRef, Teams};
+pub use contract::{Steward, StewardKey, Stewards};
 pub use ingest::*;
 pub use repo::*;
 pub use steve_types::BusEvent;

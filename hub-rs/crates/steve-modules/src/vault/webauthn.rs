@@ -26,11 +26,11 @@ use axum::http::{HeaderMap, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use rusqlite::{Connection, OptionalExtension, params};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use steve_store::{Store, base, uid};
+use steve_store::{AuthSessions, PasskeyRows, Read, UserRows};
+use steve_store::{Store, uid};
 use webauthn_rs::prelude::{
     Passkey, PasskeyAuthentication, PasskeyRegistration, PublicKeyCredential,
     RegisterPublicKeyCredential, Url, Uuid, Webauthn, WebauthnBuilder,
@@ -147,14 +147,7 @@ struct Inner {
 pub struct Passkeys(Arc<Inner>);
 
 /// A registered passkey as the API shows it (no key material).
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct PasskeyOut {
-    pub id: String,
-    pub name: String,
-    pub rp_id: String,
-    pub created: i64,
-    pub last_used: Option<i64>,
-}
+pub use steve_store::PasskeyInfo as PasskeyOut;
 
 struct Row {
     id: String,
@@ -247,16 +240,9 @@ impl Passkeys {
             .map_err(|e| VaultError::internal(format!("task failed: {e}")))?
     }
 
-    fn rows(c: &Connection, ws: &str, user: &str, rp_id: &str) -> VaultResult<Vec<Row>> {
-        let mut st = c.prepare_cached(
-            "SELECT id, credential FROM passkeys WHERE workspace_id = ? AND user_id = ? AND rp_id = ? ORDER BY created",
-        )?;
-        let raw = st
-            .query_map(params![ws, user, rp_id], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(raw
+    fn rows(r: &mut impl Read, ws: &str, user: &str, rp_id: &str) -> steve_store::Result<Vec<Row>> {
+        Ok(PasskeyRows(r)
+            .credentials(ws, user, rp_id)?
             .into_iter()
             .filter_map(|(id, cred)| match serde_json::from_str::<Passkey>(&cred) {
                 Ok(passkey) => Some(Row { id, passkey }),
@@ -275,15 +261,10 @@ impl Passkeys {
             return Err(VaultError::StaleLogin);
         };
         let now = self.now();
-        let created: Option<i64> = self.0.store.reader(|c| {
-            c.query_row(
-                "SELECT created FROM auth_sessions WHERE token_hash = ? AND user_id = ? AND expires > ?",
-                params![steve_store::sha(token), user, now],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(VaultError::from)
-        })?;
+        let created = self
+            .0
+            .store
+            .read(|r| AuthSessions(r).active_start(token, user, now))?;
         match created {
             Some(t) if now - t <= FRESH_LOGIN_MS => Ok(()),
             _ => Err(VaultError::StaleLogin),
@@ -306,12 +287,10 @@ impl Passkeys {
         self.check_fresh_login(user, token)?;
         let i = self.rp_for(host)?;
         let rp = &self.0.rps[i];
-        let (existing, display) = self.0.store.reader(|c| {
-            let rows = Self::rows(c, ws, user, &rp.rp_id)?;
-            let display: Option<String> = c
-                .query_row("SELECT name FROM users WHERE id = ?", [user], |r| r.get(0))
-                .optional()?;
-            Ok::<_, VaultError>((rows, display.unwrap_or_else(|| user.to_owned())))
+        let (existing, display) = self.0.store.read(|r| {
+            let rows = Self::rows(r, ws, user, &rp.rp_id)?;
+            let display = UserRows(r).name(user)?;
+            Ok((rows, display.unwrap_or_else(|| user.to_owned())))
         })?;
         let exclude = existing
             .iter()
@@ -374,23 +353,18 @@ impl Passkeys {
             created: self.now(),
             last_used: None,
         };
-        self.0.store.transaction(|tx| {
+        self.0.store.write(|tx| {
             // webauthn-rs: the credential id must not be registered to anyone else already.
-            let mut st = tx.prepare_cached("SELECT credential FROM passkeys WHERE rp_id = ?")?;
-            let taken = st
-                .query_map([&out.rp_id], |r| r.get::<_, String>(0))?
-                .filter_map(|r| r.ok())
+            let taken = PasskeyRows(tx)
+                .registered_credentials(&out.rp_id)?
+                .into_iter()
                 .filter_map(|c| serde_json::from_str::<Passkey>(&c).ok())
                 .any(|k| k.cred_id() == passkey.cred_id());
             if taken {
                 return Err(ApiError::conflict(steve_i18n::t!("modules.webauthn.reg_dup")).into());
             }
-            tx.execute(
-                "INSERT INTO passkeys (id, workspace_id, user_id, name, rp_id, credential, created) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                params![out.id, ws, user, out.name, out.rp_id, cred, out.created],
-            )?;
-            base::audit(
-                tx,
+            PasskeyRows(tx).insert(ws, user, &out, &cred)?;
+            tx.audit(
                 ws,
                 user,
                 "passkey.add",
@@ -404,36 +378,16 @@ impl Passkeys {
 
     /// `GET /passkeys`: the caller's passkeys in this workspace, every RP ID.
     pub fn list(&self, ws: &str, user: &str) -> VaultResult<Vec<PasskeyOut>> {
-        self.0.store.reader(|c| {
-            let mut st = c.prepare_cached(
-                "SELECT id, name, rp_id, created, last_used FROM passkeys WHERE workspace_id = ? AND user_id = ? ORDER BY created",
-            )?;
-            let out = st
-                .query_map(params![ws, user], |r| {
-                    Ok(PasskeyOut {
-                        id: r.get(0)?,
-                        name: r.get(1)?,
-                        rp_id: r.get(2)?,
-                        created: r.get(3)?,
-                        last_used: r.get(4)?,
-                    })
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(out)
-        })
+        Ok(self.0.store.read(|r| PasskeyRows(r).list(ws, user))?)
     }
 
     /// `DELETE /passkeys/:id`: only the caller's own; anything else is `404 没有这个通行密钥`.
     pub fn delete(&self, ws: &str, user: &str, id: &str) -> VaultResult<()> {
-        self.0.store.transaction(|tx| {
-            let n = tx.execute(
-                "DELETE FROM passkeys WHERE id = ? AND workspace_id = ? AND user_id = ?",
-                params![id, ws, user],
-            )?;
-            if n == 0 {
+        self.0.store.write(|tx| {
+            if !PasskeyRows(tx).delete(ws, user, id)? {
                 return Err(ApiError::not_found("通行密钥").into());
             }
-            base::audit(tx, ws, user, "passkey.delete", id, &json!({}))?;
+            tx.audit(ws, user, "passkey.delete", id, &json!({}))?;
             Ok(())
         })
     }
@@ -444,7 +398,7 @@ impl Passkeys {
         let rows = self
             .0
             .store
-            .reader(|c| Self::rows(c, &t.ws, &t.user, &rp.rp_id))?;
+            .read(|r| Self::rows(r, &t.ws, &t.user, &rp.rp_id))?;
         if rows.is_empty() {
             return Err(ApiError::rule(steve_i18n::t!("modules.vault.need_passkey")).into());
         }
@@ -485,9 +439,12 @@ impl Passkeys {
             return Err(ApiError::rule(steve_i18n::t!("modules.webauthn.not_verified")).into());
         }
         let now = self.now();
-        self.0.store.transaction(|tx| {
+        self.0.store.write(|tx| {
             let mut rows = Self::rows(tx, &t.ws, &t.user, &rp.rp_id)?;
-            let Some(row) = rows.iter_mut().find(|r| r.passkey.cred_id() == res.cred_id()) else {
+            let Some(row) = rows
+                .iter_mut()
+                .find(|r| r.passkey.cred_id() == res.cred_id())
+            else {
                 // deleted between start and finish
                 return Err(ApiError::rule(steve_i18n::t!("modules.webauthn.not_verified")).into());
             };
@@ -498,10 +455,7 @@ impl Passkeys {
                 ),
                 _ => None,
             };
-            tx.execute(
-                "UPDATE passkeys SET last_used = ?, credential = COALESCE(?, credential) WHERE id = ?",
-                params![now, cred, row.id],
-            )?;
+            PasskeyRows(tx).mark_used(&row.id, now, cred.as_deref())?;
             Ok::<_, VaultError>(())
         })?;
         Ok(Verified::new(t.clone()))

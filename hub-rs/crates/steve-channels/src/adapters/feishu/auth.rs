@@ -466,7 +466,7 @@ pub fn app_domain(conns: &Connections, ws: &str, id: &str) -> Result<Domain, Pro
     let c = conns
         .modules()
         .store
-        .reader(|c| steve_modules::accounts::connections::repo::get(c, id))
+        .read(|c| steve_modules::accounts::connections::repo::get(c, id))
         .map_err(|e| ProviderError::Config(e.to_string()))?
         .filter(|c| c.workspace_id == ws)
         .ok_or_else(|| ProviderError::Config("没有这个机器人连接".into()))?;
@@ -836,7 +836,7 @@ impl DeviceFlows {
                 .conns
                 .modules()
                 .store
-                .reader(|c| steve_modules::accounts::connections::repo::get(c, id))
+                .read(|c| steve_modules::accounts::connections::repo::get(c, id))
                 .map_err(|e| ApiError::Internal(e.to_string()))?
                 .filter(|c| {
                     c.workspace_id == who.ws && c.adapter == USER_ADAPTER && c.created_by == who.me

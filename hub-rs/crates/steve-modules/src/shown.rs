@@ -32,10 +32,7 @@ pub fn system_name(id: &str, builtin: bool, stored: &str) -> String {
     if !builtin {
         return stored.to_string();
     }
-    let seeded = crate::accounts::repo::BUILTIN_SYSTEMS
-        .iter()
-        .any(|(i, n, ..)| *i == id && *n == stored);
-    if !seeded {
+    if steve_store::builtin_system_name(id) != Some(stored) {
         return stored.to_string();
     }
     match id {

@@ -5,13 +5,13 @@
 use std::fmt;
 
 use serde_json::json;
-use steve_store::{base, now, uid};
+use steve_store::{now, uid, vault_items::VaultItems};
 
-use super::repo::{self, UseRow};
 use crate::ApiError;
 use crate::vault::crypto::open_field;
 use crate::vault::secret::SecretBytes;
 use crate::vault::{Vault, VaultError, VaultResult};
+use steve_store::secret_uses::{NewUseLog, SecretUses};
 
 /// The decrypted secret fields of one item, by label. Not `Clone`, `Serialize` or `Display`; `Debug`
 /// shows the labels only.
@@ -58,7 +58,7 @@ impl Vault {
         purpose: &str,
         f: impl FnOnce(&Credential) -> R,
     ) -> VaultResult<R> {
-        let (labels, opened) = self.open_credential(ws, item_id)?;
+        let (labels, opened) = self.open_credential(ws, item_id, None)?;
         self.log_use(ws, item_id, actor, purpose, &labels, opened.is_ok())?;
         let cred = opened?;
         Ok(f(&cred))
@@ -76,22 +76,7 @@ impl Vault {
         item_id: &str,
         f: impl FnOnce(&Credential) -> R,
     ) -> VaultResult<R> {
-        let scope: Option<String> = self.store().reader(|c| {
-            use rusqlite::OptionalExtension;
-            Ok::<_, VaultError>(
-                c.query_row(
-                    "SELECT v.scope FROM vault_items i JOIN vaults v ON v.id = i.vault_id
-                      WHERE i.id = ? AND i.workspace_id = ?",
-                    [item_id, ws],
-                    |r| r.get(0),
-                )
-                .optional()?,
-            )
-        })?;
-        if scope.as_deref() != Some("system") {
-            return Err(ApiError::not_found("条目").into());
-        }
-        let (_, opened) = self.open_credential(ws, item_id)?;
+        let (_, opened) = self.open_credential(ws, item_id, Some("system"))?;
         Ok(f(&opened?))
     }
 
@@ -106,7 +91,7 @@ impl Vault {
     ) -> VaultResult<()> {
         let labels: Vec<String> = self
             .store()
-            .reader(|c| repo::fields(c, item_id))?
+            .read(|r| VaultItems(r).fields(item_id))?
             .into_iter()
             .filter(|r| r.secret)
             .map(|r| r.label)
@@ -120,13 +105,29 @@ impl Vault {
         &self,
         ws: &str,
         item_id: &str,
+        scope: Option<&str>,
     ) -> VaultResult<(Vec<String>, VaultResult<Credential>)> {
-        let item = self
+        let (item, rows) = self
             .store()
-            .reader(|c| repo::item(c, item_id))?
-            .filter(|i| i.workspace_id == ws && i.status == "active")
+            .read(|r| {
+                let mut vaults = VaultItems(r);
+                let Some(item) = vaults
+                    .item(item_id)?
+                    .filter(|i| i.workspace_id == ws && i.status == "active")
+                else {
+                    return Ok(None);
+                };
+                if let Some(scope) = scope
+                    && !vaults
+                        .vault(&item.vault_id)?
+                        .is_some_and(|v| v.scope == scope)
+                {
+                    return Ok(None);
+                }
+                let rows = vaults.fields(item_id)?;
+                Ok(Some((item, rows)))
+            })?
             .ok_or_else(|| ApiError::not_found("条目"))?;
-        let rows = self.store().reader(|c| repo::fields(c, item_id))?;
         let opened = (|| {
             let dek = self
                 .dek_of(&item)?
@@ -156,18 +157,18 @@ impl Vault {
         ok: bool,
     ) -> VaultResult<()> {
         let at = now();
-        self.store().transaction(|tx| {
-            if ok && repo::has_internal_use(tx, ws, item_id, actor, at - at.rem_euclid(DAY_MS))? {
+        self.store().write(|tx| {
+            if ok && SecretUses(tx).has_internal(ws, item_id, actor, at - at.rem_euclid(DAY_MS))? {
                 return Ok::<_, VaultError>(());
             }
             if !ok
                 && let Some((id, status, finished)) =
-                    repo::last_internal_use(tx, ws, item_id, actor)?
+                    SecretUses(tx).last_internal(ws, item_id, actor)?
                 && status == "failed"
                 && at - finished <= FAILURE_MERGE_MS
             {
-                repo::touch_use(tx, &id, at)?;
-                tx.publish(steve_types::DomainEvent::from(
+                SecretUses(tx).touch_finished(&id, at)?;
+                tx.emit(steve_types::DomainEvent::from(
                     steve_types::VaultEvent::Vault {
                         id: {
                             let value: String = item_id.into();
@@ -182,30 +183,26 @@ impl Vault {
                 return Ok(());
             }
             let su = uid("su");
-            repo::insert_use(
-                tx,
-                ws,
-                &UseRow {
-                    id: su.clone(),
-                    item_id: item_id.into(),
-                    actor_type: "steve".into(),
-                    actor_id: actor.into(),
-                    purpose: purpose.into(),
-                    mode: "internal".into(),
-                    fields: labels.to_vec(),
-                    status: if ok { "ok" } else { "failed" }.into(),
-                    created: at,
-                },
-            )?;
-            base::audit(
-                tx,
+            SecretUses(tx).log(&NewUseLog {
+                ws: ws,
+                id: &su,
+                item: item_id,
+                actor_type: "steve",
+                actor,
+                purpose,
+                mode: "internal",
+                fields: labels,
+                status: if ok { "ok" } else { "failed" },
+                at,
+            })?;
+            tx.audit(
                 ws,
                 actor,
                 "vault.use",
                 item_id,
                 &json!({"mode": "internal", "use": su, "ok": ok, "fields": labels}),
             )?;
-            tx.publish(steve_types::DomainEvent::from(
+            tx.emit(steve_types::DomainEvent::from(
                 steve_types::VaultEvent::Vault {
                     id: {
                         let value: String = item_id.into();

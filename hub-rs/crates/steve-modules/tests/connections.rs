@@ -7,12 +7,12 @@
 mod conn_support;
 
 use std::sync::Arc;
+use steve_store::testkit::modules::connections as fixture;
 
 use axum::http::header;
 use axum::routing::post;
 use axum::{Json, Router};
 use conn_support::*;
-use rusqlite::params;
 use serde_json::{Value, json};
 use steve_channels::fake::feishu::{Endpoint, FakeFeishu, World, ids};
 use steve_github::fake::{FakeGitHub, defaults};
@@ -28,45 +28,10 @@ use zeroize::Zeroizing;
 
 const EMAIL: &str = "peng@example.test";
 
-/// A read with plain rusqlite errors.
-fn q<T>(
-    h: &H,
-    f: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>,
-) -> steve_store::Result<T> {
-    h.env
-        .store()
-        .reader(|c| f(c).map_err(steve_store::StoreError::from))
-}
-
-fn row(h: &H, sql: &str, p: &str) -> Option<Vec<Value>> {
-    q(h, |c| {
-        let mut st = c.prepare(sql)?;
-        let n = st.column_count();
-        let mut rows = st.query(params![p])?;
-        Ok(rows.next()?.map(|r| {
-            (0..n)
-                .map(|i| match r.get_ref(i).expect("col") {
-                    rusqlite::types::ValueRef::Null => Value::Null,
-                    rusqlite::types::ValueRef::Integer(x) => json!(x),
-                    rusqlite::types::ValueRef::Real(x) => json!(x),
-                    rusqlite::types::ValueRef::Text(t) => {
-                        json!(String::from_utf8_lossy(t))
-                    }
-                    rusqlite::types::ValueRef::Blob(b) => json!(format!("blob:{}", b.len())),
-                })
-                .collect()
-        }))
-    })
-    .expect("query")
-}
-
 fn conn_of(h: &H, account: &str) -> Vec<Value> {
-    row(
-        h,
-        "SELECT id, status, caps, credential_item, adapter, health, config FROM connections WHERE account_id = ?",
-        account,
-    )
-    .expect("connection row")
+    fixture::connection_for_account(h.env.store(), account)
+        .unwrap()
+        .expect("connection row")
 }
 
 fn secret(h: &H, item: &str, key: &str) -> String {
@@ -92,16 +57,7 @@ fn contains(hay: &[u8], needle: &str) -> bool {
 }
 
 fn open_decisions(h: &H, con: &str) -> Vec<Value> {
-    q(h, |c| {
-            let mut st = c.prepare(
-                "SELECT question, options, kind FROM decisions WHERE subject_type = 'connection' AND subject_id = ? AND status = 'open'",
-            )?;
-            let rows = st.query_map([con], |r| {
-                Ok(json!([r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?]))
-            })?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()
-        })
-        .expect("decisions")
+    fixture::open_connection_decisions(h.env.store(), con).expect("decisions")
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -171,12 +127,9 @@ async fn gmail_oauth_round_trip_creates_account_and_connection() {
     assert_eq!(code_req.form["client_secret"], GOOGLE_SECRET);
 
     // the account: “我”, from connecting, handle normalized
-    let a = row(
-        &h,
-        "SELECT a.handle, a.source, a.verified, p.user_id, a.system_id FROM accounts a JOIN parties p ON p.id = a.party_id WHERE a.id = ?",
-        &acc,
-    )
-    .expect("account");
+    let a = fixture::connected_user(h.env.store(), &acc)
+        .unwrap()
+        .expect("account");
     assert_eq!(
         a,
         vec![
@@ -194,12 +147,9 @@ async fn gmail_oauth_round_trip_creates_account_and_connection() {
     assert_eq!(c[1], "ok");
     assert_eq!(c[2], json!(r#"["mail.read","mail.draft"]"#));
     let item = c[3].as_str().expect("item").to_string();
-    let it = row(
-        &h,
-        "SELECT v.scope, i.template, i.account_id, i.dek_wrapped IS NOT NULL FROM vault_items i JOIN vaults v ON v.id = i.vault_id WHERE i.id = ?",
-        &item,
-    )
-    .expect("item");
+    let it = fixture::credential(h.env.store(), &item)
+        .unwrap()
+        .expect("item");
     assert_eq!(
         it,
         vec![
@@ -213,12 +163,9 @@ async fn gmail_oauth_round_trip_creates_account_and_connection() {
     let refresh = secret(&h, &item, "refresh_token");
     assert!(access.starts_with("fake-access-") && refresh.starts_with("fake-refresh-"));
     // ciphertext only: no plaintext column, no token bytes anywhere in the database files
-    let plain = row(
-        &h,
-        "SELECT COUNT(*) FROM vault_fields WHERE item_id = ? AND (value_plain IS NOT NULL OR value_ct IS NULL)",
-        &item,
-    )
-    .expect("count");
+    let plain = fixture::grant_fields_with_bad_encryption(h.env.store(), &item)
+        .unwrap()
+        .expect("count");
     assert_eq!(plain[0], 0);
     let db = db_bytes(&h);
     for n in [&access, &refresh, verifier, &GOOGLE_SECRET.to_string()] {
@@ -284,12 +231,9 @@ async fn gmail_oauth_round_trip_creates_account_and_connection() {
     let c2 = conn_of(&h, &acc);
     assert_eq!(c2[0], con);
     assert_ne!(c2[3], json!(item));
-    let old = row(
-        &h,
-        "SELECT dek_wrapped, status FROM vault_items WHERE id = ?",
-        &item,
-    )
-    .expect("old");
+    let old = fixture::destroyed_credential(h.env.store(), &item)
+        .unwrap()
+        .expect("old");
     assert_eq!(
         old,
         vec![Value::Null, json!("deleted")],
@@ -372,12 +316,9 @@ async fn callback_refuses_foreign_expired_unknown_and_denied() {
     .await;
     assert_eq!(err(&hd), "你在 Google 那边取消了授权");
     assert_eq!(
-        row(
-            &h,
-            "SELECT COUNT(*) FROM connections WHERE workspace_id = ?",
-            WS
-        )
-        .expect("n")[0],
+        fixture::workspace_connections(h.env.store(), WS)
+            .unwrap()
+            .expect("n")[0],
         0
     );
 
@@ -500,41 +441,22 @@ async fn outlook_refresh_rotates_single_use_tokens_then_reauth() {
     assert_ne!(c[3], json!(item));
     assert!(open_decisions(&h, &con).is_empty());
     assert_eq!(
-        row(
-            &h,
-            "SELECT dek_wrapped FROM vault_items WHERE id = ?",
-            &item
-        )
-        .expect("old")[0],
+        fixture::wrapped_key(h.env.store(), &item)
+            .unwrap()
+            .expect("old")[0],
         Value::Null
     );
 
     // the decision card's “pause”
     h.conns.record(WS, &con, Health::Auth("x".into())).await;
-    let id = q(&h, |c| {
-        c.query_row(
-            "SELECT id FROM decisions WHERE subject_id = ? AND status = 'open'",
-            [&con],
-            |r| r.get::<_, String>(0),
-        )
-    })
-    .expect("decision");
+    let id = fixture::open_decision(h.env.store(), &con).expect("decision");
     let r = decisions::dispatch(&h.env.modules, &me, &id, "pause", "").expect("ours");
     r.expect("resolved");
     assert_eq!(conn_of(&h, &acc)[1], "paused");
     // paused connections are not checked or refreshed, and recording leaves them alone
     h.conns.record(WS, &con, Health::Ok).await;
     assert_eq!(conn_of(&h, &acc)[1], "paused");
-    let enabled_at = |h: &H| {
-        q(h, |c| {
-            c.query_row(
-                "SELECT enabled_at FROM connections WHERE id = ?",
-                [&con],
-                |r| r.get::<_, Option<i64>>(0),
-            )
-        })
-        .expect("enabled_at")
-    };
+    let enabled_at = |h: &H| fixture::enabled_at(h.env.store(), &con).expect("enabled_at");
     // connected again just now: what it receives from before is history from here on
     let reconnected = enabled_at(&h).expect("set on reconnect");
     h.env.clock.advance(60_000);
@@ -608,12 +530,9 @@ async fn feishu_app_credential_and_user_oauth_with_single_use_refresh() {
     let app_con = v["id"].as_str().expect("id").to_string();
     let acc = v["account_id"].as_str().expect("acc").to_string();
     assert_eq!(v["auth"], "credential");
-    let a = row(
-        &h,
-        "SELECT a.handle, a.kind, p.type, p.org_kind FROM accounts a JOIN parties p ON p.id = a.party_id WHERE a.id = ?",
-        &acc,
-    )
-    .expect("account");
+    let a = fixture::bot_account(h.env.store(), &acc)
+        .unwrap()
+        .expect("account");
     assert_eq!(
         a,
         vec![
@@ -631,14 +550,7 @@ async fn feishu_app_credential_and_user_oauth_with_single_use_refresh() {
     assert_eq!(secret(&h, &item, "app_secret"), ids::APP_SECRET);
     assert_eq!(secret(&h, &item, "encrypt_key"), "PLAINTEXT-encrypt");
     // the bot's open_id is a handle under this connection
-    let oh = q(&h, |c| {
-        c.query_row(
-            "SELECT COUNT(*) FROM account_handles WHERE account_id = ? AND connection_id = ?",
-            params![acc, app_con],
-            |r| r.get::<_, i64>(0),
-        )
-    })
-    .expect("handles");
+    let oh = fixture::owned_handle_count(h.env.store(), &acc, &app_con).expect("handles");
     assert_eq!(oh, 1);
     // the tenant token was minted once (verify) and is cached
     let asked = fake.requests_to(Endpoint::TenantToken).len();
@@ -675,14 +587,7 @@ async fn feishu_app_credential_and_user_oauth_with_single_use_refresh() {
         "{v}"
     );
     assert!(!v.to_string().contains("PLAINTEXT-wrong"));
-    let active = q(&h, |c| {
-            c.query_row(
-                "SELECT COUNT(*) FROM vault_items WHERE template = 'connection_credential' AND status = 'active'",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-        })
-        .expect("n");
+    let active = fixture::active_connection_credentials(h.env.store()).expect("n");
     assert_eq!(active, 1);
     // replacing the credential verifies the new one (not the cached token of the old one)
     let (s, v, _) = send(
@@ -746,12 +651,9 @@ async fn feishu_app_credential_and_user_oauth_with_single_use_refresh() {
     )
     .await;
     let uacc = account_of(&loc);
-    let a = row(
-        &h,
-        "SELECT a.handle, a.system_id, p.user_id FROM accounts a JOIN parties p ON p.id = a.party_id WHERE a.id = ?",
-        &uacc,
-    )
-    .expect("account");
+    let a = fixture::connected_address(h.env.store(), &uacc)
+        .unwrap()
+        .expect("account");
     assert_eq!(
         a,
         vec![json!(ids::OWNER.union_id), json!("feishu"), json!(ME)]
@@ -818,12 +720,9 @@ async fn github_app_installation_tokens_are_minted_and_cached() {
         .await
         .expect("connect");
     assert!(!done.reconnected);
-    let a = row(
-        &h,
-        "SELECT a.handle, a.kind, p.org_kind FROM accounts a JOIN parties p ON p.id = a.party_id WHERE a.id = ?",
-        &done.account_id,
-    )
-    .expect("account");
+    let a = fixture::claimed_account(h.env.store(), &done.account_id)
+        .unwrap()
+        .expect("account");
     assert_eq!(
         a,
         vec![
@@ -889,7 +788,7 @@ async fn github_app_installation_tokens_are_minted_and_cached() {
 struct Uses;
 
 impl ConnectionUsage for Uses {
-    fn usage(&self, _: &rusqlite::Connection, _: &str, id: &str) -> VaultResult<Usage> {
+    fn usage(&self, _: &steve_store::Store, _: &str, id: &str) -> VaultResult<Usage> {
         Ok(Usage {
             flows: vec![UsageRef {
                 id: "flw_1".into(),
@@ -1057,20 +956,25 @@ async fn credential_health_backoff_caps_pause_and_disconnect() {
     assert_eq!(v["ok"], true);
     assert_eq!(v["usage"]["flows"][0]["id"], "flw_1");
     assert!(fp.calls().iter().any(|c| c == &format!("revoke:{con}")));
-    let it = row(&h, "SELECT dek_wrapped, status, (SELECT COUNT(*) FROM vault_fields f WHERE f.item_id = vault_items.id AND f.value_ct IS NOT NULL) FROM vault_items WHERE id = ?", &item2).expect("item");
+    let it = fixture::retained_credential(h.env.store(), &item2)
+        .unwrap()
+        .expect("item");
     assert_eq!(it, vec![Value::Null, json!("deleted"), json!(0)]);
-    assert!(row(&h, "SELECT id FROM connections WHERE id = ?", &con).is_none());
     assert!(
-        row(&h, "SELECT id FROM accounts WHERE id = ?", &acc).is_some(),
+        fixture::connection_exists(h.env.store(), &con)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        fixture::account_exists(h.env.store(), &acc)
+            .unwrap()
+            .is_some(),
         "the account stays"
     );
     assert!(
-        row(
-            &h,
-            "SELECT handle FROM account_handles WHERE connection_id = ?",
-            &con
-        )
-        .is_none()
+        fixture::linked_handle(h.env.store(), &con)
+            .unwrap()
+            .is_none()
     );
     let (s, _, _) = send(
         &h.api,
@@ -1182,7 +1086,9 @@ async fn device_flow_connects_in_the_background() {
     assert_eq!(st["status"], "ok", "{st}");
     assert!(polls.load(Ordering::SeqCst) >= 2);
     let acc = st["account_id"].as_str().expect("acc").to_string();
-    let a = row(&h, "SELECT handle FROM accounts WHERE id = ?", &acc).expect("acc");
+    let a = fixture::account_handle(h.env.store(), &acc)
+        .unwrap()
+        .expect("acc");
     assert_eq!(a[0], "dev@example.com");
     let item = conn_of(&h, &acc)[3].as_str().expect("item").to_string();
     assert_eq!(secret(&h, &item, "refresh_token"), "PLAINTEXT-dev-refresh");
@@ -1213,22 +1119,19 @@ async fn app_bot_connect_makes_an_owned_bot_party() {
     assert_eq!(s, 200, "{v}");
     let con = v["id"].as_str().expect("id").to_string();
     let acc = v["account_id"].as_str().expect("acc").to_string();
-    let party = row(&h, "SELECT p.id, p.name, p.contact_kind FROM accounts a JOIN parties p ON p.id = a.party_id WHERE a.id = ?", &acc).expect("party");
+    let party = fixture::contact_for_account(h.env.store(), &acc)
+        .unwrap()
+        .expect("party");
     assert_eq!(
         (party[1].as_str(), party[2].as_str()),
         (Some("告警小助手"), Some("bot"))
     );
     let bot = party[0].as_str().expect("id").to_string();
-    let me_id = row(&h, "SELECT id FROM parties WHERE user_id = ?", ME).expect("me")[0].clone();
-    let owner = |t: &str, id: &str| {
-        row(
-            &h,
-            &format!(
-                "SELECT person_id, source FROM stewards WHERE object_type = '{t}' AND object_id = ?"
-            ),
-            id,
-        )
-    };
+    let me_id = fixture::owner_party(h.env.store(), ME)
+        .unwrap()
+        .expect("me")[0]
+        .clone();
+    let owner = |t: &str, id: &str| fixture::steward(h.env.store(), &t, id).unwrap();
     assert_eq!(
         owner("connection", &con),
         Some(vec![me_id.clone(), json!("connect")])
@@ -1256,30 +1159,18 @@ async fn app_bot_connect_makes_an_owned_bot_party() {
 
     // the provider names the owner: 张三, whose mail account is known
     let h2 = setup(vec![fp2.clone() as Arc<dyn ConnectionProvider>]);
-    h2.env
-        .store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "INSERT INTO parties (id, workspace_id, type, name, contact_kind, created_by, created, updated) VALUES ('ct_zhang', 'default', 'contact', '张三', 'real', 'usr_dev', 1, 1);
-                 INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated) VALUES ('acc_z', 'default', 'mail', 'email', 'ct_zhang', 'work_email', 'zhang@acme.com', 'zhang@acme.com', 'sync', 1, 1);
-                 INSERT INTO account_handles (workspace_id, family, handle, account_id, created) VALUES ('default', 'email', 'zhang@acme.com', 'acc_z', 1);",
-            )?;
-            Ok(())
-        })
-        .expect("seed");
+    fixture::seed_contact_account(h2.env.store()).expect("seed");
     let (s, v, _) = send(&h2.api, Some(&me), "POST", "/connections", Some(json!({"adapter": "fake_cred", "fields": {"app_id": "cli_ops", "App Secret": "PLAINTEXT-s2"}})), None).await;
     assert_eq!(s, 200, "{v}");
     let acc = v["account_id"].as_str().expect("acc").to_string();
-    let bot = row(&h2, "SELECT party_id FROM accounts WHERE id = ?", &acc).expect("party")[0]
+    let bot = fixture::party_for_account(h2.env.store(), &acc)
+        .unwrap()
+        .expect("party")[0]
         .as_str()
         .expect("id")
         .to_string();
     assert_eq!(
-        row(
-            &h2,
-            "SELECT person_id, source FROM stewards WHERE object_type = 'party' AND object_id = ?",
-            &bot
-        ),
+        fixture::party_steward(h2.env.store(), &bot).unwrap(),
         Some(vec![json!("ct_zhang"), json!("sync")])
     );
 }

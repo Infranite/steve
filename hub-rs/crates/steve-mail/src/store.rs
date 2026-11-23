@@ -8,13 +8,11 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_modules::accounts::identify::{Hints, identify};
 use steve_modules::accounts::repo as arepo;
-use steve_modules::accounts::service::current_party;
-use steve_modules::contacts::repo as people;
 use steve_store::{Store, Tx, outbox, uid};
 
 use async_trait::async_trait;
@@ -43,7 +41,7 @@ pub struct Mailbox {
 
 impl Mailbox {
     /// Loads it from the connection row.
-    pub fn load(c: &Connection, ws: &str, connection_id: &str) -> MailResult<Self> {
+    pub fn load(c: &mut impl steve_store::Read, ws: &str, connection_id: &str) -> MailResult<Self> {
         let r = steve_modules::accounts::connections::repo::get(c, connection_id)?
             .filter(|r| r.workspace_id == ws)
             .ok_or_else(|| MailError::Api(steve_modules::ApiError::not_found("连接")))?;
@@ -72,22 +70,20 @@ impl Mailbox {
 }
 
 /// Every email handle of the party that owns `account` (the mailbox owner's “我”).
-pub fn my_addresses(c: &Connection, ws: &str, account: &str) -> MailResult<Vec<String>> {
-    let party: Option<String> = c
-        .prepare_cached("SELECT party_id FROM accounts WHERE id = ?")?
-        .query_row([account], |r| r.get(0))
-        .optional()?;
-    let Some(party) = party else {
+pub fn my_addresses(
+    c: &mut impl steve_store::Read,
+    ws: &str,
+    account: &str,
+) -> MailResult<Vec<String>> {
+    let mut accounts = steve_store::Accounts(c);
+    let Some(row) = accounts.get(account)? else {
         return Ok(Vec::new());
     };
-    let mut st = c.prepare_cached(
-        "SELECT h.handle FROM account_handles h JOIN accounts a ON a.id = h.account_id
-          WHERE h.workspace_id = ? AND h.family = 'email' AND a.party_id = ? ORDER BY h.handle",
-    )?;
-    Ok(st
-        .query_map([ws, party.as_str()], |r| r.get::<_, String>(0))?
-        .map(|r| r.map(|h| h.to_lowercase()))
-        .collect::<rusqlite::Result<_>>()?)
+    Ok(accounts
+        .email_handles(ws, &row.party_id)?
+        .into_iter()
+        .map(|h| h.to_lowercase())
+        .collect())
 }
 
 /// `data/mail/<ws>/<id[4..6]>/<id>.eml`, relative to the Steve home.
@@ -164,13 +160,22 @@ fn addr_json(a: &Addr, account: Option<&str>, party: Option<&str>) -> Value {
 }
 
 /// The account and current party of an email address, without creating anything.
-fn lookup(c: &Connection, ws: &str, addr: &str) -> MailResult<(Option<String>, Option<String>)> {
+fn lookup(
+    c: &mut impl steve_store::Read,
+    ws: &str,
+    addr: &str,
+) -> MailResult<(Option<String>, Option<String>)> {
     let h = addr.trim().to_lowercase();
     let Some(acc) = arepo::by_handle(c, ws, "email", &h)? else {
         return Ok((None, None));
     };
     let party = arepo::get(c, &acc)?
-        .and_then(|a| current_party(c, &a.party_id).ok().flatten())
+        .and_then(|a| {
+            steve_store::Contacts::new(c)
+                .current_party(&a.party_id)
+                .ok()
+                .flatten()
+        })
         .map(|p| p.id);
     Ok((Some(acc), party))
 }
@@ -198,8 +203,12 @@ impl StoreSink<'_> {
                 local_day(
                     date,
                     steve_runtime::tz::Zone::parse(
-                        steve_modules::zone::Zone::of(tx, &self.mailbox.ws, &self.mailbox.owner)?
-                            .name()
+                        tx.write(|w| steve_modules::zone::Zone::for_user(
+                            w,
+                            &self.mailbox.ws,
+                            Some(&self.mailbox.owner)
+                        ))?
+                        .name()
                     )
                     .expect("IANA zone")
                 )
@@ -336,7 +345,7 @@ impl StoreSink<'_> {
         let res = store.transaction(|tx| -> MailResult<String> {
             // identification
             let (from_acc, from_party, to, cc) = if out {
-                let (fa, fp) = lookup(tx, &mb.ws, &from.addr)?;
+                let (fa, fp) = tx.write(|w| lookup(w, &mb.ws, &from.addr))?;
                 let mut to = Vec::new();
                 for a in &p.to {
                     let (acc, party) = self.ident(tx, a, None, date)?;
@@ -358,12 +367,12 @@ impl StoreSink<'_> {
                 // dozens of contacts to confirm
                 let mut to = Vec::new();
                 for a in &p.to {
-                    let (acc, party) = lookup(tx, &mb.ws, &a.addr)?;
+                    let (acc, party) = tx.write(|w| lookup(w, &mb.ws, &a.addr))?;
                     to.push(addr_json(a, acc.as_deref(), party.as_deref()));
                 }
                 let mut cc = Vec::new();
                 for a in &p.cc {
-                    let (acc, party) = lookup(tx, &mb.ws, &a.addr)?;
+                    let (acc, party) = tx.write(|w| lookup(w, &mb.ws, &a.addr))?;
                     cc.push(addr_json(a, acc.as_deref(), party.as_deref()));
                 }
                 (fa, fp, to, cc)
@@ -476,7 +485,7 @@ impl StoreSink<'_> {
     #[allow(clippy::too_many_arguments)]
     fn event(
         &self,
-        c: &Connection,
+        c: &Tx,
         row: &MessageRow,
         p: &Parsed,
         thread: &ThreadRow,
@@ -487,7 +496,7 @@ impl StoreSink<'_> {
     ) -> MailResult<MailEvent> {
         let mb = self.mailbox;
         let party = match &row.from_party_id {
-            Some(id) => current_party(c, id)?,
+            Some(id) => c.write(|w| w.contacts().current_party(id))?,
             None => None,
         };
         let vip = party.as_ref().is_some_and(|p| p.important);
@@ -505,15 +514,20 @@ impl StoreSink<'_> {
         let org = if domain.is_empty() {
             None
         } else {
-            people::domain_owner(c, &mb.ws, &domain)?
-                .and_then(|o| people::get(c, &o).ok().flatten())
+            c.write(|w| {
+                let id = w.contacts().domain_owner(&mb.ws, &domain)?;
+                id.map(|id| w.contacts().party(&id))
+                    .transpose()
+                    .map(Option::flatten)
+            })?
         };
         let org_name = org
             .as_ref()
             .map(|o| o.name.clone())
             .or_else(|| p.signature_org.clone());
         let group_key = match &org {
-            Some(o) => people::domains(c, &mb.ws, &o.id)?
+            Some(o) => c
+                .write(|w| w.contacts().domains(&mb.ws, &o.id))?
                 .into_iter()
                 .next()
                 .unwrap_or_else(|| domain.clone()),

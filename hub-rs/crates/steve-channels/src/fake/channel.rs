@@ -144,7 +144,7 @@ impl FakeChannel {
             let (party, kind, handle, name) = match personal {
                 Some(h) => (me.id.clone(), "personal", h.to_string(), me.name.clone()),
                 None => {
-                    let org = steve_modules::contacts::repo::self_org(tx, &caller.ws)?
+                    let org = tx.write(|w| w.contacts().own_org(&caller.ws))?
                         .ok_or_else(|| steve_modules::ApiError::not_found("组织"))?;
                     (org.id, "app_bot", Self::BOT.to_string(), "测试机器人".to_string())
                 }

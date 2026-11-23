@@ -24,11 +24,11 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use regex::Regex;
-use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::json;
-use steve_store::caps::mcp::{self as repo, Server, Var};
-use steve_store::{Tx, base, now, uid};
+use steve_store::caps::Assignments;
+use steve_store::caps::mcp::{self as repo, Server, Servers, Var};
+use steve_store::{Read, W, now, uid};
 use zeroize::Zeroizing;
 
 use super::Capabilities;
@@ -123,8 +123,9 @@ pub(super) async fn remove_h(
     Ok(Json(json!({ "ok": true })).into_response())
 }
 
-fn server_of(c: &Connection, ws: &str, sid: &str) -> VaultResult<Server> {
-    repo::get(c, sid)?
+fn server_of(c: &mut impl Read, ws: &str, sid: &str) -> VaultResult<Server> {
+    Servers(c)
+        .get(sid)?
         .filter(|s| s.workspace_id == ws)
         .ok_or_else(|| ApiError::not_found("MCP 服务器").into())
 }
@@ -139,7 +140,7 @@ pub(crate) fn out(s: &Server) -> serde_json::Value {
 }
 
 /// [`out`] with the Bots that use it.
-fn out_with_users(c: &Connection, s: &Server) -> VaultResult<serde_json::Value> {
+fn out_with_users(c: &mut impl Read, s: &Server) -> VaultResult<serde_json::Value> {
     let mut v = out(s);
     v["bots"] = super::users(c, "mcp", &s.id)?;
     Ok(v)
@@ -258,8 +259,9 @@ fn server_input(old: &Server, b: ServerIn) -> (Server, Vec<VarIn>) {
 
 impl Capabilities {
     pub fn mcp_list(&self, ws: &str) -> VaultResult<Vec<serde_json::Value>> {
-        self.vault.store().reader(|c| {
-            repo::list(c, ws)?
+        self.read(|c| {
+            Servers(c)
+                .list(ws)?
                 .iter()
                 .map(|s| out_with_users(c, s))
                 .collect()
@@ -270,7 +272,7 @@ impl Capabilities {
         let count = self
             .vault
             .store()
-            .reader(|c| Ok::<_, VaultError>(repo::list(c, ws)?.len()))?;
+            .read(|c| Ok(Servers(c).list(ws)?.len()))?;
         let at = now();
         let blank = Server {
             id: uid("bmcp"),
@@ -302,20 +304,20 @@ impl Capabilities {
         sid: &str,
         b: ServerIn,
     ) -> VaultResult<serde_json::Value> {
-        let old = self.vault.store().reader(|c| server_of(c, ws, sid))?;
+        let old = self.read(|c| server_of(c, ws, sid))?;
         self.mcp_save(me, old, b, true, false)
     }
 
     pub fn mcp_delete(&self, ws: &str, me: &str, sid: &str) -> VaultResult<()> {
-        let old = self.vault.store().reader(|c| server_of(c, ws, sid))?;
-        self.vault.store().transaction(|tx| {
+        let old = self.read(|c| server_of(c, ws, sid))?;
+        self.vault.store().write(|tx| {
             if let Some(item) = &old.credential_item {
-                self.vault.destroy_item(tx, &old.workspace_id, me, item)?;
+                self.vault
+                    .destroy_item_in(tx, &old.workspace_id, me, item)?;
             }
             super::publish_users(tx, "mcp", sid)?;
-            repo::delete(tx, sid)?;
-            base::audit(
-                tx,
+            Servers(tx).delete(sid)?;
+            tx.audit(
                 ws,
                 me,
                 "mcp_server.delete",
@@ -338,8 +340,8 @@ impl Capabilities {
     ) -> VaultResult<serde_json::Value> {
         let assign_to = b.bot.clone();
         let (mut s, vars_in) = server_input(&old, b);
-        let name_ok = self.vault.store().reader(|c| {
-            Ok::<_, VaultError>(!repo::name_taken(c, &s.workspace_id, &s.name, Some(&s.id))?)
+        let name_ok = self.read(|c| {
+            Ok::<_, VaultError>(!Servers(c).name_taken(&s.workspace_id, &s.name, Some(&s.id))?)
         })?;
         if !room {
             return Err(ApiError::rule(steve_i18n::t!(
@@ -473,22 +475,22 @@ impl Capabilities {
         } = save;
         s.updated = now().max(s.updated.saturating_add(1));
         let ws = s.workspace_id.clone();
-        self.vault.store().transaction(|tx: &Tx| {
-            let drop_old = |tx: &Tx| -> VaultResult<()> {
+        self.vault.store().write(|tx: &mut W<'_>| {
+            let drop_old = |tx: &mut W<'_>| -> VaultResult<()> {
                 if let Some(item) = &old.credential_item {
-                    self.vault.destroy_item(tx, &ws, me, item)?;
+                    self.vault.destroy_item_in(tx, &ws, me, item)?;
                 }
                 Ok(())
             };
             if let Some(p) = &prepared {
                 drop_old(tx)?;
-                s.credential_item = Some(self.vault.insert_prepared(tx, p)?);
+                s.credential_item = Some(self.vault.insert_prepared_in(tx, p)?);
             } else if labels.is_empty() {
                 drop_old(tx)?;
                 s.credential_item = None;
             }
             // a Bot that uses it must not see two servers of one name
-            for a in steve_store::caps::of_entry(tx, "mcp", &s.id)? {
+            for a in Assignments(tx).of_entry("mcp", &s.id)? {
                 if super::clashes(tx, &a.bot_id, "mcp", &s.id, &s.name)? {
                     return Err(ApiError::conflict(steve_i18n::t!(
                         "modules.caps.name_used",
@@ -498,12 +500,11 @@ impl Capabilities {
                 }
             }
             if fresh {
-                repo::insert(tx, &s)?;
+                Servers(tx).insert(&s)?;
             } else {
-                repo::update(tx, &s)?;
+                Servers(tx).update(&s)?;
             }
-            base::audit(
-                tx,
+            tx.audit(
                 &ws,
                 me,
                 if fresh {
@@ -533,7 +534,7 @@ impl Capabilities {
         let s = self
             .vault
             .store()
-            .reader(|c| repo::get(c, sid))?
+            .read(|c| Servers(c).get(sid))?
             .ok_or_else(|| VaultError::from(ApiError::not_found("MCP 服务器")))?;
         let labels = s.secret_labels();
         let Some(item) = s.credential_item.as_deref().filter(|_| !labels.is_empty()) else {
@@ -558,13 +559,13 @@ impl Capabilities {
     pub fn mcp_secret(&self, session: &str, id: &str) -> VaultResult<Zeroizing<Vec<u8>>> {
         let denied = || VaultError::from(ApiError::not_found("MCP 服务器"));
         let (sid, label) = id.split_once('#').ok_or_else(denied)?;
-        let (s, on, bot) = self.vault.store().reader(|c| {
-            let bot = steve_store::caps::bot_of_session(c, session)?;
+        let (s, on, bot) = self.read(|c| {
+            let bot = Assignments(c).bot_of_session(session)?;
             let on = match &bot {
-                Some(b) => steve_store::caps::is_enabled(c, b, "mcp", sid)?,
+                Some(b) => Assignments(c).is_enabled(b, "mcp", sid)?,
                 None => false,
             };
-            Ok::<_, VaultError>((repo::get(c, sid)?, on, bot))
+            Ok::<_, VaultError>((Servers(c).get(sid)?, on, bot))
         })?;
         let s = s.filter(|_| on).ok_or_else(denied)?;
         if !s.secret_labels().iter().any(|l| l == label) {

@@ -20,7 +20,7 @@ impl Mail {
                 && decision.as_ref().is_some_and(|a| {
                     a.status == "resolved" && a.result == approval.result
                 })
-                && crate::disclosure::inputs(&self.0.m.store, tx, d)? == *inputs;
+                && tx.write(|w| crate::disclosure::inputs(w, tx, d))? == *inputs;
             if !unchanged {
                 self.blocked(tx, d, "disclosure_changed", json!({"checked_content_hash": checked_hash}))?;
                 return Ok(Some(SendOutcome::Blocked {
@@ -38,7 +38,7 @@ impl Mail {
             }
             // Authorization may change while the model is running. A paused connection waits as it
             // did before; a revoked capability/connection cannot use the earlier permission.
-            match may_write_in(tx, &d.workspace_id, &d.connection_id, Some(SEND_CAP))? {
+            match tx.write(|w| may_write_in(w, &d.workspace_id, &d.connection_id, Some(SEND_CAP)))? {
                 Ok(()) => Ok(None),
                 Err(WriteRefusal::Later(_)) => {
                     repo::draft_transition(tx, &d.id, &["sending"], "approved", self.now())?;

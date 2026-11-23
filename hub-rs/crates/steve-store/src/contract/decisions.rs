@@ -158,4 +158,47 @@ impl DecisionRows<'_, W<'_>> {
         }
         Ok(n > 0)
     }
+
+    pub fn reopen(&mut self, decision: &Decision, metadata: &Value) -> Result<()> {
+        let value = (!metadata.is_null()).then(|| metadata.to_string());
+        self.0.exec(
+            Query::update()
+                .table("decisions")
+                .value("status", "open")
+                .value("result", value)
+                .value("resolved", Option::<i64>::None)
+                .value("undo", Option::<String>::None)
+                .and_where(Expr::col("id").eq(decision.id.as_str())),
+        )?;
+        emit(self.0, decision);
+        Ok(())
+    }
+}
+
+impl<C: Read> DecisionRows<'_, C> {
+    pub fn open_for(
+        &mut self,
+        ws: &str,
+        subject_type: &str,
+        subject: &str,
+    ) -> Result<Option<Decision>> {
+        let order = self.0.db().dialect().insertion_order(None);
+        let id = self.0.one(
+            Query::select()
+                .from("decisions")
+                .column("id")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("subject_type").eq(subject_type))
+                .and_where(Expr::col("subject_id").eq(subject))
+                .and_where(Expr::col("status").eq("open"))
+                .order_by("created", sea_query::Order::Desc)
+                .order_by_expr(order, sea_query::Order::Desc)
+                .limit(1),
+            |row| row.get::<String>(0),
+        )?;
+        match id {
+            Some(id) => self.get(&id),
+            None => Ok(None),
+        }
+    }
 }

@@ -2,11 +2,11 @@
 //! `steve_steward_propose`, plus the ownership lines of `steve_contacts_find`. Defined and routed in
 //! [`super::mcp`]; the texts follow the other contacts tools (English frame, names as they are).
 
-use rusqlite::{Connection, params};
 use steve_store::base::Viewer;
+use steve_store::{Accounts, Contacts, Read};
 
 use super::mcp::{McpCx, names_lower, resolve_who, viewer};
-use super::repo::{self, Party};
+use super::repo::Party;
 use super::stewards::{self as st, ObjectInfo};
 use crate::{ApiError, ApiResult, Modules};
 
@@ -15,8 +15,9 @@ pub const WHOIS_LIMIT: usize = 5;
 /// The answer of `steve_steward_propose` when it was recorded.
 pub const RECORDED: &str = "Recorded. The user sees it on the object and can undo it for 24 hours.";
 
-fn person_line(c: &Connection, s: &st::Steward) -> ApiResult<String> {
-    let name = repo::get(c, &s.person_id)?
+fn person_line(c: &mut impl Read, s: &st::Steward) -> ApiResult<String> {
+    let name = Contacts::new(c)
+        .party(&s.person_id)?
         .map(|p| p.name)
         .unwrap_or_else(|| s.person_id.clone());
     let mut tail = vec![format!("source {}", s.source)];
@@ -45,7 +46,7 @@ fn object_line(o: &ObjectInfo) -> String {
 }
 
 /// The account → party → 负责人 chain of one object.
-fn chain(c: &Connection, viewer: &Viewer, o: &ObjectInfo) -> ApiResult<String> {
+fn chain(c: &mut impl Read, viewer: &Viewer, o: &ObjectInfo) -> ApiResult<String> {
     let ws = viewer.ws.as_str();
     let mut lines = vec![object_line(o)];
     let mut any = false;
@@ -54,7 +55,9 @@ fn chain(c: &Connection, viewer: &Viewer, o: &ObjectInfo) -> ApiResult<String> {
         any = true;
     }
     if let Some(pid) = o.party_id.as_deref().filter(|_| o.object_type != "party")
-        && let Some(p) = repo::get(c, pid)?.filter(|p| viewer.sees(&p.visibility, &p.created_by))
+        && let Some(p) = Contacts::new(c)
+            .party(pid)?
+            .filter(|p| viewer.sees(&p.visibility, &p.created_by))
     {
         let what = match (p.kind.as_str(), p.contact_kind.as_deref()) {
             (_, Some("bot")) => "a bot",
@@ -81,10 +84,9 @@ fn chain(c: &Connection, viewer: &Viewer, o: &ObjectInfo) -> ApiResult<String> {
 }
 
 /// Objects whose handle, name or id matches `q`: exact matches first.
-fn matches(c: &Connection, viewer: &Viewer, q: &str) -> ApiResult<Vec<ObjectInfo>> {
+fn matches(c: &mut impl Read, viewer: &Viewer, q: &str) -> ApiResult<Vec<ObjectInfo>> {
     let ws = viewer.ws.as_str();
     let ql = q.to_lowercase();
-    let like = repo::like(&ql);
     let mut found: Vec<(bool, ObjectInfo)> = Vec::new();
     let push = |exact: bool, o: ObjectInfo, found: &mut Vec<(bool, ObjectInfo)>| {
         if !found
@@ -101,52 +103,21 @@ fn matches(c: &Connection, viewer: &Viewer, q: &str) -> ApiResult<Vec<ObjectInfo
         }
     }
     // account handles (every handle, Feishu open_ids included), then names
-    let accounts: Vec<(String, bool)> = c
-        .prepare_cached(
-            "SELECT DISTINCT a.id, (lower(h.handle) = ?2 OR lower(a.handle_display) = ?2 OR lower(a.display_name) = ?2)
-             FROM accounts a LEFT JOIN account_handles h ON h.account_id = a.id
-             WHERE a.workspace_id = ?1 AND a.status != 'deleted'
-               AND (lower(h.handle) LIKE ?3 ESCAPE '\\' OR lower(a.handle_display) LIKE ?3 ESCAPE '\\' OR lower(a.display_name) LIKE ?3 ESCAPE '\\')
-             LIMIT 20",
-        )?
-        .query_map(params![ws, ql, like], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    for (id, exact) in accounts {
+    for (id, exact) in Accounts(c).ownership_matches(ws, &ql)? {
         if let Some(o) = st::object_info(c, ws, "account", &id)? {
             push(exact, o, &mut found);
         }
     }
-    let named = [
-        (
-            "bot",
-            "SELECT id, lower(name) = ?2 FROM bots WHERE deleted = 0 AND (workspace_id = ?1 OR id IN (SELECT bot_id FROM bot_workspaces WHERE workspace_id = ?1)) AND lower(name) LIKE ?3 ESCAPE '\\'",
-        ),
-        (
-            "persona",
-            "SELECT id, lower(name) = ?2 FROM personas WHERE workspace_id = ?1 AND deleted = 0 AND lower(name) LIKE ?3 ESCAPE '\\'",
-        ),
-        (
-            "device",
-            "SELECT id, lower(name) = ?2 FROM devices WHERE ?1 IS NOT NULL AND lower(name) LIKE ?3 ESCAPE '\\'",
-        ),
-        (
-            "space",
-            "SELECT id, lower(name) = ?2 FROM spaces WHERE workspace_id = ?1 AND status != 'archived' AND lower(name) LIKE ?3 ESCAPE '\\'",
-        ),
-    ];
-    for (t, sql) in named {
-        let ids: Vec<(String, bool)> = c
-            .prepare_cached(sql)?
-            .query_map(params![ws, ql, like], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<rusqlite::Result<_>>()?;
-        for (id, exact) in ids {
-            if let Some(o) = st::object_info(c, ws, t, &id)? {
-                push(exact, o, &mut found);
+    for kind in ["bot", "persona", "device", "space"] {
+        for o in st::named_objects(c, ws, kind)? {
+            let name = o.name.to_ascii_lowercase();
+            if name.contains(&ql) {
+                push(name == ql, o, &mut found);
             }
         }
     }
     // bot parties by name or alias
-    for p in super::people_repo::parties(c, viewer, &["contact"], true)? {
+    for p in Contacts::new(c).active(viewer, &["contact"], true)? {
         if p.contact_kind.as_deref() != Some("bot") {
             continue;
         }
@@ -168,7 +139,7 @@ pub fn whois(m: &Modules, cx: &McpCx, query: &str) -> ApiResult<String> {
         return Err(ApiError::rule("Give a handle, a name or an id."));
     }
     let viewer = viewer(m, cx)?;
-    m.store.reader(|c| {
+    m.store.read(|c| Ok((|| {
         let mut found = matches(c, &viewer, q)?;
         let more = found.len().saturating_sub(WHOIS_LIMIT);
         found.truncate(WHOIS_LIMIT);
@@ -184,89 +155,93 @@ pub fn whois(m: &Modules, cx: &McpCx, query: &str) -> ApiResult<String> {
             blocks.push(format!("({more} more matches; ask more precisely.)"));
         }
         Ok(blocks.join("\n\n"))
-    })
+    })()))?
 }
 
 /// `steve_person_holdings`.
 pub fn holdings(m: &Modules, cx: &McpCx, person: &str) -> Result<String, String> {
     let viewer = viewer(m, cx).map_err(|e| e.to_string())?;
     m.store
-        .reader(|c| {
-            let p = resolve_person(c, &viewer, person)?;
-            let h = st::holdings_of(c, &viewer, &p)?;
-            let mut lines = vec![format!(
-                "{} ({}, id {})",
-                p.name,
-                if h.is_bot {
-                    "bot"
-                } else if p.is_me() {
-                    "the user"
-                } else {
-                    "contact"
-                },
-                p.id
-            )];
-            if h.accounts.is_empty() {
-                lines.push("Own accounts: none recorded.".into());
-            } else {
-                lines.push("Own accounts:".into());
-                for g in &h.accounts {
-                    let xs: Vec<String> = g
-                        .accounts
-                        .iter()
-                        .map(|a| {
-                            if a.name.is_empty() || a.name == a.handle {
-                                format!("{} ({})", a.handle, a.kind_label)
-                            } else {
-                                format!("{} {} ({})", a.name, a.handle, a.kind_label)
-                            }
-                        })
-                        .collect();
-                    lines.push(format!("- {}: {}", g.system, xs.join(", ")));
-                }
-            }
-            if h.responsible.is_empty() {
-                lines.push("Responsible for: nothing recorded.".into());
-            } else {
-                lines.push("Responsible for:".into());
-                for x in &h.responsible {
-                    let pending = if x.status == "confirmed" {
-                        ""
+        .read(|c| {
+            Ok((|| {
+                let p = resolve_person(c, &viewer, person)?;
+                let h = st::holdings_of(c, &viewer, &p)?;
+                let mut lines = vec![format!(
+                    "{} ({}, id {})",
+                    p.name,
+                    if h.is_bot {
+                        "bot"
+                    } else if p.is_me() {
+                        "the user"
                     } else {
-                        ", proposed, not confirmed yet"
-                    };
-                    lines.push(format!(
-                        "- {} as {} ({}{pending})",
-                        object_line(&x.object),
-                        x.role_label,
-                        x.role
-                    ));
-                }
-            }
-            if h.is_bot {
-                if h.stewards.is_empty() {
-                    lines.push(
-                        "Nobody is recorded as responsible for this bot (没有负责人).".into(),
-                    );
+                        "contact"
+                    },
+                    p.id
+                )];
+                if h.accounts.is_empty() {
+                    lines.push("Own accounts: none recorded.".into());
                 } else {
-                    for s in &h.stewards {
+                    lines.push("Own accounts:".into());
+                    for g in &h.accounts {
+                        let xs: Vec<String> = g
+                            .accounts
+                            .iter()
+                            .map(|a| {
+                                if a.name.is_empty() || a.name == a.handle {
+                                    format!("{} ({})", a.handle, a.kind_label)
+                                } else {
+                                    format!("{} {} ({})", a.name, a.handle, a.kind_label)
+                                }
+                            })
+                            .collect();
+                        lines.push(format!("- {}: {}", g.system, xs.join(", ")));
+                    }
+                }
+                if h.responsible.is_empty() {
+                    lines.push("Responsible for: nothing recorded.".into());
+                } else {
+                    lines.push("Responsible for:".into());
+                    for x in &h.responsible {
+                        let pending = if x.status == "confirmed" {
+                            ""
+                        } else {
+                            ", proposed, not confirmed yet"
+                        };
                         lines.push(format!(
-                            "{}: {} (id {})",
-                            s.role_label, s.person_name, s.person_id
+                            "- {} as {} ({}{pending})",
+                            object_line(&x.object),
+                            x.role_label,
+                            x.role
                         ));
                     }
                 }
-            }
-            Ok::<_, ApiError>(lines.join("\n"))
+                if h.is_bot {
+                    if h.stewards.is_empty() {
+                        lines.push(
+                            "Nobody is recorded as responsible for this bot (没有负责人).".into(),
+                        );
+                    } else {
+                        for s in &h.stewards {
+                            lines.push(format!(
+                                "{}: {} (id {})",
+                                s.role_label, s.person_name, s.person_id
+                            ));
+                        }
+                    }
+                }
+                Ok::<_, ApiError>(lines.join("\n"))
+            })())
         })
+        .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())
 }
 
 /// A contact by id, exact name or alias; “我” / `me` is the user.
-fn resolve_person(c: &Connection, viewer: &Viewer, who: &str) -> ApiResult<Party> {
+fn resolve_person(c: &mut impl Read, viewer: &Viewer, who: &str) -> ApiResult<Party> {
     let w = who.trim();
     if w == "我" || w.eq_ignore_ascii_case("me") {
-        return repo::me_of(c, &viewer.ws, &viewer.user)?
+        return Contacts::new(c)
+            .me(&viewer.ws, &viewer.user)?
             .ok_or_else(|| ApiError::not_found("联系人"));
     }
     let p = resolve_who(c, viewer, w).map_err(ApiError::Rule)?;
@@ -296,58 +271,61 @@ pub fn propose(
     }
     let found = m
         .store
-        .reader(|c| {
-            // a bot's account and the bot party itself are one thing: the party is what gets a 负责人
-            let mut found = matches(c, &viewer, q)?;
-            let parties: Vec<String> = found
-                .iter()
-                .filter(|o| o.object_type == "party")
-                .map(|o| o.object_id.clone())
-                .collect();
-            found.retain(|o| {
-                o.object_type != "account"
-                    || o.party_id.as_ref().is_none_or(|p| !parties.contains(p))
-            });
-            let exact: Vec<&ObjectInfo> = found
-                .iter()
-                .filter(|o| o.object_id == q || o.name.to_lowercase() == q.to_lowercase())
-                .collect();
-            let o = match (exact.as_slice(), found.as_slice()) {
-                ([one], _) => (*one).clone(),
-                ([], [one]) => one.clone(),
-                ([], []) => {
+        .read(|c| {
+            Ok((|| {
+                // a bot's account and the bot party itself are one thing: the party is what gets a 负责人
+                let mut found = matches(c, &viewer, q)?;
+                let parties: Vec<String> = found
+                    .iter()
+                    .filter(|o| o.object_type == "party")
+                    .map(|o| o.object_id.clone())
+                    .collect();
+                found.retain(|o| {
+                    o.object_type != "account"
+                        || o.party_id.as_ref().is_none_or(|p| !parties.contains(p))
+                });
+                let exact: Vec<&ObjectInfo> = found
+                    .iter()
+                    .filter(|o| o.object_id == q || o.name.to_lowercase() == q.to_lowercase())
+                    .collect();
+                let o = match (exact.as_slice(), found.as_slice()) {
+                    ([one], _) => (*one).clone(),
+                    ([], [one]) => one.clone(),
+                    ([], []) => {
+                        return Err(ApiError::Rule(format!(
+                            "Nothing matches \"{q}\". Look it up with steve_whois and pass the id."
+                        )));
+                    }
+                    _ => {
+                        let list: Vec<String> = found
+                            .iter()
+                            .take(WHOIS_LIMIT)
+                            .map(|o| format!("{}「{}」(id {})", o.type_label, o.name, o.object_id))
+                            .collect();
+                        return Err(ApiError::Rule(format!(
+                            "Several match \"{q}\": {}. Pass the id.",
+                            list.join(", ")
+                        )));
+                    }
+                };
+                let p = resolve_person(c, &viewer, person)?;
+                if p.contact_kind.as_deref() == Some("bot") {
                     return Err(ApiError::Rule(format!(
-                        "Nothing matches \"{q}\". Look it up with steve_whois and pass the id."
+                        "{} is a bot; a person has to be responsible.",
+                        p.name
                     )));
                 }
-                _ => {
-                    let list: Vec<String> = found
-                        .iter()
-                        .take(WHOIS_LIMIT)
-                        .map(|o| format!("{}「{}」(id {})", o.type_label, o.name, o.object_id))
-                        .collect();
-                    return Err(ApiError::Rule(format!(
-                        "Several match \"{q}\": {}. Pass the id.",
-                        list.join(", ")
-                    )));
-                }
-            };
-            let p = resolve_person(c, &viewer, person)?;
-            if p.contact_kind.as_deref() == Some("bot") {
-                return Err(ApiError::Rule(format!(
-                    "{} is a bot; a person has to be responsible.",
-                    p.name
-                )));
-            }
-            let k = st::Key {
-                object_type: o.object_type.clone(),
-                object_id: o.object_id.clone(),
-                person_id: p.id.clone(),
-                role: role.into(),
-            };
-            let already = st::get(c, &viewer.ws, &k)?.is_some_and(|s| s.status == "confirmed");
-            Ok((o, p, already))
+                let k = st::Key {
+                    object_type: o.object_type.clone(),
+                    object_id: o.object_id.clone(),
+                    person_id: p.id.clone(),
+                    role: role.into(),
+                };
+                let already = st::get(c, &viewer.ws, &k)?.is_some_and(|s| s.status == "confirmed");
+                Ok((o, p, already))
+            })())
         })
+        .map_err(|e| e.to_string())?
         .map_err(|e: ApiError| e.to_string())?;
     let (o, p, already) = found;
     if already {
@@ -384,7 +362,7 @@ pub fn propose(
 }
 
 /// What `steve_contacts_find` adds for a contact: a bot's 负责人, or what a person is responsible for.
-pub fn find_lines(c: &Connection, viewer: &Viewer, p: &Party) -> ApiResult<Vec<String>> {
+pub fn find_lines(c: &mut impl Read, viewer: &Viewer, p: &Party) -> ApiResult<Vec<String>> {
     let ws = viewer.ws.as_str();
     let mut lines = Vec::new();
     if p.contact_kind.as_deref() == Some("bot") {

@@ -284,7 +284,7 @@ impl Mail {
                 };
                 let st = repo::settings(c, &thread.connection_id)?.unwrap_or_default();
                 let address =
-                    steve_modules::accounts::connections::repo::get(c, &thread.connection_id)?
+                    steve_modules::accounts::connections::repo::get(r, &thread.connection_id)?
                         .and_then(|r| {
                             r.config
                                 .get("address")
@@ -297,7 +297,7 @@ impl Mail {
                     anchors,
                     cards_text,
                     items,
-                } = gathering::personal(c, &viewer, who, &orig, q)?;
+                } = gathering::personal(c, r, &viewer, who, &orig, q)?;
                 let gathering::Related {
                     hits,
                     query,

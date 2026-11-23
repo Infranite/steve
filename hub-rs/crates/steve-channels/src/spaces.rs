@@ -1944,17 +1944,22 @@ pub fn mute(tx: &Tx, ws: &str, id: &str, now: i64) -> ChannelResult<bool> {
 pub struct Spaces;
 
 impl steve_modules::contacts::SpacePort for Spaces {
-    fn visible(&self, c: &Connection, viewer: &Viewer, space_id: &str) -> ChannelResult<bool> {
-        visible(c, viewer, space_id)
+    fn visible(
+        &self,
+        store: &steve_store::Store,
+        viewer: &Viewer,
+        space_id: &str,
+    ) -> ChannelResult<bool> {
+        store.reader(|c| visible(c, viewer, space_id))
     }
 
     fn seen(
         &self,
-        c: &Connection,
+        store: &steve_store::Store,
         viewer: &Viewer,
         parties: &[String],
     ) -> ChannelResult<Vec<(String, steve_modules::contacts::Seen)>> {
-        crate::seen::seen(c, viewer, parties)
+        store.reader(|c| crate::seen::seen(c, viewer, parties))
     }
 }
 

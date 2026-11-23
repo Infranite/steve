@@ -88,12 +88,20 @@ impl Mail {
     /// The trigger message of `ws`, with the mailbox it is in.
     fn trigger_message(&self, ws: &str, ev: &Value) -> Result<(Mailbox, repo::MessageRow), String> {
         let (conn, mid) = trigger_mail(ev)?;
-        let found = self.0.m.store.reader(|c| -> MailResult<_> {
-            let mb = Mailbox::load(c, ws, &conn)?;
-            let m =
-                repo::message(c, &mid)?.filter(|m| m.workspace_id == ws && m.connection_id == conn);
-            Ok((mb, m))
-        });
+        let found = self
+            .0
+            .m
+            .store
+            .read(|r| {
+                Ok(self.0.m.store.reader(|c| -> MailResult<_> {
+                    let mb = Mailbox::load(r, ws, &conn)?;
+                    let m = repo::message(c, &mid)?
+                        .filter(|m| m.workspace_id == ws && m.connection_id == conn);
+                    Ok((mb, m))
+                }))
+            })
+            .map_err(MailError::from)
+            .and_then(|out| out);
         match found {
             Ok((mb, Some(m))) => Ok((mb, m)),
             Ok((_, None)) => Err("触发的邮件已经不在了".into()),

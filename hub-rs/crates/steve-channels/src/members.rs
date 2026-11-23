@@ -13,9 +13,7 @@
 
 use rusqlite::{Connection, params};
 use serde::Serialize;
-use steve_modules::accounts::service::{current_party, is_ours};
 use steve_modules::contacts::repo::{self as people, Party};
-use steve_modules::contacts::service::own_party;
 use steve_store::base::Viewer;
 
 use crate::ChannelResult;
@@ -92,13 +90,16 @@ fn jobs(c: &Connection, ws: &str, party: &str) -> ChannelResult<Vec<String>> {
     Ok(rows)
 }
 
-fn visible(c: &Connection, viewer: &Viewer, p: &Party) -> bool {
-    own_party(c, viewer, &p.id, &p.kind, "联系人", false).is_ok()
+fn visible(viewer: &Viewer, p: &Party) -> bool {
+    p.workspace_id == viewer.ws
+        && p.status != "deleted"
+        && viewer.sees(&p.visibility, &p.created_by)
 }
 
 /// One page of the members of space `id`: owners and admins first, then by name.
 pub fn page(
     c: &Connection,
+    r: &mut impl steve_store::Read,
     viewer: &Viewer,
     id: &str,
     offset: usize,
@@ -132,10 +133,10 @@ pub fn page(
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(st);
-    let self_org = people::self_org(c, &viewer.ws)?.map(|o| o.id);
+    let self_org = people::self_org(r, &viewer.ws)?.map(|o| o.id);
     let members = rows
         .into_iter()
-        .map(|r| member(c, viewer, &space, self_org.as_deref(), r))
+        .map(|row| member(c, r, viewer, &space, self_org.as_deref(), row))
         .collect::<ChannelResult<Vec<_>>>()?;
     Ok(MembersPage {
         total,
@@ -147,12 +148,15 @@ pub fn page(
 
 fn member(
     c: &Connection,
+    r: &mut impl steve_store::Read,
     viewer: &Viewer,
     space: &SpaceRow,
     self_org: Option<&str>,
-    r: Row,
+    row: Row,
 ) -> ChannelResult<MemberOut> {
-    let party = current_party(c, &r.party_id)?.filter(|p| p.status != "deleted");
+    let party = steve_store::Contacts::new(r)
+        .current_party(&row.party_id)?
+        .filter(|p| p.status != "deleted");
     let jobs = match &party {
         Some(p) if p.kind == "contact" => jobs(c, &viewer.ws, &p.id)?,
         _ => Vec::new(),
@@ -161,7 +165,12 @@ fn member(
         _ if !space.has_external => Some(false),
         Some(p) if p.user_id.is_some() || Some(p.id.as_str()) == self_org => Some(false),
         // one of our own app bots (each is its own bot party)
-        Some(p) if is_ours(c, p)? => Some(false),
+        Some(p)
+            if p.contact_kind.as_deref() == Some("bot")
+                && steve_store::Connections(r).has_live_party(&p.id)? =>
+        {
+            Some(false)
+        }
         Some(p) if p.kind == "org" => Some(true),
         _ if self_org.is_some_and(|o| jobs.iter().any(|j| j == o)) => Some(false),
         _ if !jobs.is_empty() => Some(true),
@@ -169,12 +178,12 @@ fn member(
         Some(p) if p.rels.iter().any(|r| EXTERNAL_RELS.contains(&r.as_str())) => Some(true),
         _ => None,
     };
-    let shown = party.filter(|p| visible(c, viewer, p));
+    let shown = party.filter(|p| visible(viewer, p));
     let org = match &shown {
         Some(_) => {
             let mut org = None;
             for j in &jobs {
-                if let Some(o) = people::get(c, j)?.filter(|o| visible(c, viewer, o)) {
+                if let Some(o) = people::get(r, j)?.filter(|o| visible(viewer, o)) {
                     org = Some(OrgRef {
                         id: o.id,
                         name: o.name,
@@ -187,11 +196,11 @@ fn member(
         None => None,
     };
     Ok(MemberOut {
-        account_id: r.account_id,
-        name: r.name,
-        handle: r.handle,
-        role: r.role,
-        joined: r.joined,
+        account_id: row.account_id,
+        name: row.name,
+        handle: row.handle,
+        role: row.role,
+        joined: row.joined,
         contact: shown.map(|p| ContactRef {
             me: p.user_id.is_some(),
             id: p.id,

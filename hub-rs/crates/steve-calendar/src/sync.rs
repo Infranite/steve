@@ -146,11 +146,16 @@ pub(crate) fn me_party(c: &Connection, ws: &str, user: &str) -> rusqlite::Result
 }
 
 /// The zone of a calendar's dates and floating times.
-fn tz_of(c: &Connection, ws: &str, user: &str, name: Option<&str>) -> rusqlite::Result<Zone> {
+pub(crate) fn tz_of(
+    c: &mut impl steve_store::Read,
+    ws: &str,
+    user: &str,
+    name: Option<&str>,
+) -> steve_store::Result<Zone> {
     if let Some(zone) = name.and_then(|n| Zone::parse(n).ok()) {
         return Ok(zone);
     }
-    let policy = steve_modules::zone::Zone::of(c, ws, user)?;
+    let policy = steve_modules::zone::Zone::for_user(c, ws, Some(user))?;
     Ok(Zone::parse(policy.name()).expect("policy IANA zone"))
 }
 
@@ -207,6 +212,7 @@ fn event_times(e: &RemoteEvent, zone: &Zone) -> Result<EventTimes, String> {
 /// Who the people in an event are.
 pub(crate) struct People<'a> {
     pub(crate) c: &'a Connection,
+    pub(crate) zone: Zone,
     pub(crate) ws: &'a str,
     pub(crate) me: Option<&'a str>,
     pub(crate) cache: HashMap<String, Option<String>>,
@@ -235,21 +241,13 @@ pub(crate) fn normalize(
     if id.is_empty() || id.len() > 1024 {
         return Err("event without a valid id".into());
     }
-    // Old cache rows may have no zone; resolve them by the same policy as new calendars.
-    let zone = tz_of(
-        people.c,
-        &cal.workspace_id,
-        &cal.owner_user,
-        cal.tz.as_deref(),
-    )
-    .map_err(|e| e.to_string())?;
     let EventTimes {
         all_day,
         start_ms,
         end_ms,
         start_date,
         end_date,
-    } = event_times(e, &zone)?;
+    } = event_times(e, &people.zone)?;
     let status = match e.status.as_deref() {
         Some(s @ ("confirmed" | "tentative" | "cancelled")) => s.to_string(),
         _ => "confirmed".into(),
@@ -425,7 +423,7 @@ impl Calendar {
             .0
             .m
             .store
-            .reader(|c| crepo::get(c, conn))
+            .read(|r| crepo::get(r, conn))
             .map_err(ApiError::from)?
             .filter(|r| r.workspace_id == ws);
         let Some(row) = row else { return Ok(None) };
@@ -590,7 +588,7 @@ impl Calendar {
     ) -> ApiResult<Vec<CalRow>> {
         let now = self.now();
         self.0.m.store.transaction(|tx| {
-            let row = crepo::get(tx, conn)?.ok_or_else(|| ApiError::not_found("连接"))?;
+            let row = tx.write(|w| crepo::get(w, conn))?.ok_or_else(|| ApiError::not_found("连接"))?;
             let owner = row.created_by.clone();
             let me = me_party(tx, ws, &owner)?;
             let account_party: Option<String> = tx
@@ -658,7 +656,7 @@ impl Calendar {
                     party_id: party,
                     party_set: false,
                     enabled: true,
-                    tz: Some(tz_of(tx, ws, &owner, r.tz.as_deref())?.name().to_string()),
+                    tz: Some(tx.write(|w| tz_of(w, ws, &owner, r.tz.as_deref()))?.name().to_string()),
                     sync_cursor: None,
                     synced_at: None,
                     full_at: None,
@@ -749,6 +747,7 @@ impl Calendar {
             let me = me_party(tx, &ws, &cal.owner_user)?;
             let mut people = People {
                 c: tx,
+                zone: tx.write(|w| tz_of(w, &ws, &cal.owner_user, cal.tz.as_deref()))?,
                 ws: &ws,
                 me: me.as_deref(),
                 cache: HashMap::new(),
@@ -883,7 +882,7 @@ impl Calendar {
 
     /// One round of [`Calendar::run`]: syncs the connections that are due.
     pub async fn tick(&self) {
-        let rows = match self.0.m.store.reader(crepo::live) {
+        let rows = match self.0.m.store.read(|r| steve_store::Connections(r).live()) {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("calendar sync: connections not read: {e}");
@@ -960,6 +959,7 @@ mod tests {
         cal.tz = Some("UTC".into());
         let mut people = People {
             c: &c,
+            zone: Zone::parse("UTC").unwrap(),
             ws: "w",
             me: None,
             cache: HashMap::new(),
@@ -1072,24 +1072,38 @@ mod tests {
     #[test]
     fn missing_cached_calendar_zone_uses_owner_policy_then_workspace_then_system() {
         let c = Connection::open_in_memory().unwrap();
-        c.execute_batch(
-            "CREATE TABLE notification_policies(workspace_id, user_id, timezone);
-            CREATE TABLE settings(workspace_id, key, value);
-            INSERT INTO settings VALUES ('w','tz','\"Europe/London\"');",
-        )
-        .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let store =
+            steve_store::Store::open(temp.path().join("zone.sqlite"), steve_store::NoPublisher)
+                .unwrap();
+        store.ensure_workspace().unwrap();
+        let user = store
+            .users()
+            .create("zone-test", "Zone test", None, "owner")
+            .unwrap();
+        let ws = "default";
+        let zone = |name| store.read(|r| tz_of(r, ws, &user, name)).unwrap();
+        store
+            .settings()
+            .set(
+                ws,
+                serde_json::json!({"tz":"Europe/London"})
+                    .as_object()
+                    .unwrap(),
+                &user,
+            )
+            .unwrap();
         let mut cal = test_calendar();
         for (name, date) in [
             ("America/New_York", "2026-03-08"),
             ("Europe/London", "2026-10-25"),
             ("America/Sao_Paulo", "2018-11-04"),
         ] {
-            c.execute("DELETE FROM notification_policies", []).unwrap();
-            c.execute(
-                "INSERT INTO notification_policies VALUES ('w','me',?)",
-                [name],
-            )
-            .unwrap();
+            store.with_conn(|db| {
+                db.execute("DELETE FROM notification_policies", [])?;
+                db.execute("INSERT INTO notification_policies (workspace_id,user_id,enabled,mode,timezone,consented_at,consent_since_seq,updated) VALUES (?,?,1,'now',?,1,0,1)", params![ws,user,name])?;
+                Ok(())
+            }).unwrap();
             let event = RemoteEvent {
                 id: "event".into(),
                 start: When::day(date),
@@ -1098,6 +1112,7 @@ mod tests {
             };
             let mut people = People {
                 c: &c,
+                zone: zone(None),
                 ws: "w",
                 me: None,
                 cache: HashMap::new(),
@@ -1112,17 +1127,23 @@ mod tests {
             assert_eq!(row.end_ms, zone.day(row.start_ms).unwrap().1);
         }
         cal.tz = Some("Asia/Tokyo".into());
-        assert_eq!(
-            tz_of(&c, "w", "me", cal.tz.as_deref()).unwrap().name(),
-            "Asia/Tokyo"
-        );
-        c.execute("DELETE FROM notification_policies", []).unwrap();
-        assert_eq!(tz_of(&c, "w", "me", None).unwrap().name(), "Europe/London");
-        c.execute("DELETE FROM settings", []).unwrap();
-        assert_eq!(
-            tz_of(&c, "w", "me", None).unwrap().name(),
-            Zone::system().name()
-        );
+        assert_eq!(zone(cal.tz.as_deref()).name(), "Asia/Tokyo");
+        store
+            .with_conn(|db| {
+                db.execute("DELETE FROM notification_policies", [])?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(zone(None).name(), "Europe/London");
+        store
+            .settings()
+            .set(
+                ws,
+                serde_json::json!({"tz":"system"}).as_object().unwrap(),
+                &user,
+            )
+            .unwrap();
+        assert_eq!(zone(None).name(), Zone::system().name());
     }
 
     #[test]

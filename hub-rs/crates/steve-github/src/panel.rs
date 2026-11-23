@@ -192,9 +192,15 @@ impl ItemPanel for GhPanels {
         PLUGIN
     }
 
-    fn panels(&self, c: &Connection, ws: &str, _me: &str, item_id: &str) -> ApiResult<Vec<Panel>> {
+    fn panels(
+        &self,
+        store: &steve_store::Store,
+        ws: &str,
+        _me: &str,
+        item_id: &str,
+    ) -> ApiResult<Vec<Panel>> {
         let now = self.0.get().map_or_else(steve_store::now, |g| g.now());
-        item_panels(c, ws, item_id, now)
+        store.reader(|c| item_panels(c, ws, item_id, now))
     }
 
     async fn action(

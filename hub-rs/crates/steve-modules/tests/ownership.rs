@@ -12,6 +12,7 @@ use steve_modules::contacts::{self, changes, merge};
 use steve_modules::testkit::{ME, TestEnv, WS, call, caller};
 use steve_modules::{Caller, Registry};
 use steve_store::base::Viewer;
+use steve_store::testkit::modules::ownership as fixture;
 
 fn env() -> TestEnv {
     let t = TestEnv::new(|r: &mut Registry| {
@@ -19,14 +20,7 @@ fn env() -> TestEnv {
         changes::register(r, &accounts::ports());
         merge::register(r, &accounts::ports());
     });
-    exec(
-        &t,
-        "INSERT INTO bots (id, workspace_id, name, main, harness, updated) VALUES ('steve', 'default', 'Steve', 1, 'claude-code', 1), ('old', 'default', '旧的', 0, 'claude-code', 1);
-         UPDATE bots SET deleted = 1 WHERE id = 'old';
-         INSERT INTO personas (id, workspace_id, name, bot_id, created, updated) VALUES ('per_s', 'default', 'Steve', 'steve', 1, 1);
-         INSERT OR IGNORE INTO devices (id, name, roles, seen, created) VALUES ('hub', 'Mac mini', '[\"Hub\"]', 1, 1);
-         INSERT OR IGNORE INTO devices (id, name, roles, seen, created) VALUES ('dev_laptop', '笔记本', '[]', 1, 1);",
-    );
+    fixture::seed_steward_bots(t.store()).unwrap();
     t
 }
 
@@ -50,24 +44,8 @@ async fn ok(r: &Router, method: &str, path: &str, body: Option<Value>) -> Value 
     b
 }
 
-fn exec(t: &TestEnv, sql: &str) {
-    t.store()
-        .with_conn(|c| Ok(c.execute_batch(sql)?))
-        .expect("exec");
-}
-
 fn rows(t: &TestEnv) -> Vec<String> {
-    t.store()
-        .with_conn(|c| {
-            let mut st = c.prepare(
-                "SELECT object_type || ' ' || object_id || ' ' || person_id || ' ' || role || ' ' || source || ' ' || status FROM stewards ORDER BY 1",
-            )?;
-            let v = st
-                .query_map([], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<String>>>()?;
-            Ok(v)
-        })
-        .expect("rows")
+    fixture::steward_rows(t.store()).expect("rows")
 }
 
 fn owners(v: &Value) -> Vec<String> {
@@ -130,16 +108,8 @@ async fn me_gets_the_bots_personas_and_hub_device_and_edits_undo() {
     assert_eq!(owners(&v), vec!["张三"]);
     assert_eq!(v["object"]["name"], "Steve");
     let undo = v["undo"].as_str().expect("undo").to_string();
-    let cs: (String, String) = t
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT status, changes FROM changesets WHERE id = ?",
-                [&undo],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?)
-        })
-        .expect("changeset");
+    let cs: (String, String) =
+        fixture::changeset_status_and_changes(t.store(), &undo).expect("changeset");
     assert_eq!(cs.0, "applied");
     assert!(
         cs.1.contains("「Steve」的负责人") && cs.1.contains("张三"),
@@ -305,11 +275,7 @@ async fn merge_moves_rows_and_split_restores_them_delete_forgets() {
         .as_str()
         .or(m["id"].as_str())
         .map(str::to_string)
-        .unwrap_or_else(|| {
-            t.store()
-                .with_conn(|c| Ok(c.query_row("SELECT id FROM merges", [], |r| r.get(0))?))
-                .expect("merge")
-        });
+        .unwrap_or_else(|| fixture::merge_id(t.store()).expect("merge"));
     ok(&r, "POST", &format!("/merges/{mg}/split"), None).await;
     let rs = rows(&t);
     assert!(
@@ -334,10 +300,7 @@ async fn bots_seen_in_chat_cards_tools_and_chat_proposals() {
     let t = env();
     let r = app(&t);
     let (_, zhang) = setup(&r).await;
-    exec(
-        &t,
-        "INSERT OR IGNORE INTO systems (id, workspace_id, name, kind, family, created) VALUES ('feishu', '*', '飞书', 'comm', 'feishu_user', 1);",
-    );
+    fixture::seed_feishu_system(t.store()).unwrap();
     // another bot in a group: its own bot party, nobody's
     let got = t
         .store()
@@ -358,25 +321,16 @@ async fn bots_seen_in_chat_cards_tools_and_chat_proposals() {
         .expect("identify");
     assert!(got.created && !got.is_ours && got.proposal.is_none());
     let bot = got.party_id.clone();
-    let kind: String = t
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT contact_kind FROM parties WHERE id = ?",
-                [&bot],
-                |r| r.get(0),
-            )?)
-        })
-        .expect("kind");
+    let kind: String = fixture::contact_kind(t.store(), &bot).expect("kind");
     assert_eq!(kind, "bot");
     let u = ok(&r, "GET", "/stewards/unowned", None).await;
     assert!(u.to_string().contains("告警小助手"), "{u}");
 
     let card = |t: &TestEnv| {
         t.store()
-            .with_conn(|c| {
-                let v = Viewer::load(c, WS, ME)?;
-                Ok(contacts::contact_cards(c, &v, std::slice::from_ref(&bot)).expect("cards"))
+            .read(|r| {
+                let v = Viewer::bare(WS, ME);
+                Ok(contacts::contact_cards(r, &v, std::slice::from_ref(&bot)).expect("cards"))
             })
             .expect("card")[0]
             .text
@@ -397,16 +351,7 @@ async fn bots_seen_in_chat_cards_tools_and_chat_proposals() {
     .expect("propose");
     assert_eq!(out, contacts::ownership_mcp::RECORDED);
     assert!(rows(&t).contains(&format!("party {bot} {zhang} owner chat confirmed")));
-    let open: i64 = t
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT count(*) FROM decisions WHERE subject_type = 'steward' AND status = 'open'",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .expect("decisions");
+    let open: i64 = fixture::open_steward_decisions(t.store()).expect("decisions");
     assert_eq!(open, 0, "no confirm card");
     let again = tool(
         &t,
@@ -459,16 +404,7 @@ async fn bots_seen_in_chat_cards_tools_and_chat_proposals() {
     );
 
     // the user takes it back within 24 hours: the changeset undoes it
-    let cs: String = t
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT id FROM changesets WHERE origin = 'steve' AND status = 'applied' ORDER BY created DESC LIMIT 1",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .expect("changeset");
+    let cs: String = fixture::latest_applied_changeset(t.store()).expect("changeset");
     records::undo(&t.modules, &me(), &cs)
         .expect("ours")
         .expect("undone");

@@ -317,7 +317,7 @@ struct RangeQ {
 }
 
 fn resolve(
-    c: &rusqlite::Connection,
+    c: &mut impl steve_store::Read,
     who: &Caller,
     q: &RangeQ,
     now: i64,
@@ -334,10 +334,12 @@ async fn events(
 ) -> ApiResult<Json<Value>> {
     cal.modules()
         .blocking(move |m| {
-            m.store.reader(|c| {
-                let (tz, r) = resolve(c, &who, &q, m.clock.now())?;
-                Ok(Json(query::agenda(c, &who.ws, &who.me, &r, tz)?))
-            })
+            m.store.read(|r| {
+                Ok(m.store.reader(|c| {
+                    let (tz, r) = resolve(r, &who, &q, m.clock.now())?;
+                    Ok(Json(query::agenda(c, &who.ws, &who.me, &r, tz)?))
+                }))
+            })?
         })
         .await
 }
@@ -349,10 +351,12 @@ async fn one(
 ) -> ApiResult<Json<Value>> {
     cal.modules()
         .blocking(move |m| {
-            m.store.reader(|c| {
-                let tz = query::user_tz(c, &who.ws, &who.me)?;
-                Ok(Json(query::event(c, &who.ws, &who.me, &id, tz)?.1))
-            })
+            m.store.read(|r| {
+                Ok(m.store.reader(|c| {
+                    let tz = query::user_tz(r, &who.ws, &who.me)?;
+                    Ok(Json(query::event(c, &who.ws, &who.me, &id, tz)?.1))
+                }))
+            })?
         })
         .await
 }
@@ -366,11 +370,11 @@ async fn search(
     let ahead = cal.settings().future_days;
     cal.modules()
         .blocking(move |m| {
-            m.store.reader(|c| {
-                let now = m.clock.now();
-                let tz = query::user_tz(c, &who.ws, &who.me)?;
-                let r =
-                    query::range(
+            m.store.read(|r| {
+                Ok(m.store.reader(|c| {
+                    let now = m.clock.now();
+                    let tz = query::user_tz(r, &who.ws, &who.me)?;
+                    let r = query::range(
                         Some(q.from.as_deref().unwrap_or(
                             &query::local(now - past * 86_400_000, tz).replace(' ', "T"),
                         )),
@@ -381,16 +385,17 @@ async fn search(
                         now,
                     )
                     .map_err(ApiError::Rule)?;
-                Ok(Json(query::search(
-                    c,
-                    &who.ws,
-                    &who.me,
-                    q.q.as_deref().unwrap_or(""),
-                    &r,
-                    tz,
-                    50,
-                )?))
-            })
+                    Ok(Json(query::search(
+                        c,
+                        &who.ws,
+                        &who.me,
+                        q.q.as_deref().unwrap_or(""),
+                        &r,
+                        tz,
+                        50,
+                    )?))
+                }))
+            })?
         })
         .await
 }
@@ -402,19 +407,21 @@ async fn freebusy(
 ) -> ApiResult<Json<Value>> {
     cal.modules()
         .blocking(move |m| {
-            m.store.reader(|c| {
-                let (tz, r) = resolve(c, &who, &q, m.clock.now())?;
-                let party = query::person(c, &who.ws, q.party.as_deref().unwrap_or("me"))
-                    .map_err(ApiError::Rule)?;
-                Ok(Json(query::freebusy(
-                    c,
-                    &who.ws,
-                    &who.me,
-                    party.as_deref(),
-                    &r,
-                    tz,
-                )?))
-            })
+            m.store.read(|r| {
+                Ok(m.store.reader(|c| {
+                    let (tz, r) = resolve(r, &who, &q, m.clock.now())?;
+                    let party = query::person(c, &who.ws, q.party.as_deref().unwrap_or("me"))
+                        .map_err(ApiError::Rule)?;
+                    Ok(Json(query::freebusy(
+                        c,
+                        &who.ws,
+                        &who.me,
+                        party.as_deref(),
+                        &r,
+                        tz,
+                    )?))
+                }))
+            })?
         })
         .await
 }
@@ -439,38 +446,40 @@ async fn find_time(
     let s = cal.settings().clone();
     cal.modules()
         .blocking(move |m| {
-            m.store.reader(|c| {
-                let now = m.clock.now();
-                let tz = query::user_tz(c, &who.ws, &who.me)?;
-                let r = query::range(
-                    Some(b.from.as_deref().unwrap_or("now")),
-                    Some(
-                        b.to.as_deref()
-                            .unwrap_or(&query::local(now + 7 * 86_400_000, tz).replace(' ', "T")),
-                    ),
-                    tz,
-                    now,
-                )
-                .map_err(ApiError::Rule)?;
-                let people = b
-                    .people
-                    .iter()
-                    .take(20)
-                    .map(|p| query::person(c, &who.ws, p))
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(ApiError::Rule)?;
-                Ok(Json(query::find_time(
-                    c,
-                    &who.ws,
-                    &who.me,
-                    &people,
-                    b.duration_min,
-                    &r,
-                    tz,
-                    now,
-                    &s,
-                )?))
-            })
+            m.store.read(|r| {
+                Ok(m.store.reader(|c| {
+                    let now = m.clock.now();
+                    let tz = query::user_tz(r, &who.ws, &who.me)?;
+                    let r =
+                        query::range(
+                            Some(b.from.as_deref().unwrap_or("now")),
+                            Some(b.to.as_deref().unwrap_or(
+                                &query::local(now + 7 * 86_400_000, tz).replace(' ', "T"),
+                            )),
+                            tz,
+                            now,
+                        )
+                        .map_err(ApiError::Rule)?;
+                    let people = b
+                        .people
+                        .iter()
+                        .take(20)
+                        .map(|p| query::person(c, &who.ws, p))
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(ApiError::Rule)?;
+                    Ok(Json(query::find_time(
+                        c,
+                        &who.ws,
+                        &who.me,
+                        &people,
+                        b.duration_min,
+                        &r,
+                        tz,
+                        now,
+                        &s,
+                    )?))
+                }))
+            })?
         })
         .await
 }

@@ -1850,9 +1850,10 @@ impl Core {
         let all = self.store().items(ws)?;
         let open = self.store().decisions_open(ws)?;
         let waiting: HashSet<Option<String>> = open.into_iter().map(|d| d.item_id).collect();
-        let zone = self.store().store().reader(|c| {
-            steve_modules::zone::Zone::of_owner(c, ws).map_err(steve_store::StoreError::from)
-        })?;
+        let zone = self
+            .store()
+            .store()
+            .read(|c| steve_modules::zone::Zone::for_owner(c, ws))?;
         let today = zone.day_start(steve_store::now()).unwrap_or(0);
         let run = all.iter().filter(|i| i.status == "run").count();
         let done = all
