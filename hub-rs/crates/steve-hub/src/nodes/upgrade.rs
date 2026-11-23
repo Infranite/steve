@@ -1263,7 +1263,7 @@ mod tests {
                 };
                 let latest = up
                     .store
-                    .reader(|c| store_nodes::upgrade_latest(c, "n_a"))
+                    .read(|c| store_nodes::upgrade_latest(c, "n_a"))
                     .unwrap();
                 if latest.is_some_and(|row| row.phase == "succeeded") {
                     let _ = send.send(up.seen("n_a").and_then(|seen| seen.build));
