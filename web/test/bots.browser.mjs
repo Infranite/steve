@@ -11,9 +11,13 @@ const shots = process.env.STEVE_TEST_SHOTS; if (shots) mkdirSync(shots, { recurs
  * entries the Bot uses, 设置's permission choices (Agent / Permissions) saved
  * with the form, and 记忆 as the Memory Panel with add and forget/undo. */
 const bot = (id, name, extra = {}) => ({ id, name, role: name + '的职责', main: id === 'steve', harness: 'claude-code', model: null, reasoning_effort: null, rules: '', persona: '', proactive: 1, accept_mode: 'inherit', perm_mode: 'default', avatar: { color: '#8b7cf6' }, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ['default'], memories: 1, ...extra })
-let bots, memories, patches, deletes, posts, hub
+let bots, teams, memories, patches, deletes, posts, hub
 const reset = () => {
   bots = [bot('steve', 'Steve'), bot('dev', '开发'), bot('doc', '文档', { harness: 'codex', enabled: false })]
+  teams = { default: 'daily', editable: true, teams: [
+    { id: 'daily', name: '日常', members: [{ bot: 'dev', nodes: null }] },
+    { id: 'delivery', name: '跨项目交付与质量检查协作 Team', members: [{ bot: 'dev', nodes: null }] },
+  ] }
   memories = [{ id: 'm1', text: '周五下午不安排部署', source: '你加的', created: 0 }]
   patches = []; deletes = []; posts = []
   hub = capsHub({ mcp: [mcpServer('bmcp_1', 'github', 'stdio', { command: 'npx', args: ['-y', 'server-github'], bots: [{ id: 'dev', enabled: true }] })], skill: [], a2a: [] })
@@ -32,6 +36,8 @@ const run = async ({ width, height, scheme }) => {
   page.setDefaultTimeout(10000)
   const errors = []; page.on('pageerror', (e) => errors.push(e.message))
   let statsBot = null
+  let releaseTeams, teamFailure = false
+  const teamReady = new Promise(resolve => { releaseTeams = resolve })
   await page.route('**/*', async (route) => {
     const u = new URL(route.request().url()); if (u.origin !== base) return route.abort()
     if (u.pathname === '/auth/hello') return route.fulfill({ json: { name: 'steve', version: 'fixture', api: 2, login: { token: false, oidc: false } } })
@@ -41,6 +47,19 @@ const run = async ({ width, height, scheme }) => {
     if (await hub.handle(route, method, p)) return
     if (p === '/api/runtimes') data = state().runtimes
     else if (p === '/api/shell') data = state()
+    else if (p === '/api/snapshot') data = { epoch: 'fixture', rev: 1, cursor: 'fixture:1', views: { item: [], session: [], decision: [] } }
+    else if (p === '/api/summary') data = { ws: 'default', workspace_name: '默认', thinking: false, hold: null }
+    else if (p === '/api/yolo') data = { on: false, active: false, forced_off: null, forced_reason: null, paused: null, window: null, scopes: [], counts: { decided: 0, declined: 0, scheduled: 0 } }
+    else if (p === '/api/bot-teams' && method === 'GET') {
+      await teamReady
+      if (teamFailure) return route.fulfill({ status: 503, json: { error: 'Team fixture unavailable' } })
+      data = teams
+    }
+    else if (/^\/api\/bot-teams\/[^/]+$/.test(p) && method === 'PUT') {
+      const team = teams.teams.find(t => t.id === p.split('/').pop())
+      Object.assign(team, route.request().postDataJSON()); data = team
+    }
+    else if (/^\/api\/bots\/[^/]+\/execution-nodes$/.test(p)) data = { editable: true, bindings: [], candidates: [], unavailable_bindings: 0 }
     else if (p === '/api/stats/breakdown') { statsBot = u.searchParams.get('bot'); data = breakdown }
     else if (p.startsWith('/api/stats/')) return route.fulfill({ status: 404, contentType: 'application/json', body: '{}' })
     else if (/^\/api\/bots\/[^/]+$/.test(p) && method === 'PATCH') {
@@ -63,11 +82,50 @@ const run = async ({ width, height, scheme }) => {
   await page.locator('[data-bot-card=dev]').waitFor()
   assert.equal(await page.locator('[data-bot-cards] [data-bot-card]').count(), 2)
   assert.equal(await page.locator('[data-bot-card=doc]').getAttribute('data-off'), 'true')
+  const membership = k => page.locator(`[data-bot-card=${k}] [data-bot-teams]`)
+  assert.match(await membership('dev').innerText(), /正在加载 Team/)
+  assert.doesNotMatch(await membership('doc').innerText(), /未加入 Team/, 'loading is not an empty membership')
+  releaseTeams()
+  await membership('dev').getByText('日常', { exact: true }).waitFor()
+  assert.deepEqual(await membership('dev').locator('.ui-bdgc').allTextContents(), teams.teams.map(t => t.name))
+  assert.match(await membership('doc').innerText(), /未加入 Team/)
+  assert.match(await membership('steve').innerText(), /未加入 Team/)
+
+  /* Both creation controls belong to their section headers and use the same style. */
+  const newBot = page.locator('[data-new-bot]'), newTeam = page.locator('[data-new-team]')
+  assert.equal(await newBot.count(), 1)
+  assert.equal(await newBot.evaluate(el => !!el.closest('section')?.querySelector('[data-bot-cards]')), true)
+  for (const attr of ['data-steve-size', 'data-steve-variant']) assert.equal(await newBot.getAttribute(attr), await newTeam.getAttribute(attr))
+  const createBox = await newBot.boundingBox(), teamBox = await newTeam.boundingBox(), cardsBox = await page.locator('[data-bot-cards]').boundingBox()
+  assert.ok(createBox.y + createBox.height <= cardsBox.y, 'New Bot is above the list')
+  assert.ok(Math.abs(createBox.x + createBox.width - teamBox.x - teamBox.width) <= 1, 'the creation buttons align on the right')
+  await fits(); await shot('list')
+  if (shots && width < 640) { await page.locator('[data-bot-card=doc]').evaluate(el => el.scrollIntoView({ block: 'end', behavior: 'instant' })); await shot('list-bots') }
+  await newBot.click()
+  await page.getByRole('dialog').getByRole('heading', { name: '新建 Bot', exact: true }).waitFor()
+  await page.getByRole('dialog').getByRole('button', { name: '取消', exact: true }).click()
+  await page.locator('[data-seg="启用"]').click()
+  await page.locator('[data-bot-card=doc]').waitFor({ state: 'detached' })
+  assert.equal(await page.locator('[data-bot-cards] [data-bot-card]').count(), 1)
+  await page.locator('[data-seg="全部"]').click()
+  await page.locator('[data-bot-card=doc]').waitFor()
+
+  /* Renaming a Team and moving its membership updates both cards without a page reload, even for a disabled Bot. */
+  await page.locator('[data-edit-team=daily]').click()
+  const editor = page.locator('[data-team-editor]')
+  await editor.getByRole('textbox').fill('日常协作')
+  await editor.locator('[data-team-bot=doc]').check()
+  await editor.locator('[data-team-bot=dev]').uncheck()
+  await editor.locator('[data-save-team]').click()
+  await editor.waitFor({ state: 'detached' })
+  await membership('doc').getByText('日常协作', { exact: true }).waitFor()
+  assert.deepEqual(await membership('doc').locator('.ui-bdgc').allTextContents(), ['日常协作'])
+  assert.deepEqual(await membership('dev').locator('.ui-bdgc').allTextContents(), ['跨项目交付与质量检查协作 Team'])
   await page.locator('[data-switch="bot-on-dev"]').click()
   for (let i = 0; i < 50 && !patches.length; i++) await page.waitForTimeout(100)
   assert.deepEqual(patches[0], { id: 'dev', enabled: false })
   assert.equal(await page.evaluate(() => location.hash), '#/bots', 'the switch does not open the Bot')
-  await fits(); await shot('list')
+  await fits()
   await page.locator('[data-bot-row=dev]').click()
   await page.waitForFunction(() => location.hash === '#/bots/dev')
 
@@ -123,11 +181,17 @@ const run = async ({ width, height, scheme }) => {
   for (let i = 0; i < 50 && !deletes.length; i++) await page.waitForTimeout(100)
   assert.deepEqual(deletes, ['m2'])
 
+  /* An unavailable Team service must not claim that a Bot belongs to no Team. */
+  teamFailure = true
+  await page.goto(base + '/#/bots')
+  await membership('dev').getByText('Team 加载失败', { exact: true }).waitFor()
+  assert.doesNotMatch(await membership('dev').innerText(), /未加入 Team/)
+  await fits()
   assert.deepEqual(errors, [])
   await page.close()
 }
 
 try {
-  for (const v of [{ width: 1440, height: 900, scheme: 'light' }, { width: 390, height: 844, scheme: 'dark' }]) await run(v)
+  for (const v of [{ width: 1440, height: 900, scheme: 'light' }, { width: 320, height: 844, scheme: 'dark' }]) await run(v)
   console.log('bots: ok')
 } finally { await browser.close() }
