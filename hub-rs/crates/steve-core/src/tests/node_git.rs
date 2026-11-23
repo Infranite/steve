@@ -34,7 +34,7 @@ struct OnNode {
     /// Runs once, right before the next apply (something moves meanwhile).
     before_apply: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     applies: Mutex<Vec<String>>,
-    read_errors: Mutex<Vec<ApiError>>,
+    read_errors: Mutex<Vec<Error>>,
 }
 
 fn command<T>(op: &str, body: T) -> Command<T> {
@@ -171,7 +171,7 @@ impl OnNode {
 
     fn offline(&self) -> ApiResult<()> {
         match self.offline.load(Ordering::SeqCst) {
-            true => Err(ApiError::new(ErrorCode::Offline, "设备离线")),
+            true => Err(Error::new(Code::Unavailable, "设备离线")),
             false => Ok(()),
         }
     }

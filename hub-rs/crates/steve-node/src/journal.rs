@@ -69,16 +69,16 @@ impl Alarm {
             self.0.fetch_and(!Self::FULL, Ordering::AcqRel);
         }
     }
-    fn fail(&self, error: &ApiError) {
+    fn fail(&self, error: &Error) {
         match error.code {
-            ErrorCode::Exhausted => {
+            Code::Exhausted => {
                 self.0
                     .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
                         Some((state + 4) | Self::FULL)
                     })
                     .ok();
             }
-            ErrorCode::Internal => self.fault(),
+            Code::Internal => self.fault(),
             _ => {}
         }
     }
@@ -388,8 +388,8 @@ fn conv<T>(r: Result<T, BadId>) -> rusqlite::Result<T> {
     })
 }
 
-pub(crate) fn internal(e: impl std::fmt::Display) -> ApiError {
-    ApiError::new(ErrorCode::Internal, format!("journal: {e}"))
+pub(crate) fn internal(e: impl std::fmt::Display) -> Error {
+    Error::new(Code::Internal, format!("journal: {e}"))
 }
 
 fn has_cumulative_usage(events: &[(Subject, EventBody)]) -> bool {
@@ -444,10 +444,7 @@ impl Writer {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(internal)?;
         if version > VERSION {
-            return Err(ApiError::new(
-                ErrorCode::Unsupported,
-                "journal needs a newer Node",
-            ));
+            return Err(Error::new(Code::Unsupported, "journal needs a newer Node"));
         }
         let mut j = Self {
             db: c,
@@ -570,7 +567,7 @@ impl Writer {
         }
     }
 
-    fn fail(&self, e: &ApiError) {
+    fn fail(&self, e: &Error) {
         self.metrics.alarm.fail(e);
     }
 
@@ -686,7 +683,7 @@ impl Writer {
             if data_failed && mode == WriteMode::Control {
                 self.fail(e);
             }
-            if e.code != ErrorCode::Exhausted || !data_failed {
+            if e.code != Code::Exhausted || !data_failed {
                 self.pending = pending;
                 // Keep the original deadline/count. Only the timer's failed flush resets its
                 // retry cadence; rejected caller transactions cannot extend a data window.
@@ -1250,10 +1247,7 @@ impl Tx<'_> {
         let mut moved = false;
         for w in &ack.durable {
             let Some(mut head) = self.head(w.stream.as_str()) else {
-                return Err(ApiError::new(
-                    ErrorCode::Invalid,
-                    "ack of an unknown stream",
-                ));
+                return Err(Error::new(Code::Invalid, "ack of an unknown stream"));
             };
             let (epoch, produced, acknowledged) = (
                 head.epoch.as_str(),
@@ -1261,10 +1255,10 @@ impl Tx<'_> {
                 head.acknowledged as i64,
             );
             if epoch != w.epoch.as_str() {
-                return Err(ApiError::new(ErrorCode::Stale, "ack of another epoch"));
+                return Err(Error::new(Code::Stale, "ack of another epoch"));
             }
             if w.seq as i64 > produced {
-                return Err(ApiError::new(ErrorCode::Invalid, "ack ahead of the stream"));
+                return Err(Error::new(Code::Invalid, "ack ahead of the stream"));
             }
             if w.seq as i64 > acknowledged {
                 moved = true;
@@ -1460,19 +1454,16 @@ impl Tx<'_> {
             .optional()
             .map_err(internal)?;
         let Some((epoch, produced, acknowledged)) = row else {
-            return Err(ApiError::new(ErrorCode::Invalid, "no such stream"));
+            return Err(Error::new(Code::Invalid, "no such stream"));
         };
         if epoch != from_mark.epoch.as_str() {
-            return Err(ApiError::new(ErrorCode::Gap, "another stream epoch"));
+            return Err(Error::new(Code::Gap, "another stream epoch"));
         }
         if (from_mark.seq as i64) < acknowledged {
-            return Err(ApiError::new(
-                ErrorCode::Gap,
-                "already acknowledged and dropped",
-            ));
+            return Err(Error::new(Code::Gap, "already acknowledged and dropped"));
         }
         if from_mark.seq as i64 > produced {
-            return Err(ApiError::new(ErrorCode::Invalid, "ahead of the stream"));
+            return Err(Error::new(Code::Invalid, "ahead of the stream"));
         }
         let rows: Vec<String> = self.rows(
             "SELECT event FROM events WHERE stream = ?1 AND seq > ?2 ORDER BY seq",
@@ -1484,8 +1475,8 @@ impl Tx<'_> {
         for s in rows {
             if used + s.len() > max_bytes as usize {
                 if events.is_empty() {
-                    return Err(ApiError::new(
-                        ErrorCode::Exhausted,
+                    return Err(Error::new(
+                        Code::Exhausted,
                         "the next event does not fit in max_bytes",
                     ));
                 }
@@ -1706,8 +1697,8 @@ impl Tx<'_> {
         started: Option<u64>,
     ) -> ApiResult<()> {
         if self.proc_of(session)?.is_some() {
-            return Err(ApiError::new(
-                ErrorCode::Busy,
+            return Err(Error::new(
+                Code::Busy,
                 "a harness of this session was not confirmed gone",
             ));
         }
@@ -1825,7 +1816,7 @@ impl Tx<'_> {
     /// Last durable authorization check, in the transaction reserving the send. A queued Cancel
     /// message cannot be used as evidence: the cancel flag may already have committed.
     pub fn answer_for_send(&self, op: &OperationId, now: i64) -> ApiResult<()> {
-        let stale = || ApiError::new(ErrorCode::Stale, "permission no longer applicable");
+        let stale = || Error::new(Code::Stale, "permission no longer applicable");
         let res = self.answer_of(op)?.ok_or_else(stale)?;
         let (attempt, _, req) = self.wait(&res.id)?.ok_or_else(stale)?;
         let run = self.op(&attempt)?.ok_or_else(stale)?;
@@ -1932,7 +1923,7 @@ mod answer_fence_tests {
         j.tx(|t| t.set_cancel(&op)).unwrap(); // no actor Cancel message has been consumed
         assert_eq!(
             j.tx(|t| t.answer_for_send(&resolve, 1)).unwrap_err().code,
-            ErrorCode::Stale
+            Code::Stale
         );
         j.read(|t| {
             assert!(t.wait(&req.id)?.is_some());
@@ -2168,8 +2159,8 @@ mod retention_tests {
         consistent(&j);
         assert_eq!(j.read(|t| t.heads()).unwrap(), baseline);
         for (epoch, seq, code) in [
-            ("wrong", 1, ErrorCode::Stale),
-            (mark.epoch.as_str(), 2, ErrorCode::Invalid),
+            ("wrong", 1, Code::Stale),
+            (mark.epoch.as_str(), 2, Code::Invalid),
         ] {
             let mut bad = mark.clone();
             bad.epoch = Epoch::new(epoch).unwrap();

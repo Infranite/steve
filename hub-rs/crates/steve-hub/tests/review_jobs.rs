@@ -38,7 +38,7 @@ impl EventSink for Gate {
         let to = self.0.lock().unwrap().clone();
         match to {
             Some(w) => Sink(w).commit(batch).await,
-            None => Err(ApiError::new(ErrorCode::Offline, "no hub")),
+            None => Err(Error::new(Code::Unavailable, "no hub")),
         }
     }
 }
@@ -687,7 +687,7 @@ async fn real_node_gateway_same_and_cross_model_retries_share_call_but_not_attem
         let mut failed = build::done();
         failed.outcome = Outcome::Failed;
         failed.stop_reason = "error".into();
-        failed.error = Some(ApiError::new(ErrorCode::Internal, "503 busy"));
+        failed.error = Some(Error::new(Code::Internal, "503 busy"));
         node.finish(&first, failed).await.unwrap();
         eventually_sync("retry job accepted", || {
             node.log().iter().filter(|(m, _)| *m == "start_job").count() == 2

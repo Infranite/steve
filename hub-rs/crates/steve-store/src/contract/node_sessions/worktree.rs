@@ -144,11 +144,11 @@ pub fn tidy_since(
         return Ok(Some(Tidy::Removed));
     }
     let refused = Expr::col("state").eq("rejected").and(
-        d.json_path(Expr::col("receipt"), "$.payload.retry")
+        d.json_path(Expr::col("receipt"), "$.payload.retry.kind")
             .eq("never"),
     );
     let failed = finished.and(success.eq(false)).and(
-        d.json_path(Expr::col("receipt"), "$.payload.state.error.retry")
+        d.json_path(Expr::col("receipt"), "$.payload.state.error.retry.kind")
             .eq("never"),
     );
     let kept = r

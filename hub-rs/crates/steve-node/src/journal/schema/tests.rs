@@ -140,7 +140,7 @@ fn upgrade_refuses_live_or_unproven_process_groups_before_discarding_any_records
             let e = Writer::open(&p)
                 .err()
                 .expect("unproven group must block migration");
-            assert_eq!(e.code, ErrorCode::Unsupported, "{started} / {pgid}");
+            assert_eq!(e.code, Code::Unsupported, "{started} / {pgid}");
             assert!(e.safe_detail.contains("stop the old Node's processes"));
             assert_eq!(
                 c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
@@ -199,7 +199,7 @@ fn v3_discards_the_entire_ledger_and_retires_compatibility_schema() {
     assert_eq!(
         c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        4
+        VERSION
     );
     assert_eq!(
         c.query_row("SELECT count(*) FROM ops", [], |r| r.get::<_, i64>(0))
@@ -405,7 +405,7 @@ fn restart_uses_one_indexed_update_and_never_touches_finished_or_unknown_receipt
 }
 
 #[test]
-fn fresh_and_v4_startup_execute_no_ddl_or_column_probes() {
+fn fresh_and_current_startup_execute_no_ddl_or_column_probes() {
     let d = tempfile::tempdir().unwrap();
     let p = d.path().join("node.db");
     let c = Connection::open(&p).unwrap();
@@ -419,7 +419,7 @@ fn fresh_and_v4_startup_execute_no_ddl_or_column_probes() {
     assert_eq!(
         w.db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        4
+        VERSION
     );
     drop(w);
     let c = Connection::open(&p).unwrap();
@@ -453,7 +453,7 @@ fn fresh_and_v4_startup_execute_no_ddl_or_column_probes() {
     assert_eq!(
         w.read(|t| t.procs()).unwrap().len(),
         1,
-        "normal v4 restart retains an unproven group"
+        "normal restart retains an unproven group"
     );
     assert_eq!(denied.load(Ordering::SeqCst), 0);
 }

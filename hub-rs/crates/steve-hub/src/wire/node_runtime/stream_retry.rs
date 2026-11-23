@@ -53,8 +53,8 @@ impl NodeRuntime {
         if let Some(e) = capacity {
             c.outcome = Outcome::Failed;
             c.stop_reason = capacity_retry::UNAVAILABLE.into();
-            c.error = Some(ApiError::new(
-                ErrorCode::Internal,
+            c.error = Some(Error::new(
+                Code::Internal,
                 steve_acp::capacity_summary(&e, self.clock.now()),
             ));
             c.transient = true;
@@ -72,8 +72,8 @@ impl NodeRuntime {
         if let Some(e) = evidence {
             c.outcome = Outcome::Failed;
             c.stop_reason = STREAM_INTERRUPTED.into();
-            c.error = Some(ApiError::new(
-                ErrorCode::Internal,
+            c.error = Some(Error::new(
+                Code::Internal,
                 e.chars().take(300).collect::<String>(),
             ));
             c.transient = true;

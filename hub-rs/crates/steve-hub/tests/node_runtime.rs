@@ -505,7 +505,10 @@ async fn the_same_events_again_are_stored_once() {
 async fn a_busy_node_gets_the_very_same_command_again() {
     let h = hub();
     // a Node out of room
-    h.node.refuse("start_turn", Some(ErrorCode::Exhausted));
+    h.node.refuse(
+        "start_turn",
+        Some(Error::later(Code::Exhausted, "scripted refusal")),
+    );
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
     eventually_sync("refused", || {
@@ -525,7 +528,10 @@ async fn a_busy_node_gets_the_very_same_command_again() {
 #[tokio::test]
 async fn an_exhausted_node_backs_off_tells_the_session_once_and_runs_the_same_command_later() {
     let h = clocked_hub();
-    h.node.refuse("start_turn", Some(ErrorCode::Exhausted));
+    h.node.refuse(
+        "start_turn",
+        Some(Error::later(Code::Exhausted, "scripted refusal")),
+    );
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
     let exhausted = || {
@@ -1516,10 +1522,7 @@ async fn a_stop_pressed_on_a_restart_cut_turn_stays_a_stop() {
     .await;
     h.node.refuse_next(
         "abandon",
-        ApiError::new(
-            ErrorCode::Conflict,
-            "this execution is being abandoned already",
-        ),
+        Error::new(Code::Conflict, "this execution is being abandoned already"),
     );
     h.node.restart();
     h.restart_hub().await;
@@ -1613,7 +1616,7 @@ async fn a_turn_refused_for_good_ends_and_the_item_hears_it() {
     h.bind();
     h.one_turn("hello").await;
     h.node
-        .refuse_next("start_turn", ApiError::new(ErrorCode::Unsupported, "no"));
+        .refuse_next("start_turn", Error::new(Code::Unsupported, "no"));
     h.rt.prompt(S, "again", "user", &[]).unwrap();
     eventually_sync("end", || h.ends().len() == 2).await;
     assert_eq!(h.ends()[1].1, "error");
@@ -1629,7 +1632,7 @@ async fn a_refused_release_leaves_the_session_ready_and_what_waited_runs() {
     h.bind();
     h.one_turn("hello").await;
     h.node
-        .refuse_next("release_session", ApiError::new(ErrorCode::Invalid, "no"));
+        .refuse_next("release_session", Error::new(Code::Invalid, "no"));
     assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     assert_eq!(h.rt.prompt(S, "more", "user", &[]).unwrap(), Planned::Busy);
     eventually_sync("second turn", || h.count("start_turn") == 2).await;
@@ -1646,10 +1649,8 @@ async fn a_refused_reopen_leaves_the_session_released_until_a_human_retries() {
     h.one_turn("hello").await;
     assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     eventually_sync("released", || h.phase() == "released").await;
-    h.node.refuse_next(
-        "open_session",
-        ApiError::new(ErrorCode::Invalid, "no workspace"),
-    );
+    h.node
+        .refuse_next("open_session", Error::new(Code::Invalid, "no workspace"));
     h.rt.prompt(S, "more", "user", &[]).unwrap();
     eventually_sync("refused", || h.last_state("open_session") == "rejected").await;
     assert_eq!(h.phase(), "released");
@@ -1699,7 +1700,7 @@ async fn a_second_stop_after_a_refused_abandon_asks_again() {
     .await;
     let a: String = node_checks::attempt_attempt_id(&h.store).unwrap();
     h.node
-        .refuse_next("abandon", ApiError::new(ErrorCode::Conflict, "not now"));
+        .refuse_next("abandon", Error::new(Code::Conflict, "not now"));
     assert!(h.rt.cancel(S).unwrap());
     eventually_sync("refused", || {
         h.state_of(&format!("op_abandon_{a}")) == "rejected"
@@ -1870,7 +1871,7 @@ async fn a_refused_release_on_a_handoff_is_asked_again_and_the_successor_opens_a
     h.rt.bind(&on_the_item(S)).unwrap();
     h.one_turn("hello").await;
     h.node
-        .refuse_next("release_session", ApiError::new(ErrorCode::Invalid, "no"));
+        .refuse_next("release_session", Error::new(Code::Invalid, "no"));
     let op = h.hand_off();
     eventually_sync("refused", || h.state_of(&op) == "rejected").await;
     assert_eq!(
@@ -2293,8 +2294,10 @@ async fn a_card_closes_when_its_attempt_ends_without_the_nodes_expiry() {
 async fn a_late_answer_never_reaches_a_newer_attempt() {
     let h = hub();
     h.bind();
-    h.node
-        .refuse("resolve_permission", Some(ErrorCode::Offline));
+    h.node.refuse(
+        "resolve_permission",
+        Some(Error::later(Code::Unavailable, "scripted refusal")),
+    );
     let a = h.running("one").await;
     h.node
         .ask_permission(perm("p1", a.clone(), "rm x"))
@@ -2353,7 +2356,10 @@ async fn a_late_answer_never_reaches_a_newer_attempt() {
 async fn an_old_cancel_never_hits_a_newer_attempt() {
     let h = hub();
     h.bind();
-    h.node.refuse("cancel", Some(ErrorCode::Offline));
+    h.node.refuse(
+        "cancel",
+        Some(Error::later(Code::Unavailable, "scripted refusal")),
+    );
     let a = h.running("one").await;
     assert!(h.rt.cancel(S).unwrap());
     let a_id = a.attempt().to_string();
@@ -2567,10 +2573,7 @@ async fn refreshes_are_bounded() {
     for _ in 0..3 {
         h.node.script_once(
             "configure_session",
-            Scripted::Refuse(ApiError::new(
-                ErrorCode::Conflict,
-                "the session changed since",
-            )),
+            Scripted::Refuse(Error::new(Code::Conflict, "the session changed since")),
         );
     }
     assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Sent);
@@ -2589,7 +2592,7 @@ async fn a_refused_widening_falls_back_and_a_refused_narrowing_releases() {
     h.ready().await;
     h.node.script_once(
         "configure_session",
-        Scripted::Refuse(ApiError::new(ErrorCode::Unsupported, "no")),
+        Scripted::Refuse(Error::new(Code::Unsupported, "no")),
     );
     assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Sent);
     eventually_sync("refused", || h.cfg_states() == ["rejected"]).await;
@@ -2605,7 +2608,7 @@ async fn a_refused_widening_falls_back_and_a_refused_narrowing_releases() {
     h.ready().await;
     h.node.script_once(
         "configure_session",
-        Scripted::Refuse(ApiError::new(ErrorCode::Unsupported, "no")),
+        Scripted::Refuse(Error::new(Code::Unsupported, "no")),
     );
     assert_eq!(h.mode(PermissionMode::Ask), Configured::Sent);
     eventually_sync("released", || h.phase() == "released").await;
@@ -2713,8 +2716,8 @@ async fn a_refused_change_reads_as_refused_with_the_nodes_reason() {
     h.ready().await;
     h.node.script_once(
         "configure_session",
-        Scripted::Refuse(ApiError::new(
-            ErrorCode::Denied,
+        Scripted::Refuse(Error::new(
+            Code::Forbidden,
             "this node's owner allows at most permission mode auto here (asked: full_access)",
         )),
     );
@@ -3079,7 +3082,10 @@ async fn a_locally_settled_end_is_told_before_a_newer_turns_end() {
 async fn a_start_turn_refused_before_acceptance_is_settled_by_stop() {
     let h = hub();
     // a Node out of room
-    h.node.refuse("start_turn", Some(ErrorCode::Exhausted));
+    h.node.refuse(
+        "start_turn",
+        Some(Error::later(Code::Exhausted, "scripted refusal")),
+    );
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
     eventually_sync("leased", || {
@@ -3112,7 +3118,10 @@ async fn a_cancel_after_an_uncertain_send_goes_once_the_node_holds_the_turn() {
     let h = hub();
     h.bind();
     h.ready().await;
-    h.node.refuse("start_turn", Some(ErrorCode::OutcomeUnknown));
+    h.node.refuse(
+        "start_turn",
+        Some(Error::new(Code::OutcomeUnknown, "scripted refusal")),
+    );
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
     eventually_sync("uncertain", || {
         node_checks::possibly_sent_turn_count(&h.store).unwrap() == 1
@@ -3155,7 +3164,10 @@ async fn a_refusal_after_an_uncertain_send_still_sends_the_cancel() {
         0,
         "held back: the Node may not know it yet"
     );
-    h.node.refuse("start_turn", Some(ErrorCode::Busy));
+    h.node.refuse(
+        "start_turn",
+        Some(Error::later(Code::Busy, "scripted refusal")),
+    );
     eventually_sync("refused", || {
         node_checks::unleased_start_count_by_generation(&h.store, generation as i64).unwrap() == 1
     })
@@ -3185,7 +3197,7 @@ async fn a_second_stop_after_a_refused_cancel_asks_again() {
     h.bind();
     let _a = h.running("one").await;
     h.node
-        .refuse_next("cancel", ApiError::new(ErrorCode::Invalid, "not now"));
+        .refuse_next("cancel", Error::new(Code::Invalid, "not now"));
     assert!(h.rt.cancel(S).unwrap());
     eventually_sync("refused", || {
         node_checks::command_count_cancel_rejected(&h.store).unwrap() == 1
@@ -3554,10 +3566,7 @@ async fn an_unknown_attempt_keeps_the_session_running_until_it_is_abandoned() {
     // the Hub's own abandon (B6) is refused here, so the attempt stays unknown for this check
     h.node.refuse_next(
         "abandon",
-        ApiError::new(
-            ErrorCode::Conflict,
-            "this execution is being abandoned already",
-        ),
+        Error::new(Code::Conflict, "this execution is being abandoned already"),
     );
     h.node.restart();
     h.restart_hub().await;
@@ -3600,10 +3609,7 @@ async fn an_attempt_unknown_before_it_started_keeps_the_session_running() {
     // the Hub's own abandon (B6) is refused here, so the attempt stays unknown for this check
     h.node.refuse_next(
         "abandon",
-        ApiError::new(
-            ErrorCode::Conflict,
-            "this execution is being abandoned already",
-        ),
+        Error::new(Code::Conflict, "this execution is being abandoned already"),
     );
     h.node.restart();
     h.restart_hub().await;
@@ -3869,7 +3875,7 @@ struct Refusing;
 #[async_trait::async_trait]
 impl EventSink for Refusing {
     async fn commit(&self, _: EventBatch) -> ApiResult<EventAck> {
-        Err(ApiError::new(ErrorCode::Internal, "the commit failed"))
+        Err(Error::new(Code::Internal, "the commit failed"))
     }
 }
 
@@ -4131,7 +4137,10 @@ async fn stop_retires_an_unknown_open_once_and_the_queued_message_opens_it_again
         "the session says how to get out"
     );
     // the recover waits at the Node (busy, the very same command again later)
-    h.node.refuse("recover", Some(ErrorCode::Busy));
+    h.node.refuse(
+        "recover",
+        Some(Error::later(Code::Busy, "scripted refusal")),
+    );
     assert!(h.rt.user_stop(S).unwrap());
     assert!(
         h.rt.user_stop(S).unwrap(),
@@ -4291,7 +4300,10 @@ async fn an_unsupported_recover_keeps_the_session_held_and_the_next_stop_asks_ag
         h.state_of(&format!("op_open_{S}")) == "unknown"
     })
     .await;
-    h.node.refuse("recover", Some(ErrorCode::Unsupported));
+    h.node.refuse(
+        "recover",
+        Some(Error::new(Code::Unsupported, "scripted refusal")),
+    );
     assert!(h.rt.user_stop(S).unwrap());
     eventually_sync("refused", || h.last_state("recover") == "rejected").await;
     assert_eq!(h.systems("需要人工核验 Node 状态"), 1);
@@ -4705,7 +4717,7 @@ async fn startup_failure_holds_the_queue_and_reuses_its_card_until_human_retry()
     let h = hub();
     h.node.refuse_next(
         "open_session",
-        ApiError::new(ErrorCode::Invalid, "unsupported effort"),
+        Error::new(Code::Invalid, "unsupported effort"),
     );
     h.bind();
     h.rt.prompt(S, "initial task", "steve", &[]).unwrap();
@@ -4739,7 +4751,7 @@ async fn startup_failure_holds_the_queue_and_reuses_its_card_until_human_retry()
         .unwrap();
     h.node.refuse_next(
         "open_session",
-        ApiError::new(ErrorCode::Invalid, "unsupported effort"),
+        Error::new(Code::Invalid, "unsupported effort"),
     );
     h.rt.retry_open(S, &build::choice()).unwrap();
     eventually_sync("retry failed", || {
@@ -4766,10 +4778,8 @@ async fn startup_failure_holds_the_queue_and_reuses_its_card_until_human_retry()
 #[tokio::test]
 async fn startup_handoff_discards_queued_input_and_never_reopens_the_ended_session() {
     let h = hub();
-    h.node.refuse_next(
-        "open_session",
-        ApiError::new(ErrorCode::Invalid, "bad model"),
-    );
+    h.node
+        .refuse_next("open_session", Error::new(Code::Invalid, "bad model"));
     h.rt.bind(&on_the_item(S)).unwrap();
     h.rt.prompt(S, "initial task", "steve", &[]).unwrap();
     eventually_sync("failure", || {

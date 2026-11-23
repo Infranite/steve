@@ -155,7 +155,7 @@ pub(crate) enum Ingress {
 }
 
 impl Ingress {
-    fn stop(self, stall: Duration) -> (Outcome, ApiError) {
+    fn stop(self, stall: Duration) -> (Outcome, Error) {
         match self {
             Ingress::Frame => (Outcome::Cancelled, NodeStop::FrameTooLarge.error()),
             Ingress::Output => (Outcome::Cancelled, NodeStop::OutputLimit.error()),
@@ -327,7 +327,7 @@ struct Run {
     acted: bool,
     cancel: bool,
     /// Why the Node itself stopped it.
-    stopped: Option<(Outcome, ApiError)>,
+    stopped: Option<(Outcome, Error)>,
     /// The end, computed and waiting to be committed (kept while the journal fails).
     ending: Option<Completion>,
     closing: Option<Vec<EventBody>>,
@@ -442,7 +442,7 @@ impl Actor {
             Ok(_) => self.inner.wake.notify_one(),
             Err(e) => {
                 tracing::error!("node journal ({}): {e}", self.session);
-                if e.code == ErrorCode::Internal {
+                if e.code == Code::Internal {
                     self.inner.fault();
                 }
             }
@@ -884,7 +884,7 @@ impl Actor {
                     };
                     let current = t.open_ops_of(&session)?.into_iter().any(|(id, _)| id == op);
                     if row.view.phase != SessionPhase::Opening || !current {
-                        return Err(ApiError::new(ErrorCode::Stale, "obsolete open result"));
+                        return Err(Error::new(Code::Stale, "obsolete open result"));
                     }
                     let state = match &view {
                         Ok(v) => {
@@ -896,7 +896,7 @@ impl Actor {
                         }
                         Err(e) => {
                             row.view.phase = SessionPhase::Released;
-                            if e.code == ErrorCode::OutcomeUnknown {
+                            if e.code == Code::OutcomeUnknown {
                                 Observed::Unknown {
                                     reason: e.safe_detail.clone(),
                                 }
@@ -965,12 +965,9 @@ impl Actor {
                         let saved = self.tx(|t| {
                             let mut row = t
                                 .session(&self.session)?
-                                .ok_or_else(|| ApiError::new(ErrorCode::Stale, "session gone"))?;
+                                .ok_or_else(|| Error::new(Code::Stale, "session gone"))?;
                             if row.view.active.as_ref() != Some(&exec) {
-                                return Err(ApiError::new(
-                                    ErrorCode::Stale,
-                                    "obsolete start result",
-                                ));
+                                return Err(Error::new(Code::Stale, "obsolete start result"));
                             }
                             row.acp_id = Some(l.acp_id.clone());
                             row.view.effective = l.view.effective.clone();
@@ -1009,10 +1006,10 @@ impl Actor {
                         self.prepare(tok);
                     }
                     Err(e) => {
-                        if e.code == ErrorCode::OutcomeUnknown {
+                        if e.code == Code::OutcomeUnknown {
                             return self.unknown_end(&e.safe_detail);
                         }
-                        let outcome = if e.code == ErrorCode::Offline {
+                        let outcome = if e.code == Code::Unavailable {
                             Outcome::Interrupted
                         } else {
                             Outcome::Failed
@@ -1140,12 +1137,12 @@ impl Actor {
         self.stage_task = Some(tokio::spawn(async move {
             let left = Duration::from_millis((deadline.0 - now()).max(0) as u64);
             let result = tokio::select! {
-                _ = cancelled.changed() => Err(ApiError::new(ErrorCode::Expired, "preparation cancelled")),
+                _ = cancelled.changed() => Err(Error::new(Code::Stale, "preparation cancelled")),
                 result = tokio::time::timeout(left, async {
                     let root = tokio::task::spawn_blocking(move || context?.dir()).await.map_err(internal)??;
                     crate::prompt(&inner, &exec, &root, &parts, image).await
                 }) => {
-                    result.unwrap_or_else(|_| Err(ApiError::new(ErrorCode::Expired, "past deadline preparing attachments")))
+                    result.unwrap_or_else(|_| Err(Error::new(Code::Stale, "past deadline preparing attachments")))
                 }
             };
             let _ = tx.send(Msg::Prepared { token, result });
@@ -1460,14 +1457,9 @@ impl Actor {
         })
     }
 
-    fn update_failed(
-        &mut self,
-        error: ApiError,
-        events: Vec<(Subject, EventBody)>,
-        streamed: bool,
-    ) {
+    fn update_failed(&mut self, error: Error, events: Vec<(Subject, EventBody)>, streamed: bool) {
         tracing::error!("node journal ({}): {error}", self.session);
-        let exhausted = error.code == ErrorCode::Exhausted;
+        let exhausted = error.code == Code::Exhausted;
         // A streaming-only update transfers to the window; an update with a causal boundary
         // commits as one caller-owned transaction. Retain its closing facts for terminal retry;
         // rejected data ends this attempt and is never submitted again.
@@ -1489,7 +1481,7 @@ impl Actor {
             }
             return;
         }
-        if error.code == ErrorCode::Internal {
+        if error.code == Code::Internal {
             self.inner.fault();
         }
         if let Some(token) = self.run.as_ref().map(|run| run.token) {
@@ -1635,10 +1627,7 @@ impl Actor {
         let Ok(Some((res, req))) = found else {
             return self.answer_done(
                 &op,
-                Err(ApiError::new(
-                    ErrorCode::Stale,
-                    "nobody waits for this answer",
-                )),
+                Err(Error::new(Code::Stale, "nobody waits for this answer")),
             );
         };
         let context = crate::permission_context(&self.inner, &self.session);
@@ -1654,8 +1643,8 @@ impl Actor {
                 .await
                 {
                     Ok(Ok(r)) => r,
-                    _ => Err(ApiError::new(
-                        ErrorCode::Stale,
+                    _ => Err(Error::new(
+                        Code::Stale,
                         "could not check what the request was about",
                     )),
                 }
@@ -1680,35 +1669,23 @@ impl Actor {
         let Ok(Some((res, attempt_op, req))) = found else {
             return self.answer_done(
                 &op,
-                Err(ApiError::new(
-                    ErrorCode::Stale,
-                    "nobody waits for this answer",
-                )),
+                Err(Error::new(Code::Stale, "nobody waits for this answer")),
             );
         };
         let live = self.run.as_ref().is_some_and(|r| {
             r.op == attempt_op && !r.cancel && r.phase == Phase::Prompting && r.ending.is_none()
         });
         if !live || req.expires_at.0 <= now() {
-            return self.answer_done(
-                &op,
-                Err(ApiError::new(ErrorCode::Stale, "that attempt is over")),
-            );
+            return self.answer_done(&op, Err(Error::new(Code::Stale, "that attempt is over")));
         }
         let Some((rpc_id, asked)) = self.waits.get(&res.id).cloned() else {
             return self.answer_done(
                 &op,
-                Err(ApiError::new(
-                    ErrorCode::Stale,
-                    "nobody waits for this answer",
-                )),
+                Err(Error::new(Code::Stale, "nobody waits for this answer")),
             );
         };
         let Some(conn) = self.live.as_ref().map(|l| l.conn.clone()) else {
-            return self.answer_done(
-                &op,
-                Err(ApiError::new(ErrorCode::Stale, "the harness is gone")),
-            );
+            return self.answer_done(&op, Err(Error::new(Code::Stale, "the harness is gone")));
         };
         // Durable send intent first. The final receipt needs writer evidence, not just enqueue.
         let r = self.tx(|t| {
@@ -1740,12 +1717,12 @@ impl Actor {
                     let result = match sent {
                         Ok(rx) => match tokio::time::timeout(Duration::from_secs(10), rx).await {
                             Ok(Ok(Ok(()))) => Ok(()),
-                            _ => Err(ApiError::new(
-                                ErrorCode::OutcomeUnknown,
+                            _ => Err(Error::new(
+                                Code::OutcomeUnknown,
                                 "permission write not confirmed",
                             )),
                         },
-                        Err(e) => Err(ApiError::new(ErrorCode::OutcomeUnknown, e.message)),
+                        Err(e) => Err(Error::new(Code::OutcomeUnknown, e.message)),
                     };
                     let _ = tx.send(Msg::AnswerSent {
                         op,
@@ -1755,7 +1732,7 @@ impl Actor {
                     });
                 });
             }
-            Err(e) if e.code == ErrorCode::Stale => self.answer_done(&op, Err(e)),
+            Err(e) if e.code == Code::Stale => self.answer_done(&op, Err(e)),
             Err(_) => self.later(Msg::Answer { op }),
         }
     }
@@ -1855,7 +1832,7 @@ impl Actor {
                         stop_reason: "error".into(),
                         transient: steve_acp::is_transient(&e.message),
                         acted,
-                        error: Some(ApiError::new(ErrorCode::Internal, e.message)),
+                        error: Some(Error::new(Code::Internal, e.message)),
                         result: vec![],
                         continuation: None,
                         job: None,
@@ -2039,7 +2016,7 @@ impl Actor {
     }
 
     /// The Node stops the attempt with `token`: cancel now, its group after a grace.
-    fn stopping(&mut self, token: u64, outcome: Outcome, error: ApiError) {
+    fn stopping(&mut self, token: u64, outcome: Outcome, error: Error) {
         let Some(run) = self.run.as_mut().filter(|r| r.token == token) else {
             return;
         };
@@ -2092,11 +2069,11 @@ impl Actor {
 /// The principal's own directory for a harness (path model §4.5.1), made when missing under the
 /// Node's `state/` (0700). A principal who owns this Node starts with what the adapter declares of
 /// their own directory here (their settings, their login); a file already there is theirs to keep.
-fn valid_rel_path(rel: &str) -> Result<Vec<std::ffi::OsString>, ApiError> {
+fn valid_rel_path(rel: &str) -> Result<Vec<std::ffi::OsString>, Error> {
     let p = std::path::Path::new(rel);
     if p.is_absolute() {
-        return Err(ApiError::new(
-            ErrorCode::Invalid,
+        return Err(Error::new(
+            Code::Invalid,
             format!("harness state: path '{rel}' must be relative"),
         ));
     }
@@ -2105,16 +2082,16 @@ fn valid_rel_path(rel: &str) -> Result<Vec<std::ffi::OsString>, ApiError> {
         match c {
             std::path::Component::Normal(seg) if !seg.is_empty() => segs.push(seg.to_os_string()),
             _ => {
-                return Err(ApiError::new(
-                    ErrorCode::Invalid,
+                return Err(Error::new(
+                    Code::Invalid,
                     format!("harness state: unsafe relative path '{rel}'"),
                 ));
             }
         }
     }
     if segs.is_empty() {
-        return Err(ApiError::new(
-            ErrorCode::Invalid,
+        return Err(Error::new(
+            Code::Invalid,
             format!("harness state: empty relative path '{rel}'"),
         ));
     }
@@ -2172,8 +2149,8 @@ fn harness_state(
     skills: Option<&str>,
 ) -> ApiResult<std::path::PathBuf> {
     if !s.valid() {
-        return Err(ApiError::new(
-            ErrorCode::Invalid,
+        return Err(Error::new(
+            Code::Invalid,
             "a harness state directory that is not a plain path",
         ));
     }
@@ -2361,7 +2338,7 @@ async fn open_harness(
     let row = inner
         .j
         .read(|t| t.session(session))?
-        .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such session"))?;
+        .ok_or_else(|| Error::new(Code::Invalid, "no such session"))?;
     let cwd = crate::workspace_dir(inner, &row.open.workspace)?;
     let cwd = cwd.to_string_lossy().to_string();
     let harness = row.open.choice.harness.clone();
@@ -2369,7 +2346,7 @@ async fn open_harness(
         .cfg
         .acp
         .adapter_command(&harness)
-        .map_err(|e| ApiError::new(ErrorCode::Unsupported, e))?;
+        .map_err(|e| Error::new(Code::Unsupported, e))?;
     // the principal's own harness directory, when the Hub asks for one and the adapter can move it
     let declared_state = inner.cfg.acp.adapter_properties(&harness).state;
     let state = match (&row.open.state, declared_state.as_ref()) {
@@ -2413,8 +2390,8 @@ async fn open_harness(
             })
             .valid()
             {
-                return Err(ApiError::new(
-                    ErrorCode::Invalid,
+                return Err(Error::new(
+                    Code::Invalid,
                     "adapter state HOME must be a plain relative directory",
                 ));
             }
@@ -2673,7 +2650,7 @@ async fn open_harness(
             let _ = tx2.send(Msg::Exited { generation, report });
         },
     )
-    .map_err(|e| ApiError::new(ErrorCode::Unsupported, e.message))?;
+    .map_err(|e| Error::new(Code::Unsupported, e.message))?;
     let pgid = conn.pid() as i64;
     let started = registered_start;
     #[derive(Default)]
@@ -2726,13 +2703,13 @@ async fn open_harness(
         Ok(o) => o,
         Err(e) => {
             if !procs::stop(pgid, started).await.gone() {
-                return Err(ApiError::new(
-                    ErrorCode::OutcomeUnknown,
+                return Err(Error::new(
+                    Code::OutcomeUnknown,
                     "failed handshake did not stop",
                 ));
             }
             inner.j.tx(|t| t.drop_proc(session, pgid))?;
-            return Err(ApiError::new(ErrorCode::Unsupported, e.message));
+            return Err(Error::new(Code::Unsupported, e.message));
         }
     };
     *active_acp_id.lock().unwrap() = Some(opened.acp_id.clone());
@@ -2754,8 +2731,8 @@ async fn open_harness(
         .map_err(internal)?;
     if conn.has_exited() {
         if !procs::stop(pgid, started).await.gone() {
-            return Err(ApiError::new(
-                ErrorCode::OutcomeUnknown,
+            return Err(Error::new(
+                Code::OutcomeUnknown,
                 "exited adapter group not confirmed stopped",
             ));
         }
@@ -2799,7 +2776,7 @@ fn done_state(result: OperationResult) -> Observed {
     }
 }
 
-fn failed_state(e: ApiError) -> Observed {
+fn failed_state(e: Error) -> Observed {
     Observed::Finished {
         outcome: Outcome::Failed,
         result: None,
@@ -2820,7 +2797,7 @@ fn cancelled() -> Completion {
     }
 }
 
-fn failure(outcome: Outcome, e: ApiError, acted: bool) -> Completion {
+fn failure(outcome: Outcome, e: Error, acted: bool) -> Completion {
     Completion {
         outcome,
         stop_reason: "error".into(),

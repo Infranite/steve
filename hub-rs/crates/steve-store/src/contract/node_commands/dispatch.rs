@@ -1,7 +1,7 @@
 //! Durable send deadlines, retry observations and command dependencies.
 
 use sea_query::{CaseStatement, Expr, ExprTrait, Func, JoinType, Order, Query};
-use steve_node_api::ApiError;
+use steve_node_api::Error;
 
 use crate::{Read, Result, W};
 
@@ -35,7 +35,7 @@ fn receipt() -> Expr {
     Func::coalesce([Expr::col("receipt"), Expr::Constant("{}".into())]).into()
 }
 
-pub fn record_retry_error(w: &mut W<'_>, operation: &str, error: &ApiError) -> Result<()> {
+pub fn record_retry_error(w: &mut W<'_>, operation: &str, error: &Error) -> Result<()> {
     let value = w.dialect().json_set_field(
         receipt(),
         "last_error",
@@ -64,7 +64,7 @@ pub fn mark_waiting(w: &mut W<'_>, op: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn record_exhausted(w: &mut W<'_>, op: &str, error: &ApiError) -> Result<i64> {
+pub fn record_exhausted(w: &mut W<'_>, op: &str, error: &Error) -> Result<i64> {
     use crate::contract::Q;
     let dialect = w.dialect();
     let before = w

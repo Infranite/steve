@@ -1,11 +1,6 @@
-//! Why a Node itself ended a turn or a job: deadline, output limit, a stuck ingress and the like.
-//!
-//! The wire carries the cause only as an [`ApiError`]'s code and `safe_detail`, so a Node of any
-//! version tells it in the same words. The Node builds these errors with [`NodeStop::error`] and the
-//! Hub reads them back with [`NodeStop::of`] to say them in the user's language; a detail it does not
-//! recognize (an older or newer Node, a harness's own words) is shown as it came.
+//! Structured causes for a turn or job ended by its Node.
 
-use crate::common::{ApiError, ErrorCode};
+use steve_types::{Error, Param, ReasonCode, Retry, devices::NodeStopReason};
 
 /// The ends a Node decides on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,17 +42,6 @@ const STALLED_HEAD: &str = "the node took none of the harness's output for ";
 const STALLED_TAIL: &str = " s (its journal or disk is stuck)";
 
 impl NodeStop {
-    pub fn code(self) -> ErrorCode {
-        use NodeStop::*;
-        match self {
-            Deadline | JobDeadline | HarnessIdle => ErrorCode::Expired,
-            HubUnreachable | HarnessGone | AdapterExited => ErrorCode::Offline,
-            OutputLimit | FrameTooLarge | JournalBudget | ResearchBudget => ErrorCode::Exhausted,
-            IngressStalled { .. } => ErrorCode::Busy,
-            JournalFails | NotRecorded | StoppedByNode => ErrorCode::Internal,
-        }
-    }
-
     /// The `safe_detail` it goes over the wire with (the words Nodes have always used).
     pub fn detail(self) -> String {
         use NodeStop::*;
@@ -80,47 +64,62 @@ impl NodeStop {
         fixed.to_string()
     }
 
-    pub fn error(self) -> ApiError {
-        ApiError::new(self.code(), self.detail())
+    pub fn error(self) -> Error {
+        let detail = self.detail();
+        let error = match self {
+            Self::Deadline => NodeStopReason::deadline(detail),
+            Self::JobDeadline => NodeStopReason::job_deadline(detail),
+            Self::HubUnreachable => NodeStopReason::hub_unreachable(detail),
+            Self::OutputLimit => NodeStopReason::output_limit(detail),
+            Self::FrameTooLarge => NodeStopReason::frame_too_large(detail),
+            Self::IngressStalled { secs } => {
+                NodeStopReason::ingress_stalled(i64::try_from(secs).unwrap_or(i64::MAX), detail)
+            }
+            Self::JournalBudget => NodeStopReason::journal_budget(detail),
+            Self::JournalFails => NodeStopReason::journal_fails(detail),
+            Self::NotRecorded => NodeStopReason::not_recorded(detail),
+            Self::HarnessGone => NodeStopReason::harness_gone(detail),
+            Self::AdapterExited => NodeStopReason::adapter_exited(detail),
+            Self::StoppedByNode => NodeStopReason::stopped_by_node(detail),
+            Self::HarnessIdle => NodeStopReason::harness_idle(detail),
+            Self::ResearchBudget => NodeStopReason::research_budget(detail),
+        };
+        error.retry(Retry::Never)
     }
 
-    /// The cause behind `e`, when a Node said one of these: same code, same words.
-    pub fn of(e: &ApiError) -> Option<NodeStop> {
-        use NodeStop::*;
-        let d = e.safe_detail.as_str();
-        let stop = if let Some(secs) = d
-            .strip_prefix(STALLED_HEAD)
-            .and_then(|r| r.strip_suffix(STALLED_TAIL))
-        {
-            IngressStalled {
-                secs: secs.parse().ok()?,
-            }
-        } else {
-            [
-                Deadline,
-                JobDeadline,
-                HubUnreachable,
-                OutputLimit,
-                FrameTooLarge,
-                JournalBudget,
-                JournalFails,
-                NotRecorded,
-                HarnessGone,
-                AdapterExited,
-                StoppedByNode,
-                HarnessIdle,
-                ResearchBudget,
-            ]
-            .into_iter()
-            .find(|s| s.detail() == d)?
-        };
-        (stop.code() == e.code).then_some(stop)
+    pub fn of(e: &Error) -> Option<Self> {
+        let reason = e.reason.as_ref()?.known::<NodeStopReason>()?;
+        if reason.def().code != e.code {
+            return None;
+        }
+        Some(match reason {
+            NodeStopReason::Deadline => Self::Deadline,
+            NodeStopReason::JobDeadline => Self::JobDeadline,
+            NodeStopReason::HubUnreachable => Self::HubUnreachable,
+            NodeStopReason::OutputLimit => Self::OutputLimit,
+            NodeStopReason::FrameTooLarge => Self::FrameTooLarge,
+            NodeStopReason::IngressStalled => match e.params.0.get("secs")? {
+                Param::Int(secs) => Self::IngressStalled {
+                    secs: u64::try_from(*secs).ok()?,
+                },
+                Param::Str(_) => return None,
+            },
+            NodeStopReason::JournalBudget => Self::JournalBudget,
+            NodeStopReason::JournalFails => Self::JournalFails,
+            NodeStopReason::NotRecorded => Self::NotRecorded,
+            NodeStopReason::HarnessGone => Self::HarnessGone,
+            NodeStopReason::AdapterExited => Self::AdapterExited,
+            NodeStopReason::StoppedByNode => Self::StoppedByNode,
+            NodeStopReason::HarnessIdle => Self::HarnessIdle,
+            NodeStopReason::ResearchBudget => Self::ResearchBudget,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use steve_types::Code;
 
     #[test]
     fn every_cause_reads_back_and_only_with_its_code() {
@@ -142,16 +141,9 @@ mod tests {
         ];
         for s in all {
             assert_eq!(NodeStop::of(&s.error()), Some(s), "{s:?}");
-            let other = if s.code() == ErrorCode::Invalid {
-                ErrorCode::Internal
-            } else {
-                ErrorCode::Invalid
-            };
-            assert_eq!(NodeStop::of(&ApiError::new(other, s.detail())), None);
+            assert_eq!(s.error().retry, Retry::Never);
+            assert_eq!(NodeStop::of(&Error::new(s.error().code, s.detail())), None);
         }
-        assert_eq!(
-            NodeStop::of(&ApiError::new(ErrorCode::Internal, "boom")),
-            None
-        );
+        assert_eq!(NodeStop::of(&Error::new(Code::Internal, "boom")), None);
     }
 }

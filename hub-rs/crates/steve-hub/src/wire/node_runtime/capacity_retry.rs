@@ -95,7 +95,7 @@ impl NodeRuntime {
             let completion = Completion {
                 outcome: Outcome::Failed,
                 stop_reason: UNAVAILABLE.into(),
-                error: Some(ApiError::new(ErrorCode::Internal, error)),
+                error: Some(Error::new(Code::Internal, error)),
                 result: vec![],
                 continuation: None,
                 transient: false,

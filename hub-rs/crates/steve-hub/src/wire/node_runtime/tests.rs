@@ -47,10 +47,9 @@ async fn a_nodes_stop_reason_is_said_in_chinese() {
             "Node 连续 90 秒没能接收 harness 的输出（它的本地运行记录或磁盘卡住了），已中断这次运行"
         );
         // the very words, but another code: not ours to rephrase
-        let other = ApiError::new(ErrorCode::Stale, NodeStop::HarnessGone.detail());
+        let other = Error::new(Code::Stale, NodeStop::HarnessGone.detail());
         assert_eq!(said(&other), "the harness is gone");
-        let changed = ApiError::new(
-            ErrorCode::Conflict,
+        let changed = NodeReason::workspace_binding_conflict(
             "this resource's workspace was prepared otherwise",
         );
         assert!(workspace_binding_conflict(&changed));
@@ -60,11 +59,11 @@ async fn a_nodes_stop_reason_is_said_in_chinese() {
                 "hub.node.workspace_conflict"
             ))
         );
-        assert!(!workspace_binding_conflict(&ApiError::new(
-            ErrorCode::Internal,
+        assert!(!workspace_binding_conflict(&Error::new(
+            Code::Internal,
             changed.safe_detail.clone()
         )));
-        let harness = ApiError::new(ErrorCode::Internal, "rate limited, try later");
+        let harness = Error::new(Code::Internal, "rate limited, try later");
         assert_eq!(said(&harness), "rate limited, try later");
     })
     .await;
@@ -674,7 +673,7 @@ fn retry_count(rt: &NodeRuntime, method: &str) -> i64 {
     node_checks::command_count_by_method(&rt.store, method).unwrap()
 }
 
-fn retry_failed(rt: &NodeRuntime, op: String, error: ApiError) {
+fn retry_failed(rt: &NodeRuntime, op: String, error: Error) {
     let mut receipt = Receipt {
         operation: idv(op).unwrap(),
         state: Observed::Accepted,
@@ -695,12 +694,12 @@ fn retry_failed(rt: &NodeRuntime, op: String, error: ApiError) {
 #[tokio::test]
 async fn tidy_never_failure_holds_sweeps_until_new_prepare_but_retryable_failure_does_not() {
     for rejected in [false, true] {
-        for retry in [RetryClass::Never, RetryClass::AfterReconcile] {
+        for retry in [Retry::Never, Retry::Later { after_ms: None }] {
             let (_dir, node, rt, seen) = retry_fixture();
             assert!(rt.send_one().await); // prepare
             assert!(rt.send_one().await); // open
             assert!(rt.tidy_session_workspace("s1", true).unwrap());
-            let mut error = ApiError::new(ErrorCode::Internal, "dirty worktree retained");
+            let mut error = Error::new(Code::Internal, "dirty worktree retained");
             error.retry = retry;
             if rejected {
                 node.refuse_next("tidy_workspace", error);
@@ -717,7 +716,7 @@ async fn tidy_never_failure_holds_sweeps_until_new_prepare_but_retryable_failure
             }
             assert_eq!(
                 retry_count(&rt, "tidy_workspace"),
-                if retry == RetryClass::Never { 1 } else { 2 }
+                if retry == Retry::Never { 1 } else { 2 }
             );
             // A new prepare is a new cleanup generation, regardless of the older failure.
             planning_fixture::clone_prepare(&rt.store, "op_prep_s1", "new_prepare").unwrap();
@@ -740,12 +739,12 @@ async fn open_never_failure_blocks_all_reopen_callers_until_explicit_retry() {
         );
         node.refuse_next(
             "start_turn",
-            ApiError::new(ErrorCode::Invalid, "session not open"),
+            steve_types::devices::NodeReason::session_not_open("session not open"),
         );
         assert!(rt.send_one().await); // the refused-start path calls reopen_in
         let failed_op: String =
             node_checks::last_inserted_command_id_by_method(&&rt.store, "open_session").unwrap();
-        let error = ApiError::new(ErrorCode::Invalid, "unsupported effort");
+        let error = Error::new(Code::Invalid, "unsupported effort");
         if rejected {
             node.refuse_next("open_session", error);
             assert!(rt.send_one().await);
@@ -786,8 +785,8 @@ async fn open_never_failure_blocks_all_reopen_callers_until_explicit_retry() {
 #[tokio::test]
 async fn outcome_unknown_never_stops_leasing_and_can_be_settled_by_reconciliation() {
     let (_dir, node, rt, _seen) = retry_fixture();
-    let mut error = ApiError::new(ErrorCode::OutcomeUnknown, "reply lost; do not retry");
-    error.retry = RetryClass::Never;
+    let mut error = Error::new(Code::OutcomeUnknown, "reply lost; do not retry");
+    error.retry = Retry::Never;
     node.refuse_next("prepare_workspace", error);
     assert!(rt.send_one().await);
     for _ in 0..3 {

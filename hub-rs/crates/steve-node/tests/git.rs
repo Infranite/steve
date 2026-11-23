@@ -380,7 +380,7 @@ async fn facts_of_a_workspace() {
         })
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Invalid);
+    assert_eq!(e.code, Code::Invalid);
     n.shutdown().await;
 }
 
@@ -493,7 +493,7 @@ async fn a_push_whose_preconditions_do_not_hold_is_refused_before_it_is_taken() 
     let e = n.git_apply(now_cmd("op_p1", a)).await.unwrap_err();
     assert_eq!(
         (e.code, e.safe_detail.as_str()),
-        (ErrorCode::Denied, steve_node::git::WRONG_REMOTE)
+        (Code::Forbidden, steve_node::git::WRONG_REMOTE)
     );
 
     // the branch moved since the Hub looked
@@ -504,13 +504,13 @@ async fn a_push_whose_preconditions_do_not_hold_is_refused_before_it_is_taken() 
     let e = n.git_apply(now_cmd("op_p2", a.clone())).await.unwrap_err();
     assert_eq!(
         (e.code, e.safe_detail.as_str()),
-        (ErrorCode::Stale, steve_node::git::BRANCH_MOVED)
+        (Code::Stale, steve_node::git::BRANCH_MOVED)
     );
     // HEAD moved off it: stale as well
     let mut a = push(&n, &w, &url, false).await;
     sh(&t.proj(), &["checkout", "-q", "main"]);
     let e = n.git_apply(now_cmd("op_p3", a.clone())).await.unwrap_err();
-    assert_eq!(e.code, ErrorCode::Stale);
+    assert_eq!(e.code, Code::Stale);
     sh(&t.proj(), &["checkout", "-q", BRANCH]);
     // the branch is gone
     a = push(&n, &w, &url, false).await;
@@ -519,7 +519,7 @@ async fn a_push_whose_preconditions_do_not_hold_is_refused_before_it_is_taken() 
     let e = n.git_apply(now_cmd("op_p4", a)).await.unwrap_err();
     assert_eq!(
         (e.code, e.safe_detail.as_str()),
-        (ErrorCode::Stale, steve_node::git::NO_BRANCH)
+        (Code::Stale, steve_node::git::NO_BRANCH)
     );
     assert_eq!(remote_branch(&t), None, "nothing pushed");
 
@@ -566,7 +566,7 @@ async fn a_push_whose_preconditions_do_not_hold_is_refused_before_it_is_taken() 
             .git_apply(now_cmd(&format!("op_bad{i}"), base(action)))
             .await
             .unwrap_err();
-        assert_eq!(e.code, ErrorCode::Invalid, "{i}: {e}");
+        assert_eq!(e.code, Code::Invalid, "{i}: {e}");
     }
     n.shutdown().await;
 }
@@ -714,8 +714,8 @@ async fn a_hanging_push_exhausts_its_budget_and_leaves_no_process_or_credential(
             s,
             Observed::Finished {
                 outcome: Outcome::TimedOut,
-                error: Some(ApiError {
-                    code: ErrorCode::OutcomeUnknown,
+                error: Some(Error {
+                    code: Code::OutcomeUnknown,
                     ..
                 }),
                 ..
@@ -750,7 +750,7 @@ async fn child_forbidden_push() {
     let e = n.git_apply(now_cmd("op_far", a)).await.unwrap_err();
     assert_eq!(
         (e.code, e.safe_detail.as_str()),
-        (ErrorCode::Denied, steve_node::git::HOST_FORBIDDEN)
+        (Code::Forbidden, steve_node::git::HOST_FORBIDDEN)
     );
     // a local path and loopback stay allowed
     let a = push(&n, &w, t.bare().to_str().unwrap(), false).await;
@@ -835,14 +835,14 @@ async fn a_node_that_dies_while_it_pushes_never_pushes_again() {
     let n = t.node();
     let op = OperationId::new("op_crash").unwrap();
     assert_eq!(
-        n.operation(op.clone()).await.unwrap().state.tag(),
-        StateTag::Unknown
+        n.operation(op.clone()).await.unwrap().state.state_name(),
+        "unknown"
     );
     // the same command again: what the Node knows, no second push
     let c: Command<GitApply> =
         serde_json::from_slice(&std::fs::read(t.root.join("apply.json")).unwrap()).unwrap();
     let r = n.git_apply(c).await.unwrap();
-    assert_eq!(r.state.tag(), StateTag::Unknown);
+    assert_eq!(r.state.state_name(), "unknown");
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(server.requests.lock().unwrap().len(), 1, "pushed once");
 

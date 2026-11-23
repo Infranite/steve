@@ -298,7 +298,7 @@ impl NodeRuntime {
         tx: &mut W<'_>,
         op: &str,
         success: bool,
-        error: Option<&ApiError>,
+        error: Option<&Error>,
     ) -> Result<(), StoreError> {
         let Some(row) = node_write::permission_of_answer_in(tx, op)? else {
             return Ok(());

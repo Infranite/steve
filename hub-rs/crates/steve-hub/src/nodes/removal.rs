@@ -312,14 +312,14 @@ impl Removals {
         };
         match d.remove_begin(ask).await {
             Ok(_) => {}
-            Err(e) if e.code == ErrorCode::Unsupported => {
+            Err(e) if e.code == Code::Unsupported => {
                 return (
                     "manual",
                     Some("this node cannot remove itself; run the command on its machine".into()),
                 );
             }
             // it may have taken it: ask below
-            Err(e) if matches!(e.code, ErrorCode::OutcomeUnknown | ErrorCode::Offline) => {}
+            Err(e) if matches!(e.code, Code::OutcomeUnknown | Code::Unavailable) => {}
             Err(e) => return failed(format!("the node refused: {}", e.safe_detail)),
         }
         let limit = Duration::from_secs(row.grace_secs.max(0) as u64) + self.timing.settle;
@@ -364,7 +364,7 @@ impl Removals {
                     .unwrap_or_else(|| format!("the node ended the removal as {}", s.phase)),
             ),
             // the Node drops its link once it answered: ask while it may still be there
-            Err(e) if matches!(e.code, ErrorCode::OutcomeUnknown | ErrorCode::Offline) => {
+            Err(e) if matches!(e.code, Code::OutcomeUnknown | Code::Unavailable) => {
                 match self
                     .wait(&*d, op, &operation, Duration::from_secs(30), |p| {
                         NodeRemoveState::TERMINAL.contains(&p)

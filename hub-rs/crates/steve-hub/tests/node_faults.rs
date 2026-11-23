@@ -68,7 +68,7 @@ impl Faulty {
             .lock()
             .unwrap()
             .clone()
-            .ok_or_else(|| ApiError::new(ErrorCode::Offline, "the node is down"))
+            .ok_or_else(|| Error::new(Code::Unavailable, "the node is down"))
     }
 
     fn lose_reply(&self, method: &'static str) {
@@ -85,7 +85,7 @@ impl Faulty {
         match lose.iter().position(|m| *m == method) {
             Some(i) if r.is_ok() => {
                 lose.remove(i);
-                Err(ApiError::uncertain(op, "the reply was lost"))
+                Err(Error::outcome_unknown(op, "the reply was lost"))
             }
             _ => r,
         }
@@ -175,7 +175,7 @@ impl EventSink for Gate {
         self.commits.fetch_add(1, Ordering::SeqCst);
         let to = self.to.lock().unwrap().clone();
         let Some(to) = to else {
-            return Err(ApiError::new(ErrorCode::Offline, "no hub"));
+            return Err(Error::new(Code::Unavailable, "no hub"));
         };
         let ack = Sink(to).commit(batch).await?;
         let lose = {
@@ -282,9 +282,7 @@ impl ToolHost {
                     tools = Some(t);
                     true
                 }
-                Err(e) if e.code == ErrorCode::Busy && t0.elapsed() < Duration::from_secs(20) => {
-                    false
-                }
+                Err(e) if e.code == Code::Busy && t0.elapsed() < Duration::from_secs(20) => false,
                 Err(e) => panic!("open the tool ledger: {e:?}"),
             },
         )
@@ -323,12 +321,12 @@ impl ToolHost {
     {
         let (tools, handle) = match &*self.hub.lock().unwrap() {
             Some((t, rt)) => (t.clone(), rt.handle().clone()),
-            None => return Err(ApiError::new(ErrorCode::Offline, "the Hub is down")),
+            None => return Err(Error::new(Code::Unavailable, "the Hub is down")),
         };
         handle
             .spawn(f(tools))
             .await
-            .unwrap_or_else(|_| Err(ApiError::new(ErrorCode::Offline, "the Hub went down")))
+            .unwrap_or_else(|_| Err(Error::new(Code::Unavailable, "the Hub went down")))
     }
 }
 

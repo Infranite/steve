@@ -93,33 +93,44 @@ async fn ready_remote(n: &RemoteNode) {
         .unwrap();
 }
 
-#[tokio::test]
-async fn lost_after_it_was_sent_is_uncertain_and_asked_not_redone() {
-    let fake = FakeNode::new("n1");
-    let w = wire(fake.clone(), 1);
-    ready_remote(&w.remote).await;
-    // the Node runs it, its answer never arrives, then the link dies
-    w.node_faults
-        .drop_responses
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    let c = cmd("op_t1", turn_on("n1", "s_1", "t_1", "a_1", "hi"));
-    let remote = w.remote.clone();
-    let call = tokio::spawn({
-        let c = c.clone();
-        async move { remote.start_turn(c).await }
-    });
-    eventually_sync("the node took it", || starts(&fake) == 1).await;
-    w.hub_faults.cut_now();
-    let e = call.await.unwrap().unwrap_err();
-    assert_eq!(e.code, ErrorCode::OutcomeUnknown);
-    assert_eq!(e.retry, RetryClass::AfterReconcile);
-    assert_eq!(e.operation, Some(op("op_t1")));
-    assert_eq!(starts(&fake), 1, "the transport never resent it");
-    // a new connection asks, and learns it runs
-    let w2 = wire(fake.clone(), 2);
-    let r = w2.remote.operation(op("op_t1")).await.unwrap();
-    assert_eq!(r.state, Observed::Running);
-    assert_eq!(starts(&fake), 1);
+#[tokio::test(start_paused = true)]
+async fn uncertain_command_answers_keep_the_original_operation_and_effect() {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    for (disconnect, corrupt) in [(true, false), (false, false), (false, true)] {
+        let fake = FakeNode::new("n1");
+        let w = wire(fake.clone(), 1);
+        ready_remote(&w.remote).await;
+        w.node_faults.drop_responses.store(!corrupt, SeqCst);
+        w.node_faults.corrupt_responses.store(corrupt, SeqCst);
+        let c = cmd("op_t1", turn_on("n1", "s_1", "t_1", "a_1", "hi"));
+        let remote = w.remote.clone();
+        let call = tokio::spawn({
+            let c = c.clone();
+            async move { remote.start_turn(c).await }
+        });
+        if disconnect {
+            eventually_sync("the node took it", || starts(&fake) == 1).await;
+            w.hub_faults.cut_now();
+        }
+        let e = call.await.unwrap().unwrap_err();
+        assert_eq!(
+            (e.code, e.retry),
+            (Code::OutcomeUnknown, Retry::Later { after_ms: None })
+        );
+        assert_eq!(e.params.0["operation"], "op_t1".into());
+        assert_eq!(starts(&fake), 1, "transport made one attempt");
+
+        let w2 = wire(fake.clone(), 2);
+        let r = w2.remote.operation(c.id.clone()).await.unwrap();
+        assert_eq!(r.state, Observed::Running);
+        assert_eq!(w2.remote.start_turn(c).await.unwrap(), r);
+        assert_eq!(
+            starts(&fake),
+            1,
+            "same frozen envelope reads the prior receipt"
+        );
+    }
 }
 
 #[tokio::test]
@@ -161,15 +172,15 @@ async fn never_written_is_offline_and_safe_to_resend() {
     let e1 = first.await.unwrap().unwrap_err();
     let e2 = second.await.unwrap_err();
     // the first was being written: maybe it went
-    assert_eq!(e1.code, ErrorCode::OutcomeUnknown);
+    assert_eq!(e1.code, Code::OutcomeUnknown);
     // the second never left the queue
-    assert_eq!(e2.code, ErrorCode::Offline);
-    assert_eq!(e2.retry, RetryClass::SameOperation);
+    assert_eq!(e2.code, Code::Unavailable);
+    assert_eq!(e2.retry, Retry::Later { after_ms: None });
     // without a link: offline at once
     remote.detach(1);
     assert_eq!(
         remote.operation(op("op_t1")).await.unwrap_err().code,
-        ErrorCode::Offline
+        Code::Unavailable
     );
 }
 
@@ -186,9 +197,9 @@ async fn a_passed_deadline_is_uncertain_for_commands_offline_for_reads() {
         .start_turn(cmd("op_t1", turn_on("n1", "s_1", "t_1", "a_1", "hi")))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::OutcomeUnknown);
+    assert_eq!(e.code, Code::OutcomeUnknown);
     let e = w.remote.operation(op("op_t1")).await.unwrap_err();
-    assert_eq!(e.code, ErrorCode::Offline);
+    assert_eq!(e.code, Code::Unavailable);
     assert_eq!(starts(&fake), 1);
 }
 
@@ -289,7 +300,7 @@ async fn a_request_of_another_generation_is_refused_unexecuted() {
         .prepare_workspace(cmd("op_prep", prepare("item:s_1")))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Stale);
+    assert_eq!(e.code, Code::Stale);
     assert!(fake.log().is_empty(), "never executed");
 }
 
@@ -304,7 +315,7 @@ async fn reconciling_refuses_new_work_but_lets_inspection_through() {
         .start_turn(cmd("op_t1", turn_on("n1", "s_1", "t_1", "a_1", "hi")))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Offline);
+    assert_eq!(e.code, Code::Unavailable);
     assert_eq!(starts(&fake), 0);
     assert!(w.remote.streams().await.is_ok());
     assert!(w.remote.set_ready(w.hub_conn.generation()));
@@ -396,7 +407,7 @@ async fn a_remote_node_runs_no_jobs_and_nothing_is_sent() {
         .start_job(cmd("op_j", job("j_1", "a_j", "think")))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unsupported);
+    assert_eq!(e.code, Code::Unsupported);
     assert_eq!(w.hub_conn.frames_written(), before, "nothing went out");
     assert!(fake.log().iter().all(|(m, _)| *m != "start_job"));
 }
@@ -483,7 +494,7 @@ async fn a_peer_cannot_pile_up_requests_past_the_cap() {
         match c.await.unwrap() {
             Ok(_) => {}
             Err(e) => {
-                assert_eq!(e.code, ErrorCode::Exhausted);
+                assert_eq!(e.code, Code::Exhausted);
                 refused += 1;
             }
         }
@@ -617,7 +628,7 @@ async fn a_peer_cannot_pin_more_than_the_byte_budget() {
     let mut refused = 0;
     for c in calls {
         if let Err(e) = c.await.unwrap() {
-            assert_eq!(e.code, ErrorCode::Exhausted);
+            assert_eq!(e.code, Code::Exhausted);
             refused += 1;
         }
     }
@@ -690,7 +701,7 @@ async fn an_oversized_answer_names_its_call() {
     let _hub = Conn::spawn(h.sink, h.stream, 1, Arc::new(Huge), opts("h"));
     let node = Conn::spawn(n.sink, n.stream, 1, Arc::new(Nothing), opts("n"));
     let e = node.call("tool.call", json!({}), None).await.unwrap_err();
-    assert_eq!(e.code, ErrorCode::Exhausted);
+    assert_eq!(e.code, Code::Exhausted);
     assert!(
         e.safe_detail
             .starts_with("the answer to tool.call request ")

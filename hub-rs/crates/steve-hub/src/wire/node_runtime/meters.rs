@@ -56,9 +56,9 @@ impl Meters {
     }
 
     /// A command sent and what came back, after `seconds`.
-    pub fn command(&self, m: &str, result: Result<(), steve_node_api::ErrorCode>, seconds: f64) {
+    pub fn command(&self, m: &str, result: Result<(), steve_node_api::Code>, seconds: f64) {
         let m = method(m);
-        let result = result.map_or_else(steve_node_api::ErrorCode::as_str, |()| "ok");
+        let result = result.map_or_else(steve_node_api::Code::as_str, |()| "ok");
         let (count, time) = self
             .commands
             .lock()

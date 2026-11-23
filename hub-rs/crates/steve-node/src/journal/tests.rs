@@ -168,7 +168,7 @@ fn writer_failure_is_explicit_and_never_publishes_uncommitted_heads_or_counters(
             w.flush()
         })
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Internal);
+    assert_eq!(e.code, Code::Internal);
     assert!(j.failed());
     assert!(events(&j).is_empty());
     assert!(j.read(|t| t.heads()).unwrap().is_empty());
@@ -201,7 +201,7 @@ fn exhausted_buffer_still_allows_a_terminal_receipt() {
         j.events(vec![delta(0, "over budget")], None)
             .unwrap_err()
             .code,
-        ErrorCode::Exhausted
+        Code::Exhausted
     );
     assert!(!j.over_limit());
     j.events(
@@ -317,7 +317,7 @@ fn a_rejected_state_transaction_keeps_previously_accepted_stream_data() {
         let e = w
             .write::<()>(|_| Err(NodeStop::JournalBudget.error()))
             .unwrap_err();
-        assert_eq!(e.code, ErrorCode::Exhausted);
+        assert_eq!(e.code, Code::Exhausted);
         assert!(w.heads.is_empty());
         assert_eq!(w.pending.events.len(), 1);
         w.flush()
@@ -460,10 +460,10 @@ fn rejected_commands_cannot_reset_the_window_or_erase_its_input_count() {
         w.enqueue(prepare((0..63).map(|_| plan("snapshot")).collect())?)?;
         let deadline = w.pending.deadline();
         assert_eq!(
-            w.write::<()>(|_| Err(ApiError::new(ErrorCode::Busy, "admission fixture")))
+            w.write::<()>(|_| Err(Error::new(Code::Busy, "admission fixture")))
                 .unwrap_err()
                 .code,
-            ErrorCode::Busy
+            Code::Busy
         );
         assert_eq!(w.pending.deadline(), deadline);
         assert!(w.heads.is_empty());
@@ -489,7 +489,7 @@ fn a_local_refusal_does_not_change_other_attempts_or_the_window() {
             w.enqueue(prepare(vec![delta(8, "refused")])?)
                 .unwrap_err()
                 .code,
-            ErrorCode::Exhausted
+            Code::Exhausted
         );
         assert_eq!(w.pending.deadline(), deadline);
         assert_eq!(w.pending.events.len(), 1);
@@ -551,7 +551,7 @@ fn failed_final_usage_stays_with_the_caller_instead_of_duplicating_the_terminal_
     .unwrap();
     assert_eq!(
         j.events(vec![final_usage.clone()], None).unwrap_err().code,
-        ErrorCode::Internal
+        Code::Internal
     );
     // A known transaction failure has replied; it is not a dead connection owner. The caller
     // retains Final and can retry it with its operation's terminal state once storage recovers.

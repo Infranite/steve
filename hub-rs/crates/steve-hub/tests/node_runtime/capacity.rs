@@ -9,7 +9,7 @@ fn failure(error: &str) -> Completion {
     let mut c = build::done();
     c.outcome = Outcome::Failed;
     c.stop_reason = "error".into();
-    c.error = Some(ApiError::new(ErrorCode::Internal, error));
+    c.error = Some(Error::new(Code::Internal, error));
     c.acted = true;
     c
 }

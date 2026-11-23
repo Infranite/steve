@@ -163,8 +163,8 @@ impl PolicyCeiling {
     /// Refused (`denied`) when `p` asks more than this ceiling allows.
     pub fn check(&self, p: &ExecutionPolicy) -> ApiResult<()> {
         if Self::rank(p.permissions) > Self::rank(self.max_permissions) {
-            return Err(ApiError::new(
-                ErrorCode::Denied,
+            return Err(Error::new(
+                Code::Forbidden,
                 format!(
                     "this node's owner allows at most permission mode {} here (asked: {})",
                     mode_name(self.max_permissions),
@@ -173,8 +173,8 @@ impl PolicyCeiling {
             ));
         }
         if p.network == NetworkScope::Unrestricted && !self.full_network {
-            return Err(ApiError::new(
-                ErrorCode::Denied,
+            return Err(Error::new(
+                Code::Forbidden,
                 "this node's owner does not allow runs with the open network",
             ));
         }
@@ -186,8 +186,8 @@ impl PolicyCeiling {
         if self.exec {
             Ok(())
         } else {
-            Err(ApiError::new(
-                ErrorCode::Denied,
+            Err(Error::new(
+                Code::Forbidden,
                 "this node's owner does not allow commands here",
             ))
         }
@@ -198,8 +198,8 @@ impl PolicyCeiling {
         if self.jobs {
             Ok(())
         } else {
-            Err(ApiError::new(
-                ErrorCode::Denied,
+            Err(Error::new(
+                Code::Forbidden,
                 "this node's owner does not allow jobs here",
             ))
         }
@@ -288,7 +288,7 @@ fn id<T: TryFrom<String>>(s: impl Into<String>) -> ApiResult<T>
 where
     T::Error: std::fmt::Display,
 {
-    T::try_from(s.into()).map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))
+    T::try_from(s.into()).map_err(|e| Error::new(Code::Internal, e.to_string()))
 }
 
 /// The exclusive hold on a Node's home: one Node per journal.
@@ -313,7 +313,7 @@ impl HomeLock {
             .truncate(false)
             .write(true)
             .open(home.join("node.lock"))
-            .map_err(|e| ApiError::new(ErrorCode::Internal, format!("node lock: {e}")))?;
+            .map_err(|e| Error::new(Code::Internal, format!("node lock: {e}")))?;
         // A concurrent fork briefly inherits even a CLOEXEC descriptor until exec. After the
         // old Node closes, that small window must not turn an otherwise clean restart into a
         // spurious second-Node conflict. A real holder still refuses this bounded acquisition.
@@ -322,10 +322,7 @@ impl HomeLock {
                 break;
             }
             if !again() {
-                return Err(ApiError::new(
-                    ErrorCode::Conflict,
-                    "another node runs on this home",
-                ));
+                return Err(Error::new(Code::Conflict, "another node runs on this home"));
             }
         }
         Ok(HomeLock(f))
@@ -353,8 +350,8 @@ mod home_lock_tests {
         let lease = HomeLock::take(dir.path()).unwrap();
         assert!(matches!(
             HomeLock::take(dir.path()),
-            Err(ApiError {
-                code: ErrorCode::Conflict,
+            Err(Error {
+                code: Code::Conflict,
                 ..
             })
         ));
@@ -646,12 +643,12 @@ pub(crate) fn emit_all(inner: &Inner, t: &Tx, evs: Vec<(Subject, EventBody)>) ->
 /// The directory of a workspace, checked again now (still there, still inside its root).
 pub(crate) fn workspace_dir(inner: &Inner, w: &WorkspaceRef) -> ApiResult<PathBuf> {
     if w.node != inner.cfg.node {
-        return Err(ApiError::new(ErrorCode::Denied, "another node's workspace"));
+        return Err(Error::new(Code::Forbidden, "another node's workspace"));
     }
     let row = inner
         .j
         .read(|t| t.workspace(&w.id))?
-        .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))?;
+        .ok_or_else(|| Error::new(Code::Invalid, "no such workspace"))?;
     workspace::still_valid(
         Path::new(&row.path),
         &inner.roots(),
@@ -746,8 +743,8 @@ pub(crate) async fn prompt(
 /// A fetch error that will not go away by trying again: the Hub no longer has the artifact
 /// (`conflict`), or what it sent is not the bytes it granted (`invalid`). A denial (the execution
 /// is no longer live, say) is not one: it fails the preparation.
-fn gone(e: &ApiError) -> bool {
-    matches!(e.code, ErrorCode::Conflict | ErrorCode::Invalid)
+fn gone(e: &Error) -> bool {
+    matches!(e.code, Code::Conflict | Code::Invalid)
 }
 
 /// Attachment chunks asked of the Hub ahead of the one being taken ([`fetch`]).
@@ -779,7 +776,7 @@ pub(crate) async fn fetch(
     a: &ArtifactRef,
 ) -> ApiResult<PathBuf> {
     use sha2::Digest as _;
-    let internal = |e: std::io::Error| ApiError::new(ErrorCode::Internal, e.to_string());
+    let internal = |e: std::io::Error| Error::new(Code::Internal, e.to_string());
     let dir = inner.cfg.home.join("blobs");
     let path = dir.join(a.sha256.as_str().trim_start_matches("sha256:"));
     if let Ok(bytes) = std::fs::read(&path)
@@ -790,8 +787,8 @@ pub(crate) async fn fetch(
     }
     let files = inner.files.lock().unwrap().clone();
     let Some(files) = files else {
-        return Err(ApiError::new(
-            ErrorCode::Unsupported,
+        return Err(Error::new(
+            Code::Unsupported,
             "no hub to fetch attachments from",
         ));
     };
@@ -821,7 +818,7 @@ pub(crate) async fn fetch(
         let c = match ahead.0.pop_front() {
             Some((o, h)) if o == at => h
                 .await
-                .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))??,
+                .map_err(|e| Error::new(Code::Internal, e.to_string()))??,
             other => {
                 // nothing asked ahead, or a short chunk put the rest off: ask from here
                 if let Some((_, h)) = other {
@@ -842,34 +839,25 @@ pub(crate) async fn fetch(
             step = Some(c.bytes.len() as u64);
         }
         if c.offset != bytes.len() as u64 {
-            return Err(ApiError::new(
-                ErrorCode::Invalid,
-                "attachment chunk out of order",
-            ));
+            return Err(Error::new(Code::Invalid, "attachment chunk out of order"));
         }
         if c.bytes.is_empty() && !c.eof {
-            return Err(ApiError::new(
-                ErrorCode::Invalid,
-                "attachment made no progress",
-            ));
+            return Err(Error::new(Code::Invalid, "attachment made no progress"));
         }
         hasher.update(&c.bytes);
         bytes.extend(c.bytes);
         if bytes.len() as u64 > a.size {
-            return Err(ApiError::new(
-                ErrorCode::Invalid,
-                "attachment larger than said",
-            ));
+            return Err(Error::new(Code::Invalid, "attachment larger than said"));
         }
         if c.eof {
             break;
         }
     }
     let got = Digest::new(format!("sha256:{}", hex::encode(hasher.finalize())))
-        .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
+        .map_err(|e| Error::new(Code::Internal, e.to_string()))?;
     if bytes.len() as u64 != a.size || got != a.sha256 {
-        return Err(ApiError::new(
-            ErrorCode::Invalid,
+        return Err(Error::new(
+            Code::Invalid,
             "attachment hash or size mismatch",
         ));
     }
@@ -950,8 +938,8 @@ fn collect_head_probe(
             }
             let _ = child.kill();
             let _ = child.wait();
-            return Err(ApiError::new(
-                ErrorCode::Stale,
+            return Err(Error::new(
+                Code::Stale,
                 "HEAD probe timed out or exceeded output budget",
             ));
         }
@@ -1018,10 +1006,7 @@ fn file_version(p: &Path) -> ApiResult<Option<Revision>> {
             ))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(ApiError::new(
-            ErrorCode::Internal,
-            format!("cannot stat: {e}"),
-        )),
+        Err(e) => Err(Error::new(Code::Internal, format!("cannot stat: {e}"))),
     }
 }
 
@@ -1303,8 +1288,8 @@ pub(crate) fn preconditions_hold(
             }
         };
         if !ok {
-            return Err(ApiError::new(
-                ErrorCode::Stale,
+            return Err(Error::new(
+                Code::Stale,
                 "what the request was about changed since",
             ));
         }
@@ -1346,7 +1331,7 @@ impl Decided {
     }
 }
 
-fn failed(e: ApiError) -> Observed {
+fn failed(e: Error) -> Observed {
     Observed::Finished {
         outcome: Outcome::Failed,
         result: None,
@@ -1381,8 +1366,8 @@ impl LocalNode {
     fn reserve_node_upgrade(&self) -> ApiResult<NodeUpgradeHold<'_>> {
         let maintenance = self.0.adapter_maintenance.lock().unwrap();
         if maintenance.is_some() || self.0.node_upgrading.load(Ordering::SeqCst) {
-            return Err(ApiError::new(
-                ErrorCode::Busy,
+            return Err(Error::new(
+                Code::Busy,
                 "Component installation or another Node upgrade call is running",
             ));
         }
@@ -1390,7 +1375,7 @@ impl LocalNode {
         // A shared lease allows active harnesses (the release switch retains its existing
         // drain/force policy), but excludes a CLI or another Node's npm installer.
         let prefix = steve_acp::managed::prefix_lock(&self.0.cfg.acp.steve_home, false)
-            .map_err(|e| ApiError::new(ErrorCode::Busy, e))?;
+            .map_err(|e| Error::new(Code::Busy, e))?;
         self.0.node_upgrading.store(true, Ordering::SeqCst);
         Ok(NodeUpgradeHold {
             active: &self.0.node_upgrading,
@@ -1409,7 +1394,7 @@ impl LocalNode {
     /// subprocesses cleanly before upgrading.
     pub fn open(cfg: NodeConfig) -> ApiResult<LocalNode> {
         std::fs::create_dir_all(&cfg.home)
-            .map_err(|e| ApiError::new(ErrorCode::Internal, format!("node home: {e}")))?;
+            .map_err(|e| Error::new(Code::Internal, format!("node home: {e}")))?;
         let lock = HomeLock::take(&cfg.home)?;
         // a command's secret files a crash left behind
         secrets::cleanup(&cfg.home);
@@ -1771,7 +1756,7 @@ impl LocalNode {
 
     fn mine(&self, w: &WorkspaceRef) -> ApiResult<()> {
         if w.node != self.0.cfg.node {
-            return Err(ApiError::new(ErrorCode::Denied, "another node's workspace"));
+            return Err(Error::new(Code::Forbidden, "another node's workspace"));
         }
         Ok(())
     }
@@ -1792,35 +1777,30 @@ impl LocalNode {
         let maintenance = &mut *maintenance_guard;
         let r = self.0.j.tx(|t| {
             if c.issued_at.0 < t.accept_floor() {
-                return Err(
-                    ApiError::new(ErrorCode::Stale, "issued before journal upgrade").on(&c.id),
-                );
+                return Err(Error::new(Code::Stale, "issued before journal upgrade")
+                    .with_param("operation", c.id.to_string()));
             }
             c.check_window()?;
             if let Some(op) = t.op(&c.id)? {
                 return if op.digest == digest && op.method == method {
                     Ok((op.receipt, false))
                 } else {
-                    Err(
-                        ApiError::new(ErrorCode::Conflict, "same operation, other content")
-                            .on(&c.id),
-                    )
+                    Err(Error::new(Code::Conflict, "same operation, other content")
+                        .with_param("operation", c.id.to_string()))
                 };
             }
             if now() > c.accept_before.0 {
-                return Err(ApiError::new(ErrorCode::Stale, "past accept_before").on(&c.id));
+                return Err(Error::new(Code::Stale, "past accept_before")
+                    .with_param("operation", c.id.to_string()));
             }
             if self.0.closed.load(Ordering::SeqCst) {
-                return Err(ApiError::new(
-                    ErrorCode::Offline,
-                    "the node is shutting down",
-                ));
+                return Err(Error::later(Code::Unavailable, "the node is shutting down"));
             }
             if self.0.faulted()
                 && !matches!(method, "cancel" | "abandon" | "recover" | "release_session")
             {
-                return Err(ApiError::new(
-                    ErrorCode::Internal,
+                return Err(Error::new(
+                    Code::Internal,
                     "the node's journal failed: restart it",
                 ));
             }
@@ -1829,8 +1809,8 @@ impl LocalNode {
                 "cancel" | "abandon" | "recover" | "release_session" | "resolve_permission"
             );
             if !control && self.0.retiring.load(Ordering::SeqCst) {
-                return Err(ApiError::new(
-                    ErrorCode::Busy,
+                return Err(Error::new(
+                    Code::Busy,
                     "the node is being removed from its machine",
                 ));
             }
@@ -1847,8 +1827,8 @@ impl LocalNode {
                 {
                     return Ok((prior, false));
                 }
-                return Err(ApiError::new(
-                    ErrorCode::Busy,
+                return Err(Error::later(
+                    Code::Busy,
                     "adapter installation or upgrade is in progress; retry after it finishes",
                 ));
             }
@@ -1866,8 +1846,8 @@ impl LocalNode {
                 taken
             };
             if bytes > 1 << 20 || !taken {
-                return Err(ApiError::new(
-                    ErrorCode::Exhausted,
+                return Err(Error::later(
+                    Code::Exhausted,
                     "journal admission budget reached",
                 ));
             }
@@ -1914,21 +1894,21 @@ impl LocalNode {
         if let SandboxRequirement::Required { guarantees } = &p.sandbox
             && !guarantees.is_empty()
         {
-            return Err(ApiError::new(
-                ErrorCode::Unsupported,
+            return Err(Error::new(
+                Code::Unsupported,
                 "this node enforces no sandbox for sessions yet",
             ));
         }
         if p.network != NetworkScope::Unrestricted {
-            return Err(ApiError::new(
-                ErrorCode::Unsupported,
+            return Err(Error::new(
+                Code::Unsupported,
                 "this node cannot restrict a harness's network",
             ));
         }
         // reads are not confined at all without a sandbox: a list of what may be read cannot be kept
         if !p.readable.is_empty() {
-            return Err(ApiError::new(
-                ErrorCode::Unsupported,
+            return Err(Error::new(
+                Code::Unsupported,
                 "this node cannot confine what a harness reads",
             ));
         }
@@ -1943,26 +1923,26 @@ impl LocalNode {
             .adapter_properties(harness)
             .permission_policy
             .check(p.permissions)
-            .map_err(|e| ApiError::new(ErrorCode::Unsupported, e))
+            .map_err(|e| Error::new(Code::Unsupported, e))
     }
 
     fn check_limits(l: &Limits) -> ApiResult<()> {
         if l.max_tokens.is_some() || l.max_cost.is_some() {
-            return Err(ApiError::new(
-                ErrorCode::Unsupported,
+            return Err(Error::new(
+                Code::Unsupported,
                 "this node cannot stop a harness at a token or cost limit",
             ));
         }
         if l.deadline.0 <= now() {
-            return Err(ApiError::new(ErrorCode::Expired, "deadline already passed"));
+            return Err(Error::new(Code::Stale, "deadline already passed"));
         }
         Ok(())
     }
 
     fn check_harness(&self, h: &str) -> ApiResult<()> {
         if !self.0.cfg.acp.adapters.contains_key(h) {
-            return Err(ApiError::new(
-                ErrorCode::Unsupported,
+            return Err(Error::new(
+                Code::Unsupported,
                 format!("no harness {h} on this node"),
             ));
         }
@@ -1976,13 +1956,13 @@ impl LocalNode {
             .iter()
             .any(|(_, o)| matches!(o.receipt.state, Observed::Unknown { .. }))
         {
-            return Err(ApiError::new(
-                ErrorCode::Busy,
+            return Err(Error::new(
+                Code::Busy,
                 "an attempt of this session is unknown: abandon it first",
             ));
         }
         if !open.is_empty() {
-            return Err(ApiError::new(ErrorCode::Busy, "an attempt is running"));
+            return Err(Error::later(Code::Busy, "an attempt is running"));
         }
         Ok(())
     }
@@ -1990,8 +1970,8 @@ impl LocalNode {
     /// The workspace is not being prepared or tidied by another operation.
     fn workspace_free(t: &Tx, resource: &str) -> ApiResult<()> {
         if t.reservation(resource)?.is_some() {
-            return Err(ApiError::new(
-                ErrorCode::Busy,
+            return Err(Error::new(
+                Code::Busy,
                 "the workspace is being prepared or tidied",
             ));
         }
@@ -2092,7 +2072,8 @@ impl LocalNode {
         if self.0.cfg.capacity.execs == 0 {
             return unsupported("push");
         }
-        git::check_push_shape(&c.body.action).map_err(|e| e.on(&c.id))?;
+        git::check_push_shape(&c.body.action)
+            .map_err(|e| e.with_param("operation", c.id.to_string()))?;
         // a resend of one it has is answered by its receipt, whatever git says now
         let known = self.0.j.read(|t| t.op(&c.id))?.is_some();
         if !known {
@@ -2104,7 +2085,7 @@ impl LocalNode {
             };
             blocking(move || git::check_push(&commands, &dir, &body))
                 .await
-                .map_err(|e| e.on(&c.id))?;
+                .map_err(|e| e.with_param("operation", c.id.to_string()))?;
         }
         let w = c.body.workspace.clone();
         let mut dir = PathBuf::new();
@@ -2112,13 +2093,13 @@ impl LocalNode {
         let accepted = self.accept("git_apply", &c, |t| {
             let row = t
                 .workspace(&w.id)?
-                .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))?;
+                .ok_or_else(|| Error::new(Code::Invalid, "no such workspace"))?;
             Self::workspace_free(t, &row.resource)?;
             let existing = matches!(row.kind, PrepareKind::Existing { .. });
             dir = workspace::still_valid(Path::new(&row.path), &self.0.roots(), existing)?;
             if self.0.execs.fetch_add(1, Ordering::SeqCst) >= self.0.cfg.capacity.execs as usize {
                 self.0.execs.fetch_sub(1, Ordering::SeqCst);
-                return Err(ApiError::new(ErrorCode::Exhausted, "no command capacity"));
+                return Err(Error::later(Code::Exhausted, "no command capacity"));
             }
             counted = true;
             let mut d = Decided::accepted();
@@ -2158,10 +2139,10 @@ impl LocalNode {
         apply: GitApply,
         deadline: i64,
     ) -> Observed {
-        let not_run = |code, m: String| failed(ApiError::new(code, m));
+        let not_run = |code, m: String| failed(Error::new(code, m));
         let auth = match &apply.action {
             GitAction::Push { auth, .. } => auth.clone(),
-            _ => return not_run(ErrorCode::Unsupported, "not a push".into()),
+            _ => return not_run(Code::Unsupported, "not a push".into()),
         };
         let checked = match read_op(&self.0) {
             Ok(op) => {
@@ -2185,7 +2166,7 @@ impl LocalNode {
                 let hub = self.0.secrets.lock().unwrap().clone();
                 match secrets::header(hub, op, r).await {
                     Ok(h) => Some(h),
-                    Err(e) => return not_run(ErrorCode::Denied, format!("not pushed: {e}")),
+                    Err(e) => return not_run(Code::Forbidden, format!("not pushed: {e}")),
                 }
             }
         };
@@ -2206,7 +2187,7 @@ impl LocalNode {
         .map_err(|e| e.to_string())
         .and_then(|r| r);
         match ran {
-            Err(e) => not_run(ErrorCode::Internal, format!("the push did not start: {e}")),
+            Err(e) => not_run(Code::Internal, format!("the push did not start: {e}")),
             Ok(ran) if !ran.gone => Observed::Unknown {
                 reason: "the push's processes were not confirmed gone".into(),
             },
@@ -2222,23 +2203,23 @@ impl LocalNode {
                         error: None,
                     }
                 }
-                exec::Ended::Exited(_) => failed(ApiError::new(
-                    ErrorCode::Denied,
+                exec::Ended::Exited(_) => failed(Error::new(
+                    Code::Forbidden,
                     format!("git push: {}", git::complaint(&ran.stderr)),
                 )),
                 exec::Ended::TimedOut => Observed::Finished {
                     outcome: Outcome::TimedOut,
                     result: None,
-                    error: Some(ApiError::new(
-                        ErrorCode::OutcomeUnknown,
+                    error: Some(Error::new(
+                        Code::OutcomeUnknown,
                         "the push did not end in time: it may have landed",
                     )),
                 },
                 exec::Ended::Stopped => Observed::Finished {
                     outcome: Outcome::Interrupted,
                     result: None,
-                    error: Some(ApiError::new(
-                        ErrorCode::OutcomeUnknown,
+                    error: Some(Error::new(
+                        Code::OutcomeUnknown,
                         "the push was stopped: it may have landed",
                     )),
                 },
@@ -2398,8 +2379,8 @@ fn read_op(inner: &Inner) -> ApiResult<OperationId> {
 }
 
 fn unsupported<T>(what: &str) -> ApiResult<T> {
-    Err(ApiError::new(
-        ErrorCode::Unsupported,
+    Err(Error::new(
+        Code::Unsupported,
         format!("not on this node yet: {what}"),
     ))
 }
@@ -2411,10 +2392,7 @@ impl SessionExecutor for LocalNode {
         self.mine(&c.body.workspace)?;
         // a Node opened for its workspace faces only runs no harness
         if self.0.cfg.capacity.sessions == 0 {
-            return Err(ApiError::new(
-                ErrorCode::Unsupported,
-                "this node runs no sessions",
-            ));
+            return Err(Error::new(Code::Unsupported, "this node runs no sessions"));
         }
         let (r, fresh) = self.accept("open_session", &c, |t| {
             let o = &c.body;
@@ -2423,17 +2401,17 @@ impl SessionExecutor for LocalNode {
             Skill::check_all(&o.skills)?;
             let w = t
                 .workspace(&o.workspace.id)?
-                .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))?;
+                .ok_or_else(|| Error::new(Code::Invalid, "no such workspace"))?;
             Self::workspace_free(t, &w.resource)?;
             let old = t.session(&o.session)?;
             if let Some(s) = &old {
                 Self::idle(t, &o.session)?;
                 if s.view.phase != SessionPhase::Released {
-                    return Err(ApiError::new(ErrorCode::Conflict, "already open"));
+                    return Err(Error::new(Code::Conflict, "already open"));
                 }
                 if s.open.workspace != o.workspace || s.open.choice.harness != o.choice.harness {
-                    return Err(ApiError::new(
-                        ErrorCode::Conflict,
+                    return Err(Error::new(
+                        Code::Conflict,
                         "reopened in another workspace or harness",
                     ));
                 }
@@ -2441,8 +2419,8 @@ impl SessionExecutor for LocalNode {
             if t.proc_of(&o.session)?
                 .is_some_and(|p| p.incarnation < self.0.incarnation)
             {
-                return Err(ApiError::new(
-                    ErrorCode::Busy,
+                return Err(Error::new(
+                    Code::Busy,
                     "a harness of this session from before the restart still runs: abandon it",
                 ));
             }
@@ -2488,19 +2466,16 @@ impl SessionExecutor for LocalNode {
             Self::idle(t, &b.session)?;
             let mut row = t
                 .session(&b.session)?
-                .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "session not open"))?;
+                .ok_or_else(|| NodeReason::session_not_open("session not open"))?;
             if row.view.phase != SessionPhase::Ready {
-                return Err(ApiError::new(ErrorCode::Busy, "the session is not ready"));
+                return Err(Error::later(Code::Busy, "the session is not ready"));
             }
             if row.view.revision != b.expected {
-                return Err(ApiError::new(
-                    ErrorCode::Conflict,
-                    "the session changed since",
-                ));
+                return Err(Error::new(Code::Conflict, "the session changed since"));
             }
             if b.choice.harness != row.open.choice.harness {
-                return Err(ApiError::new(
-                    ErrorCode::Invalid,
+                return Err(Error::new(
+                    Code::Invalid,
                     "another harness needs another session",
                 ));
             }
@@ -2531,24 +2506,22 @@ impl SessionExecutor for LocalNode {
             let tu = &c.body;
             let mut row = t
                 .session(&tu.session)?
-                .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "session not open"))?;
+                .ok_or_else(|| NodeReason::session_not_open("session not open"))?;
             match row.view.phase {
                 SessionPhase::Ready => {}
                 SessionPhase::Released => {
-                    return Err(ApiError::new(
-                        ErrorCode::Invalid,
+                    return Err(NodeReason::session_not_open(
                         "session released: open it again",
                     ));
                 }
-                _ => return Err(ApiError::new(ErrorCode::Busy, "the session is not ready")),
+                _ => return Err(Error::later(Code::Busy, "the session is not ready")),
             }
             tu.check_against(&row.open)?;
-            let w = t.workspace(&row.open.workspace.id)?.ok_or_else(|| {
-                ApiError::new(ErrorCode::Invalid, "the session's workspace is gone")
-            })?;
+            let w = t
+                .workspace(&row.open.workspace.id)?
+                .ok_or_else(|| Error::new(Code::Invalid, "the session's workspace is gone"))?;
             if w.incarnation != row.incarnation {
-                return Err(ApiError::new(
-                    ErrorCode::Invalid,
+                return Err(NodeReason::session_not_open(
                     "the session's workspace is gone: open it again",
                 ));
             }
@@ -2557,8 +2530,8 @@ impl SessionExecutor for LocalNode {
             Self::check_limits(&tu.run.limits)?;
             Self::idle(t, &tu.session)?;
             if t.unacked_bytes()? > self.0.cfg.storage.quota {
-                return Err(ApiError::new(
-                    ErrorCode::Exhausted,
+                return Err(Error::new(
+                    Code::Exhausted,
                     "the hub has not taken this node's events: no new work until it does",
                 ));
             }
@@ -2568,13 +2541,13 @@ impl SessionExecutor for LocalNode {
                 .filter(|(_, o)| o.method == "start_turn" && !o.receipt.state.is_finished())
                 .count() as u32;
             if running as usize >= self.0.session_capacity.load(Ordering::SeqCst) {
-                return Err(ApiError::new(ErrorCode::Exhausted, "no session capacity"));
+                return Err(Error::later(Code::Exhausted, "no session capacity"));
             }
             if let Some((_, other)) = t.attempt(&tu.run.attempt)?
                 && other != c.id
             {
-                return Err(ApiError::new(
-                    ErrorCode::Conflict,
+                return Err(Error::new(
+                    Code::Conflict,
                     "this attempt already ran under another operation",
                 ));
             }
@@ -2613,7 +2586,7 @@ impl SessionExecutor for LocalNode {
             .j
             .read(|t| t.session(&s))?
             .map(|r| r.view)
-            .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such session"))
+            .ok_or_else(|| NodeReason::session_not_open("no such session"))
     }
 
     /// Accepted now; finished once the harness's process group is confirmed gone.
@@ -2622,7 +2595,7 @@ impl SessionExecutor for LocalNode {
             Self::idle(t, &c.body)?;
             let mut row = t
                 .session(&c.body)?
-                .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such session"))?;
+                .ok_or_else(|| NodeReason::session_not_open("no such session"))?;
             row.view.phase = SessionPhase::Releasing;
             t.put_session(&row)?;
             let mut d = Decided::accepted();
@@ -2654,15 +2627,12 @@ impl JobExecutor for LocalNode {
             .adapter_properties(&c.body.run.choice.harness)
             .permission_policy
             .check(c.body.run.policy.permissions)
-            .map_err(|e| ApiError::new(ErrorCode::Unsupported, e))?;
+            .map_err(|e| Error::new(Code::Unsupported, e))?;
         if let JobWork::Research(_) = &c.body.work {
             return self.start_research(c).await;
         }
         if self.0.cfg.capacity.jobs == 0 || self.0.cfg.acp.adapters.is_empty() {
-            return Err(ApiError::new(
-                ErrorCode::Unsupported,
-                "this node runs no jobs",
-            ));
+            return Err(Error::new(Code::Unsupported, "this node runs no jobs"));
         }
         let exec = ExecutionRef::Job {
             job: c.body.job.clone(),
@@ -2672,16 +2642,16 @@ impl JobExecutor for LocalNode {
             let j = &c.body;
             j.check()?;
             if !self.0.cfg.acp.adapters.contains_key(&j.run.choice.harness) {
-                return Err(ApiError::new(
-                    ErrorCode::Unsupported,
+                return Err(Error::new(
+                    Code::Unsupported,
                     format!("no harness {} runs jobs on this node", j.run.choice.harness),
                 ));
             }
             self.check_harness_policy(&j.run.choice.harness, &j.run.policy)?;
             Self::check_limits(&j.run.limits)?;
             if t.unacked_bytes()? > self.0.cfg.storage.quota {
-                return Err(ApiError::new(
-                    ErrorCode::Exhausted,
+                return Err(Error::new(
+                    Code::Exhausted,
                     "the hub has not taken this node's events: no new work until it does",
                 ));
             }
@@ -2691,11 +2661,11 @@ impl JobExecutor for LocalNode {
                 .filter(|(_, o)| o.method == "start_job" && !o.receipt.state.is_finished())
                 .count() as u32;
             if running >= self.0.cfg.capacity.jobs {
-                return Err(ApiError::new(ErrorCode::Exhausted, "no job capacity"));
+                return Err(Error::later(Code::Exhausted, "no job capacity"));
             }
             if t.attempt(&j.run.attempt)?.is_some() {
-                return Err(ApiError::new(
-                    ErrorCode::Conflict,
+                return Err(Error::new(
+                    Code::Conflict,
                     "this attempt already ran under another operation",
                 ));
             }
@@ -2733,7 +2703,10 @@ impl ExecutionControl for LocalNode {
             .j
             .read(|t| t.op(&op))?
             .map(|o| o.receipt)
-            .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such operation").on(&op))
+            .ok_or_else(|| {
+                NodeReason::operation_not_found("no such operation")
+                    .with_param("operation", op.to_string())
+            })
     }
 
     async fn cancel(&self, c: Command<Cancel>) -> ApiResult<Receipt> {
@@ -2742,7 +2715,7 @@ impl ExecutionControl for LocalNode {
         let (r, fresh) = self.accept("cancel", &c, |t| {
             let op = t
                 .op(&target)?
-                .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such operation"))?;
+                .ok_or_else(|| NodeReason::operation_not_found("no such operation"))?;
             if !op.receipt.state.is_finished() {
                 t.set_cancel(&target)?;
                 if let Some(ExecutionRef::Turn { session: s, .. }) = &op.execution {
@@ -2770,10 +2743,10 @@ impl ExecutionControl for LocalNode {
         let (r, fresh) = self.accept("abandon", &c, |t| {
             let op = t
                 .op(&target)?
-                .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such operation"))?;
+                .ok_or_else(|| NodeReason::operation_not_found("no such operation"))?;
             if !matches!(op.receipt.state, Observed::Unknown { .. }) {
-                return Err(ApiError::new(
-                    ErrorCode::Conflict,
+                return Err(Error::new(
+                    Code::Conflict,
                     "only an unknown execution is abandoned (cancel a live one)",
                 ));
             }
@@ -2787,15 +2760,15 @@ impl ExecutionControl for LocalNode {
                     });
                 }
                 None => {
-                    return Err(ApiError::new(
-                        ErrorCode::Unsupported,
+                    return Err(Error::new(
+                        Code::Unsupported,
                         "only an execution is abandoned",
                     ));
                 }
             }
             if t.reservation(&format!("abandon:{target}"))?.is_some() {
-                return Err(ApiError::new(
-                    ErrorCode::Conflict,
+                return Err(Error::new(
+                    Code::Conflict,
                     "this execution is being abandoned already",
                 ));
             }
@@ -2824,8 +2797,8 @@ impl ExecutionControl for LocalNode {
                     return me
                         .complete(
                             &op,
-                            failed(ApiError::new(
-                                ErrorCode::Busy,
+                            failed(Error::new(
+                                Code::Busy,
                                 "its processes would not stop (or are not this node's to stop)",
                             )),
                             |t| t.unreserve(&key),
@@ -2841,7 +2814,7 @@ impl ExecutionControl for LocalNode {
                     let completion = Completion {
                         outcome: Outcome::Interrupted,
                         stop_reason: "abandoned".into(),
-                        error: Some(ApiError::new(ErrorCode::OutcomeUnknown, "abandoned")),
+                        error: Some(Error::new(Code::OutcomeUnknown, "abandoned")),
                         result: vec![],
                         continuation: None,
                         transient: false,
@@ -2914,10 +2887,10 @@ impl ExecutionControl for LocalNode {
         let (receipt, fresh) = self.accept("recover", &c, |t| {
             let op = t
                 .op(&target)?
-                .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such operation"))?;
+                .ok_or_else(|| NodeReason::operation_not_found("no such operation"))?;
             if op.digest != c.body.expected || !matches!(op.receipt.state, Observed::Unknown { .. })
             {
-                return Err(ApiError::new(ErrorCode::Stale, "recovery target changed"));
+                return Err(Error::new(Code::Stale, "recovery target changed"));
             }
             if op.execution.is_some() {
                 return unsupported("recover execution: use abandon");
@@ -2933,7 +2906,7 @@ impl ExecutionControl for LocalNode {
             if let Some(session) = &session {
                 for (_, other) in t.open_ops_of(session)? {
                     if !matches!(other.receipt.state, Observed::Unknown { .. }) {
-                        return Err(ApiError::new(ErrorCode::Busy, "session has live work"));
+                        return Err(Error::later(Code::Busy, "session has live work"));
                     }
                 }
             }
@@ -2970,8 +2943,8 @@ impl ExecutionControl for LocalNode {
             if !stopped {
                 me.complete(
                     &c.id,
-                    failed(ApiError::new(
-                        ErrorCode::OutcomeUnknown,
+                    failed(Error::new(
+                        Code::OutcomeUnknown,
                         "recovery could not prove stopped",
                     )),
                     |t| t.unreserve(&key),
@@ -2984,13 +2957,13 @@ impl ExecutionControl for LocalNode {
                 if op.digest != c.body.expected
                     || !matches!(op.receipt.state, Observed::Unknown { .. })
                 {
-                    return Err(ApiError::new(ErrorCode::Stale, "recovery target changed"));
+                    return Err(Error::new(Code::Stale, "recovery target changed"));
                 }
                 let state = Observed::Finished {
                     outcome: Outcome::Interrupted,
                     result: None,
-                    error: Some(ApiError::new(
-                        ErrorCode::OutcomeUnknown,
+                    error: Some(Error::new(
+                        Code::OutcomeUnknown,
                         "control retired; effects preserved, not replayed",
                     )),
                 };
@@ -3038,35 +3011,29 @@ impl ExecutionControl for LocalNode {
         let mut session = None;
         let (r, fresh) = self.accept("resolve_permission", &c, |t| {
             let Some((op, s, req)) = t.wait(&res.id)? else {
-                return Err(ApiError::new(
-                    ErrorCode::Stale,
-                    "nobody waits for this answer",
-                ));
+                return Err(Error::new(Code::Stale, "nobody waits for this answer"));
             };
             if req.execution != res.execution || req.digest != res.action_digest {
-                return Err(ApiError::new(
-                    ErrorCode::Stale,
+                return Err(Error::new(
+                    Code::Stale,
                     "the answer is for another attempt or action",
                 ));
             }
             if req.expires_at.0 <= now() {
-                return Err(ApiError::new(ErrorCode::Expired, "the request expired"));
+                return Err(Error::new(Code::Stale, "the request expired"));
             }
             if !req.choices.contains(&res.decision) {
-                return Err(ApiError::new(
-                    ErrorCode::Invalid,
-                    "not one of the offered choices",
-                ));
+                return Err(Error::new(Code::Invalid, "not one of the offered choices"));
             }
             let o = t
                 .op(&op)?
-                .ok_or_else(|| ApiError::new(ErrorCode::Internal, "a wait without its attempt"))?;
+                .ok_or_else(|| Error::new(Code::Internal, "a wait without its attempt"))?;
             if o.receipt.state.is_finished() || o.cancel {
-                return Err(ApiError::new(ErrorCode::Stale, "that attempt is over"));
+                return Err(Error::new(Code::Stale, "that attempt is over"));
             }
             if t.answer_pending_for(&res.id)? {
-                return Err(ApiError::new(
-                    ErrorCode::Conflict,
+                return Err(Error::new(
+                    Code::Conflict,
                     "another answer to this request is being given",
                 ));
             }
@@ -3120,7 +3087,7 @@ impl ExecutionControl for LocalNode {
                 (token, 0usize, 0usize)
             }
             Some(c) => {
-                let bad = || ApiError::new(ErrorCode::Invalid, "not a snapshot cursor");
+                let bad = || Error::new(Code::Invalid, "not a snapshot cursor");
                 let (t, o, h) = c
                     .as_str()
                     .strip_prefix("snap")
@@ -3136,8 +3103,8 @@ impl ExecutionControl for LocalNode {
         };
         let snaps = self.0.snapshots.lock().unwrap();
         let Some(s) = snaps.get(&token) else {
-            return Err(ApiError::new(
-                ErrorCode::Expired,
+            return Err(Error::new(
+                Code::Stale,
                 "this snapshot is gone: take a new one",
             ));
         };
@@ -3189,8 +3156,8 @@ fn check_reply_path(rel: &Path, path: &Path, protected: &[PathBuf]) -> ApiResult
             )
         })
     {
-        return Err(ApiError::new(
-            ErrorCode::Denied,
+        return Err(Error::new(
+            Code::Forbidden,
             "reply file outside its authorized scope",
         ));
     }
@@ -3213,8 +3180,7 @@ impl WorkspaceExecutor for LocalNode {
                     d.workspace = Some(w.view.workspace);
                     return Ok(d);
                 }
-                return Err(ApiError::new(
-                    ErrorCode::Conflict,
+                return Err(NodeReason::workspace_binding_conflict(
                     "this resource's workspace was prepared otherwise",
                 ));
             }
@@ -3248,7 +3214,7 @@ impl WorkspaceExecutor for LocalNode {
                     let p = home.join("scratch").join(&name);
                     std::fs::create_dir_all(&p)
                         .map(|_| (p, None, None))
-                        .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))
+                        .map_err(|e| Error::new(Code::Internal, e.to_string()))
                 }
                 PrepareKind::Existing { dir } => {
                     workspace::resolve(&me.0.roots(), dir, true).map(|p| (p, None, None))
@@ -3285,7 +3251,7 @@ impl WorkspaceExecutor for LocalNode {
                                 )
                             })
                             .await
-                            .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))
+                            .map_err(|e| Error::new(Code::Internal, e.to_string()))
                             .and_then(|r| r)
                             .map(|_| (p, Some(repo), Some(branch.clone())))
                         }
@@ -3383,7 +3349,7 @@ impl WorkspaceExecutor for LocalNode {
             .0
             .j
             .read(|t| t.workspace(&w.id))?
-            .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))?;
+            .ok_or_else(|| Error::new(Code::Invalid, "no such workspace"))?;
         let mut v = row.view;
         v.usable = workspace::usable(Path::new(&row.path));
         Ok(v)
@@ -3400,14 +3366,14 @@ impl WorkspaceExecutor for LocalNode {
         let (r, fresh) = self.accept("tidy_workspace", &c, |t| {
             let row = t
                 .workspace(&w.id)?
-                .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))?;
+                .ok_or_else(|| Error::new(Code::Invalid, "no such workspace"))?;
             Self::workspace_free(t, &row.resource)?;
             if row.view.revision != c.body.expected {
-                return Err(ApiError::new(ErrorCode::Conflict, "changed since"));
+                return Err(Error::new(Code::Conflict, "changed since"));
             }
             if t.open_execs_in(&w)? > 0 {
-                return Err(ApiError::new(
-                    ErrorCode::Busy,
+                return Err(Error::new(
+                    Code::Busy,
                     "a command runs in it or is unknown: recover it first",
                 ));
             }
@@ -3448,10 +3414,7 @@ impl WorkspaceExecutor for LocalNode {
                     return me
                         .complete(
                             &op,
-                            failed(ApiError::new(
-                                ErrorCode::Busy,
-                                "a harness in it would not stop",
-                            )),
+                            failed(Error::new(Code::Busy, "a harness in it would not stop")),
                             |t| t.unreserve(&res),
                         )
                         .await;
@@ -3464,7 +3427,7 @@ impl WorkspaceExecutor for LocalNode {
                     return me
                         .complete(
                             &op,
-                            failed(ApiError::new(ErrorCode::Conflict, "changed since")),
+                            failed(Error::new(Code::Conflict, "changed since")),
                             |t| t.unreserve(&res),
                         )
                         .await;
@@ -3522,7 +3485,7 @@ impl WorkspaceExecutor for LocalNode {
                         Observed::Finished {
                             outcome: Outcome::Succeeded,
                             result: Some(OperationResult::Unit),
-                            error: note.map(|n| ApiError::new(ErrorCode::Conflict, n)),
+                            error: note.map(|n| Error::new(Code::Conflict, n)),
                         },
                         |t| {
                             t.unreserve(&res)?;
@@ -3539,7 +3502,7 @@ impl WorkspaceExecutor for LocalNode {
                     .await
                 }
                 Err(e) => {
-                    me.complete(&op, failed(ApiError::new(ErrorCode::Internal, e)), |t| {
+                    me.complete(&op, failed(Error::new(Code::Internal, e)), |t| {
                         t.unreserve(&res)
                     })
                     .await
@@ -3579,11 +3542,12 @@ impl WorkspaceExecutor for LocalNode {
             .0
             .j
             .read(|t| t.workspace(&w.id))?
-            .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))?;
+            .ok_or_else(|| Error::new(Code::Invalid, "no such workspace"))?;
         if !known {
             let now = self.facts_now(&dir).await?;
             if now.revision != c.body.expected || now.head != c.body.expected_head {
-                return Err(ApiError::new(ErrorCode::Stale, "changed since").on(&c.id));
+                return Err(Error::new(Code::Stale, "changed since")
+                    .with_param("operation", c.id.to_string()));
             }
         }
         let resource = row.resource.clone();
@@ -3611,7 +3575,7 @@ impl WorkspaceExecutor for LocalNode {
                 GitAction::Rebase { onto } => {
                     git::rebase(&commands, &d, &onto, &expected, &expected_head)
                 }
-                GitAction::Push { .. } => Err(ApiError::new(ErrorCode::Internal, "push")),
+                GitAction::Push { .. } => Err(Error::new(Code::Internal, "push")),
             })
             .await
             .map_err(internal)
@@ -3651,22 +3615,30 @@ impl WorkspaceExecutor for LocalNode {
     /// restart while it ran: it is never run again (recover stops what is left).
     async fn exec(&self, c: Command<ExecSpec>) -> ApiResult<Receipt> {
         self.mine(&c.body.workspace)?;
-        self.0.cfg.ceiling.check_exec().map_err(|e| e.on(&c.id))?;
+        self.0
+            .cfg
+            .ceiling
+            .check_exec()
+            .map_err(|e| e.with_param("operation", c.id.to_string()))?;
         if self.0.cfg.capacity.execs == 0 {
             return unsupported("commands");
         }
-        secrets::check(&c.body.secrets, &c.body.env).map_err(|e| e.on(&c.id))?;
+        secrets::check(&c.body.secrets, &c.body.env)
+            .map_err(|e| e.with_param("operation", c.id.to_string()))?;
         self.check_policy(&c.body.policy)?;
         Self::check_limits(&c.body.limits)?;
         if c.body.command.trim().is_empty() || c.body.command.contains('\0') {
-            return Err(ApiError::new(ErrorCode::Invalid, "no command").on(&c.id));
+            return Err(
+                Error::new(Code::Invalid, "no command").with_param("operation", c.id.to_string())
+            );
         }
         if c.body
             .env
             .iter()
             .any(|(k, v)| k.is_empty() || k.contains('=') || k.contains('\0') || v.contains('\0'))
         {
-            return Err(ApiError::new(ErrorCode::Invalid, "a bad environment variable").on(&c.id));
+            return Err(Error::new(Code::Invalid, "a bad environment variable")
+                .with_param("operation", c.id.to_string()));
         }
         let w = c.body.workspace.clone();
         let mut dir = PathBuf::new();
@@ -3674,7 +3646,7 @@ impl WorkspaceExecutor for LocalNode {
         let accepted = self.accept("exec", &c, |t| {
             let row = t
                 .workspace(&w.id)?
-                .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))?;
+                .ok_or_else(|| Error::new(Code::Invalid, "no such workspace"))?;
             Self::workspace_free(t, &row.resource)?;
             let existing = matches!(row.kind, PrepareKind::Existing { .. });
             let base = workspace::still_valid(Path::new(&row.path), &self.0.roots(), existing)?;
@@ -3684,7 +3656,7 @@ impl WorkspaceExecutor for LocalNode {
             };
             if self.0.execs.fetch_add(1, Ordering::SeqCst) >= self.0.cfg.capacity.execs as usize {
                 self.0.execs.fetch_sub(1, Ordering::SeqCst);
-                return Err(ApiError::new(ErrorCode::Exhausted, "no command capacity"));
+                return Err(Error::later(Code::Exhausted, "no command capacity"));
             }
             counted = true;
             let mut d = Decided::accepted();
@@ -3738,8 +3710,8 @@ impl WorkspaceExecutor for LocalNode {
                 }
             };
             let state = match ran {
-                Err(e) => failed(ApiError::new(
-                    ErrorCode::Invalid,
+                Err(e) => failed(Error::new(
+                    Code::Invalid,
                     format!("the command did not start: {e}"),
                 )),
                 Ok(ran) if !ran.gone => Observed::Unknown {
@@ -3838,7 +3810,7 @@ impl WorkspaceExecutor for LocalNode {
                 let root = roots
                     .iter()
                     .find(|r| r.id == at.root)
-                    .ok_or_else(|| ApiError::new(ErrorCode::Denied, "not an allowed root"))?;
+                    .ok_or_else(|| Error::new(Code::Forbidden, "not an allowed root"))?;
                 (
                     root.path.canonicalize().map_err(not_listed)?,
                     at.rel.clone(),
@@ -3865,8 +3837,8 @@ impl WorkspaceExecutor for LocalNode {
             .flatten();
         let (grant, output) = self.0.j.read(|t| {
             let denied = || {
-                ApiError::new(
-                    ErrorCode::Denied,
+                Error::new(
+                    Code::Forbidden,
                     "delivery outside current execution workspace",
                 )
             };
@@ -3883,8 +3855,8 @@ impl WorkspaceExecutor for LocalNode {
                 return Err(denied());
             }
             let grant = t.artifact_grant(q.execution.attempt())?.ok_or_else(|| {
-                ApiError::new(
-                    ErrorCode::Unsupported,
+                Error::new(
+                    Code::Unsupported,
                     "execution has no delivery boundary; start a new turn",
                 )
             })?;
@@ -3951,7 +3923,7 @@ impl WorkspaceExecutor for LocalNode {
         })?;
         // Configured roots may have been revoked since this execution started.
         if workspace_dir(&self.0, &q.workspace)? != Path::new(&grant.dir) {
-            return Err(ApiError::new(ErrorCode::Denied, "delivery workspace moved"));
+            return Err(Error::new(Code::Forbidden, "delivery workspace moved"));
         }
         blocking(move || match output {
             Some((home, rel)) => {
@@ -3964,27 +3936,24 @@ impl WorkspaceExecutor for LocalNode {
 
     async fn read_artifact(&self, q: ArtifactRead) -> ApiResult<ReadChunk> {
         let grant = self.0.j.read(|t| {
-            let grant = t.artifact_grant(q.execution.attempt())?.ok_or_else(|| {
-                ApiError::new(ErrorCode::Unsupported, "execution has no artifact view")
-            })?;
+            let grant = t
+                .artifact_grant(q.execution.attempt())?
+                .ok_or_else(|| Error::new(Code::Unsupported, "execution has no artifact view"))?;
             if grant.view_digest.is_none() {
-                return Err(ApiError::new(
-                    ErrorCode::Unsupported,
+                return Err(Error::new(
+                    Code::Unsupported,
                     "execution has no artifact view",
                 ));
             }
             if grant.execution != q.execution || grant.view_digest.as_ref() != Some(&q.view_digest)
             {
-                return Err(ApiError::new(ErrorCode::Denied, "another execution view"));
+                return Err(Error::new(Code::Forbidden, "another execution view"));
             }
             let current = t.workspace(&grant.workspace.id)?.ok_or_else(|| {
-                ApiError::new(ErrorCode::Denied, "artifact workspace no longer available")
+                Error::new(Code::Forbidden, "artifact workspace no longer available")
             })?;
             if current.incarnation != grant.incarnation || current.path != grant.recorded_dir() {
-                return Err(ApiError::new(
-                    ErrorCode::Denied,
-                    "artifact workspace replaced",
-                ));
+                return Err(Error::new(Code::Forbidden, "artifact workspace replaced"));
             }
             Ok(grant)
         })?;
@@ -3992,7 +3961,7 @@ impl WorkspaceExecutor for LocalNode {
         // the Hub recorded when the execution was accepted.
         let base = workspace_dir(&self.0, &grant.workspace)?;
         if base != Path::new(&grant.dir) {
-            return Err(ApiError::new(ErrorCode::Denied, "artifact workspace moved"));
+            return Err(Error::new(Code::Forbidden, "artifact workspace moved"));
         }
         blocking(move || artifact::read(&grant, &q)).await
     }
@@ -4008,20 +3977,17 @@ impl WorkspaceExecutor for LocalNode {
             .chain(&spec.exclude)
             .any(|p| !steve_node_api::glob::valid_pattern(p))
         {
-            return Err(ApiError::new(ErrorCode::Invalid, "a scan pattern"));
+            return Err(Error::new(Code::Invalid, "a scan pattern"));
         }
         if spec.limits.max_files > scan::MAX_SCAN_FILES {
-            return Err(ApiError::new(
-                ErrorCode::Invalid,
-                "too many files for one scan",
-            ));
+            return Err(Error::new(Code::Invalid, "too many files for one scan"));
         }
         let roots = self.0.roots();
         // a place among the kept scans, taken for a new scan only (a resend is answered as it was)
         let mut place: Option<ScanPlace> = None;
         let (r, fresh) = self.accept("scan", &c, |_| {
             if !workspace::resolve(&roots, &spec.root, false)?.is_dir() {
-                return Err(ApiError::new(ErrorCode::Invalid, "not a directory"));
+                return Err(Error::new(Code::Invalid, "not a directory"));
             }
             if place.is_none() {
                 place = Some(ScanPlace::take(&self.0)?);
@@ -4073,20 +4039,26 @@ impl WorkspaceExecutor for LocalNode {
             return Ok(p);
         }
         match self.0.j.read(|t| t.op(&s))? {
-            Some(o) if o.method == "scan" && o.receipt.state.is_finished() => Err(ApiError::new(
-                ErrorCode::Expired,
+            Some(o) if o.method == "scan" && o.receipt.state.is_finished() => Err(Error::new(
+                Code::Stale,
                 "this scan's manifest is gone: scan again",
             )
-            .on(&s)),
+            .with_param("operation", s.to_string())),
             Some(o)
                 if o.method == "scan" && matches!(o.receipt.state, Observed::Unknown { .. }) =>
             {
-                Err(ApiError::new(ErrorCode::Expired, "this scan was cut short: scan again").on(&s))
+                Err(
+                    Error::new(Code::Stale, "this scan was cut short: scan again")
+                        .with_param("operation", s.to_string()),
+                )
             }
             Some(o) if o.method == "scan" => {
-                Err(ApiError::new(ErrorCode::Busy, "still scanning").on(&s))
+                Err(Error::new(Code::Busy, "still scanning").with_param("operation", s.to_string()))
             }
-            _ => Err(ApiError::new(ErrorCode::Invalid, "no such scan").on(&s)),
+            _ => {
+                Err(Error::new(Code::Invalid, "no such scan")
+                    .with_param("operation", s.to_string()))
+            }
         }
     }
 }
@@ -4115,11 +4087,8 @@ async fn blocking<T: Send + 'static>(
     tokio::task::spawn_blocking(f).await.map_err(internal)?
 }
 
-fn not_listed(e: std::io::Error) -> ApiError {
-    ApiError::new(
-        ErrorCode::Invalid,
-        format!("cannot list the directory: {e}"),
-    )
+fn not_listed(e: std::io::Error) -> Error {
+    Error::new(Code::Invalid, format!("cannot list the directory: {e}"))
 }
 
 /// The root of `at` itself.
@@ -4155,10 +4124,7 @@ impl Discovery for LocalNode {
             return unsupported("this node runs no sessions");
         }
         if !(1..=Capacity::SESSIONS_MAX).contains(&sessions) {
-            return Err(ApiError::new(
-                ErrorCode::Invalid,
-                "session capacity must be 1–256",
-            ));
+            return Err(Error::new(Code::Invalid, "session capacity must be 1–256"));
         }
         // Share admission's journal lock so the change has a well-defined ordering against starts.
         self.0.j.tx(|_| {
@@ -4180,8 +4146,8 @@ impl Discovery for LocalNode {
                 .map(|(r, _)| r);
         }
         if !cfg.managed_adapter(&harness) || steve_harness_spec::components(&harness).is_empty() {
-            return Err(ApiError::new(
-                ErrorCode::Unsupported,
+            return Err(Error::new(
+                Code::Unsupported,
                 "only built-in components in this Node's configured managed prefix may be installed; custom commands are left untouched",
             ));
         }
@@ -4201,20 +4167,20 @@ impl Discovery for LocalNode {
         }
         let req = adapter_setup::requirements(cfg, &harness).await;
         if let Some(e) = req.node_error.or(req.npm_error) {
-            return Err(ApiError::new(ErrorCode::Unsupported, e));
+            return Err(Error::new(Code::Unsupported, e));
         }
         let mut prefix = None;
         let (r, fresh) = self.accept("install_harness", &c, |t| {
             if self.0.node_upgrade_pending() {
-                return Err(ApiError::new(
-                    ErrorCode::Busy,
+                return Err(Error::new(
+                    Code::Busy,
                     "A Node release upgrade is in progress",
                 ));
             }
             adapter_setup::idle(t)?;
             prefix = Some(
                 steve_acp::managed::prefix_lock(&cfg.steve_home, true)
-                    .map_err(|e| ApiError::new(ErrorCode::Busy, e))?,
+                    .map_err(|e| Error::new(Code::Busy, e))?,
             );
             t.set_installation(&harness, &c.id)?;
             let mut d = Decided::accepted();
@@ -4249,7 +4215,7 @@ impl Discovery for LocalNode {
                     Err(e) => Observed::Finished {
                         outcome: Outcome::Failed,
                         result: None,
-                        error: Some(ApiError::new(ErrorCode::Internal, e)),
+                        error: Some(Error::new(Code::Internal, e)),
                     },
                 };
                 if inner.j.tx(|t| t.set_state(&op, &state)).is_err() {
@@ -4276,7 +4242,7 @@ impl Discovery for LocalNode {
         // the computer name may take a short command, once
         tokio::task::spawn_blocking(host::this_machine)
             .await
-            .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))
+            .map_err(|e| Error::new(Code::Internal, e.to_string()))
     }
     async fn vitals(&self) -> ApiResult<NodeVitals> {
         let roots = self.0.roots();
@@ -4288,7 +4254,7 @@ impl Discovery for LocalNode {
             ..vitals::measure(&roots, sessions)
         })
         .await
-        .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))
+        .map_err(|e| Error::new(Code::Internal, e.to_string()))
     }
     async fn probe(&self, fresh: bool) -> ApiResult<Capabilities> {
         self.start_adapter_updates();
@@ -4484,12 +4450,12 @@ impl Discovery for LocalNode {
             Some(c) => c
                 .as_str()
                 .parse::<usize>()
-                .map_err(|_| ApiError::new(ErrorCode::Invalid, "bad cursor"))?,
+                .map_err(|_| Error::new(Code::Invalid, "bad cursor"))?,
         };
         let limit = p.limit.clamp(1, 500) as usize;
         let all = tokio::task::spawn_blocking(move || history::candidates(&d.homes, from + limit))
             .await
-            .map_err(|e| ApiError::new(ErrorCode::Internal, format!("history: {e}")))?;
+            .map_err(|e| Error::new(Code::Internal, format!("history: {e}")))?;
         let full = all.len() == from + limit;
         let items: Vec<HistoryEntry> = all.iter().skip(from).map(|s| s.entry()).collect();
         let next = full.then(|| Cursor::new((from + limit).to_string()).expect("a number"));
@@ -4524,23 +4490,17 @@ impl Discovery for LocalNode {
                 _ => "",
             };
             if harness_of_key != source.harness || !history::listed(h, &source.key) {
-                return Err(ApiError::new(
-                    ErrorCode::Invalid,
-                    "not a history this node lists",
-                ));
+                return Err(Error::new(Code::Invalid, "not a history this node lists"));
             }
             match history::read(&h.steve_home, &source.key) {
-                history::Read::Missing => {
-                    Err(ApiError::new(ErrorCode::Stale, "the transcript is gone"))
+                history::Read::Missing => Err(Error::new(Code::Stale, "the transcript is gone")),
+                history::Read::Unreadable => {
+                    Err(Error::new(Code::Invalid, "the transcript is unreadable"))
                 }
-                history::Read::Unreadable => Err(ApiError::new(
-                    ErrorCode::Invalid,
-                    "the transcript is unreadable",
-                )),
                 history::Read::Ready { peek, rows, .. } => {
                     if peek.version() != expected {
-                        return Err(ApiError::new(
-                            ErrorCode::Stale,
+                        return Err(Error::new(
+                            Code::Stale,
                             "the transcript changed since it was listed",
                         ));
                     }
@@ -4549,8 +4509,8 @@ impl Discovery for LocalNode {
             }
         })
         .await
-        .map_err(|e| ApiError::new(ErrorCode::Internal, format!("import: {e}")))?
-        .map_err(|e| e.on(&c.id))?;
+        .map_err(|e| Error::new(Code::Internal, format!("import: {e}")))?
+        .map_err(|e| e.with_param("operation", c.id.to_string()))?;
         self.0.imports.keep(c.id.clone(), digest, events);
         Ok(done(&c.id))
     }
@@ -4562,7 +4522,7 @@ impl Discovery for LocalNode {
         let d = self.discovery()?;
         tokio::task::spawn_blocking(move || history::locate(&d.homes, &source))
             .await
-            .map_err(|e| ApiError::new(ErrorCode::Internal, format!("locate: {e}")))?
+            .map_err(|e| Error::new(Code::Internal, format!("locate: {e}")))?
     }
 }
 
@@ -4605,7 +4565,7 @@ mod binding_tests {
         let started = std::time::Instant::now();
         let timeout = Duration::from_secs(1);
         let error = collect_head_probe(&mut child, false, timeout).unwrap_err();
-        assert_eq!(error.code, ErrorCode::Stale);
+        assert_eq!(error.code, Code::Stale);
         assert!(started.elapsed() >= timeout);
         assert!(started.elapsed() < Duration::from_secs(2));
         // A killed but unreaped child would still be waitable.

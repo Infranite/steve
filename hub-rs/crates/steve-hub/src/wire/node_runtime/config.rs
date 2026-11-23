@@ -448,10 +448,10 @@ impl NodeRuntime {
         &self,
         tx: &mut W<'_>,
         op: &str,
-        e: &ApiError,
+        e: &Error,
     ) -> Result<Option<String>, StoreError> {
         let session = self.store.read(|r| commands::configure_session(r, op))?;
-        if matches!(e.code, ErrorCode::Conflict | ErrorCode::Stale)
+        if matches!(e.code, Code::Conflict | Code::Stale)
             && let Some(mut d) = desired_in(&self.store, &session)?
             && d.refreshes < MAX_REFRESHES
         {

@@ -235,7 +235,7 @@ async fn revoking_a_live_node_closes_it_and_refuses_it_after() {
         .conn
         .call("events.commit", json!({"events": []}), None)
         .await;
-    assert_eq!(late.unwrap_err().code, ErrorCode::Offline);
+    assert_eq!(late.unwrap_err().code, Code::Unavailable);
     let e = dial(&h, &id, &node, fake, 2).await.err().unwrap();
     assert_eq!(e.code, "denied");
     assert_eq!(

@@ -10,7 +10,8 @@ use std::{
 /// The command owner enforces this budget, then falls back to Later with the same operation ID.
 pub const NOW_MAX_ATTEMPTS: u8 = 3;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub enum Code {
@@ -35,6 +36,10 @@ pub enum Code {
 }
 
 impl Code {
+    pub fn as_str(self) -> &'static str {
+        self.into()
+    }
+
     /// HTTP edge fallback; domain-specific codes require an explicit contract body.
     pub const fn from_http_status(status: u16) -> Self {
         match status {
@@ -371,6 +376,31 @@ pub struct HttpErrorBody {
 }
 
 impl Error {
+    pub fn new(code: Code, detail: impl Into<String>) -> Self {
+        Self {
+            code,
+            retry: Retry::Never,
+            reason: None,
+            params: Params::default(),
+            safe_detail: detail.into(),
+        }
+    }
+
+    pub fn later(code: Code, detail: impl Into<String>) -> Self {
+        Self::new(code, detail).retry(Retry::Later { after_ms: None })
+    }
+
+    pub fn with_param(mut self, name: &str, value: impl Into<Param>) -> Self {
+        self.params.0.insert(name.to_owned(), value.into());
+        self
+    }
+
+    pub fn outcome_unknown(operation: impl fmt::Display, detail: impl Into<String>) -> Self {
+        Self::new(Code::OutcomeUnknown, detail)
+            .with_param("operation", operation.to_string())
+            .with_param("state", "unknown")
+    }
+
     /// Override retry advice without changing the cause or classification.
     pub fn retry(mut self, retry: Retry) -> Self {
         self.retry = retry;

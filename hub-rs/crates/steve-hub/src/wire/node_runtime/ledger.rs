@@ -42,7 +42,7 @@ pub struct LedgerEntry {
     /// The Node's last receipt (accepted, running, unknown or finished with its result).
     pub receipt: Option<Receipt>,
     /// Why the Node refused it before accepting it (`rejected`).
-    pub refusal: Option<ApiError>,
+    pub refusal: Option<Error>,
 }
 
 impl LedgerEntry {
@@ -189,33 +189,18 @@ impl NodeRuntime {
         Ok(n)
     }
 
-    /// Sends a ledger operation. One that may have been sent before is asked about instead: the
-    /// Node's receipt if it has one, `unknown` if it has none (it is never run a second time).
+    /// Dispatches a workspace mutation after the sender has ruled out a prior uncertain send.
     pub(super) async fn send_ledger(&self, l: &rt::CommandLease) -> ApiResult<Receipt> {
         fn parse<T: serde::de::DeserializeOwned>(v: &Value) -> ApiResult<Command<T>> {
             serde_json::from_value(v.clone())
-                .map_err(|e| ApiError::new(ErrorCode::Invalid, format!("stored command: {e}")))
-        }
-        let id = OperationId::try_from(l.operation.clone())
-            .map_err(|e| ApiError::new(ErrorCode::Invalid, format!("stored command: {e}")))?;
-        if l.maybe_sent {
-            return match self.node.operation(id.clone()).await {
-                Ok(r) => Ok(r),
-                Err(e) if e.code == ErrorCode::Invalid => Ok(Receipt {
-                    operation: id,
-                    state: Observed::Unknown {
-                        reason: "an earlier send may have reached the Node, which has no record of it: not sent again".into(),
-                    },
-                }),
-                Err(e) => Err(e),
-            };
+                .map_err(|e| Error::new(Code::Invalid, format!("stored command: {e}")))
         }
         match l.method.as_str() {
             "exec" => self.node.exec(parse(&l.request)?).await,
             "git_apply" => self.node.git_apply(parse(&l.request)?).await,
             "tidy_workspace" => self.node.tidy_workspace(parse(&l.request)?).await,
-            other => Err(ApiError::new(
-                ErrorCode::Unsupported,
+            other => Err(Error::new(
+                Code::Unsupported,
                 format!("{other} is not a ledger operation"),
             )),
         }

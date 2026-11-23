@@ -105,7 +105,7 @@ pub(super) struct Think {
 }
 
 /// The completion the Hub writes for an attempt it ends on its own word.
-fn ended(outcome: Outcome, stop_reason: &str, error: Option<ApiError>) -> Completion {
+fn ended(outcome: Outcome, stop_reason: &str, error: Option<Error>) -> Completion {
     Completion {
         outcome,
         stop_reason: stop_reason.into(),
@@ -513,7 +513,7 @@ impl NodeRuntime {
         tx: &mut W<'_>,
         method: &str,
         attempt: &str,
-        e: &ApiError,
+        e: &Error,
     ) -> Result<(), StoreError> {
         match method {
             "start_job" => {
@@ -538,10 +538,12 @@ impl NodeRuntime {
         &self,
         tx: &mut W<'_>,
         attempt: &str,
-        e: &ApiError,
+        e: &Error,
     ) -> Result<(), StoreError> {
-        let unknown_to_node =
-            e.code == ErrorCode::Invalid && e.safe_detail.contains("no such operation");
+        let unknown_to_node = e
+            .reason
+            .as_ref()
+            .is_some_and(|r| r.is(steve_types::devices::NodeReason::OperationNotFound));
         if unknown_to_node
             && job_commands::attempt_in(tx, attempt)?
                 .is_some_and(|a| a.state == AttemptState::Unknown)
@@ -549,8 +551,8 @@ impl NodeRuntime {
             let c = ended(
                 Outcome::Interrupted,
                 "error",
-                Some(ApiError::new(
-                    ErrorCode::Invalid,
+                Some(Error::new(
+                    Code::Invalid,
                     "the Node holds no record of this attempt: it did not run there",
                 )),
             );
@@ -768,20 +770,13 @@ impl Drop for Waiting {
 /// A Node's completion of a failed call as the one-shot error it was (`stop_reason` and the
 /// adapter's words).
 fn call_error(c: &Completion, timeout: Duration) -> OneShotError {
-    if c.error
-        .as_ref()
-        .is_some_and(|e| e.code == ErrorCode::Exhausted)
-        && c.error
-            .as_ref()
-            .is_some_and(|e| e.safe_detail == "the output limit was reached")
-    {
+    if c.error.as_ref().and_then(NodeStop::of) == Some(NodeStop::OutputLimit) {
         return OneShotError::OutputLimit;
     }
-    // the model reached for a tool the call does not allow: the same typed error as in process,
-    // so the caller can hand the request on (the Node reports it as its words)
     if c.error
         .as_ref()
-        .is_some_and(|e| e.safe_detail == steve_acp::TOOL_REFUSED)
+        .and_then(|e| e.reason.as_ref())
+        .is_some_and(|r| r.is(NodeReason::ToolRefused))
     {
         return OneShotError::ToolRefused;
     }
@@ -1306,7 +1301,7 @@ mod tests {
         let refused = ended(
             Outcome::Failed,
             "error",
-            Some(ApiError::new(ErrorCode::Internal, steve_acp::TOOL_REFUSED)),
+            Some(NodeReason::tool_refused(steve_acp::TOOL_REFUSED)),
         );
         assert!(matches!(
             call_error(&refused, Duration::from_secs(1)),
@@ -1315,7 +1310,7 @@ mod tests {
         let other = ended(
             Outcome::Failed,
             "error",
-            Some(ApiError::new(ErrorCode::Internal, "the provider said no")),
+            Some(Error::new(Code::Internal, "the provider said no")),
         );
         assert!(matches!(
             call_error(&other, Duration::from_secs(1)),

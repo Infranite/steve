@@ -58,8 +58,8 @@ fn now() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
-fn err(code: ErrorCode, m: impl Into<String>) -> ApiError {
-    ApiError::new(code, m)
+fn err(code: Code, m: impl Into<String>) -> Error {
+    Error::new(code, m)
 }
 
 /// This binary's release identity; `None` for a development build, which is never upgraded.
@@ -80,7 +80,7 @@ fn op_name(op: &OperationId) -> ApiResult<&str> {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
     {
-        return Err(err(ErrorCode::Invalid, "bad upgrade operation id"));
+        return Err(err(Code::Invalid, "bad upgrade operation id"));
     }
     Ok(s)
 }
@@ -244,24 +244,19 @@ impl Upgrader for ServiceUpgrader {
     async fn stage(&self, node: &LocalNode, u: NodeUpgrade) -> ApiResult<NodeUpgradeState> {
         let op = op_name(&u.operation)?.to_string();
         let _g = self.lock.lock().await;
-        if let Some(r) =
-            load(&self.home, &op).map_err(|e| err(ErrorCode::Internal, e.to_string()))?
-        {
+        if let Some(r) = load(&self.home, &op).map_err(|e| err(Code::Internal, e.to_string()))? {
             if r.request != u {
-                return Err(err(
-                    ErrorCode::Conflict,
-                    "another upgrade under this operation",
-                ));
+                return Err(err(Code::Conflict, "another upgrade under this operation"));
             }
             return Ok(r.state);
         }
         if records(&self.home).iter().any(|r| !r.state.is_terminal()) {
-            return Err(err(ErrorCode::Busy, "another upgrade is unfinished"));
+            return Err(err(Code::Busy, "another upgrade is unfinished"));
         }
         check_request(&self.build, &u)?;
         let files = node
             .hub_files()
-            .ok_or_else(|| err(ErrorCode::Offline, "not linked to the hub"))?;
+            .ok_or_else(|| err(Code::Unavailable, "not linked to the hub"))?;
         let mut r = Record {
             state: NodeUpgradeState {
                 operation: u.operation.clone(),
@@ -275,7 +270,7 @@ impl Upgrader for ServiceUpgrader {
             release: None,
             previous_release: None,
         };
-        save(&self.home, &r).map_err(|e| err(ErrorCode::Internal, e.to_string()))?;
+        save(&self.home, &r).map_err(|e| err(Code::Internal, e.to_string()))?;
         let state = r.state.clone();
         let home = self.home.clone();
         tokio::spawn(async move {
@@ -297,8 +292,8 @@ impl Upgrader for ServiceUpgrader {
         let op = op_name(&s.operation)?.to_string();
         let _g = self.lock.lock().await;
         let mut r = load(&self.home, &op)
-            .map_err(|e| err(ErrorCode::Internal, e.to_string()))?
-            .ok_or_else(|| err(ErrorCode::Invalid, "no such upgrade"))?;
+            .map_err(|e| err(Code::Internal, e.to_string()))?
+            .ok_or_else(|| err(Code::Invalid, "no such upgrade"))?;
         if r.state.phase != "staged" {
             return Ok(r.state);
         }
@@ -315,10 +310,10 @@ impl Upgrader for ServiceUpgrader {
             &self.build.version,
             &r.request.build.version,
         )
-        .map_err(ApiError::from)?;
+        .map_err(Error::from)?;
         if running > 0 && !s.force {
             return Err(err(
-                ErrorCode::Busy,
+                Code::Busy,
                 format!("the node still runs {running} turns or commands"),
             ));
         }
@@ -338,9 +333,9 @@ impl Upgrader for ServiceUpgrader {
     fn status(&self, operation: &OperationId) -> ApiResult<NodeUpgradeState> {
         let op = op_name(operation)?;
         load(&self.home, op)
-            .map_err(|e| err(ErrorCode::Internal, e.to_string()))?
+            .map_err(|e| err(Code::Internal, e.to_string()))?
             .map(|r| r.state)
-            .ok_or_else(|| err(ErrorCode::Invalid, "no such upgrade"))
+            .ok_or_else(|| err(Code::Invalid, "no such upgrade"))
     }
 }
 
@@ -348,7 +343,7 @@ impl Upgrader for ServiceUpgrader {
 fn check_request(me: &BuildIdentity, u: &NodeUpgrade) -> ApiResult<()> {
     if u.build.target != me.target {
         return Err(err(
-            ErrorCode::Invalid,
+            Code::Invalid,
             format!(
                 "a release for {}, this node is {}",
                 u.build.target, me.target
@@ -356,10 +351,7 @@ fn check_request(me: &BuildIdentity, u: &NodeUpgrade) -> ApiResult<()> {
         ));
     }
     if u.build == *me {
-        return Err(err(
-            ErrorCode::Invalid,
-            "this node already runs that release",
-        ));
+        return Err(err(Code::Invalid, "this node already runs that release"));
     }
     if steve_node_api::upgrade_bridge::release_version(&u.build.version).is_err()
         || u.build.commit.len() != 40
@@ -369,7 +361,7 @@ fn check_request(me: &BuildIdentity, u: &NodeUpgrade) -> ApiResult<()> {
         || u.size == 0
         || u.size > ARCHIVE_MAX
     {
-        return Err(err(ErrorCode::Invalid, "not a release this node takes"));
+        return Err(err(Code::Invalid, "not a release this node takes"));
     }
     Ok(())
 }
@@ -445,7 +437,7 @@ async fn fetch(files: &dyn HubFiles, u: &NodeUpgrade, path: &Path) -> anyhow::Re
                 c
             }
             // the link came and went: the same chunk again, for a while
-            Err(e) if matches!(e.code, ErrorCode::Offline | ErrorCode::Expired) => {
+            Err(e) if matches!(e.code, Code::Unavailable | Code::Stale) => {
                 let since = *failing_since.get_or_insert_with(Instant::now);
                 anyhow::ensure!(since.elapsed() < FETCH_PATIENCE, "fetching: {e}");
                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -849,7 +841,7 @@ mod tests {
         ) -> ApiResult<ReadChunk> {
             match access {
                 FileAccess::Operation { operation } if operation == self.op => {}
-                _ => return Err(err(ErrorCode::Denied, "not granted")),
+                _ => return Err(err(Code::Forbidden, "not granted")),
             }
             let end = (offset as usize + max.min(1000) as usize).min(self.bytes.len());
             Ok(ReadChunk {
@@ -1157,8 +1149,13 @@ mod tests {
                 )
                 .await
                 .unwrap_err();
-            assert_eq!(error.code, ErrorCode::Downgrade);
-            assert!(error.safe_detail.contains("refusing downgrade"));
+            assert_eq!(error.code, Code::Invalid);
+            assert!(
+                error
+                    .reason
+                    .unwrap()
+                    .is(steve_node_api::NodeReason::Downgrade)
+            );
             let after = load(root, "nup_older").unwrap().unwrap();
             assert_eq!(after.state.phase, "staged");
             assert!(after.previous_release.is_none());

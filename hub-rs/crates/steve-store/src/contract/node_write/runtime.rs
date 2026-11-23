@@ -805,7 +805,7 @@ const REALTIME_STOP_RECEIPT_SQL: &str = r#"INSERT OR IGNORE INTO realtime_output
    AND json_extract(c.receipt,'$.payload.state.outcome') IN ('succeeded','failed','cancelled','interrupted'))
   OR (c.state='rejected' AND c.maybe_sent=0 AND
    (json_extract(c.receipt,'$.payload.reason')='cancelled before it was sent'
-    OR (json_type(c.receipt,'$.payload.code')='text' AND json_type(c.receipt,'$.payload.retry')='text'))))
+    OR (json_type(c.receipt,'$.payload.code')='text' AND json_type(c.receipt,'$.payload.retry.kind')='text'))))
  ON CONFLICT(attempt_id) DO UPDATE SET
   ended=MAX(excluded.ended,COALESCE((SELECT MAX(at) FROM realtime_output_samples
                                   WHERE attempt_id=excluded.attempt_id),excluded.ended)),

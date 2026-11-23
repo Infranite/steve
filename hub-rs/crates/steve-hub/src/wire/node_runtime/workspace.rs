@@ -26,7 +26,7 @@ pub enum WorkspaceFact {
     /// It could not be made: `error` is the Node's.
     PrepareFailed {
         session: String,
-        error: Option<ApiError>,
+        error: Option<Error>,
     },
     /// The tidy of the item's worktree is over: `removed`, or it is kept (dirty, changed since,
     /// refused). `note`: why it was kept, or what else could not be done.
@@ -230,7 +230,7 @@ impl NodeRuntime {
         &self,
         tx: &mut W<'_>,
         op: &str,
-        error: Option<&ApiError>,
+        error: Option<&Error>,
         detail: &str,
     ) -> Result<Option<End>, StoreError> {
         let Some(session) = command_any_session_in(&self.store, op)? else {

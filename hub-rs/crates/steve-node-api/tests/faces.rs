@@ -370,7 +370,7 @@ async fn a_readonly_root_refuses_prepare_exec_and_git_apply() {
             n.prepare_workspace(cmd("op_p1", existing("item:a", at("notes", "x"))))
                 .await
         ),
-        ErrorCode::Denied
+        Code::Forbidden
     );
     let wt = Prepare {
         resource: "item:b".into(),
@@ -383,7 +383,7 @@ async fn a_readonly_root_refuses_prepare_exec_and_git_apply() {
     };
     assert_eq!(
         denied(n.prepare_workspace(cmd("op_p2", wt)).await),
-        ErrorCode::Denied
+        Code::Forbidden
     );
     // an unknown root is denied too
     assert_eq!(
@@ -391,7 +391,7 @@ async fn a_readonly_root_refuses_prepare_exec_and_git_apply() {
             n.prepare_workspace(cmd("op_p3", existing("item:c", at("elsewhere", ""))))
                 .await
         ),
-        ErrorCode::Denied
+        Code::Forbidden
     );
     // a read-write one works; once its root turns readonly, nothing runs or changes there
     let w = match result_of(
@@ -412,14 +412,14 @@ async fn a_readonly_root_refuses_prepare_exec_and_git_apply() {
     ]);
     assert_eq!(
         denied(n.exec(cmd("op_e2", exec_in(w.clone(), "true"))).await),
-        ErrorCode::Denied
+        Code::Forbidden
     );
     assert_eq!(
         denied(
             n.git_apply(cmd("op_g1", rebase(w.clone(), &facts("abc"))))
                 .await
         ),
-        ErrorCode::Denied
+        Code::Forbidden
     );
     // reading is still fine
     assert!(n.git_facts(git_query(w)).await.is_ok());
@@ -477,12 +477,12 @@ async fn a_readonly_root_is_listed_read_and_scanned() {
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Conflict
+        Code::Conflict
     );
     // a root the Node does not allow is denied
     assert_eq!(
         n.list_root(at("etc", ""), page(10)).await.unwrap_err().code,
-        ErrorCode::Denied
+        Code::Forbidden
     );
     let r = n
         .scan(cmd(
@@ -644,7 +644,7 @@ async fn scan_pages_share_one_manifest_and_only_a_clean_end_is_complete() {
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Invalid
+        Code::Invalid
     );
     // a cursor of one scan does not page another
     let other = pages[0].next.clone();
@@ -659,7 +659,7 @@ async fn scan_pages_share_one_manifest_and_only_a_clean_end_is_complete() {
         .await
         .unwrap_err()
         .code,
-        ErrorCode::Invalid
+        Code::Invalid
     );
     // include and exclude patterns are the glob's; a bad one is refused
     n.put_file("notes", "d/x.txt", b"x");
@@ -691,7 +691,7 @@ async fn scan_pages_share_one_manifest_and_only_a_clean_end_is_complete() {
     };
     assert_eq!(
         n.scan(cmd("op_s7", bad)).await.unwrap_err().code,
-        ErrorCode::Invalid
+        Code::Invalid
     );
 }
 
@@ -707,7 +707,7 @@ async fn git_reads_are_typed_and_applies_check_what_they_were_decided_on() {
     // nothing scripted: the fake does not pretend
     assert_eq!(
         n.git_facts(git_query(w.clone())).await.unwrap_err().code,
-        ErrorCode::Unsupported
+        Code::Unsupported
     );
     let mut f = facts("abc");
     f.reads = vec![GitReadFact {
@@ -724,10 +724,7 @@ async fn git_reads_are_typed_and_applies_check_what_they_were_decided_on() {
     let got = n.git_facts(q.clone()).await.unwrap();
     assert_eq!(got.reads, f.reads);
     q.reads = vec![GitRead::Status];
-    assert_eq!(
-        n.git_facts(q).await.unwrap_err().code,
-        ErrorCode::Unsupported
-    );
+    assert_eq!(n.git_facts(q).await.unwrap_err().code, Code::Unsupported);
     // decided on an older revision or HEAD: stale, nothing recorded
     let mut old = f.clone();
     old.head = "zzz".into();
@@ -736,7 +733,7 @@ async fn git_reads_are_typed_and_applies_check_what_they_were_decided_on() {
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Stale
+        Code::Stale
     );
     let OperationResult::Git(after) = result_of(
         n.git_apply(cmd("op_g1", rebase(w.clone(), &f)))
@@ -753,7 +750,7 @@ async fn git_reads_are_typed_and_applies_check_what_they_were_decided_on() {
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Stale
+        Code::Stale
     );
     // a push credential goes only as a header
     let env = SecretRef {
@@ -767,7 +764,7 @@ async fn git_reads_are_typed_and_applies_check_what_they_were_decided_on() {
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Invalid
+        Code::Invalid
     );
 }
 
@@ -819,13 +816,13 @@ async fn exec_answers_an_exec_result_and_masks_its_secrets() {
     assert_eq!(secrets.taken().len(), 1);
     // a new operation with the same secret: it was taken already
     let e = n.exec(cmd("op_e3", spec.clone())).await.unwrap_err();
-    assert_eq!(e.code, ErrorCode::Stale);
+    assert_eq!(e.code, Code::Stale);
     // a file needs the Node to offer it
     spec.secrets[0].how = SecretDelivery::File { env: "KEY".into() };
     secrets.give("op_e4", "vault:k", b"s3cr3t");
     assert_eq!(
         n.exec(cmd("op_e4", spec.clone())).await.unwrap_err().code,
-        ErrorCode::Unsupported
+        Code::Unsupported
     );
     n.set_features(vec![FEATURE_SECRET_FILE.into()]);
     n.exec(cmd("op_e4", spec)).await.unwrap();
@@ -834,7 +831,7 @@ async fn exec_answers_an_exec_result_and_masks_its_secrets() {
     late.limits.deadline = Timestamp(1);
     assert_eq!(
         n.exec(cmd("op_e5", late)).await.unwrap_err().code,
-        ErrorCode::Expired
+        Code::Stale
     );
 }
 
@@ -845,7 +842,7 @@ async fn a_secret_is_taken_once_and_only_by_its_operation() {
     let op = |x: &str| OperationId::new(x).unwrap();
     assert_eq!(
         s.take(op("op_2"), "gh".into()).await.unwrap_err().code,
-        ErrorCode::Denied
+        Code::Forbidden
     );
     assert_eq!(
         s.take(op("op_1"), "gh".into()).await.unwrap().expose(),
@@ -853,11 +850,11 @@ async fn a_secret_is_taken_once_and_only_by_its_operation() {
     );
     assert_eq!(
         s.take(op("op_1"), "gh".into()).await.unwrap_err().code,
-        ErrorCode::Stale
+        Code::Stale
     );
     assert_eq!(
         s.take(op("op_1"), "never".into()).await.unwrap_err().code,
-        ErrorCode::Denied
+        Code::Forbidden
     );
 }
 
@@ -912,21 +909,15 @@ async fn a_refused_command_leaves_its_secret_with_the_hub() {
 
     // busy: refused, nothing taken; the same operation sent again runs and takes it then
     secrets.give("op_busy", "vault:k", b"s3cr3t");
-    n.refuse("exec", Some(ErrorCode::Busy));
+    n.refuse("exec", Some(Error::later(Code::Busy, "scripted refusal")));
     let c = cmd("op_busy", with_key("deploy"));
     let e = n.exec(c.clone()).await.unwrap_err();
-    assert_eq!(e.code, ErrorCode::Busy);
-    assert_eq!(e.retry, RetryClass::SameOperation);
+    assert_eq!(e.code, Code::Busy);
+    assert_eq!(e.retry, Retry::Later { after_ms: None });
     assert!(secrets.taken().is_empty());
     n.refuse("exec", None);
-    n.refuse_next(
-        "exec",
-        ApiError::new(ErrorCode::Exhausted, "scripted: no capacity"),
-    );
-    assert_eq!(
-        n.exec(c.clone()).await.unwrap_err().code,
-        ErrorCode::Exhausted
-    );
+    n.refuse_next("exec", Error::new(Code::Exhausted, "scripted: no capacity"));
+    assert_eq!(n.exec(c.clone()).await.unwrap_err().code, Code::Exhausted);
     assert!(secrets.taken().is_empty());
     n.exec(c).await.unwrap();
     assert_eq!(secrets.taken().len(), 1);
@@ -937,18 +928,18 @@ async fn a_refused_command_leaves_its_secret_with_the_hub() {
     late.limits.deadline = Timestamp(1);
     assert_eq!(
         n.exec(cmd("op_late", late)).await.unwrap_err().code,
-        ErrorCode::Expired
+        Code::Stale
     );
     n.script_once(
         "exec",
-        Scripted::Refuse(ApiError::new(ErrorCode::Offline, "scripted")),
+        Scripted::Refuse(Error::new(Code::Unavailable, "scripted")),
     );
     assert_eq!(
         n.exec(cmd("op_late", with_key("deploy")))
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Offline
+        Code::Unavailable
     );
     assert_eq!(secrets.taken().len(), 1);
 
@@ -965,7 +956,7 @@ async fn a_refused_command_leaves_its_secret_with_the_hub() {
     let moved = push(w.clone(), &facts("old"), Some(auth.clone()));
     assert_eq!(
         n.git_apply(cmd("op_push", moved)).await.unwrap_err().code,
-        ErrorCode::Stale
+        Code::Stale
     );
     assert_eq!(secrets.taken().len(), 1);
 
@@ -979,14 +970,14 @@ async fn a_refused_command_leaves_its_secret_with_the_hub() {
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Denied
+        Code::Forbidden
     );
     assert_eq!(
         n.git_apply(cmd("op_push", push(w.clone(), &f, Some(auth))))
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Denied
+        Code::Forbidden
     );
     assert_eq!(secrets.taken().len(), 1, "{:?}", secrets.taken());
     let log: Vec<_> = n.log().into_iter().map(|(m, _)| m).collect();
@@ -1028,7 +1019,7 @@ async fn only_a_listed_history_is_located() {
         harness: "claude-code".into(),
         key: "cc:/etc/passwd".into(),
     };
-    assert_eq!(n.locate(forged).await.unwrap_err().code, ErrorCode::Invalid);
+    assert_eq!(n.locate(forged).await.unwrap_err().code, Code::Invalid);
 }
 
 #[tokio::test]

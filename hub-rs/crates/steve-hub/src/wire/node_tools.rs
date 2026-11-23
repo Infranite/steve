@@ -23,15 +23,12 @@ pub(crate) fn delivery_execution() -> Option<(NodeId, ExecutionRef)> {
     DELIVERY_EXECUTION.try_with(Clone::clone).ok()
 }
 
-pub(crate) fn internal(e: impl std::fmt::Display) -> ApiError {
+pub(crate) fn internal(e: impl std::fmt::Display) -> Error {
     tracing::error!("node host: {e}");
-    ApiError::new(ErrorCode::Internal, "Node host storage unavailable")
+    Error::new(Code::Internal, "Node host storage unavailable")
 }
-fn denied() -> ApiError {
-    ApiError::new(
-        ErrorCode::Denied,
-        "execution is not authorized on this Node",
-    )
+fn denied() -> Error {
+    Error::new(Code::Forbidden, "execution is not authorized on this Node")
 }
 
 /// Exact execution and authenticated Node binding. Historical lookup is only for a known call;
@@ -337,13 +334,13 @@ impl NodeTools {
     pub fn install(&self, service: Arc<dyn Service>) -> ApiResult<()> {
         self.service
             .set(service)
-            .map_err(|_| ApiError::new(ErrorCode::Conflict, "tool service already installed"))
+            .map_err(|_| Error::new(Code::Conflict, "tool service already installed"))
     }
     fn service(&self) -> ApiResult<Arc<dyn Service>> {
         self.service
             .get()
             .cloned()
-            .ok_or_else(|| ApiError::new(ErrorCode::Offline, "tool service not ready"))
+            .ok_or_else(|| Error::new(Code::Unavailable, "tool service not ready"))
     }
     async fn catalog_of(service: &dyn Service, caller: &Caller) -> ApiResult<Catalog> {
         let tools = match caller {
@@ -423,8 +420,8 @@ impl HubTools for NodeTools {
             return Ok(r);
         }
         let permit = self.permits.clone().try_acquire_owned().map_err(|_| {
-            ApiError::new(
-                ErrorCode::Exhausted,
+            Error::new(
+                Code::Exhausted,
                 "too many Steve tool calls running for this Node",
             )
         })?;
@@ -435,22 +432,22 @@ impl HubTools for NodeTools {
         let service = self.service()?;
         let catalog = Self::catalog_of(&*service, &session).await?;
         if catalog.revision != q.catalog {
-            return Err(ApiError::new(ErrorCode::Stale, "tool catalog changed"));
+            return Err(Error::new(Code::Stale, "tool catalog changed"));
         }
         if !catalog.tools.iter().any(|t| t.name == q.name)
             && !(matches!(session, Caller::Session(_)) && service.allows_unlisted())
         {
-            return Err(ApiError::new(ErrorCode::Denied, "tool outside catalog"));
+            return Err(Error::new(Code::Forbidden, "tool outside catalog"));
         }
         if !q.args.is_object() {
-            return Err(ApiError::new(
-                ErrorCode::Invalid,
+            return Err(Error::new(
+                Code::Invalid,
                 "tool arguments must be an object",
             ));
         }
         if q.deadline.0 <= steve_store::now() {
-            return Err(ApiError::new(
-                ErrorCode::Expired,
+            return Err(Error::new(
+                Code::Stale,
                 "tool deadline elapsed before execution",
             ));
         }
@@ -486,9 +483,10 @@ impl HubTools for NodeTools {
         };
         if let Some(r) = fenced {
             if q.name == super::diagnostics::TOOL {
-                return self.saved(&key, None).await?.ok_or_else(|| {
-                    ApiError::new(ErrorCode::Invalid, "diagnostic receipt disappeared")
-                });
+                return self
+                    .saved(&key, None)
+                    .await?
+                    .ok_or_else(|| Error::new(Code::Invalid, "diagnostic receipt disappeared"));
             }
             return Ok(r);
         }
@@ -523,14 +521,11 @@ impl HubTools for NodeTools {
             };
             let result = match authorized {
                 _ if cancelled => ToolResult::Failed {
-                    error: ApiError::new(
-                        ErrorCode::Denied,
-                        "tool call cancelled before invocation",
-                    ),
+                    error: Error::new(Code::Forbidden, "tool call cancelled before invocation"),
                 },
                 Err(error) => ToolResult::Failed { error },
                 Ok(_) if steve_store::now() >= q.deadline.0 => ToolResult::Failed {
-                    error: ApiError::new(ErrorCode::Expired, "tool expired before invocation"),
+                    error: Error::new(Code::Stale, "tool expired before invocation"),
                 },
                 Ok(_) => match super::diagnostics::in_execution(
                     &q.execution,
@@ -591,8 +586,8 @@ impl HubTools for NodeTools {
                         }
                     }
                     Err(text) => ToolResult::Failed {
-                        error: ApiError::new(
-                            ErrorCode::Invalid,
+                        error: Error::new(
+                            Code::Invalid,
                             super::tool_service::bound_result(&q.name, text),
                         ),
                     },
@@ -603,7 +598,7 @@ impl HubTools for NodeTools {
                 Ok(result)
             })
             .await?;
-            Ok::<_, ApiError>(result)
+            Ok::<_, Error>(result)
         });
         match tokio::time::timeout(std::time::Duration::from_millis(wait_ms), task).await {
             Ok(Ok(Ok(result))) => Ok(result),
@@ -617,7 +612,7 @@ impl HubTools for NodeTools {
     async fn call_status(&self, key: ToolKey) -> ApiResult<ToolResult> {
         self.saved(&key, None)
             .await?
-            .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "unknown ToolKey"))
+            .ok_or_else(|| Error::new(Code::Invalid, "unknown ToolKey"))
     }
     async fn cancel_call(&self, key: ToolKey) -> ApiResult<ToolResult> {
         let (store, node, ledger) = (self.store.clone(), self.node.clone(), self.ledger.clone());
@@ -626,7 +621,7 @@ impl HubTools for NodeTools {
             let current = caller(&store, &node, &key.execution, false)?;
             let row = ledger
                 .read(&encoded, None)?
-                .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "unknown ToolKey"))?;
+                .ok_or_else(|| Error::new(Code::Invalid, "unknown ToolKey"))?;
             if row.name == super::diagnostics::TOOL {
                 super::diagnostics::authorize_cached(&store, &current, &row.result)
                     .map_err(|_| denied())?;
@@ -781,10 +776,7 @@ pub(crate) mod tests {
         ));
         let mut changed = q.clone();
         changed.args = json!({"a":3});
-        assert_eq!(
-            tools.call(changed).await.unwrap_err().code,
-            ErrorCode::Conflict
-        );
+        assert_eq!(tools.call(changed).await.unwrap_err().code, Code::Conflict);
         drop(tools);
         let tools =
             NodeTools::open(h.store.clone(), NodeId::new("local").unwrap(), h.dir.path()).unwrap();
@@ -804,12 +796,12 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!(
             other.call_status(q.key()).await.unwrap_err().code,
-            ErrorCode::Denied
+            Code::Forbidden
         );
         steve_store::testkit::hub::node_fixtures::end_tool_session(&h.store).unwrap();
         assert_eq!(
             tools.call_status(q.key()).await.unwrap_err().code,
-            ErrorCode::Denied
+            Code::Forbidden
         );
     }
     /// A harness lists Steve's tools when it connects, before any attempt runs: its session lists
@@ -832,7 +824,7 @@ pub(crate) mod tests {
         let s1 = SessionId::new("s1").unwrap();
         let listed = tools.session_catalog(s1.clone()).await.unwrap();
         assert_eq!(listed.tools[0].name, "test");
-        assert_eq!(tools.call(q).await.unwrap_err().code, ErrorCode::Denied);
+        assert_eq!(tools.call(q).await.unwrap_err().code, Code::Forbidden);
         let other = NodeTools::open(
             h.store.clone(),
             NodeId::new("other").unwrap(),
@@ -842,12 +834,12 @@ pub(crate) mod tests {
         other.install(mock()).unwrap();
         assert_eq!(
             other.session_catalog(s1.clone()).await.unwrap_err().code,
-            ErrorCode::Denied
+            Code::Forbidden
         );
         steve_store::testkit::hub::node_fixtures::end_tool_session(&h.store).unwrap();
         assert_eq!(
             tools.session_catalog(s1).await.unwrap_err().code,
-            ErrorCode::Denied
+            Code::Forbidden
         );
     }
     /// A Steve tool that does not end the turn (`steve_update`, say).
@@ -996,11 +988,11 @@ pub(crate) mod tests {
             .unwrap();
             assert_eq!(
                 tools.catalog(h.exec.clone()).await.unwrap_err().code,
-                ErrorCode::Denied
+                Code::Forbidden
             );
             let mut fresh = q.clone();
             fresh.id = CallId::new(format!("revoked{index}")).unwrap();
-            assert_eq!(tools.call(fresh).await.unwrap_err().code, ErrorCode::Denied);
+            assert_eq!(tools.call(fresh).await.unwrap_err().code, Code::Forbidden);
             assert!(matches!(
                 tools.call(q.clone()).await.unwrap(),
                 ToolResult::Completed { .. }
@@ -1092,9 +1084,7 @@ pub(crate) mod tests {
             if allowed {
                 assert!(matches!(r, ToolResult::Completed { .. }), "{r:?}");
             } else {
-                assert!(
-                    matches!(r, ToolResult::Failed { error } if error.code == ErrorCode::Denied)
-                );
+                assert!(matches!(r, ToolResult::Failed { error } if error.code == Code::Forbidden));
             }
             assert_eq!(service.calls.load(Ordering::SeqCst), usize::from(allowed));
         }
@@ -1139,14 +1129,11 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(
             tools.catalog(h.exec.clone()).await.unwrap_err().code,
-            ErrorCode::Denied
+            Code::Forbidden
         );
         let mut revoked = q.clone();
         revoked.id = CallId::new("membership_revoked").unwrap();
-        assert_eq!(
-            tools.call(revoked).await.unwrap_err().code,
-            ErrorCode::Denied
-        );
+        assert_eq!(tools.call(revoked).await.unwrap_err().code, Code::Forbidden);
         h.store
             .bots()
             .set_workspaces("shared_bot", &["other".into(), "default".into()])
@@ -1156,7 +1143,7 @@ pub(crate) mod tests {
         disabled.id = CallId::new("bot_disabled").unwrap();
         assert_eq!(
             tools.call(disabled).await.unwrap_err().code,
-            ErrorCode::Denied
+            Code::Forbidden
         );
         assert_eq!(service.calls.load(Ordering::SeqCst), 1);
     }
@@ -1318,7 +1305,7 @@ pub(crate) mod tests {
         over.id = CallId::new("over").unwrap();
         assert_eq!(
             tools.call(over.clone()).await.unwrap_err().code,
-            ErrorCode::Exhausted
+            Code::Exhausted
         );
         let row = tools
             .ledger
@@ -1632,19 +1619,16 @@ pub(crate) mod tests {
         );
         assert_eq!(
             tools.call(call("no_update")).await.unwrap_err().code,
-            ErrorCode::Denied
+            Code::Forbidden
         );
         let mut deliver = call("no_deliver");
         deliver.name = steve_mcp::tools::DELIVER.into();
-        assert_eq!(
-            tools.call(deliver).await.unwrap_err().code,
-            ErrorCode::Denied
-        );
+        assert_eq!(tools.call(deliver).await.unwrap_err().code, Code::Forbidden);
         assert_eq!(
             authorize(&store, &NodeId::new("local").unwrap(), &host.exec, true)
                 .unwrap_err()
                 .code,
-            ErrorCode::Denied,
+            Code::Forbidden,
             "file/exec authorization remains gated",
         );
         for (id, args, ends) in [
@@ -1687,15 +1671,15 @@ pub(crate) mod tests {
         steve_store::testkit::hub::node_fixtures::set_messages_space_chan(&store, &origin).unwrap();
         assert_eq!(
             tools.call(debug_query.clone()).await.unwrap_err().code,
-            ErrorCode::Denied
+            Code::Forbidden
         );
         assert_eq!(
             tools.call_status(debug_query.key()).await.unwrap_err().code,
-            ErrorCode::Denied
+            Code::Forbidden
         );
         assert_eq!(
             tools.cancel_call(debug_query.key()).await.unwrap_err().code,
-            ErrorCode::Denied
+            Code::Forbidden
         );
         let mut safe_query = debug_query.clone();
         safe_query.id = CallId::new("shared_debug").unwrap();
@@ -1719,7 +1703,7 @@ pub(crate) mod tests {
         steve_store::testkit::hub::node_fixtures::set_items(&store).unwrap();
         assert_eq!(
             tools.catalog(host.exec.clone()).await.unwrap_err().code,
-            ErrorCode::Denied
+            Code::Forbidden
         );
         steve_store::testkit::hub::node_fixtures::assign_foreign_session_scope(&store).unwrap();
 
@@ -1728,7 +1712,7 @@ pub(crate) mod tests {
         let mut late = call("u2");
         late.args = json!({"now": "too late", "plan": []});
         let e = tools.call(late).await.unwrap_err();
-        assert_eq!(e.code, ErrorCode::Denied, "{e:?}");
+        assert_eq!(e.code, Code::Forbidden, "{e:?}");
         let now: String = steve_store::testkit::hub::node_fixtures::items_now_i1(&store).unwrap();
         assert_eq!(now, before_end, "nothing ran for an ended session");
     }

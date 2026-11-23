@@ -35,8 +35,8 @@ struct Faulty {
     reads: AtomicUsize,
 }
 
-fn offline() -> ApiError {
-    ApiError::new(ErrorCode::Offline, "gone")
+fn offline() -> Error {
+    Error::new(Code::Unavailable, "gone")
 }
 
 impl Faulty {

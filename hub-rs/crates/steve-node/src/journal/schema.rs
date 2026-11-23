@@ -3,7 +3,7 @@
 use super::*;
 
 /// 4: operation states are checked columns and restart recovery is an indexed bulk update.
-pub(super) const VERSION: i64 = 4;
+pub(super) const VERSION: i64 = 5;
 const BASE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS attempts (attempt TEXT PRIMARY KEY, execution TEXT NOT NULL, op TEXT NOT NULL);
@@ -160,8 +160,8 @@ impl Tx<'_> {
         if groups.into_iter().any(|pgid| {
             !(2..=i32::MAX as i64).contains(&pgid) || !crate::procs::state(pgid, None).gone()
         }) {
-            return Err(ApiError::new(
-                ErrorCode::Unsupported,
+            return Err(Error::new(
+                Code::Unsupported,
                 "stop the old Node's processes before upgrading the journal",
             ));
         }

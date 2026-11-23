@@ -175,14 +175,14 @@ async fn unknown_methods_are_unsupported_and_the_link_stays() {
         )
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unsupported);
+    assert_eq!(e.code, Code::Unsupported);
     // a Node→Hub method sent to the Node is unknown there too
     let e = w
         .hub_conn
         .call("events.commit", json!({"events": []}), None)
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unsupported);
+    assert_eq!(e.code, Code::Unsupported);
     assert!(w.remote.probe(false).await.is_ok(), "still up");
 }
 
@@ -192,7 +192,7 @@ async fn a_node_without_harness_updates_refuses_a_remote_upgrade() {
     let w = wire(fake.clone(), 1);
     assert_eq!(
         w.remote.harness_updates(false).await.unwrap_err().code,
-        ErrorCode::Unsupported
+        Code::Unsupported
     );
     let c = Command {
         id: op("optional_upgrade"),
@@ -205,14 +205,14 @@ async fn a_node_without_harness_updates_refuses_a_remote_upgrade() {
         },
     };
     let error = w.remote.upgrade_harness(c).await.unwrap_err();
-    assert_eq!(error.code, ErrorCode::Unsupported);
+    assert_eq!(error.code, Code::Unsupported);
     assert!(error.safe_detail.contains("harness updates unsupported"));
     assert_eq!(
         fake.operation(op("optional_upgrade"))
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Invalid
+        Code::Invalid
     );
 }
 
@@ -260,7 +260,7 @@ async fn live_capacity_round_trips_and_reports_the_executor_value() {
     }
     assert_eq!(
         w.remote.set_session_capacity(0).await.unwrap_err().code,
-        ErrorCode::Invalid
+        Code::Invalid
     );
     assert_eq!(w.remote.probe(false).await.unwrap().capacity.sessions, 256);
 }
@@ -281,13 +281,13 @@ async fn controlled_install_requires_a_colocated_current_node_and_serves_the_new
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Denied
+        Code::Forbidden
     );
     w.remote.set_colocated(true);
     // An up-to-date transport reaches the fake Node's default Unsupported face, rather than
     // sending arbitrary npm arguments or falling back to filesystem operations on the Hub.
     let error = w.remote.install_harness(command).await.unwrap_err();
-    assert_eq!(error.code, ErrorCode::Unsupported);
+    assert_eq!(error.code, Code::Unsupported);
     assert!(
         error
             .safe_detail
@@ -346,7 +346,7 @@ async fn an_upgrade_is_staged_switched_and_asked_about_over_the_link() {
     };
     assert_eq!(
         w.remote.upgrade_stage(ask.clone()).await.unwrap_err().code,
-        ErrorCode::Unsupported
+        Code::Unsupported
     );
     fake.set_upgradable(true);
     assert_eq!(
@@ -399,7 +399,7 @@ async fn a_removal_is_begun_confirmed_and_asked_about_over_the_link() {
     };
     assert_eq!(
         w.remote.remove_begin(ask.clone()).await.unwrap_err().code,
-        ErrorCode::Unsupported
+        Code::Unsupported
     );
     assert!(fake.removal_calls().is_empty());
     fake.set_features(vec![FEATURE_NODE_REMOVE.into()]);
