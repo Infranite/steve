@@ -96,3 +96,14 @@ pub fn latest_system_text(c: &mut impl Read, session: &str) -> Result<Option<Str
     )?
     .flatten())
 }
+
+pub fn device(r: &mut impl Read, ws: &str, session: &str) -> Result<Option<String>> {
+    r.one(
+        Query::select()
+            .column("device_id")
+            .from("sessions")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("id").eq(session)),
+        |row| row.get(0),
+    )
+}

@@ -102,21 +102,6 @@ pub struct Wired {
     pub(crate) core: steve_core::Core,
 }
 
-/// Process-wide SQLite settings, before the first connection: no memory statistics. With them on (the
-/// default), every SQLite allocation takes one global mutex, which serializes the read pool.
-pub fn tune_sqlite() {
-    // SAFETY: sqlite3_config is only valid before sqlite3_initialize; this runs first thing in main
-    let rc = unsafe {
-        rusqlite::ffi::sqlite3_config(
-            rusqlite::ffi::SQLITE_CONFIG_MEMSTATUS,
-            0 as std::os::raw::c_int,
-        )
-    };
-    if rc != rusqlite::ffi::SQLITE_OK {
-        tracing::warn!("sqlite3_config(MEMSTATUS) = {rc}");
-    }
-}
-
 /// The core's configuration: every model list is what the installation names, none by default (a
 /// call without one runs on the harness's own default model).
 fn core_config(cfg: &Config, vars: &Vars) -> steve_core::CoreConfig {
@@ -753,12 +738,7 @@ mod tests {
             assert_eq!(w.node.is_none(), copy);
             let store =
                 steve_store::Store::open(cfg.db_path(), steve_store::FnPublisher(|_| {})).unwrap();
-            let registered: i64 = store
-                .reader(|c| {
-                    c.query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))
-                        .map_err(steve_store::StoreError::from)
-                })
-                .unwrap();
+            let registered = steve_store::testkit::hub::hub_fixtures::node_count(&store).unwrap();
             assert_eq!(registered, 0, "enabling a listener never registers a Node");
             w.domain.shutdown().await;
         }
@@ -824,15 +804,7 @@ mod tests {
         assert_eq!(p.text, "答案");
         let store =
             steve_store::Store::open(cfg.db_path(), steve_store::FnPublisher(|_| {})).unwrap();
-        let n: i64 = store
-            .reader(|c| {
-                Ok::<_, steve_store::StoreError>(c.query_row(
-                    "SELECT COUNT(*) FROM runtime_jobs",
-                    [],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap();
+        let n = steve_store::testkit::hub::hub_fixtures::job_count(&store).unwrap();
         assert_eq!(n, 1);
         w.domain.shutdown().await;
     }

@@ -454,10 +454,7 @@ mod tests {
         fs::create_dir(home.path().join("workspaces")).unwrap();
         fs::write(home.path().join("workspaces/note.txt"), "work").unwrap();
         let db = home.path().join("db.sqlite3");
-        rusqlite::Connection::open(&db)
-            .unwrap()
-            .execute_batch("CREATE TABLE record(v);")
-            .unwrap();
+        steve_store::db::testkit::set_schema(&db, 1, None).unwrap();
         for reason in [
             Reason::Manual,
             Reason::Diagnostic,
@@ -502,10 +499,7 @@ mod tests {
         )
         .unwrap();
         let db = home.path().join("db.sqlite3");
-        rusqlite::Connection::open(&db)
-            .unwrap()
-            .execute_batch("CREATE TABLE record(v);")
-            .unwrap();
+        steve_store::db::testkit::set_schema(&db, 1, None).unwrap();
         let manifest = run(
             home.path(),
             &db,

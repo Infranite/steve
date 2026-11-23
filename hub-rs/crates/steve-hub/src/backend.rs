@@ -91,25 +91,7 @@ pub struct ImportedSession {
 
 /// What `summary()` adds to one item: computed per item by default, or for a whole workspace in
 /// a handful of queries by [`Repo::item_extras`].
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct ItemExtras {
-    pub goal: String,
-    pub goals: usize,
-    pub tags: Vec<String>,
-    pub deps: Vec<String>,
-    /// `(id, status)` of the item's sessions by `no`.
-    pub sessions: Vec<(String, String)>,
-    pub open: Vec<String>,
-    /// Queued rows of the last non-ended session.
-    pub queued: usize,
-    pub closeout: Option<steve_core::pull::Closeout>,
-    /// Graph identity and pause flag, plus failed children only when the graph matches the item cycle.
-    pub workflow_paused: Option<bool>,
-    pub workflow_cycle: Option<i64>,
-    pub workflow_failed: Vec<String>,
-    pub workflow_attempt: Option<i64>,
-    pub workflow_superseded: bool,
-}
+pub type ItemExtras = steve_store::state_batches::ItemExtras<steve_core::pull::Closeout>;
 
 /// Per-bot extras of `botOut` and `allBots` for one workspace.
 #[derive(Debug, Clone, Default, PartialEq)]

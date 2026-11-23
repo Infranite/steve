@@ -28,6 +28,7 @@ use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use steve_modules::{Modules, Registry};
 use steve_runtime::testkit::{eventually_sync, on_timeout};
+use steve_store::testkit::hub::wiring as fixtures;
 
 /// The models of the gateway: `tool` reaches for a tool on the chat answer, `next` would answer it.
 /// Every call is recorded as (model, what it was).
@@ -163,12 +164,6 @@ impl AgentRuntime for NoSessions {
     }
 }
 
-fn count(store: &steve_store::Store, sql: &str) -> i64 {
-    store
-        .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(sql, [], |r| r.get(0))?))
-        .unwrap()
-}
-
 struct ChannelFixture {
     _dir: tempfile::TempDir,
     _keys: tempfile::TempDir,
@@ -189,15 +184,7 @@ fn channel_fixture(gateway: Arc<dyn steve_core::ModelGateway>) -> ChannelFixture
         steve_store::Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher)
             .unwrap();
     store.ensure_workspace().unwrap();
-    store
-        .with_conn(|c| {
-            c.execute_batch(&format!(
-                "INSERT INTO users (id, workspace_id, subject, name, role, created) VALUES ('{ME}', '{WS}', 'dev', 'Dev', 'owner', 1);
-                 INSERT INTO workspace_members (workspace_id, user_id, role, created) VALUES ('{WS}', '{ME}', 'owner', 1);"
-            ))?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::seed_channel_owner(&store, WS, ME).unwrap();
 
     let core = Core::new(
         steve_core::repo::Db::new(store.clone()),
@@ -287,18 +274,9 @@ async fn a_trigger_word_whose_answer_needs_tools_makes_exactly_one_item() {
         )
         .await
         .unwrap();
-    store
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE channel_settings SET trigger = ? WHERE connection_id = ?",
-                rusqlite::params![
-                    json!({"on": true, "words": ["/ai"], "where": ["dm:*"], "who": ["me"], "reply": "thread", "mark": true}).to_string(),
-                    me
-                ],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    store.write(|w| fixtures::set_channel_trigger(w, &me, &json!({
+        "on": true, "words": ["/ai"], "where": ["dm:*"], "who": ["me"], "reply": "thread", "mark": true
+    }))).unwrap();
     // a reply drafted for someone else's message is no hand-off: its model reached for a tool,
     // the next model wrote it
     eventually_sync("both fallback model answers are recorded", || {
@@ -307,7 +285,7 @@ async fn a_trigger_word_whose_answer_needs_tools_makes_exactly_one_item() {
     .await;
     assert_eq!(models.answers(), ["tool", "next"]);
     models.calls.lock().unwrap().clear();
-    let items = || count(&store, "SELECT count(*) FROM items");
+    let items = || fixtures::item_count(&store).unwrap();
     let before = items();
 
     channels
@@ -328,21 +306,9 @@ async fn a_trigger_word_whose_answer_needs_tools_makes_exactly_one_item() {
         ["tool"],
         "the chat answer is not tried on the next model: it is handed on"
     );
-    assert_eq!(
-        count(
-            &store,
-            "SELECT count(*) FROM route_log WHERE outcome = 'needs_tools' AND item_id IS NOT NULL"
-        ),
-        1
-    );
+    assert_eq!(fixtures::tool_route_count(&store).unwrap(), 1);
     // the conversation of the chat says so, with the item
-    assert_eq!(
-        count(
-            &store,
-            "SELECT count(*) FROM messages WHERE space LIKE 'chan:%' AND author = 'steve' AND item_id IS NOT NULL"
-        ),
-        1
-    );
+    assert_eq!(fixtures::steve_channel_item_messages(&store).unwrap(), 1);
 }
 
 const RESEARCH_TEXT: &str = "只读到部分片段，无法覆盖最近两天。大家在讨论个人 Agent。";
@@ -393,11 +359,11 @@ async fn research_fixture(
         false,
         &[("ulilei", "李雷")],
     );
-    h.store.transaction(|tx| {
-        tx.write(|w| steve_channels::spaces::ensure_channel_settings(w, WS, &h.me, steve_channels::spaces::Mode::Own, 1))?;
-        tx.execute("UPDATE channel_settings SET trigger=? WHERE connection_id=?", rusqlite::params![
-            json!({"on":true,"words":["/ai"],"where":["*"],"who":["me"],"reply":"thread","mark":true}).to_string(), h.me
-        ])?;
+    h.store.write(|tx| {
+        steve_channels::spaces::ensure_channel_settings(tx, WS, &h.me, steve_channels::spaces::Mode::Own, 1)?;
+        fixtures::set_channel_trigger(tx, &h.me, &json!({
+            "on": true, "words": ["/ai"], "where": ["*"], "who": ["me"], "reply": "thread", "mark": true
+        }))?;
         Ok::<_, steve_channels::ChannelError>(())
     }).unwrap();
     (h, models)
@@ -589,20 +555,8 @@ async fn research_preparation_failures_and_partial_results_stay_readable_without
         assert_eq!(m.meta["chan_out"]["code"], "research_ineligible");
         assert!(m.meta["chan_out"]["reason"].is_string());
         assert!(h.fake.send_calls.lock().unwrap().is_empty());
-        assert_eq!(
-            count(
-                &h.store,
-                "SELECT count(*) FROM chan_messages WHERE direction='out'"
-            ),
-            0
-        );
-        assert_eq!(
-            count(
-                &h.store,
-                "SELECT count(*) FROM chan_reactions WHERE state='cleared' AND error IS NOT NULL"
-            ),
-            1
-        );
+        assert_eq!(fixtures::outbound_channel_messages(&h.store).unwrap(), 0);
+        assert_eq!(fixtures::failed_reaction_clears(&h.store).unwrap(), 1);
         if end != RunEnd::Done {
             assert!(
                 models.answers().is_empty(),

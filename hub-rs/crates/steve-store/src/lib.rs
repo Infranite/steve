@@ -76,11 +76,17 @@ pub use contract::message_sources::{
     Attachment, ChannelMessage, ChannelSources, Connections, MailMessage, MailSources,
     MessageSelection,
 };
+pub use contract::node_commands;
+pub use contract::node_directory;
+pub use contract::node_environment;
+pub use contract::node_sessions;
+pub use contract::node_turns;
 pub use contract::operations::{self as operation_repo, ItemOperation};
 pub use contract::read_models::{
     AttentionReads, FeedReads, ItemEventFields, ItemHead, ItemReads, NotificationPolicies,
     QuietPolicy, TimelineRows, TimezoneSettings,
 };
+pub use contract::realtime_output;
 pub use contract::tags as tag_repo;
 pub use contract::thread_runs;
 pub use contract::vault_uses as vault_use_repo;
@@ -1020,3 +1026,10 @@ pub mod retention {
 
 #[cfg(feature = "testkit")]
 pub mod testkit;
+
+pub use contract::bot_admin;
+pub use contract::deliveries as delivery_repo;
+pub use contract::node_jobs;
+pub use contract::node_write;
+pub use contract::state_batches;
+pub use contract::{tool_admission, tool_journal};

@@ -604,3 +604,73 @@ pub fn expire_open_for_item(w: &mut crate::W<'_>, item_id: &str, result: &Value)
     }
     Ok(ids.len())
 }
+
+/// The client through which a decision was answered.
+#[derive(serde::Serialize)]
+pub struct DecisionVia<'a> {
+    pub client: &'a str,
+    pub kind: &'a str,
+    pub name: &'a str,
+    pub route: &'a str,
+}
+
+pub fn record_via(w: &mut W<'_>, id: &str, via: &DecisionVia<'_>) -> Result<()> {
+    let via = serde_json::to_string(via)?;
+    let result = w.dialect().json_set_field(
+        Func::coalesce([Expr::col("result"), Expr::Constant("{}".into())]).into(),
+        "via",
+        Expr::val(via),
+    );
+    w.exec(
+        Query::update()
+            .table("decisions")
+            .value("result", result)
+            .and_where(Expr::col("id").eq(id))
+            .and_where(Expr::col("status").ne("open")),
+    )?;
+    Ok(())
+}
+
+pub(crate) fn open_for_session_or_item(
+    c: &mut impl Read,
+    session: &str,
+    item: Option<&str>,
+) -> Result<Vec<Decision>> {
+    let mut target = Expr::col("session_id").eq(session);
+    if let Some(item) = item {
+        target = target.or(Expr::col("item_id").eq(item));
+    }
+    c.all(
+        Query::select()
+            .columns(COLUMNS)
+            .from("decisions")
+            .and_where(Expr::col("status").eq("open"))
+            .and_where(target),
+        decode,
+    )
+}
+
+/// Expire a Node permission even when the Hub had recorded an answer that never reached the Node.
+pub fn expire_unapplied(w: &mut W<'_>, id: &str, result: &Value) -> Result<bool> {
+    let n = w.exec(
+        Query::update()
+            .table("decisions")
+            .value("status", "expired")
+            .value("result", result.to_string())
+            .value("resolved", now())
+            .and_where(Expr::col("id").eq(id))
+            .and_where(Expr::col("status").is_in(["open", "resolved"])),
+    )?;
+    if let Some(d) = get(w, id)? {
+        emit(w, &d);
+    }
+    Ok(n > 0)
+}
+
+pub fn settle_permission(w: &mut W<'_>, id: &str, result: &Value, status: &str) -> Result<bool> {
+    let changed = DecisionRows(w).settle(id, result, status, &Value::Null)?;
+    if !changed && let Some(d) = get(w, id)? {
+        emit(w, &d);
+    }
+    Ok(changed)
+}

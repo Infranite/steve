@@ -29,11 +29,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use steve_node_api::*;
 use steve_store::runtime::{self as rt, ReceiptState};
-use steve_store::{FileRef, Ingest, Store, StoreError, StreamKey, Tx, W};
+use steve_store::{
+    FileRef, Ingest, Store, StoreError, StreamKey, W, node_sessions, node_turns, node_write,
+};
 
 mod apply;
 mod capacity_retry;
@@ -83,9 +84,6 @@ pub(crate) use plan::{deliver_mid_turn, mid_turn_note};
 pub use receive::Sink;
 pub use workspace::WorkspaceFact;
 
-#[cfg(test)]
-use apply::role_lookup_in;
-use lifecycle::last_release_in;
 use plan::cancelled_start_in;
 #[cfg(test)]
 use send::exhausted_delay;
@@ -401,12 +399,15 @@ impl NodeRuntime {
     /// ([`super::node_binding::remote_refusal`]): refused (a conflict saying why, in the current
     /// language) when `workspace`'s work may be someone else's. A Node paused or revoked is left
     /// to what pausing does (its work waits). The local Node takes everything.
-    fn owners_work_in(&self, c: &rusqlite::Connection, workspace: &str) -> Result<(), StoreError> {
+    fn owners_work_in(&self, workspace: &str) -> Result<(), StoreError> {
         use super::node_binding::{RemoteRefusal, remote_refusal};
         if !self.is_remote() {
             return Ok(());
         }
-        match remote_refusal(c, self.node_id.as_str(), workspace)? {
+        match self
+            .store
+            .read(|c| remote_refusal(c, self.node_id.as_str(), workspace))?
+        {
             None | Some(RemoteRefusal::Inactive) => Ok(()),
             Some(r) => {
                 let why = steve_i18n::t!(
@@ -421,61 +422,36 @@ impl NodeRuntime {
     }
 
     /// Include startup policy at durable admission too: reconciliation bypasses RoutedRuntime.
-    fn workflow_blocker_in(
-        &self,
-        c: &rusqlite::Connection,
-        session: &str,
-    ) -> Result<Option<String>, StoreError> {
-        if let Some(why) = self.disabled_workflow_in(c, session)? {
+    fn workflow_blocker_in(&self, session: &str) -> Result<Option<String>, StoreError> {
+        if let Some(why) = self.disabled_workflow_in(session)? {
             return Ok(Some(why));
         }
-        steve_store::workflow_gate::session_blocker(c, session)
+        self.store
+            .reader(|c| steve_store::workflow_gate::session_blocker(c, session))
     }
 
-    fn disabled_workflow_in(
-        &self,
-        c: &rusqlite::Connection,
-        session: &str,
-    ) -> Result<Option<String>, StoreError> {
-        if !self.domain.dynamic_workflows() {
-            let child: bool = c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sessions s JOIN items i ON i.id=s.item_id WHERE s.id=?
-                  AND (json_extract(i.source,'$[1]')='workflow'
-                    OR EXISTS(SELECT 1 FROM workflow_units WHERE item_id=i.id)
-                    OR EXISTS(SELECT 1 FROM workflow_attempts WHERE item_id=i.id)))",
-                [session],
-                |r| r.get(0),
-            )?;
-            if child {
-                return Ok(Some(steve_i18n::t!("hub.workflow.disabled")));
-            }
-        }
-        Ok(None)
+    fn disabled_workflow_in(&self, session: &str) -> Result<Option<String>, StoreError> {
+        let disabled = !self.domain.dynamic_workflows()
+            && self
+                .store
+                .read(|r| node_sessions::authority::is_workflow_child(r, session))?;
+        Ok(disabled.then(|| steve_i18n::t!("hub.workflow.disabled")))
     }
 
-    /// [`Self::owners_work_in`] for the workspace of `session`.
-    fn session_owners_work_in(
-        &self,
-        c: &rusqlite::Connection,
-        session: &str,
-    ) -> Result<(), StoreError> {
-        if let Some(why) = steve_store::workflow_gate::session_authority_blocker(c, session)? {
+    /// Check the workflow authority and the workspace's Node admission together.
+    fn session_owners_work_in(&self, w: &mut W<'_>, session: &str) -> Result<(), StoreError> {
+        if let Some(why) = self
+            .store
+            .reader(|c| steve_store::workflow_gate::session_authority_blocker(c, session))?
+        {
             return Err(conflict(why));
         }
         if !self.is_remote() {
             return Ok(());
         }
-        let ws: Option<String> = c
-            .query_row(
-                "SELECT workspace_id FROM sessions WHERE id=?",
-                [session],
-                |r| r.get(0),
-            )
-            .optional()?;
-        match ws {
-            Some(w) => self.owners_work_in(c, &w),
-            None => Err(conflict(format!("no session {session}"))),
-        }
+        let s = node_sessions::authority::session(w, session)?
+            .ok_or_else(|| conflict(format!("no session {session}")))?;
+        self.owners_work_in(&s.workspace)
     }
 
     /// Attempts planned from now on get `ms` as their deadline (and their permissions with it).
@@ -651,10 +627,6 @@ impl NodeRuntime {
             self.release_idle();
         }
         more
-    }
-
-    fn tx<T>(&self, f: impl FnOnce(&Tx) -> Result<T, StoreError>) -> Result<T, StoreError> {
-        self.write(|w| f(&w.legacy()))
     }
 
     /// One write ([`Store::write`]); what the coordinator staged in it is told once it committed.
@@ -844,47 +816,13 @@ fn exec_session(x: &ExecutionRef) -> Option<String> {
     }
 }
 
-/// The turn's latest attempt (the one that ended it, once it is over).
-fn last_attempt_in(tx: &Tx, turn: &str) -> Result<String, StoreError> {
-    Ok(tx.query_row(
-        "SELECT attempt_id FROM runtime_attempts WHERE turn_id=? ORDER BY ordinal DESC LIMIT 1",
-        [turn],
-        |r| r.get(0),
-    )?)
-}
-
-/// The business side ended the session (`sessions.status`).
-fn ended_in(tx: &Tx, session: &str) -> Result<bool, StoreError> {
-    Ok(tx
-        .query_row(
-            "SELECT status='ended' FROM sessions WHERE id=?",
-            [session],
-            |r| r.get(0),
-        )
-        .optional()?
-        .unwrap_or(false))
-}
-
-/// One of this Node's streams that carries `session`'s events (any epoch) is faulted: nothing more
-/// of them is applied. The session's own stream counts even when the Hub never heard of the session
-/// on it (a gap found by reconcile).
-fn faulted(c: &rusqlite::Connection, node: &NodeId, session: &str) -> Result<bool, StoreError> {
-    Ok(c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM node_streams WHERE node_id=?2 AND fault IS NOT NULL AND (session_id=?1 OR stream=?3))",
-        rusqlite::params![session, node.as_str(), heads::session_stream(session)],
-        |r| r.get(0),
-    )?)
-}
-
-/// The session's phase and active attempt; `None`: not bound.
-fn phase_in(tx: &Tx, session: &str) -> Result<Option<(String, Option<String>)>, StoreError> {
-    Ok(tx
-        .query_row(
-            "SELECT phase, active_attempt FROM runtime_sessions WHERE session_id=?",
-            [session],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?)
+/// One of the Node's streams that carries this session's events is faulted.
+fn faulted(
+    r: &mut impl steve_store::Read,
+    node: &NodeId,
+    session: &str,
+) -> Result<bool, StoreError> {
+    node_sessions::faulted(r, node.as_str(), session, &heads::session_stream(session))
 }
 
 /// `sessions.status` once a turn is over and nothing follows it: `error` after a failure, else `idle`.
@@ -896,79 +834,47 @@ fn settled_status(stop_reason: &str) -> &'static str {
     }
 }
 
-/// Sets `sessions.status` (`running` from an attempt's start until
-/// the turn is over). A session the business side ended stays ended.
-fn status_in(tx: &Tx, session: &str, status: &str) -> Result<(), StoreError> {
-    let n = tx.execute(
-        "UPDATE sessions SET status=?1, updated=?2 WHERE id=?3 AND status NOT IN ('ended', ?1)",
-        rusqlite::params![status, now(), session],
-    )?;
-    if n > 0 {
-        session_changed(tx, session)?;
-    }
-    Ok(())
-}
-
-/// The session row changed: its readers hear it after the commit.
-fn session_changed(tx: &Tx, session: &str) -> Result<(), StoreError> {
-    let ws: String = tx.query_row(
-        "SELECT workspace_id FROM sessions WHERE id = ?",
-        [session],
-        |r| r.get(0),
-    )?;
-    tx.publish(steve_types::DomainEvent::from(
-        steve_types::WorkEvent::Session {
-            ws: ws.into(),
-            id: steve_types::SessionId::from(session.to_string()),
-            item_id: None,
-        },
-    ));
-    Ok(())
-}
-
 /// A `system` entry of the session, for the people reading it.
-fn system_in(tx: &Tx, session: &str, text: &str) -> Result<(), StoreError> {
+fn system_in(tx: &mut W<'_>, session: &str, text: &str) -> Result<(), StoreError> {
     event_in(tx, session, "system", json!({ "text": text }))
 }
 
 /// A session entry of the Hub's own (not one of a Node's events), in `tx`'s write.
-fn event_in(tx: &Tx, session: &str, kind: &str, data: Value) -> Result<(), StoreError> {
-    tx.write(|w| w.events().add(session, kind, data, None, now()))?;
+fn event_in(tx: &mut W<'_>, session: &str, kind: &str, data: Value) -> Result<(), StoreError> {
+    tx.events().add(session, kind, data, None, now())?;
     Ok(())
 }
 
-fn session_revision(tx: &Tx, session: &str) -> Result<i64, StoreError> {
-    Ok(tx.query_row(
-        "SELECT revision FROM runtime_sessions WHERE session_id=?",
-        [session],
-        |r| r.get(0),
-    )?)
-}
+impl NodeRuntime {
+    fn session_revision(&self, session: &str) -> Result<i64, StoreError> {
+        self.store.read(|r| node_sessions::revision(r, session))
+    }
 
-fn turn_revision(tx: &Tx, turn: &str) -> Result<i64, StoreError> {
-    Ok(tx.query_row(
-        "SELECT revision FROM runtime_turns WHERE turn_id=?",
-        [turn],
-        |r| r.get(0),
-    )?)
-}
+    fn turn_revision(&self, turn: &str) -> Result<i64, StoreError> {
+        self.store.read(|r| node_turns::revision(r, turn))
+    }
 
-fn op_of_attempt(tx: &Tx, attempt: &str) -> Result<String, StoreError> {
-    Ok(tx.query_row(
-        "SELECT operation_id FROM runtime_attempts WHERE attempt_id=?",
-        [attempt],
-        |r| r.get(0),
-    )?)
-}
+    fn last_attempt_in(&self, turn: &str) -> Result<String, StoreError> {
+        self.store.read(|r| node_turns::latest_attempt(r, turn))
+    }
 
-fn attempt_row(tx: &Tx, attempt: &str) -> Result<Option<(i64, String)>, StoreError> {
-    match tx.query_row(
-        "SELECT revision, state FROM runtime_attempts WHERE attempt_id=?",
-        [attempt],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    ) {
-        Ok(x) => Ok(Some(x)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e.into()),
+    fn ended_in(&self, session: &str) -> Result<bool, StoreError> {
+        self.store.read(|r| node_sessions::ended(r, session))
+    }
+
+    fn phase_in(&self, session: &str) -> Result<Option<(String, Option<String>)>, StoreError> {
+        self.store.read(|r| {
+            Ok(node_sessions::phase(r, session, None)?
+                .map(|phase| (phase.name, phase.active_attempt)))
+        })
+    }
+
+    fn status_in(&self, session: &str, status: &str) -> Result<(), StoreError> {
+        self.store
+            .write(|w| node_sessions::set_status(w, session, status, now()))
+    }
+
+    fn attempt_row(&self, attempt: &str) -> Result<Option<node_turns::Attempt>, StoreError> {
+        self.store.read(|r| node_turns::attempt(r, attempt))
     }
 }

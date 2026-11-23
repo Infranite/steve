@@ -93,7 +93,8 @@ fn only_live_nodes_link_and_each_link_is_a_new_generation() {
             .unwrap()
     );
     assert_eq!(
-        s.reader(|c| link_state(c, "n1")).unwrap(),
+        s.read(|r| steve_store::node_directory::link_state(r, "n1"))
+            .unwrap(),
         Some((4, "revoked".into()))
     );
     assert!(link(3).is_none(), "revoked");

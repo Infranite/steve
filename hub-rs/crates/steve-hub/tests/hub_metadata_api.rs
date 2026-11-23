@@ -177,12 +177,7 @@ async fn shared_info_http_permissions_cas_validation_and_node_off() {
         e.call("GET", "/api/hub-metadata", Some(cred), None).await.1["metadata"],
         saved["metadata"]
     );
-    store
-        .transaction::<_, steve_store::StoreError>(|tx| {
-            tx.execute("UPDATE users SET role='member' WHERE id=?", [&owner.id])?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::hub_fixtures::set_users_role_member(&store, &owner.id).unwrap();
     assert_eq!(
         e.call("GET", "/api/hub-metadata", Some(cred), None).await.1["can_edit"],
         false

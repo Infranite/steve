@@ -390,10 +390,7 @@ async fn closing_a_parent_archives_a_historical_failed_child_over_http() {
         )
         .unwrap()
         .unwrap();
-    store.with_conn(|c| {
-        c.execute("UPDATE items SET phase='closed',status='fail',outcome='failed',closed_reason='old review failed' WHERE id=?", [&child.id])?;
-        Ok(())
-    }).unwrap();
+    steve_store::testkit::hub::hub_fixtures::set_items_phase_closed(&store, &child.id).unwrap();
     let (status, result) = act(&e, &parent.id, "finish").await;
     assert_eq!(status, 200, "{result}");
     let (status, read) = e
@@ -888,12 +885,8 @@ async fn a_failing_derived_state_never_breaks_the_item_page() {
         v["derived_state"].is_object(),
         "the derived state rides along: {v}"
     );
-    // The derived state cannot be computed (a table it reads is gone): the page leaves it out.
-    let c = rusqlite::Connection::open(&e.db).expect("db");
-    c.busy_timeout(Duration::from_secs(10))
-        .expect("busy timeout");
-    c.execute_batch("DROP TABLE work_policy").expect("drop");
-    drop(c);
+    // the shadow state cannot be computed (a table it reads is gone): the page leaves it out
+    steve_store::testkit::hub::api::remove_work_policy(&e.db).unwrap();
     let (s, v) = e.call("GET", &format!("/api/items/{iid}"), None).await;
     assert_eq!(s, 200, "the item page stays up: {v}");
     assert!(v.get("derived_state").is_none(), "{v}");

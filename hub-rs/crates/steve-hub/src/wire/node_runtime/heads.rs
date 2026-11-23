@@ -391,8 +391,9 @@ fn fault(
         // a gap
         _ => steve_i18n::stored(|| steve_i18n::t!("hub.node.gap")),
     };
-    let tx = &w.legacy();
-    let session = stream_session_in(tx, node, k.stream)?;
+    let session = steve_store::node_sessions::on_node(w, node.as_str())?
+        .into_iter()
+        .find(|s| session_stream(s) == k.stream);
     let fresh = w.streams().fault(
         k,
         fault,
@@ -410,19 +411,11 @@ fn fault(
             h.acknowledged
         );
         if let Some(session) = &session {
-            system_in(tx, session, &note)?;
+            w.events()
+                .add(session, "system", json!({ "text": note }), None, now())?;
         }
     }
     Ok(fresh)
-}
-
-/// The session of this Node whose events `stream` carries, if it is one of its sessions.
-fn stream_session_in(tx: &Tx, node: &NodeId, stream: &str) -> Result<Option<String>, StoreError> {
-    let mut st = tx.prepare("SELECT session_id FROM runtime_sessions WHERE node_id=?")?;
-    let sessions = st
-        .query_map([node.as_str()], |r| r.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(sessions.into_iter().find(|s| session_stream(s) == stream))
 }
 
 /// The stream that carries a session's events (the Node names it so: steve-node-api's contract).

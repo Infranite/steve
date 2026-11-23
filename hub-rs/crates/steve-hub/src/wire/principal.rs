@@ -11,8 +11,7 @@
 //! of [`super::node_binding::remote_refusal`] (H1), since the Hub does not record who sent each
 //! message into a session, so another member could steer a session done with its owner's access.
 
-use rusqlite::{Connection, OptionalExtension};
-use steve_store::StoreError;
+use steve_store::{Read, Store, StoreError, W, node_sessions::authority};
 
 const SVC: &str = "svc:";
 
@@ -47,18 +46,13 @@ impl Principal {
     }
 }
 
-fn members(c: &Connection, ws: &str) -> Result<Vec<String>, StoreError> {
-    let mut q =
-        c.prepare("SELECT user_id FROM workspace_members WHERE workspace_id=? ORDER BY user_id")?;
-    let v = q
-        .query_map([ws], |r| r.get(0))?
-        .collect::<Result<Vec<String>, _>>()?;
-    Ok(v)
-}
-
 /// `requested` while a member of `ws`, else `ws`'s service principal.
-pub fn resolve(c: &Connection, ws: &str, requested: Option<&str>) -> Result<Principal, StoreError> {
-    let members = members(c, ws)?;
+pub fn resolve(
+    c: &mut impl Read,
+    ws: &str,
+    requested: Option<&str>,
+) -> Result<Principal, StoreError> {
+    let members = authority::members(c, ws)?;
     Ok(match requested.filter(|u| members.iter().any(|m| m == u)) {
         Some(u) => Principal::User(u.to_string()),
         None => Principal::Svc(ws.to_string()),
@@ -66,40 +60,32 @@ pub fn resolve(c: &Connection, ws: &str, requested: Option<&str>) -> Result<Prin
 }
 
 /// Work of `ws` nobody in particular asked for: a job, a project's or a knowledge source's files.
-pub fn of_workspace(c: &Connection, ws: &str) -> Result<Principal, StoreError> {
+pub fn of_workspace(c: &mut impl Read, ws: &str) -> Result<Principal, StoreError> {
     resolve(c, ws, None)
 }
 
 /// The principal of `item`'s runs, with its workspace. `None`: no such item.
-pub fn of_item(c: &Connection, item: &str) -> Result<Option<(String, Principal)>, StoreError> {
-    let row: Option<(String, Option<String>)> = c
-        .query_row(
-            "SELECT workspace_id, requested_by FROM items WHERE id=?",
-            [item],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    match row {
-        Some((ws, by)) => Ok(Some((ws.clone(), resolve(c, &ws, by.as_deref())?))),
-        None => Ok(None),
-    }
+pub fn of_item(c: &mut impl Read, item: &str) -> Result<Option<(String, Principal)>, StoreError> {
+    let Some(item) = authority::item(c, item)? else {
+        return Ok(None);
+    };
+    let principal = resolve(c, &item.workspace, item.requester.as_deref())?;
+    Ok(Some((item.workspace, principal)))
 }
 
 /// The principal of `session`'s runs, with its workspace: as recorded when it was bound to a Node,
 /// else as its item (or, without one, its workspace) gives it now. `None`: no such session.
 pub fn of_session(
-    c: &Connection,
+    c: &mut impl Read,
     session: &str,
 ) -> Result<Option<(String, Principal)>, StoreError> {
-    let row: Option<(String, Option<String>, Option<String>)> = c
-        .query_row(
-            "SELECT s.workspace_id, s.item_id, r.principal FROM sessions s
-              LEFT JOIN runtime_sessions r ON r.session_id=s.id WHERE s.id=?",
-            [session],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?;
-    let Some((ws, item, recorded)) = row else {
+    let Some(authority::Session {
+        workspace: ws,
+        item,
+        principal: recorded,
+        ..
+    }) = authority::session(c, session)?
+    else {
         return Ok(None);
     };
     if let Some(p) = recorded {
@@ -118,12 +104,12 @@ pub fn of_session(
 /// `workspace:<ws>`; a Node's owner (`node_owner`) is always among them, since they see everything
 /// on their machine.
 pub fn audience(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     p: &Principal,
     node_owner: Option<&str>,
 ) -> Result<Vec<String>, StoreError> {
-    let members = members(c, ws)?;
+    let members = authority::members(c, ws)?;
     let mut a = match (p.user(), members.as_slice()) {
         (Some(u), [only]) if only == u => vec![format!("user:{u}")],
         _ => vec![format!("workspace:{ws}")],
@@ -140,41 +126,17 @@ pub fn audience(
 
 /// Records `session`'s principal and audience as they are now; a Node's owner (`node_owner`: none
 /// for the local Node, run by the Hub's own account) joins the audience.
-pub fn record_in(
-    c: &Connection,
-    session: &str,
-    node_owner: Option<&str>,
-) -> Result<(), StoreError> {
-    let row: Option<(String, Option<String>)> = c
-        .query_row(
-            "SELECT workspace_id, item_id FROM sessions WHERE id=?",
-            [session],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    let Some((ws, item)) = row else {
+pub fn record_in(w: &mut W<'_>, session: &str, node_owner: Option<&str>) -> Result<(), StoreError> {
+    let Some(s) = authority::session(w, session)? else {
         return Ok(());
     };
-    let requested: Option<String> = match item.as_deref() {
-        Some(i) => c
-            .query_row("SELECT requested_by FROM items WHERE id=?", [i], |r| {
-                r.get(0)
-            })
-            .optional()?
-            .flatten(),
+    let requested = match &s.item {
+        Some(id) => authority::item(w, id)?.and_then(|i| i.requester),
         None => None,
     };
-    let p = resolve(c, &ws, requested.as_deref())?;
-    let a = audience(c, &ws, &p, node_owner)?;
-    c.execute(
-        "UPDATE runtime_sessions SET principal=?, audience=? WHERE session_id=?",
-        rusqlite::params![
-            p.key(),
-            serde_json::to_string(&a).unwrap_or_default(),
-            session
-        ],
-    )?;
-    Ok(())
+    let principal = resolve(w, &s.workspace, requested.as_deref())?;
+    let audience = audience(w, &s.workspace, &principal, node_owner)?;
+    authority::set_principal(w, session, &principal.key(), &audience)
 }
 
 /// A name for a path segment: what the Node accepts, and a short digest of the original so that
@@ -200,20 +162,16 @@ fn segment(s: &str) -> String {
 /// (workspace, principal, bot, adapter), recorded as `runtime_sessions.state_dir`. The principal
 /// who owns the Node starts it from their own settings and login there.
 pub fn harness_state_in(
-    c: &Connection,
+    store: &Store,
+    w: &mut W<'_>,
     session: &str,
     node: &str,
     harness: &str,
 ) -> Result<Option<steve_node_api::HarnessState>, StoreError> {
-    let Some((ws, p)) = of_session(c, session)? else {
+    let Some((ws, p)) = of_session(w, session)? else {
         return Ok(None);
     };
-    let bot: Option<String> = c
-        .query_row("SELECT bot_id FROM sessions WHERE id=?", [session], |r| {
-            r.get(0)
-        })
-        .optional()?
-        .flatten();
+    let bot = authority::session(w, session)?.and_then(|s| s.bot);
     let dir = [
         segment(&ws),
         segment(&p.key()),
@@ -221,13 +179,11 @@ pub fn harness_state_in(
         segment(harness),
     ]
     .join("/");
-    let owner = super::node_env::node_owner(c, node)?;
+    let owner = super::node_env::node_owner(w, node)?;
     let import_owner = p.user().is_some() && owner.as_deref() == p.user();
-    c.execute(
-        "UPDATE runtime_sessions SET state_dir=? WHERE session_id=?",
-        rusqlite::params![dir, session],
-    )?;
-    let owner_context = import_owner && steve_store::nodes::owner_context(c, node)?;
+    authority::set_state_dir(w, session, &dir)?;
+    let owner_context =
+        import_owner && store.reader(|c| steve_store::nodes::owner_context(c, node))?;
     Ok(Some(steve_node_api::HarnessState {
         dir,
         import_owner,
@@ -239,26 +195,20 @@ pub fn harness_state_in(
 mod tests {
     use super::*;
 
-    fn db() -> Connection {
-        let c = Connection::open_in_memory().unwrap();
-        c.execute_batch(
-            "CREATE TABLE workspace_members(workspace_id TEXT, user_id TEXT, role TEXT, created INTEGER);
-             CREATE TABLE items(id TEXT, workspace_id TEXT, requested_by TEXT);
-             CREATE TABLE sessions(id TEXT, workspace_id TEXT, item_id TEXT);
-             CREATE TABLE runtime_sessions(session_id TEXT, principal TEXT, audience TEXT);
-             INSERT INTO workspace_members VALUES ('solo','u1','owner',1),('team','u1','owner',1),('team','u2','member',2);
-             INSERT INTO items VALUES ('i1','solo',NULL),('i2','team','u2'),('i3','team',NULL),('i4','team','u9'),('i6','solo','u1');
-             INSERT INTO sessions VALUES ('s1','solo','i1'),('s2','team','i2'),('s3','team','i3'),('s4','team','i4'),('s5','team',NULL),('s6','solo','i6');
-             INSERT INTO runtime_sessions(session_id) VALUES ('s1'),('s2'),('s3'),('s4'),('s5'),('s6');",
-        )
-        .unwrap();
-        c
+    use steve_store::testkit::hub::authority as fixture;
+
+    fn db() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
+        fixture::principals(&store).unwrap();
+        (dir, store)
     }
 
     #[test]
     fn the_asker_while_a_member_else_the_workspace() {
-        let c = db();
-        let p = |s: &str| of_session(&c, s).unwrap().unwrap().1;
+        let (_dir, store) = db();
+        let p = |s: &str| store.read(|r| of_session(r, s)).unwrap().unwrap().1;
         assert_eq!(
             p("s1"),
             Principal::Svc("solo".into()),
@@ -269,25 +219,28 @@ mod tests {
         assert_eq!(p("s4"), Principal::Svc("team".into()), "u9 is no member");
         assert_eq!(p("s5"), Principal::Svc("team".into()));
         assert_eq!(p("s6"), Principal::User("u1".into()));
-        assert!(of_session(&c, "nope").unwrap().is_none());
+        assert!(store.read(|r| of_session(r, "nope")).unwrap().is_none());
         assert_eq!(Principal::parse("svc:team"), Principal::Svc("team".into()));
         assert_eq!(Principal::Svc("team".into()).key(), "svc:team");
     }
 
     #[test]
     fn what_is_recorded_stays_and_the_nodes_owner_reads_it_too() {
-        let c = db();
-        record_in(&c, "s1", None).unwrap();
-        record_in(&c, "s2", Some("u3")).unwrap();
-        record_in(&c, "s3", Some("u1")).unwrap();
-        record_in(&c, "s6", None).unwrap();
+        let (_dir, store) = db();
+        for (session, owner) in [
+            ("s1", None),
+            ("s2", Some("u3")),
+            ("s3", Some("u1")),
+            ("s6", None),
+        ] {
+            store.write(|w| record_in(w, session, owner)).unwrap();
+        }
         let row = |s: &str| -> (String, String) {
-            c.query_row(
-                "SELECT principal, audience FROM runtime_sessions WHERE session_id=?",
-                [s],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+            let s = store.read(|r| authority::session(r, s)).unwrap().unwrap();
+            (
+                s.principal.unwrap(),
+                serde_json::to_string(&s.audience.unwrap()).unwrap(),
             )
-            .unwrap()
         };
         assert_eq!(
             row("s1"),
@@ -303,10 +256,9 @@ mod tests {
         );
         assert_eq!(row("s6"), ("u1".into(), r#"["user:u1"]"#.into()));
         // u2 leaves: the recorded principal stays
-        c.execute("DELETE FROM workspace_members WHERE user_id='u2'", [])
-            .unwrap();
+        fixture::remove_member(&store, "team", "u2").unwrap();
         assert_eq!(
-            of_session(&c, "s2").unwrap().unwrap().1,
+            store.read(|r| of_session(r, "s2")).unwrap().unwrap().1,
             Principal::User("u2".into())
         );
     }
@@ -328,18 +280,16 @@ mod tests {
             let store = Store::open(dir.path().join("steve.sqlite3"), NoPublisher).unwrap();
             store.ensure_workspace().unwrap();
             store
-                .transaction::<_, StoreError>(|tx| {
-                    tx.execute(
-                        "INSERT INTO users(id,workspace_id,subject,name,role,created)
-                         VALUES ('requester',?,'requester','requester','member',1)",
-                        [WS],
+                .write(|w| {
+                    steve_store::UserRows(w).insert(
+                        "requester",
+                        WS,
+                        "requester",
+                        "requester",
+                        "member",
+                        1,
                     )?;
-                    tx.execute(
-                        "INSERT INTO workspace_members(workspace_id,user_id,role,created)
-                         VALUES (?,'requester','member',1)",
-                        [WS],
-                    )?;
-                    Ok(())
+                    w.members().add(WS, "requester", "member", 1)
                 })
                 .unwrap();
             for id in ["writer", "reviewer"] {
@@ -413,39 +363,23 @@ mod tests {
                     ..Default::default()
                 })
                 .unwrap();
+            if leaves {
+                fixture::remove_member(&store, WS, "requester").unwrap();
+            }
             store
-                .transaction::<_, StoreError>(|tx| {
-                    if leaves {
-                        tx.execute(
-                            "DELETE FROM workspace_members WHERE workspace_id=? AND user_id='requester'",
-                            [WS],
-                        )?;
-                    }
-                    tx.execute(
-                        "INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated)
-                         VALUES (?,'node','{}',?,'r','ready',1)",
-                        rusqlite::params![session.id, session.id],
-                    )?;
-                    record_in(tx, &session.id, Some("node-owner"))?;
-                    Ok(())
+                .write(|w| {
+                    fixture::bind_session(w, &session.id, "node")?;
+                    record_in(w, &session.id, Some("node-owner"))
                 })
                 .unwrap();
             store
-                .reader::<_, StoreError>(|c| {
-                    let original: Option<String> = c.query_row(
-                        "SELECT requested_by FROM items WHERE id=?",
-                        [child.item_id.as_deref().unwrap()],
-                        |r| r.get(0),
-                    )?;
-                    assert_eq!(original.as_deref(), requested);
-                    let (recorded, audience): (String, String) = c.query_row(
-                        "SELECT principal, audience FROM runtime_sessions WHERE session_id=?",
-                        [&session.id],
-                        |r| Ok((r.get(0)?, r.get(1)?)),
-                    )?;
-                    assert_eq!(recorded, expected.key());
+                .read::<_, StoreError>(|c| {
+                    let item = authority::item(c, child.item_id.as_deref().unwrap())?.unwrap();
+                    assert_eq!(item.requester.as_deref(), requested);
+                    let bound = authority::session(c, &session.id)?.unwrap();
+                    assert_eq!(bound.principal.as_deref(), Some(expected.key().as_str()));
                     assert_eq!(
-                        serde_json::from_str::<Vec<String>>(&audience).unwrap(),
+                        bound.audience.unwrap(),
                         vec![
                             expected
                                 .user()

@@ -1,4 +1,4 @@
-use sea_query::{Expr, ExprTrait, Query};
+use sea_query::{Expr, ExprTrait, Order, Query};
 
 use crate::{Read, Result, W};
 
@@ -17,6 +17,31 @@ impl<C: Read> UserRows<'_, C> {
                 |row| row.get::<Option<String>>(0),
             )?
             .flatten())
+    }
+
+    /// The instance owner who first registered, for instance-wide Node administration.
+    pub fn first_owner(&mut self) -> Result<Option<String>> {
+        let order = self.0.db().dialect().insertion_order(None);
+        self.0.one(
+            Query::select()
+                .column("id")
+                .from("users")
+                .and_where(Expr::col("role").eq("owner"))
+                .order_by("created", Order::Asc)
+                .order_by_expr(order, Order::Asc)
+                .limit(1),
+            |r| r.get(0),
+        )
+    }
+
+    pub fn role(&mut self, user: &str) -> Result<Option<String>> {
+        self.0.one(
+            Query::select()
+                .from("users")
+                .column("role")
+                .and_where(Expr::col("id").eq(user)),
+            |row| row.get(0),
+        )
     }
 
     pub fn name(&mut self, user: &str) -> Result<Option<String>> {

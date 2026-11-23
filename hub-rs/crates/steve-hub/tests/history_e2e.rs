@@ -11,6 +11,7 @@ use std::process::Stdio;
 use std::time::Duration;
 use steve_runtime::testkit::eventually;
 use steve_runtime::testkit::process::Child;
+use steve_store::testkit::hub::node_process;
 
 use serde_json::{Value, json};
 
@@ -179,31 +180,13 @@ impl Client {
         v
     }
 
-    fn db(&self) -> rusqlite::Connection {
-        let c = rusqlite::Connection::open(&self.db).expect("db");
-        c.busy_timeout(Duration::from_secs(5)).expect("timeout");
-        c
-    }
-
     /// A session's stored rows: `(kind, data)` in order.
     fn rows(&self, session: &str) -> Vec<(String, Value)> {
-        let c = self.db();
-        let mut st = c
-            .prepare("SELECT kind, data FROM events WHERE session_id=? ORDER BY seq")
-            .expect("prepare");
-        st.query_map([session], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })
-        .expect("query")
-        .map(|r| {
-            let (k, d) = r.expect("row");
-            (k, serde_json::from_str(&d).expect("json"))
-        })
-        .collect()
-    }
-
-    fn count(&self, sql: &str) -> i64 {
-        self.db().query_row(sql, [], |r| r.get(0)).expect("count")
+        node_process::history_events(&self.db, session)
+            .unwrap()
+            .into_iter()
+            .map(|(kind, data)| (kind, serde_json::from_str(&data).expect("json")))
+            .collect()
     }
 
     async fn import(&self, keys: &[&str]) -> Vec<Value> {
@@ -282,25 +265,7 @@ async fn imports_history_through_the_node() {
     for id in &ids {
         assert!(node.rows(id.as_str().expect("an id")).len() >= 4);
     }
-    let session = |c: &Client, id: &str| {
-        c.db()
-            .query_row(
-                "SELECT harness, cwd, title, source, import_key, created, readonly FROM sessions WHERE id=?",
-                [id],
-                |r| {
-                    Ok(json!([
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, String>(3)?,
-                        r.get::<_, String>(4)?,
-                        r.get::<_, i64>(5)?,
-                        r.get::<_, i64>(6)?
-                    ]))
-                },
-            )
-            .expect("session")
-    };
+    let session = |c: &Client, id: &str| node_process::imported_session(&c.db, id).unwrap();
     for id in &ids {
         assert_eq!(session(&node, id.as_str().unwrap())[6], 1);
     }
@@ -323,7 +288,7 @@ async fn imports_history_through_the_node() {
 
         // The Node rejects unlisted keys, even if they name an existing or traversing path.
         let projects = home.join(".claude/projects/-w-app");
-        let sessions_before = c.count("SELECT COUNT(*) FROM sessions");
+        let sessions_before = node_process::session_count(&c.db).unwrap();
         for key in [
             format!("cc:{}", forged.display()),
             format!("cc:{}/../../../elsewhere/x.jsonl", projects.display()),
@@ -335,13 +300,10 @@ async fn imports_history_through_the_node() {
                 "{key}"
             );
         }
-        assert_eq!(c.count("SELECT COUNT(*) FROM sessions"), sessions_before);
-        assert_eq!(c.count("SELECT COUNT(*) FROM agent_turns"), 0);
-        assert_eq!(c.count("SELECT COUNT(*) FROM usage_records"), 0);
-        assert_eq!(
-            c.count("SELECT COUNT(*) FROM events WHERE format != 'steve.v1'"),
-            0
-        );
+        assert_eq!(node_process::session_count(&c.db).unwrap(), sessions_before);
+        assert_eq!(node_process::turn_count(&c.db).unwrap(), 0);
+        assert_eq!(node_process::usage_records_count(&c.db).unwrap(), 0);
+        assert_eq!(node_process::event_count(&c.db).unwrap(), 0);
     }
 
     // resume: the Node finds the transcript by the harness's id
@@ -386,7 +348,7 @@ async fn inert_hub_has_no_history_node_and_returns_unavailable() {
     assert!(!hub.steve.join("data/node").exists());
     assert!(!hub.steve.join("data/node-jobs").exists());
     assert_eq!(
-        client.count("SELECT COUNT(*) FROM sessions WHERE readonly=1"),
+        node_process::session_count_with_readonly(&client.db).unwrap(),
         0
     );
 }

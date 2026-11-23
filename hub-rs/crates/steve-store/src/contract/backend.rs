@@ -191,6 +191,18 @@ impl Dialect {
         }
     }
 
+    pub(crate) fn json_set_field(self, column: Expr, field: &'static str, value: Expr) -> Expr {
+        match self {
+            Self::Sqlite => Func::cust("json_set")
+                .args([
+                    column,
+                    Expr::Constant(format!("$.{field}").into()),
+                    Func::cust("json").arg(value).into(),
+                ])
+                .into(),
+        }
+    }
+
     pub(crate) fn json_rows(self, column: Expr, alias: &'static str) -> SelectStatement {
         match self {
             Dialect::Sqlite => Query::select()

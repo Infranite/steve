@@ -192,27 +192,7 @@ pub(super) fn dependency_management_allowed(
         return Ok(false);
     };
     store
-        .reader(|c| {
-            Ok::<_, steve_store::StoreError>(c.query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM items i WHERE i.id=?1 AND i.phase='active'
-                    AND i.status IN ('run','block') AND i.archived=0
-                    AND COALESCE(json_extract(i.source,'$[1]'),'')<>'workflow'
-                    AND NOT EXISTS(SELECT 1 FROM workflow_units u WHERE u.item_id=i.id)
-                    AND NOT EXISTS(SELECT 1 FROM workflow_attempts a WHERE a.item_id=i.id)
-                    AND NOT EXISTS(SELECT 1 FROM workflows w WHERE w.item_id=i.id AND w.paused=1)
-                    AND (
-                        EXISTS(SELECT 1 FROM item_dependency_waits dw
-                            WHERE dw.item_id=i.id AND dw.cycle=i.cycle AND dw.state='waiting')
-                        OR EXISTS(SELECT 1 FROM item_deps d LEFT JOIN items dep ON dep.id=d.dep_id
-                            WHERE d.item_id=i.id AND (dep.id IS NULL OR dep.status<>'done'
-                                OR dep.phase<>'closed' OR dep.outcome IS NOT 'completed'))
-                    )
-                )",
-                [current.item_id.as_deref()],
-                |r| r.get(0),
-            )?)
-        })
+        .read(|r| steve_store::item_repo::dependency_management(r, current.item_id.as_deref()))
         .map_err(|e| e.to_string())
 }
 

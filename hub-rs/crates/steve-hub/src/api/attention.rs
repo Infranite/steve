@@ -121,7 +121,6 @@ async fn read(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::params;
     use steve_modules::testkit::{ME, TestEnv, WS, WS2, call, caller};
 
     fn final_reply(
@@ -132,17 +131,15 @@ mod tests {
         status: &str,
         space: &str,
     ) -> String {
-        let msg = format!("question_{suffix}");
-        let reply = format!("reply_{suffix}");
-        let run = format!("run_{suffix}");
-        e.modules.store.transaction(|tx| -> steve_store::Result<()> {
-            tx.execute("INSERT INTO messages(id,workspace_id,space,author,text,created) VALUES(?,?,?,'me','question',10)",params![msg,ws,space])?;
-            tx.execute("INSERT INTO thread_runs(id,workspace_id,message_id,user_id,status,created) VALUES(?,?,?,?,'running',10)",params![run,ws,msg,user])?;
-            tx.execute("INSERT INTO messages(id,workspace_id,space,author,text,meta,created) VALUES(?,?,?,'steve','final',?,20)",params![reply,ws,space,json!({"run":run,"origin":msg,"run_receipt":true}).to_string()])?;
-            tx.execute("UPDATE thread_runs SET status=?,reply_id=?,ended=20 WHERE id=?",params![status,reply,run])?;
-            Ok(())
-        }).unwrap();
-        reply
+        steve_store::testkit::hub::api::seed_attention_reply(
+            e.store(),
+            ws,
+            user,
+            suffix,
+            status,
+            space,
+        )
+        .unwrap()
     }
     fn category<'a>(v: &'a Value, k: &str) -> &'a Value {
         v["categories"]
@@ -170,15 +167,10 @@ mod tests {
             final_reply(&e, WS, ME, status, status, "steve");
         }
         final_reply(&e, WS, ME, "unbound", "running", "steve");
-        e.store()
-            .with_conn(|c| {
-                c.execute_batch(
-                    "UPDATE messages SET meta='{}' WHERE id='reply_unbound';
-              UPDATE thread_runs SET status='failed' WHERE id='run_unbound';",
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::mutations::update_messages_id_reply_unbound_status_failed(
+            e.store(),
+        )
+        .unwrap();
         let (s, v) = call(
             &router,
             Some(&me),

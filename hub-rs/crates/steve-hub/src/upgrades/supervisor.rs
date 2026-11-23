@@ -607,28 +607,42 @@ pub async fn startup_gate(cfg: &Config, listeners: &[tokio::net::TcpListener]) -
             }
         }),
     )?;
-    drop(store);
-    let db = rusqlite::Connection::open(cfg.db_path())?;
-    let schema: u32 = db.query_row("SELECT v FROM schema_version", [], |r| r.get(0))?;
+    let schema = u32::try_from(steve_store::db::inspect_schema(&cfg.db_path())?.schema)?;
     if schema != manifest.schema.target
         || schema < manifest.schema.min_read
         || schema > manifest.schema.max_read
     {
         bail!("candidate database schema incompatible with manifest")
     }
-    let rows:Vec<(String,i64,String,String)>=db.prepare("SELECT workspace_id,version,keychain_account,fingerprint FROM vault_keys WHERE status != 'retired'")?.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?.collect::<std::result::Result<_,_>>()?;
-    let db_path = cfg.db_path();
-    tokio::time::timeout(Duration::from_secs(15),tokio::task::spawn_blocking(move||->Result<()>{
-        let db=rusqlite::Connection::open_with_flags(db_path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        for (ws,version,account,expected) in rows {
-            let key=keys.get(&account).map_err(|e|anyhow::anyhow!("vault probe: {e}"))?.context("vault probe: existing KEK missing")?;
-            if steve_modules::vault::crypto::fingerprint(&key)!=expected{bail!("vault probe: KEK fingerprint mismatch")}
-            let mut stmt=db.prepare("SELECT id,dek_wrapped FROM vault_items WHERE workspace_id=? AND kek_version=? AND dek_wrapped IS NOT NULL LIMIT 1")?;
-            let mut rows=stmt.query(rusqlite::params![ws,version])?;
-            if let Some(row)=rows.next()?{let id:String=row.get(0)?;let wrapped:Vec<u8>=row.get(1)?;let _=steve_modules::vault::crypto::unwrap_dek(&key,&ws,&id,version,&wrapped).map_err(|_|anyhow::anyhow!("vault probe: existing data key cannot unwrap"))?;}
-        }Ok(())
-    })).await.context("vault probe timeout")???;
-    drop(db);
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let probes = store.read(|r| steve_store::vault_keys::upgrade_probes(r))?;
+            drop(store);
+            for probe in probes {
+                let key = keys
+                    .get(&probe.keychain_account)
+                    .map_err(|e| anyhow::anyhow!("vault probe: {e}"))?
+                    .context("vault probe: existing KEK missing")?;
+                if steve_modules::vault::crypto::fingerprint(&key) != probe.fingerprint {
+                    bail!("vault probe: KEK fingerprint mismatch")
+                }
+                if let Some(sample) = probe.sample {
+                    steve_modules::vault::crypto::unwrap_dek(
+                        &key,
+                        &probe.workspace,
+                        &sample.item_id,
+                        sample.kek_version,
+                        &sample.dek_wrapped,
+                    )
+                    .map_err(|_| anyhow::anyhow!("vault probe: existing data key cannot unwrap"))?;
+                }
+            }
+            Ok(())
+        }),
+    )
+    .await
+    .context("vault probe timeout")???;
     if crate::web::web_version(cfg) != cfg.version || !cfg.web_dir.join("index.html").is_file() {
         bail!("candidate Web version missing or incompatible")
     }
@@ -893,12 +907,7 @@ server.serve_forever()
         })
         .unwrap();
         fs::create_dir_all(&cfg.data_dir).unwrap();
-        let db = rusqlite::Connection::open(cfg.db_path()).unwrap();
-        db.execute_batch(
-            "CREATE TABLE evidence(value); INSERT INTO evidence VALUES('before-upgrade');",
-        )
-        .unwrap();
-        drop(db);
+        steve_store::testkit::hub::backup::seed_evidence(&cfg.db_path(), "before-upgrade").unwrap();
         let old = bundle(home.path(), "0.1.0", false);
         let new = bundle(home.path(), "0.2.0", broken);
         switch(home.path(), &old).unwrap();
@@ -937,10 +946,8 @@ server.serve_forever()
             fs::canonicalize(home.path().join("current")).unwrap(),
             fs::canonicalize(if broken { old } else { new }).unwrap()
         );
-        let db = rusqlite::Connection::open(cfg.db_path()).unwrap();
         assert_eq!(
-            db.query_row("SELECT value FROM evidence", [], |r| r.get::<_, String>(0))
-                .unwrap(),
+            steve_store::testkit::hub::backup::evidence(&cfg.db_path()).unwrap(),
             "before-upgrade"
         );
         stop(&mut child, STOP_GRACE).await.unwrap();
@@ -1003,10 +1010,7 @@ server.serve_forever()
     fn pre_upgrade_backup_uses_the_shared_manifest_directory() {
         let t = tempfile::tempdir().unwrap();
         let db = t.path().join("db.sqlite3");
-        rusqlite::Connection::open(&db)
-            .unwrap()
-            .execute_batch("CREATE TABLE record(v); INSERT INTO record VALUES(42);")
-            .unwrap();
+        steve_store::testkit::hub::backup::seed_evidence(&db, "42").unwrap();
         let saved = backup(&db, t.path(), "old".into(), "new".into()).unwrap();
         let manifest: steve_store_sqlite::backup::Manifest = serde_json::from_slice(
             &fs::read(saved.parent().unwrap().join("manifest.json")).unwrap(),
@@ -1017,11 +1021,8 @@ server.serve_forever()
             matches!(manifest.reason,steve_store_sqlite::backup::Reason::PreUpgrade{from,to} if from=="old"&&to=="new")
         );
         assert_eq!(
-            rusqlite::Connection::open(saved)
-                .unwrap()
-                .query_row("SELECT v FROM record", [], |r| r.get::<_, i64>(0))
-                .unwrap(),
-            42
+            steve_store::testkit::hub::backup::evidence(&saved).unwrap(),
+            "42"
         );
     }
     #[test]

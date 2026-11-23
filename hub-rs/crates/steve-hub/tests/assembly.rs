@@ -741,20 +741,12 @@ async fn an_extension_declares_its_own_handle_systems() {
             ..probe("probe")
         })
     };
-    let rows = |w: &steve_hub::wire::Wired| -> Vec<(String, String, String, String)> {
-        w.seams
-            .channels
-            .store()
-            .reader(|c| {
-                let mut st = c.prepare(
-                    "SELECT workspace_id, name, family, plugin FROM systems WHERE id = 'probe_internal'",
-                )?;
-                let rows = st
-                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok::<_, steve_store::StoreError>(rows)
-            })
-            .expect("systems")
+    let rows = |w: &steve_hub::wire::Wired| {
+        steve_store::testkit::hub::api::extension_systems(
+            w.seams.channels.store(),
+            "probe_internal",
+        )
+        .unwrap()
     };
     let w = steve_hub::wire::wire_assembly(
         &h.cfg,

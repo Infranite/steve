@@ -1,6 +1,6 @@
 //! Hub-owned Node jobs: a think call or a research run, and its attempts. One attempt runs one
 //! model on the job's Node; a fallback is the next attempt, never a rewritten one. Every write uses
-//! the caller's transaction, as in [`super::runtime`]: the job, its attempt and the `start_job`
+//! the caller's transaction, as in [`crate::runtime`]: the job, its attempt and the `start_job`
 //! command commit together, and errors roll all of them back.
 //!
 //! The spec, request, receipt and completion JSON are kept verbatim; the coordinator validates
@@ -9,8 +9,8 @@
 use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 
-use super::to_json;
-use crate::{Result, StoreError, Tx};
+use crate::repo::to_json;
+use crate::{Result, StoreError};
 
 fn conflict(detail: &str) -> StoreError {
     StoreError::Conflict(detail.into())
@@ -71,7 +71,7 @@ pub struct StartJob<'a> {
 /// The same job, attempt and command again is a no-op (false); a different identity under a used id
 /// is a conflict.
 pub fn create_job_in(
-    tx: &Tx<'_>,
+    tx: &rusqlite::Connection,
     job: &NewJob<'_>,
     attempt: &NewJobAttempt<'_>,
     start: &StartJob<'_>,
@@ -105,7 +105,7 @@ pub fn create_job_in(
 /// `start_job` command. The previous attempt must be finished and the ordinal must follow it, and
 /// no attempt of the job may have been cancelled: a cancelled job never falls back.
 pub fn next_attempt_in(
-    tx: &Tx<'_>,
+    tx: &rusqlite::Connection,
     job: &str,
     attempt: &NewJobAttempt<'_>,
     start: &StartJob<'_>,
@@ -115,7 +115,7 @@ pub fn next_attempt_in(
 }
 
 fn insert_attempt(
-    tx: &Tx<'_>,
+    tx: &rusqlite::Connection,
     job: &str,
     a: &NewJobAttempt<'_>,
     start: &StartJob<'_>,
@@ -201,7 +201,11 @@ pub struct NewJobCommand<'a> {
 /// Queues the command as `pending`. A duplicate operation id must carry exactly the same envelope.
 /// A `start_job` is only accepted under the attempt's own operation id, so an attempt is started
 /// once; any other id is a conflict.
-pub fn insert_job_command_in(tx: &Tx<'_>, c: &NewJobCommand<'_>, now: i64) -> Result<bool> {
+pub fn insert_job_command_in(
+    tx: &rusqlite::Connection,
+    c: &NewJobCommand<'_>,
+    now: i64,
+) -> Result<bool> {
     let request = to_json(c.request)?;
     let (node, operation): (String, String) = tx
         .query_row(
@@ -273,7 +277,7 @@ impl AttemptState {
 /// `Finished`; the same completion again is a no-op and a different one is a conflict. True when
 /// the row changed.
 pub fn apply_attempt_in(
-    tx: &Tx<'_>,
+    tx: &rusqlite::Connection,
     attempt: &str,
     state: AttemptState,
     receipt: Option<&Value>,
@@ -324,7 +328,7 @@ pub fn apply_attempt_in(
 
 /// Persists the intent to cancel an open attempt before the cancel is sent. False when it is
 /// already finished or already asked to cancel.
-pub fn cancel_attempt_in(tx: &Tx<'_>, attempt: &str, now: i64) -> Result<bool> {
+pub fn cancel_attempt_in(tx: &rusqlite::Connection, attempt: &str, now: i64) -> Result<bool> {
     Ok(tx.execute(
         "UPDATE runtime_job_attempts SET cancel_requested=1,revision=revision+1,updated=? WHERE attempt_id=? AND state<>'finished' AND cancel_requested=0",
         params![now, attempt],
@@ -332,7 +336,7 @@ pub fn cancel_attempt_in(tx: &Tx<'_>, attempt: &str, now: i64) -> Result<bool> {
 }
 
 /// Closes a job once none of its attempts is open. False when it was already finished.
-pub fn finish_job_in(tx: &Tx<'_>, job: &str, now: i64) -> Result<bool> {
+pub fn finish_job_in(tx: &rusqlite::Connection, job: &str, now: i64) -> Result<bool> {
     let open: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM runtime_job_attempts WHERE job_id=? AND state<>'finished')",
         [job],
@@ -360,7 +364,7 @@ pub struct JobRow {
     pub updated: i64,
 }
 
-pub fn job_in(tx: &Tx<'_>, job: &str) -> Result<Option<JobRow>> {
+pub fn job_in(tx: &rusqlite::Connection, job: &str) -> Result<Option<JobRow>> {
     let row = tx
         .query_row(
             "SELECT kind,purpose,workspace_id,node_id,thread_run_id,state,created,updated FROM runtime_jobs WHERE job_id=?",
@@ -417,7 +421,11 @@ pub struct JobAttemptRow {
 
 const ATTEMPT: &str = "SELECT attempt_id,job_id,ordinal,model,node_id,operation_id,execution,spec,digest,state,receipt,completion,cancel_requested,revision FROM runtime_job_attempts";
 
-fn attempts(tx: &Tx<'_>, filter: &str, p: impl rusqlite::Params) -> Result<Vec<JobAttemptRow>> {
+fn attempts(
+    tx: &rusqlite::Connection,
+    filter: &str,
+    p: impl rusqlite::Params,
+) -> Result<Vec<JobAttemptRow>> {
     type Raw = (
         (String, String, i64, String, String, String, String),
         (
@@ -485,18 +493,18 @@ fn attempts(tx: &Tx<'_>, filter: &str, p: impl rusqlite::Params) -> Result<Vec<J
         .collect()
 }
 
-pub fn attempt_in(tx: &Tx<'_>, attempt: &str) -> Result<Option<JobAttemptRow>> {
+pub fn attempt_in(tx: &rusqlite::Connection, attempt: &str) -> Result<Option<JobAttemptRow>> {
     Ok(attempts(tx, "WHERE attempt_id=?", [attempt])?.pop())
 }
 
 /// A job's attempts in ordinal order.
-pub fn attempts_of_job_in(tx: &Tx<'_>, job: &str) -> Result<Vec<JobAttemptRow>> {
+pub fn attempts_of_job_in(tx: &rusqlite::Connection, job: &str) -> Result<Vec<JobAttemptRow>> {
     attempts(tx, "WHERE job_id=? ORDER BY ordinal", [job])
 }
 
 /// `node`'s attempts that are not finished, oldest first. At boot their callers are gone: each is
 /// cancelled or abandoned, never run again.
-pub fn open_attempts_in(tx: &Tx<'_>, node: &str) -> Result<Vec<JobAttemptRow>> {
+pub fn open_attempts_in(tx: &rusqlite::Connection, node: &str) -> Result<Vec<JobAttemptRow>> {
     attempts(
         tx,
         "WHERE node_id=? AND state<>'finished' ORDER BY created, rowid",

@@ -690,7 +690,7 @@ mod tests {
         let recorder = recorder();
         let handle = recorder.handle();
         let app = router(store.clone(), handle);
-        let before = store.with_conn(|c| Ok(c.total_changes())).unwrap();
+        let before = steve_store::testkit::hub::writer_changes(&store).unwrap();
         metrics::with_local_recorder(&recorder, || {
             runtime().block_on(async {
                 for (token, expected) in [
@@ -745,7 +745,10 @@ mod tests {
                 assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
             })
         });
-        assert_eq!(store.with_conn(|c| Ok(c.total_changes())).unwrap(), before);
+        assert_eq!(
+            steve_store::testkit::hub::writer_changes(&store).unwrap(),
+            before
+        );
     }
 
     #[test]
@@ -904,19 +907,21 @@ mod tests {
             let barrier = tokio::sync::Barrier::new(2);
             let a = first.scope(async {
                 store
-                    .reader(|_| Ok::<_, steve_store::StoreError>(()))
+                    .read(|_| Ok::<_, steve_store::StoreError>(()))
                     .unwrap();
                 tokio::task::yield_now().await;
-                store.with_conn(|_| Ok(())).unwrap();
+                store
+                    .write::<_, steve_store::StoreError>(|_| Ok(()))
+                    .unwrap();
                 barrier.wait().await;
                 let store = store.clone();
                 crate::api::blocking(move || {
                     store.users().count().unwrap();
                     store
-                        .transaction(|_| {
-                            // Reuse of the active connection does not acquire another read/write lock.
-                            store.reader(|_| Ok::<_, steve_store::StoreError>(()))?;
-                            store.transaction(|_| Ok::<_, steve_store::StoreError>(()))
+                        .write(|w| {
+                            // A read and a savepoint share the writer's existing lock.
+                            store.read(|_| Ok::<_, steve_store::StoreError>(()))?;
+                            w.scope(|_| Ok::<_, steve_store::StoreError>(()))
                         })
                         .unwrap();
                     Ok(())
@@ -928,7 +933,9 @@ mod tests {
                 barrier.wait().await;
                 let store = store.clone();
                 crate::api::blocking(move || {
-                    store.with_conn(|_| Ok(())).unwrap();
+                    store
+                        .write::<_, steve_store::StoreError>(|_| Ok(()))
+                        .unwrap();
                     Ok(())
                 })
                 .await
@@ -947,9 +954,13 @@ mod tests {
             let store = store.clone();
             uncarried
                 .scope(async {
-                    tokio::task::spawn_blocking(move || store.with_conn(|_| Ok(())).unwrap())
-                        .await
-                        .unwrap();
+                    tokio::task::spawn_blocking(move || {
+                        store
+                            .write::<_, steve_store::StoreError>(|_| Ok(()))
+                            .unwrap()
+                    })
+                    .await
+                    .unwrap();
                 })
                 .await;
             assert_eq!(
@@ -988,7 +999,7 @@ mod tests {
         .unwrap();
         let st = crate::api::AppState::new(
             Arc::new(cfg),
-            Arc::new(crate::wire::store::StoreBackend::new(store.clone()).unwrap()),
+            Arc::new(crate::wire::store::StoreBackend(store.clone())),
             Arc::new(crate::backend::NoDomain),
             crate::bus::Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
                 Default::default(),
@@ -1096,7 +1107,8 @@ mod tests {
         metrics::with_local_recorder(&recorder, || {
             let store = Store::open(tmp.path().join("steve.sqlite3"), NoPublisher).unwrap();
             let line = line!() + 1;
-            store.with_conn(|_| Ok(())).unwrap();
+            let result = store.write(|_| Ok::<_, steve_store::StoreError>(()));
+            result.unwrap();
             let text = handle.render();
             assert!(
                 text.contains(&format!("caller=\"{}:{line}\"", file!())),
@@ -1105,9 +1117,9 @@ mod tests {
             assert!(text.contains("steve_lock_wait_seconds_count"), "{text}");
             assert!(text.contains("steve_lock_hold_seconds_count"), "{text}");
             store
-                .atomic(|| store.transaction(|_| Ok::<_, steve_store::StoreError>(())))
+                .write(|w| w.scope(|_| Ok::<_, steve_store::StoreError>(())))
                 .unwrap();
-            assert!(handle.render().contains("steve_store_transactions_total 2"));
+            assert!(handle.render().contains("steve_store_transactions_total 3"));
         });
     }
 

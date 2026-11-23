@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 use steve_hub::{access, bus::Bus, config::Config};
+use steve_store::testkit::hub::backup as backup_fixture;
 use steve_store::{Store, access::NewClient};
 
 struct Hub {
@@ -341,17 +342,8 @@ fn an_offline_cli_lists_without_writing_metadata_and_keeps_token_writes_audited(
     );
     drop(lock);
     std::fs::create_dir_all(&cfg.data_dir).unwrap();
-    let c = rusqlite::Connection::open(cfg.db_path()).unwrap();
-    steve_store::db::migrate(&c).unwrap();
-    c.execute_batch(&format!(
-        "DELETE FROM schema_version; INSERT INTO schema_version(rowid,v) VALUES(17,{});
-        DELETE FROM schema_compat; INSERT INTO schema_compat(rowid,min_reader) VALUES(29,{});",
-        steve_store::db::SCHEMA_VERSION,
-        steve_store::db::SCHEMA_VERSION - 1
-    ))
-    .unwrap();
-    drop(c);
-    let before_header = admin_header(&cfg.db_path());
+    backup_fixture::seed_admin_header(&cfg.db_path()).unwrap();
+    let before_header = backup_fixture::admin_header(&cfg.db_path()).unwrap();
     let stamp = std::time::UNIX_EPOCH + Duration::from_secs(946684800);
     std::fs::File::options()
         .write(true)
@@ -363,7 +355,10 @@ fn an_offline_cli_lists_without_writing_metadata_and_keeps_token_writes_audited(
     let listed = access::command(&cfg, &["token".into(), "list".into(), "--json".into()]);
     assert_eq!(listed.code, 0, "{}", listed.stderr);
     assert_eq!(listed.stdout, "[]\n");
-    assert_eq!(admin_header(&cfg.db_path()), before_header);
+    assert_eq!(
+        backup_fixture::admin_header(&cfg.db_path()).unwrap(),
+        before_header
+    );
     assert_eq!(std::fs::read(cfg.db_path()).unwrap(), bytes);
     assert_eq!(
         std::fs::metadata(cfg.db_path())
@@ -389,27 +384,15 @@ fn an_offline_cli_lists_without_writing_metadata_and_keeps_token_writes_audited(
     assert_eq!(revoked.code, 0, "{}", revoked.stderr);
     let store = Store::open_admin(cfg.db_path()).unwrap();
     assert!(store.access().token(id).unwrap().unwrap().revoked.is_some());
-    let actions: Vec<String> = store
-        .with_conn(|c| {
-            Ok(
-                c.prepare("SELECT action FROM audit WHERE action LIKE 'token.%' ORDER BY action")?
-                    .query_map([], |r| r.get(0))?
-                    .collect::<rusqlite::Result<_>>()?,
-            )
-        })
-        .unwrap();
+    let actions = backup_fixture::token_audit_actions(&store).unwrap();
     assert_eq!(actions, ["token.create", "token.revoke"]);
-    assert_eq!(admin_header(&cfg.db_path()), before_header);
+    assert_eq!(
+        backup_fixture::admin_header(&cfg.db_path()).unwrap(),
+        before_header
+    );
     let listed = access::command(&cfg, &args);
     assert_eq!(listed.code, 0);
     assert_eq!(listed.stdout, access::command_on(&store, &args).unwrap());
-}
-
-fn admin_header(path: &std::path::Path) -> Vec<(i64, i64)> {
-    let c = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .unwrap();
-    c.prepare("SELECT rowid,v FROM schema_version UNION ALL SELECT rowid,min_reader FROM schema_compat ORDER BY 1")
-        .unwrap().query_map([], |r| Ok((r.get(0)?,r.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
 }
 
 #[test]
@@ -417,11 +400,8 @@ fn offline_access_rejects_old_schema_without_migrating_or_restamping_it() {
     let home = tempfile::tempdir().unwrap();
     let (cfg, _) = config(home.path());
     std::fs::create_dir_all(&cfg.data_dir).unwrap();
-    let c = rusqlite::Connection::open(cfg.db_path()).unwrap();
-    c.execute_batch("CREATE TABLE schema_version(v); INSERT INTO schema_version(rowid,v) VALUES(17,50);
-        CREATE TABLE schema_compat(min_reader); INSERT INTO schema_compat(rowid,min_reader) VALUES(29,49);").unwrap();
-    drop(c);
-    let header = admin_header(&cfg.db_path());
+    backup_fixture::seed_old_admin_header(&cfg.db_path()).unwrap();
+    let header = backup_fixture::admin_header(&cfg.db_path()).unwrap();
     let bytes = std::fs::read(cfg.db_path()).unwrap();
     let modified = std::fs::metadata(cfg.db_path())
         .unwrap()
@@ -434,7 +414,10 @@ fn offline_access_rejects_old_schema_without_migrating_or_restamping_it() {
         "{}",
         result.stderr
     );
-    assert_eq!(admin_header(&cfg.db_path()), header);
+    assert_eq!(
+        backup_fixture::admin_header(&cfg.db_path()).unwrap(),
+        header
+    );
     assert_eq!(std::fs::read(cfg.db_path()).unwrap(), bytes);
     assert_eq!(
         std::fs::metadata(cfg.db_path())
@@ -662,9 +645,7 @@ fn offline_backup_takes_instance_lock_and_never_opens_the_store() {
     let temp = tempfile::tempdir().unwrap();
     let (cfg, _) = config(temp.path());
     std::fs::create_dir_all(&cfg.data_dir).unwrap();
-    let c = rusqlite::Connection::open(cfg.db_path()).unwrap();
-    c.execute_batch("CREATE TABLE schema_version(v INT); INSERT INTO schema_version VALUES(50); CREATE TABLE old_record(v); INSERT INTO old_record VALUES('old');").unwrap();
-    drop(c);
+    backup_fixture::seed_old_backup(&cfg.db_path()).unwrap();
     let before = std::fs::read(cfg.db_path()).unwrap();
     let modified = std::fs::metadata(cfg.db_path())
         .unwrap()
@@ -777,10 +758,7 @@ fn default_offline_management_backup_is_manual() {
     let temp = tempfile::tempdir().unwrap();
     let (cfg, _) = config(temp.path());
     std::fs::create_dir_all(&cfg.data_dir).unwrap();
-    rusqlite::Connection::open(cfg.db_path())
-        .unwrap()
-        .execute_batch("CREATE TABLE record(v);")
-        .unwrap();
+    backup_fixture::seed_evidence(&cfg.db_path(), "record").unwrap();
     let first = access::command(&cfg, &["backup".into()]);
     let second = access::command(&cfg, &["backup".into()]);
     assert_eq!(first.code, 0, "{}", first.stderr);
@@ -837,10 +815,7 @@ async fn daily_backup_off_does_not_disable_other_purposes_or_their_retention_rul
         if m.reason.rule().files == steve_store_sqlite::backup::FileScope::None {
             assert!(m.files.artifacts.is_empty());
         }
-        let copied = rusqlite::Connection::open(m.database_path()).unwrap();
-        let check: String = copied
-            .query_row("PRAGMA quick_check", [], |r| r.get(0))
-            .unwrap();
+        let check = backup_fixture::quick_check(&m.database_path()).unwrap();
         assert_eq!(check, "ok");
         manifests.push(m);
     }

@@ -23,6 +23,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use steve_runtime::testkit::eventually_sync;
+use steve_store::testkit::hub::node_checks;
+use steve_store::testkit::hub::node_journal as journal;
 
 use async_trait::async_trait;
 use steve_hub::wire::node_runtime::{Binding, NodeDomain, NodeRuntime, Sink};
@@ -30,7 +32,7 @@ use steve_hub::wire::node_tools::{NodeTools, Service};
 use steve_node::{LocalNode, NodeConfig, Root, Storage};
 use steve_node_api::testkit::{FakeNode, Point, build};
 use steve_node_api::*;
-use steve_store::{FnPublisher, Store, StoreError};
+use steve_store::{FnPublisher, Store};
 
 const S: &str = "s1";
 const NODE: &str = "local";
@@ -400,13 +402,7 @@ impl Rig {
         std::fs::create_dir_all(root.join("work")).unwrap();
         let store = Store::open(root.join("steve.sqlite3"), FnPublisher(|_| {})).unwrap();
         store.ensure_workspace().unwrap();
-        store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES ('i1','default',1,'test','run','执行',1,1)", [])?;
-                tx.execute("INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES (?,'default','i1','claude-code','','active',1,1)", [S])?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::node_fixtures::seed_items_and_sessions(&store, &S).unwrap();
         let node = Arc::new(Faulty {
             id: NodeId::new(NODE).unwrap(),
             node: Mutex::new(None),
@@ -522,23 +518,12 @@ impl Rig {
 
     /// `start_turn` commands the Node's journal accepted.
     fn journal_starts(&self) -> i64 {
-        self.journal()
-            .query_row(
-                "SELECT COUNT(*) FROM ops WHERE method='start_turn'",
-                [],
-                |x| x.get(0),
-            )
-            .unwrap()
+        journal::operation_count(&self.journal_path(), "start_turn").unwrap()
     }
 
     /// The Node's own journal, for triggers and counts.
-    fn journal(&self) -> rusqlite::Connection {
-        rusqlite::Connection::open(self.home().join("node.sqlite3")).unwrap()
-    }
-
-    /// The Hub's database, for triggers.
-    fn hub_db(&self) -> rusqlite::Connection {
-        rusqlite::Connection::open(self.root.join("steve.sqlite3")).unwrap()
+    fn journal_path(&self) -> PathBuf {
+        self.home().join("node.sqlite3")
     }
 
     fn bind(&self) {
@@ -561,16 +546,8 @@ impl Rig {
             .unwrap();
     }
 
-    fn q<T: rusqlite::types::FromSql>(&self, sql: &str) -> T {
-        self.store
-            .reader(|c| Ok::<_, StoreError>(c.query_row(sql, [], |r| r.get(0))?))
-            .unwrap_or_else(|e| panic!("{sql}: {e}"))
-    }
-
     fn phase(&self) -> String {
-        self.q(&format!(
-            "SELECT phase FROM runtime_sessions WHERE session_id='{S}'"
-        ))
+        node_checks::binding_phase_by_session(&self.store, &S).unwrap()
     }
 
     fn ends(&self) -> Vec<(String, String, Option<String>)> {
@@ -602,25 +579,19 @@ impl Rig {
     }
 
     fn starts(&self) -> i64 {
-        self.q("SELECT COUNT(*) FROM node_commands WHERE method='start_turn'")
+        node_checks::command_count_by_method(&self.store, "start_turn").unwrap()
     }
 
     fn attempts(&self) -> Vec<String> {
-        self.store
-            .reader(|c| {
-                let mut st =
-                    c.prepare("SELECT state FROM runtime_attempts ORDER BY created, rowid")?;
-                let v = st
-                    .query_map([], |r| r.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok::<_, StoreError>(v)
-            })
-            .unwrap()
+        steve_store::testkit::hub::node_fixtures::ordered_attempt_states(&self.store).unwrap()
     }
 
     /// The Hub's events from the Node, counted by kind.
     fn kinds(&self) -> String {
-        self.q("SELECT COALESCE(group_concat(kind||':'||n), '') FROM (SELECT kind, COUNT(*) n FROM events WHERE source_node IS NOT NULL GROUP BY kind ORDER BY kind)")
+        node_checks::first_event_coalesce_group_concat_kind_n_from_select_kind_count_n_with_value(
+            &self.store,
+        )
+        .unwrap()
     }
 
     async fn ready(&self) {
@@ -631,23 +602,15 @@ impl Rig {
     /// Each position applied once on the Hub; once the Node is quiet, everything it journaled is
     /// applied on the Hub and acknowledged on the Node.
     async fn stored_once(&self) {
-        let dup_events: i64 = self.q("SELECT COUNT(*) FROM (SELECT 1 FROM events WHERE source_node IS NOT NULL GROUP BY source_node,source_stream,source_epoch,source_seq HAVING COUNT(*)>1)");
+        let dup_events: i64 = node_checks::duplicate_node_event_count(&self.store).unwrap();
         assert_eq!(dup_events, 0, "an event position twice in events");
         eventually_sync("the Node's journal acknowledged", || {
-            let j = self.journal();
-            let mut st = j
-                .prepare("SELECT stream, epoch, produced, acknowledged FROM streams")
-                .unwrap();
-            let heads: Vec<(String, String, i64, i64)> = st
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
-                .unwrap()
-                .collect::<Result<_, _>>()
-                .unwrap();
+            let heads = journal::stream_heads(&self.journal_path()).unwrap();
             !heads.is_empty()
                 && heads.iter().all(|(stream, epoch, produced, acked)| {
-                    let applied: i64 = self.q(&format!(
-                        "SELECT COALESCE(MAX(applied),0) FROM node_streams WHERE node_id='{NODE}' AND stream='{stream}' AND epoch='{epoch}'"
-                    ));
+                    let applied: i64 =
+                        node_checks::stream_applied_or_zero(&self.store, &NODE, &stream, &epoch)
+                            .unwrap();
                     produced == acked && applied == *produced
                 })
         })
@@ -667,8 +630,7 @@ async fn a_clean_turn_runs_once_and_every_event_is_stored_once() {
     assert_eq!(r.prompts("clean"), 1);
     assert_eq!(r.attempts(), ["finished"]);
     r.stored_once().await;
-    let texts: i64 =
-        r.q("SELECT COUNT(*) FROM events WHERE kind='text' AND source_node IS NOT NULL");
+    let texts: i64 = node_checks::event_count_text_with_value(&r.store).unwrap();
     assert_eq!(texts, 1);
 }
 
@@ -678,15 +640,14 @@ async fn a_clean_turn_runs_once_and_every_event_is_stored_once() {
 async fn a_start_the_journal_cannot_record_never_reaches_the_agent() {
     let r = Rig::new().await;
     r.ready().await;
-    let j = r.journal();
-    j.execute_batch("CREATE TRIGGER fail_accept BEFORE INSERT ON ops WHEN NEW.method='start_turn' BEGIN SELECT RAISE(ABORT,'injected disk failure'); END").unwrap();
+    journal::set_failure(&r.journal_path(), journal::Failure::Start, true).unwrap();
     r.rt.prompt(S, "@say refused", "user", &[]).unwrap();
     eventually_sync("the end", || !r.ends().is_empty()).await;
     assert_eq!(r.prompts("refused"), 0, "nothing was accepted, nothing ran");
     assert_eq!(r.attempts().len(), 1, "no new attempt on its own");
     assert_eq!(r.starts(), 1, "sent once, not again");
     // the journal works again: the next message runs, the refused one stays gone
-    j.execute_batch("DROP TRIGGER fail_accept").unwrap();
+    journal::set_failure(&r.journal_path(), journal::Failure::Start, false).unwrap();
     eventually_sync("ready", || r.phase() == "ready").await;
     r.rt.prompt(S, "@say after", "user", &[]).unwrap();
     eventually_sync("the second end", || r.ends().len() == 2).await;
@@ -736,8 +697,7 @@ async fn lost_acks_bring_the_same_events_again_and_they_are_stored_once() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_harness_whose_process_cannot_be_registered_never_starts() {
     let r = Rig::new().await;
-    let j = r.journal();
-    j.execute_batch("CREATE TRIGGER fail_proc BEFORE INSERT ON procs BEGIN SELECT RAISE(ABORT,'registration failure'); END").unwrap();
+    journal::set_failure(&r.journal_path(), journal::Failure::Process, true).unwrap();
     r.bind();
     r.rt.prompt(S, "@say first", "user", &[]).unwrap();
     eventually_sync("the open fails", || !r.ends().is_empty()).await;
@@ -747,7 +707,7 @@ async fn a_harness_whose_process_cannot_be_registered_never_starts() {
     assert!(r.attempts().is_empty(), "nothing was started");
     // Repairing registration and adding input do not clear the startup stop. An explicit
     // human retry opens the session, and what waited goes with it.
-    j.execute_batch("DROP TRIGGER fail_proc").unwrap();
+    journal::set_failure(&r.journal_path(), journal::Failure::Process, false).unwrap();
     assert_eq!(
         r.rt.prompt(S, "@say second", "user", &[]).unwrap(),
         steve_hub::wire::node_runtime::Planned::Held
@@ -798,16 +758,14 @@ async fn a_node_closed_mid_turn_leaves_the_attempt_unknown_never_rerun() {
 async fn an_event_the_journal_cannot_write_never_reaches_the_hub_half_done() {
     let mut r = Rig::new().await;
     r.ready().await;
-    let j = r.journal();
-    j.execute_batch("CREATE TRIGGER fail_ev BEFORE INSERT ON events WHEN json_extract(NEW.event,'$.body.type')='text_delta' BEGIN SELECT RAISE(ABORT,'injected disk failure'); END").unwrap();
+    journal::set_failure(&r.journal_path(), journal::Failure::Text, true).unwrap();
     r.rt.prompt(S, "@say unwritten", "user", &[]).unwrap();
     eventually_sync("the prompt", || r.prompts("unwritten") == 1).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let texts: i64 =
-        r.q("SELECT COUNT(*) FROM events WHERE kind='text' AND source_node IS NOT NULL");
+    let texts: i64 = node_checks::event_count_text_with_value(&r.store).unwrap();
     assert_eq!(texts, 0, "nothing the journal did not keep");
     // the Node faulted; it and the Hub come back
-    j.execute_batch("DROP TRIGGER fail_ev").unwrap();
+    journal::set_failure(&r.journal_path(), journal::Failure::Text, false).unwrap();
     r.close_node().await;
     r.open_node().await;
     r.restart_hub().await;
@@ -822,8 +780,7 @@ async fn an_event_the_journal_cannot_write_never_reaches_the_hub_half_done() {
 async fn a_batch_the_hub_cannot_take_comes_again_and_is_stored_once() {
     let r = Rig::new().await;
     r.ready().await;
-    let hub = r.hub_db();
-    hub.execute_batch("CREATE TRIGGER fail_in BEFORE UPDATE OF applied ON node_streams WHEN NEW.session_id IS NOT NULL BEGIN SELECT RAISE(ABORT,'injected hub failure'); END").unwrap();
+    journal::set_hub_inbox_failure(r.store.path(), true).unwrap();
     r.rt.prompt(S, "@say refused @say again", "user", &[])
         .unwrap();
     eventually_sync("the prompt", || r.prompts("refused") == 1).await;
@@ -836,16 +793,15 @@ async fn a_batch_the_hub_cannot_take_comes_again_and_is_stored_once() {
         r.ends().is_empty(),
         "the end waits behind the refused events"
     );
-    let texts: i64 =
-        r.q("SELECT COUNT(*) FROM events WHERE kind='text' AND source_node IS NOT NULL");
+    let texts: i64 = node_checks::event_count_text_with_value(&r.store).unwrap();
     assert_eq!(texts, 0, "the whole batch was refused");
-    hub.execute_batch("DROP TRIGGER fail_in").unwrap();
+    journal::set_hub_inbox_failure(r.store.path(), false).unwrap();
     eventually_sync("the end", || !r.ends().is_empty()).await;
     assert_eq!(r.ends()[0].1, "end_turn");
     assert_eq!(r.prompts("refused"), 1);
     assert_eq!(r.attempts(), ["finished"]);
     r.stored_once().await;
-    let text: String = r.q("SELECT group_concat(json_extract(data,'$.text'),'') FROM (SELECT data FROM events WHERE kind='text' AND source_node IS NOT NULL ORDER BY seq)");
+    let text: String = node_checks::folded_node_text(&r.store).unwrap();
     assert_eq!(text, "refusedagain");
 }
 
@@ -908,10 +864,7 @@ async fn a_hub_restarted_between_commit_and_ack_acknowledges_on_reconcile() {
     r.rt.prompt(S, "@say unheard", "user", &[]).unwrap();
     eventually_sync("the end", || !r.ends().is_empty()).await;
     let kinds = r.kinds();
-    let unacked: i64 = r
-        .journal()
-        .query_row("SELECT COUNT(*) FROM events", [], |x| x.get(0))
-        .unwrap();
+    let unacked = journal::retained_events(&r.journal_path()).unwrap();
     assert!(unacked > 0, "the Node still keeps what the Hub holds");
     r.restart_hub().await;
     r.stored_once().await;
@@ -930,25 +883,22 @@ async fn a_hub_restarted_between_commit_and_ack_acknowledges_on_reconcile() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stop_retires_an_unknown_prepare_and_the_queued_message_runs_once() {
     let mut r = Rig::new().await;
-    let j = r.journal();
-    j.execute_batch("CREATE TRIGGER fail_prepare BEFORE UPDATE ON ops WHEN NEW.method='prepare_workspace' AND NEW.receipt LIKE '%finished%' BEGIN SELECT RAISE(ABORT,'injected crash before the final receipt'); END").unwrap();
+    journal::set_failure(&r.journal_path(), journal::Failure::Prepare, true).unwrap();
     r.bind();
     r.rt.prompt(S, "@say queued", "user", &[]).unwrap();
     eventually_sync("the prepare taken", || {
-        r.q::<String>(&format!(
-            "SELECT state FROM node_commands WHERE operation_id='op_prep_{S}'"
-        )) != "pending"
+        node_checks::command_state_by_operation(&r.store, &format!("op_prep_{}", S)).unwrap()
+            != "pending"
     })
     .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     r.close_node().await;
-    j.execute_batch("DROP TRIGGER fail_prepare").unwrap();
+    journal::set_failure(&r.journal_path(), journal::Failure::Prepare, false).unwrap();
     r.open_node().await;
     r.restart_hub().await;
     eventually_sync("unknown", || {
-        r.q::<String>(&format!(
-            "SELECT state FROM node_commands WHERE operation_id='op_prep_{S}'"
-        )) == "unknown"
+        node_checks::command_state_by_operation(&r.store, &format!("op_prep_{}", S)).unwrap()
+            == "unknown"
     })
     .await;
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -960,16 +910,9 @@ async fn stop_retires_an_unknown_prepare_and_the_queued_message_runs_once() {
     assert_eq!(r.ends()[0].1, "end_turn");
     assert_eq!(r.prompts("queued"), 1, "the queued message ran once");
     assert_eq!(r.attempts(), ["finished"]);
-    let recovers: i64 = r.q("SELECT COUNT(*) FROM node_commands WHERE method='recover'");
+    let recovers: i64 = node_checks::command_count_by_method(&r.store, "recover").unwrap();
     assert_eq!(recovers, 1, "exactly one recover");
-    let prepares: i64 = r
-        .journal()
-        .query_row(
-            "SELECT COUNT(*) FROM ops WHERE method='prepare_workspace'",
-            [],
-            |x| x.get(0),
-        )
-        .unwrap();
+    let prepares = journal::operation_count(&r.journal_path(), "prepare_workspace").unwrap();
     assert_eq!(prepares, 2, "the target never again, a new prepare instead");
     r.stored_once().await;
 }
@@ -986,21 +929,15 @@ async fn a_corrupted_redelivery_changes_nothing_and_the_node_drains() {
     *r.gate.lose_acks.lock().unwrap() = usize::MAX;
     r.rt.prompt(S, "@say original", "user", &[]).unwrap();
     eventually_sync("the end", || !r.ends().is_empty()).await;
-    let j = r.journal();
-    let changed = j
-        .execute(
-            "UPDATE events SET event=json_set(event,'$.body.text','tampered') WHERE json_extract(event,'$.body.type')='text_delta'",
-            [],
-        )
-        .unwrap();
+    let changed = journal::tamper_text(&r.journal_path()).unwrap();
     assert!(changed > 0, "the Node still keeps the unacknowledged text");
     *r.gate.lose_acks.lock().unwrap() = 0;
     r.stored_once().await;
-    let tampered: i64 = r.q("SELECT COUNT(*) FROM events WHERE data LIKE '%tampered%'");
+    let tampered: i64 = node_checks::event_count_matching_text(&r.store).unwrap();
     assert_eq!(tampered, 0, "never applied");
-    let text: String = r.q("SELECT group_concat(json_extract(data,'$.text'),'') FROM (SELECT data FROM events WHERE kind='text' AND source_node IS NOT NULL ORDER BY seq)");
+    let text: String = node_checks::folded_node_text(&r.store).unwrap();
     assert_eq!(text, "original");
-    let faulted: i64 = r.q("SELECT COUNT(*) FROM node_streams WHERE fault IS NOT NULL");
+    let faulted: i64 = node_checks::stream_count_with_value(&r.store).unwrap();
     assert_eq!(faulted, 0);
     assert!(!r.rt.is_uncertain(S));
     assert_eq!(r.prompts("original"), 1);
@@ -1168,17 +1105,7 @@ async fn the_hub_has_a_batch_before_the_node_drops_its_copy() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().join("steve.sqlite3"), FnPublisher(|_| {})).unwrap();
     store.ensure_workspace().unwrap();
-    store
-        .transaction::<_, StoreError>(|tx| {
-            tx.execute("INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','active',1,1)", [S])?;
-            Ok(())
-        })
-        .unwrap();
-    let count = |store: &Store, sql: &str| -> i64 {
-        store
-            .reader(|c| Ok::<_, StoreError>(c.query_row(sql, [], |r| r.get(0))?))
-            .unwrap()
-    };
+    steve_store::testkit::hub::node_fixtures::seed_sessions(&store, &S).unwrap();
     let node = FakeNode::new("n1");
     let rt = NodeRuntime::new(store.clone(), node.clone(), Arc::new(Ends::default()));
     node.connect(Arc::new(Sink(Arc::downgrade(&rt))));
@@ -1193,25 +1120,11 @@ async fn the_hub_has_a_batch_before_the_node_drops_its_copy() {
     .unwrap();
     rt.prompt(S, "hello", "user", &[]).unwrap();
     eventually_sync("started", || {
-        count(
-            &store,
-            "SELECT COUNT(*) FROM runtime_attempts WHERE state='running'",
-        ) == 1
-            && node.unacked() == 0
+        node_checks::attempt_count_by_state(&store, "running").unwrap() == 1 && node.unacked() == 0
     })
     .await;
-    let exec: ExecutionRef = serde_json::from_str(
-        &store
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT execution FROM runtime_attempts",
-                    [],
-                    |r| r.get::<_, String>(0),
-                )?)
-            })
-            .unwrap(),
-    )
-    .unwrap();
+    let exec: ExecutionRef =
+        serde_json::from_str(&node_checks::attempt_execution(&store).unwrap()).unwrap();
     // at each point: the Hub's text rows, and what the Node still keeps
     let seen: Arc<Mutex<Vec<(Point, i64, usize)>>> = Arc::default();
     let (st, weak, log) = (store.clone(), Arc::downgrade(&node), seen.clone());
@@ -1220,10 +1133,7 @@ async fn the_hub_has_a_batch_before_the_node_drops_its_copy() {
             p,
             Point::BeforeCommit | Point::AfterCommit | Point::BeforeAck
         ) {
-            let held = count(
-                &st,
-                "SELECT COUNT(*) FROM events WHERE kind='text' AND source_node IS NOT NULL",
-            );
+            let held = node_checks::event_count_text_with_value(&st).unwrap();
             let kept = weak.upgrade().map(|n| n.unacked()).unwrap_or(0);
             log.lock().unwrap().push((p, held, kept));
         }

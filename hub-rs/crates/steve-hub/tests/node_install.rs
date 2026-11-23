@@ -5,6 +5,7 @@
 mod node_harness;
 
 use std::path::Path;
+use steve_store::testkit::hub::node_checks;
 
 use node_harness::*;
 use serde_json::{Value, json};
@@ -136,15 +137,7 @@ async fn the_hub_installs_a_node_that_is_active_once_paired() {
             .is_ok()
     );
     h.owns_default("u1");
-    h.store
-        .transaction::<_, steve_store::StoreError>(|tx| {
-            tx.execute(
-                "INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u2','default','u2','u2','member',1)",
-                [],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::node_fixtures::seed_users(&h.store).unwrap();
 
     let (s, _) = call(&h, reqwest::Method::POST, "u2", "", json!({})).await;
     assert_eq!(s, 403, "only the owner installs");
@@ -252,7 +245,7 @@ async fn the_hub_installs_a_node_that_is_active_once_paired() {
     assert_eq!(done["state"], "done", "{done}");
     let node = done["node_id"].as_str().unwrap();
     // confirmed by the install: active without a fingerprint check
-    let state: String = h.q(&format!("SELECT state FROM nodes WHERE node_id='{node}'"));
+    let state: String = node_checks::node_state_by_node_id(&h.store, node).unwrap();
     assert_eq!(state, "active");
     let steps = done["steps"].as_array().unwrap();
     let kinds: Vec<&str> = steps.iter().filter_map(|s| s["kind"].as_str()).collect();
@@ -405,7 +398,7 @@ async fn the_hub_installs_a_node_that_is_active_once_paired() {
     .await;
     assert_eq!(s, 409);
     assert_eq!(
-        h.q::<String>(&format!("SELECT state FROM nodes WHERE node_id='{node}'")),
+        node_checks::node_state_by_node_id(&h.store, node).unwrap(),
         "active"
     );
 

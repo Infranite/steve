@@ -48,10 +48,11 @@ pub fn routes(ch: Channels, outbox: Arc<Outbox>) -> Router<Modules> {
 fn visible(ch: &Channels, who: &Caller, id: &str) -> ApiResult<()> {
     let viewer = ch.modules().viewer(who)?;
     ch.store().read(|r| {
-        let space = steve_store::channel_message_repo::space_of(r, &who.ws, id)?
+        let space = steve_store::ChannelSources(r)
+            .message_space(&who.ws, id)?
             .ok_or_else(|| ApiError::not_found("消息"))?;
-        steve_store::channel_spaces::rows::get_in_workspace(r, &viewer.ws, &space)?
-            .ok_or_else(|| ApiError::not_found("消息"))?;
+        steve_channels::spaces::checked_space(r, &viewer, &space)
+            .map_err(|_| ApiError::not_found("消息"))?;
         Ok(())
     })
 }

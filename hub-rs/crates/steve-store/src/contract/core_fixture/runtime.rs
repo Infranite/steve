@@ -3,7 +3,7 @@
 use rusqlite::params;
 use serde_json::json;
 
-use crate::runtime::{NewAttempt, NewCommand, insert_attempt_on, insert_command_on};
+use crate::runtime::{NewAttempt, NewCommand, insert_attempt_in, insert_command_in};
 use crate::{Result, Store, StoreError, W};
 
 pub struct FinishedTurn<'a> {
@@ -159,13 +159,13 @@ pub fn pending_start(
         "INSERT INTO runtime_turns(turn_id,session_id,state,created,updated) VALUES (?,?,'planned',?,?)",
         params![attempt.turn, session, at, at],
     )?;
-    insert_attempt_on(tx, attempt, at)?;
-    insert_command_on(tx, command, at)?;
+    insert_attempt_in(tx, attempt, at)?;
+    insert_command_in(tx, command, at)?;
     Ok(())
 }
 
 pub fn put_node_command(w: &mut W<'_>, command: &NewCommand<'_>, at: i64) -> Result<bool> {
-    insert_command_on(w.conn, command, at)
+    insert_command_in(w.conn, command, at)
 }
 
 pub fn mark_command_sent(w: &mut crate::W<'_>, op: &str, at: i64) -> crate::Result<()> {

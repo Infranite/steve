@@ -70,7 +70,7 @@ impl steve_flow::Core for FlowCore {
             return Ok(());
         };
         store
-            .reader(|c| {
+            .read(|c| {
                 Ok::<_, steve_store::StoreError>(preflight.can_run_schedule(c, ws, requester, bot))
             })
             .map_err(|error| error.to_string())?

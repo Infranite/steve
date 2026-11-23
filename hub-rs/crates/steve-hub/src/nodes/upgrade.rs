@@ -431,12 +431,14 @@ impl Upgrades {
                 sha256.clone(),
             );
             tokio::task::spawn_blocking(move || {
-                store.transaction(|tx| {
-                    tx.execute(
-                        "UPDATE node_upgrades SET file=?2, sha256=?3, size=?4 WHERE operation_id=?1",
-                        rusqlite::params![op2, file2, sha2, size as i64],
+                store.write(|w| {
+                    steve_store::node_directory::set_upgrade_artifact(
+                        w,
+                        &op2,
+                        &file2,
+                        &sha2,
+                        size as i64,
                     )
-                    .map_err(steve_store::StoreError::from)
                 })
             })
             .await
@@ -1042,14 +1044,7 @@ mod tests {
         let store =
             Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
-        store
-            .transaction::<_, steve_store::StoreError>(|tx| {
-                tx.execute_batch(
-                    "INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n_a','u','a',zeroblob(32),'fa','active',1);",
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::hub_fixtures::seed_nodes(&store).unwrap();
         let release = dir.path().join("release");
         std::fs::create_dir_all(release.join("bin")).unwrap();
         let h = hub.clone().unwrap_or_else(|| build("0.0.0", 'f'));
@@ -1340,14 +1335,7 @@ mod tests {
     async fn running_turns_past_the_drain_time_give_it_up_unless_forced() {
         for force in [false, true] {
             let f = fixture(true, Some(build("2.0.0", 'b')), 100);
-            f.store
-                .transaction::<_, steve_store::StoreError>(|tx| {
-                    tx.execute_batch(
-                        "INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated) VALUES ('op_t','n_a','start_turn','{}','d','active',1,1);",
-                    )?;
-                    Ok(())
-                })
-                .unwrap();
+            steve_store::testkit::hub::hub_fixtures::seed_node_commands(&f.store).unwrap();
             let op = f.up.start("n_a", "u", force).await.unwrap();
             let r = ended(&f, &op).await;
             if force {
@@ -1376,14 +1364,7 @@ mod tests {
             "nothing under way: nothing to switch, nothing started"
         );
         assert!(f.node.staged_upgrades().is_empty());
-        f.store
-            .transaction::<_, steve_store::StoreError>(|tx| {
-                tx.execute_batch(
-                    "INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated) VALUES ('op_t','n_a','start_turn','{}','d','active',1,1);",
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::hub_fixtures::seed_node_commands(&f.store).unwrap();
         let op = f.up.start("n_a", "u", false).await.unwrap();
         // waiting for the running turn
         for _ in 0..500 {

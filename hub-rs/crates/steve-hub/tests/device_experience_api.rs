@@ -301,10 +301,8 @@ async fn revoked_owner_waiting_for_sqlite_writer_cannot_patch_any_device_field()
             _ => json!(32),
         };
         let body = body.to_string();
-        let db = rusqlite::Connection::open(&e.db).unwrap();
-        db.execute_batch("BEGIN IMMEDIATE").unwrap();
-        db.execute("UPDATE users SET role='member' WHERE id=?", [&owner])
-            .unwrap();
+        let revocation =
+            steve_store::testkit::hub::api::PendingOwnerRevocation::begin(&e.db, &owner).unwrap();
         let addr = e.base.strip_prefix("http://").unwrap();
         let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
         stream.write_all(format!("PATCH /api/devices/hub HTTP/1.1\r\nHost: {addr}\r\nCookie: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n", e.owner_cookie, body.len()).as_bytes()).await.unwrap();
@@ -329,7 +327,7 @@ async fn revoked_owner_waiting_for_sqlite_writer_cannot_patch_any_device_field()
                 .is_err(),
             "must wait for writer"
         );
-        db.execute_batch("COMMIT").unwrap();
+        revocation.commit().unwrap();
         let mut response = String::new();
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
@@ -345,8 +343,7 @@ async fn revoked_owner_waiting_for_sqlite_writer_cannot_patch_any_device_field()
             assert_eq!(after[key], before[key], "{field}: {key}");
         }
         assert_eq!(after["can_configure"], false);
-        db.execute("UPDATE users SET role='owner' WHERE id=?", [&owner])
-            .unwrap();
+        steve_store::testkit::hub::api::restore_owner(&e.db, &owner).unwrap();
     }
 }
 
@@ -355,12 +352,7 @@ async fn full_range_roundtrip_pause_resume_validation_and_concurrent_cas() {
     let e = start(true).await;
     let mut d = ready(&e).await;
     // Persisted 32 is a supported existing installation, not a value to clamp on read/save.
-    e.store()
-        .with_conn(|c| {
-            c.execute("UPDATE devices SET max_sessions=32 WHERE id='hub'", [])?;
-            Ok(())
-        })
-        .unwrap();
+    steve_store::testkit::hub::hub_fixtures::set_devices_max_sessions_32(&e.store()).unwrap();
     d["max_sessions"] = json!(32);
     for (status, limit) in [("暂停接活", 32), ("正常", 32), ("正常", 256), ("正常", 32)] {
         let (code, r) = patch(

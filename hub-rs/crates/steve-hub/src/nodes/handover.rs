@@ -25,26 +25,14 @@ pub fn due(
     up_since: i64,
     now: i64,
 ) -> Vec<(String, String, i64)> {
-    let rows: Vec<(String, String, String, i64)> = store
-        .reader(|c| {
-            let mut st = c.prepare(
-                "SELECT r.session_id, n.node_id, n.name, COALESCE(n.last_seen, n.created)
-                   FROM runtime_sessions r JOIN nodes n ON n.node_id = r.node_id
-                   JOIN sessions s ON s.id = r.session_id
-                  WHERE n.local = 0 AND n.state IN ('active','paused') AND s.status <> 'ended'
-                    AND EXISTS (SELECT 1 FROM queued q WHERE q.session_id = r.session_id)",
-            )?;
-            let v = st
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok::<_, steve_store::StoreError>(v)
-        })
-        .unwrap_or_default();
-    rows.into_iter()
-        .filter(|(_, node, _, _)| svc.registry.current(node).is_none())
-        .filter_map(|(sid, _, name, seen)| {
-            let away = (now - seen.max(up_since)) / 60_000;
-            (away >= minutes).then_some((sid, name, away))
+    store
+        .read(|r| steve_store::node_sessions::handover_candidates(r))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|row| svc.registry.current(&row.node).is_none())
+        .filter_map(|row| {
+            let away = (now - row.last_seen.max(up_since)) / 60_000;
+            (away >= minutes).then_some((row.session, row.name, away))
         })
         .collect()
 }

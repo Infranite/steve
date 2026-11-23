@@ -116,3 +116,22 @@ impl Backend for Sqlite<'_> {
         Ok(())
     }
 }
+
+#[cfg(feature = "testkit")]
+pub(super) fn test_message_role_steps(
+    c: &Connection,
+    sql: &str,
+    params: &Values,
+) -> Result<(Option<String>, i32)> {
+    use rusqlite::{OptionalExtension, StatementStatus};
+    let mut st = c.prepare_cached(sql).map_err(err)?;
+    st.reset_status(StatementStatus::VmStep);
+    let text = st
+        .query_row(rusqlite::params_from_iter(bind(params)), |r| {
+            r.get::<_, Option<String>>(0)
+        })
+        .optional()
+        .map_err(err)?
+        .flatten();
+    Ok((text, st.get_status(StatementStatus::VmStep)))
+}

@@ -63,6 +63,11 @@ mod match_rules;
 mod memory_index;
 mod merge_proposals;
 pub(crate) mod message_sources;
+pub mod node_commands;
+pub mod node_directory;
+pub mod node_environment;
+pub mod node_sessions;
+pub mod node_turns;
 pub mod notifications;
 pub mod operations;
 pub mod parties;
@@ -71,6 +76,7 @@ mod passkey_rows;
 mod project_rows;
 pub mod projects;
 pub(crate) mod read_models;
+pub mod realtime_output;
 pub mod reply_basis;
 mod revisions;
 mod run_rows;
@@ -413,3 +419,12 @@ impl sealed::Q for W<'_> {
     }
 }
 impl Read for W<'_> {}
+
+pub mod node_jobs;
+pub mod node_write;
+pub mod state_batches;
+
+pub mod bot_admin;
+pub mod deliveries;
+pub mod tool_admission;
+pub mod tool_journal;

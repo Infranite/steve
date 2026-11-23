@@ -35,7 +35,7 @@ impl WorkspaceSettings<'_, W<'_>> {
         self.set(ws, HTTP_ALLOW_PRIVATE, &serde_json::to_string(hosts)?, now)
     }
 
-    pub(crate) fn set(&mut self, ws: &str, key: &str, value: &str, now: i64) -> Result<()> {
+    pub fn set(&mut self, ws: &str, key: &str, value: &str, now: i64) -> Result<()> {
         self.0.exec(
             Query::insert()
                 .into_table("settings")

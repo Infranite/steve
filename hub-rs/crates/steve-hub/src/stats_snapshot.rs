@@ -143,7 +143,6 @@ pub fn main(a: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::Connection;
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
@@ -178,27 +177,8 @@ mod tests {
     fn an_older_database_is_read_from_a_migrated_copy_and_left_as_it_was() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("old.sqlite3");
-        {
-            let c = Connection::open(&path).unwrap();
-            c.execute_batch(
-                "CREATE TABLE schema_version(v INTEGER NOT NULL); INSERT INTO schema_version VALUES(91);",
-            )
+        steve_store::testkit::hub::snapshot_before_invalidations(&path, steve_store::now())
             .unwrap();
-            for m in &db::MIGRATIONS[..91] {
-                c.execute_batch(m).unwrap();
-            }
-            c.execute_batch(
-                "INSERT INTO workspaces(id,name,created) VALUES ('w','w',1);
-                 INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES ('i1','w',1,'t','run','执行',1,1);",
-            )
-            .unwrap();
-            // a closing invalidated today, known only from its timeline line before migration 92
-            c.execute(
-                "INSERT INTO timeline(item_id,ts,actor,kind,text) VALUES ('i1',?,'steve','sys','收尾作废：计划里又有没做完的步骤')",
-                [steve_store::now()],
-            )
-            .unwrap();
-        }
         let before = std::fs::read(&path).unwrap();
         let v = snapshot(&Args {
             db: path.clone(),

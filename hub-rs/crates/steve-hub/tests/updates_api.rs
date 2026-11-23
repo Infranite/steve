@@ -154,9 +154,7 @@ async fn updates_are_for_the_instance_owner_and_the_notice_is_in_the_state() {
     }
 
     // the same person as a workspace member: no check, no upgrade, no paths
-    let db = rusqlite::Connection::open(e.cfg.db_path()).unwrap();
-    db.execute("UPDATE users SET role = 'member'", []).unwrap();
-    drop(db);
+    steve_store::testkit::hub::api::demote_users(&e.cfg.db_path()).unwrap();
     let (s, _) = json_of(e.req(Method::POST, "/api/updates/check").json(&json!({}))).await;
     assert_eq!(s, 403, "a check spends the instance's GitHub allowance");
     let (s, _) = json_of(

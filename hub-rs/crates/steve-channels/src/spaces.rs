@@ -1246,7 +1246,7 @@ impl SpacePatch {
 }
 
 /// Applies a patch: `configured=1`, a revision, audit `space.patch`, SSE `space`.
-pub(crate) fn checked_space(
+pub fn checked_space(
     r: &mut impl steve_store::Read,
     viewer: &Viewer,
     id: &str,

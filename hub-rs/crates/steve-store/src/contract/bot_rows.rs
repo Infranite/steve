@@ -218,23 +218,38 @@ impl<C: Read> BotRows<'_, C> {
     }
 }
 
+fn visible(ws: &str) -> SelectStatement {
+    let memberships = Query::select()
+        .from("bot_workspaces")
+        .column("bot_id")
+        .and_where(Expr::col("workspace_id").eq(ws))
+        .take();
+    Query::select()
+        .from("bots")
+        .and_where(Expr::col("deleted").eq(false))
+        .and_where(
+            Expr::col("workspace_id")
+                .eq(ws)
+                .or(Expr::col("id").in_subquery(memberships)),
+        )
+        .take()
+}
+
 impl<C: Read> BotRows<'_, C> {
-    pub fn owned_in(&mut self, ws: &str) -> Result<Vec<BotRef>> {
-        let memberships = Query::select()
-            .from("bot_workspaces")
-            .column("bot_id")
-            .and_where(Expr::col("workspace_id").eq(ws))
-            .take();
+    pub fn enabled_names(&mut self, ws: &str) -> Result<Vec<(String, String)>> {
         self.0.all(
-            Query::select()
-                .from("bots")
+            visible(ws)
+                .columns(["id", "name"])
+                .and_where(Expr::col("enabled").eq(true))
+                .order_by("name", Order::Asc),
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+    }
+
+    pub fn owned_in(&mut self, ws: &str) -> Result<Vec<BotRef>> {
+        self.0.all(
+            visible(ws)
                 .columns(["id", "name", "role", "main", "enabled"])
-                .and_where(Expr::col("deleted").eq(0_i64))
-                .and_where(
-                    Expr::col("workspace_id")
-                        .eq(ws)
-                        .or(Expr::col("id").in_subquery(memberships)),
-                )
                 .order_by("main", Order::Desc)
                 .order_by("name", Order::Asc),
             |r| {
@@ -286,5 +301,18 @@ impl<C: Read> BotRows<'_, C> {
                 |_| Ok(()),
             )?
             .is_some())
+    }
+}
+
+impl<C: Read> BotRows<'_, C> {
+    pub fn harness(&mut self, bot: &str) -> Result<Option<String>> {
+        self.0.one(
+            Query::select()
+                .column("harness")
+                .from("bots")
+                .and_where(Expr::col("id").eq(bot))
+                .and_where(Expr::col("deleted").eq(false)),
+            |row| row.get(0),
+        )
     }
 }

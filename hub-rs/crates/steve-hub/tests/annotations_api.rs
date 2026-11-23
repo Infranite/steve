@@ -232,15 +232,8 @@ async fn drafts_one_send_and_the_item_line() {
         .as_str()
         .expect("item")
         .to_string();
-    {
-        let c = rusqlite::Connection::open(&e.db).expect("db");
-        c.execute_batch(&format!(
-            "INSERT INTO artifacts (id, item_id, kind, title, location, created) VALUES
-               ('art_a', '{iid}', '文件', '截图', '/tmp/shots', 1), ('art_b', '{iid}', '文件', '截图', '/tmp/shots', 2);
-             INSERT INTO artifact_roles (artifact_id, role) VALUES ('art_a', 'record');"
-        ))
-        .expect("artifacts");
-    }
+    steve_store::testkit::hub::api::seed_annotations(&e.db, &iid).unwrap();
+
     let path = format!("/api/items/{iid}/annotations");
     let (s, v) = e
         .call("POST", &path, Some(json!({"art": "art_b", "path": "a.png", "anchor": {"type": "region", "x": 0.1, "y": 0.2, "w": 0.5, "h": 0.25}, "note": "按钮被裁掉了"})))

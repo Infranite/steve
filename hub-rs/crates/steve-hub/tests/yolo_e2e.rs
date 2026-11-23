@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use steve_runtime::testkit::eventually;
+use steve_store::testkit::hub::yolo as fixtures;
 
 use serde_json::{Value, json};
 use steve_hub::api::AppState;
@@ -172,27 +173,6 @@ async fn item(e: &Env, goal: &str) -> String {
     sid
 }
 
-fn rows(db: &PathBuf, sql: &str, p: &[&dyn rusqlite::ToSql]) -> Vec<Vec<Value>> {
-    let c = rusqlite::Connection::open(db).expect("db");
-    c.busy_timeout(Duration::from_secs(5)).expect("timeout");
-    let mut st = c.prepare(sql).expect("prepare");
-    let n = st.column_count();
-    st.query_map(p, |r| {
-        Ok((0..n)
-            .map(|i| match r.get_ref(i).expect("col") {
-                rusqlite::types::ValueRef::Null => Value::Null,
-                rusqlite::types::ValueRef::Integer(x) => json!(x),
-                rusqlite::types::ValueRef::Real(x) => json!(x),
-                rusqlite::types::ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
-                rusqlite::types::ValueRef::Blob(_) => Value::Null,
-            })
-            .collect())
-    })
-    .expect("query")
-    .collect::<rusqlite::Result<_>>()
-    .expect("rows")
-}
-
 async fn texts(e: &Env, sid: &str) -> String {
     let (_, v) = e
         .call("GET", &format!("/api/sessions/{sid}/events"), None)
@@ -219,12 +199,7 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         texts(&e, &inside).await.contains("perm:selected:once")
     })
     .await;
-    let r = rows(
-        &e.db,
-        "SELECT d.status, d.result, a.outcome, a.rule, a.choice FROM decisions d JOIN yolo_actions a ON a.decision_id = d.id
-          WHERE d.subject_type = 'tool_call' AND d.session_id = ?",
-        &[&inside],
-    );
+    let r = fixtures::decision_actions(&e.db, &inside).unwrap();
     assert_eq!(r.len(), 1, "{r:?}");
     assert_eq!(r[0][0], "resolved");
     let result: Value = serde_json::from_str(r[0][1].as_str().unwrap()).unwrap();
@@ -239,34 +214,18 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
             json!("allow_once")
         )
     );
-    let who = rows(
-        &e.db,
-        "SELECT a.actor FROM audit a JOIN decisions d ON d.id = a.target
-          WHERE a.action = 'decision.resolve' AND d.subject_type = 'tool_call' AND d.session_id = ?",
-        &[&inside],
-    );
+    let who = fixtures::decision_resolvers(&e.db, &inside).unwrap();
     assert_eq!(who, vec![vec![json!("yolo")]]);
 
     // outside: a delete stays with you, the reason recorded once
     let outside = item(&e, "清理 @permtool delete ../../../outside.txt").await;
     eventually("The YOLO permission action saves its outcome.", || async {
-        !rows(
-            &e.db,
-            "SELECT a.outcome FROM decisions d JOIN yolo_actions a ON a.decision_id = d.id
-                  WHERE d.subject_type = 'tool_call' AND d.session_id = ?",
-            &[&outside],
-        )
-        .is_empty()
+        !fixtures::tool_outcomes(&e.db, &outside).unwrap().is_empty()
     })
     .await;
     // Deliberate negative window: a declined delete stays open and is not answered later.
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let r = rows(
-        &e.db,
-        "SELECT d.status, a.outcome, a.reason FROM decisions d JOIN yolo_actions a ON a.decision_id = d.id
-          WHERE d.subject_type = 'tool_call' AND d.session_id = ?",
-        &[&outside],
-    );
+    let r = fixtures::decline_reasons(&e.db, &outside).unwrap();
     assert_eq!(r.len(), 1, "{r:?}");
     assert_eq!(
         (r[0][0].clone(), r[0][1].clone()),
@@ -339,20 +298,12 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         texts(&e, &free).await.contains("perm:bypassed:")
     })
     .await;
-    let r = rows(
-        &e.db,
-        "SELECT id FROM decisions WHERE subject_type = 'tool_call' AND session_id = ?",
-        &[&free],
-    );
+    let r = fixtures::permission_cards(&e.db, &free).unwrap();
     assert!(
         r.is_empty(),
         "no permission decisions under full access: {r:?}"
     );
-    let audit = rows(
-        &e.db,
-        "SELECT action, json_extract(detail, '$.mode') FROM audit WHERE action LIKE 'yolo.%' ORDER BY rowid",
-        &[],
-    );
+    let audit = fixtures::mode_audits(&e.db).unwrap();
     assert!(
         audit.contains(&vec![json!("yolo.on"), json!("full")]),
         "{audit:?}"
@@ -430,23 +381,12 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     // it stays with the user as a card
     let push = item(&e, "推送 @permexec git push origin main").await;
     eventually("The YOLO permission action saves its outcome.", || async {
-        !rows(
-            &e.db,
-            "SELECT a.outcome FROM decisions d JOIN yolo_actions a ON a.decision_id = d.id
-                  WHERE d.subject_type = 'tool_call' AND d.session_id = ?",
-            &[&push],
-        )
-        .is_empty()
+        !fixtures::tool_outcomes(&e.db, &push).unwrap().is_empty()
     })
     .await;
     // Deliberate negative window: the push stays with the user, without a late auto-answer.
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let r = rows(
-        &e.db,
-        "SELECT d.status, a.outcome FROM decisions d JOIN yolo_actions a ON a.decision_id = d.id
-          WHERE d.subject_type = 'tool_call' AND d.session_id = ?",
-        &[&push],
-    );
+    let r = fixtures::decision_outcomes(&e.db, &push).unwrap();
     assert_eq!(r.len(), 1, "{r:?}");
     assert_eq!(r[0][0], json!("open"), "the card waits for the user: {r:?}");
     assert_ne!(r[0][1], json!("decided"), "{r:?}");
@@ -463,14 +403,7 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     .await;
     let acts = |sid: String| {
         let db = e.db.clone();
-        move || {
-            rows(
-                &db,
-                "SELECT d.status, a.outcome, a.rule FROM decisions d JOIN yolo_actions a ON a.decision_id = d.id
-                  WHERE d.subject_type = 'tool_call' AND d.session_id = ? ORDER BY a.rowid",
-                &[&sid],
-            )
-        }
+        move || fixtures::decision_rules(&db, &sid).unwrap()
     };
     let waiting_acts = acts(waiting.clone());
     eventually(
@@ -518,11 +451,7 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         (r[1][0].clone(), r[1][1].clone(), r[1][2].clone()),
         (json!("resolved"), json!("decided"), json!("tool.full"))
     );
-    let cards = rows(
-        &e.db,
-        "SELECT id FROM decisions WHERE subject_type = 'tool_call' AND session_id = ?",
-        &[&waiting],
-    );
+    let cards = fixtures::permission_cards(&e.db, &waiting).unwrap();
     assert_eq!(cards.len(), 1, "one card, answered once: {cards:?}");
     let v = state().await;
     assert_eq!(
@@ -576,13 +505,7 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     .await;
     let open_cards = |sid: String| {
         let db = e.db.clone();
-        move || {
-            rows(
-                &db,
-                "SELECT id FROM decisions WHERE subject_type = 'tool_call' AND status = 'open' AND session_id = ?",
-                &[&sid],
-            )
-        }
+        move || fixtures::open_permission_cards(&db, &sid).unwrap()
     };
     let (ok_open, kill_open) = (open_cards(off_ok.clone()), open_cards(off_kill.clone()));
     eventually(
@@ -646,10 +569,7 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     // `wanted` while the harness still ran in full access). Nothing reads as applied until the
     // Node confirmed `ask`.
     let nobot = item(&e, "笔记 @say nobot @sleep 1500 @say done").await;
-    let c = rusqlite::Connection::open(&e.db).expect("db");
-    c.busy_timeout(Duration::from_secs(5)).expect("timeout");
-    c.execute("UPDATE sessions SET bot_id = NULL WHERE id = ?", [&nobot])
-        .expect("no bot");
+    fixtures::remove_session_bot(&e.db, &nobot).unwrap();
     let iid = e.session(&nobot).await["item_id"]
         .as_str()
         .expect("item")

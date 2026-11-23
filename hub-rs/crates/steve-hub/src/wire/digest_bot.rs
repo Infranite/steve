@@ -6,8 +6,6 @@ use std::time::Duration;
 use axum::extract::State;
 use axum::routing::get;
 use axum::{Extension, Json, Router};
-#[cfg(test)]
-use rusqlite::params;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use steve_digest::{bot, queue};
@@ -210,6 +208,7 @@ mod tests {
     use steve_digest::queue::BotRunner;
     use steve_flow::testkit::FlowEnv;
     use steve_modules::testkit::{ME, OTHER, WS, call, caller};
+    use steve_store::testkit::{flow as flow_fixture, hub::digest as fixtures};
 
     async fn bound() -> (FlowEnv, String) {
         let e = FlowEnv::new();
@@ -242,15 +241,31 @@ mod tests {
     }
 
     fn packet(e: &FlowEnv, ws: &str, at: i64) -> String {
-        e.env.store().transaction(|tx| -> Result<_, steve_store::StoreError> {
-            tx.execute("INSERT OR IGNORE INTO workspaces (id,name,created) VALUES (?, 'digest test', 1)", [ws])?;
-            tx.execute("INSERT OR REPLACE INTO settings (workspace_id,key,value,updated) VALUES (?, 'digest', '{\"every_min\":1,\"packets\":1000}', 1)", [ws])?;
-            tx.write(|w| w.digest_packets().insert(&queue::NewPacket {
-                ws, conv: "space:fixture", seq: 1, kind: "window", trigger: "quiet",
-                first_id: "m", last_id: "m", first_at: at, last_at: at,
-                count: 1, priority: 1, facts: &json!({}), candidates: &json!([]),
-            }, &[], at - 60_000))
-        }).unwrap()
+        e.env
+            .store()
+            .write(|w| -> steve_store::Result<_> {
+                fixtures::configure_packet(w, ws)?;
+                w.digest_packets().insert(
+                    &queue::NewPacket {
+                        ws,
+                        conv: "space:fixture",
+                        seq: 1,
+                        kind: "window",
+                        trigger: "quiet",
+                        first_id: "m",
+                        last_id: "m",
+                        first_at: at,
+                        last_at: at,
+                        count: 1,
+                        priority: 1,
+                        facts: &json!({}),
+                        candidates: &json!([]),
+                    },
+                    &[],
+                    at - 60_000,
+                )
+            })
+            .unwrap()
     }
 
     // WS uses the production runner against a graph that always rejects startup. Other
@@ -268,21 +283,17 @@ mod tests {
             if ws == WS {
                 return self.0.start(ws, now);
             }
-            self.0
-                .0
-                .store()
-                .transaction(|tx| -> Result<(), steve_store::StoreError> {
-                    let b = tx.write(|w| w.digest_packets().batching(ws))?;
-                    let (_, ids) = tx.write(|w| {
-                        w.digest_packets()
-                            .lease_matching(ws, now, &b, 10, |_, _| Ok(true))
-                    })?;
-                    for id in ids {
-                        let p = tx.write(|w| w.digest_packets().get(ws, &id))?.unwrap();
-                        tx.write(|w| w.digest_packets().packet_done(&p, true, None, &b, now))?;
-                    }
-                    Ok(())
-                })
+            self.0.0.store().write(|w| -> steve_store::Result<()> {
+                let b = w.digest_packets().batching(ws)?;
+                let (_, ids) = w
+                    .digest_packets()
+                    .lease_matching(ws, now, &b, 10, |_, _| Ok(true))?;
+                for id in ids {
+                    let p = w.digest_packets().get(ws, &id)?.unwrap();
+                    w.digest_packets().packet_done(&p, true, None, &b, now)?;
+                }
+                Ok(())
+            })
         }
     }
 
@@ -294,13 +305,7 @@ mod tests {
         let bad = packet(&e, WS, now);
         let healthy = packet(&e, "ws_digest_healthy", now);
         let future = packet(&e, "ws_digest_future", now + 17_123);
-        e.env
-            .store()
-            .with_conn(|c| {
-                c.execute("UPDATE flows SET graph = 'broken json' WHERE id = ?", [&id])?;
-                Ok(())
-            })
-            .unwrap();
+        flow_fixture::set_raw_flow_graph(e.env.store(), &id, "broken json").unwrap();
         assert!(matches!(
             steve_flow::scheduler::start_manual(&e.flow, WS, &id),
             Err(ApiError::Rule(_))
@@ -378,13 +383,7 @@ mod tests {
         let (e, id) = bound().await;
         let now = e.env.clock.now();
         packet(&e, WS, now);
-        e.env
-            .store()
-            .with_conn(|c| {
-                c.execute("UPDATE flows SET graph = 'broken json' WHERE id = ?", [&id])?;
-                Ok(())
-            })
-            .unwrap();
+        flow_fixture::set_raw_flow_graph(e.env.store(), &id, "broken json").unwrap();
         let source = queue::BotSource::new(&e.env.modules, Runner::new(e.flow.clone()));
         source.run_due(now).await.unwrap();
         let history = || {
@@ -449,13 +448,7 @@ mod tests {
         let (e, id) = bound().await;
         let now = e.env.clock.now();
         packet(&e, WS, now);
-        e.env
-            .store()
-            .with_conn(|c| {
-                c.execute("UPDATE flows SET graph = 'broken json' WHERE id = ?", [&id])?;
-                Ok(())
-            })
-            .unwrap();
+        flow_fixture::set_raw_flow_graph(e.env.store(), &id, "broken json").unwrap();
         let source = queue::BotSource::new(&e.env.modules, Runner::new(e.flow.clone()));
         source.run_due(now).await.unwrap();
         let before = e
@@ -463,10 +456,7 @@ mod tests {
             .store()
             .read(|c| runs::page(c, WS, &id, None, 50))
             .unwrap();
-        e.env.store().with_conn(|c| {
-            c.execute_batch("CREATE TRIGGER reject_failed_update BEFORE UPDATE ON flow_runs WHEN NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'cannot update failed start'); END")?;
-            Ok(())
-        }).unwrap();
+        steve_store::testkit::hub::mutations::create_reject_failed_update(e.env.store()).unwrap();
         e.env.clock.advance(60_000);
         let error = source.run_due(now + 60_000).await.unwrap_err();
         assert!(error.0.contains("cannot update failed start"));
@@ -486,11 +476,7 @@ mod tests {
         let (e, id) = bound().await;
         let now = e.env.clock.now();
         packet(&e, WS, now);
-        e.env.store().with_conn(|c| {
-            c.execute("UPDATE flows SET graph = 'broken json' WHERE id = ?", [&id])?;
-            c.execute_batch("CREATE TRIGGER reject_failed_run BEFORE INSERT ON flow_runs WHEN NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'cannot persist failed start'); END")?;
-            Ok(())
-        }).unwrap();
+        fixtures::reject_failed_start(e.env.store(), &id).unwrap();
         let source = queue::BotSource::new(&e.env.modules, Runner::new(e.flow.clone()));
         let error = source.run_due(now).await.unwrap_err();
         assert!(error.0.contains("cannot persist failed start"));
@@ -518,10 +504,7 @@ mod tests {
             Self { env, source }
         }
         fn recorded(&self, state: &str) -> Vec<String> {
-            self.env.env.store().reader(|c| -> Result<_,steve_store::StoreError> {
-                Ok(c.prepare("SELECT DISTINCT workspace_id FROM flow_runs WHERE json_extract(context,'$.source')='digest.bot' AND json_extract(context,'$.startup.state')=?")?
-                    .query_map([state],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?)
-            }).unwrap()
+            fixtures::recorded_workspaces(self.env.env.store(), state).unwrap()
         }
     }
     impl steve_runtime::due::contract::Fixture for StartupRequests {
@@ -534,14 +517,12 @@ mod tests {
         }
         fn add(&self, at: i64, poison: bool) -> String {
             let ws = steve_store::uid("ws");
-            self.env.env.store().transaction(|tx| -> ApiResult<()> {
-                tx.execute("INSERT INTO workspaces (id,name,created) VALUES (?,'startup contract',1)",[&ws])?;
-                tx.execute("INSERT INTO workspace_members (workspace_id,user_id,role,created) VALUES (?,?,'owner',1)",params![ws,ME])?;
-                tx.execute("INSERT INTO bot_workspaces (bot_id,workspace_id,created) VALUES ('steve',?,1)",[&ws])?;
+            self.env.env.store().write(|w| -> ApiResult<()> {
+                fixtures::seed_owner_workspace(w, &ws, ME)?;
                 let spec: schedules::Spec=serde_json::from_value(json!({"when":"fixture","cron":"*/30 * * * *","tz":"UTC","what":"Organize","bot":"steve","mode":"item_auto","overlap":"skip","requester":ME})).unwrap();
-                let id=tx.write(|w| schedules::insert(w,&ws,ME,&schedules::Fields{name:"startup contract",spec:&spec,enabled:true},&schedules::Origin::default(),at-60_000))?;
-                tx.write(|w| w.digest_packets().bind_schedule(&ws, Some(&id), 1))?;
-                if poison {tx.execute("UPDATE flows SET graph='broken json' WHERE id=?",[&id])?;}
+                let id=schedules::insert(w,&ws,ME,&schedules::Fields{name:"startup contract",spec:&spec,enabled:true},&schedules::Origin::default(),at-60_000)?;
+                w.digest_packets().bind_schedule(&ws, Some(&id), 1)?;
+                if poison { fixtures::break_graph(w, &id)?; }
                 Ok(())
             }).unwrap();
             packet(&self.env, &ws, at);
@@ -571,21 +552,9 @@ mod tests {
         for repair in ["schedule", "name", "bot", "binding"] {
             let (e, id) = bound().await;
             let now = e.env.clock.now();
-            let original = e
-                .env
-                .store()
-                .reader(|c| -> Result<String, steve_store::StoreError> {
-                    Ok(c.query_row("SELECT graph FROM flows WHERE id=?", [&id], |r| r.get(0))?)
-                })
-                .unwrap();
+            let original = fixtures::flow_graph(e.env.store(), &id).unwrap();
             packet(&e, WS, now);
-            e.env
-                .store()
-                .with_conn(|c| {
-                    c.execute("UPDATE flows SET graph=x'01' WHERE id=?", [&id])?;
-                    Ok(())
-                })
-                .unwrap();
+            fixtures::set_graph_blob(e.env.store(), &id).unwrap();
             let source = queue::BotSource::new(&e.env.modules, Runner::new(e.flow.clone()));
             for _ in 0..START_LIMIT {
                 source
@@ -613,13 +582,7 @@ mod tests {
                 before,
                 "elapsed time and direct calls do not revive dead starts"
             );
-            e.env
-                .store()
-                .with_conn(|c| {
-                    c.execute("UPDATE flows SET graph=? WHERE id=?", params![original, id])?;
-                    Ok(())
-                })
-                .unwrap();
+            flow_fixture::set_raw_flow_graph(e.env.store(), &id, &original).unwrap();
             assert_eq!(
                 source.next_due().await.unwrap(),
                 None,
@@ -690,7 +653,7 @@ mod tests {
                 "{repair}: new configuration is eligible"
             );
             source.run_due(e.env.clock.now()).await.unwrap();
-            let started:i64=e.env.store().reader(|c| -> Result<_,steve_store::StoreError> {Ok(c.query_row("SELECT count(*) FROM flow_runs WHERE workspace_id=? AND json_extract(context,'$.startup.state')='started'",[WS],|r|r.get(0))?)}).unwrap();
+            let started: i64 = fixtures::started_count(e.env.store(), WS).unwrap();
             assert_eq!(
                 started, 1,
                 "{repair}: a real ordinary schedule start is persisted"
@@ -705,49 +668,20 @@ mod tests {
         let assert_changed = || assert!(changed.notified().now_or_never().is_some());
         let read = || Runner::new(e.flow.clone()).ready(WS).unwrap();
         assert_eq!(read(), Some(i64::MIN));
-        e.env
-            .store()
-            .with_conn(|c| {
-                c.execute("UPDATE flows SET enabled = 0 WHERE id = ?", [&id])?;
-                Ok(())
-            })
-            .unwrap();
+        fixtures::disable_flow(e.env.store(), &id).unwrap();
         assert_changed();
         assert!(read().is_none());
-        e.env.store().with_conn(|c| {
-            c.execute("UPDATE flows SET enabled = 1 WHERE id = ?", [&id])?;
-            c.execute("INSERT INTO flow_runs (id,workspace_id,flow_id,flow_version,trigger_kind,status,started)
-                VALUES ('digest_busy',?, ?,1,'manual','running',1000)", params![WS,id])?;
-            Ok(())
-        }).unwrap();
+        fixtures::seed_busy_flow(e.env.store(), WS, &id).unwrap();
         assert_changed();
         assert!(read().is_none());
-        e.env
-            .store()
-            .with_conn(|c| {
-                c.execute(
-                    "UPDATE flow_runs SET status = 'done' WHERE id = 'digest_busy'",
-                    [],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        fixtures::finish_busy_flow(e.env.store()).unwrap();
         assert_changed();
         assert_eq!(
             read(),
             Some(61_000),
             "an empty/failed start cannot spin on queued packets"
         );
-        e.env
-            .store()
-            .with_conn(|c| {
-                c.execute(
-                    "DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
-                    params![WS, ME],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::hub::authority::remove_member(e.env.store(), WS, ME).unwrap();
         assert_changed();
         assert!(read().is_none());
     }
@@ -887,10 +821,8 @@ mod tests {
                     .unwrap()
             };
             let (before_rows, before_budget) = (history(), budget());
-            e.env.store().with_conn(|c| {
-                c.execute_batch("CREATE TRIGGER reject_running_start BEFORE INSERT ON flow_runs WHEN NEW.status='running' BEGIN SELECT RAISE(ABORT,'running insert unavailable'); END")?;
-                Ok(())
-            }).unwrap();
+            steve_store::testkit::hub::mutations::create_reject_running_start(e.env.store())
+                .unwrap();
             let source = queue::BotSource::new(&e.env.modules, Runner::new(e.flow.clone()));
             let error = source.run_due(now).await.unwrap_err();
             assert!(error.0.contains("running insert unavailable"));
@@ -913,23 +845,11 @@ mod tests {
         let (e, id) = bound().await;
         let now = e.env.clock.now();
         packet(&e, WS, now);
-        e.env
-            .store()
-            .with_conn(|c| {
-                c.execute("UPDATE flows SET graph='broken json' WHERE id=?", [&id])?;
-                Ok(())
-            })
-            .unwrap();
+        flow_fixture::set_raw_flow_graph(e.env.store(), &id, "broken json").unwrap();
         let source = queue::BotSource::new(&e.env.modules, Runner::new(e.flow.clone()));
         source.run_due(now).await.unwrap();
         e.env.clock.advance(60_000);
-        e.env
-            .store()
-            .with_conn(|c| {
-                c.execute("UPDATE flows SET graph=x'01' WHERE id=?", [&id])?;
-                Ok(())
-            })
-            .unwrap();
+        fixtures::set_graph_blob(e.env.store(), &id).unwrap();
         source.run_due(now + 60_000).await.unwrap();
         let rows = e
             .env
@@ -970,13 +890,7 @@ mod tests {
         let (e, id) = bound().await;
         let now = e.env.clock.now();
         packet(&e, WS, now);
-        e.env
-            .store()
-            .with_conn(|c| {
-                c.execute("UPDATE flows SET graph='broken json' WHERE id=?", [&id])?;
-                Ok(())
-            })
-            .unwrap();
+        flow_fixture::set_raw_flow_graph(e.env.store(), &id, "broken json").unwrap();
         let source = queue::BotSource::new(&e.env.modules, Runner::new(e.flow.clone()));
         source.run_due(now).await.unwrap();
         let run = e
@@ -986,7 +900,13 @@ mod tests {
             .unwrap()[0]
             .id
             .clone();
-        e.env.store().with_conn(|c| {c.execute("UPDATE flow_runs SET context=json_set(context,'$.startup.attempts','broken') WHERE id=?",[&run])?;Ok(())}).unwrap();
+        flow_fixture::set_run_context_field(
+            e.env.store(),
+            &run,
+            "$.startup.attempts",
+            &json!("broken"),
+        )
+        .unwrap();
         e.env.clock.advance(60_000);
         assert_eq!(source.next_due().await.unwrap(), None);
         let api = routes(e.flow.clone()).with_state(e.env.modules.clone());
@@ -1039,13 +959,7 @@ mod tests {
             let (e, id) = bound().await;
             let now = e.env.clock.now();
             packet(&e, WS, now);
-            e.env
-                .store()
-                .with_conn(|c| {
-                    c.execute("UPDATE flows SET graph='broken json' WHERE id=?", [&id])?;
-                    Ok(())
-                })
-                .unwrap();
+            flow_fixture::set_raw_flow_graph(e.env.store(), &id, "broken json").unwrap();
             let runner = Runner::new(e.flow.clone());
             queue::BotRunner::start(&runner, WS, now).unwrap();
             let old = e
@@ -1055,7 +969,12 @@ mod tests {
                 .unwrap()[0]
                 .id
                 .clone();
-            e.env.store().with_conn(|c|{c.execute("UPDATE flow_runs SET context=json_set(context,'$.startup.attempts','broken'),cost=x'ff' WHERE id=?",[&old])?;Ok(())}).unwrap();
+            flow_fixture::damage_startup_run(
+                e.env.store(),
+                &old,
+                flow_fixture::DamagedRunColumn::Cost,
+            )
+            .unwrap();
             e.env.clock.advance(60_000);
             let buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
             let sink = buffer.clone();
@@ -1143,7 +1062,8 @@ mod tests {
                 body["diagnostics"][0]["run_id"], old,
                 "old damaged run remains diagnosable after recovery"
             );
-            let original:(String,String)=e.env.store().reader(|c|Ok::<_,steve_store::StoreError>(c.query_row("SELECT json_extract(context,'$.startup.attempts'),typeof(cost) FROM flow_runs WHERE id=?",[&old],|r|Ok((r.get(0)?,r.get(1)?)))?)).unwrap();
+            let original: (String, String) =
+                fixtures::damaged_run_columns(e.env.store(), &old).unwrap();
             assert_eq!(original, ("broken".into(), "blob".into()));
         }
     }

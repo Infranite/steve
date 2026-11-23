@@ -199,9 +199,10 @@ async fn a_request_sent_before_a_refused_install_does_not_hang() {
             .status()
             .as_u16()
     });
-    let state = format!("SELECT state FROM nodes WHERE node_id='{node}'");
     eventually_sync("revoked in the store", || {
-        h.q::<String>(&state) == "revoked"
+        steve_store::testkit::hub::node_checks::node_state_by_node_id(&h.store, node.as_str())
+            .unwrap()
+            == "revoked"
     })
     .await;
     drop(held);

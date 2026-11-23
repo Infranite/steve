@@ -384,3 +384,55 @@ pub fn raised_open(
         },
     )
 }
+
+/// Item references associated with a message's conversation.
+pub fn in_conversation(
+    c: &mut impl crate::Read,
+    ws: &str,
+    space: &str,
+) -> crate::Result<Vec<String>> {
+    use sea_query::{Expr, ExprTrait, JoinType, Query};
+    c.all(
+        Query::select()
+            .column(("ti", "item_id"))
+            .from_as("thread_items", "ti")
+            .join_as(
+                JoinType::InnerJoin,
+                "messages",
+                "m",
+                Expr::col(("m", "id")).eq(Expr::col(("ti", "origin_msg"))),
+            )
+            .and_where(Expr::col(("m", "space")).eq(space))
+            .and_where(Expr::col(("m", "workspace_id")).eq(ws))
+            .and_where(Expr::col(("ti", "workspace_id")).eq(ws)),
+        |r| r.get(0),
+    )
+}
+
+/// Admits dependency management for a current active parent with unresolved prerequisites.
+pub fn dependency_management(r: &mut impl Read, item: Option<&str>) -> Result<bool> {
+    let mut allowed = false;
+    r.db().query(
+        "SELECT EXISTS(
+                    SELECT 1 FROM items i WHERE i.id=?1 AND i.phase='active'
+                    AND i.status IN ('run','block') AND i.archived=0
+                    AND COALESCE(json_extract(i.source,'$[1]'),'')<>'workflow'
+                    AND NOT EXISTS(SELECT 1 FROM workflow_units u WHERE u.item_id=i.id)
+                    AND NOT EXISTS(SELECT 1 FROM workflow_attempts a WHERE a.item_id=i.id)
+                    AND NOT EXISTS(SELECT 1 FROM workflows w WHERE w.item_id=i.id AND w.paused=1)
+                    AND (
+                        EXISTS(SELECT 1 FROM item_dependency_waits dw
+                            WHERE dw.item_id=i.id AND dw.cycle=i.cycle AND dw.state='waiting')
+                        OR EXISTS(SELECT 1 FROM item_deps d LEFT JOIN items dep ON dep.id=d.dep_id
+                            WHERE d.item_id=i.id AND (dep.id IS NULL OR dep.status<>'done'
+                                OR dep.phase<>'closed' OR dep.outcome IS NOT 'completed'))
+                    )
+                )",
+        &sea_query::Values(vec![item.into()]),
+        &mut |row| {
+            allowed = row.get(0)?;
+            Ok(())
+        },
+    )?;
+    Ok(allowed)
+}

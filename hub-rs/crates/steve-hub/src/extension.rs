@@ -672,7 +672,7 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         .with_target(false)
         .init();
 
-    crate::wire::tune_sqlite();
+    steve_store::db::tune_sqlite();
     // the Hub's own Node in a process of its own (STEVE_NODE_MODE=service, B1): started by the
     // Hub, it outlives Hub restarts and never creates a missing Hub home.
     if args.get(1).is_some_and(|arg| arg == "--local-node") {

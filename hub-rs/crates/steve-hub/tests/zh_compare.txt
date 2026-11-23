@@ -716,7 +716,6 @@ steve-hub/src/wire/core.rs	"规范"	2
 steve-hub/src/wire/core.rs	"设计"	2
 steve-hub/src/wire/core.rs	"评审"	2
 steve-hub/src/wire/core.rs	"调研"	1
-steve-hub/src/wire/node_runtime/plan.rs	"暂停接活"	1
 steve-hub/src/wire/output_files.rs	"交付摘要"	2
 steve-hub/src/wire/output_files.rs	"本次交付摘要"	1
 steve-hub/src/wire/output_files.rs	"本次交付正文"	1
@@ -994,6 +993,7 @@ steve-modules/src/vault/items/templates.rs	"证件号"	2
 steve-modules/src/vault/items/templates.rs	"连接凭据"	2
 steve-modules/src/vault/items/templates.rs	"银行卡"	2
 steve-modules/src/vault/mcp.rs	"条目"	1
+steve-store/src/contract/node_sessions/planning.rs	"暂停接活"	1
 steve-store/src/repo/kinds.rs	"不改变外部行为的代码重构"	3
 steve-store/src/repo/kinds.rs	"交付正文"	1
 steve-store/src/repo/kinds.rs	"依赖维护、工具配置等杂项"	3
