@@ -1141,14 +1141,8 @@ fn decide(h: &H, id: &str, choice: &str) {
 
 /// What steve-core's `undoDecision` does around the handler.
 fn undo(h: &H, id: &str) {
-    h.env
-        .store()
-        .transaction(|tx| -> ApiResult<()> {
-            let d = steve_store::base::decisions::get(tx, id)?.expect("decision");
-            h.env.modules.registry.before_undo(tx, &d)?;
-            tx.execute("UPDATE decisions SET status = 'open' WHERE id = ?", [id])?;
-            Ok(())
-        })
+    steve_modules::decisions::undo(&h.env.modules, id, ME, |_| true)
+        .expect("decision handler")
         .expect("undo");
 }
 

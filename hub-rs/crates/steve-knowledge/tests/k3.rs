@@ -452,9 +452,9 @@ async fn confirming_with_supersedes_makes_the_old_memory_stale() {
     // Undoing the yes puts it back and restores the old memory.
     e.env
         .store()
-        .transaction(|tx| {
-            let d = steve_store::base::decisions::get(tx, &dec)?.unwrap();
-            e.env.modules.registry.before_undo(tx, &d)
+        .write(|w| {
+            let d = steve_store::DecisionRows(w).get(&dec)?.unwrap();
+            e.env.modules.registry.before_undo(w, &d)
         })
         .unwrap();
     assert_eq!(e.mem(&new.id).unwrap().status, "candidate");

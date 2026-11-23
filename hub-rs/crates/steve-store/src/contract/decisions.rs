@@ -91,6 +91,16 @@ fn emit(w: &mut W<'_>, d: &Decision) {
 }
 
 impl DecisionRows<'_, W<'_>> {
+    pub fn set_draft(&mut self, id: &str, text: &str) -> Result<()> {
+        self.0.exec(
+            Query::update()
+                .table("decisions")
+                .value("draft", text)
+                .and_where(Expr::col("id").eq(id)),
+        )?;
+        Ok(())
+    }
+
     pub fn open(&mut self, d: &NewDecision) -> Result<Decision> {
         let id = uid("dec");
         let options = serde_json::to_string(d.options.as_deref().unwrap_or_default())?;

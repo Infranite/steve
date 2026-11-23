@@ -8,6 +8,8 @@
 //!   edited draft and must be reopened);
 //! - the queue: [`Mail::send_due`] every 2 seconds ([`Mail::spawn_send_queue`]).
 
+use steve_store::W;
+
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -24,7 +26,7 @@ use steve_modules::outbound::Verdict;
 use steve_modules::outbound::{YOLO_ACTOR, decided_by_yolo, strip_ai_prefix, with_ai_prefix};
 use steve_modules::{ApiError, ApiResult, Clock, SystemClock};
 use steve_store::base;
-use steve_store::{Decision, NewDecision, Tx, uid};
+use steve_store::{Decision, NewDecision, uid};
 
 use crate::adapter::SendMeta;
 use crate::drafts::{self, FAIL_OPTIONS, SUBJECT_TYPE, content_hash};
@@ -304,57 +306,47 @@ impl MailDraftHandler {
 }
 
 impl DecisionHandler for MailDraftHandler {
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
-        tx.write(|w| {
-            let result = match d.kind.as_str() {
-                "approve" => self.approve(w, cx, d),
-                "fail" => self.failed(w, cx, d),
-                _ => Err(ApiError::rule(steve_i18n::t!("mail.decision.unknown_kind")).into()),
-            }
-            .map_err(api)?;
-            if let Some(draft) = repo::draft(w, &d.subject_id)? {
-                drafts::emit_draft(w, &draft);
-            }
-            Ok(result)
-        })
+    fn resolve(&self, w: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+        let result = match d.kind.as_str() {
+            "approve" => self.approve(w, cx, d),
+            "fail" => self.failed(w, cx, d),
+            _ => Err(ApiError::rule(steve_i18n::t!("mail.decision.unknown_kind")).into()),
+        }
+        .map_err(api)?;
+        if let Some(draft) = repo::draft(w, &d.subject_id)? {
+            drafts::emit_draft(w, &draft);
+        }
+        Ok(result)
     }
 
     /// Undo before the delay is over puts the draft back to `pending`; afterwards `409 邮件已经发出，不能撤回`.
-    fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
-        tx.write(|tx| {
-            let now = self.0.now();
-            let Some(draft) = repo::draft(tx, &d.subject_id)? else {
-                return Ok(());
-            };
-            let choice = d.result.get("choice").and_then(Value::as_str).unwrap_or("");
-            match (d.kind.as_str(), choice) {
-                ("approve", "send") => undo_approval(tx, &draft, now).map_err(api),
-                ("approve", "no") if draft.status == "discarded" => {
-                    repo::draft_transition(tx, &draft.id, &["discarded"], "pending", now)?;
-                    Ok(())
-                }
-                ("fail", _) if ["approved", "discarded"].contains(&draft.status.as_str()) => {
-                    let previous = if d.options.iter().any(|o| o == "confirmed_not_sent") {
-                        "unknown"
-                    } else {
-                        "failed"
-                    };
-                    repo::draft_transition(
-                        tx,
-                        &draft.id,
-                        &["approved", "discarded"],
-                        previous,
-                        now,
-                    )?;
-                    repo::set_draft_send_at(tx, &draft.id, None)?;
-                    Ok(())
-                }
-                _ if ["sending", "sent"].contains(&draft.status.as_str()) => Err(
-                    ApiError::conflict(steve_i18n::t!("mail.draft.already_sent")),
-                ),
-                _ => Ok(()),
+    fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
+        let now = self.0.now();
+        let Some(draft) = repo::draft(tx, &d.subject_id)? else {
+            return Ok(());
+        };
+        let choice = d.result.get("choice").and_then(Value::as_str).unwrap_or("");
+        match (d.kind.as_str(), choice) {
+            ("approve", "send") => undo_approval(tx, &draft, now).map_err(api),
+            ("approve", "no") if draft.status == "discarded" => {
+                repo::draft_transition(tx, &draft.id, &["discarded"], "pending", now)?;
+                Ok(())
             }
-        })
+            ("fail", _) if ["approved", "discarded"].contains(&draft.status.as_str()) => {
+                let previous = if d.options.iter().any(|o| o == "confirmed_not_sent") {
+                    "unknown"
+                } else {
+                    "failed"
+                };
+                repo::draft_transition(tx, &draft.id, &["approved", "discarded"], previous, now)?;
+                repo::set_draft_send_at(tx, &draft.id, None)?;
+                Ok(())
+            }
+            _ if ["sending", "sent"].contains(&draft.status.as_str()) => Err(ApiError::conflict(
+                steve_i18n::t!("mail.draft.already_sent"),
+            )),
+            _ => Ok(()),
+        }
     }
 }
 

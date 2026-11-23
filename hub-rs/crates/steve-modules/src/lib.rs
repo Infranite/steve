@@ -152,9 +152,13 @@ impl Registry {
 
     /// `undoDecision` calls this in its transaction before reopening `d`: the handler of its
     /// `subject_type` may undo its side or refuse (`Err` → the undo is rolled back). No handler = Ok.
-    pub fn before_undo(&self, tx: &steve_store::Tx, d: &steve_store::Decision) -> ApiResult<()> {
+    pub fn before_undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        d: &steve_store::Decision,
+    ) -> ApiResult<()> {
         match self.handlers.get(&d.subject_type) {
-            Some(h) => h.before_undo(tx, d),
+            Some(h) => h.before_undo(w, d),
             None => Ok(()),
         }
     }

@@ -1,6 +1,6 @@
 //! Create outbound messages and copies that need a separate delivery identity.
 
-use sea_query::{Expr, ExprTrait, Query};
+use sea_query::{Expr, ExprTrait, Order, Query};
 
 use crate::contract::Q;
 use crate::{Read, Result, StoreError, W};
@@ -172,5 +172,102 @@ pub fn copy_for_recovery(w: &mut W<'_>, id: &str, next: &str, now: i64) -> Resul
         source.seen_by,
         source.basis_id.as_deref(),
         source.composed.as_deref(),
+    )
+}
+
+/// One outbound `chan_messages` row as the sender needs it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutRow {
+    pub id: String,
+    pub ws: String,
+    pub space_id: String,
+    pub text: String,
+    pub reply_to: Option<String>,
+    pub thread_key: Option<String>,
+    pub sender_account_id: Option<String>,
+    pub persona_id: Option<String>,
+    pub on_behalf: String,
+    pub status: String,
+    pub decision_id: Option<String>,
+    pub sent: Option<i64>,
+}
+
+pub fn get(r: &mut impl Read, id: &str) -> Result<Option<OutRow>> {
+    r.one(
+        Query::select()
+            .columns([
+                "id",
+                "workspace_id",
+                "space_id",
+                "text",
+                "reply_to",
+                "thread_key",
+                "sender_account_id",
+                "persona_id",
+                "on_behalf",
+                "status",
+                "decision_id",
+                "sent",
+            ])
+            .from("chan_messages")
+            .and_where(Expr::col("id").eq(id))
+            .and_where(Expr::col("direction").eq("out")),
+        |row| {
+            Ok(OutRow {
+                id: row.get(0)?,
+                ws: row.get(1)?,
+                space_id: row.get(2)?,
+                text: row.get::<Option<String>>(3)?.unwrap_or_default(),
+                reply_to: row.get(4)?,
+                thread_key: row.get(5)?,
+                sender_account_id: row.get(6)?,
+                persona_id: row.get(7)?,
+                on_behalf: row.get(8)?,
+                status: row.get(9)?,
+                decision_id: row.get(10)?,
+                sent: row.get(11)?,
+            })
+        },
+    )
+}
+
+pub fn set_decision(w: &mut W<'_>, message: &str, decision: &str) -> Result<()> {
+    w.exec(
+        Query::update()
+            .table("chan_messages")
+            .value("decision_id", decision)
+            .and_where(Expr::col("id").eq(message)),
+    )?;
+    Ok(())
+}
+
+pub fn source(r: &mut impl Read, message: &OutRow) -> Result<Option<String>> {
+    let reactions = Query::select()
+        .column("message_id")
+        .from("chan_reactions")
+        .and_where(Expr::col("answer_id").eq(&message.id))
+        .take();
+    let output = Query::select()
+        .column("source_message_id")
+        .from("output_deliveries")
+        .and_where(Expr::col("message_id").eq(&message.id))
+        .take();
+    r.one(
+        Query::select()
+            .column("id")
+            .from("chan_messages")
+            .and_where(Expr::col("workspace_id").eq(&message.ws))
+            .and_where(Expr::col("space_id").eq(&message.space_id))
+            .and_where(Expr::col("direction").eq("in"))
+            .and_where(Expr::col("purged").is_null())
+            .and_where(
+                Expr::col("id")
+                    .in_subquery(reactions)
+                    .or(Expr::col("id").in_subquery(output))
+                    .or(Expr::col("external_id").eq(message.reply_to.as_deref())),
+            )
+            .order_by("created", Order::Desc)
+            .limit(1),
+        |row| row.get(0),
     )
 }

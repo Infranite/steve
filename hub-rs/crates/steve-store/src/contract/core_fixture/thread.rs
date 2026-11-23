@@ -225,3 +225,24 @@ pub fn important_contact(store: &Store, id: &str) -> bool {
         .unwrap()
         .unwrap()
 }
+
+pub fn workflow_blocker(store: &crate::Store, session: &str) -> crate::Result<Option<String>> {
+    store.read_conn(|c| crate::workflow_gate::session_blocker(c, session))
+}
+
+pub fn attention(
+    store: &crate::Store,
+    ws: &str,
+    user: &str,
+) -> crate::Result<(Vec<crate::attention::Entry>, i64)> {
+    store.read_conn(|c| crate::attention::replies(c, ws, user))
+}
+
+pub fn attention_target(
+    store: &crate::Store,
+    ws: &str,
+    user: &str,
+    id: &str,
+) -> crate::Result<(String, i64)> {
+    store.read_conn(|c| crate::attention::reply(c, ws, user, id))
+}

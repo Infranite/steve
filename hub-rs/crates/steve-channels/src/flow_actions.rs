@@ -25,7 +25,6 @@
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
-use rusqlite::{Connection, OptionalExtension};
 use serde_json::{Value, json};
 use steve_flow::nodes::action::Action;
 use steve_flow::nodes::{Grant, NodeOutcome, Rule, RunCx};
@@ -90,37 +89,20 @@ fn check_text(t: &str) -> Result<(), String> {
 
 /// The plan for answering a stored inbound message (what the rules would have built).
 pub fn plan_of(store: &steve_store::Store, ws: &str, message_id: &str) -> ChannelResult<Plan> {
-    store.read(|r| store.reader(|c| plan_in(c, r, ws, message_id)))
+    store.read(|r| plan_in(r, ws, message_id))
 }
 
 pub(crate) fn plan_in(
-    c: &Connection,
     r: &mut impl steve_store::Read,
     ws: &str,
     message_id: &str,
 ) -> ChannelResult<Plan> {
-    type Row = (
-        String,
-        Option<String>,
-        Option<String>,
-        String,
-        Option<String>,
-        Option<String>,
-        String,
-    );
-    let row: Option<Row> = c
-        .query_row(
-            "SELECT m.space_id, m.external_id, m.thread_key, coalesce(m.text, ''), m.sender_account_id, m.sender_party_id,
-                    coalesce(nullif(a.display_name, ''), a.handle_display, p.name, '')
-               FROM chan_messages m LEFT JOIN accounts a ON a.id = m.sender_account_id LEFT JOIN parties p ON p.id = m.sender_party_id
-              WHERE m.id = ? AND m.workspace_id = ? AND m.direction = 'in'",
-            [message_id, ws],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
-        )
-        .optional()?;
-    let (space_id, ext, thread, text, account, party, name) =
-        row.ok_or_else(|| ApiError::not_found("消息"))?;
-    let space = spaces::get(c, &space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
+    use steve_store::channel_message_repo::ingress;
+    let space_id =
+        ingress::source_space(r, ws, message_id)?.ok_or_else(|| ApiError::not_found("消息"))?;
+    let message = crate::inbound::stored(r, message_id)?;
+    let space = steve_store::channel_spaces::rows::get(r, &space_id)?
+        .ok_or_else(|| ApiError::not_found("空间"))?;
     let (_, mode) = bindings::connection_account(r, ws, &space.connection_id)?;
     let set = spaces::settings(r, &space.id)?;
     Ok(Plan {
@@ -130,12 +112,12 @@ pub(crate) fn plan_in(
         space_name: spaces::display_title(r, &space)?,
         space_id: space.id,
         message_id: message_id.into(),
-        external_id: ext.unwrap_or_default(),
-        thread_key: thread,
-        text,
-        sender_account_id: account,
-        sender_party_id: party,
-        sender_name: name,
+        external_id: message.external_id,
+        thread_key: message.thread_key,
+        text: message.text,
+        sender_account_id: message.sender_account,
+        sender_party_id: message.sender_party,
+        sender_name: message.sender_name,
         act: Act::Reply,
         rule: None,
         muted: set.muted,
@@ -329,12 +311,10 @@ impl Action for ReplyAs {
             .as_str()
             .filter(|s| !s.is_empty())
             .map(String::from);
-        let plan = match ch.store().read(|r| {
-            ch.store().reader(|c| -> ChannelResult<_> {
-                let plan = plan_in(c, r, &ws, &mid)?;
-                check_persona(r, &ws, plan.mode, persona.as_deref()).map_err(ApiError::rule)?;
-                Ok(plan)
-            })
+        let plan = match ch.store().read(|r| -> ChannelResult<_> {
+            let plan = plan_in(r, &ws, &mid)?;
+            check_persona(r, &ws, plan.mode, persona.as_deref()).map_err(ApiError::rule)?;
+            Ok(plan)
         }) {
             Ok(p) => p,
             Err(e) => return NodeOutcome::Fail(e.to_string()),

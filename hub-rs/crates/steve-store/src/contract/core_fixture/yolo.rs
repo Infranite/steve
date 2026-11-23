@@ -1,7 +1,7 @@
 //! Persisted situations the YOLO decisions and scheduler read in Core tests.
 
 use rusqlite::params;
-use sea_query::{Expr, ExprTrait, Query};
+use sea_query::{Expr, ExprTrait, Order, Query};
 
 use crate::contract::Q;
 use crate::{Store, StoreError, WS};
@@ -97,4 +97,22 @@ pub fn change_due_at(store: &Store, id: &str, at: i64) {
             )
         })
         .unwrap();
+}
+
+pub fn revisions(
+    r: &mut impl crate::Read,
+    ws: &str,
+    kind: &str,
+    id: &str,
+) -> crate::Result<Vec<(i64, serde_json::Value)>> {
+    r.all(
+        Query::select()
+            .columns(["version", "patch"])
+            .from("revisions")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("object_type").eq(kind))
+            .and_where(Expr::col("object_id").eq(id))
+            .order_by("id", Order::Desc),
+        |row| Ok((row.get(0)?, row.get::<crate::contract::Json<_>>(1)?.0)),
+    )
 }

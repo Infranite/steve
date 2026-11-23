@@ -1,6 +1,6 @@
 //! Evidence kept with a proposed outbound channel message.
 
-use sea_query::{Expr, ExprTrait, JoinType, Query};
+use sea_query::{Expr, ExprTrait, JoinType, Query, SelectStatement};
 use serde_json::{Value, json};
 
 use crate::contract::{Json, Q};
@@ -17,23 +17,8 @@ pub struct BasisRow {
     pub created: i64,
 }
 
-pub fn of_message(
-    r: &mut impl Read,
-    message: &str,
-    workspace: Option<&str>,
-) -> Result<Option<BasisRow>> {
-    let mut query = Query::select();
-    query
-        .columns([
-            ("b", "id"),
-            ("b", "message_id"),
-            ("b", "entries"),
-            ("b", "rewrites"),
-            ("b", "verdict"),
-            ("b", "answer_model"),
-            ("b", "check_model"),
-            ("b", "created"),
-        ])
+fn by_message(message: &str) -> SelectStatement {
+    Query::select()
         .from_as("chan_messages", "m")
         .join_as(
             JoinType::InnerJoin,
@@ -41,7 +26,32 @@ pub fn of_message(
             "b",
             Expr::col(("b", "id")).eq(Expr::col(("m", "basis_id"))),
         )
-        .and_where(Expr::col(("m", "id")).eq(message));
+        .and_where(Expr::col(("m", "id")).eq(message))
+        .take()
+}
+
+pub fn verdict(r: &mut impl Read, message: &str) -> Result<Option<String>> {
+    r.one(by_message(message).column(("b", "verdict")), |row| {
+        row.get(0)
+    })
+}
+
+pub fn of_message(
+    r: &mut impl Read,
+    message: &str,
+    workspace: Option<&str>,
+) -> Result<Option<BasisRow>> {
+    let mut query = by_message(message);
+    query.columns([
+        ("b", "id"),
+        ("b", "message_id"),
+        ("b", "entries"),
+        ("b", "rewrites"),
+        ("b", "verdict"),
+        ("b", "answer_model"),
+        ("b", "check_model"),
+        ("b", "created"),
+    ]);
     if let Some(ws) = workspace {
         query.and_where(Expr::col(("m", "workspace_id")).eq(ws));
     }

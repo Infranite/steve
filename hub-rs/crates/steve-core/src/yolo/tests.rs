@@ -101,11 +101,10 @@ impl T {
         self.kit
             .db()
             .store()
-            .reader(|c| steve_store::base::revisions(c, WS, repo::REVISION_TYPE, object_id))
+            .read(|r| {
+                steve_store::core_fixture::yolo::revisions(r, WS, repo::REVISION_TYPE, object_id)
+            })
             .unwrap()
-            .into_iter()
-            .map(|(v, p, _, _)| (v, p))
-            .collect()
     }
     fn notices(&self) -> Vec<(String, String)> {
         self.kit

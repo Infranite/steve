@@ -201,12 +201,9 @@ fn decide(h: &H, id: &str, choice: &str, text: &str) -> ApiResult<steve_store::D
 
 /// What steve-core's `undoDecision` does around the handler.
 fn undo(h: &H, id: &str) -> ApiResult<()> {
-    h.env.store().transaction(|tx| -> ApiResult<()> {
-        let d = base::decisions::get(tx, id)?.expect("decision");
-        h.env.modules.registry.before_undo(tx, &d)?;
-        tx.execute("UPDATE decisions SET status = 'open' WHERE id = ?", [id])?;
-        Ok(())
-    })
+    steve_modules::decisions::undo(&h.env.modules, id, ME, |_| true)
+        .expect("decision handler")
+        .map(|_| ())
 }
 
 fn status(h: &H, id: &str) -> String {
@@ -2818,8 +2815,9 @@ async fn fallback_cards_resolve_current_dm_group_and_self_chat_titles() {
                     "{}",
                     card.question
                 );
-                let (_, approval) =
-                    steve_channels::respond::open_draft(tx, &p, "我确认一下", h.ch.now())?;
+                let (_, approval) = tx.write(|w| {
+                    steve_channels::respond::open_draft(w, &p, "我确认一下", h.ch.now())
+                })?;
                 assert_eq!(
                     base::decisions::get(tx, &approval)?.unwrap().question,
                     format!("以你本人发到「{expected}」")
@@ -5827,10 +5825,7 @@ async fn recovery_review_undo_and_a_second_rewrite_do_not_remove_the_human_gate(
         assert_eq!(same, message, "unattempted review keeps its new UUID");
         let yes = decide(&h, &review, "yes", "").unwrap();
         assert_eq!(yes.result["recovery_review"], true);
-        // Exercise the real module undo; the old test helper did not clear result as production does.
-        steve_modules::decisions::undo(&h.env.modules, &review, ME, |_| true)
-            .unwrap()
-            .unwrap();
+        undo(&h, &review).unwrap();
         let reopened = h
             .env
             .store()
@@ -6030,9 +6025,7 @@ async fn recovery_review_undoing_discard_keeps_the_refusal_human_action_requirem
         let h = setup_yolo(None, None, true).await;
         let (old, fail) = review_refusal(&h, managed).await;
         decide(&h, &fail, "discard", "").unwrap();
-        steve_modules::decisions::undo(&h.env.modules, &fail, ME, |_| true)
-            .unwrap()
-            .unwrap();
+        undo(&h, &fail).unwrap();
         assert_eq!(status(&h, &old), "failed");
         let reopened = h
             .env

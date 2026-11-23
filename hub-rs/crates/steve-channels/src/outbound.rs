@@ -40,7 +40,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use steve_store::channel_message_repo::{
-    self, delivery as delivery_repo, delivery::SentAt, outbound as message_repo,
+    self, delivery as delivery_repo, delivery::SentAt, outbound as message_repo, outbound::OutRow,
 };
 
 use async_trait::async_trait;
@@ -239,64 +239,27 @@ impl OutLink {
 
 // ---------------------------------------------------------------- rows
 
-/// One outbound `chan_messages` row as the sender needs it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct OutRow {
-    pub id: String,
-    pub ws: String,
-    pub space_id: String,
-    pub text: String,
-    pub reply_to: Option<String>,
-    pub thread_key: Option<String>,
-    pub sender_account_id: Option<String>,
-    pub persona_id: Option<String>,
-    pub on_behalf: String,
-    pub status: String,
-    pub decision_id: Option<String>,
-    pub sent: Option<i64>,
+fn out_row(r: &mut impl steve_store::Read, id: &str) -> ChannelResult<Option<OutRow>> {
+    Ok(message_repo::get(r, id)?)
 }
 
-fn out_row(c: &Connection, id: &str) -> ChannelResult<Option<OutRow>> {
-    Ok(c.query_row(
-        "SELECT id, workspace_id, space_id, coalesce(text, ''), reply_to, thread_key, sender_account_id, persona_id,
-                on_behalf, status, decision_id, sent
-           FROM chan_messages WHERE id = ? AND direction = 'out'",
-        [id],
-        |r| {
-            Ok(OutRow {
-                id: r.get(0)?,
-                ws: r.get(1)?,
-                space_id: r.get(2)?,
-                text: r.get(3)?,
-                reply_to: r.get(4)?,
-                thread_key: r.get(5)?,
-                sender_account_id: r.get(6)?,
-                persona_id: r.get(7)?,
-                on_behalf: r.get(8)?,
-                status: r.get(9)?,
-                decision_id: r.get(10)?,
-                sent: r.get(11)?,
-            })
-        },
-    )
-    .optional()?)
-}
-
-fn own_out(tx: &Tx, ws: &str, id: &str) -> ApiResult<OutRow> {
-    out_row(tx, id)?
-        .filter(|r| r.ws == ws)
+fn own_out(r: &mut impl steve_store::Read, ws: &str, id: &str) -> ApiResult<OutRow> {
+    out_row(r, id)?
+        .filter(|row| row.ws == ws)
         .ok_or_else(|| ApiError::not_found("消息"))
 }
 
-fn set_status(tx: &Tx, id: &str, from: &[&str], to: &str) -> ChannelResult<bool> {
-    tx.write(|w| {
-        let changed = delivery_repo::transition(w, id, from, to, SentAt::Clear)?;
-        // A draft settled before its disclosure check completed.
-        if changed && from.contains(&"draft") && to != "draft" {
-            basis::checking_stopped(w, id, R_DEALT_FIRST)?;
-        }
-        Ok(changed)
-    })
+fn set_status(
+    w: &mut steve_store::W<'_>,
+    id: &str,
+    from: &[&str],
+    to: &str,
+) -> ChannelResult<bool> {
+    let changed = delivery_repo::transition(w, id, from, to, SentAt::Clear)?;
+    if changed && from.contains(&"draft") && to != "draft" {
+        basis::checking_stopped(w, id, R_DEALT_FIRST)?;
+    }
+    Ok(changed)
 }
 
 /// Everything about where a message goes.
@@ -579,17 +542,6 @@ fn source_of_row(c: &Connection, row: &OutRow) -> ChannelResult<Option<(String, 
     .optional()?)
 }
 
-/// Resolve the actual inbound source, including thread targets without a reply_to.
-fn draft_source(c: &Connection, row: &OutRow) -> ChannelResult<Option<String>> {
-    Ok(c.query_row(
-        "SELECT m.id FROM chan_messages m WHERE m.workspace_id = ?1 AND m.space_id = ?2 AND m.direction = 'in'
-          AND m.purged IS NULL AND (m.id IN (SELECT message_id FROM chan_reactions WHERE answer_id = ?3)
-               OR m.id IN (SELECT source_message_id FROM output_deliveries WHERE message_id = ?3)
-               OR m.external_id = ?4) ORDER BY m.created DESC LIMIT 1",
-        params![row.ws, row.space_id, row.id, row.reply_to], |r| r.get(0),
-    ).optional()?)
-}
-
 /// What the composer was shown of how you talk, kept with the draft ([`crate::decide::keep_composed`]),
 /// and whether the composer wrote it as its reply.
 fn composed_of(c: &Connection, message: &str) -> ChannelResult<(Vec<String>, bool)> {
@@ -616,8 +568,12 @@ fn composed_of(c: &Connection, message: &str) -> ChannelResult<(Vec<String>, boo
 }
 
 /// The same choices on initial review, reopening and an asynchronous disclosure result.
-fn approval_options(c: &Connection, row: &OutRow, rewrite: bool) -> ChannelResult<Vec<String>> {
-    let has_source = draft_source(c, row)?.is_some();
+fn approval_options(
+    r: &mut impl steve_store::Read,
+    row: &OutRow,
+    rewrite: bool,
+) -> ChannelResult<Vec<String>> {
+    let has_source = message_repo::source(r, row)?.is_some();
     let base = if rewrite {
         &REWRITE_OPTIONS[..]
     } else {
@@ -651,7 +607,10 @@ fn open_approval(
            WHERE m.id=? AND m.workspace_id=? AND (d.kind='fail' OR json_extract(d.result,'$.recovery_review')=1))",
         params![id, ws], |r| r.get(0),
     )?;
-    let options = approval_options(tx, &own_out(tx, ws, id)?, rewrite)?;
+    let options = tx.write(|w| {
+        let row = own_out(w, ws, id)?;
+        approval_options(w, &row, rewrite)
+    })?;
     let d = base::decisions::open(
         tx,
         &NewDecision {
@@ -783,15 +742,12 @@ pub fn default_send_delay_ms(mode: Mode) -> i64 {
 
 /// How long `row` waits after you approve it: its account's `send_delay_s`, else the default of its
 /// identity; a bot speaking for you (`on_behalf = proxy`) always waits like your own account.
-fn send_delay_ms(
-    c: &Connection,
-    r: &mut impl steve_store::Read,
-    row: &OutRow,
-) -> ChannelResult<i64> {
+fn send_delay_ms(r: &mut impl steve_store::Read, row: &OutRow) -> ChannelResult<i64> {
     if row.on_behalf == "proxy" {
         return Ok(SEND_DELAY_MS);
     }
-    let space = spaces::get(c, &row.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
+    let space = steve_store::channel_spaces::rows::get(r, &row.space_id)?
+        .ok_or_else(|| ApiError::not_found("空间"))?;
     let (_, mode) = bindings::connection_account(r, &row.ws, &space.connection_id)?;
     let set =
         spaces::channel_settings(r, &row.ws, &space.connection_id)?.and_then(|s| s.send_delay_s);
@@ -852,7 +808,7 @@ fn later_of(
 ) -> ChannelResult<Option<Later>> {
     store.read(|r| {
         store.reader(|c| {
-            let Some(row) = out_row(c, message_id)? else {
+            let Some(row) = out_row(r, message_id)? else {
                 return Ok(None);
             };
             let Some(b) = basis::of_message(r, &row.ws, &row.id)? else {
@@ -968,7 +924,7 @@ fn nothing_left(
     row: &OutRow,
     decision: Option<&str>,
 ) -> ChannelResult<()> {
-    if !set_status(tx, &row.id, &["draft"], DISCARDED)? {
+    if !tx.write(|w| set_status(w, &row.id, &["draft"], DISCARDED))? {
         return Ok(());
     }
     link.push(After::Discarded {
@@ -1042,7 +998,7 @@ async fn check_later(
     }
     let leak = res.verdict == Verdict::Leak;
     ch.store().transaction(|tx| -> ChannelResult<()> {
-        let Some(cur) = out_row(tx, &l.row.id)? else {
+        let Some(cur) = tx.write(|w| out_row(w, &l.row.id))? else {
             return Ok(());
         };
         // edited meanwhile: what was checked is not what waits
@@ -1110,7 +1066,10 @@ async fn check_later(
         if leak && l.composed && !disclosure::not_run(&res) {
             tx.execute(
                 "UPDATE decisions SET options = ? WHERE id = ?",
-                params![json!(approval_options(tx, &cur, true)?).to_string(), d],
+                params![
+                    json!(tx.write(|w| approval_options(w, &cur, true))?).to_string(),
+                    d
+                ],
             )?;
         }
         base::audit(
@@ -1165,8 +1124,8 @@ async fn rewrite_draft(
 ) -> ChannelResult<()> {
     let now = ch.now();
     let store = ch.store();
-    let loaded = store.read(|_| store.reader(|c| -> ChannelResult<Option<(Later, bool, bool, Option<String>)>> {
-        let Some(row) = out_row(c, message_id)? else {
+    let loaded = store.read(|r| store.reader(|c| -> ChannelResult<Option<(Later, bool, bool, Option<String>)>> {
+        let Some(row) = out_row(r, message_id)? else {
             return Ok(None);
         };
         let d = base::decisions::get(c, decision_id)?;
@@ -1214,7 +1173,7 @@ async fn rewrite_draft(
     };
     ch.store().transaction(|tx| -> ChannelResult<()> {
         // answered or edited meanwhile: the rewrite is not wanted any more
-        let Some(cur) = out_row(tx, &row.id)? else {
+        let Some(cur) = tx.write(|w| out_row(w, &row.id))? else {
             return Ok(());
         };
         if cur.status != "draft"
@@ -1290,7 +1249,7 @@ async fn rewrite_draft(
             }
         };
         if review {
-            let decision = out_row(tx, &row.id)?.and_then(|r| r.decision_id)
+            let decision = tx.write(|w| out_row(w, &row.id))?.and_then(|r| r.decision_id)
                 .ok_or_else(|| ApiError::not_found("审批卡"))?;
             mark_recovery_review(tx, &decision)?;
         }
@@ -1317,7 +1276,7 @@ fn replace_recovery_draft(
     // its disclosure basis and composer provenance when an invalid rewrite reopens it.
     let next = uid("cm");
     tx.write(|w| message_repo::copy_for_recovery(w, &row.id, &next, now))?;
-    set_status(tx, &row.id, &["draft"], DISCARDED)?;
+    tx.write(|w| set_status(w, &row.id, &["draft"], DISCARDED))?;
     tx.execute(
         "UPDATE output_deliveries SET message_id=? WHERE message_id=?",
         params![next, row.id],
@@ -1335,7 +1294,7 @@ fn replace_recovery_draft(
 /// text comes back on a card as it was, so it is not left without one.
 fn rewrite_failed(ch: &Channels, message_id: &str, decision_id: &str) -> ChannelResult<()> {
     ch.store().transaction(|tx| -> ChannelResult<()> {
-        let Some(row) = out_row(tx, message_id)? else {
+        let Some(row) = tx.write(|w| out_row(w, message_id))? else {
             return Ok(());
         };
         if row.status != "draft" || row.decision_id.as_deref() != Some(decision_id) {
@@ -1553,7 +1512,7 @@ fn mark_composed(tx: &Tx, decision: &str, what: &str) -> ChannelResult<bool> {
 /// Approves draft `m` (its approval `dd`) as answered from card `card`: pending, sent after the
 /// account's delay, undoable within it. Returns when it goes out.
 fn approve_draft(
-    tx: &Tx,
+    tx: &mut steve_store::W<'_>,
     ws: &str,
     m: &str,
     dd: &str,
@@ -1562,10 +1521,9 @@ fn approve_draft(
     now: i64,
 ) -> ApiResult<i64> {
     let row = own_out(tx, ws, m)?;
-    let send_at = now + tx.write(|w| send_delay_ms(tx, w, &row))?;
-    tx.write(|w| delivery_repo::transition(w, m, &["draft"], "pending", SentAt::Clear))?;
-    base::decisions::settle(
-        tx,
+    let send_at = now + send_delay_ms(tx, &row)?;
+    delivery_repo::transition(tx, m, &["draft"], "pending", SentAt::Clear)?;
+    steve_store::DecisionRows(tx).settle(
         dd,
         &json!({"choice": "yes", "hash": text_hash(text), "send_at": send_at, "from_card": card}),
         "resolved",
@@ -1668,7 +1626,7 @@ async fn send_chosen(
         if !pending {
             return Ok(());
         }
-        let (m, dd) = respond::open_draft(tx, &plan, text, now)?;
+        let (m, dd) = tx.write(|w| respond::open_draft(w, &plan, text, now))?;
         tx.write(|w| steve_store::channel_message_repo::reactions::expect_answer(w, &plan.message_id, &m))?;
         tx.write(|w| basis::insert(
             w,
@@ -1692,7 +1650,7 @@ async fn send_chosen(
                 params![CARD_DRAFT_FLAGGED.replace("{}", note), dd],
             )?;
         } else {
-            approve_draft(tx, ws, &m, &dd, text, decision, now)?;
+            tx.write(|w| approve_draft(w, ws, &m, &dd, text, decision, now))?;
         }
         tx.execute(
             "UPDATE decisions SET result = json_set(coalesce(result, '{}'), '$.composed', ?, '$.check', ?)
@@ -2092,7 +2050,7 @@ fn claim_permission(
     if !approved_by_you(tx, auth)?
         && let Some(e) = tx.write(|w| crate::presence::stop_out(w, &row.ws, &row.id, now))?
     {
-        drop_for_you(tx, &row, &["pending", "unknown"], None, &e)?;
+        tx.write(|w| drop_for_you(w, &row, &["pending", "unknown"], None, &e))?;
         return Ok(Some(SendOutcome::Skipped));
     }
     if let Err(why) = verify(tx, &row, auth, now)? {
@@ -2112,7 +2070,7 @@ fn claim_permission(
             return Ok(Some(SendOutcome::Skipped));
         }
         // not authorized after all: back to a draft, nothing leaves
-        set_status(tx, &row.id, &["pending", "unknown"], "draft")?;
+        tx.write(|w| set_status(w, &row.id, &["pending", "unknown"], "draft"))?;
         tx.write(|w| send_state::forget(w, &row.id))?;
         let space = spaces::get(tx, &row.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
         let speaker = tx
@@ -2165,7 +2123,7 @@ impl Outbox {
         now: i64,
     ) -> ChannelResult<Result<OutRow, SendOutcome>> {
         ch.store().transaction(|tx| -> ChannelResult<_> {
-            let Some(row) = out_row(tx, id)? else {
+            let Some(row) = tx.write(|w| out_row(w, id))? else {
                 return Ok(Err(SendOutcome::Skipped));
             };
             let stale = row.sent.is_some_and(|t| t < now - CLAIM_STALE_MS);
@@ -2175,7 +2133,7 @@ impl Outbox {
             }
             // a starred contact's notification you answered yourself meanwhile: let go, not sent
             if crate::notifications::answered(tx, &row.id, now)? {
-                set_status(tx, &row.id, &["pending", "unknown"], DISCARDED)?;
+                tx.write(|w| set_status(w, &row.id, &["pending", "unknown"], DISCARDED))?;
                 messages::event(tx, &row.ws, &row.space_id, &row.id);
                 return Ok(Err(SendOutcome::Skipped));
             }
@@ -2280,7 +2238,7 @@ impl SendAttempt<'_> {
             let decision = ch
                 .store()
                 .transaction(|tx| -> ChannelResult<Option<String>> {
-                    let current = out_row(tx, &row.id)?;
+                    let current = tx.write(|w| out_row(w, &row.id))?;
                     if !current.is_some_and(|r| {
                         r.status == "pending" && r.sent == Some(claim) && r.text == row.text
                     }) {
@@ -2309,7 +2267,7 @@ impl SendAttempt<'_> {
                     if pass {
                         return Ok(None);
                     }
-                    set_status(tx, &row.id, &["pending"], "draft")?;
+                    tx.write(|w| set_status(w, &row.id, &["pending"], "draft"))?;
                     tx.write(|w| send_state::forget(w, &row.id))?;
                     let d = open_approval(
                         tx,
@@ -2395,7 +2353,7 @@ impl SendAttempt<'_> {
             let ours:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM chan_messages WHERE id=? AND status='pending' AND sent=?)",params![row.id,claim],|r|r.get(0))?;
             if !ours { return Ok(None); }
             if crate::notifications::answered(tx, &row.id, now)? {
-                set_status(tx, &row.id, &["pending"], DISCARDED)?;
+                tx.write(|w| set_status(w, &row.id, &["pending"], DISCARDED))?;
                 messages::event(tx, &row.ws, &row.space_id, &row.id);
                 return Ok(None);
             }
@@ -3436,7 +3394,7 @@ impl Outbox {
         ch.store().transaction(|tx| -> ChannelResult<()> {
             for card in &due {
                 if card.kind == "approve" {
-                    if !set_status(tx, &card.subject, &["draft"], DISCARDED)? {
+                    if !tx.write(|w| set_status(w, &card.subject, &["draft"], DISCARDED))? {
                         continue;
                     }
                     discarded.push(card.subject.clone());
@@ -3773,7 +3731,7 @@ impl Outbox {
     /// A direct reply that did not go out in time: `failed`, with a retry / rewrite / discard card.
     fn ask_late(&self, ch: &Channels, id: &str) -> ChannelResult<()> {
         ch.store().transaction(|tx| -> ChannelResult<()> {
-            let Some(row) = out_row(tx, id)? else {
+            let Some(row) = tx.write(|w| out_row(w, id))? else {
                 return Ok(());
             };
             if !tx.write(|w| {
@@ -3866,7 +3824,7 @@ impl Outbox {
     /// A message that may be out: a `fail` card with [`UNKNOWN_OPTIONS`].
     fn ask_unknown(&self, ch: &Channels, id: &str) -> ChannelResult<()> {
         ch.store().transaction(|tx| -> ChannelResult<()> {
-            let Some(row) = out_row(tx, id)? else {
+            let Some(row) = tx.write(|w| out_row(w, id))? else {
                 return Ok(());
             };
             let space =
@@ -3952,7 +3910,7 @@ impl Outbox {
             let Some(msg) = source_message(r, &item.workspace_id, &item.id)? else {
                 return Ok(None);
             };
-            let plan = plan_in(c, r, &item.workspace_id, &msg)?;
+            let plan = plan_in(r, &item.workspace_id, &msg)?;
             // the chat's own message was handed to Steve by a reply rule (its conversation turn says so): the
             // report goes where that answer went
             let replied: bool = c.query_row(
@@ -4024,12 +3982,9 @@ impl Outbox {
         text: &str,
     ) -> ChannelResult<String> {
         let plan = ch.store().read(|r| {
-            ch.store().reader(|c| -> ChannelResult<_> {
-                match source_message(r, ws, item_id)? {
-                    Some(m) => Ok(Some(plan_in(c, r, ws, &m)?)),
-                    None => Ok(None),
-                }
-            })
+            source_message(r, ws, item_id)?
+                .map(|message| plan_in(r, ws, &message))
+                .transpose()
         })?;
         let Some(plan) = plan else {
             return Ok(SRC_NO_SOURCE.into());
@@ -4110,7 +4065,7 @@ impl Outbox {
     ) -> ChannelResult<()> {
         let (row, conn, adapter, mode, msg) = ch.store().read(|r| {
             ch.store().reader(|c| -> ChannelResult<_> {
-                let row = out_row(c, id)?
+                let row = out_row(r, id)?
                     .filter(|r| r.ws == ws)
                     .ok_or_else(|| ApiError::not_found("消息"))?;
                 let space =
@@ -4322,21 +4277,21 @@ impl ItemHooks for ReturnToSource {
 /// discarded from `from`, its open card (and `decision` when given, the one being answered)
 /// superseded, audit `chan_message.superseded`.
 fn drop_for_you(
-    tx: &Tx,
+    tx: &mut steve_store::W<'_>,
     row: &OutRow,
     from: &[&str],
     decision: Option<&str>,
     stop: &crate::presence::Stop,
 ) -> ChannelResult<()> {
     set_status(tx, &row.id, from, DISCARDED)?;
-    tx.write(|w| send_state::forget(w, &row.id))?;
+    send_state::forget(tx, &row.id)?;
     if let Some(d) = decision {
-        tx.write(|w| crate::presence::settle(w, d, stop.why()))?;
+        crate::presence::settle(tx, d, stop.why())?;
     }
-    if let Some(d) = base::decisions::open_for(tx, &row.ws, SUBJECT_MESSAGE, &row.id)? {
-        tx.write(|w| crate::presence::settle(w, &d.id, stop.why()))?;
+    if let Some(d) = steve_store::decision_repo::open_for(tx, &row.ws, SUBJECT_MESSAGE, &row.id)? {
+        crate::presence::settle(tx, &d.id, stop.why())?;
     }
-    base::audit(
+    steve_store::audit_repo::record(
         tx,
         &row.ws,
         "steve",
@@ -4344,7 +4299,7 @@ fn drop_for_you(
         &row.id,
         &json!({"why": stop.why(), "reason": stop.reason()}),
     )?;
-    messages::event(tx, &row.ws, &row.space_id, &row.id);
+    steve_store::channel_message_repo::emit(tx, &row.ws, &row.space_id, &row.id);
     Ok(())
 }
 
@@ -4372,15 +4327,16 @@ fn fail_orphaned_message(tx: &Tx, row: &OutRow, now: i64) -> ChannelResult<()> {
     Ok(())
 }
 
-fn approve_message_text(tx: &Tx, message: &str, decision: &str, text: &str) -> ChannelResult<()> {
-    tx.write(|w| delivery_repo::approve_edit(w, message, text))?;
-    // Undo reopens this card: its formal draft must match the edited outbound body.
-    tx.execute(
-        "UPDATE decisions SET draft = ? WHERE id = ?",
-        params![text, decision],
-    )?;
-    // approved before its check finished: the record says so
-    tx.write(|w| basis::checking_stopped(w, message, R_DEALT_FIRST))?;
+fn approve_message_text(
+    w: &mut steve_store::W<'_>,
+    message: &str,
+    decision: &str,
+    text: &str,
+) -> ChannelResult<()> {
+    delivery_repo::approve_edit(w, message, text)?;
+    // An undo reopens the card with the approved text.
+    steve_store::DecisionRows(w).set_draft(decision, text)?;
+    basis::checking_stopped(w, message, R_DEALT_FIRST)?;
     Ok(())
 }
 
@@ -4403,7 +4359,12 @@ fn approved_by_you(c: &Connection, auth: &Auth) -> ChannelResult<bool> {
 pub struct MessageDecisions(OutLink);
 
 impl MessageDecisions {
-    fn approve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn approve(
+        &self,
+        tx: &mut steve_store::W<'_>,
+        cx: &DecisionCx,
+        d: &Decision,
+    ) -> ApiResult<Value> {
         let now = self.0.now();
         let row = own_out(tx, cx.ws, &d.subject_id)?;
         if row.status != "draft" || row.decision_id.as_deref() != Some(d.id.as_str()) {
@@ -4414,7 +4375,7 @@ impl MessageDecisions {
         // the space no longer lets Steve say for you (crate::presence, gate 3)
         if cx.choice == "yes"
             && cx.actor == b1::YOLO_ACTOR
-            && let Some(e) = tx.write(|w| crate::presence::stop_out(w, cx.ws, &row.id, now))?
+            && let Some(e) = crate::presence::stop_out(tx, cx.ws, &row.id, now)?
         {
             drop_for_you(tx, &row, &["draft"], Some(&d.id), &e)?;
             self.0.push(After::Discarded {
@@ -4429,13 +4390,7 @@ impl MessageDecisions {
         // YOLO never approves a draft whose disclosure check did not pass (flagged, still running or
         // not finished): only you do
         if cx.choice == "yes" && cx.actor == b1::YOLO_ACTOR {
-            let verdict: Option<String> = tx
-                .query_row(
-                    "SELECT b.verdict FROM chan_messages m JOIN reply_basis b ON b.id = m.basis_id WHERE m.id = ?",
-                    [&row.id],
-                    |r| r.get(0),
-                )
-                .optional()?;
+            let verdict = steve_store::reply_basis::verdict(tx, &row.id)?;
             if !matches!(verdict.as_deref(), Some(basis::PASS | basis::REWRITTEN)) {
                 return Err(ApiError::conflict(steve_i18n::t!(
                     "channels.error.not_checked"
@@ -4464,10 +4419,10 @@ impl MessageDecisions {
                 let send_at = if cx.actor == b1::YOLO_ACTOR {
                     now
                 } else {
-                    now + tx.write(|w| send_delay_ms(tx, w, &row))?
+                    now + send_delay_ms(tx, &row)?
                 };
                 approve_message_text(tx, &row.id, &d.id, &text)?;
-                base::audit(
+                steve_store::audit_repo::record(
                     tx,
                     cx.ws,
                     cx.actor,
@@ -4483,7 +4438,7 @@ impl MessageDecisions {
             }
             REWRITE if d.options.iter().any(|o| o == REWRITE) => {
                 // the card closes; the queue finds the choice and the rewritten text comes back on a new one
-                base::audit(
+                steve_store::audit_repo::record(
                     tx,
                     cx.ws,
                     cx.actor,
@@ -4497,7 +4452,7 @@ impl MessageDecisions {
                 self.0.push(After::Discarded {
                     message_id: row.id.clone(),
                 });
-                base::audit(
+                steve_store::audit_repo::record(
                     tx,
                     cx.ws,
                     cx.actor,
@@ -4508,14 +4463,14 @@ impl MessageDecisions {
             }
             "to_item" if d.options.iter().any(|o| o == "to_item") => {
                 let source =
-                    draft_source(tx, &row)?.ok_or_else(|| ApiError::not_found("原消息"))?;
-                tx.write(|w| plan_in(tx, w, cx.ws, &source))?;
+                    message_repo::source(tx, &row)?.ok_or_else(|| ApiError::not_found("原消息"))?;
+                plan_in(tx, cx.ws, &source)?;
                 set_status(tx, &row.id, &["draft"], DISCARDED)?;
                 result["source_message"] = json!(source);
                 self.0.push(After::Discarded {
                     message_id: row.id.clone(),
                 });
-                base::audit(
+                steve_store::audit_repo::record(
                     tx,
                     cx.ws,
                     cx.actor,
@@ -4526,11 +4481,16 @@ impl MessageDecisions {
             }
             _ => return Err(ApiError::invalid("choice")),
         }
-        messages::event(tx, cx.ws, &row.space_id, &row.id);
+        steve_store::channel_message_repo::emit(tx, cx.ws, &row.space_id, &row.id);
         Ok(result)
     }
 
-    fn failed(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn failed(
+        &self,
+        tx: &mut steve_store::W<'_>,
+        cx: &DecisionCx,
+        d: &Decision,
+    ) -> ApiResult<Value> {
         let now = self.0.now();
         let row = own_out(tx, cx.ws, &d.subject_id)?;
         if row.decision_id.as_deref() != Some(d.id.as_str()) {
@@ -4540,7 +4500,7 @@ impl MessageDecisions {
         // nor retries it (gate 3)
         if cx.choice == "retry"
             && cx.actor == b1::YOLO_ACTOR
-            && let Some(e) = tx.write(|w| crate::presence::stop_out(w, cx.ws, &row.id, now))?
+            && let Some(e) = crate::presence::stop_out(tx, cx.ws, &row.id, now)?
         {
             drop_for_you(tx, &row, &["failed", "unknown"], Some(&d.id), &e)?;
             result["superseded"] = json!(e.why());
@@ -4557,9 +4517,7 @@ impl MessageDecisions {
                 {
                     return Err(ApiError::rule("渠道拒绝需要你处理权限后主动重试"));
                 }
-                tx.write(|w| {
-                    delivery_repo::transition(w, &row.id, &["failed"], "pending", SentAt::Clear)
-                })?;
+                delivery_repo::transition(tx, &row.id, &["failed"], "pending", SentAt::Clear)?;
                 result["hash"] = json!(text_hash(&row.text));
                 result["send_at"] = json!(now);
                 if cx.actor == b1::YOLO_ACTOR {
@@ -4579,7 +4537,7 @@ impl MessageDecisions {
             }
             ("discard", "failed") => {
                 set_status(tx, &row.id, &["failed"], DISCARDED)?;
-                tx.write(|w| send_state::forget(w, &row.id))?;
+                send_state::forget(tx, &row.id)?;
                 self.0.push(After::Discarded {
                     message_id: row.id.clone(),
                 });
@@ -4587,7 +4545,7 @@ impl MessageDecisions {
             // may be out (no answer): you looked
             ("sent", "unknown") => {
                 set_status(tx, &row.id, &["unknown"], "sent")?;
-                tx.write(|w| send_state::forget(w, &row.id))?;
+                send_state::forget(tx, &row.id)?;
             }
             ("retry", "unknown") => {
                 if !cx.text.trim().is_empty() {
@@ -4595,9 +4553,7 @@ impl MessageDecisions {
                         "text: an uncertain send cannot be edited",
                     ));
                 }
-                tx.write(|w| {
-                    delivery_repo::transition(w, &row.id, &["unknown"], "pending", SentAt::Clear)
-                })?;
+                delivery_repo::transition(tx, &row.id, &["unknown"], "pending", SentAt::Clear)?;
                 result["hash"] = json!(text_hash(&row.text));
                 result["send_at"] = json!(now);
             }
@@ -4611,7 +4567,7 @@ impl MessageDecisions {
         if let Some(recovery) = d.result.get("recovery") {
             result["recovery"] = recovery.clone();
         }
-        base::audit(
+        steve_store::audit_repo::record(
             tx,
             cx.ws,
             cx.actor,
@@ -4619,11 +4575,16 @@ impl MessageDecisions {
             &row.id,
             &json!({"decision": d.id}),
         )?;
-        messages::event(tx, cx.ws, &row.space_id, &row.id);
+        steve_store::channel_message_repo::emit(tx, cx.ws, &row.space_id, &row.id);
         Ok(result)
     }
 
-    fn handoff(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn handoff(
+        &self,
+        tx: &mut steve_store::W<'_>,
+        cx: &DecisionCx,
+        d: &Decision,
+    ) -> ApiResult<Value> {
         let now = self.0.now();
         let mut result = choice_result(cx);
         // what speaks for you from a card is your own click: YOLO answers none of these
@@ -4646,7 +4607,7 @@ impl MessageDecisions {
                 if text.chars().count() > TEXT_MAX {
                     return Err(ApiError::invalid("text"));
                 }
-                tx.write(|w| plan_in(tx, w, cx.ws, &d.subject_id))?;
+                plan_in(tx, cx.ws, &d.subject_id)?;
                 result["by"] = json!(cx.actor);
             }
             respond::VERBATIM => {
@@ -4658,7 +4619,7 @@ impl MessageDecisions {
                 if text.chars().count() > TEXT_MAX {
                     return Err(ApiError::invalid("text"));
                 }
-                let plan = tx.write(|w| plan_in(tx, w, cx.ws, &d.subject_id))?;
+                let plan = plan_in(tx, cx.ws, &d.subject_id)?;
                 let (m, dd, send_at) = self.approve_as_you(tx, cx, &plan, text, &d.id, now)?;
                 result["draft_message"] = json!(m);
                 result["draft_decision"] = json!(dd);
@@ -4669,16 +4630,16 @@ impl MessageDecisions {
                 if cx.text.trim().is_empty() {
                     return Err(ApiError::rule(steve_i18n::t!("channels.error.reply_empty")));
                 }
-                tx.write(|w| plan_in(tx, w, cx.ws, &d.subject_id))?;
+                plan_in(tx, cx.ws, &d.subject_id)?;
             }
             respond::DRAFT_REPLY => {
-                let plan = tx.write(|w| plan_in(tx, w, cx.ws, &d.subject_id))?;
+                let plan = plan_in(tx, cx.ws, &d.subject_id)?;
                 let (m, dd) = respond::open_draft(tx, &plan, cx.text.trim(), now)?;
                 result["draft_message"] = json!(m);
                 result["draft_decision"] = json!(dd);
             }
             "to_item" => {
-                tx.write(|w| plan_in(tx, w, cx.ws, &d.subject_id))?;
+                plan_in(tx, cx.ws, &d.subject_id)?;
                 result["source_message"] = json!(d.subject_id);
             }
             "done" => {}
@@ -4694,7 +4655,7 @@ impl MessageDecisions {
     /// it). Returns `(message, its approval, send_at)`.
     fn approve_as_you(
         &self,
-        tx: &Tx,
+        tx: &mut steve_store::W<'_>,
         cx: &DecisionCx,
         plan: &respond::Plan,
         text: &str,
@@ -4702,11 +4663,9 @@ impl MessageDecisions {
         now: i64,
     ) -> ApiResult<(String, String, i64)> {
         let (m, dd) = respond::open_draft(tx, plan, text, now)?;
-        tx.write(|w| {
-            steve_store::channel_message_repo::reactions::expect_answer(w, &plan.message_id, &m)
-        })?;
+        steve_store::channel_message_repo::reactions::expect_answer(tx, &plan.message_id, &m)?;
         let send_at = approve_draft(tx, cx.ws, &m, &dd, text, card, now)?;
-        base::audit(
+        steve_store::audit_repo::record(
             tx,
             cx.ws,
             cx.actor,
@@ -4714,7 +4673,7 @@ impl MessageDecisions {
             &m,
             &json!({"decision": dd, "card": card, "choice": cx.choice}),
         )?;
-        messages::event(tx, cx.ws, &plan.space_id, &m);
+        steve_store::channel_message_repo::emit(tx, cx.ws, &plan.space_id, &m);
         Ok((m, dd, send_at))
     }
 }
@@ -4737,7 +4696,12 @@ impl DecisionHandler for MessageDecisions {
         }
     }
 
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(
+        &self,
+        tx: &mut steve_store::W<'_>,
+        cx: &DecisionCx,
+        d: &Decision,
+    ) -> ApiResult<Value> {
         match d.kind.as_str() {
             "approve" => self.approve(tx, cx, d),
             "fail" => self.failed(tx, cx, d),
@@ -4750,7 +4714,7 @@ impl DecisionHandler for MessageDecisions {
 
     /// An approval nobody answered expired: its draft is not sent and counts as discarded, so the
     /// message it answers loses its “收到” reaction instead of keeping it for good.
-    fn expire(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
+    fn expire(&self, tx: &mut steve_store::W<'_>, d: &Decision) -> ApiResult<()> {
         if d.kind != "approve" {
             return Ok(());
         }
@@ -4762,7 +4726,7 @@ impl DecisionHandler for MessageDecisions {
             self.0.push(After::Discarded {
                 message_id: row.id.clone(),
             });
-            base::audit(
+            steve_store::audit_repo::record(
                 tx,
                 &row.ws,
                 "steve",
@@ -4770,13 +4734,13 @@ impl DecisionHandler for MessageDecisions {
                 &row.id,
                 &json!({"decision": d.id}),
             )?;
-            messages::event(tx, &row.ws, &row.space_id, &row.id);
+            steve_store::channel_message_repo::emit(tx, &row.ws, &row.space_id, &row.id);
         }
         Ok(())
     }
 
     /// Undoing an approval within the delay puts the draft back; once it went out, `409`.
-    fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
+    fn before_undo(&self, tx: &mut steve_store::W<'_>, d: &Decision) -> ApiResult<()> {
         let now = self.0.now();
         if d.result["choice"] == "to_item" {
             return Err(ApiError::conflict("转事项不能作为发送批准撤销"));
@@ -4818,11 +4782,7 @@ impl DecisionHandler for MessageDecisions {
             ("fail", "discard") if row.status == DISCARDED => {
                 let uncertain =
                     d.result["was"] == "unknown" || d.options.iter().any(|o| o == "sent");
-                if uncertain
-                    && tx
-                        .write(|w| send_state::get(w, &row.id))?
-                        .is_none_or(|s| s.first_at.is_none())
-                {
+                if uncertain && send_state::get(tx, &row.id)?.is_none_or(|s| s.first_at.is_none()) {
                     return Err(ApiError::conflict(
                         "原发送结果未知且去重依据已不可用，不能撤销后重新发送",
                     ));
@@ -4840,7 +4800,7 @@ impl DecisionHandler for MessageDecisions {
                 )));
             }
         }
-        base::audit(
+        steve_store::audit_repo::record(
             tx,
             &row.ws,
             "me",
@@ -4848,7 +4808,7 @@ impl DecisionHandler for MessageDecisions {
             &row.id,
             &json!({"decision": d.id}),
         )?;
-        messages::event(tx, &row.ws, &row.space_id, &row.id);
+        steve_store::channel_message_repo::emit(tx, &row.ws, &row.space_id, &row.id);
         Ok(())
     }
 }

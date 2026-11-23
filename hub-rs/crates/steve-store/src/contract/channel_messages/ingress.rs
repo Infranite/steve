@@ -592,6 +592,8 @@ pub struct Stored {
     pub external_id: String,
     pub thread_key: Option<String>,
     pub text: String,
+    pub sender_account: Option<String>,
+    pub sender_party: Option<String>,
     pub sender_name: String,
     pub mention_names: Vec<String>,
     pub attachments: Value,
@@ -626,13 +628,13 @@ pub fn stored(r: &mut impl Read, message: &str) -> Result<Option<Stored>> {
     let Some((external_id, thread_key, text, account, party, mentions, attachments)) = row else {
         return Ok(None);
     };
-    let sender_name = match account {
+    let sender_name = match account.as_deref() {
         Some(id) => super::super::accounts::names_and_handles(r, &[&id])?
             .pop()
             .map(|(_, name)| name),
         None => None,
     };
-    let sender_name = match (sender_name, party) {
+    let sender_name = match (sender_name, party.as_deref()) {
         (Some(name), _) => name,
         (None, Some(id)) => super::super::parties::names(r, &[&id])?
             .pop()
@@ -653,6 +655,8 @@ pub fn stored(r: &mut impl Read, message: &str) -> Result<Option<Stored>> {
         external_id,
         thread_key,
         text,
+        sender_account: account,
+        sender_party: party,
         sender_name,
         mention_names,
         attachments,

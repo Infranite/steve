@@ -281,7 +281,7 @@ pub(crate) fn trigger_plan(
     let Some(conn) = conn else {
         return Ok(None);
     };
-    let mut plan = crate::flow_actions::plan_in(c, r, ws, msg)?;
+    let mut plan = crate::flow_actions::plan_in(r, ws, msg)?;
     plan.connection_id = conn;
     plan.mode = Mode::Own;
     plan.trigger = Some(String::new());

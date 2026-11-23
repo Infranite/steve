@@ -157,7 +157,7 @@ impl Channels {
         match plan.act {
             Act::Reply | Act::Draft => {
                 let (m, d) = self.store().transaction(|tx| {
-                    let (m, d) = open_draft(tx, plan, "", now)?;
+                    let (m, d) = tx.write(|w| open_draft(w, plan, "", now))?;
                     // the reply you write and approve answers the message
                     tx.write(|w| {
                         steve_store::channel_message_repo::reactions::expect_answer(

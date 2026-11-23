@@ -2286,10 +2286,9 @@ impl Channels {
                 Ok(Some(Response::skipped(crate::decide::LABEL_BOT_SEEN)))
             }
             Some(crate::decide::BotNotice::Item { .. }) => {
-                let mut plan = self.store().read(|r| {
-                    self.store()
-                        .reader(|c| crate::flow_actions::plan_in(c, r, ws, &inbound.message_id))
-                })?;
+                let mut plan = self
+                    .store()
+                    .read(|r| crate::flow_actions::plan_in(r, ws, &inbound.message_id))?;
                 plan.act = rules::Act::CreateItem(rules::ItemMode::Propose);
                 let mut r = self.execute(&plan).await?;
                 if r.item_id.is_some() {

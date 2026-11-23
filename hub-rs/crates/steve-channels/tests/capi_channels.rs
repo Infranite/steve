@@ -606,9 +606,9 @@ async fn new_group_decision_open_mute_undo_and_expiry() {
     // undo: back as it was
     h.env
         .store()
-        .transaction(|tx| {
-            let d = steve_store::base::decisions::get(tx, &d)?.expect("decision");
-            h.ch.modules().registry.before_undo(tx, &d)
+        .write(|w| {
+            let d = steve_store::DecisionRows(w).get(&d)?.expect("decision");
+            h.ch.modules().registry.before_undo(w, &d)
         })
         .expect("undo");
     let (_, sp) = h
@@ -1260,9 +1260,9 @@ async fn new_group_decision_quiet_block_and_the_suggestion() {
     assert_eq!(sp["suggest_quiet"], Value::Null, "only for a new space");
     h.env
         .store()
-        .transaction(|tx| {
-            let d = steve_store::base::decisions::get(tx, &d)?.expect("decision");
-            h.ch.modules().registry.before_undo(tx, &d)
+        .write(|w| {
+            let d = steve_store::DecisionRows(w).get(&d)?.expect("decision");
+            h.ch.modules().registry.before_undo(w, &d)
         })
         .expect("undo");
     let (_, sp) = h.call("GET", &path, None).await;

@@ -16,12 +16,12 @@ use std::ops::ControlFlow;
 
 use async_trait::async_trait;
 use rusqlite::{OptionalExtension, params};
-use steve_store::base::{self, DecisionKind};
+use steve_store::base::DecisionKind;
 use steve_store::{NewDecision, Tx, uid};
 
 use crate::rules::Act;
 use crate::spaces::{self, Mode};
-use crate::{ChannelResult, Channels, bindings, messages, personas};
+use crate::{ChannelResult, Channels, bindings, personas};
 
 /// `subject_type` of decisions about one channel message (C6 registers its handler).
 pub const SUBJECT_MESSAGE: &str = "chan_message";
@@ -226,14 +226,19 @@ pub fn open_handoff(tx: &Tx, plan: &Plan) -> ChannelResult<String> {
 /// A pending outbound draft replying to the message, and its `approve` decision: “以你本人
 /// 发到「<空间>」” on your own account, “以<身份>发到「<空间>」” on a bot. The body is `text`
 /// (empty until a composer writes one; you can write it in the inbox). Returns `(message, decision)`.
-pub fn open_draft(tx: &Tx, plan: &Plan, text: &str, now: i64) -> ChannelResult<(String, String)> {
+pub fn open_draft(
+    tx: &mut steve_store::W<'_>,
+    plan: &Plan,
+    text: &str,
+    now: i64,
+) -> ChannelResult<(String, String)> {
     open_draft_to(tx, &crate::deliver::OutTarget::reply(plan), text, now)
 }
 
 /// [`open_draft`] for any target: a reply (`reply_to`) or a new message in a space, as the
 /// target's persona (explicit, else the space's effective one; none on your own accounts).
 pub fn open_draft_to(
-    tx: &Tx,
+    tx: &mut steve_store::W<'_>,
     t: &crate::deliver::OutTarget,
     text: &str,
     now: i64,
@@ -243,80 +248,68 @@ pub fn open_draft_to(
 
 /// [`open_draft_to`] stored as message `id` (an operation's: [`crate::deliver::operation_message_id`]).
 pub(crate) fn open_draft_as(
-    tx: &Tx,
+    tx: &mut steve_store::W<'_>,
     t: &crate::deliver::OutTarget,
     text: &str,
     now: i64,
     id: String,
 ) -> ChannelResult<(String, String)> {
-    let space =
-        spaces::get(tx, &t.space_id)?.ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
-    let (account, persona) = tx.write(|w| -> ChannelResult<_> {
-        let (account, _) = bindings::connection_account(w, &t.ws, &t.connection_id)?;
-        let persona = match (t.mode, &t.persona_id) {
-            (Mode::Own, _) => None,
-            (Mode::Bot, Some(id)) => Some(
-                personas::get(w, id)?
-                    .filter(|p| p.workspace_id == t.ws && !p.deleted)
-                    .ok_or_else(|| steve_modules::ApiError::not_found("对外身份"))?,
-            ),
-            (Mode::Bot, None) => bindings::effective(w, &space)?.map(|e| e.persona),
-        };
-        Ok((account, persona))
-    })?;
-    tx.write(|w| {
-        use steve_store::channel_message_repo::outbound::{self, NewMessage};
-        outbound::insert(
-            w,
-            &NewMessage {
-                id: &id,
-                ws: &t.ws,
-                space: &t.space_id,
-                thread: t.thread_key.as_deref(),
-                reply_to: t.reply_to.as_deref(),
-                account: Some(&account),
-                persona: persona.as_ref().map(|persona| persona.id.as_str()),
-                on_behalf: if persona.is_some() { "persona" } else { "none" },
-                text: Some(text),
-                status: "draft",
-                created: now,
-            },
-        )
-    })?;
-    let name = tx.write(|w| spaces::display_title(w, &space))?;
+    use steve_store::channel_message_repo::outbound::{self, NewMessage};
+    let space = steve_store::channel_spaces::rows::get_in_workspace(tx, &t.ws, &t.space_id)?
+        .ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
+    let (account, _) = bindings::connection_account(tx, &t.ws, &t.connection_id)?;
+    let persona = match (t.mode, &t.persona_id) {
+        (Mode::Own, _) => None,
+        (Mode::Bot, Some(id)) => Some(
+            personas::get(tx, id)?
+                .filter(|p| p.workspace_id == t.ws && !p.deleted)
+                .ok_or_else(|| steve_modules::ApiError::not_found("对外身份"))?,
+        ),
+        (Mode::Bot, None) => bindings::effective(tx, &space)?.map(|e| e.persona),
+    };
+    outbound::insert(
+        tx,
+        &NewMessage {
+            id: &id,
+            ws: &t.ws,
+            space: &t.space_id,
+            thread: t.thread_key.as_deref(),
+            reply_to: t.reply_to.as_deref(),
+            account: Some(&account),
+            persona: persona.as_ref().map(|p| p.id.as_str()),
+            on_behalf: if persona.is_some() { "persona" } else { "none" },
+            text: Some(text),
+            status: "draft",
+            created: now,
+        },
+    )?;
+    let name = spaces::display_title(tx, &space)?;
     let question = match (&persona, t.mode) {
         (Some(p), _) => format!("以{}发到「{name}」", p.name),
         (None, Mode::Own) => format!("以你本人发到「{name}」"),
         (None, Mode::Bot) => {
             // no persona yet (no Bot to seed “Steve” with): the bot account's own name
-            let account_name: String = tx.query_row(
-                "SELECT coalesce(nullif(display_name, ''), handle_display) FROM accounts WHERE id = ?",
-                [&account],
-                |r| r.get(0),
-            )?;
+
+            let (_, account_name) = steve_store::Accounts(tx)
+                .display(&t.ws, &account)?
+                .ok_or_else(|| steve_modules::ApiError::not_found("账号"))?;
             format!("以{account_name}发到「{name}」")
         }
     };
-    let d = base::decisions::open(
-        tx,
-        &NewDecision {
-            workspace_id: t.ws.clone(),
-            kind: DecisionKind::Approve.code().into(),
-            subject_type: SUBJECT_MESSAGE.into(),
-            subject_id: id.clone(),
-            item_id: None,
-            session_id: None,
-            question,
-            draft: Some(text.to_string()),
-            options: Some(draft_options(t.source_message_id.is_some())),
-            requested_by: "steve".into(),
-        },
-    )?;
-    tx.execute(
-        "UPDATE chan_messages SET decision_id = ? WHERE id = ?",
-        params![d.id, id],
-    )?;
-    messages::event(tx, &t.ws, &t.space_id, &id);
+    let d = steve_store::DecisionRows(tx).open(&NewDecision {
+        workspace_id: t.ws.clone(),
+        kind: DecisionKind::Approve.code().into(),
+        subject_type: SUBJECT_MESSAGE.into(),
+        subject_id: id.clone(),
+        item_id: None,
+        session_id: None,
+        question,
+        draft: Some(text.to_string()),
+        options: Some(draft_options(t.source_message_id.is_some())),
+        requested_by: "steve".into(),
+    })?;
+    outbound::set_decision(tx, &id, &d.id)?;
+    steve_store::channel_message_repo::emit(tx, &t.ws, &t.space_id, &id);
     Ok((id, d.id))
 }
 

@@ -19,7 +19,7 @@ use steve_modules::decisions::{DecisionCx, DecisionHandler};
 use steve_modules::hooks::{ItemHooks, Takeover};
 use steve_modules::{ApiError, ApiResult, Gateway, Modules, Registry};
 use steve_store::base::Viewer;
-use steve_store::{Decision, Tx};
+use steve_store::{Decision, W};
 
 type Log = Arc<Mutex<Vec<String>>>;
 
@@ -497,7 +497,12 @@ struct Undo {
 fn recovery_keeps_only_opted_in_cards_on_completed_items() {
     struct ResultCard;
     impl DecisionHandler for ResultCard {
-        fn resolve(&self, _: &Tx, _: &DecisionCx, _: &Decision) -> ApiResult<serde_json::Value> {
+        fn resolve(
+            &self,
+            _: &mut W<'_>,
+            _: &DecisionCx,
+            _: &Decision,
+        ) -> ApiResult<serde_json::Value> {
             Ok(json!({}))
         }
 
@@ -524,15 +529,12 @@ fn recovery_keeps_only_opted_in_cards_on_completed_items() {
 }
 
 impl DecisionHandler for Undo {
-    fn resolve(&self, _: &Tx, _: &DecisionCx, _: &Decision) -> ApiResult<serde_json::Value> {
+    fn resolve(&self, _: &mut W<'_>, _: &DecisionCx, _: &Decision) -> ApiResult<serde_json::Value> {
         Ok(json!({}))
     }
-    fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
+    fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
         /* the handler sees the decision still resolved, inside a write transaction */
-        let status = tx
-            .write(|w| steve_store::decision_repo::get(w, &d.id))?
-            .unwrap()
-            .status;
+        let status = steve_store::DecisionRows(tx).get(&d.id)?.unwrap().status;
         self.log
             .lock()
             .unwrap()
@@ -554,10 +556,15 @@ fn undo_asks_the_module_of_the_decision_first_and_its_refusal_changes_nothing() 
     });
     struct Shared(Arc<Undo>);
     impl DecisionHandler for Shared {
-        fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<serde_json::Value> {
+        fn resolve(
+            &self,
+            tx: &mut W<'_>,
+            cx: &DecisionCx,
+            d: &Decision,
+        ) -> ApiResult<serde_json::Value> {
             self.0.resolve(tx, cx, d)
         }
-        fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
+        fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
             self.0.before_undo(tx, d)
         }
     }

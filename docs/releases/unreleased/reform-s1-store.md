@@ -7,3 +7,5 @@ GitHub delivery traces read pull requests, issues, and flow runs from a single s
 Mail synchronization, threads, attachments, drafts, and the send queue use the shared storage contract. Thread updates publish after their database changes commit.
 
 The Hub refreshes the reported Node build before marking a Node upgrade complete.
+
+Core persistence and module decision handlers use the shared storage contract. Decision changes, related writes, and audit records commit together.

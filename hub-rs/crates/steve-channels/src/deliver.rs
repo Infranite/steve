@@ -397,7 +397,8 @@ impl Outbound for DraftOnly {
                 Some(op) => operation_message_id(ws, op),
                 None => steve_store::uid("cm"),
             };
-            let (m, d) = respond::open_draft_as(tx, &req.target, &req.text, now, id)?;
+            let (m, d) =
+                tx.write(|w| respond::open_draft_as(w, &req.target, &req.text, now, id))?;
             if let Some(g) = &req.generation {
                 crate::decide::keep_composed(tx, &m, g)?;
             }

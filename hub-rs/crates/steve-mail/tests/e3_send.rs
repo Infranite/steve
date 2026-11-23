@@ -202,7 +202,7 @@ async fn undo_within_the_delay_sends_nothing() {
     h.env.clock.advance(3_000);
     h.env
         .store()
-        .transaction(|tx| h.env.modules.registry.before_undo(tx, &r))
+        .write(|w| h.env.modules.registry.before_undo(w, &r))
         .unwrap();
     assert_eq!(draft(&h, &d.id).status, "pending");
 
@@ -218,7 +218,7 @@ async fn undo_within_the_delay_sends_nothing() {
     let e = h
         .env
         .store()
-        .transaction(|tx| h.env.modules.registry.before_undo(tx, &dec2))
+        .write(|w| h.env.modules.registry.before_undo(w, &dec2))
         .unwrap_err();
     assert_eq!(e, ApiError::conflict(MSG_ALREADY_SENT));
     let e = h.mail.cancel_draft(&me(), &d.id).unwrap_err();

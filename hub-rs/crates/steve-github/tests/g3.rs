@@ -507,13 +507,7 @@ async fn accepting_asks_first_and_no_pushes_or_opens_nothing() {
         .env
         .store()
         .write(|tx| {
-            Ok::<_, steve_modules::ApiError>(
-                h.env
-                    .modules
-                    .registry
-                    .before_undo(&tx.legacy(), &d)
-                    .is_err(),
-            )
+            Ok::<_, steve_modules::ApiError>(h.env.modules.registry.before_undo(tx, &d).is_err())
         })
         .expect("tx");
     assert!(refused);

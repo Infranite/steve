@@ -1549,11 +1549,8 @@ async fn personal_attention_tracks_only_final_owned_inline_run_receipts() {
         .reply_id
         .as_ref()
         .expect("short answer names its persisted final receipt");
-    let (entries, upper) = k
-        .db()
-        .store()
-        .reader(|c| steve_store::attention::replies(c, WS, "attention_user"))
-        .unwrap();
+    let (entries, upper) =
+        steve_store::core_fixture::thread::attention(k.db().store(), WS, "attention_user").unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(&entries[0].id, reply);
     assert_eq!(entries[0].order, Some(upper));
@@ -1574,9 +1571,7 @@ async fn personal_attention_tracks_only_final_owned_inline_run_receipts() {
     )
     .await;
     assert_eq!(
-        k.db()
-            .store()
-            .reader(|c| steve_store::attention::replies(c, WS, "attention_user"))
+        steve_store::core_fixture::thread::attention(k.db().store(), WS, "attention_user")
             .unwrap()
             .0
             .len(),
@@ -1635,19 +1630,19 @@ async fn personal_attention_tracks_actual_stopped_short_answer_receipt() {
         "stopped receipt retains the upstream system-note classification"
     );
     assert_eq!(reply.meta["origin"], mid);
-    let (entries, _) = k
-        .db()
-        .store()
-        .reader(|c| steve_store::attention::replies(c, WS, "attention_user"))
-        .unwrap();
+    let (entries, _) =
+        steve_store::core_fixture::thread::attention(k.db().store(), WS, "attention_user").unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(&entries[0].id, id);
     assert_eq!(
-        k.db()
-            .store()
-            .reader(|c| steve_store::attention::reply(c, WS, "attention_user", id))
-            .unwrap()
-            .0,
+        steve_store::core_fixture::thread::attention_target(
+            k.db().store(),
+            WS,
+            "attention_user",
+            id
+        )
+        .unwrap()
+        .0,
         *id
     );
 }
@@ -1822,8 +1817,8 @@ fn a_boot_without_resuming_records_no_main_conversation_intent() {
 fn a_notice_written_in_a_transaction_stays_or_goes_with_it() {
     let k = Kit::new();
     let told = |text: &str, keep: bool| {
-        k.db().store().transaction(|tx| {
-            tx.write(|w| crate::notify::notify_in(w, WS, "system", "fail", text, None))?;
+        k.db().store().write(|w| {
+            crate::notify::notify_in(w, WS, "system", "fail", text, None)?;
             if keep {
                 Ok(())
             } else {

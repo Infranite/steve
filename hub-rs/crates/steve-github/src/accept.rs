@@ -13,6 +13,8 @@
 //! check the answer and record the write ([`crate::effects`]); the runner does it after the commit,
 //! reconciling first when an earlier try may have happened.
 
+use steve_store::W;
+
 use std::sync::{Arc, OnceLock, Weak};
 
 use async_trait::async_trait;
@@ -22,7 +24,7 @@ use steve_modules::hooks::{ItemHooks, Takeover};
 use steve_modules::{ApiError, ApiResult, Registry};
 use steve_store::base::DecisionKind;
 use steve_store::base::decisions as base_decisions;
-use steve_store::{Decision, Item, NewDecision, Tx};
+use steve_store::{Decision, Item, NewDecision};
 
 use crate::api::GhError;
 use crate::effects::{self, Fail, Ran};
@@ -983,24 +985,21 @@ impl GitHub {
 struct PrOpenDecisions(Slot);
 
 impl DecisionHandler for PrOpenDecisions {
-    fn resolve(&self, outer: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
-        outer.write(|tx| {
-            let gh = self.0.need()?;
-            let item = d
-                .item_id
-                .as_deref()
-                .ok_or_else(|| ApiError::not_found("事项"))?;
-            if cx.choice == "yes" && steve_store::item_repo::item_status(tx, cx.ws, item)?.is_none()
-            {
-                return Err(ApiError::not_found("事项"));
-            }
-            effects::queue(tx, &gh, cx.ws, &d.id, effects::OPEN)?;
-            Ok(choice_result(cx))
-        })
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+        let gh = self.0.need()?;
+        let item = d
+            .item_id
+            .as_deref()
+            .ok_or_else(|| ApiError::not_found("事项"))?;
+        if cx.choice == "yes" && steve_store::item_repo::item_status(tx, cx.ws, item)?.is_none() {
+            return Err(ApiError::not_found("事项"));
+        }
+        effects::queue(tx, &gh, cx.ws, &d.id, effects::OPEN)?;
+        Ok(choice_result(cx))
     }
 
     /// The branch may be pushed and the PR open by now; there is nothing to take back.
-    fn before_undo(&self, _tx: &Tx, _d: &Decision) -> ApiResult<()> {
+    fn before_undo(&self, _tx: &mut W<'_>, _d: &Decision) -> ApiResult<()> {
         Err(ApiError::rule(steve_i18n::t!("github.decision.no_undo")))
     }
 }
@@ -1010,28 +1009,26 @@ impl DecisionHandler for PrOpenDecisions {
 struct PrMergeDecisions(Slot);
 
 impl DecisionHandler for PrMergeDecisions {
-    fn resolve(&self, outer: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
-        outer.write(|tx| {
-            let gh = self.0.need()?;
-            let pr = steve_store::github::pr_get(tx, &d.subject_id)?
-                .filter(|p| p.workspace_id == cx.ws)
-                .ok_or_else(|| ApiError::not_found("PR"))?;
-            if pr.state != "open" {
-                return Err(ApiError::conflict(steve_i18n::t!("github.pr.closed")));
-            }
-            if cx.choice == "yes" && pr.checks_state != "success" {
-                return Err(ApiError::conflict(steve_i18n::t!("github.pr.new_commits")));
-            }
-            let mut out = choice_result(cx);
-            out["sha"] = json!(pr.head_sha);
-            if cx.choice == "yes" {
-                effects::queue(tx, &gh, cx.ws, &d.id, effects::MERGE)?;
-            }
-            Ok(out)
-        })
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+        let gh = self.0.need()?;
+        let pr = steve_store::github::pr_get(tx, &d.subject_id)?
+            .filter(|p| p.workspace_id == cx.ws)
+            .ok_or_else(|| ApiError::not_found("PR"))?;
+        if pr.state != "open" {
+            return Err(ApiError::conflict(steve_i18n::t!("github.pr.closed")));
+        }
+        if cx.choice == "yes" && pr.checks_state != "success" {
+            return Err(ApiError::conflict(steve_i18n::t!("github.pr.new_commits")));
+        }
+        let mut out = choice_result(cx);
+        out["sha"] = json!(pr.head_sha);
+        if cx.choice == "yes" {
+            effects::queue(tx, &gh, cx.ws, &d.id, effects::MERGE)?;
+        }
+        Ok(out)
     }
 
-    fn before_undo(&self, _tx: &Tx, _d: &Decision) -> ApiResult<()> {
+    fn before_undo(&self, _tx: &mut W<'_>, _d: &Decision) -> ApiResult<()> {
         Err(ApiError::rule(steve_i18n::t!("github.decision.no_undo")))
     }
 }

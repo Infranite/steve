@@ -771,22 +771,19 @@ mod checkout_tests {
         let mut d = kit
             .db()
             .store()
-            .transaction(|tx| {
-                steve_store::base::decisions::open(
-                    tx,
-                    &steve_store::NewDecision {
-                        workspace_id: "default".into(),
-                        kind: "fail".into(),
-                        subject_type: "chan_message".into(),
-                        subject_id: "refused-message".into(),
-                        item_id: None,
-                        session_id: None,
-                        question: "channel target refusal".into(),
-                        draft: Some("full draft".into()),
-                        options: Some(vec!["retry".into(), "rewrite".into(), "discard".into()]),
-                        requested_by: "steve".into(),
-                    },
-                )
+            .write(|w| {
+                steve_store::DecisionRows(w).open(&steve_store::NewDecision {
+                    workspace_id: "default".into(),
+                    kind: "fail".into(),
+                    subject_type: "chan_message".into(),
+                    subject_id: "refused-message".into(),
+                    item_id: None,
+                    session_id: None,
+                    question: "channel target refusal".into(),
+                    draft: Some("full draft".into()),
+                    options: Some(vec!["retry".into(), "rewrite".into(), "discard".into()]),
+                    requested_by: "steve".into(),
+                })
             })
             .unwrap();
         let yolo = super::super::Yolo::with_clock(
@@ -836,22 +833,19 @@ mod recovery_review_tests {
         let d = kit
             .db()
             .store()
-            .transaction(|tx| -> ApiResult<Decision> {
-                let d = steve_store::base::decisions::open(
-                    tx,
-                    &steve_store::NewDecision {
-                        workspace_id: "default".into(),
-                        kind: "approve".into(),
-                        subject_type: "chan_message".into(),
-                        subject_id: "review-message".into(),
-                        item_id: None,
-                        session_id: None,
-                        question: "edited for review".into(),
-                        draft: Some("edited body".into()),
-                        options: Some(vec!["yes".into(), "no".into()]),
-                        requested_by: "steve".into(),
-                    },
-                )?;
+            .write(|w| -> ApiResult<Decision> {
+                let d = steve_store::DecisionRows(w).open(&steve_store::NewDecision {
+                    workspace_id: "default".into(),
+                    kind: "approve".into(),
+                    subject_type: "chan_message".into(),
+                    subject_id: "review-message".into(),
+                    item_id: None,
+                    session_id: None,
+                    question: "edited for review".into(),
+                    draft: Some("edited body".into()),
+                    options: Some(vec!["yes".into(), "no".into()]),
+                    requested_by: "steve".into(),
+                })?;
                 steve_store::core_fixture::decision(
                     kit.db().store(),
                     &d.id,
@@ -859,7 +853,7 @@ mod recovery_review_tests {
                         &json!({"recovery_review": true}),
                     ),
                 );
-                Ok(steve_store::base::decisions::get(tx, &d.id)?.unwrap())
+                Ok(steve_store::DecisionRows(w).get(&d.id)?.unwrap())
             })
             .unwrap();
         // A new core and store connection, rather than an in-memory flag surviving the rewrite.

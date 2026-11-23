@@ -11,7 +11,7 @@ use steve_modules::decisions::{DecisionCx, DecisionHandler, choice_result};
 use steve_modules::{ApiError, ApiResult};
 use steve_store::base::ObjRef;
 use steve_store::base::links::{Links, NewLink};
-use steve_store::{BotRows, Decision, DecisionRows, FlowSources, SignalRows, Tx};
+use steve_store::{BotRows, Decision, DecisionRows, FlowSources, SignalRows, W};
 use tokio::sync::{Notify, mpsc};
 
 use crate::engine::{self, GATE_YES};
@@ -41,13 +41,13 @@ impl FlowStepDecisions {
 }
 
 impl DecisionHandler for FlowStepDecisions {
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
         let (run_id, node) = step_of(d)?;
-        let mut run = tx
-            .write(|w| steve_store::RunRows(w).get(run_id))?
+        let mut run = steve_store::RunRows(tx)
+            .get(run_id)?
             .filter(|r| r.workspace_id == cx.ws)
             .ok_or_else(|| ApiError::not_found("运行"))?;
-        let wait = tx.write(|w| steve_store::FlowWaits(w).get(run_id, node))?;
+        let wait = steve_store::FlowWaits(tx).get(run_id, node)?;
         let Some(wait) =
             wait.filter(|wait| wait.mode == "decision" && wait.decision.as_deref() == Some(&d.id))
         else {
@@ -60,16 +60,7 @@ impl DecisionHandler for FlowStepDecisions {
         let resume = if matcher["kind"] == "gate" {
             if cx.choice == engine::GATE_ALWAYS {
                 // runs now, and from now on for this version of the flow
-                tx.write(|w| {
-                    engine::write_gate_grants(
-                        w,
-                        &run,
-                        &matcher,
-                        cx.actor,
-                        &d.id,
-                        steve_store::now(),
-                    )
-                })?;
+                engine::write_gate_grants(tx, &run, &matcher, cx.actor, &d.id, steve_store::now())?;
                 json!({ "gate": GATE_YES })
             } else {
                 json!({ "gate": cx.choice })
@@ -78,7 +69,7 @@ impl DecisionHandler for FlowStepDecisions {
             run.context["approved_by"] = json!(node);
             json!({ "output": { "choice": cx.choice, "text": cx.text }, "branch": cx.choice })
         };
-        if !tx.write(|w| engine::resume_in(w, run, node, resume))? {
+        if !engine::resume_in(tx, run, node, resume)? {
             return Err(ApiError::conflict(steve_i18n::t!(
                 "flow.decision.not_waiting"
             )));
@@ -92,15 +83,15 @@ impl DecisionHandler for FlowStepDecisions {
     }
 
     /// The run has moved on: an answer cannot be taken back.
-    fn before_undo(&self, _tx: &Tx, _d: &Decision) -> ApiResult<()> {
+    fn before_undo(&self, _tx: &mut W<'_>, _d: &Decision) -> ApiResult<()> {
         Err(ApiError::rule(steve_i18n::t!("flow.decision.no_undo")))
     }
 
     /// An approval nobody gave in time ends the run.
-    fn expire(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
+    fn expire(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
         let (run_id, _) = step_of(d)?;
-        if let Some(r) = tx.write(|w| steve_store::RunRows(w).get(run_id))? {
-            tx.write(|w| engine::cancel(w, &r, steve_store::now()))?;
+        if let Some(r) = steve_store::RunRows(tx).get(run_id)? {
+            engine::cancel(tx, &r, steve_store::now())?;
         }
         Ok(())
     }
@@ -119,13 +110,11 @@ impl SignalDecisions {
 }
 
 impl DecisionHandler for SignalDecisions {
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
         match cx.choice {
             c if c == NOTIFY_OPTIONS[0] => {}
             c if c == NOTIFY_OPTIONS[1] => {
-                let exists = tx
-                    .write(|w| SignalRows(w).source(cx.ws, &d.subject_id))?
-                    .is_some();
+                let exists = SignalRows(tx).source(cx.ws, &d.subject_id)?.is_some();
                 if !exists {
                     return Err(ApiError::not_found("信号"));
                 }
@@ -275,7 +264,7 @@ pub async fn to_item(cx: &FlowCx, ws: &str, event_id: &str) -> FlowResult<String
 /// approval for that step). The step is counted as run again (`context.reruns.<node>`): an effect
 /// that keys its operation on the run and the step (a `cmd` on a Node) runs anew, not the
 /// interrupted one's answer.
-pub(crate) fn retry(tx: &Tx, run: &mut runs::RunRow) -> FlowResult<()> {
+pub(crate) fn retry(tx: &mut W<'_>, run: &mut runs::RunRow) -> FlowResult<()> {
     if run.status != "failed" || run.cursor.is_none() {
         return Err(ApiError::conflict(steve_i18n::t!("flow.decision.no_retry")));
     }
@@ -295,5 +284,5 @@ pub(crate) fn retry(tx: &Tx, run: &mut runs::RunRow) -> FlowResult<()> {
     run.ended = None;
     run.outcome = None;
     run.outcome_label = String::new();
-    Ok(tx.write(|w| runs::save(w, run))?)
+    Ok(runs::save(tx, run)?)
 }

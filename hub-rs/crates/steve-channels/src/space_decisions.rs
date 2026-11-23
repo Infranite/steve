@@ -16,7 +16,11 @@ use serde_json::{Value, json};
 use steve_modules::decisions::{DecisionCx, DecisionHandler};
 use steve_modules::{ApiError, ApiResult, Registry};
 use steve_store::base;
-use steve_store::{Decision, Tx};
+use steve_store::channel_spaces::{
+    preferences::{self, Preference},
+    registration, rows,
+};
+use steve_store::{Decision, Tx, W, audit_repo};
 
 use crate::ChannelResult;
 use crate::spaces::{self, Attention, SUBJECT_SPACE};
@@ -48,34 +52,30 @@ fn flags_of(s: &spaces::SpaceSettings) -> Flags {
 /// Writes `muted`, the attention and `configured` with a revision and audit; returns whether
 /// anything changed.
 fn set_flags(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     actor: &str,
     space: &str,
     to: Flags,
     why: &Value,
 ) -> ApiResult<bool> {
-    let before = tx.write(|w| crate::spaces::settings(w, space))?;
+    let before = crate::spaces::settings(tx, space)?;
     let was = flags_of(&before);
     if was == to {
         return Ok(false);
     }
     let now = steve_store::now();
     let revision = before.revision + 1;
-    tx.write(|w| {
-        use steve_store::channel_spaces::preferences::{self, Preference};
-        preferences::set_flags(w, space, to.muted, to.configured, revision, now)?;
-        if was.attention != to.attention {
-            preferences::set(
-                w,
-                ws,
-                space,
-                Preference::Attention(to.attention.code()),
-                now,
-            )?;
-        }
-        Ok::<_, steve_store::StoreError>(())
-    })?;
+    preferences::set_flags(tx, space, to.muted, to.configured, revision, now)?;
+    if was.attention != to.attention {
+        preferences::set(
+            tx,
+            ws,
+            space,
+            Preference::Attention(to.attention.code()),
+            now,
+        )?;
+    }
     let mut fields = Vec::new();
     if was.muted != to.muted {
         fields.push("muted");
@@ -84,7 +84,7 @@ fn set_flags(
         fields.push("attention");
     }
     if !fields.is_empty() {
-        base::revision(
+        audit_repo::revise(
             tx,
             ws,
             "space",
@@ -99,8 +99,8 @@ fn set_flags(
     if let (Some(o), Some(w)) = (detail.as_object_mut(), why.as_object()) {
         o.extend(w.clone());
     }
-    base::audit(tx, ws, actor, "space.patch", space, &detail)?;
-    spaces::event(tx, ws, space);
+    audit_repo::record(tx, ws, actor, "space.patch", space, &detail)?;
+    registration::emit(tx, ws, space);
     Ok(true)
 }
 
@@ -119,12 +119,12 @@ fn answered(choice: &str, was: Flags) -> Option<Flags> {
 }
 
 impl DecisionHandler for NewSpaceDecision {
-    fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
-        let Some(s) = spaces::get(tx, &d.subject_id)?.filter(|s| s.workspace_id == cx.ws) else {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+        let Some(s) = rows::get_in_workspace(tx, cx.ws, &d.subject_id)? else {
             // the space went away meanwhile: nothing to do
             return Ok(json!({"choice": cx.choice, "gone": true}));
         };
-        let before = tx.write(|w| crate::spaces::settings(w, &s.id))?;
+        let before = crate::spaces::settings(tx, &s.id)?;
         let was = flags_of(&before);
         let to = answered(cx.choice, was).ok_or_else(|| ApiError::invalid("choice"))?;
         set_flags(tx, cx.ws, cx.actor, &s.id, to, &json!({"decision": d.id}))?;
@@ -136,9 +136,8 @@ impl DecisionHandler for NewSpaceDecision {
     }
 
     /// Back to the flags the space had before the answer (only when nobody changed them since).
-    fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
-        let Some(s) = spaces::get(tx, &d.subject_id)?.filter(|s| s.workspace_id == d.workspace_id)
-        else {
+    fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
+        let Some(s) = rows::get_in_workspace(tx, &d.workspace_id, &d.subject_id)? else {
             return Ok(());
         };
         let w = &d.result["was"];
@@ -158,7 +157,7 @@ impl DecisionHandler for NewSpaceDecision {
         let Some(to) = answered(d.result["choice"].as_str().unwrap_or(""), was) else {
             return Ok(());
         };
-        let now = flags_of(&tx.write(|w| crate::spaces::settings(w, &s.id))?);
+        let now = flags_of(&crate::spaces::settings(tx, &s.id)?);
         if (now.muted, now.attention) != (to.muted, to.attention) {
             // changed on the space page after the answer: keep what the user set there
             return Ok(());

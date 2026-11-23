@@ -5,13 +5,13 @@
 use crate::CoreError;
 use crate::testkit::Kit;
 use serde_json::json;
-use steve_modules::accounts::{self, Hints, identify};
+use steve_modules::accounts::{self, Hints};
 use steve_modules::contacts::{self, merge};
 use steve_modules::decisions::{self, DecisionCx, DecisionHandler};
 use steve_modules::testkit::{ME, WS, call, caller};
 use steve_modules::{ApiError, ApiResult, Caller, Modules, Registry};
-use steve_store::base;
-use steve_store::{Decision, Tx};
+
+use steve_store::{Decision, W};
 
 fn attach(k: &Kit, f: impl FnOnce(&mut Registry)) -> Modules {
     steve_store::core_fixture::thread::owner(k.db().store(), WS, "usr_dev", "dev", "Dev");
@@ -61,9 +61,9 @@ async fn a_merge_answered_through_dispatch_is_split_by_undo_decision() {
     let sarah = sarah["id"].as_str().unwrap().to_string();
     let got = m
         .store
-        .transaction(|tx| {
-            identify(
-                tx,
+        .write(|w| {
+            steve_modules::accounts::identify::identify_handle(
+                w,
                 WS,
                 ME,
                 "mail",
@@ -129,11 +129,23 @@ async fn a_merge_answered_through_dispatch_is_split_by_undo_decision() {
 struct Refuses;
 
 impl DecisionHandler for Refuses {
-    fn resolve(&self, _: &Tx, cx: &DecisionCx, _: &Decision) -> ApiResult<serde_json::Value> {
+    fn resolve(
+        &self,
+        _: &mut W<'_>,
+        cx: &DecisionCx,
+        _: &Decision,
+    ) -> ApiResult<serde_json::Value> {
         Ok(decisions::choice_result(cx))
     }
-    fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
-        base::audit(tx, &d.workspace_id, "x", "x.before_undo", &d.id, &json!({}))?;
+    fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
+        steve_store::audit_repo::record(
+            tx,
+            &d.workspace_id,
+            "x",
+            "x.before_undo",
+            &d.id,
+            &json!({}),
+        )?;
         if d.result["choice"] == "yes" {
             return Err(ApiError::conflict("已经发出去了，撤不回"));
         }
@@ -143,11 +155,14 @@ impl DecisionHandler for Refuses {
 
 fn open_confirm(m: &Modules, subject: &str) -> String {
     m.store
-        .transaction(|tx| {
-            base::decisions::open(
-                tx,
-                &decisions::confirm(WS, "x_thing", subject, "要吗？", ME),
-            )
+        .write(|w| {
+            steve_store::DecisionRows(w).open(&decisions::confirm(
+                WS,
+                "x_thing",
+                subject,
+                "要吗？",
+                ME,
+            ))
         })
         .unwrap()
         .id
