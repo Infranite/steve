@@ -156,7 +156,7 @@ impl NodeRuntime {
             if state.as_deref() != Some("unknown") {
                 return Ok(true);
             }
-            self.retiring_in(tx, op, true)
+            self.retiring_in(op, true)
         })?;
         self.wake_send.notify_one();
         Ok(planned)

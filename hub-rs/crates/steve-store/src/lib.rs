@@ -1004,3 +1004,7 @@ pub mod retention {
 
 #[cfg(feature = "testkit")]
 pub mod testkit;
+
+pub use contract::files::file_row;
+pub use contract::files::{job_inputs, operation_execution};
+pub use contract::node_jobs;

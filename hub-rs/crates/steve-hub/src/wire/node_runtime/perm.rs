@@ -4,6 +4,7 @@
 //! resolution are all bound to the request's own attempt.
 
 use super::*;
+use steve_store::node_commands::dispatch;
 use steve_store::runtime::PermissionRow;
 
 /// How a card closed by time reads.
@@ -97,20 +98,16 @@ impl NodeRuntime {
             return Ok(None);
         }
         // an attempt this Hub planned on this Node, of that very session (whatever the body says)
-        let planned: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM runtime_attempts a JOIN runtime_turns t ON t.turn_id=a.turn_id JOIN runtime_sessions s ON s.session_id=t.session_id WHERE a.attempt_id=?1 AND t.session_id=?2 AND a.node_id=?3 AND s.node_id=?3)",
-            rusqlite::params![attempt, session, self.node_id.as_str()],
-            |r| r.get(0),
-        )?;
+        let planned = self.store.read(|r| {
+            node_turns::planning::planned_here(r, self.node_id.as_str(), &session, attempt)
+        })?;
         if !planned {
             tracing::warn!(permission = %request.id, attempt, "request of an attempt the Hub never planned on this Node");
             return Ok(None);
         }
-        let (ws, item, bot): (String, Option<String>, Option<String>) = tx.query_row(
-            "SELECT workspace_id, item_id, bot_id FROM sessions WHERE id=?",
-            [&session],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?;
+        let scope = self
+            .store
+            .read(|r| node_sessions::startup::scope(r, &session))?;
         let options: Vec<String> = request
             .choices
             .iter()
@@ -122,11 +119,11 @@ impl NodeRuntime {
         let d = steve_store::decision_create_in(
             tx,
             &steve_store::NewDecision {
-                workspace_id: ws,
+                workspace_id: scope.workspace,
                 kind: "approve".into(),
                 subject_type: "tool_call".into(),
                 subject_id: request.id.to_string(),
-                item_id: item,
+                item_id: scope.item,
                 session_id: Some(session.clone()),
                 question: format!("允许执行：{}", request.title),
                 draft: Some(
@@ -137,7 +134,7 @@ impl NodeRuntime {
                         .collect(),
                 ),
                 options: Some(options),
-                requested_by: bot.unwrap_or_else(|| "agent".into()),
+                requested_by: scope.bot.unwrap_or_else(|| "agent".into()),
             },
         )?;
         event_in(
@@ -183,12 +180,7 @@ impl NodeRuntime {
     ) -> Result<String, StoreError> {
         let request: PermissionRequest = serde_json::from_value(row.request.clone())?;
         let op = format!("op_answer_{}", row.decision);
-        let exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM node_commands WHERE operation_id=?)",
-            [&op],
-            |r| r.get(0),
-        )?;
-        if exists {
+        if self.store.read(|r| dispatch::exists(r, &op))? {
             return Ok(op);
         }
         let (req, digest) = command(
@@ -359,11 +351,12 @@ impl NodeRuntime {
             let Some(row) = rt::permission_of_decision_in(tx, decision)? else {
                 return Ok((false, false));
             };
-            let status: String =
-                tx.query_row("SELECT status FROM decisions WHERE id=?", [decision], |r| {
-                    r.get(0)
-                })?;
-            if status != "open" || row.state != "waiting" {
+            let card = self
+                .store
+                .decisions()
+                .get(decision)?
+                .ok_or_else(|| StoreError::Rejected(format!("missing decision {decision}")))?;
+            if card.status != "open" || row.state != "waiting" {
                 return Ok((false, false));
             }
             if let Some(why) = steve_store::workflow_gate::session_blocker(tx, &row.session)? {

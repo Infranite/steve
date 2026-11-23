@@ -121,7 +121,9 @@ impl NodeRuntime {
                 if !uncertain
                     && !lease.maybe_sent
                     && lease.method == "start_job"
-                    && let Some(attempt) = node_jobs::job_attempt_of(tx, &lease.operation)?
+                    && let Some(attempt) = self
+                        .store
+                        .read(|r| steve_store::node_jobs::command_attempt(r, &lease.operation))?
                     && steve_store::jobs::attempt_in(tx, &attempt)?
                         .is_some_and(|a| a.cancel_requested)
                 {
@@ -139,7 +141,10 @@ impl NodeRuntime {
                     now(),
                 )?;
                 // refused before it was accepted: it certainly did not run
-                if let Some(attempt) = node_jobs::job_attempt_of(tx, &lease.operation)? {
+                if let Some(attempt) = self
+                    .store
+                    .read(|r| steve_store::node_jobs::command_attempt(r, &lease.operation))?
+                {
                     self.job_refused_in(tx, &lease.method, &attempt, e)?;
                     return Ok((None, None));
                 }
@@ -376,7 +381,10 @@ impl NodeRuntime {
         if !moved {
             return Ok(None);
         }
-        if let Some(attempt) = node_jobs::job_attempt_of(tx, op)? {
+        if let Some(attempt) = self
+            .store
+            .read(|r| steve_store::node_jobs::command_attempt(r, op))?
+        {
             self.job_receipt_in(tx, op, &method, &attempt, receipt)?;
             return Ok(None);
         }
@@ -397,7 +405,7 @@ impl NodeRuntime {
                 ..
             }
         );
-        if self.retiring_in(tx, op, interrupted)? {
+        if self.retiring_in(op, interrupted)? {
             return Ok(None);
         }
         if method == "resolve_permission" && state == ReceiptState::Finished {
@@ -518,7 +526,11 @@ impl NodeRuntime {
     /// release says so: an earlier one's receipt, come late, says nothing of the session now.
     fn released_in(&self, tx: &Tx, s: &str, op: &str, success: bool) -> Result<(), StoreError> {
         if self.phase_in(s)?.is_none_or(|(p, _)| p != "releasing")
-            || last_release_in(tx, s)?.as_deref() != Some(op)
+            || self
+                .store
+                .read(|r| dispatch::release(r, s, false))?
+                .as_deref()
+                != Some(op)
         {
             return Ok(());
         }
@@ -632,7 +644,10 @@ impl NodeRuntime {
             )?;
             // an item paused while its session was opening (its workspace being prepared, say)
             // starts nothing: what is queued waits for it to continue
-            let planned = if workspace::item_paused_in(tx, s)? {
+            let planned = if self
+                .store
+                .read(|r| node_sessions::worktree::item_paused(r, s))?
+            {
                 Planned::Empty
             } else {
                 self.plan_after_in(tx, s)?
@@ -879,7 +894,7 @@ fn fresh_envelope_in(
     c.accept_before = Timestamp(at + ACCEPT_WINDOW_MS);
     let v = serde_json::to_value(&c).map_err(conflict)?;
     let digest = digest_of(&v).map_err(conflict)?.to_string();
-    store.write(|w| dispatch::refresh_envelope(w, &l.operation, &c, &digest, at))?;
+    store.write(|w| dispatch::refresh_envelope(w, &l.operation, &c, &digest, at, None))?;
     l.request = v;
     l.digest = digest;
     Ok(l)

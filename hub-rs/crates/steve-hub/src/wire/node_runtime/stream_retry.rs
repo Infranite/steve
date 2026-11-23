@@ -2,6 +2,7 @@
 //! already ran. They resume with a reminder to inspect effects, never by replaying the original task.
 
 use super::*;
+use steve_store::node_turns::retry;
 
 pub(super) const STREAM_INTERRUPTED: &str = steve_core::runtime::MODEL_STREAM_INTERRUPTED;
 
@@ -29,7 +30,7 @@ impl NodeRuntime {
             .map(|e| e.safe_detail.as_str())
             .filter(|e| !e.trim().is_empty());
         let tail = if matches!(c.stop_reason.as_str(), "end_turn" | "error") && error.is_none() {
-            self.attempt_assistant_tail_in(tx, session, attempt)?
+            tx.write(|w| retry::assistant_tail(w, self.node_id.as_str(), session, attempt))?
         } else {
             String::new()
         };
@@ -80,58 +81,10 @@ impl NodeRuntime {
         Ok(c)
     }
 
-    /// Only projected assistant deltas of this attempt, bounded from the end (those applied
-    /// earlier in this transaction included). User prompts, tools, thoughts and prior attempts
-    /// cannot supply the error.
-    fn attempt_assistant_tail_in(
-        &self,
-        tx: &Tx,
-        session: &str,
-        attempt: &str,
-    ) -> Result<String, StoreError> {
-        let mut st = tx.prepare(
-            "SELECT json_extract(data,'$.message'), json_extract(data,'$.text') FROM events
-             WHERE session_id=?3 AND source_node=?1 AND source_attempt=?2
-               AND kind='text' AND json_extract(data,'$.role')='assistant'
-             ORDER BY seq DESC",
-        )?;
-        let rows = st.query_map([self.node_id.as_str(), attempt, session], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?;
-        let mut parts = vec![];
-        let mut chars = 0;
-        let mut last_message = None;
-        for row in rows {
-            let (message, text) = row?;
-            if last_message.as_ref().is_some_and(|m| *m != message) {
-                break;
-            }
-            last_message = Some(message);
-            let tail: String = text.chars().rev().take(1024 - chars).collect();
-            chars += tail.chars().count();
-            parts.push(tail.chars().rev().collect::<String>());
-            if chars >= 1024 {
-                break;
-            }
-        }
-        parts.reverse();
-        Ok(parts.concat())
-    }
-
     /// A question, approval or committed delivery is already waiting on its own next step. A
     /// service failure after it must not start work past that boundary (or resurrect an ended item).
-    pub(super) fn stream_retry_allowed_in(
-        &self,
-        tx: &Tx,
-        session: &str,
-    ) -> Result<bool, StoreError> {
-        Ok(tx.query_row(
-            "SELECT s.status<>'ended' AND (i.id IS NULL OR (i.phase='active' AND i.archived=0))
-             AND NOT EXISTS(SELECT 1 FROM decisions d WHERE d.item_id=i.id AND d.status='open')
-             FROM sessions s LEFT JOIN items i ON i.id=s.item_id WHERE s.id=?",
-            [session],
-            |r| r.get(0),
-        )?)
+    pub(super) fn stream_retry_allowed_in(&self, session: &str) -> Result<bool, StoreError> {
+        self.store.read(|r| retry::allowed(r, session))
     }
 }
 

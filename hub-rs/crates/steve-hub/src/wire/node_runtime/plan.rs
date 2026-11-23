@@ -2,6 +2,9 @@
 //! stop/cancel planning.
 
 use super::*;
+use steve_store::node_commands::dispatch;
+use steve_store::node_sessions::planning;
+use steve_store::node_turns::planning as turns;
 
 /// What a plan did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,29 +60,26 @@ impl NodeRuntime {
             // a released session takes the lead too: once something is queued it opens again
             let released = self.may_plan()
                 && !self.is_holding()
-                && self.phase_in(session)?
+                && self
+                    .phase_in(session)?
                     .is_some_and(|(p, a)| p == "released" && a.is_none());
             let p = self.plan_state_in(tx, session)?;
             if !released && matches!(p, Planned::Busy | Planned::Held) {
                 return Ok((p, None));
             }
             if let Some((text, via)) = lead {
-                let (first, waiting): (Option<i64>, bool) = tx.query_row(
-                    "SELECT MIN(created), EXISTS(SELECT 1 FROM queued WHERE session_id=?1 AND text=?2) FROM queued WHERE session_id=?1",
-                    rusqlite::params![session, text],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )?;
+                let (first, waiting) = self
+                    .store
+                    .read(|r| planning::queue_head(r, session, text))?;
                 if !waiting {
-                    self.store.write(|w| queue_in(w, session, text, via, &[], first.map_or(now(), |t| t - 1)))?;
+                    self.store.write(|w| {
+                        queue_in(w, session, text, via, &[], first.map_or(now(), |t| t - 1))
+                    })?;
                 }
             }
             let p = self.plan_in(tx, session)?;
             let attempt = if p == Planned::Created {
-                tx.query_row(
-                    "SELECT active_attempt FROM runtime_sessions WHERE session_id=?",
-                    [session],
-                    |r| r.get(0),
-                )?
+                self.phase_in(session)?.and_then(|(_, active)| active)
             } else {
                 None
             };
@@ -93,13 +93,7 @@ impl NodeRuntime {
 
     /// Attempts `a` and `b` belong to the same turn (one is a gateway retry of the other).
     pub fn same_turn(&self, a: &str, b: &str) -> Result<bool, StoreError> {
-        self.store.reader(|c| {
-            Ok(c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM runtime_attempts x JOIN runtime_attempts y ON y.turn_id = x.turn_id WHERE x.attempt_id=?1 AND y.attempt_id=?2)",
-                [a, b],
-                |r| r.get(0),
-            )?)
-        })
+        self.store.read(|r| turns::same_turn(r, a, b))
     }
 
     /// [`Self::plan_state_in`], and a released session with messages waiting is opened again
@@ -107,12 +101,15 @@ impl NodeRuntime {
     fn state_in(&self, tx: &Tx, session: &str) -> Result<Planned, StoreError> {
         let p = self.plan_state_in(tx, session)?;
         if p == Planned::Busy {
-            let (phase, active, any): (String, Option<String>, bool) = tx.query_row(
-                "SELECT phase, active_attempt, EXISTS(SELECT 1 FROM queued WHERE session_id=?1) FROM runtime_sessions WHERE session_id=?1",
-                [session],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )?;
-            if phase == "released" && active.is_none() && any {
+            let open = self.store.read(|r| {
+                let phase = planning::required_phase(r, session)?;
+                Ok::<_, StoreError>(
+                    phase.name == "released"
+                        && phase.active_attempt.is_none()
+                        && planning::has_queued(r, session)?,
+                )
+            })?;
+            if open {
                 self.reopen_in(tx, session)?;
             }
         }
@@ -146,23 +143,15 @@ impl NodeRuntime {
         if self.store.read(|r| faulted(r, &self.node_id, session))? || self.is_held(session) {
             return Ok(Planned::Held);
         }
-        let (phase, active): (String, Option<String>) = tx.query_row(
-            "SELECT phase, active_attempt FROM runtime_sessions WHERE session_id=?",
-            [session],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        if phase != "ready" || active.is_some() {
+        let phase = self.store.read(|r| planning::required_phase(r, session))?;
+        if phase.name != "ready" || phase.active_attempt.is_some() {
             return Ok(Planned::Busy);
         }
         // a config change goes before the next turn, at this idle boundary
         if self.boundary_in(tx, session)? {
             return Ok(Planned::Busy);
         }
-        let any: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM queued WHERE session_id=?)",
-            [session],
-            |r| r.get(0),
-        )?;
+        let any = self.store.read(|r| planning::has_queued(r, session))?;
         Ok(if any {
             Planned::Created
         } else {
@@ -218,17 +207,18 @@ impl NodeRuntime {
     /// [`Self::plan_in`] while applying a Node fact: a turn that cannot be planned (a bad
     /// attachment, say) must not keep the fact from being applied. Its messages stay queued.
     pub(super) fn plan_after_in(&self, tx: &Tx, session: &str) -> Result<Planned, StoreError> {
-        tx.execute_batch("SAVEPOINT plan")?;
-        match self.plan_in(tx, session) {
-            Ok(p) => {
-                tx.execute_batch("RELEASE plan")?;
-                Ok(p)
-            }
-            Err(e) => {
+        let mark = self.staged_mark();
+        let mut plan_failed = false;
+        match tx.write(|_| {
+            self.plan_in(tx, session)
+                .inspect_err(|_| plan_failed = true)
+        }) {
+            Err(e) if plan_failed && !matches!(e, StoreError::Storage(_)) => {
+                self.unstage(mark);
                 tracing::error!("plan a turn of {session}: {e}");
-                tx.execute_batch("ROLLBACK TO plan; RELEASE plan")?;
                 Ok(Planned::Empty)
             }
+            result => result,
         }
     }
 
@@ -332,15 +322,10 @@ impl NodeRuntime {
         // (opening or loading the harness may take long, and a restart may leave the attempt
         // unknown before it starts); `starting` until the harness has a session of its own. A
         // retry of a turn already running stays running.
-        let (acp, status): (bool, Option<String>) = tx
-            .query_row(
-                "SELECT acp_session_id IS NOT NULL, status FROM sessions WHERE id=?",
-                [session],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?
-            .unwrap_or((false, None));
-        let starting = if acp || status.as_deref() == Some("running") {
+        let starting = if self
+            .store
+            .read(|r| planning::has_running_harness(r, session))?
+        {
             "running"
         } else {
             "starting"
@@ -389,35 +374,26 @@ impl NodeRuntime {
     ) -> Result<bool, StoreError> {
         self.running()?;
         let r = self.tx(|tx| {
-            let row: Option<(String, String, i64)> = match attempt {
-                Some(attempt) => tx
-                    .query_row(
-                        "SELECT a.attempt_id, a.operation_id, a.revision FROM runtime_sessions s JOIN runtime_attempts a ON a.attempt_id = s.active_attempt JOIN runtime_turns t ON t.turn_id = a.turn_id JOIN runtime_attempts asked ON asked.turn_id = a.turn_id WHERE s.session_id=?1 AND asked.attempt_id=?2 AND a.state<>'finished' AND t.state<>'finished'",
-                        [session, attempt],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                    )
-                    .optional()?,
+            let row = match attempt {
+                Some(attempt) => self
+                    .store
+                    .read(|r| turns::active_for(r, session, attempt))?,
                 None => None,
             };
-            let Some((attempt, target, rev)) = row else {
+            let Some(turns::ActiveAttempt {
+                id: attempt,
+                operation: target,
+                revision: rev,
+                state,
+            }) = row
+            else {
                 if !stop {
                     return Ok(false);
                 }
                 return Ok(self.recover_in(tx, session, None)?.unwrap_or(false));
             };
-            let state: String = tx.query_row(
-                "SELECT state FROM runtime_attempts WHERE attempt_id=?",
-                [&attempt],
-                |r| r.get(0),
-            )?;
             rt::cancel_attempt_in(tx, &attempt, rev, now())?;
-            let start: Option<(String, bool)> = tx
-                .query_row(
-                    "SELECT state, maybe_sent FROM node_commands WHERE operation_id=? AND method='start_turn'",
-                    [&target],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?;
+            let start = self.store.read(|r| dispatch::start_state(r, &target))?;
             match start {
                 // every send of it so far was refused before acceptance (or none was made): it
                 // provably never ran, so it is settled here and nothing is sent
@@ -440,7 +416,11 @@ impl NodeRuntime {
                 return Ok(r);
             }
             // what nobody can tell is running is given up, once the Node proves it stopped
-            let method = if state == "unknown" { "abandon" } else { "cancel" };
+            let method = if state == "unknown" {
+                "abandon"
+            } else {
+                "cancel"
+            };
             self.stop_command_in(tx, &attempt, &target, method)?;
             Ok(true)
         })?;
@@ -481,11 +461,9 @@ impl NodeRuntime {
         why: &str,
     ) -> Result<(), StoreError> {
         // one retired by a recover is over too, even before its own end came
-        let (n, live): (i64, bool) = tx.query_row(
-            &format!("SELECT COUNT(*), COALESCE(MAX((c.state NOT IN ('finished','rejected') OR json_extract(c.receipt,'$.success')=1) AND NOT {}), 0) FROM node_commands c WHERE c.method=? AND c.target_attempt=?", recover::RETIRED),
-            [method, attempt],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
+        let (n, live) = self
+            .store
+            .read(|r| dispatch::stop_commands(r, method, attempt))?;
         if live {
             return Ok(());
         }
@@ -569,11 +547,12 @@ impl NodeRuntime {
         attempt: &str,
         completion: &Completion,
     ) -> Result<(), StoreError> {
-        let (rev, turn): (i64, String) = tx.query_row(
-            "SELECT revision, turn_id FROM runtime_attempts WHERE attempt_id=?",
-            [attempt],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
+        let (rev, turn) = self.store.read(|r| {
+            let row = node_turns::attempt(r, attempt)?
+                .ok_or_else(|| StoreError::Rejected(format!("missing attempt {attempt}")))?;
+            let (turn, _) = node_turns::for_attempt(r, attempt)?;
+            Ok::<_, StoreError>((row.revision, turn))
+        })?;
         rt::attempt_cas_in(
             tx,
             attempt,
@@ -670,11 +649,7 @@ fn queue_in(
 }
 
 pub(super) fn startup_blocked_in(tx: &Tx, session: &str) -> Result<bool, StoreError> {
-    Ok(tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM session_stops WHERE session_id=? AND stop_reason=?)",
-        [session, steve_store::SESSION_START_FAILURE],
-        |r| r.get(0),
-    )?)
+    tx.write(|w| node_sessions::startup::active(w, session))
 }
 
 /// Messages said to a session while its turn runs, handed to that turn through a Steve tool call's
@@ -688,18 +663,8 @@ pub(crate) fn deliver_mid_turn(
     attempt: &str,
 ) -> Result<Vec<String>, StoreError> {
     store.transaction(|tx| {
-        /* the Hub's session of the Node's, while that attempt is the turn's running one */
-        let session: Option<String> = tx
-            .query_row(
-                "SELECT s.session_id FROM runtime_sessions s
-                   JOIN runtime_turns t ON t.session_id=s.session_id
-                   JOIN runtime_attempts a ON a.turn_id=t.turn_id
-                  WHERE s.node_session_id=?1 AND t.turn_id=?2 AND t.state<>'finished'
-                    AND t.active_attempt=?3 AND a.attempt_id=?3 AND a.cancel_requested=0",
-                rusqlite::params![node_session, turn, attempt],
-                |r| r.get(0),
-            )
-            .optional()?;
+        let session =
+            store.read(|r| turns::session_for_live_attempt(r, node_session, turn, attempt))?;
         let Some(session) = session else {
             return Ok(vec![]);
         };
@@ -711,25 +676,7 @@ pub(crate) fn deliver_mid_turn(
             event_in(tx, session, "user", ev)?;
         }
         if !xs.is_empty() {
-            tx.publish(steve_types::DomainEvent::from(
-                steve_types::WorkEvent::Session {
-                    ws: tx
-                        .query_row::<String, _, _>(
-                            "SELECT workspace_id FROM sessions WHERE id = ?",
-                            rusqlite::params![session],
-                            |r| r.get(0),
-                        )?
-                        .into(),
-                    id: {
-                        let value: String = session.into();
-                        steve_types::SessionId::from(value)
-                    },
-                    item_id: {
-                        let value: Option<Option<String>> = None;
-                        value.map(|value| value.map(Into::into))
-                    },
-                },
-            ));
+            tx.write(|w| node_sessions::changed_event(w, session))?;
         }
         Ok(xs.into_iter().map(|m| m.text).collect())
     })
@@ -759,14 +706,7 @@ fn message_event(text: &str, via: &str, files: &[FileRef]) -> Value {
 
 /// An attachment for the Node to fetch from the Hub by hash (none when the Hub has no such file).
 fn file_part(tx: &Tx, f: &FileRef) -> Result<Option<Part>, StoreError> {
-    let Some((sha, size, mime)) = tx
-        .query_row(
-            "SELECT sha256, size, mime FROM files WHERE id=?",
-            [&f.id],
-            |r| Ok::<(String, i64, String), _>((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?
-    else {
+    let Some((_, sha, _, mime, size)) = tx.write(|w| steve_store::file_row(w, &f.id))? else {
         return Ok(None);
     };
     Ok(Some(Part::File {
@@ -790,29 +730,22 @@ pub(super) fn cancelled_start_in(
     op: &str,
 ) -> Result<Option<(String, String)>, StoreError> {
     Ok(tx
-        .query_row(
-            "SELECT a.attempt_id, t.session_id FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE a.operation_id=? AND a.cancel_requested=1 AND a.state<>'finished'",
-            [op],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?)
+        .write(|w| node_turns::started_by(w, op))?
+        .filter(|a| a.cancelled && a.state != "finished")
+        .map(|a| (a.id, a.session)))
 }
 
 /// Manual pause gates new logical turns on the local coordinator. Capacity belongs to
 /// runtime::lease_command_in/session_room: counting active_attempt here would also count
 /// never-sent turns, hiding authoritative room waits and imposing a second limit.
 fn local_admission(tx: &Tx) -> Result<bool, StoreError> {
-    let status: Option<String> = tx
-        .query_row("SELECT status FROM devices WHERE id='hub'", [], |r| {
-            r.get(0)
-        })
-        .optional()?;
-    Ok(status.as_deref() != Some("暂停接活"))
+    tx.write(|w| planning::local_admits_work(w))
 }
 
 #[cfg(test)]
 mod admission_tests {
     use super::*;
+    use steve_store::testkit::hub::node_planning as fixture;
     struct NoDomain;
     impl NodeDomain for NoDomain {
         fn turn_ended(&self, _: &str, _: Option<&str>, _: &str, _: Option<String>) {}
@@ -860,11 +793,7 @@ mod admission_tests {
                 },
             )
             .unwrap();
-        store.transaction::<_, StoreError>(|tx| {
-            tx.execute_batch("INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('s1','default','fixture','.','idle',1,1);
-                INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES ('s1','local','{}','s1','r1','ready',1);")?;
-            Ok(())
-        }).unwrap();
+        fixture::session(&store, "s1", "ready", None).unwrap();
         let rt = NodeRuntime::new(
             store.clone(),
             steve_node_api::testkit::FakeNode::new("local"),
@@ -879,20 +808,10 @@ mod admission_tests {
             rt.flush_turn("s1", Some(("second", "user"))).unwrap().0,
             Planned::Held
         );
-        store
-            .reader::<_, StoreError>(|c| {
-                let n: i64 = c.query_row(
-                    "SELECT COUNT(*) FROM queued WHERE session_id='s1'",
-                    [],
-                    |r| r.get(0),
-                )?;
-                assert_eq!(n, 2);
-                let n: i64 =
-                    c.query_row("SELECT COUNT(*) FROM runtime_attempts", [], |r| r.get(0))?;
-                assert_eq!(n, 0);
-                Ok(())
-            })
-            .unwrap();
+        assert_eq!(
+            fixture::queue_and_attempt_count(&store, "s1").unwrap(),
+            (2, 0)
+        );
     }
     #[test]
     fn pause_preserves_reservations_without_a_duplicate_capacity_gate() {
@@ -908,20 +827,43 @@ mod admission_tests {
                 ..Default::default()
             })
             .unwrap();
-        store.transaction::<_, StoreError>(|tx| {
-            tx.execute_batch("INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('s1','default','fixture','.','running',1,1);
-                INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,active_attempt,updated) VALUES ('s1','local','{}','s1','r1','ready','already-running',1);
-                UPDATE devices SET max_sessions=1 WHERE id='hub';")?;
-            assert!(local_admission(tx)?, "capacity is enforced from command receipts, not active_attempt");
-            assert_eq!(rt::session_room(tx, "local")?.running, 0, "an unsent reservation is not running");
-            tx.execute("UPDATE devices SET max_sessions=2 WHERE id='hub'", [])?;
-            assert!(local_admission(tx)?);
-            tx.execute("UPDATE devices SET status='暂停接活' WHERE id='hub'", [])?;
-            assert!(!local_admission(tx)?);
-            let active: String = tx.query_row("SELECT active_attempt FROM runtime_sessions WHERE session_id='s1'", [], |r| r.get(0))?;
-            assert_eq!(active, "already-running");
-            Ok(())
-        }).unwrap();
+        fixture::session(&store, "s1", "ready", Some("already-running")).unwrap();
+        store
+            .devices()
+            .patch(
+                "hub",
+                &steve_store::DevicePatch {
+                    max_sessions: Some(1),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(store.read(|r| planning::local_admits_work(r)).unwrap());
+        assert_eq!(fixture::session_room(&store, "local").unwrap().running, 0);
+        store
+            .devices()
+            .patch(
+                "hub",
+                &steve_store::DevicePatch {
+                    max_sessions: Some(2),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(store.read(|r| planning::local_admits_work(r)).unwrap());
+        store
+            .devices()
+            .patch(
+                "hub",
+                &steve_store::DevicePatch {
+                    status: Some("暂停接活".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(!store.read(|r| planning::local_admits_work(r)).unwrap());
+        let phase = store.read(|r| planning::required_phase(r, "s1")).unwrap();
+        assert_eq!(phase.active_attempt.as_deref(), Some("already-running"));
     }
     #[test]
     fn manual_pause_does_not_count_unsent_reservations_as_capacity() {
@@ -949,24 +891,35 @@ mod admission_tests {
                     },
                 )
                 .unwrap();
-            store.transaction::<_,StoreError>(|tx| {
-                tx.execute("DELETE FROM runtime_sessions", [])?;
-                tx.execute("DELETE FROM sessions", [])?;
-                for i in 0..limit {
-                    assert!(local_admission(tx)?, "reservation {i} below {limit}");
-                    let sid=format!("s{i}");
-                    tx.execute("INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','fixture','.','running',1,1)",[&sid])?;
-                    tx.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,active_attempt,updated) VALUES (?,'local','{}',?,'r1','active',?,1)",[&sid,&sid,&format!("a{i}")])?;
-                }
-                assert!(local_admission(tx)?, "unsent attempts must reach the canonical command queue");
-                assert_eq!(rt::session_room(tx, "local")?.max, limit);
-                assert_eq!(rt::session_room(tx, "local")?.running, 0);
-                tx.execute("UPDATE devices SET max_sessions=1,status='暂停接活' WHERE id='hub'", [])?;
-                assert!(!local_admission(tx)?);
-                let active:i64=tx.query_row("SELECT COUNT(*) FROM runtime_sessions WHERE node_id='local' AND active_attempt IS NOT NULL",[],|r|r.get(0))?;
-                assert_eq!(active,limit,"lowering/pausing never releases or migrates accepted attempts");
-                Ok(())
-            }).unwrap();
+            fixture::clear_sessions(&store).unwrap();
+            for i in 0..limit {
+                assert!(
+                    store.read(|r| planning::local_admits_work(r)).unwrap(),
+                    "reservation {i} below {limit}"
+                );
+                fixture::session(&store, &format!("s{i}"), "active", Some(&format!("a{i}")))
+                    .unwrap();
+            }
+            assert!(
+                store.read(|r| planning::local_admits_work(r)).unwrap(),
+                "unsent attempts must reach the canonical command queue"
+            );
+            let room = fixture::session_room(&store, "local").unwrap();
+            assert_eq!(room.max, limit);
+            assert_eq!(room.running, 0);
+            store
+                .devices()
+                .patch(
+                    "hub",
+                    &steve_store::DevicePatch {
+                        max_sessions: Some(1),
+                        status: Some("暂停接活".into()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert!(!store.read(|r| planning::local_admits_work(r)).unwrap());
+            assert_eq!(fixture::reservations(&store, "local").unwrap(), limit);
         }
     }
 }

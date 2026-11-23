@@ -3,8 +3,8 @@
 use serde_json::{Value, json};
 use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc};
 use steve_hub::{api::AppState, bus::Bus, config::Config, deliveries::Service};
-use steve_store::testkit::hub::deliveries as fixture_db;
 use steve_store::Store;
+use steve_store::testkit::hub::deliveries as fixture_db;
 
 struct Env {
     _home: tempfile::TempDir,
@@ -135,11 +135,13 @@ async fn start(node: bool) -> Env {
         .next()
         .unwrap()
         .to_string();
-    store.write(|w| {
-        fixture_db::item(w, "default", "ST-1", 1)?;
-        steve_store::Workspaces(w).insert("foreign", "Foreign", 1)?;
-        fixture_db::item(w, "foreign", "OTHER-1", 1)
-    }).unwrap();
+    store
+        .write(|w| {
+            fixture_db::item(w, "default", "ST-1", 1)?;
+            steve_store::Workspaces(w).insert("foreign", "Foreign", 1)?;
+            fixture_db::item(w, "foreign", "OTHER-1", 1)
+        })
+        .unwrap();
     let cwd = cfg.scratch.join("ST-1");
     std::fs::create_dir_all(&cwd).unwrap();
     let session = store
@@ -200,10 +202,7 @@ async fn mcp_requires_a_node_and_retains_every_received_version() {
                 "{result}"
             );
             assert!(e.store.artifacts().list("ST-1").unwrap().is_empty());
-            let count: i64 = e
-                .store
-                .read(fixture_db::count)
-                .unwrap();
+            let count: i64 = e.store.read(fixture_db::count).unwrap();
             assert_eq!(count, 0);
             continue;
         }
@@ -347,7 +346,9 @@ async fn mcp_requires_a_node_and_retains_every_received_version() {
         // Opening a stable link from another selected workspace still checks membership in
         // the delivery workspace; explicit selectors never silently change workspace.
         let owner = e.store.access().owner().unwrap().unwrap();
-        e.store.write(|w| w.members().add("foreign", &owner.id, "owner", 1)).unwrap();
+        e.store
+            .write(|w| w.members().add("foreign", &owner.id, "owner", 1))
+            .unwrap();
         let cookies = e.switch_workspace("foreign").await;
         for tail in ["", "/raw", "/content/report.md"] {
             assert_eq!(
@@ -420,10 +421,12 @@ async fn artifact_contract_only_links_registered_urls_in_the_same_item_and_works
         .accept(&e.session, "Old", "old.md", b"old", None)
         .unwrap();
     let old_url = format!("{}/deliveries/{}", e.base, old.id);
-    e.store.write(|w| {
-        fixture_db::change_url(w, &old.id, &old_url)?;
-        fixture_db::item(w, "default", "ST-2", 2)
-    }).unwrap();
+    e.store
+        .write(|w| {
+            fixture_db::change_url(w, &old.id, &old_url)?;
+            fixture_db::item(w, "default", "ST-2", 2)
+        })
+        .unwrap();
     for (title, location) in [
         ("Registered", url.clone()),
         ("Old receipt", old_url),
@@ -519,7 +522,9 @@ async fn original_tool_page_url_binds_workspace_after_real_switch_and_still_chec
     assert_eq!(page.path(), format!("/deliveries/{id}"));
     assert_eq!(selector, "default");
     let owner = e.store.access().owner().unwrap().unwrap();
-    e.store.write(|w| w.members().add("foreign", &owner.id, "owner", 1)).unwrap();
+    e.store
+        .write(|w| w.members().add("foreign", &owner.id, "owner", 1))
+        .unwrap();
     let cookies = e.switch_workspace("foreign").await;
     let state: Value = e
         .request("GET", "/api/state", false)
@@ -659,10 +664,7 @@ async fn both_delivery_tools_reject_dependency_build_and_checkout_paths() {
             );
         }
     }
-    let count = e
-        .store
-        .read(fixture_db::count)
-        .unwrap();
+    let count = e.store.read(fixture_db::count).unwrap();
     assert_eq!(count, 0, "neither tool may publish rejected paths");
 }
 

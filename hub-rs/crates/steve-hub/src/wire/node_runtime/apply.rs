@@ -282,7 +282,7 @@ impl NodeRuntime {
                 }
                 // whether this view is from before the Hub's last open, before it is kept as seen
                 let stale =
-                    view.phase == SessionPhase::Released && self.stale_release_in(tx, &session)?;
+                    view.phase == SessionPhase::Released && self.stale_release_in(&session)?;
                 // the Node's revision of the session, its resume handle, and the views since the
                 // last open ([`Self::stale_release_in`])
                 let resume = view.resume.as_ref().map(|r| r.to_string());
@@ -638,12 +638,12 @@ impl NodeRuntime {
         let capacity = c.stop_reason == capacity_retry::UNAVAILABLE;
         let service = stream || capacity;
         let capacity_wait = if capacity {
-            self.capacity_wait_in(tx, turn, ordinal, c)?
+            self.capacity_wait_in(turn, ordinal, c)?
         } else {
             None
         };
         let retry = c.outcome == Outcome::Failed
-            && ((service && self.stream_retry_allowed_in(tx, session)?)
+            && ((service && self.stream_retry_allowed_in(session)?)
                 || (!service && c.transient && !c.acted))
             && !cancelled
             && self.workflow_blocker_in(tx, session)?.is_none()

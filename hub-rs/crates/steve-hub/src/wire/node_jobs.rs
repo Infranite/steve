@@ -22,6 +22,7 @@ use steve_core::gateway::{
     OnText, OneCall, OneModel, OneShotError, ThinkTools, Tried, split_static,
 };
 use steve_store::jobs::{self, AttemptState};
+use steve_store::node_jobs as job_commands;
 use tokio::sync::mpsc;
 
 use super::*;
@@ -115,27 +116,6 @@ fn ended(outcome: Outcome, stop_reason: &str, error: Option<ApiError>) -> Comple
         acted: false,
         job: None,
     }
-}
-
-/// The job attempt a command is about, if it is one.
-pub(super) fn job_attempt_of(tx: &Tx, op: &str) -> Result<Option<String>, StoreError> {
-    Ok(tx
-        .query_row(
-            "SELECT target_job_attempt FROM node_commands WHERE operation_id=?",
-            [op],
-            |r| r.get::<_, Option<String>>(0),
-        )
-        .optional()?
-        .flatten())
-}
-
-/// The `start_job` of an attempt: its operation, state and whether it may have left the Hub.
-fn start_of(tx: &Tx, attempt: &str) -> Result<(String, String, bool), StoreError> {
-    Ok(tx.query_row(
-        "SELECT c.operation_id, c.state, c.maybe_sent FROM runtime_job_attempts a JOIN node_commands c ON c.operation_id=a.operation_id WHERE a.attempt_id=?",
-        [attempt],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )?)
 }
 
 impl NodeRuntime {
@@ -421,11 +401,9 @@ impl NodeRuntime {
             c.error.as_ref().map(|e| e.safe_detail.as_str()),
             now(),
         )?;
-        let terminal: bool = tx.query_row(
-            "SELECT state IN ('finished','rejected') FROM node_commands WHERE operation_id=?",
-            [&row.operation],
-            |r| r.get(0),
-        )?;
+        let terminal = self
+            .store
+            .read(|r| job_commands::terminal(r, &row.operation))?;
         if !terminal {
             let receipt = Receipt {
                 operation: idv(row.operation.clone())?,
@@ -577,11 +555,9 @@ impl NodeRuntime {
         target: &str,
         method: &str,
     ) -> Result<(), StoreError> {
-        let (n, live): (i64, bool) = tx.query_row(
-            "SELECT COUNT(*), COALESCE(MAX(state NOT IN ('finished','rejected') OR json_extract(receipt,'$.success')=1), 0) FROM node_commands WHERE method=? AND target_job_attempt=?",
-            [method, attempt],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
+        let (n, live) = self
+            .store
+            .read(|r| job_commands::stop_commands(r, method, attempt))?;
         if live {
             return Ok(());
         }
@@ -635,7 +611,11 @@ impl NodeRuntime {
             return Ok(());
         }
         jobs::cancel_attempt_in(tx, attempt, now())?;
-        let (op, state, maybe_sent) = start_of(tx, attempt)?;
+        let job_commands::Start {
+            operation: op,
+            state,
+            maybe_sent,
+        } = self.store.read(|r| job_commands::start(r, attempt))?;
         match state.as_str() {
             "pending" if !maybe_sent => self.job_unsent_in(tx, attempt, &op),
             "pending" => Ok(()),
@@ -681,27 +661,22 @@ impl NodeRuntime {
                     continue;
                 }
                 n += 1;
-                self.store.stats().gateway_job_cancel(&a.id,"Hub restart: caller unavailable")?;
+                self.store
+                    .stats()
+                    .gateway_job_cancel(&a.id, "Hub restart: caller unavailable")?;
                 jobs::cancel_attempt_in(tx, &a.id, now())?;
-                let (op, state, _) = start_of(tx, &a.id)?;
+                let job_commands::Start {
+                    operation: op,
+                    state,
+                    ..
+                } = self.store.read(|r| job_commands::start(r, &a.id))?;
                 match state.as_str() {
                     "pending" => self.job_unsent_in(tx, &a.id, &op)?,
                     "finished" | "rejected" => {
                         // its end came on the receipt but not on the stream
-                        let receipt: Option<String> = tx.query_row(
-                            "SELECT json_extract(receipt,'$.payload') FROM node_commands WHERE operation_id=?",
-                            [&op],
-                            |r| r.get(0),
-                        )?;
-                        let end = receipt
-                            .and_then(|r| serde_json::from_str::<Receipt>(&r).ok())
-                            .and_then(|r| match r.state {
-                                Observed::Finished {
-                                    result: Some(OperationResult::Execution(c)),
-                                    ..
-                                } => Some(c),
-                                _ => None,
-                            })
+                        let end = self
+                            .store
+                            .read(|r| job_commands::completion(r, &op))?
                             .unwrap_or_else(|| ended(Outcome::Interrupted, "error", None));
                         self.job_ended_in(tx, &a.id, &end)?;
                     }
@@ -712,13 +687,9 @@ impl NodeRuntime {
                     _ => self.job_stop_in(tx, &a.id, &op, "cancel")?,
                 }
             }
-            let empty: Vec<String> = {
-                let mut st = tx.prepare(
-                    "SELECT j.job_id FROM runtime_jobs j WHERE j.node_id=? AND j.state='open' AND NOT EXISTS(SELECT 1 FROM runtime_job_attempts a WHERE a.job_id=j.job_id AND a.state<>'finished')",
-                )?;
-                st.query_map([self.node_id.as_str()], |r| r.get(0))?
-                    .collect::<Result<_, _>>()?
-            };
+            let empty = self
+                .store
+                .read(|r| job_commands::empty(r, self.node_id.as_str()))?;
             for j in empty {
                 jobs::finish_job_in(tx, &j, now())?;
             }
@@ -1288,16 +1259,7 @@ impl ResearchJobRun {
         }
         runtime
             .store
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT state='unknown' OR (state<>'finished' AND EXISTS(
-                   SELECT 1 FROM node_commands WHERE target_job_attempt=?1
-                   AND method IN ('cancel','abandon') AND state='rejected'
-                 )) FROM runtime_job_attempts WHERE attempt_id=?1",
-                    [&self.waiting.attempt],
-                    |r| r.get(0),
-                )?)
-            })
+            .read(|r| job_commands::unavailable(r, &self.waiting.attempt))
             .map_err(|e| e.to_string())
     }
 

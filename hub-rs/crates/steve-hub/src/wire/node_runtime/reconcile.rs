@@ -2,6 +2,8 @@
 //! released sessions, orphaned permission cards and stranger Node work (D7).
 
 use super::*;
+use steve_store::node_commands::{self, reconcile as commands};
+use steve_store::node_sessions::reconcile as sessions;
 
 impl NodeRuntime {
     // ── reconciling with the Node (Hub start) ──
@@ -42,26 +44,19 @@ impl NodeRuntime {
     /// their tool input is in memory only, so it is handed to YOLO again and the card looked at,
     /// as when it came. YOLO answers a card once at most (its answer command is keyed on it).
     pub(super) fn rearm_waiting(&self) {
-        let cards: Vec<(String, String, String)> = self
+        let cards = self
             .store
-            .reader(|c| {
-                let mut st = c.prepare(
-                    "SELECT p.decision_id, p.session_id, p.request FROM runtime_permissions p
-                       JOIN decisions d ON d.id=p.decision_id
-                      WHERE p.node_id=? AND p.state='waiting' AND d.status='open'",
-                )?;
-                let v = st
-                    .query_map([self.node_id.as_str()], |r| {
-                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-                    })?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok::<_, StoreError>(v)
-            })
+            .read(|r| sessions::waiting_cards(r, self.node_id.as_str()))
             .unwrap_or_else(|e| {
                 tracing::error!("node {}: waiting cards: {e}", self.node_id);
                 vec![]
             });
-        for (decision, session, request) in cards {
+        for sessions::WaitingCard {
+            id: decision,
+            session,
+            request,
+        } in cards
+        {
             let Ok(request) = serde_json::from_str::<PermissionRequest>(&request) else {
                 tracing::warn!(decision, "a waiting card's request does not read");
                 continue;
@@ -74,18 +69,9 @@ impl NodeRuntime {
     /// What waited while the Hub was not reconciled goes now: queued messages, and a desired
     /// config whose idle boundary (a turn's end applied during reconcile) found nothing planned.
     pub(super) fn plan_waiting(&self) {
-        let sessions: Vec<String> = self
+        let sessions = self
             .store
-            .reader(|c| {
-                let mut st = c.prepare(
-                    "SELECT s.session_id FROM runtime_sessions s WHERE s.node_id=?
-                       AND (s.desired_config IS NOT NULL OR EXISTS(SELECT 1 FROM queued q WHERE q.session_id=s.session_id))",
-                )?;
-                let v = st
-                    .query_map([self.node_id.as_str()], |r| r.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok::<_, StoreError>(v)
-            })
+            .read(|r| sessions::waiting_sessions(r, self.node_id.as_str()))
             .unwrap_or_default();
         for s in sessions {
             if let Err(e) = self.tx(|tx| self.plan_after_in(tx, &s)) {
@@ -119,16 +105,9 @@ impl NodeRuntime {
             );
         }
         // the sessions as the Node holds them (None: it has no such session)
-        let sessions: Vec<String> = self
+        let sessions = self
             .store
-            .reader(|c| {
-                let mut st =
-                    c.prepare("SELECT session_id FROM runtime_sessions WHERE node_id=?")?;
-                let v = st
-                    .query_map([self.node_id.as_str()], |r| r.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok::<_, StoreError>(v)
-            })
+            .read(|r| node_sessions::on_node(r, self.node_id.as_str()))
             .map_err(internal)?;
         let mut views: Vec<(String, Option<SessionView>)> = vec![];
         for s in sessions {
@@ -174,22 +153,17 @@ impl NodeRuntime {
         changed: &mut usize,
     ) -> Result<(), StoreError> {
         // 1. commands: what the Node says of each one in flight
-        let cmds: Vec<(String, String, String, String)> = {
-            let mut st = tx.prepare(
-                "SELECT operation_id, state, method, request FROM node_commands WHERE node_id=? AND state IN ('pending','accepted','active','unknown') ORDER BY created, rowid",
-            )?;
-            st.query_map([self.node_id.as_str()], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-        };
-        for (op, state, method, request) in cmds {
-            // the Node keeps the command's content hash as it computes it (method and
-            // business fields, not the id), not the Hub's hash of the stored envelope
-            let digest = serde_json::from_str::<Command<Value>>(&request)
-                .map_err(conflict)?
-                .digest(&method)
-                .map_err(conflict)?;
+        let cmds = self
+            .store
+            .read(|r| commands::unsettled(r, self.node_id.as_str()))?;
+        for commands::Command {
+            operation: op,
+            state,
+            method,
+            request,
+        } in cmds
+        {
+            let digest = request.digest(&method).map_err(conflict)?;
             let unknown = |reason: &str| -> Result<Receipt, StoreError> {
                 Ok(Receipt {
                     operation: idv(op.clone())?,
@@ -205,19 +179,15 @@ impl NodeRuntime {
                 None if state == "pending" => continue,
                 None => unknown("the Node has no record of it")?,
             };
-            let before: String = tx.query_row(
-                "SELECT state FROM node_commands WHERE operation_id=?",
-                [&op],
-                |r| r.get(0),
-            )?;
+            let before = self
+                .store
+                .read(|r| commands::required_state(r, self.node_id.as_str(), &op))?;
             if let Some(end) = self.receipt_in(tx, &receipt)? {
                 ends.push(end);
             }
-            let after: String = tx.query_row(
-                "SELECT state FROM node_commands WHERE operation_id=?",
-                [&op],
-                |r| r.get(0),
-            )?;
+            let after = self
+                .store
+                .read(|r| commands::required_state(r, self.node_id.as_str(), &op))?;
             if before != after {
                 *changed += 1;
             }
@@ -266,13 +236,9 @@ impl NodeRuntime {
         changed: &mut usize,
     ) -> Result<(), StoreError> {
         // 3. cards nobody waits for any more
-        let cards: Vec<(String, String)> = {
-            let mut st = tx.prepare(
-                "SELECT d.id, d.subject_id FROM decisions d JOIN runtime_sessions s ON s.session_id=d.session_id WHERE s.node_id=? AND d.subject_type='tool_call' AND d.status='open'",
-            )?;
-            st.query_map([self.node_id.as_str()], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<Result<Vec<_>, _>>()?
-        };
+        let cards = self
+            .store
+            .read(|r| sessions::open_permissions(r, self.node_id.as_str()))?;
         for (d, perm) in cards {
             if waiting.contains(&perm) {
                 continue;
@@ -310,12 +276,11 @@ impl NodeRuntime {
             if e.receipt.state.is_finished() {
                 continue;
             }
-            let known: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM node_commands WHERE operation_id=? AND node_id=?)",
-                rusqlite::params![op, self.node_id.as_str()],
-                |r| r.get(0),
-            )?;
-            if known {
+            if self
+                .store
+                .read(|r| node_commands::state(r, self.node_id.as_str(), op))?
+                .is_some()
+            {
                 continue;
             }
             strangers += 1;
@@ -327,11 +292,10 @@ impl NodeRuntime {
                 e.receipt.state.tag()
             );
             let Some(session) = session else { continue };
-            let ours: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=? AND node_id=?)",
-                rusqlite::params![session, self.node_id.as_str()],
-                |r| r.get(0),
-            )?;
+            let ours = self
+                .store
+                .read(|r| node_sessions::phase(r, &session, Some(self.node_id.as_str())))?
+                .is_some();
             if ours && held.insert(session.clone()) && !was.contains(&session) {
                 system_in(
                     tx,
@@ -354,32 +318,17 @@ impl NodeRuntime {
     /// A `Released` view from before the Hub's last open of the session (that open's own view
     /// has not come on the stream yet): it says nothing of the session open now. Asked before the
     /// view is kept as seen.
-    pub(super) fn stale_release_in(&self, tx: &Tx, session: &str) -> Result<bool, StoreError> {
-        let r: Option<String> = tx
-            .query_row(
-                "SELECT json_extract(receipt,'$.payload') FROM node_commands WHERE method='open_session' AND json_extract(request,'$.body.session')=? AND state='finished' AND json_extract(receipt,'$.success')=1 ORDER BY created DESC, rowid DESC LIMIT 1",
-                [session],
-                |r| r.get(0),
-            )
-            .optional()?
-            .flatten();
-        let Some(Ok(receipt)) = r.map(|r| serde_json::from_str::<Receipt>(&r)) else {
-            return Ok(false);
-        };
-        let Observed::Finished {
-            result: Some(OperationResult::Session(opened)),
-            ..
-        } = receipt.state
-        else {
-            return Ok(false);
-        };
-        // the views the stream showed since the last open ([`super::lifecycle`] resets them)
-        let seen: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM runtime_sessions s, json_each(s.node_views) v
-               WHERE s.session_id=?1 AND s.node_id=?2 AND v.value=?3)",
-            rusqlite::params![session, self.node_id.as_str(), opened.revision.as_str()],
-            |r| r.get(0),
-        )?;
-        Ok(!seen)
+    pub(super) fn stale_release_in(&self, session: &str) -> Result<bool, StoreError> {
+        self.store.read(|r| {
+            let Some(revision) = commands::latest_opened(r, session)? else {
+                return Ok(false);
+            };
+            Ok(!sessions::seen_view(
+                r,
+                self.node_id.as_str(),
+                session,
+                revision.as_str(),
+            )?)
+        })
     }
 }

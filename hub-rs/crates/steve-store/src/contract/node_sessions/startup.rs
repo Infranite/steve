@@ -127,3 +127,13 @@ pub fn hold_item(
     }));
     Ok(())
 }
+
+pub fn clear_stop(w: &mut W<'_>, session: &str) -> Result<()> {
+    w.exec(
+        Query::delete()
+            .from_table("session_stops")
+            .and_where(Expr::col("session_id").eq(session))
+            .and_where(Expr::col("stop_reason").eq(REASON)),
+    )?;
+    Ok(())
+}

@@ -250,3 +250,13 @@ pub fn recent_remote_vitals(c: &mut impl Read, since: i64) -> Result<Vec<RemoteV
         })
         .collect())
 }
+
+pub fn owner(r: &mut impl Read, node: &str) -> Result<Option<String>> {
+    r.one(
+        Query::select()
+            .column("owner")
+            .from("nodes")
+            .and_where(Expr::col("node_id").eq(node)),
+        |row| row.get(0),
+    )
+}

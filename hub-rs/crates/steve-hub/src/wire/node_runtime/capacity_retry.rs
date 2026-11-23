@@ -2,6 +2,7 @@
 //! ceiling survive restarts in the existing command ledger; the Node protocol stays unchanged.
 
 use super::*;
+use steve_store::node_turns::retry;
 
 pub(super) const UNAVAILABLE: &str = steve_core::runtime::MODEL_SERVICE_UNAVAILABLE;
 pub(super) const RETRIES: i64 = 3;
@@ -18,16 +19,14 @@ pub(super) struct CapacityWait {
 impl NodeRuntime {
     pub(super) fn capacity_wait_in(
         &self,
-        tx: &Tx,
         turn: &str,
         ordinal: i64,
         c: &Completion,
     ) -> Result<Option<CapacityWait>, StoreError> {
-        let first: i64 = tx.query_row(
-            "SELECT COALESCE(MIN(updated),?2) FROM runtime_attempts WHERE turn_id=?1 AND json_extract(completion,'$.stop_reason')=?3",
-            rusqlite::params![turn, self.clock.now(), UNAVAILABLE],
-            |r| r.get(0),
-        )?;
+        let first = self
+            .store
+            .read(|r| retry::first_failure(r, turn, UNAVAILABLE))?
+            .unwrap_or_else(|| self.clock.now());
         let at = self.clock.now();
         let deadline = first.saturating_add(MAX_WAIT_MS);
         if ordinal >= RETRIES || at >= deadline {
@@ -59,22 +58,23 @@ impl NodeRuntime {
     /// the advertised recovery lies beyond the ceiling, waiting ends here without an early call.
     /// A Hub restarted after the ceiling likewise raises the card instead of making a late call.
     pub(super) fn expire_capacity_waits_in(&self, tx: &Tx) -> Result<(), StoreError> {
-        let rows = tx.prepare(
-            "SELECT c.operation_id,a.attempt_id,t.session_id,json_extract(c.receipt,'$.provider_capacity.error'),
-                    json_extract(c.receipt,'$.provider_capacity.deadline'),json_extract(c.receipt,'$.provider_capacity.retries')
-             FROM node_commands c JOIN runtime_attempts a ON a.attempt_id=c.target_attempt
-             JOIN runtime_turns t ON t.turn_id=a.turn_id
-             WHERE c.node_id=?1 AND c.method='start_turn' AND c.state='pending' AND c.maybe_sent=0
-             AND a.state='planned' AND json_extract(c.receipt,'$.provider_capacity.deadline') IS NOT NULL",
-        )?.query_map([self.node_id.as_str()], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, i64>(4)?, r.get::<_, i64>(5)?))
-        })?.collect::<Result<Vec<_>, _>>()?;
-        for (op, attempt, session, error, deadline, retries) in rows {
+        let rows = self
+            .store
+            .read(|r| retry::unsent_capacity_waits(r, self.node_id.as_str()))?;
+        for retry::CapacityWait {
+            operation: op,
+            attempt,
+            session,
+            error,
+            deadline,
+            retries,
+        } in rows
+        {
             let expired = deadline <= self.clock.now();
             // A receipt/configuration may arrive while the provider wait is pending. Recheck
             // before every lease, rather than relying only on the boundary at failure time.
             if !expired
-                && self.stream_retry_allowed_in(tx, &session)?
+                && self.stream_retry_allowed_in(&session)?
                 && config::desired_in(&self.store, &session)?.is_none()
             {
                 continue;

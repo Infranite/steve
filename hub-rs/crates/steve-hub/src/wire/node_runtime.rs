@@ -85,7 +85,6 @@ pub(crate) use plan::{deliver_mid_turn, mid_turn_note};
 pub use receive::Sink;
 pub use workspace::WorkspaceFact;
 
-use lifecycle::last_release_in;
 use plan::cancelled_start_in;
 #[cfg(test)]
 use send::exhausted_delay;

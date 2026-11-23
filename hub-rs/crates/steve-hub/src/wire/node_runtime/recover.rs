@@ -19,6 +19,7 @@
 //! process group and it ends interrupted ([`NodeRuntime::recover_exec_in`]). It is never run again.
 
 use super::*;
+use steve_store::node_commands::{dispatch, recovery};
 
 /// The controls Stop may retire.
 const RECOVERABLE: [&str; 6] = [
@@ -32,9 +33,6 @@ const RECOVERABLE: [&str; 6] = [
 
 /// How many recovers one unknown `exec` gets at most.
 const EXEC_RECOVERS: i64 = 3;
-
-/// SQL, for a command aliased `c`: a recover of it finished with success.
-pub(super) const RETIRED: &str = "EXISTS(SELECT 1 FROM node_commands r WHERE r.method='recover' AND r.node_id=c.node_id AND json_extract(r.request,'$.body.target')=c.operation_id AND r.state='finished' AND json_extract(r.receipt,'$.success')=1)";
 
 /// How a control reads in a session note.
 pub(super) fn what(method: &str) -> String {
@@ -67,28 +65,24 @@ impl NodeRuntime {
         attempt: Option<&str>,
     ) -> Result<Option<bool>, StoreError> {
         // one recover at a time per session: a second Stop while it is on its way sends nothing
-        let live: Vec<String> = {
-            let mut st = tx.prepare(
-                "SELECT json_extract(request,'$.body.target') FROM node_commands WHERE node_id=? AND method='recover' AND state IN ('pending','accepted','active')",
-            )?;
-            st.query_map([self.node_id.as_str()], |r| r.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?
-        };
+        let live = self
+            .store
+            .read(|r| recovery::live_targets(r, self.node_id.as_str()))?;
         for target in live {
             if command_any_session_in(&self.store, &target)?.as_deref() == Some(session) {
                 return Ok(Some(true));
             }
         }
-        let candidates: Vec<(String, String, String, Option<String>)> = {
-            let mut st = tx.prepare(&format!(
-                "SELECT c.operation_id, c.method, c.request, c.target_attempt FROM node_commands c WHERE c.node_id=? AND c.state='unknown' AND NOT {RETIRED} ORDER BY c.created, c.rowid"
-            ))?;
-            st.query_map([self.node_id.as_str()], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-        };
-        for (target, method, request, target_attempt) in candidates {
+        let candidates = self
+            .store
+            .read(|r| recovery::unknown(r, self.node_id.as_str()))?;
+        for recovery::UnknownCommand {
+            id: target,
+            method,
+            request,
+            attempt: target_attempt,
+        } in candidates
+        {
             if !RECOVERABLE.contains(&method.as_str()) {
                 continue;
             }
@@ -123,11 +117,7 @@ impl NodeRuntime {
         target_attempt: Option<&str>,
         reason: &str,
     ) -> Result<(), StoreError> {
-        let n: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM node_commands WHERE method='recover' AND json_extract(request,'$.body.target')=?",
-            [target],
-            |r| r.get(0),
-        )?;
+        let n = self.store.read(|r| recovery::count(r, target))?;
         let mut op = format!("op_recover_{target}_{n}");
         if op.len() > 120 {
             op = derived_id("op_recover", &op);
@@ -173,22 +163,15 @@ impl NodeRuntime {
         op: &str,
         reason: &str,
     ) -> Result<bool, StoreError> {
-        let Some((method, request)) = tx
-            .query_row(
-                "SELECT method, request FROM node_commands WHERE operation_id=? AND node_id=? AND method IN ('exec','git_apply') AND state='unknown'",
-                [op, self.node_id.as_str()],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-            )
-            .optional()?
+        let Some((method, request)) = self
+            .store
+            .read(|r| recovery::unknown_exec(r, self.node_id.as_str(), op))?
         else {
             return Ok(false);
         };
-        let (live, all): (bool, i64) = tx.query_row(
-            "SELECT COALESCE(SUM(state IN ('pending','accepted','active','unknown') OR (state='finished' AND json_extract(receipt,'$.success')=1)), 0) > 0, COUNT(*)
-               FROM node_commands WHERE method='recover' AND node_id=? AND json_extract(request,'$.body.target')=?",
-            [self.node_id.as_str(), op],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
+        let (live, all) = self
+            .store
+            .read(|r| recovery::exec_recovers(r, self.node_id.as_str(), op))?;
         if live || all >= EXEC_RECOVERS {
             return Ok(false);
         }
@@ -201,23 +184,12 @@ impl NodeRuntime {
     /// recover's end ([`Self::recover_receipt_in`]). The Node may push that end before the Hub
     /// merged the recover's answer, so a recover still pending counts once it was (maybe) sent.
     /// Any other end is the target's own and is taken as usual (the recover then finds it stale).
-    pub(super) fn retiring_in(
-        &self,
-        tx: &Tx,
-        op: &str,
-        interrupted: bool,
-    ) -> Result<bool, StoreError> {
+    pub(super) fn retiring_in(&self, op: &str, interrupted: bool) -> Result<bool, StoreError> {
         if !interrupted {
             return Ok(false);
         }
-        Ok(tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM node_commands WHERE method='recover' AND node_id=? AND json_extract(request,'$.body.target')=?
-               AND (state IN ('accepted','active','unknown')
-                    OR (state='pending' AND (maybe_sent=1 OR lease_owner IS NOT NULL))
-                    OR (state='finished' AND json_extract(receipt,'$.success')=1)))",
-            [self.node_id.as_str(), op],
-            |r| r.get(0),
-        )?)
+        self.store
+            .read(|r| recovery::retiring(r, self.node_id.as_str(), op))
     }
 
     /// What the Node said about a recover (its answer or its stream).
@@ -246,11 +218,7 @@ impl NodeRuntime {
         op: &str,
         detail: &str,
     ) -> Result<(), StoreError> {
-        let target: String = tx.query_row(
-            "SELECT json_extract(request,'$.body.target') FROM node_commands WHERE operation_id=?",
-            [op],
-            |r| r.get(0),
-        )?;
+        let target = self.store.read(|r| recovery::target(r, op))?;
         let Some(session) = command_any_session_in(&self.store, &target)? else {
             return Ok(());
         };
@@ -272,22 +240,17 @@ impl NodeRuntime {
         session: &str,
         retired: &str,
     ) -> Result<bool, StoreError> {
-        let waiting: Vec<String> = tx
-            .prepare(
-                "SELECT operation_id FROM node_commands WHERE dependency_operation=? AND state='pending'",
-            )?
-            .query_map([retired], |r| r.get(0))?
-            .collect::<Result<_, _>>()?;
+        let waiting = self
+            .store
+            .read(|r| dispatch::pending_dependents(r, retired))?;
         if waiting.is_empty() {
             return Ok(false);
         }
         // the session stays releasing: this release's end is the session's ([`Self::released_in`])
         let op = self.release_command_in(tx, session)?;
         for w in &waiting {
-            tx.execute(
-                "UPDATE node_commands SET dependency_operation=?, updated=? WHERE operation_id=? AND state='pending'",
-                rusqlite::params![op, now(), w],
-            )?;
+            self.store
+                .write(|writer| dispatch::retarget_dependency(writer, w, &op, now()))?;
             if let Some(next) = command_any_session_in(&self.store, w)? {
                 system_in(
                     tx,
@@ -310,11 +273,7 @@ impl NodeRuntime {
 
     /// The Node retired the recover's target (interrupted, its effects kept as they are).
     fn retired_in(&self, tx: &Tx, op: &str) -> Result<(), StoreError> {
-        let (target, method): (String, String) = tx.query_row(
-            "SELECT c.operation_id, c.method FROM node_commands r JOIN node_commands c ON c.operation_id=json_extract(r.request,'$.body.target') WHERE r.operation_id=?",
-            [op],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
+        let (target, method) = self.store.read(|r| recovery::retired_target(r, op))?;
         let Some(session) = command_any_session_in(&self.store, &target)? else {
             return Ok(());
         };
@@ -393,11 +352,12 @@ impl NodeRuntime {
             &steve_i18n::stored(|| steve_i18n::t!("hub.node.recovered_released", what = what)),
         )?;
         // what waits for the session (queued, or a turn that waited for an open) opens it
-        let waiting: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM queued WHERE session_id=?1) OR EXISTS(SELECT 1 FROM runtime_turns WHERE session_id=?1 AND state<>'finished' AND active_attempt IS NULL)",
-            [session],
-            |r| r.get(0),
-        )?;
+        let waiting = self.store.read(|r| {
+            Ok::<_, StoreError>(
+                node_sessions::planning::has_queued(r, session)?
+                    || node_turns::waiting_to_open(r, session)?.is_some(),
+            )
+        })?;
         if waiting && !self.is_holding() {
             self.reopen_after_in(tx, session, None)?;
         }
@@ -413,13 +373,9 @@ impl NodeRuntime {
         what: &str,
     ) -> Result<(), StoreError> {
         // the open that waited on it never goes: it waits on a new prepare instead
-        let opens: Vec<String> = {
-            let mut st = tx.prepare(
-                "SELECT operation_id FROM node_commands WHERE dependency_operation=? AND state='pending'",
-            )?;
-            st.query_map([target], |r| r.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?
-        };
+        let opens = self
+            .store
+            .read(|r| dispatch::pending_dependents(r, target))?;
         for o in &opens {
             rt::merge_receipt_in(
                 tx,
@@ -436,11 +392,7 @@ impl NodeRuntime {
             &steve_i18n::stored(|| steve_i18n::t!("hub.node.recovered_prepare", what = what)),
         )?;
         if !opens.is_empty() {
-            let req: String = tx.query_row(
-                "SELECT request FROM node_commands WHERE operation_id=?",
-                [target],
-                |r| r.get(0),
-            )?;
+            let req = self.store.read(|r| recovery::request(r, target))?;
             let body = serde_json::from_str::<Command<Prepare>>(&req)?.body;
             let prep = uid(&format!("op_prep_{session}"));
             let (req, digest) = command(&prep, body)?;

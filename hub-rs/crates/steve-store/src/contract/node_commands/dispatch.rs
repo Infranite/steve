@@ -148,19 +148,23 @@ pub fn retarget_dependency(w: &mut W<'_>, op: &str, dependency: &str, at: i64) -
 pub fn refresh_envelope(
     w: &mut W<'_>,
     op: &str,
-    envelope: &steve_node_api::Command<serde_json::Value>,
+    envelope: &impl serde::Serialize,
     digest: &str,
     at: i64,
+    retry: Option<i64>,
 ) -> Result<()> {
-    w.exec(
-        Query::update()
-            .table(TABLE)
-            .value("request", serde_json::to_string(envelope)?)
-            .value("digest", digest)
-            .value("updated", at)
-            .and_where(Expr::col("operation_id").eq(op))
-            .and_where(Expr::col("state").eq("pending")),
-    )?;
+    let mut query = Query::update();
+    query
+        .table(TABLE)
+        .value("request", serde_json::to_string(envelope)?)
+        .value("digest", digest)
+        .value("updated", at)
+        .and_where(Expr::col("operation_id").eq(op))
+        .and_where(Expr::col("state").eq("pending"));
+    if let Some(retry) = retry {
+        query.value("retry_at", retry);
+    }
+    w.exec(&query)?;
     Ok(())
 }
 
@@ -307,5 +311,103 @@ pub fn schedule_turn_retry(
         );
     }
     w.exec(&q)?;
+    Ok(())
+}
+
+pub fn start_state(c: &mut impl Read, op: &str) -> Result<Option<(String, bool)>> {
+    c.one(
+        Query::select()
+            .columns(["state", "maybe_sent"])
+            .from(TABLE)
+            .and_where(Expr::col("operation_id").eq(op))
+            .and_where(Expr::col("method").eq("start_turn")),
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+}
+
+/// A successful recover retires a command even while its original outcome is unknown.
+pub(crate) fn retired(dialect: crate::contract::Dialect) -> Expr {
+    Expr::exists(
+        Query::select()
+            .column(("r", "operation_id"))
+            .from_as(TABLE, "r")
+            .and_where(Expr::col(("r", "method")).eq("recover"))
+            .and_where(Expr::col(("r", "node_id")).eq(Expr::col(("c", "node_id"))))
+            .and_where(
+                dialect
+                    .json_path(Expr::col(("r", "request")), "$.body.target")
+                    .eq(Expr::col(("c", "operation_id"))),
+            )
+            .and_where(Expr::col(("r", "state")).eq("finished"))
+            .and_where(
+                dialect
+                    .json_field(Expr::col(("r", "receipt")), "success")
+                    .eq(true),
+            )
+            .take(),
+    )
+}
+
+pub fn stop_commands(c: &mut impl Read, method: &str, attempt: &str) -> Result<(i64, bool)> {
+    let d = c.db().dialect();
+    let live = Expr::col(("c", "state"))
+        .is_not_in(["finished", "rejected"])
+        .or(d
+            .json_field(Expr::col(("c", "receipt")), "success")
+            .eq(true))
+        .and(retired(d).not());
+    Ok(c.one(
+        Query::select()
+            .expr(Func::count(Expr::col(("c", "operation_id"))))
+            .expr(Func::coalesce([
+                Func::max(live).into(),
+                Expr::Constant(false.into()),
+            ]))
+            .from_as(TABLE, "c")
+            .and_where(Expr::col(("c", "method")).eq(method))
+            .and_where(Expr::col(("c", "target_attempt")).eq(attempt)),
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?
+    .unwrap_or_default())
+}
+
+pub fn exists(c: &mut impl Read, op: &str) -> Result<bool> {
+    Ok(c.one(
+        Query::select()
+            .column("operation_id")
+            .from(TABLE)
+            .and_where(Expr::col("operation_id").eq(op)),
+        |_| Ok(()),
+    )?
+    .is_some())
+}
+
+const AFTER_TURN: i64 = i64::MAX;
+
+pub fn release(r: &mut impl Read, session: &str, after_turn: bool) -> Result<Option<String>> {
+    let d = r.db().dialect();
+    let mut q = Query::select();
+    q.column("operation_id")
+        .from(TABLE)
+        .and_where(Expr::col("method").eq("release_session"))
+        .and_where(d.json_field(Expr::col("request"), "body").eq(session))
+        .limit(1);
+    if after_turn {
+        q.and_where(Expr::col("state").eq("pending"))
+            .and_where(Expr::col("retry_at").eq(AFTER_TURN));
+    } else {
+        q.order_by("created", Order::Desc)
+            .order_by_expr(d.insertion_order(None), Order::Desc);
+    }
+    r.one(&q, |row| row.get(0))
+}
+
+pub fn defer_release(w: &mut W<'_>, op: &str) -> Result<()> {
+    w.exec(
+        Query::update()
+            .table(TABLE)
+            .value("retry_at", AFTER_TURN)
+            .and_where(Expr::col("operation_id").eq(op)),
+    )?;
     Ok(())
 }
