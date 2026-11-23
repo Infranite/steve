@@ -610,7 +610,7 @@ mod tests {
         let w = tempfile::tempdir().unwrap();
         let mut s = spec(
             w.path(),
-            "echo start; (sleep 30; echo late > late.txt) & sleep 30",
+            "/bin/sleep 30 & echo start; wait",
             vec![Injection {
                 var: "F".into(),
                 label: "k".into(),
@@ -622,11 +622,11 @@ mod tests {
         let out = run(home.path(), &s, &vals(&[("k", TOKEN)])).await;
         assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
         assert!(out.timed_out && out.exit_code.is_none() && out.code() == -1);
+        // The background child inherits stdout. Nonempty collected output proves EOF was
+        // observed before the drain deadline rather than the child surviving and holding it open.
         assert_eq!(out.stdout, "start\n");
         assert!(out.combined().contains("timed out after 0 s"));
         assert!(!secrets_root(home.path()).join(&s.use_id).exists());
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(!w.path().join("late.txt").exists());
     }
 
     #[tokio::test]

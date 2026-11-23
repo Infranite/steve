@@ -855,14 +855,10 @@ async fn a_research_job_answers_with_its_draft_tools_usage_and_report() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_write_is_a_violation_and_the_harness_dies_with_it() {
     let t = T::new();
-    let survived = t.root.join("survived");
     let n = t.node();
     let t0 = Instant::now();
-    let script = format!(
-        "q\n@msg m1\n@say 我先看看\n@asking edit keep.txt\n@sleep 3000\n@touch {}",
-        survived.display()
-    );
-    n.start_job(now_cmd("op_j", scripted("a_1", "m", &script)))
+    let script = "q\n@msg m1\n@say 我先看看\n@asking edit keep.txt\n@sleep 30000";
+    n.start_job(now_cmd("op_j", scripted("a_1", "m", script)))
         .await
         .unwrap();
     let c = t.end_of(&n, "op_j").await;
@@ -886,8 +882,9 @@ async fn a_write_is_a_violation_and_the_harness_dies_with_it() {
             text: "我先看看".into()
         }]
     );
-    tokio::time::sleep(Duration::from_secs(4)).await;
-    assert!(!survived.exists(), "the adapter's process group was killed");
+    // The adapter logs its PID before speaking ACP; the violation above proves it did start.
+    let pid: i32 = t.read("spawns").trim().parse().expect("adapter PID");
+    eventually_sync("the violating adapter to exit", || !alive(pid)).await;
     assert_eq!(
         std::fs::read_to_string(t.root.join("work/proj/keep.txt")).unwrap(),
         "orig"

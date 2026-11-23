@@ -708,28 +708,26 @@ sys.stdin.readline()
         // Both real output pipes stay open behind an explicit gate after the adapter exits.
         // Retain Conn too: the stdin writer must end without waiting for its senders to drop.
         conn.notify("release", json!({}));
-        tokio::time::timeout(Duration::from_secs(2), conn.wait_exit())
-            .await
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let tasks = tokio::runtime::Handle::current()
-            .metrics()
-            .num_alive_tasks();
-        let writer_closed = conn.out.is_closed();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            conn.wait_exit().await;
+            // wait_exit joins stdio; the supervisor itself may still be returning after the signal.
+            let metrics = tokio::runtime::Handle::current().metrics();
+            while metrics.num_alive_tasks() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("stdio and the supervisor must exit before releasing the pipe holder");
+        assert!(
+            conn.out.is_closed(),
+            "an exited adapter cannot accept writes"
+        );
         gate.write_all(&[1]).await.unwrap();
         // EOF proves that the holder closed its descriptors; no process is signalled by PID/name.
         tokio::time::timeout(Duration::from_secs(3), gate.read(&mut [0]))
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(
-            tasks, 0,
-            "stdio tasks must end before releasing the foreign pipe holder"
-        );
-        assert!(
-            writer_closed,
-            "an exited adapter cannot accept more queued writes"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
