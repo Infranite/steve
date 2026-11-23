@@ -179,9 +179,8 @@ fn addr_list(v: &Value) -> Vec<AddrOut> {
 
 /// The `LIKE` pattern of a search text (`%`, `_`, `\` escaped).
 
-fn current_org(store: &steve_store::Store, viewer: &Viewer, party: &str) -> Option<String> {
-    store
-        .read(|c| steve_modules::contacts::service::jobs_in(c, viewer, party))
+fn current_org(c: &mut impl steve_store::Read, viewer: &Viewer, party: &str) -> Option<String> {
+    steve_modules::contacts::service::jobs_in(c, viewer, party)
         .ok()?
         .into_iter()
         .find(|j| j.to.is_none())
@@ -190,17 +189,15 @@ fn current_org(store: &steve_store::Store, viewer: &Viewer, party: &str) -> Opti
 
 /// The brief of a thread the viewer sees.
 pub fn brief(
-    store: &steve_store::Store,
     c: &mut impl steve_store::Read,
     viewer: &Viewer,
     t: &ThreadRow,
 ) -> MailResult<ThreadBrief> {
-    brief_with(store, c, viewer, t, &mut HashMap::new())
+    brief_with(c, viewer, t, &mut HashMap::new())
 }
 
 /// [`brief`] with the mailbox addresses looked up so far (a list shares a few mailboxes).
 fn brief_with(
-    store: &steve_store::Store,
     c: &mut impl steve_store::Read,
     viewer: &Viewer,
     t: &ThreadRow,
@@ -229,7 +226,7 @@ fn brief_with(
         org: m
             .from_party_id
             .as_deref()
-            .and_then(|p| current_org(store, viewer, p)),
+            .and_then(|p| current_org(c, viewer, p)),
     });
     let signal = match msgs.iter().rev().find_map(|m| m.event_id.clone()) {
         Some(ev) => {
@@ -394,7 +391,7 @@ impl Mail {
             let mut addresses = HashMap::new();
             threads
                 .iter()
-                .map(|t| brief_with(&self.0.m.store, c, &viewer, t, &mut addresses))
+                .map(|t| brief_with(c, &viewer, t, &mut addresses))
                 .collect()
         })
     }
@@ -413,7 +410,7 @@ impl Mail {
                 .map(|d| draft_out(c, d))
                 .collect::<MailResult<Vec<_>>>()?;
             Ok(ThreadDetail {
-                brief: brief(&self.0.m.store, c, &viewer, &t)?,
+                brief: brief(c, &viewer, &t)?,
                 messages,
                 drafts,
                 items: linked_items(c, &t.workspace_id, &t.id)?,
@@ -449,7 +446,7 @@ impl Mail {
             }
             let t = repo::thread(tx, &t.id)?.ok_or_else(Self::nf_thread)?;
             crate::events::emit_thread(tx, &who.ws, &t.id);
-            Ok((brief(&self.0.m.store, tx, &viewer, &t)?, done))
+            Ok((brief(tx, &viewer, &t)?, done))
         })?;
         if done && tokio::runtime::Handle::try_current().is_ok() {
             let (m, ws, t) = (self.clone(), who.ws.clone(), b.id.clone());

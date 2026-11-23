@@ -20,6 +20,19 @@ impl<C: Read> ProjectRows<'_, C> {
             .map(|row| row.is_some())
     }
 
+    pub fn first_named(&mut self, ws: &str, name: &str) -> Result<Option<String>> {
+        self.0.one(
+            Query::select()
+                .from("projects")
+                .column("id")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("name").eq(name))
+                .and_where(Expr::col("archived").eq(0_i64))
+                .limit(1),
+            |row| row.get(0),
+        )
+    }
+
     pub fn local_path(&mut self, ws: &str, id: &str) -> Result<Option<String>> {
         self.0.one(
             Query::select()

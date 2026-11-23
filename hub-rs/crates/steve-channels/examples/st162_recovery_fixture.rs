@@ -182,7 +182,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     disclosure.bind(env.store().clone(), env.gateway.clone());
     env.store().transaction(|tx| ensure_seeds(tx, WS))?;
     env.store().write(|w| {
-        steve_store::accounts::Accounts::new(w).upsert_declared_system(
+        steve_store::Systems(w).upsert_declared(
             ext_ws::SYSTEM,
             ext_ws::SYSTEM_LABEL,
             "ext_ws",

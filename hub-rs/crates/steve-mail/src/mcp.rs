@@ -235,12 +235,8 @@ fn scope(mail: &Mail, cx: &McpCx) -> Result<(Viewer, Vec<ThreadRow>), String> {
     let m = mail.modules();
     let viewer = m
         .store
-        .read(|_| -> MailResult<Viewer> {
-            let v = mail
-                .0
-                .m
-                .store
-                .read(|c| steve_knowledge::context::item_viewer(c, &cx.ws, item))?;
+        .read(|c| -> MailResult<Viewer> {
+            let v = steve_knowledge::context::item_viewer(c, &cx.ws, item)?;
             if v.user.is_empty() && !cx.user.is_empty() {
                 return Ok(Viewer::bare(&cx.ws, &cx.user));
             }

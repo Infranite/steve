@@ -642,29 +642,31 @@ async fn history(
     Path(id): Path<String>,
     Query(q): Query<HistoryQuery>,
 ) -> ApiResult<Json<Value>> {
-    cx.store().read(|r| {
-        let dry = match q.dry.as_deref() {
-            None => None,
-            Some("1") => Some(true),
-            Some("0") => Some(false),
-            Some(_) => return Err(ApiError::invalid("dry")),
-        };
-        own(r, &who, &id)?;
-        let rows = runs::page_of(r, &who.ws, &id, None, q.limit.unwrap_or(20), dry)?;
-        Ok(Json(Value::Array(
-            rows.iter()
-                .map(|r| {
-                    let text = crate::runs::display_text(&r);
-                    json!({
-                        "id": r.id, "flow_id": r.flow_id, "flow_version": r.flow_version,
-                        "status": r.status, "dry_run": r.dry_run, "event_id": r.event_id,
-                        "outcome": r.outcome, "outcome_label": text.outcome_label,
-                        "error": text.error, "started": r.started, "ended": r.ended,
+    cx.store().read::<_, steve_store::StoreError>(|r| {
+        Ok(cx.read(|c| -> ApiResult<_> {
+            let dry = match q.dry.as_deref() {
+                None => None,
+                Some("1") => Some(true),
+                Some("0") => Some(false),
+                Some(_) => return Err(ApiError::invalid("dry")),
+            };
+            own(c, &who, &id)?;
+            let rows = runs::page_of(r, &who.ws, &id, None, q.limit.unwrap_or(20), dry)?;
+            Ok(Json(Value::Array(
+                rows.iter()
+                    .map(|r| {
+                        let text = crate::runs::display_text(&r);
+                        json!({
+                            "id": r.id, "flow_id": r.flow_id, "flow_version": r.flow_version,
+                            "status": r.status, "dry_run": r.dry_run, "event_id": r.event_id,
+                            "outcome": r.outcome, "outcome_label": text.outcome_label,
+                            "error": text.error, "started": r.started, "ended": r.ended,
+                        })
                     })
-                })
-                .collect(),
-        )))
-    })
+                    .collect(),
+            )))
+        }))
+    })?
 }
 
 /// A run of `who`'s workspace whose flow they may see: a run of another member's brief (live or deleted)

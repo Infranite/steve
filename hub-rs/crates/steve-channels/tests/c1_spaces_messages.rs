@@ -1068,7 +1068,7 @@ async fn a_sender_in_a_declared_system_lands_on_the_contact_holding_its_alias() 
     h.env
         .store()
         .write(|w| {
-            steve_store::accounts::Accounts::new(w).upsert_declared_system(
+            steve_store::Systems(w).upsert_declared(
                 "probe_internal",
                 "内部账号",
                 "probe",

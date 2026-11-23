@@ -7,7 +7,6 @@ pub(super) struct Personal {
     pub items: Vec<(String, String)>,
 }
 pub(super) fn personal(
-    db: &steve_store::Store,
     c: &mut impl steve_store::Read,
     viewer: &steve_store::base::Viewer,
     who: &Caller,
@@ -16,21 +15,20 @@ pub(super) fn personal(
 ) -> MailResult<Personal> {
     // layer 6: the sender's card, their open items, rules about them
     let mut anchors: Vec<ObjRef> = Vec::new();
-    let mut cards_text = db
-        .read(|c| steve_modules::contacts::profile::address(c, &who.ws, &who.me, true, None, None))?
-        .map(|name| format!("向收件人介绍用户时使用：{name}。不要使用内部昵称。"))
-        .unwrap_or_default();
+    let mut cards_text =
+        steve_modules::contacts::profile::address(c, &who.ws, &who.me, true, None, None)?
+            .map(|name| format!("向收件人介绍用户时使用：{name}。不要使用内部昵称。"))
+            .unwrap_or_default();
     let mut items = Vec::new();
     if let Some(p) = orig
         .from_party_id
         .as_ref()
         .filter(|_| orig.direction == "in")
     {
-        let cs = db.read(|c| cards::contact_cards(c, viewer, std::slice::from_ref(p)))?;
+        let cs = cards::contact_cards(c, viewer, std::slice::from_ref(p))?;
         cards_text.push_str(&format!("\n{}", cards::render(&cs)));
         anchors.push(ObjRef::new("party", p));
-        let links =
-            db.read(|c| people_repo::item_links_to(c, &who.ws, std::slice::from_ref(p), true))?;
+        let links = people_repo::item_links_to(c, &who.ws, std::slice::from_ref(p), true)?;
         let mut ids: Vec<String> = Vec::new();
         for l in links {
             if !ids.contains(&l.item_id) {
@@ -59,14 +57,14 @@ pub(super) struct Related {
     pub semantic_down: bool,
 }
 pub(super) fn related(
-    db: &steve_store::Store,
+    c: &mut steve_store::R<'_>,
     viewer: &steve_store::base::Viewer,
     store: &dyn steve_knowledge::port::KnowledgeStore,
     orig: &MessageRow,
     anchors: &[ObjRef],
     now: i64,
 ) -> MailResult<Related> {
-    let mut hits = db.read(|c| anchor_mems(c, viewer, anchors, ANCHOR_MEMS, now))?;
+    let mut hits = anchor_mems(c, viewer, anchors, ANCHOR_MEMS, now)?;
     // layer 7: retrieve(subject + new text, k=8, Draft)
     let query = steve_knowledge::context::query_text(&format!(
         "{} {}",
@@ -77,7 +75,7 @@ pub(super) fn related(
     rq.anchors = &anchors;
     rq.k = DRAFT_K;
     rq.now = now;
-    let found = db.read(|c| retrieve_all(c, &rq))?;
+    let found = retrieve_all(c, &rq)?;
     let semantic_down = found.semantic_down;
     for h in found.hits {
         if !hits

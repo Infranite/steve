@@ -253,7 +253,7 @@ pub fn audience_of(
 ) -> MailResult<(Option<String>, bool)> {
     use steve_store::{accounts, parties};
     let addr = addr.trim().to_lowercase();
-    let party = match accounts::by_email(c, ws, &addr)? {
+    let party = match steve_store::Accounts(c).by_handle(ws, "email", &addr)? {
         Some(id) => match accounts::Accounts::new(c).party(&id)? {
             Some(id) => parties::current_audience(c, &id)?,
             None => None,
@@ -572,7 +572,7 @@ impl Mail {
         let now = self.now();
         let done = self.0.m.store.write(|tx| -> MailResult<bool> {
             if repo::draft(tx, id)?.as_ref() != Some(&d)
-                || crate::disclosure::inputs(&self.0.m.store, tx, &d)? != inputs
+                || crate::disclosure::inputs(tx, &d)? != inputs
             {
                 return Ok(false);
             }

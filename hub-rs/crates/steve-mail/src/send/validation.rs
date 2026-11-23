@@ -20,7 +20,7 @@ impl Mail {
                 && decision.as_ref().is_some_and(|a| {
                     a.status == "resolved" && a.result == approval.result
                 })
-                && crate::disclosure::inputs(&self.0.m.store, tx, d)? == *inputs;
+                && crate::disclosure::inputs(tx, d)? == *inputs;
             if !unchanged {
                 self.blocked(tx, d, "disclosure_changed", json!({"checked_content_hash": checked_hash}))?;
                 return Ok(Some(SendOutcome::Blocked {

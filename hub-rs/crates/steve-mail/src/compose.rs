@@ -295,12 +295,12 @@ impl Mail {
                 anchors,
                 cards_text,
                 items,
-            } = gathering::personal(&self.0.m.store, c, &viewer, who, &orig, q)?;
+            } = gathering::personal(c, &viewer, who, &orig, q)?;
             let gathering::Related {
                 hits,
                 query,
                 semantic_down,
-            } = gathering::related(&self.0.m.store, &viewer, store, &orig, &anchors, now)?;
+            } = gathering::related(c, &viewer, store, &orig, &anchors, now)?;
             let context = gathering::thread(c, &thread.id)?;
             let mine = mailbox.my_addrs.clone();
             Ok(Gathered {

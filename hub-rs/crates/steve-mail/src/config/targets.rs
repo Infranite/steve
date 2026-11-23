@@ -13,7 +13,7 @@ use serde_json::{Map, Value, json};
 use steve_modules::changes::{Candidate, ChangeOp, DraftTarget, FieldSpec, OpCx, Plan, Prepared};
 use steve_modules::{ApiError, ApiResult, Registry};
 use steve_store::base::{Change, Viewer, show};
-use steve_store::now;
+use steve_store::{W, now};
 use steve_store::{accounts, connections, parties};
 
 use crate::repo::{self, AccountSettings};
@@ -324,7 +324,7 @@ fn check(c: &mut impl steve_store::Read, cx: &OpCx, op: &Value) -> ApiResult<()>
 }
 
 impl ChangeOp for PatchOp {
-    fn apply(&self, tx: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, tx: &mut W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
         let id = conn_of(op);
         check(tx, cx, op)?;
         let before = current(tx, id)?;
@@ -332,13 +332,7 @@ impl ChangeOp for PatchOp {
         Ok(settings::fields(&before))
     }
 
-    fn undo(
-        &self,
-        tx: &mut steve_store::W<'_>,
-        cx: &OpCx,
-        op: &Value,
-        before: &Value,
-    ) -> ApiResult<()> {
+    fn undo(&self, tx: &mut W<'_>, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
         let id = conn_of(op);
         let cur = current(tx, id)?;
         let mut back = cur.clone();

@@ -10,8 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use steve_modules::accounts::identify::{Hints, identify};
-use steve_modules::contacts::repo as people;
+use steve_modules::accounts::identify::{Hints, identify_handle};
 use steve_store::{Store, outbox, uid};
 
 use async_trait::async_trait;
@@ -75,11 +74,15 @@ pub fn my_addresses(
     ws: &str,
     account: &str,
 ) -> MailResult<Vec<String>> {
-    use steve_store::accounts::{Accounts, email_handles};
+    use steve_store::accounts::Accounts;
     let Some(party) = Accounts::new(c).party(account)? else {
         return Ok(Vec::new());
     };
-    Ok(email_handles(c, ws, &party)?)
+    Ok(steve_store::Accounts(c)
+        .email_handles(ws, &party)?
+        .into_iter()
+        .map(|addr| addr.to_lowercase())
+        .collect())
 }
 
 /// `data/mail/<ws>/<id[4..6]>/<id>.eml`, relative to the Steve home.
@@ -162,7 +165,9 @@ fn lookup(
     addr: &str,
 ) -> MailResult<(Option<String>, Option<String>)> {
     use steve_store::{accounts, parties};
-    let Some(account) = accounts::by_email(c, ws, &addr.trim().to_lowercase())? else {
+    let Some(account) =
+        steve_store::Accounts(c).by_handle(ws, "email", &addr.trim().to_lowercase())?
+    else {
         return Ok((None, None));
     };
     let party = match accounts::Accounts::new(c).party(&account)? {
@@ -200,7 +205,6 @@ impl StoreSink<'_> {
                             &self.mailbox.ws,
                             Some(&self.mailbox.owner)
                         )?
-                        .tz
                         .name()
                     )
                     .expect("IANA zone")
@@ -208,8 +212,8 @@ impl StoreSink<'_> {
             )),
             ..Default::default()
         };
-        match identify(
-            &tx.legacy(),
+        match identify_handle(
+            tx,
             &self.mailbox.ws,
             &self.mailbox.owner,
             "mail",
@@ -518,20 +522,18 @@ impl StoreSink<'_> {
         let org = if domain.is_empty() {
             None
         } else {
-            self.store.read(|c| {
-                steve_store::Contacts::new(c)
-                    .domain_owner(&mb.ws, &domain)
-                    .map(|id| id.and_then(|o| people::get(c, &o).ok().flatten()))
-            })?
+            let mut contacts = steve_store::Contacts::new(c);
+            contacts
+                .domain_owner(&mb.ws, &domain)?
+                .and_then(|id| contacts.party(&id).ok().flatten())
         };
         let org_name = org
             .as_ref()
             .map(|o| o.name.clone())
             .or_else(|| p.signature_org.clone());
         let group_key = match &org {
-            Some(o) => self
-                .store
-                .read(|c| steve_store::Contacts::new(c).domains(&mb.ws, &o.id))?
+            Some(o) => steve_store::Contacts::new(c)
+                .domains(&mb.ws, &o.id)?
                 .into_iter()
                 .next()
                 .unwrap_or_else(|| domain.clone()),

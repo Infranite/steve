@@ -25,11 +25,7 @@ pub(crate) struct Inputs {
     draft_model: Option<String>,
 }
 
-pub(crate) fn inputs(
-    store: &steve_store::Store,
-    c: &mut impl steve_store::Read,
-    d: &DraftRow,
-) -> MailResult<Inputs> {
+pub(crate) fn inputs(c: &mut impl steve_store::Read, d: &DraftRow) -> MailResult<Inputs> {
     let entries = d
         .basis
         .as_ref()
@@ -37,7 +33,7 @@ pub(crate) fn inputs(
         .cloned()
         .unwrap_or_default();
     let (knowledge, complete) =
-        store.read(|c| steve_knowledge::retrieve::knowledge_again(c, &d.workspace_id, &entries))?;
+        steve_knowledge::retrieve::knowledge_again(c, &d.workspace_id, &entries)?;
     let mut draft_model = d
         .basis
         .as_ref()
@@ -109,7 +105,7 @@ pub(crate) fn basis(d: &DraftRow, check: &CheckResult) -> Value {
 
 impl Mail {
     pub(crate) async fn full_check(&self, d: &DraftRow) -> MailResult<(CheckResult, Inputs)> {
-        let inputs = self.0.m.store.read(|c| inputs(&self.0.m.store, c, d))?;
+        let inputs = self.0.m.store.read(|c| inputs(c, d))?;
         let cx = CheckCx {
             ws: d.workspace_id.clone(),
             actor: d.author.clone(),

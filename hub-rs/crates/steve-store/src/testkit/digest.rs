@@ -266,33 +266,111 @@ pub fn ts5_channels(store: &Store) -> Result<()> {
 }
 
 pub fn ts5_mail(store: &Store, at: i64) -> Result<()> {
-    store.transaction(|tx| {
-        tx.execute_batch("INSERT INTO connections(id,workspace_id,account_id,adapter,auth,created_by,created,updated) VALUES('ts5-mail-conn','default','ts5-bot-account','fixture','none','usr_dev',1,1);
-        INSERT INTO mail_threads(id,workspace_id,connection_id,thread_key,subject,last_at,created_by,created,updated) VALUES('ts5-mail','default','ts5-mail-conn','thread','TS5',1,'usr_dev',1,1);")?;
+    use crate::mail::{self, MessageRow, PartMeta, ThreadRow};
+    use crate::{ConnRow, Connections};
+
+    store.write(|w| {
+        let ws = "default";
+        let conn = "ts5-mail-conn";
+        let thread = "ts5-mail";
+        Connections(w).insert(&ConnRow {
+            id: conn.into(),
+            workspace_id: ws.into(),
+            account_id: "ts5-bot-account".into(),
+            adapter: "fixture".into(),
+            auth: "none".into(),
+            granted_scopes: vec![],
+            caps: vec![],
+            credential_item: None,
+            status: "ok".into(),
+            health: Default::default(),
+            config: serde_json::json!({}),
+            last_sync: None,
+            created_by: "usr_dev".into(),
+            revision: 1,
+            created: 1,
+            updated: 1,
+        })?;
+        mail::insert_thread(
+            w,
+            &ThreadRow {
+                id: thread.into(),
+                workspace_id: ws.into(),
+                connection_id: conn.into(),
+                thread_key: "thread".into(),
+                subject: "TS5".into(),
+                last_at: 1,
+                count: 0,
+                unread: 0,
+                participants: vec![],
+                state: "waiting".into(),
+                visibility: "private".into(),
+                created_by: "usr_dev".into(),
+            },
+            1,
+        )?;
         // Reverse insertion order verifies that equal-time cursors sort by id.
         for (id, name, bulk) in [
             ("mail-c", "  ", false),
             ("mail-b", "Bulk Sender", true),
             ("mail-a", "Alice", false),
         ] {
-            tx.execute(
-                "INSERT INTO mail_messages(id, workspace_id, connection_id, thread_id, ext_id, message_id,
-                    direction, from_addr, from_name, subject, snippet, date, size, has_attachments, bulk, body_text, status, created)
-                 VALUES (?1, 'default', 'ts5-mail-conn', 'ts5-mail', ?1, ?2, 'in', 'sender@example.invalid',
-                    ?3, 'TS5', 'body', ?4, 4, ?5, ?5, 'body', 'received', ?4)",
-                params![id, format!("<{id}>"), name, at, i64::from(bulk)],
+            mail::insert_message(
+                w,
+                &MessageRow {
+                    id: id.into(),
+                    workspace_id: ws.into(),
+                    connection_id: conn.into(),
+                    thread_id: thread.into(),
+                    ext_id: id.into(),
+                    message_id: Some(format!("<{id}>")),
+                    in_reply_to: None,
+                    refs: vec![],
+                    folders: vec![],
+                    flags: vec![],
+                    direction: "in".into(),
+                    from_addr: "sender@example.invalid".into(),
+                    from_name: name.into(),
+                    from_account_id: None,
+                    from_party_id: None,
+                    reply_to: None,
+                    to_addrs: serde_json::json!([]),
+                    cc_addrs: serde_json::json!([]),
+                    subject: "TS5".into(),
+                    snippet: "body".into(),
+                    date: at,
+                    size: 4,
+                    has_attachments: bulk,
+                    bulk,
+                    body_text: Some("body".into()),
+                    body_new: None,
+                    has_html: false,
+                    raw_path: None,
+                    purged: None,
+                    event_id: None,
+                    status: "received".into(),
+                    created: at,
+                },
             )?;
-            digest::sync_message(tx, Source::MailMessage, id, None)?;
         }
         for (name, part, mime, inline) in [
             ("file", "2", "application/pdf", false),
             ("inline", "1", "image/png", true),
             ("image", "3", "image/png", false),
         ] {
-            tx.execute(
-                "INSERT INTO mail_attachments(id, workspace_id, message_id, part, name, mime, size, inline, created)
-                 VALUES (?1, 'default', 'mail-b', ?2, ?3, ?4, 7, ?5, ?6)",
-                params![crate::uid("mla"), part, format!("{name}.bin"), mime, i64::from(inline), at],
+            mail::insert_attachment(
+                w,
+                ws,
+                "mail-b",
+                &PartMeta {
+                    part: part.into(),
+                    name: format!("{name}.bin"),
+                    mime: mime.into(),
+                    size: 7,
+                    content_id: None,
+                    inline,
+                },
+                at,
             )?;
         }
         Ok(())

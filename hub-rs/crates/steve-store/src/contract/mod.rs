@@ -207,7 +207,8 @@ impl Store {
     }
 
     /// One read-only snapshot on a pooled connection; never waits for the writer. Inside a write
-    /// on this thread it reads that write (and sees what it wrote so far).
+    /// on this thread it reads that write (and sees what it wrote so far). A nested read reuses
+    /// the outer snapshot.
     pub fn read<T, E: From<StoreError>>(
         &self,
         f: impl FnOnce(&mut R<'_>) -> Result<T, E>,
@@ -220,25 +221,14 @@ impl Store {
                 db: &mut Sqlite(&c),
             });
         }
-        let c = Rc::new(
-            self.inner
-                .readers
-                .get()
-                .map_err(|e| StoreError::Storage(e.to_string()))?,
-        );
+        let c = Rc::new(self.inner.readers.get().map_err(StoreError::from)?);
         crate::instrumentation::store_acquired();
-        let mut db = Sqlite(&c);
-        db.begin_read()?;
-        // a pooled connection goes back without its snapshot, however `f` ended (even a panic)
-        let _end = EndRead(&c);
-        let id = Arc::as_ptr(&self.inner) as usize;
-        READ_SNAPSHOTS.with_borrow_mut(|snapshots| snapshots.push((id, Rc::clone(&c))));
-        let _snapshot = ReadSnapshot(id);
-        let out = f(&mut R { db: &mut db });
-        let end = db.batch("COMMIT");
-        let v = out?;
-        end?;
-        Ok(v)
+        read_snapshot(&c, |r| {
+            let id = Arc::as_ptr(&self.inner) as usize;
+            READ_SNAPSHOTS.with_borrow_mut(|snapshots| snapshots.push((id, Rc::clone(&c))));
+            let _snapshot = ReadSnapshot(id);
+            f(r)
+        })
     }
 
     /// Read a database file without starting the Hub or modifying the file.
@@ -252,7 +242,10 @@ impl Store {
     }
 }
 
-fn read_snapshot<T>(c: &Connection, f: impl FnOnce(&mut R<'_>) -> Result<T>) -> Result<T> {
+fn read_snapshot<T, E: From<StoreError>>(
+    c: &Connection,
+    f: impl FnOnce(&mut R<'_>) -> Result<T, E>,
+) -> Result<T, E> {
     let mut db = Sqlite(c);
     db.begin_read()?;
     let _end = EndRead(c);

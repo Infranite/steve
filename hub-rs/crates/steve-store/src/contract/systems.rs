@@ -218,7 +218,7 @@ impl Systems<'_, W<'_>> {
         Ok(())
     }
 
-    pub fn upsert_declared(&mut self, id: &str, name: &str, ext: &str) -> Result<()> {
+    pub fn upsert_declared(&mut self, id: &str, name: &str, ext: &str, at: i64) -> Result<()> {
         let plug = Expr::col(("systems", "plugin"));
         let changed = plug
             .clone()
@@ -237,7 +237,7 @@ impl Systems<'_, W<'_>> {
                     id.into(),
                     format!("ext:{ext}").into(),
                     json!({"normalize":"none"}).to_string().into(),
-                    now().into(),
+                    at.into(),
                 ])
                 .on_conflict(
                     OnConflict::columns(["workspace_id", "id"])

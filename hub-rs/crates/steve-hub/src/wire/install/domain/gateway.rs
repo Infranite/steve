@@ -8,7 +8,7 @@ install! { install(reg, cx) [declared, disclosure, kb_hooks, out_link, registry,
         store
             .write(|w| -> steve_store::Result<()> {
                 for (id, label, ext) in &declared.systems {
-                    steve_store::accounts::Accounts::new(w).upsert_declared_system(id, label, ext, steve_store::now())?;
+                    steve_store::Systems(w).upsert_declared(id, label, ext, steve_store::now())?;
                 }
                 Ok(())
             })

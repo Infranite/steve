@@ -22,10 +22,7 @@ use steve_modules::accounts::connections::{
 use steve_modules::testkit::{ME, TestEnv, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
-use steve_store::{
-    accounts::Accounts,
-    calendar::{CalRow, CalendarRepo, EventRow},
-};
+use steve_store::calendar::{CalRow, CalendarRepo, EventRow};
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
@@ -197,7 +194,7 @@ pub async fn setup() -> H {
                 ("cal_demo", "Demo"),
                 ("cal_script", "Scripted"),
             ] {
-                Accounts::new(w).upsert_declared_system(
+                steve_store::Systems(w).upsert_declared(
                     id,
                     label,
                     "calendar",

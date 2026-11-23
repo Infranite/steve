@@ -348,10 +348,12 @@ async fn edit_draft(
     c.done()?;
     // the working copy may be half-edited: it only has to be a graph
     let working = Graph::from_value(&b.graph).map_err(ApiError::rule)?;
-    let (f, bots) = cx.store().read(|r| -> ApiResult<_> {
-        let f = flows::own(r, &who.ws, &id)?;
-        Ok((f, bots_text(r, &who.ws)?))
-    })?;
+    let (f, bots) = cx.store().read::<_, steve_store::StoreError>(|r| {
+        Ok(cx.read(|c| -> ApiResult<_> {
+            let f = flows::own(c, &who.ws, &id)?;
+            Ok((f, bots_text(r, &who.ws)?))
+        }))
+    })??;
     if f.kind == "schedule" {
         return Err(ApiError::rule(steve_i18n::t!(
             "flow.draft.schedule_elsewhere"

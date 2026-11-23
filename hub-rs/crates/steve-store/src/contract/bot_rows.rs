@@ -89,6 +89,10 @@ impl<C: Read> BotRows<'_, C> {
         if self.local(ws, name)?.is_some() {
             return Ok(Some(name.to_owned()));
         }
+        self.first_named(ws, name)
+    }
+
+    pub fn first_named(&mut self, ws: &str, name: &str) -> Result<Option<String>> {
         self.0.one(
             local(ws)
                 .column(("b", "id"))

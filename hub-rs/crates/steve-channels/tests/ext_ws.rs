@@ -84,7 +84,7 @@ async fn setup_with_ids(ids: steve_channels::ext::MessageIds) -> H {
         .expect("account seeds");
     env.store()
         .write(|w| {
-            steve_store::accounts::Accounts::new(w).upsert_declared_system(
+            steve_store::Systems(w).upsert_declared(
                 ext_ws::SYSTEM,
                 ext_ws::SYSTEM_LABEL,
                 "ext_ws",
