@@ -1,6 +1,4 @@
 {
-  "core.bot_team.no_members": "This Bot Team has no enabled members.",
-  "core.bot_team.outside_team": "This Bot is not an enabled member of the selected Team.",
   "core.bot.invalid_selection": "Invalid Bot selection: %{field}",
   "core.bot.unsupported_selection": "%{harness} does not offer %{field} `%{value}`. Choose a reported value or reset it to default (null).",
   "core.item.closed": "This item has ended; start a new cycle if you need to",

@@ -529,14 +529,6 @@ fn pick_bot_info(
     Ok(bots.reply_profile(ws, None)?)
 }
 
-pub(crate) fn pick_bot(
-    r: &mut impl steve_store::Read,
-    ws: &str,
-    ids: &[Option<&str>],
-) -> ChannelResult<Option<String>> {
-    Ok(pick_bot_info(r, ws, ids)?.map(|bot| bot.id))
-}
-
 /// The personal account's user, or the person who connected the bot.
 pub fn owner_user(r: &mut impl steve_store::Read, ws: &str, conn: &str) -> ChannelResult<String> {
     let conn =

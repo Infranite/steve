@@ -381,6 +381,7 @@ impl Hub {
 
 fn bot() -> steve_core::repo::Bot {
     steve_core::repo::Bot {
+        specialties: vec![],
         id: "steve".into(),
         workspace_id: "default".into(),
         name: "Steve".into(),

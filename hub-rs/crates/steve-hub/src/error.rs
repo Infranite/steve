@@ -22,6 +22,11 @@ pub enum ApiError {
     Invalid(Vec<String>),
     #[error(transparent)]
     Contract(#[from] steve_types::Error),
+    #[error("{}", crate::wire::bot_dispatch::text(.blocked.reason))]
+    Placement {
+        blocked: steve_types::PlacementBlocked,
+        proposal: Option<steve_types::BotProposal>,
+    },
     /// `{"error": msg}` with a status (explicit `c.json({error}, n)`, `own()` 404s, thrown errors as 500).
     #[error("{1}")]
     Json(u16, String),
@@ -92,6 +97,27 @@ impl IntoResponse for ApiError {
         match self {
             ApiError::Contract(e) => {
                 (status(e.code.http_status()), axum::Json(e.to_http())).into_response()
+            }
+            ApiError::Placement {
+                ref blocked,
+                ref proposal,
+            } => {
+                #[derive(serde::Serialize)]
+                struct Body<'a> {
+                    error: String,
+                    placement: &'a steve_types::PlacementBlocked,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    proposal: Option<&'a steve_types::BotProposal>,
+                }
+                (
+                    StatusCode::CONFLICT,
+                    axum::Json(Body {
+                        error: self.to_string(),
+                        placement: blocked,
+                        proposal: proposal.as_ref(),
+                    }),
+                )
+                    .into_response()
             }
             ApiError::Invalid(_) => json_response(400, &json!({ "error": self.to_string() })),
             ApiError::Json(code, msg) => json_response(code, &json!({ "error": msg })),

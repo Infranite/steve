@@ -1,4 +1,8 @@
 {
+  "hub.dispatch.proposal_missing": "找不到此 Bot 提案。",
+  "hub.dispatch.proposal_stale": "Bot 提案或 Team 已变更，请重新查看提案。",
+  "hub.dispatch.no_candidates": "所选范围内没有可承接此请求的已启用 Bot。",
+  "hub.dispatch.specialty": "这个 Bot 缺少必需的专长。",
   "hub.dispatch.not_found": "当前工作空间没有这个 Bot 或 Bot Team。",
   "hub.dispatch.not_candidate": "只能新绑定有当前兼容报告的 Node。",
   "hub.dispatch.not_bound": "Team 只能从该 Bot 已绑定的 Node 中收窄范围。",

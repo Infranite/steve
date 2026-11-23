@@ -56,17 +56,11 @@ pub(crate) fn card(r: &Route, d: &Decision, item: Option<&Item>) -> (String, Val
             .project
             .clone()
             .or_else(|| item.and_then(|i| i.project_id.clone()));
-        let bot = Some(r.bot.clone())
-            .filter(|b| b != "steve" || r.bot_from_project)
-            .or_else(|| {
-                item.filter(|i| i.project_id == project)
-                    .and_then(|i| i.bot_id.clone())
-            });
         if item.is_some_and(|i| i.is_finished()) {
             return closed_card(
                 &name,
                 json!({"id": "new", "label": "单独建项", "title": title, "goal": goal,
-                "project": project, "bot": bot, "tags": r.tag_ids}),
+                "project": project, "tags": r.tag_ids}),
             );
         }
         return (
@@ -76,7 +70,7 @@ pub(crate) fn card(r: &Route, d: &Decision, item: Option<&Item>) -> (String, Val
                 "choices": [
                     {"id": "item", "label": format!("追加到 {id}"), "item": id, "recommended": true},
                     {"id": "new", "label": "单独建项", "title": title, "goal": goal,
-                     "project": project, "bot": bot, "tags": r.tag_ids},
+                     "project": project, "tags": r.tag_ids},
                 ],
                 "state": "open",
             }),
@@ -94,7 +88,7 @@ pub(crate) fn card(r: &Route, d: &Decision, item: Option<&Item>) -> (String, Val
             "choices": [
                 {"id": "here", "label": "在这里出方案"},
                 {"id": "item", "label": format!("建成事项：{}", r.title), "title": r.title, "goal": r.goal,
-                 "project": r.project, "bot": r.bot, "tags": r.tag_ids},
+                 "project": r.project, "tags": r.tag_ids},
             ],
             "state": "open",
         }),
@@ -338,7 +332,7 @@ impl Core {
             origin: &origin,
             title: s("title").unwrap_or_else(|| crate::util::js_head(&om.text, 24).into()),
             goal: s("goal").unwrap_or_else(|| om.text.clone()),
-            bot: s("bot"),
+            bot: self.named_bot(ws, &om.text)?.map(|b| b.id),
             project: s("project"),
             tags: pick["tags"]
                 .as_array()

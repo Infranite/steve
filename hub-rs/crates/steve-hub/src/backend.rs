@@ -590,6 +590,8 @@ pub struct CreateItem {
     pub title: String,
     pub bot: Option<String>,
     pub team: Option<String>,
+    pub node: Option<String>,
+    pub required_specialties: Vec<String>,
     pub deps: Vec<String>,
     /// `None` → the bot's default project; `Some(None)` → explicitly no project.
     pub project: Option<Option<String>>,
@@ -615,7 +617,6 @@ pub struct NewTag {
 pub struct Route {
     pub kind: String,
     pub title: String,
-    pub bot: String,
     pub project: Option<String>,
     pub tag_ids: Vec<String>,
     pub new_tags: Vec<NewTag>,
@@ -627,6 +628,31 @@ pub struct Route {
 pub enum Tier {
     Fast,
     Smart,
+}
+
+#[derive(serde::Serialize)]
+pub struct BotNodeCandidates {
+    pub bindings: Vec<String>,
+    pub unavailable_bindings: usize,
+    pub candidates: Vec<BotNodeCandidate>,
+}
+
+#[derive(serde::Serialize)]
+pub struct BotNodeCandidate {
+    pub id: String,
+    pub name: Option<String>,
+    pub state: BotNodeState,
+    pub reason: Option<steve_types::PlacementRejection>,
+    pub checked_at: Option<i64>,
+    pub provider_verified: bool,
+}
+
+#[derive(PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BotNodeState {
+    Candidate,
+    Pending,
+    Unavailable,
 }
 
 /// Domain operations owned by steve-core (orchestrator, thread, changes, gateway, acp). Mutations take the
@@ -662,13 +688,22 @@ pub trait Domain: Send + Sync + 'static {
     fn spawn_background(&self) {}
 
     // ── items ──
-    async fn create_item(&self, p: CreateItem) -> BResult<Obj> {
-        todo_backend!("create_item")
+    async fn create_item(&self, p: CreateItem) -> Result<Obj, crate::error::ApiError> {
+        Err(BackendError::unimplemented("create_item").into())
+    }
+    async fn confirm_bot_proposal(
+        &self,
+        _ws: String,
+        _actor: String,
+        _id: String,
+        _edit: steve_types::ConfirmBotProposal,
+    ) -> Result<String, crate::error::ApiError> {
+        Err(BackendError::unimplemented("confirm_bot_proposal").into())
     }
     async fn route_for_team(&self, ws: &str, text: &str, _team: Option<&str>) -> BResult<Route> {
         self.route(ws, text).await
     }
-    async fn bot_nodes(&self, _ws: &str, _bot: &str) -> BResult<Value> {
+    async fn bot_nodes(&self, _ws: &str, _bot: &str) -> BResult<BotNodeCandidates> {
         todo_backend!("bot_nodes")
     }
     async fn route(&self, ws: &str, text: &str) -> BResult<Route> {

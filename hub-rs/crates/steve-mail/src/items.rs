@@ -32,8 +32,8 @@ pub struct ItemRequest {
     pub by: String,
     pub title: String,
     pub goal: String,
-    /// An existing bot of the workspace.
-    pub bot: String,
+    /// An explicit Bot. None asks the item dispatcher to choose.
+    pub bot: Option<String>,
     /// `mode: "propose"`: start with a 方案 decision instead of a session.
     pub propose: bool,
     /// `["邮件", "mail"]`.
@@ -181,21 +181,10 @@ impl Mail {
             if let Some(id) = thread_items(c, &who.ws, &t.id)?.into_iter().next() {
                 return Ok(Ok(id));
             }
-            let bot = match bot {
-                Some(b) => {
-                    steve_store::bots::bot(c, &who.ws, &b)?
-                        .ok_or_else(|| MailError::Api(ApiError::not_found("Bot")))?;
-                    b
-                }
-                None => match steve_store::bots::bot(c, &who.ws, "mail")? {
-                    Some(_) => "mail".to_string(),
-                    None => {
-                        steve_store::bots::workspace_main_bot(c, &who.ws)?.ok_or_else(|| {
-                            MailError::Api(ApiError::rule(steve_i18n::t!("mail.item.no_main_bot")))
-                        })?
-                    }
-                },
-            };
+            if let Some(id) = &bot {
+                steve_store::bots::bot(c, &who.ws, id)?
+                    .ok_or_else(|| MailError::Api(ApiError::not_found("Bot")))?;
+            }
             let orig = drafts::reply_target(c, &t.id)?;
             let subject = if t.subject.trim().is_empty() {
                 "邮件往来".to_string()

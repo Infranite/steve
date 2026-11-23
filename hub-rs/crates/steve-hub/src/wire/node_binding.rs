@@ -301,46 +301,6 @@ fn workspace_resource(
     Ok(format!("{base}:workspace:{}", digest_of(desired)?.as_str()))
 }
 
-/// The binding of a new session to the paired remote Node `node` (`STEVE_NODE_BIND`), or `None`
-/// when it must stay where it would go otherwise. A remote Node has none of the Hub's directories,
-/// so only an item without a project qualifies, in a fresh scratch workspace on that Node, and only
-/// while every earlier session of the item ran there too (its files are there, not on the Hub).
-/// The Node must be paired and active (a paused or revoked Node takes no new work), and take the
-/// workspace's work ([`remote_refusal`]: paired by its owner, who is its only member): the Node
-/// runs the session with its owner's own logins, unsandboxed, so it only ever runs its owner's work.
-/// `perm`: as for [`binding_for`].
-pub fn remote_binding_for(
-    store: &Store,
-    session: &str,
-    perm: Option<&str>,
-    node: &NodeId,
-) -> Option<Binding> {
-    // the Hub's directories are not planned there: the workspace is a fresh scratch one
-    let mut b = binding_for(store, session, perm, &|_| true)?;
-    let s = store.sessions().get(session).ok()??;
-    let item = store.items().get(s.item_id.as_deref()?).ok()??;
-    if item.project_id.is_some() {
-        return None;
-    }
-    let ok = store
-        .read(|r| {
-            let takes = node_takes(r, node.as_str(), &s.workspace_id)?;
-            let elsewhere = steve_store::node_sessions::placements::earlier_session_elsewhere(
-                r,
-                &item.id,
-                session,
-                node.as_str(),
-            )?;
-            Ok::<_, StoreError>(takes && !elsewhere)
-        })
-        .ok()?;
-    if !ok {
-        return None;
-    }
-    b.prepare = PrepareKind::Scratch;
-    Some(b)
-}
-
 /// The strict router already checked ownership, tag, project and item affinity, and checks
 /// them once more in the bind transaction. Remote projects are never mapped to scratch.
 pub(super) fn scoped_remote_plan(
@@ -611,38 +571,13 @@ mod remote_tests {
         let cwd = dir.path().join("scratch/i1");
         steve_store::testkit::hub::workspace_cases::seed_remote_item(&store, cwd.to_str().unwrap())
             .unwrap();
-        let a = NodeId::new("n_a").unwrap();
-        // the Hub's directory is not the Node's: a fresh scratch workspace there
-        let b = remote_binding_for(&store, "s1", None, &a).unwrap();
-        assert!(matches!(b.prepare, PrepareKind::Scratch));
-        assert!(matches!(
-            binding_for(&store, "s1", None, &|_| true).unwrap().prepare,
-            PrepareKind::Existing { .. }
-        ));
-        // a paused or unknown Node takes no new work
-        assert!(remote_binding_for(&store, "s1", None, &NodeId::new("n_p").unwrap()).is_none());
-        assert!(remote_binding_for(&store, "s1", None, &NodeId::new("n_none").unwrap()).is_none());
-        // a Node a plain member paired never gets the workspace's sessions
-        assert!(remote_binding_for(&store, "s1", None, &NodeId::new("n_m").unwrap()).is_none());
-        // an earlier session of the item on the Hub keeps the item's work there
-        steve_store::testkit::hub::mutations::seed_sessions(&store).unwrap();
-        assert!(remote_binding_for(&store, "s1", None, &a).is_none());
-        // unless it ran on that very Node
-        steve_store::testkit::hub::mutations::seed_runtime_sessions(&store).unwrap();
-        assert!(remote_binding_for(&store, "s1", None, &a).is_some());
-        // H1: another member in the workspace, and the run may be theirs: not on the owner's Node
-        steve_store::testkit::hub::mutations::seed_workspace_members(&store).unwrap();
-        assert!(remote_binding_for(&store, "s1", None, &a).is_none());
         let why = |n: &str| store.read(|c| remote_refusal(c, n, "default")).unwrap();
-        assert_eq!(why("n_a"), Some(RemoteRefusal::Shared));
+        assert_eq!(why("n_a"), None);
         assert_eq!(why("n_m"), Some(RemoteRefusal::NotOwner));
         assert_eq!(why("n_p"), Some(RemoteRefusal::Inactive));
         assert_eq!(why("n_none"), Some(RemoteRefusal::Inactive));
-        steve_store::testkit::hub::mutations::clear_workspace_members_user_id_m(&store).unwrap();
-        assert_eq!(why("n_a"), None);
-        // a project's directories are on the Hub
-        steve_store::testkit::hub::mutations::seed_projects_project_id_p1_id_i1(&store).unwrap();
-        assert!(remote_binding_for(&store, "s1", None, &a).is_none());
+        steve_store::testkit::hub::mutations::seed_workspace_members(&store).unwrap();
+        assert_eq!(why("n_a"), Some(RemoteRefusal::Shared));
     }
 }
 
@@ -776,21 +711,6 @@ mod bot_tests {
             mode("s5_0", harness_mode(None, Level::Full, false)),
             Some(PermissionMode::FullAccess)
         );
-    }
-
-    /// An `auto` Bot's session binds to a paired remote Node with its `auto` permissions; other
-    /// modes keep theirs.
-    #[test]
-    fn an_auto_bot_session_binds_to_a_remote_node_in_auto() {
-        let dir = tempfile::tempdir().unwrap();
-        let store =
-            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
-        store.ensure_workspace().unwrap();
-        steve_store::testkit::hub::mutations::seed_bots_for_an_auto_bot_session_binds_to_a_remote_node_in_auto(&store).unwrap();
-        let a = NodeId::new("n_a").unwrap();
-        assert!(remote_binding_for(&store, "s2", Some("default"), &a).is_some());
-        let b = remote_binding_for(&store, "s1", Some("auto"), &a).expect("an auto session binds");
-        assert_eq!(b.policy.permissions, PermissionMode::Auto);
     }
 }
 
@@ -933,6 +853,19 @@ mod host_tests {
         let store =
             Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
+        store
+            .bots()
+            .seed(
+                "steve",
+                true,
+                &steve_store::NewBot {
+                    name: "Steve".into(),
+                    harness: "claude-code".into(),
+                    ..Default::default()
+                },
+                steve_store::WS,
+            )
+            .unwrap();
         let on: Vars = Arc::new(|k| (k == "STEVE_NODE_MODE").then(|| "local".into()));
         let mut jobs = vec![];
         let super::super::NodeHost {
@@ -1184,12 +1117,20 @@ mod host_tests {
             assert!(!super::super::node_runtime::bound(&store, "work"));
             let error = routed
                 .prompt("work", "必须不能启动", "user", &[])
-                .unwrap_err()
-                .to_string();
+                .unwrap_err();
             if detached {
-                assert!(error.contains("已被替换"));
+                assert!(error.to_string().contains("已被替换"));
             } else {
-                assert!(error.contains("执行节点"), "{error}");
+                assert!(
+                    matches!(
+                        error,
+                        steve_core::CoreError::Placement(steve_types::PlacementBlocked {
+                            reason: steve_types::PlacementRejection::Offline,
+                            ..
+                        })
+                    ),
+                    "{error}"
+                );
             }
             assert_eq!(routed.flush("work", None), steve_core::Flushed::Held);
             assert!(!routed.is_busy("work"), "an unbound attempt can be retired");

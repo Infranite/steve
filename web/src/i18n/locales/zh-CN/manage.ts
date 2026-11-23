@@ -1,6 +1,10 @@
 /* zh-CN strings for the "manage" namespace: the source text, byte-identical to the UI. Conventions: web/src/i18n/index.ts */
 export default {
   dispatch: {
+    recover: { bots: "查看 Bot 和 Team 设置", devices: "检查执行 Node" },
+    requiredSpecialties: "必需专长",
+    specialtyPlaceholder: "可选，用逗号分隔",
+    proposal: { title: "Bot 提案", node: "执行节点 · {{node}}", team: "Team 成员关系 · {{team}}", confirm: "确认并创建" },
     "teams": "Bot Team",
     "defaultTeam": "工作空间默认 Team",
     "newTeam": "新建 Team",
@@ -33,7 +37,19 @@ export default {
       "explicit": "为此事项单次指定",
       "inherited": "继承自主事项"
     },
+    selection: {
+      explicit: "你指定了这个 Bot",
+      specialty: "匹配 Bot 专长",
+      description: "匹配 Bot 职责说明",
+      project_preference: "符合项目执行偏好",
+      stable_order: "按执行节点优先级和 Bot ID 选定",
+      steve_fallback: "其他路径受阻，由 Steve 承接",
+      existing_assignment: "使用事项已指派的 Bot",
+    },
     "reason": {
+      no_candidates: "所选范围内没有可承接此请求的已启用 Bot。",
+      specialty: "这个 Bot 缺少必需的专长。",
+
       "preferred": "选择允许范围内首个合格节点。",
       "fallback": "回退到允许范围内的备选节点。",
       "outside_team": "该 Bot 不在 Team 的启用成员中。",
@@ -274,6 +290,8 @@ export default {
     emptySub: "你手动加的偏好和规则会写在这里，开会话时带给它",
   },
   form: {
+    specialties: "专长",
+    specialtiesHint: "每行一个标签，最多 12 个，每个不超过 48 个字符。用于在合格的 Bot 中择优。",
     ask: "告诉 Steve「{{name}}」该怎么配，例如：改用 opus，做完自动验收，说话更简洁",
     identity: "身份",
     avatar: "头像",

@@ -380,7 +380,7 @@ impl Core {
             origin: &origin,
             title: crate::gateway::jstr(&o["title"]),
             goal: crate::gateway::jstr(&o["goal"]),
-            bot: o["bot"].as_str().map(String::from),
+            bot: None,
             project: o["project"].as_str().map(String::from),
             tags: vec![],
             files: m

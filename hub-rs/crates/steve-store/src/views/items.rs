@@ -4,7 +4,8 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use sea_query::{Alias, Expr, ExprTrait, Query, SelectStatement};
 use serde::{Deserialize, Serialize};
 use steve_types::{
-    ItemClosing, ItemParent, ItemSnooze, ItemView, ItemWorkflow, Millis, OperationBlocker,
+    BotPlacement, ItemClosing, ItemParent, ItemSnooze, ItemView, ItemWorkflow, Millis,
+    OperationBlocker,
 };
 
 use super::{Page, page, read_ids};
@@ -41,6 +42,7 @@ fn select() -> SelectStatement {
             (SELECT json_array(revision, updated) FROM workflows WHERE item_id=items.id),
             (SELECT follow FROM thread_items WHERE item_id=items.id)
         )"))
+        .expr(Expr::cust("(SELECT fact FROM bot_placements WHERE item_id=items.id AND fact IS NOT NULL ORDER BY seq DESC LIMIT 1)"))
         .and_where(Expr::col(Alias::new("kind")).eq("task"));
     q
 }
@@ -133,6 +135,9 @@ fn row(r: &Row<'_>) -> Result<ItemView> {
     revision.hash(&mut stamp);
     r.get::<String>(36)?.hash(&mut stamp);
     let mut v = ItemView {
+        placement: r
+            .get::<Option<Json<BotPlacement>>>(37)?
+            .map(|Json(f)| f.explanation),
         id: r.get::<String>(0)?.into(),
         ws: r.get::<String>(1)?.into(),
         no: r.get(2)?,

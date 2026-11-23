@@ -158,6 +158,18 @@ pub trait AgentRuntime: Send + Sync {
             "协作运行器尚未实现同主体与 Node 授权检查，工作不会回退到 Hub 执行。".into(),
         ))
     }
+    /// Assess one authorized binding against the current Node and its capability report.
+    fn assess_placement_node(
+        &self,
+        _workspace: &str,
+        _project: Option<&steve_store::Project>,
+        _node: &str,
+        _choice: &steve_node_api::HarnessChoice,
+        _mode: &str,
+    ) -> Result<Option<steve_types::PlacementRejection>> {
+        Ok(None)
+    }
+
     /// Whether `bot` (of `harness`) could run `item_id`'s work at all, before a session is made
     /// for it or the item is given to the Bot: its harness installed, ready and signed in on the
     /// Nodes. `Err` says why and where to fix it (stored text, zh-CN); nothing is made then, and

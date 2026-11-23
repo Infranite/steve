@@ -38,7 +38,7 @@ impl NodeRuntime {
         &self,
         b: &Binding,
         after: Option<&str>,
-        placement: &Value,
+        placement: &steve_types::BotPlacement,
     ) -> Result<(), StoreError> {
         self.bind_new(b, after, Some(placement)).map(|_| ())
     }
@@ -48,7 +48,7 @@ impl NodeRuntime {
         &self,
         b: &Binding,
         after: Option<&str>,
-        placement: Option<&Value>,
+        placement: Option<&steve_types::BotPlacement>,
     ) -> Result<bool, StoreError> {
         self.running()?;
         let workspace = WorkspaceRef {
@@ -90,27 +90,18 @@ impl NodeRuntime {
                 return Ok(false);
             }
             if let Some(placement) = placement {
-                let item = self
-                    .store
-                    .read(|r| node_sessions::startup::scope(r, &b.session))?
+                let scope = node_sessions::authority::session(tx, &b.session)?
+                    .ok_or(StoreError::NotFound("Session"))?;
+                let item = scope
                     .item
-                    .ok_or_else(|| StoreError::Rejected("placement has no item".into()))?;
-                node_write::record_placement(tx, &item, placement)?;
-                let ws = self
-                    .store
-                    .items()
-                    .get(&item)?
-                    .ok_or_else(|| StoreError::Rejected(format!("missing item {item}")))?
-                    .workspace_id;
-                self.store.write(|w| {
-                    w.emit(steve_types::DomainEvent::from(
-                        steve_types::WorkEvent::Item {
-                            ws: ws.into(),
-                            id: item.into(),
-                        },
-                    ));
-                    Ok::<_, StoreError>(())
-                })?;
+                    .ok_or(StoreError::Rejected("placement has no item".into()))?;
+                steve_store::bot_dispatch::record(
+                    tx,
+                    &scope.workspace,
+                    &item,
+                    Some(&b.session),
+                    Ok(placement),
+                )?;
             }
             // whose access it runs with and who reads it, fixed now (a remote Node's owner reads it too)
             let owner = if self.is_remote() {

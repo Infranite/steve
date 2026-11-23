@@ -303,7 +303,7 @@ impl Core {
             origin,
             title: r.title.clone(),
             goal: r.goal.clone(),
-            bot: Some(r.bot.clone()),
+            bot: self.named_bot(ws, &om.text)?.map(|b| b.id),
             project: r.project.clone(),
             tags: r.tag_ids.clone(),
             files: files_of(&om, "files"),
@@ -406,7 +406,7 @@ impl Core {
             origin: &origin,
             title: r.title.clone(),
             goal,
-            bot: Some(r.bot.clone()),
+            bot: self.named_bot(ws, &q)?.map(|b| b.id),
             project: r.project.clone(),
             tags: r.tag_ids.clone(),
             files: files_of(m, "chatFiles"),
@@ -427,7 +427,7 @@ impl Core {
         let mut route = route_step(&r, None, t1 - t0);
         route["kind"] = json!("item");
         route["newTags"] = json!([]);
-        let steps = json!({"route": route, "tools": [{"name": "create_item", "args": {"title": r.title, "bot": r.bot, "project": r.project, "tags": r.tag_ids}, "result": {"item": item.id, "bot": item.bot_id, "project": item.project_id}, "status": "ok", "ms": now() - t1}], "ms": now() - t0});
+        let steps = json!({"route": route, "tools": [{"name": "create_item", "args": {"title": r.title, "project": r.project, "tags": r.tag_ids}, "result": {"item": item.id, "bot": item.bot_id, "project": item.project_id}, "status": "ok", "ms": now() - t1}], "ms": now() - t0});
         self.announce(
             ws,
             &item,

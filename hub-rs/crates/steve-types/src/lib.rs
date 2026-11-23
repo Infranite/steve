@@ -36,6 +36,7 @@ pub mod integrations;
 pub mod knowledge;
 pub mod orchestration;
 pub mod people;
+pub mod placement;
 pub mod raw;
 pub mod stats;
 pub mod stream;
@@ -52,6 +53,7 @@ pub use event::{
 };
 pub use fact::{AlarmFired, AlarmLine, DurableFact, MailDelivery, PrSupplement};
 pub use id::*;
+pub use placement::*;
 pub use raw::RawJson;
 pub use stream::StreamControl;
 mod closeout;

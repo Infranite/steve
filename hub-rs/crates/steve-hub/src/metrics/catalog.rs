@@ -15,6 +15,16 @@ pub(super) const COUNTS: &[&str] = &[
 pub(super) const LONG: &[&str] = &["steve_node_link_uptime_seconds", "steve_model_call_seconds"];
 
 pub(super) fn describe() {
+    describe_histogram!(
+        "steve_bot_selection_seconds",
+        Seconds,
+        "Time to assess and rank one Bot dispatch request."
+    );
+    describe_counter!(
+        "steve_bot_selection_blocked_total",
+        Count,
+        "Requests with no eligible placement. Counted once for each distinct reason. Label: reason."
+    );
     // HTTP (metrics::http, the outermost layer)
     describe_counter!(
         "steve_http_requests_total",

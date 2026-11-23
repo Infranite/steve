@@ -144,6 +144,7 @@ impl Test {
             question: "@wire-check".into(),
             history: vec![],
             main: steve_core::repo::Bot {
+                specialties: vec![],
                 id: "main".into(),
                 workspace_id: steve_store::WS.into(),
                 name: "Steve".into(),

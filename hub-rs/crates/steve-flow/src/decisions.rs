@@ -11,7 +11,7 @@ use steve_modules::decisions::{DecisionCx, DecisionHandler, choice_result};
 use steve_modules::{ApiError, ApiResult};
 use steve_store::base::ObjRef;
 use steve_store::base::links::{Links, NewLink};
-use steve_store::{BotRows, Decision, DecisionRows, FlowSources, SignalRows, W};
+use steve_store::{Decision, DecisionRows, SignalRows, W};
 use tokio::sync::{Notify, mpsc};
 
 use crate::engine::{self, GATE_YES};
@@ -182,21 +182,7 @@ pub async fn to_item(cx: &FlowCx, ws: &str, event_id: &str) -> FlowResult<String
         .read(|c| crate::ingest::event_json(c, event_id))?;
     let bot = cx
         .store()
-        .read(|r| {
-            let triage = match ev["connection_id"].as_str() {
-                Some(conn) => FlowSources(r).triage(ws, conn)?,
-                None => None,
-            };
-            if let Some(bot) = triage
-                && BotRows(r)
-                    .local(ws, &bot)?
-                    .is_some_and(|(_, enabled)| enabled)
-            {
-                return Ok(Some(bot));
-            }
-            BotRows(r).main()
-        })?
-        .ok_or_else(|| ApiError::rule(steve_i18n::t!("flow.decision.no_main_bot")))?;
+        .read(|r| crate::nodes::action::event_bot(r, ws, None, &ev))?;
     let summary = ev["summary"].as_str().unwrap_or("").to_string();
     let text = ev["payload"]["text"].as_str().unwrap_or("");
     let goal = if text.is_empty() {
@@ -223,6 +209,7 @@ pub async fn to_item(cx: &FlowCx, ws: &str, event_id: &str) -> FlowResult<String
             title: summary.chars().take(80).collect(),
             goal,
             bot,
+            node_tag: None,
             project: None,
             tag_ids: Vec::new(),
             source: (label, "sig".into()),
