@@ -6,6 +6,83 @@ use serde::Serialize;
 
 pub const REASONS: &[ReasonSet] = &[];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum NodeOfflineReason {
+    AwaitingConfirmation,
+    Revoked,
+    ProtocolMismatch,
+    HandshakeFailed,
+    NeverConnected,
+    Unreachable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct NodeOffline {
+    pub reason: NodeOfflineReason,
+    /// Unix milliseconds of the last observation (or when the link became expected).
+    pub since: i64,
+    pub duration_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum HarnessDegradedReason {
+    AuthenticationRequired,
+    AdapterMissing,
+    InitializeFailed,
+    SessionUnavailable,
+}
+
+pub const NODE_FILE_ACCESS_SOCKET: &str = "services/node-file-access.sock";
+pub const NODE_BOOT_SERVICE_ENV: &str = "STEVE_NODE_BOOT_SERVICE";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum FileAccessStatus {
+    Granted,
+    Missing,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum ProtectedLocation {
+    Desktop,
+    Documents,
+    Downloads,
+    Volume,
+    ProtectedLibrary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ProtectedAccess {
+    pub location: ProtectedLocation,
+    pub status: FileAccessStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct FileAccessReport {
+    pub status: FileAccessStatus,
+    pub locations: Vec<ProtectedAccess>,
+}
+
+impl FileAccessReport {
+    pub fn unknown() -> Self {
+        Self {
+            status: FileAccessStatus::Unknown,
+            locations: Vec::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, strum::EnumCount)]
 #[serde(tag = "type")]
 #[cfg_attr(test, derive(ts_rs::TS))]

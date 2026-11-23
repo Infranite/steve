@@ -23,6 +23,8 @@ mod space;
 
 mod bot_skills;
 mod exec;
+#[cfg(target_os = "macos")]
+mod file_access;
 pub mod git;
 mod harness_context;
 mod harness_login;
@@ -433,6 +435,8 @@ pub(crate) struct Inner {
     probes: history::Probes,
     /// What each adapter said to `initialize` ([`adapter_probe`]).
     adapter_probes: adapter_probe::AdapterProbes,
+    #[cfg(target_os = "macos")]
+    file_access: Arc<tokio::sync::Semaphore>,
     /// The adapters Steve installed, kept up to date ([`adapter_updates`]).
     adapter_updates: adapter_updates::AdapterUpdates,
     /// Admission for prefix mutations and new execution, shared by explicit installs and the
@@ -1433,6 +1437,8 @@ impl LocalNode {
             discovery: std::sync::RwLock::new(None),
             probes: Default::default(),
             adapter_probes: Default::default(),
+            #[cfg(target_os = "macos")]
+            file_access: Arc::new(tokio::sync::Semaphore::new(1)),
             adapter_updates: Default::default(),
             adapter_maintenance: Mutex::new(None),
             harness_updates: Default::default(),
@@ -2226,10 +2232,14 @@ impl LocalNode {
                         error: None,
                     }
                 }
-                exec::Ended::Exited(_) => failed(ApiError::new(
-                    ErrorCode::Denied,
-                    format!("git push: {}", git::complaint(&ran.stderr)),
-                )),
+                exec::Ended::Exited(_) => {
+                    failed(git::authentication_error(&ran.stderr).unwrap_or_else(|| {
+                        ApiError::new(
+                            ErrorCode::Denied,
+                            format!("git push: {}", git::complaint(&ran.stderr)),
+                        )
+                    }))
+                }
                 exec::Ended::TimedOut => Observed::Finished {
                     outcome: Outcome::TimedOut,
                     result: None,
@@ -4278,9 +4288,15 @@ impl Discovery for LocalNode {
     }
     async fn host(&self) -> ApiResult<HostInfo> {
         // the computer name may take a short command, once
-        tokio::task::spawn_blocking(host::this_machine)
+        let host = tokio::task::spawn_blocking(host::this_machine)
             .await
-            .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))
+            .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
+        #[cfg(target_os = "macos")]
+        let host = HostInfo {
+            file_access: self.file_access().await,
+            ..host
+        };
+        Ok(host)
     }
     async fn vitals(&self) -> ApiResult<NodeVitals> {
         let roots = self.0.roots();

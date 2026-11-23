@@ -5972,6 +5972,7 @@ dependencies = [
  "steve-i18n",
  "steve-runtime",
  "steve-store",
+ "steve-types",
  "tempfile",
  "url",
  "uuid",

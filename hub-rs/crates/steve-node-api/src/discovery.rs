@@ -144,7 +144,7 @@ pub struct AdapterInfo {
     pub session: Option<AdapterOffer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_error: Option<String>,
-    /// Only present when the adapter explicitly required authentication during session/new.
+    /// Only present when the adapter explicitly required authentication during the ACP probe.
     /// Absence is not proof that the provider account or entitlement was verified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_auth_required: Option<bool>,
@@ -364,9 +364,8 @@ pub struct ProcessMeters {
     pub disk_written_bytes: Option<u64>,
 }
 
-/// What the Node's machine is (H→N `node.host`): fixed while the Node runs,
-/// so the Hub asks once per link and keeps the answer for when the Node is away. Every field is
-/// what the platform says of itself; one it cannot give is left out rather than guessed.
+/// What the Node's machine is (H→N `node.host`). The Hub asks once per link and also on demand
+/// to recheck file access. It keeps the latest answer for when the Node is away.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostInfo {
     /// The machine's name as its owner sees it (macOS: the computer name; elsewhere the host name).
@@ -388,6 +387,8 @@ pub struct HostInfo {
     /// Bytes of memory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mem_total: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_access: Option<crate::FileAccessReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

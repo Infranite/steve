@@ -645,6 +645,26 @@ fn no_credentials(url: &str) -> String {
     }
 }
 
+/// Recognize explicit Git/SSH auth evidence, not general permission, network or transport
+/// errors. Helpers need not identify their credential store; don't infer Keychain from a 401.
+pub(crate) fn authentication_error(stderr: &str) -> Option<ApiError> {
+    let lower = stderr.to_ascii_lowercase();
+    let detail = if lower.contains("user interaction is not allowed")
+        || lower.contains("errsecinteractionnotallowed")
+    {
+        "Git's credential provider needs interaction unavailable to this Node; configure non-interactive credentials"
+    } else if lower.contains("terminal prompts disabled")
+        || lower.contains("authentication failed for")
+        || lower.contains("permission denied (publickey")
+        || lower.contains("permission denied (keyboard-interactive")
+    {
+        "Git could not authenticate; configure non-interactive credentials for this operation"
+    } else {
+        return None;
+    };
+    Some(ApiError::new(ErrorCode::Denied, detail))
+}
+
 /// The facts `q` asks for in the checkout at `dir`, after fetching `origin` (with its tags) when it
 /// asks for that. A `dir` that is no checkout with a commit, or a read git refuses, is `invalid`; a
 /// fetch the remote refuses is `invalid` with git's words; git not finishing (its deadline) is
@@ -662,7 +682,10 @@ pub(crate) fn facts(c: &Commands, dir: &Path, q: &GitQuery) -> ApiResult<GitFact
             .map_err(|f| ApiError::new(ErrorCode::Internal, String::from(f)))?;
         match r.code {
             Some(0) => {}
-            Some(_) => return Err(invalid(format!("fetch: {}", r.stderr))),
+            Some(_) => {
+                return Err(authentication_error(&r.stderr)
+                    .unwrap_or_else(|| invalid(format!("fetch: {}", r.stderr))));
+            }
             None => return Err(ApiError::new(ErrorCode::Internal, "fetch timed out")),
         }
     }
@@ -1263,6 +1286,22 @@ pub(crate) fn complaint(stderr: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_git_auth_errors_do_not_forward_helper_or_remote_output() {
+        for stderr in [
+            "fatal: could not read Username for 'https://fixture.invalid': terminal prompts disabled",
+            "git-credential-osxkeychain: User interaction is not allowed. private-fixture",
+            "fixture@fixture.invalid: Permission denied (publickey).",
+        ] {
+            let error = authentication_error(stderr).unwrap();
+            assert_eq!(error.code, ErrorCode::Denied);
+            assert!(error.safe_detail.contains("non-interactive"));
+            assert!(!error.safe_detail.contains("fixture"));
+        }
+        assert!(authentication_error("Could not resolve host: fixture.invalid").is_none());
+        assert!(authentication_error("permission denied while opening .git/config").is_none());
+    }
 
     #[test]
     fn a_revision_is_never_an_option() {

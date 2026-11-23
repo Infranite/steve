@@ -9,13 +9,13 @@ import { Button } from "@/components/ui/button"
 import { go, openSheet } from "@/ui"
 import { api } from "@/api"
 import { deviceWorkEvidence, st, toast, useStore } from "@/store"
-import { agoText, nodeStatus, upgradeCard, type NodeView } from "@/device-model"
+import { nodeStatus, offlineReason, statusText, upgradeCard, type NodeView } from "@/device-model"
 import { mapClients } from "@/device-map-model"
 import { useDevices } from "@/devices-data"
 import { deviceGroups } from "@/devices-work"
 import { DCard, Figure } from "@/devices-ui"
 import { DeviceMap } from "@/devices-map"
-import { NodesGrid, linkReason, nodeHref } from "@/devices-nodes"
+import { NodesGrid, nodeHref } from "@/devices-nodes"
 import { cn } from "cn"
 
 /** at most this many lines of what wants you; the rest behind "N more" */
@@ -42,7 +42,7 @@ export function OverviewTab() {
     else if (s.kind === "rolledBack") rows.push({ key: v.id, tone: "bad", icon: RotateCcwIcon, text: t("devices:attn.failed", { name, to: s.version ?? "", from: s.from ?? "" }), actions: open(v, t("devices:attn.why")) })
     else if (s.kind === "upgrading") rows.push({ key: v.id, tone: "info", icon: LoaderIcon, text: t("devices:attn.upgrading", { name, to: s.version ?? "" }), actions: open(v) })
     else if (s.kind === "offline") rows.push({ key: v.id, tone: "warn", icon: WifiOffIcon,
-      text: <>{t("devices:attn.offline", { name, ago: s.since ? agoText(s.since, now) : "—" })}{linkReason(v) && <span className="text-muted-foreground">{t("devices:attn.reason", { why: linkReason(v) })}</span>}</>, actions: open(v) })
+      text: <>{t("devices:attn.nodeStatus", { name, status: statusText(s, now) })}{offlineReason(v) && <span className="text-muted-foreground">{t("devices:attn.reason", { why: offlineReason(v) })}</span>}</>, actions: open(v) })
     else if (card.kind === "outdated" || card.kind === "manual" && card.behind) rows.push({ key: v.id, tone: "warn", icon: ArrowUpCircleIcon, text: t("devices:attn.outdated", { name, v: v.version ?? "?", hub: hubVersion }),
       actions: <>{open(v, t("devices:card.details"))}{card.kind === "outdated" && st.owner && <Button size="xs" disabled={busy === v.id} onClick={() => void upgrade(v)} data-attention-upgrade={v.id}>{t("devices:attn.upgrade")}</Button>}</> })
     const asks = v.device && deviceWorkEvidence().loaded ? deviceGroups(v.device.id).attention.length : 0
