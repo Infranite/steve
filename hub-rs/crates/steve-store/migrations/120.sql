@@ -100,9 +100,28 @@ UPDATE runtime_sessions AS s SET mode_refusal_code=p.refusal_code
  FROM runtime_mode_projection p WHERE p.session_id=s.session_id;
 
 -- Older commands cannot be replayed into a replaced Node journal.
+-- The lease generation makes the never-leased case safe even for rows predating maybe_sent.
+UPDATE node_commands SET state='rejected', lease_owner=NULL, lease_until=NULL, revision=revision+1,
+ receipt=json_object('success',json('false'),'payload',json_object(
+   'code','stale','retry',json_object('kind','never'),
+   'reason','node.protocol_changed','safe_detail','Node protocol changed before dispatch'))
+ WHERE state='pending' AND maybe_sent=0 AND lease_generation=0 AND receipt IS NULL;
+
+INSERT OR IGNORE INTO realtime_output_attempts
+ (attempt_id,session_id,workspace_id,project_id,bot_id,node_id,started,ended,baseline,stop_evidence,not_started)
+ SELECT a.attempt_id,s.id,s.workspace_id,i.project_id,s.bot_id,a.node_id,a.created,
+        MAX(a.created,c.updated),0,'unsent',1
+ FROM runtime_attempts a JOIN runtime_turns t USING(turn_id)
+ JOIN sessions s ON s.id=t.session_id
+ LEFT JOIN items i ON i.id=s.item_id AND i.workspace_id=s.workspace_id
+ JOIN node_commands c ON c.operation_id=a.operation_id AND c.node_id=a.node_id
+   AND c.target_attempt=a.attempt_id AND c.method='start_turn'
+ WHERE s.readonly=0 AND c.state='rejected'
+   AND json_extract(c.receipt,'$.payload.reason')='node.protocol_changed';
+
 UPDATE node_commands SET state='unknown', maybe_sent=1,
  lease_owner=NULL, lease_until=NULL, revision=revision+1,
- receipt=json_object('success',json('false'),'payload',json_object(
+ receipt=json_set(COALESCE(receipt,'{}'),'$.success',json('false'),'$.payload',json_object(
    'operation',operation_id,'state',json_object('state','unknown','reason','node_protocol_changed')))
  WHERE state IN ('pending','accepted','active');
 UPDATE runtime_attempts SET state='unknown', revision=revision+1 WHERE state <> 'finished';

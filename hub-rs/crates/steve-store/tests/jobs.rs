@@ -101,7 +101,7 @@ fn applies_on_a_039_database_and_keeps_its_commands() {
     assert_eq!(
         count(
             &c,
-            "SELECT count(*) FROM node_commands WHERE operation_id='old' AND target_job_attempt IS NULL AND state='pending'"
+            "SELECT count(*) FROM node_commands WHERE operation_id='old' AND target_job_attempt IS NULL AND state='rejected' AND maybe_sent=0"
         ),
         1
     );
