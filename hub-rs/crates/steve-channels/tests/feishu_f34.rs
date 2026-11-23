@@ -8,6 +8,8 @@ mod digest_env;
 use digest_env::TestEnv;
 use std::sync::Arc;
 use std::time::Duration;
+use steve_store::testkit::channels::inspect;
+use steve_store::testkit::channels::seed;
 
 use axum::Router;
 use axum::body::Body;
@@ -15,7 +17,7 @@ use axum::http::{Request, header};
 use serde_json::{Value, json};
 use steve_channels::adapters::feishu::inbound::LongConnection;
 use steve_channels::adapters::feishu::ws::WsState;
-use steve_channels::adapters::feishu::{FeishuApp, at_handle, chats, send};
+use steve_channels::adapters::feishu::{FeishuApp, chats, send};
 use steve_channels::fake::feishu::{
     Chat, Endpoint, FakeFeishu, Member, UserIds, WsClientConfig, fixture, ids,
 };
@@ -118,42 +120,12 @@ impl H {
         self.ch.connections().cx(WS, &self.con).expect("cx")
     }
 
-    fn rows(&self, sql: &str, p: &str) -> Vec<Vec<Value>> {
-        let (sql, p) = (sql.to_string(), p.to_string());
-        self.env
-            .store()
-            .reader(move |c| {
-                let mut st = c.prepare(&sql)?;
-                let n = st.column_count();
-                let rows = st
-                    .query_map([&p], |r| {
-                        (0..n)
-                            .map(|i| {
-                                Ok(match r.get_ref(i)? {
-                                    rusqlite::types::ValueRef::Null => Value::Null,
-                                    rusqlite::types::ValueRef::Integer(x) => json!(x),
-                                    rusqlite::types::ValueRef::Text(t) => {
-                                        json!(String::from_utf8_lossy(t))
-                                    }
-                                    _ => Value::Null,
-                                })
-                            })
-                            .collect::<rusqlite::Result<Vec<_>>>()
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok::<_, steve_store::StoreError>(rows)
-            })
-            .expect("query")
-    }
-
-    fn n(&self, sql: &str, p: &str) -> i64 {
-        self.rows(sql, p)[0][0].as_i64().expect("count")
-    }
-
     /// Waits until the count `sql` reaches `want`.
-    async fn wait_count(&self, sql: &str, p: &str, want: i64) {
-        steve_runtime::testkit::eventually(sql, || std::future::ready(self.n(sql, p) == want))
-            .await;
+    async fn wait_count(&self, label: &str, query: impl Fn(&steve_store::Store) -> i64, want: i64) {
+        steve_runtime::testkit::eventually(label, || {
+            std::future::ready(query(self.env.store()) == want)
+        })
+        .await;
     }
 
     async fn start(&self) -> LongConnection {
@@ -454,24 +426,16 @@ async fn members_are_paged_and_external_ones_marked() {
     assert_eq!(chats::sync_bot_chats(&h.ch, WS, &h.con).await.unwrap(), 3);
     assert_eq!(chats::sync_bot_chats(&h.ch, WS, &h.con).await.unwrap(), 0);
     assert_eq!(
-        h.n(
-            "SELECT count(*) FROM spaces s JOIN space_settings ss ON ss.space_id = s.id WHERE ss.configured = 0 AND s.connection_id = ?",
-            &h.con
-        ),
+        inspect::spaces::count_spaces_by_connection_count_2(h.env.store(), &h.con).unwrap(),
         3
     );
     assert_eq!(
-        h.n(
-            "SELECT count(*) FROM decisions WHERE subject_type = 'space' AND ?1 = ?1",
-            ""
-        ),
+        inspect::decisions::count_decisions_by_space_and_at_1(h.env.store(), "").unwrap(),
         0
     );
     assert_eq!(
-        h.rows(
-            "SELECT has_external FROM spaces WHERE external_id = ?",
-            ids::EXTERNAL_CHAT
-        )[0][0],
+        inspect::spaces::space_has_external_by_external(h.env.store(), ids::EXTERNAL_CHAT).unwrap()
+            [0][0],
         json!(1)
     );
 }
@@ -510,16 +474,17 @@ async fn member_and_chat_events_over_the_long_connection() {
         }
     });
     let lc = h.start().await;
-    const SPACE: &str = "SELECT count(*) FROM spaces WHERE external_id = ?";
 
     // bot.added: the space, its members, the “新群” decision; an external member flags it
     h.push(fixture("bot_added").unwrap()).await;
-    h.wait_count(SPACE, NEW_GROUP, 1).await;
-    let s = &h.rows(
-        "SELECT s.id, s.name, s.kind, s.status, s.has_external, s.member_count, ss.configured, ss.disclosure
-           FROM spaces s JOIN space_settings ss ON ss.space_id = s.id WHERE s.external_id = ?",
-        NEW_GROUP,
-    )[0];
+    h.wait_count(
+        "space count",
+        |store| inspect::spaces::count_by_external(store, NEW_GROUP).unwrap(),
+        1,
+    )
+    .await;
+    let s = &inspect::spaces::space_id_name_kind_status_by_external(h.env.store(), NEW_GROUP)
+        .unwrap()[0];
     assert_eq!(
         &s[1..],
         &[
@@ -534,17 +499,12 @@ async fn member_and_chat_events_over_the_long_connection() {
     );
     let space = s[0].as_str().unwrap().to_string();
     assert_eq!(
-        h.rows(
-            "SELECT question, options FROM decisions WHERE subject_type = 'space' AND subject_id = ?",
-            &space
-        )[0][0],
+        inspect::decisions::decision_question_options_by_space_and_subject(h.env.store(), &space)
+            .unwrap()[0][0],
         json!("值班小运被拉进了「新项目群」，要设置它在这里做什么吗？")
     );
     assert_eq!(
-        h.n(
-            "SELECT count(*) FROM space_members WHERE space_id = ?",
-            &space
-        ),
+        inspect::spaces::count_space_members_by_space_count(h.env.store(), &space).unwrap(),
         4,
         "three people and the bot"
     );
@@ -556,47 +516,60 @@ async fn member_and_chat_events_over_the_long_connection() {
         ids::GROUP_CHAT,
     ))
     .await;
-    h.wait_count(SPACE, ids::GROUP_CHAT, 1).await;
-    let group = h.rows(
-        "SELECT id FROM spaces WHERE external_id = ?",
-        ids::GROUP_CHAT,
-    )[0][0]
+    h.wait_count(
+        "space count",
+        |store| inspect::spaces::count_by_external(store, ids::GROUP_CHAT).unwrap(),
+        1,
+    )
+    .await;
+    let group = inspect::spaces::space_id_by_external_rows(h.env.store(), ids::GROUP_CHAT).unwrap()
+        [0][0]
         .as_str()
         .unwrap()
         .to_string();
-    const MEMBERS: &str = "SELECT count(*) FROM space_members WHERE space_id = ?";
-    assert_eq!(h.n(MEMBERS, &group), 4);
-    h.push(fixture("user_deleted").unwrap()).await;
-    h.wait_count(MEMBERS, &group, 3).await;
     assert_eq!(
-        h.n(
-            "SELECT count(*) FROM space_members m JOIN account_handles ah ON ah.account_id = m.account_id
-              WHERE m.space_id = ? AND ah.handle = 'on_bob0000000000000000000000000001'",
-            &group
-        ),
+        inspect::spaces::member_count(h.env.store(), &group).unwrap(),
+        4
+    );
+    h.push(fixture("user_deleted").unwrap()).await;
+    h.wait_count(
+        "member count",
+        |store| inspect::spaces::member_count(store, &group).unwrap(),
+        3,
+    )
+    .await;
+    assert_eq!(
+        inspect::spaces::count_space_members_by_space_count_2(h.env.store(), &group).unwrap(),
         0
     );
     let mut added = with_event("user_added", "evt_f4_user_added", ids::GROUP_CHAT);
     added["event"]["external"] = json!(true);
     h.push(added).await;
-    h.wait_count(MEMBERS, &group, 4).await;
-    h.wait_count("SELECT has_external FROM spaces WHERE id = ?", &group, 1)
-        .await;
-    h.push(fixture("chat_updated").unwrap()).await;
     h.wait_count(
-        "SELECT count(*) FROM spaces WHERE name = '平台值班群（夜班）' AND id = ?",
-        &group,
-        1,
+        "member count",
+        |store| inspect::spaces::member_count(store, &group).unwrap(),
+        4,
     )
+    .await;
+    steve_runtime::testkit::eventually("count_spaces_by_id", || {
+        std::future::ready(inspect::spaces::count_spaces_by_id(h.env.store(), &group).unwrap() == 1)
+    })
+    .await;
+    h.push(fixture("chat_updated").unwrap()).await;
+    steve_runtime::testkit::eventually("count_spaces_by_id_count", || {
+        std::future::ready(
+            inspect::spaces::count_spaces_by_id_count(h.env.store(), &group).unwrap() == 1,
+        )
+    })
     .await;
 
     // the bot removed: left; added back while still unconfigured: active and asked again
     h.push(fixture("bot_deleted").unwrap()).await;
-    h.wait_count(
-        "SELECT count(*) FROM spaces WHERE status = 'left' AND id = ?",
-        &group,
-        1,
-    )
+    steve_runtime::testkit::eventually("count_spaces_by_left_and_id", || {
+        std::future::ready(
+            inspect::spaces::count_spaces_by_left_and_id(h.env.store(), &group).unwrap() == 1,
+        )
+    })
     .await;
     h.push(with_event(
         "bot_added",
@@ -604,29 +577,34 @@ async fn member_and_chat_events_over_the_long_connection() {
         ids::GROUP_CHAT,
     ))
     .await;
-    h.wait_count(
-        "SELECT count(*) FROM spaces WHERE status = 'active' AND id = ?",
-        &group,
-        1,
-    )
+    steve_runtime::testkit::eventually("count_spaces_by_active_and_id", || {
+        std::future::ready(
+            inspect::spaces::count_spaces_by_active_and_id(h.env.store(), &group).unwrap() == 1,
+        )
+    })
     .await;
     assert_eq!(
-        h.n(
-            "SELECT count(*) FROM decisions WHERE subject_type = 'space' AND status = 'open' AND subject_id = ?",
-            &group
-        ),
+        inspect::decisions::count_decisions_by_space_and_open_and_subject(h.env.store(), &group)
+            .unwrap(),
         1
     );
 
     // disbanded: archived (the topic group, known from a message first)
     h.push(fixture("message_thread_reply").unwrap()).await;
-    h.wait_count(SPACE, ids::TOPIC_CHAT, 1).await;
-    h.push(fixture("chat_disbanded").unwrap()).await;
     h.wait_count(
-        "SELECT count(*) FROM spaces WHERE status = 'archived' AND external_id = ?",
-        ids::TOPIC_CHAT,
+        "space count",
+        |store| inspect::spaces::count_by_external(store, ids::TOPIC_CHAT).unwrap(),
         1,
     )
+    .await;
+    h.push(fixture("chat_disbanded").unwrap()).await;
+    steve_runtime::testkit::eventually("count_spaces_by_archived_and_external", || {
+        std::future::ready(
+            inspect::spaces::count_spaces_by_archived_and_external(h.env.store(), ids::TOPIC_CHAT)
+                .unwrap()
+                == 1,
+        )
+    })
     .await;
 
     // an event about a space Steve does not know changes nothing
@@ -644,17 +622,16 @@ async fn member_and_chat_events_over_the_long_connection() {
     assert_eq!(r, None);
 
     // the @ handle of a member, for C6's group replies
-    let alice: String = h.rows(
-        "SELECT account_id FROM account_handles WHERE handle = ?",
-        ids::ALICE.union_id,
-    )[0][0]
-        .as_str()
-        .unwrap()
-        .into();
+    let alice: String =
+        inspect::people::handle_account_id_by_handle(h.env.store(), ids::ALICE.union_id).unwrap()
+            [0][0]
+            .as_str()
+            .unwrap()
+            .into();
     let at = h
         .env
         .store()
-        .reader(|c| at_handle(c, WS, &h.con, &alice))
+        .read(|r| steve_store::accounts::feishu_mention_handle(r, WS, &h.con, &alice))
         .unwrap();
     assert_eq!(at.as_deref(), Some(ids::ALICE.open_id));
     lc.stop().await.unwrap();
@@ -753,11 +730,18 @@ async fn authenticated_provider_bytes_reach_the_channel_composer() {
         image: png.clone(),
     });
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    h.env.store().transaction(|tx|->steve_modules::ApiResult<()> {
-        tx.execute("UPDATE connections SET config=json_set(config,'$.api_base',?1) WHERE id=?2",rusqlite::params![base,h.con])?;
-        tx.execute_batch("INSERT INTO bots(id,workspace_id,name,main,harness,persona,role,rules,model,updated) VALUES('media_bot','default','Steve',1,'claude','','','','capture-model',1); INSERT INTO bot_workspaces(bot_id,workspace_id,created) VALUES('media_bot','default',1);")?;
-        Ok(())
-    }).unwrap();
+    ({
+        seed::connections::set_api_base(h.env.store(), &h.con, &base).unwrap();
+        seed::people::bots(
+            h.env.store(),
+            &[seed::people::Bot {
+                id: "media_bot",
+                model: Some("capture-model"),
+                ..Default::default()
+            }],
+        )
+    })
+    .unwrap();
     let mut incoming = steve_channels::adapters::feishu::inbound::parse_receive(
         &fixture("message_image").unwrap(),
         "",
@@ -769,9 +753,7 @@ async fn authenticated_provider_bytes_reach_the_channel_composer() {
         .push(json!({"type":"file","key":"file_fixture","name":"log.txt","source":"message"}));
     let written = h.ch.on_inbound(WS, &h.con, incoming).await.unwrap();
     let plan =
-        h.ch.store()
-            .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &written.message_id))
-            .unwrap();
+        steve_channels::flow_actions::plan_of(h.ch.store(), WS, &written.message_id).unwrap();
     let capture = Arc::new(ImageReplyCapture::default());
     let composer = steve_channels::compose::Composer::new()
         .media(Arc::new(steve_channels::media_agent::FeishuMediaSource))

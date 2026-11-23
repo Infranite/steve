@@ -14,14 +14,15 @@ use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_modules::accounts::connections::ConnCx;
 use steve_store::base::Viewer;
+use steve_store::channel_message_repo::media::{self as repo, Source};
+use steve_store::{Read, channel_spaces, connections, flow_repo, settings};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use crate::Channels;
 use crate::channel::MessageRef;
-use crate::{Channels, spaces};
 
 /// The media view of a channel side: fetching a stored message's resources (images, files) as the
 /// connection that received it. Registered with [`crate::ChannelsBuilder::media`] under the
@@ -205,91 +206,30 @@ impl MediaError {
 
 // ---------------------------------------------------------------- the stored message
 
-/// What resource access needs of a `chan_messages` row.
-#[derive(Debug, Clone)]
-struct Row {
-    id: String,
-    ws: String,
-    space_id: String,
-    direction: String,
-    status: String,
-    event_id: Option<String>,
-    text: Option<String>,
-    attachments: Value,
-    purged: Option<i64>,
-}
-
-impl Row {
-    /// The message as the [`MediaFetch`] of connection `conn` sees it: the same [`MessageRef`]
-    /// recall and reactions get (the delivery id that connection knows it by, the sender, the
-    /// provider's create time). `None` when the row is gone.
-    fn message_ref(&self, c: &Connection, conn: Option<&str>) -> Option<MessageRef> {
-        crate::messages::message_ref(c, &self.id, conn.unwrap_or_default())
-            .ok()
-            .flatten()
-    }
-}
-
-fn load(c: &Connection, id: &str) -> rusqlite::Result<Option<Row>> {
-    c.query_row(
-        "SELECT id, workspace_id, space_id, direction, status, event_id, text, attachments, purged
-           FROM chan_messages WHERE id = ?",
-        [id],
-        |r| {
-            Ok(Row {
-                id: r.get(0)?,
-                ws: r.get(1)?,
-                space_id: r.get(2)?,
-                direction: r.get(3)?,
-                status: r.get(4)?,
-                event_id: r.get(5)?,
-                text: r.get(6)?,
-                attachments: r
-                    .get::<_, Option<String>>(7)?
-                    .and_then(|s| serde_json::from_str(&s).ok())
-                    .unwrap_or_else(|| json!([])),
-                purged: r.get(8)?,
-            })
-        },
-    )
-    .optional()
-}
-
 /// The connection to fetch as: the one whose event recorded the message, else the one the space
 /// was first seen through, else its voice; with `want`, only a connection of that adapter (the
 /// one the resource's key belongs to). `(connection, adapter)`; `None` when none is left.
-fn connection_of(c: &Connection, r: &Row, want: Option<&str>) -> Option<(String, String)> {
-    let mut cands: Vec<String> = Vec::new();
-    if let Some(ev) = &r.event_id
-        && let Ok(Some(Some(conn))) = c
-            .query_row(
-                "SELECT connection_id FROM ext_events
-                  WHERE id = ?1 AND workspace_id = ?2 AND space_id = ?3 AND message_id = ?4",
-                params![ev, r.ws, r.space_id, r.id],
-                |x| x.get::<_, Option<String>>(0),
-            )
-            .optional()
+fn connection_of(db: &mut impl Read, r: &Source, want: Option<&str>) -> Option<(String, String)> {
+    let mut candidates = Vec::new();
+    if let Some(event) = &r.event_id
+        && let Ok(Some(conn)) =
+            flow_repo::channel_event_connection(db, &r.ws, event, &r.space_id, &r.id)
     {
-        cands.push(conn);
+        candidates.push(conn);
     }
-    if let Ok(Some(s)) = spaces::get(c, &r.space_id) {
-        cands.push(s.via);
-        cands.push(s.connection_id);
+    if let Ok(Some(space)) = channel_spaces::rows::get(db, &r.space_id) {
+        candidates.push(space.via);
+        candidates.push(space.connection_id);
     }
-    cands
+    candidates
         .into_iter()
-        .filter(|x| !x.is_empty())
+        .filter(|conn| !conn.is_empty())
         .find_map(|conn| {
-            c.query_row(
-                "SELECT adapter FROM connections WHERE id = ? AND workspace_id = ?",
-                params![conn, r.ws],
-                |x| x.get::<_, String>(0),
-            )
-            .optional()
-            .ok()
-            .flatten()
-            .filter(|a| want.is_none_or(|w| w == a))
-            .map(|a| (conn, a))
+            connections::connection_kind(db, &conn)
+                .ok()
+                .flatten()
+                .filter(|(ws, adapter)| ws == &r.ws && want.is_none_or(|want| want == adapter))
+                .map(|(_, adapter)| (conn, adapter))
         })
 }
 
@@ -298,7 +238,7 @@ fn supported(adapter: &str) -> bool {
 }
 
 /// Why entry `a` of message `r` cannot be fetched, if it cannot (connection aside).
-fn blocked(r: &Row, a: &Value) -> Option<MediaError> {
+fn blocked(r: &Source, a: &Value) -> Option<MediaError> {
     if r.purged.is_some() {
         return Some(MediaError::Purged);
     }
@@ -371,15 +311,19 @@ fn public_entry(msg: &str, i: usize, a: &Value, why: Option<MediaError>) -> Valu
 
 /// What a stored message shows: `(text, attachments)` with keys removed and `url` / `unavailable`
 /// on each resource; outbound messages have no resources (their entries show `unsupported`).
-pub fn present(c: &Connection, id: &str) -> Option<(Option<String>, Value)> {
-    let r = load(c, id).ok().flatten()?;
+pub fn present(db: &mut impl Read, id: &str) -> Option<(Option<String>, Value)> {
+    let r = repo::get(db, id).ok().flatten()?;
+    Some(present_source(db, &r))
+}
+
+pub(crate) fn present_source(db: &mut impl Read, r: &Source) -> (Option<String>, Value) {
     // purged (or text gone): nothing of it shows, whatever an older sweep left in `attachments`
     if r.purged.is_some() || r.text.is_none() {
-        return Some((None, json!([])));
+        return (None, json!([]));
     }
     let (text, atts) = (r.text.clone(), &r.attachments);
     let Some(xs) = atts.as_array().filter(|x| !x.is_empty()) else {
-        return Some((text, json!([])));
+        return (text, json!([]));
     };
     let out = xs
         .iter()
@@ -394,10 +338,11 @@ pub fn present(c: &Connection, id: &str) -> Option<(Option<String>, Value)> {
                 }
                 return public;
             }
-            let why = blocked(&r, a).or(if r.direction != "in" {
-                Some(MediaError::Unsupported)
-            } else {
-                match &connection_of(c, &r, stamp_of(a)) {
+            let why = blocked(r, a).or_else(|| {
+                if r.direction != "in" {
+                    return Some(MediaError::Unsupported);
+                }
+                match &connection_of(db, r, stamp_of(a)) {
                     None => Some(MediaError::Disconnected),
                     Some((_, ad)) if !supported(ad) => Some(MediaError::Unsupported),
                     _ => None,
@@ -406,7 +351,7 @@ pub fn present(c: &Connection, id: &str) -> Option<(Option<String>, Value)> {
             public_entry(&r.id, i, a, why)
         })
         .collect();
-    Some((text, Value::Array(out)))
+    (text, Value::Array(out))
 }
 
 /// The fetchable resources of stored attachments.
@@ -520,7 +465,7 @@ struct Plan {
     name: Option<String>,
 }
 
-fn plan(c: &Connection, r: &Row, index: usize) -> Result<Plan, MediaError> {
+fn plan(db: &mut impl steve_store::Read, r: &Source, index: usize) -> Result<Plan, MediaError> {
     if r.direction != "in" {
         return Err(MediaError::NotFound);
     }
@@ -539,11 +484,13 @@ fn plan(c: &Connection, r: &Row, index: usize) -> Result<Plan, MediaError> {
     if let Some(e) = blocked(r, a) {
         return Err(e);
     }
-    let (conn, adapter) = connection_of(c, r, stamp_of(a)).ok_or(MediaError::Disconnected)?;
+    let (conn, adapter) = connection_of(db, r, stamp_of(a)).ok_or(MediaError::Disconnected)?;
     if !supported(&adapter) {
         return Err(MediaError::Unsupported);
     }
-    let msg = r.message_ref(c, Some(&conn)).ok_or(MediaError::NotFound)?;
+    let msg = crate::messages::message_ref(db, &r.id, &conn)
+        .map_err(|_| MediaError::Provider)?
+        .ok_or(MediaError::NotFound)?;
     Ok(Plan {
         space_id: r.space_id.clone(),
         conn,
@@ -570,30 +517,22 @@ pub async fn fetch_for_viewer(
 ) -> Result<Fetched, MediaError> {
     let check = || {
         ch.store()
-            .reader(|c| -> crate::ChannelResult<Result<Plan, MediaError>> {
-                let Some(r) = load(c, message_id)? else {
+            .read(|db| -> steve_store::Result<_> {
+                let Some(r) = repo::get(db, message_id)? else {
                     return Ok(Err(MediaError::NotFound));
                 };
                 if r.ws != viewer.ws
-                    || !member(c, &viewer.ws, &viewer.user)?
-                    || !spaces::visible(c, viewer, &r.space_id)?
+                    || !settings::user_is_member(db, &viewer.ws, &viewer.user)?
+                    || !channel_spaces::platform_chat(db, &r.space_id)?
+                        .is_some_and(|chat| chat.ws == viewer.ws)
                 {
                     return Ok(Err(MediaError::NotFound));
                 }
-                Ok(plan(c, &r, index))
+                Ok(plan(db, &r, index))
             })
             .map_err(|_| MediaError::Provider)?
     };
     run(ch, check, limits).await
-}
-
-/// Is `user` (still) a member of `ws`? A viewer loaded before a removal must not keep reading.
-fn member(c: &Connection, ws: &str, user: &str) -> rusqlite::Result<bool> {
-    c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?)",
-        params![ws, user],
-        |r| r.get(0),
-    )
 }
 
 /// The agent's fetch: bound to the workspace and the space the turn came from (no viewer); the
@@ -608,9 +547,9 @@ pub async fn fetch_bound(
 ) -> Result<Fetched, MediaError> {
     let check = || {
         ch.store()
-            .reader(|c| -> crate::ChannelResult<Result<Plan, MediaError>> {
-                Ok(match load(c, message_id)? {
-                    Some(r) if r.ws == ws && r.space_id == space_id => plan(c, &r, index),
+            .read(|db| -> steve_store::Result<_> {
+                Ok(match repo::get(db, message_id)? {
+                    Some(r) if r.ws == ws && r.space_id == space_id => plan(db, &r, index),
                     _ => Err(MediaError::NotFound),
                 })
             })

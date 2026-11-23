@@ -111,7 +111,7 @@ async fn the_same_fact_twice_is_one_event() {
     let c = ItemTrigger::new(e.flow.clone());
     // applied twice without a receipt between (a receipt lost in a restore): the event's id dedupes
     for _ in 0..2 {
-        let a = e.env.store().transaction(|tx| c.apply(tx, &ev)).unwrap();
+        let a = e.env.store().write(|tx| c.apply(tx, &ev)).unwrap();
         drop(a.after);
     }
     assert_eq!(fixtures::event_ids(e.env.store()).unwrap().len(), 1);
@@ -136,7 +136,7 @@ async fn an_executor_that_cannot_wake_in_the_transaction_is_refused() {
     fixtures::waiting_for_item(e.env.store()).unwrap();
     let ev = done(&e, "ST-1");
     let c = ItemTrigger::new(fx);
-    let r = e.env.store().transaction(|tx| c.apply(tx, &ev).map(|_| ()));
+    let r = e.env.store().write(|tx| c.apply(tx, &ev).map(|_| ()));
     assert!(matches!(r, Err(ConsumeError::Reject(_))), "{:?}", r.err());
     assert_eq!(
         fixtures::event_ids(e.env.store()).unwrap().len(),

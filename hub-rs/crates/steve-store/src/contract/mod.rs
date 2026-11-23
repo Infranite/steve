@@ -20,16 +20,27 @@ pub mod account_rows;
 pub mod accounts;
 pub(crate) mod alarms;
 mod attribute_rows;
+pub mod audit;
 pub(crate) mod automation;
 mod backend;
 mod bot_rows;
 pub mod bots;
 mod catalog_rows;
+pub mod channel_feed;
+pub mod channel_messages;
+pub mod channel_names;
+pub mod channel_personas;
+pub mod channel_positions;
+pub mod channel_sends;
+pub mod channel_spaces;
+pub mod channel_trigger_report;
+pub mod channel_write_policy;
 mod connection_rows;
 pub mod connections;
 mod contacts;
 pub mod decisions;
 mod digest_notes;
+pub mod feishu_registration;
 pub mod files;
 mod flow_rows;
 mod flow_sources;
@@ -47,12 +58,14 @@ mod match_rules;
 mod memory_index;
 mod merge_proposals;
 pub(crate) mod message_sources;
+pub mod notifications;
 pub mod parties;
 mod party_rows;
 mod passkey_rows;
 mod project_rows;
 pub mod projects;
 pub(crate) mod read_models;
+pub mod reply_basis;
 mod revisions;
 mod run_rows;
 pub mod secret_uses;
@@ -64,6 +77,7 @@ mod sqlite;
 mod steward_rows;
 mod systems;
 mod team_rows;
+mod thread_triggers;
 mod user_rows;
 pub mod vault_items;
 pub mod vault_keys;
@@ -82,7 +96,7 @@ use sea_query::QueryStatementWriter;
 pub use account_rows::Accounts;
 pub use attribute_rows::{AttrDef, AttrValue, Attributes, NewDef, NewValue};
 pub(crate) use backend::{Backend, Dialect, Json, Row};
-pub use bot_rows::{BotPrompt, BotRef, BotRows};
+pub use bot_rows::{BotPrompt, BotRef, BotRows, ReplyBot};
 pub use catalog_rows::{DeviceIdentity, DeviceRows, PersonaIdentity, PersonaRows};
 pub use connection_rows::{ConnRow, ConnectionBrief, DirectoryConnection, HealthState};
 pub use contacts::{AccountIdentity, Contacts};
@@ -246,6 +260,11 @@ impl Drop for EndRead<'_> {
 }
 
 impl<'a> W<'a> {
+    #[cfg(feature = "testkit")]
+    pub(crate) fn fixture_connection(&self) -> &Connection {
+        self.conn
+    }
+
     /// Published after the commit; dropped if this write, or the scope it is in, rolls back.
     pub fn emit(&mut self, e: impl Into<BusEvent>) {
         self.store.emit_event(e.into());

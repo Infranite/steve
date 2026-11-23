@@ -10,6 +10,9 @@ mod cleanup_backup;
 mod digest_env;
 use digest_env::TestEnv;
 use std::sync::Arc;
+use steve_store::testkit::channels::inspect;
+use steve_store::testkit::channels::seed;
+use steve_store::testkit::channels::seed::people::Bot;
 
 use serde_json::{Value, json};
 use steve_channels::disclosure::{CHECK_HEAD, Disclosure};
@@ -21,15 +24,11 @@ use steve_channels::starred::{self, HEAD, LABEL_AGAIN, LABEL_POLICY_OFF, LABEL_S
 use steve_channels::{Channels, Inbound, InboundMessage, Mention, Replies, SpaceKind, spaces};
 use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowSetup, LinearExecutor};
-use steve_modules::ApiResult;
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
-use steve_modules::accounts::repo::{self as arepo, NewAccount};
-use steve_modules::accounts::service::ensure_seeds;
 use steve_modules::testkit::{ME, WS, call, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use steve_store::base::Viewer;
-use steve_store::uid;
 use tempfile::TempDir;
 
 const PASS: &str = r#"{"verdict": "pass", "spans": []}"#;
@@ -48,37 +47,9 @@ struct H {
 
 /// A bot connection of the workspace (its account is the own organization's).
 fn bot_connection(env: &TestEnv, handle: &str, name: &str) -> String {
-    env.store()
-        .transaction(|tx| -> ApiResult<String> {
-            ensure_seeds(tx, WS)?;
-            steve_modules::contacts::service::ensure_base(tx, &caller(WS, ME))?;
-            let org = tx.write(|w| w.contacts().own_org(WS))?.expect("self org");
-            let a = arepo::insert(
-                tx,
-                WS,
-                &NewAccount {
-                    system_id: FakeChannel::SYSTEM.into(),
-                    family: "slack_user".into(),
-                    party_id: org.id,
-                    kind: "app_bot".into(),
-                    handle: handle.into(),
-                    handle_display: handle.into(),
-                    display_name: name.into(),
-                    verified: true,
-                    confidence: 1.0,
-                    source: "connect".into(),
-                    source_label: String::new(),
-                },
-            )?;
-            let con = uid("con");
-            tx.execute(
-                "INSERT INTO connections (id, workspace_id, account_id, adapter, auth, caps, created_by, created, updated)
-                 VALUES (?, ?, ?, ?, 'none', '[\"msg.receive\",\"msg.send\"]', ?, 1, 1)",
-                rusqlite::params![con, WS, a.id, FakeChannel::ID, ME],
-            )?;
-            Ok(con)
-        })
-        .expect("bot")
+    FakeChannel::seed_bot_connection(env.store(), &caller(WS, ME), handle, name)
+        .expect("bot connection")
+        .0
 }
 
 async fn setup() -> H {
@@ -96,16 +67,7 @@ async fn setup() -> H {
     disclosure.bind(env.store().clone(), env.gateway.clone());
     link.bind_clock(env.clock.clone());
     *core.store.lock().unwrap() = Some(env.store().clone());
-    env.store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "INSERT INTO bots (id, workspace_id, name, main, harness, persona, role, rules, updated) VALUES
-                    ('steve', 'default', 'Steve', 1, 'claude', '', '', '', 1);
-                 INSERT INTO bot_workspaces (bot_id, workspace_id, created) VALUES ('steve', 'default', 1);",
-            )?;
-            Ok(())
-        })
-        .expect("bots");
+    steve_store::testkit::channels::seed::people::bots(env.store(), &[Bot::default()]).unwrap();
     let keys = tempfile::tempdir().expect("tmp");
     let vault = Vault::new(
         env.store().clone(),
@@ -142,7 +104,7 @@ async fn setup() -> H {
     let v = Viewer::bare(WS, ME);
     // nothing is drafted for you anywhere: what the star does is the only thing that happens
     env.store()
-        .transaction(|tx| {
+        .write(|tx| {
             spaces::set_account_rules(
                 tx,
                 &v,
@@ -185,74 +147,22 @@ async fn push(h: &H, m: InboundMessage) -> Inbound {
         .expect("message")
 }
 
-fn row(h: &H, sql: &str, p: &[&str]) -> Vec<Value> {
-    let (sql, p): (String, Vec<String>) = (sql.into(), p.iter().map(|s| s.to_string()).collect());
-    h.env
-        .store()
-        .reader(move |c| {
-            let mut st = c.prepare(&sql)?;
-            let n = st.column_count();
-            let v = st.query_row(rusqlite::params_from_iter(p.iter()), |r| {
-                (0..n)
-                    .map(|i| {
-                        Ok(match r.get_ref(i)? {
-                            rusqlite::types::ValueRef::Null => Value::Null,
-                            rusqlite::types::ValueRef::Integer(x) => json!(x),
-                            rusqlite::types::ValueRef::Real(x) => json!(x),
-                            rusqlite::types::ValueRef::Text(t) => {
-                                json!(String::from_utf8_lossy(t))
-                            }
-                            rusqlite::types::ValueRef::Blob(_) => Value::Null,
-                        })
-                    })
-                    .collect::<rusqlite::Result<Vec<_>>>()
-            })?;
-            Ok::<_, steve_store::StoreError>(v)
-        })
-        .expect("row")
-}
-
-fn count(h: &H, sql: &str, p: &[&str]) -> i64 {
-    row(h, sql, p)[0].as_i64().expect("count")
-}
-
-fn exec(h: &H, sql: &str, p: &[&str]) {
-    let (sql, p): (String, Vec<String>) = (sql.into(), p.iter().map(|s| s.to_string()).collect());
-    digest_env::write(h.env.store(), move |c| {
-        c.execute(&sql, rusqlite::params_from_iter(p.iter()))?;
-        Ok(())
-    })
-    .expect("exec");
-}
-
 fn party_of(h: &H, handle: &str) -> String {
-    row(
-        h,
-        "SELECT party_id FROM accounts WHERE handle = ?",
-        &[handle],
-    )[0]
-    .as_str()
-    .unwrap()
-    .to_string()
+    inspect::people::account_party_id_by_handle(h.env.store(), handle).unwrap()[0]
+        .as_str()
+        .unwrap()
+        .to_string()
 }
 
 fn space_of(h: &H, ext: &str) -> String {
-    row(
-        h,
-        "SELECT id FROM spaces WHERE external_id = ? ORDER BY created LIMIT 1",
-        &[ext],
-    )[0]
-    .as_str()
-    .unwrap()
-    .to_string()
+    inspect::spaces::space_id_by_external(h.env.store(), ext).unwrap()[0]
+        .as_str()
+        .unwrap()
+        .to_string()
 }
 
 fn star(h: &H, handle: &str) {
-    exec(
-        h,
-        "UPDATE parties SET important = 1 WHERE id = ?",
-        &[&party_of(h, handle)],
-    );
+    seed::people::set_party_important_value_1(h.env.store(), &party_of(h, handle)).unwrap();
 }
 
 /// What went out to you: the texts sent anywhere.
@@ -282,28 +192,18 @@ async fn policy(h: &H, mode: Mode) -> Policy {
     )
     .await
     .expect("self dm");
-    let me_party = row(
-        h,
-        "SELECT id FROM parties WHERE workspace_id = ? AND user_id = ?",
-        &[WS, ME],
-    )[0]
+    let me_party = inspect::people::party_id_by_workspace_and_user(h.env.store(), WS, ME).unwrap()
+        [0]
     .as_str()
     .unwrap()
     .to_string();
     // your account on the bot's side is yours (a verified link, not a guess)
-    exec(
-        h,
-        "UPDATE accounts SET party_id = ? WHERE handle = 'uself'",
-        &[&me_party],
-    );
-    let self_dm = row(
-        h,
-        "SELECT id FROM spaces WHERE external_id = 'D_SELF' AND connection_id = ?",
-        &[&h.bot],
-    )[0]
-    .as_str()
-    .unwrap()
-    .to_string();
+    seed::people::set_account_party_id(h.env.store(), &me_party).unwrap();
+    let self_dm = inspect::spaces::space_id_by_d_self_and_connection(h.env.store(), &h.bot)
+        .unwrap()[0]
+        .as_str()
+        .unwrap()
+        .to_string();
     let p = Policy {
         enabled: true,
         mode,
@@ -349,31 +249,23 @@ async fn a_starred_contacts_message_reaches_you_where_nothing_is_drafted() {
     assert_eq!(out[0], format!("{HEAD} 阿甲 私聊你\n晚上一起吃饭吗"));
     // urgent, of its own kind in your inbox and feed
     let intent: Value = serde_json::from_str(
-        row(
-            &h,
-            "SELECT d.intent FROM output_deliveries d JOIN personal_notifications p ON p.delivery_id = d.id WHERE p.topic = 'contact.starred'",
-            &[],
-        )[0]
-        .as_str()
-        .unwrap(),
+        inspect::delivery::output_delivery_intent(h.env.store()).unwrap()[0]
+            .as_str()
+            .unwrap(),
     )
     .unwrap();
     assert_eq!(intent["urgency"], "high");
     assert_eq!(
-        row(
-            &h,
-            "SELECT e.kind FROM feed_entries e JOIN personal_notifications p ON p.id = e.notification_id",
-            &[]
-        )[0],
+        inspect::feed_entries::feed_entrie_kind(h.env.store()).unwrap()[0],
         json!("starred")
     );
     // never a draft in your name because of the star
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM chan_messages WHERE direction = 'out' AND space_id = ?",
-            &[&space_of(&h, "D_A")]
-        ),
+        inspect::messages::count_chan_messages_by_outgoing_and_space(
+            h.env.store(),
+            &space_of(&h, "D_A")
+        )
+        .unwrap(),
         0
     );
 
@@ -441,11 +333,8 @@ async fn nothing_once_you_answered_yourself() {
     pump(&h).await;
     assert!(alerts(&h).is_empty(), "{:?}", alerts(&h));
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM personal_notifications WHERE topic = 'contact.starred' AND state = 'cancelled'",
-            &[]
-        ),
+        inspect::notifications::count_personal_notifications_by_cancelled_count(h.env.store())
+            .unwrap(),
         1
     );
 }
@@ -490,7 +379,7 @@ async fn your_policy_decides_how_it_reaches_you() {
         .unwrap();
     assert!(r.label.ends_with(LABEL_POLICY_OFF), "{}", r.label);
     assert_eq!(
-        count(&h, "SELECT count(*) FROM personal_notifications", &[]),
+        inspect::notifications::count_personal_notifications(h.env.store()).unwrap(),
         0
     );
 
@@ -526,11 +415,7 @@ async fn your_policy_decides_how_it_reaches_you() {
     pump(&h).await;
     assert_eq!(alerts(&h).len(), 1);
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM personal_notifications WHERE topic = 'contact.starred' AND state = 'held'",
-            &[]
-        ),
+        inspect::notifications::count_personal_notifications_by_held_count(h.env.store()).unwrap(),
         2
     );
 
@@ -561,23 +446,14 @@ async fn a_space_set_aside_keeps_it_out() {
     let space = space_of(&h, "D_A");
 
     // replies set to record there: still told (the setting is about replies)
-    exec(
-        &h,
-        "INSERT INTO space_prefs (space_id, workspace_id, reply_as_you, updated) VALUES (?1, 'default', 'record', 1)
-           ON CONFLICT (space_id) DO UPDATE SET reply_as_you = 'record'",
-        &[&space],
-    );
+    seed::spaces::seed_space_preference(h.env.store(), &space).unwrap();
     push(&h, msg(&h, "D_A", "s1", "ua", "在吗", 0)).await;
     pump(&h).await;
     assert_eq!(alerts(&h).len(), 1);
 
     // Steve leaves the space alone (off): nothing, and a waiting one is cancelled
     h.env.clock.advance(3_600_000);
-    exec(
-        &h,
-        "UPDATE space_prefs SET reply_as_you = 'off' WHERE space_id = ?",
-        &[&space],
-    );
+    seed::spaces::set_space_preference_reply_as_you_off(h.env.store(), &space).unwrap();
     let r = push(&h, msg(&h, "D_A", "s2", "ua", "在吗", 0))
         .await
         .response
@@ -587,16 +463,8 @@ async fn a_space_set_aside_keeps_it_out() {
     assert_eq!(alerts(&h).len(), 1);
 
     // 不提醒: nothing either
-    exec(
-        &h,
-        "UPDATE space_prefs SET reply_as_you = 'draft' WHERE space_id = ?",
-        &[&space],
-    );
-    exec(
-        &h,
-        "UPDATE space_prefs SET attention = 'quiet' WHERE space_id = ?",
-        &[&space],
-    );
+    seed::spaces::set_space_preference_reply_as_you_draft(h.env.store(), &space).unwrap();
+    seed::spaces::set_space_preference_attention_quiet(h.env.store(), &space).unwrap();
     h.env.clock.advance(3_600_000);
     push(&h, msg(&h, "D_A", "s3", "ua", "在吗", 0)).await;
     pump(&h).await;
@@ -614,22 +482,15 @@ async fn a_retry_after_you_answered_is_let_go() {
     push(&h, msg(&h, "D_A", "s1", "ua", "在吗", 0)).await;
     pump(&h).await;
     *h.fake.fail_send.lock().unwrap() = None;
-    let out = row(
-        &h,
-        "SELECT d.message_id FROM output_deliveries d JOIN personal_notifications p ON p.delivery_id = d.id WHERE p.topic = 'contact.starred'",
-        &[],
-    )[0]
-    .as_str()
-    .unwrap()
-    .to_string();
-    let fail = row(
-        &h,
-        "SELECT id FROM decisions WHERE subject_id = ? AND kind = 'fail' AND status = 'open'",
-        &[&out],
-    )[0]
-    .as_str()
-    .unwrap()
-    .to_string();
+    let out = inspect::delivery::output_delivery_message_id(h.env.store()).unwrap()[0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let fail = inspect::decisions::decision_id_by_subject_and_fail_and_open(h.env.store(), &out)
+        .unwrap()[0]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // you answered A yourself meanwhile; the retry sends nothing
     h.env.clock.advance(30_000);
@@ -641,15 +502,11 @@ async fn a_retry_after_you_answered_is_let_go() {
     h.outbox.send_due(&h.ch).await;
     assert!(alerts(&h).is_empty(), "{:?}", alerts(&h));
     assert_eq!(
-        row(&h, "SELECT status FROM chan_messages WHERE id = ?", &[&out])[0],
+        inspect::messages::message_status(h.env.store(), &out).unwrap()[0],
         json!("discarded")
     );
     assert_eq!(
-        row(
-            &h,
-            "SELECT state FROM personal_notifications WHERE topic = 'contact.starred'",
-            &[]
-        )[0],
+        inspect::notifications::notice_state(h.env.store()).unwrap()[0],
         json!("cancelled")
     );
 }
@@ -685,14 +542,10 @@ async fn the_bots_copy_first_still_tells_you() {
         vec![format!("{HEAD} 阿甲 在「开发群」@ 了你\n这个你看下")]
     );
     assert!(
-        row(
-            &h,
-            "SELECT e.outcome_label FROM ext_events e JOIN chan_messages m ON m.event_id = e.id WHERE m.id = ?",
-            &[&first.message_id]
-        )[0]
-        .as_str()
-        .unwrap()
-        .ends_with(LABEL_SENT)
+        inspect::signals::signal_outcome_label(h.env.store(), &first.message_id).unwrap()[0]
+            .as_str()
+            .unwrap()
+            .ends_with(LABEL_SENT)
     );
     // the same copy again: nothing more
     push(&h, at_you(msg(&h, "C_DEV", "g2", "ua", "这个你看下", 0))).await;
@@ -733,11 +586,7 @@ async fn under_digest_an_interrupted_send_is_resumed() {
     pump(&h).await;
     assert!(alerts(&h).is_empty());
     assert_eq!(
-        row(
-            &h,
-            "SELECT state FROM personal_notifications WHERE topic = 'contact.starred'",
-            &[]
-        )[0],
+        inspect::notifications::notice_state(h.env.store()).unwrap()[0],
         json!("submitted")
     );
     h.env.store().maintenance_set(false).unwrap();
@@ -763,27 +612,15 @@ async fn two_notified(h: &H) {
     push(h, msg(h, "D_B", "s2", "ub", "门禁口令是松鼠", 0)).await;
     // the copies there are to purge
     assert_eq!(
-        count(
-            h,
-            "SELECT count(*) FROM output_deliveries WHERE intent LIKE '%青蛙%'",
-            &[]
-        ),
+        inspect::delivery::count_output_deliveries_count_3(h.env.store()).unwrap(),
         1
     );
     assert_eq!(
-        count(
-            h,
-            "SELECT count(*) FROM chan_messages WHERE direction = 'out' AND text LIKE '%青蛙%'",
-            &[]
-        ),
+        inspect::messages::count_chan_messages_by_outgoing_count_3(h.env.store()).unwrap(),
         1
     );
     assert_eq!(
-        count(
-            h,
-            "SELECT count(*) FROM personal_notifications WHERE topic = 'contact.starred' AND body IS NOT NULL",
-            &[]
-        ),
+        inspect::notifications::count_personal_notifications_count_2(h.env.store()).unwrap(),
         2
     );
 }
@@ -792,29 +629,17 @@ async fn two_notified(h: &H) {
 /// message that went out to you, or its delivery.
 fn no_copy_left(h: &H, how: &str) {
     assert_eq!(
-        count(
-            h,
-            "SELECT count(*) FROM personal_notifications WHERE topic = 'contact.starred' AND (body IS NOT NULL OR state <> 'purged')",
-            &[]
-        ),
+        inspect::notifications::count_personal_notifications_count_3(h.env.store()).unwrap(),
         0,
         "{how}"
     );
     assert_eq!(
-        count(
-            h,
-            "SELECT count(*) FROM chan_messages WHERE direction = 'out' AND (text LIKE '%青蛙%' OR text LIKE '%松鼠%')",
-            &[]
-        ),
+        inspect::messages::count_chan_messages_by_outgoing_count_4(h.env.store()).unwrap(),
         0,
         "{how}"
     );
     assert_eq!(
-        count(
-            h,
-            "SELECT count(*) FROM output_deliveries WHERE intent LIKE '%青蛙%' OR intent LIKE '%松鼠%'",
-            &[]
-        ),
+        inspect::delivery::count_output_deliveries_count_4(h.env.store()).unwrap(),
         0,
         "{how}"
     );
@@ -825,11 +650,8 @@ async fn purging_the_message_purges_every_copy_of_it() {
     // the text purged (删除消息正文, or retention): the same update of the message as both do
     let h = setup().await;
     two_notified(&h).await;
-    exec(
-        &h,
-        "UPDATE chan_messages SET text = NULL, attachments = '[]', purged = 1 WHERE external_id IN ('s1', 's2')",
-        &[],
-    );
+    seed::messages::clear_message_text_for_purging_the_message_purges_every_co(h.env.store())
+        .unwrap();
     no_copy_left(&h, "text");
 
     // 清理记录: the spaces, their messages and the cards on them deleted
@@ -862,11 +684,7 @@ async fn purging_the_message_purges_every_copy_of_it() {
     .await;
     assert_eq!(st, 200, "{result}");
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM chan_messages WHERE external_id IN ('s1', 's2')",
-            &[]
-        ),
+        inspect::messages::count_chan_messages_by_external_id_s1_s2(h.env.store()).unwrap(),
         0,
         "{result}"
     );

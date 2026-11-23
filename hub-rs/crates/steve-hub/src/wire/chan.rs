@@ -7,7 +7,6 @@ use std::sync::Arc;
 use axum::extract::{Extension, Path, Query};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
-use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use steve_channels::{Channels, Outbox};
 use steve_modules::{ApiError, ApiResult, Caller, Modules};
@@ -48,16 +47,11 @@ pub fn routes(ch: Channels, outbox: Arc<Outbox>) -> Router<Modules> {
 /// The message exists in the caller's workspace and its space is visible to them.
 fn visible(ch: &Channels, who: &Caller, id: &str) -> ApiResult<()> {
     let viewer = ch.modules().viewer(who)?;
-    ch.store().reader(|c| {
-        let space: Option<String> = c
-            .query_row(
-                "SELECT space_id FROM chan_messages WHERE id = ? AND workspace_id = ?",
-                [id, &who.ws],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let space = space.ok_or_else(|| ApiError::not_found("消息"))?;
-        steve_channels::spaces::own(c, &viewer, &space).map_err(|_| ApiError::not_found("消息"))?;
+    ch.store().read(|r| {
+        let space = steve_store::channel_message_repo::space_of(r, &who.ws, id)?
+            .ok_or_else(|| ApiError::not_found("消息"))?;
+        steve_store::channel_spaces::rows::get_in_workspace(r, &viewer.ws, &space)?
+            .ok_or_else(|| ApiError::not_found("消息"))?;
         Ok(())
     })
 }
@@ -84,10 +78,10 @@ async fn basis(
     let c2 = ch.clone();
     ch.modules()
         .blocking(move |_| {
-            visible(&c2, &who, &id)?;
-            let b = c2
-                .store()
-                .reader(|c| steve_channels::basis::of_message(c, &who.ws, &id))?;
+            let b = c2.store().read(|r| {
+                visible(&c2, &who, &id)?;
+                steve_channels::basis::of_message(r, &who.ws, &id)
+            })?;
             Ok(Json(serde_json::to_value(b).map_err(ApiError::from)?))
         })
         .await
@@ -173,9 +167,13 @@ async fn conversations(
     ch.modules()
         .blocking(move |_| {
             let viewer = c2.modules().viewer(&who)?;
-            let list = c2.store().reader(|c| {
-                steve_channels::conversations::list_page(c, &who.ws, &viewer, &query, c2.now())
-            })?;
+            let list = steve_channels::conversations::list_page(
+                c2.store(),
+                &who.ws,
+                &viewer,
+                &query,
+                c2.now(),
+            )?;
             Ok(Json(serde_json::to_value(list).map_err(ApiError::from)?))
         })
         .await
@@ -197,7 +195,7 @@ async fn conversation_preferences(
     ch.modules()
         .blocking(move |_| {
             let viewer = c2.modules().viewer(&who)?;
-            c2.store().transaction(|tx| {
+            c2.store().write(|tx| {
                 steve_channels::conversations::set_closed(tx, &who.ws, &viewer, &space, body.closed)
             })?;
             Ok(Json(
@@ -234,9 +232,7 @@ async fn conversation_channels(
     ch.modules()
         .blocking(move |_| {
             let viewer = c2.modules().viewer(&who)?;
-            let list = c2
-                .store()
-                .reader(|c| steve_channels::conv_record::channels(&c2, c, &viewer, c2.now()))?;
+            let list = steve_channels::conv_record::channels(&c2, c2.store(), &viewer, c2.now())?;
             Ok(Json(json!({ "channels": list })))
         })
         .await
@@ -254,9 +250,8 @@ async fn conversation_record(
     ch.modules()
         .blocking(move |_| {
             let viewer = c2.modules().viewer(&who)?;
-            let v = c2.store().reader(|c| {
-                steve_channels::conv_record::record(c, &who.ws, &viewer, &space, &query)
-            })?;
+            let v =
+                steve_channels::conv_record::record(c2.store(), &who.ws, &viewer, &space, &query)?;
             Ok(Json(v))
         })
         .await
@@ -281,7 +276,7 @@ async fn conversation_read(
         .blocking(move |_| {
             let viewer = c2.modules().viewer(&who)?;
             let now = c2.now();
-            c2.store().transaction(|tx| {
+            c2.store().write(|tx| {
                 steve_channels::conv_record::mark_read(tx, &who.ws, &viewer, &space, body.at, now)
             })?;
             Ok(Json(json!({"ok": true})))

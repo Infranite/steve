@@ -7,9 +7,10 @@
 mod digest_env;
 use digest_env::TestEnv;
 use std::sync::Arc;
+use steve_store::testkit::channels::inspect;
+use steve_store::testkit::channels::seed;
 
 use axum::Router;
-use rusqlite::params;
 use serde_json::{Value, json};
 use steve_channels::fake::channel::FakeChannel;
 use steve_channels::inbound::{LABEL_BOT, LABEL_OWN};
@@ -92,45 +93,6 @@ fn setup() -> H {
     }
 }
 
-fn rows(h: &H, sql: &str, p: &[&str]) -> Vec<Vec<Value>> {
-    let (sql, p): (String, Vec<String>) = (sql.into(), p.iter().map(|s| s.to_string()).collect());
-    h.env
-        .store()
-        .reader(move |c| {
-            let mut st = c.prepare(&sql)?;
-            let n = st.column_count();
-            let out = st
-                .query_map(rusqlite::params_from_iter(p.iter()), |r| {
-                    (0..n)
-                        .map(|i| {
-                            Ok(match r.get_ref(i)? {
-                                rusqlite::types::ValueRef::Null => Value::Null,
-                                rusqlite::types::ValueRef::Integer(x) => json!(x),
-                                rusqlite::types::ValueRef::Real(x) => json!(x),
-                                rusqlite::types::ValueRef::Text(t) => {
-                                    json!(String::from_utf8_lossy(t))
-                                }
-                                rusqlite::types::ValueRef::Blob(_) => Value::Null,
-                            })
-                        })
-                        .collect::<rusqlite::Result<Vec<_>>>()
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok::<_, steve_store::StoreError>(out)
-        })
-        .expect("rows")
-}
-
-fn one(h: &H, sql: &str, p: &[&str]) -> Vec<Value> {
-    let mut r = rows(h, sql, p);
-    assert_eq!(r.len(), 1, "{sql} {p:?} → {r:?}");
-    r.remove(0)
-}
-
-fn count(h: &H, sql: &str, p: &[&str]) -> i64 {
-    one(h, sql, p)[0].as_i64().expect("count")
-}
-
 async fn push(h: &H, m: steve_channels::InboundMessage) -> Inbound {
     h.ch.on_inbound(WS, &h.con, m).await.expect("inbound")
 }
@@ -148,12 +110,8 @@ async fn pushed_message_creates_space_identifies_sender_and_records_event() {
     assert_eq!(r.next, Next::Handle);
 
     // the space: name and kind from the adapter, settings not yet configured, default disclosure
-    let s = one(
-        &h,
-        "SELECT s.name, s.kind, s.member_count, s.has_external, ss.configured, ss.disclosure, s.system_id FROM spaces s
-           JOIN space_settings ss ON ss.space_id = s.id WHERE s.id = ?",
-        &[&r.space_id],
-    );
+    let s = inspect::spaces::space_name_kind_member_count_has_external(h.env.store(), &r.space_id)
+        .unwrap();
     assert_eq!(
         s,
         vec![
@@ -170,37 +128,25 @@ async fn pushed_message_creates_space_identifies_sender_and_records_event() {
     // the sender: identified with the name from the members list, a member of the space
     let acc = r.sender_account_id.clone().expect("sender account");
     let party = r.sender_party_id.clone().expect("sender party");
-    let a = one(
-        &h,
-        "SELECT handle, display_name, party_id FROM accounts WHERE id = ?",
-        &[&acc],
-    );
+    let a = inspect::people::account_handle_display_name_party_id(h.env.store(), &acc).unwrap();
     assert_eq!(a, vec![json!("ualice"), json!("王小丽"), json!(party)]);
     assert_eq!(
-        one(
-            &h,
-            "SELECT name, contact_kind FROM parties WHERE id = ?",
-            &[&party]
-        ),
+        inspect::people::party_name_contact_kind(h.env.store(), &party).unwrap(),
         vec![json!("王小丽"), json!("unconfirmed")]
     );
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM space_members WHERE space_id = ?",
-            &[&r.space_id]
-        ),
+        inspect::spaces::count_space_members_by_space_count(h.env.store(), &r.space_id).unwrap(),
         3,
         "bot + two members"
     );
     assert!(!r.sender_is_ours);
 
     // the message and its event
-    let m = one(
-        &h,
-        "SELECT direction, text, status, sender_party_id, event_id, external_id FROM chan_messages WHERE id = ?",
-        &[&r.message_id],
-    );
+    let m = inspect::messages::message_direction_text_status_sender_party_id(
+        h.env.store(),
+        &r.message_id,
+    )
+    .unwrap();
     let Some(Ingested::Stored { id: evt, .. }) = r.event.clone() else {
         panic!("event stored: {:?}", r.event);
     };
@@ -215,11 +161,7 @@ async fn pushed_message_creates_space_identifies_sender_and_records_event() {
             json!("m1")
         ]
     );
-    let e = one(
-        &h,
-        "SELECT source, type, space_id, message_id, actor_party_id, connection_id, summary, outcome_label FROM ext_events WHERE id = ?",
-        &[&evt],
-    );
+    let e = inspect::signals::signal_source_kind_space_id_message_id(h.env.store(), &evt).unwrap();
     assert_eq!(
         e,
         vec![
@@ -241,7 +183,7 @@ async fn pushed_message_creates_space_identifies_sender_and_records_event() {
     assert_eq!(r2.space_id, r.space_id);
     assert_eq!(r2.sender_party_id, r.sender_party_id);
     assert_eq!(*h.fake.member_calls.lock().unwrap(), calls);
-    assert_eq!(count(&h, "SELECT count(*) FROM spaces", &[]), 1);
+    assert_eq!(inspect::spaces::count_spaces(h.env.store()).unwrap(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -249,11 +191,8 @@ async fn new_group_opens_one_decision_dm_and_existing_spaces_none() {
     let h = setup();
     let r = push(&h, FakeChannel::message("G1", "m1", "ualice", "hi")).await;
     let d = r.decision_id.clone().expect("decision");
-    let row = one(
-        &h,
-        "SELECT kind, subject_type, subject_id, question, options, status, item_id FROM decisions WHERE id = ?",
-        &[&d],
-    );
+    let row = inspect::decisions::decision_kind_subject_type_subject_id_question(h.env.store(), &d)
+        .unwrap();
     assert_eq!(
         row,
         vec![
@@ -273,29 +212,17 @@ async fn new_group_opens_one_decision_dm_and_existing_spaces_none() {
     assert!(dm.space_created && dm.decision_id.is_none());
     assert_eq!(dm.type_key, "im.dm");
     assert_eq!(
-        one(
-            &h,
-            "SELECT s.name, s.kind, ss.disclosure FROM spaces s JOIN space_settings ss ON ss.space_id = s.id WHERE s.id = ?",
-            &[&dm.space_id]
-        ),
+        inspect::spaces::space_name_kind_disclosure(h.env.store(), &dm.space_id).unwrap(),
         vec![json!("王小丽"), json!("dm"), json!("reasoning")]
     );
     // a customer group: `reasoning`, has_external
     let x = push(&h, FakeChannel::message("X1", "x1", "uext", "方案呢")).await;
     assert_eq!(
-        one(
-            &h,
-            "SELECT s.has_external, ss.disclosure FROM spaces s JOIN space_settings ss ON ss.space_id = s.id WHERE s.id = ?",
-            &[&x.space_id]
-        ),
+        inspect::spaces::space_has_external_disclosure(h.env.store(), &x.space_id).unwrap(),
         vec![json!(1), json!("reasoning")]
     );
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM decisions WHERE subject_type = 'space'",
-            &[]
-        ),
+        inspect::decisions::count_decisions_by_space(h.env.store()).unwrap(),
         2
     );
 }
@@ -309,11 +236,7 @@ async fn space_info_failure_falls_back_to_the_payload() {
     let r = push(&h, m).await;
     assert!(r.space_created);
     assert_eq!(
-        one(
-            &h,
-            "SELECT name, kind FROM spaces WHERE id = ?",
-            &[&r.space_id]
-        ),
+        inspect::spaces::space_name_kind(h.env.store(), &r.space_id).unwrap(),
         vec![json!("临时群"), json!("group")]
     );
     assert!(r.sender_account_id.is_some(), "still identified by handle");
@@ -346,11 +269,7 @@ async fn own_bot_messages_are_not_processed_other_bots_only_recorded() {
         .expect("event")
         .to_string();
     assert_eq!(
-        one(
-            &h,
-            "SELECT outcome, outcome_label FROM ext_events WHERE id = ?",
-            &[&evt]
-        ),
+        inspect::signals::signal_outcome_outcome_label_single_row(h.env.store(), &evt).unwrap(),
         vec![json!("recorded"), json!(LABEL_OWN)]
     );
 
@@ -366,19 +285,16 @@ async fn own_bot_messages_are_not_processed_other_bots_only_recorded() {
         .expect("event")
         .to_string();
     assert_eq!(
-        one(
-            &h,
-            "SELECT outcome_label FROM ext_events WHERE id = ?",
-            &[&evt]
-        ),
+        inspect::signals::signal_outcome_label_single_row(h.env.store(), &evt).unwrap(),
         vec![json!(LABEL_BOT)]
     );
     assert_eq!(
-        one(
-            &h,
-            "SELECT role FROM space_members WHERE space_id = ? AND account_id = ?",
-            &[&other.space_id, other.sender_account_id.as_deref().unwrap()]
-        ),
+        inspect::spaces::space_member_role_by_space_and_account(
+            h.env.store(),
+            &other.space_id,
+            other.sender_account_id.as_deref().unwrap()
+        )
+        .unwrap(),
         vec![json!("bot")]
     );
 
@@ -401,17 +317,7 @@ async fn own_bot_messages_are_not_processed_other_bots_only_recorded() {
     h.env.clock.advance(5);
     let out = |id: &str, status: &str| {
         let at = h.env.modules.clock.now();
-        h.env
-            .store()
-            .transaction(|c| -> Result<(), steve_store::StoreError> {
-                c.execute(
-                    "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, text, status, created, sent)
-                     VALUES (?1, 'default', ?2, ?3, 'out', '好的', ?4, ?5, ?5)",
-                    params![id, other.space_id, format!("fm_{id}"), status, at],
-                )?;
-                steve_store_sqlite::digest::sync_message(c, steve_store_sqlite::digest::Source::ChanMessage, id, None)?;
-                Ok(())
-            })
+        seed::messages::seed_outbound_state(h.env.store(), id, &other.space_id, status, at)
             .unwrap();
     };
     out("draft1", "draft");
@@ -457,15 +363,17 @@ async fn redelivery_is_a_duplicate_and_writes_nothing() {
     let b = push(&h, again).await;
     assert!(b.duplicate && b.event.is_none());
     assert_eq!(b.message_id, a.message_id);
-    assert_eq!(count(&h, "SELECT count(*) FROM chan_messages", &[]), 1);
-    assert_eq!(count(&h, "SELECT count(*) FROM ext_events", &[]), 1);
+    assert_eq!(
+        inspect::messages::count_chan_messages(h.env.store()).unwrap(),
+        1
+    );
+    assert_eq!(
+        inspect::signals::count_ext_events(h.env.store()).unwrap(),
+        1
+    );
     // the second path filled what the first lacked
     assert_eq!(
-        one(
-            &h,
-            "SELECT thread_key FROM chan_messages WHERE id = ?",
-            &[&a.message_id]
-        ),
+        inspect::messages::message_thread_key_single_row(h.env.store(), &a.message_id).unwrap(),
         vec![json!("t1")]
     );
 }
@@ -490,13 +398,9 @@ async fn types_mention_reply_and_mentions_column() {
     let r = push(&h, m).await;
     assert_eq!(r.type_key, "im.mention");
     let mentions: Value = serde_json::from_str(
-        one(
-            &h,
-            "SELECT mentions FROM chan_messages WHERE id = ?",
-            &[&r.message_id],
-        )[0]
-        .as_str()
-        .unwrap(),
+        inspect::messages::message_mentions(h.env.store(), &r.message_id).unwrap()[0]
+            .as_str()
+            .unwrap(),
     )
     .unwrap();
     assert_eq!(
@@ -505,25 +409,14 @@ async fn types_mention_reply_and_mentions_column() {
     );
 
     // a reply to a message Steve sent
-    h.env
-        .store()
-        .transaction(|c| -> Result<(), steve_store::StoreError> {
-            c.execute(
-                "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_account_id, on_behalf, text, status, created, sent)
-                 VALUES ('cm_out1', 'default', ?, 'fm_1', 'out', ?, 'persona', '已处理', 'sent', 1, 1)",
-                params![r.space_id, h.bot_acc],
-            )?;
-                steve_store_sqlite::digest::sync_message(c, steve_store_sqlite::digest::Source::ChanMessage, "cm_out1", None)?;
-            Ok(())
-        })
-        .unwrap();
+    seed::messages::seed_persona_reply(h.env.store(), &r.space_id, &h.bot_acc).unwrap();
     let mut m = FakeChannel::message("G1", "m2", "ualice", "谢谢");
     m.reply_to = Some("fm_1".into());
     let r = push(&h, m).await;
     assert_eq!(r.type_key, "im.reply");
     let evt = r.event.as_ref().and_then(|e| e.id()).unwrap().to_string();
     assert_eq!(
-        one(&h, "SELECT type FROM ext_events WHERE id = ?", &[&evt]),
+        inspect::signals::signal_kind(h.env.store(), &evt).unwrap(),
         vec![json!("im.reply")]
     );
 }
@@ -535,35 +428,14 @@ async fn many_replies_do_not_silence_the_space() {
     let h = setup();
     let r = push(&h, FakeChannel::message("G1", "m0", "ualice", "hi")).await;
     let now = h.ch.now();
-    h.env
-        .store()
-        .transaction(|c| -> Result<(), steve_store::StoreError> {
-            for i in 0..50 {
-                c.execute(
-                    "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, text, status, created, sent)
-                     VALUES (?, 'default', ?, ?, 'out', 'x', 'sent', ?, ?)",
-                    params![format!("cm_o{i}"), r.space_id, format!("fm_{i}"), now, now],
-                )?;
-                steve_store_sqlite::digest::sync_message(c, steve_store_sqlite::digest::Source::ChanMessage, &format!("cm_o{i}"), None)?;
-            }
-            Ok(())
-        })
-        .unwrap();
+    seed::messages::seed_recent_outbound(h.env.store(), &r.space_id, now).unwrap();
     push(&h, FakeChannel::message("G1", "m1", "ualice", "再来")).await;
     assert_eq!(
-        one(
-            &h,
-            "SELECT coalesce(max(muted), 0) FROM space_settings WHERE space_id = ?",
-            &[&r.space_id]
-        ),
+        inspect::spaces::space_coalescemax_by_space(h.env.store(), &r.space_id).unwrap(),
         vec![json!(0)]
     );
     assert_eq!(
-        one(
-            &h,
-            "SELECT count(*) FROM decisions WHERE subject_id = ? AND kind = 'fail'",
-            &[&r.space_id]
-        ),
+        inspect::decisions::decision_count_by_subject_and_fail(h.env.store(), &r.space_id).unwrap(),
         vec![json!(0)]
     );
 }
@@ -580,11 +452,7 @@ async fn purged_text_is_null_everywhere() {
     let later = h.env.clock.advance(8 * 24 * 3_600_000);
     assert_eq!(messages::sweep(&h.env.modules, later).unwrap(), 1);
     assert_eq!(
-        one(
-            &h,
-            "SELECT text, purged FROM chan_messages WHERE id = ?",
-            &[&r.message_id]
-        ),
+        inspect::messages::message_text_purged(h.env.store(), &r.message_id).unwrap(),
         vec![Value::Null, json!(later)]
     );
     assert_eq!(messages::sweep(&h.env.modules, later).unwrap(), 0, "once");
@@ -602,23 +470,13 @@ async fn purged_text_is_null_everywhere() {
 
     // keepRaw = 30: a 8-day-old message stays
     let r2 = push(&h, FakeChannel::message("G1", "m2", "ualice", "新的")).await;
-    h.env
-        .store()
-        .with_conn(|c| {
-            c.execute("INSERT INTO settings (workspace_id, key, value, updated) VALUES ('default', 'keepRaw', '\"30\"', 1)", [])?;
-            Ok(())
-        })
-        .unwrap();
+    seed::spaces::keep_raw_for_30_days(h.env.store()).unwrap();
     assert_eq!(
         messages::sweep(&h.env.modules, later + 8 * 24 * 3_600_000).unwrap(),
         0
     );
     assert_eq!(
-        one(
-            &h,
-            "SELECT text FROM chan_messages WHERE id = ?",
-            &[&r2.message_id]
-        ),
+        inspect::messages::message_text_single_row(h.env.store(), &r2.message_id).unwrap(),
         vec![json!("新的")]
     );
 }
@@ -690,37 +548,14 @@ async fn single_user_keeps_disconnected_history_visible_after_account_disappears
     };
     // a bot account's group: everyone sees it, connected or disconnected
     assert_eq!(lines(&timeline(OTHER).await.1), 1);
-    h.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE spaces SET status = 'left', account_id = (SELECT account_id FROM connections WHERE id = connection_id), connection_id = NULL WHERE id = ?",
-                [&r.space_id],
-            )?;
-            // what ChannelUsage does to the identities
-            c.execute(
-                "UPDATE space_identities SET left_at = 1 WHERE space_id = ?",
-                [&r.space_id],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    seed::spaces::detach_fixture_space(h.env.store(), &r.space_id).unwrap();
     assert_eq!(lines(&timeline(OTHER).await.1), 1);
     let path = format!("/spaces/{}", r.space_id);
     let (st, _) = call(&h.api, Some(&caller(WS, OTHER)), "GET", &path, None).await;
     assert_eq!(st, 200);
 
     // Single-user reads retain disconnected history even when the account no longer resolves.
-    h.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE spaces SET account_id = 'acc_gone' WHERE id = ?",
-                [&r.space_id],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    seed::spaces::assign_missing_fixture_account(h.env.store(), &r.space_id).unwrap();
     let (st, _) = call(&h.api, Some(&caller(WS, OTHER)), "GET", &path, None).await;
     assert_eq!(st, 200);
     let (_, v) = call(&h.api, Some(&caller(WS, OTHER)), "GET", "/spaces", None).await;
@@ -808,19 +643,11 @@ async fn space_routes_list_detail_patch_and_404s() {
         )
     );
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM revisions WHERE object_type = 'space' AND object_id = ?",
-            &[&r.space_id]
-        ),
+        inspect::people::count_revisions_by_object(h.env.store(), &r.space_id).unwrap(),
         1
     );
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM audit WHERE action = 'space.patch'",
-            &[]
-        ),
+        inspect::audit::count_audit_by_space_patch(h.env.store()).unwrap(),
         1
     );
 
@@ -887,11 +714,7 @@ async fn single_user_reads_other_accounts_spaces_with_fixed_bindings() {
     // a self connection opens no “新群” decision and gets the self default rules
     assert!(r.decision_id.is_none());
     assert_eq!(
-        one(
-            &h,
-            "SELECT mode FROM channel_settings WHERE connection_id = ?",
-            &[&mine]
-        ),
+        inspect::connections::channel_settings_mode_by_connection(h.env.store(), &mine).unwrap(),
         vec![json!("self")]
     );
     let (s, _) = call(
@@ -914,34 +737,26 @@ async fn single_user_reads_other_accounts_spaces_with_fixed_bindings() {
     assert_eq!(s, 200);
     h.env
         .store()
-        .reader(|c| -> steve_modules::ApiResult<()> {
+        .read(|db| -> steve_modules::ApiResult<()> {
             let viewer = steve_store::base::Viewer::bare(WS, ME);
-            let context = steve_channels::compose::viewer(c, WS, &mine, &r.space_id)?;
+            let context = steve_channels::compose::viewer(db, WS, &mine)?;
             assert_eq!(
                 context.user, OTHER,
                 "reply identity still follows the connected account"
             );
             assert!(context.scopes.is_empty());
-            // This executes spaces::visible's real ?1/?2/?3 query and bindings.
-            assert!(steve_channels::spaces::visible(c, &viewer, &r.space_id)?);
-            assert!(!steve_channels::spaces::visible(
-                c,
-                &steve_store::base::Viewer::bare(WS2, ME),
-                &r.space_id
-            )?);
-            assert!(!steve_channels::spaces::visible(c, &viewer, "missing")?);
-            assert!(steve_channels::spaces::visible_ids(c, &viewer)?.contains(&r.space_id));
+            use steve_store::channel_spaces::rows;
+            assert!(rows::get_in_workspace(db, &viewer.ws, &r.space_id)?.is_some());
+            assert!(rows::get_in_workspace(db, WS2, &r.space_id)?.is_none());
+            assert!(rows::get_in_workspace(db, &viewer.ws, "missing")?.is_none());
+            assert!(rows::visible_ids(db, &viewer.ws)?.contains(&r.space_id));
             Ok(())
         })
         .unwrap();
     // the event is private too (S1: a connection of someone's “我”)
     let evt = r.event.as_ref().and_then(|e| e.id()).unwrap().to_string();
     assert_eq!(
-        one(
-            &h,
-            "SELECT visibility FROM ext_events WHERE id = ?",
-            &[&evt]
-        ),
+        inspect::signals::signal_visibility(h.env.store(), &evt).unwrap(),
         vec![json!("private")]
     );
     // you writing in the group from your own account: not processed
@@ -1009,31 +824,19 @@ async fn a_sender_known_by_an_alias_lands_on_the_contact_holding_it() {
             )
         })
         .expect("identify");
-    let contacts = count(
-        &h,
-        "SELECT count(*) FROM parties WHERE type = 'contact'",
-        &[],
-    );
+    let contacts = inspect::people::count_parties_by_contact(h.env.store()).unwrap();
     let mut m = FakeChannel::message("G1", "m1", "u_int_1", "你好");
     m.sender = Sender::new(HandleRef::new(FakeChannel::SYSTEM, "u_int_1"))
         .alias(HandleRef::new("mail", "Alice@Example.com"));
     let r = push(&h, m).await;
     assert_eq!(r.sender_party_id.as_deref(), Some(alice.party_id.as_str()));
     assert_eq!(
-        one(
-            &h,
-            "SELECT party_id FROM accounts WHERE system_id = ? AND handle = 'u_int_1'",
-            &[FakeChannel::SYSTEM]
-        ),
+        inspect::people::account_party_id_by_system(h.env.store(), FakeChannel::SYSTEM).unwrap(),
         vec![json!(alice.party_id)]
     );
     // the members list made contacts for ualice and ubob; the sender added none
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM parties WHERE type = 'contact'",
-            &[]
-        ),
+        inspect::people::count_parties_by_contact(h.env.store()).unwrap(),
         contacts + 2
     );
     // later, the id alone is enough
@@ -1048,11 +851,8 @@ async fn a_sender_known_by_an_alias_lands_on_the_contact_holding_it() {
     let party = r.sender_party_id.expect("sender");
     assert_ne!(party, alice.party_id);
     assert_eq!(
-        one(
-            &h,
-            "SELECT party_id FROM accounts WHERE system_id = 'mail' AND handle = ?",
-            &["new@example.com"]
-        ),
+        inspect::people::account_party_id_by_handle_single_row(h.env.store(), "new@example.com")
+            .unwrap(),
         vec![json!(party)]
     );
 }
@@ -1088,11 +888,7 @@ async fn a_sender_in_a_declared_system_lands_on_the_contact_holding_its_alias() 
     assert_eq!(r.sender_party_id.as_deref(), Some(alice.party_id.as_str()));
     // kept as given (no normalization), in the system's own family
     assert_eq!(
-        one(
-            &h,
-            "SELECT party_id || ' ' || family FROM accounts WHERE system_id = 'probe_internal' AND handle = 'U-Int-1'",
-            &[]
-        ),
+        inspect::people::account_party_idfamily(h.env.store()).unwrap(),
         vec![json!(format!("{} probe_internal", alice.party_id))]
     );
 }

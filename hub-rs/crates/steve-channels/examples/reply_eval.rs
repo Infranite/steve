@@ -62,7 +62,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use steve_channels::compose::{self, BotInfo, HISTORY, HISTORY_WIDE};
+use steve_channels::compose::{self, HISTORY, HISTORY_WIDE};
 use steve_channels::deliver::Outcome;
 use steve_channels::reply_eval::{self as re, Case, CheckParams, Label, Output, OwnerLine};
 use steve_channels::spaces::Mode;
@@ -156,69 +156,10 @@ fn main() {
 
 // ---------------------------------------------------------------- the route
 
-/// What the main Bot and 设置 · 模型 say about the purpose `compose`.
-#[derive(Default)]
-struct Route {
-    bot: Option<BotInfo>,
-    harness: Option<String>,
-    effort: Option<String>,
-    /// `models.compose`, as stored.
-    compose: Option<Value>,
-}
+use steve_store::testkit::channels::evaluation::{Route, reply_route};
 
-/// The route from a Steve database, opened read-only.
 fn route_from_db(path: &str, ws: &str) -> Route {
-    use rusqlite::{OpenFlags, OptionalExtension};
-    let uri = format!("file:{path}?mode=ro");
-    let c = rusqlite::Connection::open_with_flags(
-        &uri,
-        OpenFlags::SQLITE_OPEN_READ_ONLY
-            | OpenFlags::SQLITE_OPEN_URI
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .unwrap_or_else(|e| fail(&format!("{path}: {e}")));
-    let bot = c
-        .query_row(
-            "SELECT b.id, b.name, b.role, b.persona, b.rules, coalesce(b.prompt, ''), b.model, b.harness, b.reasoning_effort
-               FROM bots b JOIN bot_workspaces w ON w.bot_id = b.id AND w.workspace_id = ?
-              WHERE b.main = 1 AND b.deleted = 0 AND b.enabled = 1 ORDER BY b.updated LIMIT 1",
-            [ws],
-            |r| {
-                Ok((
-                    BotInfo {
-                        id: r.get(0)?,
-                        name: r.get(1)?,
-                        role: r.get(2)?,
-                        persona: r.get(3)?,
-                        rules: r.get(4)?,
-                        prompt: r.get(5)?,
-                        model: r.get::<_, Option<String>>(6)?.filter(|m| !m.is_empty()),
-                    },
-                    r.get::<_, String>(7)?,
-                    r.get::<_, Option<String>>(8)?,
-                ))
-            },
-        )
-        .optional()
-        .unwrap_or_else(|e| fail(&format!("main Bot: {e}")));
-    let compose: Option<String> = c
-        .query_row(
-            "SELECT value FROM settings WHERE workspace_id = ? AND key = 'models.compose'",
-            [ws],
-            |r| r.get(0),
-        )
-        .optional()
-        .unwrap_or_else(|e| fail(&format!("settings: {e}")));
-    let (bot, harness, effort) = match bot {
-        Some((b, h, e)) => (Some(b), Some(h), e.filter(|e| !e.is_empty())),
-        None => (None, None, None),
-    };
-    Route {
-        bot,
-        harness,
-        effort,
-        compose: compose.and_then(|v| serde_json::from_str(&v).ok()),
-    }
+    reply_route(Path::new(path), ws).unwrap_or_else(|e| fail(&format!("{path}: {e}")))
 }
 
 fn env_list(k: &str) -> Vec<String> {

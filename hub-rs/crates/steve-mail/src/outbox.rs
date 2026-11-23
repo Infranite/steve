@@ -74,7 +74,7 @@ impl Consumer for MailEventsOut {
         Ok(())
     }
 
-    fn apply(&self, _tx: &steve_store::Tx, ev: &Event) -> Result<Applied, ConsumeError> {
+    fn apply(&self, _w: &mut steve_store::W<'_>, ev: &Event) -> Result<Applied, ConsumeError> {
         Ok(Applied::noted(pending(ev)?.message_id))
     }
 }

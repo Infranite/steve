@@ -24,21 +24,10 @@ impl steve_channels::PreDestructiveBackup for FixtureBackup {
                 "fixture backup failed".into(),
             ));
         }
-        let plan = steve_store_sqlite::backup::BackupPlan::new(
-            self.root.clone(),
-            steve_store_sqlite::backup::Reason::PreDestructive { what: what.into() },
-        );
-        let saved = steve_store_sqlite::backup::backup(
+        Ok(steve_store::testkit::channels::destructive_backup(
             &self.database,
-            &plan,
-            &|_| {},
-            &steve_store_sqlite::backup::CancelFlag::default(),
-        )
-        .map_err(|e| steve_modules::ApiError::Internal(e.to_string()))?;
-        Ok(saved
-            .database_path()
-            .strip_prefix(&self.root)
-            .unwrap()
-            .to_owned())
+            &self.root,
+            what,
+        )?)
     }
 }

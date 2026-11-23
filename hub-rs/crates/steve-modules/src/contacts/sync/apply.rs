@@ -130,7 +130,7 @@ pub fn apply(
     {
         return Err(ApiError::rule(EMPTY_SNAPSHOT));
     }
-    asvc::seed(tx, ws)?;
+    asvc::ensure_seeds(tx, ws)?;
     let system = asvc::own_system(tx, ws, system_id)?;
     let own = ensure_self_org_in(tx, ws, actor)?;
     let mut r = SyncReport::default();

@@ -65,7 +65,7 @@ async fn list(
                 let (entries,upper)=match kind {
                     "replies"=>attention::replies(tx,&who.ws,&who.me).map_err(error)?,
                     "pending"=>(attention::pending(tx,&who.ws,&who.me,now).map_err(error)?,0),
-                    _=>(steve_channels::conversations::attention(tx,&who.ws,&viewer,now)?,0),
+                    _=>(tx.write(|w| steve_channels::conversations::attention(w,&who.ws,&viewer,now))?,0),
                 };
                 categories.push(attention::page(tx,&who.ws,&who.me,kind,entries,upper,q.cursor.as_deref(),q.if_snapshot.as_deref(),limit,now).map_err(error)?);
             }

@@ -25,7 +25,6 @@
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
-use rusqlite::{Connection, OptionalExtension};
 use serde_json::{Value, json};
 use steve_flow::nodes::action::Action;
 use steve_flow::nodes::{Grant, NodeOutcome, Rule, RunCx};
@@ -89,44 +88,46 @@ fn check_text(t: &str) -> Result<(), String> {
 }
 
 /// The plan for answering a stored inbound message (what the rules would have built).
-pub fn plan_of(c: &Connection, ws: &str, message_id: &str) -> ChannelResult<Plan> {
-    type Row = (
-        String,
-        Option<String>,
-        Option<String>,
-        String,
-        Option<String>,
-        Option<String>,
-        String,
-    );
-    let row: Option<Row> = c
-        .query_row(
-            "SELECT m.space_id, m.external_id, m.thread_key, coalesce(m.text, ''), m.sender_account_id, m.sender_party_id,
-                    coalesce(nullif(a.display_name, ''), a.handle_display, p.name, '')
-               FROM chan_messages m LEFT JOIN accounts a ON a.id = m.sender_account_id LEFT JOIN parties p ON p.id = m.sender_party_id
-              WHERE m.id = ? AND m.workspace_id = ? AND m.direction = 'in'",
-            [message_id, ws],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
-        )
-        .optional()?;
-    let (space_id, ext, thread, text, account, party, name) =
-        row.ok_or_else(|| ApiError::not_found("消息"))?;
-    let space = spaces::get(c, &space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
-    let (_, mode) = bindings::connection_account(c, ws, &space.connection_id)?;
-    let set = spaces::settings(c, &space.id)?;
+pub fn plan_of(store: &steve_store::Store, ws: &str, message_id: &str) -> ChannelResult<Plan> {
+    store.read(|r| plan_in(r, ws, message_id))
+}
+
+pub(crate) fn plan_in(
+    r: &mut impl steve_store::Read,
+    ws: &str,
+    message_id: &str,
+) -> ChannelResult<Plan> {
+    let source = steve_store::channel_message_repo::ingress::source(r, ws, message_id)?
+        .ok_or_else(|| ApiError::not_found("消息"))?;
+    let space = steve_store::channel_spaces::rows::get_in_workspace(r, ws, &source.space)?
+        .ok_or_else(|| ApiError::not_found("空间"))?;
+    let mut name = None;
+    if let Some(account) = &source.account {
+        name = steve_store::accounts::names_and_handles(r, &[account])?
+            .into_iter()
+            .next()
+            .map(|(_, name)| name);
+    }
+    if name.is_none()
+        && let Some(party) = &source.party
+    {
+        name = steve_store::parties::Parties::new(r).name(party)?;
+    }
+    let (_, mode) = bindings::connection_account(r, ws, &space.connection_id)?;
+    let set = spaces::settings(r, &space.id)?;
     Ok(Plan {
         ws: ws.into(),
         connection_id: space.connection_id.clone(),
         mode,
-        space_name: spaces::display_title(c, &space)?,
+        space_name: spaces::display_title(r, &space)?,
         space_id: space.id,
         message_id: message_id.into(),
-        external_id: ext.unwrap_or_default(),
-        thread_key: thread,
-        text,
-        sender_account_id: account,
-        sender_party_id: party,
-        sender_name: name,
+        external_id: source.external.unwrap_or_default(),
+        thread_key: source.thread,
+        text: source.text,
+        sender_account_id: source.account,
+        sender_party_id: source.party,
+        sender_name: name.unwrap_or_default(),
         act: Act::Reply,
         rule: None,
         muted: set.muted,
@@ -135,14 +136,19 @@ pub fn plan_of(c: &Connection, ws: &str, message_id: &str) -> ChannelResult<Plan
 }
 
 /// A persona named in a node's config, checked against the target account.
-fn check_persona(c: &Connection, ws: &str, mode: Mode, id: Option<&str>) -> Result<(), String> {
+fn check_persona(
+    r: &mut impl steve_store::Read,
+    ws: &str,
+    mode: Mode,
+    id: Option<&str>,
+) -> Result<(), String> {
     let Some(id) = id.filter(|s| !s.is_empty()) else {
         return Ok(());
     };
     if mode == Mode::Own {
         return Err(bindings::SELF_NO_PERSONA.into());
     }
-    match personas::get(c, id) {
+    match personas::get(r, id) {
         Ok(Some(p)) if p.workspace_id == ws && !p.deleted => Ok(()),
         Ok(_) => Err("没有这个对外身份".into()),
         Err(e) => Err(e.to_string()),
@@ -168,15 +174,16 @@ fn step_auth(cx: &RunCx<'_>, space: Option<&str>) -> Auth {
     let granted = cx
         .flow
         .store()
-        .reader(|c| {
-            c.query_row(
-                "SELECT EXISTS (SELECT 1 FROM grants WHERE workspace_id = ? AND subject_type = 'flow' AND subject_id = ?
-                    AND capability = ? AND resource_type = 'space' AND resource_id IN (?, '*') AND revoked IS NULL AND until > ?
-                    AND json_extract(scope, '$.flow_version') = ?)",
-                rusqlite::params![cx.run.workspace_id, cx.run.flow_id, CAPABILITY, space.unwrap_or("*"), now, cx.run.flow_version],
-                |r| r.get::<_, bool>(0),
-            )
-            .map_err(steve_store::StoreError::from)
+        .read(|r| {
+            steve_store::GrantRows(r).flow_granted(&steve_store::FlowGrant {
+                ws: &cx.run.workspace_id,
+                flow: &cx.run.flow_id,
+                version: cx.run.flow_version,
+                capability: CAPABILITY,
+                resource_type: "space",
+                resource_id: space.unwrap_or("*"),
+                at: now,
+            })
         })
         .unwrap_or(false);
     if granted {
@@ -315,9 +322,9 @@ impl Action for ReplyAs {
             .as_str()
             .filter(|s| !s.is_empty())
             .map(String::from);
-        let plan = match ch.store().reader(|c| -> ChannelResult<_> {
-            let plan = plan_of(c, &ws, &mid)?;
-            check_persona(c, &ws, plan.mode, persona.as_deref()).map_err(ApiError::rule)?;
+        let plan = match ch.store().read(|r| -> ChannelResult<_> {
+            let plan = plan_in(r, &ws, &mid)?;
+            check_persona(r, &ws, plan.mode, persona.as_deref()).map_err(ApiError::rule)?;
             Ok(plan)
         }) {
             Ok(p) => p,
@@ -445,17 +452,17 @@ impl Action for SendToSpace {
             .as_str()
             .filter(|s| !s.is_empty())
             .map(String::from);
-        let target = ch.store().reader(|c| -> ChannelResult<_> {
-            let s = spaces::get(c, &space_id)?
-                .filter(|s| s.workspace_id == ws && s.status == "active")
+        let target = ch.store().read(|r| -> ChannelResult<_> {
+            let s = steve_store::channel_spaces::rows::get_in_workspace(r, &ws, &space_id)?
+                .filter(|s| s.status == "active")
                 .ok_or_else(|| ApiError::not_found("空间"))?;
-            let (_, mode) = bindings::connection_account(c, &ws, &s.connection_id)?;
-            check_persona(c, &ws, mode, persona.as_deref()).map_err(ApiError::rule)?;
+            let (_, mode) = bindings::connection_account(r, &ws, &s.connection_id)?;
+            check_persona(r, &ws, mode, persona.as_deref()).map_err(ApiError::rule)?;
             Ok(OutTarget {
                 ws: ws.clone(),
                 connection_id: s.connection_id.clone(),
                 mode,
-                space_name: spaces::display_title(c, &s)?,
+                space_name: spaces::display_title(r, &s)?,
                 space_id: s.id,
                 reply_to: None,
                 thread_key: None,

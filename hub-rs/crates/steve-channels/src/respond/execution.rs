@@ -51,7 +51,7 @@ impl Channels {
                 crate::decide::Gate::NoContent => r.label = crate::decide::LABEL_NO_CONTENT.into(),
                 crate::decide::Gate::Nudge { decision } => {
                     self.store()
-                        .transaction(|tx| crate::decide::nudge(tx, &decision, &plan.text))?;
+                        .write(|tx| crate::decide::nudge(tx, &decision, &plan.text))?;
                     r.label = crate::decide::LABEL_NUDGE.into();
                     r.decision_id = Some(decision);
                 }
@@ -66,14 +66,12 @@ impl Channels {
         plan: &Plan,
         mut r: Response,
     ) -> ChannelResult<Response> {
-        let d = self.store().transaction(|tx| open_handoff(tx, plan))?;
+        let d = self.store().write(|tx| open_handoff(tx, plan))?;
         r.decision_id = Some(d);
         if !plan.muted {
-            let owner = self.store().read::<_, steve_store::StoreError>(|r| {
-                Ok(self
-                    .store()
-                    .reader(|c| personas::owner_name_for_space(c, r, &plan.ws, &plan.space_id)))
-            })??;
+            let owner = self
+                .store()
+                .read(|r| personas::owner_name_for_space(r, &plan.ws, &plan.space_id))?;
             let text = crate::rules::handoff_ack(&owner);
             match self.responder().acknowledge(self, plan, &text).await {
                 Ok(_) => {}
@@ -158,10 +156,14 @@ impl Channels {
     ) -> ChannelResult<Response> {
         match plan.act {
             Act::Reply | Act::Draft => {
-                let (m, d) = self.store().transaction(|tx| {
-                    let (m, d) = open_draft(tx, plan, "", now)?;
+                let (m, d) = self.store().write(|w| {
+                    let (m, d) = open_draft(w, plan, "", now)?;
                     // the reply you write and approve answers the message
-                    crate::reactions::expect_answer(tx, &plan.message_id, &m)?;
+                    steve_store::channel_message_repo::reactions::expect_answer(
+                        w,
+                        &plan.message_id,
+                        &m,
+                    )?;
                     Ok::<_, crate::ChannelError>((m, d))
                 })?;
                 r.act = Act::Draft;
@@ -170,7 +172,7 @@ impl Channels {
                 r.decision_id = Some(d);
             }
             Act::CreateItem(_) => {
-                let d = self.store().transaction(|tx| open_handoff(tx, plan))?;
+                let d = self.store().write(|tx| open_handoff(tx, plan))?;
                 r.act = Act::Handoff;
                 r.label = "转给你，可以转成事项".into();
                 r.decision_id = Some(d);

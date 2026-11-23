@@ -29,8 +29,7 @@
 //! to click. The list ([`list_page`]) has every space with something to show, a turn or a channel
 //! message the viewer may see; the chat's whole record is [`crate::conv_record`]'s.
 
-use rusqlite::{OptionalExtension, params};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use steve_store::base::ObjRef;
 use steve_store::base::links::{self, NewLink};
 
@@ -78,33 +77,25 @@ pub(crate) fn conv_operation(m: &steve_store::Message, origin: &str, purpose: &s
     format!("conv:{}:{origin}:{purpose}", m.id)
 }
 
-/// Claim an ineligible answer together with its handoff so cold concurrent replays cannot reopen it.
+fn skipped(code: &str, reason: &str) -> Value {
+    json!({"message": null, "status": "skipped", "decision": null,
+        "stage": "eligibility", "code": code, "reason": reason})
+}
+
+/// Claim the ineligible outcome with its handoff so concurrent replays cannot reopen it.
 fn claim_not_sent(
-    tx: &steve_store::Tx,
+    w: &mut steve_store::W<'_>,
     m: &steve_store::Message,
     code: &str,
     reason: &str,
 ) -> ChannelResult<bool> {
-    let n = tx.execute(
-        "UPDATE messages SET meta = json_set(meta, '$.chan_out', json(?))
-          WHERE id = ? AND workspace_id = ? AND json_type(meta, '$.chan_out') IS NULL",
-        params![
-            json!({"message": null, "status": "skipped", "decision": null,
-            "stage": "eligibility", "code": code, "reason": reason})
-            .to_string(),
-            m.id,
-            m.workspace_id
-        ],
-    )?;
-    if n == 1 {
-        tx.publish(steve_types::DomainEvent::from(
-            steve_types::WorkEvent::Message {
-                ws: m.workspace_id.clone().into(),
-                id: m.id.clone().into(),
-            },
-        ));
-    }
-    Ok(n == 1)
+    use steve_store::channel_message_repo::records::{self, Content};
+    Ok(records::set_channel_content(
+        w,
+        &m.workspace_id,
+        &m.id,
+        Content::FirstOutcome(&skipped(code, reason)),
+    )?)
 }
 
 /// The short note an IM space gets when Steve could not answer (the details are in the conversation).
@@ -152,7 +143,7 @@ pub const NOT_ANSWERED: &str = "没有回答，转给你";
 
 /// Only the user whose view connection `conn` speaks with reads `space`: their private chat with Steve.
 pub fn owner_only(
-    c: &rusqlite::Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     space: &spaces::SpaceRow,
     conn: &str,
@@ -160,9 +151,9 @@ pub fn owner_only(
     if space.has_external {
         return Ok(false);
     }
-    let (account, _) = crate::bindings::connection_account(c, ws, conn)?;
-    let owner = crate::compose::owner_user(c, ws, conn)?;
-    let a = crate::disclosure::space_audience(c, space, &account, &owner)?;
+    let (account, _) = crate::bindings::connection_account(r, ws, conn)?;
+    let owner = crate::compose::owner_user(r, ws, conn)?;
+    let a = crate::disclosure::space_audience(r, space, &account, &owner)?;
     Ok(!a.external && a.scopes.iter().any(|s| s == "private"))
 }
 
@@ -194,20 +185,17 @@ pub struct Turn {
 /// The sender (`party`) is the workspace's owner: a contact linked to the user who owns it. A sender
 /// Steve can't place is not the owner.
 pub fn sender_is_owner(
-    c: &rusqlite::Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     party: Option<&str>,
 ) -> ChannelResult<bool> {
     let Some(party) = party.filter(|p| !p.is_empty()) else {
         return Ok(false);
     };
-    Ok(c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM parties p JOIN workspace_members wm
-            ON wm.user_id = p.user_id AND wm.workspace_id = ?1 AND wm.role = 'owner'
-          WHERE p.id = ?2 AND p.workspace_id = ?1)",
-        rusqlite::params![ws, party],
-        |r| r.get(0),
-    )?)
+    let Some(user) = steve_store::parties::linked_user(r, ws, party)? else {
+        return Ok(false);
+    };
+    Ok(steve_store::Members::new(r).role(ws, &user)?.as_deref() == Some("owner"))
 }
 
 /// Steve's conversation, as the channel module needs it (the hub implements it over steve-core).
@@ -269,10 +257,11 @@ pub fn system_text(meta: &Value) -> bool {
 
 /// `meta.chan` of a turn: what the conversation and its delivery need to know about the source.
 fn chan_meta(ch: &Channels, plan: &Plan, command: bool) -> ChannelResult<Value> {
-    ch.store().reader(|c| {
-        let space = spaces::get(c, &plan.space_id)?
+    ch.store().read(|r| {
+        let space = steve_store::channel_spaces::rows::get(r, &plan.space_id)?
             .ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
-        let provider = provider_name(c, &space.system_id);
+        let provider =
+            steve_store::Systems(r).provider_label(&space.workspace_id, &space.system_id)?;
         Ok(json!({
             "message": plan.message_id,
             "space": space.id,
@@ -280,7 +269,7 @@ fn chan_meta(ch: &Channels, plan: &Plan, command: bool) -> ChannelResult<Value> 
             "mode": plan.mode.code(),
             "system": space.system_id,
             "provider": provider,
-            "space_name": crate::spaces::display_title(c, &space)?,
+            "space_name": crate::spaces::display_title(r, &space)?,
             "kind": space.kind,
             "sender": plan.sender_name,
             "party": plan.sender_party_id,
@@ -307,22 +296,21 @@ impl Channels {
         if plan.mode == Mode::Own && !command {
             return Ok(None);
         }
-        let has_external = self.store().reader(|c| -> ChannelResult<bool> {
-            Ok(spaces::get(c, &plan.space_id)?.is_some_and(|s| s.has_external))
+        let (open, owner_only) = self.store().read(|r| -> ChannelResult<_> {
+            let space =
+                steve_store::channel_spaces::rows::get_in_workspace(r, &plan.ws, &plan.space_id)?;
+            let open = !space.as_ref().is_some_and(|s| s.has_external)
+                && (plan.mode == Mode::Bot || command);
+            let owner_only = match &space {
+                Some(space) if open => owner_only(r, &plan.ws, space, &plan.connection_id)?,
+                _ => false,
+            };
+            Ok((open, owner_only))
         })?;
-        // drafts as you, and spaces with outside members, answer in place only
-        let open = !has_external && (plan.mode == Mode::Bot || command);
-        let owner_only = open
-            && self.store().reader(|c| -> ChannelResult<bool> {
-                match spaces::get(c, &plan.space_id)? {
-                    Some(space) => owner_only(c, &plan.ws, &space, &plan.connection_id),
-                    None => Ok(false),
-                }
-            })?;
         // work starts only when the owner sent it, a /bot command too (any workspace user may send one)
         let start = self
             .store()
-            .reader(|c| sender_is_owner(c, &plan.ws, plan.sender_party_id.as_deref()))?;
+            .read(|r| sender_is_owner(r, &plan.ws, plan.sender_party_id.as_deref()))?;
         let mut meta = json!({ "chan": chan_meta(self, plan, command)? });
         meta["chan"]["owner_only"] = json!(owner_only);
         meta["chan"]["start"] = json!(start);
@@ -330,17 +318,11 @@ impl Channels {
         let text = turn_text(plan, command);
         // the owner's own command: what it starts is theirs
         let user = if command && start {
-            self.store().reader(|c| -> ChannelResult<Option<String>> {
-                Ok(match plan.sender_party_id.as_deref() {
-                    Some(p) => c
-                        .query_row("SELECT user_id FROM parties WHERE id = ?", [p], |r| {
-                            r.get(0)
-                        })
-                        .optional()?
-                        .flatten(),
-                    None => None,
-                })
-            })?
+            self.store()
+                .read(|r| match plan.sender_party_id.as_deref() {
+                    Some(party) => steve_store::parties::linked_user(r, &plan.ws, party),
+                    None => Ok(None),
+                })?
         } else {
             None
         };
@@ -377,7 +359,7 @@ impl Channels {
         // command goes there; any other workspace user's is recorded where it was said
         if !self
             .store()
-            .reader(|c| sender_is_owner(c, &plan.ws, plan.sender_party_id.as_deref()))?
+            .read(|r| sender_is_owner(r, &plan.ws, plan.sender_party_id.as_deref()))?
         {
             return Err(steve_modules::ApiError::forbidden(
                 "只有你本人的 /bot 指令会转到你的网页对话",
@@ -426,7 +408,7 @@ impl Channels {
         let Some(cm) = chan["message"].as_str() else {
             return Ok(None);
         };
-        let mut plan = self.store().reader(|c| plan_of(c, ws, cm))?;
+        let mut plan = plan_of(self.store(), ws, cm)?;
         if chan["act"] == "draft" {
             plan.act = Act::Draft;
         }
@@ -514,13 +496,10 @@ impl Channels {
     /// change of the turn's other meta is not lost. Fails the answer when it cannot be kept: an
     /// answer without it would never be said.
     fn keep_composed(&self, ws: &str, origin: &str, c: &Composed) -> ChannelResult<()> {
-        let v = serde_json::to_string(c).map_err(steve_modules::ApiError::from)?;
-        self.store().transaction(|tx| -> ChannelResult<()> {
-            tx.execute(
-                "UPDATE messages SET meta = json_set(CASE WHEN json_valid(meta) THEN meta ELSE '{}' END, '$.chan_gen', json(?))
-                  WHERE id = ? AND workspace_id = ?",
-                params![v, origin, ws],
-            )?;
+        use steve_store::channel_message_repo::records::{self, Content};
+        let content = serde_json::to_value(c).map_err(steve_modules::ApiError::from)?;
+        self.store().write(|w| {
+            records::set_channel_content(w, ws, origin, Content::Generated(&content))?;
             Ok(())
         })
     }
@@ -536,12 +515,7 @@ impl Channels {
         let block = match self.turn_source(ws, origin) {
             Ok(Some((_, plan, _))) if plan.space_id == space_id => self
                 .store()
-                .read::<_, steve_store::StoreError>(|r| {
-                    Ok(self.store().reader(|c| -> ChannelResult<String> {
-                        Ok(crate::im_context::render_for(c, r, &plan))
-                    }))
-                })
-                .unwrap_or_else(|e| Err(e.into()))
+                .read(|r| -> ChannelResult<_> { Ok(crate::im_context::render_for(r, &plan)) })
                 .map(|b| format!("{b}\n\n{CONV_TOOLS_NOTE}\n\n"))
                 .unwrap_or_else(|e| {
                     tracing::warn!(origin, "identity block not built, identity unknown: {e}");
@@ -562,20 +536,20 @@ impl Channels {
     /// [`Channels::conv_research_context`] after the identity block.
     fn conv_research_card(&self, ws: &str, space_id: &str, origin: &str) -> String {
         let turn = self.store().messages().get(origin).ok().flatten();
-        let r = self.store().read::<_, steve_store::StoreError>(|r| Ok(self.store().reader(|c| -> ChannelResult<String> {
-            let Some(space) = spaces::get(c, space_id)? else {
+        let r = self.store().read(|r| -> ChannelResult<String> {
+            let Some(space) = steve_store::channel_spaces::rows::get_in_workspace(r, ws, space_id)? else {
                 return Ok(String::new());
             };
             let where_ = if space.kind == "dm" { "私聊" } else { "群聊" };
-            let who = match bindings::effective(c, &space)? {
+            let who = match bindings::effective(r, &space)? {
                 Some(e) => format!("以对外身份「{}」说话", e.persona.name),
                 None => "以你本人的名义起草".to_string(),
             };
             // members are read again now; the turn says who asked
-            let own = owner_only(c, ws, &space, &space.connection_id)?;
+            let own = owner_only(r, ws, &space, &space.connection_id)?;
             let chan = turn.as_ref().map(|m| &m.meta["chan"]);
             let card = crate::conversation_card::build(
-                c,
+                r,
                 ws,
                 &space,
                 chan.and_then(|m| m["party"].as_str()),
@@ -593,19 +567,19 @@ impl Channels {
             if own {
                 return Ok(format!(
                     "{card}\n\n这次的问题来自你和 {} 的私聊（{}），只有你本人能看到，回答会发回那里。需要时直接查事项、会话、知识和代码，照实回答。{note}",
-                    personas::owner_internal_name(c, r, ws, &space.connection_id)?,
-                    crate::spaces::display_title(c, &space)?,
+                    personas::owner_internal_name(r, ws, &space.connection_id)?,
+                    crate::spaces::display_title(r, &space)?,
                 ));
             }
-            let owner = personas::owner_name_for_space(c, r, ws, &space.id)?;
+            let owner = personas::owner_name_for_space(r, ws, &space.id)?;
             Ok(format!(
                 "{card}\n\n这次的问题来自渠道「{}」（{where_}{}）。你{who}，回答会发回那里，发出前要过披露检查：\
                  只说结论，不提其他群、其他客户、内部事项编号、文件路径和代码细节；对方这次自己提到的事项编号或说法可以照着提、用来澄清，但它不代表能说这件事的内容，内容仍只按能说的部分说；拿不准能不能说的，就当不知道，或者说会请 {owner} 来看。查不到、查询失败或没有权限时，笼统地说明即可，不说是什么权限、哪里报错。",
-                crate::spaces::display_title(c, &space)?,
+                crate::spaces::display_title(r, &space)?,
                 if space.has_external { "，有外部成员" } else { "" },
             ) + &note)
-        })));
-        r.ok().and_then(Result::ok).unwrap_or_default()
+        });
+        r.unwrap_or_default()
     }
 
     /// Steve stored message `mid` in conversation `conv`: take it out to the space when it answers a
@@ -647,13 +621,10 @@ impl Channels {
             if let Some(turn) = self.store().messages().get(origin)?.filter(|o| {
                 o.workspace_id == ws && o.space == MAIN_CONV && o.meta["chan"]["web"] == true
             }) && let Some(source) = turn.meta["chan"]["message"].as_str()
-                && self.store().reader(|c| -> ChannelResult<bool> {
-                    Ok(c.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM chan_messages WHERE id = ? AND workspace_id = ? AND direction = 'in')",
-                        params![source, ws],
-                        |r| r.get(0),
-                    )?)
-                })?
+                && self
+                    .store()
+                    .read(|r| steve_store::channel_message_repo::ingress::source(r, ws, source))?
+                    .is_some()
             {
                 // Research receipts keep their terminal reason under steps, rather than the
                 // inline answer's top-level error/stopped flags. Partial results are not success.
@@ -681,7 +652,7 @@ impl Channels {
             return Ok(None);
         }
         if let Some(space) = space_of_conv(&m.space)
-            && self.store().reader(|c| spaces::voice(c, space))?.is_none()
+            && self.store().read(|r| spaces::voice(r, space))?.is_none()
         {
             return self.conv_disconnected(&m, origin).await;
         }
@@ -706,7 +677,7 @@ impl Channels {
         if !system && composed.is_none() && !self.fixed_or_routed_answer(&m, origin)? {
             // Never turn an unknown legacy question, skip or pending promise into a Bot reply.
             // The handoff only contains the inbound message, not this unclassified private text.
-            self.store().transaction(|tx| -> ChannelResult<()> {
+            self.store().write(|tx| -> ChannelResult<()> {
                 if claim_not_sent(
                     tx,
                     &m,
@@ -734,7 +705,7 @@ impl Channels {
                 c.generation.clone(),
             );
             let asks = c.generation.outcome == Outcome::AskOwner;
-            self.store().transaction(|tx| -> ChannelResult<()> {
+            self.store().write(|tx| -> ChannelResult<()> {
                 use crate::respond::{TRAIL_COMPOSER, note_message_event, trail};
                 if !claim_not_sent(
                     tx,
@@ -750,14 +721,16 @@ impl Channels {
                         &plan,
                         &crate::decide::Card::of(&generation, &q, plan.mode, false),
                     )?;
-                    note_message_event(
-                        tx,
-                        &plan.message_id,
-                        "need",
-                        crate::replies::ASKED,
-                        "",
-                        Some(&d),
-                    )
+                    {
+                        note_message_event(
+                            tx,
+                            &plan.message_id,
+                            "need",
+                            crate::replies::ASKED,
+                            "",
+                            Some(&d),
+                        )
+                    }
                 } else {
                     let said = q.trim().strip_prefix(NO_REPLY).unwrap_or(q.trim());
                     let reason = trail(TRAIL_COMPOSER, &crate::replies::skip_reason(said, &why));
@@ -785,13 +758,7 @@ impl Channels {
             if plan.mode == Mode::Bot {
                 let owner = self
                     .store()
-                    .read::<_, steve_store::StoreError>(|r| {
-                        Ok(self
-                            .store()
-                            .reader(|c| personas::owner_name_for_space(c, r, ws, &plan.space_id)))
-                    })
-                    .ok()
-                    .and_then(Result::ok)
+                    .read(|r| personas::owner_name_for_space(r, ws, &plan.space_id))
                     .unwrap_or_default();
                 let d = out
                     .deliver(
@@ -820,16 +787,18 @@ impl Channels {
             // reaches you as a handoff instead of going unanswered
             self.react_finish(&plan.message_id, Finish::Clear).await;
             if !command {
-                self.store().transaction(|tx| -> ChannelResult<()> {
+                self.store().write(|tx| -> ChannelResult<()> {
                     let d = crate::respond::open_handoff(tx, &plan)?;
-                    crate::respond::note_message_event(
-                        tx,
-                        &plan.message_id,
-                        "need",
-                        NOT_ANSWERED,
-                        crate::respond::TRAIL_RULES,
-                        Some(&d),
-                    )
+                    {
+                        crate::respond::note_message_event(
+                            tx,
+                            &plan.message_id,
+                            "need",
+                            NOT_ANSWERED,
+                            crate::respond::TRAIL_RULES,
+                            Some(&d),
+                        )
+                    }
                 })?;
             }
             return Ok(None);
@@ -924,52 +893,6 @@ impl Channels {
         Ok(Some(d))
     }
 
-    /// Only fixed receipts are reconstructed without a composer. Router questions have a durable
-    /// binding to this exact answer; a metadata flag or a route kind alone is not evidence.
-    fn fixed_or_routed_answer(
-        &self,
-        m: &steve_store::Message,
-        origin: &str,
-    ) -> ChannelResult<bool> {
-        self.store().reader(|c| -> ChannelResult<bool> {
-            if let Some(item) = &m.item_id {
-                return Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM items WHERE id = ? AND workspace_id = ?)", params![item, m.workspace_id], |r| r.get(0))?);
-            }
-            let kind = if m.meta["ask"]["options"].is_array() { "ask" }
-                else if m.meta["suggest"]["choices"].is_array() { "suggest" }
-                else { return Ok(false) };
-            Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM route_log WHERE workspace_id = ? AND message_id = ? AND reply_id = ? AND kind = ?)", params![m.workspace_id, origin, m.id, kind], |r| r.get(0))?)
-        })
-    }
-
-    /// No outbound message exists: do not confuse generation or an eligibility refusal with a
-    /// failed provider send, and do not retry a historical unclassified result automatically.
-    fn mark_not_sent(
-        &self,
-        m: &steve_store::Message,
-        code: &str,
-        reason: &str,
-    ) -> ChannelResult<()> {
-        self.store().transaction(|tx| -> ChannelResult<()> {
-            tx.execute(
-                "UPDATE messages SET meta = json_set(CASE WHEN json_valid(meta) THEN meta ELSE '{}' END,
-                  '$.chan_out', json(?)) WHERE id = ? AND workspace_id = ?",
-                params![
-                    json!({"message": null, "status": "skipped", "decision": null,
-                        "stage": "eligibility", "code": code, "reason": reason}).to_string(),
-                    m.id, m.workspace_id,
-                ],
-            )?;
-            tx.publish(steve_types::DomainEvent::from(steve_types::WorkEvent::Message { ws: m.workspace_id.clone().into(), id: m.id.clone().into() }));
-            Ok(())
-        })
-    }
-
-    /// The space of conversation message `m` has no connected identity any more (its connections
-    /// were removed): what Steve said cannot go out. It is recorded on the message
-    /// (`chan_out.status = "disconnected"`, shown under it in the conversation) and the reaction of
-    /// the message it answers ends `failed` here, without a provider call. A stopped turn or an
-    /// answer that would not have been said in the space only ends its reaction.
     async fn conv_disconnected(
         &self,
         m: &steve_store::Message,
@@ -1018,22 +941,69 @@ impl Channels {
             space = m.space,
             "conversation reply not sent: the space's connection was removed"
         );
-        let mut meta: Map<String, Value> = m.meta.as_object().cloned().unwrap_or_default();
-        meta.insert(
-            "chan_out".into(),
-            json!({"message": null, "status": DISCONNECTED, "decision": null}),
-        );
-        self.store()
-            .messages()
-            .patch_meta(&m.id, &Value::Object(meta))?;
+        use steve_store::channel_message_repo::records::{self, Content};
+        self.store().write(|w| {
+            records::set_channel_content(
+                w,
+                &m.workspace_id,
+                &m.id,
+                Content::Outcome(
+                    &json!({"message": null, "status": DISCONNECTED, "decision": null}),
+                ),
+            )
+        })?;
         Ok(None)
     }
 
-    /// `meta.chan_out` on conversation message `m`: what became of it in the space. The status is
-    /// the outbound message's own, normalized just like the read API (including policy blocks),
-    /// read in the same transaction as the write: two deliveries of one
-    /// message ([`conv_operation`]) may finish in either order, and the one that writes last still
-    /// writes the newest state (never the `pending` a second pass saw while the first was sending).
+    /// Only fixed receipts are reconstructed without a composer. Router questions have a durable
+    /// binding to this exact answer; a metadata flag or a route kind alone is not evidence.
+    fn fixed_or_routed_answer(
+        &self,
+        m: &steve_store::Message,
+        origin: &str,
+    ) -> ChannelResult<bool> {
+        self.store().read(|r| {
+            if let Some(item) = &m.item_id {
+                return Ok(steve_store::item_repo::item_workspace(r, item)?.as_deref()
+                    == Some(&m.workspace_id));
+            }
+            let kind = if m.meta["ask"]["options"].is_array() {
+                "ask"
+            } else if m.meta["suggest"]["choices"].is_array() {
+                "suggest"
+            } else {
+                return Ok(false);
+            };
+            Ok(steve_store::channel_message_repo::records::route_matches(
+                r,
+                &m.workspace_id,
+                origin,
+                &m.id,
+                kind,
+            )?)
+        })
+    }
+
+    /// No outbound message exists: do not confuse generation or an eligibility refusal with a
+    /// failed provider send, and do not retry a historical unclassified result automatically.
+    fn mark_not_sent(
+        &self,
+        m: &steve_store::Message,
+        code: &str,
+        reason: &str,
+    ) -> ChannelResult<()> {
+        use steve_store::channel_message_repo::records::{self, Content};
+        self.store().write(|w| {
+            records::set_channel_content(
+                w,
+                &m.workspace_id,
+                &m.id,
+                Content::Outcome(&skipped(code, reason)),
+            )?;
+            Ok(())
+        })
+    }
+
     pub(crate) fn mark_out(&self, m: &steve_store::Message, d: &Delivered) -> ChannelResult<()> {
         let said = match d {
             Delivered::Sent { .. } => "sent",
@@ -1043,62 +1013,27 @@ impl Channels {
             Delivered::Queued { .. } => "pending",
             Delivered::Skipped => "skipped",
         };
-        self.store().transaction(|tx| -> ChannelResult<()> {
-            let now: Option<String> = match d.message_id() {
-                Some(id) => out_state(tx, &m.workspace_id, id)?.map(|(status, _)| status),
+        use steve_store::channel_message_repo::records::{self, Content};
+        self.store().write(|w| -> ChannelResult<()> {
+            let now = match d.message_id() {
+                Some(id) => out_state(w, &m.workspace_id, id)?.map(|(status, _)| status),
                 None => None,
             };
             let status = now.as_deref().unwrap_or(said);
             let reason = match d.message_id() {
                 Some(id) if matches!(status, "failed" | "blocked" | "unknown") =>
-                    crate::conv_record::out_error(tx, &m.workspace_id, id)?,
+                    crate::conv_record::out_error(w, &m.workspace_id, id)?,
                 _ => None,
             };
-            let msgs = self.store().messages();
-            let current = msgs.get(&m.id)?.map_or_else(|| m.meta.clone(), |x| x.meta);
-            let mut meta: Map<String, Value> = current.as_object().cloned().unwrap_or_default();
-            meta.insert(
-                "chan_out".into(),
-                json!({"message": d.message_id(), "status": status, "decision": d.decision_id(), "reason": reason}),
-            );
-            msgs.patch_meta(&m.id, &Value::Object(meta))?;
+            records::set_channel_content(w, &m.workspace_id, &m.id, Content::Outcome(
+                &json!({"message": d.message_id(), "status": status, "decision": d.decision_id(), "reason": reason}),
+            ))?;
             Ok(())
         })
     }
 
-    /// `links(item, from, chan_message)` and `work_item_id`, like a rule's `create_item`.
     fn link_item(&self, ws: &str, plan: &Plan, item: &str) -> ChannelResult<()> {
-        self.store().transaction(|tx| -> ChannelResult<()> {
-            let it = || ObjRef::new("item", item);
-            links::add(
-                tx,
-                ws,
-                &NewLink::new(
-                    it(),
-                    "from",
-                    ObjRef::new("chan_message", &plan.message_id),
-                    crate::replies::LINK_SOURCE,
-                ),
-            )?;
-            if let Some(p) = &plan.sender_party_id {
-                links::add(
-                    tx,
-                    ws,
-                    &NewLink::new(
-                        it(),
-                        "raised_by",
-                        ObjRef::new("party", p),
-                        crate::replies::LINK_SOURCE,
-                    ),
-                )?;
-            }
-            tx.execute(
-                "UPDATE chan_messages SET work_item_id = ? WHERE id = ?",
-                params![item, plan.message_id],
-            )?;
-            messages::event(tx, ws, &plan.space_id, &plan.message_id);
-            Ok(())
-        })
+        self.store().write(|w| link_channel_item(w, ws, plan, item))
     }
 
     /// Records a turn the C4 responder handled itself (a rule's `create_item`, your `/bot` without a
@@ -1125,9 +1060,9 @@ impl Channels {
         out: &dyn crate::deliver::Outbound,
         operation: String,
     ) -> ChannelResult<Delivered> {
-        let yours = self.store().reader(|c| {
+        let yours = self.store().read(|r| {
             crate::arbiter::from_you(
-                c,
+                r,
                 ws,
                 plan.sender_account_id.as_deref(),
                 plan.sender_party_id.as_deref(),
@@ -1167,18 +1102,13 @@ impl Channels {
         let r = (|| -> ChannelResult<steve_store::Message> {
             let command = plan.trigger.is_some();
             let msgs = self.store().messages();
-            let stored = self
-                .store()
-                .reader(|c| -> ChannelResult<Option<(String, String)>> {
-                    Ok(c.query_row(
-                        "SELECT id, space FROM messages WHERE workspace_id = ?1 AND author = 'me'
-                        AND json_extract(meta, '$.chan.message') = ?2
-                      ORDER BY created, rowid LIMIT 1",
-                        rusqlite::params![plan.ws, plan.message_id],
-                        |r| Ok((r.get(0)?, r.get(1)?)),
-                    )
-                    .optional()?)
-                })?;
+            let stored = self.store().read(|r| {
+                steve_store::channel_message_repo::records::first_turn_for_message(
+                    r,
+                    &plan.ws,
+                    &plan.message_id,
+                )
+            })?;
             let (origin, conv) = match stored {
                 Some(t) => t,
                 None => {
@@ -1222,14 +1152,14 @@ impl Channels {
         if said.trim().is_empty() {
             return Ok(());
         }
-        let (status, decision, reason) = self.store().reader(|c| -> ChannelResult<_> {
+        let (status, decision, reason) = self.store().read(|r| -> ChannelResult<_> {
             let state = out
-                .map(|id| out_state(c, &plan.ws, id))
+                .map(|id| out_state(r, &plan.ws, id))
                 .transpose()?
                 .flatten();
             let (status, decision) = state.unwrap_or_else(|| ("skipped".to_string(), None));
             let reason = out
-                .map(|id| crate::conv_record::out_error(c, &plan.ws, id))
+                .map(|id| crate::conv_record::out_error(r, &plan.ws, id))
                 .transpose()?
                 .flatten();
             Ok((status, decision, reason))
@@ -1250,33 +1180,14 @@ impl Channels {
     }
 }
 
-/// The provider's name for a space's system: the bot account's own system (`feishu_app`) is shown
-/// as its platform (`feishu` → 飞书).
-pub(crate) fn provider_name(c: &rusqlite::Connection, system: &str) -> String {
-    let name = |id: &str| -> Option<String> {
-        c.query_row(
-            "SELECT nullif(name, '') FROM systems WHERE id = ?",
-            [id],
-            |r| r.get::<_, Option<String>>(0),
-        )
-        .ok()
-        .flatten()
-    };
-    system
-        .strip_suffix("_app")
-        .and_then(name)
-        .or_else(|| name(system))
-        .unwrap_or_else(|| system.to_string())
-}
-
 /// The badge of a conversation: where it lives.
-fn badge(c: &rusqlite::Connection, space: &crate::spaces::SpaceRow) -> ChannelResult<Value> {
-    let provider = provider_name(c, &space.system_id);
-    let mode = crate::arbiter::mode_of(c, &space.workspace_id, &space.connection_id)?;
+fn badge(r: &mut impl steve_store::Read, space: &crate::spaces::SpaceRow) -> ChannelResult<Value> {
+    let provider = steve_store::Systems(r).provider_label(&space.workspace_id, &space.system_id)?;
+    let mode = crate::arbiter::mode_of(r, &space.workspace_id, &space.connection_id)?;
     Ok(json!({
         "space": conv_space(&space.id),
         "space_id": space.id,
-        "name": crate::spaces::display_title(c, space)?,
+        "name": crate::spaces::display_title(r, space)?,
         "kind": space.kind,
         "dm": space.kind == "dm",
         "system": space.system_id,
@@ -1287,7 +1198,7 @@ fn badge(c: &rusqlite::Connection, space: &crate::spaces::SpaceRow) -> ChannelRe
         // the channel account that speaks there (its voice); `null` once disconnected
         "connection": (!space.connection_id.is_empty()).then_some(&space.connection_id),
         // opens the chat in its platform's client (“在飞书中打开”); `null` without one
-        "open_url": crate::open_link::space_url(c, space)?,
+        "open_url": crate::open_link::space_url(r, space)?,
     }))
 }
 
@@ -1313,15 +1224,15 @@ pub struct ListPage {
 }
 
 pub(crate) fn member(
-    c: &rusqlite::Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     viewer: &steve_store::base::Viewer,
 ) -> ChannelResult<()> {
-    let allowed: bool = ws == viewer.ws && c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?)",
-        params![ws, viewer.user], |r| r.get(0),
-    )?;
-    if !allowed {
+    if ws != viewer.ws
+        || steve_store::Members::new(r)
+            .role(ws, &viewer.user)?
+            .is_none()
+    {
         return Err(steve_modules::ApiError::not_found("对话"));
     }
     Ok(())
@@ -1333,64 +1244,30 @@ pub(crate) fn member(
 /// disabled/inaccessible connections are excluded; groups without a personal opt-in remain a
 /// generic indicator (`notify=false`), while direct chats can notify by default.
 pub fn attention(
-    c: &rusqlite::Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     viewer: &steve_store::base::Viewer,
     now: i64,
 ) -> ChannelResult<Vec<steve_store::attention::Entry>> {
-    member(c, ws, viewer)?;
-    let sql = format!(
-        "SELECT s.id,s.kind,p.read_up_to FROM spaces s
-         LEFT JOIN conversation_preferences p ON p.workspace_id=s.workspace_id AND p.user_id=?2 AND p.space_id=s.id
-         LEFT JOIN space_prefs pref ON pref.space_id=s.id AND pref.workspace_id=s.workspace_id
-         WHERE s.workspace_id=?1 AND s.status='active' AND {visible} AND coalesce(p.closed,0)=0
-           AND coalesce(pref.attention,'realtime')<>'blocked'
-           AND (EXISTS (SELECT 1 FROM space_identities si JOIN connections cn ON cn.id=si.connection_id
-             WHERE si.space_id=s.id AND si.left_at IS NULL AND cn.workspace_id=?1
-               AND cn.status IN ('ok','error') AND EXISTS(SELECT 1 FROM json_each(cn.caps) cap WHERE cap.value='msg.receive')
-               AND (si.owner_user IS NULL OR si.owner_user=?2))
-             OR (NOT EXISTS (SELECT 1 FROM space_identities si WHERE si.space_id=s.id)
-               AND EXISTS (SELECT 1 FROM connections cn WHERE cn.id=s.connection_id AND cn.workspace_id=?1
-                 AND cn.status IN ('ok','error') AND EXISTS(SELECT 1 FROM json_each(cn.caps) cap WHERE cap.value='msg.receive'))))",
-        visible = spaces::visible_sql("?2"),
-    );
-    let mut st = c.prepare_cached(&sql)?;
-    let rows = st
-        .query_map(params![ws, viewer.user], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, Option<i64>>(2)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut out = vec![];
-    for (id, kind, read) in rows {
-        if crate::conv_record::unread(c, &id, &viewer.user, read, now)? == 0 {
+    use steve_store::channel_spaces::conversations as repo;
+    member(r, ws, viewer)?;
+    let mut out = Vec::new();
+    for space in repo::attention_spaces(r, ws, &viewer.user)? {
+        let since = crate::conv_record::new_since(space.read_up_to, now);
+        let Some((message, created)) = repo::latest_unseen(r, &space.id, &viewer.user, since)?
+        else {
             continue;
-        }
-        // The same definition of live, incoming, not-self and visible as count_new. Stable
-        // persisted message ID is the event identity, never a mutable rowid or unread count.
-        let latest_sql = format!("SELECT m.id,m.created FROM chan_messages m
-          WHERE m.space_id=?1 AND m.direction='in' AND m.history IS NULL AND m.created>?3
-            AND NOT EXISTS (SELECT 1 FROM parties pp WHERE pp.id=m.sender_party_id AND pp.user_id=?2)
-          ORDER BY m.created DESC,m.id DESC LIMIT 1");
-        let (message, created): (String, i64) = c.query_row(
-            &latest_sql,
-            params![
-                id,
-                viewer.user,
-                read.unwrap_or(i64::MIN)
-                    .max(now.saturating_sub(crate::conv_record::UNREAD_HORIZON_MS))
-            ],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        let mut e =
-            steve_store::attention::Entry::new(conv_space(&id), created, "", conv_space(&id));
-        e.event_id = message.clone();
-        e.source_id = message;
-        e.notify = kind == "dm";
-        out.push(e);
+        };
+        let mut entry = steve_store::attention::Entry::new(
+            conv_space(&space.id),
+            created,
+            "",
+            conv_space(&space.id),
+        );
+        entry.event_id = message.clone();
+        entry.source_id = message;
+        entry.notify = space.kind == "dm";
+        out.push(entry);
     }
     out.sort_by(|a, b| {
         b.created
@@ -1402,11 +1279,11 @@ pub fn attention(
 
 /// The IM conversations the viewer may see, newest first; no silently omitted older conversations.
 pub fn list(
-    c: &rusqlite::Connection,
+    store: &steve_store::Store,
     ws: &str,
     viewer: &steve_store::base::Viewer,
 ) -> ChannelResult<Vec<Value>> {
-    Ok(list_page(c, ws, viewer, &ListQuery::default(), steve_store::now())?.conversations)
+    Ok(list_page(store, ws, viewer, &ListQuery::default(), steve_store::now())?.conversations)
 }
 
 /// The conversations of the spaces the viewer sees: every space with a message of its conversation
@@ -1416,175 +1293,110 @@ pub fn list(
 /// and its last visible channel message), `closed` and `unread` ([`crate::conv_record::unread`] at
 /// `now`).
 pub fn list_page(
-    c: &rusqlite::Connection,
+    store: &steve_store::Store,
     ws: &str,
     viewer: &steve_store::base::Viewer,
     query: &ListQuery,
     now: i64,
 ) -> ChannelResult<ListPage> {
-    member(c, ws, viewer)?;
-    let state = match query.state.as_deref().unwrap_or("all") {
-        "all" | "replied" => -1,
-        "open" => 0,
-        "closed" => 1,
-        _ => return Err(steve_modules::ApiError::invalid("state")),
-    };
-    let replied = query.state.as_deref() == Some("replied");
-    let offset = query.offset.unwrap_or(0);
-    if offset < 0 || query.limit.is_some_and(|n| !(1..=200).contains(&n)) {
-        return Err(steve_modules::ApiError::invalid("pagination"));
-    }
-    let q = query.q.as_deref().unwrap_or("").trim();
-    if q.chars().count() > 200 {
-        return Err(steve_modules::ApiError::invalid("q"));
-    }
-    let conn = query.connection.as_deref().unwrap_or("").trim();
-    // Visibility, reply activity and preferences are applied before pagination. A conversation's
-    // internal Steve turns are not proof of sending. Only visible sent messages or drafts with a
-    // still-open approval qualify; failures, queued sends and settled approvals do not.
-    // Search is literal, not LIKE wildcards.
-    // The latest visible channel message walks the (space, created) index from the end.
-    let cte = format!(
-        "WITH grouped AS (
-          SELECT space, count(*) AS n, max(created) AS last FROM messages
-          WHERE workspace_id = ?1 AND space LIKE 'chan:%' GROUP BY space
-        ), base AS (
-          SELECT s.id, s.name, s.system_id, g.space AS conv, g.n, g.last AS conv_last,
-            (SELECT m.id FROM chan_messages m WHERE m.space_id = s.id
-              ORDER BY m.created DESC, m.id DESC LIMIT 1) AS chan_id
-          FROM spaces s LEFT JOIN grouped g ON g.space = 'chan:' || s.id
-          WHERE s.workspace_id = ?1 AND {visibility}
-            AND (?7 = '' OR s.connection_id = ?7 OR EXISTS (SELECT 1 FROM space_identities li
-              WHERE li.space_id = s.id AND li.connection_id = ?7 AND li.left_at IS NULL))
-            AND (?8 = 0 OR EXISTS (SELECT 1 FROM chan_messages m
-              WHERE m.workspace_id = ?1 AND m.space_id = s.id AND m.direction = 'out'
-                AND (m.status = 'sent' OR (m.status = 'draft' AND EXISTS (
-                  SELECT 1 FROM decisions d WHERE d.id = m.decision_id AND d.workspace_id = ?1
-                    AND d.kind = 'approve' AND d.status = 'open'
-                    AND d.subject_type = 'chan_message' AND d.subject_id = m.id)))))
-        ), joined AS (
-          SELECT b.*, cm.created AS chan_last, coalesce(cm.text, '') AS chan_text, cm.direction AS chan_dir
-          FROM base b LEFT JOIN chan_messages cm ON cm.id = b.chan_id
-          WHERE b.conv IS NOT NULL OR b.chan_id IS NOT NULL
-        ), visible AS (
-          SELECT j.id, 'chan:' || j.id AS space, coalesce(j.n, 0) AS n,
-            max(coalesce(j.conv_last, 0), coalesce(j.chan_last, 0)) AS last,
-            coalesce(p.closed, 0) AS closed, p.read_up_to AS read_up_to, j.name, j.system_id,
-            coalesce((SELECT nullif(name, '') FROM systems WHERE id = CASE WHEN j.system_id LIKE '%_app'
-              THEN substr(j.system_id, 1, length(j.system_id)-4) ELSE j.system_id END),
-              (SELECT nullif(name, '') FROM systems WHERE id = j.system_id), j.system_id) AS provider,
-            CASE WHEN coalesce(j.chan_last, 0) > coalesce(j.conv_last, 0) THEN j.chan_text
-              ELSE (SELECT text FROM messages WHERE workspace_id = ?1 AND space = j.conv
-                ORDER BY created DESC, rowid DESC LIMIT 1) END AS last_text,
-            CASE WHEN coalesce(j.chan_last, 0) > coalesce(j.conv_last, 0)
-              THEN CASE j.chan_dir WHEN 'out' THEN 'steve' ELSE 'me' END
-              ELSE (SELECT author FROM messages WHERE workspace_id = ?1 AND space = j.conv
-                ORDER BY created DESC, rowid DESC LIMIT 1) END AS last_author
-          FROM joined j
-          LEFT JOIN conversation_preferences p ON p.workspace_id = ?1 AND p.user_id = ?2 AND p.space_id = j.id
-        ), filtered AS (
-          SELECT * FROM visible WHERE (?3 = -1 OR closed = ?3)
-          AND (?4 = '' OR instr(lower(coalesce(name, '') || ' ' || system_id || ' ' || provider || ' ' || coalesce(last_text, '')), lower(?4)) > 0)
-        )",
-        visibility = spaces::visible_sql("?2"),
-    );
-    let total: i64 = c.query_row(
-        &format!("{cte} SELECT count(*) FROM filtered"),
-        params![ws, viewer.user, state, q, -1, 0, conn, replied],
-        |r| r.get(0),
-    )?;
-    let mut st = c.prepare(&format!("{cte} SELECT id, space, n, last, closed, coalesce(last_text, ''), coalesce(last_author, 'me'), read_up_to
-        FROM filtered ORDER BY last DESC, space ASC LIMIT ?5 OFFSET ?6"))?;
-    type Row = (String, String, i64, i64, bool, String, String, Option<i64>);
-    let rows = st
-        .query_map(
-            params![
-                ws,
-                viewer.user,
-                state,
-                q,
-                query.limit.unwrap_or(-1),
-                offset,
-                conn,
-                replied
-            ],
-            |r| -> rusqlite::Result<Row> {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                    r.get(7)?,
-                ))
-            },
-        )?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut out = Vec::new();
-    for (id, _conv, n, last, closed, text, author, read) in rows {
-        let Some(space) = spaces::get(c, &id)? else {
-            continue;
+    use steve_store::channel_spaces::conversations as repo;
+    store.read(|r| {
+        member(r, ws, viewer)?;
+        let closed = match query.state.as_deref().unwrap_or("all") {
+            "all" | "replied" => None,
+            "open" => Some(false),
+            "closed" => Some(true),
+            _ => return Err(steve_modules::ApiError::invalid("state")),
         };
-        let mut b = badge(c, &space)?;
-        b["count"] = json!(n);
-        b["last"] = json!(last);
-        b["last_text"] = json!(text.chars().take(80).collect::<String>());
-        b["last_author"] = json!(author);
-        b["closed"] = json!(closed);
-        b["unread"] = json!(crate::conv_record::unread(c, &id, &viewer.user, read, now)?);
-        out.push(b);
-    }
-    let next = offset.saturating_add(out.len() as i64);
-    let has_more = next < total;
-    Ok(ListPage {
-        conversations: out,
-        total,
-        has_more,
-        next_offset: has_more.then_some(next),
+        let replied = query.state.as_deref() == Some("replied");
+        let offset = query.offset.unwrap_or(0);
+        if offset < 0 || query.limit.is_some_and(|n| !(1..=200).contains(&n)) {
+            return Err(steve_modules::ApiError::invalid("pagination"));
+        }
+        let q = query.q.as_deref().unwrap_or("").trim();
+        if q.chars().count() > 200 {
+            return Err(steve_modules::ApiError::invalid("q"));
+        }
+        let conn = query.connection.as_deref().unwrap_or("").trim();
+        let page = repo::list(
+            r,
+            &repo::Filter {
+                workspace: ws,
+                user: &viewer.user,
+                closed,
+                replied,
+                search: q,
+                connection: conn,
+                limit: query.limit,
+                offset,
+            },
+        )?;
+        let total = page.total;
+        let mut out = Vec::with_capacity(page.rows.len());
+        for row in page.rows {
+            let Some(space) = steve_store::channel_spaces::rows::get_in_workspace(r, ws, &row.id)?
+            else {
+                continue;
+            };
+            let mut b = badge(r, &space)?;
+            b["count"] = json!(row.count);
+            b["last"] = json!(row.last);
+            b["last_text"] = json!(row.text.chars().take(80).collect::<String>());
+            b["last_author"] = json!(row.author);
+            b["closed"] = json!(row.closed);
+            b["unread"] = json!(crate::conv_record::unread(
+                r,
+                &row.id,
+                &viewer.user,
+                row.read_up_to,
+                now
+            )?);
+            out.push(b);
+        }
+        let next = offset.saturating_add(out.len() as i64);
+        let has_more = next < total;
+        Ok(ListPage {
+            conversations: out,
+            total,
+            has_more,
+            next_offset: has_more.then_some(next),
+        })
     })
 }
 
 /// The viewer may see conversation `conv` and it has something to show: a message of its
 /// conversation or a channel message of its space. Its space id.
 pub(crate) fn shown_space<'a>(
-    c: &rusqlite::Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     viewer: &steve_store::base::Viewer,
     conv: &'a str,
 ) -> ChannelResult<&'a str> {
-    member(c, ws, viewer)?;
+    member(r, ws, viewer)?;
     let id = space_of_conv(conv).ok_or_else(|| steve_modules::ApiError::not_found("对话"))?;
-    spaces::own(c, viewer, id).map_err(|_| steve_modules::ApiError::not_found("对话"))?;
-    let exists: bool = c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM messages WHERE workspace_id = ?1 AND space = ?2)
-             OR EXISTS (SELECT 1 FROM chan_messages WHERE workspace_id = ?1 AND space_id = ?3)",
-        params![ws, conv, id],
-        |r| r.get(0),
-    )?;
-    if !exists {
+    spaces::checked_space(r, viewer, id).map_err(|_| steve_modules::ApiError::not_found("对话"))?;
+    if !steve_store::channel_spaces::conversations::has_history(r, ws, id, conv)? {
         return Err(steve_modules::ApiError::not_found("对话"));
     }
     Ok(id)
 }
 
-/// Personal list preference only: leaves message history and channel processing untouched.
-/// The caller runs this inside a store transaction so visibility and mutation share one snapshot.
+/// Personal list preference. Visibility and mutation share the caller's write snapshot.
 pub fn set_closed(
-    c: &rusqlite::Connection,
+    w: &mut steve_store::W<'_>,
     ws: &str,
     viewer: &steve_store::base::Viewer,
     conv: &str,
     closed: bool,
 ) -> ChannelResult<()> {
-    let id = shown_space(c, ws, viewer, conv)?;
-    c.execute(
-        "INSERT INTO conversation_preferences (workspace_id, user_id, space_id, closed) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(workspace_id, user_id, space_id) DO UPDATE SET closed = excluded.closed",
-        params![ws, viewer.user, id, closed],
-    )?;
-    Ok(())
+    let id = shown_space(w, ws, viewer, conv)?;
+    Ok(steve_store::channel_spaces::conversations::set_closed(
+        w,
+        ws,
+        &viewer.user,
+        id,
+        closed,
+    )?)
 }
 
 /// `GET /conversations/:space/messages`: the conversation (≤500, oldest first) and its badge.
@@ -1598,14 +1410,13 @@ pub fn messages_of(
     conv: &str,
 ) -> ChannelResult<Value> {
     let id = space_of_conv(conv).ok_or_else(|| steve_modules::ApiError::not_found("对话"))?;
-    let b = ch.store().reader(|c| -> ChannelResult<Value> {
-        let space =
-            spaces::own(c, viewer, id).map_err(|_| steve_modules::ApiError::not_found("对话"))?;
-        badge(c, &space)
-    })?;
-    let msgs = ch.store().messages().list(ws, conv, 500)?;
-    let mut out = Vec::with_capacity(msgs.len());
-    ch.store().reader(|c| -> ChannelResult<()> {
+    let store = ch.store();
+    store.read(|db| -> ChannelResult<Value> {
+        let space = spaces::checked_space(db, viewer, id)
+            .map_err(|_| steve_modules::ApiError::not_found("对话"))?;
+        let b = badge(db, &space)?;
+        let msgs = store.messages().list(ws, conv, 500)?;
+        let mut out = Vec::with_capacity(msgs.len());
         for m in msgs {
             let mut v = serde_json::to_value(&m).map_err(steve_modules::ApiError::from)?;
             // the composer's answer as the page needs it: not the knowledge it was written with
@@ -1615,28 +1426,31 @@ pub fn messages_of(
                 });
             }
             if let Some(cm) = m.meta["chan"]["message"].as_str() {
-                if let Some(r) = crate::reactions::get(c, cm)? {
+                if let Some(r) = steve_store::channel_message_repo::reactions::get(db, cm)? {
                     v["reaction"] =
                         serde_json::to_value(r).map_err(steve_modules::ApiError::from)?;
                 }
                 // the chat message itself (cards, images, files), only from this space
-                let src = messages::get(c, cm)
-                    .ok()
-                    .flatten()
-                    .filter(|x| x.space_id == id && in_ws(c, cm, ws));
+                let src = if steve_store::channel_message_repo::space_of(db, ws, cm)?.as_deref()
+                    == Some(id)
+                {
+                    messages::get(store, cm).ok().flatten()
+                } else {
+                    None
+                };
                 v["channel_message"] = match src {
                     Some(x) => serde_json::to_value(x).map_err(steve_modules::ApiError::from)?,
                     None => Value::Null,
                 };
             }
             if let Some(out_id) = m.meta["chan_out"]["message"].as_str()
-                && let Some((st, decision)) = out_state(c, ws, out_id)?
+                && let Some((st, decision)) = out_state(db, ws, out_id)?
             {
                 v["meta"]["chan_out"]["status"] = json!(st);
                 v["meta"]["chan_out"]["decision"] = json!(decision);
                 v["meta"]["chan_out"]["reason"] =
                     if matches!(st.as_str(), "failed" | "blocked" | "unknown") {
-                        json!(crate::conv_record::out_error(c, ws, out_id)?)
+                        json!(crate::conv_record::out_error(db, ws, out_id)?)
                     } else {
                         Value::Null
                     };
@@ -1650,47 +1464,70 @@ pub fn messages_of(
             }
             out.push(v);
         }
-        Ok(())
-    })?;
-    Ok(json!({"conversation": b, "messages": out}))
+        Ok(json!({"conversation": b, "messages": out}))
+    })
 }
 
 /// What became of Steve's message `id` in the space, and the open approval a draft waits on (the
 /// conversation answers it in place). A draft whose approval is no longer open (dismissed before
 /// that discarded it) never goes out as it stands: it reads `discarded`.
 pub(crate) fn out_state(
-    c: &rusqlite::Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     id: &str,
 ) -> ChannelResult<Option<(String, Option<String>)>> {
-    let row: Option<(String, Option<String>)> = c
-        .query_row(
-            "SELECT CASE WHEN m.status='failed' AND (
-                json_extract(d.result,'$.recovery.kind') IN ('channel_refusal','missing_permission')
-                OR EXISTS (SELECT 1 FROM audit a WHERE a.workspace_id=m.workspace_id AND a.target=m.id
-                    AND a.action='chan_message.send.blocked')) THEN 'blocked' ELSE m.status END,
-                CASE WHEN d.status='open' THEN d.id END FROM chan_messages m
-               LEFT JOIN decisions d ON d.id = m.decision_id
-              WHERE m.id = ? AND m.workspace_id = ? AND m.direction='out'",
-            params![id, ws],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    Ok(row.map(|(st, open)| match (st.as_str(), open) {
-        ("draft", Some(d)) => (st, Some(d)),
-        ("draft", None) => (crate::outbound::DISCARDED.to_string(), None),
-        _ => (st, None),
+    let Some(row) = steve_store::channel_message_repo::outbound::approval(r, ws, id)? else {
+        return Ok(None);
+    };
+    let decision = match row.decision {
+        Some(id) => steve_store::decision_repo::get(r, &id)?,
+        None => None,
+    };
+    let mut status = row.status;
+    if status == "failed"
+        && (decision.as_ref().is_some_and(|d| {
+            matches!(
+                d.result["recovery"]["kind"].as_str(),
+                Some("channel_refusal" | "missing_permission")
+            )
+        }) || steve_store::audit_repo::channel_send_blocked(r, ws, id)?)
+    {
+        status = "blocked".into();
+    }
+    let open = decision.filter(|d| d.status == "open").map(|d| d.id);
+    Ok(Some(match (status.as_str(), open) {
+        ("draft", Some(d)) => (status, Some(d)),
+        ("draft", None) => (crate::outbound::DISCARDED.to_owned(), None),
+        _ => (status, None),
     }))
 }
 
-/// Is chat message `id` in workspace `ws`?
-fn in_ws(c: &rusqlite::Connection, id: &str, ws: &str) -> bool {
-    c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM chan_messages WHERE id = ? AND workspace_id = ?)",
-        params![id, ws],
-        |r| r.get(0),
-    )
-    .unwrap_or(false)
+/// Link the work and its originating message together.
+pub(crate) fn link_channel_item(
+    w: &mut steve_store::W<'_>,
+    ws: &str,
+    plan: &Plan,
+    item: &str,
+) -> ChannelResult<()> {
+    let link = |predicate, target| {
+        NewLink::new(
+            ObjRef::new("item", item),
+            predicate,
+            target,
+            crate::replies::LINK_SOURCE,
+        )
+    };
+    let mut links = links::Links(w);
+    links.add(
+        ws,
+        &link("from", ObjRef::new("chan_message", &plan.message_id)),
+    )?;
+    if let Some(party) = &plan.sender_party_id {
+        links.add(ws, &link("raised_by", ObjRef::new("party", party)))?;
+    }
+    steve_store::channel_message_repo::ingress::link_item(w, &plan.message_id, item)?;
+    steve_store::channel_message_repo::emit(w, ws, &plan.space_id, &plan.message_id);
+    Ok(())
 }
 
 /// What a conversation message says in the space as a bot: its text, with the choices of a

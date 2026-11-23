@@ -33,3 +33,18 @@ pub fn effective_model(c: &mut impl Read, ws: &str, session: &str) -> Result<Opt
         None => Ok(None),
     }
 }
+
+pub fn latest_system_text(c: &mut impl Read, session: &str) -> Result<Option<String>> {
+    let dialect = c.db().dialect();
+    Ok(c.one(
+        Query::select()
+            .expr(dialect.json_field(Expr::col("data"), "text"))
+            .from("events")
+            .and_where(Expr::col("session_id").eq(session))
+            .and_where(Expr::col("kind").eq("system"))
+            .order_by("seq", sea_query::Order::Desc)
+            .limit(1),
+        |row| row.get::<Option<String>>(0),
+    )?
+    .flatten())
+}

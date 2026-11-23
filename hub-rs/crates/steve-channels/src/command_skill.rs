@@ -7,8 +7,6 @@
 
 use steve_modules::Tier;
 
-use rusqlite::OptionalExtension;
-
 use crate::deliver::OutTarget;
 use crate::respond::Plan;
 use crate::rules::{ReplyStyle, Trigger};
@@ -27,34 +25,41 @@ impl Channels {
     ) -> ChannelResult<Option<crate::respond::Response>> {
         let plan = self
             .store()
-            .reader(|c| -> ChannelResult<Option<(Plan, bool)>> {
-                let Some(space) = spaces::get(c, &inbound.space_id)? else {
+            .read(|r| -> ChannelResult<Option<(Plan, bool)>> {
+                let Some(space) =
+                    steve_store::channel_spaces::rows::get_in_workspace(r, ws, &inbound.space_id)?
+                else {
                     return Ok(None);
                 };
-                let m = crate::inbound::stored(c, &inbound.message_id)?;
+                let m = crate::inbound::stored(r, &inbound.message_id)?;
                 let Some(command) =
-                    crate::arbiter::command(c, ws, &space, conn, &inbound.message_id)?
+                    crate::arbiter::command(r, ws, &space, conn, &inbound.message_id)?
                 else {
                     return Ok(None);
                 };
                 // once per message; and only while your account is still in the chat
-                if answered(c, ws, &inbound.message_id)? || !present(c, &space.id, conn)? {
+                if steve_store::channel_message_repo::trigger::has_command_turn(
+                    r,
+                    ws,
+                    &inbound.message_id,
+                )? || !steve_store::channel_spaces::is_active_connection(r, &space.id, conn)?
+                {
                     return Ok(None);
                 }
                 // the thread of an item handed off: what is said there goes to that item
-                if crate::messages::thread_item(c, ws, &inbound.message_id, inbound.from_owner)?
+                if crate::messages::thread_item(r, ws, &inbound.message_id, inbound.from_owner)?
                     .is_some()
                 {
                     return Ok(None);
                 }
-                let set = spaces::settings(c, &space.id)?;
+                let set = spaces::settings(r, &space.id)?;
                 Ok(Some((
                     Plan {
                         ws: ws.into(),
                         connection_id: conn.to_string(),
                         mode: Mode::Own,
                         space_id: space.id.clone(),
-                        space_name: crate::spaces::display_title(c, &space)?,
+                        space_name: crate::spaces::display_title(r, &space)?,
                         message_id: inbound.message_id.clone(),
                         external_id: m.external_id.clone(),
                         thread_key: m.thread_key.clone(),
@@ -88,8 +93,8 @@ impl Channels {
     async fn guard(&self, plan: &Plan) -> Guard {
         let context = self
             .store()
-            .reader(|c| {
-                crate::messages::context_before(c, &plan.space_id, &plan.message_id, GUARD_CONTEXT)
+            .read(|r| {
+                crate::messages::context_before(r, &plan.space_id, &plan.message_id, GUARD_CONTEXT)
             })
             .unwrap_or_default();
         let mut p = String::from(GUARD);
@@ -124,12 +129,7 @@ impl Channels {
     async fn decline(&self, plan: &Plan, guard: &Guard) -> ChannelResult<crate::respond::Response> {
         let owner = self
             .store()
-            .read::<_, steve_store::StoreError>(|r| {
-                Ok(self.store().reader(|c| {
-                    crate::personas::owner_name_for_space(c, r, &plan.ws, &plan.space_id)
-                }))
-            })
-            .unwrap_or_else(|e| Err(e.into()))
+            .read(|r| crate::personas::owner_name_for_space(r, &plan.ws, &plan.space_id))
             .unwrap_or_default();
         let owner = if owner.trim().is_empty() {
             "我".to_string()
@@ -200,17 +200,14 @@ impl Channels {
     /// conversation). Best-effort.
     fn alert_owner(&self, ws: &str, text: &str, risk: bool) {
         let level = if risk { "fail" } else { "info" };
-        let r = self.store().transaction(|tx| {
-            steve_store::base::message_add(
-                tx,
-                ws,
-                "steve",
-                text,
-                None,
-                &serde_json::json!({"notice": {"kind": "security", "level": level}}),
-                "notify",
-            )
-        });
+        let r = self.store().messages().add(
+            ws,
+            "steve",
+            text,
+            None,
+            &serde_json::json!({"notice": {"kind": "security", "level": level}}),
+            "notify",
+        );
         if let Err(e) = r {
             tracing::warn!("trigger guard: owner not alerted: {e}");
         }
@@ -266,48 +263,19 @@ fn cut(s: &str, max: usize) -> String {
 /// later (its item's progress and end) goes the same way — from your own account that took it,
 /// `[AI] `-marked, where the settings say, without waiting for approval.
 pub(crate) fn trigger_plan(
-    c: &rusqlite::Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     msg: &str,
 ) -> ChannelResult<Option<Plan>> {
-    let conn: Option<String> = c
-        .query_row(
-            "SELECT json_extract(meta, '$.chan.connection') FROM messages WHERE workspace_id = ?1
-                AND json_extract(meta, '$.chan.message') = ?2 AND json_extract(meta, '$.chan.command') = 1
-                AND json_extract(meta, '$.chan.mode') = 'self'
-              ORDER BY created LIMIT 1",
-            rusqlite::params![ws, msg],
-            |r| r.get(0),
-        )
-        .optional()?
-        .flatten();
+    let conn = steve_store::channel_message_repo::trigger::personal_command_connection(r, ws, msg)?;
     let Some(conn) = conn else {
         return Ok(None);
     };
-    let mut plan = crate::flow_actions::plan_of(c, ws, msg)?;
+    let mut plan = crate::flow_actions::plan_in(r, ws, msg)?;
     plan.connection_id = conn;
     plan.mode = Mode::Own;
     plan.trigger = Some(String::new());
     Ok(Some(plan))
-}
-
-/// Does `conn` still see the space (it was not removed from the chat)?
-fn present(c: &rusqlite::Connection, space: &str, conn: &str) -> ChannelResult<bool> {
-    Ok(c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM space_identities WHERE space_id = ? AND connection_id = ? AND left_at IS NULL)",
-        rusqlite::params![space, conn],
-        |r| r.get(0),
-    )?)
-}
-
-/// Was the trigger word of message `id` taken already (its conversation turn exists)?
-fn answered(c: &rusqlite::Connection, ws: &str, id: &str) -> ChannelResult<bool> {
-    Ok(c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM messages WHERE workspace_id = ?1
-            AND json_extract(meta, '$.chan.message') = ?2 AND json_extract(meta, '$.chan.command') = 1)",
-        rusqlite::params![ws, id],
-        |r| r.get(0),
-    )?)
 }
 
 /// Where the answer to a trigger word goes, by the answering identity's trigger settings: in the
@@ -316,7 +284,7 @@ fn answered(c: &rusqlite::Connection, ws: &str, id: &str) -> ChannelResult<bool>
 pub(crate) fn target(ch: &Channels, plan: &Plan) -> ChannelResult<OutTarget> {
     let style = ch
         .store()
-        .reader(|c| spaces::channel_settings(c, &plan.ws, &plan.connection_id))?
+        .read(|c| spaces::channel_settings(c, &plan.ws, &plan.connection_id))?
         .map(|s| Trigger::from_value(&s.trigger).reply)
         .unwrap_or_default();
     let mut t = OutTarget::reply(plan);

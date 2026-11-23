@@ -826,10 +826,6 @@ impl Vault {
     }
 
     /// Writes a [`Self::prepare_credential`] item in `tx`; returns its id.
-    pub fn insert_prepared(&self, tx: &Tx, p: &PreparedItem) -> VaultResult<String> {
-        tx.write(|w| self.insert_prepared_in(w, p))
-    }
-
     pub(crate) fn insert_prepared_in(
         &self,
         w: &mut W<'_>,

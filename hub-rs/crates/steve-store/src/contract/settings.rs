@@ -1,6 +1,6 @@
-use sea_query::{Expr, ExprTrait, Query};
+use sea_query::{Expr, ExprTrait, Order, Query};
 
-use crate::{Read, Result};
+use crate::{Read, Result, W};
 
 pub struct Settings<'a, C>(&'a mut C);
 pub struct NotificationPolicies<'a, C>(&'a mut C);
@@ -12,6 +12,14 @@ impl<'a, C: Read> Settings<'a, C> {
 
     /// The workspace's configured zone name. The caller resolves the system default.
     pub fn timezone(&mut self, ws: &str) -> Result<Option<String>> {
+        self.text(ws, "tz")
+    }
+
+    pub fn quiet_hours(&mut self, ws: &str) -> Result<Option<String>> {
+        self.text(ws, "quiet")
+    }
+
+    fn text(&mut self, ws: &str, key: &str) -> Result<Option<String>> {
         let value = self
             .0
             .one(
@@ -19,7 +27,7 @@ impl<'a, C: Read> Settings<'a, C> {
                     .column("value")
                     .from("settings")
                     .and_where(Expr::col("workspace_id").eq(ws))
-                    .and_where(Expr::col("key").eq("tz")),
+                    .and_where(Expr::col("key").eq(key)),
                 |r| r.get::<Option<String>>(0),
             )?
             .flatten();
@@ -66,6 +74,19 @@ pub fn workspace_name(c: &mut impl Read, ws: &str) -> Result<Option<String>> {
     )
 }
 
+pub fn workspace_owner(r: &mut impl Read, ws: &str) -> Result<Option<String>> {
+    r.one(
+        Query::select()
+            .column("user_id")
+            .from("workspace_members")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("role").eq("owner"))
+            .order_by("created", Order::Asc)
+            .limit(1),
+        |row| row.get(0),
+    )
+}
+
 pub fn user_is_member(c: &mut impl Read, ws: &str, user: &str) -> Result<bool> {
     c.one(
         Query::select()
@@ -83,4 +104,58 @@ pub fn user_is_member(c: &mut impl Read, ws: &str, user: &str) -> Result<bool> {
         |_| Ok(()),
     )
     .map(|r| r.is_some())
+}
+
+/// Whether the personal connection's send failure has already been reported.
+pub fn unsendable_reported(r: &mut impl Read, ws: &str, connection: &str) -> Result<bool> {
+    Ok(r.one(
+        Query::select()
+            .column("key")
+            .from("settings")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("key").eq(unsendable_key(connection))),
+        |_| Ok(()),
+    )?
+    .is_some())
+}
+
+pub fn report_unsendable(
+    w: &mut W<'_>,
+    ws: &str,
+    connection: &str,
+    error: &str,
+    at: i64,
+) -> Result<()> {
+    let detail = serde_json::json!({"error": error, "at": at}).to_string();
+    w.exec(
+        Query::insert()
+            .into_table("settings")
+            .columns(["workspace_id", "key", "value", "updated"])
+            .values_panic([
+                ws.into(),
+                unsendable_key(connection).into(),
+                detail.into(),
+                at.into(),
+            ])
+            .on_conflict(
+                sea_query::OnConflict::columns(["workspace_id", "key"])
+                    .update_columns(["value", "updated"])
+                    .to_owned(),
+            ),
+    )?;
+    Ok(())
+}
+
+pub fn clear_unsendable(w: &mut W<'_>, ws: &str, connection: &str) -> Result<()> {
+    w.exec(
+        Query::delete()
+            .from_table("settings")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("key").eq(unsendable_key(connection))),
+    )?;
+    Ok(())
+}
+
+fn unsendable_key(connection: &str) -> String {
+    format!("trigger.unsendable.{connection}")
 }

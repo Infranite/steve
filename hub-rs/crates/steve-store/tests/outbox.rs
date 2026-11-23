@@ -11,7 +11,7 @@ use serde_json::json;
 use steve_store::outbox::{
     self, Applied, ConsumeError, Consumer, DEAD_AFTER_MS, Dispatcher, Event, Since,
 };
-use steve_store::{Store, StoreError, Tx};
+use steve_store::{Store, StoreError, W};
 
 const TOPIC: &str = "test.happened";
 
@@ -64,13 +64,17 @@ impl Consumer for Counter {
         }
         Ok(())
     }
-    fn apply(&self, tx: &Tx, ev: &Event) -> Result<Applied, ConsumeError> {
+    fn apply(&self, w: &mut W<'_>, ev: &Event) -> Result<Applied, ConsumeError> {
         if let Some(e) = self.fail.lock().unwrap().clone() {
             return Err(e);
         }
-        tx.execute(
-            "INSERT INTO audit (workspace_id, ts, actor, action, target, detail) VALUES (?, 0, ?, 'consumed', ?, '')",
-            rusqlite::params![ev.workspace_id, self.id, ev.id],
+        steve_store::audit_repo::record(
+            w,
+            &ev.workspace_id,
+            self.id,
+            "consumed",
+            &ev.id,
+            &serde_json::Value::Null,
         )?;
         self.applied.fetch_add(1, Ordering::SeqCst);
         Ok(Applied::noted(format!("ok {}", ev.id)))

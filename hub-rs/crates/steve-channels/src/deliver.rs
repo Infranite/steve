@@ -32,57 +32,7 @@ pub enum Purpose {
     Source,
 }
 
-/// What lets a message go out without a draft (“授权（规则或决定）”). The outbound verifies it
-/// against the store again right before the adapter is called; anything else becomes a draft.
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-pub enum Auth {
-    /// Nothing: a draft for your approval.
-    #[default]
-    None,
-    /// A live member explicitly requested a bot send, bound to a durable output intent.
-    /// Never valid on personal accounts or on legacy messages without that intent.
-    Requester { user: String },
-    /// A bot account's response rule that speaks (`reply`; `create_item`'s “收到，已记为…”;
-    /// `handoff`'s “我请…来看。”) for the inbound message it answers.
-    Rule {
-        source: String,
-        act: crate::rules::Act,
-    },
-    /// Your own trigger words in your own message (only on your own account).
-    Trigger { source: String },
-    /// A live `msg.send` grant of the flow, for the flow version the run is running (a grant is
-    /// bound to one version: an edit of the flow ends it).
-    Grant {
-        flow_id: String,
-        run_id: String,
-        #[serde(default)]
-        flow_version: i64,
-    },
-    /// The flow engine's approval for this run: `gate` = you approved exactly this step (its fixed
-    /// text was on the card), else an `approve` node earlier on the path.
-    Step {
-        run_id: String,
-        node_id: String,
-        gate: bool,
-    },
-    /// You approved this message (a resolved `approve` `yes` or `fail` `retry` decision about it).
-    Decision { id: String },
-}
-
-impl Auth {
-    /// For the audit log.
-    pub fn code(&self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::Requester { .. } => "requester",
-            Self::Rule { .. } => "rule",
-            Self::Trigger { .. } => "trigger",
-            Self::Grant { .. } => "grant",
-            Self::Step { .. } => "step",
-            Self::Decision { .. } => "decision",
-        }
-    }
-}
+pub use steve_store::channel_sends::Auth;
 
 /// Where a message goes and as whom.
 #[derive(Debug, Clone, PartialEq)]
@@ -301,21 +251,13 @@ pub fn delivered_of(message_id: &str, status: &str, decision: Option<&str>) -> D
 
 /// The state of operation `op`'s outbound message, when it has one ([`OutRequest::operation_id`]).
 pub fn operation_delivered(
-    c: &rusqlite::Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     op: &str,
 ) -> ChannelResult<Option<Delivered>> {
-    use rusqlite::OptionalExtension;
     let id = operation_message_id(ws, op);
-    let row: Option<(String, Option<String>)> = c
-        .query_row(
-            "SELECT status, decision_id FROM chan_messages
-              WHERE id = ? AND workspace_id = ? AND direction = 'out'",
-            rusqlite::params![id, ws],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    Ok(row.map(|(status, decision)| delivered_of(&id, &status, decision.as_deref())))
+    let row = steve_store::channel_message_repo::outbound::approval(r, ws, &id)?;
+    Ok(row.map(|row| delivered_of(&id, &row.status, row.decision.as_deref())))
 }
 
 /// What became of a message.
@@ -436,10 +378,10 @@ impl Outbound for DraftOnly {
         }
         let now = ch.now();
         let ws = &req.target.ws;
-        ch.store().transaction(|tx| {
+        ch.store().write(|w| {
             // asked again for the same operation: its draft, not a second one
             if let Some(op) = &req.operation_id
-                && let Some(d) = operation_delivered(tx, ws, op)?
+                && let Some(d) = operation_delivered(w, ws, op)?
             {
                 return Ok(d);
             }
@@ -447,9 +389,9 @@ impl Outbound for DraftOnly {
                 Some(op) => operation_message_id(ws, op),
                 None => steve_store::uid("cm"),
             };
-            let (m, d) = respond::open_draft_as(tx, &req.target, &req.text, now, id)?;
+            let (m, d) = respond::open_draft_as(w, &req.target, &req.text, now, id)?;
             if let Some(g) = &req.generation {
-                crate::decide::keep_composed(tx, &m, g)?;
+                crate::decide::keep_composed(w, &m, g)?;
             }
             Ok::<_, crate::ChannelError>(Delivered::Drafted {
                 message_id: m,

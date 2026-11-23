@@ -27,7 +27,7 @@ fn private_address_is_not_injected_into_shared_workspace_chat() {
         .store()
         .transaction(|tx| -> steve_modules::ApiResult<()> {
             let who = caller(WS, ME);
-            let me = steve_modules::contacts::service::ensure_base(tx, &who)?;
+            let me = tx.write(|w| steve_modules::contacts::service::ensure_base(w, &who))?;
             steve_modules::contacts::repo::value_insert(
                 tx,
                 WS,

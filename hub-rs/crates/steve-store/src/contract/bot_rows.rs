@@ -20,6 +20,17 @@ pub struct BotPrompt {
     pub rules: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ReplyBot {
+    pub id: String,
+    pub name: String,
+    pub role: String,
+    pub persona: String,
+    pub rules: String,
+    pub prompt: String,
+    pub model: Option<String>,
+}
+
 fn decode_prompt(row: &super::Row<'_>) -> Result<BotPrompt> {
     Ok(BotPrompt {
         id: row.get(0)?,
@@ -50,6 +61,56 @@ fn local(ws: &str) -> SelectStatement {
 }
 
 impl<C: Read> BotRows<'_, C> {
+    pub fn reply_profile(&mut self, ws: &str, id: Option<&str>) -> Result<Option<ReplyBot>> {
+        let mut query = local(ws);
+        query
+            .columns([
+                ("b", "id"),
+                ("b", "name"),
+                ("b", "role"),
+                ("b", "persona"),
+                ("b", "rules"),
+                ("b", "prompt"),
+                ("b", "model"),
+            ])
+            .and_where(Expr::col(("b", "enabled")).eq(1_i64))
+            .limit(1);
+        match id {
+            Some(id) => query.and_where(Expr::col(("b", "id")).eq(id)),
+            None => query
+                .and_where(Expr::col(("b", "main")).eq(1_i64))
+                .order_by(("b", "updated"), Order::Asc),
+        };
+        self.0.one(&query, |row| {
+            Ok(ReplyBot {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                role: row.get(2)?,
+                persona: row.get(3)?,
+                rules: row.get(4)?,
+                prompt: row.get::<Option<String>>(5)?.unwrap_or_default(),
+                model: row
+                    .get::<Option<String>>(6)?
+                    .filter(|model| !model.is_empty()),
+            })
+        })
+    }
+
+    pub fn persona_seed(&mut self, ws: &str) -> Result<Option<(String, String)>> {
+        self.0.one(
+            local(ws)
+                .columns([("b", "id"), ("b", "persona")])
+                .order_by_expr(Expr::col(("b", "id")).eq("steve"), Order::Desc)
+                .order_by_columns([
+                    (("b", "main"), Order::Desc),
+                    (("w", "created"), Order::Asc),
+                    (("b", "id"), Order::Asc),
+                ])
+                .limit(1),
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+    }
+
     pub fn enabled_prompt(&mut self, ws: &str, id: &str) -> Result<Option<BotPrompt>> {
         self.0.one(
             prompt_query(ws)

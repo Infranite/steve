@@ -18,6 +18,9 @@
 mod digest_env;
 use digest_env::TestEnv;
 use std::sync::{Arc, Mutex};
+use steve_store::testkit::channels::inspect;
+use steve_store::testkit::channels::seed;
+use steve_store::testkit::channels::seed::people::Bot;
 
 use serde_json::{Value, json};
 use steve_channels::compose::H_SAFETY;
@@ -35,13 +38,10 @@ use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowSetup, LinearExecutor};
 use steve_modules::ApiResult;
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
-use steve_modules::accounts::repo::{self as arepo, NewAccount};
-use steve_modules::accounts::service::ensure_seeds;
 use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use steve_store::base::Viewer;
-use steve_store::uid;
 use tempfile::TempDir;
 
 #[path = "support/reply_http.rs"]
@@ -86,36 +86,7 @@ struct H {
 }
 
 fn bot_connection(h: &TestEnv, handle: &str, name: &str) -> (String, String) {
-    h.store()
-        .transaction(|tx| -> ApiResult<(String, String)> {
-            ensure_seeds(tx, WS)?;
-            steve_modules::contacts::service::ensure_base(tx, &caller(WS, ME))?;
-            let org = tx.write(|w| w.contacts().own_org(WS))?.expect("self org");
-            let a = arepo::insert(
-                tx,
-                WS,
-                &NewAccount {
-                    system_id: FakeChannel::SYSTEM.into(),
-                    family: "slack_user".into(),
-                    party_id: org.id,
-                    kind: "app_bot".into(),
-                    handle: handle.into(),
-                    handle_display: handle.into(),
-                    display_name: name.into(),
-                    verified: true,
-                    confidence: 1.0,
-                    source: "connect".into(),
-                    source_label: String::new(),
-                },
-            )?;
-            let con = uid("con");
-            tx.execute(
-                "INSERT INTO connections (id, workspace_id, account_id, adapter, auth, caps, created_by, created, updated)
-                 VALUES (?, ?, ?, ?, 'none', '[\"msg.receive\",\"msg.send\",\"msg.send_as_user\"]', ?, 1, 1)",
-                rusqlite::params![con, WS, a.id, FakeChannel::ID, ME],
-            )?;
-            Ok((con, a.id))
-        })
+    FakeChannel::seed_bot_connection(h.store(), &caller(WS, ME), handle, name)
         .expect("bot connection")
 }
 
@@ -123,35 +94,8 @@ fn set_rules(h: &H, conn: &str, rules: Value) {
     let now = h.ch.now();
     h.env
         .store()
-        .transaction(|tx| spaces::set_account_rules(tx, &Viewer::bare(WS, ME), conn, &rules, now))
+        .write(|tx| spaces::set_account_rules(tx, &Viewer::bare(WS, ME), conn, &rules, now))
         .expect("rules");
-}
-
-fn exec(h: &H, sql: &str, p: &[&str]) {
-    let (sql, p): (String, Vec<String>) = (sql.into(), p.iter().map(|s| s.to_string()).collect());
-    digest_env::write(h.env.store(), move |c| {
-        c.execute(&sql, rusqlite::params_from_iter(p.iter()))?;
-        Ok(())
-    })
-    .expect("sql");
-}
-
-fn one(h: &H, sql: &str, p: &[&str]) -> Value {
-    let (sql, p): (String, Vec<String>) = (sql.into(), p.iter().map(|s| s.to_string()).collect());
-    h.env
-        .store()
-        .reader(move |c| {
-            let v = c.query_row(&sql, rusqlite::params_from_iter(p.iter()), |r| {
-                Ok(match r.get_ref(0)? {
-                    rusqlite::types::ValueRef::Null => Value::Null,
-                    rusqlite::types::ValueRef::Integer(x) => json!(x),
-                    rusqlite::types::ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
-                    _ => Value::Null,
-                })
-            })?;
-            Ok::<_, steve_store::StoreError>(v)
-        })
-        .expect("row")
 }
 
 /// A message from `from`; `at` @-mentions the receiving connection, `bot_at` the bot by handle.
@@ -204,11 +148,7 @@ fn log(h: &H) -> Vec<String> {
 }
 
 fn state(h: &H, message: &str) -> Value {
-    one(
-        h,
-        "SELECT state FROM chan_reactions WHERE message_id = ?",
-        &[message],
-    )
+    inspect::messages::chan_reaction_state_by_message(h.env.store(), message).unwrap()
 }
 
 async fn setup(with_thread: bool) -> H {
@@ -231,16 +171,7 @@ async fn setup_answering(with_thread: bool, composed: &str) -> H {
     disclosure.bind(env.store().clone(), env.gateway.clone());
     link.bind_clock(env.clock.clone());
     *core.store.lock().unwrap() = Some(env.store().clone());
-    env.store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "INSERT INTO bots (id, workspace_id, name, main, harness, persona, role, rules, updated) VALUES
-                    ('steve', 'default', 'Steve', 1, 'claude', '', '', '', 1);
-                 INSERT INTO bot_workspaces (bot_id, workspace_id, created) VALUES ('steve', 'default', 1);",
-            )?;
-            Ok(())
-        })
-        .expect("bots");
+    steve_store::testkit::channels::seed::people::bots(env.store(), &[Bot::default()]).unwrap();
     let keys = tempfile::tempdir().expect("tmp");
     let vault = Vault::new(
         env.store().clone(),
@@ -282,15 +213,7 @@ async fn setup_answering(with_thread: bool, composed: &str) -> H {
         FakeChannel::seed_connection(env.store(), &caller(WS, ME), Some("upx")).expect("you");
     let (bot, _) = bot_connection(&env, "uoncall", "值班小运");
     // you joined the bot's app (one installation, two identities: one space per chat)
-    env.store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE connections SET config = json_object('app_connection', ?) WHERE id = ?",
-                rusqlite::params![bot, me],
-            )?;
-            Ok(())
-        })
-        .expect("installation");
+    seed::connections::link_personal_connection(env.store(), &bot, &me).expect("installation");
     let people = [("ulilei", "李雷"), ("uhan", "韩梅梅")];
     fake.space("C_OPS", "运维群", SpaceKind::Group, false, &people);
     fake.space("C_ACME", "Acme 客户群", SpaceKind::Group, true, &people);
@@ -342,11 +265,8 @@ async fn ack_first_then_done_once_the_reply_is_out() {
     // the answer that completed it
     let out = i.response.unwrap().out_message_id.unwrap();
     assert_eq!(
-        one(
-            &h,
-            "SELECT answer_id FROM chan_reactions WHERE message_id = ?",
-            &[&i.message_id]
-        ),
+        inspect::messages::chan_reaction_answer_id_by_message(h.env.store(), &i.message_id)
+            .unwrap(),
         json!(out)
     );
 }
@@ -366,11 +286,7 @@ async fn a_failed_send_turns_failed_and_a_retry_turns_done() {
     // you retry once the provider is back: done replaces failed
     *h.fake.fail_send.lock().unwrap() = None;
     let out = i.response.unwrap().out_message_id.unwrap();
-    let d = one(
-        &h,
-        "SELECT decision_id FROM chan_messages WHERE id = ?",
-        &[&out],
-    );
+    let d = inspect::messages::message_decision_id_value(h.env.store(), &out).unwrap();
     steve_modules::decisions::dispatch(
         &h.env.modules,
         &caller(WS, ME),
@@ -401,12 +317,9 @@ async fn reactions_are_best_effort() {
     // the state is kept (with the provider's error), so the UI and the ending still know
     assert_eq!(state(&h, &i.message_id), "done");
     assert!(
-        one(
-            &h,
-            "SELECT error FROM chan_reactions WHERE message_id = ?",
-            &[&i.message_id]
-        )
-        .is_string()
+        inspect::messages::chan_reaction_error_by_message(h.env.store(), &i.message_id)
+            .unwrap()
+            .is_string()
     );
 }
 
@@ -521,11 +434,7 @@ async fn a_reaction_ends_locally_once_the_connection_is_removed() {
     assert_eq!(h.fake.reactions_on("o1"), [ReactionKind::Ack]);
     remove_bot(&h).await;
     assert_eq!(
-        one(
-            &h,
-            "SELECT connection_id FROM spaces WHERE id = ?",
-            &[&i.space_id]
-        ),
+        inspect::spaces::space_connection_id(h.env.store(), &i.space_id).unwrap(),
         Value::Null,
         "the space keeps no connection"
     );
@@ -535,11 +444,7 @@ async fn a_reaction_ends_locally_once_the_connection_is_removed() {
     assert_eq!(state(&h, &i.message_id), "done");
     assert_eq!(log(&h), before, "nothing asked of the provider");
     assert_eq!(
-        one(
-            &h,
-            "SELECT error FROM chan_reactions WHERE message_id = ?",
-            &[&i.message_id]
-        ),
+        inspect::messages::chan_reaction_error_by_message(h.env.store(), &i.message_id).unwrap(),
         Value::Null
     );
     // and nothing to acknowledge any more
@@ -615,21 +520,13 @@ async fn only_the_voice_answers_whoever_sees_the_message_first() {
     assert!(r.out_message_id.is_some(), "{r:?}");
     assert_eq!(sent(&h).len(), 1);
     assert_eq!(
-        one(
-            &h,
-            "SELECT count(*) FROM decisions WHERE status = 'open' AND kind = 'approve'",
-            &[]
-        ),
+        inspect::decisions::decision_count_by_open_and_approve(h.env.store()).unwrap(),
         json!(0),
         "your account does not draft"
     );
     let out = r.out_message_id.unwrap();
     assert_eq!(
-        one(
-            &h,
-            "SELECT space_id FROM chan_messages WHERE id = ?",
-            &[&out]
-        ),
+        inspect::messages::message_space_id_value(h.env.store(), &out).unwrap(),
         json!(bot_space)
     );
     // then the bot's own copy arrives: a duplicate, nothing more
@@ -685,15 +582,12 @@ async fn your_account_only_observes_where_the_bot_speaks() {
 async fn your_command_is_answered_as_you_once_where_the_bot_speaks() {
     let h = setup(false).await;
     let (_, self_space) = both_see_ops(&h).await;
-    exec(
-        &h,
-        "UPDATE channel_settings SET trigger = ? WHERE connection_id = ?",
-        &[
-            &json!({"on": true, "words": ["/bot"], "where": [self_space], "mark": true})
-                .to_string(),
-            &h.me,
-        ],
-    );
+    seed::connections::set_channel_trigger(
+        h.env.store(),
+        &json!({"on": true, "words": ["/bot"], "where": [self_space], "mark": true}).to_string(),
+        &h.me,
+    )
+    .unwrap();
     // the bot's connection sees your command first (it has the group's messages): its own rules
     let b = push(
         &h,
@@ -746,15 +640,12 @@ async fn the_same_message_twice_is_answered_once() {
 async fn echoes_and_automatic_replies_are_not_instructions() {
     let h = setup(false).await;
     let (_, self_space) = both_see_ops(&h).await;
-    exec(
-        &h,
-        "UPDATE channel_settings SET trigger = ? WHERE connection_id = ?",
-        &[
-            &json!({"on": true, "words": ["/bot"], "where": [self_space], "mark": true})
-                .to_string(),
-            &h.me,
-        ],
-    );
+    seed::connections::set_channel_trigger(
+        h.env.store(),
+        &json!({"on": true, "words": ["/bot"], "where": [self_space], "mark": true}).to_string(),
+        &h.me,
+    )
+    .unwrap();
     // the bot's answer read back by your poller before its send result is stored
     let i = push(
         &h,
@@ -763,11 +654,11 @@ async fn echoes_and_automatic_replies_are_not_instructions() {
     )
     .await;
     let out = i.response.unwrap().out_message_id.unwrap();
-    exec(
-        &h,
-        "UPDATE chan_messages SET external_id = NULL, status = 'pending' WHERE id = ?",
-        &[&out],
-    );
+    seed::messages::clear_message_external_id_for_echoes_and_automatic_replies_are_no(
+        h.env.store(),
+        &out,
+    )
+    .unwrap();
     let e = push(
         &h,
         &h.me.clone(),
@@ -931,11 +822,7 @@ async fn each_space_has_one_conversation_that_continues() {
     assert!(h.ch.conv_deliver(WS, &reply).await.unwrap().is_none());
 
     // an item made from the second turn: linked to the chat message, “收到，已记为”, ack kept
-    exec(
-        &h,
-        "INSERT INTO items (id, workspace_id, no, title, status, stage, source, created, updated) VALUES ('ST-7', 'default', 7, '回滚', 'run', '', '[]', 1, 1)",
-        &[],
-    );
+    seed::items::seed_item_st_7(h.env.store()).unwrap();
     let (turn2, _) = turns[1].clone();
     let ann = h
         .env
@@ -955,22 +842,14 @@ async fn each_space_has_one_conversation_that_continues() {
     h.ch.react_settled(&b.message_id).await;
     assert_eq!(h.fake.reactions_on("o2"), [ReactionKind::Ack]);
     assert_eq!(
-        one(
-            &h,
-            "SELECT count(*) FROM links WHERE subject_id = 'ST-7' AND predicate = 'from' AND object_id = ?",
-            &[&b.message_id]
-        ),
+        inspect::people::link_count_by_from_and_object(h.env.store(), &b.message_id).unwrap(),
         json!(1)
     );
     h.ch.react_item_ended(WS, "ST-7", true).await;
     assert_eq!(h.fake.reactions_on("o2"), [ReactionKind::Done]);
 
     // the conversation list: three conversations with their badges
-    let list = h
-        .env
-        .store()
-        .reader(|c| conversations::list(c, WS, &Viewer::bare(WS, ME)))
-        .unwrap();
+    let list = conversations::list(h.env.store(), WS, &Viewer::bare(WS, ME)).unwrap();
     assert_eq!(list.len(), 3);
     let opsb = list.iter().find(|x| x["space"] == json!(ops)).unwrap();
     assert_eq!(opsb["name"], json!("运维群"));
@@ -1023,14 +902,12 @@ async fn your_command_is_not_answered_once_you_left_the_chat() {
         msg("D_LI", "d0", "ulilei", "在吗", false, false),
     )
     .await;
-    exec(
-        &h,
-        "UPDATE channel_settings SET trigger = ? WHERE connection_id = ?",
-        &[
-            &json!({"on": true, "words": ["/bot"], "where": ["dm:*"], "mark": true}).to_string(),
-            &h.me,
-        ],
-    );
+    seed::connections::set_channel_trigger(
+        h.env.store(),
+        &json!({"on": true, "words": ["/bot"], "where": ["dm:*"], "mark": true}).to_string(),
+        &h.me,
+    )
+    .unwrap();
     let c =
         h.ch.on_inbound(
             WS,
@@ -1047,16 +924,8 @@ async fn your_command_is_not_answered_once_you_left_the_chat() {
         .await
         .expect("stored");
     // no identity speaks there any more (every identity left the space)
-    exec(
-        &h,
-        "UPDATE space_identities SET left_at = 1 WHERE space_id = ?",
-        &[&i.space_id],
-    );
-    exec(
-        &h,
-        "UPDATE spaces SET connection_id = NULL, status = 'left' WHERE id = ?",
-        &[&i.space_id],
-    );
+    seed::spaces::set_space_identity_left_at_value_1(h.env.store(), &i.space_id).unwrap();
+    seed::spaces::clear_space_connection_id(h.env.store(), &i.space_id).unwrap();
     let before = h.thread.as_ref().unwrap().turns.lock().unwrap().len();
     let r = h.ch.respond(WS, &h.me.clone(), &c).await.expect("respond");
     // your account is not in the chat any more: nobody answers, nothing starts
@@ -1118,11 +987,7 @@ async fn a_turn_carries_its_chat_message_with_media() {
     assert_eq!(last["channel_message"], Value::Null);
 
     // purged: text null, attachments empty, purged set
-    exec(
-        &h,
-        "UPDATE chan_messages SET text = NULL, purged = 9 WHERE id = ?",
-        &[&a.message_id],
-    );
+    seed::messages::clear_message_text(h.env.store(), &a.message_id).unwrap();
     let v = conversations::messages_of(&h.ch, WS, &Viewer::bare(WS, ME), &ops).unwrap();
     let cm = &v["messages"][0]["channel_message"];
     assert_eq!(
@@ -1150,7 +1015,7 @@ fn undo(h: &H, id: &str) {
         .transaction(|tx| -> ApiResult<()> {
             let d = steve_store::base::decisions::get(tx, id)?.expect("decision");
             h.env.modules.registry.before_undo(tx, &d)?;
-            tx.execute("UPDATE decisions SET status = 'open' WHERE id = ?", [id])?;
+            tx.write(|w| seed::decisions::reopen_fixture_decision(w, id))?;
             Ok(())
         })
         .expect("undo");
@@ -1229,11 +1094,11 @@ async fn an_expired_approval_discards_the_draft() {
     assert!(steve_modules::decisions::expire(&h.env.modules, &d).expect("expire"));
     h.outbox.send_due(&h.ch).await;
     assert_eq!(
-        one(&h, "SELECT status FROM chan_messages WHERE id = ?", &[&out]),
+        inspect::messages::message_status_value(h.env.store(), &out).unwrap(),
         json!("discarded")
     );
     assert_eq!(
-        one(&h, "SELECT status FROM decisions WHERE id = ?", &[&d]),
+        inspect::decisions::decision_status_value(h.env.store(), &d).unwrap(),
         json!("expired")
     );
     assert!(h.fake.reactions_on("d1").is_empty());
@@ -1251,7 +1116,8 @@ async fn your_private_chat_with_the_bot_is_owner_only() {
     h.env
         .store()
         .transaction(|tx| -> ApiResult<()> {
-            let me = steve_modules::contacts::service::ensure_base(tx, &caller(WS, ME))?;
+            let me =
+                tx.write(|w| steve_modules::contacts::service::ensure_base(w, &caller(WS, ME)))?;
             for (key, value) in [
                 ("call", "Private nickname"),
                 ("call_external", "External name"),
@@ -1293,7 +1159,7 @@ async fn your_private_chat_with_the_bot_is_owner_only() {
     assert!(!context.contains("External name"), "{context}");
     h.env
         .store()
-        .reader(|_| {
+        .read(|_| {
             assert_eq!(
                 h.env.store().read::<_, steve_store::StoreError>(|r| Ok(
                     steve_channels::personas::owner_name(r, WS)
@@ -1304,11 +1170,7 @@ async fn your_private_chat_with_the_bot_is_owner_only() {
         })
         .unwrap();
     // a one-to-one chat whose member count the provider never gave is still complete: one person
-    exec(
-        &h,
-        "UPDATE spaces SET member_count = 0 WHERE external_id = 'D_ME'",
-        &[],
-    );
+    seed::spaces::set_space_member_count_value_0(h.env.store()).unwrap();
     push(
         &h,
         &h.bot.clone(),
@@ -1426,27 +1288,11 @@ async fn only_the_owner_starts_work_from_a_chat() {
     assert!(!turns[1].1.start, "someone else");
     assert_eq!(turns[1].1.meta["chan"]["start"], json!(false));
     // 李雷 becomes a member of the workspace (not its owner): still a proposal
-    exec(
-        &h,
-        "INSERT INTO users (id, workspace_id, subject, name, role, created) VALUES ('u_li', ?, 'li', '李雷', 'member', 1)",
-        &[WS],
-    );
-    exec(
-        &h,
-        "INSERT INTO workspace_members (workspace_id, user_id, role, created) VALUES (?, 'u_li', 'member', 1)",
-        &[WS],
-    );
-    exec(
-        &h,
-        "UPDATE parties SET user_id = 'u_li' WHERE id = (SELECT sender_party_id FROM chan_messages WHERE external_id = 'w2')",
-        &[],
-    );
+    seed::people::seed_user_u_li(h.env.store(), WS).unwrap();
+    seed::people::seed_workspace_member(h.env.store(), WS).unwrap();
+    seed::people::set_party_user_id_u_li(h.env.store()).unwrap();
     assert_eq!(
-        one(
-            &h,
-            "SELECT count(*) FROM parties WHERE user_id = ?",
-            &["u_li"]
-        ),
+        inspect::people::party_count_by_user(h.env.store(), "u_li").unwrap(),
         json!(1),
         "李雷's contact is linked to the member"
     );
@@ -1468,15 +1314,12 @@ async fn a_trigger_word_a_bot_receives_is_no_command() {
     let h = setup(true).await;
     let t = h.thread.clone().unwrap();
     let (_, self_space) = both_see_ops(&h).await;
-    exec(
-        &h,
-        "UPDATE channel_settings SET trigger = ? WHERE connection_id = ?",
-        &[
-            &json!({"on": true, "words": ["/bot"], "where": [self_space], "mark": true})
-                .to_string(),
-            &h.me,
-        ],
-    );
+    seed::connections::set_channel_trigger(
+        h.env.store(),
+        &json!({"on": true, "words": ["/bot"], "where": [self_space], "mark": true}).to_string(),
+        &h.me,
+    )
+    .unwrap();
     // 李雷 has said something before (Steve knows their contact) and is a member of the workspace
     push(
         &h,
@@ -1484,27 +1327,12 @@ async fn a_trigger_word_a_bot_receives_is_no_command() {
         msg("C_OPS", "o1", "ulilei", "大家好", false, false),
     )
     .await;
-    exec(
-        &h,
-        "INSERT INTO users (id, workspace_id, subject, name, role, created) VALUES ('u_li', ?, 'li', '李雷', 'member', 1)",
-        &[WS],
-    );
-    exec(
-        &h,
-        "INSERT INTO workspace_members (workspace_id, user_id, role, created) VALUES (?, 'u_li', 'member', 1)",
-        &[WS],
-    );
-    exec(
-        &h,
-        "UPDATE parties SET user_id = 'u_li' WHERE id = (SELECT sender_party_id FROM chan_messages WHERE external_id = 'o1')",
-        &[],
-    );
+    seed::people::seed_user_u_li(h.env.store(), WS).unwrap();
+    seed::people::seed_workspace_member(h.env.store(), WS).unwrap();
+    seed::people::set_party_user_id_u_li_for_a_trigger_word_a_bot_receives_is_no(h.env.store())
+        .unwrap();
     assert_eq!(
-        one(
-            &h,
-            "SELECT count(*) FROM parties WHERE user_id = ?",
-            &["u_li"]
-        ),
+        inspect::people::party_count_by_user(h.env.store(), "u_li").unwrap(),
         json!(1)
     );
     let before = t.turns.lock().unwrap().len();
@@ -1565,22 +1393,12 @@ async fn the_conversation_card_says_who_asks_and_who_listens() {
     assert!(mine.contains("李雷（身份未知）"), "{mine}");
     assert!(mine.contains("可以直接做成事项开工"), "{mine}");
     // 李雷 asks: only a proposal; 李雷 works at a customer, recorded as a job
-    let party = one(
-        &h,
-        "SELECT sender_party_id FROM chan_messages WHERE external_id = ?",
-        &["c2"],
-    );
+    let party =
+        inspect::messages::message_sender_party_id_by_external(h.env.store(), "c2").unwrap();
     let party = party.as_str().unwrap().to_string();
-    exec(
-        &h,
-        "INSERT INTO parties (id, workspace_id, type, name, org_kind, created_by, created, updated) VALUES ('org_acme', ?, 'org', 'ACME 客户', 'customer', 'u', 1, 1)",
-        &[WS],
-    );
-    exec(
-        &h,
-        "INSERT INTO links (workspace_id, subject_type, subject_id, predicate, object_type, object_id, source, created) VALUES (?, 'party', ?, 'works_at', 'party', 'org_acme', 'manual', 1)",
-        &[WS, &party],
-    );
+    seed::people::seed_party_org_acme_for_the_conversation_card_says_who_asks(h.env.store(), WS)
+        .unwrap();
+    seed::people::seed_link(h.env.store(), WS, &party).unwrap();
     let theirs = card(&turns[1].0);
     assert!(
         theirs.contains("提问的人：李雷（外部，ACME 客户）"),
@@ -1592,30 +1410,18 @@ async fn the_conversation_card_says_who_asks_and_who_listens() {
     );
     assert!(theirs.contains("只能作为提议"), "{theirs}");
     // an organization not everyone in the workspace may see is not named
-    exec(
-        &h,
-        "UPDATE parties SET visibility = 'private' WHERE id = 'org_acme'",
-        &[],
-    );
+    seed::people::set_party_visibility_private(h.env.store()).unwrap();
     let hidden = card(&turns[1].0);
     assert!(
         hidden.contains("提问的人：李雷（外部）") && !hidden.contains("ACME"),
         "{hidden}"
     );
     // a job that ended says nothing about now
-    exec(
-        &h,
-        "UPDATE links SET props = '{\"to\":\"2025-01\"}' WHERE object_id = 'org_acme'",
-        &[],
-    );
+    seed::people::set_link_props(h.env.store()).unwrap();
     let ended = card(&turns[1].0);
     assert!(ended.contains("提问的人：李雷（身份未知）"), "{ended}");
     // the provider counts more members than are recorded: they are said to be unknown
-    exec(
-        &h,
-        "UPDATE spaces SET member_count = member_count + 3 WHERE external_id = 'G_C'",
-        &[],
-    );
+    seed::spaces::set_space_member_count(h.env.store()).unwrap();
     let wider = card(&turns[1].0);
     assert!(wider.contains("另有 3 位没有记录，身份未知"), "{wider}");
 }
@@ -1638,29 +1444,18 @@ async fn an_incomplete_member_list_widens_nothing() {
         msg("G_I", "i1", "uli", "大家好", false, false),
     )
     .await;
-    exec(
-        &h,
-        "INSERT INTO users (id, workspace_id, subject, name, role, created) VALUES ('u_li', ?, 'li', '李雷', 'member', 1)",
-        &[WS],
-    );
-    exec(
-        &h,
-        "INSERT INTO workspace_members (workspace_id, user_id, role, created) VALUES (?, 'u_li', 'member', 1)",
-        &[WS],
-    );
-    exec(
-        &h,
-        "UPDATE parties SET user_id = 'u_li' WHERE id = (SELECT sender_party_id FROM chan_messages WHERE external_id = 'i1')",
-        &[],
-    );
-    let id = one(&h, "SELECT id FROM spaces WHERE external_id = ?", &["G_I"]);
+    seed::people::seed_user_u_li(h.env.store(), WS).unwrap();
+    seed::people::seed_workspace_member(h.env.store(), WS).unwrap();
+    seed::people::set_party_user_id_u_li_for_an_incomplete_member_list_widens_no(h.env.store())
+        .unwrap();
+    let id = inspect::spaces::space_id_by_external_value(h.env.store(), "G_I").unwrap();
     let id = id.as_str().unwrap().to_string();
     let scopes = |h: &H| -> Vec<String> {
         h.ch.store()
-            .reader(|c| -> steve_channels::ChannelResult<Vec<String>> {
-                let space = spaces::get(c, &id)?.expect("space");
-                let (bot, _) = steve_channels::bindings::connection_account(c, WS, &h.bot)?;
-                Ok(steve_channels::disclosure::space_audience(c, &space, &bot, ME)?.scopes)
+            .read(|r| -> steve_channels::ChannelResult<Vec<String>> {
+                let space = steve_store::channel_spaces::rows::get(r, &id)?.expect("space");
+                let (bot, _) = steve_channels::bindings::connection_account(r, WS, &h.bot)?;
+                Ok(steve_channels::disclosure::space_audience(r, &space, &bot, ME)?.scopes)
             })
             .unwrap()
     };
@@ -1668,11 +1463,8 @@ async fn an_incomplete_member_list_widens_nothing() {
         scopes(&h).contains(&"workspace".to_string()),
         "everyone recorded, all of us"
     );
-    exec(
-        &h,
-        "UPDATE spaces SET member_count = member_count + 2 WHERE external_id = 'G_I'",
-        &[],
-    );
+    seed::spaces::set_space_member_count_for_an_incomplete_member_list_widens_no(h.env.store())
+        .unwrap();
     assert!(
         !scopes(&h).contains(&"workspace".to_string()),
         "two members nobody recorded"
@@ -1697,16 +1489,15 @@ async fn a_group_without_a_member_count_gets_one_from_its_next_message() {
         msg("G_S", "s1", "upx", "在吗", false, false),
     )
     .await;
-    exec(
-        &h,
-        "UPDATE spaces SET member_count = 0 WHERE external_id = 'G_S'",
-        &[],
-    );
-    exec(
-        &h,
-        "DELETE FROM space_members WHERE space_id = (SELECT id FROM spaces WHERE external_id = 'G_S') AND account_id <> (SELECT account_id FROM connections WHERE id = ?)",
-        &[&h.bot],
-    );
+    seed::spaces::set_space_member_count_value_0_for_a_group_without_a_member_count_gets(
+        h.env.store(),
+    )
+    .unwrap();
+    seed::spaces::remove_space_member_for_a_group_without_a_member_count_gets(
+        h.env.store(),
+        &h.bot,
+    )
+    .unwrap();
     push(
         &h,
         &h.bot.clone(),
@@ -1714,18 +1505,10 @@ async fn a_group_without_a_member_count_gets_one_from_its_next_message() {
     )
     .await;
     assert_eq!(
-        one(
-            &h,
-            "SELECT member_count FROM spaces WHERE external_id = ?",
-            &["G_S"]
-        ),
+        inspect::spaces::space_member_count_by_external(h.env.store(), "G_S").unwrap(),
         json!(2)
     );
-    let n = one(
-        &h,
-        "SELECT count(*) FROM space_members WHERE space_id = (SELECT id FROM spaces WHERE external_id = ?)",
-        &["G_S"],
-    );
+    let n = inspect::spaces::space_member_count(h.env.store(), "G_S").unwrap();
     assert!(n.as_i64().unwrap() >= 3, "the bot and both people: {n}");
 }
 
@@ -1806,11 +1589,7 @@ async fn a_drafted_answer_is_closed_in_its_own_conversation() {
 
     // a draft whose approval was taken out of 待处理 without discarding it
     let (ops, r2, d2) = draft("q2").await;
-    exec(
-        &h,
-        "UPDATE decisions SET status = 'resolved', result = '{\"dismissed\":true}' WHERE id = ?",
-        &[&d2],
-    );
+    seed::decisions::set_decision_status_resolved(h.env.store(), &d2).unwrap();
     let o = out_of(&ops, &r2);
     assert_eq!(
         (o["status"].clone(), o["decision"].clone()),
@@ -1884,13 +1663,10 @@ fn failed_answer(h: &H, turn: &str, text: &str) -> String {
 }
 
 fn unsendable_notices(h: &H) -> i64 {
-    one(
-        h,
-        "SELECT count(*) FROM messages WHERE space = 'notify' AND json_extract(meta, '$.notice.kind') = ?",
-        &[steve_channels::unsendable::NOTICE_KIND],
-    )
-    .as_i64()
-    .unwrap()
+    inspect::conversations::turn_count(h.env.store(), steve_channels::unsendable::NOTICE_KIND)
+        .unwrap()
+        .as_i64()
+        .unwrap()
 }
 
 /// The owner sent `/ai 看下我现在磁盘情况` on their own account; the answer's model reached for a tool,
@@ -1907,14 +1683,7 @@ async fn a_failed_trigger_word_is_visible_in_its_thread_and_in_steve() {
         msg("D_LI", "d0", "ulilei", "在吗", false, false),
     )
     .await;
-    exec(
-        &h,
-        "UPDATE channel_settings SET trigger = ? WHERE connection_id = ?",
-        &[
-            &json!({"on": true, "words": ["/ai"], "where": ["dm:*"], "who": ["me"], "reply": "thread", "mark": true}).to_string(),
-            &h.me,
-        ],
-    );
+    seed::connections::set_channel_trigger(h.env.store(), &json!({"on": true, "words": ["/ai"], "where": ["dm:*"], "who": ["me"], "reply": "thread", "mark": true}).to_string(), &h.me).unwrap();
     let turn = your_trigger(&h, "d1", "/ai 看下我现在磁盘情况").await;
     let err = failed_answer(&h, &turn, "（这件事要在机器上动手……）");
     let d = h.ch.conv_deliver(WS, &err).await.unwrap();
@@ -1941,22 +1710,22 @@ async fn a_failed_trigger_word_is_visible_in_its_thread_and_in_steve() {
         assert_eq!(m.meta["chan_out"]["status"], json!("failed"));
         assert_eq!(unsendable_notices(&h), n, "one notice, not one per message");
     }
-    let notice = one(
-        &h,
-        "SELECT text FROM messages WHERE space = 'notify' AND json_extract(meta, '$.notice.kind') = ?",
-        &[steve_channels::unsendable::NOTICE_KIND],
-    );
+    let notice = inspect::conversations::turn_text_value(
+        h.env.store(),
+        steve_channels::unsendable::NOTICE_KIND,
+    )
+    .unwrap();
     let notice = notice.as_str().unwrap();
     assert!(
         notice.contains("连接只读") && notice.contains("接入"),
         "why and where to fix it: {notice}"
     );
     assert_eq!(
-        one(
-            &h,
-            "SELECT count(*) FROM messages WHERE space = 'steve' AND json_extract(meta, '$.notice.kind') = ?",
-            &[steve_channels::unsendable::NOTICE_KIND],
-        ),
+        inspect::conversations::turn_count_value(
+            h.env.store(),
+            steve_channels::unsendable::NOTICE_KIND
+        )
+        .unwrap(),
         json!(1),
         "a line in your conversation too"
     );
@@ -1987,14 +1756,7 @@ async fn a_failed_trigger_word_of_someone_else_is_answered_in_your_voice() {
         msg("D_LI", "o0", "ulilei", "在吗", false, false),
     )
     .await;
-    exec(
-        &h,
-        "UPDATE channel_settings SET trigger = ? WHERE connection_id = ?",
-        &[
-            &json!({"on": true, "words": ["/ai"], "where": ["dm:*"], "who": ["*"], "reply": "thread", "mark": true}).to_string(),
-            &h.me,
-        ],
-    );
+    seed::connections::set_channel_trigger(h.env.store(), &json!({"on": true, "words": ["/ai"], "where": ["dm:*"], "who": ["*"], "reply": "thread", "mark": true}).to_string(), &h.me).unwrap();
     // the privacy guard lets an ordinary request through
     h.env.gateway.script(
         "你是一道隐私关卡",
@@ -2045,14 +1807,7 @@ async fn a_trigger_word_no_one_took_records_the_real_reason_once() {
         msg("D_LI", "n0", "ulilei", "在吗", false, false),
     )
     .await;
-    exec(
-        &h,
-        "UPDATE channel_settings SET trigger = ? WHERE connection_id = ?",
-        &[
-            &json!({"on": true, "words": ["/ai"], "where": ["dm:*"], "who": ["me"], "reply": "thread", "mark": true}).to_string(),
-            &h.me,
-        ],
-    );
+    seed::connections::set_channel_trigger(h.env.store(), &json!({"on": true, "words": ["/ai"], "where": ["dm:*"], "who": ["me"], "reply": "thread", "mark": true}).to_string(), &h.me).unwrap();
     let t = h.thread.clone().unwrap();
     *t.fail.lock().unwrap() = Some("对话队列已满".into());
     h.env.gateway.unscript(H_SAFETY);
@@ -2107,14 +1862,7 @@ async fn a_read_only_account_gets_the_write_block_notice_only() {
         msg("D_LI", "b0", "ulilei", "在吗", false, false),
     )
     .await;
-    exec(
-        &h,
-        "UPDATE channel_settings SET trigger = ? WHERE connection_id = ?",
-        &[
-            &json!({"on": true, "words": ["/ai"], "where": ["dm:*"], "who": ["me"], "reply": "thread", "mark": true}).to_string(),
-            &h.me,
-        ],
-    );
+    seed::connections::set_channel_trigger(h.env.store(), &json!({"on": true, "words": ["/ai"], "where": ["dm:*"], "who": ["me"], "reply": "thread", "mark": true}).to_string(), &h.me).unwrap();
     *h.fake.block_send.lock().unwrap() = Some("write_policy forbidden".into());
     for id in ["b1", "b2"] {
         let turn = your_trigger(&h, id, "/ai 看下我现在磁盘情况").await;
@@ -2140,9 +1888,7 @@ fn record_of(
     q: &steve_channels::conv_record::RecordQuery,
 ) -> ApiResult<Value> {
     let conv = conversations::conv_space(space);
-    h.env
-        .store()
-        .reader(|c| steve_channels::conv_record::record(c, WS, &Viewer::bare(WS, user), &conv, q))
+    steve_channels::conv_record::record(h.env.store(), WS, &Viewer::bare(WS, user), &conv, q)
 }
 
 /// The handling of the received message `id` and the out state of Steve's message `id` in a record.
@@ -2250,11 +1996,7 @@ async fn the_record_shows_every_message_with_what_steve_did() {
     )
     .await;
     *h.fake.fail_send.lock().unwrap() = None;
-    let space = one(
-        &h,
-        "SELECT space_id FROM chan_messages WHERE id = ?",
-        &[&a.message_id],
-    );
+    let space = inspect::messages::message_space_id_value(h.env.store(), &a.message_id).unwrap();
     let space = space.as_str().unwrap().to_string();
 
     let r = record_of(&h, ME, &space, &Default::default()).unwrap();
@@ -2338,31 +2080,24 @@ async fn the_record_shows_every_message_with_what_steve_did() {
         msg("C_ACME", "q1", "ulilei", "周五见", false, false),
     )
     .await;
-    let quiet_space = one(
-        &h,
-        "SELECT space_id FROM chan_messages WHERE id = ?",
-        &[&quiet.message_id],
-    );
+    let quiet_space =
+        inspect::messages::message_space_id_value(h.env.store(), &quiet.message_id).unwrap();
     // in the list, with what is new for you; reading it clears that
     let now =
         h.ch.now()
             .max(recs.last().unwrap()["created"].as_i64().unwrap());
     let list = |user: &str, connection: Option<&str>| {
-        h.env
-            .store()
-            .reader(|c| {
-                conversations::list_page(
-                    c,
-                    WS,
-                    &Viewer::bare(WS, user),
-                    &conversations::ListQuery {
-                        connection: connection.map(String::from),
-                        ..Default::default()
-                    },
-                    now,
-                )
-            })
-            .unwrap()
+        conversations::list_page(
+            h.env.store(),
+            WS,
+            &Viewer::bare(WS, user),
+            &conversations::ListQuery {
+                connection: connection.map(String::from),
+                ..Default::default()
+            },
+            now,
+        )
+        .unwrap()
     };
     let l = list(ME, None);
     let row = l
@@ -2387,11 +2122,9 @@ async fn the_record_shows_every_message_with_what_steve_did() {
     );
     assert_eq!(list(ME, Some(&bot)).total, l.total);
     assert_eq!(list(ME, Some("con_missing")).total, 0);
-    let entries = h
-        .env
-        .store()
-        .reader(|c| steve_channels::conv_record::channels(&h.ch, c, &Viewer::bare(WS, ME), now))
-        .unwrap();
+    let entries =
+        steve_channels::conv_record::channels(&h.ch, h.env.store(), &Viewer::bare(WS, ME), now)
+            .unwrap();
     let e = entries
         .iter()
         .find(|e| e.connection == bot)
@@ -2401,7 +2134,7 @@ async fn the_record_shows_every_message_with_what_steve_did() {
     let last = recs[2]["created"].as_i64().unwrap();
     h.env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             steve_channels::conv_record::mark_read(tx, WS, &Viewer::bare(WS, ME), &conv, last, now)
         })
         .unwrap();
@@ -2420,14 +2153,14 @@ async fn the_record_shows_every_message_with_what_steve_did() {
     // the marker never moves back
     h.env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             steve_channels::conv_record::mark_read(tx, WS, &Viewer::bare(WS, ME), &conv, 0, now)
         })
         .unwrap();
     assert_eq!(unread_after(list(ME, None)), json!(left));
     h.env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             steve_channels::conv_record::mark_read(tx, WS, &Viewer::bare(WS, ME), &conv, now, now)
         })
         .unwrap();
@@ -2444,11 +2177,7 @@ async fn single_user_reads_personal_records_without_changing_account_ownership()
     let h = setup(false).await;
     let me = h.me.clone();
     let i = push(&h, &me, msg("D_LI", "d1", "ulilei", "在吗", false, false)).await;
-    let space = one(
-        &h,
-        "SELECT space_id FROM chan_messages WHERE id = ?",
-        &[&i.message_id],
-    );
+    let space = inspect::messages::message_space_id_value(h.env.store(), &i.message_id).unwrap();
     let space = space.as_str().unwrap().to_string();
     let r = record_of(&h, ME, &space, &Default::default()).unwrap();
     assert_eq!(rec(&r, &i.message_id)["direction"], "in");
@@ -2458,27 +2187,26 @@ async fn single_user_reads_personal_records_without_changing_account_ownership()
     let conv = conversations::conv_space(&space);
     h.env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             steve_channels::conv_record::mark_read(tx, WS, &Viewer::bare(WS, other), &conv, 1, 2)
         })
         .unwrap();
     // Account ownership is identity semantics, independent of reading its stored history.
-    let theirs = h
-        .env
-        .store()
-        .reader(|c| steve_channels::conv_record::channels(&h.ch, c, &Viewer::bare(WS, other), 0))
-        .unwrap();
+    let theirs =
+        steve_channels::conv_record::channels(&h.ch, h.env.store(), &Viewer::bare(WS, other), 0)
+            .unwrap();
     assert!(
         theirs.iter().all(|e| e.connection != me),
         "your account is not in their switcher"
     );
-    let l = h
-        .env
-        .store()
-        .reader(|c| {
-            conversations::list_page(c, WS, &Viewer::bare(WS, other), &Default::default(), 0)
-        })
-        .unwrap();
+    let l = conversations::list_page(
+        h.env.store(),
+        WS,
+        &Viewer::bare(WS, other),
+        &Default::default(),
+        0,
+    )
+    .unwrap();
     assert!(
         l.conversations
             .iter()
@@ -2541,19 +2269,13 @@ async fn a_turn_whose_answer_failed_shows_failed_with_the_reason() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_command_answered_in_your_web_conversation_shows_that_answer() {
     let h = setup(true).await;
-    exec(
-        &h,
-        "UPDATE connections SET caps = '[\"msg.receive\"]' WHERE id = ?",
-        &[&h.me],
-    );
-    exec(
-        &h,
-        "UPDATE channel_settings SET trigger = ? WHERE connection_id = ?",
-        &[
-            &json!({"on": true, "words": ["/bot"], "where": ["dm:*"], "mark": true}).to_string(),
-            &h.me,
-        ],
-    );
+    seed::connections::set_connection_caps_msg_receive(h.env.store(), &h.me).unwrap();
+    seed::connections::set_channel_trigger(
+        h.env.store(),
+        &json!({"on": true, "words": ["/bot"], "where": ["dm:*"], "mark": true}).to_string(),
+        &h.me,
+    )
+    .unwrap();
     let me = h.me.clone();
     let main = |h: &H, n: usize| -> String {
         let turns = h.thread.as_ref().unwrap().turns.lock().unwrap().clone();
@@ -2596,11 +2318,7 @@ async fn a_command_answered_in_your_web_conversation_shows_that_answer() {
         .unwrap();
     assert_eq!(state(&h, &a.message_id), json!("ack"));
     // A grant restored while the web turn ran must not reroute its answer to the channel.
-    exec(
-        &h,
-        "UPDATE connections SET caps = '[\"msg.receive\",\"msg.send_as_user\"]' WHERE id = ?",
-        &[&h.me],
-    );
+    seed::connections::set_connection_caps(h.env.store(), &h.me).unwrap();
     assert!(h.ch.conv_deliver(WS, &answer).await.unwrap().is_none());
     assert_eq!(state(&h, &a.message_id), "done");
     assert_eq!(h.fake.reactions_on("d1"), [ReactionKind::Done]);
@@ -2609,11 +2327,7 @@ async fn a_command_answered_in_your_web_conversation_shows_that_answer() {
         (x["state"].clone(), x["main_turn"].clone()),
         (json!("local"), json!(t1))
     );
-    exec(
-        &h,
-        "UPDATE connections SET caps = '[\"msg.receive\"]' WHERE id = ?",
-        &[&h.me],
-    );
+    seed::connections::set_connection_caps_msg_receive(h.env.store(), &h.me).unwrap();
 
     let b = push(
         &h,
@@ -2715,11 +2429,7 @@ async fn a_command_answered_in_your_web_conversation_shows_that_answer() {
     assert_eq!(log(&h), reactions);
     assert!(sent(&h).is_empty());
     assert_eq!(
-        one(
-            &h,
-            "SELECT count(*) FROM chan_messages WHERE direction = 'out'",
-            &[]
-        ),
+        inspect::messages::message_count_by_outgoing_value(h.env.store()).unwrap(),
         0
     );
 }
@@ -2867,32 +2577,16 @@ async fn conversation_trail(composed: &str, id: &str, text: &str) -> (H, String,
     let d = h.ch.conv_deliver(WS, &reply).await.unwrap();
     assert!(d.is_none(), "not delivered: {d:?}");
     assert!(sent(&h).is_empty(), "nothing said in the space");
-    let opened = one(
-        &h,
-        "SELECT count(*) FROM decisions WHERE subject_id = ? AND kind = 'approve'",
-        &[&a.message_id],
-    );
+    let opened =
+        inspect::decisions::decision_count_by_subject_and_approve(h.env.store(), &a.message_id)
+            .unwrap();
     assert_eq!(opened, json!(0), "no draft");
     (h, a.message_id, json!(said))
 }
 
 /// The message's event: outcome, label, reason, decision.
 fn event_of(h: &H, message: &str) -> (Value, Value, Value, Value) {
-    let q = |col: &str| {
-        one(
-            h,
-            &format!(
-                "SELECT e.{col} FROM ext_events e JOIN chan_messages m ON m.event_id = e.id WHERE m.id = ?"
-            ),
-            &[message],
-        )
-    };
-    (
-        q("outcome"),
-        q("outcome_label"),
-        q("reason"),
-        q("decision_id"),
-    )
+    inspect::signals::message_outcome(h.env.store(), message).unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2923,21 +2617,14 @@ async fn a_question_on_the_conversation_path_marks_the_event_as_needing_you() {
     )
     .await;
     assert_eq!(said, json!("这条要回吗？"));
-    let opened = one(
-        &h,
-        "SELECT id FROM decisions WHERE subject_id = ? AND status = 'open'",
-        &[&mid],
-    );
+    let opened = inspect::decisions::decision_id_by_subject_and_open(h.env.store(), &mid).unwrap();
     assert!(opened.is_string(), "a question opened: {opened:?}");
     assert!(
-        one(
-            &h,
-            "SELECT question FROM decisions WHERE id = ?",
-            &[opened.as_str().unwrap()]
-        )
-        .as_str()
-        .unwrap()
-        .contains("这条要回吗？"),
+        inspect::decisions::decision_question_value(h.env.store(), opened.as_str().unwrap())
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .contains("这条要回吗？"),
         "the question carries what Steve asks"
     );
     assert_eq!(
@@ -2955,14 +2642,12 @@ async fn a_question_on_the_conversation_path_marks_the_event_as_needing_you() {
 
 /// `/bot` works for you everywhere on your account.
 fn bot_command_everywhere(h: &H) {
-    exec(
-        h,
-        "UPDATE channel_settings SET trigger = ? WHERE connection_id = ?",
-        &[
-            &json!({"on": true, "words": ["/bot"], "where": ["*"], "mark": true}).to_string(),
-            &h.me,
-        ],
-    );
+    seed::connections::set_channel_trigger(
+        h.env.store(),
+        &json!({"on": true, "words": ["/bot"], "where": ["*"], "mark": true}).to_string(),
+        &h.me,
+    )
+    .unwrap();
 }
 
 /// Steve's message `text` about turn `origin` in the conversation of `space`, as steve-core's thread
@@ -2993,18 +2678,7 @@ fn steve_says(
 
 /// Everything drafted or sent in any space, oldest first.
 fn out_texts(h: &H) -> Vec<String> {
-    h.env
-        .store()
-        .with_conn(|c| {
-            let mut st = c.prepare(
-                "SELECT coalesce(text, '') FROM chan_messages WHERE direction = 'out' ORDER BY created, rowid",
-            )?;
-            let v = st
-                .query_map([], |r| r.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(v)
-        })
-        .expect("out")
+    inspect::messages::outgoing_texts(h.env.store()).expect("out")
 }
 
 /// On your account a message is the composer's alone: the router never sees it (no turn), the
@@ -3044,11 +2718,7 @@ async fn on_your_account_a_message_never_reaches_the_router() {
     h.ch.react_settled(&i.message_id).await;
     assert!(h.fake.reactions_on("v1").is_empty(), "{:?}", log(&h));
     assert_eq!(
-        one(
-            &h,
-            "SELECT count(*) FROM chan_reactions WHERE message_id = ?",
-            &[&i.message_id]
-        ),
+        inspect::messages::chan_reaction_count_by_message(h.env.store(), &i.message_id).unwrap(),
         json!(0),
         "no reaction as you on somebody else's message"
     );
@@ -3075,11 +2745,7 @@ async fn the_routers_queue_and_question_never_become_your_draft() {
     let (turn, _) = t.turns.lock().unwrap().last().cloned().expect("a turn");
     let space = i.space_id.clone();
     // A real Core only announces an item after storing it. The fixed receipt needs that evidence.
-    exec(
-        &h,
-        "INSERT INTO items (id,workspace_id,no,title,status,stage,source,created,updated) VALUES ('ST-9','default',9,'渠道事项','run','','[]',1,1)",
-        &[],
-    );
+    seed::items::seed_item_st_9(h.env.store()).unwrap();
     for (text, item, meta) in [
         (
             steve_core::thread::research::QUEUE_FULL,
@@ -3126,11 +2792,7 @@ async fn the_routers_queue_and_question_never_become_your_draft() {
         [format!("[AI] {}", conversations::TRIGGER_FAILED_NOTE)]
     );
     assert_eq!(
-        one(
-            &h,
-            "SELECT work_item_id FROM chan_messages WHERE id = ?",
-            &[&i.message_id]
-        ),
+        inspect::messages::message_work_item_id(h.env.store(), &i.message_id).unwrap(),
         json!("ST-9"),
         "the item is still linked to your message"
     );
@@ -3138,11 +2800,7 @@ async fn the_routers_queue_and_question_never_become_your_draft() {
     // the composer's answer: kept on the turn, said as it wrote it (no options added)
     let said = h.ch.conv_answer(WS, &turn).await.expect("answer");
     assert_eq!(
-        one(
-            &h,
-            "SELECT json_extract(meta, '$.chan_gen.outcome') FROM messages WHERE id = ?",
-            &[&turn]
-        ),
+        inspect::conversations::turn_outcome(h.env.store(), &turn).unwrap(),
         json!("reply")
     );
     let id = steve_says(
@@ -3249,11 +2907,8 @@ async fn a_full_queue_is_never_said_and_reaches_you_instead() {
     assert!(sent(&h).is_empty());
     assert!(out_texts(&h).is_empty());
     assert_eq!(
-        one(
-            &h,
-            "SELECT kind FROM decisions WHERE subject_id = ? AND status = 'open'",
-            &[&i.message_id]
-        ),
+        inspect::decisions::decision_kind_by_subject_and_open(h.env.store(), &i.message_id)
+            .unwrap(),
         json!("ask")
     );
 }
@@ -3264,11 +2919,7 @@ use steve_channels::im_context::{CLOSE, OPEN, RULE_DATA, RULE_NOT_OWNER};
 use steve_channels::im_conv_mcp;
 
 fn set_trigger(h: &H, v: Value) {
-    exec(
-        h,
-        "UPDATE channel_settings SET trigger = ? WHERE connection_id = ?",
-        &[&v.to_string(), &h.me],
-    );
+    seed::connections::set_channel_trigger(h.env.store(), &v.to_string(), &h.me).unwrap();
 }
 
 /// The research context of turn `turn` (in its own conversation).
@@ -3324,11 +2975,7 @@ async fn the_identity_block_of_your_trigger_word_in_a_private_chat() {
         json!({"on": true, "words": ["/ai"], "where": ["dm:*"], "who": ["me"], "reply": "thread", "mark": true}),
     );
     let turn = your_trigger(&h, "d1", "/ai 看下告警").await;
-    let cm = one(
-        &h,
-        "SELECT id FROM chan_messages WHERE external_id = ?",
-        &["d1"],
-    );
+    let cm = inspect::messages::message_id_by_external(h.env.store(), "d1").unwrap();
     let cm = cm.as_str().unwrap();
     let ctx = research_of(&h, &turn);
     assert!(
@@ -3366,22 +3013,12 @@ async fn the_identity_block_of_a_group_with_external_members() {
         msg("C_ACME", "a0", "ulilei", "大家好", false, false),
     )
     .await;
-    let party = one(
-        &h,
-        "SELECT sender_party_id FROM chan_messages WHERE external_id = ?",
-        &["a0"],
-    );
+    let party =
+        inspect::messages::message_sender_party_id_by_external(h.env.store(), "a0").unwrap();
     let party = party.as_str().unwrap().to_string();
-    exec(
-        &h,
-        "INSERT INTO parties (id, workspace_id, type, name, org_kind, created_by, created, updated) VALUES ('org_acme', ?, 'org', 'ACME 客户', 'customer', 'u', 1, 1)",
-        &[WS],
-    );
-    exec(
-        &h,
-        "INSERT INTO links (workspace_id, subject_type, subject_id, predicate, object_type, object_id, source, created) VALUES (?, 'party', ?, 'works_at', 'party', 'org_acme', 'manual', 1)",
-        &[WS, &party],
-    );
+    seed::people::seed_party_org_acme_for_the_conversation_card_says_who_asks(h.env.store(), WS)
+        .unwrap();
+    seed::people::seed_link(h.env.store(), WS, &party).unwrap();
     set_trigger(
         &h,
         json!({"on": true, "words": ["/ai"], "where": ["*"], "who": ["me"], "reply": "thread", "mark": true}),
@@ -3510,11 +3147,7 @@ async fn the_chat_read_tools_read_only_their_own_chat() {
         msg("D_LI", "x1", "ulilei", "私聊里的秘密", false, false),
     )
     .await;
-    let other = one(
-        &h,
-        "SELECT id FROM chan_messages WHERE external_id = ?",
-        &["x1"],
-    );
+    let other = inspect::messages::message_id_by_external(h.env.store(), "x1").unwrap();
     let other = other.as_str().unwrap().to_string();
 
     let scope =
@@ -3588,11 +3221,7 @@ async fn the_chat_read_tools_read_only_their_own_chat() {
     assert_eq!(h.ch.conv_read_scope("other_ws", &turn).unwrap(), None);
 
     // the chat set not to be used: not read
-    exec(
-        &h,
-        "UPDATE space_settings SET disclosure = 'never' WHERE space_id = ?",
-        &[&scope.space_id],
-    );
+    seed::spaces::set_space_settings_disclosure_never(h.env.store(), &scope.space_id).unwrap();
     assert!(
         im_conv_mcp::call(
             &h.ch,
@@ -3607,16 +3236,8 @@ async fn the_chat_read_tools_read_only_their_own_chat() {
 
 /// Marks contact `party` as working at an outside organization.
 fn make_external(h: &H, party: &str) {
-    exec(
-        h,
-        "INSERT OR IGNORE INTO parties (id, workspace_id, type, name, org_kind, created_by, created, updated) VALUES ('org_acme', ?, 'org', 'ACME 客户', 'customer', 'u', 1, 1)",
-        &[WS],
-    );
-    exec(
-        h,
-        "INSERT INTO links (workspace_id, subject_type, subject_id, predicate, object_type, object_id, source, created) VALUES (?, 'party', ?, 'works_at', 'party', 'org_acme', 'manual', 1)",
-        &[WS, party],
-    );
+    seed::people::seed_party_org_acme_for_make_external(h.env.store(), WS).unwrap();
+    seed::people::seed_link(h.env.store(), WS, &party).unwrap();
 }
 
 /// An outside sender alone in the chat: the sender reads the answer too, so it is public and the
@@ -3631,11 +3252,8 @@ async fn the_sender_is_part_of_the_audience() {
         msg("D_LI", "e0", "ulilei", "在吗", false, false),
     )
     .await;
-    let party = one(
-        &h,
-        "SELECT sender_party_id FROM chan_messages WHERE external_id = ?",
-        &["e0"],
-    );
+    let party =
+        inspect::messages::message_sender_party_id_by_external(h.env.store(), "e0").unwrap();
     make_external(&h, party.as_str().unwrap());
     push(
         &h,
@@ -3656,11 +3274,7 @@ async fn the_sender_is_part_of_the_audience() {
     }
 
     // a sender with no recorded contact: unknown, so public
-    exec(
-        &h,
-        "DELETE FROM links WHERE subject_id = ? AND predicate = 'works_at'",
-        &[party.as_str().unwrap()],
-    );
+    seed::people::remove_link(h.env.store(), &party.as_str().unwrap()).unwrap();
     let b = block_of(&research_of(&h, &turn));
     assert!(b.contains("<disclosure level=\"public\"/>"), "{b}");
     assert!(b.contains("unknown=\"1\""), "the sender counted: {b}");
@@ -3683,18 +3297,10 @@ async fn an_unsent_draft_is_never_the_thread_root() {
     u2.reply_to = Some("u1".into());
     push(&h, &h.bot.clone(), u2).await;
     let (turn, _) = t.turns.lock().unwrap().last().unwrap().clone();
-    let draft = one(
-        &h,
-        "SELECT id FROM chan_messages WHERE external_id = ?",
-        &["u1"],
-    );
+    let draft = inspect::messages::message_id_by_external(h.env.store(), "u1").unwrap();
     let draft = draft.as_str().unwrap().to_string();
     // the root turns out to be Steve's own draft, never sent
-    exec(
-        &h,
-        "UPDATE chan_messages SET direction = 'out', status = 'draft' WHERE id = ?",
-        &[&draft],
-    );
+    seed::messages::set_message_direction_outgoing(h.env.store(), &draft).unwrap();
     let scope =
         h.ch.conv_read_scope(WS, &turn)
             .unwrap()
@@ -3752,11 +3358,7 @@ async fn an_unresolved_own_account_leaves_the_identity_unknown() {
         .to_string();
     assert!(!owner.is_empty());
     // your account is no longer verified: who speaks can't be told
-    exec(
-        &h,
-        "UPDATE accounts SET verified = 0 WHERE id = (SELECT account_id FROM connections WHERE id = ?)",
-        &[&h.me],
-    );
+    seed::people::set_account_verified_value_0(h.env.store(), &h.me).unwrap();
     let ctx = research_of(&h, &turn);
     let b = block_of(&ctx);
     assert!(
@@ -3807,14 +3409,7 @@ async fn own_trigger_words(h: &H) {
         msg("D_LI", "x0", "ulilei", "在吗", false, false),
     )
     .await;
-    exec(
-        h,
-        "UPDATE channel_settings SET trigger = ? WHERE connection_id = ?",
-        &[
-            &json!({"on": true, "words": ["/ai"], "where": ["dm:*"], "who": ["me"], "reply": "thread", "mark": true}).to_string(),
-            &h.me,
-        ],
-    );
+    seed::connections::set_channel_trigger(h.env.store(), &json!({"on": true, "words": ["/ai"], "where": ["dm:*"], "who": ["me"], "reply": "thread", "mark": true}).to_string(), &h.me).unwrap();
 }
 
 /// Two deliveries of one conversation message at the same time: the second finds the first's
@@ -3996,13 +3591,8 @@ async fn a_lost_receipt_does_not_send_the_note_again() {
     let Some(Delivered::Queued { message_id }) = d.clone() else {
         panic!("{d:?}")
     };
-    let status = |h: &H| {
-        one(
-            h,
-            "SELECT status FROM chan_messages WHERE id = ?",
-            &[&message_id],
-        )
-    };
+    let status =
+        |h: &H| inspect::messages::message_status_value(h.env.store(), &message_id).unwrap();
     assert_eq!(status(&h), json!("unknown"));
     let m = h.env.store().messages().get(&err).unwrap().unwrap();
     assert_eq!(
@@ -4163,11 +3753,7 @@ async fn identity_reply_uses_current_authorization_and_approval_flag() {
             };
             // The formal body, rather than a private question, is on the approval.
             assert_eq!(
-                one(
-                    &h,
-                    "SELECT draft FROM decisions WHERE id = ?",
-                    &[&decision_id]
-                ),
+                inspect::decisions::decision_draft_value(h.env.store(), &decision_id).unwrap(),
                 json!("我是 Steve，值班助手。有什么可以帮你处理的？")
             );
             assert!(sent(&h).is_empty());
@@ -4194,21 +3780,21 @@ async fn private_outcomes_and_unknown_snapshots_never_become_sendable_drafts() {
             )
             .await;
             match damage {
-                "missing" => exec(
-                    &h,
-                    "UPDATE messages SET meta=json_remove(meta, '$.chan_gen') WHERE id=?",
-                    &[&turn],
-                ),
-                "partial" => exec(
-                    &h,
-                    "UPDATE messages SET meta=json_remove(meta, '$.chan_gen.hits') WHERE id=?",
-                    &[&turn],
-                ),
-                "invalid" => exec(
-                    &h,
-                    "UPDATE messages SET meta=json_set(meta, '$.chan_gen', 'corrupt') WHERE id=?",
-                    &[&turn],
-                ),
+                "missing" => seed::conversations::set_turn_meta(h.env.store(), &turn).unwrap(),
+                "partial" => {
+                    seed::conversations::set_turn_meta_for_private_outcomes_and_unknown_snapsh(
+                        h.env.store(),
+                        &turn,
+                    )
+                    .unwrap()
+                }
+                "invalid" => {
+                    seed::conversations::set_turn_meta_for_private_outcomes_and_unknown_snapshots(
+                        h.env.store(),
+                        &turn,
+                    )
+                    .unwrap()
+                }
                 _ => {}
             }
             let (cold, _) = cold_runtime(&h);
@@ -4223,11 +3809,11 @@ async fn private_outcomes_and_unknown_snapshots_never_become_sendable_drafts() {
             } else {
                 assert_eq!((a, b), (None, None), "{outcome}/{damage}");
                 assert_eq!(
-                    one(
-                        &h,
-                        "SELECT count(*) FROM decisions WHERE subject_type='chan_message' AND subject_id=? AND kind='ask'",
-                        &[&source.message_id]
-                    ),
+                    inspect::decisions::decision_count_by_chan_message_and_subject_and_ask(
+                        h.env.store(),
+                        &source.message_id
+                    )
+                    .unwrap(),
                     json!(if damage == "none" && outcome == "skip" {
                         0
                     } else {
@@ -4235,11 +3821,8 @@ async fn private_outcomes_and_unknown_snapshots_never_become_sendable_drafts() {
                     })
                 );
                 assert_eq!(
-                    one(
-                        &h,
-                        "SELECT count(*) FROM decisions WHERE subject_type='chan_message' AND kind='approve'",
-                        &[]
-                    ),
+                    inspect::decisions::decision_count_by_chan_message_and_approve(h.env.store())
+                        .unwrap(),
                     json!(0)
                 );
             }
@@ -4266,11 +3849,7 @@ async fn replay_cannot_cross_a_workspace_or_conversation() {
             .unwrap()
             .is_none()
     );
-    exec(
-        &h,
-        "UPDATE messages SET space='chan:another-chat' WHERE id=?",
-        &[&reply],
-    );
+    seed::conversations::set_turn_space_chan_another_chat(h.env.store(), &reply).unwrap();
     assert!(h.ch.conv_deliver(WS, &reply).await.unwrap().is_none());
     assert!(sent(&h).is_empty());
 }
@@ -4293,11 +3872,7 @@ async fn a_router_question_needs_its_exact_durable_answer_binding() {
             json!({"ask":{"options":["前端","后端"]}}),
         );
         if bound {
-            exec(
-                &h,
-                "INSERT INTO route_log (id,workspace_id,message_id,reply_id,model_kind,kind,ms,created) VALUES ('fixture-route',?,?,?,'fixture','ask',0,1)",
-                &[WS, &turn, &reply],
-            );
+            seed::harness::seed_route_log_fixture_route(h.env.store(), WS, &turn, &reply).unwrap();
         }
         let (cold, _) = cold_runtime(&h);
         let result = cold.conv_deliver(WS, &reply).await.unwrap();
@@ -4331,11 +3906,7 @@ async fn incomplete_generation_fields_cannot_inherit_default_send_authority() {
         );
         assert!(sent(&h).is_empty(), "{key}");
         assert_eq!(
-            one(
-                &h,
-                "SELECT count(*) FROM decisions WHERE kind='approve' AND subject_type='chan_message'",
-                &[]
-            ),
+            inspect::decisions::decision_count_by_approve_and_chan_message(h.env.store()).unwrap(),
             json!(0)
         );
     }
@@ -4366,11 +3937,11 @@ async fn own_identity_answer_is_a_reviewable_reply_not_a_private_meta_question()
     assert!(r.out_message_id.is_some(), "{r:?}");
     let d = r.decision_id.unwrap();
     assert_eq!(
-        one(&h, "SELECT kind FROM decisions WHERE id=?", &[&d]),
+        inspect::decisions::decision_kind(h.env.store(), &d).unwrap(),
         json!("approve")
     );
     assert_eq!(
-        one(&h, "SELECT draft FROM decisions WHERE id=?", &[&d]),
+        inspect::decisions::decision_draft_value(h.env.store(), &d).unwrap(),
         json!(text)
     );
     assert!(sent(&h).is_empty(), "Own still waits for approval");

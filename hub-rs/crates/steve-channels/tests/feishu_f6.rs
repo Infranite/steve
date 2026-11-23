@@ -10,6 +10,8 @@ mod digest_env;
 use digest_env::TestEnv;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use steve_store::testkit::channels::inspect;
+use steve_store::testkit::channels::seed;
 
 use axum::Router;
 use axum::body::Body;
@@ -28,7 +30,6 @@ use steve_modules::testkit::{ME, OTHER, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use steve_modules::{ApiError, Caller};
-use steve_store::Cached;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -114,27 +115,6 @@ async fn send(
     (status, v, headers)
 }
 
-fn row(h: &H, sql: &str, p: &str) -> Vec<Value> {
-    let (sql, p) = (sql.to_string(), p.to_string());
-    h.env
-        .store()
-        .reader(move |c| {
-            let mut st = c.prepare(&sql)?;
-            let n = st.column_count();
-            let row = st.query_row([&p], |r| {
-                (0..n)
-                    .map(|i| {
-                        r.get::<_, Option<String>>(i)
-                            .map(|s| s.map(Value::String).unwrap_or(Value::Null))
-                            .or_else(|_| r.get::<_, i64>(i).map(Value::from))
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-            })?;
-            Ok::<_, steve_store::StoreError>(row)
-        })
-        .expect("row")
-}
-
 fn s(v: &Value) -> String {
     v.as_str().unwrap_or_default().to_string()
 }
@@ -192,16 +172,12 @@ async fn authorize_me(h: &H, app_con: &str) -> (String, String) {
         .strip_prefix("/#/accounts/")
         .unwrap_or_else(|| panic!("not a success: {loc}"))
         .to_string();
-    let con = s(&row(h, "SELECT id FROM connections WHERE account_id = ?", &acc)[0]);
+    let con = s(&inspect::connections::connection_id_by_account(h.env.store(), &acc).unwrap()[0]);
     (acc, con)
 }
 
 fn me_party(h: &H) -> String {
-    s(&row(
-        h,
-        "SELECT id FROM parties WHERE user_id = ? AND type = 'contact'",
-        ME,
-    )[0])
+    s(&inspect::people::party_id_by_user_and_contact(h.env.store(), ME).unwrap()[0])
 }
 
 fn owner_ids() -> FeishuIds {
@@ -215,7 +191,7 @@ fn owner_ids() -> FeishuIds {
 fn bot_sees(h: &H, bot: &str, ids: &FeishuIds) -> steve_modules::accounts::Identified {
     h.env
         .store()
-        .transaction(|tx| identify_sender(tx, WS, ME, ids, Some(bot), Some("林知远")))
+        .write(|w| identify_sender(w, WS, ME, ids, Some(bot), Some("林知远")))
         .expect("identify")
 }
 
@@ -232,21 +208,17 @@ async fn oauth_first_then_the_bot_finds_you_on_me() {
     let bot = connect_bot(&h).await;
     let (acc, ucon) = authorize_me(&h, &bot).await;
     let me = me_party(&h);
-    let a = row(
-        &h,
-        "SELECT handle, system_id, party_id FROM accounts WHERE id = ?",
-        &acc,
-    );
+    let a = inspect::people::account_handle_system_id_party_id(h.env.store(), &acc).unwrap();
     assert_eq!(
         a,
         vec![json!(ids::OWNER.union_id), json!("feishu"), json!(me)]
     );
     // nothing of the start flow but the pair is kept in the connection's config
-    let cfg: Value = serde_json::from_str(&s(&row(
-        &h,
-        "SELECT config FROM connections WHERE id = ?",
+    let cfg: Value = serde_json::from_str(&s(&inspect::connections::connection_config(
+        h.env.store(),
         &ucon,
-    )[0]))
+    )
+    .unwrap()[0]))
     .expect("json");
     assert!(cfg["self_claim"].is_null(), "{cfg}");
 
@@ -282,32 +254,20 @@ async fn bot_first_then_oauth_merges_the_unconfirmed_contact_into_me() {
     assert!(first.created);
     let me = me_party(&h);
     assert_ne!(first.party_id, me);
-    let k = row(
-        &h,
-        "SELECT contact_kind, status FROM parties WHERE id = ?",
-        &first.party_id,
-    );
+    let k = inspect::people::party_contact_kind_status(h.env.store(), &first.party_id).unwrap();
     assert_eq!(k, vec![json!("unconfirmed"), json!("active")]);
 
     let (acc, _) = authorize_me(&h, &bot).await;
     // the same account (the bot's), now on 我; the old contact merged into 我
     assert_eq!(acc, first.account_id);
     assert_eq!(
-        s(&row(&h, "SELECT party_id FROM accounts WHERE id = ?", &acc)[0]),
+        s(&inspect::people::account_party_id(h.env.store(), &acc).unwrap()[0]),
         me
     );
-    let k = row(
-        &h,
-        "SELECT status, merged_into FROM parties WHERE id = ?",
-        &first.party_id,
-    );
+    let k = inspect::people::party_status_merged_into(h.env.store(), &first.party_id).unwrap();
     assert_eq!(k, vec![json!("merged"), json!(me)]);
     assert_eq!(
-        row(
-            &h,
-            "SELECT COUNT(*) FROM merges WHERE from_id = ?",
-            &first.party_id
-        ),
+        inspect::merges::merge_count_by_from(h.env.store(), &first.party_id).unwrap(),
         vec![json!(1)],
         "a normal merge: it can be split again"
     );
@@ -344,24 +304,16 @@ async fn a_contact_the_names_run_made_real_is_still_merged_but_not_one_you_confi
         })
         .expect("enrich");
     assert!(promoted.promoted);
-    let k = row(
-        &h,
-        "SELECT contact_kind, source FROM parties WHERE id = ?",
-        &first.party_id,
-    );
+    let k = inspect::people::party_contact_kind_source(h.env.store(), &first.party_id).unwrap();
     assert_eq!(k, vec![json!("real"), json!("chat")]);
     let (acc, _) = authorize_me(&h, &bot).await;
     assert_eq!(acc, first.account_id);
     assert_eq!(
-        s(&row(&h, "SELECT party_id FROM accounts WHERE id = ?", &acc)[0]),
+        s(&inspect::people::account_party_id(h.env.store(), &acc).unwrap()[0]),
         me_party(&h)
     );
     assert_eq!(
-        s(&row(
-            &h,
-            "SELECT status FROM parties WHERE id = ?",
-            &first.party_id
-        )[0]),
+        s(&inspect::people::party_status(h.env.store(), &first.party_id).unwrap()[0]),
         "merged"
     );
 
@@ -386,10 +338,7 @@ async fn a_contact_the_names_run_made_real_is_still_merged_but_not_one_you_confi
                 json!({"kind": "real"}),
                 ME,
             )?;
-            tx.run(
-                "UPDATE parties SET source = 'chat' WHERE id = ?",
-                [&first.party_id],
-            )?;
+            tx.write(|w| seed::people::set_contact_source(w, &first.party_id, "chat"))?;
             Ok::<_, ApiError>(())
         })
         .expect("confirm");
@@ -402,11 +351,7 @@ async fn a_contact_the_names_run_made_real_is_still_merged_but_not_one_you_confi
     .await;
     assert!(loc.starts_with("/#/accounts?error="), "{loc}");
     assert_eq!(
-        s(&row(
-            &h,
-            "SELECT status FROM parties WHERE id = ?",
-            &first.party_id
-        )[0]),
+        s(&inspect::people::party_status(h.env.store(), &first.party_id).unwrap()[0]),
         "active"
     );
 }
@@ -441,11 +386,7 @@ async fn bot_first_then_device_code_merges_too() {
     assert_eq!(last["status"], "ok", "{last}");
     assert_eq!(s(&last["account_id"]), first.account_id);
     assert_eq!(
-        s(&row(
-            &h,
-            "SELECT status FROM parties WHERE id = ?",
-            &first.party_id
-        )[0]),
+        s(&inspect::people::party_status(h.env.store(), &first.party_id).unwrap()[0]),
         "merged"
     );
 }
@@ -465,11 +406,7 @@ async fn the_generic_start_route_merges_too_but_never_a_confirmed_contact() {
     .await;
     assert_eq!(loc, format!("/#/accounts/{}", first.account_id));
     assert_eq!(
-        s(&row(
-            &h,
-            "SELECT status FROM parties WHERE id = ?",
-            &first.party_id
-        )[0]),
+        s(&inspect::people::party_status(h.env.store(), &first.party_id).unwrap()[0]),
         "merged"
     );
 
@@ -480,10 +417,7 @@ async fn the_generic_start_route_merges_too_but_never_a_confirmed_contact() {
     h.env
         .store()
         .transaction(|tx| {
-            tx.run(
-                "UPDATE parties SET contact_kind = 'real' WHERE id = ?",
-                [&first.party_id],
-            )?;
+            tx.write(|w| seed::people::set_contact_kind(w, &first.party_id, "real"))?;
             Ok::<_, ApiError>(())
         })
         .expect("confirm");
@@ -496,11 +430,7 @@ async fn the_generic_start_route_merges_too_but_never_a_confirmed_contact() {
     .await;
     assert!(loc.starts_with("/#/accounts?error="), "{loc}");
     assert_eq!(
-        s(&row(
-            &h,
-            "SELECT status FROM parties WHERE id = ?",
-            &first.party_id
-        )[0]),
+        s(&inspect::people::party_status(h.env.store(), &first.party_id).unwrap()[0]),
         "active"
     );
 }
@@ -732,7 +662,7 @@ async fn the_per_user_rate_limit_waits_and_retries_once() {
     assert_eq!(h.fake.requests_to(Endpoint::ReplyMessage).len(), 2);
     // a rate limit is not an auth problem
     assert_eq!(
-        s(&row(&h, "SELECT status FROM connections WHERE id = ?", &ucon)[0]),
+        s(&inspect::connections::connection_status(h.env.store(), &ucon).unwrap()[0]),
         "ok"
     );
 }
@@ -744,11 +674,11 @@ async fn without_the_send_scope_nothing_is_sent() {
     let h = setup_with(w).await;
     let bot = connect_bot(&h).await;
     let (_, ucon) = authorize_me(&h, &bot).await;
-    let caps: Value = serde_json::from_str(&s(&row(
-        &h,
-        "SELECT caps FROM connections WHERE id = ?",
+    let caps: Value = serde_json::from_str(&s(&inspect::connections::connection_caps(
+        h.env.store(),
         &ucon,
-    )[0]))
+    )
+    .unwrap()[0]))
     .expect("json");
     assert_eq!(caps, json!(["msg.receive"]), "ticked by what was granted");
     let e = h
@@ -785,11 +715,8 @@ async fn granted_scopes_tick_caps_and_permission_rows() {
     let h = setup_with(w).await;
     let bot = connect_bot(&h).await;
     let (_, ucon) = authorize_me(&h, &bot).await;
-    let r = row(
-        &h,
-        "SELECT caps, granted_scopes, config FROM connections WHERE id = ?",
-        &ucon,
-    );
+    let r =
+        inspect::connections::connection_caps_granted_scopes_config(h.env.store(), &ucon).unwrap();
     let caps: Value = serde_json::from_str(&s(&r[0])).expect("caps");
     let granted: Value = serde_json::from_str(&s(&r[1])).expect("scopes");
     let cfg: Value = serde_json::from_str(&s(&r[2])).expect("config");
@@ -832,24 +759,7 @@ async fn granted_scopes_tick_caps_and_permission_rows() {
 // reauth.
 
 fn decision_of(h: &H, con: &str) -> Option<Vec<Value>> {
-    let (sql, p) = (
-        "SELECT question, options, status FROM decisions WHERE subject_type = 'connection' AND subject_id = ? ORDER BY created DESC LIMIT 1".to_string(),
-        con.to_string(),
-    );
-    h.env
-        .store()
-        .reader(move |c| {
-            let mut st = c.prepare(&sql)?;
-            let r = st.query_map([&p], |r| {
-                Ok(vec![
-                    Value::String(r.get(0)?),
-                    Value::String(r.get(1)?),
-                    Value::String(r.get(2)?),
-                ])
-            })?;
-            Ok::<_, steve_store::StoreError>(r.flatten().next())
-        })
-        .expect("decision")
+    inspect::decisions::connection_decision(h.env.store(), con).unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -864,7 +774,7 @@ async fn dead_refresh_token_means_reauth_with_a_decision_and_reauthorizing_settl
     let e = h.conns.refresh(WS, &ucon, true).await.expect_err("refused");
     assert!(matches!(e, ProviderError::Auth(_)), "{e:?}");
     assert_eq!(
-        s(&row(&h, "SELECT status FROM connections WHERE id = ?", &ucon)[0]),
+        s(&inspect::connections::connection_status(h.env.store(), &ucon).unwrap()[0]),
         "reauth"
     );
     let d = decision_of(&h, &ucon).expect("decision");
@@ -878,11 +788,7 @@ async fn dead_refresh_token_means_reauth_with_a_decision_and_reauthorizing_settl
     // a second failure doesn't open another one
     let _ = h.conns.refresh(WS, &ucon, true).await;
     assert_eq!(
-        row(
-            &h,
-            "SELECT COUNT(*) FROM decisions WHERE subject_type = 'connection' AND subject_id = ?",
-            &ucon
-        ),
+        inspect::decisions::decision_count_by_connection_and_subject(h.env.store(), &ucon).unwrap(),
         vec![json!(1)]
     );
 
@@ -915,7 +821,7 @@ async fn dead_refresh_token_means_reauth_with_a_decision_and_reauthorizing_settl
     };
     assert_eq!(loc, format!("/#/accounts/{acc}"));
     assert_eq!(
-        s(&row(&h, "SELECT status FROM connections WHERE id = ?", &ucon)[0]),
+        s(&inspect::connections::connection_status(h.env.store(), &ucon).unwrap()[0]),
         "ok"
     );
     assert_eq!(s(&decision_of(&h, &ucon).expect("decision")[2]), "resolved");
@@ -951,7 +857,7 @@ async fn a_withdrawn_grant_fails_the_send_and_asks_for_reauth() {
     );
     assert!(h.fake.sent().is_empty());
     assert_eq!(
-        s(&row(&h, "SELECT status FROM connections WHERE id = ?", &ucon)[0]),
+        s(&inspect::connections::connection_status(h.env.store(), &ucon).unwrap()[0]),
         "reauth"
     );
     assert_eq!(

@@ -491,7 +491,7 @@ pub fn tenant_org(tx: &mut W<'_>, ws: &str, actor: &str, t: &TenantHint) -> ApiR
     if key.is_empty() {
         return Err(ApiError::invalid("tenant_key"));
     }
-    svc::seed(tx, ws)?;
+    svc::ensure_seeds(tx, ws)?;
     let system = own_system(tx, ws, TENANT_SYSTEM)?;
     let name = t
         .name

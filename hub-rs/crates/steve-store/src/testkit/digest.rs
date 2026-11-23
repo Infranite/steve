@@ -524,3 +524,13 @@ pub fn acknowledge_counted(w: &mut W<'_>, ws: &str, conv: &str, ids: &[String]) 
     result?;
     Ok(count.load(Ordering::SeqCst))
 }
+
+pub struct Audit(pub Store);
+
+impl Drop for Audit {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            audit(&self.0).unwrap();
+        }
+    }
+}

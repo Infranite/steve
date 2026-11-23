@@ -585,3 +585,33 @@ pub fn decisions_expire_open_in(tx: &crate::Tx, item_id: &str, result: &Value) -
     }
     Ok(ids.len())
 }
+
+pub fn append_message(
+    w: &mut crate::W<'_>,
+    ws: &str,
+    author: &str,
+    text: &str,
+    item_id: Option<&str>,
+    meta: &Value,
+    space: &str,
+) -> Result<String> {
+    let id = uid("msg");
+    let stmt = message_statement(
+        crate::contract::Q::db(w).dialect(),
+        &id,
+        ws,
+        author,
+        text,
+        item_id,
+        meta,
+        space,
+    );
+    w.exec(&stmt)?;
+    w.emit(steve_types::DomainEvent::from(
+        steve_types::WorkEvent::Message {
+            ws: ws.into(),
+            id: id.clone().into(),
+        },
+    ));
+    Ok(id)
+}

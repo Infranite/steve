@@ -6,18 +6,14 @@
 //! bound to one connection ([`ConnQueries`]), so an adapter cannot read or write another
 //! connection's or workspace's rows by id. Part of the public extension API (`ext`).
 
-use rusqlite::{OptionalExtension, params};
-use serde_json::Value;
 use steve_modules::accounts::connections::ConnCx;
 use steve_modules::accounts::service as handles;
 use steve_store::{Accounts, Systems};
 
+use steve_store::{channel_message_repo::ingress, channel_positions, channel_spaces, connections};
+
 use crate::channel::{HandleRef, InboundMessage, MessageRef};
 use crate::{ChannelResult, Channels};
-
-/// The `chan_cursors.kind` of an adapter's own cursors (the built-in self poller's are `chat` and
-/// `thread`).
-const CURSOR_KIND: &str = "ext";
 
 /// The Hub's read views, for one connection at a time.
 #[derive(Clone)]
@@ -66,23 +62,12 @@ impl ConnQueries {
     /// an active space of a healthy (`ok`) connection whose channel adapter says it receives all
     /// ([`crate::ChannelAdapter::receives_all`]). Unknown counts as not covered.
     pub fn covered(&self, space_ext: &str) -> ChannelResult<bool> {
-        let others = self.channels.store().reader(|c| -> ChannelResult<_> {
-            let mut st = c.prepare(
-                "SELECT DISTINCT c.adapter, c.config FROM spaces s
-                   JOIN space_identities i ON i.space_id = s.id AND i.left_at IS NULL
-                   JOIN connections c ON c.id = i.connection_id
-                  WHERE s.workspace_id = ?1 AND s.external_id = ?2 AND s.status = 'active'
-                    AND c.workspace_id = ?1 AND c.id <> ?3 AND c.status = 'ok'",
-            )?;
-            let rows = st
-                .query_map(params![self.ws, space_ext, self.conn], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(rows)
+        let others = self.channels.store().read(|r| {
+            let mut ids = channel_spaces::active_chat_connections(r, &self.ws, space_ext)?;
+            ids.retain(|id| id != &self.conn);
+            connections::lifecycle::healthy_adapter_configs(r, &self.ws, &ids)
         })?;
         Ok(others.into_iter().any(|(adapter, config)| {
-            let config: Value = serde_json::from_str(&config).unwrap_or(Value::Null);
             self.channels
                 .adapter(&adapter)
                 .is_some_and(|a| a.receives_all(&config))
@@ -98,19 +83,14 @@ impl ConnQueries {
                 Some(src) => Ok(self
                     .channels
                     .store()
-                    .reader(|c| crate::fallback::by_source(c, &self.conn, src))?
+                    .read(|r| ingress::by_source(r, &self.conn, src))?
                     .is_some()),
                 None => Ok(false),
             };
         }
-        self.channels.store().reader(|c| -> ChannelResult<bool> {
-            Ok(c.query_row(
-                "SELECT EXISTS (SELECT 1 FROM chan_messages m JOIN spaces s ON s.id = m.space_id
-                                 WHERE s.workspace_id = ?1 AND s.external_id = ?2 AND m.external_id = ?3)",
-                params![self.ws, msg.space_ext_id, msg.external_id],
-                |r| r.get(0),
-            )?)
-        })
+        Ok(self.channels.store().read(|r| {
+            ingress::has_provider_message(r, &self.ws, &msg.space_ext_id, &msg.external_id)
+        })?)
     }
 
     /// Stored message `ext` of space `space_ext`, if there is one: by its provider id, else by the
@@ -126,20 +106,11 @@ impl ConnQueries {
     }
 
     fn by_external(&self, space_ext: &str, ext: &str) -> ChannelResult<Option<MessageRef>> {
-        self.channels.store().reader(|c| -> ChannelResult<_> {
-            let id: Option<String> = c
-                .query_row(
-                    "SELECT m.id FROM chan_messages m JOIN spaces s ON s.id = m.space_id
-                      WHERE s.workspace_id = ?1 AND s.external_id = ?2 AND m.external_id = ?3
-                      ORDER BY m.created, m.id LIMIT 1",
-                    params![self.ws, space_ext, ext],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            match id {
-                Some(id) => crate::messages::message_ref(c, &id, &self.conn),
-                None => Ok(None),
-            }
+        self.channels.store().read(|r| {
+            let Some(id) = ingress::first_in_chat(r, &self.ws, space_ext, ext)? else {
+                return Ok(None);
+            };
+            crate::messages::message_ref(r, &id, &self.conn)
         })
     }
 
@@ -153,58 +124,36 @@ impl ConnQueries {
         if source_id.is_empty() {
             return Ok(None);
         }
-        self.channels.store().reader(|c| -> ChannelResult<_> {
-            let id: Option<String> = c
-                .query_row(
-                    "SELECT m.id FROM chan_message_seen x JOIN chan_messages m ON m.id = x.message_id
-                       JOIN spaces s ON s.id = m.space_id
-                      WHERE x.connection_id = ?1 AND x.source_id = ?2 AND s.workspace_id = ?3
-                        AND s.external_id = ?4",
-                    params![self.conn, source_id, self.ws, space_ext],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            match id {
-                Some(id) => crate::messages::message_ref(c, &id, &self.conn),
-                None => Ok(None),
+        self.channels.store().read(|r| {
+            let Some(message) = ingress::by_source(r, &self.conn, source_id)? else {
+                return Ok(None);
+            };
+            let chat = channel_spaces::platform_chat(r, &message.space_id)?;
+            if !chat.is_some_and(|chat| chat.ws == self.ws && chat.external_id == space_ext) {
+                return Ok(None);
             }
+            crate::messages::message_ref(r, &message.id, &self.conn)
         })
     }
 
     /// This connection's cursor for `container` (a space, a thread, a feed: the adapter's name).
     pub fn cursor(&self, container: &str) -> ChannelResult<Option<String>> {
-        self.channels.store().reader(|c| -> ChannelResult<_> {
-            Ok(c.query_row(
-                "SELECT token FROM chan_cursors WHERE connection_id = ? AND container = ? AND kind = ?",
-                params![self.conn, container, CURSOR_KIND],
-                |r| r.get::<_, Option<String>>(0),
-            )
-            .optional()?
-            .flatten())
-        })
+        Ok(self
+            .channels
+            .store()
+            .read(|r| channel_positions::external_token(r, &self.conn, container))?)
     }
 
     /// Keeps this connection's cursor for `container`. Deleted with the connection.
     pub fn save_cursor(&self, container: &str, cursor: &str) -> ChannelResult<()> {
         let now = self.channels.now();
-        self.channels.store().transaction(|tx| -> ChannelResult<()> {
-            // only a connection of this workspace (not one deleted meanwhile)
-            let ours: bool = tx.query_row(
-                "SELECT EXISTS (SELECT 1 FROM connections WHERE id = ? AND workspace_id = ?)",
-                params![self.conn, self.ws],
-                |r| r.get(0),
-            )?;
-            if !ours {
+        self.channels.store().write(|w| {
+            if !connections::connection_kind(w, &self.conn)?.is_some_and(|(ws, _)| ws == self.ws) {
                 return Err(crate::ChannelError::not_found("连接"));
             }
-            let n = tx.execute(
-                "INSERT INTO chan_cursors (connection_id, workspace_id, container, kind, chat_id, token, created, updated)
-                 VALUES (?1, ?2, ?3, ?4, ?3, ?5, ?6, ?6)
-                 ON CONFLICT (connection_id, container) DO UPDATE SET token = excluded.token, updated = excluded.updated
-                  WHERE chan_cursors.kind = excluded.kind",
-                params![self.conn, self.ws, container, CURSOR_KIND, cursor, now],
-            )?;
-            if n == 0 {
+            if !channel_positions::save_external_token(
+                w, &self.ws, &self.conn, container, cursor, now,
+            )? {
                 return Err(crate::ChannelError::Conflict(steve_i18n::t!(
                     "channels.error.cursor_not_ext",
                     container = container

@@ -216,17 +216,13 @@ pub fn start(m: &Modules, who: &Caller) -> ApiResult<(Viewer, Party)> {
     })?;
     let me = match found {
         (Some(me), true) => me,
-        _ => m.store.write(|w| ensure_base_in(w, who))?,
+        _ => m.store.write(|w| ensure_base(w, who))?,
     };
     Ok((m.viewer(who)?, me))
 }
 
-/// [`start`]'s write part for callers that still own a legacy transaction.
-pub fn ensure_base(tx: &Tx, who: &Caller) -> ApiResult<Party> {
-    tx.write(|w| ensure_base_in(w, who))
-}
-
-pub(crate) fn ensure_base_in(w: &mut steve_store::W<'_>, who: &Caller) -> ApiResult<Party> {
+/// Seed the user's contact and workspace organization in the caller's write.
+pub fn ensure_base(w: &mut steve_store::W<'_>, who: &Caller) -> ApiResult<Party> {
     let me = match w.contacts().me(&who.ws, &who.me)? {
         Some(me) => me,
         None => {

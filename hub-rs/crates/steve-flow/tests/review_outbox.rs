@@ -44,7 +44,7 @@ fn apply_without_after(e: &FlowEnv, ev: &Event) {
     let applied = e
         .env
         .store()
-        .transaction(|tx| -> Result<_, outbox::ConsumeError> {
+        .write(|tx| -> Result<_, outbox::ConsumeError> {
             let a = c.apply(tx, ev)?;
             fixtures::applied_receipt(tx, ev, c.id(), &a.outcome)?;
             Ok(a)
@@ -111,7 +111,7 @@ async fn item_from_another_workspace_has_no_consumer_writes() {
     let e = FlowEnv::new();
     let ev = event(&e, WS2);
     let c = ItemTrigger::new(e.flow.clone());
-    let r = e.env.store().transaction(|tx| c.apply(tx, &ev));
+    let r = e.env.store().write(|tx| c.apply(tx, &ev));
     assert!(matches!(r, Err(outbox::ConsumeError::Reject(_))));
     assert_eq!(fixtures::event_ids(e.env.store()).unwrap().len(), 0);
     assert_eq!(fixtures::run_count(e.env.store()).unwrap(), 0);

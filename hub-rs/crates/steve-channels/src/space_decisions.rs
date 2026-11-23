@@ -12,11 +12,9 @@
 //!
 //! Register with `steve_channels::space_decisions::register(&mut registry)`.
 
-use rusqlite::params;
 use serde_json::{Value, json};
 use steve_modules::decisions::{DecisionCx, DecisionHandler};
 use steve_modules::{ApiError, ApiResult, Registry};
-use steve_store::base;
 use steve_store::{Decision, Tx};
 
 use crate::ChannelResult;
@@ -49,27 +47,32 @@ fn flags_of(s: &spaces::SpaceSettings) -> Flags {
 /// Writes `muted`, the attention and `configured` with a revision and audit; returns whether
 /// anything changed.
 fn set_flags(
-    tx: &Tx,
+    w: &mut steve_store::W<'_>,
     ws: &str,
     actor: &str,
     space: &str,
     to: Flags,
     why: &Value,
 ) -> ApiResult<bool> {
-    let before = spaces::settings(tx, space)?;
+    let before = crate::spaces::settings(w, space)?;
     let was = flags_of(&before);
     if was == to {
         return Ok(false);
     }
     let now = steve_store::now();
     let revision = before.revision + 1;
-    tx.execute(
-        "UPDATE space_settings SET muted = ?, configured = ?, revision = ?, updated = ? WHERE space_id = ?",
-        params![to.muted as i64, to.configured as i64, revision, now, space],
-    )?;
+    use steve_store::channel_spaces::preferences::{self, Preference};
+    preferences::set_flags(w, space, to.muted, to.configured, revision, now)?;
     if was.attention != to.attention {
-        spaces::write_attention(tx, ws, space, to.attention, now)?;
+        preferences::set(
+            w,
+            ws,
+            space,
+            Preference::Attention(to.attention.code()),
+            now,
+        )?;
     }
+
     let mut fields = Vec::new();
     if was.muted != to.muted {
         fields.push("muted");
@@ -78,8 +81,8 @@ fn set_flags(
         fields.push("attention");
     }
     if !fields.is_empty() {
-        base::revision(
-            tx,
+        steve_store::audit_repo::revise(
+            w,
             ws,
             "space",
             space,
@@ -93,8 +96,8 @@ fn set_flags(
     if let (Some(o), Some(w)) = (detail.as_object_mut(), why.as_object()) {
         o.extend(w.clone());
     }
-    base::audit(tx, ws, actor, "space.patch", space, &detail)?;
-    spaces::event(tx, ws, space);
+    steve_store::audit_repo::record(w, ws, actor, "space.patch", space, &detail)?;
+    steve_store::channel_spaces::registration::emit(w, ws, space);
     Ok(true)
 }
 
@@ -114,69 +117,83 @@ fn answered(choice: &str, was: Flags) -> Option<Flags> {
 
 impl DecisionHandler for NewSpaceDecision {
     fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
-        let Some(s) = spaces::get(tx, &d.subject_id)?.filter(|s| s.workspace_id == cx.ws) else {
+        tx.write(|w| {
+        let Some(s) = steve_store::channel_spaces::rows::get_in_workspace(w, cx.ws, &d.subject_id)?
+        else {
             // the space went away meanwhile: nothing to do
             return Ok(json!({"choice": cx.choice, "gone": true}));
         };
-        let before = spaces::settings(tx, &s.id)?;
+        let before = crate::spaces::settings(w, &s.id)?;
         let was = flags_of(&before);
         let to = answered(cx.choice, was).ok_or_else(|| ApiError::invalid("choice"))?;
-        set_flags(tx, cx.ws, cx.actor, &s.id, to, &json!({"decision": d.id}))?;
+        set_flags(w, cx.ws, cx.actor, &s.id, to, &json!({"decision": d.id}))?;
         Ok(json!({
             "choice": cx.choice,
             "space_id": s.id,
             "was": {"muted": was.muted, "attention": was.attention.code(), "configured": was.configured},
         }))
+        })
     }
 
     /// Back to the flags the space had before the answer (only when nobody changed them since).
     fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
-        let Some(s) = spaces::get(tx, &d.subject_id)?.filter(|s| s.workspace_id == d.workspace_id)
-        else {
-            return Ok(());
-        };
-        let w = &d.result["was"];
-        let (Some(muted), Some(configured)) = (w["muted"].as_bool(), w["configured"].as_bool())
-        else {
-            return Ok(());
-        };
-        let was = Flags {
-            muted,
-            // answers recorded before 019 carry no attention
-            attention: w["attention"]
-                .as_str()
-                .and_then(Attention::parse)
-                .unwrap_or(Attention::Realtime),
-            configured,
-        };
-        let Some(to) = answered(d.result["choice"].as_str().unwrap_or(""), was) else {
-            return Ok(());
-        };
-        let now = flags_of(&spaces::settings(tx, &s.id)?);
-        if (now.muted, now.attention) != (to.muted, to.attention) {
-            // changed on the space page after the answer: keep what the user set there
-            return Ok(());
-        }
-        set_flags(
-            tx,
-            &d.workspace_id,
-            "steve",
-            &s.id,
-            was,
-            &json!({"decision": d.id, "undo": true}),
-        )?;
-        Ok(())
+        tx.write(|w| {
+            let Some(s) = steve_store::channel_spaces::rows::get_in_workspace(
+                w,
+                &d.workspace_id,
+                &d.subject_id,
+            )?
+            else {
+                return Ok(());
+            };
+            let prior = &d.result["was"];
+            let (Some(muted), Some(configured)) =
+                (prior["muted"].as_bool(), prior["configured"].as_bool())
+            else {
+                return Ok(());
+            };
+            let was = Flags {
+                muted,
+                // answers recorded before 019 carry no attention
+                attention: prior["attention"]
+                    .as_str()
+                    .and_then(Attention::parse)
+                    .unwrap_or(Attention::Realtime),
+                configured,
+            };
+            let Some(to) = answered(d.result["choice"].as_str().unwrap_or(""), was) else {
+                return Ok(());
+            };
+            let now = flags_of(&crate::spaces::settings(w, &s.id)?);
+            if (now.muted, now.attention) != (to.muted, to.attention) {
+                // changed on the space page after the answer: keep what the user set there
+                return Ok(());
+            }
+            set_flags(
+                w,
+                &d.workspace_id,
+                "steve",
+                &s.id,
+                was,
+                &json!({"decision": d.id, "undo": true}),
+            )?;
+            Ok(())
+        })
     }
 }
 
 /// Expires the open “新群” decision of a space (the bot left or the group was disbanded). Returns
 /// whether one was open.
-pub fn expire_for_space(tx: &Tx, ws: &str, space: &str, reason: &str) -> ChannelResult<bool> {
-    let Some(d) = base::decisions::open_for(tx, ws, SUBJECT_SPACE, space)? else {
+pub fn expire_for_space(
+    w: &mut steve_store::W<'_>,
+    ws: &str,
+    space: &str,
+    reason: &str,
+) -> ChannelResult<bool> {
+    let Some(d) = steve_store::decision_repo::open_for(w, ws, SUBJECT_SPACE, space)? else {
         return Ok(false);
     };
-    Ok(base::decisions::settle(
-        tx,
+    Ok(steve_store::DecisionRows(w).settle(
         &d.id,
         &json!({"expired": true, "reason": reason}),
         "expired",

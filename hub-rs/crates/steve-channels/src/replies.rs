@@ -17,10 +17,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rusqlite::params;
 use steve_flow::ports::ItemRequest;
-use steve_store::base::ObjRef;
-use steve_store::base::links::{self, NewLink};
 
 use crate::compose::{self, ComposeOpts, Composer};
 use crate::conversations::sender_is_owner;
@@ -123,18 +120,20 @@ impl Replies {
     async fn reply(&self, ch: &Channels, plan: &Plan) -> ChannelResult<Option<Acted>> {
         // writes are refused there for now: no reply is written that could not go out
         let now = ch.now();
-        if !ch.store().reader(|c| {
-            write_blocks::explicit_request(
-                c,
+        let refusal = ch.store().read(|r| {
+            if write_blocks::explicit_request(
+                r,
                 &plan.ws,
                 &plan.connection_id,
                 &plan.space_id,
                 &plan.message_id,
-            )
-        })? && let Some(why) = ch
-            .store()
-            .reader(|c| write_blocks::active(c, &plan.connection_id, &plan.space_id, now))?
-        {
+            )? {
+                Ok(None)
+            } else {
+                write_blocks::active(r, &plan.connection_id, &plan.space_id, now)
+            }
+        })?;
+        if let Some(why) = refusal {
             return Ok(Some(Acted {
                 label: format!("没有起草回复：{why}"),
                 decision_id: None,
@@ -148,7 +147,7 @@ impl Replies {
         // of theirs opens, is approved by YOLO or is sent (crate::presence::take_turn)
         let turn = if plan.mode == Mode::Own && plan.trigger.is_none() {
             ch.store()
-                .transaction(|tx| crate::presence::take_turn(tx, &plan.ws, &plan.message_id))?
+                .write(|tx| crate::presence::take_turn(tx, &plan.ws, &plan.message_id))?
         } else {
             Vec::new()
         };
@@ -172,8 +171,9 @@ impl Replies {
                 // messages of the turn are their own again
                 tracing::warn!(space = plan.space_id, "channel reply not generated: {e}");
                 if turn.len() > 1 {
-                    ch.store()
-                        .transaction(|tx| crate::presence::release_turn(tx, &plan.message_id))?;
+                    ch.store().write(|w| {
+                        steve_store::channel_message_repo::turns::release(w, &plan.message_id)
+                    })?;
                 }
                 return Ok(None);
             }
@@ -184,7 +184,7 @@ impl Replies {
             .filter(|id| *id != plan.message_id)
             .collect();
         if !earlier.is_empty() {
-            ch.store().transaction(|tx| {
+            ch.store().write(|tx| {
                 crate::presence::supersede(
                     tx,
                     &plan.ws,
@@ -278,32 +278,8 @@ impl Replies {
                 return Ok(None);
             }
         };
-        ch.store().transaction(|tx| -> ChannelResult<()> {
-            let it = || ObjRef::new("item", &item);
-            links::add(
-                tx,
-                &ws,
-                &NewLink::new(
-                    it(),
-                    "from",
-                    ObjRef::new("chan_message", &plan.message_id),
-                    LINK_SOURCE,
-                ),
-            )?;
-            if let Some(p) = &plan.sender_party_id {
-                links::add(
-                    tx,
-                    &ws,
-                    &NewLink::new(it(), "raised_by", ObjRef::new("party", p), LINK_SOURCE),
-                )?;
-            }
-            tx.execute(
-                "UPDATE chan_messages SET work_item_id = ? WHERE id = ?",
-                params![item, plan.message_id],
-            )?;
-            messages::event(tx, &ws, &plan.space_id, &plan.message_id);
-            Ok(())
-        })?;
+        ch.store()
+            .write(|w| crate::conversations::link_channel_item(w, &ws, plan, &item))?;
         if !acknowledge {
             return Ok(Some(acted(
                 &Delivered::Skipped,
@@ -468,7 +444,7 @@ fn not_a_reply(
     match r.generation.outcome {
         Outcome::Reply => Ok(None),
         Outcome::AskOwner | Outcome::NeedContext => {
-            let d = ch.store().transaction(|tx| {
+            let d = ch.store().write(|tx| {
                 crate::decide::open_card(
                     tx,
                     plan,
@@ -572,7 +548,7 @@ fn starred_reply(ch: &Channels, plan: &Plan, r: &compose::Reply) -> ChannelResul
     let starred = plan.mode == Mode::Own
         && ch
             .store()
-            .reader(|c| crate::decide::starred(c, &plan.ws, plan.sender_party_id.as_deref()))?;
+            .read(|r| crate::decide::starred(r, &plan.ws, plan.sender_party_id.as_deref()))?;
     if starred {
         let mut g = r.generation.clone();
         if g.outcome == crate::deliver::Outcome::Reply && g.draft.trim().is_empty() {
@@ -581,7 +557,7 @@ fn starred_reply(ch: &Channels, plan: &Plan, r: &compose::Reply) -> ChannelResul
         if g.outcome != crate::deliver::Outcome::AskOwner {
             g.reason = crate::decide::Reason::Starred.code().into();
         }
-        let d = ch.store().transaction(|tx| {
+        let d = ch.store().write(|tx| {
             crate::decide::open_card(tx, plan, &crate::decide::Card::of(&g, "", Mode::Own, true))
         })?;
         return Ok(Some(Acted {
@@ -599,43 +575,41 @@ fn prepare_item_request(
     ws: &str,
     mode: ItemMode,
 ) -> ChannelResult<(Option<ItemRequest>, String)> {
-    ch.store().read::<_, steve_store::StoreError>(|r| {
-        Ok(ch.store().reader(|c| -> ChannelResult<_> {
-            let space = spaces::get(c, &plan.space_id)?
-                .ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
-            let set = spaces::settings(c, &space.id)?;
-            let d = &set.item_defaults;
-            let persona_bot = match plan.mode {
-                Mode::Bot => bindings::effective(c, &space)?.map(|e| e.persona.bot_id),
-                Mode::Own => None,
-            };
-            let bot = compose::pick_bot(c, &ws, &[d["bot_id"].as_str(), persona_bot.as_deref()])?;
-            let context = messages::context_before(c, &space.id, &plan.message_id, ITEM_CONTEXT)?;
-            let from_owner = sender_is_owner(c, &ws, plan.sender_party_id.as_deref())?;
-            let goal = item_goal(&plan.text, &context, from_owner);
-            let space_name = spaces::display_title(c, &space)?;
-            let title = {
-                let flat = plan.text.split_whitespace().collect::<Vec<_>>().join(" ");
-                if flat.is_empty() {
-                    format!("来自「{space_name}」的消息")
-                } else {
-                    flat.chars().take(TITLE_MAX).collect()
-                }
-            };
-            let req = bot.map(|bot| ItemRequest {
-                requester: None,
-                ws: ws.to_string(),
-                title,
-                goal,
-                bot,
-                project: d["project_id"].as_str().map(String::from),
-                tag_ids: compose::str_list(&d["tags"]),
-                source: (space_name, LINK_SOURCE.into()),
-                propose: mode == ItemMode::Propose,
-                accept_auto: false,
-                run_id: String::new(),
-            });
-            Ok((req, personas::owner_name_for_space(c, r, &ws, &space.id)?))
-        }))
-    })?
+    ch.store().read(|r| -> ChannelResult<_> {
+        let space = steve_store::channel_spaces::rows::get_in_workspace(r, ws, &plan.space_id)?
+            .ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
+        let set = spaces::settings(r, &space.id)?;
+        let d = &set.item_defaults;
+        let persona_bot = match plan.mode {
+            Mode::Bot => bindings::effective(r, &space)?.map(|e| e.persona.bot_id),
+            Mode::Own => None,
+        };
+        let bot = compose::pick_bot(r, &ws, &[d["bot_id"].as_str(), persona_bot.as_deref()])?;
+        let context = messages::context_before(r, &space.id, &plan.message_id, ITEM_CONTEXT)?;
+        let from_owner = sender_is_owner(r, &ws, plan.sender_party_id.as_deref())?;
+        let goal = item_goal(&plan.text, &context, from_owner);
+        let space_name = spaces::display_title(r, &space)?;
+        let title = {
+            let flat = plan.text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if flat.is_empty() {
+                format!("来自「{space_name}」的消息")
+            } else {
+                flat.chars().take(TITLE_MAX).collect()
+            }
+        };
+        let req = bot.map(|bot| ItemRequest {
+            requester: None,
+            ws: ws.to_string(),
+            title,
+            goal,
+            bot,
+            project: d["project_id"].as_str().map(String::from),
+            tag_ids: compose::str_list(&d["tags"]),
+            source: (space_name, LINK_SOURCE.into()),
+            propose: mode == ItemMode::Propose,
+            accept_auto: false,
+            run_id: String::new(),
+        });
+        Ok((req, personas::owner_name_for_space(r, &ws, &space.id)?))
+    })
 }

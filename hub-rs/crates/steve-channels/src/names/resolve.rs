@@ -25,7 +25,7 @@ pub(super) async fn run(channels: &Channels, ws: &str) -> ChannelResult<NameRepo
     let ids = if adapters.is_empty() {
         Vec::new()
     } else {
-        store.reader(|c| identities(c, ws, &adapters))?
+        store.read(|c| identities(c, ws, &adapters))?
     };
     let tenants = identity_tenants(channels, &ids, now, &mut rep).await;
     link_local_tenants(channels, ws, &tenants, &mut rep).await?;
@@ -36,7 +36,7 @@ pub(super) async fn run(channels: &Channels, ws: &str) -> ChannelResult<NameRepo
     let (w, o) = (ws.to_string(), open.clone());
     let spaces = channels
         .modules()
-        .blocking(move |m| m.store.reader(|c| seen_spaces(c, &w, &o)))
+        .blocking(move |m| m.store.read(|c| seen_spaces(c, &w, &o)))
         .await?;
     let mut answers = Answers::default();
     let mut lookup = Lookup {
@@ -84,9 +84,8 @@ async fn local_candidates(
         channels
             .modules()
             .blocking(move |m| {
-                m.store.reader(|c| -> ChannelResult<_> {
-                    Ok((mention_names(c, &w)?, dm_names(c, &w)?))
-                })
+                m.store
+                    .read(|c| -> ChannelResult<_> { Ok((mention_names(c, &w)?, dm_names(c, &w)?)) })
             })
             .await?
     };
@@ -172,9 +171,8 @@ async fn link_local_tenants(
     let (tenants_seen, mut own_keys) = channels
         .modules()
         .blocking(move |m| {
-            m.store.reader(|c| -> ChannelResult<_> {
-                Ok((local_tenants(c, &w)?, own_tenants(c, &w)?))
-            })
+            m.store
+                .read(|c| -> ChannelResult<_> { Ok((local_tenants(c, &w)?, own_tenants(c, &w)?)) })
         })
         .await?;
     // parties given an organization in this run: another account of theirs checks again
@@ -260,7 +258,7 @@ impl Lookup<'_> {
     ) -> ChannelResult<()> {
         let (channels, now, ids, open) = (self.channels, self.now, self.ids, self.open);
         let store = channels.store();
-        let inst = store.reader(|c| installation_of(ids, c, &sp.connection))?;
+        let inst = store.read(|r| installation_of(ids, r, &sp.connection))?;
         let handles: Vec<HandleRef> = open
             .iter()
             .filter(|c| sp.accounts.contains(&c.account_id))
@@ -345,7 +343,7 @@ impl Lookup<'_> {
                     .iter()
                     .filter(|s| s.accounts.contains(&cand.account_id))
                 {
-                    s.insert(store.reader(|c| installation_of(ids, c, &sp.connection))?);
+                    s.insert(store.read(|r| installation_of(ids, r, &sp.connection))?);
                 }
                 if s.is_empty() {
                     s.extend(ids.iter().map(|i| i.installation.clone()));

@@ -513,7 +513,7 @@ pub fn claim_due(store: &Store, sources: &AlarmSources, now: i64) -> FlowResult<
                 late,
                 at: Some(now),
             };
-            let ev = steve_store::outbox::enqueue(
+            let ev = steve_store::outbox::append(
                 w,
                 &ws,
                 topic.name,

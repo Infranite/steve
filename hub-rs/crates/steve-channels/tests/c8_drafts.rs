@@ -8,6 +8,9 @@
 mod digest_env;
 use digest_env::TestEnv;
 use std::sync::Arc;
+use steve_store::testkit::channels::inspect;
+use steve_store::testkit::channels::seed;
+use steve_store::testkit::channels::seed::people::{Bot, OPS};
 
 use axum::Router;
 use serde_json::{Value, json};
@@ -44,19 +47,18 @@ fn setup() -> H {
         connections::register(r);
         drafts::register(r, Arc::new(SystemClock));
     });
-    env.store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "INSERT INTO bots (id, workspace_id, name, main, harness, persona, updated) VALUES
-                    ('steve', 'default', 'Steve', 1, 'claude', '沉稳、简洁。', 1),
-                    ('ops', 'default', '运维', 0, 'claude', '', 1);
-                 INSERT INTO bot_workspaces (bot_id, workspace_id, created) VALUES
-                    ('steve', 'default', 1), ('ops', 'default', 2);
-                 INSERT INTO tags (id, workspace_id, name, cat, description, created_by, created) VALUES ('tag_ops', 'default', '运维', '领域', '', 'usr_dev', 1);",
-            )?;
-            Ok(())
-        })
-        .expect("bots");
+    steve_store::testkit::channels::seed::people::bots(
+        env.store(),
+        &[
+            Bot {
+                persona: "沉稳、简洁。",
+                ..Bot::default()
+            },
+            OPS,
+        ],
+    )
+    .unwrap();
+    steve_store::testkit::channels::seed::people::ops_tag(env.store()).unwrap();
     let keys = tempfile::tempdir().expect("tmp");
     let vault = Vault::new(
         env.store().clone(),
@@ -322,7 +324,7 @@ async fn a_stale_draft_is_409() {
     let now = h.ch.now();
     h.env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             spaces::set_account_rules(
                 tx,
                 &Viewer::bare(WS, ME),
@@ -540,7 +542,7 @@ async fn bot_channel_persona_rules_and_duty() {
     let rev0 = h
         .env
         .store()
-        .reader(|c| spaces::channel_settings(c, WS, &h.con))
+        .read(|c| spaces::channel_settings(c, WS, &h.con))
         .expect("read")
         .expect("settings")
         .revision;
@@ -548,7 +550,7 @@ async fn bot_channel_persona_rules_and_duty() {
     let (s, per) = h
         .env
         .store()
-        .reader(|c| {
+        .read(|c| {
             Ok::<_, ApiError>((
                 spaces::channel_settings(c, WS, &h.con)?.expect("settings"),
                 bindings::account_persona(c, WS, &h.con)?,
@@ -569,7 +571,7 @@ async fn bot_channel_persona_rules_and_duty() {
     let (s, per) = h
         .env
         .store()
-        .reader(|c| {
+        .read(|c| {
             Ok::<_, ApiError>((
                 spaces::channel_settings(c, WS, &h.con)?.expect("settings"),
                 bindings::account_persona(c, WS, &h.con)?,
@@ -615,7 +617,7 @@ async fn self_channel_trigger_words_and_where() {
     let t = h
         .env
         .store()
-        .reader(|c| spaces::channel_settings(c, WS, &mine))
+        .read(|c| spaces::channel_settings(c, WS, &mine))
         .expect("read")
         .expect("settings")
         .trigger;
@@ -627,7 +629,7 @@ async fn self_channel_trigger_words_and_where() {
     let t = h
         .env
         .store()
-        .reader(|c| spaces::channel_settings(c, WS, &mine))
+        .read(|c| spaces::channel_settings(c, WS, &mine))
         .expect("read")
         .expect("settings")
         .trigger;
@@ -665,17 +667,7 @@ async fn self_channel_trigger_words_and_where() {
 async fn names_resolve_exactly_or_are_not_recognized() {
     let h = setup();
     let g2 = space_of(&h, &h.con, "G2", "m1").await;
-    let alice: String = h
-        .env
-        .store()
-        .reader(|c| {
-            Ok::<_, ApiError>(c.query_row(
-                "SELECT id FROM parties WHERE workspace_id = ? AND type = 'contact' AND name = '王小丽'",
-                [WS],
-                |r| r.get(0),
-            )?)
-        })
-        .expect("alice");
+    let alice: String = inspect::people::xiaoli_contact(h.env.store(), WS).expect("alice");
     let p = draft(
         &h,
         "space",
@@ -791,27 +783,25 @@ async fn ownership_and_candidates() {
     let default = h
         .env
         .store()
-        .reader(|c| personas::default_persona(c, WS))
+        .read(|c| personas::default_persona(c, WS))
         .expect("read")
         .expect("seeded");
     want.push(format!("persona:{} — 对外身份 Steve", default.id));
     want.sort();
     assert_eq!(cands, want);
     // bestSpace: the longest shared piece of at least 2 characters
-    let hints = h
-        .env
-        .store()
-        .reader(|c| drafts::space_hints(c, &Viewer::bare(WS, ME), "Acme 交付那边别回复太快"))
-        .expect("hints");
+    let hints = drafts::space_hints(
+        h.env.store(),
+        &Viewer::bare(WS, ME),
+        "Acme 交付那边别回复太快",
+    )
+    .expect("hints");
     assert_eq!(
         hints.first().map(|c| c.code.clone()),
         Some(format!("space:{g2}"))
     );
-    let hints = h
-        .env
-        .store()
-        .reader(|c| drafts::space_hints(c, &Viewer::bare(WS, ME), "运维那边静默"))
-        .expect("hints");
+    let hints =
+        drafts::space_hints(h.env.store(), &Viewer::bare(WS, ME), "运维那边静默").expect("hints");
     assert_eq!(
         hints.iter().map(|c| c.code.clone()).collect::<Vec<_>>(),
         vec![format!("space:{g1}")]
@@ -836,34 +826,14 @@ async fn a_disconnected_space_can_only_be_viewed() {
         assert_eq!(e.to_string(), spaces::DISCONNECTED);
     };
     // the connection gone (ON DELETE SET NULL), settings still there: the op itself refuses
-    h.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE spaces SET status = 'left', account_id = (SELECT account_id FROM connections WHERE id = ?1), connection_id = NULL WHERE connection_id = ?1",
-                [&h.con],
-            )?;
-            // what ChannelUsage does to the identities
-            c.execute(
-                "UPDATE space_identities SET left_at = 1 WHERE connection_id = ?1",
-                [&h.con],
-            )?;
-            Ok(())
-        })
-        .expect("disconnect");
+    seed::spaces::detach_connection_spaces(h.env.store(), &h.con).expect("disconnect");
     refused(
         changes::apply(&h.env.modules, &me(), &p.id)
             .expect("stored")
             .expect_err("apply refused"),
     );
     // and what ChannelUsage leaves: no settings
-    h.env
-        .store()
-        .with_conn(|c| {
-            c.execute("DELETE FROM space_settings WHERE space_id = ?", [&g1])?;
-            Ok(())
-        })
-        .expect("settings");
+    seed::spaces::clear_space_settings(h.env.store(), &g1).expect("settings");
     let shown = get(&h, &format!("/spaces/{g1}")).await;
     assert_eq!(shown["status"], "left");
     assert_eq!(shown["connection_id"], "");

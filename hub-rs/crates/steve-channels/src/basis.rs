@@ -3,11 +3,10 @@
 //! the rewrites, the verdict and both models. Only you see it (the space page, the inbox); people in
 //! the chat only see the reply.
 
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_modules::outbound::{BasisEntry, Span};
-use steve_store::{Tx, uid};
+use steve_store::{Read, W, reply_basis};
 
 use crate::ChannelResult;
 
@@ -65,99 +64,52 @@ pub struct BasisOut {
 /// Writes the basis and links it from the message (`basis_id`). The table has no column for the
 /// suspicious spans, so they are stored in `entries` as `{"source_type":"span","text","reason"}`
 /// and split off again when read ([`of_message`]).
-pub fn insert(tx: &Tx, b: &NewBasis, now: i64) -> ChannelResult<String> {
-    let id = uid("bs");
-    tx.execute(
-        "INSERT INTO reply_basis (id, workspace_id, message_id, entries, rewrites, verdict, answer_model, check_model, created)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        params![
-            id,
-            b.ws,
-            b.message_id,
-            entries_json(b),
-            serde_json::to_string(&b.rewrites).unwrap_or_else(|_| "[]".into()),
-            b.verdict,
-            b.answer_model,
-            b.check_model,
-            now
-        ],
-    )?;
-    tx.execute(
-        "UPDATE chan_messages SET basis_id = ? WHERE id = ?",
-        params![id, b.message_id],
-    )?;
-    Ok(id)
+pub fn insert(w: &mut W<'_>, b: &NewBasis, now: i64) -> ChannelResult<String> {
+    Ok(reply_basis::insert(
+        w,
+        &b.ws,
+        &b.message_id,
+        b.answer_model.as_deref(),
+        content(b)?,
+        now,
+    )?)
 }
 
-fn entries_json(b: &NewBasis) -> String {
-    let mut entries = serde_json::to_value(&b.entries).unwrap_or_else(|_| json!([]));
-    if let Value::Array(a) = &mut entries {
-        for s in &b.spans {
-            a.push(json!({"source_type": "span", "text": s.text, "reason": s.reason}));
-        }
-    }
-    entries.to_string()
-}
-
-/// The check that ran after the draft was written settles its basis `id`: verdict, entries, spans,
-/// rewrites and check model as in `b`. Only while it is still [`CHECKING`]; `false` when it is not
-/// any more (the draft was dealt with first).
-pub fn settle(tx: &Tx, id: &str, b: &NewBasis) -> ChannelResult<bool> {
-    let n = tx.execute(
-        "UPDATE reply_basis SET verdict = ?, entries = ?, rewrites = ?, check_model = ?
-          WHERE id = ? AND verdict = ?",
-        params![
-            b.verdict,
-            entries_json(b),
-            serde_json::to_string(&b.rewrites).unwrap_or_else(|_| "[]".into()),
-            b.check_model,
-            id,
-            CHECKING
-        ],
-    )?;
-    Ok(n > 0)
-}
-
-/// The draft `message` was dealt with while its check still ran: its basis says the check did not
-/// finish ([`UNCHECKED`], with `why` as a span), so it never reads as checked. Nothing when it was
-/// not [`CHECKING`].
-pub fn checking_stopped(tx: &Tx, message: &str, why: &str) -> ChannelResult<bool> {
-    let n = tx.execute(
-        "UPDATE reply_basis SET verdict = ?,
-                entries = json_insert(entries, '$[#]', json_object('source_type', 'span', 'text', '', 'reason', ?))
-          WHERE id = (SELECT basis_id FROM chan_messages WHERE id = ?) AND verdict = ?",
-        params![UNCHECKED, why, message, CHECKING],
-    )?;
-    Ok(n > 0)
-}
-
-/// A `reply_basis` row as stored.
-struct Raw {
-    id: String,
-    message_id: String,
-    entries: String,
-    rewrites: String,
-    verdict: String,
-    answer_model: Option<String>,
-    check_model: Option<String>,
-    created: i64,
-}
-
-fn raw(r: &rusqlite::Row) -> rusqlite::Result<Raw> {
-    Ok(Raw {
-        id: r.get(0)?,
-        message_id: r.get(1)?,
-        entries: r.get(2)?,
-        rewrites: r.get(3)?,
-        verdict: r.get(4)?,
-        answer_model: r.get(5)?,
-        check_model: r.get(6)?,
-        created: r.get(7)?,
+fn content(b: &NewBasis) -> ChannelResult<reply_basis::Basis<'_>> {
+    let mut entries = b
+        .entries
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    entries.extend(
+        b.spans
+            .iter()
+            .map(|s| json!({"source_type": "span", "text": s.text, "reason": s.reason})),
+    );
+    Ok(reply_basis::Basis {
+        entries,
+        rewrites: b
+            .rewrites
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<_, _>>()?,
+        verdict: &b.verdict,
+        check_model: b.check_model.as_deref(),
     })
 }
 
-fn out_of(r: Raw) -> BasisOut {
-    let Raw {
+/// The check that ran after the draft was written settles its basis while it is still checking.
+pub fn settle(w: &mut W<'_>, id: &str, b: &NewBasis) -> ChannelResult<bool> {
+    Ok(reply_basis::settle_check(w, id, content(b)?)?)
+}
+
+/// The draft was dealt with before its check finished. Keep the check's reason with the draft.
+pub fn checking_stopped(w: &mut W<'_>, message: &str, why: &str) -> ChannelResult<bool> {
+    Ok(reply_basis::stop_check(w, message, why)?)
+}
+
+fn out_of(r: reply_basis::BasisRow) -> BasisOut {
+    let reply_basis::BasisRow {
         id,
         message_id,
         entries,
@@ -167,9 +119,9 @@ fn out_of(r: Raw) -> BasisOut {
         check_model,
         created,
     } = r;
-    let all: Vec<Value> = serde_json::from_str(&entries).unwrap_or_default();
-    let (spans, entries): (Vec<Value>, Vec<Value>) =
-        all.into_iter().partition(|e| e["source_type"] == "span");
+    let (spans, entries): (Vec<_>, Vec<_>) = entries
+        .into_iter()
+        .partition(|e| e["source_type"] == "span");
     let spans: Vec<Value> = spans
         .into_iter()
         .map(|s| json!({"text": s["text"], "reason": s["reason"]}))
@@ -179,7 +131,7 @@ fn out_of(r: Raw) -> BasisOut {
         message_id,
         verdict,
         entries: Value::Array(entries),
-        rewrites: serde_json::from_str(&rewrites).unwrap_or_else(|_| json!([])),
+        rewrites: Value::Array(rewrites),
         spans: Value::Array(spans),
         answer_model,
         check_model,
@@ -188,30 +140,13 @@ fn out_of(r: Raw) -> BasisOut {
 }
 
 /// The basis of a message (`GET /chan-messages/:id/basis`), when it has one.
-pub fn of_message(c: &Connection, ws: &str, message_id: &str) -> ChannelResult<Option<BasisOut>> {
-    Ok(c.query_row(
-        "SELECT b.id, b.message_id, b.entries, b.rewrites, b.verdict, b.answer_model, b.check_model, b.created
-           FROM chan_messages m JOIN reply_basis b ON b.id = m.basis_id
-          WHERE m.id = ? AND m.workspace_id = ?",
-        params![message_id, ws],
-        raw,
-    )
-    .optional()?
-    .map(out_of))
+pub fn of_message(r: &mut impl Read, ws: &str, message: &str) -> ChannelResult<Option<BasisOut>> {
+    Ok(reply_basis::of_message(r, message, Some(ws))?.map(out_of))
 }
 
-/// The `basis` field of a `ChanMessage`: `{verdict, entries, rewrites, spans}` or `null`.
-/// The caller has checked the message is the caller's to see.
-pub fn summary_of(c: &Connection, message_id: &str) -> ChannelResult<Value> {
-    let b = c
-        .query_row(
-            "SELECT b.id, b.message_id, b.entries, b.rewrites, b.verdict, b.answer_model, b.check_model, b.created
-               FROM chan_messages m JOIN reply_basis b ON b.id = m.basis_id WHERE m.id = ?",
-            [message_id],
-            raw,
-        )
-        .optional()?
-        .map(out_of);
+/// The basis of a visible outbound message.
+pub fn summary_of(r: &mut impl Read, message: &str) -> ChannelResult<Value> {
+    let b = reply_basis::of_message(r, message, None)?.map(out_of);
     Ok(match b {
         Some(b) => json!({
             "verdict": b.verdict, "entries": b.entries, "rewrites": b.rewrites, "spans": b.spans,

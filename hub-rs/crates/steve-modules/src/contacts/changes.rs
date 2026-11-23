@@ -30,7 +30,7 @@ use steve_store::{Attributes, Contacts, Read, Teams, W};
 use super::Ports;
 use super::repo::{ContactQuery, NewDef, NewParty, NewValue, Party, PartyPatch};
 use super::service::{
-    dedup, ensure_base_in, jobs_in, normalize_domain, own_party_in, pref, revise_in, this_month,
+    dedup, ensure_base, jobs_in, normalize_domain, own_party_in, pref, revise_in, this_month,
 };
 use super::teams::chart_readonly;
 use super::teams::repo::Details;
@@ -2309,7 +2309,7 @@ impl ChangeOp for TeamCreateOp {
     fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
         let tx = w;
         let a: TeamCreate = args(op)?;
-        let me = ensure_base_in(
+        let me = ensure_base(
             tx,
             &Caller {
                 ws: cx.ws.into(),

@@ -557,7 +557,7 @@ async fn real_completion_notification_reaches_e1_and_existing_c6_fake_adapter() 
     FakeChannel::seed_connection(&e.store, &who, Some("u-notify-self")).unwrap();
     let (conn, _) = FakeChannel::seed_connection(&e.store, &who, None).unwrap();
     e.store
-        .transaction(|tx| {
+        .write(|tx| {
             steve_channels::spaces::set_account_rules(
                 tx,
                 &steve_store::base::Viewer::bare(&who.ws, &who.me),
@@ -708,7 +708,7 @@ async fn notification_targets_http_uses_live_caller_not_owner_or_query_identity(
     FakeChannel::seed_connection(&e.store, &them, Some("target-member")).unwrap();
     let (conn, _) = FakeChannel::seed_connection(&e.store, &me, None).unwrap();
     e.store
-        .transaction(|tx| {
+        .write(|tx| {
             steve_channels::spaces::set_account_rules(
                 tx,
                 &steve_store::base::Viewer::bare(&me.ws, &me.me),

@@ -14,6 +14,7 @@ pub fn delivery_summary(c: &mut impl Read, item: &str) -> Result<Option<String>>
             .from("decisions")
             .and_where(Expr::col("item_id").eq(item))
             .and_where(Expr::col("kind").eq("accept"))
+            .and_where(Expr::col("draft").is_not_null())
             .order_by("created", Order::Desc)
             .limit(1),
         |r| r.get(0),
@@ -119,6 +120,28 @@ impl<C: Read> DecisionRows<'_, C> {
         get(self.0, id)
     }
 
+    pub fn subject_had_failure(
+        &mut self,
+        ws: &str,
+        subject_type: &str,
+        subject: &str,
+    ) -> Result<bool> {
+        Ok(self
+            .0
+            .one(
+                Query::select()
+                    .column("id")
+                    .from("decisions")
+                    .and_where(Expr::col("workspace_id").eq(ws))
+                    .and_where(Expr::col("subject_type").eq(subject_type))
+                    .and_where(Expr::col("subject_id").eq(subject))
+                    .and_where(Expr::col("kind").eq("fail"))
+                    .limit(1),
+                |_| Ok(()),
+            )?
+            .is_some())
+    }
+
     pub fn open_confirmations(&mut self, ws: &str, subject: &str) -> Result<i64> {
         Ok(self
             .0
@@ -189,6 +212,66 @@ impl DecisionRows<'_, W<'_>> {
         Ok(d)
     }
 
+    /// Writes the card shown to the user in the same transaction as the checked draft.
+    pub fn edit_card(
+        &mut self,
+        id: &str,
+        question: Option<&str>,
+        draft: Option<&str>,
+        options: Option<&[String]>,
+    ) -> Result<()> {
+        self.update_card(id, question.map(Expr::val), draft, options)
+    }
+
+    /// Replaces a rendered annotation after the caller has settled its disclosure check.
+    pub fn replace_card_note(
+        &mut self,
+        id: &str,
+        pending: &str,
+        settled: &str,
+        draft: Option<&str>,
+        options: Option<&[String]>,
+    ) -> Result<()> {
+        let question = Func::cust("replace").args([
+            Expr::col("question"),
+            Expr::val(pending),
+            Expr::val(settled),
+        ]);
+        self.update_card(id, Some(question.into()), draft, options)
+    }
+
+    fn update_card(
+        &mut self,
+        id: &str,
+        question: Option<Expr>,
+        draft: Option<&str>,
+        options: Option<&[String]>,
+    ) -> Result<()> {
+        let mut update = Query::update();
+        update.table("decisions").and_where(Expr::col("id").eq(id));
+        if let Some(question) = question {
+            update.value("question", question);
+        }
+        if let Some(draft) = draft {
+            update.value("draft", draft);
+        }
+        if let Some(options) = options {
+            update.value("options", serde_json::to_string(options)?);
+        }
+        self.0.exec(&update)?;
+        Ok(())
+    }
+
+    pub fn set_result(&mut self, id: &str, result: &Value) -> Result<()> {
+        self.0.exec(
+            Query::update()
+                .table("decisions")
+                .value("result", result.to_string())
+                .and_where(Expr::col("id").eq(id)),
+        )?;
+        Ok(())
+    }
+
     pub fn settle(&mut self, id: &str, result: &Value, status: &str, undo: &Value) -> Result<bool> {
         let undo = crate::types::truthy(undo).then(|| undo.to_string());
         let n = self.0.exec(
@@ -211,6 +294,23 @@ impl DecisionRows<'_, W<'_>> {
             emit(self.0, &d);
         }
         Ok(n > 0)
+    }
+
+    /// Close a card automatically as orphaned, without emitting a second event.
+    pub fn close_orphaned(&mut self, id: &str, now: i64) -> Result<()> {
+        self.0.exec(
+            Query::update()
+                .table("decisions")
+                .value("status", "resolved")
+                .value(
+                    "result",
+                    serde_json::json!({"dismissed": true, "why": "connection_gone"}).to_string(),
+                )
+                .value("resolved", now)
+                .and_where(Expr::col("id").eq(id))
+                .and_where(Expr::col("status").eq("open")),
+        )?;
+        Ok(())
     }
 
     pub fn reopen(&mut self, decision: &Decision, metadata: &Value) -> Result<()> {

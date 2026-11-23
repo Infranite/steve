@@ -87,6 +87,18 @@ pub struct SyncedTeam {
 }
 
 impl<C: Read> Teams<'_, C> {
+    pub fn parties_in_space(&mut self, ws: &str, space: &str) -> Result<Vec<String>> {
+        self.0.all(
+            Query::select()
+                .column("party_id")
+                .from("team_details")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("space_id").eq(space))
+                .order_by("party_id", sea_query::Order::Asc),
+            |row| row.get(0),
+        )
+    }
+
     pub fn details(&mut self, team: &str) -> Result<Details> {
         Ok(self
             .0
@@ -585,5 +597,26 @@ impl Teams<'_, W<'_>> {
                 .and_where(Expr::col("workspace_id").eq(ws))
                 .and_where(Expr::col("contact_id").eq(contact)),
         )? as usize)
+    }
+}
+
+impl<C: Read> Teams<'_, C> {
+    pub fn active_ids_for_contact(&mut self, ws: &str, contact: &str) -> Result<Vec<String>> {
+        self.0.all(
+            Query::select()
+                .column(("m", "team_id"))
+                .from_as("team_members", "m")
+                .join_as(
+                    JoinType::InnerJoin,
+                    "parties",
+                    "t",
+                    Expr::col(("t", "id")).equals(("m", "team_id")),
+                )
+                .and_where(Expr::col(("t", "status")).eq("active"))
+                .and_where(Expr::col(("m", "workspace_id")).eq(ws))
+                .and_where(Expr::col(("m", "contact_id")).eq(contact))
+                .order_by(("m", "team_id"), Order::Asc),
+            |row| row.get(0),
+        )
     }
 }

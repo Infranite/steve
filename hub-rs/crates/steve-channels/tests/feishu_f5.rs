@@ -9,6 +9,7 @@ mod digest_env;
 use digest_env::TestEnv;
 use std::sync::Arc;
 use std::time::Duration;
+use steve_store::testkit::channels::inspect;
 
 use axum::Router;
 use axum::body::Body;
@@ -128,52 +129,19 @@ impl H {
         self.sync.sync_connection(&self.dir_conn()).await
     }
 
-    fn rows(&self, sql: &str) -> Vec<String> {
-        let sql = sql.to_string();
-        self.env
-            .store()
-            .reader(move |c| {
-                let mut st = c.prepare(&sql)?;
-                let r = st
-                    .query_map([], |r| r.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok::<_, steve_store::StoreError>(r)
-            })
-            .expect("rows")
-    }
-
-    fn count(&self, sql: &str) -> i64 {
-        let sql = sql.to_string();
-        self.env
-            .store()
-            .reader(move |c| {
-                Ok::<_, steve_store::StoreError>(c.query_row(&sql, [], |r| r.get::<_, i64>(0))?)
-            })
-            .expect("count")
-    }
-
     /// Names of the members of the team synced from this department, sorted.
     fn members(&self, dept: &str) -> Vec<String> {
-        let mut v = self.rows(&format!(
-            "SELECT p.name FROM team_members m JOIN team_details d ON d.party_id = m.team_id
-               JOIN parties p ON p.id = m.contact_id WHERE d.external_id = '{dept}'"
-        ));
-        v.sort();
-        v
+        inspect::people::department_member_names(self.env.store(), dept).unwrap()
     }
 
     fn team_status(&self, dept: &str) -> String {
-        self.rows(&format!(
-            "SELECT p.status FROM team_details d JOIN parties p ON p.id = d.party_id WHERE d.external_id = '{dept}'"
-        ))
-        .pop()
-        .unwrap_or_default()
+        inspect::people::department_status(self.env.store(), dept)
+            .unwrap()
+            .unwrap_or_default()
     }
 
     fn contact_exists(&self, name: &str) -> bool {
-        self.count(&format!(
-            "SELECT COUNT(*) FROM parties WHERE type = 'contact' AND name = '{name}' AND workspace_id = '{WS}'"
-        )) == 1
+        inspect::people::named_contact_count(self.env.store(), WS, name).unwrap() == 1
     }
 
     fn calls(&self, ep: Endpoint) -> usize {
@@ -251,11 +219,7 @@ async fn sample_tree_becomes_the_snapshot_and_the_org_chart() {
     assert_eq!(h.members(ids::DEPT_SALES), s(&["张伟"]));
     assert!(!h.contact_exists("陈静"));
     assert_eq!(
-        h.rows(&format!(
-            "SELECT m.role FROM team_members m JOIN team_details d ON d.party_id = m.team_id
-               WHERE d.external_id = '{}'",
-            ids::DEPT_PLATFORM
-        )),
+        inspect::people::department_member_roles(h.env.store(), ids::DEPT_PLATFORM).unwrap(),
         s(&["lead"])
     );
 }
@@ -408,7 +372,7 @@ async fn a_narrow_scope_reads_departments_users_and_user_groups() {
 async fn missing_permissions_fail_the_read_and_change_nothing() {
     let h = setup(World::sample()).await;
     h.sync().await.expect("first sync");
-    let before = h.count("SELECT COUNT(*) FROM team_members");
+    let before = inspect::people::count_team_members(h.env.store()).unwrap();
 
     for ep in [
         Endpoint::ContactScopes,
@@ -426,7 +390,10 @@ async fn missing_permissions_fail_the_read_and_change_nothing() {
         assert!(e.to_string().starts_with("通讯录没有授权"), "{e}");
         h.fake.allow(ep);
     }
-    assert_eq!(h.count("SELECT COUNT(*) FROM team_members"), before);
+    assert_eq!(
+        inspect::people::count_team_members(h.env.store()).unwrap(),
+        before
+    );
     assert_eq!(h.team_status(ids::DEPT_SALES), "active");
 
     // a scoped department that is no longer visible: 40004, with a hint about the scope settings

@@ -168,3 +168,30 @@ impl TagRows<'_, W<'_>> {
         Ok(tags)
     }
 }
+
+impl<C: Read> TagRows<'_, C> {
+    pub fn name(&mut self, id: &str) -> Result<Option<String>> {
+        self.0.one(
+            Query::select()
+                .column("name")
+                .from("tags")
+                .and_where(Expr::col("id").eq(id)),
+            |row| row.get(0),
+        )
+    }
+
+    pub fn resolve_name(&mut self, ws: &str, name: &str) -> Result<Option<String>> {
+        if self.contains(ws, name)? {
+            return Ok(Some(name.to_owned()));
+        }
+        self.0.one(
+            Query::select()
+                .column("id")
+                .from("tags")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("name").eq(name))
+                .limit(1),
+            |row| row.get(0),
+        )
+    }
+}

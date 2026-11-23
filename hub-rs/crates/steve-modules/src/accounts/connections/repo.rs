@@ -1,7 +1,7 @@
 //! SQL of `connections` (migration 005, owned by steve-store).
 
 use serde_json::Value;
-use steve_store::{Connections, Read, Result, Tx};
+use steve_store::{Connections, Read, Result};
 
 pub use steve_store::{ConnRow, HealthState};
 
@@ -82,23 +82,21 @@ pub fn note_permissions_in(
 /// [`note_permissions_in`] on connection `id`'s row (inside the caller's transaction; no revision,
 /// no change event). Returns whether anything changed.
 pub fn note_permissions(
-    tx: &Tx,
+    w: &mut steve_store::W<'_>,
     id: &str,
     missing: &[(&str, &str)],
     granted: &[&str],
     now: i64,
 ) -> Result<bool> {
-    tx.write(|w| {
-        let mut connections = Connections(w);
-        let Some(mut row) = connections.get(id)? else {
-            return Ok(false);
-        };
-        if !note_permissions_in(&mut row.config, missing, granted, now) {
-            return Ok(false);
-        }
-        connections.replace_config(id, &row.config)?;
-        Ok(true)
-    })
+    let mut connections = Connections(w);
+    let Some(mut row) = connections.get(id)? else {
+        return Ok(false);
+    };
+    if !note_permissions_in(&mut row.config, missing, granted, now) {
+        return Ok(false);
+    }
+    connections.replace_config(id, &row.config)?;
+    Ok(true)
 }
 
 pub fn change_signature(r: &mut impl Read, id: &str) -> Result<Option<String>> {

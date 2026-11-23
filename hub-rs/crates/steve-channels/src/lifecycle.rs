@@ -28,10 +28,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 use steve_flow::AdapterError;
 use steve_modules::accounts::connections::{ConnCx, Health, PAIR_KEY, Paired};
+use steve_store::connections::lifecycle::{self as connection_rows, RuntimeConnection};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -384,14 +384,7 @@ impl ConnectionRuntime {
             .inner
             .channels
             .store()
-            .reader(|c| -> ChannelResult<Vec<(String, String)>> {
-                let mut st =
-                    c.prepare("SELECT id, adapter FROM connections ORDER BY created, id")?;
-                let rows = st
-                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok(rows)
-            });
+            .read(|r| connection_rows::adapter_ids(r));
         match ids {
             Ok(ids) => {
                 for (id, adapter) in ids {
@@ -424,19 +417,10 @@ impl ConnectionRuntime {
 
     /// Connections of `ws` paired with `id`.
     fn dependents(&self, ws: &str, id: &str) -> Vec<String> {
-        let sql = format!(
-            "SELECT id FROM connections WHERE workspace_id = ? AND json_extract(config, '$.{PAIR_KEY}') = ? ORDER BY created, id"
-        );
         self.inner
             .channels
             .store()
-            .reader(|c| -> ChannelResult<Vec<String>> {
-                let mut st = c.prepare(&sql)?;
-                let rows = st
-                    .query_map(params![ws, id], |r| r.get(0))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok(rows)
-            })
+            .read(|r| connection_rows::paired_to(r, ws, id, PAIR_KEY))
             .unwrap_or_else(|e| {
                 tracing::warn!(conn = id, "connection runtime: paired connections: {e}");
                 Vec::new()
@@ -462,57 +446,48 @@ impl ConnectionRuntime {
     /// The connection as its hook sees it; `None` when it is gone.
     pub fn state(&self, id: &str) -> ChannelResult<Option<ConnState>> {
         let inner = &self.inner;
-        let row = inner.channels.store().reader(|c| -> ChannelResult<_> {
-            Ok(c.query_row(
-                "SELECT workspace_id, adapter, status, caps, credential_item, config FROM connections WHERE id = ?",
-                params![id],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, String>(3)?,
-                        r.get::<_, Option<String>>(4)?,
-                        r.get::<_, String>(5)?,
-                    ))
-                },
-            )
-            .optional()?)
-        })?;
-        let Some((ws, adapter, status, caps, credential, config)) = row else {
-            return Ok(None);
-        };
-        let caps: Vec<String> = serde_json::from_str(&caps).unwrap_or_default();
-        let config: Value = serde_json::from_str(&config).unwrap_or(Value::Null);
-        let pairing = inner
-            .channels
-            .connections()
-            .provider(&adapter)
-            .and_then(|p| p.pairing());
-        let paired = inner
-            .channels
-            .connections()
-            .paired(&ws, &adapter, &config)
-            .map_err(|e| ChannelError::Internal(e.to_string()))?;
-        let receive_cap = inner
-            .hooks
-            .get(&adapter)
-            .and_then(|r| r.decl.as_ref())
-            .and_then(|d| d.receive_cap.clone());
-        let live = matches!(status.as_str(), "ok" | "error")
-            && receive_cap.is_none_or(|cap| caps.contains(&cap))
-            && pairing.is_none_or(|p| !p.required || paired.as_ref().is_some_and(|x| x.ok));
-        Ok(Some(ConnState {
-            ws,
-            id: id.to_string(),
-            adapter,
-            status,
-            caps,
-            credential,
-            config,
-            paired,
-            live,
-        }))
+        inner.channels.store().read(|r| {
+            let Some(RuntimeConnection {
+                ws,
+                adapter,
+                status,
+                caps,
+                credential,
+                config,
+            }) = connection_rows::get(r, id)?
+            else {
+                return Ok(None);
+            };
+            let pairing = inner
+                .channels
+                .connections()
+                .provider(&adapter)
+                .and_then(|p| p.pairing());
+            let paired = inner
+                .channels
+                .connections()
+                .paired(&ws, &adapter, &config)
+                .map_err(|e| ChannelError::Internal(e.to_string()))?;
+            let receive_cap = inner
+                .hooks
+                .get(&adapter)
+                .and_then(|r| r.decl.as_ref())
+                .and_then(|d| d.receive_cap.clone());
+            let live = matches!(status.as_str(), "ok" | "error")
+                && receive_cap.is_none_or(|cap| caps.contains(&cap))
+                && pairing.is_none_or(|p| !p.required || paired.as_ref().is_some_and(|x| x.ok));
+            Ok(Some(ConnState {
+                ws,
+                id: id.to_string(),
+                adapter,
+                status,
+                caps,
+                credential,
+                config,
+                paired,
+                live,
+            }))
+        })
     }
 
     /// Hands connection `id`'s wanted state to its supervisor (started when first wanted).
@@ -733,7 +708,7 @@ fn start_run(inner: &Arc<Inner>, id: &str, fp: String, state: ConnState) -> Opti
         if let Err(e) = inner
             .channels
             .store()
-            .transaction(|tx| spaces::ensure_channel_settings(tx, &state.ws, id, decl.mode, now))
+            .write(|tx| spaces::ensure_channel_settings(tx, &state.ws, id, decl.mode, now))
         {
             tracing::warn!(
                 conn = id,

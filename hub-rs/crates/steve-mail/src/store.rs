@@ -469,7 +469,7 @@ impl StoreSink<'_> {
             };
             let payload =
                 serde_json::to_value(&pending).map_err(|e| MailError::Other(e.to_string()))?;
-            outbox::emit(&tx.legacy(), &mb.ws, EVENT_TOPIC, EVENT_V, &payload)?;
+            outbox::append(tx, &mb.ws, EVENT_TOPIC, EVENT_V, &payload)?;
             Ok(thread.id)
         });
         match res {

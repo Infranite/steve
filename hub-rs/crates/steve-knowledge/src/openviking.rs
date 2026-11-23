@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use steve_store::knowledge::Chunks;
 pub use steve_store::knowledge::ObjectChunk;
 use steve_store::outbox::{self, Applied, ConsumeError, Consumer, Event, Since};
-use steve_store::{R, Result, Store, Tx, W};
+use steve_store::{R, Result, Store, W};
 
 use crate::port::{Candidate, KnowledgeStore, Pass, Scope, SqliteStore, unavailable};
 
@@ -319,7 +319,7 @@ impl KnowledgeStore for Hybrid {
 
 /// Records that `obj_type`/`obj_id` of `ws` changed in the Hub's index (in its transaction).
 pub(crate) fn changed(tx: &mut W<'_>, ws: &str, obj_type: &str, obj_id: &str) -> Result<()> {
-    outbox::enqueue(
+    outbox::append(
         tx,
         ws,
         TOPIC,
@@ -393,7 +393,11 @@ impl Consumer for Mirror {
             .map_err(ConsumeError::Retry)
     }
 
-    fn apply(&self, _tx: &Tx, ev: &Event) -> std::result::Result<Applied, ConsumeError> {
+    fn apply(
+        &self,
+        _w: &mut steve_store::W<'_>,
+        ev: &Event,
+    ) -> std::result::Result<Applied, ConsumeError> {
         Ok(Applied::noted(format!(
             "{}:{}",
             ev.payload["obj_type"].as_str().unwrap_or(""),

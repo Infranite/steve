@@ -12,7 +12,6 @@
 use std::time::Duration;
 
 use chrono::{Datelike, Timelike};
-use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use steve_flow::graph::{Edge, Graph, Node};
 use steve_modules::{ApiError, Gateway, Tier};
@@ -83,64 +82,23 @@ pub enum When {
     OtherGroup,
 }
 
-/// `item.mode` of `create_item`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum ItemMode {
-    Start,
-    Propose,
-}
+pub use steve_store::channel_sends::{Act, ItemMode};
 
-impl ItemMode {
-    pub fn code(self) -> &'static str {
-        match self {
-            Self::Start => "start",
-            Self::Propose => "propose",
-        }
+/// The labels used by the Chinese signal and conversation formats.
+pub(crate) fn action_label(act: Act) -> &'static str {
+    match act {
+        Act::Reply => "直接回复",
+        Act::Draft => "起草，等你批准",
+        Act::Record => "只记录",
+        Act::CreateItem(_) => "建事项",
+        Act::Handoff => "转给你",
     }
 }
 
-/// `act`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum Act {
-    /// Reply right away (bot accounts only).
-    Reply,
-    /// Draft a reply for your approval.
-    Draft,
-    /// Only the signal of step 2.
-    Record,
-    CreateItem(ItemMode),
-    /// To you: an `ask` decision (and, when not muted, “我请 <主人称呼> 来看。”).
-    Handoff,
-}
-
-impl Act {
-    pub fn code(self) -> &'static str {
-        match self {
-            Self::Reply => "reply",
-            Self::Draft => "draft",
-            Self::Record => "record",
-            Self::CreateItem(_) => "create_item",
-            Self::Handoff => "handoff",
-        }
-    }
-
-    /// The Chinese label (the prototype's wording), for signals and logs.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Reply => "直接回复",
-            Self::Draft => "起草，等你批准",
-            Self::Record => "只记录",
-            Self::CreateItem(_) => "建事项",
-            Self::Handoff => "转给你",
-        }
-    }
-
-    /// What a muted space does instead.
-    pub fn muted(self) -> Self {
-        match self {
-            Self::Handoff => Self::Handoff,
-            _ => Self::Record,
-        }
+fn quiet_action(act: Act) -> Act {
+    match act {
+        Act::Handoff => Act::Handoff,
+        _ => Act::Record,
     }
 }
 
@@ -394,16 +352,18 @@ pub fn load(v: &Value, mode: Mode) -> Vec<Rule> {
 }
 
 /// `member` rules must name contacts and teams of this workspace (`404 没有这个联系人/团队`).
-pub fn check_refs(c: &Connection, ws: &str, rules: &[Rule]) -> ChannelResult<()> {
-    for r in rules {
-        if let When::Member { parties, teams } = &r.when {
+pub fn check_refs(r: &mut impl steve_store::Read, ws: &str, rules: &[Rule]) -> ChannelResult<()> {
+    for rule in rules {
+        if let When::Member { parties, teams } = &rule.when {
             for (ids, ty, noun) in [(parties, "contact", "联系人"), (teams, "team", "团队")] {
                 for id in ids {
-                    let ok: bool = c.query_row(
-                        "SELECT EXISTS (SELECT 1 FROM parties WHERE id = ? AND workspace_id = ? AND type = ? AND merged_into IS NULL)",
-                        params![id, ws, ty],
-                        |r| r.get(0),
-                    )?;
+                    let ok = steve_store::Contacts::new(r)
+                        .party(id)?
+                        .is_some_and(|party| {
+                            party.workspace_id == ws
+                                && party.kind == ty
+                                && party.merged_into.is_none()
+                        });
                     if !ok {
                         return Err(ApiError::not_found(noun));
                     }
@@ -555,7 +515,7 @@ pub async fn evaluate(rules: &[Rule], f: &Facts, muted: bool, judge: &dyn Intent
             },
         };
         if hit {
-            let act = if muted { r.act.muted() } else { r.act };
+            let act = if muted { quiet_action(r.act) } else { r.act };
             return Verdict {
                 rule: Some(i),
                 act,
@@ -959,7 +919,7 @@ pub fn compile(rules: &[Rule], space_id: &str, muted: bool, owner: &str) -> Grap
             });
             link(&mut edges, &from, &id);
             let act = if muted {
-                rules[i].act.muted()
+                quiet_action(rules[i].act)
             } else {
                 rules[i].act
             };
@@ -993,7 +953,7 @@ pub fn compile(rules: &[Rule], space_id: &str, muted: bool, owner: &str) -> Grap
         });
         link(&mut edges, &from, &id);
         for (k, r) in rules.iter().enumerate().take(i).skip(start) {
-            let act = if muted { r.act.muted() } else { r.act };
+            let act = if muted { quiet_action(r.act) } else { r.act };
             let label = format!("规则{}", k + 1);
             push_act(&mut nodes, &mut edges, (&id, &label), k, act, muted, owner);
         }
@@ -1062,22 +1022,20 @@ pub const FLOW_ORIGIN_LABEL: &str = "由响应规则转成";
 /// With `nodes` the graph is validated against the registered node kinds first (`400` with the
 /// flow module's text). Already converted → `409`.
 pub fn to_flow(
-    tx: &steve_store::Tx,
+    w: &mut steve_store::W<'_>,
     viewer: &steve_store::base::Viewer,
     space_id: &str,
     nodes: Option<&steve_flow::nodes::NodeRegistry>,
     now: i64,
 ) -> ChannelResult<String> {
-    let s = crate::spaces::own(tx, viewer, space_id)?;
-    let set = crate::spaces::settings(tx, &s.id)?;
+    let s = crate::spaces::checked_space(w, viewer, space_id)?;
+    let set = crate::spaces::settings(w, &s.id)?;
     if let Some(f) = &set.flow_id
-        && tx
-            .write(|w| steve_flow::flows::get(w, f))?
-            .is_some_and(|f| !f.deleted)
+        && steve_flow::flows::get(w, f)?.is_some_and(|f| !f.deleted)
     {
         return Err(ApiError::conflict(steve_i18n::t!(
             "channels.error.already_flow",
-            flow = tx.write(|w| steve_flow::flows::name_of(w, f))?
+            flow = steve_flow::flows::name_of(w, f)?
         )));
     }
     if set.attention >= crate::spaces::Attention::Quiet {
@@ -1090,82 +1048,70 @@ pub fn to_flow(
         ));
     }
     let ws = &viewer.ws;
-    let (_, mode) = crate::bindings::connection_account(tx, ws, &s.connection_id)?;
-    let account = crate::spaces::channel_settings(tx, ws, &s.connection_id)?
+    let (_, mode) = crate::bindings::connection_account(w, ws, &s.connection_id)?;
+    let account = crate::spaces::channel_settings(w, ws, &s.connection_id)?
         .map(|c| c.rules)
         .unwrap_or_else(|| match mode {
             Mode::Own => crate::spaces::default_self_rules(),
             Mode::Bot => crate::spaces::default_bot_rules(),
         });
     let rules = load(set.rules.as_ref().unwrap_or(&account), mode);
-    let owner = tx.write(|w| crate::personas::owner_name_for_space(tx, w, ws, &s.id))?;
+    let owner = crate::personas::owner_name_for_space(w, ws, &s.id)?;
     let graph = compile(&rules, &s.id, set.muted, &owner);
     let graph = match nodes {
         Some(reg) => steve_flow::graph::validate(&graph.to_value(), reg).map_err(ApiError::rule)?,
         None => graph,
     };
-    let label = crate::spaces::display_title(tx, &s)?;
+    let label = crate::spaces::display_title(w, &s)?;
     let name = cut(
         &format!("「{label}」的响应规则"),
         steve_flow::flows::NAME_MAX - 1,
     );
     let description = format!("由「{label}」的 {} 条响应规则转成", rules.len());
-    let flow_id = tx.write(|w| {
-        steve_flow::flows::create(
-            w,
-            ws,
-            &viewer.user,
-            &steve_flow::flows::NewFlow {
-                kind: FLOW_KIND,
-                name: &name,
-                description: &description,
-                graph: &graph,
-                origin: "me",
-                origin_label: FLOW_ORIGIN_LABEL,
-                enabled: true,
-            },
-            now,
-        )
-    })?;
-    set_flow(
-        tx,
-        viewer,
-        &s.id,
-        &set,
-        Some(&flow_id),
-        "space.to_flow",
+    let flow_id = steve_flow::flows::create(
+        w,
+        ws,
+        &viewer.user,
+        &steve_flow::flows::NewFlow {
+            kind: FLOW_KIND,
+            name: &name,
+            description: &description,
+            graph: &graph,
+            origin: "me",
+            origin_label: FLOW_ORIGIN_LABEL,
+            enabled: true,
+        },
         now,
     )?;
+    set_flow(w, viewer, &s.id, &set, Some(&flow_id), "space.to_flow", now)?;
     Ok(flow_id)
 }
 
 /// `DELETE /spaces/:id/flow` (“改回规则”): clears `flow_id`; the flow is disabled, not deleted.
 /// Nothing converted → nothing changes.
 pub fn back_to_rules(
-    tx: &steve_store::Tx,
+    w: &mut steve_store::W<'_>,
     viewer: &steve_store::base::Viewer,
     space_id: &str,
     now: i64,
 ) -> ChannelResult<()> {
-    let s = crate::spaces::own(tx, viewer, space_id)?;
-    let set = crate::spaces::settings(tx, &s.id)?;
+    let s = crate::spaces::checked_space(w, viewer, space_id)?;
+    let set = crate::spaces::settings(w, &s.id)?;
     let Some(f) = &set.flow_id else {
         return Ok(());
     };
-    if let Some(row) = tx.write(|w| steve_flow::flows::get(w, f))?
+    if let Some(row) = steve_flow::flows::get(w, f)?
         && row.workspace_id == viewer.ws
         && !row.deleted
         && row.enabled
     {
-        tx.write(|w| {
-            steve_flow::flows::patch(w, &row, &viewer.user, None, None, Some(false), now)
-        })?;
+        steve_flow::flows::patch(w, &row, &viewer.user, None, None, Some(false), now)?;
     }
-    set_flow(tx, viewer, &s.id, &set, None, "space.flow_off", now)
+    set_flow(w, viewer, &s.id, &set, None, "space.flow_off", now)
 }
 
 fn set_flow(
-    tx: &steve_store::Tx,
+    w: &mut steve_store::W<'_>,
     viewer: &steve_store::base::Viewer,
     space: &str,
     before: &crate::spaces::SpaceSettings,
@@ -1174,12 +1120,9 @@ fn set_flow(
     now: i64,
 ) -> ChannelResult<()> {
     let version = before.revision + 1;
-    tx.execute(
-        "UPDATE space_settings SET flow_id = ?, revision = ?, updated = ? WHERE space_id = ?",
-        params![flow, version, now, space],
-    )?;
-    steve_store::base::revision(
-        tx,
+    steve_store::channel_spaces::preferences::set_flow(w, space, flow, version, now)?;
+    steve_store::audit_repo::revise(
+        w,
         &viewer.ws,
         "space",
         space,
@@ -1188,15 +1131,15 @@ fn set_flow(
         &json!({ "flow_id": flow }),
         &viewer.user,
     )?;
-    steve_store::base::audit(
-        tx,
+    steve_store::audit_repo::record(
+        w,
         &viewer.ws,
         &viewer.user,
         action,
         space,
         &json!({ "flow_id": flow.or(before.flow_id.as_deref()) }),
     )?;
-    crate::spaces::event(tx, &viewer.ws, space);
+    steve_store::channel_spaces::registration::emit(w, &viewer.ws, space);
     Ok(())
 }
 

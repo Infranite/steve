@@ -126,11 +126,7 @@ pub fn normalize(system: &System, raw: &str) -> Option<Handle> {
 // ---------------------------------------------------------------- seeds, start
 
 /// Seeds the built-in systems and the workspace's default match rule when missing.
-pub fn ensure_seeds(tx: &Tx, ws: &str) -> ApiResult<()> {
-    tx.write(|w| seed(w, ws))
-}
-
-pub(crate) fn seed(w: &mut W<'_>, ws: &str) -> ApiResult<()> {
+pub fn ensure_seeds(w: &mut W<'_>, ws: &str) -> ApiResult<()> {
     let mut systems = Systems(w);
     if !systems.seeded()? {
         systems.seed()?;
@@ -149,7 +145,7 @@ pub fn start(m: &Modules, who: &Caller) -> ApiResult<(Viewer, Party)> {
         Ok(Systems(r).seeded()? && MatchRules(r).prefix(&who.ws)?.is_some())
     })?;
     if !seeded {
-        m.store.write(|w| seed(w, &who.ws))?;
+        m.store.write(|w| ensure_seeds(w, &who.ws))?;
     }
     contacts::start(m, who)
 }

@@ -65,7 +65,7 @@ impl ChangeOp for AccountAdd {
         let a: Add = args(op)?;
         let v = viewer(cx);
         let party = own_owner(w, &v, &a.party)?;
-        svc::seed(w, cx.ws)?;
+        svc::ensure_seeds(w, cx.ws)?;
         let acc = svc::record(
             w,
             &v,

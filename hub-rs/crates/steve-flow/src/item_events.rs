@@ -162,7 +162,7 @@ impl Consumer for ItemTrigger {
         Since::Start
     }
 
-    fn apply(&self, tx: &steve_store::Tx, ev: &Event) -> Result<Applied, ConsumeError> {
+    fn apply(&self, w: &mut steve_store::W<'_>, ev: &Event) -> Result<Applied, ConsumeError> {
         if ev.version != steve_work_api::ITEM_DONE_V {
             return Err(ConsumeError::Reject(format!(
                 "{} version {}",
@@ -174,22 +174,20 @@ impl Consumer for ItemTrigger {
         let ws = ev.workspace_id.as_str();
         let now = self.cx.now();
         let external = format!("{}:{}:{}", it.item_id, ItemEvent::Done.type_key(), ev.id);
-        let raw = tx.write(|w| {
+        let raw = {
             if ItemReads(w).title(ws, &it.item_id)?.is_none() {
                 return Err(ConsumeError::Reject(format!(
                     "{} 不在工作空间 {ws}",
                     it.item_id
                 )));
             }
-            Ok(describe(w, ws, &it, ItemEvent::Done, external, now)?)
-        })?;
+            describe(w, ws, &it, ItemEvent::Done, external, now)?
+        };
         let Some(raw) = raw else {
             return Ok(Applied::noted("没有流程在听"));
         };
         crate::ingest::check(&raw).map_err(|e| ConsumeError::Reject(e.to_string()))?;
-        let step = tx
-            .write(|w| crate::ingest::store_in(w, &self.cx, ws, None, &raw, now))
-            .map_err(retry)?;
+        let step = crate::ingest::store_in(w, &self.cx, ws, None, &raw, now).map_err(retry)?;
         // the reliable path never leaves a wake-up to an in-memory callback: an executor that cannot
         // wake a matching wait in this transaction rejects the delivery (rolled back, dead, visible)
         if let crate::ingest::Step::Stored(s) = &step

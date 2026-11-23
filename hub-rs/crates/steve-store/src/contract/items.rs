@@ -207,3 +207,64 @@ pub fn open_items(c: &mut impl Read, ids: &[String]) -> Result<Vec<(String, Stri
         .filter_map(|id| by_id.get(id.as_str()).map(|r| (*r).clone()))
         .collect())
 }
+
+pub(crate) fn progress_of_open_items(r: &mut impl Read) -> Result<Vec<(String, String, String)>> {
+    r.all(
+        Query::select()
+            .columns(["workspace_id", "id", "now"])
+            .from("items")
+            .and_where(Expr::col("status").is_not_in(["done", "drop"])),
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get::<Option<String>>(2)?.unwrap_or_default(),
+            ))
+        },
+    )
+}
+
+pub struct RaisedItem {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub current: String,
+}
+
+pub fn raised_open(
+    r: &mut impl Read,
+    ws: &str,
+    party: &str,
+    limit: u64,
+) -> Result<Vec<RaisedItem>> {
+    r.all(
+        Query::select()
+            .columns([("i", "id"), ("i", "title"), ("i", "status"), ("i", "now")])
+            .from_as("items", "i")
+            .join_as(
+                sea_query::JoinType::InnerJoin,
+                "links",
+                "l",
+                Expr::col(("l", "subject_id"))
+                    .equals(("i", "id"))
+                    .and(Expr::col(("l", "workspace_id")).equals(("i", "workspace_id"))),
+            )
+            .and_where(Expr::col(("i", "workspace_id")).eq(ws))
+            .and_where(Expr::col(("l", "subject_type")).eq("item"))
+            .and_where(Expr::col(("l", "predicate")).eq("raised_by"))
+            .and_where(Expr::col(("l", "object_type")).eq("party"))
+            .and_where(Expr::col(("l", "object_id")).eq(party))
+            .and_where(Expr::col(("i", "status")).is_not_in(["done", "drop"]))
+            .and_where(Expr::col(("i", "archived")).eq(0_i64))
+            .order_by(("i", "updated"), sea_query::Order::Desc)
+            .limit(limit),
+        |row| {
+            Ok(RaisedItem {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                status: row.get(2)?,
+                current: row.get(3)?,
+            })
+        },
+    )
+}

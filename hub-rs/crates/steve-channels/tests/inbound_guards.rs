@@ -7,9 +7,11 @@
 mod digest_env;
 use digest_env::TestEnv;
 use std::sync::{Arc, Mutex};
+use steve_store::testkit::channels::inspect;
+use steve_store::testkit::channels::seed;
 
 use async_trait::async_trait;
-use serde_json::{Value, json};
+use serde_json::json;
 use steve_channels::channel::{HandleRef, InboundMessage, Sender};
 use steve_channels::fake::channel::FakeChannel;
 use steve_channels::history::HistoryRead;
@@ -110,16 +112,7 @@ fn setup(with_history: bool) -> H {
     fake.space("D1", "", SpaceKind::Dm, false, &[("ualice", "王小丽")]);
     fake.space("P1", "", SpaceKind::Dm, false, &[("ucarol", "李娜")]);
     fake.space("P2", "", SpaceKind::Dm, false, &[]);
-    let me: String = env
-        .store()
-        .reader(|c| {
-            Ok::<_, steve_store::StoreError>(c.query_row(
-                "SELECT id FROM parties WHERE workspace_id = ? AND user_id = ?",
-                [WS, ME],
-                |r| r.get(0),
-            )?)
-        })
-        .expect("我");
+    let me: String = inspect::people::self_party(env.store(), WS, ME).expect("我");
     H {
         env,
         _keys: keys,
@@ -129,44 +122,6 @@ fn setup(with_history: bool) -> H {
         mine,
         me,
     }
-}
-
-fn one(h: &H, sql: &str, p: &[&str]) -> Value {
-    let (sql, p): (String, Vec<String>) = (sql.into(), p.iter().map(|s| s.to_string()).collect());
-    h.env
-        .store()
-        .reader(move |c| {
-            Ok::<_, steve_store::StoreError>(c.query_row(
-                &sql,
-                rusqlite::params_from_iter(p.iter()),
-                |r| {
-                    Ok(match r.get_ref(0)? {
-                        rusqlite::types::ValueRef::Null => Value::Null,
-                        rusqlite::types::ValueRef::Integer(x) => json!(x),
-                        rusqlite::types::ValueRef::Real(x) => json!(x),
-                        rusqlite::types::ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
-                        rusqlite::types::ValueRef::Blob(_) => Value::Null,
-                    })
-                },
-            )?)
-        })
-        .expect("row")
-}
-
-fn count(h: &H, sql: &str, p: &[&str]) -> i64 {
-    one(h, sql, p).as_i64().expect("count")
-}
-
-fn exec(h: &H, sql: &str, p: &[&str]) {
-    let (sql, p): (String, Vec<String>) = (sql.into(), p.iter().map(|s| s.to_string()).collect());
-    h.env
-        .store()
-        .transaction(move |tx| {
-            Ok::<_, steve_store::StoreError>(
-                tx.execute(&sql, rusqlite::params_from_iter(p.iter()))?,
-            )
-        })
-        .expect("exec");
 }
 
 fn at(mut m: InboundMessage, created: i64) -> InboundMessage {
@@ -192,11 +147,7 @@ fn label(i: &Inbound) -> String {
 }
 
 fn decisions(h: &H) -> i64 {
-    count(
-        h,
-        "SELECT count(*) FROM decisions WHERE workspace_id = ?",
-        &[WS],
-    )
+    inspect::decisions::count_decisions_by_workspace(h.env.store(), WS).unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -226,70 +177,40 @@ async fn a_batch_of_day_old_messages_arriving_now_runs_nothing() {
     }
     // stored as history, nothing drafted or sent, no card, the events only recorded
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM chan_messages WHERE direction = 'in' AND history = 'late'",
-            &[]
-        ),
+        inspect::messages::count_chan_messages_by_incoming(h.env.store()).unwrap(),
         10
     );
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM chan_messages WHERE direction = 'out'",
-            &[]
-        ),
+        inspect::messages::count_chan_messages_by_outgoing(h.env.store()).unwrap(),
         0
     );
     assert_eq!(decisions(&h), before);
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM ext_events WHERE source = 'im' AND outcome = 'recorded' AND outcome_label = ?",
-            &[LABEL_HISTORY_LATE]
-        ),
+        inspect::signals::count_ext_events_by_outcome_label(h.env.store(), LABEL_HISTORY_LATE)
+            .unwrap(),
         10
     );
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM ext_events WHERE source = 'im' AND outcome <> 'recorded'",
-            &[]
-        ),
+        inspect::signals::count_ext_events_count(h.env.store()).unwrap(),
         0
     );
     // counted on the connection
     assert_eq!(
-        count(
-            &h,
-            "SELECT history_late FROM channel_settings WHERE connection_id = ?",
-            &[&h.bot]
-        ),
+        inspect::connections::count_channel_settings_by_connection(h.env.store(), &h.bot).unwrap(),
         10
     );
     // the space keeps its own time, and its messages say they are history
-    let space = one(&h, "SELECT id FROM spaces WHERE external_id = 'G1'", &[]);
-    let page = h
-        .env
-        .store()
-        .reader(|c| {
-            steve_channels::messages::page(
-                c,
-                space.as_str().unwrap(),
-                steve_modules::testkit::ME,
-                None,
-                50,
-            )
-        })
-        .expect("page");
+    let space = inspect::spaces::space_id_by_g1(h.env.store()).unwrap();
+    let page = steve_channels::messages::page(
+        h.env.store(),
+        space.as_str().unwrap(),
+        steve_modules::testkit::ME,
+        None,
+        50,
+    )
+    .expect("page");
     assert!(page.iter().all(|m| m.history.as_deref() == Some("late")));
-    assert!(
-        count(
-            &h,
-            "SELECT last_message FROM spaces WHERE external_id = 'G1'",
-            &[]
-        ) < now - 20 * HOUR
-    );
+    assert!(inspect::spaces::count_spaces_by_g1(h.env.store()).unwrap() < now - 20 * HOUR);
 
     // someone writes now: acted on, and the group asks “新群” now
     let live = push(
@@ -318,11 +239,7 @@ async fn written_before_the_connection_was_on_is_history_with_a_grace_for_clocks
     let now = h.ch.now();
     // connected (again) ten minutes ago
     let on = (now - 10 * 60_000).to_string();
-    exec(
-        &h,
-        "UPDATE connections SET enabled_at = ? WHERE id = ?",
-        &[&on, &h.bot],
-    );
+    seed::connections::set_connection_enabled_at(h.env.store(), &on, &h.bot).unwrap();
     let r = push(
         &h,
         &h.bot,
@@ -335,19 +252,12 @@ async fn written_before_the_connection_was_on_is_history_with_a_grace_for_clocks
     assert_eq!(r.next, Next::Record(LABEL_HISTORY_BEFORE));
     assert_eq!(label(&r), LABEL_HISTORY_BEFORE);
     assert_eq!(
-        one(
-            &h,
-            "SELECT history FROM chan_messages WHERE id = ?",
-            &[&r.message_id]
-        ),
+        inspect::messages::message_history(h.env.store(), &r.message_id).unwrap(),
         json!("before")
     );
     assert_eq!(
-        count(
-            &h,
-            "SELECT history_before FROM channel_settings WHERE connection_id = ?",
-            &[&h.bot]
-        ),
+        inspect::connections::count_channel_settings_by_connection_count(h.env.store(), &h.bot)
+            .unwrap(),
         1
     );
     // a minute before the connection was on: within the clocks' grace, live
@@ -402,11 +312,7 @@ async fn lateness_counts_from_the_last_edit_and_is_set_per_connection() {
     .await;
     assert_eq!(r.next, Next::Handle);
     // five minutes on this connection
-    exec(
-        &h,
-        "UPDATE channel_settings SET late_ms = 300000 WHERE connection_id = ?",
-        &[&h.bot],
-    );
+    seed::connections::set_channel_late_ms_value_300000(h.env.store(), &h.bot).unwrap();
     let r = push(
         &h,
         &h.bot,
@@ -483,11 +389,7 @@ async fn your_own_messages_are_never_answered_as_you_however_the_adapter_names_y
 
     // your work email is an alias of “我”: a message under it is yours, though the adapter made a
     // new contact of it
-    exec(
-        &h,
-        "UPDATE parties SET aliases = '[\"Lee@Corp.example\"]' WHERE id = ?",
-        &[&h.me],
-    );
+    seed::people::set_party_aliases_lee_corp_example(h.env.store(), &h.me).unwrap();
     let you = InboundMessage::without_id(
         "P2",
         Sender::new(HandleRef::new("mail", "lee@corp.example")).display_name("Lee"),
@@ -504,24 +406,21 @@ async fn your_own_messages_are_never_answered_as_you_however_the_adapter_names_y
     assert_ne!(r.sender_party_id.as_deref(), Some(h.me.as_str()));
     // no draft, no approval card; only the merge proposal into “我” (a suggestion, never a merge)
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM decisions WHERE workspace_id = ? AND subject_type <> 'party_merge'",
-            &[WS]
-        ),
+        inspect::decisions::count_decisions_by_workspace_and_subject_type_party_merge(
+            h.env.store(),
+            WS
+        )
+        .unwrap(),
         cards
     );
     let p = r.sender_party_id.clone().expect("party");
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM merge_proposals WHERE from_id = ? AND into_id = ? AND decision_id IS NOT NULL",
-            &[&p, &h.me]
-        ),
+        inspect::merge_proposals::count_merge_proposals_by_from_and_into(h.env.store(), &p, &h.me)
+            .unwrap(),
         1
     );
     assert_eq!(
-        one(&h, "SELECT status FROM parties WHERE id = ?", &[&p]),
+        inspect::people::party_status_value(h.env.store(), &p).unwrap(),
         json!("active")
     );
 
@@ -534,11 +433,7 @@ async fn your_own_messages_are_never_answered_as_you_however_the_adapter_names_y
     .await;
     assert_eq!(r.next, Next::Handle);
     let merged = r.sender_party_id.clone().expect("party");
-    exec(
-        &h,
-        "UPDATE parties SET status = 'merged', merged_into = ? WHERE id = ?",
-        &[&h.me, &merged],
-    );
+    seed::people::set_party_status_merged(h.env.store(), &h.me, &merged).unwrap();
     let cards = decisions(&h);
     let r = push(
         &h,
@@ -564,7 +459,7 @@ async fn your_own_messages_are_never_answered_as_you_however_the_adapter_names_y
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_contact_with_your_name_and_your_domain_is_proposed_not_merged() {
     let h = setup(false);
-    let name = one(&h, "SELECT name FROM parties WHERE id = ?", &[&h.me]);
+    let name = inspect::people::party_name(h.env.store(), &h.me).unwrap();
     let name = name.as_str().unwrap().to_string();
     // “我” has a work email at corp.example
     h.env
@@ -599,21 +494,15 @@ async fn a_new_contact_with_your_name_and_your_domain_is_proposed_not_merged() {
     assert!(!r.from_owner);
     let p = r.sender_party_id.clone().expect("party");
     assert_ne!(p, h.me);
-    let reason = one(
-        &h,
-        "SELECT reason FROM merge_proposals WHERE from_id = ? AND into_id = ?",
-        &[&p, &h.me],
-    );
+    let reason =
+        inspect::merge_proposals::merge_proposal_reason_by_from_and_into(h.env.store(), &p, &h.me)
+            .unwrap();
     assert!(
         reason.as_str().unwrap().contains("corp.example"),
         "{reason}"
     );
     assert_eq!(
-        count(
-            &h,
-            "SELECT count(*) FROM decisions WHERE subject_type = 'party_merge' AND status = 'open'",
-            &[]
-        ),
+        inspect::decisions::count_decisions_by_party_merge_and_open(h.env.store()).unwrap(),
         1
     );
     // someone with another name in another domain: nothing proposed
@@ -622,7 +511,10 @@ async fn a_new_contact_with_your_name_and_your_domain_is_proposed_not_merged() {
         .display_name("赵六")
         .alias(HandleRef::new("mail", "zed@other.example"));
     push(&h, &h.mine, m).await;
-    assert_eq!(count(&h, "SELECT count(*) FROM merge_proposals", &[]), 1);
+    assert_eq!(
+        inspect::merge_proposals::count_merge_proposals(h.env.store()).unwrap(),
+        1
+    );
 }
 
 fn cx(user: &str) -> McpCx {
@@ -662,8 +554,8 @@ async fn steve_im_read_reads_through_the_adapter_as_context_only() {
         ),
     ];
     let (msgs, events) = (
-        count(&h, "SELECT count(*) FROM chan_messages", &[]),
-        count(&h, "SELECT count(*) FROM ext_events", &[]),
+        inspect::messages::count_chan_messages(h.env.store()).unwrap(),
+        inspect::signals::count_ext_events(h.env.store()).unwrap(),
     );
     let out = im_mcp::call(
         &h.ch,
@@ -685,19 +577,25 @@ async fn steve_im_read_reads_through_the_adapter_as_context_only() {
     assert_eq!(asked[0].0, "G1");
     assert_eq!((asked[0].1, asked[0].2), (now - 24 * HOUR, now));
     // context only: nothing stored, no event, no rule ran
-    assert_eq!(count(&h, "SELECT count(*) FROM chan_messages", &[]), msgs);
-    assert_eq!(count(&h, "SELECT count(*) FROM ext_events", &[]), events);
+    assert_eq!(
+        inspect::messages::count_chan_messages(h.env.store()).unwrap(),
+        msgs
+    );
+    assert_eq!(
+        inspect::signals::count_ext_events(h.env.store()).unwrap(),
+        events
+    );
     // by id too
     let by_id = im_mcp::call(&h.ch, &cx(ME), im_mcp::READ, &json!({"space": space}))
         .await
         .expect("by id");
     assert!(by_id.contains("运维群"));
     // a space set to never is not read
-    exec(
-        &h,
-        "UPDATE space_settings SET disclosure = 'never' WHERE space_id = ?",
-        &[&space],
-    );
+    seed::spaces::set_space_settings_disclosure_never_for_steve_im_read_reads_through_the_ada(
+        h.env.store(),
+        &space,
+    )
+    .unwrap();
     let e = im_mcp::call(&h.ch, &cx(ME), im_mcp::READ, &json!({"space": space}))
         .await
         .expect_err("never");

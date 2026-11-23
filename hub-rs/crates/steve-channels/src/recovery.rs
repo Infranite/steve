@@ -3,14 +3,15 @@
 //! cache, authorizes a remote credential, or sends a message.
 
 use crate::flow_actions::LateChannels;
-use crate::{Channels, bindings, spaces};
-use rusqlite::{Connection, params};
+use crate::{Channels, spaces};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use steve_modules::changes::{self, ChangeOp, DraftTarget, OpCx, Plan, Prepared};
 use steve_modules::{ApiError, ApiResult, Caller, Registry};
-use steve_store::base::{self, Change, Viewer};
-use steve_store::{ConnRow, Connections};
+use steve_store::base::{Change, Viewer};
+use steve_store::channel_message_repo::outbound;
+use steve_store::channel_spaces::{account_settings, rows};
+use steve_store::{Accounts, ConnRow, Connections, Contacts, DecisionRows, Read};
 
 const KIND: &str = "channel_send_permission";
 const OP: &str = "chan.send_permission.enable";
@@ -23,19 +24,24 @@ pub fn register(registry: &mut Registry, late: Arc<LateChannels>) {
 
 struct Permission(Arc<LateChannels>);
 
-fn own(
-    c: &Connection,
-    r: &mut impl steve_store::Read,
-    viewer: &Viewer,
-    id: &str,
-) -> ApiResult<ConnRow> {
-    crate::channel_accounts::can_manage(c, viewer, id)?;
+fn own(r: &mut impl Read, viewer: &Viewer, id: &str) -> ApiResult<ConnRow> {
     let row = Connections(r)
         .get(id)?
+        .filter(|row| row.workspace_id == viewer.ws)
         .ok_or_else(|| ApiError::not_found("连接"))?;
-    if bindings::connection_account(c, &viewer.ws, id)?.1 != spaces::Mode::Own
-        || row.status == "revoked"
-    {
+    let account = Accounts(r)
+        .get(&row.account_id)?
+        .ok_or_else(|| ApiError::not_found("连接"))?;
+    let owner = Contacts::new(r)
+        .party(&account.party_id)?
+        .and_then(|p| p.user_id);
+    if owner.as_ref().is_some_and(|u| u != &viewer.user) {
+        return Err(ApiError::not_found("连接"));
+    }
+    let own_mode = account_settings::channel_mode(r, &viewer.ws, id)?
+        .as_deref()
+        .map_or(owner.is_some(), |mode| mode == spaces::Mode::Own.code());
+    if !own_mode || row.status == "revoked" {
         return Err(ApiError::rule("这不是可恢复本地代发能力的个人连接"));
     }
     Ok(row)
@@ -64,26 +70,24 @@ impl Permission {
 impl DraftTarget for Permission {
     fn prepare(
         &self,
-        store: &steve_store::Store,
+        _store: &steve_store::Store,
         r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         id: Option<&str>,
     ) -> ApiResult<Prepared> {
-        store.reader(|c| {
-            let id = id.ok_or_else(|| ApiError::invalid("target.id"))?;
-            let row = own(c, r, viewer, id)?;
-            self.available(&row)?;
-            Ok(Prepared {
-                target_id: Some(id.into()),
-                revision: Some(row.revision),
-                title: "允许这个连接以你本人发送（不会发送任何消息）".into(),
-                href: format!("#/channels/acc/{id}"),
-                subject: "local send-as-user capability".into(),
-                fields: vec![],
-                ops: vec![],
-                free_text: None,
-                context: Value::Null,
-            })
+        let id = id.ok_or_else(|| ApiError::invalid("target.id"))?;
+        let row = own(r, viewer, id)?;
+        self.available(&row)?;
+        Ok(Prepared {
+            target_id: Some(id.into()),
+            revision: Some(row.revision),
+            title: "允许这个连接以你本人发送（不会发送任何消息）".into(),
+            href: format!("#/channels/acc/{id}"),
+            subject: "local send-as-user capability".into(),
+            fields: vec![],
+            ops: vec![],
+            free_text: None,
+            context: Value::Null,
         })
     }
     fn plan(
@@ -113,16 +117,13 @@ impl DraftTarget for Permission {
 
 impl ChangeOp for Permission {
     fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
-        let c = &w.legacy();
         let viewer = Viewer::bare(cx.ws, cx.actor);
-        let row = own(c, w, &viewer, op["connection_id"].as_str().unwrap_or(""))?;
+        let row = own(w, &viewer, op["connection_id"].as_str().unwrap_or(""))?;
         self.available(&row)
     }
     fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
         self.validate(w, cx, op)?;
-        let tx = &w.legacy();
         let mut row = own(
-            tx,
             w,
             &Viewer::bare(cx.ws, cx.actor),
             op["connection_id"].as_str().unwrap_or(""),
@@ -132,14 +133,14 @@ impl ChangeOp for Permission {
             row.caps.push(spaces::SEND_AS_USER_CAP.into());
             Connections(w).update(&row, steve_store::now())?;
             Connections(w).set_enabled_at(&row.id, steve_store::now())?;
-            tx.publish(steve_types::DomainEvent::from(
+            w.emit(steve_types::DomainEvent::from(
                 steve_types::ChannelsEvent::Connection {
                     id: row.id.clone().into(),
                     ws: cx.ws.into(),
                 },
             ));
-            base::audit(
-                tx,
+            steve_store::audit_repo::record(
+                w,
                 cx.ws,
                 cx.actor,
                 "connection.send_permission",
@@ -156,9 +157,7 @@ impl ChangeOp for Permission {
         op: &Value,
         before: &Value,
     ) -> ApiResult<()> {
-        let tx = &w.legacy();
         let mut row = own(
-            tx,
             w,
             &Viewer::bare(cx.ws, cx.actor),
             op["connection_id"].as_str().unwrap_or(""),
@@ -170,14 +169,14 @@ impl ChangeOp for Permission {
             }
             row.caps.retain(|c| c != spaces::SEND_AS_USER_CAP);
             Connections(w).update(&row, steve_store::now())?;
-            tx.publish(steve_types::DomainEvent::from(
+            w.emit(steve_types::DomainEvent::from(
                 steve_types::ChannelsEvent::Connection {
                     id: row.id.clone().into(),
                     ws: cx.ws.into(),
                 },
             ));
-            base::audit(
-                tx,
+            steve_store::audit_repo::record(
+                w,
                 cx.ws,
                 cx.actor,
                 "connection.send_permission.undo",
@@ -193,32 +192,64 @@ impl ChangeOp for Permission {
 /// A service refusal is deliberately rejected here even if a local permission is also disabled.
 pub fn propose(ch: &Channels, who: &Caller, message: &str) -> ApiResult<changes::Proposal> {
     let viewer = ch.modules().viewer(who)?;
-    let (prepared, plan) = ch.store().read::<_, steve_store::StoreError>(|r| Ok(ch.store().reader(|c| -> ApiResult<_> {
-        let (space, status, decision): (String, String, Option<String>) = c.query_row(
-            "SELECT space_id,status,decision_id FROM chan_messages WHERE id=? AND workspace_id=? AND direction='out'",
-            params![message, who.ws], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
-        ).map_err(|_| ApiError::not_found("消息"))?;
-        spaces::own(c, &viewer, &space)?;
-        let d = decision.and_then(|id| base::decisions::get(c, &id).ok().flatten())
-            .filter(|d| status == "failed" && d.status == "open" && d.result["recovery"]["kind"] == "missing_permission" && d.result["recovery"]["authorization_kind"] == "managed")
-            .ok_or_else(|| ApiError::rule("这条拒绝需在渠道服务侧处理；Steve 没有它的授权管理 API"))?;
+    let (prepared, plan) = ch.store().read(|r| -> ApiResult<_> {
+        let message =
+            outbound::approval(r, &who.ws, message)?.ok_or_else(|| ApiError::not_found("消息"))?;
+        rows::get_in_workspace(r, &viewer.ws, &message.space)?
+            .ok_or_else(|| ApiError::not_found("空间"))?;
+        let decision = match message.decision {
+            Some(id) => DecisionRows(r).get(&id)?,
+            None => None,
+        };
+        let d = decision
+            .filter(|d| {
+                message.status == "failed"
+                    && d.status == "open"
+                    && d.result["recovery"]["kind"] == "missing_permission"
+                    && d.result["recovery"]["authorization_kind"] == "managed"
+            })
+            .ok_or_else(|| {
+                ApiError::rule("这条拒绝需在渠道服务侧处理；Steve 没有它的授权管理 API")
+            })?;
         let conn = d.result["recovery"]["connection_id"].as_str().unwrap_or("");
-        let row = own(c, r, &viewer, conn)?;
-        let provider = ch.connections().provider(&row.adapter).ok_or_else(|| ApiError::rule("渠道服务不可用"))?;
+        let row = own(r, &viewer, conn)?;
+        let provider = ch
+            .connections()
+            .provider(&row.adapter)
+            .ok_or_else(|| ApiError::rule("渠道服务不可用"))?;
         if row.caps.iter().any(|c| c == spaces::SEND_AS_USER_CAP)
-            || !provider.available_caps(&row.granted_scopes).iter().any(|c| c == spaces::SEND_AS_USER_CAP) {
-            return Err(ApiError::rule("本地代发能力无需恢复或平台尚未授权；请到接入核对平台权限"));
+            || !provider
+                .available_caps(&row.granted_scopes)
+                .iter()
+                .any(|c| c == spaces::SEND_AS_USER_CAP)
+        {
+            return Err(ApiError::rule(
+                "本地代发能力无需恢复或平台尚未授权；请到接入核对平台权限",
+            ));
         }
         let prepared = Prepared {
-            target_id: Some(conn.into()), revision: Some(row.revision),
-            title: "允许这个连接以你本人发送（不会发送任何消息）".into(), href: format!("#/channels/acc/{conn}"),
-            subject: String::new(), fields: vec![], ops: vec![], free_text: None, context: Value::Null,
+            target_id: Some(conn.into()),
+            revision: Some(row.revision),
+            title: "允许这个连接以你本人发送（不会发送任何消息）".into(),
+            href: format!("#/channels/acc/{conn}"),
+            subject: String::new(),
+            fields: vec![],
+            ops: vec![],
+            free_text: None,
+            context: Value::Null,
         };
-        Ok((prepared, Plan {
-            ops: vec![json!({"op": OP,"connection_id":conn})],
-            changes: vec![Change::new("本地代发能力 msg.send_as_user（整个连接）", "关闭", "开启；平台授权及每条消息的审批仍分别校验；可撤销")],
-        }))
-    })))??;
+        Ok((
+            prepared,
+            Plan {
+                ops: vec![json!({"op": OP,"connection_id":conn})],
+                changes: vec![Change::new(
+                    "本地代发能力 msg.send_as_user（整个连接）",
+                    "关闭",
+                    "开启；平台授权及每条消息的审批仍分别校验；可撤销",
+                )],
+            },
+        ))
+    })?;
     changes::store_plan(
         ch.modules(),
         who,

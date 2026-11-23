@@ -230,14 +230,12 @@ pub fn latest_receipt(store: &Store) -> Result<String> {
 }
 
 pub fn applied_receipt(
-    tx: &crate::Tx<'_>,
+    w: &mut crate::W<'_>,
     event: &crate::outbox::Event,
     consumer: &str,
     outcome: &str,
 ) -> Result<()> {
-    tx.execute("INSERT INTO outbox_receipts(event_seq,consumer_id,workspace_id,done,outcome) VALUES (?,?,?,?,?)",
-        params![event.seq, consumer, event.workspace_id, 1, outcome])?;
-    Ok(())
+    crate::outbox::record_test_receipt(w, event, consumer, outcome)
 }
 
 pub fn event_ids(store: &Store) -> Result<Vec<String>> {

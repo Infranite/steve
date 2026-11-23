@@ -14,7 +14,7 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 use steve_store::base::{DecisionKind, Viewer};
 use steve_store::{
-    Accounts, Connections as ConnectionRows, DecisionRows, NewDecision, Read, Store, Tx, W, uid,
+    Accounts, Connections as ConnectionRows, DecisionRows, NewDecision, Read, Store, W, uid,
 };
 use zeroize::Zeroizing;
 
@@ -1127,15 +1127,21 @@ impl Connections {
     /// Writes a [`Self::prepare_credential`] item in `tx`; returns its id.
     pub fn insert_prepared(
         &self,
-        tx: &Tx,
+        tx: &mut W<'_>,
         p: &crate::vault::items::PreparedItem,
     ) -> VaultResult<String> {
-        self.0.vault.insert_prepared(tx, p)
+        self.0.vault.insert_prepared_in(tx, p)
     }
 
     /// Destroys a credential item in `tx` (missing or already destroyed is fine).
-    pub fn destroy_item_tx(&self, tx: &Tx, ws: &str, actor: &str, item: &str) -> VaultResult<()> {
-        self.0.vault.destroy_item(tx, ws, actor, item)?;
+    pub fn destroy_item(
+        &self,
+        tx: &mut W<'_>,
+        ws: &str,
+        actor: &str,
+        item: &str,
+    ) -> VaultResult<()> {
+        self.0.vault.destroy_item_in(tx, ws, actor, item)?;
         Ok(())
     }
 
@@ -1158,7 +1164,7 @@ impl Connections {
         guard: G,
     ) -> VaultResult<Connected>
     where
-        G: FnOnce(&Tx, &Connected) -> VaultResult<()> + Send + 'static,
+        G: FnOnce(&mut W<'_>, &Connected) -> VaultResult<()> + Send + 'static,
     {
         let p = self.provider_or_404(adapter)?;
         let config = self.clean_config(who, p.as_ref(), config, None)?;
@@ -1209,7 +1215,7 @@ impl Connections {
                             fresh_only: true,
                         },
                     )?;
-                    guard(&tx.legacy(), &done)?;
+                    guard(tx, &done)?;
                     Ok::<_, VaultError>(done)
                 })
             })

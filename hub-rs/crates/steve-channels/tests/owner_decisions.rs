@@ -9,6 +9,9 @@
 mod digest_env;
 use digest_env::TestEnv;
 use std::sync::Arc;
+use steve_store::testkit::channels::inspect;
+use steve_store::testkit::channels::seed;
+use steve_store::testkit::channels::seed::people::Bot;
 
 use serde_json::{Value, json};
 use steve_channels::compose::{Composer, H_SAFETY, H_TASK};
@@ -64,17 +67,7 @@ async fn setup_with(check: &str) -> H {
     disclosure.bind(env.store().clone(), env.gateway.clone());
     link.bind_clock(env.clock.clone());
     *core.store.lock().unwrap() = Some(env.store().clone());
-    env.store()
-        .with_conn(|c| {
-            // no model of its own: the composer asks the gateway, which the tests script
-            c.execute_batch(
-                "INSERT INTO bots (id, workspace_id, name, main, harness, persona, role, rules, updated) VALUES
-                    ('steve', 'default', 'Steve', 1, 'claude', '', '', '', 1);
-                 INSERT INTO bot_workspaces (bot_id, workspace_id, created) VALUES ('steve', 'default', 1);",
-            )?;
-            Ok(())
-        })
-        .expect("bots");
+    steve_store::testkit::channels::seed::people::bots(env.store(), &[Bot::default()]).unwrap();
     let keys = tempfile::tempdir().expect("tmp");
     let vault = Vault::new(
         env.store().clone(),
@@ -118,7 +111,7 @@ async fn setup_with(check: &str) -> H {
     let now = env.modules.clock.now();
     let v = Viewer::bare(WS, ME);
     env.store()
-        .transaction(|tx| {
+        .write(|tx| {
             spaces::set_account_rules(
                 tx,
                 &v,
@@ -178,48 +171,8 @@ fn compose_prompts(h: &H) -> Vec<String> {
         .collect()
 }
 
-fn row(h: &H, sql: &str, p: &[&str]) -> Vec<Value> {
-    let (sql, p): (String, Vec<String>) = (sql.into(), p.iter().map(|s| s.to_string()).collect());
-    h.env
-        .store()
-        .reader(move |c| {
-            let mut st = c.prepare(&sql)?;
-            let n = st.column_count();
-            let v = st.query_row(rusqlite::params_from_iter(p.iter()), |r| {
-                (0..n)
-                    .map(|i| {
-                        Ok(match r.get_ref(i)? {
-                            rusqlite::types::ValueRef::Null => Value::Null,
-                            rusqlite::types::ValueRef::Integer(x) => json!(x),
-                            rusqlite::types::ValueRef::Real(x) => json!(x),
-                            rusqlite::types::ValueRef::Text(t) => {
-                                json!(String::from_utf8_lossy(t))
-                            }
-                            rusqlite::types::ValueRef::Blob(_) => Value::Null,
-                        })
-                    })
-                    .collect::<rusqlite::Result<Vec<_>>>()
-            })?;
-            Ok::<_, steve_store::StoreError>(v)
-        })
-        .expect("row")
-}
-
-fn exec(h: &H, sql: &str, p: &[&str]) {
-    let (sql, p): (String, Vec<String>) = (sql.into(), p.iter().map(|s| s.to_string()).collect());
-    digest_env::write(h.env.store(), move |c| {
-        c.execute(&sql, rusqlite::params_from_iter(p.iter()))?;
-        Ok(())
-    })
-    .expect("exec");
-}
-
 fn card(h: &H, d: &str) -> (String, String, String, String, Value) {
-    let r = row(
-        h,
-        "SELECT status, question, draft, options, result FROM decisions WHERE id = ?",
-        &[d],
-    );
+    let r = inspect::decisions::decision_status_question_draft_options(h.env.store(), d).unwrap();
     let s = |i: usize| r[i].as_str().unwrap_or_default().to_string();
     (
         s(0),
@@ -231,17 +184,13 @@ fn card(h: &H, d: &str) -> (String, String, String, String, Value) {
 }
 
 fn open_cards(h: &H) -> i64 {
-    row(
-        h,
-        "SELECT count(*) FROM decisions WHERE subject_type = 'chan_message' AND kind = 'ask' AND status = 'open'",
-        &[],
-    )[0]
-    .as_i64()
-    .unwrap()
+    inspect::decisions::decision_count_by_chan_message_and_ask_and_open(h.env.store()).unwrap()[0]
+        .as_i64()
+        .unwrap()
 }
 
 fn status(h: &H, id: &str) -> String {
-    row(h, "SELECT status FROM chan_messages WHERE id = ?", &[id])[0]
+    inspect::messages::message_status(h.env.store(), id).unwrap()[0]
         .as_str()
         .unwrap()
         .to_string()
@@ -283,14 +232,10 @@ async fn asked(h: &H, id: &str, secs: i64) -> (String, String) {
 }
 
 fn party_of(h: &H, handle: &str) -> String {
-    row(
-        h,
-        "SELECT party_id FROM accounts WHERE handle = ?",
-        &[handle],
-    )[0]
-    .as_str()
-    .expect("a contact")
-    .to_string()
+    inspect::people::account_party_id_by_handle(h.env.store(), handle).unwrap()[0]
+        .as_str()
+        .expect("a contact")
+        .to_string()
 }
 
 // ---------------------------------------------------------------- G4, G5: before any model
@@ -474,7 +419,7 @@ async fn your_click_sends_the_draft_or_your_words_and_yolo_clicks_none() {
     assert_eq!(h.outbox.send_due(&h.ch).await, 1);
     assert_eq!(status(&h, &out), "sent");
     assert_eq!(
-        row(&h, "SELECT text FROM chan_messages WHERE id = ?", &[&out])[0],
+        inspect::messages::message_text(h.env.store(), &out).unwrap()[0],
         "周四可以"
     );
 
@@ -487,11 +432,7 @@ async fn your_click_sends_the_draft_or_your_words_and_yolo_clicks_none() {
     h.env.clock.advance(11_000);
     assert_eq!(h.outbox.send_due(&h.ch).await, 1);
     assert_eq!(
-        row(
-            &h,
-            "SELECT text, status FROM chan_messages WHERE id = ?",
-            &[&out]
-        ),
+        inspect::messages::message_text_status(h.env.store(), &out).unwrap(),
         vec![json!("周四三点吧"), json!("sent")]
     );
     assert_eq!(h.fake.sent.lock().unwrap().len(), 2);
@@ -502,11 +443,7 @@ async fn checked(h: &H, d: &str) -> String {
     let composed = std::sync::Mutex::new(None);
     steve_runtime::testkit::eventually("the answered card's draft is checked", || async {
         h.outbox.send_due(&h.ch).await;
-        let r = row(
-            h,
-            "SELECT coalesce(json_extract(result, '$.composed'), '') FROM decisions WHERE id = ?",
-            &[d],
-        );
+        let r = inspect::decisions::decision_composed(h.env.store(), d).unwrap();
         if let Some(m) = r[0].as_str().filter(|m| !m.is_empty()) {
             *composed.lock().unwrap() = Some(m.to_string());
             true
@@ -531,14 +468,10 @@ async fn a_cards_draft_that_may_leak_waits_for_you_again() {
     let out = checked(&h, &d).await;
     assert_eq!(card(&h, &d).4["check"], "leak");
     assert_eq!(status(&h, &out), "draft");
-    let approval = row(
-        &h,
-        "SELECT decision_id FROM chan_messages WHERE id = ?",
-        &[&out],
-    )[0]
-    .as_str()
-    .unwrap()
-    .to_string();
+    let approval = inspect::messages::message_decision_id(h.env.store(), &out).unwrap()[0]
+        .as_str()
+        .unwrap()
+        .to_string();
     let (st, q, ..) = card(&h, &approval);
     assert_eq!(st, "open");
     assert!(q.contains("可能泄露") && q.contains("「周四可以」"), "{q}");
@@ -582,11 +515,7 @@ async fn telling_it_how_to_reply_drafts_with_your_words_once() {
     h.outbox.send_due(&h.ch).await;
     let mut draft = None;
     steve_runtime::testkit::eventually_sync("the instructed reply draft is composed", || {
-        let r = row(
-            &h,
-            "SELECT coalesce(json_extract(result, '$.composed'), '') FROM decisions WHERE id = ?",
-            &[&d],
-        );
+        let r = inspect::decisions::decision_composed(h.env.store(), &d).unwrap();
         if r[0].as_str().is_some_and(|s| !s.is_empty()) {
             draft = r[0].as_str().map(String::from);
             true
@@ -606,11 +535,7 @@ async fn telling_it_how_to_reply_drafts_with_your_words_once() {
     assert!(!last.contains(steve_channels::compose::H_DECIDE), "{last}");
     // the reply is a draft for your approval, as any
     assert_eq!(
-        row(
-            &h,
-            "SELECT text, status FROM chan_messages WHERE id = ?",
-            &[&draft]
-        ),
+        inspect::messages::message_text_status(h.env.store(), &draft).unwrap(),
         vec![json!("周四下午三点吧"), json!("draft")]
     );
     assert!(h.fake.sent.lock().unwrap().is_empty());
@@ -626,11 +551,7 @@ async fn telling_it_how_to_reply_drafts_with_your_words_once() {
 async fn a_card_opened_before_keeps_its_reply_field() {
     let h = setup().await;
     let (_, d) = asked(&h, "a1", 0).await;
-    exec(
-        &h,
-        "UPDATE decisions SET options = '[\"draft_reply\",\"to_item\",\"done\"]', draft = '' WHERE id = ?",
-        &[&d],
-    );
+    seed::decisions::set_decision_options(h.env.store(), &d).unwrap();
     let r = decide_as(&h, ME, &d, "draft_reply", "我晚点回你").expect("drafted");
     let out = r.result["draft_message"].as_str().unwrap().to_string();
     assert_eq!(status(&h, &out), "draft", "still waits for your approval");
@@ -769,12 +690,7 @@ async fn a_newer_card_takes_over_only_what_it_shows_of_the_same_person() {
 
 /// Your own account's card lifetime, in hours (`None`: never on time).
 fn lifetime(h: &H, hours: Option<i64>) {
-    let v = hours.map(|x| x.to_string()).unwrap_or("NULL".into());
-    exec(
-        h,
-        &format!("UPDATE channel_settings SET card_ttl_h = {v} WHERE connection_id = ?"),
-        &[&h.me],
-    );
+    seed::connections::set_channel_card_ttl_h(h.env.store(), hours, &h.me).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -814,11 +730,7 @@ async fn cards_close_after_the_lifetime_you_set_but_never_a_commitment_or_a_star
     let (draft, approval) = (r.out_message_id.unwrap(), r.decision_id.unwrap());
     // a starred contact's card, a while later (not one turn with B's question)
     h.env.clock.advance(40 * 60_000);
-    exec(
-        &h,
-        "UPDATE parties SET important = 1 WHERE id = ?",
-        &[&party_of(&h, "ub")],
-    );
+    seed::people::set_party_important_value_1(h.env.store(), &party_of(&h, "ub")).unwrap();
     answers(
         &h,
         json!({"outcome": "skip", "summary": "阿乙说晚上一起吃饭", "text": "闲聊", "why": "闲聊"}),
@@ -872,30 +784,12 @@ async fn cards_on_a_bots_account_never_hold_up_the_sweep() {
             .expect("message")
             .message_id;
     // even with a lifetime written on it
-    exec(
-        &h,
-        "UPDATE channel_settings SET card_ttl_h = 1 WHERE connection_id = ?",
-        &[&bot],
-    );
+    seed::connections::set_channel_card_ttl_h_value_1(h.env.store(), &bot).unwrap();
     let old = h.ch.now() - 48 * 3_600_000;
     for i in 0..(steve_channels::outbound::EXPIRY_PAGE + 20) {
         let id = format!("bm{i}");
-        exec(
-            &h,
-            "INSERT INTO chan_messages (id, workspace_id, space_id, thread_key, direction, sender_account_id,
-                 sender_party_id, text, status, created, external_id)
-             SELECT ?1, workspace_id, space_id, ?1, direction, sender_account_id, sender_party_id, text, status, created,
-                 ?1 FROM chan_messages WHERE id = ?2",
-            &[&id, &m],
-        );
-        exec(
-            &h,
-            &format!(
-                "INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, question, status, requested_by, created)
-                 VALUES ('dbm{i}', 'default', 'ask', 'chan_message', ?, '机器人转给你', 'open', 'steve', {old})"
-            ),
-            &[&id],
-        );
+        seed::messages::seed_message(h.env.store(), &id, &m).unwrap();
+        seed::decisions::seed_decision(h.env.store(), &format!(r#"dbm{}"#, i), old, &id).unwrap();
     }
     // yours, newer than all of them
     lifetime(&h, Some(1));
@@ -910,11 +804,7 @@ async fn cards_on_a_bots_account_never_hold_up_the_sweep() {
     h.outbox.send_due(&h.ch).await;
     assert_eq!(card(&h, &fact).0, "expired");
     assert_eq!(
-        row(
-            &h,
-            "SELECT count(*) FROM decisions WHERE id LIKE 'dbm%' AND status = 'open'",
-            &[]
-        )[0],
+        inspect::decisions::decision_count_by_id_dbm_and_open(h.env.store()).unwrap()[0],
         json!(steve_channels::outbound::EXPIRY_PAGE + 20)
     );
 }
@@ -926,11 +816,7 @@ async fn a_starred_contact_always_reaches_you_unless_you_are_there() {
     let h = setup().await;
     // A becomes known, then starred (the contact page's star)
     push(&h, msg(&h, "C_DEV", "k0", "ua", "早", -3600)).await;
-    exec(
-        &h,
-        "UPDATE parties SET important = 1 WHERE id = ?",
-        &[&party_of(&h, "ua")],
-    );
+    seed::people::set_party_important_value_1(h.env.store(), &party_of(&h, "ua")).unwrap();
 
     // the composer would say nothing: a card anyway, marked
     answers(
@@ -964,16 +850,11 @@ async fn a_starred_contact_always_reaches_you_unless_you_are_there() {
     );
 
     // even where nothing is drafted for you; no composer runs there
-    let space = row(&h, "SELECT id FROM spaces WHERE external_id = 'D_A'", &[])[0]
+    let space = inspect::spaces::space_id_by_d_a(h.env.store()).unwrap()[0]
         .as_str()
         .unwrap()
         .to_string();
-    exec(
-        &h,
-        "INSERT INTO space_prefs (space_id, workspace_id, reply_as_you, updated) VALUES (?1, 'default', 'record', 1)
-           ON CONFLICT (space_id) DO UPDATE SET reply_as_you = 'record'",
-        &[&space],
-    );
+    seed::spaces::seed_space_preference(h.env.store(), &space).unwrap();
     h.env.clock.advance(10 * 60_000);
     let n = compose_prompts(&h).len();
     let r = push(&h, msg(&h, "D_A", "s3", "ua", "到了吗", 0))
@@ -988,11 +869,7 @@ async fn a_starred_contact_always_reaches_you_unless_you_are_there() {
     assert_eq!(compose_prompts(&h).len(), n);
 
     // you are there yourself: nothing
-    exec(
-        &h,
-        "UPDATE space_prefs SET reply_as_you = 'draft' WHERE space_id = ?",
-        &[&space],
-    );
+    seed::spaces::set_space_preference_reply_as_you_draft(h.env.store(), &space).unwrap();
     h.env.clock.advance(10 * 60_000);
     push(&h, msg(&h, "D_A", "y1", "upx", "我到了", 0)).await;
     let r = push(&h, msg(&h, "D_A", "s4", "ua", "看到你了", 30))
@@ -1077,20 +954,15 @@ async fn a_bots_notice_becomes_an_item_by_its_structure_not_its_words() {
     assert_eq!(h.core.created().len(), 1);
 
     // your setting: record only — or every message of this bot
-    let space = row(
-        &h,
-        "SELECT id FROM spaces WHERE external_id = 'D_ALERT'",
-        &[],
-    )[0]
-    .as_str()
-    .unwrap()
-    .to_string();
-    exec(
-        &h,
-        "INSERT INTO space_prefs (space_id, workspace_id, bot_notices, updated) VALUES (?1, 'default', 'record', 1)
-           ON CONFLICT (space_id) DO UPDATE SET bot_notices = 'record'",
-        &[&space],
-    );
+    let space = inspect::spaces::space_id_by_d_alert(h.env.store()).unwrap()[0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    seed::spaces::seed_space_preference_for_a_bots_notice_becomes_an_item_by_it(
+        h.env.store(),
+        &space,
+    )
+    .unwrap();
     h.env.clock.advance(60_000);
     push(
         &h,
@@ -1098,11 +970,7 @@ async fn a_bots_notice_becomes_an_item_by_its_structure_not_its_words() {
     )
     .await;
     assert_eq!(h.core.created().len(), 1);
-    exec(
-        &h,
-        "UPDATE space_prefs SET bot_notices = 'item' WHERE space_id = ?",
-        &[&space],
-    );
+    seed::spaces::set_space_preference_bot_notices_item(h.env.store(), &space).unwrap();
     h.env.clock.advance(60_000);
     let r = push(&h, bot_msg(&h, "b5", "日报已生成", None))
         .await
@@ -1127,13 +995,9 @@ async fn a_draft_keeps_what_the_composer_said_about_it() {
         .unwrap();
     let out = r.out_message_id.expect("a draft");
     let composed: Value = serde_json::from_str(
-        row(
-            &h,
-            "SELECT composed FROM chan_messages WHERE id = ?",
-            &[&out],
-        )[0]
-        .as_str()
-        .unwrap(),
+        inspect::messages::message_composed(h.env.store(), &out).unwrap()[0]
+            .as_str()
+            .unwrap(),
     )
     .unwrap();
     assert_eq!(composed["outcome"], "reply");

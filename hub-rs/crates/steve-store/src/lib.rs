@@ -22,6 +22,19 @@ pub mod calendar;
 pub mod caps;
 pub mod compact;
 mod contract;
+pub use contract::audit as audit_repo;
+pub use contract::channel_feed;
+pub use contract::channel_messages as channel_message_repo;
+pub use contract::channel_names;
+pub use contract::channel_personas;
+pub use contract::channel_positions;
+pub use contract::channel_sends;
+pub use contract::channel_spaces;
+pub use contract::channel_trigger_report;
+pub use contract::channel_write_policy;
+pub use contract::feishu_registration;
+pub use contract::notifications as notification_repo;
+pub use contract::reply_basis;
 pub use contract::{
     Accounts, AuthSessions, ConnRow, ConnectionBrief, HealthState, MatchRule, MatchRules, NewParty,
     NewVaultGrant, Party, PartyPatch, PasskeyInfo, PasskeyRows, PrefixConfig, System, Systems,
@@ -68,9 +81,9 @@ pub use contract::{
     FlowSources, FlowTriggers, FlowWaits, GrantRows, HTTP_ALLOW_PRIVATE, IndexedRange,
     ItemEvidence, Members, MemoryIndex, MemoryIndexData, MemoryRange, MessageEvidence,
     NewCorrection, NewFlowRow, NewRun, NewSignal, NewStep, NewTrigger, NewWait, ProjectRows, R,
-    Read, References, Revisions, RunRow, RunRows, RunStep, SchedulePatch, SessionEvidence,
-    SignalFilter, SignalRow, SignalRows, SignalTriage, SourceConfig, StartupRecord, TagRows, W,
-    WorkspaceSettings, Workspaces,
+    Read, References, ReplyBot, Revisions, RunRow, RunRows, RunStep, SchedulePatch,
+    SessionEvidence, SignalFilter, SignalRow, SignalRows, SignalTriage, SourceConfig,
+    StartupRecord, TagRows, W, WorkspaceSettings, Workspaces,
 };
 pub use contract::{AttrDef, AttrValue, Attributes, ContactQuery, NewDef, NewValue};
 pub use contract::{

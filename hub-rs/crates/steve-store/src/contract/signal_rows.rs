@@ -2,6 +2,8 @@ use sea_query::{Expr, ExprTrait, Order, Query};
 
 use crate::{Read, Result, W};
 
+use super::Q;
+
 pub struct SignalRows<'a, C>(pub &'a mut C);
 
 #[derive(serde::Serialize)]
@@ -102,6 +104,37 @@ impl<C: Read> SignalRows<'_, C> {
             }
         }
         Ok(counts)
+    }
+
+    pub fn triage(&mut self, ws: &str, id: &str) -> Result<Option<SignalTriage>> {
+        self.0.one(
+            Query::select()
+                .columns([
+                    "outcome",
+                    "outcome_label",
+                    "reason",
+                    "handled_by",
+                    "flow_id",
+                    "run_id",
+                    "work_item_id",
+                    "decision_id",
+                ])
+                .from("ext_events")
+                .and_where(Expr::col("id").eq(id))
+                .and_where(Expr::col("workspace_id").eq(ws)),
+            |row| {
+                Ok(SignalTriage {
+                    outcome: row.get(0)?,
+                    label: row.get(1)?,
+                    reason: row.get(2)?,
+                    handled_by: row.get(3)?,
+                    flow: row.get(4)?,
+                    run: row.get(5)?,
+                    item: row.get(6)?,
+                    decision: row.get(7)?,
+                })
+            },
+        )
     }
 
     pub fn event(&mut self, id: &str) -> Result<Option<SignalEvent>> {
@@ -597,6 +630,66 @@ impl SignalRows<'_, W<'_>> {
                 .table("ext_events")
                 .value("outcome", "recorded")
                 .value("outcome_label", label)
+                .and_where(Expr::col("id").eq(id)),
+        )?;
+        Ok(())
+    }
+}
+
+impl SignalRows<'_, W<'_>> {
+    pub fn channel_outcome(
+        &mut self,
+        id: &str,
+        outcome: &str,
+        label: &str,
+        reason: &str,
+        decision: Option<&str>,
+        item: Option<&str>,
+    ) -> Result<()> {
+        let mut update = Query::update();
+        update
+            .table("ext_events")
+            .value("outcome", outcome)
+            .value("outcome_label", label)
+            .value("reason", reason)
+            .and_where(Expr::col("id").eq(id))
+            .and_where(Expr::col("outcome").eq("recorded"))
+            .and_where(Expr::col("flow_id").is_null())
+            .and_where(Expr::col("run_id").is_null());
+        if let Some(decision) = decision {
+            update.value("decision_id", decision);
+        }
+        if let Some(item) = item {
+            update.value("work_item_id", item);
+        }
+        self.0.exec(&update)?;
+        Ok(())
+    }
+
+    pub fn append_channel_label(&mut self, id: &str, label: &str) -> Result<()> {
+        let current = self.0.one(
+            Query::select()
+                .column("outcome_label")
+                .from("ext_events")
+                .and_where(Expr::col("id").eq(id)),
+            |row| row.get::<Option<String>>(0),
+        )?;
+        let Some(current) = current else {
+            return Ok(());
+        };
+        let current = current.unwrap_or_default();
+        if current.contains(label) {
+            return Ok(());
+        }
+        let next = if current.is_empty() {
+            label.to_owned()
+        } else {
+            format!("{current} · {label}")
+        };
+        self.0.exec(
+            Query::update()
+                .table("ext_events")
+                .value("outcome_label", next)
                 .and_where(Expr::col("id").eq(id)),
         )?;
         Ok(())

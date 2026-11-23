@@ -34,7 +34,7 @@ use steve_runtime::schedule::CronExpr;
 use steve_store::digest::{Briefings, NewBriefing, Todos};
 use steve_store::outbox::{Applied, ConsumeError, Consumer, Event, Since};
 use steve_store::{
-    Alarms, AttentionReads, FeedReads, ItemReads, Members, Read, Schedules, StoreError, Tx, W,
+    Alarms, AttentionReads, FeedReads, ItemReads, Members, Read, Schedules, StoreError, W,
 };
 
 use crate::todo::Zone;
@@ -750,7 +750,7 @@ impl Consumer for BriefIntake {
     fn since(&self) -> Since {
         Since::Start
     }
-    fn apply(&self, tx: &Tx, ev: &Event) -> std::result::Result<Applied, ConsumeError> {
+    fn apply(&self, w: &mut W<'_>, ev: &Event) -> std::result::Result<Applied, ConsumeError> {
         if ev.version != ALARM_FIRED_V {
             return Err(ConsumeError::Reject(format!(
                 "unknown {BRIEFING_READY} version"
@@ -761,18 +761,15 @@ impl Consumer for BriefIntake {
         if a.lines.is_empty() || a.owner.starts_with("svc:") {
             return Ok(Applied::noted("nothing to brief"));
         }
-        tx.write(|w| -> Result<Applied> {
-            if Members::new(w).role(&ev.workspace_id, &a.owner)?.is_none() {
-                return Ok(Applied::noted("the brief's owner is no longer a member"));
-            }
-            let outcome = a
-                .lines
-                .iter()
-                .map(|line| self.brief(w, ev, &a, line))
-                .collect::<Result<Vec<_>>>()?;
-            Ok(Applied::noted(outcome.join("; ")))
-        })
-        .map_err(|e| ConsumeError::Retry(e.to_string()))
+        if Members::new(w).role(&ev.workspace_id, &a.owner)?.is_none() {
+            return Ok(Applied::noted("the brief's owner is no longer a member"));
+        }
+        let outcome = a
+            .lines
+            .iter()
+            .map(|line| self.brief(w, ev, &a, line))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Applied::noted(outcome.join("; ")))
     }
 }
 

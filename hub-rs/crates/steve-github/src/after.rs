@@ -9,7 +9,6 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use steve_modules::ApiError;
-use steve_store::Tx;
 use steve_store::outbox::{self, Applied, ConsumeError, Consumer, Event, Since};
 
 use crate::GitHub;
@@ -60,7 +59,7 @@ pub(crate) fn emit(
         supplements: std::mem::take(&mut fx.supplements),
     };
     let payload = serde_json::to_value(&a).map_err(|e| ApiError::Internal(e.to_string()))?;
-    outbox::emit(&tx.legacy(), ws, TOPIC, VERSION, &payload)?;
+    outbox::append(tx, ws, TOPIC, VERSION, &payload)?;
     Ok(())
 }
 
@@ -120,7 +119,7 @@ impl Consumer for GitHubAfter {
         .map_err(ConsumeError::Retry)
     }
 
-    fn apply(&self, _tx: &Tx, ev: &Event) -> Result<Applied, ConsumeError> {
+    fn apply(&self, _w: &mut steve_store::W<'_>, ev: &Event) -> Result<Applied, ConsumeError> {
         let a = after(ev)?;
         Ok(Applied::noted(format!(
             "{} 个事项，{} 个信号",

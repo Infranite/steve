@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 use steve_store::base::links;
 use steve_store::{
-    Accounts, Attributes, Connections, Read, Revisions, Tx, UserRows, Workspaces,
+    Accounts, Attributes, Connections, Read, Revisions, UserRows, Workspaces,
     account_profiles::{AccountProfiles, Lookup, LookupUpdate},
 };
 
@@ -341,49 +341,47 @@ impl Gap {
 /// Records one lookup of `account` at `now`: where the answer came from and the gaps it left. No gaps
 /// clears the retry; gaps schedule the next one (1 h, 6 h, 24 h, then 72 h).
 pub fn record_lookup(
-    tx: &Tx,
+    w: &mut steve_store::W<'_>,
     ws: &str,
     account: &str,
     now: i64,
     source: Option<&str>,
     gaps: &[(&str, Gap)],
 ) -> ApiResult<()> {
-    tx.write(|w| {
-        let account_row = Accounts(w)
-            .get(account)?
-            .filter(|row| row.workspace_id == ws);
-        if account_row.is_none() {
-            return Err(crate::ApiError::not_found("账号"));
+    let account_row = Accounts(w)
+        .get(account)?
+        .filter(|row| row.workspace_id == ws);
+    if account_row.is_none() {
+        return Err(crate::ApiError::not_found("账号"));
+    }
+    let attempts = AccountProfiles(w).attempts(account)?;
+    let mut g = Map::new();
+    for (f, gap) in gaps {
+        let mut v = json!({"reason": gap.reason});
+        if let Some(s) = &gap.scope {
+            v["scope"] = json!(s);
         }
-        let attempts = AccountProfiles(w).attempts(account)?;
-        let mut g = Map::new();
-        for (f, gap) in gaps {
-            let mut v = json!({"reason": gap.reason});
-            if let Some(s) = &gap.scope {
-                v["scope"] = json!(s);
-            }
-            g.insert((*f).to_string(), v);
-        }
-        // only what a retry could change is retried: an external person's title never comes
-        let retry = gaps
-            .iter()
-            .any(|(_, x)| !matches!(x.reason.as_str(), "external"));
-        let (attempts, next) = if retry {
-            (attempts + 1, Some(now + retry_after_ms(attempts)))
-        } else {
-            (0, None)
-        };
-        AccountProfiles(w).upsert(&LookupUpdate {
-            account,
-            workspace: ws,
-            at: now,
-            next,
-            attempts,
-            source,
-            gaps: &Value::Object(g),
-        })?;
-        Ok(())
-    })
+        g.insert((*f).to_string(), v);
+    }
+    // only what a retry could change is retried: an external person's title never comes
+    let retry = gaps
+        .iter()
+        .any(|(_, x)| !matches!(x.reason.as_str(), "external"));
+    let (attempts, next) = if retry {
+        (attempts + 1, Some(now + retry_after_ms(attempts)))
+    } else {
+        (0, None)
+    };
+    AccountProfiles(w).upsert(&LookupUpdate {
+        account,
+        workspace: ws,
+        at: now,
+        next,
+        attempts,
+        source,
+        gaps: &Value::Object(g),
+    })?;
+    Ok(())
 }
 
 /// Is `account` due for a lookup at `now` (never looked up, or its retry time has come)?
@@ -402,8 +400,8 @@ pub fn retry_due(r: &mut impl Read, account: &str, now: i64) -> ApiResult<bool> 
 }
 
 /// Everyone of `ws` with gaps is due now (a connection changed: a permission may have been granted).
-pub fn all_due(tx: &Tx, ws: &str, now: i64) -> ApiResult<usize> {
-    Ok(tx.write(|w| AccountProfiles(w).mark_due(ws, now))?)
+pub fn all_due(w: &mut steve_store::W<'_>, ws: &str, now: i64) -> ApiResult<usize> {
+    Ok(AccountProfiles(w).mark_due(ws, now)?)
 }
 
 /// Fill only a missing email from the Hub's own user record. Connected account profiles and

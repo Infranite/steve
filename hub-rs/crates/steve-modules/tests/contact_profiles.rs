@@ -512,7 +512,7 @@ async fn the_profile_says_what_is_missing_and_lookups_are_retried() {
     // a lookup that left the email out: said as such, retried 1 h, then 6 h later
     let rec = |now: i64, gaps: Vec<(&str, Gap)>| {
         fx.t.store()
-            .transaction(|tx| profile::record_lookup(tx, WS, &acc, now, Some("directory"), &gaps))
+            .write(|tx| profile::record_lookup(tx, WS, &acc, now, Some("directory"), &gaps))
     };
     rec(1_000, vec![("email", Gap::new("not_provided"))]).unwrap();
     let p = &fx.contact(&lilei).await["profile"];
@@ -551,7 +551,7 @@ async fn the_profile_says_what_is_missing_and_lookups_are_retried() {
     assert!(due(2_000 + 6 * 3_600_000));
     // a connection changed: due at once
     fx.t.store()
-        .transaction(|tx| profile::all_due(tx, WS, 5_000))
+        .write(|tx| profile::all_due(tx, WS, 5_000))
         .unwrap();
     assert!(due(5_000));
     // nothing a retry could change (another organization's member): no retry
@@ -565,7 +565,7 @@ async fn the_profile_says_what_is_missing_and_lookups_are_retried() {
     // only an account of the workspace is bookkept
     assert!(
         fx.t.store()
-            .transaction(|tx| profile::record_lookup(tx, WS2, &acc, 1, None, &[]))
+            .write(|tx| profile::record_lookup(tx, WS2, &acc, 1, None, &[]))
             .is_err()
     );
 

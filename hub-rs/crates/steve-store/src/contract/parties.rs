@@ -8,6 +8,58 @@ fn parties<const N: usize>(cols: [&'static str; N]) -> SelectStatement {
     Query::select().columns(cols).from("parties").take()
 }
 
+pub(crate) fn sender_name(party: Expr) -> SelectStatement {
+    parties(["name"])
+        .and_where(Expr::col("id").eq(party))
+        .take()
+}
+
+pub fn names(r: &mut impl Read, ids: &[&str]) -> Result<Vec<(String, String)>> {
+    if ids.is_empty() {
+        return Ok(vec![]);
+    }
+    let ids = r.db().dialect().text_array(ids)?;
+    r.all(
+        parties(["id", "name"]).and_where(Expr::col("id").in_subquery(ids)),
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+}
+
+pub(crate) fn bot_ids(r: &mut impl Read, ids: &[&str]) -> Result<Vec<String>> {
+    if ids.is_empty() {
+        return Ok(vec![]);
+    }
+    let ids = r.db().dialect().text_array(ids)?;
+    r.all(
+        parties(["id"])
+            .and_where(Expr::col("id").in_subquery(ids))
+            .and_where(
+                Expr::col("type")
+                    .eq("bot")
+                    .or(Expr::col("contact_kind").eq("bot")),
+            ),
+        |row| row.get(0),
+    )
+}
+
+pub fn user_id(r: &mut impl Read, party: &str) -> Result<Option<String>> {
+    Ok(r.one(
+        parties(["user_id"]).and_where(Expr::col("id").eq(party)),
+        |row| row.get(0),
+    )?
+    .flatten())
+}
+
+pub fn linked_user(r: &mut impl Read, ws: &str, party: &str) -> Result<Option<String>> {
+    Ok(r.one(
+        parties(["user_id"])
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("id").eq(party)),
+        |row| row.get(0),
+    )?
+    .flatten())
+}
+
 impl<'a, C: Read> Parties<'a, C> {
     pub fn new(handle: &'a mut C) -> Self {
         Self(handle)
@@ -178,4 +230,92 @@ pub fn merged_ids(c: &mut impl Read, party: &str) -> Result<Vec<String>> {
         }
     }
     Ok(ids)
+}
+
+pub struct NameAliases {
+    pub id: String,
+    pub name: String,
+    pub aliases: Vec<String>,
+}
+
+pub fn current_names(r: &mut impl Read, ws: &str, kind: &str) -> Result<Vec<NameAliases>> {
+    r.all(
+        Query::select()
+            .columns(["id", "name", "aliases"])
+            .from("parties")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("type").eq(kind))
+            .and_where(Expr::col("merged_into").is_null()),
+        |row| {
+            Ok(NameAliases {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                aliases: serde_json::from_str(&row.get::<String>(2)?).unwrap_or_default(),
+            })
+        },
+    )
+}
+
+pub fn active_names_and_aliases(r: &mut impl Read, ws: &str) -> Result<Vec<NameAliases>> {
+    r.all(
+        parties(["id", "name", "aliases"])
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("status").eq("active"))
+            .and_where(Expr::col("merged_into").is_null()),
+        |row| {
+            let aliases: String = row.get(2)?;
+            let aliases = serde_json::from_str::<Vec<serde_json::Value>>(&aliases)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|alias| alias.as_str().map(str::to_owned))
+                .collect();
+            Ok(NameAliases {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                aliases,
+            })
+        },
+    )
+}
+
+/// A star carries along the contact's existing merge chain within the visibility workspace.
+pub fn starred_contact(r: &mut impl Read, ws: &str, party: &str) -> Result<bool> {
+    let mut cursor = Some(party.to_owned());
+    for _ in 0..=5 {
+        let Some(id) = cursor else { break };
+        let row = r.one(
+            parties([
+                "workspace_id",
+                "important",
+                "status",
+                "contact_kind",
+                "type",
+                "merged_into",
+            ])
+            .and_where(Expr::col("id").eq(id)),
+            |row| {
+                Ok((
+                    row.get::<String>(0)?,
+                    row.get::<i64>(1)?,
+                    row.get::<String>(2)?,
+                    row.get::<Option<String>>(3)?,
+                    row.get::<String>(4)?,
+                    row.get::<Option<String>>(5)?,
+                ))
+            },
+        )?;
+        let Some((workspace, important, status, kind, party_type, next)) = row else {
+            break;
+        };
+        if workspace == ws
+            && important != 0
+            && status == "active"
+            && kind.as_deref() != Some("bot")
+            && party_type != "bot"
+        {
+            return Ok(true);
+        }
+        cursor = next;
+    }
+    Ok(false)
 }

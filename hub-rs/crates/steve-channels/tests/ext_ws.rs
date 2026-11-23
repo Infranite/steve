@@ -10,6 +10,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 use steve_runtime::testkit::eventually_sync;
+use steve_store::testkit::channels::inspect;
+use steve_store::testkit::channels::seed;
 
 use serde_json::{Value, json};
 use steve_channels::adapters::ext_ws::{self, ExtWs, ExtWsHook, Timing};
@@ -80,7 +82,7 @@ async fn setup_with_ids(ids: steve_channels::ext::MessageIds) -> H {
     let t0 = env.clock.now();
     fake.with(|w| w.now = Some(t0));
     env.store()
-        .transaction(|tx| ensure_seeds(tx, WS))
+        .write(|w| ensure_seeds(w, WS))
         .expect("account seeds");
     env.store()
         .write(|w| {
@@ -187,60 +189,25 @@ impl H {
         }
     }
 
-    fn rows(&self, sql: &str, p: &[&str]) -> Vec<Vec<Value>> {
-        let (sql, p): (String, Vec<String>) =
-            (sql.into(), p.iter().map(|s| s.to_string()).collect());
-        self.env
-            .store()
-            .reader(move |c| {
-                let mut st = c.prepare(&sql)?;
-                let n = st.column_count();
-                let out = st
-                    .query_map(rusqlite::params_from_iter(p.iter()), |r| {
-                        (0..n)
-                            .map(|i| {
-                                Ok(match r.get_ref(i)? {
-                                    rusqlite::types::ValueRef::Null => Value::Null,
-                                    rusqlite::types::ValueRef::Integer(x) => json!(x),
-                                    rusqlite::types::ValueRef::Real(x) => json!(x),
-                                    rusqlite::types::ValueRef::Text(t) => {
-                                        json!(String::from_utf8_lossy(t))
-                                    }
-                                    rusqlite::types::ValueRef::Blob(_) => Value::Null,
-                                })
-                            })
-                            .collect::<rusqlite::Result<Vec<Value>>>()
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok::<_, steve_modules::ApiError>(out)
-            })
-            .expect("rows")
-    }
-
     /// The messages of chat `chat`: `[text, history, outcome_label]`, oldest first.
     fn messages(&self, chat: &str) -> Vec<Vec<Value>> {
-        self.rows(
-            "SELECT m.text, m.history, coalesce(e.outcome_label, '') FROM chan_messages m
-               JOIN spaces s ON s.id = m.space_id LEFT JOIN ext_events e ON e.id = m.event_id
-              WHERE s.external_id = ? ORDER BY m.created, m.rowid",
-            &[chat],
-        )
+        inspect::messages::message_text_history_coalescee_by_external(self.env.store(), chat)
+            .unwrap()
     }
 
     fn status(&self, id: &str) -> String {
-        self.rows("SELECT status FROM connections WHERE id = ?", &[id])[0][0]
+        inspect::connections::connection_status_by_id(self.env.store(), id).unwrap()[0][0]
             .as_str()
             .unwrap_or_default()
             .to_string()
     }
 
     fn cursor(&self, id: &str) -> Option<Value> {
-        self.rows(
-            "SELECT token FROM chan_cursors WHERE connection_id = ? AND container = ?",
-            &[id, ext_ws::CURSOR],
-        )
-        .first()
-        .and_then(|r| r[0].as_str().and_then(|t| serde_json::from_str(t).ok()))
+        self.ch
+            .store()
+            .read(|r| steve_store::channel_positions::external_token(r, id, ext_ws::CURSOR))
+            .expect("feed cursor")
+            .and_then(|token| serde_json::from_str(&token).ok())
     }
 
     /// The fake's subscriptions so far.
@@ -268,10 +235,7 @@ async fn connecting_checks_the_url_says_hello_and_claims_who_is_signed_in() {
     let hello = &h.fake.calls("hello")[0];
     assert_eq!(hello["protocol"], json!({"min": 1, "max": 1}));
     assert_eq!(hello["client"]["name"], "steve-hub");
-    let r = h.rows(
-        "SELECT a.handle, c.config FROM connections c JOIN accounts a ON a.id = c.account_id WHERE c.id = ?",
-        &[&id],
-    );
+    let r = inspect::connections::connection_handle_config_by_id(h.env.store(), &id).unwrap();
     assert_eq!(r[0][0], format!("{}:id:{}", fake::REALM, fake::ME));
     let config: Value = serde_json::from_str(r[0][1].as_str().unwrap()).unwrap();
     assert_eq!(config["realm"], fake::REALM);
@@ -282,11 +246,7 @@ async fn connecting_checks_the_url_says_hello_and_claims_who_is_signed_in() {
         "the token is never in config"
     );
     // the email alias is claimed into 我 with the primary handle
-    let mail = h.rows(
-        "SELECT count(*) FROM accounts a JOIN parties p ON p.id = a.party_id
-          WHERE a.system_id = 'mail' AND a.handle = 'ada@example.com' AND p.user_id = ?",
-        &[ME],
-    );
+    let mail = inspect::people::account_count_by_user(h.env.store(), ME).unwrap();
     assert_eq!(mail[0][0], 1, "{mail:?}");
 
     // V2 at the form: a URL that is refused never dials
@@ -397,10 +357,7 @@ async fn the_feed_stores_then_saves_the_cursor_then_acks() {
     );
     assert_eq!(h.cursor(&id).expect("cursor")["cursor"], format!("c:{seq}"));
     // the space got its name from the message
-    let name = h.rows(
-        "SELECT name, kind FROM spaces WHERE external_id = 'c_42'",
-        &[],
-    );
+    let name = inspect::spaces::space_name_kind_by_c_42(h.env.store()).unwrap();
     assert_eq!(name[0], vec![json!("Chat c_42"), json!("group")]);
 
     // V4: written before the subscription's watermark → only recorded
@@ -473,10 +430,7 @@ async fn the_account_takes_the_name_the_service_gives_later_unless_you_named_it(
     h.fake.with(|w| w.me_display = String::new());
     let id = h.connect().await;
     let name = |h: &H| {
-        h.rows(
-            "SELECT a.display_name FROM connections c JOIN accounts a ON a.id = c.account_id WHERE c.id = ?",
-            &[&id],
-        )[0][0]
+        inspect::connections::connection_display_name_by_id(h.env.store(), &id).unwrap()[0][0]
             .as_str()
             .unwrap()
             .to_string()
@@ -486,10 +440,7 @@ async fn the_account_takes_the_name_the_service_gives_later_unless_you_named_it(
     let (rt, _tx) = h.runtime();
     eventually_sync("named", || name(&h) == "Ada").await;
     // renamed by you: a later connect keeps your name
-    h.env
-        .store()
-        .transaction(|tx| -> steve_modules::ApiResult<usize> { Ok(tx.execute("UPDATE accounts SET display_name = 'Ada (work)' WHERE id = (SELECT account_id FROM connections WHERE id = ?)", [&id])?) })
-        .unwrap();
+    seed::people::rename_ada_at_work(h.env.store(), &id).unwrap();
     eventually_sync("subscribed", || h.subscribes().len() == 1).await;
     h.fake.drop_all();
     eventually_sync("resubscribed", || h.subscribes().len() == 2).await;
@@ -505,7 +456,7 @@ async fn the_platform_a_service_names_is_kept_current_and_never_an_account_chang
     h.fake.with(|w| w.platform = Some("feishu".into()));
     let id = h.connect().await;
     let platform = |h: &H| {
-        let r = h.rows("SELECT config FROM connections WHERE id = ?", &[&id]);
+        let r = inspect::connections::connection_config_by_id(h.env.store(), &id).unwrap();
         let c: Value = serde_json::from_str(r[0][0].as_str().unwrap()).unwrap();
         c["platform"].clone()
     };
@@ -610,10 +561,8 @@ async fn v8_a_gap_is_read_back_and_recorded_only() {
     let seq = h.fake.push(vec![json!({"type": "gap", "chats": ["*"],
         "from_ms": h.t0 + 100, "to_ms": h.t0 + 200})]);
     eventually_sync("acked", || h.fake.acked() == seq).await;
-    let notes = h.rows(
-        "SELECT text FROM digest_entries WHERE workspace_id = ? AND text LIKE '%可能不全%'",
-        &[WS],
-    );
+    let notes =
+        inspect::digest_entries::digest_entrie_text_by_workspace(h.env.store(), WS).unwrap();
     assert_eq!(notes.len(), 1, "{notes:?}");
     rt.shutdown().await;
 }
@@ -681,7 +630,7 @@ async fn v13_an_expired_session_waits_for_ok_then_resumes() {
         json!({"status": "expired", "write_policy": "allowed"}),
     );
     eventually_sync("shown", || {
-        h.rows("SELECT health FROM connections WHERE id = ?", &[&id])[0][0]
+        inspect::connections::connection_health_by_id(h.env.store(), &id).unwrap()[0][0]
             .as_str()
             .is_some_and(|e| e.contains("重新登录"))
     })
@@ -1513,7 +1462,9 @@ async fn connector_discovery_explicit_read_references_and_unknown_write() {
     assert!(result["references"][0].get("external_id").is_none());
     assert!(result["references"][0].get("body").is_none());
     assert!(
-        h.rows("SELECT id FROM chan_messages", &[]).is_empty(),
+        inspect::messages::message_id(h.env.store())
+            .unwrap()
+            .is_empty(),
         "search must not import history"
     );
     assert!(
@@ -1562,16 +1513,7 @@ async fn connector_discovery_explicit_read_references_and_unknown_write() {
         1,
         "writes must not be replayed"
     );
-    h.env
-        .store()
-        .transaction(|tx| {
-            tx.execute(
-                "UPDATE connector_refs SET expires=0 WHERE id=?",
-                [reference],
-            )?;
-            Ok::<_, steve_modules::ApiError>(())
-        })
-        .unwrap();
+    seed::delivery::expire_connector_reference(h.env.store(), reference).unwrap();
     assert!(
         h.ch.connector_call(&who, read, json!({"reference":reference}), "expired")
             .await
@@ -1614,10 +1556,7 @@ async fn connector_events_reconnect_dedupe_and_no_automatic_backfill() {
         json!({"type":"gap","chats":["project-1"],"from_ms":h.t0-1000,"to_ms":h.t0}),
     ]);
     eventually_sync("acked duplicate and gap", || h.fake.acked() == seq).await;
-    let rows = h.rows(
-        "SELECT id,payload FROM ext_events WHERE source='connector'",
-        &[],
-    );
+    let rows = inspect::signals::signal_id_payload(h.env.store()).unwrap();
     assert_eq!(rows.len(), 1, "stable event ID deduplicates");
     assert!(!rows[0][1].as_str().unwrap().contains("forged-hub"));
     assert!(h.fake.calls("messages.history").is_empty());
@@ -1642,7 +1581,8 @@ async fn connector_rich_message_keeps_only_reference_metadata() {
     ]);
     let seq = h.fake.push_message(m);
     eventually_sync("rich reference ack", || h.fake.acked() == seq).await;
-    let rows = h.rows("SELECT m.id,m.attachments,s.kind,m.thread_key,m.reply_to FROM chan_messages m JOIN spaces s ON s.id=m.space_id WHERE s.external_id='pr-7'",&[]);
+    let rows =
+        inspect::messages::message_id_attachments_kind_thread_key_by_pr_7(h.env.store()).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0][2], "pr");
     assert_eq!(rows[0][3], "topic-7");
@@ -1654,9 +1594,9 @@ async fn connector_rich_message_keeps_only_reference_metadata() {
     let presented = h
         .env
         .store()
-        .reader(|c| {
+        .read(|r| {
             Ok::<_, steve_modules::ApiError>(
-                steve_channels::media::present(c, rows[0][0].as_str().unwrap()).unwrap(),
+                steve_channels::media::present(r, rows[0][0].as_str().unwrap()).unwrap(),
             )
         })
         .unwrap();
@@ -1746,7 +1686,9 @@ async fn connector_message_binding_uses_provider_id_or_connection_source_never_h
         2,
     ));
     eventually_sync("stored platform message", || h.fake.acked() == seq).await;
-    let rows = h.rows("SELECT m.id,m.external_id,x.source_id FROM chan_messages m JOIN chan_message_seen x ON x.message_id=m.id WHERE x.connection_id=? ORDER BY m.created,m.id",&[&conn]);
+    let rows =
+        inspect::messages::message_id_external_id_source_id_by_connection(h.env.store(), &conn)
+            .unwrap();
     assert_eq!(rows.len(), 2);
     let name = steve_channels::connector::tool_name(&conn, "read_message");
     let fallback_hub = rows
@@ -1794,16 +1736,7 @@ async fn connector_message_binding_uses_provider_id_or_connection_source_never_h
         );
     }
     // The connection's delivery mapping is required when the platform supplied no message ID.
-    h.env
-        .store()
-        .transaction(|tx| {
-            tx.execute(
-                "DELETE FROM chan_message_seen WHERE connection_id=? AND message_id=?",
-                rusqlite::params![conn, fallback_hub],
-            )?;
-            Ok::<_, steve_modules::ApiError>(())
-        })
-        .unwrap();
+    seed::messages::forget_seen_message(h.env.store(), &conn, &fallback_hub).unwrap();
     let before = h.fake.calls("connector.call").len();
     assert!(
         h.ch.connector_call(
@@ -1849,7 +1782,7 @@ async fn connector_participants_aliases_and_departed_conversation_cannot_reuse_r
         "aliases":[{"kind":"email","value":"contributor@example.org"}],"role":"admin"});
     let seq = h.fake.push(vec![json!({"type":"participants","conversation_id":"issue-9","change":"added","members":[member.clone()]})]);
     eventually_sync("participant ack", || h.fake.acked() == seq).await;
-    let found = h.rows("SELECT sm.role FROM space_members sm JOIN spaces s ON s.id=sm.space_id JOIN accounts a ON a.id=sm.account_id JOIN accounts alias ON alias.party_id=a.party_id WHERE s.external_id='issue-9' AND alias.handle='contributor@example.org'", &[]);
+    let found = inspect::spaces::space_member_role_by_issue_9(h.env.store()).unwrap();
     assert_eq!(
         found.len(),
         1,
@@ -1858,7 +1791,11 @@ async fn connector_participants_aliases_and_departed_conversation_cannot_reuse_r
     assert_eq!(found[0][0], "admin");
     let seq = h.fake.push(vec![json!({"type":"participants","conversation_id":"issue-9","change":"removed","members":[member]})]);
     eventually_sync("participant removal ack", || h.fake.acked() == seq).await;
-    assert!(h.rows("SELECT sm.account_id FROM space_members sm JOIN accounts a ON a.id=sm.account_id JOIN accounts alias ON alias.party_id=a.party_id WHERE alias.handle='contributor@example.org'", &[]).is_empty());
+    assert!(
+        inspect::spaces::space_member_account_id(h.env.store())
+            .unwrap()
+            .is_empty()
+    );
     let who = caller(WS, ME);
     let search = steve_channels::connector::tool_name(&conn, "search");
     let read = steve_channels::connector::tool_name(&conn, "read");
@@ -1871,18 +1808,9 @@ async fn connector_participants_aliases_and_departed_conversation_cannot_reuse_r
     h.ch.connector_call(&who, &read, json!({"reference":reference}), "before-leave")
         .await
         .unwrap();
-    let rows = h.rows("SELECT m.id,m.space_id FROM chan_messages m JOIN spaces s ON s.id=m.space_id WHERE s.external_id='issue-9'", &[]);
+    let rows = inspect::messages::message_id_space_id_by_issue_9(h.env.store()).unwrap();
     let (id, space) = (rows[0][0].as_str().unwrap(), rows[0][1].as_str().unwrap());
-    h.env
-        .store()
-        .transaction(|tx| {
-            tx.execute(
-                "UPDATE space_identities SET left_at=1 WHERE space_id=? AND connection_id=?",
-                rusqlite::params![space, conn],
-            )?;
-            Ok::<_, steve_modules::ApiError>(())
-        })
-        .unwrap();
+    seed::spaces::leave_space_identity(h.env.store(), &space, &conn).unwrap();
     let before = h.fake.calls("connector.call").len();
     for (tool, args) in [
         (&read, json!({"reference":reference})),
@@ -1943,7 +1871,7 @@ async fn a_read_only_connection_gives_one_notice_and_lifts_when_writes_are_allow
     let now = h.ch.now();
     h.env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             spaces::set_account_rules(
                 tx,
                 &Viewer::bare(WS, ME),
@@ -1968,18 +1896,15 @@ async fn a_read_only_connection_gives_one_notice_and_lifts_when_writes_are_allow
                 .fake
                 .push_message(msg(h, "ro_chat", &ev, "u_somebody", &text, n));
             eventually_sync("inbound stored", || h.fake.acked() >= seq).await;
-            let source = h.rows(
-                "SELECT m.id FROM chan_messages m JOIN spaces s ON s.id=m.space_id
-                  WHERE s.external_id='ro_chat' AND m.direction='in' AND m.text=?",
-                &[&text],
-            )[0][0]
+            let source = inspect::messages::message_id_by_ro_chat_and_incoming_and_text(
+                h.env.store(),
+                &text,
+            )
+            .unwrap()[0][0]
                 .as_str()
                 .unwrap()
                 .to_string();
-            h.env
-                .store()
-                .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &source))
-                .unwrap()
+            steve_channels::flow_actions::plan_of(h.env.store(), WS, &source).unwrap()
         }
     };
     let reply = |plan: &steve_channels::respond::Plan, purpose: Purpose| OutRequest {
@@ -1995,11 +1920,8 @@ async fn a_read_only_connection_gives_one_notice_and_lifts_when_writes_are_allow
         operation_id: None,
     };
     let cards = || {
-        h.rows(
-            "SELECT d.options, d.question FROM decisions d JOIN chan_messages m ON m.id = d.subject_id
-              JOIN spaces s ON s.id = m.space_id WHERE s.connection_id = ? AND d.kind = 'fail'",
-            &[&id],
-        )
+        inspect::decisions::decision_options_question_by_connection_and_fail(h.env.store(), &id)
+            .unwrap()
     };
 
     // The first automatic refusal opens a full recovery card; retries require human action.
@@ -2032,10 +1954,7 @@ async fn a_read_only_connection_gives_one_notice_and_lifts_when_writes_are_allow
         panic!("{second:?}")
     };
     assert_eq!(
-        h.rows(
-            "SELECT status, decision_id FROM chan_messages WHERE id=?",
-            &[&message_id]
-        )[0],
+        inspect::messages::message_status_decision_id_by_id(h.env.store(), &message_id).unwrap()[0],
         vec![json!("failed"), Value::Null]
     );
     assert_eq!(cards().len(), 1);
@@ -2049,7 +1968,7 @@ async fn a_read_only_connection_gives_one_notice_and_lifts_when_writes_are_allow
     assert!(
         h.env
             .store()
-            .reader(|c| write_blocks::active(c, &id, &space, h.ch.now()))
+            .read(|r| write_blocks::active(r, &id, &space, h.ch.now()))
             .unwrap()
             .is_some()
     );
@@ -2063,7 +1982,7 @@ async fn a_read_only_connection_gives_one_notice_and_lifts_when_writes_are_allow
     eventually_sync("lifted", || {
         h.env
             .store()
-            .reader(|c| write_blocks::active(c, &id, &space, h.ch.now()))
+            .read(|r| write_blocks::active(r, &id, &space, h.ch.now()))
             .unwrap()
             .is_none()
     })
@@ -2080,7 +1999,7 @@ async fn a_read_only_connection_gives_one_notice_and_lifts_when_writes_are_allow
     h.env.clock.advance(10_000);
     outbox.send_due(&h.ch).await;
     assert_eq!(
-        h.rows("SELECT status FROM chan_messages WHERE id=?", &[&id_sent])[0][0],
+        inspect::messages::message_status_by_id(h.env.store(), &id_sent).unwrap()[0][0],
         "sent"
     );
     assert_eq!(cards().len(), 1);
@@ -2098,11 +2017,9 @@ async fn bot_connect_claims_a_bot_not_me_and_outbox_sends_as_bot_with_source_rec
     bot_identity(&h);
     h.fake.with(|w| w.source_only = true);
     let id = connect_bot(&h).await;
-    let account = h.rows(
-        "SELECT a.kind,p.contact_kind,p.user_id,c.caps FROM connections c
-        JOIN accounts a ON a.id=c.account_id JOIN parties p ON p.id=a.party_id WHERE c.id=?",
-        &[&id],
-    );
+    let account =
+        inspect::connections::connection_kind_contact_kind_user_id_caps_by_id(h.env.store(), &id)
+            .unwrap();
     assert_eq!(account[0][0], "app_bot");
     assert_eq!(account[0][1], "bot");
     assert!(account[0][2].is_null(), "a bot is not me: {account:?}");
@@ -2110,45 +2027,31 @@ async fn bot_connect_claims_a_bot_not_me_and_outbox_sends_as_bot_with_source_rec
     assert!(caps.iter().any(|c| c == "msg.send"));
     assert!(!caps.iter().any(|c| c == "msg.send_as_user"));
     assert!(h.conns.cx_for(WS, &id, Some("msg.send_as_user")).is_err());
-    let alias = h.rows(
-        "SELECT p.contact_kind,p.user_id FROM accounts a JOIN parties p ON p.id=a.party_id
-        WHERE a.system_id='mail' AND a.handle='ada@example.com'",
-        &[],
-    );
+    let alias = inspect::people::account_contact_kind_user_id(h.env.store()).unwrap();
     assert_eq!(alias[0][0], "bot");
     assert!(alias[0][1].is_null());
 
     let (rt, _tx) = h.runtime();
     eventually_sync("bot subscribed", || h.subscribes().len() == 1).await;
     assert_eq!(
-        h.rows(
-            "SELECT mode FROM channel_settings WHERE connection_id=?",
-            &[&id]
-        )[0][0],
+        inspect::connections::channel_settings_mode_by_connection_rows(h.env.store(), &id).unwrap()
+            [0][0],
         "bot"
     );
     let mut incoming = msg(&h, "bot_chat", "bot_in", "u_somebody", "hello bot", 1);
     incoming["id"] = Value::Null;
     let seq = h.fake.push_message(incoming);
     eventually_sync("bot inbound stored", || h.fake.acked() == seq).await;
-    let inbound = h.rows(
-        "SELECT m.id,m.space_id FROM chan_messages m JOIN spaces s ON s.id=m.space_id
-        WHERE s.external_id='bot_chat'",
-        &[],
-    );
+    let inbound = inspect::messages::message_id_space_id_by_bot_chat(h.env.store()).unwrap();
     let source = inbound[0][0].as_str().unwrap().to_string();
     let space_id = inbound[0][1].as_str().unwrap().to_string();
-    let plan = h
-        .env
-        .store()
-        .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &source))
-        .unwrap();
+    let plan = steve_channels::flow_actions::plan_of(h.env.store(), WS, &source).unwrap();
     assert_eq!(plan.mode, spaces::Mode::Bot);
     // A source-only reply keeps its real remote source_id, not the Hub's fp: id.
     let now = h.ch.now();
     h.env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             spaces::set_account_rules(
                 tx,
                 &Viewer::bare(WS, ME),
@@ -2189,7 +2092,7 @@ async fn bot_connect_claims_a_bot_not_me_and_outbox_sends_as_bot_with_source_rec
     h.env.clock.advance(10_000);
     outbox.send_due(&h.ch).await;
     assert_eq!(
-        h.rows("SELECT status FROM chan_messages WHERE id=?", &[&out_id])[0][0],
+        inspect::messages::message_status_by_id(h.env.store(), &out_id).unwrap()[0][0],
         "sent"
     );
     let writes = h.fake.with(|w| w.writes.clone());
@@ -2201,10 +2104,12 @@ async fn bot_connect_claims_a_bot_not_me_and_outbox_sends_as_bot_with_source_rec
         json!({"kind":"id","value":fake::ME})
     );
     assert!(writes[0].1["idempotency_key"].as_str().is_some());
-    let receipt = h.rows(
-        "SELECT source_id FROM chan_message_seen WHERE connection_id=? AND message_id=?",
-        &[&id, &out_id],
-    );
+    let receipt = inspect::messages::seen_message_source_id_by_connection_and_message(
+        h.env.store(),
+        &id,
+        &out_id,
+    )
+    .unwrap();
     assert_eq!(receipt[0][0], writes[0].2["source_id"]);
     assert!(!space_id.is_empty());
     assert!(writes[0].2["id"].is_null());
@@ -2223,10 +2128,7 @@ async fn bot_connect_claims_a_bot_not_me_and_outbox_sends_as_bot_with_source_rec
     let seq = h.fake.push_message(echo);
     eventually_sync("bot echo acked", || h.fake.acked() == seq).await;
     assert_eq!(
-        h.rows(
-            "SELECT count(*) FROM chan_messages WHERE space_id=?",
-            &[&space_id]
-        )[0][0],
+        inspect::messages::message_count_by_space(h.env.store(), &space_id).unwrap()[0][0],
         2,
         "source receipt deduplicates the bot's source-only echo"
     );
@@ -2284,7 +2186,11 @@ async fn bot_identity_must_be_explicit_and_match_both_hello_and_account() {
                 .await
                 .is_err()
         );
-        assert!(h.rows("SELECT id FROM connections", &[]).is_empty());
+        assert!(
+            inspect::connections::connection_id(h.env.store())
+                .unwrap()
+                .is_empty()
+        );
         assert!(h.fake.with(|w| w.writes.is_empty()));
     }
     let h = setup().await;
@@ -2314,7 +2220,9 @@ async fn the_same_account_cannot_be_reused_between_bot_and_self() {
         } else {
             h.connect().await
         };
-        let before = h.rows("SELECT a.party_id,c.adapter,c.caps FROM connections c JOIN accounts a ON a.id=c.account_id WHERE c.id=?", &[&id]);
+        let before =
+            inspect::connections::connection_party_id_adapter_caps_by_id(h.env.store(), &id)
+                .unwrap();
         h.fake.with(|w| {
             let identity = if first_bot { "self" } else { "bot" };
             w.identity = Some(identity.into());
@@ -2336,8 +2244,15 @@ async fn the_same_account_cannot_be_reused_between_bot_and_self() {
                 .await
                 .is_err()
         );
-        assert_eq!(h.rows("SELECT a.party_id,c.adapter,c.caps FROM connections c JOIN accounts a ON a.id=c.account_id WHERE c.id=?", &[&id]), before);
-        assert_eq!(h.rows("SELECT count(*) FROM connections", &[])[0][0], 1);
+        assert_eq!(
+            inspect::connections::connection_party_id_adapter_caps_by_id(h.env.store(), &id)
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            inspect::connections::connection_count(h.env.store()).unwrap()[0][0],
+            1
+        );
         // The original provider also refuses a remote identity flip, before writing.
         let ext = if first_bot { &h.bot } else { &h.ext };
         let result = if first_bot {
@@ -2430,16 +2345,7 @@ async fn bot_connector_writes_require_bot_caps_and_never_discover_as_you_operati
     assert_eq!(writes.len(), 1);
     assert_eq!(writes[0].1["expected_identity"], "bot");
     assert_eq!(writes[0].1["arguments"]["reference"], "document-1");
-    h.env
-        .store()
-        .transaction(|tx| {
-            tx.execute(
-                "UPDATE connections SET caps='[\"msg.receive\"]' WHERE id=?",
-                [&conn],
-            )?;
-            Ok::<_, steve_modules::ApiError>(())
-        })
-        .unwrap();
+    seed::connections::permit_receive_only(h.env.store(), &conn).unwrap();
     assert!(
         h.ch.connector_call(
             &who,
@@ -2584,19 +2490,19 @@ async fn permanently_invalid_inbound_is_retained_and_diagnosed_before_ack() {
     let seq = h.fake.push_message(invalid);
     feed_wait(|| h.fake.acked() == seq).await;
     assert_eq!(h.messages("c_dead").len(), 0);
-    let dead = h.rows(
-        "SELECT source_id, payload FROM chan_ext_ws_dead_letters WHERE connection_id = ?",
-        &[&id],
-    );
+    let dead =
+        inspect::chan_ext_ws_dead_letters::chan_ext_ws_dead_letter_source_id_payload_by_connection(
+            h.env.store(),
+            &id,
+        )
+        .unwrap();
     assert_eq!(dead.len(), 1);
     assert_eq!(dead[0][0], "dead_1");
     assert!(dead[0][1].as_str().unwrap().contains("retain this input"));
     assert_eq!(
-        h.rows(
-            "SELECT action FROM audit WHERE target = ? AND action = 'channel.dead_letter'",
-            &[&id]
-        )
-        .len(),
+        inspect::audit::audit_action_by_target_and_channel_dead_letter(h.env.store(), &id)
+            .unwrap()
+            .len(),
         1
     );
     h.fake.redeliver();
@@ -2605,10 +2511,11 @@ async fn permanently_invalid_inbound_is_retained_and_diagnosed_before_ack() {
         .push_message(msg(&h, "c_dead", "good_2", "u_7", "next input", 2));
     feed_wait(|| h.fake.acked() == next).await;
     assert_eq!(
-        h.rows(
-            "SELECT source_id FROM chan_ext_ws_dead_letters WHERE connection_id = ?",
-            &[&id]
+        inspect::chan_ext_ws_dead_letters::chan_ext_ws_dead_letter_source_id_by_connection(
+            h.env.store(),
+            &id
         )
+        .unwrap()
         .len(),
         1
     );
@@ -2627,16 +2534,7 @@ async fn non_internal_transient_error_keeps_batch_cursor_for_retry() {
         .push_message(msg(&h, "c_retry", "initial", "u_7", "first", 1));
     feed_wait(|| h.fake.acked() == initial).await;
     // A temporarily unavailable connection produces NotFound rather than Internal.
-    h.env
-        .store()
-        .transaction(|tx| {
-            tx.execute(
-                "UPDATE connections SET workspace_id = 'w2' WHERE id = ?",
-                [&id],
-            )?;
-            Ok::<_, steve_modules::ApiError>(())
-        })
-        .unwrap();
+    seed::connections::move_connection_to_other_workspace(h.env.store(), &id).unwrap();
     let retry = h
         .fake
         .push_message(msg(&h, "c_retry", "retry", "u_7", "retry me", 2));
@@ -2644,16 +2542,7 @@ async fn non_internal_transient_error_keeps_batch_cursor_for_retry() {
     rt.shutdown().await;
     assert_eq!(h.fake.acked(), initial);
     assert_eq!(h.cursor(&id).unwrap()["cursor"], format!("c:{initial}"));
-    h.env
-        .store()
-        .transaction(|tx| {
-            tx.execute(
-                "UPDATE connections SET workspace_id = 'default' WHERE id = ?",
-                [&id],
-            )?;
-            Ok::<_, steve_modules::ApiError>(())
-        })
-        .unwrap();
+    seed::connections::return_connection_to_default_workspace(h.env.store(), &id).unwrap();
     let (rt, _tx) = h.runtime();
     feed_wait(|| h.fake.acked() == retry).await;
     assert_eq!(h.messages("c_retry").len(), 2);
@@ -2670,18 +2559,17 @@ async fn malformed_feed_message_is_retained_before_ack() {
         json!({"type": "message", "chat_id": "c_bad", "source_id": "bad"}),
     ]);
     feed_wait(|| h.fake.acked() == seq).await;
-    let dead = h.rows(
-        "SELECT payload FROM chan_ext_ws_dead_letters WHERE connection_id = ?",
-        &[&id],
-    );
+    let dead = inspect::chan_ext_ws_dead_letters::chan_ext_ws_dead_letter_payload_by_connection(
+        h.env.store(),
+        &id,
+    )
+    .unwrap();
     assert_eq!(dead.len(), 1);
     assert!(dead[0][0].as_str().unwrap().contains("bad"));
     assert_eq!(
-        h.rows(
-            "SELECT action FROM audit WHERE target = ? AND action = 'channel.dead_letter'",
-            &[&id]
-        )
-        .len(),
+        inspect::audit::audit_action_by_target_and_channel_dead_letter(h.env.store(), &id)
+            .unwrap()
+            .len(),
         1
     );
     rt.shutdown().await;

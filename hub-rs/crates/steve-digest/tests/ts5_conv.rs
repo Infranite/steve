@@ -21,10 +21,10 @@ fn inbound_names_and_persona_or_none_drafts_use_the_owners_write_paths() {
     fixture::ts5_channels(e.store()).unwrap();
     let inbound = e
         .store()
-        .transaction(|tx| {
-            steve_channels::messages::insert_inbound(
+        .write(|tx| {
+            steve_store::channel_message_repo::ingress::insert(
                 tx,
-                &steve_channels::messages::NewInbound {
+                &steve_store::channel_message_repo::ingress::NewInbound {
                     ws: WS,
                     space_id: "ts5-space",
                     external_id: "ts5-in",
@@ -60,14 +60,14 @@ fn inbound_names_and_persona_or_none_drafts_use_the_owners_write_paths() {
     for with_persona in [false, true] {
         let (draft, persona) = e
             .store()
-            .transaction(|tx| {
+            .write(|w| {
                 let persona = if with_persona {
                     let n =
                         serde_json::from_value(json!({"name":"Public persona","bot_id":"ts5-bot"}))
                             .unwrap();
                     Some(
                         steve_channels::personas::create(
-                            tx,
+                            w,
                             &steve_store::base::Viewer::bare(WS, "usr_dev"),
                             &n,
                             AT,
@@ -89,18 +89,12 @@ fn inbound_names_and_persona_or_none_drafts_use_the_owners_write_paths() {
                     persona_id: persona.clone(),
                     source_message_id: None,
                 };
-                let (draft, _) =
-                    steve_channels::respond::open_draft_to(tx, &target, "not sent", AT)
-                        .map_err(|e| StoreError::Hook(e.to_string()))?;
+                let (draft, _) = steve_channels::respond::open_draft_to(w, &target, "not sent", AT)
+                    .map_err(|e| StoreError::Hook(e.to_string()))?;
                 Ok::<_, StoreError>((draft, persona))
             })
             .unwrap();
-        let stored = e
-            .store()
-            .reader(|c| {
-                steve_channels::messages::get(c, &draft)
-                    .map_err(|e| StoreError::Hook(e.to_string()))
-            })
+        let stored = steve_channels::messages::get(e.store(), &draft)
             .unwrap()
             .unwrap();
         assert_eq!(stored.direction, "out");

@@ -28,12 +28,10 @@ pub(crate) fn routes() -> Router<Modules> {
 }
 
 fn persona_json(ch: &Channels, v: &Viewer, id: &str) -> ApiResult<Value> {
-    ch.store().read::<_, steve_store::StoreError>(|r| {
-        Ok(ch.store().reader(|c| -> ApiResult<Value> {
-            let p = personas::own(c, &v.ws, id)?;
-            Ok(serde_json::to_value(personas::out(c, r, v, &p)?)?)
-        }))
-    })?
+    ch.store().read(|r| {
+        let p = personas::own(r, &v.ws, id)?;
+        Ok(serde_json::to_value(personas::out(r, v, &p)?)?)
+    })
 }
 
 async fn list(Extension(ch): Cx, who: Caller) -> ApiResult<Json<Value>> {
@@ -41,11 +39,11 @@ async fn list(Extension(ch): Cx, who: Caller) -> ApiResult<Json<Value>> {
     let now = ch.now();
     let out = ch
         .store()
-        .transaction(|tx| -> ApiResult<Vec<personas::PersonaOut>> {
+        .write(|tx| -> ApiResult<Vec<personas::PersonaOut>> {
             personas::ensure_default(tx, &v.ws, now)?;
             personas::list(tx, &v.ws)?
                 .iter()
-                .map(|p| tx.write(|w| personas::out(tx, w, &v, p)))
+                .map(|p| personas::out(tx, &v, p))
                 .collect()
         })?;
     Ok(Json(serde_json::to_value(out)?))
@@ -65,9 +63,7 @@ async fn create(
     n.intro = personas::sent(n.intro, "intro");
     n.soul = personas::sent(n.soul, "soul");
     let now = ch.now();
-    let p = ch
-        .store()
-        .transaction(|tx| personas::create(tx, &v, &n, now))?;
+    let p = ch.store().write(|tx| personas::create(tx, &v, &n, now))?;
     Ok(Json(persona_json(&ch, &v, &p.id)?))
 }
 
@@ -82,15 +78,13 @@ async fn patch(
     p.soul = personas::sent(p.soul, "soul");
     let now = ch.now();
     ch.store()
-        .transaction(|tx| personas::patch(tx, &v, &id, &p, now))?;
+        .write(|tx| personas::patch(tx, &v, &id, &p, now))?;
     Ok(Json(persona_json(&ch, &v, &id)?))
 }
 
 async fn delete(Extension(ch): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let v = ch.modules().viewer(&who)?;
     let now = ch.now();
-    let moved = ch
-        .store()
-        .transaction(|tx| personas::delete(tx, &v, &id, now))?;
+    let moved = ch.store().write(|tx| personas::delete(tx, &v, &id, now))?;
     Ok(Json(json!({"ok": true, "moved": moved})))
 }

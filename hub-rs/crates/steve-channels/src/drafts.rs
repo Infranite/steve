@@ -18,18 +18,17 @@
 //! ```ignore
 //! steve_channels::drafts::register(&mut registry, clock.clone());
 //! // pickTarget: candidates come with `changes::candidates`; for a request naming a group,
-//! // `drafts::space_hints(c, &viewer, request)` orders the spaces by the prototype's `bestSpace`.
+//! // `drafts::space_hints(store, &viewer, request)` orders the spaces by the prototype's `bestSpace`.
 //! ```
 
 use std::sync::Arc;
 
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Map, Value, json};
 use steve_i18n::t;
 use steve_modules::changes::{Candidate, ChangeOp, DraftTarget, FieldSpec, OpCx, Plan, Prepared};
 use steve_modules::{ApiError, ApiResult, Clock, Registry};
-use steve_store::Tx;
-use steve_store::base::{self, Change, Viewer, show};
+use steve_store::Read;
+use steve_store::base::{Change, Viewer, show};
 
 use crate::bindings;
 use crate::personas::{self, PersonaPatch, PersonaRow, Reveal};
@@ -296,44 +295,44 @@ fn set_of(op: &Value) -> Option<(&str, &Value)> {
     (op["op"] == "set").then(|| (op["key"].as_str().unwrap_or(""), &op["value"]))
 }
 
-fn viewer(c: &Connection, cx: &OpCx) -> ApiResult<Viewer> {
-    Ok(Viewer::load(c, cx.ws, cx.actor)?)
+fn viewer(cx: &OpCx) -> Viewer {
+    Viewer::bare(cx.ws, cx.actor)
 }
 
 /// A Bot of the workspace by exact name or id (never a guess).
-fn find_bot(c: &Connection, ws: &str, said: &str) -> ApiResult<Option<String>> {
-    Ok(c.query_row(
-        "SELECT b.id FROM bots b JOIN bot_workspaces w ON w.bot_id = b.id AND w.workspace_id = ? WHERE b.deleted = 0 AND (b.id = ?2 OR b.name = ?2) ORDER BY b.id = ?2 DESC LIMIT 1",
-        params![ws, said.trim()],
-        |r| r.get(0),
-    )
-    .optional()?)
+fn find_bot(r: &mut impl Read, ws: &str, said: &str) -> ApiResult<Option<String>> {
+    Ok(steve_store::BotRows(r).resolve_name(ws, said.trim())?)
 }
 
-fn bot_name(c: &Connection, id: &str) -> String {
-    c.query_row("SELECT name FROM bots WHERE id = ?", [id], |r| r.get(0))
-        .unwrap_or_else(|_| id.to_string())
+fn bot_name(r: &mut impl Read, id: &str) -> String {
+    steve_store::BotRows(r)
+        .name(id)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| id.to_string())
 }
 
 /// A live persona of the workspace by exact name or id.
-fn find_persona(c: &Connection, ws: &str, said: &str) -> ApiResult<Option<PersonaRow>> {
+fn find_persona(
+    r: &mut impl steve_store::Read,
+    ws: &str,
+    said: &str,
+) -> ApiResult<Option<PersonaRow>> {
     let said = said.trim();
-    Ok(personas::list(c, ws)?
+    Ok(personas::list(r, ws)?
         .into_iter()
         .find(|p| p.id == said || p.name == said))
 }
 
 /// Tag ids by exact name or id; `Err(name)` for the first one not found.
-fn find_tags(c: &Connection, ws: &str, said: &[String]) -> ApiResult<Result<Vec<String>, String>> {
+fn find_tags(
+    c: &mut impl Read,
+    ws: &str,
+    said: &[String],
+) -> ApiResult<Result<Vec<String>, String>> {
     let mut out = Vec::new();
     for s in said {
-        let id: Option<String> = c
-            .query_row(
-                "SELECT id FROM tags WHERE workspace_id = ? AND (id = ?2 OR name = ?2) ORDER BY id = ?2 DESC LIMIT 1",
-                params![ws, s],
-                |r| r.get(0),
-            )
-            .optional()?;
+        let id = steve_store::TagRows(c).resolve_name(ws, s)?;
         match id {
             Some(id) if !out.contains(&id) => out.push(id),
             Some(_) => {}
@@ -344,12 +343,15 @@ fn find_tags(c: &Connection, ws: &str, said: &[String]) -> ApiResult<Result<Vec<
 }
 
 /// Tag names for the prompt (`card = false`, Chinese) or the card.
-fn tag_names(c: &Connection, ids: &[String], card: bool) -> String {
+fn tag_names(c: &mut impl Read, ids: &[String], card: bool) -> String {
     let names: Vec<String> = ids
         .iter()
         .map(|id| {
-            c.query_row("SELECT name FROM tags WHERE id = ?", [id], |r| r.get(0))
-                .unwrap_or_else(|_| id.clone())
+            steve_store::TagRows(c)
+                .name(id)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| id.clone())
         })
         .collect();
     match (names.is_empty(), card) {
@@ -366,12 +368,15 @@ fn hhmm(m: u32) -> String {
     format!("{:02}:{:02}", m / 60, m % 60)
 }
 
-fn party_name(c: &Connection, id: &str) -> String {
-    c.query_row("SELECT name FROM parties WHERE id = ?", [id], |r| r.get(0))
-        .unwrap_or_else(|_| id.to_string())
+fn party_name(c: &mut impl Read, id: &str) -> String {
+    steve_store::parties::Parties::new(c)
+        .name(id)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| id.to_string())
 }
 
-fn when_text(c: &Connection, w: &When, mode: Mode) -> String {
+fn when_text(c: &mut impl Read, w: &When, mode: Mode) -> String {
     let own = mode == Mode::Own;
     match w {
         When::MentionOrDm if own => "@你 或私聊你".into(),
@@ -417,7 +422,7 @@ fn when_text(c: &Connection, w: &When, mode: Mode) -> String {
 
 /// A rule list in words, for the prompt (always Chinese): “被 @ 或私聊时直接回复；其他只记录”.
 /// The card shows [`rules_card`].
-pub fn describe_rules(c: &Connection, rules: &[Rule], mode: Mode) -> String {
+pub fn describe_rules(c: &mut impl Read, rules: &[Rule], mode: Mode) -> String {
     if rules.is_empty() {
         return "没有规则（全部只记录）".into();
     }
@@ -425,7 +430,7 @@ pub fn describe_rules(c: &Connection, rules: &[Rule], mode: Mode) -> String {
         .iter()
         .enumerate()
         .map(|(i, r)| {
-            let act = r.act.label();
+            let act = rules::action_label(r.act);
             match &r.when {
                 When::All if i > 0 => format!("其他{act}"),
                 When::All | When::OtherGroup => format!("{}{act}", when_text(c, &r.when, mode)),
@@ -447,7 +452,7 @@ fn act_card(a: rules::Act) -> String {
 }
 
 /// [`when_text`] in the request's language.
-fn when_card(c: &Connection, w: &When, mode: Mode) -> String {
+fn when_card(c: &mut impl Read, w: &When, mode: Mode) -> String {
     let own = mode == Mode::Own;
     match w {
         When::MentionOrDm if own => t!("channels.rules.when.mention_or_dm_own"),
@@ -500,7 +505,7 @@ fn when_card(c: &Connection, w: &When, mode: Mode) -> String {
 }
 
 /// [`describe_rules`] in the request's language, for the card.
-fn rules_card(c: &Connection, rules: &[Rule], mode: Mode) -> String {
+fn rules_card(c: &mut impl Read, rules: &[Rule], mode: Mode) -> String {
     if rules.is_empty() {
         return t!("channels.rules.none");
     }
@@ -529,33 +534,19 @@ fn rules_card(c: &Connection, rules: &[Rule], mode: Mode) -> String {
 
 /// A contact or team by id, or by exact name or alias (case-insensitive); `None` when there is
 /// none or more than one.
-fn find_party(c: &Connection, ws: &str, ty: &str, said: &str) -> ApiResult<Option<String>> {
-    let mut st = c.prepare_cached(
-        "SELECT id, name, aliases FROM parties WHERE workspace_id = ? AND type = ? AND merged_into IS NULL",
-    )?;
-    let rows = st
-        .query_map(params![ws, ty], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    if let Some((id, _, _)) = rows.iter().find(|(id, _, _)| id == said) {
-        return Ok(Some(id.clone()));
+fn find_party(c: &mut impl Read, ws: &str, ty: &str, said: &str) -> ApiResult<Option<String>> {
+    let rows = steve_store::parties::current_names(c, ws, ty)?;
+    if let Some(party) = rows.iter().find(|party| party.id == said) {
+        return Ok(Some(party.id.clone()));
     }
     let want = said.trim().to_lowercase();
     let hits: Vec<&String> = rows
         .iter()
-        .filter(|(_, name, aliases)| {
-            name.to_lowercase() == want
-                || serde_json::from_str::<Vec<String>>(aliases)
-                    .unwrap_or_default()
-                    .iter()
-                    .any(|a| a.to_lowercase() == want)
+        .filter(|party| {
+            party.name.to_lowercase() == want
+                || party.aliases.iter().any(|a| a.to_lowercase() == want)
         })
-        .map(|(id, _, _)| id)
+        .map(|party| &party.id)
         .collect();
     Ok((hits.len() == 1).then(|| hits[0].clone()))
 }
@@ -571,7 +562,7 @@ enum Checked {
 
 /// The model's rules → names in `member` resolved → validated like `PATCH /spaces/:id`
 /// (`rules::parse` for the account's mode, then `rules::check_refs`).
-fn check_rules(c: &Connection, ws: &str, mode: Mode, raw: &Value) -> ApiResult<Checked> {
+fn check_rules(r: &mut impl Read, ws: &str, mode: Mode, raw: &Value) -> ApiResult<Checked> {
     let mut v = match raw {
         Value::String(s) => match serde_json::from_str::<Value>(s) {
             Ok(v) => v,
@@ -582,41 +573,41 @@ fn check_rules(c: &Connection, ws: &str, mode: Mode, raw: &Value) -> ApiResult<C
     let Some(items) = v.as_array_mut() else {
         return Ok(Checked::Unknown(raw.to_string()));
     };
-    for r in items.iter_mut() {
-        if r["when"]["kind"] != "member" {
+    for rule in items.iter_mut() {
+        if rule["when"]["kind"] != "member" {
             continue;
         }
         for (key, ty) in [("parties", "contact"), ("teams", "team")] {
-            let Some(xs) = r["when"][key].as_array().cloned() else {
+            let Some(xs) = rule["when"][key].as_array().cloned() else {
                 continue;
             };
             let mut ids = Vec::new();
             for x in xs {
                 let said = text_of(&x).unwrap_or_default();
-                match find_party(c, ws, ty, &said)? {
+                match find_party(r, ws, ty, &said)? {
                     Some(id) => ids.push(Value::String(id)),
                     None => return Ok(Checked::Unknown(said)),
                 }
             }
-            r["when"][key] = Value::Array(ids);
+            rule["when"][key] = Value::Array(ids);
         }
     }
     let parsed = match rules::parse(&v, mode) {
         Ok(p) => p,
         Err(e) => return Ok(Checked::Refused(reason(e)?)),
     };
-    if let Err(e) = rules::check_refs(c, ws, &parsed) {
+    if let Err(e) = rules::check_refs(r, ws, &parsed) {
         return Ok(Checked::Refused(reason(e)?));
     }
     Ok(Checked::Ok(
         rules::to_value(&parsed),
-        rules_card(c, &parsed, mode),
+        rules_card(r, &parsed, mode),
     ))
 }
 
 /// Stored rules in words (leniently loaded, like the pipeline reads them), for the prompt
 /// (`card = false`, Chinese) or the card.
-fn rules_text(c: &Connection, v: &Value, mode: Mode, card: bool) -> String {
+fn rules_text(c: &mut impl Read, v: &Value, mode: Mode, card: bool) -> String {
     let rules = rules::load(v, mode);
     if card {
         rules_card(c, &rules, mode)
@@ -628,21 +619,16 @@ fn rules_text(c: &Connection, v: &Value, mode: Mode, card: bool) -> String {
 // ---------------------------------------------------------------- space
 
 /// What an account is called (display name, else its handle).
-fn account_name(c: &Connection, ws: &str, conn: &str) -> ApiResult<String> {
-    Ok(c
-        .query_row(
-            "SELECT coalesce(nullif(a.display_name, ''), a.handle_display) FROM connections c JOIN accounts a ON a.id = c.account_id
-              WHERE c.id = ? AND c.workspace_id = ?",
-            params![conn, ws],
-            |r| r.get(0),
-        )
-        .optional()?
-        .unwrap_or_else(|| conn.to_string()))
+fn account_name(r: &mut impl Read, ws: &str, conn: &str) -> ApiResult<String> {
+    let Some(owner) = steve_store::connections::owner(r, ws, conn)? else {
+        return Ok(conn.to_string());
+    };
+    Ok(steve_store::accounts::display_name(r, &owner.account)?.unwrap_or_else(|| conn.to_string()))
 }
 
 /// The shared title, with the unnamed-DM fallback translated for the settings card.
-fn space_name_card(c: &Connection, s: &SpaceRow) -> ApiResult<String> {
-    let name = spaces::display_title(c, s)?;
+fn space_name_card(r: &mut impl steve_store::Read, s: &SpaceRow) -> ApiResult<String> {
+    let name = spaces::display_title(r, s)?;
     Ok(
         if s.kind == "dm" && s.name.trim().is_empty() && name == spaces::DM_FALLBACK {
             t!("channels.draft.dm")
@@ -674,21 +660,21 @@ struct SpaceNow {
 }
 
 impl SpaceNow {
-    fn load(c: &Connection, viewer: &Viewer, id: &str) -> ApiResult<Self> {
-        let row = spaces::own(c, viewer, id)?;
+    fn load(r: &mut impl Read, viewer: &Viewer, id: &str) -> ApiResult<Self> {
+        let row = spaces::checked_space(r, viewer, id)?;
         spaces::writable(&row)?;
-        let set = spaces::settings(c, id)?;
-        let mode = bindings::connection_account(c, &viewer.ws, &row.connection_id)?.1;
-        let account_rules = spaces::channel_settings(c, &viewer.ws, &row.connection_id)?
+        let set = spaces::settings(r, id)?;
+        let mode = bindings::connection_account(r, &viewer.ws, &row.connection_id)?.1;
+        let account_rules = spaces::channel_settings(r, &viewer.ws, &row.connection_id)?
             .map(|x| x.rules)
             .unwrap_or_else(|| match mode {
                 Mode::Bot => spaces::default_bot_rules(),
                 Mode::Own => spaces::default_self_rules(),
             });
         Ok(Self {
-            account: account_name(c, &viewer.ws, &row.connection_id)?,
-            binding: bindings::space_binding(c, &row)?,
-            persona: bindings::space_persona(c, &row)?,
+            account: account_name(r, &viewer.ws, &row.connection_id)?,
+            binding: bindings::space_binding(r, &row)?,
+            persona: bindings::space_persona(r, &row)?,
             row,
             set,
             mode,
@@ -712,7 +698,7 @@ impl SpaceNow {
     }
 
     /// The rules for the prompt (`card = false`, Chinese) or the card.
-    fn rules_text(&self, c: &Connection, card: bool) -> String {
+    fn rules_text(&self, c: &mut impl Read, card: bool) -> String {
         match (&self.set.rules, card) {
             (Some(v), _) => rules_text(c, v, self.mode, card),
             (None, false) => format!(
@@ -727,13 +713,11 @@ impl SpaceNow {
     }
 }
 
-fn space_revision(c: &Connection, ws: &str, id: &str) -> ApiResult<Option<i64>> {
-    Ok(c.query_row(
-        "SELECT ss.revision FROM space_settings ss JOIN spaces s ON s.id = ss.space_id WHERE s.id = ? AND s.workspace_id = ?",
-        params![id, ws],
-        |r| r.get(0),
-    )
-    .optional()?)
+fn space_revision(r: &mut impl Read, ws: &str, id: &str) -> ApiResult<Option<i64>> {
+    if steve_store::channel_spaces::rows::get_in_workspace(r, ws, id)?.is_none() {
+        return Ok(None);
+    }
+    Ok(steve_store::channel_spaces::preferences::settings(r, id)?.map(|s| s.revision))
 }
 
 // Field labels of the prompt (Chinese); the card's labels are `channels.draft.label.*`.
@@ -748,15 +732,14 @@ struct SpaceTarget;
 impl DraftTarget for SpaceTarget {
     fn prepare(
         &self,
-        store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        _store: &steve_store::Store,
+        r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         id: Option<&str>,
     ) -> ApiResult<Prepared> {
-        store.reader(|c| {
         let id = id.ok_or_else(|| ApiError::invalid("target.id"))?;
-        let s = SpaceNow::load(c, viewer, id)?;
-        let name = spaces::display_title(c, &s.row)?;
+        let s = SpaceNow::load(r, viewer, id)?;
+        let name = spaces::display_title(r, &s.row)?;
         let mut fields = Vec::new();
         if s.mode == Mode::Bot {
             fields.push(FieldSpec::new(
@@ -778,7 +761,7 @@ impl DraftTarget for SpaceTarget {
                 "rules",
                 &format!("{L_RULES}（{RULES_FORMAT}；跟随账号写 null）"),
                 "list",
-                json!({ "本群": s.set.rules, "生效": s.set.rules.clone().unwrap_or_else(|| s.account_rules.clone()), "说明": s.rules_text(c, false) }),
+                json!({ "本群": s.set.rules, "生效": s.set.rules.clone().unwrap_or_else(|| s.account_rules.clone()), "说明": s.rules_text(r, false) }),
             ),
             FieldSpec::new(
                 "disclosure",
@@ -800,7 +783,7 @@ impl DraftTarget for SpaceTarget {
                 "item_defaults.tags",
                 "从这里建的事项默认带的标签（标签名）",
                 "list",
-                json!(tag_names(c, &tags_of(&s.set.item_defaults), false)),
+                json!(tag_names(r, &tags_of(&s.set.item_defaults), false)),
             ),
             FieldSpec::new("duty", "这个群的职责（自由文本）", "text", json!(s.set.duty)),
         ]);
@@ -809,7 +792,7 @@ impl DraftTarget for SpaceTarget {
             revision: Some(s.set.revision),
             title: t!(
                 "channels.draft.title.space",
-                name = space_name_card(c, &s.row)?
+                name = space_name_card(r, &s.row)?
             ),
             href: format!("#/channels/space/{id}"),
             subject: format!("the chat space \"{name}\" of the account \"{}\"", s.account),
@@ -818,226 +801,218 @@ impl DraftTarget for SpaceTarget {
             free_text: Some("duty".into()),
             context: Value::Null,
         })
-    })
     }
 
     fn plan(
         &self,
-        store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        _store: &steve_store::Store,
+        r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         p: &Prepared,
         raw: Vec<Value>,
     ) -> ApiResult<Plan> {
-        store.reader(|c| {
-            let id = p.target_id.as_deref().unwrap_or("");
-            let s = SpaceNow::load(c, viewer, id)?;
-            let ws = &viewer.ws;
-            let mut d = Lines::default();
-            let l_persona = t!("channels.draft.label.persona");
-            let l_muted = t!("channels.draft.label.muted");
-            let l_rules = t!("channels.draft.label.rules");
-            let l_disclosure = t!("channels.draft.label.disclosure");
-            let l_memory = t!("channels.draft.label.memory");
-            let l_collab = t!("channels.draft.label.collab");
-            let l_tags = t!("channels.draft.label.tags");
-            let l_duty = t!("channels.draft.label.duty");
-            for op in raw {
-                let Some((key, v)) = set_of(&op) else {
-                    d.other(&op);
-                    continue;
-                };
-                let said = text_of(v).unwrap_or_default();
-                match key {
-                    "persona" if s.mode == Mode::Own => {
-                        d.line(refused(
-                            &l_persona,
-                            t!("channels.draft.value.you"),
-                            &t!("channels.error.self_no_persona"),
-                        ));
+        let id = p.target_id.as_deref().unwrap_or("");
+        let s = SpaceNow::load(r, viewer, id)?;
+        let ws = &viewer.ws;
+        let mut d = Lines::default();
+        let l_persona = t!("channels.draft.label.persona");
+        let l_muted = t!("channels.draft.label.muted");
+        let l_rules = t!("channels.draft.label.rules");
+        let l_disclosure = t!("channels.draft.label.disclosure");
+        let l_memory = t!("channels.draft.label.memory");
+        let l_collab = t!("channels.draft.label.collab");
+        let l_tags = t!("channels.draft.label.tags");
+        let l_duty = t!("channels.draft.label.duty");
+        for op in raw {
+            let Some((key, v)) = set_of(&op) else {
+                d.other(&op);
+                continue;
+            };
+            let said = text_of(v).unwrap_or_default();
+            match key {
+                "persona" if s.mode == Mode::Own => {
+                    d.line(refused(
+                        &l_persona,
+                        t!("channels.draft.value.you"),
+                        &t!("channels.error.self_no_persona"),
+                    ));
+                }
+                "persona" if v.is_null() || said.is_empty() || said == FOLLOW => {
+                    if s.binding.is_some() {
+                        d.set(
+                            "persona_id",
+                            Value::Null,
+                            Change::new(
+                                &l_persona,
+                                s.persona_text(true),
+                                t!("channels.draft.value.follow"),
+                            ),
+                        );
                     }
-                    "persona" if v.is_null() || said.is_empty() || said == FOLLOW => {
-                        if s.binding.is_some() {
+                }
+                "persona" => match find_persona(r, ws, &said)? {
+                    Some(per) if s.binding.as_deref() != Some(per.id.as_str()) => d.set(
+                        "persona_id",
+                        json!(per.id),
+                        Change::new(&l_persona, s.persona_text(true), per.name),
+                    ),
+                    Some(_) => {}
+                    None => d.line(not_recognized(&l_persona, &said)),
+                },
+                "muted" => match flag(v, &[MUTED, "是", "mute"], &[WORKING, "否"]) {
+                    Some(m) if m != s.set.muted => d.set(
+                        "muted",
+                        json!(m),
+                        Change::new(&l_muted, muted_card(s.set.muted), muted_card(m)),
+                    ),
+                    Some(_) => {}
+                    None => d.line(not_recognized(&l_muted, &said)),
+                },
+                "rules" => {
+                    if let Some(f) = &s.set.flow_id {
+                        let why = t!(
+                            "channels.error.space_is_flow",
+                            flow = steve_flow::flows::name_of(r, f)?
+                        );
+                        d.line(refused(&l_rules, s.rules_text(r, true), &why));
+                        continue;
+                    }
+                    if v.is_null() || said == FOLLOW {
+                        if s.set.rules.is_some() {
+                            let to = t!(
+                                "channels.draft.value.follow_with",
+                                what = rules_text(r, &s.account_rules, s.mode, true)
+                            );
                             d.set(
-                                "persona_id",
+                                "rules",
                                 Value::Null,
+                                Change::new(&l_rules, s.rules_text(r, true), to),
+                            );
+                        }
+                        continue;
+                    }
+                    match check_rules(r, ws, s.mode, v)? {
+                        Checked::Ok(rules, to) => {
+                            if s.set.rules.as_ref() != Some(&rules) {
+                                d.set(
+                                    "rules",
+                                    rules,
+                                    Change::new(&l_rules, s.rules_text(r, true), to),
+                                );
+                            }
+                        }
+                        Checked::Unknown(x) => d.line(not_recognized(&l_rules, &x)),
+                        Checked::Refused(why) => {
+                            d.line(refused(&l_rules, s.rules_text(r, true), &why))
+                        }
+                    }
+                }
+                "disclosure" => match code_of(&LEVELS, &said) {
+                    Some(l) if l != s.set.disclosure => d.set(
+                        "disclosure",
+                        json!(l),
+                        Change::new(&l_disclosure, level_card(&s.set.disclosure), level_card(l)),
+                    ),
+                    Some(_) => {}
+                    None => d.line(not_recognized(&l_disclosure, &said)),
+                },
+                "memory_scope" => match code_of(&SCOPES, &said) {
+                    Some(m) if m != s.set.memory_scope => d.set(
+                        "memory_scope",
+                        json!(m),
+                        Change::new(&l_memory, scope_card(&s.set.memory_scope), scope_card(m)),
+                    ),
+                    Some(_) => {}
+                    None => d.line(not_recognized(&l_memory, &said)),
+                },
+                "collab" => match on_off_flag(v) {
+                    Some(b) if b != s.set.collab => d.set(
+                        "collab",
+                        json!(b),
+                        Change::new(&l_collab, on_off_card(s.set.collab), on_off_card(b)),
+                    ),
+                    Some(_) => {}
+                    None => d.line(not_recognized(&l_collab, &said)),
+                },
+                "item_defaults.tags" => {
+                    let Some(names) = list_of(v) else {
+                        d.line(not_recognized(&l_tags, &v.to_string()));
+                        continue;
+                    };
+                    let old = tags_of(&s.set.item_defaults);
+                    match find_tags(r, ws, &names)? {
+                        Ok(ids) if ids.len() > 20 => d.line(refused(
+                            &l_tags,
+                            tag_names(r, &old, true),
+                            &invalid_card("item_defaults.tags"),
+                        )),
+                        Ok(ids) if ids != old => {
+                            let mut defaults = item_defaults(&s.set.item_defaults);
+                            defaults["tags"] = json!(ids);
+                            d.set(
+                                "item_defaults",
+                                defaults,
                                 Change::new(
-                                    &l_persona,
-                                    s.persona_text(true),
-                                    t!("channels.draft.value.follow"),
+                                    &l_tags,
+                                    tag_names(r, &old, true),
+                                    tag_names(r, &ids, true),
                                 ),
                             );
                         }
+                        Ok(_) => {}
+                        Err(name) => d.line(not_recognized(&l_tags, &name)),
                     }
-                    "persona" => match find_persona(c, ws, &said)? {
-                        Some(per) if s.binding.as_deref() != Some(per.id.as_str()) => d.set(
-                            "persona_id",
-                            json!(per.id),
-                            Change::new(&l_persona, s.persona_text(true), per.name),
-                        ),
-                        Some(_) => {}
-                        None => d.line(not_recognized(&l_persona, &said)),
-                    },
-                    "muted" => match flag(v, &[MUTED, "是", "mute"], &[WORKING, "否"]) {
-                        Some(m) if m != s.set.muted => d.set(
-                            "muted",
-                            json!(m),
-                            Change::new(&l_muted, muted_card(s.set.muted), muted_card(m)),
-                        ),
-                        Some(_) => {}
-                        None => d.line(not_recognized(&l_muted, &said)),
-                    },
-                    "rules" => {
-                        if let Some(f) = &s.set.flow_id {
-                            let why = t!(
-                                "channels.error.space_is_flow",
-                                flow = store.read(|r| steve_flow::flows::name_of(r, f))?
-                            );
-                            d.line(refused(&l_rules, s.rules_text(c, true), &why));
-                            continue;
-                        }
-                        if v.is_null() || said == FOLLOW {
-                            if s.set.rules.is_some() {
-                                let to = t!(
-                                    "channels.draft.value.follow_with",
-                                    what = rules_text(c, &s.account_rules, s.mode, true)
-                                );
-                                d.set(
-                                    "rules",
-                                    Value::Null,
-                                    Change::new(&l_rules, s.rules_text(c, true), to),
-                                );
-                            }
-                            continue;
-                        }
-                        match check_rules(c, ws, s.mode, v)? {
-                            Checked::Ok(rules, to) => {
-                                if s.set.rules.as_ref() != Some(&rules) {
-                                    d.set(
-                                        "rules",
-                                        rules,
-                                        Change::new(&l_rules, s.rules_text(c, true), to),
-                                    );
-                                }
-                            }
-                            Checked::Unknown(x) => d.line(not_recognized(&l_rules, &x)),
-                            Checked::Refused(why) => {
-                                d.line(refused(&l_rules, s.rules_text(c, true), &why))
-                            }
-                        }
-                    }
-                    "disclosure" => match code_of(&LEVELS, &said) {
-                        Some(l) if l != s.set.disclosure => d.set(
-                            "disclosure",
-                            json!(l),
-                            Change::new(
-                                &l_disclosure,
-                                level_card(&s.set.disclosure),
-                                level_card(l),
-                            ),
-                        ),
-                        Some(_) => {}
-                        None => d.line(not_recognized(&l_disclosure, &said)),
-                    },
-                    "memory_scope" => match code_of(&SCOPES, &said) {
-                        Some(m) if m != s.set.memory_scope => d.set(
-                            "memory_scope",
-                            json!(m),
-                            Change::new(&l_memory, scope_card(&s.set.memory_scope), scope_card(m)),
-                        ),
-                        Some(_) => {}
-                        None => d.line(not_recognized(&l_memory, &said)),
-                    },
-                    "collab" => match on_off_flag(v) {
-                        Some(b) if b != s.set.collab => d.set(
-                            "collab",
-                            json!(b),
-                            Change::new(&l_collab, on_off_card(s.set.collab), on_off_card(b)),
-                        ),
-                        Some(_) => {}
-                        None => d.line(not_recognized(&l_collab, &said)),
-                    },
-                    "item_defaults.tags" => {
-                        let Some(names) = list_of(v) else {
-                            d.line(not_recognized(&l_tags, &v.to_string()));
-                            continue;
-                        };
-                        let old = tags_of(&s.set.item_defaults);
-                        match find_tags(c, ws, &names)? {
-                            Ok(ids) if ids.len() > 20 => d.line(refused(
-                                &l_tags,
-                                tag_names(c, &old, true),
-                                &invalid_card("item_defaults.tags"),
-                            )),
-                            Ok(ids) if ids != old => {
-                                let mut defaults = item_defaults(&s.set.item_defaults);
-                                defaults["tags"] = json!(ids);
-                                d.set(
-                                    "item_defaults",
-                                    defaults,
-                                    Change::new(
-                                        &l_tags,
-                                        tag_names(c, &old, true),
-                                        tag_names(c, &ids, true),
-                                    ),
-                                );
-                            }
-                            Ok(_) => {}
-                            Err(name) => d.line(not_recognized(&l_tags, &name)),
-                        }
-                    }
-                    "duty" => {
-                        let new = appended(&s.set.duty, &said);
-                        if said.is_empty() || new == s.set.duty {
-                            continue;
-                        }
-                        if utf16_len(&new) > DUTY_MAX {
-                            d.line(refused(&l_duty, show(&s.set.duty), &invalid_card("duty")));
-                            continue;
-                        }
-                        let added = new.strip_prefix(s.set.duty.as_str()).unwrap_or(&new).trim();
-                        let line = Change::new(&l_duty, show(&s.set.duty), appended_card(added));
-                        d.set("duty", json!(new), line);
-                    }
-                    _ => d.other(&op),
                 }
+                "duty" => {
+                    let new = appended(&s.set.duty, &said);
+                    if said.is_empty() || new == s.set.duty {
+                        continue;
+                    }
+                    if utf16_len(&new) > DUTY_MAX {
+                        d.line(refused(&l_duty, show(&s.set.duty), &invalid_card("duty")));
+                        continue;
+                    }
+                    let added = new.strip_prefix(s.set.duty.as_str()).unwrap_or(&new).trim();
+                    let line = Change::new(&l_duty, show(&s.set.duty), appended_card(added));
+                    d.set("duty", json!(new), line);
+                }
+                _ => d.other(&op),
             }
-            let mut plan = Plan {
-                ops: vec![],
-                changes: d.changes,
-            };
-            if !d.patch.is_empty() {
-                plan.ops
-                    .push(json!({ "op": OP_SPACE, "space_id": id, "patch": d.patch }));
-            }
-            Ok(plan)
-        })
+        }
+        let mut plan = Plan {
+            ops: vec![],
+            changes: d.changes,
+        };
+        if !d.patch.is_empty() {
+            plan.ops
+                .push(json!({ "op": OP_SPACE, "space_id": id, "patch": d.patch }));
+        }
+        Ok(plan)
     }
 
     fn revision(
         &self,
         _store: &steve_store::Store,
-        w: &mut steve_store::W<'_>,
+        r: &mut steve_store::W<'_>,
         ws: &str,
         id: &str,
     ) -> ApiResult<Option<i64>> {
-        let c = &w.legacy();
-        space_revision(c, ws, id)
+        space_revision(r, ws, id)
     }
 
     fn candidates(
         &self,
-        store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        _store: &steve_store::Store,
+        r: &mut steve_store::R<'_>,
         viewer: &Viewer,
     ) -> ApiResult<Vec<Candidate>> {
-        store.reader(|c| space_candidates(c, viewer))
+        space_candidates(r, viewer)
     }
 }
 
-fn space_candidates(c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Candidate>> {
+fn space_candidates(r: &mut impl Read, viewer: &Viewer) -> ApiResult<Vec<Candidate>> {
     let mut out = Vec::new();
-    for s in spaces::list(c, viewer, None, None)? {
+    for s in spaces::list(r, viewer, None, None)? {
         if s.status != "active" {
             continue;
         }
@@ -1045,8 +1020,8 @@ fn space_candidates(c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Candidate>
             code: format!("space:{}", s.id),
             label: format!(
                 "{}（{}）",
-                spaces::display_title(c, &s)?,
-                account_name(c, &viewer.ws, &s.connection_id)?
+                spaces::display_title(r, &s)?,
+                account_name(r, &viewer.ws, &s.connection_id)?
             ),
         });
     }
@@ -1067,31 +1042,37 @@ fn tags_of(defaults: &Value) -> Vec<String> {
 /// The prototype's `bestSpace` as an ordering hint for `pickTarget`: spaces whose name (without a
 /// trailing “群”) shares a piece of at least 2 characters with the request, longest piece first.
 /// The model still picks; `prepare` checks the pick.
-pub fn space_hints(c: &Connection, viewer: &Viewer, request: &str) -> ApiResult<Vec<Candidate>> {
-    let score = |name: &str| -> usize {
-        let core: Vec<char> = name.strip_suffix('群').unwrap_or(name).chars().collect();
-        let mut best = 0;
-        for i in 0..core.len() {
-            for j in (i + 2)..=core.len() {
-                let piece: String = core[i..j].iter().collect();
-                if request.contains(&piece) {
-                    best = best.max(j - i);
+pub fn space_hints(
+    store: &steve_store::Store,
+    viewer: &Viewer,
+    request: &str,
+) -> ApiResult<Vec<Candidate>> {
+    store.read(|r| {
+        let score = |name: &str| -> usize {
+            let core: Vec<char> = name.strip_suffix('群').unwrap_or(name).chars().collect();
+            let mut best = 0;
+            for i in 0..core.len() {
+                for j in (i + 2)..=core.len() {
+                    let piece: String = core[i..j].iter().collect();
+                    if request.contains(&piece) {
+                        best = best.max(j - i);
+                    }
                 }
             }
-        }
-        best
-    };
-    let mut scored: Vec<(usize, Candidate)> = space_candidates(c, viewer)?
-        .into_iter()
-        .filter_map(|cand| {
-            let id = cand.code.strip_prefix("space:")?;
-            let name = spaces::get(c, id).ok()??.name;
-            let n = score(&name);
-            (n >= 2).then_some((n, cand))
-        })
-        .collect();
-    scored.sort_by_key(|s| std::cmp::Reverse(s.0));
-    Ok(scored.into_iter().map(|(_, c)| c).collect())
+            best
+        };
+        let mut scored: Vec<(usize, Candidate)> = space_candidates(r, viewer)?
+            .into_iter()
+            .filter_map(|cand| {
+                let id = cand.code.strip_prefix("space:")?;
+                let name = steve_store::channel_spaces::rows::get(r, id).ok()??.name;
+                let n = score(&name);
+                (n >= 2).then_some((n, cand))
+            })
+            .collect();
+        scored.sort_by_key(|s| std::cmp::Reverse(s.0));
+        Ok(scored.into_iter().map(|(_, c)| c).collect())
+    })
 }
 
 fn parse_space_patch(v: &Value) -> ApiResult<SpacePatch> {
@@ -1103,24 +1084,22 @@ struct SpaceOp(Arc<dyn Clock>);
 
 impl ChangeOp for SpaceOp {
     fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
-        let c = &w.legacy();
         parse_space_patch(&op["patch"])?.check()?;
-        let s = spaces::own(c, &viewer(c, cx)?, op["space_id"].as_str().unwrap_or(""))?;
+        let s = spaces::checked_space(w, &viewer(cx), op["space_id"].as_str().unwrap_or(""))?;
         spaces::writable(&s)?;
         Ok(())
     }
 
     fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
-        let tx = &w.legacy();
         let id = op["space_id"].as_str().unwrap_or("");
-        let v = viewer(tx, cx)?;
-        let s = spaces::own(tx, &v, id)?;
+        let v = viewer(cx);
+        let s = spaces::checked_space(w, &v, id)?;
         spaces::writable(&s)?;
-        let set = spaces::settings(tx, id)?;
+        let set = spaces::settings(w, id)?;
         let mut before = Map::new();
         for key in op["patch"].as_object().into_iter().flat_map(|m| m.keys()) {
             let old = match key.as_str() {
-                "persona_id" => json!(bindings::space_binding(tx, &s)?),
+                "persona_id" => json!(bindings::space_binding(w, &s)?),
                 "duty" => json!(set.duty),
                 "rules" => json!(set.rules),
                 "muted" => json!(set.muted),
@@ -1132,7 +1111,7 @@ impl ChangeOp for SpaceOp {
             };
             before.insert(key.clone(), old);
         }
-        spaces::patch(tx, &v, id, &parse_space_patch(&op["patch"])?, self.0.now())?;
+        spaces::patch(w, &v, id, &parse_space_patch(&op["patch"])?, self.0.now())?;
         Ok(json!({ "fields": before, "configured": set.configured }))
     }
 
@@ -1143,16 +1122,12 @@ impl ChangeOp for SpaceOp {
         op: &Value,
         before: &Value,
     ) -> ApiResult<()> {
-        let tx = &w.legacy();
         let id = op["space_id"].as_str().unwrap_or("");
-        let v = viewer(tx, cx)?;
+        let v = viewer(cx);
         let now = self.0.now();
-        spaces::patch(tx, &v, id, &parse_space_patch(&before["fields"])?, now)?;
+        spaces::patch(w, &v, id, &parse_space_patch(&before["fields"])?, now)?;
         if before["configured"] == false {
-            tx.execute(
-                "UPDATE space_settings SET configured = 0, updated = ? WHERE space_id = ?",
-                params![now, id],
-            )?;
+            steve_store::channel_spaces::preferences::clear_configured(w, id, now)?;
         }
         Ok(())
     }
@@ -1188,220 +1163,210 @@ struct PersonaTarget;
 impl DraftTarget for PersonaTarget {
     fn prepare(
         &self,
-        store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        _store: &steve_store::Store,
+        r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         id: Option<&str>,
     ) -> ApiResult<Prepared> {
-        store.reader(|c| {
-            let id = id.ok_or_else(|| ApiError::invalid("target.id"))?;
-            let p = personas::own(c, &viewer.ws, id)?;
-            let mut fields = vec![
-                FieldSpec::new("name", "名字（1–20 字）", "text", json!(p.name)),
-                FieldSpec::new(
-                    "bot",
-                    "背后的 Bot（Bot 的名字）",
-                    "ref",
-                    json!(bot_name(c, &p.bot_id)),
-                ),
-                FieldSpec::new("intro", "自我介绍（≤400 字）", "text", json!(p.intro)),
-                FieldSpec::new(
-                    "soul",
-                    "口吻、性格、说话方式（自由文本）",
-                    "text",
-                    json!(p.soul),
-                ),
-            ];
-            for (k, l) in REVEALS {
-                fields.push(
-                    FieldSpec::new(
-                        &format!("reveal.{k}"),
-                        &format!("被问到时是否透露：{l}"),
-                        "enum",
-                        json!(reveal_text(reveal_of(&p.reveal, k))),
-                    )
-                    .values(&[REVEAL, HIDE]),
-                );
-            }
-            fields.push(FieldSpec::new(
-                "signature",
-                "签名（追加在每条消息末尾，≤60 字）",
+        let id = id.ok_or_else(|| ApiError::invalid("target.id"))?;
+        let p = personas::own(r, &viewer.ws, id)?;
+        let mut fields = vec![
+            FieldSpec::new("name", "名字（1–20 字）", "text", json!(p.name)),
+            FieldSpec::new(
+                "bot",
+                "背后的 Bot（Bot 的名字）",
+                "ref",
+                json!(bot_name(r, &p.bot_id)),
+            ),
+            FieldSpec::new("intro", "自我介绍（≤400 字）", "text", json!(p.intro)),
+            FieldSpec::new(
+                "soul",
+                "口吻、性格、说话方式（自由文本）",
                 "text",
-                json!(p.signature),
-            ));
-            Ok(Prepared {
-                target_id: Some(p.id.clone()),
-                revision: Some(p.revision),
-                title: t!("channels.draft.title.persona", name = p.name),
-                href: format!("#/channels/personas/{}", p.id),
-                subject: format!(
-                    "the outward persona \"{}\" (how Steve presents itself in chats)",
-                    p.name
-                ),
-                fields,
-                ops: vec![],
-                free_text: Some("soul".into()),
-                context: Value::Null,
-            })
+                json!(p.soul),
+            ),
+        ];
+        for (k, l) in REVEALS {
+            fields.push(
+                FieldSpec::new(
+                    &format!("reveal.{k}"),
+                    &format!("被问到时是否透露：{l}"),
+                    "enum",
+                    json!(reveal_text(reveal_of(&p.reveal, k))),
+                )
+                .values(&[REVEAL, HIDE]),
+            );
+        }
+        fields.push(FieldSpec::new(
+            "signature",
+            "签名（追加在每条消息末尾，≤60 字）",
+            "text",
+            json!(p.signature),
+        ));
+        Ok(Prepared {
+            target_id: Some(p.id.clone()),
+            revision: Some(p.revision),
+            title: t!("channels.draft.title.persona", name = p.name),
+            href: format!("#/channels/personas/{}", p.id),
+            subject: format!(
+                "the outward persona \"{}\" (how Steve presents itself in chats)",
+                p.name
+            ),
+            fields,
+            ops: vec![],
+            free_text: Some("soul".into()),
+            context: Value::Null,
         })
     }
 
     fn plan(
         &self,
-        store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        _store: &steve_store::Store,
+        r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         prep: &Prepared,
         raw: Vec<Value>,
     ) -> ApiResult<Plan> {
-        store.reader(|c| {
-            let p = personas::own(c, &viewer.ws, prep.target_id.as_deref().unwrap_or(""))?;
-            let mut d = Lines::default();
-            let mut reveal = Map::new();
-            for op in raw {
-                let Some((key, v)) = set_of(&op) else {
-                    d.other(&op);
-                    continue;
-                };
-                let said = text_of(v).unwrap_or_default();
-                if let Some((k, _)) = key
-                    .strip_prefix("reveal.")
-                    .and_then(|k| REVEALS.iter().find(|(x, _)| *x == k))
-                {
-                    let label = reveal_label(k);
-                    match flag(v, &[REVEAL, "是", "说"], &[HIDE, "否", "不说", "不透露"]) {
-                        Some(b) if b != reveal_of(&p.reveal, k) => {
-                            reveal.insert((*k).into(), json!(b));
-                            d.line(Change::new(
-                                label,
-                                reveal_card(reveal_of(&p.reveal, k)),
-                                reveal_card(b),
-                            ));
-                        }
-                        Some(_) => {
-                            reveal.remove(*k);
-                            d.changes.retain(|x| x.label != label);
-                        }
-                        None => d.line(not_recognized(&label, &said)),
-                    }
-                    continue;
-                }
-                match key {
-                    "name" => {
-                        let l_name = t!("channels.draft.label.name");
-                        if !(1..=20).contains(&utf16_len(&said)) {
-                            d.line(not_recognized(&l_name, &said));
-                        } else if said != p.name {
-                            d.set(
-                                "name",
-                                json!(said),
-                                Change::new(l_name, &p.name, said.clone()),
-                            );
-                        }
-                    }
-                    "bot" => {
-                        let l_bot = t!("channels.draft.label.bot");
-                        match find_bot(c, &viewer.ws, &said)? {
-                            Some(b) if b != p.bot_id => d.set(
-                                "bot_id",
-                                json!(b),
-                                Change::new(l_bot, bot_name(c, &p.bot_id), bot_name(c, &b)),
-                            ),
-                            Some(_) => {}
-                            None => d.line(not_recognized(&l_bot, &said)),
-                        }
-                    }
-                    "intro" => {
-                        let l_intro = t!("channels.draft.label.intro");
-                        if utf16_len(&said) > 400 {
-                            d.line(refused(&l_intro, show(&p.intro), &invalid_card("intro")));
-                        } else if said != p.intro {
-                            d.set(
-                                "intro",
-                                json!(said),
-                                Change::new(l_intro, show(&p.intro), show(&said)),
-                            );
-                        }
-                    }
-                    "soul" => {
-                        let l_soul = t!("channels.draft.label.soul");
-                        let new = appended(&p.soul, &said);
-                        if said.is_empty() || new == p.soul {
-                            continue;
-                        }
-                        if utf16_len(&new) > 2000 {
-                            d.line(refused(&l_soul, show(&p.soul), &invalid_card("soul")));
-                            continue;
-                        }
-                        let added = new.strip_prefix(p.soul.as_str()).unwrap_or(&new).trim();
-                        let line = Change::new(l_soul, show(&p.soul), appended_card(added));
-                        d.set("soul", json!(new), line);
-                    }
-                    "signature" => {
-                        let l_signature = t!("channels.draft.label.signature");
-                        if utf16_len(&said) > 60 {
-                            d.line(refused(
-                                &l_signature,
-                                or_none(&p.signature),
-                                &invalid_card("signature"),
-                            ));
-                        } else if said != p.signature {
-                            d.set(
-                                "signature",
-                                json!(said),
-                                Change::new(l_signature, or_none(&p.signature), or_none(&said)),
-                            );
-                        }
-                    }
-                    _ => d.other(&op),
-                }
-            }
-            if !reveal.is_empty() {
-                d.patch.insert("reveal".into(), Value::Object(reveal));
-            }
-            let mut plan = Plan {
-                ops: vec![],
-                changes: d.changes,
+        let p = personas::own(r, &viewer.ws, prep.target_id.as_deref().unwrap_or(""))?;
+        let mut d = Lines::default();
+        let mut reveal = Map::new();
+        for op in raw {
+            let Some((key, v)) = set_of(&op) else {
+                d.other(&op);
+                continue;
             };
-            if !d.patch.is_empty() {
-                plan.ops
-                    .push(json!({ "op": OP_PERSONA, "persona_id": p.id, "patch": d.patch }));
+            let said = text_of(v).unwrap_or_default();
+            if let Some((k, _)) = key
+                .strip_prefix("reveal.")
+                .and_then(|k| REVEALS.iter().find(|(x, _)| *x == k))
+            {
+                let label = reveal_label(k);
+                match flag(v, &[REVEAL, "是", "说"], &[HIDE, "否", "不说", "不透露"]) {
+                    Some(b) if b != reveal_of(&p.reveal, k) => {
+                        reveal.insert((*k).into(), json!(b));
+                        d.line(Change::new(
+                            label,
+                            reveal_card(reveal_of(&p.reveal, k)),
+                            reveal_card(b),
+                        ));
+                    }
+                    Some(_) => {
+                        reveal.remove(*k);
+                        d.changes.retain(|x| x.label != label);
+                    }
+                    None => d.line(not_recognized(&label, &said)),
+                }
+                continue;
             }
-            Ok(plan)
-        })
+            match key {
+                "name" => {
+                    let l_name = t!("channels.draft.label.name");
+                    if !(1..=20).contains(&utf16_len(&said)) {
+                        d.line(not_recognized(&l_name, &said));
+                    } else if said != p.name {
+                        d.set(
+                            "name",
+                            json!(said),
+                            Change::new(l_name, &p.name, said.clone()),
+                        );
+                    }
+                }
+                "bot" => {
+                    let l_bot = t!("channels.draft.label.bot");
+                    match find_bot(r, &viewer.ws, &said)? {
+                        Some(b) if b != p.bot_id => d.set(
+                            "bot_id",
+                            json!(b),
+                            Change::new(l_bot, bot_name(r, &p.bot_id), bot_name(r, &b)),
+                        ),
+                        Some(_) => {}
+                        None => d.line(not_recognized(&l_bot, &said)),
+                    }
+                }
+                "intro" => {
+                    let l_intro = t!("channels.draft.label.intro");
+                    if utf16_len(&said) > 400 {
+                        d.line(refused(&l_intro, show(&p.intro), &invalid_card("intro")));
+                    } else if said != p.intro {
+                        d.set(
+                            "intro",
+                            json!(said),
+                            Change::new(l_intro, show(&p.intro), show(&said)),
+                        );
+                    }
+                }
+                "soul" => {
+                    let l_soul = t!("channels.draft.label.soul");
+                    let new = appended(&p.soul, &said);
+                    if said.is_empty() || new == p.soul {
+                        continue;
+                    }
+                    if utf16_len(&new) > 2000 {
+                        d.line(refused(&l_soul, show(&p.soul), &invalid_card("soul")));
+                        continue;
+                    }
+                    let added = new.strip_prefix(p.soul.as_str()).unwrap_or(&new).trim();
+                    let line = Change::new(l_soul, show(&p.soul), appended_card(added));
+                    d.set("soul", json!(new), line);
+                }
+                "signature" => {
+                    let l_signature = t!("channels.draft.label.signature");
+                    if utf16_len(&said) > 60 {
+                        d.line(refused(
+                            &l_signature,
+                            or_none(&p.signature),
+                            &invalid_card("signature"),
+                        ));
+                    } else if said != p.signature {
+                        d.set(
+                            "signature",
+                            json!(said),
+                            Change::new(l_signature, or_none(&p.signature), or_none(&said)),
+                        );
+                    }
+                }
+                _ => d.other(&op),
+            }
+        }
+        if !reveal.is_empty() {
+            d.patch.insert("reveal".into(), Value::Object(reveal));
+        }
+        let mut plan = Plan {
+            ops: vec![],
+            changes: d.changes,
+        };
+        if !d.patch.is_empty() {
+            plan.ops
+                .push(json!({ "op": OP_PERSONA, "persona_id": p.id, "patch": d.patch }));
+        }
+        Ok(plan)
     }
 
     fn revision(
         &self,
         _store: &steve_store::Store,
-        w: &mut steve_store::W<'_>,
+        r: &mut steve_store::W<'_>,
         ws: &str,
         id: &str,
     ) -> ApiResult<Option<i64>> {
-        let c = &w.legacy();
-        Ok(c.query_row(
-            "SELECT revision FROM personas WHERE id = ? AND workspace_id = ? AND deleted = 0",
-            params![id, ws],
-            |r| r.get(0),
-        )
-        .optional()?)
+        Ok(personas::get(r, id)?
+            .filter(|p| p.workspace_id == ws && !p.deleted)
+            .map(|p| p.revision))
     }
 
     fn candidates(
         &self,
-        store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        _store: &steve_store::Store,
+        r: &mut steve_store::R<'_>,
         viewer: &Viewer,
     ) -> ApiResult<Vec<Candidate>> {
-        store.reader(|c| {
-            Ok(personas::list(c, &viewer.ws)?
-                .into_iter()
-                .map(|p| Candidate {
-                    code: format!("persona:{}", p.id),
-                    label: format!("对外身份 {}", p.name),
-                })
-                .collect())
-        })
+        Ok(personas::list(r, &viewer.ws)?
+            .into_iter()
+            .map(|p| Candidate {
+                code: format!("persona:{}", p.id),
+                label: format!("对外身份 {}", p.name),
+            })
+            .collect())
     }
 }
 
@@ -1414,16 +1379,14 @@ struct PersonaOp(Arc<dyn Clock>);
 
 impl ChangeOp for PersonaOp {
     fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
-        let c = &w.legacy();
         parse_persona_patch(&op["patch"])?;
-        personas::own(c, cx.ws, op["persona_id"].as_str().unwrap_or(""))?;
+        personas::own(w, cx.ws, op["persona_id"].as_str().unwrap_or(""))?;
         Ok(())
     }
 
     fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
-        let tx = &w.legacy();
         let id = op["persona_id"].as_str().unwrap_or("");
-        let p = personas::own(tx, cx.ws, id)?;
+        let p = personas::own(w, cx.ws, id)?;
         let mut before = Map::new();
         for key in op["patch"].as_object().into_iter().flat_map(|m| m.keys()) {
             let old = match key.as_str() {
@@ -1438,8 +1401,8 @@ impl ChangeOp for PersonaOp {
             before.insert(key.clone(), old);
         }
         personas::patch(
-            tx,
-            &viewer(tx, cx)?,
+            w,
+            &viewer(cx),
             id,
             &parse_persona_patch(&op["patch"])?,
             self.0.now(),
@@ -1454,10 +1417,9 @@ impl ChangeOp for PersonaOp {
         op: &Value,
         before: &Value,
     ) -> ApiResult<()> {
-        let tx = &w.legacy();
         personas::patch(
-            tx,
-            &viewer(tx, cx)?,
+            w,
+            &viewer(cx),
             op["persona_id"].as_str().unwrap_or(""),
             &parse_persona_patch(before)?,
             self.0.now(),
@@ -1469,13 +1431,6 @@ impl ChangeOp for PersonaOp {
 // ---------------------------------------------------------------- channel (account)
 
 const L_DEFAULT_RULES: &str = "默认响应规则";
-
-/// The connections of channels `viewer` may configure: in the workspace, receiving messages, not
-/// someone else's personal account (`own` like `set_account_rules`).
-const CHANNEL_SQL: &str = "SELECT c.id FROM connections c JOIN accounts a ON a.id = c.account_id LEFT JOIN parties p ON p.id = a.party_id
-    WHERE c.workspace_id = ?1 AND c.status <> 'revoked' AND (p.user_id IS NULL OR p.user_id = ?2)
-      AND (EXISTS (SELECT 1 FROM channel_settings s WHERE s.connection_id = c.id)
-           OR EXISTS (SELECT 1 FROM json_each(c.caps) WHERE json_each.value = 'msg.receive'))";
 
 /// A channel account as the draft sees it.
 struct ChannelNow {
@@ -1501,27 +1456,19 @@ fn full_trigger(v: &Value) -> Value {
     json!({"on": t.on, "words": t.words, "where": t.r#where, "mark": t.mark})
 }
 
-fn account_binding(c: &Connection, ws: &str, account: &str) -> ApiResult<Option<String>> {
-    Ok(c.query_row(
-        "SELECT persona_id FROM persona_bindings WHERE workspace_id = ? AND account_id = ? AND space_id = ''",
-        params![ws, account],
-        |r| r.get(0),
-    )
-    .optional()?)
+fn account_binding(r: &mut impl Read, ws: &str, account: &str) -> ApiResult<Option<String>> {
+    Ok(steve_store::channel_personas::bindings::bound_id(
+        r, ws, account, "",
+    )?)
 }
 
 impl ChannelNow {
-    fn load(c: &Connection, viewer: &Viewer, conn: &str) -> ApiResult<Self> {
-        let ok: bool = c.query_row(
-            &format!("SELECT EXISTS ({CHANNEL_SQL} AND c.id = ?3)"),
-            params![viewer.ws, viewer.user, conn],
-            |r| r.get(0),
-        )?;
-        if !ok {
+    fn load(r: &mut impl Read, viewer: &Viewer, conn: &str) -> ApiResult<Self> {
+        if !steve_store::channel_spaces::account_settings::can_configure(r, viewer, conn)? {
             return Err(ApiError::not_found("连接"));
         }
-        let (account, mode) = bindings::connection_account(c, &viewer.ws, conn)?;
-        let set = spaces::channel_settings(c, &viewer.ws, conn)?;
+        let (account, mode) = bindings::connection_account(r, &viewer.ws, conn)?;
+        let set = spaces::channel_settings(r, &viewer.ws, conn)?;
         let (duty, rules, trigger, revision) = match set {
             Some(s) => (s.duty, s.rules, full_trigger(&s.trigger), s.revision),
             None => (
@@ -1537,13 +1484,13 @@ impl ChannelNow {
         Ok(Self {
             conn: conn.to_string(),
             mode,
-            name: account_name(c, &viewer.ws, conn)?,
+            name: account_name(r, &viewer.ws, conn)?,
             duty,
             rules,
             trigger,
             revision,
-            binding: account_binding(c, &viewer.ws, &account)?,
-            persona: bindings::account_persona(c, &viewer.ws, conn)?,
+            binding: account_binding(r, &viewer.ws, &account)?,
+            persona: bindings::account_persona(r, &viewer.ws, conn)?,
         })
     }
 
@@ -1559,8 +1506,12 @@ impl ChannelNow {
     }
 
     /// The account's spaces `(id, name)`, for `trigger.where`.
-    fn spaces(&self, c: &Connection, viewer: &Viewer) -> ApiResult<Vec<(String, String)>> {
-        Ok(spaces::list(c, viewer, Some(&self.conn), None)?
+    fn spaces(
+        &self,
+        r: &mut impl steve_store::Read,
+        viewer: &Viewer,
+    ) -> ApiResult<Vec<(String, String)>> {
+        Ok(spaces::list(r, viewer, Some(&self.conn), None)?
             .into_iter()
             .map(|s| (s.id, s.name))
             .collect())
@@ -1653,39 +1604,38 @@ struct ChannelTarget;
 impl DraftTarget for ChannelTarget {
     fn prepare(
         &self,
-        store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        _store: &steve_store::Store,
+        r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         id: Option<&str>,
     ) -> ApiResult<Prepared> {
-        store.reader(|c| {
-            let id = id.ok_or_else(|| ApiError::invalid("target.id"))?;
-            let a = ChannelNow::load(c, viewer, id)?;
-            let mut fields = Vec::new();
-            if a.mode == Mode::Bot {
-                fields.push(FieldSpec::new(
-                    "persona",
-                    "默认对外身份（身份的名字）",
-                    "ref",
-                    json!(a.persona_text(false)),
-                ));
-            }
+        let id = id.ok_or_else(|| ApiError::invalid("target.id"))?;
+        let a = ChannelNow::load(r, viewer, id)?;
+        let mut fields = Vec::new();
+        if a.mode == Mode::Bot {
             fields.push(FieldSpec::new(
-                "rules",
-                &format!("{L_DEFAULT_RULES}（{RULES_FORMAT}）"),
-                "list",
-                json!({ "规则": a.rules, "说明": rules_text(c, &a.rules, a.mode, false) }),
+                "persona",
+                "默认对外身份（身份的名字）",
+                "ref",
+                json!(a.persona_text(false)),
             ));
-            fields.push(FieldSpec::new(
-                "duty",
-                "账号默认职责（自由文本）",
-                "text",
-                json!(a.duty),
-            ));
-            if a.mode == Mode::Own {
-                let t = rules::Trigger::from_value(&a.trigger);
-                let places = a.spaces(c, viewer)?;
-                fields.extend([
+        }
+        fields.push(FieldSpec::new(
+            "rules",
+            &format!("{L_DEFAULT_RULES}（{RULES_FORMAT}）"),
+            "list",
+            json!({ "规则": a.rules, "说明": rules_text(r, &a.rules, a.mode, false) }),
+        ));
+        fields.push(FieldSpec::new(
+            "duty",
+            "账号默认职责（自由文本）",
+            "text",
+            json!(a.duty),
+        ));
+        if a.mode == Mode::Own {
+            let t = rules::Trigger::from_value(&a.trigger);
+            let places = a.spaces(r, viewer)?;
+            fields.extend([
                 FieldSpec::new(
                     "trigger.on",
                     "触发语（你本人发以触发语开头的消息时，Steve 以你的名义代发）",
@@ -1715,265 +1665,250 @@ impl DraftTarget for ChannelTarget {
                 )
                 .values(&[ON, OFF]),
             ]);
-            }
-            Ok(Prepared {
-                target_id: Some(id.to_string()),
-                revision: Some(a.revision),
-                title: t!("channels.draft.title.channel", name = a.name),
-                href: format!("#/channels/acc/{id}"),
-                subject: format!(
-                    "the chat account \"{}\" ({})",
-                    a.name,
-                    if a.mode == Mode::Own {
-                        "the user's own account"
-                    } else {
-                        "an app bot"
-                    }
-                ),
-                fields,
-                ops: vec![],
-                free_text: Some("duty".into()),
-                context: Value::Null,
-            })
+        }
+        Ok(Prepared {
+            target_id: Some(id.to_string()),
+            revision: Some(a.revision),
+            title: t!("channels.draft.title.channel", name = a.name),
+            href: format!("#/channels/acc/{id}"),
+            subject: format!(
+                "the chat account \"{}\" ({})",
+                a.name,
+                if a.mode == Mode::Own {
+                    "the user's own account"
+                } else {
+                    "an app bot"
+                }
+            ),
+            fields,
+            ops: vec![],
+            free_text: Some("duty".into()),
+            context: Value::Null,
         })
     }
 
     fn plan(
         &self,
-        store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        _store: &steve_store::Store,
+        r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         p: &Prepared,
         raw: Vec<Value>,
     ) -> ApiResult<Plan> {
-        store.reader(|c| {
-            let a = ChannelNow::load(c, viewer, p.target_id.as_deref().unwrap_or(""))?;
-            let ws = &viewer.ws;
-            let places = if a.mode == Mode::Own {
-                a.spaces(c, viewer)?
-            } else {
-                Vec::new()
+        let a = ChannelNow::load(r, viewer, p.target_id.as_deref().unwrap_or(""))?;
+        let ws = &viewer.ws;
+        let places = if a.mode == Mode::Own {
+            a.spaces(r, viewer)?
+        } else {
+            Vec::new()
+        };
+        let mut d = Lines::default();
+        let mut trigger = a.trigger.clone();
+        for op in raw {
+            let Some((key, v)) = set_of(&op) else {
+                d.other(&op);
+                continue;
             };
-            let mut d = Lines::default();
-            let mut trigger = a.trigger.clone();
-            for op in raw {
-                let Some((key, v)) = set_of(&op) else {
-                    d.other(&op);
-                    continue;
-                };
-                let said = text_of(v).unwrap_or_default();
-                if let Some(tk) = key.strip_prefix("trigger.") {
-                    let label = match tk {
-                        "on" => t!("channels.draft.label.trigger_on"),
-                        "words" => t!("channels.draft.label.trigger_words"),
-                        "where" => t!("channels.draft.label.trigger_where"),
-                        "mark" => t!("channels.draft.label.trigger_mark"),
-                        _ => {
-                            d.other(&op);
-                            continue;
-                        }
-                    };
-                    let label = label.as_str();
-                    if a.mode != Mode::Own {
-                        d.line(refused(label, "—", &t!("channels.error.trigger_self_only")));
+            let said = text_of(v).unwrap_or_default();
+            if let Some(tk) = key.strip_prefix("trigger.") {
+                let label = match tk {
+                    "on" => t!("channels.draft.label.trigger_on"),
+                    "words" => t!("channels.draft.label.trigger_words"),
+                    "where" => t!("channels.draft.label.trigger_where"),
+                    "mark" => t!("channels.draft.label.trigger_mark"),
+                    _ => {
+                        d.other(&op);
                         continue;
                     }
-                    let t = rules::Trigger::from_value(&a.trigger);
-                    match tk {
-                        "on" | "mark" => {
-                            let old = if tk == "on" { t.on } else { t.mark };
-                            match on_off_flag(v) {
-                                Some(b) => {
-                                    trigger[tk] = json!(b);
-                                    d.line(Change::new(label, on_off_card(old), on_off_card(b)));
-                                }
-                                None => d.line(not_recognized(label, &said)),
-                            }
-                        }
-                        "words" => match list_of(v) {
-                            Some(ws) if ws.len() > TRIGGER_WORDS_MAX => d.line(refused(
-                                label,
-                                t.words.join(" "),
-                                &invalid_card("trigger.words"),
-                            )),
-                            Some(ws) => match ws.iter().find(|w| !word_ok(w)) {
-                                Some(bad) => d.line(refused(
-                                    label,
-                                    t.words.join(" "),
-                                    &t!("channels.error.trigger_word", word = bad),
-                                )),
-                                None => {
-                                    let mut uniq: Vec<String> = Vec::new();
-                                    for w in ws {
-                                        if !uniq.contains(&w) {
-                                            uniq.push(w);
-                                        }
-                                    }
-                                    d.line(Change::new(label, t.words.join(" "), uniq.join(" ")));
-                                    trigger["words"] = json!(uniq);
-                                }
-                            },
-                            None => d.line(not_recognized(label, &said)),
-                        },
-                        _ => {
-                            let Some(names) = list_of(v) else {
-                                d.line(not_recognized(label, &v.to_string()));
-                                continue;
-                            };
-                            let mut ids: Vec<String> = Vec::new();
-                            let mut unknown = None;
-                            for n in names {
-                                let id = if n == rules::WHERE_ALL_DMS || n == ALL_DMS || n == "私聊"
-                                {
-                                    Some(rules::WHERE_ALL_DMS.to_string())
-                                } else if n == rules::WHERE_EVERYWHERE
-                                    || n == EVERYWHERE
-                                    || n == "所有地方"
-                                    || n == "到处"
-                                {
-                                    Some(rules::WHERE_EVERYWHERE.to_string())
-                                } else if places.iter().any(|(id, _)| *id == n) {
-                                    Some(n.clone())
-                                } else {
-                                    let hits: Vec<&String> = places
-                                        .iter()
-                                        .filter(|(_, name)| *name == n)
-                                        .map(|(id, _)| id)
-                                        .collect();
-                                    (hits.len() == 1).then(|| hits[0].clone())
-                                };
-                                match id {
-                                    Some(id) if !ids.contains(&id) => ids.push(id),
-                                    Some(_) => {}
-                                    None => {
-                                        unknown = Some(n);
-                                        break;
-                                    }
-                                }
-                            }
-                            match unknown {
-                                Some(n) => d.line(not_recognized(label, &n)),
-                                None => {
-                                    let ids = rules::normal_where(ids);
-                                    d.line(Change::new(
-                                        label,
-                                        where_names(&places, &t.r#where, true),
-                                        where_names(&places, &ids, true),
-                                    ));
-                                    trigger["where"] = json!(ids);
-                                }
-                            }
-                        }
-                    }
+                };
+                let label = label.as_str();
+                if a.mode != Mode::Own {
+                    d.line(refused(label, "—", &t!("channels.error.trigger_self_only")));
                     continue;
                 }
-                match key {
-                    "persona" if a.mode == Mode::Own => {
-                        d.line(refused(
-                            &t!("channels.draft.label.default_persona"),
-                            t!("channels.draft.value.you"),
-                            &t!("channels.error.self_no_persona"),
-                        ));
-                    }
-                    "persona" => {
-                        let label = t!("channels.draft.label.default_persona");
-                        match find_persona(c, ws, &said)? {
-                            Some(per) if a.binding.as_deref() != Some(per.id.as_str()) => d.set(
-                                "persona_id",
-                                json!(per.id),
-                                Change::new(label, a.persona_text(true), per.name),
-                            ),
-                            Some(_) => {}
-                            None => d.line(not_recognized(&label, &said)),
+                let t = rules::Trigger::from_value(&a.trigger);
+                match tk {
+                    "on" | "mark" => {
+                        let old = if tk == "on" { t.on } else { t.mark };
+                        match on_off_flag(v) {
+                            Some(b) => {
+                                trigger[tk] = json!(b);
+                                d.line(Change::new(label, on_off_card(old), on_off_card(b)));
+                            }
+                            None => d.line(not_recognized(label, &said)),
                         }
                     }
-                    "rules" => {
-                        let label = t!("channels.draft.label.default_rules");
-                        match check_rules(c, ws, a.mode, v)? {
-                            Checked::Ok(rules, to) => {
-                                if rules != a.rules {
-                                    let from = rules_text(c, &a.rules, a.mode, true);
-                                    d.set("rules", rules, Change::new(label, from, to));
+                    "words" => match list_of(v) {
+                        Some(ws) if ws.len() > TRIGGER_WORDS_MAX => d.line(refused(
+                            label,
+                            t.words.join(" "),
+                            &invalid_card("trigger.words"),
+                        )),
+                        Some(ws) => match ws.iter().find(|w| !word_ok(w)) {
+                            Some(bad) => d.line(refused(
+                                label,
+                                t.words.join(" "),
+                                &t!("channels.error.trigger_word", word = bad),
+                            )),
+                            None => {
+                                let mut uniq: Vec<String> = Vec::new();
+                                for w in ws {
+                                    if !uniq.contains(&w) {
+                                        uniq.push(w);
+                                    }
+                                }
+                                d.line(Change::new(label, t.words.join(" "), uniq.join(" ")));
+                                trigger["words"] = json!(uniq);
+                            }
+                        },
+                        None => d.line(not_recognized(label, &said)),
+                    },
+                    _ => {
+                        let Some(names) = list_of(v) else {
+                            d.line(not_recognized(label, &v.to_string()));
+                            continue;
+                        };
+                        let mut ids: Vec<String> = Vec::new();
+                        let mut unknown = None;
+                        for n in names {
+                            let id = if n == rules::WHERE_ALL_DMS || n == ALL_DMS || n == "私聊" {
+                                Some(rules::WHERE_ALL_DMS.to_string())
+                            } else if n == rules::WHERE_EVERYWHERE
+                                || n == EVERYWHERE
+                                || n == "所有地方"
+                                || n == "到处"
+                            {
+                                Some(rules::WHERE_EVERYWHERE.to_string())
+                            } else if places.iter().any(|(id, _)| *id == n) {
+                                Some(n.clone())
+                            } else {
+                                let hits: Vec<&String> = places
+                                    .iter()
+                                    .filter(|(_, name)| *name == n)
+                                    .map(|(id, _)| id)
+                                    .collect();
+                                (hits.len() == 1).then(|| hits[0].clone())
+                            };
+                            match id {
+                                Some(id) if !ids.contains(&id) => ids.push(id),
+                                Some(_) => {}
+                                None => {
+                                    unknown = Some(n);
+                                    break;
                                 }
                             }
-                            Checked::Unknown(x) => d.line(not_recognized(&label, &x)),
-                            Checked::Refused(why) => {
-                                d.line(refused(&label, rules_text(c, &a.rules, a.mode, true), &why))
+                        }
+                        match unknown {
+                            Some(n) => d.line(not_recognized(label, &n)),
+                            None => {
+                                let ids = rules::normal_where(ids);
+                                d.line(Change::new(
+                                    label,
+                                    where_names(&places, &t.r#where, true),
+                                    where_names(&places, &ids, true),
+                                ));
+                                trigger["where"] = json!(ids);
                             }
                         }
                     }
-                    "duty" => {
-                        let label = t!("channels.draft.label.account_duty");
-                        let new = appended(&a.duty, &said);
-                        if said.is_empty() || new == a.duty {
-                            continue;
-                        }
-                        if utf16_len(&new) > DUTY_MAX {
-                            d.line(refused(&label, show(&a.duty), &invalid_card("duty")));
-                            continue;
-                        }
-                        let added = new.strip_prefix(a.duty.as_str()).unwrap_or(&new).trim();
-                        let line = Change::new(label, show(&a.duty), appended_card(added));
-                        d.set("duty", json!(new), line);
-                    }
-                    _ => d.other(&op),
                 }
+                continue;
             }
-            d.changes.retain(|x| x.from != x.to);
-            if trigger != a.trigger {
-                d.patch.insert("trigger".into(), trigger);
+            match key {
+                "persona" if a.mode == Mode::Own => {
+                    d.line(refused(
+                        &t!("channels.draft.label.default_persona"),
+                        t!("channels.draft.value.you"),
+                        &t!("channels.error.self_no_persona"),
+                    ));
+                }
+                "persona" => {
+                    let label = t!("channels.draft.label.default_persona");
+                    match find_persona(r, ws, &said)? {
+                        Some(per) if a.binding.as_deref() != Some(per.id.as_str()) => d.set(
+                            "persona_id",
+                            json!(per.id),
+                            Change::new(label, a.persona_text(true), per.name),
+                        ),
+                        Some(_) => {}
+                        None => d.line(not_recognized(&label, &said)),
+                    }
+                }
+                "rules" => {
+                    let label = t!("channels.draft.label.default_rules");
+                    match check_rules(r, ws, a.mode, v)? {
+                        Checked::Ok(rules, to) => {
+                            if rules != a.rules {
+                                let from = rules_text(r, &a.rules, a.mode, true);
+                                d.set("rules", rules, Change::new(label, from, to));
+                            }
+                        }
+                        Checked::Unknown(x) => d.line(not_recognized(&label, &x)),
+                        Checked::Refused(why) => {
+                            d.line(refused(&label, rules_text(r, &a.rules, a.mode, true), &why))
+                        }
+                    }
+                }
+                "duty" => {
+                    let label = t!("channels.draft.label.account_duty");
+                    let new = appended(&a.duty, &said);
+                    if said.is_empty() || new == a.duty {
+                        continue;
+                    }
+                    if utf16_len(&new) > DUTY_MAX {
+                        d.line(refused(&label, show(&a.duty), &invalid_card("duty")));
+                        continue;
+                    }
+                    let added = new.strip_prefix(a.duty.as_str()).unwrap_or(&new).trim();
+                    let line = Change::new(label, show(&a.duty), appended_card(added));
+                    d.set("duty", json!(new), line);
+                }
+                _ => d.other(&op),
             }
-            let mut plan = Plan {
-                ops: vec![],
-                changes: d.changes,
-            };
-            if !d.patch.is_empty() {
-                plan.ops
-                    .push(json!({ "op": OP_CHANNEL, "connection_id": a.conn, "patch": d.patch }));
-            }
-            Ok(plan)
-        })
+        }
+        d.changes.retain(|x| x.from != x.to);
+        if trigger != a.trigger {
+            d.patch.insert("trigger".into(), trigger);
+        }
+        let mut plan = Plan {
+            ops: vec![],
+            changes: d.changes,
+        };
+        if !d.patch.is_empty() {
+            plan.ops
+                .push(json!({ "op": OP_CHANNEL, "connection_id": a.conn, "patch": d.patch }));
+        }
+        Ok(plan)
     }
 
     fn revision(
         &self,
         _store: &steve_store::Store,
-        w: &mut steve_store::W<'_>,
+        r: &mut steve_store::W<'_>,
         ws: &str,
         id: &str,
     ) -> ApiResult<Option<i64>> {
-        let c = &w.legacy();
-        if let Some(s) = spaces::channel_settings(c, ws, id)? {
+        if let Some(s) = spaces::channel_settings(r, ws, id)? {
             return Ok(Some(s.revision));
         }
-        let exists: bool = c.query_row(
-            "SELECT EXISTS (SELECT 1 FROM connections WHERE id = ? AND workspace_id = ?)",
-            params![id, ws],
-            |r| r.get(0),
-        )?;
-        Ok(exists.then_some(1))
+        Ok(steve_store::Connections(r).contains(ws, id)?.then_some(1))
     }
 
     fn candidates(
         &self,
-        store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        _store: &steve_store::Store,
+        r: &mut steve_store::R<'_>,
         viewer: &Viewer,
     ) -> ApiResult<Vec<Candidate>> {
-        store.reader(|c| {
-            let mut st = c.prepare_cached(&format!("{CHANNEL_SQL} ORDER BY c.created, c.id"))?;
-            let ids = st
-                .query_map(params![viewer.ws, viewer.user], |r| r.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            ids.into_iter()
-                .map(|id| {
-                    Ok(Candidate {
-                        label: format!("接入账号 {}", account_name(c, &viewer.ws, &id)?),
-                        code: format!("channel:{id}"),
-                    })
+        steve_store::channel_spaces::account_settings::configurable_ids(r, viewer)?
+            .into_iter()
+            .map(|id| {
+                Ok(Candidate {
+                    label: format!("接入账号 {}", account_name(r, &viewer.ws, &id)?),
+                    code: format!("channel:{id}"),
                 })
-                .collect()
-        })
+            })
+            .collect()
     }
 }
 
@@ -1987,7 +1922,7 @@ impl ChannelOp {
     /// of `channel`, audit `channel.patch`, SSE `channel`.
     fn write(
         &self,
-        tx: &Tx,
+        w: &mut steve_store::W<'_>,
         cx: &OpCx,
         conn: &str,
         fields: &Map<String, Value>,
@@ -1998,8 +1933,8 @@ impl ChannelOp {
         }
         let ws = cx.ws;
         let now = self.0.now();
-        let (account, mode) = bindings::connection_account(tx, ws, conn)?;
-        let set = spaces::ensure_channel_settings(tx, ws, conn, mode, now)?;
+        let (account, mode) = bindings::connection_account(w, ws, conn)?;
+        let set = spaces::ensure_channel_settings(w, ws, conn, mode, now)?;
         let mut before = Map::new();
         let mut after = Map::new();
         let (mut rules, mut duty, mut trigger) =
@@ -2019,16 +1954,11 @@ impl ChannelOp {
                     trigger = v.clone();
                 }
                 "persona_id" => {
-                    before.insert(k.clone(), json!(account_binding(tx, ws, &account)?));
+                    before.insert(k.clone(), json!(account_binding(w, ws, &account)?));
                     match v.as_str() {
-                        Some(p) => {
-                            bindings::set_account_default(tx, &viewer(tx, cx)?, conn, p, now)?
-                        }
+                        Some(p) => bindings::set_account_default(w, &viewer(cx), conn, p, now)?,
                         None => {
-                            tx.execute(
-                                "DELETE FROM persona_bindings WHERE workspace_id = ? AND account_id = ? AND space_id = ''",
-                                params![ws, account],
-                            )?;
+                            steve_store::channel_personas::bindings::clear(w, ws, &account, "")?;
                         }
                     }
                 }
@@ -2037,12 +1967,16 @@ impl ChannelOp {
             after.insert(k.clone(), v.clone());
         }
         let version = set.revision + 1;
-        tx.execute(
-            "UPDATE channel_settings SET rules = ?, duty = ?, trigger = ?, revision = ?, updated = ? WHERE connection_id = ?",
-            params![rules.to_string(), duty, trigger.to_string(), version, now, conn],
-        )?;
-        base::revision(
-            tx,
+        let patch = steve_store::channel_spaces::account_settings::SettingsPatch {
+            rules: Some(&rules),
+            duty: Some(&duty),
+            trigger: Some(&trigger),
+            revision: version,
+            ..Default::default()
+        };
+        steve_store::channel_spaces::account_settings::patch(w, conn, &patch, now)?;
+        steve_store::audit_repo::revise(
+            w,
             ws,
             "channel",
             conn,
@@ -2052,15 +1986,15 @@ impl ChannelOp {
             cx.actor,
         )?;
         let keys: Vec<&String> = fields.keys().collect();
-        base::audit(
-            tx,
+        steve_store::audit_repo::record(
+            w,
             ws,
             cx.actor,
             "channel.patch",
             conn,
             &json!({ "fields": keys, "changeset": cx.changeset_id, "undo": undo }),
         )?;
-        tx.publish(steve_types::DomainEvent::from(
+        w.emit(steve_types::DomainEvent::from(
             steve_types::ChannelsEvent::Channel {
                 id: conn.into(),
                 ws: ws.into(),
@@ -2072,9 +2006,8 @@ impl ChannelOp {
 
 impl ChangeOp for ChannelOp {
     fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
-        let c = &w.legacy();
         let conn = op["connection_id"].as_str().unwrap_or("");
-        let a = ChannelNow::load(c, &viewer(c, cx)?, conn)?;
+        let a = ChannelNow::load(w, &viewer(cx), conn)?;
         let p = &op["patch"];
         if !p.is_object() {
             return Err(ApiError::invalid("patch"));
@@ -2095,16 +2028,15 @@ impl ChangeOp for ChannelOp {
             if a.mode == Mode::Own {
                 return Err(ApiError::rule(t!("channels.error.self_no_persona")));
             }
-            personas::own(c, cx.ws, per.as_str().unwrap_or(""))?;
+            personas::own(w, cx.ws, per.as_str().unwrap_or(""))?;
         }
         Ok(())
     }
 
     fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
-        let tx = &w.legacy();
         let conn = op["connection_id"].as_str().unwrap_or("");
-        let v = viewer(tx, cx)?;
-        let a = ChannelNow::load(tx, &v, conn)?;
+        let v = viewer(cx);
+        let a = ChannelNow::load(w, &v, conn)?;
         let mut fields = op["patch"].as_object().cloned().unwrap_or_default();
         let mut before = Map::new();
         for k in fields.keys() {
@@ -2118,9 +2050,9 @@ impl ChangeOp for ChannelOp {
             before.insert(k.clone(), old);
         }
         if let Some(r) = fields.remove("rules") {
-            spaces::set_account_rules(tx, &v, conn, &r, self.0.now())?;
+            spaces::set_account_rules(w, &v, conn, &r, self.0.now())?;
         }
-        self.write(tx, cx, conn, &fields, false)?;
+        self.write(w, cx, conn, &fields, false)?;
         Ok(Value::Object(before))
     }
 
@@ -2131,10 +2063,9 @@ impl ChangeOp for ChannelOp {
         op: &Value,
         before: &Value,
     ) -> ApiResult<()> {
-        let tx = &w.legacy();
         let fields = before.as_object().cloned().unwrap_or_default();
         self.write(
-            tx,
+            w,
             cx,
             op["connection_id"].as_str().unwrap_or(""),
             &fields,

@@ -8,6 +8,9 @@ mod cleanup_backup;
 mod digest_env;
 use digest_env::TestEnv;
 use std::sync::Arc;
+use steve_store::testkit::channels::inspect;
+use steve_store::testkit::channels::seed;
+use steve_store::testkit::channels::seed::people::Bot;
 
 use axum::Router;
 use axum::body::Body;
@@ -45,16 +48,7 @@ async fn setup_with_backup(fail: Option<bool>) -> (H, String, String) {
         connections::register(r);
         space_decisions::register(r);
     });
-    env.store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "INSERT INTO bots (id, workspace_id, name, main, harness, persona, updated) VALUES
-                    ('steve', 'default', 'Steve', 1, 'claude', '', 1);
-                 INSERT INTO bot_workspaces (bot_id, workspace_id, created) VALUES ('steve', 'default', 1);",
-            )?;
-            Ok(())
-        })
-        .expect("bots");
+    steve_store::testkit::channels::seed::people::bots(env.store(), &[Bot::default()]).unwrap();
     let keys = tempfile::tempdir().expect("tmp");
     let vault = Vault::new(
         env.store().clone(),
@@ -114,9 +108,7 @@ async fn setup_with_backup(fail: Option<bool>) -> (H, String, String) {
         .or(v["id"].as_str())
         .expect("connection id")
         .to_string();
-    let acc = h.one(&format!(
-        "SELECT account_id FROM connections WHERE id = '{con}'"
-    ));
+    let acc = inspect::connections::account_id(h.env.store(), &con).unwrap();
     (h, con, acc)
 }
 
@@ -156,91 +148,24 @@ impl H {
         (status, v)
     }
 
-    fn n(&self, sql: &str) -> i64 {
-        let sql = sql.to_string();
-        self.env
-            .store()
-            .reader(move |c| Ok::<_, steve_store::StoreError>(c.query_row(&sql, [], |r| r.get(0))?))
-            .expect("count")
-    }
-
-    fn one(&self, sql: &str) -> String {
-        let sql = sql.to_string();
-        self.env
-            .store()
-            .reader(move |c| Ok::<_, steve_store::StoreError>(c.query_row(&sql, [], |r| r.get(0))?))
-            .expect("row")
-    }
-
-    fn exec(&self, sql: &str) {
-        let sql = sql.to_string();
-        digest_env::write(self.env.store(), move |c| {
-            c.execute_batch(&sql)?;
-            Ok(())
-        })
-        .expect("exec");
-    }
-
     /// Spaces of `con` (or, `con` empty, of disconnected account `acc`): 客户群 with an auto
     /// contact (Ann), a confirmed one (Bob) and a shared auto one (Cat); 项目群 whose one message
     /// an item points at (Cat is there too), and 空群.
     fn seed(&self, p: &str, con: &str, acc: &str) {
-        let conn = if con.is_empty() {
-            "NULL".to_string()
-        } else {
-            format!("'{con}'")
-        };
-        self.exec(&format!(
-            "INSERT INTO parties (id, workspace_id, type, name, contact_kind, source, created_by, created, updated) VALUES
-               ('{p}ann', 'default', 'contact', 'Ann', 'unconfirmed', 'identify', 'usr_dev', 1, 1),
-               ('{p}bob', 'default', 'contact', 'Bob', NULL, 'manual', 'usr_dev', 1, 1),
-               ('{p}cat', 'default', 'contact', 'Cat', 'unconfirmed', 'identify', 'usr_dev', 1, 1);
-             INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated) VALUES
-               ('{p}a_ann', 'default', 'feishu', 'feishu', '{p}ann', 'personal', '{p}on_ann', 'Ann', 'identify', 1, 1),
-               ('{p}a_bob', 'default', 'feishu', 'feishu', '{p}bob', 'personal', '{p}on_bob', 'Bob', 'identify', 1, 1),
-               ('{p}a_cat', 'default', 'feishu', 'feishu', '{p}cat', 'personal', '{p}on_cat', 'Cat', 'identify', 1, 1);
-             INSERT INTO account_handles (workspace_id, family, handle, account_id, created) VALUES
-               ('default', 'feishu', '{p}on_ann', '{p}a_ann', 1);
-             INSERT INTO links (workspace_id, subject_type, subject_id, predicate, object_type, object_id, source, created) VALUES
-               ('default', 'party', '{p}ann', 'works_at', 'party', '{p}bob', 'infer', 1);
-             INSERT INTO spaces (id, workspace_id, system_id, connection_id, kind, external_id, name, status, created, updated, account_id) VALUES
-               ('{p}sp_a', 'default', 'feishu', {conn}, 'group', '{p}oc_a', '客户群', 'active', 1, 1, '{acc}'),
-               ('{p}sp_b', 'default', 'feishu', {conn}, 'group', '{p}oc_b', '项目群', 'active', 1, 1, '{acc}'),
-               ('{p}sp_c', 'default', 'feishu', {conn}, 'group', '{p}oc_c', '空群', 'active', 1, 1, '{acc}');
-             INSERT INTO space_members (workspace_id, space_id, account_id, joined) VALUES
-               ('default', '{p}sp_a', '{p}a_ann', 1), ('default', '{p}sp_a', '{p}a_bob', 1), ('default', '{p}sp_a', '{p}a_cat', 1),
-               ('default', '{p}sp_b', '{p}a_cat', 1);
-             INSERT INTO chan_messages (id, workspace_id, space_id, direction, sender_account_id, sender_party_id, text, attachments, work_item_id, created) VALUES
-               ('{p}m1', 'default', '{p}sp_a', 'in', '{p}a_ann', '{p}ann', '合同下周签', '[{{\"file\":\"fil_1\"}}]', NULL, 1),
-               ('{p}m2', 'default', '{p}sp_a', 'in', '{p}a_bob', '{p}bob', '好的', '[]', NULL, 2),
-               ('{p}m3', 'default', '{p}sp_b', 'in', '{p}a_cat', '{p}cat', '帮我跟进报价', '[]', 'it_1', 3),
-               ('{p}m4', 'default', '{p}sp_b', 'in', '{p}a_cat', '{p}cat', '顺便问下', '[]', NULL, 4);
-             INSERT INTO ext_events (id, workspace_id, connection_id, source, type, dedupe_key, space_id, message_id, occurred, received, summary, payload) VALUES
-               ('{p}ev1', 'default', {conn}, 'im', 'im.message', '{p}d1', '{p}sp_a', '{p}m1', 1, 1, 'Ann：合同下周签', '{{\"text\":\"合同下周签\"}}');"
-        ));
-        self.env
-            .store()
-            .transaction(|tx| {
-                for n in 1..=4 {
-                    steve_store_sqlite::digest::sync_message(
-                        tx,
-                        steve_store_sqlite::digest::Source::ChanMessage,
-                        &format!("{p}m{n}"),
-                        None,
-                    )?;
-                }
-                Ok::<_, steve_store::StoreError>(())
-            })
-            .unwrap();
+        seed::spaces::seed_cleanup_spaces(
+            self.env.store(),
+            p,
+            (!con.is_empty()).then_some(con),
+            acc,
+        )
+        .unwrap();
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn preview_then_text_purge() {
     let (h, con, _) = setup().await;
-    let base = h.n(&format!(
-        "SELECT count(*) FROM spaces WHERE connection_id = '{con}'"
-    ));
+    let base = inspect::spaces::spaces_for_connection(h.env.store(), &con).unwrap();
     h.seed("", &con, "");
 
     // confirm is required, and the target
@@ -288,7 +213,7 @@ async fn preview_then_text_purge() {
     );
     assert!(v.get("backup").is_none());
     assert_eq!(
-        h.n("SELECT count(*) FROM chan_messages WHERE text IS NULL"),
+        inspect::messages::count_chan_messages_by_text_null(h.env.store()).unwrap(),
         0,
         "a preview changes nothing"
     );
@@ -314,20 +239,24 @@ async fn preview_then_text_purge() {
         assert_eq!(mode(&dir), 0o700);
     }
     assert_eq!(
-        h.n("SELECT count(*) FROM chan_messages WHERE text IS NULL AND attachments = '[]' AND purged IS NOT NULL"),
+        inspect::messages::count_chan_messages_by_text_null_count(h.env.store()).unwrap(),
         3
     );
     assert_eq!(
-        h.one("SELECT text FROM chan_messages WHERE id = 'm3'"),
+        inspect::messages::message_text_by_m3(h.env.store()).unwrap(),
         "帮我跟进报价"
     );
-    assert_eq!(h.n("SELECT count(*) FROM chan_messages"), 4, "rows stay");
     assert_eq!(
-        h.n("SELECT count(*) FROM ext_events WHERE id = 'ev1' AND payload IS NULL AND payload_purged IS NOT NULL AND summary <> ''"),
+        inspect::messages::count_chan_messages(h.env.store()).unwrap(),
+        4,
+        "rows stay"
+    );
+    assert_eq!(
+        inspect::signals::count_ext_events_by_ev1(h.env.store()).unwrap(),
         1
     );
     assert_eq!(
-        h.n("SELECT count(*) FROM audit WHERE action = 'channel.cleanup' AND detail LIKE '%pre-purge-%'"),
+        inspect::audit::count_audit_by_channel_cleanup(h.env.store()).unwrap(),
         1
     );
     // nothing left to purge
@@ -346,13 +275,7 @@ async fn everything_but_what_is_referenced() {
     let (h, con, acc) = setup().await;
     h.seed("", &con, "");
     // Cat is also in a group of another account; Bob was confirmed by hand
-    h.exec(
-        "INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated) VALUES
-           ('a_other', 'default', 'feishu', 'feishu', 'bob', 'app_bot', 'cli_other', 'Other', 'connect', 1, 1);
-         INSERT INTO spaces (id, workspace_id, system_id, connection_id, kind, external_id, name, status, created, updated, account_id) VALUES
-           ('sp_elsewhere', 'default', 'feishu', NULL, 'group', 'oc_e', '别处', 'left', 1, 1, 'a_other');
-         INSERT INTO space_members (workspace_id, space_id, account_id, joined) VALUES ('default', 'sp_elsewhere', 'a_cat', 1);",
-    );
+    seed::people::seed_everything_but_what_is_referenced(h.env.store()).unwrap();
     let (st, v) = h
         .call(
             "POST",
@@ -407,58 +330,59 @@ async fn everything_but_what_is_referenced() {
         .await;
     assert_eq!(st, 200, "{v}");
     assert_eq!(
-        h.n("SELECT count(*) FROM spaces WHERE id IN ('sp_a', 'sp_c')"),
-        0
-    );
-    assert_eq!(h.n("SELECT count(*) FROM spaces WHERE id = 'sp_b'"), 1);
-    assert_eq!(
-        h.n("SELECT count(*) FROM chan_messages WHERE space_id = 'sp_a'"),
+        inspect::spaces::count_spaces_by_ids(h.env.store()).unwrap(),
         0
     );
     assert_eq!(
-        h.n("SELECT count(*) FROM space_members WHERE space_id = 'sp_a'"),
+        inspect::spaces::count_spaces_by_sp_b(h.env.store()).unwrap(),
+        1
+    );
+    assert_eq!(
+        inspect::messages::count_chan_messages_count_2(h.env.store()).unwrap(),
         0
     );
     assert_eq!(
-        h.n("SELECT count(*) FROM ext_events WHERE id = 'ev1'"),
+        inspect::spaces::count_space_members(h.env.store()).unwrap(),
+        0
+    );
+    assert_eq!(
+        inspect::signals::count_ext_events_by_ev1_count(h.env.store()).unwrap(),
         0,
         "an unused signal goes"
     );
     assert_eq!(
-        h.one("SELECT text FROM chan_messages WHERE id = 'm3'"),
+        inspect::messages::message_text_by_m3(h.env.store()).unwrap(),
         "帮我跟进报价"
     );
     assert_eq!(
-        h.n("SELECT count(*) FROM chan_messages WHERE id = 'm4' AND text IS NULL"),
+        inspect::messages::count_chan_messages_by_m4_and_text_null(h.env.store()).unwrap(),
         1
     );
     assert_eq!(
-        h.n("SELECT count(*) FROM parties WHERE id = 'ann'"),
+        inspect::people::count_parties_by_ann(h.env.store()).unwrap(),
         0,
         "auto contact deleted"
     );
-    assert_eq!(h.n("SELECT count(*) FROM accounts WHERE id = 'a_ann'"), 0);
     assert_eq!(
-        h.n("SELECT count(*) FROM account_handles WHERE account_id = 'a_ann'"),
+        inspect::people::count_accounts_by_a_ann(h.env.store()).unwrap(),
         0
     );
     assert_eq!(
-        h.n("SELECT count(*) FROM links WHERE subject_id = 'ann'"),
+        inspect::people::count_account_handles(h.env.store()).unwrap(),
         0
     );
+    assert_eq!(inspect::people::count_links(h.env.store()).unwrap(), 0);
     assert_eq!(
-        h.n("SELECT count(*) FROM parties WHERE id IN ('bob', 'cat')"),
+        inspect::people::count_parties_by_ids(h.env.store()).unwrap(),
         2
     );
     // the identity itself is untouched
     assert_eq!(
-        h.n(&format!("SELECT count(*) FROM accounts WHERE id = '{acc}'")),
+        inspect::people::account_count(h.env.store(), &acc).unwrap(),
         1
     );
     assert_eq!(
-        h.n(&format!(
-            "SELECT count(*) FROM connections WHERE id = '{con}'"
-        )),
+        inspect::connections::count_by_id(h.env.store(), &con).unwrap(),
         1
     );
     assert!(
@@ -474,12 +398,7 @@ async fn everything_but_what_is_referenced() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_disconnected_identity_by_its_account() {
     let (h, _con, _) = setup().await;
-    h.exec(
-        "INSERT INTO parties (id, workspace_id, type, name, contact_kind, source, created_by, created, updated) VALUES
-           ('old_bot', 'default', 'contact', '旧机器人', 'bot', 'connect', 'usr_dev', 1, 1);
-         INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, display_name, source, created, updated) VALUES
-           ('acc_old', 'default', 'feishu_app', 'feishu_app', 'old_bot', 'app_bot', 'cli_old', 'cli_old', '旧应用', 'connect', 1, 1);",
-    );
+    seed::people::seed_disconnected_identity_by_its_account(h.env.store()).unwrap();
     h.seed("x", "", "acc_old");
 
     let (st, v) = h.call("GET", "/channels/cleanup/leftovers", None).await;
@@ -508,7 +427,7 @@ async fn a_disconnected_identity_by_its_account() {
     );
     assert_eq!(v["name"], "旧应用");
     assert_eq!(
-        h.n("SELECT count(*) FROM spaces WHERE account_id = 'acc_old'"),
+        inspect::spaces::count_spaces_count(h.env.store()).unwrap(),
         1,
         "项目群 stays"
     );
@@ -529,23 +448,14 @@ async fn a_disconnected_identity_by_its_account() {
 #[tokio::test(flavor = "multi_thread")]
 async fn only_spaces_no_other_live_identity_sees() {
     let (h, con, _) = setup().await;
-    let base = h.n(&format!(
-        "SELECT count(*) FROM spaces WHERE connection_id = '{con}'"
-    ));
+    let base = inspect::spaces::spaces_for_connection(h.env.store(), &con).unwrap();
     h.seed("", &con, "");
-    h.exec(&format!(
-        "INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated)
-           VALUES ('acc_you', 'default', 'feishu', 'feishu', 'bob', 'personal', 'on_you', '你', 'connect', 1, 1);
-         INSERT INTO connections (id, workspace_id, account_id, adapter, auth, config, created_by, created, updated)
-           VALUES ('con_you', 'default', 'acc_you', 'feishu_user', 'oauth', '{{\"app_connection\":\"{con}\"}}', 'usr_dev', 1, 1);
-         INSERT INTO space_identities (space_id, connection_id, workspace_id, joined) VALUES
-           ('sp_a', '{con}', 'default', 1), ('sp_a', 'con_you', 'default', 1),
-           ('sp_c', '{con}', 'default', 1), ('sp_c', 'con_gone', 'default', 1);
-         UPDATE space_identities SET left_at = 2 WHERE connection_id = 'con_gone';
-         INSERT INTO spaces (id, workspace_id, system_id, connection_id, kind, external_id, name, status, created, updated) VALUES
-           ('sp_d', 'default', 'feishu', NULL, 'group', 'oc_d', '先由旧连接看到', 'active', 1, 1);
-         INSERT INTO space_identities (space_id, connection_id, workspace_id, joined) VALUES ('sp_d', '{con}', 'default', 1);"
-    ));
+    seed::people::seed_only_spaces_no_other_live_identity_sees(
+        h.env.store(),
+        &format!(r#"{{"app_connection":"{}"}}"#, con),
+        &con,
+    )
+    .unwrap();
     let (st, v) = h
         .call(
             "POST",
@@ -566,25 +476,25 @@ async fn only_spaces_no_other_live_identity_sees() {
         .await;
     assert_eq!(st, 200, "{v}");
     assert_eq!(
-        h.n("SELECT count(*) FROM spaces WHERE id IN ('sp_c', 'sp_d')"),
+        inspect::spaces::count_spaces_by_ids_count(h.env.store()).unwrap(),
         0
     );
     assert_eq!(
-        h.n("SELECT count(*) FROM space_identities WHERE space_id IN ('sp_c', 'sp_d')"),
+        inspect::spaces::count_space_identities(h.env.store()).unwrap(),
         0
     );
-    assert_eq!(h.n("SELECT count(*) FROM spaces WHERE id = 'sp_a'"), 1);
+    assert_eq!(
+        inspect::spaces::count_spaces_by_sp_a(h.env.store()).unwrap(),
+        1
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn standalone_decisions_are_previewed_and_deleted_atomically() {
     let (h, con, _) = setup().await;
     h.seed("", &con, "");
-    h.exec("INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, question, status, requested_by, created) VALUES
-      ('d1','default','reply','chan_message','m1','reply?','open','usr_dev',1),
-      ('d2','default','reply','chan_message','m2','reply?','resolved','usr_dev',1);
-      UPDATE chan_messages SET decision_id='d1' WHERE id='m1';
-      UPDATE ext_events SET decision_id='d1' WHERE message_id='m1';");
+    seed::decisions::seed_standalone_decisions_are_previewed_and_deleted_atomically(h.env.store())
+        .unwrap();
     let req = json!({"connection_id":con,"level":"all"});
     let (st, preview) = h
         .call("POST", "/channels/cleanup/preview", Some(req.clone()))
@@ -596,35 +506,35 @@ async fn standalone_decisions_are_previewed_and_deleted_atomically() {
     let (st, _) = h.call("POST", "/channels/cleanup", Some(run.clone())).await;
     assert_ne!(st, 200);
     assert_eq!(
-        h.n("SELECT count(*) FROM decisions WHERE id IN ('d1','d2')"),
+        inspect::decisions::count_decisions_by_ids(h.env.store()).unwrap(),
         2
     );
     run["decision_ids"] = preview["decision_ids"].clone();
-    h.exec("CREATE TRIGGER fail_cleanup BEFORE DELETE ON spaces BEGIN SELECT RAISE(ABORT, 'test rollback'); END;");
+    seed::harness::install_fail_cleanup(h.env.store()).unwrap();
     let (st, _) = h.call("POST", "/channels/cleanup", Some(run.clone())).await;
     assert_ne!(st, 200);
     assert_eq!(
-        h.n("SELECT count(*) FROM decisions WHERE id IN ('d1','d2')"),
+        inspect::decisions::count_decisions_by_ids(h.env.store()).unwrap(),
         2
     );
     assert_eq!(
-        h.one("SELECT decision_id FROM chan_messages WHERE id='m1'"),
+        inspect::messages::message_decision_id_by_m1(h.env.store()).unwrap(),
         "d1"
     );
-    h.exec("DROP TRIGGER fail_cleanup;");
+    seed::harness::remove_fail_cleanup(h.env.store()).unwrap();
     let (st, result) = h.call("POST", "/channels/cleanup", Some(run)).await;
     assert_eq!(st, 200, "{result}");
     assert_eq!(result["decisions"], 2);
     assert_eq!(
-        h.n("SELECT count(*) FROM decisions WHERE id IN ('d1','d2')"),
+        inspect::decisions::count_decisions_by_ids(h.env.store()).unwrap(),
         0
     );
     assert_eq!(
-        h.n("SELECT count(*) FROM chan_messages WHERE decision_id IN ('d1','d2')"),
+        inspect::messages::count_chan_messages_count_3(h.env.store()).unwrap(),
         0
     );
     assert_eq!(
-        h.n("SELECT count(*) FROM ext_events WHERE decision_id IN ('d1','d2')"),
+        inspect::signals::count_ext_events_count_4(h.env.store()).unwrap(),
         0
     );
 }
@@ -633,30 +543,30 @@ async fn standalone_decisions_are_previewed_and_deleted_atomically() {
 async fn shared_decision_and_changed_preview_are_not_deleted() {
     let (h, con, _) = setup().await;
     h.seed("", &con, "");
-    h.exec("INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, question, status, requested_by, created) VALUES
-      ('shared','default','reply','chan_message','m1','reply?','open','usr_dev',1);
-      UPDATE chan_messages SET decision_id='shared' WHERE id IN ('m1','m3');");
+    seed::decisions::seed_shared_decision_and_changed_preview_are_not_deleted(h.env.store())
+        .unwrap();
     let req = json!({"connection_id":con,"level":"all"});
     let (_, preview) = h
         .call("POST", "/channels/cleanup/preview", Some(req.clone()))
         .await;
     assert_eq!(preview["decisions"], 0);
-    h.exec("UPDATE chan_messages SET decision_id=NULL WHERE id='m3';");
+    seed::messages::clear_message_decision_id(h.env.store()).unwrap();
     let mut run = req;
     run["confirm"] = json!(true);
     run["decision_ids"] = preview["decision_ids"].clone();
     let (st, _) = h.call("POST", "/channels/cleanup", Some(run)).await;
     assert_ne!(st, 200);
-    assert_eq!(h.n("SELECT count(*) FROM decisions WHERE id='shared'"), 1);
+    assert_eq!(
+        inspect::decisions::count_decisions_by_shared(h.env.store()).unwrap(),
+        1
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn foreign_workspace_and_item_decisions_remain() {
     let (h, con, _) = setup().await;
     h.seed("", &con, "");
-    h.exec("INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, item_id, question, status, requested_by, created) VALUES
-      ('foreign','other','reply','chan_message','m1',NULL,'reply?','open','usr_dev',1),
-      ('item_decision','default','reply','space','sp_c','it_1','reply?','open','usr_dev',1);");
+    seed::decisions::seed_decision_foreign(h.env.store()).unwrap();
     let req = json!({"connection_id":con,"level":"all","confirm":true});
     let (st, preview) = h
         .call("POST", "/channels/cleanup/preview", Some(req.clone()))
@@ -666,11 +576,11 @@ async fn foreign_workspace_and_item_decisions_remain() {
     let (st, result) = h.call("POST", "/channels/cleanup", Some(req)).await;
     assert_eq!(st, 200, "{result}");
     assert_eq!(
-        h.n("SELECT count(*) FROM decisions WHERE id IN ('foreign','item_decision')"),
+        inspect::decisions::count_decisions_by_ids_count(h.env.store()).unwrap(),
         2
     );
     assert_eq!(
-        h.n("SELECT count(*) FROM spaces WHERE id IN ('sp_a','sp_c')"),
+        inspect::spaces::count_spaces_by_ids(h.env.store()).unwrap(),
         2
     );
 }
@@ -690,7 +600,10 @@ async fn another_workspace_cannot_preview_or_delete() {
             .await;
         assert_ne!(st, 200);
     }
-    assert_eq!(h.n("SELECT count(*) FROM chan_messages WHERE id='m1'"), 1);
+    assert_eq!(
+        inspect::messages::count_chan_messages_by_m1(h.env.store()).unwrap(),
+        1
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -699,14 +612,8 @@ async fn completed_yolo_history_does_not_pin_channel_decisions() {
     h.seed("", &con, "");
     // Production shape: resolved channel approve/fail decisions, with cancelled or
     // decided YOLO history, sometimes carrying an unused undo description.
-    h.exec("INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, question, status, requested_by, created, resolved) VALUES
-      ('d1','default','approve','chan_message','m1','send?','resolved','steve',1,2),
-      ('d2','default','fail','chan_message','m2','retry?','resolved','steve',1,2);
-      UPDATE chan_messages SET decision_id='d1' WHERE id='m1';
-      INSERT INTO yolo_actions (id,workspace_id,decision_id,kind,subject_type,rule,outcome,reason,undo,created) VALUES
-      ('ya1','default','d1','approve','chan_message','channel.send','decided','sent','{\"kind\":\"recall\"}',1),
-      ('ya2','default','d2','fail','chan_message','channel.retry','cancelled','cancelled','{\"kind\":\"decision\"}',1),
-      ('ya3','default','d2','fail','chan_message','channel.retry','decided','done',NULL,1);");
+    seed::decisions::seed_completed_yolo_history_does_not_pin_channel_decisions(h.env.store())
+        .unwrap();
     let mut req = json!({"connection_id":con,"level":"all","confirm":true});
     let (st, preview) = h
         .call("POST", "/channels/cleanup/preview", Some(req.clone()))
@@ -714,24 +621,30 @@ async fn completed_yolo_history_does_not_pin_channel_decisions() {
     assert_eq!(st, 200, "{preview}");
     assert_eq!(preview["decisions"], 2);
     req["decision_ids"] = preview["decision_ids"].clone();
-    h.exec("CREATE TRIGGER fail_yolo_cleanup BEFORE DELETE ON decisions BEGIN SELECT RAISE(ABORT, 'rollback'); END;");
+    seed::harness::install_fail_yolo_cleanup(h.env.store()).unwrap();
     let (st, _) = h.call("POST", "/channels/cleanup", Some(req.clone())).await;
     assert_ne!(st, 200);
-    assert_eq!(h.n("SELECT count(*) FROM yolo_actions WHERE id='ya1' AND decision_id='d1' AND undo IS NOT NULL"), 1);
-    h.exec("DROP TRIGGER fail_yolo_cleanup;");
+    assert_eq!(
+        inspect::decisions::count_yolo_actions_by_ya1(h.env.store()).unwrap(),
+        1
+    );
+    seed::harness::remove_fail_yolo_cleanup(h.env.store()).unwrap();
     let (st, result) = h.call("POST", "/channels/cleanup", Some(req)).await;
     assert_eq!(st, 200, "{result}");
     assert_eq!(
-        h.n("SELECT count(*) FROM decisions WHERE id IN ('d1','d2')"),
+        inspect::decisions::count_decisions_by_ids(h.env.store()).unwrap(),
         0
     );
     assert_eq!(
-        h.n("SELECT count(*) FROM yolo_actions WHERE id IN ('ya1','ya2','ya3')"),
+        inspect::decisions::count_yolo_actions_by_ids(h.env.store()).unwrap(),
         3
     );
-    assert_eq!(h.n("SELECT count(*) FROM yolo_actions WHERE id IN ('ya1','ya2','ya3') AND (decision_id IS NOT NULL OR undo IS NOT NULL)"), 0);
     assert_eq!(
-        h.one("SELECT reason FROM yolo_actions WHERE id='ya1'"),
+        inspect::decisions::count_yolo_actions_by_ids_count(h.env.store()).unwrap(),
+        0
+    );
+    assert_eq!(
+        inspect::decisions::yolo_action_reason_by_ya1(h.env.store()).unwrap(),
         "sent"
     );
 }
@@ -740,41 +653,35 @@ async fn completed_yolo_history_does_not_pin_channel_decisions() {
 async fn scheduled_yolo_action_and_new_execution_after_preview_are_protected() {
     let (h, con, _) = setup().await;
     h.seed("", &con, "");
-    h.exec("INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, question, status, requested_by, created) VALUES
-      ('d1','default','approve','chan_message','m1','send?','open','steve',1);
-      INSERT INTO yolo_actions (id,workspace_id,decision_id,kind,subject_type,rule,outcome,reason,created) VALUES
-      ('ya1','default','d1','approve','chan_message','channel.send','scheduled','waiting',1);");
+    seed::decisions::seed_scheduled_yolo_action_and_new_execution_after_preview_are(h.env.store())
+        .unwrap();
     let mut req = json!({"connection_id":con,"level":"all","confirm":true});
     let (_, blocked) = h
         .call("POST", "/channels/cleanup/preview", Some(req.clone()))
         .await;
     assert_eq!(blocked["decisions"], 0);
-    h.exec("UPDATE yolo_actions SET outcome='cancelled' WHERE id='ya1';");
+    seed::decisions::set_yolo_action_outcome_cancelled(h.env.store()).unwrap();
     let (_, preview) = h
         .call("POST", "/channels/cleanup/preview", Some(req.clone()))
         .await;
     assert_eq!(preview["decisions"], 1);
     req["decision_ids"] = preview["decision_ids"].clone();
     // Any nonterminal/unknown execution state must fail closed.
-    h.exec("UPDATE yolo_actions SET outcome='running' WHERE id='ya1';");
+    seed::decisions::set_yolo_action_outcome_running(h.env.store()).unwrap();
     let (st, _) = h.call("POST", "/channels/cleanup", Some(req)).await;
     assert_ne!(st, 200);
     assert_eq!(
-        h.one("SELECT decision_id FROM yolo_actions WHERE id='ya1'"),
+        inspect::decisions::yolo_action_decision_id_by_ya1(h.env.store()).unwrap(),
         "d1"
     );
-    assert_eq!(h.n("SELECT count(*) FROM decisions WHERE id='d1'"), 1);
+    assert_eq!(
+        inspect::decisions::count_decisions_by_d1(h.env.store()).unwrap(),
+        1
+    );
 }
 
 fn seed_output_records(h: &H, con: &str) {
-    h.exec(&format!(r#"
-        INSERT INTO output_deliveries(id,workspace_id,requester,idempotency_key,fingerprint,intent,connection_id,space_id,message_id,replied_at,reply_message_id,created) VALUES
-        ('output-delete','default','usr_dev','delete-key','original-hash','{{"identity":"bot","content":{{"title":"private-title","markdown":"private-body","fields":[["private-field","value"]],"actions":[["private-action","https://example.org/private"]],"references":[["private-source","https://example.org/source"]]}}}}','{con}','sp_a','m2',7,'m1',1),
-        ('output-keep','default','usr_dev','keep-key','keep-hash','{{"identity":"bot","content":{{"markdown":"retained"}}}}','{con}','sp_b','m3',7,'m1',1);
-        INSERT INTO output_channel_preferences(workspace_id,user_id,party_id,manual_space_id,learned_space_id,updated) VALUES
-        ('default','usr_dev','ann','sp_a','sp_b',1),
-        ('default','usr_dev','bob','sp_b','sp_a',1);
-    "#));
+    seed::delivery::seed_seed_output_records(h.env.store(), &con).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -790,13 +697,23 @@ async fn output_intents_follow_text_purge_without_losing_fingerprints_or_receipt
         )
         .await;
     assert_eq!(st, 200, "{result}");
-    assert_eq!(h.one("SELECT json_extract(intent,'$.content') FROM output_deliveries WHERE id='output-delete'"), "{}");
     assert_eq!(
-        h.one("SELECT fingerprint FROM output_deliveries WHERE id='output-delete'"),
+        inspect::delivery::output_delivery_content_by_output_delete(h.env.store()).unwrap(),
+        "{}"
+    );
+    assert_eq!(
+        inspect::delivery::output_delivery_fingerprint_by_output_delete(h.env.store()).unwrap(),
         "original-hash"
     );
-    assert_eq!(h.n("SELECT count(*) FROM output_deliveries WHERE id='output-delete' AND replied_at=7 AND reply_message_id='m1'"), 1);
-    assert_eq!(h.one("SELECT json_extract(intent,'$.content.markdown') FROM output_deliveries WHERE id='output-keep'"), "retained", "referenced messages remain protected");
+    assert_eq!(
+        inspect::delivery::count_output_deliveries_by_output_delete(h.env.store()).unwrap(),
+        1
+    );
+    assert_eq!(
+        inspect::delivery::output_delivery_markdown_by_output_keep(h.env.store()).unwrap(),
+        "retained",
+        "referenced messages remain protected"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -805,29 +722,49 @@ async fn output_foreign_keys_follow_full_cleanup_and_rollback() {
     h.seed("", &con, "");
     seed_output_records(&h, &con);
     let req = json!({"connection_id":con,"level":"all","confirm":true});
-    h.exec("CREATE TRIGGER fail_output_cleanup BEFORE DELETE ON spaces BEGIN SELECT RAISE(ABORT,'rollback'); END;");
+    seed::harness::install_fail_output_cleanup(h.env.store()).unwrap();
     assert_ne!(
         h.call("POST", "/channels/cleanup", Some(req.clone()))
             .await
             .0,
         200
     );
-    assert_eq!(h.n("SELECT count(*) FROM output_deliveries"), 2);
-    assert_eq!(h.n("SELECT count(*) FROM output_channel_preferences WHERE manual_space_id='sp_a' OR learned_space_id='sp_a'"), 2);
-    h.exec("DROP TRIGGER fail_output_cleanup;");
+    assert_eq!(
+        inspect::delivery::count_output_deliveries(h.env.store()).unwrap(),
+        2
+    );
+    assert_eq!(
+        inspect::output_channel_preferences::count_output_channel_preferences(h.env.store())
+            .unwrap(),
+        2
+    );
+    seed::harness::remove_fail_output_cleanup(h.env.store()).unwrap();
     let (st, result) = h.call("POST", "/channels/cleanup", Some(req)).await;
     assert_eq!(st, 200, "{result}");
     assert_eq!(
-        h.n("SELECT count(*) FROM output_deliveries WHERE id='output-delete'"),
+        inspect::delivery::count_output_deliveries_by_output_delete_count(h.env.store()).unwrap(),
         0
     );
-    assert_eq!(h.n("SELECT count(*) FROM output_deliveries WHERE id='output-keep' AND reply_message_id IS NULL AND replied_at=7"), 1);
     assert_eq!(
-        h.n("SELECT count(*) FROM output_channel_preferences WHERE party_id='ann'"),
+        inspect::delivery::count_output_deliveries_by_output_keep(h.env.store()).unwrap(),
+        1
+    );
+    assert_eq!(
+        inspect::output_channel_preferences::count_output_channel_preferences_count(h.env.store())
+            .unwrap(),
         0
     );
-    assert_eq!(h.n("SELECT count(*) FROM output_channel_preferences WHERE party_id='bob' AND manual_space_id='sp_b' AND learned_space_id IS NULL"), 1);
-    assert_eq!(h.n("SELECT count(*) FROM pragma_foreign_key_check"), 0);
+    assert_eq!(
+        inspect::output_channel_preferences::count_output_channel_preferences_count_2(
+            h.env.store()
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        inspect::pragma_foreign_key_check::count_pragma_foreign_key_check(h.env.store()).unwrap(),
+        0
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

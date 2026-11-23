@@ -179,7 +179,7 @@ pub struct OutContent {
     /// Idempotency key (the outbound `cm_…`): a retry does not send twice.
     pub uuid: Option<String>,
     /// People to @ at the start, as the provider's per-connection ids (Feishu `open_id`, found with
-    /// `adapters::feishu::send::at_handle`). C6 passes the person replied to in a group; empty in
+    /// `steve_store::accounts::feishu_mention_handle`). C6 passes the person replied to in a group; empty in
     /// DMs.
     pub at: Vec<String>,
     /// The space's provider id when known (for a reply: the space of the replied-to message). It

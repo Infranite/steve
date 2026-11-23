@@ -8,6 +8,7 @@ mod digest_env;
 use digest_env::TestEnv;
 use std::sync::Arc;
 use std::time::Duration;
+use steve_store::testkit::channels::inspect;
 
 use axum::Router;
 use axum::body::Body;
@@ -110,42 +111,9 @@ async fn setup() -> H {
     }
 }
 
-fn q(h: &H, sql: &str, p: &str) -> Vec<Vec<Value>> {
-    let (sql, p) = (sql.to_string(), p.to_string());
-    h.env
-        .store()
-        .reader(move |c| {
-            let mut st = c.prepare(&sql)?;
-            let n = st.column_count();
-            let rows = st
-                .query_map([&p], |r| {
-                    (0..n)
-                        .map(|i| {
-                            Ok(match r.get_ref(i)? {
-                                rusqlite::types::ValueRef::Null => Value::Null,
-                                rusqlite::types::ValueRef::Integer(x) => json!(x),
-                                rusqlite::types::ValueRef::Text(t) => {
-                                    json!(String::from_utf8_lossy(t))
-                                }
-                                _ => Value::Null,
-                            })
-                        })
-                        .collect::<rusqlite::Result<Vec<_>>>()
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok::<_, steve_store::StoreError>(rows)
-        })
-        .expect("query")
-}
-
-fn n(h: &H, sql: &str) -> i64 {
-    q(h, sql, "")[0][0].as_i64().expect("count")
-}
-
-/// Waits until `sql` (a count) reaches `want`.
-async fn wait_count(h: &H, sql: &str, want: i64) {
-    steve_runtime::testkit::eventually(sql, || std::future::ready(n(h, sql) >= want)).await;
-    assert_eq!(n(h, sql), want, "{sql}");
+async fn wait_count(label: &str, count: impl Fn() -> i64, want: i64) {
+    steve_runtime::testkit::eventually(label, || std::future::ready(count() >= want)).await;
+    assert_eq!(count(), want, "{label}");
 }
 
 async fn start(h: &H) -> LongConnection {
@@ -159,27 +127,16 @@ async fn start(h: &H) -> LongConnection {
     lc
 }
 
-/// Inbound messages (the rules may add pending drafts, `direction=out`).
-/// The first row `sql` finds for `p`, once there is one. A message is stored before it is linked to
-/// its event and its outcome is written after that, so a query joining them waits for both.
-async fn row(h: &H, sql: &str, p: &str) -> Vec<Value> {
-    let t0 = std::time::Instant::now();
+// The message and its signal settle separately, so allow time for the joined row.
+async fn wait_row(label: &str, rows: impl Fn() -> Vec<Vec<Value>>) -> Vec<Value> {
     let mut found = None;
-    steve_runtime::testkit::eventually_sync(format!("{sql}: row for {p}"), || {
-        found = q(h, sql, p).into_iter().next();
-        if found.is_some() {
-            true
-        } else {
-            assert!(t0.elapsed() < T, "{sql}: no row for {p}");
-            false
-        }
+    steve_runtime::testkit::eventually_sync(label, || {
+        found = rows().into_iter().next();
+        found.is_some()
     })
     .await;
     found.unwrap()
 }
-
-const MSGS: &str = "SELECT count(*) FROM chan_messages WHERE ?1 = ?1 AND direction = 'in'";
-const EVENTS: &str = "SELECT count(*) FROM ext_events WHERE ?1 = ?1";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn group_mention_over_the_long_connection() {
@@ -191,21 +148,24 @@ async fn group_mention_over_the_long_connection() {
         .ws_push_envelope(fixture("message_group_at_bot").unwrap());
     let d = h.fake.ws_wait_acked(&id, T).await.expect("acked");
     assert_eq!(d.ack.expect("ack").code, 200);
-    wait_count(&h, MSGS, 1).await;
+    wait_count(
+        "msgs",
+        || inspect::messages::incoming_count(h.env.store()).unwrap(),
+        1,
+    )
+    .await;
     // the message is stored before it is linked to its event: wait for the link too
     wait_count(
-        &h,
-        "SELECT count(*) FROM chan_messages WHERE ?1 = ?1 AND direction = 'in' AND event_id IS NOT NULL",
+        "inbound with signal",
+        || inspect::messages::incoming_with_signal(h.env.store()).unwrap(),
         1,
     )
     .await;
 
     // the space, from GET chats/{id}
-    let s = &q(
-        &h,
-        "SELECT s.id, s.name, s.kind, s.system_id, s.member_count, ss.configured FROM spaces s JOIN space_settings ss ON ss.space_id = s.id WHERE s.external_id = ?",
-        ids::GROUP_CHAT,
-    )[0];
+    let s =
+        &inspect::spaces::space_id_name_kind_system_id_by_external(h.env.store(), ids::GROUP_CHAT)
+            .unwrap()[0];
     assert_eq!(
         &s[1..],
         &[
@@ -220,12 +180,11 @@ async fn group_mention_over_the_long_connection() {
 
     // the message: text with the mention replaced, the sender identified by union_id with the
     // name from the members list, the bot in `mentions`
-    let m = &q(
-        &h,
-        "SELECT m.text, a.handle, a.display_name, a.system_id, m.mentions, m.thread_key, m.event_id FROM chan_messages m
-           JOIN accounts a ON a.id = m.sender_account_id WHERE m.external_id = ?",
+    let m = &inspect::messages::message_text_handle_display_name_system_id_by_external(
+        h.env.store(),
         "om_groupat00000000000000000000001",
-    )[0];
+    )
+    .unwrap()[0];
     assert_eq!(m[0], json!("@值班小运 帮我查一下昨晚告警的原因"));
     assert_eq!(
         &m[1..4],
@@ -239,11 +198,11 @@ async fn group_mention_over_the_long_connection() {
     assert_eq!(m[5], json!("om_groupat00000000000000000000001"));
 
     // its event and the “新群” decision
-    let e = &q(
-        &h,
-        "SELECT type, source, space_id, summary FROM ext_events WHERE id = ?",
+    let e = &inspect::signals::signal_kind_source_space_id_summary_by_id(
+        h.env.store(),
         m[6].as_str().unwrap(),
-    )[0];
+    )
+    .unwrap()[0];
     assert_eq!(
         e,
         &vec![
@@ -253,21 +212,15 @@ async fn group_mention_over_the_long_connection() {
             json!("王小丽：@值班小运 帮我查一下昨晚告警的原因")
         ]
     );
-    let dq = &q(
-        &h,
-        "SELECT question FROM decisions WHERE subject_type = 'space' AND subject_id = ?",
-        &space,
-    )[0];
+    let dq = &inspect::decisions::decision_question_by_space_and_subject(h.env.store(), &space)
+        .unwrap()[0];
     assert_eq!(
         dq[0],
         json!("值班小运被拉进了「平台值班群」，要设置它在这里做什么吗？")
     );
     // the group's members (owner, Alice, Bob) and the bot
     assert_eq!(
-        n(
-            &h,
-            &format!("SELECT count(*) FROM space_members WHERE space_id = '{space}' AND ?1 = ?1")
-        ),
+        inspect::spaces::member_count(h.env.store(), &space).unwrap(),
         4
     );
 
@@ -288,8 +241,11 @@ async fn group_mention_over_the_long_connection() {
     // Negative window: an acknowledged redelivery must not produce a delayed duplicate row.
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(h.fake.ws_deliveries_of(&id).len(), 2);
-    assert_eq!(n(&h, MSGS), 1);
-    assert_eq!(n(&h, EVENTS), 1);
+    assert_eq!(inspect::messages::incoming_count(h.env.store()).unwrap(), 1);
+    assert_eq!(
+        inspect::signals::count_ext_events(h.env.store()).unwrap(),
+        1
+    );
 
     // after a restart (empty memory) the unique index still stops it
     lc.stop().await.unwrap();
@@ -313,8 +269,11 @@ async fn group_mention_over_the_long_connection() {
     .await;
     // Negative window: an acknowledged redelivery must not produce a delayed duplicate row.
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(n(&h, MSGS), 1);
-    assert_eq!(n(&h, EVENTS), 1);
+    assert_eq!(inspect::messages::incoming_count(h.env.store()).unwrap(), 1);
+    assert_eq!(
+        inspect::signals::count_ext_events(h.env.store()).unwrap(),
+        1
+    );
     lc.stop().await.unwrap();
 }
 
@@ -326,47 +285,62 @@ async fn dm_external_bots_and_own_messages() {
     // a DM: no decision, the space named after Alice
     h.fake
         .ws_push_envelope(fixture("message_p2p_text").unwrap());
-    wait_count(&h, MSGS, 1).await;
+    wait_count(
+        "msgs",
+        || inspect::messages::incoming_count(h.env.store()).unwrap(),
+        1,
+    )
+    .await;
     // The channel message commits before the asynchronous event sink finishes.
-    wait_count(&h, EVENTS, 1).await;
-    let s = &q(
-        &h,
-        "SELECT name, kind FROM spaces WHERE external_id = ?",
-        ids::P2P_CHAT,
-    )[0];
+    wait_count(
+        "events",
+        || inspect::signals::count_ext_events(h.env.store()).unwrap(),
+        1,
+    )
+    .await;
+    let s = &inspect::spaces::space_name_kind_by_external(h.env.store(), ids::P2P_CHAT).unwrap()[0];
     assert_eq!(s, &vec![json!("王小丽"), json!("dm")]);
     assert_eq!(
-        n(
-            &h,
-            "SELECT count(*) FROM decisions WHERE subject_type = 'space' AND ?1 = ?1"
-        ),
+        inspect::decisions::count_decisions_by_space_and_at_1(h.env.store(), "").unwrap(),
         0
     );
     assert_eq!(
-        q(&h, "SELECT type FROM ext_events WHERE ?1 = ?1", "")[0][0],
+        inspect::signals::signal_kind_by_at_1(h.env.store(), "").unwrap()[0][0],
         json!("im.dm")
     );
 
     // a customer in the external group
     h.fake
         .ws_push_envelope(fixture("message_external_user").unwrap());
-    wait_count(&h, MSGS, 2).await;
-    let s = &q(
-        &h,
-        "SELECT s.has_external, ss.disclosure FROM spaces s JOIN space_settings ss ON ss.space_id = s.id WHERE s.external_id = ?",
+    wait_count(
+        "msgs",
+        || inspect::messages::incoming_count(h.env.store()).unwrap(),
+        2,
+    )
+    .await;
+    let s = &inspect::spaces::space_has_external_disclosure_by_external(
+        h.env.store(),
         ids::EXTERNAL_CHAT,
-    )[0];
+    )
+    .unwrap()[0];
     assert_eq!(s, &vec![json!(1), json!("reasoning")]);
 
     // another app's bot: only recorded
     h.fake
         .ws_push_envelope(fixture("message_from_bot").unwrap());
-    wait_count(&h, MSGS, 3).await;
-    let e = &row(
-        &h,
-        "SELECT e.outcome_label FROM ext_events e JOIN chan_messages m ON m.event_id = e.id WHERE m.external_id = ? AND e.outcome_label IS NOT NULL",
-        "om_otherbot0000000000000000000001",
+    wait_count(
+        "msgs",
+        || inspect::messages::incoming_count(h.env.store()).unwrap(),
+        3,
     )
+    .await;
+    let e = &wait_row("signal_outcome_label_by_external", || {
+        inspect::signals::signal_outcome_label_by_external(
+            h.env.store(),
+            "om_otherbot0000000000000000000001",
+        )
+        .unwrap()
+    })
     .await;
     assert_eq!(e[0], json!(LABEL_BOT));
 
@@ -376,11 +350,21 @@ async fn dm_external_bots_and_own_messages() {
     env["event"]["sender"]["sender_id"]["open_id"] = json!(ids::BOT_OPEN_ID);
     env["event"]["message"]["message_id"] = json!("om_own00000000000000000000000001");
     h.fake.ws_push_envelope(env);
-    wait_count(&h, MSGS, 4).await;
-    let r = &row(
-        &h,
-        "SELECT m.sender_account_id, e.outcome_label FROM chan_messages m JOIN ext_events e ON e.id = m.event_id WHERE m.external_id = ? AND e.outcome_label IS NOT NULL",
-        "om_own00000000000000000000000001",
+    wait_count(
+        "msgs",
+        || inspect::messages::incoming_count(h.env.store()).unwrap(),
+        4,
+    )
+    .await;
+    let r = &wait_row(
+        "message_sender_account_id_outcome_label_by_external",
+        || {
+            inspect::messages::message_sender_account_id_outcome_label_by_external(
+                h.env.store(),
+                "om_own00000000000000000000000001",
+            )
+            .unwrap()
+        },
     )
     .await;
     assert_eq!(r, &vec![json!(h.bot_acc), json!(LABEL_OWN)]);
@@ -395,7 +379,9 @@ async fn the_bot_run_reports_the_connection_healthy_once_connected() {
     use steve_modules::accounts::connections::Health;
 
     let h = setup().await;
-    let status = |h: &H| q(h, "SELECT status FROM connections WHERE id = ?", &h.con)[0][0].clone();
+    let status = |h: &H| {
+        inspect::connections::connection_status_by_id(h.env.store(), &h.con).unwrap()[0][0].clone()
+    };
     // failed starts before (the vault not readable at boot): reported, `error`
     let cx = h.ch.connections().cx(WS, &h.con).expect("cx");
     for _ in 0..3 {
@@ -422,11 +408,7 @@ async fn the_bot_run_reports_the_connection_healthy_once_connected() {
         }
     })
     .await;
-    let fails = q(
-        &h,
-        "SELECT json_extract(health, '$.fails') FROM connections WHERE id = ?",
-        &h.con,
-    );
+    let fails = inspect::connections::connection_fails_by_id(h.env.store(), &h.con).unwrap();
     assert_eq!(fails[0][0], json!(0));
     rt.shutdown().await;
 }

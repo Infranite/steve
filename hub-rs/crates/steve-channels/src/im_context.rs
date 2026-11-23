@@ -16,8 +16,6 @@
 //!
 //! [`Channels::conv_research_context`]: crate::Channels::conv_research_context
 
-use rusqlite::{Connection, OptionalExtension, params};
-
 use crate::conversation_card::Relation;
 use crate::respond::Plan;
 use crate::rules::{ReplyStyle, Trigger};
@@ -268,56 +266,6 @@ pub fn escape(s: &str) -> String {
 }
 
 /// Messages anyone in the chat saw (SQL over alias `m`): received ones, and Steve's own once sent.
-/// Drafts and messages waiting or refused never count, as a thread's root or anything else.
-pub const SEEN: &str = "(m.direction = 'in' OR m.status IN ('sent', 'recalled'))";
-
-/// The stored message's root in its thread, among the messages anyone in the chat saw ([`SEEN`]):
-/// the message whose provider id is the thread key, else the earliest seen message of that thread
-/// (a provider thread id such as Feishu's `omt_…`), else the message itself. A draft or a message
-/// never sent is never the root.
-pub fn thread_root(c: &Connection, space: &str, message: &str) -> ChannelResult<Option<String>> {
-    let row: Option<(Option<String>, Option<String>)> = c
-        .query_row(
-            "SELECT thread_key, external_id FROM chan_messages WHERE id = ? AND space_id = ?",
-            params![message, space],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    let Some((key, ext)) = row else {
-        return Ok(None);
-    };
-    let Some(key) = key.or(ext).filter(|k| !k.is_empty()) else {
-        return Ok(Some(message.to_string()));
-    };
-    let root: Option<String> = c
-        .query_row(
-            &format!(
-                "SELECT m.id FROM chan_messages m WHERE m.space_id = ?1 AND m.external_id = ?2 AND {SEEN}
-                 UNION ALL
-                 SELECT id FROM (SELECT m.id FROM chan_messages m
-                                  WHERE m.space_id = ?1 AND m.thread_key = ?2 AND {SEEN}
-                                  ORDER BY m.created, m.id LIMIT 1)
-                 LIMIT 1"
-            ),
-            params![space, key],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(Some(root.unwrap_or_else(|| message.to_string())))
-}
-
-/// Contact `party` is a recorded member of `space` (through one of its accounts).
-fn sender_recorded(c: &Connection, space: &str, party: Option<&str>) -> ChannelResult<bool> {
-    let Some(party) = party.filter(|p| !p.is_empty()) else {
-        return Ok(false);
-    };
-    Ok(c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM space_members sm JOIN accounts a ON a.id = sm.account_id
-                         WHERE sm.space_id = ?1 AND a.party_id = ?2)",
-        params![space, party],
-        |r| r.get(0),
-    )?)
-}
 
 /// What the block says in place of the identity when it could not be told from the records.
 pub const IDENTITY_UNKNOWN: &str = "系统没能从记录确认这次以谁的身份、在哪里回答";
@@ -350,8 +298,8 @@ pub fn unknown_block() -> String {
 
 /// The block for answering `plan`'s message: [`build`] rendered, or, when its facts can't be told,
 /// logged and [`unknown_block`].
-pub fn render_for(c: &Connection, r: &mut impl steve_store::Read, plan: &Plan) -> String {
-    match build(c, r, plan) {
+pub fn render_for(r: &mut impl steve_store::Read, plan: &Plan) -> String {
+    match build(r, plan) {
         Ok(x) => x.render(),
         Err(e) => {
             tracing::warn!(message = %plan.message_id, "identity block not built, identity unknown: {e}");
@@ -361,55 +309,46 @@ pub fn render_for(c: &Connection, r: &mut impl steve_store::Read, plan: &Plan) -
 }
 
 /// The identity block's facts for answering `plan`'s message.
-pub fn build(
-    c: &Connection,
-    r: &mut impl steve_store::Read,
-    plan: &Plan,
-) -> ChannelResult<ImContext> {
+pub fn build(r: &mut impl steve_store::Read, plan: &Plan) -> ChannelResult<ImContext> {
     let ws = &plan.ws;
-    let space = spaces::get(c, &plan.space_id)?
-        .filter(|s| s.workspace_id == *ws)
+    let space = steve_store::channel_spaces::rows::get_in_workspace(r, ws, &plan.space_id)?
         .ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
-    let platform = crate::conversations::provider_name(c, &space.system_id);
-    let (account_id, _) = bindings::connection_account(c, ws, &plan.connection_id)?;
-    let account_name: String = c
-        .query_row(
-            "SELECT coalesce(nullif(display_name, ''), handle_display, '') FROM accounts WHERE id = ?",
-            [&account_id],
-            |r| r.get(0),
-        )
-        .optional()?
+    let platform = steve_store::Systems(r).provider_label(ws, &space.system_id)?;
+    let (account_id, _) = bindings::connection_account(r, ws, &plan.connection_id)?;
+    let account_name = steve_store::Accounts(r)
+        .display(ws, &account_id)?
+        .map(|(_, name)| name)
         .unwrap_or_default();
     let account = match plan.mode {
         Mode::Own => AccountKind::Own,
         Mode::Bot => AccountKind::Bot,
     };
     let persona = match plan.mode {
-        Mode::Bot => bindings::effective(c, &space)?.map(|e| e.persona.name),
+        Mode::Bot => bindings::effective(r, &space)?.map(|e| e.persona.name),
         Mode::Own => None,
     };
     // on your own account the reply is that account's user speaking: when who that is can't be
     // told, there is no block ([`unknown_block`] instead), never the workspace owner's name in its place
     let owner = match plan.mode {
-        Mode::Own => crate::compose::own_name(c, r, ws, &plan.connection_id, &space.id)?,
-        Mode::Bot => personas::owner_name_for_space(c, r, ws, &space.id)?,
+        Mode::Own => crate::compose::own_name(r, ws, &plan.connection_id, &space.id)?,
+        Mode::Bot => personas::owner_name_for_space(r, ws, &space.id)?,
     };
-    let owner_only = crate::conversations::owner_only(c, ws, &space, &plan.connection_id)?;
+    let owner_only = crate::conversations::owner_only(r, ws, &space, &plan.connection_id)?;
     let AudienceFacts {
         external,
         unknown,
         disclosure,
-    } = audience_facts(c, plan, &space, owner_only)?;
-    let is_owner = crate::conversations::sender_is_owner(c, ws, plan.sender_party_id.as_deref())?;
+    } = audience_facts(r, plan, &space, owner_only)?;
+    let is_owner = crate::conversations::sender_is_owner(r, ws, plan.sender_party_id.as_deref())?;
     // what the message said, as stored (before notes were added for the composer)
-    let stored = crate::inbound::stored(c, &plan.message_id).ok();
+    let stored = crate::inbound::stored(r, &plan.message_id).ok();
     let raw = stored
         .as_ref()
         .map_or(plan.text.as_str(), |m| m.text.as_str());
-    let typed_by_human = sender_typed_by_human(c, plan, raw)?;
+    let typed_by_human = sender_typed_by_human(r, plan, raw)?;
     let chat_kind = ChatKind::of(&space.kind);
     // the trigger settings of the identity that answers (your own account's)
-    let settings = spaces::channel_settings(c, ws, &plan.connection_id)?
+    let settings = spaces::channel_settings(r, ws, &plan.connection_id)?
         .map(|s| Trigger::from_value(&s.trigger));
     let (placement, mark) = placement_and_mark(plan, &space, chat_kind, &settings);
     let trigger = plan.trigger.as_ref().map(|_| {
@@ -443,13 +382,17 @@ pub fn build(
         persona,
         owner,
         chat_id: space.id.clone(),
-        chat_name: crate::spaces::display_title(c, &space)?,
+        chat_name: crate::spaces::display_title(r, &space)?,
         chat_kind,
         members: space.people(),
         has_external: space.has_external,
         external,
         unknown,
-        thread_root: thread_root(c, &space.id, &plan.message_id)?,
+        thread_root: steve_store::channel_message_repo::history::thread_root(
+            r,
+            &space.id,
+            &plan.message_id,
+        )?,
         message: plan.message_id.clone(),
         placement,
         sender_party: plan.sender_party_id.clone(),
@@ -462,16 +405,15 @@ pub fn build(
     })
 }
 
-fn sender_typed_by_human(c: &Connection, plan: &Plan, raw: &str) -> ChannelResult<bool> {
-    let by_bot: bool = match plan.sender_account_id.as_deref() {
-        Some(a) => c
-            .query_row(
-                "SELECT kind IN ('app_bot', 'bot') FROM accounts WHERE id = ?",
-                [a],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or(false),
+fn sender_typed_by_human(
+    r: &mut impl steve_store::Read,
+    plan: &Plan,
+    raw: &str,
+) -> ChannelResult<bool> {
+    let by_bot = match &plan.sender_account_id {
+        Some(account) => steve_store::Accounts(r)
+            .get(account)?
+            .is_some_and(|account| matches!(account.kind.as_str(), "app_bot" | "bot")),
         None => false,
     };
     Ok(!by_bot && !crate::arbiter::looks_automated(raw))
@@ -484,14 +426,14 @@ struct AudienceFacts {
 }
 
 fn audience_facts(
-    c: &Connection,
+    r: &mut impl steve_store::Read,
     plan: &Plan,
     space: &spaces::SpaceRow,
     owner_only: bool,
 ) -> ChannelResult<AudienceFacts> {
     let ws = &plan.ws;
     let card = crate::conversation_card::build(
-        c,
+        r,
         ws,
         &space,
         plan.sender_party_id.as_deref(),
@@ -526,7 +468,9 @@ fn audience_facts(
         }
         Relation::Unknown => {
             // a recorded member is not among the members the provider counts but nobody recorded
-            if sender_recorded(c, &space.id, plan.sender_party_id.as_deref())? {
+            if let Some(party) = &plan.sender_party_id
+                && steve_store::channel_spaces::members::recorded_party(r, &space.id, party)?
+            {
                 unknown += 1;
             }
             true
