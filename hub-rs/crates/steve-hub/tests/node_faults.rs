@@ -873,12 +873,10 @@ async fn a_hub_restarted_between_commit_and_ack_acknowledges_on_reconcile() {
 
 // ── an unknown control, retired by Stop ──
 
-/// N1-8: the journal cannot write a prepare's end, and the Node closes. Its outcome is unknown
-/// after both restart: the open waiting on it never goes, nothing retires it on its own. Stop
-/// sends one recover; the workspace is prepared again under a new id (adopted as it is) and
-/// opened, and the message queued all along runs once.
+/// N1-8: the journal cannot write a prepare's end, and the Node closes. Stop retires the unknown
+/// prepare after restart. The dependent open is rejected and queued input stays held.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn stop_retires_an_unknown_prepare_and_the_queued_message_runs_once() {
+async fn stop_retires_an_unknown_prepare_without_starting_queued_work() {
     let mut r = Rig::new().await;
     journal::set_failure(&r.journal_path(), journal::Failure::Prepare, true).unwrap();
     r.bind();
@@ -903,14 +901,18 @@ async fn stop_retires_an_unknown_prepare_and_the_queued_message_runs_once() {
     assert_eq!(r.prompts("queued"), 0);
 
     assert!(r.rt.user_stop(S).unwrap());
-    eventually_sync("the end", || !r.ends().is_empty()).await;
-    assert_eq!(r.ends()[0].1, "end_turn");
-    assert_eq!(r.prompts("queued"), 1, "the queued message ran once");
-    assert_eq!(r.attempts(), ["finished"]);
+    eventually_sync("the dependent open is rejected", || {
+        node_checks::command_state_by_operation(&r.store, &format!("open:{S}:r0")).unwrap()
+            == "rejected"
+    })
+    .await;
+    assert!(r.ends().is_empty());
+    assert_eq!(r.prompts("queued"), 0);
+    assert!(r.attempts().is_empty());
     let recovers: i64 = node_checks::command_count_by_method(&r.store, "recover").unwrap();
     assert_eq!(recovers, 1, "exactly one recover");
     let prepares = journal::operation_count(&r.journal_path(), "prepare_workspace").unwrap();
-    assert_eq!(prepares, 2, "the target never again, a new prepare instead");
+    assert_eq!(prepares, 1);
     r.stored_once().await;
 }
 

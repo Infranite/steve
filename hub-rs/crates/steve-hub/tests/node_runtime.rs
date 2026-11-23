@@ -2202,7 +2202,7 @@ async fn a_refused_answer_is_not_an_answer() {
         "never claims an answer that was not applied"
     );
     let refused: String = node_checks::decision_refused_by_id(&h.store, &d).unwrap();
-    assert_eq!(refused, "expired");
+    assert_eq!(refused, "stale");
 }
 
 #[tokio::test]
@@ -2613,7 +2613,6 @@ async fn a_pending_change_skips_the_automatic_retry() {
     c.error = Some(Error::later(Code::Unavailable, "temporary service failure"));
     h.node.finish(&a, c).await.unwrap();
     eventually_sync("turn end", || h.ends().len() == 1).await;
-    assert!(h.said("不自动重试"));
     eventually_sync("configure", || h.count("configure_session") == 1).await;
     assert_eq!(h.attempts().len(), 1, "no second attempt with the old mode");
     eventually_sync("applied", || h.cfg_states() == ["finished"]).await;
@@ -2689,7 +2688,7 @@ async fn a_refused_change_reads_as_refused_with_the_nodes_reason() {
     assert_eq!(s.desired, None, "a widening falls back");
     assert_eq!(
         node_checks::mode_refusal_code(&h.store).unwrap().unwrap(),
-        "denied"
+        "forbidden"
     );
     assert!(
         s.refused

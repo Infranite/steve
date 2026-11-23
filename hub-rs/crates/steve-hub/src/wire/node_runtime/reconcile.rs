@@ -149,8 +149,19 @@ impl NodeRuntime {
             let receipt = match entries.get(&op) {
                 Some(e) if e.digest == digest && e.method == method => e.receipt.clone(),
                 Some(_) => unknown("the Node holds another command under this id")?,
-                // never got there: the sender sends the very same command
-                None if state == "pending" && !maybe_sent => continue,
+                None if state == "pending" && !maybe_sent => {
+                    // A one-shot call whose waiter is gone can settle locally before admission.
+                    if method == "start_job"
+                        && let Some(attempt) = self
+                            .store
+                            .read(|r| steve_store::node_jobs::command_attempt(r, &op))?
+                        && !self.jobs.has(&attempt)
+                    {
+                        self.stop_job_in(tx, &attempt)?;
+                        *changed += 1;
+                    }
+                    continue;
+                }
                 None => unknown("the Node has no record of it")?,
             };
             let before = self

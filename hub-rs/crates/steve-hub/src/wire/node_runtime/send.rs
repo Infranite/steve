@@ -57,6 +57,9 @@ impl NodeRuntime {
 
     /// Leases one command, sends it and merges what came back. False: nothing to send.
     pub(super) async fn send_one(&self) -> bool {
+        if !self.node.observes_execution() {
+            return false;
+        }
         let lease = match self.send_tx(|tx| {
             self.note_waiting_in(tx)?;
             match node_write::lease_command_in(

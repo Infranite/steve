@@ -53,11 +53,6 @@ inspect!(
 );
 
 inspect!(
-    attempt_count_by_session_runtime_attempts(session: &str) -> i64,
-    "SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=?1 AND json_extract(a.completion,'$.stop_reason')='node_restarted'"
-);
-
-inspect!(
     attempt_count_by_turn(turn: &str) -> i64,
     "SELECT COUNT(*) FROM runtime_attempts WHERE turn_id=?1 AND json_extract(completion,'$.stop_reason')='node_restarted'"
 );

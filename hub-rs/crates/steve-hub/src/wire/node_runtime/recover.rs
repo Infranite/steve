@@ -7,7 +7,7 @@
 //!
 //! What a finished recover does to its target:
 //! - open, release, configure: the session is let go (the next message opens it again);
-//! - prepare: a new prepare under a new id, and the open waiting on it again after it;
+//! - prepare: the dependent open is rejected and the session is held;
 //! - abandon: only its slot is freed; the attempt stays unknown, the next Stop abandons it anew;
 //! - resolve_permission: its card closes as unknown; the attempt is not touched.
 //!
@@ -312,7 +312,7 @@ impl NodeRuntime {
         Ok(())
     }
 
-    /// Reject opens tied to the retired prepare and give their replacement a new dependency.
+    /// Reject opens tied to a prepare whose effects remain unsettled.
     fn retired_prepare_in(
         &self,
         tx: &mut W<'_>,
@@ -320,7 +320,6 @@ impl NodeRuntime {
         target: &str,
         what: &str,
     ) -> Result<(), StoreError> {
-        // the open that waited on it never goes: it waits on a new prepare instead
         let opens = self
             .store
             .read(|r| dispatch::pending_dependents(r, target))?;
@@ -330,7 +329,7 @@ impl NodeRuntime {
                 o,
                 ReceiptState::Rejected,
                 false,
-                &json!({ "reason": "its prepare was retired: it waits on a new one" }),
+                &json!({ "reason": "its prepare was retired with an unknown outcome" }),
                 now(),
             )?;
         }

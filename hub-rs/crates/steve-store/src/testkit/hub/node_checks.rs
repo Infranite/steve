@@ -127,12 +127,6 @@ scalar!(command_count_open_session() -> i64, "SELECT COUNT(*) FROM node_commands
 scalar!(command_count_prepare_workspace() -> i64, "SELECT COUNT(*) FROM node_commands WHERE method='prepare_workspace' AND json_extract(request,'$.body.resource')='item:i1'");
 
 scalar!(
-    upgrade_deferred_start_count(generation: i64) -> i64,
-    "SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND lease_generation>? AND lease_owner IS NULL
-     AND json_extract(receipt,'$.last_error.code')='offline' AND json_extract(receipt,'$.last_error.safe_detail') LIKE '%while upgrading%'"
-);
-
-scalar!(
     unleased_start_count_by_generation(lease_generation: i64) -> i64,
     "SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND lease_owner IS NULL AND lease_generation>?1"
 );
@@ -153,8 +147,6 @@ scalar!(
 scalar!(command_expected_configure_session() -> String, "SELECT json_extract(request,'$.body.expected') FROM node_commands WHERE method='configure_session'");
 
 scalar!(command_expected_recover() -> String, "SELECT json_extract(request,'$.body.expected') FROM node_commands WHERE method='recover'");
-
-scalar!(command_last_error_code_start_turn() -> String, "SELECT json_extract(receipt,'$.last_error.code') FROM node_commands WHERE method='start_turn'");
 
 scalar!(
     command_lease_generation_by_method(method: &str) -> i64,
@@ -500,8 +492,6 @@ scalar!(
     nth_attempt_prompt_0_text(offset: i64) -> String,
     "SELECT json_extract(spec,'$.run.prompt[0].text') FROM runtime_attempts ORDER BY created, rowid LIMIT 1 OFFSET ?1"
 );
-
-scalar!(offline_pending_start_count() -> i64, "SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND state='pending' AND json_extract(receipt,'$.last_error.code')='offline'");
 
 scalar!(optional_binding_node_revision() -> Option<String>, "SELECT node_revision FROM runtime_sessions");
 

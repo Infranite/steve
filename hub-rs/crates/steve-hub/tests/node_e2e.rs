@@ -923,8 +923,7 @@ async fn a_node_session_end_to_end() {
     )
     .await;
 
-    // ── the Hub killed mid-turn: the attempt is never re-run; the Hub gives it up on its own once
-    // the Node confirms the old harness is gone, and the agent is continued (B6)
+    // ── the Hub killed mid-turn: the original attempt stays unknown until it can be settled
     c.say(&sid, "崩溃验收-K2 @sleep 600000").await;
     eventually_sync(
         "The fake adapter records the target prompt exactly once.",
@@ -936,25 +935,17 @@ async fn a_node_session_end_to_end() {
     serving(&h).await;
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The interrupted Node attempt is recorded as abandoned after restart; Hub log:\n{}",
+            "The interrupted Node attempt is held after restart; Hub log:\n{}",
             hub_log(&h)
         )
     });
-    eventually_sync(diagnostic, || {
-        node_process::attempt_count_by_session_runtime_attempts(&h.db_path(), &sid).unwrap() == 1
-    })
-    .await;
-    eventually_sync(
-        "The session records the reason its Node attempt was interrupted.",
-        || steve_v1(&h, &sid, "Node 重启了") > 0,
-    )
-    .await;
+    eventually_sync(diagnostic, || attempts(&h, &sid, "unknown") == 1).await;
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(h.got("崩溃验收-K2"), 1, "never re-run: {:?}", h.prompts());
     let n = node_health(&h).await;
     assert_eq!(
         (&n["reconciled"], &n["unknown"], &n["parked"]),
-        (&json!(true), &json!(0), &json!(0)),
+        (&json!(true), &json!(1), &json!(0)),
         "healthz after the kill: {n}"
     );
     assert!(n["sessions"].as_i64() >= Some(1), "{n}");
@@ -982,7 +973,7 @@ async fn a_node_session_end_to_end() {
         "healthz with the Node off: {n}"
     );
     assert!(n["parked"].as_i64() >= Some(1), "parked: {n}");
-    assert_eq!(n["unknown"], 0, "given up before: {n}");
+    assert_eq!(n["unknown"], 1, "still held: {n}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
