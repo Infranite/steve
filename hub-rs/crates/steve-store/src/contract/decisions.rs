@@ -368,3 +368,29 @@ pub fn reopen(w: &mut crate::W<'_>, id: &str) -> Result<()> {
     }
     Ok(())
 }
+
+/// The client through which a decision was answered.
+#[derive(serde::Serialize)]
+pub struct DecisionVia<'a> {
+    pub client: &'a str,
+    pub kind: &'a str,
+    pub name: &'a str,
+    pub route: &'a str,
+}
+
+pub fn record_via(w: &mut W<'_>, id: &str, via: &DecisionVia<'_>) -> Result<()> {
+    let via = serde_json::to_string(via)?;
+    let result = w.dialect().json_set_field(
+        Func::coalesce([Expr::col("result"), Expr::Constant("{}".into())]).into(),
+        "via",
+        Expr::val(via),
+    );
+    w.exec(
+        Query::update()
+            .table("decisions")
+            .value("result", result)
+            .and_where(Expr::col("id").eq(id))
+            .and_where(Expr::col("status").ne("open")),
+    )?;
+    Ok(())
+}
