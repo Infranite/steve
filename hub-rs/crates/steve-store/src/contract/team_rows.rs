@@ -587,3 +587,24 @@ impl Teams<'_, W<'_>> {
         )? as usize)
     }
 }
+
+impl<C: Read> Teams<'_, C> {
+    pub fn active_ids_for_contact(&mut self, ws: &str, contact: &str) -> Result<Vec<String>> {
+        self.0.all(
+            Query::select()
+                .column(("m", "team_id"))
+                .from_as("team_members", "m")
+                .join_as(
+                    JoinType::InnerJoin,
+                    "parties",
+                    "t",
+                    Expr::col(("t", "id")).equals(("m", "team_id")),
+                )
+                .and_where(Expr::col(("t", "status")).eq("active"))
+                .and_where(Expr::col(("m", "workspace_id")).eq(ws))
+                .and_where(Expr::col(("m", "contact_id")).eq(contact))
+                .order_by(("m", "team_id"), Order::Asc),
+            |row| row.get(0),
+        )
+    }
+}

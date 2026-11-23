@@ -370,8 +370,8 @@ pub fn build(
     let space = spaces::get(c, &plan.space_id)?
         .filter(|s| s.workspace_id == *ws)
         .ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
-    let platform = crate::conversations::provider_name(c, &space.system_id);
-    let (account_id, _) = bindings::connection_account(c, ws, &plan.connection_id)?;
+    let platform = steve_store::Systems(r).provider_label(ws, &space.system_id)?;
+    let (account_id, _) = bindings::connection_account(r, ws, &plan.connection_id)?;
     let account_name: String = c
         .query_row(
             "SELECT coalesce(nullif(display_name, ''), handle_display, '') FROM accounts WHERE id = ?",
@@ -385,31 +385,31 @@ pub fn build(
         Mode::Bot => AccountKind::Bot,
     };
     let persona = match plan.mode {
-        Mode::Bot => bindings::effective(c, &space)?.map(|e| e.persona.name),
+        Mode::Bot => bindings::effective(r, &space)?.map(|e| e.persona.name),
         Mode::Own => None,
     };
     // on your own account the reply is that account's user speaking: when who that is can't be
     // told, there is no block ([`unknown_block`] instead), never the workspace owner's name in its place
     let owner = match plan.mode {
         Mode::Own => crate::compose::own_name(c, r, ws, &plan.connection_id, &space.id)?,
-        Mode::Bot => personas::owner_name_for_space(c, r, ws, &space.id)?,
+        Mode::Bot => personas::owner_name_for_space(r, ws, &space.id)?,
     };
-    let owner_only = crate::conversations::owner_only(c, ws, &space, &plan.connection_id)?;
+    let owner_only = crate::conversations::owner_only(c, r, ws, &space, &plan.connection_id)?;
     let AudienceFacts {
         external,
         unknown,
         disclosure,
-    } = audience_facts(c, plan, &space, owner_only)?;
+    } = audience_facts(c, r, plan, &space, owner_only)?;
     let is_owner = crate::conversations::sender_is_owner(c, ws, plan.sender_party_id.as_deref())?;
     // what the message said, as stored (before notes were added for the composer)
-    let stored = crate::inbound::stored(c, &plan.message_id).ok();
+    let stored = crate::inbound::stored(r, &plan.message_id).ok();
     let raw = stored
         .as_ref()
         .map_or(plan.text.as_str(), |m| m.text.as_str());
     let typed_by_human = sender_typed_by_human(c, plan, raw)?;
     let chat_kind = ChatKind::of(&space.kind);
     // the trigger settings of the identity that answers (your own account's)
-    let settings = spaces::channel_settings(c, ws, &plan.connection_id)?
+    let settings = spaces::channel_settings(r, ws, &plan.connection_id)?
         .map(|s| Trigger::from_value(&s.trigger));
     let (placement, mark) = placement_and_mark(plan, &space, chat_kind, &settings);
     let trigger = plan.trigger.as_ref().map(|_| {
@@ -443,7 +443,7 @@ pub fn build(
         persona,
         owner,
         chat_id: space.id.clone(),
-        chat_name: crate::spaces::display_title(c, &space)?,
+        chat_name: crate::spaces::display_title(r, &space)?,
         chat_kind,
         members: space.people(),
         has_external: space.has_external,
@@ -485,6 +485,7 @@ struct AudienceFacts {
 
 fn audience_facts(
     c: &Connection,
+    r: &mut impl steve_store::Read,
     plan: &Plan,
     space: &spaces::SpaceRow,
     owner_only: bool,
@@ -492,6 +493,7 @@ fn audience_facts(
     let ws = &plan.ws;
     let card = crate::conversation_card::build(
         c,
+        r,
         ws,
         &space,
         plan.sender_party_id.as_deref(),

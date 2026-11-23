@@ -123,18 +123,20 @@ impl Channels {
         let conn = m.meta["chan"]["connection"].as_str().map(str::to_string);
         // only the owner reads it: marked so when the turn came, and still so now
         let marked = m.meta["chan"]["owner_only"] == json!(true);
-        self.store().reader(|c| -> ChannelResult<Option<Scope>> {
-            let Some(space) = spaces::get(c, space_id)?.filter(|s| s.workspace_id == ws) else {
-                return Ok(None);
-            };
-            let conn = conn.unwrap_or_else(|| space.connection_id.clone());
-            let owner_only =
-                marked && conversations::owner_only(c, ws, &space, &conn).unwrap_or(false);
-            Ok(Some(Scope {
-                ws: ws.to_string(),
-                space_id: space.id.clone(),
-                owner_only,
-            }))
+        self.store().read(|r| {
+            self.store().reader(|c| -> ChannelResult<Option<Scope>> {
+                let Some(space) = spaces::get(c, space_id)?.filter(|s| s.workspace_id == ws) else {
+                    return Ok(None);
+                };
+                let conn = conn.unwrap_or_else(|| space.connection_id.clone());
+                let owner_only =
+                    marked && conversations::owner_only(c, r, ws, &space, &conn).unwrap_or(false);
+                Ok(Some(Scope {
+                    ws: ws.to_string(),
+                    space_id: space.id.clone(),
+                    owner_only,
+                }))
+            })
         })
     }
 }
@@ -165,8 +167,8 @@ fn bad(k: &str) -> steve_modules::ApiError {
 }
 
 /// The space may be read at all, and its disclosure level.
-fn readable(c: &Connection, scope: &Scope) -> ChannelResult<Level> {
-    let set = spaces::settings(c, &scope.space_id)?;
+fn readable(r: &mut impl steve_store::Read, scope: &Scope) -> ChannelResult<Level> {
+    let set = spaces::settings(r, &scope.space_id)?;
     let level = Level::parse(&set.disclosure).unwrap_or(Level::Reasoning);
     if set.attention == Attention::Blocked || level == Level::Never {
         return Err(steve_modules::ApiError::rule(steve_i18n::t!(
@@ -297,7 +299,7 @@ fn thread(ch: &Channels, scope: &Scope, args: &Value) -> ChannelResult<String> {
         .as_str()
         .ok_or_else(|| bad("message_id"))?;
     ch.store().read(|db| ch.store().reader(|c| -> ChannelResult<String> {
-        let level = readable(c, scope)?;
+        let level = readable(db, scope)?;
         let id = resolve(c, scope, q)?;
         let target = one(c, &id)?;
         let tz = crate::im_mcp::tz_of(db, &scope.ws);
@@ -344,7 +346,7 @@ fn thread(ch: &Channels, scope: &Scope, args: &Value) -> ChannelResult<String> {
             _ => None,
         };
         let space = spaces::get(c, &scope.space_id)?
-            .map(|s| spaces::display_title(c, &s))
+            .map(|s| spaces::display_title(db, &s))
             .transpose()?
             .unwrap_or_default();
         let mut out = format!(
@@ -399,9 +401,9 @@ async fn media(ch: &Channels, scope: &Scope, args: &Value) -> ChannelResult<Answ
         .filter(|x| *x >= 0.0 && x.fract() == 0.0)
         .map(|x| x as usize)
         .ok_or_else(|| bad("index"))?;
-    let id = ch.store().reader(|c| -> ChannelResult<String> {
-        readable(c, scope)?;
-        resolve(c, scope, q)
+    let id = ch.store().read(|r| -> ChannelResult<String> {
+        readable(r, scope)?;
+        ch.store().reader(|c| resolve(c, scope, q))
     })?;
     let fetched = crate::media::fetch_bound(
         ch,
@@ -422,7 +424,7 @@ async fn media(ch: &Channels, scope: &Scope, args: &Value) -> ChannelResult<Answ
         ))
     })?;
     // the space may have changed while the bytes came
-    ch.store().reader(|c| readable(c, scope))?;
+    ch.store().read(|r| readable(r, scope))?;
     let (name, size) = (fetched.name.clone(), fetched.bytes.len());
     let piece = crate::media_agent::read_resource(
         crate::media_agent::Resource {

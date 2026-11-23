@@ -62,6 +62,7 @@ mod match_rules;
 mod memory_index;
 mod merge_proposals;
 pub(crate) mod message_sources;
+pub mod notifications;
 pub mod operations;
 pub mod parties;
 mod party_rows;

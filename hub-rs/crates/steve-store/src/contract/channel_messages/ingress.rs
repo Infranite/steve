@@ -149,6 +149,18 @@ pub fn by_source(r: &mut impl Read, conn: &str, source: &str) -> Result<Option<F
     )
 }
 
+pub fn source_space(r: &mut impl Read, ws: &str, message: &str) -> Result<Option<String>> {
+    r.one(
+        Query::select()
+            .column("space_id")
+            .from("chan_messages")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("id").eq(message))
+            .and_where(Expr::col("direction").eq("in")),
+        |row| row.get(0),
+    )
+}
+
 pub fn by_external(r: &mut impl Read, space: &str, external: &str) -> Result<Option<String>> {
     r.one(
         Query::select()
@@ -471,4 +483,248 @@ pub fn fill_created(w: &mut W<'_>, message: &str, created: i64) -> Result<()> {
             .and_where(Expr::col("direction").eq("out")),
     )?;
     Ok(())
+}
+
+/// A space discovered through history is first introduced when a live message arrives.
+pub fn only_history(r: &mut impl Read, space: &str) -> Result<bool> {
+    let mut rows = Query::select();
+    rows.column("id")
+        .from("chan_messages")
+        .and_where(Expr::col("space_id").eq(space))
+        .and_where(Expr::col("direction").eq("in"))
+        .limit(1);
+    let live = r.one(
+        rows.clone().and_where(Expr::col("history").is_null()),
+        |_| Ok(()),
+    )?;
+    if live.is_some() {
+        return Ok(false);
+    }
+    Ok(
+        r.one(rows.and_where(Expr::col("history").is_not_null()), |_| {
+            Ok(())
+        })?
+        .is_some(),
+    )
+}
+
+pub enum ReplyAuthor<'a> {
+    Outbound,
+    Account(&'a str),
+}
+
+/// Whether one of these provider messages came from the selected author in this space.
+pub fn has_provider_reply(
+    r: &mut impl Read,
+    space: &str,
+    ids: &[&str],
+    author: ReplyAuthor<'_>,
+) -> Result<bool> {
+    if ids.is_empty() {
+        return Ok(false);
+    }
+    let author = match author {
+        ReplyAuthor::Outbound => Expr::col("direction").eq("out"),
+        ReplyAuthor::Account(account) => Expr::col("sender_account_id").eq(account),
+    };
+    Ok(r.one(
+        Query::select()
+            .column("id")
+            .from("chan_messages")
+            .and_where(Expr::col("space_id").eq(space))
+            .and_where(Expr::col("external_id").is_in(ids.iter().copied()))
+            .and_where(author)
+            .limit(1),
+        |_| Ok(()),
+    )?
+    .is_some())
+}
+
+/// Allow at most one answer to a bot between messages from people in this space.
+pub fn answered_since_people(r: &mut impl Read, space: &str, bot: &str) -> Result<bool> {
+    let members = super::super::channel_spaces::members::bot_accounts(space);
+    let apps = super::super::accounts::app_bot_ids();
+    let mut inbound = Query::select();
+    inbound
+        .from("chan_messages")
+        .and_where(Expr::col("space_id").eq(space))
+        .and_where(Expr::col("direction").eq("in"));
+    let last_person = r
+        .one(
+            inbound
+                .clone()
+                .expr(Func::max(Expr::col("created")))
+                .and_where(Expr::col("sender_account_id").is_not_null())
+                .and_where(Expr::col("sender_account_id").not_in_subquery(members))
+                .and_where(Expr::col("sender_account_id").not_in_subquery(apps)),
+            |row| row.get::<Option<i64>>(0),
+        )?
+        .flatten()
+        .unwrap_or(0);
+    let first_bot = r
+        .one(
+            inbound
+                .expr(Func::min(Expr::col("created")))
+                .and_where(Expr::col("sender_account_id").eq(bot))
+                .and_where(Expr::col("created").gt(last_person)),
+            |row| row.get::<Option<i64>>(0),
+        )?
+        .flatten();
+    let Some(first_bot) = first_bot else {
+        return Ok(false);
+    };
+    Ok(r.one(
+        Query::select()
+            .column("id")
+            .from("chan_messages")
+            .and_where(Expr::col("space_id").eq(space))
+            .and_where(Expr::col("direction").eq("out"))
+            .and_where(Expr::col("status").is_in(["sent", "recalled"]))
+            .and_where(Func::coalesce([Expr::col("sent"), Expr::col("created")]).gte(first_bot))
+            .limit(1),
+        |_| Ok(()),
+    )?
+    .is_some())
+}
+
+/// The message context needed to plan a response.
+pub struct Stored {
+    pub external_id: String,
+    pub thread_key: Option<String>,
+    pub text: String,
+    pub sender_name: String,
+    pub mention_names: Vec<String>,
+    pub attachments: Value,
+}
+
+pub fn stored(r: &mut impl Read, message: &str) -> Result<Option<Stored>> {
+    let row = r.one(
+        Query::select()
+            .columns([
+                "external_id",
+                "thread_key",
+                "text",
+                "sender_account_id",
+                "sender_party_id",
+                "mentions",
+                "attachments",
+            ])
+            .from("chan_messages")
+            .and_where(Expr::col("id").eq(message)),
+        |row| {
+            Ok((
+                row.get::<Option<String>>(0)?.unwrap_or_default(),
+                row.get::<Option<String>>(1)?,
+                row.get::<Option<String>>(2)?.unwrap_or_default(),
+                row.get::<Option<String>>(3)?,
+                row.get::<Option<String>>(4)?,
+                row.get::<Option<String>>(5)?,
+                row.get::<Option<String>>(6)?,
+            ))
+        },
+    )?;
+    let Some((external_id, thread_key, text, account, party, mentions, attachments)) = row else {
+        return Ok(None);
+    };
+    let sender_name = match account {
+        Some(id) => super::super::accounts::names_and_handles(r, &[&id])?
+            .pop()
+            .map(|(_, name)| name),
+        None => None,
+    };
+    let sender_name = match (sender_name, party) {
+        (Some(name), _) => name,
+        (None, Some(id)) => super::super::parties::names(r, &[&id])?
+            .pop()
+            .map(|(_, name)| name)
+            .unwrap_or_default(),
+        (None, None) => String::new(),
+    };
+    let mention_names = mentions
+        .and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|m| m["name"].as_str().map(String::from))
+        .collect();
+    let attachments = attachments
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(Value::Null);
+    Ok(Some(Stored {
+        external_id,
+        thread_key,
+        text,
+        sender_name,
+        mention_names,
+        attachments,
+    }))
+}
+
+/// Account IDs listed by the inbound sender as mentions.
+pub fn mentioned_accounts(r: &mut impl Read, message: &str) -> Result<Option<Vec<String>>> {
+    r.one(
+        Query::select()
+            .column("mentions")
+            .from("chan_messages")
+            .and_where(Expr::col("id").eq(message)),
+        |row| {
+            let raw: String = row.get(0)?;
+            let mentions: Vec<Value> = serde_json::from_str(&raw).unwrap_or_default();
+            Ok(mentions
+                .iter()
+                .filter_map(|m| m["account_id"].as_str().map(str::to_owned))
+                .collect())
+        },
+    )
+}
+
+pub fn sender_in_space(
+    r: &mut impl Read,
+    ws: &str,
+    message: &str,
+) -> Result<Option<(String, Option<String>)>> {
+    r.one(
+        Query::select()
+            .column("space_id")
+            .expr(Func::coalesce([
+                Expr::col("sender_party_id"),
+                Expr::col("sender_account_id"),
+            ]))
+            .from("chan_messages")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("id").eq(message)),
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+}
+
+pub(in crate::contract) fn space_sender_messages(
+    r: &mut impl Read,
+    space: &str,
+    sender: Option<&str>,
+) -> SelectStatement {
+    let matches_sender = r.db().dialect().null_safe_eq(
+        Func::coalesce([Expr::col("sender_party_id"), Expr::col("sender_account_id")]).into(),
+        Expr::val(sender),
+    );
+    Query::select()
+        .column("id")
+        .from("chan_messages")
+        .and_where(Expr::col("space_id").eq(space))
+        .and_where(matches_sender)
+        .take()
+}
+
+pub fn other_sender(r: &mut impl Read, space: &str, excluded: &[String]) -> Result<Option<String>> {
+    let excluded = r.db().dialect().text_array(excluded)?;
+    r.one(
+        Query::select()
+            .column("sender_account_id")
+            .from("chan_messages")
+            .and_where(Expr::col("space_id").eq(space))
+            .and_where(Expr::col("direction").eq("in"))
+            .and_where(Expr::col("sender_account_id").is_not_null())
+            .and_where(Expr::col("sender_account_id").not_in_subquery(excluded))
+            .order_by("created", Order::Asc)
+            .limit(1),
+        |row| row.get(0),
+    )
 }

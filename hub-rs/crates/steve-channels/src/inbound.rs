@@ -33,13 +33,15 @@
 //! is stored once: the second copy only fills in what the first lacked and triggers nothing
 //! (`duplicate`). Steve's own sends read back are echoes, not messages ([`messages::our_echo`]).
 
-use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_flow::{ActorRef, Ingested, RawEvent};
 use steve_modules::ApiError;
 use steve_modules::accounts::{AnyHandle, ExtraHandle, Hints, Identified, identify_any};
-use steve_store::Tx;
-use steve_store::channel_message_repo::ingress;
+use steve_store::channel_message_repo::{
+    duplicates,
+    ingress::{self, ReplyAuthor},
+};
+use steve_store::{Accounts, Read, Tx, W};
 
 use crate::channel::{HandleRef, InboundMessage, MemberInfo, Sender, SpaceInfo, SpaceKind};
 use crate::ext::MessageIds;
@@ -207,37 +209,32 @@ pub(crate) struct ConnFacts {
     pub platform: Option<String>,
 }
 
-pub(crate) fn conn_facts(
-    c: &rusqlite::Connection,
-    ws: &str,
-    conn: &str,
-) -> ChannelResult<ConnFacts> {
-    c.query_row(
-        "SELECT c.adapter, c.account_id, c.created_by, coalesce(nullif(a.display_name, ''), a.handle_display), p.user_id,
-                coalesce(c.enabled_at, c.created), cs.late_ms,
-                CASE WHEN json_valid(c.config) THEN json_extract(c.config, '$.platform') END
-           FROM connections c JOIN accounts a ON a.id = c.account_id LEFT JOIN parties p ON p.id = a.party_id
-           LEFT JOIN channel_settings cs ON cs.connection_id = c.id
-          WHERE c.id = ? AND c.workspace_id = ?",
-        params![conn, ws],
-        |r| {
-            Ok(ConnFacts {
-                adapter: r.get(0)?,
-                account_id: r.get(1)?,
-                created_by: r.get(2)?,
-                account_name: r.get(3)?,
-                owner_user: r.get(4)?,
-                enabled_at: r.get(5)?,
-                late_ms: r
-                    .get::<_, Option<i64>>(6)?
-                    .filter(|l| LATE_MS.contains(l))
-                    .unwrap_or(DEFAULT_LATE_MS),
-                platform: r.get(7)?,
-            })
-        },
-    )
-    .optional()?
-    .ok_or_else(|| ApiError::not_found("连接"))
+fn conn_facts(r: &mut impl Read, ws: &str, conn: &str) -> ChannelResult<ConnFacts> {
+    let connection = steve_store::connections::ingress(r, ws, conn)?
+        .ok_or_else(|| ApiError::not_found("连接"))?;
+    let account = Accounts(r)
+        .get(&connection.account_id)?
+        .ok_or_else(|| ApiError::not_found("连接"))?;
+    let owner_user = steve_store::parties::user_id(r, &account.party_id)?;
+    let account_name = if account.display_name.is_empty() {
+        account.handle_display
+    } else {
+        account.display_name
+    };
+    let late_ms = spaces::channel_settings(r, ws, conn)?
+        .and_then(|settings| settings.late_ms)
+        .filter(|late| LATE_MS.contains(late))
+        .unwrap_or(DEFAULT_LATE_MS);
+    Ok(ConnFacts {
+        adapter: connection.adapter,
+        account_id: connection.account_id,
+        created_by: connection.created_by,
+        account_name,
+        owner_user,
+        enabled_at: connection.enabled_at,
+        late_ms,
+        platform: connection.platform,
+    })
 }
 
 impl Channels {
@@ -254,7 +251,7 @@ impl Channels {
 
     /// [`conn_facts`] with the platform filled in.
     pub(crate) fn facts(&self, ws: &str, conn: &str) -> ChannelResult<ConnFacts> {
-        let mut f = self.store().reader(|c| conn_facts(c, ws, conn))?;
+        let mut f = self.store().read(|r| conn_facts(r, ws, conn))?;
         f.platform = self.chat_platform(&f.adapter, f.platform.take());
         Ok(f)
     }
@@ -263,7 +260,7 @@ impl Channels {
 /// Identifies a handle in a savepoint: a failure leaves no half-created contact and does not stop
 /// the message.
 pub(crate) fn identify_handle(
-    tx: &Tx,
+    w: &mut W<'_>,
     ws: &str,
     conn: &str,
     actor: &str,
@@ -271,14 +268,14 @@ pub(crate) fn identify_handle(
     name: Option<&str>,
     label: &str,
 ) -> Option<Identified> {
-    identify_handle_as(tx, ws, conn, actor, h, name, label, false)
+    identify_handle_as(w, ws, conn, actor, h, name, label, false)
 }
 
 /// [`identify_handle`] for a sender or member that may be a bot: a new bot becomes a bot party with
 /// a `bot` account, not an unconfirmed person.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn identify_handle_as(
-    tx: &Tx,
+    w: &mut W<'_>,
     ws: &str,
     conn: &str,
     actor: &str,
@@ -287,7 +284,7 @@ pub(crate) fn identify_handle_as(
     label: &str,
     bot: bool,
 ) -> Option<Identified> {
-    identify_with_aliases(tx, ws, conn, actor, h, &[], name, label, bot)
+    identify_with_aliases(w, ws, conn, actor, h, &[], name, label, bot)
 }
 
 /// [`identify_handle_as`] for a sender known by more handles ([`crate::channel::Sender::aliases`]):
@@ -295,7 +292,7 @@ pub(crate) fn identify_handle_as(
 /// not have yet are attached to it; with none, a new contact gets them all.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn identify_with_aliases(
-    tx: &Tx,
+    w: &mut W<'_>,
     ws: &str,
     conn: &str,
     actor: &str,
@@ -306,9 +303,6 @@ pub(crate) fn identify_with_aliases(
     bot: bool,
 ) -> Option<Identified> {
     if h.handle.trim().is_empty() {
-        return None;
-    }
-    if tx.execute_batch("SAVEPOINT chan_identify").is_err() {
         return None;
     }
     // handles valid only under this connection (Feishu `open_id`)
@@ -338,33 +332,25 @@ pub(crate) fn identify_with_aliases(
             extra: extra_of(a),
         })
         .collect();
-    match identify_any(tx, ws, actor, &h.system, &h.handle, &aliases, &hints) {
-        Ok(id) => {
-            let _ = tx.execute_batch("RELEASE chan_identify");
-            Some(id)
-        }
+    match w.scope(|w| identify_any(w, ws, actor, &h.system, &h.handle, &aliases, &hints)) {
+        Ok(id) => Some(id),
         Err(e) => {
             tracing::warn!(
                 ws,
                 system = h.system,
                 "channel inbound: not identified: {e}"
             );
-            let _ = tx.execute_batch("ROLLBACK TO chan_identify; RELEASE chan_identify");
             None
         }
     }
 }
 
 /// Is any of the sender's handles known already (so its name need not be looked up)?
-fn handle_known(c: &rusqlite::Connection, ws: &str, sender: &Sender) -> ChannelResult<bool> {
+
+fn handle_known(r: &mut impl Read, ws: &str, sender: &Sender) -> ChannelResult<bool> {
     let all = std::iter::once(&sender.handle).chain(sender.aliases.iter());
     for x in all.flat_map(|h| std::iter::once(&h.handle).chain(h.extra.iter())) {
-        let hit: bool = c.query_row(
-            "SELECT EXISTS (SELECT 1 FROM account_handles WHERE workspace_id = ? AND handle = ?)",
-            params![ws, x.trim()],
-            |r| r.get(0),
-        )?;
-        if hit {
+        if steve_store::accounts::by_any_handle(r, ws, x.trim())?.is_some() {
             return Ok(true);
         }
     }
@@ -422,19 +408,17 @@ impl Channels {
         let store = self.store().clone();
         let facts = self.facts(ws, conn)?;
         self.validate_inbound(&facts, &msg)?;
-        let (existing, known) = store.read(|r| {
-            store.reader(|c| -> ChannelResult<_> {
-                Ok((
-                    spaces::find_as(r, ws, conn, &msg.space_ext_id, facts.platform.as_deref())?,
-                    handle_known(c, ws, &msg.sender)?,
-                ))
-            })
+        let (existing, known) = store.read(|r| -> ChannelResult<_> {
+            Ok((
+                spaces::find_as(r, ws, conn, &msg.space_ext_id, facts.platform.as_deref())?,
+                handle_known(r, ws, &msg.sender)?,
+            ))
         })?;
 
         // 屏蔽: nothing is processed or stored, not even the sender
         if let Some(sp) = &existing
             && store
-                .reader(|c| spaces::settings(c, &sp.id))
+                .read(|r| spaces::settings(r, &sp.id))
                 .is_ok_and(|s| s.attention == Attention::Blocked)
         {
             return Ok(Inbound {
@@ -475,9 +459,9 @@ impl Channels {
             precision,
         )
         .or(msg.backfill.then_some(History::Backfill));
-        let written = store.transaction(|tx| {
+        let written = store.write(|w| {
             self.write(
-                tx,
+                w,
                 ws,
                 conn,
                 &facts,
@@ -626,11 +610,11 @@ impl Channels {
         let yours = inbound.from_owner
             || (inbound.next == Next::Own
                 && store
-                    .reader(|c| spaces::channel_settings(c, ws, conn))?
+                    .read(|r| spaces::channel_settings(r, ws, conn))?
                     .is_some_and(|s| s.mode == Mode::Own));
         if yours
             && inbound.next != Next::Record(crate::arbiter::LABEL_AUTOMATED)
-            && store.reader(|c| spaces::speaks_as_you(c, ws, &inbound.space_id, Some(conn)))?
+            && store.read(|r| spaces::speaks_as_you(r, ws, &inbound.space_id, Some(conn)))?
         {
             let (sid, mid, before) = (
                 inbound.space_id.clone(),
@@ -641,8 +625,8 @@ impl Channels {
                 before,
                 now: now.max(before),
             };
-            match store.transaction(|tx| {
-                crate::presence::supersede(tx, ws, &sid, what, crate::presence::BY_YOU, &mid)
+            match store.write(|w| {
+                crate::presence::supersede(w, ws, &sid, what, crate::presence::BY_YOU, &mid)
             }) {
                 Ok(0) => {}
                 Ok(n) => tracing::info!(space = sid, closed = n, "you answered: cards superseded"),
@@ -663,7 +647,7 @@ impl Channels {
             let (sid, now) = (inbound.space_id.clone(), self.now());
             let r = store.transaction(|tx| -> ChannelResult<()> {
                 let label = spaces::get(tx, &sid)?
-                    .map(|s| spaces::display_title(tx, &s))
+                    .map(|s| tx.write(|w| spaces::display_title(w, &s)))
                     .transpose()?
                     .unwrap_or_default();
                 let text = format!("「{label}」有新消息（不提醒，只记录）");
@@ -693,9 +677,7 @@ impl Channels {
     ) -> ChannelResult<()> {
         let store = self.store();
         // What the rules look at; the event carries it too, for flows converted from rules.
-        let rf = store.read::<_, steve_store::StoreError>(|r| {
-            Ok(store.reader(|c| rule_facts(c, r, ws, &facts, &inbound, &msg)))
-        })??;
+        let rf = store.read(|r| rule_facts(r, ws, facts, inbound, msg))?;
 
         // Step 2, second half: the signal.
         // a message without a provider id is its event by the Hub's message id
@@ -734,14 +716,16 @@ impl Channels {
         });
         // the gate holds for flows too: a message addressed to none of Steve's identities here starts no flow
         // (a flow already waiting for an answer in this conversation is still woken: it asked)
-        let addressed = store
-            .reader(|c| addressed(c, ws, conn, &inbound.space_id, &inbound.message_id, &rf))?;
+        let addressed =
+            store.read(|r| addressed(r, ws, conn, &inbound.space_id, &inbound.message_id, &rf))?;
         inbound.facts = Some(rf);
         // `reply_as_you` other than `draft` on your own account: no flow starts or wakes on someone
         // else's message here (decided in code, before anything reads it); under `off` nothing else
         // acts on it either, under `record` only an item's thread still takes it (crate::respond)
         let reply_as_you = if inbound.next == Next::Handle {
-            store.reader(|c| spaces::reply_as_you_here(c, ws, &inbound.space_id, conn))?
+            store.read(|r| {
+                store.reader(|c| spaces::reply_as_you_here(c, r, ws, &inbound.space_id, conn))
+            })?
         } else {
             spaces::ReplyAsYou::Draft
         };
@@ -781,7 +765,7 @@ impl Channels {
     #[allow(clippy::too_many_arguments)]
     fn write(
         &self,
-        tx: &Tx,
+        w: &mut W<'_>,
         ws: &str,
         conn: &str,
         facts: &ConnFacts,
@@ -792,13 +776,16 @@ impl Channels {
         now: i64,
         history: Option<History>,
     ) -> ChannelResult<Written> {
-        let mode = match spaces::channel_settings(tx, ws, conn)? {
+        let mode = match spaces::channel_settings(w, ws, conn)? {
             Some(s) => s.mode,
             None if facts.owner_user.is_some() => Mode::Own,
             None => Mode::Bot,
         };
-        spaces::ensure_channel_settings(tx, ws, conn, mode, now)?;
-        let system = facts_system(tx, &facts.account_id)?;
+        spaces::ensure_channel_settings(w, ws, conn, mode, now)?;
+
+        let system = steve_store::accounts::system_handle(w, &facts.account_id)?
+            .map(|(system, _)| system)
+            .ok_or_else(|| ApiError::not_found("账号"))?;
 
         let input = InboundWrite {
             ws,
@@ -812,34 +799,32 @@ impl Channels {
             history,
             mode,
         };
-        let prepared = input.prepare_space(tx, &system)?;
+        let prepared = input.prepare_space(w, &system)?;
         let space = &prepared.space;
-        let identity = input.identify_sender(tx, space, &prepared.label)?;
-        let trigger = input.trigger_author(tx, &identity)?;
-        input.name_direct_message(tx, space, &identity)?;
-        let mentions = input.identify_mentions(tx, &prepared.label)?;
+        let identity = input.identify_sender(w, space, &prepared.label)?;
+        let trigger = input.trigger_author(w, &identity)?;
+        input.name_direct_message(w, space, &identity)?;
+        let mentions = input.identify_mentions(w, &prepared.label)?;
         let key = {
             let want = fallback::key_system(self, &facts.adapter, &msg.sender.handle.system);
-            let (sys, handle) = tx.write(|w| {
-                fallback::key_sender(
-                    w,
-                    ws,
-                    identity.sender_party.as_deref(),
-                    &want,
-                    &msg.sender.handle,
-                )
-            })?;
+            let (sys, handle) = fallback::key_sender(
+                w,
+                ws,
+                identity.sender_party.as_deref(),
+                &want,
+                &msg.sender.handle,
+            )?;
             fallback::key_of(&sys, &handle, &msg.text, &msg.attachments)
         };
-        let first = input.find_existing_message(self, tx, space, &identity, &key)?;
-        if let Some(written) = input.duplicate_message(tx, &prepared, &identity, &trigger, first)? {
+        let first = input.find_existing_message(self, w, space, &identity, &key)?;
+        if let Some(written) = input.duplicate_message(w, &prepared, &identity, &trigger, first)? {
             return Ok(written);
         }
-        let message_id = input.insert_message(tx, space, &identity, &key, mentions, &trigger)?;
-        let type_key = input.message_type(tx, space)?;
-        let set = spaces::settings(tx, &space.id)?;
-        let (sender_is_ours, from_owner, own) = input.settle_authorship(tx, &identity)?;
-        let next = input.loop_guard(tx, space, &set, &identity, own, sender_is_ours)?;
+        let message_id = input.insert_message(w, space, &identity, &key, mentions, &trigger)?;
+        let type_key = input.message_type(w, space)?;
+        let set = crate::spaces::settings(w, &space.id)?;
+        let (sender_is_ours, from_owner, own) = input.settle_authorship(w, &identity)?;
+        let next = input.loop_guard(w, space, &set, &identity, own, sender_is_ours)?;
         let SenderIdentity {
             sender_account,
             sender_party,
@@ -918,7 +903,7 @@ impl TriggerAuthor {
 type ExistingMessage = (String, String, &'static str);
 
 impl InboundWrite<'_> {
-    fn prepare_space(&self, tx: &Tx, system: &str) -> ChannelResult<PreparedSpace> {
+    fn prepare_space(&self, w: &mut W<'_>, system: &str) -> ChannelResult<PreparedSpace> {
         let Self {
             ws,
             conn,
@@ -933,23 +918,21 @@ impl InboundWrite<'_> {
         } = *self;
         let actor = facts.owner_user.as_deref().unwrap_or(&facts.created_by);
         // 1. the space
-        let (space, created) = tx.write(|w| {
-            spaces::locate_or_create(
-                w,
-                &NewSpace {
-                    ws,
-                    system_id: &system,
-                    connection_id: conn,
-                    kind: info.kind,
-                    external_id: &msg.space_ext_id,
-                    name: &info.name,
-                    member_count: info.member_count,
-                    has_external: info.has_external,
-                    now,
-                    platform: facts.platform.as_deref(),
-                },
-            )
-        })?;
+        let (space, created) = spaces::locate_or_create(
+            w,
+            &NewSpace {
+                ws,
+                system_id: system,
+                connection_id: conn,
+                kind: info.kind,
+                external_id: &msg.space_ext_id,
+                name: &info.name,
+                member_count: info.member_count,
+                has_external: info.has_external,
+                now,
+                platform: facts.platform.as_deref(),
+            },
+        )?;
         let label = if space.name.is_empty() {
             "渠道消息".to_string()
         } else {
@@ -959,26 +942,26 @@ impl InboundWrite<'_> {
         // a group seen before without its member count: now that it is known, record it and its members
         let filled = !created && space.member_count == 0 && info.member_count > 0;
         if filled {
-            tx.execute(
-                "UPDATE spaces SET member_count = ?1, has_external = max(has_external, ?2), updated = ?3
-                  WHERE id = ?4 AND member_count = 0",
-                rusqlite::params![info.member_count, info.has_external as i64, now, space.id],
+            steve_store::channel_spaces::registration::fill_member_count(
+                w,
+                &space.id,
+                info.member_count,
+                info.has_external,
+                now,
             )?;
         }
         if created || filled {
-            tx.write(|w| {
-                steve_store::channel_spaces::members::add(
-                    w,
-                    ws,
-                    &space.id,
-                    &facts.account_id,
-                    "bot",
-                    now,
-                )
-            })?;
+            steve_store::channel_spaces::members::add(
+                w,
+                ws,
+                &space.id,
+                &facts.account_id,
+                "bot",
+                now,
+            )?;
             for m in members {
                 if let Some(id) = identify_handle_as(
-                    tx,
+                    w,
                     ws,
                     conn,
                     actor,
@@ -988,16 +971,14 @@ impl InboundWrite<'_> {
                     m.role == "bot",
                 ) && id.account_id != facts.account_id
                 {
-                    tx.write(|w| {
-                        steve_store::channel_spaces::members::add(
-                            w,
-                            ws,
-                            &space.id,
-                            &id.account_id,
-                            &m.role,
-                            now,
-                        )
-                    })?;
+                    steve_store::channel_spaces::members::add(
+                        w,
+                        ws,
+                        &space.id,
+                        &id.account_id,
+                        &m.role,
+                        now,
+                    )?;
                 }
             }
         }
@@ -1006,10 +987,10 @@ impl InboundWrite<'_> {
         if mode == Mode::Bot
             && info.kind.is_group()
             && history.is_none()
-            && (created || only_history(tx, &space.id)?)
+            && (created || ingress::only_history(w, &space.id)?)
         {
             decision_id = Some(spaces::open_new_space_decision(
-                tx,
+                w,
                 ws,
                 &space,
                 &facts.account_name,
@@ -1026,7 +1007,7 @@ impl InboundWrite<'_> {
 
     fn identify_sender(
         &self,
-        tx: &Tx,
+        w: &mut W<'_>,
         space: &spaces::SpaceRow,
         label: &str,
     ) -> ChannelResult<SenderIdentity> {
@@ -1042,7 +1023,7 @@ impl InboundWrite<'_> {
         let actor = facts.owner_user.as_deref().unwrap_or(&facts.created_by);
         // 1. the sender
         let sender = identify_with_aliases(
-            tx,
+            w,
             ws,
             conn,
             actor,
@@ -1054,17 +1035,15 @@ impl InboundWrite<'_> {
         );
         if let Some(s) = &sender {
             let role = if msg.sender.is_bot { "bot" } else { "member" };
-            if tx.write(|w| {
-                steve_store::channel_spaces::members::add(
-                    w,
-                    ws,
-                    &space.id,
-                    &s.account_id,
-                    role,
-                    now,
-                )
-            })? {
-                spaces::event(tx, ws, &space.id);
+            if steve_store::channel_spaces::members::add(
+                w,
+                ws,
+                &space.id,
+                &s.account_id,
+                role,
+                now,
+            )? {
+                steve_store::channel_spaces::registration::emit(w, ws, &space.id);
             }
         }
         let (sender_account, sender_party) = match &sender {
@@ -1072,13 +1051,9 @@ impl InboundWrite<'_> {
             None => (None, None),
         };
         let sender_display: String = match &sender_account {
-            Some(a) => tx
-                .query_row(
-                    "SELECT coalesce(nullif(display_name, ''), handle_display) FROM accounts WHERE id = ?",
-                    [a],
-                    |r| r.get(0),
-                )
-                .optional()?
+            Some(a) => Accounts(w)
+                .display(ws, a)?
+                .map(|(_, name)| name)
                 .unwrap_or_default(),
             None => sender_name.unwrap_or("").to_string(),
         };
@@ -1091,7 +1066,11 @@ impl InboundWrite<'_> {
         })
     }
 
-    fn trigger_author(&self, tx: &Tx, identity: &SenderIdentity) -> ChannelResult<TriggerAuthor> {
+    fn trigger_author(
+        &self,
+        w: &mut W<'_>,
+        identity: &SenderIdentity,
+    ) -> ChannelResult<TriggerAuthor> {
         let Self {
             ws,
             facts,
@@ -1105,19 +1084,15 @@ impl InboundWrite<'_> {
             sender_party,
             ..
         } = identity;
+
         let bot_author = msg.sender.is_bot
             || sender.as_ref().is_some_and(|s| s.is_ours)
-            || sender_account
-                .as_deref()
-                .map(|id| {
-                    tx.query_row(
-                        "SELECT kind IN ('bot','app_bot') FROM accounts WHERE id=?",
-                        [id],
-                        |r| r.get::<_, bool>(0),
-                    )
-                })
-                .transpose()?
-                .unwrap_or(false);
+            || match sender_account {
+                Some(id) => Accounts(w)
+                    .get(id)?
+                    .is_some_and(|a| matches!(a.kind.as_str(), "bot" | "app_bot")),
+                None => false,
+            };
         // Trigger authorship belongs to the receiving personal account, not every workspace
         // owner. Canonicalize only this receipt/plan, without merging contacts or their handles.
         let trigger_self = mode == Mode::Own
@@ -1125,18 +1100,18 @@ impl InboundWrite<'_> {
             && (msg.mine
                 || sender_account.as_deref() == Some(facts.account_id.as_str())
                 || crate::arbiter::from_owner(
-                    tx,
+                    w,
                     ws,
                     &facts.owner_user.iter().cloned().collect::<Vec<_>>(),
                     sender_party.as_deref(),
                     &msg.sender,
                 )?);
-        let trigger_party: Option<String> = if trigger_self {
-            tx.query_row(
-                "SELECT party_id FROM accounts WHERE id=?",
-                [&facts.account_id],
-                |r| r.get(0),
-            )?
+
+        let trigger_party = if trigger_self {
+            let account = Accounts(w)
+                .get(&facts.account_id)?
+                .ok_or_else(|| ApiError::not_found("账号"))?;
+            Some(account.party_id)
         } else {
             sender_party.clone()
         };
@@ -1149,7 +1124,7 @@ impl InboundWrite<'_> {
 
     fn name_direct_message(
         &self,
-        tx: &Tx,
+        w: &mut W<'_>,
         space: &spaces::SpaceRow,
         identity: &SenderIdentity,
     ) -> ChannelResult<()> {
@@ -1166,17 +1141,18 @@ impl InboundWrite<'_> {
             && from_other
             && !sender_display.trim().is_empty()
         {
-            tx.execute(
-                "UPDATE spaces SET name = ? WHERE id = ?",
-                params![sender_display.trim(), space.id],
+            steve_store::channel_spaces::registration::name_direct_message(
+                w,
+                ws,
+                &space.id,
+                sender_display.trim(),
             )?;
-            spaces::event(tx, ws, &space.id);
         }
 
         Ok(())
     }
 
-    fn identify_mentions(&self, tx: &Tx, label: &str) -> ChannelResult<Vec<Value>> {
+    fn identify_mentions(&self, w: &mut W<'_>, label: &str) -> ChannelResult<Vec<Value>> {
         let Self {
             ws,
             conn,
@@ -1192,7 +1168,7 @@ impl InboundWrite<'_> {
                 Some(facts.account_id.clone())
             } else {
                 m.handle.as_ref().and_then(|h| {
-                    identify_handle(tx, ws, conn, actor, h, Some(&m.name), &label)
+                    identify_handle(w, ws, conn, actor, h, Some(&m.name), &label)
                         .map(|i| i.account_id)
                 })
             };
@@ -1205,7 +1181,7 @@ impl InboundWrite<'_> {
     fn find_existing_message(
         &self,
         ch: &Channels,
-        tx: &Tx,
+        w: &mut W<'_>,
         space: &spaces::SpaceRow,
         identity: &SenderIdentity,
         key: &str,
@@ -1231,51 +1207,47 @@ impl InboundWrite<'_> {
         let source = msg.source_id.as_deref().filter(|s| !s.trim().is_empty());
         let mut first: Option<(String, String, &'static str)> = None;
         if let Some(src) = source
-            && let Some(f) = tx.write(|w| ingress::by_source(w, conn, src))?
+            && let Some(f) = ingress::by_source(w, conn, src)?
         {
             if has_id {
-                tx.write(|w| ingress::upgrade_provider_id(w, &f.id, &msg.external_id))?;
+                ingress::upgrade_provider_id(w, &f.id, &msg.external_id)?;
             }
             let label = if f.out {
                 LABEL_ECHO
             } else {
-                tx.write(|w| {
-                    ingress::complete(
-                        w,
-                        &f.id,
-                        msg.thread_key.as_deref(),
-                        msg.reply_to.as_deref(),
-                        None,
-                        None,
-                    )
-                })?;
+                ingress::complete(
+                    w,
+                    &f.id,
+                    msg.thread_key.as_deref(),
+                    msg.reply_to.as_deref(),
+                    None,
+                    None,
+                )?;
                 "重复的消息"
             };
             first = Some((f.id, f.space_id, label));
         }
         if first.is_none()
             && has_id
-            && let Some(id) = tx.write(|w| ingress::by_external(w, &space.id, &msg.external_id))?
+            && let Some(id) = ingress::by_external(w, &space.id, &msg.external_id)?
         {
-            tx.write(|w| {
-                ingress::complete(
-                    w,
-                    &id,
-                    msg.thread_key.as_deref(),
-                    msg.reply_to.as_deref(),
-                    None,
-                    None,
-                )
-            })?;
+            ingress::complete(
+                w,
+                &id,
+                msg.thread_key.as_deref(),
+                msg.reply_to.as_deref(),
+                None,
+                None,
+            )?;
             first = Some((id, space.id.clone(), "重复的消息"));
         }
         if first.is_none() {
-            first = self.find_content_copy(ch, tx, space, identity, key)?;
+            first = self.find_content_copy(ch, w, space, identity, key)?;
         }
         if first.is_none()
             && has_id
-            && let Some((id, sp)) = messages::seen_elsewhere(
-                tx,
+            && let Some((id, sp)) = duplicates::elsewhere(
+                w,
                 ws,
                 conn,
                 mode == Mode::Own,
@@ -1283,25 +1255,23 @@ impl InboundWrite<'_> {
                 &msg.external_id,
             )?
         {
-            tx.write(|w| {
-                ingress::complete(
-                    w,
-                    &id,
-                    msg.thread_key.as_deref(),
-                    msg.reply_to.as_deref(),
-                    sender_account.as_deref(),
-                    sender_party.as_deref(),
-                )
-            })?;
+            ingress::complete(
+                w,
+                &id,
+                msg.thread_key.as_deref(),
+                msg.reply_to.as_deref(),
+                sender_account.as_deref(),
+                sender_party.as_deref(),
+            )?;
             first = Some((id, sp, LABEL_ELSEWHERE));
         }
-        self.find_own_echo(tx, space, identity, has_id, first)
+        self.find_own_echo(w, space, identity, has_id, first)
     }
 
     fn find_content_copy(
         &self,
         ch: &Channels,
-        tx: &Tx,
+        w: &mut W<'_>,
         space: &spaces::SpaceRow,
         identity: &SenderIdentity,
         key: &str,
@@ -1320,46 +1290,47 @@ impl InboundWrite<'_> {
             ..
         } = identity;
         let has_id = !msg.external_id.is_empty();
-        let probe = fallback::Probe {
-            ws,
-            conn,
-            space_id: &space.id,
-            space_ext: &msg.space_ext_id,
-            own: mode == Mode::Own,
-            key: &key,
-            created: msg.created,
-            tol: fallback::tolerance(ch, tx, ws, &facts.adapter, &msg.space_ext_id)?,
-            has_id,
-            party: sender_party.as_deref(),
-        };
-        let found = match fallback::by_content(tx, &probe)? {
-            Some(f) => Some(f),
-            None => {
-                let others = fallback::other_keys(tx, &probe, &msg.text, &msg.attachments)?;
-                match fallback::by_keys(tx, &probe, &others)? {
-                    Some(f) => Some(f),
-                    None => fallback::by_exact_time(tx, &probe)?,
-                }
+        use steve_store::channel_message_repo::duplicates::{self, Probe};
+
+        let found = (|| -> ChannelResult<_> {
+            let probe = Probe {
+                ws,
+                conn,
+                space_id: &space.id,
+                space_ext: &msg.space_ext_id,
+                own: mode == Mode::Own,
+                key,
+                created: msg.created,
+                tol: fallback::tolerance(ch, w, ws, &facts.adapter, &msg.space_ext_id)?,
+                has_id,
+                party: sender_party.as_deref(),
+            };
+            if let Some(found) = duplicates::by_keys(w, &probe, &[probe.key])? {
+                return Ok(Some(found));
             }
-        };
+            let others = fallback::other_keys(w, &probe, &msg.text, &msg.attachments)?;
+            let others = others.iter().map(String::as_str).collect::<Vec<_>>();
+            if let Some(found) = duplicates::by_keys(w, &probe, &others)? {
+                return Ok(Some(found));
+            }
+            Ok(duplicates::by_exact_time(w, &probe)?)
+        })()?;
         if let Some(f) = found {
             if has_id {
-                tx.write(|w| ingress::upgrade_provider_id(w, &f.id, &msg.external_id))?;
+                ingress::upgrade_provider_id(w, &f.id, &msg.external_id)?;
             }
             let label = if f.out {
-                tx.write(|w| ingress::fill_created(w, &f.id, msg.created))?;
+                ingress::fill_created(w, &f.id, msg.created)?;
                 LABEL_ECHO
             } else {
-                tx.write(|w| {
-                    ingress::complete(
-                        w,
-                        &f.id,
-                        msg.thread_key.as_deref(),
-                        msg.reply_to.as_deref(),
-                        sender_account.as_deref(),
-                        sender_party.as_deref(),
-                    )
-                })?;
+                ingress::complete(
+                    w,
+                    &f.id,
+                    msg.thread_key.as_deref(),
+                    msg.reply_to.as_deref(),
+                    sender_account.as_deref(),
+                    sender_party.as_deref(),
+                )?;
                 LABEL_ELSEWHERE
             };
             return Ok(Some((f.id, f.space_id, label)));
@@ -1369,7 +1340,7 @@ impl InboundWrite<'_> {
 
     fn find_own_echo(
         &self,
-        tx: &Tx,
+        w: &mut W<'_>,
         space: &spaces::SpaceRow,
         identity: &SenderIdentity,
         has_id: bool,
@@ -1396,29 +1367,27 @@ impl InboundWrite<'_> {
             None if !from_other
                 || sender.as_ref().is_some_and(|s| s.is_ours)
                 || crate::arbiter::from_you(
-                    tx,
+                    w,
                     ws,
                     sender_account.as_deref(),
                     sender_party.as_deref(),
                 )? =>
             {
-                tx.write(|w| -> ChannelResult<Option<ExistingMessage>> {
-                    let found = messages::our_echo(
-                        w,
-                        ws,
-                        &msg.space_ext_id,
-                        &msg.external_id,
-                        &msg.text,
-                        now - ECHO_WINDOW_MS,
-                    )?;
-                    let Some((id, stored_space)) = found else {
-                        return Ok(None);
-                    };
-                    if stored_space == space.id && has_id {
-                        ingress::fill_echo_id(w, &id, &msg.external_id)?;
-                    }
-                    Ok(Some((id, stored_space, LABEL_ECHO)))
-                })?
+                let found = messages::our_echo(
+                    w,
+                    ws,
+                    &msg.space_ext_id,
+                    &msg.external_id,
+                    &msg.text,
+                    now - ECHO_WINDOW_MS,
+                )?;
+                let Some((id, stored_space)) = found else {
+                    return Ok(None);
+                };
+                if stored_space == space.id && has_id {
+                    ingress::fill_echo_id(w, &id, &msg.external_id)?;
+                }
+                Some((id, stored_space, LABEL_ECHO))
             }
             None => None,
         })
@@ -1426,7 +1395,7 @@ impl InboundWrite<'_> {
 
     fn duplicate_message(
         &self,
-        tx: &Tx,
+        w: &mut W<'_>,
         prepared: &PreparedSpace,
         identity: &SenderIdentity,
         trigger: &TriggerAuthor,
@@ -1461,10 +1430,8 @@ impl InboundWrite<'_> {
         let has_id = !msg.external_id.is_empty();
         let source = msg.source_id.as_deref().filter(|s| !s.trim().is_empty());
         if let Some((id, _, _)) = &first {
-            tx.write(|w| {
-                ingress::supplied(w, id, conn, source, !has_id)?;
-                ingress::mark_seen(w, id, conn)
-            })?;
+            ingress::supplied(w, id, conn, source, !has_id)?;
+            ingress::mark_seen(w, id, conn)?;
             if mode == Mode::Own
                 && !*bot_author
                 && history.is_none()
@@ -1472,16 +1439,14 @@ impl InboundWrite<'_> {
                     .as_ref()
                     .is_some_and(|(_, _, label)| *label != LABEL_ECHO)
             {
-                tx.write(|w| {
-                    ingress::trigger_receipt(
-                        w,
-                        conn,
-                        id,
-                        trigger_account,
-                        trigger_party.as_deref(),
-                        *trigger_self,
-                    )
-                })?;
+                ingress::trigger_receipt(
+                    w,
+                    conn,
+                    id,
+                    trigger_account,
+                    trigger_party.as_deref(),
+                    *trigger_self,
+                )?;
             }
         }
         if let Some((id, space_id, label)) = first {
@@ -1513,7 +1478,7 @@ impl InboundWrite<'_> {
 
     fn insert_message(
         &self,
-        tx: &Tx,
+        w: &mut W<'_>,
         space: &spaces::SpaceRow,
         identity: &SenderIdentity,
         key: &str,
@@ -1553,49 +1518,44 @@ impl InboundWrite<'_> {
         let external_id = if has_id {
             msg.external_id.clone()
         } else {
-            fallback::new_id(tx, &space.id, &key, msg.created)?
+            steve_store::channel_message_repo::duplicates::new_id(w, &space.id, &key, msg.created)?
         };
-        let message_id = tx.write(|w| -> ChannelResult<String> {
-            let seen_by = steve_store::channel_spaces::identity_bit(w, &space.id, conn)?;
-            let id = ingress::insert(
-                w,
-                &ingress::NewInbound {
-                    ws,
-                    space_id: &space.id,
-                    external_id: &external_id,
-                    thread_key: msg.thread_key.as_deref(),
-                    reply_to: msg.reply_to.as_deref(),
-                    sender_account_id: sender_account.as_deref(),
-                    sender_party_id: sender_party.as_deref(),
-                    text: &msg.text,
-                    attachments: &attachments,
-                    mentions: &mentions,
-                    created: msg.created,
-                    content_key: Some(&key),
-                    fallback_from: (!has_id).then_some(conn),
-                    history: history.map(History::code),
-                    seen_by,
-                },
-            )?
-            .ok_or_else(|| ApiError::conflict("这条消息已经记下了"))?;
-            ingress::supplied(w, &id, conn, source, false)?;
-            Ok(id)
-        })?;
+        let seen_by = steve_store::channel_spaces::identity_bit(w, &space.id, conn)?;
+        let message_id = ingress::insert(
+            w,
+            &ingress::NewInbound {
+                ws,
+                space_id: &space.id,
+                external_id: &external_id,
+                thread_key: msg.thread_key.as_deref(),
+                reply_to: msg.reply_to.as_deref(),
+                sender_account_id: sender_account.as_deref(),
+                sender_party_id: sender_party.as_deref(),
+                text: &msg.text,
+                attachments: &attachments,
+                mentions: &mentions,
+                created: msg.created,
+                content_key: Some(&key),
+                fallback_from: (!has_id).then_some(conn),
+                history: history.map(History::code),
+                seen_by,
+            },
+        )?
+        .ok_or_else(|| ApiError::conflict("这条消息已经记下了"))?;
+        ingress::supplied(w, &message_id, conn, source, false)?;
         if mode == Mode::Own && !*bot_author && history.is_none() {
-            tx.write(|w| {
-                ingress::trigger_receipt(
-                    w,
-                    conn,
-                    &message_id,
-                    trigger_account,
-                    trigger_party.as_deref(),
-                    *trigger_self,
-                )
-            })?;
+            ingress::trigger_receipt(
+                w,
+                conn,
+                &message_id,
+                trigger_account,
+                trigger_party.as_deref(),
+                *trigger_self,
+            )?;
         }
         if history.is_none() && !msg.sender.is_bot {
             crate::pipeline::observe_reply(
-                tx,
+                w,
                 ws,
                 &space.id,
                 msg.reply_to.as_deref(),
@@ -1610,15 +1570,15 @@ impl InboundWrite<'_> {
         } else {
             msg.created.max(now)
         };
-        tx.write(|w| steve_store::channel_spaces::touch(w, &space.id, at, msg.sender.external))?;
+        steve_store::channel_spaces::touch(w, &space.id, at, msg.sender.external)?;
         if let Some(h) = history {
-            count_history(tx, conn, h, now)?;
+            count_history(w, conn, h, now)?;
         }
 
         Ok(message_id)
     }
 
-    fn message_type(&self, tx: &Tx, space: &spaces::SpaceRow) -> ChannelResult<&'static str> {
+    fn message_type(&self, w: &mut W<'_>, space: &spaces::SpaceRow) -> ChannelResult<&'static str> {
         let Self { msg, info, .. } = *self;
         let kind = chat_kind(msg, &space.kind, info.kind);
         let reply_exts: Vec<&str> = [msg.reply_to.as_deref(), msg.root_id.as_deref()]
@@ -1629,7 +1589,9 @@ impl InboundWrite<'_> {
             "im.dm"
         } else if msg.mentions_connection() {
             "im.mention"
-        } else if !reply_exts.is_empty() && messages::is_ours_out(tx, &space.id, &reply_exts)? {
+        } else if !reply_exts.is_empty()
+            && ingress::has_provider_reply(w, &space.id, &reply_exts, ReplyAuthor::Outbound)?
+        {
             "im.reply"
         } else {
             "im.message"
@@ -1640,7 +1602,7 @@ impl InboundWrite<'_> {
 
     fn settle_authorship(
         &self,
-        tx: &Tx,
+        w: &mut W<'_>,
         identity: &SenderIdentity,
     ) -> ChannelResult<(bool, bool, bool)> {
         let Self {
@@ -1662,14 +1624,10 @@ impl InboundWrite<'_> {
         // you, however the adapter named you (a handle of yours it saw as someone new)
         // (or the remote says so: an external channel's `is_mine`, on your own account)
         let from_owner = (msg.mine && mode == Mode::Own)
-            || (!msg.sender.is_bot
-                && crate::arbiter::from_owner(
-                    tx,
-                    ws,
-                    &owner_users(tx, ws, facts)?,
-                    sender_party.as_deref(),
-                    &msg.sender,
-                )?);
+            || (!msg.sender.is_bot && {
+                let users = owner_users(w, ws, facts)?;
+                crate::arbiter::from_owner(w, ws, &users, sender_party.as_deref(), &msg.sender)?
+            });
         // on your own account your words are yours, never someone's to answer
         let own = sender_account.as_deref() == Some(facts.account_id.as_str())
             || (from_owner && mode == Mode::Own);
@@ -1680,7 +1638,7 @@ impl InboundWrite<'_> {
                 .into_iter()
                 .flatten()
             {
-                crate::context::settle_own_name(tx, a)?;
+                crate::context::settle_own_name(w, a)?;
             }
         }
         if let Some(s) = &sender
@@ -1688,14 +1646,14 @@ impl InboundWrite<'_> {
             && !msg.sender.is_bot
         {
             // a new contact that looks like you: a merge proposal into “我”, never a merge
-            suggest_me(tx, ws, facts, s, sender_name, &msg.sender)?;
+            suggest_me(w, ws, facts, s, sender_name, &msg.sender)?;
         }
         Ok((sender_is_ours, from_owner, own))
     }
 
     fn loop_guard(
         &self,
-        tx: &Tx,
+        w: &mut W<'_>,
         space: &spaces::SpaceRow,
         set: &spaces::SpaceSettings,
         identity: &SenderIdentity,
@@ -1712,18 +1670,22 @@ impl InboundWrite<'_> {
         } else if (msg.sender.is_bot || sender_is_ours) && !set.collab {
             Next::Record(LABEL_BOT)
         } else if (msg.sender.is_bot || sender_is_ours)
-            && answered_since_people(tx, &space.id, sender_account.as_deref())?
+            && sender_account
+                .as_deref()
+                .map(|bot| ingress::answered_since_people(w, &space.id, bot))
+                .transpose()?
+                .unwrap_or(false)
         {
             Next::Record(LABEL_BOT_ANSWERED)
         } else {
             Next::Handle
         };
-        self.filter_automated(tx, identity, own, next)
+        self.filter_automated(w, identity, own, next)
     }
 
     fn filter_automated(
         &self,
-        tx: &Tx,
+        w: &mut W<'_>,
         identity: &SenderIdentity,
         own: bool,
         next: Next,
@@ -1742,7 +1704,7 @@ impl InboundWrite<'_> {
         let next = match next {
             Next::Handle | Next::Own
                 if mode == Mode::Own
-                    && spaces::channel_settings(tx, ws, conn)?.is_some_and(|cs| {
+                    && spaces::channel_settings(w, ws, conn)?.is_some_and(|cs| {
                         crate::arbiter::automated(
                             &msg.text,
                             &msg.mentions
@@ -1761,7 +1723,7 @@ impl InboundWrite<'_> {
                     && (own
                         || sender_account
                             .as_deref()
-                            .map(|id| crate::arbiter::is_yours(tx, ws, id))
+                            .map(|id| crate::arbiter::is_yours(w, ws, id))
                             .transpose()?
                             .unwrap_or(false)) =>
             {
@@ -1780,26 +1742,16 @@ impl InboundWrite<'_> {
     }
 }
 
-/// Has the space received only history so far (at least one message, none live)?
-fn only_history(tx: &Tx, space: &str) -> ChannelResult<bool> {
-    Ok(tx.query_row(
-        "SELECT EXISTS (SELECT 1 FROM chan_messages WHERE space_id = ?1 AND direction = 'in' AND history IS NOT NULL)
-            AND NOT EXISTS (SELECT 1 FROM chan_messages WHERE space_id = ?1 AND direction = 'in' AND history IS NULL)",
-        [space],
-        |r| r.get(0),
-    )?)
-}
-
 /// Counts one message only recorded as history on the connection's settings (the account page
 /// shows them).
-fn count_history(tx: &Tx, conn: &str, h: History, now: i64) -> ChannelResult<()> {
+fn count_history(w: &mut W<'_>, conn: &str, h: History, now: i64) -> ChannelResult<()> {
     use steve_store::channel_spaces::account_settings::{self, HistoryArrival};
 
     let arrival = match h {
         History::Before | History::Backfill => HistoryArrival::Before,
         History::Late => HistoryArrival::Late,
     };
-    tx.write(|w| account_settings::count_history(w, conn, arrival, now))?;
+    account_settings::count_history(w, conn, arrival, now)?;
     tracing::info!(
         conn,
         history = h.code(),
@@ -1810,18 +1762,15 @@ fn count_history(tx: &Tx, conn: &str, h: History, now: i64) -> ChannelResult<()>
 
 /// The users whose messages are “yours” on this connection: the user whose “我” owns its account,
 /// else whoever connected it, and the workspace's owner.
-fn owner_users(tx: &Tx, ws: &str, facts: &ConnFacts) -> ChannelResult<Vec<String>> {
+fn owner_users(w: &mut W<'_>, ws: &str, facts: &ConnFacts) -> ChannelResult<Vec<String>> {
     let mut out = vec![
         facts
             .owner_user
             .clone()
             .unwrap_or_else(|| facts.created_by.clone()),
     ];
-    let mut st = tx.prepare_cached(
-        "SELECT user_id FROM workspace_members WHERE workspace_id = ? AND role = 'owner' ORDER BY created",
-    )?;
-    for u in st.query_map([ws], |r| r.get::<_, String>(0))? {
-        let u = u?;
+
+    for u in w.members().owners(ws)? {
         if !out.contains(&u) {
             out.push(u);
         }
@@ -1832,7 +1781,7 @@ fn owner_users(tx: &Tx, ws: &str, facts: &ConnFacts) -> ChannelResult<Vec<String
 /// A sender seen for the first time who looks like you: [`steve_modules::accounts::identify::propose_if_me`]
 /// for the “我” of the connection's owner (a failure only logs).
 fn suggest_me(
-    tx: &Tx,
+    w: &mut W<'_>,
     ws: &str,
     facts: &ConnFacts,
     s: &Identified,
@@ -1840,43 +1789,37 @@ fn suggest_me(
     sender: &Sender,
 ) -> ChannelResult<()> {
     let user = facts.owner_user.as_deref().unwrap_or(&facts.created_by);
-    let Some(me) = tx.write(|w| w.contacts().me(ws, user))? else {
+    let Some(me) = w.contacts().me(ws, user)? else {
         return Ok(());
     };
     let handles: Vec<&str> = std::iter::once(&sender.handle)
         .chain(sender.aliases.iter())
         .map(|h| h.handle.as_str())
         .collect();
-    if tx.execute_batch("SAVEPOINT chan_suggest_me").is_err() {
-        return Ok(());
-    }
-    match steve_modules::accounts::identify::propose_if_me(
-        tx,
-        ws,
-        &me.id,
-        &s.party_id,
-        &s.account_id,
-        name,
-        &handles,
-    ) {
-        Ok(_) => {
-            let _ = tx.execute_batch("RELEASE chan_suggest_me");
-        }
-        Err(e) => {
-            tracing::warn!(ws, "channel inbound: no merge proposal into 我: {e}");
-            let _ = tx.execute_batch("ROLLBACK TO chan_suggest_me; RELEASE chan_suggest_me");
-        }
+
+    if let Err(e) = w.scope(|w| {
+        steve_modules::accounts::identify::propose_if_me(
+            w,
+            ws,
+            &me.id,
+            &s.party_id,
+            &s.account_id,
+            name,
+            &handles,
+        )
+    }) {
+        tracing::warn!(ws, "channel inbound: no merge proposal into 我: {e}");
     }
     Ok(())
 }
 
 /// `systems.id` of the connection's account (the space's `system_id`).
+
 pub(crate) fn facts_system(tx: &Tx, account: &str) -> ChannelResult<String> {
-    Ok(tx.query_row(
-        "SELECT system_id FROM accounts WHERE id = ?",
-        [account],
-        |r| r.get(0),
-    )?)
+    let system = tx.write(|w| steve_store::accounts::system_handle(w, account))?;
+    system
+        .map(|(id, _)| id)
+        .ok_or_else(|| ApiError::not_found("账号"))
 }
 
 /// The other types that hold besides the main one (a trigger on `im.mention` also takes a mention
@@ -1894,14 +1837,14 @@ fn also(main: &str, msg: &InboundMessage) -> Vec<String> {
 
 /// The facts the rules' conditions look at (after step 1–2's writes).
 fn rule_facts(
-    c: &rusqlite::Connection,
     r: &mut impl steve_store::Read,
     ws: &str,
     conn: &ConnFacts,
     inbound: &Inbound,
     msg: &InboundMessage,
 ) -> ChannelResult<Facts> {
-    let space = spaces::get(c, &inbound.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
+    let space = steve_store::channel_spaces::rows::get_in_workspace(r, ws, &inbound.space_id)?
+        .ok_or_else(|| ApiError::not_found("空间"))?;
     let kind = chat_kind(msg, &space.kind, SpaceKind::Group);
     let exts: Vec<&str> = [msg.reply_to.as_deref(), msg.root_id.as_deref()]
         .into_iter()
@@ -1909,24 +1852,23 @@ fn rule_facts(
         .filter(|e| *e != msg.external_id)
         .collect();
     let reply_to_me = !exts.is_empty()
-        && (messages::is_ours_out(c, &space.id, &exts)?
-            || messages::is_by(c, &space.id, &exts, &conn.account_id)?);
+        && (ingress::has_provider_reply(r, &space.id, &exts, ReplyAuthor::Outbound)?
+            || ingress::has_provider_reply(
+                r,
+                &space.id,
+                &exts,
+                ReplyAuthor::Account(&conn.account_id),
+            )?);
+
     let (confirmed, teams) = match &inbound.sender_party_id {
-        Some(p) => {
-            let kind: Option<String> = c
-                .query_row("SELECT contact_kind FROM parties WHERE id = ?", [p], |r| {
-                    r.get(0)
-                })
-                .optional()?
-                .flatten();
-            let mut st = c.prepare_cached(
-                "SELECT m.team_id FROM team_members m JOIN parties t ON t.id = m.team_id AND t.status = 'active'
-                  WHERE m.workspace_id = ? AND m.contact_id = ? ORDER BY m.team_id",
-            )?;
-            let teams = st
-                .query_map(params![ws, p], |r| r.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            (kind.as_deref() != Some("unconfirmed"), teams)
+        Some(party) => {
+            let confirmed = steve_store::Contacts::new(r)
+                .party(party)?
+                .and_then(|p| p.contact_kind)
+                .as_deref()
+                != Some("unconfirmed");
+            let teams = steve_store::Teams(r).active_ids_for_contact(ws, party)?;
+            (confirmed, teams)
         }
         None => (false, Vec::new()),
     };
@@ -1948,46 +1890,10 @@ fn rule_facts(
     Ok(f)
 }
 
-/// The inbound message as steps 4–7 need it.
-pub(crate) struct Stored {
-    pub(crate) external_id: String,
-    pub(crate) thread_key: Option<String>,
-    pub(crate) text: String,
-    pub(crate) sender_name: String,
-    /// The names of the people mentioned (leading mentions are not part of trigger words).
-    pub(crate) mention_names: Vec<String>,
-    /// `chan_messages.attachments` as stored.
-    pub(crate) attachments: Value,
-}
+pub(crate) use ingress::Stored;
 
-pub(crate) fn stored(c: &rusqlite::Connection, id: &str) -> ChannelResult<Stored> {
-    c.query_row(
-        "SELECT m.external_id, m.thread_key, coalesce(m.text, ''), coalesce(nullif(a.display_name, ''), a.handle_display, p.name, ''), m.mentions, m.attachments
-           FROM chan_messages m LEFT JOIN accounts a ON a.id = m.sender_account_id LEFT JOIN parties p ON p.id = m.sender_party_id
-          WHERE m.id = ?",
-        [id],
-        |r| {
-            Ok(Stored {
-                external_id: r.get::<_, Option<String>>(0)?.unwrap_or_default(),
-                thread_key: r.get(1)?,
-                text: r.get(2)?,
-                sender_name: r.get(3)?,
-                mention_names: r
-                    .get::<_, Option<String>>(4)?
-                    .and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok())
-                    .unwrap_or_default()
-                    .iter()
-                    .filter_map(|m| m["name"].as_str().map(String::from))
-                    .collect(),
-                attachments: r
-                    .get::<_, Option<String>>(5)?
-                    .and_then(|s| serde_json::from_str(&s).ok())
-                    .unwrap_or(Value::Null),
-            })
-        },
-    )
-    .optional()?
-    .ok_or_else(|| ApiError::not_found("消息"))
+pub(crate) fn stored(r: &mut impl Read, id: &str) -> ChannelResult<Stored> {
+    ingress::stored(r, id)?.ok_or_else(|| ApiError::not_found("消息"))
 }
 
 struct ResponseContext {
@@ -2152,13 +2058,13 @@ impl Channels {
         if v != conn {
             // the conditions as the voice sees the message (another identity received it)
             facts.mentioned =
-                store.reader(|c| mentions_account(c, &inbound.message_id, &voice_account))?;
+                store.read(|r| mentions_account(r, &inbound.message_id, &voice_account))?;
         }
 
         // only messages addressed to the speaking identity are acted on; the rest are recorded, and neither the
         // space's flow nor any rule (nor an intent model) looks at them
         let original = inbound.facts.clone().unwrap_or_default();
-        if !store.reader(|c| addressed(c, ws, conn, &space.id, &inbound.message_id, &original))? {
+        if !store.read(|r| addressed(r, ws, conn, &space.id, &inbound.message_id, &original))? {
             return Ok(Response::skipped(rules::LABEL_UNADDRESSED));
         }
 
@@ -2189,15 +2095,16 @@ impl Channels {
         inbound: &Inbound,
     ) -> ChannelResult<ResponseContext> {
         let store = self.store();
-        let (cs, space, set, m, voice, voice_account) = store.reader(|c| -> ChannelResult<_> {
+        let (cs, space, set, m, voice, voice_account) = store.read(|r| -> ChannelResult<_> {
             let space =
-                spaces::get(c, &inbound.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
-            let voice = spaces::voice(c, &space.id)?;
+                steve_store::channel_spaces::rows::get_in_workspace(r, ws, &inbound.space_id)?
+                    .ok_or_else(|| ApiError::not_found("空间"))?;
+            let voice = (!space.connection_id.is_empty()).then(|| space.connection_id.clone());
             let acting = voice.as_deref().unwrap_or(conn);
-            let (account, mode) = crate::bindings::connection_account(c, ws, acting)?;
-            let cs = spaces::channel_settings(c, ws, acting)?;
-            let set = spaces::settings(c, &space.id)?;
-            let m = stored(c, &inbound.message_id)?;
+            let (account, mode) = crate::bindings::connection_account(r, ws, acting)?;
+            let cs = spaces::channel_settings(r, ws, acting)?;
+            let set = spaces::settings(r, &space.id)?;
+            let m = stored(r, &inbound.message_id)?;
             Ok((
                 cs.map(|s| (s.mode, s.rules)).unwrap_or((mode, json!([]))),
                 space,
@@ -2213,7 +2120,7 @@ impl Channels {
             connection_id: voice.clone().unwrap_or_else(|| conn.to_string()),
             mode,
             space_id: space.id.clone(),
-            space_name: store.reader(|c| spaces::display_title(c, &space))?,
+            space_name: store.read(|r| spaces::display_title(r, &space))?,
             message_id: inbound.message_id.clone(),
             external_id: m.external_id.clone(),
             thread_key: m.thread_key.clone(),
@@ -2356,7 +2263,7 @@ impl Channels {
         let now = self.now();
         let found = self.store().read(|r| {
             self.store().reader(|c| -> ChannelResult<_> {
-                let (_, mode) = crate::bindings::connection_account(c, ws, conn)?;
+                let (_, mode) = crate::bindings::connection_account(r, ws, conn)?;
                 if mode != Mode::Own {
                     return Ok(None);
                 }
@@ -2379,9 +2286,10 @@ impl Channels {
                 Ok(Some(Response::skipped(crate::decide::LABEL_BOT_SEEN)))
             }
             Some(crate::decide::BotNotice::Item { .. }) => {
-                let mut plan = self
-                    .store()
-                    .reader(|c| crate::flow_actions::plan_of(c, ws, &inbound.message_id))?;
+                let mut plan = self.store().read(|r| {
+                    self.store()
+                        .reader(|c| crate::flow_actions::plan_in(c, r, ws, &inbound.message_id))
+                })?;
                 plan.act = rules::Act::CreateItem(rules::ItemMode::Propose);
                 let mut r = self.execute(&plan).await?;
                 if r.item_id.is_some() {
@@ -2391,38 +2299,6 @@ impl Channels {
             }
         }
     }
-}
-
-/// Has Steve already answered `bot` in `space` since a person last spoke there: has anything Steve sends
-/// gone out (sent, also if recalled since; a draft, a message still waiting to go out or a failure is
-/// not) after the bot's first message since, by when it was sent? A
-/// bot gets one answer between two people's messages, however Steve answered (a reply, a flow's message)
-/// and however the bot speaks (a reply, a new @), so two bots never keep answering each other.
-fn answered_since_people(
-    c: &rusqlite::Connection,
-    space: &str,
-    bot: Option<&str>,
-) -> ChannelResult<bool> {
-    let Some(bot) = bot else {
-        return Ok(false);
-    };
-    Ok(c.query_row(
-        "WITH people AS (
-           SELECT coalesce(max(h.created), 0) AS at FROM chan_messages h
-            WHERE h.space_id = ?1 AND h.direction = 'in' AND h.sender_account_id IS NOT NULL
-              AND h.sender_account_id NOT IN (SELECT account_id FROM space_members WHERE space_id = ?1 AND role = 'bot')
-              AND h.sender_account_id NOT IN (SELECT id FROM accounts WHERE kind = 'app_bot')
-         ), first_bot AS (
-           SELECT min(b.created) AS at FROM chan_messages b, people
-            WHERE b.space_id = ?1 AND b.direction = 'in' AND b.sender_account_id = ?2 AND b.created > people.at
-         )
-         SELECT EXISTS(
-           SELECT 1 FROM chan_messages o, first_bot
-            WHERE o.space_id = ?1 AND o.direction = 'out' AND o.status IN ('sent', 'recalled')
-              AND first_bot.at IS NOT NULL AND coalesce(o.sent, o.created) >= first_bot.at)",
-        params![space, bot],
-        |r| r.get(0),
-    )?)
 }
 
 /// The kind of chat a message came from: its own chat type (Feishu's chat_type on every event) wins over
@@ -2437,7 +2313,7 @@ fn chat_kind(msg: &InboundMessage, stored: &str, fallback: SpaceKind) -> SpaceKi
 /// `conn` when there is none): a private chat, or an @ of that identity's account. One answer for the event
 /// (which flows may run) and for the rules ([`rules::Gate`]).
 fn addressed(
-    c: &rusqlite::Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     conn: &str,
     space: &str,
@@ -2447,23 +2323,21 @@ fn addressed(
     if f.dm {
         return Ok(true);
     }
-    match spaces::voice(c, space)? {
+    let voice = steve_store::channel_spaces::rows::get_in_workspace(r, ws, space)?
+        .map(|s| s.connection_id)
+        .filter(|id| !id.is_empty());
+    match voice {
         Some(v) if v != conn => {
-            let (account, _) = crate::bindings::connection_account(c, ws, &v)?;
-            mentions_account(c, message, &account)
+            let (account, _) = crate::bindings::connection_account(r, ws, &v)?;
+            mentions_account(r, message, &account)
         }
         _ => Ok(rules::Gate::default().admits(f)),
     }
 }
 
 /// Does inbound message `id` @-mention `account`?
-fn mentions_account(c: &rusqlite::Connection, id: &str, account: &str) -> ChannelResult<bool> {
-    let raw: String = c.query_row(
-        "SELECT mentions FROM chan_messages WHERE id = ?",
-        [id],
-        |r| r.get(0),
-    )?;
-    let v: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
-    Ok(v.as_array()
-        .is_some_and(|a| a.iter().any(|m| m["account_id"].as_str() == Some(account))))
+fn mentions_account(r: &mut impl Read, id: &str, account: &str) -> ChannelResult<bool> {
+    let mentions =
+        ingress::mentioned_accounts(r, id)?.ok_or_else(|| ApiError::not_found("消息"))?;
+    Ok(mentions.iter().any(|id| id == account))
 }

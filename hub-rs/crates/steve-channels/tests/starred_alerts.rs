@@ -142,7 +142,7 @@ async fn setup() -> H {
     let v = Viewer::bare(WS, ME);
     // nothing is drafted for you anywhere: what the star does is the only thing that happens
     env.store()
-        .transaction(|tx| {
+        .write(|tx| {
             spaces::set_account_rules(
                 tx,
                 &v,

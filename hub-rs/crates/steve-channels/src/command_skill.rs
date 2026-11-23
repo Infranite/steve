@@ -25,51 +25,52 @@ impl Channels {
         conn: &str,
         inbound: &crate::inbound::Inbound,
     ) -> ChannelResult<Option<crate::respond::Response>> {
-        let plan = self
-            .store()
-            .reader(|c| -> ChannelResult<Option<(Plan, bool)>> {
-                let Some(space) = spaces::get(c, &inbound.space_id)? else {
-                    return Ok(None);
-                };
-                let m = crate::inbound::stored(c, &inbound.message_id)?;
-                let Some(command) =
-                    crate::arbiter::command(c, ws, &space, conn, &inbound.message_id)?
-                else {
-                    return Ok(None);
-                };
-                // once per message; and only while your account is still in the chat
-                if answered(c, ws, &inbound.message_id)? || !present(c, &space.id, conn)? {
-                    return Ok(None);
-                }
-                // the thread of an item handed off: what is said there goes to that item
-                if crate::messages::thread_item(c, ws, &inbound.message_id, inbound.from_owner)?
-                    .is_some()
-                {
-                    return Ok(None);
-                }
-                let set = spaces::settings(c, &space.id)?;
-                Ok(Some((
-                    Plan {
-                        ws: ws.into(),
-                        connection_id: conn.to_string(),
-                        mode: Mode::Own,
-                        space_id: space.id.clone(),
-                        space_name: crate::spaces::display_title(c, &space)?,
-                        message_id: inbound.message_id.clone(),
-                        external_id: m.external_id.clone(),
-                        thread_key: m.thread_key.clone(),
-                        text: crate::media::with_unread_note(&m.text, &m.attachments),
-                        sender_account_id: command.sender_account,
-                        sender_party_id: command.sender_party,
-                        sender_name: m.sender_name.clone(),
-                        act: crate::rules::Act::Reply,
-                        rule: None,
-                        muted: set.muted,
-                        trigger: Some(command.instruction),
-                    },
-                    command.from_self,
-                )))
-            })?;
+        let plan = self.store().read(|r| {
+            self.store()
+                .reader(|c| -> ChannelResult<Option<(Plan, bool)>> {
+                    let Some(space) = spaces::get(c, &inbound.space_id)? else {
+                        return Ok(None);
+                    };
+                    let m = crate::inbound::stored(r, &inbound.message_id)?;
+                    let Some(command) =
+                        crate::arbiter::command(c, r, ws, &space, conn, &inbound.message_id)?
+                    else {
+                        return Ok(None);
+                    };
+                    // once per message; and only while your account is still in the chat
+                    if answered(c, ws, &inbound.message_id)? || !present(c, &space.id, conn)? {
+                        return Ok(None);
+                    }
+                    // the thread of an item handed off: what is said there goes to that item
+                    if crate::messages::thread_item(c, ws, &inbound.message_id, inbound.from_owner)?
+                        .is_some()
+                    {
+                        return Ok(None);
+                    }
+                    let set = spaces::settings(r, &space.id)?;
+                    Ok(Some((
+                        Plan {
+                            ws: ws.into(),
+                            connection_id: conn.to_string(),
+                            mode: Mode::Own,
+                            space_id: space.id.clone(),
+                            space_name: crate::spaces::display_title(r, &space)?,
+                            message_id: inbound.message_id.clone(),
+                            external_id: m.external_id.clone(),
+                            thread_key: m.thread_key.clone(),
+                            text: crate::media::with_unread_note(&m.text, &m.attachments),
+                            sender_account_id: command.sender_account,
+                            sender_party_id: command.sender_party,
+                            sender_name: m.sender_name.clone(),
+                            act: crate::rules::Act::Reply,
+                            rule: None,
+                            muted: set.muted,
+                            trigger: Some(command.instruction),
+                        },
+                        command.from_self,
+                    )))
+                })
+        })?;
         let Some((plan, yours)) = plan else {
             return Ok(None);
         };
@@ -124,12 +125,7 @@ impl Channels {
     async fn decline(&self, plan: &Plan, guard: &Guard) -> ChannelResult<crate::respond::Response> {
         let owner = self
             .store()
-            .read::<_, steve_store::StoreError>(|r| {
-                Ok(self.store().reader(|c| {
-                    crate::personas::owner_name_for_space(c, r, &plan.ws, &plan.space_id)
-                }))
-            })
-            .unwrap_or_else(|e| Err(e.into()))
+            .read(|r| crate::personas::owner_name_for_space(r, &plan.ws, &plan.space_id))
             .unwrap_or_default();
         let owner = if owner.trim().is_empty() {
             "我".to_string()
@@ -267,6 +263,7 @@ fn cut(s: &str, max: usize) -> String {
 /// `[AI] `-marked, where the settings say, without waiting for approval.
 pub(crate) fn trigger_plan(
     c: &rusqlite::Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     msg: &str,
 ) -> ChannelResult<Option<Plan>> {
@@ -284,7 +281,7 @@ pub(crate) fn trigger_plan(
     let Some(conn) = conn else {
         return Ok(None);
     };
-    let mut plan = crate::flow_actions::plan_of(c, ws, msg)?;
+    let mut plan = crate::flow_actions::plan_in(c, r, ws, msg)?;
     plan.connection_id = conn;
     plan.mode = Mode::Own;
     plan.trigger = Some(String::new());
@@ -316,7 +313,7 @@ fn answered(c: &rusqlite::Connection, ws: &str, id: &str) -> ChannelResult<bool>
 pub(crate) fn target(ch: &Channels, plan: &Plan) -> ChannelResult<OutTarget> {
     let style = ch
         .store()
-        .reader(|c| spaces::channel_settings(c, &plan.ws, &plan.connection_id))?
+        .read(|c| spaces::channel_settings(c, &plan.ws, &plan.connection_id))?
         .map(|s| Trigger::from_value(&s.trigger).reply)
         .unwrap_or_default();
     let mut t = OutTarget::reply(plan);

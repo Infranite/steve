@@ -2,13 +2,13 @@
 //! runner or retry loop. The intent and `chan_messages` row commit together; the ordinary outbox
 //! then owns approvals, ambiguous outcomes, dedupe-aware retry, failure decisions and recall.
 
-use rusqlite::{Connection, OptionalExtension, params};
-use serde::Serialize;
 use serde_json::json;
 use steve_modules::outbound::{DeliveryIntent, Identity};
 use steve_modules::{ApiError, Caller};
 use steve_store::base::Viewer;
-use steve_store::{Tx, uid};
+use steve_store::channel_message_repo::{self, outputs};
+use steve_store::channel_spaces::{members, registration, rows};
+use steve_store::{Members, Read, Tx, W};
 
 use crate::deliver::{Auth, Delivered, OutRequest, OutTarget, Purpose};
 use crate::outbound::{Outbox, TEXT_MAX, text_hash};
@@ -22,49 +22,19 @@ pub(crate) struct Envelope {
     pub fingerprint: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct Delivery {
-    pub id: String,
-    pub message_id: String,
-    pub space_id: String,
-    pub connection_id: String,
-    /// Live channel-message state: draft/pending/unknown/sent/failed/discarded/recalled.
-    pub status: String,
-    pub decision_id: Option<String>,
-    pub attempts: i64,
-    pub last_error: Option<String>,
-    pub replied_at: Option<i64>,
-    pub reply_message_id: Option<String>,
-}
+pub use outputs::Delivery;
 
 /// A recorded principal is not permission: membership is rechecked at submission AND queue send.
-pub fn require_requester(c: &Connection, who: &Caller) -> ChannelResult<()> {
-    let live: bool = c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?)",
-        params![who.ws, who.me],
-        |r| r.get(0),
-    )?;
-    if !live {
+pub fn require_requester(r: &mut impl Read, who: &Caller) -> ChannelResult<()> {
+    if Members::new(r).role(&who.ws, &who.me)?.is_none() {
         return Err(ApiError::Unauthenticated);
     }
     Ok(())
 }
 
-fn lookup(c: &Connection, who: &Caller, key: &str) -> ChannelResult<Option<(String, Delivery)>> {
-    Ok(c.query_row(
-        "SELECT d.fingerprint,d.id,d.message_id,d.space_id,d.connection_id,m.status,m.decision_id,d.attempts,d.last_error,d.replied_at,d.reply_message_id
-         FROM output_deliveries d JOIN chan_messages m ON m.id=d.message_id
-         WHERE d.workspace_id=? AND d.requester=? AND d.idempotency_key=?",
-        params![who.ws,who.me,key], |r| Ok((r.get(0)?, Delivery {
-            id:r.get(1)?,message_id:r.get(2)?,space_id:r.get(3)?,connection_id:r.get(4)?,
-            status:r.get(5)?,decision_id:r.get(6)?,attempts:r.get(7)?,last_error:r.get(8)?,replied_at:r.get(9)?,reply_message_id:r.get(10)?,
-        })),
-    ).optional()?)
-}
-
-pub(crate) fn existing(c: &Connection, e: &Envelope) -> ChannelResult<Option<Delivery>> {
-    require_requester(c, &e.who)?;
-    match lookup(c, &e.who, &e.intent.key)? {
+pub(crate) fn existing(r: &mut impl Read, e: &Envelope) -> ChannelResult<Option<Delivery>> {
+    require_requester(r, &e.who)?;
+    match outputs::by_key(r, &e.who.ws, &e.who.me, &e.intent.key)? {
         Some((fingerprint, d)) if fingerprint == e.fingerprint => Ok(Some(d)),
         Some(_) => Err(ApiError::conflict(
             "idempotency key already names a different intent",
@@ -85,26 +55,30 @@ pub(crate) fn record(
     message: &str,
     now: i64,
 ) -> ChannelResult<()> {
-    require_requester(tx, &e.who)?;
-    let t = &req.target;
-    tx.write(|r| crate::notifications::verify_intent(tx, r, &e.who, &e.intent, now))?;
-    crate::notifications::verify_pinned(tx, &e.who, &e.intent, &t.space_id)?;
-    let delivery_id = uid("od");
-    tx.execute(
-        "INSERT INTO output_deliveries(id,workspace_id,requester,idempotency_key,fingerprint,intent,connection_id,space_id,source_message_id,message_id,created)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        params![delivery_id,e.who.ws,e.who.me,e.intent.key,e.fingerprint,serde_json::to_string(&e.intent)?,t.connection_id,t.space_id,t.source_message_id,message,now],
-    )?;
-    crate::notifications::attach(tx, &e.who, &e.intent, &delivery_id)?;
-    steve_store::base::audit(
-        tx,
-        &e.who.ws,
-        &e.who.me,
-        "output.delivery.created",
-        message,
-        &json!({"key":e.intent.key,"source":t.source_message_id,"space":t.space_id,"connection":t.connection_id,"reason":e.intent.reason,"urgency":e.intent.urgency}),
-    )?;
-    Ok(())
+    tx.write(|w| {
+        require_requester(w, &e.who)?;
+        let t = &req.target;
+        crate::notifications::verify_intent(w, &e.who, &e.intent, now)?;
+        crate::notifications::verify_pinned(w, &e.who, &e.intent, &t.space_id)?;
+        let delivery = outputs::insert(w, &outputs::NewDelivery {
+            ws: &e.who.ws,
+            requester: &e.who.me,
+            key: &e.intent.key,
+            fingerprint: &e.fingerprint,
+            intent: &serde_json::to_value(&e.intent)?,
+            connection: &t.connection_id,
+            space: &t.space_id,
+            source: t.source_message_id.as_deref(),
+            message,
+            created: now,
+        })?;
+        crate::notifications::attach(w, &e.who, &e.intent, &delivery)?;
+        steve_store::audit_repo::record(
+            w, &e.who.ws, &e.who.me, "output.delivery.created", message,
+            &json!({"key":e.intent.key,"source":t.source_message_id,"space":t.space_id,"connection":t.connection_id,"reason":e.intent.reason,"urgency":e.intent.urgency}),
+        )?;
+        Ok(())
+    })
 }
 
 /// The queue cannot silently reroute a stored intent to another voice/account, nor keep using an
@@ -114,46 +88,42 @@ pub(crate) fn verify_route(
     message: &str,
     now: i64,
 ) -> ChannelResult<Result<(), String>> {
-    let row: Option<(String,String,String,String,String)> = c.query_row(
-        "SELECT workspace_id,requester,connection_id,space_id,intent FROM output_deliveries WHERE message_id=?",
-        [message], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
-    ).optional()?;
-    let Some((ws, user, conn, space, intent)) = row else {
-        return Ok(Ok(()));
-    };
-    let who = Caller { ws, me: user };
-    if require_requester(c, &who).is_err() {
-        return Ok(Err("requester is no longer a member".into()));
-    }
-    let viewer = Viewer::load(c, &who.ws, &who.me)?;
-    let i: DeliveryIntent = serde_json::from_str(&intent)?;
-    if let Err(e) = c
-        .write(|r| crate::notifications::verify_intent(c, r, &who, &i, now))
-        .and_then(|_| crate::notifications::verify_pinned(c, &who, &i, &space))
-    {
-        return Ok(Err(format!("personal notification consent/route: {e}")));
-    }
-    match c.write(|r| reachable(c, r, &viewer, &space, i.identity, i.party_id.as_deref())) {
-        Ok(t) if t.connection_id == conn => Ok(Ok(())),
-        _ => Ok(Err("stored output route is no longer reachable".into())),
-    }
+    c.write(|w| {
+        let Some(row) = outputs::by_message(w, message)? else {
+            return Ok(Ok(()));
+        };
+        let who = Caller {
+            ws: row.ws,
+            me: row.requester,
+        };
+        if require_requester(w, &who).is_err() {
+            return Ok(Err("requester is no longer a member".into()));
+        }
+        let viewer = Viewer::bare(&who.ws, &who.me);
+        let i: DeliveryIntent = serde_json::from_value(row.intent)?;
+        if let Err(e) = crate::notifications::verify_intent(w, &who, &i, now)
+            .and_then(|_| crate::notifications::verify_pinned(w, &who, &i, &row.space))
+        {
+            return Ok(Err(format!("personal notification consent/route: {e}")));
+        }
+        match reachable(w, &viewer, &row.space, i.identity, i.party_id.as_deref()) {
+            Ok(t) if t.connection_id == row.connection => Ok(Ok(())),
+            _ => Ok(Err("stored output route is no longer reachable".into())),
+        }
+    })
 }
 
 fn reachable(
-    c: &Connection,
     r: &mut impl steve_store::Read,
     viewer: &Viewer,
     id: &str,
     identity: Identity,
     party: Option<&str>,
 ) -> ChannelResult<OutTarget> {
-    let s = spaces::own(c, viewer, id)?;
-    let linked:bool=c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM space_identities i JOIN connections c ON c.id=i.connection_id
-         WHERE i.workspace_id=? AND i.space_id=? AND i.connection_id=? AND i.left_at IS NULL AND c.status IN ('ok','error','paused','reauth'))",
-        params![viewer.ws,id,s.connection_id], |r| r.get(0),
-    )?;
-    let set = spaces::settings(c, id)?;
+    let s =
+        rows::get_in_workspace(r, &viewer.ws, id)?.ok_or_else(|| ApiError::not_found("空间"))?;
+    let linked = registration::routed_identity(r, &viewer.ws, id, &s.connection_id)?;
+    let set = spaces::settings(r, id)?;
     if !linked
         || s.status != "active"
         || set.attention == spaces::Attention::Blocked
@@ -161,7 +131,7 @@ fn reachable(
     {
         return Err(ApiError::not_found("reachable conversation"));
     }
-    let (account, mode) = bindings::connection_account(c, &viewer.ws, &s.connection_id)?;
+    let (account, mode) = bindings::connection_account(r, &viewer.ws, &s.connection_id)?;
     let a = steve_modules::accounts::service::own_account(r, viewer, &account)?;
     let owner = steve_store::Contacts::new(r).current_party(&a.party_id)?;
     if owner
@@ -174,22 +144,14 @@ fn reachable(
         return Err(ApiError::invalid("route identity does not match account"));
     }
     if mode == Mode::Own {
-        let mine:bool=c.query_row(
-            "SELECT EXISTS(SELECT 1 FROM accounts a JOIN parties p ON p.id=a.party_id WHERE a.id=? AND a.workspace_id=? AND p.user_id=?)",
-            params![account,viewer.ws,viewer.user],|r| r.get(0),
-        )?;
-        if !mine {
+        if steve_store::parties::user_id(r, &a.party_id)?.as_deref() != Some(&viewer.user) {
             return Err(ApiError::Unauthenticated);
         }
     }
     if let Some(party) = party {
         steve_modules::accounts::service::own_owner(r, viewer, party)?;
-        let member:bool=c.query_row(
-            "SELECT EXISTS(SELECT 1 FROM space_members sm JOIN accounts a ON a.id=sm.account_id JOIN parties p ON p.id=a.party_id
-             WHERE sm.workspace_id=? AND sm.space_id=? AND p.workspace_id=? AND p.id=? AND p.status='active')",
-            params![viewer.ws,id,viewer.ws,party],|r|r.get(0),
-        )?;
-        if !member {
+
+        if !members::has_party(r, &viewer.ws, id, party)? {
             return Err(ApiError::not_found("recipient in conversation"));
         }
     }
@@ -197,7 +159,7 @@ fn reachable(
         ws: viewer.ws.clone(),
         connection_id: s.connection_id.clone(),
         mode,
-        space_name: spaces::display_title(c, &s)?,
+        space_name: spaces::display_title(r, &s)?,
         space_id: s.id,
         reply_to: None,
         thread_key: None,
@@ -207,18 +169,15 @@ fn reachable(
 }
 
 pub(crate) fn route(
-    c: &Connection,
     r: &mut impl steve_store::Read,
     viewer: &Viewer,
     i: &DeliveryIntent,
 ) -> ChannelResult<OutTarget> {
     let source = if let Some(id) = &i.source_message_id {
-        let row:Option<(String,Option<String>,Option<String>)>=c.query_row(
-            "SELECT space_id,external_id,thread_key FROM chan_messages WHERE workspace_id=? AND id=? AND direction='in' AND purged IS NULL",
-            params![viewer.ws,id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
-        ).optional()?;
-        let row = row.ok_or_else(|| ApiError::not_found("source message"))?;
-        spaces::own(c, viewer, &row.0)?;
+        let row = outputs::source(r, &viewer.ws, id)?
+            .ok_or_else(|| ApiError::not_found("source message"))?;
+        rows::get_in_workspace(r, &viewer.ws, &row.space)?
+            .ok_or_else(|| ApiError::not_found("空间"))?;
         Some(row)
     } else {
         None
@@ -227,28 +186,22 @@ pub(crate) fn route(
     // an explicit space id. Preferences only choose a new conversation for a person.
     let id = if let Some(id) = &i.space_id {
         id.clone()
-    } else if let Some((id, _, _)) = &source {
-        id.clone()
+    } else if let Some(source) = &source {
+        source.space.clone()
     } else if let Some(p) = &i.party_id {
-        let pref:Option<(Option<String>,Option<String>)>=c.query_row(
-                "SELECT manual_space_id,learned_space_id FROM output_channel_preferences WHERE workspace_id=? AND user_id=? AND party_id=?",
-                params![viewer.ws,viewer.user,p],|r|Ok((r.get(0)?,r.get(1)?)),
-            ).optional()?;
-        if let Some((Some(manual), _)) = pref {
+        let pref = outputs::route_preference(r, &viewer.ws, &viewer.user, p)?;
+        if let Some(manual) = pref.as_ref().and_then(|pref| pref.manual.clone()) {
             manual
         } else {
             let learned = pref
-                .and_then(|(_, l)| l)
-                .filter(|id| reachable(c, r, viewer, id, i.identity, Some(p)).is_ok());
+                .and_then(|pref| pref.learned)
+                .filter(|id| reachable(r, viewer, id, i.identity, Some(p)).is_ok());
             if let Some(id) = learned {
                 id
             } else {
-                let mut st=c.prepare("SELECT DISTINCT s.id FROM spaces s JOIN space_members m ON m.space_id=s.id JOIN accounts a ON a.id=m.account_id WHERE s.workspace_id=? AND s.kind='dm' AND a.party_id=? ORDER BY s.id")?;
-                let ids = st
-                    .query_map(params![viewer.ws, p], |r| r.get::<_, String>(0))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let ids = members::direct_chats(r, &viewer.ws, p)?;
                 ids.into_iter()
-                    .find(|id| reachable(c, r, viewer, id, i.identity, Some(p)).is_ok())
+                    .find(|id| reachable(r, viewer, id, i.identity, Some(p)).is_ok())
                     .ok_or_else(|| ApiError::not_found("reachable recipient"))?
             }
         }
@@ -257,11 +210,11 @@ pub(crate) fn route(
             "intent needs a source, conversation or person",
         ));
     };
-    let mut t = reachable(c, r, viewer, &id, i.identity, i.party_id.as_deref())?;
-    if let Some((source_space, external, thread)) = source {
-        if source_space == id {
-            t.reply_to = crate::fallback::platform(external);
-            t.thread_key = thread;
+    let mut t = reachable(r, viewer, &id, i.identity, i.party_id.as_deref())?;
+    if let Some(source) = source {
+        if source.space == id {
+            t.reply_to = crate::fallback::platform(source.external);
+            t.thread_key = source.thread;
         }
         // Kept even across channels for the timeline, not used as a foreign reply_to identifier.
         t.source_message_id = i.source_message_id.clone();
@@ -295,17 +248,15 @@ impl Outbox {
             intent,
             fingerprint,
         };
-        if let Some(d) = ch.store().reader(|c| existing(c, &e))? {
+        if let Some(d) = ch.store().read(|r| existing(r, &e))? {
             return Ok(d);
         }
         let viewer = ch.modules().viewer(who)?;
-        let target = ch.store().read::<_, steve_store::StoreError>(|r| {
-            Ok(ch.store().reader(|c| {
-                require_requester(c, who)?;
-                crate::notifications::verify_intent(c, r, who, &e.intent, ch.now())?;
-                route(c, r, &viewer, &e.intent)
-            }))
-        })??;
+        let target = ch.store().read(|r| -> ChannelResult<_> {
+            require_requester(r, who)?;
+            crate::notifications::verify_intent(r, who, &e.intent, ch.now())?;
+            route(r, &viewer, &e.intent)
+        })?;
         // Account visibility is stricter than a shared conversation: never borrow somebody else's
         // personal connection. The queue revalidates the pinned route before dispatch too.
         ch.connections()
@@ -328,7 +279,7 @@ impl Outbox {
         };
         self.deliver_enveloped(ch, &req, Some(&e)).await?;
         ch.store()
-            .reader(|c| existing(c, &e))?
+            .read(|r| existing(r, &e))?
             .ok_or_else(|| ApiError::Internal("output intent did not commit".into()))
     }
 
@@ -344,9 +295,9 @@ impl Outbox {
         space: Option<String>,
         party: Option<String>,
     ) -> ChannelResult<Option<Delivery>> {
-        let source = ch.store().reader(|c| {
-            require_requester(c, who)?;
-            crate::outbound::source_message(c, &who.ws, item)
+        let source = ch.store().read(|r| {
+            require_requester(r, who)?;
+            crate::outbound::source_message(r, &who.ws, item)
         })?;
         let Some(source) = source else {
             return Ok(None);
@@ -354,28 +305,23 @@ impl Outbox {
         // Identity is derived only for a NEW source reply. A timeout retry must fingerprint
         // the original intent, not reinterpret it using a conversation's newly selected voice.
         // Read only the scoped caller's record; submit still checks membership and the full hash.
-        let recorded_identity: Option<String> = ch.store().reader(|c| -> ChannelResult<_> {
-            require_requester(c, who)?;
-            Ok(c.query_row(
-                "SELECT json_extract(intent,'$.identity') FROM output_deliveries
-                 WHERE workspace_id=? AND requester=? AND idempotency_key=?",
-                params![who.ws, who.me, key],
-                |r| r.get(0),
-            )
-            .optional()?)
+
+        let recorded_identity = ch.store().read(|r| -> ChannelResult<_> {
+            require_requester(r, who)?;
+            Ok(outputs::recorded_identity(r, &who.ws, &who.me, key)?)
         })?;
         let identity = if let Some(identity) = recorded_identity {
             serde_json::from_value(serde_json::Value::String(identity))?
         } else {
             let viewer = ch.modules().viewer(who)?;
-            let mode = ch.store().reader(|c| -> ChannelResult<_> {
-                let source_space: String = c.query_row(
-                    "SELECT space_id FROM chan_messages WHERE workspace_id=? AND id=?",
-                    params![who.ws, source],
-                    |r| r.get(0),
-                )?;
-                let s = spaces::own(c, &viewer, space.as_deref().unwrap_or(&source_space))?;
-                Ok(bindings::connection_account(c, &who.ws, &s.connection_id)?.1)
+
+            let mode = ch.store().read(|r| -> ChannelResult<_> {
+                let source_space = channel_message_repo::space_of(r, &who.ws, &source)?
+                    .ok_or_else(|| ApiError::not_found("source message"))?;
+                let id = space.as_deref().unwrap_or(&source_space);
+                let s = rows::get_in_workspace(r, &viewer.ws, id)?
+                    .ok_or_else(|| ApiError::not_found("空间"))?;
+                Ok(bindings::connection_account(r, &who.ws, &s.connection_id)?.1)
             })?;
             if mode == Mode::Bot {
                 Identity::Bot
@@ -414,16 +360,27 @@ pub fn set_preference(
     space: Option<&str>,
 ) -> ChannelResult<()> {
     let viewer = ch.modules().viewer(who)?;
-    ch.store().transaction(|tx| {
-        require_requester(tx,who)?;
-        tx.write(|w| steve_modules::accounts::service::own_owner(w, &viewer, party))?;
-        if let Some(space)=space {
-            let s=spaces::own(tx,&viewer,space)?;
-            let (_,mode)=bindings::connection_account(tx,&who.ws,&s.connection_id)?;
-            tx.write(|w| reachable(tx,w,&viewer,space,if mode==Mode::Bot {Identity::Bot}else{Identity::AsYou},Some(party)))?;
-            if s.kind!="dm" {return Err(ApiError::invalid("preference must be a direct conversation"));}
+
+    ch.store().write(|w| {
+        require_requester(w, who)?;
+        steve_modules::accounts::service::own_owner(w, &viewer, party)?;
+        if let Some(space) = space {
+            let s = rows::get_in_workspace(w, &viewer.ws, space)?
+                .ok_or_else(|| ApiError::not_found("空间"))?;
+            let (_, mode) = bindings::connection_account(w, &who.ws, &s.connection_id)?;
+            let role = if mode == Mode::Bot {
+                Identity::Bot
+            } else {
+                Identity::AsYou
+            };
+            reachable(w, &viewer, space, role, Some(party))?;
+            if s.kind != "dm" {
+                return Err(ApiError::invalid(
+                    "preference must be a direct conversation",
+                ));
+            }
         }
-        tx.execute("INSERT INTO output_channel_preferences(workspace_id,user_id,party_id,manual_space_id,updated) VALUES(?,?,?,?,?) ON CONFLICT(workspace_id,user_id,party_id) DO UPDATE SET manual_space_id=excluded.manual_space_id,updated=excluded.updated",params![who.ws,who.me,party,space,ch.now()])?;
+        outputs::set_manual(w, &who.ws, &who.me, party, space, ch.now())?;
         Ok(())
     })
 }
@@ -432,7 +389,7 @@ pub fn set_preference(
 /// channel preference observation. History import, guessed identities and unrelated messages do
 /// not teach preferences. An observation never changes `manual_space_id`.
 pub(crate) fn observe_reply(
-    tx: &Tx,
+    w: &mut W<'_>,
     ws: &str,
     space: &str,
     reply_to: Option<&str>,
@@ -440,36 +397,29 @@ pub(crate) fn observe_reply(
     message: &str,
     now: i64,
 ) -> ChannelResult<()> {
+    use steve_store::channel_message_repo::outputs;
+
     let (Some(reply), Some(party)) = (reply_to, party) else {
         return Ok(());
     };
-    let mut st = tx.prepare(
-        "SELECT d.id,d.requester FROM output_deliveries d JOIN chan_messages m ON m.id=d.message_id
-         JOIN workspace_members w ON w.workspace_id=d.workspace_id AND w.user_id=d.requester
-         WHERE d.workspace_id=? AND d.space_id=? AND m.external_id=? AND m.status='sent'",
-    )?;
-    let rows = st
-        .query_map(params![ws, space, reply], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (id, user) in rows {
-        tx.execute("UPDATE output_deliveries SET replied_at=coalesce(replied_at,?),reply_message_id=coalesce(reply_message_id,?) WHERE id=?",params![now,message,id])?;
-        let dm: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM spaces WHERE workspace_id=? AND id=? AND kind='dm')",
-            params![ws, space],
-            |r| r.get(0),
-        )?;
+    let rows = outputs::replied_deliveries(w, ws, space, reply)?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let dm = steve_store::channel_spaces::rows::get_in_workspace(w, ws, space)?
+        .is_some_and(|row| row.kind == "dm");
+    for delivery in rows {
+        outputs::record_reply(w, &delivery.id, message, now)?;
         if dm {
-            tx.execute("INSERT INTO output_channel_preferences(workspace_id,user_id,party_id,learned_space_id,updated) VALUES(?,?,?,?,?) ON CONFLICT(workspace_id,user_id,party_id) DO UPDATE SET learned_space_id=excluded.learned_space_id,updated=excluded.updated",params![ws,user,party,space,now])?;
+            outputs::learn_route(w, ws, &delivery.requester, party, space, now)?;
         }
-        steve_store::base::audit(
-            tx,
+        steve_store::audit_repo::record(
+            w,
             ws,
-            &user,
+            &delivery.requester,
             "output.delivery.replied",
-            &id,
-            &json!({"message":message,"space":space}),
+            &delivery.id,
+            &json!({"message": message, "space": space}),
         )?;
     }
     Ok(())
@@ -478,10 +428,8 @@ pub(crate) fn observe_reply(
 /// Only the original live requester can read an intent (shared bot conversations do not expose
 /// another person's delivery reasons or content). State is joined from the authoritative outbox.
 pub fn get(ch: &Channels, who: &Caller, id: &str) -> ChannelResult<Delivery> {
-    ch.store().reader(|c| {
-        require_requester(c,who)?;
-        let key:Option<String>=c.query_row("SELECT idempotency_key FROM output_deliveries WHERE id=? AND workspace_id=? AND requester=?",params![id,who.ws,who.me],|r|r.get(0)).optional()?;
-        let key=key.ok_or_else(||ApiError::not_found("delivery"))?;
-        lookup(c,who,&key)?.map(|(_,d)|d).ok_or_else(||ApiError::not_found("delivery"))
+    ch.store().read(|r| {
+        require_requester(r, who)?;
+        outputs::get(r, &who.ws, &who.me, id)?.ok_or_else(|| ApiError::not_found("delivery"))
     })
 }

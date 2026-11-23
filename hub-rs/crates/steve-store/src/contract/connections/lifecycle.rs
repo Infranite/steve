@@ -117,6 +117,22 @@ pub fn adapter_ids(r: &mut impl Read) -> Result<Vec<(String, String)>> {
     )
 }
 
+/// The adapter names of the supplied connections, including disconnected ones.
+pub fn adapters(r: &mut impl Read, connections: &[String]) -> Result<Vec<String>> {
+    if connections.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids = r.db().dialect().text_array(connections)?;
+    r.all(
+        Query::select()
+            .distinct()
+            .column("adapter")
+            .from("connections")
+            .and_where(Expr::col("id").in_subquery(ids)),
+        |row| row.get(0),
+    )
+}
+
 pub fn healthy_adapter_configs(
     r: &mut impl Read,
     ws: &str,

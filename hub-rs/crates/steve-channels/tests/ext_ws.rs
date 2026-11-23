@@ -1942,7 +1942,7 @@ async fn a_read_only_connection_gives_one_notice_and_lifts_when_writes_are_allow
     let now = h.ch.now();
     h.env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             spaces::set_account_rules(
                 tx,
                 &Viewer::bare(WS, ME),
@@ -1975,10 +1975,7 @@ async fn a_read_only_connection_gives_one_notice_and_lifts_when_writes_are_allow
                 .as_str()
                 .unwrap()
                 .to_string();
-            h.env
-                .store()
-                .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &source))
-                .unwrap()
+            steve_channels::flow_actions::plan_of(h.env.store(), WS, &source).unwrap()
         }
     };
     let reply = |plan: &steve_channels::respond::Plan, purpose: Purpose| OutRequest {
@@ -2137,17 +2134,13 @@ async fn bot_connect_claims_a_bot_not_me_and_outbox_sends_as_bot_with_source_rec
     );
     let source = inbound[0][0].as_str().unwrap().to_string();
     let space_id = inbound[0][1].as_str().unwrap().to_string();
-    let plan = h
-        .env
-        .store()
-        .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &source))
-        .unwrap();
+    let plan = steve_channels::flow_actions::plan_of(h.env.store(), WS, &source).unwrap();
     assert_eq!(plan.mode, spaces::Mode::Bot);
     // A source-only reply keeps its real remote source_id, not the Hub's fp: id.
     let now = h.ch.now();
     h.env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             spaces::set_account_rules(
                 tx,
                 &Viewer::bare(WS, ME),

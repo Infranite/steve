@@ -4,14 +4,17 @@
 //!
 //! Personas are workspace objects: every member of the workspace sees them.
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_modules::{ApiError, Check};
-use steve_store::base::{self, Viewer};
-pub use steve_store::channel_personas::Reveal;
+use steve_store::base::Viewer;
+use steve_store::channel_personas as repo;
+pub use steve_store::channel_personas::{
+    Persona as PersonaRow, Reveal, default_persona, get, list,
+};
 use steve_store::seeded;
-use steve_store::{Tx, uid};
+use steve_store::{BotRows, Read, W};
 
 use crate::ChannelResult;
 use crate::bindings;
@@ -41,48 +44,6 @@ impl RevealPatch {
         reveal.owner = self.owner.unwrap_or(reveal.owner);
         reveal
     }
-}
-
-/// One `personas` row.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PersonaRow {
-    pub id: String,
-    pub workspace_id: String,
-    pub name: String,
-    pub avatar: Value,
-    pub bot_id: String,
-    pub intro: String,
-    pub soul: String,
-    pub reveal: Reveal,
-    pub signature: String,
-    pub is_default: bool,
-    pub deleted: bool,
-    pub revision: i64,
-    pub created: i64,
-    pub updated: i64,
-}
-
-const COLS: &str = "id, workspace_id, name, avatar, bot_id, intro, soul, reveal, signature, is_default, deleted, revision, created, updated";
-
-fn row(r: &rusqlite::Row) -> rusqlite::Result<PersonaRow> {
-    let avatar: String = r.get(3)?;
-    let reveal: String = r.get(7)?;
-    Ok(PersonaRow {
-        id: r.get(0)?,
-        workspace_id: r.get(1)?,
-        name: r.get(2)?,
-        avatar: serde_json::from_str(&avatar).unwrap_or_else(|_| json!({})),
-        bot_id: r.get(4)?,
-        intro: r.get(5)?,
-        soul: r.get(6)?,
-        reveal: serde_json::from_str(&reveal).unwrap_or(Reveal::ALL),
-        signature: r.get(8)?,
-        is_default: r.get::<_, i64>(9)? != 0,
-        deleted: r.get::<_, i64>(10)? != 0,
-        revision: r.get(11)?,
-        created: r.get(12)?,
-        updated: r.get(13)?,
-    })
 }
 
 /// The answer to “你是谁？” (prototype `introOf`, ported verbatim): the revealed parts joined with
@@ -135,17 +96,11 @@ pub fn owner_name(r: &mut impl steve_store::Read, ws: &str) -> ChannelResult<Str
 }
 
 /// External acknowledgments and handoffs use the same effective persona/space scope as drafts.
-pub fn owner_name_for_space(
-    c: &Connection,
-    r: &mut impl steve_store::Read,
-    ws: &str,
-    space: &str,
-) -> ChannelResult<String> {
-    let persona = crate::spaces::get(c, space)?
-        .filter(|s| s.workspace_id == ws)
-        .map(|s| bindings::effective(c, &s))
-        .transpose()?
-        .flatten();
+pub fn owner_name_for_space(r: &mut impl Read, ws: &str, space: &str) -> ChannelResult<String> {
+    let persona = match steve_store::channel_spaces::rows::get_in_workspace(r, ws, space)? {
+        Some(row) => bindings::effective(r, &row)?,
+        None => None,
+    };
     owner_name_in(
         r,
         ws,
@@ -196,101 +151,47 @@ fn owner_address(
     )
 }
 
-pub fn get(c: &Connection, id: &str) -> ChannelResult<Option<PersonaRow>> {
-    c.query_row(
-        &format!("SELECT {COLS} FROM personas WHERE id = ?"),
-        [id],
-        row,
-    )
-    .optional()
-    .map_err(Into::into)
-}
-
-/// `own_persona(ws, id)`: a live persona of this workspace, else `404 没有这个对外身份`.
-pub fn own(c: &Connection, ws: &str, id: &str) -> ChannelResult<PersonaRow> {
-    get(c, id)?
+/// A live persona of this workspace, else `404 没有这个对外身份`.
+pub fn own(r: &mut impl Read, ws: &str, id: &str) -> ChannelResult<PersonaRow> {
+    get(r, id)?
         .filter(|p| p.workspace_id == ws && !p.deleted)
         .ok_or_else(|| ApiError::not_found("对外身份"))
 }
 
-/// Live personas of a workspace: the default first, then by creation.
-pub fn list(c: &Connection, ws: &str) -> ChannelResult<Vec<PersonaRow>> {
-    let mut st = c.prepare_cached(&format!(
-        "SELECT {COLS} FROM personas WHERE workspace_id = ? AND deleted = 0 ORDER BY is_default DESC, created, id"
-    ))?;
-    Ok(st
-        .query_map([ws], row)?
-        .collect::<rusqlite::Result<Vec<_>>>()?)
-}
-
-/// The workspace's default persona, if seeded.
-pub fn default_persona(c: &Connection, ws: &str) -> ChannelResult<Option<PersonaRow>> {
-    c.query_row(
-        &format!(
-            "SELECT {COLS} FROM personas WHERE workspace_id = ? AND is_default = 1 AND deleted = 0 ORDER BY created LIMIT 1"
-        ),
-        [ws],
-        row,
-    )
-    .optional()
-    .map_err(Into::into)
-}
-
-/// The Bot behind the default persona: `steve` if it is in this workspace, else the main Bot, else
-/// the first Bot of the workspace. With its speaking style (`bots.persona`) for the soul.
-fn seed_bot(c: &Connection, ws: &str) -> ChannelResult<Option<(String, String)>> {
-    Ok(c.query_row(
-        "SELECT b.id, b.persona FROM bots b JOIN bot_workspaces w ON w.bot_id = b.id AND w.workspace_id = ?
-          WHERE b.deleted = 0 ORDER BY (b.id = 'steve') DESC, b.main DESC, w.created, b.id LIMIT 1",
-        [ws],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )
-    .optional()?)
-}
-
 /// Seeds the default persona “Steve” on first use of channels. `None` when the workspace has
 /// no Bot yet (nothing to put behind it); seeded on the next call then.
-pub fn ensure_default(tx: &Tx, ws: &str, now: i64) -> ChannelResult<Option<PersonaRow>> {
-    if let Some(p) = default_persona(tx, ws)? {
+pub fn ensure_default(w: &mut W<'_>, ws: &str, now: i64) -> ChannelResult<Option<PersonaRow>> {
+    if let Some(p) = default_persona(w, ws)? {
         return Ok(Some(p));
     }
-    let Some((bot, soul)) = seed_bot(tx, ws)? else {
+    let Some((bot, soul)) = BotRows(w).persona_seed(ws)? else {
         return Ok(None);
     };
-    let id = uid("per");
-    tx.execute(
-        "INSERT INTO personas (id, workspace_id, name, avatar, bot_id, intro, soul, reveal, signature, is_default, created, updated)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', 1, ?, ?)",
-        params![
-            id,
-            ws,
-            DEFAULT_NAME,
-            json!({"seed": DEFAULT_NAME}).to_string(),
-            bot,
-            seeded::persona_intro(),
-            soul,
-            serde_json::to_string(&Reveal::ALL)?,
+    let p = repo::create(
+        w,
+        &repo::NewPersona {
+            workspace: ws,
+            name: DEFAULT_NAME,
+            bot: &bot,
+            intro: &seeded::persona_intro(),
+            soul: &soul,
+            reveal: Reveal::ALL,
+            signature: "",
+            is_default: true,
             now,
-            now
-        ],
+        },
     )?;
-    tx.write(|w| steve_modules::contacts::stewards::adopt(w, ws, "persona", &id, None, "seed"))?;
-    event(tx, ws, &id);
-    get(tx, &id)
+    steve_modules::contacts::stewards::adopt(w, ws, "persona", &p.id, None, "seed")?;
+    event(w, ws, &p.id);
+    Ok(Some(p))
 }
 
-/// `ownBot`: the Bot is in this workspace and not deleted, else `404 没有这个 Bot`.
-fn own_bot(c: &Connection, ws: &str, bot: &str) -> ChannelResult<()> {
-    let ok: bool = c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM bots b JOIN bot_workspaces w ON w.bot_id = b.id AND w.workspace_id = ?1 WHERE b.id = ?2 AND b.deleted = 0)",
-        params![ws, bot],
-        |r| r.get(0),
-    )?;
-    if ok {
-        Ok(())
-    } else {
-        Err(ApiError::not_found("Bot"))
+/// The Bot is in this workspace and live.
+fn own_bot(r: &mut impl Read, ws: &str, bot: &str) -> ChannelResult<()> {
+    if BotRows(r).local(ws, bot)?.is_none() {
+        return Err(ApiError::not_found("Bot"));
     }
+    Ok(())
 }
 
 /// `POST /personas`.
@@ -335,16 +236,14 @@ fn check_fields(
         .done()
 }
 
-fn snap(p: &PersonaRow) -> Value {
-    json!({
-        "name": p.name, "bot_id": p.bot_id, "intro": p.intro, "soul": p.soul,
-        "reveal": p.reveal, "signature": p.signature,
-    })
-}
-
 /// Creates a persona: avatar seeded by its name, reveal defaults to [`Reveal::NEW`]. Seeds the
 /// default persona first, so a workspace's first persona never becomes the only one.
-pub fn create(tx: &Tx, viewer: &Viewer, n: &NewPersona, now: i64) -> ChannelResult<PersonaRow> {
+pub fn create(
+    w: &mut W<'_>,
+    viewer: &Viewer,
+    n: &NewPersona,
+    now: i64,
+) -> ChannelResult<PersonaRow> {
     check_fields(
         Some(&n.name),
         n.intro.as_deref(),
@@ -352,61 +251,55 @@ pub fn create(tx: &Tx, viewer: &Viewer, n: &NewPersona, now: i64) -> ChannelResu
         n.signature.as_deref(),
     )?;
     let ws = &viewer.ws;
-    own_bot(tx, ws, &n.bot_id)?;
-    ensure_default(tx, ws, now)?;
+    own_bot(w, ws, &n.bot_id)?;
+    ensure_default(w, ws, now)?;
     let name = n.name.trim();
     let reveal = n
         .reveal
         .as_ref()
         .map_or(Reveal::NEW, |patch| patch.apply(Reveal::NEW));
-    let id = uid("per");
-    tx.execute(
-        "INSERT INTO personas (id, workspace_id, name, avatar, bot_id, intro, soul, reveal, signature, is_default, created, updated)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
-        params![
-            id,
-            ws,
+    let p = repo::create(
+        w,
+        &repo::NewPersona {
+            workspace: ws,
             name,
-            json!({"seed": name}).to_string(),
-            n.bot_id,
-            n.intro.as_deref().unwrap_or("").trim(),
-            n.soul.as_deref().unwrap_or("").trim(),
-            serde_json::to_string(&reveal)?,
-            n.signature.as_deref().unwrap_or("").trim(),
+            bot: &n.bot_id,
+            intro: n.intro.as_deref().unwrap_or("").trim(),
+            soul: n.soul.as_deref().unwrap_or("").trim(),
+            reveal,
+            signature: n.signature.as_deref().unwrap_or("").trim(),
+            is_default: false,
             now,
-            now
-        ],
+        },
     )?;
-    let p = own(tx, ws, &id)?;
-    // the person who creates a persona is its 负责人
-    tx.write(|w| {
-        steve_modules::contacts::stewards::adopt(w, ws, "persona", &id, Some(&viewer.user), "seed")
-    })?;
-    base::revision(
-        tx,
+    let id = &p.id;
+    // The person who creates a persona is its steward.
+    steve_modules::contacts::stewards::adopt(w, ws, "persona", id, Some(&viewer.user), "seed")?;
+    steve_store::audit_repo::revise(
+        w,
         ws,
         "persona",
-        &id,
+        id,
         1,
         &Value::Null,
-        &snap(&p),
+        &p.snapshot(),
         &viewer.user,
     )?;
-    base::audit(
-        tx,
+    steve_store::audit_repo::record(
+        w,
         ws,
         &viewer.user,
         "persona.create",
-        &id,
+        id,
         &json!({"bot_id": p.bot_id}),
     )?;
-    event(tx, ws, &id);
+    event(w, ws, id);
     Ok(p)
 }
 
 /// Patches a persona: a revision, audit `persona.patch`, SSE `persona`.
 pub fn patch(
-    tx: &Tx,
+    w: &mut W<'_>,
     viewer: &Viewer,
     id: &str,
     p: &PersonaPatch,
@@ -419,9 +312,9 @@ pub fn patch(
         p.signature.as_deref(),
     )?;
     let ws = &viewer.ws;
-    let before = own(tx, ws, id)?;
+    let before = own(w, ws, id)?;
     if let Some(b) = &p.bot_id {
-        own_bot(tx, ws, b)?;
+        own_bot(w, ws, b)?;
     }
     let mut after = before.clone();
     if let Some(v) = &p.name {
@@ -444,28 +337,15 @@ pub fn patch(
     }
     after.revision = before.revision + 1;
     after.updated = now;
-    tx.execute(
-        "UPDATE personas SET name = ?, bot_id = ?, intro = ?, soul = ?, reveal = ?, signature = ?, revision = ?, updated = ? WHERE id = ?",
-        params![
-            after.name,
-            after.bot_id,
-            after.intro,
-            after.soul,
-            serde_json::to_string(&after.reveal)?,
-            after.signature,
-            after.revision,
-            now,
-            id
-        ],
-    )?;
-    base::revision(
-        tx,
+    repo::update(w, &after)?;
+    steve_store::audit_repo::revise(
+        w,
         ws,
         "persona",
         id,
         after.revision,
-        &snap(&before),
-        &snap(&after),
+        &before.snapshot(),
+        &after.snapshot(),
         &viewer.user,
     )?;
     let fields: Vec<&str> = [
@@ -479,15 +359,15 @@ pub fn patch(
     .into_iter()
     .filter_map(|(k, on)| on.then_some(k))
     .collect();
-    base::audit(
-        tx,
+    steve_store::audit_repo::record(
+        w,
         ws,
         &viewer.user,
         "persona.patch",
         id,
         &json!({ "fields": fields }),
     )?;
-    event(tx, ws, id);
+    event(w, ws, id);
     Ok(after)
 }
 
@@ -496,47 +376,42 @@ pub use steve_store::channel_personas::bindings::Moved;
 /// Deletes a persona: the default one cannot be deleted; accounts using it as their default
 /// switch to the default persona, spaces bound to it go back to following their account;
 /// `deleted=1`.
-pub fn delete(tx: &Tx, viewer: &Viewer, id: &str, now: i64) -> ChannelResult<Moved> {
+pub fn delete(w: &mut W<'_>, viewer: &Viewer, id: &str, now: i64) -> ChannelResult<Moved> {
     let ws = &viewer.ws;
-    let p = own(tx, ws, id)?;
+    let p = own(w, ws, id)?;
     if p.is_default {
         return Err(ApiError::rule(steve_i18n::t!(
             "channels.error.default_persona_kept"
         )));
     }
-    let fallback = ensure_default(tx, ws, now)?.ok_or_else(|| ApiError::not_found("对外身份"))?;
-    let moved = tx.write(|w| {
-        steve_store::channel_personas::bindings::release(w, ws, id, &fallback.id, now)
-    })?;
-    tx.execute(
-        "UPDATE personas SET deleted = 1, revision = revision + 1, updated = ? WHERE id = ?",
-        params![now, id],
-    )?;
-    base::revision(
-        tx,
+    let fallback = ensure_default(w, ws, now)?.ok_or_else(|| ApiError::not_found("对外身份"))?;
+    let moved = repo::bindings::release(w, ws, id, &fallback.id, now)?;
+    repo::retire(w, id, now)?;
+    steve_store::audit_repo::revise(
+        w,
         ws,
         "persona",
         id,
         p.revision + 1,
-        &snap(&p),
+        &p.snapshot(),
         &json!({"deleted": true}),
         &viewer.user,
     )?;
-    base::audit(
-        tx,
+    steve_store::audit_repo::record(
+        w,
         ws,
         &viewer.user,
         "persona.delete",
         id,
         &json!({"accounts": moved.accounts, "spaces": moved.spaces}),
     )?;
-    event(tx, ws, id);
+    event(w, ws, id);
     Ok(moved)
 }
 
 /// SSE `{type:"persona", id, ws}`.
-pub fn event(tx: &Tx, ws: &str, id: &str) {
-    tx.publish(steve_types::DomainEvent::from(
+pub fn event(w: &mut W<'_>, ws: &str, id: &str) {
+    w.emit(steve_types::DomainEvent::from(
         steve_types::ChannelsEvent::Persona {
             id: id.into(),
             ws: ws.into(),
@@ -602,7 +477,6 @@ pub(crate) fn sent(v: Option<String>, field: &str) -> Option<String> {
 }
 
 pub fn out(
-    c: &Connection,
     r: &mut impl steve_store::Read,
     viewer: &Viewer,
     p: &PersonaRow,
@@ -620,7 +494,7 @@ pub fn out(
         signature: p.signature.clone(),
         is_default: p.is_default,
         intro_preview: intro_of(&p.name, &p.intro, &p.reveal, &owner),
-        used_by: bindings::used_by(c, viewer, p)?,
+        used_by: bindings::used_by(r, viewer, p)?,
         revision: p.revision,
     })
 }

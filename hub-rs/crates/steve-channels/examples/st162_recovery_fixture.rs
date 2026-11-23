@@ -76,10 +76,7 @@ async fn request(Extension(f): F, Json(body): Json<Value>) -> ApiResult<Json<Val
         is_connection: true,
     });
     let stored = f.ch.on_message(WS, &f.conn, inbound).await?;
-    let plan = f
-        .env
-        .store()
-        .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &stored.message_id))?;
+    let plan = steve_channels::flow_actions::plan_of(f.env.store(), WS, &stored.message_id)?;
     let out = f.out.lock().unwrap().clone();
     let delivered = out
         .deliver(
@@ -222,7 +219,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create(&caller(WS, ME), ext_ws::BOT_ADAPTER, &fields, json!({}))
         .await?
         .id;
-    env.store().transaction(|tx| {
+    env.store().write(|tx| {
         spaces::set_account_rules(
             tx,
             &Viewer::bare(WS, ME),

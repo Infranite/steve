@@ -12,7 +12,7 @@
 use std::time::Duration;
 
 use chrono::{Datelike, Timelike};
-use rusqlite::{Connection, params};
+use rusqlite::params;
 use serde_json::{Value, json};
 use steve_flow::graph::{Edge, Graph, Node};
 use steve_modules::{ApiError, Gateway, Tier};
@@ -353,16 +353,18 @@ pub fn load(v: &Value, mode: Mode) -> Vec<Rule> {
 }
 
 /// `member` rules must name contacts and teams of this workspace (`404 没有这个联系人/团队`).
-pub fn check_refs(c: &Connection, ws: &str, rules: &[Rule]) -> ChannelResult<()> {
-    for r in rules {
-        if let When::Member { parties, teams } = &r.when {
+pub fn check_refs(r: &mut impl steve_store::Read, ws: &str, rules: &[Rule]) -> ChannelResult<()> {
+    for rule in rules {
+        if let When::Member { parties, teams } = &rule.when {
             for (ids, ty, noun) in [(parties, "contact", "联系人"), (teams, "team", "团队")] {
                 for id in ids {
-                    let ok: bool = c.query_row(
-                        "SELECT EXISTS (SELECT 1 FROM parties WHERE id = ? AND workspace_id = ? AND type = ? AND merged_into IS NULL)",
-                        params![id, ws, ty],
-                        |r| r.get(0),
-                    )?;
+                    let ok = steve_store::Contacts::new(r)
+                        .party(id)?
+                        .is_some_and(|party| {
+                            party.workspace_id == ws
+                                && party.kind == ty
+                                && party.merged_into.is_none()
+                        });
                     if !ok {
                         return Err(ApiError::not_found(noun));
                     }
@@ -1028,7 +1030,7 @@ pub fn to_flow(
     now: i64,
 ) -> ChannelResult<String> {
     let s = crate::spaces::own(tx, viewer, space_id)?;
-    let set = crate::spaces::settings(tx, &s.id)?;
+    let set = tx.write(|w| crate::spaces::settings(w, &s.id))?;
     if let Some(f) = &set.flow_id
         && tx
             .write(|w| steve_flow::flows::get(w, f))?
@@ -1049,21 +1051,22 @@ pub fn to_flow(
         ));
     }
     let ws = &viewer.ws;
-    let (_, mode) = crate::bindings::connection_account(tx, ws, &s.connection_id)?;
-    let account = crate::spaces::channel_settings(tx, ws, &s.connection_id)?
+    let (_, mode) = tx.write(|w| crate::bindings::connection_account(w, ws, &s.connection_id))?;
+    let account = tx
+        .write(|w| crate::spaces::channel_settings(w, ws, &s.connection_id))?
         .map(|c| c.rules)
         .unwrap_or_else(|| match mode {
             Mode::Own => crate::spaces::default_self_rules(),
             Mode::Bot => crate::spaces::default_bot_rules(),
         });
     let rules = load(set.rules.as_ref().unwrap_or(&account), mode);
-    let owner = tx.write(|w| crate::personas::owner_name_for_space(tx, w, ws, &s.id))?;
+    let owner = tx.write(|w| crate::personas::owner_name_for_space(w, ws, &s.id))?;
     let graph = compile(&rules, &s.id, set.muted, &owner);
     let graph = match nodes {
         Some(reg) => steve_flow::graph::validate(&graph.to_value(), reg).map_err(ApiError::rule)?,
         None => graph,
     };
-    let label = crate::spaces::display_title(tx, &s)?;
+    let label = tx.write(|w| crate::spaces::display_title(w, &s))?;
     let name = cut(
         &format!("「{label}」的响应规则"),
         steve_flow::flows::NAME_MAX - 1,
@@ -1107,7 +1110,7 @@ pub fn back_to_rules(
     now: i64,
 ) -> ChannelResult<()> {
     let s = crate::spaces::own(tx, viewer, space_id)?;
-    let set = crate::spaces::settings(tx, &s.id)?;
+    let set = tx.write(|w| crate::spaces::settings(w, &s.id))?;
     let Some(f) = &set.flow_id else {
         return Ok(());
     };

@@ -574,11 +574,12 @@ pub struct ChannelEntry {
 /// `GET /conversations/channels`: the channel accounts the viewer sees, oldest first.
 pub fn channels(
     ch: &Channels,
-    c: &Connection,
+    store: &steve_store::Store,
     viewer: &Viewer,
     now: i64,
 ) -> ChannelResult<Vec<ChannelEntry>> {
-    crate::conversations::member(c, &viewer.ws, viewer)?;
+    store.read(|r| store.reader(|c| {
+        crate::conversations::member(c, &viewer.ws, viewer)?;
     let mut st = c.prepare_cached(&format!(
         "SELECT s.id, p.read_up_to FROM spaces s
            LEFT JOIN conversation_preferences p ON p.workspace_id = s.workspace_id AND p.user_id = ?2 AND p.space_id = s.id
@@ -590,7 +591,7 @@ pub fn channels(
         visibility = spaces::visible_sql("?2"),
     ))?;
     let mut out = Vec::new();
-    for a in crate::channel_accounts::list(ch, c, viewer)? {
+    for a in crate::channel_accounts::list(ch, r, viewer)? {
         let rows = st
             .query_map(params![viewer.ws, viewer.user, a.connection_id], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?))
@@ -612,7 +613,8 @@ pub fn channels(
             unread,
         });
     }
-    Ok(out)
+        Ok(out)
+    }))
 }
 
 #[cfg(test)]

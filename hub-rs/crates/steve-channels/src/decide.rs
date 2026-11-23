@@ -458,6 +458,7 @@ fn message_text(c: &Connection, id: &str) -> ChannelResult<(String, Value, i64, 
 /// anything in the space since.
 fn open_question(
     c: &Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     space: &str,
     sender: &str,
@@ -479,7 +480,7 @@ fn open_question(
         .find(|(t, _)| asks(t))
         .map(|(_, at)| at);
     match asked {
-        Some(at) => Ok(!crate::presence::you_spoke(c, ws, space, at, now)?),
+        Some(at) => Ok(!crate::presence::you_spoke(r, ws, space, at, now)?),
         None => Ok(false),
     }
 }
@@ -510,12 +511,13 @@ fn open_card_of(
 /// having no words (it may be a missed call).
 pub fn gate(
     c: &Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     target: &str,
     starred: bool,
     now: i64,
 ) -> ChannelResult<Option<Gate>> {
-    let ids = crate::presence::turn(c, ws, target)?;
+    let ids = crate::presence::turn(r, ws, target)?;
     if ids.is_empty() {
         return Ok(None);
     }
@@ -539,7 +541,7 @@ pub fn gate(
     }
     if !starred
         && texts.iter().all(|(t, a, _, _)| content_free(t, a))
-        && !open_question(c, ws, &space, &sender, first_at, now)?
+        && !open_question(c, r, ws, &space, &sender, first_at, now)?
     {
         return Ok(Some(Gate::NoContent));
     }
@@ -776,7 +778,7 @@ pub fn open_card(tx: &Tx, plan: &Plan, card: &Card) -> ChannelResult<String> {
     let lines: Vec<String> = shown.iter().map(|(_, l)| l.clone()).collect();
     let space = crate::spaces::get(tx, &plan.space_id)?
         .ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
-    let name = crate::spaces::display_title(tx, &space)?;
+    let name = tx.write(|w| crate::spaces::display_title(w, &space))?;
     let question = card_question(&name, &plan.sender_name, &card, why, &lines);
     let draft = card.draft.trim();
     let options: Vec<String> = if draft.is_empty() {
@@ -894,7 +896,7 @@ pub fn supersede_older(
         if card_reason(&q) == Some(Reason::Commitment) && !newer.commitment {
             continue;
         }
-        if crate::presence::settle(tx, &d, BY_NEWER)? {
+        if tx.write(|w| crate::presence::settle(w, &d, BY_NEWER))? {
             n += 1;
             base::audit(
                 tx,

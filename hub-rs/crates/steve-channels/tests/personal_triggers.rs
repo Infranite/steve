@@ -251,11 +251,7 @@ async fn send_time_rechecks_receiver_configuration_and_requires_its_receipt() {
         &f.me,
         json!({"on":true,"words":["/bot"],"ignore_prefixes":["/bot"]}),
     );
-    let plan = f
-        .env
-        .store()
-        .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &a.message_id))
-        .unwrap();
+    let plan = steve_channels::flow_actions::plan_of(f.env.store(), WS, &a.message_id).unwrap();
     let d = f
         .out
         .deliver(

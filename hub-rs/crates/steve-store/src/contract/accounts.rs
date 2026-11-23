@@ -1,4 +1,6 @@
-use sea_query::{Expr, ExprTrait, Func, JoinType, LikeExpr, OnConflict, Order, Query};
+use sea_query::{
+    Expr, ExprTrait, Func, JoinType, LikeExpr, OnConflict, Order, Query, SelectStatement,
+};
 
 use crate::{Read, Result, W};
 
@@ -123,6 +125,17 @@ pub(crate) fn display_handle(c: &mut impl Read, id: &str) -> Result<Option<Strin
             .and_where(Expr::col("id").eq(id)),
         |row| row.get(0),
     )
+}
+
+pub(crate) fn sender_name(account: Expr) -> SelectStatement {
+    Query::select()
+        .expr(Func::coalesce([
+            Expr::col("display_name"),
+            Expr::col("handle_display"),
+        ]))
+        .from("accounts")
+        .and_where(Expr::col("id").eq(account))
+        .take()
 }
 
 pub fn display_name(c: &mut impl Read, id: &str) -> Result<Option<String>> {
@@ -275,4 +288,25 @@ fn feishu_handles(account: &str) -> sea_query::SelectStatement {
         .and_where(Expr::col("account_id").eq(account))
         .and_where(Expr::col("handle").like(LikeExpr::new(r"ou\_%").escape('\\')))
         .take()
+}
+
+pub(crate) fn app_bot_ids() -> SelectStatement {
+    Query::select()
+        .column("id")
+        .from("accounts")
+        .and_where(Expr::col("kind").eq("app_bot"))
+        .take()
+}
+
+pub fn has_handle(r: &mut impl Read, account: &str, handle: &str) -> Result<bool> {
+    Ok(r.one(
+        Query::select()
+            .column("account_id")
+            .from("account_handles")
+            .and_where(Expr::col("account_id").eq(account))
+            .and_where(Expr::col("handle").eq(handle))
+            .limit(1),
+        |_| Ok(()),
+    )?
+    .is_some())
 }

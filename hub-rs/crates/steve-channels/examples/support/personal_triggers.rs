@@ -82,8 +82,8 @@ impl Fixture {
         );
         for conn in [&me, &second, &other, &bot] {
             env.store().transaction(|tx| -> ApiResult<()> {
-                let (_, mode) = steve_channels::bindings::connection_account(tx, WS, conn)?;
-                spaces::ensure_channel_settings(tx, WS, conn, mode, env.clock.now())?;
+                let (_, mode) = tx.write(|w| steve_channels::bindings::connection_account(w, WS, conn))?;
+                tx.write(|w| spaces::ensure_channel_settings(w, WS, conn, mode, env.clock.now()))?;
                 tx.execute("UPDATE channel_settings SET rules='[{\"when\":{\"kind\":\"all\"},\"act\":\"record\"}]' WHERE connection_id=?", [conn])?;
                 Ok(())
             }).unwrap();

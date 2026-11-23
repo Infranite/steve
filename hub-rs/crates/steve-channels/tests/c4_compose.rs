@@ -131,7 +131,7 @@ fn set_rules(h: &H, conn: &str, rules: Value) {
     let now = h.ch.now();
     h.env
         .store()
-        .transaction(|tx| spaces::set_account_rules(tx, &viewer(), conn, &rules, now))
+        .write(|tx| spaces::set_account_rules(tx, &viewer(), conn, &rules, now))
         .expect("rules");
 }
 
@@ -320,7 +320,7 @@ async fn setup() -> H {
         let now = h.ch.now();
         h.env
             .store()
-            .transaction(|tx| bindings::set_account_default(tx, &viewer(), conn, &p, now))
+            .write(|tx| bindings::set_account_default(tx, &viewer(), conn, &p, now))
             .expect("bind");
         if bot == "ops" {
             h.oncall_persona = p;
@@ -577,11 +577,8 @@ async fn own_draft_uses_verified_connection_user_and_external_space_address() {
         )
         .await
         .unwrap();
-    let plan = h
-        .env
-        .store()
-        .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &inbound.message_id))
-        .unwrap();
+    let plan =
+        steve_channels::flow_actions::plan_of(h.env.store(), WS, &inbound.message_id).unwrap();
     assert_eq!(plan.mode, spaces::Mode::Own);
     let gather = || {
         compose::gather(
@@ -1322,9 +1319,7 @@ async fn composer_receives_real_images_and_file_text_and_rejects_stale_source() 
     let incoming = push(&h, &c, m).await;
     exec(&h, "UPDATE bots SET model='fixture-model' WHERE id='ops'");
     let plan =
-        h.ch.store()
-            .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &incoming.message_id))
-            .unwrap();
+        steve_channels::flow_actions::plan_of(h.ch.store(), WS, &incoming.message_id).unwrap();
     let capture = Arc::new(MediaCapture::default());
     let composer = compose::Composer::new()
         .media(Arc::new(MessageMedia))
@@ -1412,9 +1407,7 @@ async fn media_cleanup_during_download_never_reaches_the_model() {
     let incoming = push(&h, &h.oncall, m).await;
     exec(&h, "UPDATE bots SET model='fixture-model' WHERE id='ops'");
     let plan =
-        h.ch.store()
-            .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &incoming.message_id))
-            .unwrap();
+        steve_channels::flow_actions::plan_of(h.ch.store(), WS, &incoming.message_id).unwrap();
     let capture = Arc::new(MediaCapture::default());
     let composer = compose::Composer::new()
         .media(Arc::new(PurgeDuringDownload))
@@ -1555,10 +1548,7 @@ async fn what_was_read_in_an_image_is_reused_later() {
     m.attachments = vec![json!({"type":"image","key":"img_fixture"})];
     let first = push(&h, &c, m).await;
     exec(&h, "UPDATE bots SET model='fixture-model' WHERE id='ops'");
-    let plan =
-        h.ch.store()
-            .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &first.message_id))
-            .unwrap();
+    let plan = steve_channels::flow_actions::plan_of(h.ch.store(), WS, &first.message_id).unwrap();
     compose::Composer::new()
         .media(Arc::new(MessageMedia))
         .pinned(Arc::new(Describing))
@@ -1585,10 +1575,7 @@ async fn what_was_read_in_an_image_is_reused_later() {
     );
 
     let next = push(&h, &c, msg("C_OPS", "img-2", "ulilei", "这个怎么办", false)).await;
-    let plan =
-        h.ch.store()
-            .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &next.message_id))
-            .unwrap();
+    let plan = steve_channels::flow_actions::plan_of(h.ch.store(), WS, &next.message_id).unwrap();
     let l = compose::gather(
         h.env.store(),
         h.ch.knowledge_store(),
@@ -1726,10 +1713,7 @@ async fn your_own_account_reads_the_conversation_by_ids_and_time() {
             t_created + 1_000
         ),
     );
-    let plan =
-        h.ch.store()
-            .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &target.message_id))
-            .unwrap();
+    let plan = steve_channels::flow_actions::plan_of(h.ch.store(), WS, &target.message_id).unwrap();
     let l = compose::gather(
         h.env.store(),
         h.ch.knowledge_store(),
@@ -1853,10 +1837,7 @@ async fn what_steve_sent_for_you_is_placed_when_it_was_sent() {
         .concat(),
     );
     let target = push(&h, &me, msg("C_DEV", "t1", "uhan", "@你 那就这样", true)).await;
-    let plan =
-        h.ch.store()
-            .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &target.message_id))
-            .unwrap();
+    let plan = steve_channels::flow_actions::plan_of(h.ch.store(), WS, &target.message_id).unwrap();
     let l = compose::gather(
         h.env.store(),
         h.ch.knowledge_store(),
@@ -2068,10 +2049,7 @@ async fn your_own_account_writes_like_you_not_like_a_bot() {
     assert!(!p.contains("发送人提过、还在进行的事项"), "{p}");
 
     // the Bot still picks the model
-    let plan =
-        h.ch.store()
-            .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &target.message_id))
-            .unwrap();
+    let plan = steve_channels::flow_actions::plan_of(h.ch.store(), WS, &target.message_id).unwrap();
     let l = compose::gather(
         h.env.store(),
         h.ch.knowledge_store(),

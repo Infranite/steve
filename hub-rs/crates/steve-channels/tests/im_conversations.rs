@@ -123,7 +123,7 @@ fn set_rules(h: &H, conn: &str, rules: Value) {
     let now = h.ch.now();
     h.env
         .store()
-        .transaction(|tx| spaces::set_account_rules(tx, &Viewer::bare(WS, ME), conn, &rules, now))
+        .write(|tx| spaces::set_account_rules(tx, &Viewer::bare(WS, ME), conn, &rules, now))
         .expect("rules");
 }
 
@@ -1653,10 +1653,13 @@ async fn an_incomplete_member_list_widens_nothing() {
     let id = id.as_str().unwrap().to_string();
     let scopes = |h: &H| -> Vec<String> {
         h.ch.store()
-            .reader(|c| -> steve_channels::ChannelResult<Vec<String>> {
-                let space = spaces::get(c, &id)?.expect("space");
-                let (bot, _) = steve_channels::bindings::connection_account(c, WS, &h.bot)?;
-                Ok(steve_channels::disclosure::space_audience(c, &space, &bot, ME)?.scopes)
+            .read(|r| {
+                h.ch.store()
+                    .reader(|c| -> steve_channels::ChannelResult<Vec<String>> {
+                        let space = spaces::get(c, &id)?.expect("space");
+                        let (bot, _) = steve_channels::bindings::connection_account(r, WS, &h.bot)?;
+                        Ok(steve_channels::disclosure::space_audience(c, &space, &bot, ME)?.scopes)
+                    })
             })
             .unwrap()
     };
@@ -2377,11 +2380,9 @@ async fn the_record_shows_every_message_with_what_steve_did() {
     );
     assert_eq!(list(ME, Some(&bot)).total, l.total);
     assert_eq!(list(ME, Some("con_missing")).total, 0);
-    let entries = h
-        .env
-        .store()
-        .reader(|c| steve_channels::conv_record::channels(&h.ch, c, &Viewer::bare(WS, ME), now))
-        .unwrap();
+    let entries =
+        steve_channels::conv_record::channels(&h.ch, h.env.store(), &Viewer::bare(WS, ME), now)
+            .unwrap();
     let e = entries
         .iter()
         .find(|e| e.connection == bot)
@@ -2453,11 +2454,9 @@ async fn single_user_reads_personal_records_without_changing_account_ownership()
         })
         .unwrap();
     // Account ownership is identity semantics, independent of reading its stored history.
-    let theirs = h
-        .env
-        .store()
-        .reader(|c| steve_channels::conv_record::channels(&h.ch, c, &Viewer::bare(WS, other), 0))
-        .unwrap();
+    let theirs =
+        steve_channels::conv_record::channels(&h.ch, h.env.store(), &Viewer::bare(WS, other), 0)
+            .unwrap();
     assert!(
         theirs.iter().all(|e| e.connection != me),
         "your account is not in their switcher"

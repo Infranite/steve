@@ -89,7 +89,16 @@ fn check_text(t: &str) -> Result<(), String> {
 }
 
 /// The plan for answering a stored inbound message (what the rules would have built).
-pub fn plan_of(c: &Connection, ws: &str, message_id: &str) -> ChannelResult<Plan> {
+pub fn plan_of(store: &steve_store::Store, ws: &str, message_id: &str) -> ChannelResult<Plan> {
+    store.read(|r| store.reader(|c| plan_in(c, r, ws, message_id)))
+}
+
+pub(crate) fn plan_in(
+    c: &Connection,
+    r: &mut impl steve_store::Read,
+    ws: &str,
+    message_id: &str,
+) -> ChannelResult<Plan> {
     type Row = (
         String,
         Option<String>,
@@ -112,13 +121,13 @@ pub fn plan_of(c: &Connection, ws: &str, message_id: &str) -> ChannelResult<Plan
     let (space_id, ext, thread, text, account, party, name) =
         row.ok_or_else(|| ApiError::not_found("消息"))?;
     let space = spaces::get(c, &space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
-    let (_, mode) = bindings::connection_account(c, ws, &space.connection_id)?;
-    let set = spaces::settings(c, &space.id)?;
+    let (_, mode) = bindings::connection_account(r, ws, &space.connection_id)?;
+    let set = spaces::settings(r, &space.id)?;
     Ok(Plan {
         ws: ws.into(),
         connection_id: space.connection_id.clone(),
         mode,
-        space_name: spaces::display_title(c, &space)?,
+        space_name: spaces::display_title(r, &space)?,
         space_id: space.id,
         message_id: message_id.into(),
         external_id: ext.unwrap_or_default(),
@@ -135,14 +144,19 @@ pub fn plan_of(c: &Connection, ws: &str, message_id: &str) -> ChannelResult<Plan
 }
 
 /// A persona named in a node's config, checked against the target account.
-fn check_persona(c: &Connection, ws: &str, mode: Mode, id: Option<&str>) -> Result<(), String> {
+fn check_persona(
+    r: &mut impl steve_store::Read,
+    ws: &str,
+    mode: Mode,
+    id: Option<&str>,
+) -> Result<(), String> {
     let Some(id) = id.filter(|s| !s.is_empty()) else {
         return Ok(());
     };
     if mode == Mode::Own {
         return Err(bindings::SELF_NO_PERSONA.into());
     }
-    match personas::get(c, id) {
+    match personas::get(r, id) {
         Ok(Some(p)) if p.workspace_id == ws && !p.deleted => Ok(()),
         Ok(_) => Err("没有这个对外身份".into()),
         Err(e) => Err(e.to_string()),
@@ -315,10 +329,12 @@ impl Action for ReplyAs {
             .as_str()
             .filter(|s| !s.is_empty())
             .map(String::from);
-        let plan = match ch.store().reader(|c| -> ChannelResult<_> {
-            let plan = plan_of(c, &ws, &mid)?;
-            check_persona(c, &ws, plan.mode, persona.as_deref()).map_err(ApiError::rule)?;
-            Ok(plan)
+        let plan = match ch.store().read(|r| {
+            ch.store().reader(|c| -> ChannelResult<_> {
+                let plan = plan_in(c, r, &ws, &mid)?;
+                check_persona(r, &ws, plan.mode, persona.as_deref()).map_err(ApiError::rule)?;
+                Ok(plan)
+            })
         }) {
             Ok(p) => p,
             Err(e) => return NodeOutcome::Fail(e.to_string()),
@@ -445,22 +461,24 @@ impl Action for SendToSpace {
             .as_str()
             .filter(|s| !s.is_empty())
             .map(String::from);
-        let target = ch.store().reader(|c| -> ChannelResult<_> {
-            let s = spaces::get(c, &space_id)?
-                .filter(|s| s.workspace_id == ws && s.status == "active")
-                .ok_or_else(|| ApiError::not_found("空间"))?;
-            let (_, mode) = bindings::connection_account(c, &ws, &s.connection_id)?;
-            check_persona(c, &ws, mode, persona.as_deref()).map_err(ApiError::rule)?;
-            Ok(OutTarget {
-                ws: ws.clone(),
-                connection_id: s.connection_id.clone(),
-                mode,
-                space_name: spaces::display_title(c, &s)?,
-                space_id: s.id,
-                reply_to: None,
-                thread_key: None,
-                persona_id: persona.clone(),
-                source_message_id: None,
+        let target = ch.store().read(|r| {
+            ch.store().reader(|c| -> ChannelResult<_> {
+                let s = spaces::get(c, &space_id)?
+                    .filter(|s| s.workspace_id == ws && s.status == "active")
+                    .ok_or_else(|| ApiError::not_found("空间"))?;
+                let (_, mode) = bindings::connection_account(r, &ws, &s.connection_id)?;
+                check_persona(r, &ws, mode, persona.as_deref()).map_err(ApiError::rule)?;
+                Ok(OutTarget {
+                    ws: ws.clone(),
+                    connection_id: s.connection_id.clone(),
+                    mode,
+                    space_name: spaces::display_title(r, &s)?,
+                    space_id: s.id,
+                    reply_to: None,
+                    thread_key: None,
+                    persona_id: persona.clone(),
+                    source_message_id: None,
+                })
             })
         });
         let target = match target {

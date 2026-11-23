@@ -125,7 +125,7 @@ fn set_default(h: &H, conn: &str, persona: &str) -> Result<(), steve_channels::C
     let now = h.ch.now();
     h.env
         .store()
-        .transaction(|tx| bindings::set_account_default(tx, &v, conn, persona, now))
+        .write(|tx| bindings::set_account_default(tx, &v, conn, persona, now))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -134,7 +134,7 @@ async fn default_persona_is_seeded_on_first_use() {
     assert!(
         h.env
             .store()
-            .reader(|c| personas::default_persona(c, WS))
+            .read(|c| personas::default_persona(c, WS))
             .expect("read")
             .is_none(),
         "nothing before channels are used"
@@ -202,7 +202,7 @@ async fn space_binding_overrides_the_account_default() {
     let acc = h
         .env
         .store()
-        .reader(|c| bindings::account_persona(c, WS, &h.con))
+        .read(|c| bindings::account_persona(c, WS, &h.con))
         .expect("account persona")
         .expect("bot");
     assert_eq!((acc.id.as_str(), acc.inherited), (oncall.as_str(), None));
@@ -395,7 +395,7 @@ async fn deleting_a_persona_moves_accounts_to_default_and_spaces_to_following() 
     let acc = h
         .env
         .store()
-        .reader(|c| bindings::account_persona(c, WS, &h.con))
+        .read(|c| bindings::account_persona(c, WS, &h.con))
         .expect("read")
         .expect("bot");
     assert_eq!(json!(acc.id), steve);
@@ -480,7 +480,7 @@ async fn own_account_cannot_get_a_persona() {
     assert!(
         h.env
             .store()
-            .reader(|c| bindings::account_persona(c, WS, &mine))
+            .read(|c| bindings::account_persona(c, WS, &mine))
             .expect("read")
             .is_none()
     );

@@ -119,22 +119,22 @@ pub(crate) fn shown(at: i64, tz: chrono_tz::Tz) -> String {
 }
 
 /// `space`: a space id, else the one space the viewer sees with exactly this name.
-fn resolve(c: &rusqlite::Connection, viewer: &Viewer, q: &str) -> ChannelResult<String> {
+fn resolve(r: &mut impl steve_store::Read, viewer: &Viewer, q: &str) -> ChannelResult<String> {
     let q = q.trim();
     if q.is_empty() {
         return Err(steve_modules::ApiError::rule(steve_i18n::t!(
             "channels.im_read.error.no_space_arg"
         )));
     }
-    if spaces::visible(c, viewer, q)? {
+    if steve_store::channel_spaces::rows::get_in_workspace(r, &viewer.ws, q)?.is_some() {
         return Ok(q.to_string());
     }
-    let found = spaces::list(c, viewer, None, Some(q))?;
+    let found = spaces::list(r, viewer, None, Some(q))?;
     let key = q.to_lowercase();
     let mut exact = Vec::new();
     for s in &found {
         if s.name.trim().to_lowercase() == key
-            || spaces::display_title(c, s)?.trim().to_lowercase() == key
+            || spaces::display_title(r, s)?.trim().to_lowercase() == key
         {
             exact.push(s);
         }
@@ -150,7 +150,7 @@ fn resolve(c: &rusqlite::Connection, viewer: &Viewer, q: &str) -> ChannelResult<
     let names: Vec<String> = pool
         .iter()
         .take(CANDIDATES)
-        .map(|s| Ok(format!("{}（{}）", spaces::display_title(c, s)?, s.id)))
+        .map(|s| Ok(format!("{}（{}）", spaces::display_title(r, s)?, s.id)))
         .collect::<ChannelResult<_>>()?;
     Err(steve_modules::ApiError::rule(if names.is_empty() {
         steve_i18n::t!("channels.im_read.error.no_space", space = q)
@@ -181,11 +181,9 @@ async fn read(ch: &Channels, cx: &McpCx, args: &Value) -> ChannelResult<String> 
     };
     let viewer = steve_knowledge::tools::session_viewer(ch.modules(), cx)?;
     let now = ch.now();
-    let (space, tz) = ch.store().read::<_, steve_store::StoreError>(|r| {
-        Ok(ch.store().reader(|c| -> ChannelResult<_> {
-            Ok((resolve(c, &viewer, &space_q)?, tz_of(r, &viewer.ws)))
-        }))
-    })??;
+    let (space, tz) = ch.store().read(|r| -> ChannelResult<_> {
+        Ok((resolve(r, &viewer, &space_q)?, tz_of(r, &viewer.ws)))
+    })?;
     let time = |k: &str| -> ChannelResult<Option<i64>> {
         match args.get(k) {
             None | Some(Value::Null) => Ok(None),

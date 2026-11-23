@@ -118,7 +118,7 @@ async fn setup_with(check: &str) -> H {
     let now = env.modules.clock.now();
     let v = Viewer::bare(WS, ME);
     env.store()
-        .transaction(|tx| {
+        .write(|tx| {
             spaces::set_account_rules(
                 tx,
                 &v,

@@ -46,12 +46,12 @@ impl SpaceChange {
 }
 
 fn mode_of(tx: &Tx, ws: &str, conn: &str, facts: &ConnFacts, now: i64) -> ChannelResult<Mode> {
-    let mode = match spaces::channel_settings(tx, ws, conn)? {
+    let mode = match tx.write(|w| spaces::channel_settings(w, ws, conn))? {
         Some(s) => s.mode,
         None if facts.owner_user.is_some() => Mode::Own,
         None => Mode::Bot,
     };
-    spaces::ensure_channel_settings(tx, ws, conn, mode, now)?;
+    tx.write(|w| spaces::ensure_channel_settings(w, ws, conn, mode, now))?;
     Ok(mode)
 }
 
@@ -93,17 +93,19 @@ fn add_members(
     };
     let mut n = 0;
     for m in members {
-        if let Some(id) = identify_with_aliases(
-            tx,
-            ws,
-            conn,
-            actor,
-            &m.handle,
-            &m.aliases,
-            Some(&m.name),
-            &label,
-            m.role == "bot",
-        ) && id.account_id != facts.account_id
+        if let Some(id) = tx.write(|w| -> ChannelResult<_> {
+            Ok(identify_with_aliases(
+                w,
+                ws,
+                conn,
+                actor,
+                &m.handle,
+                &m.aliases,
+                Some(&m.name),
+                &label,
+                m.role == "bot",
+            ))
+        })? && id.account_id != facts.account_id
             && tx.write(|w| member_repo::add(w, ws, &space.id, &id.account_id, &m.role, now))?
         {
             n += 1;
@@ -524,14 +526,16 @@ impl Channels {
         let kind = SpaceKind::parse(&space.kind).unwrap_or(info.kind);
         if mode == Mode::Bot
             && kind.is_group()
-            && (created || (rejoined && !spaces::settings(tx, &space.id)?.configured))
+            && (created
+                || (rejoined
+                    && !tx
+                        .write(|w| crate::spaces::settings(w, &space.id))?
+                        .configured))
         {
-            decision_id = Some(spaces::open_new_space_decision(
-                tx,
-                ws,
-                &space,
-                &facts.account_name,
-            )?);
+            decision_id =
+                Some(tx.write(|w| {
+                    spaces::open_new_space_decision(w, ws, &space, &facts.account_name)
+                })?);
         }
         spaces::event(tx, ws, &space.id);
         Ok(SpaceChange {

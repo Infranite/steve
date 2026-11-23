@@ -153,6 +153,7 @@ pub const NOT_ANSWERED: &str = "没有回答，转给你";
 /// Only the user whose view connection `conn` speaks with reads `space`: their private chat with Steve.
 pub fn owner_only(
     c: &rusqlite::Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     space: &spaces::SpaceRow,
     conn: &str,
@@ -160,7 +161,7 @@ pub fn owner_only(
     if space.has_external {
         return Ok(false);
     }
-    let (account, _) = crate::bindings::connection_account(c, ws, conn)?;
+    let (account, _) = crate::bindings::connection_account(r, ws, conn)?;
     let owner = crate::compose::owner_user(c, ws, conn)?;
     let a = crate::disclosure::space_audience(c, space, &account, &owner)?;
     Ok(!a.external && a.scopes.iter().any(|s| s == "private"))
@@ -269,10 +270,11 @@ pub fn system_text(meta: &Value) -> bool {
 
 /// `meta.chan` of a turn: what the conversation and its delivery need to know about the source.
 fn chan_meta(ch: &Channels, plan: &Plan, command: bool) -> ChannelResult<Value> {
-    ch.store().reader(|c| {
-        let space = spaces::get(c, &plan.space_id)?
+    ch.store().read(|r| {
+        let space = steve_store::channel_spaces::rows::get(r, &plan.space_id)?
             .ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
-        let provider = provider_name(c, &space.system_id);
+        let provider =
+            steve_store::Systems(r).provider_label(&space.workspace_id, &space.system_id)?;
         Ok(json!({
             "message": plan.message_id,
             "space": space.id,
@@ -280,7 +282,7 @@ fn chan_meta(ch: &Channels, plan: &Plan, command: bool) -> ChannelResult<Value> 
             "mode": plan.mode.code(),
             "system": space.system_id,
             "provider": provider,
-            "space_name": crate::spaces::display_title(c, &space)?,
+            "space_name": crate::spaces::display_title(r, &space)?,
             "kind": space.kind,
             "sender": plan.sender_name,
             "party": plan.sender_party_id,
@@ -313,11 +315,13 @@ impl Channels {
         // drafts as you, and spaces with outside members, answer in place only
         let open = !has_external && (plan.mode == Mode::Bot || command);
         let owner_only = open
-            && self.store().reader(|c| -> ChannelResult<bool> {
-                match spaces::get(c, &plan.space_id)? {
-                    Some(space) => owner_only(c, &plan.ws, &space, &plan.connection_id),
-                    None => Ok(false),
-                }
+            && self.store().read(|r| {
+                self.store().reader(|c| -> ChannelResult<bool> {
+                    match spaces::get(c, &plan.space_id)? {
+                        Some(space) => owner_only(c, r, &plan.ws, &space, &plan.connection_id),
+                        None => Ok(false),
+                    }
+                })
             })?;
         // work starts only when the owner sent it, a /bot command too (any workspace user may send one)
         let start = self
@@ -426,7 +430,7 @@ impl Channels {
         let Some(cm) = chan["message"].as_str() else {
             return Ok(None);
         };
-        let mut plan = self.store().reader(|c| plan_of(c, ws, cm))?;
+        let mut plan = plan_of(self.store(), ws, cm)?;
         if chan["act"] == "draft" {
             plan.act = Act::Draft;
         }
@@ -567,15 +571,16 @@ impl Channels {
                 return Ok(String::new());
             };
             let where_ = if space.kind == "dm" { "私聊" } else { "群聊" };
-            let who = match bindings::effective(c, &space)? {
+            let who = match bindings::effective(r, &space)? {
                 Some(e) => format!("以对外身份「{}」说话", e.persona.name),
                 None => "以你本人的名义起草".to_string(),
             };
             // members are read again now; the turn says who asked
-            let own = owner_only(c, ws, &space, &space.connection_id)?;
+            let own = owner_only(c, r, ws, &space, &space.connection_id)?;
             let chan = turn.as_ref().map(|m| &m.meta["chan"]);
             let card = crate::conversation_card::build(
                 c,
+                r,
                 ws,
                 &space,
                 chan.and_then(|m| m["party"].as_str()),
@@ -594,14 +599,14 @@ impl Channels {
                 return Ok(format!(
                     "{card}\n\n这次的问题来自你和 {} 的私聊（{}），只有你本人能看到，回答会发回那里。需要时直接查事项、会话、知识和代码，照实回答。{note}",
                     personas::owner_internal_name(c, r, ws, &space.connection_id)?,
-                    crate::spaces::display_title(c, &space)?,
+                    crate::spaces::display_title(r, &space)?,
                 ));
             }
-            let owner = personas::owner_name_for_space(c, r, ws, &space.id)?;
+            let owner = personas::owner_name_for_space(r, ws, &space.id)?;
             Ok(format!(
                 "{card}\n\n这次的问题来自渠道「{}」（{where_}{}）。你{who}，回答会发回那里，发出前要过披露检查：\
                  只说结论，不提其他群、其他客户、内部事项编号、文件路径和代码细节；对方这次自己提到的事项编号或说法可以照着提、用来澄清，但它不代表能说这件事的内容，内容仍只按能说的部分说；拿不准能不能说的，就当不知道，或者说会请 {owner} 来看。查不到、查询失败或没有权限时，笼统地说明即可，不说是什么权限、哪里报错。",
-                crate::spaces::display_title(c, &space)?,
+                crate::spaces::display_title(r, &space)?,
                 if space.has_external { "，有外部成员" } else { "" },
             ) + &note)
         }));
@@ -785,13 +790,7 @@ impl Channels {
             if plan.mode == Mode::Bot {
                 let owner = self
                     .store()
-                    .read::<_, steve_store::StoreError>(|r| {
-                        Ok(self
-                            .store()
-                            .reader(|c| personas::owner_name_for_space(c, r, ws, &plan.space_id)))
-                    })
-                    .ok()
-                    .and_then(Result::ok)
+                    .read(|r| personas::owner_name_for_space(r, ws, &plan.space_id))
                     .unwrap_or_default();
                 let d = out
                     .deliver(
@@ -1125,9 +1124,9 @@ impl Channels {
         out: &dyn crate::deliver::Outbound,
         operation: String,
     ) -> ChannelResult<Delivered> {
-        let yours = self.store().reader(|c| {
+        let yours = self.store().read(|r| {
             crate::arbiter::from_you(
-                c,
+                r,
                 ws,
                 plan.sender_account_id.as_deref(),
                 plan.sender_party_id.as_deref(),
@@ -1250,37 +1249,14 @@ impl Channels {
     }
 }
 
-/// The provider's name for a space's system: the bot account's own system (`feishu_app`) is shown
-/// as its platform (`feishu` → 飞书).
-pub(crate) fn provider_name(c: &rusqlite::Connection, system: &str) -> String {
-    let name = |id: &str| -> Option<String> {
-        c.query_row(
-            "SELECT nullif(name, '') FROM systems WHERE id = ?",
-            [id],
-            |r| r.get::<_, Option<String>>(0),
-        )
-        .ok()
-        .flatten()
-    };
-    system
-        .strip_suffix("_app")
-        .and_then(name)
-        .or_else(|| name(system))
-        .unwrap_or_else(|| system.to_string())
-}
-
 /// The badge of a conversation: where it lives.
-fn badge(
-    r: &mut impl steve_store::Read,
-    c: &rusqlite::Connection,
-    space: &crate::spaces::SpaceRow,
-) -> ChannelResult<Value> {
-    let provider = provider_name(c, &space.system_id);
-    let mode = crate::arbiter::mode_of(c, &space.workspace_id, &space.connection_id)?;
+fn badge(r: &mut impl steve_store::Read, space: &crate::spaces::SpaceRow) -> ChannelResult<Value> {
+    let provider = steve_store::Systems(r).provider_label(&space.workspace_id, &space.system_id)?;
+    let mode = crate::arbiter::mode_of(r, &space.workspace_id, &space.connection_id)?;
     Ok(json!({
         "space": conv_space(&space.id),
         "space_id": space.id,
-        "name": crate::spaces::display_title(c, space)?,
+        "name": crate::spaces::display_title(r, space)?,
         "kind": space.kind,
         "dm": space.kind == "dm",
         "system": space.system_id,
@@ -1532,7 +1508,7 @@ pub fn list_page(
         let Some(space) = spaces::get(c, &id)? else {
             continue;
         };
-        let mut b = badge(r,c, &space)?;
+        let mut b = badge(r, &space)?;
         b["count"] = json!(n);
         b["last"] = json!(last);
         b["last_text"] = json!(text.chars().take(80).collect::<String>());
@@ -1609,7 +1585,7 @@ pub fn messages_of(
         store.reader(|c| -> ChannelResult<Value> {
             let space = spaces::own(c, viewer, id)
                 .map_err(|_| steve_modules::ApiError::not_found("对话"))?;
-            badge(r, c, &space)
+            badge(r, &space)
         })
     })?;
     let msgs = ch.store().messages().list(ws, conv, 500)?;

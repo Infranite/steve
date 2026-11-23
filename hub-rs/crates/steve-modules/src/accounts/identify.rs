@@ -399,7 +399,7 @@ pub(crate) fn attach_handle(
 /// rule, a proposal, a new unconfirmed contact) and the aliases are attached to what it found.
 /// Without aliases this is [`identify`].
 pub fn identify_any(
-    tx: &Tx,
+    w: &mut W<'_>,
     ws: &str,
     actor: &str,
     system_id: &str,
@@ -407,66 +407,64 @@ pub fn identify_any(
     aliases: &[AnyHandle],
     hints: &Hints,
 ) -> ApiResult<Identified> {
-    tx.write(|w| {
-        if aliases.is_empty() {
-            return identify_handle(w, ws, actor, system_id, handle, hints);
-        }
-        svc::seed(w, ws)?;
-        let system = own_system(w, ws, system_id)?;
-        normalize(&system, handle).ok_or_else(|| ApiError::invalid("handle"))?;
-        let source = hints.source.clone().unwrap_or_else(|| "identify".into());
-        let label = hints
-            .source_label
-            .clone()
-            .unwrap_or_else(|| svc::default_label(&source).into());
-        let kind = hints.kind.clone().unwrap_or_else(|| "personal".into());
-        let display_name = hints.display_name.clone().unwrap_or_default();
-        let what = Attach {
-            kind: &kind,
-            display_name: &display_name,
-            source: &source,
-            source_label: &label,
-        };
-        if held(w, ws, &system, handle, &hints.extra)?.is_none() {
-            let mut found = None;
-            for a in aliases {
-                let Some(sys) = Systems(w).get(ws, &a.system)? else {
-                    continue;
-                };
-                let Some(id) = held(w, ws, &sys, &a.handle, &a.extra)? else {
-                    continue;
-                };
-                let Some(acc) = Accounts(w).get(&id)? else {
-                    continue;
-                };
-                if let Some(p) = w
-                    .contacts()
-                    .current_party(&acc.party_id)?
-                    .filter(|p| p.status == "active")
-                {
-                    found = Some(p.id);
-                    break;
-                }
-            }
-            if let Some(p) = found {
-                attach_handle(w, ws, actor, &p, system_id, handle, &hints.extra, &what)?;
-            }
-        }
-        let id = identify_handle(w, ws, actor, system_id, handle, hints)?;
+    if aliases.is_empty() {
+        return identify_handle(w, ws, actor, system_id, handle, hints);
+    }
+    svc::seed(w, ws)?;
+    let system = own_system(w, ws, system_id)?;
+    normalize(&system, handle).ok_or_else(|| ApiError::invalid("handle"))?;
+    let source = hints.source.clone().unwrap_or_else(|| "identify".into());
+    let label = hints
+        .source_label
+        .clone()
+        .unwrap_or_else(|| svc::default_label(&source).into());
+    let kind = hints.kind.clone().unwrap_or_else(|| "personal".into());
+    let display_name = hints.display_name.clone().unwrap_or_default();
+    let what = Attach {
+        kind: &kind,
+        display_name: &display_name,
+        source: &source,
+        source_label: &label,
+    };
+    if held(w, ws, &system, handle, &hints.extra)?.is_none() {
+        let mut found = None;
         for a in aliases {
-            attach_handle(
-                w,
-                ws,
-                actor,
-                &id.party_id,
-                &a.system,
-                &a.handle,
-                &a.extra,
-                &what,
-            )?;
+            let Some(sys) = Systems(w).get(ws, &a.system)? else {
+                continue;
+            };
+            let Some(id) = held(w, ws, &sys, &a.handle, &a.extra)? else {
+                continue;
+            };
+            let Some(acc) = Accounts(w).get(&id)? else {
+                continue;
+            };
+            if let Some(p) = w
+                .contacts()
+                .current_party(&acc.party_id)?
+                .filter(|p| p.status == "active")
+            {
+                found = Some(p.id);
+                break;
+            }
         }
-        Ok(id)
-    })
+        if let Some(p) = found {
+            attach_handle(w, ws, actor, &p, system_id, handle, &hints.extra, &what)?;
+        }
+    }
+    let id = identify_handle(w, ws, actor, system_id, handle, hints)?;
+    for a in aliases {
+        attach_handle(
+            w,
+            ws,
+            actor,
+            &id.party_id,
+            &a.system,
+            &a.handle,
+            &a.extra,
+            &what,
+        )?;
+    }
+    Ok(id)
 }
 
 fn add_extra(
@@ -668,18 +666,6 @@ fn new_contact(
 /// your email accounts uses. Only an unconfirmed, active contact is proposed; a pair rejected
 /// before is not proposed again. Returns the proposal id.
 pub fn propose_if_me(
-    tx: &Tx,
-    ws: &str,
-    me: &str,
-    party: &str,
-    account: &str,
-    name: Option<&str>,
-    handles: &[&str],
-) -> ApiResult<Option<String>> {
-    tx.write(|w| propose_if_me_in(w, ws, me, party, account, name, handles))
-}
-
-fn propose_if_me_in(
     w: &mut W<'_>,
     ws: &str,
     me: &str,

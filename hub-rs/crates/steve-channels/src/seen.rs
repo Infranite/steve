@@ -4,14 +4,13 @@
 //! message, and whether every one of those spaces is one you muted (不提醒 / 屏蔽 — then they don't
 //! need your judgement at all).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use rusqlite::{Connection, OptionalExtension, params};
 use steve_modules::contacts::{Seen, SeenMessage, SeenSpace};
-use steve_store::base::Viewer;
+use steve_store::channel_spaces::activity;
+use steve_store::{Accounts, Read, Result};
 
-use crate::ChannelResult;
-use crate::spaces::visible_sql;
+use crate::spaces::Attention;
 
 /// Spaces listed per contact at most.
 const MAX_SPACES: usize = 5;
@@ -29,129 +28,97 @@ fn snippet(t: &str) -> String {
     }
 }
 
-/// A space someone was seen in: `(id, name, kind, when)`.
-type SpaceRow = (String, String, String, i64);
-
-/// For each party of `parties` that was seen somewhere the viewer can see.
-pub fn seen(
-    c: &Connection,
-    viewer: &Viewer,
-    parties: &[String],
-) -> ChannelResult<Vec<(String, Seen)>> {
-    let vis = visible_sql("?3");
-    let mut spaces_q = c.prepare(&format!(
-        "SELECT s.id, s.name, s.kind, MAX(x.at) AS at FROM (
-             SELECT m.space_id, m.created AS at FROM chan_messages m
-              WHERE m.workspace_id = ?1 AND m.direction = 'in' AND m.sender_party_id = ?2
-             UNION ALL
-             SELECT sm.space_id, sm.joined FROM space_members sm JOIN accounts a ON a.id = sm.account_id
-              WHERE sm.workspace_id = ?1 AND a.party_id = ?2) x
-           JOIN spaces s ON s.id = x.space_id
-          WHERE s.workspace_id = ?1 AND {vis}
-          GROUP BY s.id"
-    ))?;
-    let mut mentioned = mentioned_spaces(c, viewer, parties)?;
-    let mut last_q = c.prepare(&format!(
-        "SELECT m.text, m.created, s.id, s.name FROM chan_messages m JOIN spaces s ON s.id = m.space_id
-          WHERE m.workspace_id = ?1 AND m.direction = 'in' AND m.sender_party_id = ?2
-            AND m.text IS NOT NULL AND trim(m.text) <> '' AND {vis}
-          ORDER BY m.created DESC LIMIT 1"
-    ))?;
-    let mut count_q = c.prepare(
-        "SELECT count(*) FROM chan_messages WHERE workspace_id = ?1 AND direction = 'in' AND sender_party_id = ?2",
-    )?;
-    let mut attention_of: HashMap<String, String> = HashMap::new();
-    let mut out = Vec::new();
-    for p in parties {
-        let mut rows: Vec<SpaceRow> = spaces_q
-            .query_map(params![viewer.ws, p, viewer.user], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        // each space once, at the latest time they were seen there, latest first
-        for m in mentioned.remove(p).unwrap_or_default() {
-            match rows.iter_mut().find(|r| r.0 == m.0) {
-                Some(r) => r.3 = r.3.max(m.3),
-                None => rows.push(m),
+/// For each contact that was seen in a space of this workspace.
+pub fn seen(r: &mut impl Read, ws: &str, parties: &[String]) -> Result<Vec<(String, Seen)>> {
+    if parties.is_empty() {
+        return Ok(Vec::new());
+    }
+    let accounts: HashMap<_, _> = Accounts(r)
+        .owners_of_accounts(ws, parties)?
+        .into_iter()
+        .collect();
+    let account_ids = accounts.keys().cloned().collect::<Vec<_>>();
+    let mut appearances: HashMap<String, HashMap<String, i64>> = HashMap::new();
+    let mut record = |party: String, space: String, at: i64| {
+        appearances
+            .entry(party)
+            .or_default()
+            .entry(space)
+            .and_modify(|v| *v = (*v).max(at))
+            .or_insert(at);
+    };
+    for row in activity::sent_spaces(r, ws, parties)? {
+        record(row.subject, row.space, row.at);
+    }
+    if !account_ids.is_empty() {
+        for row in activity::member_spaces(r, ws, &account_ids)?
+            .into_iter()
+            .chain(activity::mentioned_spaces(r, ws, &account_ids)?)
+        {
+            if let Some(party) = accounts.get(&row.subject) {
+                record(party.clone(), row.space, row.at);
             }
         }
-        rows.sort_by(|a, b| b.3.cmp(&a.3).then_with(|| a.0.cmp(&b.0)));
-        if rows.is_empty() {
+    }
+    let ids = appearances
+        .values()
+        .flat_map(HashMap::keys)
+        .cloned()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let spaces: HashMap<_, _> = activity::spaces(r, ws, &ids)?
+        .into_iter()
+        .map(|space| (space.id.clone(), space))
+        .collect();
+    let counts: HashMap<_, _> = activity::message_counts(r, ws, parties)?
+        .into_iter()
+        .collect();
+    let mut out = Vec::new();
+    for party in parties {
+        let rows = appearances.get(party).into_iter().flatten();
+        let mut rows: Vec<_> = rows
+            .filter_map(|(id, at)| spaces.get(id).map(|s| (s, *at)))
+            .collect();
+        rows.sort_by(|(a, at), (b, bt)| bt.cmp(at).then_with(|| a.id.cmp(&b.id)));
+        let Some((_, last_at)) = rows.first() else {
             continue;
-        }
-        let mut spaces = Vec::new();
-        for (id, name, kind, _) in &rows {
-            let a = match attention_of.get(id) {
-                Some(a) => a.clone(),
-                None => {
-                    let a = crate::spaces::attention(c, id)?.code().to_string();
-                    attention_of.insert(id.clone(), a.clone());
-                    a
-                }
-            };
-            spaces.push(SeenSpace {
-                id: id.clone(),
-                name: name.clone(),
-                kind: kind.clone(),
-                attention: a,
-            });
-        }
-        let quiet = spaces.iter().all(|s| s.attention != "realtime");
-        let last = last_q
-            .query_row(params![viewer.ws, p, viewer.user], |r| {
-                Ok(SeenMessage {
-                    text: snippet(&r.get::<_, String>(0)?),
-                    created: r.get(1)?,
-                    space_id: r.get(2)?,
-                    space_name: r.get(3)?,
-                })
+        };
+        let attention = |s: &activity::Space| {
+            s.attention
+                .as_deref()
+                .and_then(Attention::parse)
+                .unwrap_or(Attention::Realtime)
+        };
+        let quiet = rows
+            .iter()
+            .all(|(s, _)| attention(s) != Attention::Realtime);
+        let spaces = rows
+            .iter()
+            .take(MAX_SPACES)
+            .map(|(s, _)| SeenSpace {
+                id: s.id.clone(),
+                name: s.name.clone(),
+                kind: s.kind.clone(),
+                attention: attention(s).code().into(),
             })
-            .optional()?;
-        let messages: i64 = count_q.query_row(params![viewer.ws, p], |r| r.get(0))?;
-        spaces.truncate(MAX_SPACES);
+            .collect();
+        let last = activity::last_message(r, ws, party)?.map(|m| SeenMessage {
+            text: snippet(&m.text),
+            created: m.created,
+            space_id: m.space_id,
+            space_name: m.space_name,
+        });
         out.push((
-            p.clone(),
+            party.clone(),
             Seen {
-                last_at: rows.first().map(|r| r.3),
+                last_at: Some(*last_at),
                 spaces,
                 last,
-                messages,
+                messages: counts.get(party).copied().unwrap_or(0),
                 quiet,
             },
         ));
     }
     Ok(out)
-}
-
-fn mentioned_spaces(
-    c: &Connection,
-    viewer: &Viewer,
-    parties: &[String],
-) -> ChannelResult<HashMap<String, Vec<SpaceRow>>> {
-    // Where they were @-mentioned, for all of `parties` in one pass over the mentions.
-    let mut mentioned: HashMap<String, Vec<SpaceRow>> = HashMap::new();
-    if !parties.is_empty() {
-        let vis2 = visible_sql("?2");
-        let mut st = c.prepare(&format!(
-            "SELECT a.party_id, s.id, s.name, s.kind, MAX(m.created) FROM chan_messages m,
-                    json_each(CASE WHEN json_valid(m.mentions) THEN m.mentions ELSE '[]' END) j
-               JOIN accounts a ON a.id = json_extract(j.value, '$.account_id')
-               JOIN spaces s ON s.id = m.space_id
-              WHERE m.workspace_id = ?1 AND a.party_id IN (SELECT value FROM json_each(?3))
-                AND s.workspace_id = ?1 AND {vis2}
-              GROUP BY a.party_id, s.id"
-        ))?;
-        let ids = serde_json::to_string(parties).unwrap_or_else(|_| "[]".into());
-        let rows = st.query_map(params![viewer.ws, viewer.user, ids], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?),
-            ))
-        })?;
-        for row in rows {
-            let (party, sp) = row?;
-            mentioned.entry(party).or_default().push(sp);
-        }
-    }
-    Ok(mentioned)
 }

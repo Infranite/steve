@@ -61,6 +61,48 @@ pub fn by_chat(r: &mut impl Read, ws: &str, external: &str) -> Result<Vec<Space>
     )
 }
 
+pub fn chat_connections(r: &mut impl Read, ws: &str, external: &str) -> Result<Vec<String>> {
+    r.all(
+        Query::select()
+            .distinct()
+            .column(("i", "connection_id"))
+            .from_as("space_identities", "i")
+            .join_as(
+                JoinType::InnerJoin,
+                "spaces",
+                "s",
+                Expr::col(("s", "id")).eq(Expr::col(("i", "space_id"))),
+            )
+            .and_where(Expr::col(("s", "workspace_id")).eq(ws))
+            .and_where(Expr::col(("s", "external_id")).eq(external)),
+        |row| row.get(0),
+    )
+}
+
+/// Active spaces still visible to this connection. An untracked identity uses its space's original connection.
+pub fn active_count(r: &mut impl Read, ws: &str, conn: &str) -> Result<i64> {
+    let identities = super::identities();
+    let still_sees = identities
+        .clone()
+        .and_where(Expr::col(("i", "connection_id")).eq(conn))
+        .and_where(Expr::col(("i", "left_at")).is_null())
+        .take();
+    Ok(r.one(
+        Query::select()
+            .expr(Func::count(Expr::col(("s", "id"))))
+            .from_as("spaces", "s")
+            .and_where(Expr::col(("s", "workspace_id")).eq(ws))
+            .and_where(Expr::col(("s", "status")).eq("active"))
+            .and_where(
+                Expr::exists(still_sees).or(Expr::col(("s", "connection_id"))
+                    .eq(conn)
+                    .and(Expr::exists(identities).not())),
+            ),
+        |row| row.get(0),
+    )?
+    .unwrap_or(0))
+}
+
 pub fn list(
     r: &mut impl Read,
     ws: &str,
@@ -206,4 +248,48 @@ fn voice_expr() -> Expr {
         Expr::col(("s", "connection_id")),
     ])
     .into()
+}
+
+/// Readers that have a recorded identity for this space and a usable connection.
+pub fn history_readers(
+    r: &mut impl Read,
+    ws: &str,
+    user: &str,
+    space: &Space,
+) -> Result<Vec<(String, String)>> {
+    let mut ids = super::active_connections(r, &space.id)?;
+    if !space.via.is_empty() {
+        ids.push(space.via.clone());
+    }
+    if ids.is_empty() {
+        return Ok(vec![]);
+    }
+    let ids = r.db().dialect().text_array(&ids)?;
+    r.all(
+        Query::select()
+            .columns([("c", "id"), ("c", "adapter")])
+            .from_as("connections", "c")
+            .join_as(
+                JoinType::InnerJoin,
+                "accounts",
+                "a",
+                Expr::col(("a", "id")).equals(("c", "account_id")),
+            )
+            .join_as(
+                JoinType::LeftJoin,
+                "parties",
+                "p",
+                Expr::col(("p", "id")).equals(("a", "party_id")),
+            )
+            .and_where(Expr::col(("c", "id")).in_subquery(ids))
+            .and_where(Expr::col(("c", "workspace_id")).eq(ws))
+            .and_where(Expr::col(("c", "status")).is_in(["ok", "error"]))
+            .and_where(
+                Expr::col(("p", "user_id"))
+                    .is_null()
+                    .or(Expr::col(("p", "user_id")).eq(user)),
+            )
+            .order_by_columns([(("c", "created"), Order::Asc), (("c", "id"), Order::Asc)]),
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
 }

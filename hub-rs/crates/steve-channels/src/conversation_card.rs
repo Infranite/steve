@@ -110,6 +110,7 @@ pub fn relation(c: &Connection, ws: &str, party: Option<&str>) -> rusqlite::Resu
 /// speaking as `speaker`.
 pub fn build(
     c: &Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     space: &SpaceRow,
     asker: Option<&str>,
@@ -154,7 +155,7 @@ pub fn build(
     });
     let group = space.kind != "dm";
     Ok(Card {
-        place: crate::spaces::display_title(c, space)?,
+        place: crate::spaces::display_title(r, space)?,
         group,
         asker,
         others,

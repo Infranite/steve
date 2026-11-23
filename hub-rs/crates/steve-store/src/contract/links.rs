@@ -175,3 +175,19 @@ pub fn channel_sources(
         |row| Ok((row.get(0)?, row.get(1)?)),
     )
 }
+
+pub fn item_channel_source(r: &mut impl Read, ws: &str, item: &str) -> Result<Option<String>> {
+    r.one(
+        Query::select()
+            .column("object_id")
+            .from("links")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("subject_type").eq("item"))
+            .and_where(Expr::col("subject_id").eq(item))
+            .and_where(Expr::col("predicate").eq("from"))
+            .and_where(Expr::col("object_type").eq("chan_message"))
+            .order_by("created", Order::Asc)
+            .limit(1),
+        |row| row.get(0),
+    )
+}

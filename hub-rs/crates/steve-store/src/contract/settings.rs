@@ -139,3 +139,57 @@ pub fn save_yolo_report_cursor(w: &mut W<'_>, ws: &str, at: i64) -> Result<()> {
     )?;
     Ok(())
 }
+
+/// Whether the personal connection's send failure has already been reported.
+pub fn unsendable_reported(r: &mut impl Read, ws: &str, connection: &str) -> Result<bool> {
+    Ok(r.one(
+        Query::select()
+            .column("key")
+            .from("settings")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("key").eq(unsendable_key(connection))),
+        |_| Ok(()),
+    )?
+    .is_some())
+}
+
+pub fn report_unsendable(
+    w: &mut W<'_>,
+    ws: &str,
+    connection: &str,
+    error: &str,
+    at: i64,
+) -> Result<()> {
+    let detail = serde_json::json!({"error": error, "at": at}).to_string();
+    w.exec(
+        Query::insert()
+            .into_table("settings")
+            .columns(["workspace_id", "key", "value", "updated"])
+            .values_panic([
+                ws.into(),
+                unsendable_key(connection).into(),
+                detail.into(),
+                at.into(),
+            ])
+            .on_conflict(
+                sea_query::OnConflict::columns(["workspace_id", "key"])
+                    .update_columns(["value", "updated"])
+                    .to_owned(),
+            ),
+    )?;
+    Ok(())
+}
+
+pub fn clear_unsendable(w: &mut W<'_>, ws: &str, connection: &str) -> Result<()> {
+    w.exec(
+        Query::delete()
+            .from_table("settings")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("key").eq(unsendable_key(connection))),
+    )?;
+    Ok(())
+}
+
+fn unsendable_key(connection: &str) -> String {
+    format!("trigger.unsendable.{connection}")
+}

@@ -1053,7 +1053,7 @@ impl Feed<'_> {
             .transaction(|tx| -> Result<(), ApiError> {
                 let label = tx
                     .write(|w| crate::spaces::find(w, ws, conn, chat))?
-                    .map(|s| crate::spaces::display_title(tx, &s))
+                    .map(|s| tx.write(|w| crate::spaces::display_title(w, &s)))
                     .transpose()?
                     .unwrap_or_else(|| chat.to_string());
                 let text = format!(

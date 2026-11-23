@@ -760,6 +760,7 @@ pub fn people_names(c: &Connection, ws: &str, conn: &str) -> ChannelResult<Vec<S
 /// edited one as you sent it.
 pub fn examples(
     c: &Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     conn: &str,
     space: &str,
@@ -804,7 +805,7 @@ pub fn examples(
     for (draft, choice, text, here, out, out_space, created, resolved) in rows {
         let (list, t) = match choice.as_str() {
             "no" if rejected.len() < EXAMPLES_MAX
-                && rejected_for_its_words(c, ws, &out, &out_space, created, resolved)? =>
+                && rejected_for_its_words(r, ws, &out, &out_space, created, resolved)? =>
             {
                 (&mut rejected, draft.trim().to_string())
             }
@@ -831,25 +832,25 @@ pub fn examples(
 /// into a later turn. Space-wide on purpose, wider than the presence gate's own rule: a rejection
 /// that may have been about presence never teaches voice.
 pub fn rejected_for_its_words(
-    c: &Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     out: &str,
     space: &str,
     created: i64,
     resolved: i64,
 ) -> ChannelResult<bool> {
-    let src = crate::presence::answered_message(c, ws, out)?;
+    let src = crate::presence::answered_message(r, ws, out)?;
     let from = match &src {
         Some(id) => {
-            if crate::presence::merged_into(c, id)?.is_some() {
+            if crate::presence::merged_into(r, id)?.is_some() {
                 return Ok(false);
             }
-            crate::presence::said(c, ws, id)?.map_or(created, |(s, _, _)| s.at.min(created))
+            crate::presence::said(r, ws, id)?.map_or(created, |(s, _, _)| s.at.min(created))
         }
         None => created,
     };
     Ok(!crate::presence::you_spoke(
-        c,
+        r,
         ws,
         space,
         from - crate::presence::OWNER_LIVE_MS,
@@ -861,6 +862,7 @@ pub fn rejected_for_its_words(
 /// `before`.
 pub fn gather(
     c: &Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     conn: &str,
     space: &str,
@@ -872,7 +874,7 @@ pub fn gather(
     let ranked = read_pool(c, ws, conn, space, before, Order::Ranked { dm })?;
     let recent = read_pool(c, ws, conn, space, before, Order::Recent)?;
     let styles = styles(&recent);
-    let (rejected, edited) = examples(c, ws, conn, space, &names)?;
+    let (rejected, edited) = examples(c, r, ws, conn, space, &names)?;
     Ok(Voice {
         situation: Some(situation),
         style: style_for(&styles, situation).map(|(s, st)| (s, st.clone())),

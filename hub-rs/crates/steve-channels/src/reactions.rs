@@ -209,11 +209,16 @@ fn target(
 /// The voice of the message's space is your own account and the message is not yours: a reaction
 /// there would be you reacting to somebody else's message, which nobody asked for. Steve reacts as
 /// you only to your own messages (your `/bot`).
-fn unasked_as_you(c: &Connection, message_id: &str, t: &Target) -> ChannelResult<bool> {
+fn unasked_as_you(
+    c: &Connection,
+    r: &mut impl steve_store::Read,
+    message_id: &str,
+    t: &Target,
+) -> ChannelResult<bool> {
     let Some((conn, _)) = &t.via else {
         return Ok(false);
     };
-    if crate::arbiter::mode_of(c, &t.ws, conn)? != crate::spaces::Mode::Own {
+    if crate::arbiter::mode_of(r, &t.ws, conn)? != crate::spaces::Mode::Own {
         return Ok(false);
     }
     let (account, party): (Option<String>, Option<String>) = c.query_row(
@@ -221,7 +226,7 @@ fn unasked_as_you(c: &Connection, message_id: &str, t: &Target) -> ChannelResult
         [message_id],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    let (mine, _) = crate::bindings::connection_account(c, &t.ws, conn)?;
+    let (mine, _) = crate::bindings::connection_account(r, &t.ws, conn)?;
     let own = account.as_deref() == Some(mine.as_str())
         || crate::conversations::sender_is_owner(c, &t.ws, party.as_deref())?;
     Ok(!own)
@@ -293,7 +298,10 @@ impl Channels {
         let Some(t) = t.filter(|t| t.via.is_some()) else {
             return Ok(None);
         };
-        if self.store().reader(|c| unasked_as_you(c, message_id, &t))? {
+        if self.store().read(|r| {
+            self.store()
+                .reader(|c| unasked_as_you(c, r, message_id, &t))
+        })? {
             return Ok(None);
         }
         if row.is_some_and(|r| r.state != "cleared") {

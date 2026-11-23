@@ -495,3 +495,21 @@ pub fn expire_open_for_item(w: &mut crate::W<'_>, item_id: &str, result: &Value)
     }
     Ok(ids.len())
 }
+
+pub(in crate::contract) fn open_channel_asks(
+    r: &mut impl Read,
+    ws: &str,
+    messages: sea_query::SelectStatement,
+) -> Result<Vec<(String, String)>> {
+    r.all(
+        Query::select()
+            .columns(["id", "subject_id"])
+            .from("decisions")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("subject_type").eq("chan_message"))
+            .and_where(Expr::col("kind").eq("ask"))
+            .and_where(Expr::col("status").eq("open"))
+            .and_where(Expr::col("subject_id").in_subquery(messages)),
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+}

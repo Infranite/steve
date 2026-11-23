@@ -233,13 +233,19 @@ fn own_reader(store: &Store, origin: &str) -> Result<bool, String> {
     }
     let conn = m.meta["chan"]["connection"].as_str().unwrap_or_default();
     store
-        .reader(|c| -> steve_channels::ChannelResult<bool> {
-            match steve_channels::spaces::get(c, space_id)? {
-                Some(space) => {
-                    steve_channels::conversations::owner_only(c, &m.workspace_id, &space, conn)
+        .read(|r| {
+            store.reader(|c| -> steve_channels::ChannelResult<bool> {
+                match steve_channels::spaces::get(c, space_id)? {
+                    Some(space) => steve_channels::conversations::owner_only(
+                        c,
+                        r,
+                        &m.workspace_id,
+                        &space,
+                        conn,
+                    ),
+                    None => Ok(false),
                 }
-                None => Ok(false),
-            }
+            })
         })
         .map_err(|e| e.to_string())
 }

@@ -1,6 +1,6 @@
 //! Membership of a channel space.
 
-use sea_query::{Expr, ExprTrait, Func, JoinType, OnConflict, Order, Query};
+use sea_query::{Expr, ExprTrait, Func, JoinType, OnConflict, Order, Query, SelectStatement};
 
 use crate::{Read, Result, W};
 
@@ -122,4 +122,67 @@ pub fn remove(w: &mut W<'_>, space: &str, account: &str) -> Result<bool> {
             .and_where(Expr::col("space_id").eq(space))
             .and_where(Expr::col("account_id").eq(account)),
     )? == 1)
+}
+
+pub(in crate::contract) fn bot_accounts(space: &str) -> sea_query::SelectStatement {
+    Query::select()
+        .column("account_id")
+        .from("space_members")
+        .and_where(Expr::col("space_id").eq(space))
+        .and_where(Expr::col("role").eq("bot"))
+        .take()
+}
+
+fn member_accounts(space: &str) -> SelectStatement {
+    Query::select()
+        .from_as("space_members", "m")
+        .join_as(
+            JoinType::InnerJoin,
+            "accounts",
+            "a",
+            Expr::col(("a", "id")).equals(("m", "account_id")),
+        )
+        .and_where(Expr::col(("m", "space_id")).eq(space))
+        .take()
+}
+
+pub fn has_party(r: &mut impl Read, ws: &str, space: &str, party: &str) -> Result<bool> {
+    if !crate::parties::Parties::new(r).is_active(ws, party)? {
+        return Ok(false);
+    }
+    Ok(r.one(
+        member_accounts(space)
+            .column(("a", "id"))
+            .and_where(Expr::col(("m", "workspace_id")).eq(ws))
+            .and_where(Expr::col(("a", "party_id")).eq(party))
+            .limit(1),
+        |_| Ok(()),
+    )?
+    .is_some())
+}
+
+pub fn direct_chats(r: &mut impl Read, ws: &str, party: &str) -> Result<Vec<String>> {
+    r.all(
+        Query::select()
+            .distinct()
+            .column(("s", "id"))
+            .from_as("spaces", "s")
+            .join_as(
+                JoinType::InnerJoin,
+                "space_members",
+                "m",
+                Expr::col(("m", "space_id")).equals(("s", "id")),
+            )
+            .join_as(
+                JoinType::InnerJoin,
+                "accounts",
+                "a",
+                Expr::col(("a", "id")).equals(("m", "account_id")),
+            )
+            .and_where(Expr::col(("a", "party_id")).eq(party))
+            .and_where(Expr::col(("s", "workspace_id")).eq(ws))
+            .and_where(Expr::col(("s", "kind")).eq("dm"))
+            .order_by(("s", "id"), Order::Asc),
+        |row| row.get(0),
+    )
 }

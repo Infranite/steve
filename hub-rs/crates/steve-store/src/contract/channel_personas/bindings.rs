@@ -4,7 +4,19 @@ use sea_query::{Expr, ExprTrait, OnConflict, Order, Query};
 use serde::Serialize;
 
 use crate::contract::Q;
-use crate::{Result, W, connections};
+use crate::{Read, Result, W, connections};
+
+pub fn bound_id(r: &mut impl Read, ws: &str, account: &str, space: &str) -> Result<Option<String>> {
+    r.one(
+        Query::select()
+            .column("persona_id")
+            .from("persona_bindings")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("account_id").eq(account))
+            .and_where(Expr::col("space_id").eq(space)),
+        |row| row.get(0),
+    )
+}
 
 pub fn bind(
     w: &mut W<'_>,

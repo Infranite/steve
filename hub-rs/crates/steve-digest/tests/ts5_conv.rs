@@ -66,12 +66,14 @@ fn inbound_names_and_persona_or_none_drafts_use_the_owners_write_paths() {
                         serde_json::from_value(json!({"name":"Public persona","bot_id":"ts5-bot"}))
                             .unwrap();
                     Some(
-                        steve_channels::personas::create(
-                            tx,
-                            &steve_store::base::Viewer::bare(WS, "usr_dev"),
-                            &n,
-                            AT,
-                        )
+                        tx.write(|w| {
+                            steve_channels::personas::create(
+                                w,
+                                &steve_store::base::Viewer::bare(WS, "usr_dev"),
+                                &n,
+                                AT,
+                            )
+                        })
                         .map_err(|e| StoreError::Hook(e.to_string()))?
                         .id,
                     )

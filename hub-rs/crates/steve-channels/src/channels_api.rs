@@ -57,7 +57,7 @@ fn viewer(ch: &Channels, who: &Caller) -> ApiResult<Viewer> {
 
 async fn list(Extension(a): Cx, who: Caller) -> ApiResult<Json<Value>> {
     let v = viewer(&a.ch, &who)?;
-    let accounts = a.ch.store().reader(|c| accounts::list(&a.ch, c, &v))?;
+    let accounts = a.ch.store().read(|r| accounts::list(&a.ch, r, &v))?;
     Ok(Json(json!({
         "providers": accounts::providers(&a.ch),
         "accounts": accounts,
@@ -66,20 +66,20 @@ async fn list(Extension(a): Cx, who: Caller) -> ApiResult<Json<Value>> {
 
 fn account_json(ch: &Channels, v: &Viewer, id: &str, with_spaces: bool) -> ApiResult<Value> {
     let store = ch.store();
-    store.read(|_| store.reader(|c| -> ApiResult<Value> {
-        let acc = accounts::out(ch, c, v, id)?;
+    store.read(|r| -> ApiResult<Value> {
+        let acc = accounts::out(ch, r, v, id)?;
         let mut out = serde_json::to_value(acc)?;
         if with_spaces {
-                let list: Vec<Value> = spaces::list(c, v, Some(id), None)?
+                let list: Vec<Value> = spaces::list(r, v, Some(id), None)?
                 .iter()
                 .map(|s| -> ApiResult<Value> {
-                    let set = spaces::settings(c, &s.id)?;
+                    let set = spaces::settings(r, &s.id)?;
                     let full = spaces::out(store, s)?;
                     Ok(json!({
                         "id": s.id, "kind": s.kind, "name": s.name, "title": full.title, "self_chat": full.self_chat,
                         "attention": set.attention, "member_count": full.member_count,
                         "has_external": s.has_external, "status": s.status,
-                        "persona": crate::bindings::space_persona(c, s)?,
+                        "persona": full.persona,
                         "muted": set.muted, "configured": set.configured, "own_rules": set.rules.is_some(),
                         "flow_id": set.flow_id, "last_message": s.last_message,
                     }))
@@ -88,7 +88,7 @@ fn account_json(ch: &Channels, v: &Viewer, id: &str, with_spaces: bool) -> ApiRe
             out["spaces"] = Value::Array(list);
         }
         Ok(out)
-    }))
+    })
 }
 
 async fn detail(Extension(a): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
@@ -105,7 +105,7 @@ async fn patch(
     let v = viewer(&a.ch, &who)?;
     let now = a.ch.now();
     a.ch.store()
-        .transaction(|tx| accounts::patch(&a.ch, tx, &v, &id, &p, now))?;
+        .write(|tx| accounts::patch(&a.ch, tx, &v, &id, &p, now))?;
     Ok(Json(account_json(&a.ch, &v, &id, false)?))
 }
 
@@ -177,7 +177,7 @@ async fn create_form(
     let v = viewer(&a.ch, who)?;
     // checked before anything is created at the provider's side or in the vault
     if let Some(p) = &persona {
-        a.ch.store().reader(|c| crate::personas::own(c, &v.ws, p))?;
+        a.ch.store().read(|c| crate::personas::own(c, &v.ws, p))?;
     }
     let conn =
         a.ch.connections()
@@ -185,7 +185,7 @@ async fn create_form(
             .await?;
     let now = a.ch.now();
     a.ch.store()
-        .transaction(|tx| accounts::created(tx, &v, &conn.id, mode, persona.as_deref(), now))?;
+        .write(|tx| accounts::created(tx, &v, &conn.id, mode, persona.as_deref(), now))?;
     Ok(Json(account_json(&a.ch, &v, &conn.id, false)?))
 }
 

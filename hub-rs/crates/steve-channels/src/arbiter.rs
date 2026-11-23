@@ -49,122 +49,75 @@ pub fn looks_automated(text: &str) -> bool {
         || (t.contains('🤖') && t.contains("仅供参考"))
 }
 
-/// Your account in this workspace that speaks for you (a `mode=self` connection): `(connection,
-/// account)` pairs.
-fn self_connections(c: &Connection, ws: &str) -> ChannelResult<Vec<(String, String)>> {
-    let mut st = c.prepare_cached(
-        "SELECT cs.connection_id, c.account_id FROM channel_settings cs JOIN connections c ON c.id = cs.connection_id
-          WHERE cs.workspace_id = ? AND cs.mode = 'self' AND c.status NOT IN ('disconnected')
-          ORDER BY cs.connection_id",
-    )?;
-    let v = st
-        .query_map([ws], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<Vec<(String, String)>>>()?;
-    Ok(v)
-}
-
-/// The account's party.
-fn party_of(c: &Connection, account: &str) -> ChannelResult<Option<String>> {
-    Ok(c.query_row(
-        "SELECT party_id FROM accounts WHERE id = ?",
-        [account],
-        |r| r.get(0),
-    )
-    .optional()?
-    .flatten())
-}
-
-fn same_person(c: &Connection, a: &str, b: &str) -> ChannelResult<bool> {
-    if a == b {
+/// Is `account` yours (the account of one of your own connections, or the same person)?
+pub fn is_yours(r: &mut impl steve_store::Read, ws: &str, account: &str) -> ChannelResult<bool> {
+    use steve_store::accounts::owned_party;
+    let own = steve_store::channel_spaces::account_settings::personal_accounts(r, ws)?;
+    if own.iter().any(|a| a == account) {
         return Ok(true);
     }
-    let pa = party_of(c, a)?;
-    Ok(pa.is_some() && pa == party_of(c, b)?)
-}
-
-/// Is `account` yours (the account of one of your own connections, or the same person)?
-pub fn is_yours(c: &Connection, ws: &str, account: &str) -> ChannelResult<bool> {
-    for (_, a) in self_connections(c, ws)? {
-        if same_person(c, &a, account)? {
+    let Some(party) = owned_party(r, ws, account)? else {
+        return Ok(false);
+    };
+    for other in own {
+        if owned_party(r, ws, &other)?.as_deref() == Some(&party) {
             return Ok(true);
         }
     }
     Ok(false)
 }
 
-/// Is the sender you: a person whose party is a user's “我”, or the account of one of your own
-/// (`mode=self`) connections, or the same person?
+/// Is the sender the user or one of the accounts they use in this workspace?
 pub fn from_you(
-    c: &Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     sender_account: Option<&str>,
     sender_party: Option<&str>,
 ) -> ChannelResult<bool> {
-    if let Some(p) = sender_party
-        && c.query_row(
-            "SELECT user_id IS NOT NULL FROM parties WHERE id = ?",
-            [p],
-            |r| r.get::<_, bool>(0),
-        )
-        .optional()?
-        .unwrap_or(false)
+    if let Some(id) = sender_party
+        && steve_store::Contacts::new(r)
+            .party(id)?
+            .is_some_and(|p| p.is_me())
     {
         return Ok(true);
     }
     match sender_account {
-        Some(a) => is_yours(c, ws, a),
+        Some(account) => is_yours(r, ws, account),
         None => Ok(false),
     }
 }
 
-/// How many merges [`from_owner`] follows from a sender's contact (a chain is never this long).
+/// How many merges the sender's identity follows before looking at handles.
 const MERGE_HOPS: usize = 16;
 
-/// Is the sender one of `users` (the owner of the receiving connection, the workspace's owner)
-/// however the adapter named them: the sender's contact is a user's “我” or was merged into one,
-/// or one of the sender's handles (primary, aliases, their per-connection ids) is a handle of an
-/// account of that “我” (or of a contact merged into it), one of its aliases, or the user's email.
-/// The core's backstop for adapters that hand your own messages over under a handle Steve did not
-/// know as yours.
+/// Is the sender one of the connection or workspace owners, by party, merge,
+/// account handle, alias or email?
 pub fn from_owner(
-    c: &Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     users: &[String],
     sender_party: Option<&str>,
     sender: &crate::channel::Sender,
 ) -> ChannelResult<bool> {
-    let mut mes: Vec<(String, String)> = Vec::new();
-    for u in users {
-        if let Some(id) = c
-            .query_row(
-                "SELECT id FROM parties WHERE workspace_id = ? AND user_id = ?",
-                rusqlite::params![ws, u],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?
-        {
-            mes.push((id, u.clone()));
+    use steve_store::{Accounts, Contacts, UserRows};
+    let mut owners = Vec::new();
+    for user in users {
+        if let Some(id) = Contacts::new(r).user_party(ws, user)? {
+            owners.push((id, user));
         }
     }
-    if mes.is_empty() {
+    if owners.is_empty() {
         return Ok(false);
     }
-    // the sender's contact, following merges
-    let mut cur = sender_party.map(String::from);
+    let mut current = sender_party.map(str::to_owned);
     for _ in 0..MERGE_HOPS {
-        let Some(p) = cur else { break };
-        if mes.iter().any(|(m, _)| *m == p) {
+        let Some(party) = current else { break };
+        if owners.iter().any(|(id, _)| id == &party) {
             return Ok(true);
         }
-        cur = c
-            .query_row("SELECT merged_into FROM parties WHERE id = ?", [&p], |r| {
-                r.get::<_, Option<String>>(0)
-            })
-            .optional()?
-            .flatten();
+        current = Contacts::new(r).party(&party)?.and_then(|p| p.merged_into);
     }
-    // the sender's handles
-    let seen: Vec<String> = std::iter::once(&sender.handle)
+    let seen: std::collections::HashSet<_> = std::iter::once(&sender.handle)
         .chain(sender.aliases.iter())
         .flat_map(|h| std::iter::once(&h.handle).chain(h.extra.iter()))
         .map(|h| h.trim().to_lowercase())
@@ -173,41 +126,19 @@ pub fn from_owner(
     if seen.is_empty() {
         return Ok(false);
     }
-    for (me, user) in &mes {
-        let mut known: Vec<String> = Vec::new();
-        let mut st = c.prepare_cached(
-            "WITH RECURSIVE ids(id) AS (SELECT ?2 UNION SELECT p.id FROM parties p JOIN ids ON p.merged_into = ids.id)
-             SELECT h.handle FROM account_handles h JOIN accounts a ON a.id = h.account_id
-              WHERE h.workspace_id = ?1 AND a.party_id IN (SELECT id FROM ids)
-             UNION SELECT a.handle FROM accounts a WHERE a.workspace_id = ?1 AND a.party_id IN (SELECT id FROM ids)",
-        )?;
-        for h in st.query_map(rusqlite::params![ws, me], |r| r.get::<_, String>(0))? {
-            known.push(h?.trim().to_lowercase());
-        }
-        let aliases: Option<String> = c
-            .query_row("SELECT aliases FROM parties WHERE id = ?", [me], |r| {
-                r.get(0)
-            })
-            .optional()?;
-        known.extend(
-            aliases
-                .and_then(|a| serde_json::from_str::<Vec<String>>(&a).ok())
-                .unwrap_or_default()
-                .into_iter()
-                .map(|a| a.trim().to_lowercase()),
-        );
-        if let Some(email) = c
-            .query_row("SELECT email FROM users WHERE id = ?", [user], |r| {
-                r.get::<_, Option<String>>(0)
-            })
-            .optional()?
-            .flatten()
-        {
-            known.push(email.trim().to_lowercase());
-        }
-        if seen
-            .iter()
-            .any(|h| known.iter().any(|k| !k.is_empty() && k == h))
+    for (owner, user) in owners {
+        let parties = Contacts::new(r).merged_party_ids(&owner)?;
+        let handles = Accounts(r).party_handles(ws, &parties)?;
+        let aliases = Contacts::new(r)
+            .party(&owner)?
+            .map(|p| p.aliases)
+            .unwrap_or_default();
+        let email = UserRows(r).email(user)?;
+        if handles
+            .into_iter()
+            .chain(aliases)
+            .chain(email)
+            .any(|handle| seen.contains(&handle.trim().to_lowercase()))
         {
             return Ok(true);
         }
@@ -242,16 +173,17 @@ pub fn automated(text: &str, mentions: &[String], trigger: &crate::rules::Trigge
 /// bot authors and historical messages cannot create a personal-send authorization.
 pub fn command(
     c: &Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     space: &SpaceRow,
     conn: &str,
     msg: &str,
 ) -> ChannelResult<Option<Command>> {
-    let Some(cs) = spaces::channel_settings(c, ws, conn)? else {
+    let Some(cs) = spaces::channel_settings(r, ws, conn)? else {
         return Ok(None);
     };
     if cs.mode != Mode::Own
-        || spaces::settings(c, &space.id)?.attention == spaces::Attention::Blocked
+        || spaces::settings(r, &space.id)?.attention == spaces::Attention::Blocked
     {
         return Ok(None);
     }
@@ -272,7 +204,7 @@ pub fn command(
         return Ok(None);
     };
     let t = crate::rules::Trigger::from_value(&cs.trigger);
-    let m = crate::inbound::stored(c, msg)?;
+    let m = crate::inbound::stored(r, msg)?;
     if automated(&m.text, &m.mention_names, &t) || !t.allows(from_self, sender_party.as_deref()) {
         return Ok(None);
     }
@@ -320,8 +252,8 @@ pub fn continues(c: &Connection, space: &str, msg: &str, conn: &str) -> ChannelR
 }
 
 /// The mode of a connection (its channel settings; bot when it has none).
-pub fn mode_of(c: &Connection, ws: &str, conn: &str) -> ChannelResult<Mode> {
-    Ok(spaces::channel_settings(c, ws, conn)?
+pub fn mode_of(r: &mut impl steve_store::Read, ws: &str, conn: &str) -> ChannelResult<Mode> {
+    Ok(spaces::channel_settings(r, ws, conn)?
         .map(|s| s.mode)
         .unwrap_or(Mode::Bot))
 }

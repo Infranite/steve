@@ -280,3 +280,69 @@ pub fn set_state(w: &mut W<'_>, space: &str, state: State, now: i64) -> Result<b
     }
     Ok(w.exec(&update)? != 0)
 }
+
+/// The first description with a member count fills the information left absent on discovery.
+pub fn fill_member_count(
+    w: &mut W<'_>,
+    space: &str,
+    count: i64,
+    external: bool,
+    now: i64,
+) -> Result<()> {
+    let external = w
+        .db()
+        .dialect()
+        .greatest(Expr::col("has_external"), Expr::val(i64::from(external)));
+    w.exec(
+        Query::update()
+            .table("spaces")
+            .values([
+                ("member_count", Expr::val(count)),
+                ("has_external", external),
+                ("updated", Expr::val(now)),
+            ])
+            .and_where(Expr::col("id").eq(space))
+            .and_where(Expr::col("member_count").eq(0i64)),
+    )?;
+    Ok(())
+}
+
+pub fn name_direct_message(w: &mut W<'_>, ws: &str, space: &str, name: &str) -> Result<()> {
+    w.exec(
+        Query::update()
+            .table("spaces")
+            .value("name", name)
+            .and_where(Expr::col("id").eq(space))
+            .and_where(Expr::col("workspace_id").eq(ws)),
+    )?;
+    emit(w, ws, space);
+    Ok(())
+}
+
+pub fn emit(w: &mut W<'_>, ws: &str, space: &str) {
+    w.emit(steve_types::ChannelsEvent::Space {
+        id: space.into(),
+        ws: ws.into(),
+    });
+}
+
+pub fn routed_identity(r: &mut impl Read, ws: &str, space: &str, conn: &str) -> Result<bool> {
+    let has_identity = r
+        .one(
+            Query::select()
+                .column("space_id")
+                .from("space_identities")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("space_id").eq(space))
+                .and_where(Expr::col("connection_id").eq(conn))
+                .and_where(Expr::col("left_at").is_null()),
+            |_| Ok(()),
+        )?
+        .is_some();
+    if !has_identity {
+        return Ok(false);
+    }
+    Ok(connections::Connections::new(r)
+        .source(ws, conn)?
+        .is_some_and(|row| matches!(row.status.as_str(), "ok" | "error" | "paused" | "reauth")))
+}

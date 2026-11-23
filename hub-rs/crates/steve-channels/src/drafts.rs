@@ -18,7 +18,7 @@
 //! ```ignore
 //! steve_channels::drafts::register(&mut registry, clock.clone());
 //! // pickTarget: candidates come with `changes::candidates`; for a request naming a group,
-//! // `drafts::space_hints(c, &viewer, request)` orders the spaces by the prototype's `bestSpace`.
+//! // `drafts::space_hints(store, &viewer, request)` orders the spaces by the prototype's `bestSpace`.
 //! ```
 
 use std::sync::Arc;
@@ -316,9 +316,13 @@ fn bot_name(c: &Connection, id: &str) -> String {
 }
 
 /// A live persona of the workspace by exact name or id.
-fn find_persona(c: &Connection, ws: &str, said: &str) -> ApiResult<Option<PersonaRow>> {
+fn find_persona(
+    r: &mut impl steve_store::Read,
+    ws: &str,
+    said: &str,
+) -> ApiResult<Option<PersonaRow>> {
     let said = said.trim();
-    Ok(personas::list(c, ws)?
+    Ok(personas::list(r, ws)?
         .into_iter()
         .find(|p| p.id == said || p.name == said))
 }
@@ -571,7 +575,13 @@ enum Checked {
 
 /// The model's rules → names in `member` resolved → validated like `PATCH /spaces/:id`
 /// (`rules::parse` for the account's mode, then `rules::check_refs`).
-fn check_rules(c: &Connection, ws: &str, mode: Mode, raw: &Value) -> ApiResult<Checked> {
+fn check_rules(
+    c: &Connection,
+    r: &mut impl steve_store::Read,
+    ws: &str,
+    mode: Mode,
+    raw: &Value,
+) -> ApiResult<Checked> {
     let mut v = match raw {
         Value::String(s) => match serde_json::from_str::<Value>(s) {
             Ok(v) => v,
@@ -605,7 +615,7 @@ fn check_rules(c: &Connection, ws: &str, mode: Mode, raw: &Value) -> ApiResult<C
         Ok(p) => p,
         Err(e) => return Ok(Checked::Refused(reason(e)?)),
     };
-    if let Err(e) = rules::check_refs(c, ws, &parsed) {
+    if let Err(e) = rules::check_refs(r, ws, &parsed) {
         return Ok(Checked::Refused(reason(e)?));
     }
     Ok(Checked::Ok(
@@ -641,8 +651,8 @@ fn account_name(c: &Connection, ws: &str, conn: &str) -> ApiResult<String> {
 }
 
 /// The shared title, with the unnamed-DM fallback translated for the settings card.
-fn space_name_card(c: &Connection, s: &SpaceRow) -> ApiResult<String> {
-    let name = spaces::display_title(c, s)?;
+fn space_name_card(r: &mut impl steve_store::Read, s: &SpaceRow) -> ApiResult<String> {
+    let name = spaces::display_title(r, s)?;
     Ok(
         if s.kind == "dm" && s.name.trim().is_empty() && name == spaces::DM_FALLBACK {
             t!("channels.draft.dm")
@@ -674,12 +684,17 @@ struct SpaceNow {
 }
 
 impl SpaceNow {
-    fn load(c: &Connection, viewer: &Viewer, id: &str) -> ApiResult<Self> {
+    fn load(
+        c: &Connection,
+        r: &mut impl steve_store::Read,
+        viewer: &Viewer,
+        id: &str,
+    ) -> ApiResult<Self> {
         let row = spaces::own(c, viewer, id)?;
         spaces::writable(&row)?;
-        let set = spaces::settings(c, id)?;
-        let mode = bindings::connection_account(c, &viewer.ws, &row.connection_id)?.1;
-        let account_rules = spaces::channel_settings(c, &viewer.ws, &row.connection_id)?
+        let set = spaces::settings(r, id)?;
+        let mode = bindings::connection_account(r, &viewer.ws, &row.connection_id)?.1;
+        let account_rules = spaces::channel_settings(r, &viewer.ws, &row.connection_id)?
             .map(|x| x.rules)
             .unwrap_or_else(|| match mode {
                 Mode::Bot => spaces::default_bot_rules(),
@@ -687,8 +702,8 @@ impl SpaceNow {
             });
         Ok(Self {
             account: account_name(c, &viewer.ws, &row.connection_id)?,
-            binding: bindings::space_binding(c, &row)?,
-            persona: bindings::space_persona(c, &row)?,
+            binding: bindings::space_binding(r, &row)?,
+            persona: bindings::space_persona(r, &row)?,
             row,
             set,
             mode,
@@ -749,14 +764,14 @@ impl DraftTarget for SpaceTarget {
     fn prepare(
         &self,
         store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         id: Option<&str>,
     ) -> ApiResult<Prepared> {
         store.reader(|c| {
         let id = id.ok_or_else(|| ApiError::invalid("target.id"))?;
-        let s = SpaceNow::load(c, viewer, id)?;
-        let name = spaces::display_title(c, &s.row)?;
+        let s = SpaceNow::load(c, r, viewer, id)?;
+        let name = spaces::display_title(r, &s.row)?;
         let mut fields = Vec::new();
         if s.mode == Mode::Bot {
             fields.push(FieldSpec::new(
@@ -809,7 +824,7 @@ impl DraftTarget for SpaceTarget {
             revision: Some(s.set.revision),
             title: t!(
                 "channels.draft.title.space",
-                name = space_name_card(c, &s.row)?
+                name = space_name_card(r, &s.row)?
             ),
             href: format!("#/channels/space/{id}"),
             subject: format!("the chat space \"{name}\" of the account \"{}\"", s.account),
@@ -832,7 +847,7 @@ impl DraftTarget for SpaceTarget {
     ) -> ApiResult<Plan> {
         store.reader(|c| {
             let id = p.target_id.as_deref().unwrap_or("");
-            let s = SpaceNow::load(c, viewer, id)?;
+            let s = SpaceNow::load(c, r, viewer, id)?;
             let ws = &viewer.ws;
             let mut d = Lines::default();
             let l_persona = t!("channels.draft.label.persona");
@@ -870,7 +885,7 @@ impl DraftTarget for SpaceTarget {
                             );
                         }
                     }
-                    "persona" => match find_persona(c, ws, &said)? {
+                    "persona" => match find_persona(r, ws, &said)? {
                         Some(per) if s.binding.as_deref() != Some(per.id.as_str()) => d.set(
                             "persona_id",
                             json!(per.id),
@@ -911,7 +926,7 @@ impl DraftTarget for SpaceTarget {
                             }
                             continue;
                         }
-                        match check_rules(c, ws, s.mode, v)? {
+                        match check_rules(c, r, ws, s.mode, v)? {
                             Checked::Ok(rules, to) => {
                                 if s.set.rules.as_ref() != Some(&rules) {
                                     d.set(
@@ -1028,16 +1043,20 @@ impl DraftTarget for SpaceTarget {
     fn candidates(
         &self,
         store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        r: &mut steve_store::R<'_>,
         viewer: &Viewer,
     ) -> ApiResult<Vec<Candidate>> {
-        store.reader(|c| space_candidates(c, viewer))
+        store.reader(|c| space_candidates(c, r, viewer))
     }
 }
 
-fn space_candidates(c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Candidate>> {
+fn space_candidates(
+    c: &Connection,
+    r: &mut impl steve_store::Read,
+    viewer: &Viewer,
+) -> ApiResult<Vec<Candidate>> {
     let mut out = Vec::new();
-    for s in spaces::list(c, viewer, None, None)? {
+    for s in spaces::list(r, viewer, None, None)? {
         if s.status != "active" {
             continue;
         }
@@ -1045,7 +1064,7 @@ fn space_candidates(c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Candidate>
             code: format!("space:{}", s.id),
             label: format!(
                 "{}（{}）",
-                spaces::display_title(c, &s)?,
+                spaces::display_title(r, &s)?,
                 account_name(c, &viewer.ws, &s.connection_id)?
             ),
         });
@@ -1067,31 +1086,39 @@ fn tags_of(defaults: &Value) -> Vec<String> {
 /// The prototype's `bestSpace` as an ordering hint for `pickTarget`: spaces whose name (without a
 /// trailing “群”) shares a piece of at least 2 characters with the request, longest piece first.
 /// The model still picks; `prepare` checks the pick.
-pub fn space_hints(c: &Connection, viewer: &Viewer, request: &str) -> ApiResult<Vec<Candidate>> {
-    let score = |name: &str| -> usize {
-        let core: Vec<char> = name.strip_suffix('群').unwrap_or(name).chars().collect();
-        let mut best = 0;
-        for i in 0..core.len() {
-            for j in (i + 2)..=core.len() {
-                let piece: String = core[i..j].iter().collect();
-                if request.contains(&piece) {
-                    best = best.max(j - i);
+pub fn space_hints(
+    store: &steve_store::Store,
+    viewer: &Viewer,
+    request: &str,
+) -> ApiResult<Vec<Candidate>> {
+    store.read(|r| {
+        store.reader(|c| {
+            let score = |name: &str| -> usize {
+                let core: Vec<char> = name.strip_suffix('群').unwrap_or(name).chars().collect();
+                let mut best = 0;
+                for i in 0..core.len() {
+                    for j in (i + 2)..=core.len() {
+                        let piece: String = core[i..j].iter().collect();
+                        if request.contains(&piece) {
+                            best = best.max(j - i);
+                        }
+                    }
                 }
-            }
-        }
-        best
-    };
-    let mut scored: Vec<(usize, Candidate)> = space_candidates(c, viewer)?
-        .into_iter()
-        .filter_map(|cand| {
-            let id = cand.code.strip_prefix("space:")?;
-            let name = spaces::get(c, id).ok()??.name;
-            let n = score(&name);
-            (n >= 2).then_some((n, cand))
+                best
+            };
+            let mut scored: Vec<(usize, Candidate)> = space_candidates(c, r, viewer)?
+                .into_iter()
+                .filter_map(|cand| {
+                    let id = cand.code.strip_prefix("space:")?;
+                    let name = spaces::get(c, id).ok()??.name;
+                    let n = score(&name);
+                    (n >= 2).then_some((n, cand))
+                })
+                .collect();
+            scored.sort_by_key(|s| std::cmp::Reverse(s.0));
+            Ok(scored.into_iter().map(|(_, c)| c).collect())
         })
-        .collect();
-    scored.sort_by_key(|s| std::cmp::Reverse(s.0));
-    Ok(scored.into_iter().map(|(_, c)| c).collect())
+    })
 }
 
 fn parse_space_patch(v: &Value) -> ApiResult<SpacePatch> {
@@ -1116,11 +1143,11 @@ impl ChangeOp for SpaceOp {
         let v = viewer(tx, cx)?;
         let s = spaces::own(tx, &v, id)?;
         spaces::writable(&s)?;
-        let set = spaces::settings(tx, id)?;
+        let set = spaces::settings(w, id)?;
         let mut before = Map::new();
         for key in op["patch"].as_object().into_iter().flat_map(|m| m.keys()) {
             let old = match key.as_str() {
-                "persona_id" => json!(bindings::space_binding(tx, &s)?),
+                "persona_id" => json!(bindings::space_binding(w, &s)?),
                 "duty" => json!(set.duty),
                 "rules" => json!(set.rules),
                 "muted" => json!(set.muted),
@@ -1189,13 +1216,13 @@ impl DraftTarget for PersonaTarget {
     fn prepare(
         &self,
         store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         id: Option<&str>,
     ) -> ApiResult<Prepared> {
         store.reader(|c| {
             let id = id.ok_or_else(|| ApiError::invalid("target.id"))?;
-            let p = personas::own(c, &viewer.ws, id)?;
+            let p = personas::own(r, &viewer.ws, id)?;
             let mut fields = vec![
                 FieldSpec::new("name", "名字（1–20 字）", "text", json!(p.name)),
                 FieldSpec::new(
@@ -1249,13 +1276,13 @@ impl DraftTarget for PersonaTarget {
     fn plan(
         &self,
         store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         prep: &Prepared,
         raw: Vec<Value>,
     ) -> ApiResult<Plan> {
         store.reader(|c| {
-            let p = personas::own(c, &viewer.ws, prep.target_id.as_deref().unwrap_or(""))?;
+            let p = personas::own(r, &viewer.ws, prep.target_id.as_deref().unwrap_or(""))?;
             let mut d = Lines::default();
             let mut reveal = Map::new();
             for op in raw {
@@ -1390,19 +1417,17 @@ impl DraftTarget for PersonaTarget {
 
     fn candidates(
         &self,
-        store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        _store: &steve_store::Store,
+        r: &mut steve_store::R<'_>,
         viewer: &Viewer,
     ) -> ApiResult<Vec<Candidate>> {
-        store.reader(|c| {
-            Ok(personas::list(c, &viewer.ws)?
-                .into_iter()
-                .map(|p| Candidate {
-                    code: format!("persona:{}", p.id),
-                    label: format!("对外身份 {}", p.name),
-                })
-                .collect())
-        })
+        Ok(personas::list(r, &viewer.ws)?
+            .into_iter()
+            .map(|p| Candidate {
+                code: format!("persona:{}", p.id),
+                label: format!("对外身份 {}", p.name),
+            })
+            .collect())
     }
 }
 
@@ -1415,16 +1440,15 @@ struct PersonaOp(Arc<dyn Clock>);
 
 impl ChangeOp for PersonaOp {
     fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
-        let c = &w.legacy();
         parse_persona_patch(&op["patch"])?;
-        personas::own(c, cx.ws, op["persona_id"].as_str().unwrap_or(""))?;
+        personas::own(w, cx.ws, op["persona_id"].as_str().unwrap_or(""))?;
         Ok(())
     }
 
     fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
         let tx = &w.legacy();
         let id = op["persona_id"].as_str().unwrap_or("");
-        let p = personas::own(tx, cx.ws, id)?;
+        let p = personas::own(w, cx.ws, id)?;
         let mut before = Map::new();
         for key in op["patch"].as_object().into_iter().flat_map(|m| m.keys()) {
             let old = match key.as_str() {
@@ -1439,7 +1463,7 @@ impl ChangeOp for PersonaOp {
             before.insert(key.clone(), old);
         }
         personas::patch(
-            tx,
+            w,
             &viewer(tx, cx)?,
             id,
             &parse_persona_patch(&op["patch"])?,
@@ -1457,7 +1481,7 @@ impl ChangeOp for PersonaOp {
     ) -> ApiResult<()> {
         let tx = &w.legacy();
         personas::patch(
-            tx,
+            w,
             &viewer(tx, cx)?,
             op["persona_id"].as_str().unwrap_or(""),
             &parse_persona_patch(before)?,
@@ -1512,7 +1536,12 @@ fn account_binding(c: &Connection, ws: &str, account: &str) -> ApiResult<Option<
 }
 
 impl ChannelNow {
-    fn load(c: &Connection, viewer: &Viewer, conn: &str) -> ApiResult<Self> {
+    fn load(
+        c: &Connection,
+        r: &mut impl steve_store::Read,
+        viewer: &Viewer,
+        conn: &str,
+    ) -> ApiResult<Self> {
         let ok: bool = c.query_row(
             &format!("SELECT EXISTS ({CHANNEL_SQL} AND c.id = ?3)"),
             params![viewer.ws, viewer.user, conn],
@@ -1521,8 +1550,8 @@ impl ChannelNow {
         if !ok {
             return Err(ApiError::not_found("连接"));
         }
-        let (account, mode) = bindings::connection_account(c, &viewer.ws, conn)?;
-        let set = spaces::channel_settings(c, &viewer.ws, conn)?;
+        let (account, mode) = bindings::connection_account(r, &viewer.ws, conn)?;
+        let set = spaces::channel_settings(r, &viewer.ws, conn)?;
         let (duty, rules, trigger, revision) = match set {
             Some(s) => (s.duty, s.rules, full_trigger(&s.trigger), s.revision),
             None => (
@@ -1544,7 +1573,7 @@ impl ChannelNow {
             trigger,
             revision,
             binding: account_binding(c, &viewer.ws, &account)?,
-            persona: bindings::account_persona(c, &viewer.ws, conn)?,
+            persona: bindings::account_persona(r, &viewer.ws, conn)?,
         })
     }
 
@@ -1560,8 +1589,12 @@ impl ChannelNow {
     }
 
     /// The account's spaces `(id, name)`, for `trigger.where`.
-    fn spaces(&self, c: &Connection, viewer: &Viewer) -> ApiResult<Vec<(String, String)>> {
-        Ok(spaces::list(c, viewer, Some(&self.conn), None)?
+    fn spaces(
+        &self,
+        r: &mut impl steve_store::Read,
+        viewer: &Viewer,
+    ) -> ApiResult<Vec<(String, String)>> {
+        Ok(spaces::list(r, viewer, Some(&self.conn), None)?
             .into_iter()
             .map(|s| (s.id, s.name))
             .collect())
@@ -1655,13 +1688,13 @@ impl DraftTarget for ChannelTarget {
     fn prepare(
         &self,
         store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         id: Option<&str>,
     ) -> ApiResult<Prepared> {
         store.reader(|c| {
             let id = id.ok_or_else(|| ApiError::invalid("target.id"))?;
-            let a = ChannelNow::load(c, viewer, id)?;
+            let a = ChannelNow::load(c, r, viewer, id)?;
             let mut fields = Vec::new();
             if a.mode == Mode::Bot {
                 fields.push(FieldSpec::new(
@@ -1685,7 +1718,7 @@ impl DraftTarget for ChannelTarget {
             ));
             if a.mode == Mode::Own {
                 let t = rules::Trigger::from_value(&a.trigger);
-                let places = a.spaces(c, viewer)?;
+                let places = a.spaces(r, viewer)?;
                 fields.extend([
                 FieldSpec::new(
                     "trigger.on",
@@ -1742,16 +1775,16 @@ impl DraftTarget for ChannelTarget {
     fn plan(
         &self,
         store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         p: &Prepared,
         raw: Vec<Value>,
     ) -> ApiResult<Plan> {
         store.reader(|c| {
-            let a = ChannelNow::load(c, viewer, p.target_id.as_deref().unwrap_or(""))?;
+            let a = ChannelNow::load(c, r, viewer, p.target_id.as_deref().unwrap_or(""))?;
             let ws = &viewer.ws;
             let places = if a.mode == Mode::Own {
-                a.spaces(c, viewer)?
+                a.spaces(r, viewer)?
             } else {
                 Vec::new()
             };
@@ -1878,7 +1911,7 @@ impl DraftTarget for ChannelTarget {
                     }
                     "persona" => {
                         let label = t!("channels.draft.label.default_persona");
-                        match find_persona(c, ws, &said)? {
+                        match find_persona(r, ws, &said)? {
                             Some(per) if a.binding.as_deref() != Some(per.id.as_str()) => d.set(
                                 "persona_id",
                                 json!(per.id),
@@ -1890,7 +1923,7 @@ impl DraftTarget for ChannelTarget {
                     }
                     "rules" => {
                         let label = t!("channels.draft.label.default_rules");
-                        match check_rules(c, ws, a.mode, v)? {
+                        match check_rules(c, r, ws, a.mode, v)? {
                             Checked::Ok(rules, to) => {
                                 if rules != a.rules {
                                     let from = rules_text(c, &a.rules, a.mode, true);
@@ -1938,22 +1971,15 @@ impl DraftTarget for ChannelTarget {
 
     fn revision(
         &self,
-        store: &steve_store::Store,
-        _r: &mut steve_store::W<'_>,
+        _store: &steve_store::Store,
+        r: &mut steve_store::W<'_>,
         ws: &str,
         id: &str,
     ) -> ApiResult<Option<i64>> {
-        store.reader(|c| {
-            if let Some(s) = spaces::channel_settings(c, ws, id)? {
-                return Ok(Some(s.revision));
-            }
-            let exists: bool = c.query_row(
-                "SELECT EXISTS (SELECT 1 FROM connections WHERE id = ? AND workspace_id = ?)",
-                params![id, ws],
-                |r| r.get(0),
-            )?;
-            Ok(exists.then_some(1))
-        })
+        if let Some(s) = spaces::channel_settings(r, ws, id)? {
+            return Ok(Some(s.revision));
+        }
+        Ok(steve_store::Connections(r).contains(ws, id)?.then_some(1))
     }
 
     fn candidates(
@@ -1990,6 +2016,7 @@ impl ChannelOp {
     fn write(
         &self,
         tx: &Tx,
+        w: &mut steve_store::W<'_>,
         cx: &OpCx,
         conn: &str,
         fields: &Map<String, Value>,
@@ -2000,8 +2027,8 @@ impl ChannelOp {
         }
         let ws = cx.ws;
         let now = self.0.now();
-        let (account, mode) = bindings::connection_account(tx, ws, conn)?;
-        let set = spaces::ensure_channel_settings(tx, ws, conn, mode, now)?;
+        let (account, mode) = bindings::connection_account(w, ws, conn)?;
+        let set = spaces::ensure_channel_settings(w, ws, conn, mode, now)?;
         let mut before = Map::new();
         let mut after = Map::new();
         let (mut rules, mut duty, mut trigger) =
@@ -2024,7 +2051,7 @@ impl ChannelOp {
                     before.insert(k.clone(), json!(account_binding(tx, ws, &account)?));
                     match v.as_str() {
                         Some(p) => {
-                            bindings::set_account_default(tx, &viewer(tx, cx)?, conn, p, now)?
+                            bindings::set_account_default(w, &viewer(tx, cx)?, conn, p, now)?
                         }
                         None => {
                             tx.write(|w| {
@@ -2079,7 +2106,7 @@ impl ChangeOp for ChannelOp {
     fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
         let c = &w.legacy();
         let conn = op["connection_id"].as_str().unwrap_or("");
-        let a = ChannelNow::load(c, &viewer(c, cx)?, conn)?;
+        let a = ChannelNow::load(c, w, &viewer(c, cx)?, conn)?;
         let p = &op["patch"];
         if !p.is_object() {
             return Err(ApiError::invalid("patch"));
@@ -2100,7 +2127,7 @@ impl ChangeOp for ChannelOp {
             if a.mode == Mode::Own {
                 return Err(ApiError::rule(t!("channels.error.self_no_persona")));
             }
-            personas::own(c, cx.ws, per.as_str().unwrap_or(""))?;
+            personas::own(w, cx.ws, per.as_str().unwrap_or(""))?;
         }
         Ok(())
     }
@@ -2109,7 +2136,7 @@ impl ChangeOp for ChannelOp {
         let tx = &w.legacy();
         let conn = op["connection_id"].as_str().unwrap_or("");
         let v = viewer(tx, cx)?;
-        let a = ChannelNow::load(tx, &v, conn)?;
+        let a = ChannelNow::load(tx, w, &v, conn)?;
         let mut fields = op["patch"].as_object().cloned().unwrap_or_default();
         let mut before = Map::new();
         for k in fields.keys() {
@@ -2123,9 +2150,9 @@ impl ChangeOp for ChannelOp {
             before.insert(k.clone(), old);
         }
         if let Some(r) = fields.remove("rules") {
-            spaces::set_account_rules(tx, &v, conn, &r, self.0.now())?;
+            spaces::set_account_rules(w, &v, conn, &r, self.0.now())?;
         }
-        self.write(tx, cx, conn, &fields, false)?;
+        self.write(tx, w, cx, conn, &fields, false)?;
         Ok(Value::Object(before))
     }
 
@@ -2140,6 +2167,7 @@ impl ChangeOp for ChannelOp {
         let fields = before.as_object().cloned().unwrap_or_default();
         self.write(
             tx,
+            w,
             cx,
             op["connection_id"].as_str().unwrap_or(""),
             &fields,

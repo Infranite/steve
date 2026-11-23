@@ -663,12 +663,13 @@ fn gather_from_snapshot(
 ) -> ChannelResult<Layers> {
     let ws = &plan.ws;
     let space = spaces::get(c, &plan.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
-    let set = spaces::settings(c, &space.id)?;
+    let set = spaces::settings(r, &space.id)?;
     let owner = match plan.mode {
         Mode::Own => own_name(c, r, ws, &plan.connection_id, &plan.space_id)?,
         Mode::Bot => personas::owner_name_in(r, ws, None, Some(&plan.space_id))?,
     };
-    let internal_name = if crate::conversations::owner_only(c, ws, &space, &plan.connection_id)? {
+    let internal_name = if crate::conversations::owner_only(c, r, ws, &space, &plan.connection_id)?
+    {
         Some(personas::owner_internal_name(
             c,
             r,
@@ -688,7 +689,7 @@ fn gather_from_snapshot(
     } = gather_identity(c, r, plan, opts, &space, &set, &owner)?;
 
     // 4–5
-    let account_duty = spaces::channel_settings(c, ws, &plan.connection_id)?
+    let account_duty = spaces::channel_settings(r, ws, &plan.connection_id)?
         .map(|s| s.duty)
         .unwrap_or_default();
 
@@ -716,6 +717,7 @@ fn gather_from_snapshot(
     let voice = match plan.mode {
         Mode::Own => Some(crate::voice::gather(
             c,
+            r,
             ws,
             &plan.connection_id,
             &space.id,
@@ -804,11 +806,11 @@ fn gather_identity(
         Mode::Bot => {
             let p = match &opts.persona_id {
                 Some(id) => Some(
-                    personas::get(c, id)?
+                    personas::get(r, id)?
                         .filter(|p| p.workspace_id == *ws && !p.deleted)
                         .ok_or_else(|| ApiError::not_found("对外身份"))?,
                 ),
-                None => bindings::effective(c, &space)?.map(|e| e.persona),
+                None => bindings::effective(r, space)?.map(|e| e.persona),
             };
             match p {
                 Some(p) => {

@@ -73,6 +73,7 @@ pub use contract::message_sources::{
     Attachment, ChannelMessage, ChannelSources, Connections, MailMessage, MailSources,
     MessageSelection,
 };
+pub use contract::notifications as notification_repo;
 pub use contract::operations::{self as operation_repo, ItemOperation};
 pub use contract::read_models::{
     AttentionReads, FeedReads, ItemEventFields, ItemHead, ItemReads, NotificationPolicies,

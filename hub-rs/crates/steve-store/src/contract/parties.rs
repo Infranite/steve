@@ -8,6 +8,12 @@ fn parties<const N: usize>(cols: [&'static str; N]) -> SelectStatement {
     Query::select().columns(cols).from("parties").take()
 }
 
+pub(crate) fn sender_name(party: Expr) -> SelectStatement {
+    parties(["name"])
+        .and_where(Expr::col("id").eq(party))
+        .take()
+}
+
 pub fn names(r: &mut impl Read, ids: &[&str]) -> Result<Vec<(String, String)>> {
     if ids.is_empty() {
         return Ok(vec![]);

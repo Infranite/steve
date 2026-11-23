@@ -5,7 +5,11 @@ use sea_query::{Expr, ExprTrait, Func, JoinType, Order, Query, SelectStatement};
 use crate::{Read, Result, W};
 
 pub mod account_settings;
+pub mod activity;
+pub mod cleanup;
+pub mod direct;
 pub mod members;
+pub mod notification_routes;
 pub mod preferences;
 pub mod registration;
 pub mod rows;

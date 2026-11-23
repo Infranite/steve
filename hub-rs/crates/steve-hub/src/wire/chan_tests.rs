@@ -394,7 +394,7 @@ async fn research_fixture(
         &[("ulilei", "李雷")],
     );
     h.store.transaction(|tx| {
-        steve_channels::spaces::ensure_channel_settings(tx, WS, &h.me, steve_channels::spaces::Mode::Own, 1)?;
+        tx.write(|w| steve_channels::spaces::ensure_channel_settings(w, WS, &h.me, steve_channels::spaces::Mode::Own, 1))?;
         tx.execute("UPDATE channel_settings SET trigger=? WHERE connection_id=?", rusqlite::params![
             json!({"on":true,"words":["/ai"],"where":["*"],"who":["me"],"reply":"thread","mark":true}).to_string(), h.me
         ])?;

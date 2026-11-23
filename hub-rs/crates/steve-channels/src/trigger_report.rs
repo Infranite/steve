@@ -92,9 +92,10 @@ pub async fn sweep(ch: &Channels, outbox: &Outbox) -> ChannelResult<usize> {
             Ok(say)
         })?;
         let Some(text) = say else { continue };
-        let plan = ch
-            .store()
-            .reader(|c| crate::command_skill::trigger_plan(c, &o.ws, &o.message))?;
+        let plan = ch.store().read(|r| {
+            ch.store()
+                .reader(|c| crate::command_skill::trigger_plan(c, r, &o.ws, &o.message))
+        })?;
         let Some(plan) = plan else { continue };
         let req = OutRequest {
             target: crate::command_skill::target(ch, &plan)?,

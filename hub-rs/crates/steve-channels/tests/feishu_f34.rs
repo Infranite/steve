@@ -769,9 +769,7 @@ async fn authenticated_provider_bytes_reach_the_channel_composer() {
         .push(json!({"type":"file","key":"file_fixture","name":"log.txt","source":"message"}));
     let written = h.ch.on_inbound(WS, &h.con, incoming).await.unwrap();
     let plan =
-        h.ch.store()
-            .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &written.message_id))
-            .unwrap();
+        steve_channels::flow_actions::plan_of(h.ch.store(), WS, &written.message_id).unwrap();
     let capture = Arc::new(ImageReplyCapture::default());
     let composer = steve_channels::compose::Composer::new()
         .media(Arc::new(steve_channels::media_agent::FeishuMediaSource))

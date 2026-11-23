@@ -55,7 +55,7 @@ fn set_flags(
     to: Flags,
     why: &Value,
 ) -> ApiResult<bool> {
-    let before = spaces::settings(tx, space)?;
+    let before = tx.write(|w| crate::spaces::settings(w, space))?;
     let was = flags_of(&before);
     if was == to {
         return Ok(false);
@@ -124,7 +124,7 @@ impl DecisionHandler for NewSpaceDecision {
             // the space went away meanwhile: nothing to do
             return Ok(json!({"choice": cx.choice, "gone": true}));
         };
-        let before = spaces::settings(tx, &s.id)?;
+        let before = tx.write(|w| crate::spaces::settings(w, &s.id))?;
         let was = flags_of(&before);
         let to = answered(cx.choice, was).ok_or_else(|| ApiError::invalid("choice"))?;
         set_flags(tx, cx.ws, cx.actor, &s.id, to, &json!({"decision": d.id}))?;
@@ -158,7 +158,7 @@ impl DecisionHandler for NewSpaceDecision {
         let Some(to) = answered(d.result["choice"].as_str().unwrap_or(""), was) else {
             return Ok(());
         };
-        let now = flags_of(&spaces::settings(tx, &s.id)?);
+        let now = flags_of(&tx.write(|w| crate::spaces::settings(w, &s.id))?);
         if (now.muted, now.attention) != (to.muted, to.attention) {
             // changed on the space page after the answer: keep what the user set there
             return Ok(());

@@ -159,6 +159,19 @@ impl<C: Read> Systems<'_, C> {
         )
     }
 
+    pub fn provider_label(&mut self, ws: &str, system: &str) -> Result<String> {
+        if let Some(platform) = system.strip_suffix("_app")
+            && let Some(row) = self.get(ws, platform)?.filter(|row| !row.name.is_empty())
+        {
+            return Ok(row.name);
+        }
+        Ok(self
+            .get(ws, system)?
+            .filter(|row| !row.name.is_empty())
+            .map(|row| row.name)
+            .unwrap_or_else(|| system.to_owned()))
+    }
+
     pub fn get(&mut self, ws: &str, id: &str) -> Result<Option<System>> {
         Ok(self
             .0

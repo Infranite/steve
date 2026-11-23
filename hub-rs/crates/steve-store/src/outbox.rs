@@ -88,6 +88,18 @@ pub fn append(
     Ok(event)
 }
 
+pub(crate) fn latest_sequence(r: &mut impl crate::Read) -> Result<i64> {
+    use sea_query::{Expr, Func, Query};
+    Ok(r.one(
+        Query::select()
+            .expr(Func::max(Expr::col("seq")))
+            .from("outbox_events"),
+        |row| row.get::<Option<i64>>(0),
+    )?
+    .flatten()
+    .unwrap_or_default())
+}
+
 fn append_on(
     db: &mut dyn crate::contract::Backend,
     ws: &str,

@@ -238,9 +238,7 @@ async fn conversation_channels(
     ch.modules()
         .blocking(move |_| {
             let viewer = c2.modules().viewer(&who)?;
-            let list = c2
-                .store()
-                .reader(|c| steve_channels::conv_record::channels(&c2, c, &viewer, c2.now()))?;
+            let list = steve_channels::conv_record::channels(&c2, c2.store(), &viewer, c2.now())?;
             Ok(Json(json!({ "channels": list })))
         })
         .await

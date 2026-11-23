@@ -6,11 +6,16 @@ use crate::{Read, Result};
 pub mod approval_context;
 pub mod connector_refs;
 pub mod delivery;
+pub mod duplicates;
 #[cfg(feature = "testkit")]
 pub mod fixtures;
+pub mod history;
 pub mod ingress;
 pub mod media;
 pub mod outbound;
+pub mod outputs;
+pub mod presence;
+pub mod projection;
 pub mod provider;
 pub mod reactions;
 pub mod retention;
@@ -29,6 +34,17 @@ pub struct MessageLink {
     pub id: String,
     pub space: String,
     pub external: Option<String>,
+}
+
+pub fn space_of(r: &mut impl Read, ws: &str, message: &str) -> Result<Option<String>> {
+    r.one(
+        Query::select()
+            .column("space_id")
+            .from("chan_messages")
+            .and_where(Expr::col("id").eq(message))
+            .and_where(Expr::col("workspace_id").eq(ws)),
+        |row| row.get(0),
+    )
 }
 
 pub fn external_id(r: &mut impl Read, id: &str) -> Result<Option<String>> {

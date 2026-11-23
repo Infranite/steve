@@ -10,7 +10,7 @@ use steve_modules::changes::{self, ChangeOp, DraftTarget, OpCx, Plan, Prepared};
 use steve_modules::{ApiError, ApiResult, Caller, Registry};
 use steve_store::base::{Change, Viewer};
 use steve_store::channel_message_repo::outbound;
-use steve_store::channel_spaces::{preferences, rows};
+use steve_store::channel_spaces::{account_settings, rows};
 use steve_store::{Accounts, ConnRow, Connections, Contacts, DecisionRows, Read};
 
 const KIND: &str = "channel_send_permission";
@@ -38,7 +38,7 @@ fn own(r: &mut impl Read, viewer: &Viewer, id: &str) -> ApiResult<ConnRow> {
     if owner.as_ref().is_some_and(|u| u != &viewer.user) {
         return Err(ApiError::not_found("连接"));
     }
-    let own_mode = preferences::channel_mode(r, &viewer.ws, id)?
+    let own_mode = account_settings::channel_mode(r, &viewer.ws, id)?
         .as_deref()
         .map_or(owner.is_some(), |mode| mode == spaces::Mode::Own.code());
     if !own_mode || row.status == "revoked" {

@@ -150,7 +150,7 @@ impl Replies {
         // of theirs opens, is approved by YOLO or is sent (crate::presence::take_turn)
         let turn = if plan.mode == Mode::Own && plan.trigger.is_none() {
             ch.store()
-                .transaction(|tx| crate::presence::take_turn(tx, &plan.ws, &plan.message_id))?
+                .write(|w| crate::presence::take_turn(w, &plan.ws, &plan.message_id))?
         } else {
             Vec::new()
         };
@@ -187,9 +187,9 @@ impl Replies {
             .filter(|id| *id != plan.message_id)
             .collect();
         if !earlier.is_empty() {
-            ch.store().transaction(|tx| {
+            ch.store().write(|w| {
                 crate::presence::supersede(
-                    tx,
+                    w,
                     &plan.ws,
                     &plan.space_id,
                     crate::presence::Answering::Messages(&earlier),
@@ -606,17 +606,17 @@ fn prepare_item_request(
         ch.store().reader(|c| -> ChannelResult<_> {
             let space = spaces::get(c, &plan.space_id)?
                 .ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
-            let set = spaces::settings(c, &space.id)?;
+            let set = spaces::settings(r, &space.id)?;
             let d = &set.item_defaults;
             let persona_bot = match plan.mode {
-                Mode::Bot => bindings::effective(c, &space)?.map(|e| e.persona.bot_id),
+                Mode::Bot => bindings::effective(r, &space)?.map(|e| e.persona.bot_id),
                 Mode::Own => None,
             };
             let bot = compose::pick_bot(c, &ws, &[d["bot_id"].as_str(), persona_bot.as_deref()])?;
             let context = messages::context_before(r, &space.id, &plan.message_id, ITEM_CONTEXT)?;
             let from_owner = sender_is_owner(c, &ws, plan.sender_party_id.as_deref())?;
             let goal = item_goal(&plan.text, &context, from_owner);
-            let space_name = spaces::display_title(c, &space)?;
+            let space_name = spaces::display_title(r, &space)?;
             let title = {
                 let flat = plan.text.split_whitespace().collect::<Vec<_>>().join(" ");
                 if flat.is_empty() {
@@ -638,7 +638,7 @@ fn prepare_item_request(
                 accept_auto: false,
                 run_id: String::new(),
             });
-            Ok((req, personas::owner_name_for_space(c, r, &ws, &space.id)?))
+            Ok((req, personas::owner_name_for_space(r, &ws, &space.id)?))
         })
     })
 }

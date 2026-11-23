@@ -17,11 +17,13 @@
 //! `source_id` or keeps its own cursor so it does not deliver a message twice. An edit's new text
 //! is not applied.
 
-use rusqlite::{Connection, params};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use steve_store::channel_message_repo::ingress::{Found, SYNTHETIC_PREFIX as FP};
+use steve_store::channel_message_repo::duplicates::Probe;
+use steve_store::channel_message_repo::ingress::SYNTHETIC_PREFIX as FP;
+use steve_store::channel_spaces::rows;
 use steve_store::connections::Connections;
+use steve_store::connections::lifecycle;
 use steve_store::{Accounts, Read, Systems};
 
 use crate::channel::HandleRef;
@@ -30,8 +32,6 @@ use crate::{ChannelResult, Channels};
 
 /// The version of the content key's formula (part of every key).
 pub const KEY_VERSION: &str = "v1";
-/// How far a provider's time of a send may be from the Hub's when the provider did not say it.
-pub const SEND_SLACK_MS: i64 = 30_000;
 /// The time precision of a side that declared none.
 const DEFAULT_PRECISION_MS: i64 = 1000;
 
@@ -120,7 +120,7 @@ pub fn out_key(
 /// sides that see it and of `adapter`'s.
 pub fn tolerance(
     ch: &Channels,
-    c: &Connection,
+    r: &mut impl Read,
     ws: &str,
     adapter: &str,
     space_ext: &str,
@@ -131,65 +131,19 @@ pub fn tolerance(
             .unwrap_or(DEFAULT_PRECISION_MS)
             .clamp(*PRECISION_MS.start(), *PRECISION_MS.end())
     };
-    let mut st = c.prepare_cached(
-        "SELECT DISTINCT cn.adapter FROM spaces s JOIN space_identities i ON i.space_id = s.id
-           JOIN connections cn ON cn.id = i.connection_id
-          WHERE s.workspace_id = ?1 AND s.external_id = ?2",
-    )?;
-    let others = st
-        .query_map(params![ws, space_ext], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let connections = rows::chat_connections(r, ws, space_ext)?;
+    let others = lifecycle::adapters(r, &connections)?;
     Ok(others
         .iter()
         .map(|a| precision(a))
         .fold(precision(adapter), i64::max))
 }
 
-/// What a copy is matched by.
-#[derive(Debug, Clone)]
-pub struct Probe<'a> {
-    pub ws: &'a str,
-    pub conn: &'a str,
-    /// The space the copy came into.
-    pub space_id: &'a str,
-    pub space_ext: &'a str,
-    /// The connection is your own (`mode=self`): it may match the copies of any other connection
-    /// of the chat, as messages seen elsewhere do ([`crate::messages::seen_elsewhere`]).
-    pub own: bool,
-    pub key: &'a str,
-    pub created: i64,
-    pub tol: i64,
-    /// The copy has a provider id: only a message without one can be its other copy.
-    pub has_id: bool,
-    pub party: Option<&'a str>,
-}
-
-/// The candidates' common conditions: the same chat, a received message or a sent one, a space the
-/// connection may match in (its own, or a copy that reached someone's own account,
-/// [`crate::spaces::reached_own_sql`]), one side without a provider id, not supplied by this
-/// connection.
-const CANDIDATE: &str = "FROM spaces s JOIN chan_messages m ON m.space_id = s.id
-       LEFT JOIN channel_settings cs ON cs.connection_id = s.connection_id
-      WHERE s.workspace_id = ?1 AND s.external_id = ?2 AND m.workspace_id = ?1
-        AND (m.direction = 'in' OR m.status = 'sent')
-        AND (s.id = ?3 OR ?4 OR (CASE WHEN m.seen_by = 0 THEN coalesce(cs.mode = 'self', 0) ELSE EXISTS (
-            SELECT 1 FROM space_identities oi WHERE oi.space_id = m.space_id AND oi.ordinal IS NOT NULL
-               AND oi.owner_user IS NOT NULL AND ((m.seen_by >> oi.ordinal) & 1) = 1) END))
-        AND (NOT ?5 OR m.external_id IS NULL OR m.external_id LIKE 'fp:%')
-        AND coalesce(m.fallback_from, '') <> ?6
-        AND NOT EXISTS (SELECT 1 FROM chan_message_seen x WHERE x.message_id = m.id AND x.connection_id = ?6)";
-
-/// The other copy of the message by content key: within the tolerance (wider for a send whose
-/// provider time is unknown), the nearest in time, then the oldest.
-pub fn by_content(c: &Connection, p: &Probe) -> ChannelResult<Option<Found>> {
-    by_keys(c, p, &[p.key.to_string()])
-}
-
 /// The keys the same message may have been stored under by a side that named its sender by
 /// another handle (one of another system, before the party had one in the side's): one for each
 /// handle of the sender's party, other than the probe's own key.
 pub fn other_keys(
-    c: &Connection,
+    r: &mut impl Read,
     p: &Probe,
     text: &str,
     attachments: &[Value],
@@ -197,18 +151,7 @@ pub fn other_keys(
     let Some(party) = p.party else {
         return Ok(Vec::new());
     };
-    let mut st = c.prepare_cached(
-        "SELECT a.system_id, a.handle FROM accounts a WHERE a.workspace_id = ?1 AND a.party_id = ?2
-         UNION
-         SELECT a.system_id, h.handle FROM account_handles h JOIN accounts a ON a.id = h.account_id
-          WHERE a.workspace_id = ?1 AND h.workspace_id = ?1 AND a.party_id = ?2
-         LIMIT 64",
-    )?;
-    let handles = st
-        .query_map(params![p.ws, party], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let handles = Accounts(r).matching_handles(p.ws, party, 64)?;
     let mut keys: Vec<String> = handles
         .iter()
         .map(|(s, h)| key_of(s, h.trim(), text, attachments))
@@ -217,125 +160,4 @@ pub fn other_keys(
     keys.sort();
     keys.dedup();
     Ok(keys)
-}
-
-/// [`by_content`] for any of `keys`.
-pub fn by_keys(c: &Connection, p: &Probe, keys: &[String]) -> ChannelResult<Option<Found>> {
-    if keys.is_empty() {
-        return Ok(None);
-    }
-    let keys = serde_json::to_string(keys).unwrap_or_else(|_| "[]".into());
-    let slack = p.tol + SEND_SLACK_MS;
-    // a message's time: the provider's when known, else the Hub's send time (a draft's row is made
-    // long before it goes out)
-    let at = "coalesce(m.ext_created, CASE WHEN m.direction = 'out' THEN coalesce(m.sent, m.created) ELSE m.created END)";
-    let mut st = c.prepare_cached(&format!(
-        "SELECT m.id, m.space_id, m.direction = 'out', {at},
-                m.direction = 'out' AND m.ext_created IS NULL, m.created, m.rowid
-           {CANDIDATE}
-            AND m.content_key IN (SELECT value FROM json_each(?7)) AND {at} BETWEEN ?8 - ?9 AND ?8 + ?9
-          ORDER BY m.created DESC, m.rowid DESC LIMIT 100"
-    ))?;
-    let rows = st
-        .query_map(
-            params![
-                p.ws,
-                p.space_ext,
-                p.space_id,
-                p.own,
-                p.has_id,
-                p.conn,
-                keys,
-                p.created,
-                slack
-            ],
-            |r| {
-                Ok((
-                    Found {
-                        id: r.get(0)?,
-                        space_id: r.get(1)?,
-                        out: r.get(2)?,
-                    },
-                    r.get::<_, i64>(3)?,
-                    r.get::<_, bool>(4)?,
-                    (r.get::<_, i64>(5)?, r.get::<_, i64>(6)?),
-                ))
-            },
-        )?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows
-        .into_iter()
-        .filter_map(|(f, t, loose, created)| {
-            let d = (t - p.created).abs();
-            (d <= if loose { slack } else { p.tol }).then_some((d, created, f))
-        })
-        // the oldest: by the time stored, then the order stored in
-        .min_by_key(|(d, created, _)| (*d, *created))
-        .map(|(_, _, f)| f))
-}
-
-/// When every side times its messages to the ms: the one other message of the same sender at
-/// exactly the same time (an edit changes the text, not the time). Several: none.
-pub fn by_exact_time(c: &Connection, p: &Probe) -> ChannelResult<Option<Found>> {
-    let Some(party) = p.party else {
-        return Ok(None);
-    };
-    if p.tol != 1 {
-        return Ok(None);
-    }
-    let mut st = c.prepare_cached(&format!(
-        "SELECT m.id, m.space_id, m.direction = 'out'
-           {CANDIDATE}
-            AND m.sender_party_id = ?7
-            AND coalesce(m.ext_created, CASE WHEN m.direction = 'in' THEN m.created END) = ?8
-          LIMIT 2"
-    ))?;
-    let mut rows = st
-        .query_map(
-            params![
-                p.ws,
-                p.space_ext,
-                p.space_id,
-                p.own,
-                p.has_id,
-                p.conn,
-                party,
-                p.created
-            ],
-            |r| {
-                Ok(Found {
-                    id: r.get(0)?,
-                    space_id: r.get(1)?,
-                    out: r.get(2)?,
-                })
-            },
-        )?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(if rows.len() == 1 { rows.pop() } else { None })
-}
-
-/// The Hub's own id for a message without a provider id in `space`:
-/// `fp:v1:{hash}:{created}:{n}`, `n` one past the highest in use with the same key and time (a
-/// message upgraded to a provider id no longer holds its Hub-made one, so counting them could give
-/// one still in use).
-pub fn new_id(c: &Connection, space: &str, key: &str, created: i64) -> ChannelResult<String> {
-    let base = format!("{FP}{key}:{created}:");
-    let mut n: i64 = c.query_row(
-        "SELECT coalesce(max(CAST(substr(external_id, length(?2) + 1) AS INTEGER)) + 1, 0)
-           FROM chan_messages WHERE space_id = ?1 AND substr(external_id, 1, length(?2)) = ?2",
-        params![space, base],
-        |r| r.get(0),
-    )?;
-    // never one in use, whatever the stored ones look like
-    let taken = |id: &str| -> rusqlite::Result<bool> {
-        c.query_row(
-            "SELECT EXISTS (SELECT 1 FROM chan_messages WHERE space_id = ? AND external_id = ?)",
-            params![space, id],
-            |r| r.get(0),
-        )
-    };
-    while taken(&format!("{base}{n}"))? {
-        n += 1;
-    }
-    Ok(format!("{base}{n}"))
 }

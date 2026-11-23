@@ -10,7 +10,7 @@
 //!   their feed; it is sent to their own DM only under a policy that sends now. The alarm clock already held it
 //!   through the quiet hours, and several that came due together are one notification;
 //! - a member's morning brief (`briefing.ready`): its alarm is a `brief` schedule's, and steve-digest has its
-//!   own intake that composes the day ([`own_delivery`], [`record`]); sent like an alarm's;
+//!   own intake that composes the day ([`brief_delivery`], [`record`]); sent like an alarm's;
 //! - a starred contact's message to you on your own account (`contact.starred`, [`queue_starred`], from
 //!   [`crate::starred`]). It is the urgent one: it goes out now under `digest` too, to the private chat you chose
 //!   for it (no route is looked up for you under `digest`: none chosen keeps it in the inbox, as `log` does;
@@ -22,13 +22,14 @@
 //! written again.
 
 use crate::{ChannelResult, Channels, Outbox};
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use steve_modules::outbound::{Content, DeliveryIntent, Identity};
 use steve_modules::{ApiError, Caller};
+use steve_store::base::Viewer;
+use steve_store::channel_spaces::notification_routes;
 use steve_store::outbox::{Applied, ConsumeError, Consumer, Event, Since};
-use steve_store::{Tx, uid};
+use steve_store::{Members, Read, Tx, W, audit_repo, notification_repo as repo};
 
 pub const PREFIX: &str = "notification:";
 const KEEP_MS: i64 = 30 * 86_400_000;
@@ -219,59 +220,38 @@ impl Policy {
     }
 }
 
-fn load(c: &Connection, who: &Caller) -> ChannelResult<Option<Policy>> {
-    type Row = (
-        bool,
-        String,
-        Option<String>,
-        Option<String>,
-        String,
-        Option<u16>,
-        Option<u16>,
-        bool,
-    );
-    let row:Option<Row>=c.query_row(
-        "SELECT enabled,mode,party_id,space_id,timezone,quiet_start,quiet_end,starred_in_quiet FROM notification_policies WHERE workspace_id=? AND user_id=?",
-        params![who.ws,who.me],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?)),
-    ).optional()?;
-    row.map(
-        |(
-            enabled,
-            mode,
-            party_id,
-            space_id,
-            timezone,
-            quiet_start,
-            quiet_end,
-            starred_in_quiet,
-        )| {
-            Ok(Policy {
-                enabled,
-                mode: serde_json::from_value(serde_json::Value::String(mode))?,
-                party_id,
-                space_id,
-                timezone,
-                quiet_start,
-                quiet_end,
-                starred_in_quiet,
-            })
-        },
-    )
-    .transpose()
+fn load(r: &mut impl Read, who: &Caller) -> ChannelResult<Option<Policy>> {
+    let Some(row) = repo::policy(r, &who.ws, &who.me)? else {
+        return Ok(None);
+    };
+    let minute = |value: Option<i64>| -> ChannelResult<Option<u16>> {
+        value
+            .map(|n| u16::try_from(n).map_err(|_| ApiError::invalid("quiet hours")))
+            .transpose()
+    };
+    Ok(Some(Policy {
+        enabled: row.enabled,
+        mode: serde_json::from_value(serde_json::Value::String(row.mode))?,
+        party_id: row.party,
+        space_id: row.space,
+        timezone: row.timezone,
+        quiet_start: minute(row.quiet_start)?,
+        quiet_end: minute(row.quiet_end)?,
+        starred_in_quiet: row.starred_in_quiet,
+    }))
 }
 
-fn require_person(c: &Connection, who: &Caller) -> ChannelResult<()> {
-    if who.me.starts_with("svc:") {
+fn require_person(r: &mut impl Read, who: &Caller) -> ChannelResult<()> {
+    if who.me.starts_with("svc:") || Members::new(r).role(&who.ws, &who.me)?.is_none() {
         return Err(ApiError::Unauthenticated);
     }
-    crate::pipeline::require_requester(c, who)
+    Ok(())
 }
 
-/// Stronger than contact ownership: this party must be the authenticated member themselves.
-fn self_party(c: &Connection, who: &Caller, party: &str) -> ChannelResult<()> {
-    require_person(c, who)?;
-    let own:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM parties WHERE id=? AND workspace_id=? AND user_id=? AND status='active')",params![party,who.ws,who.me],|r|r.get(0))?;
-    if !own {
+fn self_party(r: &mut impl Read, who: &Caller, party: &str) -> ChannelResult<()> {
+    require_person(r, who)?;
+    let own = steve_store::parties::Parties::new(r).active_user(&who.ws, &who.me)?;
+    if own.as_deref() != Some(party) {
         return Err(ApiError::Unauthenticated);
     }
     Ok(())
@@ -295,7 +275,6 @@ fn intent(p: &Policy, key: &str, body: &str, topic: Topic) -> DeliveryIntent {
 
 /// Validates E1's chosen DM, not an arbitrary reachable group or a service-owned party.
 fn self_route(
-    c: &Connection,
     r: &mut impl steve_store::Read,
     who: &Caller,
     i: &DeliveryIntent,
@@ -304,19 +283,16 @@ fn self_route(
         .party_id
         .as_deref()
         .ok_or_else(|| ApiError::invalid("notification needs your user-linked party"))?;
-    self_party(c, who, p)?;
-    let viewer = steve_store::base::Viewer::load(c, &who.ws, &who.me)?;
-    let t = crate::pipeline::route(c, r, &viewer, i)?;
-    self_dm(c, who, p, &t.space_id)
+    self_party(r, who, p)?;
+    let viewer = Viewer::bare(&who.ws, &who.me);
+    let t = crate::pipeline::route(r, &viewer, i)?;
+    self_dm(r, who, p, &t.space_id)
 }
 
-fn self_dm(c: &Connection, who: &Caller, p: &str, space: &str) -> ChannelResult<()> {
-    self_party(c, who, p)?;
-    let dm:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM spaces s WHERE s.id=? AND s.workspace_id=? AND s.kind='dm' AND NOT EXISTS(
-        SELECT 1 FROM space_members sm JOIN accounts a ON a.id=sm.account_id
-        WHERE sm.space_id=s.id AND a.party_id<>? AND a.id<>(SELECT account_id FROM connections WHERE id=s.connection_id)))",
-        params![space,who.ws,p],|r|r.get(0))?;
-    if !dm {
+fn self_dm(r: &mut impl Read, who: &Caller, p: &str, space: &str) -> ChannelResult<()> {
+    self_party(r, who, p)?;
+
+    if !notification_routes::is_self_dm(r, &who.ws, p, space)? {
         return Err(ApiError::invalid(
             "notification route must be a DM with yourself and the bot only",
         ));
@@ -324,132 +300,104 @@ fn self_dm(c: &Connection, who: &Caller, p: &str, space: &str) -> ChannelResult<
     Ok(())
 }
 
-/// A selectable explicit bot DM, not a contact/owner guess or a promise of later delivery.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct Target {
-    pub party_id: String,
-    pub space_id: String,
-    pub party_name: String,
-    pub space_name: String,
-    /// Public channel system identifier, never account handles or connection credentials.
-    pub channel: String,
-}
+pub use notification_routes::Target;
 
 /// Read only the caller's linked parties and their recorded DM membership. In particular, do not
 /// infer a counterpart from message history, cached member_count, ownership or a sole member.
 pub fn targets(ch: &Channels, who: &Caller) -> ChannelResult<Vec<Target>> {
-    ch.store().read::<_, steve_store::StoreError>(|r| {
-        Ok(ch.store().reader(|c| {
-            require_person(c, who)?;
-            let viewer = steve_store::base::Viewer::load(c, &who.ws, &who.me)?;
-            let mut st = c.prepare_cached(
-                "SELECT DISTINCT p.id,s.id,p.name,s.name,s.system_id
-             FROM parties p JOIN accounts a ON a.party_id=p.id AND a.workspace_id=p.workspace_id
-             JOIN space_members m ON m.account_id=a.id AND m.workspace_id=p.workspace_id
-             JOIN spaces s ON s.id=m.space_id AND s.workspace_id=p.workspace_id
-             WHERE p.workspace_id=? AND p.user_id=? AND p.status='active'
-               AND coalesce(p.contact_kind,'')<>'bot' AND p.type<>'bot'
-               AND a.status='active' AND a.kind NOT IN ('bot','app_bot') AND s.kind='dm'
-             ORDER BY p.id,s.id",
-            )?;
-            let candidates = st
-                .query_map(params![who.ws, who.me], |r| {
-                    Ok(Target {
-                        party_id: r.get(0)?,
-                        space_id: r.get(1)?,
-                        party_name: r.get(2)?,
-                        space_name: r.get(3)?,
-                        channel: r.get(4)?,
-                    })
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let mut targets = Vec::new();
-            for target in candidates {
-                let p = Policy {
-                    party_id: Some(target.party_id.clone()),
-                    space_id: Some(target.space_id.clone()),
-                    ..Policy::default()
-                };
-                // Pin the explicit bot route through E1's live visibility/account/identity checks.
-                // Internal failures must not masquerade as an empty picker.
-                let route = self_party(c, who, &target.party_id)
-                    .and_then(|_| {
-                        crate::pipeline::route(
-                            c,
-                            r,
-                            &viewer,
-                            &intent(&p, "validation", "validation", Topic::ItemDone),
-                        )
-                    })
-                    .and_then(|route| {
-                        self_dm(c, who, &target.party_id, &route.space_id)?;
-                        Ok(route)
-                    });
-                let route = match route {
-                    Ok(route) => route,
-                    Err(e @ ApiError::Internal(_)) => return Err(e),
-                    Err(_) => continue,
-                };
-                // E1 selects the effective voice, which need not be spaces.connection_id. A bot-mode
-                // override cannot turn someone's self account (or a disabled account) into a bot.
-                // The sender may be implicit in a provider's roster; every recorded member must still
-                // resolve to an active, same-workspace self account or that exact sending bot account.
-                let valid: bool = c.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM connections cn
-                 JOIN accounts bot ON bot.id=cn.account_id AND bot.workspace_id=cn.workspace_id
-                 JOIN parties bp ON bp.id=bot.party_id AND bp.workspace_id=cn.workspace_id
-                 WHERE cn.id=?1 AND cn.workspace_id=?2 AND bot.status='active'
-                   AND bot.kind IN ('bot','app_bot') AND bp.status='active' AND bp.user_id IS NULL
-                   AND bp.id<>?3 AND NOT EXISTS(
-                     SELECT 1 FROM space_members sm LEFT JOIN accounts a ON a.id=sm.account_id
-                     WHERE sm.space_id=?4 AND (sm.workspace_id<>?2 OR a.id IS NULL
-                       OR a.workspace_id<>?2 OR a.status<>'active'
-                       OR (a.id<>bot.id AND (a.party_id<>?3 OR a.kind IN ('bot','app_bot'))))))",
-                    params![
-                        route.connection_id,
-                        who.ws,
-                        target.party_id,
-                        target.space_id
-                    ],
-                    |r| r.get(0),
-                )?;
-                if valid {
-                    targets.push(target);
-                }
+    ch.store().read(|r| {
+        require_person(r, who)?;
+        let viewer = Viewer::bare(&who.ws, &who.me);
+
+        let candidates = notification_routes::targets(r, &who.ws, &who.me)?;
+        let mut targets = Vec::new();
+        for target in candidates {
+            let p = Policy {
+                party_id: Some(target.party_id.clone()),
+                space_id: Some(target.space_id.clone()),
+                ..Policy::default()
+            };
+            // Pin the explicit bot route through E1's live visibility/account/identity checks.
+            // Internal failures must not masquerade as an empty picker.
+            let route = self_party(r, who, &target.party_id)
+                .and_then(|_| {
+                    crate::pipeline::route(
+                        r,
+                        &viewer,
+                        &intent(&p, "validation", "validation", Topic::ItemDone),
+                    )
+                })
+                .and_then(|route| {
+                    self_dm(r, who, &target.party_id, &route.space_id)?;
+                    Ok(route)
+                });
+            let route = match route {
+                Ok(route) => route,
+                Err(e @ ApiError::Internal(_)) => return Err(e),
+                Err(_) => continue,
+            };
+            // E1 selects the effective voice, which need not be spaces.connection_id. A bot-mode
+            // override cannot turn someone's self account (or a disabled account) into a bot.
+            // The sender may be implicit in a provider's roster; every recorded member must still
+            // resolve to an active, same-workspace self account or that exact sending bot account.
+
+            if notification_routes::bot_route(
+                r,
+                &who.ws,
+                &route.connection_id,
+                &target.party_id,
+                &target.space_id,
+            )? {
+                targets.push(target);
             }
-            Ok(targets)
-        }))
-    })?
+        }
+        Ok(targets)
+    })
 }
 
 pub fn get_policy(ch: &Channels, who: &Caller) -> ChannelResult<Policy> {
-    ch.store().reader(|c| {
-        require_person(c, who)?;
-        Ok(load(c, who)?.unwrap_or_default())
+    ch.store().read(|r| {
+        require_person(r, who)?;
+        Ok(load(r, who)?.unwrap_or_default())
     })
 }
+
 pub fn put_policy(ch: &Channels, who: &Caller, p: &Policy) -> ChannelResult<()> {
     p.validate()?;
-    ch.store().transaction(|tx| {
-        require_person(tx,who)?;
+    ch.store().write(|w| {
+        require_person(w, who)?;
         if p.enabled {
-            if let Some(party)=&p.party_id { self_party(tx,who,party)?; }
-            // what is sent goes to a private chat with yourself and the bot: under digest only the one you chose
-            if p.mode==Mode::Now || (p.mode==Mode::Digest && p.space_id.is_some()) { tx.write(|w| self_route(tx,w,who,&intent(p,"validation","validation",Topic::ItemDone)))?; }
+            if let Some(party) = &p.party_id {
+                self_party(w, who, party)?;
+            }
+            if p.mode == Mode::Now || (p.mode == Mode::Digest && p.space_id.is_some()) {
+                self_route(
+                    w,
+                    who,
+                    &intent(p, "validation", "validation", Topic::ItemDone),
+                )?;
+            }
         }
-        let now=ch.now();
-        tx.execute("INSERT INTO notification_policies(workspace_id,user_id,enabled,mode,party_id,space_id,timezone,quiet_start,quiet_end,starred_in_quiet,consented_at,consent_since_seq,updated)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,(SELECT coalesce(max(seq),0) FROM outbox_events),?) ON CONFLICT(workspace_id,user_id) DO UPDATE SET enabled=excluded.enabled,mode=excluded.mode,party_id=excluded.party_id,space_id=excluded.space_id,
-            timezone=excluded.timezone,quiet_start=excluded.quiet_start,quiet_end=excluded.quiet_end,starred_in_quiet=excluded.starred_in_quiet,
-            consented_at=CASE WHEN notification_policies.enabled=0 AND excluded.enabled=1 THEN excluded.consented_at ELSE notification_policies.consented_at END,
-            consent_since_seq=CASE WHEN notification_policies.enabled=0 AND excluded.enabled=1 THEN excluded.consent_since_seq ELSE notification_policies.consent_since_seq END,updated=excluded.updated",
-            params![who.ws,who.me,p.enabled,p.mode.code(),p.party_id,p.space_id,p.timezone,p.quiet_start,p.quiet_end,p.starred_in_quiet,now,now])?;
-        // A disabled policy never resurrects an old pending notification on a later opt-in.
-        if !p.enabled { tx.execute("UPDATE personal_notifications SET state='cancelled' WHERE workspace_id=? AND user_id=? AND state IN ('waiting','held','submitted')",params![who.ws,who.me])?; }
-        // what this policy no longer sends waits in the inbox only (Topic::sends: a starred contact's message
-        // still goes out under digest when you chose where)
-        if p.mode!=Mode::Now { tx.execute("UPDATE personal_notifications SET state='held',mode=?1 WHERE workspace_id=?2 AND user_id=?3 AND state='waiting' AND (?1<>'digest' OR topic<>?5 OR ?4 IS NULL)",params![p.mode.code(),who.ws,who.me,p.space_id,CONTACT_STARRED])?; }
-        steve_store::base::audit(tx,&who.ws,&who.me,"notification.policy.updated",&who.me,&serde_json::to_value(p)?)?;
+        let stored = repo::Policy {
+            enabled: p.enabled,
+            mode: p.mode.code().into(),
+            party: p.party_id.clone(),
+            space: p.space_id.clone(),
+            timezone: p.timezone.clone(),
+            quiet_start: p.quiet_start.map(i64::from),
+            quiet_end: p.quiet_end.map(i64::from),
+            starred_in_quiet: p.starred_in_quiet,
+        };
+        repo::set_policy(w, &who.ws, &who.me, &stored, ch.now())?;
+        repo::update_for_policy(w, &who.ws, &who.me, &stored, CONTACT_STARRED)?;
+        audit_repo::record(
+            w,
+            &who.ws,
+            &who.me,
+            "notification.policy.updated",
+            &who.me,
+            &serde_json::to_value(p)?,
+        )?;
         Ok(())
     })
 }
@@ -473,14 +421,9 @@ impl Consumer for Intake {
         }
         let d: steve_work_api::ItemDone = serde_json::from_value(ev.payload.clone())
             .map_err(|e| ConsumeError::Reject(e.to_string()))?;
-        let apply = || -> ChannelResult<()> {
-            // No receipt, owner, bot or unique-member heuristic grants personal notification consent.
-            let mut st=tx.prepare("SELECT p.user_id FROM notification_policies p JOIN workspace_members m ON m.workspace_id=p.workspace_id AND m.user_id=p.user_id WHERE p.workspace_id=? AND p.enabled=1 AND p.user_id NOT LIKE 'svc:%' AND p.consented_at<=? AND p.consent_since_seq<?")?;
-            let users = st
-                .query_map(params![ev.workspace_id, ev.created, ev.seq], |r| {
-                    r.get::<_, String>(0)
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        tx.write(|w| -> ChannelResult<()> {
+            let users = repo::recipients(w, &ev.workspace_id, ev.created, ev.seq)?;
             let body = format!(
                 "Work item completed: {}\nItem: {}\nProject: {}\nCycle: {} · Revision: {}",
                 d.title,
@@ -496,17 +439,17 @@ impl Consumer for Intake {
                     ws: ev.workspace_id.clone(),
                     me: user,
                 };
-                let p = load(tx, &who)?.expect("policy selected in same transaction");
+                let p = load(w, &who)?.expect("policy selected in same transaction");
                 let state = if p.mode == Mode::Now {
                     "waiting"
                 } else {
                     "held"
                 };
-                insert(tx, &who, ev, p.mode, &body, state, Topic::ItemDone)?;
+                insert(w, &who, ev, p.mode, &body, state, Topic::ItemDone)?;
             }
             Ok(())
-        };
-        apply().map_err(|e| ConsumeError::Retry(e.to_string()))?;
+        })
+        .map_err(|e| ConsumeError::Retry(e.to_string()))?;
         Ok(Applied::noted("personal notification policy recorded"))
     }
 }
@@ -514,24 +457,20 @@ impl Consumer for Intake {
 /// How a notification a member set up themselves (an alarm's, a morning brief) is kept: sent under a
 /// policy that sends now (`waiting`, for the pump), otherwise only in their feed (`held`, under their
 /// policy's mode, or `log` without one or when it is off).
-pub fn own_delivery(c: &Connection, ws: &str, user: &str) -> ChannelResult<(Mode, &'static str)> {
+pub fn brief_delivery(
+    r: &mut impl Read,
+    ws: &str,
+    user: &str,
+) -> ChannelResult<(Mode, &'static str)> {
     let who = Caller {
         ws: ws.into(),
         me: user.into(),
     };
-    Ok(match load(c, &who)? {
+    Ok(match load(r, &who)? {
         Some(p) if p.enabled && p.mode == Mode::Now => (Mode::Now, "waiting"),
         Some(p) if p.enabled => (p.mode, "held"),
         _ => (Mode::Log, "held"),
     })
-}
-
-pub fn brief_delivery(
-    w: &mut steve_store::W<'_>,
-    ws: &str,
-    user: &str,
-) -> ChannelResult<(Mode, &'static str)> {
-    own_delivery(&w.legacy(), ws, user)
 }
 
 /// [`insert`] for a module with its own notification topic (steve-digest's morning brief): one inbox row,
@@ -551,12 +490,13 @@ pub fn record(
         ws: ws.into(),
         me: user.into(),
     };
-    insert(&w.legacy(), &who, ev, mode, body, state, topic)
+    insert(w, &who, ev, mode, body, state, topic)
 }
 
 /// One inbox row (and, by trigger, its feed entry) for `who` about event `ev`.
+
 fn insert(
-    tx: &Tx,
+    w: &mut W<'_>,
     who: &Caller,
     ev: &Event,
     mode: Mode,
@@ -564,8 +504,21 @@ fn insert(
     state: &str,
     topic: Topic,
 ) -> ChannelResult<()> {
-    tx.execute("INSERT INTO personal_notifications(id,workspace_id,user_id,event_id,delivery_key,mode,body,state,created,topic) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id,user_id,event_id) DO NOTHING",
-        params![uid("ntf"),who.ws,who.me,ev.id,format!("{PREFIX}{}:{}",ev.id,who.me),mode.code(),body,state,ev.created,topic.code()])?;
+    repo::insert(
+        w,
+        &repo::NewNotice {
+            ws: &who.ws,
+            user: &who.me,
+            event: &ev.id,
+            key: &format!("{PREFIX}{}:{}", ev.id, who.me),
+            mode: mode.code(),
+            body,
+            state,
+            topic: topic.code(),
+            message: None,
+            created: ev.created,
+        },
+    )?;
     Ok(())
 }
 
@@ -649,12 +602,9 @@ impl Consumer for AlarmIntake {
         if a.lines.is_empty() || a.owner.starts_with("svc:") {
             return Ok(Applied::noted("nothing to notify"));
         }
-        let apply = || -> ChannelResult<Applied> {
-            let member: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?)",
-                params![ev.workspace_id, a.owner],
-                |r| r.get(0),
-            )?;
+
+        tx.write(|w| -> ChannelResult<Applied> {
+            let member = w.members().role(&ev.workspace_id, &a.owner)?.is_some();
             if !member {
                 return Ok(Applied::noted("the alarm's owner is no longer a member"));
             }
@@ -662,11 +612,11 @@ impl Consumer for AlarmIntake {
                 ws: ev.workspace_id.clone(),
                 me: a.owner.clone(),
             };
-            let (mode, state) = own_delivery(tx, &who.ws, &who.me)?;
+            let (mode, state) = brief_delivery(w, &who.ws, &who.me)?;
             let topic = Topic::parse(self.0.name)
                 .ok_or_else(|| ApiError::invalid("personal notification topic"))?;
             insert(
-                tx,
+                w,
                 &who,
                 ev,
                 mode,
@@ -675,15 +625,14 @@ impl Consumer for AlarmIntake {
                 topic,
             )?;
             Ok(Applied::noted("personal alarm notification recorded"))
-        };
-        apply().map_err(|e| ConsumeError::Retry(e.to_string()))
+        })
+        .map_err(|e| ConsumeError::Retry(e.to_string()))
     }
 }
 
 /// Before E1 commits or retries, revalidate the stored personal consent, exact content and self DM.
 /// Reserved keys cannot be used by a caller to create an untracked notification.
 pub(crate) fn verify_intent(
-    c: &Connection,
     r: &mut impl steve_store::Read,
     who: &Caller,
     i: &DeliveryIntent,
@@ -692,35 +641,40 @@ pub(crate) fn verify_intent(
     if !i.key.starts_with(PREFIX) {
         return Ok(());
     }
-    type Row = (Option<String>, String, String, Option<String>);
-    let row:Option<Row>=c.query_row("SELECT body,state,topic,message_id FROM personal_notifications WHERE workspace_id=? AND user_id=? AND delivery_key=?",params![who.ws,who.me,i.key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
-    let Some((Some(body), state, topic, message)) = row else {
+
+    let Some(repo::Pending {
+        body: Some(body),
+        state,
+        topic,
+        message,
+    }) = repo::pending(r, &who.ws, &who.me, &i.key)?
+    else {
         return Err(ApiError::Unauthenticated);
     };
     let topic = Topic::parse(&topic).ok_or(ApiError::Unauthenticated)?;
-    let p = load(c, who)?.ok_or(ApiError::Unauthenticated)?;
+    let p = load(r, who)?.ok_or(ApiError::Unauthenticated)?;
     if !p.enabled
         || !topic.sends(&p)
         || !matches!(state.as_str(), "waiting" | "submitted")
         || p.holds(topic, now)?
         || *i != intent(&p, &i.key, &body, topic)
-        || (topic.checks_answered() && unwanted(c, &who.ws, message.as_deref(), now)?.is_some())
+        || (topic.checks_answered() && unwanted(r, &who.ws, message.as_deref(), now)?.is_some())
     {
         return Err(ApiError::Unauthenticated);
     }
-    self_route(c, r, who, i)
+    self_route(r, who, i)
 }
 
 /// Queue checks the immutable destination, not a freshly resolved personal preference.
 pub(crate) fn verify_pinned(
-    c: &Connection,
+    r: &mut impl Read,
     who: &Caller,
     i: &DeliveryIntent,
     space: &str,
 ) -> ChannelResult<()> {
     if i.key.starts_with(PREFIX) {
         self_dm(
-            c,
+            r,
             who,
             i.party_id.as_deref().ok_or(ApiError::Unauthenticated)?,
             space,
@@ -730,55 +684,50 @@ pub(crate) fn verify_pinned(
 }
 
 pub(crate) fn attach(
-    tx: &Tx,
+    w: &mut W<'_>,
     who: &Caller,
     i: &DeliveryIntent,
     delivery: &str,
 ) -> ChannelResult<()> {
     if i.key.starts_with(PREFIX) {
-        tx.execute("UPDATE personal_notifications SET delivery_id=?,state='submitted' WHERE workspace_id=? AND user_id=? AND delivery_key=?",params![delivery,who.ws,who.me,i.key])?;
+        repo::attach(w, &who.ws, &who.me, &i.key, delivery)?;
     }
     Ok(())
 }
 
 /// DND is a postponement, never a failed send or a reason to bypass the normal C6 authorization.
 /// Digest/log changes also park already queued sends; disabling is handled by verify_intent.
-pub(crate) fn deferred(c: &Connection, message: &str, now: i64) -> ChannelResult<bool> {
-    let who:Option<(String,String,String)>=c.query_row("SELECT workspace_id,user_id,topic FROM personal_notifications WHERE delivery_id=(SELECT id FROM output_deliveries WHERE message_id=?)",[message],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-    let Some((ws, me, topic)) = who else {
+
+pub(crate) fn deferred(r: &mut impl Read, message: &str, now: i64) -> ChannelResult<bool> {
+    let Some(row) = repo::by_output(r, message)? else {
         return Ok(false);
     };
-    let topic = topic_of(&topic)?;
-    let Some(p) = load(c, &Caller { ws, me })? else {
+    let topic = topic_of(&row.topic)?;
+    let who = Caller {
+        ws: row.workspace,
+        me: row.user,
+    };
+    let Some(p) = load(r, &who)? else {
         return Ok(false);
     };
     Ok(p.enabled && (!topic.sends(&p) || p.holds(topic, now)?))
 }
 
-#[derive(Serialize)]
-pub struct Notification {
-    pub id: String,
-    pub event_id: String,
-    pub mode: String,
-    pub body: Option<String>,
-    pub state: String,
-    pub delivery_id: Option<String>,
-    pub seen_at: Option<i64>,
-    pub created: i64,
-}
+pub use repo::Notice as Notification;
+
 pub fn list(ch: &Channels, who: &Caller) -> ChannelResult<Vec<Notification>> {
-    ch.store().reader(|c| {
-        require_person(c,who)?;
-        let mut st=c.prepare("SELECT n.id,n.event_id,n.mode,n.body,n.state,n.delivery_id,r.read_at,n.created FROM personal_notifications n JOIN feed_entries e ON e.notification_id=n.id LEFT JOIN feed_reads r ON r.entry_id=e.id AND r.workspace_id=n.workspace_id AND r.user_id=n.user_id WHERE n.workspace_id=? AND n.user_id=? ORDER BY n.created DESC,n.id DESC LIMIT 100")?;
-        Ok(st.query_map(params![who.ws,who.me],|r|Ok(Notification{id:r.get(0)?,event_id:r.get(1)?,mode:r.get(2)?,body:r.get(3)?,state:r.get(4)?,delivery_id:r.get(5)?,seen_at:r.get(6)?,created:r.get(7)?}))?.collect::<rusqlite::Result<Vec<_>>>()?)
+    ch.store().read(|r| {
+        require_person(r, who)?;
+        Ok(repo::list(r, &who.ws, &who.me)?)
     })
 }
+
 pub fn seen(ch: &Channels, who: &Caller, id: &str) -> ChannelResult<()> {
-    ch.store().transaction(|tx| {
-        require_person(tx,who)?;
-        let entry: Option<String> = tx.query_row("SELECT id FROM feed_entries WHERE notification_id=? AND workspace_id=? AND recipient_id=?", params![id,who.ws,who.me], |r|r.get(0)).optional()?;
-        let entry = entry.ok_or_else(||ApiError::not_found("notification"))?;
-        steve_store::feed::read_ids(tx, &who.ws, &who.me, &[entry], ch.now())?;
+    ch.store().write(|w| {
+        require_person(w, who)?;
+        if !steve_store::FeedReads(w).mark_notification(&who.ws, &who.me, id, ch.now())? {
+            return Err(ApiError::not_found("notification"));
+        }
         Ok(())
     })
 }
@@ -790,15 +739,20 @@ pub async fn pump(ch: &Channels, outbox: &Outbox) -> ChannelResult<usize> {
 }
 
 async fn pump_at(ch: &Channels, outbox: &Outbox, now: i64) -> ChannelResult<usize> {
-    type Due = (String, String, String, String, String, Option<String>);
-    let rows=ch.store().reader(|c|->ChannelResult<Vec<Due>> {
-        let mut st=c.prepare("SELECT workspace_id,user_id,delivery_key,body,topic,message_id FROM personal_notifications WHERE state='waiting' AND delivery_id IS NULL AND body IS NOT NULL AND next_attempt_at<=? AND created>=? ORDER BY next_attempt_at,created LIMIT 50")?;
-        Ok(st.query_map([now,now-KEEP_MS],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)
-    })?;
+    let rows = ch.store().read(|r| repo::due(r, now, now - KEEP_MS))?;
     let mut n = 0;
-    for (ws, me, key, body, topic, message) in rows {
+    for repo::Due {
+        workspace: ws,
+        user: me,
+        key,
+        body,
+        topic,
+        message,
+    } in rows
+    {
         // Every attempted row advances, including topics this version cannot interpret.
-        ch.store().transaction(|tx|->ChannelResult<()> { tx.execute("UPDATE personal_notifications SET next_attempt_at=? WHERE delivery_key=? AND state='waiting'",params![now+10_000,key])?;Ok(()) })?;
+        ch.store()
+            .write(|w| repo::update_waiting(w, &key, repo::WaitingChange::RetryAt(now + 10_000)))?;
         let Some(topic) = Topic::parse(&topic) else {
             tracing::warn!(
                 key,
@@ -811,21 +765,22 @@ async fn pump_at(ch: &Channels, outbox: &Outbox, now: i64) -> ChannelResult<usiz
         if topic.checks_answered() {
             let why = ch
                 .store()
-                .reader(|c| unwanted(c, &ws, message.as_deref(), now))?;
+                .read(|r| unwanted(r, &ws, message.as_deref(), now))?;
             if let Some(why) = why {
-                ch.store().transaction(|tx| cancel(tx, &ws, &key, why))?;
+                ch.store().write(|w| cancel(w, &ws, &key, why))?;
                 continue;
             }
         }
         let who = Caller { ws, me };
-        let p = ch.store().reader(|c| -> ChannelResult<Option<Policy>> {
-            if require_person(c, &who).is_err() {
+        let p = ch.store().read(|r| -> ChannelResult<Option<Policy>> {
+            if require_person(r, &who).is_err() {
                 return Ok(None);
             }
-            load(c, &who)
+            load(r, &who)
         })?;
         let Some(p) = p.filter(|p| p.enabled) else {
-            ch.store().transaction(|tx|->ChannelResult<()> {tx.execute("UPDATE personal_notifications SET state='cancelled' WHERE delivery_key=? AND state='waiting'",[&key])?;Ok(())})?;
+            ch.store()
+                .write(|w| repo::update_waiting(w, &key, repo::WaitingChange::Cancel))?;
             continue;
         };
         if !topic.sends(&p) || p.holds(topic, now)? {
@@ -840,10 +795,7 @@ async fn pump_at(ch: &Channels, outbox: &Outbox, now: i64) -> ChannelResult<usiz
     }
     // Inbox body retention is independent of source outbox/transport retention; tombstone keys and
     // delivery receipts stay so pruning never turns a replay into another external send.
-    ch.store().transaction(|tx|->ChannelResult<()> {
-        tx.execute("UPDATE personal_notifications SET body=NULL,state='purged' WHERE id IN (SELECT id FROM personal_notifications WHERE created<? AND body IS NOT NULL LIMIT 1000)",[now-KEEP_MS])?;
-        Ok(())
-    })?;
+    ch.store().write(|w| repo::prune(w, now - KEEP_MS))?;
     Ok(n)
 }
 
@@ -857,20 +809,11 @@ impl steve_runtime::due::DueSource for NotificationDue {
     fn name(&self) -> &'static str {
         "channels.notifications"
     }
+
     async fn next_due(&self) -> Result<Option<i64>, steve_runtime::due::DueError> {
         self.channels
             .store()
-            .reader(|c| -> ChannelResult<_> {
-                Ok(c.query_row(
-                    "SELECT min(at) FROM (
-                   SELECT next_attempt_at AS at FROM personal_notifications
-                     WHERE state='waiting' AND delivery_id IS NULL AND body IS NOT NULL
-                   UNION ALL SELECT created+?1+1 FROM personal_notifications WHERE body IS NOT NULL
-                 )",
-                    [KEEP_MS],
-                    |r| r.get(0),
-                )?)
-            })
+            .read(|r| repo::next_due(r, KEEP_MS))
             .map_err(|e| steve_runtime::due::DueError(e.to_string()))
     }
     async fn run_due(&self, now: i64) -> Result<(), steve_runtime::due::DueError> {
@@ -915,7 +858,7 @@ pub async fn run(ch: Channels, outbox: Arc<Outbox>) {
 /// chatting there), or its space is set aside (不提醒, 屏蔽, or `reply_as_you = off`). `None`: still
 /// wanted. A message that is gone is not wanted.
 pub(crate) fn unwanted(
-    c: &Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     message: Option<&str>,
     now: i64,
@@ -923,20 +866,14 @@ pub(crate) fn unwanted(
     let Some(message) = message else {
         return Ok(Some(GONE));
     };
-    let space: Option<String> = c
-        .query_row(
-            "SELECT space_id FROM chan_messages WHERE id = ? AND workspace_id = ? AND direction = 'in'",
-            params![message, ws],
-            |r| r.get(0),
-        )
-        .optional()?;
-    let Some(space) = space else {
+    let Some(space) = steve_store::channel_message_repo::ingress::source_space(r, ws, message)?
+    else {
         return Ok(Some(GONE));
     };
-    if crate::presence::owner_engaged_chat(c, ws, message, now)?.is_some() {
+    if crate::presence::owner_engaged_chat(r, ws, message, now)?.is_some() {
         return Ok(Some(crate::presence::REASON_REPLIED));
     }
-    if crate::starred::set_aside_chat(c, ws, &space)? {
+    if crate::starred::set_aside_chat(r, ws, &space)? {
         return Ok(Some(crate::presence::REASON_SETTING));
     }
     Ok(None)
@@ -945,22 +882,19 @@ pub(crate) fn unwanted(
 /// `audit.why` of a notification whose message is no longer stored.
 const GONE: &str = "message_gone";
 
-fn cancel(tx: &Tx, ws: &str, key: &str, why: &str) -> ChannelResult<bool> {
-    let n = tx.execute(
-        "UPDATE personal_notifications SET state='cancelled' WHERE delivery_key=? AND state IN ('waiting','held','submitted')",
-        [key],
-    )?;
-    if n > 0 {
-        steve_store::base::audit(
-            tx,
+fn cancel(w: &mut W<'_>, ws: &str, key: &str, why: &str) -> ChannelResult<bool> {
+    let changed = repo::cancel(w, ws, key)?;
+    if changed {
+        audit_repo::record(
+            w,
             ws,
             "steve",
             "notification.starred.cancelled",
             key,
-            &serde_json::json!({ "why": why }),
+            &serde_json::json!({"why": why}),
         )?;
     }
-    Ok(n > 0)
+    Ok(changed)
 }
 
 /// What became of a starred contact's message as a notification ([`queue_starred`]).
@@ -988,74 +922,67 @@ pub(crate) fn queue_starred(
     if who.me.starts_with("svc:") {
         return Ok(Queued::Off);
     }
-    let member: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?)",
-        params![who.ws, who.me],
-        |r| r.get(0),
-    )?;
-    let Some(p) = load(tx, who)?.filter(|p| p.enabled && member) else {
+
+    let Some((p, space, last)) = tx.write(|w| -> ChannelResult<_> {
+        let member = w.members().role(&who.ws, &who.me)?.is_some();
+        let Some(p) = load(w, who)?.filter(|p| p.enabled && member) else {
+            return Ok(None);
+        };
+        let (space, sender) =
+            steve_store::channel_message_repo::ingress::sender_in_space(w, &who.ws, message)?
+                .ok_or_else(|| ApiError::not_found("消息"))?;
+        let last = repo::recent_starred(
+            w,
+            &who.ws,
+            &who.me,
+            &space,
+            sender.as_deref(),
+            now - crate::context::SEGMENT_GAP_MS,
+            CONTACT_STARRED,
+        )?;
+        Ok(Some((p, space, last)))
+    })?
+    else {
         return Ok(Queued::Off);
     };
-    let (space, sender): (String, Option<String>) = tx.query_row(
-        "SELECT space_id, coalesce(sender_party_id, sender_account_id) FROM chan_messages WHERE id = ?",
-        [message],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
-    let last: Option<i64> = tx
-        .query_row(
-            "SELECT max(n.created) FROM personal_notifications n
-               JOIN chan_messages m ON m.id = n.message_id
-              WHERE n.workspace_id = ?1 AND n.user_id = ?2 AND n.topic = ?6 AND n.state <> 'cancelled'
-                AND m.space_id = ?3 AND coalesce(m.sender_party_id, m.sender_account_id) IS ?4
-                AND n.created > ?5",
-            params![
-                who.ws,
-                who.me,
-                space,
-                sender,
-                now - crate::context::SEGMENT_GAP_MS,
-                CONTACT_STARRED
-            ],
-            |r| r.get(0),
-        )
-        .optional()?
-        .flatten();
     if let Some(at) = last
-        && !crate::presence::you_spoke(tx, &who.ws, &space, at, now)?
+        && !tx.write(|w| crate::presence::you_spoke(w, &who.ws, &space, at, now))?
     {
         return Ok(Queued::Again);
     }
     let sends = Topic::ContactStarred.sends(&p);
-    let id = uid("ntf");
-    let n = tx.execute(
-        "INSERT INTO personal_notifications(id,workspace_id,user_id,event_id,delivery_key,mode,body,state,topic,message_id,created)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id,user_id,event_id) DO NOTHING",
-        params![
-            id,
-            who.ws,
-            who.me,
-            message,
-            format!("{PREFIX}{message}:{}", who.me),
-            p.mode.code(),
-            body,
-            if sends { "waiting" } else { "held" },
-            CONTACT_STARRED,
-            message,
-            now
-        ],
-    )?;
-    if n == 0 {
-        // this message was notified already (processed again)
+
+    let Some(id) = tx.write(|w| -> ChannelResult<_> {
+        let id = repo::insert(
+            w,
+            &repo::NewNotice {
+                ws: &who.ws,
+                user: &who.me,
+                event: message,
+                key: &format!("{PREFIX}{message}:{}", who.me),
+                mode: p.mode.code(),
+                body,
+                state: if sends { "waiting" } else { "held" },
+                topic: CONTACT_STARRED,
+                message: Some(message),
+                created: now,
+            },
+        )?;
+        if let Some(id) = &id {
+            audit_repo::record(
+                w,
+                &who.ws,
+                "steve",
+                "notification.starred.queued",
+                message,
+                &serde_json::json!({"notification": id, "sends": sends}),
+            )?;
+        }
+        Ok(id)
+    })?
+    else {
         return Ok(Queued::Again);
-    }
-    steve_store::base::audit(
-        tx,
-        &who.ws,
-        "steve",
-        "notification.starred.queued",
-        message,
-        &serde_json::json!({ "notification": id, "sends": sends }),
-    )?;
+    };
     Ok(Queued::Yes { id, sends })
 }
 
@@ -1063,24 +990,18 @@ pub(crate) fn queue_starred(
 /// notification that is no longer wanted ([`unwanted`]), the notification is cancelled and `true`
 /// returned — the caller lets the message go instead of sending it.
 pub(crate) fn answered(tx: &Tx, out: &str, now: i64) -> ChannelResult<bool> {
-    let row: Option<(String, String, Option<String>)> = tx
-        .query_row(
-            "SELECT workspace_id, delivery_key, message_id FROM personal_notifications
-              WHERE topic = ?2 AND delivery_id = (SELECT id FROM output_deliveries WHERE message_id = ?1)",
-            params![out, CONTACT_STARRED],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?;
-    let Some((ws, key, message)) = row else {
-        return Ok(false);
-    };
-    match unwanted(tx, &ws, message.as_deref(), now)? {
-        Some(why) => {
-            cancel(tx, &ws, &key, why)?;
-            Ok(true)
+    tx.write(|w| {
+        let Some(row) = repo::by_output(w, out)?.filter(|row| row.topic == CONTACT_STARRED) else {
+            return Ok(false);
+        };
+        match unwanted(w, &row.workspace, row.message.as_deref(), now)? {
+            Some(why) => {
+                cancel(w, &row.workspace, &row.key, why)?;
+                Ok(true)
+            }
+            None => Ok(false),
         }
-        None => Ok(false),
-    }
+    })
 }
 
 #[cfg(test)]

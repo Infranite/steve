@@ -393,3 +393,29 @@ impl crate::W<'_> {
         Ok((result, true))
     }
 }
+
+impl crate::FeedReads<'_, crate::W<'_>> {
+    /// Groups the notification lookup and its feed read receipt in one write.
+    pub fn mark_notification(&mut self, ws: &str, user: &str, id: &str, now: i64) -> Result<bool> {
+        use crate::contract::Q;
+        use sea_query::{Expr, ExprTrait, OnConflict, Query};
+        let entry = self.0.one(
+            Query::select()
+                .column("id")
+                .from("feed_entries")
+                .and_where(Expr::col("notification_id").eq(id))
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("recipient_id").eq(user)),
+            |row| row.get::<String>(0),
+        )?;
+        let Some(entry) = entry else { return Ok(false) };
+        self.0.exec(
+            Query::insert()
+                .into_table("feed_reads")
+                .columns(["workspace_id", "user_id", "entry_id", "read_at"])
+                .values_panic([ws.into(), user.into(), entry.into(), now.into()])
+                .on_conflict(OnConflict::new().do_nothing().to_owned()),
+        )?;
+        Ok(true)
+    }
+}

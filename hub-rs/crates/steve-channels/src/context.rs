@@ -893,46 +893,36 @@ pub fn remember_described(tx: &steve_store::Tx, message: &str, text: &str) -> Ch
 /// empty, a number or a handle ([`raw_name`]) — what a provider gives for “me” — it takes the name of
 /// another account of the same contact (your Feishu account), else the contact's name. A name that
 /// is a real name is never touched. Returns whether it changed.
-pub fn settle_own_name(tx: &steve_store::Tx, account: &str) -> ChannelResult<bool> {
-    let row: Option<(String, Option<String>)> = tx
-        .query_row(
-            "SELECT coalesce(display_name, ''), party_id FROM accounts WHERE id = ?",
-            [account],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    let Some((current, Some(party))) = row else {
+
+pub fn settle_own_name(w: &mut steve_store::W<'_>, account: &str) -> ChannelResult<bool> {
+    use steve_store::Accounts;
+
+    let Some(current) = Accounts(w).get(account)? else {
         return Ok(false);
     };
-    if !raw_name(&current) {
+    if !raw_name(&current.display_name) {
         return Ok(false);
     }
-    let mut st = tx.prepare_cached(
-        "SELECT coalesce(display_name, '') FROM accounts
-          WHERE party_id = ?1 AND id <> ?2 AND status <> 'deleted' ORDER BY verified DESC, created",
-    )?;
-    let siblings = st
-        .query_map(params![party, account], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let party_name: String = tx
-        .query_row("SELECT name FROM parties WHERE id = ?", [&party], |r| {
-            r.get(0)
-        })
-        .optional()?
+    let mut siblings = Accounts(w).of_party(&current.workspace_id, &current.party_id)?;
+    siblings.retain(|a| a.id != account && a.status != "deleted");
+    siblings.sort_by_key(|a| (!a.verified, a.created));
+    let party_name = w
+        .contacts()
+        .party(&current.party_id)?
+        .map(|p| p.name)
         .unwrap_or_default();
     let name = shown_name(
         siblings
             .iter()
-            .map(String::as_str)
+            .map(|a| a.display_name.as_str())
             .chain([party_name.as_str()]),
     );
     if name.is_empty() {
         return Ok(false);
     }
-    steve_modules::accounts::repo::update(
-        tx,
+    Accounts(w).update(
         account,
-        &steve_modules::accounts::repo::AccountPatch {
+        &steve_store::account_rows::AccountPatch {
             display_name: Some(name),
             ..Default::default()
         },

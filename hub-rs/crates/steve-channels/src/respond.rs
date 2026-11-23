@@ -63,7 +63,7 @@ impl Channels {
         }
         let now = self.now();
         self.store()
-            .reader(|c| crate::presence::stop(c, &plan.ws, &plan.message_id, now))
+            .read(|r| crate::presence::stop(r, &plan.ws, &plan.message_id, now))
     }
 }
 
@@ -77,9 +77,11 @@ impl Channels {
             return Ok(None);
         }
         let now = self.now();
-        self.store().reader(|c| {
-            let starred = crate::decide::starred(c, &plan.ws, plan.sender_party_id.as_deref())?;
-            crate::decide::gate(c, &plan.ws, &plan.message_id, starred, now)
+        self.store().read(|r| {
+            self.store().reader(|c| {
+                let starred = crate::decide::starred(c, &plan.ws, plan.sender_party_id.as_deref())?;
+                crate::decide::gate(c, r, &plan.ws, &plan.message_id, starred, now)
+            })
         })
     }
 }
@@ -249,16 +251,19 @@ pub(crate) fn open_draft_as(
 ) -> ChannelResult<(String, String)> {
     let space =
         spaces::get(tx, &t.space_id)?.ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
-    let (account, _) = bindings::connection_account(tx, &t.ws, &t.connection_id)?;
-    let persona = match (t.mode, &t.persona_id) {
-        (Mode::Own, _) => None,
-        (Mode::Bot, Some(id)) => Some(
-            personas::get(tx, id)?
-                .filter(|p| p.workspace_id == t.ws && !p.deleted)
-                .ok_or_else(|| steve_modules::ApiError::not_found("对外身份"))?,
-        ),
-        (Mode::Bot, None) => bindings::effective(tx, &space)?.map(|e| e.persona),
-    };
+    let (account, persona) = tx.write(|w| -> ChannelResult<_> {
+        let (account, _) = bindings::connection_account(w, &t.ws, &t.connection_id)?;
+        let persona = match (t.mode, &t.persona_id) {
+            (Mode::Own, _) => None,
+            (Mode::Bot, Some(id)) => Some(
+                personas::get(w, id)?
+                    .filter(|p| p.workspace_id == t.ws && !p.deleted)
+                    .ok_or_else(|| steve_modules::ApiError::not_found("对外身份"))?,
+            ),
+            (Mode::Bot, None) => bindings::effective(w, &space)?.map(|e| e.persona),
+        };
+        Ok((account, persona))
+    })?;
     tx.write(|w| {
         use steve_store::channel_message_repo::outbound::{self, NewMessage};
         outbound::insert(
@@ -278,7 +283,7 @@ pub(crate) fn open_draft_as(
             },
         )
     })?;
-    let name = spaces::display_title(tx, &space)?;
+    let name = tx.write(|w| spaces::display_title(w, &space))?;
     let question = match (&persona, t.mode) {
         (Some(p), _) => format!("以{}发到「{name}」", p.name),
         (None, Mode::Own) => format!("以你本人发到「{name}」"),

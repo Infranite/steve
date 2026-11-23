@@ -127,7 +127,7 @@ fn set_rules(h: &H, conn: &str, rules: Value) {
     let now = h.ch.now();
     h.env
         .store()
-        .transaction(|tx| spaces::set_account_rules(tx, &viewer(), conn, &rules, now))
+        .write(|tx| spaces::set_account_rules(tx, &viewer(), conn, &rules, now))
         .expect("rules");
 }
 
@@ -365,7 +365,7 @@ async fn setup_yolo(
         let now = h.ch.now();
         h.env
             .store()
-            .transaction(|tx| bindings::set_account_default(tx, &viewer(), conn, &p, now))
+            .write(|tx| bindings::set_account_default(tx, &viewer(), conn, &p, now))
             .expect("bind");
         if bot == "ops" {
             h.oncall_persona = p;
@@ -424,10 +424,7 @@ fn nothing_sent(h: &H) {
 /// An inbound message in `space` on `conn` that the rules only record, and its plan.
 async fn recorded(h: &H, conn: &str, space: &str, id: &str, from: &str, text: &str) -> Plan {
     let i = push(h, conn, msg(space, id, from, text, false)).await;
-    h.env
-        .store()
-        .reader(|c| plan_of(c, WS, &i.message_id))
-        .expect("plan")
+    plan_of(h.env.store(), WS, &i.message_id).expect("plan")
 }
 
 fn out(plan: &Plan, text: &str, auth: Auth, g: Option<Generation>) -> OutRequest {
@@ -2618,7 +2615,7 @@ async fn attention_quiet_and_blocked_against_trigger_words() {
     let e = h
         .env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             steve_channels::channel_accounts::patch(
                 &h.ch,
                 tx,
@@ -4013,12 +4010,12 @@ async fn a_cards_lifetime_is_set_on_your_own_account_only() {
         let now = h.ch.now();
         h.env
             .store()
-            .transaction(|tx| channel_accounts::patch(&h.ch, tx, &viewer(), conn, &p, now))
+            .write(|tx| channel_accounts::patch(&h.ch, tx, &viewer(), conn, &p, now))
     };
     let ttl = |conn: &str| {
         h.env
             .store()
-            .reader(|c| channel_accounts::out(&h.ch, c, &viewer(), conn))
+            .read(|c| channel_accounts::out(&h.ch, c, &viewer(), conn))
             .unwrap()
             .card_ttl_h
     };
@@ -4071,14 +4068,14 @@ async fn the_undo_window_follows_the_account() {
         let now = h.ch.now();
         h.env
             .store()
-            .transaction(|tx| channel_accounts::patch(&h.ch, tx, &viewer(), &h.oncall, &p, now))
+            .write(|tx| channel_accounts::patch(&h.ch, tx, &viewer(), &h.oncall, &p, now))
     };
     assert!(set(json!(61)).is_err(), "0–60 s");
     set(json!(20)).expect("20 s");
     let a = h
         .env
         .store()
-        .reader(|c| channel_accounts::out(&h.ch, c, &viewer(), &h.oncall))
+        .read(|c| channel_accounts::out(&h.ch, c, &viewer(), &h.oncall))
         .unwrap();
     assert_eq!((a.send_delay_s, a.send_delay_default_s), (Some(20), 3));
     let d = draft("好了，稍后发公告。").await;
@@ -4091,7 +4088,7 @@ async fn the_undo_window_follows_the_account() {
     let a = h
         .env
         .store()
-        .reader(|c| channel_accounts::out(&h.ch, c, &viewer(), &h.oncall))
+        .read(|c| channel_accounts::out(&h.ch, c, &viewer(), &h.oncall))
         .unwrap();
     assert_eq!(a.send_delay_s, None);
 
@@ -6618,11 +6615,7 @@ async fn recovery_explicit_acknowledgements_are_not_swallowed_by_the_automatic_c
         msg("C_OPS", "explicit-ack", "ulilei", "请记录", true),
     )
     .await;
-    let plan = h
-        .env
-        .store()
-        .reader(|c| plan_of(c, WS, &inbound.message_id))
-        .unwrap();
+    let plan = plan_of(h.env.store(), WS, &inbound.message_id).unwrap();
     let out = h
         .outbox
         .deliver(

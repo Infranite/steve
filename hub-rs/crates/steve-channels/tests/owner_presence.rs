@@ -195,7 +195,7 @@ async fn setup() -> H {
     let v = Viewer::bare(WS, ME);
     h.env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             spaces::set_account_rules(
                 tx,
                 &v,
@@ -1184,7 +1184,7 @@ async fn a_draft_whose_message_a_later_turn_took_while_it_drafted_never_opens() 
     *h.model.during.lock().unwrap() = Some(Box::new(move || {
         let later = stored_in(&store, "l1", "l2", 20);
         store
-            .transaction(|tx| presence::take_turn(tx, WS, &later))
+            .write(|w| presence::take_turn(w, WS, &later))
             .expect("turn");
     }));
     let r = push(&h, &me, msg(&h, "D_LI", "l1", "ulilei", "在吗", 0))

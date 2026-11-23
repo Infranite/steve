@@ -62,7 +62,7 @@ use crate::channel::{ActAsUser, ActTarget, MessageRef, OutContent, SendKey, Sent
 use crate::compose::PinnedModel;
 use crate::deliver::{Auth, Delivered, Generation, OutRequest, OutTarget, Outbound, Purpose};
 use crate::disclosure::{self, MAX_REWRITES};
-use crate::flow_actions::{LateChannels, plan_of};
+use crate::flow_actions::{LateChannels, plan_in, plan_of};
 use crate::personas::{self, PersonaRow};
 use crate::respond::{self, DRAFT_OPTIONS, SUBJECT_MESSAGE};
 use crate::rules::{self, Act, ItemMode, Trigger};
@@ -312,6 +312,7 @@ struct Place {
 
 fn place(
     c: &Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     conn: &str,
     space_id: &str,
@@ -320,15 +321,15 @@ fn place(
     let space = spaces::get(c, space_id)?
         .filter(|s| s.workspace_id == ws)
         .ok_or_else(|| ApiError::not_found("空间"))?;
-    let (account, mode) = bindings::connection_account(c, ws, conn)?;
+    let (account, mode) = bindings::connection_account(r, ws, conn)?;
     let persona = match (mode, persona_id) {
         (Mode::Own, _) => None,
         (Mode::Bot, Some(id)) => Some(
-            personas::get(c, id)?
+            personas::get(r, id)?
                 .filter(|p| p.workspace_id == ws && !p.deleted)
                 .ok_or_else(|| ApiError::not_found("对外身份"))?,
         ),
-        (Mode::Bot, None) => bindings::effective(c, &space)?.map(|e| e.persona),
+        (Mode::Bot, None) => bindings::effective(r, &space)?.map(|e| e.persona),
     };
     let owner_user = compose::owner_user(c, ws, conn)?;
     let speaker = match (&persona, mode) {
@@ -782,14 +783,18 @@ pub fn default_send_delay_ms(mode: Mode) -> i64 {
 
 /// How long `row` waits after you approve it: its account's `send_delay_s`, else the default of its
 /// identity; a bot speaking for you (`on_behalf = proxy`) always waits like your own account.
-fn send_delay_ms(c: &Connection, row: &OutRow) -> ChannelResult<i64> {
+fn send_delay_ms(
+    c: &Connection,
+    r: &mut impl steve_store::Read,
+    row: &OutRow,
+) -> ChannelResult<i64> {
     if row.on_behalf == "proxy" {
         return Ok(SEND_DELAY_MS);
     }
     let space = spaces::get(c, &row.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
-    let (_, mode) = bindings::connection_account(c, &row.ws, &space.connection_id)?;
+    let (_, mode) = bindings::connection_account(r, &row.ws, &space.connection_id)?;
     let set =
-        spaces::channel_settings(c, &row.ws, &space.connection_id)?.and_then(|s| s.send_delay_s);
+        spaces::channel_settings(r, &row.ws, &space.connection_id)?.and_then(|s| s.send_delay_s);
     Ok(set.map_or(default_send_delay_ms(mode), |s| s.clamp(0, 60) * 1000))
 }
 
@@ -863,6 +868,7 @@ fn later_of(
             };
             let p = place(
                 c,
+                r,
                 &row.ws,
                 &space.connection_id,
                 &row.space_id,
@@ -969,7 +975,7 @@ fn nothing_left(
         message_id: row.id.clone(),
     });
     if let Some(d) = decision {
-        crate::presence::settle(tx, d, BY_NOTHING_LEFT)?;
+        tx.write(|w| crate::presence::settle(w, d, BY_NOTHING_LEFT))?;
     }
     base::audit(
         tx,
@@ -1224,7 +1230,7 @@ async fn rewrite_draft(
         if recovering && !matches!(new, Some(disclosure::Rewrite::Empty)) {
             replace_recovery_draft(tx, &mut row, decision_id, now)?;
         }
-        let mut q = format!("{}发到「{}」", l.p.speaker, spaces::display_title(tx, &l.p.space)?);
+        let mut q = format!("{}发到「{}」", l.p.speaker, tx.write(|w| spaces::display_title(w, &l.p.space))?);
         let text = match (&new, &checked) {
             (Some(disclosure::Rewrite::Kept(t)), Some(r)) => {
                 let leak = r.verdict != Verdict::Pass;
@@ -1341,7 +1347,7 @@ fn rewrite_failed(ch: &Channels, message_id: &str, decision_id: &str) -> Channel
             return Ok(());
         }
         let name = spaces::get(tx, &row.space_id)?
-            .map(|s| spaces::display_title(tx, &s))
+            .map(|s| tx.write(|w| spaces::display_title(w, &s)))
             .transpose()?
             .unwrap_or_default();
         open_approval(
@@ -1464,7 +1470,7 @@ async fn compose_instructed(
     message: &str,
     words: &str,
 ) -> ChannelResult<()> {
-    let plan = ch.store().reader(|c| plan_of(c, ws, message))?;
+    let plan = plan_of(ch.store(), ws, message)?;
     let r = match ch.responder().composer() {
         Some(composer) => {
             let opts = compose::ComposeOpts {
@@ -1556,7 +1562,7 @@ fn approve_draft(
     now: i64,
 ) -> ApiResult<i64> {
     let row = own_out(tx, ws, m)?;
-    let send_at = now + send_delay_ms(tx, &row)?;
+    let send_at = now + tx.write(|w| send_delay_ms(tx, w, &row))?;
     tx.write(|w| delivery_repo::transition(w, m, &["draft"], "pending", SentAt::Clear))?;
     base::decisions::settle(
         tx,
@@ -1622,12 +1628,12 @@ async fn send_chosen(
     text: &str,
     by: &str,
 ) -> ChannelResult<()> {
-    let plan = ch.store().reader(|c| plan_of(c, ws, message))?;
+    let plan = plan_of(ch.store(), ws, message)?;
     let t = OutTarget::reply(&plan);
     let now = ch.now();
     let (p, audience, said, seen) = ch.store().read(|r| {
         ch.store().reader(|c| -> ChannelResult<_> {
-            let p = place(c, &t.ws, &t.connection_id, &t.space_id, None)?;
+            let p = place(c, r, &t.ws, &t.connection_id, &t.space_id, None)?;
             let a = disclosure::space_audience(c, &p.space, &p.account, &p.owner_user)?;
             let seen = seen_of(c, r, ws, &t.space_id, message, p.mode, now)?;
             Ok((p, a, audience_said(c, &t)?, seen))
@@ -1803,8 +1809,9 @@ pub fn verify(c: &Tx, row: &OutRow, auth: &Auth, now: i64) -> ChannelResult<Resu
     let Some(space) = sending_space(c, row)? else {
         return Ok(Err("not in the chat".into()));
     };
-    let (account, mode) = bindings::connection_account(c, &row.ws, &space.connection_id)?;
-    if spaces::settings(c, &space.id)?.attention == spaces::Attention::Blocked {
+    let (account, mode) =
+        c.write(|w| bindings::connection_account(w, &row.ws, &space.connection_id))?;
+    if c.write(|w| spaces::settings(w, &space.id))?.attention == spaces::Attention::Blocked {
         return Ok(Err("space blocked".into()));
     }
     if row.sender_account_id.as_deref() != Some(account.as_str()) {
@@ -1846,10 +1853,10 @@ pub fn verify(c: &Tx, row: &OutRow, auth: &Auth, now: i64) -> ChannelResult<Resu
             })
         }
         Auth::Rule { source, act } => {
-            let set = spaces::settings(c, &space.id)?;
+            let set = c.write(|w| spaces::settings(w, &space.id))?;
             let rules_v = match &set.rules {
                 Some(r) => r.clone(),
-                None => spaces::channel_settings(c, &row.ws, &space.connection_id)?
+                None => c.write(|w| spaces::channel_settings(w, &row.ws, &space.connection_id))?
                     .map(|s| s.rules)
                     .unwrap_or(Value::Null),
             };
@@ -1865,7 +1872,7 @@ pub fn verify(c: &Tx, row: &OutRow, auth: &Auth, now: i64) -> ChannelResult<Resu
                 && src.is_some_and(|(ext, _, _)| ext.is_some() && ext == row.reply_to)
         }
         Auth::Trigger { source } => {
-            crate::arbiter::command(c, &row.ws, &space, &space.connection_id, source)?.is_some()
+            c.write(|w| crate::arbiter::command(c, w, &row.ws, &space, &space.connection_id, source))?.is_some()
         }
         // only a grant for the flow version the run is running
         Auth::Grant {
@@ -1992,10 +1999,10 @@ fn prepare_send(ch: &Channels, row: &OutRow, auth: &Auth) -> ChannelResult<Prepa
             // as the account it was written for, or not at all (your answer, you no longer there)
             let space = sending_space(c, &row)?
                 .ok_or_else(|| ApiError::rule("你的账号已经不在这个聊天里，不再回复"))?;
-            let (account, mode) = bindings::connection_account(c, &row.ws, &space.connection_id)?;
+            let (account, mode) = bindings::connection_account(r, &row.ws, &space.connection_id)?;
             // the answer to a trigger word: `[AI] `-marked and placed as its settings say
             let trigger = (row.on_behalf == "proxy")
-                .then(|| spaces::channel_settings(c, &row.ws, &space.connection_id))
+                .then(|| spaces::channel_settings(r, &row.ws, &space.connection_id))
                 .transpose()?
                 .flatten()
                 .map(|s| Trigger::from_value(&s.trigger));
@@ -2003,7 +2010,7 @@ fn prepare_send(ch: &Channels, row: &OutRow, auth: &Auth) -> ChannelResult<Prepa
                 .ok_or_else(|| {
                     steve_store::StoreError::Storage("sending connection disappeared".into())
                 })?;
-            let text = Outbox::final_text(c, &row)?;
+            let text = Outbox::final_text(r, &row)?;
             // `[AI] ` only on what YOLO approved in your name (your account, or your trigger words);
             // anything else loses a mark it brought along, so the mark cannot be faked
             let by_yolo = match auth {
@@ -2083,7 +2090,7 @@ fn claim_permission(
     // space no longer lets Steve reply for you: what YOLO or a rule let out is dropped; what
     // you approved yourself goes (crate::presence, gate 4)
     if !approved_by_you(tx, auth)?
-        && let Some(e) = crate::presence::stop_out(tx, &row.ws, &row.id, now)?
+        && let Some(e) = tx.write(|w| crate::presence::stop_out(w, &row.ws, &row.id, now))?
     {
         drop_for_you(tx, &row, &["pending", "unknown"], None, &e)?;
         return Ok(Some(SendOutcome::Skipped));
@@ -2108,21 +2115,28 @@ fn claim_permission(
         set_status(tx, &row.id, &["pending", "unknown"], "draft")?;
         tx.write(|w| send_state::forget(w, &row.id))?;
         let space = spaces::get(tx, &row.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
-        let speaker = place(
-            tx,
-            &row.ws,
-            &space.connection_id,
-            &row.space_id,
-            row.persona_id.as_deref(),
-        )?
-        .speaker;
+        let speaker = tx
+            .write(|w| {
+                place(
+                    tx,
+                    w,
+                    &row.ws,
+                    &space.connection_id,
+                    &row.space_id,
+                    row.persona_id.as_deref(),
+                )
+            })?
+            .speaker;
         let d = match base::decisions::open_for(tx, &row.ws, SUBJECT_MESSAGE, &row.id)? {
             Some(d) if d.kind == "approve" => d.id,
             _ => open_approval(
                 tx,
                 &row.ws,
                 &row.id,
-                format!("{speaker}发到「{}」", spaces::display_title(tx, &space)?),
+                format!(
+                    "{speaker}发到「{}」",
+                    tx.write(|w| spaces::display_title(w, &space))?
+                ),
                 &row.text,
                 false,
             )?,
@@ -2165,7 +2179,7 @@ impl Outbox {
                 messages::event(tx, &row.ws, &row.space_id, &row.id);
                 return Ok(Err(SendOutcome::Skipped));
             }
-            if crate::notifications::deferred(tx, &row.id, now)? {
+            if tx.write(|w| crate::notifications::deferred(w, &row.id, now))? {
                 tx.execute("UPDATE personal_notifications SET next_attempt_at=? WHERE delivery_id=(SELECT id FROM output_deliveries WHERE message_id=?)",params![now+10_000,row.id])?;
                 return Ok(Err(SendOutcome::Skipped));
             }
@@ -2201,7 +2215,13 @@ impl Outbox {
                     )
                     .optional()?;
             let window = adapter
-                .and_then(|(conn, a)| self.send_dedup(ch, tx, &row.ws, &conn, &a))
+                .and_then(|(conn, a)| {
+                    tx.write(|w| {
+                        Ok::<_, steve_store::StoreError>(self.send_dedup(ch, w, &row.ws, &conn, &a))
+                    })
+                    .ok()
+                    .flatten()
+                })
                 .map(|d| d.as_millis() as i64);
             if !window.is_some_and(|w| now < first + w) {
                 tx.write(|w| {
@@ -2297,7 +2317,7 @@ impl SendAttempt<'_> {
                         &row.id,
                         format!(
                             "发到「{}」{}",
-                            spaces::display_title(tx, &space)?,
+                            tx.write(|w| spaces::display_title(w, &space))?,
                             check_note(&check)
                         ),
                         &row.text,
@@ -2379,7 +2399,7 @@ impl SendAttempt<'_> {
                 messages::event(tx, &row.ws, &row.space_id, &row.id);
                 return Ok(None);
             }
-            if crate::notifications::deferred(tx, &row.id, now)?
+            if tx.write(|w| crate::notifications::deferred(w, &row.id, now))?
                 || verify(tx, &row, auth, now)?.is_err()
                 || tx.write(|w| may_write_in(w, &row.ws, &space.connection_id, cap))?.is_err()
             {
@@ -2583,6 +2603,7 @@ fn prepare_delivery(
         ch.store().reader(|c| -> ChannelResult<_> {
             let p = place(
                 c,
+                r,
                 &t.ws,
                 &t.connection_id,
                 &t.space_id,
@@ -2712,7 +2733,7 @@ impl Outbox {
             return Ok(Some(Delivered::Skipped));
         }
         if let Some(e) = envelope
-            && let Some(d) = ch.store().reader(|c| crate::pipeline::existing(c, e))?
+            && let Some(d) = ch.store().read(|r| crate::pipeline::existing(r, e))?
         {
             return Ok(Some(crate::pipeline::outcome(&d)));
         }
@@ -2862,7 +2883,7 @@ impl DeliveryWrite<'_> {
         let proxy = self.proxy;
         // Concurrent submissions serialize here, before either can create a second message.
         if let Some(e) = envelope
-            && let Some(d) = crate::pipeline::existing(tx, e)?
+            && let Some(d) = tx.write(|w| crate::pipeline::existing(w, e))?
         {
             return Ok((String::new(), None, Some(crate::pipeline::outcome(&d))));
         }
@@ -2948,7 +2969,7 @@ impl DeliveryWrite<'_> {
             let mut q = format!(
                 "{}发到「{}」",
                 p.speaker,
-                spaces::display_title(tx, &p.space)?
+                tx.write(|w| spaces::display_title(w, &p.space))?
             );
             if later {
                 q.push_str(CHECKING_NOTE);
@@ -3024,12 +3045,12 @@ impl Outbox {
     fn send_dedup(
         &self,
         ch: &Channels,
-        c: &Connection,
+        r: &mut impl steve_store::Read,
         ws: &str,
         conn: &str,
         adapter: &str,
     ) -> Option<Duration> {
-        let own = bindings::connection_account(c, ws, conn).is_ok_and(|(_, m)| m == Mode::Own);
+        let own = bindings::connection_account(r, ws, conn).is_ok_and(|(_, m)| m == Mode::Own);
         match (own, self.as_user.get(adapter)) {
             (true, Some(u)) => u.send_dedup(),
             _ => ch.adapter(adapter).and_then(|a| a.send_dedup()),
@@ -3141,12 +3162,12 @@ impl Outbox {
     }
 
     /// The final text: the persona's signature, or “（由 Steve 代发）” after your trigger words.
-    fn final_text(c: &Connection, row: &OutRow) -> ChannelResult<String> {
+    fn final_text(r: &mut impl steve_store::Read, row: &OutRow) -> ChannelResult<String> {
         let mut text = row.text.trim_end().to_string();
         // a trigger word's answer is marked `[AI] ` where it goes out (`send_as`), not here
         if row.on_behalf != "proxy"
             && let Some(pid) = &row.persona_id
-            && let Some(p) = personas::get(c, pid)?
+            && let Some(p) = personas::get(r, pid)?
         {
             let sig = p.signature.trim();
             if !sig.is_empty() && !text.ends_with(sig) {
@@ -3304,7 +3325,7 @@ impl Outbox {
                     Some(open_fail(
                         tx,
                         row,
-                        blocked_notice(scope, &spaces::display_title(tx, &space)?, error),
+                        blocked_notice(scope, &tx.write(|w| spaces::display_title(w, &space))?, error),
                         &BLOCKED_OPTIONS,
                     )?)
                 } else {
@@ -3331,7 +3352,7 @@ impl Outbox {
                     row,
                     format!(
                         "发到「{}」的消息没有发出去：{error}。请先到“接入”核对这项权限：平台缺少 scope 时需管理员开通后重新授权；Steve 本地关闭的代发能力可创建可审阅、可撤销的授权改动。权限处理后点重试；修改会重新审阅；不发送会关闭本条消息。清除拒绝缓存不会授予权限",
-                        spaces::display_title(tx, &space)?
+                        tx.write(|w| spaces::display_title(w, &space))?
                     ),
                     &BLOCKED_OPTIONS,
                 )?
@@ -3339,7 +3360,7 @@ impl Outbox {
                 open_fail(
                     tx,
                     row,
-                    format!("发到「{}」的消息没有发出去：{error}", spaces::display_title(tx, &space)?),
+                    format!("发到「{}」的消息没有发出去：{error}", tx.write(|w| spaces::display_title(w, &space))?),
                     &FAIL_OPTIONS,
                 )?
             };
@@ -3384,19 +3405,23 @@ impl Outbox {
     fn expire_stale(&self, ch: &Channels) -> ChannelResult<usize> {
         let now = ch.now();
         let after = lock(&self.expiry_cursor).clone();
-        let (page, due) = ch.store().reader(|c| -> ChannelResult<_> {
-            let page = stale_cards(c, now, after.as_ref())?;
-            let mut due = Vec::new();
-            for card in &page {
-                let yours = match card.kind.as_str() {
-                    "ask" => spaces::speaks_as_you(c, &card.ws, &card.space, None)?,
-                    _ => crate::presence::answered_message(c, &card.ws, &card.subject)?.is_some(),
-                };
-                if yours {
-                    due.push(card.clone());
+        let (page, due) = ch.store().read(|r| {
+            ch.store().reader(|c| -> ChannelResult<_> {
+                let page = stale_cards(c, now, after.as_ref())?;
+                let mut due = Vec::new();
+                for card in &page {
+                    let yours = match card.kind.as_str() {
+                        "ask" => spaces::speaks_as_you(r, &card.ws, &card.space, None)?,
+                        _ => {
+                            crate::presence::answered_message(r, &card.ws, &card.subject)?.is_some()
+                        }
+                    };
+                    if yours {
+                        due.push(card.clone());
+                    }
                 }
-            }
-            Ok((page, due))
+                Ok((page, due))
+            })
         })?;
         *lock(&self.expiry_cursor) = if page.len() < EXPIRY_PAGE {
             None
@@ -3416,7 +3441,7 @@ impl Outbox {
                     }
                     discarded.push(card.subject.clone());
                 }
-                if crate::presence::settle(tx, &card.id, crate::decide::BY_EXPIRY)? {
+                if tx.write(|w| crate::presence::settle(w, &card.id, crate::decide::BY_EXPIRY))? {
                     closed += 1;
                     base::audit(
                         tx,
@@ -3660,7 +3685,7 @@ impl Outbox {
                 let item = match prior {
                     Some(item) => item,
                     None => {
-                        let mut plan = ch.store().reader(|c| plan_of(c, &ws, &source))?;
+                        let mut plan = plan_of(ch.store(), &ws, &source)?;
                         plan.act = Act::CreateItem(ItemMode::Start);
                         ch.responder().to_item(ch, &plan).await?
                             .and_then(|a| a.item_id)
@@ -3764,7 +3789,7 @@ impl Outbox {
                 &row,
                 format!(
                     "发到「{}」的回复中途被打断，没有及时发出；现在还要发吗",
-                    spaces::display_title(tx, &space)?
+                    tx.write(|w| spaces::display_title(w, &space))?
                 ),
                 &FAIL_OPTIONS,
             )?;
@@ -3777,7 +3802,7 @@ impl Outbox {
     /// counted from the first try) sent again as they were, so a repeat is dropped; after it, or
     /// without one, you are asked whether it went out ([`UNKNOWN_OPTIONS`]), once.
     async fn settle_unknown(&self, ch: &Channels, now: i64) -> usize {
-        let rows = ch.store().reader(|c| -> ChannelResult<Vec<Unknown>> {
+        let rows = ch.store().read(|r| ch.store().reader(|c| -> ChannelResult<Vec<Unknown>> {
             let mut st = c.prepare_cached(
                 "SELECT m.id, m.workspace_id, c.id, c.adapter, s.first_at FROM chan_messages m
                    JOIN spaces sp ON sp.id = m.space_id JOIN connections c ON c.id = sp.connection_id
@@ -3802,10 +3827,10 @@ impl Outbox {
             Ok(v
                 .into_iter()
                 .map(|(m, ws, conn, adapter, first)| {
-                    (m, self.send_dedup(ch, c, &ws, &conn, &adapter), first)
+                    (m, self.send_dedup(ch, r, &ws, &conn, &adapter), first)
                 })
                 .collect())
-        });
+        }));
         let rows = match rows {
             Ok(r) => r,
             Err(e) => {
@@ -3851,7 +3876,7 @@ impl Outbox {
                 &row,
                 format!(
                     "发到「{}」的消息可能已经发出（没有收到对方的确认），请到那边看一下",
-                    spaces::display_title(tx, &space)?
+                    tx.write(|w| spaces::display_title(w, &space))?
                 ),
                 &UNKNOWN_OPTIONS,
             )?;
@@ -3923,11 +3948,11 @@ impl Outbox {
         if item.status == "drop" {
             return Ok(None);
         }
-        let found = ch.store().reader(|c| -> ChannelResult<_> {
-            let Some(msg) = source_message(c, &item.workspace_id, &item.id)? else {
+        let found = ch.store().read(|r| ch.store().reader(|c| -> ChannelResult<_> {
+            let Some(msg) = source_message(r, &item.workspace_id, &item.id)? else {
                 return Ok(None);
             };
-            let plan = plan_of(c, &item.workspace_id, &msg)?;
+            let plan = plan_in(c, r, &item.workspace_id, &msg)?;
             // the chat's own message was handed to Steve by a reply rule (its conversation turn says so): the
             // report goes where that answer went
             let replied: bool = c.query_row(
@@ -3945,12 +3970,12 @@ impl Outbox {
                 && replied
                 && match spaces::get(c, &plan.space_id)? {
                     Some(s) => {
-                        crate::conversations::owner_only(c, &plan.ws, &s, &plan.connection_id)?
+                        crate::conversations::owner_only(c, r, &plan.ws, &s, &plan.connection_id)?
                     }
                     None => false,
                 };
             Ok(Some((plan, delivery_summary(c, item)?, mine)))
-        })?;
+        }))?;
         let Some((plan, summary, mine)) = found else {
             return Ok(None);
         };
@@ -3958,8 +3983,10 @@ impl Outbox {
         // done (`react_item_ended`) — progress and failures were said on the way (trigger_report)
         if ch
             .store()
-            .reader(|c| {
-                crate::command_skill::trigger_plan(c, &item.workspace_id, &plan.message_id)
+            .read(|r| {
+                ch.store().reader(|c| {
+                    crate::command_skill::trigger_plan(c, r, &item.workspace_id, &plan.message_id)
+                })
             })?
             .is_some()
         {
@@ -3996,19 +4023,22 @@ impl Outbox {
         item_id: &str,
         text: &str,
     ) -> ChannelResult<String> {
-        let plan = ch.store().reader(|c| -> ChannelResult<_> {
-            match source_message(c, ws, item_id)? {
-                Some(m) => Ok(Some(plan_of(c, ws, &m)?)),
-                None => Ok(None),
-            }
+        let plan = ch.store().read(|r| {
+            ch.store().reader(|c| -> ChannelResult<_> {
+                match source_message(r, ws, item_id)? {
+                    Some(m) => Ok(Some(plan_in(c, r, ws, &m)?)),
+                    None => Ok(None),
+                }
+            })
         })?;
         let Some(plan) = plan else {
             return Ok(SRC_NO_SOURCE.into());
         };
         // progress on an answer to your trigger word: said as you, where the answer went
-        let as_trigger = ch
-            .store()
-            .reader(|c| crate::command_skill::trigger_plan(c, ws, &plan.message_id))?;
+        let as_trigger = ch.store().read(|r| {
+            ch.store()
+                .reader(|c| crate::command_skill::trigger_plan(c, r, ws, &plan.message_id))
+        })?;
         let (plan, req) = match as_trigger {
             Some(tp) => {
                 let req = OutRequest {
@@ -4099,7 +4129,7 @@ impl Outbox {
                     )
                     .optional()?
                     .unwrap_or_default();
-                let mode = bindings::connection_account(c, ws, &conn)
+                let mode = bindings::connection_account(r, ws, &conn)
                     .map(|(_, m)| m)
                     .unwrap_or(Mode::Bot);
                 let msg = crate::messages::message_ref(r, id, &conn)?
@@ -4198,14 +4228,12 @@ pub fn done_text(item: &str, summary: &str) -> String {
 }
 
 /// The chat message an item was made from (`links(item, 'from', 'chan_message', …)`).
-pub fn source_message(c: &Connection, ws: &str, item: &str) -> ChannelResult<Option<String>> {
-    Ok(c.query_row(
-        "SELECT object_id FROM links WHERE workspace_id = ? AND subject_type = 'item' AND subject_id = ?
-            AND predicate = 'from' AND object_type = 'chan_message' ORDER BY created LIMIT 1",
-        params![ws, item],
-        |r| r.get(0),
-    )
-    .optional()?)
+pub fn source_message(
+    r: &mut impl steve_store::Read,
+    ws: &str,
+    item: &str,
+) -> ChannelResult<Option<String>> {
+    Ok(steve_store::link_repo::item_channel_source(r, ws, item)?)
 }
 
 /// One sentence of what an item delivered: the summary of its last delivery (the `accept` decision's
@@ -4303,10 +4331,10 @@ fn drop_for_you(
     set_status(tx, &row.id, from, DISCARDED)?;
     tx.write(|w| send_state::forget(w, &row.id))?;
     if let Some(d) = decision {
-        crate::presence::settle(tx, d, stop.why())?;
+        tx.write(|w| crate::presence::settle(w, d, stop.why()))?;
     }
     if let Some(d) = base::decisions::open_for(tx, &row.ws, SUBJECT_MESSAGE, &row.id)? {
-        crate::presence::settle(tx, &d.id, stop.why())?;
+        tx.write(|w| crate::presence::settle(w, &d.id, stop.why()))?;
     }
     base::audit(
         tx,
@@ -4386,7 +4414,7 @@ impl MessageDecisions {
         // the space no longer lets Steve say for you (crate::presence, gate 3)
         if cx.choice == "yes"
             && cx.actor == b1::YOLO_ACTOR
-            && let Some(e) = crate::presence::stop_out(tx, cx.ws, &row.id, now)?
+            && let Some(e) = tx.write(|w| crate::presence::stop_out(w, cx.ws, &row.id, now))?
         {
             drop_for_you(tx, &row, &["draft"], Some(&d.id), &e)?;
             self.0.push(After::Discarded {
@@ -4436,7 +4464,7 @@ impl MessageDecisions {
                 let send_at = if cx.actor == b1::YOLO_ACTOR {
                     now
                 } else {
-                    now + send_delay_ms(tx, &row)?
+                    now + tx.write(|w| send_delay_ms(tx, w, &row))?
                 };
                 approve_message_text(tx, &row.id, &d.id, &text)?;
                 base::audit(
@@ -4481,7 +4509,7 @@ impl MessageDecisions {
             "to_item" if d.options.iter().any(|o| o == "to_item") => {
                 let source =
                     draft_source(tx, &row)?.ok_or_else(|| ApiError::not_found("原消息"))?;
-                plan_of(tx, cx.ws, &source)?;
+                tx.write(|w| plan_in(tx, w, cx.ws, &source))?;
                 set_status(tx, &row.id, &["draft"], DISCARDED)?;
                 result["source_message"] = json!(source);
                 self.0.push(After::Discarded {
@@ -4512,7 +4540,7 @@ impl MessageDecisions {
         // nor retries it (gate 3)
         if cx.choice == "retry"
             && cx.actor == b1::YOLO_ACTOR
-            && let Some(e) = crate::presence::stop_out(tx, cx.ws, &row.id, now)?
+            && let Some(e) = tx.write(|w| crate::presence::stop_out(w, cx.ws, &row.id, now))?
         {
             drop_for_you(tx, &row, &["failed", "unknown"], Some(&d.id), &e)?;
             result["superseded"] = json!(e.why());
@@ -4618,7 +4646,7 @@ impl MessageDecisions {
                 if text.chars().count() > TEXT_MAX {
                     return Err(ApiError::invalid("text"));
                 }
-                plan_of(tx, cx.ws, &d.subject_id)?;
+                tx.write(|w| plan_in(tx, w, cx.ws, &d.subject_id))?;
                 result["by"] = json!(cx.actor);
             }
             respond::VERBATIM => {
@@ -4630,7 +4658,7 @@ impl MessageDecisions {
                 if text.chars().count() > TEXT_MAX {
                     return Err(ApiError::invalid("text"));
                 }
-                let plan = plan_of(tx, cx.ws, &d.subject_id)?;
+                let plan = tx.write(|w| plan_in(tx, w, cx.ws, &d.subject_id))?;
                 let (m, dd, send_at) = self.approve_as_you(tx, cx, &plan, text, &d.id, now)?;
                 result["draft_message"] = json!(m);
                 result["draft_decision"] = json!(dd);
@@ -4641,16 +4669,16 @@ impl MessageDecisions {
                 if cx.text.trim().is_empty() {
                     return Err(ApiError::rule(steve_i18n::t!("channels.error.reply_empty")));
                 }
-                plan_of(tx, cx.ws, &d.subject_id)?;
+                tx.write(|w| plan_in(tx, w, cx.ws, &d.subject_id))?;
             }
             respond::DRAFT_REPLY => {
-                let plan = plan_of(tx, cx.ws, &d.subject_id)?;
+                let plan = tx.write(|w| plan_in(tx, w, cx.ws, &d.subject_id))?;
                 let (m, dd) = respond::open_draft(tx, &plan, cx.text.trim(), now)?;
                 result["draft_message"] = json!(m);
                 result["draft_decision"] = json!(dd);
             }
             "to_item" => {
-                plan_of(tx, cx.ws, &d.subject_id)?;
+                tx.write(|w| plan_in(tx, w, cx.ws, &d.subject_id))?;
                 result["source_message"] = json!(d.subject_id);
             }
             "done" => {}

@@ -77,9 +77,9 @@ pub const LABEL_YOU_THERE: &str = "⭐ 星标联系人，你已在这里，不�
 
 /// The space is set aside for the star: 不提醒 or 屏蔽, or `reply_as_you = off` (Steve leaves it
 /// alone on your account).
-pub fn set_aside(c: &Connection, space: &str) -> ChannelResult<bool> {
-    let set = spaces::settings(c, space)?;
-    Ok(set.attention >= Attention::Quiet || spaces::reply_as_you(c, space)? == ReplyAsYou::Off)
+pub fn set_aside(r: &mut impl steve_store::Read, space: &str) -> ChannelResult<bool> {
+    let set = spaces::settings(r, space)?;
+    Ok(set.attention >= Attention::Quiet || set.reply_as_you == ReplyAsYou::Off)
 }
 
 /// How a message reached you, in the notification.
@@ -232,12 +232,12 @@ impl Channels {
                     return Ok(None);
                 };
                 if !crate::decide::starred(tx, ws, m.party.as_deref())?
-                    || set_aside_chat(tx, ws, &m.space)?
+                    || tx.write(|w| set_aside_chat(w, ws, &m.space))?
                 {
                     return Ok(None);
                 }
                 let mut best: Option<Alert> = None;
-                for o in owners(tx, ws, conn, &m.space, copy.clone())? {
+                for o in tx.write(|w| owners(tx, w, ws, conn, &m.space, copy.clone()))? {
                     let Some((dm, mentioned)) = meant(tx, ws, &m, &o)? else {
                         continue;
                     };
@@ -300,6 +300,7 @@ fn stored(c: &Connection, ws: &str, id: &str) -> ChannelResult<Option<Stored>> {
 /// connection with a space for the same chat (by what is stored only).
 fn owners(
     c: &Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     conn: &str,
     space: &str,
@@ -324,7 +325,7 @@ fn owners(
     for (k, cp) in std::iter::once((conn.to_string(), copy.unwrap_or_default()))
         .chain(others.into_iter().map(|o| (o, OwnCopy::default())))
     {
-        if let Some((user, account)) = own_user(c, ws, &k)?
+        if let Some((user, account)) = own_user(r, ws, &k)?
             && !out.iter().any(|o: &Owner| o.user == user)
         {
             out.push(Owner {
@@ -404,7 +405,10 @@ fn alert(
     mentioned: bool,
     now: i64,
 ) -> ChannelResult<Alert> {
-    if crate::presence::owner_engaged_chat(tx, ws, &m.id, now)?.is_some() {
+    if tx
+        .write(|w| crate::presence::owner_engaged_chat(w, ws, &m.id, now))?
+        .is_some()
+    {
         return Ok(Alert::YouThere);
     }
     let (sender, text, attachments, space): (String, String, Option<String>, String) = tx
@@ -443,17 +447,20 @@ fn alert(
 
 /// The chat of stored space `space` is set aside for the star in any connection's space for it
 /// ([`set_aside`]): what you said about the chat holds whichever identity received the message.
-pub fn set_aside_chat(c: &Connection, ws: &str, space: &str) -> ChannelResult<bool> {
-    let mut st = c.prepare_cached(
-        "SELECT o.id FROM spaces s JOIN spaces o ON o.workspace_id = s.workspace_id AND o.external_id = s.external_id
-          WHERE s.id = ?1 AND s.workspace_id = ?2
-         UNION SELECT ?1",
-    )?;
-    let ids = st
-        .query_map(params![space, ws], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for id in ids {
-        if set_aside(c, &id)? {
+pub fn set_aside_chat(
+    r: &mut impl steve_store::Read,
+    ws: &str,
+    space: &str,
+) -> ChannelResult<bool> {
+    use steve_store::channel_spaces::rows;
+    if set_aside(r, space)? {
+        return Ok(true);
+    }
+    let Some(row) = rows::get_in_workspace(r, ws, space)? else {
+        return Ok(false);
+    };
+    for other in rows::by_chat(r, ws, &row.external_id)? {
+        if other.id != space && set_aside(r, &other.id)? {
             return Ok(true);
         }
     }
@@ -462,19 +469,17 @@ pub fn set_aside_chat(c: &Connection, ws: &str, space: &str) -> ChannelResult<bo
 
 /// The user whose own account connection `conn` is (`Mode::Own`: its account's contact is a
 /// user's), with that account; `None` for a bot's connection.
-fn own_user(c: &Connection, ws: &str, conn: &str) -> ChannelResult<Option<(String, String)>> {
-    let (account, mode) = crate::bindings::connection_account(c, ws, conn)?;
+fn own_user(
+    r: &mut impl steve_store::Read,
+    ws: &str,
+    conn: &str,
+) -> ChannelResult<Option<(String, String)>> {
+    let (account, mode) = crate::bindings::connection_account(r, ws, conn)?;
     if mode != Mode::Own {
         return Ok(None);
     }
-    Ok(c.query_row(
-        "SELECT p.user_id FROM connections c JOIN accounts a ON a.id = c.account_id
-           JOIN parties p ON p.id = a.party_id
-          WHERE c.id = ? AND c.workspace_id = ?",
-        params![conn, ws],
-        |r| r.get::<_, Option<String>>(0),
+    Ok(
+        steve_store::connections::lifecycle::personal_user(r, ws, conn)?
+            .map(|user| (user, account)),
     )
-    .optional()?
-    .flatten()
-    .map(|u| (u, account)))
 }

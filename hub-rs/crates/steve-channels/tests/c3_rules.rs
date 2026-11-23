@@ -133,7 +133,7 @@ fn set_rules(h: &H, conn: &str, rules: Value) {
     let now = h.ch.now();
     h.env
         .store()
-        .transaction(|tx| spaces::set_account_rules(tx, &viewer(), conn, &rules, now))
+        .write(|tx| spaces::set_account_rules(tx, &viewer(), conn, &rules, now))
         .expect("rules");
 }
 
@@ -235,7 +235,7 @@ async fn setup() -> H {
         let now = h.ch.now();
         h.env
             .store()
-            .transaction(|tx| bindings::set_account_default(tx, &viewer(), conn, &p, now))
+            .write(|tx| bindings::set_account_default(tx, &viewer(), conn, &p, now))
             .expect("bind");
     }
     // the accounts' rules (channel-data.ts)
@@ -518,7 +518,7 @@ async fn your_account_drafts_records_and_takes_trigger_words() {
     let err = h
         .env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             spaces::set_account_rules(
                 tx,
                 &viewer(),
@@ -1177,7 +1177,7 @@ async fn default_rules_of_a_new_own_account() {
     let s = h
         .env
         .store()
-        .reader(|c| spaces::channel_settings(c, WS, &con))
+        .read(|c| spaces::channel_settings(c, WS, &con))
         .expect("settings")
         .expect("row");
     assert_eq!(

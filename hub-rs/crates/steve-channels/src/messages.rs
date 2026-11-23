@@ -9,10 +9,12 @@ use std::time::Duration;
 use rusqlite::types::Value as Sql;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use steve_modules::contacts::{TimelineEntry, TimelineSource};
 use steve_modules::{ApiResult, Modules};
 use steve_store::base::Viewer;
+use steve_store::channel_message_repo::projection::{self, Before};
+use steve_store::channel_message_repo::retention as stored_retention;
 use steve_store::{Read, Store, StoreError, Tx};
 
 use crate::ChannelResult;
@@ -48,47 +50,6 @@ pub(crate) fn our_echo(
         .into_iter()
         .find(|candidate| crate::arbiter::same_text(&candidate.text, text))
         .map(|candidate| (candidate.id, candidate.space)))
-}
-
-/// The same provider message stored under another connection of the workspace, where one of the
-/// two is your own (`mode=self`): the self poller and a bot's long connection see the same chat
-/// (same `chat_id`, same `message_id`) as different spaces. `(message, space)`.
-pub fn seen_elsewhere(
-    c: &Connection,
-    ws: &str,
-    conn: &str,
-    own: bool,
-    space_ext: &str,
-    ext: &str,
-) -> ChannelResult<Option<(String, String)>> {
-    // which copy reached your own account: by the identities that received it (`seen_by`)
-    let own_copy = crate::spaces::reached_own_sql("m", "cs");
-    Ok(c.query_row(
-        &format!("SELECT m.id, m.space_id FROM chan_messages m JOIN spaces s ON s.id = m.space_id
-           LEFT JOIN channel_settings cs ON cs.connection_id = s.connection_id
-          WHERE s.workspace_id = ?1 AND s.connection_id <> ?2 AND s.external_id = ?3 AND m.external_id = ?4
-            AND m.direction = 'in' AND (?5 OR {own_copy})
-          ORDER BY m.created, m.id LIMIT 1"),
-        params![ws, conn, space_ext, ext, own],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )
-    .optional()?)
-}
-
-/// Is one of these provider ids a message the account wrote in this space (your own messages
-/// come in as `direction=in` on a self connection)?
-pub fn is_by(c: &Connection, space: &str, exts: &[&str], account: &str) -> ChannelResult<bool> {
-    for e in exts {
-        let hit: bool = c.query_row(
-            "SELECT EXISTS (SELECT 1 FROM chan_messages WHERE space_id = ? AND external_id = ? AND sender_account_id = ?)",
-            params![space, e, account],
-            |r| r.get(0),
-        )?;
-        if hit {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 /// The `n` messages before `id` in its space, oldest first: `(sender name, text)` (purged ones
@@ -148,21 +109,6 @@ fn named_lines(
         .collect())
 }
 
-/// Is one of these provider ids a message Steve sent in this space (`im.reply`)?
-pub fn is_ours_out(c: &Connection, space: &str, exts: &[&str]) -> ChannelResult<bool> {
-    for e in exts {
-        let hit: bool = c.query_row(
-            "SELECT EXISTS (SELECT 1 FROM chan_messages WHERE space_id = ? AND external_id = ? AND direction = 'out')",
-            params![space, e],
-            |r| r.get(0),
-        )?;
-        if hit {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 /// SSE `{type:"chan_message", id, space_id, ws}`.
 pub fn event(tx: &Tx, ws: &str, space: &str, id: &str) {
     tx.publish(steve_types::DomainEvent::from(
@@ -214,66 +160,43 @@ pub struct ChanMessage {
     pub open_url: Option<String>,
 }
 
-const MSG_COLS: &str = "m.id, m.space_id, m.direction, coalesce(a.display_name, a.handle_display, p.name, ''), m.sender_party_id,
-    m.sender_account_id, m.persona_id, m.on_behalf, m.text, m.attachments, m.mentions, m.status, m.thread_key, m.reply_to,
-    m.event_id, m.work_item_id, m.decision_id, m.created, m.sent, m.purged, m.history";
-const MSG_FROM: &str = "FROM chan_messages m LEFT JOIN accounts a ON a.id = m.sender_account_id
-    LEFT JOIN parties p ON p.id = m.sender_party_id";
-
-fn jv(s: Option<String>) -> Value {
-    s.and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| json!([]))
-}
-
-fn msg_row(r: &rusqlite::Row) -> rusqlite::Result<ChanMessage> {
-    let name: String = r.get(3)?;
-    Ok(ChanMessage {
-        id: r.get(0)?,
-        space_id: r.get(1)?,
-        direction: r.get(2)?,
+fn projected(r: &mut impl Read, row: projection::Message) -> ChannelResult<ChanMessage> {
+    let mut m = ChanMessage {
+        id: row.id,
+        space_id: row.space_id,
+        direction: row.direction,
         sender: SenderOut {
-            name,
-            party_id: r.get(4)?,
-            account_id: r.get(5)?,
+            name: row.sender_name,
+            party_id: row.sender_party_id,
+            account_id: row.sender_account_id,
         },
-        persona_id: r.get(6)?,
-        on_behalf: r.get(7)?,
-        text: r.get(8)?,
-        attachments: jv(r.get(9)?),
-        mentions: jv(r.get(10)?),
-        status: r.get(11)?,
-        thread_key: r.get(12)?,
-        reply_to: crate::fallback::platform(r.get(13)?),
-        event_id: r.get(14)?,
-        work_item_id: r.get(15)?,
-        decision_id: r.get(16)?,
-        created: r.get(17)?,
-        sent: r.get(18)?,
-        purged: r.get(19)?,
+        persona_id: row.persona_id,
+        on_behalf: row.on_behalf,
+        text: row.text,
+        attachments: row.attachments,
+        mentions: row.mentions,
+        status: row.status,
+        thread_key: row.thread_key,
+        reply_to: crate::fallback::platform(row.reply_to),
+        event_id: row.event_id,
+        work_item_id: row.work_item_id,
+        decision_id: row.decision_id,
+        created: row.created,
+        sent: row.sent,
+        purged: row.purged,
         basis: Value::Null,
-        history: r.get(20)?,
+        history: row.history,
         open_url: None,
-    })
+    };
+    with_basis(r, &mut m)?;
+    Ok(m)
 }
 
 pub fn get(store: &Store, id: &str) -> ChannelResult<Option<ChanMessage>> {
     store.read(|r| {
-        store.reader(|c| {
-            let m = c
-                .query_row(
-                    &format!("SELECT {MSG_COLS} {MSG_FROM} WHERE m.id = ?"),
-                    [id],
-                    msg_row,
-                )
-                .optional()?;
-            match m {
-                Some(mut m) => {
-                    with_basis(r, &mut m)?;
-                    Ok(Some(m))
-                }
-                None => Ok(None),
-            }
-        })
+        projection::get(r, id)?
+            .map(|row| projected(r, row))
+            .transpose()
     })
 }
 
@@ -336,21 +259,7 @@ pub fn page(
     before: Option<i64>,
     limit: usize,
 ) -> ChannelResult<Vec<ChanMessage>> {
-    store.read(|r| {
-        store.reader(|c| {
-            let mut st = c.prepare_cached(&format!(
-        "SELECT {MSG_COLS} {MSG_FROM} WHERE m.space_id = ?1 AND (?2 IS NULL OR m.created < ?2)
-          ORDER BY m.created DESC, m.id DESC LIMIT ?3"
-    ))?;
-            let mut rows = st
-                .query_map(params![space, before, limit as i64], msg_row)?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            for m in &mut rows {
-                with_basis(r, m)?;
-            }
-            Ok(rows)
-        })
-    })
+    project_page(store, space, before.map(Before::Time), limit)
 }
 
 /// Like [`page`], with an exact cursor: the messages strictly before `(created, id)` (all when
@@ -362,25 +271,25 @@ pub fn page_before(
     before: Option<(i64, &str)>,
     limit: usize,
 ) -> ChannelResult<Vec<ChanMessage>> {
+    project_page(
+        store,
+        space,
+        before.map(|(time, id)| Before::Message(time, id)),
+        limit,
+    )
+}
+
+fn project_page(
+    store: &Store,
+    space: &str,
+    before: Option<Before<'_>>,
+    limit: usize,
+) -> ChannelResult<Vec<ChanMessage>> {
     store.read(|r| {
-        store.reader(|c| {
-            let (at, id) = match before {
-                Some((at, id)) => (Some(at), Some(id)),
-                None => (None, None),
-            };
-            let mut st = c.prepare_cached(&format!(
-                "SELECT {MSG_COLS} {MSG_FROM} WHERE m.space_id = ?1
-            AND (?2 IS NULL OR m.created < ?2 OR (m.created = ?2 AND m.id < ?3))
-          ORDER BY m.created DESC, m.id DESC LIMIT ?4"
-            ))?;
-            let mut rows = st
-                .query_map(params![space, at, id, limit as i64], msg_row)?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            for m in &mut rows {
-                with_basis(r, m)?;
-            }
-            Ok(rows)
-        })
+        projection::page(r, space, before, limit as u64)?
+            .into_iter()
+            .map(|row| projected(r, row))
+            .collect()
     })
 }
 
@@ -396,33 +305,21 @@ const PURGE_BATCH: usize = 1000;
 /// resource keys) older than `keepRaw` days are cleared and `purged = now`. Returns the messages
 /// purged. Blocking: runs in batches of [`PURGE_BATCH`], each in its own transaction.
 pub fn sweep(m: &Modules, now: i64) -> ApiResult<usize> {
-    let wss: Vec<String> = m.store.reader(|c| -> ApiResult<_> {
-        let mut st = c.prepare("SELECT id FROM workspaces ORDER BY id")?;
-        Ok(st
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?)
-    })?;
-    // what a sweep before attachments were cleared left behind
-    m.store.transaction(|tx| -> ApiResult<()> {
-        tx.execute(
-            "UPDATE chan_messages SET attachments = '[]' WHERE purged IS NOT NULL AND attachments <> '[]'",
-            [],
-        )?;
-        Ok(())
-    })?;
+    let workspaces = m.store.read(|r| steve_store::Workspaces(r).ids())?;
+    m.store.write(stored_retention::clear_purged_attachments)?;
     let mut n = 0;
-    for ws in wss {
+    for ws in workspaces {
         loop {
-            let done = m.store.transaction(|tx| -> ApiResult<usize> {
-                let days = tx.write(|w| steve_flow::retention::keep_raw_days(w, &ws))?;
-                let cut = now - days * 24 * 3_600_000;
-                Ok(tx.execute(
-                    "UPDATE chan_messages SET text = NULL, attachments = '[]', purged = ?1
-                      WHERE rowid IN (SELECT rowid FROM chan_messages
-                                       WHERE workspace_id = ?2 AND purged IS NULL AND created < ?3
-                                       LIMIT ?4)",
-                    params![now, ws, cut, PURGE_BATCH as i64],
-                )?)
+            let done = m.store.write(|w| {
+                let days = steve_flow::retention::keep_raw_days(w, &ws)?;
+                let cutoff = now - days * 24 * 3_600_000;
+                Ok::<_, steve_store::StoreError>(stored_retention::purge_before(
+                    w,
+                    &ws,
+                    cutoff,
+                    now,
+                    PURGE_BATCH as u64,
+                )? as usize)
             })?;
             n += done;
             if done < PURGE_BATCH {

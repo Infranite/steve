@@ -278,6 +278,54 @@ impl<C: Read> Accounts<'_, C> {
         )
     }
 
+    pub fn owners_of_accounts(
+        &mut self,
+        ws: &str,
+        parties: &[String],
+    ) -> Result<Vec<(String, String)>> {
+        let ids = self.0.db().dialect().text_array(parties)?;
+        self.0.all(
+            Query::select()
+                .columns(["id", "party_id"])
+                .from("accounts")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("party_id").in_subquery(ids)),
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+    }
+
+    /// The party's published and alternate handles, paired with each account's system.
+    pub fn matching_handles(
+        &mut self,
+        ws: &str,
+        party: &str,
+        limit: u64,
+    ) -> Result<Vec<(String, String)>> {
+        let aliases = Query::select()
+            .columns([("a", "system_id"), ("h", "handle")])
+            .from_as("account_handles", "h")
+            .join_as(
+                sea_query::JoinType::InnerJoin,
+                "accounts",
+                "a",
+                Expr::col(("a", "id")).eq(Expr::col(("h", "account_id"))),
+            )
+            .and_where(Expr::col(("a", "workspace_id")).eq(ws))
+            .and_where(Expr::col(("h", "workspace_id")).eq(ws))
+            .and_where(Expr::col(("a", "party_id")).eq(party))
+            .take();
+        self.0.all(
+            Query::select()
+                .columns(["system_id", "handle"])
+                .from("accounts")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("party_id").eq(party))
+                .union(sea_query::UnionType::Distinct, aliases)
+                .limit(limit),
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+    }
+
     pub fn handles_of(&mut self, id: &str) -> Result<Vec<(String, Option<String>)>> {
         let order = self.0.db().dialect().insertion_order(Some("h"));
         self.0.all(
@@ -318,6 +366,57 @@ impl<C: Read> Accounts<'_, C> {
                 .order_by(("h", "handle"), Order::Asc),
             |row| row.get(0),
         )
+    }
+
+    /// Primary and additional handles owned by these parties in the workspace.
+
+    pub(in crate::contract) fn ids_by_parties(
+        &mut self,
+        parties: &[String],
+    ) -> Result<Vec<String>> {
+        if parties.is_empty() {
+            return Ok(vec![]);
+        }
+        let parties = self.0.db().dialect().text_array(parties)?;
+        self.0.all(
+            Query::select()
+                .column("id")
+                .from("accounts")
+                .and_where(Expr::col("party_id").in_subquery(parties)),
+            |row| row.get(0),
+        )
+    }
+
+    pub fn party_handles(&mut self, ws: &str, parties: &[String]) -> Result<Vec<String>> {
+        if parties.is_empty() {
+            return Ok(vec![]);
+        }
+        let party_ids = self.0.db().dialect().text_array(parties)?;
+        let mut handles = self.0.all(
+            Query::select()
+                .column(("a", "handle"))
+                .from_as("accounts", "a")
+                .and_where(Expr::col(("a", "workspace_id")).eq(ws))
+                .and_where(Expr::col(("a", "party_id")).in_subquery(party_ids.clone())),
+            |row| row.get(0),
+        )?;
+        handles.extend(
+            self.0.all(
+                Query::select()
+                    .column(("h", "handle"))
+                    .from_as("account_handles", "h")
+                    .join_as(
+                        JoinType::InnerJoin,
+                        "accounts",
+                        "a",
+                        Expr::col(("a", "id")).equals(("h", "account_id")),
+                    )
+                    .and_where(Expr::col(("h", "workspace_id")).eq(ws))
+                    .and_where(Expr::col(("a", "party_id")).in_subquery(party_ids)),
+                |row| row.get::<String>(0),
+            )?,
+        );
+        Ok(handles)
     }
 
     pub fn primary_emails(&mut self, ws: &str, parties: &[String]) -> Result<Vec<String>> {

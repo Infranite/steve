@@ -50,6 +50,22 @@ fn local(ws: &str) -> SelectStatement {
 }
 
 impl<C: Read> BotRows<'_, C> {
+    /// Live Bot and style for the default persona: Steve, the main Bot, then the first to join.
+    pub fn persona_seed(&mut self, ws: &str) -> Result<Option<(String, String)>> {
+        self.0.one(
+            local(ws)
+                .columns([("b", "id"), ("b", "persona")])
+                .order_by_expr(Expr::col(("b", "id")).eq("steve"), Order::Desc)
+                .order_by_columns([
+                    (("b", "main"), Order::Desc),
+                    (("w", "created"), Order::Asc),
+                    (("b", "id"), Order::Asc),
+                ])
+                .limit(1),
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+    }
+
     pub fn enabled_prompt(&mut self, ws: &str, id: &str) -> Result<Option<BotPrompt>> {
         self.0.one(
             prompt_query(ws)

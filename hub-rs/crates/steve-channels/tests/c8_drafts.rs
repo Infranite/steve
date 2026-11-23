@@ -322,7 +322,7 @@ async fn a_stale_draft_is_409() {
     let now = h.ch.now();
     h.env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             spaces::set_account_rules(
                 tx,
                 &Viewer::bare(WS, ME),
@@ -540,7 +540,7 @@ async fn bot_channel_persona_rules_and_duty() {
     let rev0 = h
         .env
         .store()
-        .reader(|c| spaces::channel_settings(c, WS, &h.con))
+        .read(|c| spaces::channel_settings(c, WS, &h.con))
         .expect("read")
         .expect("settings")
         .revision;
@@ -548,7 +548,7 @@ async fn bot_channel_persona_rules_and_duty() {
     let (s, per) = h
         .env
         .store()
-        .reader(|c| {
+        .read(|c| {
             Ok::<_, ApiError>((
                 spaces::channel_settings(c, WS, &h.con)?.expect("settings"),
                 bindings::account_persona(c, WS, &h.con)?,
@@ -569,7 +569,7 @@ async fn bot_channel_persona_rules_and_duty() {
     let (s, per) = h
         .env
         .store()
-        .reader(|c| {
+        .read(|c| {
             Ok::<_, ApiError>((
                 spaces::channel_settings(c, WS, &h.con)?.expect("settings"),
                 bindings::account_persona(c, WS, &h.con)?,
@@ -615,7 +615,7 @@ async fn self_channel_trigger_words_and_where() {
     let t = h
         .env
         .store()
-        .reader(|c| spaces::channel_settings(c, WS, &mine))
+        .read(|c| spaces::channel_settings(c, WS, &mine))
         .expect("read")
         .expect("settings")
         .trigger;
@@ -627,7 +627,7 @@ async fn self_channel_trigger_words_and_where() {
     let t = h
         .env
         .store()
-        .reader(|c| spaces::channel_settings(c, WS, &mine))
+        .read(|c| spaces::channel_settings(c, WS, &mine))
         .expect("read")
         .expect("settings")
         .trigger;
@@ -791,27 +791,25 @@ async fn ownership_and_candidates() {
     let default = h
         .env
         .store()
-        .reader(|c| personas::default_persona(c, WS))
+        .read(|c| personas::default_persona(c, WS))
         .expect("read")
         .expect("seeded");
     want.push(format!("persona:{} — 对外身份 Steve", default.id));
     want.sort();
     assert_eq!(cands, want);
     // bestSpace: the longest shared piece of at least 2 characters
-    let hints = h
-        .env
-        .store()
-        .reader(|c| drafts::space_hints(c, &Viewer::bare(WS, ME), "Acme 交付那边别回复太快"))
-        .expect("hints");
+    let hints = drafts::space_hints(
+        h.env.store(),
+        &Viewer::bare(WS, ME),
+        "Acme 交付那边别回复太快",
+    )
+    .expect("hints");
     assert_eq!(
         hints.first().map(|c| c.code.clone()),
         Some(format!("space:{g2}"))
     );
-    let hints = h
-        .env
-        .store()
-        .reader(|c| drafts::space_hints(c, &Viewer::bare(WS, ME), "运维那边静默"))
-        .expect("hints");
+    let hints =
+        drafts::space_hints(h.env.store(), &Viewer::bare(WS, ME), "运维那边静默").expect("hints");
     assert_eq!(
         hints.iter().map(|c| c.code.clone()).collect::<Vec<_>>(),
         vec![format!("space:{g1}")]

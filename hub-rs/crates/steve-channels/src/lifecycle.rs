@@ -708,7 +708,7 @@ fn start_run(inner: &Arc<Inner>, id: &str, fp: String, state: ConnState) -> Opti
         if let Err(e) = inner
             .channels
             .store()
-            .transaction(|tx| spaces::ensure_channel_settings(tx, &state.ws, id, decl.mode, now))
+            .write(|tx| spaces::ensure_channel_settings(tx, &state.ws, id, decl.mode, now))
         {
             tracing::warn!(
                 conn = id,

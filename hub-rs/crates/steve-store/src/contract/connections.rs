@@ -1,4 +1,4 @@
-use sea_query::{Expr, ExprTrait, Order, Query};
+use sea_query::{Expr, ExprTrait, Func, Order, Query};
 
 use crate::contract::{Json, Row};
 use crate::{Read, Result};
@@ -296,5 +296,44 @@ pub fn workspace_sources(c: &mut impl Read, ws: &str) -> Result<Vec<ConnectionSo
             .and_where(Expr::col("workspace_id").eq(ws))
             .order_by_columns([("created", Order::Asc), ("id", Order::Asc)]),
         source,
+    )
+}
+
+/// The fields used to attribute ingress and apply its existing history watermark.
+pub struct IngressConnection {
+    pub adapter: String,
+    pub account_id: String,
+    pub created_by: String,
+    pub enabled_at: i64,
+    pub platform: Option<String>,
+}
+
+pub fn ingress(r: &mut impl Read, ws: &str, connection: &str) -> Result<Option<IngressConnection>> {
+    let dialect = r.db().dialect();
+    let config = Expr::col("config");
+    let platform = Expr::case(
+        dialect.json_valid(config.clone()),
+        dialect.json_field(config, "platform"),
+    );
+    r.one(
+        Query::select()
+            .columns(["adapter", "account_id", "created_by"])
+            .expr(Func::coalesce([
+                Expr::col("enabled_at"),
+                Expr::col("created"),
+            ]))
+            .expr(platform)
+            .from("connections")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("id").eq(connection)),
+        |row| {
+            Ok(IngressConnection {
+                adapter: row.get(0)?,
+                account_id: row.get(1)?,
+                created_by: row.get(2)?,
+                enabled_at: row.get(3)?,
+                platform: row.get(4)?,
+            })
+        },
     )
 }
