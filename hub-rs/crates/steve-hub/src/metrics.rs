@@ -904,7 +904,7 @@ mod tests {
         .unwrap();
         let st = crate::api::AppState::new(
             Arc::new(cfg),
-            Arc::new(crate::wire::store::StoreBackend::new(store.clone()).unwrap()),
+            Arc::new(crate::wire::store::StoreBackend(store.clone())),
             Arc::new(crate::backend::NoDomain),
             crate::bus::Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
                 Default::default(),

@@ -89,7 +89,7 @@ impl Env {
         ])));
         let st = AppState::new(
             cfg,
-            Arc::new(StoreBackend::new(store.clone()).unwrap()),
+            Arc::new(StoreBackend(store.clone())),
             catalogue.clone(),
             Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
                 Default::default(),

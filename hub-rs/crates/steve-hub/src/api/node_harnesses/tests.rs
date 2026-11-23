@@ -250,7 +250,7 @@ async fn http_reports_are_isolated_authorized_and_fenced_across_reconnects() {
     let runtime = NodeRuntime::new(h.store.clone(), fake, h.ends.clone());
     let st = AppState::new(
         cfg,
-        Arc::new(StoreBackend::new(h.store.clone()).unwrap()),
+        Arc::new(StoreBackend(h.store.clone())),
         Arc::new(crate::backend::NoDomain),
         crate::bus::Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
             Default::default(),
