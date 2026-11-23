@@ -665,7 +665,7 @@ impl NodeRuntime {
                 self.plan_after_in(tx, s)?
             };
             if planned != Planned::Created {
-                self.release_if_self.ended_in(s)?;
+                self.release_if_ended_in(tx, s)?;
             }
             return Ok(None);
         }
@@ -720,7 +720,7 @@ impl NodeRuntime {
                 "Node 没能打开这个会话（{detail}），已停止自动重试，请修正 Bot 配置后从失败卡重试。"
             ),
         )?;
-        self.release_if_self.ended_in(s)?;
+        self.release_if_ended_in(tx, s)?;
         if self.ended_in(s)? {
             tx.execute("DELETE FROM queued WHERE session_id=?", [s])?;
             return Ok(None);

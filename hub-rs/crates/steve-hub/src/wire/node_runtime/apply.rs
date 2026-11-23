@@ -797,7 +797,7 @@ impl NodeRuntime {
         }
         // a session the business side ended is let go once its last turn is over (the release it
         // asked for while the turn ran waited for this)
-        self.release_if_self.ended_in(session)?;
+        self.release_if_ended_in(tx, session)?;
         self.status_in(session, settled_status(&c.stop_reason))?;
         Ok(Some(End {
             session: session.to_string(),

@@ -608,7 +608,7 @@ impl NodeRuntime {
         };
         let settled = self.plan_after_in(tx, session)? != Planned::Created;
         if settled {
-            self.release_if_self.ended_in(session)?;
+            self.release_if_ended_in(tx, session)?;
             self.status_in(session, settled_status(&completion.stop_reason))?;
         }
         let ended = settled.then(|| End {
