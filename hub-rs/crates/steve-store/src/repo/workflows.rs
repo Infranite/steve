@@ -8,6 +8,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use sea_query::{Expr, ExprTrait, Query};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use steve_types::orchestration::{Finding, ReviewReceipt, ReviewScope, ReviewedUnit, ReworkReason};
 
 use super::{all, next_counter, one, to_json};
 use crate::{Item, Parent, Result, Store, StoreError, W, now};
@@ -46,6 +47,10 @@ pub struct WorkUnit {
     pub summary: String,
     pub outputs: Value,
     pub checks: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_output: Option<String>,
+    #[serde(skip)]
+    pub inputs: Option<Vec<ReviewedUnit>>,
     pub reason: Option<String>,
 }
 
@@ -130,30 +135,72 @@ impl Workflow {
             .is_some_and(|h| h.action == "single_session")
     }
 
-    /// What a reset of unit `id` invalidates, in graph order: the unit and every unit that depends on
-    /// it, directly or through others. Retrying the unit reruns exactly these; the rest of the graph
-    /// keeps running and keeps its results.
-    pub fn reset_scope(&self, id: &str) -> Vec<&WorkUnit> {
-        let mut affected = HashSet::from([id]);
-        loop {
-            let before = affected.len();
-            for u in &self.units {
-                if u.spec
-                    .depends_on
-                    .iter()
-                    .any(|d| affected.contains(d.as_str()))
-                {
-                    affected.insert(u.spec.id.as_str());
-                }
+    /// A result depending on an unresolved predecessor remains on record while awaiting evidence.
+    pub fn dependency_ready(&self, id: &str) -> bool {
+        let mut seen = HashSet::new();
+        let mut pending = vec![id];
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id) {
+                continue;
             }
-            if affected.len() == before {
-                break;
+            let Some(unit) = self.units.iter().find(|u| u.spec.id == id) else {
+                return false;
+            };
+            if unit.status != "succeeded" {
+                return false;
+            }
+            pending.extend(unit.spec.depends_on.iter().map(String::as_str));
+        }
+        true
+    }
+
+    pub fn depends_on(&self, unit: &WorkUnit, target: &str) -> bool {
+        let mut seen = HashSet::new();
+        let mut pending: Vec<&str> = unit.spec.depends_on.iter().map(String::as_str).collect();
+        while let Some(id) = pending.pop() {
+            if id == target {
+                return true;
+            }
+            if seen.insert(id)
+                && let Some(parent) = self.units.iter().find(|u| u.spec.id == id)
+            {
+                pending.extend(parent.spec.depends_on.iter().map(String::as_str));
             }
         }
-        self.units
+        false
+    }
+
+    fn reviewed_units(&self, review: &WorkUnit) -> Option<Vec<ReviewedUnit>> {
+        review
+            .spec
+            .depends_on
             .iter()
-            .filter(|u| affected.contains(u.spec.id.as_str()))
+            .map(|id| {
+                let unit = self.units.iter().find(|u| &u.spec.id == id)?;
+                self.dependency_ready(id).then(|| ReviewedUnit {
+                    unit: id.clone(),
+                    attempt: unit.attempt,
+                    input_digest: unit.verified_output.clone(),
+                })
+            })
             .collect()
+    }
+
+    pub fn review_scope(&self, review: &WorkUnit) -> Option<ReviewScope> {
+        if review.spec.kind != "review" || review.status != "failed" {
+            return None;
+        }
+        let units = self.reviewed_units(review)?;
+        if review.inputs.as_ref() != Some(&units) {
+            return None;
+        }
+        Some(ReviewScope {
+            cycle: self.cycle,
+            graph_revision: self.revision,
+            review_unit: review.spec.id.clone(),
+            review_attempt: review.attempt,
+            units,
+        })
     }
 
     /// Optional work may be waived by cancelling it; required units need successful evidence unless
@@ -163,7 +210,8 @@ impl Workflow {
             .units
             .iter()
             .filter(|u| {
-                (!self.single_session() && u.spec.required && u.status != "succeeded") || u.active()
+                (!self.single_session() && u.spec.required && !self.dependency_ready(&u.spec.id))
+                    || u.active()
             })
             .map(|u| format!("{}（{}）", u.spec.title, u.status))
             .collect();
@@ -207,6 +255,11 @@ fn unit_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkUnit> {
         summary: r.get("summary")?,
         outputs: decode(r, "outputs")?,
         checks: decode(r, "checks")?,
+        verified_output: r.get("verified_output")?,
+        inputs: r
+            .get::<_, Option<String>>("inputs")?
+            .map(|_| decode(r, "inputs"))
+            .transpose()?,
         reason: r.get("reason")?,
     })
 }
@@ -542,7 +595,7 @@ pub fn claim_in(w: &mut W<'_>, parent: &str, id: &str) -> Result<WorkUnit> {
         return Err(conflict("已达到工作图并发上限"));
     }
     for dep in &unit.spec.depends_on {
-        if must_unit(&graph, dep)?.status != "succeeded" {
+        if !graph.dependency_ready(dep) {
             return Err(conflict(format!("前置工作 {dep} 尚未成功")));
         }
     }
@@ -566,6 +619,13 @@ pub fn claim_in(w: &mut W<'_>, parent: &str, id: &str) -> Result<WorkUnit> {
             ));
         }
     }
+    let inputs = graph
+        .reviewed_units(unit)
+        .ok_or_else(|| conflict("work unit inputs unavailable"))?;
+    tx.execute(
+        "UPDATE workflow_units SET inputs=? WHERE workflow_id=? AND id=?",
+        params![to_json(&inputs)?, parent, id],
+    )?;
     if let Some(child) = unit.item_id.as_deref() {
         return reclaim_in(w, &item, unit, child);
     }
@@ -769,6 +829,99 @@ fn retired(c: &Connection, child: &str) -> Result<Option<(String, WorkUnit)>> {
 
 /// Records a unit's evidence inside the caller's write transaction. The core uses this with the
 /// child's closing intent so a committed success can never be left without its lifecycle checkpoint.
+/// Scope equality can be proven for immutable Hub deliveries. Names or mutable paths alone
+/// never qualify as evidence that two outputs are equivalent.
+fn verified_output(
+    tx: &Connection,
+    spec: &UnitSpec,
+    child: &str,
+    session: &str,
+    outputs: &Value,
+) -> Result<Option<String>> {
+    let outputs = outputs
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|out| out.get("role").and_then(Value::as_str) != Some("record"));
+    let mut measured = Vec::new();
+    for output in outputs {
+        let Some(url) = output.get("location").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        let artifact = tx
+            .query_row(
+                "SELECT d.sha256,d.mime,d.size FROM deliveries d JOIN items i ON i.id=d.item_id
+             WHERE d.url=? AND d.item_id=? AND d.session_id=? AND i.project_id IS NULL",
+                params![url, child, session],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((digest, mime, size)) = artifact else {
+            return Ok(None);
+        };
+        measured.push((
+            output.get("title").and_then(Value::as_str),
+            digest,
+            mime,
+            size,
+        ));
+    }
+    if measured.is_empty() {
+        return Ok(None);
+    }
+    measured.sort_unstable();
+    Ok(Some(
+        steve_node_api::digest_of(&(spec, measured))
+            .map_err(|e| conflict(e.to_string()))?
+            .to_string(),
+    ))
+}
+
+fn reopen_unit(
+    w: &mut W<'_>,
+    graph: &Workflow,
+    unit: &WorkUnit,
+    reason: ReworkReason,
+) -> Result<()> {
+    if unit.active() {
+        return Err(conflict("工作单元仍在执行"));
+    }
+    archive_cycle_unit(w.conn, &graph.item_id, unit)?;
+    w.conn.execute(
+        "UPDATE workflow_units SET status='pending',session_id=NULL,reason=?
+         WHERE workflow_id=? AND id=?",
+        params![reason.as_str(), graph.item_id, unit.spec.id],
+    )?;
+    Ok(())
+}
+
+/// On settlement of a new upstream attempt, invalidate only immediate dependents whose basis
+/// changed. Their own successors wait for the replacement output and the same comparison.
+fn propagate_output(
+    w: &mut W<'_>,
+    graph: &Workflow,
+    unit: &WorkUnit,
+    output: Option<&str>,
+) -> Result<()> {
+    let why = match (unit.verified_output.as_deref(), output) {
+        (Some(old), Some(new)) if old == new => return Ok(()),
+        (Some(_), Some(_)) => ReworkReason::DependencyOutputChanged,
+        (_, _) => ReworkReason::EvidenceUnverifiable,
+    };
+    for downstream in &graph.units {
+        if downstream.status == "succeeded" && downstream.spec.depends_on.contains(&unit.spec.id) {
+            reopen_unit(w, graph, downstream, why)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn deliver_in(
     w: &mut W<'_>,
     child: &str,
@@ -829,6 +982,22 @@ pub fn deliver_in(
             "成功交付必须包含至少一项通过的单元检查，且本单元范围内的检查必须全部通过",
         ));
     }
+    if passed {
+        let graph = must_graph(tx, &parent)?;
+        let inputs = graph.reviewed_units(&unit);
+        if inputs.is_none() || inputs != unit.inputs {
+            return Err(conflict("work unit inputs changed during execution"));
+        }
+    }
+    let fingerprint = if passed {
+        verified_output(tx, &unit.spec, child, session, outputs)?
+    } else {
+        None
+    };
+    if passed && unit.attempt > 1 {
+        let graph = must_graph(tx, &parent)?;
+        propagate_output(w, &graph, &unit, fingerprint.as_deref())?;
+    }
     w.exec(
         Query::update()
             .table("workflow_units")
@@ -836,6 +1005,7 @@ pub fn deliver_in(
             .value("summary", summary)
             .value("outputs", to_json(outputs)?)
             .value("checks", to_json(checks)?)
+            .value("verified_output", fingerprint)
             .value("reason", (!passed).then_some(summary))
             .and_where(Expr::col("workflow_id").eq(parent.as_str()))
             .and_where(Expr::col("id").eq(unit.spec.id.as_str())),
@@ -1173,46 +1343,111 @@ impl Workflows<'_> {
             .write(|w| deliver_in(w, child, session, summary, outputs, checks, passed))
     }
 
-    /// Resetting a result invalidates every descendant's evidence. Active work must be cancelled
-    /// first so old Node executions cannot race a new plan; attempt budgets and history survive.
-    pub fn reset(&self, parent: &str, id: &str, reason: &str) -> Result<Workflow> {
-        if reason.trim().is_empty() {
-            return Err(conflict("重置必须说明原因"));
-        }
+    pub fn retry_unit(
+        &self,
+        parent: &str,
+        revision: i64,
+        id: &str,
+        reason: &str,
+    ) -> Result<Workflow> {
         self.0.write(|w| {
-            let tx = w.conn;
-            open_parent(tx, parent)?;
-            let graph = must_graph(tx, parent)?;
-            must_unit(&graph, id)?;
-            let before = graph.reset_scope(id);
-            // Core names the unit and the way out for its caller; these hold for any other caller.
-            if before.iter().any(|u| u.active()) {
-                return Err(conflict(
-                    "当前工作或下游仍在执行，等它结束或取消并确认停止后再重置",
-                ));
+            open_parent(w.conn, parent)?;
+            let graph = must_graph(w.conn, parent)?;
+            if graph.revision != revision {
+                return Err(conflict("work graph changed"));
             }
-            if before.iter().any(|u| u.attempt >= graph.max_attempts) {
-                return Err(conflict("当前工作或下游已达到尝试预算上限，不能重置"));
+            let unit = must_unit(&graph, id)?;
+            if unit.active()
+                || graph
+                    .units
+                    .iter()
+                    .any(|u| u.active() && graph.depends_on(u, id))
+            {
+                return Err(conflict("工作单元仍在执行"));
             }
-            // The unit keeps its child item: the retry is a new cycle and session of the same item
-            // (its number, branch and worktree), not a new item. The retired attempt's snapshot is kept.
-            for u in &before {
-                archive_attempt(tx, parent, u, reason)?;
-                tx.execute(
-                    "UPDATE workflow_units SET status='pending',session_id=NULL,summary='',
-                     outputs='[]',checks='[]',reason=? WHERE workflow_id=? AND id=?",
-                    params![reason, parent, u.spec.id],
-                )?;
+            if unit.attempt >= graph.max_attempts {
+                return Err(conflict("工作单元已达到尝试预算"));
             }
+            reopen_unit(w, &graph, unit, ReworkReason::ExplicitRetry)?;
             record(
                 w,
                 parent,
-                "reset",
+                "retry",
                 reason,
                 Some(id),
-                &json!({"invalidated":before}),
+                &json!({"cause":ReworkReason::ExplicitRetry}),
             )?;
-            must_graph(tx, parent)
+            must_graph(w.conn, parent)
+        })
+    }
+
+    /// Apply a failed review against a frozen scope. Replays return the prior verdict and stale
+    /// findings remain archived without modifying the graph.
+    pub fn apply_review_findings(
+        &self,
+        parent: &str,
+        scope: &ReviewScope,
+        findings: &[Finding],
+        reason: &str,
+    ) -> Result<ReviewReceipt> {
+        let fingerprint =
+            steve_node_api::digest_of(&(scope, findings)).map_err(|e| conflict(e.to_string()))?;
+        self.0.write(|w| {
+            let tx = w.conn;
+            if let Some(applied) = tx.query_row(
+                "SELECT applied_revision FROM workflow_review_findings WHERE workflow_id=? AND fingerprint=?",
+                params![parent,fingerprint.as_str()], |r| r.get::<_, Option<i64>>(0),
+            ).optional()? {
+                return Ok(if applied.is_some() { ReviewReceipt::Replay } else { ReviewReceipt::Unverified });
+            }
+            let parent_item = open_parent(tx, parent)?;
+            let graph = must_graph(tx, parent)?;
+            let review = graph.units.iter().find(|u| u.spec.id == scope.review_unit);
+            let current = review.and_then(|u| graph.review_scope(u)).as_ref() == Some(scope);
+            let valid = current && parent_item.project_id.is_none() && !findings.is_empty() && findings.iter().all(|f| {
+                scope.units.iter().any(|u| u.unit == f.affected_unit)
+                    && !f.criterion.trim().is_empty() && !f.evidence_ref.trim().is_empty()
+            });
+            let mut invalidated = HashSet::new();
+            let mut verified = valid;
+            if let Some(review) = review.filter(|_| verified) {
+                for finding in findings {
+                    let affected = must_unit(&graph, &finding.affected_unit)?;
+                    let criterion = affected.checks.as_array().into_iter().flatten()
+                        .any(|check| check.get("name").and_then(Value::as_str) == Some(finding.criterion.as_str()));
+                    let receipt = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM deliveries WHERE url=? AND item_id=? AND session_id=?)",
+                        params![finding.evidence_ref,review.item_id,review.session_id],
+                        |row| row.get::<_, bool>(0),
+                    )?;
+                    if !criterion || !receipt {
+                        verified = false;
+                        break;
+                    }
+                    invalidated.insert(affected.spec.id.as_str());
+                }
+            }
+            if let Some(review) = review.filter(|_| verified) {
+                invalidated.insert(review.spec.id.as_str());
+                if graph.units.iter().any(|u| invalidated.contains(u.spec.id.as_str())
+                    && (u.active() || u.attempt >= graph.max_attempts))
+                {
+                    return Err(conflict("review scope is still running or has exhausted its budget"));
+                }
+                for u in &graph.units {
+                    if invalidated.contains(u.spec.id.as_str()) {
+                        reopen_unit(w, &graph, u, ReworkReason::ReviewFinding)?;
+                    }
+                }
+                record(w, parent, "apply_review_findings", reason, Some(&scope.review_unit),
+                       &json!({"cause":ReworkReason::ReviewFinding,"fingerprint":fingerprint.as_str()}))?;
+            }
+            w.conn.execute(
+                "INSERT INTO workflow_review_findings(workflow_id,fingerprint,scope,findings,applied_revision)
+                 VALUES (?,?,?,?,?)",
+                params![parent,fingerprint.as_str(),to_json(scope)?,to_json(&findings)?,verified.then_some(graph.revision+1)],
+            )?;
+            Ok(if verified { ReviewReceipt::Applied } else { ReviewReceipt::Unverified })
         })
     }
 

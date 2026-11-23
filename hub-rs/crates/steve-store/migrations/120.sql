@@ -145,3 +145,14 @@ CREATE TABLE runtime_turn_progress (
  summary TEXT NOT NULL,
  decision_id TEXT REFERENCES decisions(id)
 );
+
+ALTER TABLE workflow_units ADD COLUMN verified_output TEXT;
+ALTER TABLE workflow_units ADD COLUMN inputs TEXT;
+CREATE TABLE workflow_review_findings (
+ workflow_id TEXT NOT NULL REFERENCES workflows(item_id) ON DELETE CASCADE,
+ fingerprint TEXT NOT NULL,
+ scope TEXT NOT NULL,
+ findings TEXT NOT NULL,
+ applied_revision INTEGER,
+ PRIMARY KEY(workflow_id,fingerprint)
+);
