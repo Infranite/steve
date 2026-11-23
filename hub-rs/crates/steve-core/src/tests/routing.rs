@@ -14,32 +14,30 @@ use steve_runtime::testkit::eventually_sync;
 const A1: &str = "现在steve的知识系统是怎么运作的？给我讲一下";
 const A3: &str = "事项页面信息太散了，得优化一下，你看看怎么设计一下";
 
-const BATCH_MESSAGES: &str = "\nThe user sent these messages in a row, oldest first.";
-
-/// The router answers with `f(message)` for each input; the answer tier answers “直接回答”.
+/// The router answers with `f(message)`; the answer tier answers “直接回答”.
 fn router(k: &Kit, f: impl Fn(&str) -> Value + Send + Sync + 'static) {
     k.gw.set(move |p, _| {
         if p.starts_with("You are the router") {
-            if let Some((_, batch)) = p.split_once(BATCH_MESSAGES) {
-                let routes: Vec<_> = batch
+            // A batch must receive an ordered array; invalid replies are not replayed one by one.
+            if let Some((_, messages)) = p.rsplit_once("The user sent these messages in a row,") {
+                let answers = messages
                     .lines()
                     .skip(1)
-                    .map_while(|line| line.strip_prefix("  "))
-                    .map(|line| {
-                        let (_, text) = line.split_once(": ").expect("numbered router input");
-                        let text: String = serde_json::from_str(text).expect("JSON router input");
-                        f(&text)
+                    .map_while(|line| {
+                        let (index, text) = line.trim_start().split_once(": ")?;
+                        index.parse::<usize>().ok()?;
+                        serde_json::from_str::<String>(text).ok()
                     })
+                    .map(|text| f(&text))
                     .collect();
-                return Ok(json!(routes).to_string());
+                return Ok(Value::Array(answers).to_string());
             }
-            let text = p
+            let m = p
                 .lines()
-                .rev()
-                .find_map(|line| line.strip_prefix("User message: "))
-                .expect("single router input");
-            let text: String = serde_json::from_str(text).expect("JSON router input");
-            Ok(f(&text).to_string())
+                .rfind(|l| l.starts_with("User message: "))
+                .and_then(|l| serde_json::from_str::<String>(&l["User message: ".len()..]).ok())
+                .unwrap_or_default();
+            Ok(f(&m).to_string())
         } else if p.starts_with("You are Steve") {
             Ok(r#"{"thought":"想","answer":"直接回答","offer":null}"#.into())
         } else {
@@ -541,6 +539,7 @@ async fn while_research_runs_messages_wait_and_can_be_changed_or_withdrawn() {
 
 /// 2026-11-09: while Steve is still answering, work that stands on its own and an instruction for an
 /// item go at once; what needs the answer waits for it, without holding up the messages behind it.
+/// A current-thread runtime keeps the two synchronous sends together, so routing always sees a batch.
 #[tokio::test]
 async fn while_research_runs_standalone_work_goes_ahead() {
     let k = Kit::new();
@@ -562,7 +561,6 @@ async fn while_research_runs_standalone_work_goes_ahead() {
     )
     .await;
     let before = items(&k);
-    // Both messages enter the lane before the single-threaded executor polls it again.
     let follow = k.core.say(WS, "就按你说的改", &[]).unwrap();
     let fix = k.core.say(WS, "修登录页", &[]).unwrap();
     /* the work behind the follow-up is not held up by it */
@@ -570,14 +568,20 @@ async fn while_research_runs_standalone_work_goes_ahead() {
         items(&k) == before + 1
     })
     .await;
+    assert_eq!(
+        k.gw.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.contains("a JSON array of 2 objects"))
+            .count(),
+        1,
+        "the dependent and standalone messages were routed together"
+    );
     assert!(
         k.core.researching(WS),
         "while the answer is still being read"
     );
-    assert!(k.gw.calls.lock().unwrap().iter().any(|prompt| {
-        prompt.contains(BATCH_MESSAGES)
-            && prompt.contains("  1: \"就按你说的改\"\n  2: \"修登录页\"")
-    }));
     assert_eq!(route_log(&k, &fix).kind, "item");
     let m = k.db().message(&fix).unwrap().unwrap();
     assert!(m.meta.get("held").is_none(), "no longer waiting");
