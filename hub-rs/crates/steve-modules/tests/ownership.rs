@@ -328,7 +328,7 @@ async fn bots_seen_in_chat_cards_tools_and_chat_proposals() {
 
     let card = |t: &TestEnv| {
         t.store()
-            .read(|r| {
+            .read::<_, steve_store::StoreError>(|r| {
                 let v = Viewer::bare(WS, ME);
                 Ok(contacts::contact_cards(r, &v, std::slice::from_ref(&bot)).expect("cards"))
             })

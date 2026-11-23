@@ -28,7 +28,7 @@ pub(crate) fn routes() -> Router<Modules> {
 }
 
 fn persona_json(ch: &Channels, v: &Viewer, id: &str) -> ApiResult<Value> {
-    ch.store().read(|r| {
+    ch.store().read::<_, steve_store::StoreError>(|r| {
         Ok(ch.store().reader(|c| -> ApiResult<Value> {
             let p = personas::own(c, &v.ws, id)?;
             Ok(serde_json::to_value(personas::out(c, r, v, &p)?)?)

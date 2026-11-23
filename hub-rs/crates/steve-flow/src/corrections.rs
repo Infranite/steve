@@ -411,7 +411,7 @@ pub async fn correct(
     let proposal = changes::store_plan(m, who, "flow", &prepared, plan, origin)?;
     changes::apply(m, who, &proposal.id)
         .ok_or_else(|| ApiError::Internal("correction changeset vanished".into()))??;
-    let mem_id = cx.store().read(|c| {
+    let mem_id = cx.store().read::<_, steve_store::StoreError>(|c| {
         let cs = steve_store::base::changesets::ChangeSets(c).get(&proposal.id)?;
         Ok(cs.and_then(|cs| cs.before).and_then(|b| {
             b.iter()

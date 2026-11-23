@@ -341,7 +341,7 @@ fn quiet_hours_postpone_a_reminder_and_merge_what_waited() {
     );
     let held = e
         .store
-        .read(|r| {
+        .read::<_, steve_store::StoreError>(|r| {
             let mut a = Alarms(r);
             let (first, second) = (a.of_subject(WS, "thing:a")?, a.of_subject(WS, "thing:b")?);
             Ok(first

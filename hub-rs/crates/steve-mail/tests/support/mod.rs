@@ -5,17 +5,15 @@
 
 #![allow(dead_code)]
 
-#[path = "../../../steve-channels/tests/support/digest_env.rs"]
-mod digest_env;
-use digest_env::TestEnv;
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use steve_modules::testkit::TestEnv;
+use steve_store::mail::fixtures as db;
 
 use serde_json::{Value, json};
-use steve_mail::events::{FnNotify, RecordingEvents};
+use steve_mail::events::RecordingEvents;
 use steve_mail::fake::imap::Inject;
 use steve_mail::fake::{FakeImap, FakeSmtp, ImapConfig, SmtpConfig, TestCa, TlsMode};
-use steve_mail::repo::{self, MessageRow, ThreadRow};
 use steve_mail::usage::MailUsage;
 use steve_mail::{ImapAdapter, Mail, MailConfig};
 use steve_modules::Caller;
@@ -23,6 +21,7 @@ use steve_modules::accounts::connections::{Connections, ConnectionsConfig};
 use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
+use steve_store::mail::{self as repo, MessageRow, ThreadRow};
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
@@ -31,6 +30,7 @@ pub const PASS: &str = "app-password";
 pub const DAY_MS: i64 = 86_400_000;
 
 pub struct H {
+    _digest: db::DigestAudit,
     pub env: TestEnv,
     pub link: steve_mail::DraftLink,
     pub _keys: TempDir,
@@ -41,7 +41,6 @@ pub struct H {
     pub cfg: MailConfig,
     pub events: Arc<RecordingEvents>,
     pub dispatcher: Arc<steve_store::outbox::Dispatcher>,
-    pub notified: Arc<Mutex<Vec<String>>>,
     pub imap: FakeImap,
     pub smtp: FakeSmtp,
 }
@@ -167,24 +166,17 @@ pub async fn setup_with(o: Opts) -> H {
     .usage(Arc::new(MailUsage::new(cfg.clone())))
     .build();
     let events = Arc::new(RecordingEvents::new());
-    let notified: Arc<Mutex<Vec<String>>> = Arc::default();
-    let n = notified.clone();
     let mut b = Mail::builder(env.modules.clone(), conns.clone(), cfg.clone()).drafts(link.clone());
     if let Some(h) = o.hooks.clone() {
         b = b.hooks(h);
     }
-    let mail = b
-        .adapter(adapter)
-        .events(events.clone())
-        .notify(Arc::new(FnNotify(move |_ws: &str, id: &str| {
-            n.lock().unwrap().push(id.to_string())
-        })))
-        .build();
+    let mail = b.adapter(adapter).events(events.clone()).build();
     let dispatcher = Arc::new(steve_store::outbox::Dispatcher::new(vec![
         steve_mail::outbox::MailEventsOut::new(mail.clone()),
     ]));
     dispatcher.register(env.store()).expect("register");
     H {
+        _digest: db::DigestAudit(env.store().clone()),
         dispatcher,
         env,
         link,
@@ -195,7 +187,6 @@ pub async fn setup_with(o: Opts) -> H {
         mail,
         cfg,
         events,
-        notified,
         imap,
         smtp,
     }
@@ -281,24 +272,12 @@ impl H {
     }
 
     pub fn messages(&self, conn: &str) -> Vec<MessageRow> {
-        let ids: Vec<String> = self
-            .env
-            .store()
-            .reader(|c| {
-                let mut st = c.prepare(
-                    "SELECT id FROM mail_messages WHERE connection_id = ? ORDER BY date, rowid",
-                )?;
-                let v = st
-                    .query_map([conn], |r| r.get(0))?
-                    .collect::<rusqlite::Result<Vec<String>>>()?;
-                Ok::<_, steve_store::StoreError>(v)
-            })
-            .expect("ids");
+        let ids: Vec<String> = db::mailbox_messages(self.env.store(), conn);
         ids.iter()
             .map(|id| {
                 self.env
                     .store()
-                    .reader(|c| repo::message(c, id))
+                    .read(|c| repo::message(c, id))
                     .expect("message")
                     .expect("row")
             })
@@ -315,16 +294,9 @@ impl H {
     pub fn thread(&self, id: &str) -> ThreadRow {
         self.env
             .store()
-            .reader(|c| repo::thread(c, id))
+            .read(|c| repo::thread(c, id))
             .expect("thread")
             .expect("row")
-    }
-
-    pub fn count(&self, sql: &str, p: &str) -> i64 {
-        self.env
-            .store()
-            .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(sql, [p], |r| r.get(0))?))
-            .expect("count")
     }
 
     /// Drive the test dispatcher while the shared waiter observes the delivered state.

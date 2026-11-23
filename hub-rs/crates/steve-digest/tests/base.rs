@@ -19,7 +19,7 @@ const NOW: i64 = 1_800_000_000_000;
 fn owner_viewer_resolves_the_workspace_owner() {
     let e = TestEnv::new(|_| {});
     e.store()
-        .read(|r| {
+        .read::<_, steve_store::StoreError>(|r| {
             let viewer = conv::owner_viewer(r, WS)?.unwrap();
             assert_eq!(viewer.user, ME);
             assert!(viewer.scopes.is_empty());
@@ -104,7 +104,7 @@ fn defaults_overrides_null_reset_and_revision_are_independent() {
     );
     let (one, two) = e
         .store()
-        .read(|r| {
+        .read::<_, steve_store::StoreError>(|r| {
             let mut profiles = r.digest_profiles();
             Ok((profiles.get(WS, "space:s1")?, profiles.get(WS, "space:s2")?))
         })
@@ -755,7 +755,7 @@ fn alert_rules_roll_up_resolved_messages_and_queue_only_anomalies() {
     assert_eq!(packets(&e)[0].kind, "alerts");
     let rollup = e
         .store()
-        .read(|r| {
+        .read::<_, steve_store::StoreError>(|r| {
             Ok(serde_json::to_value(
                 r.digest_alerts().rollup(WS, "space:s1")?,
             )?)
@@ -1071,7 +1071,9 @@ async fn memory_index_undo_conflicts_with_later_ranges_without_partial_deletion(
     }
     let before = e
         .store()
-        .read(|r| Ok(serde_json::to_value(r.memory_index().get(WS, &mem.id)?)?))
+        .read::<_, steve_store::StoreError>(|r| {
+            Ok(serde_json::to_value(r.memory_index().get(WS, &mem.id)?)?)
+        })
         .unwrap();
     let (status, body) = call(
         &app,
@@ -1084,13 +1086,17 @@ async fn memory_index_undo_conflicts_with_later_ranges_without_partial_deletion(
     assert_eq!(status, 409, "{body}");
     assert_eq!(
         e.store()
-            .read(|r| Ok(serde_json::to_value(r.memory_index().get(WS, &mem.id)?)?))
+            .read::<_, steve_store::StoreError>(|r| Ok(serde_json::to_value(
+                r.memory_index().get(WS, &mem.id)?
+            )?))
             .unwrap(),
         before
     );
     let state: String = e
         .store()
-        .read(|r| Ok(r.digest_changes().get(WS, &changes[0])?.unwrap().state))
+        .read::<_, steve_store::StoreError>(|r| {
+            Ok(r.digest_changes().get(WS, &changes[0])?.unwrap().state)
+        })
         .unwrap();
     assert_eq!(state, "applied");
     // Removing the later operation first makes the original insertion safe to undo again.
@@ -1107,7 +1113,9 @@ async fn memory_index_undo_conflicts_with_later_ranges_without_partial_deletion(
     }
     assert_eq!(
         e.store()
-            .read(|r| Ok(serde_json::to_value(r.memory_index().get(WS, &mem.id)?)?))
+            .read::<_, steve_store::StoreError>(|r| Ok(serde_json::to_value(
+                r.memory_index().get(WS, &mem.id)?
+            )?))
             .unwrap(),
         json!({"about": [], "ranges": []})
     );
@@ -1159,7 +1167,9 @@ async fn memory_index_undo_conflicts_after_matter_merge_without_partial_deletion
     assert_eq!(status, 200, "{body}");
     let before = e
         .store()
-        .read(|r| Ok(serde_json::to_value(r.memory_index().get(WS, &mem.id)?)?))
+        .read::<_, steve_store::StoreError>(|r| {
+            Ok(serde_json::to_value(r.memory_index().get(WS, &mem.id)?)?)
+        })
         .unwrap();
     let (status, body) = call(
         &app,
@@ -1172,13 +1182,17 @@ async fn memory_index_undo_conflicts_after_matter_merge_without_partial_deletion
     assert_eq!(status, 409, "{body}");
     assert_eq!(
         e.store()
-            .read(|r| Ok(serde_json::to_value(r.memory_index().get(WS, &mem.id)?)?))
+            .read::<_, steve_store::StoreError>(|r| Ok(serde_json::to_value(
+                r.memory_index().get(WS, &mem.id)?
+            )?))
             .unwrap(),
         before
     );
     let state: String = e
         .store()
-        .read(|r| Ok(r.digest_changes().get(WS, change)?.unwrap().state))
+        .read::<_, steve_store::StoreError>(|r| {
+            Ok(r.digest_changes().get(WS, change)?.unwrap().state)
+        })
         .unwrap();
     assert_eq!(state, "applied");
 }
@@ -1210,7 +1224,7 @@ fn intake_consumes_only_new_positions_including_older_backfill() {
     assert_eq!(n, 2);
     assert!(first.unwrap() > position);
     e.store()
-        .read(|r| {
+        .read::<_, steve_store::StoreError>(|r| {
             assert_eq!(conv::unread(r, WS, &cv("s1"), 500)?.len(), 2);
             assert_eq!(
                 r.digest_windows().pending_stats(WS, "space:s1")?,

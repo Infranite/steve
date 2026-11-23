@@ -70,7 +70,7 @@ pub const ALLOW_PRIVATE_MAX: usize = 50;
 async fn allow_private_get(Extension(cx): Cx, who: Caller) -> ApiResult<Json<Value>> {
     let mut hosts: Vec<String> = cx
         .store()
-        .read(|c| Ok(http::allow_private(c, &who.ws)))?
+        .read::<_, steve_store::StoreError>(|c| Ok(http::allow_private(c, &who.ws)))?
         .into_iter()
         .collect();
     hosts.sort();
@@ -642,7 +642,7 @@ async fn history(
     Path(id): Path<String>,
     Query(q): Query<HistoryQuery>,
 ) -> ApiResult<Json<Value>> {
-    cx.store().read(|r| {
+    cx.store().read::<_, steve_store::StoreError>(|r| {
         Ok(cx.read(|c| -> ApiResult<_> {
             let dry = match q.dry.as_deref() {
                 None => None,

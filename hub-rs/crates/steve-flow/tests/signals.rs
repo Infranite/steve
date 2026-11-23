@@ -271,7 +271,7 @@ async fn keep_raw_setting_is_read_per_workspace() {
     fixtures::raw_retention_settings(e.env.store()).unwrap();
     e.env
         .store()
-        .read(|c| {
+        .read::<_, steve_store::StoreError>(|c| {
             assert_eq!(retention::keep_raw_days(c, WS).unwrap(), 30);
             assert_eq!(
                 retention::keep_raw_days(c, WS2).unwrap(),
@@ -353,7 +353,7 @@ async fn single_user_reads_private_events_without_crossing_workspaces_or_connect
         };
         e.env
             .store()
-            .read(|r| {
+            .read::<_, steve_store::StoreError>(|r| {
                 let found = signals::list(r, &viewer, &signals::Filter::default())?;
                 assert_eq!(found["stats"]["total"], 2);
                 assert_eq!(signals::own(r, &viewer, pid)?.id, pid);

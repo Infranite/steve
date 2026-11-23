@@ -21,7 +21,6 @@ use steve_modules::{
     Clock,
     accounts::{
         connections::{self, Connections, ConnectionsConfig},
-        repo,
         service::ensure_seeds,
     },
     testkit::{ME, TestEnv, WS, caller},
@@ -150,12 +149,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         connections::register(r);
     });
     fake.with(|w| w.now = Some(env.clock.now()));
-    env.store()
-        .transaction(|tx| -> steve_modules::ApiResult<()> {
-            ensure_seeds(tx, WS)?;
-            repo::upsert_declared(tx, ext_ws::SYSTEM, ext_ws::SYSTEM_LABEL, "ext_ws")?;
-            Ok(())
-        })?;
+    env.store().transaction(|tx| ensure_seeds(tx, WS))?;
+    env.store().write(|w| {
+        steve_store::Systems(w).upsert_declared(
+            ext_ws::SYSTEM,
+            ext_ws::SYSTEM_LABEL,
+            "ext_ws",
+            steve_store::now(),
+        )
+    })?;
     let keys = tempfile::tempdir()?;
     let vault = Vault::new(
         env.store().clone(),

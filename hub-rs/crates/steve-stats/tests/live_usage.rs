@@ -110,7 +110,7 @@ fn report(id: &str, m: Measurement, n: Option<u64>) -> UsageReport {
 }
 
 fn totals(s: &Store, item: &str, sessions: &[String], want: i64) {
-    s.read(|c| {
+    s.read::<_, steve_store::StoreError>(|c| {
         let session_total: i64 = sessions
             .iter()
             .map(|id| views::session(c, id).unwrap().unwrap().1.usage.total)
@@ -239,8 +239,10 @@ fn epochs_models_and_all_main_scope_are_isolated_and_replaceable() {
 fn unreported_unavailable_partial_and_true_zero_are_distinct() {
     let (_dir, s, item, sessions, turns) = fixture();
     let cov = |id: &str| {
-        s.read(|c| Ok(views::session(c, id)?.unwrap().1.usage.coverage))
-            .unwrap()
+        s.read::<_, steve_store::StoreError>(|c| {
+            Ok(views::session(c, id)?.unwrap().1.usage.coverage)
+        })
+        .unwrap()
     };
     assert_eq!(cov(&sessions[0]).state, CoverageState::NotReported);
     assert_eq!(cov(&sessions[0]).total, None);
@@ -265,7 +267,7 @@ fn unreported_unavailable_partial_and_true_zero_are_distinct() {
     assert_eq!(cov(&sessions[1]).state, CoverageState::Complete);
     assert_eq!(cov(&sessions[1]).total, Some(0));
     let whole = s
-        .read(|c| {
+        .read::<_, steve_store::StoreError>(|c| {
             Ok(views::item_detail(c, &item, AT + 2, true)?
                 .unwrap()
                 .1
@@ -390,7 +392,7 @@ fn legacy_companions_use_stable_ownership_and_same_millisecond_is_only_uncertain
                 .unwrap();
         }
         let read = || {
-            s.read(|c| {
+            s.read::<_, steve_store::StoreError>(|c| {
                 let q = metrics::Query {
                     workspace_id: WS.into(),
                     from: DAY.into(),
@@ -474,7 +476,7 @@ fn standalone_cost_only_and_other_models_stay_missing() {
                 attempts: 1,
             })
             .unwrap();
-        s.read(|c| {
+        s.read::<_, steve_store::StoreError>(|c| {
             let q = metrics::Query {
                 workspace_id: WS.into(),
                 from: DAY.into(),

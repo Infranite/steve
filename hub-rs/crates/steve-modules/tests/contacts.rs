@@ -1697,7 +1697,9 @@ async fn owner_address_contexts_never_fall_back_to_each_other_and_scopes_do_not_
     .await;
     let get = |external, persona: Option<&str>, space: Option<&str>| {
         t.store()
-            .read(|c| Ok(address(c, WS, ME, external, persona, space).unwrap()))
+            .read::<_, steve_store::StoreError>(|c| {
+                Ok(address(c, WS, ME, external, persona, space).unwrap())
+            })
             .unwrap()
             .unwrap()
     };
@@ -1760,7 +1762,9 @@ async fn owner_address_contexts_never_fall_back_to_each_other_and_scopes_do_not_
     req(&r, &other(), "GET", "/me/contact", None).await;
     let other_name = t
         .store()
-        .read(|c| Ok(address(c, WS, OTHER, true, Some("p1"), Some("s1")).unwrap()))
+        .read::<_, steve_store::StoreError>(|c| {
+            Ok(address(c, WS, OTHER, true, Some("p1"), Some("s1")).unwrap())
+        })
         .unwrap()
         .unwrap();
     assert_ne!(other_name, "Space name");

@@ -38,7 +38,7 @@ impl ItemFinders {
         by: &str,
         event: &Value,
     ) -> FlowResult<Option<String>> {
-        store.read(|_| {
+        store.read::<_, steve_store::StoreError>(|_| {
             Ok((|| -> FlowResult<_> {
                 for finder in self.0.get(by).into_iter().flatten() {
                     if let Some(id) = finder.find(store, ws, event)? {
@@ -116,7 +116,7 @@ impl ItemFinder for ByThread {
         let Some(thread) = event["thread_key"].as_str().filter(|t| !t.is_empty()) else {
             return Ok(None);
         };
-        Ok(store.read(|r| {
+        Ok(store.read::<_, steve_store::StoreError>(|r| {
             let events =
                 SignalRows(r).thread_events(ws, thread, event["id"].as_str().unwrap_or(""))?;
             let at: HashMap<_, _> = events

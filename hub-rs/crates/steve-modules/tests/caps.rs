@@ -166,7 +166,7 @@ async fn a_server_is_defined_once_and_its_secrets_go_to_the_bots_that_use_it() {
     assert_eq!(
         h.env
             .store()
-            .read(|r| Ok(Servers(r).list(WS)?.len()))
+            .read::<_, steve_store::StoreError>(|r| Ok(Servers(r).list(WS)?.len()))
             .unwrap(),
         1
     );
@@ -190,14 +190,14 @@ async fn a_server_is_defined_once_and_its_secrets_go_to_the_bots_that_use_it() {
     assert_eq!(
         h.env
             .store()
-            .read(|r| Ok(Servers(r).list(WS)?.len()))
+            .read::<_, steve_store::StoreError>(|r| Ok(Servers(r).list(WS)?.len()))
             .unwrap(),
         0
     );
     assert_eq!(
         h.env
             .store()
-            .read(|r| Ok(Assignments(r).all("mcp")?.len()))
+            .read::<_, steve_store::StoreError>(|r| Ok(Assignments(r).all("mcp")?.len()))
             .unwrap(),
         0
     );

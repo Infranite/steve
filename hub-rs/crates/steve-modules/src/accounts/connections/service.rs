@@ -681,7 +681,7 @@ impl Connections {
     /// The connections the caller may see, with their accounts (the list and 接入).
     pub(super) fn visible(&self, who: &Caller) -> VaultResult<Vec<(ConnRow, arepo::Account)>> {
         let viewer = self.viewer(who)?;
-        self.0.m.store.read(|c| {
+        self.0.m.store.read::<_, steve_store::StoreError>(|c| {
             Ok((|| {
                 let mut out = Vec::new();
                 for r in ConnectionRows(c).list(&who.ws)? {
@@ -721,7 +721,11 @@ impl Connections {
 
     pub fn get(&self, who: &Caller, id: &str) -> VaultResult<ConnectionOut> {
         let viewer = self.viewer(who)?;
-        let r = self.0.m.store.read(|c| Ok(self.own(c, &viewer, id)))??;
+        let r = self
+            .0
+            .m
+            .store
+            .read::<_, steve_store::StoreError>(|c| Ok(self.own(c, &viewer, id)))??;
         Ok(self.out(&r))
     }
 
@@ -975,7 +979,7 @@ impl Connections {
 
     pub fn usage(&self, who: &Caller, id: &str) -> VaultResult<Usage> {
         let viewer = self.viewer(who)?;
-        self.0.m.store.read(|c| {
+        self.0.m.store.read::<_, steve_store::StoreError>(|c| {
             Ok((|| {
                 let r = self.own(c, &viewer, id)?;
                 let mut u = Usage::default();
@@ -1661,10 +1665,9 @@ impl Connections {
             )))
         })?;
         let viewer = self.viewer(who)?;
-        self.0
-            .m
-            .store
-            .read(|c| Ok(self.check_pair(c, &viewer, p, &mut config, this, true)))??;
+        self.0.m.store.read::<_, steve_store::StoreError>(|c| {
+            Ok(self.check_pair(c, &viewer, p, &mut config, this, true))
+        })??;
         Ok(config)
     }
 
@@ -1734,7 +1737,11 @@ impl Connections {
         fields: &BTreeMap<String, Zeroizing<String>>,
     ) -> VaultResult<ConnectionOut> {
         let viewer = self.viewer(who)?;
-        let r = self.0.m.store.read(|c| Ok(self.own(c, &viewer, id)))??;
+        let r = self
+            .0
+            .m
+            .store
+            .read::<_, steve_store::StoreError>(|c| Ok(self.own(c, &viewer, id)))??;
         let p = self.provider_or_404(&r.adapter)?;
         if !matches!(p.auth(), AuthKind::Credential | AuthKind::Managed) {
             return Err(ApiError::rule(steve_i18n::t!("modules.connections.needs_reauth")).into());
@@ -1757,7 +1764,11 @@ impl Connections {
     /// `POST /connections/:id/reauth`: OAuth → `{url}`; credential → `{fields}` to fill again.
     pub async fn reauth(&self, who: &Caller, origin: &str, id: &str) -> VaultResult<Value> {
         let viewer = self.viewer(who)?;
-        let r = self.0.m.store.read(|c| Ok(self.own(c, &viewer, id)))??;
+        let r = self
+            .0
+            .m
+            .store
+            .read::<_, steve_store::StoreError>(|c| Ok(self.own(c, &viewer, id)))??;
         let p = self.provider_or_404(&r.adapter)?;
         match p.auth() {
             AuthKind::OAuth => {
@@ -1873,7 +1884,11 @@ impl Connections {
     pub async fn disconnect(&self, who: &Caller, id: &str) -> VaultResult<Usage> {
         let usage = self.usage(who, id)?;
         let viewer = self.viewer(who)?;
-        let r = self.0.m.store.read(|c| Ok(self.own(c, &viewer, id)))??;
+        let r = self
+            .0
+            .m
+            .store
+            .read::<_, steve_store::StoreError>(|c| Ok(self.own(c, &viewer, id)))??;
         if let Some(p) = self.provider(&r.adapter)
             && r.credential_item.is_some()
             && let Err(e) = p.revoke(&self.cx_of(&r)).await
@@ -2345,7 +2360,11 @@ impl Connections {
     /// `POST /connections/:id/test`: one health check now.
     pub async fn test(&self, who: &Caller, id: &str) -> VaultResult<ConnectionOut> {
         let viewer = self.viewer(who)?;
-        let r = self.0.m.store.read(|c| Ok(self.own(c, &viewer, id)))??;
+        let r = self
+            .0
+            .m
+            .store
+            .read::<_, steve_store::StoreError>(|c| Ok(self.own(c, &viewer, id)))??;
         let Some(p) = self.provider(&r.adapter) else {
             return Err(ApiError::rule(steve_i18n::t!(
                 "modules.connections.not_installed",

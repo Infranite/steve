@@ -19,30 +19,28 @@ impl Mail {
     ) -> MailResult<Audience> {
         let m = self.clone();
         tokio::task::spawn_blocking(move || {
-            m.0.m.store.read(|c| {
-                Ok((|| -> MailResult<Audience> {
-                    let mut a = Audience::default();
-                    let mut names = Vec::new();
-                    for r in &rc {
-                        let (party, internal) = audience_of(c, &ws, &r.addr)?;
-                        a.external |= !internal;
-                        if let Some(p) = party {
-                            a.parties.push(p);
-                        }
-                        names.push(if r.name.is_empty() {
-                            r.addr.clone()
-                        } else {
-                            r.name.clone()
-                        });
+            m.0.m.store.read(|c| -> MailResult<Audience> {
+                let mut a = Audience::default();
+                let mut names = Vec::new();
+                for r in &rc {
+                    let (party, internal) = audience_of(c, &ws, &r.addr)?;
+                    a.external |= !internal;
+                    if let Some(p) = party {
+                        a.parties.push(p);
                     }
-                    a.description = format!(
-                        "邮件收件人：{}，{}",
-                        names.join("、"),
-                        if a.external { "外部" } else { "内部" }
-                    );
-                    Ok(a)
-                })())
-            })?
+                    names.push(if r.name.is_empty() {
+                        r.addr.clone()
+                    } else {
+                        r.name.clone()
+                    });
+                }
+                a.description = format!(
+                    "邮件收件人：{}，{}",
+                    names.join("、"),
+                    if a.external { "外部" } else { "内部" }
+                );
+                Ok(a)
+            })
         })
         .await
         .map_err(|e| MailError::Other(format!("task failed: {e}")))?
@@ -107,14 +105,10 @@ impl Mail {
             );
         }
         let (hits, query) = (g.hits.clone(), g.query.clone());
-        self.0.m.store.transaction(|tx| -> MailResult<()> {
-            tx.prepare_cached("UPDATE mail_drafts SET basis = ? WHERE id = ?")?
-                .execute(rusqlite::params![
-                    d.basis.as_ref().map(Value::to_string),
-                    d.id
-                ])?;
+        self.0.m.store.write(|tx| -> MailResult<()> {
+            repo::set_optional_draft_basis(tx, &d.id, d.basis.as_ref())?;
             if !hits.is_empty() {
-                tx.write(|w| record_use(w, &d.workspace_id, ("draft", &d.id), &query, &hits))?;
+                record_use(tx, &d.workspace_id, ("draft", &d.id), &query, &hits)?;
             }
             Ok(())
         })?;

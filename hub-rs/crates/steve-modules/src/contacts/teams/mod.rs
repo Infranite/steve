@@ -315,7 +315,7 @@ pub fn own_team(
 }
 
 fn team_by_id(m: &Modules, viewer: &Viewer, ports: &Ports, id: &str) -> ApiResult<Team> {
-    m.store.read(|r| {
+    m.store.read::<_, steve_store::StoreError>(|r| {
         let party = r
             .contacts()
             .party(id)?
@@ -363,7 +363,8 @@ fn tree_order(chart: Vec<Team>) -> Vec<Team> {
 /// `GET /teams`: `{chart (tree order, with depth), virtual, sync}`, without members.
 pub fn list_teams(m: &Modules, ports: &Ports, who: &Caller) -> ApiResult<TeamList> {
     let (viewer, _) = start(m, who)?;
-    m.store.read(|r| Ok(list_teams_in(r, ports, who, viewer)))?
+    m.store
+        .read::<_, steve_store::StoreError>(|r| Ok(list_teams_in(r, ports, who, viewer)))?
 }
 
 fn list_teams_in(
@@ -736,6 +737,8 @@ pub fn sync_teams(m: &Modules, ports: &Ports, who: &Caller, b: SyncBody) -> ApiR
         return Err(ApiError::rule(steve_i18n::t!("modules.teams.no_directory")));
     };
     m.store
-        .read(|r| Ok(sync.schedule(r, &who.ws, &who.me, b.connection_id.as_deref())))??
+        .read::<_, steve_store::StoreError>(|r| {
+            Ok(sync.schedule(r, &who.ws, &who.me, b.connection_id.as_deref()))
+        })??
         .ok_or_else(|| ApiError::rule(steve_i18n::t!("modules.teams.no_directory")))
 }

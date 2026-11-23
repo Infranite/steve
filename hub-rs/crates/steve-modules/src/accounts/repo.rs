@@ -5,11 +5,6 @@ pub use steve_store::{MatchRule, PrefixConfig};
 
 pub use steve_store::System;
 
-/// Installs a system from an extension during the caller's boot transaction.
-pub fn upsert_declared(tx: &Tx, id: &str, name: &str, ext: &str) -> Result<()> {
-    tx.write(|w| steve_store::Systems(w).upsert_declared(id, name, ext))
-}
-
 // ---------------------------------------------------------------- accounts
 
 pub use steve_store::account_rows::{ACCOUNT, Account, AccountPatch, AccountQuery, NewAccount};

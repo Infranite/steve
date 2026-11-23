@@ -122,7 +122,7 @@ pub fn item_prompt_cards(
     viewer: &Viewer,
     item: &str,
 ) -> ApiResult<Vec<ContactCard>> {
-    store.read(|c| Ok(item_contact_cards(c, viewer, item)))?
+    store.read::<_, steve_store::StoreError>(|c| Ok(item_contact_cards(c, viewer, item)))?
 }
 
 /// The cards of everyone linked to an item, in the order they were linked, with their roles.

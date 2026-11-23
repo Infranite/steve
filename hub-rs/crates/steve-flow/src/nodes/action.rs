@@ -100,7 +100,7 @@ async fn item_create(cx: &FlowCx, run: &RunRow, cfg: &Value) -> FlowResult<Actio
     let tz = s.spec.zone();
     let at = run.at();
     let ws = run.workspace_id.clone();
-    let (bot, note, previous) = cx.store().read(|r| {
+    let (bot, note, previous) = cx.store().read::<_, steve_store::StoreError>(|r| {
         let previous = steve_store::RunRows(r).last_real(&ws, &run.flow_id, Some(&run.id))?;
         Ok(pick_bot(r, &ws, cfg["bot"].as_str().unwrap_or(&s.spec.bot))
             .map(|(bot, note)| (bot, note, previous)))
@@ -122,7 +122,7 @@ async fn item_create(cx: &FlowCx, run: &RunRow, cfg: &Value) -> FlowResult<Actio
     let propose = cfg["mode"] == "propose";
     // Recheck membership at execution, not just when the schedule was configured.
     cx.store()
-        .read(|c| Ok(schedules::check_refs(c, &ws, &s.spec)))??;
+        .read::<_, steve_store::StoreError>(|c| Ok(schedules::check_refs(c, &ws, &s.spec)))??;
     // and that its item could run at all (#222): otherwise no item is made, the run records why
     // and nothing tries again by itself
     let mut spec = s.spec.clone();
@@ -663,7 +663,7 @@ pub async fn item_create_event(cx: &mut RunCx<'_>, cfg: &Value, input: &Value) -
     let picked = cx
         .flow
         .store()
-        .read(|c| Ok(event_bot(c, &ws, bot_cfg.as_deref(), &ev)))
+        .read::<_, steve_store::StoreError>(|c| Ok(event_bot(c, &ws, bot_cfg.as_deref(), &ev)))
         .map_err(steve_modules::ApiError::from)
         .and_then(|result| result);
     let (bot, note) = match picked {

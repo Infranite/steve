@@ -1295,9 +1295,9 @@ async fn your_private_chat_with_the_bot_is_owner_only() {
         .store()
         .reader(|_| {
             assert_eq!(
-                h.env
-                    .store()
-                    .read(|r| Ok(steve_channels::personas::owner_name(r, WS)))??,
+                h.env.store().read::<_, steve_store::StoreError>(|r| Ok(
+                    steve_channels::personas::owner_name(r, WS)
+                ))??,
                 "External name"
             );
             Ok::<_, steve_modules::ApiError>(())
@@ -4347,7 +4347,7 @@ async fn own_identity_answer_is_a_reviewable_reply_not_a_private_meta_question()
     let owner = h
         .env
         .store()
-        .read(|c| Ok(steve_channels::personas::owner_name(c, WS)))
+        .read::<_, steve_store::StoreError>(|c| Ok(steve_channels::personas::owner_name(c, WS)))
         .unwrap()
         .unwrap();
     let text = format!("我是{owner}。");

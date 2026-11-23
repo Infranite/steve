@@ -38,17 +38,18 @@ use steve_modules::ApiError;
 use tokio::sync::{Notify, Semaphore, mpsc};
 use zeroize::Zeroizing;
 
+use steve_store::github::{Deliveries, DeliveryInput, DeliveryRow, RECEIVED};
 use steve_store::outbox;
 
 use crate::adapters::github_app::WEBHOOK_SECRET;
-use crate::repo::{self, AppRow, DeliveryRow};
 use crate::sync::Source;
 use crate::{GitHub, Inner, signature};
+use steve_store::github::AppRow;
 
 /// Largest body accepted.
 pub const BODY_LIMIT: usize = 1024 * 1024;
 /// Deliveries the recovery queues per pass.
-pub const RECOVER_BATCH: i64 = 200;
+pub const RECOVER_BATCH: u64 = 200;
 /// Deliveries per connection per minute (same as signals).
 pub const RATE_PER_MINUTE: usize = 120;
 /// The vault field of a repository hook's secret item.
@@ -277,8 +278,8 @@ impl GitHub {
             .as_i64()
             .and_then(|i| {
                 self.store()
-                    .reader(|c| {
-                        repo::installation_connections(c, &app.workspace_id, i)
+                    .read(|c| {
+                        steve_store::connections::installation_connections(c, &app.workspace_id, i)
                             .map_err(ApiError::from)
                     })
                     .ok()
@@ -305,10 +306,9 @@ impl GitHub {
         let Some(sig) = header_str(headers, signature::SIGNATURE_HEADER) else {
             return empty(StatusCode::UNAUTHORIZED);
         };
-        let ws = match self
-            .store()
-            .reader(|c| repo::connection_kind(c, connection_id).map_err(ApiError::from))
-        {
+        let ws = match self.store().read(|c| {
+            steve_store::connections::connection_kind(c, connection_id).map_err(ApiError::from)
+        }) {
             Ok(Some((ws, adapter))) if handles(&adapter) => ws,
             _ => return empty(StatusCode::UNAUTHORIZED),
         };
@@ -321,7 +321,7 @@ impl GitHub {
         };
         let r = match self
             .store()
-            .reader(|c| repo::repo_by_gh(c, &ws, gh_id).map_err(ApiError::from))
+            .read(|c| steve_store::github::repo_by_gh(c, &ws, gh_id).map_err(ApiError::from))
         {
             Ok(Some(r)) if r.connection_id == connection_id => r,
             _ => return empty(StatusCode::UNAUTHORIZED),
@@ -381,7 +381,7 @@ impl GitHub {
         let repo_id = match (&ws, payload["repository"]["id"].as_i64()) {
             (Some(w), Some(gh_id)) => self
                 .store()
-                .reader(|c| repo::repo_by_gh(c, w, gh_id).map_err(ApiError::from))
+                .read(|c| steve_store::github::repo_by_gh(c, w, gh_id).map_err(ApiError::from))
                 .ok()
                 .flatten()
                 .map(|r| r.id),
@@ -395,16 +395,17 @@ impl GitHub {
             action: payload["action"]
                 .as_str()
                 .map(|a| a.chars().take(64).collect()),
-            status: repo::RECEIVED.into(),
+            status: RECEIVED.into(),
             error: None,
             received: now,
         };
         let src = serde_json::to_string(&source).unwrap_or_default();
         let body = payload.to_string();
-        let fresh = match self
-            .store()
-            .transaction(|tx| repo::insert_delivery(tx, &row, &src, &body).map_err(ApiError::from))
-        {
+        let fresh = match self.store().write(|tx| {
+            Deliveries::new(tx)
+                .insert_delivery(&row, &src, &body)
+                .map_err(ApiError::from)
+        }) {
             Ok(f) => f,
             Err(e) => {
                 tracing::error!(error = %e, "github delivery not recorded");
@@ -482,8 +483,10 @@ impl GitHub {
     /// Queues the deliveries still `received` (accepted, not processed: a restart came between)
     /// that aren't queued already. On start and with every poll tick. Returns how many.
     pub fn recover_deliveries(&self) -> usize {
-        let rows = match self.store().reader(|c| {
-            repo::received_deliveries(c, self.now(), RECOVER_BATCH).map_err(ApiError::from)
+        let rows = match self.store().read(|c| {
+            Deliveries::new(c)
+                .received_deliveries(self.now(), RECOVER_BATCH)
+                .map_err(ApiError::from)
         }) {
             Ok(r) => r,
             Err(e) => {
@@ -492,7 +495,13 @@ impl GitHub {
             }
         };
         let mut n = 0;
-        for (delivery_id, event, source, payload) in rows {
+        for DeliveryInput {
+            delivery_id,
+            event,
+            source,
+            payload,
+        } in rows
+        {
             let (Ok(source), Ok(payload)) = (
                 serde_json::from_str::<Source>(&source),
                 serde_json::from_str::<Value>(&payload),
@@ -518,16 +527,16 @@ impl GitHub {
     /// Mark an input that cannot be decoded failed rather than retrying it forever.
     fn reject_unreadable_delivery(&self, delivery_id: &str) {
         // never readable: recorded as failed rather than tried forever
-        let r = self.store().transaction(|tx| {
-            repo::set_delivery_result(
-                tx,
-                delivery_id,
-                None,
-                None,
-                "failed",
-                Some("存下的内容读不出来"),
-            )
-            .map_err(ApiError::from)
+        let r = self.store().write(|tx| {
+            Deliveries::new(tx)
+                .set_delivery_result(
+                    delivery_id,
+                    None,
+                    None,
+                    "failed",
+                    Some("存下的内容读不出来"),
+                )
+                .map_err(ApiError::from)
         });
         if let Err(e) = r {
             tracing::error!(error = %e, "github: unreadable delivery not recorded");
@@ -543,10 +552,11 @@ impl GitHub {
         // `done_one` removes `delivery_id` from `queued`. Re-checking SQLite after claiming
         // `queued` closes the window where `received_deliveries` read the row right before
         // the worker finished and released `queued`.
-        match self
-            .store()
-            .reader(|c| repo::delivery_due(c, delivery_id, self.now()).map_err(ApiError::from))
-        {
+        match self.store().read(|c| {
+            Deliveries::new(c)
+                .delivery_due(delivery_id, self.now())
+                .map_err(ApiError::from)
+        }) {
             Ok(true) => {}
             Ok(false) => {
                 lock(&self.0.queue.queued).remove(delivery_id);
@@ -604,10 +614,8 @@ impl GitHub {
         // queued by the recovery while a worker finished it: nothing left to do
         let still = self
             .store()
-            .reader(|c| repo::delivery(c, &job.delivery_id).map_err(ApiError::from))
-            .ok()
-            .flatten()
-            .is_some_and(|d| d.status == repo::RECEIVED);
+            .read(|r| Deliveries::new(r).is_received(&job.delivery_id))
+            .unwrap_or(false);
         if !still {
             return;
         }
@@ -631,29 +639,30 @@ impl GitHub {
             tracing::warn!(delivery, event, error = ?out.error, "github delivery failed");
         }
         let now = self.now();
-        let r = self.store().transaction(|tx| {
+        let r = self.store().write(|tx| {
+            if let (Some(ws), Some(_)) = (&out.ws, &out.repo_id) {
+                crate::events::emit(tx, ws, delivery);
+            }
             if out.status == "failed" {
-                let n = repo::delivery_attempts(tx, delivery)? + 1;
+                let n = Deliveries::new(tx).delivery_attempts(delivery)? + 1;
                 if n < outbox::MAX_ATTEMPTS {
                     let why = out.error.as_deref().unwrap_or("处理失败");
-                    repo::delivery_retry(tx, delivery, why, now + outbox::backoff(n))?;
+                    Deliveries::new(tx).delivery_retry(delivery, why, now + outbox::backoff(n))?;
                     return Ok(());
                 }
             }
-            repo::set_delivery_result(
-                tx,
-                delivery,
-                out.ws.as_deref(),
-                out.repo_id.as_deref(),
-                out.status,
-                out.error.as_deref(),
-            )
-            .map_err(ApiError::from)
+            Deliveries::new(tx)
+                .set_delivery_result(
+                    delivery,
+                    out.ws.as_deref(),
+                    out.repo_id.as_deref(),
+                    out.status,
+                    out.error.as_deref(),
+                )
+                .map_err(ApiError::from)
         });
         if let Err(e) = r {
             tracing::error!(error = %e, "github delivery result not recorded");
-        } else if let (Some(ws), Some(_)) = (&out.ws, &out.repo_id) {
-            self.notifier().gh(ws, delivery);
         }
     }
 
@@ -674,7 +683,10 @@ impl GitHub {
                     None => {
                         let inst = v["installation"]["id"].as_i64()?;
                         self.store()
-                            .reader(|c| repo::app_of_installation(c, inst).map_err(ApiError::from))
+                            .read(|c| {
+                                steve_store::connections::app_of_installation(c, inst)
+                                    .map_err(ApiError::from)
+                            })
                             .ok()
                             .flatten()?
                     }
@@ -682,7 +694,7 @@ impl GitHub {
             }
         };
         self.store()
-            .reader(|c| repo::app_by_app_id(c, app_id).map_err(ApiError::from))
+            .read(|c| steve_store::github::app_by_app_id(c, app_id).map_err(ApiError::from))
             .ok()
             .flatten()
     }

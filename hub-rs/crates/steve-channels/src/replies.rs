@@ -599,7 +599,7 @@ fn prepare_item_request(
     ws: &str,
     mode: ItemMode,
 ) -> ChannelResult<(Option<ItemRequest>, String)> {
-    ch.store().read(|r| {
+    ch.store().read::<_, steve_store::StoreError>(|r| {
         Ok(ch.store().reader(|c| -> ChannelResult<_> {
             let space = spaces::get(c, &plan.space_id)?
                 .ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;

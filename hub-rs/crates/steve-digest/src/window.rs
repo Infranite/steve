@@ -451,7 +451,7 @@ mod tests {
             )
             .unwrap();
             reopened
-                .read(|r| {
+                .read::<_, steve_store::StoreError>(|r| {
                     assert!(r.digest_packets().list(WS, None, None, 50)?.is_empty());
                     assert_eq!(r.digest_windows().pending_stats(WS, &conv.key())?.0, 1);
                     assert!(r.digest_windows().cursor(WS, &conv.key())?.is_none());
@@ -461,7 +461,7 @@ mod tests {
             assert_eq!(cut_now(&reopened, WS, &conv, DAY_MS).unwrap().windows, 1);
             assert_eq!(cut_now(&reopened, WS, &conv, DAY_MS).unwrap().windows, 0);
             reopened
-                .read(|r| {
+                .read::<_, steve_store::StoreError>(|r| {
                     assert_eq!(r.digest_packets().list(WS, None, None, 50)?.len(), 1);
                     assert_eq!(
                         r.digest_windows().pending_stats(WS, &conv.key())?,

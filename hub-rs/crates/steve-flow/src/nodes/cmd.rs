@@ -238,7 +238,11 @@ impl NodeKind for Cmd {
                 CmdRan::Unknown => return NodeOutcome::Fail(UNKNOWN.into()),
             }
         }
-        let Ok(Some(dir)) = cx.flow.store().read(|c| Ok(project_dir(c, &ws, &project))) else {
+        let Ok(Some(dir)) = cx
+            .flow
+            .store()
+            .read::<_, steve_store::StoreError>(|c| Ok(project_dir(c, &ws, &project)))
+        else {
             return NodeOutcome::Fail(NO_PROJECT.into());
         };
         let timeout = timeout_of(cfg).unwrap_or(DEFAULT_TIMEOUT_S);

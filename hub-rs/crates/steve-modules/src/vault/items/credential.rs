@@ -109,7 +109,7 @@ impl Vault {
     ) -> VaultResult<(Vec<String>, VaultResult<Credential>)> {
         let (item, rows) = self
             .store()
-            .read(|r| {
+            .read::<_, steve_store::StoreError>(|r| {
                 let mut vaults = VaultItems(r);
                 let Some(item) = vaults
                     .item(item_id)?

@@ -5,19 +5,19 @@
 use std::collections::BTreeSet;
 
 use async_trait::async_trait;
-use rusqlite::Connection;
 use serde_json::json;
 use steve_modules::panels::{
     ActionOutcome, ItemPanel, Panel, PanelAction, PanelHead, PanelRow, RowState,
 };
 use steve_modules::{ApiError, ApiResult, Caller, Modules};
 use steve_store::base;
-use steve_store::base::decisions as base_decisions;
 
 use crate::accept::{PR_MERGE, Slot};
-use crate::repo::{self, CheckRow, PrRow, RepoRow};
 use crate::repos::check_state;
 use crate::sync::latest_checks;
+use steve_store::github::CheckRow;
+use steve_store::github::PrRow;
+use steve_store::github::RepoRow;
 
 /// Provider id and panel id prefix.
 pub const PLUGIN: &str = "github";
@@ -81,7 +81,7 @@ fn badges(pr: &PrRow) -> Vec<String> {
 
 /// `3 项检查通过 · 等你验收后合并`.
 fn foot(
-    c: &Connection,
+    c: &mut impl steve_store::Read,
     pr: &PrRow,
     checks: &[&CheckRow],
     item_status: Option<&str>,
@@ -103,7 +103,8 @@ fn foot(
         "merged" => parts.push(steve_i18n::t!("github.panel.badge_merged")),
         "closed" => parts.push(steve_i18n::t!("github.panel.badge_closed")),
         _ if green
-            && base_decisions::open_for(c, &pr.workspace_id, PR_MERGE, &pr.id)?.is_some() =>
+            && steve_store::decision_repo::open_for(c, &pr.workspace_id, PR_MERGE, &pr.id)?
+                .is_some() =>
         {
             parts.push(steve_i18n::t!("github.panel.wait_merge"))
         }
@@ -116,11 +117,16 @@ fn foot(
 }
 
 /// The panel of one PR.
-pub fn pr_panel(c: &Connection, repo: &RepoRow, pr: &PrRow, now: i64) -> ApiResult<Panel> {
-    let rows = repo::checks_for_sha(c, &repo.id, &pr.head_sha)?;
+pub fn pr_panel(
+    c: &mut impl steve_store::Read,
+    repo: &RepoRow,
+    pr: &PrRow,
+    now: i64,
+) -> ApiResult<Panel> {
+    let rows = steve_store::github::checks_for_sha(c, &repo.id, &pr.head_sha)?;
     let checks = latest_checks(&rows);
     let item_status = match &pr.item_id {
-        Some(i) => repo::item_status(c, &pr.workspace_id, i)?,
+        Some(i) => steve_store::item_repo::item_status(c, &pr.workspace_id, i)?,
         None => None,
     };
     let mut updated = pr.updated;
@@ -171,12 +177,17 @@ pub fn pr_panel(c: &Connection, repo: &RepoRow, pr: &PrRow, now: i64) -> ApiResu
 }
 
 /// The panels of an item: its PRs, open first, then the newest.
-pub fn item_panels(c: &Connection, ws: &str, item: &str, now: i64) -> ApiResult<Vec<Panel>> {
-    let mut prs = repo::prs(c, ws, None, false, Some(item))?;
+pub fn item_panels(
+    c: &mut impl steve_store::Read,
+    ws: &str,
+    item: &str,
+    now: i64,
+) -> ApiResult<Vec<Panel>> {
+    let mut prs = steve_store::github::prs(c, ws, None, false, Some(item))?;
     prs.sort_by_key(|p| (p.state != "open", -p.updated));
     let mut out = Vec::new();
     for pr in prs {
-        if let Some(r) = repo::repo_get(c, &pr.repo_id)? {
+        if let Some(r) = steve_store::github::repo_get(c, &pr.repo_id)? {
             out.push(pr_panel(c, &r, &pr, now)?);
         }
     }
@@ -200,7 +211,7 @@ impl ItemPanel for GhPanels {
         item_id: &str,
     ) -> ApiResult<Vec<Panel>> {
         let now = self.0.get().map_or_else(steve_store::now, |g| g.now());
-        store.reader(|c| item_panels(c, ws, item_id, now))
+        store.read(|r| item_panels(r, ws, item_id, now))
     }
 
     async fn action(
@@ -218,11 +229,11 @@ impl ItemPanel for GhPanels {
         let ws = caller.ws.clone();
         let (pr, r) = m
             .store
-            .reader(|c| {
-                let pr = repo::pr_get(c, pr_id)?
+            .read(|c| {
+                let pr = steve_store::github::pr_get(c, pr_id)?
                     .filter(|p| p.workspace_id == ws && p.item_id.as_deref() == Some(item_id));
                 let r = match &pr {
-                    Some(p) => repo::repo_get(c, &p.repo_id)?,
+                    Some(p) => steve_store::github::repo_get(c, &p.repo_id)?,
                     None => None,
                 };
                 Ok::<_, ApiError>(pr.zip(r))
@@ -231,8 +242,8 @@ impl ItemPanel for GhPanels {
         if action != RERUN {
             return Err(ApiError::not_found("操作"));
         }
-        let runs = m.store.reader(|c| {
-            let rows = repo::checks_for_sha(c, &r.id, &pr.head_sha)?;
+        let runs = m.store.read(|c| {
+            let rows = steve_store::github::checks_for_sha(c, &r.id, &pr.head_sha)?;
             Ok::<_, ApiError>(failed_runs(&latest_checks(&rows)))
         })?;
         if pr.state != "open" || runs.is_empty() {
@@ -265,9 +276,9 @@ impl ItemPanel for GhPanels {
                 }
             }
         }
-        m.store.transaction(|tx| {
+        m.store.write(|tx| {
             base::audit(
-                tx,
+                &tx.legacy(),
                 &ws,
                 &caller.me,
                 "github.rerun",

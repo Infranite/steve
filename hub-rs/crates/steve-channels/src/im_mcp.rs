@@ -181,7 +181,7 @@ async fn read(ch: &Channels, cx: &McpCx, args: &Value) -> ChannelResult<String> 
     };
     let viewer = steve_knowledge::tools::session_viewer(ch.modules(), cx)?;
     let now = ch.now();
-    let (space, tz) = ch.store().read(|r| {
+    let (space, tz) = ch.store().read::<_, steve_store::StoreError>(|r| {
         Ok(ch.store().reader(|c| -> ChannelResult<_> {
             Ok((resolve(c, &viewer, &space_q)?, tz_of(r, &viewer.ws)))
         }))

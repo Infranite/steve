@@ -32,7 +32,7 @@ async fn read(State(m): State<Modules>, who: Caller) -> ApiResult<Json<Value>> {
         owner(m, &who)?;
         let id = m.store.read(|r| r.digest_packets().schedule(&who.ws))?;
         let diagnostic = match &id {
-            Some(id) => m.store.read(|r| Ok(runs::startup_diagnostic(r, &who.ws, id, BOT_SOURCE)))??,
+            Some(id) => m.store.read::<_, steve_store::StoreError>(|r| Ok(runs::startup_diagnostic(r, &who.ws, id, BOT_SOURCE)))??,
             None => None,
         };
         Ok(Json(json!({"schedule_id": id, "template": bot::template(), "diagnostics": diagnostic.into_iter().collect::<Vec<_>>()})))
@@ -845,7 +845,9 @@ mod tests {
             let revision = e
                 .env
                 .store()
-                .read(|c| Ok(steve_flow::scheduler::startup_revision(c, WS, &id)))
+                .read::<_, steve_store::StoreError>(|c| {
+                    Ok(steve_flow::scheduler::startup_revision(c, WS, &id))
+                })
                 .unwrap()
                 .unwrap()
                 .unwrap();
@@ -878,7 +880,9 @@ mod tests {
             let budget = || {
                 e.env
                     .store()
-                    .read(|c| Ok(runs::startup_state(c, WS, &id, BOT_SOURCE, &revision)))
+                    .read::<_, steve_store::StoreError>(|c| {
+                        Ok(runs::startup_state(c, WS, &id, BOT_SOURCE, &revision))
+                    })
                     .unwrap()
                     .unwrap()
             };
@@ -1115,14 +1119,18 @@ mod tests {
             let revision = e
                 .env
                 .store()
-                .read(|c| Ok(steve_flow::scheduler::startup_revision(c, WS, &id)))
+                .read::<_, steve_store::StoreError>(|c| {
+                    Ok(steve_flow::scheduler::startup_revision(c, WS, &id))
+                })
                 .unwrap()
                 .unwrap()
                 .unwrap();
             let state = e
                 .env
                 .store()
-                .read(|c| Ok(runs::startup_state(c, WS, &id, BOT_SOURCE, &revision)))
+                .read::<_, steve_store::StoreError>(|c| {
+                    Ok(runs::startup_state(c, WS, &id, BOT_SOURCE, &revision))
+                })
                 .unwrap()
                 .unwrap()
                 .unwrap();

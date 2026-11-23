@@ -239,7 +239,7 @@ async fn members_page(
     let limit =
         num(q.limit, "limit", |n| (1..=members::PAGE_MAX).contains(&n))?.unwrap_or(members::PAGE);
     let v = viewer(&a.ch, &who)?;
-    let page = a.ch.store().read(|r| {
+    let page = a.ch.store().read::<_, steve_store::StoreError>(|r| {
         Ok(a.ch
             .store()
             .reader(|c| members::page(c, r, &v, &id, offset, limit)))

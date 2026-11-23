@@ -1,4 +1,4 @@
-use sea_query::{Expr, ExprTrait, Func, Query};
+use sea_query::{Expr, ExprTrait, Func, Order, Query};
 use serde_json::Value;
 use steve_types::{DomainEvent, WorkEvent};
 
@@ -6,6 +6,60 @@ use super::{Json, Row};
 use crate::{Decision, NewDecision, Read, Result, W, now, uid};
 
 pub struct DecisionRows<'a, C>(pub &'a mut C);
+/// The draft of the item's latest acceptance decision: the delivery summary and its checks.
+pub fn delivery_summary(c: &mut impl Read, item: &str) -> Result<Option<String>> {
+    c.one(
+        Query::select()
+            .columns(["draft"])
+            .from("decisions")
+            .and_where(Expr::col("item_id").eq(item))
+            .and_where(Expr::col("kind").eq("accept"))
+            .order_by("created", Order::Desc)
+            .limit(1),
+        |r| r.get(0),
+    )
+}
+
+/// Did you approve the PR Steve offered when accepting this item (`gh_pr_open`, `yes`)? Then
+/// the item waits for its PR (`finish_on=merged`).
+pub fn wrap_up_by_pr(c: &mut impl Read, ws: &str, item: &str) -> Result<bool> {
+    let dialect = c.db().dialect();
+    c.one(
+        Query::select()
+            .expr(Expr::cust("1"))
+            .from("decisions")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("subject_type").eq("gh_pr_open"))
+            .and_where(Expr::col("item_id").eq(item))
+            .and_where(Expr::col("requested_by").eq("steve"))
+            .and_where(Expr::col("status").eq("resolved"))
+            .and_where(dialect.json_field(Expr::col("result"), "choice").eq("yes"))
+            .limit(1),
+        |_| Ok(()),
+    )
+    .map(|row| row.is_some())
+}
+
+/// Was merging this PR at `sha` already asked (open, or answered for that head)?
+pub fn merge_asked(c: &mut impl Read, ws: &str, pr: &str, sha: &str) -> Result<bool> {
+    let dialect = c.db().dialect();
+    c.one(
+        Query::select()
+            .expr(Expr::cust("1"))
+            .from("decisions")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("subject_type").eq("gh_pr_merge"))
+            .and_where(Expr::col("subject_id").eq(pr))
+            .and_where(
+                Expr::col("status")
+                    .eq("open")
+                    .or(dialect.json_field(Expr::col("result"), "sha").eq(sha)),
+            )
+            .limit(1),
+        |_| Ok(()),
+    )
+    .map(|row| row.is_some())
+}
 
 const COLUMNS: [&str; 16] = [
     "id",
@@ -201,4 +255,116 @@ impl<C: Read> DecisionRows<'_, C> {
             None => Ok(None),
         }
     }
+}
+
+pub fn open_for(
+    c: &mut impl Read,
+    ws: &str,
+    kind: &str,
+    subject_id: &str,
+) -> Result<Option<Decision>> {
+    c.one(
+        Query::select()
+            .columns(COLUMNS)
+            .from("decisions")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("subject_type").eq(kind))
+            .and_where(Expr::col("subject_id").eq(subject_id))
+            .and_where(Expr::col("status").eq("open"))
+            .order_by("created", Order::Asc)
+            .limit(1),
+        decode,
+    )
+}
+
+pub fn for_item_actor(
+    c: &mut impl Read,
+    ws: &str,
+    item: &str,
+    kind: &str,
+    actor: &str,
+) -> Result<Option<Decision>> {
+    c.one(
+        Query::select()
+            .columns(COLUMNS)
+            .from("decisions")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("item_id").eq(item))
+            .and_where(Expr::col("subject_type").eq(kind))
+            .and_where(Expr::col("requested_by").eq(actor))
+            .order_by("created", Order::Asc)
+            .limit(1),
+        decode,
+    )
+}
+
+/// The latest resolved decision about a draft whose answer was `send` (the approval `execute` needs).
+pub fn send_approval(c: &mut impl Read, ws: &str, draft: &str) -> Result<Option<crate::Decision>> {
+    let dialect = c.db().dialect();
+    let id = c.one(
+        Query::select()
+            .columns(["id"])
+            .from("decisions")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("subject_type").eq("mail_draft"))
+            .and_where(Expr::col("subject_id").eq(draft))
+            .and_where(Expr::col("kind").eq("approve"))
+            .and_where(Expr::col("status").eq("resolved"))
+            .and_where(dialect.json_field(Expr::col("result"), "choice").eq("send"))
+            .order_by("resolved", Order::Desc)
+            .order_by("created", Order::Desc)
+            .limit(1),
+        |r| r.get::<String>(0),
+    )?;
+    match id {
+        Some(id) => get(c, &id),
+        None => Ok(None),
+    }
+}
+
+/// Every open decision about a draft (approval or failure).
+pub fn open_draft_decisions(c: &mut impl Read, ws: &str, draft: &str) -> Result<Vec<String>> {
+    c.all(
+        Query::select()
+            .columns(["id"])
+            .from("decisions")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("subject_type").eq("mail_draft"))
+            .and_where(Expr::col("subject_id").eq(draft))
+            .and_where(Expr::col("status").eq("open")),
+        |r| r.get(0),
+    )
+}
+
+pub fn open_mail_draft_ids(c: &mut impl Read) -> Result<Vec<String>> {
+    c.all(
+        Query::select()
+            .column("subject_id")
+            .from("decisions")
+            .and_where(Expr::col("subject_type").eq("mail_draft"))
+            .and_where(Expr::col("status").eq("open")),
+        |r| r.get(0),
+    )
+}
+
+pub fn reopen(w: &mut crate::W<'_>, id: &str) -> Result<()> {
+    w.exec(
+        Query::update()
+            .table("decisions")
+            .value("status", "open")
+            .value("result", None::<String>)
+            .value("resolved", None::<i64>)
+            .value("undo", None::<String>)
+            .and_where(Expr::col("id").eq(id)),
+    )?;
+    if let Some(d) = get(w, id)? {
+        w.emit(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::Decision {
+                ws: d.workspace_id.into(),
+                id: id.to_owned().into(),
+                item_id: Some(d.item_id.map(Into::into)),
+            },
+        ));
+    }
+    Ok(())
 }

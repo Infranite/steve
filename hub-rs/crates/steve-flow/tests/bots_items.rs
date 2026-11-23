@@ -282,7 +282,7 @@ async fn item_made_by_a_flow_does_not_restart_it() {
     assert_eq!(
         e.env
             .store()
-            .read(|r| Ok(RunRows(r).activity(WS, &fid, 0)?.0))
+            .read::<_, steve_store::StoreError>(|r| Ok(RunRows(r).activity(WS, &fid, 0)?.0))
             .unwrap(),
         1
     );

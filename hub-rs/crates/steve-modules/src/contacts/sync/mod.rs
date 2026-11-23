@@ -380,7 +380,7 @@ impl DirectorySync {
 
     /// Recompute connection changes from authoritative rows, never from a commit hint's payload.
     fn observe_connections(&self) -> ApiResult<()> {
-        let facts = self.m.store.read(|r| {
+        let facts = self.m.store.read::<_, steve_store::StoreError>(|r| {
             let rows = steve_store::Connections(r).change_keys()?;
             let mut facts = Vec::with_capacity(rows.len());
             for (ws, id) in rows {
@@ -429,7 +429,7 @@ impl DirectorySync {
         let (ok, sig) = self
             .m
             .store
-            .read(|r| {
+            .read::<_, steve_store::StoreError>(|r| {
                 Ok(self
                     .connection_fact(r, ws, connection_id)
                     .map(|(sig, ok)| (ok, sig)))
@@ -493,7 +493,7 @@ impl DirectorySync {
     pub fn tick(&self, now: i64) -> ApiResult<Vec<String>> {
         // Re-read workspace clocks so changing settings.tz takes effect on the next tick.
         let since = lock(&self.state).daily_since;
-        let daily = self.m.store.read(|r| {
+        let daily = self.m.store.read::<_, steve_store::StoreError>(|r| {
             let mut daily = std::collections::BTreeSet::new();
             for ws in steve_store::Workspaces(r).ids()? {
                 let tz = crate::zone::Zone::for_user(r, &ws, None)?.tz;
@@ -520,10 +520,9 @@ impl DirectorySync {
             return Ok(Vec::new());
         }
         let mut out = Vec::new();
-        let (all, events, failed) = self
-            .m
-            .store
-            .read(|r| Ok(self.due_connections(r, &daily, catch_up, &due)))??;
+        let (all, events, failed) = self.m.store.read::<_, steve_store::StoreError>(|r| {
+            Ok(self.due_connections(r, &daily, catch_up, &due))
+        })??;
 
         // Commit the timer state only after successful source reads. Preserve events changed
         // concurrently with the read, and retain individual lookup failures with a later deadline.
@@ -744,7 +743,7 @@ impl steve_runtime::due::DueSource for DirectoryDue {
                             .fold(st.next_catch_up, i64::min),
                     )
                 };
-                Ok(m.store.read(|r| {
+                Ok(m.store.read::<_, steve_store::StoreError>(|r| {
                     for ws in steve_store::Workspaces(r).ids()? {
                         let tz = crate::zone::Zone::for_user(r, &ws, None)?.tz;
                         next = next.min(next_daily_in(

@@ -223,7 +223,9 @@ fn invariants_hold() {
     refresh::refresh_all(&s).unwrap();
     let q = day_query();
     let (sm, rows, prices) = s
-        .read(|c| Ok((summary(c, &q)?.unwrap(), daily(c, &q)?, prices_of(c, WS)?)))
+        .read::<_, steve_store::StoreError>(|c| {
+            Ok((summary(c, &q)?.unwrap(), daily(c, &q)?, prices_of(c, WS)?))
+        })
         .unwrap();
     for by in [
         By::Model,
@@ -343,7 +345,10 @@ fn tree_follows_who_started_whom() {
     let (_d, s) = store();
     seed_tree(&s).unwrap();
     refresh::rebuild(&s, WS).unwrap();
-    let (ws, tree) = s.read(|c| Ok(views::tree(c, "ST-1")?)).unwrap().unwrap();
+    let (ws, tree) = s
+        .read::<_, steve_store::StoreError>(|c| Ok(views::tree(c, "ST-1")?))
+        .unwrap()
+        .unwrap();
     assert_eq!(ws, WS);
     assert!(!tree.truncated);
     let shape: Vec<_> = tree
@@ -363,20 +368,29 @@ fn tree_follows_who_started_whom() {
     // each row is the item's own figures, as on its drill-down
     for n in &tree.nodes {
         let (_, d) = s
-            .read(|c| Ok(views::item_detail(c, &n.item_id, m(400), true)?))
+            .read::<_, steve_store::StoreError>(|c| {
+                Ok(views::item_detail(c, &n.item_id, m(400), true)?)
+            })
             .unwrap()
             .unwrap();
         assert_eq!(n.reported, d.usage.reported, "{}", n.item_id);
         assert_eq!(n.agent_ms, d.facts.agent_ms, "{}", n.item_id);
     }
-    assert!(s.read(|c| Ok(views::tree(c, "ST-404")?)).unwrap().is_none());
+    assert!(
+        s.read::<_, steve_store::StoreError>(|c| Ok(views::tree(c, "ST-404")?))
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
 fn tree_stops_at_its_depth() {
     let (_d, s) = store();
     seed_tree_chain(&s, views::TREE_DEPTH).unwrap();
-    let (_, tree) = s.read(|c| Ok(views::tree(c, "ST-5")?)).unwrap().unwrap();
+    let (_, tree) = s
+        .read::<_, steve_store::StoreError>(|c| Ok(views::tree(c, "ST-5")?))
+        .unwrap()
+        .unwrap();
     assert!(tree.truncated);
     assert_eq!(tree.nodes.last().unwrap().depth, views::TREE_DEPTH);
 }

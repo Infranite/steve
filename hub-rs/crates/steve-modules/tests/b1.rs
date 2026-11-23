@@ -359,7 +359,7 @@ async fn panels_list_in_order_and_actions_go_to_their_provider() {
     let i = item(&t);
     let ps = t
         .store()
-        .read(|_| Ok(panels::panels(&t.modules, WS, ME, &i.id)))
+        .read::<_, steve_store::StoreError>(|_| Ok(panels::panels(&t.modules, WS, ME, &i.id)))
         .unwrap()
         .unwrap();
     let ids: Vec<_> = ps.iter().map(|p| p.id.as_str()).collect();

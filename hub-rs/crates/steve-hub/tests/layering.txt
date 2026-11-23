@@ -3,6 +3,7 @@
 edge steve-acp steve-harness-spec	1
 edge steve-acp steve-node-api	1
 edge steve-calendar steve-runtime	1
+edge steve-calendar steve-store	1
 edge steve-calendar steve-types	1
 edge steve-channels steve-runtime	1
 edge steve-channels steve-types	1
@@ -19,6 +20,7 @@ edge steve-flow steve-runtime	1
 edge steve-flow steve-types	1
 edge steve-flow steve-work-api	1
 edge steve-github steve-runtime	1
+edge steve-github steve-store	1
 edge steve-github steve-types	1
 edge steve-harness-spec steve-node-api	1
 edge steve-hub steve-auth	1
@@ -37,6 +39,7 @@ edge steve-install steve-store	1
 edge steve-knowledge steve-runtime	1
 edge steve-knowledge steve-types	1
 edge steve-mail steve-runtime	1
+edge steve-mail steve-store	1
 edge steve-mail steve-types	1
 edge steve-modules steve-runtime	1
 edge steve-modules steve-types	1

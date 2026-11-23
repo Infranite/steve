@@ -2,7 +2,8 @@
 //! events, repositories, SQL) is written once; a backend only runs what the core rendered.
 
 use sea_query::{
-    Expr, ExprTrait, Func, FunctionCall, QueryStatementWriter, SqliteQueryBuilder, Value, Values,
+    Expr, ExprTrait, Func, FunctionCall, Query, QueryStatementWriter, SelectStatement,
+    SqliteQueryBuilder, Value, Values,
 };
 
 use crate::{Result, StoreError};
@@ -168,6 +169,56 @@ impl Dialect {
         match self {
             Dialect::Sqlite => Func::cust("json_each").arg(array),
         }
+    }
+
+    pub(crate) fn ascii_nocase(self, expr: Expr) -> Expr {
+        match self {
+            Dialect::Sqlite => Expr::cust_with_expr("(? COLLATE NOCASE)", expr),
+        }
+    }
+
+    /// The database's insertion order for deliveries received in the same millisecond.
+    pub(crate) fn delivery_order(self, table: &'static str) -> Expr {
+        match self {
+            Dialect::Sqlite => Expr::col((table, "rowid")),
+        }
+    }
+
+    pub(crate) fn json_integer(self, column: Expr, key: &'static str) -> Expr {
+        match self {
+            Dialect::Sqlite => {
+                Expr::cust_with_expr("CAST(? AS BIGINT)", self.json_field(column, key))
+            }
+        }
+    }
+
+    pub(crate) fn json_merge_patch(self, column: Expr, patch: Expr) -> Expr {
+        match self {
+            Dialect::Sqlite => Expr::cust_with_exprs("json_patch(?, ?)", [column, patch]),
+        }
+    }
+
+    pub(crate) fn json_rows(self, column: Expr, alias: &'static str) -> SelectStatement {
+        match self {
+            Dialect::Sqlite => Query::select()
+                .column((alias, "value"))
+                .from_function(sea_query::Func::cust("json_each").arg(column), alias)
+                .take(),
+        }
+    }
+
+    /// A bound text array as rows, so large lists use one parameter.
+    pub(crate) fn text_array(
+        self,
+        items: &[impl AsRef<str> + serde::Serialize],
+    ) -> Result<SelectStatement> {
+        let json = serde_json::to_string(items).map_err(|e| StoreError::Rejected(e.to_string()))?;
+        Ok(match self {
+            Dialect::Sqlite => Query::select()
+                .column("value")
+                .from_function(sea_query::Func::cust("json_each").arg(json), "items")
+                .take(),
+        })
     }
 
     /// `array` (a JSON array column) with `item` appended.

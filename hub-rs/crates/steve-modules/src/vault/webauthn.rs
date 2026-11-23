@@ -287,7 +287,7 @@ impl Passkeys {
         self.check_fresh_login(user, token)?;
         let i = self.rp_for(host)?;
         let rp = &self.0.rps[i];
-        let (existing, display) = self.0.store.read(|r| {
+        let (existing, display) = self.0.store.read::<_, steve_store::StoreError>(|r| {
             let rows = Self::rows(r, ws, user, &rp.rp_id)?;
             let display = UserRows(r).name(user)?;
             Ok((rows, display.unwrap_or_else(|| user.to_owned())))

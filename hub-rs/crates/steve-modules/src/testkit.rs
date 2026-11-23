@@ -114,12 +114,22 @@ pub struct TestEnv {
 impl TestEnv {
     /// Migrated store in a temp dir; `register` fills the registry like the integrator would.
     pub fn new(register: impl FnOnce(&mut Registry)) -> Self {
+        Self::observing(register, |_| {})
+    }
+
+    pub fn observing(
+        register: impl FnOnce(&mut Registry),
+        observe: impl Fn(&BusEvent) + Send + Sync + 'static,
+    ) -> Self {
         let dir = tempfile::tempdir().expect("temp dir");
         let events: Arc<Mutex<Vec<BusEvent>>> = Arc::default();
         let sink = events.clone();
         let store = Store::open(
             dir.path().join("steve.sqlite3"),
-            FnPublisher(move |e| sink.lock().unwrap_or_else(|p| p.into_inner()).push(e)),
+            FnPublisher(move |e| {
+                observe(&e);
+                sink.lock().unwrap_or_else(|p| p.into_inner()).push(e);
+            }),
         )
         .expect("open store");
         store.ensure_workspace().expect("workspace");

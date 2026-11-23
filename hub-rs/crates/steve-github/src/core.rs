@@ -71,11 +71,17 @@ impl RecordingCore {
         self.calls.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    fn record(&self, c: CoreCall, sql: &str, p: [&str; 3]) -> Result<(), String> {
+    fn record(
+        &self,
+        c: CoreCall,
+        item: &str,
+        status: &str,
+        stage: &str,
+        now: &str,
+    ) -> Result<(), String> {
         self.calls.lock().unwrap_or_else(|e| e.into_inner()).push(c);
         self.store
-            .with_conn(|c| Ok(c.execute(sql, p)?))
-            .map(|_| ())
+            .write(|w| steve_store::item_repo::set_progress(w, item, status, stage, now))
             .map_err(|e| e.to_string())
     }
 }
@@ -89,8 +95,10 @@ impl ItemCore for RecordingCore {
                 stage: stage.into(),
                 now: now.into(),
             },
-            "UPDATE items SET status = 'run', stage = ?, now = ? WHERE id = ?",
-            [stage, now, item_id],
+            item_id,
+            "run",
+            stage,
+            now,
         )
     }
     async fn finish(&self, _: &str, item_id: &str, now: &str) -> Result<(), String> {
@@ -99,8 +107,10 @@ impl ItemCore for RecordingCore {
                 item: item_id.into(),
                 now: now.into(),
             },
-            "UPDATE items SET status = 'done', stage = ?, now = ? WHERE id = ?",
-            ["收尾", now, item_id],
+            item_id,
+            "done",
+            "收尾",
+            now,
         )
     }
     async fn fail(&self, _: &str, item_id: &str, why: &str) -> Result<(), String> {
@@ -109,8 +119,10 @@ impl ItemCore for RecordingCore {
                 item: item_id.into(),
                 why: why.into(),
             },
-            "UPDATE items SET status = 'wait', stage = ?, now = ? WHERE id = ?",
-            ["执行", why, item_id],
+            item_id,
+            "wait",
+            "执行",
+            why,
         )
     }
 }

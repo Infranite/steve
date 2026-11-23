@@ -30,7 +30,9 @@ fn scope() -> Scope {
 fn the_span_counts_every_kind_and_lists_the_newest_first() {
     let (_d, s) = store();
     let e = s
-        .read(|c| Ok(events(c, &scope(), m(0), m(60), None, 12, m(55))?))
+        .read::<_, steve_store::StoreError>(|c| {
+            Ok(events(c, &scope(), m(0), m(60), None, 12, m(55))?)
+        })
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -75,7 +77,7 @@ fn the_span_counts_every_kind_and_lists_the_newest_first() {
 fn a_window_narrows_the_list_not_the_histogram() {
     let (_d, s) = store();
     let e = s
-        .read(|c| {
+        .read::<_, steve_store::StoreError>(|c| {
             Ok(events(
                 c,
                 &scope(),
@@ -105,7 +107,7 @@ fn a_window_narrows_the_list_not_the_histogram() {
 fn project_kind_and_item_narrow_everything() {
     let (_d, s) = store();
     let run = |sc: Scope| {
-        s.read(|c| Ok(events(c, &sc, m(0), m(60), None, 12, m(55))?))
+        s.read::<_, steve_store::StoreError>(|c| Ok(events(c, &sc, m(0), m(60), None, 12, m(55))?))
             .unwrap()
             .unwrap()
     };
@@ -129,8 +131,16 @@ fn project_kind_and_item_narrow_everything() {
     });
     assert_eq!(st2.total, 4);
     assert!(
-        s.read(|c| Ok(events(c, &scope(), m(10), m(10), None, 12, m(55))?))
-            .unwrap()
-            .is_none()
+        s.read::<_, steve_store::StoreError>(|c| Ok(events(
+            c,
+            &scope(),
+            m(10),
+            m(10),
+            None,
+            12,
+            m(55)
+        )?))
+        .unwrap()
+        .is_none()
     );
 }

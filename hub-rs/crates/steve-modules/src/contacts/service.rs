@@ -207,7 +207,7 @@ pub enum PartyView {
 /// Creates “我” for the caller and the workspace's own organization when missing, and returns the
 /// caller's viewer and “我”.
 pub fn start(m: &Modules, who: &Caller) -> ApiResult<(Viewer, Party)> {
-    let found = m.store.read(|r| {
+    let found = m.store.read::<_, steve_store::StoreError>(|r| {
         let mut contacts = r.contacts();
         Ok((
             contacts.me(&who.ws, &who.me)?,
@@ -563,14 +563,14 @@ pub fn org(
 }
 
 fn contact_by_id(m: &Modules, viewer: &Viewer, id: &str) -> ApiResult<Contact> {
-    m.store.read(|r| {
+    m.store.read::<_, steve_store::StoreError>(|r| {
         Ok(own_party_in(r, viewer, id, "contact", "联系人", false)
             .and_then(|p| contact(r, viewer, &p)))
     })?
 }
 
 fn org_by_id(m: &Modules, viewer: &Viewer, id: &str) -> ApiResult<Org> {
-    m.store.read(|r| {
+    m.store.read::<_, steve_store::StoreError>(|r| {
         Ok(
             own_party_in(r, viewer, id, "org", "组织", false)
                 .and_then(|p| org(r, viewer, &p, true)),
@@ -631,7 +631,7 @@ pub fn list_contacts(
         ..Default::default()
     };
     m.store
-        .read(|r| Ok(list_contacts_in(r, ports, &viewer, f)))?
+        .read::<_, steve_store::StoreError>(|r| Ok(list_contacts_in(r, ports, &viewer, f)))?
 }
 
 fn list_contacts_in(
@@ -1659,7 +1659,7 @@ fn check_domains(
 /// `GET /orgs` (without `people`).
 pub fn list_orgs(m: &Modules, who: &Caller) -> ApiResult<Vec<Org>> {
     let (viewer, _) = start(m, who)?;
-    m.store.read(|r| {
+    m.store.read::<_, steve_store::StoreError>(|r| {
         let rows = r.contacts().organizations(&viewer)?;
         Ok(rows.iter().map(|p| org(r, &viewer, p, false)).collect())
     })?

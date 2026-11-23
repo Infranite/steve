@@ -602,7 +602,7 @@ pub fn merge(
     let merge_id = m
         .store
         .write(|tx| merge_tx(tx, &ports.hooks, &viewer, &who.me, &from, &into))?;
-    let into = m.store.read(|r| {
+    let into = m.store.read::<_, steve_store::StoreError>(|r| {
         Ok(
             svc::own_party_in(r, &viewer, &into, "contact", "联系人", false)
                 .and_then(|p| svc::contact(r, &viewer, &p)),
@@ -622,7 +622,7 @@ pub fn split(m: &Modules, ports: &Ports, who: &Caller, id: &str) -> ApiResult<()
 /// contacts.
 pub fn pending(m: &Modules, ports: &Ports, who: &Caller) -> ApiResult<Pending> {
     let (viewer, _) = svc::start(m, who)?;
-    m.store.read(|r| {
+    m.store.read::<_, steve_store::StoreError>(|r| {
         Ok((|| {
             let rows = MergeProposals(r).pending(&viewer.ws)?;
             let mut proposals = Vec::new();

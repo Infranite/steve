@@ -69,7 +69,10 @@ async fn local_candidates(
     let lookups = channels.profile_systems();
     let cands = channels
         .modules()
-        .blocking(move |m| m.store.read(|r| Ok(candidates(r, &w, now, &lookups)))?)
+        .blocking(move |m| {
+            m.store
+                .read::<_, steve_store::StoreError>(|r| Ok(candidates(r, &w, now, &lookups)))?
+        })
         .await?;
     rep.candidates = cands.len();
 

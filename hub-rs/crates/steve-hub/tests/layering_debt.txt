@@ -39,7 +39,6 @@ w4	c1	edge steve-knowledge steve-i18n	1
 w4	c1	edge steve-knowledge steve-modules	1
 w4	c1	edge steve-knowledge steve-node-api	1
 w4	c1	edge steve-knowledge steve-store	1
-w4	c1	edge steve-mail steve-store-sqlite	1
 w4	c1	edge steve-modules steve-i18n	1
 w4	c1	edge steve-modules steve-store	1
 w4	c1	edge steve-stats steve-acp	1
@@ -63,15 +62,12 @@ w4	g2	edge steve-store steve-node-api	1
 w4	g2	edge steve-store steve-store-sqlite	1
 w4	g2	edge steve-store steve-types	1
 w4	g2	rusqlite steve-store	1
-w5	c1	edge steve-calendar steve-flow	1
 w5	c1	edge steve-calendar steve-i18n	1
 w5	c1	edge steve-calendar steve-modules	1
-w5	c1	edge steve-calendar steve-store	1
 w5	c1	edge steve-github steve-flow	1
 w5	c1	edge steve-github steve-i18n	1
 w5	c1	edge steve-github steve-modules	1
 w5	c1	edge steve-github steve-node-api	1
-w5	c1	edge steve-github steve-store	1
 w5	c1	edge steve-hub steve-calendar	1
 w5	c1	edge steve-hub steve-digest	1
 w5	c1	edge steve-hub steve-github	1
@@ -81,9 +77,5 @@ w5	c1	edge steve-mail steve-flow	1
 w5	c1	edge steve-mail steve-i18n	1
 w5	c1	edge steve-mail steve-knowledge	1
 w5	c1	edge steve-mail steve-modules	1
-w5	c1	edge steve-mail steve-store	1
-w5	c1	rusqlite steve-calendar	1
-w5	c1	rusqlite steve-github	1
-w5	c1	rusqlite steve-mail	1
 w5	g0	edge steve-auth steve-i18n	1
 w5	g0	edge steve-hub steve-install	1

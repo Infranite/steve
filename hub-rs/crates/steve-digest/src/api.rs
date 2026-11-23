@@ -102,7 +102,7 @@ async fn conversation(
     m.blocking(move |m| {
         owner(m, &who)?;
         let cv = cv(&key)?;
-        let result = m.store.read(|r| {
+        let result = m.store.read::<_, steve_store::StoreError>(|r| {
             let Some(info) = conv::info(r, &who.ws, &cv)? else {
                 return Ok(None);
             };
@@ -190,7 +190,7 @@ async fn packets(
 ) -> ApiResult<Json<Value>> {
     m.blocking(move |m| {
         owner(m, &who)?;
-        let packets = m.store.read(|r| {
+        let packets = m.store.read::<_, steve_store::StoreError>(|r| {
             let found = r.digest_packets().list(
                 &who.ws,
                 p.state.as_deref(),
@@ -219,7 +219,7 @@ async fn packet(
 ) -> ApiResult<Json<Value>> {
     m.blocking(move |m| {
         owner(m, &who)?;
-        let found = m.store.read(|r| {
+        let found = m.store.read::<_, steve_store::StoreError>(|r| {
             let Some(p) = r.digest_packets().get(&who.ws, &id)? else {
                 return Ok(None);
             };
@@ -438,7 +438,7 @@ async fn read_todo(
     m.blocking(move |m| {
         member(m, &who)?;
         m.store
-            .read(|c| {
+            .read::<_, steve_store::StoreError>(|c| {
                 let Some(mut t) = todo::get_own(c, &who.ws, &who.me, &id)? else {
                     return Ok(None);
                 };
@@ -776,12 +776,12 @@ async fn undo(
 ) -> ApiResult<Json<Value>> {
     m.blocking(move |m| {
         // a todo change is undone by the todo's owner, any member; every other change by the workspace owner
-        let todo_of = m
-            .store
-            .read(|r| match r.digest_changes().get(&who.ws, &id)? {
+        let todo_of = m.store.read::<_, steve_store::StoreError>(|r| {
+            match r.digest_changes().get(&who.ws, &id)? {
                 Some(ch) if ch.is_todo() => Ok(Some(todo::owner_of(r, &who.ws, &ch.target)?)),
                 _ => Ok(None),
-            })?;
+            }
+        })?;
         match todo_of {
             Some(Some(o)) if o != who.me => {
                 return Err(ApiError::not_found(steve_i18n::t!("digest.noun.change")));

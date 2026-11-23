@@ -114,7 +114,7 @@ pub fn event_get(cx: &FlowCx, mcp: &McpCx, event: Option<&str>) -> ApiResult<Str
         .item_id
         .as_deref()
         .ok_or_else(|| ApiError::rule(NO_ITEM))?;
-    let (ev, party, tz) = cx.store().read(|r| {
+    let (ev, party, tz) = cx.store().read::<_, steve_store::StoreError>(|r| {
         let links = Links(r).destinations(&mcp.ws, &ObjRef::new("item", item), "from", "event")?;
         let mut signals = SignalRows(r);
         let id = if let Some(id) = event {

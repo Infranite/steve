@@ -134,7 +134,7 @@ fn people_of(c: &mut impl Read, viewer: &Viewer, item: &str) -> ApiResult<Vec<It
 /// `GET /items/:id/people`, in the order the links were made.
 pub fn list(m: &Modules, who: &Caller, item: &str) -> ApiResult<Vec<ItemPerson>> {
     let (viewer, _) = start(m, who)?;
-    m.store.read(|c| {
+    m.store.read::<_, steve_store::StoreError>(|c| {
         Ok((|| {
             own_item(c, &who.ws, item)?;
             people_of(c, &viewer, item)
@@ -370,7 +370,7 @@ pub fn infer_item_people(
     text: &str,
 ) -> ApiResult<Vec<String>> {
     let (viewer, _) = start(m, who)?;
-    let candidates: Vec<Party> = m.store.read(|c| {
+    let candidates: Vec<Party> = m.store.read::<_, steve_store::StoreError>(|c| {
         Ok(Contacts::new(c)
             .active(&viewer, &["contact", "team"], true)?
             .into_iter()
@@ -440,7 +440,7 @@ fn own_listed(c: &mut impl Read, viewer: &Viewer, id: &str, me: &Party) -> ApiRe
 /// `GET /parties/:id/items`.
 pub fn party_items(m: &Modules, who: &Caller, id: &str) -> ApiResult<Vec<PartyItem>> {
     let (viewer, me) = start(m, who)?;
-    m.store.read(|c| {
+    m.store.read::<_, steve_store::StoreError>(|c| {
         Ok((|| {
             let p = own_listed(c, &viewer, id, &me)?;
             Ok(item_links(c, &who.ws, &p)?
@@ -510,7 +510,7 @@ pub fn timeline(
         };
     let before = num(q.before, "before", &|n| n > 0)?;
     let limit = num(q.limit, "limit", &|n| (1..=100).contains(&n))?.unwrap_or(50) as usize;
-    m.store.read(|c| {
+    m.store.read::<_, steve_store::StoreError>(|c| {
         Ok((|| {
             let p = own_listed(c, &viewer, id, &me)?;
             let mut out: Vec<TimelineEntry> = item_links(c, &who.ws, &p)?

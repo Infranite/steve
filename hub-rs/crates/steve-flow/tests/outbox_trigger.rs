@@ -85,7 +85,9 @@ async fn delivered_once_with_its_outcome_on_the_receipt() {
     let external: String = e
         .env
         .store()
-        .read(|r| Ok(SignalRows(r).event(&id)?.unwrap().external_id.unwrap()))
+        .read::<_, steve_store::StoreError>(|r| {
+            Ok(SignalRows(r).event(&id)?.unwrap().external_id.unwrap())
+        })
         .unwrap();
     assert_eq!(external, format!("ST-2:item.done:{}", ev.id));
     let outcome: String = fixtures::latest_receipt(e.env.store()).unwrap();

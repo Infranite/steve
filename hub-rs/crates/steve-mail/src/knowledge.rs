@@ -10,7 +10,6 @@
 //!   (`origin = mail`, default level `reasoning`), once per state of the thread (`kb_marks
 //!   extract:mail:<thread>` = its last message).
 
-use rusqlite::Connection;
 use serde_json::json;
 use steve_knowledge::candidates::OriginKind;
 use steve_knowledge::chunk::TextKind;
@@ -115,7 +114,7 @@ pub fn is_thread_doc(doc: &DocRow) -> bool {
 /// `Knowledge::with_loaders(notify, vec![Arc::new(ThreadLoader), Arc::new(FilesLoader::new(..))])`.
 pub struct ThreadLoader;
 
-fn load_thread(c: &Connection, doc: &DocRow) -> MailResult<Option<String>> {
+fn load_thread(c: &mut impl steve_store::Read, doc: &DocRow) -> MailResult<Option<String>> {
     let Some(t) = repo::thread(c, &doc.r#ref)?.filter(|t| t.workspace_id == doc.workspace_id)
     else {
         return Ok(None);
@@ -137,7 +136,7 @@ impl DocLoader for ThreadLoader {
         _: &'a SourceRow,
     ) -> BoxFuture<'a, Loaded> {
         Box::pin(async move {
-            match m.store.reader(|c| load_thread(c, doc)) {
+            match m.store.read(|c| load_thread(c, doc)) {
                 Ok(Some(text)) => Loaded::Text(extracted(text)),
                 Ok(None) => Loaded::Gone,
                 Err(e) => Loaded::Failed(format!("读取邮件往来失败：{e}")),
@@ -155,13 +154,19 @@ impl Mail {
             .0
             .m
             .store
-            .reader(|c| self.own_thread(c, &viewer, thread_id))?;
+            .read(|c| self.own_thread(c, &viewer, thread_id))?;
         steve_knowledge::service::prepare(&self.0.m, who)?;
         let now = self.now();
-        let id = self.0.m.store.transaction(|tx| -> MailResult<String> {
+        let id = self.0.m.store.write(|tx| -> MailResult<String> {
             let msgs = repo::thread_messages(tx, &t.id)?;
-            let src = steve_knowledge::sources::builtin(tx, &who.ws, SOURCE_KIND, &who.me, now)?;
-            let id = match kb_repo::doc_by_ref(tx, &src.id, &t.id)? {
+            let src = steve_knowledge::sources::builtin(
+                &tx.legacy(),
+                &who.ws,
+                SOURCE_KIND,
+                &who.me,
+                now,
+            )?;
+            let id = match kb_repo::doc_by_ref(&tx.legacy(), &src.id, &t.id)? {
                 Some(d) => d.id,
                 None => {
                     let id = uid("kd");
@@ -171,7 +176,7 @@ impl Mail {
                         t.subject.chars().take(120).collect()
                     };
                     kb_repo::insert_doc(
-                        tx,
+                        &tx.legacy(),
                         &who.ws,
                         &NewDoc {
                             id: id.clone(),
@@ -187,7 +192,7 @@ impl Mail {
                         now,
                     )?;
                     base::audit(
-                        tx,
+                        &tx.legacy(),
                         &who.ws,
                         &who.me,
                         "mail_thread.to_knowledge",
@@ -197,9 +202,17 @@ impl Mail {
                     id
                 }
             };
-            kb_repo::set_doc_about(tx, &who.ws, &id, &senders(&msgs))?;
-            let doc = kb_repo::doc(tx, &id)?.ok_or(steve_store::StoreError::NotFound("文档"))?;
-            index::index_doc(tx, &doc, &src, &extracted(thread_text(&msgs)), now, false)?;
+            kb_repo::set_doc_about(&tx.legacy(), &who.ws, &id, &senders(&msgs))?;
+            let doc = kb_repo::doc(&tx.legacy(), &id)?
+                .ok_or(steve_store::StoreError::NotFound("文档"))?;
+            index::index_doc(
+                &tx.legacy(),
+                &doc,
+                &src,
+                &extracted(thread_text(&msgs)),
+                now,
+                false,
+            )?;
             Ok(id)
         })?;
         if let Some(kb) = &self.0.kb {
@@ -216,12 +229,12 @@ impl Mail {
             return Ok(0);
         };
         let mark = format!("{MARK_PREFIX}{thread_id}");
-        let found = self.0.m.store.reader(|c| -> MailResult<_> {
+        let found = self.0.m.store.read(|c| -> MailResult<_> {
             let Some(t) = repo::thread(c, thread_id)?.filter(|t| t.workspace_id == ws) else {
                 return Ok(None);
             };
             let msgs = repo::thread_messages(c, &t.id)?;
-            let done = kb_repo::mark(c, ws, &mark)?;
+            let done = self.0.m.store.reader(|c| kb_repo::mark(c, ws, &mark))?;
             Ok(Some((t, msgs, done)))
         })?;
         let Some((t, msgs, done)) = found else {
@@ -261,7 +274,7 @@ impl Mail {
         self.0
             .m
             .store
-            .transaction(|tx| kb_repo::set_mark(tx, ws, &mark, &last, now))?;
+            .write(|tx| kb_repo::set_mark(&tx.legacy(), ws, &mark, &last, now))?;
         Ok(n)
     }
 }

@@ -1,4 +1,4 @@
-//! GitHub as an S1 event source, the module SSE notices, the Feishu directory events, the watcher
+//! GitHub as an S1 event source, Feishu directory events, the watcher
 //! that follows connections coming and going, and the unauthenticated `POST /hooks/:connection_id`.
 
 use std::sync::Arc;
@@ -19,8 +19,6 @@ use steve_modules::accounts::connections::{
     OAuthSpec, ProviderError, StartCx, TokenKind, TokenSet,
 };
 use steve_modules::contacts::sync::DirectorySync;
-
-use crate::bus::Bus;
 
 // ---------------------------------------------------------------- GitHub (G2)
 
@@ -166,35 +164,6 @@ impl EventAdapter for GithubSource {
     async fn parse_push(&self, _: &ConnCx, _: &PushRequest) -> Result<Vec<RawEvent>, AdapterError> {
         // G2 verifies and parses GitHub deliveries itself
         Err(AdapterError::BadSignature)
-    }
-}
-
-/// `{type, id, ws}` notices of the modules that have no `BusEvent` variant: they are scoped to
-/// their workspace by the bus (`the typed event contract`).
-#[derive(Clone)]
-pub struct Notices {
-    pub bus: Bus,
-}
-
-impl steve_github::events::GhNotifier for Notices {
-    fn gh(&self, ws: &str, id: &str) {
-        self.bus.publish(steve_types::DomainEvent::from(
-            steve_types::IntegrationsEvent::Gh {
-                id: id.into(),
-                ws: ws.into(),
-            },
-        ));
-    }
-}
-
-impl steve_mail::MailNotify for Notices {
-    fn thread(&self, ws: &str, thread_id: &str) {
-        self.bus.publish(steve_types::DomainEvent::from(
-            steve_types::IntegrationsEvent::Mail {
-                id: thread_id.into(),
-                ws: ws.into(),
-            },
-        ));
     }
 }
 

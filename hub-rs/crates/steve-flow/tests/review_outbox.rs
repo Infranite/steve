@@ -67,7 +67,11 @@ async fn committed_trigger_run_recovers_without_after_commit_and_keeps_fact_snap
     assert_eq!(
         e.env
             .store()
-            .read(|r| Ok(SignalRows(r).event(&signal)?.unwrap().payload["title"].clone()))
+            .read::<_, steve_store::StoreError>(|r| Ok(SignalRows(r)
+                .event(&signal)?
+                .unwrap()
+                .payload["title"]
+                .clone()))
             .unwrap(),
         "snapshot title"
     );

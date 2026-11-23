@@ -136,7 +136,7 @@ impl<R: BotRunner> steve_runtime::due::DueSource for BotSource<R> {
             {
                 let step = (|| -> Result<()> {
                     store.write(|w| w.digest_packets().release_expired(&ws, now))?;
-                    let due = store.read(|r| {
+                    let due = store.read::<_, steve_store::StoreError>(|r| {
                         let mut packets = r.digest_packets();
                         let b = packets.batching(&ws)?;
                         Ok(b.enabled && packets.due(&ws, now, &b)?.is_some())

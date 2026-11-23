@@ -38,7 +38,9 @@ fn q(bot: Option<&str>) -> Query {
 #[test]
 fn the_workflow_section_reads_the_graph_the_marks_and_the_sessions() {
     let (_d, s) = store();
-    let sum = s.read(|c| Ok(summary(c, &q(None))?.unwrap())).unwrap();
+    let sum = s
+        .read::<_, steve_store::StoreError>(|c| Ok(summary(c, &q(None))?.unwrap()))
+        .unwrap();
     let w = &sum.workflow;
     // five attempts of three units; the second work and review are retries
     assert_eq!((w.graphs, w.units, w.attempts, w.retries), (1, 3, 5, 2));
@@ -90,7 +92,9 @@ fn the_workflow_section_reads_the_graph_the_marks_and_the_sessions() {
 fn the_filters_go_through_the_graphs_item() {
     let (_d, s) = store();
     let w = s
-        .read(|c| Ok(summary(c, &q(Some("other")))?.unwrap().workflow))
+        .read::<_, steve_store::StoreError>(|c| {
+            Ok(summary(c, &q(Some("other")))?.unwrap().workflow)
+        })
         .unwrap();
     assert_eq!((w.graphs, w.attempts, w.rejected, w.merged), (0, 0, 0, 0));
     // replies follow the workspace only

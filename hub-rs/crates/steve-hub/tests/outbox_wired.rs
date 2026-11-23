@@ -622,10 +622,12 @@ async fn real_completion_notification_reaches_e1_and_existing_c6_fake_adapter() 
     assert_eq!(e.one("SELECT count(*) FROM output_deliveries"), 1);
     // The test has no model backend: the unchanged disclosure contract leaves a draft. Explicit
     // existing C6 approval, not a notification bypass, then sends through the fake adapter.
-    let status = e.one_text(
-        "SELECT m.status FROM output_deliveries d JOIN chan_messages m ON m.id=d.message_id",
-    );
-    if status == "draft" {
+    let delivery_status = || {
+        e.one_text(
+            "SELECT m.status FROM output_deliveries d JOIN chan_messages m ON m.id=d.message_id",
+        )
+    };
+    if delivery_status() == "draft" {
         let card=e.one_text("SELECT m.decision_id FROM output_deliveries d JOIN chan_messages m ON m.id=d.message_id");
         let (s, v) = e
             .call(
@@ -641,6 +643,11 @@ async fn real_completion_notification_reaches_e1_and_existing_c6_fake_adapter() 
         );
         e.outbox.send_due(&e.channels).await;
     }
+    // The background queue can claim the message before the explicit pass returns.
+    eventually_sync("The fake adapter send is recorded on the delivery.", || {
+        delivery_status() == "sent"
+    })
+    .await;
     assert_eq!(e.fake.sent.lock().unwrap().len(), 1);
     assert!(
         e.fake.sent.lock().unwrap()[0]

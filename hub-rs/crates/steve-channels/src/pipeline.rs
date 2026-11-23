@@ -299,7 +299,7 @@ impl Outbox {
             return Ok(d);
         }
         let viewer = ch.modules().viewer(who)?;
-        let target = ch.store().read(|r| {
+        let target = ch.store().read::<_, steve_store::StoreError>(|r| {
             Ok(ch.store().reader(|c| {
                 require_requester(c, who)?;
                 crate::notifications::verify_intent(c, r, who, &e.intent, ch.now())?;

@@ -811,7 +811,9 @@ async fn handle_conflicts_are_409() {
     assert_eq!(s, 200, "{b}");
     let n: i64 = t
         .store()
-        .read(|r| Ok(steve_store::Accounts(r).of_party(WS, &a.sarah)?.len() as i64))
+        .read::<_, steve_store::StoreError>(|r| {
+            Ok(steve_store::Accounts(r).of_party(WS, &a.sarah)?.len() as i64)
+        })
         .unwrap();
     assert_eq!(n, 1);
 }

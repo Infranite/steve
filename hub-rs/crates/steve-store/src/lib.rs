@@ -18,6 +18,7 @@ steve_i18n::init!();
 pub mod base;
 pub mod bot_dispatch;
 mod bus;
+pub mod calendar;
 pub mod caps;
 pub mod compact;
 mod contract;
@@ -78,6 +79,11 @@ pub use contract::{
 pub use contract::{DeviceIdentity, DeviceRows, PersonaIdentity, PersonaRows};
 pub use contract::{MembershipRow, SyncedTeam, TeamDetails, TeamRef, Teams};
 pub use contract::{Steward, StewardKey, Stewards};
+pub use contract::{
+    accounts, bots, connections, decisions as decision_repo, files as file_repo,
+    flows as flow_repo, github, grants, items as item_repo, links as link_repo, mail, parties,
+    projects, sessions as session_repo, settings, sources,
+};
 pub use ingest::*;
 pub use repo::*;
 pub use steve_types::BusEvent;

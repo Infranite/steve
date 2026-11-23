@@ -338,7 +338,7 @@ pub struct Target {
 /// Read only the caller's linked parties and their recorded DM membership. In particular, do not
 /// infer a counterpart from message history, cached member_count, ownership or a sole member.
 pub fn targets(ch: &Channels, who: &Caller) -> ChannelResult<Vec<Target>> {
-    ch.store().read(|r| {
+    ch.store().read::<_, steve_store::StoreError>(|r| {
         Ok(ch.store().reader(|c| {
             require_person(c, who)?;
             let viewer = steve_store::base::Viewer::load(c, &who.ws, &who.me)?;

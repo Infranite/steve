@@ -143,7 +143,8 @@ impl Vault {
         &self,
         f: impl FnOnce(&mut steve_store::R<'_>) -> VaultResult<T>,
     ) -> VaultResult<T> {
-        self.store().read(|r| Ok(f(r)))?
+        self.store()
+            .read::<_, steve_store::StoreError>(|r| Ok(f(r)))?
     }
 
     pub fn store(&self) -> &Store {

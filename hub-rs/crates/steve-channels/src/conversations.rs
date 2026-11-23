@@ -536,7 +536,7 @@ impl Channels {
         let block = match self.turn_source(ws, origin) {
             Ok(Some((_, plan, _))) if plan.space_id == space_id => self
                 .store()
-                .read(|r| {
+                .read::<_, steve_store::StoreError>(|r| {
                     Ok(self.store().reader(|c| -> ChannelResult<String> {
                         Ok(crate::im_context::render_for(c, r, &plan))
                     }))
@@ -562,7 +562,7 @@ impl Channels {
     /// [`Channels::conv_research_context`] after the identity block.
     fn conv_research_card(&self, ws: &str, space_id: &str, origin: &str) -> String {
         let turn = self.store().messages().get(origin).ok().flatten();
-        let r = self.store().read(|r| Ok(self.store().reader(|c| -> ChannelResult<String> {
+        let r = self.store().read::<_, steve_store::StoreError>(|r| Ok(self.store().reader(|c| -> ChannelResult<String> {
             let Some(space) = spaces::get(c, space_id)? else {
                 return Ok(String::new());
             };
@@ -785,7 +785,7 @@ impl Channels {
             if plan.mode == Mode::Bot {
                 let owner = self
                     .store()
-                    .read(|r| {
+                    .read::<_, steve_store::StoreError>(|r| {
                         Ok(self
                             .store()
                             .reader(|c| personas::owner_name_for_space(c, r, ws, &plan.space_id)))

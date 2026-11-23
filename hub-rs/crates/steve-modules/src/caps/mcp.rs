@@ -272,7 +272,7 @@ impl Capabilities {
         let count = self
             .vault
             .store()
-            .read(|c| Ok(Servers(c).list(ws)?.len()))?;
+            .read::<_, steve_store::StoreError>(|c| Ok(Servers(c).list(ws)?.len()))?;
         let at = now();
         let blank = Server {
             id: uid("bmcp"),

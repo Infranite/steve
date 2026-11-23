@@ -124,7 +124,7 @@ impl Channels {
     async fn decline(&self, plan: &Plan, guard: &Guard) -> ChannelResult<crate::respond::Response> {
         let owner = self
             .store()
-            .read(|r| {
+            .read::<_, steve_store::StoreError>(|r| {
                 Ok(self.store().reader(|c| {
                     crate::personas::owner_name_for_space(c, r, &plan.ws, &plan.space_id)
                 }))

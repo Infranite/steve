@@ -1152,7 +1152,7 @@ async fn retention_keeps_90_days_or_200_runs() {
     let counts = |id: &str| {
         e.env
             .store()
-            .read(|r| Ok(RunRows(r).activity(WS, id, 0)?.0))
+            .read::<_, steve_store::StoreError>(|r| Ok(RunRows(r).activity(WS, id, 0)?.0))
             .unwrap()
     };
     assert_eq!(counts(&a), 200);
@@ -1323,7 +1323,9 @@ async fn bot_deletion_revokes_personal_schedule_instead_of_lending_access_to_hei
     let saved = e
         .env
         .store()
-        .read(|c| Ok(steve_flow::schedules::own(c, WS, s["id"].as_str().unwrap())))
+        .read::<_, steve_store::StoreError>(|c| {
+            Ok(steve_flow::schedules::own(c, WS, s["id"].as_str().unwrap()))
+        })
         .unwrap()
         .unwrap();
     assert!(!saved.enabled);

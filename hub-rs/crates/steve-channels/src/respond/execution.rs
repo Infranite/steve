@@ -69,7 +69,7 @@ impl Channels {
         let d = self.store().transaction(|tx| open_handoff(tx, plan))?;
         r.decision_id = Some(d);
         if !plan.muted {
-            let owner = self.store().read(|r| {
+            let owner = self.store().read::<_, steve_store::StoreError>(|r| {
                 Ok(self
                     .store()
                     .reader(|c| personas::owner_name_for_space(c, r, &plan.ws, &plan.space_id)))

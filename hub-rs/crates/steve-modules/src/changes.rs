@@ -337,8 +337,9 @@ pub async fn draft(
             let viewer = m.viewer(&caller_c)?;
             let t = &m.registry.targets[&kind_s];
             let p = stored(|| {
-                m.store
-                    .read(|c| Ok(t.prepare(&m.store, c, &viewer, id_s.as_deref())))?
+                m.store.read::<_, steve_store::StoreError>(|c| {
+                    Ok(t.prepare(&m.store, c, &viewer, id_s.as_deref()))
+                })?
             })?;
             Ok((viewer, p))
         })
@@ -357,8 +358,9 @@ pub async fn draft(
     m.blocking(move |m| {
         let t = &m.registry.targets[&kind_s];
         let plan = stored(|| {
-            m.store
-                .read(|c| Ok(t.plan(&m.store, c, &viewer, &prepared, raw.clone())))?
+            m.store.read::<_, steve_store::StoreError>(|c| {
+                Ok(t.plan(&m.store, c, &viewer, &prepared, raw.clone()))
+            })?
         })?;
         for op in &plan.ops {
             let name = op.get("op").and_then(Value::as_str).unwrap_or("");
@@ -607,8 +609,9 @@ pub async fn prepared(
     m.blocking(move |m| {
         let viewer = m.viewer(&caller)?;
         let t = &m.registry.targets[&kind];
-        m.store
-            .read(|c| Ok(t.prepare(&m.store, c, &viewer, id.as_deref())))?
+        m.store.read::<_, steve_store::StoreError>(|c| {
+            Ok(t.prepare(&m.store, c, &viewer, id.as_deref()))
+        })?
     })
     .await
 }
@@ -618,7 +621,10 @@ pub fn candidates(m: &Modules, caller: &Caller) -> ApiResult<Vec<Candidate>> {
     let viewer = m.viewer(caller)?;
     let mut out = Vec::new();
     for t in m.registry.targets.values() {
-        out.extend(m.store.read(|c| Ok(t.candidates(&m.store, c, &viewer)))??);
+        out.extend(
+            m.store
+                .read::<_, steve_store::StoreError>(|c| Ok(t.candidates(&m.store, c, &viewer)))??,
+        );
     }
     Ok(out)
 }

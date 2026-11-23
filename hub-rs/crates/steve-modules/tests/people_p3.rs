@@ -894,7 +894,7 @@ async fn cards_keep_contacts_preferred_names_but_not_users_private_address_rules
     let viewer = t.modules.viewer(&me()).unwrap();
     let cards = t
         .store()
-        .read(|c| {
+        .read::<_, steve_store::StoreError>(|c| {
             Ok(contacts::contact_cards(
                 c,
                 &viewer,
@@ -982,7 +982,9 @@ async fn contact_cards_for_prompts() {
     let viewer = t.modules.viewer(&me()).unwrap();
     let cards = t
         .store()
-        .read(|c| Ok(contacts::item_contact_cards(c, &viewer, "ST-1")))
+        .read::<_, steve_store::StoreError>(|c| {
+            Ok(contacts::item_contact_cards(c, &viewer, "ST-1"))
+        })
         .unwrap()
         .unwrap();
     assert_eq!(cards.len(), 2);
@@ -993,7 +995,7 @@ async fn contact_cards_for_prompts() {
     assert_eq!(cards[0].roles, ["raised_by"]);
     let cards = t
         .store()
-        .read(|c| {
+        .read::<_, steve_store::StoreError>(|c| {
             Ok(contacts::contact_cards(
                 c,
                 &viewer,

@@ -663,7 +663,7 @@ impl steve_runtime::due::DueSource for AlarmClock {
                 if cx.alarm_recheck.load(std::sync::atomic::Ordering::SeqCst) {
                     return Ok(Some(cx.now()));
                 }
-                Ok(s.read(|c| {
+                Ok(s.read::<_, steve_store::StoreError>(|c| {
                     let now = cx.now();
                     if !changed_policies(c, now)?.is_empty() {
                         return Ok(Some(now));

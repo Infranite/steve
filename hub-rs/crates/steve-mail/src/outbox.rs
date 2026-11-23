@@ -68,7 +68,7 @@ impl Consumer for MailEventsOut {
                 .0
                 .m
                 .store
-                .transaction(|tx| repo::set_event(tx, &p.message_id, &id))
+                .write(|tx| repo::set_event(tx, &p.message_id, &id))
                 .map_err(|e| ConsumeError::Retry(e.to_string()))?;
         }
         Ok(())

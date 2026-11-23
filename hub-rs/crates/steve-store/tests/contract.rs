@@ -78,7 +78,7 @@ fn nested_repository_reads_keep_the_same_snapshot() {
                 w.events()
                     .add(&f.session, "text", json!({"text": "committed"}), None, 1)
             })?;
-            f.store.read(|_| {
+            f.store.read::<_, steve_store::StoreError>(|_| {
                 assert!(texts(&f).is_empty());
                 Ok(())
             })
@@ -101,7 +101,7 @@ fn what_a_write_emits_goes_out_after_its_commit_and_never_after_its_rollback() {
                 f.seen.lock().unwrap().is_empty(),
                 "nothing before the commit"
             );
-            Ok(())
+            Ok::<_, StoreError>(())
         })
         .unwrap();
     assert_eq!(marks(&f.seen), vec![mark("a"), mark("b")]);
@@ -142,7 +142,7 @@ fn a_failed_scope_rolls_back_alone_with_what_it_emitted() {
                 Ok::<_, StoreError>(())
             })?;
             w.emit(stats_changed("d", None));
-            Ok(())
+            Ok::<_, StoreError>(())
         })
         .unwrap();
     assert_eq!(marks(&f.seen), vec![mark("a"), mark("c"), mark("d")]);
@@ -177,7 +177,7 @@ fn a_write_inside_a_legacy_transaction_is_a_scope_of_it() {
     let f = open();
     let s = f.session.as_str();
     let out: Result<(), StoreError> = f.store.transaction(|tx| {
-        tx.write(|w| {
+        tx.write::<_, StoreError>(|w| {
             w.events()
                 .add(s, "text", json!({"text": "gone"}), None, 1)?;
             w.emit(stats_changed("a", None));

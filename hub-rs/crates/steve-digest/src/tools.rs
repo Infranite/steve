@@ -287,7 +287,7 @@ fn read(m: &Modules, cx: &McpCx, args: &Value, now: i64) -> ApiResult<Value> {
     })?;
     let (p, chunks, previous_summary, run, saved, candidates, visible) = m
         .store
-        .read(|r| {
+        .read::<_, steve_store::StoreError>(|r| {
             let mut packets = r.digest_packets();
             let Some(p) = packets.get(&cx.ws, &lease.packet)? else {
                 return Ok(None);

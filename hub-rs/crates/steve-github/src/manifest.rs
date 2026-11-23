@@ -27,7 +27,7 @@ use crate::GitHub;
 use crate::adapters::github_app::{self, CLIENT_SECRET, PRIVATE_KEY, WEBHOOK_SECRET};
 use crate::api::GhError;
 use crate::auth;
-use crate::repo::{self, AppRow};
+use steve_store::github::AppRow;
 
 /// Paths relative to `/api`.
 pub const MANIFEST_PATH: &str = "/github/app/manifest";
@@ -185,7 +185,7 @@ impl GitHub {
         self.vault_ready(&who.ws).map_err(ApiError::rule)?;
         let ws_name = self
             .store()
-            .read(|r| steve_store::Workspaces(r).name(&who.ws))
+            .read(|c| steve_store::settings::workspace_name(c, &who.ws))
             .map_err(ApiError::from)?
             .ok_or_else(|| ApiError::not_found("工作空间"))?;
         let public = self.public_url();
@@ -311,15 +311,15 @@ impl GitHub {
             html_url: c.html_url,
             created: self.now(),
         };
-        let r = self.store().transaction(|tx| {
-            if repo::app_by_app_id(tx, row.app_id)?.is_some() {
+        let r = self.store().write(|tx| {
+            if steve_store::github::app_by_app_id(tx, row.app_id)?.is_some() {
                 return Err(
                     ApiError::conflict(steve_i18n::t!("github.manifest.app_exists")).into(),
                 );
             }
-            repo::insert_app(tx, &row).map_err(ApiError::from)?;
+            steve_store::github::insert_app(tx, &row).map_err(ApiError::from)?;
             base::audit(
-                tx,
+                &tx.legacy(),
                 ws,
                 me,
                 "github.app_create",
@@ -332,7 +332,7 @@ impl GitHub {
         if r.is_err() {
             let d = self
                 .store()
-                .transaction(|tx| vault.destroy_item(tx, ws, me, &item));
+                .write(|tx| vault.destroy_item(&tx.legacy(), ws, me, &item));
             if d.is_err() {
                 tracing::error!("could not destroy a GitHub App credential item");
             }
@@ -372,7 +372,7 @@ impl GitHub {
         let ws = who.ws.clone();
         let apps = self
             .store()
-            .reader(|c| repo::apps(c, &ws).map_err(ApiError::from))
+            .read(|c| steve_store::github::apps(c, &ws).map_err(ApiError::from))
             .map_err(|e| e.to_string())?;
         if apps.is_empty() {
             return Err(steve_i18n::t!("github.manifest.no_app"));
@@ -395,7 +395,9 @@ impl GitHub {
         // One installation per App for now: its account is `<slug>[bot]`, one connection per account.
         let current = self
             .store()
-            .reader(|c| repo::app_connection(c, &ws, app.app_id).map_err(ApiError::from))
+            .read(|c| {
+                steve_store::connections::app_connection(c, &ws, app.app_id).map_err(ApiError::from)
+            })
             .map_err(|e| e.to_string())?;
         if let Some((_, old)) = current
             && old as u64 != inst

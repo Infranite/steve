@@ -679,7 +679,7 @@ impl NodeKind for Http {
         let allow = Arc::new(
             cx.flow
                 .store()
-                .read(|c| Ok(allow_private(c, &ws)))
+                .read::<_, steve_store::StoreError>(|c| Ok(allow_private(c, &ws)))
                 .unwrap_or_default(),
         );
         if let Some(msg) = literal_refusal(&url, &allow) {

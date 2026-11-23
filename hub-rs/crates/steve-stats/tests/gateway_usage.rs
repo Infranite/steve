@@ -173,7 +173,7 @@ fn same_model_and_cross_model_retries_reopen_replay_and_rebuild_keep_one_call() 
             }
             let previous = fixture::gateway_previous(s).unwrap();
             assert_eq!(previous, "first");
-            s.read(|c| {
+            s.read::<_, steve_store::StoreError>(|c| {
                 let q = metrics::Query {
                     workspace_id: WS.into(),
                     from: "2026-11-01".into(),
@@ -252,7 +252,7 @@ fn parallel_calls_keep_ownership_filters_and_source_day_after_timezone_rebuild()
     for j in jobs {
         j.join().unwrap();
     }
-    s.read(|c| {
+    s.read::<_, steve_store::StoreError>(|c| {
         for (bot, model, expected) in [
             (Some("bill"), None, 80),
             (Some("other"), None, 0),
@@ -388,7 +388,7 @@ fn ownership_is_frozen_at_dispatch_and_workspace_project_bot_filters_agree() {
     s.stats()
         .gateway_report("other-a", &r("f", "m", 41, Measurement::Final), AT)
         .unwrap();
-    s.read(|c| {
+    s.read::<_, steve_store::StoreError>(|c| {
         for (ws, prj, bot, n) in [
             (WS, Some(project.as_str()), Some("bill"), 23),
             (WS, Some("no-project"), None, 0),

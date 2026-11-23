@@ -223,7 +223,8 @@ impl FlowCx {
         &self,
         f: impl FnOnce(&mut steve_store::R<'_>) -> FlowResult<T>,
     ) -> FlowResult<T> {
-        self.store().read(|r| Ok(f(r)))?
+        self.store()
+            .read::<_, steve_store::StoreError>(|r| Ok(f(r)))?
     }
 
     /// Runs synchronous store work on the blocking pool (the shape of `Modules::blocking`), so a

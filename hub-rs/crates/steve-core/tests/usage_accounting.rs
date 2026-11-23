@@ -101,7 +101,7 @@ fn gateway_day(s: &Store) -> String {
     steve_stats::day(steve_store::now(), steve_stats::tz(zone.as_deref()))
 }
 fn coverage(s: &Store, item: &str, session: &str) -> Coverage {
-    s.read(|c| {
+    s.read::<_, steve_store::StoreError>(|c| {
         let a = views::session(c, session)?.unwrap().1.usage;
         let b = views::item_detail(c, item, AT + 1000, false)?
             .unwrap()
@@ -237,7 +237,7 @@ fn same_inputs_match_after_every_durable_restart_and_one_shot_projection() {
                 Ok(())
             })
             .unwrap();
-            s.read(|c| {
+            s.read::<_, steve_store::StoreError>(|c| {
                 let d = gateway_day(&s);
                 let cov = metrics::summary(
                     c,
@@ -259,7 +259,7 @@ fn same_inputs_match_after_every_durable_restart_and_one_shot_projection() {
             .unwrap();
         }
         let gw = s
-            .read(|c| {
+            .read::<_, steve_store::StoreError>(|c| {
                 let d = gateway_day(&s);
                 Ok(metrics::summary(
                     c,
@@ -373,7 +373,7 @@ fn concurrent_calls_have_stable_separate_ownership_without_extra_request_rows() 
         for (id,rows,attempts,duration,failures) in groups {assert!(uuid::Uuid::parse_str(&id).is_ok());assert_eq!((rows,attempts,duration,failures),(2,3,123,1));}
         Ok(())
     }).unwrap();
-    s.read(|c| {
+    s.read::<_, steve_store::StoreError>(|c| {
         let d = gateway_day(&s);
         let cov = metrics::summary(
             c,

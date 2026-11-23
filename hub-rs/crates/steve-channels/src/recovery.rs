@@ -193,7 +193,7 @@ impl ChangeOp for Permission {
 /// A service refusal is deliberately rejected here even if a local permission is also disabled.
 pub fn propose(ch: &Channels, who: &Caller, message: &str) -> ApiResult<changes::Proposal> {
     let viewer = ch.modules().viewer(who)?;
-    let (prepared, plan) = ch.store().read(|r| Ok(ch.store().reader(|c| -> ApiResult<_> {
+    let (prepared, plan) = ch.store().read::<_, steve_store::StoreError>(|r| Ok(ch.store().reader(|c| -> ApiResult<_> {
         let (space, status, decision): (String, String, Option<String>) = c.query_row(
             "SELECT space_id,status,decision_id FROM chan_messages WHERE id=? AND workspace_id=? AND direction='out'",
             params![message, who.ws], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),

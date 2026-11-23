@@ -172,7 +172,7 @@ async fn a_mixed_grantable_and_high_pair_clears_the_persistent_grant_offer() {
         let (matcher, options) =
             f.e.env
                 .store()
-                .read(|r| {
+                .read::<_, steve_store::StoreError>(|r| {
                     let wait = FlowWaits(r).get(&run, "h")?.unwrap();
                     let decision = DecisionRows(r).get(&wait.decision.unwrap())?.unwrap();
                     Ok((wait.matcher, decision.options))

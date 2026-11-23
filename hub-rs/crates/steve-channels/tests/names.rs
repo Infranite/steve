@@ -729,7 +729,7 @@ async fn the_directory_sync_reports_its_visibility_range_and_missing_permissions
     let conn = h
         .env
         .store()
-        .read(|r| Ok(tables.get(r, WS, &h.bot_con)))
+        .read::<_, steve_store::StoreError>(|r| Ok(tables.get(r, WS, &h.bot_con)))
         .expect("get")
         .expect("a directory connection")
         .unwrap();

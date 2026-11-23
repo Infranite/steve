@@ -2937,7 +2937,7 @@ async fn a_reply_meant_for_you_becomes_a_question_in_your_inbox() {
     let owner = h
         .env
         .store()
-        .read(|c| Ok(steve_channels::personas::owner_name(c, WS)))
+        .read::<_, steve_store::StoreError>(|c| Ok(steve_channels::personas::owner_name(c, WS)))
         .unwrap()
         .expect("owner");
     h.env.gateway.script(

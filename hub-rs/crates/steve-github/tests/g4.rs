@@ -9,6 +9,7 @@
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+use steve_store::github::fixtures::{FixtureValue, Inspect, Seed};
 
 use async_trait::async_trait;
 use axum::Router;
@@ -110,32 +111,12 @@ async fn nav(r: &Router, who: &Caller, uri: &str) -> u16 {
     res.status().as_u16()
 }
 
-fn q(h: &H, sql: &str, p: &[&dyn rusqlite::ToSql]) -> Value {
-    h.env
-        .store()
-        .reader(|c| {
-            c.query_row(sql, p, |r| {
-                Ok(match r.get_ref(0)? {
-                    rusqlite::types::ValueRef::Null => Value::Null,
-                    rusqlite::types::ValueRef::Integer(i) => json!(i),
-                    rusqlite::types::ValueRef::Real(f) => json!(f),
-                    rusqlite::types::ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
-                    rusqlite::types::ValueRef::Blob(_) => json!("<blob>"),
-                })
-            })
-            .map_err(steve_store::StoreError::from)
-        })
-        .expect(sql)
+fn q(h: &H, field: Inspect, p: &[&dyn FixtureValue]) -> Value {
+    field.read(h.env.store(), p).expect("fixture assertion")
 }
 
-fn exec(h: &H, sql: &str, p: &[&dyn rusqlite::ToSql]) {
-    h.env
-        .store()
-        .with_conn(|c| {
-            c.execute(sql, p)?;
-            Ok(())
-        })
-        .expect(sql);
+fn exec(h: &H, change: Seed, p: &[&dyn FixtureValue]) {
+    change.write(h.env.store(), p).expect("fixture update");
 }
 
 /// The fake GitHub with a bare remote, the App installed, the repo linked to a git project whose
@@ -205,24 +186,12 @@ async fn setup() -> H {
         .with_state(env.modules.clone());
 
     env.store()
-        .with_conn(|c| {
-            c.execute(
-                "INSERT INTO projects (id, workspace_id, name, path, kind, created, updated) VALUES (?, ?, 'Demo', ?, 'git', 1, 1)",
-                rusqlite::params![PROJECT, WS, w.display().to_string()],
-            )?;
-            c.execute(
-                "INSERT INTO projects (id, workspace_id, name, path, kind, created, updated) VALUES ('prj_other', ?, 'Other', '/tmp/none', 'dir', 1, 1)",
-                [WS],
-            )?;
+        .write::<_, steve_store::StoreError>(|c| {
+            Seed::InsertProjects2.apply(c, &[&PROJECT, &WS, &w.display().to_string()])?;
+            Seed::InsertProjects3.apply(c, &[&WS])?;
             for (id, name) in [(BOT, "前端 Bot"), ("bot_be", "后端 Bot")] {
-                c.execute(
-                    "INSERT INTO bots (id, workspace_id, name, harness, updated) VALUES (?, ?, ?, 'claude', 1)",
-                    rusqlite::params![id, WS, name],
-                )?;
-                c.execute(
-                    "INSERT INTO bot_workspaces (bot_id, workspace_id, created) VALUES (?, ?, 1)",
-                    rusqlite::params![id, WS],
-                )?;
+                Seed::InsertBots2.apply(c, &[&id, &WS, &name])?;
+                Seed::InsertBotWorkspaces.apply(c, &[&id, &WS])?;
             }
             Ok(())
         })
@@ -273,14 +242,10 @@ async fn install(h: &H) -> String {
         defaults::INSTALLATION_ID
     );
     assert_eq!(nav(&h.api, &me, &uri).await, 302);
-    q(
-        h,
-        "SELECT id FROM connections WHERE adapter = 'github_app'",
-        &[],
-    )
-    .as_str()
-    .expect("connection")
-    .to_string()
+    q(h, Inspect::ConnectionsId2, &[])
+        .as_str()
+        .expect("connection")
+        .to_string()
 }
 
 fn item(h: &H, no: i64, project: Option<&str>, branch: Option<&str>) -> String {
@@ -288,8 +253,7 @@ fn item(h: &H, no: i64, project: Option<&str>, branch: Option<&str>) -> String {
     let cwd = h.work.path().display().to_string();
     exec(
         h,
-        "INSERT INTO items (id, workspace_id, no, title, status, stage, cwd, branch, project_id, created, updated)
-         VALUES (?, ?, ?, '保留 return_to 参数', 'run', '执行', ?, ?, ?, 1, 1)",
+        Seed::ItemsIdWorkspaceIdNoTitleStatusStage,
         &[&id, &WS, &no, &cwd, &branch, &project],
     );
     id
@@ -328,7 +292,7 @@ async fn pr_with_failure(h: &H, log: &str) -> (u64, u64) {
     h.fake.set_job_log(job, log);
     h.fake
         .set_external_check(REPO, &sha, "lint", Some("success"));
-    let repo = q(h, "SELECT id FROM gh_repos", &[]);
+    let repo = q(h, Inspect::GhReposId, &[]);
     h.gh.poll_repo(repo.as_str().expect("repo"))
         .await
         .expect("poll");
@@ -355,19 +319,7 @@ async fn answer(h: &H, id: &str, choice: &str, text: &str) -> Value {
 }
 
 fn open_decision(h: &H, subject_type: &str) -> Option<(String, String, String)> {
-    h.env
-        .store()
-        .reader(|c| {
-            Ok::<_, steve_store::StoreError>(
-                c.query_row(
-                    "SELECT id, question, draft FROM decisions WHERE subject_type = ? AND status = 'open'",
-                    [subject_type],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )
-                .ok(),
-            )
-        })
-        .expect("decision")
+    steve_store::github::fixtures::open_decision(h.env.store(), subject_type).expect("decision")
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -474,14 +426,7 @@ async fn status_and_a_ci_log() {
         "No check \"e2e\" on this item's pull requests. Call steve_github_status."
     );
     // the log is never stored
-    assert_eq!(
-        q(
-            &h,
-            "SELECT count(*) FROM gh_checks WHERE summary LIKE '%exit code%'",
-            &[]
-        ),
-        json!(0)
-    );
+    assert_eq!(q(&h, Inspect::GhChecksCount2, &[]), json!(0));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -514,7 +459,7 @@ async fn a_comment_asks_first_then_grant_8h_lets_the_next_through() {
     assert_eq!(
         q(
             &h,
-            "SELECT options || ' ' || requested_by || ' ' || session_id || ' ' || item_id FROM decisions WHERE id = ?",
+            Inspect::DecisionsOptionsRequestedBySessionIdItemId,
             &[&dec]
         ),
         json!(format!(r#"["yes","no","grant_8h"] {BOT} {SESSION} {id}"#))
@@ -529,16 +474,12 @@ async fn a_comment_asks_first_then_grant_8h_lets_the_next_through() {
     assert_eq!(
         q(
             &h,
-            "SELECT capability || ' ' || subject_type || ' ' || subject_id || ' ' || resource_type || ' ' || decision_id FROM grants WHERE id = ?",
+            Inspect::GrantsCapabilitySubjectTypeSubjectIdResourceTypeDecisionId,
             &[&grant]
         ),
         json!(format!("github.comment bot {BOT} repo {dec}"))
     );
-    let hours = q(
-        &h,
-        "SELECT (until - created) / 3600000 FROM grants WHERE id = ?",
-        &[&grant],
-    );
+    let hours = q(&h, Inspect::GrantsUntilCreated, &[&grant]);
     assert_eq!(hours, json!(8));
     let told = h.sink.texts();
     assert_eq!(told.len(), 1);
@@ -562,14 +503,7 @@ async fn a_comment_asks_first_then_grant_8h_lets_the_next_through() {
     );
     assert_eq!(h.fake.comments(REPO, n).len(), 2);
     assert!(open_decision(&h, comment::COMMENT).is_none());
-    assert_eq!(
-        q(
-            &h,
-            "SELECT count(*) FROM audit WHERE action = 'github.comment'",
-            &[]
-        ),
-        json!(2)
-    );
+    assert_eq!(q(&h, Inspect::AuditCount, &[]), json!(2));
 
     // another bot is still asked; `no` posts nothing and tells its session
     let o = tool(
@@ -591,7 +525,7 @@ async fn a_comment_asks_first_then_grant_8h_lets_the_next_through() {
     );
 
     // a revoked or expired grant no longer counts
-    exec(&h, "UPDATE grants SET until = 1", &[]);
+    exec(&h, Seed::GrantsUntil, &[]);
     let o = tool(&h, &c, mcp::COMMENT, json!({"body": "第三条"}))
         .await
         .expect("comment");
@@ -609,7 +543,7 @@ async fn your_own_comment_posts_directly() {
     let h = setup().await;
     let id = item(&h, 1, Some(PROJECT), Some(BRANCH));
     let (n, _) = pr_with_failure(&h, "ok\n").await;
-    let pr = q(&h, "SELECT id FROM gh_prs WHERE item_id = ?", &[&id]);
+    let pr = q(&h, Inspect::GhPrsId2, &[&id]);
     let me = caller(WS, ME);
     let (s, v) = call(
         &h.api,
@@ -647,11 +581,19 @@ async fn the_panel_matches_section_7_and_reruns_failed_checks() {
     let h = setup().await;
     let id = item(&h, 1, Some(PROJECT), Some(BRANCH));
     let (n, job) = pr_with_failure(&h, "boom\n").await;
-    let ps = panels::panels(&h.env.modules, WS, ME, &id).expect("panels");
+    let ps = h
+        .env
+        .modules
+        .blocking({
+            let id = id.clone();
+            move |m| panels::panels(m, WS, ME, &id)
+        })
+        .await
+        .expect("panels");
     assert_eq!(ps.len(), 1);
-    let pr_id = q(&h, "SELECT id FROM gh_prs WHERE item_id = ?", &[&id]);
+    let pr_id = q(&h, Inspect::GhPrsId2, &[&id]);
     let pr_id = pr_id.as_str().expect("id");
-    let url = q(&h, "SELECT url FROM gh_prs WHERE item_id = ?", &[&id]);
+    let url = q(&h, Inspect::GhPrsUrl2, &[&id]);
     let mut v = serde_json::to_value(&ps[0]).expect("json");
     assert!(v["updated"].as_i64().expect("updated") > 0);
     v["updated"] = json!(0);
@@ -692,14 +634,7 @@ async fn the_panel_matches_section_7_and_reruns_failed_checks() {
         .expect("rerun");
     assert_eq!(o.message.as_deref(), Some("已重跑 1 个工作流里失败的检查"));
     assert_eq!(h.fake.reruns(run), 1);
-    assert_eq!(
-        q(
-            &h,
-            "SELECT count(*) FROM audit WHERE action = 'github.rerun'",
-            &[]
-        ),
-        json!(1)
-    );
+    assert_eq!(q(&h, Inspect::AuditCount2, &[]), json!(1));
     // another item's panel, or an unknown action: 404
     let other = item(&h, 2, Some(PROJECT), None);
     let e = panels::action(&h.env.modules, &me, &other, &panel, "rerun_failed")
@@ -720,12 +655,20 @@ async fn the_panel_matches_section_7_and_reruns_failed_checks() {
     // all green, item waiting for acceptance: no rerun button, the foot
     let sha = git(h.work.path(), &["rev-parse", BRANCH]);
     h.fake.set_check(REPO, &sha, "build", Some("success"));
-    let repo = q(&h, "SELECT id FROM gh_repos", &[]);
+    let repo = q(&h, Inspect::GhReposId, &[]);
     h.gh.poll_repo(repo.as_str().expect("repo"))
         .await
         .expect("poll");
-    exec(&h, "UPDATE items SET status = 'wait' WHERE id = ?", &[&id]);
-    let ps = panels::panels(&h.env.modules, WS, ME, &id).expect("panels");
+    exec(&h, Seed::ItemsStatusWaitId, &[&id]);
+    let ps = h
+        .env
+        .modules
+        .blocking({
+            let id = id.clone();
+            move |m| panels::panels(m, WS, ME, &id)
+        })
+        .await
+        .expect("panels");
     assert_eq!(ps[0].foot.as_deref(), Some("2 项检查通过 · 等你验收后合并"));
     assert_eq!(
         ps[0]
@@ -776,7 +719,7 @@ async fn an_agent_asks_for_a_draft_pr_and_hears_back() {
     );
 
     answer(&h, &dec, "yes", "").await;
-    let n = q(&h, "SELECT number FROM gh_prs WHERE item_id = ?", &[&id]);
+    let n = q(&h, Inspect::GhPrsNumber2, &[&id]);
     let n = n.as_i64().expect("PR opened") as u64;
     let pull = h.fake.pull(REPO, n).expect("PR opened");
     assert!(pull.draft, "an agent's PR is a draft by default");
@@ -790,10 +733,7 @@ async fn an_agent_asks_for_a_draft_pr_and_hears_back() {
         told[0]
     );
     // the item is not finished: this was before acceptance
-    assert_eq!(
-        q(&h, "SELECT status FROM items WHERE id = ?", &[&id]),
-        json!("run")
-    );
+    assert_eq!(q(&h, Inspect::ItemsStatus, &[&id]), json!("run"));
     // now there is an open PR from the branch
     let e = tool(&h, &c, mcp::OPEN_PR, json!({"title": "again", "body": ""}))
         .await
@@ -837,7 +777,7 @@ async fn draft_false_and_no() {
     .expect("open_pr");
     let (dec, _, _) = open_decision(&h, accept::PR_OPEN).expect("asked");
     answer(&h, &dec, "yes", "").await;
-    let n = q(&h, "SELECT number FROM gh_prs WHERE item_id = ?", &[&id]);
+    let n = q(&h, Inspect::GhPrsNumber2, &[&id]);
     let n = n.as_i64().expect("PR opened") as u64;
     assert!(!h.fake.pull(REPO, n).expect("PR").draft);
 }
@@ -849,18 +789,15 @@ async fn a_comment_is_refused_while_the_connection_cannot_write() {
     let h = setup().await;
     let id = item(&h, 1, Some(PROJECT), Some(BRANCH));
     let (n, _) = pr_with_failure(&h, "ok\n").await;
-    let pr = q(&h, "SELECT id FROM gh_prs WHERE item_id = ?", &[&id]);
-    let conn = q(&h, "SELECT connection_id FROM gh_repos LIMIT 1", &[]);
+    let pr = q(&h, Inspect::GhPrsId2, &[&id]);
+    let conn = q(&h, Inspect::GhReposConnectionId, &[]);
     let conn = conn.as_str().expect("connection").to_string();
     let me = caller(WS, ME);
     let set = |status: &str, caps: &str| {
         h.env
             .store()
-            .transaction(|tx| {
-                tx.execute(
-                    "UPDATE connections SET status = ?, caps = ? WHERE id = ?",
-                    rusqlite::params![status, caps, conn],
-                )?;
+            .write::<_, steve_store::StoreError>(|tx| {
+                Seed::UpdateConnectionsStatus2.apply(tx, &[&status, &caps, &conn])?;
                 Ok::<_, steve_store::StoreError>(())
             })
             .expect("set");
@@ -912,24 +849,10 @@ async fn a_posted_comment_whose_answer_was_lost_is_found_not_posted_twice() {
         .fail_next_on("/comments", steve_github::fake::Fault::LostAnswer);
     answer(&h, &dec, "yes", "").await;
     assert_eq!(h.fake.comments(REPO, n).len(), 1, "it went out");
-    assert_eq!(
-        q(
-            &h,
-            "SELECT state FROM gh_effects WHERE decision_id = ?",
-            &[&dec]
-        ),
-        json!("unknown")
-    );
+    assert_eq!(q(&h, Inspect::GhEffectsState, &[&dec]), json!("unknown"));
     h.env.clock.advance(steve_store::outbox::backoff(1) + 1);
     h.gh.settle().await;
-    assert_eq!(
-        q(
-            &h,
-            "SELECT state FROM gh_effects WHERE decision_id = ?",
-            &[&dec]
-        ),
-        json!("done")
-    );
+    assert_eq!(q(&h, Inspect::GhEffectsState, &[&dec]), json!("done"));
     assert_eq!(h.fake.comments(REPO, n).len(), 1, "not posted twice");
 }
 
@@ -961,11 +884,7 @@ async fn a_comment_not_found_after_a_failure_is_not_posted_again() {
         "not posted again by itself"
     );
     assert_eq!(
-        q(
-            &h,
-            "SELECT state || '|' || (next_at IS NULL) FROM gh_effects WHERE decision_id = ?",
-            &[&dec]
-        ),
+        q(&h, Inspect::GhEffectsStateNextAt, &[&dec]),
         json!("unknown|1")
     );
 }
@@ -978,7 +897,7 @@ async fn a_comment_through_a_pat_says_it_posts_as_your_account() {
     // the repo's connection is a PAT: what it posts is yours on GitHub
     h.env
         .store()
-        .with_conn(|c| Ok(c.execute("UPDATE connections SET adapter = 'github_pat'", [])?))
+        .write::<_, steve_store::StoreError>(|c| Ok(Seed::UpdateConnectionsAdapter.apply(c, &[])?))
         .expect("pat");
     let c = cx(Some(&id), BOT);
     let o = tool(&h, &c, mcp::COMMENT, json!({"body": "修好了"}))

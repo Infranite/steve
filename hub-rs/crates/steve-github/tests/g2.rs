@@ -6,6 +6,8 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use steve_store::github::fixtures::{FixtureValue, Inspect, Seed};
 
 use axum::Router;
 use axum::body::Body;
@@ -36,9 +38,31 @@ struct H {
     hooks: String,
 }
 
+impl H {
+    fn notices(&self) -> Vec<(String, String)> {
+        use steve_types::{DomainEvent, IntegrationsEvent};
+        self.env
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event.as_domain() {
+                Some(DomainEvent::Integrations(IntegrationsEvent::Gh { id, ws })) => {
+                    Some((ws.to_string(), id.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+}
+
 async fn setup() -> H {
+    setup_observing(|_| {}).await
+}
+
+async fn setup_observing(observe: impl Fn(&steve_store::BusEvent) + Send + Sync + 'static) -> H {
     let fake = FakeGitHub::start().await.expect("fake github");
-    let env = TestEnv::new(connections::register);
+    let env = TestEnv::observing(connections::register, observe);
     let keys = tempfile::tempdir().expect("tmp");
     let vault = Vault::new(
         env.store().clone(),
@@ -62,7 +86,6 @@ async fn setup() -> H {
     );
     let sink = RecordingSink::new();
     gh.set_event_sink(sink.clone());
-    gh.set_notifier(sink.clone());
     let api = manifest::routes(gh.clone())
         .merge(repos::routes(gh.clone()))
         .merge(connections::routes(conns.clone()))
@@ -113,41 +136,13 @@ async fn nav(r: &Router, who: &Caller, uri: &str) -> (u16, String) {
     (res.status().as_u16(), loc)
 }
 
-fn q(h: &H, sql: &str, p: &[&dyn rusqlite::ToSql]) -> Value {
-    h.env
-        .store()
-        .reader(|c| {
-            c.query_row(sql, p, |r| {
-                Ok(match r.get_ref(0)? {
-                    rusqlite::types::ValueRef::Null => Value::Null,
-                    rusqlite::types::ValueRef::Integer(i) => json!(i),
-                    rusqlite::types::ValueRef::Real(f) => json!(f),
-                    rusqlite::types::ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
-                    rusqlite::types::ValueRef::Blob(_) => json!("<blob>"),
-                })
-            })
-            .map_err(steve_store::StoreError::from)
-        })
-        .expect(sql)
+fn q(h: &H, field: Inspect, p: &[&dyn FixtureValue]) -> Value {
+    field.read(h.env.store(), p).expect("fixture assertion")
 }
 
 /// Row count of every table.
 fn counts(h: &H) -> BTreeMap<String, i64> {
-    h.env
-        .store()
-        .reader(|c| {
-            let names: Vec<String> = c
-                .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")?
-                .query_map([], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?;
-            let mut m = BTreeMap::new();
-            for n in names {
-                let k: i64 = c.query_row(&format!("SELECT count(*) FROM \"{n}\""), [], |r| r.get(0))?;
-                m.insert(n, k);
-            }
-            Ok::<_, steve_store::StoreError>(m)
-        })
-        .expect("counts")
+    steve_store::github::fixtures::table_counts(h.env.store()).expect("counts")
 }
 
 /// Manifest → install: the `github_app` connection.
@@ -181,14 +176,10 @@ async fn install(h: &H) -> String {
     )
     .await;
     assert_eq!((s, loc.as_str()), (302, "/#/github"));
-    q(
-        h,
-        "SELECT id FROM connections WHERE adapter = 'github_app'",
-        &[],
-    )
-    .as_str()
-    .expect("connection")
-    .to_string()
+    q(h, Inspect::ConnectionsId2, &[])
+        .as_str()
+        .expect("connection")
+        .to_string()
 }
 
 /// A PAT connection for `lee-test`: also makes `lee-test` “your” GitHub account.
@@ -220,12 +211,16 @@ async fn link(h: &H, conn: &str, gh_id: u64, project: Option<&str>) -> Value {
 
 /// App installed, `steve-test/demo` linked, `lee-test` is mine.
 async fn ready() -> (H, String, String) {
-    let h = setup().await;
+    installed(setup().await).await
+}
+
+async fn installed(h: H) -> (H, String, String) {
     let app = install(&h).await;
     pat(&h).await;
     let r = link(&h, &app, defaults::REPO_ID, None).await;
     let repo = r["id"].as_str().expect("repo").to_string();
     h.sink.clear();
+    h.env.take_events();
     (h, app, repo)
 }
 
@@ -330,11 +325,7 @@ async fn a_bad_signature_is_401_and_writes_nothing() {
         assert_eq!(res.status().as_u16(), 413, "declared: {declared}");
     }
     // a PAT hook route for a connection that is not a PAT
-    let app_conn = q(
-        &h,
-        "SELECT id FROM connections WHERE adapter = 'github_app'",
-        &[],
-    );
+    let app_conn = q(&h, Inspect::ConnectionsId2, &[]);
     let pat_target = format!("{}/hooks/{}", h.hooks, app_conn.as_str().expect("id"));
     let d = WebhookSender::new(&pat_target, defaults::WEBHOOK_SECRET.as_bytes().to_vec())
         .send(event, &payload)
@@ -378,7 +369,7 @@ async fn a_bad_signature_on_a_cold_cache_writes_nothing() {
     // A new day for the vault's use log, and a Hub that has not opened the secret yet.
     h.env
         .store()
-        .with_conn(|c| Ok(c.execute("DELETE FROM secret_uses", [])?))
+        .write::<_, steve_store::StoreError>(|c| Ok(Seed::ClearSecretUses.apply(c, &[])?))
         .expect("clear uses");
     let cold = GitHub::new(
         h.gh.connections().clone(),
@@ -407,11 +398,7 @@ async fn a_bad_signature_on_a_cold_cache_writes_nothing() {
     );
     assert_eq!(cold.receive_app(&ok, &body).await.status().as_u16(), 202);
     cold.settle().await;
-    let uses = q(
-        &h,
-        "SELECT count(*) FROM secret_uses WHERE actor_id LIKE 'ghapp_%'",
-        &[],
-    );
+    let uses = q(&h, Inspect::SecretUsesCount, &[]);
     assert_eq!(uses, json!(1));
     let ok = app_headers(
         event,
@@ -421,7 +408,7 @@ async fn a_bad_signature_on_a_cold_cache_writes_nothing() {
     );
     assert_eq!(cold.receive_app(&ok, &body).await.status().as_u16(), 202);
     cold.settle().await;
-    assert_eq!(q(&h, "SELECT count(*) FROM secret_uses", &[]), json!(1));
+    assert_eq!(q(&h, Inspect::SecretUsesCount2, &[]), json!(1));
     let _ = repo;
 }
 
@@ -438,46 +425,26 @@ async fn a_redelivery_is_processed_once() {
     let again = h.fake.redeliver(&d.id).await.expect("redeliver");
     assert_eq!(again.status, 200);
     h.gh.settle().await;
-    assert_eq!(q(&h, "SELECT count(*) FROM gh_prs", &[]), json!(1));
+    assert_eq!(q(&h, Inspect::GhPrsCount, &[]), json!(1));
+    assert_eq!(q(&h, Inspect::GhDeliveriesCount, &[&d.id]), json!(1));
     assert_eq!(
-        q(
-            &h,
-            "SELECT count(*) FROM gh_deliveries WHERE delivery_id = ?",
-            &[&d.id]
-        ),
-        json!(1)
-    );
-    assert_eq!(
-        q(
-            &h,
-            "SELECT status || '|' || repo_id || '|' || workspace_id FROM gh_deliveries WHERE delivery_id = ?",
-            &[&d.id]
-        ),
+        q(&h, Inspect::GhDeliveriesStatusRepoIdWorkspaceId, &[&d.id]),
         json!(format!("ok|{repo}|{WS}"))
     );
     // PR 12 is by the App's bot: Steve opened it.
     assert_eq!(
-        q(
-            &h,
-            "SELECT opened_by || '|' || state || '|' || head_ref || '|' || checks_state FROM gh_prs",
-            &[]
-        ),
+        q(&h, Inspect::GhPrsOpenedByStateHeadRefChecksState, &[]),
         json!("steve|open|steve/st-12|none")
     );
     // The same change under a new delivery id is applied again but changes nothing.
-    let before = h.sink.notices().len();
+    let before = h.notices().len();
     assert_eq!(emit(&h, "pull_request.opened").await, 202);
     // Activity subscribers see the new receipt, but the PR did not change.
     let received = h.fake.deliveries().last().expect("receipt").id.clone();
-    assert_eq!(&h.sink.notices()[before..], &[(WS.to_string(), received)]);
-    assert_eq!(q(&h, "SELECT count(*) FROM gh_prs", &[]), json!(1));
+    assert_eq!(&h.notices()[before..], &[(WS.to_string(), received)]);
+    assert_eq!(q(&h, Inspect::GhPrsCount, &[]), json!(1));
     assert!(
-        q(
-            &h,
-            "SELECT last_delivery FROM gh_repos WHERE id = ?",
-            &[&repo]
-        )
-        .is_i64(),
+        q(&h, Inspect::GhReposLastDelivery, &[&repo]).is_i64(),
         "last_delivery is set"
     );
 }
@@ -607,7 +574,7 @@ async fn webhook_and_poll_seeing_the_same_change_give_one_event() {
 async fn checks_state_and_signals_follow_the_spec() {
     let (h, _app, repo) = ready().await;
     assert_eq!(emit(&h, "pull_request.opened").await, 202);
-    let state = |h: &H| q(h, "SELECT checks_state FROM gh_prs WHERE number = 12", &[]);
+    let state = |h: &H| q(h, Inspect::GhPrsChecksState, &[]);
     assert_eq!(state(&h), json!("none"));
 
     // A check run in progress: pending.
@@ -635,14 +602,7 @@ async fn checks_state_and_signals_follow_the_spec() {
     assert_eq!(ev.payload["number"], json!(12));
     assert_eq!(ev.payload["failed"].as_array().map(Vec::len), Some(2));
     // job ids of Actions checks are known
-    assert_eq!(
-        q(
-            &h,
-            "SELECT count(*) FROM gh_checks WHERE head_sha = ? AND job_id IS NOT NULL AND run_id IS NOT NULL",
-            &[&PR_SHA]
-        ),
-        json!(2)
-    );
+    assert_eq!(q(&h, Inspect::GhChecksCount, &[&PR_SHA]), json!(2));
 
     // Reruns pass: success, `check_passed` once.
     h.sink.clear();
@@ -669,11 +629,7 @@ async fn checks_state_and_signals_follow_the_spec() {
     h.gh.settle().await;
     assert_eq!(state(&h), json!("failure"));
     assert_eq!(
-        q(
-            &h,
-            "SELECT kind || '|' || status || '|' || conclusion FROM gh_checks WHERE ext_id = 'ci/legacy'",
-            &[]
-        ),
+        q(&h, Inspect::GhChecksKindStatusConclusion, &[]),
         json!("status|completed|failure")
     );
     assert_eq!(types(&h), ["github.check_failed"]);
@@ -681,11 +637,7 @@ async fn checks_state_and_signals_follow_the_spec() {
     // A new head: `checks_state` is that commit's.
     assert_eq!(emit(&h, "pull_request.synchronize").await, 202);
     assert_eq!(
-        q(
-            &h,
-            "SELECT head_sha || '|' || checks_state FROM gh_prs WHERE number = 12",
-            &[]
-        ),
+        q(&h, Inspect::GhPrsHeadShaChecksState, &[]),
         json!("b2c3d4e5f60718293a4b5c6d7e8f901234567890|none")
     );
 
@@ -723,16 +675,10 @@ async fn reviews_comments_issues_and_merges() {
         h.sink.events()[0].2.summary,
         "steve-test[bot] 请你评审 PR #12：fix: preserve return_to"
     );
-    assert_eq!(
-        q(&h, "SELECT review_state FROM gh_prs WHERE number = 12", &[]),
-        json!("requested")
-    );
+    assert_eq!(q(&h, Inspect::GhPrsReviewState, &[]), json!("requested"));
     // Approved on a PR Steve opened.
     assert_eq!(emit(&h, "pull_request_review.submitted").await, 202);
-    assert_eq!(
-        q(&h, "SELECT review_state FROM gh_prs WHERE number = 12", &[]),
-        json!("approved")
-    );
+    assert_eq!(q(&h, Inspect::GhPrsReviewState, &[]), json!("approved"));
     assert_eq!(types(&h)[1], "github.review");
     assert_eq!(h.sink.events()[1].2.summary, "lee-test 批准了 PR #12");
     // A comment on a PR not linked to an item: no signal.
@@ -741,8 +687,8 @@ async fn reviews_comments_issues_and_merges() {
     // Once linked (G3 writes item_id), comments become signals.
     h.env
         .store()
-        .transaction(|tx| {
-            tx.execute("UPDATE gh_prs SET item_id = 'ST-12' WHERE number = 12", [])?;
+        .write::<_, steve_store::StoreError>(|tx| {
+            Seed::UpdateGhPrsItemId.apply(tx, &[])?;
             Ok::<_, steve_store::StoreError>(())
         })
         .expect("link");
@@ -757,7 +703,7 @@ async fn reviews_comments_issues_and_merges() {
 
     // Issues: the fixture's issue is older than the link — stored, no signal; a new one signals.
     assert_eq!(emit(&h, "issues.opened").await, 202);
-    assert_eq!(q(&h, "SELECT count(*) FROM gh_issues", &[]), json!(1));
+    assert_eq!(q(&h, Inspect::GhIssuesCount, &[]), json!(1));
     assert_eq!(types(&h).len(), 3);
     let (_, mut issue) = fixture("issues.opened").expect("fixture");
     let now = chrono::Utc::now() + chrono::Duration::minutes(1);
@@ -779,10 +725,7 @@ async fn reviews_comments_issues_and_merges() {
 
     // Merged.
     assert_eq!(emit(&h, "pull_request.closed.merged").await, 202);
-    assert_eq!(
-        q(&h, "SELECT state FROM gh_prs WHERE number = 12", &[]),
-        json!("merged")
-    );
+    assert_eq!(q(&h, Inspect::GhPrsState, &[]), json!("merged"));
     assert_eq!(types(&h)[4], "github.pr_merged");
     assert_eq!(h.sink.events()[4].2.payload["item_id"], json!("ST-12"));
     assert!(
@@ -860,22 +803,14 @@ async fn a_repo_removed_from_the_installation_is_disabled() {
     h.fake
         .remove_from_installation(defaults::INSTALLATION_ID, REPO);
     assert_eq!(emit(&h, "installation_repositories.removed").await, 202);
-    assert_eq!(
-        q(&h, "SELECT enabled FROM gh_repos WHERE id = ?", &[&repo]),
-        json!(0)
-    );
+    assert_eq!(q(&h, Inspect::GhReposEnabled, &[&repo]), json!(0));
     let me = caller(WS, ME);
     let (_, all) = call(&h.api, Some(&me), "GET", "/github", None).await;
     let r = &all["repos"][0];
     assert_eq!(r["enabled"], json!(false));
     assert_eq!(r["healthy"], json!(false));
     assert_eq!(r["problem"], json!("GitHub App 不再能访问这个仓库"));
-    assert!(
-        h.sink
-            .notices()
-            .iter()
-            .any(|(w, id)| w == WS && id == &repo)
-    );
+    assert!(h.notices().iter().any(|(w, id)| w == WS && id == &repo));
     // Later deliveries for it are recorded as ignored.
     let d = h
         .fake
@@ -884,14 +819,10 @@ async fn a_repo_removed_from_the_installation_is_disabled() {
         .expect("emit");
     h.gh.settle().await;
     assert_eq!(
-        q(
-            &h,
-            "SELECT status || '|' || error FROM gh_deliveries WHERE delivery_id = ?",
-            &[&d.id]
-        ),
+        q(&h, Inspect::GhDeliveriesStatusError, &[&d.id]),
         json!("ignored|这个仓库已停用")
     );
-    assert_eq!(q(&h, "SELECT count(*) FROM gh_prs", &[]), json!(0));
+    assert_eq!(q(&h, Inspect::GhPrsCount, &[]), json!(0));
     // The list of linkable repos no longer has it.
     let (_, avail) = call(
         &h.api,
@@ -908,11 +839,7 @@ async fn a_repo_removed_from_the_installation_is_disabled() {
     let d = h.fake.emit("pull_request", &p).await.expect("emit");
     h.gh.settle().await;
     assert_eq!(
-        q(
-            &h,
-            "SELECT status FROM gh_deliveries WHERE delivery_id = ?",
-            &[&d.id]
-        ),
+        q(&h, Inspect::GhDeliveriesStatus, &[&d.id]),
         json!("ignored")
     );
 }
@@ -943,11 +870,8 @@ async fn repo_endpoints() {
     ]);
     h.env
         .store()
-        .transaction(|tx| {
-            tx.execute(
-                "INSERT INTO projects (id, workspace_id, name, path, kind, created, updated) VALUES ('prj_demo', 'default', 'Demo', ?, 'git', 1, 1), ('prj_two', 'default', 'Two', '/nonexistent', 'git', 1, 1)",
-                [&path],
-            )?;
+        .write::<_, steve_store::StoreError>(|tx| {
+            Seed::InsertProjects.apply(tx, &[&&path])?;
             Ok::<_, steve_store::StoreError>(())
         })
         .expect("projects");
@@ -1050,14 +974,7 @@ async fn repo_endpoints() {
     assert_eq!(v["settings"]["merge_method"], json!("rebase"));
     assert_eq!(v["project"], Value::Null);
     assert_eq!(v["revision"], json!(2));
-    assert_eq!(
-        q(
-            &h,
-            "SELECT count(*) FROM revisions WHERE object_type = 'gh_repo' AND object_id = ?",
-            &[&id]
-        ),
-        json!(1)
-    );
+    assert_eq!(q(&h, Inspect::RevisionsCount, &[&id]), json!(1));
     let (s, v) = call(
         &h.api,
         Some(&me),
@@ -1110,7 +1027,7 @@ async fn repo_endpoints() {
     assert_eq!(s, 202);
     h.gh.settle().await;
     assert_eq!(
-        q(&h, "SELECT title || '|' || opened_by FROM gh_prs", &[]),
+        q(&h, Inspect::GhPrsTitleOpenedBy, &[]),
         json!("feat: x|other")
     );
 
@@ -1124,8 +1041,8 @@ async fn repo_endpoints() {
     )
     .await;
     assert_eq!((s, v), (200, json!({"ok": true})));
-    assert_eq!(q(&h, "SELECT count(*) FROM gh_prs", &[]), json!(0));
-    assert_eq!(q(&h, "SELECT count(*) FROM gh_repos", &[]), json!(0));
+    assert_eq!(q(&h, Inspect::GhPrsCount, &[]), json!(0));
+    assert_eq!(q(&h, Inspect::GhReposCount, &[]), json!(0));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1143,7 +1060,7 @@ async fn pat_repos_get_a_hook_or_are_polled() {
     assert!(hooks[0].events.iter().any(|e| e == "check_suite"));
     assert_eq!(hooks[0].secret.len(), 64);
     // The secret is in the vault, not in the row.
-    let state = q(&h, "SELECT poll_state FROM gh_repos WHERE id = ?", &[&id]);
+    let state = q(&h, Inspect::GhReposPollState, &[&id]);
     assert!(!state.as_str().expect("state").contains(&hooks[0].secret));
 
     // A delivery on the connection's route, signed with the hook's secret.
@@ -1160,7 +1077,7 @@ async fn pat_repos_get_a_hook_or_are_polled() {
     let d = sender.send(event, &payload).await.expect("send");
     assert_eq!(d.status, 202);
     h.gh.settle().await;
-    assert_eq!(q(&h, "SELECT count(*) FROM gh_prs", &[]), json!(1));
+    assert_eq!(q(&h, Inspect::GhPrsCount, &[]), json!(1));
     // The App's secret does not open the PAT route.
     let wrong = WebhookSender::with_target(
         &target,
@@ -1189,40 +1106,23 @@ async fn pat_repos_get_a_hook_or_are_polled() {
     let r = link(&h, &con, defaults::REPO_ID, None).await;
     assert_eq!(r["ingest"], json!("poll"));
     let id = r["id"].as_str().expect("id").to_string();
-    let due = h
-        .env
-        .store()
-        .reader(|c| {
-            let row = steve_github::repo::repo_get(c, &id)?.expect("row");
-            Ok::<_, steve_store::StoreError>(h.gh.poll_is_due(
-                c,
-                &row,
-                h.env.clock.now() + steve_github::poll::POLL_EVERY_MS,
-            ))
-        })
-        .expect("due");
+    let due =
+        h.gh.poll_is_due(&id, h.env.clock.now() + steve_github::poll::POLL_EVERY_MS)
+            .expect("due");
     assert!(due, "poll repos are polled every 2 minutes");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn app_repos_are_polled_when_webhooks_go_quiet() {
     let (h, _app, repo) = ready().await;
-    let is_due = |h: &H, at: i64| {
-        h.env
-            .store()
-            .reader(|c| {
-                let row = steve_github::repo::repo_get(c, &repo)?.expect("row");
-                Ok::<_, steve_store::StoreError>(h.gh.poll_is_due(c, &row, at))
-            })
-            .expect("due")
-    };
+    let is_due = |h: &H, at: i64| h.gh.poll_is_due(&repo, at).expect("due");
     let now = h.env.clock.now() + steve_github::poll::POLL_EVERY_MS;
     assert!(!is_due(&h, now), "no linked PR: webhooks only");
     assert_eq!(emit(&h, "pull_request.opened").await, 202);
     h.env
         .store()
-        .transaction(|tx| {
-            tx.execute("UPDATE gh_prs SET item_id = 'ST-12'", [])?;
+        .write::<_, steve_store::StoreError>(|tx| {
+            Seed::UpdateGhPrsItemId2.apply(tx, &[])?;
             Ok::<_, steve_store::StoreError>(())
         })
         .expect("link");
@@ -1268,7 +1168,6 @@ async fn a_cold_secret_cache_logs_the_vault_use_only_after_the_signature_verifie
         std::sync::Arc::new(steve_runtime::cache::Caches::new(Default::default())),
     );
     cold.set_event_sink(h.sink.clone());
-    cold.set_notifier(h.sink.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -1282,7 +1181,7 @@ async fn a_cold_secret_cache_logs_the_vault_use_only_after_the_signature_verifie
     // nothing logged today yet for the App's webhook secret
     h.env
         .store()
-        .with_conn(|c| Ok(c.execute("DELETE FROM secret_uses", [])?))
+        .write::<_, steve_store::StoreError>(|c| Ok(Seed::ClearSecretUses.apply(c, &[])?))
         .expect("clear");
 
     let (event, payload) = fixture("pull_request.opened").expect("fixture");
@@ -1338,23 +1237,24 @@ async fn an_accepted_delivery_a_restart_interrupted_is_processed_by_the_recovery
         )
         .expect("pr");
     let payload = pr_payload(&h, &app, n, "opened").await;
-    assert_eq!(q(&h, "SELECT count(*) FROM gh_prs", &[]), json!(0));
+    assert_eq!(q(&h, Inspect::GhPrsCount, &[]), json!(0));
     // what `accept` committed before the worker got to it
-    let row = steve_github::repo::DeliveryRow {
+    let row = steve_store::github::DeliveryRow {
         delivery_id: "d-interrupted".into(),
         workspace_id: Some(WS.into()),
         repo_id: None,
         event: "pull_request".into(),
         action: Some("opened".into()),
-        status: steve_github::repo::RECEIVED.into(),
+        status: steve_store::github::RECEIVED.into(),
         error: None,
         received: steve_store::now(),
     };
     let source = serde_json::to_string(&steve_github::sync::Source::App { ws: WS.into() }).unwrap();
     h.env
         .store()
-        .transaction(|tx| {
-            steve_github::repo::insert_delivery(tx, &row, &source, &payload.to_string())
+        .write(|w| {
+            steve_store::github::Deliveries::new(w)
+                .insert_delivery(&row, &source, &payload.to_string())
                 .map_err(steve_modules::ApiError::from)
         })
         .expect("insert");
@@ -1362,13 +1262,9 @@ async fn an_accepted_delivery_a_restart_interrupted_is_processed_by_the_recovery
     assert_eq!(h.gh.recover_deliveries(), 1);
     assert_eq!(h.gh.recover_deliveries(), 0, "queued once");
     h.gh.settle().await;
-    assert_eq!(q(&h, "SELECT count(*) FROM gh_prs", &[]), json!(1));
+    assert_eq!(q(&h, Inspect::GhPrsCount, &[]), json!(1));
     assert_eq!(
-        q(
-            &h,
-            "SELECT status || '|' || (SELECT count(*) FROM gh_delivery_inputs WHERE delivery_id = 'd-interrupted') FROM gh_deliveries WHERE delivery_id = 'd-interrupted'",
-            &[]
-        ),
+        q(&h, Inspect::GhDeliveryInputsStatusCount, &[]),
         json!("ok|0")
     );
     assert_eq!(h.gh.recover_deliveries(), 0, "processed: nothing left");
@@ -1378,32 +1274,26 @@ async fn an_accepted_delivery_a_restart_interrupted_is_processed_by_the_recovery
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unprocessed_delivery_outlives_the_retention() {
     let (h, _app, _repo) = ready().await;
-    let row = steve_github::repo::DeliveryRow {
+    let row = steve_store::github::DeliveryRow {
         delivery_id: "d-old".into(),
         workspace_id: Some(WS.into()),
         repo_id: None,
         event: "ping".into(),
         action: None,
-        status: steve_github::repo::RECEIVED.into(),
+        status: steve_store::github::RECEIVED.into(),
         error: None,
         received: 1,
     };
     h.env
         .store()
-        .transaction(|tx| {
-            steve_github::repo::insert_delivery(tx, &row, "{\"app\":{\"ws\":\"default\"}}", "{}")
+        .write(|w| {
+            steve_store::github::Deliveries::new(w)
+                .insert_delivery(&row, "{\"app\":{\"ws\":\"default\"}}", "{}")
                 .map_err(steve_modules::ApiError::from)
         })
         .expect("insert");
     h.gh.prune_deliveries();
-    assert_eq!(
-        q(
-            &h,
-            "SELECT count(*) FROM gh_deliveries WHERE delivery_id = 'd-old'",
-            &[]
-        ),
-        json!(1)
-    );
+    assert_eq!(q(&h, Inspect::GhDeliveriesCount2, &[]), json!(1));
 }
 
 /// Y1: a signal follows a committed state change through the outbox: processed but not yet
@@ -1460,21 +1350,22 @@ async fn an_older_view_processed_late_does_not_undo_a_newer_one() {
     closed["pull_request"]["state"] = json!("closed");
     closed["pull_request"]["updated_at"] = json!("2026-01-02T00:00:00Z");
     // the opened delivery was accepted first but not processed before a restart ...
-    let row = steve_github::repo::DeliveryRow {
+    let row = steve_store::github::DeliveryRow {
         delivery_id: "d-late".into(),
         workspace_id: Some(WS.into()),
         repo_id: None,
         event: "pull_request".into(),
         action: Some("opened".into()),
-        status: steve_github::repo::RECEIVED.into(),
+        status: steve_store::github::RECEIVED.into(),
         error: None,
         received: 1,
     };
     let source = serde_json::to_string(&steve_github::sync::Source::App { ws: WS.into() }).unwrap();
     h.env
         .store()
-        .transaction(|tx| {
-            steve_github::repo::insert_delivery(tx, &row, &source, &opened.to_string())
+        .write(|w| {
+            steve_store::github::Deliveries::new(w)
+                .insert_delivery(&row, &source, &opened.to_string())
                 .map_err(steve_modules::ApiError::from)
         })
         .expect("insert");
@@ -1490,22 +1381,8 @@ async fn an_older_view_processed_late_does_not_undo_a_newer_one() {
     h.gh.settle().await;
     assert_eq!(h.gh.recover_deliveries(), 1);
     h.gh.settle().await;
-    assert_eq!(
-        q(
-            &h,
-            "SELECT state FROM gh_prs WHERE number = ?",
-            &[&(n as i64)]
-        ),
-        json!("closed")
-    );
-    assert_eq!(
-        q(
-            &h,
-            "SELECT status FROM gh_deliveries WHERE delivery_id = 'd-late'",
-            &[]
-        ),
-        json!("ok")
-    );
+    assert_eq!(q(&h, Inspect::GhPrsState2, &[&(n as i64)]), json!("closed"));
+    assert_eq!(q(&h, Inspect::GhDeliveriesStatus2, &[]), json!("ok"));
 }
 
 /// Y1: a processing that fails (here the store refuses) keeps the delivery `received` with its
@@ -1515,10 +1392,8 @@ async fn a_failed_processing_is_tried_again() {
     let (h, _app, _repo) = ready().await;
     h.env
         .store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "CREATE TRIGGER no_prs BEFORE INSERT ON gh_prs BEGIN SELECT RAISE(ABORT, 'test store fault'); END",
-            )?;
+        .write::<_, steve_store::StoreError>(|c| {
+            Seed::FailPrWrites.apply(c, &[])?;
             Ok(())
         })
         .unwrap();
@@ -1530,51 +1405,40 @@ async fn a_failed_processing_is_tried_again() {
     assert_eq!(d.status, 202);
     h.gh.settle().await;
     assert_eq!(
-        q(
-            &h,
-            "SELECT d.status || '|' || i.attempts FROM gh_deliveries d JOIN gh_delivery_inputs i USING (delivery_id) WHERE delivery_id = ?",
-            &[&d.id]
-        ),
+        q(&h, Inspect::GhDeliveriesDStatusIAttempts, &[&d.id]),
         json!("received|1")
     );
     assert_eq!(h.gh.recover_deliveries(), 0, "backing off");
     h.env
         .store()
-        .with_conn(|c| {
-            c.execute_batch("DROP TRIGGER no_prs")?;
+        .write::<_, steve_store::StoreError>(|c| {
+            Seed::AllowPrWrites.apply(c, &[])?;
             Ok(())
         })
         .unwrap();
     h.env.clock.advance(steve_store::outbox::backoff(1) + 1);
     assert_eq!(h.gh.recover_deliveries(), 1);
     h.gh.settle().await;
-    assert_eq!(q(&h, "SELECT count(*) FROM gh_prs", &[]), json!(1));
-    assert_eq!(
-        q(
-            &h,
-            "SELECT status FROM gh_deliveries WHERE delivery_id = ?",
-            &[&d.id]
-        ),
-        json!("ok")
-    );
+    assert_eq!(q(&h, Inspect::GhPrsCount, &[]), json!(1));
+    assert_eq!(q(&h, Inspect::GhDeliveriesStatus, &[&d.id]), json!("ok"));
 }
 
 /// Panics on every notice: a processing that crashes after its commit.
-struct PanickingNotifier;
-
-impl steve_github::GhNotifier for PanickingNotifier {
-    fn gh(&self, _: &str, _: &str) {
-        panic!("test notifier panic");
-    }
-}
-
 /// A processing that panics counts as a failed attempt: still `received`, attempts up by one and
 /// backing off, so the recovery doesn't queue it again on every tick (it would panic each time and
 /// never reach `failed`).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_panicking_processing_counts_as_a_failed_attempt() {
-    let (h, _app, _repo) = ready().await;
-    h.gh.set_notifier(Arc::new(PanickingNotifier));
+    let armed = Arc::new(AtomicBool::new(false));
+    let panic_on_publish = armed.clone();
+    let h = setup_observing(move |e| {
+        if e.wire_type() == "gh" && panic_on_publish.swap(false, Ordering::SeqCst) {
+            panic!("test publisher panic");
+        }
+    })
+    .await;
+    let (h, _app, _repo) = installed(h).await;
+    armed.store(true, Ordering::SeqCst);
     let d = h
         .fake
         .emit_fixture("pull_request.opened")
@@ -1583,11 +1447,7 @@ async fn a_panicking_processing_counts_as_a_failed_attempt() {
     assert_eq!(d.status, 202);
     h.gh.settle().await;
     assert_eq!(
-        q(
-            &h,
-            "SELECT d.status || '|' || i.attempts || '|' || d.error FROM gh_deliveries d JOIN gh_delivery_inputs i USING (delivery_id) WHERE delivery_id = ?",
-            &[&d.id]
-        ),
+        q(&h, Inspect::GhDeliveriesDStatusIAttemptsDError, &[&d.id]),
         json!("received|1|处理时崩溃")
     );
     assert_eq!(
@@ -1617,20 +1477,21 @@ async fn recover_deliveries_racing_with_worker_completion_queues_each_once() {
             )
             .expect("pr");
         let payload = pr_payload(&h, &app, n, "opened").await;
-        let row = steve_github::repo::DeliveryRow {
+        let row = steve_store::github::DeliveryRow {
             delivery_id: format!("d-race-{idx}"),
             workspace_id: Some(WS.into()),
             repo_id: None,
             event: "pull_request".into(),
             action: Some("opened".into()),
-            status: steve_github::repo::RECEIVED.into(),
+            status: steve_store::github::RECEIVED.into(),
             error: None,
             received: steve_store::now(),
         };
         h.env
             .store()
-            .transaction(|tx| {
-                steve_github::repo::insert_delivery(tx, &row, &source, &payload.to_string())
+            .write(|w| {
+                steve_store::github::Deliveries::new(w)
+                    .insert_delivery(&row, &source, &payload.to_string())
                     .map_err(steve_modules::ApiError::from)
             })
             .expect("insert");
@@ -1660,10 +1521,7 @@ async fn recover_deliveries_racing_with_worker_completion_queues_each_once() {
         queued, total,
         "every accepted delivery is queued at most once"
     );
-    assert_eq!(
-        q(&h, "SELECT count(*) FROM gh_prs", &[]),
-        json!(total as i64)
-    );
+    assert_eq!(q(&h, Inspect::GhPrsCount, &[]), json!(total as i64));
 }
 
 fn cursor_prs(h: &H, count: usize) {
@@ -1688,12 +1546,7 @@ fn cursor_prs(h: &H, count: usize) {
 }
 
 fn poll_state(h: &H, repo: &str) -> Value {
-    serde_json::from_str(
-        q(h, "SELECT poll_state FROM gh_repos WHERE id = ?", &[&repo])
-            .as_str()
-            .unwrap(),
-    )
-    .unwrap()
+    serde_json::from_str(q(h, Inspect::GhReposPollState, &[&repo]).as_str().unwrap()).unwrap()
 }
 
 #[tokio::test]
@@ -1714,32 +1567,16 @@ async fn poll_follows_all_pages_of_120_updates_and_replays_no_deliveries() {
     assert_eq!(calls.len(), 3);
     assert!(calls[0].if_none_match.is_some());
     assert!(calls[1..].iter().all(|c| c.if_none_match.is_none()));
-    assert_eq!(
-        q(
-            &h,
-            "SELECT COUNT(*) FROM gh_prs WHERE repo_id = ?",
-            &[&repo]
-        ),
-        json!(120)
-    );
-    assert_eq!(
-        q(
-            &h,
-            "SELECT COUNT(*) FROM gh_deliveries WHERE repo_id = ? AND event = 'pull_request'",
-            &[&repo]
-        ),
-        json!(240)
-    );
+    assert_eq!(q(&h, Inspect::GhPrsCount2, &[&repo]), json!(120));
+    assert_eq!(q(&h, Inspect::GhDeliveriesCount3, &[&repo]), json!(240));
     assert!(h.gh.poll_repo(&repo).await.unwrap().pulls_unchanged);
     // A pre-fix installation has an ETag but no watermark: it must scan older pages once.
     h.env
         .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE gh_repos SET poll_state = json_remove(poll_state, '$.pulls_since') WHERE id = ?",
-                [&repo],
-            )
-            .map_err(Into::into)
+        .write::<_, steve_store::StoreError>(|c| {
+            Seed::UpdateGhReposPollState
+                .apply(c, &[&&repo])
+                .map_err(Into::into)
         })
         .unwrap();
     h.fake.clear_calls();
@@ -1778,14 +1615,7 @@ async fn poll_page_budget_persists_and_continues_without_a_first_page_304() {
     assert!(calls[0].query.contains("page=11"));
     assert!(calls[0].if_none_match.is_none());
     assert!(poll_state(&h, &repo)["pulls_scan"].is_null());
-    assert_eq!(
-        q(
-            &h,
-            "SELECT COUNT(*) FROM gh_prs WHERE repo_id = ?",
-            &[&repo]
-        ),
-        json!(520)
-    );
+    assert_eq!(q(&h, Inspect::GhPrsCount2, &[&repo]), json!(520));
     assert!(h.gh.poll_repo(&repo).await.unwrap().pulls_unchanged);
 }
 
@@ -1814,47 +1644,24 @@ async fn failed_poll_replays_durable_half_without_duplicate_effects() {
     let (h, _, repo) = ready().await;
     cursor_prs(&h, 120);
     let before = poll_state(&h, &repo);
-    h.env.store().with_conn(|c| c.execute_batch(
-        "CREATE TRIGGER fail_cursor_delivery BEFORE INSERT ON gh_deliveries WHEN NEW.event = 'pull_request' AND (SELECT COUNT(*) FROM gh_deliveries WHERE event = 'pull_request') >= 60 BEGIN SELECT RAISE(FAIL, 'injected receipt failure'); END;"
-    ).map_err(Into::into)).unwrap();
+    h.env
+        .store()
+        .write::<_, steve_store::StoreError>(|c| Seed::FailPollMidway.apply(c, &[]))
+        .unwrap();
     assert!(h.gh.poll_repo(&repo).await.is_err());
     assert_eq!(
         poll_state(&h, &repo),
         before,
         "no cursor or ETag committed after failure"
     );
-    assert_eq!(
-        q(
-            &h,
-            "SELECT COUNT(*) FROM gh_prs WHERE repo_id = ?",
-            &[&repo]
-        ),
-        json!(60)
-    );
+    assert_eq!(q(&h, Inspect::GhPrsCount2, &[&repo]), json!(60));
     h.env
         .store()
-        .with_conn(|c| {
-            c.execute_batch("DROP TRIGGER fail_cursor_delivery")
-                .map_err(Into::into)
-        })
+        .write::<_, steve_store::StoreError>(|c| Seed::AllowPollWrites.apply(c, &[]))
         .unwrap();
     let r = h.gh.poll_repo(&repo).await.unwrap();
     assert_eq!((r.applied, r.seen), (60, 60));
-    assert_eq!(
-        q(
-            &h,
-            "SELECT COUNT(*) FROM gh_deliveries WHERE repo_id = ? AND event = 'pull_request'",
-            &[&repo]
-        ),
-        json!(120)
-    );
-    assert_eq!(
-        q(
-            &h,
-            "SELECT COUNT(*) FROM gh_prs WHERE repo_id = ?",
-            &[&repo]
-        ),
-        json!(120)
-    );
+    assert_eq!(q(&h, Inspect::GhDeliveriesCount3, &[&repo]), json!(120));
+    assert_eq!(q(&h, Inspect::GhPrsCount2, &[&repo]), json!(120));
     assert!(h.sink.duplicates().is_empty());
 }

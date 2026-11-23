@@ -220,7 +220,7 @@ fn todo_deadline_uses_source_quote_and_memory_remains_a_confirmable_candidate() 
     let id = out["memories"][0]["id"].as_str().unwrap();
     let (status, source, quote) = e
         .store()
-        .read(|r| {
+        .read::<_, steve_store::StoreError>(|r| {
             let status = r
                 .memory_index()
                 .visible_status(&steve_store::base::Viewer::bare(WS, ME), id)?
@@ -235,7 +235,7 @@ fn todo_deadline_uses_source_quote_and_memory_remains_a_confirmable_candidate() 
     );
     let indexed = e
         .store()
-        .read(|r| Ok(r.memory_index().get(WS, id)?.ranges.len()))
+        .read::<_, steve_store::StoreError>(|r| Ok(r.memory_index().get(WS, id)?.ranges.len()))
         .unwrap();
     assert_eq!(indexed, 1);
     let report = call(&e, tools::REPORT, json!({})).unwrap();
@@ -400,7 +400,7 @@ fn single_user_memory_links_keep_range_validation_and_existing_confirmation() {
     assert_eq!(out["memories"][2]["indexed"], true);
     assert!(
         e.store()
-            .read(|r| Ok(r
+            .read::<_, steve_store::StoreError>(|r| Ok(r
                 .memory_index()
                 .get(WS, &private)?
                 .about
@@ -411,7 +411,7 @@ fn single_user_memory_links_keep_range_validation_and_existing_confirmation() {
     let viewer = steve_store::base::Viewer::bare(WS, ME);
     let (old, new) = e
         .store()
-        .read(|r| {
+        .read::<_, steve_store::StoreError>(|r| {
             let mut index = r.memory_index();
             Ok((
                 index.visible_status(&viewer, &visible)?.unwrap(),
@@ -442,7 +442,7 @@ fn one_run_batches_conversations_and_confirms_the_same_cross_conversation_matter
     call(&e, tools::CHUNK, json!({"packet": second["packet"], "batch": second["batch"], "chunk": 1, "segments": [{"first":1,"last":1,"summary":"Other team confirmed follow up","tags":["fact"],"matter":matter}]})).unwrap();
     let conversations = e
         .store()
-        .read(|r| Ok(Segments::new(r).conversations(matter)?.len()))
+        .read::<_, steve_store::StoreError>(|r| Ok(Segments::new(r).conversations(matter)?.len()))
         .unwrap();
     assert_eq!(conversations, 2);
 }

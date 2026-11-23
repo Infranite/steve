@@ -301,7 +301,7 @@ fn a_brief_fires_once_at_its_time_with_the_members_day_and_is_sent_under_their_p
     assert_eq!(v["schedule"]["id"], s.id.as_str());
     let first =
         e.e.store()
-            .read(|r| {
+            .read::<_, steve_store::StoreError>(|r| {
                 Ok(Todos(r)
                     .list(
                         WS,
@@ -451,7 +451,7 @@ fn a_moved_rezoned_or_switched_off_brief_is_planned_again() {
     hourly.cron = "0 * * * *".into();
     let refused =
         e.e.store()
-            .read(|c| Ok(schedules::check_refs(c, WS, &hourly)))
+            .read::<_, steve_store::StoreError>(|c| Ok(schedules::check_refs(c, WS, &hourly)))
             .unwrap();
     assert!(refused.is_err());
 

@@ -74,9 +74,7 @@ impl ItemFinder for GhPrFinder {
         let Some(id) = event["payload"]["item_id"].as_str() else {
             return Ok(None);
         };
-        Ok(store
-            .read(|r| steve_store::ItemReads(r).title(ws, id))?
-            .map(|_| id.to_string()))
+        store.read(|r| Ok(steve_store::item_repo::item_brief(r, ws, id)?.map(|_| id.to_string())))
     }
 }
 
@@ -147,9 +145,8 @@ impl Action for GhItemLink {
             return NodeOutcome::Fail(format!("补充到 {item} 失败：{e}"));
         }
         if let Some(e) = ev["id"].as_str() {
-            let r = cx.flow.store().transaction(|tx| {
-                links::add(
-                    tx,
+            let r = cx.flow.store().write(|tx| {
+                links::Links(tx).add(
                     &ws,
                     &NewLink::new(
                         ObjRef::new("item", &item),
@@ -218,13 +215,7 @@ impl GitHub {
         // workspaces with repositories from before a template existed get it once (D2)
         let wss: Vec<String> = self
             .store()
-            .reader(|c| {
-                let mut st = c.prepare("SELECT DISTINCT workspace_id FROM gh_repos")?;
-                let v = st
-                    .query_map([], |r| r.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok::<_, steve_store::StoreError>(v)
-            })
+            .read(|r| steve_store::github::repo_workspaces(r))
             .unwrap_or_default();
         for ws in wss {
             match self.install_template(&ws, "steve") {
@@ -294,7 +285,7 @@ impl GitHub {
         let graph = steve_flow::graph::validate(&graph, &flow.nodes).map_err(ApiError::rule)?;
         let now = self.now();
         self.store().write(|tx| {
-            if steve_store::FlowRows(tx).has_origin(ws, origin)? {
+            if steve_store::flow_repo::has_origin(tx, ws, origin)? {
                 return Ok(None);
             }
             let id = flows::create(

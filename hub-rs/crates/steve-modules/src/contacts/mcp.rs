@@ -270,7 +270,7 @@ pub fn find(m: &Modules, ports: &Ports, cx: &McpCx, query: &str) -> ApiResult<St
         return Err(ApiError::rule("Give a name, alias, email or organization."));
     }
     let viewer = viewer(m, cx)?;
-    m.store.read(|r| {
+    m.store.read::<_, steve_store::StoreError>(|r| {
         Ok((|| {
             let found = matches(r, ports, &viewer, q)?;
             let mut blocks = Vec::new();

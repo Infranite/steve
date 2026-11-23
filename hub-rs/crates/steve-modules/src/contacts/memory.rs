@@ -86,7 +86,8 @@ fn own_any(r: &mut impl Read, viewer: &Viewer, id: &str, me: &Party) -> ApiResul
 /// included (this is the owner's own page; prompts and MCP never get them), newest first.
 pub fn list(m: &Modules, who: &Caller, id: &str) -> ApiResult<Vec<MemOut>> {
     let (viewer, me) = start(m, who)?;
-    m.store.read(|r| Ok(list_in(r, &viewer, id, &me)))?
+    m.store
+        .read::<_, steve_store::StoreError>(|r| Ok(list_in(r, &viewer, id, &me)))?
 }
 
 fn list_in(r: &mut impl Read, viewer: &Viewer, id: &str, me: &Party) -> ApiResult<Vec<MemOut>> {

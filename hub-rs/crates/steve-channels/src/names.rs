@@ -860,7 +860,7 @@ impl Channels {
         let lookups = self.profile_systems();
         let cands = self
             .store()
-            .read(|r| Ok(candidates(r, ws, now, &lookups)))??;
+            .read::<_, steve_store::StoreError>(|r| Ok(candidates(r, ws, now, &lookups)))??;
         Ok(cands.iter().filter(|c| !c.named).count())
     }
 }

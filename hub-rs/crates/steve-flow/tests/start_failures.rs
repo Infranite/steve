@@ -109,7 +109,7 @@ fn bounded(e: &FlowEnv, error: &str, epoch: i64, now: i64) -> String {
 fn state(e: &FlowEnv, epoch: i64) -> Option<runs::StartupState> {
     e.env
         .store()
-        .read(|c| {
+        .read::<_, steve_store::StoreError>(|c| {
             Ok(runs::startup_state(
                 c,
                 WS,
@@ -158,7 +158,7 @@ fn changing_errors_or_ordinary_history_cannot_reset_the_persisted_budget() {
         steve_store::Store::open(e.env.store().path(), steve_store::NoPublisher).unwrap();
     assert_eq!(
         reopened
-            .read(|c| Ok(runs::startup_state(
+            .read::<_, steve_store::StoreError>(|c| Ok(runs::startup_state(
                 c,
                 WS,
                 "flow_start",
@@ -384,7 +384,7 @@ fn corrupt_source_metadata_is_diagnosable_and_cannot_spend_or_erase_budget() {
         let error = e
             .env
             .store()
-            .read(|c| {
+            .read::<_, steve_store::StoreError>(|c| {
                 Ok(runs::startup_state(
                     c,
                     WS,
@@ -399,7 +399,7 @@ fn corrupt_source_metadata_is_diagnosable_and_cannot_spend_or_erase_budget() {
         let diagnostic = e
             .env
             .store()
-            .read(|c| {
+            .read::<_, steve_store::StoreError>(|c| {
                 Ok(runs::startup_diagnostic(
                     c,
                     WS,
@@ -450,7 +450,7 @@ fn an_edited_configuration_starts_at_zero_without_overwriting_damaged_history() 
     let diagnostic = e
         .env
         .store()
-        .read(|c| {
+        .read::<_, steve_store::StoreError>(|c| {
             Ok(runs::startup_diagnostic(
                 c,
                 WS,
@@ -479,7 +479,7 @@ fn diagnostics_decode_columns_independently_instead_of_loading_a_full_run() {
         let diagnostic = e
             .env
             .store()
-            .read(|c| {
+            .read::<_, steve_store::StoreError>(|c| {
                 Ok(runs::startup_diagnostic(
                     c,
                     WS,
@@ -512,7 +512,7 @@ fn unreadable_unrelated_history_cannot_replace_a_known_dead_source_budget() {
     let diagnostic = e
         .env
         .store()
-        .read(|c| {
+        .read::<_, steve_store::StoreError>(|c| {
             Ok(runs::startup_diagnostic(
                 c,
                 WS,
@@ -554,7 +554,7 @@ fn startup_rejection_and_recovery_diagnostics_follow_the_readers_language() {
             let d = e
                 .env
                 .store()
-                .read(|c| {
+                .read::<_, steve_store::StoreError>(|c| {
                     Ok(runs::startup_diagnostic(
                         c,
                         WS,
@@ -658,7 +658,9 @@ async fn r4g_startup_storage_is_language_neutral_and_views_follow_the_reader() {
     let diagnostic = e
         .env
         .store()
-        .read(|c| Ok(runs::startup_diagnostic(c, WS, flow, "digest.bot")))
+        .read::<_, steve_store::StoreError>(|c| {
+            Ok(runs::startup_diagnostic(c, WS, flow, "digest.bot"))
+        })
         .unwrap()
         .unwrap()
         .unwrap();
@@ -684,7 +686,7 @@ fn r4g_diagnostics_distinguish_recovered_and_unattributed_history() {
     let diagnostic = e
         .env
         .store()
-        .read(|c| {
+        .read::<_, steve_store::StoreError>(|c| {
             Ok(runs::startup_diagnostic(
                 c,
                 WS,
@@ -703,7 +705,7 @@ fn r4g_diagnostics_distinguish_recovered_and_unattributed_history() {
     let diagnostic = e
         .env
         .store()
-        .read(|c| {
+        .read::<_, steve_store::StoreError>(|c| {
             Ok(runs::startup_diagnostic(
                 c,
                 WS,
@@ -739,7 +741,9 @@ async fn readable_startup_fixture(mode: &str) -> (FlowEnv, String, String) {
     let revision = e
         .env
         .store()
-        .read(|c| Ok(steve_flow::scheduler::startup_revision(c, WS, &flow)))
+        .read::<_, steve_store::StoreError>(|c| {
+            Ok(steve_flow::scheduler::startup_revision(c, WS, &flow))
+        })
         .unwrap()
         .unwrap()
         .unwrap();

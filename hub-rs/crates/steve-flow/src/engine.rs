@@ -409,7 +409,7 @@ async fn drive_inner(cx: &FlowCx, run_id: &str) -> FlowResult<RunStatus> {
             slot @ None => {
                 let r = cx
                     .store()
-                    .read(|c| {
+                    .read::<_, steve_store::StoreError>(|c| {
                         Ok(graph_of(c, &run).map(|g| {
                             let sender =
                                 sender_of(c, run.context.get("event").unwrap_or(&Value::Null));
@@ -895,7 +895,9 @@ mod tests {
         let f = e
             .flow
             .store()
-            .read(|c| Ok(flows::own(c, WS, v["id"].as_str().unwrap())))
+            .read::<_, steve_store::StoreError>(|c| {
+                Ok(flows::own(c, WS, v["id"].as_str().unwrap()))
+            })
             .unwrap()
             .unwrap();
         let now = e.flow.now();

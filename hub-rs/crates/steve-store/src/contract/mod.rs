@@ -17,34 +17,49 @@
 
 pub mod account_profiles;
 pub mod account_rows;
+pub mod accounts;
 pub(crate) mod alarms;
 mod attribute_rows;
 pub(crate) mod automation;
 mod backend;
 mod bot_rows;
+pub mod bots;
 mod catalog_rows;
 mod connection_rows;
+pub mod connections;
 mod contacts;
-mod decisions;
+pub mod decisions;
 mod digest_notes;
+pub mod files;
 mod flow_rows;
 mod flow_sources;
 mod flow_triggers;
 mod flow_waits;
+pub mod flows;
+pub mod github;
 mod grant_rows;
+pub mod grants;
+pub mod items;
 mod knowledge_references;
+pub mod links;
+pub mod mail;
 mod match_rules;
 mod memory_index;
 mod merge_proposals;
 pub(crate) mod message_sources;
+pub mod parties;
 mod party_rows;
 mod passkey_rows;
 mod project_rows;
+pub mod projects;
 pub(crate) mod read_models;
 mod revisions;
 mod run_rows;
 pub mod secret_uses;
+pub mod sessions;
+pub mod settings;
 mod signal_rows;
+pub mod sources;
 mod sqlite;
 mod steward_rows;
 mod systems;
@@ -173,7 +188,10 @@ impl Store {
     /// One read-only snapshot on a pooled connection; never waits for the writer. Inside a write
     /// on this thread it reads that write (and sees what it wrote so far). A nested read reuses
     /// the outer snapshot.
-    pub fn read<T>(&self, f: impl FnOnce(&mut R<'_>) -> Result<T>) -> Result<T> {
+    pub fn read<T, E: From<StoreError>>(
+        &self,
+        f: impl FnOnce(&mut R<'_>) -> Result<T, E>,
+    ) -> Result<T, E> {
         if let Some(c) = self.active_conn() {
             return f(&mut R { db: &mut Sqlite(c) });
         }
@@ -182,7 +200,7 @@ impl Store {
                 db: &mut Sqlite(&c),
             });
         }
-        let c = Rc::new(self.inner.readers.get()?);
+        let c = Rc::new(self.inner.readers.get().map_err(StoreError::from)?);
         crate::instrumentation::store_acquired();
         read_snapshot(&c, |r| {
             let id = Arc::as_ptr(&self.inner) as usize;
@@ -203,7 +221,10 @@ impl Store {
     }
 }
 
-fn read_snapshot<T>(c: &Connection, f: impl FnOnce(&mut R<'_>) -> Result<T>) -> Result<T> {
+fn read_snapshot<T, E: From<StoreError>>(
+    c: &Connection,
+    f: impl FnOnce(&mut R<'_>) -> Result<T, E>,
+) -> Result<T, E> {
     let mut db = Sqlite(c);
     db.begin_read()?;
     let _end = EndRead(c);

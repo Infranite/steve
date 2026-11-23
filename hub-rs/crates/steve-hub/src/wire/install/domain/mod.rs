@@ -125,7 +125,6 @@ pub(crate) struct ModuleRegistry<'a> {
     conns: Option<steve_modules::accounts::connections::Connections>,
     gh: Option<steve_github::GitHub>,
     mail_events: Option<steve_mail::flow_events::FlowEvents>,
-    notices: Option<crate::wire::signals::Notices>,
     mail: Option<steve_mail::Mail>,
     calendar: Option<steve_calendar::Calendar>,
     replies: Option<Arc<steve_channels::Replies>>,

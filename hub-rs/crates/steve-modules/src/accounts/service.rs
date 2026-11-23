@@ -145,9 +145,9 @@ pub(crate) fn seed(w: &mut W<'_>, ws: &str) -> ApiResult<()> {
 /// Like contacts' `start`: “我” and the own organization exist, the seeds are there. Returns the
 /// caller's viewer and “我”.
 pub fn start(m: &Modules, who: &Caller) -> ApiResult<(Viewer, Party)> {
-    let seeded = m
-        .store
-        .read(|r| Ok(Systems(r).seeded()? && MatchRules(r).prefix(&who.ws)?.is_some()))?;
+    let seeded = m.store.read::<_, steve_store::StoreError>(|r| {
+        Ok(Systems(r).seeded()? && MatchRules(r).prefix(&who.ws)?.is_some())
+    })?;
     if !seeded {
         m.store.write(|w| seed(w, &who.ws))?;
     }
@@ -292,7 +292,7 @@ pub fn list(m: &Modules, who: &Caller, p: AccountsParams) -> ApiResult<Vec<Accou
             .one_of("scope", s, &["mine", "company", "others"])
             .done()?;
     }
-    m.store.read(|r| {
+    m.store.read::<_, steve_store::StoreError>(|r| {
         Ok(list_in(
             r,
             who,
@@ -349,7 +349,8 @@ fn list_in(
 /// `GET /accounts/:id`.
 pub fn get(m: &Modules, who: &Caller, id: &str) -> ApiResult<AccountOut> {
     let (viewer, _) = start(m, who)?;
-    m.store.read(|r| Ok(get_in(r, &viewer, id)))?
+    m.store
+        .read::<_, steve_store::StoreError>(|r| Ok(get_in(r, &viewer, id)))?
 }
 
 fn get_in(r: &mut impl Read, viewer: &Viewer, id: &str) -> ApiResult<AccountOut> {

@@ -218,7 +218,7 @@ fn reply_prompts(h: &H) -> Vec<String> {
 fn owner(h: &H) -> String {
     h.env
         .store()
-        .read(|c| Ok(personas::owner_name(c, WS)))
+        .read::<_, steve_store::StoreError>(|c| Ok(personas::owner_name(c, WS)))
         .unwrap()
         .expect("owner")
 }

@@ -413,7 +413,9 @@ async fn failing_op_rolls_back_everything_and_keeps_the_draft() {
     let me = caller(WS, ME);
     let prepared = t
         .store()
-        .read(|r| Ok(Contact.prepare(t.store(), r, &Viewer::bare(WS, ME), Some("ct_s"))))
+        .read::<_, steve_store::StoreError>(|r| {
+            Ok(Contact.prepare(t.store(), r, &Viewer::bare(WS, ME), Some("ct_s")))
+        })
         .unwrap()
         .unwrap();
     let plan = Plan {

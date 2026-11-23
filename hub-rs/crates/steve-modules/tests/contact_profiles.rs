@@ -544,7 +544,7 @@ async fn the_profile_says_what_is_missing_and_lookups_are_retried() {
     );
     let due = |now: i64| {
         fx.t.store()
-            .read(|c| Ok(profile::due(c, &acc, now).unwrap()))
+            .read::<_, steve_store::StoreError>(|c| Ok(profile::due(c, &acc, now).unwrap()))
             .unwrap()
     };
     assert!(!due(3_000));
@@ -572,11 +572,15 @@ async fn the_profile_says_what_is_missing_and_lookups_are_retried() {
     // the page counts only jobs you can see
     let party =
         fx.t.store()
-            .read(|c| Ok(contacts::repo::get(c, &lilei).unwrap().unwrap()))
+            .read::<_, steve_store::StoreError>(|c| {
+                Ok(contacts::repo::get(c, &lilei).unwrap().unwrap())
+            })
             .unwrap();
     let p =
         fx.t.store()
-            .read(|c| Ok(profile::contact_profile(c, WS, &party, Some(&[])).unwrap()))
+            .read::<_, steve_store::StoreError>(|c| {
+                Ok(profile::contact_profile(c, WS, &party, Some(&[])).unwrap())
+            })
             .unwrap();
     assert_eq!(p.fields.org.state, "missing");
 }

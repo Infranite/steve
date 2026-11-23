@@ -245,7 +245,7 @@ impl Mail {
             .0
             .m
             .store
-            .reader(|c| self.own_thread(c, &viewer, &q.thread_id))?;
+            .read(|c| self.own_thread(c, &viewer, &q.thread_id))?;
         let mailbox = self.own_mailbox(who, &thread.connection_id)?;
         let now = self.now();
         let sqlite = steve_knowledge::port::SqliteStore;
@@ -253,84 +253,80 @@ impl Mail {
             Some(kb) => kb.store(),
             None => &sqlite,
         };
-        let gather =
-            |r: &mut steve_store::R<'_>, c: &rusqlite::Connection| -> MailResult<Gathered> {
-                let orig = match &q.message_id {
-                    Some(id) => repo::message(c, id)?
-                        .filter(|m| m.thread_id == thread.id)
-                        .ok_or_else(|| MailError::Api(ApiError::not_found("邮件")))?,
-                    None => drafts::reply_target(c, &thread.id)?.ok_or_else(|| {
-                        MailError::Api(ApiError::rule(steve_i18n::t!("mail.compose.no_messages")))
-                    })?,
-                };
-                // the bot: asked for, else the mail bot, else the main bot
-                let bot_id = match &q.bot {
-                    Some(b) => Some(b.clone()),
-                    None => match repo::bot(c, &who.ws, "mail")? {
-                        Some(_) => Some("mail".to_string()),
-                        None => repo::main_bot(c, &who.ws)?,
-                    },
-                };
-                let (author, bot) = match bot_id {
-                    Some(id) => {
-                        let b = repo::bot(c, &who.ws, &id)?
-                            .ok_or_else(|| MailError::Api(ApiError::not_found("Bot")))?;
-                        (id, b)
-                    }
-                    None => (
-                        "steve".to_string(),
-                        ("Steve".to_string(), String::new(), String::new()),
-                    ),
-                };
-                let st = repo::settings(c, &thread.connection_id)?.unwrap_or_default();
-                let address =
-                    steve_modules::accounts::connections::repo::get(r, &thread.connection_id)?
-                        .and_then(|r| {
-                            r.config
-                                .get("address")
-                                .and_then(Value::as_str)
-                                .map(String::from)
-                        })
-                        .unwrap_or_default();
-
-                let gathering::Personal {
-                    anchors,
-                    cards_text,
-                    items,
-                } = gathering::personal(c, r, &viewer, who, &orig, q)?;
-                let gathering::Related {
-                    hits,
-                    query,
-                    semantic_down,
-                } = gathering::related(r, &viewer, store, &orig, &anchors, now)?;
-                let context = gathering::thread(c, &thread.id)?;
-                let mine = mailbox.my_addrs.clone();
-                Ok(Gathered {
-                    parts: PromptParts {
-                        bot_name: bot.0,
-                        bot_role: bot.1,
-                        bot_rules: bot.2,
-                        address,
-                        duty: st.duty,
-                        signature: st.signature,
-                        cards: cards_text,
-                        items,
-                        knowledge: with_down_note(render_hits(&hits), semantic_down),
-                        context,
-                        replying_to: line_of(&orig).replace('\n', "；"),
-                        instruction: q.instruction.clone().unwrap_or_default(),
-                    },
-                    orig,
-                    mine,
-                    hits,
-                    query,
-                    author,
-                    connection_id: thread.connection_id.clone(),
-                    thread_subject: thread.subject.clone(),
-                })
+        self.0.m.store.read(|c| -> MailResult<Gathered> {
+            let orig = match &q.message_id {
+                Some(id) => repo::message(c, id)?
+                    .filter(|m| m.thread_id == thread.id)
+                    .ok_or_else(|| MailError::Api(ApiError::not_found("邮件")))?,
+                None => drafts::reply_target(c, &thread.id)?.ok_or_else(|| {
+                    MailError::Api(ApiError::rule(steve_i18n::t!("mail.compose.no_messages")))
+                })?,
             };
-        let db = &self.0.m.store;
-        db.read(|r| Ok(db.reader(|c| gather(r, c))))?
+            // the bot: asked for, else the mail bot, else the main bot
+            let bot_id = match &q.bot {
+                Some(b) => Some(b.clone()),
+                None => match steve_store::bots::bot(c, &who.ws, "mail")? {
+                    Some(_) => Some("mail".to_string()),
+                    None => steve_store::bots::workspace_main_bot(c, &who.ws)?,
+                },
+            };
+            let (author, bot) = match bot_id {
+                Some(id) => {
+                    let b = steve_store::bots::bot(c, &who.ws, &id)?
+                        .ok_or_else(|| MailError::Api(ApiError::not_found("Bot")))?;
+                    (id, b)
+                }
+                None => (
+                    "steve".to_string(),
+                    ("Steve".to_string(), String::new(), String::new()),
+                ),
+            };
+            let st = repo::settings(c, &thread.connection_id)?.unwrap_or_default();
+            let address = steve_store::connections::config(c, &thread.connection_id)?
+                .and_then(|config| {
+                    config
+                        .get("address")
+                        .and_then(Value::as_str)
+                        .map(String::from)
+                })
+                .unwrap_or_default();
+
+            let gathering::Personal {
+                anchors,
+                cards_text,
+                items,
+            } = gathering::personal(c, &viewer, who, &orig, q)?;
+            let gathering::Related {
+                hits,
+                query,
+                semantic_down,
+            } = gathering::related(c, &viewer, store, &orig, &anchors, now)?;
+            let context = gathering::thread(c, &thread.id)?;
+            let mine = mailbox.my_addrs.clone();
+            Ok(Gathered {
+                parts: PromptParts {
+                    bot_name: bot.0,
+                    bot_role: bot.1,
+                    bot_rules: bot.2,
+                    address,
+                    duty: st.duty,
+                    signature: st.signature,
+                    cards: cards_text,
+                    items,
+                    knowledge: with_down_note(render_hits(&hits), semantic_down),
+                    context,
+                    replying_to: line_of(&orig).replace('\n', "；"),
+                    instruction: q.instruction.clone().unwrap_or_default(),
+                },
+                orig,
+                mine,
+                hits,
+                query,
+                author,
+                connection_id: thread.connection_id.clone(),
+                thread_subject: thread.subject.clone(),
+            })
+        })
     }
 
     /// A quick draft for a thread (≤90 s): prompt → model → server-side recipients and subject →

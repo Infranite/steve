@@ -563,7 +563,7 @@ pub fn holdings_of(c: &mut impl Read, viewer: &Viewer, p: &Party) -> ApiResult<H
 pub fn holdings(m: &Modules, who: &Caller, id: &str) -> ApiResult<Holdings> {
     let (viewer, me) = super::service::start(m, who)?;
     let id = if id == "me" { me.id.as_str() } else { id };
-    m.store.read(|c| {
+    m.store.read::<_, steve_store::StoreError>(|c| {
         Ok((|| {
             let p = super::service::own_party_in(c, &viewer, id, "contact", "联系人", false)?;
             holdings_of(c, &viewer, &p)
@@ -600,7 +600,8 @@ pub fn unowned_in(c: &mut impl Read, ws: &str) -> ApiResult<Vec<ObjectInfo>> {
 /// `GET /stewards/unowned`.
 pub fn unowned(m: &Modules, who: &Caller) -> ApiResult<Vec<ObjectInfo>> {
     super::service::start(m, who)?;
-    m.store.read(|c| Ok(unowned_in(c, &who.ws)))?
+    m.store
+        .read::<_, steve_store::StoreError>(|c| Ok(unowned_in(c, &who.ws)))?
 }
 
 /// `GET /stewards/:type/:id`.
@@ -611,7 +612,7 @@ pub fn list_object(
     id: &str,
 ) -> ApiResult<ObjectStewards> {
     super::service::start(m, who)?;
-    m.store.read(|c| {
+    m.store.read::<_, steve_store::StoreError>(|c| {
         Ok((|| {
             let o = own_object(c, &who.ws, object_type, id)?;
             object_stewards(c, &who.ws, o)
@@ -758,7 +759,7 @@ pub fn set_from(
     let role = check_role(b.role.as_deref())?;
     // the preview line is stored with the changeset: zh-CN (changes::stored)
     let (o, plan, person) = changes::stored(|| {
-        m.store.read(|c| {
+        m.store.read::<_, steve_store::StoreError>(|c| {
             Ok((|| {
                 let o = own_object(c, &who.ws, object_type, id)?;
                 let p = person(c, &viewer, b.person_id.trim())?;
@@ -806,7 +807,9 @@ pub fn set_from(
         })?
     })?;
     let undo = record(m, who, &o, &person.id, plan, origin)?;
-    let now = m.store.read(|c| Ok(object_stewards(c, &who.ws, o)))??;
+    let now = m
+        .store
+        .read::<_, steve_store::StoreError>(|c| Ok(object_stewards(c, &who.ws, o)))??;
     Ok(Changed {
         ok: true,
         undo,
@@ -825,7 +828,7 @@ pub fn remove(
     let (_, me) = super::service::start(m, who)?;
     let role = check_role(q.role.as_deref())?;
     let (o, plan, href) = changes::stored(|| {
-        m.store.read(|c| {
+        m.store.read::<_, steve_store::StoreError>(|c| {
             Ok((|| {
                 let o = own_object(c, &who.ws, object_type, id)?;
                 let rows = of_object(c, &who.ws, object_type, id)?;
@@ -870,7 +873,9 @@ pub fn remove(
         })?
     })?;
     let undo = record(m, who, &o, &href, plan, Origin::default())?;
-    let now = m.store.read(|c| Ok(object_stewards(c, &who.ws, o)))??;
+    let now = m
+        .store
+        .read::<_, steve_store::StoreError>(|c| Ok(object_stewards(c, &who.ws, o)))??;
     Ok(Changed {
         ok: true,
         undo,

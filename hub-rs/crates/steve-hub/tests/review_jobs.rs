@@ -237,7 +237,7 @@ fn seed_item(s: &Store) -> String {
 }
 fn snapshot(s: &Store, item: &str) -> Value {
     let (summary, detail) = s
-        .read(|c| {
+        .read::<_, steve_store::StoreError>(|c| {
             let day = steve_stats::day(steve_store::now(), None);
             let query = steve_stats::metrics::Query {
                 workspace_id: "default".into(),

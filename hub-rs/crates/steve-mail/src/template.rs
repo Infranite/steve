@@ -91,15 +91,14 @@ pub fn install(
     cx.store().write(|tx| -> FlowResult<Option<String>> {
         let mut st = sources::settings(tx, ws, connection_id)?;
         if st.triage_bot.is_none() {
-            let has_mail_bot = steve_store::BotRows(tx)
-                .local(ws, MAIL_BOT)?
-                .is_some_and(|(_, enabled)| enabled);
+            let has_mail_bot = steve_store::bots::scoped_bot(tx, ws, MAIL_BOT)?
+                && steve_store::bots::bot_enabled(tx, MAIL_BOT)? == Some(true);
             if has_mail_bot {
                 st.triage_bot = Some(MAIL_BOT.into());
                 sources::save(tx, &st, now)?;
             }
         }
-        if steve_store::FlowRows(tx).has_origin(ws, ORIGIN)? {
+        if steve_store::flow_repo::has_origin(tx, ws, ORIGIN)? {
             return Ok(None);
         }
         let id = flows::create(

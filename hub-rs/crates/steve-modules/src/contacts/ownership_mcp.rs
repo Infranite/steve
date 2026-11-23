@@ -139,7 +139,7 @@ pub fn whois(m: &Modules, cx: &McpCx, query: &str) -> ApiResult<String> {
         return Err(ApiError::rule("Give a handle, a name or an id."));
     }
     let viewer = viewer(m, cx)?;
-    m.store.read(|c| Ok((|| {
+    m.store.read::<_, steve_store::StoreError>(|c| Ok((|| {
         let mut found = matches(c, &viewer, q)?;
         let more = found.len().saturating_sub(WHOIS_LIMIT);
         found.truncate(WHOIS_LIMIT);
@@ -162,7 +162,7 @@ pub fn whois(m: &Modules, cx: &McpCx, query: &str) -> ApiResult<String> {
 pub fn holdings(m: &Modules, cx: &McpCx, person: &str) -> Result<String, String> {
     let viewer = viewer(m, cx).map_err(|e| e.to_string())?;
     m.store
-        .read(|c| {
+        .read::<_, steve_store::StoreError>(|c| {
             Ok((|| {
                 let p = resolve_person(c, &viewer, person)?;
                 let h = st::holdings_of(c, &viewer, &p)?;
@@ -271,7 +271,7 @@ pub fn propose(
     }
     let found = m
         .store
-        .read(|c| {
+        .read::<_, steve_store::StoreError>(|c| {
             Ok((|| {
                 // a bot's account and the bot party itself are one thing: the party is what gets a 负责人
                 let mut found = matches(c, &viewer, q)?;

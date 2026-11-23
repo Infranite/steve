@@ -70,7 +70,7 @@ fn a_session_gets_the_entries_its_bot_has_switched_on() {
         })
         .unwrap();
     t.store
-        .read(|c| {
+        .read::<_, steve_store::StoreError>(|c| {
             let got: Vec<String> = mcp::Servers(c)
                 .enabled_for_session("s_dev")?
                 .into_iter()
@@ -104,7 +104,7 @@ fn a_session_gets_the_entries_its_bot_has_switched_on() {
         })
         .unwrap();
     t.store
-        .read(|c| {
+        .read::<_, steve_store::StoreError>(|c| {
             let got: Vec<String> = mcp::Servers(c)
                 .enabled_for_session("s_dev")?
                 .into_iter()

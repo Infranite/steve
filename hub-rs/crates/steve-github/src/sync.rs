@@ -13,13 +13,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_modules::ApiError;
 use steve_modules::accounts::connections::Health;
-use steve_store::{Tx, uid};
+use steve_store::uid;
 
 use crate::GitHub;
 use crate::events::{Actor, SignalEvent};
 use crate::link;
-use crate::repo::{self, CheckRow, IssueRow, PrRow, RepoRow};
 use crate::repos::Settings;
+use steve_store::github::CheckRow;
+use steve_store::github::IssueRow;
+use steve_store::github::PrRow;
+use steve_store::github::RepoRow;
 
 /// Where a change came from (stored with a delivery as JSON: `{"app":{"ws":…}}`, …).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -329,8 +332,9 @@ impl GitHub {
                             Outcome::ignored(Some(ws), None, "没有安装编号")
                         };
                     }
-                    Some(i) => match self.store().reader(|c| {
-                        repo::installation_connections(c, ws, i).map_err(ApiError::from)
+                    Some(i) => match self.store().read(|c| {
+                        steve_store::connections::installation_connections(c, ws, i)
+                            .map_err(ApiError::from)
                     }) {
                         Ok(v) if !v.is_empty() => (ws.clone(), v),
                         Ok(_) => {
@@ -344,7 +348,7 @@ impl GitHub {
             Source::Poll { repo_id } => {
                 match self
                     .store()
-                    .reader(|c| repo::repo_get(c, repo_id).map_err(ApiError::from))
+                    .read(|c| steve_store::github::repo_get(c, repo_id).map_err(ApiError::from))
                 {
                     Ok(Some(r)) => (r.workspace_id, vec![r.connection_id]),
                     Ok(None) => return Outcome::ignored(None, None, "仓库已经取消关联"),
@@ -369,7 +373,7 @@ impl GitHub {
         };
         let repo = match self
             .store()
-            .reader(|c| repo::repo_by_gh(c, &ws, gh_id).map_err(ApiError::from))
+            .read(|c| steve_store::github::repo_by_gh(c, &ws, gh_id).map_err(ApiError::from))
         {
             Ok(Some(r)) if conns.contains(&r.connection_id) => r,
             Ok(_) => return Outcome::ignored(Some(&ws), None, "这个仓库没有关联"),
@@ -389,16 +393,12 @@ impl GitHub {
         let fetched = fetched.unwrap_or_default();
         let now = self.now();
         let flow = self.flow();
-        let res = self.store().transaction(|tx| {
+        let res = self.store().write(|tx| {
             // Re-read under the writer lock: a settings change while fetching must win.
-            let Some(repo) =
-                repo::repo_get(tx, &repo.id)?.filter(|r| r.connection_id == repo.connection_id)
+            let Some(repo) = steve_store::github::repo_get(tx, &repo.id)?
+                .filter(|r| r.connection_id == repo.connection_id)
             else {
-                return Ok((
-                    Outcome::ignored(Some(&ws), None, "这个仓库没有关联"),
-                    Effects::default(),
-                    None,
-                ));
+                return Ok((Outcome::ignored(Some(&ws), None, "这个仓库没有关联"), None));
             };
             let staged = match delivery {
                 Some(id) => {
@@ -409,7 +409,6 @@ impl GitHub {
             if !repo.enabled {
                 return Ok((
                     Outcome::ignored(Some(&ws), Some(&repo.id), "这个仓库已停用"),
-                    Effects::default(),
                     staged,
                 ));
             }
@@ -419,33 +418,23 @@ impl GitHub {
                 ..Default::default()
             };
             if from_hook {
-                repo::set_last_delivery(tx, &repo.id, now)?;
+                steve_store::github::set_last_delivery(tx, &repo.id, now)?;
             }
             self.dispatch(tx, &repo, event, payload, fetched, now, &mut fx)?;
             self.ask_merges(tx, &repo, &fx)?;
             crate::after::emit(tx, &repo.workspace_id, &repo.connection_id, &mut fx)?;
             let mut out = Outcome::ok(&ws, Some(&repo.id));
             out.error = fx.note.clone();
-            Ok::<_, ApiError>((out, fx, staged))
+            Ok::<_, ApiError>((out, staged))
         });
         match res {
-            Ok((out, fx, staged)) => {
+            Ok((out, staged)) => {
                 if let (Some(commit), Some(flow)) = (staged, flow.as_ref()) {
                     commit.dispatch(flow, &ws);
                 }
-                self.after_commit(&ws, &repo.connection_id, fx).await;
                 out
             }
             Err(e) => Outcome::failed(Some(&ws), Some(&repo.id), e.to_string()),
-        }
-    }
-
-    /// Publishes the `gh` notices. The items to finish and the signals went to the outbox in the
-    /// transaction ([`crate::after`]).
-    pub(crate) async fn after_commit(&self, ws: &str, _connection: &str, fx: Effects) {
-        let notifier = self.notifier();
-        for id in &fx.gh {
-            notifier.gh(ws, id);
         }
     }
 
@@ -455,17 +444,11 @@ impl GitHub {
             return Outcome::ok(ws, None);
         };
         let now = self.now();
-        let r = self.store().transaction(|tx| {
-            let conns: Vec<String> = tx
-                .prepare_cached(
-                    "SELECT id FROM connections WHERE workspace_id = ? AND adapter = 'github_app'
-                     AND CAST(json_extract(config, '$.app_id') AS INTEGER) = ?",
-                )?
-                .query_map(rusqlite::params![ws, app_id], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?;
+        let r = self.store().write(|tx| {
+            let conns = steve_store::connections::app_connections(tx, ws, app_id)?;
             for c in conns {
-                for r in repo::repos_of_connection(tx, &c)? {
-                    repo::set_last_delivery(tx, &r.id, now)?;
+                for r in steve_store::github::repos_of_connection(tx, &c)? {
+                    steve_store::github::set_last_delivery(tx, &r.id, now)?;
                 }
             }
             Ok::<_, ApiError>(())
@@ -478,10 +461,10 @@ impl GitHub {
 
     fn touch_connections(&self, ws: &str, conns: &[String]) -> Outcome {
         let now = self.now();
-        let r = self.store().transaction(|tx| {
+        let r = self.store().write(|tx| {
             for c in conns {
-                for r in repo::repos_of_connection(tx, c)? {
-                    repo::set_last_delivery(tx, &r.id, now)?;
+                for r in steve_store::github::repos_of_connection(tx, c)? {
+                    steve_store::github::set_last_delivery(tx, &r.id, now)?;
                 }
             }
             Ok::<_, ApiError>(())
@@ -525,10 +508,10 @@ impl GitHub {
             self.forget_available(c);
         }
         let now = self.now();
-        let res = self.store().transaction(|tx| {
+        let res = self.store().write(|tx| {
             let mut fx = Effects::default();
             for c in conns {
-                for mut r in repo::repos_of_connection(tx, c)? {
+                for mut r in steve_store::github::repos_of_connection(tx, c)? {
                     if target.as_ref().is_some_and(|t| !t.contains(&r.gh_id)) {
                         continue;
                     }
@@ -549,16 +532,16 @@ impl GitHub {
                         r.poll_state["lost_access"] = json!(true);
                     }
                     r.updated = now;
-                    repo::update_repo(tx, &r)?;
+                    steve_store::github::update_repo(tx, &r)?;
                     fx.gh.insert(r.id.clone());
                 }
             }
             let first = conns.first().map(String::as_str).unwrap_or_default();
             crate::after::emit(tx, ws, first, &mut fx)?;
-            Ok::<_, ApiError>(fx)
+            Ok::<_, ApiError>(())
         });
         match res {
-            Ok(fx) => {
+            Ok(()) => {
                 if event == "installation" {
                     for c in conns {
                         if let Ok(cx) = self.connections().cx(ws, c) {
@@ -571,8 +554,6 @@ impl GitHub {
                         }
                     }
                 }
-                let first = conns.first().cloned().unwrap_or_default();
-                self.after_commit(ws, &first, fx).await;
                 Outcome::ok(ws, None)
             }
             Err(e) => Outcome::failed(Some(ws), None, e.to_string()),
@@ -644,7 +625,7 @@ impl GitHub {
     #[allow(clippy::too_many_arguments)]
     fn dispatch(
         &self,
-        tx: &Tx,
+        tx: &mut steve_store::W<'_>,
         repo: &RepoRow,
         event: &str,
         p: &Value,
@@ -767,8 +748,8 @@ impl GitHub {
     }
 
     /// The bot login of the repo's connection (`<slug>[bot]`) and its kind.
-    fn conn_login(&self, c: &rusqlite::Connection, repo: &RepoRow) -> (String, String) {
-        repo::connection_label(c, &repo.connection_id)
+    fn conn_login(&self, c: &mut impl steve_store::Read, repo: &RepoRow) -> (String, String) {
+        steve_store::connections::connection_label(c, &repo.connection_id)
             .ok()
             .flatten()
             .map(|(a, h, _)| (a, h))
@@ -781,7 +762,7 @@ impl GitHub {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn sync_pr(
         &self,
-        tx: &Tx,
+        tx: &mut steve_store::W<'_>,
         repo: &RepoRow,
         v: &Value,
         action: &str,
@@ -794,7 +775,7 @@ impl GitHub {
         let Some(number) = v["number"].as_i64() else {
             return Ok(None);
         };
-        let prev = repo::pr_by_number(tx, &repo.id, number)?;
+        let prev = steve_store::github::pr_by_number(tx, &repo.id, number)?;
         // processed late, an older view than the one stored (a newer delivery came first) changes
         // nothing: GitHub's `updated_at` orders them
         if fx.late
@@ -818,10 +799,12 @@ impl GitHub {
             _ if adapter == crate::adapters::github_app::ID && author == bot && !bot.is_empty() => {
                 "steve".into()
             }
-            _ if repo::is_user_handle(tx, &repo.workspace_id, &author)? => "me".into(),
+            _ if steve_store::accounts::is_user_handle(tx, &repo.workspace_id, &author)? => {
+                "me".into()
+            }
             _ => "other".into(),
         };
-        let checks = repo::checks_for_sha(tx, &repo.id, &head_sha)?;
+        let checks = steve_store::github::checks_for_sha(tx, &repo.id, &head_sha)?;
         let checks_state = checks_state(&checks).0.to_string();
         let mut review_state = prev
             .as_ref()
@@ -887,10 +870,10 @@ impl GitHub {
             row.link_source = Some((*source).into());
         }
         if prev.as_ref() != Some(&row) {
-            repo::upsert_pr(tx, &row)?;
+            steve_store::github::upsert_pr(tx, &row)?;
             fx.gh.insert(row.id.clone());
             if let Some(item) = &row.item_id {
-                tx.publish(steve_types::DomainEvent::from(
+                tx.emit(steve_types::DomainEvent::from(
                     steve_types::WorkEvent::Item {
                         ws: row.workspace_id.clone().into(),
                         id: {
@@ -954,7 +937,7 @@ impl GitHub {
         let newly = prev.as_ref().is_some_and(|p| p.review_state != "requested") || fresh;
         if row.state == "open" && newly {
             for login in requested {
-                if repo::is_user_handle(tx, &repo.workspace_id, login)? {
+                if steve_store::accounts::is_user_handle(tx, &repo.workspace_id, login)? {
                     let summary = format!(
                         "{} 请你评审 PR #{}：{}",
                         row.author_login, row.number, row.title
@@ -1016,7 +999,7 @@ impl GitHub {
     /// belong to an item.
     fn review(
         &self,
-        tx: &Tx,
+        tx: &mut steve_store::W<'_>,
         repo: &RepoRow,
         mut pr: PrRow,
         p: &Value,
@@ -1036,10 +1019,10 @@ impl GitHub {
         if new_state != pr.review_state {
             pr.review_state = new_state;
             pr.updated = pr.updated.max(now);
-            repo::upsert_pr(tx, &pr)?;
+            steve_store::github::upsert_pr(tx, &pr)?;
             fx.gh.insert(pr.id.clone());
             if let Some(item) = &pr.item_id {
-                tx.publish(steve_types::DomainEvent::from(
+                tx.emit(steve_types::DomainEvent::from(
                     steve_types::WorkEvent::Item {
                         ws: pr.workspace_id.clone().into(),
                         id: {
@@ -1095,7 +1078,7 @@ impl GitHub {
     /// Comment bodies are not stored.
     fn comment(
         &self,
-        tx: &Tx,
+        tx: &mut steve_store::W<'_>,
         repo: &RepoRow,
         p: &Value,
         fx: &mut Effects,
@@ -1106,7 +1089,7 @@ impl GitHub {
         let Some(n) = p["issue"]["number"].as_i64() else {
             return Ok(());
         };
-        let Some(pr) = repo::pr_by_number(tx, &repo.id, n)? else {
+        let Some(pr) = steve_store::github::pr_by_number(tx, &repo.id, n)? else {
             return Ok(());
         };
         let (_, bot) = self.conn_login(tx, repo);
@@ -1148,7 +1131,7 @@ impl GitHub {
     /// Steve: `github.review_comment`, and the comment for the item.
     fn review_comment(
         &self,
-        tx: &Tx,
+        tx: &mut steve_store::W<'_>,
         repo: &RepoRow,
         p: &Value,
         fx: &mut Effects,
@@ -1156,7 +1139,7 @@ impl GitHub {
         let Some(n) = p["pull_request"]["number"].as_i64() else {
             return Ok(());
         };
-        let Some(pr) = repo::pr_by_number(tx, &repo.id, n)? else {
+        let Some(pr) = steve_store::github::pr_by_number(tx, &repo.id, n)? else {
             return Ok(());
         };
         let (_, bot) = self.conn_login(tx, repo);
@@ -1204,7 +1187,7 @@ impl GitHub {
     /// was linked.
     fn sync_issue(
         &self,
-        tx: &Tx,
+        tx: &mut steve_store::W<'_>,
         repo: &RepoRow,
         v: &Value,
         sender: &Value,
@@ -1217,7 +1200,7 @@ impl GitHub {
         if !v["pull_request"].is_null() {
             return Ok(());
         }
-        let prev = repo::issue_by_number(tx, &repo.id, number)?;
+        let prev = steve_store::github::issue_by_number(tx, &repo.id, number)?;
         let labels: Vec<String> = v["labels"]
             .as_array()
             .map(|a| {
@@ -1246,7 +1229,7 @@ impl GitHub {
             updated: ts(&v["updated_at"]).unwrap_or(now),
         };
         if prev.as_ref() != Some(&row) {
-            repo::upsert_issue(tx, &row)?;
+            steve_store::github::upsert_issue(tx, &row)?;
             fx.gh.insert(row.id.clone());
         }
         if prev.is_none() && row.state == "open" && created >= repo.created {
@@ -1275,7 +1258,7 @@ impl GitHub {
     /// Check rows that may span commits (a `check_run` event plus whatever came with it).
     fn write_checks(
         &self,
-        tx: &Tx,
+        tx: &mut steve_store::W<'_>,
         repo: &RepoRow,
         rows: Vec<CheckRow>,
         branch: Option<&str>,
@@ -1297,7 +1280,7 @@ impl GitHub {
     #[allow(clippy::too_many_arguments)]
     fn write_checks_for(
         &self,
-        tx: &Tx,
+        tx: &mut steve_store::W<'_>,
         repo: &RepoRow,
         sha: &str,
         rows: Vec<CheckRow>,
@@ -1308,7 +1291,7 @@ impl GitHub {
         if sha.is_empty() {
             return Ok(());
         }
-        let before = repo::checks_for_sha(tx, &repo.id, sha)?;
+        let before = steve_store::github::checks_for_sha(tx, &repo.id, sha)?;
         for r in &rows {
             // Unchanged rows are not rewritten (no churn on every poll).
             let same = before.iter().any(|b| {
@@ -1320,10 +1303,10 @@ impl GitHub {
                     && (r.job_id.is_none() || b.job_id == r.job_id)
             });
             if !same {
-                repo::upsert_check(tx, r)?;
+                steve_store::github::upsert_check(tx, r)?;
             }
         }
-        let after = repo::checks_for_sha(tx, &repo.id, sha)?;
+        let after = steve_store::github::checks_for_sha(tx, &repo.id, sha)?;
         let state = checks_state(&after).0;
         let outcome = settled(&after);
         let fresh = outcome.is_some() && outcome != settled(&before);
@@ -1347,7 +1330,7 @@ impl GitHub {
             Some("failure") => format!("checks:{scope}:{sha}:failure:{fail_key}"),
             _ => format!("checks:{scope}:{sha}:success"),
         };
-        let prs: Vec<PrRow> = repo::prs_with_head(tx, &repo.id, sha)?
+        let prs: Vec<PrRow> = steve_store::github::prs_with_head(tx, &repo.id, sha)?
             .into_iter()
             .filter(|p| p.state == "open")
             .collect();
@@ -1355,9 +1338,9 @@ impl GitHub {
             if pr.checks_state != state {
                 pr.checks_state = state.into();
                 pr.updated = pr.updated.max(now);
-                repo::upsert_pr(tx, &pr)?;
+                steve_store::github::upsert_pr(tx, &pr)?;
                 if let Some(item) = &pr.item_id {
-                    tx.publish(steve_types::DomainEvent::from(
+                    tx.emit(steve_types::DomainEvent::from(
                         steve_types::WorkEvent::Item {
                             ws: pr.workspace_id.clone().into(),
                             id: {

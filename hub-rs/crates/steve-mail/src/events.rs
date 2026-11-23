@@ -190,26 +190,13 @@ pub fn classify(reply_to_mine: bool, vip: bool, attachment: bool) -> (String, Ve
     (main, also)
 }
 
-/// Where SSE `{type:"mail", id:<thread>, ws}` goes. The integrator adds the variant to `BusEvent`
-/// and publishes it; [`crate::Mail`] already coalesces a sync's changes to one per thread.
-pub trait MailNotify: Send + Sync {
-    fn thread(&self, ws: &str, thread_id: &str);
-}
-
-/// Drops notifications.
-pub struct NoNotify;
-
-impl MailNotify for NoNotify {
-    fn thread(&self, _: &str, _: &str) {}
-}
-
-/// Adapts a closure.
-pub struct FnNotify<F>(pub F);
-
-impl<F: Fn(&str, &str) + Send + Sync> MailNotify for FnNotify<F> {
-    fn thread(&self, ws: &str, thread_id: &str) {
-        (self.0)(ws, thread_id)
-    }
+pub(crate) fn emit_thread(w: &mut steve_store::W<'_>, ws: &str, id: &str) {
+    w.emit(steve_types::DomainEvent::from(
+        steve_types::IntegrationsEvent::Mail {
+            ws: ws.into(),
+            id: id.to_owned().into(),
+        },
+    ));
 }
 
 #[cfg(test)]

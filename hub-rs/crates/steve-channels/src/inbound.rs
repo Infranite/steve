@@ -690,8 +690,9 @@ impl Channels {
     ) -> ChannelResult<()> {
         let store = self.store();
         // What the rules look at; the event carries it too, for flows converted from rules.
-        let rf = store
-            .read(|r| Ok(store.reader(|c| rule_facts(c, r, ws, &facts, &inbound, &msg))))??;
+        let rf = store.read::<_, steve_store::StoreError>(|r| {
+            Ok(store.reader(|c| rule_facts(c, r, ws, &facts, &inbound, &msg)))
+        })??;
 
         // Step 2, second half: the signal.
         // a message without a provider id is its event by the Hub's message id

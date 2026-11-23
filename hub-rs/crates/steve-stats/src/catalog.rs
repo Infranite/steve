@@ -309,7 +309,7 @@ mod tests {
             "my-local-model",
         ] {
             let q = store
-                .read(|c| {
+                .read::<_, steve_store::StoreError>(|c| {
                     Ok(crate::PriceBook::new(vec![])
                         .with_catalog(c, None, [m])?
                         .quote(m, "2026-11-05"))

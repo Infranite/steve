@@ -1063,11 +1063,18 @@ async fn a_sender_known_by_an_alias_lands_on_the_contact_holding_it() {
 async fn a_sender_in_a_declared_system_lands_on_the_contact_holding_its_alias() {
     use steve_channels::HandleRef;
     use steve_channels::channel::Sender;
-    use steve_modules::accounts::{Hints, identify, repo};
+    use steve_modules::accounts::{Hints, identify};
     let h = setup();
     h.env
         .store()
-        .transaction(|tx| repo::upsert_declared(tx, "probe_internal", "内部账号", "probe"))
+        .write(|w| {
+            steve_store::Systems(w).upsert_declared(
+                "probe_internal",
+                "内部账号",
+                "probe",
+                steve_store::now(),
+            )
+        })
         .expect("declared");
     let alice = h
         .env

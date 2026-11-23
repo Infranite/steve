@@ -29,6 +29,12 @@ impl ToSql for V<'_> {
         Ok(match self.0 {
             Value::Bool(v) => v.map_or(NULL, |b| (b as i64).into()),
             Value::BigInt(v) => v.map_or(NULL, Into::into),
+            // sea-query uses u64 for LIMIT and OFFSET. SQLite binds signed BIGINT.
+            Value::BigUnsigned(v) => v
+                .map(i64::try_from)
+                .transpose()
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?
+                .map_or(NULL, Into::into),
             Value::Double(v) => v.map_or(NULL, Into::into),
             Value::String(v) => v.as_deref().map_or(NULL, |s| {
                 ToSqlOutput::Borrowed(ValueRef::Text(s.as_bytes()))

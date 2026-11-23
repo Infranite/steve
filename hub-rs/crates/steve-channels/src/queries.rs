@@ -221,38 +221,41 @@ impl ConnQueries {
         from: &HandleRef,
         want_system: &str,
     ) -> ChannelResult<Option<HandleRef>> {
-        Ok(self.channels.store().read(|r| {
-            let Some(sys) = Systems(r).get(&self.ws, &from.system)? else {
-                return Ok(None);
-            };
-            let Some(want) = Systems(r).get(&self.ws, want_system)? else {
-                return Ok(None);
-            };
-            let mut accounts = Accounts(r);
-            let mut account = None;
-            for raw in std::iter::once(&from.handle).chain(&from.extra) {
-                let Some(h) = handles::normalize(&sys, raw) else {
-                    continue;
+        Ok(self
+            .channels
+            .store()
+            .read::<_, steve_store::StoreError>(|r| {
+                let Some(sys) = Systems(r).get(&self.ws, &from.system)? else {
+                    return Ok(None);
                 };
-                account = accounts.by_handle(&self.ws, &sys.family, &h.handle)?;
-                if account.is_some() {
-                    break;
+                let Some(want) = Systems(r).get(&self.ws, want_system)? else {
+                    return Ok(None);
+                };
+                let mut accounts = Accounts(r);
+                let mut account = None;
+                for raw in std::iter::once(&from.handle).chain(&from.extra) {
+                    let Some(h) = handles::normalize(&sys, raw) else {
+                        continue;
+                    };
+                    account = accounts.by_handle(&self.ws, &sys.family, &h.handle)?;
+                    if account.is_some() {
+                        break;
+                    }
                 }
-            }
-            let Some(account) = account else {
-                return Ok(None);
-            };
-            let Some(owner) = accounts.get(&account)? else {
-                return Ok(None);
-            };
-            let handle = accounts.preferred_handle(
-                &self.ws,
-                &owner.party_id,
-                &want.family,
-                &want.id,
-                Some(&self.conn),
-            )?;
-            Ok(handle.map(|h| HandleRef::new(want.id, h)))
-        })?)
+                let Some(account) = account else {
+                    return Ok(None);
+                };
+                let Some(owner) = accounts.get(&account)? else {
+                    return Ok(None);
+                };
+                let handle = accounts.preferred_handle(
+                    &self.ws,
+                    &owner.party_id,
+                    &want.family,
+                    &want.id,
+                    Some(&self.conn),
+                )?;
+                Ok(handle.map(|h| HandleRef::new(want.id, h)))
+            })?)
     }
 }

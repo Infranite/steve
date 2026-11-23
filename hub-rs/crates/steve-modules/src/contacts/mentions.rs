@@ -118,7 +118,8 @@ fn query(q: Q) -> ApiResult<String> {
 pub fn mention_options(m: &Modules, who: &Caller, q: Q) -> ApiResult<MentionOptions> {
     let (viewer, _) = start(m, who)?;
     let q = query(q)?;
-    m.store.read(|r| Ok(mention_options_in(r, &viewer, &q)))?
+    m.store
+        .read::<_, steve_store::StoreError>(|r| Ok(mention_options_in(r, &viewer, &q)))?
 }
 
 fn mention_options_in(c: &mut impl Read, viewer: &Viewer, q: &str) -> ApiResult<MentionOptions> {
@@ -168,7 +169,8 @@ pub fn search(m: &Modules, who: &Caller, q: Q) -> ApiResult<SearchResult> {
             teams: vec![],
         });
     }
-    m.store.read(|r| Ok(search_in(r, &viewer, &q)))?
+    m.store
+        .read::<_, steve_store::StoreError>(|r| Ok(search_in(r, &viewer, &q)))?
 }
 
 fn search_in(c: &mut impl Read, viewer: &Viewer, q: &str) -> ApiResult<SearchResult> {

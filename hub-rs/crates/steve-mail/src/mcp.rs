@@ -15,7 +15,6 @@
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::outbound::{self, Audience, CheckCx, CheckResult};
@@ -234,19 +233,19 @@ fn scope(mail: &Mail, cx: &McpCx) -> Result<(Viewer, Vec<ThreadRow>), String> {
         return Err(NOT_ABOUT.into());
     };
     let m = mail.modules();
-    let (viewer, threads) = m
+    let viewer = m
         .store
-        .read(|r| {
-            let mut viewer = steve_knowledge::context::item_viewer(r, &cx.ws, item)?;
-            if viewer.user.is_empty() && !cx.user.is_empty() {
-                viewer = Viewer::bare(&cx.ws, &cx.user);
+        .read(|c| -> MailResult<Viewer> {
+            let v = steve_knowledge::context::item_viewer(c, &cx.ws, item)?;
+            if v.user.is_empty() && !cx.user.is_empty() {
+                return Ok(Viewer::bare(&cx.ws, &cx.user));
             }
-            Ok(m.store.reader(|c| {
-                let threads = visible_item_threads(c, &viewer, item)?;
-                Ok::<_, crate::error::MailError>((viewer, threads))
-            }))
+            Ok(v)
         })
-        .map_err(internal)?
+        .map_err(internal)?;
+    let threads = m
+        .store
+        .read(|c| visible_item_threads(c, &viewer, item))
         .map_err(internal)?;
     if threads.is_empty() {
         return Err(NOT_ABOUT.into());
@@ -265,14 +264,6 @@ fn pick<'a>(threads: &'a [ThreadRow], id: Option<&str>) -> Result<&'a ThreadRow,
     }
 }
 
-fn session_cwd(c: &Connection, ws: &str, session: &str) -> MailResult<Option<String>> {
-    Ok(
-        c.prepare_cached("SELECT cwd FROM sessions WHERE id = ? AND workspace_id = ?")?
-            .query_row([session, ws], |r| r.get(0))
-            .optional()?,
-    )
-}
-
 fn cwd_of(mail: &Mail, cx: &McpCx) -> Result<PathBuf, String> {
     let s = cx
         .session_id
@@ -280,7 +271,7 @@ fn cwd_of(mail: &Mail, cx: &McpCx) -> Result<PathBuf, String> {
         .ok_or("This tool needs a session with a working directory.")?;
     mail.modules()
         .store
-        .reader(|c| session_cwd(c, &cx.ws, s))
+        .read(|c| steve_store::session_repo::cwd(c, &cx.ws, s))
         .map_err(internal)?
         .map(PathBuf::from)
         .ok_or_else(|| "This tool needs a session with a working directory.".into())
@@ -316,26 +307,6 @@ fn date_line(ms: i64) -> String {
 }
 
 /// The unsent draft of this item for this thread (one per item and thread).
-fn item_draft(c: &Connection, item: &str, thread: &str) -> MailResult<Option<DraftRow>> {
-    let id: Option<String> = c
-        .prepare_cached(
-            "SELECT id FROM mail_drafts WHERE item_id = ? AND thread_id = ?
-               AND status IN ('draft', 'pending', 'approved', 'sending', 'failed', 'unknown')
-             ORDER BY created DESC, rowid DESC LIMIT 1",
-        )?
-        .query_row([item, thread], |r| r.get(0))
-        .optional()?;
-    match id {
-        Some(id) => repo::draft(c, &id),
-        None => Ok(None),
-    }
-}
-
-fn set_author(c: &Connection, id: &str, author: &str, session: Option<&str>) -> MailResult<()> {
-    c.prepare_cached("UPDATE mail_drafts SET author = ?, session_id = ? WHERE id = ?")?
-        .execute(params![author, session, id])?;
-    Ok(())
-}
 
 /// What the agent passed to `steve_mail_draft`.
 #[derive(Debug, Clone, Default)]
@@ -393,7 +364,7 @@ impl Mail {
         self.0
             .m
             .store
-            .reader(|c| -> MailResult<String> {
+            .read(|c| -> MailResult<String> {
                 let msgs = repo::thread_messages(c, &t.id)?;
                 // the budget goes to the newest messages first
                 let mut texts: Vec<String> = vec![String::new(); msgs.len()];
@@ -456,7 +427,7 @@ impl Mail {
                     }
                     out.push(b.join("\n"));
                 }
-                if let Some(d) = item_draft(c, &item, &t.id)? {
+                if let Some(d) = repo::item_draft(c, &item, &t.id)? {
                     out.push(format!(
                         "Your current draft for this thread: {} ({}).",
                         d.id,
@@ -481,7 +452,7 @@ impl Mail {
             .0
             .m
             .store
-            .reader(|c| self.own_attachment(c, &viewer, id.trim()))
+            .read(|c| self.own_attachment(c, &viewer, id.trim()))
             .ok()
             .is_some_and(|(_, m)| threads.iter().any(|t| t.id == m.thread_id));
         if !in_item {
@@ -511,9 +482,9 @@ impl Mail {
             .0
             .m
             .store
-            .reader(|c| -> MailResult<_> {
+            .read(|c| -> MailResult<_> {
                 let orig = drafts::reply_target(c, &thread.id)?;
-                let existing = item_draft(c, item, &thread.id)?;
+                let existing = repo::item_draft(c, item, &thread.id)?;
                 let sig = repo::settings(c, &thread.connection_id)?
                     .unwrap_or_default()
                     .signature;
@@ -582,31 +553,28 @@ impl Mail {
             .0
             .m
             .store
-            .read(|c| {
-                Ok((|| -> MailResult<Audience> {
-                    let mut au = Audience::default();
-                    let mut names = Vec::new();
-                    for r in to.iter().chain(cc.iter()) {
-                        let (party, internal) = audience_of(c, &cx.ws, &r.addr)?;
-                        au.external |= !internal;
-                        if let Some(p) = party {
-                            au.parties.push(p);
-                        }
-                        names.push(if r.name.is_empty() {
-                            r.addr.clone()
-                        } else {
-                            r.name.clone()
-                        });
+            .read(|c| -> MailResult<Audience> {
+                let mut au = Audience::default();
+                let mut names = Vec::new();
+                for r in to.iter().chain(cc.iter()) {
+                    let (party, internal) = audience_of(c, &cx.ws, &r.addr)?;
+                    au.external |= !internal;
+                    if let Some(p) = party {
+                        au.parties.push(p);
                     }
-                    au.description = format!(
-                        "邮件收件人：{}，{}",
-                        names.join("、"),
-                        if au.external { "外部" } else { "内部" }
-                    );
-                    Ok(au)
-                })())
+                    names.push(if r.name.is_empty() {
+                        r.addr.clone()
+                    } else {
+                        r.name.clone()
+                    });
+                }
+                au.description = format!(
+                    "邮件收件人：{}，{}",
+                    names.join("、"),
+                    if au.external { "外部" } else { "内部" }
+                );
+                Ok(au)
             })
-            .map_err(internal)?
             .map_err(internal)?;
         Ok(Prepared {
             who,
@@ -709,7 +677,7 @@ impl Mail {
             };
             return Ok(self.insert_pending(d, &check)?.id);
         };
-        let d = self.0.m.store.transaction(|tx| -> MailResult<DraftRow> {
+        let d = self.0.m.store.write(|tx| -> MailResult<DraftRow> {
             let mut d = repo::draft(tx, &existing.id)?
                 .ok_or_else(|| MailError::Api(ApiError::not_found("草稿")))?;
             if !["draft", "pending", "failed"].contains(&d.status.as_str()) {
@@ -731,21 +699,21 @@ impl Mail {
             d.session_id = cx.session_id.clone();
             d.content_hash = drafts::content_hash(&d);
             repo::update_draft_content(tx, &d, now)?;
-            set_author(tx, &d.id, &author, d.session_id.as_deref())?;
+            repo::set_author(tx, &d.id, &author, d.session_id.as_deref())?;
             repo::set_draft_error(tx, &d.id, None)?;
             // the old card expires, a new one opens for this version
             drafts::open_approval(tx, &mut d, &author, now)?;
             base::audit(
-                tx,
+                &tx.legacy(),
                 &d.workspace_id,
                 &author,
                 "mail_draft.update",
                 &d.id,
                 &json!({"mode": d.mode, "by": "steve_mail_draft"}),
             )?;
+            crate::events::emit_thread(tx, &d.workspace_id, &thread_id);
             Ok(d)
         })?;
-        self.0.notify.thread(&d.workspace_id, &thread_id);
         Ok(d.id)
     }
 }

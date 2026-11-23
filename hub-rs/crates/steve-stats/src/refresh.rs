@@ -35,7 +35,7 @@ impl Refresher {
         let t = now();
         let since = self.since;
         // Stay off the single-writer queue during idle polls; recheck under the write lock.
-        if !store.read(|r| {
+        if !store.read::<_, steve_store::StoreError>(|r| {
             Ok(ItemStats(r).has_dirty()?
                 || (since > 0 && DecisionReads(r).has_item_activity(since)?))
         })? {
