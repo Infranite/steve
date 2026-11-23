@@ -698,10 +698,10 @@ impl Core {
             }
             format!(" 标签：{}。", names.join("、"))
         };
-        let head = match &named {
+        let head = Self::unplaced_reply(&item).unwrap_or_else(|| match &named {
             Some(b) => format!("按你指定的，交给 {} Bot 了。", b.name),
             None => format!("好，交给 {} 了，做完请你验收。", self.bot_name(&item)),
-        };
+        });
         let people = match self.item_people(ws, user, &item.id, text, mentions) {
             Some(n) => format!(" {n}。"),
             None => String::new(),

@@ -1,6 +1,7 @@
 /* zh-CN strings for the "manage" namespace: the source text, byte-identical to the UI. Conventions: web/src/i18n/index.ts */
 export default {
   dispatch: {
+    chooseBot: "选择 Bot",
     recover: { bots: "查看 Bot 和 Team 设置", devices: "检查执行 Node" },
     requiredSpecialties: "必需专长",
     specialtyPlaceholder: "可选，用逗号分隔",

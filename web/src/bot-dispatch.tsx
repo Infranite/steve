@@ -1,8 +1,8 @@
 /* Bot Team configuration and per-Bot execution grants, scoped to the workspace they were loaded in. */
 import { useEffect, useId, useState } from "react"
 import { ArrowDownIcon, ArrowUpIcon, PlusIcon, RefreshCwIcon } from "lucide-react"
-import { modReq, type ModuleScope, type RItemDetail, type BotPlacementError } from "@/api"
-import type { BotProposal, PlacementExplanation, PlacementRejection } from "@/gen"
+import { modReq, type ModuleScope, type RItemDetail } from "@/api"
+import type { BotProposal, PlacementBlocked, PlacementExplanation, PlacementRejection } from "@/gen"
 import { hubBase } from "@/hub"
 import { useT } from "@/i18n"
 import { botName, refresh, st } from "@/store"
@@ -23,6 +23,7 @@ type Candidate = { id: string; name: string | null; state: "candidate" | "pendin
 type NodeList = { editable: boolean; bindings: string[]; candidates: Candidate[]; unavailable_bindings: number }
 export type ItemDispatch = {
   team: { id: string; name: string; source: "default" | "explicit" | "inherited" } | null
+  blocked?: PlacementBlocked | null
 }
 const msg = (e: unknown) => e instanceof Error ? e.message : String(e)
 const nodesPath = (id: string) => `/bots/${encodeURIComponent(id)}/execution-nodes`
@@ -210,24 +211,24 @@ export function PlacementWhy({ value, detail = false }: { value: PlacementExplan
   </div>
 }
 
-export function DispatchDetails({ dispatch, placement }: { dispatch?: RItemDetail["dispatch"]; placement?: PlacementExplanation }) {
+export function DispatchDetails({ dispatch, placement, unassigned }: { dispatch?: RItemDetail["dispatch"]; placement?: PlacementExplanation; unassigned?: boolean }) {
   const t = useT()
-  const team = dispatch?.team
-  if (!team && !placement) return null
+  const team = dispatch?.team, blocked = unassigned && dispatch?.blocked
+  if (!team && !placement && !blocked) return null
   return <div className="mt-3 flex flex-col gap-1 border-t pt-2 type-footnote text-muted-foreground" data-item-dispatch>
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
       {team && <><Badge>{team.name}</Badge><span>{t(`manage:dispatch.source.${team.source}`)}</span></>}
       {placement && <span>{botName(placement.bot)}</span>}
     </div>
     {placement && <PlacementWhy value={placement} detail />}
+    {blocked && <BlockedPlacement blocked={blocked} />}
   </div>
 }
 
-export function BlockedPlacement({ error }: { error: BotPlacementError }) {
+export function BlockedPlacement({ blocked }: { blocked: PlacementBlocked }) {
   const t = useT()
-  const { blocked } = error
   const reasons = [...new Set(blocked.rejected.map(b => b.reason))].filter(reason => reason !== blocked.reason)
-  const botSetup: PlacementRejection[] = ["bot", "no_bindings", "outside_team", "unauthorized"]
+  const botSetup: PlacementRejection[] = ["bot", "no_bindings", "no_candidates", "outside_team", "unauthorized"]
   const deviceSetup: PlacementRejection[] = ["offline", "harness", "model", "permission", "signin", "session_probe", "pending", "effort"]
   const fix = botSetup.includes(blocked.reason) ? "bots" : deviceSetup.includes(blocked.reason) ? "devices" : undefined
   return <div role="alert" className="rounded-lg bg-muted p-3 type-footnote" data-placement-blocked={blocked.reason}>

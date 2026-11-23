@@ -394,6 +394,125 @@ async fn thread_routing_api() {
     assert_eq!(s, 404);
 }
 
+// #524: this goes through the owner's actual suggestion button endpoint, not create_item directly.
+async fn take_offer_with_team_worker(enabled: bool) {
+    let e = start().await;
+    let (s, b) = e
+        .call(
+            "POST",
+            "/api/bots",
+            Some(json!({
+                "name":"Team worker", "harness":"claude-code", "perm_mode":"plan"
+            })),
+        )
+        .await;
+    assert_eq!(s, 200, "{b}");
+    let bot = b["id"].as_str().unwrap();
+    let (s, team) = e
+        .call(
+            "POST",
+            "/api/bot-teams",
+            Some(json!({
+                "name":"Team", "members":[{"bot":bot,"nodes":null}]
+            })),
+        )
+        .await;
+    assert_eq!(s, 200, "{team}");
+    let (s, v) = e
+        .call(
+            "PUT",
+            "/api/bot-teams/default",
+            Some(json!({"team":team["id"]})),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let bot_path = format!("/api/bots/{bot}");
+    if !enabled {
+        let (s, v) = e
+            .call("PATCH", &bot_path, Some(json!({"enabled":false})))
+            .await;
+        assert_eq!(s, 200, "{v}");
+    }
+    let (s, v) = e
+        .call(
+            "POST",
+            "/api/thread",
+            Some(json!({"text":"评论支持 markdown 吗，你看看"})),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let messages = e.settle(2).await;
+    let offer = &messages[1];
+    assert_eq!(offer["meta"]["offer"]["bot"], "steve", "{offer}");
+    let path = format!("/api/thread/{}/offer", offer["id"].as_str().unwrap());
+    let (s, v) = e.call("POST", &path, Some(json!({"take":true}))).await;
+    assert_eq!(s, 200, "{v}");
+    let item = v["item"]["id"].as_str().expect("saved item");
+    let (s, detail) = e.call("GET", &format!("/api/items/{item}"), None).await;
+    assert_eq!(s, 200, "{detail}");
+    assert_eq!(detail["dispatch"]["team"]["id"], team["id"]);
+    let store = steve_store::Store::open(&e.db, steve_store::NoPublisher).unwrap();
+    let assigned = || store.items().get(item).unwrap().unwrap().bot_id;
+    assert_eq!(assigned().as_deref(), enabled.then_some(bot));
+    assert_eq!(
+        store.thread().item(item).unwrap().unwrap().origin_msg,
+        messages[0]["id"].as_str().unwrap()
+    );
+
+    if enabled {
+        assert!(detail["dispatch"]["blocked"].is_null());
+        let fact = store
+            .read(|r| steve_store::bot_dispatch::initial(r, item))
+            .unwrap()
+            .unwrap();
+        assert_eq!(fact.explanation.bot.as_str(), bot);
+    } else {
+        assert_eq!(detail["dispatch"]["blocked"]["reason"], "bot", "{detail}");
+        assert!(store.sessions().of_item(item).unwrap().is_empty());
+        let (s, again) = e.call("POST", &path, Some(json!({"take":true}))).await;
+        assert_eq!(s, 409, "{again}");
+        assert_eq!(again["item"]["id"], item);
+        let (s, strict) = e
+            .call(
+                "POST",
+                "/api/items",
+                Some(json!({
+                    "title":"Explicit Bot", "goal":"Work", "project":null, "bot":"steve"
+                })),
+            )
+            .await;
+        assert_eq!(s, 409, "{strict}");
+        assert_eq!(strict["placement"]["reason"], "outside_team", "{strict}");
+
+        let (s, v) = e
+            .call("PATCH", &bot_path, Some(json!({"enabled":true})))
+            .await;
+        assert_eq!(s, 200, "{v}");
+        let (s, v) = e
+            .call(
+                "POST",
+                &format!("/api/items/{item}/reassign"),
+                Some(json!({"bot":bot})),
+            )
+            .await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(assigned().as_deref(), Some(bot));
+    }
+    let sessions = store.sessions().of_item(item).unwrap();
+    assert_eq!(sessions[0].bot_id.as_deref(), Some(bot));
+    assert_ne!(sessions[0].status, "ended", "{sessions:?}");
+}
+
+#[tokio::test]
+async fn taking_an_offer_uses_the_eligible_team_bot_not_the_routed_main_bot() {
+    take_offer_with_team_worker(true).await;
+}
+
+#[tokio::test]
+async fn taking_an_offer_keeps_the_item_when_the_default_team_has_no_eligible_bot() {
+    take_offer_with_team_worker(false).await;
+}
+
 /// While Steve answers, what is said waits (`meta.held`), can be changed or withdrawn, and goes after the
 /// turn; stop ends the answer at once and says so (ST-33).
 #[tokio::test]
