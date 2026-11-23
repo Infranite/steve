@@ -213,7 +213,7 @@ async fn install_is_async_deduplicated_and_immediately_rediscovered_without_rest
     conflict.body.harness = "codex".into();
     assert_eq!(
         n.install_harness(conflict).await.unwrap_err().code,
-        ErrorCode::Conflict
+        Code::Conflict
     );
     assert_eq!(
         n.install_harness(command("install_duplicate"))
@@ -232,7 +232,7 @@ async fn install_is_async_deduplicated_and_immediately_rediscovered_without_rest
     );
     assert!(!caps.harnesses[0].setup.as_ref().unwrap().can_install);
     let blocked = n.start_job(job_command()).await;
-    assert_eq!(blocked.unwrap_err().code, ErrorCode::Busy);
+    assert_eq!(blocked.unwrap_err().code, Code::Busy);
     assert!(
         Lease::reserve(&n.0, "other-adapter").is_none(),
         "auto update shares admission"
@@ -368,7 +368,7 @@ async fn missing_or_old_node_refuses_install_and_missing_npm_is_actionable() {
         .install_harness(command("install_missing_node"))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unsupported);
+    assert_eq!(e.code, Code::Unsupported);
     assert!(e.safe_detail.contains("Node.js"));
     let r = Requirements {
         npm: None,
@@ -405,7 +405,7 @@ async fn custom_commands_and_remote_owner_ceiling_are_never_overwritten() {
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Unsupported
+        Code::Unsupported
     );
     assert!(
         !n.probe(false).await.unwrap().harnesses[0]
@@ -426,7 +426,7 @@ async fn custom_commands_and_remote_owner_ceiling_are_never_overwritten() {
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Unsupported
+        Code::Unsupported
     );
     n.shutdown().await;
     let mut t = Fixture::new();
@@ -437,7 +437,7 @@ async fn custom_commands_and_remote_owner_ceiling_are_never_overwritten() {
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Denied
+        Code::Forbidden
     );
     n.shutdown().await;
 }
@@ -480,7 +480,7 @@ async fn active_execution_and_upgrade_exclude_manual_installation() {
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Busy
+        Code::Busy
     );
     assert!(Lease::reserve(&n.0, "pi").is_none());
     n.0.j
@@ -501,7 +501,7 @@ async fn active_execution_and_upgrade_exclude_manual_installation() {
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Busy
+        Code::Busy
     );
     drop(lease);
     assert!(!t.dir.path().join("npm.log").exists());
@@ -518,7 +518,7 @@ async fn the_prefix_lease_excludes_other_nodes_jobs_and_cli_installers() {
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Busy
+        Code::Busy
     );
     assert!(Lease::reserve(&n.0, "pi").is_none());
     assert!(
@@ -545,10 +545,7 @@ async fn thinking_levels_cannot_widen_permission_modes() {
         let mut job = job_command();
         job.body.run.choice.harness = "pi".into();
         job.body.run.policy.permissions = mode;
-        assert_eq!(
-            n.start_job(job).await.unwrap_err().code,
-            ErrorCode::Unsupported
-        );
+        assert_eq!(n.start_job(job).await.unwrap_err().code, Code::Unsupported);
         assert!(
             n.0.cfg
                 .acp
@@ -564,7 +561,7 @@ async fn thinking_levels_cannot_widen_permission_modes() {
         c.body = research;
         assert_eq!(
             n.start_job(c).await.unwrap_err().code,
-            ErrorCode::Unsupported,
+            Code::Unsupported,
             "research must refuse unsupported permissions before probing a provider"
         );
     }
@@ -608,11 +605,11 @@ async fn a_recorded_orphan_installer_blocks_new_installs_and_execution() {
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Busy
+        Code::Busy
     );
     assert_eq!(
         n.start_job(job_command()).await.unwrap_err().code,
-        ErrorCode::Busy
+        Code::Busy
     );
     child.kill().unwrap();
     child.wait().unwrap();
@@ -662,7 +659,7 @@ async fn external_executables_keep_session_evidence_without_installer_node_or_me
         c.body.harness = id.into();
         assert_eq!(
             n.install_harness(c).await.unwrap_err().code,
-            ErrorCode::Unsupported
+            Code::Unsupported
         );
         n.shutdown().await;
     }

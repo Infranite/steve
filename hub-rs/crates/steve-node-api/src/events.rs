@@ -325,6 +325,14 @@ pub enum ToolPhase {
     Failed,
 }
 
+/// Evidence derived from structured driver facts without sending the underlying command inputs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolEvidence {
+    Failed { signature: Digest },
+    ContentChanged { signature: Digest },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolView {
     pub id: CallId,
@@ -344,6 +352,8 @@ pub struct ToolView {
     pub phase: ToolPhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<Action>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<ToolEvidence>,
     /// Bounded; anything large is an artifact.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub result: Vec<Part>,

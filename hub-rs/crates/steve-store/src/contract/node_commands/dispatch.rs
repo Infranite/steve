@@ -1,7 +1,7 @@
 //! Durable send deadlines, retry observations and command dependencies.
 
 use sea_query::{CaseStatement, Expr, ExprTrait, Func, JoinType, Order, Query};
-use steve_node_api::ApiError;
+use steve_node_api::Error;
 
 use crate::{Read, Result, W};
 
@@ -35,7 +35,7 @@ fn receipt() -> Expr {
     Func::coalesce([Expr::col("receipt"), Expr::Constant("{}".into())]).into()
 }
 
-pub fn record_retry_error(w: &mut W<'_>, operation: &str, error: &ApiError) -> Result<()> {
+pub fn record_retry_error(w: &mut W<'_>, operation: &str, error: &Error) -> Result<()> {
     let value = w.dialect().json_set_field(
         receipt(),
         "last_error",
@@ -64,7 +64,7 @@ pub fn mark_waiting(w: &mut W<'_>, op: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn record_exhausted(w: &mut W<'_>, op: &str, error: &ApiError) -> Result<i64> {
+pub fn record_exhausted(w: &mut W<'_>, op: &str, error: &Error) -> Result<i64> {
     use crate::contract::Q;
     let dialect = w.dialect();
     let before = w
@@ -102,25 +102,6 @@ pub fn pending_dependents(c: &mut impl Read, operation: &str) -> Result<Vec<Stri
     )
 }
 
-pub fn release_failures(c: &mut impl Read, session: &str) -> Result<i64> {
-    let dialect = c.db().dialect();
-    Ok(c.one(
-        Query::select()
-            .expr(Func::count(Expr::col("operation_id")))
-            .from(TABLE)
-            .and_where(Expr::col("method").eq("release_session"))
-            .and_where(dialect.json_field(Expr::col("request"), "body").eq(session))
-            .and_where(Expr::col("state").is_in(["finished", "rejected"]))
-            .and_where(
-                dialect
-                    .json_field(Expr::col("receipt"), "success")
-                    .eq(false),
-            ),
-        |r| r.get(0),
-    )?
-    .unwrap_or(0))
-}
-
 pub fn postpone(w: &mut W<'_>, op: &str, retry: i64, at: i64) -> Result<()> {
     w.exec(
         Query::update()
@@ -133,41 +114,29 @@ pub fn postpone(w: &mut W<'_>, op: &str, retry: i64, at: i64) -> Result<()> {
     Ok(())
 }
 
-pub fn retarget_dependency(w: &mut W<'_>, op: &str, dependency: &str, at: i64) -> Result<()> {
-    let changed = w.exec(
-        Query::update()
-            .table(TABLE)
-            .value("dependency_operation", dependency)
-            .value("updated", at)
-            .and_where(Expr::col("operation_id").eq(op))
-            .and_where(Expr::col("state").eq("pending")),
-    )?;
-    if changed > 0 {
-        crate::runtime::command_changed_in(w, op)?;
-    }
-    Ok(())
-}
-
-pub fn refresh_envelope(
+pub fn freeze_envelope(
     w: &mut W<'_>,
     op: &str,
     envelope: &impl serde::Serialize,
     digest: &str,
     at: i64,
-    retry: Option<i64>,
 ) -> Result<()> {
-    let mut query = Query::update();
-    query
-        .table(TABLE)
-        .value("request", serde_json::to_string(envelope)?)
-        .value("digest", digest)
-        .value("updated", at)
-        .and_where(Expr::col("operation_id").eq(op))
-        .and_where(Expr::col("state").eq("pending"));
-    if let Some(retry) = retry {
-        query.value("retry_at", retry);
+    let updated = w.exec(
+        Query::update()
+            .table(TABLE)
+            .value("request", serde_json::to_string(envelope)?)
+            .value("digest", digest)
+            .value("updated", at)
+            .and_where(Expr::col("operation_id").eq(op))
+            .and_where(Expr::col("lease_generation").eq(1_i64))
+            .and_where(Expr::col("lease_owner").is_not_null())
+            .and_where(Expr::col("state").eq("pending")),
+    )?;
+    if updated != 1 {
+        return Err(crate::StoreError::Conflict(
+            "command envelope already frozen".into(),
+        ));
     }
-    w.exec(&query)?;
     Ok(())
 }
 
@@ -228,39 +197,6 @@ pub fn any_session(c: &mut impl Read, op: &str) -> Result<Option<String>> {
     .flatten())
 }
 
-pub fn restart_only_abandon(c: &mut impl Read, attempt: &str, restart: &str) -> Result<bool> {
-    let reason = c
-        .db()
-        .dialect()
-        .json_path(Expr::col("request"), "$.body.reason");
-    let mut commands = Query::select();
-    commands
-        .column("operation_id")
-        .from(TABLE)
-        .and_where(Expr::col("target_attempt").eq(attempt))
-        .and_where(Expr::col("method").eq("abandon"))
-        .limit(1);
-    let restart = c
-        .one(
-            commands.clone().and_where(reason.clone().eq(restart)),
-            |_| Ok(()),
-        )?
-        .is_some()
-        && c.one(commands.and_where(reason.ne(restart)), |_| Ok(()))?
-            .is_none();
-    if !restart {
-        return Ok(false);
-    }
-    let cancelled = c.one(
-        Query::select()
-            .column("cancel_requested")
-            .from("runtime_attempts")
-            .and_where(Expr::col("attempt_id").eq(attempt)),
-        |r| r.get::<bool>(0),
-    )?;
-    Ok(cancelled == Some(false))
-}
-
 pub fn abandoned_turn(c: &mut impl Read, turn: &str) -> Result<bool> {
     Ok(c.one(
         Query::select()
@@ -280,19 +216,7 @@ pub fn abandoned_turn(c: &mut impl Read, turn: &str) -> Result<bool> {
     .is_some())
 }
 
-#[derive(serde::Serialize)]
-pub struct CapacityWait<'a> {
-    pub deadline: i64,
-    pub error: &'a str,
-    pub retries: i64,
-}
-
-pub fn schedule_turn_retry(
-    w: &mut W<'_>,
-    turn: &str,
-    at: i64,
-    capacity: Option<CapacityWait<'_>>,
-) -> Result<()> {
+pub fn schedule_turn_retry(w: &mut W<'_>, turn: &str, at: i64) -> Result<()> {
     let target = Query::select()
         .column("active_attempt")
         .from("runtime_turns")
@@ -303,16 +227,6 @@ pub fn schedule_turn_retry(
         .value("retry_at", at)
         .and_where(Expr::col("target_attempt").eq(Expr::from(target)))
         .and_where(Expr::col("method").eq("start_turn"));
-    if let Some(capacity) = capacity {
-        q.value(
-            "receipt",
-            w.dialect().json_set_field(
-                receipt(),
-                "provider_capacity",
-                Expr::val(serde_json::to_string(&capacity)?),
-            ),
-        );
-    }
     w.exec(&q)?;
     Ok(())
 }

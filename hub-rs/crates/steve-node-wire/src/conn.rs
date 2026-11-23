@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use steve_node_api::upgrade_v1 as upgrade;
-use steve_node_api::{ApiError, ApiResult, ErrorCode, OperationId};
+use steve_node_api::{ApiResult, Code, Error, OperationId, Retry};
 use tokio::sync::{Notify, Semaphore, mpsc, oneshot, watch};
 use tokio::time::Instant;
 
@@ -169,7 +169,7 @@ impl Schema {
                 p: env.p,
             }
             .encode()
-            .map_err(ApiError::from),
+            .map_err(Error::from),
         }
     }
 
@@ -412,13 +412,13 @@ impl Conn {
     /// Calls `method` with the table's lane and deadline.
     pub async fn call(&self, method: &str, p: Value, op: Option<&OperationId>) -> ApiResult<Value> {
         if self.is_upgrade() {
-            return Err(ApiError::new(
-                ErrorCode::Offline,
+            return Err(Error::later(
+                Code::Unavailable,
                 "ordinary protocol unavailable while upgrading",
             ));
         }
         let spec = methods::spec(method)
-            .ok_or_else(|| ApiError::new(ErrorCode::Internal, format!("no method {method}")))?;
+            .ok_or_else(|| Error::new(Code::Internal, format!("no method {method}")))?;
         self.call_with(method, p, spec.lane, spec.class.deadline(), op)
             .await
     }
@@ -432,20 +432,22 @@ impl Conn {
         op: Option<&OperationId>,
     ) -> ApiResult<Value> {
         if self.is_upgrade() {
-            return Err(ApiError::new(
-                ErrorCode::Offline,
+            return Err(Error::later(
+                Code::Unavailable,
                 "ordinary protocol unavailable while upgrading",
             ));
         }
         let raw = self
             .call_raw(method, p, lane, deadline, op, Schema::Ordinary)
             .await?;
-        let outcome: Outcome = serde_json::from_value(raw)
-            .map_err(|e| ApiError::new(ErrorCode::Internal, format!("bad result: {e}")))?;
+        let outcome: Outcome = answer_of(method, raw, op)?;
         match outcome {
             Outcome::Ok(value) => Ok(value),
             Outcome::Err(mut error) => {
                 error.safe_detail = peer_text(&error.safe_detail);
+                if error.retry == Retry::Now {
+                    error.retry = Retry::Never;
+                }
                 Err(error)
             }
         }
@@ -489,7 +491,7 @@ impl Conn {
         op: Option<&OperationId>,
         schema: Schema,
     ) -> ApiResult<Value> {
-        let offline = |why: &str| ApiError::new(ErrorCode::Offline, format!("{method}: {why}"));
+        let offline = |why: &str| Error::later(Code::Unavailable, format!("{method}: {why}"));
         if self.is_closed() {
             return Err(offline("not connected"));
         }
@@ -522,7 +524,7 @@ impl Conn {
                 .is_ok();
             match op {
                 Some(op) if !never_written => {
-                    ApiError::uncertain(op, format!("{method}: {why} after it was sent"))
+                    uncertain_answer(method, op, format!("{method}: {why} after it was sent"))
                 }
                 _ => offline(why),
             }
@@ -837,8 +839,8 @@ async fn reader(
                 let Some(permit) = permit else {
                     s.respond_now(
                         env.id,
-                        Outcome::Err(ApiError::new(
-                            ErrorCode::Exhausted,
+                        Outcome::Err(Error::later(
+                            Code::Exhausted,
                             "too many requests in flight on this link",
                         )),
                         s.generation,
@@ -866,7 +868,7 @@ async fn reader(
             },
             Kind::Unknown => s.respond_now(
                 env.id,
-                Outcome::Err(ApiError::new(ErrorCode::Unsupported, "unknown frame kind")),
+                Outcome::Err(Error::new(Code::Unsupported, "unknown frame kind")),
                 s.generation,
                 schema,
             ),
@@ -889,7 +891,7 @@ fn refuse_other_generation(s: &Arc<Shared>, env: Envelope, schema: Schema) -> bo
     }
     s.respond_now(
         env.id,
-        Outcome::Err(ApiError::new(ErrorCode::Stale, "another connection")),
+        Outcome::Err(Error::new(Code::Stale, "another connection")),
         env.generation,
         schema,
     );
@@ -965,12 +967,12 @@ pub fn peer_text(s: &str) -> String {
     out
 }
 
-pub fn unsupported(method: &str) -> ApiError {
-    ApiError::new(ErrorCode::Unsupported, format!("unknown method {method}"))
+pub fn unsupported(method: &str) -> Error {
+    Error::new(Code::Unsupported, format!("unknown method {method}"))
 }
 
 pub(crate) fn to_value<T: serde::Serialize>(v: &T) -> ApiResult<Value> {
-    serde_json::to_value(v).map_err(|e| ApiError::new(ErrorCode::Internal, format!("encode: {e}")))
+    serde_json::to_value(v).map_err(|e| Error::new(Code::Internal, format!("encode: {e}")))
 }
 
 /// Decodes a request. A kind this end does not know (a newer peer's variant) is `unsupported`,
@@ -979,11 +981,11 @@ pub(crate) fn to_value<T: serde::Serialize>(v: &T) -> ApiResult<Value> {
 pub fn from_value<T: serde::de::DeserializeOwned>(v: Value) -> ApiResult<T> {
     serde_json::from_value(v).map_err(|e| {
         let code = if e.to_string().starts_with("unknown variant") {
-            ErrorCode::Unsupported
+            Code::Unsupported
         } else {
-            ErrorCode::Invalid
+            Code::Invalid
         };
-        ApiError::new(code, format!("decode: {e}"))
+        Error::new(code, format!("decode: {e}"))
     })
 }
 
@@ -997,12 +999,18 @@ pub fn answer_of<T: serde::de::DeserializeOwned>(
     op: Option<&OperationId>,
 ) -> ApiResult<T> {
     serde_json::from_value(v).map_err(|e| match op {
-        Some(op) => ApiError::uncertain(op, format!("{method}: unreadable answer: {e}")),
-        None => ApiError::new(
-            ErrorCode::Invalid,
-            format!("{method}: unreadable answer: {e}"),
-        ),
+        Some(op) => uncertain_answer(method, op, format!("{method}: unreadable answer: {e}")),
+        None => Error::new(Code::Invalid, format!("{method}: unreadable answer: {e}")),
     })
+}
+
+fn uncertain_answer(method: &str, op: &OperationId, detail: String) -> Error {
+    let error = Error::outcome_unknown(op, detail);
+    if methods::has_durable_receipt(method) {
+        error.retry(Retry::Later { after_ms: None })
+    } else {
+        error
+    }
 }
 
 #[cfg(test)]

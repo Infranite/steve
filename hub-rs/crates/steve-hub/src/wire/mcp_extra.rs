@@ -207,11 +207,25 @@ fn workflow_tool() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["get", "plan", "pause", "resume", "retry", "cancel", "fail"]},
+                "action": {"type": "string", "enum": ["get", "plan", "pause", "resume", "retry", "cancel", "fail", "apply_review_findings"]},
                 "expected_revision": {"type": "integer", "minimum": 0},
                 "known_revision": {"type": "integer", "minimum": 0, "description": "get only: the revision you last read. When the graph is still at it, the reply is only {unchanged: true, revision}."},
                 "reason": {"type": "string", "minLength": 1},
                 "unit_id": {"type": "string"},
+                "scope": {"type": "object", "description": "For apply_review_findings, copy the failed review's scope from get."},
+                "findings": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "affected_unit": {"type": "string"},
+                            "criterion": {"type": "string"},
+                            "evidence_ref": {"type": "string", "description": "Immutable Steve delivery URL created by the reviewer."}
+                        },
+                        "required": ["affected_unit", "criterion", "evidence_ref"],
+                        "additionalProperties": false
+                    }
+                },
                 "max_parallel": {"type": "integer", "minimum": 1, "description": "Leave out unless this graph needs an additional limit such as a shared device or rate limit. All descendant graphs still share their root item's collaboration budget, and Node capacity applies independently."},
                 "max_attempts": {"type": "integer", "minimum": 1},
                 "units": {

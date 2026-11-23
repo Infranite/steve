@@ -141,7 +141,7 @@ async fn start_with_node(node: Option<Arc<dyn steve_node_api::Node>>) -> Env {
 #[tokio::test(flavor = "multi_thread")]
 async fn disconnect_after_ready_stays_unknown_in_state_and_model_catalogue() {
     use serde_json::json;
-    use steve_node_api::{ApiError, ErrorCode, HarnessCapability};
+    use steve_node_api::{Code, Error, HarnessCapability};
 
     let ready: HarnessCapability = serde_json::from_value(json!({
         "name": "pi", "version": "1.5.2", "sessions": true, "jobs": true,
@@ -170,7 +170,7 @@ async fn disconnect_after_ready_stays_unknown_in_state_and_model_catalogue() {
             .unwrap()
             .clone()
     };
-    for code in [ErrorCode::Offline, ErrorCode::Internal] {
+    for code in [Code::Unavailable, Code::Internal] {
         let (status, devices) = e.call("GET", "/api/runtimes?fresh=1", None).await;
         assert_eq!(status, 200, "{devices}");
         assert_eq!(pi(&devices)["ok"], true);
@@ -183,7 +183,7 @@ async fn disconnect_after_ready_stays_unknown_in_state_and_model_catalogue() {
 
         // The Node remains disconnected for both Devices and the following state read.
         for _ in 0..2 {
-            node.refuse_next("probe", ApiError::new(code, "probe unavailable"));
+            node.refuse_next("probe", Error::new(code, "probe unavailable"));
         }
         let (status, devices) = e.call("GET", "/api/runtimes?fresh=1", None).await;
         assert_eq!(status, 200, "{devices}");
@@ -329,7 +329,7 @@ async fn accepted_installation_cannot_restore_old_devices_state_or_model_readine
 #[tokio::test(flavor = "multi_thread")]
 async fn persistent_disconnect_revokes_independent_follower_through_http() {
     use serde_json::json;
-    use steve_node_api::ErrorCode;
+    use steve_node_api::Code;
     let base = steve_node_api::testkit::FakeNode::new("local");
     let ready = serde_json::from_value(json!({
         "name":"pi","version":"1","sessions":true,"jobs":true,"models":[],
@@ -350,7 +350,7 @@ async fn persistent_disconnect_revokes_independent_follower_through_http() {
             .unwrap()
             .clone()
     };
-    for code in [ErrorCode::Offline, ErrorCode::Internal] {
+    for code in [Code::Unavailable, Code::Internal] {
         assert_eq!(
             pi(&e.call("GET", "/api/runtimes?fresh=1", None).await.1)["ok"],
             true

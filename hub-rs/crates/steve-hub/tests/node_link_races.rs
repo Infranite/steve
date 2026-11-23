@@ -151,7 +151,7 @@ async fn a_request_sent_before_the_install_waits_for_it() {
     drop(held);
     let r = sent.await.unwrap();
     assert!(
-        matches!(&r, Err(e) if e.code == steve_node_api::ErrorCode::Denied),
+        matches!(&r, Err(e) if e.code == steve_node_api::Code::Forbidden),
         "judged as the installed link: {r:?}"
     );
     assert_eq!(h.svc.registry.current(node.as_str()), Some(l.generation));
@@ -212,7 +212,7 @@ async fn a_request_sent_before_a_refused_install_does_not_hang() {
         .expect("answered once the install was refused")
         .unwrap();
     assert!(
-        matches!(&r, Err(e) if e.code != steve_node_api::ErrorCode::Denied),
+        matches!(&r, Err(e) if e.code != steve_node_api::Code::Forbidden),
         "{r:?}"
     );
     assert_eq!(h.svc.registry.current(node.as_str()), None);

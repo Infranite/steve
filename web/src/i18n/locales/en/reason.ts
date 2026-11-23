@@ -1,4 +1,23 @@
 // Domain-owned reason texts, grouped by the stable reason prefix.
 export default {
   "config.diagnostic_model_disabled": "Model execution is disabled on this diagnostic Hub.",
+  "node.downgrade": "The Node refused to install an older version.",
+  "node.operation_not_found": "The Node has no receipt for this operation.",
+  "node.session_not_open": "The session is closed on the Node.",
+  "node.tool_refused": "The Node refused the tool call.",
+  "node.workspace_binding_conflict": "This resource is already bound to a different workspace.",
+  "node_stop.adapter_exited": "The adapter exited while starting.",
+  "node_stop.deadline": "The Node stopped the run when it reached its time limit.",
+  "node_stop.frame_too_large": "The Node stopped the run after the harness sent a message larger than 16 MiB.",
+  "node_stop.harness_gone": "The harness process exited.",
+  "node_stop.harness_idle": "The Node stopped the harness after it went too long without output.",
+  "node_stop.hub_unreachable": "The Node stopped the run when its lease expired while the Hub was unreachable.",
+  "node_stop.ingress_stalled": "The Node stopped the run after {{secs}} seconds without being able to receive harness output.",
+  "node_stop.job_deadline": "The Node stopped the job when it reached its time limit.",
+  "node_stop.journal_budget": "The Node stopped the run when its journal reached its data limit.",
+  "node_stop.journal_fails": "The Node stopped the run after a journal write failed.",
+  "node_stop.not_recorded": "The Node stopped the run because it could not record the harness output.",
+  "node_stop.output_limit": "The Node stopped the run when it reached its output limit.",
+  "node_stop.research_budget": "The research run reached its turn or tool call limit.",
+  "node_stop.stopped_by_node": "The Node stopped the run.",
 } as const

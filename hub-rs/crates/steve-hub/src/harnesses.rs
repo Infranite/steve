@@ -749,7 +749,7 @@ mod tests {
         let node = steve_node_api::testkit::FakeNode::new("local");
         node.refuse_next(
             "probe",
-            steve_node_api::ApiError::new(steve_node_api::ErrorCode::Offline, "probe unavailable"),
+            steve_node_api::Error::new(steve_node_api::Code::Unavailable, "probe unavailable"),
         );
         hs.refresh(node.as_ref(), false).await;
         assert!(

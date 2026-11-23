@@ -1,5 +1,6 @@
 //! Node ledger operations scoped to the Hub's existing store write.
 pub mod runtime;
+pub mod stall;
 
 use serde_json::Value;
 

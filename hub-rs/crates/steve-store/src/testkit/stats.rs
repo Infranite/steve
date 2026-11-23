@@ -748,7 +748,9 @@ impl RealtimeV73 {
         self.0.execute("INSERT INTO runtime_attempts(attempt_id,turn_id,ordinal,node_id,operation_id,execution,spec,digest,state,created,updated) VALUES(?1,?1,0,'n',?1,'{}','{}','d','finished',?2,?3)",params![id,at-100_000,at]).unwrap();
     }
     pub fn command(&self, id: &str, state: &str, sent: i64, payload: serde_json::Value, at: i64) {
-        self.0.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,target_attempt,state,receipt,maybe_sent,created,updated) VALUES(?1,'n','start_turn','{}','d',?1,?2,?3,?4,?5,?6)",params![id,state,serde_json::json!({"success":false,"payload":payload}).to_string(),sent,at-100_000,at-20_000]).unwrap();
+        let receipt = (!payload.is_null())
+            .then(|| serde_json::json!({"success":false,"payload":payload}).to_string());
+        self.0.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,target_attempt,state,receipt,maybe_sent,created,updated) VALUES(?1,'n','start_turn','{}','d',?1,?2,?3,?4,?5,?6)",params![id,state,receipt,sent,at-100_000,at-20_000]).unwrap();
     }
 
     pub fn stop(
@@ -796,14 +798,6 @@ pub fn merge_terminal_receipt(s: &Store, payload: &serde_json::Value, at: i64) -
             payload,
             at
         )?);
-        Ok::<_, crate::StoreError>(())
-    })
-}
-
-pub fn merge_unsent_rejection(s: &Store, payload: &serde_json::Value, at: i64) -> Result<()> {
-    use crate::runtime::{self, ReceiptState};
-    s.write(|tx| {
-        runtime::merge_receipt_in(tx, "a", ReceiptState::Rejected, false, payload, at)?;
         Ok::<_, crate::StoreError>(())
     })
 }

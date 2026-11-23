@@ -546,7 +546,7 @@ mod tests {
             },
         };
         let c = Command {
-            id: OperationId::new("op_prep_s0").unwrap(),
+            id: OperationId::new("prepare:s0:r0").unwrap(),
             issued_at: Timestamp(1),
             accept_before: Timestamp(2),
             grant: GrantId::new("hub").unwrap(),

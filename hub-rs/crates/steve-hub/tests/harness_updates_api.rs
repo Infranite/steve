@@ -371,7 +371,7 @@ async fn local_and_remote_upgrade_receipts_survive_disconnect_and_are_read_back_
     link.close(None, 1000, "fixture disconnect");
     e.svc.fleet.remote(n2.id()).detach(1);
     let offline = e.report("remote").await;
-    assert_eq!(offline["code"], "offline");
+    assert_eq!(offline["code"], "unavailable");
     assert!(!offline["error"].is_null());
     assert_eq!(
         offline["report"]["node"], "remote",

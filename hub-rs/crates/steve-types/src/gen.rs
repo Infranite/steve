@@ -73,6 +73,8 @@ fn bindings_match() {
         Params,
         Reason,
         Error,
+        gateway::GatewayFailure,
+        gateway::TimeoutPhase,
         HttpErrorBody,
         Envelope<DomainEvent>,
         Scope,

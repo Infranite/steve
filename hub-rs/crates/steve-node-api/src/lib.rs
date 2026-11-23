@@ -44,6 +44,7 @@ pub use steve_types::devices::{
     ProtectedAccess, ProtectedLocation,
 };
 pub use steve_types::gateway::{GatewayFailure, TimeoutPhase};
+pub use steve_types::{Code, Error, Retry, devices::NodeReason};
 pub use stop::*;
 pub use tools::*;
 pub use workspace::*;

@@ -580,7 +580,7 @@ async fn concurrent_hubs_report_their_os_assigned_ports() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn provider_stream_interruption_is_retried_without_continues_then_shown_as_a_service_card() {
+async fn provider_refusals_share_one_turn_and_finish_with_one_service_card() {
     let h = Home::new();
     let _hub = spawn(
         &h,
@@ -595,186 +595,41 @@ async fn provider_stream_interruption_is_retried_without_continues_then_shown_as
     let sid = c
         .retry_item(
             &h,
-            "stream failure acceptance @tool execute Bash\n@streamfail 3",
+            "bounded provider retries @fail 4 HTTP 503 Service Unavailable",
         )
         .await;
     let item = node_process::session_item_id_by_id(&h.db_path(), &sid)
         .unwrap()
         .unwrap();
-    let retry_count = || node_process::attempt_count_by_session(&h.db_path(), &sid).unwrap();
+    let retries = || node_process::attempt_count_by_session(&h.db_path(), &sid).unwrap();
     let cards = || node_process::decision_count_by_item_fail_open(&h.db_path(), &item).unwrap();
-    let continues = || node_process::item_takeover_notice_count(&h.db_path(), &item).unwrap();
-    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
-        format!(
-            "The first Node retry is scheduled after the failed attempt; first retry; {}",
-            hub_log(&h)
-        )
-    });
-    eventually_sync(diagnostic, || retry_count() == 2).await;
-    assert_eq!(cards(), 0, "no card before backoff");
-    assert_eq!(continues(), 0);
-    // At least one tool already ran; this is the mid-work interruption, not the old no-action retry.
-    assert_eq!(
-        node_process::event_count_by_session_tool(&h.db_path(), &sid).unwrap(),
-        2
-    );
-    h.make_retry_due(&sid);
-    eventually_sync(
-        "The retry prompt states that no undelivered continuation budget is consumed.",
-        || {
-            h.prompts()
-                .iter()
-                .filter(|p| p.contains("不占用未交付续跑次数"))
-                .count()
-                >= 1
-        },
-    )
-    .await;
-    assert_eq!(cards(), 0);
-    eventually_sync(
-        "The second Node retry is saved before it is made due.",
-        || retry_count() == 3,
-    )
-    .await;
-    h.make_retry_due(&sid);
-    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
-        format!(
-            "Exhausted retries produce one service failure card; exhausted service card; {}",
-            hub_log(&h)
-        )
-    });
-    eventually_sync(diagnostic, || cards() == 1).await;
-    assert_eq!(retry_count(), 3);
-    assert_eq!(continues(), 0);
-    let question = node_process::decision_question_by_item_fail_open(&h.db_path(), &item)
-        .unwrap()
-        .unwrap();
-    assert!(
-        question.starts_with("模型服务中断：") && question.contains("已自动重试 2 次仍失败"),
-        "{question}"
-    );
-    assert!(!question.contains("Agent 停下来了"), "{question}");
-    let prompts = h.prompts();
-    let retries: Vec<_> = prompts
-        .iter()
-        .filter(|p| p.contains("不占用未交付续跑次数"))
-        .collect();
-    assert_eq!(retries.len(), 2);
-    assert!(retries.iter().all(|p| p.contains("不要重做")));
-    assert_eq!(
-        node_process::items_status_by_id(&h.db_path(), &item)
-            .unwrap()
-            .as_deref(),
-        Some("wait")
-    );
-    let (status, state) = c.call("GET", "/api/snapshot?kinds=decision", None).await;
-    assert_eq!(status, 200);
-    assert!(
-        state["views"]["decision"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|d| d["question"] == question),
-        "service failure card is returned to the client"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn provider_capacity_waits_for_recovery_then_exhausts_as_one_service_card() {
-    let h = Home::new();
-    let _hub = spawn(
-        &h,
-        true,
-        &[(
-            "STEVE_ADAPTER_PI",
-            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/retry-acp.mjs"),
-        )],
-    );
-    serving(&h).await;
-    let c = Client::login(&h).await;
-    let sid = c
-        .retry_item(
-            &h,
-            "capacity failure acceptance @tool execute Bash\n@capacityfail 4 5",
-        )
-        .await;
-    let item = node_process::session_item_id_by_id(&h.db_path(), &sid)
-        .unwrap()
-        .unwrap();
-    let retry_count = || node_process::attempt_count_by_session(&h.db_path(), &sid).unwrap();
-    let cards = || node_process::decision_count_by_item_fail_open(&h.db_path(), &item).unwrap();
-    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
-        format!(
-            "The first capacity retry is saved; first capacity wait; {}",
-            hub_log(&h)
-        )
-    });
-    eventually_sync(diagnostic, || retry_count() == 2).await;
-    assert_eq!(cards(), 0);
-    let (scheduled, observed, completion) =
-        node_process::capacity_retry(&h.db_path(), &sid).unwrap();
-    let completion: steve_node_api::Completion = serde_json::from_str(&completion).unwrap();
-    let recovery =
-        steve_acp::capacity_recovery_at(&completion.error.unwrap().safe_detail, observed).unwrap();
-    assert!(
-        scheduled >= recovery + 1_000 && scheduled >= observed,
-        "the advertised recovery must be respected"
-    );
-    assert_eq!(
-        node_process::event_count_by_session_tool(&h.db_path(), &sid).unwrap(),
-        2,
-        "the first attempt already ran a tool"
-    );
     for attempts in 2..=4 {
-        eventually_sync(
-            "The next capacity retry is saved before it is made due.",
-            || retry_count() == attempts,
-        )
-        .await;
+        let waiting = steve_runtime::testkit::on_timeout(|| async {
+            format!("attempt {attempts} is persisted; {}", hub_log(&h))
+        });
+        eventually_sync(waiting, || retries() == attempts).await;
         assert_eq!(cards(), 0);
         h.make_retry_due(&sid);
     }
-    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
-        let observed_attempts = node_process::attempt_observations(&h.db_path(), &sid).unwrap();
-        format!(
-            "capacity retries reach the service-card ceiling; attempts={observed_attempts:?}; now={}; Hub log:\n{}",
-            steve_store::now(),
-            hub_log(&h)
-        )
+    let settled = steve_runtime::testkit::on_timeout(|| async {
+        format!("one service failure card; {}", hub_log(&h))
     });
-    eventually_sync(diagnostic, || cards() == 1).await;
-    assert_eq!(retry_count(), 4);
+    eventually_sync(settled, || cards() == 1).await;
+    assert_eq!(retries(), 4);
     assert_eq!(
         node_process::item_takeover_notice_count(&h.db_path(), &item).unwrap(),
         0
     );
+    let prompts: Vec<_> = h
+        .prompts()
+        .into_iter()
+        .filter(|p| p.contains("@fail 4"))
+        .collect();
+    assert_eq!(prompts.len(), 4);
+    assert!(prompts.windows(2).all(|ps| ps[0] == ps[1]));
     let question = node_process::decision_question_by_item_fail_open(&h.db_path(), &item)
         .unwrap()
         .unwrap();
-    assert!(
-        question.starts_with("模型服务容量不足：")
-            && question.contains("已自动重试 3 次仍失败")
-            && question.contains("预计恢复时间：20"),
-        "{question}"
-    );
-    assert!(!question.contains("Agent 停下来了"), "{question}");
-    let prompts = h.prompts();
-    let retries: Vec<_> = prompts
-        .iter()
-        .filter(|p| p.contains("不占用未交付续跑次数"))
-        .collect();
-    assert_eq!(retries.len(), 3);
-    assert!(
-        retries
-            .iter()
-            .all(|p| p.contains("不要重做") && p.contains("模型服务容量不足"))
-    );
-    assert_eq!(
-        node_process::items_status_by_id(&h.db_path(), &item)
-            .unwrap()
-            .as_deref(),
-        Some("wait")
-    );
     let (status, state) = c.call("GET", "/api/snapshot?kinds=decision", None).await;
     assert_eq!(status, 200);
     assert!(
@@ -923,8 +778,7 @@ async fn a_node_session_end_to_end() {
     )
     .await;
 
-    // ── the Hub killed mid-turn: the attempt is never re-run; the Hub gives it up on its own once
-    // the Node confirms the old harness is gone, and the agent is continued (B6)
+    // ── the Hub killed mid-turn: the original attempt stays unknown until it can be settled
     c.say(&sid, "崩溃验收-K2 @sleep 600000").await;
     eventually_sync(
         "The fake adapter records the target prompt exactly once.",
@@ -936,25 +790,17 @@ async fn a_node_session_end_to_end() {
     serving(&h).await;
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The interrupted Node attempt is recorded as abandoned after restart; Hub log:\n{}",
+            "The interrupted Node attempt is held after restart; Hub log:\n{}",
             hub_log(&h)
         )
     });
-    eventually_sync(diagnostic, || {
-        node_process::attempt_count_by_session_runtime_attempts(&h.db_path(), &sid).unwrap() == 1
-    })
-    .await;
-    eventually_sync(
-        "The session records the reason its Node attempt was interrupted.",
-        || steve_v1(&h, &sid, "Node 重启了") > 0,
-    )
-    .await;
+    eventually_sync(diagnostic, || attempts(&h, &sid, "unknown") == 1).await;
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(h.got("崩溃验收-K2"), 1, "never re-run: {:?}", h.prompts());
     let n = node_health(&h).await;
     assert_eq!(
         (&n["reconciled"], &n["unknown"], &n["parked"]),
-        (&json!(true), &json!(0), &json!(0)),
+        (&json!(true), &json!(1), &json!(0)),
         "healthz after the kill: {n}"
     );
     assert!(n["sessions"].as_i64() >= Some(1), "{n}");
@@ -982,7 +828,7 @@ async fn a_node_session_end_to_end() {
         "healthz with the Node off: {n}"
     );
     assert!(n["parked"].as_i64() >= Some(1), "parked: {n}");
-    assert_eq!(n["unknown"], 0, "given up before: {n}");
+    assert_eq!(n["unknown"], 1, "still held: {n}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

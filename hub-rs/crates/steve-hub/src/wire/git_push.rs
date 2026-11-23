@@ -92,23 +92,23 @@ fn node_error(e: impl std::fmt::Display) -> PushError {
 
 /// What the Node said, as the Hub's own push says it. `now`: where the branch is now, for a
 /// branch that moved.
-fn mapped(e: &ApiError, p: &NodePush<'_>, now: Option<String>) -> PushError {
+fn mapped(e: &Error, p: &NodePush<'_>, now: Option<String>) -> PushError {
     use steve_node::git::{BRANCH_MOVED, HOST_FORBIDDEN, NO_BRANCH, WRONG_REMOTE};
     match (e.code, e.safe_detail.as_str()) {
-        (ErrorCode::Offline, _) => node_error(PlacementError::Offline {
+        (Code::Unavailable, _) => node_error(PlacementError::Offline {
             device: String::new(),
         }),
-        (ErrorCode::Denied, WRONG_REMOTE) => PushError::WrongRemote {
+        (Code::Forbidden, WRONG_REMOTE) => PushError::WrongRemote {
             expected: format!("github.com/{}", p.full_name),
         },
-        (ErrorCode::Denied, HOST_FORBIDDEN) => PushError::HostForbidden(
+        (Code::Forbidden, HOST_FORBIDDEN) => PushError::HostForbidden(
             steve_modules::net::check_url_with(true, p.url)
                 .err()
                 .map(|e| e.to_string())
                 .unwrap_or_else(|| HOST_FORBIDDEN.into()),
         ),
-        (ErrorCode::Stale, NO_BRANCH) => PushError::NoBranch(p.branch.into()),
-        (ErrorCode::Stale, BRANCH_MOVED) => PushError::Moved {
+        (Code::Stale, NO_BRANCH) => PushError::NoBranch(p.branch.into()),
+        (Code::Stale, BRANCH_MOVED) => PushError::Moved {
             branch: p.branch.into(),
             now: now.unwrap_or_default().chars().take(7).collect(),
         },
@@ -120,7 +120,7 @@ fn mapped(e: &ApiError, p: &NodePush<'_>, now: Option<String>) -> PushError {
 fn moved_meanwhile(l: &LedgerEntry) -> bool {
     l.state == "rejected"
         && l.refusal.as_ref().is_some_and(|e| {
-            e.code == ErrorCode::Stale
+            e.code == Code::Stale
                 && e.safe_detail != steve_node::git::BRANCH_MOVED
                 && e.safe_detail != steve_node::git::NO_BRANCH
         })
@@ -176,7 +176,7 @@ impl GitPush {
         w: &WorkspaceRef,
         refs: Vec<String>,
         reads: Vec<GitRead>,
-    ) -> Result<GitFacts, ApiError> {
+    ) -> Result<GitFacts, Error> {
         node.git_facts(GitQuery {
             workspace: w.clone(),
             refs,
@@ -380,7 +380,7 @@ impl GitPush {
             l.receipt.as_ref().map(|r| &r.state),
         ) {
             ("rejected", Some(e), _) => e.clone(),
-            ("rejected", None, _) => ApiError::new(ErrorCode::Internal, "refused"),
+            ("rejected", None, _) => Error::new(Code::Internal, "refused"),
             ("unknown", ..) => {
                 self.stop(&placed.runtime, &l.operation).await;
                 return Err(PushError::Lost);
@@ -934,7 +934,7 @@ mod tests {
         drop(value);
         assert_eq!(short.push(&spec).await.unwrap(), Err(PushError::Running));
         let error = take().await.unwrap_err();
-        assert_eq!(error.code, ErrorCode::Stale);
+        assert_eq!(error.code, Code::Stale);
         assert_eq!(error.safe_detail, "already taken");
         assert_eq!(t.pushes(), 1);
 
@@ -944,7 +944,7 @@ mod tests {
         let until = Instant::now() + Duration::from_secs(5);
         loop {
             let error = take().await.unwrap_err();
-            assert_eq!(error.code, ErrorCode::Stale);
+            assert_eq!(error.code, Code::Stale);
             if error.safe_detail == "the operation ended" {
                 break;
             }
@@ -961,7 +961,7 @@ mod tests {
         }
         let (placed, _) = t.git.item(ITEM).await.unwrap().unwrap();
         t.git.give(&op, &placed, &spec).unwrap();
-        assert_eq!(take().await.unwrap_err().code, ErrorCode::Denied);
+        assert_eq!(take().await.unwrap_err().code, Code::Forbidden);
     }
 
     #[tokio::test]
@@ -984,7 +984,7 @@ mod tests {
             .take(OperationId::new(&op).unwrap(), SECRET_ID.into())
             .await
             .unwrap_err();
-        assert_eq!(error.code, ErrorCode::Denied);
+        assert_eq!(error.code, Code::Forbidden);
         assert_eq!(error.safe_detail, "no secret for this operation");
         steve_store::testkit::hub::mutations::remove_refuse_push(&t.store).unwrap();
         t.runtime.start();
@@ -1020,7 +1020,7 @@ mod tests {
                 .take(OperationId::new(&op).unwrap(), SECRET_ID.into())
                 .await
             {
-                assert_eq!(error.code, ErrorCode::Stale);
+                assert_eq!(error.code, Code::Stale);
                 if error.safe_detail == "the operation ended" {
                     break;
                 }
@@ -1112,41 +1112,6 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert_eq!(*seen.lock().unwrap(), 1, "pushed once");
-        assert_eq!(t.pushes(), 1);
-    }
-
-    /// Lost in a crash and never asked about again (what it was for does not run again): past
-    /// its deadline the ledger's sweep stops it all the same, and it is not sent again.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_push_lost_in_a_crash_is_stopped_past_its_deadline() {
-        let (tmp, port, seen) = crashed_push().await;
-        let t = hub_at(tmp.path());
-        let op = op_of("dec_c", 0);
-        let t0 = Instant::now();
-        while t.runtime.ledger(&op).unwrap().unwrap().state != "unknown" {
-            assert!(t0.elapsed() < Duration::from_secs(30), "reconciled");
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        // not before its deadline
-        assert_eq!(t.runtime.recover_lost_execs(steve_store::now()).unwrap(), 0);
-        let later = steve_store::now() + super::super::node_runtime::PUSH_DEADLINE;
-        assert_eq!(t.runtime.recover_lost_execs(later).unwrap(), 1);
-        while t.runtime.ledger(&op).unwrap().unwrap().state != "finished" {
-            assert!(
-                t0.elapsed() < Duration::from_secs(30),
-                "the lost push is stopped"
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        // asked after all: lost, not sent again
-        let url = format!("http://127.0.0.1:{port}/o/r.git");
-        let tip = t.tip();
-        assert_eq!(
-            t.git.push(&spec("dec_c", &url, &tip)).await.unwrap(),
-            Err(PushError::Lost)
-        );
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(*seen.lock().unwrap(), 1, "pushed once");
         assert_eq!(t.pushes(), 1);

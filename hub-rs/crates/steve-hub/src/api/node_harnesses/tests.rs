@@ -76,14 +76,14 @@ async fn empty_success_failure_unsupported_and_offline_remain_distinct() {
     inv.refresh(&t, false).await;
     let success = inv.view(&t).await;
     assert_eq!(success.state, "reported");
-    node.disconnect(ErrorCode::Internal);
+    node.disconnect(Code::Internal);
     inv.refresh(&t, true).await;
     let failure = inv.view(&t).await;
     assert_eq!(failure.state, "failed");
     assert!(failure.stale);
     assert_eq!(failure.checked_at, success.checked_at);
     assert_eq!(failure.harnesses, success.harnesses);
-    node.disconnect(ErrorCode::Unsupported);
+    node.disconnect(Code::Unsupported);
     inv.refresh(&t, true).await;
     assert_eq!(inv.view(&t).await.state, "unsupported");
     node.reconnect();

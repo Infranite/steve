@@ -161,7 +161,7 @@ impl super::node_runtime::NodeDomain for HubHost {
                             &session,
                             error
                                 .as_ref()
-                                .is_some_and(|e| e.code == steve_node_api::ErrorCode::Exhausted),
+                                .is_some_and(|e| e.code == steve_node_api::Code::Exhausted),
                             &detail,
                         )
                     }

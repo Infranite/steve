@@ -1,6 +1,6 @@
 //! Durable command identity and reconciliation reads for the Hub-side Node ledger.
 
-use sea_query::{Expr, ExprTrait, Func, Query};
+use sea_query::{Expr, ExprTrait, Query};
 use serde::Deserialize;
 use serde_json::Value;
 use steve_node_api::OperationId;
@@ -25,6 +25,7 @@ pub struct CommandRecord {
     pub node: String,
     pub method: String,
     pub request: Value,
+    pub subject: Option<String>,
     pub digest: String,
     pub state: String,
     pub receipt: Option<StoredReceipt>,
@@ -38,7 +39,7 @@ pub fn record(
 ) -> Result<Option<CommandRecord>> {
     let mut q = Query::select();
     q.columns([
-        "node_id", "method", "request", "digest", "state", "receipt", "revision",
+        "node_id", "method", "request", "digest", "state", "receipt", "revision", "subject",
     ])
     .from("node_commands")
     .and_where(Expr::col("operation_id").eq(operation));
@@ -55,6 +56,7 @@ pub fn record(
             state: r.get(4)?,
             receipt: r.get::<Option<Json<StoredReceipt>>>(5)?.map(|v| v.0),
             revision: r.get(6)?,
+            subject: r.get(7)?,
         })
     })
 }
@@ -70,34 +72,6 @@ pub fn state(c: &mut impl Read, node: &str, operation: &str) -> Result<Option<St
     )
 }
 
-pub fn due_lost_execs(
-    c: &mut impl Read,
-    node: &str,
-    now: i64,
-    push_deadline: i64,
-) -> Result<Vec<String>> {
-    let deadline = c
-        .db()
-        .dialect()
-        .json_path(Expr::col("request"), "$.body.limits.deadline");
-    let exec_due = Expr::col("method")
-        .eq("exec")
-        .and(Func::coalesce([deadline, Expr::Constant(0_i64.into())]).lte(now));
-    let push_due = Expr::col("method")
-        .eq("git_apply")
-        .and(Expr::col("created").add(push_deadline).lte(now));
-    c.all(
-        Query::select()
-            .column("operation_id")
-            .from("node_commands")
-            .and_where(Expr::col("node_id").eq(node))
-            .and_where(Expr::col("state").eq("unknown"))
-            .and_where(exec_due.or(push_due)),
-        |r| r.get(0),
-    )
-}
-
-/// An unrecorded command may have been sent directly by the Hub.
 pub fn operation_is_foreign(
     c: &mut impl Read,
     node: &str,

@@ -345,7 +345,7 @@ async fn artifact_reads_bind_the_execution_view_and_survive_compaction_and_resta
     wrong.view_digest = Digest::sha256(b"another principal");
     assert_eq!(
         n.read_artifact(wrong).await.unwrap_err().code,
-        ErrorCode::Denied
+        Code::Forbidden
     );
     let mut wrong = query.clone();
     let ExecutionRef::Turn { ref mut turn, .. } = wrong.execution else {
@@ -354,7 +354,7 @@ async fn artifact_reads_bind_the_execution_view_and_survive_compaction_and_resta
     *turn = TurnId::new("another-turn").unwrap();
     assert_eq!(
         n.read_artifact(wrong).await.unwrap_err().code,
-        ErrorCode::Denied
+        Code::Forbidden
     );
     let mut legacy = query.clone();
     legacy.execution = ExecutionRef::Job {
@@ -363,7 +363,7 @@ async fn artifact_reads_bind_the_execution_view_and_survive_compaction_and_resta
     };
     assert_eq!(
         n.read_artifact(legacy).await.unwrap_err().code,
-        ErrorCode::Unsupported
+        Code::Unsupported
     );
     // Reopening the session with a new view must not relabel an old execution's artifacts.
     n.release_session(now_cmd("op_rel_art", open.session.clone()))
@@ -417,7 +417,7 @@ async fn artifact_reads_bind_the_execution_view_and_survive_compaction_and_resta
     assert!(ok(&finished(&n, "op_tidy_art").await));
     assert_eq!(
         n.read_artifact(query.clone()).await.unwrap_err().code,
-        ErrorCode::Unsupported
+        Code::Unsupported
     );
     // Reusing the resource/id cannot resurrect a predecessor's grant.
     n.prepare_workspace(now_cmd("op_reprep_art", prepare_proj()))
@@ -426,7 +426,7 @@ async fn artifact_reads_bind_the_execution_view_and_survive_compaction_and_resta
     assert!(ok(&finished(&n, "op_reprep_art").await));
     assert_eq!(
         n.read_artifact(query).await.unwrap_err().code,
-        ErrorCode::Unsupported
+        Code::Unsupported
     );
     n.shutdown().await;
 }
@@ -457,7 +457,7 @@ async fn a_legacy_execution_never_falls_back_to_a_general_file_read() {
     };
     assert_eq!(
         n.read_artifact(query).await.unwrap_err().code,
-        ErrorCode::Unsupported
+        Code::Unsupported
     );
     n.shutdown().await;
 }
@@ -535,7 +535,7 @@ async fn execution_deliveries_resolve_actual_paths_and_reject_changed_boundaries
     };
     assert_eq!(
         n.read_execution_delivery(wrong).await.unwrap_err().code,
-        ErrorCode::Denied
+        Code::Forbidden
     );
     for execution in [
         ExecutionRef::Turn {
@@ -553,25 +553,25 @@ async fn execution_deliveries_resolve_actual_paths_and_reject_changed_boundaries
         wrong.execution = execution;
         assert_eq!(
             n.read_execution_delivery(wrong).await.unwrap_err().code,
-            ErrorCode::Denied
+            Code::Forbidden
         );
     }
     let mut wrong = q.clone();
     wrong.workspace.id = WorkspaceId::new("another-workspace").unwrap();
     assert_eq!(
         n.read_execution_delivery(wrong).await.unwrap_err().code,
-        ErrorCode::Denied
+        Code::Forbidden
     );
     let mut wrong = q.clone();
     wrong.workspace.node = NodeId::new("another-node").unwrap();
     assert_eq!(
         n.read_execution_delivery(wrong).await.unwrap_err().code,
-        ErrorCode::Denied
+        Code::Forbidden
     );
     put(&work, "outputs/result.md", b"changed after first chunk");
     assert_eq!(
         n.read_execution_delivery(relative).await.unwrap_err().code,
-        ErrorCode::Conflict
+        Code::Conflict
     );
     n.set_roots(vec![]);
     assert!(n.read_execution_delivery(q.clone()).await.is_err());
@@ -582,7 +582,7 @@ async fn execution_deliveries_resolve_actual_paths_and_reject_changed_boundaries
     put(&work, "outputs/result.md", b"actual Node bytes");
     assert_eq!(
         n.read_execution_delivery(q.clone()).await.unwrap_err().code,
-        ErrorCode::Denied
+        Code::Forbidden
     );
     std::fs::remove_dir_all(&work).unwrap();
     std::fs::rename(t.root.join("parked"), &work).unwrap();
@@ -591,7 +591,7 @@ async fn execution_deliveries_resolve_actual_paths_and_reject_changed_boundaries
         .unwrap();
     assert_eq!(
         n.read_execution_delivery(q.clone()).await.unwrap_err().code,
-        ErrorCode::Denied
+        Code::Forbidden
     );
     db.execute("UPDATE workspaces SET incarnation=incarnation-1", [])
         .unwrap();
@@ -728,7 +728,7 @@ async fn one_node_per_home() {
     let t = T::new(&[]);
     let _n = t.node();
     let e = LocalNode::open(t.config()).err().expect("refused");
-    assert_eq!(e.code, ErrorCode::Conflict);
+    assert_eq!(e.code, Code::Conflict);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -774,7 +774,7 @@ async fn a_retiring_node_takes_no_new_work_and_cancels_what_runs() {
         .open_session(now_cmd("op_o2", open_body("s_2")))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Busy, "{e}");
+    assert_eq!(e.code, Code::Busy, "{e}");
     assert_eq!(n.cancel_running("removing").await.unwrap(), 1);
     t.wait_for("the end", |t| !t.ended().is_empty()).await;
     assert_eq!(t.ended()[0].outcome, Outcome::Cancelled);
@@ -876,7 +876,7 @@ async fn an_answer_after_the_cancel_is_stale() {
         .resolve_permission(now_cmd("op_r", answer(&req, PermissionDecision::AllowOnce)))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Stale);
+    assert_eq!(e.code, Code::Stale);
     assert!(!t.text().contains("perm:selected"), "{}", t.text());
 }
 
@@ -1062,11 +1062,11 @@ async fn what_cannot_be_enforced_is_refused() {
         currency: "USD".into(),
     });
     let e = n.start_turn(now_cmd("op_t", tr)).await.unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unsupported);
+    assert_eq!(e.code, Code::Unsupported);
     let mut o = open_body("s_2");
     o.policy.network = NetworkScope::Denied;
     let e = n.open_session(now_cmd("op_o", o)).await.unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unsupported);
+    assert_eq!(e.code, Code::Unsupported);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1123,7 +1123,7 @@ async fn paths_stay_inside_the_roots() {
         ))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Denied);
+    assert_eq!(e.code, Code::Forbidden);
     std::os::unix::fs::symlink("/", t.root.join("work/out")).unwrap();
     let e = n
         .prepare_workspace(now_cmd(
@@ -1140,7 +1140,7 @@ async fn paths_stay_inside_the_roots() {
         ))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Denied);
+    assert_eq!(e.code, Code::Forbidden);
 }
 
 fn prepare_in(resource: &str, root: &str, rel: &str) -> Prepare {
@@ -1166,7 +1166,7 @@ async fn roots_change_without_a_restart_and_a_read_only_root_takes_no_workspace(
         .prepare_workspace(now_cmd("op_later0", prepare_in("item:l", "later", "p")))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Denied);
+    assert_eq!(e.code, Code::Forbidden);
     let work = t.config().roots.remove(0);
     n.set_roots(vec![
         work.clone(),
@@ -1196,14 +1196,14 @@ async fn roots_change_without_a_restart_and_a_read_only_root_takes_no_workspace(
         .prepare_workspace(now_cmd("op_kb", prepare_in("item:k", "kb", "notes")))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Denied);
+    assert_eq!(e.code, Code::Forbidden);
     // a root taken away (an archived project): refused for new work
     n.set_roots(vec![work]);
     let e = n
         .prepare_workspace(now_cmd("op_later2", prepare_in("item:m", "later", "p")))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Denied);
+    assert_eq!(e.code, Code::Forbidden);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1221,11 +1221,11 @@ async fn a_node_with_no_session_capacity_takes_workspace_work_only() {
         .open_session(now_cmd("op_open", open_body("s1")))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unsupported);
+    assert_eq!(e.code, Code::Unsupported);
     assert_eq!(t.sent("initialize"), 0, "no harness started");
     assert_eq!(
         n.set_session_capacity(32).await.unwrap_err().code,
-        ErrorCode::Unsupported
+        Code::Unsupported
     );
 }
 
@@ -1276,13 +1276,13 @@ async fn a_killed_node_leaves_its_attempt_unknown_until_abandoned() {
         .operation(OperationId::new("op_t").unwrap())
         .await
         .unwrap();
-    assert_eq!(r.state.tag(), StateTag::Unknown);
+    assert_eq!(r.state.state_name(), "unknown");
     // nothing new runs in that session, not even after opening it again
     let e = n
         .open_session(now_cmd("op_reopen", open_body("s_1")))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Busy);
+    assert_eq!(e.code, Code::Busy);
     // the Hub gives it up: its processes are stopped first
     n.abandon(now_cmd(
         "op_ab",
@@ -1346,10 +1346,10 @@ impl HubTools for Tools {
         })
     }
     async fn call_status(&self, _k: ToolKey) -> ApiResult<ToolResult> {
-        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+        Err(Error::new(Code::Unsupported, "x"))
     }
     async fn cancel_call(&self, _k: ToolKey) -> ApiResult<ToolResult> {
-        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+        Err(Error::new(Code::Unsupported, "x"))
     }
 }
 
@@ -1580,7 +1580,7 @@ async fn a_permission_is_bound_to_the_file_as_it_was() {
         .unwrap();
     let s = finished(&n, "op_r").await;
     assert!(
-        matches!(&s, Observed::Finished { outcome: Outcome::Failed, error: Some(e), .. } if e.code == ErrorCode::Stale),
+        matches!(&s, Observed::Finished { outcome: Outcome::Failed, error: Some(e), .. } if e.code == Code::Stale),
         "{s:?}"
     );
     // a rejection still goes through
@@ -1716,22 +1716,22 @@ impl HubFiles for Hanging {
         _m: u32,
     ) -> ApiResult<ReadChunk> {
         tokio::time::sleep(Duration::from_secs(3600)).await;
-        Err(ApiError::new(ErrorCode::Offline, "never"))
+        Err(Error::new(Code::Unavailable, "never"))
     }
     async fn begin_upload(&self, _b: BeginUpload) -> ApiResult<Transfer> {
-        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+        Err(Error::new(Code::Unsupported, "x"))
     }
     async fn upload(&self, _c: BlobChunk) -> ApiResult<Transfer> {
-        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+        Err(Error::new(Code::Unsupported, "x"))
     }
     async fn upload_status(&self, _t: TransferId) -> ApiResult<TransferState> {
-        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+        Err(Error::new(Code::Unsupported, "x"))
     }
     async fn finish_upload(&self, _t: TransferId) -> ApiResult<ArtifactRef> {
-        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+        Err(Error::new(Code::Unsupported, "x"))
     }
     async fn abort_upload(&self, _t: TransferId) -> ApiResult<TransferState> {
-        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+        Err(Error::new(Code::Unsupported, "x"))
     }
 }
 
@@ -1838,7 +1838,7 @@ async fn shutdown_releases_home_during_an_unrelated_fork_before_exec() {
     ready(&n, "fork").await;
     assert_eq!(
         LocalNode::open(t.config()).err().unwrap().code,
-        ErrorCode::Conflict,
+        Code::Conflict,
         "a live Node must still exclude a second owner"
     );
     let child = ForkHold::new();
@@ -1878,7 +1878,7 @@ async fn shutdown_releases_home_during_an_unrelated_fork_before_exec() {
     let again = reopened.expect("shutdown and last Node drop release the lock before exec");
     assert_eq!(
         LocalNode::open(t.config()).err().unwrap().code,
-        ErrorCode::Conflict
+        Code::Conflict
     );
     again.shutdown().await;
     drop(again);
@@ -1896,7 +1896,7 @@ async fn reads_that_cannot_be_confined_are_refused() {
         rel: RelPath::new("other").unwrap(),
     }];
     let e = n.open_session(now_cmd("op_o", o)).await.unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unsupported);
+    assert_eq!(e.code, Code::Unsupported);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1917,7 +1917,7 @@ async fn opening_reserves_session_and_workspace_until_handshake_finishes() {
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Busy
+        Code::Busy
     );
     let w = n.workspace(ws()).await.unwrap();
     assert_eq!(
@@ -1932,7 +1932,7 @@ async fn opening_reserves_session_and_workspace_until_handshake_finishes() {
         .await
         .unwrap_err()
         .code,
-        ErrorCode::Busy
+        Code::Busy
     );
     assert!(ok(&finished(&n, "open").await));
     n.shutdown().await;
@@ -1966,7 +1966,7 @@ async fn shutdown_joins_an_inflight_handshake_before_releasing_home() {
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Offline
+        Code::Unavailable
     );
     drop(n);
     let again = open_again(&t).await;
@@ -2135,8 +2135,8 @@ async fn missing_operations_are_invalid_for_recover_as_for_query_cancel_and_aban
         .unwrap_err(),
     ];
     for e in errors {
-        assert_eq!(e.code, ErrorCode::Invalid);
-        assert_eq!(e.retry, RetryClass::Never);
+        assert_eq!(e.code, Code::Invalid);
+        assert_eq!(e.retry, Retry::Never);
         assert_eq!(e.safe_detail, "no such operation");
     }
     n.shutdown().await;
@@ -2393,8 +2393,8 @@ async fn journal_budget_stops_running_work_and_reserves_terminal_space() {
             turn("s_1", "t_2", "a_2", "hello")
         ))
         .await,
-        Err(ApiError {
-            code: ErrorCode::Exhausted,
+        Err(Error {
+            code: Code::Exhausted,
             ..
         })
     ));
@@ -2624,7 +2624,7 @@ async fn open_again(t: &T) -> LocalNode {
         match LocalNode::open(t.config()) {
             Ok(x) => return x,
             Err(e) => {
-                assert_eq!(e.code, ErrorCode::Conflict, "{e:?}");
+                assert_eq!(e.code, Code::Conflict, "{e:?}");
                 assert!(t0.elapsed() < Duration::from_secs(30), "home never freed");
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
@@ -2757,9 +2757,9 @@ async fn a_replaced_journal_refuses_executed_envelopes_before_the_floor_across_r
     );
     for _ in 0..2 {
         let e = n.open_session(old.clone()).await.unwrap_err();
-        assert_eq!(e.code, ErrorCode::Stale);
-        assert_eq!(e.retry, RetryClass::Never);
-        assert_eq!(e.operation, Some(old.id.clone()));
+        assert_eq!(e.code, Code::Stale);
+        assert_eq!(e.retry, Retry::Never);
+        assert_eq!(e.params.0["operation"], old.id.clone().to_string().into());
     }
     assert_eq!(starts(), executions, "pre-upgrade work must not run twice");
     assert_eq!(
@@ -2785,7 +2785,7 @@ async fn a_replaced_journal_refuses_executed_envelopes_before_the_floor_across_r
     // The floor takes precedence even when the id now has a post-upgrade deduplication record.
     assert_eq!(
         n.open_session(old.clone()).await.unwrap_err().retry,
-        RetryClass::Never
+        Retry::Never
     );
     assert!(
         n.open_session(current.clone())
@@ -2805,7 +2805,7 @@ async fn a_replaced_journal_refuses_executed_envelopes_before_the_floor_across_r
         floor
     );
     let e = n.open_session(old).await.unwrap_err();
-    assert_eq!((e.code, e.retry), (ErrorCode::Stale, RetryClass::Never));
+    assert_eq!((e.code, e.retry), (Code::Stale, Retry::Never));
     assert!(n.open_session(current).await.unwrap().state.is_finished());
     assert_eq!(starts(), executions + 1);
     n.shutdown().await;
@@ -2820,25 +2820,25 @@ async fn a_journal_from_a_newer_node_is_refused() {
     let path = t.home.join("node.sqlite3");
     rusqlite::Connection::open(&path)
         .unwrap()
-        .execute_batch("PRAGMA user_version=5;")
+        .execute_batch("PRAGMA user_version=999;")
         .unwrap();
     let t0 = Instant::now();
     let e = loop {
         match LocalNode::open(t.config()) {
             Ok(_) => panic!("a newer journal was opened"),
-            Err(e) if e.code == ErrorCode::Conflict => {
+            Err(e) if e.code == Code::Conflict => {
                 assert!(t0.elapsed() < Duration::from_secs(30), "home never freed");
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             Err(e) => break e,
         }
     };
-    assert_eq!(e.code, ErrorCode::Unsupported, "{e:?}");
+    assert_eq!(e.code, Code::Unsupported, "{e:?}");
     let version: i64 = rusqlite::Connection::open(&path)
         .unwrap()
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 5, "left as it was");
+    assert_eq!(version, 999, "left as it was");
 }
 
 // ── disk quota (N1-4): a free-space high-water with hysteresis, compaction on the ack ──
@@ -2866,7 +2866,7 @@ fn spec_ops(db: &rusqlite::Connection) -> Vec<String> {
 }
 
 fn exhausted<T: std::fmt::Debug>(r: &ApiResult<T>) -> bool {
-    matches!(r, Err(e) if e.code == ErrorCode::Exhausted)
+    matches!(r, Err(e) if e.code == Code::Exhausted)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3206,7 +3206,7 @@ async fn a_worktree_goes_where_it_is_named_above_the_disk_floor_and_comes_back_a
             outcome: Outcome::Failed,
             error: Some(e),
             ..
-        } => assert_eq!(e.code, ErrorCode::Exhausted, "{e:?}"),
+        } => assert_eq!(e.code, Code::Exhausted, "{e:?}"),
         other => panic!("{other:?}"),
     }
     assert!(!wt.exists());
@@ -3237,7 +3237,7 @@ async fn a_worktree_goes_where_it_is_named_above_the_disk_floor_and_comes_back_a
         keep_branch: true,
     };
     let e = n.tidy_workspace(now_cmd("op_t0", stale)).await.unwrap_err();
-    assert_eq!(e.code, ErrorCode::Conflict);
+    assert_eq!(e.code, Code::Conflict);
     assert!(wt.exists());
     let tidy = Tidy {
         workspace: v.workspace.clone(),
@@ -3309,7 +3309,7 @@ async fn a_worktree_goes_where_it_is_named_above_the_disk_floor_and_comes_back_a
             .await
             .unwrap_err();
         assert!(
-            matches!(e.code, ErrorCode::Denied | ErrorCode::Invalid),
+            matches!(e.code, Code::Forbidden | Code::Invalid),
             "{rel}: {e:?}"
         );
     }
@@ -3636,12 +3636,12 @@ async fn a_scan_keeps_its_manifest_while_files_change() {
         )
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Invalid);
+    assert_eq!(e.code, Code::Invalid);
     let e = n
         .scan_page(OperationId::new("op_nope").unwrap(), page(1))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Invalid);
+    assert_eq!(e.code, Code::Invalid);
     // a resend is the same scan
     n.scan(c).await.unwrap();
     assert_eq!(n.scan_page(scan, page(2)).await.unwrap(), pages[0]);
@@ -3785,7 +3785,7 @@ async fn reads_stay_inside_their_root_and_see_a_changed_file() {
             .read_file(read(FileAddress::Root(kb_at(rel)), None, 0, 100))
             .await
             .unwrap_err();
-        assert_eq!(e.code, ErrorCode::Denied, "{rel}");
+        assert_eq!(e.code, Code::Forbidden, "{rel}");
     }
     let e = n
         .read_file(read(
@@ -3799,7 +3799,7 @@ async fn reads_stay_inside_their_root_and_see_a_changed_file() {
         ))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Denied);
+    assert_eq!(e.code, Code::Forbidden);
     assert!(RelPath::new("../outside/s.md").is_err());
     assert!(RelPath::new("/etc/passwd").is_err());
     let forged = serde_json::json!({
@@ -3835,7 +3835,7 @@ async fn reads_stay_inside_their_root_and_see_a_changed_file() {
         ))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Conflict);
+    assert_eq!(e.code, Code::Conflict);
 
     // in a workspace: the same rules
     put(&t.root, "work/proj/src/lib.rs", b"fn main() {}");
@@ -3859,7 +3859,7 @@ async fn reads_stay_inside_their_root_and_see_a_changed_file() {
         .read_file(read(in_ws("leak"), None, 0, 100))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Denied);
+    assert_eq!(e.code, Code::Forbidden);
     let listed = n
         .list_dir(
             PathRef {
@@ -3913,14 +3913,14 @@ async fn listings_page_and_do_not_follow_linked_directories() {
     assert_eq!(names, ["b/c.md"]);
     // a directory that is not there
     let e = n.list_root(kb_at("nope"), page(10)).await.unwrap_err();
-    assert_eq!(e.code, ErrorCode::Invalid);
+    assert_eq!(e.code, Code::Invalid);
     // a read-only root is listed, read and scanned, but a bad pattern is refused
     let bad = ScanSpec {
         include: vec!["../*.md".into()],
         ..kb_scan("", &[], ScanLimits::default())
     };
     let e = n.scan(now_cmd("op_bad", bad)).await.unwrap_err();
-    assert_eq!(e.code, ErrorCode::Invalid);
+    assert_eq!(e.code, Code::Invalid);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3946,7 +3946,7 @@ async fn a_scan_read_after_a_restart_is_scanned_again() {
         .scan_page(OperationId::new("op_scan").unwrap(), page(10))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Expired);
+    assert_eq!(e.code, Code::Stale);
 }
 
 fn git_in(dir: &Path, args: &[&str]) -> String {
@@ -4087,7 +4087,7 @@ async fn git_facts_reads_files_commits_logs_and_diffs_of_a_workspace() {
     };
     assert_eq!(
         n.git_facts(q("--output=x")).await.unwrap_err().code,
-        ErrorCode::Invalid
+        Code::Invalid
     );
     // a revision that names no commit is an answer, not a failure (the checkout is there)
     let none = n.git_facts(q("1234567")).await.unwrap();
@@ -4286,7 +4286,7 @@ async fn a_fetch_and_the_remotes_tags_come_from_origin() {
     );
     let mut q = query(vec![]);
     q.fetch = true;
-    assert_eq!(n.git_facts(q).await.unwrap_err().code, ErrorCode::Invalid);
+    assert_eq!(n.git_facts(q).await.unwrap_err().code, Code::Invalid);
 }
 
 fn rebase_onto(f: &GitFacts, onto: &str) -> GitApply {
@@ -4317,7 +4317,7 @@ async fn a_rebase_applies_only_on_the_facts_it_was_decided_on() {
         .git_apply(now_cmd("op_rb1", rebase_onto(&f, "main")))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Stale);
+    assert_eq!(e.code, Code::Stale);
     assert_eq!(git_in(&repo, &["rev-parse", "HEAD"]), moved);
 
     // on the facts as they are: rebased, the new facts in the result; the same command again is
@@ -4358,10 +4358,7 @@ async fn a_rebase_applies_only_on_the_facts_it_was_decided_on() {
     else {
         panic!("a conflict rebased")
     };
-    assert_eq!(
-        (e.code, e.safe_detail.as_str()),
-        (ErrorCode::Conflict, "b.txt")
-    );
+    assert_eq!((e.code, e.safe_detail.as_str()), (Code::Conflict, "b.txt"));
     assert_eq!(git_in(&repo, &["rev-parse", "HEAD"]), f.head);
     assert_eq!(git_in(&repo, &["status", "--porcelain"]), "");
 
@@ -4374,7 +4371,7 @@ async fn a_rebase_applies_only_on_the_facts_it_was_decided_on() {
     let Observed::Finished { error: Some(e), .. } = finished(&n, "op_rb4").await else {
         panic!("a dirty tree rebased")
     };
-    assert_eq!(e.code, ErrorCode::Busy);
+    assert_eq!(e.code, Code::Busy);
     assert_eq!(std::fs::read(repo.join("b.txt")).unwrap(), b"dirty\n");
 }
 
@@ -4395,7 +4392,7 @@ async fn the_owners_ceiling_refuses_what_is_over_it() {
     let mut o = open_body("s_2");
     o.policy.permissions = PermissionMode::FullAccess;
     let e = n.open_session(now_cmd("op_o2", o)).await.unwrap_err();
-    assert_eq!(e.code, ErrorCode::Denied, "{e:?}");
+    assert_eq!(e.code, Code::Forbidden, "{e:?}");
     assert!(e.safe_detail.contains("full_access"), "{e:?}");
     let v = n.session(SessionId::new("s_1").unwrap()).await.unwrap();
     let mut wide = policy();
@@ -4412,7 +4409,7 @@ async fn the_owners_ceiling_refuses_what_is_over_it() {
         ))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Denied, "{e:?}");
+    assert_eq!(e.code, Code::Forbidden, "{e:?}");
     // nothing of either was taken
     assert!(
         n.operation(OperationId::new("op_o2").unwrap())
@@ -4439,7 +4436,7 @@ async fn the_owners_ceiling_refuses_what_is_over_it() {
         ))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Denied, "{e:?}");
+    assert_eq!(e.code, Code::Forbidden, "{e:?}");
     let e = n
         .start_job(now_cmd(
             "op_j",
@@ -4447,7 +4444,7 @@ async fn the_owners_ceiling_refuses_what_is_over_it() {
         ))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Denied, "{e:?}");
+    assert_eq!(e.code, Code::Forbidden, "{e:?}");
     // a turn under it still runs
     n.start_turn(now_cmd("op_t2", turn("s_1", "t_2", "a_2", "@say ok")))
         .await
@@ -4488,7 +4485,7 @@ async fn the_owners_ceiling_refuses_what_is_over_it() {
         .open_session(now_cmd("op_o4", open_body("s_4")))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Denied, "{e:?}");
+    assert_eq!(e.code, Code::Forbidden, "{e:?}");
 }
 
 /// What the harness says in small chunks goes out as fewer, bigger deltas of the very same text,
@@ -4797,7 +4794,7 @@ async fn a_harness_stuck_behind_a_stuck_journal_is_stopped_with_why() {
     let end = &t.ended()[0];
     assert_eq!(end.outcome, Outcome::Interrupted, "{end:?}");
     let e = end.error.as_ref().unwrap();
-    assert_eq!(e.code, ErrorCode::Busy);
+    assert_eq!(e.code, Code::Busy);
     assert!(
         e.safe_detail
             .contains("took none of the harness's output for 1 s"),
@@ -5550,7 +5547,7 @@ async fn live_session_capacity_changes_the_actual_limiter_without_stopping_turns
     );
     assert_eq!(
         n.start_turn(second.clone()).await.unwrap_err().code,
-        ErrorCode::Exhausted
+        Code::Exhausted
     );
     n.set_session_capacity(2).await.unwrap();
     n.start_turn(second).await.unwrap();
@@ -5570,7 +5567,7 @@ async fn live_session_capacity_changes_the_actual_limiter_without_stopping_turns
     );
     assert_eq!(
         n.start_turn(third.clone()).await.unwrap_err().code,
-        ErrorCode::Exhausted
+        Code::Exhausted
     );
     for op in ["capacity_op1", "capacity_op2"] {
         n.cancel(now_cmd(
@@ -5586,7 +5583,7 @@ async fn live_session_capacity_changes_the_actual_limiter_without_stopping_turns
         if op == "capacity_op1" {
             assert_eq!(
                 n.start_turn(third.clone()).await.unwrap_err().code,
-                ErrorCode::Exhausted
+                Code::Exhausted
             );
         }
     }
@@ -5596,7 +5593,7 @@ async fn live_session_capacity_changes_the_actual_limiter_without_stopping_turns
     for invalid in [0, 257] {
         assert_eq!(
             n.set_session_capacity(invalid).await.unwrap_err().code,
-            ErrorCode::Invalid
+            Code::Invalid
         );
     }
     n.shutdown().await;
@@ -5633,12 +5630,13 @@ async fn pruned_commands_are_stale_recent_commands_deduplicate_and_snapshot_page
             },
         };
         db.execute(
-            "INSERT INTO ops(id,method,digest,receipt,accepted,state) VALUES (?1,'cancel',?2,?3,?4,'finished')",
+            "INSERT INTO ops(id,method,digest,receipt,accepted,accept_before,state) VALUES (?1,'cancel',?2,?3,?4,?5,'finished')",
             rusqlite::params![
                 command.id.as_str(),
                 command.digest("cancel").unwrap().as_str(),
                 serde_json::to_string(&receipt).unwrap(),
-                command.issued_at.0
+                command.issued_at.0,
+                command.accept_before.0
             ],
         )
         .unwrap();
@@ -5670,16 +5668,13 @@ async fn pruned_commands_are_stale_recent_commands_deduplicate_and_snapshot_page
 
     assert_eq!(
         n.cancel(commands[0].clone()).await.unwrap_err().code,
-        ErrorCode::Stale
+        Code::Stale
     );
     let first = n.cancel(commands[1].clone()).await.unwrap();
     assert_eq!(n.cancel(commands[1].clone()).await.unwrap(), first);
     let mut changed = commands[1].clone();
     changed.body.reason = "different".into();
-    assert_eq!(
-        n.cancel(changed).await.unwrap_err().code,
-        ErrorCode::Conflict
-    );
+    assert_eq!(n.cancel(changed).await.unwrap_err().code, Code::Conflict);
     let page = n
         .snapshot(PageRequest {
             cursor: None,
@@ -5697,7 +5692,7 @@ async fn pruned_commands_are_stale_recent_commands_deduplicate_and_snapshot_page
     let n = LocalNode::open(t.config()).unwrap();
     assert_eq!(
         n.cancel(commands[0].clone()).await.unwrap_err().code,
-        ErrorCode::Stale
+        Code::Stale
     );
     assert_eq!(n.cancel(commands[1].clone()).await.unwrap(), first);
     assert_eq!(n.streams().await.unwrap(), page.heads);

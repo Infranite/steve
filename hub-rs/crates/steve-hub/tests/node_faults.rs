@@ -68,7 +68,7 @@ impl Faulty {
             .lock()
             .unwrap()
             .clone()
-            .ok_or_else(|| ApiError::new(ErrorCode::Offline, "the node is down"))
+            .ok_or_else(|| Error::new(Code::Unavailable, "the node is down"))
     }
 
     fn lose_reply(&self, method: &'static str) {
@@ -85,7 +85,7 @@ impl Faulty {
         match lose.iter().position(|m| *m == method) {
             Some(i) if r.is_ok() => {
                 lose.remove(i);
-                Err(ApiError::uncertain(op, "the reply was lost"))
+                Err(Error::outcome_unknown(op, "the reply was lost"))
             }
             _ => r,
         }
@@ -175,7 +175,7 @@ impl EventSink for Gate {
         self.commits.fetch_add(1, Ordering::SeqCst);
         let to = self.to.lock().unwrap().clone();
         let Some(to) = to else {
-            return Err(ApiError::new(ErrorCode::Offline, "no hub"));
+            return Err(Error::new(Code::Unavailable, "no hub"));
         };
         let ack = Sink(to).commit(batch).await?;
         let lose = {
@@ -282,9 +282,7 @@ impl ToolHost {
                     tools = Some(t);
                     true
                 }
-                Err(e) if e.code == ErrorCode::Busy && t0.elapsed() < Duration::from_secs(20) => {
-                    false
-                }
+                Err(e) if e.code == Code::Busy && t0.elapsed() < Duration::from_secs(20) => false,
                 Err(e) => panic!("open the tool ledger: {e:?}"),
             },
         )
@@ -323,12 +321,12 @@ impl ToolHost {
     {
         let (tools, handle) = match &*self.hub.lock().unwrap() {
             Some((t, rt)) => (t.clone(), rt.handle().clone()),
-            None => return Err(ApiError::new(ErrorCode::Offline, "the Hub is down")),
+            None => return Err(Error::new(Code::Unavailable, "the Hub is down")),
         };
         handle
             .spawn(f(tools))
             .await
-            .unwrap_or_else(|_| Err(ApiError::new(ErrorCode::Offline, "the Hub went down")))
+            .unwrap_or_else(|_| Err(Error::new(Code::Unavailable, "the Hub went down")))
     }
 }
 
@@ -739,16 +737,16 @@ async fn a_node_closed_mid_turn_leaves_the_attempt_unknown_never_rerun() {
     r.open_node().await;
     // the Hub restarts too and reconciles with the Node
     r.restart_hub().await;
-    // B6: the Hub gives it up on its own once the Node confirms the harness is gone
-    eventually_sync("given up", || r.attempts() == ["finished"]).await;
-    eventually_sync("its end", || !r.ends().is_empty()).await;
-    assert_eq!(r.ends().last().unwrap().1, steve_node_api::NODE_RESTARTED);
+    eventually_sync("awaiting reconciliation", || r.attempts() == ["unknown"]).await;
+    assert!(r.ends().is_empty());
     assert_eq!(r.prompts("mid"), 1, "never prompted again");
     assert_eq!(r.journal_starts(), 1, "never started again");
-    // the restarted Node let the session go: the next message opens it again
     r.rt.prompt(S, "@say next", "user", &[]).unwrap();
-    eventually_sync("the next turn", || r.attempts() == ["finished", "finished"]).await;
-    assert_eq!((r.prompts("mid"), r.prompts("next")), (1, 1));
+    assert_eq!(
+        r.prompts("next"),
+        0,
+        "no execution while the prior result is unknown"
+    );
     r.stored_once().await;
 }
 
@@ -769,8 +767,7 @@ async fn an_event_the_journal_cannot_write_never_reaches_the_hub_half_done() {
     r.close_node().await;
     r.open_node().await;
     r.restart_hub().await;
-    // B6: never run again; given up by the Hub once the Node confirms it
-    eventually_sync("given up", || r.attempts() == ["finished"]).await;
+    eventually_sync("awaiting reconciliation", || r.attempts() == ["unknown"]).await;
     assert_eq!(r.prompts("unwritten"), 1, "never prompted again");
     assert_eq!(r.journal_starts(), 1);
     r.stored_once().await;
@@ -876,18 +873,16 @@ async fn a_hub_restarted_between_commit_and_ack_acknowledges_on_reconcile() {
 
 // ── an unknown control, retired by Stop ──
 
-/// N1-8: the journal cannot write a prepare's end, and the Node closes. Its outcome is unknown
-/// after both restart: the open waiting on it never goes, nothing retires it on its own. Stop
-/// sends one recover; the workspace is prepared again under a new id (adopted as it is) and
-/// opened, and the message queued all along runs once.
+/// N1-8: the journal cannot write a prepare's end, and the Node closes. Stop retires the unknown
+/// prepare after restart. The dependent open is rejected and queued input stays held.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn stop_retires_an_unknown_prepare_and_the_queued_message_runs_once() {
+async fn stop_retires_an_unknown_prepare_without_starting_queued_work() {
     let mut r = Rig::new().await;
     journal::set_failure(&r.journal_path(), journal::Failure::Prepare, true).unwrap();
     r.bind();
     r.rt.prompt(S, "@say queued", "user", &[]).unwrap();
     eventually_sync("the prepare taken", || {
-        node_checks::command_state_by_operation(&r.store, &format!("op_prep_{}", S)).unwrap()
+        node_checks::command_state_by_operation(&r.store, &format!("prepare:{}:r0", S)).unwrap()
             != "pending"
     })
     .await;
@@ -897,7 +892,7 @@ async fn stop_retires_an_unknown_prepare_and_the_queued_message_runs_once() {
     r.open_node().await;
     r.restart_hub().await;
     eventually_sync("unknown", || {
-        node_checks::command_state_by_operation(&r.store, &format!("op_prep_{}", S)).unwrap()
+        node_checks::command_state_by_operation(&r.store, &format!("prepare:{}:r0", S)).unwrap()
             == "unknown"
     })
     .await;
@@ -906,14 +901,18 @@ async fn stop_retires_an_unknown_prepare_and_the_queued_message_runs_once() {
     assert_eq!(r.prompts("queued"), 0);
 
     assert!(r.rt.user_stop(S).unwrap());
-    eventually_sync("the end", || !r.ends().is_empty()).await;
-    assert_eq!(r.ends()[0].1, "end_turn");
-    assert_eq!(r.prompts("queued"), 1, "the queued message ran once");
-    assert_eq!(r.attempts(), ["finished"]);
+    eventually_sync("the dependent open is rejected", || {
+        node_checks::command_state_by_operation(&r.store, &format!("open:{S}:r0")).unwrap()
+            == "rejected"
+    })
+    .await;
+    assert!(r.ends().is_empty());
+    assert_eq!(r.prompts("queued"), 0);
+    assert!(r.attempts().is_empty());
     let recovers: i64 = node_checks::command_count_by_method(&r.store, "recover").unwrap();
     assert_eq!(recovers, 1, "exactly one recover");
     let prepares = journal::operation_count(&r.journal_path(), "prepare_workspace").unwrap();
-    assert_eq!(prepares, 2, "the target never again, a new prepare instead");
+    assert_eq!(prepares, 1);
     r.stored_once().await;
 }
 
@@ -975,14 +974,13 @@ fn update_call() -> serde_json::Value {
         "params": {"name": "steve_update", "arguments": {"now": "x"}}})
 }
 
-/// The Node, then the Hub, restart under a turn; the attempt is never run again, and the Hub
-/// gives it up on its own (B6).
+/// The Node and Hub restart under a turn; the attempt remains unknown until reconciled.
 async fn restart_both(r: &mut Rig, host: &ToolHost) {
     r.close_node().await;
     host.crash().await;
     r.open_node().await;
     r.restart_hub().await;
-    eventually_sync("given up", || r.attempts() == ["finished"]).await;
+    eventually_sync("awaiting reconciliation", || r.attempts() == ["unknown"]).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

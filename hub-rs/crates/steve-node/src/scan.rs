@@ -301,7 +301,7 @@ pub(crate) fn page(m: &Manifest, scan: &OperationId, req: &PageRequest) -> ApiRe
             .strip_prefix(&format!("s{tag}."))
             .and_then(|n| n.parse::<usize>().ok())
             .filter(|n| *n <= m.entries.len())
-            .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "not a cursor of this scan"))?,
+            .ok_or_else(|| Error::new(Code::Invalid, "not a cursor of this scan"))?,
     };
     let (mut to, mut bytes) = fill(&m.entries, from, req.limit);
     let issue_bytes = serde_json::to_vec(&m.issues).map_or(0, |b| b.len());
@@ -402,7 +402,7 @@ pub(crate) fn list_page(items: Vec<FileInfo>, req: &PageRequest) -> ApiResult<Pa
             .strip_prefix('l')
             .and_then(|n| n.parse::<usize>().ok())
             .filter(|n| *n <= items.len())
-            .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "not a listing cursor"))?,
+            .ok_or_else(|| Error::new(Code::Invalid, "not a listing cursor"))?,
     };
     let (to, _) = fill(&items, from, req.limit);
     let next = (to < items.len()).then(|| Cursor::new(format!("l{to}")).expect("a cursor"));
@@ -417,9 +417,9 @@ pub(crate) fn inside(base: &Path, rel: &RelPath) -> ApiResult<PathBuf> {
     let real = base
         .join(rel.as_str())
         .canonicalize()
-        .map_err(|_| ApiError::new(ErrorCode::Invalid, "no such file"))?;
+        .map_err(|_| Error::new(Code::Invalid, "no such file"))?;
     if !real.starts_with(base) {
-        return Err(ApiError::new(ErrorCode::Denied, "outside the root"));
+        return Err(Error::new(Code::Forbidden, "outside the root"));
     }
     Ok(real)
 }
@@ -437,17 +437,17 @@ pub(crate) fn read(
     offset: u64,
     max: u32,
 ) -> ApiResult<ReadChunk> {
-    let io = |e: io::Error| ApiError::new(ErrorCode::Invalid, format!("cannot read: {e}"));
+    let io = |e: io::Error| Error::new(Code::Invalid, format!("cannot read: {e}"));
     let mut f = fs::File::open(real).map_err(io)?;
     if !opened_path(&f).map_err(io)?.starts_with(base) {
-        return Err(ApiError::new(ErrorCode::Denied, "outside the root"));
+        return Err(Error::new(Code::Forbidden, "outside the root"));
     }
     let meta = f.metadata().map_err(io)?;
     if !meta.is_file() {
-        return Err(ApiError::new(ErrorCode::Invalid, "not a file"));
+        return Err(Error::new(Code::Invalid, "not a file"));
     }
     if expected.is_some_and(|v| *v != version(real, &meta)) {
-        return Err(ApiError::new(ErrorCode::Conflict, "the file changed"));
+        return Err(Error::new(Code::Conflict, "the file changed"));
     }
     let offset = offset.min(meta.len());
     f.seek(SeekFrom::Start(offset)).map_err(io)?;
@@ -576,9 +576,9 @@ impl Scans {
     }
 }
 
-fn busy() -> ApiError {
-    ApiError::new(
-        ErrorCode::Busy,
+fn busy() -> Error {
+    Error::new(
+        Code::Busy,
         "too many scans are being read: scan again later",
     )
 }
@@ -680,10 +680,10 @@ mod tests {
             s.release();
             s.keep(op(i), manifest(1), t0).unwrap();
         }
-        assert_eq!(s.reserve(t0).unwrap_err().code, ErrorCode::Busy);
+        assert_eq!(s.reserve(t0).unwrap_err().code, Code::Busy);
         assert_eq!(
             s.keep(op(99), manifest(1), t0).unwrap_err().code,
-            ErrorCode::Busy
+            Code::Busy
         );
         assert!((0..MAX_KEPT_SCANS).all(|i| s.get(&op(i), t0).is_some()));
         // a scan read out stays for its grace, then makes room
@@ -714,7 +714,7 @@ mod tests {
         s.keep(op(1), manifest(big), t0).unwrap();
         s.keep(op(2), manifest(big), t0).unwrap();
         let e = s.keep(op(3), manifest(1), t0).unwrap_err();
-        assert_eq!(e.code, ErrorCode::Busy);
+        assert_eq!(e.code, Code::Busy);
         s.read_out(&op(1));
         s.keep(op(3), manifest(1), t0 + READ_GRACE).unwrap();
         assert!(s.get(&op(1), t0 + READ_GRACE).is_none());
@@ -738,6 +738,6 @@ mod tests {
         fs::rename(base.join("d"), top.join("old")).unwrap();
         std::os::unix::fs::symlink(&out, base.join("d")).unwrap();
         let e = read(&base, &real, None, 0, 100).unwrap_err();
-        assert_eq!(e.code, ErrorCode::Denied);
+        assert_eq!(e.code, Code::Forbidden);
     }
 }

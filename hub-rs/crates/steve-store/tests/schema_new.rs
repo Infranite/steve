@@ -856,7 +856,9 @@ fn replacing_legacy_approval_preserves_human_and_external_facts() {
         assert_eq!(count(c, "SELECT COUNT(*) FROM node_commands WHERE operation_id='never-sent' AND state='rejected'"), 1);
         assert_eq!(count(c, "SELECT COUNT(*) FROM decisions WHERE id='unsent' AND status='expired'"), 1);
         assert_eq!(count(c, "SELECT COUNT(*) FROM runtime_permissions WHERE decision_id='unsent' AND state='expired'"), 1);
-        assert_eq!(count(c, "SELECT COUNT(*) FROM node_commands WHERE operation_id='possibly-sent' AND state='pending' AND maybe_sent=1"), 1);
+        // Approval migration 121 leaves this answer for reconciliation. Migration 122 marks
+        // possibly dispatched pre-cutover commands unknown and preserves their dispatch evidence.
+        assert_eq!(count(c, "SELECT COUNT(*) FROM node_commands WHERE operation_id='possibly-sent' AND state='unknown' AND maybe_sent=1 AND json_extract(receipt, '$.payload.state.state')='unknown'"), 1);
         assert_eq!(count(c, "SELECT COUNT(*) FROM runtime_permissions WHERE decision_id='maybe' AND state='answering' AND resolver='legacy'"), 1);
         assert_eq!(count(c, "SELECT decisions FROM item_stats WHERE item_id='old-stat'"), 7);
         assert_eq!(count(c, "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'yolo_%'"), 0);

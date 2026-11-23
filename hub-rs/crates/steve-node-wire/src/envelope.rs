@@ -5,7 +5,7 @@ use std::pin::Pin;
 use futures_util::{Sink, Stream};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use steve_node_api::{ApiError, ErrorCode};
+use steve_node_api::{Code, Error};
 
 // Local scheduling policy; these limits may evolve with the ordinary protocol.
 pub const MAX_FRAME: usize = 288 * 1024;
@@ -71,17 +71,17 @@ impl Envelope {
         }
     }
 
-    pub fn encode(&self) -> Result<String, ApiError> {
-        let text = serde_json::to_string(self)
-            .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
+    pub fn encode(&self) -> Result<String, Error> {
+        let text =
+            serde_json::to_string(self).map_err(|e| Error::new(Code::Internal, e.to_string()))?;
         let cap = if self.t == Kind::Ctl {
             CONTROL_CAP
         } else {
             MAX_FRAME
         };
         if text.len() > cap {
-            return Err(ApiError::new(
-                ErrorCode::Exhausted,
+            return Err(Error::new(
+                Code::Exhausted,
                 format!(
                     "{} is {} bytes, over the {cap} limit",
                     self.subject(),
@@ -120,12 +120,12 @@ impl Envelope {
 /// Event batches use the existing, smaller transport scheduling limit.
 pub const EVENTS_FRAME: usize = 64 * 1024;
 
-/// A result as it travels: `{"ok":T}` or `{"err":ApiError}`.
+/// A result as it travels: `{"ok":T}` or `{"err":Error}`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
     Ok(Value),
-    Err(ApiError),
+    Err(Error),
 }
 
 /// What a link carries, independent of the WebSocket library (the Node uses tungstenite, the Hub
@@ -164,7 +164,7 @@ mod tests {
         assert!(Envelope::decode("{not json").is_none());
         assert!(Envelope::decode(&"x".repeat(MAX_FRAME + 1)).is_none());
         let big = Envelope::ctl("c", "hello", 0, Value::String("y".repeat(CONTROL_CAP)));
-        assert_eq!(big.encode().unwrap_err().code, ErrorCode::Exhausted);
+        assert_eq!(big.encode().unwrap_err().code, Code::Exhausted);
         let mut raw = big.clone();
         raw.t = Kind::Req;
         let text = raw.encode().unwrap().replace("\"req\"", "\"ctl\"");
@@ -175,7 +175,7 @@ mod tests {
         let mut huge = e.clone();
         huge.p = Value::String("z".repeat(MAX_FRAME));
         let err = huge.encode().unwrap_err();
-        assert_eq!(err.code, ErrorCode::Exhausted);
+        assert_eq!(err.code, Code::Exhausted);
         assert!(
             err.safe_detail.starts_with("request turn.start is "),
             "{}",

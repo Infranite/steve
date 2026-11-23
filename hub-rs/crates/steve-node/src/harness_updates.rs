@@ -273,21 +273,21 @@ impl LocalNode {
         let (components, packages) = upgrade_packages(&self.0, &c)?;
         let req = adapter_setup::requirements(cfg, id).await;
         if let Some(e) = req.node_error.or(req.npm_error) {
-            return Err(ApiError::new(ErrorCode::Unsupported, e));
+            return Err(Error::new(Code::Unsupported, e));
         }
         let mut prefix = None;
         let mut changed = false;
         let (receipt, fresh) = self.accept("upgrade_harness", &c, |t| {
             if self.0.node_upgrade_pending() {
-                return Err(ApiError::new(
-                    ErrorCode::Busy,
+                return Err(Error::new(
+                    Code::Busy,
                     "A Node release upgrade is in progress",
                 ));
             }
             adapter_setup::idle(t)?;
             prefix = Some(
                 managed::prefix_lock(&cfg.steve_home, true)
-                    .map_err(|e| ApiError::new(ErrorCode::Busy, e))?,
+                    .map_err(|e| Error::new(Code::Busy, e))?,
             );
             changed = recheck_components(&self.0, &components, &c.body)?;
             t.set_installation(&format!("upgrade:{id}"), &c.id)?;
@@ -323,7 +323,7 @@ impl LocalNode {
                     Err(e) => Observed::Finished {
                         outcome: Outcome::Failed,
                         result: None,
-                        error: Some(ApiError::new(ErrorCode::Internal, e)),
+                        error: Some(Error::new(Code::Internal, e)),
                     },
                 };
                 if inner.j.tx(|t| t.set_state(&op, &state)).is_err() {
@@ -355,8 +355,8 @@ fn upgrade_packages(
     let cfg = &inner.cfg.acp;
     let id = &c.body.harness;
     if !cfg.managed_adapter(id) || c.body.versions.is_empty() {
-        return Err(ApiError::new(
-            ErrorCode::Unsupported,
+        return Err(Error::new(
+            Code::Unsupported,
             "Only installed components in this Node's managed prefix may be upgraded",
         ));
     }
@@ -368,16 +368,16 @@ fn upgrade_packages(
             let spec = components
                 .iter()
                 .find(|s| s.id == component)
-                .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "Unknown component id"))?;
+                .ok_or_else(|| Error::new(Code::Invalid, "Unknown component id"))?;
             if !owned(cfg, id, spec) {
-                return Err(ApiError::new(
-                    ErrorCode::Denied,
+                return Err(Error::new(
+                    Code::Forbidden,
                     "The selected component is external, missing or overridden; manage it on the Node",
                 ));
             }
             let installed = installed(spec).ok_or_else(|| {
-                ApiError::new(
-                    ErrorCode::Stale,
+                Error::new(
+                    Code::Stale,
                     "Component changed during the version read; refresh and retry",
                 )
             })?;
@@ -389,8 +389,8 @@ fn upgrade_packages(
                     || check.and_then(|v| v.latest.as_ref()) != Some(target)
                     || !managed::newer(target, &installed)
                 {
-                    return Err(ApiError::new(
-                        ErrorCode::Stale,
+                    return Err(Error::new(
+                        Code::Stale,
                         "Component versions changed or have not been checked on this Node; refresh before upgrading",
                     ));
                 }
@@ -418,14 +418,14 @@ fn recheck_components(
             .find(|s| s.id == component)
             .expect("validated");
         if !owned(cfg, id, spec) || installed(spec).is_some_and(|v| managed::newer(&v, target)) {
-            return Err(ApiError::new(
-                ErrorCode::Stale,
+            return Err(Error::new(
+                Code::Stale,
                 "Components changed before admission; refresh and retry",
             ));
         }
         let current = installed(spec).ok_or_else(|| {
-            ApiError::new(
-                ErrorCode::Stale,
+            Error::new(
+                Code::Stale,
                 "Component changed before admission; refresh and retry",
             )
         })?;
@@ -437,8 +437,8 @@ fn recheck_components(
             if check.and_then(|v| v.latest.as_ref()) != Some(target)
                 || !managed::newer(target, &current)
             {
-                return Err(ApiError::new(
-                    ErrorCode::Stale,
+                return Err(Error::new(
+                    Code::Stale,
                     "Refresh component versions before retrying",
                 ));
             }

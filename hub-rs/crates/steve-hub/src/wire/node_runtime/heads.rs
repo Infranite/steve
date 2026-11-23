@@ -66,7 +66,7 @@ pub async fn read_snapshot(node: &dyn Node, limit: u32) -> ApiResult<NodeSnapsho
                     }
                 }
             }
-            Err(e) if e.code == ErrorCode::Expired && restarts < 3 => {
+            Err(e) if e.code == Code::Stale && restarts < 3 => {
                 restarts += 1;
                 entries.clear();
                 heads.clear();
@@ -125,7 +125,7 @@ pub async fn catch_up_streams(
     heads: &[StreamHead],
     pull_with: Option<Pull<'_>>,
 ) -> ApiResult<CaughtUp> {
-    let internal = |e: StoreError| ApiError::new(ErrorCode::Internal, e.to_string());
+    let internal = |e: StoreError| Error::new(Code::Internal, e.to_string());
     let node_id = node.id().clone();
     let mut out = CaughtUp::default();
     let looked: Vec<(StreamHead, Head, bool)> = store
@@ -198,7 +198,7 @@ async fn confirm_ahead(
     }
     let fresh = store
         .write(|w| fault(w, node.id(), &now, hub, Fault::Ahead))
-        .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
+        .map_err(|e| Error::new(Code::Internal, e.to_string()))?;
     if fresh {
         out.faulted += 1;
     }
@@ -230,11 +230,11 @@ async fn pull(
                 b
             }
             // the next event alone is bigger than a page: once more in the largest one
-            Err(e) if e.code == ErrorCode::Exhausted && budget < with.largest => {
+            Err(e) if e.code == Code::Exhausted && budget < with.largest => {
                 budget = with.largest;
                 continue;
             }
-            Err(e) if e.code == ErrorCode::Exhausted => {
+            Err(e) if e.code == Code::Exhausted => {
                 tracing::warn!(
                     "node {}: replay of {} from {from}: {e}; left to push",
                     node.id(),
@@ -242,7 +242,7 @@ async fn pull(
                 );
                 return Ok(());
             }
-            Err(e) if e.code == ErrorCode::Gap => {
+            Err(e) if e.code == Code::Gap => {
                 match recover_replay_gap(store, node, h, from, out, e).await? {
                     std::ops::ControlFlow::Continue(hub) => {
                         from = hub;
@@ -261,8 +261,8 @@ async fn pull(
             })
             .collect();
         if events.is_empty() {
-            return Err(ApiError::new(
-                ErrorCode::Internal,
+            return Err(Error::new(
+                Code::Internal,
                 format!(
                     "replay of {} from {from} brought nothing below its head {}",
                     h.stream, h.produced
@@ -272,7 +272,7 @@ async fn pull(
         let n = events.len();
         let ack = match (with.receive)(&EventBatch { events }) {
             Ok(a) => a,
-            Err(e) if e.code == ErrorCode::Denied => {
+            Err(e) if e.code == Code::Forbidden => {
                 tracing::warn!(
                     "node {}: replay of {} from {from} refused: {e}",
                     node.id(),
@@ -289,8 +289,8 @@ async fn pull(
             .find(|w| w.stream == h.stream && w.epoch == h.epoch)
             .map_or(from, |w| w.seq);
         if next <= from {
-            return Err(ApiError::new(
-                ErrorCode::Internal,
+            return Err(Error::new(
+                Code::Internal,
                 format!("replay of {} from {from} was not taken in", h.stream),
             ));
         }
@@ -306,9 +306,9 @@ async fn recover_replay_gap(
     h: &StreamHead,
     from: u64,
     out: &mut CaughtUp,
-    e: ApiError,
+    e: Error,
 ) -> ApiResult<std::ops::ControlFlow<(), u64>> {
-    let internal = |e: StoreError| ApiError::new(ErrorCode::Internal, e.to_string());
+    let internal = |e: StoreError| Error::new(Code::Internal, e.to_string());
     // the Node dropped what the Hub lacks, or its journal changed since the snapshot:
     // what both hold now decides
     let now = node
@@ -427,7 +427,7 @@ impl NodeRuntime {
     /// Brings what the Hub applied up to the Node's heads ([`catch_up_streams`]): replayed events
     /// are applied as they come.
     pub(super) async fn catch_up(&self, heads: &[StreamHead]) -> ApiResult<CaughtUp> {
-        let internal = |e: StoreError| ApiError::new(ErrorCode::Internal, e.to_string());
+        let internal = |e: StoreError| Error::new(Code::Internal, e.to_string());
         let check = self.replay_check.get().cloned();
         let receive = |b: &EventBatch| {
             if let Some(check) = &check {

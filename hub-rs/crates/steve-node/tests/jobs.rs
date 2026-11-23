@@ -182,7 +182,7 @@ impl T {
                         *opened.lock().unwrap() = Some(n);
                         true
                     }
-                    Err(e) if e.code == ErrorCode::Conflict => {
+                    Err(e) if e.code == Code::Conflict => {
                         *last_conflict.lock().unwrap() = Some(e);
                         false
                     }
@@ -257,7 +257,7 @@ impl HubFiles for Files {
             .unwrap()
             .get(id.as_str())
             .cloned()
-            .ok_or_else(|| ApiError::new(ErrorCode::Denied, "not granted"))?;
+            .ok_or_else(|| Error::new(Code::Forbidden, "not granted"))?;
         let from = (o as usize).min(b.len());
         let to = (from + m as usize).min(b.len());
         Ok(ReadChunk {
@@ -267,19 +267,19 @@ impl HubFiles for Files {
         })
     }
     async fn begin_upload(&self, _b: BeginUpload) -> ApiResult<Transfer> {
-        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+        Err(Error::new(Code::Unsupported, "x"))
     }
     async fn upload(&self, _c: BlobChunk) -> ApiResult<Transfer> {
-        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+        Err(Error::new(Code::Unsupported, "x"))
     }
     async fn upload_status(&self, _t: TransferId) -> ApiResult<TransferState> {
-        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+        Err(Error::new(Code::Unsupported, "x"))
     }
     async fn finish_upload(&self, _t: TransferId) -> ApiResult<ArtifactRef> {
-        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+        Err(Error::new(Code::Unsupported, "x"))
     }
     async fn abort_upload(&self, _t: TransferId) -> ApiResult<TransferState> {
-        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+        Err(Error::new(Code::Unsupported, "x"))
     }
 }
 
@@ -643,7 +643,7 @@ async fn a_job_past_its_deadline_times_out() {
         (c.outcome, c.stop_reason.as_str()),
         (Outcome::TimedOut, "timeout")
     );
-    assert_eq!(c.error.map(|e| e.code), Some(ErrorCode::Expired));
+    assert_eq!(c.error.map(|e| e.code), Some(Code::Stale));
     // The deadline may expire during ACP startup on a loaded runner, before @hang writes
     // its prompt marker. Every adapter records its PID at startup, so check cleanup from
     // that log rather than requiring the prompt to beat a one-second deadline.
@@ -792,7 +792,7 @@ async fn a_job_command_runs_once_and_an_attempt_never_twice() {
         .start_job(now_cmd("op_j2", think("a_1", FAKE, "x")))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Conflict);
+    assert_eq!(e.code, Code::Conflict);
     assert_eq!(t.spawns(), 1);
 }
 
@@ -805,7 +805,7 @@ async fn what_this_node_cannot_run_is_refused() {
         .start_job(now_cmd("op_1", think("a_1", FAKE, "x")))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unsupported);
+    assert_eq!(e.code, Code::Unsupported);
     let caps = n.probe(false).await.unwrap();
     assert!(caps.harnesses.iter().all(|h| !h.jobs));
     n.shutdown().await;
@@ -829,13 +829,13 @@ async fn what_this_node_cannot_run_is_refused() {
         ("op_h", think("a_h", "gemini", "x")),
     ] {
         let e = n.start_job(now_cmd(op, spec)).await.unwrap_err();
-        assert_eq!(e.code, ErrorCode::Unsupported, "{op}");
+        assert_eq!(e.code, Code::Unsupported, "{op}");
     }
     let mut past = think("a_p", FAKE, "x");
     past.run.limits.deadline = Timestamp(wall() - 1);
     assert_eq!(
         n.start_job(now_cmd("op_p", past)).await.unwrap_err().code,
-        ErrorCode::Expired
+        Code::Stale
     );
     // one at a time with a capacity of one
     n.start_job(now_cmd("op_1", think("a_1", FAKE, "@hang")))
@@ -846,7 +846,7 @@ async fn what_this_node_cannot_run_is_refused() {
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Exhausted
+        Code::Exhausted
     );
     n.shutdown().await;
 }

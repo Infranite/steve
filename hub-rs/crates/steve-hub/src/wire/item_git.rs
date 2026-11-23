@@ -30,16 +30,16 @@ impl ItemGit {
             .ws
             .placement_of(Subject::Item(item))
             .map_err(|e| match e {
-                PlacementError::Offline { .. } => ApiError::new(ErrorCode::Offline, e.to_string()),
-                e => ApiError::new(ErrorCode::Internal, e.to_string()),
+                PlacementError::Offline { .. } => Error::new(Code::Unavailable, e.to_string()),
+                e => Error::new(Code::Internal, e.to_string()),
             })?;
         match &p.at {
             At::Workspace(w) => {
                 let w = w.clone();
                 Ok((p, w))
             }
-            At::Root(_) => Err(ApiError::new(
-                ErrorCode::Internal,
+            At::Root(_) => Err(Error::new(
+                Code::Internal,
                 "the item is in no workspace on its Node now",
             )),
         }
@@ -85,7 +85,7 @@ impl NodeGit for ItemGit {
             action,
         };
         if let Err(e) = p.runtime.submit(operation, subject, "git_apply", &body) {
-            return Applied::Failed(ApiError::new(ErrorCode::Internal, e.to_string()));
+            return Applied::Failed(Error::new(Code::Internal, e.to_string()));
         }
         let t0 = Instant::now();
         loop {
@@ -107,7 +107,7 @@ fn settled(e: super::node_runtime::LedgerEntry) -> Applied {
     match e.state.as_str() {
         "rejected" => Applied::Failed(
             e.refusal
-                .unwrap_or_else(|| ApiError::new(ErrorCode::Internal, "refused")),
+                .unwrap_or_else(|| Error::new(Code::Internal, "refused")),
         ),
         "unknown" => Applied::Unknown(match e.receipt.map(|r| r.state) {
             Some(Observed::Unknown { reason }) => reason,
@@ -121,8 +121,8 @@ fn settled(e: super::node_runtime::LedgerEntry) -> Applied {
             }) => Applied::Done(f),
             Some(Observed::Finished { error: Some(e), .. }) => Applied::Failed(e),
             Some(Observed::Unknown { reason }) => Applied::Unknown(reason),
-            other => Applied::Failed(ApiError::new(
-                ErrorCode::Internal,
+            other => Applied::Failed(Error::new(
+                Code::Internal,
                 format!("ended without its facts: {other:?}"),
             )),
         },

@@ -34,6 +34,7 @@ pub mod gateway;
 pub mod id;
 pub mod integrations;
 pub mod knowledge;
+pub mod orchestration;
 pub mod people;
 pub mod placement;
 pub mod raw;

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_modules::Caller;
 use steve_node_api::{
-    AdapterStatus, ErrorCode, HarnessCapability, HarnessSetup, Node, NodeId, SetupState,
+    AdapterStatus, Code, HarnessCapability, HarnessSetup, Node, NodeId, SetupState,
 };
 use steve_types::devices::HarnessDegradedReason;
 
@@ -224,7 +224,7 @@ impl Inventory {
                             Some("probe returned a different Node identity".into()),
                         ),
                         Ok(Err(e)) => (
-                            if e.code == ErrorCode::Unsupported {
+                            if e.code == Code::Unsupported {
                                 "unsupported"
                             } else {
                                 "failed"

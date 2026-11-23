@@ -4,7 +4,36 @@
 use crate::*;
 use serde::Serialize;
 
-pub const REASONS: &[ReasonSet] = &[];
+reasons! {
+    pub enum NodeReason = "node" {
+        Downgrade = downgrade [Invalid] (),
+        OperationNotFound = operation_not_found [Invalid] (),
+        SessionNotOpen = session_not_open [Invalid] (),
+        WorkspaceBindingConflict = workspace_binding_conflict [Conflict] (),
+        ToolRefused = tool_refused [Internal] (),
+    }
+    retired { }
+}
+reasons! {
+    pub enum NodeStopReason = "node_stop" {
+        Deadline = deadline [Stale] (),
+        JobDeadline = job_deadline [Stale] (),
+        HubUnreachable = hub_unreachable [Unavailable] (),
+        OutputLimit = output_limit [Exhausted] (),
+        FrameTooLarge = frame_too_large [Exhausted] (),
+        IngressStalled = ingress_stalled [Busy] (secs),
+        JournalBudget = journal_budget [Exhausted] (),
+        JournalFails = journal_fails [Internal] (),
+        NotRecorded = not_recorded [Internal] (),
+        HarnessGone = harness_gone [Unavailable] (),
+        AdapterExited = adapter_exited [Unavailable] (),
+        StoppedByNode = stopped_by_node [Internal] (),
+        HarnessIdle = harness_idle [Stale] (),
+        ResearchBudget = research_budget [Exhausted] (),
+    }
+    retired { }
+}
+pub const REASONS: &[ReasonSet] = &[NodeReason::SET, NodeStopReason::SET];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]

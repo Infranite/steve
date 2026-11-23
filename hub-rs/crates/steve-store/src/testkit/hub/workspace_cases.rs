@@ -69,7 +69,7 @@ pub fn record_existing_prepare(
 ) -> Result<()> {
     store.write(|tx| {
         tx.conn.execute("UPDATE node_commands SET request=json_set(request,'$.body.kind',json(?)) WHERE node_id='local' AND method='prepare_workspace' AND json_extract(request,'$.body.resource')='item:i1'", [serde_json::to_string(kind)?])?;
-        tx.conn.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated) VALUES('op_prep_s0','local','prepare_workspace',?,'d','finished',1,1)", [request])?;
+        tx.conn.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated,intent_purpose,intent_subject,intent_revision) VALUES('prepare:s0:r0','local','prepare_workspace',?,'d','finished',1,1,'prepare','s0',0)", [request])?;
         Ok(())
     })
 }
@@ -118,7 +118,9 @@ pub fn seed_permission_modes(store: &Store, bots: &[Option<&str>]) -> Result<()>
 
 pub fn seed_item_and_active_session(store: &Store, item: &str, session: &str) -> Result<()> {
     store.write(|tx| {
-        tx.conn.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES (?,'default',1,'t','run','执行',1,1)", [item])?;
+        tx.conn.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated)
+            SELECT ?,'default',COALESCE(MAX(no)+1,1),'t','run','执行',1,1
+            FROM items WHERE workspace_id='default'", [item])?;
         tx.conn.execute("INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES (?,'default',?,'claude-code','.','active',1,1)", [session, item])?;
         Ok(())
     })

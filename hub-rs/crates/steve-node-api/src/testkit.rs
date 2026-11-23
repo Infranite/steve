@@ -29,6 +29,7 @@ use crate::ids::*;
 use crate::ports::*;
 use crate::run::*;
 use crate::workspace::*;
+use crate::{NodeReason, Retry};
 
 fn id<T: TryFrom<String>>(s: impl Into<String>) -> T
 where
@@ -131,9 +132,9 @@ struct State {
     capacity: Option<Capacity>,
     delivery_failures: u64,
     /// Refusals the test asked for, by method, used up in order.
-    refusals: Vec<(&'static str, ApiError)>,
-    /// Methods refused with this code until told otherwise.
-    refused: HashMap<&'static str, ErrorCode>,
+    refusals: Vec<(&'static str, Error)>,
+    /// Methods refused with this error until told otherwise.
+    refused: HashMap<&'static str, Error>,
     /// What the next commands of a method do instead of the normal answer, in order.
     scripted: HashMap<&'static str, std::collections::VecDeque<Scripted>>,
     /// The most sessions open (not released) in one workspace at once, by workspace.
@@ -186,7 +187,7 @@ enum Admitted {
 #[derive(Debug, Clone)]
 pub enum Scripted {
     /// Refused before anything is recorded.
-    Refuse(ApiError),
+    Refuse(Error),
     /// Recorded and decided as normal, the answer lost on the way back.
     DropReply,
     /// Recorded, then the Node cannot tell what it did: its receipt is unknown, nothing else happens.
@@ -366,7 +367,7 @@ impl FakeNode {
     }
 
     /// The next command of `method` is refused with `e` before anything is decided (nothing runs).
-    pub fn refuse_next(&self, method: &'static str, e: ApiError) {
+    pub fn refuse_next(&self, method: &'static str, e: Error) {
         self.st().refusals.push((method, e));
     }
 
@@ -445,8 +446,8 @@ impl FakeNode {
     }
 
     /// Refuse every `method` with `code` before recording it (`None`: stop refusing).
-    pub fn refuse(&self, method: &'static str, code: Option<ErrorCode>) {
-        match code {
+    pub fn refuse(&self, method: &'static str, error: Option<Error>) {
+        match error {
             Some(c) => self.st().refused.insert(method, c),
             None => self.st().refused.remove(method),
         };
@@ -550,10 +551,8 @@ impl FakeNode {
                 return if a.digest == digest && a.method == method {
                     Ok(a.receipt.clone())
                 } else {
-                    Err(
-                        ApiError::new(ErrorCode::Conflict, "same operation, other content")
-                            .on(&c.id),
-                    )
+                    Err(Error::new(Code::Conflict, "same operation, other content")
+                        .with_param("operation", c.id.to_string()))
                 };
             }
             check(&st)?;
@@ -572,8 +571,8 @@ impl FakeNode {
         c: &Command<T>,
         digest: &Digest,
     ) -> ApiResult<Admitted> {
-        if let Some(code) = st.refused.get(method) {
-            return Err(ApiError::new(*code, "refused by the test").on(&c.id));
+        if let Some(error) = st.refused.get(method) {
+            return Err(error.clone().with_param("operation", c.id.to_string()));
         }
         let script = if st.inbox.contains_key(&c.id) {
             None
@@ -591,14 +590,20 @@ impl FakeNode {
             return if a.digest == *digest && a.method == method {
                 Ok(Admitted::Resend(a.receipt.clone()))
             } else {
-                Err(ApiError::new(ErrorCode::Conflict, "same operation, other content").on(&c.id))
+                Err(Error::new(Code::Conflict, "same operation, other content")
+                    .with_param("operation", c.id.to_string()))
             };
         }
         if st.now > c.accept_before.0 {
-            return Err(ApiError::new(ErrorCode::Stale, "past accept_before").on(&c.id));
+            return Err(Error::new(Code::Stale, "past accept_before")
+                .with_param("operation", c.id.to_string()));
         }
         if let Some(i) = st.refusals.iter().position(|(m, _)| *m == method) {
-            return Err(st.refusals.remove(i).1.on(&c.id));
+            return Err(st
+                .refusals
+                .remove(i)
+                .1
+                .with_param("operation", c.id.to_string()));
         }
         Ok(Admitted::New {
             drop_reply,
@@ -658,7 +663,10 @@ impl FakeNode {
         // a Hub that cannot take the events now gets them on replay: the command stays accepted
         self.deliver(events).await;
         if drop_reply {
-            return Err(ApiError::uncertain(&c.id, "the answer was lost (scripted)"));
+            return Err(
+                Error::outcome_unknown(&c.id, "the answer was lost (scripted)")
+                    .retry(Retry::Later { after_ms: None }),
+            );
         }
         Ok(receipt)
     }
@@ -733,19 +741,13 @@ impl FakeNode {
         let mut st = self.st();
         for w in &ack.durable {
             let Some(s) = st.streams.get_mut(&w.stream) else {
-                return Err(ApiError::new(
-                    ErrorCode::Invalid,
-                    "ack of an unknown stream",
-                ));
+                return Err(Error::new(Code::Invalid, "ack of an unknown stream"));
             };
             if s.epoch != w.epoch {
-                return Err(ApiError::new(ErrorCode::Stale, "ack of another epoch"));
+                return Err(Error::new(Code::Stale, "ack of another epoch"));
             }
             if w.seq > s.produced {
-                return Err(ApiError::new(
-                    ErrorCode::Invalid,
-                    "ack ahead of what was produced",
-                ));
+                return Err(Error::new(Code::Invalid, "ack ahead of what was produced"));
             }
             if w.seq > s.acknowledged {
                 s.acknowledged = w.seq;
@@ -760,13 +762,13 @@ impl FakeNode {
         match st.attempts.get(exec.attempt()) {
             Some((e, op)) if e == exec => match st.inbox.get(op) {
                 Some(a) if !a.receipt.state.is_finished() => Ok(op.clone()),
-                _ => Err(ApiError::new(ErrorCode::Stale, "that attempt is over")),
+                _ => Err(Error::new(Code::Stale, "that attempt is over")),
             },
-            Some(_) => Err(ApiError::new(
-                ErrorCode::Invalid,
+            Some(_) => Err(Error::new(
+                Code::Invalid,
                 "the attempt belongs to another execution",
             )),
-            None => Err(ApiError::new(ErrorCode::Invalid, "no such attempt")),
+            None => Err(Error::new(Code::Invalid, "no such attempt")),
         }
     }
 
@@ -779,7 +781,7 @@ impl FakeNode {
                     Self::live_op(&st, e)?;
                 }
                 Subject::Session { session } if !st.sessions.contains_key(session) => {
-                    return Err(ApiError::new(ErrorCode::Invalid, "no such session"));
+                    return Err(NodeReason::session_not_open("no such session"));
                 }
                 _ => {}
             }
@@ -798,21 +800,15 @@ impl FakeNode {
                 return if *old == req {
                     Ok(())
                 } else {
-                    Err(ApiError::new(
-                        ErrorCode::Conflict,
-                        "another request with this id",
-                    ))
+                    Err(Error::new(Code::Conflict, "another request with this id"))
                 };
             }
             if st.resolved.contains_key(&req.id) {
-                return Err(ApiError::new(
-                    ErrorCode::Conflict,
-                    "this request was answered",
-                ));
+                return Err(Error::new(Code::Conflict, "this request was answered"));
             }
             if permission_digest(&req.action, &req.preconditions)? != req.digest {
-                return Err(ApiError::new(
-                    ErrorCode::Invalid,
+                return Err(Error::new(
+                    Code::Invalid,
                     "digest does not match the action",
                 ));
             }
@@ -846,8 +842,8 @@ impl FakeNode {
         if let Some(r) = &completion.job
             && !r.end.fits(completion.outcome)
         {
-            return Err(ApiError::new(
-                ErrorCode::Invalid,
+            return Err(Error::new(
+                Code::Invalid,
                 "the job's end contradicts its outcome",
             ));
         }
@@ -856,12 +852,12 @@ impl FakeNode {
             let op = match st.attempts.get(exec.attempt()) {
                 Some((e, op)) if e == exec => op.clone(),
                 Some(_) => {
-                    return Err(ApiError::new(
-                        ErrorCode::Invalid,
+                    return Err(Error::new(
+                        Code::Invalid,
                         "the attempt belongs to another execution",
                     ));
                 }
-                None => return Err(ApiError::new(ErrorCode::Invalid, "no such attempt")),
+                None => return Err(Error::new(Code::Invalid, "no such attempt")),
             };
             let final_state = Observed::Finished {
                 outcome: completion.outcome,
@@ -869,19 +865,13 @@ impl FakeNode {
                 error: completion.error.clone(),
             };
             let Some(a) = st.inbox.get_mut(&op) else {
-                return Err(ApiError::new(
-                    ErrorCode::Internal,
-                    "attempt without operation",
-                ));
+                return Err(Error::new(Code::Internal, "attempt without operation"));
             };
             if a.receipt.state.is_finished() {
                 return if a.receipt.state == final_state {
                     Ok(())
                 } else {
-                    Err(ApiError::new(
-                        ErrorCode::Conflict,
-                        "already ended otherwise",
-                    ))
+                    Err(Error::new(Code::Conflict, "already ended otherwise"))
                 };
             }
             a.receipt.state = final_state;
@@ -996,7 +986,7 @@ impl FakeNode {
                     let (outcome, stop, error, end) = if a.cancel_requested {
                         (Outcome::Cancelled, "cancelled", None, JobEnd::Stopped)
                     } else if spec.run.limits.deadline.0 <= st.now {
-                        let e = ApiError::new(ErrorCode::Expired, "deadline passed");
+                        let e = Error::new(Code::Stale, "deadline passed");
                         let end = JobEnd::Budget {
                             hit: BudgetHit::Time,
                         };
@@ -1049,8 +1039,8 @@ impl FakeNode {
         if let SandboxRequirement::Required { guarantees } = &p.sandbox
             && !guarantees.is_empty()
         {
-            return Err(ApiError::new(
-                ErrorCode::Unsupported,
+            return Err(Error::new(
+                Code::Unsupported,
                 "the fake enforces no sandbox",
             ));
         }
@@ -1070,10 +1060,7 @@ impl FakeNode {
                     match st.workspaces.get(&workspace.id) {
                         Some(w) if w.view.revision == *revision => {}
                         _ => {
-                            return Err(ApiError::new(
-                                ErrorCode::Stale,
-                                "the workspace changed since",
-                            ));
+                            return Err(Error::new(Code::Stale, "the workspace changed since"));
                         }
                     }
                 }
@@ -1087,14 +1074,11 @@ impl FakeNode {
 
     fn check_run(st: &State, run: &RunSpec) -> ApiResult<()> {
         if run.choice.harness != HARNESS {
-            return Err(ApiError::new(
-                ErrorCode::Unsupported,
-                "no such harness here",
-            ));
+            return Err(Error::new(Code::Unsupported, "no such harness here"));
         }
         Self::check_policy(&run.policy)?;
         if run.limits.deadline.0 <= st.now {
-            return Err(ApiError::new(ErrorCode::Expired, "deadline already passed"));
+            return Err(Error::new(Code::Stale, "deadline already passed"));
         }
         Ok(())
     }
@@ -1103,11 +1087,11 @@ impl FakeNode {
         if let Some((_, other)) = st.attempts.get(exec.attempt())
             && other != op
         {
-            return Err(ApiError::new(
-                ErrorCode::Conflict,
+            return Err(Error::new(
+                Code::Conflict,
                 "this attempt already ran under another operation",
             )
-            .on(op));
+            .with_param("operation", op.to_string()));
         }
         st.attempts
             .insert(exec.attempt().clone(), (exec.clone(), op.clone()));
@@ -1116,7 +1100,7 @@ impl FakeNode {
 
     fn mine(&self, w: &WorkspaceRef) -> ApiResult<()> {
         if w.node != self.node {
-            return Err(ApiError::new(ErrorCode::Denied, "another node's workspace"));
+            return Err(Error::new(Code::Forbidden, "another node's workspace"));
         }
         Ok(())
     }
@@ -1126,18 +1110,18 @@ impl FakeNode {
             .iter()
             .find(|r| r.id == *root)
             .map(|r| r.access)
-            .ok_or_else(|| ApiError::new(ErrorCode::Denied, "not an allowed root"))
+            .ok_or_else(|| Error::new(Code::Forbidden, "not an allowed root"))
     }
 
     /// A workspace commands and git may change: it exists and its root (as it is now) is writable.
     fn writable(st: &State, w: &WorkspaceRef) -> ApiResult<()> {
         let Some(ws) = st.workspaces.get(&w.id) else {
-            return Err(ApiError::new(ErrorCode::Invalid, "no such workspace"));
+            return Err(Error::new(Code::Invalid, "no such workspace"));
         };
         if let Some(r) = &ws.root
             && Self::root_access(st, r)? == RootAccess::ReadOnly
         {
-            return Err(ApiError::new(ErrorCode::Denied, "a readonly root"));
+            return Err(Error::new(Code::Forbidden, "a readonly root"));
         }
         Ok(())
     }
@@ -1168,7 +1152,7 @@ impl FakeNode {
                 secrets
                     .take(op.clone(), r.id.clone())
                     .await
-                    .map_err(|e| e.on(op))?,
+                    .map_err(|e| e.with_param("operation", op.to_string()))?,
             );
         }
         Ok(out)
@@ -1192,10 +1176,7 @@ impl FakeNode {
 }
 
 fn unsupported<T>(what: &str) -> ApiResult<T> {
-    Err(ApiError::new(
-        ErrorCode::Unsupported,
-        format!("fake node: {what}"),
-    ))
+    Err(Error::new(Code::Unsupported, format!("fake node: {what}")))
 }
 
 /// The remainder of `p` below `base` (`""` for `base` itself), or `None` outside it.
@@ -1219,7 +1200,7 @@ fn page_of<T: Clone>(items: &[T], page: &PageRequest) -> ApiResult<(Vec<T>, Opti
             .strip_prefix('o')
             .and_then(|n| n.parse::<usize>().ok())
             .filter(|n| *n <= items.len())
-            .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "bad cursor"))?,
+            .ok_or_else(|| Error::new(Code::Invalid, "bad cursor"))?,
     };
     let to = (from + page.limit.max(1) as usize).min(items.len());
     let next = (to < items.len()).then(|| id(format!("o{to}")));
@@ -1252,19 +1233,18 @@ impl HubSecrets for FakeSecrets {
     async fn take(&self, operation: OperationId, secret: String) -> ApiResult<SecretBytes> {
         let mut held = self.held.lock().unwrap();
         match held.get(&secret) {
-            Some((op, _)) if *op != operation => Err(ApiError::new(
-                ErrorCode::Denied,
-                "a secret of another operation",
-            )),
+            Some((op, _)) if *op != operation => {
+                Err(Error::new(Code::Forbidden, "a secret of another operation"))
+            }
             Some(_) => {
                 let (_, bytes) = held.remove(&secret).unwrap();
                 self.taken.lock().unwrap().push((operation, secret));
                 Ok(SecretBytes::new(bytes))
             }
             None if self.taken.lock().unwrap().iter().any(|(_, s)| *s == secret) => {
-                Err(ApiError::new(ErrorCode::Stale, "already taken"))
+                Err(Error::new(Code::Stale, "already taken"))
             }
-            None => Err(ApiError::new(ErrorCode::Denied, "no such secret")),
+            None => Err(Error::new(Code::Forbidden, "no such secret")),
         }
     }
 }
@@ -1276,26 +1256,23 @@ impl SessionExecutor for FakeNode {
         self.accept("open_session", &c, |st| {
             let o = &c.body;
             if o.choice.harness != HARNESS {
-                return Err(ApiError::new(
-                    ErrorCode::Unsupported,
-                    "no such harness here",
-                ));
+                return Err(Error::new(Code::Unsupported, "no such harness here"));
             }
             Self::check_policy(&o.policy)?;
             let Some(incarnation) = st.workspaces.get(&o.workspace.id).map(|w| w.incarnation)
             else {
-                return Err(ApiError::new(ErrorCode::Invalid, "no such workspace"));
+                return Err(Error::new(Code::Invalid, "no such workspace"));
             };
             if let Some(s) = st.sessions.get(&o.session) {
                 if st.active.contains_key(&o.session) {
-                    return Err(ApiError::new(ErrorCode::Busy, "an attempt is running"));
+                    return Err(Error::later(Code::Busy, "an attempt is running"));
                 }
                 if s.view.phase != SessionPhase::Released {
-                    return Err(ApiError::new(ErrorCode::Conflict, "already open"));
+                    return Err(Error::new(Code::Conflict, "already open"));
                 }
                 if s.open.workspace != o.workspace || s.open.choice.harness != o.choice.harness {
-                    return Err(ApiError::new(
-                        ErrorCode::Conflict,
+                    return Err(Error::new(
+                        Code::Conflict,
                         "reopened in another workspace or harness",
                     ));
                 }
@@ -1345,20 +1322,17 @@ impl SessionExecutor for FakeNode {
         self.accept("configure_session", &c, |st| {
             let b = &c.body;
             if st.active.contains_key(&b.session) {
-                return Err(ApiError::new(ErrorCode::Busy, "an attempt is running"));
+                return Err(Error::later(Code::Busy, "an attempt is running"));
             }
             let Some(s) = st.sessions.get_mut(&b.session) else {
-                return Err(ApiError::new(ErrorCode::Invalid, "session not open"));
+                return Err(NodeReason::session_not_open("session not open"));
             };
             if s.view.revision != b.expected {
-                return Err(ApiError::new(
-                    ErrorCode::Conflict,
-                    "the session changed since",
-                ));
+                return Err(Error::new(Code::Conflict, "the session changed since"));
             }
             if b.choice.harness != s.open.choice.harness {
-                return Err(ApiError::new(
-                    ErrorCode::Invalid,
+                return Err(Error::new(
+                    Code::Invalid,
                     "another harness needs another session",
                 ));
             }
@@ -1366,7 +1340,7 @@ impl SessionExecutor for FakeNode {
             // everything checked: now change it
             let revision = Self::revision(st);
             let Some(s) = st.sessions.get_mut(&b.session) else {
-                return Err(ApiError::new(ErrorCode::Internal, "session vanished"));
+                return Err(Error::new(Code::Internal, "session vanished"));
             };
             s.open.choice = b.choice.clone();
             s.open.policy = b.policy.clone();
@@ -1396,30 +1370,28 @@ impl SessionExecutor for FakeNode {
         self.accept("start_turn", &c, |st| {
             let t = &c.body;
             let Some(s) = st.sessions.get(&t.session) else {
-                return Err(ApiError::new(ErrorCode::Invalid, "session not open"));
+                return Err(NodeReason::session_not_open("session not open"));
             };
             if s.view.phase == SessionPhase::Released {
-                return Err(ApiError::new(
-                    ErrorCode::Invalid,
+                return Err(NodeReason::session_not_open(
                     "session released: open it again",
                 ));
             }
             t.check_against(&s.open)?;
             let ws = s.open.workspace.clone();
             if st.workspaces.get(&ws.id).map(|w| w.incarnation) != Some(s.incarnation) {
-                return Err(ApiError::new(
-                    ErrorCode::Invalid,
+                return Err(NodeReason::session_not_open(
                     "the session's workspace is gone: open it again",
                 ));
             }
             Self::check_run(st, &t.run)?;
             if st.active.contains_key(&t.session) {
-                return Err(ApiError::new(ErrorCode::Busy, "an attempt is running"));
+                return Err(Error::later(Code::Busy, "an attempt is running"));
             }
             if let Some(cap) = &st.capacity
                 && Self::running(st).0 >= cap.sessions
             {
-                return Err(ApiError::new(ErrorCode::Exhausted, "no session capacity"));
+                return Err(Error::later(Code::Exhausted, "no session capacity"));
             }
             Self::take_attempt(st, &c.id, &exec)?;
             st.active.insert(t.session.clone(), exec.clone());
@@ -1441,17 +1413,17 @@ impl SessionExecutor for FakeNode {
     async fn session(&self, s: SessionId) -> ApiResult<SessionView> {
         match self.st().sessions.get(&s) {
             Some(x) => Ok(x.view.clone()),
-            None => Err(ApiError::new(ErrorCode::Invalid, "no such session")),
+            None => Err(NodeReason::session_not_open("no such session")),
         }
     }
 
     async fn release_session(&self, c: Command<SessionId>) -> ApiResult<Receipt> {
         self.accept("release_session", &c, |st| {
             if st.active.contains_key(&c.body) {
-                return Err(ApiError::new(ErrorCode::Busy, "an attempt is running"));
+                return Err(Error::later(Code::Busy, "an attempt is running"));
             }
             let Some(s) = st.sessions.get_mut(&c.body) else {
-                return Err(ApiError::new(ErrorCode::Invalid, "no such session"));
+                return Err(NodeReason::session_not_open("no such session"));
             };
             s.view.phase = SessionPhase::Released;
             let view = s.view.clone();
@@ -1482,7 +1454,7 @@ impl JobExecutor for FakeNode {
             if let Some(cap) = &st.capacity
                 && Self::running(st).1 >= cap.jobs
             {
-                return Err(ApiError::new(ErrorCode::Exhausted, "no job capacity"));
+                return Err(Error::later(Code::Exhausted, "no job capacity"));
             }
             Self::take_attempt(st, &c.id, &exec)?;
             st.jobs.insert(exec.attempt().clone());
@@ -1503,8 +1475,10 @@ impl JobExecutor for FakeNode {
 #[async_trait]
 impl ExecutionControl for FakeNode {
     async fn operation(&self, op: OperationId) -> ApiResult<Receipt> {
-        self.receipt(&op)
-            .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such operation").on(&op))
+        self.receipt(&op).ok_or_else(|| {
+            NodeReason::operation_not_found("no such operation")
+                .with_param("operation", op.to_string())
+        })
     }
 
     /// Records the intent (the cancel itself is done once recorded); the target ends when the test
@@ -1513,7 +1487,7 @@ impl ExecutionControl for FakeNode {
         let target = c.body.target.clone();
         self.accept("cancel", &c, |st| {
             let Some(a) = st.inbox.get_mut(&target) else {
-                return Err(ApiError::new(ErrorCode::Invalid, "no such operation"));
+                return Err(NodeReason::operation_not_found("no such operation"));
             };
             if !a.receipt.state.is_finished() {
                 a.cancel_requested = true;
@@ -1527,11 +1501,11 @@ impl ExecutionControl for FakeNode {
         let target = c.body.target.clone();
         self.accept("abandon", &c, |st| {
             let Some(a) = st.inbox.get(&target) else {
-                return Err(ApiError::new(ErrorCode::Invalid, "no such operation"));
+                return Err(NodeReason::operation_not_found("no such operation"));
             };
             if !matches!(a.receipt.state, Observed::Unknown { .. }) {
-                return Err(ApiError::new(
-                    ErrorCode::Conflict,
+                return Err(Error::new(
+                    Code::Conflict,
                     "only an unknown execution is abandoned (cancel a live one)",
                 ));
             }
@@ -1540,7 +1514,7 @@ impl ExecutionControl for FakeNode {
             let completion = Completion {
                 outcome: Outcome::Interrupted,
                 stop_reason: "abandoned".into(),
-                error: Some(ApiError::new(ErrorCode::OutcomeUnknown, "abandoned")),
+                error: Some(Error::new(Code::OutcomeUnknown, "abandoned")),
                 result: vec![],
                 continuation: None,
                 transient: false,
@@ -1600,10 +1574,10 @@ impl ExecutionControl for FakeNode {
         let target = c.body.target.clone();
         self.accept("recover", &c, |st| {
             let Some(a) = st.inbox.get(&target) else {
-                return Err(ApiError::new(ErrorCode::Invalid, "no such operation"));
+                return Err(NodeReason::operation_not_found("no such operation"));
             };
             if a.digest != c.body.expected || !matches!(a.receipt.state, Observed::Unknown { .. }) {
-                return Err(ApiError::new(ErrorCode::Stale, "recovery target changed"));
+                return Err(Error::new(Code::Stale, "recovery target changed"));
             }
             if a.execution.is_some() {
                 return unsupported("recover execution: use abandon");
@@ -1617,13 +1591,13 @@ impl ExecutionControl for FakeNode {
                         .is_some_and(|o| !matches!(o.receipt.state, Observed::Unknown { .. }))
                 })
             {
-                return Err(ApiError::new(ErrorCode::Busy, "session has live work"));
+                return Err(Error::later(Code::Busy, "session has live work"));
             }
             let state = Observed::Finished {
                 outcome: Outcome::Interrupted,
                 result: None,
-                error: Some(ApiError::new(
-                    ErrorCode::OutcomeUnknown,
+                error: Some(Error::new(
+                    Code::OutcomeUnknown,
                     "control retired; effects preserved, not replayed",
                 )),
             };
@@ -1666,25 +1640,19 @@ impl ExecutionControl for FakeNode {
         let res = c.body.clone();
         self.accept("resolve_permission", &c, |st| {
             let Some(req) = st.waiting.get(&res.id) else {
-                return Err(ApiError::new(
-                    ErrorCode::Stale,
-                    "nobody waits for this answer",
-                ));
+                return Err(Error::new(Code::Stale, "nobody waits for this answer"));
             };
             if req.execution != res.execution || req.digest != res.action_digest {
-                return Err(ApiError::new(
-                    ErrorCode::Stale,
+                return Err(Error::new(
+                    Code::Stale,
                     "the answer is for another attempt or action",
                 ));
             }
             if req.expires_at.0 <= st.now {
-                return Err(ApiError::new(ErrorCode::Expired, "the request expired"));
+                return Err(Error::new(Code::Stale, "the request expired"));
             }
             if !req.choices.contains(&res.decision) {
-                return Err(ApiError::new(
-                    ErrorCode::Invalid,
-                    "not one of the offered choices",
-                ));
+                return Err(Error::new(Code::Invalid, "not one of the offered choices"));
             }
             // checked again right before the approval is used
             if res.decision == PermissionDecision::AllowOnce {
@@ -1754,7 +1722,7 @@ impl ExecutionControl for FakeNode {
                 (token, 0usize)
             }
             Some(c) => {
-                let bad = || ApiError::new(ErrorCode::Invalid, "not a snapshot cursor");
+                let bad = || Error::new(Code::Invalid, "not a snapshot cursor");
                 let (t, o) = c
                     .as_str()
                     .strip_prefix("snap")
@@ -1764,7 +1732,7 @@ impl ExecutionControl for FakeNode {
             }
         };
         let Some((entries, heads)) = st.snapshots.get(&token) else {
-            return Err(ApiError::new(ErrorCode::Expired, "this snapshot is gone"));
+            return Err(Error::new(Code::Stale, "this snapshot is gone"));
         };
         let page: Vec<SnapshotEntry> = entries.iter().skip(offset).take(limit).cloned().collect();
         let heads = heads.clone();
@@ -1791,19 +1759,16 @@ impl ExecutionControl for FakeNode {
     async fn replay(&self, from: Watermark, max_bytes: u32) -> ApiResult<EventBatch> {
         let st = self.st();
         let Some(s) = st.streams.get(&from.stream) else {
-            return Err(ApiError::new(ErrorCode::Invalid, "no such stream"));
+            return Err(Error::new(Code::Invalid, "no such stream"));
         };
         if s.epoch != from.epoch {
-            return Err(ApiError::new(ErrorCode::Gap, "another stream epoch"));
+            return Err(Error::new(Code::Gap, "another stream epoch"));
         }
         if from.seq < s.acknowledged {
-            return Err(ApiError::new(
-                ErrorCode::Gap,
-                "already acknowledged and dropped",
-            ));
+            return Err(Error::new(Code::Gap, "already acknowledged and dropped"));
         }
         if from.seq > s.produced {
-            return Err(ApiError::new(ErrorCode::Invalid, "ahead of the stream"));
+            return Err(Error::new(Code::Invalid, "ahead of the stream"));
         }
         let mut events = vec![];
         let mut used = 0usize;
@@ -1811,8 +1776,8 @@ impl ExecutionControl for FakeNode {
             let n = serde_json::to_vec(e).map(|v| v.len()).unwrap_or(usize::MAX);
             if used.saturating_add(n) > max_bytes as usize {
                 if events.is_empty() {
-                    return Err(ApiError::new(
-                        ErrorCode::Exhausted,
+                    return Err(Error::new(
+                        Code::Exhausted,
                         "the next event does not fit in max_bytes",
                     ));
                 }
@@ -1843,21 +1808,20 @@ impl WorkspaceExecutor for FakeNode {
                 && !st.roots.is_empty()
                 && Self::root_access(st, r)? == RootAccess::ReadOnly
             {
-                return Err(ApiError::new(ErrorCode::Denied, "a readonly root"));
+                return Err(Error::new(Code::Forbidden, "a readonly root"));
             }
             if let PrepareKind::Worktree { at: Some(at), .. } = &c.body.kind
                 && !st.roots.is_empty()
                 && Self::root_access(st, &at.root)? == RootAccess::ReadOnly
             {
-                return Err(ApiError::new(ErrorCode::Denied, "a readonly root"));
+                return Err(Error::new(Code::Forbidden, "a readonly root"));
             }
             let spec = digest_of(&c.body.kind)?;
             let wid: WorkspaceId = id(derived_id("w", &c.body.resource));
             let view = match st.workspaces.get(&wid) {
                 Some(w) if w.resource == c.body.resource && w.spec == spec => w.view.clone(),
                 Some(_) => {
-                    return Err(ApiError::new(
-                        ErrorCode::Conflict,
+                    return Err(NodeReason::workspace_binding_conflict(
                         "this resource's workspace was prepared otherwise",
                     ));
                 }
@@ -1903,7 +1867,7 @@ impl WorkspaceExecutor for FakeNode {
             .workspaces
             .get(&w.id)
             .map(|x| x.view.clone())
-            .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))
+            .ok_or_else(|| Error::new(Code::Invalid, "no such workspace"))
     }
 
     async fn tidy_workspace(&self, c: Command<Tidy>) -> ApiResult<Receipt> {
@@ -1916,11 +1880,11 @@ impl WorkspaceExecutor for FakeNode {
                     && !a.receipt.state.is_finished()
             });
             if in_use {
-                return Err(ApiError::new(ErrorCode::Busy, "the workspace is in use"));
+                return Err(Error::later(Code::Busy, "the workspace is in use"));
             }
             match st.workspaces.get(&w.id) {
                 Some(x) if x.view.revision != c.body.expected => {
-                    Err(ApiError::new(ErrorCode::Conflict, "changed since"))
+                    Err(Error::new(Code::Conflict, "changed since"))
                 }
                 Some(_) => {
                     st.workspaces.remove(&w.id);
@@ -1933,7 +1897,7 @@ impl WorkspaceExecutor for FakeNode {
                     }
                     Ok(Decided::done(OperationResult::Unit))
                 }
-                None => Err(ApiError::new(ErrorCode::Invalid, "no such workspace")),
+                None => Err(Error::new(Code::Invalid, "no such workspace")),
             }
         })
         .await
@@ -1943,7 +1907,7 @@ impl WorkspaceExecutor for FakeNode {
         self.mine(&q.workspace)?;
         let st = self.st();
         if !st.workspaces.contains_key(&q.workspace.id) {
-            return Err(ApiError::new(ErrorCode::Invalid, "no such workspace"));
+            return Err(Error::new(Code::Invalid, "no such workspace"));
         }
         let Some(facts) = st.git.get(&q.workspace.id) else {
             return unsupported("git facts nobody scripted");
@@ -1968,11 +1932,10 @@ impl WorkspaceExecutor for FakeNode {
         let auth = match &c.body.action {
             GitAction::Push { auth: Some(a), .. } => {
                 if !matches!(a.how, SecretDelivery::Header { .. }) {
-                    return Err(ApiError::new(
-                        ErrorCode::Invalid,
-                        "a push credential goes as a header",
-                    )
-                    .on(&c.id));
+                    return Err(
+                        Error::new(Code::Invalid, "a push credential goes as a header")
+                            .with_param("operation", c.id.to_string()),
+                    );
                 }
                 vec![a.clone()]
             }
@@ -1986,7 +1949,7 @@ impl WorkspaceExecutor for FakeNode {
                 return unsupported("git facts nobody scripted");
             };
             if facts.revision != c.body.expected || facts.head != c.body.expected_head {
-                return Err(ApiError::new(ErrorCode::Stale, "changed since"));
+                return Err(Error::new(Code::Stale, "changed since"));
             }
             if let GitAction::Push {
                 branch,
@@ -2001,7 +1964,7 @@ impl WorkspaceExecutor for FakeNode {
                     .and_then(|(_, sha)| sha.as_ref())
                     .unwrap_or(&facts.head);
                 if local != expected_local {
-                    return Err(ApiError::new(ErrorCode::Stale, "the branch moved"));
+                    return Err(Error::new(Code::Stale, "the branch moved"));
                 }
             }
             Ok(())
@@ -2029,13 +1992,14 @@ impl WorkspaceExecutor for FakeNode {
             .iter()
             .any(|r| matches!(r.how, SecretDelivery::Header { .. }))
         {
-            return Err(ApiError::new(ErrorCode::Invalid, "a header is for a push only").on(&c.id));
+            return Err(Error::new(Code::Invalid, "a header is for a push only")
+                .with_param("operation", c.id.to_string()));
         }
         let check = |st: &State| -> ApiResult<()> {
             Self::writable(st, &c.body.workspace)?;
             Self::check_policy(&c.body.policy)?;
             if c.body.limits.deadline.0 <= st.now {
-                return Err(ApiError::new(ErrorCode::Expired, "deadline already passed"));
+                return Err(Error::new(Code::Stale, "deadline already passed"));
             }
             Ok(())
         };
@@ -2104,10 +2068,10 @@ impl WorkspaceExecutor for FakeNode {
         let st = self.st();
         Self::root_access(&st, &at.root)?;
         let Some(f) = st.files.get(&(at.root.clone(), at.rel.clone())) else {
-            return Err(ApiError::new(ErrorCode::Invalid, "no such file"));
+            return Err(Error::new(Code::Invalid, "no such file"));
         };
         if q.expected.as_ref().is_some_and(|v| *v != f.version) {
-            return Err(ApiError::new(ErrorCode::Conflict, "the file changed"));
+            return Err(Error::new(Code::Conflict, "the file changed"));
         }
         let from = (q.offset as usize).min(f.bytes.len());
         let to = (from + q.max as usize).min(f.bytes.len());
@@ -2126,7 +2090,7 @@ impl WorkspaceExecutor for FakeNode {
             .chain(&c.body.exclude)
             .any(|p| !crate::glob::valid_pattern(p))
         {
-            return Err(ApiError::new(ErrorCode::Invalid, "a scan pattern"));
+            return Err(Error::new(Code::Invalid, "a scan pattern"));
         }
         self.accept("scan", &c, |st| {
             let spec = &c.body;
@@ -2188,7 +2152,9 @@ impl WorkspaceExecutor for FakeNode {
     async fn scan_page(&self, scan: OperationId, page: PageRequest) -> ApiResult<ScanPage> {
         let st = self.st();
         let Some(s) = st.scans.get(&scan) else {
-            return Err(ApiError::new(ErrorCode::Invalid, "no such scan").on(&scan));
+            return Err(
+                Error::new(Code::Invalid, "no such scan").with_param("operation", scan.to_string())
+            );
         };
         // cursors name their scan: one from another scan is refused
         let d = digest_of(&scan)?;
@@ -2200,7 +2166,7 @@ impl WorkspaceExecutor for FakeNode {
                 .strip_prefix(&format!("s{tag}."))
                 .and_then(|n| n.parse::<usize>().ok())
                 .filter(|n| *n <= s.entries.len())
-                .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "not a cursor of this scan"))?,
+                .ok_or_else(|| Error::new(Code::Invalid, "not a cursor of this scan"))?,
         };
         let to = (from + page.limit.max(1) as usize).min(s.entries.len());
         let entries = s.entries[from..to].to_vec();
@@ -2230,10 +2196,7 @@ impl Discovery for FakeNode {
     async fn set_session_capacity(&self, sessions: u32) -> ApiResult<()> {
         let mut st = self.st();
         if !(1..=Capacity::SESSIONS_MAX).contains(&sessions) {
-            return Err(ApiError::new(
-                ErrorCode::Invalid,
-                "session capacity must be 1–256",
-            ));
+            return Err(Error::new(Code::Invalid, "session capacity must be 1–256"));
         }
         let cap = st.capacity.get_or_insert(Capacity {
             sessions: Capacity::SESSIONS_DEFAULT,
@@ -2327,10 +2290,7 @@ impl Discovery for FakeNode {
             return Ok(s.clone());
         }
         if st.upgrades.values().any(|s| !s.is_terminal()) {
-            return Err(ApiError::new(
-                ErrorCode::Busy,
-                "another upgrade is unfinished",
-            ));
+            return Err(Error::new(Code::Busy, "another upgrade is unfinished"));
         }
         let state = NodeUpgradeState {
             operation: u.operation.clone(),
@@ -2356,7 +2316,7 @@ impl Discovery for FakeNode {
             .map(|u| u.build.clone());
         let current = st.build.clone();
         let Some(state) = st.upgrades.get_mut(&s.operation) else {
-            return Err(ApiError::new(ErrorCode::Invalid, "no such upgrade"));
+            return Err(Error::new(Code::Invalid, "no such upgrade"));
         };
         if state.is_terminal() || state.phase != "staged" {
             return Ok(state.clone());
@@ -2368,13 +2328,13 @@ impl Discovery for FakeNode {
         }
         crate::upgrade_bridge::refuse_downgrade(
             &current
-                .ok_or_else(|| ApiError::new(ErrorCode::Unsupported, "no installed build"))?
+                .ok_or_else(|| Error::new(Code::Unsupported, "no installed build"))?
                 .version,
             &state.version,
         )
-        .map_err(ApiError::from)?;
+        .map_err(Error::from)?;
         if busy && !s.force {
-            return Err(ApiError::new(ErrorCode::Busy, "the node still runs work"));
+            return Err(Error::new(Code::Busy, "the node still runs work"));
         }
         let (phase, error) = outcome.unwrap_or(("succeeded".into(), None));
         state.phase = phase;
@@ -2391,7 +2351,7 @@ impl Discovery for FakeNode {
             .upgrades
             .get(&operation)
             .cloned()
-            .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such upgrade"))
+            .ok_or_else(|| Error::new(Code::Invalid, "no such upgrade"))
     }
     async fn remove_begin(&self, r: NodeRemove) -> ApiResult<NodeRemoveState> {
         let mut st = self.st();
@@ -2402,10 +2362,7 @@ impl Discovery for FakeNode {
             return Ok(s.clone());
         }
         if st.removals.values().any(|s| !s.is_terminal()) {
-            return Err(ApiError::new(
-                ErrorCode::Busy,
-                "another removal is unfinished",
-            ));
+            return Err(Error::new(Code::Busy, "another removal is unfinished"));
         }
         let state = NodeRemoveState {
             operation: r.operation.clone(),
@@ -2426,7 +2383,7 @@ impl Discovery for FakeNode {
             c.operation.clone(),
         ));
         let Some(state) = st.removals.get_mut(&c.operation) else {
-            return Err(ApiError::new(ErrorCode::Invalid, "no such removal"));
+            return Err(Error::new(Code::Invalid, "no such removal"));
         };
         if state.is_terminal() {
             return Ok(state.clone());
@@ -2434,7 +2391,7 @@ impl Discovery for FakeNode {
         if c.abandon {
             state.phase = "abandoned".into();
         } else if state.phase != "ready" {
-            return Err(ApiError::new(ErrorCode::Busy, "the node is still draining"));
+            return Err(Error::new(Code::Busy, "the node is still draining"));
         } else {
             state.phase = "removing".into();
         }
@@ -2446,7 +2403,7 @@ impl Discovery for FakeNode {
             .removals
             .get(&operation)
             .cloned()
-            .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such removal"))
+            .ok_or_else(|| Error::new(Code::Invalid, "no such removal"))
     }
     async fn history(&self, p: PageRequest) -> ApiResult<Page<HistoryEntry>> {
         let all: Vec<HistoryEntry> = self.st().history.iter().map(|(e, _)| e.clone()).collect();
@@ -2465,7 +2422,7 @@ impl Discovery for FakeNode {
             .iter()
             .find(|(e, _)| e.source == source)
             .map(|(_, l)| l.clone())
-            .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "not a history this node lists"))
+            .ok_or_else(|| Error::new(Code::Invalid, "not a history this node lists"))
     }
 }
 
@@ -2510,7 +2467,7 @@ impl RecordingSink {
 impl EventSink for RecordingSink {
     async fn commit(&self, batch: EventBatch) -> ApiResult<EventAck> {
         if *self.fail.lock().unwrap() {
-            return Err(ApiError::new(ErrorCode::Offline, "hub store unavailable"));
+            return Err(Error::later(Code::Unavailable, "hub store unavailable"));
         }
         let mut held = self.held.lock().unwrap();
         // the whole batch is checked (against itself and what is held) before anything is kept
@@ -2524,10 +2481,7 @@ impl EventSink for RecordingSink {
             let clash = held.get(&k).is_some_and(|old| old != e)
                 || seen.get(&k).is_some_and(|old| *old != e);
             if clash {
-                return Err(ApiError::new(
-                    ErrorCode::Conflict,
-                    "another event at this position",
-                ));
+                return Err(Error::new(Code::Conflict, "another event at this position"));
             }
             seen.insert(k, e);
         }

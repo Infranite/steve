@@ -699,8 +699,7 @@ async fn hub_restart_keeps_the_work_going_and_nothing_runs_twice() {
     );
     assert_eq!(attempts(&h, &sid, "unknown"), 0, "{}", dump(&h, &sid));
 
-    // the Node killed mid-turn: what it cannot tell the end of is never re-run; the Hub gives it
-    // up on its own once the restarted Node confirms its harness is gone (B6)
+    // A Node restart leaves the interrupted operation awaiting reconciliation.
     let c = Client::login(&h).await;
     c.say(&sid, "断电验收-K7 @sleep 600000").await;
     eventually_sync(
@@ -712,16 +711,13 @@ async fn hub_restart_keeps_the_work_going_and_nothing_runs_twice() {
     let _p = n.run();
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The interrupted Node attempt is recorded as abandoned after restart; the cut attempt is given up; {}\nhub:\n{}\nnode:\n{}",
+            "The interrupted Node attempt remains unknown after restart; {}\nhub:\n{}\nnode:\n{}",
             dump(&h, &sid),
             h.log(),
             n.log()
         )
     });
-    eventually_sync(diagnostic, || {
-        node_process::attempt_count_by_session_runtime_attempts(&h.db_path(), &sid).unwrap() == 1
-    })
-    .await;
+    eventually_sync(diagnostic, || attempts(&h, &sid, "unknown") == 1).await;
     // Deliberate cross-process quiet window: a late resend must still be observed.
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(n.got("断电验收-K7"), 1, "never re-run");
@@ -809,7 +805,7 @@ async fn another_nodes_session_is_refused() {
         })
         .await
         .expect_err("refused");
-    assert_eq!(e.code, ErrorCode::Denied);
+    assert_eq!(e.code, Code::Forbidden);
     assert_eq!(
         node_process::event_count_by_session_events(&h.db_path(), &sid).unwrap(),
         before
@@ -832,8 +828,8 @@ async fn another_nodes_session_is_refused() {
         })
         .await;
     assert!(
-        matches!(&r, Err(e) if e.code == ErrorCode::Denied)
-            || matches!(&r, Ok(ToolResult::Failed { error }) if error.code == ErrorCode::Denied),
+        matches!(&r, Err(e) if e.code == Code::Forbidden)
+            || matches!(&r, Ok(ToolResult::Failed { error }) if error.code == Code::Forbidden),
         "{r:?}"
     );
 
@@ -944,7 +940,7 @@ async fn another_nodes_session_is_refused() {
             .commit(batch.clone())
             .await
             .expect_err("a body naming another node's work is refused");
-        assert_eq!(e.code, ErrorCode::Denied, "{batch:?}");
+        assert_eq!(e.code, Code::Forbidden, "{batch:?}");
     }
     assert_eq!(
         node_process::decision_count_by_session(&h.db_path(), &sid).unwrap(),

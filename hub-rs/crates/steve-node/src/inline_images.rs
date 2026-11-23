@@ -304,7 +304,7 @@ async fn capture_reply_tail(
     *reply_spent += start.elapsed();
     match result {
         // A Hub without reply capture (no delivery service) gets the inline image path below.
-        Ok(Err(e)) if e.code == ErrorCode::Unsupported => ReplyCaptureResult::Unsupported,
+        Ok(Err(e)) if e.code == Code::Unsupported => ReplyCaptureResult::Unsupported,
         result => {
             let text = match result {
                 Ok(Ok(text)) if text.starts_with(&b.text[..b.emitted]) => text,
@@ -490,8 +490,8 @@ fn local_path(destination: &str) -> Option<String> {
     }
     Some(decoded)
 }
-fn invalid() -> ApiError {
-    ApiError::new(ErrorCode::Denied, "inline image unavailable")
+fn invalid() -> Error {
+    Error::new(Code::Forbidden, "inline image unavailable")
 }
 
 pub(crate) fn protected_path(rel: &Path, path: &Path, protected: &[PathBuf]) -> bool {
@@ -597,13 +597,10 @@ impl Drop for PendingUpload {
         }
     }
 }
-fn retryable(error: &ApiError) -> bool {
+fn retryable(error: &Error) -> bool {
     // Every blob method here is idempotent. An unknown/lost reply is safe to resume with the
     // same begin key; validation, permission and protocol errors cannot be repaired by resending.
-    matches!(
-        error.retry,
-        RetryClass::SameOperation | RetryClass::AfterReconcile
-    ) || error.code == ErrorCode::Internal
+    matches!(error.retry, Retry::Later { .. }) || error.code == Code::Internal
 }
 async fn abandon(files: Arc<dyn HubFiles>, begin: BeginUpload, mut id: Option<TransferId>) {
     for _ in 0..2 {
@@ -733,7 +730,7 @@ async fn upload(
                 // A Hub restart loses an in-memory transfer ID. Begin with the same key must
                 // recheck the execution grant before restarting bytes; a revoked grant still
                 // refuses it. Content/integrity errors remain terminal and are never retried.
-                let again = retryable(&e) || (pending.id.is_some() && e.code == ErrorCode::Denied);
+                let again = retryable(&e) || (pending.id.is_some() && e.code == Code::Forbidden);
                 last = e;
                 if !again {
                     break;
@@ -821,17 +818,14 @@ mod tests {
             if self.fault == Fault::FinishOffline
                 || (self.fault == Fault::FinishOfflineOnce && first)
             {
-                return Err(ApiError::new(ErrorCode::Offline, "lost reply"));
+                return Err(Error::later(Code::Unavailable, "lost reply"));
             }
             if self.fault == Fault::FinishDeniedOnce && first {
                 *self.bytes.lock().unwrap() = vec![];
-                return Err(ApiError::new(
-                    ErrorCode::Denied,
-                    "transfer registry restarted",
-                ));
+                return Err(Error::new(Code::Forbidden, "transfer registry restarted"));
             }
             if self.fault == Fault::FinishInvalid {
-                return Err(ApiError::new(ErrorCode::Invalid, "invalid image"));
+                return Err(Error::new(Code::Invalid, "invalid image"));
             }
             let m = self.manifest.lock().unwrap().clone().unwrap();
             Ok(ArtifactRef {

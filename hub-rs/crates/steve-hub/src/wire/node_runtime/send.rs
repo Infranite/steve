@@ -6,6 +6,20 @@ use steve_store::node_commands::dispatch;
 
 /// A worker's hold on a command it sends.
 const LEASE_MS: i64 = 60_000;
+const MAX_SENDS_PER_REVISION: i64 = 4;
+
+fn retry_at(lease: &rt::CommandLease, at: i64, retry: Retry) -> Option<i64> {
+    let Retry::Later { after_ms } = retry else {
+        return None;
+    };
+    let hint = after_ms
+        .and_then(|ms| i64::try_from(ms).ok())
+        .unwrap_or(if after_ms.is_some() { i64::MAX } else { 0 });
+    let delay = exhausted_delay(lease.generation).max(hint);
+    let due = at.saturating_add(delay);
+    let accept_before = lease.request["accept_before"].as_i64()?;
+    (lease.generation < MAX_SENDS_PER_REVISION && due <= accept_before).then_some(due)
+}
 
 impl NodeRuntime {
     // ── T2: sending ──
@@ -43,8 +57,10 @@ impl NodeRuntime {
 
     /// Leases one command, sends it and merges what came back. False: nothing to send.
     pub(super) async fn send_one(&self) -> bool {
+        if !self.node.observes_execution() {
+            return false;
+        }
         let lease = match self.send_tx(|tx| {
-            self.expire_capacity_waits_in(tx)?;
             self.note_waiting_in(tx)?;
             match node_write::lease_command_in(
                 tx,
@@ -53,8 +69,8 @@ impl NodeRuntime {
                 self.clock.now(),
                 self.clock.now() + LEASE_MS,
             )? {
-                Some(l) if !l.maybe_sent => {
-                    fresh_envelope_in(&self.store, l, self.clock.now()).map(Some)
+                Some(l) if l.generation == 1 => {
+                    freeze_first_envelope_in(&self.store, l, self.clock.now()).map(Some)
                 }
                 l => Ok(l),
             }
@@ -67,7 +83,20 @@ impl NodeRuntime {
             }
         };
         let sending = std::time::Instant::now();
-        let sent = self.send(&lease).await;
+        let sent = self.send(&lease).await.and_then(|receipt| {
+            if receipt.operation.as_str() == lease.operation {
+                return Ok(receipt);
+            }
+            Err(Error::outcome_unknown(
+                &lease.operation,
+                "receipt for another operation",
+            ))
+        });
+        let at = self.clock.now();
+        let due = sent
+            .as_ref()
+            .err()
+            .and_then(|e| retry_at(&lease, at, e.retry));
         self.meters.command(
             &lease.method,
             sent.as_ref().map(|_| ()).map_err(|e| e.code),
@@ -76,7 +105,7 @@ impl NodeRuntime {
         // a turn end to report, and a session whose configure was refused for a stale revision
         let r = self.send_tx(|tx| match &sent {
             Ok(receipt) => self.receipt_in(tx, receipt).map(|end| (end, None)),
-            Err(e) if e.code == ErrorCode::OutcomeUnknown && e.retry == RetryClass::Never => {
+            Err(e) if (lease.maybe_sent || e.code == Code::OutcomeUnknown) && due.is_none() => {
                 // Leasing already persisted maybe_sent=1. Do not resend or call this a refusal:
                 // the Node may have executed it. A later receipt/reconcile can settle unknown.
                 self.receipt_in(
@@ -88,23 +117,13 @@ impl NodeRuntime {
                 )
                 .map(|end| (end, None))
             }
-            Err(e)
-                if e.retry == RetryClass::SameOperation || e.code == ErrorCode::OutcomeUnknown =>
-            {
+            Err(e) if let Some(due) = due => {
                 // not refused for good, or maybe accepted: the very same command again later
-                let uncertain = e.retry != RetryClass::SameOperation;
-                let delay = if e.code == ErrorCode::Exhausted {
-                    self.exhausted_in(tx, &lease, e)?
-                } else {
-                    1_000
-                };
-                node_write::retry_command_in(
-                    tx,
-                    &lease,
-                    self.clock.now(),
-                    self.clock.now() + delay,
-                    uncertain,
-                )?;
+                let uncertain = lease.maybe_sent || e.code == Code::OutcomeUnknown;
+                if e.code == Code::Exhausted && !uncertain {
+                    self.exhausted_in(tx, &lease, e)?;
+                }
+                node_write::retry_command_in(tx, &lease, at, due, uncertain)?;
                 self.meters.retry(&lease.method);
                 if !uncertain && !lease.maybe_sent {
                     self.store
@@ -135,6 +154,10 @@ impl NodeRuntime {
                 Ok((None, None))
             }
             Err(e) => {
+                if !rt::refused_before_acceptance_in(tx, &lease)? {
+                    return Ok((None, None));
+                }
+                let e = &e.clone().retry(Retry::Never);
                 node_write::merge_receipt_in(
                     tx,
                     &lease.operation,
@@ -245,8 +268,8 @@ impl NodeRuntime {
         &self,
         tx: &mut W<'_>,
         lease: &rt::CommandLease,
-        e: &ApiError,
-    ) -> Result<i64, StoreError> {
+        e: &Error,
+    ) -> Result<(), StoreError> {
         let n = self
             .store
             .write(|w| dispatch::record_exhausted(w, &lease.operation, e))?;
@@ -259,13 +282,29 @@ impl NodeRuntime {
                 &steve_i18n::t!("hub.node.waiting_for_node", detail = e.safe_detail.as_str()),
             )?;
         }
-        Ok(exhausted_delay(n))
+        Ok(())
     }
 
     async fn send(&self, l: &rt::CommandLease) -> ApiResult<Receipt> {
+        if l.maybe_sent {
+            let id = OperationId::try_from(l.operation.clone())
+                .map_err(|e| Error::new(Code::Invalid, format!("stored command: {e}")))?;
+            // The operation might already have changed its Node. An unavailable journal
+            // or a missing receipt cannot authorize another business command.
+            return self.node.operation(id).await;
+        }
+        if l.generation > MAX_SENDS_PER_REVISION {
+            return Err(Error::new(Code::Exhausted, "command send budget exhausted"));
+        }
+        if l.request["accept_before"]
+            .as_i64()
+            .is_none_or(|end| self.clock.now() > end)
+        {
+            return Err(Error::new(Code::Stale, "command acceptance window ended"));
+        }
         fn parse<T: serde::de::DeserializeOwned>(v: &Value) -> ApiResult<Command<T>> {
             serde_json::from_value(v.clone())
-                .map_err(|e| ApiError::new(ErrorCode::Invalid, format!("stored command: {e}")))
+                .map_err(|e| Error::new(Code::Invalid, format!("stored command: {e}")))
         }
         let n = &self.node;
         match l.method.as_str() {
@@ -274,39 +313,63 @@ impl NodeRuntime {
                 let cmd: Command<OpenSession> = parse(&l.request)?;
                 // Only before first acceptance: an uncertain command keeps its identity and is
                 // reconciled, never manufactured into a rejection while it may already run.
-                if !l.maybe_sent {
-                    let ended = self
-                        .store
-                        .sessions()
-                        .get(cmd.body.session.as_str())
-                        .map_err(|e| ApiError::new(ErrorCode::Invalid, e.to_string()))?
-                        .is_none_or(|s| s.status == "ended");
-                    if ended {
-                        return Err(ApiError::new(ErrorCode::Invalid, "已结束的会话不能重开。"));
+                let ended = self
+                    .store
+                    .sessions()
+                    .get(cmd.body.session.as_str())
+                    .map_err(|e| Error::new(Code::Invalid, e.to_string()))?
+                    .is_none_or(|s| s.status == "ended");
+                if ended {
+                    return Err(Error::new(Code::Invalid, "已结束的会话不能重开。"));
+                }
+                if let Ok(report) = n.probe(false).await {
+                    let cap = report
+                        .harnesses
+                        .iter()
+                        .find(|h| h.name == cmd.body.choice.harness);
+                    let mut h = crate::harnesses::merge(&cmd.body.choice.harness, None, cap);
+                    // Without an adapter report nothing is known about selectable models or
+                    // efforts; a declared fallback is not a successful capability probe.
+                    if cap.is_none_or(|c| c.adapter.is_none()) {
+                        h.ready = None;
                     }
-                    if let Ok(report) = n.probe(false).await {
-                        let cap = report
-                            .harnesses
-                            .iter()
-                            .find(|h| h.name == cmd.body.choice.harness);
-                        let mut h = crate::harnesses::merge(&cmd.body.choice.harness, None, cap);
-                        // Without an adapter report nothing is known about selectable models or
-                        // efforts; a declared fallback is not a successful capability probe.
-                        if cap.is_none_or(|c| c.adapter.is_none()) {
-                            h.ready = None;
-                        }
-                        let selection = json!({"harness":cmd.body.choice.harness,"model":cmd.body.choice.model,"reasoning_effort":cmd.body.choice.effort});
-                        steve_core::models::validate_bot_patch(
-                            None,
-                            selection.as_object().unwrap(),
-                            &[h],
-                        )
-                        .map_err(|why| ApiError::new(ErrorCode::Invalid, why))?;
-                    }
+                    let selection = json!({"harness":cmd.body.choice.harness,"model":cmd.body.choice.model,"reasoning_effort":cmd.body.choice.effort});
+                    steve_core::models::validate_bot_patch(
+                        None,
+                        selection.as_object().unwrap(),
+                        &[h],
+                    )
+                    .map_err(|why| Error::new(Code::Invalid, why))?;
                 }
                 n.open_session(cmd).await
             }
             "start_turn" => {
+                let command: Command<TurnSpec> = parse(&l.request)?;
+                let retry_allowed = self
+                    .store
+                    .read(|r| {
+                        let attempt = node_turns::started_by(r, &l.operation)?
+                            .ok_or_else(|| conflict("missing turn attempt"))?;
+                        if node_turns::ordinal(r, &attempt.id)? == 0 {
+                            return Ok(true);
+                        }
+                        Ok::<_, StoreError>(
+                            node_turns::retry::before_deadline(
+                                r,
+                                command.body.turn.as_str(),
+                                self.clock.now(),
+                            )? && node_turns::retry::allowed(r, command.body.session.as_str())?
+                                && config::desired_in(&self.store, command.body.session.as_str())?
+                                    .is_none(),
+                        )
+                    })
+                    .map_err(|e| Error::new(Code::Internal, e.to_string()))?;
+                if !retry_allowed {
+                    return Err(Error::new(
+                        Code::Stale,
+                        "turn retry expired or is no longer authorized",
+                    ));
+                }
                 let blocked = if self.domain.dynamic_workflows() {
                     None
                 } else {
@@ -316,30 +379,19 @@ impl NodeRuntime {
                                 .ok_or_else(|| conflict("missing turn attempt"))?;
                             self.disabled_workflow_in(&a.session)
                         })
-                        .map_err(|e| ApiError::new(ErrorCode::Offline, e.to_string()))?
+                        .map_err(|e| Error::new(Code::Unavailable, e.to_string()))?
                 };
                 if let Some(why) = blocked {
-                    // A prior uncertain send may already be running: only reconciliation can
-                    // settle it, never manufacture a pre-admission rejection for it.
-                    return Err(ApiError::new(
-                        if l.maybe_sent {
-                            ErrorCode::OutcomeUnknown
-                        } else {
-                            ErrorCode::Invalid
-                        },
-                        why,
-                    ));
+                    return Err(Error::new(Code::Invalid, why));
                 }
                 let limit = self
                     .store
                     .read(|c| rt::session_limit(c, self.node_id.as_str()))
-                    .map_err(|e| {
-                        ApiError::new(ErrorCode::Offline, format!("session capacity: {e}"))
-                    })?;
+                    .map_err(|e| Error::new(Code::Unavailable, format!("session capacity: {e}")))?;
                 // Reapply before each start, not once per Hub boot: a separately running Node may
                 // have restarted/reconnected meanwhile. This is resource scheduling, not policy.
                 n.set_session_capacity(limit as u32).await?;
-                n.start_turn(parse(&l.request)?).await
+                n.start_turn(command).await
             }
             "start_job" => n.start_job(parse(&l.request)?).await,
             "cancel" => n.cancel(parse(&l.request)?).await,
@@ -349,8 +401,8 @@ impl NodeRuntime {
             "abandon" => n.abandon(parse(&l.request)?).await,
             "recover" => n.recover(parse(&l.request)?).await,
             m if ledger::LEDGER_METHODS.contains(&m) => self.send_ledger(l).await,
-            other => Err(ApiError::new(
-                ErrorCode::Unsupported,
+            other => Err(Error::new(
+                Code::Unsupported,
                 format!("the coordinator does not send {other}"),
             )),
         }
@@ -379,7 +431,7 @@ impl NodeRuntime {
             &serde_json::to_value(receipt).map_err(conflict)?,
             now(),
         )?;
-        if !moved {
+        if !moved || !rt::is_intent_head_in(tx, op)? {
             return Ok(None);
         }
         if let Some(attempt) = self
@@ -465,25 +517,13 @@ impl NodeRuntime {
                 {
                     let (attempt, rev, s) = (a.id, a.revision, a.session);
                     node_write::attempt_cas_in(tx, &attempt, rev, "unknown", None, None, now())?;
-                    if detail == steve_node_api::RESTARTED {
-                        // the Node restarted under it (#54): its harness is gone with the old
-                        // process. Given up here, as Stop would; once the Node confirms it,
-                        // the agent is continued (NODE_RESTARTED), never the turn resent
-                        self.stop_command_as_in(tx, &attempt, op, "abandon", RESTART_ABANDON)?;
-                        system_in(
-                            tx,
-                            &s,
-                            &steve_i18n::stored(|| steve_i18n::t!("hub.node.restart_abandon")),
-                        )?;
-                    } else {
-                        system_in(
-                            tx,
-                            &s,
-                            &format!(
-                                "Node 无法确定这次执行的结果（{detail}），等待对账，不会自动重跑。点停止可放弃这次执行。"
-                            ),
-                        )?;
-                    }
+                    system_in(
+                        tx,
+                        &s,
+                        &format!(
+                            "Node 无法确定这次执行的结果（{detail}），等待对账。点停止可请求放弃。"
+                        ),
+                    )?;
                 }
             }
             ("open_session" | "release_session", ReceiptState::Unknown) => {
@@ -553,48 +593,8 @@ impl NodeRuntime {
             },
             now(),
         )?;
-        if self.plan_after_in(tx, s)? != Planned::Created && !success {
-            self.release_again_in(tx, s, op)?;
-        }
-        Ok(())
-    }
-
-    /// A release of an ended session that a successor waits for came back refused or failed:
-    /// the old harness is still open in the shared worktree, so the successor keeps waiting, now
-    /// for a new release (after a delay doubling from 1 s up to a minute) that it is moved onto.
-    /// The successor is told once. Nothing waits for it: it stays as it is (tidy asks again).
-    fn release_again_in(&self, tx: &mut W<'_>, s: &str, failed: &str) -> Result<(), StoreError> {
-        let waiting = self
-            .store
-            .read(|r| dispatch::pending_dependents(r, failed))?;
-        if waiting.is_empty() || !self.ended_in(s)? {
-            return Ok(());
-        }
-        let Release::Pending(op) = self.release_in(tx, s)? else {
-            return Ok(());
-        };
-        let failures = self.store.read(|r| dispatch::release_failures(r, s))?;
-        self.store.write(|w| {
-            let at = self.clock.now();
-            dispatch::postpone(
-                w,
-                &op,
-                at + (1_000i64 << (failures - 1).clamp(0, 6)).min(60_000),
-                at,
-            )
-        })?;
-        for w in &waiting {
-            self.store
-                .write(|handle| dispatch::retarget_dependency(handle, w, &op, now()))?;
-            if failures == 1
-                && let Some(next) = command_any_session_in(&self.store, w)?
-            {
-                system_in(
-                    tx,
-                    &next,
-                    &steve_i18n::stored(|| steve_i18n::t!("hub.node.release_retry")),
-                )?;
-            }
+        if success {
+            self.plan_after_in(tx, s)?;
         }
         Ok(())
     }
@@ -624,7 +624,7 @@ impl NodeRuntime {
                         &Completion {
                             outcome: Outcome::Interrupted,
                             stop_reason: "cancelled".into(),
-                            error: Some(ApiError::new(ErrorCode::Invalid, why)),
+                            error: Some(Error::new(Code::Invalid, why)),
                             result: vec![],
                             continuation: None,
                             transient: false,
@@ -678,8 +678,8 @@ impl NodeRuntime {
             let c = Completion {
                 outcome: Outcome::Failed,
                 stop_reason: "error".into(),
-                error: Some(ApiError::new(
-                    ErrorCode::Invalid,
+                error: Some(Error::new(
+                    Code::Invalid,
                     format!("the Node could not open the session again: {detail}"),
                 )),
                 result: vec![],
@@ -762,46 +762,18 @@ impl NodeRuntime {
         })
     }
 
-    /// An abandon the Node refused or could not finish: the attempt stays unknown, its session
-    /// held; the user may give it up again (a new abandon). Refused because the Node has no such
-    /// operation: the Node holds no record of the attempt's start_turn, so it never ran there (the
-    /// reconciliation that made it unknown saw the same); it ends as interrupted, never sent again.
+    /// A refused abandon leaves the target uncertain until a trustworthy receipt arrives.
     fn abandon_failed_in(
         &self,
         tx: &mut W<'_>,
         op: &str,
-        e: Option<&ApiError>,
+        e: Option<&Error>,
     ) -> Result<Option<End>, StoreError> {
         let Some(a) = self.store.read(|r| node_turns::targeted_by(r, op))? else {
             return Ok(None);
         };
-        let (s, attempt, state) = (a.session, a.id, a.state);
+        let s = a.session;
         let detail = e.map(|e| e.safe_detail.clone()).unwrap_or_default();
-        let unknown_to_node = e.is_some_and(|e| {
-            e.code == ErrorCode::Invalid && e.safe_detail.contains("no such operation")
-        });
-        if unknown_to_node && state == "unknown" {
-            let completion = Completion {
-                outcome: Outcome::Interrupted,
-                stop_reason: "error".into(),
-                error: Some(ApiError::new(
-                    ErrorCode::Invalid,
-                    "the Node holds no record of this attempt: it did not run there",
-                )),
-                result: vec![],
-                continuation: None,
-                transient: false,
-                acted: false,
-                job: None,
-            };
-            self.settle_in(tx, &s, &attempt, &completion)?;
-            system_in(
-                tx,
-                &s,
-                "Node 没有这次执行的记录（它没有在 Node 上运行），已放弃，不会自动重跑。",
-            )?;
-            return Ok(None);
-        }
         system_in(
             tx,
             &s,
@@ -817,13 +789,15 @@ impl NodeRuntime {
         &self,
         tx: &mut W<'_>,
         op: &str,
-        e: &ApiError,
+        e: &Error,
     ) -> Result<Option<End>, StoreError> {
         let Some(a) = self.store.read(|r| node_turns::started_by(r, op))? else {
             return Ok(None);
         };
-        let gone = e.code == ErrorCode::Invalid
-            && (e.safe_detail.contains("open it again") || e.safe_detail.contains("not open"));
+        let gone = e
+            .reason
+            .as_ref()
+            .is_some_and(|r| r.is(steve_types::devices::NodeReason::SessionNotOpen));
         let (attempt, rev, turn, session, cancelled) =
             (a.id, a.revision, a.turn, a.session, a.cancelled);
         let reopened_before = self.store.read(|r| node_turns::was_released(r, &turn))?;
@@ -883,24 +857,21 @@ pub(super) fn receipt_state(s: &Observed) -> (ReceiptState, bool) {
     }
 }
 
-/// A command that never went out and waited long (behind its dependency, say: a successor's
-/// prepare behind its predecessor's turn) is issued again now, so the Node does not refuse it as
-/// past `accept_before`. Only one no send can have reached: the Node knows nothing of it yet.
-fn fresh_envelope_in(
+/// Commands can wait to be issued until the first lease. Save the acceptance window before
+/// leaving the transaction so later sends and restart reconciliation see exactly these bytes.
+fn freeze_first_envelope_in(
     store: &Store,
     mut l: rt::CommandLease,
     at: i64,
 ) -> Result<rt::CommandLease, StoreError> {
-    let mut c: Command<Value> = serde_json::from_value(l.request.clone()).map_err(conflict)?;
+    let c: Command<Value> = serde_json::from_value(l.request.clone()).map_err(conflict)?;
     if c.accept_before.0 - at >= ACCEPT_WINDOW_MS / 2 {
         return Ok(l);
     }
-    c.issued_at = Timestamp(at);
-    c.accept_before = Timestamp(at + ACCEPT_WINDOW_MS);
-    let v = serde_json::to_value(&c).map_err(conflict)?;
-    let digest = digest_of(&v).map_err(conflict)?.to_string();
-    store.write(|w| dispatch::refresh_envelope(w, &l.operation, &c, &digest, at, None))?;
-    l.request = v;
+    l.request["issued_at"] = Value::from(at);
+    l.request["accept_before"] = Value::from(at + ACCEPT_WINDOW_MS);
+    let digest = digest_of(&l.request).map_err(conflict)?.to_string();
+    store.write(|w| dispatch::freeze_envelope(w, &l.operation, &l.request, &digest, at))?;
     l.digest = digest;
     Ok(l)
 }

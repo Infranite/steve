@@ -309,10 +309,7 @@ mod tests {
                     steve_node_wire::methods::EXECUTION_DELIVERY_READ,
                     "an execution delivery never falls back to workspace or general fs.read"
                 );
-                return Err(ApiError::new(
-                    ErrorCode::Unsupported,
-                    "execution delivery refused",
-                ));
+                return Err(Error::new(Code::Unsupported, "execution delivery refused"));
             }
             assert_eq!(
                 method,
@@ -320,10 +317,7 @@ mod tests {
                 "no fallback to general fs.read"
             );
             if self.mode == 1 {
-                return Err(ApiError::new(
-                    ErrorCode::Unsupported,
-                    "delivery read refused",
-                ));
+                return Err(Error::new(Code::Unsupported, "delivery read refused"));
             }
             let q: FileRead = steve_node_wire::conn::from_value(p)?;
             let FileAddress::Root(path) = q.path else {
@@ -347,7 +341,7 @@ mod tests {
                 r.version = Revision::new("changed").unwrap();
             }
             if self.mode == 4 && q.offset > 0 {
-                return Err(ApiError::new(ErrorCode::Offline, "link cut"));
+                return Err(Error::new(Code::Unavailable, "link cut"));
             }
             Ok(serde_json::to_value(r).unwrap())
         }

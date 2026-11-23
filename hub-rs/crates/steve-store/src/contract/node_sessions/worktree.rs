@@ -41,7 +41,9 @@ pub fn initial_prepare(r: &mut impl Read, session: &str, node: &str) -> Result<O
         Query::select()
             .column("request")
             .from("node_commands")
-            .and_where(Expr::col("operation_id").eq(format!("op_prep_{session}")))
+            .and_where(Expr::col("intent_purpose").eq("prepare"))
+            .and_where(Expr::col("intent_subject").eq(session))
+            .and_where(Expr::col("intent_revision").eq(0_i64))
             .and_where(Expr::col("node_id").eq(node))
             .and_where(Expr::col("method").eq("prepare_workspace")),
         |row| Ok(row.get::<Json<Command<Prepare>>>(0)?.0.body),
@@ -143,25 +145,7 @@ pub fn tidy_since(
     if removed {
         return Ok(Some(Tidy::Removed));
     }
-    let refused = Expr::col("state").eq("rejected").and(
-        d.json_path(Expr::col("receipt"), "$.payload.retry")
-            .eq("never"),
-    );
-    let failed = finished.and(success.eq(false)).and(
-        d.json_path(Expr::col("receipt"), "$.payload.state.error.retry")
-            .eq("never"),
-    );
-    let kept = r
-        .one(
-            commands.and_where(
-                Expr::col("state")
-                    .is_not_in(["finished", "rejected"])
-                    .or(refused)
-                    .or(failed),
-            ),
-            |_| Ok(()),
-        )?
-        .is_some();
+    let kept = r.one(&commands, |_| Ok(()))?.is_some();
     Ok(kept.then_some(Tidy::Kept))
 }
 

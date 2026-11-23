@@ -130,10 +130,10 @@ impl HubTools for StubTools {
                 structured: None,
                 end_turn: false,
             }),
-            None => Err(ApiError::new(ErrorCode::Invalid, "no such call")),
+            None => Err(Error::new(Code::Invalid, "no such call")),
         }
     }
     async fn cancel_call(&self, _: ToolKey) -> ApiResult<ToolResult> {
-        Err(ApiError::new(ErrorCode::Unsupported, "no"))
+        Err(Error::new(Code::Unsupported, "no"))
     }
 }
