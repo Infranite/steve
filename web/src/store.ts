@@ -806,7 +806,7 @@ function onHub(e: HubEvent) {
     if (nextDraft || draft?.mid !== e.mid) priorDraftReplies = new Set(messageViews().map(msgOfView).filter((m) => m.k === "steve" && m.origin === e.mid).map((m) => m.id!))
     nextDraft = false
     const was = draft?.mid === e.mid ? draft : undefined, now = Date.now()
-    updateChat({ draft: { mid: e.mid, thought: e.thought, text: e.text, t0: was?.t0 ?? now, t1: was?.t1 ?? (e.text ? now : undefined) } }, "frame")
+    updateChat({ draft: { mid: e.mid, thought: e.thought, text: e.text, t0: was?.t0 ?? now, t1: was?.t1 ?? (e.text ? now : undefined) } }, was && !!was.text === !!e.text ? "reply" : "frame")
     return
   }
   if (e.type === "steve.tool") {

@@ -316,3 +316,10 @@ details[open]::details-content { height: auto; }
 .md blockquote { border-left: 2px solid var(--border); padding-left: 12px; color: var(--muted-foreground); font-style: normal; }
 /* where a note on selected text is (ST-38), found again when the note is located */
 ::highlight(steve-ann) { background-color: color-mix(in oklab, var(--attention) 35%, transparent); color: inherit; }
+
+/* Skip the draft's layout and paint while reading far above it. Retain
+   its last measured height offscreen; the visible draft still grows naturally. */
+[data-chat-draft] > [data-steve-msg] {
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 0px;
+}

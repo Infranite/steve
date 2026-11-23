@@ -2,7 +2,7 @@ import { messageViews } from "@/data/sync"
 import type { ConvMessage } from "@/api/conversations"
 import { VirtualList } from "@/components/virtual-list"
 import type { Virtualizer } from "@tanstack/react-virtual"
-import { useChatLive } from "@/data/live"
+import { observeChatLive, presentedChatLive, useChatLive } from "@/data/live"
 import { getItems } from "@/store"
 import type { RFile } from "@/api"
 import { Files } from "@/attach"
@@ -512,12 +512,26 @@ const LiveTail = memo(function LiveTail({ memory }: { memory: ProcessMemory }) {
   if (!working && !sending.some((m) => !m.held)) return null
   return <div className="flex flex-col gap-2" data-chat-draft={mid} aria-busy="true">
     {sending.filter((m) => !m.held).map((m) => <Me key={m.clientId} t={m.t ?? ""} files={m.files} />)}
-    {working && <><LiveReply key={mid} /><LiveSteps memory={memory} /></>}
+    {working && <>{mid && <LiveReply key={mid} mid={mid} />}<LiveSteps memory={memory} /></>}
   </div>
 })
 
-function LiveReply() {
-  const text = useChatLive((s) => s.draft?.text)
+function LiveReply({ mid }: { mid: string }) {
+  const [text, setText] = useState("")
+  useEffect(() => {
+    let shown = ""
+    const publish = () => {
+      const draft = presentedChatLive().draft
+      if (draft?.mid !== mid || draft.text === shown) return
+      // An external-store update must render synchronously; this local state
+      // update can yield if input arrives while the markdown is reconciling.
+      shown = draft.text
+      startTransition(() => setText(draft.text))
+    }
+    const unsubscribe = observeChatLive(publish)
+    publish()
+    return unsubscribe
+  }, [mid])
   return text ? <SteveSays still><Markdown text={text} streaming /></SteveSays> : null
 }
 

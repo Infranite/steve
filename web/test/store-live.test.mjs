@@ -296,7 +296,7 @@ test("chat drafts paint successive chunks before any stored reply arrives", asyn
   assert.equal(c.states, 1)
 })
 
-test("draft chunks publish once per frame, but a stored reply takes precedence immediately", async () => {
+test("draft text publishes at a low cadence, but a stored reply takes precedence immediately", async () => {
   const h = harness()
   h.store.start(); await flush()
   h.event({ type: "steve.thinking", on: true })
@@ -310,10 +310,16 @@ test("draft chunks publish once per frame, but a stored reply takes precedence i
   await h.tick(0)
   assert.deepEqual(painted, ["ab"])
   draft(h, "question", "abc")
-  deliverMessage(h, chatMessage("answer", "steve", "question"))
-  assert.deepEqual(painted, ["ab", undefined])
+  draft(h, "question", "abcd")
   await h.tick(0)
-  assert.deepEqual(painted, ["ab", undefined], "no stale frame resurrects the draft")
+  assert.deepEqual(painted, ["ab"])
+  await h.tick(h.chat.REPLY_BATCH_MS)
+  assert.deepEqual(painted, ["ab", "abcd"])
+  draft(h, "question", "abcde")
+  deliverMessage(h, chatMessage("answer", "steve", "question"))
+  assert.deepEqual(painted, ["ab", "abcd", undefined])
+  await h.tick(h.chat.REPLY_BATCH_MS)
+  assert.deepEqual(painted, ["ab", "abcd", undefined], "no stale batch resurrects the draft")
   off()
 })
 
@@ -321,8 +327,10 @@ test("an unpainted draft cannot publish into another workspace", async () => {
   const h = harness()
   h.store.start(); await flush()
   draft(h, "question", "old workspace")
-  await h.store.switchWorkspace("other")
   await h.tick(0)
+  draft(h, "question", "unpainted old workspace body")
+  await h.store.switchWorkspace("other")
+  await h.tick(h.chat.REPLY_BATCH_MS)
   assert.equal(h.chat.useChatLive((s) => s.draft).read(), null)
 })
 

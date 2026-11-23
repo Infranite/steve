@@ -1,7 +1,7 @@
 import { itemIds } from "@/data/sync"
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react"
 import { Streamdown, defaultComponents, defaultRehypePlugins, defaultRemarkPlugins, parseMarkdownIntoBlocks, useIsCodeFenceIncomplete, type StreamdownProps, type Components, type DefaultComponents, type DiagramPlugin } from "streamdown"
-import type { CodeHighlighterPlugin } from "@streamdown/code"
+import { code } from "@/components/markdown-highlight"
 import { cjk } from "@streamdown/cjk"
 import remarkBreaks from "remark-breaks"
 import { cn } from "cn"
@@ -188,14 +188,11 @@ const components: Components = {
 }
 /* cjk: CommonMark does not close `**` between a full-width mark and a Han character (`**“执行中”。**看…`), which leaves
  * the asterisks showing in Chinese replies */
-const plugins = { cjk, mermaid }
+const plugins = { cjk, mermaid, code }
 // Streamdown shares these through context with every parsed block. Keep the values
 // stable so a new token does not invalidate all the completed code/table blocks.
 const shikiTheme: StreamdownProps["shikiTheme"] = ["github-light", "github-dark"]
 const controls: StreamdownProps["controls"] = { mermaid: { panZoom: false }, table: false }
-type HighlightedPlugins = typeof plugins & { code: CodeHighlighterPlugin }
-let highlighted: Promise<HighlightedPlugins> | undefined
-let loadedHighlight: HighlightedPlugins | undefined
 const remarkPlugins = [...Object.values(defaultRemarkPlugins), remarkBreaks, remarkHtmlAsText, remarkItemRefs]
 /* Streamdown's defaults minus rehype-raw: sanitize + harden still apply to what markdown itself produces */
 function rehypeReplyImageHints() {
@@ -225,21 +222,9 @@ const noBlocks = () => []
 export default function MarkdownImpl({ text, className, streaming, resolve, replyFiles, settled }: { text: string; className?: string; streaming?: boolean; settled?: boolean; replyFiles?: boolean; resolve?: (ref: string) => string | null }) {
   const source = String(text ?? "")
   const parseTail = useMemo(() => streamingBlockParser(parseMarkdownIntoBlocks), [])
-  const fenced = source.includes("```") || source.includes("~~~")
-  const [codePlugins, setCodePlugins] = useState<HighlightedPlugins>()
-  // A remounted virtual row should not paint a plain code block and then
-  // replace it with a highlighted one if the module is already available.
-  const highlight = fenced ? codePlugins ?? loadedHighlight : undefined
-  useEffect(() => {
-    if (!fenced || highlight) return
-    let active = true
-    void (highlighted ??= import("@streamdown/code").then(({ code }) => loadedHighlight = { ...plugins, code }))
-      .then((ready) => { if (active) setCodePlugins(ready) }).catch(() => {})
-    return () => { active = false }
-  }, [fenced, highlight])
   const remark = useMemo(() => resolve ? [...remarkPlugins, remarkRebase(resolve)] : replyFiles ? [...remarkPlugins, remarkUnresolvedReplyFiles] : remarkPlugins, [resolve, replyFiles])
   return (
-    <Streamdown className={cn("md", className)} plugins={highlight ?? plugins} components={components} remarkPlugins={remark} rehypePlugins={rehypePlugins}
+    <Streamdown className={cn("md", className)} plugins={plugins} components={components} remarkPlugins={remark} rehypePlugins={rehypePlugins}
       mode={!streaming && settled ? "static" : "streaming"}
       parseMarkdownIntoBlocksFn={streaming ? parseTail : settled ? noBlocks : undefined}
       shikiTheme={shikiTheme} controls={controls} tableMaxHeight="none"
