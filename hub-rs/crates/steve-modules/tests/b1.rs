@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rusqlite::Connection;
 use serde_json::{Value, json};
 use steve_modules::context::{ChatCtx, ChatDone, Cite, PromptContext};
 use steve_modules::decisions::{DecisionCx, DecisionHandler};
@@ -142,18 +141,17 @@ async fn nothing_registered_is_a_no_op() {
     assert_eq!(r.hooks().accepted(&i).await, None);
     r.hooks().finished(&i).await;
     r.hooks().dropped(&i).await;
-    t.store()
-        .reader(|c| {
-            assert_eq!(r.contexts().session(c, WS, &i), "");
-            assert!(
-                r.contexts()
-                    .chat(c, WS, &Viewer::bare(WS, ME), "hi")
-                    .is_none()
-            );
-            assert!(panels::panels(&t.modules, WS, ME, &i.id)?.is_empty());
-            Ok::<_, ApiError>(())
-        })
-        .unwrap();
+    assert_eq!(r.contexts().session(t.store(), WS, &i), "");
+    assert!(
+        r.contexts()
+            .chat(t.store(), WS, &Viewer::bare(WS, ME), "hi")
+            .is_none()
+    );
+    assert!(
+        panels::panels(&t.modules, WS, ME, &i.id)
+            .unwrap()
+            .is_empty()
+    );
     let err = panels::action(
         &t.modules,
         &caller(WS, ME),
@@ -191,10 +189,10 @@ fn hooks_with_the_same_name_panic() {
 struct Ctx(&'static str);
 
 impl PromptContext for Ctx {
-    fn session(&self, _: &Connection, _: &str, item: &Item) -> Option<String> {
+    fn session(&self, _: &steve_store::Store, _: &str, item: &Item) -> Option<String> {
         (!self.0.is_empty()).then(|| format!("{} · {}", self.0, item.title))
     }
-    fn chat(&self, _: &Connection, _: &str, v: &Viewer, text: &str) -> Option<ChatCtx> {
+    fn chat(&self, _: &steve_store::Store, _: &str, v: &Viewer, text: &str) -> Option<ChatCtx> {
         (!self.0.is_empty()).then(|| ChatCtx {
             text: format!("{}: {text} for {}", self.0, v.user),
             cites: vec![Cite {
@@ -207,7 +205,7 @@ impl PromptContext for Ctx {
     }
     fn chat_done(
         &self,
-        _: &Connection,
+        _: &steve_store::Store,
         _: &str,
         mid: &str,
         answer: &str,
@@ -232,23 +230,29 @@ fn prompt_contexts_join_sessions_and_take_the_first_chat() {
     });
     let i = item(&t);
     let cx = t.modules.registry.contexts();
-    t.store()
-        .reader(|c| {
-            assert_eq!(cx.session(c, WS, &i), "知识 · 修 bug\n\n卡片 · 修 bug");
-            let (n, chat) = cx.chat(c, WS, &Viewer::bare(WS, ME), "合同").unwrap();
-            assert_eq!(n, 1);
-            assert_eq!(chat.text, "知识: 合同 for usr_dev");
-            let done = cx.chat_done(n, c, WS, "msg_1", "好的 [1] [9]", &chat);
-            assert_eq!(done.text, "好的 [1]");
-            assert_eq!(
-                Value::Object(done.meta.unwrap()),
-                json!({"cites": [{"n": 1, "label": "笔记 · Acme", "href": "/kb/docs/kd_1", "level": "public"}], "mid": "msg_1"})
-            );
-            // an unknown provider index leaves the answer alone
-            assert_eq!(cx.chat_done(9, c, WS, "m", "a", &chat), ChatDone { text: "a".into(), meta: None });
-            Ok::<_, ApiError>(())
-        })
+    assert_eq!(
+        cx.session(t.store(), WS, &i),
+        "知识 · 修 bug\n\n卡片 · 修 bug"
+    );
+    let (n, chat) = cx
+        .chat(t.store(), WS, &Viewer::bare(WS, ME), "合同")
         .unwrap();
+    assert_eq!(n, 1);
+    assert_eq!(chat.text, "知识: 合同 for usr_dev");
+    let done = cx.chat_done(n, t.store(), WS, "msg_1", "好的 [1] [9]", &chat);
+    assert_eq!(done.text, "好的 [1]");
+    assert_eq!(
+        Value::Object(done.meta.unwrap()),
+        json!({"cites": [{"n": 1, "label": "笔记 · Acme", "href": "/kb/docs/kd_1", "level": "public"}], "mid": "msg_1"})
+    );
+    // an unknown provider index leaves the answer alone
+    assert_eq!(
+        cx.chat_done(9, t.store(), WS, "m", "a", &chat),
+        ChatDone {
+            text: "a".into(),
+            meta: None
+        }
+    );
 }
 
 /// The GitHub panel example, with the alternatives resolved.

@@ -3,7 +3,8 @@
 use rusqlite::params;
 use serde_json::json;
 
-use crate::{Store, StoreError};
+use crate::runtime::{NewAttempt, NewCommand, insert_attempt_in, insert_command_in};
+use crate::{Result, Store, StoreError, W};
 
 pub struct FinishedTurn<'a> {
     pub session: &'a str,
@@ -154,23 +155,29 @@ pub fn clear_stop_sequence(store: &Store, session: &str) {
 }
 
 pub fn pending_start(
-    w: &mut crate::W<'_>,
+    w: &mut W<'_>,
     session: &str,
-    node: &str,
-    turn: &str,
+    attempt: &NewAttempt<'_>,
+    command: &NewCommand<'_>,
     at: i64,
-) -> crate::Result<()> {
+) -> Result<()> {
     let tx = w.legacy();
     tx.execute(
         "INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated)
          VALUES (?,?,'ws','ns-1','r1','open',?)",
-        params![session, node, at],
+        params![session, attempt.node, at],
     )?;
     tx.execute(
         "INSERT INTO runtime_turns(turn_id,session_id,state,created,updated) VALUES (?,?,'planned',?,?)",
-        params![turn, session, at, at],
+        params![attempt.turn, session, at, at],
     )?;
+    insert_attempt_in(&tx, attempt, at)?;
+    insert_command_in(&tx, command, at)?;
     Ok(())
+}
+
+pub fn put_node_command(w: &mut W<'_>, command: &NewCommand<'_>, at: i64) -> Result<bool> {
+    insert_command_in(&w.legacy(), command, at)
 }
 
 pub fn mark_command_sent(w: &mut crate::W<'_>, op: &str, at: i64) -> crate::Result<()> {

@@ -2049,16 +2049,12 @@ impl Core {
                 };
                 let cid = id.to_string();
                 m.blocking(move |m| {
-                    let cs = m
+                    let operations = m
                         .store
-                        .reader(|c| steve_store::base::changesets::get(c, &cid))?;
-                    let fields_only = cs.is_some_and(|cs| {
-                        !cs.ops.is_empty()
-                            && cs.ops.iter().all(|o| {
-                                o["op"]
-                                    .as_str()
-                                    .is_some_and(|n| AUTO_MODULE_OPS.contains(&n))
-                            })
+                        .read(|r| steve_store::changeset_repo::operation_names(r, &cid))?;
+                    let fields_only = operations.is_some_and(|ops| {
+                        !ops.is_empty()
+                            && ops.iter().all(|op| AUTO_MODULE_OPS.contains(&op.as_str()))
                     });
                     if !fields_only {
                         return Ok(false);

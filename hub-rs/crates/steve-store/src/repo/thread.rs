@@ -283,54 +283,8 @@ impl Thread<'_> {
 
     // ── thread_runs ──
 
-    pub fn run_add(&self, n: &NewThreadRun) -> Result<ThreadRun> {
-        let id = uid("tr");
-        self.0.write_conn(|w| {
-            w.c.run(
-                "INSERT INTO thread_runs (id, workspace_id, message_id, reply_id, prev_run, user_id, project_id, status, created)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?)",
-                params![
-                    id,
-                    n.workspace_id,
-                    n.message_id,
-                    n.reply_id,
-                    n.prev_run,
-                    n.user_id,
-                    n.project_id,
-                    now()
-                ],
-            )?;
-            must(one(w.c, RUN, [&id], ThreadRun::from_row)?)
-        })
-    }
-
     pub fn run(&self, id: &str) -> Result<Option<ThreadRun>> {
-        self.0.read_conn(|c| one(c, RUN, [id], ThreadRun::from_row))
-    }
-
-    pub fn run_patch(&self, id: &str, p: &RunPatch) -> Result<Option<ThreadRun>> {
-        let mut s = super::Sets::default();
-        s.val("status", p.status.clone())
-            .val("reply_id", p.reply_id.clone())
-            .val("model", p.model.clone())
-            .val("session", p.session.clone())
-            .val("harness", p.harness.clone())
-            .null("token_hash", p.token_hash.clone())
-            .val("tools", p.tools)
-            .val("turns", p.turns)
-            .val("first_text_ms", p.first_text_ms)
-            .val("error", p.error.clone())
-            .val("started", p.started)
-            .val("ended", p.ended);
-        self.0.write_conn(|w| {
-            if !s.is_empty() {
-                w.c.run(
-                    &format!("UPDATE thread_runs SET {} WHERE id = ?", s.sql()),
-                    rusqlite::params_from_iter(s.params([id.to_string().into()])),
-                )?;
-            }
-            one(w.c, RUN, [id], ThreadRun::from_row)
-        })
+        self.0.read(|r| crate::thread_runs::get(r, id))
     }
 
     /// Queued and running runs of a workspace, oldest first.

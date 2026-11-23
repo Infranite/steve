@@ -85,7 +85,7 @@ pub struct Registry {
 pub trait BotDeleted: Send + Sync {
     fn on_bot_deleted(
         &self,
-        tx: &steve_store::Tx,
+        tx: &mut steve_store::W<'_>,
         ws: &str,
         bot: &str,
         heir: &str,
@@ -198,7 +198,7 @@ impl Registry {
     /// Runs every [`BotDeleted`] for one workspace in `tx`.
     pub fn on_bot_deleted(
         &self,
-        tx: &steve_store::Tx,
+        tx: &mut steve_store::W<'_>,
         ws: &str,
         bot: &str,
         heir: &str,

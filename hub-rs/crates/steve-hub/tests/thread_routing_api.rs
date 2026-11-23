@@ -457,41 +457,58 @@ async fn research_runs_get_read_only_mcp() {
     let t = e.settle(2).await;
     let item = t[1]["item_id"].as_str().unwrap().to_string();
     let store = steve_store::Store::open(&e.db, steve_store::NoPublisher).unwrap();
-    let th = store.thread();
-    let run = th
-        .run_add(&steve_store::NewThreadRun {
-            workspace_id: "default".into(),
-            message_id: t[0]["id"].as_str().unwrap().into(),
-            ..Default::default()
+    let run = store
+        .write(|w| {
+            steve_store::thread_runs::add(
+                w,
+                &steve_store::NewThreadRun {
+                    workspace_id: "default".into(),
+                    message_id: t[0]["id"].as_str().unwrap().into(),
+                    ..Default::default()
+                },
+            )
         })
         .unwrap();
     let token = "research-token-1";
     // a run answering a message that is not the owner's own (unknown here) gets no sessions
-    let other = th
-        .run_add(&steve_store::NewThreadRun {
-            workspace_id: "default".into(),
-            message_id: "msg_elsewhere".into(),
-            ..Default::default()
+    let other = store
+        .write(|w| {
+            steve_store::thread_runs::add(
+                w,
+                &steve_store::NewThreadRun {
+                    workspace_id: "default".into(),
+                    message_id: "msg_elsewhere".into(),
+                    ..Default::default()
+                },
+            )
         })
         .unwrap();
-    th.run_patch(
-        &other.id,
-        &steve_store::RunPatch {
-            status: Some("running".into()),
-            token_hash: Some(Some(steve_store::sha("research-token-2"))),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    th.run_patch(
-        &run.id,
-        &steve_store::RunPatch {
-            status: Some("running".into()),
-            token_hash: Some(Some(steve_store::sha(token))),
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    store
+        .write(|w| {
+            steve_store::thread_runs::patch(
+                w,
+                &other.id,
+                &steve_store::RunPatch {
+                    status: Some("running".into()),
+                    token_hash: Some(Some(steve_store::sha("research-token-2"))),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
+    store
+        .write(|w| {
+            steve_store::thread_runs::patch(
+                w,
+                &run.id,
+                &steve_store::RunPatch {
+                    status: Some("running".into()),
+                    token_hash: Some(Some(steve_store::sha(token))),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
     let rpc = |body: Value, tok: &'static str| {
         let http = e.http.clone();
         let url = format!("{}/mcp", e.base);
@@ -781,22 +798,31 @@ async fn research_runs_get_read_only_mcp() {
             Ok(())
         })
         .unwrap();
-    let grp = th
-        .run_add(&steve_store::NewThreadRun {
-            workspace_id: "default".into(),
-            message_id: "msg_grp_2".into(),
-            ..Default::default()
+    let grp = store
+        .write(|w| {
+            steve_store::thread_runs::add(
+                w,
+                &steve_store::NewThreadRun {
+                    workspace_id: "default".into(),
+                    message_id: "msg_grp_2".into(),
+                    ..Default::default()
+                },
+            )
         })
         .unwrap();
-    th.run_patch(
-        &grp.id,
-        &steve_store::RunPatch {
-            status: Some("running".into()),
-            token_hash: Some(Some(steve_store::sha("research-token-3"))),
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    store
+        .write(|w| {
+            steve_store::thread_runs::patch(
+                w,
+                &grp.id,
+                &steve_store::RunPatch {
+                    status: Some("running".into()),
+                    token_hash: Some(Some(steve_store::sha("research-token-3"))),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
     let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": 12, "method": "tools/call", "params": {"name": "steve_items_search", "arguments": {"query": "改"}}}), "research-token-3").await;
     assert!(
         text(&v).contains(&item) && !text(&v).contains("现在："),
@@ -847,15 +873,19 @@ async fn research_runs_get_read_only_mcp() {
     let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": 14, "method": "tools/call", "params": {"name": "steve_items_search", "arguments": {"query": "改"}}}), "research-token-2").await;
     assert_eq!(text(&v), "No items match.", "still not for a run elsewhere");
     /* the run ended: the token is dead */
-    th.run_patch(
-        &run.id,
-        &steve_store::RunPatch {
-            status: Some("done".into()),
-            token_hash: Some(None),
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    store
+        .write(|w| {
+            steve_store::thread_runs::patch(
+                w,
+                &run.id,
+                &steve_store::RunPatch {
+                    status: Some("done".into()),
+                    token_hash: Some(None),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
     let (s, _) = rpc(
         json!({"jsonrpc": "2.0", "id": 7, "method": "tools/list"}),
         token,
@@ -957,27 +987,35 @@ async fn the_first_meeting_writes_through_its_own_tools() {
     assert_eq!(e.thread().await.len(), 1);
 
     let store = steve_store::Store::open(&e.db, steve_store::NoPublisher).unwrap();
-    let th = store.thread();
     for (message, token) in [
         (hello.as_str(), "meet-token-1"),
         ("msg_elsewhere", "meet-token-2"),
     ] {
-        let run = th
-            .run_add(&steve_store::NewThreadRun {
-                workspace_id: "default".into(),
-                message_id: message.into(),
-                ..Default::default()
+        let run = store
+            .write(|w| {
+                steve_store::thread_runs::add(
+                    w,
+                    &steve_store::NewThreadRun {
+                        workspace_id: "default".into(),
+                        message_id: message.into(),
+                        ..Default::default()
+                    },
+                )
             })
             .unwrap();
-        th.run_patch(
-            &run.id,
-            &steve_store::RunPatch {
-                status: Some("running".into()),
-                token_hash: Some(Some(steve_store::sha(token))),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        store
+            .write(|w| {
+                steve_store::thread_runs::patch(
+                    w,
+                    &run.id,
+                    &steve_store::RunPatch {
+                        status: Some("running".into()),
+                        token_hash: Some(Some(steve_store::sha(token))),
+                        ..Default::default()
+                    },
+                )
+            })
+            .unwrap();
     }
     let rpc = |body: Value, tok: &'static str| {
         let http = e.http.clone();

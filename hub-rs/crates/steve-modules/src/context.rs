@@ -6,11 +6,10 @@
 //! With nothing registered, or nothing found, `session` is the empty string and `chat` is `None`, so the
 //! prompts stay byte for byte what they are today.
 
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use steve_store::Item;
 use steve_store::base::{Level, Viewer};
+use steve_store::{Item, Store};
 
 /// One numbered piece of knowledge a chat answer may cite as `[n]`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -42,13 +41,13 @@ pub struct ChatDone {
 /// One provider. All methods default to adding nothing.
 pub trait PromptContext: Send + Sync {
     /// Text for the opening prompt of a session working on `item` (`""` or `None` = nothing).
-    fn session(&self, c: &Connection, ws: &str, item: &Item) -> Option<String> {
+    fn session(&self, c: &Store, ws: &str, item: &Item) -> Option<String> {
         let _ = (c, ws, item);
         None
     }
 
     /// Context for answering `text` from `viewer` in the main thread.
-    fn chat(&self, c: &Connection, ws: &str, viewer: &Viewer, text: &str) -> Option<ChatCtx> {
+    fn chat(&self, c: &Store, ws: &str, viewer: &Viewer, text: &str) -> Option<ChatCtx> {
         let _ = (c, ws, viewer, text);
         None
     }
@@ -56,7 +55,7 @@ pub trait PromptContext: Send + Sync {
     /// Called with the answer when this provider's [`ChatCtx`] was used; `message_id` is the stored reply.
     fn chat_done(
         &self,
-        c: &Connection,
+        c: &Store,
         ws: &str,
         message_id: &str,
         answer: &str,
@@ -80,7 +79,7 @@ impl PromptContexts {
     }
 
     /// The non-empty session texts joined by a blank line; `""` when there are none.
-    pub fn session(&self, c: &Connection, ws: &str, item: &Item) -> String {
+    pub fn session(&self, c: &Store, ws: &str, item: &Item) -> String {
         self.0
             .iter()
             .filter_map(|p| p.session(c, ws, item))
@@ -93,7 +92,7 @@ impl PromptContexts {
     /// cite one numbering, so contexts are not merged.
     pub fn chat(
         &self,
-        c: &Connection,
+        c: &Store,
         ws: &str,
         viewer: &Viewer,
         text: &str,
@@ -109,7 +108,7 @@ impl PromptContexts {
     pub fn chat_done(
         &self,
         provider: usize,
-        c: &Connection,
+        c: &Store,
         ws: &str,
         message_id: &str,
         answer: &str,

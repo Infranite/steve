@@ -1079,12 +1079,19 @@ async fn hub_restart_interrupts_research() {
     let k = Kit::new();
     let th = k.db().store().thread();
     let mid = k.db().message_add(WS, "me", "问", None, None).unwrap();
-    th.run_add(&steve_store::NewThreadRun {
-        workspace_id: WS.into(),
-        message_id: mid.clone(),
-        ..Default::default()
-    })
-    .unwrap();
+    k.db()
+        .store()
+        .write(|w| {
+            steve_store::thread_runs::add(
+                w,
+                &steve_store::NewThreadRun {
+                    workspace_id: WS.into(),
+                    message_id: mid.clone(),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
     k.core.thread_recover().unwrap();
     assert_eq!(th.runs_of_message(&mid).unwrap()[0].status, "interrupted");
     let last = k.db().messages(WS).unwrap().pop().unwrap();
@@ -1656,11 +1663,18 @@ async fn interrupted_local_answer_recovers_after_ready_once_across_two_boots() {
         .db()
         .message_add(WS, "me", "继续解释", None, None)
         .unwrap();
-    let run = th
-        .run_add(&steve_store::NewThreadRun {
-            workspace_id: WS.into(),
-            message_id: mid.clone(),
-            ..Default::default()
+    let run = k
+        .db()
+        .store()
+        .write(|w| {
+            steve_store::thread_runs::add(
+                w,
+                &steve_store::NewThreadRun {
+                    workspace_id: WS.into(),
+                    message_id: mid.clone(),
+                    ..Default::default()
+                },
+            )
         })
         .unwrap();
     k.core.thread_recover().unwrap();
@@ -1683,14 +1697,19 @@ async fn interrupted_local_answer_recovers_after_ready_once_across_two_boots() {
         .collect::<Vec<_>>();
     assert_eq!(answers.len(), 1);
     // Simulate the tiny crash window after answer persistence but before the final run receipt.
-    th.run_patch(
-        &run.id,
-        &steve_store::RunPatch {
-            status: Some("running".into()),
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    k.db()
+        .store()
+        .write(|w| {
+            steve_store::thread_runs::patch(
+                w,
+                &run.id,
+                &steve_store::RunPatch {
+                    status: Some("running".into()),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
     k.core.thread_recover().unwrap();
     assert_eq!(th.run(&run.id).unwrap().unwrap().status, "done");
     assert!(th.runs_to_resume(0).unwrap().is_empty());
@@ -1706,11 +1725,18 @@ async fn a_main_answer_that_keeps_taking_the_hub_down_is_re_answered_once() {
         .db()
         .message_add(WS, "me", "解释一下", None, None)
         .unwrap();
-    let run = th
-        .run_add(&steve_store::NewThreadRun {
-            workspace_id: WS.into(),
-            message_id: mid.clone(),
-            ..Default::default()
+    let run = k
+        .db()
+        .store()
+        .write(|w| {
+            steve_store::thread_runs::add(
+                w,
+                &steve_store::NewThreadRun {
+                    workspace_id: WS.into(),
+                    message_id: mid.clone(),
+                    ..Default::default()
+                },
+            )
         })
         .unwrap();
     k.core.thread_recover().unwrap();
@@ -1744,11 +1770,18 @@ async fn a_re_answer_is_counted_before_it_starts() {
         .db()
         .message_add(WS, "me", "解释一下", None, None)
         .unwrap();
-    let run = th
-        .run_add(&steve_store::NewThreadRun {
-            workspace_id: WS.into(),
-            message_id: mid,
-            ..Default::default()
+    let run = k
+        .db()
+        .store()
+        .write(|w| {
+            steve_store::thread_runs::add(
+                w,
+                &steve_store::NewThreadRun {
+                    workspace_id: WS.into(),
+                    message_id: mid,
+                    ..Default::default()
+                },
+            )
         })
         .unwrap();
     k.core.thread_recover().unwrap();
@@ -1765,12 +1798,19 @@ fn a_boot_without_resuming_records_no_main_conversation_intent() {
         .db()
         .message_add(WS, "me", "解释一下", None, None)
         .unwrap();
-    th.run_add(&steve_store::NewThreadRun {
-        workspace_id: WS.into(),
-        message_id: mid,
-        ..Default::default()
-    })
-    .unwrap();
+    k.db()
+        .store()
+        .write(|w| {
+            steve_store::thread_runs::add(
+                w,
+                &steve_store::NewThreadRun {
+                    workspace_id: WS.into(),
+                    message_id: mid,
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
     k.core.thread_recover().unwrap();
     assert!(
         th.runs_to_resume(0).unwrap().is_empty(),

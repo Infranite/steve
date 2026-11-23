@@ -20,6 +20,8 @@ pub mod audit;
 mod backend;
 pub mod bots;
 pub mod channel_messages;
+pub mod channel_personas;
+pub mod changesets;
 pub mod connections;
 #[cfg(feature = "testkit")]
 pub mod core_fixture;
@@ -41,6 +43,7 @@ pub mod settings;
 pub mod sources;
 mod sqlite;
 pub mod tags;
+pub mod thread_runs;
 pub mod vault_uses;
 pub mod yolo;
 

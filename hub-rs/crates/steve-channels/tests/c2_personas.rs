@@ -600,7 +600,7 @@ async fn deleted_bot_hands_its_personas_to_the_heir() {
     let n = h
         .env
         .store()
-        .transaction(|tx| personas::on_bot_deleted(tx, WS, "ops", "steve", now))
+        .write(|w| steve_store::channel_personas::reassign_bot(w, WS, "ops", "steve", now))
         .expect("moved");
     assert_eq!(n, 1);
     let p = get(&h, &format!("/personas/{id}")).await;

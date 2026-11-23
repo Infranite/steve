@@ -4906,7 +4906,7 @@ impl Tx<'_> {
                 let now = now();
                 for (ws, heir) in &heirs {
                     m.registry
-                        .on_bot_deleted(&w.legacy(), ws, id, heir, now)
+                        .on_bot_deleted(w, ws, id, heir, now)
                         .map_err(|e| msg(e.to_string()))?;
                 }
             }

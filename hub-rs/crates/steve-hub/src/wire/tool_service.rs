@@ -532,8 +532,21 @@ pub struct CatalogContext {
 impl steve_modules::context::PromptContext for CatalogContext {
     fn session(
         &self,
-        c: &rusqlite::Connection,
+        store: &steve_store::Store,
         _ws: &str,
+        item: &steve_store::Item,
+    ) -> Option<String> {
+        store
+            .reader(|c| Ok::<_, steve_store::StoreError>(self.session_summary(c, item)))
+            .ok()
+            .flatten()
+    }
+}
+
+impl CatalogContext {
+    fn session_summary(
+        &self,
+        c: &rusqlite::Connection,
         item: &steve_store::Item,
     ) -> Option<String> {
         let bot = item.bot_id.as_deref().unwrap_or("steve");

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_modules::{ApiError, Check};
 use steve_store::base::{self, Viewer};
+pub use steve_store::channel_personas::Reveal;
 use steve_store::seeded;
 use steve_store::{Tx, uid};
 
@@ -20,54 +21,6 @@ pub const DEFAULT_NAME: &str = "Steve";
 /// `introOf` when nothing is revealed.
 pub const NOTHING_REVEALED: &str = "（不透露身份，只回答问题本身）";
 
-/// What a persona tells about itself. Missing keys in stored JSON read as `true`, the column
-/// default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Reveal {
-    #[serde(default = "yes")]
-    pub name: bool,
-    #[serde(default = "yes")]
-    pub role: bool,
-    #[serde(default = "yes")]
-    pub ai: bool,
-    #[serde(default = "yes")]
-    pub steve: bool,
-    #[serde(default = "yes")]
-    pub owner: bool,
-}
-
-fn yes() -> bool {
-    true
-}
-
-impl Reveal {
-    /// Everything, the default persona's setting.
-    pub const ALL: Reveal = Reveal {
-        name: true,
-        role: true,
-        ai: true,
-        steve: true,
-        owner: true,
-    };
-    /// A new persona's default: name, role and “is an AI assistant”.
-    pub const NEW: Reveal = Reveal {
-        name: true,
-        role: true,
-        ai: true,
-        steve: false,
-        owner: false,
-    };
-
-    fn apply(mut self, p: &RevealPatch) -> Self {
-        self.name = p.name.unwrap_or(self.name);
-        self.role = p.role.unwrap_or(self.role);
-        self.ai = p.ai.unwrap_or(self.ai);
-        self.steve = p.steve.unwrap_or(self.steve);
-        self.owner = p.owner.unwrap_or(self.owner);
-        self
-    }
-}
-
 /// A partial `reveal` in a request body; missing keys keep their value.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -77,6 +30,17 @@ pub struct RevealPatch {
     pub ai: Option<bool>,
     pub steve: Option<bool>,
     pub owner: Option<bool>,
+}
+
+impl RevealPatch {
+    fn apply(&self, mut reveal: Reveal) -> Reveal {
+        reveal.name = self.name.unwrap_or(reveal.name);
+        reveal.role = self.role.unwrap_or(reveal.role);
+        reveal.ai = self.ai.unwrap_or(reveal.ai);
+        reveal.steve = self.steve.unwrap_or(reveal.steve);
+        reveal.owner = self.owner.unwrap_or(reveal.owner);
+        reveal
+    }
 }
 
 /// One `personas` row.
@@ -386,7 +350,10 @@ pub fn create(tx: &Tx, viewer: &Viewer, n: &NewPersona, now: i64) -> ChannelResu
     own_bot(tx, ws, &n.bot_id)?;
     ensure_default(tx, ws, now)?;
     let name = n.name.trim();
-    let reveal = Reveal::NEW.apply(&n.reveal.clone().unwrap_or_default());
+    let reveal = n
+        .reveal
+        .as_ref()
+        .map_or(Reveal::NEW, |patch| patch.apply(Reveal::NEW));
     let id = uid("per");
     tx.execute(
         "INSERT INTO personas (id, workspace_id, name, avatar, bot_id, intro, soul, reveal, signature, is_default, created, updated)
@@ -463,7 +430,7 @@ pub fn patch(
         after.soul = v.trim().to_string();
     }
     if let Some(v) = &p.reveal {
-        after.reveal = after.reveal.apply(v);
+        after.reveal = v.apply(after.reveal);
     }
     if let Some(v) = &p.signature {
         after.signature = v.trim().to_string();
@@ -561,49 +528,6 @@ pub fn delete(tx: &Tx, viewer: &Viewer, id: &str, now: i64) -> ChannelResult<Mov
     )?;
     event(tx, ws, id);
     Ok(moved)
-}
-
-/// The Bot behind personas was deleted (`deleteBot` in steve-core calls this with the heir): the
-/// personas keep their face and get the heir as their brain. Returns how many changed.
-pub fn on_bot_deleted(tx: &Tx, ws: &str, bot: &str, heir: &str, now: i64) -> ChannelResult<usize> {
-    let mut st = tx.prepare_cached(&format!(
-        "SELECT {COLS} FROM personas WHERE workspace_id = ? AND bot_id = ? AND deleted = 0 ORDER BY id"
-    ))?;
-    let rows = st
-        .query_map(params![ws, bot], row)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(st);
-    for p in &rows {
-        let id = &p.id;
-        tx.execute(
-            "UPDATE personas SET bot_id = ?, revision = revision + 1, updated = ? WHERE id = ?",
-            params![heir, now, id],
-        )?;
-        let after = PersonaRow {
-            bot_id: heir.into(),
-            ..p.clone()
-        };
-        base::revision(
-            tx,
-            ws,
-            "persona",
-            id,
-            p.revision + 1,
-            &snap(p),
-            &snap(&after),
-            "steve",
-        )?;
-        base::audit(
-            tx,
-            ws,
-            "steve",
-            "persona.bot_moved",
-            id,
-            &json!({"from": bot, "to": heir}),
-        )?;
-        event(tx, ws, id);
-    }
-    Ok(rows.len())
 }
 
 /// SSE `{type:"persona", id, ws}`.
