@@ -30,7 +30,8 @@ impl NodeRuntime {
     ) -> Result<Planned, StoreError> {
         self.running()?;
         let planned = self.tx(|tx| {
-            queue_in(tx, session, text, via, files, now())?;
+            self.store
+                .write(|w| queue_in(w, session, text, via, files, now()))?;
             self.plan_in(tx, session)
         })?;
         if planned == Planned::Created {
@@ -56,7 +57,7 @@ impl NodeRuntime {
             // a released session takes the lead too: once something is queued it opens again
             let released = self.may_plan()
                 && !self.is_holding()
-                && phase_in(tx, session)?
+                && self.phase_in(session)?
                     .is_some_and(|(p, a)| p == "released" && a.is_none());
             let p = self.plan_state_in(tx, session)?;
             if !released && matches!(p, Planned::Busy | Planned::Held) {
@@ -69,7 +70,7 @@ impl NodeRuntime {
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )?;
                 if !waiting {
-                    queue_in(tx, session, text, via, &[], first.map_or(now(), |t| t - 1))?;
+                    self.store.write(|w| queue_in(w, session, text, via, &[], first.map_or(now(), |t| t - 1)))?;
                 }
             }
             let p = self.plan_in(tx, session)?;
@@ -120,7 +121,7 @@ impl NodeRuntime {
 
     /// What [`Self::plan_in`] would answer, without planning (and without writing anything).
     fn plan_state_in(&self, tx: &Tx, session: &str) -> Result<Planned, StoreError> {
-        if ended_in(tx, session)? {
+        if self.ended_in(session)? {
             self.store.sessions().retire_queue(session)?;
             return Ok(Planned::Held);
         }
@@ -142,7 +143,7 @@ impl NodeRuntime {
         }
         // a faulted stream waits for reconciliation: what the Node does for this session now would
         // never be applied, so nothing new starts there (and a released session is not reopened)
-        if faulted(tx, &self.node_id, session)? || self.is_held(session) {
+        if self.store.read(|r| faulted(r, &self.node_id, session))? || self.is_held(session) {
             return Ok(Planned::Held);
         }
         let (phase, active): (String, Option<String>) = tx.query_row(
@@ -240,7 +241,7 @@ impl NodeRuntime {
         ordinal: i64,
         prompt: Vec<Part>,
     ) -> Result<(), StoreError> {
-        let open = self.open_of(tx, session)?;
+        let open = self.open_of(session)?;
         let attempt = uid("a");
         let op = format!("op_{attempt}");
         let limit = self.turn_limit.load(std::sync::atomic::Ordering::Relaxed);
@@ -300,7 +301,7 @@ impl NodeRuntime {
             },
             self.clock.now(),
         )?;
-        let trev = turn_revision(tx, turn)?;
+        let trev = self.turn_revision(turn)?;
         rt::turn_cas_in(
             tx,
             turn,
@@ -313,7 +314,7 @@ impl NodeRuntime {
             },
             now(),
         )?;
-        let srev = session_revision(tx, session)?;
+        let srev = self.session_revision(session)?;
         if !rt::session_cas_in(
             tx,
             session,
@@ -344,7 +345,7 @@ impl NodeRuntime {
         } else {
             "starting"
         };
-        status_in(tx, session, starting)?;
+        self.status_in(session, starting)?;
         Ok(())
     }
 
@@ -607,8 +608,8 @@ impl NodeRuntime {
         };
         let settled = self.plan_after_in(tx, session)? != Planned::Created;
         if settled {
-            self.release_if_ended_in(tx, session)?;
-            status_in(tx, session, settled_status(&completion.stop_reason))?;
+            self.release_if_self.ended_in(session)?;
+            self.status_in(session, settled_status(&completion.stop_reason))?;
         }
         let ended = settled.then(|| End {
             session: session.to_string(),
@@ -632,15 +633,14 @@ pub fn park(
     via: &str,
     files: &[FileRef],
 ) -> Result<(), StoreError> {
-    store.transaction(|tx| {
-        queue_in(tx, session, text, via, files, now())?;
-        let told: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM events WHERE session_id=?1 AND kind='system' AND json_extract(data,'$.parked')=1 AND seq > (SELECT COALESCE(MAX(seq),0) FROM events WHERE session_id=?1 AND kind IN ('user','turn_end')))",
-            [session],
-            |r| r.get(0),
-        )?;
-        if !told {
-            event_in(tx, session, "system", json!({ "text": steve_i18n::stored(|| steve_i18n::t!("hub.session.node_parked")), "parked": true }))?;
+    store.write(|w| {
+        queue_in(w, session, text, via, files, now())?;
+        if !node_sessions::has_current_park_notice(w, session)? {
+            w.events().add(
+                session, "system",
+                json!({ "text": steve_i18n::stored(|| steve_i18n::t!("hub.session.node_parked")), "parked": true }),
+                None, now(),
+            )?;
         }
         Ok(())
     })
@@ -648,48 +648,25 @@ pub fn park(
 
 /// Queues a message (with its `queued` event) at `created`.
 fn queue_in(
-    tx: &Tx,
+    w: &mut W<'_>,
     session: &str,
     text: &str,
     via: &str,
     files: &[FileRef],
     created: i64,
 ) -> Result<(), StoreError> {
-    if ended_in(tx, session)? {
+    if node_sessions::ended(w, session)? {
         return Err(conflict("已结束的会话不能接收新消息，请使用当前会话。"));
     }
-    tx.execute(
-        "INSERT INTO queued (id, session_id, text, via, created, files) VALUES (?, ?, ?, ?, ?, ?)",
-        rusqlite::params![
-            uid("q"),
-            session,
-            text,
-            via,
-            created,
-            serde_json::to_string(files)?
-        ],
+    node_sessions::queue(w, &uid("q"), session, text, via, files, created)?;
+    w.events().add(
+        session,
+        "queued",
+        message_event(text, via, files),
+        None,
+        now(),
     )?;
-    event_in(tx, session, "queued", message_event(text, via, files))?;
-    tx.publish(steve_types::DomainEvent::from(
-        steve_types::WorkEvent::Session {
-            ws: tx
-                .query_row::<String, _, _>(
-                    "SELECT workspace_id FROM sessions WHERE id = ?",
-                    rusqlite::params![session],
-                    |r| r.get(0),
-                )?
-                .into(),
-            id: {
-                let value: String = session.into();
-                steve_types::SessionId::from(value)
-            },
-            item_id: {
-                let value: Option<Option<String>> = None;
-                value.map(|value| value.map(Into::into))
-            },
-        },
-    ));
-    Ok(())
+    node_sessions::changed_event(w, session)
 }
 
 pub(super) fn startup_blocked_in(tx: &Tx, session: &str) -> Result<bool, StoreError> {

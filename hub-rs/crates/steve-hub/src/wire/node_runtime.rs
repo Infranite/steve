@@ -33,7 +33,9 @@ use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use steve_node_api::*;
 use steve_store::runtime::{self as rt, ReceiptState};
-use steve_store::{FileRef, Ingest, Store, StoreError, StreamKey, Tx, W};
+use steve_store::{
+    FileRef, Ingest, Store, StoreError, StreamKey, Tx, W, node_sessions, node_turns,
+};
 
 mod apply;
 mod capacity_retry;
@@ -845,47 +847,13 @@ fn exec_session(x: &ExecutionRef) -> Option<String> {
     }
 }
 
-/// The turn's latest attempt (the one that ended it, once it is over).
-fn last_attempt_in(tx: &Tx, turn: &str) -> Result<String, StoreError> {
-    Ok(tx.query_row(
-        "SELECT attempt_id FROM runtime_attempts WHERE turn_id=? ORDER BY ordinal DESC LIMIT 1",
-        [turn],
-        |r| r.get(0),
-    )?)
-}
-
-/// The business side ended the session (`sessions.status`).
-fn ended_in(tx: &Tx, session: &str) -> Result<bool, StoreError> {
-    Ok(tx
-        .query_row(
-            "SELECT status='ended' FROM sessions WHERE id=?",
-            [session],
-            |r| r.get(0),
-        )
-        .optional()?
-        .unwrap_or(false))
-}
-
-/// One of this Node's streams that carries `session`'s events (any epoch) is faulted: nothing more
-/// of them is applied. The session's own stream counts even when the Hub never heard of the session
-/// on it (a gap found by reconcile).
-fn faulted(c: &rusqlite::Connection, node: &NodeId, session: &str) -> Result<bool, StoreError> {
-    Ok(c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM node_streams WHERE node_id=?2 AND fault IS NOT NULL AND (session_id=?1 OR stream=?3))",
-        rusqlite::params![session, node.as_str(), heads::session_stream(session)],
-        |r| r.get(0),
-    )?)
-}
-
-/// The session's phase and active attempt; `None`: not bound.
-fn phase_in(tx: &Tx, session: &str) -> Result<Option<(String, Option<String>)>, StoreError> {
-    Ok(tx
-        .query_row(
-            "SELECT phase, active_attempt FROM runtime_sessions WHERE session_id=?",
-            [session],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?)
+/// One of the Node's streams that carries this session's events is faulted.
+fn faulted(
+    r: &mut impl steve_store::Read,
+    node: &NodeId,
+    session: &str,
+) -> Result<bool, StoreError> {
+    node_sessions::faulted(r, node.as_str(), session, &heads::session_stream(session))
 }
 
 /// `sessions.status` once a turn is over and nothing follows it: the legacy runner's values.
@@ -895,36 +863,6 @@ fn settled_status(stop_reason: &str) -> &'static str {
     } else {
         "idle"
     }
-}
-
-/// Sets `sessions.status` the way the legacy runner does (`running` from an attempt's start until
-/// the turn is over). A session the business side ended stays ended.
-fn status_in(tx: &Tx, session: &str, status: &str) -> Result<(), StoreError> {
-    let n = tx.execute(
-        "UPDATE sessions SET status=?1, updated=?2 WHERE id=?3 AND status NOT IN ('ended', ?1)",
-        rusqlite::params![status, now(), session],
-    )?;
-    if n > 0 {
-        session_changed(tx, session)?;
-    }
-    Ok(())
-}
-
-/// The session row changed: its readers hear it after the commit.
-fn session_changed(tx: &Tx, session: &str) -> Result<(), StoreError> {
-    let ws: String = tx.query_row(
-        "SELECT workspace_id FROM sessions WHERE id = ?",
-        [session],
-        |r| r.get(0),
-    )?;
-    tx.publish(steve_types::DomainEvent::from(
-        steve_types::WorkEvent::Session {
-            ws: ws.into(),
-            id: steve_types::SessionId::from(session.to_string()),
-            item_id: None,
-        },
-    ));
-    Ok(())
 }
 
 /// A `system` entry of the session, for the people reading it.
@@ -938,38 +876,36 @@ fn event_in(tx: &Tx, session: &str, kind: &str, data: Value) -> Result<(), Store
     Ok(())
 }
 
-fn session_revision(tx: &Tx, session: &str) -> Result<i64, StoreError> {
-    Ok(tx.query_row(
-        "SELECT revision FROM runtime_sessions WHERE session_id=?",
-        [session],
-        |r| r.get(0),
-    )?)
-}
+impl NodeRuntime {
+    fn session_revision(&self, session: &str) -> Result<i64, StoreError> {
+        self.store.read(|r| node_sessions::revision(r, session))
+    }
 
-fn turn_revision(tx: &Tx, turn: &str) -> Result<i64, StoreError> {
-    Ok(tx.query_row(
-        "SELECT revision FROM runtime_turns WHERE turn_id=?",
-        [turn],
-        |r| r.get(0),
-    )?)
-}
+    fn turn_revision(&self, turn: &str) -> Result<i64, StoreError> {
+        self.store.read(|r| node_turns::revision(r, turn))
+    }
 
-fn op_of_attempt(tx: &Tx, attempt: &str) -> Result<String, StoreError> {
-    Ok(tx.query_row(
-        "SELECT operation_id FROM runtime_attempts WHERE attempt_id=?",
-        [attempt],
-        |r| r.get(0),
-    )?)
-}
+    fn last_attempt_in(&self, turn: &str) -> Result<String, StoreError> {
+        self.store.read(|r| node_turns::latest_attempt(r, turn))
+    }
 
-fn attempt_row(tx: &Tx, attempt: &str) -> Result<Option<(i64, String)>, StoreError> {
-    match tx.query_row(
-        "SELECT revision, state FROM runtime_attempts WHERE attempt_id=?",
-        [attempt],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    ) {
-        Ok(x) => Ok(Some(x)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e.into()),
+    fn ended_in(&self, session: &str) -> Result<bool, StoreError> {
+        self.store.read(|r| node_sessions::ended(r, session))
+    }
+
+    fn phase_in(&self, session: &str) -> Result<Option<(String, Option<String>)>, StoreError> {
+        self.store.read(|r| {
+            Ok(node_sessions::phase(r, session, None)?
+                .map(|phase| (phase.name, phase.active_attempt)))
+        })
+    }
+
+    fn status_in(&self, session: &str, status: &str) -> Result<(), StoreError> {
+        self.store
+            .write(|w| node_sessions::set_status(w, session, status, now()))
+    }
+
+    fn attempt_row(&self, attempt: &str) -> Result<Option<node_turns::Attempt>, StoreError> {
+        self.store.read(|r| node_turns::attempt(r, attempt))
     }
 }

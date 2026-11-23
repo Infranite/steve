@@ -1,7 +1,7 @@
 //! Hub-side Node session bindings and execution ownership.
 
 use sea_query::{Expr, ExprTrait, Func, JoinType, Query};
-use steve_node_api::{ExecutionRef, OperationId, SessionId};
+use steve_node_api::{ExecutionRef, SessionId};
 
 use crate::{Read, Result};
 
@@ -98,23 +98,6 @@ pub fn owns_execution(c: &mut impl Read, node: &str, execution: &ExecutionRef) -
     Ok(c.one(&query, |_| Ok(()))?.is_some())
 }
 
-/// An unrecorded command may have been sent directly by the Hub.
-pub fn operation_is_foreign(
-    c: &mut impl Read,
-    node: &str,
-    operation: &OperationId,
-) -> Result<bool> {
-    Ok(c.one(
-        Query::select()
-            .column("operation_id")
-            .from("node_commands")
-            .and_where(Expr::col("operation_id").eq(operation.as_str()))
-            .and_where(Expr::col("node_id").ne(node)),
-        |_| Ok(()),
-    )?
-    .is_some())
-}
-
 pub struct HandoverCandidate {
     pub session: String,
     pub node: String,
@@ -162,4 +145,251 @@ pub fn handover_candidates(c: &mut impl Read) -> Result<Vec<HandoverCandidate>> 
             })
         },
     )
+}
+
+/// The latest in-flight state of a bound session.
+pub struct Phase {
+    pub name: String,
+    pub active_attempt: Option<String>,
+}
+
+pub fn phase(c: &mut impl Read, session: &str, node: Option<&str>) -> Result<Option<Phase>> {
+    let mut q = Query::select();
+    q.columns(["phase", "active_attempt"])
+        .from("runtime_sessions")
+        .and_where(Expr::col("session_id").eq(session));
+    if let Some(node) = node {
+        q.and_where(Expr::col("node_id").eq(node));
+    }
+    c.one(&q, |r| {
+        Ok(Phase {
+            name: r.get(0)?,
+            active_attempt: r.get(1)?,
+        })
+    })
+}
+
+pub fn unfinished(c: &mut impl Read, session: &str) -> Result<bool> {
+    Ok(c.one(
+        Query::select()
+            .column("turn_id")
+            .from("runtime_turns")
+            .and_where(Expr::col("session_id").eq(session))
+            .and_where(Expr::col("state").ne("finished"))
+            .limit(1),
+        |_| Ok(()),
+    )?
+    .is_some())
+}
+
+pub fn configuring_on(c: &mut impl Read, node: &str) -> Result<Vec<String>> {
+    c.all(
+        Query::select()
+            .column("session_id")
+            .from("runtime_sessions")
+            .and_where(Expr::col("node_id").eq(node))
+            .and_where(Expr::col("phase").eq("configuring")),
+        |r| r.get(0),
+    )
+}
+
+pub fn node_revision(c: &mut impl Read, session: &str) -> Result<Option<steve_node_api::Revision>> {
+    Ok(c.one(
+        Query::select()
+            .column("node_revision")
+            .from("runtime_sessions")
+            .and_where(Expr::col("session_id").eq(session)),
+        |r| r.get::<Option<String>>(0),
+    )?
+    .flatten()
+    .and_then(|s| s.try_into().ok()))
+}
+
+/// The desired harness configuration, pending a Node command at an idle boundary.
+pub fn desired_config<T: serde::de::DeserializeOwned>(
+    c: &mut impl Read,
+    session: &str,
+) -> Result<Option<T>> {
+    Ok(c.one(
+        Query::select()
+            .column("desired_config")
+            .from("runtime_sessions")
+            .and_where(Expr::col("session_id").eq(session)),
+        |r| r.get::<Option<super::Json<T>>>(0),
+    )?
+    .flatten()
+    .map(|v| v.0))
+}
+
+/// Changing desired configuration leaves the session's phase revision alone.
+pub fn set_desired_config<T: serde::Serialize>(
+    w: &mut crate::W<'_>,
+    session: &str,
+    config: Option<&T>,
+    at: i64,
+) -> Result<()> {
+    let config = config.map(serde_json::to_string).transpose()?;
+    w.exec(
+        Query::update()
+            .table("runtime_sessions")
+            .value("desired_config", config)
+            .value("updated", at)
+            .and_where(Expr::col("session_id").eq(session)),
+    )?;
+    Ok(())
+}
+
+pub fn ended(c: &mut impl Read, session: &str) -> Result<bool> {
+    Ok(c.one(
+        Query::select()
+            .column("id")
+            .from("sessions")
+            .and_where(Expr::col("id").eq(session))
+            .and_where(Expr::col("status").eq("ended")),
+        |_| Ok(()),
+    )?
+    .is_some())
+}
+
+pub fn faulted(c: &mut impl Read, node: &str, session: &str, stream: &str) -> Result<bool> {
+    Ok(c.one(
+        Query::select()
+            .column("stream")
+            .from("node_streams")
+            .and_where(Expr::col("node_id").eq(node))
+            .and_where(Expr::col("fault").is_not_null())
+            .and_where(
+                Expr::col("session_id")
+                    .eq(session)
+                    .or(Expr::col("stream").eq(stream)),
+            )
+            .limit(1),
+        |_| Ok(()),
+    )?
+    .is_some())
+}
+
+pub fn uncertain_turn(c: &mut impl Read, session: &str) -> Result<bool> {
+    Ok(c.one(
+        Query::select()
+            .column(("t", "turn_id"))
+            .from_as("runtime_turns", "t")
+            .join_as(
+                JoinType::LeftJoin,
+                "runtime_attempts",
+                "a",
+                Expr::col(("a", "turn_id"))
+                    .eq(Expr::col(("t", "turn_id")))
+                    .and(Expr::col(("a", "state")).ne("finished")),
+            )
+            .and_where(Expr::col(("t", "session_id")).eq(session))
+            .and_where(Expr::col(("t", "state")).ne("finished"))
+            .and_where(
+                Expr::col(("t", "state"))
+                    .eq("unknown")
+                    .or(Expr::col(("a", "state")).eq("unknown")),
+            )
+            .limit(1),
+        |_| Ok(()),
+    )?
+    .is_some())
+}
+
+pub fn revision(c: &mut impl Read, session: &str) -> Result<i64> {
+    c.one(
+        Query::select()
+            .column("revision")
+            .from("runtime_sessions")
+            .and_where(Expr::col("session_id").eq(session)),
+        |r| r.get(0),
+    )?
+    .ok_or_else(|| crate::StoreError::Rejected(format!("missing runtime session {session}")))
+}
+
+/// A session the business side ended stays ended.
+pub fn set_status(w: &mut crate::W<'_>, session: &str, status: &str, at: i64) -> Result<()> {
+    let changed = w.exec(
+        Query::update()
+            .table("sessions")
+            .value("status", status)
+            .value("updated", at)
+            .and_where(Expr::col("id").eq(session))
+            .and_where(Expr::col("status").is_not_in(["ended", status])),
+    )?;
+    if changed > 0 {
+        changed_event(w, session)?;
+    }
+    Ok(())
+}
+
+pub fn changed_event(w: &mut crate::W<'_>, session: &str) -> Result<()> {
+    use super::Q;
+    let ws: String = w
+        .one(
+            Query::select()
+                .column("workspace_id")
+                .from("sessions")
+                .and_where(Expr::col("id").eq(session)),
+            |r| r.get(0),
+        )?
+        .ok_or_else(|| crate::StoreError::Rejected(format!("missing session {session}")))?;
+    w.emit(steve_types::DomainEvent::from(
+        steve_types::WorkEvent::Session {
+            ws: ws.into(),
+            id: session.to_string().into(),
+            item_id: None,
+        },
+    ));
+    Ok(())
+}
+
+pub fn queue(
+    w: &mut crate::W<'_>,
+    id: &str,
+    session: &str,
+    text: &str,
+    via: &str,
+    files: &[crate::FileRef],
+    created: i64,
+) -> Result<()> {
+    let files = serde_json::to_string(files)?;
+    w.exec(
+        Query::insert()
+            .into_table("queued")
+            .columns(["id", "session_id", "text", "via", "created", "files"])
+            .values_panic([
+                id.into(),
+                session.into(),
+                text.into(),
+                via.into(),
+                created.into(),
+                files.into(),
+            ]),
+    )?;
+    Ok(())
+}
+
+pub fn has_current_park_notice(c: &mut impl Read, session: &str) -> Result<bool> {
+    let boundary = Query::select()
+        .expr(Func::coalesce([
+            Func::max(Expr::col("seq")).into(),
+            Expr::Constant(0_i64.into()),
+        ]))
+        .from("events")
+        .and_where(Expr::col("session_id").eq(session))
+        .and_where(Expr::col("kind").is_in(["user", "turn_end"]))
+        .take();
+    let parked = c.db().dialect().json_field(Expr::col("data"), "parked");
+    Ok(c.one(
+        Query::select()
+            .column("seq")
+            .from("events")
+            .and_where(Expr::col("session_id").eq(session))
+            .and_where(Expr::col("kind").eq("system"))
+            .and_where(parked.eq(true))
+            .and_where(Expr::col("seq").gt(Expr::from(boundary)))
+            .limit(1),
+        |_| Ok(()),
+    )?
+    .is_some())
 }

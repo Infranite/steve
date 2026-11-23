@@ -26,7 +26,7 @@ pub fn due(
     now: i64,
 ) -> Vec<(String, String, i64)> {
     store
-        .read(steve_store::node_sessions::handover_candidates)
+        .read(|r| steve_store::node_sessions::handover_candidates(r))
         .unwrap_or_default()
         .into_iter()
         .filter(|row| svc.registry.current(&row.node).is_none())

@@ -366,13 +366,16 @@ impl NodeRuntime {
             "release_session" => "releasing",
             _ => "configuring",
         };
-        if phase_in(tx, session)?.is_none_or(|(p, a)| p != held || a.is_some()) {
+        if self
+            .phase_in(session)?
+            .is_none_or(|(p, a)| p != held || a.is_some())
+        {
             return Ok(());
         }
         if method == "release_session" && self.release_for_successor_in(tx, session, target)? {
             return Ok(());
         }
-        let rev = session_revision(tx, session)?;
+        let rev = self.session_revision(session)?;
         rt::session_cas_in(
             tx,
             session,

@@ -200,6 +200,7 @@ fn segment(s: &str) -> String {
 /// (workspace, principal, bot, adapter), recorded as `runtime_sessions.state_dir`. The principal
 /// who owns the Node starts it from their own settings and login there.
 pub fn harness_state_in(
+    store: &steve_store::Store,
     c: &Connection,
     session: &str,
     node: &str,
@@ -221,7 +222,7 @@ pub fn harness_state_in(
         segment(harness),
     ]
     .join("/");
-    let owner = super::node_env::node_owner(c, node)?;
+    let owner = store.read(|r| super::node_env::node_owner(r, node))?;
     let import_owner = p.user().is_some() && owner.as_deref() == p.user();
     c.execute(
         "UPDATE runtime_sessions SET state_dir=? WHERE session_id=?",

@@ -702,16 +702,8 @@ mod tests {
         );
         // held from the start, never let go: it is unpaired
         assert_eq!(*f.fleet.holds.lock().unwrap(), vec![true]);
-        let audit: i64 = f
-            .store
-            .reader(|c| {
-                Ok::<_, steve_store::StoreError>(c.query_row(
-                    "SELECT count(*) FROM node_audit WHERE what='remove' AND node_id='n_a' AND actor='u'",
-                    [],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap();
+        let audit =
+            steve_store::testkit::hub::node_audit_count(&f.store, "n_a", "u", "remove").unwrap();
         assert_eq!(audit, 1);
     }
 

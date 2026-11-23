@@ -642,68 +642,6 @@ const REALTIME_STOP_RECEIPT_SQL: &str = r#"INSERT OR IGNORE INTO realtime_output
    AND excluded.not_started=0;
 "#;
 
-/// For reconciliation after a crash or a response lost in transit. A receipt's JSON wrapper has
-/// `success` plus the original Node `payload`; it is not a new wire protocol.
-#[derive(Debug)]
-pub struct CommandRecord {
-    pub operation: String,
-    pub node: String,
-    pub method: String,
-    pub request: Value,
-    pub digest: String,
-    pub state: String,
-    pub receipt: Option<Value>,
-    pub revision: i64,
-}
-pub fn command_in(tx: &Tx<'_>, operation: &str) -> Result<Option<CommandRecord>> {
-    let row = tx.query_row("SELECT node_id,method,request,digest,state,receipt,revision FROM node_commands WHERE operation_id=?",[operation],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,i64>(6)?))).optional()?;
-    row.map(
-        |(node, method, request, digest, state, receipt, revision)| {
-            Ok(CommandRecord {
-                operation: operation.into(),
-                node,
-                method,
-                request: serde_json::from_str(&request)?,
-                digest,
-                state,
-                receipt: receipt.map(|s| serde_json::from_str(&s)).transpose()?,
-                revision,
-            })
-        },
-    )
-    .transpose()
-}
-
-/// A Node session's desired harness config (applied at its next idle boundary), as the coordinator
-/// wrote it.
-pub fn desired_config_in(tx: &Tx<'_>, session: &str) -> Result<Option<Value>> {
-    let v: Option<Option<String>> = tx
-        .query_row(
-            "SELECT desired_config FROM runtime_sessions WHERE session_id=?",
-            [session],
-            |r| r.get(0),
-        )
-        .optional()?;
-    v.flatten()
-        .map(|s| serde_json::from_str(&s).map_err(StoreError::from))
-        .transpose()
-}
-
-/// Sets or clears the desired config. Leaves the session's revision alone: it is not a phase change.
-pub fn set_desired_config_in(
-    tx: &Tx<'_>,
-    session: &str,
-    v: Option<&Value>,
-    now: i64,
-) -> Result<()> {
-    let v = v.map(to_json).transpose()?;
-    tx.execute(
-        "UPDATE runtime_sessions SET desired_config=?, updated=? WHERE session_id=?",
-        params![v, now, session],
-    )?;
-    Ok(())
-}
-
 /// A Node's permission request as the Hub holds it, with its card.
 pub struct NewPermission<'a> {
     pub decision: &'a str,

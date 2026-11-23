@@ -442,7 +442,13 @@ fn projection_cas_terminal_and_identity_guards() {
                 6
             )?);
             command(tx, "op", None)?;
-            assert_eq!(command_in(tx, "op")?.unwrap().state, "pending");
+            assert_eq!(
+                t.store
+                    .read(|r| steve_store::node_commands::record(r, "op", None))?
+                    .unwrap()
+                    .state,
+                "pending"
+            );
             Ok(())
         })
         .unwrap();
@@ -522,22 +528,41 @@ fn desired_config_round_trip_leaves_the_revision_and_configuring_is_a_phase() {
     ready(&t);
     t.store
         .transaction::<_, StoreError>(|tx| {
-            assert_eq!(desired_config_in(tx, "s")?, None);
+            assert_eq!(
+                t.store.read(
+                    |r| steve_store::node_sessions::desired_config::<serde_json::Value>(r, "s")
+                )?,
+                None
+            );
             let rev: i64 = tx.query_row(
                 "SELECT revision FROM runtime_sessions WHERE session_id='s'",
                 [],
                 |r| r.get(0),
             )?;
-            set_desired_config_in(tx, "s", Some(&json!({"x": 1})), 5)?;
-            assert_eq!(desired_config_in(tx, "s")?, Some(json!({"x": 1})));
+            t.store.write(|w| {
+                steve_store::node_sessions::set_desired_config(w, "s", Some(&json!({"x": 1})), 5)
+            })?;
+            assert_eq!(
+                t.store.read(
+                    |r| steve_store::node_sessions::desired_config::<serde_json::Value>(r, "s")
+                )?,
+                Some(json!({"x": 1}))
+            );
             let after: i64 = tx.query_row(
                 "SELECT revision FROM runtime_sessions WHERE session_id='s'",
                 [],
                 |r| r.get(0),
             )?;
             assert_eq!(rev, after);
-            set_desired_config_in(tx, "s", None, 6)?;
-            assert_eq!(desired_config_in(tx, "s")?, None);
+            t.store.write(|w| {
+                steve_store::node_sessions::set_desired_config::<serde_json::Value>(w, "s", None, 6)
+            })?;
+            assert_eq!(
+                t.store.read(
+                    |r| steve_store::node_sessions::desired_config::<serde_json::Value>(r, "s")
+                )?,
+                None
+            );
             let configuring = SessionUpdate {
                 phase: "configuring",
                 active_attempt: None,

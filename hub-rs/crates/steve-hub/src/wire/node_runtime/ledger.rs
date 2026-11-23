@@ -13,6 +13,7 @@
 
 use super::*;
 use serde::Serialize;
+use steve_store::node_commands;
 
 /// The methods that go through the ledger.
 pub(super) const LEDGER_METHODS: [&str; 3] = ["exec", "git_apply", "tidy_workspace"];
@@ -78,7 +79,7 @@ impl NodeRuntime {
         request["subject"] = Value::from(subject);
         let digest = digest_of(&request).map_err(conflict)?.to_string();
         let fresh = self.tx(|tx| {
-            if let Some(c) = rt::command_in(tx, op)? {
+            if let Some(c) = self.store.read(|r| node_commands::record(r, op, None))? {
                 let same = c.node == self.node_id.as_str()
                     && c.method == method
                     && c.request.get("subject").and_then(Value::as_str) == Some(subject)
@@ -110,43 +111,33 @@ impl NodeRuntime {
     /// The ledger operation `op` of this Node, as it stands.
     pub fn ledger(&self, op: &str) -> Result<Option<LedgerEntry>, StoreError> {
         let node = self.node_id.as_str();
-        self.store.reader(|c| {
-            let row: Option<(String, String, String, Option<String>)> = c
-                .query_row(
-                    "SELECT method, request, state, receipt FROM node_commands WHERE operation_id=? AND node_id=?",
-                    [op, node],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-                )
-                .optional()?;
-            let Some((method, request, state, receipt)) = row else {
-                return Ok(None);
-            };
-            if !LEDGER_METHODS.contains(&method.as_str()) {
-                return Ok(None);
-            }
-            let request: Value = serde_json::from_str(&request)?;
-            let payload = receipt
-                .map(|r| serde_json::from_str::<Value>(&r))
-                .transpose()?
-                .and_then(|v| v.get("payload").cloned());
-            let (receipt, refusal) = match (state.as_str(), payload) {
-                (_, None) => (None, None),
-                ("rejected", Some(p)) => (None, serde_json::from_value(p).ok()),
-                (_, Some(p)) => (serde_json::from_value(p).ok(), None),
-            };
-            Ok(Some(LedgerEntry {
-                operation: op.into(),
-                subject: request
-                    .get("subject")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .into(),
-                method,
-                state,
-                receipt,
-                refusal,
-            }))
-        })
+        let Some(row) = self
+            .store
+            .read(|r| node_commands::record(r, op, Some(node)))?
+        else {
+            return Ok(None);
+        };
+        if !LEDGER_METHODS.contains(&row.method.as_str()) {
+            return Ok(None);
+        }
+        let (receipt, refusal) = match (row.state.as_str(), row.receipt.and_then(|r| r.payload)) {
+            (_, None) => (None, None),
+            ("rejected", Some(p)) => (None, serde_json::from_value(p).ok()),
+            (_, Some(p)) => (serde_json::from_value(p).ok(), None),
+        };
+        Ok(Some(LedgerEntry {
+            operation: row.operation,
+            subject: row
+                .request
+                .get("subject")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .into(),
+            method: row.method,
+            state: row.state,
+            receipt,
+            refusal,
+        }))
     }
 
     /// `op`, a ledger `exec` or push the Node can no longer tell the end of, stopped now rather
@@ -159,13 +150,9 @@ impl NodeRuntime {
             if self.recover_exec_in(tx, op, "a step whose command was lost is run again")? {
                 return Ok(true);
             }
-            let state: Option<String> = tx
-                .query_row(
-                    "SELECT state FROM node_commands WHERE operation_id=? AND node_id=?",
-                    [op, self.node_id.as_str()],
-                    |r| r.get(0),
-                )
-                .optional()?;
+            let state = self
+                .store
+                .read(|r| node_commands::state(r, self.node_id.as_str(), op))?;
             if state.as_deref() != Some("unknown") {
                 return Ok(true);
             }
@@ -181,17 +168,8 @@ impl NodeRuntime {
     /// what it was for asks about it again. A push's deadline is [`PUSH_DEADLINE`] after it was
     /// written (the Node's starts later, when it takes it). How many were planned.
     pub(crate) fn recover_lost_execs(&self, now: i64) -> Result<usize, StoreError> {
-        let due: Vec<String> = self.store.reader(|c| {
-            let mut st = c.prepare(
-                "SELECT operation_id FROM node_commands WHERE node_id=?1 AND state='unknown'
-                   AND ((method='exec' AND COALESCE(json_extract(request,'$.body.limits.deadline'), 0) <= ?2)
-                        OR (method='git_apply' AND created + ?3 <= ?2))",
-            )?;
-            st.query_map(rusqlite::params![self.node_id.as_str(), now, PUSH_DEADLINE], |r| {
-                r.get::<_, String>(0)
-            })?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(StoreError::from)
+        let due = self.store.read(|r| {
+            node_commands::due_lost_execs(r, self.node_id.as_str(), now, PUSH_DEADLINE)
         })?;
         let mut n = 0;
         for op in due {

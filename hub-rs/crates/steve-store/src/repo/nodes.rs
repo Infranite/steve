@@ -661,14 +661,6 @@ pub fn set_host(tx: &Tx<'_>, node_id: &str, host: &str) -> Result<bool> {
     told(tx, node_id, n)
 }
 
-/// How the Node's latest link reached the Hub (JSON), kept while the Node is away.
-pub fn set_link(tx: &Tx<'_>, node_id: &str, link: &str) -> Result<bool> {
-    Ok(tx.execute(
-        "UPDATE nodes SET link=?2 WHERE node_id=?1",
-        params![node_id, link],
-    )? == 1)
-}
-
 pub fn get(c: &Connection, node_id: &str) -> Result<Option<NodeRow>> {
     Ok(c.query_row(
         &format!("SELECT {COLS} FROM nodes WHERE node_id=?"),
@@ -679,15 +671,6 @@ pub fn get(c: &Connection, node_id: &str) -> Result<Option<NodeRow>> {
 }
 
 /// The generation and state the guards compare a link with.
-pub fn link_state(c: &Connection, node_id: &str) -> Result<Option<(i64, String)>> {
-    Ok(c.query_row(
-        "SELECT generation, state FROM nodes WHERE node_id=?",
-        [node_id],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )
-    .optional()?)
-}
-
 pub fn list_for_owner(c: &Connection, owner: &str) -> Result<Vec<NodeRow>> {
     let mut st = c.prepare(&format!(
         "SELECT {COLS} FROM nodes WHERE owner=? ORDER BY created, node_id"

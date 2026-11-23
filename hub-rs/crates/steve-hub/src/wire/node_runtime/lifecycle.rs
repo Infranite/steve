@@ -80,7 +80,7 @@ impl NodeRuntime {
             skills: vec![],
         };
         let fresh = self.tx(|tx| {
-            if ended_in(tx, &b.session)? {
+            if self.ended_in(&b.session)? {
                 return Err(conflict("已结束的会话不能绑定或重开。"));
             }
             self.session_owners_work_in(tx, &b.session)?;
@@ -170,11 +170,16 @@ impl NodeRuntime {
             let open_op = format!("op_open_{}", b.session);
             // the principal's own variables on this Node, as recorded just now (node_env)
             let mut open = open.clone();
-            open.env = super::super::node_env::for_session(tx, self.node_id.as_str(), &b.session)?;
+            open.env = super::super::node_env::for_session(
+                &self.store,
+                self.node_id.as_str(),
+                &b.session,
+            )?;
             // and its skills
             open.skills = tx.write(|w| super::super::bot_skills::for_session(w, &b.session))?;
             if self.principal_state.load(Ordering::Relaxed) {
                 open.state = super::super::principal::harness_state_in(
+                    &self.store,
                     tx,
                     &b.session,
                     self.node_id.as_str(),
@@ -196,7 +201,7 @@ impl NodeRuntime {
                 self.clock.now(),
             )?;
             opening_in(tx, &b.session)?;
-            let rev = session_revision(tx, &b.session)?;
+            let rev = self.session_revision(&b.session)?;
             rt::session_cas_in(
                 tx,
                 &b.session,
@@ -265,7 +270,7 @@ impl NodeRuntime {
         session: &str,
         dependency: Option<&str>,
     ) -> Result<(), StoreError> {
-        if ended_in(tx, session)? || super::plan::startup_blocked_in(tx, session)? {
+        if self.ended_in(session)? || super::plan::startup_blocked_in(tx, session)? {
             return Ok(());
         }
         // a worktree it made that was tidied since, or that it could not make: made again first
@@ -274,11 +279,12 @@ impl NodeRuntime {
             Some(_) => None,
         };
         let dependency = again.as_deref().or(dependency);
-        let mut open = self.open_of(tx, session)?;
-        self.fold_desired_in(tx, session, &mut open)?;
+        let mut open = self.open_of(session)?;
+        self.fold_desired_in(session, &mut open)?;
         open.resume = resume_of_in(tx, session)?;
         // the variables as they are now: a removed or changed one does not come back
-        open.env = super::super::node_env::for_session(tx, self.node_id.as_str(), session)?;
+        open.env =
+            super::super::node_env::for_session(&self.store, self.node_id.as_str(), session)?;
         open.skills = tx.write(|w| super::super::bot_skills::for_session(w, session))?;
         let op = uid(&format!("op_open_{session}"));
         let (req, digest) = command(&op, open)?;
@@ -296,7 +302,7 @@ impl NodeRuntime {
             self.clock.now(),
         )?;
         opening_in(tx, session)?;
-        let rev = session_revision(tx, session)?;
+        let rev = self.session_revision(session)?;
         rt::session_cas_in(
             tx,
             session,
@@ -316,33 +322,34 @@ impl NodeRuntime {
     pub fn retry_open(&self, session: &str, choice: &HarnessChoice) -> Result<(), StoreError> {
         self.running()?;
         self.tx(|tx| {
-            if ended_in(tx, session)? {
+            if self.ended_in(session)? {
                 return Err(conflict("已结束的会话不能重开，请使用当前会话。"));
             }
             if !super::plan::startup_blocked_in(tx, session)? {
                 return Err(conflict("会话已经重试或状态已变化，请刷新。"));
             }
-            let mut open = self.open_of(tx, session)?;
+            let mut open = self.open_of(session)?;
             // A binding keeps its adapter identity; this compares user-selected ids, not adapter kinds.
             if !choice.harness.eq(&open.choice.harness) {
                 return Err(conflict("Bot 的执行器已改变，请重新指派以创建新会话。"));
             }
             open.choice = choice.clone();
-            let mut desired =
-                super::config::desired_in(tx, session)?.unwrap_or(super::config::Desired {
+            let mut desired = super::config::desired_in(&self.store, session)?.unwrap_or(
+                super::config::Desired {
                     choice: choice.clone(),
                     policy: open.policy,
                     refreshes: 0,
                     expected: None,
-                });
+                },
+            );
             desired.choice = choice.clone();
-            rt::set_desired_config_in(tx, session, Some(&serde_json::to_value(desired)?), now())?;
+            super::config::set_desired_in(&self.store, session, Some(&desired))?;
             tx.execute(
                 "DELETE FROM session_stops WHERE session_id=? AND stop_reason=?",
                 [session, steve_store::SESSION_START_FAILURE],
             )?;
             self.reopen_in(tx, session)?;
-            status_in(tx, session, "starting")?;
+            self.status_in(session, "starting")?;
             Ok(())
         })?;
         self.wake_send.notify_one();
@@ -396,7 +403,10 @@ impl NodeRuntime {
                     .optional()?;
                 // a session paused (its stream faulted, stranger Node work held) is sent no new
                 // command, a release included
-                if still.is_none() || self.is_held(&s) || faulted(tx, &self.node_id, &s)? {
+                if still.is_none()
+                    || self.is_held(&s)
+                    || self.store.read(|r| faulted(r, &self.node_id, &s))?
+                {
                     return Ok(false);
                 }
                 // only a release that goes out lets a harness go
@@ -419,7 +429,7 @@ impl NodeRuntime {
 
     /// [`Self::release`] inside `tx`.
     pub(super) fn release_in(&self, tx: &Tx, session: &str) -> Result<Release, StoreError> {
-        let Some((phase, active)) = phase_in(tx, session)? else {
+        let Some((phase, active)) = self.phase_in(session)? else {
             return Ok(Release::Gone);
         };
         let waiting = after_turn_release_in(tx, session)?;
@@ -463,7 +473,7 @@ impl NodeRuntime {
                     }
                     None => self.release_command_in(tx, session)?,
                 };
-                let rev = session_revision(tx, session)?;
+                let rev = self.session_revision(session)?;
                 rt::session_cas_in(
                     tx,
                     session,
@@ -477,7 +487,7 @@ impl NodeRuntime {
                 )?;
                 Ok(Release::Pending(op))
             }
-            _ if ended_in(tx, session)? => {
+            _ if self.ended_in(session)? => {
                 // busy (a turn, an open, a configure): queued for when that is over
                 let op = match waiting {
                     Some(op) => op,
@@ -521,7 +531,7 @@ impl NodeRuntime {
 
     /// An ended session is let go once it is idle (see [`Self::release`]).
     pub(super) fn release_if_ended_in(&self, tx: &Tx, session: &str) -> Result<(), StoreError> {
-        if ended_in(tx, session)? {
+        if self.ended_in(session)? {
             self.release_in(tx, session)?;
         }
         Ok(())
@@ -545,8 +555,8 @@ impl NodeRuntime {
 
     /// The session's open request as in force: as last opened or configured (the turn must match
     /// it exactly).
-    pub(super) fn open_of(&self, tx: &Tx, session: &str) -> Result<OpenSession, StoreError> {
-        config_in(tx, session)
+    pub(super) fn open_of(&self, session: &str) -> Result<OpenSession, StoreError> {
+        self.store.read(|r| config_in(r, session))
     }
 
     /// A turn of `session` is in flight (planned, running, waiting, retrying or unknown), or the
@@ -637,12 +647,11 @@ impl NodeRuntime {
     /// A read error counts as uncertain: waiting is the safe answer.
     pub fn is_uncertain(&self, session: &str) -> bool {
         self.store
-            .reader(|c| {
-                Ok::<_, StoreError>(c.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM runtime_turns t LEFT JOIN runtime_attempts a ON a.turn_id=t.turn_id AND a.state<>'finished' WHERE t.session_id=?1 AND t.state<>'finished' AND (t.state='unknown' OR a.state='unknown'))",
-                    [session],
-                    |r| r.get::<_, bool>(0),
-                )? || faulted(c, &self.node_id, session)?)
+            .read(|r| {
+                Ok::<_, StoreError>(
+                    node_sessions::uncertain_turn(r, session)?
+                        || faulted(r, &self.node_id, session)?,
+                )
             })
             .unwrap_or(true)
             || self.is_held(session)

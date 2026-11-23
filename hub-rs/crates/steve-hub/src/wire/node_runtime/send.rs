@@ -525,12 +525,12 @@ impl NodeRuntime {
     /// came in meanwhile goes now (opening it again if it was let go). Only the session's last
     /// release says so: an earlier one's receipt, come late, says nothing of the session now.
     fn released_in(&self, tx: &Tx, s: &str, op: &str, success: bool) -> Result<(), StoreError> {
-        if phase_in(tx, s)?.is_none_or(|(p, _)| p != "releasing")
+        if self.phase_in(s)?.is_none_or(|(p, _)| p != "releasing")
             || last_release_in(tx, s)?.as_deref() != Some(op)
         {
             return Ok(());
         }
-        let rev = session_revision(tx, s)?;
+        let rev = self.session_revision(s)?;
         rt::session_cas_in(
             tx,
             s,
@@ -559,7 +559,7 @@ impl NodeRuntime {
             )?
             .query_map([failed], |r| r.get(0))?
             .collect::<Result<_, _>>()?;
-        if waiting.is_empty() || !ended_in(tx, s)? {
+        if waiting.is_empty() || !self.ended_in(s)? {
             return Ok(());
         }
         let Release::Pending(op) = self.release_in(tx, s)? else {
@@ -607,7 +607,7 @@ impl NodeRuntime {
         ok: bool,
         detail: &str,
     ) -> Result<Option<End>, StoreError> {
-        if phase_in(tx, s)?.is_none_or(|(p, _)| p != "opening") {
+        if self.phase_in(s)?.is_none_or(|(p, _)| p != "opening") {
             return Ok(None);
         }
         let waiting: Option<String> = tx
@@ -645,7 +645,7 @@ impl NodeRuntime {
                 self.attempt_in(tx, s, &turn, ordinal + 1, spec.run.prompt)?;
                 return Ok(None);
             }
-            let rev = session_revision(tx, s)?;
+            let rev = self.session_revision(s)?;
             rt::session_cas_in(
                 tx,
                 s,
@@ -665,7 +665,7 @@ impl NodeRuntime {
                 self.plan_after_in(tx, s)?
             };
             if planned != Planned::Created {
-                self.release_if_ended_in(tx, s)?;
+                self.release_if_self.ended_in(s)?;
             }
             return Ok(None);
         }
@@ -696,12 +696,12 @@ impl NodeRuntime {
             self.turn_over_in(tx, s, &turn, &c)?;
             end = Some(End {
                 session: s.to_string(),
-                attempt: Some(last_attempt_in(tx, &turn)?),
+                attempt: Some(self.last_attempt_in(&turn)?),
                 stop: steve_store::SESSION_START_FAILURE.to_string(),
                 error: Some(text),
             });
         }
-        let rev = session_revision(tx, s)?;
+        let rev = self.session_revision(s)?;
         rt::session_cas_in(
             tx,
             s,
@@ -720,12 +720,12 @@ impl NodeRuntime {
                 "Node 没能打开这个会话（{detail}），已停止自动重试，请修正 Bot 配置后从失败卡重试。"
             ),
         )?;
-        self.release_if_ended_in(tx, s)?;
-        if ended_in(tx, s)? {
+        self.release_if_self.ended_in(s)?;
+        if self.ended_in(s)? {
             tx.execute("DELETE FROM queued WHERE session_id=?", [s])?;
             return Ok(None);
         }
-        status_in(tx, s, "error")?;
+        self.status_in(s, "error")?;
         self.startup_failed_in(tx, s, detail)?;
         Ok(end)
     }
@@ -920,7 +920,7 @@ impl NodeRuntime {
         self.close_cards_of_attempt_in(tx, &attempt)?;
         if reopen {
             // the turn keeps its messages and waits for the open (see opened_in)
-            let trev = turn_revision(tx, &turn)?;
+            let trev = self.turn_revision(&turn)?;
             let ordinal: i64 = tx.query_row(
                 "SELECT retry_ordinal FROM runtime_turns WHERE turn_id=?",
                 [&turn],

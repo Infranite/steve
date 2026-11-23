@@ -76,20 +76,17 @@ fn register(store: &Store, id: &Identity) -> Result<(), steve_store::StoreError>
     let pubkey = id.public();
     let fingerprint = steve_node_wire::identity::fingerprint(&pubkey);
     let name = format!("{} · Hub", hostname());
-    store.transaction(|tx| {
-        let owner: String = tx
-            .query_row(
-                "SELECT id FROM users WHERE role='owner' ORDER BY created, rowid LIMIT 1",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap_or_else(|_| "system".into());
-        tx.execute(
-            "INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,local,created) VALUES (?1,?2,?3,?4,?5,'active',1,?6)
-             ON CONFLICT(node_id) DO UPDATE SET pubkey=excluded.pubkey, fingerprint=excluded.fingerprint, state='active', local=1, revoked_at=NULL, revoked_by=NULL",
-            rusqlite::params![NODE_ID, owner, name, &pubkey[..], fingerprint, crate::nodes::now()],
-        )?;
-        Ok(())
+    store.write(|w| {
+        let owner = steve_store::UserRows(w)
+            .first_owner()?
+            .unwrap_or_else(|| "system".into());
+        let node = steve_store::nodes::NewNode {
+            node_id: NODE_ID,
+            name: &name,
+            pubkey: &pubkey,
+            fingerprint: &fingerprint,
+        };
+        steve_store::node_directory::register_local(w, &node, &owner, crate::nodes::now())
     })
 }
 

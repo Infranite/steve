@@ -236,8 +236,12 @@ impl NodeRuntime {
             let gone = view
                 .as_ref()
                 .is_none_or(|v| v.phase == SessionPhase::Released);
-            if gone && phase_in(tx, s)?.is_some_and(|(p, a)| p == "ready" && a.is_none()) {
-                let rev = session_revision(tx, s)?;
+            if gone
+                && self
+                    .phase_in(s)?
+                    .is_some_and(|(p, a)| p == "ready" && a.is_none())
+            {
+                let rev = self.session_revision(s)?;
                 rt::session_cas_in(
                     tx,
                     s,

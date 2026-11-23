@@ -23,7 +23,7 @@ pub enum Door {
     Colocated,
 }
 
-/// How a link arrived, as `/api/nodes` shows it in `link` (kept with the Node, [`steve_store::nodes::set_link`]).
+/// How a link arrived, as `/api/nodes` shows it in `link` (kept with the Node, [`steve_store::node_directory::admit_link`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Arrival {
     /// Where the Node's machine is, as far as the Hub can tell: `loopback` (this machine), `lan`,

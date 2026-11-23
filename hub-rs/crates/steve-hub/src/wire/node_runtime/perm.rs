@@ -223,7 +223,9 @@ impl NodeRuntime {
         if row.state != "waiting" {
             return Ok(false);
         }
-        let running = attempt_row(tx, &row.attempt)?.is_some_and(|(_, s)| s != "finished");
+        let running = self
+            .attempt_row(&row.attempt)?
+            .is_some_and(|a| a.state != "finished");
         let op = if running {
             Some(self.answer_command_in(tx, row, PermissionDecision::Reject)?)
         } else {

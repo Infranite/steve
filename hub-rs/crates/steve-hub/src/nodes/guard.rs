@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use steve_node_api::*;
-use steve_store::{Read, Store, StoreError, node_sessions};
+use steve_store::{Read, Store, StoreError, node_commands, node_sessions};
 
 use super::fleet::NodeFleet;
 use super::registry::NodeRegistry;
@@ -56,7 +56,7 @@ impl LinkCtx {
         self.live()?;
         let (store, node) = (self.store.clone(), self.node.to_string());
         let row = tokio::task::spawn_blocking(move || {
-            store.reader(|c| steve_store::nodes::link_state(c, &node))
+            store.read(|c| steve_store::node_directory::link_state(c, &node))
         })
         .await
         .map_err(internal)?
@@ -118,7 +118,7 @@ fn foreign(
                 // any other and the coordinator passes it by. Refusing it would hold back every
                 // event behind it, of every session on this Node.
                 Subject::Operation { operation } => {
-                    !node_sessions::operation_is_foreign(c, node, operation)?
+                    !node_commands::operation_is_foreign(c, node, operation)?
                 }
             };
         if !own {

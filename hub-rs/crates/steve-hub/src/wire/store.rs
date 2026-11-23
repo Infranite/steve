@@ -855,26 +855,19 @@ impl Repo for StoreBackend {
             .map_err(err)
     }
     fn setting_raw(&self, ws: &str, key: &str) -> BResult<Option<String>> {
-        use rusqlite::OptionalExtension;
         self.0
-            .with_conn(|c| {
-                Ok(c.query_row(
-                    "SELECT value FROM settings WHERE workspace_id = ? AND key = ?",
-                    [ws, key],
-                    |r| r.get::<_, String>(0),
-                )
-                .optional()?)
-            })
+            .read(|r| steve_store::WorkspaceSettings(r).get(ws, key))
             .map_err(err)
     }
     fn node_env_list(&self, me: &str, ws: &str, node: &str, principal: &str) -> BResult<Value> {
         use super::node_env as ne;
+        use steve_store::node_environment as env;
         self.0
-            .with_conn(|c| {
+            .read::<_, steve_store::StoreError>(|c| {
                 if let Some(why) = ne::refusal(c, me, ws, node, principal)? {
                     return Ok(Err(why));
                 }
-                Ok(Ok(ne::list(c, node, principal)?))
+                Ok(Ok(env::list(c, node, principal)?))
             })
             .map_err(err)?
             .map(|rows| serde_json::json!({ "node": node, "principal": principal, "env": rows }))
@@ -894,6 +887,7 @@ impl Repo for StoreBackend {
         note: &str,
     ) -> BResult<()> {
         use super::node_env as ne;
+        use steve_store::node_environment as env;
         if let Some(v) = value
             && let Some(why) = ne::value_refusal(key, v)
         {
@@ -903,14 +897,25 @@ impl Repo for StoreBackend {
             });
         }
         self.0
-            .with_conn(|c| {
+            .write::<_, steve_store::StoreError>(|c| {
                 if let Some(why) = ne::refusal(c, me, ws, node, principal)? {
                     return Ok(Err(why));
                 }
                 match value {
-                    Some(v) => ne::put(c, node, principal, key, v, note, me)?,
+                    Some(v) => env::put(
+                        c,
+                        env::Change {
+                            node,
+                            principal,
+                            key,
+                            value: v,
+                            note,
+                            actor: me,
+                        },
+                        steve_store::now(),
+                    )?,
                     None => {
-                        ne::delete(c, node, principal, key)?;
+                        env::delete(c, node, principal, key)?;
                     }
                 }
                 Ok(Ok(()))
@@ -922,15 +927,8 @@ impl Repo for StoreBackend {
             })
     }
     fn setting_put_raw(&self, ws: &str, key: &str, value: &str) -> BResult<()> {
-        let t = steve_store::now();
         self.0
-            .with_conn(|c| {
-                c.execute(
-                    "INSERT INTO settings (workspace_id, key, value, updated) VALUES (?, ?, ?, ?) ON CONFLICT(workspace_id, key) DO UPDATE SET value = excluded.value, updated = excluded.updated",
-                    rusqlite::params![ws, key, value, t],
-                )?;
-                Ok(())
-            })
+            .write(|w| steve_store::WorkspaceSettings(w).set(ws, key, value, steve_store::now()))
             .map_err(err)
     }
     fn devices_list(&self) -> BResult<Vec<Obj>> {

@@ -297,7 +297,7 @@ impl NodeRuntime {
                         |r| Ok((r.get(0)?, r.get(1)?)),
                     )?;
                     if phase == "ready" && active.is_none() {
-                        let rev = session_revision(tx, &session)?;
+                        let rev = self.session_revision(&session)?;
                         rt::session_cas_in(
                             tx,
                             &session,
@@ -323,10 +323,10 @@ impl NodeRuntime {
                         session
                     ],
                 )?;
-                session_changed(tx, &session)?;
+                node_sessions::changed_event(w, &session)?;
             }
             (EventBody::AttemptStarted, Some(a)) => {
-                if let Some((_, state)) = attempt_row(tx, a)?
+                if let Some(node_turns::Attempt { state, .. }) = self.attempt_row(a)?
                     && state == "planned"
                 {
                     let ordinal: i64 = tx.query_row(
@@ -334,7 +334,7 @@ impl NodeRuntime {
                         [a],
                         |r| r.get(0),
                     )?;
-                    status_in(tx, &session, "running")?;
+                    self.status_in(&session, "running")?;
                     // the turn's first message: the first `user` entry since the last turn ended
                     let user_seq: Option<i64> = tx.query_row(
                         "SELECT MIN(seq) FROM events WHERE session_id=?1 AND kind='user' AND seq > (SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_id=?1 AND kind='turn_end')",
@@ -359,7 +359,7 @@ impl NodeRuntime {
                 }
             }
             (EventBody::AttemptEnded { completion }, Some(a)) => {
-                if let Some((_, state)) = attempt_row(tx, a)?
+                if let Some(node_turns::Attempt { state, .. }) = self.attempt_row(a)?
                     && state != "finished"
                 {
                     let facts = take_facts(w, a)?;
@@ -437,7 +437,7 @@ impl NodeRuntime {
                 session
             ],
         )?;
-        session_changed(tx, session)?;
+        node_sessions::changed_event(w, session)?;
         Ok(if delta.is_some_and(|d| d > 0.0) {
             vec![After::Cost {
                 session: session.to_string(),
@@ -496,7 +496,7 @@ impl NodeRuntime {
             EventBody::OperationChanged { receipt } => end = self.receipt_in(tx, receipt)?,
             EventBody::AttemptStarted => {
                 if let Subject::Execution(x) = &ev.subject
-                    && let Some((rev, state)) = attempt_row(tx, x.attempt().as_str())?
+                    && let Some(node_turns::Attempt { revision: rev, state, .. }) = self.attempt_row(x.attempt().as_str())?
                     // planned -> running only: an attempt reconciled as unknown meanwhile stays
                     // unknown until it ends or is settled (Stop abandons it, never cancels)
                     && state == "planned"
@@ -517,7 +517,12 @@ impl NodeRuntime {
                     return Ok(None);
                 };
                 let attempt = x.attempt().as_str();
-                let Some((rev, state)) = attempt_row(tx, attempt)? else {
+                let Some(node_turns::Attempt {
+                    revision: rev,
+                    state,
+                    ..
+                }) = self.attempt_row(attempt)?
+                else {
                     return Ok(None);
                 };
                 if state == "finished" {
@@ -553,7 +558,10 @@ impl NodeRuntime {
                 )?;
                 // the receipt the Node gives this start_turn from now on (unless the Node's own
                 // final receipt came first: terminal receipts are never rewritten)
-                let op = op_of_attempt(tx, attempt)?;
+                let op = self
+                    .attempt_row(attempt)?
+                    .ok_or_else(|| conflict("missing attempt"))?
+                    .operation;
                 let terminal: bool = tx.query_row(
                     "SELECT state IN ('finished','rejected') FROM node_commands WHERE operation_id=?",
                     [&op],
@@ -685,7 +693,7 @@ impl NodeRuntime {
                 (ordinal as usize) < RETRY_DELAYS_MS.len()
             };
         // a retry carries the config of its first attempt: never once a change is waiting
-        let waits = retry && config::desired_in(tx, session)?.is_some();
+        let waits = retry && config::desired_in(&self.store, session)?.is_some();
         if waits {
             event_in(
                 tx,
@@ -702,7 +710,7 @@ impl NodeRuntime {
                 |r| r.get(0),
             )?;
             let spec: TurnSpec = serde_json::from_str(&spec)?;
-            let srev = session_revision(tx, session)?;
+            let srev = self.session_revision(session)?;
             // the slot is kept by the turn: the attempt is freed only to be replaced
             rt::session_cas_in(
                 tx,
@@ -789,11 +797,11 @@ impl NodeRuntime {
         }
         // a session the business side ended is let go once its last turn is over (the release it
         // asked for while the turn ran waited for this)
-        self.release_if_ended_in(tx, session)?;
-        status_in(tx, session, settled_status(&c.stop_reason))?;
+        self.release_if_self.ended_in(session)?;
+        self.status_in(session, settled_status(&c.stop_reason))?;
         Ok(Some(End {
             session: session.to_string(),
-            attempt: Some(last_attempt_in(tx, turn)?),
+            attempt: Some(self.last_attempt_in(turn)?),
             stop: c.stop_reason.clone(),
             error: c.error.as_ref().map(|e| {
                 if capacity && ordinal >= capacity_retry::RETRIES {
@@ -817,7 +825,7 @@ impl NodeRuntime {
         turn: &str,
         c: &Completion,
     ) -> Result<(), StoreError> {
-        let rev = turn_revision(tx, turn)?;
+        let rev = self.turn_revision(turn)?;
         let ordinal: i64 = tx.query_row(
             "SELECT retry_ordinal FROM runtime_turns WHERE turn_id=?",
             [turn],
@@ -859,7 +867,7 @@ impl NodeRuntime {
             [turn],
             |r| r.get(0),
         )?;
-        let srev = session_revision(tx, session)?;
+        let srev = self.session_revision(session)?;
         rt::session_cas_in(
             tx,
             session,

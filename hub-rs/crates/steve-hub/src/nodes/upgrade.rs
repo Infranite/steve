@@ -422,12 +422,14 @@ impl Upgrades {
                 sha256.clone(),
             );
             tokio::task::spawn_blocking(move || {
-                store.transaction(|tx| {
-                    tx.execute(
-                        "UPDATE node_upgrades SET file=?2, sha256=?3, size=?4 WHERE operation_id=?1",
-                        rusqlite::params![op2, file2, sha2, size as i64],
+                store.write(|w| {
+                    steve_store::node_directory::set_upgrade_artifact(
+                        w,
+                        &op2,
+                        &file2,
+                        &sha2,
+                        size as i64,
                     )
-                    .map_err(steve_store::StoreError::from)
                 })
             })
             .await

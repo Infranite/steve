@@ -144,27 +144,18 @@ pub async fn warn_low_disks(store: &Store, low: u64) {
     let store = store.clone();
     let _ = tokio::task::spawn_blocking(move || {
         let since = super::now() - 5 * 60 * 1000;
-        let rows: Vec<(String, String, String)> = store
-            .reader(|c| {
-                let mut st = c.prepare(
-                    "SELECT v.node_id, n.name, v.data FROM node_vitals v JOIN nodes n ON n.node_id = v.node_id
-                      WHERE n.local = 0 AND v.at >= ?
-                        AND v.at = (SELECT MAX(at) FROM node_vitals w WHERE w.node_id = v.node_id)",
-                )?;
-                let v = st
-                    .query_map([since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok::<_, steve_store::StoreError>(v)
-            })
+        let rows = store
+            .read(|r| steve_store::node_directory::recent_remote_vitals(r, since))
             .unwrap_or_default();
         let mut warned = WARNED.lock().unwrap();
-        for (id, name, data) in rows {
-            let Ok(v) = serde_json::from_str::<Value>(&data) else { continue };
-            let short = v["roots"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|r| r["free"].as_u64())
+        for row in rows {
+            let id = row.node;
+            let name = row.name;
+            let short = row
+                .data
+                .roots
+                .iter()
+                .map(|r| r.free)
                 .min()
                 .filter(|free| *free < low);
             match short {
@@ -175,9 +166,14 @@ pub async fn warn_low_disks(store: &Store, low: u64) {
                         free = steve_core::workspace::human(free)
                     );
                     let db = steve_core::repo::Db::new(store.clone());
-                    if let Err(e) =
-                        steve_core::notify::notify(&db, steve_store::WS, "disk", "info", &text, None)
-                    {
+                    if let Err(e) = steve_core::notify::notify(
+                        &db,
+                        steve_store::WS,
+                        "disk",
+                        "info",
+                        &text,
+                        None,
+                    ) {
                         tracing::error!("node disk notice: {e}");
                     }
                 }

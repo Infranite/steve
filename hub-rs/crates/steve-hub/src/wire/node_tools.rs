@@ -152,14 +152,11 @@ fn authorize_steve_session(
 /// grant in force is the Hub's, authorized as a fresh call would be, but with no attempt needed.
 fn session_lister(store: &Store, node: &NodeId, session: &SessionId) -> ApiResult<Caller> {
     let config = store
-        .reader(|c| {
-            let here: bool = c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=?1 AND node_id=?2 AND node_session_id=?1)",
-                params![session.as_str(), node.as_str()],
-                |r| r.get(0),
-            )?;
-            here.then(|| super::node_runtime::config_in(c, session.as_str()))
-                .transpose()
+        .read(|r| {
+            if !steve_store::node_sessions::owns_session(r, node.as_str(), session)? {
+                return Ok(None);
+            }
+            super::node_runtime::config_in(r, session.as_str()).map(Some)
         })
         .map_err(internal)?
         .ok_or_else(denied)?;

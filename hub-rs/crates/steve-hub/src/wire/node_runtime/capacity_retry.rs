@@ -75,7 +75,7 @@ impl NodeRuntime {
             // before every lease, rather than relying only on the boundary at failure time.
             if !expired
                 && self.stream_retry_allowed_in(tx, &session)?
-                && config::desired_in(tx, &session)?.is_none()
+                && config::desired_in(&self.store, &session)?.is_none()
             {
                 continue;
             }
