@@ -41,4 +41,4 @@ tier: DecisionTier,
 /**
  * Why it is folded away (`tier` = `folded`).
  */
-folded: FoldReason | null, };
+folded: FoldReason | null, revision: number, };

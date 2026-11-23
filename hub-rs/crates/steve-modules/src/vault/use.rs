@@ -44,7 +44,7 @@ use super::inject::{
 };
 use super::items::templates::BANK_CARD;
 use super::{Vault, VaultError, VaultResult};
-use crate::decisions::{DecisionCx, DecisionHandler, choice_result};
+use crate::decisions::{DecisionCx, DecisionHandler, DecisionOutcome, choice_result};
 use crate::{ApiError, ApiResult};
 use steve_store::secret_uses::{SecretUses as UseRows, UseRecord};
 use steve_store::vault_items::{FieldRow, ItemFilter, ItemRow};
@@ -972,7 +972,7 @@ fn publish(tx: &mut W<'_>, u: &UseRecord) {
 pub struct UseDecisions(SecretUses);
 
 impl DecisionHandler for UseDecisions {
-    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<DecisionOutcome> {
         let inner = &self.0.0;
         let u = UseRows(tx)
             .get(&d.subject_id)?
@@ -1040,7 +1040,7 @@ impl DecisionHandler for UseDecisions {
         publish(tx, &u);
         // runs after the commit: the job waits for the write lock and re-reads the row
         let _ = inner.jobs.send(job);
-        Ok(result)
+        Ok(result.into())
     }
 
     fn before_undo(&self, _: &mut W<'_>, _: &Decision) -> ApiResult<()> {

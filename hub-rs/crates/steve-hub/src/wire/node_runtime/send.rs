@@ -747,7 +747,7 @@ impl NodeRuntime {
                 }
             }
             startup::record_stop(w, session, detail, now())?;
-            if !startup::reopen_matching(w, session, &scope, &question)? {
+            if !startup::already_open(w, session, &question)? {
                 steve_store::DecisionRows(w).open(&steve_store::NewDecision {
                     workspace_id: scope.workspace.clone(), kind: "fail".into(), subject_type: reason.into(),
                     subject_id: scope.bot.unwrap_or_default(), item_id: scope.item.clone(), session_id: Some(session.into()),

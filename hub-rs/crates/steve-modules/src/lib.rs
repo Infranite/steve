@@ -23,7 +23,7 @@
 //! 3. `POST /api/config/draft`: kinds in `registry.target_kinds()` go to [`changes::draft`];
 //!    `POST /api/config/:id/apply|undo` try [`changes::apply`] / [`changes::undo`] first and fall back to
 //!    the in-memory drafts on `None`; `pickTarget` appends [`changes::candidates`];
-//! 4. `POST /api/decisions/:id`: try [`decisions::dispatch`] first; on `None` run the old logic;
+//! 4. Decision commands select the registered subject handler through the settlement service;
 //! 5. `/api/stream`: filter typed envelopes using `Scoped::scope()`;
 //! 6. `undoDecision`: call [`Registry::before_undo`] in its transaction first;
 //! 7. the B1 call points: `registry.hooks()` in createItem / accept / finish / drop,

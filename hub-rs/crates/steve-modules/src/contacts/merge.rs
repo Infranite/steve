@@ -32,7 +32,7 @@ use steve_store::{
 use super::repo::{self, AttrDef, AttrValue, PARTY, Party, PartyPatch};
 use super::service::{self as svc, ContactBrief};
 use super::{PartyHooks, Ports};
-use crate::decisions::{self, DecisionCx, DecisionHandler};
+use crate::decisions::{self, DecisionCx, DecisionHandler, DecisionOutcome};
 use crate::{ApiError, ApiResult, Body, Caller, Modules, Registry};
 
 fn pref(id: &str) -> ObjRef {
@@ -789,7 +789,7 @@ fn proposal(tx: &mut W<'_>, id: &str) -> ApiResult<Option<(String, String, Strin
 }
 
 impl DecisionHandler for PartyMerge {
-    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<DecisionOutcome> {
         let (ws, from, into, status) = proposal(tx, &d.subject_id)?
             .filter(|p| p.0 == cx.ws)
             .ok_or_else(|| ApiError::not_found("合并提议"))?;
@@ -809,7 +809,7 @@ impl DecisionHandler for PartyMerge {
             }
             _ => set_proposal(tx, &d.subject_id, "rejected")?,
         }
-        Ok(result)
+        Ok(result.into())
     }
 
     fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
@@ -845,7 +845,7 @@ fn value_snapshot(v: &AttrValue) -> Value {
 pub struct AttrValueConfirm;
 
 impl DecisionHandler for AttrValueConfirm {
-    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<DecisionOutcome> {
         let v = Attributes(tx)
             .value(&d.subject_id)?
             .filter(|v| v.workspace_id == cx.ws)
@@ -862,7 +862,7 @@ impl DecisionHandler for AttrValueConfirm {
         }
         tx.contacts().touch(&v.party_id)?;
         tx.emit(crate::accounts::service::party_changed(cx.ws, &v.party_id));
-        Ok(result)
+        Ok(result.into())
     }
 
     fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
@@ -949,7 +949,7 @@ fn def_snapshot(x: &AttrDef) -> Value {
 pub struct AttrDefConfirm;
 
 impl DecisionHandler for AttrDefConfirm {
-    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<DecisionOutcome> {
         let x = Attributes(tx)
             .definition(&d.subject_id)?
             .filter(|x| x.workspace_id == cx.ws)
@@ -961,7 +961,7 @@ impl DecisionHandler for AttrDefConfirm {
             Attributes(tx).delete_definition(&x.id)?;
             result["def"] = def_snapshot(&x);
         }
-        Ok(result)
+        Ok(result.into())
     }
 
     fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {

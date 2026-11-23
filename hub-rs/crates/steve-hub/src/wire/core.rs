@@ -1518,23 +1518,15 @@ impl Domain for CoreDomain {
         to_obj(blocking(move || c.fork(&ws, &sid, seq, &goal, as_session, &actor)).await?)
     }
 
-    async fn resolve(&self, id: &str, choice: &str, text: &str, actor: &str) -> BResult<Obj> {
-        let (c, id, choice, text, actor) = (
-            self.core.clone(),
-            id.to_string(),
-            choice.to_string(),
-            text.to_string(),
-            actor.to_string(),
-        );
-        to_obj(blocking(move || c.resolve(&id, &choice, &text, &actor)).await?)
-    }
-    async fn undo_decision(&self, id: &str, actor: &str) -> BResult<Obj> {
-        let (c, id, actor) = (self.core.clone(), id.to_string(), actor.to_string());
-        to_obj(blocking(move || c.undo_decision(&id, &actor)).await?)
-    }
-    async fn dismiss_decision(&self, id: &str, actor: &str) -> BResult<Obj> {
-        let (c, id, actor) = (self.core.clone(), id.to_string(), actor.to_string());
-        to_obj(blocking(move || c.dismiss_decision(&id, &actor)).await?)
+    async fn settle_decision(
+        &self,
+        caller: steve_modules::Caller,
+        id: String,
+        revision: Option<i64>,
+        command: steve_core::DecisionCommand,
+    ) -> BResult<Obj> {
+        let core = self.core.clone();
+        to_obj(blocking(move || core.decision_command(&caller, &id, revision, command)).await?)
     }
     async fn drain(&self, token: &str, start: bool) -> BResult<Option<Obj>> {
         let (c, token) = (self.core.clone(), token.to_string());

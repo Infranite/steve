@@ -15,7 +15,7 @@ use axum::routing::post;
 use axum::{Extension, Json, Router};
 use serde_json::{Value, json};
 use steve_modules::contacts::mcp::McpCx;
-use steve_modules::decisions::{DecisionCx, DecisionHandler, choice_result};
+use steve_modules::decisions::{DecisionCx, DecisionHandler, DecisionOutcome, choice_result};
 use steve_modules::outbound::{self, Audience, CheckCx, Verdict};
 use steve_modules::vault::VaultResult;
 use steve_modules::vault::mcp::ToolOut;
@@ -426,7 +426,7 @@ impl DecisionHandler for CommentDecisions {
         d.kind == "approve" && d.requested_by == crate::automation::APPROVAL_ACTOR
     }
 
-    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<DecisionOutcome> {
         let gh = self.0.need()?;
         let t = target(tx, cx.ws, &d.subject_id)?.ok_or_else(|| ApiError::not_found("PR"))?;
         let mut out = choice_result(cx);
@@ -465,7 +465,7 @@ impl DecisionHandler for CommentDecisions {
             out["grant"] = json!(id);
         }
         effects::queue(tx, &gh, cx.ws, &d.id, effects::COMMENT)?;
-        Ok(out)
+        Ok(out.into())
     }
 
     /// The comment may be out by now; there is nothing to take back.

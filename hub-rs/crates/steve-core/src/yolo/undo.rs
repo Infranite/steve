@@ -114,7 +114,12 @@ impl Engine {
         let mut detail = json!({ "kind": kind, "decision": a.decision_id, "rule": a.rule });
         match kind.as_str() {
             "decision" => {
-                core.undo_decision(&decision, me).map_err(ce)?;
+                let caller = steve_modules::Caller {
+                    ws: ws.into(),
+                    me: me.into(),
+                };
+                core.decision_command(&caller, &decision, None, crate::DecisionCommand::Undo)
+                    .map_err(ce)?;
             }
             "rollback" => {
                 let d = core

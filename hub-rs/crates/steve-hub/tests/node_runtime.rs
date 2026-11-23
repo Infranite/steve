@@ -2163,11 +2163,11 @@ async fn a_refused_answer_is_not_an_answer() {
     // as the orchestrator does after a true
     h.store
         .write::<_, StoreError>(|tx| {
-            steve_store::decision_resolve_in(
-                tx,
+            steve_store::DecisionRows(tx).settle(
                 &d,
                 &serde_json::json!({"optionId": "allow_once"}),
                 "resolved",
+                &serde_json::Value::Null,
             )?;
             Ok(())
         })
@@ -2179,11 +2179,9 @@ async fn a_refused_answer_is_not_an_answer() {
     assert_eq!(h.perm_state(&d), "refused");
     assert_eq!(
         h.status(&d),
-        "expired",
-        "never claims an answer that was not applied"
+        "resolved",
+        "the recorded choice survives the Node refusing to apply it"
     );
-    let refused: String = node_checks::decision_refused_by_id(&h.store, &d).unwrap();
-    assert_eq!(refused, "stale");
 }
 
 #[tokio::test]

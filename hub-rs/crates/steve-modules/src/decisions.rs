@@ -1,9 +1,9 @@
-//! Decisions opened by modules. A module opens one with
-//! `DecisionRows(w).open(&NewDecision)` and registers a [`DecisionHandler`] for its
-//! `subject_type`; `POST /api/decisions/:id` reaches [`dispatch`] first.
+//! Settlement for registered decision subjects. The domain handler, choice receipt,
+//! card transition, and audit share one write.
 
 use serde_json::{Value, json};
 use steve_store::base::{CONFIRM_OPTIONS, DecisionKind};
+use steve_store::decision_repo::{DecisionChange, choice_receipt};
 use steve_store::views::{ABOUT_CHAT_MESSAGE, Views};
 use steve_store::{Decision, DecisionRows, NewDecision, W};
 use steve_types::DecisionTier;
@@ -20,12 +20,23 @@ pub struct DecisionCx<'a> {
     pub text: &'a str,
 }
 
+/// A domain handler can discover that the subject went out of scope while answering it.
+pub enum DecisionOutcome {
+    Resolved(Value),
+    Expired(Value),
+}
+
+impl From<Value> for DecisionOutcome {
+    fn from(result: Value) -> Self {
+        Self::Resolved(result)
+    }
+}
+
 /// The module side of one `subject_type`.
 pub trait DecisionHandler: Send + Sync {
-    /// Acts on the answer inside the transaction that settles the decision; returns the `result` JSON
-    /// stored on it (default `{"choice": …}` plus `text` when given). An error rolls everything back and
-    /// leaves the decision open.
-    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value>;
+    /// Applies the domain effect or records that its subject has expired. A handler failure
+    /// rolls back its writes and leaves the card open.
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<DecisionOutcome>;
 
     /// Called in `undoDecision`'s transaction before a resolved decision is reopened: undo this
     /// module's side of the answer, or refuse with an error (the undo is rolled back). Default: nothing.
@@ -86,14 +97,9 @@ pub fn confirm(
     }
 }
 
-/// `POST /api/decisions/:id {choice, text}` for decisions whose `subject_type` a module registered.
-/// `None` = not ours (or no such decision): steve-core runs its own `resolve()`.
-///
-/// In one transaction: the decision must be in the caller's workspace (`404 没有这个决定`) and open
-/// (`409 这个决定已经处理过了`); `choice` must be one of its options when it has any
-/// (`400 参数不对：choice`); the handler runs; the decision is settled `resolved` with the handler's
-/// result; audit `decision.resolve`. Returns the settled decision. If it has an `item_id`, steve-core
-/// does its item-side follow-up (supersede, timeline) afterwards; module decisions usually have none.
+/// Resolve a fixture's card using the current revision. Production callers carry
+/// the revision from the decision they present or open.
+#[doc(hidden)]
 pub fn dispatch(
     m: &Modules,
     caller: &Caller,
@@ -102,14 +108,30 @@ pub fn dispatch(
     text: &str,
 ) -> Option<ApiResult<Decision>> {
     let d = m.store.read(|r| DecisionRows(r).get(id)).ok()??;
-    let handler = m.registry.handlers.get(&d.subject_type)?;
-    Some(m.store.write(|w| {
+    m.registry.handlers.get(&d.subject_type)?;
+    Some(resolve(m, caller, id, d.revision, choice, text))
+}
+
+pub fn resolve(
+    m: &Modules,
+    caller: &Caller,
+    id: &str,
+    revision: i64,
+    choice: &str,
+    text: &str,
+) -> ApiResult<Decision> {
+    m.store.write(|w| {
         let d = DecisionRows(w)
             .get(id)?
             .filter(|d| d.workspace_id == caller.ws)
             .ok_or_else(|| ApiError::not_found("决定"))?;
-        answer(w, caller, handler.as_ref(), &d, choice, text)
-    }))
+        let handler = m
+            .registry
+            .handlers
+            .get(&d.subject_type)
+            .ok_or_else(|| ApiError::not_found("决定"))?;
+        answer(w, caller, handler.as_ref(), &d, revision, choice, text)
+    })
 }
 
 /// Ignore the supplied quiet drafts. Check each tier under the same write lock that discards the
@@ -135,7 +157,7 @@ pub fn dismiss_drafts(m: &Modules, caller: &Caller, ids: &[String]) -> ApiResult
             let d = DecisionRows(w)
                 .get(id)?
                 .ok_or_else(|| ApiError::not_found("决定"))?;
-            answer(w, caller, handler.as_ref(), &d, "no", "")?;
+            answer(w, caller, handler.as_ref(), &d, d.revision, "no", "")?;
             dismissed.push(id.to_owned());
         }
         Ok(dismissed)
@@ -147,14 +169,12 @@ fn answer(
     caller: &Caller,
     handler: &dyn DecisionHandler,
     d: &Decision,
+    revision: i64,
     choice: &str,
     text: &str,
 ) -> ApiResult<Decision> {
-    let id = &d.id;
-    if d.status != "open" {
-        return Err(ApiError::conflict(steve_i18n::t!(
-            "modules.decision.already_handled"
-        )));
+    if replay(w, d, revision, &caller.me, choice, text)? {
+        return Ok(d.clone());
     }
     if !d.options.is_empty() && !d.options.iter().any(|o| o == choice) {
         return Err(ApiError::invalid("choice"));
@@ -165,18 +185,67 @@ fn answer(
         choice,
         text,
     };
-    let result = handler.resolve(w, &cx, d)?;
-    DecisionRows(w).settle(id, &result, "resolved", &undo_marker(&d.subject_type))?;
+    match handler.resolve(w, &cx, d)? {
+        DecisionOutcome::Resolved(result) => {
+            complete_answer(w, d, &cx, &result, &undo_marker(&d.subject_type))
+        }
+        DecisionOutcome::Expired(result) => {
+            expire_in(w, d, &result)?;
+            DecisionRows(w)
+                .get(&d.id)?
+                .ok_or_else(|| ApiError::not_found("决定"))
+        }
+    }
+}
+
+pub fn replay(
+    r: &mut impl steve_store::Read,
+    decision: &Decision,
+    revision: i64,
+    actor: &str,
+    choice: &str,
+    text: &str,
+) -> ApiResult<bool> {
+    if revision != decision.revision {
+        return Err(already_handled());
+    }
+    if decision.status == "open" {
+        return Ok(false);
+    }
+    if choice_receipt(r, &decision.id, revision)?
+        .is_some_and(|receipt| receipt.matches(actor, choice, text))
+    {
+        return Ok(true);
+    }
+    Err(already_handled())
+}
+
+pub fn complete_answer(
+    w: &mut W<'_>,
+    d: &Decision,
+    cx: &DecisionCx<'_>,
+    result: &Value,
+    undo: &Value,
+) -> ApiResult<Decision> {
+    let mut rows = DecisionRows(w);
+    if !rows.apply(d, DecisionChange::Resolve, result, undo)? {
+        return Err(already_handled());
+    }
+    rows.record_choice(d, cx.actor, cx.choice, cx.text)?;
     w.audit(
-        &caller.ws,
-        &caller.me,
+        cx.ws,
+        cx.actor,
         "decision.resolve",
-        id,
-        &json!({ "choice": choice, "text": text }),
+        &d.id,
+        &json!({ "revision": d.revision, "choice": cx.choice }),
     )?;
     DecisionRows(w)
-        .get(id)?
+        .get(&d.id)?
         .ok_or_else(|| ApiError::not_found("决定"))
+}
+
+fn already_handled() -> ApiError {
+    ApiError::conflict(steve_i18n::t!("modules.decision.already_handled"))
 }
 
 /// The `undo` stored on a decision a module settled. Core only undoes decisions with a truthy `undo`
@@ -206,24 +275,82 @@ pub fn undo(
             .get(id)?
             .filter(|d| undoable(d))
             .ok_or_else(|| ApiError::rule(steve_i18n::t!("modules.decision.not_undoable")))?;
-        handler.before_undo(w, &d)?;
-        let metadata = handler.reopen_result(&d);
-        DecisionRows(w).reopen(&d, &metadata)?;
-        w.audit(&d.workspace_id, actor, "decision.undo", id, &json!({}))?;
+        reverse(w, &d, actor, handler.as_ref())?;
         Ok(d)
     }))
 }
 
+/// Reverse a registered decision as part of a domain command's transaction.
+pub fn undo_in(m: &Modules, w: &mut W<'_>, caller: &Caller, decision: &Decision) -> ApiResult<()> {
+    let d = DecisionRows(w)
+        .get(&decision.id)?
+        .filter(|d| d.workspace_id == caller.ws)
+        .ok_or_else(|| ApiError::not_found("决定"))?;
+    if d.revision != decision.revision || !undoable(&d) {
+        return Err(ApiError::rule(steve_i18n::t!(
+            "modules.decision.not_undoable"
+        )));
+    }
+    let handler = m
+        .registry
+        .handlers
+        .get(&d.subject_type)
+        .ok_or_else(|| ApiError::not_found("决定"))?;
+    reverse(w, &d, &caller.me, handler.as_ref())
+}
+
+pub fn undoable(d: &Decision) -> bool {
+    d.undo_until()
+        .is_some_and(|until| steve_store::now() <= until)
+}
+
+fn reverse(
+    w: &mut W<'_>,
+    d: &Decision,
+    actor: &str,
+    handler: &dyn DecisionHandler,
+) -> ApiResult<()> {
+    handler.before_undo(w, d)?;
+    let metadata = handler.reopen_result(d);
+    DecisionRows(w).reopen(d, &metadata)?;
+    w.audit(
+        &d.workspace_id,
+        actor,
+        "decision.undo",
+        &d.id,
+        &json!({ "revision": d.revision }),
+    )?;
+    Ok(())
+}
+
 /// Expires an open module decision (jobs): the handler's `expire`, then `status=expired`. Returns
-/// whether it was open. Decisions of unregistered subject types are only marked expired.
+/// whether it was open.
 pub fn expire(m: &Modules, id: &str) -> ApiResult<bool> {
     m.store.write(|w| {
         let Some(d) = DecisionRows(w).get(id)?.filter(|d| d.status == "open") else {
             return Ok(false);
         };
-        if let Some(h) = m.registry.handlers.get(&d.subject_type) {
-            h.expire(w, &d)?;
-        }
-        Ok(DecisionRows(w).settle(id, &json!({ "expired": true }), "expired", &Value::Null)?)
+        let handler = m
+            .registry
+            .handlers
+            .get(&d.subject_type)
+            .ok_or_else(|| ApiError::not_found("决定"))?;
+        handler.expire(w, &d)?;
+        expire_in(w, &d, &json!({ "expired": true }))?;
+        Ok(true)
     })
+}
+
+fn expire_in(w: &mut W<'_>, d: &Decision, result: &Value) -> ApiResult<()> {
+    if !DecisionRows(w).apply(d, DecisionChange::Expire, result, &Value::Null)? {
+        return Err(already_handled());
+    }
+    w.audit(
+        &d.workspace_id,
+        "steve",
+        "decision.expire",
+        &d.id,
+        &json!({}),
+    )?;
+    Ok(())
 }

@@ -573,16 +573,21 @@ pub struct Decision {
     pub question: String,
     pub draft: String,
     pub options: Vec<String>,
-    /// `open` | `resolved` | `expired`
+    /// `open` | `resolved` | `dismissed` | `expired` | `superseded`
     pub status: String,
     pub result: Value,
     pub requested_by: String,
     pub created: i64,
     pub resolved: Option<i64>,
     pub undo: Value,
+    pub revision: i64,
 }
 
 impl Decision {
+    pub fn undo_until(&self) -> Option<i64> {
+        crate::decision_repo::undo_until(&self.status, self.resolved, &self.undo)
+    }
+
     pub(crate) fn from_row(r: &Row) -> rusqlite::Result<Self> {
         Ok(Self {
             id: r.get("id")?,
@@ -601,6 +606,7 @@ impl Decision {
             created: r.get("created")?,
             resolved: r.get("resolved")?,
             undo: json_col(r, "undo", Value::Null)?,
+            revision: r.get("revision")?,
         })
     }
 }

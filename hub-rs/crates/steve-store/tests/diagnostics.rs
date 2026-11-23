@@ -536,7 +536,7 @@ fn card_transitions_record_only_committed_changes_without_copying_card_content()
     s.decisions().reopen(&d.id).unwrap();
     s.decisions().reopen(&d.id).unwrap();
     let rolled_back: Result<(), steve_store::StoreError> = s.write(|tx| {
-        steve_store::decision_create_in(tx, &spec)?;
+        steve_store::DecisionRows(tx).open(&spec)?;
         Err(steve_store::StoreError::Conflict("rollback fixture".into()))
     });
     assert!(rolled_back.is_err());

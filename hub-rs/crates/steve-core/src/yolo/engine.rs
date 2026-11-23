@@ -559,17 +559,20 @@ impl Engine {
 
     /// Answers the way the user's button does, as `yolo`.
     fn answer(&self, d: &Decision, choice: &str, text: &str) -> ApiResult<Decision> {
-        if let Some(m) = self.core().modules() {
-            let caller = Caller {
-                ws: d.workspace_id.clone(),
-                me: YOLO_ACTOR.into(),
-            };
-            if let Some(r) = steve_modules::decisions::dispatch(m, &caller, &d.id, choice, text) {
-                return r;
-            }
-        }
+        let caller = Caller {
+            ws: d.workspace_id.clone(),
+            me: YOLO_ACTOR.into(),
+        };
         self.core()
-            .resolve(&d.id, choice, text, YOLO_ACTOR)
+            .decision_command(
+                &caller,
+                &d.id,
+                Some(d.revision),
+                crate::DecisionCommand::Resolve {
+                    choice: choice.into(),
+                    text: text.into(),
+                },
+            )
             .map_err(ce)
     }
 

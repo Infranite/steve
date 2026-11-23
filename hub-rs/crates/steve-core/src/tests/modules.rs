@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use steve_modules::context::{ChatCtx, ChatDone, PromptContext};
-use steve_modules::decisions::{DecisionCx, DecisionHandler};
+use steve_modules::decisions::{DecisionCx, DecisionHandler, DecisionOutcome};
 use steve_modules::hooks::ItemHooks;
 use steve_modules::{ApiError, ApiResult, Gateway, Modules, Registry};
 use steve_store::base::Viewer;
@@ -365,8 +365,8 @@ fn recovery_keeps_only_opted_in_cards_on_completed_items() {
             _: &mut W<'_>,
             _: &DecisionCx,
             _: &Decision,
-        ) -> ApiResult<serde_json::Value> {
-            Ok(json!({}))
+        ) -> ApiResult<DecisionOutcome> {
+            Ok(json!({}).into())
         }
 
         fn retain_on_completed_item_recovery(&self, d: &Decision) -> bool {
@@ -392,8 +392,8 @@ fn recovery_keeps_only_opted_in_cards_on_completed_items() {
 }
 
 impl DecisionHandler for Undo {
-    fn resolve(&self, _: &mut W<'_>, _: &DecisionCx, _: &Decision) -> ApiResult<serde_json::Value> {
-        Ok(json!({}))
+    fn resolve(&self, _: &mut W<'_>, _: &DecisionCx, _: &Decision) -> ApiResult<DecisionOutcome> {
+        Ok(json!({}).into())
     }
     fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
         /* the handler sees the decision still resolved, inside a write transaction */
@@ -424,7 +424,7 @@ fn undo_asks_the_module_of_the_decision_first_and_its_refusal_changes_nothing() 
             tx: &mut W<'_>,
             cx: &DecisionCx,
             d: &Decision,
-        ) -> ApiResult<serde_json::Value> {
+        ) -> ApiResult<DecisionOutcome> {
             self.0.resolve(tx, cx, d)
         }
         fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {

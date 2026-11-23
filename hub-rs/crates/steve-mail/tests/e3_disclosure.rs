@@ -197,17 +197,16 @@ async fn direct_send_checks_edited_to_cc_bcc_and_body_and_never_sends_twice() {
         .unwrap();
     let d = h.mail.send_draft(&me(), &d.id).unwrap();
     assert!(h.mail.send_draft(&me(), &d.id).is_err());
-    assert!(
-        dispatch(
-            &h.env.modules,
-            &me(),
-            d.decision_id.as_deref().unwrap(),
-            "send",
-            ""
-        )
-        .unwrap()
-        .is_err()
-    );
+    let replay = dispatch(
+        &h.env.modules,
+        &me(),
+        d.decision_id.as_deref().unwrap(),
+        "send",
+        "",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(replay.status, "resolved");
     h.env.clock.advance(10_000);
     let (a, b) = tokio::join!(h.mail.execute(&d.id), h.mail.execute(&d.id));
     assert!(matches!(a.unwrap(), SendOutcome::Sent { .. }));

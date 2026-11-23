@@ -830,6 +830,7 @@ fn truncated_input_and_missing_worktree_are_never_allowed() {
 fn from_the_stored_row_a_cut_draft_counts_as_truncated() {
     let pl = place();
     let d = crate::repo::Decision {
+        revision: 1,
         id: "dc".into(),
         workspace_id: WS.into(),
         kind: "approve".into(),

@@ -25,7 +25,7 @@ use steve_store::{
 
 use super::repo::{NewParty, Party};
 use crate::changes::{self, ChangeOp, OpCx, Origin, Plan, Prepared};
-use crate::decisions::{self, DecisionCx, DecisionHandler};
+use crate::decisions::{self, DecisionCx, DecisionHandler, DecisionOutcome};
 use crate::{ApiError, ApiResult, Caller, Modules};
 
 /// `object_type` codes and how the pages name them.
@@ -1248,7 +1248,7 @@ pub fn propose(
 pub struct StewardConfirm;
 
 impl DecisionHandler for StewardConfirm {
-    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<DecisionOutcome> {
         let s = Stewards(tx)
             .by_decision(&d.id)?
             .filter(|s| s.workspace_id == cx.ws)
@@ -1264,7 +1264,7 @@ impl DecisionHandler for StewardConfirm {
             delete(tx, &s.workspace_id, &s.key())?;
             result["steward"] = serde_json::to_value(&s)?;
         }
-        Ok(result)
+        Ok(result.into())
     }
 
     fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {

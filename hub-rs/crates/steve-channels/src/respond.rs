@@ -394,14 +394,9 @@ pub fn edit_reply_draft(
         )?;
         crate::basis::checking_stopped(w, message, crate::outbound::R_DEALT_FIRST)?;
         repo::outbound::edit_draft(w, message, text)?;
-        DecisionRows(w).set_draft(id, text)?;
-        w.emit(steve_types::DomainEvent::from(
-            steve_types::WorkEvent::Decision {
-                id: id.into(),
-                ws: ws.into(),
-                item_id: None,
-            },
-        ));
+        if !DecisionRows(w).revise_draft(id, d.revision, text)? {
+            return Err(ApiError::conflict(steve_i18n::t!("channels.error.handled")));
+        }
         repo::emit(w, ws, &row.space, message);
         Ok(())
     })

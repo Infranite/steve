@@ -28,6 +28,7 @@ mod schema {
         Created,
         Resolved,
         Undo,
+        Revision,
     }
 
     #[derive(Iden, Clone, Copy)]
@@ -62,7 +63,7 @@ fn tier(
     let draft = chat && d.kind == "approve";
     if chat && (d.kind == "fail" || starred || recovery) {
         (DecisionTier::Decide, None)
-    } else if d.status == "expired" {
+    } else if matches!(d.status.as_str(), "expired" | "superseded") {
         (DecisionTier::Folded, Some(FoldReason::Expired))
     } else if replied {
         (DecisionTier::Folded, Some(FoldReason::Replied))
@@ -78,9 +79,6 @@ fn tier(
 fn d(c: D) -> Expr {
     Expr::col((D::Table, c).into_column_ref())
 }
-
-/// An answer can be taken back for a day (the orchestrator's `undo_decision` checks the same).
-const UNDO_FOR: i64 = 24 * 3_600_000;
 
 pub struct DecisionViews<'a, C>(pub(super) &'a mut C);
 
@@ -146,6 +144,7 @@ fn select() -> SelectStatement {
          OR m.direction <> 'out' OR m.status <> 'draft' OR m.decision_id IS NULL
          OR m.decision_id <> decisions.id",
     ))
+    .column((D::Table, D::Revision))
     .from(D::Table)
     .join_as(
         JoinType::LeftJoin,
@@ -184,11 +183,11 @@ fn candidate(r: &Row<'_>) -> Result<Candidate> {
     // every view of the workspace
     let result: Option<String> = r.get(11)?;
     let undo: Option<String> = r.get(15)?;
-    let undoable = status == "resolved"
-        && undo
-            .as_deref()
-            .and_then(|u| serde_json::from_str(u).ok())
-            .is_some_and(|u| crate::types::truthy(&u));
+    let undo = undo
+        .as_deref()
+        .and_then(|value| serde_json::from_str(value).ok())
+        .unwrap_or_default();
+    let undo_until = crate::decision_repo::undo_until(&status, resolved, &undo);
     let options: Option<Json<Vec<String>>> = r.get(9).ok();
     let (kind, subject_type): (String, String) = (r.get(2)?, r.get(3)?);
     let recovery = subject_type == ABOUT_CHAT_MESSAGE
@@ -203,6 +202,7 @@ fn candidate(r: &Row<'_>) -> Result<Candidate> {
             == Some(true);
     let view = DecisionView {
         id: r.get::<String>(0)?.into(),
+        revision: r.get(19)?,
         ws: r.get::<String>(1)?.into(),
         kind,
         subject_type,
@@ -216,9 +216,7 @@ fn candidate(r: &Row<'_>) -> Result<Candidate> {
         requested_by: r.get(12)?,
         created: Millis(r.get(13)?),
         resolved: resolved.map(Millis),
-        undo_until: resolved
-            .filter(|r| undoable && *r != 0)
-            .map(|r| Millis(r + UNDO_FOR)),
+        undo_until: undo_until.map(Millis),
         status,
         space_id: r.get::<Option<String>>(16)?.map(Into::into),
         tier: DecisionTier::Decide,

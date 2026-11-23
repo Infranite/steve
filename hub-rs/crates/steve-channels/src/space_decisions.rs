@@ -13,7 +13,7 @@
 //! Register with `steve_channels::space_decisions::register(&mut registry)`.
 
 use serde_json::{Value, json};
-use steve_modules::decisions::{DecisionCx, DecisionHandler};
+use steve_modules::decisions::{DecisionCx, DecisionHandler, DecisionOutcome};
 use steve_modules::{ApiError, ApiResult, Registry};
 use steve_store::{Decision, W};
 
@@ -116,11 +116,11 @@ fn answered(choice: &str, was: Flags) -> Option<Flags> {
 }
 
 impl DecisionHandler for NewSpaceDecision {
-    fn resolve(&self, w: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, w: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<DecisionOutcome> {
         let Some(s) = steve_store::channel_spaces::rows::get_in_workspace(w, cx.ws, &d.subject_id)?
         else {
             // the space went away meanwhile: nothing to do
-            return Ok(json!({"choice": cx.choice, "gone": true}));
+            return Ok(json!({"choice": cx.choice, "gone": true}).into());
         };
         let before = crate::spaces::settings(w, &s.id)?;
         let was = flags_of(&before);
@@ -130,7 +130,7 @@ impl DecisionHandler for NewSpaceDecision {
             "choice": cx.choice,
             "space_id": s.id,
             "was": {"muted": was.muted, "attention": was.attention.code(), "configured": was.configured},
-        }))
+        }).into())
     }
 
     /// Back to the flags the space had before the answer (only when nobody changed them since).

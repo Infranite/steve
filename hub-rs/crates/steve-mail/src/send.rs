@@ -21,7 +21,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use steve_modules::accounts::connections::{WriteRefusal, may_write_in};
 use steve_modules::contacts::people_repo;
-use steve_modules::decisions::{DecisionCx, DecisionHandler, choice_result};
+use steve_modules::decisions::{DecisionCx, DecisionHandler, DecisionOutcome, choice_result};
 use steve_modules::outbound::Verdict;
 use steve_modules::outbound::{YOLO_ACTOR, decided_by_yolo, strip_ai_prefix, with_ai_prefix};
 use steve_modules::{ApiError, ApiResult, Clock, SystemClock};
@@ -308,7 +308,7 @@ impl MailDraftHandler {
 }
 
 impl DecisionHandler for MailDraftHandler {
-    fn resolve(&self, w: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, w: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<DecisionOutcome> {
         let result = match d.kind.as_str() {
             "approve" => self.approve(w, cx, d),
             "fail" => self.failed(w, cx, d),
@@ -318,7 +318,7 @@ impl DecisionHandler for MailDraftHandler {
         if let Some(draft) = repo::draft(w, &d.subject_id)? {
             drafts::emit_draft(w, &draft);
         }
-        Ok(result)
+        Ok(result.into())
     }
 
     /// Undo before the delay is over puts the draft back to `pending`; afterwards `409 邮件已经发出，不能撤回`.

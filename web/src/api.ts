@@ -212,7 +212,7 @@ async function req<T>(method: string, path: string, body?: unknown, seen?: (r: R
   return j as T
 }
 /** what a command on a decision answers: the decision as it now stands */
-export type DecisionAnswer = { id: string; status: string; kind: string; subject_type: string; result?: any }
+export type DecisionAnswer = { id: string; revision: number; status: string; kind: string; subject_type: string; result?: any }
 /* the newest revision a command committed (`x-steve-rev`), by its answer: the views catch up to it (data/sync.ts) */
 const writeRevs = new WeakMap<object, number>()
 export const revOf = (answer: unknown): number => (answer && typeof answer === "object" ? writeRevs.get(answer) ?? 0 : 0)
@@ -380,7 +380,9 @@ export const api = {
   fork: (id: string, seq: number, goal: string, asSession: boolean) => post<{ item?: string; session?: string }>(`/sessions/${id}/fork`, { seq, goal, asSession }), link: (id: string, item: string) => post(`/sessions/${id}/link`, { item }),
   localSessions: () => get<LocalSession[]>("/local-sessions"), importSessions: (keys: string[]) => post<(string | { error: string })[]>("/local-sessions/import", { keys }),
   dismissDrafts: (ids: string[]) => post<{ ids: string[] }>("/decisions/dismiss-drafts", { ids }),
-  decide: (id: string, choice: string, text?: string) => post<DecisionAnswer>("/decisions/" + id, { choice, text }), undo: (id: string) => post<DecisionAnswer>(`/decisions/${id}/undo`), dismiss: (id: string) => post<DecisionAnswer>(`/decisions/${id}/dismiss`),
+  decide: (id: string, choice: string, text?: string, revision?: number) => post<DecisionAnswer>("/decisions/" + id, { choice, text, revision }),
+  undo: (id: string, revision: number) => post<DecisionAnswer>(`/decisions/${id}/undo`, { revision }),
+  dismiss: (id: string, revision: number) => post<DecisionAnswer>(`/decisions/${id}/dismiss`, { revision }),
   newBot: (p: Partial<RBot> & { name: string }) => post<RBot>("/bots", p), draftBot: (desc: string) => post<RBot>("/bots/draft", { desc }), patchBot: (id: string, p: Partial<RBot>) => patch<RBot>("/bots/" + id, p),
   botWorkspaces: (id: string, ids: string[]) => req("PUT", `/bots/${id}/workspaces`, { ids }), dupBot: (id: string) => post<RBot>(`/bots/${id}/duplicate`), deleteBot: (id: string, to: string, memory: "delete" | "export") => del<{ moved: string[]; memories: any[] }>("/bots/" + id, { to, memory }), restoreBot: (id: string) => post(`/bots/${id}/restore`),
   botPrompt: (id: string) => get<{ generated: string; custom: string | null }>(`/bots/${id}/prompt`), memories: (id: string) => get<{ id: string; text: string; source: string; created: number }[]>(`/bots/${id}/memories`),

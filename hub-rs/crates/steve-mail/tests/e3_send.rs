@@ -207,8 +207,11 @@ async fn undo_within_the_delay_sends_nothing() {
     assert_eq!(draft(&h, &d.id).status, "pending");
 
     // after sending, undo is refused
-    let r = dispatch(&h.env.modules, &me(), &dec.id, "send", "").unwrap();
-    assert!(r.is_err(), "the decision is already resolved: {r:?}");
+    let replay = dispatch(&h.env.modules, &me(), &dec.id, "send", "")
+        .unwrap()
+        .unwrap();
+    assert_eq!(replay, r);
+    assert_eq!(draft(&h, &d.id).status, "pending");
     let d2 = h.mail.send_draft(&me(), &d.id).unwrap();
     h.env.clock.advance(10_001);
     let sent = h.mail.send_due().await.unwrap();

@@ -1632,6 +1632,7 @@ fn the_preview_reads_no_checkout() {
         let raw = json!({ "command": s });
         let sub = subject_from_row(
             &crate::repo::Decision {
+                revision: 1,
                 id: "dc".into(),
                 workspace_id: "ws".into(),
                 kind: "approve".into(),

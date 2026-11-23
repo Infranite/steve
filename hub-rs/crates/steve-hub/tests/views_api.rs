@@ -178,7 +178,7 @@ async fn a_dismissed_decision_reaches_the_page_as_a_patch() {
         .create(&steve_store::NewDecision {
             workspace_id: "default".into(),
             kind: "ask".into(),
-            subject_type: "test".into(),
+            subject_type: "question".into(),
             subject_id: "s".into(),
             question: "继续吗？".into(),
             requested_by: "steve".into(),
@@ -247,7 +247,7 @@ async fn a_dismissed_decision_reaches_the_page_as_a_patch() {
         })
         .expect("the patch for the dismissal");
     assert_eq!(op["op"], "upsert");
-    assert_eq!(op["view"]["status"], "resolved");
+    assert_eq!(op["view"]["status"], "dismissed");
     assert!(
         arrived.saturating_duration_since(answered) <= Duration::from_millis(200),
         "patch came {:?} after the answer",

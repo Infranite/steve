@@ -908,7 +908,7 @@ fn decisions() {
         ("resolved", json!({"choice": "pass"}), undo.clone())
     );
     assert!(r.resolved.is_some());
-    // resolving again is a no-op (only open decisions change) but still publishes
+    // A second settlement leaves the original answer and event intact.
     let again = s
         .decisions()
         .resolve(
@@ -920,7 +920,7 @@ fn decisions() {
         .unwrap()
         .unwrap();
     assert_eq!(again.result, json!({"choice": "pass"}));
-    assert_eq!(t.events.take().len(), 2);
+    assert_eq!(t.events.take().len(), 1);
     assert!(s.decisions().open(WS).unwrap().is_empty());
     assert_eq!(s.decisions().recent(WS, 0).unwrap().len(), 1);
     assert!(s.decisions().recent(WS, now() + 1000).unwrap().is_empty());
@@ -1382,48 +1382,99 @@ fn records_and_annotations_drafts_one_send_per_key_and_removal() {
 }
 
 #[test]
-fn an_unapplied_answer_expires_its_card_open_or_resolved_only() {
+fn expiring_an_unapplied_answer_preserves_a_recorded_choice() {
     let t = with_steve();
     let s = &t.store;
-    let i = new_item(s, WS, "a");
-    let nd = || NewDecision {
+    let nd = NewDecision {
         workspace_id: WS.into(),
         kind: "approve".into(),
         subject_type: "tool_call".into(),
         subject_id: "p1".into(),
-        item_id: Some(i.id.clone()),
-        question: "允许？".into(),
+        question: "Allow?".into(),
         requested_by: "steve".into(),
         ..Default::default()
     };
-    let status = |id: &str| s.decisions().get(id).unwrap().unwrap().status;
-    let open = s.decisions().create(&nd()).unwrap().unwrap();
-    let resolved = s.decisions().create(&nd()).unwrap().unwrap();
-    let expired = s.decisions().create(&nd()).unwrap().unwrap();
-    let cancelled = s.decisions().create(&nd()).unwrap().unwrap();
     s.write::<_, StoreError>(|tx| {
-        decision_resolve_in(
-            tx,
-            &resolved.id,
-            &json!({"optionId": "allow_once"}),
-            "resolved",
-        )?;
-        decision_resolve_in(tx, &expired.id, &json!({}), "expired")?;
-        decision_resolve_in(tx, &cancelled.id, &json!({}), "cancelled")?;
-        let r = json!({"expired": true, "refused": "expired"});
-        assert!(decision_expire_unapplied_in(tx, &open.id, &r)?);
-        assert!(decision_expire_unapplied_in(tx, &resolved.id, &r)?);
-        assert!(!decision_expire_unapplied_in(tx, &expired.id, &r)?);
-        assert!(!decision_expire_unapplied_in(tx, &cancelled.id, &r)?);
+        use steve_store::decision_repo::{DecisionChange, choice_receipt, expire_unapplied};
+
+        let open = DecisionRows(tx).open(&nd)?;
+        let answered = DecisionRows(tx).open(&nd)?;
+        let answer = json!({"optionId": "allow_once"});
+        DecisionRows(tx).record_choice(&answered, "owner", "allow_once", "")?;
+        assert!(DecisionRows(tx).apply(
+            &answered,
+            DecisionChange::Resolve,
+            &answer,
+            &Value::Null
+        )?);
+        let expired = json!({"expired": true});
+        assert!(expire_unapplied(tx, &open.id, &expired)?);
+        assert!(!expire_unapplied(tx, &open.id, &expired)?);
+        assert!(!expire_unapplied(tx, &answered.id, &expired)?);
+        let answered = DecisionRows(tx).get(&answered.id)?.unwrap();
+        assert_eq!(answered.status, "resolved");
+        assert_eq!(answered.result, answer);
+        assert!(choice_receipt(tx, &answered.id, answered.revision)?.is_some());
         Ok(())
     })
     .unwrap();
-    assert_eq!(status(&open.id), "expired");
-    assert_eq!(status(&resolved.id), "expired");
-    assert_eq!(status(&cancelled.id), "cancelled");
-    let d = s.decisions().get(&resolved.id).unwrap().unwrap();
-    assert_eq!(
-        serde_json::to_value(&d).unwrap()["result"]["refused"],
-        "expired"
-    );
+}
+
+#[test]
+fn decision_revisions_reject_stale_transitions() {
+    use steve_store::decision_repo::{DecisionChange, choice_receipt};
+
+    let t = with_steve();
+    let s = &t.store;
+    let spec = NewDecision {
+        workspace_id: WS.into(),
+        kind: "confirm".into(),
+        subject_type: "test".into(),
+        requested_by: "steve".into(),
+        ..Default::default()
+    };
+    s.write::<_, StoreError>(|w| {
+        for sequence in 0..1_000 {
+            let mut cards = DecisionRows(w);
+            let open = cards.open(&spec)?;
+            let terminal = match sequence % 4 {
+                0 => DecisionChange::Resolve,
+                1 => DecisionChange::Dismiss,
+                2 => DecisionChange::Expire,
+                _ => DecisionChange::Supersede,
+            };
+            assert!(cards.apply(&open, terminal, &Value::Null, &Value::Null)?);
+            assert!(!cards.apply(&open, DecisionChange::Expire, &Value::Null, &Value::Null)?);
+            let settled = cards.get(&open.id)?.unwrap();
+            assert_ne!(settled.status, "open");
+
+            if terminal == DecisionChange::Resolve {
+                cards.record_choice(&settled, "owner", "yes", "")?;
+            }
+            let can_reopen = matches!(terminal, DecisionChange::Resolve | DecisionChange::Dismiss);
+            assert_eq!(
+                cards.apply(&settled, DecisionChange::Reopen, &Value::Null, &Value::Null)?,
+                can_reopen,
+            );
+            if can_reopen {
+                assert!(!cards.apply(
+                    &open,
+                    DecisionChange::Supersede,
+                    &Value::Null,
+                    &Value::Null
+                )?);
+                let reopened = cards.get(&open.id)?.unwrap();
+                assert_eq!(
+                    (reopened.status.as_str(), reopened.revision),
+                    ("open", open.revision + 1)
+                );
+            }
+            assert_eq!(
+                choice_receipt(w, &open.id, open.revision)?.is_some(),
+                terminal == DecisionChange::Resolve,
+            );
+        }
+        Ok(())
+    })
+    .unwrap();
 }

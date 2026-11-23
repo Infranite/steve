@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::contacts::memory::{MAX_OPEN_CONFIRMS, confirm_question, record_name};
-use steve_modules::decisions::{self, DecisionCx, DecisionHandler};
+use steve_modules::decisions::{self, DecisionCx, DecisionHandler, DecisionOutcome};
 use steve_modules::{ApiError, ApiResult, Body, Caller, Check, Modules};
 use steve_store::base::mems::{Mem, MemPatch, NewMem};
 use steve_store::base::{Level, ObjRef, Viewer, Visibility};
@@ -410,9 +410,9 @@ fn replaced(c: &mut impl Read, id: &str) -> ApiResult<Vec<String>> {
 pub struct MemDecisions;
 
 impl DecisionHandler for MemDecisions {
-    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<DecisionOutcome> {
         answer(tx, cx.ws, cx.actor, &d.subject_id, cx.choice, cx.text)?;
-        Ok(decisions::choice_result(cx))
+        Ok(decisions::choice_result(cx).into())
     }
 
     /// Undoing a `yes` puts the candidate back and restores the memory it replaced; a `no` deleted
@@ -594,31 +594,14 @@ pub fn resolve_many(m: &Modules, who: &Caller, b: &ResolveBody) -> ApiResult<Val
         if mem.status != "candidate" {
             continue;
         }
-        let open = match &mem.decision_id {
-            Some(d) => m
-                .store
-                .read(|c| DecisionRows(c).get(d))?
-                .filter(|d| d.status == "open")
-                .map(|d| d.id),
-            None => None,
-        };
-        if let Some(dec) = open
-            && let Some(r) = decisions::dispatch(m, who, &dec, &b.choice, "")
-        {
-            r?;
-            done += 1;
-            continue;
-        }
-        // No open decision (or no handler registered): answer directly, settling any decision too.
         m.store.write(|tx| {
-            answer(tx, &who.ws, &who.me, &mem.id, &b.choice, "")?;
-            if let Some(d) = &mem.decision_id {
-                DecisionRows(tx).settle(
-                    d,
-                    &json!({"choice": b.choice}),
-                    "resolved",
-                    &Value::Null,
-                )?;
+            if let Some(id) = &mem.decision_id {
+                let d = DecisionRows(tx)
+                    .get(id)?
+                    .ok_or_else(|| ApiError::not_found("决定"))?;
+                decisions::resolve(m, who, id, d.revision, &b.choice, "")?;
+            } else {
+                answer(tx, &who.ws, &who.me, &mem.id, &b.choice, "")?;
             }
             Ok::<_, ApiError>(())
         })?;
@@ -691,11 +674,12 @@ pub fn expire(m: &Modules, now: i64) -> ApiResult<usize> {
             .store
             .read(|c| Memories(c).candidates_before(&ws, now - EXPIRE_AFTER_MS))?;
         for (id, dec) in old {
-            if let Some(d) = dec {
-                decisions::expire(m, &d)?;
-            }
             m.store.write(|tx| {
-                stale_candidate(tx, &id)?;
+                if let Some(d) = dec {
+                    decisions::expire(m, &d)?;
+                } else {
+                    stale_candidate(tx, &id)?;
+                }
                 tx.audit(&ws, "steve", "mm.expire", &id, &json!({}))?;
                 Ok::<_, ApiError>(())
             })?;

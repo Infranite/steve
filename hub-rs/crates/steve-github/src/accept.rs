@@ -6,7 +6,7 @@ use steve_store::W;
 use std::sync::{Arc, OnceLock, Weak};
 
 use serde_json::{Value, json};
-use steve_modules::decisions::{DecisionCx, DecisionHandler, choice_result};
+use steve_modules::decisions::{DecisionCx, DecisionHandler, DecisionOutcome, choice_result};
 use steve_modules::{ApiError, ApiResult, Registry};
 use steve_store::base::DecisionKind;
 use steve_store::{Decision, NewDecision};
@@ -539,7 +539,7 @@ impl GitHub {
 struct PrOpenDecisions(Slot);
 
 impl DecisionHandler for PrOpenDecisions {
-    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<DecisionOutcome> {
         let gh = self.0.need()?;
         let item = d
             .item_id
@@ -549,7 +549,7 @@ impl DecisionHandler for PrOpenDecisions {
             return Err(ApiError::conflict("item cycle is closed"));
         }
         effects::queue(tx, &gh, cx.ws, &d.id, effects::OPEN)?;
-        Ok(choice_result(cx))
+        Ok(choice_result(cx).into())
     }
 
     /// The branch may be pushed and the PR open by now; there is nothing to take back.
@@ -632,7 +632,7 @@ fn merge_ready(pr: &PrRow) -> bool {
 struct PrMergeDecisions(Slot);
 
 impl DecisionHandler for PrMergeDecisions {
-    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<DecisionOutcome> {
         let gh = self.0.need()?;
         let pr = steve_store::github::pr_get(tx, &d.subject_id)?
             .filter(|p| p.workspace_id == cx.ws)
@@ -658,7 +658,7 @@ impl DecisionHandler for PrMergeDecisions {
         if cx.choice == "yes" {
             effects::queue(tx, &gh, cx.ws, &d.id, effects::MERGE)?;
         }
-        Ok(out)
+        Ok(out.into())
     }
 
     fn before_undo(&self, _tx: &mut W<'_>, _d: &Decision) -> ApiResult<()> {
@@ -672,6 +672,7 @@ mod tests {
 
     fn decision(draft: &str, result: Value) -> Decision {
         Decision {
+            revision: 1,
             id: "dec_1".into(),
             workspace_id: "default".into(),
             kind: "approve".into(),

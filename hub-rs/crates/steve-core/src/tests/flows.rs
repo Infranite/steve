@@ -344,17 +344,12 @@ fn declining_a_proposal_closes_that_cycle() {
         })
         .unwrap();
     let d = k.db().decisions_of_item(&i.id).unwrap().pop().unwrap();
-    k.core.resolve(&d.id, "no", "", "me").unwrap();
+    let first = k.core.resolve(&d.id, "no", "", "me").unwrap();
     assert_eq!(k.item_label(&i.id), "drop");
     assert!(k.core.undo_decision(&d.id, "me").is_err());
     assert_eq!(k.db().item(&i.id).unwrap().unwrap().cycle, 1);
-    assert_eq!(
-        k.core
-            .resolve(&d.id, "no", "", "me")
-            .unwrap_err()
-            .to_string(),
-        "这个决定已经处理过了"
-    );
+    assert_eq!(k.core.resolve(&d.id, "no", "", "me").unwrap(), first);
+    assert!(k.core.resolve(&d.id, "yes", "", "me").is_err());
 }
 
 #[test]

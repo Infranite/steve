@@ -7,7 +7,7 @@ use crate::testkit::Kit;
 use serde_json::json;
 use steve_modules::accounts::{self, Hints};
 use steve_modules::contacts::{self, merge};
-use steve_modules::decisions::{self, DecisionCx, DecisionHandler};
+use steve_modules::decisions::{self, DecisionCx, DecisionHandler, DecisionOutcome};
 use steve_modules::testkit::{ME, WS, call, caller};
 use steve_modules::{ApiError, ApiResult, Caller, Modules, Registry};
 
@@ -129,13 +129,8 @@ async fn a_merge_answered_through_dispatch_is_split_by_undo_decision() {
 struct Refuses;
 
 impl DecisionHandler for Refuses {
-    fn resolve(
-        &self,
-        _: &mut W<'_>,
-        cx: &DecisionCx,
-        _: &Decision,
-    ) -> ApiResult<serde_json::Value> {
-        Ok(decisions::choice_result(cx))
+    fn resolve(&self, _: &mut W<'_>, cx: &DecisionCx, _: &Decision) -> ApiResult<DecisionOutcome> {
+        Ok(decisions::choice_result(cx).into())
     }
     fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
         steve_store::audit_repo::record(

@@ -64,11 +64,11 @@ impl NodeRuntime {
                         PermissionDecision::AllowOnce => Some(ALLOW),
                         PermissionDecision::Reject => None,
                     };
-                    steve_store::decision_repo::settle_permission(
-                        tx,
+                    steve_store::DecisionRows(tx).settle(
                         &row.decision,
                         &json!({ "optionId": chose }),
                         "resolved",
+                        &serde_json::Value::Null,
                     )?;
                 }
                 Ok(None)
@@ -102,7 +102,7 @@ impl NodeRuntime {
         if node_write::permission_in(tx, self.node_id.as_str(), attempt, request.id.as_str())?
             .is_some()
         {
-            // the same request again (a replay): its card is there
+            metrics::counter!("steve_decision_duplicate_prompts_total").increment(1);
             return Ok(None);
         }
         // an attempt this Hub planned on this Node, of that very session (whatever the body says)
@@ -249,11 +249,11 @@ impl NodeRuntime {
         )? {
             return Err(conflict("the permission changed while expiring it"));
         }
-        steve_store::decision_repo::settle_permission(
-            tx,
+        steve_store::DecisionRows(tx).settle(
             &row.decision,
             &json!({ "superseded": why }),
             "expired",
+            &serde_json::Value::Null,
         )?;
         Ok(op.is_some())
     }
@@ -277,11 +277,11 @@ impl NodeRuntime {
                 &json!({ "superseded": why, "unapplied": true }),
             )?;
         } else {
-            steve_store::decision_repo::settle_permission(
-                tx,
+            steve_store::DecisionRows(tx).settle(
                 &row.decision,
                 &json!({ "superseded": why }),
                 "expired",
+                &serde_json::Value::Null,
             )?;
         }
         Ok(())

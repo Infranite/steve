@@ -364,6 +364,8 @@ pub struct DecisionView {
     pub tier: DecisionTier,
     /// Why it is folded away (`tier` = `folded`).
     pub folded: Option<FoldReason>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub revision: i64,
 }
 
 /// The tiers of 待处理, decided by the Hub in a fixed order of rules: an approved send that failed

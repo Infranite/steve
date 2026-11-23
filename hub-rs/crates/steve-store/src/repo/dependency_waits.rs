@@ -83,7 +83,12 @@ pub(super) fn rearm_in(tx: &mut crate::W<'_>, item: &str) -> Result<()> {
         [item],
         |r| r.get::<_, String>(0),
     )? {
-        crate::decision_resolve_in(tx, &id, &json!({"superseded":"前置事项已变化"}), "expired")?;
+        crate::DecisionRows(tx).settle(
+            &id,
+            &json!({"superseded":"前置事项已变化"}),
+            "expired",
+            &serde_json::Value::Null,
+        )?;
     }
     Ok(())
 }

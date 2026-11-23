@@ -1,7 +1,7 @@
 //! hub/test/supersede.test.ts: a question or failure card expires once the conversation goes on without it.
 
 use crate::ItemAction;
-use crate::lifecycle::{supersede, tidy};
+use crate::lifecycle::supersede;
 use crate::testkit::Kit;
 use serde_json::json;
 
@@ -49,30 +49,6 @@ fn nothing_to_supersede_changes_nothing() {
     k.core.item_action(&i, ItemAction::Pause, "me").unwrap();
     assert_eq!(supersede(k.db(), &i, &["ask"], "x").unwrap(), 0);
     assert_eq!(k.item_label(&i), "pause");
-}
-
-#[test]
-fn tidy_expires_questions_older_than_a_delivery_and_keeps_the_delivery() {
-    let k = Kit::new();
-    let i = k.item("run", "定义", None);
-    let a = ask(&k, &i, "ask");
-    let acc = ask(&k, &i, "accept");
-    let question_at = k.db().decision(&a).unwrap().unwrap().created;
-    let delivery_at = k
-        .db()
-        .decision(&acc)
-        .unwrap()
-        .unwrap()
-        .created
-        .max(question_at + 1);
-    steve_store::core_fixture::decision(
-        k.db().store(),
-        &acc,
-        steve_store::core_fixture::DecisionState::Created(delivery_at),
-    );
-    assert_eq!(tidy(k.db(), &i).unwrap(), 1);
-    assert_eq!(k.db().decision(&a).unwrap().unwrap().status, "expired");
-    assert_eq!(k.db().decision(&acc).unwrap().unwrap().status, "open");
 }
 
 #[test]

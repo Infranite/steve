@@ -48,7 +48,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use steve_flow::AdapterError;
 use steve_modules::accounts::connections::{BlockScope, ProviderError, WriteRefusal, may_write_in};
-use steve_modules::decisions::{DecisionCx, DecisionHandler, choice_result};
+use steve_modules::decisions::{DecisionCx, DecisionHandler, DecisionOutcome, choice_result};
 use steve_modules::hooks::ItemHooks;
 use steve_modules::outbound::{self as b1, Audience, CheckCx, CheckResult, KnowledgeUse, Verdict};
 use steve_modules::{ApiError, ApiResult, Clock, SystemClock, Tier};
@@ -1868,7 +1868,7 @@ fn claim_permission(
     let live = steve_store::channel_spaces::rows::original_route(w, &row.space_id)?
         .is_some_and(|route| route.space_status != "left" && route.connection_status != "revoked");
     if !live {
-        fail_orphaned_message(w, &row, now)?;
+        fail_orphaned_message(w, &row)?;
         return Ok(Some(SendOutcome::Skipped));
     }
     // you answered yourself since, the sender's later message took it into its turn, or the
@@ -4027,21 +4027,20 @@ impl ItemHooks for ReturnToSource {
 // ---------------------------------------------------------------- not said in your name any more
 
 /// Drops a message in your name that is not to be said any more ([`crate::presence::stop_out`]):
-/// discarded from `from`, its open card (and `decision` when given, the one being answered)
-/// superseded, audit `chan_message.superseded`.
+/// Discard the message and close outstanding cards. The decision currently being answered
+/// is closed by its settlement transaction.
 fn drop_for_you(
     w: &mut steve_store::W<'_>,
     row: &OutRow,
     from: &[&str],
-    decision: Option<&str>,
+    answering: Option<&str>,
     stop: &crate::presence::Stop,
 ) -> ChannelResult<()> {
     set_status(w, &row.id, from, DISCARDED)?;
     send_state::forget(w, &row.id)?;
-    if let Some(d) = decision {
-        crate::presence::settle(w, d, stop.why())?;
-    }
-    if let Some(d) = steve_store::DecisionRows(w).open_for(&row.ws, SUBJECT_MESSAGE, &row.id)? {
+    if let Some(d) = steve_store::DecisionRows(w).open_for(&row.ws, SUBJECT_MESSAGE, &row.id)?
+        && Some(d.id.as_str()) != answering
+    {
         crate::presence::settle(w, &d.id, stop.why())?;
     }
     steve_store::audit_repo::record(
@@ -4056,11 +4055,16 @@ fn drop_for_you(
     Ok(())
 }
 
-fn fail_orphaned_message(w: &mut steve_store::W<'_>, row: &OutRow, now: i64) -> ChannelResult<()> {
+fn fail_orphaned_message(w: &mut steve_store::W<'_>, row: &OutRow) -> ChannelResult<()> {
     delivery_repo::transition(w, &row.id, &[], "failed", SentAt::Clear)?;
     let mut decisions = steve_store::DecisionRows(w);
     if let Some(d) = decisions.open_for(&row.ws, SUBJECT_MESSAGE, &row.id)? {
-        decisions.close_orphaned(&d.id, now)?;
+        decisions.apply(
+            &d,
+            steve_store::decision_repo::DecisionChange::Dismiss,
+            &json!({"dismissed": true, "why": "connection_gone"}),
+            &Value::Null,
+        )?;
     }
     steve_store::audit_repo::record(
         w,
@@ -4112,7 +4116,7 @@ impl MessageDecisions {
         w: &mut steve_store::W<'_>,
         cx: &DecisionCx,
         d: &Decision,
-    ) -> ApiResult<Value> {
+    ) -> ApiResult<DecisionOutcome> {
         let now = self.0.now();
         let row = own_out(w, cx.ws, &d.subject_id)?;
         if row.status != "draft" || row.decision_id.as_deref() != Some(d.id.as_str()) {
@@ -4129,8 +4133,7 @@ impl MessageDecisions {
             self.0.push(After::Discarded {
                 message_id: row.id.clone(),
             });
-            result["superseded"] = json!(e.why());
-            return Ok(result);
+            return Ok(DecisionOutcome::Expired(json!({"superseded": e.why()})));
         }
         if d.result["recovery_review"] == true {
             result["recovery_review"] = json!(true);
@@ -4230,7 +4233,7 @@ impl MessageDecisions {
             _ => return Err(ApiError::invalid("choice")),
         }
         channel_message_repo::emit(w, cx.ws, &row.space_id, &row.id);
-        Ok(result)
+        Ok(result.into())
     }
 
     fn failed(
@@ -4238,7 +4241,7 @@ impl MessageDecisions {
         w: &mut steve_store::W<'_>,
         cx: &DecisionCx,
         d: &Decision,
-    ) -> ApiResult<Value> {
+    ) -> ApiResult<DecisionOutcome> {
         let now = self.0.now();
         let row = own_out(w, cx.ws, &d.subject_id)?;
         if row.decision_id.as_deref() != Some(d.id.as_str()) {
@@ -4251,8 +4254,7 @@ impl MessageDecisions {
             && let Some(e) = crate::presence::stop_out(w, cx.ws, &row.id, now)?
         {
             drop_for_you(w, &row, &["failed", "unknown"], Some(&d.id), &e)?;
-            result["superseded"] = json!(e.why());
-            return Ok(result);
+            return Ok(DecisionOutcome::Expired(json!({"superseded": e.why()})));
         }
         result["was"] = json!(row.status);
         match (cx.choice, row.status.as_str()) {
@@ -4324,7 +4326,7 @@ impl MessageDecisions {
             &json!({"decision": d.id}),
         )?;
         channel_message_repo::emit(w, cx.ws, &row.space_id, &row.id);
-        Ok(result)
+        Ok(result.into())
     }
 
     fn handoff(
@@ -4438,11 +4440,11 @@ impl DecisionHandler for MessageDecisions {
         }
     }
 
-    fn resolve(&self, w: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, w: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<DecisionOutcome> {
         match d.kind.as_str() {
             "approve" => self.approve(w, cx, d),
             "fail" => self.failed(w, cx, d),
-            "ask" => self.handoff(w, cx, d),
+            "ask" => self.handoff(w, cx, d).map(Into::into),
             _ => Err(ApiError::rule(steve_i18n::t!(
                 "channels.error.unknown_decision"
             ))),
