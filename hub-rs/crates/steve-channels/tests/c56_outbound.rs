@@ -5245,7 +5245,7 @@ async fn recovery_review_survives_edits_failed_rewrites_cooling_and_cold_restart
                 let yes = decide(&h, &approve, "yes", "").unwrap();
                 assert_eq!(yes.result["recovery_review"], true);
                 assert!(yes.result.get("decided_by").is_none());
-                assert!(decide(&h, &approve, "yes", "").is_err());
+                assert_eq!(decide(&h, &approve, "yes", "").unwrap(), yes);
                 h.env.clock.advance(11_000);
                 tokio::join!(queue.send_due(&h.ch), h.outbox.send_due(&h.ch));
                 restarted.tick();

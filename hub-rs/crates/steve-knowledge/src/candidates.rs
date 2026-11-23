@@ -641,19 +641,40 @@ pub fn restore(m: &Modules, who: &Caller, id: &str) -> ApiResult<Value> {
         .as_array()
         .is_some_and(|xs| xs.iter().any(|x| x["mem"]["id"] == id));
     m.store.write(|tx| {
-        if Memories(tx).visible(&viewer, id)?.is_none() {
-            return Err(ApiError::not_found(NOUN));
-        }
-        if !ok {
+        let mem = Memories(tx)
+            .visible(&viewer, id)?
+            .ok_or_else(|| ApiError::not_found(NOUN))?;
+        if !ok || mem.status != "stale" {
             return Err(ApiError::conflict(steve_i18n::t!(
                 "knowledge.mem.already_handled"
             )));
         }
+        let previous = mem
+            .decision_id
+            .as_deref()
+            .map(|id| DecisionRows(tx).get(id))
+            .transpose()?
+            .flatten()
+            .filter(|d| {
+                d.workspace_id == who.ws
+                    && d.subject_type == SUBJECT
+                    && d.subject_id == mem.id
+                    && d.status == "expired"
+            });
+        let decision_id = if let Some(d) = previous {
+            let mut spec = decisions::confirm(&who.ws, SUBJECT, id, &d.question, &d.requested_by);
+            spec.draft = Some(d.draft);
+            spec.session_id = d.session_id;
+            Some(DecisionRows(tx).open(&spec)?.id)
+        } else {
+            None
+        };
         let now = steve_store::now();
         Memories(tx).patch(
             id,
             &MemPatch {
                 status: Some("candidate".into()),
+                decision_id: Some(decision_id),
                 ..Default::default()
             },
         )?;

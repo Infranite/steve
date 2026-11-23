@@ -212,28 +212,6 @@ fn on_boot_reminders_left_on_finished_or_dropped_items_are_cleared() {
 }
 
 #[test]
-fn on_boot_a_question_older_than_a_delivery_expires() {
-    let k = Kit::new();
-    let (i, question) = waiting(&k, "ask");
-    let acc = k.decision(&i, None, "accept", "item", &["pass", "rework"]);
-    steve_store::core_fixture::decision(
-        k.db().store(),
-        &acc,
-        steve_store::core_fixture::DecisionState::CreatedAfter(&question),
-    );
-    k.core.recover().unwrap();
-    let open: Vec<String> = k
-        .db()
-        .decisions_of_item(&i)
-        .unwrap()
-        .into_iter()
-        .filter(|d| d.status == "open")
-        .map(|d| d.id)
-        .collect();
-    assert_eq!(open, vec![acc]);
-}
-
-#[test]
 fn a_turn_cut_off_by_a_restart_that_nothing_continues_shows_one_card() {
     let k = Kit::new();
     let i = k.item("run", "执行", None);

@@ -273,7 +273,7 @@ async fn a_dismissed_decision_reaches_the_page_as_a_patch() {
         .json()
         .await
         .unwrap();
-    assert_eq!(r["views"][0]["status"], "resolved");
+    assert_eq!(r["views"][0]["status"], "dismissed");
     assert_eq!(r["missing"], serde_json::json!(["nope"]));
     let r: Value = e
         .get("/api/views/page?kind=decision&status=settled&since=0")

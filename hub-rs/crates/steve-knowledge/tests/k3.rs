@@ -721,7 +721,13 @@ async fn an_expired_candidate_can_be_restored() {
         .me("POST", &format!("/kb/candidates/{}/restore", x.id), None)
         .await;
     assert_eq!(code, 200);
-    assert_eq!(e.mem(&x.id).unwrap().status, "candidate");
+    let restored = e.mem(&x.id).unwrap();
+    assert_eq!(restored.status, "candidate");
+    assert_ne!(restored.decision_id, x.decision_id);
+    assert_eq!(
+        e.decision(x.decision_id.as_deref().unwrap()).status,
+        "expired"
+    );
     let (_, list) = e.me("GET", "/kb/candidates", None).await;
     assert_eq!(list[0]["mem"]["id"], x.id.as_str());
     let (_, list) = e.me("GET", "/kb/candidates/expired", None).await;

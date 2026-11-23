@@ -4578,10 +4578,10 @@ async fn accounting_vectors_cross_node_admission_and_the_shared_gateway_boundary
     }
 }
 
-/// ST-174: a startup message is not an unlimited retry token. The stop survives a runtime
-/// restart and even dismissal of the card; explicit retries reuse the same card on failure.
+/// A startup failure survives a runtime restart. If an owner retries and it fails again,
+/// one new card represents that failure while the previous answer remains recorded.
 #[tokio::test]
-async fn startup_failure_holds_the_queue_and_reuses_its_card_until_human_retry() {
+async fn startup_failure_holds_the_queue_and_keeps_the_previous_answer() {
     let h = hub();
     h.node.refuse_next(
         "open_session",
@@ -4627,11 +4627,15 @@ async fn startup_failure_holds_the_queue_and_reuses_its_card_until_human_retry()
             && h.phase() == "released"
     })
     .await;
-    assert_eq!(node_checks::decision_count(&h.store).unwrap(), 1);
+    assert_eq!(node_checks::decision_count(&h.store).unwrap(), 2);
     assert_eq!(
         h.store.decisions().get(&card).unwrap().unwrap().status,
-        "open"
+        "resolved"
     );
+    let open = h.store.decisions().open(steve_store::WS).unwrap();
+    assert_eq!(open.len(), 1);
+    assert_ne!(open[0].id, card);
+    assert_eq!(open[0].subject_type, "session_start");
     h.rt.retry_open(S, &build::choice()).unwrap();
     eventually_sync("retry started the queued task", || {
         h.count("start_turn") == 1
