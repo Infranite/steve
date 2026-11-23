@@ -225,6 +225,16 @@ fn excerpt(
 }
 
 impl<C: Read> ChannelSources<'_, C> {
+    pub fn message_space(&mut self, ws: &str, id: &str) -> Result<Option<String>> {
+        self.0.one(
+            Query::select()
+                .column("space_id")
+                .from("chan_messages")
+                .and_where(within("chan_messages", ws, id)),
+            |r| r.get(0),
+        )
+    }
+
     pub fn message_locations(
         &mut self,
         ws: &str,

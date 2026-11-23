@@ -7,7 +7,6 @@ use std::sync::Arc;
 use axum::extract::{Extension, Path, Query};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
-use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use steve_channels::{Channels, Outbox};
 use steve_modules::{ApiError, ApiResult, Caller, Modules};
@@ -48,17 +47,16 @@ pub fn routes(ch: Channels, outbox: Arc<Outbox>) -> Router<Modules> {
 /// The message exists in the caller's workspace and its space is visible to them.
 fn visible(ch: &Channels, who: &Caller, id: &str) -> ApiResult<()> {
     let viewer = ch.modules().viewer(who)?;
-    ch.store().reader(|c| {
-        let space: Option<String> = c
-            .query_row(
-                "SELECT space_id FROM chan_messages WHERE id = ? AND workspace_id = ?",
-                [id, &who.ws],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let space = space.ok_or_else(|| ApiError::not_found("消息"))?;
-        steve_channels::spaces::own(c, &viewer, &space).map_err(|_| ApiError::not_found("消息"))?;
-        Ok(())
+    ch.store().read(|r| {
+        let space = steve_store::ChannelSources(r)
+            .message_space(&who.ws, id)?
+            .ok_or_else(|| ApiError::not_found("消息"))?;
+        // Shares the read snapshot until Channels' space authorization accepts a read handle.
+        ch.store().reader(|c| {
+            steve_channels::spaces::own(c, &viewer, &space)
+                .map_err(|_| ApiError::not_found("消息"))?;
+            Ok(())
+        })
     })
 }
 

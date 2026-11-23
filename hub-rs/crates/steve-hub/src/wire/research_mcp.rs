@@ -93,14 +93,7 @@ impl ItemScope {
             return Ok(Self::Conversation(Default::default()));
         };
         let ids = store
-            .reader(|c| -> steve_store::Result<Vec<String>> {
-                let mut st = c.prepare_cached(
-                    "SELECT ti.item_id FROM thread_items ti JOIN messages m ON m.id = ti.origin_msg
-                      WHERE m.space = ?1 AND m.workspace_id = ?2 AND ti.workspace_id = ?2",
-                )?;
-                let rows = st.query_map([&m.space, &m.workspace_id], |r| r.get(0))?;
-                Ok(rows.collect::<rusqlite::Result<_>>()?)
-            })
+            .read(|r| steve_store::item_repo::in_conversation(r, &m.workspace_id, &m.space))
             .map_err(|e| e.to_string())?;
         Ok(Self::Conversation(ids.into_iter().collect()))
     }

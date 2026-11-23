@@ -11,7 +11,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use rusqlite::OptionalExtension;
 use steve_flow::nodes::cmd::{CmdNode, CmdRan, CmdRequest};
 use steve_node_api::*;
 use steve_store::{Store, StoreError};
@@ -79,15 +78,7 @@ pub(super) fn command<B>(op: &str, body: B, within: Duration) -> Result<Command<
 
 /// An unarchived project of the flow's workspace (on any device).
 fn project_in(store: &Store, ws: &str, id: &str) -> Result<bool, StoreError> {
-    store.reader(|c| {
-        Ok(c.query_row(
-            "SELECT 1 FROM projects WHERE id=? AND workspace_id=? AND archived=0",
-            [id, ws],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some())
-    })
+    store.read(|r| Ok(steve_store::projects::project(r, ws, id)?.is_some_and(|p| !p.archived)))
 }
 
 impl FlowCmd {

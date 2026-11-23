@@ -16,6 +16,32 @@ pub struct ConnectionSource {
     pub created_by: String,
 }
 
+pub struct WatchedConnection {
+    pub id: String,
+    pub workspace_id: String,
+    pub adapter: String,
+    pub status: String,
+    pub created_by: String,
+}
+
+pub fn watched(c: &mut impl Read) -> Result<Vec<WatchedConnection>> {
+    c.all(
+        Query::select()
+            .columns(["id", "workspace_id", "adapter", "status", "created_by"])
+            .from("connections")
+            .order_by_columns([("created", Order::Asc), ("id", Order::Asc)]),
+        |r| {
+            Ok(WatchedConnection {
+                id: r.get(0)?,
+                workspace_id: r.get(1)?,
+                adapter: r.get(2)?,
+                status: r.get(3)?,
+                created_by: r.get(4)?,
+            })
+        },
+    )
+}
+
 const COLUMNS: [&str; 7] = [
     "id",
     "workspace_id",

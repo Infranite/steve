@@ -207,3 +207,27 @@ pub fn open_items(c: &mut impl Read, ids: &[String]) -> Result<Vec<(String, Stri
         .filter_map(|id| by_id.get(id.as_str()).map(|r| (*r).clone()))
         .collect())
 }
+
+/// Item references associated with a message's conversation.
+pub fn in_conversation(
+    c: &mut impl crate::Read,
+    ws: &str,
+    space: &str,
+) -> crate::Result<Vec<String>> {
+    use sea_query::{Expr, ExprTrait, JoinType, Query};
+    c.all(
+        Query::select()
+            .column(("ti", "item_id"))
+            .from_as("thread_items", "ti")
+            .join_as(
+                JoinType::InnerJoin,
+                "messages",
+                "m",
+                Expr::col(("m", "id")).eq(Expr::col(("ti", "origin_msg"))),
+            )
+            .and_where(Expr::col(("m", "space")).eq(space))
+            .and_where(Expr::col(("m", "workspace_id")).eq(ws))
+            .and_where(Expr::col(("ti", "workspace_id")).eq(ws)),
+        |r| r.get(0),
+    )
+}

@@ -180,18 +180,9 @@ impl steve_channels::OtherEvents for DirectoryEvents {
 
 // ---------------------------------------------------------------- connections coming and going
 
-/// The `connections` rows a watcher acts on: `(id, ws, adapter, status, created_by)`.
-fn connections(flow: &FlowCx) -> Vec<(String, String, String, String, String)> {
+fn connections(flow: &FlowCx) -> Vec<steve_store::connections::WatchedConnection> {
     flow.store()
-        .reader(|c| -> steve_store::Result<Vec<_>> {
-            let mut st = c.prepare(
-                "SELECT id, workspace_id, adapter, status, created_by FROM connections ORDER BY created, id",
-            )?;
-            let rows = st
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(rows)
-        })
+        .read(|r| steve_store::connections::watched(r))
         .unwrap_or_default()
 }
 
@@ -206,7 +197,7 @@ pub async fn watch_mailboxes(
     let live = |s: &str| matches!(s, "ok" | "error");
     // what existed at boot is not “new”
     let mut known: std::collections::BTreeSet<String> =
-        connections(&flow).into_iter().map(|c| c.0).collect();
+        connections(&flow).into_iter().map(|c| c.id).collect();
     while changes.recv().await.is_some() {
         // E6: a mailbox that appears, recovers or goes away starts or stops its runner now (the
         // first sync of a new mailbox runs at once)
@@ -214,7 +205,14 @@ pub async fn watch_mailboxes(
             tracing::warn!(error = %err, "mail runners");
         }
         while changes.try_recv().is_ok() {}
-        for (id, ws, adapter, status, by) in connections(&flow) {
+        for conn in connections(&flow) {
+            let steve_store::connections::WatchedConnection {
+                id,
+                workspace_id: ws,
+                adapter,
+                status,
+                created_by: by,
+            } = conn;
             if !known.insert(id.clone()) || !live(&status) {
                 continue;
             }
@@ -275,15 +273,7 @@ async fn hook(State(h): State<Hooks>, Path(id): Path<String>, req: Request) -> R
     let store = h.flow.store().clone();
     let cid = id.clone();
     let conn = tokio::task::spawn_blocking(move || {
-        store.reader(|c| -> steve_store::Result<Option<(String, String)>> {
-            use rusqlite::OptionalExtension;
-            Ok(c.query_row(
-                "SELECT workspace_id, adapter FROM connections WHERE id = ?",
-                [&cid],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?)
-        })
+        store.read(|r| steve_store::connections::connection_kind(r, &cid))
     })
     .await
     .ok()
