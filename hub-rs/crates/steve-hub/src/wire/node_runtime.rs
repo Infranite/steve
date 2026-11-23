@@ -310,7 +310,6 @@ const TURN_LIMIT_MS: i64 = super::research::NO_WALL_LIMIT.as_millis() as i64;
 const IDLE_RELEASE_MS: i64 = 600_000;
 /// How often the upkeep worker looks for idle sessions.
 const IDLE_EVERY: Duration = Duration::from_secs(1);
-/// How often the upkeep worker looks for lost commands past their deadline.
 /// The most pending gateway accounting rows the upkeep worker applies at once.
 const LOCAL_RUN: usize = 128;
 
@@ -596,7 +595,7 @@ impl NodeRuntime {
     }
 
     /// What the upkeep worker does: pending usage in the durable gateway inbox, what committed transactions tell the business side,
-    /// cards past due, lost commands and idle sessions. True: more of the gateway's usage may wait.
+    /// cards past due, turn progress and idle sessions. True: more gateway usage may wait.
     fn upkeep(&self, idle: bool) -> bool {
         let more = match self.store.stats().gateway_apply_local(LOCAL_RUN) {
             Ok(n) => n > 0,

@@ -14,9 +14,8 @@
 //! A recover that fails (unsupported, or the Node could not prove the target stopped) leaves the
 //! session held; the next Stop asks again under a new id.
 //!
-//! A ledger `exec` left unknown (a restart cut it off) is the one target retired without a Stop:
-//! once its deadline passed, or when you ask for its flow step to run again, a recover stops its
-//! process group and it ends interrupted ([`NodeRuntime::recover_exec_in`]). It is never run again.
+//! When you explicitly rerun a flow step whose ledger `exec` is unknown, a recover first stops the
+//! process group and the original command ends interrupted ([`NodeRuntime::recover_exec_in`]).
 
 use super::{
     intent::{Advance, next_revision},

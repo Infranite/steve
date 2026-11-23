@@ -555,10 +555,9 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(300)).await;
     }
 
-    /// The Hub (and its local Node with it) is killed while two steps' commands run. After the
-    /// restart both are unknown and never sent again; the one whose deadline passed is stopped by a
-    /// recover on its own, the other when you ask for its step to run again (a new command then);
-    /// with no command left open, the workspace can be tidied.
+    /// The Hub (and its local Node with it) is killed while two steps' commands run. Their receipts
+    /// remain unknown across the restart and deadline. A rerun first retires the original command;
+    /// once both original commands are settled, the workspace can be tidied.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_command_lost_in_a_crash_is_stopped_and_never_run_again() {
         let tmp = tempfile::tempdir().unwrap();
@@ -588,25 +587,15 @@ mod tests {
 
         let t = hub_at(tmp.path());
         let (a, b) = (derived_id("op_fcmd", "r1/a"), derived_id("op_fcmd", "r1/b"));
-        // `a`: past its deadline (3 s) its group is stopped, and it ends interrupted (unknown to
-        // the step), not run again
-        eventually(
-            "a is stopped at its deadline",
-            Duration::from_secs(30),
-            || !alive(&a_pid),
-        )
-        .await;
-        eventually("a ends interrupted", Duration::from_secs(10), || {
-            t.runtime
-                .ledger(&a)
-                .unwrap()
-                .is_some_and(|l| l.state == "finished" && super::ran(&l) == CmdRan::Unknown)
+        eventually("both commands are unknown", Duration::from_secs(10), || {
+            [&a, &b]
+                .into_iter()
+                .all(|op| t.runtime.ledger(op).unwrap().unwrap().state == "unknown")
         })
         .await;
-        // `b`: its deadline is far off; the lost command keeps running and stays unknown
-        let l = t.runtime.ledger(&b).unwrap().unwrap();
-        assert_eq!(l.state, "unknown");
-        assert!(alive(&b_pid));
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(alive(&a_pid) && alive(&b_pid));
+        assert_eq!(t.runtime.ledger(&a).unwrap().unwrap().state, "unknown");
         assert_eq!(
             t.cmd.run(sleeper(&t, "b", Duration::from_secs(300))).await,
             CmdRan::Unknown,
@@ -645,6 +634,16 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(e.code, Code::Busy, "{e}");
+        // An explicit stop can retire the overdue command without rerunning its step.
+        assert!(t.runtime.stop_lost(&a).unwrap());
+        eventually("a ends interrupted", Duration::from_secs(10), || {
+            t.runtime
+                .ledger(&a)
+                .unwrap()
+                .is_some_and(|l| l.state == "finished" && super::ran(&l) == CmdRan::Unknown)
+        })
+        .await;
+        assert!(!alive(&a_pid));
         // you ask for `b` to run again: the lost one is stopped first, then it runs anew, once
         let mut again = sleeper(&t, "b", Duration::from_secs(10));
         again.rerun = 1;

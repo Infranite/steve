@@ -861,16 +861,14 @@ fn freeze_first_envelope_in(
     mut l: rt::CommandLease,
     at: i64,
 ) -> Result<rt::CommandLease, StoreError> {
-    let mut c: Command<Value> = serde_json::from_value(l.request.clone()).map_err(conflict)?;
+    let c: Command<Value> = serde_json::from_value(l.request.clone()).map_err(conflict)?;
     if c.accept_before.0 - at >= ACCEPT_WINDOW_MS / 2 {
         return Ok(l);
     }
-    c.issued_at = Timestamp(at);
-    c.accept_before = Timestamp(at + ACCEPT_WINDOW_MS);
-    let v = serde_json::to_value(&c).map_err(conflict)?;
-    let digest = digest_of(&v).map_err(conflict)?.to_string();
-    store.write(|w| dispatch::freeze_envelope(w, &l.operation, &c, &digest, at))?;
-    l.request = v;
+    l.request["issued_at"] = Value::from(at);
+    l.request["accept_before"] = Value::from(at + ACCEPT_WINDOW_MS);
+    let digest = digest_of(&l.request).map_err(conflict)?.to_string();
+    store.write(|w| dispatch::freeze_envelope(w, &l.operation, &l.request, &digest, at))?;
     l.digest = digest;
     Ok(l)
 }
