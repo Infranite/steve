@@ -11,7 +11,6 @@ import type { Workflow } from "./workflow"
 import type { Delivery, DeliveryShare } from "./delivery"
 export type ItemStatus = "prop" | "run" | "wait" | "pause" | "done" | "drop" | "fail" | "block"
 export type PlanStep = { step: string; done: boolean; left?: boolean }
-export type { Closeout } from "./gen"
 export type DependencyWait = {
   item_id: string; status: ItemStatus; phase: string; cycle: number
   dependencies: { id: string; status: string | null; phase: string | null }[]; open_dependencies: string[]

@@ -1,5 +1,4 @@
-//! The item lifecycle (CLAUDE-LIFECYCLE-DISCUSSION.txt rounds 3–4): the one place
-//! that moves an item between its phases.
+//! Item cycle transitions and evaluation of automatic close requests.
 //!
 //! ```text
 //!  受理 ─► ready ──开始（第一项实际工作被领取）──► active ──请求完成（冻结 r）──► closing ──提交──► closed
@@ -10,16 +9,14 @@
 //!
 //! Every step is one store transaction: the item's lifecycle columns, their legacy projection
 //! (`status` / `stage` / `now`) and a `work.item.lifecycle` fact in the outbox. A closing request
-//! returns at once; the close itself is committed by [`Tx::lc_try_close`] once the gate holds:
+//! returns at once; the close itself is committed by [`Tx::evaluate_cycle_close`] once the gate holds:
 //! 1. no productive work of the item runs — a turn in flight on any of its sessions (`is_busy`
 //!    covers adapter start, the turn and the gateway-retry wait), a session still `running` /
 //!    `starting`, a resume intent, or messages of a person queued for a session (Steve's own queued
 //!    follow-ups void nothing and are dropped once it closes, #347);
 //! 2. no required operation of this cycle and revision is still open ([`steve_store::ItemOperation`]);
-//! 3. (completion) the frozen result is unchanged — same revision, same worktree fingerprint; once
-//!    the pull request the accepted result is followed on merged with it, the worktree is no longer
-//!    looked at (#347), and a worktree that moved while such a pull request is open voids the result
-//!    only once the host was asked whether it merged meanwhile;
+//! 3. (completion) the frozen result is unchanged, or the complete delivery manifest
+//!    was verified on the repositories' current default branches;
 //! 4. (completion) the acceptance is decided: human, automatic or waived;
 //! 5. (completion) no question or approval raised after the request is still open: an answer may
 //!    change what is left to do, so the close is judged again once it was handled (cards older than the
@@ -31,10 +28,12 @@
 
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_store::{ItemOperation, LifecycleWrite};
-use steve_work_api::{ITEM_DONE, ITEM_DONE_V, ITEM_LIFECYCLE, ITEM_LIFECYCLE_V, ItemDone};
+pub use steve_types::{CloseKind, ClosePolicy, CloseRequest};
+use steve_work_api::{
+    ITEM_DONE, ITEM_DONE_V, ITEM_LIFECYCLE, ITEM_LIFECYCLE_V, ItemDone, ItemLifecycle,
+};
 
 use crate::Tx;
 use crate::error::{CoreError, Result, msg};
@@ -72,86 +71,20 @@ pub const CLOSED: &str = "closed";
 /// release or the pull request), as the queue and the conversation show it.
 pub const STEVE_VIA: &str = "steve";
 
-pub const COMPLETE: &str = "complete";
-pub const CANCEL: &str = "cancel";
-pub const FAIL: &str = "fail";
-
 /// The user-facing refusal for anything sent to a closed item, in the request's language.
 pub fn closed_msg() -> String {
     steve_i18n::t!("core.item.closed")
 }
 
-/// Operation kinds the core knows. Modules' wrap-ups (a PR merge) run as `hooks.accepted`.
+/// Required proof from an explicitly configured release.
 pub const OP_RELEASE: &str = "release";
-pub const OP_HOOKS: &str = "hooks.accepted";
 /// A build the completion tag triggered (a GitHub Release): followed on its own; it holds the close
 /// only when the item's goal asks for the build to pass (`proof`: then it is required).
 pub const OP_BUILD: &str = "release.build";
 
-/// A closing intent while `phase = closing`.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct Closing {
-    /// `complete` | `cancel` | `fail`
-    pub kind: String,
-    pub reason: String,
-    pub by: String,
-    pub at: i64,
-    pub frozen_revision: i64,
-    /// A parent acceptance is for exactly this graph. A committed replan followed by a crash
-    /// cannot resurrect the previous acceptance after the new work finishes.
-    #[serde(default)]
-    pub workflow_revision: Option<i64>,
-    /// The worktree's `HEAD` and changes when the result was frozen; `None` without a git worktree.
-    #[serde(default)]
-    pub fingerprint: Option<String>,
-    /// The worktree is on a Node and its fingerprint was not there yet when the result was frozen:
-    /// it is taken when its facts come (`node_git`), and nothing closes before.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub print_pending: bool,
-    /// `human` | `automatic` | `waived` (completion); empty for cancel / fail.
-    #[serde(default)]
-    pub policy: String,
-    pub accepted: bool,
-    /// The acceptance decision (human policy).
-    #[serde(default)]
-    pub decision: Option<String>,
-    /// What the acceptance rests on (checks, a module's receipt, who marked it done).
-    #[serde(default)]
-    pub evidence: Vec<String>,
-    /// The termination rule of a failure decided by a rule.
-    #[serde(default)]
-    pub rule: Option<String>,
-}
-
-/// How an acceptance is decided.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Policy {
-    Human,
-    Automatic,
-    Waived,
-    Owner,
-}
-
-impl Policy {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Policy::Human => "human",
-            Policy::Automatic => "automatic",
-            Policy::Waived => "waived",
-            Policy::Owner => "owner",
-        }
-    }
-}
-
 /// A failure card asking you to check an external effect whose result nobody knows.
 pub(crate) fn unknown_effect_card(d: &steve_store::Decision) -> bool {
     d.kind == "fail" && d.options.iter().any(|x| x == "release_retry")
-}
-
-pub(crate) fn closing_of(i: &Item) -> Option<Closing> {
-    i.closing
-        .clone()
-        .and_then(|v| serde_json::from_value(v).ok())
 }
 
 pub(crate) fn conflict(m: impl Into<String>) -> CoreError {
@@ -280,8 +213,8 @@ pub(crate) fn result_moved(now: Option<&str>, frozen: Option<&str>) -> bool {
 
 /// Whether the gate of closing `c` compares the worktree with what was frozen: a completion still on
 /// its frozen revision with a frozen fingerprint (a new revision is a change already).
-fn looks_at_worktree(i: &Item, c: &Closing) -> bool {
-    c.kind == COMPLETE && c.fingerprint.is_some() && c.frozen_revision == i.revision
+fn looks_at_worktree(i: &Item, c: &CloseRequest) -> bool {
+    c.kind == CloseKind::Complete && c.fingerprint.is_some() && c.frozen_revision == i.revision
 }
 
 /// What blocks a closing commit, for the projection (`closing.waiting`) and the logs.
@@ -341,6 +274,32 @@ pub(crate) fn closed_status(outcome: &str) -> &'static str {
     }
 }
 
+enum CycleChange {
+    Start,
+    Close(CloseRequest),
+    Invalidate,
+    StartNewCycle,
+}
+
+impl CycleChange {
+    fn apply(self, item: &Item, write: &mut LifecycleWrite) -> Result<&'static str> {
+        let (phase, request, transition) = match self {
+            Self::Start if item.phase == READY => (ACTIVE, None, "started"),
+            Self::Close(request) if item.phase != CLOSED => {
+                (CLOSING, Some(request), "closing_requested")
+            }
+            Self::Invalidate if item.phase == CLOSING => (ACTIVE, None, "closing_invalidated"),
+            Self::StartNewCycle if item.phase == CLOSED => (READY, None, "cycle_created"),
+            Self::Start | Self::Close(_) | Self::Invalidate | Self::StartNewCycle => {
+                return Err(conflict("item state changed"));
+            }
+        };
+        write.phase = phase.into();
+        write.closing = request;
+        Ok(transition)
+    }
+}
+
 struct ClosedPlan {
     outcome: &'static str,
     acceptance: Option<String>,
@@ -354,19 +313,20 @@ struct ClosedPlan {
 impl Tx<'_> {
     /* ── writes ── */
 
-    /// One lifecycle step in one store transaction: the columns, the legacy projection, the fact.
-    #[allow(clippy::too_many_arguments)]
-    fn lc_write(
+    /// Commit the change and its event together against the aggregate revision.
+    fn change_cycle(
         &self,
         i: &Item,
-        w: LifecycleWrite,
-        transition: &str,
+        mut w: LifecycleWrite,
+        change: CycleChange,
         reason: &str,
         extra: impl FnOnce(&mut steve_store::W<'_>, &Item) -> Result<()>,
     ) -> Result<Item> {
         let ws = i.workspace_id.clone();
         let id = i.id.clone();
+        let transition = change.apply(i, &mut w)?;
         self.db().store().write(|tx| -> Result<Item> {
+            steve_store::require_item_revision_in(tx, &id, i.cycle, i.revision, &i.phase)?;
             let item = steve_store::lifecycle_write_in(tx, &id, &w)?
                 .ok_or_else(|| msg(steve_i18n::t!("core.item.not_found")))?;
             steve_store::outbox::append(
@@ -374,11 +334,16 @@ impl Tx<'_> {
                 &ws,
                 ITEM_LIFECYCLE,
                 ITEM_LIFECYCLE_V,
-                &json!({
-                    "item_id": item.id, "cycle": item.cycle, "revision": item.revision,
-                    "transition": transition, "phase": item.phase, "outcome": item.outcome,
-                    "acceptance": item.acceptance, "reason": reason,
-                }),
+                &serde_json::to_value(ItemLifecycle {
+                    item_id: item.id.clone(),
+                    cycle: item.cycle,
+                    revision: item.revision,
+                    transition: transition.into(),
+                    phase: item.phase.clone(),
+                    outcome: item.outcome.clone(),
+                    acceptance: item.acceptance.clone(),
+                    reason: reason.into(),
+                })?,
             )?;
             extra(tx, &item)?;
             Ok(item)
@@ -400,7 +365,7 @@ impl Tx<'_> {
     }
 
     /// 409 for anything that would act on a closed item (a message, a supplement, a goal change).
-    pub(crate) fn lc_guard_open(&self, item_id: &str) -> Result<()> {
+    pub(crate) fn require_open_item(&self, item_id: &str) -> Result<()> {
         match self.db().item(item_id)? {
             Some(i) if i.phase == CLOSED => Err(conflict(closed_msg())),
             _ => Ok(()),
@@ -408,14 +373,13 @@ impl Tx<'_> {
     }
 
     /// The first actual work of the cycle was taken up: `ready` → `active` (no-op otherwise).
-    pub(crate) fn lc_start(&mut self, item_id: &str) -> Result<()> {
+    pub(crate) fn start_item_work(&mut self, item_id: &str) -> Result<()> {
         let i = self.item(item_id)?;
         if i.phase != READY {
             return Ok(());
         }
-        let mut w = Self::base(&i);
-        w.phase = ACTIVE.into();
-        self.lc_write(&i, w, "started", "开始工作", |_, _| Ok(()))?;
+        let w = Self::base(&i);
+        self.change_cycle(&i, w, CycleChange::Start, "work_started", |_, _| Ok(()))?;
         Ok(())
     }
 
@@ -423,17 +387,17 @@ impl Tx<'_> {
     /// revision and the request returns at once. With `accepted`, the acceptance is already decided
     /// (automatic, waived, or the user who asked). Required operations of the project are recorded.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn lc_request_complete(
+    pub(crate) fn request_delivery_close(
         &mut self,
         item_id: &str,
         by: &str,
-        policy: Policy,
+        policy: ClosePolicy,
         accepted: bool,
         reason: &str,
         decision: Option<String>,
         evidence: Vec<String>,
     ) -> Result<Item> {
-        self.lc_request_complete_with(
+        self.request_delivery_close_in(
             item_id,
             by,
             policy,
@@ -447,11 +411,11 @@ impl Tx<'_> {
 
     /// Work-unit result evidence and its frozen completion intent commit in the same transaction.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn lc_request_complete_with(
+    pub(crate) fn request_delivery_close_in(
         &mut self,
         item_id: &str,
         by: &str,
-        policy: Policy,
+        policy: ClosePolicy,
         accepted: bool,
         reason: &str,
         decision: Option<String>,
@@ -462,12 +426,14 @@ impl Tx<'_> {
         match i.phase.as_str() {
             CLOSED => return Err(conflict(closed_msg())),
             CLOSING => {
-                let c = closing_of(&i).unwrap_or_default();
-                if c.kind != COMPLETE {
+                if i.closing
+                    .as_ref()
+                    .is_none_or(|c| c.kind != CloseKind::Complete)
+                {
                     return Err(conflict(steve_i18n::t!("core.item.ending_no_complete")));
                 }
                 /* a new delivery replaces the one waiting: its acceptance and operations go with it */
-                self.lc_invalidate(item_id, void::REDELIVER, "有新的交付，上一次交付作废")?;
+                self.invalidate_delivery(item_id, void::REDELIVER, "有新的交付，上一次交付作废")?;
             }
             _ => {}
         }
@@ -482,8 +448,8 @@ impl Tx<'_> {
         } else {
             (fingerprint(i.cwd.as_deref()), false)
         };
-        let c = Closing {
-            kind: COMPLETE.into(),
+        let c = CloseRequest {
+            kind: CloseKind::Complete,
             reason: reason.into(),
             by: by.into(),
             at: crate::util::now(),
@@ -496,16 +462,14 @@ impl Tx<'_> {
                 .map(|g| g.revision),
             fingerprint: print,
             print_pending,
-            policy: policy.as_str().into(),
+            policy: Some(policy),
             accepted,
             decision,
             evidence,
             rule: None,
         };
         let mut w = Self::base(&i);
-        w.phase = CLOSING.into();
         w.revision = rev;
-        w.closing = Some(serde_json::to_value(&c)?);
         w.stage = Some("收尾".into());
         w.now = Some(
             if accepted {
@@ -515,25 +479,28 @@ impl Tx<'_> {
             }
             .into(),
         );
-        let i = self.lc_write(&i, w, "closing_requested", reason, extra)?;
+        let i = self.change_cycle(&i, w, CycleChange::Close(c), reason, extra)?;
         /* the acceptance's requirements are recorded by the gate, after it compared the worktree; on a
          * Node that comparison waits for facts gathered off the lock, so they are recorded now */
         if accepted && self.git_on_node(&i.id) {
-            self.lc_accepted(&i.id)?;
+            self.register_delivery_requirements(&i.id)?;
         }
-        self.lc_try_close(item_id)?;
+        self.evaluate_cycle_close(item_id)?;
         self.item(item_id)
     }
 
     /// The acceptance of the current closing was decided (`mode`: `human` | `automatic` | `waived`).
-    pub(crate) fn lc_accept(
+    pub(crate) fn accept_delivery(
         &mut self,
         item_id: &str,
-        mode: Policy,
+        mode: ClosePolicy,
         evidence: Option<&str>,
     ) -> Result<()> {
         let i = self.item(item_id)?;
-        let Some(mut c) = closing_of(&i).filter(|c| i.phase == CLOSING && c.kind == COMPLETE)
+        let Some(mut c) = i
+            .closing
+            .clone()
+            .filter(|c| i.phase == CLOSING && c.kind == CloseKind::Complete)
         else {
             return Err(conflict(steve_i18n::t!(
                 "core.item.not_awaiting_acceptance"
@@ -543,38 +510,41 @@ impl Tx<'_> {
             return Ok(());
         }
         c.accepted = true;
-        c.policy = mode.as_str().into();
+        c.policy = Some(mode);
         if let Some(e) = evidence {
             c.evidence.push(e.into());
         }
         let mut w = Self::base(&i);
-        w.closing = Some(serde_json::to_value(&c)?);
         w.now = Some("已验收，正在结束".into());
-        self.lc_write(&i, w, "closing_requested", "验收通过", |_, _| Ok(()))?;
-        /* see `lc_request_complete`: here the gate records the requirements after comparing, except on a Node */
+        self.change_cycle(&i, w, CycleChange::Close(c), "验收通过", |_, _| Ok(()))?;
+        /* see `request_delivery_close`: here the gate records the requirements after comparing, except on a Node */
         if self.git_on_node(item_id) {
-            self.lc_accepted(item_id)?;
+            self.register_delivery_requirements(item_id)?;
         }
-        self.lc_try_close(item_id)?;
+        self.evaluate_cycle_close(item_id)?;
         Ok(())
     }
 
     /// An undone acceptance before the close committed: waiting on the user again.
-    pub(crate) fn lc_unaccept(&mut self, item_id: &str) -> Result<()> {
+    pub(crate) fn withdraw_acceptance(&mut self, item_id: &str) -> Result<()> {
         let i = self.item(item_id)?;
         if i.phase == CLOSED {
             return Err(conflict(steve_i18n::t!("core.item.acceptance_undo_closed")));
         }
-        let Some(mut c) = closing_of(&i).filter(|c| i.phase == CLOSING && c.kind == COMPLETE)
+        let Some(mut c) = i
+            .closing
+            .clone()
+            .filter(|c| i.phase == CLOSING && c.kind == CloseKind::Complete)
         else {
             return Ok(());
         };
         c.accepted = false;
         let mut w = Self::base(&i);
-        w.closing = Some(serde_json::to_value(&c)?);
         w.now = Some("交付了，等你验收".into());
         /* operations started on the strength of the acceptance stay as they are: their effects happened */
-        self.lc_write(&i, w, "closing_requested", "验收被撤销", |_, _| Ok(()))?;
+        self.change_cycle(&i, w, CycleChange::Close(c), "验收被撤销", |_, _| {
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -583,7 +553,7 @@ impl Tx<'_> {
     /// may take the close over) and the release of a release project (`release.rs`). Idempotent — every
     /// operation has a stable effect key — so the gate calls it again before each check: a crash between
     /// the accepted closing and its operations is completed before anything can close over it.
-    fn lc_accepted(&mut self, item_id: &str) -> Result<()> {
+    fn register_delivery_requirements(&mut self, item_id: &str) -> Result<()> {
         let i = self.item(item_id)?;
         // Unit success is a local checkpoint, never permission to merge, publish or deploy.
         if self.workflow_child(&i)? {
@@ -592,8 +562,10 @@ impl Tx<'_> {
         if !self.workflow_blockers(item_id, true)?.is_empty() {
             return Ok(());
         }
-        let Some(c) =
-            closing_of(&i).filter(|c| i.phase == CLOSING && c.kind == COMPLETE && c.accepted)
+        let Some(c) = i
+            .closing
+            .clone()
+            .filter(|c| i.phase == CLOSING && c.kind == CloseKind::Complete && c.accepted)
         else {
             return Ok(());
         };
@@ -606,23 +578,6 @@ impl Tx<'_> {
                 .map(|g| g.revision)
         {
             return Ok(());
-        }
-        if self.hooked() {
-            let (op, new) = self.lc_op_add(
-                &i,
-                OP_HOOKS,
-                Some(&format!("{}:{}:{}", OP_HOOKS, i.cycle, i.revision)),
-                true,
-                "pending",
-                "收尾模块确认",
-                json!({}),
-            )?;
-            if new {
-                self.st.hooks.push(crate::modules::HookEvent::Accepted {
-                    item: i.clone(),
-                    op: op.id,
-                });
-            }
         }
         // Declared PRs already describe what to deliver. Do not ask the agent to push or
         // create a replacement PR from the item's branch.
@@ -638,7 +593,7 @@ impl Tx<'_> {
 
     /// Records an operation of the item's current cycle and revision.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn lc_op_add(
+    pub(crate) fn record_item_operation(
         &self,
         i: &Item,
         kind: &str,
@@ -657,19 +612,28 @@ impl Tx<'_> {
     }
 
     /// Sets an operation's status; the gate is checked again.
-    pub(crate) fn lc_op_set(&mut self, op: &str, status: &str, evidence: Value) -> Result<bool> {
+    pub(crate) fn settle_item_operation(
+        &mut self,
+        op: &str,
+        status: &str,
+        evidence: Value,
+    ) -> Result<bool> {
         let changed = self
             .db()
             .store()
             .write(|tx| steve_store::operation_repo::set(tx, op, status, &evidence))?;
         if changed && let Some(o) = self.db().store().items().operation(op)? {
-            self.lc_try_close(&o.item_id)?;
+            self.evaluate_cycle_close(&o.item_id)?;
         }
         Ok(changed)
     }
 
     /// The open required operation of `kind` in the item's current cycle and revision.
-    pub(crate) fn lc_open_op(&self, item_id: &str, kind: &str) -> Result<Option<ItemOperation>> {
+    pub(crate) fn open_item_operation(
+        &self,
+        item_id: &str,
+        kind: &str,
+    ) -> Result<Option<ItemOperation>> {
         let i = self.item(item_id)?;
         Ok(self
             .db()
@@ -684,7 +648,7 @@ impl Tx<'_> {
     /// You checked the effects of `kind` whose result nobody knew (all of this cycle, any revision, but
     /// `except`, which the caller settles itself): they become `status` (`succeeded`, `failed` or `waived`).
     /// The gate is checked again.
-    pub(crate) fn lc_reconcile(
+    pub(crate) fn reconcile_item_operations(
         &mut self,
         item_id: &str,
         kind: &str,
@@ -706,7 +670,7 @@ impl Tx<'_> {
             }
         }
         if n > 0 {
-            self.lc_try_close(item_id)?;
+            self.evaluate_cycle_close(item_id)?;
         }
         Ok(n)
     }
@@ -714,47 +678,51 @@ impl Tx<'_> {
     /// The frozen result is void (rework, new input, a new result): back to `active`, the acceptance
     /// card expires. `false` when nothing was waiting to close.
     /// `code` is one of [`void`], recorded with `why` on the `invalidate` mark.
-    pub(crate) fn lc_invalidate(&mut self, item_id: &str, code: &str, why: &str) -> Result<bool> {
+    pub(crate) fn invalidate_delivery(
+        &mut self,
+        item_id: &str,
+        code: &str,
+        why: &str,
+    ) -> Result<bool> {
         let i = self.item(item_id)?;
-        let Some(c) = closing_of(&i).filter(|c| i.phase == CLOSING && c.kind == COMPLETE) else {
+        let Some(c) = i
+            .closing
+            .clone()
+            .filter(|c| i.phase == CLOSING && c.kind == CloseKind::Complete)
+        else {
             return Ok(false);
         };
         let mut w = Self::base(&i);
-        w.phase = ACTIVE.into();
-        w.closing = None;
         w.stage = Some("执行".into());
         w.now = Some(format!("收尾作废：{why}"));
         w.status = Some("run".into());
-        self.lc_write(&i, w, "closing_invalidated", why, |_, _| Ok(()))?;
-        /* the acceptance asked for this result no longer applies */
-        if let Some(d) = c.decision.as_deref()
-            && self.db().decision(d)?.is_some_and(|d| d.status == "open")
-        {
-            self.db()
-                .decision_resolve(d, json!({"superseded": why}), "expired", None)?;
-        }
-        /* and so does a pull request waiting for your yes to merge it: that result is not merged */
-        crate::lifecycle::supersede_where(
-            self.db(),
-            item_id,
-            |d| d.kind == "accept" || d.subject_type == crate::pull::PR_AWAITING_MERGE,
-            why,
-        )?;
-        self.db()
-            .timeline_add(item_id, "steve", "sys", &format!("收尾作废：{why}"), None)?;
+        self.change_cycle(&i, w, CycleChange::Invalidate, why, |tx, _| {
+            let mut cards = steve_store::decision_repo::open_item_decisions(tx, item_id)?;
+            cards.retain(|d| d.kind == "accept" || Some(&d.id) == c.decision.as_ref());
+            for d in cards {
+                steve_store::DecisionRows(tx).settle(
+                    &d.id,
+                    &json!({"superseded": why}),
+                    "expired",
+                    &Value::Null,
+                )?;
+            }
+            steve_store::item_repo::append_system_note(tx, item_id, &format!("收尾作废：{why}"))?;
+            Ok(())
+        })?;
         self.mark_invalidate(&i.workspace_id, item_id, code, why); // stats
         Ok(true)
     }
 
     /// New input (a message, a supplement, a queued message sent now) reaches the item: a closing for
     /// completion is void; a closed item refuses it.
-    pub(crate) fn lc_new_input(&mut self, item_id: &str) -> Result<()> {
+    pub(crate) fn receive_item_input(&mut self, item_id: &str) -> Result<()> {
         let i = self.item(item_id)?;
         match i.phase.as_str() {
             CLOSED => Err(conflict(closed_msg())),
-            CLOSING => match closing_of(&i).map(|c| c.kind).as_deref() {
-                Some(COMPLETE) => {
-                    self.lc_invalidate(item_id, void::MESSAGE, "收到新的消息")?;
+            CLOSING => match i.closing.as_ref().map(|c| c.kind) {
+                Some(CloseKind::Complete) => {
+                    self.invalidate_delivery(item_id, void::MESSAGE, "收到新的消息")?;
                     Ok(())
                 }
                 _ => Err(conflict(steve_i18n::t!("core.item.ending_no_message"))),
@@ -765,10 +733,10 @@ impl Tx<'_> {
 
     /// Cancel (`kind = cancel`) or fail (`kind = fail`, with a reason; `rule` for a termination rule):
     /// running turns are stopped outside the lock, the close commits once the work stopped.
-    pub(crate) fn lc_stop(
+    pub(crate) fn request_cycle_stop(
         &mut self,
         item_id: &str,
-        kind: &str,
+        kind: CloseKind,
         by: &str,
         reason: &str,
         rule: Option<&str>,
@@ -777,14 +745,14 @@ impl Tx<'_> {
         if i.phase == CLOSED {
             return Err(conflict(closed_msg()));
         }
-        if let Some(c) = closing_of(&i).filter(|c| c.kind != COMPLETE) {
+        if let Some(c) = i.closing.clone().filter(|c| c.kind != CloseKind::Complete) {
             if c.kind == kind {
                 return Ok(i);
             }
             return Err(conflict(steve_i18n::t!("core.item.already_ending")));
         }
-        let c = Closing {
-            kind: kind.into(),
+        let c = CloseRequest {
+            kind,
             reason: reason.into(),
             by: by.into(),
             at: crate::util::now(),
@@ -792,34 +760,29 @@ impl Tx<'_> {
             workflow_revision: None,
             fingerprint: None,
             print_pending: false,
-            policy: String::new(),
+            policy: None,
             accepted: true,
             decision: None,
             evidence: vec![],
             rule: rule.map(String::from),
         };
         let mut w = Self::base(&i);
-        w.phase = CLOSING.into();
-        w.closing = Some(serde_json::to_value(&c)?);
         w.now = Some(
-            if kind == CANCEL {
+            if kind == CloseKind::Cancel {
                 "正在取消"
             } else {
                 "正在标记失败"
             }
             .into(),
         );
-        self.lc_write(&i, w, "closing_requested", reason, |_, _| Ok(()))?;
+        self.change_cycle(&i, w, CycleChange::Close(c), reason, |_, _| Ok(()))?;
         /* the acceptance or approval cards of the work being stopped no longer apply */
         /* the acceptance, question and failure cards of the work being stopped no longer apply, except a card
          * asking you to check an effect nobody knows: the stop waits on that one */
         crate::lifecycle::supersede_where(
             self.db(),
             item_id,
-            |d| {
-                (matches!(d.kind.as_str(), "accept" | "ask" | "fail") && !unknown_effect_card(d))
-                    || d.subject_type == crate::pull::PR_AWAITING_MERGE
-            },
+            |d| (matches!(d.kind.as_str(), "accept" | "ask" | "fail") && !unknown_effect_card(d)),
             reason,
         )?;
         for s in self.db().sessions_of_item(item_id)? {
@@ -829,13 +792,13 @@ impl Tx<'_> {
                 self.st.cancels.push((turn, item_id.into()));
             }
         }
-        self.lc_try_close(item_id)?;
+        self.evaluate_cycle_close(item_id)?;
         self.item(item_id)
     }
 
     /// An explicit new cycle of a closed item: `cycle + 1`, revision 0, `ready`; the cycle before stays
     /// as it closed. With a goal, work starts by the usual rules.
-    pub(crate) fn lc_new_cycle(
+    pub(crate) fn start_new_cycle(
         &mut self,
         item_id: &str,
         by: &str,
@@ -846,7 +809,6 @@ impl Tx<'_> {
             return Err(conflict(steve_i18n::t!("core.item.new_cycle_needs_closed")));
         }
         let mut w = LifecycleWrite {
-            phase: READY.into(),
             cycle: i.cycle + 1,
             revision: 0,
             status: Some("wait".into()),
@@ -858,11 +820,11 @@ impl Tx<'_> {
             w.now = Some("新周期，准备开始".into());
         }
         let reason = format!("{by} 开始了新周期");
-        self.lc_write(&i, w, "cycle_created", &reason, |tx, _| {
+        self.change_cycle(&i, w, CycleChange::StartNewCycle, &reason, |tx, _| {
             steve_store::item_repo::unarchive(tx, item_id)?;
             Ok(())
         })?;
-        self.lc_plan_to_round(&i, by)?;
+        self.archive_cycle_plan(&i, by)?;
         self.db().timeline_add(
             item_id,
             by,
@@ -886,7 +848,7 @@ impl Tx<'_> {
     }
 
     /// The plan was the cycle before's: it is kept as an earlier round, the new cycle starts without one.
-    fn lc_plan_to_round(&self, i: &Item, by: &str) -> Result<()> {
+    fn archive_cycle_plan(&self, i: &Item, by: &str) -> Result<()> {
         if !i.plan.is_empty() {
             let end = if i.plan.iter().all(|p| p.done) {
                 "done"
@@ -901,11 +863,11 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// A work unit's retry on its own closed child (#182): a new cycle as [`Self::lc_new_cycle`] makes
+    /// A work unit's retry on its own closed child (#182): a new cycle as [`Self::start_new_cycle`] makes
     /// one (`cycle + 1`, revision 0, `ready`, the plan kept as an earlier round; the cycle before stays
     /// as it closed), with the unit's claim of it in the same transaction (`claim`): the cycle never
     /// opens without its attempt, nor the attempt without its cycle. It runs at once (`run`).
-    pub(crate) fn lc_new_attempt(
+    pub(crate) fn retry_unit_cycle(
         &mut self,
         item_id: &str,
         attempt: i64,
@@ -916,7 +878,6 @@ impl Tx<'_> {
             return Err(conflict(steve_i18n::t!("core.item.new_cycle_needs_closed")));
         }
         let w = LifecycleWrite {
-            phase: READY.into(),
             cycle: i.cycle + 1,
             revision: 0,
             status: Some("run".into()),
@@ -925,11 +886,11 @@ impl Tx<'_> {
             ..Default::default()
         };
         let reason = format!("协作工作第 {attempt} 次尝试");
-        self.lc_write(&i, w, "cycle_created", &reason, |tx, _| {
+        self.change_cycle(&i, w, CycleChange::StartNewCycle, &reason, |tx, _| {
             steve_store::item_repo::unarchive(tx, item_id)?;
             claim(tx)
         })?;
-        self.lc_plan_to_round(&i, "steve")?;
+        self.archive_cycle_plan(&i, "steve")?;
         self.db().timeline_add(
             item_id,
             "steve",
@@ -943,8 +904,8 @@ impl Tx<'_> {
     /* ── the gate ── */
 
     /// What still holds the item's closing.
-    pub(crate) fn lc_gate(&self, i: &Item, c: &Closing) -> Result<Gate> {
-        let looks = looks_at_worktree(i, c) && self.pr_merged_accepted(i, c)?.is_none();
+    pub(crate) fn delivery_blockers(&self, i: &Item, c: &CloseRequest) -> Result<Gate> {
+        let looks = looks_at_worktree(i, c);
         let now = match looks {
             false => None,
             /* on a Node: what it said last, or the worktree left out */
@@ -952,18 +913,23 @@ impl Tx<'_> {
             /* a fingerprint git could not take in time leaves the worktree out */
             true => fingerprint_now(i.cwd.as_deref()).ok(),
         };
-        self.lc_gate_at(i, c, now.as_ref().map(Option::as_deref))
+        self.delivery_blockers_at(i, c, now.as_ref().map(Option::as_deref))
     }
 
-    /// [`Self::lc_gate`] with the worktree's fingerprint `now` already taken (`Some(None)`: no worktree);
+    /// [`Self::delivery_blockers`] with the worktree's fingerprint `now` already taken (`Some(None)`: no worktree);
     /// `None` leaves the worktree out, so `changed` then only sees a new revision.
-    fn lc_gate_at(&self, i: &Item, c: &Closing, now: Option<Option<&str>>) -> Result<Gate> {
+    fn delivery_blockers_at(
+        &self,
+        i: &Item,
+        c: &CloseRequest,
+        now: Option<Option<&str>>,
+    ) -> Result<Gate> {
         let mut g = Gate {
-            delivery: c.kind == COMPLETE && self.delivery_required(i)?,
+            delivery: c.kind == CloseKind::Complete && self.delivery_required(i)?,
             ..Gate::default()
         };
         if !self
-            .workflow_blockers(&i.id, c.kind == COMPLETE)?
+            .workflow_blockers(&i.id, c.kind == CloseKind::Complete)?
             .is_empty()
         {
             g.operation = true;
@@ -976,7 +942,9 @@ impl Tx<'_> {
                 g.turn = true;
             }
             /* only a person's input voids a completion: what Steve queued itself does not (#347) */
-            if c.kind == COMPLETE && self.db().queued(&s.id)?.iter().any(|q| q.via != STEVE_VIA) {
+            if c.kind == CloseKind::Complete
+                && self.db().queued(&s.id)?.iter().any(|q| q.via != STEVE_VIA)
+            {
                 g.input = true;
             }
         }
@@ -987,7 +955,7 @@ impl Tx<'_> {
             if o.kind == OP_BUILD {
                 /* followed on its own, unless the item's goal asks for the build to pass: then this
                  * result's build is one of its requirements (`proof`) */
-                if c.kind == COMPLETE
+                if c.kind == CloseKind::Complete
                     && o.required
                     && o.revision == i.revision
                     && !matches!(o.status.as_str(), "succeeded" | "waived")
@@ -1000,7 +968,7 @@ impl Tx<'_> {
              * revision it was for and whether or not it was required: it is settled (or checked by you) first,
              * an unknown effect is never closed over. A completion also needs each of its own requirements done. */
             let open = matches!(o.status.as_str(), "running" | "unknown")
-                || (c.kind == COMPLETE
+                || (c.kind == CloseKind::Complete
                     && o.required
                     && o.revision == i.revision
                     && !matches!(o.status.as_str(), "succeeded" | "waived"));
@@ -1008,7 +976,7 @@ impl Tx<'_> {
                 g.operation = true;
             }
         }
-        if c.kind == COMPLETE {
+        if c.kind == CloseKind::Complete {
             if !c.accepted {
                 g.acceptance = true;
             }
@@ -1018,12 +986,7 @@ impl Tx<'_> {
             g.decision = self.db().decisions_of_item(&i.id)?.iter().any(|d| {
                 d.status == "open"
                     && d.created > c.at
-                    && (d.kind == "ask"
-                        || (d.kind == "approve"
-                            && !matches!(
-                                d.subject_type.as_str(),
-                                "tool_call" | crate::pull::PR_AWAITING_MERGE
-                            )))
+                    && (d.kind == "ask" || (d.kind == "approve" && d.subject_type != "tool_call"))
             });
             if c.frozen_revision != i.revision
                 || c.workflow_revision
@@ -1041,10 +1004,10 @@ impl Tx<'_> {
         Ok(g)
     }
 
-    fn lc_freeze_pending(
+    fn pin_worktree_snapshot(
         &mut self,
         i: &Item,
-        c: &mut Closing,
+        c: &mut CloseRequest,
         print: &Option<Option<String>>,
         item_id: &str,
     ) -> Result<Option<bool>> {
@@ -1055,11 +1018,13 @@ impl Tx<'_> {
             /* the result frozen before its facts came: they are what was frozen */
             c.fingerprint = p.clone();
             c.print_pending = false;
-            let mut w = Self::base(&i);
-            w.closing = Some(serde_json::to_value(&c)?);
-            self.db()
-                .store()
-                .write(|tx| steve_store::lifecycle_write_in(tx, item_id, &w))?;
+            self.change_cycle(
+                i,
+                Self::base(i),
+                CycleChange::Close(c.clone()),
+                "result_frozen",
+                |_, _| Ok(()),
+            )?;
             /* those facts were gathered with nothing frozen to compare against or to look for in a
              * release: nothing is decided on them, the next gathering asks with what is frozen now
              * and checks the closing again */
@@ -1071,7 +1036,7 @@ impl Tx<'_> {
     }
 
     /// Commits the closing when nothing holds it any more. `true` when the item is closed now.
-    pub(crate) fn lc_try_close(&mut self, item_id: &str) -> Result<bool> {
+    pub(crate) fn evaluate_cycle_close(&mut self, item_id: &str) -> Result<bool> {
         self.try_close(item_id, None)
     }
 
@@ -1091,7 +1056,7 @@ impl Tx<'_> {
     fn try_close(
         &mut self,
         item_id: &str,
-        proof: Option<&steve_types::DeliveryBaseline>,
+        proof: Option<&steve_types::DeliveryProof>,
     ) -> Result<bool> {
         let Some(i) = self.db().item(item_id)? else {
             return Ok(false);
@@ -1099,30 +1064,27 @@ impl Tx<'_> {
         if i.phase != CLOSING {
             return Ok(i.phase == CLOSED);
         }
-        let Some(mut c) = closing_of(&i) else {
+        let Some(mut c) = i.closing.clone() else {
             return Ok(false);
         };
-        if let Some(proof) = proof
+        if let Some(proof) = proof.map(|p| &p.baseline)
             && (proof.cycle != i.cycle
                 || proof.revision != i.revision
                 || proof.scope != self.scope_revision(item_id)?
                 || proof.refs.is_empty()
                 || proof.refs != self.delivery_refs(&i)?
-                || c.kind != COMPLETE
+                || c.kind != CloseKind::Complete
                 || !c.accepted)
         {
             metrics::counter!("steve_item_stale_delivery_total").increment(1);
             return Ok(false);
         }
-        /* the pull request the accepted result is followed on merged with it: that is the result,
-         * whatever became of the branch or the worktree since (deleted on merge, cleaned up), so
-         * neither is looked at any more (#347) */
-        let merged = proof.is_some() || self.pr_merged_accepted(&i, &c)?.is_some();
+        let verified_manifest = proof.is_some();
         /* on a Node the worktree's facts are gathered off the lock: until they are here (or while
          * its Node can't be reached) nothing is decided on them, the closing holds. Only when the
          * gate uses them: a frozen result to compare, one to freeze, an accepted one to release */
-        let node = !merged
-            && c.kind == COMPLETE
+        let node = !verified_manifest
+            && c.kind == CloseKind::Complete
             && (c.print_pending || c.accepted || looks_at_worktree(&i, &c))
             && self.git_on_node(item_id);
         /* `Some(None)`: its Node says there is no git checkout */
@@ -1138,18 +1100,18 @@ impl Tx<'_> {
             false => None,
         };
         let print = seen.as_ref().map(|s| s.as_ref().map(|s| s.print.clone()));
-        if let Some(result) = self.lc_freeze_pending(&i, &mut c, &print, item_id)? {
+        if let Some(result) = self.pin_worktree_snapshot(&i, &mut c, &print, item_id)? {
             return Ok(result);
         }
         /* the worktree is fingerprinted once (it runs `git add --all` over all of it), for the gate and
          * for saying what moved. On the periodic tick, not while something else still holds the closing
          * (a turn, an acceptance, an operation, a question): the check that clears it looks then. */
-        let held = self.lc_gate_at(&i, &c, None)?;
+        let held = self.delivery_blockers_at(&i, &c, None)?;
         let others = held.turn || held.input || held.operation || held.acceptance || held.decision;
-        let now = match looks_at_worktree(&i, &c) && !merged {
+        let now = match looks_at_worktree(&i, &c) && !verified_manifest {
             false => None,
             true if node => print.clone(),
-            true if self.st.lc_ticking && others && !held.changed => None,
+            true if self.st.evaluating_closing_cycles && others && !held.changed => None,
             true => match fingerprint_now(i.cwd.as_deref()) {
                 Ok(p) => Some(p),
                 Err(PrintUnknown) => {
@@ -1162,15 +1124,10 @@ impl Tx<'_> {
                 }
             },
         };
-        let g = self.lc_gate_at(&i, &c, now.as_ref().map(Option::as_deref))?;
+        let g = self.delivery_blockers_at(&i, &c, now.as_ref().map(Option::as_deref))?;
         /* a result that moved is void before anything is started on its acceptance (the acceptance
          * hooks, a GitHub PR card) */
         if g.changed && !g.turn {
-            /* the merge fact comes before the worktree's: while the pull request the result is
-             * followed on may have merged meanwhile, the host is asked first (#347) */
-            if self.pr_merge_unseen(&i, &c)? {
-                return Ok(false);
-            }
             /* the frozen result moved after it was frozen (and nothing is still at work on it): say what
              * moved, and tell the agent, which may well believe its delivery still stands */
             let now = match now {
@@ -1196,23 +1153,23 @@ impl Tx<'_> {
                 _ => "交付的版本变了".into(),
             };
             let why = format!("冻结之后结果又变了：{what}，需要重新交付");
-            self.lc_invalidate(item_id, void::CHANGED, &why)?;
+            self.invalidate_delivery(item_id, void::CHANGED, &why)?;
             self.takeover_invalidated(item_id, &why)?;
             return Ok(false);
         }
         if g.input && !g.turn {
-            self.lc_invalidate(item_id, void::MESSAGE, "收到新的消息")?;
+            self.invalidate_delivery(item_id, void::MESSAGE, "收到新的消息")?;
             return Ok(false);
         }
-        let g = if c.kind == COMPLETE && c.accepted {
-            self.lc_accepted(item_id)?;
+        let g = if c.kind == CloseKind::Complete && c.accepted {
+            self.register_delivery_requirements(item_id)?;
             /* the requirements were decided on the same facts as the gate below, or the closing holds
              * until facts for what is asked now are here */
             if node && self.git_take(&self.item(item_id)?).is_none() {
                 return Ok(false);
             }
             /* what the acceptance started holds it too */
-            self.lc_gate_at(&i, &c, now.as_ref().map(Option::as_deref))?
+            self.delivery_blockers_at(&i, &c, now.as_ref().map(Option::as_deref))?
         } else {
             g
         };
@@ -1226,13 +1183,13 @@ impl Tx<'_> {
         self.commit_cycle(&i, &c, None, proof)
     }
 
-    fn lc_closed_plan(&self, i: &Item, c: &Closing) -> Result<ClosedPlan> {
-        let outcome = match c.kind.as_str() {
-            COMPLETE => "completed",
-            FAIL => "failed",
-            _ => "cancelled",
+    fn plan_cycle_close(&self, i: &Item, c: &CloseRequest) -> Result<ClosedPlan> {
+        let outcome = match c.kind {
+            CloseKind::Complete => "completed",
+            CloseKind::Fail => "failed",
+            CloseKind::Cancel => "cancelled",
         };
-        let acceptance = (c.kind == COMPLETE).then(|| c.policy.clone());
+        let acceptance = c.policy.map(|policy| policy.as_str().to_owned());
         /* finishing never ticks steps off: what was not done stays visible as left open */
         let plan: Vec<PlanStep> = i
             .plan
@@ -1248,23 +1205,23 @@ impl Tx<'_> {
             .filter(|p| !p.done && !p.left)
             .map(|p| p.step.as_str())
             .collect();
-        let effects = self.lc_effects(i)?;
+        let effects = self.settled_effects(i)?;
         let mut reason = c.reason.clone();
-        if !effects.is_empty() && c.kind != COMPLETE {
+        if !effects.is_empty() && c.kind != CloseKind::Complete {
             reason = format!("{reason}；已发生：{}", effects.join("；"));
         }
-        // stored in zh-CN, shown in the reader's language (crate::now_line)
-        let now_text = steve_i18n::stored(|| match c.kind.as_str() {
-            COMPLETE => match c.policy.as_str() {
-                "waived" => steve_i18n::t!("core.now.closed_waived"),
+        // Store the completion message with the cycle.
+        let now_text = steve_i18n::stored(|| match c.kind {
+            CloseKind::Complete => match c.policy {
+                Some(ClosePolicy::Waived) => steve_i18n::t!("core.now.closed_waived"),
                 // a module's result (a mail that went out) says what happened
-                "automatic" if c.by == "steve" => c.reason.clone(),
-                "automatic" => steve_i18n::t!("core.now.closed_auto"),
+                Some(ClosePolicy::Automatic) if c.by == "steve" => c.reason.clone(),
+                Some(ClosePolicy::Automatic) => steve_i18n::t!("core.now.closed_auto"),
                 _ if c.reason == crate::proof::MARKED => c.reason.clone(),
                 _ => steve_i18n::t!("core.now.closed_accepted"),
             },
-            FAIL => steve_i18n::t!("core.now.closed_failed", why = c.reason),
-            _ => c.reason.clone(),
+            CloseKind::Fail => steve_i18n::t!("core.now.closed_failed", why = c.reason),
+            CloseKind::Cancel => c.reason.clone(),
         });
         let closed = crate::util::now();
         let mut w = Self::base(i);
@@ -1279,7 +1236,7 @@ impl Tx<'_> {
             w.stage = Some("收尾".into());
         }
         w.now = Some(now_text);
-        let note = (c.kind == COMPLETE && !left.is_empty()).then(|| {
+        let note = (c.kind == CloseKind::Complete && !left.is_empty()).then(|| {
             format!(
                 "完成时计划里还有 {} 步没做：{}",
                 left.len(),
@@ -1297,14 +1254,14 @@ impl Tx<'_> {
         })
     }
 
-    pub(crate) fn lc_closed_effects(
+    pub(crate) fn after_cycle_closed(
         &mut self,
         i: &Item,
         outcome: &str,
         acceptance: &Option<String>,
         reason: &str,
     ) -> Result<()> {
-        self.lc_finish_children(&i.id)?;
+        self.retire_closed_cycle_children(&i.id)?;
         /* nothing of Steve's automation for the item is left to run */
         self.drop_steve_queued(&i.id)?;
         self.db().timeline_add(
@@ -1378,7 +1335,7 @@ impl Tx<'_> {
         if item.cycle == expected_cycle
             && item.revision.checked_sub(1) == Some(expected_revision)
             && item.phase == CLOSED
-            && item.acceptance.as_deref() == Some(Policy::Owner.as_str())
+            && item.acceptance.as_deref() == Some(ClosePolicy::Owner.as_str())
         {
             return Ok(item.clone());
         }
@@ -1393,11 +1350,11 @@ impl Tx<'_> {
             return Err(conflict(closed_msg()));
         }
         let started = std::time::Instant::now();
-        let close = Closing {
-            kind: COMPLETE.into(),
+        let close = CloseRequest {
+            kind: CloseKind::Complete,
             reason: "owner_finished".into(),
-            policy: Policy::Owner.as_str().into(),
-            ..Closing::default()
+            policy: Some(ClosePolicy::Owner),
+            ..CloseRequest::default()
         };
         self.commit_cycle(item, &close, Some(actor), None)?;
         metrics::histogram!("steve_item_owner_finish_seconds")
@@ -1408,9 +1365,9 @@ impl Tx<'_> {
     fn commit_cycle(
         &mut self,
         i: &Item,
-        c: &Closing,
+        c: &CloseRequest,
         owner: Option<&str>,
-        proof: Option<&steve_types::DeliveryBaseline>,
+        proof: Option<&steve_types::DeliveryProof>,
     ) -> Result<bool> {
         let ClosedPlan {
             outcome,
@@ -1420,21 +1377,27 @@ impl Tx<'_> {
             closed,
             mut w,
             note,
-        } = self.lc_closed_plan(i, c)?;
+        } = self.plan_cycle_close(i, c)?;
         let (ws, id) = (i.workspace_id.clone(), i.id.clone());
         let cycle = i.cycle;
         let rev = i.revision + i64::from(owner.is_some());
         w.revision = rev;
         let committed = self.db().store().write(|tx| -> Result<bool> {
             if let Some(proof) = proof {
-                steve_store::require_item_revision_in(tx, &id, cycle, i.revision)?;
-                if steve_store::item_delivery::scope(tx, &id)? != proof.scope {
+                steve_store::require_item_revision_in(tx, &id, cycle, i.revision, &i.phase)?;
+                if !steve_store::item_delivery::record_proof(tx, &ws, proof)? {
                     metrics::counter!("steve_item_stale_delivery_total").increment(1);
                     return Ok(false);
                 }
             }
+            if owner.is_none()
+                && c.kind == CloseKind::Complete
+                && steve_store::item_delivery::unsettled_github_writes(tx, &id)?
+            {
+                return Ok(false);
+            }
             if let Some(actor) = owner {
-                steve_store::require_item_revision_in(tx, &id, cycle, i.revision)?;
+                steve_store::require_item_revision_in(tx, &id, cycle, i.revision, &i.phase)?;
                 steve_store::finish_item_dispatch_in(tx, &id, cycle)?;
                 tx.audit(
                     &ws,
@@ -1505,13 +1468,13 @@ impl Tx<'_> {
             return Ok(false);
         }
         if owner.is_none() {
-            self.lc_closed_effects(i, outcome, &acceptance, &reason)?;
+            self.after_cycle_closed(i, outcome, &acceptance, &reason)?;
         }
         Ok(true)
     }
 
     /// What external effects of the cycle already happened (cancel / fail say so).
-    fn lc_effects(&self, i: &Item) -> Result<Vec<String>> {
+    fn settled_effects(&self, i: &Item) -> Result<Vec<String>> {
         Ok(self
             .db()
             .store()
@@ -1527,29 +1490,29 @@ impl Tx<'_> {
     }
 
     /// Checks every item waiting to close (boot after recovery, the periodic tick).
-    pub(crate) fn lc_tick(&mut self) -> Result<usize> {
+    pub(crate) fn evaluate_closing_cycles(&mut self) -> Result<usize> {
         let mut n = 0;
         // Independent of dynamic workflows and automatic continuation: an upgrade must retire
         // historical child items too, even when their graph/attempt is no longer current.
         for id in self.db().store().items().closed_parents()? {
-            self.lc_finish_children(&id)?;
+            self.retire_closed_cycle_children(&id)?;
         }
         let ids = self.db().store().items().closing_ids()?;
         self.st.git_polling = true;
-        self.st.lc_ticking = true;
+        self.st.evaluating_closing_cycles = true;
         for id in ids {
-            match self.lc_try_close(&id) {
+            match self.evaluate_cycle_close(&id) {
                 Ok(true) => n += 1,
                 Ok(false) => {}
                 Err(e) => tracing::warn!(item = %id, "closing check: {e}"),
             }
         }
-        self.st.lc_ticking = false;
+        self.st.evaluating_closing_cycles = false;
         self.st.git_polling = false;
         Ok(n)
     }
 
-    fn lc_finish_children(&mut self, parent: &str) -> Result<()> {
+    fn retire_closed_cycle_children(&mut self, parent: &str) -> Result<()> {
         let p = self.item(parent)?;
         if p.phase != CLOSED || !matches!(p.outcome.as_deref(), Some("completed" | "cancelled")) {
             return Ok(());
@@ -1591,9 +1554,15 @@ impl Tx<'_> {
                 }
                 if child.phase != CLOSED {
                     if stopping(&child) {
-                        self.lc_try_close(&child.id)?;
+                        self.evaluate_cycle_close(&child.id)?;
                     } else {
-                        self.lc_stop(&child.id, CANCEL, "parent", &why, None)?;
+                        self.request_cycle_stop(
+                            &child.id,
+                            CloseKind::Cancel,
+                            "parent",
+                            &why,
+                            None,
+                        )?;
                     }
                 }
                 if self.item(&child.id)?.phase != CLOSED {
@@ -1643,30 +1612,6 @@ impl Tx<'_> {
             }
         }
         Ok(())
-    }
-
-    /// Boot: hook consultations that were pending when the Hub stopped are asked again.
-    pub(crate) fn lc_recover_ops(&mut self) -> Result<()> {
-        for id in self.db().store().items().closing_ids()? {
-            let Some(op) = self.lc_open_op(&id, OP_HOOKS)? else {
-                continue;
-            };
-            if op.status == "pending" && self.hooked() {
-                let item = self.item(&id)?;
-                self.st
-                    .hooks
-                    .push(crate::modules::HookEvent::Accepted { item, op: op.id });
-            } else if op.status == "pending" {
-                /* the modules that would have been asked are gone: nothing takes the wrap-up over */
-                self.lc_op_set(&op.id, "succeeded", json!({"note": "没有收尾模块"}))?;
-            }
-        }
-        Ok(())
-    }
-
-    /// The projection of the item's lifecycle.
-    pub(crate) fn lc_view(&self, i: &Item) -> Result<Value> {
-        lifecycle_view(self, i)
     }
 }
 
@@ -1756,7 +1701,7 @@ fn blocker_rank(k: &str) -> i32 {
 /// The lifecycle object of an item, computed from the item, its decisions,
 /// sessions and operations.
 pub(crate) fn lifecycle_view(t: &Tx, i: &Item) -> Result<Value> {
-    let c = closing_of(i);
+    let c = i.closing.as_ref();
     let mut blockers: Vec<Value> = vec![];
     let mut push = |kind: &str, label: String| {
         if !blockers
@@ -1772,7 +1717,7 @@ pub(crate) fn lifecycle_view(t: &Tx, i: &Item) -> Result<Value> {
     /* the projection shows only what the gate waits for, never whether the result moved, so it leaves
      * the worktree alone: fingerprinting it is a `git add --all` per closing item on every look */
     let gate = match &c {
-        Some(c) if i.phase == CLOSING => Some(t.lc_gate_at(i, c, None)?),
+        Some(c) if i.phase == CLOSING => Some(t.delivery_blockers_at(i, c, None)?),
         _ => None,
     };
     if i.phase != CLOSED {
@@ -1816,7 +1761,7 @@ pub(crate) fn lifecycle_view(t: &Tx, i: &Item) -> Result<Value> {
     };
     let acceptance = match (&c, i.phase.as_str()) {
         (_, CLOSED) => json!(i.acceptance),
-        (Some(c), CLOSING) if c.kind == COMPLETE => json!(c.policy),
+        (Some(c), CLOSING) if c.kind == CloseKind::Complete => json!(c.policy),
         _ => Value::Null,
     };
     Ok(json!({
@@ -1839,7 +1784,10 @@ pub(crate) fn lifecycle_view(t: &Tx, i: &Item) -> Result<Value> {
 
 /// `true` for an item that is not closed but whose closing intent is a cancel or a failure.
 pub(crate) fn stopping(i: &Item) -> bool {
-    i.phase == CLOSING && closing_of(i).is_some_and(|c| c.kind != COMPLETE)
+    i.phase == CLOSING
+        && i.closing
+            .as_ref()
+            .is_some_and(|c| c.kind != CloseKind::Complete)
 }
 
 #[cfg(test)]
@@ -1909,14 +1857,15 @@ mod tests {
 
 impl crate::Core {
     /// A proof is usable only by the closing request whose complete manifest was read.
-    pub fn delivery_verified(&self, baseline: &steve_types::DeliveryBaseline) -> Result<()> {
+    pub fn delivery_verified(&self, proof: &steve_types::DeliveryProof) -> Result<()> {
+        let baseline = &proof.baseline;
         let mut tx = self.tx();
         let item = tx.db().item(baseline.item.as_str())?;
         if !item.is_some_and(|i| i.phase == CLOSING) {
             metrics::counter!("steve_item_stale_delivery_total").increment(1);
             return Ok(());
         }
-        tx.try_close(baseline.item.as_str(), Some(baseline))?;
+        tx.try_close(baseline.item.as_str(), Some(proof))?;
         Ok(())
     }
 }

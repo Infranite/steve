@@ -3,7 +3,6 @@
 //! it waiting on you. The plan of the cycle before is kept as an earlier round, not shown as this one's.
 
 use crate::ItemAction;
-use crate::patch;
 use crate::repo::PlanStep;
 use crate::testkit::Kit;
 
@@ -103,11 +102,11 @@ fn only_an_open_card_makes_the_new_cycle_wait_on_you_and_answering_it_runs_again
     k.core
         .tool_request_approval(&s, "推送到 main", "git push")
         .unwrap();
-    assert_eq!(k.status(&id).0, "wait", "an approval is a real wait");
+    assert!(!k.open_kinds(&id).is_empty(), "an approval is a real wait");
     assert_eq!(open_cards(&k, &id), 1, "and you have its card");
     /* progress while the approval is open keeps it waiting */
     k.core.tool_update(&s, "等批准", &[]).unwrap();
-    assert_eq!(k.status(&id).0, "wait");
+    assert!(!k.open_kinds(&id).is_empty());
     let d = k
         .db()
         .decisions_of_item(&id)
@@ -118,24 +117,4 @@ fn only_an_open_card_makes_the_new_cycle_wait_on_you_and_answering_it_runs_again
     k.core.resolve(&d.id, "yes", "", "me").unwrap();
     assert_eq!(k.status(&id).0, "run");
     assert_eq!(open_cards(&k, &id), 0);
-}
-
-#[test]
-fn a_wait_without_a_card_ends_when_the_bot_reports_progress() {
-    let k = Kit::new();
-    /* as ST-49 was left: the cycle started, the bot at work, the item still saying it waits on you */
-    let id = k.item("wait", "定义", None);
-    steve_store::core_fixture::item(
-        k.db().store(),
-        &id,
-        steve_store::core_fixture::ItemState::RestartCycle,
-    );
-    k.db()
-        .item_patch(&id, patch![now: "新周期，等你说要做什么"])
-        .unwrap();
-    let sid = k.session(&id, "running");
-    let s = k.db().session(&sid).unwrap().unwrap();
-    k.core.tool_update(&s, "在查原因", &[]).unwrap();
-    let (status, _, now) = k.status(&id);
-    assert_eq!((status.as_str(), now.as_str()), ("run", "在查原因"));
 }

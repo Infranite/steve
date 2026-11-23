@@ -749,7 +749,6 @@ pub(crate) fn extras_one(r: &dyn Repo, id: &str) -> BResult<ItemExtras> {
         sessions,
         open,
         queued,
-        closeout: r.item_closeout(id)?,
         workflow_paused: None,
         workflow_cycle: None,
         workflow_failed: Vec::new(),
@@ -760,12 +759,6 @@ pub(crate) fn extras_one(r: &dyn Repo, id: &str) -> BResult<ItemExtras> {
 
 /// `{...i, goal, goals, tags, deps, sessionIds, open, queued, live}`.
 pub(crate) fn summary_with(mut i: Obj, x: ItemExtras) -> Obj {
-    /* the work judgement's `now` lines are stored in zh-CN: in the request's language here */
-    if let Some(Value::String(now)) = i.get_mut("now")
-        && let std::borrow::Cow::Owned(shown) = steve_core::now_line::shown(now)
-    {
-        *now = shown;
-    }
     let live = x
         .sessions
         .iter()
@@ -783,12 +776,6 @@ pub(crate) fn summary_with(mut i: Obj, x: ItemExtras) -> Obj {
                 .collect(),
         ),
     );
-    if let Some(mut closeout) = x.closeout {
-        if !x.open.is_empty() && closeout.next_owner != "none" {
-            closeout.next_owner = "user";
-        }
-        i.insert("closeout".into(), json!(closeout));
-    }
     i.insert("open".into(), json!(x.open));
     i.insert("queued".into(), json!(x.queued));
     i.insert("live".into(), json!(live));
@@ -953,25 +940,6 @@ mod tests {
             own(None, "default", Noun::Session).unwrap_err().message,
             "没有这个会话"
         );
-    }
-
-    #[test]
-    fn an_items_work_line_comes_in_the_requests_language() {
-        let item = |now: &str| {
-            let mut i = Obj::new();
-            i.insert("id".into(), json!("ST-1"));
-            i.insert("now".into(), json!(now));
-            i
-        };
-        let now = |locale, s: &str| {
-            steve_i18n::with(locale, || summary_with(item(s), ItemExtras::default()))["now"].clone()
-        };
-        assert_eq!(
-            now(steve_i18n::EN, "协作已暂停"),
-            json!("Collaboration paused")
-        );
-        assert_eq!(now(steve_i18n::ZH_CN, "协作已暂停"), json!("协作已暂停"));
-        assert_eq!(now(steve_i18n::EN, "正在改 README"), json!("正在改 README"));
     }
 }
 

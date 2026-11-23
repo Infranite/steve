@@ -78,7 +78,7 @@ impl Consumer for WorkTidy {
         if item.cycle != d.cycle || item.phase != crate::cycle::CLOSED {
             return Ok(());
         }
-        if d.acceptance.as_deref() == Some(crate::cycle::Policy::Owner.as_str()) {
+        if d.acceptance.as_deref() == Some(crate::cycle::ClosePolicy::Owner.as_str()) {
             let mut tx = self.core.tx();
             let item = tx.item(&d.item_id).map_err(retry)?;
             if item.cycle != d.cycle || item.phase != crate::cycle::CLOSED {
@@ -96,7 +96,7 @@ impl Consumer for WorkTidy {
                     "item sessions are still stopping".into(),
                 ));
             }
-            tx.lc_closed_effects(&item, "completed", &d.acceptance, "owner_finished")
+            tx.after_cycle_closed(&item, "completed", &d.acceptance, "owner_finished")
                 .map_err(retry)?;
         }
         /* a process still running in the worktree (a dev server) keeps it; the workspace watcher looks

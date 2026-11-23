@@ -6,7 +6,7 @@
 //! per entity, the copy with the larger `rev`.
 
 use crate::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 fn default_session_source(value: &str) -> bool {
     value == "Steve"
@@ -102,9 +102,6 @@ pub struct ItemView {
     pub deps: Vec<ItemId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
-    pub closeout: Option<Closeout>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
     pub workflow: Option<ItemWorkflow>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(test, ts(as = "Option<Vec<ItemWait>>", optional))]
@@ -177,10 +174,11 @@ pub enum ItemState {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub enum CloseKind {
+    #[default]
     Complete,
     Cancel,
     Fail,

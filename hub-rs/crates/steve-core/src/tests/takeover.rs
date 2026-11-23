@@ -597,7 +597,7 @@ fn a_look_begun_before_a_turn_ended_is_not_kept_a_fresh_one_decides() {
         let mut t = k.core.tx();
         // a look starts, and can't come back while this section holds the lock
         t.forget_probe(&x.item);
-        t.lc_try_close(&x.item).unwrap();
+        t.evaluate_cycle_close(&x.item).unwrap();
         assert!(t.st.probing.contains_key(&x.item));
         let seq = t.st.probe_seq;
         // meanwhile the agent merged and tagged, and its turn ended: what that look read is old
@@ -628,7 +628,7 @@ fn stopped_after_merging_and_tagging_it_completes_on_steves_check() {
     // delivered once, then the delivery went void (ST-25: the branch changed after the freeze)
     k.core
         .tx()
-        .lc_invalidate(&x.item, crate::cycle::void::REDELIVER, "有新的交付")
+        .invalidate_delivery(&x.item, crate::cycle::void::REDELIVER, "有新的交付")
         .unwrap();
     merge_and_tag(&x, Some("v0.2.21"));
     // ST-25: the agent reports the merge and the tag, the build still running, and stops
@@ -664,7 +664,7 @@ fn stopped_before_the_merge_it_is_continued_with_what_steve_found() {
     let x = remote(&k, upstream::DONE_MERGE, false);
     k.core
         .tx()
-        .lc_invalidate(&x.item, crate::cycle::void::REDELIVER, "有新的交付")
+        .invalidate_delivery(&x.item, crate::cycle::void::REDELIVER, "有新的交付")
         .unwrap();
     stop(&k, &x.session, "分支推上去了。");
     // the line and the prompt are written one after the other: wait for both
@@ -688,7 +688,7 @@ fn an_accepted_delivery_that_moved_tells_the_agent_what_moved() {
     // delivered again on the real worktree (the frozen fingerprint is the branch's)
     k.core
         .tx()
-        .lc_invalidate(&x.item, crate::cycle::void::REDELIVER, "有新的交付")
+        .invalidate_delivery(&x.item, crate::cycle::void::REDELIVER, "有新的交付")
         .unwrap();
     let d = k.decision(
         &x.item,
@@ -699,10 +699,10 @@ fn an_accepted_delivery_that_moved_tells_the_agent_what_moved() {
     );
     k.core
         .tx()
-        .lc_request_complete(
+        .request_delivery_close(
             &x.item,
             "dev",
-            cycle::Policy::Human,
+            cycle::ClosePolicy::Human,
             false,
             "交付",
             Some(d.clone()),
@@ -750,7 +750,7 @@ fn a_void_delivery_waiting_on_your_approval_is_told_with_the_answer() {
     let (x, wt) = super::lifecycle::delivered_in_git(&k, true);
     k.core
         .tx()
-        .lc_invalidate(&x.id, crate::cycle::void::REDELIVER, "有新的交付")
+        .invalidate_delivery(&x.id, crate::cycle::void::REDELIVER, "有新的交付")
         .unwrap();
     let d = k.decision(
         &x.id,
@@ -761,10 +761,10 @@ fn a_void_delivery_waiting_on_your_approval_is_told_with_the_answer() {
     );
     k.core
         .tx()
-        .lc_request_complete(
+        .request_delivery_close(
             &x.id,
             "dev",
-            cycle::Policy::Human,
+            cycle::ClosePolicy::Human,
             false,
             "交付",
             Some(d.clone()),
@@ -802,7 +802,7 @@ fn a_build_is_followed_once_and_only_a_failure_is_told() {
     let x = remote(&k, upstream::DONE_TAG, false);
     k.core
         .tx()
-        .lc_invalidate(&x.item, crate::cycle::void::REDELIVER, "有新的交付")
+        .invalidate_delivery(&x.item, crate::cycle::void::REDELIVER, "有新的交付")
         .unwrap();
     merge_and_tag(&x, Some("v2.0.0"));
     stop(&k, &x.session, "合并了，tag 推了。");
@@ -1197,7 +1197,7 @@ fn a_goal_that_asks_for_an_actual_operation_is_noted_when_the_delivery_lacks_one
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
     k.core
         .tx()
-        .lc_invalidate(&x.item, crate::cycle::void::REDELIVER, "有新的交付")
+        .invalidate_delivery(&x.item, crate::cycle::void::REDELIVER, "有新的交付")
         .unwrap();
     merge_and_tag(&x, Some("v1.0.1"));
     stop(&k, &x.session, "合并了，tag 推了。");
@@ -1235,7 +1235,7 @@ fn stopped_after_merging(rule: &str, url: &str, tag: Option<&str>) -> (Kit, Remo
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
     k.core
         .tx()
-        .lc_invalidate(&x.item, crate::cycle::void::REDELIVER, "有新的交付")
+        .invalidate_delivery(&x.item, crate::cycle::void::REDELIVER, "有新的交付")
         .unwrap();
     merge_and_tag(&x, tag);
     let before = k.rt.prompts_of(&x.session).len();
@@ -1473,8 +1473,6 @@ fn accepted_without_a_commit_of_its_own_completes_on_the_acceptance_not_as_merge
         let k = kit(2);
         let x = remote_without_commits(&k, rule);
         k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-        // on GitHub its pull request is looked at once (here `gh` can't be asked: no merged PR)
-        settle_pr(&k);
         let diagnostic = steve_runtime::testkit::on_timeout(|| async {
             format!(
                 "The item with no own commits reaches closed on acceptance rather than an inferred merge; {rule}: {:?} {:?}",
@@ -1517,7 +1515,6 @@ fn a_commit_that_landed_before_a_reset_onto_main_is_not_merged_without_its_pull_
     merge_and_tag(&x, None);
     g(&x.wt, &["reset", "-q", "--hard", "main"]);
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-    settle_pr(&k);
     // without a merged pull request's word, nothing of its own is there to call merged
     steve_runtime::testkit::eventually_blocking(
         "The reset-to-main item reaches closed without claiming its PR was merged.",
@@ -1530,17 +1527,6 @@ fn a_commit_that_landed_before_a_reset_onto_main_is_not_merged_without_its_pull_
     );
 }
 
-/// The pull request looks `pull` would make once the acceptance asked for one.
-pub(super) fn settle_pr(k: &Kit) {
-    steve_runtime::testkit::eventually_blocking(
-        "The pull request is checked after the previous cached result is cleared.",
-        || {
-            k.core.tx().st.pr_checked.clear();
-            k.core.check_prs().unwrap() > 0
-        },
-    );
-}
-
 #[test]
 fn stopped_without_a_commit_of_its_own_is_continued_not_closed_as_merged() {
     let k = kit(2);
@@ -1548,7 +1534,7 @@ fn stopped_without_a_commit_of_its_own_is_continued_not_closed_as_merged() {
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
     k.core
         .tx()
-        .lc_invalidate(&x.item, crate::cycle::void::REDELIVER, "有新的交付")
+        .invalidate_delivery(&x.item, crate::cycle::void::REDELIVER, "有新的交付")
         .unwrap();
     let before = k.rt.prompts_of(&x.session).len();
     stop(&k, &x.session, "看了一下，好像没什么要改的。");
@@ -1648,10 +1634,10 @@ fn automatic_close_with_the_worktree_gone_and_the_session_in_error_is_a_card_not
     );
     k.core
         .tx()
-        .lc_request_complete(
+        .request_delivery_close(
             &x.item,
             "dev",
-            crate::cycle::Policy::Automatic,
+            crate::cycle::ClosePolicy::Automatic,
             true,
             "delivered",
             None,
@@ -1709,10 +1695,10 @@ fn automatic_close_with_the_session_in_error_tells_you_what_is_missing_instead_o
         .unwrap();
     k.core
         .tx()
-        .lc_request_complete(
+        .request_delivery_close(
             &x.item,
             "dev",
-            crate::cycle::Policy::Automatic,
+            crate::cycle::ClosePolicy::Automatic,
             true,
             "delivered",
             None,

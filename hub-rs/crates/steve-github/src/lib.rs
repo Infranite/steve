@@ -33,18 +33,16 @@
 //!
 //! G3 (items, opening and merging PRs: [`link`], [`accept`], [`push`], [`flow`]):
 //! 8. before `Modules` exists: `let gh_slot = steve_github::accept::register(&mut registry);`
-//!    (decision handlers `gh_pr_open`, `gh_pr_merge`; item hooks `on_accepted`); after
+//!    (decision handlers `gh_pr_open`, `gh_pr_merge`); after
 //!    `GitHub::new`: `gh_slot.bind(&gh)`;
-//! 9. `gh.set_core(Arc<impl ItemCore>)` over the orchestrator ([`core::ItemCore`]: `progress` =
-//!    `item_patch(stage, now)` with the item kept open, `finish`, `fail`);
-//! 10. flows: on the `FlowSetup`, `.item_finder("gh_pr", Arc::new(steve_github::flow::GhPrFinder))`
+//! 9. flows: on the `FlowSetup`, `.item_finder("gh_pr", Arc::new(steve_github::flow::GhPrFinder))`
 //!     and `.action(Arc::new(steve_github::flow::GhItemLink))` (S2's `item.link` plus `by:"gh_pr"`;
 //!     every other `by` goes to S2's action); after `build`: `gh.set_flow(flow.clone())` (installs
 //!     the “PR 检查失败” template when the first repo is linked). Point 5 can now be
 //!     `gh.set_event_sink(Arc::new(steve_github::flow::FlowSink(Arc::new(flow.clone()))))`;
-//! 11. `POST /github/prs/{id}/link` is part of [`repos::routes`]; nothing else to mount;
-//! 12. web: 待处理 cards for `gh_pr_open` (title and body editable, sent as `text`, first line =
-//!     title) and `gh_pr_merge` (the draft is the check list).
+//! 10. `POST /github/prs/{id}/link` is part of [`repos::routes`]; nothing else to mount;
+//! 11. web: 待处理 cards for `gh_pr_open` (title and body editable, sent as `text`, first line =
+//!     title) and `gh_pr_merge` (the draft is the approved head).
 //!
 //! G4 (agents' tools, the item panel, comments: [`mcp`], [`panel`], [`comment`]):
 //! 13. MCP: list [`mcp::tools`] after the Steve tools; route names with [`mcp::handles`] to
@@ -113,7 +111,7 @@ use steve_modules::accounts::connections::{ConnectionProvider, Connections, Pend
 use steve_modules::vault::{SessionSink, VaultResult};
 use steve_store::Store;
 
-pub use crate::core::{ItemCore, NoCore, RecordingCore};
+pub use crate::core::{ItemCore, NoCore};
 pub use adapters::{GitHubApp, GitHubPat};
 pub use api::{EtagCache, GhClient, GhConn, GhError, GhResponse};
 pub use events::{Actor, EventSink, NoSink, RecordingSink, SignalEvent};

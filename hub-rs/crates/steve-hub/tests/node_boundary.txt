@@ -22,6 +22,7 @@ Dir	steve-knowledge/src/eval.rs	1
 Dir	steve-knowledge/src/scan.rs	1
 Dir	steve-knowledge/src/sources/folder.rs	1
 Dir	steve-modules/src/vault/inject.rs	1
+Dir	steve-runtime/src/process.rs	2
 Dir	steve-store-sqlite/src/backup/plan.rs	3
 Dir	steve-toolchains/src/lib.rs	2
 Fs	steve-acp/src/adapters.rs	1
@@ -90,6 +91,7 @@ Fs	steve-modules/src/vault/keystore/dir.rs	1
 Fs	steve-modules/src/vault/keystore/file.rs	7
 Fs	steve-node-wire/src/identity.rs	3
 Fs	steve-research/src/attach.rs	4
+Fs	steve-runtime/src/process.rs	3
 Fs	steve-store-sqlite/src/backup/offline.rs	8
 Fs	steve-store-sqlite/src/backup/plan.rs	16
 Fs	steve-store/src/contract/tool_journal.rs	2
@@ -100,7 +102,6 @@ Spawn	steve-acp/src/rpc.rs	1
 Spawn	steve-confine/src/lib.rs	2
 Spawn	steve-confine/src/probe.rs	1
 Spawn	steve-core/src/git.rs	1
-Spawn	steve-core/src/pull.rs	1
 Spawn	steve-core/src/release.rs	2
 Spawn	steve-core/src/takeover.rs	1
 Spawn	steve-core/src/workspace.rs	1
@@ -126,5 +127,3 @@ Spawn	steve-keyhelper/src/mac.rs	2
 Spawn	steve-modules/src/net.rs	1
 Spawn	steve-modules/src/vault/inject.rs	1
 Spawn	steve-modules/src/vault/keystore/helper.rs	1
-Dir	steve-runtime/src/process.rs	2
-Fs	steve-runtime/src/process.rs	3

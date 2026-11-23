@@ -31,13 +31,11 @@ mod modules;
 pub mod node_git;
 pub mod notice_line;
 pub mod notify;
-pub mod now_line;
 mod occupancy;
 mod orchestrator;
 pub mod outbox_work;
 mod placement;
 pub mod proof;
-pub mod pull;
 mod quota;
 pub mod release;
 pub mod repo;
@@ -47,9 +45,9 @@ pub mod stats;
 pub mod takeover;
 pub mod thread;
 mod turn_receipts;
+mod turn_wait;
 pub mod upstream;
 pub mod util;
-mod work;
 pub mod workflow;
 pub mod workspace;
 mod worktrees;
@@ -149,12 +147,6 @@ pub(crate) struct State {
     probed: HashMap<String, takeover::Probed>,
     /// Followed builds: when each was last looked at.
     build_checked: HashMap<String, i64>,
-    /// When each followed pull request was last looked at (`pull`), by its operation.
-    pr_checked: HashMap<String, i64>,
-    /// Closings whose worktree moved while the pull request they are followed on was open: since
-    /// when each waits for the host to say whether it merged before the result is void (`pull`), by
-    /// the release operation.
-    pr_verify: HashMap<String, i64>,
     /// Why new turns wait now (`occupancy`).
     holds: std::collections::BTreeSet<occupancy::Hold>,
     /// Items handing over to a new session while the old one's release is on its way: the
@@ -171,7 +163,7 @@ pub(crate) struct State {
     git_polling: bool,
     /// The periodic closing check is running: it fingerprints a worktree only when nothing else
     /// holds the closing (`cycle.rs`).
-    lc_ticking: bool,
+    evaluating_closing_cycles: bool,
 }
 
 /// One critical section: the core plus the held state lock.
@@ -261,7 +253,7 @@ impl Core {
     /// backend may also retire what holds the session ([`AgentRuntime::user_stop`]).
     pub fn cancel_turn(&self, session_id: &str) -> Result<bool> {
         /* your Stop is kept before it goes out (its turn end may come after a restart): how that
-         * turn ends is yours to go on with, never Steve's to continue (`crate::work::stopped`) */
+         * turn ends is yours to go on with, never Steve's to continue (`crate::turn_wait::stopped`) */
         let sessions = self.0.store.store().sessions();
         let asked = self.0.runtime.running(session_id).map(|r| r.attempt);
         sessions.stop_asked(session_id, Some(asked.as_deref().unwrap_or("")))?;

@@ -4,7 +4,7 @@
 use serde_json::{Value, json};
 use steve_store::{UnitSpec, WorkUnit, Workflow};
 
-use crate::cycle::{CANCEL, CLOSED, FAIL, Policy, conflict};
+use crate::cycle::{CLOSED, CloseKind, ClosePolicy, conflict};
 use crate::marks::reject;
 use crate::repo::{Item, Session};
 use crate::{Check, Core, CoreError, ItemAction, Mark, Output, Result, TurnEnd, Tx, patch};
@@ -838,7 +838,7 @@ impl Tx<'_> {
         {
             return Err(conflict(steve_i18n::t!("core.workflow.blocker.disabled")));
         }
-        self.lc_guard_open(item)?;
+        self.require_open_item(item)?;
         let parent = self.item(item)?;
         if self.workflow_child(&parent)? {
             return Err(conflict("请在主事项调整工作图"));
@@ -931,7 +931,7 @@ impl Tx<'_> {
             }
             _ => return Err(conflict("未知工作图操作")),
         }
-        self.lc_invalidate(
+        self.invalidate_delivery(
             item,
             crate::cycle::void::GRAPH,
             "工作图已调整，需要按最新结果统一验收",
@@ -1053,9 +1053,13 @@ impl Tx<'_> {
                 } else {
                     reason
                 };
-                self.lc_stop(
+                self.request_cycle_stop(
                     child,
-                    if failed { FAIL } else { CANCEL },
+                    if failed {
+                        CloseKind::Fail
+                    } else {
+                        CloseKind::Cancel
+                    },
                     "workflow",
                     reason,
                     None,
@@ -1086,7 +1090,7 @@ impl Tx<'_> {
                     && !self.unit_turn(u)?
                 {
                     let (kind, why) = unit_end(u);
-                    self.lc_stop(child, kind, "workflow", &why, None)?;
+                    self.request_cycle_stop(child, kind, "workflow", &why, None)?;
                 }
                 if (g.paused
                     || parent.status == "pause"
@@ -1388,7 +1392,7 @@ impl Tx<'_> {
             }
         }
         let (parent, id) = (g.item_id.clone(), u.spec.id.clone());
-        self.lc_new_attempt(child, u.attempt + 1, |tx| {
+        self.retry_unit_cycle(child, u.attempt + 1, |tx| {
             steve_store::claim_in(tx, &parent, &id)?;
             Ok(())
         })?;
@@ -1412,9 +1416,9 @@ impl Tx<'_> {
         }
         let (kind, why) = match self.db().store().workflows().retired_of(child)? {
             Some((_, last)) => unit_end(&last),
-            None => (CANCEL, "工作尝试已被替换".into()),
+            None => (CloseKind::Cancel, "工作尝试已被替换".into()),
         };
-        self.lc_stop(child, kind, "workflow", &why, None)?;
+        self.request_cycle_stop(child, kind, "workflow", &why, None)?;
         Ok(())
     }
 
@@ -1542,7 +1546,7 @@ impl Tx<'_> {
             Some(found) => found,
             None => return Err(refuse(self, reject::UNIT_STALE, "工作尝试已被替换")),
         };
-        self.lc_guard_open(&parent)
+        self.require_open_item(&parent)
             .map_err(|e| self.unit_refused(s, passed, reject::UNIT_STALE, e))?;
         let Some(current) = self.db().store().workflows().get(&parent)? else {
             return Err(refuse(self, reject::UNIT_STALE, "工作图不存在"));
@@ -1642,10 +1646,10 @@ impl Tx<'_> {
             return Ok(());
         }
         if passed {
-            self.lc_request_complete_with(
+            self.request_delivery_close_in(
                 child,
                 s.bot_id.as_deref().unwrap_or("agent"),
-                Policy::Automatic,
+                ClosePolicy::Automatic,
                 true,
                 "工作单元局部交付；主事项仍需统一验收",
                 None,
@@ -1700,7 +1704,7 @@ impl Tx<'_> {
                 &format!("{} 未通过，需要调整或重试\n{summary}", unit.spec.title),
                 Some(&s.id),
             )?;
-            self.lc_invalidate(&parent, crate::cycle::void::UNIT_FAILED, "工作单元未通过")?;
+            self.invalidate_delivery(&parent, crate::cycle::void::UNIT_FAILED, "工作单元未通过")?;
             self.db().item_patch(child, patch![now: summary])?;
             // its questions and stop cards are moot now: the coordinator decides what comes next
             if let Some((_, failed)) = self.db().store().workflows().by_child(child)? {
@@ -1777,7 +1781,7 @@ impl Tx<'_> {
         }
         let g = self.db().store().workflows().get(&parent)?.unwrap();
         if unit.status == "succeeded" {
-            self.lc_try_close(child)?;
+            self.evaluate_cycle_close(child)?;
         } else {
             if unit.status == "running"
                 && !g.paused
@@ -1806,7 +1810,7 @@ impl Tx<'_> {
                 // Explicit failure, a turn ending without delivery and a cancel all finish this
                 // attempt. Its evidence remains on the graph; a retry opens a new cycle of this child.
                 let (kind, why) = unit_end(&settled);
-                self.lc_stop(child, kind, "workflow", &why, None)?;
+                self.request_cycle_stop(child, kind, "workflow", &why, None)?;
             }
         }
         self.workflow_drive(&parent)?;
@@ -1964,16 +1968,16 @@ pub fn plan_notes(specs: &[UnitSpec], max_parallel: Option<usize>) -> Vec<String
 }
 
 /// How a failed or cancelled unit's child item ends, and why (its own reason when it gave one).
-fn unit_end(u: &WorkUnit) -> (&'static str, String) {
+fn unit_end(u: &WorkUnit) -> (CloseKind, String) {
     let said = u
         .reason
         .as_deref()
         .filter(|s| !s.trim().is_empty())
         .or_else(|| (!u.summary.trim().is_empty()).then_some(u.summary.as_str()));
     if u.status == "cancelled" {
-        (CANCEL, said.unwrap_or("工作单元已取消").into())
+        (CloseKind::Cancel, said.unwrap_or("工作单元已取消").into())
     } else {
-        (FAIL, said.unwrap_or("工作单元未通过").into())
+        (CloseKind::Fail, said.unwrap_or("工作单元未通过").into())
     }
 }
 

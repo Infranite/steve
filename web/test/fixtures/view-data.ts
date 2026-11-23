@@ -33,7 +33,7 @@ export function seedItems(items: (Pick<Item, "id" | "t" | "st" | "b"> & Partial<
       parent: parent ? { item: parent.item, session: parent.s, at: parent.at } : undefined,
       accept_mode: i.acc, project_id: i.project ?? undefined, source: i.src?.[1] ?? "",
       created: i.created ?? 0, updated: i.updated ?? 0,
-      goals: i.goals?.length ?? 0, closeout: i.closeout,
+      goals: i.goals?.length ?? 0,
       tags: i.tags ?? [], deps: i.deps ?? [], plan_total: i.plan?.length ?? 0,
       plan_done: i.plan?.filter((p) => p[1] === 1).length ?? 0, op_blockers: [], active_operations: 0,
       detail_stamp: 0, has_branch: !!i.branch,

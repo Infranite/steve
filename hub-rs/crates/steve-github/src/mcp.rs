@@ -595,6 +595,9 @@ fn open_pr(
     let opened = gh
         .store()
         .write(|tx| {
+            if steve_store::item_repo::open_cycle(tx, &ws, &l.item.id)?.is_none() {
+                return Ok(Err("The item cycle is already closed.".to_string()));
+            }
             if steve_store::github::has_open_pr_from(tx, &r.id, branch)? {
                 return Ok(Err(format!(
                     "A pull request from {branch} is already open."

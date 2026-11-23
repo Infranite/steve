@@ -6,8 +6,6 @@ import { useItemDetail, useNotices, useSessionQueue } from "@/store"
 import { getItem, getItems, getSession } from "@/store"
 import { itemDisplayStatus } from "@/item-workflow-relation"
 import { AgentDetailPanel, hasAgentTree, History, Notices, ROOT_STATUS, TeamSteps, useAgentTree, useSelectedNode, WorkflowButtons } from "@/agent-tree-view"
-import { CloseoutSummary } from "@/item-closeout"
-import { Card } from "@/components/ui/card"
 import { itemState, type ItemState } from "@/item-state"
 import { clip } from "@/thread/topics"
 import { BlockedPlacement, BotProposalCard, DispatchDetails, PlacementWhy, NO_TEAM, useBotTeams } from "@/bot-dispatch"
@@ -384,7 +382,7 @@ export function ItemView({ id }: { id: string }) {
   const state = rootState!
   /* the now card with nothing under its headline (finished, say): one centred line in a smaller card */
   const compact = !i.waits.length && state.move === "none"
-  const centered = compact && !i.workflow && !state.detail && state.kind !== "idle" && !i.rel && !i.dependencyWait && !i.closeout
+  const centered = compact && !i.workflow && !state.detail && state.kind !== "idle" && !i.rel && !i.dependencyWait
   const goal = <>
           {/* 1 — goal reads as the description of the title */}
           <section data-goal className="-mt-3">
@@ -471,7 +469,6 @@ export function ItemView({ id }: { id: string }) {
               </div>
               {i.workflow && <div className="max-sm:basis-full max-sm:pl-10"><WorkflowButtons at={at} /></div>}
             </div>
-            {i.closeout && <CloseoutSummary value={i.closeout} className="mt-3 pl-10" />}
             {(i.dispatch || i.placement) && <DispatchDetails dispatch={i.dispatch} placement={i.placement} />}
             {at.dialogs}
             {i.waits.length > 0 && <div className="mt-5 flex flex-col gap-3">{i.waits.map((w) => <DecisionCard key={w.decision} i={i} w={w} showItem={false} />)}</div>}
@@ -487,10 +484,6 @@ export function ItemView({ id }: { id: string }) {
             </div>
             {dtab === "动态" && (
               <div key="activity" className="anim-in flex flex-col" data-worklog>
-                {i.closeout && <Card size="sm" className="mb-4 gap-1.5 p-3" data-closeout-timeline>
-                  <h3 className="type-label text-tertiary">{t("views:closeout.timeline")}</h3>
-                  <CloseoutSummary value={i.closeout} />
-                </Card>}
                 {byDay(foldProcess(feed, (x) => x.e[0] === "sys" && !queued.byComment.has(x.n))).map(([day, gs]) => <Fragment key={day}>
                   {day && <h3 className="mb-1 mt-5 type-label text-tertiary first:mt-0" data-day>{day}</h3>}
                   {gs.map((g) => Array.isArray(g)

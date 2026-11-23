@@ -27,12 +27,6 @@ test("lifecycle states without a graph", () => {
   assert.equal(itemState({ st: "run", now: "等它继续" }, null, false).kind, "idle")
 })
 
-test("ST-179: a followed PR owns closeout even when the agent has no active turn", () => {
-  const item = { st: "run", now: "旧进展", closeout: { status: "waiting_checks", next_owner: "steve" } }
-  assert.deepEqual(itemState(item, null, false), { kind: "closing", tone: "run", move: "steve" })
-  assert.equal(itemState({ ...item, closeout: { status: "checks_failed", next_owner: "agent" } }, null, false).move, "agents")
-  assert.deepEqual(itemState({ ...item, closeout: { status: "sync_failed", sync_error: "offline", next_owner: "steve" } }, null, false),
-    { kind: "closing", tone: "wait", move: "steve" })
-  assert.equal(itemState({ ...item, waits: [{ q: "批准吗？" }] }, null, false).kind, "asking")
-  assert.equal(itemState({ ...item, st: "done" }, null, false).kind, "done")
+test("the cycle shows as closing without a session, including during delivery verification", () => {
+  assert.equal(itemState({ st: "run", phase: "closing" }, null, false).kind, "closing")
 })

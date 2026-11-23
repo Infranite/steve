@@ -23,7 +23,9 @@
 //! route: a typed protocol field or an error reason, never parallel representations in both.
 
 mod item_delivery;
-pub use item_delivery::{DeliveryBaseline, DeliveryRef};
+pub use item_delivery::{
+    ClosePolicy, CloseRequest, DeliveryBaseline, DeliveryProof, DeliveryRef, PullProof,
+};
 pub mod automation;
 pub mod autonomy;
 pub mod channels;
@@ -58,8 +60,6 @@ pub use id::*;
 pub use placement::*;
 pub use raw::RawJson;
 pub use stream::StreamControl;
-mod closeout;
-pub use closeout::{Closeout, PullChecks, PullSnapshot};
 pub use view::{
     ById, CloseKind, ClosedBy, DecisionTier, DecisionView, FoldReason, ItemOutcome, ItemParent,
     ItemSnooze, ItemState, ItemView, ItemWait, ItemWorkflow, MessageView, Op, OperationBlocker,

@@ -20,7 +20,6 @@ mod node_git;
 mod onboard;
 mod outbox;
 mod parent_closure;
-mod pull;
 mod queued;
 mod refused;
 mod release_cleanup;
@@ -201,10 +200,10 @@ impl Kit {
         // delivered = a completion request waiting for this acceptance, as `steve_deliver` leaves it
         self.core
             .tx()
-            .lc_request_complete(
+            .request_delivery_close(
                 &id,
                 "dev",
-                crate::cycle::Policy::Human,
+                crate::cycle::ClosePolicy::Human,
                 false,
                 "交付，等你验收",
                 Some(decision.clone()),

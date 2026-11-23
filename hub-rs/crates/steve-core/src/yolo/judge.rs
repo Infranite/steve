@@ -447,8 +447,7 @@ pub enum Subject {
     Mail(Outbound),
     /// `approve` / `fail` / `ask` on `chan_message`.
     Chan(Outbound),
-    /// `gh_pr_open`, `gh_pr_merge`, `gh_comment`, and a pull request awaiting your merge
-    /// ([`crate::pull::PR_AWAITING_MERGE`]).
+    /// Explicitly authorized GitHub effects.
     Github,
     FlowStep,
     FlowRun {
@@ -1429,10 +1428,7 @@ pub fn subject_from_row(
         ("approve", "secret_use") => later("保险箱条目"),
         (_, "mail_draft") | (_, "chan_message") => later("披露检查"),
         /* merging a change no independent review passed is only ever yours (#239) */
-        (
-            "approve",
-            "gh_pr_open" | "gh_pr_merge" | "gh_comment" | crate::pull::PR_AWAITING_MERGE,
-        ) => Subject::Github,
+        ("approve", "gh_pr_open" | "gh_pr_merge" | "gh_comment") => Subject::Github,
         (_, "flow_step") => Subject::FlowStep,
         (_, "flow_run") => Subject::FlowRun { over_budget: false },
         (_, "connection") => Subject::Connection,

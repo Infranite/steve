@@ -371,7 +371,7 @@ pub struct Item {
     /// `human` | `automatic` | `waived` once closed completed (`None` for migrated history).
     pub acceptance: Option<String>,
     /// The closing intent while `phase = closing`.
-    pub closing: Option<serde_json::Value>,
+    pub closing: Option<steve_types::CloseRequest>,
     pub closed_at: Option<i64>,
     pub closed_reason: Option<String>,
 }

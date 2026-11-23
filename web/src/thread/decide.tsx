@@ -18,7 +18,7 @@ import { MessageOpenInFeishu } from "@/channels/open-in-app"
 import { SendRecovery } from "@/channels/send-recovery"
 import { t as tr, useT } from "@/i18n"
 import { FLOW_SUBJECTS, hasOptionIds, isModuleCard, isPeopleDecision, WITH_WORDS, WORDS_OPTIONS } from "@/decision-options"
-import { acceptChoosesRelease, botName, channelAnswer, decide, dismiss, FAIL_CHOICE, optionLabel, decideCards, PR_AWAITING_MERGE, setSt, SNOOZE_KEYS, snooze, snoozeLabel, st, WT, type Item, type Wait } from "@/store"
+import { acceptChoosesRelease, botName, channelAnswer, decide, dismiss, FAIL_CHOICE, optionLabel, decideCards, GITHUB_PR_MERGE, setSt, SNOOZE_KEYS, snooze, snoozeLabel, st, WT, type Item, type Wait } from "@/store"
 import { permissionCommand } from "@/ui"
 import { YoloBadge } from "@/yolo/badges"
 import { AlarmClockIcon, BanIcon, BellOffIcon, EllipsisIcon } from "lucide-react"
@@ -35,7 +35,7 @@ const toolOptions = (w: Wait) => {
   const opts = w.options.map((o) => { const [id, name, kind] = o.split("|"); return { id, name, kind } })
   return { always: opts.find((o) => o.kind === "allow_always"), once: opts.find((o) => o.kind === "allow_once") }
 }
-const kindLabel = (w: Wait) => (w.subject === "tool_call" ? tr("core:wait.tool") : w.subject === "release" ? tr("core:wait.release") : w.subject === PR_AWAITING_MERGE ? tr("core:wait.prMerge") : WT[w.type])
+const kindLabel = (w: Wait) => (w.subject === "tool_call" ? tr("core:wait.tool") : w.subject === "release" ? tr("core:wait.release") : w.subject === GITHUB_PR_MERGE ? tr("core:wait.prMerge") : WT[w.type])
 export const busyOf = (w: Wait) => st.pendingActions.has("decision:" + w.decision) || st.submittedChannelDecisions.has(w.decision) || st.inactiveChannelDecisions.has(w.decision) || !!channelAnswer(w)
 
 /** the card's labels in the UI language ("later" folds the card here; above the composer it reads Hide, next to the Hub's remind-me-later) */
@@ -205,7 +205,7 @@ export function mapDecision(i: Item, w: Wait, where: "inline" | "composer", show
       d: { ...base, detail: <Detail w={w} reply extra={<ChannelReply key={w.decision} i={i} w={w} />} />, options: [], own: false },
       answer: () => {},
     }
-    const rows = [opt("yes", tr(w.subject === "release" ? "core:card.approveRelease" : w.subject === PR_AWAITING_MERGE ? "core:card.approveMerge" : "core:card.approve"), { "data-approve": "" }),
+    const rows = [opt("yes", tr(w.subject === "release" ? "core:card.approveRelease" : w.subject === GITHUB_PR_MERGE ? "core:card.approveMerge" : "core:card.approve"), { "data-approve": "" }),
       ...(w.subject === "chan_message" && w.options.includes("rewrite") ? [opt("rewrite", tr("core:card.rewriteFirst"), { "data-rewrite": "" })] : [])]
     /* rejecting is the field: its button sends with or without a reason */
     return {

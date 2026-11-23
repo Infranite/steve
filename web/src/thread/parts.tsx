@@ -3,7 +3,6 @@ import { getItems, getItem } from "@/store"
  * options, the research being read, queued questions, quotes, flow-back from items and the focus bar. Built from the
  * existing parts (ItemRef, DecisionCard, Trace) — no new colours. */
 import { lazy, Suspense, useEffect, useId, useLayoutEffect, useRef, useState, type ComponentProps } from "react"
-import { CloseoutSummary } from "@/item-closeout"
 import { itemDisplayState } from "@/item-workflow-relation"
 import { cn } from "cn"
 import { CornerDownRightIcon, FileTextIcon, LibraryIcon, RotateCcwIcon, SearchIcon, XIcon, CircleCheckIcon, BanIcon, CircleAlertIcon, MessageSquareReplyIcon, CheckIcon, ChevronDownIcon, RocketIcon, TerminalIcon, PencilIcon, GlobeIcon } from "lucide-react"
@@ -18,7 +17,7 @@ import { chatBusy, refresh } from "@/store"
 import { Markdown } from "@/components/markdown"
 import { Textarea } from "@/components/ui/textarea"
 import { clip as clipPlain } from "@/thread/topics"
-import { PR_AWAITING_MERGE, STEVE_TOOL, st, tm, emit, chatSend, takeOffer, chooseSuggest, cancelQueued, clearFocus, focusItem, quoteMsg, decisionDraft, decide, acceptChoosesRelease, botName, alertClosed, closeAlerts, type Msg, type SuggestChoice, type Steps, type Update, type Item, type ItemCardState, type LiveRun } from "@/store"
+import { GITHUB_PR_MERGE, STEVE_TOOL, st, tm, emit, chatSend, takeOffer, chooseSuggest, cancelQueued, clearFocus, focusItem, quoteMsg, decisionDraft, decide, acceptChoosesRelease, botName, alertClosed, closeAlerts, type Msg, type SuggestChoice, type Steps, type Update, type Item, type ItemCardState, type LiveRun } from "@/store"
 import { ItemRef, ItemNo, AlertClose, go, Pill } from "@/ui"
 import { jumpToMsg, threadMessages, threadMsg, useThreadIds, useThreadMessage } from "@/thread/history"
 import { Trans } from "react-i18next"
@@ -243,7 +242,7 @@ export function cardLook(i: Item, c?: ItemCardState): Look {
   if (w?.type === "fail") return { label: tr("thread:card.status.failed"), dot: "fail", tone: "fail" }
   if (w?.type === "accept") return { label: tr("thread:card.status.accept"), dot: "wait", tone: "wait" }
   if (w?.subject === "release") return { label: tr("thread:card.status.release"), dot: "wait", tone: "wait" }
-  if (w?.subject === PR_AWAITING_MERGE) return { label: tr("thread:card.status.prMerge"), dot: "wait", tone: "wait" }
+  if (w?.subject === GITHUB_PR_MERGE) return { label: tr("thread:card.status.prMerge"), dot: "wait", tone: "wait" }
   if (w?.subject === "tool_call") return { label: tr("thread:card.status.toolCall"), dot: "wait", tone: "wait" }
   if (w?.type === "approve") return { label: tr("thread:card.status.approve"), dot: "wait", tone: "wait" }
   if (w?.type === "ask") return { label: tr("thread:card.status.answer"), dot: "wait", tone: "wait" }
@@ -339,7 +338,6 @@ export function ItemCard({ c }: { c: ItemCardState }) {
         </span>
         <Pill tone={look.tone} className="mt-0.5 h-auto max-w-[45%] py-0.5 leading-4" data-card-status>{look.tone === "done" && c.released ? <RocketIcon className="size-3.5 shrink-0" /> : look.tone === "run" ? <span className="dot-running size-1.5 shrink-0 rounded-full bg-current" aria-hidden /> : null}{look.label}{look.version && <span className="hidden min-w-0 max-w-32 truncate font-mono font-normal sm:inline">{look.version}</span>}</Pill>
       </button>
-      {i.closeout && <CloseoutSummary value={i.closeout} />}
       {d && <DeliveryBlock key={d.decision ?? d.text} d={d} />}
       {i.outs.length > 0 && <DeliveryCards key={i.id} item={i.id} outs={i.outs} anns={i.anns} />}
       {reply && <div className="flex min-w-0 flex-col gap-1 rounded-lg bg-muted/60 px-3 py-2.5" data-card-reply>

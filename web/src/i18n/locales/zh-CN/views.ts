@@ -83,24 +83,6 @@ export default {
     progress: "进度", details: "详情", moreProps: "更多属性",
     process_other: "过程记录 {{count}} 条",
   },
-  closeout: {
-    timeline: "当前 PR 收尾",
-    status: {
-      syncing: "等待 GitHub 同步", sync_failed: "GitHub 同步中断 · 显示上次结果",
-      no_pr: "等待 Agent 提交 PR", waiting_checks: "收尾中 · 等 GitHub CI", checks_failed: "GitHub 检查失败",
-      conflict: "与默认分支有冲突", behind: "需要跟上默认分支", draft: "PR 仍是草稿",
-      head: "PR 提交与验收版本不同", uncommitted: "验收结果还有未提交的改动", accepted_unknown: "无法确认验收提交",
-      closed: "PR 已关闭，未合并", waiting_github: "等待 GitHub 确认能否合并", waiting_result: "正在核对验收版本",
-      ready: "等待 Steve 核对并合并", merge_retry: "合并失败 · 等 Steve 重试", merge_method: "仓库允许的合并方式均不可用",
-      awaiting_approval: "等你决定是否合并", manual_merge: "已拒绝自动合并 · 等你处理", merged: "PR 已合并",
-    },
-    owner: { steve: "Steve", agent: "Agent", user: "你", none: "无" },
-    nextOwner: "下一步：{{owner}}", lastSync: "上次成功同步：{{time}}", neverSynced: "尚未成功同步",
-    checks: "{{passed}} 通过 · {{pending}} 排队/运行 · {{failed}} 失败 · {{other}} 其他",
-    noChecks: "GitHub 尚未返回检查记录", unknownChecks: "没有这次提交的检查快照",
-    failures: "失败检查：{{names}}", lastFailures: "上次同步的失败检查：{{names}}",
-    syncError: "同步失败原因：{{reason}}", mergeError: "合并失败原因：{{reason}}",
-  },
   /* the item page's agent tree: who started whom */
   agentTree: {
     title: "协作",

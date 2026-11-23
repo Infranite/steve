@@ -1,4 +1,5 @@
 {
+  "github.pr.approve_merge": "合并 PR #{{number}}（{{repo}}）？",
   "github.panel.title": "PR 与检查",
   "github.panel.ago_now": "刚刚",
   "github.panel.ago_minutes": "%{n} 分钟前",
@@ -14,7 +15,6 @@
   "github.panel.checks_pending": "%{n} 项检查进行中",
   "github.panel.checks_passed": "%{n} 项检查通过",
   "github.panel.wait_merge": "等你确认合并",
-  "github.panel.wait_accept": "等你验收后合并",
   "github.panel.check_queued": "排队中",
   "github.panel.check_running": "进行中",
   "github.panel.rerun": "重跑失败的检查",

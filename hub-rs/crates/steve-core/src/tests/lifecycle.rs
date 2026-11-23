@@ -227,7 +227,7 @@ fn a_no_to_the_release_holds_for_every_later_result_of_the_cycle() {
         // the agent's follow-up (a new message to it) voids the frozen result
         k.core
             .tx()
-            .lc_invalidate(&x.id, crate::cycle::void::MESSAGE, "收到新的消息")
+            .invalidate_delivery(&x.id, crate::cycle::void::MESSAGE, "收到新的消息")
             .unwrap();
         k.rt.end_turn(&k.core, &x.session, "end_turn", None);
         assert_eq!(k.phase(&x.id), "active");
@@ -335,7 +335,7 @@ fn an_approval_after_the_no_takes_it_back() {
     );
     let i = k.db().item(&x.id).unwrap().unwrap();
     assert_eq!(k.core.tx().release_declined(&i).unwrap(), None);
-    k.core.tx().lc_try_close(&x.id).unwrap();
+    k.core.tx().evaluate_cycle_close(&x.id).unwrap();
     assert_eq!(k.phase(&x.id), "closing", "it still waits for the release");
 }
 
@@ -347,9 +347,7 @@ fn a_question_after_the_acceptance_is_answered_before_the_close_is_judged_again(
     let k = Kit::new();
     let x = k.delivered(true);
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-    let accepted_at = crate::cycle::closing_of(&k.db().item(&x.id).unwrap().unwrap())
-        .unwrap()
-        .at;
+    let accepted_at = k.db().item(&x.id).unwrap().unwrap().closing.unwrap().at;
     let q = k.decision(&x.id, Some(&x.session), "ask", "question", &[]);
     let question_at = k
         .db()
@@ -365,9 +363,9 @@ fn a_question_after_the_acceptance_is_answered_before_the_close_is_judged_again(
     );
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
     let i = k.db().item(&x.id).unwrap().unwrap();
-    let c = crate::cycle::closing_of(&i).unwrap();
+    let c = i.closing.clone().unwrap();
     assert!(
-        k.core.tx().lc_gate(&i, &c).unwrap().decision,
+        k.core.tx().delivery_blockers(&i, &c).unwrap().decision,
         "the open question holds the close"
     );
     assert!(
@@ -552,7 +550,7 @@ fn auto_accept_holds_failed_or_unfinished_delivery_and_closes_clean_or_baseline(
             &["待恢复外部上游".into()],
         )
         .unwrap();
-    assert_eq!(k.status(&x.id).0, "wait");
+    assert!(!k.open_kinds(&x.id).is_empty());
     assert_eq!(k.open_kinds(&x.id), vec!["accept"]);
     assert!(
         k.timeline_texts(&x.id)
@@ -609,7 +607,7 @@ fn design_delivery_waits_for_the_users_implementation_decision() {
         .into_iter()
         .find(|d| d.status == "open" && d.subject_type == "design_implementation")
         .unwrap();
-    assert_eq!(k.status(&item).0, "wait");
+    assert!(!k.open_kinds(&item).is_empty());
     assert!(
         k.core
             .resolve(
@@ -805,7 +803,7 @@ fn changed_design_file_cannot_reuse_the_old_approval() {
             .resolve(&decision.id, "按方案实现", "", "me")
             .is_err()
     );
-    assert_eq!(k.status(&item).0, "wait");
+    assert!(!k.open_kinds(&item).is_empty());
 }
 
 #[test]
@@ -1422,7 +1420,7 @@ fn a_closing_left_waiting_despite_a_recorded_no_closes_on_the_next_check() {
         .session_patch(&x.session, patch![status: "idle"])
         .unwrap();
     assert_eq!(k.phase(&x.id), "closing");
-    assert_eq!(k.core.tx().lc_tick().unwrap(), 1);
+    assert_eq!(k.core.tx().evaluate_closing_cycles().unwrap(), 1);
     let i = k.db().item(&x.id).unwrap().unwrap();
     assert_eq!((i.status.as_str(), i.phase.as_str()), ("done", "closed"));
 }
@@ -1438,7 +1436,7 @@ fn frozen_in_git(k: &Kit) -> (super::Delivered, std::path::PathBuf, String) {
     .unwrap();
     k.core
         .tx()
-        .lc_invalidate(&x.id, crate::cycle::void::REDELIVER, "有新的交付")
+        .invalidate_delivery(&x.id, crate::cycle::void::REDELIVER, "有新的交付")
         .unwrap();
     let d = k.decision(
         &x.id,
@@ -1449,10 +1447,10 @@ fn frozen_in_git(k: &Kit) -> (super::Delivered, std::path::PathBuf, String) {
     );
     k.core
         .tx()
-        .lc_request_complete(
+        .request_delivery_close(
             &x.id,
             "dev",
-            crate::cycle::Policy::Human,
+            crate::cycle::ClosePolicy::Human,
             false,
             "交付",
             Some(d.clone()),
@@ -1490,7 +1488,12 @@ fn accept_and_release_starts_the_release_without_a_round_of_the_agent() {
         k.db().decision(&d).unwrap().unwrap().result["release"],
         "started"
     );
-    let frozen = crate::cycle::closing_of(&k.db().item(&x.id).unwrap().unwrap())
+    let frozen = k
+        .db()
+        .item(&x.id)
+        .unwrap()
+        .unwrap()
+        .closing
         .unwrap()
         .fingerprint;
     assert_eq!(r.result["fingerprint"].as_str(), frozen.as_deref());

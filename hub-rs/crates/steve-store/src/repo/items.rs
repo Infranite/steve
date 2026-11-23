@@ -864,7 +864,7 @@ pub struct LifecycleWrite {
     pub revision: i64,
     pub outcome: Option<String>,
     pub acceptance: Option<String>,
-    pub closing: Option<serde_json::Value>,
+    pub closing: Option<steve_types::CloseRequest>,
     pub closed_at: Option<i64>,
     pub closed_reason: Option<String>,
     /// Legacy projection; `None` leaves the column as it is.
@@ -879,10 +879,11 @@ pub fn require_item_revision_in(
     id: &str,
     cycle: i64,
     revision: i64,
+    phase: &str,
 ) -> Result<()> {
     let matches: bool = w.conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM items WHERE id=? AND cycle=? AND revision=? AND phase<>'closed')",
-        params![id, cycle, revision],
+        "SELECT EXISTS(SELECT 1 FROM items WHERE id=? AND cycle=? AND revision=? AND phase=?)",
+        params![id, cycle, revision, phase],
         |r| r.get(0),
     )?;
     if !matches {

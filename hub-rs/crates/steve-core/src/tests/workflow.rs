@@ -1144,10 +1144,10 @@ fn lifecycle_gate_blocks_even_direct_completion_request_and_no_release_is_starte
     plan(&k, &parent, &specs);
     k.core
         .tx()
-        .lc_request_complete(
+        .request_delivery_close(
             &parent,
             "me",
-            crate::cycle::Policy::Waived,
+            crate::cycle::ClosePolicy::Waived,
             true,
             "直接完成",
             None,
@@ -1311,10 +1311,10 @@ async fn an_old_graph_acceptance_cannot_start_wrapup_hooks_after_a_replan_crash(
     k.session(&parent, "running");
     k.core
         .tx()
-        .lc_request_complete(
+        .request_delivery_close(
             &parent,
             "me",
-            crate::cycle::Policy::Automatic,
+            crate::cycle::ClosePolicy::Automatic,
             true,
             "已验收旧图",
             None,

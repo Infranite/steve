@@ -67,7 +67,7 @@ fn an_edit_that_keeps_the_status_still_voids_the_frozen_result() {
     // delivered again on the dirty worktree (as `steve_deliver` does it): this is the frozen result
     k.core
         .tx()
-        .lc_invalidate(&x.id, crate::cycle::void::REDELIVER, "有新的交付")
+        .invalidate_delivery(&x.id, crate::cycle::void::REDELIVER, "有新的交付")
         .unwrap();
     let d = k.decision(
         &x.id,
@@ -78,10 +78,10 @@ fn an_edit_that_keeps_the_status_still_voids_the_frozen_result() {
     );
     k.core
         .tx()
-        .lc_request_complete(
+        .request_delivery_close(
             &x.id,
             "dev",
-            cycle::Policy::Human,
+            cycle::ClosePolicy::Human,
             false,
             "交付",
             Some(d.clone()),
@@ -90,7 +90,11 @@ fn an_edit_that_keeps_the_status_still_voids_the_frozen_result() {
         .unwrap();
     let rev = k.db().item(&x.id).unwrap().unwrap().revision;
     assert!(
-        cycle::closing_of(&k.db().item(&x.id).unwrap().unwrap())
+        k.db()
+            .item(&x.id)
+            .unwrap()
+            .unwrap()
+            .closing
             .unwrap()
             .fingerprint
             .is_some()
@@ -123,7 +127,7 @@ fn the_tick_does_not_fingerprint_while_the_acceptance_is_still_open() {
     std::fs::write(wt.join("x.txt"), "first\n").unwrap();
     k.core
         .tx()
-        .lc_invalidate(&x.id, crate::cycle::void::REDELIVER, "有新的交付")
+        .invalidate_delivery(&x.id, crate::cycle::void::REDELIVER, "有新的交付")
         .unwrap();
     let d = k.decision(
         &x.id,
@@ -134,10 +138,10 @@ fn the_tick_does_not_fingerprint_while_the_acceptance_is_still_open() {
     );
     k.core
         .tx()
-        .lc_request_complete(
+        .request_delivery_close(
             &x.id,
             "dev",
-            cycle::Policy::Human,
+            cycle::ClosePolicy::Human,
             false,
             "交付",
             Some(d.clone()),
@@ -147,7 +151,7 @@ fn the_tick_does_not_fingerprint_while_the_acceptance_is_still_open() {
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
     std::fs::write(wt.join("x.txt"), "second\n").unwrap();
     // the acceptance holds the closing anyway: the tick leaves the worktree alone
-    k.core.tx().lc_tick().unwrap();
+    k.core.tx().evaluate_closing_cycles().unwrap();
     assert_eq!(k.phase(&x.id), "closing");
     // the answer that would clear it looks, and finds the change
     k.core.resolve(&d, "pass", "", "me").unwrap();
@@ -166,7 +170,7 @@ fn an_unknown_effect_of_an_older_revision_holds_the_close_until_you_check_it() {
     old.revision -= 1;
     k.core
         .tx()
-        .lc_op_add(
+        .record_item_operation(
             &old,
             OP_RELEASE,
             Some("attempt:test"),
@@ -213,7 +217,7 @@ fn a_cancel_waits_for_an_unknown_effect_and_keeps_the_card_that_asks() {
     let i = k.db().item(&x.id).unwrap().unwrap();
     k.core
         .tx()
-        .lc_op_add(
+        .record_item_operation(
             &i,
             OP_RELEASE,
             Some("attempt:t"),
@@ -272,9 +276,9 @@ fn a_running_operation_of_an_older_revision_holds_a_failure_ruling() {
     let (op, _) = k
         .core
         .tx()
-        .lc_op_add(
+        .record_item_operation(
             &old,
-            "hooks.accepted",
+            "test.external_write",
             Some("h:old"),
             true,
             "running",
@@ -294,15 +298,9 @@ fn a_running_operation_of_an_older_revision_holds_a_failure_ruling() {
         )
         .unwrap();
     assert_eq!(k.phase(&x.id), "closing");
-    k.core.module_done(&x.id, "模块处理完了").unwrap();
-    assert_eq!(
-        k.phase(&x.id),
-        "closing",
-        "module_done settles only the current revision's op"
-    );
     k.core
         .tx()
-        .lc_op_set(&op.id, "succeeded", json!({}))
+        .settle_item_operation(&op.id, "succeeded", json!({}))
         .unwrap();
     let i = k.db().item(&x.id).unwrap().unwrap();
     assert_eq!(
@@ -317,7 +315,7 @@ fn after_a_crash_before_the_required_release_was_recorded_the_gate_records_it_fi
     let k = Kit::new();
     let (x, _) = delivered_in_git(&k, true);
     let i = k.db().item(&x.id).unwrap().unwrap();
-    let mut c = cycle::closing_of(&i).unwrap();
+    let mut c = i.closing.clone().unwrap();
     c.accepted = true;
     steve_store::core_fixture::item(
         k.db().store(),
@@ -464,10 +462,10 @@ fn a_busy_turn_holds_the_close_and_its_end_commits_it_once() {
     );
     k.core
         .tx()
-        .lc_request_complete(
+        .request_delivery_close(
             &x.id,
             "dev",
-            cycle::Policy::Human,
+            cycle::ClosePolicy::Human,
             false,
             "交付",
             Some(d.clone()),

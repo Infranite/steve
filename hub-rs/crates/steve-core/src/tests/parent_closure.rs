@@ -1,4 +1,4 @@
-use crate::cycle::{CANCEL, FAIL};
+use crate::cycle::CloseKind;
 use crate::repo::{NewItem, Parent, WS};
 use crate::runtime::AgentRuntime;
 use crate::testkit::Kit;
@@ -33,19 +33,25 @@ fn completed_and_abandoned_parents_retire_children_without_claiming_their_succes
         let failed = child(&k, &parent);
         k.core
             .tx()
-            .lc_stop(&failed, FAIL, "workflow", "review failed", None)
+            .request_cycle_stop(&failed, CloseKind::Fail, "workflow", "review failed", None)
             .unwrap();
         let success = child(&k, &parent);
         k.finish(&success).unwrap();
         let cancelled = child(&k, &parent);
         k.core
             .tx()
-            .lc_stop(&cancelled, CANCEL, "me", "independently cancelled", None)
+            .request_cycle_stop(
+                &cancelled,
+                CloseKind::Cancel,
+                "me",
+                "independently cancelled",
+                None,
+            )
             .unwrap();
         let archived = child(&k, &parent);
         k.core
             .tx()
-            .lc_stop(&archived, FAIL, "workflow", "old failure", None)
+            .request_cycle_stop(&archived, CloseKind::Fail, "workflow", "old failure", None)
             .unwrap();
         k.db()
             .item_patch(&archived, patch![archived: true])
@@ -104,7 +110,7 @@ fn upgrade_reconciles_nested_retired_attempts_idempotently_even_with_resume_disa
     let old = child(&k, &parent);
     k.core
         .tx()
-        .lc_stop(&old, FAIL, "workflow", "old failure", None)
+        .request_cycle_stop(&old, CloseKind::Fail, "workflow", "old failure", None)
         .unwrap();
     let nested = child(&k, &old);
     let unrelated = k.item("run", "执行", None);
@@ -145,7 +151,7 @@ fn a_child_turn_or_unknown_effect_must_settle_before_parent_cleanup_hides_it() {
     let (op, _) = k
         .core
         .tx()
-        .lc_op_add(
+        .record_item_operation(
             &i,
             "external",
             None,
@@ -161,7 +167,7 @@ fn a_child_turn_or_unknown_effect_must_settle_before_parent_cleanup_hides_it() {
     assert!(!i.archived);
     k.core
         .tx()
-        .lc_op_set(&op.id, "succeeded", serde_json::json!({}))
+        .settle_item_operation(&op.id, "succeeded", serde_json::json!({}))
         .unwrap();
     k.core.lifecycle_tick().unwrap();
     assert!(k.db().item(&other).unwrap().unwrap().archived);

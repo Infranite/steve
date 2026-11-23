@@ -11,7 +11,7 @@ use steve_modules::vault::{VaultError, VaultResult};
 use steve_modules::{ApiError, Body, Caller};
 use steve_store::github::{PrRow, RepoRow};
 use steve_store::{Read, StoreError, UserRows, item_delivery};
-use steve_types::{DeliveryBaseline, DeliveryRef, ItemId};
+use steve_types::{DeliveryBaseline, DeliveryProof, DeliveryRef, ItemId, PullProof};
 
 use crate::GitHub;
 use crate::api::GhConn;
@@ -282,7 +282,12 @@ impl GitHub {
         })
     }
 
-    async fn verified(&self, workspace: &str, baseline: &DeliveryBaseline) -> Option<()> {
+    async fn verified(
+        &self,
+        workspace: &str,
+        baseline: &DeliveryBaseline,
+    ) -> Option<DeliveryProof> {
+        let mut pulls = Vec::with_capacity(baseline.refs.len());
         let mut targets = BTreeMap::new();
         for expected in &baseline.refs {
             let repo = self
@@ -292,8 +297,7 @@ impl GitHub {
             let conn = self.conn(workspace, &repo.connection_id).ok()?;
             let path = format!("/repos/{}", repo.full_name);
             let live = pull(&conn, &path, expected.number).await?;
-            if !live.merged
-                || live.base.repo.id != repo.gh_id
+            if live.base.repo.id != repo.gh_id
                 || live.base.branch != expected.target
                 || live.head.sha != expected.head
                 || live.base.repo.default_branch != expected.target
@@ -313,9 +317,11 @@ impl GitHub {
                 targets.insert(expected.repository.clone(), (tip.object.sha, current));
             }
             let (tip, current) = targets.get(&expected.repository)?;
-            let landing = compare(&conn, &path, live.merge_commit_sha.as_deref()?, tip).await?;
-            if !matches!(landing.status.as_str(), "ahead" | "identical") {
-                return None;
+            if live.merged {
+                let landing = compare(&conn, &path, live.merge_commit_sha.as_deref()?, tip).await?;
+                if !matches!(landing.status.as_str(), "ahead" | "identical") {
+                    return None;
+                }
             }
             let (base, head) = tokio::join!(
                 tree(&conn, &path, accepted_base),
@@ -324,8 +330,16 @@ impl GitHub {
             if !present(&base?, &head?, current) {
                 return None;
             }
+            pulls.push(PullProof {
+                repository: expected.repository.clone(),
+                number: expected.number,
+                target_head: tip.clone(),
+            });
         }
-        Some(())
+        Some(DeliveryProof {
+            baseline: baseline.clone(),
+            pulls,
+        })
     }
 
     pub(crate) async fn verify_deliveries(&self) {
@@ -338,16 +352,19 @@ impl GitHub {
         };
         stream::iter(pending)
             .map(|(workspace, baseline)| async move {
-                let verified = tokio::time::timeout(
+                let proof = tokio::time::timeout(
                     std::time::Duration::from_secs(20),
                     self.verified(&workspace, &baseline),
                 )
                 .await
-                .is_ok_and(|result| result.is_some());
+                .ok()
+                .flatten();
                 metrics::counter!("steve_item_automatic_delivery_total",
-                    "result" => if verified { "verified" } else { "unverified" })
+                    "result" => if proof.is_some() { "verified" } else { "unverified" })
                 .increment(1);
-                if verified && let Err(error) = self.core().delivery_verified(baseline).await {
+                if let Some(proof) = proof
+                    && let Err(error) = self.core().delivery_verified(proof).await
+                {
                     tracing::warn!(%error, "recording verified item delivery");
                 }
             })

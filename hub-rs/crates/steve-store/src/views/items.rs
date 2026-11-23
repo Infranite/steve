@@ -32,7 +32,6 @@ fn select() -> SelectStatement {
         .expr(Expr::cust("(SELECT json_group_array(item_id) FROM (SELECT u.item_id FROM workflow_units u JOIN workflows w ON w.item_id=u.workflow_id WHERE u.workflow_id=items.id AND w.cycle=items.cycle AND items.phase<>'closed' AND u.status='failed' AND u.item_id IS NOT NULL ORDER BY u.position))"))
         .expr(Expr::cust("(SELECT attempt FROM workflow_units WHERE item_id=items.id LIMIT 1)"))
         .expr(Expr::cust("(SELECT max(attempt) FROM workflow_attempts WHERE item_id=items.id)"))
-        .expr(Expr::cust("(SELECT evidence FROM item_operations WHERE item_id=items.id AND cycle=items.cycle AND revision=items.revision AND kind='release' AND json_extract(evidence,'$.pr_slug') IS NOT NULL AND status IN ('pending','succeeded') AND (items.phase='closing' OR (items.phase='closed' AND items.status='done')) ORDER BY created DESC,id DESC LIMIT 1)"))
         .expr(Expr::cust("(SELECT json_group_array(json_object('kind',kind,'status',status,'required',required,'revision',revision,'tag',json_extract(evidence,'$.tag'))) FROM (SELECT * FROM item_operations WHERE item_id=items.id AND cycle=items.cycle AND status NOT IN ('succeeded','waived') ORDER BY created,id))"))
         // The detail observer refetches when its own facts change, even if the list looks the same.
         .expr(Expr::cust("json_array(
@@ -129,19 +128,14 @@ fn row(r: &Row<'_>) -> Result<ItemView> {
     } else {
         None
     };
-    let closeout = r
-        .get::<Option<Json<serde_json::Value>>>(34)
-        .ok()
-        .flatten()
-        .and_then(|Json(ev)| super::closeout_from_evidence(&ev, phase == "closed", false));
     let revision: i64 = r.get(8)?;
     let mut stamp = DefaultHasher::new();
     revision.hash(&mut stamp);
-    r.get::<String>(36)?.hash(&mut stamp);
-    let delivery: Vec<steve_types::DeliveryRef> = r.get::<Json<Vec<_>>>(38)?.0;
+    r.get::<String>(35)?.hash(&mut stamp);
+    let delivery: Vec<steve_types::DeliveryRef> = r.get::<Json<Vec<_>>>(37)?.0;
     let status: String = r.get(4)?;
     let outcome: Option<String> = r.get(5)?;
-    let acceptance: Option<String> = r.get(39)?;
+    let acceptance: Option<String> = r.get(38)?;
     let state = match phase.as_str() {
         "closed" => ItemState::Closed {
             outcome: match outcome.as_deref() {
@@ -173,14 +167,14 @@ fn row(r: &Row<'_>) -> Result<ItemView> {
         "ready" => ItemState::Ready,
         _ => ItemState::Active,
     };
-    let waits = if !matches!(state, ItemState::Closed { .. }) && r.get::<bool>(40)? {
+    let waits = if !matches!(state, ItemState::Closed { .. }) && r.get::<bool>(39)? {
         vec![ItemWait::Prerequisite]
     } else {
         Vec::new()
     };
     let mut v = ItemView {
         placement: r
-            .get::<Option<Json<BotPlacement>>>(37)?
+            .get::<Option<Json<BotPlacement>>>(36)?
             .map(|Json(f)| f.explanation),
         id: r.get::<String>(0)?.into(),
         ws: r.get::<String>(1)?.into(),
@@ -212,14 +206,13 @@ fn row(r: &Row<'_>) -> Result<ItemView> {
         tags: r.get::<Json<Vec<_>>>(27)?.0,
         deps: r.get::<Json<Vec<_>>>(28)?.0,
         workflow,
-        closeout,
         waits,
         op_blockers: Vec::new(),
         active_operations: 0,
         detail_stamp: stamp.finish() & ((1 << 53) - 1),
         has_branch: r.get(22)?,
     };
-    apply_operations(&mut v, revision, r.get::<Json<Vec<_>>>(35)?.0);
+    apply_operations(&mut v, revision, r.get::<Json<Vec<_>>>(34)?.0);
     Ok(v)
 }
 

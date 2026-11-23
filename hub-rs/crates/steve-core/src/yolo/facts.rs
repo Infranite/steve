@@ -464,7 +464,7 @@ impl Engine {
                         .sessions()
                         .stop(sid)
                         .map_err(|e| ce(e.into()))?
-                        .is_some_and(|k| crate::work::held(&k)),
+                        .is_some_and(|k| crate::turn_wait::held(&k)),
                     None => false,
                 },
             })

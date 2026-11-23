@@ -169,7 +169,7 @@ impl Tx<'_> {
         }
         let valid = item.phase == crate::cycle::CLOSING
             && item.closing.as_ref().is_some_and(|c| {
-                c["kind"] == crate::cycle::COMPLETE && c["frozen_revision"] == r.revision
+                c.kind == steve_types::CloseKind::Complete && c.frozen_revision == r.revision
             });
         Ok(valid.then_some(Mark::Delivered))
     }

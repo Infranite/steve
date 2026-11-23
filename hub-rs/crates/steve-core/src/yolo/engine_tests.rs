@@ -322,10 +322,10 @@ fn an_accept_with_passing_checks_passes_and_without_checks_is_reworked() {
     t.kit
         .core
         .tx()
-        .lc_request_complete(
+        .request_delivery_close(
             &item,
             "bot",
-            crate::cycle::Policy::Human,
+            crate::cycle::ClosePolicy::Human,
             false,
             "做完了，请验收",
             Some(d.clone()),

@@ -1,7 +1,22 @@
-use steve_types::{DeliveryBaseline, DeliveryRef};
+use steve_types::{DeliveryBaseline, DeliveryProof, DeliveryRef, PullProof};
 
-use crate::cycle::Policy;
+use crate::cycle::ClosePolicy;
 use crate::testkit::Kit;
+
+fn proof(baseline: &DeliveryBaseline) -> DeliveryProof {
+    DeliveryProof {
+        baseline: baseline.clone(),
+        pulls: baseline
+            .refs
+            .iter()
+            .map(|pr| PullProof {
+                repository: pr.repository.clone(),
+                number: pr.number,
+                target_head: "c".repeat(40),
+            })
+            .collect(),
+    }
+}
 
 #[test]
 fn automatic_finish_requires_the_whole_current_manifest_and_owner_finish_wins_over_late_proof() {
@@ -36,10 +51,10 @@ fn automatic_finish_requires_the_whole_current_manifest_and_owner_finish_wins_ov
         let closing = k
             .core
             .tx()
-            .lc_request_complete(
+            .request_delivery_close(
                 &item,
                 "dev",
-                Policy::Automatic,
+                ClosePolicy::Automatic,
                 true,
                 "delivered",
                 None,
@@ -50,15 +65,15 @@ fn automatic_finish_requires_the_whole_current_manifest_and_owner_finish_wins_ov
         assert_eq!(k.phase(&item), "closing");
         let mut stale = manifest.clone();
         stale.revision -= 1;
-        k.core.delivery_verified(&stale).unwrap();
+        k.core.delivery_verified(&proof(&stale)).unwrap();
         let mut partial = manifest.clone();
         partial.refs.pop();
-        k.core.delivery_verified(&partial).unwrap();
+        k.core.delivery_verified(&proof(&partial)).unwrap();
         assert_eq!(k.phase(&item), "closing");
         if owner_first {
             k.finish(&item).unwrap();
         }
-        k.core.delivery_verified(&manifest).unwrap();
+        k.core.delivery_verified(&proof(&manifest)).unwrap();
         let closed = store.items().get(&item).unwrap().unwrap();
         assert_eq!(closed.phase, "closed");
         assert_eq!(
@@ -66,7 +81,7 @@ fn automatic_finish_requires_the_whole_current_manifest_and_owner_finish_wins_ov
             Some(if owner_first { "owner" } else { "automatic" }),
         );
         let restarted = k.reopened();
-        restarted.delivery_verified(&manifest).unwrap();
+        restarted.delivery_verified(&proof(&manifest)).unwrap();
         let cycles = store.items().cycles(&item).unwrap();
         assert_eq!(cycles.len(), 1);
         assert_eq!(store.items().get(&item).unwrap().unwrap(), closed);

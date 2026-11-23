@@ -24,9 +24,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::cycle::{ACTIVE, CLOSING, OP_BUILD, OP_RELEASE, Policy};
+use crate::cycle::{ACTIVE, CLOSING, ClosePolicy, OP_BUILD, OP_RELEASE};
 use crate::error::Result;
-use crate::lifecycle::settle;
 use crate::repo::{Item, ItemExt};
 use crate::thread::flowback::{Update, flow_quiet};
 use crate::upstream::{DONE_MERGE, DONE_TAG, Probe};
@@ -68,7 +67,7 @@ pub(crate) enum Stop {
     },
     /// The session sat idle with nothing going on (`crate::stall`).
     Idle { why: String },
-    /// The coordinator stopped while its work graph needs it ([`crate::work::Work::Failed`]).
+    /// The coordinator stopped while its work graph needs it ([`crate::turn_wait::CoordinatorAttention::Failed`]).
     Workflow { why: String },
 }
 
@@ -341,22 +340,15 @@ impl Tx<'_> {
         }
         /* looked at again right before a continue is spent: the stop may be old news (a probe
          * that came back late, a unit that started meanwhile), and a waiting item is not continued */
-        let work = self.work_to_continue(&self.item(&i.id)?)?;
-        if work.waiting() {
+        if self.turn_has_wait(&self.item(&i.id)?, false)? {
             self.diagnostic_session(
                 &s.id,
                 None,
                 "takeover.evaluated",
                 "work_waiting",
                 true,
-                steve_store::diagnostics::Details {
-                    to_state: Some(work.code().into()),
-                    ..Default::default()
-                },
+                Default::default(),
             );
-            if let Some(t) = work.text() {
-                self.db().item_patch(&i.id, patch![now: t])?;
-            }
             return Ok(None);
         }
         /* you stopped its last turn: going on is yours, whatever stopped it besides (a failure the
@@ -366,7 +358,7 @@ impl Tx<'_> {
             .store()
             .sessions()
             .stop(&s.id)?
-            .is_some_and(|k| crate::work::held(&k))
+            .is_some_and(|k| crate::turn_wait::held(&k))
         {
             self.diagnostic_session(
                 &s.id,
@@ -447,7 +439,6 @@ impl Tx<'_> {
             Some(&s.id),
         )?;
         self.db().item_patch(&i.id, patch![now: "Steve 让它继续"])?;
-        settle(self.db(), &i.id)?;
         let text = match refusals.first() {
             Some(r) => format!("{text}{}", refused_text(r)),
             None => text.to_string(),
@@ -478,10 +469,10 @@ impl Tx<'_> {
             &format!("Steve 核对：{what}；按约定（{}）判定完成", rule_text(rule)),
             None,
         )?;
-        self.lc_request_complete(
+        self.request_delivery_close(
             &i.id,
             "steve",
-            Policy::Automatic,
+            ClosePolicy::Automatic,
             true,
             &format!("按约定完成：{what}"),
             None,
@@ -604,7 +595,7 @@ impl Tx<'_> {
             Probing::Requirement => {
                 /* an answer not kept decides nothing: the closing is checked again, which looks afresh */
                 if i.phase == CLOSING {
-                    self.lc_try_close(item_id)?;
+                    self.evaluate_cycle_close(item_id)?;
                 }
             }
             Probing::Stall { session, stop } => {
@@ -675,20 +666,6 @@ impl Tx<'_> {
             .map(|p| p.probe.clone())
     }
 
-    /// `owner/repo` of the item's project's `origin` when it is on GitHub.
-    fn github_slug_of(&self, i: &Item) -> Result<Option<String>> {
-        let Some(p) = self.db().project(i.project_id.as_deref())? else {
-            return Ok(None);
-        };
-        Ok(crate::git::git(
-            Path::new(&p.path),
-            &["config", "--get", "remote.origin.url"],
-        )
-        .ok()
-        .and_then(|u| crate::upstream::github_slug(&u)))
-    }
-
-    /// Whether the item's worktree holds a change of its own now (`None`: can't tell).
     fn own_change_now(&self, i: &Item) -> Option<bool> {
         if self.git_on_node(&i.id) {
             return self.git_seen(&i.id).and_then(|s| own_change_in(&s.print));
@@ -704,7 +681,9 @@ impl Tx<'_> {
         rule: &str,
         op: &steve_store::ItemOperation,
     ) -> Result<Option<()>> {
-        let own = match crate::cycle::closing_of(i)
+        let own = match i
+            .closing
+            .clone()
             .and_then(|c| c.fingerprint)
             .as_deref()
             .and_then(own_change_in)
@@ -712,25 +691,7 @@ impl Tx<'_> {
             Some(o) => Some(o),
             None => self.own_change_now(i),
         };
-        if own == Some(false) && op.evidence["pr_merged"] != json!(true) {
-            let branch = i.branch.clone().unwrap_or_default();
-            if op.evidence["pr_none"] != json!(true)
-                && !branch.is_empty()
-                && let Some(slug) = self.github_slug_of(i)?
-            {
-                if op.evidence["own"] != json!(false) {
-                    self.follow_pr(&op.id, &slug, &branch)?;
-                    self.db().store().write(|tx| {
-                        steve_store::operation_repo::set(
-                            tx,
-                            &op.id,
-                            "pending",
-                            &json!({"own": false}),
-                        )
-                    })?;
-                }
-                return Ok(Some(()));
-            }
+        if own == Some(false) {
             let note = "事项分支上没有自己的提交，没有要合并的改动";
             self.db().store().write(|tx| {
                 steve_store::operation_repo::set(tx, &op.id, "waived", &json!({"note": note}))
@@ -750,51 +711,11 @@ impl Tx<'_> {
         Ok(None)
     }
 
-    fn carry_requirement_pr(
-        &mut self,
-        i: &Item,
-        op: &steve_store::ItemOperation,
-        branch: &str,
-    ) -> Result<Option<()>> {
-        if let Some(prev) = self.pr_followed(i, &op.id, &branch)? {
-            let n = prev.evidence["pr"].as_u64().unwrap_or(0);
-            let open = prev.evidence["pr_state"].as_str() == Some("OPEN")
-                && prev.evidence["pr_merged"] != json!(true);
-            let mut carry = json!({"pr_before": n});
-            if open {
-                let told: Vec<Value> = prev.evidence["pr_told"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter(|k| k.as_str().is_some_and(crate::pull::is_tell_key))
-                    .cloned()
-                    .collect();
-                carry["pr_told"] = json!(told);
-                carry["pr_ci_notified"] = prev.evidence["pr_ci_notified"].clone();
-                carry["pr_tells"] = json!(prev.evidence["pr_tells"].as_i64().unwrap_or(0));
-            }
-            self.db()
-                .store()
-                .write(|tx| steve_store::operation_repo::set(tx, &op.id, "pending", &carry))?;
-            if open {
-                self.db().timeline_add(
-                    &i.id,
-                    "steve",
-                    "sys",
-                    &format!("验收了新的结果，Steve 继续跟踪 PR #{n}"),
-                    None,
-                )?;
-                return Ok(Some(()));
-            }
-        }
-        Ok(None)
-    }
-
     /// The release adapter for a project with a completion rule: the required release is the rule.
     /// Called again before each look at the gate; idempotent.
     pub(crate) fn contract_requirement(&mut self, i: &Item, rule: &str) -> Result<()> {
         let key = format!("{}:{}:{}", OP_RELEASE, i.cycle, i.revision);
-        let (op, _) = self.lc_op_add(
+        let (op, _) = self.record_item_operation(
             i,
             OP_RELEASE,
             Some(&key),
@@ -806,15 +727,6 @@ impl Tx<'_> {
         if op.status != "pending" {
             return Ok(());
         }
-        /* the pull request this result is followed on merged with it: the host's word is the
-         * evidence, whatever became of the branch (deleted on merge) or the worktree since (#347) */
-        if rule == DONE_MERGE && self.pr_merge_meets(i, &op)? {
-            return Ok(());
-        }
-        /* nothing of its own on the branch (as frozen when it was delivered, else as it is now), and no
-         * merged pull request of its branch says otherwise: there is no change to merge, so the rule
-         * does not apply and the acceptance alone completes it; it is never reported as merged
-         * (#218). On GitHub the branch's pull request is looked at once first (`pull`). */
         if self.waive_unchanged_requirement(i, rule, &op)?.is_some() {
             return Ok(());
         }
@@ -859,58 +771,27 @@ impl Tx<'_> {
         if p.unread {
             return self.requirement_unread(i, &op, rule, &p.summary());
         }
-        /* not there yet: the agent hears once what is missing; Steve keeps looking while it waits and,
-         * on GitHub, follows the branch's pull request (`pull`: CI, conflicts, Steve's own merge) */
-        if op.evidence.get("asked").is_none() {
-            self.db().store().write(|tx| {
-                steve_store::operation_repo::set(tx, &op.id, "pending", &json!({"asked": true}))
-            })?;
-            self.db().item_patch(
-                &i.id,
-                patch![stage: "收尾", now: format!("等{}", rule_text(rule))],
-            )?;
-            let branch = i.branch.clone().unwrap_or_default();
-            if let Some(slug) = p.slug.as_deref()
-                && !branch.is_empty()
-            {
-                self.follow_pr(&op.id, slug, &branch)?;
-                /* a pull request of this branch Steve already followed for an earlier result of the
-                 * cycle, still open, is followed on: the agent is not woken for it again (waking it
-                 * was what made it report a plan and void the result, #239), and what it was told
-                 * stays told (the cards about it were the earlier result's). It counts for this
-                 * result only once this result saw it open (`pr_before`): one that merged or closed
-                 * before is the earlier result's, and the agent hears it needs one of its own */
-                if self.carry_requirement_pr(i, &op, &branch)?.is_some() {
-                    return Ok(());
-                }
-            }
-            let to = self.steve_to(&i.id)?;
+        if op.evidence.get("asked").is_some() {
+            return Ok(());
+        }
+        self.db().store().write(|tx| {
+            steve_store::operation_repo::set(tx, &op.id, "pending", &json!({ "asked": true }))
+        })?;
+        self.db()
+            .item_patch(&i.id, patch![now: format!("等{}", rule_text(rule))])?;
+        let reason = format!(
+            "验收通过。按这个项目的约定，{}后事项才算完成；现在还差：{}。",
+            rule_text(rule),
+            p.summary()
+        );
+        if let Some(to) = self.steve_to(&i.id)? {
             let build =
                 build_text(crate::proof::build_followed(rule, &p) && self.build_required(i)?);
-            let how = if p.slug.is_some() {
-                crate::pull::follow_text(&branch)
-            } else {
-                "推送这个分支，在代码托管上开到默认分支的合并请求（PR/MR；修 bug 先建 issue 并关联）；合并按托管方的流程完成，不要推送默认分支、不要手工打 tag。".into()
-            };
-            let Some(to) = to else {
-                /* its session is in error: a message would only wait in its queue and void the
-                 * acceptance once it ran nothing (#347); a card for you instead */
-                return self.fail(
-                    &i.id,
-                    &format!(
-                        "验收通过了，按这个项目的约定{}后事项才算完成，现在还差：{}。Bot 的会话出错停下了，Steve 没有给它排消息：让它继续，或者在代码托管上合并后事项照常完成。",
-                        rule_text(rule),
-                        p.summary()
-                    ),
-                );
-            };
-            self.send(
-                &to,
-                &format!(
-                    "验收通过。按这个项目的约定，{}后事项才算完成；现在还差：{}。{how}{build}。做完后结束这一回合即可，Steve 会自己核对远端。",
-                    rule_text(rule),
-                    p.summary()
-                ),
+            self.send(&to, &format!("{reason}{build}完成后 Steve 会核对远端。"))?;
+        } else {
+            self.fail(
+                &i.id,
+                &format!("{reason}Bot 的会话出错停下了，Steve 没有给它排消息。"),
             )?;
         }
         Ok(())
@@ -970,7 +851,7 @@ impl Tx<'_> {
         )?;
         self.db()
             .item_patch(&i.id, patch![stage: "收尾", now: "核对不了远端，等你核对"])?;
-        settle(self.db(), &i.id)
+        Ok(())
     }
 
     /// The build the completion tag started is followed from now on: once per tag, or, `required` by
@@ -997,7 +878,7 @@ impl Tx<'_> {
         } else {
             format!("{OP_BUILD}:{tag}")
         };
-        let (_, new) = self.lc_op_add(
+        let (_, new) = self.record_item_operation(
             i,
             OP_BUILD,
             Some(&key),

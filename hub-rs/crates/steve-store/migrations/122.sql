@@ -35,6 +35,18 @@ CREATE TABLE item_delivery_refs (
  required INTEGER NOT NULL CHECK(required IN (0,1) AND (required=0 OR base IS NOT NULL)),
  PRIMARY KEY(item_id,cycle,scope,repository,number)
 );
+CREATE TABLE item_delivery_proofs (
+ item_id TEXT NOT NULL,
+ cycle INTEGER NOT NULL,
+ scope INTEGER NOT NULL,
+ revision INTEGER NOT NULL,
+ repository TEXT NOT NULL,
+ number INTEGER NOT NULL,
+ target_head TEXT NOT NULL CHECK (length(target_head) IN (40,64) AND target_head NOT GLOB '*[^0-9a-f]*'),
+ PRIMARY KEY(item_id,cycle,scope,revision,repository,number,target_head),
+ FOREIGN KEY(item_id,cycle,scope,repository,number)
+  REFERENCES item_delivery_refs(item_id,cycle,scope,repository,number) ON DELETE CASCADE
+);
 INSERT INTO item_delivery_refs(item_id,cycle,scope,repository,number,target,head,base,required)
  SELECT i.id,i.cycle,COALESCE((SELECT MAX(version) FROM item_goals WHERE item_id=i.id),0),
   p.repo_id,p.number,p.base_ref,p.head_sha,NULL,0
@@ -86,10 +98,12 @@ UPDATE decisions SET status='expired',resolved=(
  SELECT updated FROM items i WHERE i.id=decisions.item_id
 ),result='{"superseded":"item_lifecycle_migrated"}'
  WHERE status='open' AND (
-  item_id IN (SELECT id FROM item_owner_finishes)
+  (subject_type IN ('gh_pr_open','gh_pr_merge') AND requested_by='steve')
+  OR item_id IN (SELECT id FROM item_owner_finishes)
   OR (item_id IN (SELECT id FROM item_discarded_closings)
    AND (kind='accept' OR subject_type IN ('release','pr_awaiting_merge','gh_pr_open','gh_pr_merge')))
  );
+DELETE FROM item_operations WHERE kind='hooks.accepted';
 UPDATE item_operations SET required=0,status=CASE WHEN status='pending' THEN 'waived' ELSE status END
  WHERE EXISTS (
   SELECT 1 FROM item_owner_finishes f WHERE f.id=item_operations.item_id AND f.cycle=item_operations.cycle
@@ -97,19 +111,33 @@ UPDATE item_operations SET required=0,status=CASE WHEN status='pending' THEN 'wa
   SELECT 1 FROM item_discarded_closings d WHERE d.id=item_operations.item_id
    AND d.cycle=item_operations.cycle AND d.revision=item_operations.revision
  );
+-- Bind still eligible explicit PR operations to their original item scope.
+ALTER TABLE gh_effects ADD COLUMN item_cycle INTEGER;
+ALTER TABLE gh_effects ADD COLUMN item_scope INTEGER;
+UPDATE gh_effects SET (item_cycle,item_scope)=(
+ SELECT i.cycle,COALESCE((SELECT MAX(version) FROM item_goals WHERE item_id=i.id),0)
+ FROM decisions d JOIN items i ON i.id=d.item_id
+ WHERE d.id=gh_effects.decision_id AND i.phase<>'closed'
+   AND gh_effects.created >= COALESCE((SELECT MAX(closed) FROM item_cycles
+      WHERE item_id=i.id AND cycle<i.cycle),0)
+   AND gh_effects.created >= COALESCE((SELECT MAX(created) FROM item_goals WHERE item_id=i.id),0)
+) WHERE kind IN ('open','merge') AND state IN ('pending','running','unknown');
 UPDATE gh_effects SET state=CASE WHEN state='pending' THEN 'failed' ELSE state END,
  next_at=NULL,last_error='item lifecycle migrated'
  WHERE state IN ('pending','unknown') AND kind IN ('open','merge')
-  AND decision_id IN (SELECT id FROM decisions WHERE item_id IN (
-   SELECT id FROM item_owner_finishes UNION SELECT id FROM item_discarded_closings
-  ));
+  AND decision_id IN (SELECT id FROM decisions
+   WHERE (subject_type IN ('gh_pr_open','gh_pr_merge') AND requested_by='steve')
+    OR item_id IN (SELECT id FROM item_owner_finishes UNION SELECT id FROM item_discarded_closings));
+UPDATE gh_repos SET settings=json_remove(settings,'$.after_accept','$.finish_on','$.draft_pr');
 -- Old outbox completions were missing the cycle and accepted head. Preserve other effects.
-UPDATE outbox_events SET payload=json_set(payload,'$.finish',json('[]'))
+UPDATE outbox_events SET payload=json_remove(payload,'$.finish')
  WHERE topic='github.after' AND json_type(payload,'$.finish')='array';
 DELETE FROM queued WHERE via IN ('steve','resumed:steve') AND session_id IN (
  SELECT s.id FROM sessions s JOIN item_discarded_closings d ON d.id=s.item_id
 );
 UPDATE items SET phase='active',revision=revision+1,closing=NULL
  WHERE id IN (SELECT id FROM item_discarded_closings);
+UPDATE items SET closing=json_remove(closing,'$.policy')
+ WHERE phase='closing' AND json_extract(closing,'$.kind') IN ('cancel','fail');
 DROP TABLE item_owner_finishes;
 DROP TABLE item_discarded_closings;

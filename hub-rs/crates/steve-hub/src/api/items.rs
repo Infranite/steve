@@ -199,14 +199,9 @@ pub async fn get_one(
     st.read(move |r| {
         let i = own(r.item_get(&id)?, &c.ws, Noun::Item)?;
         let mut out = summary(r, i)?;
-        let mut text = r
+        let text = r
             .item_text(&c.ws, &id)?
             .ok_or_else(|| ApiError::not_found(Noun::Item.missing()))?;
-        if let Some(Value::String(now)) = text.get_mut("now")
-            && let std::borrow::Cow::Owned(shown) = steve_core::now_line::shown(now)
-        {
-            *now = shown;
-        }
         out.extend(text);
         if let Some(dispatch) = dispatch {
             out.insert("dispatch".into(), dispatch);

@@ -48,17 +48,7 @@ pub fn register(r: &mut Registry, slot: Slot) {
 /// `(code, Chinese label)` pairs of an enum setting.
 type Choices = &'static [(&'static str, &'static str)];
 
-const ENUM_FIELDS: [(&str, &str, Choices); 4] = [
-    (
-        "after_accept",
-        "验收通过后",
-        &[("ask_pr", "问我要不要开 PR"), ("none", "不开")],
-    ),
-    (
-        "finish_on",
-        "什么时候算完成",
-        &[("accepted", "开了 PR 就完成"), ("merged", "合并后才完成")],
-    ),
+const ENUM_FIELDS: [(&str, &str, Choices); 2] = [
     (
         "merge_method",
         "合并方式",
@@ -74,10 +64,7 @@ const ENUM_FIELDS: [(&str, &str, Choices); 4] = [
         &[("supplement", "交给事项修"), ("signal", "只记录")],
     ),
 ];
-const BOOL_FIELDS: [(&str, &str); 2] = [
-    ("delete_branch", "合并后删除分支"),
-    ("draft_pr", "先开成草稿 PR"),
-];
+const BOOL_FIELDS: [(&str, &str); 1] = [("delete_branch", "合并后删除分支")];
 
 fn yes_no(b: bool) -> &'static str {
     if b { "是" } else { "否" }

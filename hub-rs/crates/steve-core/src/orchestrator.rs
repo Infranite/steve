@@ -2,7 +2,7 @@
 
 use crate::error::{CoreError, Result, msg};
 use crate::git;
-use crate::lifecycle::{deps_open, settle, supersede, tidy};
+use crate::lifecycle::{deps_open, supersede, tidy};
 use crate::marks::reject;
 use crate::modules::Point;
 use crate::patch;
@@ -544,28 +544,6 @@ impl Core {
     pub fn mark_awaiting_approval(&self, session_id: &str) -> Result<()> {
         self.tx().mark_awaiting_approval(session_id)
     }
-    /// A module that took over an item's wrap-up (GitHub after a merge) says it is done: the required
-    /// `hooks.accepted` operation of the current cycle succeeds and the closing gate is checked. A report
-    /// for an item that has no such operation open (another cycle, already closed) is recorded only — it
-    /// never closes the item by itself.
-    pub fn module_done(&self, item: &str, now_text: &str) -> Result<()> {
-        let mut t = self.tx();
-        match t.lc_open_op(item, crate::cycle::OP_HOOKS)? {
-            Some(op) => {
-                t.lc_op_set(&op.id, "succeeded", json!({"note": now_text}))?;
-            }
-            None => {
-                t.db().timeline_add(
-                    item,
-                    "steve",
-                    "sys",
-                    &format!("{now_text}（已记录）"),
-                    None,
-                )?;
-            }
-        }
-        Ok(())
-    }
     /// A module's own result completes the item's work (a mail draft item whose mail went out): a
     /// completion request with that result as the evidence of an automatic acceptance. Ignored for a
     /// closed item (a late result of an earlier cycle).
@@ -582,10 +560,10 @@ impl Core {
             )?;
             return Ok(());
         }
-        t.lc_request_complete(
+        t.request_delivery_close(
             item,
             "steve",
-            crate::cycle::Policy::Automatic,
+            crate::cycle::ClosePolicy::Automatic,
             true,
             evidence,
             None,
@@ -593,21 +571,10 @@ impl Core {
         )?;
         Ok(())
     }
-    /// A module reports a failure of its wrap-up: the operation stays open, a fail card asks what next.
     pub fn fail_item(&self, item: &str, why: &str) -> Result<()> {
-        let mut t = self.tx();
-        if let Some(op) = t.lc_open_op(item, crate::cycle::OP_HOOKS)? {
-            t.db().store().write(|tx| {
-                steve_store::operation_repo::set(
-                    tx,
-                    &op.id,
-                    "running",
-                    &json!({"last_failure": why}),
-                )
-            })?;
-        }
-        t.fail(item, why)
+        self.tx().fail(item, why)
     }
+
     /// The lifecycle commands of the API (`accept` | `cancel` | `fail` | `new_cycle`), checked against
     /// the cycle and revision the caller saw (409 otherwise).
     #[allow(clippy::too_many_arguments)]
@@ -648,9 +615,12 @@ impl Core {
         )?;
         match command {
             "accept" => {
-                let c = crate::cycle::closing_of(&i)
+                let c = i
+                    .closing
+                    .clone()
                     .filter(|c| {
-                        i.phase == crate::cycle::CLOSING && c.kind == crate::cycle::COMPLETE
+                        i.phase == crate::cycle::CLOSING
+                            && c.kind == crate::cycle::CloseKind::Complete
                     })
                     .ok_or_else(|| {
                         crate::cycle::conflict(steve_i18n::t!("core.item.not_awaiting_acceptance"))
@@ -666,16 +636,20 @@ impl Core {
                     }
                     _ => {
                         t.answer_line(item, actor, "验收通过", None)?;
-                        t.lc_accept(item, crate::cycle::Policy::Human, Some("你确认了完成"))?;
+                        t.accept_delivery(
+                            item,
+                            crate::cycle::ClosePolicy::Human,
+                            Some("你确认了完成"),
+                        )?;
                     }
                 }
             }
             "cancel" => {
                 t.db()
                     .timeline_add(item, actor, "me", "取消这个事项", None)?;
-                t.lc_stop(
+                t.request_cycle_stop(
                     item,
-                    crate::cycle::CANCEL,
+                    crate::cycle::CloseKind::Cancel,
                     actor,
                     reason
                         .filter(|r| !r.trim().is_empty())
@@ -692,10 +666,10 @@ impl Core {
                     })?;
                 t.db()
                     .timeline_add(item, actor, "me", &format!("标记失败：{why}"), None)?;
-                t.lc_stop(item, crate::cycle::FAIL, actor, why, None)?;
+                t.request_cycle_stop(item, crate::cycle::CloseKind::Fail, actor, why, None)?;
             }
             "new_cycle" => {
-                t.lc_new_cycle(item, actor, goal)?;
+                t.start_new_cycle(item, actor, goal)?;
             }
             _ => {
                 return Err(CoreError::Status(
@@ -710,7 +684,7 @@ impl Core {
     pub fn lifecycle_tick(&self) -> Result<usize> {
         let n = {
             let mut t = self.tx();
-            let n = t.lc_tick()?;
+            let n = t.evaluate_closing_cycles()?;
             t.dependency_tick()?;
             t.workflow_tick()?;
             n
@@ -721,7 +695,7 @@ impl Core {
     pub fn lifecycle_view(&self, item: &str) -> Result<Value> {
         let t = self.tx();
         let i = t.item(item)?;
-        t.lc_view(&i)
+        crate::cycle::lifecycle_view(&t, &i)
     }
     /// The lifecycle projections of many items under one lock.
     pub fn lifecycle_views(
@@ -732,7 +706,7 @@ impl Core {
         let mut out = std::collections::HashMap::new();
         for id in items {
             if let Some(i) = t.db().item(id)? {
-                out.insert(id.clone(), t.lc_view(&i)?);
+                out.insert(id.clone(), crate::cycle::lifecycle_view(&t, &i)?);
             }
         }
         Ok(out)
@@ -1392,7 +1366,7 @@ impl Tx<'_> {
         files: &[FileRef],
     ) -> Result<()> {
         if self.dependency_waiting(item)? || !deps_open(self.db(), item)?.is_empty() {
-            self.lc_guard_open(item)?;
+            self.require_open_item(item)?;
             self.db()
                 .item_patch(item, patch![status: "block", now: "等待前置事项完成"])?;
             return Ok(());
@@ -1450,9 +1424,9 @@ impl Tx<'_> {
         self.rt().can_run(item_id, &bot.id, &bot.harness)?;
         /* taken first: a start that fails leaves nothing behind for a later one */
         let after = self.st.handoffs.remove(item_id);
-        self.lc_guard_open(item_id)?;
+        self.require_open_item(item_id)?;
         /* preparing the worktree is the cycle's first actual work */
-        self.lc_start(item_id)?;
+        self.start_item_work(item_id)?;
         if let Some(b) = bot_override {
             self.db().item_patch(item_id, patch![bot_id: b])?;
         }
@@ -1582,7 +1556,7 @@ impl Tx<'_> {
                 .iter()
                 .any(|d| d.status == "open" && d.kind == "fail" && d.question == why)
             {
-                return settle(self.db(), item_id);
+                return Ok(());
             }
             crate::lifecycle::supersede_where(
                 self.db(),
@@ -1617,7 +1591,7 @@ impl Tx<'_> {
                     ..Default::default()
                 },
             );
-            settle(self.db(), item_id)
+            Ok(())
         })
     }
     /* ── Steve tools ── */
@@ -1660,10 +1634,6 @@ impl Tx<'_> {
                 .plan_round_add(&i.workspace_id, item, &i.plan, end, &Self::by(s))?;
         }
         self.db().item_patch(item, patch![now: now, plan: plan])?;
-        /* the bot reports progress, so it is working: a wait without a card (a new cycle it took up) is over */
-        if i.status == "wait" {
-            settle(self.db(), item)?;
-        }
         let steps = |p: &[PlanStep]| p.iter().map(|x| x.step.clone()).collect::<Vec<_>>();
         let note = match turn {
             Some("done") => "上一轮计划已完成，开始新一轮计划".to_string(),
@@ -1759,7 +1729,7 @@ impl Tx<'_> {
                     ..Default::default()
                 },
             );
-            settle(&db, item)
+            Ok(())
         })?;
         self.mark(&s.id, Mark::Asked);
         Ok(())
@@ -1814,7 +1784,7 @@ impl Tx<'_> {
                     ..Default::default()
                 },
             );
-            settle(&db, item)
+            Ok(())
         })?;
         self.mark(&s.id, Mark::Approval);
         Ok(())
@@ -2040,7 +2010,7 @@ impl Tx<'_> {
                 },
             );
             self.mark(&s.id, Mark::Asked);
-            return settle(self.db(), item_id);
+            return Ok(());
         }
         let unfinished_note = if unfinished.is_empty() {
             String::new()
@@ -2049,9 +2019,9 @@ impl Tx<'_> {
         };
         let evidence: Vec<String> = checks.iter().map(crate::proof::check_line).collect();
         let policy = match self.accept_of(item)?.as_str() {
-            "waived" => crate::cycle::Policy::Waived,
-            "auto" => crate::cycle::Policy::Automatic,
-            _ => crate::cycle::Policy::Human,
+            "waived" => crate::cycle::ClosePolicy::Waived,
+            "auto" => crate::cycle::ClosePolicy::Automatic,
+            _ => crate::cycle::ClosePolicy::Human,
         };
         self.mark(&s.id, Mark::Delivered);
         let saved_summary = outputs
@@ -2067,8 +2037,8 @@ impl Tx<'_> {
         let missing_proof = self.proof_missing(item, checks)?.is_some();
         let clean_for_auto =
             !has_failed_check && !missing_proof && left.is_empty() && unfinished.is_empty();
-        if policy == crate::cycle::Policy::Waived
-            || (policy == crate::cycle::Policy::Automatic && clean_for_auto)
+        if policy == crate::cycle::ClosePolicy::Waived
+            || (policy == crate::cycle::ClosePolicy::Automatic && clean_for_auto)
         {
             flow_quiet(
                 self.db(),
@@ -2081,7 +2051,7 @@ impl Tx<'_> {
                 },
             );
             self.mark_deliver(&item.workspace_id, item_id, &Self::by(s), None); // stats (ST3)
-            let line = if policy == crate::cycle::Policy::Automatic {
+            let line = if policy == crate::cycle::ClosePolicy::Automatic {
                 "自检全部通过，自动验收"
             } else {
                 "免确认：不需要验收"
@@ -2089,10 +2059,10 @@ impl Tx<'_> {
             self.db()
                 .timeline_add(item_id, "steve", "sys", line, None)?;
             /* the request returns at once; the close waits for this very turn and anything required */
-            self.lc_request_complete(item_id, &Self::by(s), policy, true, line, None, evidence)?;
+            self.request_delivery_close(item_id, &Self::by(s), policy, true, line, None, evidence)?;
             return Ok(());
         }
-        if policy == crate::cycle::Policy::Automatic {
+        if policy == crate::cycle::ClosePolicy::Automatic {
             self.db().timeline_add(
                 item_id,
                 "steve",
@@ -2102,7 +2072,7 @@ impl Tx<'_> {
             )?;
         }
         /* a delivery waiting for acceptance before this one is void */
-        self.lc_invalidate(
+        self.invalidate_delivery(
             item_id,
             crate::cycle::void::REDELIVER,
             "有新的交付，上一次交付作废",
@@ -2122,10 +2092,10 @@ impl Tx<'_> {
             requested_by: Self::by(s),
         })?;
         self.mark_deliver(&item.workspace_id, item_id, &Self::by(s), Some(&d.id)); // stats (ST3)
-        self.lc_request_complete(
+        self.request_delivery_close(
             item_id,
             &Self::by(s),
-            crate::cycle::Policy::Human,
+            crate::cycle::ClosePolicy::Human,
             false,
             "交付，等你验收",
             Some(d.id.clone()),
@@ -2146,7 +2116,7 @@ impl Tx<'_> {
                 ..Default::default()
             },
         );
-        settle(self.db(), item_id)
+        Ok(())
     }
 
     pub(crate) fn tool_publish(&mut self, s: &Session, branch: &str, summary: &str) -> Result<()> {
@@ -2199,7 +2169,7 @@ impl Tx<'_> {
         })?;
         self.db().item_patch(item_id, patch![now: "等你批准发布"])?;
         self.mark(&s.id, Mark::Approval);
-        settle(self.db(), item_id)
+        Ok(())
     }
 
     /// steve_publish with nothing on the branch: no release decision. An accepted item is finished; one not yet
@@ -2335,21 +2305,6 @@ impl Tx<'_> {
                     s.stop_reason.as_deref() == Some(steve_store::SESSION_START_FAILURE)
                 })
         {
-            // A late notification of the failed open must not put a successful/manual retry
-            // back into waiting. The runtime already saved this stop atomically with its card.
-            if self
-                .db()
-                .store()
-                .sessions()
-                .stop(&session.id)?
-                .is_some_and(|s| {
-                    s.stop_reason.as_deref() == Some(steve_store::SESSION_START_FAILURE)
-                })
-                && let Some(item) = session.item_id.as_deref()
-                && self.db().item(item)?.is_some_and(|i| i.status != "pause")
-            {
-                settle(self.db(), item)?;
-            }
             return Ok(());
         }
         /* how it ended, kept for the stall watch (durably: the same after a restart). A turn you
@@ -2394,7 +2349,7 @@ impl Tx<'_> {
         }
         if let (Some(e), Some(k)) = (&end, &kept)
             && k.stop_reason.is_some()
-            && crate::work::yours(k)
+            && crate::turn_wait::yours(k)
             && k.attempt.as_deref().is_some_and(|a| a != e.attempt)
             && !self.db().sent_after(&session.id, k.seq.unwrap_or(0))?
         {
@@ -2423,9 +2378,6 @@ impl Tx<'_> {
                 .read(|r| steve_store::node_write::stall::held_attempt(r, attempt))?
         {
             self.st.pending.remove(&session.id);
-            if let Some(item) = session.item_id.as_deref() {
-                settle(self.db(), item)?;
-            }
             return Ok(());
         }
         let Some(item_id) = session.item_id.as_deref() else {
@@ -2488,7 +2440,7 @@ impl Tx<'_> {
             );
             /* the turn may have merged or tagged: a completion rule is looked up afresh */
             self.forget_probe(item_id);
-            if !self.lc_try_close(item_id)? {
+            if !self.evaluate_cycle_close(item_id)? {
                 self.release_not_requested(item_id)?;
             }
             return Ok(());
@@ -2536,7 +2488,7 @@ impl Tx<'_> {
                 true,
                 Default::default(),
             );
-            return settle(self.db(), item_id);
+            return Ok(());
         }
         /* a coordinator's turn ended: its graph decides whether that is a wait or a stop. Running,
          * queued, waiting for you or paused work is waited for; a failed unit is a failure it owns */
@@ -2549,33 +2501,27 @@ impl Tx<'_> {
                 .get(item_id)?
                 .is_some_and(|g| !g.single_session())
         {
-            let work = self.work(&item)?;
-            if work.waiting() {
+            if self.turn_has_wait(&item, true)? {
                 self.diagnostic_session(
                     &session.id,
                     t.attempt.as_deref(),
                     "turn.end_evaluated",
                     "work_waiting",
                     true,
-                    steve_store::diagnostics::Details {
-                        to_state: Some(work.code().into()),
-                        ..Default::default()
-                    },
+                    Default::default(),
                 );
-                if let Some(text) = work.text() {
-                    self.db().item_patch(item_id, patch![now: text])?;
-                }
                 return Ok(());
             }
-            match work {
-                crate::work::Work::Failed(why) => graph_failed = Some(why),
-                /* it paused its own graph and asked nothing: yours to decide, not continued */
-                crate::work::Work::Halted(why)
-                    if t.stop_reason != "cancelled" && error.is_none() =>
+            match self.coordinator_attention(item_id)? {
+                Some(crate::turn_wait::CoordinatorAttention::Failed(why)) => {
+                    graph_failed = Some(why)
+                }
+                Some(crate::turn_wait::CoordinatorAttention::PausedByAgent(why))
+                    if error.is_none() =>
                 {
                     return self.fail(item_id, &why);
                 }
-                _ => {}
+                Some(crate::turn_wait::CoordinatorAttention::PausedByAgent(_)) | None => {}
             }
         }
         if t.stop_reason == "cancelled" {
@@ -2724,7 +2670,7 @@ impl Tx<'_> {
     /// proves it live: a card asks you (already live / no release needed / look at it).
     pub(crate) fn release_unproven(&mut self, item_id: &str) -> Result<()> {
         if self
-            .lc_open_op(item_id, crate::cycle::OP_RELEASE)?
+            .open_item_operation(item_id, crate::cycle::OP_RELEASE)?
             .is_none()
         {
             return Ok(());
@@ -2753,18 +2699,18 @@ impl Tx<'_> {
     /// (decided by the user on 2026-11-09). Releasing is still yours to ask for, as a new round.
     pub(crate) fn release_not_requested(&mut self, item_id: &str) -> Result<()> {
         let i = self.item(item_id)?;
-        let Some(c) = crate::cycle::closing_of(&i)
-            .filter(|c| i.phase == crate::cycle::CLOSING && c.kind == crate::cycle::COMPLETE)
-        else {
+        let Some(c) = i.closing.clone().filter(|c| {
+            i.phase == crate::cycle::CLOSING && c.kind == crate::cycle::CloseKind::Complete
+        }) else {
             return Ok(());
         };
-        let Some(op) = self.lc_open_op(item_id, crate::cycle::OP_RELEASE)? else {
+        let Some(op) = self.open_item_operation(item_id, crate::cycle::OP_RELEASE)? else {
             return Ok(());
         };
         if op.status != "pending" || self.st.releasing.as_ref().is_some_and(|r| r.item == i.id) {
             return Ok(());
         }
-        let g = self.lc_gate(&i, &c)?;
+        let g = self.delivery_blockers(&i, &c)?;
         if g.turn || g.input || g.decision || g.acceptance || g.changed {
             return Ok(());
         }
@@ -2784,14 +2730,14 @@ impl Tx<'_> {
         let line = "验收已经通过，Agent 没有请求发布：不发布，按验收完成";
         self.db()
             .timeline_add(item_id, "steve", "sys", line, None)?;
-        self.lc_reconcile(
+        self.reconcile_item_operations(
             item_id,
             crate::cycle::OP_RELEASE,
             "waived",
             line,
             Some(&op.id),
         )?;
-        self.lc_op_set(
+        self.settle_item_operation(
             &op.id,
             "waived",
             json!({"note": "Agent 没有请求发布，不发布"}),
@@ -2812,7 +2758,6 @@ impl Tx<'_> {
         let i = self.item(item_id)?;
         self.db()
             .item_patch(item_id, patch![stage: "收尾", now: "等待发布"])?;
-        settle(self.db(), item_id)?;
         self.send(
             to,
             &format!(
@@ -3275,10 +3220,10 @@ impl Tx<'_> {
                         self.send(&to, &format!("用户已确认设计，并要求按方案实现。先阅读本事项的交付正文及设计产出，然后实现、验证并再次交付。{detail}"))?;
                     }
                     "只保留设计" => {
-                        self.lc_request_complete(
+                        self.request_delivery_close(
                             &i,
                             actor,
-                            crate::cycle::Policy::Human,
+                            crate::cycle::ClosePolicy::Human,
                             true,
                             "你确认只交付设计，暂不实现",
                             None,
@@ -3325,8 +3270,11 @@ impl Tx<'_> {
                     if text == ACCEPT_AND_RELEASE {
                         self.st.release_with_accept = Some((i.clone(), actor.to_string()));
                     }
-                    let accepted =
-                        self.lc_accept(&i, crate::cycle::Policy::Human, Some("你验收通过"));
+                    let accepted = self.accept_delivery(
+                        &i,
+                        crate::cycle::ClosePolicy::Human,
+                        Some("你验收通过"),
+                    );
                     self.st.release_with_accept = None;
                     accepted?;
                     /* the card's answer says whether the release started with it */
@@ -3339,10 +3287,14 @@ impl Tx<'_> {
                             .merge_result(id, &json!({"release": "started"}))?;
                     }
                     if text == "no-release"
-                        && let Some(op) = self.lc_open_op(&i, crate::cycle::OP_RELEASE)?
+                        && let Some(op) = self.open_item_operation(&i, crate::cycle::OP_RELEASE)?
                         && op.evidence.get("rule").is_none()
                     {
-                        self.lc_op_set(&op.id, "waived", json!({"note": "你选择不发布"}))?;
+                        self.settle_item_operation(
+                            &op.id,
+                            "waived",
+                            json!({"note": "你选择不发布"}),
+                        )?;
                     }
                 }
                 return reget(self);
@@ -3356,7 +3308,7 @@ impl Tx<'_> {
                     None,
                 )?;
                 tl(self, &i, &format!("返工：{text}"))?;
-                self.lc_invalidate(&i, crate::cycle::void::REWORK, "验收没有通过，返工")?;
+                self.invalidate_delivery(&i, crate::cycle::void::REWORK, "验收没有通过，返工")?;
                 self.db()
                     .item_patch(&i, patch![stage: "执行", now: "按你的意见返工"])?;
                 self.send(
@@ -3431,10 +3383,6 @@ impl Tx<'_> {
                     }
                 }
             }
-            ("approve", crate::pull::PR_AWAITING_MERGE) => {
-                self.pr_merge_answer(&d, choice, text, actor)?;
-                return reget(self);
-            }
             ("approve", "tool_call") => {
                 let opt = (choice != "deny").then_some(choice);
                 /* answer first: resolve() only touches open decisions, so marking it resolved first would hide the expiry;
@@ -3474,9 +3422,9 @@ impl Tx<'_> {
                 } else if !text.is_empty() {
                     /* your no stands for this cycle (release_requirement); the agent first does what you said instead */
                     self.send(&to, &format!("用户没有批准发布：{text}。这个周期不再发布；按用户的意思还要做的（比如合并 PR）做完就结束这一回合，改了代码就用 steve_deliver 重新交付。"))?;
-                } else if let Some(op) = self.lc_open_op(&i, crate::cycle::OP_RELEASE)? {
+                } else if let Some(op) = self.open_item_operation(&i, crate::cycle::OP_RELEASE)? {
                     /* you decided this result needs no release: the requirement is waived, said so */
-                    self.lc_op_set(&op.id, "waived", json!({"note": "你选择不发布"}))?;
+                    self.settle_item_operation(&op.id, "waived", json!({"note": "你选择不发布"}))?;
                     return reget(self);
                 }
             }
@@ -3533,7 +3481,13 @@ impl Tx<'_> {
                         Some(json!({"status": before.status, "now": before.now})),
                     )?;
                     self.answer_line(&i, actor, "不需要", None)?;
-                    self.lc_stop(&i, crate::cycle::CANCEL, actor, "你认为不需要", None)?;
+                    self.request_cycle_stop(
+                        &i,
+                        crate::cycle::CloseKind::Cancel,
+                        actor,
+                        "你认为不需要",
+                        None,
+                    )?;
                 }
                 return reget(self);
             }
@@ -3555,21 +3509,12 @@ impl Tx<'_> {
                         }
                         /* accepted and only the release left (release_not_requested): continuing is publishing */
                         let publish = before.phase == crate::cycle::CLOSING
-                            && self.lc_open_op(&i, crate::cycle::OP_RELEASE)?.is_some();
+                            && self
+                                .open_item_operation(&i, crate::cycle::OP_RELEASE)?
+                                .is_some();
                         let next = if publish {
                             let branch = before.branch.as_deref().unwrap_or_default();
-                            if self
-                                .db()
-                                .project(before.project_id.as_deref())?
-                                .is_some_and(|p| pr_flow(&p))
-                            {
-                                format!(
-                                    "验收已经通过，只差 PR 合并。{}",
-                                    crate::pull::follow_text(branch)
-                                )
-                            } else {
-                                format!("验收已经通过，只差发布。{}", publish_text(branch))
-                            }
+                            format!("验收已经通过，只差发布。{}", publish_text(branch))
                         } else {
                             "请继续。完成后用 steve_deliver 交付；需要决定时用 steve_ask。".into()
                         };
@@ -3595,15 +3540,15 @@ impl Tx<'_> {
                             format!("你确认已交付并验收通过：{text}")
                         };
                         tl(self, &i, &line)?;
-                        self.lc_invalidate(
+                        self.invalidate_delivery(
                             &i,
                             crate::cycle::void::REACCEPT,
                             "你确认已交付并验收通过",
                         )?;
-                        self.lc_request_complete(
+                        self.request_delivery_close(
                             &i,
                             actor,
-                            crate::cycle::Policy::Human,
+                            crate::cycle::ClosePolicy::Human,
                             true,
                             "你确认已交付并验收通过",
                             None,
@@ -3630,8 +3575,8 @@ impl Tx<'_> {
                             "release_retry" => "failed",
                             _ => "waived",
                         };
-                        let required = self.lc_open_op(&i, crate::cycle::OP_RELEASE)?;
-                        self.lc_reconcile(
+                        let required = self.open_item_operation(&i, crate::cycle::OP_RELEASE)?;
+                        self.reconcile_item_operations(
                             &i,
                             crate::cycle::OP_RELEASE,
                             checked,
@@ -3639,27 +3584,28 @@ impl Tx<'_> {
                             required.as_ref().map(|o| o.id.as_str()),
                         )?;
                         let completing = self.db().item(&i)?.is_some_and(|x| {
-                            crate::cycle::closing_of(&x)
-                                .is_some_and(|c| c.kind == crate::cycle::COMPLETE)
+                            x.closing
+                                .clone()
+                                .is_some_and(|c| c.kind == crate::cycle::CloseKind::Complete)
                         });
                         if let Some(op) = required {
                             match choice {
                                 "release_live" => {
-                                    self.lc_op_set(
+                                    self.settle_item_operation(
                                         &op.id,
                                         "succeeded",
                                         json!({"note": "你核对过已经上线"}),
                                     )?;
                                 }
                                 "release_waive" => {
-                                    self.lc_op_set(
+                                    self.settle_item_operation(
                                         &op.id,
                                         "waived",
                                         json!({"note": "你确认不需要发布"}),
                                     )?;
                                 }
                                 _ => {
-                                    self.lc_op_set(
+                                    self.settle_item_operation(
                                         &op.id,
                                         "pending",
                                         json!({"note": "需要重新发布"}),
@@ -3724,9 +3670,6 @@ impl Tx<'_> {
                 )?;
             }
         }
-        if let Some(i) = &item_id {
-            settle(self.db(), i)?;
-        }
         reget(self)
     }
 
@@ -3773,10 +3716,6 @@ impl Tx<'_> {
                     "expired",
                     None,
                 )?;
-            }
-            /* a pull request of an item that is gone: nothing left to merge */
-            ("approve", crate::pull::PR_AWAITING_MERGE) => {
-                db.decision_resolve(id, json!({"choice": choice}), "expired", None)?;
             }
             ("approve", "tool_call") => {
                 let opt = (choice != "deny").then_some(choice);
@@ -3909,13 +3848,13 @@ impl Tx<'_> {
                     "core.decision.undo_closed"
                 )));
             }
-            self.lc_new_cycle(i, actor, None)?;
+            self.start_new_cycle(i, actor, None)?;
             self.db().item_patch(i, patch![stage: "规划"])?;
         }
         if d.kind == "accept"
             && let Some(i) = d.item_id.as_deref()
         {
-            self.lc_unaccept(i)?;
+            self.withdraw_acceptance(i)?;
         }
         if let Some(d) = self.module_undo(&d, actor, undoable)? {
             /* the module reopened it with its own side undone; the item follows as for core decisions */
@@ -3936,7 +3875,6 @@ impl Tx<'_> {
         }
         if let Some(i) = &d.item_id {
             self.db().timeline_add(i, actor, "me", "撤销了决定", None)?;
-            settle(self.db(), i)?;
             if d.kind == "accept" {
                 self.reblock(i, d.resolved.unwrap_or(0))?;
             }
@@ -4062,8 +4000,6 @@ impl Tx<'_> {
                     &i.id,
                     patch![status: "pause", now: "你撤回了待处理，需要时点继续"],
                 )?;
-            } else {
-                settle(self.db(), &i.id)?;
             }
         }
         db.decision(id)?
@@ -4079,10 +4015,10 @@ impl Tx<'_> {
         let Some(i) = item_id.map(|i| self.db().item(i)).transpose()?.flatten() else {
             return Ok(());
         };
-        self.lc_new_input(&i.id)?;
+        self.receive_item_input(&i.id)?;
         let fresh = i.phase == crate::cycle::READY;
         if fresh {
-            self.lc_start(&i.id)?;
+            self.start_item_work(&i.id)?;
         }
         let i = self.item(&i.id)?;
         if !i.is_settled() {
@@ -4109,7 +4045,7 @@ impl Tx<'_> {
             &i.id,
             patch![status: "run", stage: "执行", now: "收到新消息，继续处理", archived: false],
         )?;
-        settle(self.db(), &i.id)
+        Ok(())
     }
 
     pub(crate) fn supplement(
@@ -4119,7 +4055,7 @@ impl Tx<'_> {
         mode: SupplementMode,
         files: &[FileRef],
     ) -> Result<()> {
-        self.lc_guard_open(item_id)?;
+        self.require_open_item(item_id)?;
         let s = self.active_session(item_id)?;
         self.db().timeline_add_files(
             item_id,
@@ -4191,7 +4127,7 @@ impl Tx<'_> {
     /// holds for a release the queue is left as it is: taking it and prompting again would only queue
     /// it a second time (a duplicate `queued` entry, its `via` and attachments lost).
     pub(crate) fn deliver_queued(&mut self, item_id: &str) -> Result<()> {
-        self.lc_guard_open(item_id)?;
+        self.require_open_item(item_id)?;
         let Some(s) = self.active_session(item_id)? else {
             return Ok(());
         };
@@ -4263,13 +4199,19 @@ impl Tx<'_> {
             ItemAction::Drop => {
                 self.db()
                     .timeline_add(id, actor, "me", action.label(), None)?;
-                return self.lc_stop(id, crate::cycle::CANCEL, actor, "你放弃了", None);
+                return self.request_cycle_stop(
+                    id,
+                    crate::cycle::CloseKind::Cancel,
+                    actor,
+                    "你放弃了",
+                    None,
+                );
             }
             ItemAction::Reopen if i.is_finished() => {
                 /* reopening a closed item is an explicit new cycle; the cycle before stays as it closed */
                 self.db()
                     .timeline_add(id, actor, "me", action.label(), None)?;
-                return self.lc_new_cycle(id, actor, None);
+                return self.start_new_cycle(id, actor, None);
             }
             ItemAction::Resume | ItemAction::Reopen => {
                 if i.is_finished() {
@@ -4297,7 +4239,6 @@ impl Tx<'_> {
                     /* paused while a question or approval was open: back to waiting on it, don't push the agent past it */
                     self.db()
                         .item_patch(id, patch![status: "run", now: "继续处理"])?;
-                    settle(self.db(), id)?;
                 } else {
                     self.db()
                         .item_patch(id, patch![status: "run", now: "继续处理"])?;
@@ -4318,7 +4259,7 @@ impl Tx<'_> {
     pub(crate) fn revise_goal(&mut self, id: &str, text: &str) -> Result<()> {
         let db = self.db().clone();
         let v = db.store().write::<_, crate::CoreError>(|_w| {
-            self.lc_guard_open(id)?;
+            self.require_open_item(id)?;
             let v = db.add_goal(id, text)?;
             db.timeline_add(id, "me", "sys", &format!("目标更新为 v{v}"), None)?;
             Ok(v)
@@ -4395,7 +4336,7 @@ impl Tx<'_> {
             .session(sid)?
             .ok_or_else(|| msg(steve_i18n::t!("core.conversation.not_found")))?;
         if let Some(i) = s.item_id.as_deref() {
-            self.lc_guard_open(i)?;
+            self.require_open_item(i)?;
             self.db()
                 .timeline_add_files(i, "me", "me", text, Some(&s.id), files)?;
             supersede(self.db(), i, &["ask", "fail"], "你直接在会话里发了消息")?;
@@ -4463,7 +4404,7 @@ impl Tx<'_> {
             .session(sid)?
             .ok_or_else(|| msg(steve_i18n::t!("core.conversation.not_found")))?;
         if let Some(i) = s.item_id.as_deref() {
-            self.lc_guard_open(i)?;
+            self.require_open_item(i)?;
         }
         let q = self.db().queue_front(sid, qid)?.ok_or_else(already_sent)?;
         if self.holding() {
@@ -4566,7 +4507,7 @@ impl Tx<'_> {
             db.store().write::<_, crate::CoreError>(|_w| {
                 supersede(&db, item, &["ask", "fail"], "Bot 继续往下做了")?;
                 db.item_patch(item, patch![now: "在等你批准"])?;
-                settle(&db, item)
+                Ok(())
             })?;
         }
         self.mark(&s.id, Mark::Approval);
@@ -4872,7 +4813,6 @@ impl Tx<'_> {
         self.report_release()?;
         /* closing intents survive the restart; their pending hook consultations are asked again (the
          * gate itself is only checked in `ready`, once the interrupted turns are accounted for) */
-        self.lc_recover_ops()?;
         /* first the cards that no longer apply, so "waits on the user" below only counts live ones */
         for w in self.db().workspace_ids()? {
             for d in self.db().decisions_open(&w)? {
@@ -4898,7 +4838,6 @@ impl Tx<'_> {
                             "Hub 重启使工具授权失效，继续操作需要重新授权",
                             d.session_id.as_deref(),
                         )?;
-                        settle(self.db(), i)?;
                     }
                 } else if let Some(i) = d
                     .item_id

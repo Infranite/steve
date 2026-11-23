@@ -61,7 +61,6 @@ export type Item = {
   workflowAttempt?: number
   workflowSuperseded?: boolean
   workflow?: RItemDetail["workflow"]
-  closeout?: ItemView["closeout"]
   dependencyWait?: RItemDetail["dependency_wait"]
   dispatch?: RItemDetail["dispatch"]
   placement?: PlacementExplanation
@@ -133,8 +132,8 @@ export const WT: Record<string, string> = live(WAIT_TYPES, (k) => t(`core:waitTy
 export const WACT: Record<string, string> = live(WAIT_TYPES, (k) => t(`core:waitAction.${k}`))
 /** what a card asks of you, in a line: `审批：推送到 main` */
 /** the card asking you whether to merge a change no independent review passed (only you answer it) */
-export const PR_AWAITING_MERGE = "pr_awaiting_merge"
-export const waitLine = (w: Wait) => t("core:wait.line", { kind: w.subject === "tool_call" ? t("core:wait.tool") : w.subject === "release" ? t("core:wait.release") : w.subject === PR_AWAITING_MERGE ? t("core:wait.prMerge") : WT[w.type] ?? t("core:wait.other"), q: w.q })
+export const GITHUB_PR_MERGE = "gh_pr_merge"
+export const waitLine = (w: Wait) => t("core:wait.line", { kind: w.subject === "tool_call" ? t("core:wait.tool") : w.subject === "release" ? t("core:wait.release") : w.subject === GITHUB_PR_MERGE ? t("core:wait.prMerge") : WT[w.type] ?? t("core:wait.other"), q: w.q })
 /* the name a harness's runtime reports (an adapter of one's own included), when the Hub listed it */
 export const runtimeName = (h: string): string | undefined => runtimes().find((r) => r.id === h)?.name ?? shell()?.harnessNames?.[h]
 const harnessLabel = (h: string) => runtimeName(h) ?? h
@@ -558,13 +557,6 @@ function mapItem(i: ItemView, det?: RItemDetail): Item {
     rounds: (det?.planRounds ?? []).map((r) => ({ n: r.round, steps: steps(r.steps), end: r.end, at: tm(r.created) })),
     workflow: det?.workflow,
     dependencyWait: det?.dependency_wait,
-    get closeout() {
-      const c = i.closeout
-      if (!c || c.next_owner === "none") return c
-      const ds = decisionsForItem(i.id)
-      if (!ds.length) return c
-      return { ...c, status: ds.some((d) => d.subject_type === PR_AWAITING_MERGE) ? "awaiting_approval" : c.status, next_owner: "user" }
-    },
     dispatch: det?.dispatch,
     placement: i.placement,
     get wait() { const d = decisionsForItem(i.id)[0]; return d ? waitOf(d) : undefined },

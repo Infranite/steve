@@ -62,7 +62,6 @@ fn durable_topics_keep_snapshot_fields_and_roundtrip() {
             "github.after",
             DurableFact::GithubAfter {
                 connection: "connection-1".into(),
-                finish: vec![("item-1".into(), "now".into())],
                 signals: vec![raw()],
                 supplements: vec![PrSupplement {
                     item: "item-1".into(),
@@ -101,7 +100,7 @@ fn durable_topics_keep_snapshot_fields_and_roundtrip() {
         }
     }
     // Old facts omitted these fields; retain defaults rather than inventing current entity data.
-    let old = r#"{"topic":"github.after","payload":{"connection":"c","finish":[],"signals":[]}}"#;
+    let old = r#"{"topic":"github.after","payload":{"connection":"c","signals":[]}}"#;
     assert!(
         matches!(serde_json::from_str::<DurableFact>(old).unwrap(),DurableFact::GithubAfter { supplements,.. } if supplements.is_empty())
     );

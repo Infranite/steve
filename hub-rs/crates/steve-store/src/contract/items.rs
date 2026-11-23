@@ -34,6 +34,18 @@ pub fn item_for_branch(
     )
 }
 
+pub fn open_cycle(c: &mut impl Read, ws: &str, item: &str) -> Result<Option<i64>> {
+    c.one(
+        Query::select()
+            .column("cycle")
+            .from("items")
+            .and_where(Expr::col("id").eq(item))
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("phase").ne("closed")),
+        |row| row.get(0),
+    )
+}
+
 /// `status` of an item in a workspace.
 pub fn item_status(c: &mut impl Read, ws: &str, id: &str) -> Result<Option<String>> {
     c.one(
@@ -166,7 +178,7 @@ pub fn running_tasks(c: &mut impl Read, ws: &str) -> Result<Vec<String>> {
             .from("items")
             .and_where(Expr::col("workspace_id").eq(ws))
             .and_where(Expr::col("kind").eq("task"))
-            .and_where(Expr::col("status").eq("run"))
+            .and_where(Expr::col("status").is_in(["run", "wait"]))
             .and_where(Expr::col("archived").eq(0_i64))
             .and_where(Expr::col("phase").eq("active"))
             .order_by("updated", Order::Desc),
@@ -201,18 +213,6 @@ pub fn existing_ids(
         )?
         .into_iter()
         .collect())
-}
-
-pub fn set_progress(w: &mut W<'_>, id: &str, status: &str, stage: &str, now: &str) -> Result<()> {
-    w.exec(
-        Query::update()
-            .table("items")
-            .value("status", status)
-            .value("stage", stage)
-            .value("now", now)
-            .and_where(Expr::col("id").eq(id)),
-    )?;
-    Ok(())
 }
 
 #[derive(Clone)]

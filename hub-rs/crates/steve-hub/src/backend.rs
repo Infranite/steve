@@ -95,7 +95,7 @@ pub struct SummaryFacts {
     pub devices_total: usize,
 }
 
-pub type ItemExtras = steve_store::state_batches::ItemExtras<steve_core::pull::Closeout>;
+pub type ItemExtras = steve_store::state_batches::ItemExtras;
 
 /// Per-bot extras of `botOut` and `allBots` for one workspace.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -112,9 +112,6 @@ pub struct BotExtras {
 /// shows which ones are still missing.
 #[allow(unused_variables)]
 pub trait Repo {
-    fn item_closeout(&self, id: &str) -> BResult<Option<steve_core::pull::Closeout>> {
-        Ok(None)
-    }
     fn bot_extras(&self) -> BResult<Option<BotExtras>> {
         Ok(None)
     }

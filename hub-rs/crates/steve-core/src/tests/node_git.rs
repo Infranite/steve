@@ -274,10 +274,10 @@ fn delivered_on_node(k: &Kit, port: &OnNode) -> (String, PathBuf) {
     port.put(&i);
     k.core
         .tx()
-        .lc_request_complete(
+        .request_delivery_close(
             &i,
             "dev",
-            crate::cycle::Policy::Human,
+            crate::cycle::ClosePolicy::Human,
             false,
             "交付，等你验收",
             None,
@@ -287,8 +287,8 @@ fn delivered_on_node(k: &Kit, port: &OnNode) -> (String, PathBuf) {
     (i, wt)
 }
 
-fn closing(k: &Kit, i: &str) -> crate::cycle::Closing {
-    crate::cycle::closing_of(&k.db().item(i).unwrap().unwrap()).unwrap()
+fn closing(k: &Kit, i: &str) -> crate::cycle::CloseRequest {
+    k.db().item(i).unwrap().unwrap().closing.unwrap()
 }
 
 #[test]
@@ -312,7 +312,7 @@ fn a_delivery_on_a_node_is_frozen_and_checked_there() {
     std::fs::write(wt.join("c.txt"), "c\n").unwrap();
     let now = crate::cycle::fingerprint(wt.to_str()).unwrap();
     let words = crate::upstream::describe_change(&wt, &frozen, &now);
-    assert!(!k.core.tx().lc_try_close(&i).unwrap());
+    assert!(!k.core.tx().evaluate_cycle_close(&i).unwrap());
     // the phase changes first, the timeline line is written a moment later: wait for both
     let moved = format!("冻结之后结果又变了：{words}");
     steve_runtime::testkit::eventually_blocking(
@@ -336,10 +336,10 @@ fn an_unreachable_node_during_the_check_is_unknown_not_changed() {
     port.offline.store(true, Ordering::SeqCst);
     std::fs::write(wt.join("c.txt"), "c\n").unwrap();
     for _ in 0..5 {
-        assert!(!k.core.tx().lc_try_close(&i).unwrap());
+        assert!(!k.core.tx().evaluate_cycle_close(&i).unwrap());
         std::thread::sleep(Duration::from_millis(50));
     }
-    k.core.tx().lc_tick().unwrap();
+    k.core.tx().evaluate_closing_cycles().unwrap();
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(k.phase(&i), "closing", "an unknown is never a change");
     assert!(
@@ -349,7 +349,7 @@ fn an_unreachable_node_during_the_check_is_unknown_not_changed() {
     );
     /* back: the change is seen */
     port.offline.store(false, Ordering::SeqCst);
-    k.core.tx().lc_tick().unwrap();
+    k.core.tx().evaluate_closing_cycles().unwrap();
     steve_runtime::testkit::eventually_blocking(
         "The changed delivery reopens the item and records what changed.",
         || k.phase(&i) == "active",
@@ -368,12 +368,12 @@ fn a_gathering_slower_than_the_periodic_check_still_decides() {
     /* each read takes longer than the time between two checks */
     *port.slow.lock().unwrap() = Duration::from_millis(300);
     std::fs::write(wt.join("c.txt"), "c\n").unwrap();
-    assert!(!k.core.tx().lc_try_close(&i).unwrap());
+    assert!(!k.core.tx().evaluate_cycle_close(&i).unwrap());
     let mut moved = false;
     steve_runtime::testkit::eventually_blocking(
         "The periodic check observes the changed Node worktree.",
         || {
-            k.core.tx().lc_tick().unwrap();
+            k.core.tx().evaluate_closing_cycles().unwrap();
             moved = k.phase(&i) == "active";
             moved
         },
@@ -561,10 +561,10 @@ fn an_accepted_delivery_on_a_node_in_a_release_project_waits_for_its_release() {
     /* accepted at once, frozen before its Node's facts came */
     k.core
         .tx()
-        .lc_request_complete(
+        .request_delivery_close(
             &i,
             "dev",
-            crate::cycle::Policy::Automatic,
+            crate::cycle::ClosePolicy::Automatic,
             true,
             "交付",
             None,
@@ -595,7 +595,7 @@ fn an_accepted_delivery_on_a_node_in_a_release_project_waits_for_its_release() {
         released,
     );
     for _ in 0..3 {
-        k.core.tx().lc_tick().unwrap();
+        k.core.tx().evaluate_closing_cycles().unwrap();
         std::thread::sleep(Duration::from_millis(100));
     }
     assert_eq!(

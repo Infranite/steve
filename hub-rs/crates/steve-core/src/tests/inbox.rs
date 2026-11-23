@@ -178,10 +178,10 @@ fn finishing_an_item_clears_reminders_still_open_on_it() {
     let acc = k.decision(&i, None, "accept", "item", &["pass", "rework"]);
     k.core
         .tx()
-        .lc_request_complete(
+        .request_delivery_close(
             &i,
             "dev",
-            crate::cycle::Policy::Human,
+            crate::cycle::ClosePolicy::Human,
             false,
             "交付",
             Some(acc.clone()),
@@ -292,12 +292,12 @@ fn a_paused_item_is_not_resumed() {
 #[test]
 fn boot_expires_open_tool_permissions() {
     let k = Kit::new();
-    let i = k.item("wait", "执行", None);
+    let i = k.item("run", "执行", None);
     let s = k.session(&i, "idle");
     let p = k.decision(&i, Some(&s), "approve", "tool_call", &["a|允许|allow_once"]);
     k.core.recover().unwrap();
     assert_eq!(k.db().decision(&p).unwrap().unwrap().status, "expired");
-    assert_eq!(k.status(&i).0, "run");
+    assert!(k.open_kinds(&i).is_empty());
     assert!(
         k.db()
             .events_after(&s, 0)

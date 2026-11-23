@@ -384,7 +384,6 @@ steve-core/src/proof.rs	"流水线"	1
 steve-core/src/proof.rs	"编译"	1
 steve-core/src/proof.rs	"部署生效"	1
 steve-core/src/proof.rs	"验证码"	1
-steve-core/src/stall.rs	"等待 Node 连接："	2
 steve-core/src/takeover.rs	"Steve 接手："	1
 steve-core/src/takeover.rs	"交付被拒："	1
 steve-core/src/takeover.rs	"待你确认"	1
@@ -665,33 +664,26 @@ steve-flow/src/when.rs	"跟"	1
 steve-github/src/accept.rs	"在验收前开一个 PR"	1
 steve-github/src/config.rs	"不关联"	1
 steve-github/src/config.rs	"不删除"	1
-steve-github/src/config.rs	"不开"	1
 steve-github/src/config.rs	"不要"	1
 steve-github/src/config.rs	"个小时"	1
 steve-github/src/config.rs	"交给事项修"	1
-steve-github/src/config.rs	"什么时候算完成"	1
 steve-github/src/config.rs	"仓库"	1
 steve-github/src/config.rs	"停用"	1
-steve-github/src/config.rs	"先开成草稿 PR"	1
 steve-github/src/config.rs	"关"	1
 steve-github/src/config.rs	"关闭"	1
 steve-github/src/config.rs	"删除"	1
 steve-github/src/config.rs	"只记录"	1
 steve-github/src/config.rs	"合并后删除分支"	1
-steve-github/src/config.rs	"合并后才完成"	1
 steve-github/src/config.rs	"合并方式"	1
 steve-github/src/config.rs	"否"	1
 steve-github/src/config.rs	"启用"	1
 steve-github/src/config.rs	"小时"	1
 steve-github/src/config.rs	"开"	1
-steve-github/src/config.rs	"开了 PR 就完成"	1
 steve-github/src/config.rs	"开启"	1
 steve-github/src/config.rs	"无"	1
 steve-github/src/config.rs	"是"	1
 steve-github/src/config.rs	"检查失败时"	1
 steve-github/src/config.rs	"要"	1
-steve-github/src/config.rs	"问我要不要开 PR"	1
-steve-github/src/config.rs	"验收通过后"	1
 steve-github/src/config.rs	"（无）"	1
 steve-hub/src/api/items.rs	"类型"	1
 steve-hub/src/api/outputs.rs	"分支"	1

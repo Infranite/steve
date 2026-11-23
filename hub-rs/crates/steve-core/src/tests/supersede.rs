@@ -1,6 +1,6 @@
 //! hub/test/supersede.test.ts: a question or failure card expires once the conversation goes on without it.
 
-use crate::lifecycle::{settle, supersede, tidy};
+use crate::lifecycle::{supersede, tidy};
 use crate::patch;
 use crate::testkit::Kit;
 use serde_json::json;
@@ -10,21 +10,11 @@ fn ask(k: &Kit, item: &str, kind: &str) -> String {
 }
 
 #[test]
-fn an_open_question_keeps_the_item_waiting() {
-    let k = Kit::new();
-    let i = k.item("run", "定义", None);
-    ask(&k, &i, "ask");
-    settle(k.db(), &i).unwrap();
-    assert_eq!(k.status(&i).0, "wait");
-}
-
-#[test]
 fn superseding_expires_questions_and_failure_cards_and_runs_again() {
     let k = Kit::new();
     let i = k.item("run", "定义", None);
     let a = ask(&k, &i, "ask");
     let f = ask(&k, &i, "fail");
-    settle(k.db(), &i).unwrap();
     assert_eq!(
         supersede(k.db(), &i, &["ask", "fail"], "你直接补充了信息").unwrap(),
         2
@@ -48,10 +38,8 @@ fn other_kinds_stay_open_and_the_item_keeps_waiting() {
     let i = k.item("run", "定义", None);
     ask(&k, &i, "ask");
     let acc = ask(&k, &i, "accept");
-    settle(k.db(), &i).unwrap();
     supersede(k.db(), &i, &["ask", "fail"], "x").unwrap();
     assert_eq!(k.db().decision(&acc).unwrap().unwrap().status, "open");
-    assert_eq!(k.status(&i).0, "wait");
 }
 
 #[test]
@@ -82,11 +70,9 @@ fn tidy_expires_questions_older_than_a_delivery_and_keeps_the_delivery() {
         &acc,
         steve_store::core_fixture::DecisionState::Created(delivery_at),
     );
-    settle(k.db(), &i).unwrap();
     assert_eq!(tidy(k.db(), &i).unwrap(), 1);
     assert_eq!(k.db().decision(&a).unwrap().unwrap().status, "expired");
     assert_eq!(k.db().decision(&acc).unwrap().unwrap().status, "open");
-    assert_eq!(k.status(&i).0, "wait");
 }
 
 #[test]

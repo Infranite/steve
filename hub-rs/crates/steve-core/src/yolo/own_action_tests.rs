@@ -474,7 +474,7 @@ fn replay_after_restart_must_preserve_stop() {
     t.kit.rt.say(&sid, "又改了一些");
     t.kit.rt.end_turn(&core, &sid, "end_turn", None);
     let kept = core.store().store().sessions().stop(&sid).unwrap().unwrap();
-    assert!(!crate::work::held(&kept), "{kept:?}");
+    assert!(!crate::turn_wait::held(&kept), "{kept:?}");
     let d = t
         .kit
         .db()

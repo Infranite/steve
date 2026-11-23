@@ -961,16 +961,22 @@ async fn repo_endpoints() {
         Some(&me),
         "PATCH",
         &format!("/github/repos/{id}"),
-        Some(&json!({"settings": {"finish_on": "later"}})),
+        Some(&json!({"settings": {"merge_method": "later"}})),
     )
     .await;
     assert_eq!(
         (s, &e["error"]),
-        (400, &json!("参数不对：settings.finish_on"))
+        (400, &json!("参数不对：settings.merge_method"))
     );
-    let (s, v) = call(&h.api, Some(&me), "PATCH", &format!("/github/repos/{id}"), Some(&json!({"settings": {"finish_on": "merged", "merge_method": "rebase"}, "project_id": null}))).await;
+    let (s, v) = call(
+        &h.api,
+        Some(&me),
+        "PATCH",
+        &format!("/github/repos/{id}"),
+        Some(&json!({"settings": {"merge_method": "rebase"}, "project_id": null})),
+    )
+    .await;
     assert_eq!(s, 200, "{v}");
-    assert_eq!(v["settings"]["finish_on"], json!("merged"));
     assert_eq!(v["settings"]["merge_method"], json!("rebase"));
     assert_eq!(v["project"], Value::Null);
     assert_eq!(v["revision"], json!(2));
@@ -980,7 +986,7 @@ async fn repo_endpoints() {
         Some(&me),
         "PATCH",
         &format!("/github/repos/{id}"),
-        Some(&json!({"settings": {"finish_on": "merged"}})),
+        Some(&json!({"settings": {"merge_method": "rebase"}})),
     )
     .await;
     assert_eq!(

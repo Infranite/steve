@@ -98,11 +98,8 @@ fn a_rebase_conflict_records_not_released_and_keeps_the_item_open() {
         result(&k, &d),
         json!({"approved": true, "text": "", "outcome": "not_released", "reason": "rebase 到 main 有冲突（a.txt）"})
     );
-    let (status, stage, now) = k.status(&i0);
-    assert_eq!(
-        (status.as_str(), stage.as_str(), now.as_str()),
-        ("run", "收尾", "要先 rebase 解决冲突")
-    );
+    assert_ne!(k.phase(&i0), "closed");
+    assert_eq!(k.status(&i0).2, "要先 rebase 解决冲突");
     /* 批准发布 first, then why it did not happen */
     let tl = k.timeline_texts(&i0);
     let n = tl.len();
@@ -168,11 +165,8 @@ fn a_dirty_worktree_records_not_released() {
             .unwrap()
             .starts_with("工作区有未提交的改动（")
     );
-    let (status, _, now) = k.status(&i);
-    assert_eq!(
-        (status.as_str(), now.as_str()),
-        ("run", "发布前要先处理分支")
-    );
+    assert_ne!(k.phase(&i), "closed");
+    assert_eq!(k.status(&i).2, "发布前要先处理分支");
 }
 
 #[test]
@@ -245,8 +239,7 @@ fn a_release_while_another_runs_is_not_released_and_a_failed_script_reopens() {
             .unwrap()
             .contains("release-")
     );
-    let (status, _, now) = k.status(&a);
-    assert_eq!((status.as_str(), now.as_str()), ("run", "正在发布"));
+    assert_eq!(k.status(&a).2, "正在发布");
 
     let (b, _, db) = asking(&k, &p, "steve/b", None);
     k.core.resolve(&db, "yes", "", "me").unwrap();

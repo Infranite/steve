@@ -1,6 +1,6 @@
 //! A model quota that ran out and says when it comes back (a 429 "available again at 00:40 UTC (in
 //! 9h27m)"): the turn that failed on it is not continued at once, which only fails again within a
-//! second and spends Steve's continues. The item waits until then ([`crate::work::Work::Until`]) and
+//! second and spends Steve's continues. The item waits until then ([`crate::turn_wait::Work::Until`]) and
 //! the agent is continued once the time has come. This schedules a continue; it refuses nothing.
 //!
 //! Kept in memory: after a restart the stop is an ordinary one again (Steve continues it, a quota
@@ -12,7 +12,6 @@ use chrono::{DateTime, TimeZone, Utc};
 use regex::Regex;
 
 use crate::error::Result;
-use crate::lifecycle::settle;
 use crate::util::js_head;
 use crate::{Tx, patch};
 
@@ -149,14 +148,20 @@ impl Tx<'_> {
             .timeline_add(item_id, "steve", "sys", &line, Some(sid))?;
         let now = self.quota_text(item_id).unwrap_or_default();
         self.db().item_patch(item_id, patch![now: now])?;
-        settle(self.db(), item_id)
+        Ok(())
+    }
+
+    pub(crate) fn quota_waiting(&self, item_id: &str) -> bool {
+        self.st
+            .quota_waits
+            .get(item_id)
+            .is_some_and(|wait| wait.until > crate::util::now())
     }
 
     /// What the item waits for while its quota is out: `None` when it does not.
     pub(crate) fn quota_text(&self, item_id: &str) -> Option<String> {
         let w = self.st.quota_waits.get(item_id)?;
         let now = crate::util::now();
-        /* written into the item's `now`: zh-CN, shown in the reader's language by crate::now_line */
         (w.until > now).then(|| {
             steve_i18n::stored(|| {
                 steve_i18n::t!(

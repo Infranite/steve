@@ -42,7 +42,7 @@ fn a_stopped_item_gets_one_card_with_how_its_turn_ended() {
     );
     assert_eq!(d.options, ["continue", "look", "drop"]);
     assert_eq!(d.session_id.as_deref(), Some(s.as_str()));
-    assert_eq!(k.status(&i).0, "wait", "the item waits on the user");
+    assert!(!k.open_kinds(&i).is_empty(), "the item waits on the user");
     assert!(
         k.core.tx().check_stalls(later()).unwrap().is_empty(),
         "one card per item"

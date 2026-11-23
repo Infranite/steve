@@ -8,7 +8,7 @@
 //! only a project on the Hub's device (`projects.device_id = "hub"`) can release or roll back. A project on a
 //! remote Node is refused before anything runs; an in-process Node dies with the Hub, so it can't host it either.
 
-use crate::cycle::{Closing, OP_RELEASE, fingerprint_head};
+use crate::cycle::{CloseRequest, OP_RELEASE, fingerprint_head};
 use crate::error::Result;
 use crate::gateway::{jstr, truthy};
 use crate::git::{self, Rebase};
@@ -427,8 +427,8 @@ impl Tx<'_> {
             return Ok(());
         }
         /* the requirement is still open: a fail card asks what next (retry, rework, give up) */
-        if let Some(op) = self.lc_open_op(item_id, crate::cycle::OP_RELEASE)? {
-            self.lc_op_set(&op.id, "pending", json!({"last_failure": why}))?;
+        if let Some(op) = self.open_item_operation(item_id, crate::cycle::OP_RELEASE)? {
+            self.settle_item_operation(&op.id, "pending", json!({"last_failure": why}))?;
         }
         self.db()
             .item_patch(item_id, patch![stage: "收尾", now: now_text])?;
@@ -549,8 +549,8 @@ impl Tx<'_> {
             }
         }
         self.release_outcome(item_id, RELEASING, json!({"log": log.to_string_lossy()}))?;
-        if let Some(op) = self.lc_open_op(item_id, crate::cycle::OP_RELEASE)? {
-            self.lc_op_set(
+        if let Some(op) = self.open_item_operation(item_id, crate::cycle::OP_RELEASE)? {
+            self.settle_item_operation(
                 &op.id,
                 "running",
                 json!({"log": log.to_string_lossy(), "branch": branch}),
@@ -955,7 +955,7 @@ impl Tx<'_> {
             } else {
                 "failed"
             };
-            let (_, new) = self.lc_op_add(
+            let (_, new) = self.record_item_operation(
                 i,
                 crate::cycle::OP_RELEASE,
                 Some(&format!("attempt:{effect}")),
@@ -968,7 +968,7 @@ impl Tx<'_> {
             fresh = new;
         }
         if let (Some(i), true) = (&item, fresh) {
-            let required = self.lc_open_op(&i.id, crate::cycle::OP_RELEASE)?;
+            let required = self.open_item_operation(&i.id, crate::cycle::OP_RELEASE)?;
             if ok {
                 self.db().timeline_add(&i.id, "steve", "sys", &text, None)?;
                 /* `prev`: what a rollback of this release goes back to (YOLO's undo) */
@@ -989,7 +989,9 @@ impl Tx<'_> {
                 );
                 /* a release is evidence for the closing gate, never a close by itself */
                 if let Some(op) = required {
-                    let head = crate::cycle::closing_of(i)
+                    let head = i
+                        .closing
+                        .clone()
                         .and_then(|c| c.fingerprint)
                         .map(|f| crate::cycle::fingerprint_head(&f).to_string());
                     let attempt = steve_store::ItemOperation {
@@ -998,14 +1000,14 @@ impl Tx<'_> {
                     };
                     match self.release_holds(i, &attempt, head.as_deref()) {
                         Some(true) => {
-                            self.lc_op_set(
+                            self.settle_item_operation(
                                 &op.id,
                                 "succeeded",
                                 json!({"version": version, "commit": r.get("commit"), "kind": kind}),
                             )?;
                         }
                         Some(false) => {
-                            self.lc_op_set(
+                            self.settle_item_operation(
                                 &op.id,
                                 "pending",
                                 json!({"last_failure": "发布的版本不包含验收的结果"}),
@@ -1038,7 +1040,7 @@ impl Tx<'_> {
                     json!({"reason": NO_RESULT, "version": version, "kind": kind}),
                 )?;
                 if let Some(op) = required {
-                    self.lc_op_set(&op.id, "unknown", json!({"note": NO_RESULT}))?;
+                    self.settle_item_operation(&op.id, "unknown", json!({"note": NO_RESULT}))?;
                 }
                 if i.phase != crate::cycle::CLOSED {
                     self.release_unknown(&i.id, &text)?;
@@ -1248,7 +1250,7 @@ impl Tx<'_> {
     /// a deployment: without such a release it stays a requirement you can waive. Once you said no to
     /// releasing in this cycle (and nothing since said yes), every later result of it is waived too:
     /// your no holds for the cycle, not just for the revision it was asked about.
-    pub(crate) fn release_requirement(&mut self, i: &Item, c: &Closing) -> Result<()> {
+    pub(crate) fn release_requirement(&mut self, i: &Item, c: &CloseRequest) -> Result<()> {
         if !self.release_pending(i)? {
             return Ok(());
         }
@@ -1276,7 +1278,7 @@ impl Tx<'_> {
         let key = format!("{}:{}:{}", OP_RELEASE, i.cycle, i.revision);
         match proof {
             Some(p) => {
-                self.lc_op_add(
+                self.record_item_operation(
                     i,
                     OP_RELEASE,
                     Some(&key),
@@ -1288,7 +1290,7 @@ impl Tx<'_> {
             }
             None => {
                 let declined = self.release_declined(i)?;
-                let (op, new) = self.lc_op_add(
+                let (op, new) = self.record_item_operation(
                     i,
                     OP_RELEASE,
                     Some(&key),
@@ -1299,7 +1301,7 @@ impl Tx<'_> {
                 )?;
                 if let Some(reason) = declined {
                     if op.status == "pending" {
-                        /* set here, not through lc_op_set: the gate that called this checks right after */
+                        /* set here, not through settle_item_operation: the gate that called this checks right after */
                         let mut e = json!({"note": "你选择不发布"});
                         if !reason.is_empty() {
                             e["reason"] = json!(reason);
@@ -1394,7 +1396,7 @@ impl Tx<'_> {
     /// (the frozen fingerprint, kept on the release decision). `false` leaves it to the agent's own
     /// release request (a separate card): the branch moved since, another release is running, the
     /// worktree is on a Node or on another device, or this acceptance did not ask.
-    fn release_with_accept(&mut self, i: &Item, c: &Closing) -> Result<bool> {
+    fn release_with_accept(&mut self, i: &Item, c: &CloseRequest) -> Result<bool> {
         let Some((_, who)) = self
             .st
             .release_with_accept

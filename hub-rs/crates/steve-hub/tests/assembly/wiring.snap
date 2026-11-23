@@ -255,6 +255,7 @@ api POST /github/app/manifest
 api POST /github/comments
 api POST /github/issues/x/to-item
 api POST /github/prs/x/link
+api POST /github/prs/x/merge
 api POST /github/repos
 api POST /github/repos/x/sync
 api POST /items/x/people

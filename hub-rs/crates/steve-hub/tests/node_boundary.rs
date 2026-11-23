@@ -268,7 +268,6 @@ const RATIONALE: &[Entry] = &[
     e(Fs, "steve-core/src/release.rs", Hub, "D12: release logs and manifests in the Hub home"),
     /* Hub-host work */
     e(Spawn, "steve-core/src/takeover.rs", Hub, "`gh run list`"),
-    e(Spawn, "steve-core/src/pull.rs", Hub, "`gh pr list`, `gh repo view`, `gh pr merge` of an accepted item's pull request"),
     e(Spawn, "steve-hub/src/config.rs", Hub, "npm config"),
     e(Spawn, "steve-hub/src/system.rs", Hub, "host facts (sw_vers, sysctl, uname, hostname)"),
     e(Fs, "steve-hub/src/nodes/mod.rs", Hub, "the Hub's own identity key directory"),

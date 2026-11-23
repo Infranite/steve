@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use steve_node_api as na;
 
-use crate::cycle::{CLOSING, COMPLETE, OP_RELEASE, closing_of, fingerprint_head, same_result};
+use crate::cycle::{CLOSING, CloseKind, OP_RELEASE, fingerprint_head, same_result};
 use crate::error::Result;
 use crate::orchestrator::To;
 use crate::repo::Item;
@@ -663,7 +663,7 @@ impl Core {
         }
         match t.db().item(item) {
             Ok(Some(i)) if i.phase == CLOSING => {
-                if let Err(e) = t.lc_try_close(item) {
+                if let Err(e) = t.evaluate_cycle_close(item) {
                     tracing::warn!(item, "closing check: {e}");
                 }
             }
@@ -681,8 +681,10 @@ impl Tx<'_> {
     /// What a gathering for `i` asks now: the frozen fingerprint, its branch, and whether each
     /// release of this cycle (and each report waiting) contains the frozen `HEAD`.
     pub(crate) fn git_want(&self, i: &Item) -> Want {
-        let frozen = closing_of(i)
-            .filter(|c| i.phase == CLOSING && c.kind == COMPLETE)
+        let frozen = i
+            .closing
+            .clone()
+            .filter(|c| i.phase == CLOSING && c.kind == CloseKind::Complete)
             .and_then(|c| c.fingerprint);
         let mut contains = vec![];
         if let Some(head) = frozen.as_deref().map(fingerprint_head) {
@@ -796,14 +798,14 @@ impl Tx<'_> {
         for p in waiting {
             match self.git_contains(item, &p.head, &p.commit) {
                 Some(true) => {
-                    self.lc_op_set(
+                    self.settle_item_operation(
                         &p.op,
                         "succeeded",
                         json!({"version": p.version, "commit": p.commit, "kind": p.kind}),
                     )?;
                 }
                 Some(false) => {
-                    self.lc_op_set(
+                    self.settle_item_operation(
                         &p.op,
                         "pending",
                         json!({"last_failure": "发布的版本不包含验收的结果"}),

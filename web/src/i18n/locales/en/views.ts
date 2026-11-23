@@ -85,24 +85,6 @@ export default {
     process_one: "{{count}} process note",
     process_other: "{{count}} process notes",
   },
-  closeout: {
-    timeline: "Current PR closeout",
-    status: {
-      syncing: "Waiting for GitHub to sync", sync_failed: "GitHub sync interrupted · showing last known results",
-      no_pr: "Waiting for the agent to open a PR", waiting_checks: "Closing out · waiting for GitHub CI", checks_failed: "GitHub checks failed",
-      conflict: "Conflicts with the default branch", behind: "Branch must be brought up to date", draft: "PR is still a draft",
-      head: "PR head does not match the accepted result", uncommitted: "Accepted result has uncommitted changes", accepted_unknown: "Can't verify the accepted commit",
-      closed: "PR closed without merging", waiting_github: "Waiting for GitHub to determine mergeability", waiting_result: "Verifying the accepted result",
-      ready: "Waiting for Steve to verify and merge", merge_retry: "Merge failed · waiting for Steve to retry", merge_method: "No permitted merge method worked",
-      awaiting_approval: "Waiting for your merge approval", manual_merge: "Automatic merge declined · over to you", merged: "PR merged",
-    },
-    owner: { steve: "Steve", agent: "Agent", user: "You", none: "None" },
-    nextOwner: "Next: {{owner}}", lastSync: "Last successful sync: {{time}}", neverSynced: "No successful sync yet",
-    checks: "{{passed}} passed · {{pending}} queued/running · {{failed}} failed · {{other}} other",
-    noChecks: "GitHub has not reported any checks", unknownChecks: "No check snapshot for this commit",
-    failures: "Failed checks: {{names}}", lastFailures: "Failed checks at last sync: {{names}}",
-    syncError: "Sync failure: {{reason}}", mergeError: "Merge failure: {{reason}}",
-  },
   /* the item page's agent tree: who started whom */
   agentTree: {
     title: "Collaboration",

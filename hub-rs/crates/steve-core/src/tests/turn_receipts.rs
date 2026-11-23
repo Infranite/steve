@@ -194,7 +194,7 @@ fn accepted_delivery_waiting_on_pr_closeout_is_not_idle_after_restart() {
     // A deterministic pending closeout gate; no Git host or publishing action runs here.
     k.core
         .tx()
-        .lc_op_add(
+        .record_item_operation(
             &i,
             "fixture.pr",
             None,
@@ -220,7 +220,7 @@ fn accepted_delivery_waiting_on_pr_closeout_is_not_idle_after_restart() {
     assert_eq!(i.phase, "closing");
     assert_eq!(i.now, "已验收，正在结束");
     // The accepted-state line and the pending closeout gate are separate public fields.
-    let view = core.tx().lc_view(&i).unwrap();
+    let view = crate::cycle::lifecycle_view(&core.tx(), &i).unwrap();
     assert_eq!(view["closing"]["accepted"], true);
     assert!(
         view["closing"]["waiting"]
@@ -245,7 +245,7 @@ fn accepted_delivery_waiting_on_pr_closeout_is_not_idle_after_restart() {
             .iter()
             .any(|o| o.kind == "fixture.pr" && o.status == "pending" && o.label == "等待 PR 检查")
     );
-    assert_eq!(core.tx().work_to_continue(&i).unwrap().code(), "queued");
+    assert!(core.tx().turn_has_wait(&i, false).unwrap());
     assert!(k.open_fails(&id).is_empty());
 }
 

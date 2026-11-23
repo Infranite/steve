@@ -9,13 +9,12 @@ import { isAttachedWorkflowChild, itemDisplayState, workflowRelation, workflowRe
 import { resumable, RUN_ORDER, runStateOf, type RunState } from "@/item-lanes"
 import { permissionQuestion } from "@/permission-question"
 import { setSt, type Item } from "@/store"
-import { t as tr, useT } from "@/i18n"
+import { useT } from "@/i18n"
 import { useMemo, useState } from "react"
 
 /** what the item is on now: its open card's question, the workflow it waits on, or its own "now" line */
 export function stepOf(i: Item, said: string): string {
   if (i.waits[0]) return permissionQuestion(i.waits[0].q)
-  if (i.closeout) return tr(`views:closeout.status.${i.closeout.status}`, { defaultValue: i.closeout.status })
   const relation = workflowRelation(i, getItems())
   if (relation) return workflowRelationText(relation)
   return i.now || said

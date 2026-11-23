@@ -302,7 +302,6 @@ fn a_missing_project_dir_is_a_fail_card() {
         k.open_fails(&i.id),
         vec!["开不了会话：项目目录不存在：/nonexistent/steve-test"]
     );
-    assert_eq!(i.status, "wait");
     /* steve's own item: no "tosteve" option */
     let d = k.db().decisions_of_item(&i.id).unwrap().pop().unwrap();
     assert_eq!(d.options, vec!["continue", "delivered", "look"]);
@@ -433,15 +432,12 @@ fn ask_then_answer_continues_the_session() {
     k.core
         .tool_ask(&s, "用哪个？", &["A".into(), "B".into()])
         .unwrap();
-    assert_eq!(
-        k.status(&i.id),
-        ("wait".into(), "执行".into(), "在等你回答".into())
-    );
+    assert_eq!(k.open_kinds(&i.id), vec!["ask"]);
     k.rt.end_turn(&k.core, &s.id, "end_turn", None);
     assert_eq!(
-        k.status(&i.id).0,
-        "wait",
-        "a question ends the turn without a fail card"
+        k.open_kinds(&i.id),
+        vec!["ask"],
+        "the question survives turn end"
     );
     let d = k.db().decisions_of_item(&i.id).unwrap().pop().unwrap();
     k.core.resolve(&d.id, "A", "", "me").unwrap();
@@ -480,7 +476,7 @@ fn turn_ends_without_a_tool_call_raise_a_fail_card() {
         k.open_fails(&i.id),
         vec!["Agent 停下来了，没有交付也没有提问：我觉得做完了"]
     );
-    assert_eq!(k.status(&i.id).0, "wait");
+    assert!(!k.open_kinds(&i.id).is_empty());
     let d = k.db().decisions_of_item(&i.id).unwrap().pop().unwrap();
     k.core.resolve(&d.id, "continue", "", "me").unwrap();
     assert_eq!(
@@ -552,7 +548,7 @@ fn fail_look_pauses_and_tosteve_reassigns() {
         ("pause".into(), "执行".into(), "你在查看，已暂停".into())
     );
     k.core.undo_decision(&d.id, "me").unwrap();
-    assert_eq!(k.status(&i.id).0, "wait");
+    assert!(!k.open_kinds(&i.id).is_empty());
     k.core.resolve(&d.id, "tosteve", "", "me").unwrap();
     let it = k.db().item(&i.id).unwrap().unwrap();
     assert_eq!(it.bot_id.as_deref(), Some("steve"));
@@ -695,14 +691,8 @@ fn deliver_records_outputs_and_rework_goes_back() {
         )
         .unwrap();
     k.rt.end_turn(&k.core, &s.id, "end_turn", None);
-    assert_eq!(
-        k.status(&i.id),
-        (
-            "wait".into(),
-            "交付与验收".into(),
-            "交付了，等你验收".into()
-        )
-    );
+    assert_eq!(k.phase(&i.id), "closing");
+    assert_eq!(k.open_kinds(&i.id), vec!["accept"]);
     let d = k.db().decisions_of_item(&i.id).unwrap().pop().unwrap();
     assert_eq!(
         (d.question.as_str(), d.draft.as_str()),
@@ -1174,7 +1164,7 @@ fn resume_with_an_open_question_waits_on_it() {
     k.core.item_action(&i.id, ItemAction::Pause, "me").unwrap();
     let n = k.rt.prompts_of(&s.id).len();
     k.core.item_action(&i.id, ItemAction::Resume, "me").unwrap();
-    assert_eq!(k.status(&i.id).0, "wait");
+    assert!(!k.open_kinds(&i.id).is_empty());
     assert_eq!(
         k.rt.prompts_of(&s.id).len(),
         n,
@@ -1999,10 +1989,9 @@ fn startup_blocker_survives_queued_input_and_cannot_be_continued_by_yolo() {
         .queued()
         .add(&sid, "initial task", "steve", &[])
         .unwrap();
-    crate::lifecycle::settle(k.db(), &i).unwrap();
     crate::lifecycle::supersede(k.db(), &i, &["fail"], "background queue").unwrap();
     assert_eq!(k.db().decision(&card.id).unwrap().unwrap().status, "open");
-    assert_eq!(k.status(&i).0, "wait");
+    assert!(!k.open_kinds(&i).is_empty());
     assert!(
         k.core
             .resolve(&card.id, "retry", "", steve_modules::outbound::YOLO_ACTOR)

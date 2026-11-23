@@ -29,7 +29,7 @@ use std::path::Path;
 use serde_json::json;
 
 use crate::Tx;
-use crate::cycle::{COMPLETE, Closing, OP_RELEASE, closing_of};
+use crate::cycle::{CloseKind, CloseRequest, OP_RELEASE};
 use crate::error::Result;
 use crate::orchestrator::To;
 use crate::patch;
@@ -240,8 +240,8 @@ impl Tx<'_> {
     }
 
     /// The closing asks for the goal's evidence (not one you marked done yourself).
-    pub(crate) fn proof_needed(&self, i: &Item, c: &Closing) -> Result<Needs> {
-        if c.kind != COMPLETE || c.reason == MARKED {
+    pub(crate) fn proof_needed(&self, i: &Item, c: &CloseRequest) -> Result<Needs> {
+        if c.kind != CloseKind::Complete || c.reason == MARKED {
             return Ok(Needs::default());
         }
         self.needs_of(i)
@@ -326,7 +326,7 @@ impl Tx<'_> {
 
     /// The deploy requirement of an accepted result, once the remote showed it: met when this Hub runs
     /// a version that contains it. Called again before each look at the gate; idempotent.
-    pub(crate) fn deploy_requirement(&mut self, i: &Item, c: &Closing) -> Result<()> {
+    pub(crate) fn deploy_requirement(&mut self, i: &Item, c: &CloseRequest) -> Result<()> {
         if !self.proof_needed(i, c)?.deploy || !self.deploy_checked(i)? {
             return Ok(());
         }
@@ -347,7 +347,7 @@ impl Tx<'_> {
             None => "本机运行包含这个结果的版本".into(),
         };
         let key = format!("{}:{}:{}", OP_DEPLOY, i.cycle, i.revision);
-        let (op, new) = self.lc_op_add(
+        let (op, new) = self.record_item_operation(
             i,
             OP_DEPLOY,
             Some(&key),
@@ -407,7 +407,7 @@ impl Tx<'_> {
 
     /// Whether the build the tag started holds the close (the goal asks for it to pass).
     pub(crate) fn build_required(&self, i: &Item) -> Result<bool> {
-        let Some(c) = closing_of(i) else {
+        let Some(c) = i.closing.clone() else {
             return Ok(false);
         };
         Ok(self.proof_needed(i, &c)?.build)
@@ -417,7 +417,7 @@ impl Tx<'_> {
     /// to the agent to fix and to you.
     pub(crate) fn build_settled(&mut self, item: &str, line: &str, failed: bool) -> Result<()> {
         if !failed {
-            self.lc_try_close(item)?;
+            self.evaluate_cycle_close(item)?;
             return Ok(());
         }
         self.db().item_patch(

@@ -110,58 +110,18 @@ impl steve_mail::DraftHooks for MailDraftHooks {
 
 // ---------------------------------------------------------------- items
 
-/// G3: the wrap-up of an item through GitHub.
+/// Applies verified GitHub delivery to its current item cycle.
 pub struct GhItems(pub Core);
 
 #[async_trait]
 impl steve_github::core::ItemCore for GhItems {
-    async fn delivery_verified(
-        &self,
-        baseline: steve_types::DeliveryBaseline,
-    ) -> Result<(), String> {
+    async fn delivery_verified(&self, proof: steve_types::DeliveryProof) -> Result<(), String> {
         let core = self.0.clone();
         blocking(move || {
-            core.delivery_verified(&baseline)
+            core.delivery_verified(&proof)
                 .map_err(|error| error.to_string())
         })
         .await
-    }
-    async fn progress(
-        &self,
-        _ws: &str,
-        item_id: &str,
-        stage: &str,
-        now: &str,
-    ) -> Result<(), String> {
-        let (c, id, stage, now) = (
-            self.0.clone(),
-            item_id.to_string(),
-            stage.to_string(),
-            now.to_string(),
-        );
-        blocking(move || {
-            let p = steve_store::ItemPatch {
-                stage: Some(stage),
-                now: Some(now),
-                ..Default::default()
-            };
-            c.store()
-                .store()
-                .items()
-                .patch(&id, &p)
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-        })
-        .await
-    }
-    async fn finish(&self, _ws: &str, item_id: &str, now: &str) -> Result<(), String> {
-        let (c, id, now) = (self.0.clone(), item_id.to_string(), now.to_string());
-        // the module's wrap-up of an accepted result is done (never a close by itself)
-        blocking(move || c.module_done(&id, &now).map_err(|e| e.to_string())).await
-    }
-    async fn fail(&self, _ws: &str, item_id: &str, why: &str) -> Result<(), String> {
-        let (c, id, why) = (self.0.clone(), item_id.to_string(), why.to_string());
-        blocking(move || c.fail_item(&id, &why).map_err(|e| e.to_string())).await
     }
 }
 

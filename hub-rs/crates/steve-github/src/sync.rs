@@ -80,8 +80,6 @@ pub(crate) struct Effects {
     pub(crate) signals: Vec<SignalEvent>,
     /// A non-fatal problem (a list GitHub would not give), kept on the delivery.
     pub(crate) note: Option<String>,
-    /// Items to finish after the commit: `(item, now)` (a PR merged, `finish_on=merged`).
-    pub(crate) finish: Vec<(String, String)>,
     /// What people with a say in the repository wrote on a PR linked to an item, for that item
     /// (2026-11-09: a linked PR's comments and reviews reach its item).
     pub(crate) supplements: Vec<crate::after::PrSupplement>,
@@ -421,7 +419,6 @@ impl GitHub {
                 steve_store::github::set_last_delivery(tx, &repo.id, now)?;
             }
             self.dispatch(tx, &repo, event, payload, fetched, now, &mut fx)?;
-            self.ask_merges(tx, &repo, &fx)?;
             crate::after::emit(tx, &repo.workspace_id, &repo.connection_id, &mut fx)?;
             let mut out = Outcome::ok(&ws, Some(&repo.id));
             out.error = fx.note.clone();
@@ -897,14 +894,6 @@ impl GitHub {
             Some(p) => p.state == "open",
             None => row.closed_at.is_some_and(|t| t >= repo.created),
         };
-        if row.state == "merged"
-            && was_open
-            && let Some(item) = &row.item_id
-            && self.waits_for_merge(tx, repo, item)?
-        {
-            fx.finish
-                .push((item.clone(), format!("PR #{} 已合并", row.number)));
-        }
         if row.state != "open" && was_open {
             let (ty, verb) = if row.state == "merged" {
                 ("github.pr_merged", "已合并")

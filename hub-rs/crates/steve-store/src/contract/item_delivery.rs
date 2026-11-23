@@ -1,5 +1,5 @@
-use sea_query::{Expr, ExprTrait, Order, Query};
-use steve_types::{DeliveryBaseline, DeliveryRef, ItemId, WorkEvent};
+use sea_query::{Expr, ExprTrait, OnConflict, Order, Query};
+use steve_types::{DeliveryBaseline, DeliveryProof, DeliveryRef, ItemId, WorkEvent};
 
 use crate::{Read, Result, StoreError, W};
 
@@ -141,20 +141,85 @@ pub fn pending(c: &mut impl Read) -> Result<Vec<(String, DeliveryBaseline)>> {
         .collect()
 }
 
-pub fn matches_closing(
-    c: &mut impl Read,
-    item: &ItemId,
-    cycle: i64,
-    revision: i64,
-) -> Result<bool> {
+/// Persist only evidence for a complete, current set of required ranges. The event and the
+/// evidence share the caller's transaction.
+pub fn record_proof(w: &mut W<'_>, ws: &str, proof: &DeliveryProof) -> Result<bool> {
+    let baseline = &proof.baseline;
+    if scope(w, baseline.item.as_str())? != baseline.scope {
+        return Ok(false);
+    }
+    let required = refs(w, &baseline.item, baseline.cycle, baseline.scope)?
+        .into_iter()
+        .filter(|pr| pr.required);
+    if !required.eq(baseline.refs.iter().cloned())
+        || baseline.refs.len() != proof.pulls.len()
+        || baseline.refs.is_empty()
+        || baseline
+            .refs
+            .iter()
+            .zip(&proof.pulls)
+            .any(|(pr, check)| pr.repository != check.repository || pr.number != check.number)
+    {
+        return Ok(false);
+    }
+    let mut changed = false;
+    for pull in &proof.pulls {
+        changed |= w.exec(
+            Query::insert()
+                .into_table("item_delivery_proofs")
+                .columns([
+                    "item_id",
+                    "cycle",
+                    "scope",
+                    "revision",
+                    "repository",
+                    "number",
+                    "target_head",
+                ])
+                .values_panic([
+                    baseline.item.as_str().into(),
+                    baseline.cycle.into(),
+                    baseline.scope.into(),
+                    baseline.revision.into(),
+                    pull.repository.as_str().into(),
+                    pull.number.into(),
+                    pull.target_head.as_str().into(),
+                ])
+                .on_conflict(
+                    OnConflict::columns([
+                        "item_id",
+                        "cycle",
+                        "scope",
+                        "revision",
+                        "repository",
+                        "number",
+                        "target_head",
+                    ])
+                    .do_nothing()
+                    .to_owned(),
+                ),
+        )? == 1;
+    }
+    if changed {
+        w.emit(WorkEvent::Item {
+            ws: ws.to_owned().into(),
+            id: baseline.item.clone(),
+        });
+    }
+    Ok(true)
+}
+
+pub fn unsettled_github_writes(c: &mut impl Read, item: &str) -> Result<bool> {
     Ok(c.one(
         Query::select()
-            .column("id")
-            .from("items")
-            .and_where(Expr::col("id").eq(item.as_str()))
-            .and_where(Expr::col("cycle").eq(cycle))
-            .and_where(Expr::col("revision").eq(revision))
-            .and_where(Expr::col("phase").eq("closing")),
+            .column(("gh_effects", "id"))
+            .from("gh_effects")
+            .inner_join(
+                "decisions",
+                Expr::col(("gh_effects", "decision_id")).equals(("decisions", "id")),
+            )
+            .and_where(Expr::col(("decisions", "item_id")).eq(item))
+            .and_where(Expr::col(("gh_effects", "state")).is_in(["pending", "running", "unknown"])),
         |_| Ok(()),
     )?
     .is_some())
