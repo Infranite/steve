@@ -83,6 +83,10 @@ export default {
   list: {
     sub: "Capabilities Steve calls on. You rarely need to touch them, since Steve picks the right bot. This is where you manage them.",
     newBot: "New bot",
+    joinedTeams: "Teams",
+    noTeams: "Not in any Team",
+    teamsLoading: "Loading Teams…",
+    teamsLoadFailed: "Could not load Teams",
     main: "Main bot",
     filterAll: "All",
     filterOn: "Enabled",
