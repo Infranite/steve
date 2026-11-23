@@ -17,8 +17,8 @@ use regex::Regex;
 use serde_json::{Value, json};
 use steve_modules::vault::VaultResult;
 use steve_modules::{ApiError, Body, Caller, Modules};
-use steve_store::base::links::{self, LinkKey, NewLink};
-use steve_store::base::{self, ObjRef};
+use steve_store::base::ObjRef;
+use steve_store::base::links::{LinkKey, NewLink};
 
 use crate::GitHub;
 use crate::repos::pr_out;
@@ -75,8 +75,7 @@ pub fn attach(
     now: i64,
 ) -> Result<(), ApiError> {
     let ws = &repo.workspace_id;
-    links::add(
-        &tx.legacy(),
+    steve_store::base::links::Links(tx).add(
         ws,
         &NewLink::new(item_ref(item), "output", pr_ref(pr), LINK_SOURCE),
     )?;
@@ -110,8 +109,7 @@ pub fn linked_line(repo: &RepoRow, pr: &PrRow) -> String {
 
 /// Removes the `output` link of `pr` from `item` (the artifact stays, like on unlinking a repo).
 fn detach(tx: &mut steve_store::W<'_>, ws: &str, pr: &PrRow, item: &str) -> Result<(), ApiError> {
-    links::remove(
-        &tx.legacy(),
+    steve_store::base::links::Links(tx).remove(
         ws,
         &LinkKey {
             subject: item_ref(item),
@@ -166,8 +164,7 @@ impl GitHub {
             {
                 attach(tx, &r, &pr, i, Some(&linked_line(&r, &pr)), now)?;
             }
-            base::audit(
-                &tx.legacy(),
+            tx.audit(
                 &ws,
                 &who.me,
                 "github.pr_link",

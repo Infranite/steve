@@ -60,7 +60,7 @@ pub(crate) fn emit(
         supplements: std::mem::take(&mut fx.supplements),
     };
     let payload = serde_json::to_value(&a).map_err(|e| ApiError::Internal(e.to_string()))?;
-    outbox::emit(&tx.legacy(), ws, TOPIC, VERSION, &payload)?;
+    outbox::append(tx, ws, TOPIC, VERSION, &payload)?;
     Ok(())
 }
 
@@ -159,8 +159,7 @@ impl GitHub {
         let (ws2, item) = (ws.to_string(), s.item.clone());
         store
             .write(move |tx| {
-                steve_store::base::links::add(
-                    &tx.legacy(),
+                steve_store::base::links::Links(tx).add(
                     &ws2,
                     &steve_store::base::links::NewLink::new(
                         steve_store::base::ObjRef::new("item", &item),

@@ -13,7 +13,7 @@ use steve_modules::changes::{
     Candidate, ChangeOp, DraftTarget, FieldSpec, OpCx, OpSpec, Plan, Prepared,
 };
 use steve_modules::{ApiError, ApiResult, Registry};
-use steve_store::base::{self, Change, Viewer, show};
+use steve_store::base::{Change, Viewer, show};
 use steve_store::uid;
 
 use crate::accept::Slot;
@@ -548,18 +548,10 @@ impl ChangeOp for RepoPatchOp {
             r.revision += 1;
             r.updated = now_of(&self.0);
             steve_store::github::update_repo(tx, &r)?;
-            base::revision(
-                &tx.legacy(),
-                cx.ws,
-                "gh_repo",
-                &r.id,
-                r.revision,
-                &was,
-                &after,
-                cx.actor,
+            steve_store::audit_repo::revise(
+                tx, cx.ws, "gh_repo", &r.id, r.revision, &was, &after, cx.actor,
             )?;
-            base::audit(
-                &tx.legacy(),
+            tx.audit(
                 cx.ws,
                 cx.actor,
                 "github.repo_patch",
@@ -616,8 +608,7 @@ impl ChangeOp for GrantOp {
             None,
             now,
         )?;
-        base::audit(
-            &tx.legacy(),
+        tx.audit(
             cx.ws,
             cx.actor,
             "grant.add",
@@ -641,8 +632,7 @@ impl ChangeOp for GrantOp {
         };
         let n = steve_store::grants::revoke(tx, cx.ws, id, now_of(&self.0))?;
         if n > 0 {
-            base::audit(
-                &tx.legacy(),
+            tx.audit(
                 cx.ws,
                 cx.actor,
                 "grant.revoke",

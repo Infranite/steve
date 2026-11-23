@@ -19,7 +19,6 @@ use steve_modules::contacts::mcp::McpCx;
 use steve_modules::vault::mcp::ToolOut;
 use steve_modules::vault::r#use::END;
 use steve_store::base::DecisionKind;
-use steve_store::base::decisions as base_decisions;
 use steve_store::{Item, NewDecision};
 
 use crate::GitHub;
@@ -607,7 +606,7 @@ fn open_pr(
                         .to_string(),
                 ));
             }
-            base_decisions::open(&tx.legacy(), &d)?;
+            steve_store::DecisionRows(tx).open(&d)?;
             Ok::<_, ApiError>(Ok(()))
         })
         .map_err(internal)?;

@@ -23,7 +23,6 @@ use steve_modules::decisions::{DecisionCx, DecisionHandler, choice_result};
 use steve_modules::hooks::{ItemHooks, Takeover};
 use steve_modules::{ApiError, ApiResult, Registry};
 use steve_store::base::DecisionKind;
-use steve_store::base::decisions as base_decisions;
 use steve_store::{Decision, Item, NewDecision};
 
 use crate::api::GhError;
@@ -350,9 +349,8 @@ impl GitHub {
             let now = self.now();
             self.store()
                 .write(|tx| {
-                    let opened = base_decisions::open(&tx.legacy(), &d)?;
-                    base_decisions::settle(
-                        &tx.legacy(),
+                    let opened = steve_store::DecisionRows(tx).open(&d)?;
+                    steve_store::DecisionRows(tx).settle(
                         &opened.id,
                         &json!({"choice": "yes", "text": "", "auto": AUTO}),
                         "resolved",
@@ -392,7 +390,11 @@ impl GitHub {
             return Ok(true);
         }
         self.store()
-            .write(|tx| base_decisions::open(&tx.legacy(), &d).map_err(ApiError::from))
+            .write(|tx| {
+                steve_store::DecisionRows(tx)
+                    .open(&d)
+                    .map_err(ApiError::from)
+            })
             .map_err(|e| e.to_string())?;
         if let Err(e) = self
             .core()
@@ -826,21 +828,18 @@ impl GitHub {
             if s.delete_branch {
                 draft.push_str(&format!("，合并后删除分支 {}", pr.head_ref));
             }
-            base_decisions::open(
-                &tx.legacy(),
-                &NewDecision {
-                    workspace_id: repo.workspace_id.clone(),
-                    kind: DecisionKind::Approve.code().into(),
-                    subject_type: PR_MERGE.into(),
-                    subject_id: pr.id.clone(),
-                    item_id: Some(item),
-                    session_id: None,
-                    question: format!("合并 PR #{}（{}）？", pr.number, repo.full_name),
-                    draft: Some(draft),
-                    options: Some(OPTIONS.map(String::from).to_vec()),
-                    requested_by: STEVE.into(),
-                },
-            )?;
+            steve_store::DecisionRows(tx).open(&NewDecision {
+                workspace_id: repo.workspace_id.clone(),
+                kind: DecisionKind::Approve.code().into(),
+                subject_type: PR_MERGE.into(),
+                subject_id: pr.id.clone(),
+                item_id: Some(item),
+                session_id: None,
+                question: format!("合并 PR #{}（{}）？", pr.number, repo.full_name),
+                draft: Some(draft),
+                options: Some(OPTIONS.map(String::from).to_vec()),
+                requested_by: STEVE.into(),
+            })?;
         }
         Ok(())
     }

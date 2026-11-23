@@ -20,7 +20,6 @@ use serde_json::{Value, json};
 use steve_modules::accounts::connections::ProviderError;
 use steve_modules::vault::{VaultError, VaultResult};
 use steve_modules::{ApiError, Body, Caller, Modules};
-use steve_store::base;
 use zeroize::Zeroizing;
 
 use crate::GitHub;
@@ -318,8 +317,7 @@ impl GitHub {
                 );
             }
             steve_store::github::insert_app(tx, &row).map_err(ApiError::from)?;
-            base::audit(
-                &tx.legacy(),
+            tx.audit(
                 ws,
                 me,
                 "github.app_create",

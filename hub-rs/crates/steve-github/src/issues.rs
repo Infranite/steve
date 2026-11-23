@@ -12,8 +12,8 @@ use serde_json::{Value, json};
 use steve_flow::ItemRequest;
 use steve_modules::vault::{VaultError, VaultResult};
 use steve_modules::{ApiError, Caller, Modules, parse};
-use steve_store::base::links::{self, NewLink};
-use steve_store::base::{self, ObjRef};
+use steve_store::base::ObjRef;
+use steve_store::base::links::NewLink;
 
 use crate::GitHub;
 use steve_store::github::IssueRow;
@@ -131,21 +131,20 @@ impl GitHub {
             .map_err(|e| ApiError::rule(steve_i18n::t!("github.issue.create_failed", error = e)))?;
         let now = self.now();
         self.store().write(|tx| -> Result<(), VaultError> {
-            links::add(
-                &tx.legacy(),
-                &ws,
-                &NewLink::new(
-                    ObjRef::new("item", &item),
-                    "from",
-                    ObjRef::new(ISSUE, &i.id),
-                    LINK_SOURCE,
-                ),
-            )
-            .map_err(ApiError::from)?;
+            steve_store::base::links::Links(tx)
+                .add(
+                    &ws,
+                    &NewLink::new(
+                        ObjRef::new("item", &item),
+                        "from",
+                        ObjRef::new(ISSUE, &i.id),
+                        LINK_SOURCE,
+                    ),
+                )
+                .map_err(ApiError::from)?;
             steve_store::github::set_issue_item(tx, &i.id, Some(&item), now)
                 .map_err(ApiError::from)?;
-            base::audit(
-                &tx.legacy(),
+            tx.audit(
                 &ws,
                 &who.me,
                 "github.issue_to_item",

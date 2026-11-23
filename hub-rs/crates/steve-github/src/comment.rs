@@ -21,7 +21,7 @@ use steve_modules::vault::VaultResult;
 use steve_modules::vault::mcp::ToolOut;
 use steve_modules::vault::r#use::END;
 use steve_modules::{ApiError, ApiResult, Body, Caller, Modules};
-use steve_store::base::{self, DecisionKind, decisions as base_decisions};
+use steve_store::base::DecisionKind;
 use steve_store::{Decision, NewDecision};
 
 use crate::GitHub;
@@ -191,7 +191,7 @@ impl GitHub {
             m.extend(extra);
         }
         let r = self.store().write(|tx| {
-            base::audit(&tx.legacy(), ws, actor, "github.comment", &t.subject, &d)?;
+            tx.audit(ws, actor, "github.comment", &t.subject, &d)?;
             if d["by"] == "me" {
                 crate::events::emit(tx, ws, &t.subject);
             }
@@ -316,7 +316,11 @@ impl GitHub {
             },
         };
         self.store()
-            .write(|tx| base_decisions::open(&tx.legacy(), &d).map_err(ApiError::from))
+            .write(|tx| {
+                steve_store::DecisionRows(tx)
+                    .open(&d)
+                    .map_err(ApiError::from)
+            })
             .map_err(|e| e.to_string())?;
         Ok(ToolOut {
             text: format!("Approval requested. {END}"),
