@@ -1,14 +1,16 @@
 //! Node ledger operations scoped to the Hub's existing store write.
+pub mod runtime;
+
 use serde_json::Value;
 
-use crate::runtime::{
+use crate::{Queued, Result, W};
+use runtime::{
     CommandLease, NewAttempt, NewCommand, NewPermission, PermissionRow, ReceiptState,
     SessionBinding, SessionRoom, SessionUpdate, TurnUpdate,
 };
-use crate::{Queued, Result, W};
 
 pub fn bind_session_in(w: &mut W<'_>, b: &SessionBinding<'_>, now: i64) -> Result<bool> {
-    crate::runtime::bind_session_in(w.conn, b, now)
+    runtime::bind_session_in(w.conn, b, now)
 }
 
 pub fn session_cas_in(
@@ -18,11 +20,11 @@ pub fn session_cas_in(
     u: &SessionUpdate<'_>,
     now: i64,
 ) -> Result<bool> {
-    crate::runtime::session_cas_in(w.conn, session, revision, u, now)
+    runtime::session_cas_in(w.conn, session, revision, u, now)
 }
 
 pub fn claim_in(w: &mut W<'_>, session: &str, turn: &str, now: i64) -> Result<Vec<Queued>> {
-    crate::runtime::claim_in(w.conn, session, turn, now)
+    runtime::claim_in(w.conn, session, turn, now)
 }
 
 pub fn deliver_into_turn_in(
@@ -31,11 +33,11 @@ pub fn deliver_into_turn_in(
     turn: &str,
     now: i64,
 ) -> Result<Vec<Queued>> {
-    crate::runtime::deliver_into_turn_in(w.conn, session, turn, now)
+    runtime::deliver_into_turn_in(w.conn, session, turn, now)
 }
 
 pub fn insert_attempt_in(w: &mut W<'_>, a: &NewAttempt<'_>, now: i64) -> Result<bool> {
-    crate::runtime::insert_attempt_in(w.conn, a, now)
+    runtime::insert_attempt_in(w.conn, a, now)
 }
 
 pub fn attempt_cas_in(
@@ -47,11 +49,11 @@ pub fn attempt_cas_in(
     completion: Option<&Value>,
     now: i64,
 ) -> Result<bool> {
-    crate::runtime::attempt_cas_in(w.conn, id, revision, state, receipt, completion, now)
+    runtime::attempt_cas_in(w.conn, id, revision, state, receipt, completion, now)
 }
 
 pub fn cancel_attempt_in(w: &mut W<'_>, id: &str, revision: i64, now: i64) -> Result<bool> {
-    crate::runtime::cancel_attempt_in(w.conn, id, revision, now)
+    runtime::cancel_attempt_in(w.conn, id, revision, now)
 }
 
 pub fn turn_cas_in(
@@ -61,15 +63,15 @@ pub fn turn_cas_in(
     u: &TurnUpdate<'_>,
     now: i64,
 ) -> Result<bool> {
-    crate::runtime::turn_cas_in(w.conn, turn, revision, u, now)
+    runtime::turn_cas_in(w.conn, turn, revision, u, now)
 }
 
 pub fn dispatch_receipt_in(w: &mut W<'_>, turn: &str, state: &str, now: i64) -> Result<usize> {
-    crate::runtime::dispatch_receipt_in(w.conn, turn, state, now)
+    runtime::dispatch_receipt_in(w.conn, turn, state, now)
 }
 
 pub fn insert_command_in(w: &mut W<'_>, c: &NewCommand<'_>, now: i64) -> Result<bool> {
-    crate::runtime::insert_command_in(w.conn, c, now)
+    runtime::insert_command_in(w.conn, c, now)
 }
 
 pub fn lease_command_in(
@@ -79,7 +81,7 @@ pub fn lease_command_in(
     now: i64,
     until: i64,
 ) -> Result<Option<CommandLease>> {
-    crate::runtime::lease_command_in(w.conn, node, owner, now, until)
+    runtime::lease_command_in(w.conn, node, owner, now, until)
 }
 
 pub fn retry_command_in(
@@ -89,7 +91,7 @@ pub fn retry_command_in(
     retry_at: i64,
     uncertain: bool,
 ) -> Result<bool> {
-    crate::runtime::retry_command_in(w.conn, lease, now, retry_at, uncertain)
+    runtime::retry_command_in(w.conn, lease, now, retry_at, uncertain)
 }
 
 pub fn merge_receipt_in(
@@ -100,11 +102,11 @@ pub fn merge_receipt_in(
     payload: &Value,
     now: i64,
 ) -> Result<bool> {
-    crate::runtime::merge_receipt_in(w.conn, operation, state, success, payload, now)
+    runtime::merge_receipt_in(w.conn, operation, state, success, payload, now)
 }
 
 pub fn insert_permission_in(w: &mut W<'_>, p: &NewPermission<'_>, now: i64) -> Result<bool> {
-    crate::runtime::insert_permission_in(w.conn, p, now)
+    runtime::insert_permission_in(w.conn, p, now)
 }
 
 pub fn permission_in(
@@ -113,15 +115,15 @@ pub fn permission_in(
     attempt: &str,
     permission: &str,
 ) -> Result<Option<PermissionRow>> {
-    crate::runtime::permission_in(w.conn, node, attempt, permission)
+    runtime::permission_in(w.conn, node, attempt, permission)
 }
 
 pub fn permission_of_decision_in(w: &mut W<'_>, decision: &str) -> Result<Option<PermissionRow>> {
-    crate::runtime::permission_of_decision_in(w.conn, decision)
+    runtime::permission_of_decision_in(w.conn, decision)
 }
 
 pub fn permission_of_answer_in(w: &mut W<'_>, operation: &str) -> Result<Option<PermissionRow>> {
-    crate::runtime::permission_of_answer_in(w.conn, operation)
+    runtime::permission_of_answer_in(w.conn, operation)
 }
 
 pub fn permission_cas_in(
@@ -132,7 +134,7 @@ pub fn permission_cas_in(
     answer_operation: Option<&str>,
     now: i64,
 ) -> Result<bool> {
-    crate::runtime::permission_cas_in(w.conn, decision, revision, state, answer_operation, now)
+    runtime::permission_cas_in(w.conn, decision, revision, state, answer_operation, now)
 }
 
 pub fn due_permissions_in(
@@ -141,19 +143,19 @@ pub fn due_permissions_in(
     now: i64,
     limit: i64,
 ) -> Result<Vec<PermissionRow>> {
-    crate::runtime::due_permissions_in(w.conn, node, now, limit)
+    runtime::due_permissions_in(w.conn, node, now, limit)
 }
 
 pub fn permissions_of_attempt_in(w: &mut W<'_>, attempt: &str) -> Result<Vec<PermissionRow>> {
-    crate::runtime::permissions_of_attempt_in(w.conn, attempt)
+    runtime::permissions_of_attempt_in(w.conn, attempt)
 }
 
 pub fn waiting_commands(w: &mut W<'_>, node: &str) -> Result<Vec<(String, Option<String>)>> {
-    crate::runtime::waiting_commands(w.conn, node)
+    runtime::waiting_commands(w.conn, node)
 }
 
 pub fn session_room(w: &mut W<'_>, node: &str) -> Result<SessionRoom> {
-    crate::runtime::session_room(w.conn, node)
+    runtime::session_room(w.conn, node)
 }
 
 pub fn record_placement(w: &mut W<'_>, item: &str, placement: &Value) -> Result<()> {

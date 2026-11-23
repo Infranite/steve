@@ -1,6 +1,6 @@
 //! Hub-owned Node jobs: a think call or a research run, and its attempts. One attempt runs one
 //! model on the job's Node; a fallback is the next attempt, never a rewritten one. Every write uses
-//! the caller's transaction, as in [`super::runtime`]: the job, its attempt and the `start_job`
+//! the caller's transaction, as in [`crate::runtime`]: the job, its attempt and the `start_job`
 //! command commit together, and errors roll all of them back.
 //!
 //! The spec, request, receipt and completion JSON are kept verbatim; the coordinator validates
@@ -9,7 +9,7 @@
 use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 
-use super::to_json;
+use crate::repo::to_json;
 use crate::{Result, StoreError};
 
 fn conflict(detail: &str) -> StoreError {

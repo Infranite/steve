@@ -1,5 +1,7 @@
 //! Relationships between Node jobs and their commands.
 
+pub mod sqlite;
+
 use sea_query::{Expr, ExprTrait, Func, JoinType, Query};
 
 use crate::{Read, Result, StoreError};
@@ -141,8 +143,8 @@ pub fn unavailable(r: &mut impl Read, attempt: &str) -> Result<bool> {
 }
 
 use crate::W;
-use crate::jobs::{AttemptState, JobAttemptRow, NewJob, NewJobAttempt, NewJobCommand, StartJob};
 use serde_json::Value;
+use sqlite::{AttemptState, JobAttemptRow, NewJob, NewJobAttempt, NewJobCommand, StartJob};
 
 pub fn create_job_in(
     w: &mut W<'_>,
@@ -151,7 +153,7 @@ pub fn create_job_in(
     start: &StartJob<'_>,
     now: i64,
 ) -> Result<bool> {
-    crate::jobs::create_job_in(w.conn, job, attempt, start, now)
+    sqlite::create_job_in(w.conn, job, attempt, start, now)
 }
 
 pub fn apply_attempt_in(
@@ -162,25 +164,25 @@ pub fn apply_attempt_in(
     completion: Option<&Value>,
     now: i64,
 ) -> Result<bool> {
-    crate::jobs::apply_attempt_in(w.conn, attempt, state, receipt, completion, now)
+    sqlite::apply_attempt_in(w.conn, attempt, state, receipt, completion, now)
 }
 
 pub fn finish_job_in(w: &mut W<'_>, job: &str, now: i64) -> Result<bool> {
-    crate::jobs::finish_job_in(w.conn, job, now)
+    sqlite::finish_job_in(w.conn, job, now)
 }
 
 pub fn attempt_in(w: &mut W<'_>, attempt: &str) -> Result<Option<JobAttemptRow>> {
-    crate::jobs::attempt_in(w.conn, attempt)
+    sqlite::attempt_in(w.conn, attempt)
 }
 
 pub fn insert_job_command_in(w: &mut W<'_>, c: &NewJobCommand<'_>, now: i64) -> Result<bool> {
-    crate::jobs::insert_job_command_in(w.conn, c, now)
+    sqlite::insert_job_command_in(w.conn, c, now)
 }
 
 pub fn cancel_attempt_in(w: &mut W<'_>, attempt: &str, now: i64) -> Result<bool> {
-    crate::jobs::cancel_attempt_in(w.conn, attempt, now)
+    sqlite::cancel_attempt_in(w.conn, attempt, now)
 }
 
 pub fn open_attempts_in(w: &mut W<'_>, node: &str) -> Result<Vec<JobAttemptRow>> {
-    crate::jobs::open_attempts_in(w.conn, node)
+    sqlite::open_attempts_in(w.conn, node)
 }

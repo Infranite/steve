@@ -5,7 +5,7 @@
 use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 
-use super::{all, to_json};
+use crate::repo::{all, to_json};
 use crate::{Queued, Result, StoreError};
 
 fn conflict(detail: &str) -> StoreError {
