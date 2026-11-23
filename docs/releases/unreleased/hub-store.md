@@ -1,0 +1,1 @@
+- Hub metadata and storage diagnostics use the shared storage contract. Existing metadata and Node identities are preserved when upgrading.

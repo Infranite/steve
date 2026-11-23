@@ -19,6 +19,16 @@ impl<C: Read> UserRows<'_, C> {
             .flatten())
     }
 
+    pub fn role(&mut self, user: &str) -> Result<Option<String>> {
+        self.0.one(
+            Query::select()
+                .from("users")
+                .column("role")
+                .and_where(Expr::col("id").eq(user)),
+            |row| row.get(0),
+        )
+    }
+
     pub fn name(&mut self, user: &str) -> Result<Option<String>> {
         self.0.one(
             Query::select()

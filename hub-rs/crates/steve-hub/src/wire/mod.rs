@@ -102,21 +102,6 @@ pub struct Wired {
     pub(crate) core: steve_core::Core,
 }
 
-/// Process-wide SQLite settings, before the first connection: no memory statistics. With them on (the
-/// default), every SQLite allocation takes one global mutex, which serializes the read pool.
-pub fn tune_sqlite() {
-    // SAFETY: sqlite3_config is only valid before sqlite3_initialize; this runs first thing in main
-    let rc = unsafe {
-        rusqlite::ffi::sqlite3_config(
-            rusqlite::ffi::SQLITE_CONFIG_MEMSTATUS,
-            0 as std::os::raw::c_int,
-        )
-    };
-    if rc != rusqlite::ffi::SQLITE_OK {
-        tracing::warn!("sqlite3_config(MEMSTATUS) = {rc}");
-    }
-}
-
 /// The core's configuration: every model list is what the installation names, none by default (a
 /// call without one runs on the harness's own default model).
 fn core_config(cfg: &Config, vars: &Vars) -> steve_core::CoreConfig {

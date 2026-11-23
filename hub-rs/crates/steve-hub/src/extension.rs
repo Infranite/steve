@@ -672,7 +672,7 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         .with_target(false)
         .init();
 
-    crate::wire::tune_sqlite();
+    steve_store::db::tune_sqlite();
     let mut cfg = Config::from_env()?;
     if std::env::args().any(|arg| arg == "--supervise") {
         return crate::upgrades::supervise(cfg).await;

@@ -25,7 +25,6 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::routing::{get, post};
-use rusqlite::OptionalExtension;
 use steve_store::{Store, StoreError};
 
 pub use fleet::NodeFleet;
@@ -135,24 +134,15 @@ pub const MAX_UNPROVEN: usize = 64;
 
 /// This Hub's random id, made once and kept in the settings.
 pub fn hub_id(store: &Store) -> Result<String, StoreError> {
-    store.transaction(|tx| {
-        let old: Option<String> = tx
-            .query_row(
-                "SELECT value FROM settings WHERE workspace_id='default' AND key=?",
-                [HUB_ID_KEY],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(v) = old {
-            return Ok(v);
+    store.write(|w| {
+        let mut settings = steve_store::WorkspaceSettings(w);
+        if let Some(id) = settings.get(steve_store::WS, HUB_ID_KEY)? {
+            return Ok(id);
         }
         let raw = steve_node_wire::identity::random::<12>()
             .map_err(|e| StoreError::Conflict(e.to_string()))?;
         let id = format!("hub_{}", hex::encode(raw));
-        tx.execute(
-            "INSERT INTO settings(workspace_id,key,value,updated) VALUES ('default',?,?,?)",
-            rusqlite::params![HUB_ID_KEY, id, now()],
-        )?;
+        settings.set(steve_store::WS, HUB_ID_KEY, &id, now())?;
         Ok(id)
     })
 }

@@ -131,7 +131,7 @@ async fn revoke_client(State(store): State<Store>, Path(id): Path<String>) -> Re
 }
 async fn status(State(store): State<Store>) -> Response {
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-        let schema: i64 = store.reader(|c| Ok::<_, steve_store::StoreError>(c.query_row("SELECT v FROM schema_version LIMIT 1", [], |r| r.get(0))?))?;
+        let schema = steve_store::db::inspect_schema(store.path())?.schema;
         Ok(serde_json::json!({"path": store.path(), "schema_version": schema, "file_size": std::fs::metadata(store.path())?.len()}))
     }).await;
     match result {

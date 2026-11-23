@@ -753,3 +753,18 @@ mod migration_progress_tests {
         );
     }
 }
+
+/// Process-wide SQLite settings, before the first connection: no memory statistics. With them on (the
+/// default), every SQLite allocation takes one global mutex, which serializes the read pool.
+pub fn tune_sqlite() {
+    // SAFETY: sqlite3_config is only valid before sqlite3_initialize; this runs first thing in main
+    let rc = unsafe {
+        rusqlite::ffi::sqlite3_config(
+            rusqlite::ffi::SQLITE_CONFIG_MEMSTATUS,
+            0 as std::os::raw::c_int,
+        )
+    };
+    if rc != rusqlite::ffi::SQLITE_OK {
+        tracing::warn!("sqlite3_config(MEMSTATUS) = {rc}");
+    }
+}

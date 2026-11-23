@@ -15,10 +15,9 @@ use super::{AppState, Ctx, blocking};
 use crate::error::ApiError;
 use axum::http::HeaderMap;
 use axum::{Extension, Json, extract::State};
-use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use steve_store::{Store, StoreError, now};
+use steve_store::{Read, Store, StoreError, UserRows, WS, WorkspaceSettings, now};
 
 const KEY: &str = "hub.metadata.v1";
 
@@ -46,27 +45,12 @@ impl From<StoreError> for ApiError {
     }
 }
 
-fn owner(c: &rusqlite::Connection, actor: &str) -> Result<bool, ApiError> {
-    Ok(
-        c.query_row("SELECT role FROM users WHERE id=?", [actor], |r| {
-            r.get::<_, String>(0)
-        })
-        .optional()
-        .map_err(StoreError::from)?
-        .as_deref()
-            == Some("owner"),
-    )
+fn owner(c: &mut impl Read, actor: &str) -> Result<bool, ApiError> {
+    Ok(UserRows(c).role(actor)?.as_deref() == Some("owner"))
 }
 
-fn read(c: &rusqlite::Connection, id: &str) -> Result<Metadata, ApiError> {
-    let raw: Option<String> = c
-        .query_row(
-            "SELECT value FROM settings WHERE workspace_id='default' AND key=?",
-            [KEY],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(StoreError::from)?;
+fn read(c: &mut impl Read, id: &str) -> Result<Metadata, ApiError> {
+    let raw = WorkspaceSettings(c).get(WS, KEY)?;
     let mut m = match raw {
         Some(s) => serde_json::from_str(&s).map_err(|e| ApiError::internal(e.to_string()))?,
         None => Metadata {
@@ -112,19 +96,34 @@ fn normalized(b: &Change) -> Result<(String, String), ApiError> {
 
 fn snapshot(s: &Store, actor: &str) -> Result<(Metadata, bool), ApiError> {
     let id = crate::nodes::hub_id(s)?;
-    s.reader(|c| Ok((read(c, &id)?, owner(c, actor)?)))
+    s.read(|c| Ok((read(c, &id)?, owner(c, actor)?)))
 }
 
 fn update(s: &Store, actor: &str, b: &Change) -> Result<Metadata, ApiError> {
     let id = crate::nodes::hub_id(s)?;
-    s.transaction(|tx| {
-        // Re-read the user's instance role here: an old Ctx cannot retain revoked permission.
-        if !owner(tx, actor)? { return Err(ApiError::Json(403, "hub_metadata_forbidden".into())); }
+    s.write(|w| {
+        // A role observed by the request can have been revoked before this write.
+        if !owner(w, actor)? {
+            return Err(ApiError::Json(403, "hub_metadata_forbidden".into()));
+        }
         let (name, note) = normalized(b)?;
-        let old = read(tx, &id)?;
-        if old.revision != b.revision { return Err(ApiError::Json(409, "hub_metadata_conflict".into())); }
-        let m = Metadata { display_name: name, purpose_note: note, revision: old.revision.checked_add(1).ok_or_else(|| ApiError::internal("revision exhausted"))?, updated_at: Some(now()), updated_by: Some(actor.into()), ..old };
-        tx.execute("INSERT INTO settings(workspace_id,key,value,updated) VALUES ('default',?,?,?) ON CONFLICT(workspace_id,key) DO UPDATE SET value=excluded.value,updated=excluded.updated", params![KEY, serde_json::to_string(&m).map_err(StoreError::from)?, now()]).map_err(StoreError::from)?;
+        let old = read(w, &id)?;
+        if old.revision != b.revision {
+            return Err(ApiError::Json(409, "hub_metadata_conflict".into()));
+        }
+        let m = Metadata {
+            display_name: name,
+            purpose_note: note,
+            revision: old
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| ApiError::internal("revision exhausted"))?,
+            updated_at: Some(now()),
+            updated_by: Some(actor.into()),
+            ..old
+        };
+        let value = serde_json::to_string(&m).map_err(StoreError::from)?;
+        WorkspaceSettings(w).set(WS, KEY, &value, now())?;
         Ok(m)
     })
 }
@@ -186,13 +185,14 @@ mod tests {
     fn fixture() -> (tempfile::TempDir, Store) {
         let d = tempfile::tempdir().unwrap();
         let s = Store::open(d.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
-        s.transaction::<_, StoreError>(|tx| {
-            tx.execute("INSERT INTO workspaces(id,name,created) VALUES ('default','Test',0)", [])?;
+        s.write::<_, StoreError>(|w| {
+            steve_store::Workspaces(w).insert(WS, "Test", 0)?;
             for (id, role) in [("a", "owner"), ("b", "member")] {
-                tx.execute("INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES (?,'default',?,?,?,0)", params![id,id,id,role])?;
+                UserRows(w).insert(id, WS, id, id, role, 0)?;
             }
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
         (d, s)
     }
     fn change(revision: i64, name: &str, note: &str) -> Change {
@@ -231,11 +231,7 @@ mod tests {
         let cleared = update(&reopened, "a", &change(1, "Hub", "")).unwrap();
         assert!(cleared.purpose_note.is_empty());
         assert_eq!(cleared.hub_id, first.hub_id);
-        s.transaction::<_, StoreError>(|tx| {
-            tx.execute("UPDATE users SET role='member' WHERE id='a'", [])?;
-            Ok(())
-        })
-        .unwrap();
+        steve_store::testkit::hub::set_user_role(&s, "a", "member").unwrap();
         assert!(matches!(
             update(&s, "a", &change(2, "Revoked", "")),
             Err(ApiError::Json(403, _))
@@ -275,7 +271,7 @@ mod tests {
                 .count(),
             1
         );
-        s.transaction::<_, StoreError>(|tx| {tx.execute_batch("CREATE TRIGGER refuse_metadata BEFORE UPDATE ON settings WHEN NEW.key='hub.metadata.v1' BEGIN SELECT RAISE(ABORT,'test failure'); END;")?;Ok(())}).unwrap();
+        steve_store::testkit::hub::refuse_metadata_updates(&s).unwrap();
         assert!(update(&s, "a", &change(1, "Failed", "must not persist")).is_err());
         assert_eq!(snapshot(&s, "a").unwrap().0.revision, 1);
         assert_eq!(snapshot(&s, "a").unwrap().0.display_name, "New");
