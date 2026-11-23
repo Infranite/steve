@@ -9,10 +9,10 @@ use steve_store::{Result, W, uid};
 
 use crate::extract_text::markdown;
 use crate::index::{self, BoxFuture, DocLoader, Loaded};
-use crate::repo::{DocRow, NewDoc, SourceRow};
 use crate::sources;
 use steve_store::Revisions;
 use steve_store::knowledge::Documents;
+use steve_store::knowledge::{DocRow, NewDoc, SourceRow};
 
 /// Reads a note's text from its row (for re-indexing through the queue).
 pub struct NotesLoader;
@@ -60,7 +60,7 @@ fn index_note(tx: &mut W<'_>, doc_id: &str, now: i64, force: bool) -> Result<()>
 
 /// Creates and indexes a note in `ws` written by `me`. Returns the document id.
 pub fn create(tx: &mut W<'_>, ws: &str, me: &str, n: &NewNote, now: i64) -> Result<String> {
-    let src = sources::builtin_in(tx, ws, "notes", me, now)?;
+    let src = sources::builtin(tx, ws, "notes", me, now)?;
     let id = uid("kd");
     Documents(tx).insert_doc(
         ws,

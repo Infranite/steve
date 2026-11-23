@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use steve_modules::outbound::{Audience, CheckResult, Verdict};
 use steve_modules::{ApiError, Caller, decisions};
-use steve_store::base::{self, Viewer, Visibility};
+use steve_store::base::{Viewer, Visibility};
 use steve_store::{FileRef, NewDecision, uid};
 
 use crate::Mail;
@@ -499,21 +499,18 @@ pub fn open_approval(
 ) -> MailResult<String> {
     expire_open(tx, &d.workspace_id, &d.id)?;
     d.content_hash = content_hash(d);
-    let dec = base::decisions::open(
-        &tx.legacy(),
-        &NewDecision {
-            workspace_id: d.workspace_id.clone(),
-            kind: "approve".into(),
-            subject_type: SUBJECT_TYPE.into(),
-            subject_id: d.id.clone(),
-            item_id: d.item_id.clone(),
-            session_id: d.session_id.clone(),
-            question: decision_question(d),
-            draft: Some(decision_text(d)),
-            options: Some(APPROVE_OPTIONS.map(String::from).to_vec()),
-            requested_by: requested_by.into(),
-        },
-    )?;
+    let dec = steve_store::DecisionRows(tx).open(&NewDecision {
+        workspace_id: d.workspace_id.clone(),
+        kind: "approve".into(),
+        subject_type: SUBJECT_TYPE.into(),
+        subject_id: d.id.clone(),
+        item_id: d.item_id.clone(),
+        session_id: d.session_id.clone(),
+        question: decision_question(d),
+        draft: Some(decision_text(d)),
+        options: Some(APPROVE_OPTIONS.map(String::from).to_vec()),
+        requested_by: requested_by.into(),
+    })?;
     repo::set_draft_decision(tx, &d.id, Some(&dec.id), &d.content_hash)?;
     repo::draft_transition(tx, &d.id, &["draft", "pending", "failed"], "pending", now)?;
     d.decision_id = Some(dec.id.clone());
@@ -527,8 +524,7 @@ pub fn open_approval(
 /// Expires every open decision about a draft.
 pub fn expire_open(tx: &mut steve_store::W<'_>, ws: &str, draft: &str) -> MailResult<()> {
     for id in steve_store::decision_repo::open_draft_decisions(tx, ws, draft)? {
-        base::decisions::settle(
-            &tx.legacy(),
+        steve_store::DecisionRows(tx).settle(
             &id,
             &json!({"expired": true}),
             "expired",
@@ -578,8 +574,7 @@ impl Mail {
             }
             let changed = repo::set_checked_basis(tx, &d, &basis, now)?;
             if changed {
-                base::audit(
-                    &tx.legacy(),
+                tx.audit(
                     &who.ws,
                     &who.me,
                     "mail_draft.check",
@@ -729,8 +724,7 @@ impl Mail {
         d.content_hash = content_hash(&d);
         self.0.m.store.write(|tx| -> MailResult<()> {
             repo::insert_draft(tx, &d)?;
-            base::audit(
-                &tx.legacy(),
+            tx.audit(
                 &who.ws,
                 &who.me,
                 "mail_draft.create",
@@ -794,14 +788,7 @@ impl Mail {
                 return Err(ApiError::conflict(steve_i18n::t!("mail.draft.locked")).into());
             }
             repo::update_draft_content(tx, &d, now)?;
-            base::audit(
-                &tx.legacy(),
-                &who.ws,
-                &who.me,
-                "mail_draft.update",
-                id,
-                &json!({}),
-            )?;
+            tx.audit(&who.ws, &who.me, "mail_draft.update", id, &json!({}))?;
             emit_draft(tx, &d);
             Ok(())
         })?;
@@ -850,14 +837,7 @@ impl Mail {
             }
             repo::set_draft_send_at(tx, id, None)?;
             expire_open(tx, &who.ws, id)?;
-            base::audit(
-                &tx.legacy(),
-                &who.ws,
-                &who.me,
-                "mail_draft.discard",
-                id,
-                &json!({}),
-            )?;
+            tx.audit(&who.ws, &who.me, "mail_draft.discard", id, &json!({}))?;
             emit_draft(tx, &d);
             Ok(())
         })?;
@@ -908,23 +888,9 @@ impl Mail {
             crate::send::undo_approval(tx, &cur, now)?;
             if let Some(dec) = steve_store::decision_repo::send_approval(tx, &who.ws, id)? {
                 steve_store::decision_repo::reopen(tx, &dec.id)?;
-                base::audit(
-                    &tx.legacy(),
-                    &who.ws,
-                    &who.me,
-                    "decision.undo",
-                    &dec.id,
-                    &json!({}),
-                )?;
+                tx.audit(&who.ws, &who.me, "decision.undo", &dec.id, &json!({}))?;
             }
-            base::audit(
-                &tx.legacy(),
-                &who.ws,
-                &who.me,
-                "mail_draft.cancel",
-                id,
-                &json!({}),
-            )?;
+            tx.audit(&who.ws, &who.me, "mail_draft.cancel", id, &json!({}))?;
             emit_draft(tx, &d);
             Ok(())
         })?;
@@ -964,8 +930,7 @@ impl Mail {
             repo::insert_draft(tx, &d)?;
             let author = d.author.clone();
             open_approval(tx, &mut d, &author, now)?;
-            base::audit(
-                &tx.legacy(),
+            tx.audit(
                 &d.workspace_id,
                 &author,
                 "mail_draft.create",

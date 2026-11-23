@@ -437,13 +437,11 @@ pub fn link_item(
     thread: &str,
 ) -> MailResult<()> {
     let it = || ObjRef::new("item", item);
-    links::add(
-        &tx.legacy(),
+    links::Links(tx).add(
         ws,
         &NewLink::new(it(), "from", ObjRef::new("mail_message", message), "sig"),
     )?;
-    links::add(
-        &tx.legacy(),
+    links::Links(tx).add(
         ws,
         &NewLink::new(it(), "about", ObjRef::new("mail_thread", thread), "sig"),
     )?;

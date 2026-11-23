@@ -282,7 +282,7 @@ async fn the_section_10_example_drafts_applies_and_undoes() {
     let ops: Vec<Value> =
         e.h.env
             .store()
-            .reader(|c| steve_store::base::changesets::get(c, &p.id))
+            .read(|r| steve_store::base::changesets::ChangeSets(r).get(&p.id))
             .unwrap()
             .unwrap()
             .ops;

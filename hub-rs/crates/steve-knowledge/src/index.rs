@@ -12,14 +12,14 @@ use futures_util::StreamExt;
 use steve_modules::Modules;
 use steve_store::base::{Level, Visibility};
 use steve_store::knowledge::{ChunkMeta as StoredChunkMeta, Chunks, Documents, IndexChunk};
-use steve_store::{Result, Tx, W, sha};
+use steve_store::{Result, W, sha};
 use tokio::sync::mpsc;
 
 use crate::chunk::{Chunk, TRUNCATED_ERROR, chunk};
 use crate::extract_text::Extracted;
-use crate::repo::{DocRow, SourceRow};
 use crate::seg::seg;
 use crate::state::Knowledge;
+use steve_store::knowledge::{DocRow, SourceRow};
 
 /// Documents per transaction in the queue worker.
 pub const BATCH: usize = 20;
@@ -160,18 +160,6 @@ pub fn doc_label_shown(stored: &str) -> String {
     };
     let prefix = steve_i18n::reword!(prefix, DOC_PREFIXES).unwrap_or_else(|| prefix.to_owned());
     format!("{prefix} · {}", crate::sources::chat_day_shown(title))
-}
-
-/// Indexes text from an integration already inside the caller's transaction.
-pub fn index_doc(
-    tx: &Tx<'_>,
-    doc: &DocRow,
-    source: &SourceRow,
-    extracted: &Extracted,
-    now: i64,
-    force: bool,
-) -> Result<usize> {
-    tx.write(|w| index_document(w, doc, source, extracted, now, force))
 }
 
 /// Indexes a document from its extracted text: hashed, chunked, written.

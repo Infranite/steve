@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_modules::{ApiError, Caller};
-use steve_store::base::{self, Viewer, Visibility};
+use steve_store::base::{Viewer, Visibility};
 
 use crate::attach::Refused;
 use crate::drafts::{DraftOut, draft_out};
@@ -434,8 +434,7 @@ impl Mail {
                 && s != t.state
             {
                 repo::set_thread_state(tx, &t.id, s, now)?;
-                base::audit(
-                    &tx.legacy(),
+                tx.audit(
                     &who.ws,
                     &who.me,
                     "mail_thread.patch",

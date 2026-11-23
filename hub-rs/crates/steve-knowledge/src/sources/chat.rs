@@ -18,9 +18,9 @@ use crate::chunk::TextKind;
 use crate::extract;
 use crate::extract_text::{Extracted, FrontMatter};
 use crate::index::{self, BoxFuture, DocLoader, Loaded};
-use crate::repo::{DocRow, NewDoc, SourceRow};
 use crate::sources;
 use crate::state::Knowledge;
+use steve_store::knowledge::{DocRow, NewDoc, SourceRow};
 
 pub const KIND: &str = "chat";
 /// The main thread's `messages.space`.
@@ -93,7 +93,7 @@ pub fn sync_day(m: &Modules, ws: &str, day: &str) -> ApiResult<Option<String>> {
     let now = m.clock.now();
     m.store.write(|tx| {
         let user = extract::owner(tx, ws)?;
-        let src = sources::builtin_in(tx, ws, KIND, &user, now)?;
+        let src = sources::builtin(tx, ws, KIND, &user, now)?;
         let r#ref = format!("chat:{day}");
         let existing = Documents(tx).doc_by_ref(&src.id, &r#ref)?;
         let Some(text) = day_text(tx, ws, day)? else {

@@ -109,10 +109,10 @@ impl MailItems for Items {
 
 fn new_item(store: &steve_store::Store, ws: &str, id: &str, by: &str) {
     store
-        .transaction(|tx| -> Result<(), steve_store::StoreError> {
+        .write(|tx| -> Result<(), steve_store::StoreError> {
             let no: i64 = id.trim_start_matches("ST-").parse().unwrap_or(1);
             db::item(store, ws, id, no, "t")?;
-            steve_store::base::audit(tx, ws, by, "item.create", id, &json!({}))?;
+            tx.audit(ws, by, "item.create", id, &json!({}))?;
             Ok(())
         })
         .unwrap();
@@ -221,7 +221,7 @@ impl E5 {
         self.h
             .env
             .store()
-            .reader(|c| steve_store::base::decisions::get(c, id))
+            .read(|r| steve_store::DecisionRows(r).get(id))
             .unwrap()
             .unwrap()
     }
@@ -282,9 +282,8 @@ async fn a_session_reads_only_its_items_threads() {
     new_item(e.h.env.store(), WS, "ST-8", OTHER);
     e.h.env
         .store()
-        .transaction(|tx| {
-            steve_store::base::links::add(
-                tx,
+        .write(|tx| {
+            steve_store::base::links::Links(tx).add(
                 WS,
                 &steve_store::base::links::NewLink::new(
                     steve_store::base::ObjRef::new("item", "ST-8"),
@@ -578,9 +577,8 @@ async fn to_item_and_the_panel() {
     let preds: Vec<(String, String)> =
         e.h.env
             .store()
-            .reader(|c| {
-                steve_store::base::links::from(
-                    c,
+            .read(|r| {
+                steve_store::base::links::Links(r).from(
                     WS,
                     &steve_store::base::ObjRef::new("item", &item),
                     None,

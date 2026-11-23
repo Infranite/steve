@@ -5,7 +5,6 @@
 use serde::Deserialize;
 use serde_json::json;
 use steve_modules::{ApiError, Caller};
-use steve_store::base;
 
 use crate::Mail;
 use crate::error::{MailError, MailResult};
@@ -143,8 +142,8 @@ pub(crate) fn write_tx(
     now: i64,
 ) -> MailResult<()> {
     repo::update_settings(tx, connection_id, after, now)?;
-    base::revision(
-        &tx.legacy(),
+    steve_store::audit_repo::revise(
+        tx,
         ws,
         "mail_account",
         connection_id,
@@ -153,8 +152,7 @@ pub(crate) fn write_tx(
         &fields(after),
         actor,
     )?;
-    base::audit(
-        &tx.legacy(),
+    tx.audit(
         ws,
         actor,
         "mail_account.patch",

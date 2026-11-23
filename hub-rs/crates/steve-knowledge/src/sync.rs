@@ -144,7 +144,7 @@ pub fn sweep_mems(tx: &mut W<'_>, ws: &str, now: i64) -> Result<usize> {
 /// Makes the `bot_mem` entries of `ws` match `bot_memories` (the old table has no `updated` and is
 /// small, so it is compared whole; a hash in `kb_marks` skips the work when nothing changed).
 pub fn sync_bot_mems(tx: &mut W<'_>, ws: &str, actor: &str, now: i64) -> Result<usize> {
-    let src = sources::builtin_in(tx, ws, "bot_mems", actor, now)?;
+    let src = sources::builtin(tx, ws, "bot_mems", actor, now)?;
     let facts = BotMemories(tx).in_workspace(ws)?;
     let bot_ids: Vec<_> = facts.iter().map(|(_, bot, _)| bot.as_str()).collect();
     let names = References(tx).bot_names(&bot_ids)?;

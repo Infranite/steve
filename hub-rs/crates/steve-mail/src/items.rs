@@ -11,7 +11,7 @@ use steve_modules::panels::{
 };
 use steve_modules::{ApiError, ApiResult, Caller, Modules};
 use steve_store::base::links::{self, NewLink};
-use steve_store::base::{self, ObjRef, Viewer, Visibility};
+use steve_store::base::{ObjRef, Viewer, Visibility};
 
 use crate::error::{MailError, MailResult};
 use crate::parse::cut_chars;
@@ -242,27 +242,23 @@ impl Mail {
         let ws = who.ws.as_str();
         let it = || ObjRef::new("item", item);
         self.0.m.store.write(|tx| -> MailResult<()> {
-            links::add(
-                &tx.legacy(),
+            links::Links(tx).add(
                 ws,
                 &NewLink::new(it(), "about", ObjRef::new(THREAD, thread), LINK_SOURCE),
             )?;
             if let Some(m) = orig {
-                links::add(
-                    &tx.legacy(),
+                links::Links(tx).add(
                     ws,
                     &NewLink::new(it(), "from", ObjRef::new(MESSAGE, &m.id), LINK_SOURCE),
                 )?;
                 if let Some(p) = m.from_party_id.as_ref().filter(|_| m.direction == "in") {
-                    links::add(
-                        &tx.legacy(),
+                    links::Links(tx).add(
                         ws,
                         &NewLink::new(it(), "raised_by", ObjRef::new("party", p), LINK_SOURCE),
                     )?;
                 }
                 if let Some(ev) = &m.event_id {
-                    links::add(
-                        &tx.legacy(),
+                    links::Links(tx).add(
                         ws,
                         &NewLink::new(it(), "from", ObjRef::new("event", ev), LINK_SOURCE),
                     )?;
@@ -275,8 +271,7 @@ impl Mail {
                     )?;
                 }
             }
-            base::audit(
-                &tx.legacy(),
+            tx.audit(
                 ws,
                 &who.me,
                 "mail_thread.to_item",

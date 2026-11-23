@@ -60,7 +60,7 @@ fn audits(h: &H, action: &str) -> Vec<Value> {
 fn decision(h: &H, id: &str) -> steve_store::Decision {
     h.env
         .store()
-        .reader(|c| steve_store::base::decisions::get(c, id))
+        .read(|r| steve_store::DecisionRows(r).get(id))
         .unwrap()
         .unwrap()
 }
@@ -1067,9 +1067,8 @@ async fn dismissed_unknown_card_is_recreated_even_without_item_or_thread() {
     // Same persisted effect as Core::dismiss_decision for an orphan card: no undo target.
     h.env
         .store()
-        .transaction(|tx| {
-            steve_store::base::decisions::settle(
-                tx,
+        .write(|tx| {
+            steve_store::DecisionRows(tx).settle(
                 &old,
                 &json!({"dismissed": true}),
                 "resolved",

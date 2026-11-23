@@ -25,7 +25,6 @@ use steve_modules::decisions::{DecisionCx, DecisionHandler, choice_result};
 use steve_modules::outbound::Verdict;
 use steve_modules::outbound::{YOLO_ACTOR, decided_by_yolo, strip_ai_prefix, with_ai_prefix};
 use steve_modules::{ApiError, ApiResult, Clock, SystemClock};
-use steve_store::base;
 use steve_store::{Decision, NewDecision, uid};
 
 use crate::adapter::SendMeta;
@@ -205,10 +204,9 @@ impl MailDraftHandler {
                     } else {
                         ("me", format!("批准发送邮件「{}」", draft.subject))
                     };
-                    people_repo::timeline_add(&tx.legacy(), item, who, "sys", &line)?;
+                    people_repo::timeline_add(tx, item, who, "sys", &line)?;
                 }
-                base::audit(
-                    &tx.legacy(),
+                tx.audit(
                     cx.ws,
                     cx.actor,
                     "mail_draft.approve",
@@ -226,8 +224,7 @@ impl MailDraftHandler {
                 if let Some(t) = &draft.thread_id {
                     repo::set_thread_state(tx, t, "open", now)?;
                 }
-                base::audit(
-                    &tx.legacy(),
+                tx.audit(
                     cx.ws,
                     cx.actor,
                     "mail_draft.reject",
@@ -289,8 +286,7 @@ impl MailDraftHandler {
             }
             _ => return Err(ApiError::invalid("choice").into()),
         }
-        base::audit(
-            &tx.legacy(),
+        tx.audit(
             cx.ws,
             cx.actor,
             &format!("mail_draft.{}", cx.choice),
@@ -488,8 +484,7 @@ impl Mail {
         let mut detail = detail;
         detail["draft"] = json!(d.id);
         detail["reason"] = json!(reason);
-        base::audit(
-            &tx.legacy(),
+        tx.audit(
             &d.workspace_id,
             "steve",
             "mail.send.blocked",
@@ -547,7 +542,7 @@ impl Mail {
                     reason: ERR_NO_APPROVAL.into(),
                 }));
             };
-            base::audit(&tx.legacy(), &d.workspace_id, "steve", "mail.send.attempt", &d.id,
+            tx.audit( &d.workspace_id, "steve", "mail.send.attempt", &d.id,
                 &json!({"message_id": message_id(&d), "content_hash": d.content_hash, "decision": a.id}))?;
             let mut d = d;
             d.status = "sending".into();
@@ -745,8 +740,7 @@ impl Mail {
         repo::set_draft_send_at(tx, &d.id, None)?;
         drafts::expire_open(tx, &d.workspace_id, &d.id)?;
         self.open_unknown_decision(tx, d)?;
-        base::audit(
-            &tx.legacy(),
+        tx.audit(
             &d.workspace_id,
             "steve",
             "mail.send.unknown",
@@ -758,24 +752,21 @@ impl Mail {
     }
 
     fn open_unknown_decision(&self, tx: &mut steve_store::W<'_>, d: &DraftRow) -> MailResult<()> {
-        let decision = base::decisions::open(
-            &tx.legacy(),
-            &NewDecision {
-                workspace_id: d.workspace_id.clone(),
-                kind: "fail".into(),
-                subject_type: SUBJECT_TYPE.into(),
-                subject_id: d.id.clone(),
-                item_id: d.item_id.clone(),
-                session_id: d.session_id.clone(),
-                question: format!(
-                    "邮件「{}」发送结果不明，请核实。重试可能重复发送；放弃待办不会撤回邮件。",
-                    d.subject
-                ),
-                draft: Some(drafts::decision_text(d)),
-                options: Some(UNKNOWN_OPTIONS.map(String::from).to_vec()),
-                requested_by: "steve".into(),
-            },
-        )?;
+        let decision = steve_store::DecisionRows(tx).open(&NewDecision {
+            workspace_id: d.workspace_id.clone(),
+            kind: "fail".into(),
+            subject_type: SUBJECT_TYPE.into(),
+            subject_id: d.id.clone(),
+            item_id: d.item_id.clone(),
+            session_id: d.session_id.clone(),
+            question: format!(
+                "邮件「{}」发送结果不明，请核实。重试可能重复发送；放弃待办不会撤回邮件。",
+                d.subject
+            ),
+            draft: Some(drafts::decision_text(d)),
+            options: Some(UNKNOWN_OPTIONS.map(String::from).to_vec()),
+            requested_by: "steve".into(),
+        })?;
         repo::set_draft_decision(tx, &d.id, Some(&decision.id), &d.content_hash)?;
         Ok(())
     }
@@ -804,8 +795,7 @@ impl Mail {
                     continue;
                 }
                 self.open_unknown_decision(tx, &d)?;
-                base::audit(
-                    &tx.legacy(),
+                tx.audit(
                     &d.workspace_id,
                     "steve",
                     "mail.send.reconciliation_reopened",
@@ -836,23 +826,19 @@ impl Mail {
             }
             repo::set_draft_error(tx, &d.id, Some(error))?;
             drafts::expire_open(tx, &d.workspace_id, &d.id)?;
-            base::decisions::open(
-                &tx.legacy(),
-                &NewDecision {
-                    workspace_id: d.workspace_id.clone(),
-                    kind: "fail".into(),
-                    subject_type: SUBJECT_TYPE.into(),
-                    subject_id: d.id.clone(),
-                    item_id: d.item_id.clone(),
-                    session_id: d.session_id.clone(),
-                    question: format!("邮件「{}」没有发出去：{error}", d.subject),
-                    draft: Some(drafts::decision_text(d)),
-                    options: Some(FAIL_OPTIONS.map(String::from).to_vec()),
-                    requested_by: "steve".into(),
-                },
-            )?;
-            base::audit(
-                &tx.legacy(),
+            steve_store::DecisionRows(tx).open(&NewDecision {
+                workspace_id: d.workspace_id.clone(),
+                kind: "fail".into(),
+                subject_type: SUBJECT_TYPE.into(),
+                subject_id: d.id.clone(),
+                item_id: d.item_id.clone(),
+                session_id: d.session_id.clone(),
+                question: format!("邮件「{}」没有发出去：{error}", d.subject),
+                draft: Some(drafts::decision_text(d)),
+                options: Some(FAIL_OPTIONS.map(String::from).to_vec()),
+                requested_by: "steve".into(),
+            })?;
+            tx.audit(
                 &d.workspace_id,
                 "steve",
                 "mail.send.failed",
@@ -955,10 +941,9 @@ impl Mail {
                 repo::set_draft_thread(tx, &d.id, &thread_id)?;
             }
             if let Some(item) = &d.item_id {
-                people_repo::timeline_add(&tx.legacy(), item, "steve", "sys", &format!("邮件已发出：{}", d.subject))?;
+                people_repo::timeline_add(tx, item, "steve", "sys", &format!("邮件已发出：{}", d.subject))?;
             }
-            base::audit(
-                &tx.legacy(),
+            tx.audit(
                 ws,
                 "steve",
                 "mail.send",

@@ -11,10 +11,10 @@ use steve_store::base::{Level, Visibility};
 use steve_store::uid;
 
 use crate::index::{BoxFuture, DocLoader, Loaded};
-use crate::repo::{DocRow, NewDoc, SourceRow};
 use crate::service;
 use crate::sources::{self, folder};
 use steve_store::knowledge::Documents;
+use steve_store::knowledge::{DocRow, NewDoc, SourceRow};
 use steve_store::{FileReads, References};
 
 pub const NOUN_FILE: &str = "附件";
@@ -103,7 +103,7 @@ pub fn add(m: &Modules, who: &Caller, b: &FileBody) -> ApiResult<(String, bool)>
         let file = FileReads(tx)
             .in_workspace(&who.ws, &b.file_id)?
             .ok_or_else(|| ApiError::not_found(NOUN_FILE))?;
-        let src = sources::builtin_in(tx, &who.ws, "files", &who.me, now)?;
+        let src = sources::builtin(tx, &who.ws, "files", &who.me, now)?;
         if let Some(d) = Documents(tx).doc_by_ref(&src.id, &file.id)? {
             return if viewer.sees(&d.eff_visibility(&src), &d.created_by) {
                 Ok((d.id, false))

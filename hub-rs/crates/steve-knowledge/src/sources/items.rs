@@ -21,9 +21,9 @@ use crate::candidates::{Origin, OriginKind};
 use crate::extract::{self, MAX_INPUT, clip};
 use crate::extract_text::markdown;
 use crate::index::{self, BoxFuture, DocLoader, Loaded};
-use crate::repo::{DocRow, NewDoc, SourceRow};
 use crate::sources;
 use crate::state::Knowledge;
+use steve_store::knowledge::{DocRow, NewDoc, SourceRow};
 
 pub const KIND: &str = "items";
 /// Text outputs larger than this are listed, not read.
@@ -213,7 +213,7 @@ pub fn extract_text(f: &ItemFacts) -> String {
 
 /// Writes (or rewrites) the item's document and indexes it, in one transaction. Returns its id.
 fn write_doc(tx: &mut W<'_>, f: &ItemFacts, text: &str, now: i64) -> ApiResult<String> {
-    let src = sources::builtin_in(tx, &f.ws, KIND, &f.user, now)?;
+    let src = sources::builtin(tx, &f.ws, KIND, &f.user, now)?;
     let title = format!("{} {}", f.id, f.title);
     let id = match Documents(tx).doc_by_ref(&src.id, &f.id)? {
         Some(d) => {
