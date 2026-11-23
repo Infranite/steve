@@ -561,6 +561,7 @@ impl r::AttemptRunner for OnNode<'_> {
                             self.usage.push(u);
                         }
                     }
+                    Some(News::GatewayProgress(_)) => {},
                     Some(News::End(c)) => break Some(c),
                     None => break None,
                 },
