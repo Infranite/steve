@@ -848,7 +848,6 @@ impl crate::OneModel for ModelScript {
                 cost_reported: Some(0.000829045),
                 detail: json!({"scope": "main"}),
             }],
-            timed_out: false,
             reported_model: (!model.is_empty()).then(|| model.to_string()),
         }
     }

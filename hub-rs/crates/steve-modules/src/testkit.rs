@@ -30,8 +30,8 @@ pub const WS2: &str = "w2";
 /// else `{}`. Records every call so tests can assert on the prompts.
 #[derive(Default)]
 pub struct FakeGateway {
-    scripts: Mutex<Vec<(String, Result<GatewayOut, String>)>>,
-    replies: Mutex<VecDeque<Result<GatewayOut, String>>>,
+    scripts: Mutex<Vec<(String, Result<GatewayOut, crate::gateway::GatewayError>)>>,
+    replies: Mutex<VecDeque<Result<GatewayOut, crate::gateway::GatewayError>>>,
     /// Every prompt received, in order.
     pub prompts: Mutex<Vec<String>>,
     /// Every call's tier and prompt, in order.
@@ -61,7 +61,10 @@ impl FakeGateway {
     }
     /// Fails every prompt starting with `prefix`.
     pub fn script_fail(&self, prefix: impl Into<String>, err: impl Into<String>) {
-        lock(&self.scripts).push((prefix.into(), Err(err.into())));
+        lock(&self.scripts).push((
+            prefix.into(),
+            Err(crate::gateway::GatewayError::Other(err.into())),
+        ));
     }
     /// Takes back the scripts for `prefix` (a later [`FakeGateway::script`] or the queue answers).
     pub fn unscript(&self, prefix: &str) {
@@ -73,7 +76,10 @@ impl FakeGateway {
     }
     /// Queues one failure.
     pub fn fail(&self, s: impl Into<String>) {
-        lock(&self.replies).push_back(Err(s.into()));
+        self.fail_with(crate::gateway::GatewayError::Other(s.into()));
+    }
+    pub fn fail_with(&self, error: crate::gateway::GatewayError) {
+        lock(&self.replies).push_back(Err(error));
     }
     pub fn last_prompt(&self) -> Option<String> {
         lock(&self.prompts).last().cloned()
@@ -86,7 +92,12 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[async_trait]
 impl Gateway for FakeGateway {
-    async fn run(&self, tier: Tier, prompt: &str, _: Duration) -> Result<GatewayOut, String> {
+    async fn run(
+        &self,
+        tier: Tier,
+        prompt: &str,
+        _: Duration,
+    ) -> Result<GatewayOut, crate::gateway::GatewayError> {
         lock(&self.prompts).push(prompt.into());
         lock(&self.calls).push((tier, prompt.into()));
         if let Some((_, r)) = lock(&self.scripts)

@@ -10,7 +10,7 @@ use steve_runtime::testkit::eventually_sync;
 use steve_store::testkit::hub::node_checks;
 
 use serde_json::{Value, json};
-use steve_core::Fallback;
+use steve_core::SingleModelGateway;
 use steve_core::gateway::{ModelGateway, Readable, ThinkTools, Tier, with_images};
 use steve_core::stats::{RecordingGateway, tagged};
 use steve_hub::wire::node_files::NodeFiles;
@@ -178,7 +178,7 @@ impl Local {
             declared: HashMap::from([(
                 id.clone(),
                 serde_json::from_value(json!({"properties": {
-                    "nested_sandbox": false, "self_read_only": true}}))
+                    "nested_sandbox": false, "self_read_only": true, "probe_initialize": false}}))
                 .unwrap(),
             )]),
             adapters: HashMap::from([(id, root.join("adapter.py"))]),
@@ -198,7 +198,7 @@ impl Local {
     /// Steve's gateway over the local Node.
     fn node(&self, models: &[&str]) -> RecordingGateway {
         RecordingGateway::new(
-            Arc::new(Fallback {
+            Arc::new(SingleModelGateway {
                 one: NodePrint {
                     runtime: self.rt.clone(),
                     data_dir: self.root.join("data"),
@@ -266,12 +266,12 @@ async fn model_calls_wait_for_maintenance_before_starting() {
     }
 }
 
-/// A conversation admitted before maintenance may finish its nested model call, including
-/// fallback. The drain still waits for that conversation's permit before sealing.
+/// A conversation admitted before maintenance may finish its nested model call.
+/// The drain still waits for that conversation's permit before sealing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admitted_model_calls_finish_during_maintenance() {
     let h = Local::new().await;
-    let gw = h.node(&["m-busy", "m1"]);
+    let gw = h.node(&["m1", "m-busy"]);
     let permit = h.store.try_activity("thread_answer").unwrap();
     h.store.maintenance_set(true).unwrap();
     let out = tokio::time::timeout(
@@ -287,8 +287,8 @@ async fn admitted_model_calls_finish_during_maintenance() {
     .await
     .unwrap();
     assert_eq!(out.result.unwrap().text, "答案");
-    assert_eq!(out.attempts, 2, "fallback stays inside the admitted call");
-    assert_eq!(h.spawns(), 2);
+    assert_eq!(out.attempts, 1);
+    assert_eq!(h.spawns(), 1);
     assert!(
         !h.store.maintenance_seal(),
         "the conversation still owns its permit"
@@ -329,9 +329,9 @@ async fn a_burst_of_calls_all_answer_within_their_timeout() {
     assert_eq!(h.spawns(), 24);
 }
 
-/// A busy first model falls back to the next. Each model gets its own job under the same call.
+/// A 503 is terminal for the plan, but its reported cost still reaches the bill.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_busy_model_falls_back_and_books_each_try_under_the_call() {
+async fn a_busy_model_stops_after_one_request_and_books_the_failure() {
     let h = Local::new().await;
     let models = ["m-busy", "haiku"];
     let call = |gw: RecordingGateway| async move {
@@ -349,13 +349,11 @@ async fn a_busy_model_falls_back_and_books_each_try_under_the_call() {
         .await
     };
     let attempt = call(h.node(&models)).await;
-    assert_eq!(h.spawns(), 2, "one process per model");
-    assert_eq!(attempt.attempts, 2);
-    assert_eq!(attempt.model, "haiku");
+    assert_eq!(h.spawns(), 1);
+    assert_eq!(attempt.attempts, 1);
+    assert_eq!(attempt.model, "m-busy");
     assert_eq!(attempt.failures, ["m-busy: API Error: 503 overloaded"]);
-    let reply = attempt.result.unwrap();
-    assert_eq!(reply.text, "答案");
-    assert_eq!(reply.cost_usd, Some(0.25));
+    assert!(attempt.result.is_err());
     assert!(
         attempt
             .usage
@@ -368,11 +366,11 @@ async fn a_busy_model_falls_back_and_books_each_try_under_the_call() {
     );
     assert_eq!(
         node_checks::job_count_finished_think_answer(&h.store).unwrap(),
-        2
+        1
     );
     assert_eq!(
         node_checks::runtime_job_attempts_count_finished_with_ordinal(&h.store).unwrap(),
-        2
+        1
     );
 }
 
@@ -509,9 +507,9 @@ async fn a_dropped_call_cancels_its_job_and_the_process_dies() {
     assert_eq!(h.spawns(), 1);
 }
 
-/// A timed-out Node job ends the fallback chain and reaps its harness.
+/// A timed-out Node job returns its phase and reaps its harness.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_timeout_stops_the_job_and_fallback_chain() {
+async fn an_execution_timeout_stops_the_job_without_a_retry() {
     let h = Local::new().await;
     let call = h
         .node(&["m1", "m2"])
@@ -523,15 +521,14 @@ async fn a_timeout_stops_the_job_and_fallback_chain() {
             None,
         )
         .await;
-    assert_eq!(
-        call.result.unwrap_err().to_string(),
-        "Command timed out after 1500 ms"
-    );
+    assert!(matches!(
+        call.result,
+        Err(steve_core::CoreError::Gateway(
+            steve_core::gateway::GatewayError::Timeout(TimeoutPhase::Execution)
+        ))
+    ));
     assert_eq!(call.attempts, 1);
-    assert_eq!(
-        call.failures,
-        ["m1: [timeout] Command timed out after 1500 ms"]
-    );
+    assert_eq!(call.failures, ["m1: 网关在 execution 阶段超时"]);
     let pid: i32 = h.read("pid").trim().parse().unwrap();
     eventually_sync("the harness gone", || !alive(pid)).await;
 }
@@ -548,7 +545,7 @@ async fn the_fake_node_contract_streams_and_answers() {
     rt.start();
     eventually_sync("reconciled", || rt.is_reconciled()).await;
     let gw = Arc::new(RecordingGateway::new(
-        Arc::new(Fallback {
+        Arc::new(SingleModelGateway {
             one: NodePrint {
                 runtime: rt.clone(),
                 data_dir: dir.path().to_path_buf(),
@@ -741,4 +738,206 @@ async fn a_hub_restart_stops_open_job_attempts_and_runs_none_again() {
     assert_eq!(starts(), 2, "nothing started again");
     assert_eq!(node_checks::job_count_by_state(&store, "open").unwrap(), 0);
     let _ = exec_b;
+}
+
+/// A fake clock plus the real Hub gateway, job coordinator and durable usage ledger.
+#[tokio::test]
+async fn gateway_deadline_is_classified_from_phase_evidence_and_failure_usage_is_replayed() {
+    use steve_core::{CoreError, gateway::GatewayError};
+    use steve_store::core_fixture::usage::usage;
+    let budget = Duration::from_secs(60);
+    for (expected, evidence) in [
+        (TimeoutPhase::Queue, None),
+        (TimeoutPhase::FirstByte, Some(GatewayPhase::Submitted)),
+        (TimeoutPhase::Execution, Some(GatewayPhase::Responding)),
+        (TimeoutPhase::Unknown, None),
+    ] {
+        for run in 1..=2 {
+            let dir = tempfile::tempdir().unwrap();
+            let store = open_store(dir.path());
+            let node = FakeNode::new("n1");
+            let rt = NodeRuntime::new(store.clone(), node.clone(), Arc::new(NoDomain));
+            node.connect(Arc::new(Sink(Arc::downgrade(&rt))));
+            rt.start();
+            eventually_sync("reconciled", || rt.is_reconciled()).await;
+            let gw = RecordingGateway::new(
+                Arc::new(SingleModelGateway {
+                    one: NodePrint {
+                        runtime: rt.clone(),
+                        data_dir: dir.path().to_path_buf(),
+                    },
+                    fast: vec!["first".into(), "must-not-run".into()],
+                    smart: vec![],
+                    models: None,
+                }),
+                store.clone(),
+            );
+            tokio::time::pause();
+            if expected == TimeoutPhase::Queue {
+                store.maintenance_set(true).unwrap();
+            }
+            let call = gw.attempt("test", Tier::Fast, budget, &ThinkTools::None, None);
+            tokio::pin!(call);
+            let mut exec = None;
+            let inject = async {
+                if expected == TimeoutPhase::Queue {
+                    // Drive admission to Pending without advancing time.
+                    tokio::task::yield_now().await;
+                } else {
+                    eventually_sync("fake Node accepted the think job", || {
+                        node.log().iter().any(|(m, _)| *m == "start_job")
+                    })
+                    .await;
+                    let execution: ExecutionRef = serde_json::from_str(
+                        &node_checks::runtime_job_attempts_execution(&store).unwrap(),
+                    )
+                    .unwrap();
+                    let subject = Subject::Execution(execution.clone());
+                    for phase in [
+                        GatewayPhase::Submitting,
+                        GatewayPhase::Submitted,
+                        GatewayPhase::Responding,
+                    ] {
+                        if evidence.is_some_and(|last| phase <= last)
+                            || (expected == TimeoutPhase::Unknown
+                                && run == 2
+                                && phase == GatewayPhase::Submitting)
+                        {
+                            node.emit(subject.clone(), EventBody::GatewayProgress { phase })
+                                .await
+                                .unwrap();
+                        }
+                    }
+                    if evidence.is_some() {
+                        node.emit(
+                            subject,
+                            EventBody::Usage {
+                                report: gateway_test_report(
+                                    "observed",
+                                    Measurement::Cumulative,
+                                    10 + run,
+                                ),
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    exec = Some(execution);
+                }
+                tokio::time::advance(budget).await;
+            };
+            // Poll the actual deadline and hold on to the injector until its advance returns.
+            let (a, ()) = tokio::join!(biased; &mut call, inject);
+            assert!(
+                matches!(a.result, Err(CoreError::Gateway(GatewayError::Timeout(p))) if p == expected),
+                "{expected:?} #{run}: {:?}",
+                a.result
+            );
+            assert_eq!(a.attempts, u32::from(expected != TimeoutPhase::Queue));
+            assert_eq!(
+                node.log().iter().filter(|(m, _)| *m == "start_job").count(),
+                a.attempts as usize
+            );
+            if evidence.is_some() {
+                assert_eq!(a.usage[0].tokens.output, Some(10 + run as i64));
+                let execution = exec.unwrap();
+                let report = gateway_test_report("settled", Measurement::Final, 20 + run);
+                // A Final can reach the Hub after its caller timed out. Replays do not bill twice.
+                for _ in 0..2 {
+                    node.emit(
+                        Subject::Execution(execution.clone()),
+                        EventBody::Usage {
+                            report: report.clone(),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+                let rows = usage(&store, Some("gateway"));
+                assert_eq!(rows.len(), 1);
+                assert!(!rows[0].ok);
+                assert_eq!(rows[0].tokens.output, Some(20 + run as i64));
+                assert_eq!(rows[0].tokens.input, Some(7));
+                assert_eq!(rows[0].tokens.cache_read, Some(5));
+            }
+            tokio::time::resume();
+        }
+    }
+}
+
+fn gateway_test_report(id: &str, measurement: Measurement, output: u64) -> UsageReport {
+    UsageReport {
+        report_id: id.into(),
+        model: Some("first".into()),
+        meter_epoch: Epoch::new("test_meter").unwrap(),
+        scope: UsageScope::All,
+        measurement,
+        tokens: Tokens {
+            input: Some(7),
+            output: Some(output),
+            cache_read: Some(5),
+            ..Default::default()
+        },
+        context_used: None,
+        context_limit: None,
+        cost: None,
+    }
+}
+
+#[tokio::test]
+async fn missing_capability_and_missing_authorization_stop_before_any_job_or_model_request() {
+    use steve_core::{CoreError, gateway::GatewayError};
+    let dir = tempfile::tempdir().unwrap();
+    let store = open_store(dir.path());
+    let node = FakeNode::new("n1");
+    let rt = NodeRuntime::new(store.clone(), node.clone(), Arc::new(NoDomain));
+    let gw = RecordingGateway::new(
+        Arc::new(SingleModelGateway {
+            one: NodePrint {
+                runtime: rt,
+                data_dir: dir.path().to_path_buf(),
+            },
+            fast: vec!["first".into(), "must-not-run".into()],
+            smart: vec![],
+            models: None,
+        }),
+        store.clone(),
+    );
+    store
+        .files()
+        .create(&steve_store::NewFile {
+            id: "fil_allowed".into(),
+            workspace_id: steve_store::WS.into(),
+            sha256: "a".repeat(64),
+            name: "notes.md".into(),
+            mime: "text/markdown".into(),
+            size: 1,
+            created_by: "owner".into(),
+        })
+        .unwrap();
+    for (id, expected) in [
+        ("fil_allowed", GatewayError::MissingCapability),
+        ("fil_ungranted", GatewayError::ToolDenied),
+    ] {
+        let tools = ThinkTools::Read(vec![Readable {
+            file_id: id.into(),
+            rel_path: format!(".steve/attachments/{id}-notes.md"),
+        }]);
+        let a = gw
+            .attempt("test", Tier::Fast, Duration::from_secs(5), &tools, None)
+            .await;
+        assert!(
+            matches!(a.result, Err(CoreError::Gateway(ref e)) if *e == expected),
+            "{:?}",
+            a.result
+        );
+        assert!(
+            !expected.can_handoff(),
+            "refuse explicitly rather than selecting another Bot"
+        );
+        assert_eq!(a.attempts, 0);
+        assert!(a.usage.is_empty());
+        assert_eq!(node_checks::job_count(&store).unwrap(), 0);
+        assert!(!node.log().iter().any(|(m, _)| *m == "start_job"));
+    }
 }

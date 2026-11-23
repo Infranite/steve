@@ -52,6 +52,7 @@ impl From<v1::Error> for ApiError {
             operation: None,
             state: None,
             safe_detail: error.detail,
+            gateway: None,
         }
     }
 }

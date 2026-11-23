@@ -121,7 +121,12 @@ pub struct ChanConvHost(pub steve_channels::WeakChannels);
 
 #[async_trait::async_trait]
 impl steve_core::thread::ConvHost for ChanConvHost {
-    async fn answer(&self, ws: &str, _space: &str, origin: &str) -> Result<String, String> {
+    async fn answer(
+        &self,
+        ws: &str,
+        _space: &str,
+        origin: &str,
+    ) -> Result<String, steve_modules::gateway::GatewayError> {
         let ch = self
             .0
             .upgrade()

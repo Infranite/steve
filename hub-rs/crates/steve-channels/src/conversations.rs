@@ -428,7 +428,11 @@ impl Channels {
     /// The inline answer of a conversation turn (steve-core calls it instead of its own chat
     /// answer): the channel composer, so the persona, the safety rules and the knowledge by
     /// disclosure level hold. Your `/bot` command is the instruction.
-    pub async fn conv_answer(&self, ws: &str, origin: &str) -> Result<String, String> {
+    pub async fn conv_answer(
+        &self,
+        ws: &str,
+        origin: &str,
+    ) -> Result<String, steve_modules::gateway::GatewayError> {
         self.conv_compose(ws, origin, None).await
     }
 
@@ -442,6 +446,7 @@ impl Channels {
     ) -> Result<String, String> {
         self.conv_compose(ws, origin, Some(result.to_string()))
             .await
+            .map_err(|e| e.to_string())
     }
 
     async fn conv_compose(
@@ -449,7 +454,7 @@ impl Channels {
         ws: &str,
         origin: &str,
         research: Option<String>,
-    ) -> Result<String, String> {
+    ) -> Result<String, steve_modules::gateway::GatewayError> {
         let (_, plan, _) = self
             .turn_source(ws, origin)
             .map_err(|e| e.to_string())?
@@ -473,7 +478,10 @@ impl Channels {
         let r = replies
             .generate(self, &plan, &opts)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| match e {
+                steve_modules::ApiError::Gateway(error) => error,
+                e => e.to_string().into(),
+            })?;
         let text = match r.generation.outcome {
             Outcome::Reply => r.text.clone(),
             Outcome::AskOwner => r.text.clone(),

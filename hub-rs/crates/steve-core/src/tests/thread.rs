@@ -1117,7 +1117,7 @@ async fn a_question_that_needs_tools_says_to_make_it_an_item() {
         if p.starts_with("You are the router of Steve") {
             Ok(json!({"kind": "answer", "confidence": 0.9, "signals": ["question"], "title": "看磁盘", "goal": "看看这台机器的磁盘用量", "bot": "steve"}).to_string())
         } else if p.starts_with("You are Steve, the user's assistant.") {
-            Err(crate::error::CoreError::NeedsTools)
+            Err(steve_modules::gateway::GatewayError::NeedsTools.into())
         } else {
             Err(msg("unexpected prompt"))
         }
