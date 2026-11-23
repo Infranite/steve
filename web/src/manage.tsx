@@ -21,6 +21,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Robot, Face, AVATAR_COLORS } from "@/robot"
 import { Card as ACard, CardHeader } from "@/components/affect/card-clean"
+import { Badge } from "@/components/affect/badge-clean"
 import { MemoryPanel, type Memory } from "@/components/affect/memory-panel"
 import { AutonomyChoice } from "@/components/affect/agent-permissions"
 import {
@@ -50,7 +51,7 @@ import { NotificationSettingsPane } from "@/notification-settings"
 import { currentHub } from "@/hub"
 import { flowApi, useLoad as useFlowLoad, errText } from "@/api/flow"
 import { when } from "@/auto/common"
-import { ExecutionNodes, TeamsSection } from "@/bot-dispatch"
+import { ExecutionNodes, TeamsSection, useBotTeams } from "@/bot-dispatch"
 import { BotOverview, BotPrompt, RunsOn } from "@/bot-page"
 import { HarnessMark } from "@/components/harness-mark"
 import { RuntimeAvailability, RuntimePermissionNotice, RuntimeSelect, RuntimeSetupLink } from "@/runtime-access"
@@ -77,23 +78,24 @@ const catLabel = (t: T, c: string) => (TAG_CAT_KEYS[c] ? t(`manage:tagCat.${TAG_
 
 export function BotsView() {
   const t = useT()
+  const teams = useBotTeams()
   const [, f] = useState(0); const r = () => f((x) => x + 1)
   const ks = Object.keys(st.bots).filter((k) => !st.bots[k].main && (botFilter === "全部" || (botFilter === "启用") === st.bots[k].on))
   const S = st.bots.steve
   const runOf = (k: string) => getItems().filter((i) => i.b === k && ["run", "wait", "block"].includes(itemDisplayStatus(i)) && !i.arch).length
   const others = st.allBots.filter((b) => !st.bots[b.id])
   return (
-    <Page title="Bot" sub={t("manage:list.sub")} max={720}
-      actions={<Button size="sm" onClick={() => openSheet("newBot")} data-new-bot><PlusIcon />{t("manage:list.newBot")}</Button>}>
+    <Page title="Bot" sub={t("manage:list.sub")} max={720}>
       <div className="flex flex-col gap-8">
       {S && <Section label={t("manage:list.main")}>
-        <BotCard k="steve" size={44} title={S.n} sub={S.role} meta={[S.h, S.m, t("manage:bot.running", { count: runOf("steve") })]} action={<Chevron />} />
+        <BotCard k="steve" teams={teams} size={44} title={S.n} sub={S.role} meta={[S.h, S.m, t("manage:bot.running", { count: runOf("steve") })]} action={<Chevron />} />
       </Section>}
-      <TeamsSection key={st.workspace?.id} />
+      <TeamsSection key={st.workspace?.id} load={teams} />
       <Section label={<><span className="hidden sm:inline">{t("manage:list.others", { ws: st.workspace?.name, n: Object.keys(st.bots).length - 1 })}</span><span className="sm:hidden">{t("manage:list.othersShort", { n: Object.keys(st.bots).length - 1 })}</span></>} note={<Trans t={t} i18nKey="manage:list.hint" components={{ code: <span className="font-mono" /> }} />}
-        right={<Segmented size="sm" value={botFilter} onChange={(v) => { botFilter = v; r() }} options={[["全部", t("manage:list.filterAll")], ["启用", t("manage:list.filterOn")], ["停用", t("manage:list.filterOff")]] as const} />}>
+        right={<Button size="xs" variant="outline" onClick={() => openSheet("newBot")} data-new-bot><PlusIcon />{t("manage:list.newBot")}</Button>}>
+        <div className="mb-3 flex justify-end"><Segmented size="sm" value={botFilter} onChange={(v) => { botFilter = v; r() }} options={[["全部", t("manage:list.filterAll")], ["启用", t("manage:list.filterOn")], ["停用", t("manage:list.filterOff")]] as const} /></div>
         {ks.length ? <ul className="grid gap-3 sm:grid-cols-2" data-bot-cards>{ks.map((k) => { const b = st.bots[k]; return (
-          <BotCard key={k} as="li" k={k} off={!b.on} title={t("manage:bot.name", { name: b.n })} sub={b.role}
+          <BotCard key={k} as="li" k={k} teams={teams} off={!b.on} title={t("manage:bot.name", { name: b.n })} sub={b.role}
             meta={[b.h, b.m, t("manage:bot.running", { count: runOf(k) }), b.project && t("manage:list.defaultProject", { name: b.ws }), b.workspaces.length > 1 && t("manage:list.inWorkspaces", { count: b.workspaces.length }), !b.on && t("manage:bot.disabled")]}
             action={<><SetSwitch testId={"bot-on-" + k} checked={b.on} onChange={(v) => void saveBot(k, { on: v }, v ? t("manage:list.enabledToast", { name: b.n }) : t("manage:list.disabledToast", { name: b.n }))} label={t("manage:bot.enableNamed", { name: b.n })} /><BotMenu k={k} /></>} />) })}</ul>
           : <Empty title={Object.keys(st.bots).length > 1 ? t("manage:list.noMatch") : t("manage:list.onlySteve")} sub={t("manage:list.emptySub")} />}
@@ -106,14 +108,20 @@ export function BotsView() {
 }
 /** a Bot as affectUI's Card: its avatar, its name as the button that opens it (the whole card is the target), its role,
  *  and what it runs on underneath; the switch and the menu stay their own buttons above the card's target */
-function BotCard({ k, title, sub, meta, action, off, size = 36, as }: { k: string; title: ReactNode; sub: string; meta: (string | false | null | undefined)[]; action: ReactNode; off?: boolean; size?: number; as?: "li" }) {
+function BotCard({ k, teams, title, sub, meta, action, off, size = 36, as }: { k: string; teams: ReturnType<typeof useBotTeams>; title: ReactNode; sub: string; meta: (string | false | null | undefined)[]; action: ReactNode; off?: boolean; size?: number; as?: "li" }) {
   const t = useT()
+  const joined = teams.value?.teams.filter(team => team.members.some(member => member.bot === k)) ?? []
   return (
     <ACard as={as} interactive className="anim-in" data-bot-card={k} data-off={off || undefined}>
       <CardHeader icon={<BotAvatar k={k} size={size} className={cn("transition-[opacity,filter]", EASE, off && "opacity-40 grayscale")} />} action={action}
         title={<button type="button" onClick={() => go("#/bots/" + k)} data-bot-row={k}>{title}</button>}
         description={<span className="line-clamp-2">{sub || t("manage:detail.noRole")}</span>} />
       <Meta>{meta.filter(Boolean).map((x, i) => <span key={i}>{x}</span>)}</Meta>
+      <div className="flex min-w-0 flex-wrap items-center gap-1.5 type-footnote text-muted-foreground" data-bot-teams>
+        <span>{t("manage:list.joinedTeams")}</span>
+        {teams.error ? <span>{t("manage:list.teamsLoadFailed")}</span> : !teams.value ? <span>{t("manage:list.teamsLoading")}</span>
+          : joined.length ? joined.map(team => <Badge key={team.id} title={team.name}>{team.name}</Badge>) : <span>{t("manage:list.noTeams")}</span>}
+      </div>
     </ACard>
   )
 }
