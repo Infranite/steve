@@ -451,11 +451,15 @@ fn write_projection(
                     bot_id: bot_id.clone(),
                     project_id: project_id.clone(),
                     usage,
-                    /* the call's time and fallbacks once, on its first row */
+                    /* the call's time and dispatch attempts once, on its first row */
                     duration_ms: first.then(|| i64::try_from(a.duration_ms).unwrap_or(i64::MAX)),
                     ok,
                     attempts: if first {
-                        i64::from(a.attempts.max(1))
+                        i64::from(if pending {
+                            a.attempts.max(1)
+                        } else {
+                            a.attempts
+                        })
                     } else {
                         1
                     },

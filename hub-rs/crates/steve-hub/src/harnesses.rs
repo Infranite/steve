@@ -530,6 +530,7 @@ pub(crate) async fn ready_locally(harnesses: &[&str], models: &[&str]) -> Arc<Hu
             cancel: true,
             permissions: true,
             images: true,
+            read_attached: false,
             enforcement: vec![],
             setup: None,
             adapter: Some(AdapterInfo {
@@ -587,6 +588,7 @@ mod tests {
             cancel: true,
             permissions: true,
             images: true,
+            read_attached: false,
             enforcement: vec![],
             setup: None,
             adapter: Some(AdapterInfo {

@@ -20,6 +20,9 @@ pub struct HarnessCapability {
     pub cancel: bool,
     pub permissions: bool,
     pub images: bool,
+    /// The selected adapter declares read access to explicitly attached files in a think job.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_attached: bool,
     /// Guarantees it can enforce (`fs-readonly`, `no-network`…), Steve's names.
     pub enforcement: Vec<String>,
     /// What its adapter is and said about itself (`initialize`), when the Node asked it; `None`

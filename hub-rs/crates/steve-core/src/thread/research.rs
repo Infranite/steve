@@ -229,16 +229,6 @@ pub(crate) struct InlineJob {
     pub to_item: Option<bool>,
 }
 
-/// `f`, whose gateway calls end their model chain on a request that needs tools when `j` hands
-/// such a request on to an item ([`InlineJob::to_item`]); otherwise they fall back as always.
-async fn handing_on<F: std::future::Future>(j: &InlineJob, f: F) -> F::Output {
-    if j.to_item.is_some() {
-        steve_modules::gateway::hands_on_needs_tools(f).await
-    } else {
-        f.await
-    }
-}
-
 /// The inline queue of a conversation: the web's is keyed by the workspace (as before), a guest
 /// conversation's has its own, so a chat's question never waits behind your research.
 struct Active {
@@ -979,7 +969,7 @@ impl Core {
         let on_draft = |thought: &str, t: &str| drafts.send(thought, t);
         /* a stop ends the call right away (its harness is killed), not after the whole answer is written */
         let a = tokio::select! {
-            a = handing_on(j, crate::stats::tagged(
+            a = crate::stats::tagged(
                 "chat",
                 ws,
                 gateway::answer(
@@ -991,7 +981,7 @@ impl Core {
                     extra,
                     &on_draft,
                 ),
-            )) => Some(a),
+            ) => Some(a),
             _ = j.stop.stopped() => None,
         };
         lock(&drafts.state).closed = true;
@@ -1051,7 +1041,7 @@ impl Core {
         host: Arc<dyn super::ConvHost>,
     ) -> Result<()> {
         let a0 = now();
-        let r = handing_on(j, host.answer(ws, &j.space, &j.origin)).await;
+        let r = host.answer(ws, &j.space, &j.origin).await;
         if j.stop.is_stopped() {
             self.post(
                 ws,
@@ -1066,14 +1056,15 @@ impl Core {
             Ok(t) if !t.trim().is_empty() => (t, false),
             Ok(_) => (format!("（没能生成回答。{FIX_MODEL}）"), true),
             /* the question needs tools the answer does not have: an item does it, or the reply says why not */
-            Err(e) if steve_modules::gateway::needs_tools(&e) => {
-                match self.needs_tools(ws, j).await {
-                    None => return Ok(()),
-                    Some(why) => (why, true),
-                }
-            }
+            Err(e) if e.can_handoff() => match self.needs_tools(ws, j).await {
+                None => return Ok(()),
+                Some(why) => (why, true),
+            },
             Err(e) => (
-                format!("（没能生成回答：{}。{FIX_MODEL}）", js_head(&e, 80)),
+                format!(
+                    "（没能生成回答：{}。{FIX_MODEL}）",
+                    js_head(&e.to_string(), 80)
+                ),
                 true,
             ),
         };

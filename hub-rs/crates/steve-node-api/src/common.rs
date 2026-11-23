@@ -88,6 +88,8 @@ pub struct ApiError {
     pub state: Option<StateTag>,
     /// Safe to show and to log: no secret, no path outside the workspace.
     pub safe_detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<crate::GatewayFailure>,
 }
 
 impl ApiError {
@@ -107,6 +109,7 @@ impl ApiError {
             operation: None,
             state: None,
             safe_detail: detail.into(),
+            gateway: None,
         }
     }
     /// The command may have been accepted (the answer got lost, the connection broke after sending):
@@ -118,7 +121,12 @@ impl ApiError {
             operation: Some(op.clone()),
             state: Some(StateTag::Unknown),
             safe_detail: detail.into(),
+            gateway: None,
         }
+    }
+    pub fn for_gateway(mut self, failure: crate::GatewayFailure) -> Self {
+        self.gateway = Some(failure);
+        self
     }
     pub fn on(mut self, op: &OperationId) -> Self {
         self.operation = Some(op.clone());
@@ -216,6 +224,7 @@ mod error_contract_tests {
                     operation: None,
                     state: None,
                     safe_detail: "safe detail".into(),
+                    gateway: None,
                 });
                 assert_eq!(error.code, code, "{node_code:?}");
                 assert_eq!(error.retry, retry, "{node_code:?} / {wire_retry:?}");
@@ -234,6 +243,7 @@ mod error_contract_tests {
             operation: None,
             state: None,
             safe_detail: "unknown".into(),
+            gateway: None,
         });
         assert_eq!(error.retry, Retry::Never);
     }
@@ -253,6 +263,7 @@ mod error_contract_tests {
                 operation: Some(OperationId::new("op-1").unwrap()),
                 state: Some(state),
                 safe_detail: "safe detail".into(),
+                gateway: None,
             });
             assert_eq!(error.params.0["operation"], Param::Str("op-1".into()));
             assert_eq!(error.params.0["state"], Param::Str(expected.into()));

@@ -288,7 +288,7 @@ fn gateway_for(
         ))),
     );
     runtime.start();
-    let inner = Arc::new(steve_core::Fallback {
+    let inner = Arc::new(steve_core::SingleModelGateway {
         one: NodePrint { runtime, data_dir },
         fast: vec![],
         smart: vec![],
@@ -317,7 +317,8 @@ async fn compose_once(
         "compose",
         gw.run_with_images(Tier::Smart, &compose::prompt(layers), &[], compose::TIMEOUT),
     )
-    .await?;
+    .await
+    .map_err(|e| e.to_string())?;
     compose::answer_of(&out.text, &out.model, layers).ok_or_else(|| "模型没有给出正文".to_string())
 }
 
@@ -778,7 +779,7 @@ async fn judge(a: &Args, scratch: &Path) {
                 Err(e) => (None, String::new(), Some(e)),
             };
             json!({"case_id": o.case_id, "sample": o.sample, "outcome": o.outcome,
-                   "judgment": j, "judge_model": model, "error": error})
+                   "judgment": j, "judge_model": model, "error": error.map(|e| e.to_string())})
         });
     }
     let mut rows = Vec::new();

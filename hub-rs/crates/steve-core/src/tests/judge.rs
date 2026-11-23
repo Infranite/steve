@@ -1285,7 +1285,6 @@ impl crate::gateway::OneModel for Serves {
         crate::gateway::Tried {
             reply: Ok((DONE.into(), None)),
             usage: vec![],
-            timed_out: false,
             reported_model: self.0.map(String::from),
         }
     }
@@ -1295,14 +1294,14 @@ impl crate::gateway::OneModel for Serves {
 /// that reported back, and `unknown` for what did not.
 #[tokio::test]
 async fn the_judgement_records_who_reported_back_not_who_was_asked() {
-    use crate::gateway::{Fallback, ModelGateway, ThinkTools, Tier};
-    let asked = |one| Fallback {
+    use crate::gateway::{ModelGateway, SingleModelGateway, ThinkTools, Tier};
+    let asked = |one| SingleModelGateway {
         one,
         fast: vec![],
         smart: vec!["asked-model".into()],
         models: None,
     };
-    let call = |g: Fallback<Serves>| async move {
+    let call = |g: SingleModelGateway<Serves>| async move {
         g.attempt(
             "q",
             Tier::Smart,

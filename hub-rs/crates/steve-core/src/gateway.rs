@@ -1,5 +1,4 @@
-//! Steve's short model calls use the purpose's harness on a Node, with a timeout per call and a fallback down
-//! each tier's model list. The router, chat answers and config drafts
+//! Steve's short model calls use one model on the purpose's harness, with one absolute deadline. The router, chat answers and config drafts
 //! are built here from data the caller collected under the core lock, so no lock is held while a model runs.
 
 use crate::error::{CoreError, Result, msg};
@@ -11,6 +10,7 @@ use serde_json::{Value, json};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 pub use steve_acp::{Image, OneShotError};
+pub use steve_modules::gateway::{GatewayError, TimeoutPhase};
 pub use steve_node_api::UsageReport;
 pub use steve_store::ModelUsage;
 
@@ -33,11 +33,11 @@ pub struct Printed {
     pub reported_model: Option<String>,
     /// The dollars the answering run reported, when it reports any (module budgets add them up).
     pub cost_usd: Option<f64>,
-    /// Tokens per model over every model tried, failed tries included.
+    /// Tokens per accounting model in the answering attempt.
     pub usage: Vec<ModelUsage>,
-    /// Models of the tier tried, the one that answered included.
+    /// Attempts made by this call.
     pub attempts: u32,
-    /// Wall time of the whole call, fallbacks included.
+    /// Wall time of the whole call.
     pub duration_ms: u64,
 }
 
@@ -58,10 +58,24 @@ pub struct Attempt {
     pub harness: String,
 }
 
+impl Attempt {
+    pub fn before_dispatch(error: CoreError, duration_ms: u64) -> Self {
+        Self {
+            failures: vec![error.to_string()],
+            result: Err(error),
+            attempts: 0,
+            duration_ms,
+            usage: vec![],
+            model: String::new(),
+            harness: String::new(),
+        }
+    }
+}
+
 /// Told what the model has written so far in its current message, each time it grows.
 pub type OnText<'a> = &'a (dyn Fn(&str) + Send + Sync);
 
-/// One model call with fallback; implemented by [`Fallback`], faked in tests.
+/// One planned model call; implemented by [`SingleModelGateway`], faked in tests.
 #[async_trait]
 pub trait ModelGateway: Send + Sync {
     /// `claudePrintWith`: `tools` are what the call may use besides answering (a chat answer that reads
@@ -142,8 +156,6 @@ fn elapsed_ms(t0: Instant) -> u64 {
 pub struct Tried {
     pub reply: Result<(String, Option<f64>)>,
     pub usage: Vec<ModelUsage>,
-    /// The try ran out of its time: the next model is not tried (it would most likely wait as long).
-    pub timed_out: bool,
     /// The model the harness named in its own reports of this try ([`reported_model`]), before a
     /// report without one is booked under the model asked for.
     pub reported_model: Option<String>,
@@ -169,7 +181,6 @@ impl Tried {
         Tried {
             reply: Err(e),
             usage: vec![],
-            timed_out: false,
             reported_model: None,
         }
     }
@@ -181,7 +192,6 @@ impl Tried {
         reply: std::result::Result<(String, Option<f64>), OneShotError>,
         usage: Vec<UsageReport>,
     ) -> Tried {
-        let timed_out = matches!(reply, Err(OneShotError::Timeout(_)));
         // Normalize reports before turning them into accounting rows.
         let reports = merged_usage(usage, "");
         let costs: Vec<_> = reports
@@ -212,7 +222,6 @@ impl Tried {
             }
         }
         Tried {
-            timed_out,
             reply: reply
                 .map(|(text, reported)| {
                     (
@@ -232,9 +241,9 @@ impl Tried {
 fn call_error(e: OneShotError) -> CoreError {
     match e {
         OneShotError::OutputLimit => msg("输出超出这次运行的限制"),
-        OneShotError::Timeout(t) => msg(format!("Command timed out after {} ms", t.as_millis())),
-        OneShotError::Failed(err) => msg(format!("Command failed: {}", js_head(&err, 300))),
-        OneShotError::ToolRefused => CoreError::NeedsTools,
+        OneShotError::Timeout(phase) => GatewayError::Timeout(phase).into(),
+        OneShotError::Failed(err) => GatewayError::Startup(js_head(&err, 300).to_string()).into(),
+        OneShotError::ToolRefused => GatewayError::NeedsTools.into(),
         OneShotError::Harness { text, .. } => msg(js_head(&text, 300).to_string()),
         e @ OneShotError::Unsupported(_) => msg(e.to_string()),
         OneShotError::Io(e) => CoreError::Io(e),
@@ -252,23 +261,49 @@ pub use steve_node_api::merged_usage;
 /// A usage report as the statistics' row (its dollars back to the same `f64`).
 pub use steve_store::gateway_ledger::model_usage;
 
-/// One think call as [`Fallback`] hands it to each model in turn: everything but the model and effort,
-/// which the fallback chooses.
+/// The purpose, required capabilities, and trusted attachment grants of a single plan.
+/// This is built from caller intent, never inferred from the prompt or expanded by the model.
+pub struct CallSpec<'a> {
+    pub purpose: &'static str,
+    pub required_tools: &'a ThinkTools,
+    pub auth_scope: &'a ThinkTools,
+    pub deadline: tokio::time::Instant,
+}
+
+impl CallSpec<'_> {
+    pub fn authorize(&self) -> Result<()> {
+        match (self.required_tools, self.auth_scope) {
+            (ThinkTools::None, _) => Ok(()),
+            (ThinkTools::Read(required), ThinkTools::Read(granted))
+                if !required.is_empty() && required.iter().all(|file| granted.contains(file)) =>
+            {
+                Ok(())
+            }
+            _ => Err(GatewayError::ToolDenied.into()),
+        }
+    }
+}
+
+/// One planned inference at the selected adapter. Images and attachments cannot widen its grant.
 pub struct OneCall<'a> {
     pub prompt: &'a str,
-    /// Per try, not for the whole fallback.
-    pub timeout: Duration,
-    pub tools: &'a ThinkTools,
-    /// The harness adapter the purpose runs on (设置 · 模型), by its id.
+    pub spec: CallSpec<'a>,
     pub harness: &'a str,
-    /// The images of the call ([`with_images`]), the same for every model tried.
     pub images: &'a [Image],
 }
 
-/// A single attempt of one model on a Node, with no fallback of its own. [`Fallback`] keeps the policy around it: which models, in which order, and what the
-/// statistics see of the tries.
 #[async_trait]
 pub trait OneModel: Send + Sync {
+    /// Discover capabilities without starting an inference. Fail closed for tool-bearing calls
+    /// unless the backend implements discovery for the selected target.
+    async fn preflight(&self, call: &OneCall<'_>) -> Result<()> {
+        if call.spec.required_tools.any() {
+            Err(GatewayError::MissingCapability.into())
+        } else {
+            Ok(())
+        }
+    }
+
     /// Runs `model` (empty: the harness's default) once; streaming when `on_text` is given.
     async fn once(
         &self,
@@ -279,20 +314,15 @@ pub trait OneModel: Send + Sync {
     ) -> Tried;
 }
 
-/// The Hub's model gateway: each model of the call's list in turn over `one`, until one answers. The
-/// purpose's harness and list come from 设置 · 模型 ([`crate::models::Models::for_call`], Steve's bot
-/// unless overridden) when `models` is set, else the tier's on Claude Code.
-pub struct Fallback<M> {
-    /// Runs one model once.
+/// Select the first configured model for the purpose, or the adapter default. A failure never
+/// causes a second prompt or selects a different harness.
+pub struct SingleModelGateway<M> {
     pub one: M,
     pub fast: Vec<String>,
     pub smart: Vec<String>,
-    /// The resolver of 设置 · 模型; `None` (tests) uses `fast` / `smart` as they are.
+    /// The model-settings resolver; tests can supply fixed tier lists instead.
     pub models: Option<crate::models::Models>,
 }
-
-/// The mark on a failure that ran out of time ([`Attempt::failures`]), ahead of the harness's words.
-pub const TIMED_OUT: &str = "[timeout]";
 
 /// The router's time limit: a route that takes longer becomes [`Route::fallback`] (successful routes
 /// take under 20 s).
@@ -393,11 +423,9 @@ pub fn answer_tools(files: &ChatFiles) -> ThinkTools {
     }
 }
 
-/// Adds settled attempts/epochs to `into`, summing rows of the same accounting model. Overlapping
-/// main/all reports must have been selected by `merged_usage` before reaching this point.
 use steve_store::gateway_ledger::merge_usage;
 
-impl<M: OneModel> Fallback<M> {
+impl<M: OneModel> SingleModelGateway<M> {
     /// The models (and effort) of this call: its purpose and workspace come from the caller's
     /// [`crate::stats::CallTag`].
     pub fn choice(&self, tier: Tier) -> crate::models::Choice {
@@ -417,9 +445,7 @@ impl<M: OneModel> Fallback<M> {
         }
     }
 
-    /// Each model of the tier in turn until one answers or one runs out of time; streaming when `on_text`
-    /// is given. Counts the models tried and keeps the tokens of failed tries too (they were spent).
-    async fn fall_back(
+    async fn run_once(
         &self,
         prompt: &str,
         tier: Tier,
@@ -427,112 +453,102 @@ impl<M: OneModel> Fallback<M> {
         tools: &ThinkTools,
         on_text: Option<OnText<'_>>,
     ) -> Attempt {
-        let t0 = Instant::now();
+        let t0 = tokio::time::Instant::now();
         let choice = self.choice(tier);
-        let models = &choice.models;
-        let mut a = Attempt {
-            result: Err(msg("没有可用的模型")),
-            attempts: 0,
-            duration_ms: 0,
-            usage: vec![],
-            model: String::new(),
-            failures: vec![],
-            harness: choice.harness.clone(),
-        };
-        // no model named: the harness's own default (no model is set)
-        let default_only = [String::new()];
-        let models: &[String] = if models.is_empty() {
-            &default_only
-        } else {
-            models
-        };
-        // the images of the call ([`with_images`]), for every model tried
+        let model = choice.models.first().map_or("", String::as_str);
         let images = current_images().map(|b| images_of(&b)).unwrap_or_default();
         let call = OneCall {
             prompt,
-            timeout,
-            tools,
+            spec: CallSpec {
+                purpose: crate::stats::current_tag().purpose,
+                required_tools: tools,
+                auth_scope: tools, // the legacy call form supplies only its explicit attachment grants
+                deadline: t0 + timeout,
+            },
             harness: &choice.harness,
             images: &images,
         };
-        for m in models {
-            let account = match crate::stats::current_call() {
-                Some(c) => match c.attempt(&choice.harness, m) {
-                    Ok(a) => Some(a),
-                    Err(e) => {
-                        a.result = Err(msg(format!("usage ownership: {e}")));
-                        break;
-                    }
-                },
-                None => None,
-            };
-            let run = self.one.once(&call, m, choice.effort.as_deref(), on_text);
-            let r = match &account {
+        let queue_timeout = || GatewayError::Timeout(TimeoutPhase::Queue).into();
+        let preflight = async {
+            call.spec.authorize()?;
+            self.one.preflight(&call).await
+        };
+        let preflight = if tokio::time::Instant::now() >= call.spec.deadline {
+            Err(queue_timeout())
+        } else {
+            tokio::time::timeout_at(call.spec.deadline, preflight)
+                .await
+                .unwrap_or_else(|_| Err(queue_timeout()))
+        };
+
+        let mut attempts = 0;
+        let tried = async {
+            preflight?;
+            if tokio::time::Instant::now() >= call.spec.deadline {
+                return Err(queue_timeout());
+            }
+            let account = crate::stats::current_call()
+                .map(|c| c.attempt(&choice.harness, model))
+                .transpose()
+                .map_err(|e| msg(format!("usage ownership: {e}")))?;
+            attempts = 1;
+            let run = self
+                .one
+                .once(&call, model, choice.effort.as_deref(), on_text);
+            let tried = match &account {
                 Some(a) => a.scope(run).await,
                 None => run.await,
             };
             if let Some(account) = account {
-                let error = r.reply.as_ref().err().map(ToString::to_string);
+                let error = tried.reply.as_ref().err().map(ToString::to_string);
                 if let Err(e) = account.call.store.stats().gateway_attempt_end(
                     &account.id,
-                    r.reply.is_ok(),
+                    tried.reply.is_ok(),
                     error.as_deref(),
                     steve_store::now(),
                 ) {
                     tracing::warn!("stats: attempt end: {e}");
                 }
             }
-            a.attempts += 1;
-            // the model asked for: the call is booked under it (who answered is `reported_model`)
-            a.model = m.clone();
-            merge_usage(&mut a.usage, r.usage);
-            match r.reply {
-                Ok((text, cost_usd)) => {
-                    a.duration_ms = elapsed_ms(t0);
-                    a.result = Ok(Printed {
-                        text,
-                        model: m.clone(),
-                        reported_model: r.reported_model,
-                        cost_usd,
-                        usage: a.usage.clone(),
-                        attempts: a.attempts,
-                        duration_ms: a.duration_ms,
-                    });
-                    return a;
-                }
-                Err(e) => {
-                    if fallback_failure(&mut a, m, e, r.timed_out) {
-                        break;
-                    }
-                }
-            }
+            Ok(tried)
         }
-        a.duration_ms = elapsed_ms(t0);
-        a
+        .await
+        .unwrap_or_else(Tried::failed);
+
+        let duration_ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let result = tried.reply.map(|(text, cost_usd)| Printed {
+            text,
+            cost_usd,
+            model: model.to_string(),
+            reported_model: tried.reported_model,
+            usage: tried.usage.clone(),
+            attempts,
+            duration_ms,
+        });
+        let failures = result
+            .as_ref()
+            .err()
+            .map(|e| {
+                let detail = js_head(&e.to_string(), 200).to_string();
+                tracing::warn!(harness = %choice.harness, model, "gateway: {detail}");
+                format!("{model}: {detail}")
+            })
+            .into_iter()
+            .collect();
+        Attempt {
+            result,
+            attempts,
+            duration_ms,
+            usage: tried.usage,
+            model: model.to_string(),
+            failures,
+            harness: choice.harness.clone(),
+        }
     }
 }
 
-/// Record one failed attempt and decide whether timeout or handoff ends this fallback chain.
-fn fallback_failure(a: &mut Attempt, m: &str, e: CoreError, timed_out: bool) -> bool {
-    let e1 = js_head(&e.to_string(), 200).to_string();
-    tracing::error!("model {m} failed: {e1}");
-    a.failures.push(if timed_out {
-        format!("{m}: {TIMED_OUT} {e1}")
-    } else {
-        format!("{m}: {e1}")
-    });
-    // a request that needs tools, from a caller that hands it on (a trigger
-    // word's answer becomes an item): the next model has no tools either. Any
-    // other caller falls back, as for every fast error
-    let handed_on = matches!(e, CoreError::NeedsTools) && steve_modules::gateway::hands_on();
-    a.result = Err(e);
-    // a timeout is not the model's own fault (the provider or the harness is slow): the
-    // next one would wait as long, so the chain ends here; fast errors fall back
-    timed_out || handed_on
-}
-
 #[async_trait]
-impl<M: OneModel> ModelGateway for Fallback<M> {
+impl<M: OneModel> ModelGateway for SingleModelGateway<M> {
     async fn call(
         &self,
         prompt: &str,
@@ -540,7 +556,7 @@ impl<M: OneModel> ModelGateway for Fallback<M> {
         timeout: Duration,
         tools: &ThinkTools,
     ) -> Result<Printed> {
-        self.fall_back(prompt, tier, timeout, tools, None)
+        self.run_once(prompt, tier, timeout, tools, None)
             .await
             .result
     }
@@ -552,7 +568,7 @@ impl<M: OneModel> ModelGateway for Fallback<M> {
         tools: &ThinkTools,
         on_text: OnText<'_>,
     ) -> Result<Printed> {
-        self.fall_back(prompt, tier, timeout, tools, Some(on_text))
+        self.run_once(prompt, tier, timeout, tools, Some(on_text))
             .await
             .result
     }
@@ -564,12 +580,12 @@ impl<M: OneModel> ModelGateway for Fallback<M> {
         tools: &ThinkTools,
         on_text: Option<OnText<'_>>,
     ) -> Attempt {
-        self.fall_back(prompt, tier, timeout, tools, on_text).await
+        self.run_once(prompt, tier, timeout, tools, on_text).await
     }
 }
 
 /// Steve's gateway as the modules' [`steve_modules::Gateway`] (B1), so core and modules share one model
-/// gateway: same tier lists, same fallback, same scratch directory.
+/// gateway: same selection policy, same scratch directory.
 pub struct SharedGateway(pub std::sync::Arc<dyn ModelGateway>);
 
 #[async_trait]
@@ -580,7 +596,7 @@ impl steve_modules::Gateway for SharedGateway {
         prompt: &str,
         images: &[Value],
         timeout: Duration,
-    ) -> std::result::Result<steve_modules::GatewayOut, String> {
+    ) -> std::result::Result<steve_modules::GatewayOut, GatewayError> {
         with_images(images.to_vec(), self.run(tier, prompt, timeout)).await
     }
 
@@ -589,7 +605,7 @@ impl steve_modules::Gateway for SharedGateway {
         tier: steve_modules::Tier,
         prompt: &str,
         timeout: Duration,
-    ) -> std::result::Result<steve_modules::GatewayOut, String> {
+    ) -> std::result::Result<steve_modules::GatewayOut, GatewayError> {
         let tier = match tier {
             steve_modules::Tier::Fast => Tier::Fast,
             steve_modules::Tier::Smart => Tier::Smart,
@@ -605,7 +621,15 @@ impl steve_modules::Gateway for SharedGateway {
                 attempts: p.attempts,
                 duration_ms: p.duration_ms,
             })
-            .map_err(|e| e.to_string())
+            .map_err(gateway_error)
+    }
+}
+
+/// Keep typed gateway failures across the module and conversation boundaries.
+pub fn gateway_error(error: CoreError) -> GatewayError {
+    match error {
+        CoreError::Gateway(error) => error,
+        error => GatewayError::Other(error.to_string()),
     }
 }
 
@@ -1249,16 +1273,16 @@ fn route_new_tags(value: Option<&Value>) -> Option<Vec<NewTag>> {
     })
 }
 
-/// Route several messages the user sent in a row in one call (`route` purpose, fast tier). `None` when
-/// the call or its reply fails: the caller routes each alone, as before.
+/// Route a burst in one call. Failure uses the same safe deterministic route as a single
+/// request; do not replay the failed batch as individual model calls.
 pub async fn route_many(
     gw: &dyn ModelGateway,
     c: &RouteCtx,
     texts: &[String],
     history: &[Said],
-) -> Option<Vec<Route>> {
+) -> Vec<Route> {
     let prompt = route_prompt_for(c, texts, history, false);
-    match gw
+    let routed = match gw
         .call(&prompt, Tier::Fast, ROUTE_TIMEOUT, &ThinkTools::None)
         .await
     {
@@ -1269,7 +1293,13 @@ pub async fn route_many(
             tracing::error!("route batch failed {e}");
             None
         }
-    }
+    };
+    routed.unwrap_or_else(|| {
+        texts
+            .iter()
+            .map(|text| route_without_model(c, text, false))
+            .collect()
+    })
 }
 
 /// Interpret one successful batch reply and attach its answering model after validation.
@@ -1315,6 +1345,10 @@ pub async fn route(
         }
         Err(e) => tracing::error!("route failed {e}"),
     }
+    route_without_model(c, text, promote)
+}
+
+fn route_without_model(c: &RouteCtx, text: &str, promote: bool) -> Route {
     let project = c.steve_project.clone().or_else(|| {
         c.projects
             .iter()
@@ -1436,7 +1470,7 @@ pub struct Answer {
     pub offer: Option<Offer>,
     pub model: Option<String>,
     pub failed: bool,
-    /// It failed because the question needs tools the answer does not have ([`CoreError::NeedsTools`]).
+    /// It failed because the question needs tools the answer does not have ([`steve_modules::gateway::GatewayError::NeedsTools`]).
     pub needs_tools: bool,
 }
 
@@ -1532,7 +1566,7 @@ pub async fn answer(
             offer: None,
             model: None,
             failed: true,
-            needs_tools: matches!(e, CoreError::NeedsTools),
+            needs_tools: gateway_error(e).can_handoff(),
         },
     }
 }
@@ -1911,14 +1945,13 @@ mod usage_tests {
     #[test]
     fn cancellation_and_timeout_keep_consumed_usage_without_a_successful_reply() {
         for error in [
-            OneShotError::Timeout(Duration::from_secs(1)),
+            OneShotError::Timeout(TimeoutPhase::Execution),
             OneShotError::Harness {
                 text: "cancelled".into(),
                 code: None,
                 transient: false,
             },
         ] {
-            let timed_out = matches!(error, OneShotError::Timeout(_));
             let tried = Tried::of(
                 Err(error),
                 vec![
@@ -1927,7 +1960,6 @@ mod usage_tests {
                 ],
             );
             assert!(tried.reply.is_err());
-            assert_eq!(tried.timed_out, timed_out);
             assert_eq!(tried.usage.len(), 1);
             assert_eq!(tried.usage[0].tokens.output, Some(12));
             assert_eq!(tried.usage[0].cost_reported, Some(0.12));
@@ -2241,15 +2273,18 @@ mod tests {
     fn a_failed_run_says_why_in_steves_words() {
         let said = |e| call_error(e).to_string();
         assert_eq!(
-            said(OneShotError::Timeout(Duration::from_millis(200))),
-            "Command timed out after 200 ms"
+            said(OneShotError::Timeout(TimeoutPhase::FirstByte)),
+            "网关在 first_byte 阶段超时"
         );
         assert_eq!(
             said(OneShotError::Failed("nope".into())),
-            "Command failed: nope"
+            "模型请求无法启动：nope"
         );
         let long = "x".repeat(400);
-        assert_eq!(said(OneShotError::Failed(long.clone())).len(), 16 + 300);
+        assert_eq!(
+            said(OneShotError::Failed(long.clone())).len(),
+            "模型请求无法启动：".len() + 300
+        );
         assert_eq!(
             said(OneShotError::Harness {
                 text: long,
@@ -2450,7 +2485,7 @@ mod tests {
             rs.iter().map(|r| r.kind.as_str()).collect::<Vec<_>>(),
             ["item", "config"]
         );
-        /* one missing or unusable: none, each is routed alone */
+        /* one missing or unusable: use deterministic routes for the batch */
         assert!(parse_routes(&c, &texts, r#"[{"kind":"item"}]"#).is_none());
         assert!(parse_routes(&c, &texts, r#"[{"kind":"item"},{"kind":"nope"}]"#).is_none());
         assert!(parse_routes(&c, &texts, r#"{"kind":"item"}"#).is_none());

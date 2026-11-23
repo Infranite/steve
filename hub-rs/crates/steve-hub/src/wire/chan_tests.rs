@@ -1,8 +1,8 @@
 //! A trigger word end to end on the real channel path, as the Hub wires it: the channel module
 //! hands your `/ai` to steve-core's conversation of the chat ([`CoreThread`]), steve-core asks the
 //! channel module for the answer ([`ChanConvHost`]), the composer calls the model gateway
-//! ([`SharedGateway`] over [`Fallback`]), and the model reaches for a tool the answer may not use
-//! ([`CoreError::NeedsTools`]). No string is faked in between: what the gateway says is what the
+//! ([`SharedGateway`] over [`SingleModelGateway`]), and the model reaches for a tool the answer may not use
+//! ([`steve_modules::gateway::GatewayError::NeedsTools`]). No string is faked in between: what the gateway says is what the
 //! hand-off reads.
 
 use super::chan::{ChanConvHost, CoreThread};
@@ -17,8 +17,8 @@ use steve_channels::respond::SUBJECT_MESSAGE;
 use steve_channels::{Channels, Replies, SpaceKind};
 use steve_core::gateway::{OnText, OneCall, Tried};
 use steve_core::{
-    AgentRuntime, Answered, Core, CoreConfig, CoreError, Fallback, Flushed, Prompted, Released,
-    Running, Stop,
+    AgentRuntime, Answered, Core, CoreConfig, CoreError, Flushed, Prompted, Released, Running,
+    SingleModelGateway, Stop,
 };
 use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowSetup, LinearExecutor};
@@ -91,7 +91,10 @@ impl steve_core::OneModel for One {
                 )
             } else {
                 match model {
-                    "tool" => ("answer", Err(CoreError::NeedsTools)),
+                    "tool" => (
+                        "answer",
+                        Err(steve_modules::gateway::GatewayError::NeedsTools.into()),
+                    ),
                     _ => ("answer", Ok(REPLY.to_string())),
                 }
             }
@@ -111,7 +114,6 @@ impl steve_core::OneModel for One {
         Tried {
             reply: reply.map(|t| (t, None)),
             usage: vec![],
-            timed_out: false,
             reported_model: None,
         }
     }
@@ -248,9 +250,9 @@ fn channel_fixture(gateway: Arc<dyn steve_core::ModelGateway>) -> ChannelFixture
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_trigger_word_whose_answer_needs_tools_makes_exactly_one_item() {
-    // the gateway as wired: the fallback over two models, shared with the modules
+    // The shared gateway selects one model even if the tier lists two.
     let models = Arc::new(Models::default());
-    let gateway: Arc<dyn steve_core::ModelGateway> = Arc::new(Fallback {
+    let gateway: Arc<dyn steve_core::ModelGateway> = Arc::new(SingleModelGateway {
         one: One(models.clone()),
         fast: vec!["tool".into(), "next".into()],
         smart: vec!["tool".into(), "next".into()],
@@ -277,13 +279,12 @@ async fn a_trigger_word_whose_answer_needs_tools_makes_exactly_one_item() {
     store.write(|w| fixtures::set_channel_trigger(w, &me, &json!({
         "on": true, "words": ["/ai"], "where": ["dm:*"], "who": ["me"], "reply": "thread", "mark": true
     }))).unwrap();
-    // a reply drafted for someone else's message is no hand-off: its model reached for a tool,
-    // the next model wrote it
-    eventually_sync("both fallback model answers are recorded", || {
-        models.answers().len() >= 2
+    // A reply drafted for someone else must not cause a handoff or a second inference.
+    eventually_sync("the tool refusal was recorded", || {
+        !models.answers().is_empty()
     })
     .await;
-    assert_eq!(models.answers(), ["tool", "next"]);
+    assert_eq!(models.answers(), ["tool"]);
     models.calls.lock().unwrap().clear();
     let items = || fixtures::item_count(&store).unwrap();
     let before = items();
@@ -345,7 +346,7 @@ async fn research_fixture(
         check,
         ..Default::default()
     });
-    let h = channel_fixture(Arc::new(Fallback {
+    let h = channel_fixture(Arc::new(SingleModelGateway {
         one: One(models.clone()),
         fast: vec!["scripted".into()],
         smart: vec!["scripted".into()],
