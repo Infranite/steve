@@ -132,6 +132,6 @@ try {
   assert.deepEqual(errors, [])
   assert.deepEqual(external, [])
   /* the fixture answers the tour's own calls; only the store's refresh after them reaches for the network */
-  assert.deepEqual([...new Set(hub)], ["/api/state"])
+  assert.deepEqual([...new Set(hub)], ["/api/shell"])
   console.log("onboarding: ok")
 } finally { await browser.close() }

@@ -159,18 +159,26 @@ pub(crate) fn hydrate(c: &Connection, session: &str, seq: i64, data: &mut Value)
     while let Some(r) = rows.next()? {
         let path: String = r.get(0)?;
         let owner: String = r.get(2)?;
-        if owner != session {
-            return Err(StoreError::Hook("event payload session mismatch".into()));
-        }
-        let raw: String = r
-            .get::<_, Option<String>>(1)?
-            .ok_or_else(|| StoreError::Hook("missing event payload".into()))?;
-        let value: Value = serde_json::from_str(&raw)?;
-        let target = data
-            .pointer_mut(&path)
-            .ok_or_else(|| StoreError::Hook("invalid event payload reference".into()))?;
-        *target = value;
+        restore(session, data, &path, r.get(1)?, &owner)?;
     }
+    Ok(())
+}
+
+pub(crate) fn restore(
+    session: &str,
+    data: &mut Value,
+    path: &str,
+    raw: Option<String>,
+    owner: &str,
+) -> Result<()> {
+    if owner != session {
+        return Err(StoreError::Hook("event payload session mismatch".into()));
+    }
+    let raw = raw.ok_or_else(|| StoreError::Hook("missing event payload".into()))?;
+    let target = data
+        .pointer_mut(path)
+        .ok_or_else(|| StoreError::Hook("invalid event payload reference".into()))?;
+    *target = serde_json::from_str(&raw)?;
     Ok(())
 }
 

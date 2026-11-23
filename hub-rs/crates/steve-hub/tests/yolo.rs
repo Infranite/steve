@@ -327,6 +327,15 @@ async fn the_ledger_routes() {
             .await;
         assert_eq!(s, 404, "{verb}: {v}");
     }
+    let (s, v) = h.call("GET", "/api/yolo/decisions/no-action", None).await;
+    assert_eq!((s, v), (200, Value::Null));
+    fixtures::seed_badge_actions(&h.db).unwrap();
+    let (s, action) = h
+        .call("GET", "/api/yolo/decisions/decision_badge", None)
+        .await;
+    assert_eq!(s, 200, "{action}");
+    assert_eq!(action["id"], "ya_badge_last");
+    assert_eq!(action["outcome"], "declined");
     // a declined row has nothing to undo
     fixtures::seed_declined_action(&h.db).unwrap();
     let (s, v) = h.call("POST", "/api/yolo/actions/ya_x/undo", None).await;

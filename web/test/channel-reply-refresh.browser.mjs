@@ -15,17 +15,17 @@ const initial = "我是值班助手，是负责答疑的 AI 助手。\n你可以
 const updated = "另一端修改并撤销批准后保留的新正文。"
 const newer = "刚刚同步的第二版正式稿。\n请以此稿为准。"
 const local = "我尚未提交的修改。\n需要保留并对照。"
-const snapshot = { version: "fixture", web_version: "fixture", workspace: { id: "ws_fixture", item_prefix: "ST" }, workspaces: [], items: [], sessions: [], projects: [], recent: [], bots: [], allBots: [], tags: [], tagUses: {}, thread: [], settings: {}, devices: [], runtimes: [] }
 
 function scenario(name) {
-  let decision = { id: "dc_reply", kind: "approve", subject_type: "chan_message", subject_id: "cm_reply", item_id: null, session_id: null, question: "审批渠道回复", draft: initial, options: ["yes", "no", "to_item"], status: "open", result: null, requested_by: "steve", created: 1, resolved: null, undo: null }
+  let decision = { id: "dc_reply", ws: "ws_fixture", kind: "approve", subject_type: "chan_message", subject_id: "cm_reply", item_id: null, session_id: null, question: "审批渠道回复", draft: initial, options: ["yes", "no", "to_item"], status: "open", result: null, requested_by: "steve", created: 1, resolved: null, undo_until: null, space_id: null, tier: "decide", folded: null }
+  let rev = 1
   let failNext = false
   const pages = [], errors = [], writes = [], events = []
   const record = { scenario: name, writes, events }
   evidence.push(record)
   return {
     writes,
-    change(draft) { decision = { ...decision, draft }; events.push({ action: "fixture-updates-formal-draft", id: decision.id, draft }) },
+    change(draft) { decision = { ...decision, draft }; rev++; events.push({ action: "fixture-updates-formal-draft", id: decision.id, draft }) },
     failNext() { failNext = true },
     async open(kind = "draft", { width = 1280, lang = "zh-CN" } = {}) {
       const page = await browser.newPage({ viewport: { width, height: 1000 }, locale: lang, reducedMotion: "reduce" })
@@ -51,12 +51,14 @@ function scenario(name) {
             eq(u.pathname, "/api/decisions/dc_reply", "every approval targets the same decision ID")
             decision = { ...decision, draft: body.text ?? decision.draft, status: "resolved", result: { choice: body.choice, send_at: 2000 }, resolved: Date.now() }
           }
-          return route.fulfill({ json: decision })
+          return route.fulfill({ headers: { "x-steve-rev": String(++rev) }, json: decision })
         }
-        if (u.pathname === "/api/state") {
-          events.push({ action: "state-read", client, id: decision.id, status: decision.status, draft: decision.draft })
-          return route.fulfill({ json: { ...snapshot, decisions: decision.status === "open" ? [decision] : [] } })
+        if (u.pathname === "/api/snapshot") {
+          events.push({ action: "snapshot-read", client, id: decision.id, status: decision.status, draft: decision.draft })
+          return route.fulfill({ json: { rev, cursor: String(rev), views: { decision: decision.status === "open" ? [decision] : [] } } })
         }
+        if (u.pathname === "/api/views") return route.fulfill({ json: { rev, views: [decision], missing: [] } })
+        if (u.pathname === "/api/views/page") return route.fulfill({ json: { rev, views: [], next: null } })
         if (u.pathname.endsWith("/context")) return route.fulfill({ json: { space: { id: "sp_product", name: "产品讨论群", kind: "group", external: true }, as_you: false, persona: "值班助手", text: decision.draft, reply_to: { id: "cm_in", sender: "陈同学", text: "你是谁啊？", at: 1 }, before: [] } })
         return route.fulfill({ status: 404, json: { error: "fixture: unavailable" } })
       })
@@ -76,7 +78,7 @@ function scenario(name) {
   }
 }
 async function refresh(page) {
-  await Promise.all([page.waitForResponse((r) => new URL(r.url()).pathname === "/api/state"), page.locator("[data-fixture-fresh]").click()])
+  await Promise.all([page.waitForResponse((r) => new URL(r.url()).pathname === "/api/snapshot"), page.locator("[data-fixture-fresh]").click()])
 }
 async function shown(page, text) {
   await page.waitForFunction((text) => document.querySelector("[data-reply-draft]")?.textContent === text, text)
@@ -114,7 +116,7 @@ try {
   await second.locator("[data-reply-editor]").fill(updated)
   await second.locator("[data-reply-send]").click()
   await sent(second)
-  await Promise.all([second.waitForResponse((r) => new URL(r.url()).pathname === "/api/state"), second.locator("[data-fixture-undo]").click()])
+  await Promise.all([second.waitForResponse((r) => new URL(r.url()).pathname === "/api/snapshot"), second.locator("[data-fixture-undo]").click()])
   await second.locator("[data-reply-draft]").waitFor()
   eq(await second.locator("[data-reply-draft]").textContent(), updated, "undo retains the modified formal draft in the fixture contract")
   await refresh(first)

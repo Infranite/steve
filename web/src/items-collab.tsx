@@ -1,3 +1,4 @@
+import { getItems, getItem, getSession } from "@/store"
 /* ── the items page's 协作 view (affectUI Agent Fleet) ──
  * Every open item that coordinates a work graph is a main agent: Steve's coordinator, its state the item's own one
  * state (item-state.ts). Open one and its steps hang beside it – each with its Bot, its state, cost and working time
@@ -10,7 +11,7 @@ import { useT } from "@/i18n"
 import { clockDur } from "@/i18n/format"
 import { itemState } from "@/item-state"
 import { fmtUsd } from "@/stats/format"
-import { botName, closedSt, loadItem, st, type Item } from "@/store"
+import { botName, closedSt, loadItem, type Item } from "@/store"
 import { BotAvatar, go } from "@/ui"
 import { buildAgentTree, isOver, rollup, type AgentNode, type AgentStatus, type TreeItem, type TreeStat } from "@/agent-tree"
 import { model, ROOT_STATUS } from "@/agent-tree-view"
@@ -50,8 +51,8 @@ export function ItemsFleet({ xs }: { xs: Item[] }) {
   const S = (k: string, o?: Record<string, unknown>): string => (t as unknown as (k: string, o?: object) => string)(`views:items.fleet.${k}`, o)
   const agents: FleetAgent[] = mains.map((i) => {
     const rows = figs[i.id] ?? [], by = new Map(rows.map((r) => [r.item_id, r])), total = rollup(rows).get(i.id)
-    const state = itemState(i, i.workflow, i.ss.some((k) => st.S[k]?.st === "run"))
-    const tree = buildAgentTree(i.id, st.items as TreeItem[], i.workflow, 8, ROOT_STATUS[state.kind])
+    const state = itemState(i, i.workflow, i.ss.some((k) => getSession(k)?.st === "run"))
+    const tree = buildAgentTree(i.id, getItems() as TreeItem[], i.workflow, 8, ROOT_STATUS[state.kind])
     const steps = tree ? tree.children.filter((c) => c.kind === "unit") : []
     const sub = (n: AgentNode): FleetAgent => {
       const tries = tree!.children.filter((c) => c.kind === "attempt" && c.unitId === n.unitId)
@@ -59,7 +60,7 @@ export function ItemsFleet({ xs }: { xs: Item[] }) {
       const own = items.map((x) => by.get(x)?.est ?? 0).reduce((a, b) => a + b, 0)
       const worked = items.map((x) => by.get(x)?.agent_ms ?? 0).reduce((a, b) => a + b, 0)
       const needs = n.decisions > 0 && !isOver(n.status)
-      const child = n.item ? st.items.find((x) => x.id === n.item) : undefined
+      const child = n.item ? getItem(n.item) : undefined
       return {
         id: `${i.id}:${n.key}`, name: n.bot ? botName(n.bot) : t("views:agentTree.noBot"), model: model(n.bot) || undefined, avatar: <BotAvatar k={n.bot} size={20} />,
         task: n.title, status: needs ? "waiting" : FLEET[n.status], statusText: t(`views:agentTree.status.${needs ? "asking" : n.status}`), cost: own || undefined, time: worked ? clockDur(worked) : "",

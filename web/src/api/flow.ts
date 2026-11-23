@@ -1,8 +1,6 @@
-/* Signals, flows, schedules and event sources (steve-flow, signals-automation.md §4 and schedules.md §8).
- * A Hub without the module answers an unknown GET /api path with the SPA's index.html, and other methods with a
- * 404: both come back as NotWired, and the pages show the module's Unwired placeholder. */
+/* Signals, flows, schedules and event sources (steve-flow, signals-automation.md §4 and schedules.md §8). */
 import { useCallback, useEffect, useRef, useState } from "react"
-import { modReq as req, Unauthenticated, NotWired, qs } from "@/api"
+import { modReq as req, Unauthenticated, qs } from "@/api"
 import { refresh, useHubEvents } from "@/store"
 import { lazy } from "@/api/accounts"
 import { t } from "@/i18n"
@@ -105,8 +103,8 @@ export const flowApi = {
   connections: () => get<any>("/connections").then((x) => (Array.isArray(x) ? x : x?.connections ?? x?.items ?? []) as unknown[]),
 }
 
-export type Load<T> = { data: T | undefined; error: Error | null; unwired: boolean; loading: boolean; reload: () => Promise<void>; set: (v: T) => void }
-/** load once on mount (and when `deps` change); `unwired` when the Hub has no such module */
+export type Load<T> = { data: T | undefined; error: Error | null; loading: boolean; reload: () => Promise<void>; set: (v: T) => void }
+/** load once on mount (and when `deps` change) */
 export function useLoad<T>(f: () => Promise<T>, deps: unknown[], live: string[] = []): Load<T> {
   const [data, setData] = useState<T>(), [error, setError] = useState<Error | null>(null), [loading, setLoading] = useState(true)
   const seq = useRef(0)
@@ -118,8 +116,7 @@ export function useLoad<T>(f: () => Promise<T>, deps: unknown[], live: string[] 
   }, deps)
   useEffect(() => { setLoading(true); void reload() }, [reload])
   useHubEvents(live, () => void reload())
-  const unwired = !data && error instanceof NotWired
-  return { data, error, unwired, loading, reload, set: setData }
+  return { data, error, loading, reload, set: setData }
 }
 
 /* labels shared by the pages */
@@ -128,4 +125,4 @@ export const SOURCE_LABEL: Record<string, string> = lazy({
   webhook: () => t("api:source.webhook"), time: () => t("api:source.time"), item: () => t("api:source.item"), manual: () => t("api:source.manual"),
 })
 export const sourceLabel = (s: string | null | undefined) => (s ? SOURCE_LABEL[s] ?? s : "")
-export const errText = (e: unknown) => (e instanceof NotWired ? t("api:error.unreachable") : (e as Error)?.message || t("api:error.generic"))
+export const errText = (e: unknown) => ((e as Error)?.message || t("api:error.generic"))

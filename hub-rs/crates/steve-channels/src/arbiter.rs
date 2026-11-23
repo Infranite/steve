@@ -38,14 +38,7 @@ pub fn same_text(a: &str, b: &str) -> bool {
 
 /// Text another assistant posts on your account by itself (“🤖 AI 代答，仅供参考”, an `[AI]` mark,
 /// Steve's own proxy mark): recorded, never read as a command or a question to answer.
-pub fn looks_automated(text: &str) -> bool {
-    let t = text.trim();
-    t.starts_with("[AI]")
-        || t.contains(crate::outbound::PROXY_MARK)
-        || t.contains("AI 代答")
-        || t.contains("AI代答")
-        || (t.contains('🤖') && t.contains("仅供参考"))
-}
+pub use steve_store::views::looks_automated;
 
 /// Is `account` yours (the account of one of your own connections, or the same person)?
 pub fn is_yours(r: &mut impl steve_store::Read, ws: &str, account: &str) -> ChannelResult<bool> {

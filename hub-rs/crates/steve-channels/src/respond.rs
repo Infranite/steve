@@ -15,10 +15,14 @@ mod execution;
 use std::ops::ControlFlow;
 
 use async_trait::async_trait;
+use steve_store::Store;
+use steve_store::audit_repo as audit;
 use steve_store::base::DecisionKind;
+use steve_store::views::Views;
 use steve_store::{
     Accounts, DecisionRows, NewDecision, SignalRows, W, channel_message_repo as repo, uid,
 };
+use steve_types::DecisionTier;
 
 use crate::rules::Act;
 use crate::spaces::{self, Mode};
@@ -303,8 +307,104 @@ pub(crate) fn open_draft_as(
         requested_by: "steve".into(),
     })?;
     repo::outbound::link_decision(w, &id, &d.id)?;
+    retire_previous_drafts(w, &t.ws, &t.space_id, &d.id)?;
     repo::emit(w, &t.ws, &t.space_id, &id);
     Ok((id, d.id))
+}
+
+// Superseded versions keep their original body and decision in history. The decision tier
+// protects starred contacts and required reviews from the conversation's ordinary draft slot.
+fn retire_previous_drafts(
+    w: &mut W<'_>,
+    ws: &str,
+    space: &str,
+    current: &str,
+) -> ChannelResult<()> {
+    let mut views = w.decision_views();
+    let ids = views.open_about_chat(ws, space)?;
+    let views = views.of(ws, &ids)?;
+    if !views
+        .iter()
+        .any(|d| d.id.as_str() == current && d.tier == DecisionTier::Draft)
+    {
+        return Ok(());
+    }
+    for d in views
+        .into_iter()
+        .filter(|d| d.id.as_str() != current && d.tier == DecisionTier::Draft)
+    {
+        let id = &d.subject_id;
+        if let Some(row) = repo::outbound::approval(w, ws, id)? {
+            repo::delivery::transition(
+                w,
+                id,
+                &["draft"],
+                "discarded",
+                repo::delivery::SentAt::Keep,
+            )?;
+            crate::basis::checking_stopped(w, id, crate::outbound::R_DEALT_FIRST)?;
+            crate::presence::settle(w, d.id.as_str(), "replaced_by_draft")?;
+            repo::emit(w, ws, &row.space, id);
+        }
+    }
+    Ok(())
+}
+
+/// Saves an edit to the still-open draft against the version the user read.
+pub fn edit_reply_draft(
+    store: &Store,
+    ws: &str,
+    actor: &str,
+    id: &str,
+    previous: &str,
+    text: &str,
+) -> ChannelResult<()> {
+    use steve_modules::ApiError;
+
+    let text = text.trim();
+    if text.is_empty() || text.chars().count() > crate::outbound::TEXT_MAX {
+        return Err(ApiError::invalid("text"));
+    }
+    store.write(|w| {
+        let d = w
+            .decision_views()
+            .of(ws, &[id.to_owned()])?
+            .pop()
+            .ok_or_else(|| ApiError::not_found("decision"))?;
+        if d.tier != DecisionTier::Draft || d.status != "open" || d.draft != previous {
+            return Err(ApiError::conflict(steve_i18n::t!("channels.error.handled")));
+        }
+        if previous == text {
+            return Ok(());
+        }
+        let message = &d.subject_id;
+        let row = repo::outbound::approval(w, ws, message)?
+            .filter(|row| row.status == "draft" && row.decision.as_deref() == Some(id))
+            .ok_or_else(|| ApiError::conflict(steve_i18n::t!("channels.error.handled")))?;
+        let version = audit::next_revision(w, ws, SUBJECT_MESSAGE, message)?;
+        audit::revise(
+            w,
+            ws,
+            SUBJECT_MESSAGE,
+            message,
+            version,
+            &serde_json::json!({ "text": previous }),
+            &serde_json::json!({ "text": text }),
+            actor,
+        )?;
+        crate::basis::checking_stopped(w, message, crate::outbound::R_DEALT_FIRST)?;
+        repo::outbound::edit_draft(w, message, text)?;
+        DecisionRows(w).set_draft(id, text)?;
+        w.emit(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::Decision {
+                id: id.into(),
+                ws: ws.into(),
+                item_id: None,
+            },
+        ));
+        repo::emit(w, ws, &row.space, message);
+        Ok(())
+    })
 }
 
 /// What a trigger word's conversation records when it got no answer: why, and where to look.

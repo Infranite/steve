@@ -13,7 +13,7 @@ import { Badge } from "@/components/ui/badge"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { IntegrationRow, IntegrationSection, IntegrationSettings } from "@/components/affect/integration-settings-clean"
-import { Section, Empty, Loading, Blank, Segmented, Notice, Panel, Row } from "@/ui"
+import { Section, Empty, Loading, Segmented, Notice, Panel, Row } from "@/ui"
 import { toast } from "@/store"
 import { capsApi, type A2aAgent, type A2aAgentIn, type A2aAuth, type AgentCard } from "@/api/caps"
 import { AssignMenu, UsedBy, errText, useList } from "./common"
@@ -36,7 +36,6 @@ export function A2aLibrary() {
   return (
     <Section label={t("caps:a2a.section")} note={t("caps:a2a.note")} right={d.s === "ok" && d.v.length > 0 ? add : undefined} data-a2a>
       {d.s === "loading" ? <Loading className="py-8" />
-        : d.s === "unwired" ? <Blank>{t("caps:a2a.unwired")}</Blank>
         : d.s === "error" ? <Notice tone="destructive">{d.e}</Notice>
         : d.v.length === 0 ? <Empty compact className="bg-muted/50" icon={<NetworkIcon />} title={t("caps:a2a.emptyTitle")} sub={t("caps:a2a.emptySub")} data-a2a-empty
             action={<Button size="sm" onClick={() => setEditing("new")} data-a2a-add><PlusIcon />{t("caps:a2a.add")}</Button>} />
@@ -153,7 +152,7 @@ export function SteveAgent() {
   const [d] = useList(() => capsApi.steve(), [])
   return (
     <Section label={t("caps:a2a.own")} note={t("caps:a2a.ownNote")} data-a2a-own>
-      {d.s === "loading" ? <Loading className="py-8" /> : d.s !== "ok" ? <Blank>{t("caps:a2a.unwired")}</Blank> : (
+      {d.s === "loading" ? <Loading className="py-8" /> : d.s === "error" ? <Notice tone="destructive" role="alert">{d.e}</Notice> : (
         <Panel><div className="flex flex-col gap-4 p-3 sm:p-4">
           <CopyLine label={t("caps:a2a.ownCard")} value={d.v.agent_card} data-a2a-own-card />
           <CopyLine label={t("caps:a2a.ownEndpoint")} value={d.v.a2a} data-a2a-own-endpoint />

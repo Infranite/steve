@@ -41,7 +41,7 @@ const HOLD_LIMIT: Duration = Duration::from_secs(20 * 60);
 /// How often the running-turn count of a hold is published while it lasts.
 const HOLD_TICK: Duration = Duration::from_secs(2);
 
-/// What the Hub is holding for (`/api/state` `hold`, SSE `release.hold`): the releasing item, the turns
+/// What the Hub is holding for (`/api/summary` `hold`, SSE `release.hold`): the releasing item, the turns
 /// still running that the restart waits for, and since when new turns wait.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HoldStatus {

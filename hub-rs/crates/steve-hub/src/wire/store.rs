@@ -8,9 +8,8 @@ use steve_store as s;
 
 use std::collections::HashMap;
 
-use crate::backend::RawEvent;
 use crate::backend::{
-    BResult, Backend, BackendError, BotExtras, ImportedSession, ItemExtras, NewProject, Obj, Repo,
+    BResult, Backend, BackendError, BotExtras, ImportedSession, NewProject, Obj, Repo,
 };
 use crate::bus::Bus;
 use crate::files::NewFile;
@@ -88,59 +87,15 @@ fn str_field(o: &Obj, k: &str) -> Option<String> {
 }
 
 impl Repo for StoreBackend {
-    fn item_extras(&self, ws: &str) -> BResult<Option<HashMap<String, ItemExtras>>> {
-        self.0
-            .read(|r| {
-                s::state_batches::item_extras(r, ws, steve_core::pull::Closeout::from_evidence)
-            })
-            .map(Some)
-            .map_err(err)
-    }
-
     fn item_closeout(&self, id: &str) -> BResult<Option<steve_core::pull::Closeout>> {
         self.0
-            .read(|r| {
-                s::state_batches::item_closeout(r, id, steve_core::pull::Closeout::from_evidence)
-            })
+            .read(|r| s::state_batches::item_closeout(r, id, s::views::closeout_from_evidence))
             .map_err(err)
     }
-    fn queued_by_session(&self, ws: &str) -> BResult<Option<HashMap<String, Vec<Obj>>>> {
-        let grouped = self
-            .0
-            .read(|r| s::state_batches::queued_by_session(r, ws))
-            .map_err(err)?;
-        grouped
-            .into_iter()
-            .map(|(sid, rows)| Ok((sid, objs(rows)?)))
-            .collect::<BResult<_>>()
-            .map(Some)
-    }
-
-    fn events_raw(
-        &self,
-        session: &str,
-        after: i64,
-        each: &mut dyn FnMut(RawEvent),
-    ) -> BResult<bool> {
-        self.0
-            .events()
-            .visit_page(session, after, |e| {
-                // Value serialization is infallible; use the repository's transparent hydration.
-                each((
-                    e.seq,
-                    e.ts,
-                    e.kind,
-                    serde_json::to_string(&e.data).expect("JSON event"),
-                ));
-            })
-            .map_err(err)?;
-        Ok(true)
-    }
-
-    fn bot_extras(&self, ws: &str) -> BResult<Option<BotExtras>> {
+    fn bot_extras(&self) -> BResult<Option<BotExtras>> {
         let extras = self
             .0
-            .read(|r| s::state_batches::bot_extras(r, ws))
+            .read(|r| s::state_batches::bot_extras(r))
             .map_err(err)?;
         let mcp = extras
             .mcp
@@ -152,7 +107,6 @@ impl Repo for StoreBackend {
             .collect::<BResult<_>>()?;
         Ok(Some(BotExtras {
             workspaces: extras.workspaces,
-            memories: extras.memories,
             mcp,
         }))
     }
@@ -434,9 +388,6 @@ impl Repo for StoreBackend {
         self.0.tags().set_item(item, tags).map_err(err)
     }
 
-    fn items_all(&self, ws: &str) -> BResult<Vec<Obj>> {
-        objs(self.0.items().all(ws).map_err(err)?)
-    }
     fn item_get(&self, id: &str) -> BResult<Option<Obj>> {
         opt(self.0.items().get(id).map_err(err)?)
     }
@@ -448,6 +399,10 @@ impl Repo for StoreBackend {
     }
     fn item_remove(&self, id: &str) -> BResult<()> {
         self.0.items().remove(id).map_err(err)
+    }
+    fn item_text(&self, ws: &str, id: &str) -> BResult<Option<Obj>> {
+        use steve_store::Views;
+        opt(self.0.read(|r| r.item_views().text(ws, id)).map_err(err)?)
     }
     fn item_goals(&self, id: &str) -> BResult<Vec<Obj>> {
         objs(self.0.items().goals(id).map_err(err)?)
@@ -555,9 +510,6 @@ impl Repo for StoreBackend {
     fn sessions_of_item(&self, item: &str) -> BResult<Vec<Obj>> {
         objs(self.0.sessions().of_item(item).map_err(err)?)
     }
-    fn sessions_list(&self, ws: &str) -> BResult<Vec<Obj>> {
-        objs(self.0.sessions().list(Some(ws)).map_err(err)?)
-    }
     fn session_patch(&self, id: &str, p: &Obj) -> BResult<()> {
         self.0.sessions().patch(id, &patch(p)?).map_err(err)
     }
@@ -569,14 +521,6 @@ impl Repo for StoreBackend {
             .events()
             .add(session, kind, data.clone())
             .map_err(err)
-    }
-    fn events_after(&self, session: &str, after: i64) -> BResult<Vec<Obj>> {
-        let mut out = vec![];
-        self.0
-            .events()
-            .visit_page(session, after, |e| out.push(e))
-            .map_err(err)?;
-        objs(out)
     }
     fn queued_list(&self, session: &str) -> BResult<Vec<Obj>> {
         objs(self.0.queued().list(session).map_err(err)?)
@@ -626,35 +570,26 @@ impl Repo for StoreBackend {
         obj(self.0.files().create(&n).map_err(err)?)
     }
 
-    fn decisions_open(&self, ws: &str) -> BResult<Vec<Obj>> {
-        objs(self.0.decisions().open(ws).map_err(err)?)
-    }
-    fn decisions_recent(&self, ws: &str, since: i64) -> BResult<Vec<Obj>> {
-        objs(self.0.decisions().recent(ws, since).map_err(err)?)
-    }
     fn decision_get(&self, id: &str) -> BResult<Option<Obj>> {
         opt(self.0.decisions().get(id).map_err(err)?)
     }
     fn decisions_of_item(&self, item: &str) -> BResult<Vec<Obj>> {
         objs(self.0.decisions().of_item(item).map_err(err)?)
     }
-    fn messages_in(&self, ws: &str, space: &str, limit: i64) -> BResult<Vec<Obj>> {
-        objs(self.0.messages().list(ws, space, limit).map_err(err)?)
-    }
-    fn messages_before(
+    fn decision_views_of_item(
         &self,
         ws: &str,
-        space: &str,
-        before: i64,
-        after: i64,
-        limit: i64,
-    ) -> BResult<Vec<Obj>> {
-        objs(
-            self.0
-                .messages()
-                .list_before(ws, space, before, after, limit)
-                .map_err(err)?,
-        )
+        item: &str,
+    ) -> BResult<Vec<steve_types::DecisionView>> {
+        use s::Views;
+        let ds = self
+            .0
+            .read(|r| r.decision_views().of_item(ws, item))
+            .map_err(err)?;
+        Ok(ds)
+    }
+    fn messages_in(&self, ws: &str, space: &str, limit: i64) -> BResult<Vec<Obj>> {
+        objs(self.0.messages().list(ws, space, limit).map_err(err)?)
     }
     fn messages_search(&self, ws: &str, space: &str, q: &str, limit: i64) -> BResult<Vec<Obj>> {
         objs(self.0.messages().search(ws, space, q, limit).map_err(err)?)
@@ -750,6 +685,28 @@ impl Repo for StoreBackend {
             .write(|w| steve_store::WorkspaceSettings(w).set(ws, key, value, steve_store::now()))
             .map_err(err)
     }
+    fn summary_facts(&self, ws: &str) -> BResult<crate::backend::SummaryFacts> {
+        self.0
+            .read(|r| -> steve_store::Result<_> {
+                let workspace_name = self
+                    .0
+                    .workspaces()
+                    .get(ws)?
+                    .map_or_else(String::new, |row| row.name);
+                let devices = self.0.devices().list()?;
+                let devices_online = devices
+                    .iter()
+                    .filter(|d| !matches!(d.status.to_lowercase().as_str(), "离线" | "offline"))
+                    .count();
+                Ok(crate::backend::SummaryFacts {
+                    workspace_name,
+                    pending: s::core_queue::has_pending_in_space(r, ws, steve_core::thread::MAIN)?,
+                    devices_online,
+                    devices_total: devices.len(),
+                })
+            })
+            .map_err(err)
+    }
     fn devices_list(&self) -> BResult<Vec<Obj>> {
         use steve_store::runtime::{HUB_DEVICE, HUB_NODE, session_room};
         let mut out = objs(self.0.devices().list().map_err(err)?)?;
@@ -797,149 +754,5 @@ impl Repo for StoreBackend {
     }
     fn device_patch(&self, id: &str, p: &Obj) -> BResult<()> {
         self.0.devices().patch(id, &patch(p)?).map_err(err)
-    }
-}
-
-#[cfg(test)]
-mod event_page_tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn transcript_entries_are_transparent_and_all_readers_use_bounded_pages() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = s::Store::open(dir.path().join("steve.sqlite3"), s::NoPublisher).unwrap();
-        store.ensure_workspace().unwrap();
-        let id = store
-            .sessions()
-            .create(&s::NewSession {
-                workspace_id: s::WS.into(),
-                harness: "fake".into(),
-                cwd: "/tmp".into(),
-                title: "paging".into(),
-                token: "fake-token".into(),
-                ..Default::default()
-            })
-            .unwrap()
-            .id;
-        for i in 0..501 {
-            store
-                .events()
-                .add(
-                    &id,
-                    "text",
-                    json!({"role":"assistant", "text":i.to_string()}),
-                )
-                .unwrap();
-        }
-        let backend = StoreBackend(store.clone());
-        let mut raw = Vec::new();
-        assert!(backend.events_raw(&id, 0, &mut |e| raw.push(e)).unwrap());
-        assert_eq!(raw.len(), 500);
-        let mut bounded = Vec::new();
-        assert!(
-            backend
-                .events_raw(&id, 0, &mut |e| bounded.push(e))
-                .unwrap()
-        );
-        assert_eq!(bounded.len(), 500);
-        let decoded = backend.events_after(&id, 0).unwrap();
-        assert_eq!(decoded.len(), bounded.len());
-        assert_eq!(decoded[0]["kind"], bounded[0].2);
-        assert_eq!(
-            decoded[0]["data"],
-            serde_json::from_str::<Value>(&bounded[0].3).unwrap()
-        );
-        let mut tail = Vec::new();
-        backend
-            .events_raw(&id, bounded.last().unwrap().0, &mut |e| tail.push(e))
-            .unwrap();
-        assert_eq!(tail.len(), 1);
-        let data = json!({"content":[{"type":"image","data":"base64".repeat(20_000)}]});
-        store
-            .events()
-            .add(&id, "tool_call_update", data.clone())
-            .unwrap();
-        let mut full = Vec::new();
-        backend
-            .events_raw(&id, tail[0].0, &mut |e| full.push(e))
-            .unwrap();
-        assert_eq!(serde_json::from_str::<Value>(&full[0].3).unwrap(), data);
-    }
-
-    #[test]
-    fn unsupported_formats_are_visible_and_keep_the_page_cursor() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = s::Store::open(dir.path().join("steve.sqlite3"), s::NoPublisher).unwrap();
-        store.ensure_workspace().unwrap();
-        let id = store
-            .sessions()
-            .create(&s::NewSession {
-                workspace_id: s::WS.into(),
-                harness: "fake".into(),
-                cwd: "/w".into(),
-                title: "formats".into(),
-                token: "t".into(),
-                ..Default::default()
-            })
-            .unwrap()
-            .id;
-        s::testkit::hub::state::unsupported_events(&store, &id, &["retired.acp", "future.v2"])
-            .unwrap();
-        let last = store
-            .events()
-            .add(&id, "text", json!({"role":"assistant", "text":"current"}))
-            .unwrap();
-        let backend = StoreBackend(store);
-        let entries = backend.events_after(&id, 0).unwrap();
-        for (entry, format) in entries.iter().zip(["retired.acp", "future.v2"]) {
-            assert_eq!(entry["kind"], "system");
-            assert_eq!(entry["data"]["code"], "unsupported_format");
-            assert_eq!(entry["data"]["format"], format);
-            assert!(!entry["data"].to_string().contains("not read"));
-        }
-        let mut tail = vec![];
-        backend
-            .events_raw(&id, entries[1]["seq"].as_i64().unwrap(), &mut |e| {
-                tail.push(e)
-            })
-            .unwrap();
-        assert_eq!(tail.len(), 1);
-        assert_eq!(tail[0].0, last);
-        assert_eq!(tail[0].2, "text");
-        assert!(backend.events_after(&id, last).unwrap().is_empty());
-    }
-}
-
-#[cfg(test)]
-mod workflow_summary_tests {
-    use super::*;
-    use s::testkit::hub::state as fixture;
-
-    #[test]
-    fn state_extras_identify_paused_current_graph_and_ignore_old_cycle_failures() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("steve.sqlite3");
-        let store = s::Store::open(&path, s::NoPublisher).unwrap();
-        store.ensure_workspace().unwrap();
-        fixture::failed_workflow(&store).unwrap();
-        let backend = StoreBackend(store);
-        let read = || {
-            backend
-                .item_extras(s::WS)
-                .unwrap()
-                .unwrap()
-                .remove("ST-1")
-                .unwrap()
-        };
-        let current = read();
-        assert_eq!(current.workflow_paused, Some(true));
-        assert_eq!(current.workflow_cycle, Some(1));
-        assert_eq!(current.workflow_failed, ["ST-2"]);
-
-        fixture::set_item_cycle(&backend.0, "ST-1", 2).unwrap();
-        let previous = read();
-        assert_eq!(previous.workflow_cycle, Some(1));
-        assert!(previous.workflow_failed.is_empty());
     }
 }

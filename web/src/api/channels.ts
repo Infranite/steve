@@ -1,9 +1,6 @@
 import type { ChannelAttachment } from "@/api/channel-content"
-/* Channels and external personas (channels-personas.md §5, feishu-lark-cli.md §2.4): the Hub's /api/spaces,
- * /api/personas, /api/channels/feishu/* and the accounts module's /api/connections (with /connections/integrations
- * for which provider a connection belongs to and whether it can carry messages). On a Hub without them, `NotWired`
- * makes a page fall back to its Unwired placeholder. Nothing here sends a message. */
-import { modReq, qs, isNotWired, type Proposal } from "@/api"
+/** Channel accounts, spaces, personas and message controls. */
+import { modReq, qs, type Proposal } from "@/api"
 import { accountsApi, type RAccount, type RConnection, type RDevice, type RDeviceStatus } from "@/api/accounts"
 import { integrationsApi, providerByAdapter } from "@/api/integrations"
 import { lazy } from "@/api/accounts"
@@ -14,8 +11,6 @@ const get = <T>(p: string) => modReq<T>("GET", p)
 const post = <T = any>(p: string, b: unknown = {}) => modReq<T>("POST", p, b)
 const patch = <T = any>(p: string, b: unknown) => modReq<T>("PATCH", p, b)
 const del = <T = any>(p: string) => modReq<T>("DELETE", p)
-/** `undefined` when this Hub has no such route (an optional, newer route), the error otherwise */
-const optional = <T>(p: Promise<T>) => p.catch((x) => (isNotWired(x) ? undefined : Promise.reject(x)))
 
 /* ───────── shapes (§5.1) ───────── */
 export type PersonaRef = { id: string; name: string; inherited?: boolean }
@@ -82,15 +77,12 @@ export type ChannelAccount = {
   provider: { id: string; name: string }
   /** the bot's default persona (`null` for your own account, which speaks as you) */
   persona: PersonaRef | null; personaBot: string | null
-  /** the account's default rules; `null` when this Hub doesn't say (no `GET /channels/:id` yet) */
-  rules: Rule[] | null; trigger: Trigger | null
-  /** whether this Hub can change the account's persona, rules and trigger (`PATCH /channels/:id`) */
-  editable: boolean
+  rules: Rule[]; trigger: Trigger | null
   spaces: Space[]; permissions: PermissionCheck[] | null
-  /** how its messages come in, as its side declares (`poll`, `long_connection`…); `null` when the Hub doesn't say */
-  receive?: string | null
-  /** the wait after you approve a message before it goes out, in seconds: as set (`null`: the default) and the default; `null` when this Hub doesn't say */
-  sendDelay: { set: number | null; def: number } | null
+  /** How messages arrive, as declared by the channel side. */
+  receive: string | null
+  /** the wait after you approve a message before it goes out, in seconds: as set (`null`: the default) and the default */
+  sendDelay: { set: number | null; def: number }
 }
 
 export type FeishuRegistration = {
@@ -102,59 +94,42 @@ export type FeishuRegistration = {
 
 export const FEISHU_APP = "feishu_app"
 type Providers = ReturnType<typeof providerByAdapter>
-/** the integrations list's view of the adapters; `{}` when it cannot be read */
-const providers = (): Promise<Providers> => integrationsApi.all().then(providerByAdapter, () => ({}))
-const MSG = ["msg.receive", "msg.send", "msg.send_as_user"]
-/** a connection that carries messages: its adapter has the 渠道 area, or (an adapter the list does not have: not
- *  installed, or the list unreadable) it has a message cap */
-export const isChannelConn = (c: RConnection, ps: Providers = {}) => ps[c.adapter]?.channel ?? [...c.caps, ...c.available_caps].some((x) => MSG.includes(x))
-const modeOf = (c: RConnection, ps: Providers): "bot" | "self" => (ps[c.adapter]?.identity === "self" ? "self" : "bot")
-/** the verify result, wherever the Hub puts it on a connection */
-export const permissionsOf = (x: unknown): PermissionCheck[] | null => { const o = x as any; const p = o?.permissions ?? o?.config?.permissions; return Array.isArray(p) ? p : null }
+const providers = () => integrationsApi.all().then(providerByAdapter)
+type SpecAccount = { connection_id: string; mode: "bot" | "self"; permissions: PermissionCheck[] | null; persona: PersonaRef | null; rules: Rule[]; trigger: Trigger | null; receive: string | null; send_delay_s: number | null; send_delay_default_s: number }
 
-/** a persona's default binding to an account, from the persona's own `used_by` */
-function personaOfAccount(ps: Persona[], account: string): PersonaRef | null {
-  const p = ps.find((x) => x.used_by.accounts.some((a) => a.account_id === account))
-  return p ? { id: p.id, name: p.name } : null
-}
-/** the account's rules as the spaces that follow it see them */
-const inheritedRules = (ss: Space[]) => ss.find((s) => s.rules === null)?.effective_rules ?? null
-
-type SpecAccount = { connection_id: string; persona: PersonaRef | null; rules: Rule[]; trigger: Trigger | null; receive?: string | null; send_delay_s?: number | null; send_delay_default_s?: number }
-
-async function compose(c: RConnection, ps: Persona[], all: Space[], pv: Providers): Promise<ChannelAccount> {
-  const [account, spec] = await Promise.all([accountsApi.account(c.account_id), optional(get<SpecAccount>("/channels/" + e(c.id)))])
-  const spaces = all.filter((s) => s.connection_id === c.id), mode = modeOf(c, pv)
+async function compose(c: RConnection, spec: SpecAccount, ps: Persona[], spaces: Space[], pv: Providers): Promise<ChannelAccount> {
+  const account = await accountsApi.account(c.account_id)
+  const { mode, permissions } = spec
   const provider = pv[c.adapter] ? { id: pv[c.adapter].id, name: pv[c.adapter].name } : { id: c.adapter, name: account.system?.name || c.adapter }
-  const persona = mode === "self" ? null : spec ? spec.persona : personaOfAccount(ps, c.account_id)
+  const persona = mode === "self" ? null : spec.persona
   return {
     connection: c, account, mode, name: account.display_name || account.handle, provider, persona, personaBot: persona ? ps.find((p) => p.id === persona.id)?.bot_id ?? null : null,
-    rules: spec?.rules ?? inheritedRules(spaces), trigger: spec?.trigger ?? null, editable: !!spec, spaces, permissions: permissionsOf(spec) ?? permissionsOf(c), receive: spec?.receive ?? null,
-    sendDelay: typeof spec?.send_delay_default_s === "number" ? { set: spec.send_delay_s ?? null, def: spec.send_delay_default_s } : null,
+    rules: spec.rules, trigger: spec.trigger, spaces, permissions, receive: spec.receive,
+    sendDelay: { set: spec.send_delay_s, def: spec.send_delay_default_s },
   }
 }
 
 export const channelsApi = {
-  /** every channel account with its spaces (connections + spaces + personas; `/channels/:id` when the Hub has it) */
+  /** every channel account with its spaces */
   accounts: async (): Promise<ChannelAccount[]> => {
-    const [conns, spaces, ps, pv] = await Promise.all([accountsApi.connections(), channelsApi.spaces(), channelsApi.personas(), providers()])
-    return Promise.all(conns.filter((c) => isChannelConn(c, pv)).map((c) => compose(c, ps, spaces, pv)))
+    const [conns, { accounts }, spaces, ps, pv] = await Promise.all([accountsApi.connections(), get<{ accounts: SpecAccount[] }>("/channels"), channelsApi.spaces(), channelsApi.personas(), providers()])
+    const specs = new Map(accounts.map((a) => [a.connection_id, a]))
+    return Promise.all(conns.flatMap((c) => {
+      const spec = specs.get(c.id)
+      return spec ? [compose(c, spec, ps, spaces.filter((s) => s.connection_id === c.id), pv)] : []
+    }))
   },
   /** one account by its connection or account id (the accounts page links with the account id) */
   account: async (id: string): Promise<ChannelAccount | null> => {
     const [conns, ps, pv] = await Promise.all([accountsApi.connections(), channelsApi.personas(), providers()])
     const c = conns.find((x) => x.id === id || x.account_id === id)
     if (!c) return null
-    return compose(c, ps, await channelsApi.spaces({ connection: c.id }), pv)
+    const [spec, spaces] = await Promise.all([get<SpecAccount>("/channels/" + e(c.id)), channelsApi.spaces({ connection: c.id })])
+    return compose(c, spec, ps, spaces, pv)
   },
   patchAccount: (connection: string, b: { duty?: string; rules?: Rule[]; trigger?: Partial<Trigger>; persona_id?: string; send_delay_s?: number | null }) => patch<SpecAccount>("/channels/" + e(connection), b),
-  /** connect the Feishu bot: `POST /channels` when the Hub has it (it also binds the default persona), else the plain connection */
-  connectBot: async (fields: Record<string, string>, persona_id?: string): Promise<{ connection_id: string; account_id: string; permissions: PermissionCheck[] | null; bound: boolean }> => {
-    const r = await optional(post<any>("/channels", { adapter: FEISHU_APP, fields, persona_id }))
-    if (r) return { connection_id: r.connection_id, account_id: r.account_id, permissions: permissionsOf(r), bound: true }
-    const c = await accountsApi.connect(FEISHU_APP, fields)
-    return { connection_id: c.id, account_id: c.account_id, permissions: permissionsOf(c), bound: false }
-  },
+  /** Connect the Feishu bot and bind its default persona. */
+  connectBot: (fields: Record<string, string>, persona_id?: string) => post<{ connection_id: string; account_id: string; permissions: PermissionCheck[] | null }>("/channels", { adapter: FEISHU_APP, fields, persona_id }),
   /** “授权你本人”: the browser flow on the bot's app (merges a contact the bot already made for you into “我”) */
   userOAuth: (app_connection: string, scopes?: string[]) => post<{ url: string }>("/channels/feishu/user/oauth/start", scopes?.length ? { app_connection, scopes } : { app_connection }),
   userDevice: (app_connection: string, scopes?: string[], reauth_of?: string) => post<RDevice>("/channels/feishu/device/start", { app_connection, ...(scopes?.length ? { scopes } : {}), ...(reauth_of ? { reauth_of } : {}) }),
@@ -242,4 +217,4 @@ export type ROutContext = {
   reply_to: { id: string; sender: string; text: string | null; at: number } | null
   before: { sender: string; text: string | null; at: number }[]
 }
-export const outContext = (id: string) => optional(get<ROutContext>(`/chan-messages/${e(id)}/context`))
+export const outContext = (id: string) => get<ROutContext>(`/chan-messages/${e(id)}/context`)

@@ -79,7 +79,7 @@ fn approving_a_release_runs_the_script_and_drain_holds_until_it_exits() {
     let d = k.core.drain(&token, true).unwrap().unwrap();
     assert_eq!((d.idle, d.running), (false, 1));
     assert!(k.rt.is_holding());
-    /* the hold is in /api/state and on SSE: which item, how many turns it waits for, since when */
+    /* the hold is in /api/summary and on SSE: which item, how many turns it waits for, since when */
     let h = k.core.hold_status().unwrap();
     assert_eq!((h.item.as_str(), h.running), (i.as_str(), 1));
     assert!(crate::util::now() - h.since < 5_000);

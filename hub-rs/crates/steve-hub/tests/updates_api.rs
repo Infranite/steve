@@ -1,5 +1,5 @@
 //! /api/updates and the page's update notice over HTTP: owner only, paths and runner details hidden from
-//! everyone else, the notice in /api/state. Temp STEVE_HOME; no GitHub call (the check is only read from cache).
+//! everyone else, the notice in /api/summary. Temp STEVE_HOME; no GitHub call (the check is only read from cache).
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -141,7 +141,7 @@ async fn updates_are_for_the_instance_owner_and_the_notice_is_in_the_state() {
         v["install"]["home"].is_string(),
         "the owner gets this machine's paths"
     );
-    let (_, state) = json_of(e.req(Method::GET, "/api/state")).await;
+    let (_, state) = json_of(e.req(Method::GET, "/api/summary")).await;
     assert_eq!(state["update"], json!({"version": "99.0.0", "owner": true}));
     // tags only: anything but a stable version is refused before any work
     for version in ["main", "../../etc", "99.0.0-rc.1"] {
@@ -170,7 +170,7 @@ async fn updates_are_for_the_instance_owner_and_the_notice_is_in_the_state() {
     seed_check(&e.cfg, "up_to_date");
     let observed = std::sync::Mutex::new(Value::Null);
     steve_runtime::testkit::eventually("the state cache drops the up-to-date notice", || async {
-        let (status, state) = json_of(e.req(Method::GET, "/api/state")).await;
+        let (status, state) = json_of(e.req(Method::GET, "/api/summary")).await;
         let ready = status == 200 && state.get("update").is_none();
         *observed.lock().unwrap() = state;
         ready

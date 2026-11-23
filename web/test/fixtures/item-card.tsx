@@ -1,3 +1,4 @@
+import { seedItems } from "./view-data"
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { ItemCard } from "../../src/thread/parts"
@@ -5,12 +6,12 @@ import { st, msgOf, useStore, type Item, type Bot } from "../../src/store"
 
 document.documentElement.classList.toggle("dark", matchMedia("(prefers-color-scheme: dark)").matches)
 const now = Date.now()
-const dev: Bot = { id: "dev", n: "Steve 开发", a: "", role: "", pers: "", pro: 1, h: "Codex", harness: "codex", m: "", model: null, on: true, acc: "manual", ws: "", project: null, perm: "", permMode: "auto", rule: "", prompt: null, mem: [], memCount: 0, memLoaded: true, routines: [], hue: "", color: "#8b9eac", round: 60, skin: null, workspaces: [] }
+const dev: Bot = { id: "dev", n: "Steve 开发", a: "", role: "", pers: "", pro: 1, h: "Codex", harness: "codex", m: "", model: null, on: true, acc: "manual", ws: "", project: null, perm: "", permMode: "auto", rule: "", prompt: null, routines: [], hue: "", color: "#8b9eac", round: 60, skin: null, workspaces: [] }
 const item = (id: string, t: string): Item => ({ id, t, b: "dev", st: "done", src: ["", ""], ws: "", project: null, up: "", acc: "", goals: [], now: "", rounds: [], waits: [], ss: [], tl: [], outs: [], q: [], qs: null, branch: null, cwd: null, detail: false, dependents: [], created: now, updated: now })
 st.bots = { dev }
-st.items = [item("ST-33", "排队中的消息支持撤回修改"), item("ST-40", "会话列表支持搜索"),
+seedItems([item("ST-33", "排队中的消息支持撤回修改"), item("ST-40", "会话列表支持搜索"),
   { ...item("ST-41", "发布脚本加上回滚"), outs: [["file", "自查日志", null, "check-log", now, "record"]] },
-  { ...item("ST-43", "独立审查回归覆盖"), st: "fail", phase: "closed", now: "失败：评审不通过" }]
+  { ...item("ST-43", "独立审查回归覆盖"), st: "fail", phase: "closed", now: "失败：评审不通过" }])
 const failed = "ST-33 v0.2.23 的 Release 构建失败（failure）：https://github.com/Infranite/steve/actions/runs/41851954210。事项已按约定完成，构建需要你看一下。"
 const delivery = { text: "PR #8 已经变基合并进 main，ST-33 的两个提交落在 main 的 d2070a4a 和 58d3eacb。按你的要求，没有打标签，没有发布，也没有升级本机。", at: now - 2000 }
 const cards = [

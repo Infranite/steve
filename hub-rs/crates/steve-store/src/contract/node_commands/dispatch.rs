@@ -134,7 +134,7 @@ pub fn postpone(w: &mut W<'_>, op: &str, retry: i64, at: i64) -> Result<()> {
 }
 
 pub fn retarget_dependency(w: &mut W<'_>, op: &str, dependency: &str, at: i64) -> Result<()> {
-    w.exec(
+    let changed = w.exec(
         Query::update()
             .table(TABLE)
             .value("dependency_operation", dependency)
@@ -142,6 +142,9 @@ pub fn retarget_dependency(w: &mut W<'_>, op: &str, dependency: &str, at: i64) -
             .and_where(Expr::col("operation_id").eq(op))
             .and_where(Expr::col("state").eq("pending")),
     )?;
+    if changed > 0 {
+        crate::runtime::command_changed_in(w, op)?;
+    }
     Ok(())
 }
 

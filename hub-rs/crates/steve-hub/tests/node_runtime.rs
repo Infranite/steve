@@ -4622,7 +4622,25 @@ async fn accounting_vectors_cross_node_admission_and_the_shared_gateway_boundary
         let h = hub();
         h.bind();
         h.rt.prompt(S, "accounting vector", "user", &[]).unwrap();
-        eventually_sync("started", || h.methods().contains(&"start_turn")).await;
+        // The command log precedes stream delivery. The real Node's stream sender
+        // preserves order, so wait for the fake Node's start to be durable before
+        // sending a separate usage batch on the same stream.
+        eventually_sync(
+            steve_runtime::testkit::on_timeout(|| async {
+                format!(
+                    "{}: start committed (phase {}, {} events unacked)",
+                    c.name,
+                    h.phase(),
+                    h.node.unacked()
+                )
+            }),
+            || {
+                h.methods().contains(&"start_turn")
+                    && h.node.unacked() == 0
+                    && h.phase() == "active"
+            },
+        )
+        .await;
         let exec = h.attempts()[0].clone();
         let mut seen = std::collections::HashSet::new();
         for r in &c.reports {

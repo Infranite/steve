@@ -349,6 +349,7 @@ pub fn message_add(
         steve_types::WorkEvent::Message {
             ws: ws.into(),
             id: id.clone().into(),
+            space: space.into(),
         },
     ));
     Ok(id)

@@ -476,6 +476,7 @@ impl MessageEvidence<'_, crate::W<'_>> {
         self.0.exec(&statement)?;
         self.0.emit(steve_types::DomainEvent::from(
             steve_types::WorkEvent::Message {
+                space: space.into(),
                 ws: ws.into(),
                 id: id.clone().into(),
             },

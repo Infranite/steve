@@ -7,7 +7,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::backend::Row;
-use crate::{Queued, Read, Result};
+use crate::{Read, Result};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ItemExtras<C> {
@@ -90,156 +90,6 @@ fn pr_closeouts<C>(
     })
 }
 
-pub fn item_extras<C>(
-    c: &mut impl Read,
-    ws: &str,
-    map_closeout: impl Fn(&Value, bool, bool) -> Option<C>,
-) -> Result<HashMap<String, ItemExtras<C>>> {
-    let mut m: HashMap<String, ItemExtras<C>> = HashMap::new();
-    // same orders as the per-item queries of repo.ts (index order for the PK lookups)
-    const ITEMS: &str = "SELECT id FROM items WHERE workspace_id = ?1 AND kind = 'task'";
-    each(
-        c,
-        &format!(
-            "SELECT item_id, text FROM item_goals WHERE item_id IN ({ITEMS}) ORDER BY item_id, version"
-        ),
-        ws,
-        |r| {
-            let x = m.entry(r.get(0)?).or_default();
-            x.goal = r.get(1)?;
-            x.goals += 1;
-            Ok(())
-        },
-    )?;
-    each(
-        c,
-        &format!(
-            "SELECT it.item_id, it.tag_id FROM item_tags it LEFT JOIN tags t ON t.id = it.tag_id WHERE it.item_id IN ({ITEMS}) ORDER BY it.item_id, coalesce(t.cat = '类型', 0) DESC, it.rowid"
-        ),
-        ws,
-        |r| {
-            m.entry(r.get(0)?).or_default().tags.push(r.get(1)?);
-            Ok(())
-        },
-    )?;
-    each(
-        c,
-        &format!(
-            "SELECT item_id, dep_id FROM item_deps WHERE item_id IN ({ITEMS}) ORDER BY item_id, created, dep_id"
-        ),
-        ws,
-        |r| {
-            m.entry(r.get(0)?).or_default().deps.push(r.get(1)?);
-            Ok(())
-        },
-    )?;
-    each(
-        c,
-        &format!(
-            "SELECT item_id, id, status FROM sessions WHERE item_id IN ({ITEMS}) ORDER BY item_id, no, rowid"
-        ),
-        ws,
-        |r| {
-            m.entry(r.get(0)?)
-                .or_default()
-                .sessions
-                .push((r.get(1)?, r.get(2)?));
-            Ok(())
-        },
-    )?;
-    each(
-        c,
-        &format!(
-            "SELECT item_id, id FROM decisions WHERE status = 'open' AND item_id IN ({ITEMS}) ORDER BY item_id, created, rowid"
-        ),
-        ws,
-        |r| {
-            m.entry(r.get(0)?).or_default().open.push(r.get(1)?);
-            Ok(())
-        },
-    )?;
-    let mut counts: HashMap<String, usize> = HashMap::new();
-    each(
-        c,
-        &format!(
-            "SELECT q.session_id, count(*) FROM queued q JOIN sessions s ON s.id = q.session_id WHERE s.item_id IN ({ITEMS}) GROUP BY q.session_id"
-        ),
-        ws,
-        |r| {
-            counts.insert(r.get(0)?, r.get::<i64>(1)? as usize);
-            Ok(())
-        },
-    )?;
-    each(
-        c,
-        &format!(
-            "SELECT w.item_id, w.paused, w.cycle FROM workflows w WHERE w.item_id IN ({ITEMS})"
-        ),
-        ws,
-        |r| {
-            let x = m.entry(r.get(0)?).or_default();
-            x.workflow_paused = Some(r.get(1)?);
-            x.workflow_cycle = Some(r.get(2)?);
-            Ok(())
-        },
-    )?;
-    each(
-        c,
-        &format!(
-            "SELECT u.workflow_id, u.item_id FROM workflow_units u JOIN workflows w ON w.item_id = u.workflow_id JOIN items i ON i.id = w.item_id AND i.cycle = w.cycle AND i.phase != 'closed' WHERE u.status = 'failed' AND u.item_id IS NOT NULL AND u.workflow_id IN ({ITEMS}) ORDER BY u.workflow_id, u.position"
-        ),
-        ws,
-        |r| {
-            m.entry(r.get(0)?)
-                .or_default()
-                .workflow_failed
-                .push(r.get(1)?);
-            Ok(())
-        },
-    )?;
-    each(
-        c,
-        &format!(
-            "SELECT u.item_id, u.attempt FROM workflow_units u WHERE u.item_id IS NOT NULL AND u.item_id IN ({ITEMS})"
-        ),
-        ws,
-        |r| {
-            m.entry(r.get(0)?).or_default().workflow_attempt = Some(r.get(1)?);
-            Ok(())
-        },
-    )?;
-    each(
-        c,
-        &format!(
-            "SELECT a.item_id, max(a.attempt) FROM workflow_attempts a WHERE a.item_id IN ({ITEMS}) AND NOT EXISTS (SELECT 1 FROM workflow_units u WHERE u.item_id = a.item_id) GROUP BY a.item_id"
-        ),
-        ws,
-        |r| {
-            let x = m.entry(r.get(0)?).or_default();
-            x.workflow_superseded = true;
-            if x.workflow_attempt.is_none() {
-                x.workflow_attempt = r.get(1)?;
-            }
-            Ok(())
-        },
-    )?;
-    pr_closeouts(
-        c,
-        "i.workspace_id = ?1",
-        ws,
-        map_closeout,
-        |id, closeout| {
-            m.entry(id).or_default().closeout = Some(closeout);
-        },
-    )?;
-    for x in m.values_mut() {
-        if let Some((sid, _)) = x.sessions.iter().rev().find(|(_, st)| st != "ended") {
-            x.queued = counts.get(sid).copied().unwrap_or(0);
-        }
-    }
-    Ok(m)
-}
-
 pub fn item_closeout<C>(
     c: &mut impl Read,
     id: &str,
@@ -248,42 +98,6 @@ pub fn item_closeout<C>(
     let mut closeout = None;
     pr_closeouts(c, "i.id = ?1", id, map_closeout, |_, p| closeout = Some(p))?;
     Ok(closeout)
-}
-
-pub fn queued_by_session(r: &mut impl Read, ws: &str) -> Result<HashMap<String, Vec<Queued>>> {
-    let order = r.db().dialect().insertion_order(None);
-    let sessions = Query::select()
-        .column("id")
-        .from("sessions")
-        .and_where(Expr::col("workspace_id").eq(ws))
-        .order_by("updated", Order::Desc)
-        .limit(300)
-        .take();
-    let mut grouped = HashMap::<String, Vec<Queued>>::new();
-    r.scan(
-        Query::select()
-            .columns(["id", "session_id", "text", "via", "created", "files"])
-            .from("queued")
-            .and_where(Expr::col("session_id").in_subquery(sessions))
-            .order_by("created", Order::Asc)
-            .order_by_expr(order, Order::Asc),
-        |row| {
-            let files: Option<String> = row.get(5)?;
-            let row = Queued {
-                id: row.get(0)?,
-                session_id: row.get(1)?,
-                text: row.get(2)?,
-                via: row.get(3)?,
-                created: row.get(4)?,
-                files: files
-                    .and_then(|value| serde_json::from_str(&value).ok())
-                    .unwrap_or_default(),
-            };
-            grouped.entry(row.session_id.clone()).or_default().push(row);
-            Ok(())
-        },
-    )?;
-    Ok(grouped)
 }
 
 #[derive(Serialize)]
@@ -297,7 +111,6 @@ pub struct McpSummary {
 #[derive(Default)]
 pub struct BotExtras {
     pub workspaces: HashMap<String, Vec<String>>,
-    pub memories: HashMap<String, i64>,
     pub mcp: HashMap<String, Vec<McpSummary>>,
 }
 
@@ -350,8 +163,7 @@ pub fn bot_mcp(r: &mut impl Read, bot: &str) -> Result<Vec<McpSummary>> {
     Ok(summaries)
 }
 
-pub fn bot_extras(r: &mut impl Read, ws: &str) -> Result<BotExtras> {
-    use sea_query::Func;
+pub fn bot_extras(r: &mut impl Read) -> Result<BotExtras> {
     let mut extras = BotExtras::default();
     r.scan(
         Query::select()
@@ -371,17 +183,5 @@ pub fn bot_extras(r: &mut impl Read, ws: &str) -> Result<BotExtras> {
     scan_mcp(r, None, |bot, server| {
         extras.mcp.entry(bot).or_default().push(server)
     })?;
-    r.scan(
-        Query::select()
-            .column("bot_id")
-            .expr(Func::count(Expr::col("bot_id")))
-            .from("bot_memories")
-            .and_where(Expr::col("workspace_id").eq(ws))
-            .group_by_col("bot_id"),
-        |row| {
-            extras.memories.insert(row.get(0)?, row.get(1)?);
-            Ok(())
-        },
-    )?;
     Ok(extras)
 }

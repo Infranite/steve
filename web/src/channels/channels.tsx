@@ -10,7 +10,6 @@ import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { go, Page, Group, Row, SectionLabel, Section, Empty, StatusDot, ConnectPrompt, Notice, Pill, Blank } from "@/ui"
 import { Select } from "@/view-shared"
-import { Unwired } from "@/unwired"
 import { tm } from "@/store"
 import { useLoad } from "@/accounts/load"
 import { CONN_STATUS } from "@/api/accounts"
@@ -51,7 +50,6 @@ function ChannelsView() {
   const blocked = every.filter(({ s }) => attentionOf(s) === "blocked")
   const spaces = showBlocked ? blocked : every.filter(({ s }) => attentionOf(s) !== "blocked")
   const pick = (s: Space, a: Attention) => void act(() => channelsApi.patchSpace(s.id, { attention: a }), t(a === "blocked" ? "channels:list.blockedToast" : a === "quiet" ? "channels:list.quietToast" : "channels:list.realtimeToast", { name: spaceTitle(s) })).then((r) => r && L.reload())
-  if (L.s === "unwired") return <Unwired id="channels" />
   if (L.s === "loading") return <Page title={t("channels:list.title")}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
   if (L.s === "error") return <Page title={t("channels:list.title")}><Empty title={L.err} /></Page>
   const all = L.data.accounts

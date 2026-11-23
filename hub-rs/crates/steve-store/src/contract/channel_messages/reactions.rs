@@ -47,12 +47,20 @@ pub fn get(r: &mut impl Read, message_id: &str) -> Result<Option<Reaction>> {
     )
 }
 
-pub fn answered_by(r: &mut impl Read, out_id: &str) -> Result<Option<String>> {
+pub fn discarded_answer_source(r: &mut impl Read, out_id: &str) -> Result<Option<String>> {
     r.one(
         Query::select()
             .column("message_id")
             .from("chan_reactions")
             .and_where(Expr::col("answer_id").eq(out_id))
+            .and_where(Expr::exists(
+                Query::select()
+                    .column("id")
+                    .from("chan_messages")
+                    .and_where(Expr::col("id").eq(out_id))
+                    .and_where(Expr::col("status").eq("discarded"))
+                    .take(),
+            ))
             .limit(1),
         |row| row.get(0),
     )

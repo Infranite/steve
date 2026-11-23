@@ -6,9 +6,10 @@ import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { useT } from "@/i18n"
 import { date } from "@/i18n/format"
-import { decide, emit, refresh, st, useHubEvents, type Item, type Wait } from "@/store"
+import { decide, emit, st, useHubEvents, type Item, type Wait } from "@/store"
+import { readViews } from "@/data/sync"
 import { OutContext } from "./out-context"
-import { OpenInFeishu } from "./open-in-app"
+import { MessageOpenInFeishu, OpenInFeishu } from "./open-in-app"
 import { SendAuthorization } from "./send-authorization"
 
 export function SendRecovery({ i, w }: { i: Item; w: Wait }) {
@@ -91,14 +92,14 @@ export function SendRecovery({ i, w }: { i: Item; w: Wait }) {
     {managed && <SendAuthorization key={w.subjectId} w={w} locked={locked} revision={revision} />}
     <div className="flex min-w-0 flex-wrap items-center gap-2" role="status" aria-live="polite" data-send-status={status ?? "unread"}>
       <span>{t("core:sendRecovery.state", { state })}</span>
-      <Button size="xs" variant="outline" disabled={loading || submitting} onClick={() => { setRevision((n) => n + 1); void load(); void refresh() }} data-send-refresh>{t(loading ? "core:sendRecovery.refreshing" : "core:sendRecovery.refresh")}</Button>
+      <Button size="xs" variant="outline" disabled={loading || submitting} onClick={() => { setRevision((n) => n + 1); void load(); void readViews("decision", [w.decision]).catch(() => {}) }} data-send-refresh>{t(loading ? "core:sendRecovery.refreshing" : "core:sendRecovery.refresh")}</Button>
       {busy && <p className="w-full" data-send-submitting>{t(submitted ? "core:sendRecovery.submitted" : "core:card.submitting")}</p>}
       {failed && <span className="w-full text-attention" data-send-read-error>{t("core:sendRecovery.readFailed")}</span>}
       {status === "unknown" && <p className="w-full text-attention">{t("core:sendRecovery.unknownNote")}</p>}
       {status === "sent" && <p className="w-full" data-send-receipt>{record?.sent ? t("core:sendRecovery.sentAt", { at: date(record.sent, { dateStyle: "short", timeStyle: "medium" }) }) : t("core:sendRecovery.markedSent")} {t("core:sendRecovery.noReceipt")}</p>}
       {stale && <p className="w-full" data-send-stale>{t("core:sendRecovery.changed")}</p>}
     </div>
-    <OpenInFeishu url={record?.open_url ?? w.openUrl} className="self-start" />
+    {record?.open_url ? <OpenInFeishu url={record.open_url} className="self-start" /> : <MessageOpenInFeishu message={w.subjectId} className="self-start" />}
     {w.options.includes("rewrite") && (editing ? <div className="flex min-w-0 flex-col gap-2" data-send-editor>
       <label htmlFor={fieldId} className="font-medium text-foreground">{t("core:sendRecovery.edit")}</label>
       <Textarea id={fieldId} value={text} onChange={(e) => setText(e.target.value)} disabled={locked} rows={4} maxRows={12} data-send-edit />

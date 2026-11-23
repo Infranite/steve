@@ -1,5 +1,4 @@
-/* 统计（steve-stats，stats.md §4）：汇总、趋势、分组用量、事项表和下钻、会话用量、价格表。
- * 没有这些接口时：404、HTML 回落或网络错误一律是 NotWired，页面显示“还没有接入”。费用全是估算。 */
+/** Estimated costs and activity statistics. */
 import { modReq as req, qs } from "@/api"
 import type { TreeStat } from "@/agent-tree"
 

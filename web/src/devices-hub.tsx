@@ -67,7 +67,7 @@ export function HubCard({ readOnly = false, route = null }: { readOnly?: boolean
     try { setSnapshot(parseHubSnapshot(JSON.parse(sessionStorage.getItem(key) ?? "null"))) } catch { setSnapshot(null) }
   }, [key])
   const [info, setInfo] = useState<HubInfo | null>(null)
-  const [status, setStatus] = useState<"loading" | "online" | "offline">("loading")
+  const [status, setStatus] = useState<"loading" | "online" | "offline" | "error">("loading")
   const [editing, setEditing] = useState(false)
   const [base, setBase] = useState<HubMetadata | null>(null)
   const [draft, setDraft] = useState<HubDraft>({ display_name: "", purpose_note: "" })
@@ -107,7 +107,7 @@ export function HubCard({ readOnly = false, route = null }: { readOnly?: boolean
   const refresh = useCallback(async () => {
     const epoch = ++readEpoch.current
     try { const value = await readHubInfo(); if (epoch === readEpoch.current) accept(value); return value }
-    catch (e) { if (epoch === readEpoch.current) { setInfo(null); setStatus("offline") }; return null }
+    catch (e) { if (epoch === readEpoch.current) { setInfo(null); setStatus(e instanceof TypeError || e instanceof DOMException ? "offline" : "error") }; return null }
   }, [accept])
   useEffect(() => {
     void refresh()
@@ -242,27 +242,37 @@ function HubMachine() {
 /** how other computers reach this Hub: whether it listens for Nodes, tailcat, and the upgrade policy Nodes follow */
 function RemoteNodes() {
   const t = useT(), { nodesRead, nodesError, nodesOff } = useDevices()
+  const owner = st.owner
+  const [error, setError] = useState("")
   const [tailcat, setTailcat] = useState<RTailcat | null>(null), [busy, setBusy] = useState(false)
   useEffect(() => {
+    setTailcat(null); setError("")
+    if (!owner || !nodesRead || nodesOff) return
     let live = true
-    void api.nodesTailcat().then(v => { if (live) setTailcat(v) }).catch(() => {})
+    void api.nodesTailcat().then(
+      (v) => { if (live) setTailcat(v) },
+      (e: Error) => { if (live) setError(e.message) },
+    )
     return () => { live = false }
-  }, [])
-  /* the Node registry is the owner's: without it there is nothing here to read */
-  if (!nodesRead && nodesError) return null
+  }, [owner, nodesRead, nodesOff])
+  if (!owner) return null
   const toggle = async (on: boolean) => {
     setBusy(true)
-    try { setTailcat(await api.setNodesTailcat(on)) }
-    catch (e) { toast((e as Error).message); void api.nodesTailcat().then(setTailcat).catch(() => {}) }
+    try { setTailcat(await api.setNodesTailcat(on)); setError("") }
+    catch (e) {
+      setError((e as Error).message)
+      void api.nodesTailcat().then(setTailcat, () => {})
+    }
     finally { setBusy(false) }
   }
   return (
     <DCard icon={<ServerIcon />} title={t("devices:hub.remote")} sub={t("devices:hub.remoteSub")} data-hub-remote>
       <div className="border-t border-border/70">
-        <DRow title={t("devices:hub.accept")} sub={nodesOff ? t("devices:hub.acceptOffSub") : t("devices:hub.acceptSub")} data-nodes-off={nodesOff ? "" : undefined}>
+        {(nodesError || error) && <p role="alert" className="px-5 py-3 type-callout text-destructive">{nodesError || error}</p>}
+        {nodesRead && <DRow title={t("devices:hub.accept")} sub={nodesOff ? t("devices:hub.acceptOffSub") : t("devices:hub.acceptSub")} data-nodes-off={nodesOff ? "" : undefined}>
           <Badge tone={nodesOff ? "neutral" : "success"} size="sm" dot title={nodesOff ? t("devices:hub.acceptOffTip") : undefined}>{t(nodesOff ? "devices:hub.off" : "devices:hub.on")}</Badge>
-        </DRow>
-        {tailcat && <DRow title={t("devices:hub.tailcat")} data-tailcat={tailcat.enabled ? "on" : "off"}
+        </DRow>}
+        {nodesRead && !nodesOff && tailcat && <DRow title={t("devices:hub.tailcat")} data-tailcat={tailcat.enabled ? "on" : "off"}
           sub={tailcat.available || tailcat.enabled ? <>{t("devices:hub.tailcatSub")}{tailcat.enabled && tailcat.address && <span className="type-code">{tailcat.address}</span>}{tailcat.enabled && !tailcat.running && tailcat.error && <span className="text-destructive">{tailcat.error}</span>}</> : t("devices:hub.tailcatMissing")}>
           {(tailcat.available || tailcat.enabled) && <>{busy && <Spinner className="size-3.5 text-muted-foreground" />}<Switch checked={tailcat.enabled} disabled={busy} onCheckedChange={(on) => void toggle(on)} aria-label={t("devices:hub.tailcat")} data-tailcat-switch /></>}
         </DRow>}

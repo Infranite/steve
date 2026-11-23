@@ -202,7 +202,7 @@ async fn finishing_through_the_api_runs_an_item_flow_once_through_the_outbox() {
         .await;
     assert_eq!(s, 200, "{v}");
     // an item in progress, without a session (no agent runs here)
-    let (_, state) = e.call("GET", "/api/state", None).await;
+    let (_, state) = e.call("GET", "/api/shell", None).await;
     let bot = state["bots"][0]["id"].as_str().expect("a bot").to_string();
     outbox_checks::seed_finish_item(&e.db, &bot).unwrap();
     let (s, v) = e
@@ -410,22 +410,18 @@ async fn a_chat_message_decision_opens_its_chat_in_the_feishu_client() {
     outbox_checks::set_lark_connection(&e.db, &conn).unwrap();
     outbox_checks::seed_chat_space(&e.db, &conn).unwrap();
     outbox_checks::seed_chat_decisions(&e.db).unwrap();
-    let (s, state) = e.call("GET", "/api/state", None).await;
-    assert_eq!(s, 200, "{state}");
-    let d = |id: &str| {
-        state["decisions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|d| d["id"] == id)
-            .cloned()
-            .unwrap_or_else(|| panic!("{id} in {state}"))
-    };
+    let (status, open) = e
+        .call("GET", "/api/chan-messages/cm_open/open-url", None)
+        .await;
+    assert_eq!(status, 200, "{open}");
     assert_eq!(
-        d("dc_open")["open_url"],
+        open["url"],
         "https://applink.larksuite.com/client/chat/open?openChatId=oc_0000test0002"
     );
-    assert!(d("dc_other").get("open_url").is_none());
+    let (_, other) = e
+        .call("GET", "/api/chan-messages/cm_other/open-url", None)
+        .await;
+    assert!(other["url"].is_null(), "{other}");
 }
 
 /// Audit #5: the dead deliveries are listed for the instance owner, grouped by consumer, and revived.
@@ -513,7 +509,7 @@ async fn real_completion_notification_reaches_e1_and_existing_c6_fake_adapter() 
         "enabled":true,"mode":"now","party_id":party,"space_id":inbound.space_id,"timezone":"UTC","quiet_start":null,"quiet_end":null
     }))).await;
     assert_eq!(s, 200, "{v}");
-    let (_, state) = e.call("GET", "/api/state", None).await;
+    let (_, state) = e.call("GET", "/api/shell", None).await;
     let bot = state["bots"][0]["id"].as_str().unwrap();
     outbox_checks::seed_notification_item(&e.db, bot).unwrap();
     let (s, v) = e

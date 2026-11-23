@@ -163,6 +163,21 @@ impl Engine {
         Ok(json!({ "windows": out, "waiting": waiting }))
     }
 
+    /// The latest badge action for a decision in the workspace's open window.
+    pub fn current_decision_action(&self, ws: &str, decision: &str) -> ApiResult<Value> {
+        let action = self.yolo().store().read(|c| -> steve_store::Result<_> {
+            let Some(window) = repo::window_current(c, ws)? else {
+                return Ok(None);
+            };
+            Ok(repo::actions_of_decision(c, decision)?
+                .into_iter()
+                .rfind(|a| a.workspace_id == ws && a.window_id.as_ref() == Some(&window.id)))
+        })?;
+        action
+            .as_ref()
+            .map_or(Ok(Value::Null), |a| self.action_json(a))
+    }
+
     /// One ledger row as the digest shows it.
     pub fn action_json(&self, a: &ActionRow) -> ApiResult<Value> {
         let d = match a.decision_id.as_deref() {

@@ -1,5 +1,6 @@
 //! Stored conversation turns that explain how a channel message was handled.
 
+use crate::contract::Q;
 use sea_query::{Expr, ExprTrait, Func, Order, Query};
 
 use crate::contract::Row;
@@ -117,16 +118,19 @@ pub fn set_channel_content(
     if claim {
         update.and_where(w.dialect().json_type(meta, path).is_null());
     }
-    let changed = w.exec(&update)? == 1;
-    if changed && path == "$.chan_out" {
+    let Some(space) = w.one(update.returning_col("space"), |row| row.get::<String>(0))? else {
+        return Ok(false);
+    };
+    if path == "$.chan_out" {
         w.emit(steve_types::DomainEvent::from(
             steve_types::WorkEvent::Message {
+                space: space.into(),
                 ws: ws.into(),
                 id: id.into(),
             },
         ));
     }
-    Ok(changed)
+    Ok(true)
 }
 
 pub fn first_turn_for_message(

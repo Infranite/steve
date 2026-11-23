@@ -1,3 +1,5 @@
+import { isThinking } from "@/store"
+import { getItems } from "@/store"
 /* The composer every page writes with: the main conversation, an item's page and a session's.
  * Steve's own behaviour – the marked text (items, mentions, commands), the #/@// menus, drafts that survive a reload,
  * uploads, idempotent sends – inside affectUI's Chat Composer card, with Run Controls' buttons at its end: Send when
@@ -39,7 +41,7 @@ export function markText(v: string, at: (ins: string) => "bot" | "party" | undef
   const rs: [number, number, Mark][] = []
   for (const m of v.matchAll(TOKEN)) {
     const t = m[0], k: Mark | undefined = t[0] === "@" ? at(t) : t[0] === "/" ? (COMMANDS.some(([n]) => "/" + n.replace(/\s+/g, "") === t.replace(/\s+/g, "")) ? "cmd" : undefined)
-      : st.items.some((i) => i.id === t.replace(/^#/, "").toUpperCase()) ? "item" : undefined
+      : getItems().some((i) => i.id === t.replace(/^#/, "").toUpperCase()) ? "item" : undefined
     if (k) rs.push([m.index, m.index + t.length, k])
   }
   if (typing && typing[1] > typing[0] && !rs.some(([a, b]) => a < typing[1] && typing[0] < b)) rs.push([typing[0], typing[1], "typing"])
@@ -130,7 +132,7 @@ function ComposerInput({ placeholder, onSend, model, modelIcon, left, autoFocus,
   const isFileDrag = (e: React.DragEvent) => [...(e.dataTransfer?.types ?? [])].includes("Files")
   type Opt = { id: string; label: ReactNode; ins: string; cmd?: string }
   const opts: Opt[] = !menu ? [] : menu.kind === "#"
-    ? st.items.filter((i) => !i.arch && (!menu.q || i.id.toLowerCase().includes(menu.q.toLowerCase()) || i.t.includes(menu.q))).slice(0, 6).map((i) => ({ id: i.id, ins: i.id, label: <><ItemNo id={i.id} className="w-14" /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><Status s={itemDisplayStatus(i)} /></> }))
+    ? getItems().filter((i) => !i.arch && (!menu.q || i.id.toLowerCase().includes(menu.q.toLowerCase()) || i.t.includes(menu.q))).slice(0, 6).map((i) => ({ id: i.id, ins: i.id, label: <><ItemNo id={i.id} className="w-14" /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><Status s={itemDisplayStatus(i)} /></> }))
     : menu.kind === "@" && men.opts ? men.opts
     : menu.kind === "@"
     ? [...Object.keys(st.bots).filter((k) => st.bots[k].on && !st.bots[k].main && (!menu.q || st.bots[k].n.includes(menu.q))).map((k) => ({ id: k, ins: "@" + st.bots[k].n.replace(/\s+/g, ""), label: <><BotAvatar k={k} size={18} /><span className="type-callout">{tr("core:composer.botName", { name: st.bots[k].n })}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{tr("core:composer.handTo", { role: st.bots[k].role })}</span></> })),
@@ -182,7 +184,8 @@ function ComposerInput({ placeholder, onSend, model, modelIcon, left, autoFocus,
   const marked = markText(v, atKind, menu && [menu.start, menu.end])
   useLayoutEffect(() => { if (mirror.current && ta.current) mirror.current.scrollTop = ta.current.scrollTop })
   const head = menu?.kind === "#" ? <><HashIcon className="size-3.5" />{tr("core:composer.headItem")}</> : menu?.kind === "@" ? <><AtSignIcon className="size-3.5" />{tr("core:composer.headMention")}</> : <><SlashIcon className="size-3.5" />{tr("core:composer.headCommand")}</>
-  const [floating, leaving] = useLinger(menu && opts.length > 0 && { kind: menu.kind, opts, groups: menu.kind === "@" && men.opts ? men.groups(opts) : [{ head, xs: opts }] })
+  const mentionError = menu?.kind === "@" ? men.error : null
+  const [floating, leaving] = useLinger(menu && (opts.length > 0 || !!mentionError) && { kind: menu.kind, opts, groups: menu.kind === "@" && men.opts ? men.groups(opts) : [{ head, xs: opts }] })
   /* the keys, said once in the row: while a turn runs what Enter does, else how to send (the chat says its menus instead) */
   const hint = queues ? (steers ? <><Kbd>⏎</Kbd>{tr("core:composer.steer")}<Kbd>{ALT.glyph}⏎</Kbd>{tr("core:composer.queue")}</> : <><Kbd>Esc</Kbd>{tr("core:composer.stop")}</>)
     : chat ? <><Kbd>#</Kbd>{tr("core:composer.hintItem")}<Kbd>@</Kbd>Bot<Kbd>/</Kbd>{tr("core:composer.hintCommand")}</>
@@ -198,6 +201,7 @@ function ComposerInput({ placeholder, onSend, model, modelIcon, left, autoFocus,
       {floating && (
         <Command shouldFilter={false} value={floating.opts[sel]?.id} className="absolute inset-x-2 bottom-full z-30 mb-2 h-auto max-w-md origin-bottom-left rounded-2xl bg-popover shadow-[var(--lift-hover)] anim-float" data-ref-menu={leaving ? undefined : floating.kind} data-leaving={leaving || undefined} aria-hidden={leaving || undefined}>
           <CommandList>
+            {mentionError && <p role="alert" className="px-3 py-2 type-footnote text-destructive">{mentionError}</p>}
             {floating.groups.filter((g) => g.xs.length).map((g, k) => (
             <CommandGroup key={k} heading={<span className="inline-flex items-center gap-1.5">{g.head}</span>}>
               {g.xs.map((o) => { const n = floating.opts.indexOf(o); return (
@@ -226,7 +230,7 @@ function ComposerInput({ placeholder, onSend, model, modelIcon, left, autoFocus,
         <textarea ref={ta} autoFocus={autoFocus} disabled={disabled || sending} value={v} placeholder={drag > 0 ? tr("core:composer.dropFiles") : placeholder} rows={1}
           data-under aria-label={placeholder} aria-description={keysHelp} className="ui-ccc__message relative [scrollbar-gutter:stable]"
           onPaste={(e) => { if (e.clipboardData?.files?.length && takeFiles(e.clipboardData.files)) e.preventDefault() }}
-          onChange={(e) => { if (chat && !v && e.target.value) cue("input"); else if (chat && v && !e.target.value && !st.thinking) cue("idle"); setV(e.target.value); track(e.target.value, e.target.selectionStart ?? e.target.value.length) }}
+          onChange={(e) => { if (chat && !v && e.target.value) cue("input"); else if (chat && v && !e.target.value && !isThinking()) cue("idle"); setV(e.target.value); track(e.target.value, e.target.selectionStart ?? e.target.value.length) }}
           onScroll={(e) => { if (mirror.current) mirror.current.scrollTop = e.currentTarget.scrollTop }}
           onKeyDown={(e) => {
             if (menu && opts.length) {

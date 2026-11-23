@@ -1,3 +1,6 @@
+import { decisionView, onViews, useOpenDecisions } from "@/data/sync"
+import { Textarea } from "@/components/ui/textarea"
+import { Markdown } from "@/components/markdown"
 /* IM conversations in 对话 (channels-personas.md §2.12): every IM space where Steve answers is a conversation of its
  * own. The switcher above the conversation lists them with their badge (provider · space · 群聊/私聊); one opens at
  * #/c/<space> with the same message parts as yours, the sender above each turn, and the “收到 → 完成” state of the
@@ -5,12 +8,12 @@
  * Since #243 a conversation also shows the chat's whole record (every message you may see, with what Steve did with
  * it), a space Steve never answered in is listed too, and a channel switcher picks the account whose conversations
  * the list shows. */
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react"
 import { cn } from "cn"
 import { ArrowLeftIcon, BotIcon, CheckIcon, LoaderIcon, UsersIcon, UserIcon, XIcon, ExternalLinkIcon, ListIcon, MessagesSquareIcon } from "lucide-react"
 import { conversationsApi, type ChannelEntry, type ConvBadge, type ConvMessage, type ConvRecord, type ConvRow, type ConvState, type Handling, type Reaction, type RecordPage } from "@/api/conversations"
 import { HANDLING_TONE, handlingDetail, shownUpTo } from "@/thread/channel-record"
-import { st, msgOf, discardOut, tm, useHubEvents, type Msg } from "@/store"
+import { st, msgOf, discardOut, decide, editReplyDraft, tm, useHubEvents, type Msg } from "@/store"
 import { SegmentedControl } from "@/components/affect/segmented-control-clean"
 import { Badge } from "@/components/ui/badge"
 import { ChannelMessageBody } from "@/channels/message-body"
@@ -66,7 +69,7 @@ export function useConversation(space: string | undefined) {
       markRead(data)
     }).catch((e) => {
       if (!active(id)) return
-      // Only a resource 404 means missing. Transport/module failures are retryable and retain the loaded messages.
+      // Other failures are retryable and retain the loaded messages.
       if (e instanceof HubError && e.status === 404) setState({ scope, data: null, error: false, loading: false, older: false })
       else setState(old => ({ scope, data: old.scope === scope ? old.data : undefined, error: true, loading: false, older: false }))
     })
@@ -90,7 +93,8 @@ export function useConversation(space: string | undefined) {
   }, [space, scope, state, active])
   useEffect(() => { load(); return () => { request.current++ } }, [load])
   /* a chat message's event names its space (`sp_…`), the conversation is `chan:sp_…` */
-  useHubEvents(["message", "chan_message"], load, 250, { filter: (e) => matchesSpace(e as { space_id?: string }, space?.replace(/^chan:/, "")) })
+  useHubEvents(["message", "chan_message"], load, 250, { filter: (e) =>
+    !!space && (e.type === "message" ? e.space === space : matchesSpace(e as { space_id?: string }, space.replace(/^chan:/, ""))) })
   // Hide the previous scope immediately, before the new effect starts its request.
   const mine = state.scope === scope
   return { data: mine ? state.data : undefined, error: mine && state.error, loading: mine ? state.loading : !!space, reload: load, older, loadingOlder: mine && state.older }
@@ -118,19 +122,24 @@ const OPEN_EV = "steve-open-conversations"
  *  switcher, there with the account picked (`connection`) */
 export function openConversations(connection?: string) { window.dispatchEvent(new CustomEvent(OPEN_EV, { detail: { connection: typeof connection === "string" ? connection : undefined } })) }
 
-/** the channel accounts you see, for the switcher and the list's filter; undefined until known or on a Hub without them */
+/** The channel accounts you see, for the switcher and the list's filter. */
 export function useChannels() {
   const [list, setList] = useState<ChannelEntry[] | undefined>()
+  const [error, setError] = useState("")
   const scope = st.workspace?.id, hub = hubBase()
   const request = useRef(0)
   const load = useCallback(() => {
     const id = ++request.current
-    conversationsApi.channels().then((c) => { if (id === request.current && st.workspace?.id === scope && hubBase() === hub) setList(c) }, () => {})
+    const active = () => id === request.current && st.workspace?.id === scope && hubBase() === hub
+    conversationsApi.channels().then(
+      (c) => { if (active()) { setList(c); setError("") } },
+      (e: Error) => { if (active()) setError(e.message) },
+    )
   }, [scope, hub])
-  useEffect(() => { setList(undefined); load(); return () => { request.current++ } }, [load])
+  useEffect(() => { setList(undefined); setError(""); load(); return () => { request.current++ } }, [load])
   useEffect(() => { window.addEventListener(READ_EV, load); return () => window.removeEventListener(READ_EV, load) }, [load])
   useHubEvents(["chan_message", "space", "connection"], load, 1000, { maxWait: 5000 })
-  return list
+  return { channels: list, error, retry: load }
 }
 
 const channelOf = (t: EventTarget | null) => (t instanceof Element ? t.closest("[data-channel]")?.getAttribute("data-channel") ?? null : null)
@@ -138,9 +147,8 @@ const channelOf = (t: EventTarget | null) => (t instanceof Element ? t.closest("
 /** 对话's channel switcher (#243): Steve, then every channel account you see with how many of its conversations have new
  *  messages (affectUI Segmented Control, scrolling sideways on a phone). Steve is your conversation; an account opens its
  *  conversations. Inside a channel conversation its account is the one picked. Nothing shows without a channel account. */
-export function ChannelSwitcher({ current }: { current?: ConvBadge | null }) {
+export function ChannelSwitcher({ channels, current }: { channels?: ChannelEntry[]; current?: ConvBadge | null }) {
   const t = useT()
-  const channels = useChannels()
   const pressed = useRef<string | null>(null)
   if (!channels?.length) return null
   /* undefined: your conversation; null: a channel conversation still loading */
@@ -166,7 +174,7 @@ export function ChannelSwitcher({ current }: { current?: ConvBadge | null }) {
 
 /** A bounded navigator; closing only changes this user's list, never the channel. Inside an IM conversation a bar
  *  leads back to the main conversation; otherwise only the list (opened from 历史) */
-export function ConvSwitcher({ current, badge }: { current?: string; badge?: ConvBadge }) {
+export function ConvSwitcher({ channels, current, badge }: { channels?: ChannelEntry[]; current?: string; badge?: ConvBadge }) {
   const t = useT()
   const [open, setOpen] = useState(false)
   /* the account whose conversations are listed; "" all of them */
@@ -175,7 +183,6 @@ export function ConvSwitcher({ current, badge }: { current?: string; badge?: Con
     const h = (e: Event) => { const c = (e as CustomEvent<{ connection?: string } | null>).detail?.connection; if (typeof c === "string") setAccount(c); setOpen(true) }
     window.addEventListener(OPEN_EV, h); return () => window.removeEventListener(OPEN_EV, h)
   }, [])
-  const channels = useChannels()
   const [query, setQuery] = useState("")
   const [state, setState] = useState<ConvState>("open")
   const [rows, setRows] = useState<ConvRow[]>([])
@@ -209,7 +216,7 @@ export function ConvSwitcher({ current, badge }: { current?: string; badge?: Con
     return () => { clearTimeout(timer); request.current++ }
   }, [open, load])
   const refresh = useCallback(() => { if (open) setUpdates(true) }, [open])
-  useHubEvents(["message", "chan_message", "space", "decision"], refresh, 600)
+  useHubEvents(["message", "chan_message", "space", "patch"], refresh, 600)
   const change = async (space: string, closed: boolean) => {
     const hash = location.hash
     setBusy(space); setError("")
@@ -301,6 +308,7 @@ export function ChanOutNote({ m }: { m?: ConvMessage }) {
   const t = useT()
   const [closed, setClosed] = useState(false)
   const s = m?.meta?.chan_out?.status as string | undefined, decision = m?.meta?.chan_out?.decision as string | undefined
+  const tier = useSyncExternalStore(onViews, () => decision ? decisionView(decision)?.tier : undefined)
   const reason = m?.meta?.chan_out?.reason as string | undefined
   /* a new state from the Hub replaces what this click assumed */
   useEffect(() => setClosed(false), [s, decision])
@@ -310,6 +318,7 @@ export function ChanOutNote({ m }: { m?: ConvMessage }) {
   const label = shown in CHAN_OUT ? t(CHAN_OUT[shown as keyof typeof CHAN_OUT]) : shown
   const note = <div className={cn("type-callout", shown === "failed" || shown === "disconnected" ? "text-destructive" : "text-muted-foreground")} data-chan-out={shown}>{reason ? t("thread:chanOut.withReason", { label, reason }) : label}</div>
   if (shown !== "draft" || !decision) return note
+  if (tier === "draft") return null
   const busy = st.pendingActions.has("decision:" + decision)
   const discard = async () => { if (await discardOut(decision)) setClosed(true) }
   return (
@@ -319,6 +328,38 @@ export function ChanOutNote({ m }: { m?: ConvMessage }) {
       <Button size="xs" variant="outline" disabled={busy} onClick={() => go("#/inbox")} data-chan-out-review>{t("thread:chanOut.review")}</Button>
     </div>
   )
+}
+
+/** The decision tier owns the single draft shown on your side of this conversation. */
+export function ConversationDraft({ conv, decisionIds }: { conv: string; decisionIds: ReadonlySet<string> }) {
+  const decisions = useOpenDecisions()
+  const draft = decisions.findLast((d) => d.tier === "draft" &&
+    (d.space_id === conv.replace(/^chan:/, "") || decisionIds.has(d.id)))
+  return draft ? <DraftBubble key={draft.id} id={draft.id} text={draft.draft} /> : null
+}
+
+function DraftBubble({ id, text }: { id: string; text: string }) {
+  const t = useT(), [edit, setEdit] = useState<{ previous: string; text: string } | null>(null)
+  const [busy, setBusy] = useState(false)
+  const run = async (action: () => Promise<unknown>) => {
+    setBusy(true)
+    try { if (await action()) setEdit(null) } finally { setBusy(false) }
+  }
+  return <section className="w-fit max-w-[85%] self-end rounded-xl border border-dashed border-blue/50 bg-blue/5 p-3" data-conversation-draft={id}>
+    <div className="mb-2 type-footnote font-semibold text-blue">{t("thread:chanOut.draftBubble")}</div>
+    {edit ? <Textarea autoFocus aria-label={t("thread:chanOut.draftBubble")} value={edit.text} maxLength={4000}
+      onChange={(e) => setEdit({ ...edit, text: e.target.value })} /> : <Markdown text={text} />}
+    <div className="mt-2 flex flex-wrap justify-end gap-2">
+      {edit ? <>
+        <Button size="sm" variant="ghost" disabled={busy} onClick={() => setEdit(null)}>{t("common:action.cancel")}</Button>
+        <Button size="sm" disabled={busy || !edit.text.trim()} onClick={() => void run(() => editReplyDraft(id, edit.previous, edit.text))}>{t("common:action.save")}</Button>
+      </> : <>
+        <Button size="sm" variant="ghost" disabled={busy} onClick={() => void run(() => discardOut(id))} data-draft-skip>{t("thread:chanOut.discard")}</Button>
+        <Button size="sm" variant="outline" disabled={busy} onClick={() => setEdit({ previous: text, text })} data-draft-edit>{t("common:action.edit")}</Button>
+        <Button size="sm" disabled={busy || !text.trim()} onClick={() => void run(() => decide("", "yes", text, id))} data-draft-send>{t("thread:chanOut.send")}</Button>
+      </>}
+    </div>
+  </section>
 }
 
 /** whose turn it is: the sender's name over the bubble */

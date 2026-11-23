@@ -13,14 +13,13 @@ import { Spinner } from "@/components/ui/spinner"
 import { go, Page, Group, Row, SectionLabel, Segmented, Meta, Empty, StatusDot, Notice, Note, Blank } from "@/ui"
 import { Clamp } from "@/auto/common"
 import { Select } from "@/view-shared"
-import { Unwired } from "@/unwired"
 import { tm, toast } from "@/store"
 import { useLoad, useBusy } from "@/accounts/load"
 import { accountsApi, CONN_STATUS } from "@/api/accounts"
 import { channelsApi, TRIGGER_ALL_DMS, TRIGGER_EVERYWHERE, attentionOf, isDm, spaceTitle, type ChannelAccount, type Rule, type Space, type Trigger } from "@/api/channels"
 import { SpaceAvatar, kindLine } from "@/channels/space-bits"
 import { GroupedSpaces } from "@/channels/space-groups"
-import { Rules, ruleText, ruleOk } from "@/channels/rules"
+import { Rules, ruleOk } from "@/channels/rules"
 import { PersonaAvatar } from "@/channels/basis"
 import { PermissionList, SelfButtons } from "@/integrations/feishu"
 import { integrationsApi, type IAdapter } from "@/api/integrations"
@@ -35,9 +34,9 @@ export function AccountView({ id }: { id: string }) {
   const t = useT()
   const L = useLoad(async () => {
     const a = await channelsApi.account(id)
-    const [personas, ig] = await Promise.all([channelsApi.personas(), integrationsApi.all().catch(() => null)])
+    const [personas, ig] = await Promise.all([channelsApi.personas(), integrationsApi.all()])
     /* “你本人” through this bot: a side acting as you that pairs with this bot's adapter, and its connections */
-    const adapters: IAdapter[] = ig?.providers.flatMap((p) => p.adapters) ?? []
+    const adapters: IAdapter[] = ig.providers.flatMap((p) => p.adapters)
     const sides = a && a.mode === "bot" ? selfSidesFor(adapters, a.connection.adapter) : []
     const all = sides.length ? await accountsApi.connections() : []
     const self = all.filter((c) => sides.some((x) => x.id === c.adapter))
@@ -45,7 +44,6 @@ export function AccountView({ id }: { id: string }) {
     return { a, personas, self, side }
   }, [id], ["connection", "account", "space", "persona", "channel"])
   const [busy, act] = useBusy(), [rules, setRules] = useState<Rule[] | null>(null)
-  if (L.s === "unwired") return <Unwired id="accounts" />
   const back: [string, string] = ["#/channels", t("channels:list.title")]
   if (L.s === "loading") return <Page title={t("channels:account.title")} back={back}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
   if (L.s === "error") return <Page title={t("channels:account.title")} back={back}><Empty title={L.err} /></Page>
@@ -73,19 +71,15 @@ export function AccountView({ id }: { id: string }) {
           <GroupedSpaces a={a} empty={t(me ? "channels:account.noSessions" : "channels:account.noGroups")} onChanged={() => void L.reload()} />
         </section>
         <section><SectionLabel>{t("channels:account.defaultRules")}</SectionLabel>
-          {!me && <Group className="mb-2"><Row icon={<PersonaAvatar bot={a.personaBot} size={32} />} title={t("channels:account.defaultPersona", { name: a.persona?.name ?? "—" })} sub={a.editable ? t("channels:account.defaultPersonaSub") : t("channels:account.personaReadonly")} onClick={!a.editable && a.persona ? () => go("#/channels/personas/" + a.persona!.id) : undefined}>
-              {a.editable ? <Select align="end" testId="acc-default-persona" value={a.persona?.id ?? ""} onChange={(v) => void patch({ persona_id: v }, t("channels:account.personaChanged"))} options={personas.map((p) => ({ v: p.id, l: p.name }))} />
-                : a.persona && <ChevronRightIcon className="size-4 text-tertiary" aria-label={t("channels:word.editPersona")} />}</Row></Group>}
+          {!me && <Group className="mb-2"><Row icon={<PersonaAvatar bot={a.personaBot} size={32} />} title={t("channels:account.defaultPersona", { name: a.persona?.name ?? "—" })} sub={t("channels:account.defaultPersonaSub")}>
+              <Select align="end" testId="acc-default-persona" value={a.persona?.id ?? ""} onChange={(v) => void patch({ persona_id: v }, t("channels:account.personaChanged"))} options={personas.map((p) => ({ v: p.id, l: p.name }))} /></Row></Group>}
           {me && <div className="mb-2 type-footnote text-muted-foreground">{t("channels:account.selfSub")}</div>}
-          {a.editable && rulesNow ? <>
-            <Rules rules={rulesNow} self={me} onChange={setRules} note={t("channels:account.rulesNote")} />
-            {rules && <div className="mt-2 flex gap-2"><Button size="sm" disabled={busy || !rules.every(ruleOk)} onClick={() => void patch({ rules }, t("channels:word.rulesSaved")).then((ok) => ok && setRules(null))} data-acc-rules-save>{t("channels:word.saveRules")}</Button><Button size="sm" variant="ghost" onClick={() => setRules(null)}>{t("channels:word.revert")}</Button></div>}
-          </> : a.rules ? <><Group>{a.rules.map((r, n) => <Row key={n} title={ruleText(r, me)} />)}</Group>{!a.editable && <Note>{t("channels:account.rulesReadonly")}</Note>}</>
-            : <Blank>{t("channels:account.rulesUnknown")}</Blank>}
-          {a.editable && a.sendDelay && <Group className="mt-2"><Row title={t("channels:account.sendDelayTitle")} sub={t("channels:account.sendDelaySub")}>
+          <Rules rules={rulesNow} self={me} onChange={setRules} note={t("channels:account.rulesNote")} />
+          {rules && <div className="mt-2 flex gap-2"><Button size="sm" disabled={busy || !rules.every(ruleOk)} onClick={() => void patch({ rules }, t("channels:word.rulesSaved")).then((ok) => ok && setRules(null))} data-acc-rules-save>{t("channels:word.saveRules")}</Button><Button size="sm" variant="ghost" onClick={() => setRules(null)}>{t("channels:word.revert")}</Button></div>}
+          <Group className="mt-2"><Row title={t("channels:account.sendDelayTitle")} sub={t("channels:account.sendDelaySub")}>
             <Select align="end" testId="acc-send-delay" value={a.sendDelay.set === null ? "default" : String(a.sendDelay.set)}
               onChange={(v) => void patch({ send_delay_s: v === "default" ? null : Number(v) }, t("channels:account.sendDelaySaved"))}
-              options={[{ v: "default", l: t("channels:account.sendDelayDefault", { n: a.sendDelay.def }) }, ...SEND_DELAYS.map((n) => ({ v: String(n), l: t("channels:account.sendDelaySeconds", { n }) }))]} /></Row></Group>}
+              options={[{ v: "default", l: t("channels:account.sendDelayDefault", { n: a.sendDelay.def }) }, ...SEND_DELAYS.map((n) => ({ v: String(n), l: t("channels:account.sendDelaySeconds", { n }) }))]} /></Row></Group>
         </section>
         {me && <TriggerSection a={a} onSave={(x) => patch({ trigger: x }, t("channels:account.triggerSaved"))} busy={busy} />}
         {side && <section><SectionLabel>{t("channels:word.you")}</SectionLabel>
@@ -106,7 +100,7 @@ const whoOf = (who: string[] | undefined): "me" | "anyone" | "some" =>
   !who?.length || (who.length === 1 && who[0] === "me") ? "me" : who.includes("*") ? "anyone" : "some"
 const scopeOf = (where: string[]): Scope => !where.length || where.includes(TRIGGER_EVERYWHERE) ? "all" : where.length === 1 && where[0] === TRIGGER_ALL_DMS ? "dms" : "some"
 
-export function TriggerSection({ a, onSave, busy }: { a: { connection: Pick<ChannelAccount["connection"], "id">; trigger: Trigger | null; editable: boolean; spaces: Space[] }; onSave: (t: Partial<Trigger>) => Promise<boolean>; busy: boolean }) {
+export function TriggerSection({ a, onSave, busy }: { a: { connection: Pick<ChannelAccount["connection"], "id">; trigger: Trigger | null; spaces: Space[] }; onSave: (t: Partial<Trigger>) => Promise<boolean>; busy: boolean }) {
   const t = useT()
   const [word, setWord] = useState("")
   const [prefix, setPrefix] = useState("")
@@ -115,7 +109,7 @@ export function TriggerSection({ a, onSave, busy }: { a: { connection: Pick<Chan
   useEffect(() => { let live = true; channelsApi.spaces().then((x) => live && setAll(x), () => live && setAll(a.spaces)); return () => { live = false } }, [a.connection.id])
   const [picking, setPicking] = useState(false), [some, setSome] = useState(false)
   const tr = a.trigger
-  if (!a.editable || !tr) return <section><SectionLabel>{t("channels:trigger.label")}</SectionLabel>
+  if (!tr) return <section><SectionLabel>{t("channels:trigger.label")}</SectionLabel>
     <div className="rounded-xl bg-muted/60 px-4 py-3.5 type-callout text-muted-foreground">{t("channels:trigger.unsupported")}</div></section>
   const add = () => { const w = word.trim().startsWith("/") ? word.trim() : "/" + word.trim(); if (!TRIGGER_WORD.test(w)) { toast(t("channels:trigger.invalid")); return } if (!tr.words.includes(w) && tr.words.length < 10) void onSave({ words: [...tr.words, w] }); setWord("") }
   const spaces = all ?? a.spaces

@@ -108,11 +108,10 @@ impl Core {
             return Ok(());
         }
         store.write(|w| {
-            let mut stored = self
-                .store()
-                .message(message_id)?
-                .map(|x| x.meta)
-                .unwrap_or_default();
+            let Some(message) = self.store().message(message_id)? else {
+                return Ok(());
+            };
+            let mut stored = message.meta;
             if let (Some(extra), serde_json::Value::Object(object)) = (meta, &mut stored) {
                 object.extend(extra);
             }
@@ -120,6 +119,7 @@ impl Core {
             steve_store::core_queue::edit_message(w, ws, message_id, &text, Some(&metadata))?;
             w.emit(steve_types::DomainEvent::from(
                 steve_types::WorkEvent::Message {
+                    space: message.space.into(),
                     ws: ws.into(),
                     id: steve_types::MessageId::from(message_id.to_owned()),
                 },

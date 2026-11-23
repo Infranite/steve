@@ -1,10 +1,10 @@
+import { itemIds } from "@/data/sync"
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react"
 import { Streamdown, defaultComponents, defaultRehypePlugins, defaultRemarkPlugins, useIsCodeFenceIncomplete, type Components, type DefaultComponents, type DiagramPlugin } from "streamdown"
+import type { CodeHighlighterPlugin } from "@streamdown/code"
 import { cjk } from "@streamdown/cjk"
-import { code } from "@streamdown/code"
 import remarkBreaks from "remark-breaks"
 import { cn } from "cn"
-import { st } from "@/store"
 import { A2uiPending, useA2uiNested } from "@/a2ui/host"
 import { useT } from "@/i18n"
 import { currentHub } from "@/hub"
@@ -46,7 +46,7 @@ function remarkItemRefs() {
       const v = c.value ?? "", out: MdNode[] = []
       let last = 0
       for (const m of v.matchAll(REF)) {
-        if (!st.items.some((i) => i.id === m[0])) continue
+        if (!itemIds()?.has(m[0])) continue
         if (m.index > last) out.push({ type: "text", value: v.slice(last, m.index) })
         out.push({ type: "link", url: "#/items/" + m[0], children: [{ type: "text", value: m[0] }], data: { hProperties: { "data-ref": m[0] } } })
         last = m.index + m[0].length
@@ -186,7 +186,9 @@ const components: Components = {
 }
 /* cjk: CommonMark does not close `**` between a full-width mark and a Han character (`**“执行中”。**看…`), which leaves
  * the asterisks showing in Chinese replies */
-const plugins = { cjk, code, mermaid }
+const plugins = { cjk, mermaid }
+type HighlightedPlugins = typeof plugins & { code: CodeHighlighterPlugin }
+let highlighted: Promise<HighlightedPlugins> | undefined
 const remarkPlugins = [...Object.values(defaultRemarkPlugins), remarkBreaks, remarkHtmlAsText, remarkItemRefs]
 /* Streamdown's defaults minus rehype-raw: sanitize + harden still apply to what markdown itself produces */
 function rehypeReplyImageHints() {
@@ -212,10 +214,16 @@ function remarkRebase(resolve: (ref: string) => string | null) {
 }
 
 export default function MarkdownImpl({ text, className, streaming, resolve, replyFiles }: { text: string; className?: string; streaming?: boolean; replyFiles?: boolean; resolve?: (ref: string) => string | null }) {
+  const source = String(text ?? "")
+  const fenced = source.includes("```") || source.includes("~~~")
+  const [codePlugins, setCodePlugins] = useState<HighlightedPlugins>()
+  useEffect(() => {
+    if (fenced) void (highlighted ??= import("@streamdown/code").then(({ code }) => ({ ...plugins, code }))).then(setCodePlugins).catch(() => {})
+  }, [fenced])
   const remark = useMemo(() => resolve ? [...remarkPlugins, remarkRebase(resolve)] : replyFiles ? [...remarkPlugins, remarkUnresolvedReplyFiles] : remarkPlugins, [resolve, replyFiles])
   return (
-    <Streamdown className={cn("md", className)} plugins={plugins} components={components} remarkPlugins={remark} rehypePlugins={rehypePlugins}
+    <Streamdown className={cn("md", className)} plugins={codePlugins ?? plugins} components={components} remarkPlugins={remark} rehypePlugins={rehypePlugins}
       shikiTheme={["github-light", "github-dark"]} controls={{ mermaid: { panZoom: false }, table: false }} tableMaxHeight="none"
-      isAnimating={!!streaming} caret={streaming ? "circle" : undefined}>{String(text ?? "")}</Streamdown>
+      isAnimating={!!streaming} caret={streaming ? "circle" : undefined}>{source}</Streamdown>
   )
 }

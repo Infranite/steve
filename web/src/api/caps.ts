@@ -1,9 +1,4 @@
-/* 能力 (steve-modules caps): the workspace's library of MCP servers, skills and remote A2A agents, each
- * defined once and assigned per Bot (switched on or off for that Bot). A secret (an MCP env value or header, an
- * agent's key) lives only in the vault: answers carry its name or `has_secret`, never the value; saving it again
- * without one keeps the stored value. `/capabilities/steve` is Steve itself as the built-in MCP server: the tools
- * every session has, the ones an outside client (Claude Desktop, Cursor, another agent) gets with an access token,
- * and the addresses it connects to. A Hub without the module: NotWired. */
+/** Steve tools, tool pins and the capabilities library. */
 import { modReq as req } from "@/api"
 
 export type CapKind = "mcp" | "skill" | "a2a"

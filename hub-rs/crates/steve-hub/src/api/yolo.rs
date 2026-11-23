@@ -22,6 +22,7 @@ pub fn routes(engine: Engine) -> Router {
         .route("/yolo/items/{id}", get(item))
         .route("/yolo/resume", post(resume))
         .route("/yolo/actions", get(actions))
+        .route("/yolo/decisions/{id}", get(decision_action))
         .route("/yolo/actions/{id}/undo", post(undo))
         .route("/yolo/actions/{id}/now", post(now))
         .route("/yolo/actions/{id}/cancel", post(cancel))
@@ -94,6 +95,14 @@ async fn actions(
         outcome: nonempty(q.outcome),
     };
     run(move || e.digest(&who.ws, &q)).await
+}
+
+async fn decision_action(
+    State(e): State<Engine>,
+    who: Caller,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    run(move || e.current_decision_action(&who.ws, &id)).await
 }
 
 async fn undo(

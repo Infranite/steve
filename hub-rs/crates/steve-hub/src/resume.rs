@@ -46,29 +46,11 @@ fn text<'a>(s: &'a Obj, k: &str) -> Option<&'a str> {
     s.get(k).and_then(Value::as_str).filter(|v| !v.is_empty())
 }
 
-/// The id at the end of a transcript file name: `<id>.jsonl` (Claude Code) or `rollout-<time>-<id>.jsonl`
-/// (Codex, a UUID of 36 characters).
-fn id_of_file(kind: &str, file: &str) -> Option<String> {
-    let stem = Path::new(file).file_stem()?.to_str()?;
-    let id = match kind {
-        "cc" => stem,
-        "cx" => stem.get(stem.len().checked_sub(36)?..)?,
-        _ => return None,
-    };
-    (!id.is_empty()).then(|| id.to_owned())
-}
+use steve_store::valid_id;
 
-fn valid_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 256 && !id.starts_with('-') && !id.chars().any(char::is_control)
-}
-
-/// The harness's session id of a session row (before `import_key` is dropped from the output).
+/// The harness's session id from a stored row, before the import key is dropped.
 pub fn native_id(s: &Obj) -> Option<String> {
-    if let Some(id) = text(s, "acp_session_id") {
-        return valid_id(id).then(|| id.to_owned());
-    }
-    let (kind, file) = text(s, "import_key")?.split_once(':')?;
-    id_of_file(kind, file).filter(|id| valid_id(id))
+    steve_store::native_id(text(s, "acp_session_id"), text(s, "import_key"))
 }
 
 /// Where a session's harness state lives, and whether the caller may inspect an isolated principal

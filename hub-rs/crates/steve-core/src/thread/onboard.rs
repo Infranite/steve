@@ -8,7 +8,7 @@ use crate::Core;
 use crate::error::Result;
 use serde_json::json;
 
-/// Workspace setting: empty (never met), [`PENDING`] or [`DONE`]. The web reads it from `/api/state`.
+/// Workspace setting: empty (never met), [`PENDING`] or [`DONE`]. The web reads it from `/api/shell`.
 pub const STATE: &str = "onboard";
 /// Workspace setting: the welcome message the meeting began with.
 pub const FROM: &str = "onboardFrom";

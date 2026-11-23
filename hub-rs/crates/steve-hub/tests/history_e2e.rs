@@ -319,8 +319,8 @@ async fn imports_history_through_the_node() {
     assert_eq!(r["transcript"]["matches"], true);
     assert_eq!(r["transcript"]["id"], CC_ID);
     // the harnesses as the Node's probe reports them
-    let devices = node.ok("GET", "/api/devices?fresh=1", None).await;
-    let runtimes = devices["runtimes"].as_array().unwrap();
+    let data = node.ok("GET", "/api/runtimes?fresh=1", None).await;
+    let runtimes = data.as_array().unwrap();
     let rt = |id: &str| runtimes.iter().find(|r| r["id"] == id).unwrap();
     assert_eq!(rt("claude-code")["version"], "2.1.0");
     assert_eq!(rt("codex")["version"], "0.80.0");

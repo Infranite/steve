@@ -39,7 +39,7 @@ import { IconEdit, IconSteer, IconUndo, RunActions, RunAct, RunContext, RunQueue
 import { runLabels } from "@/composer"
 import { PermissionDetails } from "@/components/permission"
 import { dcLabels } from "@/thread/decide"
-import { dialActions, dialText, LOCKED } from "@/yolo/switch"
+import { dialActions, dialText, LOCKED } from "@/yolo/dialog"
 import { panelText } from "@/knowledge/index"
 import { memKind } from "@/api/knowledge"
 import { Badge } from "@/components/ui/badge"

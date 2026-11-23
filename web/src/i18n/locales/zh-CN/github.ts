@@ -131,7 +131,6 @@ export default {
     unlinked: "已取消关联",
   },
   list: {
-    absent: "这个 Hub 没有提供这项数据",
     open: "打开的",
     all: "全部",
   },

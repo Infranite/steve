@@ -134,9 +134,10 @@ enum Claim {
     Failed(crate::error::CoreError),
 }
 
-fn emit_message(w: &mut W<'_>, ws: &str, mid: &str) {
+fn emit_message(w: &mut W<'_>, ws: &str, mid: &str, space: &str) {
     w.emit(steve_types::DomainEvent::from(
         steve_types::WorkEvent::Message {
+            space: space.into(),
             ws: ws.into(),
             id: steve_types::MessageId::from(mid.to_owned()),
         },
@@ -639,9 +640,8 @@ impl Core {
             .read(|r| core_queue::has_pending_in_space(r, ws, MAIN))?)
     }
 
-    /// The main conversation's turn is on (a message being routed on its lane, an answer or research) —
-    /// what a message with a fixed way passes without waiting.
-    pub(crate) fn main_busy_besides(&self, ws: &str) -> bool {
+    /// Whether the main lane is routing or answering a turn in memory.
+    pub fn main_busy_besides(&self, ws: &str) -> bool {
         {
             let inflight = lock(&self.0.thread.inflight);
             if inflight.contains_key(ws) || inflight.contains_key(&after_lane(ws, MAIN)) {
@@ -896,7 +896,8 @@ impl Core {
                 core_queue::remove_pending(w, ws, mid)?;
                 // Put the held message strictly after the turn's last word, even in the same ms.
                 if core_queue::release_held(w, ws, mid, now())? {
-                    emit_message(w, ws, mid);
+                    let job: Job = serde_json::from_str(&raw)?;
+                    emit_message(w, ws, mid, &job.conv.space);
                 }
                 Ok(Some(Ok(raw)))
             })
@@ -926,7 +927,7 @@ impl Core {
             // Keep the original queue position across restart.
             core_queue::replace_pending(w, ws, mid, &serde_json::to_string(&job)?)?;
             core_queue::edit_message(w, ws, mid, text, None)?;
-            emit_message(w, ws, mid);
+            emit_message(w, ws, mid, &job.conv.space);
             Ok(true)
         })
     }
@@ -948,7 +949,7 @@ impl Core {
             }
             core_queue::remove_pending(w, ws, mid)?;
             core_queue::remove_message(w, ws, mid)?;
-            emit_message(w, ws, mid);
+            emit_message(w, ws, mid, &job.conv.space);
             Ok(Some((job.text, job.files)))
         })
     }

@@ -157,6 +157,7 @@ impl Store {
             }
             super::kinds::ensure(w, WS)?;
             if created {
+                initialize_notice_cursor(c, WS)?;
                 super::kinds::seed_deliveries(w, WS)?;
             }
             Ok(())
@@ -192,6 +193,17 @@ pub struct WorkspacePatch {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_prefix: Option<String>,
+}
+
+pub const NOTIFY_SEEN: &str = "notifySeen";
+
+fn initialize_notice_cursor(c: &rusqlite::Connection, ws: &str) -> Result<()> {
+    let at = now();
+    c.execute(
+        "INSERT INTO settings (workspace_id, key, value, updated) VALUES (?, ?, ?, ?)",
+        params![ws, NOTIFY_SEEN, at.to_string(), at],
+    )?;
+    Ok(())
 }
 
 pub struct Workspaces<'a>(&'a Store);
@@ -249,6 +261,7 @@ impl Workspaces<'_> {
                 "INSERT INTO workspace_members (workspace_id, user_id, role, created) VALUES (?, ?, 'owner', ?)",
                 params![id, owner_id, t],
             )?;
+            initialize_notice_cursor(w.c, &id)?;
             super::kinds::ensure(w, &id)?;
             super::kinds::seed_deliveries(w, &id)?;
             w.publish(steve_types::DomainEvent::from(
@@ -323,7 +336,7 @@ impl Users<'_> {
             .read_conn(|c| one(c, "SELECT * FROM users WHERE id = ?", [id], User::from_row))
     }
 
-    /// Creates the user in workspace `default` with a membership of the same role; returns the id. No event.
+    /// Creates the user in workspace `default` with a membership of the same role; returns the id.
     pub fn create(&self, sub: &str, name: &str, email: Option<&str>, role: &str) -> Result<String> {
         self.0.write_conn(|w| {
             let (id, t) = (uid("usr"), now());
@@ -335,6 +348,12 @@ impl Users<'_> {
                 "INSERT INTO workspace_members (workspace_id, user_id, role, created) VALUES (?, ?, ?, ?)",
                 params![WS, id, role, t],
             )?;
+            if role == "owner" {
+                w.publish(steve_types::DomainEvent::from(steve_types::ConfigEvent::Workspace {
+                    id: WS.into(),
+                    ws: WS.into(),
+                }));
+            }
             Ok(id)
         })
     }

@@ -1,18 +1,19 @@
+import { seedSessions } from "./view-data"
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
-import { api, type REvent, type RSession, type State } from "../../src/api"
+import { api, type REvent, type Shell } from "../../src/api"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
 import { TooltipProvider } from "../../src/components/ui/tooltip"
 import { refresh, useStore } from "../../src/store"
-import { RunBar, Transcript } from "../../src/ui"
+import { RunBar, Transcript } from "../../src/thread/transcript"
 
 /* The run bar of a turn that runs a very long command, and a turn that was interrupted after more than a minute:
  * its notes, thinking and calls, among them one of Steve's own tools with what went in. */
 const q = new URLSearchParams(location.search)
 document.documentElement.classList.toggle("dark", q.has("dark"))
 const T = Date.now(), s = (n: number) => T - (300 - n) * 1000
-const sess = (id: string, no: number, running: boolean): RSession => ({ id, workspace_id: "default", item_id: null, no, bot_id: "dev", harness: "claude-code", model: "claude-opus-5-5", cwd: "/tmp/st-9", status: running ? "running" : "idle",
-  used: null, size: null, cost: null, title: "构建", device_id: "hub", source: "item", readonly: false, busy: running, queued: [], created: s(0), updated: s(200) } as unknown as RSession)
+const sess = (id: string, no: number, running: boolean) => ({ id, workspace_id: "default", item_id: null, no, bot_id: "dev", harness: "claude-code", model: "claude-opus-5-5", cwd: "/tmp/st-9", status: running ? "running" : "idle",
+  used: null, size: null, cost: null, title: "构建", device_id: "hub", source: "item", readonly: false, busy: running, queued: [], created: s(0), updated: s(200) })
 const sessions = [sess("s1", 1, true), sess("s2", 2, false)]
 let seq = 0
 const ev = (n: number, kind: string, data: any): REvent => ({ seq: ++seq, ts: s(n), kind, data })
@@ -31,9 +32,10 @@ const events: Record<string, REvent[]> = {
 }
 const state = { version: "test", web_version: "test", workspace: { id: "default", name: "默认", description: "", item_prefix: "ST", sort: 0, created: 0 }, workspaces: [], items: [], decisions: [], recent: [], allBots: [],
   bots: [{ id: "dev", name: "Steve 开发 Bot", role: "", main: false, harness: "claude-code", model: null, rules: "", persona: "", proactive: 1, accept_mode: "manual", perm_mode: "auto", avatar: {}, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ["default"], memories: 0 }],
-  projects: [], tags: [], tagUses: {}, thread: [], settings: {}, sessions, devices: [{ id: "hub", name: "Hub", roles: [], os: "", version: "", status: "online", max_sessions: 4, seen: 0, created: 0 }], runtimes: [] } as unknown as State
-api.state = async () => structuredClone(state)
-api.events = async (id: string, after = 0) => (events[id] ?? []).filter((e) => e.seq > after)
+  projects: [], tags: [], tagUses: {}, thread: [], settings: {}, sessions, devices: [{ id: "hub", name: "Hub", roles: [], os: "", version: "", status: "online", max_sessions: 4, seen: 0, created: 0 }], runtimes: [] } as unknown as Shell
+api.shell = async () => structuredClone(state)
+api.transcript = async (id) => ({ events: events[id] ?? [], next: null })
+seedSessions(Object.fromEntries(sessions.map((s) => [s.id, { item: s.item_id ?? null, b: s.bot_id, n: s.no, harness: s.harness, m: s.model, title: s.title, cwd: s.cwd, st: s.status === "running" ? "run" : s.status === "ended" ? "ended" : "idle", since: s.created, at: s.updated, busy: s.busy, ctxUsed: s.used ?? undefined, ctxSize: s.size ?? undefined }])))
 void refresh()
 function Fixture() {
   useStore()

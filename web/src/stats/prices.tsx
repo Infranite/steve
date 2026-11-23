@@ -1,6 +1,6 @@
 /* 设置 · 统计（stats.md §4.1、§6.1）：价格（美元 / 百万 tokens）、切天的时区、重建统计。
  * 价格两个来源：价格表（自己的行或内置官方价，优先，可改、可恢复默认）和 Models.dev 自动同步的价格（表里没有的模型用它）。
- * 价格只用来估算，页面上的费用都标“估”。没有统计接口时这一节显示“还没有接入”。 */
+ * 价格只用来估算，页面上的费用都标“估”。 */
 import { useEffect, useState } from "react"
 import { ChartNoAxesColumnIcon, PlusIcon, RefreshCwIcon, TrashIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -83,7 +83,6 @@ export function StatsSettingsPane() {
   const [err, setErr] = useState("")
   useEffect(() => { if (d.s === "ok") setRows(d.v.prices.map(toDraft)) }, [d])
   if (d.s === "loading" || (d.s === "ok" && !rows)) return <div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div>
-  if (d.s === "absent") return <div className="rounded-xl bg-card px-4 py-3.5 type-callout text-muted-foreground shadow-[var(--lift)]" data-stats-unwired>{t("stats:prices.unwired")}</div>
   if (d.s === "error") return <div className="type-callout text-muted-foreground" role="alert">{d.msg}</div>
   const v = d.v, list = rows!, cols = COLS()
   const set = (i: number, k: keyof Draft, val: string) => { setBad(null); setErr(""); setRows(list.map((r, n) => (n === i ? { ...r, [k]: val } : r))) }

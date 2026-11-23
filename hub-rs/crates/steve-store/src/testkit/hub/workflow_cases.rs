@@ -124,7 +124,7 @@ pub fn seed_remote_open_session(store: &Store, request: &serde_json::Value) -> R
                     [],
                 )?;
                 crate::runtime::bind_session_in(
-                    tx.conn,
+                    tx,
                     &crate::runtime::SessionBinding {
                         session: "s1",
                         node: "n2",
@@ -135,7 +135,7 @@ pub fn seed_remote_open_session(store: &Store, request: &serde_json::Value) -> R
                     1,
                 )?;
                 crate::runtime::insert_command_in(
-                    tx.conn,
+                    tx,
                     &crate::runtime::NewCommand {
                         operation: "open_s1",
                         node: "n2",
@@ -167,7 +167,7 @@ pub fn seed_local_binding(store: &Store) -> Result<()> {
                     [],
                 )?;
                 crate::runtime::bind_session_in(
-                    tx.conn,
+                    tx,
                     &crate::runtime::SessionBinding {
                         session: "s1",
                         node: "local",

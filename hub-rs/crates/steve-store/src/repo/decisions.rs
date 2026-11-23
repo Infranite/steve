@@ -98,6 +98,7 @@ pub fn append_message(
     w.exec(&stmt)?;
     w.emit(steve_types::DomainEvent::from(
         steve_types::WorkEvent::Message {
+            space: space.into(),
             ws: ws.into(),
             id: id.clone().into(),
         },
@@ -271,6 +272,27 @@ fn changed(w: &crate::WriteConn, id: &str) -> Result<Option<Decision>> {
 }
 
 impl Decisions<'_> {
+    /// Records the client attribution and publishes the resulting view change in the same commit.
+    pub fn note_via(&self, ws: &str, id: &str, via: &Value) -> Result<()> {
+        self.0.write_conn(|tx| {
+            let row = tx.c.run(
+                "UPDATE decisions SET result = json_set(coalesce(result, '{}'), '$.via', json(?))
+                 WHERE workspace_id = ? AND id = ? AND status <> 'open'",
+                params![via.to_string(), ws, id],
+            )?;
+            if row > 0 {
+                tx.publish(steve_types::DomainEvent::from(
+                    steve_types::WorkEvent::Decision {
+                        ws: ws.into(),
+                        id: id.into(),
+                        item_id: None,
+                    },
+                ));
+            }
+            Ok(())
+        })
+    }
+
     /// Open decisions, oldest first.
     pub fn open(&self, ws: &str) -> Result<Vec<Decision>> {
         self.0.read_conn(|c| all(c, "SELECT * FROM decisions WHERE workspace_id = ? AND status = 'open' ORDER BY created", [ws], Decision::from_row))
@@ -438,28 +460,6 @@ impl Messages<'_> {
         })
     }
 
-    /// Older history, oldest first: messages created before `before` and from `after` on (inclusive), the newest
-    /// `limit` of them. Paging back is `after = 0`; filling the gap down to a message is `after = its created`.
-    pub fn list_before(
-        &self,
-        ws: &str,
-        space: &str,
-        before: i64,
-        after: i64,
-        limit: i64,
-    ) -> Result<Vec<Message>> {
-        self.0.read_conn(|c| {
-            let mut v = all(
-                c,
-                "SELECT * FROM messages WHERE workspace_id = ? AND space = ? AND created < ? AND created >= ? ORDER BY created DESC LIMIT ?",
-                params![ws, space, before, after, limit],
-                Message::from_row,
-            )?;
-            v.reverse();
-            Ok(v)
-        })
-    }
-
     /// Messages whose text contains `q` (ASCII case-insensitive) or that belong to item `q`, newest first.
     pub fn search(&self, ws: &str, space: &str, q: &str, limit: i64) -> Result<Vec<Message>> {
         let like = format!(
@@ -504,6 +504,7 @@ impl Messages<'_> {
             let id = message_insert(w.c, ws, author, text, item_id, meta, space)?;
             w.publish(steve_types::DomainEvent::from(
                 steve_types::WorkEvent::Message {
+                    space: space.into(),
                     ws: ws.into(),
                     id: id.clone().into(),
                 },
@@ -529,14 +530,15 @@ impl Messages<'_> {
                 "UPDATE messages SET meta = ? WHERE id = ?",
                 params![to_json(meta)?, id],
             )?;
-            if let Some(ws) = crate::repo::one(
+            if let Some((ws, space)) = crate::repo::one(
                 w.c,
-                "SELECT workspace_id FROM messages WHERE id = ?",
+                "SELECT workspace_id, space FROM messages WHERE id = ?",
                 [id],
-                |r| r.get::<_, String>(0),
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
             )? {
                 w.publish(steve_types::DomainEvent::from(
                     steve_types::WorkEvent::Message {
+                        space: space.into(),
                         ws: ws.into(),
                         id: id.into(),
                     },
@@ -553,14 +555,15 @@ impl Messages<'_> {
                 "UPDATE messages SET text = ?, meta = ? WHERE id = ?",
                 params![text, to_json(meta)?, id],
             )?;
-            if let Some(ws) = crate::repo::one(
+            if let Some((ws, space)) = crate::repo::one(
                 w.c,
-                "SELECT workspace_id FROM messages WHERE id = ?",
+                "SELECT workspace_id, space FROM messages WHERE id = ?",
                 [id],
-                |r| r.get::<_, String>(0),
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
             )? {
                 w.publish(steve_types::DomainEvent::from(
                     steve_types::WorkEvent::Message {
+                        space: space.into(),
                         ws: ws.into(),
                         id: id.into(),
                     },

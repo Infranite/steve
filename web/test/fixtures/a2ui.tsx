@@ -1,7 +1,9 @@
+import { updateChat } from "../../src/data/live"
+import { seedMessages } from "./view-data"
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { Toaster } from "@/components/ui/toaster"
-import { api, type A2uiSubmit, type RMessage, type State } from "../../src/api"
+import { api, type A2uiSubmit, type ConversationMessage, type Shell } from "../../src/api"
 import { ChatView } from "../../src/chat-view"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
 import { TooltipProvider } from "../../src/components/ui/tooltip"
@@ -87,8 +89,8 @@ const unknown = L(
   { version: V, updateComponents: { surfaceId: "u", components: [{ id: "root", component: "Column", children: ["a", "b"] }, { id: "a", component: "Fancy3D" }, { id: "b", component: "Text", text: "其他组件照常显示" }] } },
 )
 
-const msg = (id: string, author: "me" | "steve", text: string, n: number, meta: Record<string, unknown> = {}): RMessage => ({ id, author, text, item_id: null, meta, created: t0 + n * 60000 })
-type Server = { thread: RMessage[]; calls: number; fail: boolean }
+const msg = (id: string, author: "me" | "steve", text: string, n: number, meta: Record<string, unknown> = {}): ConversationMessage => ({ id, author, text, item_id: null, meta, created: t0 + n * 60000 })
+type Server = { thread: ConversationMessage[]; calls: number; fail: boolean }
 const KEY = "fixture.a2ui.hub"
 const initial = (): Server => ({ calls: 0, fail: false, thread: [
   msg("old", "steve", "旧消息照旧显示：\n\n```json\n{\"a2ui\": false}\n```", 0),
@@ -107,8 +109,8 @@ Object.assign(window, { fixtureHub: { load, save } })
 
 const state = () => ({ version: "test", web_version: "test", workspace: { id: "default", name: "默认", description: "", item_prefix: "ST", sort: 0, created: 0 }, workspaces: [], items: [], decisions: [], recent: [], allBots: [],
   bots: [{ id: "steve", name: "Steve", role: "你的助手", main: true, harness: "claude-code", model: null, rules: "", persona: "", proactive: 1, accept_mode: "manual", perm_mode: "auto", avatar: {}, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ["default"], memories: 0 }],
-  projects: [], tags: [], tagUses: {}, thread: load().thread, settings: {}, sessions: [], devices: [], runtimes: [] }) as unknown as State
-api.state = async () => state()
+  projects: [], tags: [], tagUses: {}, thread: load().thread, settings: {}, sessions: [], devices: [], runtimes: [] }) as unknown as Shell
+api.shell = async () => state()
 api.a2ui = async (id: string, a: A2uiSubmit) => {
   const s = load(); s.calls++; save(s)
   await new Promise((r) => setTimeout(r, 300))
@@ -124,9 +126,9 @@ api.a2ui = async (id: string, a: A2uiSubmit) => {
   return { already: false, message_id: mid, action: rec }
 }
 await refresh()
+seedMessages(state().thread)
 if (location.search.includes("stream")) {
-  st.thread = [...st.thread, { k: "thinking" }]; st.thinking = true; st.phase = "answer"
-  st.draft = { mid: "q2", thought: "", text: "我画个图：\n\n```a2ui\n" + trend.split("\n").slice(0, 2).join("\n") }
+  updateChat({ thinking: true, phase: "answer", draft: { t0: Date.now(), mid: "q2", thought: "", text: "我画个图：\n\n```a2ui\n" + trend.split("\n").slice(0, 2).join("\n") } })
   emit()
 }
 function Fixture() { useStore(); return <TooltipProvider><SidebarProvider><main style={{ height: "100dvh", width: "100%", minWidth: 0 }}><ChatView /></main><Toaster /></SidebarProvider></TooltipProvider> }

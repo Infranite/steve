@@ -527,7 +527,7 @@ async fn original_tool_page_url_binds_workspace_after_real_switch_and_still_chec
         .unwrap();
     let cookies = e.switch_workspace("foreign").await;
     let state: Value = e
-        .request("GET", "/api/state", false)
+        .request("GET", "/api/shell", false)
         .header("cookie", &cookies)
         .send()
         .await
@@ -539,7 +539,7 @@ async fn original_tool_page_url_binds_workspace_after_real_switch_and_still_chec
     // The delivery frontend binds the page's ws before bootstrap. Emulate that exact header,
     // then assert the cookie really would select the other workspace without it.
     let bound: Value = e
-        .request("GET", "/api/state", false)
+        .request("GET", "/api/shell", false)
         .header("cookie", &cookies)
         .header("x-steve-ws", &selector)
         .send()

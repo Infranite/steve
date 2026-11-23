@@ -458,7 +458,7 @@ impl Client {
     }
     /// A new item on the claude-code bot, and the session it opened.
     async fn item(&self, h: &Home, goal: &str) -> String {
-        let (_, state) = self.call("GET", "/api/state", None).await;
+        let (_, state) = self.call("GET", "/api/shell", None).await;
         let bot = state["bots"]
             .as_array()
             .and_then(|bs| bs.iter().find(|b| b["harness"] == "claude-code"))
@@ -667,10 +667,10 @@ async fn provider_stream_interruption_is_retried_without_continues_then_shown_as
             .as_deref(),
         Some("wait")
     );
-    let (status, state) = c.call("GET", "/api/state", None).await;
+    let (status, state) = c.call("GET", "/api/snapshot?kinds=decision", None).await;
     assert_eq!(status, 200);
     assert!(
-        state["decisions"]
+        state["views"]["decision"]
             .as_array()
             .unwrap()
             .iter()
@@ -775,10 +775,10 @@ async fn provider_capacity_waits_for_recovery_then_exhausts_as_one_service_card(
             .as_deref(),
         Some("wait")
     );
-    let (status, state) = c.call("GET", "/api/state", None).await;
+    let (status, state) = c.call("GET", "/api/snapshot?kinds=decision", None).await;
     assert_eq!(status, 200);
     assert!(
-        state["decisions"]
+        state["views"]["decision"]
             .as_array()
             .unwrap()
             .iter()
@@ -1554,7 +1554,7 @@ async fn git_worktree_case(mode: &str) {
         )
         .await;
     assert_eq!(st, 200, "{p}");
-    let (_, state) = c.call("GET", "/api/state", None).await;
+    let (_, state) = c.call("GET", "/api/shell", None).await;
     let bot = state["bots"]
         .as_array()
         .and_then(|bs| bs.iter().find(|b| b["harness"] == "claude-code"))

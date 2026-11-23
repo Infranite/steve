@@ -13,7 +13,7 @@ export function CloseoutSummary({ value: c, compact, className }: { value: Close
   return (
     <div className={cn("min-w-0 space-y-1 type-footnote text-muted-foreground", className)} data-closeout={c.status}>
       <div className="flex flex-wrap items-baseline gap-x-2">
-        <span className="font-medium text-foreground" data-closeout-status>{t(`views:closeout.status.${c.status}`)}</span>
+        <span className="font-medium text-foreground" data-closeout-status>{t(`views:closeout.status.${c.status}`, { defaultValue: c.status })}</span>
         {ref}
       </div>
       <div className="flex flex-wrap gap-x-3 gap-y-0.5">
@@ -21,7 +21,7 @@ export function CloseoutSummary({ value: c, compact, className }: { value: Close
           ? checks.passed + checks.pending + checks.failed + checks.other > 0
             ? t("views:closeout.checks", checks) : t("views:closeout.noChecks")
           : t("views:closeout.unknownChecks")}</span>}
-        <span data-closeout-owner>{t("views:closeout.nextOwner", { owner: t(`views:closeout.owner.${c.next_owner}`) })}</span>
+        <span data-closeout-owner>{t("views:closeout.nextOwner", { owner: t(`views:closeout.owner.${c.next_owner}`, { defaultValue: c.next_owner }) })}</span>
         <span data-closeout-sync>{ts ? <time dateTime={ts.toISOString()}>{t("views:closeout.lastSync", { time: date(ts, { dateStyle: "short", timeStyle: "medium" }) })}</time>
           : t("views:closeout.neverSynced")}</span>
       </div>

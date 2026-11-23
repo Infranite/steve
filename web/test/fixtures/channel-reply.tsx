@@ -1,10 +1,12 @@
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
-import { DecisionCard } from "../../src/ui"
+import { DecisionCard } from "../../src/thread/decision-card"
 import { Toaster } from "../../src/components/ui/toaster"
 import { ComposerDecisions } from "../../src/thread/decide"
-import { emit, refresh, st, useStore, type Item, type Wait } from "../../src/store"
+import { orphans, useStore, type Wait } from "../../src/store"
+import { loadViews } from "../../src/data/sync"
 import { api } from "../../src/api"
+import { seedDecisions } from "./view-data"
 
 /* Local browser fixtures only. All API requests are intercepted by channel-reply.browser.mjs. */
 const params = new URLSearchParams(location.search)
@@ -19,19 +21,21 @@ const scenario: Wait = kind === "handoff"
   : kind === "tool" ? { ...approval, subject: "tool_call", options: ["once|Run once|allow_once", "always|Always|allow_always", "deny"], q: "Allow running: pwd", draft: "{\"command\":\"pwd\"}" }
   : kind === "failed" ? { ...approval, type: "fail", q: "消息发送失败：渠道暂时不可用", options: ["retry", "discard"] }
   : approval
-const orphan = (w: Wait): Item => ({ id: "", t: "", b: "steve", st: "wait", src: ["", ""], ws: "", project: null, up: "", acc: "", goals: [], now: "", rounds: [], wait: w, waits: [w], ss: [], tl: [], outs: [], anns: [], q: [], qs: null, branch: null, cwd: null, detail: false, dependents: [], created: 1, updated: 1 })
-const waits = kind === "composer" ? [scenario, { ...approval, decision: "dc_next", subjectId: "cm_next", q: "以你本人回复「另一个聊天」" }] : [scenario]
-st.orphans = kind === "live" ? [] : waits.map((w) => ({ i: orphan(w), w })) as typeof st.orphans
-if (kind === "live") void refresh()
+// Fixture timestamps match; the hot view breaks ties by decision ID.
+const waits = kind === "composer" ? [scenario, { ...approval, decision: "dc_second", subjectId: "cm_next", q: "以你本人回复「另一个聊天」" }] : [scenario]
+const refreshViews = () => loadViews().catch(() => {})
+if (kind === "live") void refreshViews()
+else seedDecisions(waits)
 function Fixture() {
   useStore()
+  const cards = orphans()
   return <main className="mx-auto flex w-full max-w-2xl flex-col gap-4 p-4">
     <div className="type-footnote text-muted-foreground">Channel reply browser fixture · intercepted API</div>
-    {kind === "composer" ? <ComposerDecisions /> : st.orphans.map(({ i, w }) => <DecisionCard key={w.decision} i={i} w={w} showItem={false} />)}
-    {kind === "duplicate" && st.orphans[0] && <DecisionCard i={st.orphans[0].i} w={st.orphans[0].w} showItem={false} />}
-    <button type="button" data-fixture-rebuild onClick={() => { st.orphans = [{ i: orphan({ ...scenario }), w: { ...scenario } }] as typeof st.orphans; emit() }}>Rebuild existing snapshot</button>
-    <button type="button" data-fixture-fresh onClick={() => void refresh()}>Refresh open snapshot (undo)</button>
-    <button type="button" data-fixture-undo onClick={() => void api.undo("dc_reply").then(() => refresh())}>Undo through fixture API</button>
+    {kind === "composer" ? <ComposerDecisions /> : cards.map(({ i, w }) => <DecisionCard key={w.decision} i={i} w={w} showItem={false} />)}
+    {kind === "duplicate" && cards[0] && <DecisionCard i={cards[0].i} w={cards[0].w} showItem={false} />}
+    <button type="button" data-fixture-rebuild onClick={() => seedDecisions(waits)}>Rebuild existing snapshot</button>
+    <button type="button" data-fixture-fresh onClick={() => void refreshViews()}>Refresh open snapshot (undo)</button>
+    <button type="button" data-fixture-undo onClick={() => void api.undo("dc_reply").then(refreshViews)}>Undo through fixture API</button>
     <Toaster />
   </main>
 }

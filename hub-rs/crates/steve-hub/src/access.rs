@@ -25,7 +25,7 @@ use steve_store::{Store, User};
 use crate::api::AppState;
 
 /// The API generation clients check before they sign in (`/auth/hello`).
-pub const API_VERSION: u32 = 1;
+pub const API_VERSION: u32 = 2;
 
 /// The client a request comes from, and how it came (put next to `Ctx`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1117,7 +1117,7 @@ pub async fn cors(
         );
         h.insert(
             header::ACCESS_CONTROL_EXPOSE_HEADERS,
-            HeaderValue::from_static("x-steve-cursor, content-disposition, x-steve-origin"),
+            HeaderValue::from_static("x-steve-rev, content-disposition, x-steve-origin"),
         );
         h.append(header::VARY, HeaderValue::from_static("origin"));
     };
@@ -2367,7 +2367,7 @@ pub fn note_via(st: &AppState, decision: &str, c: &crate::api::Ctx) {
     ) else {
         return;
     };
-    let (id, me) = (decision.to_string(), c.me.clone());
+    let (id, me, ws) = (decision.to_string(), c.me.clone(), c.ws.clone());
     tokio::task::spawn_blocking(move || {
         let via = steve_store::decision_repo::DecisionVia {
             client: &client.id,
@@ -2380,13 +2380,7 @@ pub fn note_via(st: &AppState, decision: &str, c: &crate::api::Ctx) {
             tracing::warn!("decision {id} via: {e}");
         }
         store
-            .audit(
-                &me,
-                "decision.resolve",
-                &id,
-                &json!({"via": via}),
-                steve_store::WS,
-            )
+            .audit(&me, "decision.resolve", &id, &json!({"via": via}), &ws)
             .ok();
     });
 }

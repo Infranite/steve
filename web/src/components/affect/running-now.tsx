@@ -321,30 +321,32 @@ export function RunningNow({
         </button>
 
         <div ref={panelRef} id={panelId} className="ui-rnc__panel" style={shift ? { translate: `${shift}px 0` } : undefined} role="dialog" aria-label={labels.title} tabIndex={-1} hidden={!open} onKeyDown={onPanelKey} onFocus={onPanelFocus}>
-          <div className="ui-rnc__head">
-            <span className="ui-rnc__label">{labels.title}</span>
-            <span className="ui-rnc__count">{num.format(list.length)}</span>
-          </div>
-          <div className="ui-rnc__body">
-            {list.length ? (
-              <ul ref={listRef} className="ui-rnc__list">
-                {list.map((t) => (
-                  <Row key={t.id} task={t} labels={labels} onPause={onPause} onResume={onResume} onOpen={onOpen} />
-                ))}
-              </ul>
-            ) : (
-              <p className="ui-rnc__empty">{labels.empty}</p>
-            )}
-          </div>
-          {onOpenAll && (
-            <div className="ui-rnc__foot">
-              <button type="button" className="ui-rnc__all" onClick={onOpenAll}>
-                <TasksIcon />
-                <span>{labels.openAll}</span>
-                <ChevronRight />
-              </button>
+          {open && <>
+            <div className="ui-rnc__head">
+              <span className="ui-rnc__label">{labels.title}</span>
+              <span className="ui-rnc__count">{num.format(list.length)}</span>
             </div>
-          )}
+            <div className="ui-rnc__body">
+              {list.length ? (
+                <ul ref={listRef} className="ui-rnc__list">
+                  {list.map((t) => (
+                    <Row key={t.id} task={t} labels={labels} onPause={onPause} onResume={onResume} onOpen={onOpen} />
+                  ))}
+                </ul>
+              ) : (
+                <p className="ui-rnc__empty">{labels.empty}</p>
+              )}
+            </div>
+            {onOpenAll && (
+              <div className="ui-rnc__foot">
+                <button type="button" className="ui-rnc__all" onClick={onOpenAll}>
+                  <TasksIcon />
+                  <span>{labels.openAll}</span>
+                  <ChevronRight />
+                </button>
+              </div>
+            )}
+          </>}
         </div>
 
         <span className="ui-rnc__sr" role="status" aria-live="polite">

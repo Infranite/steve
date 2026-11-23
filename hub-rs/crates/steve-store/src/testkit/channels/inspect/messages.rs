@@ -703,7 +703,7 @@ pub fn count_chan_messages_by_external_id_s1_s2(store: &Store) -> Result<i64> {
 pub fn count_chan_messages_by_outgoing_and_status_draft(store: &Store) -> Result<i64> {
     cell(
         store,
-        r#"SELECT count(*) FROM chan_messages WHERE direction = 'out' AND status <> 'draft'"#,
+        r#"SELECT count(*) FROM chan_messages WHERE direction = 'out' AND status NOT IN ('draft', 'discarded')"#,
         [],
     )
 }
@@ -885,4 +885,10 @@ pub fn received_message(store: &Store, external: &str) -> Result<Option<String>>
                 .optional()?,
             )
         })
+}
+
+pub fn drafts_in_space(store: &Store, space: &str) -> Result<i64> {
+    store.read_conn(|c| {
+        Ok(c.query_row("SELECT count(*) FROM chan_messages WHERE space_id=? AND direction='out' AND status='draft'", [space], |r| r.get(0))?)
+    })
 }

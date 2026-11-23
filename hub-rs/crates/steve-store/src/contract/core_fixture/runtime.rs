@@ -160,12 +160,12 @@ pub fn pending_start(
         params![attempt.turn, session, at, at],
     )?;
     insert_attempt_in(tx, attempt, at)?;
-    insert_command_in(tx, command, at)?;
+    insert_command_in(w, command, at)?;
     Ok(())
 }
 
 pub fn put_node_command(w: &mut W<'_>, command: &NewCommand<'_>, at: i64) -> Result<bool> {
-    insert_command_in(w.conn, command, at)
+    insert_command_in(w, command, at)
 }
 
 pub fn mark_command_sent(w: &mut crate::W<'_>, op: &str, at: i64) -> crate::Result<()> {

@@ -10,6 +10,7 @@
 //! | `GET /spaces/:id/messages?before=&limit=` | `ChanMessage[]` (limit ≤100; purged text is `null`) |
 //! | `GET /chan-messages/:id/resources/:n?download=1` | the bytes of attachment `n` (an image or file of an inbound message in a space you see; [`crate::media`]); errors `{error, reason}` |
 //! | `GET /chan-messages/:id/context` | what an outbound message answers, for its approval card: `{space, as_you, text, reply_to?, before[]}` |
+//! | `GET /chan-messages/:id/open-url` | `{url}`: the link that opens it (or its chat) in its platform's own client, `null` when there is none or its space is not yours |
 
 use axum::extract::{Path, Query};
 use axum::http::{HeaderValue, StatusCode, header};
@@ -35,6 +36,7 @@ pub fn routes(ch: Channels) -> Router<Modules> {
         .route("/spaces/{id}/rules/to-flow", post(to_flow))
         .route("/spaces/{id}/flow", delete(back_to_rules))
         .route("/chan-messages/{id}/context", get(context))
+        .route("/chan-messages/{id}/open-url", get(open_url))
         .route("/chan-messages/{id}/authorization", post(authorization))
         .route("/chan-messages/{id}/resources/{n}", get(resource))
         .merge(crate::personas_api::routes())
@@ -43,6 +45,18 @@ pub fn routes(ch: Channels) -> Router<Modules> {
 
 fn viewer(ch: &Channels, who: &Caller) -> ApiResult<Viewer> {
     ch.modules().viewer(who)
+}
+
+/// Asked when a card about a chat message is shown, not with every list of cards.
+async fn open_url(
+    Extension(ch): Cx,
+    who: Caller,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let v = viewer(&ch, &who)?;
+    let ids = [id.clone()];
+    let mut urls = crate::open_link::message_urls(ch.store(), &v, &ids)?;
+    Ok(Json(json!({ "url": urls.remove(&id) })))
 }
 
 async fn authorization(

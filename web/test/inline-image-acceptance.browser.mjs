@@ -86,7 +86,7 @@ async function turn(commands, marker) {
   const result = await owner.request.post(base + "/api/thread", { data: { text: "离线图片集成验收（不进行授权）\n" + commands + "\n@say " + marker } })
   assert.equal(result.status(), 200, await result.text())
   for (let i = 0; i < 300; i++) {
-    const response = await owner.request.get(base + "/api/thread/history")
+    const response = await owner.request.get(base + "/api/views/page?kind=message")
     assert.equal(response.status(), 200)
     const history = await response.json(), message = history.messages.filter((m) => m.author === "steve").at(-1)
     const attempt = rows("SELECT state FROM runtime_job_attempts ORDER BY rowid DESC LIMIT 1")

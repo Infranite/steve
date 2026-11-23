@@ -244,11 +244,11 @@ impl Sessions<'_> {
     /// a fresh protocol; replaying this queue would give it obsolete Bot/session instructions.
     /// Also used to repair queues left on ended sessions by earlier builds.
     pub fn retire_queue(&self, id: &str) -> Result<()> {
-        self.0.write(|_| {
+        self.0.write(|w| {
             if self.get(id)?.is_none_or(|s| s.status != "ended") {
                 return Err(crate::StoreError::Conflict("只能清理已结束会话的旧队列。".into()));
             }
-            let n = self.0.write_conn(|w| Ok(w.c.execute("DELETE FROM queued WHERE session_id=?", [id])?))?;
+            let n = discard_queue_in(w, id)?;
             if n > 0 {
                 self.0.events().add(id, "system", serde_json::json!({
                     "text": format!("会话已结束，已丢弃 {n} 条未发送消息；新会话使用新的任务说明。"),
@@ -491,26 +491,6 @@ fn hydrate_event(c: &rusqlite::Connection, session: &str, e: &mut Event) -> Resu
     Ok(())
 }
 
-/// Decode a transcript page row, leaving unsupported formats visible at their stored cursor.
-fn transcript_row(c: &rusqlite::Connection, session: &str, row: &rusqlite::Row) -> Result<Event> {
-    let format: String = row.get(5)?;
-    if format != "steve.v1" {
-        return Ok(Event {
-            seq: row.get(0)?,
-            ts: row.get(1)?,
-            kind: "system".into(),
-            data: serde_json::json!({
-                "code": "unsupported_format",
-                "format": format,
-                "text": format!("Unsupported transcript format: {format}"),
-            }),
-        });
-    }
-    let mut event = event_row(row)?;
-    hydrate_event(c, session, &mut event)?;
-    Ok(event)
-}
-
 impl Events<'_> {
     /// Appends an event and returns its `seq`. The published event carries `data` as stored.
     ///
@@ -536,37 +516,6 @@ impl Events<'_> {
                 for e in &mut events { hydrate_event(tx, session_id, e)?; }
                 Ok(events)
             })
-        })
-    }
-
-    /// Visit at most 500 rows in sequence order within a 2 MiB byte budget, without retaining
-    /// all decoded rows. The byte budget
-    /// accounts for full referenced strings, not just previews. A single oversize row is
-    /// returned alone to guarantee cursor progress; this is not a per-event size limit.
-    /// Callers continue from the last returned seq until an empty page (never infer EOF
-    /// from a short page). Internal `after`/`up_to` keep their complete-data semantics.
-    pub fn visit_page(
-        &self,
-        session_id: &str,
-        after: i64,
-        mut each: impl FnMut(Event),
-    ) -> Result<()> {
-        self.0.read_conn(|c| {
-            let mut st = c.prepare_cached(
-                "SELECT e.seq, e.ts, e.kind, e.data, length(CAST(e.data AS BLOB)) + COALESCE((SELECT SUM(length(CAST(p.data AS BLOB))) FROM event_payload_refs r JOIN event_payloads p ON p.session_id = r.session_id AND p.hash = r.hash WHERE r.event_seq = e.seq), 0), e.format FROM events e WHERE e.session_id = ? AND e.seq > ? ORDER BY e.seq LIMIT ?"
-            )?;
-            let mut rows = st.query(params![session_id, after, 500i64])?;
-            let (mut count, mut bytes) = (0, 0usize);
-            while let Some(row) = rows.next()? {
-                let size = row.get::<_, i64>(4)?.max(0) as usize;
-                if count > 0 && bytes.saturating_add(size) > 2 * 1024 * 1024 { break; }
-                let event = transcript_row(c, session_id, row)?;
-                each(event);
-                bytes = bytes.saturating_add(size);
-                count += 1;
-                if bytes >= 2 * 1024 * 1024 { break; }
-            }
-            Ok(())
         })
     }
 
@@ -681,6 +630,58 @@ impl Events<'_> {
 }
 
 /// Messages waiting for the session's current turn to end.
+/// Publish the session facts affected by a write in this transaction.
+pub(crate) fn session_changed_in(w: &mut crate::W<'_>, session: &str) -> Result<()> {
+    if let Some((ws, item)) = one(
+        w.conn,
+        "SELECT workspace_id,item_id FROM sessions WHERE id=?",
+        [session],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+    )? {
+        w.emit(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::Session {
+                ws: ws.into(),
+                id: session.into(),
+                item_id: Some(item.map(Into::into)),
+            },
+        ));
+    }
+    Ok(())
+}
+
+pub fn enqueue_in(
+    w: &mut crate::W<'_>,
+    session: &str,
+    text: &str,
+    via: &str,
+    created: i64,
+    files: &[FileRef],
+) -> Result<()> {
+    ensure_open(w.conn, session)?;
+    w.conn.execute(
+        "INSERT INTO queued (id,session_id,text,via,created,files) VALUES (?,?,?,?,?,?)",
+        params![
+            uid("q"),
+            session,
+            text,
+            via,
+            created,
+            super::file_refs(files)?
+        ],
+    )?;
+    session_changed_in(w, session)
+}
+
+pub fn discard_queue_in(w: &mut crate::W<'_>, session: &str) -> Result<usize> {
+    let changed = w
+        .conn
+        .execute("DELETE FROM queued WHERE session_id=?", [session])?;
+    if changed > 0 {
+        session_changed_in(w, session)?;
+    }
+    Ok(changed)
+}
+
 pub struct QueuedRepo<'a>(&'a Store);
 
 impl QueuedRepo<'_> {
@@ -781,16 +782,16 @@ impl QueuedRepo<'_> {
         })
     }
 
-    /// Returns and deletes the whole queue. No event.
+    /// Returns and deletes the whole queue.
     pub fn take(&self, session_id: &str) -> Result<Vec<Queued>> {
-        self.0.write_conn(|w| {
+        self.0.write(|w| {
             let xs = all(
-                w.c,
+                w.conn,
                 "SELECT * FROM queued WHERE session_id = ? ORDER BY created, rowid",
                 [session_id],
                 Queued::from_row,
             )?;
-            w.c.run("DELETE FROM queued WHERE session_id = ?", [session_id])?;
+            discard_queue_in(w, session_id)?;
             Ok(xs)
         })
     }
@@ -997,4 +998,29 @@ impl Store {
         )?;
         Ok(1)
     }
+}
+
+/// The id at the end of a transcript file name: `<id>.jsonl` (Claude Code) or `rollout-<time>-<id>.jsonl`
+/// (Codex, a UUID of 36 characters).
+fn id_of_file(kind: &str, file: &str) -> Option<String> {
+    let stem = std::path::Path::new(file).file_stem()?.to_str()?;
+    let id = match kind {
+        "cc" => stem,
+        "cx" => stem.get(stem.len().checked_sub(36)?..)?,
+        _ => return None,
+    };
+    (!id.is_empty()).then(|| id.to_owned())
+}
+
+pub fn valid_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 256 && !id.starts_with('-') && !id.chars().any(char::is_control)
+}
+
+/// The harness's session id of a session row (before `import_key` is dropped from the output).
+pub fn native_id(native: Option<&str>, imported: Option<&str>) -> Option<String> {
+    if let Some(id) = native.filter(|id| !id.is_empty()) {
+        return valid_id(id).then(|| id.to_owned());
+    }
+    let (kind, file) = imported?.split_once(':')?;
+    id_of_file(kind, file).filter(|id| valid_id(id))
 }

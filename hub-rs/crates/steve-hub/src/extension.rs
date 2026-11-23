@@ -155,6 +155,15 @@ impl Assembly {
         self.list.iter().map(|e| e.ext.id()).collect()
     }
 
+    pub(crate) fn optional_modules(&self) -> steve_types::integrations::OptionalModules {
+        steve_types::integrations::OptionalModules {
+            feishu_registration: self
+                .list
+                .iter()
+                .any(|e| e.builtin && e.ext.id() == builtin::FEISHU_BOT_ID),
+        }
+    }
+
     /// Unique ids and the API version, before anything is built.
     pub(crate) fn check(&self) -> Result<(), ExtensionError> {
         let mut seen = BTreeSet::new();
@@ -733,10 +742,11 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
     let w =
         crate::wire::wire_assembly(&cfg, &bus, Arc::new(|k: &str| std::env::var(k).ok()), &asm)?;
     let st = crate::api::AppState::new(cfg.clone(), w.backend, w.domain, bus)
-        .with_modules(w.modules)
         .with_oidc(w.oidc.clone())
         .with_nodes(w.nodes)
         .with_node(w.node)
+        .with_modules(w.modules)
+        .with_optional_modules(asm.optional_modules())
         .with_history(w.history)
         .with_workspaces(Some(w.workspaces));
     *supervised_state.lock().unwrap_or_else(|e| e.into_inner()) = Some(st.clone());
@@ -961,6 +971,19 @@ mod tests {
             plugin.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn registration_capability_follows_builtin_extension() {
+        assert!(Assembly::builtin().optional_modules().feishu_registration);
+        assert!(
+            !Assembly::builtin()
+                .without(builtin::FEISHU_BOT_ID)
+                .unwrap()
+                .optional_modules()
+                .feishu_registration
+        );
+        assert!(!Assembly::empty().optional_modules().feishu_registration);
     }
 
     #[test]

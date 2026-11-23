@@ -20,6 +20,7 @@ pub mod node_usage;
 pub mod outbox_checks;
 pub mod realtime;
 pub mod state;
+pub mod views;
 pub mod wiring;
 pub mod workflow_cases;
 pub mod workspace_cases;

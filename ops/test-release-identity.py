@@ -109,7 +109,7 @@ with tempfile.TemporaryDirectory(prefix="steve-release-identity-") as temp:
         health = wait_health(process, True)
         assert health["upgrade_id"] == ident, health
         try:
-            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/state", timeout=2)
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/summary", timeout=2)
         except urllib.error.HTTPError as error:
             assert error.code == 503, error.code
         else:

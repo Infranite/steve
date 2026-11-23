@@ -93,11 +93,8 @@ pub fn released_idle(r: &mut impl crate::Read, session: &str) -> Result<bool> {
 }
 
 /// Idempotent insert; a reused session with a different binding is a conflict.
-pub fn bind_session_in(
-    tx: &rusqlite::Connection,
-    b: &SessionBinding<'_>,
-    now: i64,
-) -> Result<bool> {
+pub fn bind_session_in(w: &mut crate::W<'_>, b: &SessionBinding<'_>, now: i64) -> Result<bool> {
+    let tx = w.conn;
     let workspace = to_json(b.workspace)?;
     let old: Option<(String,String,String,String)> = tx.query_row(
         "SELECT node_id,workspace_ref,node_session_id,config_revision FROM runtime_sessions WHERE session_id=?",
@@ -117,6 +114,7 @@ pub fn bind_session_in(
     }
     tx.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES (?,?,?,?,?,'unopened',?)",
         params![b.session,b.node,workspace,b.node_session,b.config_revision,now])?;
+    crate::session_changed_in(w, b.session)?;
     Ok(true)
 }
 
@@ -127,12 +125,13 @@ pub struct SessionUpdate<'a> {
     pub release_pending: bool,
 }
 pub fn session_cas_in(
-    tx: &rusqlite::Connection,
+    w: &mut crate::W<'_>,
     session: &str,
     revision: i64,
     u: &SessionUpdate<'_>,
     now: i64,
 ) -> Result<bool> {
+    let tx = w.conn;
     if ![
         "unopened",
         "opening",
@@ -164,20 +163,20 @@ pub fn session_cas_in(
             ));
         }
     }
-    Ok(tx.execute("UPDATE runtime_sessions SET phase=?,active_attempt=?,release_pending=?,revision=revision+1,updated=? WHERE session_id=? AND revision=?",
-        params![u.phase,u.active_attempt,u.release_pending,now,session,revision])? == 1)
+    let changed = tx.execute("UPDATE runtime_sessions SET phase=?,active_attempt=?,release_pending=?,revision=revision+1,updated=? WHERE session_id=? AND revision=?",
+        params![u.phase,u.active_attempt,u.release_pending,now,session,revision])? == 1;
+    if changed {
+        crate::session_changed_in(w, session)?;
+    }
+    Ok(changed)
 }
 
 /// Atomically reserve one logical turn and move its queued rows into Node-owned dispatch receipts.
 /// Empty means no queued work. A retry with the same turn reads the same rows; another turn cannot
 /// claim while this session has an unfinished turn (including unknown). Caller inserts attempt and
 /// command in this same transaction. Holds and permission to dispatch are Hub policy, checked by caller.
-pub fn claim_in(
-    tx: &rusqlite::Connection,
-    session: &str,
-    turn: &str,
-    now: i64,
-) -> Result<Vec<Queued>> {
+pub fn claim_in(w: &mut crate::W<'_>, session: &str, turn: &str, now: i64) -> Result<Vec<Queued>> {
+    let tx = w.conn;
     let existing: Option<String> = tx
         .query_row(
             "SELECT session_id FROM runtime_turns WHERE turn_id=?",
@@ -213,6 +212,7 @@ pub fn claim_in(
     tx.execute("INSERT INTO session_dispatch(id,session_id,text,via,created,files,state,updated,turn_id,backend) SELECT id,session_id,text,via,created,files,'claimed',?,?,'node' FROM queued WHERE session_id=?",params![now,turn,session])?;
     tx.execute("DELETE FROM queued WHERE session_id=?", [session])?;
     tx.execute("UPDATE runtime_sessions SET phase='active',revision=revision+1,updated=? WHERE session_id=?",params![now,session])?;
+    crate::session_changed_in(w, session)?;
     Ok(xs)
 }
 
@@ -220,11 +220,12 @@ pub fn claim_in(
 /// the queue as the turn's own dispatch, already submitted, so they end with it (completed,
 /// interrupted…) and are never sent again as a turn of their own. The caller checks the turn runs.
 pub fn deliver_into_turn_in(
-    tx: &rusqlite::Connection,
+    w: &mut crate::W<'_>,
     session: &str,
     turn: &str,
     now: i64,
 ) -> Result<Vec<Queued>> {
+    let tx = w.conn;
     let xs = all(
         tx,
         "SELECT * FROM queued WHERE session_id=? AND (files IS NULL OR files='' OR files='[]') ORDER BY created,rowid",
@@ -234,6 +235,9 @@ pub fn deliver_into_turn_in(
     for q in &xs {
         tx.execute("INSERT INTO session_dispatch(id,session_id,text,via,created,files,state,updated,turn_id,backend) SELECT id,session_id,text,via,created,files,'submitted',?,?,'node' FROM queued WHERE id=?",params![now,turn,q.id])?;
         tx.execute("DELETE FROM queued WHERE id=?", [&q.id])?;
+    }
+    if !xs.is_empty() {
+        crate::session_changed_in(w, session)?;
     }
     Ok(xs)
 }
@@ -314,12 +318,13 @@ pub struct TurnUpdate<'a> {
     pub applied: bool,
 }
 pub fn turn_cas_in(
-    tx: &rusqlite::Connection,
+    w: &mut crate::W<'_>,
     turn: &str,
     revision: i64,
     u: &TurnUpdate<'_>,
     now: i64,
 ) -> Result<bool> {
+    let tx = w.conn;
     if !valid_execution_state(u.state) || u.retry_ordinal < 0 {
         return Err(conflict("invalid turn state"));
     }
@@ -343,8 +348,25 @@ pub fn turn_cas_in(
             return Err(conflict("turn still has an unresolved attempt"));
         }
     }
-    Ok(tx.execute("UPDATE runtime_turns SET state=?,active_attempt=?,retry_ordinal=?,applied=?,revision=revision+1,updated=? WHERE turn_id=? AND revision=? AND state<>'finished' AND (state<>'unknown' OR ? IN ('unknown','finished'))",
-        params![u.state,u.active_attempt,u.retry_ordinal,u.applied,now,turn,revision,u.state])?==1)
+    let session = crate::one(
+        tx,
+        "UPDATE runtime_turns SET state=?,active_attempt=?,retry_ordinal=?,applied=?,revision=revision+1,updated=? WHERE turn_id=? AND revision=? AND state<>'finished' AND (state<>'unknown' OR ? IN ('unknown','finished')) RETURNING session_id",
+        params![
+            u.state,
+            u.active_attempt,
+            u.retry_ordinal,
+            u.applied,
+            now,
+            turn,
+            revision,
+            u.state
+        ],
+        |r| r.get::<_, String>(0),
+    )?;
+    if let Some(id) = &session {
+        crate::session_changed_in(w, id)?;
+    }
+    Ok(session.is_some())
 }
 /// Node receipts are scoped to the claimed logical turn, never all rows of a session.
 pub fn dispatch_receipt_in(
@@ -377,7 +399,8 @@ pub struct NewCommand<'a> {
     pub dependency: Option<&'a str>,
 }
 /// Duplicate operation IDs must carry exactly the same immutable envelope, including method/target.
-pub fn insert_command_in(tx: &rusqlite::Connection, c: &NewCommand<'_>, now: i64) -> Result<bool> {
+pub fn insert_command_in(w: &mut crate::W<'_>, c: &NewCommand<'_>, now: i64) -> Result<bool> {
+    let tx = w.conn;
     if c.dependency == Some(c.operation) {
         return Err(conflict("self-dependent command"));
     }
@@ -427,6 +450,7 @@ pub fn insert_command_in(tx: &rusqlite::Connection, c: &NewCommand<'_>, now: i64
     if let (Some(session), Some(_)) = (session, mode) {
         record_mode_in(tx, session)?;
     }
+    command_changed_in(w, c.operation)?;
     Ok(true)
 }
 
@@ -439,6 +463,28 @@ fn record_mode_in(tx: &rusqlite::Connection, session: &str) -> Result<()> {
           WHERE session_id=?1",
         [session],
     )?;
+    Ok(())
+}
+
+/// Invalidate this command's waiting session, turns dependent on its receipt, and turns competing
+/// for the same device room. The callers commit these events with the command transition.
+pub(crate) fn command_changed_in(w: &mut crate::W<'_>, operation: &str) -> Result<()> {
+    let sessions = all(w.conn, &format!(
+        "SELECT DISTINCT s.id,s.workspace_id,s.item_id FROM node_commands changed
+         JOIN node_commands c ON c.node_id=changed.node_id AND c.method='start_turn'
+         JOIN sessions s ON s.id=c.session_id
+         WHERE changed.operation_id=? AND (c.operation_id=changed.operation_id OR
+             c.dependency_operation=changed.operation_id OR (changed.method='start_turn' AND {WAITING}))"
+    ), [operation], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?)))?;
+    for (id, ws, item) in sessions {
+        w.emit(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::Session {
+                ws: ws.into(),
+                id: id.into(),
+                item_id: Some(item.map(Into::into)),
+            },
+        ));
+    }
     Ok(())
 }
 
@@ -504,9 +550,9 @@ pub(crate) fn session_limit_on(c: &rusqlite::Connection, node: &str) -> Result<i
 
 /// A `start_turn` that occupies its Node: sent and not over, or maybe sent (an earlier send was
 /// uncertain, or it is leased now). One refused every time it went, or never sent, does not.
-const OCCUPYING: &str = "c.method='start_turn' AND (c.state IN ('accepted','active','unknown') OR (c.state='pending' AND c.maybe_sent=1))";
+pub(crate) const OCCUPYING: &str = "c.method='start_turn' AND (c.state IN ('accepted','active','unknown') OR (c.state='pending' AND c.maybe_sent=1))";
 /// A `start_turn` waiting for room: never sent (or refused before acceptance every time).
-const WAITING: &str = "c.method='start_turn' AND c.state='pending' AND c.maybe_sent=0 AND (c.dependency_operation IS NULL OR EXISTS(SELECT 1 FROM node_commands d WHERE d.operation_id=c.dependency_operation AND d.state='finished' AND json_extract(d.receipt,'$.success')=1))";
+pub(crate) const WAITING: &str = "c.method='start_turn' AND c.state='pending' AND c.maybe_sent=0 AND (c.dependency_operation IS NULL OR EXISTS(SELECT 1 FROM node_commands d WHERE d.operation_id=c.dependency_operation AND d.state='finished' AND json_extract(d.receipt,'$.success')=1))";
 
 /// `node`'s [`SessionRoom`].
 pub(crate) fn session_room_on(c: &rusqlite::Connection, node: &str) -> Result<SessionRoom> {
@@ -597,12 +643,13 @@ pub fn waiting_commands(
 /// must have a successful final receipt; the caller explicitly sets success via merge_receipt_in.
 /// Only `node`'s commands: one coordinator per Node shares the store with the others.
 pub fn lease_command_in(
-    tx: &rusqlite::Connection,
+    w: &mut crate::W<'_>,
     node: &str,
     owner: &str,
     now: i64,
     until: i64,
 ) -> Result<Option<CommandLease>> {
+    let tx = w.conn;
     if owner.is_empty() || until <= now {
         return Err(conflict("invalid lease"));
     }
@@ -619,6 +666,9 @@ pub fn lease_command_in(
         .checked_add(1)
         .ok_or_else(|| conflict("lease generation overflow"))?;
     tx.execute("UPDATE node_commands SET lease_owner=?,lease_until=?,lease_generation=?,maybe_sent=1,updated=? WHERE operation_id=?",params![owner,until,generation,now,operation])?;
+    if method == "start_turn" && !maybe_sent {
+        command_changed_in(w, &operation)?;
+    }
     Ok(Some(CommandLease {
         operation,
         node,
@@ -638,15 +688,20 @@ pub fn lease_command_in(
 /// nothing about the earlier send, which may still arrive. It goes back to 0 only while every send
 /// so far was refused.
 pub fn retry_command_in(
-    tx: &rusqlite::Connection,
+    w: &mut crate::W<'_>,
     lease: &CommandLease,
     now: i64,
     retry_at: i64,
     uncertain: bool,
 ) -> Result<bool> {
+    let tx = w.conn;
     let maybe_sent = lease.maybe_sent || uncertain;
-    Ok(tx.execute("UPDATE node_commands SET retry_at=?,lease_owner=NULL,lease_until=NULL,maybe_sent=?,updated=? WHERE operation_id=? AND state='pending' AND lease_owner=? AND lease_generation=? AND lease_until>?",
-        params![retry_at,maybe_sent as i64,now,lease.operation,lease.owner,lease.generation,now])?==1)
+    let changed = tx.execute("UPDATE node_commands SET retry_at=?,lease_owner=NULL,lease_until=NULL,maybe_sent=?,updated=? WHERE operation_id=? AND state='pending' AND lease_owner=? AND lease_generation=? AND lease_until>?",
+        params![retry_at,maybe_sent as i64,now,lease.operation,lease.owner,lease.generation,now])? == 1;
+    if changed && lease.method == "start_turn" && !maybe_sent {
+        command_changed_in(w, &lease.operation)?;
+    }
+    Ok(changed)
 }
 
 /// Receipt progression deliberately collapses running/waiting to Active: their order is determined
@@ -674,13 +729,14 @@ impl ReceiptState {
 /// Terminal contradictions are conflicts. Late earlier receipts are ignored. The same terminal is
 /// idempotent; a distinct terminal payload is surfaced for reconciliation, never silently overwritten.
 pub fn merge_receipt_in(
-    tx: &rusqlite::Connection,
+    w: &mut crate::W<'_>,
     operation: &str,
     state: ReceiptState,
     success: bool,
     payload: &Value,
     now: i64,
 ) -> Result<bool> {
+    let tx = w.conn;
     if success && state != ReceiptState::Finished {
         return Err(conflict("only a finished receipt can succeed"));
     }
@@ -728,6 +784,7 @@ pub fn merge_receipt_in(
     // Persist independently of the billing/lifecycle projection.
     // Only a typed terminal Node receipt or a provably unsent refusal can close unknown output.
     tx.execute(REALTIME_STOP_RECEIPT_SQL, [operation])?;
+    command_changed_in(w, operation)?;
     Ok(true)
 }
 

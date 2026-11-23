@@ -137,7 +137,7 @@ fn a_job_its_first_attempt_and_its_start_command_commit_together() {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )?;
             assert_eq!(target, (START_JOB.into(), "j-a0".into(), None));
-            let lease = runtime::lease_command_in(steve_store::testkit::sqlite_writer(tx), "n", "w", 1, 10)?.unwrap();
+            let lease = runtime::lease_command_in(tx, "n", "w", 1, 10)?.unwrap();
             assert_eq!((lease.operation.as_str(), lease.method.as_str()), ("j-op0", START_JOB));
             assert_eq!(lease.request, spec("j", "j-a0").request);
             Ok(())
@@ -217,7 +217,7 @@ fn identities_are_immutable() {
             // a session command cannot reuse a job attempt's operation id
             is_conflict(
                 runtime::insert_command_in(
-                    steve_store::testkit::sqlite_writer(tx),
+                    tx,
                     &runtime::NewCommand {
                         operation: "j-op0",
                         node: "n",
@@ -576,7 +576,7 @@ fn background_job_retention_reaches_finished_rows_behind_a_large_live_prefix() {
         }
         create(tx,"expired")?;
         finish(tx,"expired-a0")?;
-        runtime::merge_receipt_in(steve_store::testkit::sqlite_writer(tx),"expired-op0",runtime::ReceiptState::Finished,true,&json!({}),3)?;
+        runtime::merge_receipt_in(tx,"expired-op0",runtime::ReceiptState::Finished,true,&json!({}),3)?;
         finish_job_in(steve_store::testkit::sqlite_writer(tx),"expired",5)?;
         Ok(())
     }).unwrap();

@@ -135,3 +135,14 @@ pub fn remove_session_bot(path: &Path, session: &str) -> Result<()> {
         .execute("UPDATE sessions SET bot_id = NULL WHERE id = ?", [session])?;
     Ok(())
 }
+
+pub fn seed_badge_actions(path: &Path) -> Result<()> {
+    super::api::writable(path)?.execute_batch(
+        "INSERT INTO yolo_actions (id, workspace_id, window_id, decision_id, kind, subject_type, rule, outcome, reason, created)
+         SELECT a.id, workspace_id, yolo_windows.id, 'decision_badge', 'approve', 'tool_call', 'limit.5', outcome, '', ts
+         FROM yolo_windows CROSS JOIN (SELECT 'ya_badge_first' AS id, 'scheduled' AS outcome, 1 AS ts
+           UNION ALL SELECT 'ya_badge_last', 'declined', 2) a
+         WHERE workspace_id = 'default' AND ended IS NULL",
+    )?;
+    Ok(())
+}

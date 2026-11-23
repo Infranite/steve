@@ -4,5 +4,5 @@
   "warmup_s": 5,
   "load_s": 60,
   "cli_runs": 0,
-  "endpoints": [{"path": "/api/state", "requests": 1}]
+  "endpoints": [{"path": "/api/summary", "requests": 1}]
 }

@@ -118,3 +118,19 @@ pub fn channel_send_blocked(r: &mut impl Read, ws: &str, message: &str) -> Resul
     )?
     .is_some())
 }
+
+/// The version following the latest revision of this object's history.
+pub fn next_revision(r: &mut impl Read, ws: &str, kind: &str, id: &str) -> Result<i64> {
+    let previous: Option<i64> = r.one(
+        Query::select()
+            .column("version")
+            .from("revisions")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("object_type").eq(kind))
+            .and_where(Expr::col("object_id").eq(id))
+            .order_by("id", Order::Desc)
+            .limit(1),
+        |row| row.get(0),
+    )?;
+    Ok(previous.unwrap_or_default() + 1)
+}

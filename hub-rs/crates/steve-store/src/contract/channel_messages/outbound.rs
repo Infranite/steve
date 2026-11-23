@@ -304,6 +304,20 @@ pub fn store_composer_result(w: &mut W<'_>, id: &str, result: &Value) -> Result<
     Ok(())
 }
 
+/// Editing a draft invalidates the basis of its previously generated text.
+pub fn edit_draft(w: &mut W<'_>, id: &str, text: &str) -> Result<()> {
+    w.exec(
+        Query::update()
+            .table("chan_messages")
+            .value("text", text)
+            .value("basis_id", Option::<String>::None)
+            .and_where(Expr::col("id").eq(id))
+            .and_where(Expr::col("status").eq("draft")),
+    )?;
+    digest::sync_message(w.conn, Source::ChanMessage, id, None)?;
+    Ok(())
+}
+
 pub fn update_draft_text(w: &mut W<'_>, id: &str, text: &str) -> Result<()> {
     w.exec(
         Query::update()

@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 const SPACE: &str = "notify";
 
-/// One notification (`GET /api/state` `notifications[]`).
+/// One notification (`GET /api/notifications` entries).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Notice {
     pub id: String,

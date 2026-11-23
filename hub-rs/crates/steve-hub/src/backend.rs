@@ -16,8 +16,6 @@ use serde_json::{Map, Value};
 /// A JSON object as produced by the store's row mappers.
 pub type Obj = Map<String, Value>;
 pub type BResult<T> = Result<T, BackendError>;
-/// `(seq, ts, kind, data as stored JSON text)`.
-pub type RawEvent = (i64, i64, String, String);
 
 /// An error from storage or the domain. `status` is 500 for everything the TS Hub threw as a plain `Error`
 /// (the message is shown to the user verbatim), 404 for `own()`-style misses.
@@ -89,8 +87,14 @@ pub struct ImportedSession {
     pub created: f64,
 }
 
-/// What `summary()` adds to one item: computed per item by default, or for a whole workspace in
-/// a handful of queries by [`Repo::item_extras`].
+#[derive(Default)]
+pub struct SummaryFacts {
+    pub workspace_name: String,
+    pub pending: bool,
+    pub devices_online: usize,
+    pub devices_total: usize,
+}
+
 pub type ItemExtras = steve_store::state_batches::ItemExtras<steve_core::pull::Closeout>;
 
 /// Per-bot extras of `botOut` and `allBots` for one workspace.
@@ -98,8 +102,6 @@ pub type ItemExtras = steve_store::state_batches::ItemExtras<steve_core::pull::C
 pub struct BotExtras {
     /// bot id → workspace ids
     pub workspaces: std::collections::HashMap<String, Vec<String>>,
-    /// bot id → memory count in the workspace
-    pub memories: std::collections::HashMap<String, i64>,
     /// bot id → its own MCP servers ([`Repo::bot_mcp_servers`])
     pub mcp: std::collections::HashMap<String, Vec<Value>>,
 }
@@ -110,25 +112,10 @@ pub struct BotExtras {
 /// shows which ones are still missing.
 #[allow(unused_variables)]
 pub trait Repo {
-    // ── batched reads for /api/state (optional; `None` = the API falls back to per-row calls) ──
-    /// `summary()` extras of every task item of `ws`, keyed by item id (items without rows may be absent).
-    fn item_extras(
-        &self,
-        ws: &str,
-    ) -> BResult<Option<std::collections::HashMap<String, ItemExtras>>> {
-        Ok(None)
-    }
     fn item_closeout(&self, id: &str) -> BResult<Option<steve_core::pull::Closeout>> {
         Ok(None)
     }
-    /// Queued rows of the sessions `sessions_list(ws)` returns, keyed by session id.
-    fn queued_by_session(
-        &self,
-        ws: &str,
-    ) -> BResult<Option<std::collections::HashMap<String, Vec<Obj>>>> {
-        Ok(None)
-    }
-    fn bot_extras(&self, ws: &str) -> BResult<Option<BotExtras>> {
+    fn bot_extras(&self) -> BResult<Option<BotExtras>> {
         Ok(None)
     }
     /// The sessions whose next turn waits because its device is full, keyed by session id, each
@@ -136,19 +123,6 @@ pub trait Repo {
     fn waiting_for_room(&self) -> BResult<std::collections::HashMap<String, Value>> {
         Ok(Default::default())
     }
-    /// One byte/row bounded page of `events_after`, with `data` as the stored JSON text, row by
-    /// row: `(seq, ts, kind, data)`. Short pages are not EOF; callers continue by seq until empty.
-    /// `false` = not supported here (the caller uses `events_after`). Rows are handed over one at
-    /// a time so a large page is never held twice.
-    fn events_raw(
-        &self,
-        session: &str,
-        after: i64,
-        each: &mut dyn FnMut(RawEvent),
-    ) -> BResult<bool> {
-        Ok(false)
-    }
-
     // ── workspaces, users ──
     fn ensure_workspace(&self) -> BResult<()> {
         todo_backend!("ensure_workspace")
@@ -359,9 +333,6 @@ pub trait Repo {
 
     // ── items ──
     /// Every task item of the workspace, updated DESC.
-    fn items_all(&self, ws: &str) -> BResult<Vec<Obj>> {
-        todo_backend!("items_all")
-    }
     fn item_get(&self, id: &str) -> BResult<Option<Obj>> {
         todo_backend!("item_get")
     }
@@ -378,6 +349,9 @@ pub trait Repo {
         todo_backend!("item_remove")
     }
     /// `[{version, text, created}]` by version.
+    fn item_text(&self, ws: &str, id: &str) -> BResult<Option<Obj>> {
+        todo_backend!("item_text")
+    }
     fn item_goals(&self, id: &str) -> BResult<Vec<Obj>> {
         todo_backend!("item_goals")
     }
@@ -475,10 +449,6 @@ pub trait Repo {
     fn sessions_of_item(&self, item: &str) -> BResult<Vec<Obj>> {
         todo_backend!("sessions_of_item")
     }
-    /// `sessions.list(ws)`: LIMIT 300, updated DESC.
-    fn sessions_list(&self, ws: &str) -> BResult<Vec<Obj>> {
-        todo_backend!("sessions_list")
-    }
     fn session_patch(&self, id: &str, patch: &Obj) -> BResult<()> {
         todo_backend!("session_patch")
     }
@@ -490,10 +460,7 @@ pub trait Repo {
     fn events_add(&self, session: &str, kind: &str, data: &Value) -> BResult<i64> {
         todo_backend!("events_add")
     }
-    /// `[{seq, ts, kind, data}]` with `seq > after`, by seq, LIMIT 5000.
-    fn events_after(&self, session: &str, after: i64) -> BResult<Vec<Obj>> {
-        todo_backend!("events_after")
-    }
+    /// Full queued rows of a session by created.
     fn queued_list(&self, session: &str) -> BResult<Vec<Obj>> {
         todo_backend!("queued_list")
     }
@@ -524,39 +491,25 @@ pub trait Repo {
     }
 
     // ── decisions, messages, devices ──
-    fn decisions_open(&self, ws: &str) -> BResult<Vec<Obj>> {
-        todo_backend!("decisions_open")
-    }
-    /// Resolved/expired with `resolved > since`, resolved DESC, LIMIT 100.
-    fn decisions_recent(&self, ws: &str, since: i64) -> BResult<Vec<Obj>> {
-        todo_backend!("decisions_recent")
-    }
     fn decision_get(&self, id: &str) -> BResult<Option<Obj>> {
         todo_backend!("decision_get")
     }
     fn decisions_of_item(&self, item: &str) -> BResult<Vec<Obj>> {
         todo_backend!("decisions_of_item")
     }
-    /// The last 200 thread messages, ascending.
-    fn messages_list(&self, ws: &str) -> BResult<Vec<Obj>> {
-        self.messages_in(ws, "steve", 200)
+    /// An item's decisions as views (`steve_types::DecisionView`), oldest first.
+    fn decision_views_of_item(
+        &self,
+        ws: &str,
+        item: &str,
+    ) -> BResult<Vec<steve_types::DecisionView>> {
+        todo_backend!("decision_views_of_item")
     }
     /// `messages.list(ws, space, limit)`: the latest `limit` of a space, ascending.
     fn messages_in(&self, ws: &str, space: &str, limit: i64) -> BResult<Vec<Obj>> {
         todo_backend!("messages_in")
     }
     /// Up to `limit` messages of a space created in `[after, before)`, the newest of them, oldest first.
-    fn messages_before(
-        &self,
-        ws: &str,
-        space: &str,
-        before: i64,
-        after: i64,
-        limit: i64,
-    ) -> BResult<Vec<Obj>> {
-        todo_backend!("messages_before")
-    }
-    /// Messages of a space whose text contains `q` or whose item is `q`, newest first.
     fn messages_search(&self, ws: &str, space: &str, q: &str, limit: i64) -> BResult<Vec<Obj>> {
         todo_backend!("messages_search")
     }
@@ -597,6 +550,9 @@ pub trait Repo {
     /// Upserts one raw `settings` value (JSON text) without a revision row and without publishing.
     fn setting_put_raw(&self, ws: &str, key: &str, value: &str) -> BResult<()> {
         todo_backend!("setting_put_raw")
+    }
+    fn summary_facts(&self, ws: &str) -> BResult<SummaryFacts> {
+        Ok(SummaryFacts::default())
     }
     fn devices_list(&self) -> BResult<Vec<Obj>> {
         todo_backend!("devices_list")
@@ -769,10 +725,6 @@ pub trait Domain: Send + Sync + 'static {
     async fn diagnostic_snapshot(&self, id: &str) -> BResult<Value> {
         todo_backend!("diagnostic_snapshot")
     }
-    /// The lifecycle projections of the task items of `ws`, keyed by item id.
-    async fn lifecycle_views(&self, ws: &str) -> BResult<std::collections::HashMap<String, Value>> {
-        Ok(Default::default())
-    }
     /// Commits the closings whose gate holds now (the periodic tick).
     async fn lifecycle_tick(&self) -> BResult<usize> {
         Ok(0)
@@ -927,8 +879,8 @@ pub trait Domain: Send + Sync + 'static {
         todo_backend!("stop")
     }
     /// Whether Steve is on a turn in the main conversation (the page's stop button after a reload).
-    async fn thread_busy(&self, ws: &str) -> BResult<bool> {
-        Ok(false)
+    fn thread_active(&self, ws: &str) -> bool {
+        false
     }
     /// Rewrites a main-conversation message still waiting its turn; `false` once it is being handled.
     async fn thread_queued_edit(&self, ws: &str, message: &str, text: &str) -> BResult<bool> {

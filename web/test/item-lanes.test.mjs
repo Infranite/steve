@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { itemState } from "../src/item-state.ts"
-import { besideState, laneOf, planProgress, resumable, runStateOf } from "../src/item-lanes.ts"
+import { besideState, laneOf, resumable, runStateOf } from "../src/item-lanes.ts"
 
 const wf = (x = {}) => ({ item_id: "ST-1", revision: 1, paused: false, max_parallel: 1, max_attempts: 3, units: [], blockers: [], history: [], ...x })
 const at = (i, w = null, running = false) => { const s = itemState(i, w, running); return [laneOf(s), runStateOf(s), resumable(s)] }
@@ -20,16 +20,9 @@ test("the board's column, the page's counts and the pill's row follow the list's
   assert.deepEqual(at({ st: "fail" }), [null, null, false], "failed is closed: not on the board")
   assert.deepEqual(at({ st: "drop" }), [null, null, false])
 })
-
 test("a line beside its state says only the rest", () => {
   assert.equal(besideState("协作已暂停 · ST-41 失败", "协作已暂停"), "ST-41 失败")
   assert.equal(besideState("协作已暂停", "协作已暂停"), "")
   assert.equal(besideState("Collaboration paused: ST-41 failed", "Collaboration paused"), "ST-41 failed")
   assert.equal(besideState("跑测试", "进行中"), "跑测试")
-})
-
-test("plan progress counts finished steps; no plan, no progress", () => {
-  assert.deepEqual(planProgress([["a", 1], ["b", 0], ["c", 1]]), { done: 2, total: 3 })
-  assert.equal(planProgress(undefined), null)
-  assert.equal(planProgress([]), null)
 })

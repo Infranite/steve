@@ -243,78 +243,6 @@ export default {
     version: "v{{v}}",
     locate: "Show",
   },
-  unwired: {
-    notWired: "Not connected yet",
-    notBuilt: "This Hub doesn't have this module. There's no data here and nothing can be created.",
-    willHead: "Once connected, you can",
-    contacts: {
-      title: "Contacts",
-      sub: "The people, organizations and teams you deal with",
-      will: [["Contacts and organizations", "Relationships, roles, accounts in each system, a timeline of exchanges, related items and memories"], ["Teams", "Sync the org chart from your work IM, or build virtual teams yourself"], ["Merge suggestions", "When one person has accounts in several systems, Steve suggests merging them and you confirm"], ["@contacts", "@ someone in a conversation to link them to an item"]],
-    },
-    signals: {
-      title: "Signals",
-      sub: "Mail, IM, calendar and other outside information, and how bots handled it",
-      will: [["Triage", "Each incoming message goes through a flow: needs you, becomes an item, goes into a digest, or is ignored"], ["Corrections", "When something is handled wrong, switch it to \"remind me next time\" or \"ignore next time\" in one click to improve the flow"], ["Originals kept", "Originals are kept for a set period; after that only the outcome and a summary remain"]],
-      now: "First connect outside services (IM, mail, calendar) under Connections. Nothing shows up here until then.",
-    },
-    auto: {
-      title: "Automation",
-      sub: "Flows, scheduled tasks and event sources",
-      will: [["Scheduled tasks", "Have a bot do something daily, weekly or at a set time"], ["Flows", "What to do when a kind of event arrives: filter, look up, hand to a bot, wait for your approval, take action"], ["Event sources", "What mail, IM, calendar, GitHub and webhooks receive is set in each account"]],
-    },
-    accounts: {
-      title: "Accounts",
-      sub: "Your accounts and the connections into Steve",
-      will: [["Accounts", "Grouped by system: yours and your company's app bot accounts"], ["Connected to Steve", "Once authorized, shows what it can do, the persona it uses and the groups it's in"], ["Matching rules", "Which accounts belong to which contact"]],
-    },
-    vault: {
-      title: "Vault",
-      sub: "Secrets like passwords, tokens and bank cards",
-      will: [["Entries", "Save logins, API credentials, bank cards and more from templates; secret fields only show masked and their values never reach a model"], ["Use approval", "Bots request an entry for a stated purpose and you approve each use by default; high-security entries can't be granted"], ["Usage log", "Who used what, when and why; external vaults only get an interface"]],
-    },
-    personas: {
-      title: "Personas",
-      sub: "Who bots appear as in each channel",
-      will: [["Persona", "Name, avatar, introduction, disclosure settings and signature"], ["Binding", "Bind to an app bot account, or use a different persona in a specific group"], ["Disclosure check", "Before replying, check how much can be said to this audience"]],
-    },
-    mail: {
-      title: "Mail",
-      sub: "Mailbox threads, triage and reply drafts",
-      will: [["Threads", "See each thread under Needs action, Inbox, Waiting, Sent and Drafts"], ["Draft replies", "The mail bot drafts; it only goes out after you edit and approve it, and you can undo within 10 seconds"], ["Triage", "Notification mail goes into digests; mail that needs a reply is listed"]],
-      now: "This Hub doesn't have the mail module yet, or can't list mail threads yet.",
-    },
-    github: {
-      title: "GitHub",
-      sub: "Repositories, PRs and checks",
-      will: [["Connect", "Create a GitHub App (recommended), or use a personal token"], ["Repos and projects", "Link repositories to projects; PRs and checks on item branches are tracked automatically"], ["Review and merge", "After acceptance, Steve asks whether to open a PR, and once checks are green, whether to merge"]],
-      now: "This Hub doesn't have the GitHub module yet.",
-    },
-    knowledge: {
-      title: "Knowledge",
-      sub: "What Steve remembers and the material it can look up",
-      will: [["Search", "Look through long-term memory, knowledge entries, notes, folders, item records and conversation logs"], ["Long-term memory", "Preferences and rules you've said always apply"], ["Knowledge entries", "Confirmed facts and practices that are useful elsewhere too"], ["Sources", "Notes, files and folders on this machine"], ["To confirm", "Entries Steve thinks are worth keeping; they're only used after you confirm"]],
-      now: "This Hub doesn't have the knowledge base API yet.",
-    },
-    stats: {
-      title: "Stats",
-      sub: "Tokens, cache hit rate, estimated cost and throughput",
-      will: [["Usage and cost", "Tokens in and out, cache hit rate, and cost estimated from the price list (marked \"est.\")"], ["Throughput", "Items completed, average time per item, first-pass rate, and time spent waiting on you"], ["Drill down", "Each item's turns, decisions, deliveries and releases, and the tokens it used"]],
-      now: "This Hub doesn't have the stats API yet.",
-    },
-    integrations: {
-      title: "Connections",
-      sub: "The outside services Steve can connect to, and what each connection can do",
-      will: [["Services", "IM, docs, calendar, tasks, mail, code hosting and directory; each one is connected step by step"], ["Capabilities", "Each connection lists what's on, what's missing permissions and what's planned"], ["Identity", "The bot and you are connected and authorized separately"]],
-      now: "This Hub doesn't have the integrations module yet.",
-    },
-    channels: {
-      title: "Channels",
-      sub: "Groups and direct messages across your integrations",
-      will: [["Groups and DMs", "Every conversation in connections that send and receive messages, filtered by source and account"], ["Per-group settings", "Which persona speaks, when to respond, quiet mode, and where content may go"], ["Personas", "The name, introduction and voice bots use in a group"]],
-      now: "This Hub doesn't have the channels module yet.",
-    },
-  },
   queue: {
     next: "Next",
     place: "#{{n}}",
@@ -603,6 +531,8 @@ export default {
       http_p95: "Request time (p95)",
       write_lock_wait_p95: "Write lock wait (p95)",
       sse_delivery_p95: "Live update delay (p95)",
+      patch_delay_p95: "View update delay (p95)",
+      reconcile_diff: "View reconciliation differences",
       ingest_p95: "Node event commit time (p95)",
       ingest_rate: "Node events taken in",
       cache_hit_ratio: "Cache hit rate",
@@ -624,6 +554,8 @@ export default {
       http_p95: "Requests are slow: p95 is {{value}}, over {{limit}}.",
       write_lock_wait_p95: "Writes are queueing: the write lock wait p95 is {{value}}, over {{limit}}.",
       sse_delivery_p95: "Pages get updates late: the delivery delay p95 is {{value}}, over {{limit}}.",
+      patch_delay_p95: "Pages get data updates late: the patch delay p95 is {{value}}, over {{limit}}.",
+      reconcile_diff: "{{value}} views differed from the database: a write published no event (corrected).",
       ingest_p95: "Node events commit slowly: p95 is {{value}}, over {{limit}}.",
       ingest_rate: "Node events come in at {{value}}, over {{limit}}.",
       cache_hit_ratio: "The cache hit rate is only {{value}}, under {{limit}}: most reads go to the database.",
@@ -658,7 +590,6 @@ export default {
   http: {
     incomplete: "The response was incomplete. Try again shortly",
     failed: "Request failed ({{status}})",
-    unreachable: "Can't reach Steve. Try again shortly",
     uploadFailed: "Upload failed ({{status}})",
   },
   config: {
@@ -741,7 +672,6 @@ export default {
     manage: "Manage this space",
   },
   misc: {
-    cursorStuck: "The conversation event cursor didn't advance",
     badZip: "Not a valid zip file",
     loading: "Loading",
   },

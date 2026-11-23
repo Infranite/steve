@@ -194,7 +194,7 @@ async fn start() -> Env {
 
 /// An item whose first turn runs `goal` on the fake agent; returns its session id.
 async fn item(e: &Env, goal: &str) -> String {
-    let (_, state) = e.call("GET", "/api/state", None).await;
+    let (_, state) = e.call("GET", "/api/shell", None).await;
     let bot = state["bots"]
         .as_array()
         .and_then(|bs| bs.iter().find(|b| b["harness"] == "claude-code"))
@@ -210,8 +210,10 @@ async fn item(e: &Env, goal: &str) -> String {
         .await;
     assert_eq!(s, 200, "{i}");
     let iid = i["id"].as_str().expect("item id").to_string();
-    let (_, ss) = e.call("GET", "/api/sessions", None).await;
-    let sid = ss
+    let (_, ss) = e
+        .call("GET", &format!("/api/views?kind=session&items={iid}"), None)
+        .await;
+    let sid = ss["views"]
         .as_array()
         .and_then(|ss| ss.iter().find(|s| s["item_id"] == iid.as_str()))
         .and_then(|s| s["id"].as_str())
@@ -264,7 +266,7 @@ async fn command(e: &Env, iid: &str, body: Value) -> (u16, Value) {
 #[tokio::test(flavor = "multi_thread")]
 async fn creation_blocks_before_opening_a_session_and_completion_starts_it_once() {
     let e = start().await;
-    let (_, state) = e.call("GET", "/api/state", None).await;
+    let (_, state) = e.call("GET", "/api/shell", None).await;
     let bot = state["bots"]
         .as_array()
         .unwrap()
@@ -283,9 +285,11 @@ async fn creation_blocks_before_opening_a_session_and_completion_starts_it_once(
     assert_eq!(status, 200, "{item}");
     assert_eq!(item["status"], "block", "{item}");
     let id = item["id"].as_str().unwrap();
-    let (_, sessions) = e.call("GET", "/api/sessions", None).await;
+    let (_, sessions) = e
+        .call("GET", &format!("/api/views?kind=session&items={id}"), None)
+        .await;
     assert!(
-        !sessions
+        !sessions["views"]
             .as_array()
             .unwrap()
             .iter()
@@ -305,17 +309,23 @@ async fn creation_blocks_before_opening_a_session_and_completion_starts_it_once(
     eventually(
         "Finishing the dependency starts the dependent item session.",
         || async {
-            let (_, ss) = e.call("GET", "/api/sessions", None).await;
-            ss.as_array()
+            let (_, ss) = e
+                .call("GET", &format!("/api/views?kind=session&items={id}"), None)
+                .await;
+            ss["views"]
+                .as_array()
                 .unwrap()
                 .iter()
                 .any(|s| s["item_id"] == id && s["busy"] == true && s["status"] == "running")
         },
     )
     .await;
-    let (_, ss) = e.call("GET", "/api/sessions", None).await;
+    let (_, ss) = e
+        .call("GET", &format!("/api/views?kind=session&items={id}"), None)
+        .await;
     assert_eq!(
-        ss.as_array()
+        ss["views"]
+            .as_array()
             .unwrap()
             .iter()
             .filter(|s| s["item_id"] == id)
@@ -469,12 +479,14 @@ async fn pause_finish_drop_and_new_cycles() {
         "{}",
         v["derived_state"]
     );
-    let (_, state) = e.call("GET", "/api/state", None).await;
-    let row = state["items"]
+    let (_, state) = e
+        .call("GET", &format!("/api/views?kind=item&ids={iid}"), None)
+        .await;
+    let row = state["views"]
         .as_array()
         .and_then(|xs| xs.iter().find(|x| x["id"] == iid.as_str()))
         .expect("item in state");
-    assert_eq!(row["lifecycle"]["phase"], "closed", "{row}");
+    assert_eq!(row["phase"], "closed", "{row}");
 
     // a closed cycle: no second finish, no undo, no resume, no message, no supplement
     for a in ["finish", "unfinish", "resume"] {
@@ -618,7 +630,7 @@ async fn pause_finish_drop_and_new_cycles() {
 }
 
 async fn optional_delivery_names_do_not_block_creation(e: &Env) {
-    let (_, state) = e.call("GET", "/api/state", None).await;
+    let (_, state) = e.call("GET", "/api/shell", None).await;
     let report = state["tags"]
         .as_array()
         .unwrap()
@@ -635,7 +647,7 @@ async fn optional_delivery_names_do_not_block_creation(e: &Env) {
     });
     let (status, body) = e.call("POST", "/api/items", Some(request.clone())).await;
     assert_eq!(status, 200, "{body}");
-    let (_, state) = e.call("GET", "/api/state", None).await;
+    let (_, state) = e.call("GET", "/api/shell", None).await;
     assert!(
         !state["tags"]
             .as_array()
@@ -666,7 +678,7 @@ async fn optional_delivery_names_do_not_block_creation(e: &Env) {
         )
         .await;
     assert!(!item["tags"].as_array().unwrap().contains(&ordinary["id"]));
-    let (_, state) = e.call("GET", "/api/state", None).await;
+    let (_, state) = e.call("GET", "/api/shell", None).await;
     let kept = state["tags"]
         .as_array()
         .unwrap()
@@ -680,7 +692,7 @@ async fn optional_delivery_names_do_not_block_creation(e: &Env) {
 /// ST-34 over HTTP: an item made through the API has one category; no write leaves it with none or two;
 /// the categories themselves cannot be deleted, merged or joined.
 async fn an_item_keeps_exactly_one_category(e: &Env) {
-    let (_, state) = e.call("GET", "/api/state", None).await;
+    let (_, state) = e.call("GET", "/api/shell", None).await;
     let tags = state["tags"].as_array().expect("tags").clone();
     let kind = |n: &str| {
         tags.iter()
@@ -1144,7 +1156,7 @@ async fn project_setup_requires_owner_and_a_current_preview_and_registers_after_
     assert_eq!(answer["project"]["kind"], "dir");
     assert_eq!(answer["project"]["path"], json!(target));
     assert_eq!(target.read_dir().unwrap().count(), 0);
-    let (_, state) = e.call("GET", "/api/state", None).await;
+    let (_, state) = e.call("GET", "/api/shell", None).await;
     assert!(
         state["projects"]
             .as_array()

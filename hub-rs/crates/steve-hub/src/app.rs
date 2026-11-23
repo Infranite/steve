@@ -522,6 +522,12 @@ pub async fn boot(st: &AppState) -> anyhow::Result<()> {
             }
         })
     });
+    if let Some(p) = st.projection.clone() {
+        st.jobs.start("hub.projection", || {
+            p.start()
+                .unwrap_or_else(|| steve_runtime::spawn("hub.projection", async {}))
+        });
+    }
     // recover() reports a finished release first, as in TS
     boot_step("recover", st.domain.recover().await)?;
     st.domain.spawn_background();
@@ -535,7 +541,7 @@ pub async fn boot(st: &AppState) -> anyhow::Result<()> {
             steve_runtime::spawn("hub.presence", st.presence.clone().sweep(m.store.clone()))
         });
     }
-    // warm the runtimes cache so the first /api/state doesn't wait for `claude --version`
+    // warm the runtimes cache so the first /api/runtimes doesn't wait for `claude --version`
     let rt = st.clone();
     st.jobs.start("hub.runtimes", || {
         steve_runtime::spawn("hub.runtimes", async move {

@@ -80,7 +80,8 @@ test("the dialog picks up the running install, else the newest unfinished one", 
   assert.equal(resumable([]), null)
 })
 
-test("every install string is there in both languages", () => {
+test("every install string is there in both languages", async () => {
+  await i18n.loadLanguages("en")
   for (const lang of ["zh-CN", "en"]) {
     for (const key of ["progress", "working", "failed", "finished", "pending", "of", "failedAt", "joined", "retry", "cancel", "cancelHint",
       "kind.probe", "kind.fetch", "kind.send", "kind.setup",

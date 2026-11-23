@@ -29,7 +29,11 @@ pub enum WorkEvent {
         ws: WorkspaceId,
     },
     #[serde(rename = "message")]
-    Message { id: MessageId, ws: WorkspaceId },
+    Message {
+        id: MessageId,
+        ws: WorkspaceId,
+        space: String,
+    },
     #[serde(rename = "thread.run")]
     ThreadRun { id: ThreadRunId, ws: WorkspaceId },
 }

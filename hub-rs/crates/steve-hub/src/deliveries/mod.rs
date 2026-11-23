@@ -143,7 +143,7 @@ impl Service {
     pub fn url(&self, id: &str, workspace: &str) -> String {
         let mut url = reqwest::Url::parse(&format!("{}/deliveries/{id}", self.base))
             .expect("configured public URL");
-        // The page must bind this selector BEFORE /api/state picks the remembered workspace.
+        // The page must bind this selector BEFORE the Web bootstrap picks the remembered workspace.
         // Headers or query selectors on API requests still go through normal membership checks.
         url.query_pairs_mut().append_pair("ws", workspace);
         url.into()

@@ -9,6 +9,7 @@ const errors = []
 const page = await browser.newPage({ locale: "zh-CN", viewport: { width: 390, height: 844 } })
 page.on("pageerror", e => errors.push(e.message))
 page.on("console", m => { if (m.type() === "error" && m.text().includes("Base UI:")) errors.push(m.text()) })
+let currentReads = 0, registrationFailure = false
 let registration = null, starts = 0, reads = 0, retry = 0, deviceCancelled = false, deviceDrop = false, deviceBody
 let holdStart = false, releaseStart, sawStart
 const pending = () => ({ id: "reg_fixture", brand: "feishu", state: "pending", verification_uri_complete: "https://open.feishu.cn/page/cli?user_code=FAKE", user_code: "FAKE", expires_at: Date.now() + 600_000, interval: 1 })
@@ -18,7 +19,11 @@ await page.route("**/*", async route => {
   if (!u.pathname.startsWith("/api/")) return route.continue()
   let data = {}
   const path = u.pathname
-  if (path.endsWith("/registrations/current")) data = registration
+  if (path.endsWith("/registrations/current")) {
+    currentReads++
+    if (registrationFailure) return route.fulfill({ status: 404, contentType: "text/plain", body: "Not Found" })
+    data = registration
+  }
   else if (path.endsWith("/registrations") && req.method() === "POST") { starts++; registration = pending(); data = registration }
   else if (path.endsWith("/reg_fixture/cancel")) { registration = { ...registration, state: "cancelled", app_may_exist: true }; data = registration }
   else if (path.endsWith("/reg_fixture/retry")) { retry++; registration = { ...registration, state: "succeeded", error: undefined, connection_id: "con_fixture" }; data = registration }
@@ -32,7 +37,17 @@ await page.route("**/*", async route => {
   return route.fulfill({ contentType: "application/json", body: JSON.stringify(data) })
 })
 try {
+  await page.goto(base + "/test/fixtures/feishu.html?disabled")
+  await page.locator("[data-registration-disabled]").waitFor()
+  assert.equal(currentReads, 0, "a disabled extension is not probed")
+  registrationFailure = true
   await page.goto(base + "/test/fixtures/feishu.html")
+  await page.locator("[data-app-registration] [role=alert]").waitFor()
+  assert.equal(await page.locator("[data-registration-disabled]").count(), 0)
+  assert.equal(await page.locator("[data-registration-start]").isDisabled(), true)
+  registrationFailure = false
+  await page.locator("[data-app-registration] [role=alert] button").click()
+  await page.locator("[data-registration-start]:enabled").waitFor()
   await page.locator("[data-registration-start]").waitFor()
   await page.locator("[data-registration-start]").click({ timeout: 5000 })
   await page.locator('[data-registration-state="pending"]').waitFor()

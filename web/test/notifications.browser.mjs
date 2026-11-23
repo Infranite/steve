@@ -31,9 +31,12 @@ async function open(options = {}) {
     calls.push({ method, path: p, workspace, origin: new URL(req.url()).origin, body: req.postData() ? req.postDataJSON() : null })
     const json = (body, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) })
     const error = () => json({ error: "fixture unavailable" }, 503)
-    if (p === "/auth/hello") return json({ name: "steve", api: 1, version: "fixture", login: { token: true, oidc: false } })
+    if (p === "/auth/hello") return json({ name: "steve", api: 2, version: "fixture", login: { token: true, oidc: false } })
     if (p === "/api/workspaces/ws_2/switch") return json({ ok: true })
-    if (p === "/api/state") {
+    if (p === "/api/snapshot") return json({ epoch: "e", rev: 1, cursor: "e:1", views: { item: [], session: [], decision: [], message: { views: [], next: null } } })
+    if (p === "/api/summary") return json({ thinking: false, hold: null })
+    if (p === "/api/notifications") return json(state.notifications)
+    if (p === "/api/shell") {
       if (options.otherModel && workspace === "ws_2") { signalState(); await stateGate }
       return json({ ...state, ...(options.otherModel ? { workspace: workspace === "ws_2" ? otherWorkspace : state.workspace, workspaces: [state.workspace, otherWorkspace] } : {}), settings: { theme } })
     }

@@ -27,6 +27,7 @@ pub mod slim;
 pub mod stats;
 pub mod stream;
 mod updates;
+mod views;
 pub mod yolo;
 
 use std::sync::Arc;
@@ -63,11 +64,11 @@ pub struct Inner {
     pub node_harnesses: node_harnesses::Inventory,
     /// The models each harness offers (`/system/models`).
     pub catalog: crate::catalog::Catalog,
-    pub state_cache: misc::StateCache,
     /// `client_id` of recent sends (`POST /thread`, `POST /items`), so a retry does not send twice.
     pub dedupe: dedupe::Dedupe,
     /// The new modules (steve-modules), for config drafts and decisions they own.
     pub modules: Option<steve_modules::Modules>,
+    pub optional_modules: steve_types::integrations::OptionalModules,
     /// Remote Nodes (enabled by default): pairing, the `/node/ws` listener, their coordinators.
     pub nodes: Option<Arc<crate::nodes::NodeService>>,
     /// The local Node's coordinator (`STEVE_NODE_MODE=local`), for `/healthz`.
@@ -81,6 +82,15 @@ pub struct Inner {
     /// Which signed-in clients hold the live stream open now (G6).
     pub presence: Arc<crate::presence::Presence>,
     pub jobs: Arc<crate::jobs::Tasks>,
+    /// The read projection (views, snapshots, patches), on the modules' store.
+    pub projection: Option<Arc<crate::projection::Projection>>,
+}
+
+fn runtime_routes(inner: &Inner) -> crate::projection::RuntimeRoutes {
+    crate::projection::RuntimeRoutes {
+        local: inner.node.as_ref().map(|n| n.node_id().to_string()),
+        remote: inner.nodes.is_some(),
+    }
 }
 
 impl std::ops::Deref for AppState {
@@ -114,15 +124,16 @@ impl AppState {
             node_harnesses,
             caches,
             origins,
-            state_cache: Default::default(),
             dedupe: Default::default(),
             modules: None,
+            optional_modules: Default::default(),
             nodes: None,
             node: None,
             history: None,
             workspaces: None,
             oidc: None,
             presence: Default::default(),
+            projection: None,
         }))
     }
 
@@ -132,10 +143,31 @@ impl AppState {
         self.jobs.stop().await;
     }
 
+    pub(crate) fn runtime_routes(&self) -> crate::projection::RuntimeRoutes {
+        runtime_routes(&self.0)
+    }
+
+    pub(crate) fn with_optional_modules(
+        mut self,
+        modules: steve_types::integrations::OptionalModules,
+    ) -> Self {
+        Arc::get_mut(&mut self.0)
+            .expect("Hub state is still being assembled")
+            .optional_modules = modules;
+        self
+    }
+
     /// The same state with the new modules attached.
     pub fn with_modules(self, modules: Option<steve_modules::Modules>) -> Self {
         match Arc::try_unwrap(self.0) {
             Ok(mut inner) => {
+                inner.projection = modules.as_ref().map(|m| {
+                    crate::projection::Projection::new(
+                        m.store.clone(),
+                        inner.bus.clone(),
+                        runtime_routes(&inner),
+                    )
+                });
                 inner.deliveries = modules.as_ref().map(|m| {
                     crate::deliveries::Service::new(
                         m.store.clone(),
@@ -566,9 +598,10 @@ async fn require_user(State(st): State<AppState>, mut req: Request, next: Next) 
     }
 }
 
-/// Unknown `/api` paths: GET falls through to the SPA index (after auth), anything else is Hono's 404.
-async fn api_fallback(State(st): State<AppState>, req: Request) -> Response {
-    crate::web::serve(&st.cfg, req).await
+/// API requests only match registered resources.
+async fn api_fallback() -> Response {
+    use axum::response::IntoResponse;
+    ApiError::no_route().into_response()
 }
 
 /// The largest request body the API reads (uploads to `/files` have their own limit).
@@ -598,6 +631,7 @@ pub fn router(st: AppState, modules: Router) -> Router {
         harness_updates::routes,
         node_harnesses::routes,
         stream::routes,
+        views::routes,
     ];
     let routes = areas
         .iter()
@@ -777,24 +811,6 @@ pub(crate) fn summary(r: &dyn Repo, i: Obj) -> BResult<Obj> {
     Ok(summary_with(i, x))
 }
 
-/// `items.all(ws).map(summary)`, batched when the backend can.
-pub(crate) fn summaries(r: &dyn Repo, ws: &str) -> BResult<Vec<Obj>> {
-    let items = r.items_all(ws)?;
-    match r.item_extras(ws)? {
-        Some(mut m) => Ok(items
-            .into_iter()
-            .map(|i| {
-                let x = m.remove(&str_of(&i, "id")).unwrap_or_default();
-                summary_with(i, x)
-            })
-            .collect()),
-        None => items.into_iter().map(|i| summary(r, i)).collect(),
-    }
-}
-
-/// `sessOut`: the raw row without `token_hash`/`import_key`, `readonly` as a boolean, plus `busy` and `queued`,
-/// the harness's own session id (`harness_session_id`, also for an imported session), and `room` when its
-/// next turn waits because its device is full (`{running, max, waiting}`, [`steve_store::runtime::session_room`]).
 pub(crate) fn sess_out(r: &dyn Repo, d: &dyn Domain, s: Obj) -> BResult<Obj> {
     let id = str_of(&s, "id");
     let q = r.queued_list(&id)?;
@@ -820,24 +836,6 @@ pub(crate) fn sess_out_with(
     s.insert("harness_session_id".into(), json!(native));
     s.insert("room".into(), room.unwrap_or(Value::Null));
     s
-}
-
-/// `sessions.list(ws).map(sessOut)`, batched when the backend can.
-pub(crate) fn sessions_out(r: &dyn Repo, d: &dyn Domain, ws: &str) -> BResult<Vec<Obj>> {
-    let list = r.sessions_list(ws)?;
-    let mut rooms = r.waiting_for_room()?;
-    match r.queued_by_session(ws)? {
-        Some(mut m) => Ok(list
-            .into_iter()
-            .map(|s| {
-                let id = str_of(&s, "id");
-                let q = m.remove(&id).unwrap_or_default();
-                let room = rooms.remove(&id);
-                sess_out_with(d, s, q, room)
-            })
-            .collect()),
-        None => list.into_iter().map(|s| sess_out(r, d, s)).collect(),
-    }
 }
 
 /// Workspaces as the pages show them: a seeded name in the request's language ([`steve_store::seeded`]).
@@ -868,17 +866,12 @@ fn bot_ws(r: &dyn Repo, x: Option<&crate::backend::BotExtras>, id: &str) -> BRes
 
 /// `bots.list(ws).map(botOut)` and `allBots`, batched when the backend can.
 pub(crate) fn bots_out(r: &dyn Repo, ws: &str) -> BResult<(Vec<Obj>, Vec<Value>)> {
-    let x = r.bot_extras(ws)?;
+    let x = r.bot_extras()?;
     let mut bots = vec![];
     for mut b in r.bots_list(Some(ws))? {
         let id = str_of(&b, "id");
         steve_store::seeded::show(&mut b, steve_store::seeded::BOT);
         b.insert("workspaces".into(), json!(bot_ws(r, x.as_ref(), &id)?));
-        let n = match &x {
-            Some(x) => x.memories.get(&id).copied().unwrap_or(0),
-            None => r.memories_count(&id, ws)?,
-        };
-        b.insert("memories".into(), json!(n));
         let mcp = match &x {
             Some(x) => x.mcp.get(&id).cloned().unwrap_or_default(),
             None => r.bot_mcp_servers(&id)?,

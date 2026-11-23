@@ -12,7 +12,6 @@ import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { go, Page, Group, Row, SectionLabel, Empty, BotAvatar, Panel, Chevron, Blank } from "@/ui"
 import { Select } from "@/view-shared"
-import { Unwired } from "@/unwired"
 import { st, botName } from "@/store"
 import { useLoad, useBusy } from "@/accounts/load"
 import { channelsApi, type Persona, type Reveal } from "@/api/channels"
@@ -32,7 +31,6 @@ export function PersonasSection({ bot, panel = false }: { bot?: string; panel?: 
   const t = useT()
   const L = useLoad(() => channelsApi.personas(), [], ["persona", "space", "channel"])
   const [busy, act] = useBusy()
-  if (L.s === "unwired") return bot ? <Empty title={t("channels:persona.unwiredTitle")} sub={t("channels:persona.unwiredSub")} /> : <Unwired id="personas" />
   if (L.s === "loading") return <div className="flex justify-center py-10"><Spinner className="size-5 text-muted-foreground" /></div>
   if (L.s === "error") return <Empty title={L.err} />
   const xs = bot ? L.data.filter((p) => p.bot_id === bot) : L.data
@@ -73,7 +71,6 @@ function PersonaView({ id }: { id: string }) {
   /* a change from elsewhere (the stream) replaces the form only when nothing is being edited */
   useEffect(() => { if (p) { setReveal(p.reveal); setForm((f) => (f && dirty(f, p) ? f : formOf(p))) } }, [p?.revision, p?.id])
   const preview = useMemo(() => (p && form && reveal ? introOf({ name: form.name, intro: form.intro, reveal }, ownerOf(p)) : ""), [p, form, reveal])
-  if (L.s === "unwired") return <Unwired id="personas" />
   const back: [string, string] = ["#/channels/personas", t("channels:persona.title")]
   if (L.s === "loading") return <Page title={t("channels:persona.title")} back={back}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
   if (L.s === "error") return <Page title={t("channels:persona.title")} back={back}><Empty title={L.status === 404 ? t("channels:persona.notFound") : L.err} sub={L.status === 404 ? t("channels:persona.notFoundSub") : undefined} /></Page>

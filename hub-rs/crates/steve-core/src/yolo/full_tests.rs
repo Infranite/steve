@@ -129,7 +129,7 @@ fn full_access_keeps_steve_data_and_what_it_promises() {
             exec(&format!("rm -rf {home}/worktrees/ST-9"), &cwd),
             "limit.4",
         ),
-        (exec("curl -s localhost:8440/api/state", &cwd), "limit.4"),
+        (exec("curl -s localhost:8440/api/summary", &cwd), "limit.4"),
         (exec("launchctl kickstart gui/501/steve", &cwd), "limit.4"),
         (exec("git push origin HEAD", &cwd), "limit.5"),
         (exec("gh pr create --fill", &cwd), "limit.5"),

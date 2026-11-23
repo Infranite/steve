@@ -187,6 +187,15 @@ pub async fn get_one(
     st.read(move |r| {
         let i = own(r.item_get(&id)?, &c.ws, Noun::Item)?;
         let mut out = summary(r, i)?;
+        let mut text = r
+            .item_text(&c.ws, &id)?
+            .ok_or_else(|| ApiError::not_found(Noun::Item.missing()))?;
+        if let Some(Value::String(now)) = text.get_mut("now")
+            && let std::borrow::Cow::Owned(shown) = steve_core::now_line::shown(now)
+        {
+            *now = shown;
+        }
+        out.extend(text);
         if let Some(dispatch) = dispatch {
             out.insert("dispatch".into(), dispatch);
         }
@@ -199,7 +208,6 @@ pub async fn get_one(
         out.insert("workflow".into(), workflow);
         out.insert("dependency_wait".into(), dependency_wait);
         out.insert("cycles".into(), objs(r.item_cycles(&id)?));
-        out.insert("goalsList".into(), objs(r.item_goals(&id)?));
         out.insert("planRounds".into(), objs(r.item_plan_rounds(&id)?));
         out.insert("timeline".into(), objs(r.timeline_list(&id)?));
         out.insert("artifacts".into(), objs(r.artifacts_list(&id)?));
@@ -210,7 +218,8 @@ pub async fn get_one(
         out.insert("annotations".into(), objs(r.annotations_list(&id)?));
         out.insert(
             "decisions".into(),
-            objs(crate::decision_text::all(r.decisions_of_item(&id)?)),
+            serde_json::to_value(r.decision_views_of_item(&c.ws, &id)?)
+                .map_err(|e| ApiError::internal(e.to_string()))?,
         );
         out.insert("dependents".into(), json!(r.deps_dependents(&id)?));
         out.insert("thread".into(), r.thread_item(&id)?.unwrap_or(Value::Null));

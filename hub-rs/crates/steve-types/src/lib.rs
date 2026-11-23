@@ -38,6 +38,7 @@ pub mod raw;
 pub mod stats;
 pub mod stream;
 pub mod vault;
+pub mod view;
 pub mod work;
 
 pub use error::{
@@ -51,6 +52,13 @@ pub use fact::{AlarmFired, AlarmLine, DurableFact, MailDelivery, PrSupplement};
 pub use id::*;
 pub use raw::RawJson;
 pub use stream::StreamControl;
+mod closeout;
+pub use closeout::{Closeout, PullChecks, PullSnapshot};
+pub use view::{
+    ById, DecisionTier, DecisionView, FoldReason, ItemClosing, ItemParent, ItemSnooze, ItemView,
+    ItemWorkflow, MessageView, Op, OperationBlocker, PageOf, Patch, PatchOp, PatchTag, SessionView,
+    SessionWaiting, Snapshot, SnapshotViews, View, ViewKind,
+};
 
 #[cfg(test)]
 mod r#gen;

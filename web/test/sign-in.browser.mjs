@@ -13,7 +13,7 @@ async function open({ lang = "zh-CN", reducedMotion = "no-preference" } = {}) {
   await page.route((u) => u.pathname === "/auth/hello" || u.pathname.startsWith("/api/"), (route) => {
     const p = new URL(route.request().url()).pathname
     const json = (body, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) })
-    if (p === "/auth/hello") return json({ name: "steve", api: 1, version: "fixture", login: { token: true, oidc: false } })
+    if (p === "/auth/hello") return json({ name: "steve", api: 2, version: "fixture", login: { token: true, oidc: false } })
     if (p === "/api/plugins/themes") return json({ themes: [] })
     return json({ error: "unauthenticated", code: "unauthenticated", retry: { kind: "never" }, reason: null, params: {}, login: null, token: true }, 401)
   })

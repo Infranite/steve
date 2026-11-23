@@ -165,6 +165,7 @@ fn atomic_reads_uncommitted_writes_and_defers_events_until_outer_commit() {
 fn atomic_rolls_back_all_tables_and_discards_events_on_err_and_panic() {
     let (_dir, store, events) = open_tracked();
     let wake = store.outbox_wake();
+    let initial_settings = store.settings().all(WS).unwrap();
 
     let err = store.write(|_| -> steve_store::Result<()> {
         let item = store
@@ -194,7 +195,7 @@ fn atomic_rolls_back_all_tables_and_discards_events_on_err_and_panic() {
     });
     assert!(err.is_err());
     assert!(store.items().list(WS, false).unwrap().is_empty());
-    assert!(store.settings().all(WS).unwrap().is_empty());
+    assert_eq!(store.settings().all(WS).unwrap(), initial_settings);
     assert!(events.lock().unwrap().is_empty());
 
     // Panic unwind must also roll back cleanly, drop staged events, and leave the Store usable.

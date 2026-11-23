@@ -1,13 +1,13 @@
+import { getItems } from "@/store"
 /* The items board, on affectUI's Agent Inbox, with Steve's own data: every item's one state (item-state.ts via
- * itemDisplayState) decides its column the way the items page counts and filters it (item-lanes.ts), its "now" line
- * or open card says where it stands, and its plan gives the progress. Nothing here is made up: what Steve has no data
- * for (tool and source counts, a per-task running clock) is left out. */
+ * itemDisplayState) decides its column the way the items page counts and filters it (item-lanes.ts).
+ * Plan counts are projected with the list. The plan text is loaded when the item is opened. */
 import { CloseoutSummary } from "@/item-closeout"
 import { AgentInbox, type AgentTask } from "@/components/affect/agent-inbox"
 import { isWorkflowChild, itemDisplayState, partitionSubtasks } from "@/item-workflow-relation"
-import { besideState, laneOf, planProgress } from "@/item-lanes"
+import { besideState, laneOf } from "@/item-lanes"
 import { stepOf } from "@/running-pill"
-import { botName, st, type Item } from "@/store"
+import { botName, type Item } from "@/store"
 import { go, Meta, Tags } from "@/ui"
 import { dueLabel, ProjectChip } from "@/view-shared"
 import { useT } from "@/i18n"
@@ -15,18 +15,15 @@ import { useT } from "@/i18n"
 /** `cap`: the Done column shows this many until you ask for all of them, as the list folds its closed groups */
 export function ItemsBoard({ xs, cap }: { xs: Item[]; cap: number }) {
   const t = useT()
-  const pool = st.items.filter((x) => !x.arch)
+  const pool = getItems().filter((x) => !x.arch)
   const tasks: AgentTask[] = xs.flatMap((i) => {
     const s = itemDisplayState(i), lane = laneOf(s)
     if (!lane) return []
     const kids = pool.filter((c) => isWorkflowChild(c) && c.parent?.item === i.id)
     const sub = kids.length ? partitionSubtasks(i, kids) : null
-    const said = t(`views:itemState.${s.kind}`), prog = planProgress(i.plan)
+    const said = t(`views:itemState.${s.kind}`)
     // the line under the title: what it is on, without the state the pill beside it already says
     const desc = besideState(stepOf(i, ""), said)
-    const plan = i.plan?.filter((x) => x[1] === 1).map((x) => ({ label: x[0] })) ?? []
-    // the step it is on is marked with its state only while a session works on it
-    const next = i.plan?.find((x) => x[1] !== 1)
     const details = (i.closeout || i.project || i.due || i.tags?.length || sub) ? (
       <div className="flex flex-col gap-1.5">
         {i.closeout && <CloseoutSummary value={i.closeout} compact />}
@@ -38,9 +35,7 @@ export function ItemsBoard({ xs, cap }: { xs: Item[]; cap: number }) {
     return [{
       id: i.id, code: i.id, title: i.t, description: desc && desc !== said ? desc : undefined, agent: botName(i.b), lane,
       status: lane === "done" ? "done" : s.tone === "fail" ? "failed" : lane === "needs" ? "waiting" : "running", stateText: said, tone: s.tone, time: i.up,
-      progress: prog ?? undefined, details,
-      // unfolded: the plan's last finished steps and the one it is on
-      steps: next ? [...plan, { label: next[0], time: s.kind === "working" ? said : undefined }] : plan,
+      progress: i.planTotal ? { done: i.planDone ?? 0, total: i.planTotal } : undefined, details,
     } satisfies AgentTask]
   })
   return (

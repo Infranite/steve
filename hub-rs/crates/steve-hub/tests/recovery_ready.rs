@@ -265,7 +265,7 @@ impl Client {
 
 /// The claude-code bot's id.
 async fn bot(c: &Client) -> String {
-    let (_, state) = c.call("GET", "/api/state", None).await;
+    let (_, state) = c.call("GET", "/api/shell", None).await;
     state["bots"]
         .as_array()
         .and_then(|bs| bs.iter().find(|b| b["harness"] == "claude-code"))
@@ -377,7 +377,7 @@ async fn a_failing_recovery_is_reported_and_the_hub_still_serves() {
     assert_eq!(v["ok"], true);
     assert_eq!(v["recovery"]["state"], "failed", "{v}");
     let c = Client::login(&h).await;
-    let (st, _) = c.call("GET", "/api/state", None).await;
+    let (st, _) = c.call("GET", "/api/shell", None).await;
     assert_eq!(st, 200, "the app serves");
     // the Node's recovery is not held back by the other one
     health_until(&h, 30, |v| v["node"]["reconciled"] == true).await;
@@ -424,7 +424,7 @@ async fn nothing_is_sent_behind_the_upgrade_gate_and_what_waited_goes_once_commi
     let _hub = spawn(&h, Some(&id));
     let gate = health_until(&h, 60, |v| v["maintenance"] == true).await;
     assert_eq!(gate["upgrade_id"], json!(id));
-    let r = reqwest::get(format!("{}/api/state", h.base()))
+    let r = reqwest::get(format!("{}/api/summary", h.base()))
         .await
         .expect("request");
     assert_eq!(r.status().as_u16(), 503, "no app behind the gate");

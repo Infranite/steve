@@ -1,5 +1,4 @@
-/* Accounts and connections (accounts-vault.md §5): the Hub's /api/systems, /api/accounts, /api/match-rules and
- * /api/connections. On a Hub without the module, `NotWired` tells a page to fall back to its Unwired placeholder. */
+/** Accounts, adapters and connections. */
 import { modReq, qs as q } from "@/api"
 import { t } from "@/i18n"
 export const mget = <T>(p: string) => modReq<T>("GET", p)

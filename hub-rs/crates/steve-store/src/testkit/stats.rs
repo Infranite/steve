@@ -781,7 +781,7 @@ pub fn merge_terminal_receipt(s: &Store, payload: &serde_json::Value, at: i64) -
     use crate::runtime::{self, ReceiptState};
     s.write(|tx| {
         assert!(runtime::merge_receipt_in(
-            tx.conn,
+            tx,
             "a",
             ReceiptState::Finished,
             true,
@@ -789,7 +789,7 @@ pub fn merge_terminal_receipt(s: &Store, payload: &serde_json::Value, at: i64) -
             at - 20_000
         )?);
         assert!(!runtime::merge_receipt_in(
-            tx.conn,
+            tx,
             "a",
             ReceiptState::Finished,
             true,
@@ -803,7 +803,7 @@ pub fn merge_terminal_receipt(s: &Store, payload: &serde_json::Value, at: i64) -
 pub fn merge_unsent_rejection(s: &Store, payload: &serde_json::Value, at: i64) -> Result<()> {
     use crate::runtime::{self, ReceiptState};
     s.write(|tx| {
-        runtime::merge_receipt_in(tx.conn, "a", ReceiptState::Rejected, false, payload, at)?;
+        runtime::merge_receipt_in(tx, "a", ReceiptState::Rejected, false, payload, at)?;
         Ok::<_, crate::StoreError>(())
     })
 }

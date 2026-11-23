@@ -1,6 +1,4 @@
-/* 接入 (integrations): the Hub's `GET /api/connections/integrations` — every provider Steve can connect, its ways
- * in (adapters) and planned ones, the caller's connections, and per connection the state of each capability area.
- * On a Hub without the module, `NotWired` makes the page fall back to its Unwired placeholder. */
+/** Providers, their adapters and current connections. */
 import { modReq } from "@/api"
 import { lazy } from "@/api/accounts"
 import { t } from "@/i18n"
@@ -56,9 +54,9 @@ export const identityLabel = (i: string) => IDENTITY_LABEL[i] ?? i
 /** an adapter of the integrations list in the shape the generic connect dialog takes */
 export const asAdapter = (a: IAdapter, system: string): RAdapter => ({ id: a.id, system, name: a.name, auth: a.auth, caps: a.capabilities.flatMap((c) => c.caps), device: a.device, fields: a.fields })
 /** the channel-capable connections' provider, by adapter id (the 渠道 view's badges and filters) */
-export function providerByAdapter(x: Integrations): Record<string, { id: string; name: string; identity: Identity; channel: boolean }> {
-  const out: Record<string, { id: string; name: string; identity: Identity; channel: boolean }> = {}
-  for (const p of x.providers) for (const a of p.adapters) out[a.id] = { id: p.id, name: p.name, identity: a.identity, channel: a.capabilities.some((c) => c.area === "channel" && !c.planned) }
+export function providerByAdapter(x: Integrations): Record<string, { id: string; name: string }> {
+  const out: Record<string, { id: string; name: string }> = {}
+  for (const p of x.providers) for (const a of p.adapters) out[a.id] = { id: p.id, name: p.name }
   return out
 }
 

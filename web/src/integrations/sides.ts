@@ -27,7 +27,7 @@ export const selfSideOf = (adapters: SideAdapter[], bots: string[] = botAdapterI
 /** how a connection of `a` is made, in the order offered: its declared start; an adapter without a declaration, its
  * OAuth flow (and the device code when offered) or its credential form */
 export function startsOf(a: SideAdapter | null | undefined): StartMethod[] {
-  if (!a) return [{ kind: "oauth" }, { kind: "device" }]
+  if (!a) return []
   if (a.channel?.start) return a.channel.start
   const out: StartMethod[] = []
   if (a.auth === "oauth") { out.push({ kind: "oauth" }); if (a.device) out.push({ kind: "device" }) }

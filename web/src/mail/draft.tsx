@@ -18,7 +18,6 @@ import { StatusDot } from "@/ui"
 import { Files } from "@/attach"
 import { report } from "@/accounts/load"
 import { mailApi, DRAFT_STATUS, type Draft, type Rcpt } from "@/api/mail"
-import { isNotWired } from "@/api"
 import { useT } from "@/i18n"
 
 const EDITABLE = new Set(["draft", "pending"])
@@ -147,16 +146,16 @@ function DraftParts({ d0, onChange, children }: { d0: Draft; onChange?: () => vo
 type P = { w: Wait; act: (c: string, t?: string) => Promise<void>; busy: boolean; head: (t: ReactNode) => ReactNode; foot: (c: ReactNode) => ReactNode }
 export function MailDraftCard({ w, head, foot, act, busy }: P) {
   const t = useT()
-  const [d, setD] = useState<Draft | null>(null), [err, setErr] = useState<"" | "unwired" | string>("")
+  const [d, setD] = useState<Draft | null>(null), [err, setErr] = useState("")
   useEffect(() => {
     let live = true
-    if (w.subjectId) mailApi.draft(w.subjectId).then((r) => live && setD(r), (e) => live && setErr(isNotWired(e) ? "unwired" : (e as Error).message))
+    if (w.subjectId) mailApi.draft(w.subjectId).then((r) => live && setD(r), (e) => live && setErr((e as Error).message))
     return () => { live = false }
   }, [w.subjectId, w.decision])
   /* without the draft (another Hub, or it's gone) the card still answers from the decision's own text */
   if (!d) return <>
     {head(w.q)}
-    <CardContent className="pb-4">{err ? <><pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words type-body text-muted-foreground">{w.draft}</pre>{err !== "unwired" && <div className="mt-2 type-footnote text-destructive">{err}</div>}</>
+    <CardContent className="pb-4">{err ? <><pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words type-body text-muted-foreground">{w.draft}</pre><div role="alert" className="mt-2 type-footnote text-destructive">{err}</div></>
       : <div className="flex justify-center py-6"><Spinner className="text-muted-foreground" /></div>}</CardContent>
     {err && foot(<>{w.options.map((choice) => <Button key={choice} variant="outline" disabled={busy} onClick={() => void act(choice)}>{({ no: t("mail:draft.no"), send: t("mail:draft.send"), retry: t("common:action.retry"), discard: t("mail:draft.discardTodo"), confirmed_not_sent: t("mail:draft.confirmedNotSent") } as Record<string, string>)[choice] ?? choice}</Button>)}</>)}
   </>

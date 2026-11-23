@@ -62,11 +62,11 @@ fn from_json<T: DeserializeOwned>(v: Value) -> BResult<T> {
     serde_json::from_value(v).map_err(|e| BackendError::msg(e.to_string()))
 }
 
-/// Runs a synchronous core call on the blocking pool, in the request's language.
+/// Runs a synchronous core call on the blocking pool, in the request's language and context.
 async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> Result<T, CoreError> + Send + 'static,
 ) -> BResult<T> {
-    tokio::task::spawn_blocking(steve_i18n::carry(f))
+    tokio::task::spawn_blocking(crate::metrics::carry(steve_i18n::carry(f)))
         .await
         .map_err(|e| BackendError::msg(format!("task failed: {e}")))?
         .map_err(cerr)
@@ -1346,10 +1346,6 @@ impl Domain for CoreDomain {
         let (c, id, actor) = (self.core.clone(), id.to_string(), actor.to_string());
         blocking(move || c.workflow_change(&id, args, &actor)).await
     }
-    async fn lifecycle_views(&self, ws: &str) -> BResult<std::collections::HashMap<String, Value>> {
-        let (c, ws) = (self.core.clone(), ws.to_string());
-        blocking(move || c.lifecycle_views_ws(&ws)).await
-    }
     async fn lifecycle_tick(&self) -> BResult<usize> {
         let c = self.core.clone();
         blocking(move || c.lifecycle_tick()).await
@@ -1594,9 +1590,8 @@ impl Domain for CoreDomain {
         let (c, ws) = (self.core.clone(), ws.to_string());
         blocking(move || c.stop(&ws)).await
     }
-    async fn thread_busy(&self, ws: &str) -> BResult<bool> {
-        let (c, ws) = (self.core.clone(), ws.to_string());
-        blocking(move || c.main_busy(&ws)).await
+    fn thread_active(&self, ws: &str) -> bool {
+        self.core.main_busy_besides(ws)
     }
     async fn thread_queued_edit(&self, ws: &str, message: &str, text: &str) -> BResult<bool> {
         let (c, ws, m, t) = (

@@ -1,5 +1,5 @@
 /* What an outbound message answers, above its draft on the approval card: the message it replies to
- * (with the few before it, folded), where it goes and as whom. Hidden when the Hub has no such route. */
+ * (with the few before it, folded), where it goes and as whom. */
 import { useEffect, useState } from "react"
 import { outContext, type ROutContext } from "@/api/channels"
 import { useT } from "@/i18n"
@@ -15,7 +15,7 @@ export function OutContext({ id, context }: { id?: string; context?: ROutContext
   const [c, setC] = useState<ROutContext | null>(null)
   const [open, setOpen] = useState(false)
   const [loaded, setLoaded] = useState<string | undefined>()
-  useEffect(() => { if (!id || context !== undefined) return; let live = true; setC(null); setLoaded(undefined); setOpen(false); outContext(id).then((x) => { if (live) { setC(x ?? null); setLoaded(id) } }, () => { if (live) { setC(null); setLoaded(id) } }); return () => { live = false } }, [id, context])
+  useEffect(() => { if (!id || context !== undefined) return; let live = true; setC(null); setLoaded(undefined); setOpen(false); outContext(id).then((x) => { if (live) { setC(x); setLoaded(id) } }, () => { if (live) { setC(null); setLoaded(id) } }); return () => { live = false } }, [id, context])
   const shown = context === undefined ? (loaded === id ? c : null) : context
   if (!shown) return context !== undefined ? null : <div role="status" className="type-footnote text-muted-foreground" data-out-context-state={id && loaded !== id ? "loading" : "unavailable"}>{t(id && loaded !== id ? "common:state.loading" : "channels:reply.contextUnavailable")}</div>
   const who = shown.as_you ? t("channels:out.asYou") : shown.persona ? t("channels:out.asPersona", { persona: shown.persona }) : t("channels:out.asBot")
