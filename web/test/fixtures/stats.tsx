@@ -1,6 +1,6 @@
 import { seedItems } from "./view-data"
-/* 统计页夹具（ST-40）：真实的 StatsView，事项和 YOLO 状态直接写进 store，统计接口由浏览器测试拦截。
- * ?theme=dark 切深色，?yolo=paused|off|full 切运行状态，?view=inbox 看待处理页（熔断暂停时顶上那一条），
+/* 统计页夹具（ST-40）：真实的 StatsView，事项直接写进 store，统计接口由浏览器测试拦截。
+ * ?theme=dark 切深色，?view=inbox 看待处理页，
  * ?view=item&id=ST-1 看一件事项的下钻（费用去向）。 */
 import { StrictMode } from "react"
 import { createRoot } from "react-dom/client"
@@ -30,12 +30,6 @@ seedItems([
 ])
 st.projects = [{ id: "p1", name: "Steve" } as any]
 st.bots = { dev: { id: "dev", n: "Steve 开发 Bot" } as any }
-const y = q.get("yolo") ?? "full"
-st.yolo = y === "none" ? null : {
-  on: y !== "off", mode: y === "full" ? "full" : y === "off" ? "off" : "on", full: y === "full", active: y !== "off" && y !== "paused", forced_off: null, forced_reason: null,
-  paused: y === "paused" ? { code: "undo_burst", reason: "1 小时内撤销了 2 次", at: now } : null, window: { id: "w1", started: now - 3600000, include_open: true }, scopes: [],
-  counts: { decided: 3, declined: 1, scheduled: 0 },
-}
 emit()
 
 function Fixture() {

@@ -1,8 +1,8 @@
 use super::*;
 
-install! { install(reg, cx) [auth_cfg, backend, core, db, host, node_host, preflight, secrets, workspaces, yolo_forced] => [auth_cfg, backend, built, core, db, host, node_host, workspaces, yolo_forced] {
+install! { install(reg, cx) [auth_cfg, backend, core, db, host, node_host, node_jobs, preflight, secrets, workspaces] => [auth_cfg, backend, built, core, db, host, jobs, node_host, workspaces] {
     let HubEnv { cfg, bus, vars, asm, .. } = *cx;
-    let built = crate::wire::modules::build(crate::wire::modules::Env {
+    let mut built = crate::wire::modules::build(crate::wire::modules::Env {
         store: &db,
         core: &core,
         backend: backend.clone(),
@@ -11,7 +11,6 @@ install! { install(reg, cx) [auth_cfg, backend, core, db, host, node_host, prefl
         public_urls: &auth_cfg.public_urls,
         bus,
         vars,
-        yolo_forced,
         openviking: cfg.openviking.clone(),
         assembly: asm,
         workspaces: node_host.as_ref().map(|_| workspaces.clone()),
@@ -32,5 +31,7 @@ install! { install(reg, cx) [auth_cfg, backend, core, db, host, node_host, prefl
         }),
         preflight: Some(preflight.clone()),
     })?;
+    let mut jobs = std::mem::take(&mut built.jobs);
+    jobs.extend(node_jobs);
     let _ = host.flow.set(built.flow.clone());
 }}

@@ -223,7 +223,7 @@ async fn a_new_bot_is_drafted_made_and_undone() {
     k.gw.set(|p, _| {
         assert!(p.starts_with("You configure \"a new bot \"验收\" (it does not exist yet"));
         assert!(!p.contains("enabled · 启用状态"), "a new bot starts enabled");
-        Ok(r#"{"changes":[{"key":"role","value":"独立验收"},{"key":"perm_mode","value":"可以改文件、运行命令；对外操作仍需你批准"},{"key":"reasoning_effort","value":"high"}]}"#.into())
+        Ok(r#"{"changes":[{"key":"role","value":"独立验收"},{"key":"perm_mode","value":"只读：只出方案，不改文件"},{"key":"reasoning_effort","value":"high"}]}"#.into())
     });
     let p = k
         .core
@@ -239,7 +239,7 @@ async fn a_new_bot_is_drafted_made_and_undone() {
         json!([
             {"label": "名字", "from": "—", "to": "验收"},
             {"label": "职责", "from": "—", "to": "独立验收"},
-            {"label": "权限", "from": "—", "to": "可以改文件、运行命令；对外操作仍需你批准"},
+            {"label": "权限", "from": "—", "to": "只读：只出方案，不改文件"},
             {"label": "思考强度", "from": "—", "to": "高"}
         ])
     );
@@ -253,7 +253,7 @@ async fn a_new_bot_is_drafted_made_and_undone() {
             b.perm_mode.as_str(),
             b.harness.as_str()
         ),
-        ("验收", "独立验收", "auto", "claude-code")
+        ("验收", "独立验收", "plan", "claude-code")
     );
     assert!(b.enabled && k.db().bot_in_workspace(&made, WS).unwrap());
     /* work it took meanwhile goes to the main bot when the bot is undone */

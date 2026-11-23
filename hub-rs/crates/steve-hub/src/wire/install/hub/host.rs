@@ -7,7 +7,7 @@ install! { install(reg, cx) [db] => [core_cfg, db, harnesses, host, mode, model_
         data_dir: cfg.data_dir.clone(),
         core: std::sync::OnceLock::new(),
         flow: std::sync::OnceLock::new(),
-        yolo: std::sync::OnceLock::new(),
+        approval: crate::wire::approval::ApprovalModes(Arc::new(cfg.declared_adapters.clone())),
         local_node: std::sync::OnceLock::new(),
     });
     let core_cfg = core_config(cfg, &vars);

@@ -171,7 +171,6 @@ pub fn compute(i: &ItemInput, now: i64) -> ItemFacts {
         releases: releases.clone().count() as i64,
         release_fails: releases.filter(|m| m.to() != "released").count() as i64,
         decisions: i.decisions.len() as i64,
-        yolo_decided: i.decisions.iter().filter(|d| d.by_yolo()).count() as i64,
         ..ItemFacts::default()
     };
     for u in &i.usage {
@@ -290,7 +289,6 @@ mod tests {
         let f = compute(&i, 5000);
         assert_eq!(f.wait_ms, Some(400));
         assert_eq!(f.lead_ms, Some(1000));
-        assert_eq!(f.yolo_decided, 1);
         assert_eq!(f.decisions, 3);
     }
 

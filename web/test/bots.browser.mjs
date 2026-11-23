@@ -23,7 +23,7 @@ const reset = () => {
   hub = capsHub({ mcp: [mcpServer('bmcp_1', 'github', 'stdio', { command: 'npx', args: ['-y', 'server-github'], bots: [{ id: 'dev', enabled: true }] })], skill: [], a2a: [] })
 }
 const state = () => ({ version: 'fixture', web_version: 'fixture', workspace: { id: 'default', name: '默认', description: '', item_prefix: 'ST', sort: 0, created: 0 }, workspaces: [{ id: 'default', name: '默认', description: '', item_prefix: 'ST', sort: 0, created: 0 }], items: [], decisions: [], recent: [], bots, allBots: bots.map((b) => ({ id: b.id, name: b.name, workspaces: b.workspaces })), projects: [], tags: [], tagUses: {}, thread: [], settings: {}, sessions: [], devices: [],
-  runtimes: [{ id: 'claude-code', name: 'Claude Code', ok: true, version: '', path: '', models: [], note: '' }, { id: 'codex', name: 'Codex', ok: true, version: '', path: '', models: [], note: '' }] })
+  runtimes: [{ id: 'claude-code', name: 'Claude Code', ok: true, version: '', path: '', models: [], note: '', modes: ['plan', 'ask', 'accept_edits', 'auto', 'full_access'] }, { id: 'codex', name: 'Codex', ok: true, version: '', path: '', models: [], note: '' }] })
 const breakdown = { by: 'tool', rows: [
   { key: 'exec', label: 'exec', dim: 'kind', count: 40 }, { key: 'tool:Bash', label: 'Bash', dim: 'tool', count: 40 },
   { key: 'mcp:steve_update', label: 'steve_update', dim: 'mcp', count: 3 }, { key: 'mcp:steve_workflow', label: 'steve_workflow', dim: 'mcp', count: 2 },
@@ -148,7 +148,7 @@ const run = async ({ width, height, scheme }) => {
   await page.locator('[data-slot=tabs-trigger]:has-text("设置")').click()
   const perm = page.locator('[data-choices="bot-perm"]')
   await perm.waitFor()
-  assert.equal(await perm.locator('[role=radio]').count(), 5)
+  assert.deepEqual(await perm.locator('[role=radio]').evaluateAll((choices) => choices.map((choice) => choice.getAttribute('data-choice')).sort()), ['default', 'plan'])
   assert.equal(await perm.locator('[aria-checked=true]').getAttribute('data-choice'), 'default')
   await perm.locator('[data-choice=plan]').click()
   await page.locator('[data-choices="bot-acc"] [data-choice="自动验收"]').click()

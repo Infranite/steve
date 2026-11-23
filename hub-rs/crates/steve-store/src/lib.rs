@@ -22,6 +22,7 @@ pub mod calendar;
 pub mod caps;
 pub mod compact;
 mod contract;
+pub use contract::approval;
 pub use contract::audit as audit_repo;
 pub use contract::channel_feed;
 pub use contract::channel_messages as channel_message_repo;
@@ -91,7 +92,6 @@ pub use contract::realtime_output;
 pub use contract::tags as tag_repo;
 pub use contract::thread_runs;
 pub use contract::vault_uses as vault_use_repo;
-pub use contract::yolo;
 pub use contract::{
     AccountIdentity, AddedMemoryIndex, BotPrompt, BotRef, BotRows, Contacts, DecisionRows,
     DigestEntry, DigestNotes, DueTrigger, FileInfo, FileReads, FlowGrant, FlowRow, FlowRows,

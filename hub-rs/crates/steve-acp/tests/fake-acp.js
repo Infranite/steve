@@ -17,10 +17,10 @@
 //   @permexec <command>    request_permission for an `execute` tool call running <command>
 //   @run <command>         an `execute` tool call running <command> without asking, whatever the mode
 //                          (no `_meta` of any harness): in_progress, 2 s, completed, says "ran:<command>"
-//                          (steve-hub's yolo_e2e: such a call does not stop the turn)
+//                          (the Hub resolves it through the same port as other permission requests)
 //   @codexperm <tool>      Codex-style MCP approval form for the steve server
 //   @permtool <kind> <path> request_permission for a `kind` tool call on `path` (rawInput.file_path, locations);
-//                          like a real harness, in mode bypassPermissions / full-access it asks nothing
+//                          like a real harness, in mode bypassPermissions / agent-full-access it asks nothing
 //                          and says "perm:bypassed:"
 // $FAKE_ACP_IMAGE=1 advertises promptCapabilities.image.
 //   @fsread                asks the client for fs/read_text_file; says the error it got
@@ -101,7 +101,7 @@ async function turn(text) {
     }
     if (cmd === "permtool") {
       const [kind, path] = a.split(" ")
-      if (mode === "bypassPermissions" || mode === "full-access") { say("perm:bypassed:"); continue }
+      if (mode === "bypassPermissions" || mode === "full-access" || mode === "agent-full-access") { say("perm:bypassed:"); continue }
       const r = await ask("session/request_permission", { sessionId: sid, options, toolCall: { toolCallId: `pt-${n}-${kind}`, title: `${kind} ${path}`, kind, rawInput: { file_path: path }, locations: [{ path }] } })
       say(`perm:${r.outcome.outcome}:${r.outcome.optionId ?? ""}`)
     }
@@ -148,7 +148,7 @@ const modelOpt = () => ({ id: "model", type: "select", currentValue: model, opti
 // the modes most adapters offer (claude-agent-acp 0.99.1's five); $FAKE_ACP_MODES=a,b,… offers those
 const modes = () => ({ currentModeId: "default", availableModes: (process.env.FAKE_ACP_MODES ?? "default,acceptEdits,plan,auto,bypassPermissions").split(",").filter(Boolean).map((id) => ({ id, name: id })) })
 const session = () => process.env.FAKE_ACP_CODEX
-  ? { modes: { currentModeId: "read-only", availableModes: ["read-only", "auto", "full-access"].map((id) => ({ id, name: id })) }, configOptions: [{ id: "model", currentValue: model, options: [] }, ...effortOpts()] }
+  ? { modes: { currentModeId: "read-only", availableModes: ["read-only", "workspace-write", "agent", "agent-full-access"].map((id) => ({ id, name: id })) }, configOptions: [{ id: "model", currentValue: model, options: [] }, ...effortOpts()] }
   : process.env.FAKE_ACP_SHAPE === "claude099"
     ? { modes: modes(), configOptions: [modelOpt(), ...effortOpts()] }
     : { modes: modes(), models: { currentModelId: "fake-model", availableModels: [] } }

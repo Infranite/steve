@@ -69,8 +69,6 @@ const TeamView = lazyView(() => import("@/people/routes").then((m) => ({ default
 import { Robot } from "@/robot"
 import { syncPluginThemes } from "@/plugin-themes"
 import { HoldBanner } from "@/hold-banner"
-const YoloDialog = lazyView(() => import("@/yolo/dialog").then((m) => ({ default: m.YoloDialog })))
-const YoloDigestView = lazyView(() => import("@/yolo/digest").then((m) => ({ default: m.YoloDigestView })))
 const StatsRoute = lazyView(() => import("@/stats/page").then((m) => ({ default: m.StatsRoute })))
 const TodosView = lazyView(() => import("@/todos/page").then((m) => ({ default: m.TodosView })))
 const TodoRoute = lazyView(() => import("@/todos/page").then((m) => ({ default: m.TodoRoute })))
@@ -290,7 +288,6 @@ function WorkspacePage({ a, b, c, workspace, session }: { a: string; b?: string;
     a === "mail" || a.startsWith("mail?") ? (b === "t" && c ? <ThreadView key={c} id={c} /> : <MailView />) :
     a === "accounts" || a.startsWith("accounts?") ? <AccountsRoute route={a} id={b} sub={c} /> :
     a === "vault" ? <VaultRoute id={b} /> :
-    a === "yolo" ? <YoloDigestView window={b} /> :
     a === "stats" ? <StatsRoute b={b} c={c} /> :
     a === "contacts" ? (b === "me" ? <MeView /> : b ? <ContactView key={b} id={b} /> : <ContactsView />) : a === "orgs" ? (b ? <OrgView key={b} id={b} /> : <ContactsView />) : a === "teams" ? (b ? <TeamView key={b} id={b} /> : <ContactsView />) :
     a === "publications" ? <MyDeliveriesView /> :
@@ -314,7 +311,6 @@ function WorkspacePage({ a, b, c, workspace, session }: { a: string; b?: string;
         {sh?.kind === "tag" && <TagDialog id={sh.payload?.id} item={sh.payload?.item} name={sh.payload?.name} />}
         {sh?.kind === "newProject" && <NewProjectDialog />}
         {sh?.kind === "newWorkspace" && <NewWorkspaceDialog />}
-        {sh?.kind === "yolo" && <YoloDialog />}
         {sh?.kind === "command" && <CommandPalette />}
         <Toaster />
       </SidebarProvider>
