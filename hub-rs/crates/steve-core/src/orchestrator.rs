@@ -48,6 +48,9 @@ pub struct CreateItem {
     pub title: String,
     pub bot: Option<String>,
     pub team: Option<String>,
+    pub node: Option<String>,
+    pub node_tag: Option<String>,
+    pub required_specialties: Vec<String>,
     /// `None`: not given (the bot's default project); `Some(None)`: explicitly no project.
     pub project: Option<Option<String>>,
     /// `[label, code]`, e.g. `["对话", "chat"]`; `None` keeps the column default.
@@ -1248,32 +1251,36 @@ impl Tx<'_> {
                 }
             }
             let team = steve_store::bot_dispatch::selected(w, ws, n.team.as_deref())?;
-            let selected_bot = n.bot.as_deref().filter(|b| !b.is_empty());
-            let bot = match selected_bot {
-                Some(b) if db.bot_in_workspace(b, ws)? => db.bot(b)?,
-                _ => None,
-            };
-            let bot = match &team {
-                Some(team) => match (selected_bot, bot) {
-                    (_, Some(b)) if b.enabled && team.member(&b.id).is_some() => b,
-                    (None, _) => {
-                        let bots = db.bots(ws)?;
-                        team.members.iter().find_map(|m| bots.iter().find(|b| b.id == m.bot && b.enabled))
-                            .cloned()
-                            .ok_or_else(|| crate::cycle::conflict(steve_i18n::t!("core.bot_team.no_members")))?
-                    }
-                    _ => return Err(crate::cycle::conflict(steve_i18n::t!("core.bot_team.outside_team"))),
+            let tags_for_selection: Vec<String> = n.tag_ids.iter().map(|id| db.tag(id))
+                .collect::<Result<Vec<_>>>()?.into_iter().flatten()
+                .filter(|tag| tag.workspace_id == ws).map(|tag| tag.name).collect();
+            let required_nodes = n.node_tag.as_deref().map(|tag| {
+                let tag = steve_store::nodes::tag_of(tag).ok_or_else(|| {
+                    CoreError::Placement(steve_types::PlacementBlocked {
+                        reason: steve_types::PlacementRejection::Tag,
+                        rejected: vec![],
+                    })
+                })?;
+                Ok::<_, CoreError>(steve_store::nodes::with_tag(w, &tag)?)
+            }).transpose()?;
+            let (placement, project) = crate::placement::select(
+                db,
+                self.rt(),
+                crate::placement::DispatchRequest {
+                    workspace: ws,
+                    bot: n.bot.as_deref().filter(|b| !b.is_empty()),
+                    team: team.as_ref(),
+                    project: &n.project,
+                    goal: &n.goal,
+                    tags: &tags_for_selection,
+                    required_specialties: &n.required_specialties,
+                    node: n.node.as_deref(),
+                    required_nodes: required_nodes.as_deref(),
                 },
-                None => match bot {
-                    Some(b) => b,
-                    None => db.main_bot()?,
-                },
-            };
-            let project = match &n.project {
-                Some(p) => db.project(p.as_deref().filter(|p| !p.is_empty()))?,
-                None => db.project(bot.default_project.as_deref())?,
-            };
-            let project = project.filter(|p| p.workspace_id == ws);
+                |bot| bot.model.clone().or_else(|| self.c.models().agent_model(ws, &bot.harness)),
+            )?;
+            let bot = db.bot(placement.explanation.bot.as_str())?
+                .ok_or(steve_store::StoreError::NotFound("Bot"))?;
             /* exactly one category, in the same write as the item: Steve's pick if nobody named one */
             let (tags, guessed) = crate::kinds::settle(db, ws, &n.tag_ids, &n.title, &n.goal)?;
             /* whose access its runs use: the member who asked (Steve, a flow or a stranger: nobody) */
@@ -1315,6 +1322,10 @@ impl Tx<'_> {
                     if n.team.is_some() { "explicit" } else { "default" },
                 )?;
             }
+            if n.node_tag.is_some() {
+                steve_store::nodes::set_item_tag(w, &item.id, n.node_tag.as_deref())?;
+            }
+            steve_store::bot_dispatch::record(w, ws, &item.id, None, Ok(&placement))?;
             Ok((item, bot, project, guessed))
         })?;
         let ws = n.ws.as_str();
@@ -1428,19 +1439,18 @@ impl Tx<'_> {
             }
             self.rt().check_workflow_execution(item_id)?;
         }
-        /* a Bot that could not run this item at all (its harness not installed, ready or signed in on any Node): said once on
-         * the item before anything is made, no session, nothing tried again by itself */
-        {
-            let want = match bot_override {
-                Some(b) => Some(b.to_string()),
-                None => self.item(item_id)?.bot_id,
-            };
-            let bot = match self.db().bot(want.as_deref().unwrap_or("steve"))? {
-                Some(b) => b,
-                None => self.db().main_bot()?,
-            };
-            self.rt().can_run(item_id, &bot.id, &bot.harness)?;
-        }
+        let item = self.item(item_id)?;
+        let want = bot_override.or(item.bot_id.as_deref());
+        let bot = match want {
+            Some(id) => self.db().bot(id)?.ok_or_else(|| {
+                crate::CoreError::Placement(steve_types::PlacementBlocked {
+                    reason: steve_types::PlacementRejection::Bot,
+                    rejected: vec![],
+                })
+            })?,
+            None => self.db().main_bot()?,
+        };
+        self.rt().can_run(item_id, &bot.id, &bot.harness)?;
         /* taken first: a start that fails leaves nothing behind for a later one */
         let after = self.st.handoffs.remove(item_id);
         self.lc_guard_open(item_id)?;
@@ -1450,10 +1460,6 @@ impl Tx<'_> {
             self.db().item_patch(item_id, patch![bot_id: b])?;
         }
         let item = self.item(item_id)?;
-        let bot = match self.db().bot(item.bot_id.as_deref().unwrap_or("steve"))? {
-            Some(b) => b,
-            None => self.db().main_bot()?,
-        };
         /* a worktree its backend makes is only named here: made off the lock before the session opens */
         let (cwd, branch, planned) = match item
             .cwd
@@ -4807,6 +4813,9 @@ impl Tx<'_> {
             requester: None,
             files: vec![],
             team: None,
+            node: None,
+            node_tag: None,
+            required_specialties: vec![],
         })?;
         if let Some(pi) = s.item_id.as_deref() {
             self.db().timeline_add(

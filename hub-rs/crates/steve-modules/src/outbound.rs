@@ -116,9 +116,7 @@ pub struct CheckCx {
     /// from this and other chats, your edited and rejected drafts). Inputs for the tone, not content:
     /// text copied from them that the audience has not seen is flagged.
     pub style_samples: Vec<String>,
-    /// Nobody waits on the answer (a draft that waits for your approval anyway, checked in the
-    /// background): the check model gets a longer time limit and, failing, one more try on a
-    /// stronger model.
+    /// Use a longer time limit when checking a draft that awaits approval in the background.
     pub patient: bool,
 }
 

@@ -4,8 +4,8 @@
 //! (`role`) and working rules (`rules`), the instruction, the event's summary and original text
 //! (≤ 8000 characters) and the branch list; the answer must be
 //! `{"branch","reason","fields"}`. A branch that is not in the list fails the node (its `on_fail`
-//! decides); a gateway error or timeout makes the run try again in 10 minutes, once
-//! ([`NodeOutcome::Retry`]). The reason becomes the event's triage reason and the bot its
+//! decides); a gateway error or timeout also fails this plan, without another model call
+//! ([`NodeOutcome::Fail`]). The reason becomes the event's triage reason and the bot its
 //! `handled_by`.
 //!
 //! Which bot: `bot_id` (a template is allowed), else the source's “先交给谁判断” (`triage_bot`), else
@@ -307,11 +307,11 @@ impl NodeKind for BotNode {
             Ok(Ok(o)) => o,
             Ok(Err(e)) => {
                 tracing::warn!(run = %cx.run.id, node = %cx.node.id, "bot node: gateway failed: {e}");
-                return NodeOutcome::Retry(format!("{} 没有及时给出判断", bot.name));
+                return NodeOutcome::Fail(format!("{} 没有给出判断：{e}", bot.name));
             }
             Err(_) => {
                 tracing::warn!(run = %cx.run.id, node = %cx.node.id, "bot node: gateway timed out");
-                return NodeOutcome::Retry(format!("{} 没有及时给出判断", bot.name));
+                return NodeOutcome::Fail(format!("{} 没有及时给出判断", bot.name));
             }
         };
         cx.effects.cost += answer.cost_usd.unwrap_or(0.0);

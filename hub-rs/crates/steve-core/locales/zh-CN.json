@@ -1,6 +1,4 @@
 {
-  "core.bot_team.no_members": "这个 Bot Team 没有已启用的成员。",
-  "core.bot_team.outside_team": "这个 Bot 不在所选 Team 的启用成员中。",
   "core.bot.invalid_selection": "Bot 配置值无效：%{field}",
   "core.bot.unsupported_selection": "%{harness} 未提供 %{field} `%{value}`；请选择实报值或重置为默认（null）。",
   "core.item.closed": "这个事项已经结束了，需要时先新建周期",

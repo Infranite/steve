@@ -160,7 +160,7 @@ An adapter's model list and a successful text reply do not verify that a model c
 Steve stays out of your harness settings. It answers a permission prompt for that one call and never writes "always allow". It never edits your harness config. Every session shows the command to resume (and, where supported, fork) it in the harness itself, and you can import your local Claude Code and Codex history.
 
 - **Memories** are proposed from finished items, chat days, mail and agents, each with the quote it came from and the memory it would replace. Nothing takes effect until you confirm it.
-- **Models per purpose.** Routing, chat, research, titles, extraction, drafting, flows and mail each have their own model, effort and ordered fallbacks. Prices sync daily from Models.dev, and past estimates keep the prices of their day.
+- **Models per purpose.** Routing, chat, research, titles, extraction, drafting, flows and mail each have their own model and effort. Short gateway calls use the first configured model without automatically trying another. Prices sync daily from Models.dev, and past estimates keep the prices of their day.
 
 <p align="center"><img src="docs/assets/screenshots/session.webp" alt="Agent session: changed files, tools, cost and context, and the command to resume it in the harness" width="85%"><br><sub><b>Agent session</b>: changed files, tools, cost and context, and the command to resume it in the harness</sub></p>
 

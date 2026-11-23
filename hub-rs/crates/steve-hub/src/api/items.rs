@@ -31,6 +31,10 @@ pub async fn create(
     let title = k.opt_str("title", Str::ANY);
     let bot = k.opt_str("bot", Str::ANY);
     let team = k.opt_str("team", Str::len(1, 64));
+    let node = k.opt_str("node", Str::len(1, 80));
+    let required_specialties = k
+        .opt_str_array_of("required_specialties", Str::len(1, 48), None, Some(12))
+        .unwrap_or_default();
     let deps = k
         .opt_str_array_of("deps", Str::len(1, 80), None, Some(200))
         .unwrap_or_default();
@@ -46,7 +50,20 @@ pub async fn create(
     let item = st
         .dedupe
         .once(&c.ws, &c.me, "items", client_id, move || async move {
-            create_now(&st2, &c2, goal, title, bot, project, mode, team, deps).await
+            create_now(
+                &st2,
+                &c2,
+                goal,
+                title,
+                bot,
+                project,
+                mode,
+                team,
+                deps,
+                node,
+                required_specialties,
+            )
+            .await
         })
         .await?;
     ok(item)
@@ -62,6 +79,8 @@ async fn create_now(
     mode: String,
     team: Option<String>,
     deps: Vec<String>,
+    node: Option<String>,
+    required_specialties: Vec<String>,
 ) -> Result<Value, ApiError> {
     for dep in &deps {
         own_item(st, &c.ws, dep).await?;
@@ -79,9 +98,7 @@ async fn create_now(
             })?;
     }
     // whatever the user left open (bot, project, title, tags) Steve decides, the same way as in the conversation
-    let needs_route = bot.as_deref().is_none_or(str::is_empty)
-        || project.is_none()
-        || title.as_deref().is_none_or(str::is_empty);
+    let needs_route = project.is_none() || title.as_deref().is_none_or(str::is_empty);
     let r = if needs_route {
         Some(
             st.domain
@@ -111,7 +128,6 @@ async fn create_now(
     let title = title
         .or_else(|| r.as_ref().map(|r| r.title.clone()))
         .unwrap_or_else(|| js::slice(&goal, 24));
-    let bot = bot.or_else(|| r.as_ref().map(|r| r.bot.clone()));
     let project = match project {
         Some(p) => Some(p),
         None => Some(r.as_ref().and_then(|r| r.project.clone())),
@@ -124,6 +140,8 @@ async fn create_now(
             title,
             bot,
             team,
+            node,
+            required_specialties,
             deps,
             project,
             tag_ids,
@@ -180,7 +198,7 @@ pub async fn get_one(
     let workflow = st.domain.workflow_get(&id).await?;
     let dependency_wait = dependency_shown(st.domain.dependency_get(&id).await?);
     let dispatch = super::bot_dispatch::store(&st).and_then(|s| {
-        super::bot_dispatch::item_dispatch(s, &id, &c.ws)
+        super::bot_dispatch::item_dispatch(s, &id)
             .inspect_err(|e| tracing::warn!(item = %id, "item dispatch detail unavailable: {e}"))
             .ok()
     });

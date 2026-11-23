@@ -732,6 +732,28 @@ async fn a_module_decision_is_undone_through_the_route() {
     );
 }
 
+fn fixture_item(hub: &Hub, requester: Option<String>) -> String {
+    let db = hub.home.path().join("steve/data/steve.sqlite3");
+    let store = steve_store::Store::open(db, steve_store::NoPublisher).unwrap();
+    let ws = steve_store::WS;
+    store
+        .items()
+        .create(
+            ws,
+            &steve_store::NewItem {
+                title: "x".into(),
+                goal: "x".into(),
+                bot_id: "steve".into(),
+                requested_by: requester,
+                tags: vec![store.tags().kinds(ws).unwrap().remove(0).id],
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .unwrap()
+        .id
+}
+
 /// An item whose session gets the bearer token `test-token`; returns an MCP caller with that token.
 /// The diagnostic Hub refuses session execution. The fixture inserts an idle session for
 /// its Steve tools.
@@ -739,15 +761,10 @@ async fn agent_session(
     hub: &Hub,
     c: &Client,
 ) -> impl Fn(Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = (u16, String)> + Send>> {
-    let (_, item) = c
-        .call(
-            "POST",
-            "/api/items",
-            Some(json!({ "goal": "x", "title": "x", "bot": "steve", "project": null })),
-            None,
-        )
-        .await;
-    let id = item["id"].as_str().expect("item").to_string();
+    let (status, me) = c.call("GET", "/api/me", None, None).await;
+    assert_eq!(status, 200, "{me}");
+    let requester = me["user"]["id"].as_str().expect("signed-in user");
+    let id = fixture_item(hub, Some(requester.into()));
     let db = hub.home.path().join("steve/data/steve.sqlite3");
     let hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"test-token"));
     fixtures::seed_mcp_fixture_session(&db, &id, &hash).unwrap();
@@ -867,8 +884,7 @@ async fn contacts_tools_are_served_over_mcp() {
 async fn panels_and_mentions() {
     let hub = start().await;
     let c = Client::login(&hub).await;
-    let (_, item) = c.call("POST", "/api/items", Some(json!({ "goal": "x", "title": "x", "bot": "steve", "project": null, "mode": "propose" })), None).await;
-    let id = item["id"].as_str().expect("item").to_string();
+    let id = fixture_item(&hub, None);
     assert_eq!(
         c.call("GET", &format!("/api/items/{id}/panels"), None, None)
             .await,

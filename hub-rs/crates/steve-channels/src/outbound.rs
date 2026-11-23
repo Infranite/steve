@@ -763,7 +763,10 @@ async fn rewrite_text(
 ) -> Option<String> {
     let prompt = disclosure::rewrite_prompt(audience, text, &r.spans);
     let out = match pinned {
-        Some(p) if !model.is_empty() => p.run(model, &prompt, compose::TIMEOUT).await,
+        Some(p) if !model.is_empty() => p
+            .run(model, &prompt, compose::TIMEOUT)
+            .await
+            .map_err(steve_modules::gateway::GatewayError::from),
         _ => {
             steve_modules::gateway::purpose(
                 "compose",
@@ -939,10 +942,10 @@ fn nothing_left(
 }
 
 /// The disclosure check of a draft on your own account, after it was written (its basis is
-/// [`basis::CHECKING`]): nothing waits on it — the draft waits for your approval anyway — so the
-/// check model gets its patient time limit and one more try ([`CheckCx::patient`]), against the
-/// knowledge the draft was written with, the conversation the audience can read and the samples of
-/// how you talk the composer was shown. The basis and the card say what it found: nothing, `（可能泄露：…）` with
+/// [`basis::CHECKING`]): the draft waits for your approval, so the check uses the longer time limit
+/// ([`CheckCx::patient`]). It uses the knowledge the draft was written with, the conversation the
+/// audience can read and the style samples shown to the composer. The basis and the card say what
+/// it found: nothing, `（可能泄露：…）` with
 /// “改写后再看”, or `（检查没跑完：…）` — never “可能泄露” for a check that did not finish. A draft
 /// dealt with meanwhile keeps its card; its basis already says the check did not finish
 /// ([`basis::checking_stopped`]). On a task of its own ([`Outbox::send_due`] finds such drafts in

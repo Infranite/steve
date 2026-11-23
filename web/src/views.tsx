@@ -1,4 +1,5 @@
 import { ApprovalSwitch, SessionApproval } from "@/approval"
+import type { BotPlacementError } from "@/api"
 import { useTranscript } from "@/data/transcript"
 import { SessionIdentity } from "@/components/session-identity"
 import { useItemState } from "@/data/sync"
@@ -10,7 +11,7 @@ import { CloseoutSummary } from "@/item-closeout"
 import { Card } from "@/components/ui/card"
 import { itemState, type ItemState } from "@/item-state"
 import { clip } from "@/thread/topics"
-import { DispatchDetails, NO_TEAM, useBotTeams } from "@/bot-dispatch"
+import { BlockedPlacement, BotProposalCard, DispatchDetails, PlacementWhy, NO_TEAM, useBotTeams } from "@/bot-dispatch"
 import { SetSelect } from "@/settings-controls"
 import { DependencyWaitPanel } from "@/dependency-wait-panel"
 import { ItemDebugDialog } from "@/debug-panel"
@@ -99,25 +100,31 @@ export function NewItemDialog({ project: pre, bot: preBot }: { project?: string;
   const t = useT()
   const [g, setG] = useState(""), [mode, setMode] = useState<"start" | "propose">("start"), [bot, setBot] = useState(preBot ?? "auto"), [proj, setProj] = useState(pre ?? "auto"), [busy, setBusy] = useState(false)
   const { value: teams } = useBotTeams()
+  const [placementError, setPlacementError] = useState<BotPlacementError>()
+  const [specialties, setSpecialties] = useState("")
+  const requiredSpecialties = specialties.split(/[,\uFF0C]/u).map(tag => tag.trim()).filter(Boolean)
+  const validTags = requiredSpecialties.length <= 12 && requiredSpecialties.every(tag => tag.length <= 48)
   const [team, setTeam] = useState("")
+  useEffect(() => setPlacementError(undefined), [g, bot, proj, mode, team, specialties])
   const activeTeam = teams?.teams.find(v => v.id === (team || teams.default))
   const allowed = Object.keys(st.bots).filter(k => st.bots[k].on && (!activeTeam || activeTeam.members.some(m => m.bot === k)))
-  const target = activeTeam && !allowed.includes(bot) ? "auto" : bot
+  const target = bot
   const selected = st.bots[target]
   // The execution target is resolved by the backend. Hub-local probes cannot admit or reject it.
   // A proposal creates a decision, without opening a session.
-  const canSubmit = (!activeTeam || allowed.length > 0) && (mode === "propose" || target === "auto" || !!selected?.on)
+  const canSubmit = validTags && (target === "auto" || !!selected)
   /* one send idempotency key while the form stays the same: a retry after a lost answer makes no second item */
   const sendKey = useRef<{ form: string; id: string } | null>(null)
   const clientId = () => {
-    const form = JSON.stringify([g.trim(), target, proj, mode, team])
+    const form = JSON.stringify([g.trim(), target, proj, mode, team, requiredSpecialties])
     if (sendKey.current?.form !== form) sendKey.current = { form, id: newClientId() }
     return sendKey.current.id
   }
   return (
     <Modal open title={t("views:newItem.title")} desc={t("views:newItem.desc")}
       footer={<><Button variant="outline" onClick={closeSheet}>{t("common:action.cancel")}</Button><Button data-testid="new-go" disabled={!g.trim() || busy || !canSubmit} onClick={async () => {
-        setBusy(true); const id = await newItem(g.trim(), target === "auto" ? undefined : target, proj === "auto" ? undefined : proj === "none" ? null : proj, mode, clientId(), team || undefined)
+        setPlacementError(undefined)
+        setBusy(true); const id = await newItem(g.trim(), target === "auto" ? undefined : target, proj === "auto" ? undefined : proj === "none" ? null : proj, mode, clientId(), team || undefined, { requiredSpecialties, blocked: setPlacementError })
         setBusy(false); if (id) { closeSheet(); go("#/items/" + id) } }}>{busy && <Spinner className="size-3.5" />}{t("views:newItem.create")}</Button></>}>
       <FieldGroup className="gap-4">
         <Field><FieldLabel htmlFor="new-goal">{t("views:newItem.goal")}</FieldLabel><Textarea id="new-goal" autoFocus className="min-h-24 rounded-lg" placeholder={t("views:newItem.goalPlaceholder")} value={g} onChange={(e) => setG(e.target.value)} /></Field>
@@ -126,9 +133,12 @@ export function NewItemDialog({ project: pre, bot: preBot }: { project?: string;
           onChange={v => { setTeam(v === "default" ? "" : v); setBot("auto") }} /></Field>}
         {activeTeam && !allowed.length && <p role="status" className="type-footnote text-attention">{t("manage:dispatch.noMembers")}</p>}
         <div className="grid grid-cols-2 gap-3">
-          <Field><FieldLabel>{t("views:newItem.bot")}</FieldLabel><Select testId="new-bot" value={target} onChange={setBot} options={[{ v: "auto", l: t("views:newItem.auto") }, ...allowed.map((k) => ({ v: k, l: <span><BotName k={k} /> · {runtimeName(st.bots[k].harness) ?? st.bots[k].harness}</span> }))]} /></Field>
+          <Field><FieldLabel>{t("views:newItem.bot")}</FieldLabel><Select testId="new-bot" value={target} onChange={setBot} options={[{ v: "auto", l: t("views:newItem.auto") }, ...[...new Set([...allowed, ...(selected ? [target] : [])])].map((k) => ({ v: k, l: <span><BotName k={k} /> · {runtimeName(st.bots[k].harness) ?? st.bots[k].harness}</span> }))]} /></Field>
           <Field><FieldLabel>{t("views:newItem.project")}</FieldLabel><Select testId="new-project" value={proj} onChange={setProj} options={[{ v: "auto", l: t("views:newItem.auto") }, ...st.projects.map((p) => ({ v: p.id, l: p.name })), { v: "none", l: t("views:newItem.noProject") }]} /></Field>
         </div>
+        <Field><FieldLabel htmlFor="new-specialties">{t("manage:dispatch.requiredSpecialties")}</FieldLabel><Input id="new-specialties" value={specialties} onChange={e => setSpecialties(e.target.value)} placeholder={t("manage:dispatch.specialtyPlaceholder")} /></Field>
+        {placementError && <BlockedPlacement error={placementError} />}
+        {placementError?.proposal && <BotProposalCard key={placementError.proposal.id} proposal={placementError.proposal} onClose={() => setPlacementError(undefined)} />}
         {selected && <><RuntimeAvailability harness={selected.harness} /><RuntimePermissionNotice harness={selected.harness} mode={selected.permMode} /></>}
         {!selected && <div className="type-footnote text-muted-foreground"><p>{t("shell:runtimeSetup.chooseBot")} · {t("shell:runtimeSetup.targetPending")}</p><RuntimeSetupLink /></div>}
         <Field><FieldLabel>{t("views:newItem.mode")}</FieldLabel><ChoiceCards value={mode} onChange={setMode} options={[{ v: "start", t: t("views:newItem.start"), d: t("views:newItem.startDesc") }, { v: "propose", t: t("views:newItem.propose"), d: t("views:newItem.proposeDesc") }]} /></Field>
@@ -330,7 +340,7 @@ export function ItemView({ id }: { id: string }) {
   if (!i) return <Page title={t("views:item.title")} back={["#/items", t("views:items.title")]}><Empty title={t("views:item.notFound")} sub={t("views:item.notFoundSub")} /></Page>
   const designReview = i.waits.find((w) => w.subject === "design_implementation")
   const dependents = [...new Set([...i.dependents, ...getItems().filter((x) => x.deps?.includes(i.id)).map((x) => x.id)])].flatMap((id) => getItem(id) ?? [])
-  const a = active(i), B = st.bots[i.b]
+  const a = active(i)
   const targetLabel = { auto: t("views:item.targetAuto"), steer: t("views:item.targetSteer"), new: t("views:item.targetNew") }
   const targets = (a && a.st === "run" ? ["auto", "steer", "new"] : ["auto", "new"]) as ("auto" | "steer" | "new")[]
   /* queued supplements show on their comments; the strip above the composer keeps only rows no comment claims */
@@ -459,7 +469,7 @@ export function ItemView({ id }: { id: string }) {
               {i.workflow && <div className="max-sm:basis-full max-sm:pl-10"><WorkflowButtons at={at} /></div>}
             </div>
             {i.closeout && <CloseoutSummary value={i.closeout} className="mt-3 pl-10" />}
-            {i.dispatch && <DispatchDetails dispatch={i.dispatch} bot={i.b} />}
+            {(i.dispatch || i.placement) && <DispatchDetails dispatch={i.dispatch} placement={i.placement} />}
             {at.dialogs}
             {i.waits.length > 0 && <div className="mt-5 flex flex-col gap-3">{i.waits.map((w) => <DecisionCard key={w.decision} i={i} w={w} showItem={false} />)}</div>}
             {i.rel && <RelNote rel={i.rel} box={i.rel.tone !== "ok"} className="mt-3" onClose={i.rel.tone === "fail" ? () => closeRel(i) : undefined} />}
@@ -502,9 +512,11 @@ export function ItemView({ id }: { id: string }) {
           <section data-details>
             <h3 className="mb-2 type-label text-tertiary">{t("views:itemState.details")}</h3>
             <dl className="grid grid-cols-[minmax(64px,max-content)_minmax(0,1fr)] items-start gap-x-3 gap-y-2.5 [&_[data-select]]:-ml-2">
-            <Prop label={t("views:item.propBot")}><Select quiet testId="bot" value={i.b} onChange={(k) => reassign(i.id, k)} options={Object.keys(st.bots).filter((k) => st.bots[k].on || k === i.b).map((k) => ({ v: k, l: <BotName k={k} /> }))} />{B && <div className="type-footnote text-muted-foreground">{B.h} · {B.m}</div>}</Prop>
+            <Prop label={t("views:item.propBot")}><Select quiet testId="bot" value={i.b} onChange={(k) => reassign(i.id, k)} options={Object.keys(st.bots).filter((k) => st.bots[k].on || k === i.b).map((k) => ({ v: k, l: <BotName k={k} /> }))} /></Prop>
             <Prop label={t("views:item.propSessions")}><div className="flex flex-col gap-2 pt-1">{i.ss.length ? i.ss.map((k) => <div key={k} className="flex min-w-0 flex-col gap-0.5" data-item-session={k}>
-              <a href={"#/sessions/" + k} className="flex min-w-0 flex-wrap items-center gap-2 hover:underline"><span>#{getSession(k)?.n}</span>{getSession(k) && <SessionIdentity session={getSession(k)!} />}</a><SessionApproval id={k} />
+              <a href={"#/sessions/" + k} className="flex min-w-0 flex-wrap items-center gap-2 hover:underline"><span>#{getSession(k)?.n}</span>{getSession(k) && <SessionIdentity session={getSession(k)!} />}</a>
+              <SessionApproval id={k} />
+              {getSession(k)?.placement && <PlacementWhy value={getSession(k)!.placement!} />}
               <NativeIdLine k={k} label="ID" /></div>) : <span className="text-muted-foreground">{t("common:state.empty")}</span>}</div></Prop>
             <ItemStatsRows id={i.id} render={(u, time, href) => <><Prop label={t("views:item.propUsage")}><a href={href} className="block pt-1 hover:underline" data-item-usage>{u}</a></Prop><Prop label={t("views:item.propTime")}><a href={href} className="block pt-1 hover:underline" data-item-time>{time}</a></Prop></>} />
             <Prop label={t("views:item.propProject")}><Select quiet testId="project" value={i.project ?? "none"} onChange={(v) => patchItem(i.id, { project: v === "none" ? null : v })} options={[{ v: "none", l: t("common:state.none") }, ...st.projects.map((p) => ({ v: p.id, l: p.name }))]} />

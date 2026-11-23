@@ -11,7 +11,7 @@ install! { install(reg, cx) [core_cfg, db, harnesses, host, mode, model_node, mu
             );
             models.set_harnesses(harnesses.source());
             tracing::info!("conversation model calls stream through local Node jobs");
-            let model = steve_core::Fallback {
+            let model = steve_core::SingleModelGateway {
                 one: node_runtime::NodePrint {
                     runtime: h.runtime.clone(),
                     data_dir: cfg.data_dir.clone(),

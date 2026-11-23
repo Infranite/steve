@@ -529,14 +529,6 @@ fn pick_bot_info(
     Ok(bots.reply_profile(ws, None)?)
 }
 
-pub(crate) fn pick_bot(
-    r: &mut impl steve_store::Read,
-    ws: &str,
-    ids: &[Option<&str>],
-) -> ChannelResult<Option<String>> {
-    Ok(pick_bot_info(r, ws, ids)?.map(|bot| bot.id))
-}
-
 /// The personal account's user, or the person who connected the bot.
 pub fn owner_user(r: &mut impl steve_store::Read, ws: &str, conn: &str) -> ChannelResult<String> {
     let conn =
@@ -1220,7 +1212,10 @@ impl Composer {
         }
 
         let out = match (&self.pinned, &layers.model) {
-            (Some(pm), Some(m)) => pm.run_with_images(m, &p, &media.images, TIMEOUT).await,
+            (Some(pm), Some(m)) => pm
+                .run_with_images(m, &p, &media.images, TIMEOUT)
+                .await
+                .map_err(steve_modules::gateway::GatewayError::from),
             _ => {
                 steve_modules::gateway::purpose(
                     "compose",
@@ -1231,7 +1226,7 @@ impl Composer {
                 .await
             }
         }
-        .map_err(|e| ApiError::Internal(format!("回复没有生成：{e}")))?;
+        .map_err(ApiError::Gateway)?;
         let mut reply = answer_of(&out.text, &out.model, &layers)
             .ok_or_else(|| ApiError::Internal("回复没有生成：模型没有给出正文".into()))?;
         // what it saw in the images it was given, kept for later conversations

@@ -2,6 +2,7 @@
 use axum::{
     Extension, Json,
     extract::{Path, State},
+    response::IntoResponse,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -11,6 +12,7 @@ use steve_store::{
 };
 
 use super::{ApiResult, AppState, Ctx, ok};
+use crate::backend::{BotNodeCandidates, BotNodeState};
 use crate::error::ApiError;
 
 pub(super) fn store(st: &AppState) -> Option<&Store> {
@@ -42,7 +44,7 @@ async fn operate(f: impl FnOnce() -> Result<Value, ApiError> + Send + 'static) -
 }
 
 fn is_bot(c: &mut impl Read, ws: &str, id: &str) -> steve_store::Result<bool> {
-    bot_admin::selectable(c, ws, id, false)
+    bot_admin::selectable(c, ws, id)
 }
 
 fn is_owner(c: &mut impl Read, ws: &str, user: &str) -> steve_store::Result<bool> {
@@ -92,9 +94,17 @@ pub async fn candidates(
             "hub.dispatch.not_found"
         )));
     }
-    let mut v = st.domain.bot_nodes(&cx.ws, &id).await?;
-    v["editable"] = json!(s.read(|c| is_owner(c, &cx.ws, &cx.me)).map_err(error)?);
-    ok(v)
+    #[derive(serde::Serialize)]
+    struct CandidateList {
+        #[serde(flatten)]
+        nodes: BotNodeCandidates,
+        editable: bool,
+    }
+    Ok(Json(CandidateList {
+        nodes: st.domain.bot_nodes(&cx.ws, &id).await?,
+        editable: s.read(|c| is_owner(c, &cx.ws, &cx.me)).map_err(error)?,
+    })
+    .into_response())
 }
 
 #[derive(Deserialize)]
@@ -143,10 +153,10 @@ pub async fn set_bindings(
             "hub.dispatch.not_found"
         )));
     }
-    let report = if !nodes.is_empty() {
-        st.domain.bot_nodes(&cx.ws, &id).await?
+    let report = if nodes.is_empty() {
+        Vec::new()
     } else {
-        Value::Null
+        st.domain.bot_nodes(&cx.ws, &id).await?.candidates
     };
     operate(move || {
         let result: Result<Value, DispatchWriteError> = s.write(|tx| {
@@ -157,10 +167,9 @@ pub async fn set_bindings(
             let old = bot_dispatch::bindings(tx, &cx.ws, &id)?;
             for node in nodes.iter().filter(|id| !old.contains(id)) {
                 if (node != "local" && !crate::wire::node_binding::node_takes(tx, node, &cx.ws)?)
-                    || !report["candidates"].as_array().is_some_and(|cs| {
-                        cs.iter()
-                            .any(|r| r["id"] == node.as_str() && r["state"] == "candidate")
-                    })
+                    || !report
+                        .iter()
+                        .any(|r| &r.id == node && r.state == BotNodeState::Candidate)
                 {
                     return Err(
                         ApiError::Json(409, steve_i18n::t!("hub.dispatch.not_candidate")).into(),
@@ -338,33 +347,51 @@ pub async fn set_default(
     .await
 }
 
-/// Item detail reports the actual binding, not a projection of the workspace's current default.
-pub(super) fn item_dispatch(store: &Store, id: &str, ws: &str) -> steve_store::Result<Value> {
+/// The Team snapshot belongs to this item. Placement explanations are in the projected views.
+pub(super) fn item_dispatch(store: &Store, id: &str) -> steve_store::Result<Value> {
     store.read(|c| {
         let team = bot_dispatch::item_team(c, id)?;
-        let mut placement = bot_dispatch::last_decision(c, id)?.unwrap_or(Value::Null);
-        if let Some(node) = placement["node"].as_str().map(str::to_string)
-            && node != "local"
-        {
-            if crate::wire::node_binding::node_takes(c, &node, ws)? {
-                let name = steve_store::node_directory::name(c, &node)?
-                    .ok_or_else(|| StoreError::NotFound("Node"))?;
-                placement["node_name"] = json!(name);
-            } else {
-                placement["node"] = json!("unavailable");
-            }
-        }
         Ok(json!({
-            "team":team.map(|(t, source)| json!({"id":t.id,"name":t.name,"source":source})),
-            "placement":placement
+            "team": team.map(|(t, source)| json!({"id":t.id,"name":t.name,"source":source})),
         }))
     })
+}
+
+async fn confirm_proposal(
+    State(st): State<AppState>,
+    Extension(cx): Extension<Ctx>,
+    Path(id): Path<String>,
+    Json(edit): Json<steve_types::ConfirmBotProposal>,
+) -> ApiResult {
+    let valid = |value: &str, max| {
+        !value.trim().is_empty()
+            && value.chars().count() <= max
+            && !value.chars().any(char::is_control)
+    };
+    if !valid(&edit.name, 40)
+        || edit.role.chars().count() > 200
+        || edit.specialties.len() > 12
+        || !edit.specialties.iter().all(|t| valid(t, 48))
+        || !valid(&edit.harness, 80)
+        || edit.model.as_ref().is_some_and(|m| !valid(m, 256))
+    {
+        return Err(bad());
+    }
+    let bot = st
+        .domain
+        .confirm_bot_proposal(cx.ws, cx.me, id, edit)
+        .await?;
+    ok(json!({ "id": bot }))
 }
 
 /// Routes mounted behind the shared API login and body-limit layers.
 pub(crate) fn routes() -> axum::Router<super::AppState> {
     use super::*;
     Router::new()
+        .route(
+            "/bot-proposals/{id}/confirm",
+            post(bot_dispatch::confirm_proposal),
+        )
         .route(
             "/bot-teams",
             get(bot_dispatch::list).post(bot_dispatch::create),

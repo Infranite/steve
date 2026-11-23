@@ -252,7 +252,10 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/118.sql"),
     // 119: Node telemetry now lives only in the Hub's in-memory recorder.
     include_str!("../migrations/119.sql"),
+    // 120: immutable Bot selection and session placement facts.
     include_str!("../migrations/120.sql"),
+    // 121: retire Steve's automatic decisions and add native harness approval.
+    include_str!("../migrations/121.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).
@@ -629,6 +632,21 @@ fn migrate_observed(c: &Connection, observer: Option<MigrationObserver>) -> Resu
     Ok(())
 }
 
+fn add_reasoning_effort(c: &Connection) -> Result<()> {
+    for table in ["bots", "sessions"] {
+        let present: bool = c.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name = 'reasoning_effort')"),
+            [], |r| r.get(0),
+        )?;
+        if !present {
+            c.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN reasoning_effort TEXT"
+            ))?;
+        }
+    }
+    Ok(())
+}
+
 /// The migrations after `cur` and the version row, in one transaction. IMMEDIATE: another process
 /// (the upgrade supervisor) may open the same file, and the write lock is taken up front, where the
 /// busy timeout applies, instead of at the first write.
@@ -638,18 +656,12 @@ fn run_pending(c: &Connection, cur: i64, progress: Option<&MigrationTracker<'_>>
         if let Some(progress) = progress {
             progress.report((i + 1) as u32, false);
         }
-        tx.execute_batch(m)?;
-    }
-    for table in ["bots", "sessions"] {
-        let present: bool = tx.query_row(
-            &format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name = 'reasoning_effort')"),
-            [], |r| r.get(0),
-        )?;
-        if !present {
-            tx.execute_batch(&format!(
-                "ALTER TABLE {table} ADD COLUMN reasoning_effort TEXT"
-            ))?;
+        if i == 119 {
+            // Historical migrations added reasoning effort after the numbered SQL. Finish it
+            // before adding Bot specialties so fresh and upgraded databases have the same order.
+            add_reasoning_effort(&tx)?;
         }
+        tx.execute_batch(m)?;
     }
     /* 027's item columns: once, where there are items without them (a module-only schema has no items) */
     let items: bool = tx.query_row(

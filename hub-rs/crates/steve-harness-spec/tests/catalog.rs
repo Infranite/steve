@@ -11,6 +11,10 @@ fn the_catalog_preserves_the_pre_extraction_registry() {
     // Environments are maps in both manifest forms. Their serialization order does not change
     // the variables passed to a process; compare each old array in its canonical key order.
     for entry in expected.as_array_mut().unwrap() {
+        // #505 adds a fail-closed gateway capability to the extracted registry. Keep the
+        // old snapshot intact and check which built-ins explicitly opt in.
+        let reads = matches!(entry["id"].as_str(), Some("claude-code" | "codex"));
+        entry["properties"]["read_attached"] = json!(reads);
         entry["env"]
             .as_array_mut()
             .unwrap()

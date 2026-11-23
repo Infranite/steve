@@ -58,7 +58,7 @@ pub fn goal_of(r: &RepoRow, i: &IssueRow, body: &str) -> String {
 
 enum Prep {
     Existing(String),
-    Make(Box<(RepoRow, IssueRow, String)>),
+    Make(Box<(RepoRow, IssueRow)>),
 }
 
 impl GitHub {
@@ -83,15 +83,14 @@ impl GitHub {
             let r = steve_store::github::repo_get(c, &i.repo_id)?
                 .filter(|r| r.workspace_id == ws)
                 .ok_or_else(|| ApiError::not_found("Issue"))?;
-            let bot = match &p.bot {
-                Some(b) if steve_store::bots::scoped_bot(c, &ws, b)? => b.clone(),
-                Some(_) => return Err(ApiError::not_found("Bot")),
-                None => steve_store::bots::main_bot(c)?
-                    .ok_or_else(|| ApiError::rule(steve_i18n::t!("github.issue.no_main_bot")))?,
-            };
-            Ok(Prep::Make(Box::new((r, i, bot))))
+            if let Some(bot) = &p.bot
+                && !steve_store::bots::scoped_bot(c, &ws, bot)?
+            {
+                return Err(ApiError::not_found("Bot"));
+            }
+            Ok(Prep::Make(Box::new((r, i))))
         })?;
-        let (r, i, bot) = match prep {
+        let (r, i) = match prep {
             Prep::Existing(item) => return Ok(item),
             Prep::Make(x) => *x,
         };
@@ -119,7 +118,8 @@ impl GitHub {
                 title: cut(i.title.trim(), TITLE_MAX),
                 // the issue is somebody else's text: the agent reads it as data
                 goal: steve_modules::outbound::quote_untrusted(&goal_of(&r, &i, &body)),
-                bot,
+                bot: p.bot,
+                node_tag: None,
                 project: r.project_id.clone(),
                 tag_ids: Vec::new(),
                 source: ("GitHub".into(), "sig".into()),

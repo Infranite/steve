@@ -336,8 +336,10 @@ async fn create_task(
             ws: who.ws.clone(),
             goal: text,
             title,
-            bot: Some(r.bot.clone()),
+            bot: None,
             team: None,
+            node: None,
+            required_specialties: vec![],
             deps: vec![],
             project: Some(r.project.clone()),
             tag_ids: r.tag_ids.clone(),
@@ -349,7 +351,7 @@ async fn create_task(
         .await;
     let item = match made {
         Ok(i) => i,
-        Err(e) => return rpc_err(id, -32603, e.message),
+        Err(e) => return rpc_err(id, -32603, e.to_string()),
     };
     let iid = item
         .get("id")

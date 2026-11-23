@@ -39,6 +39,7 @@ pub mod now_line;
 mod occupancy;
 mod orchestrator;
 pub mod outbox_work;
+mod placement;
 pub mod proof;
 pub mod pull;
 mod quota;
@@ -67,7 +68,7 @@ mod tests;
 
 pub use config::CoreConfig;
 pub use error::{CoreError, Result};
-pub use gateway::{Fallback, ModelGateway, OneModel, SharedGateway, Tier};
+pub use gateway::{ModelGateway, OneModel, SharedGateway, SingleModelGateway, Tier};
 pub use orchestrator::{CreateItem, Forked, ItemAction, SendNow, SupplementMode, design_pending};
 pub use runtime::{
     AgentRuntime, Answered, Check, Flushed, McpEndpoint, ModeState, Output, Prompted, Released,
@@ -87,7 +88,7 @@ pub(crate) struct Inner {
     runtime: Arc<dyn AgentRuntime>,
     gateway: Arc<dyn ModelGateway>,
     config: CoreConfig,
-    /// 设置 · 模型 (the same resolver the gateway's [`Fallback`] uses).
+    /// 设置 · 模型 (the same resolver the gateway's [`SingleModelGateway`] uses).
     models: models::Models,
     state: Mutex<State>,
     thread: thread::Lanes,

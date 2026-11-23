@@ -127,7 +127,7 @@ fn create_item_with_project_bot_and_tags() {
 }
 
 #[test]
-fn create_item_drops_a_foreign_project_and_an_unknown_bot() {
+fn create_item_refuses_a_foreign_project_or_an_unknown_bot() {
     let k = Kit::new();
     steve_store::core_fixture::workspace(k.db().store(), "ws_other", "别处", "OT", 1, 0);
     let other = k.db().workspace("ws_other").unwrap().unwrap();
@@ -144,20 +144,37 @@ fn create_item_drops_a_foreign_project_and_an_unknown_bot() {
             None,
         )
         .unwrap();
-    let i = k
-        .core
-        .create_item(CreateItem {
-            ws: WS.into(),
-            goal: "g".into(),
-            title: "x".into(),
-            bot: Some("ghost".into()),
+    let request = CreateItem {
+        ws: WS.into(),
+        goal: "g".into(),
+        title: "x".into(),
+        bot: Some("ghost".into()),
+        ..Default::default()
+    };
+    assert!(matches!(
+        k.core.create_item(request.clone()),
+        Err(crate::CoreError::Placement(steve_types::PlacementBlocked {
+            reason: steve_types::PlacementRejection::Unauthorized,
+            ..
+        }))
+    ));
+    assert!(matches!(
+        k.core.create_item(CreateItem {
+            bot: Some("steve".into()),
             project: Some(Some(p.id)),
-            ..Default::default()
-        })
+            ..request
+        }),
+        Err(crate::CoreError::Placement(steve_types::PlacementBlocked {
+            reason: steve_types::PlacementRejection::Project,
+            ..
+        }))
+    ));
+    k.db()
+        .store()
+        .bots()
+        .set_workspaces("steve", &[WS.into(), other.id.clone()])
         .unwrap();
-    assert_eq!(i.bot_id.as_deref(), Some("steve"));
-    assert_eq!(i.project_id, None);
-    /* items of another workspace use its prefix */
+    // A Bot explicitly granted to the workspace can create an item with its prefix.
     let j = k
         .core
         .create_item(CreateItem {

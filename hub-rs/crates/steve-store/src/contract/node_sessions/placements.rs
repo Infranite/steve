@@ -152,35 +152,6 @@ pub fn knowledge_source(r: &mut impl Read, id: &str) -> Result<Option<KnowledgeS
     )
 }
 
-pub fn earlier_session_elsewhere(
-    r: &mut impl Read,
-    item: &str,
-    session: &str,
-    node: &str,
-) -> Result<bool> {
-    Ok(r.one(
-        Query::select()
-            .column(("s", "id"))
-            .from_as("sessions", "s")
-            .join_as(
-                JoinType::LeftJoin,
-                "runtime_sessions",
-                "r",
-                Expr::col(("s", "id")).eq(Expr::col(("r", "session_id"))),
-            )
-            .and_where(Expr::col(("s", "item_id")).eq(item))
-            .and_where(Expr::col(("s", "id")).ne(session))
-            .and_where(
-                Expr::col(("r", "node_id"))
-                    .is_null()
-                    .or(Expr::col(("r", "node_id")).ne(node)),
-            )
-            .limit(1),
-        |_| Ok(()),
-    )?
-    .is_some())
-}
-
 pub fn roots(r: &mut impl Read) -> Result<(Vec<String>, Vec<String>)> {
     let mut rw = Vec::new();
     r.db().query(

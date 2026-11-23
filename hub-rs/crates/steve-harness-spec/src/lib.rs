@@ -470,6 +470,8 @@ impl AdapterProperties {
 }
 
 adapter_properties! {
+    /// Supports the gateway's read-only tools for explicitly attached files.
+    read_attached: bool = false => Option<bool>, "Option::is_none", copied;
     /// Its read-only mode is enforced by the harness's own sandbox.
     self_read_only: bool = false => Option<bool>, "Option::is_none", copied;
     /// It runs inside the Node's OS sandbox (macOS cannot nest a harness's own one in it).

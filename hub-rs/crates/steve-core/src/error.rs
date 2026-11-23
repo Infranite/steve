@@ -6,6 +6,8 @@ use thiserror::Error;
 pub enum CoreError {
     #[error("{0}")]
     Msg(String),
+    #[error("{0}")]
+    Placement(steve_types::PlacementBlocked),
     #[error(transparent)]
     Contract(#[from] steve_types::Error),
     #[error(transparent)]
@@ -21,11 +23,8 @@ pub enum CoreError {
     /// A refusal with its own status (`404 没有这条消息`, `409 已经处理过了`).
     #[error("{1}")]
     Status(u16, String),
-    /// A model call without tools (or with only some) met a request that needs them: the model
-    /// reached for one. Its words are [`steve_modules::gateway::NEEDS_TOOLS`], so a caller across
-    /// the modules' string boundary tells it apart too.
-    #[error("{}", steve_modules::gateway::NEEDS_TOOLS)]
-    NeedsTools,
+    #[error(transparent)]
+    Gateway(#[from] steve_modules::gateway::GatewayError),
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;

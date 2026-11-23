@@ -9,8 +9,9 @@ import type { ItemSnooze } from "./ItemSnooze";
 import type { ItemWorkflow } from "./ItemWorkflow";
 import type { Millis } from "./Millis";
 import type { OperationBlocker } from "./OperationBlocker";
+import type { PlacementExplanation } from "./PlacementExplanation";
 import type { ProjectId } from "./ProjectId";
 import type { TagId } from "./TagId";
 import type { WorkspaceId } from "./WorkspaceId";
 
-export type ItemView = { id: ItemId, ws: WorkspaceId, no: number, title: string, status: string, stage: string, phase: string, cycle: number, bot_id?: BotId, project_id?: ProjectId, parent?: ItemParent, priority: string, star?: boolean, archived?: boolean, due?: string, snooze?: ItemSnooze, accept_mode?: string, design_gate?: boolean, source: string, created: Millis, updated: Millis, plan_done?: number, plan_total?: number, goals: number, tags: Array<TagId>, deps?: Array<ItemId>, closeout?: Closeout, workflow?: ItemWorkflow, closing?: ItemClosing, op_blockers?: Array<OperationBlocker>, detail_stamp: number, active_operations?: number, has_branch?: boolean, };
+export type ItemView = { placement?: PlacementExplanation, id: ItemId, ws: WorkspaceId, no: number, title: string, status: string, stage: string, phase: string, cycle: number, bot_id?: BotId, project_id?: ProjectId, parent?: ItemParent, priority: string, star?: boolean, archived?: boolean, due?: string, snooze?: ItemSnooze, accept_mode?: string, design_gate?: boolean, source: string, created: Millis, updated: Millis, plan_done?: number, plan_total?: number, goals: number, tags: Array<TagId>, deps?: Array<ItemId>, closeout?: Closeout, workflow?: ItemWorkflow, closing?: ItemClosing, op_blockers?: Array<OperationBlocker>, detail_stamp: number, active_operations?: number, has_branch?: boolean, };

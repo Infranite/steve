@@ -108,12 +108,24 @@ impl Core for FakeCore {
     async fn create_item(&self, req: ItemRequest) -> Result<String, String> {
         lock(&self.calls).push(CoreCall::Create(req.clone()));
         self.with_store(|s| {
+            let bot = match req.bot.as_deref() {
+                Some(bot) => bot.to_owned(),
+                None => {
+                    s.bots()
+                        .list(Some(&req.ws))
+                        .map_err(|e| e.to_string())?
+                        .into_iter()
+                        .find(|bot| bot.enabled)
+                        .ok_or("fixture has no enabled Bot")?
+                        .id
+                }
+            };
             flow_store::create_item(
                 s,
                 flow_store::FixtureItem {
                     ws: &req.ws,
                     title: &req.title,
-                    bot: &req.bot,
+                    bot: &bot,
                     project: req.project.as_deref(),
                     source: &json!([req.source.0, req.source.1]),
                     requester: req.requester.as_deref(),

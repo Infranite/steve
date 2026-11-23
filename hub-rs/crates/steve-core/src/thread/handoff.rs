@@ -1,6 +1,6 @@
 //! An answer that needs tools: the answer is a model call without them, so a question that has to
 //! run a command, read a file or look at the machine (“看下磁盘还剩多少”) makes the model reach for
-//! one, and the call refuses it ([`CoreError::NeedsTools`]). That is decided by the refusal, not by
+//! one, and the call refuses it ([`GatewayError::NeedsTools`]). That is decided by the refusal, not by
 //! how the question reads: for the owner's own trigger word on their account ([`Conv::hands_on`]) the
 //! question becomes an item a Bot works on, once, where the conversation lets a turn become one.
 //! Anywhere else (the web conversation, a Bot's chat, a chat with outside members) the
@@ -8,11 +8,11 @@
 //!
 //! [`Conv::hands_on`]: super::Conv::hands_on
 //!
-//! [`CoreError::NeedsTools`]: crate::error::CoreError::NeedsTools
+//! [`GatewayError::NeedsTools`]: steve_modules::gateway::GatewayError::NeedsTools
 
 use super::offer::ThreadItem;
 use super::research::InlineJob;
-use super::{MAIN, Steps, lock};
+use super::{Steps, lock};
 use crate::Core;
 use crate::error::Result;
 use crate::util::now;
@@ -57,19 +57,7 @@ impl Core {
             return Ok(None);
         };
         let th = self.store().store().thread();
-        if th.route_of(&j.origin)?.is_some_and(|r| r.item_id.is_some()) {
-            return Ok(None);
-        }
-        // title, goal, Bot and project as for any item made from the conversation
-        let history = self.history_before(ws, &j.origin)?;
-        let r = self
-            .route_in(ws, &j.question, &history, true, j.space != MAIN)
-            .await?;
-        let goal = if r.goal.trim().is_empty() || r.goal.trim() == j.question.trim() {
-            j.question.clone()
-        } else {
-            format!("{}\n\n（用户原话：{}）", r.goal.trim(), j.question)
-        };
+        // The failure authorizes no second model call, reroute, or privileged selection.
         let _one = lock(&self.0.thread.acting);
         // made meanwhile (a click on “做成事项”, a second failure of the same question): that one
         if th.route_of(&j.origin)?.is_some_and(|r| r.item_id.is_some()) {
@@ -78,17 +66,18 @@ impl Core {
         let item = self.thread_item(ThreadItem {
             ws,
             origin: &j.origin,
-            title: r.title.clone(),
-            goal,
-            bot: Some(r.bot.clone()),
-            project: r.project.clone().or_else(|| j.project.clone()),
-            tags: r.tag_ids.clone(),
+            title: crate::util::js_head(&j.question, 24).to_string(),
+            goal: j.question.clone(),
+            bot: None,
+            project: j.project.clone(),
+            tags: vec![],
             files: j.files.clone(),
             from_question: super::decide::pure_question(&j.question),
             answer: None,
             start,
             by: j.user.clone(),
         })?;
+        metrics::counter!("steve_gateway_handoffs_total").increment(1);
         th.route_outcome(&j.origin, NEEDS_TOOLS_OUTCOME, Some(&item.id))?;
         let text = handed_off(&item.id, &self.bot_name(&item), item.status == "propose");
         let steps = Steps {

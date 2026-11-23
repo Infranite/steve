@@ -47,6 +47,9 @@ impl ViewKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct ItemView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub placement: Option<PlacementExplanation>,
     pub id: ItemId,
     pub ws: WorkspaceId,
     pub no: i64,
@@ -177,6 +180,9 @@ pub struct OperationBlocker {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct SessionView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub placement: Option<PlacementExplanation>,
     pub id: SessionId,
     pub ws: WorkspaceId,
     #[serde(skip_serializing_if = "Option::is_none")]

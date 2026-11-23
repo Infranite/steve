@@ -38,8 +38,8 @@ const NEW_TABLES: [(&str, i64); 30] = [
     ("session_resume", 24),
     ("session_dispatch", 24),
     ("thread_resume", 24),
-    ("approval_policies", 120),
-    ("approval_turns", 120),
+    ("approval_policies", 121),
+    ("approval_turns", 121),
 ];
 
 fn has_table(c: &Connection, name: &str) -> bool {
@@ -272,7 +272,7 @@ fn rerunning_the_module_migrations_changes_nothing() {
         .find(|m| m.contains("DROP TABLE IF EXISTS lanes;"))
         .unwrap();
     c.execute_batch(dropped).unwrap();
-    // Replaying the early module SQL also recreates the tables retired by 120. Replay only
+    // Replaying the early module SQL also recreates the tables retired by 121. Replay only
     // their drops here; production never reapplies those migrations to an up-to-date store.
     c.execute_batch(
         "DROP TABLE IF EXISTS yolo_actions;

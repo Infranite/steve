@@ -33,6 +33,16 @@ pub(super) fn describe() {
         "steve_approval_questions_total",
         "Agent question cards created for the owner."
     );
+    describe_histogram!(
+        "steve_bot_selection_seconds",
+        Seconds,
+        "Time to assess and rank one Bot dispatch request."
+    );
+    describe_counter!(
+        "steve_bot_selection_blocked_total",
+        Count,
+        "Requests with no eligible placement. Counted once for each distinct reason. Label: reason."
+    );
     // HTTP (metrics::http, the outermost layer)
     describe_counter!(
         "steve_http_requests_total",
@@ -435,6 +445,26 @@ pub(super) fn describe() {
         "steve_model_calls_total",
         Count,
         "Agent turns and gateway calls finished. Labels: source (agent, gateway), harness, model, result (ok or reason code)."
+    );
+    describe_counter!(
+        "steve_gateway_timeout_total",
+        Count,
+        "Gateway calls that timed out. Labels: phase (queue, first_byte, execution, unknown)."
+    );
+    describe_counter!(
+        "steve_gateway_preflight_rejections_total",
+        Count,
+        "Gateway calls stopped before dispatch. Labels: reason (missing_capability, tool_denied)."
+    );
+    describe_counter!(
+        "steve_gateway_handoffs_total",
+        Count,
+        "Controlled gateway handoffs that created a work item."
+    );
+    describe_counter!(
+        "steve_gateway_requests_total",
+        Count,
+        "Think prompts confirmed submitted by a Node's adapter transport."
     );
     describe_histogram!(
         "steve_model_call_seconds",

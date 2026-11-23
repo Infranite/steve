@@ -258,6 +258,10 @@ impl Repo for StoreBackend {
             harness: str_field(f, "harness")
                 .unwrap_or_else(|| steve_harness_spec::DEFAULT_ADAPTER.0.into()),
             role: str_field(f, "role"),
+            specialties: get("specialties")
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| BackendError::msg(e.to_string()))?,
             model: str_field(f, "model"),
             reasoning_effort: str_field(f, "reasoning_effort"),
             rules: str_field(f, "rules"),

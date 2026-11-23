@@ -16,8 +16,9 @@ pub struct ItemRequest {
     pub ws: String,
     pub title: String,
     pub goal: String,
-    /// Always an existing, enabled bot of the workspace (the scheduler falls back to the main bot).
-    pub bot: String,
+    /// An explicit Bot assignment. None asks the dispatch selector to choose.
+    pub bot: Option<String>,
+    pub node_tag: Option<String>,
     /// `None` = the bot's default project.
     pub project: Option<String>,
     pub tag_ids: Vec<String>,

@@ -565,6 +565,7 @@ fn blank_bot(ws: &str, name: &str, m: &crate::models::Models) -> Bot {
         workspace_id: ws.into(),
         name: name.into(),
         role: String::new(),
+        specialties: vec![],
         main: false,
         harness,
         model: None,

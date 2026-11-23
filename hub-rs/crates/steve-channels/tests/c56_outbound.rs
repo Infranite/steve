@@ -5923,10 +5923,8 @@ async fn own_draft(
     }
 }
 
-/// On your own account the check model runs after the draft is written. When it gives no answer —
-/// twice, the second time on the smart tier — the draft's check did not finish: `unchecked`, with
-/// both tries named, not a leak; the card says “检查没跑完”, never “可能泄露”, and offers nothing to
-/// rewrite; YOLO does not send it.
+/// The check runs once after the draft is written. When it fails, the draft is unchecked, not a
+/// leak; the card says “检查没跑完”, never “可能泄露”, and YOLO does not send it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_check_that_did_not_finish_is_not_a_leak() {
     let h = setup().await;
@@ -5948,16 +5946,11 @@ async fn a_check_that_did_not_finish_is_not_a_leak() {
         "nothing waits on the model when drafting"
     );
     h.env.gateway.fail("upstream timeout");
-    h.env.gateway.fail("upstream timeout");
     checked(&h).await;
-    assert_eq!(
-        tries(),
-        vec![steve_modules::Tier::Fast, steve_modules::Tier::Smart],
-        "fast, then smart once"
-    );
+    assert_eq!(tries(), vec![steve_modules::Tier::Fast]);
     let b = basis_of(&h, &m);
     assert_eq!(b.verdict, "unchecked");
-    assert_eq!(b.check_model.as_deref(), Some("tier:fast → tier:smart"));
+    assert_eq!(b.check_model.as_deref(), Some("tier:fast"));
     assert!(
         b.spans[0]["reason"]
             .as_str()
@@ -5969,7 +5962,7 @@ async fn a_check_that_did_not_finish_is_not_a_leak() {
     let q = inspect::decisions::decision_question_options_status(h.env.store(), &d).unwrap();
     assert_eq!(
         q[0],
-        "以你本人发到「Steve 开发群」（检查没跑完：出错：upstream timeout；试过 tier:fast → tier:smart）"
+        "以你本人发到「Steve 开发群」（检查没跑完：出错：upstream timeout；试过 tier:fast）"
     );
     assert_eq!(q[1], json!(r#"["yes","no","to_item"]"#));
     assert_eq!(q[2], "open");
@@ -5977,17 +5970,22 @@ async fn a_check_that_did_not_finish_is_not_a_leak() {
     assert_eq!(status(&h, &m), "pending");
 }
 
-/// The first try fails, the smart tier answers: the check counts, and the card is cleared.
+/// A successful next response belongs to a different draft, not a retry of the failed check.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_failed_first_try_gets_a_second_on_the_smart_tier() {
+async fn a_failed_check_leaves_the_next_response_for_another_draft() {
     let h = setup().await;
-    let (m, d) = own_draft(&h, "d1", "周四能上线吗", "周四可以。", composed()).await;
+    let (failed, _) = own_draft(&h, "d1", "周四能上线吗", "周四可以。", composed()).await;
     h.env.gateway.fail("busy");
     h.env.gateway.reply(PASS);
     checked(&h).await;
+    assert_eq!(basis_of(&h, &failed).verdict, "unchecked");
+    nothing_sent(&h);
+
+    let (m, d) = own_draft(&h, "d2", "周五能上线吗", "周五可以。", composed()).await;
+    checked(&h).await;
     let b = basis_of(&h, &m);
     assert_eq!(b.verdict, "pass");
-    assert_eq!(b.check_model.as_deref(), Some("tier:fast → fake"));
+    assert_eq!(b.check_model.as_deref(), Some("fake"));
     let q = inspect::decisions::decision_question(h.env.store(), &d).unwrap();
     assert_eq!(q[0], "以你本人发到「Steve 开发群」");
     decide(&h, &d, "yes", "").expect("you approve");

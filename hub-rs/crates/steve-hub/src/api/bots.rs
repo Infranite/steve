@@ -84,6 +84,11 @@ fn bot_in(v: &Value, create: bool, harnesses: &[String]) -> Result<Obj, ApiError
     };
     put("name", name.map(Value::from));
     put("role", c.opt_str("role", Str::max(200)).map(Value::from));
+    put(
+        "specialties",
+        c.opt_str_array_of("specialties", Str::len(1, 48), None, Some(12))
+            .map(|tags| json!(steve_store::bot_dispatch::specialties(tags))),
+    );
     let allowed: Vec<&str> = harnesses.iter().map(String::as_str).collect();
     let harness = c.opt_enum("harness", &allowed);
     put("harness", harness.map(Value::from));
