@@ -69,6 +69,8 @@ pub mod operations;
 pub mod parties;
 mod party_rows;
 mod passkey_rows;
+#[cfg(test)]
+mod postgres;
 mod project_rows;
 pub mod projects;
 pub(crate) mod read_models;

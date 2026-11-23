@@ -125,6 +125,8 @@ pub fn lines(
 ) -> Result<Vec<Line>> {
     let order = match r.db().dialect() {
         crate::contract::Dialect::Sqlite => "m.rowid",
+        #[cfg(test)]
+        crate::contract::Dialect::Postgres => unimplemented!("PostgreSQL presence ordering"),
     };
     let sql = format!(
         "SELECT {} FROM chan_messages m

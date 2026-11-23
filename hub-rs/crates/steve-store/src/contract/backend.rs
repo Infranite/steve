@@ -12,6 +12,8 @@ use crate::{Result, StoreError};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dialect {
     Sqlite,
+    #[cfg(test)]
+    Postgres,
 }
 
 impl Dialect {
@@ -19,6 +21,8 @@ impl Dialect {
     pub(crate) fn render<S: QueryStatementWriter>(self, s: &S) -> Result<(String, Values)> {
         let (sql, mut values) = match self {
             Dialect::Sqlite => s.build(SqliteQueryBuilder),
+            #[cfg(test)]
+            Dialect::Postgres => s.build(sea_query::PostgresQueryBuilder),
         };
         // sea-query binds LIMIT and OFFSET as unsigned values. Drivers only receive BIGINTs.
         for value in &mut values.0 {
@@ -38,12 +42,16 @@ impl Dialect {
             Dialect::Sqlite => {
                 Expr::cust_with_exprs("? MATCH ?", [Expr::col(table), Expr::value(text)])
             }
+            #[cfg(test)]
+            Dialect::Postgres => unimplemented!("PostgreSQL full-text search"),
         }
     }
 
     pub(crate) fn fulltext_score(self, table: &'static str) -> FunctionCall {
         match self {
             Dialect::Sqlite => Func::cust("bm25").arg(Expr::col(table)),
+            #[cfg(test)]
+            Dialect::Postgres => unimplemented!("PostgreSQL full-text ranking"),
         }
     }
 
@@ -52,18 +60,28 @@ impl Dialect {
             Self::Sqlite => Func::cust("instr")
                 .args([text, needle])
                 .gt(Expr::Constant(0_i64.into())),
+            #[cfg(test)]
+            Dialect::Postgres => Func::cust("strpos")
+                .args([text, needle])
+                .gt(Expr::Constant(0_i64.into())),
         }
     }
 
     pub(crate) fn knowledge_score(self) -> Expr {
         match self {
             Self::Sqlite => Expr::cust("bm25(kb_fts, 1.0, 2.0)"),
+            #[cfg(test)]
+            Dialect::Postgres => unimplemented!("PostgreSQL knowledge ranking"),
         }
     }
 
     pub(crate) fn local_date(self, ms: Expr) -> Expr {
         match self {
             Dialect::Sqlite => Expr::cust_with_expr("date(? / 1000, 'unixepoch', 'localtime')", ms),
+            #[cfg(test)]
+            Dialect::Postgres => {
+                Expr::cust_with_expr("to_char(to_timestamp($1 / 1000.0), 'YYYY-MM-DD')", ms)
+            }
         }
     }
 
@@ -72,12 +90,18 @@ impl Dialect {
             Self::Sqlite => Func::cust("zeroblob")
                 .arg(Func::cust("length").arg(Expr::col(column)))
                 .into(),
+            #[cfg(test)]
+            Dialect::Postgres => {
+                Expr::cust_with_expr("decode(repeat('00', length($1)), 'hex')", Expr::col(column))
+            }
         }
     }
 
     pub(crate) fn json_valid(self, json: Expr) -> Expr {
         match self {
             Dialect::Sqlite => Func::cust("json_valid").arg(json).into(),
+            #[cfg(test)]
+            Dialect::Postgres => Expr::cust_with_expr("($1 IS JSON)", json),
         }
     }
 
@@ -91,6 +115,8 @@ impl Dialect {
                 .arg(json)
                 .arg(Expr::Constant(path.into().into()))
                 .into(),
+            #[cfg(test)]
+            Dialect::Postgres => super::postgres::json_path(json, path.into()),
         }
     }
 
@@ -100,18 +126,24 @@ impl Dialect {
                 .arg(json)
                 .arg(Expr::Constant(path.into()))
                 .into(),
+            #[cfg(test)]
+            Dialect::Postgres => super::postgres::json_type(json, path),
         }
     }
 
     pub(crate) fn greatest(self, a: Expr, b: Expr) -> Expr {
         match self {
             Dialect::Sqlite => Func::cust("max").args([a, b]).into(),
+            #[cfg(test)]
+            Dialect::Postgres => Func::greatest([a, b]).into(),
         }
     }
 
     pub(crate) fn least(self, a: Expr, b: Expr) -> Expr {
         match self {
             Self::Sqlite => Func::cust("min").args([a, b]).into(),
+            #[cfg(test)]
+            Dialect::Postgres => Func::least([a, b]).into(),
         }
     }
 
@@ -119,6 +151,8 @@ impl Dialect {
         match (self, alias) {
             (Self::Sqlite, Some(alias)) => Expr::col((alias, "rowid")),
             (Self::Sqlite, None) => Expr::col("rowid"),
+            #[cfg(test)]
+            (Self::Postgres, _) => unimplemented!("PostgreSQL requires an explicit insertion key"),
         }
     }
 
@@ -141,6 +175,10 @@ impl Dialect {
                     },
                 )
             }
+            #[cfg(test)]
+            Dialect::Postgres => {
+                sea_query::Cond::any().add(self.invalid_integer(Expr::col(required)))
+            }
         }
     }
 
@@ -149,18 +187,26 @@ impl Dialect {
             Self::Sqlite => self
                 .storage_type(value)
                 .ne(Expr::Constant("integer".into())),
+            #[cfg(test)]
+            Dialect::Postgres => {
+                Expr::cust_with_expr("(pg_typeof($1) <> 'bigint'::regtype)", value)
+            }
         }
     }
 
     pub(crate) fn storage_type(self, value: Expr) -> Expr {
         match self {
             Self::Sqlite => Func::cust("typeof").arg(value).into(),
+            #[cfg(test)]
+            Dialect::Postgres => Expr::cust_with_expr("CAST(pg_typeof($1) AS TEXT)", value),
         }
     }
 
     pub(crate) fn null_safe_eq(self, a: Expr, b: Expr) -> Expr {
         match self {
             Dialect::Sqlite => Expr::cust_with_exprs("? IS ?", [a, b]),
+            #[cfg(test)]
+            Dialect::Postgres => Expr::cust_with_exprs("$1 IS NOT DISTINCT FROM $2", [a, b]),
         }
     }
 
@@ -168,12 +214,19 @@ impl Dialect {
     pub(crate) fn json_array_elements(self, array: Expr) -> FunctionCall {
         match self {
             Dialect::Sqlite => Func::cust("json_each").arg(array),
+            #[cfg(test)]
+            Dialect::Postgres => Func::cust("jsonb_array_elements_text")
+                .arg(Expr::cust_with_expr("CAST($1 AS JSONB)", array)),
         }
     }
 
     pub(crate) fn ascii_nocase(self, expr: Expr) -> Expr {
         match self {
             Dialect::Sqlite => Expr::cust_with_expr("(? COLLATE NOCASE)", expr),
+            #[cfg(test)]
+            Dialect::Postgres => {
+                Func::lower(Expr::cust_with_expr("($1 COLLATE \"C\")", expr)).into()
+            }
         }
     }
 
@@ -182,12 +235,18 @@ impl Dialect {
             Dialect::Sqlite => {
                 Expr::cust_with_expr("CAST(? AS BIGINT)", self.json_field(column, key))
             }
+            #[cfg(test)]
+            Dialect::Postgres => {
+                Expr::cust_with_expr("CAST($1 AS BIGINT)", self.json_field(column, key))
+            }
         }
     }
 
     pub(crate) fn json_merge_patch(self, column: Expr, patch: Expr) -> Expr {
         match self {
             Dialect::Sqlite => Expr::cust_with_exprs("json_patch(?, ?)", [column, patch]),
+            #[cfg(test)]
+            Dialect::Postgres => unimplemented!("PostgreSQL RFC 7396 merge patch"),
         }
     }
 
@@ -200,6 +259,11 @@ impl Dialect {
                     Func::cust("json").arg(value).into(),
                 ])
                 .into(),
+            #[cfg(test)]
+            Dialect::Postgres => Expr::cust_with_exprs(
+                "CAST(jsonb_set(CAST($1 AS JSONB), ARRAY[CAST($2 AS TEXT)], CAST($3 AS JSONB)) AS TEXT)",
+                [column, Expr::val(field), value],
+            ),
         }
     }
 
@@ -208,6 +272,11 @@ impl Dialect {
             Dialect::Sqlite => Query::select()
                 .column((alias, "value"))
                 .from_function(sea_query::Func::cust("json_each").arg(column), alias)
+                .take(),
+            #[cfg(test)]
+            Dialect::Postgres => Query::select()
+                .column((alias, "value"))
+                .from_function(self.json_array_elements(column), alias)
                 .take(),
         }
     }
@@ -223,6 +292,11 @@ impl Dialect {
                 .column("value")
                 .from_function(sea_query::Func::cust("json_each").arg(json), "items")
                 .take(),
+            #[cfg(test)]
+            Dialect::Postgres => Query::select()
+                .column("value")
+                .from_function(self.json_array_elements(Expr::val(json)), "items")
+                .take(),
         })
     }
 
@@ -230,6 +304,11 @@ impl Dialect {
     pub(crate) fn json_push(self, array: Expr, item: Expr) -> Expr {
         match self {
             Dialect::Sqlite => Expr::cust_with_exprs("json_insert(?, '$[#]', ?)", [array, item]),
+            #[cfg(test)]
+            Dialect::Postgres => Expr::cust_with_exprs(
+                "CAST(CAST($1 AS JSONB) || jsonb_build_array(CAST($2 AS TEXT)) AS TEXT)",
+                [array, item],
+            ),
         }
     }
 }
@@ -272,6 +351,8 @@ pub struct Row<'a>(pub(crate) RowImpl<'a>);
 
 pub(crate) enum RowImpl<'a> {
     Sqlite(&'a rusqlite::Row<'a>),
+    #[cfg(test)]
+    Postgres(&'a postgres::Row),
 }
 
 /// A column value as a backend hands it over.
@@ -291,6 +372,8 @@ impl Row<'_> {
     fn col(&self, i: usize) -> Result<Col<'_>> {
         match &self.0 {
             RowImpl::Sqlite(r) => super::sqlite::col(r, i),
+            #[cfg(test)]
+            RowImpl::Postgres(r) => super::postgres::col(r, i),
         }
     }
 }

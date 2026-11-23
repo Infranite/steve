@@ -67,7 +67,7 @@ impl<C: Read> FlowSources<'_, C> {
                 .one(
                     Query::select()
                         .from("source_settings")
-                        .expr(Func::sum(Expr::col(Revision)))
+                        .expr(Expr::from(Func::sum(Expr::col(Revision))).cast_as("BIGINT"))
                         .and_where(Expr::col(WorkspaceId).eq(ws))
                         .and_where(Expr::col(ConnectionId).is_in(batch.iter().map(String::as_str))),
                     |r| r.get::<Option<i64>>(0),
@@ -149,8 +149,11 @@ impl FlowSources<'_, W<'_>> {
                 .on_conflict(
                     OnConflict::column(ConnectionId)
                         .update_columns([Paused, TriageBot, Types, Scopes, Cursor, Updated])
-                        .value(Revision, Expr::col(Revision).add(1_i64))
-                        .action_and_where(Expr::col(WorkspaceId).eq(config.ws))
+                        .value(
+                            Revision,
+                            Expr::col(("source_settings", Revision)).add(1_i64),
+                        )
+                        .action_and_where(Expr::col(("source_settings", WorkspaceId)).eq(config.ws))
                         .to_owned(),
                 ),
         )?;

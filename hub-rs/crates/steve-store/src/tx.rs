@@ -99,17 +99,25 @@ impl WriteTx<'_> {
     }
 }
 
-struct RootScopeGuard<'c> {
-    store_id: usize,
-    conn: &'c Connection,
+struct BackendWrite<'a> {
+    db: &'a mut dyn Backend,
+    committed: bool,
 }
 
-impl Drop for RootScopeGuard<'_> {
+impl Drop for BackendWrite<'_> {
     fn drop(&mut self) {
-        // not committed (an error or a panic in the write): nothing of it stays
-        if !self.conn.is_autocommit() {
-            let _ = self.conn.execute_batch("ROLLBACK");
+        if !self.committed {
+            let _ = self.db.batch("ROLLBACK");
         }
+    }
+}
+
+struct RootScopeGuard {
+    store_id: usize,
+}
+
+impl Drop for RootScopeGuard {
+    fn drop(&mut self) {
         let store_id = self.store_id;
         ACTIVE_WRITES.with(|cell| {
             let mut list = cell.borrow_mut();
@@ -328,11 +336,19 @@ impl Store {
         &self,
         f: impl FnOnce(&Connection, &mut dyn Backend) -> Result<T, E>,
     ) -> Result<T, E> {
-        let store_id = self.inner_id();
         let guard = self.lock();
         let c = guard.connection();
+        self.root_on(c, &mut Sqlite(c), f)
+    }
+
+    pub(crate) fn root_on<T, E: From<StoreError>>(
+        &self,
+        c: &Connection,
+        db: &mut dyn Backend,
+        f: impl FnOnce(&Connection, &mut dyn Backend) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let store_id = self.inner_id();
         crate::instrumentation::transaction_started();
-        let mut db = Sqlite(c);
         db.begin_write()?;
         ACTIVE_WRITES.with(|cell| {
             cell.borrow_mut().push((
@@ -343,10 +359,14 @@ impl Store {
                 },
             ));
         });
-        let root_guard = RootScopeGuard { store_id, conn: c };
-        let out = f(c, &mut db)?;
-        // on failure the guard rolls back
-        db.batch("COMMIT")?;
+        let root_guard = RootScopeGuard { store_id };
+        let mut write = BackendWrite {
+            db,
+            committed: false,
+        };
+        let out = f(c, write.db)?;
+        write.db.batch("COMMIT")?;
+        write.committed = true;
         let staged = ACTIVE_WRITES.with(|cell| {
             let mut list = cell.borrow_mut();
             let pos = list
