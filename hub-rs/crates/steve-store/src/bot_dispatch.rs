@@ -225,6 +225,26 @@ pub fn record(
     Ok(())
 }
 
+/// A chat item whose placement failed before there was any execution session.
+pub fn creation_blocked(
+    r: &mut impl Read,
+    ws: &str,
+    item: &str,
+) -> Result<Option<PlacementBlocked>> {
+    let blocked = Expr::cust("json_extract(detail, '$.placement_blocked')");
+    r.one(
+        Query::select()
+            .expr(blocked.clone())
+            .from("audit")
+            .and_where(Expr::col("target").eq(item))
+            .and_where(Expr::col("action").eq("item.create"))
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(blocked.is_not_null())
+            .limit(1),
+        |row| Ok(row.get::<Json<PlacementBlocked>>(0)?.0),
+    )
+}
+
 pub fn initial(r: &mut impl Read, item: &str) -> Result<Option<BotPlacement>> {
     r.one(
         Query::select()

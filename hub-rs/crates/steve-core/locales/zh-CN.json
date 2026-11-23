@@ -1,4 +1,5 @@
 {
+  "core.thread.choose_execution_bot": "事项尚未分配。请在事项详情选择合格的 Bot，必要时检查 Team 与 Node 设置。",
   "core.bot.invalid_selection": "Bot 配置值无效：%{field}",
   "core.bot.unsupported_selection": "%{harness} 未提供 %{field} `%{value}`；请选择实报值或重置为默认（null）。",
   "core.item.closed": "这个事项已经结束了，需要时先新建周期",
