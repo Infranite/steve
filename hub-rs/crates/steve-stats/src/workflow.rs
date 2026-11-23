@@ -11,12 +11,14 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
-use serde_json::Value;
-use steve_store::{Result, TOOL_CALL_EVENT};
+use steve_store::statistics::{
+    ConversationMeasures, ItemStats, MarkReads, ReportScope, SessionReads, TurnReads, UsageReads,
+    WorkflowReads,
+};
+use steve_store::{Read, Result};
 
-use crate::metrics::{P, Query};
+use crate::metrics::{P, Query, report_scope};
 
 /// A coordinator turn longer than this is a long one: the coordinator waited in its turn instead of
 /// ending it after planning (Steve wakes it when a unit settles).
@@ -88,33 +90,16 @@ fn ratio(a: i64, b: i64) -> Option<f64> {
     (b > 0).then(|| a as f64 / b as f64)
 }
 
-/// `(item filter SQL)` on alias `i`: `?4` project, `?5` bot (as `metrics`).
-const ITEM_FILTER: &str = "(?4 IS NULL OR i.project_id = ?4) AND (?5 IS NULL OR i.bot_id = ?5)";
-
-fn has_column(c: &Connection, table: &str, column: &str) -> Result<bool> {
-    Ok(c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
-        params![table, column],
-        |r| r.get(0),
-    )?)
-}
-
-/// `(to_v, ts, item)` of the marks of `kind` in the range, item filters applied.
 fn marks(
-    c: &Connection,
-    q: &Query,
-    lo: i64,
-    hi: i64,
+    c: &mut impl Read,
+    scope: ReportScope<'_>,
     kind: &str,
 ) -> Result<Vec<(String, i64, String)>> {
-    Ok(c.prepare_cached(&format!(
-        "SELECT COALESCE(m.to_v, ''), m.ts, m.item_id FROM item_marks m JOIN items i ON i.id = m.item_id
-         WHERE m.workspace_id = ?1 AND m.kind = ?6 AND m.ts >= ?2 AND m.ts < ?3 AND {ITEM_FILTER}"
-    ))?
-    .query_map(params![q.workspace_id, lo, hi, q.project, q.bot, kind], |r| {
-        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-    })?
-    .collect::<rusqlite::Result<_>>()?)
+    Ok(MarkReads(c)
+        .changes(scope, kind)?
+        .into_iter()
+        .map(|(id, at, _, to)| (to.unwrap_or_default(), at, id))
+        .collect())
 }
 
 fn by_value(rows: &[(String, i64, String)]) -> BTreeMap<String, i64> {
@@ -125,43 +110,16 @@ fn by_value(rows: &[(String, i64, String)]) -> BTreeMap<String, i64> {
     m
 }
 
-/// One row of a graph's history.
-struct H {
-    graph: String,
-    action: String,
-    unit: Option<String>,
-    detail: Value,
-    created: i64,
-}
-
 /// The section for `q`, within `[lo, hi)` (the summary's bounds).
-pub fn of(c: &Connection, q: &Query, lo: i64, hi: i64) -> Result<Workflow> {
-    let ws = &q.workspace_id;
-    let p = params![ws, lo, hi, q.project, q.bot];
+pub fn of(c: &mut impl Read, q: &Query, lo: i64, hi: i64) -> Result<Workflow> {
+    let scope = report_scope(q, lo, hi);
     let mut w = Workflow {
         long_turn_ms: LONG_TURN_MS,
         ..Workflow::default()
     };
 
     /* graphs: their whole history, read in order, for those with something in the range */
-    let history: Vec<H> = c
-        .prepare_cached(&format!(
-            "SELECT h.workflow_id, h.action, h.unit_id, h.detail, h.created FROM workflow_history h
-             JOIN items i ON i.id = h.workflow_id
-             WHERE i.workspace_id = ?1 AND {ITEM_FILTER} AND h.workflow_id IN
-               (SELECT workflow_id FROM workflow_history WHERE created >= ?2 AND created < ?3)
-             ORDER BY h.workflow_id, h.revision"
-        ))?
-        .query_map(p, |r| {
-            Ok(H {
-                graph: r.get(0)?,
-                action: r.get(1)?,
-                unit: r.get(2)?,
-                detail: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or_default(),
-                created: r.get(4)?,
-            })
-        })?
-        .collect::<rusqlite::Result<_>>()?;
+    let history = WorkflowReads(c).history(scope)?;
     for k in UNIT_KINDS {
         w.first_try.insert((*k).into(), FirstTry::default());
     }
@@ -217,33 +175,10 @@ pub fn of(c: &Connection, q: &Query, lo: i64, hi: i64) -> Result<Workflow> {
     /* the coordinator: the graph's own item, against its units' items */
     let mut coordinator_turns = Vec::new();
     for g in &graphs {
-        let children: Vec<String> = c
-            .prepare_cached(
-                "SELECT item_id FROM workflow_units WHERE workflow_id = ?1 AND item_id IS NOT NULL
-                 UNION SELECT item_id FROM workflow_attempts WHERE workflow_id = ?1",
-            )?
-            .query_map([g], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        let tokens = |item: &str| -> Result<i64> {
-            Ok(c.prepare_cached(
-                "SELECT COALESCE(SUM(COALESCE(input, 0) + COALESCE(output, 0) + COALESCE(cache_read, 0)
-                        + COALESCE(cache_write, 0)), 0)
-                 FROM usage_records WHERE item_id = ?1 AND ts >= ?2 AND ts < ?3",
-            )?
-            .query_row(params![item, lo, hi], |r| r.get(0))?)
-        };
-        w.coordinator_tokens += tokens(g)?;
-        for child in &children {
-            w.unit_tokens += tokens(child)?;
-        }
-        let turns: Vec<i64> = c
-            .prepare_cached(
-                "SELECT ended - started FROM agent_turns
-                 WHERE item_id = ?1 AND started >= ?2 AND started < ?3 AND ended IS NOT NULL",
-            )?
-            .query_map(params![g, lo, hi], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        coordinator_turns.extend(turns.into_iter().map(|t| t.max(0)));
+        let children = WorkflowReads(c).children(g)?;
+        w.coordinator_tokens += UsageReads(c).tokens_for_items(&[(*g).to_owned()], scope)?;
+        w.unit_tokens += UsageReads(c).tokens_for_items(&children, scope)?;
+        coordinator_turns.extend(TurnReads(c).item_durations(g, scope)?);
     }
     w.coordinator_share = ratio(w.coordinator_tokens, w.coordinator_tokens + w.unit_tokens);
     w.coordinator_long_turns = coordinator_turns
@@ -253,76 +188,33 @@ pub fn of(c: &Connection, q: &Query, lo: i64, hi: i64) -> Result<Workflow> {
     w.coordinator_turn_ms = P::of(&coordinator_turns);
 
     /* sessions per item done in the range (units are counted with their graph's item) */
-    let sessions: Vec<i64> = c
-        .prepare_cached(&format!(
-            "SELECT (SELECT COUNT(*) FROM sessions x WHERE x.item_id = s.item_id)
-                  + (SELECT COUNT(*) FROM sessions x WHERE x.item_id IN
-                      (SELECT item_id FROM workflow_units WHERE workflow_id = s.item_id AND item_id IS NOT NULL
-                       UNION SELECT item_id FROM workflow_attempts WHERE workflow_id = s.item_id))
-             FROM item_stats s JOIN items i ON i.id = s.item_id
-             WHERE s.workspace_id = ?1 AND s.done_at >= ?2 AND s.done_at < ?3 AND {ITEM_FILTER}
-               AND json_extract(i.source, '$[1]') IS NOT 'workflow'"
-        ))?
-        .query_map(p, |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+    let sessions = SessionReads(c).by_completed_item(scope)?;
     w.sessions_per_item = P::of(&sessions);
 
     /* marks */
-    w.wakes = by_value(&marks(c, q, lo, hi, "wake")?);
-    w.invalidations = by_value(&marks(c, q, lo, hi, "invalidate")?);
-    let merges = marks(c, q, lo, hi, "merge")?;
+    w.wakes = by_value(&marks(c, scope, "wake")?);
+    w.invalidations = by_value(&marks(c, scope, "invalidate")?);
+    let merges = marks(c, scope, "merge")?;
     w.merged = merges.len() as i64;
     let mut to_merge = Vec::new();
     for (_, ts, item) in &merges {
-        let accepted: Option<i64> = c
-            .prepare_cached("SELECT accepted FROM item_stats WHERE item_id = ?")?
-            .query_row([item], |r| r.get(0))
-            .optional()?
-            .flatten();
+        let accepted = ItemStats(c).accepted(item)?;
         if let Some(a) = accepted.filter(|a| a <= ts) {
             to_merge.push(ts - a);
         }
     }
     w.accept_to_merge = P::of(&to_merge);
-    let rejects = marks(c, q, lo, hi, "reject")?;
+    let rejects = marks(c, scope, "reject")?;
     w.rejected = rejects.len() as i64;
     w.rejects = by_value(&rejects);
-    w.delivered = marks(c, q, lo, hi, "deliver")?.len() as i64 + w.unit_deliveries;
+    w.delivered = marks(c, scope, "deliver")?.len() as i64 + w.unit_deliveries;
     w.reject_rate = ratio(w.rejected, w.rejected + w.delivered);
 
     /* channels: an inbound message → the first reply to it that was sent */
-    let latency: Vec<i64> = c
-        .prepare_cached(
-            "SELECT MIN(o.sent) - m.created FROM chan_messages o
-             JOIN chan_messages m ON m.space_id = o.space_id AND m.external_id = o.reply_to AND m.direction = 'in'
-             WHERE o.workspace_id = ?1 AND o.direction = 'out' AND o.status = 'sent' AND o.sent IS NOT NULL
-               AND o.created >= ?2 AND o.created < ?3 AND o.reply_to IS NOT NULL
-             GROUP BY m.id",
-        )?
-        .query_map(params![ws, lo, hi], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+    let latency = ConversationMeasures(c).reply_delays(scope)?;
     w.reply_latency = P::of(&latency.into_iter().filter(|v| *v >= 0).collect::<Vec<_>>());
 
-    /* cold start: a session's first tool call (sessions from before migration 92, or a database not
-     * migrated yet, have it only as their first `tool_call` event) */
-    let first_event =
-        "(SELECT MIN(e.ts) FROM events e WHERE e.session_id = s.id AND e.kind = ?6)".to_string();
-    let first = if has_column(c, "sessions", "first_tool_at")? {
-        format!("COALESCE(s.first_tool_at, {first_event})")
-    } else {
-        first_event
-    };
-    let starts: Vec<Option<i64>> = c
-        .prepare(&format!(
-            "SELECT {first} - s.created FROM sessions s LEFT JOIN items i ON i.id = s.item_id
-             WHERE s.workspace_id = ?1 AND s.source = 'Steve' AND s.created >= ?2 AND s.created < ?3
-               AND (?4 IS NULL OR i.project_id = ?4) AND (?5 IS NULL OR s.bot_id = ?5)"
-        ))?
-        .query_map(
-            params![ws, lo, hi, q.project, q.bot, TOOL_CALL_EVENT],
-            |r| r.get(0),
-        )?
-        .collect::<rusqlite::Result<_>>()?;
+    let starts = SessionReads(c).first_tool_delays(scope)?;
     w.no_tool = starts.iter().filter(|s| s.is_none()).count() as i64;
     w.first_tool = P::of(
         &starts

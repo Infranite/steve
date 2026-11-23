@@ -89,20 +89,20 @@ pub fn install(
     let g = graph::validate(&graph(), &cx.nodes).map_err(ApiError::rule)?;
     let now = cx.now();
     cx.store().write(|tx| -> FlowResult<Option<String>> {
-        let mut st = sources::settings(&tx.legacy(), ws, connection_id)?;
+        let mut st = sources::settings(tx, ws, connection_id)?;
         if st.triage_bot.is_none() {
             let has_mail_bot = steve_store::bots::scoped_bot(tx, ws, MAIL_BOT)?
                 && steve_store::bots::bot_enabled(tx, MAIL_BOT)? == Some(true);
             if has_mail_bot {
                 st.triage_bot = Some(MAIL_BOT.into());
-                sources::save(&tx.legacy(), &st, now)?;
+                sources::save(tx, &st, now)?;
             }
         }
         if steve_store::flow_repo::has_origin(tx, ws, ORIGIN)? {
             return Ok(None);
         }
         let id = flows::create(
-            &tx.legacy(),
+            tx,
             ws,
             actor,
             &NewFlow {

@@ -30,9 +30,7 @@
 
 use std::sync::Arc;
 
-use crate::contract::Q;
 use rusqlite::{Connection, OptionalExtension, params};
-use sea_query::{InsertStatement, Query};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -65,25 +63,18 @@ pub struct Event {
 
 /// Records `payload` under `topic` in the caller's transaction; delivered only if it commits.
 pub fn emit(tx: &Tx, ws: &str, topic: &str, version: i64, payload: &Value) -> Result<Event> {
-    let id = uid("evt");
-    let created = crate::now();
-    crate::contract::exec_on(
+    let event = append_on(
         &mut crate::contract::Sqlite(tx),
-        &insert_event(&id, ws, topic, version, payload, created),
+        ws,
+        topic,
+        version,
+        payload,
     )?;
     tx.mark_outbox();
-    Ok(Event {
-        seq: tx.last_insert_rowid(),
-        id,
-        workspace_id: ws.into(),
-        topic: topic.into(),
-        version,
-        payload: payload.clone(),
-        created,
-    })
+    Ok(event)
 }
 
-/// Append a fact within a typed storage write. Delivery wakes after the write commits.
+/// Records a durable fact inside the caller's write transaction.
 pub fn append(
     w: &mut crate::W<'_>,
     ws: &str,
@@ -91,35 +82,22 @@ pub fn append(
     version: i64,
     payload: &Value,
 ) -> Result<Event> {
-    let id = uid("evt");
-    let created = crate::now();
-    let mut insert = insert_event(&id, ws, topic, version, payload, created);
-    let seq = w
-        .one(insert.returning(Query::returning().column("seq")), |r| {
-            r.get(0)
-        })?
-        .ok_or_else(|| StoreError::Storage("outbox insert returned no sequence".into()))?;
-    w.mark_outbox();
-    Ok(Event {
-        seq,
-        id,
-        workspace_id: ws.into(),
-        topic: topic.into(),
-        version,
-        payload: payload.clone(),
-        created,
-    })
+    use crate::contract::Q;
+    let event = append_on(w.db(), ws, topic, version, payload)?;
+    w.outbox_changed();
+    Ok(event)
 }
 
-fn insert_event(
-    id: &str,
+fn append_on(
+    db: &mut dyn crate::contract::Backend,
     ws: &str,
     topic: &str,
     version: i64,
     payload: &Value,
-    created: i64,
-) -> InsertStatement {
-    Query::insert()
+) -> Result<Event> {
+    let id = uid("evt");
+    let created = crate::now();
+    let statement = sea_query::Query::insert()
         .into_table("outbox_events")
         .columns([
             "id",
@@ -130,14 +108,30 @@ fn insert_event(
             "created",
         ])
         .values_panic([
-            id.into(),
+            id.as_str().into(),
             ws.into(),
             topic.into(),
             version.into(),
             payload.to_string().into(),
             created.into(),
         ])
-        .take()
+        .returning_col("seq")
+        .take();
+    let (sql, values) = db.dialect().render(&statement)?;
+    let mut seq = None;
+    db.query(&sql, &values, &mut |row| {
+        seq = Some(row.get(0)?);
+        Ok(())
+    })?;
+    Ok(Event {
+        seq: crate::repo::must(seq)?,
+        id,
+        workspace_id: ws.into(),
+        topic: topic.into(),
+        version,
+        payload: payload.clone(),
+        created,
+    })
 }
 
 /// Why a delivery did not go through.

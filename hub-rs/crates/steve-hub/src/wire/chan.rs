@@ -84,10 +84,10 @@ async fn basis(
     let c2 = ch.clone();
     ch.modules()
         .blocking(move |_| {
-            visible(&c2, &who, &id)?;
-            let b = c2
-                .store()
-                .reader(|c| steve_channels::basis::of_message(c, &who.ws, &id))?;
+            let b = c2.store().read(|r| {
+                visible(&c2, &who, &id)?;
+                steve_channels::basis::of_message(r, &who.ws, &id)
+            })?;
             Ok(Json(serde_json::to_value(b).map_err(ApiError::from)?))
         })
         .await
@@ -173,9 +173,13 @@ async fn conversations(
     ch.modules()
         .blocking(move |_| {
             let viewer = c2.modules().viewer(&who)?;
-            let list = c2.store().reader(|c| {
-                steve_channels::conversations::list_page(c, &who.ws, &viewer, &query, c2.now())
-            })?;
+            let list = steve_channels::conversations::list_page(
+                c2.store(),
+                &who.ws,
+                &viewer,
+                &query,
+                c2.now(),
+            )?;
             Ok(Json(serde_json::to_value(list).map_err(ApiError::from)?))
         })
         .await
@@ -254,9 +258,8 @@ async fn conversation_record(
     ch.modules()
         .blocking(move |_| {
             let viewer = c2.modules().viewer(&who)?;
-            let v = c2.store().reader(|c| {
-                steve_channels::conv_record::record(c, &who.ws, &viewer, &space, &query)
-            })?;
+            let v =
+                steve_channels::conv_record::record(c2.store(), &who.ws, &viewer, &space, &query)?;
             Ok(Json(v))
         })
         .await

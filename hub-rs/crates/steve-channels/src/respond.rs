@@ -259,30 +259,25 @@ pub(crate) fn open_draft_as(
         ),
         (Mode::Bot, None) => bindings::effective(tx, &space)?.map(|e| e.persona),
     };
-    tx.execute(
-        // seen by the identity it goes out as (`seen_by`, migration 88)
-        "INSERT INTO chan_messages (id, workspace_id, space_id, thread_key, reply_to, direction, sender_account_id,
-            persona_id, on_behalf, text, status, created, seen_by)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'out', ?6, ?7, ?8, ?9, 'draft', ?10, coalesce((SELECT sum(1 << i.ordinal) FROM space_identities i JOIN connections c ON c.id = i.connection_id WHERE i.space_id = ?3 AND c.account_id = ?6 AND i.ordinal IS NOT NULL), 0))",
-        params![
-            id,
-            t.ws,
-            t.space_id,
-            t.thread_key,
-            t.reply_to,
-            account,
-            persona.as_ref().map(|p| p.id.clone()),
-            if persona.is_some() { "persona" } else { "none" },
-            text,
-            now
-        ],
-    )?;
-    steve_store_sqlite::digest::sync_message(
-        tx,
-        steve_store_sqlite::digest::Source::ChanMessage,
-        &id,
-        None,
-    )?;
+    tx.write(|w| {
+        use steve_store::channel_message_repo::outbound::{self, NewMessage};
+        outbound::insert(
+            w,
+            &NewMessage {
+                id: &id,
+                ws: &t.ws,
+                space: &t.space_id,
+                thread: t.thread_key.as_deref(),
+                reply_to: t.reply_to.as_deref(),
+                account: Some(&account),
+                persona: persona.as_ref().map(|persona| persona.id.as_str()),
+                on_behalf: if persona.is_some() { "persona" } else { "none" },
+                text: Some(text),
+                status: "draft",
+                created: now,
+            },
+        )
+    })?;
     let name = spaces::display_title(tx, &space)?;
     let question = match (&persona, t.mode) {
         (Some(p), _) => format!("以{}发到「{name}」", p.name),
@@ -347,7 +342,7 @@ impl Channels {
             act: plan.act,
             rule: plan.rule,
             muted: false,
-            label: plan.act.label().into(),
+            label: crate::rules::action_label(plan.act).into(),
             decision_id: None,
             out_message_id: None,
             item_id: None,
@@ -362,7 +357,7 @@ impl Channels {
             && matches!(plan.act, Act::Reply | Act::Draft)
             && !self
                 .store()
-                .reader(|c| spaces::can_send_as_you(c, &plan.connection_id))?
+                .read(|r| spaces::can_send_as_you(r, &plan.connection_id))?
         {
             return self.respond_without_grant(plan, r).await;
         }

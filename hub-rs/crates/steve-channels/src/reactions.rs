@@ -25,11 +25,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rusqlite::{Connection, OptionalExtension, params};
-use serde::Serialize;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::channel::{MessageRef, ReactionKind};
-use crate::{ChannelResult, Channels, messages};
+use crate::{ChannelResult, Channels};
+use steve_store::channel_message_repo::{self, reactions as repo};
 
 /// How long one provider call may take before it is given up on.
 pub const REACTION_TIMEOUT: Duration = Duration::from_secs(4);
@@ -160,58 +160,6 @@ impl Finish {
     }
 }
 
-/// One `chan_reactions` row.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ReactionRow {
-    pub message_id: String,
-    /// `ack | done | failed | cleared`
-    pub state: String,
-    pub reaction_id: Option<String>,
-    pub emoji: Option<String>,
-    pub as_user: bool,
-    pub answer_id: Option<String>,
-    pub error: Option<String>,
-    pub updated: i64,
-}
-
-pub fn get(c: &Connection, message_id: &str) -> ChannelResult<Option<ReactionRow>> {
-    Ok(c.query_row(
-        "SELECT message_id, state, reaction_id, emoji, as_user, answer_id, error, updated FROM chan_reactions WHERE message_id = ?",
-        [message_id],
-        |r| {
-            Ok(ReactionRow {
-                message_id: r.get(0)?,
-                state: r.get(1)?,
-                reaction_id: r.get(2)?,
-                emoji: r.get(3)?,
-                as_user: r.get::<_, i64>(4)? != 0,
-                answer_id: r.get(5)?,
-                error: r.get(6)?,
-                updated: r.get(7)?,
-            })
-        },
-    )
-    .optional()?)
-}
-
-/// The inbound message whose reaction the sending of outbound `out_id` completes.
-pub fn answered_by(c: &Connection, out_id: &str) -> ChannelResult<Option<String>> {
-    Ok(c.query_row(
-        "SELECT message_id FROM chan_reactions WHERE answer_id = ?",
-        [out_id],
-        |r| r.get(0),
-    )
-    .optional()?)
-}
-
-/// Remembers that sending `out_id` answers `message_id` (only while it is acknowledged or failed).
-pub fn expect_answer(c: &Connection, message_id: &str, out_id: &str) -> ChannelResult<bool> {
-    Ok(c.execute(
-        "UPDATE chan_reactions SET answer_id = ? WHERE message_id = ? AND state IN ('ack', 'failed')",
-        params![out_id, message_id],
-    )? == 1)
-}
-
 /// Where a message is, for the provider calls.
 struct Target {
     ws: String,
@@ -225,7 +173,11 @@ struct Target {
 
 /// The message reacts as the space's voice (the identity that answers there,
 /// [`crate::spaces::voice`]), whichever identity received it.
-fn target(c: &Connection, message_id: &str) -> ChannelResult<Option<Target>> {
+fn target(
+    r: &mut impl steve_store::Read,
+    c: &Connection,
+    message_id: &str,
+) -> ChannelResult<Option<Target>> {
     let t = c
         .query_row(
             "SELECT m.workspace_id, m.space_id, coalesce(m.external_id, '')
@@ -246,7 +198,7 @@ fn target(c: &Connection, message_id: &str) -> ChannelResult<Option<Target>> {
     // the voice falls back to the connection the space was first seen through; neither once the
     // space's connections were all removed
     if let Some(conn) = crate::spaces::voice(c, &t.space)? {
-        match crate::messages::message_ref(c, message_id, &conn)? {
+        match crate::messages::message_ref(r, message_id, &conn)? {
             Some(m) => t.via = Some((conn, m)),
             None => return Ok(None),
         }
@@ -332,8 +284,10 @@ impl Channels {
     /// Records state `ack` for `message_id` (no reaction id yet); `None` when there is nothing to
     /// acknowledge (no target, or acknowledged already). The caller holds the message's reaction lock.
     fn ack_record(&self, message_id: &str) -> ChannelResult<Option<Target>> {
-        let (t, row) = self.store().reader(|c| {
-            Ok::<_, crate::ChannelError>((target(c, message_id)?, get(c, message_id)?))
+        let (t, row) = self.store().read(|r| {
+            self.store().reader(|c| {
+                Ok::<_, crate::ChannelError>((target(r, c, message_id)?, repo::get(r, message_id)?))
+            })
         })?;
         // no connected identity: nobody to react as, nothing to record
         let Some(t) = t.filter(|t| t.via.is_some()) else {
@@ -346,15 +300,9 @@ impl Channels {
             return Ok(None);
         }
         let now = self.now();
-        self.store().transaction(|tx| -> ChannelResult<()> {
-            tx.execute(
-                "INSERT INTO chan_reactions (message_id, workspace_id, state, reaction_id, emoji, as_user, error, updated)
-                 VALUES (?, ?, 'ack', NULL, NULL, 0, NULL, ?)
-                 ON CONFLICT (message_id) DO UPDATE SET state = 'ack', reaction_id = NULL, emoji = NULL, as_user = 0,
-                   answer_id = NULL, error = NULL, updated = excluded.updated",
-                params![message_id, t.ws, now],
-            )?;
-            messages::event(tx, &t.ws, &t.space, message_id);
+        self.store().write(|w| -> ChannelResult<()> {
+            repo::acknowledge(w, &t.ws, message_id, now)?;
+            channel_message_repo::emit(w, &t.ws, &t.space, message_id);
             Ok(())
         })?;
         Ok(Some(t))
@@ -375,17 +323,29 @@ impl Channels {
             tracing::info!(message = message_id, "ack reaction not added: {e}");
         }
         let now = self.now();
-        self.store().transaction(|tx| -> ChannelResult<()> {
-            let (id, emoji, as_user, err) = match &added {
-                Ok(a) => (Some(a.reaction_id.clone()), Some(a.emoji.clone()), a.as_user, None),
-                Err(e) => (None, None, false, Some(e.clone())),
+        self.store().write(|w| {
+            let (id, emoji, as_user, error) = match &added {
+                Ok(a) => (
+                    Some(a.reaction_id.as_str()),
+                    Some(a.emoji.as_str()),
+                    a.as_user,
+                    None,
+                ),
+                Err(e) => (None, None, false, Some(e.as_str())),
             };
-            tx.execute(
-                "UPDATE chan_reactions SET reaction_id = ?, emoji = ?, as_user = ?, error = ?, updated = ?
-                  WHERE message_id = ? AND state = 'ack'",
-                params![id, emoji, as_user as i64, err, now, message_id],
+            repo::save_result(
+                w,
+                message_id,
+                repo::Change {
+                    id,
+                    emoji,
+                    as_user,
+                    error,
+                },
+                None,
+                now,
             )?;
-            messages::event(tx, &t.ws, &t.space, message_id);
+            channel_message_repo::emit(w, &t.ws, &t.space, message_id);
             Ok(())
         })
     }
@@ -402,8 +362,10 @@ impl Channels {
     async fn react_finish_inner(&self, message_id: &str, how: Finish) -> ChannelResult<()> {
         let lock = self.reaction_locks().of(message_id);
         let _g = lock.lock().await;
-        let (t, row) = self.store().reader(|c| {
-            Ok::<_, crate::ChannelError>((target(c, message_id)?, get(c, message_id)?))
+        let (t, row) = self.store().read(|r| {
+            self.store().reader(|c| {
+                Ok::<_, crate::ChannelError>((target(r, c, message_id)?, repo::get(r, message_id)?))
+            })
         })?;
         let (Some(t), Some(row)) = (t, row) else {
             return Ok(());
@@ -413,13 +375,15 @@ impl Channels {
         }
         let finished = self.finish_provider(message_id, how, &t, &row).await;
         let now = self.now();
-        self.store().transaction(|tx| -> ChannelResult<()> {
-            tx.execute(
-                "UPDATE chan_reactions SET state = ?, reaction_id = ?, emoji = ?, as_user = ?, error = ?, updated = ?
-                  WHERE message_id = ?",
-                params![how.state(), finished.id, finished.emoji, finished.as_user as i64, finished.error, now, message_id],
-            )?;
-            messages::event(tx, &t.ws, &t.space, message_id);
+        self.store().write(|w| {
+            let change = repo::Change {
+                id: finished.id.as_deref(),
+                emoji: finished.emoji.as_deref(),
+                as_user: finished.as_user,
+                error: finished.error.as_deref(),
+            };
+            repo::save_result(w, message_id, change, Some(how.state()), now)?;
+            channel_message_repo::emit(w, &t.ws, &t.space, message_id);
             Ok(())
         })
     }
@@ -427,7 +391,7 @@ impl Channels {
     /// The outbound row `out_id` went out (`true`) or could not (`false`): the inbound message it
     /// answers turns done or failed.
     pub async fn react_answered(&self, out_id: &str, sent: bool) {
-        let src = self.store().reader(|c| answered_by(c, out_id));
+        let src = self.store().read(|r| repo::answered_by(r, out_id));
         match src {
             Ok(Some(m)) => {
                 self.react_finish(&m, if sent { Finish::Done } else { Finish::Failed })
@@ -440,7 +404,7 @@ impl Channels {
 
     /// A draft answer you discarded: its message's acknowledgement comes off.
     pub async fn react_discarded(&self, out_id: &str) {
-        if let Ok(Some(m)) = self.store().reader(|c| answered_by(c, out_id)) {
+        if let Ok(Some(m)) = self.store().read(|r| repo::answered_by(r, out_id)) {
             self.react_finish(&m, Finish::Clear).await;
         }
     }
@@ -448,16 +412,10 @@ impl Channels {
     /// The item made from a message ended: done when it finished, the acknowledgement comes off when
     /// it was dropped. Every inbound message the item came from (`links … from chan_message`).
     pub async fn react_item_ended(&self, ws: &str, item_id: &str, finished: bool) {
-        let ids = self.store().reader(|c| -> ChannelResult<Vec<String>> {
-            let mut st = c.prepare_cached(
-                "SELECT l.object_id FROM links l JOIN chan_reactions r ON r.message_id = l.object_id
-                  WHERE l.workspace_id = ? AND l.subject_type = 'item' AND l.subject_id = ?
-                    AND l.predicate = 'from' AND l.object_type = 'chan_message'",
-            )?;
-            let v = st
-                .query_map(params![ws, item_id], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<String>>>()?;
-            Ok(v)
+        let ids = self.store().read(|r| {
+            let sources = steve_store::link_repo::channel_sources(r, ws, &[item_id])?;
+            let messages: Vec<_> = sources.into_iter().map(|(_, id)| id).collect();
+            repo::for_messages(r, &messages)
         });
         for m in ids.unwrap_or_default() {
             self.react_finish(

@@ -6,14 +6,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rusqlite::types::Value as Sql;
-use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::{Value, json};
-use steve_modules::ApiError;
 use steve_store::base::Viewer;
-use steve_store::{Store, Tx};
+use steve_store::{
+    Connections, Contacts, FlowRows, Read, RunRows, SignalFilter, SignalRow, SignalRows,
+    SignalTriage, Store, StoreError, W,
+};
 
-use crate::{FlowResult, runs};
+use crate::runs;
 
 /// `GET /signals` returns at most this many.
 pub const MAX_LIST: i64 = 500;
@@ -90,85 +90,60 @@ impl SignalDebounce {
 
 /// Recomputes an event's triage result from its (non-dry) runs. Called after a run ends (the
 /// executor, S2's engine after waits). Returns the event's workspace when it changed.
-pub fn settle(tx: &Tx, event_id: &str) -> FlowResult<Option<String>> {
-    let ev = tx
-        .query_row(
-            "SELECT workspace_id, outcome, outcome_label FROM ext_events WHERE id = ?",
-            [event_id],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
-            },
-        )
-        .optional()?;
-    let Some((ws, old_outcome, old_label)) = ev else {
+pub fn settle(w: &mut W<'_>, event_id: &str) -> steve_store::Result<Option<String>> {
+    let Some((ws, old_outcome, old_label)) = SignalRows(w).current_outcome(event_id)? else {
         return Ok(None);
     };
-    let mut st = tx.prepare_cached(
-        "SELECT id, flow_id, status, outcome, outcome_label, work_item_id, context FROM flow_runs
-          WHERE event_id = ? AND dry_run = 0 ORDER BY started, rowid",
-    )?;
-    let runs = st
-        .query_map([event_id], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, Option<String>>(3)?,
-                r.get::<_, String>(4)?,
-                r.get::<_, Option<String>>(5)?,
-                r.get::<_, String>(6)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let runs = RunRows(w).triage_runs(&ws, event_id)?;
     if runs.is_empty() {
         return Ok(None);
     }
-    let rank = |o: &Option<String>| {
-        o.as_deref()
-            .and_then(|o| OUTCOME_ORDER.iter().position(|x| *x == o))
-    };
     let best = runs
         .iter()
-        .filter(|r| rank(&r.3).is_some())
-        .min_by_key(|r| rank(&r.3));
-    let going = runs.iter().any(|r| r.2 == "running" || r.2 == "waiting");
+        .filter_map(|run| {
+            let outcome = run.outcome.as_deref()?;
+            let rank = OUTCOME_ORDER.iter().position(|&key| key == outcome)?;
+            Some((rank, outcome, run))
+        })
+        .min_by_key(|(rank, _, _)| *rank);
+    let going = runs
+        .iter()
+        .any(|r| matches!(r.status.as_str(), "running" | "waiting"));
     let (outcome, run) = match best {
-        Some(r) => (r.3.clone().unwrap_or_default(), Some(r)),
-        None if going => ("pending".to_string(), None),
-        None => match runs.iter().rev().find(|r| r.2 == "failed") {
-            Some(r) => ("failed".to_string(), Some(r)),
-            None => ("recorded".to_string(), runs.last()),
+        Some((_, outcome, run)) => (outcome, Some(run)),
+        None if going => ("pending", None),
+        None => match runs.iter().rev().find(|run| run.status == "failed") {
+            Some(run) => ("failed", Some(run)),
+            None => ("recorded", runs.last()),
         },
     };
-    let ctx: Value = run
-        .and_then(|r| serde_json::from_str(&r.6).ok())
-        .unwrap_or(Value::Null);
-    let label = match (outcome.as_str(), run) {
+    let label = match (outcome, run) {
         ("pending", _) => String::new(),
-        ("recorded", Some(r)) if r.4.is_empty() => crate::ingest::LABEL_RECORD.to_string(),
-        (_, Some(r)) => r.4.clone(),
+        ("recorded", Some(r)) if r.label.is_empty() => crate::ingest::LABEL_RECORD.to_string(),
+        (_, Some(r)) => r.label.clone(),
         _ => String::new(),
     };
-    let s = |k: &str| ctx.get(k).and_then(Value::as_str).map(String::from);
-    tx.execute(
-        "UPDATE ext_events SET outcome = ?, outcome_label = ?, reason = ?, handled_by = ?, flow_id = ?, run_id = ?, work_item_id = ?, decision_id = ? WHERE id = ?",
-        params![
-            outcome,
+    let text = |key: &str| {
+        run.and_then(|run| run.context.get(key))
+            .and_then(Value::as_str)
+            .map(String::from)
+    };
+    let changed = outcome != old_outcome || label != old_label;
+    SignalRows(w).settle(
+        &ws,
+        event_id,
+        &SignalTriage {
+            outcome: outcome.into(),
             label,
-            s("reason").unwrap_or_default(),
-            s("handled_by"),
-            run.map(|r| r.1.clone()),
-            run.map(|r| r.0.clone()),
-            run.and_then(|r| r.5.clone()),
-            s("decision_id"),
-            event_id
-        ],
+            reason: text("reason").unwrap_or_default(),
+            handled_by: text("handled_by"),
+            flow: run.map(|run| run.flow.clone()),
+            run: run.map(|run| run.id.clone()),
+            item: run.and_then(|run| run.item.clone()),
+            decision: text("decision_id"),
+        },
     )?;
-    Ok((outcome != old_outcome || label != old_label).then_some(ws))
+    Ok(changed.then_some(ws))
 }
 
 /// `range` of `GET /signals`.
@@ -209,112 +184,64 @@ pub struct Filter {
     pub outcome: Option<String>,
 }
 
-/// Reuse the shared read rule. Events have no created_by column: project their
-/// connection creator into the Viewer field shape without changing event/rowid joins.
-fn visible(viewer: &Viewer, params: &mut Vec<Sql>) -> String {
-    let scope = viewer.sql("signal_visibility");
-    params.extend(scope.params);
-    format!(
-        "EXISTS (SELECT 1 FROM (SELECT e.visibility AS visibility,
-            coalesce(c.created_by, '') AS created_by) signal_visibility WHERE {})",
-        scope.sql
-    )
+fn projections(
+    c: &mut impl Read,
+    ws: &str,
+    rows: Vec<SignalRow>,
+) -> steve_store::Result<Vec<Value>> {
+    let connection_names =
+        Connections(c).display_names(ws, rows.iter().filter_map(|r| r.connection.as_deref()))?;
+    let names = Contacts::new(c).party_names(rows.iter().filter_map(|r| r.party.as_deref()))?;
+    let labels = FlowRows(c).labels(ws, rows.iter().filter_map(|r| r.flow.as_deref()))?;
+    Ok(rows.into_iter().map(|row| {
+        let connection = row.connection.map(|id| json!({
+            "id": id, "name": connection_names.get(&id).map_or("", String::as_str)
+        }));
+        let actor = row.party.map(|id| json!({
+            "party_id": id, "name": names.get(&id).map_or("", String::as_str)
+        }));
+        let flow = row.flow.map(|id| {
+            let (name, kind) = labels.get(&id).map_or(("", "flow"), |(name, kind, _)| (name.as_str(), kind.as_str()));
+            json!({"id": id, "name": name, "kind": kind})
+        });
+        json!({
+            "id": row.id, "source": row.source, "type": row.kind, "summary": row.summary,
+            "group_key": row.group, "group_label": row.group, "thread_key": row.thread,
+            "connection": connection, "actor": actor, "outcome": row.outcome, "outcome_label": row.label,
+            "reason": row.reason, "handled_by": row.handled_by, "flow": flow,
+            "work_item_id": row.item, "decision_id": row.decision, "raw_available": row.raw_available,
+            "occurred": row.occurred, "received": row.received,
+        })
+    }).collect())
 }
 
-/// Every `ext_events` column but `payload` (the raw body is only read by [`raw`]).
-const SELECT: &str = "SELECT e.id, e.workspace_id, e.connection_id, e.source, e.type, e.external_id, e.dedupe_key,
-    e.thread_key, e.group_key, e.scope_ext_id, e.space_id, e.message_id, e.actor_account_id, e.actor_party_id,
-    e.occurred, e.received, e.summary, e.payload_purged, e.visibility, e.outcome, e.outcome_label, e.reason,
-    e.handled_by, e.flow_id, e.run_id, e.work_item_id, e.decision_id, (e.payload IS NOT NULL) AS raw_available,
-    coalesce(nullif(a.handle_display, ''), a.handle) AS conn_name, f.name AS flow_name, f.kind AS flow_kind, p.name AS actor_name
-  FROM ext_events e LEFT JOIN connections c ON c.id = e.connection_id LEFT JOIN accounts a ON a.id = c.account_id
-  LEFT JOIN flows f ON f.id = e.flow_id LEFT JOIN parties p ON p.id = e.actor_party_id";
-
-/// `Signal`.
-fn signal(r: &Row) -> rusqlite::Result<Value> {
-    let conn: Option<String> = r.get("connection_id")?;
-    let flow: Option<String> = r.get("flow_id")?;
-    let party: Option<String> = r.get("actor_party_id")?;
-    let group: Option<String> = r.get("group_key")?;
-    Ok(json!({
-        "id": r.get::<_, String>("id")?,
-        "source": r.get::<_, String>("source")?,
-        "type": r.get::<_, String>("type")?,
-        "summary": r.get::<_, String>("summary")?,
-        "group_key": group,
-        "group_label": group,
-        "thread_key": r.get::<_, Option<String>>("thread_key")?,
-        "connection": conn.map(|id| -> rusqlite::Result<Value> {
-            Ok(json!({"id": id, "name": r.get::<_, Option<String>>("conn_name")?.unwrap_or_default()}))
-        }).transpose()?,
-        "actor": party.map(|id| -> rusqlite::Result<Value> {
-            Ok(json!({"party_id": id, "name": r.get::<_, Option<String>>("actor_name")?.unwrap_or_default()}))
-        }).transpose()?,
-        "outcome": r.get::<_, String>("outcome")?,
-        "outcome_label": r.get::<_, String>("outcome_label")?,
-        "reason": r.get::<_, String>("reason")?,
-        "handled_by": r.get::<_, Option<String>>("handled_by")?,
-        "flow": flow.map(|id| -> rusqlite::Result<Value> {
-            Ok(json!({
-                "id": id,
-                "name": r.get::<_, Option<String>>("flow_name")?.unwrap_or_default(),
-                "kind": r.get::<_, Option<String>>("flow_kind")?.unwrap_or_else(|| "flow".into()),
-            }))
-        }).transpose()?,
-        "work_item_id": r.get::<_, Option<String>>("work_item_id")?,
-        "decision_id": r.get::<_, Option<String>>("decision_id")?,
-        "raw_available": r.get::<_, bool>("raw_available")?,
-        "occurred": r.get::<_, i64>("occurred")?,
-        "received": r.get::<_, i64>("received")?,
-    }))
-}
-
-/// `GET /signals`: `{stats:{total, need, item, quiet}, items}` (newest first, ≤500). `quiet` =
-/// ignored, digested or only recorded (the prototype's “忽略或进汇报”). Stats ignore the `outcome`
-/// filter, so the counters stay put while you switch tabs.
-pub fn list(c: &Connection, viewer: &Viewer, f: &Filter) -> FlowResult<Value> {
-    let mut params = vec![Sql::Text(viewer.ws.clone()), Sql::Integer(f.since)];
-    let mut cond = format!(
-        "e.workspace_id = ? AND e.received >= ? AND {}",
-        visible(viewer, &mut params)
-    );
-    if let Some(s) = f.source.as_deref().filter(|s| !s.is_empty()) {
-        cond.push_str(" AND e.source = ?");
-        params.push(Sql::Text(s.into()));
-    }
-    if let Some(q) = f.q.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
-        let q = q.to_lowercase();
-        // sources whose Chinese name matches
-        let codes: Vec<&str> = [
+/// Counts ignore the outcome filter, so tabs share the same totals.
+pub fn list(c: &mut impl Read, viewer: &Viewer, f: &Filter) -> steve_store::Result<Value> {
+    let text =
+        f.q.as_deref()
+            .map(str::trim)
+            .filter(|q| !q.is_empty())
+            .map(str::to_lowercase);
+    let codes = text.as_ref().map_or_else(Vec::new, |text| {
+        [
             "mail", "cal", "im", "github", "webhook", "time", "item", "manual",
         ]
         .into_iter()
-        .filter(|s| source_label(s).to_lowercase().contains(&q) || s.contains(&q))
-        .collect();
-        cond.push_str(
-            " AND (instr(lower(e.summary), ?) > 0 OR instr(lower(coalesce(e.group_key, '')), ?) > 0 OR instr(lower(e.outcome_label), ?) > 0",
-        );
-        params.extend([Sql::Text(q.clone()), Sql::Text(q.clone()), Sql::Text(q)]);
-        if !codes.is_empty() {
-            cond.push_str(&format!(
-                " OR e.source IN ({})",
-                vec!["?"; codes.len()].join(", ")
-            ));
-            params.extend(codes.into_iter().map(|s| Sql::Text(s.into())));
-        }
-        cond.push(')');
-    }
-    let counts: Vec<(String, i64)> = {
-        let sql = format!(
-            "SELECT e.outcome, COUNT(*) FROM ext_events e LEFT JOIN connections c ON c.id = e.connection_id WHERE {cond} GROUP BY e.outcome"
-        );
-        let mut st = c.prepare(&sql)?;
-        st.query_map(rusqlite::params_from_iter(params.iter()), |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })?
-        .collect::<rusqlite::Result<_>>()?
-    };
-    let n = |ks: &[&str]| -> i64 {
+        .filter(|src| source_label(src).to_lowercase().contains(text) || src.contains(text))
+        .collect()
+    });
+    let (counts, rows) = SignalRows(c).list(
+        viewer,
+        &SignalFilter {
+            since: f.since,
+            source: f.source.as_deref().filter(|s| !s.is_empty()),
+            outcome: f.outcome.as_deref().filter(|s| !s.is_empty()),
+            text: text.as_deref(),
+            matching_sources: &codes,
+        },
+        MAX_LIST as u64,
+    )?;
+    let sum = |ks: &[&str]| -> i64 {
         counts
             .iter()
             .filter(|(k, _)| ks.contains(&k.as_str()))
@@ -322,96 +249,54 @@ pub fn list(c: &Connection, viewer: &Viewer, f: &Filter) -> FlowResult<Value> {
             .sum()
     };
     let total: i64 = counts.iter().map(|(_, n)| n).sum();
-    if let Some(o) = f.outcome.as_deref().filter(|o| !o.is_empty()) {
-        cond.push_str(" AND e.outcome = ?");
-        params.push(Sql::Text(o.into()));
-    }
-    params.push(Sql::Integer(MAX_LIST));
-    let sql = format!("{SELECT} WHERE {cond} ORDER BY e.received DESC, e.rowid DESC LIMIT ?");
-    let mut st = c.prepare(&sql)?;
-    let items = st
-        .query_map(rusqlite::params_from_iter(params.iter()), signal)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(json!({
-        "stats": {"total": total, "need": n(&["need"]), "item": n(&["item"]), "quiet": n(&["ignored", "digest", "recorded"])},
-        "items": items,
+        "stats": {"total": total, "need": sum(&["need"]), "item": sum(&["item"]), "quiet": sum(&["ignored", "digest", "recorded"])},
+        "items": projections(c, &viewer.ws, rows)?,
     }))
 }
 
-/// One visible signal, or `404 没有这个信号`.
-pub fn own(c: &Connection, viewer: &Viewer, id: &str) -> FlowResult<Value> {
-    let mut params = vec![Sql::Text(id.into()), Sql::Text(viewer.ws.clone())];
-    let cond = visible(viewer, &mut params);
-    let sql = format!("{SELECT} WHERE e.id = ? AND e.workspace_id = ? AND {cond}");
-    c.query_row(&sql, rusqlite::params_from_iter(params.iter()), signal)
-        .optional()?
-        .ok_or_else(|| ApiError::not_found("信号"))
+const NOT_FOUND: StoreError = StoreError::NotFound("没有这个信号");
+
+/// One visible signal.
+pub fn own(c: &mut impl Read, viewer: &Viewer, id: &str) -> steve_store::Result<SignalRow> {
+    SignalRows(c).get(viewer, id)?.ok_or(NOT_FOUND)
 }
 
-fn parse_json(s: Option<String>) -> Value {
-    s.and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(Value::Null)
-}
-
-/// `Run` with its steps.
-pub fn run_view(c: &Connection, id: &str) -> FlowResult<Option<Value>> {
-    let Some(row) = runs::get(c, id)? else {
-        return Ok(None);
-    };
-    let text = row.display_text();
-    let mut run = json!({
+fn run_projection(c: &mut impl Read, row: &runs::RunRow) -> steve_store::Result<Value> {
+    let text = runs::display_text(row);
+    let steps = RunRows(c).steps(&row.id)?;
+    Ok(json!({
         "id": row.id, "flow_id": row.flow_id, "flow_version": row.flow_version,
         "status": row.status, "dry_run": row.dry_run, "event_id": row.event_id,
         "outcome": row.outcome, "outcome_label": text.outcome_label,
-        "started": row.started, "ended": row.ended,
-    });
-    let mut st = c.prepare_cached(
-        "SELECT seq, node_id, status, branch, input, output, ms, error FROM flow_run_steps WHERE run_id = ? ORDER BY seq",
-    )?;
-    let steps = st
-        .query_map([id], |r| {
-            Ok(json!({
-                "seq": r.get::<_, i64>(0)?,
-                "node_id": r.get::<_, String>(1)?,
-                "status": r.get::<_, String>(2)?,
-                "branch": r.get::<_, Option<String>>(3)?,
-                "input": parse_json(r.get(4)?),
-                "output": parse_json(r.get(5)?),
-                "ms": r.get::<_, f64>(6)?,
-                "error": r.get::<_, Option<String>>(7)?,
-            }))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    run["steps"] = Value::Array(steps);
-    Ok(Some(run))
+        "started": row.started, "ended": row.ended, "steps": steps,
+    }))
 }
 
-/// `GET /signals/:id`: `Signal` + `runs`.
-pub fn detail(c: &Connection, viewer: &Viewer, id: &str) -> FlowResult<Value> {
-    let mut s = own(c, viewer, id)?;
-    let mut st = c.prepare_cached(
-        "SELECT id FROM flow_runs WHERE event_id = ? AND dry_run = 0 ORDER BY started, rowid",
-    )?;
-    let ids = st
-        .query_map([id], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let runs = ids
-        .iter()
-        .map(|r| run_view(c, r))
-        .collect::<FlowResult<Vec<_>>>()?;
-    s["runs"] = Value::Array(runs.into_iter().flatten().collect());
-    Ok(s)
+/// `Run` with its steps.
+pub fn run_view(c: &mut impl Read, id: &str) -> steve_store::Result<Option<Value>> {
+    RunRows(c)
+        .get(id)?
+        .map(|r| run_projection(c, &r))
+        .transpose()
 }
 
-/// `GET /signals/:id/raw`: `Ok(Some(payload))`, or `Ok(None)` when the retention period removed it
-/// (`410`).
-pub fn raw(c: &Connection, viewer: &Viewer, id: &str) -> FlowResult<Option<Value>> {
-    own(c, viewer, id)?;
-    let p: Option<String> =
-        c.query_row("SELECT payload FROM ext_events WHERE id = ?", [id], |r| {
-            r.get(0)
-        })?;
-    Ok(p.map(|p| serde_json::from_str(&p).unwrap_or(Value::String(p))))
+/// A signal's summary and ordered runs.
+pub fn detail(c: &mut impl Read, viewer: &Viewer, id: &str) -> steve_store::Result<Value> {
+    let signal = own(c, viewer, id)?;
+    let mut signal = projections(c, &viewer.ws, vec![signal])?.swap_remove(0);
+    let rows = RunRows(c).by_event(&viewer.ws, id)?;
+    signal["runs"] = Value::Array(
+        rows.iter()
+            .map(|r| run_projection(c, r))
+            .collect::<steve_store::Result<_>>()?,
+    );
+    Ok(signal)
+}
+
+/// Raw payload. `None` means its retention period expired.
+pub fn raw(c: &mut impl Read, viewer: &Viewer, id: &str) -> steve_store::Result<Option<Value>> {
+    SignalRows(c).payload(viewer, id)?.ok_or(NOT_FOUND)
 }
 
 #[cfg(test)]

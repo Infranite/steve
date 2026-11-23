@@ -884,17 +884,6 @@ async fn disclose(a: &Args, scratch: &Path) {
     names.ensure_workspace().expect("workspace");
     let check = Disclosure::with_models(Vec::new());
     check.bind(names, gw);
-    let open_db = || {
-        use rusqlite::OpenFlags;
-        rusqlite::Connection::open_with_flags(
-            format!("file:{db}?mode=ro"),
-            OpenFlags::SQLITE_OPEN_READ_ONLY
-                | OpenFlags::SQLITE_OPEN_URI
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .unwrap_or_else(|e| fail(&format!("{db}: {e}")))
-    };
-    let conn = open_db();
     let sem = Arc::new(tokio::sync::Semaphore::new(
         one(a, "concurrency")
             .and_then(|n| n.parse().ok())
@@ -926,9 +915,10 @@ async fn disclose(a: &Args, scratch: &Path) {
             .filter(|e| e["source_type"] != "span")
             .cloned()
             .collect();
-        let (knowledge, complete) =
-            steve_knowledge::retrieve::knowledge_again(&conn, &ws, &entries)
-                .unwrap_or_else(|e| fail(&format!("knowledge: {e}")));
+        let (knowledge, complete) = steve_store::Store::read_file(Path::new(&db), |c| {
+            steve_knowledge::retrieve::knowledge_again(c, &ws, &entries)
+        })
+        .unwrap_or_else(|e| fail(&format!("knowledge: {e}")));
         let rewrite = rewrites.first().map(|r| {
             match disclosure::judge_rewrite(
                 r["from"].as_str().unwrap_or_default(),

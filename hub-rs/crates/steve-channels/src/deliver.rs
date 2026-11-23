@@ -32,57 +32,7 @@ pub enum Purpose {
     Source,
 }
 
-/// What lets a message go out without a draft (“授权（规则或决定）”). The outbound verifies it
-/// against the store again right before the adapter is called; anything else becomes a draft.
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-pub enum Auth {
-    /// Nothing: a draft for your approval.
-    #[default]
-    None,
-    /// A live member explicitly requested a bot send, bound to a durable output intent.
-    /// Never valid on personal accounts or on legacy messages without that intent.
-    Requester { user: String },
-    /// A bot account's response rule that speaks (`reply`; `create_item`'s “收到，已记为…”;
-    /// `handoff`'s “我请…来看。”) for the inbound message it answers.
-    Rule {
-        source: String,
-        act: crate::rules::Act,
-    },
-    /// Your own trigger words in your own message (only on your own account).
-    Trigger { source: String },
-    /// A live `msg.send` grant of the flow, for the flow version the run is running (a grant is
-    /// bound to one version: an edit of the flow ends it).
-    Grant {
-        flow_id: String,
-        run_id: String,
-        #[serde(default)]
-        flow_version: i64,
-    },
-    /// The flow engine's approval for this run: `gate` = you approved exactly this step (its fixed
-    /// text was on the card), else an `approve` node earlier on the path.
-    Step {
-        run_id: String,
-        node_id: String,
-        gate: bool,
-    },
-    /// You approved this message (a resolved `approve` `yes` or `fail` `retry` decision about it).
-    Decision { id: String },
-}
-
-impl Auth {
-    /// For the audit log.
-    pub fn code(&self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::Requester { .. } => "requester",
-            Self::Rule { .. } => "rule",
-            Self::Trigger { .. } => "trigger",
-            Self::Grant { .. } => "grant",
-            Self::Step { .. } => "step",
-            Self::Decision { .. } => "decision",
-        }
-    }
-}
+pub use steve_store::channel_sends::Auth;
 
 /// Where a message goes and as whom.
 #[derive(Debug, Clone, PartialEq)]

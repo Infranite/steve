@@ -1,12 +1,10 @@
 //! The digest is an ordinary Bot using tools, not a completion job. An owner explicitly binds an
 //! ordinary item-mode schedule with explicit requester identity. Existing service schedules do
 //! not acquire personal access.
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_modules::contacts::mcp::McpCx;
-use steve_store::StoreError;
+use steve_store::{Store, StoreError};
 
-pub const SCHEDULE: &str = "digest:schedule";
 pub const RULES: &str = r#"Digest already stored conversations in batches, using Steve tools through the configured harness.
 Discover the digest tools with steve_tools_search (query: digest), then call them with steve_tool_call.
 1. steve_digest_batch leases due packets. If none are due, deliver a short no-work report and stop.
@@ -18,8 +16,8 @@ Discover the digest tools with steve_tools_search (query: digest), then call the
 
 /// Packets are currently built for the workspace owner by intake. A personal schedule receives
 /// that caller through the ordinary flow -> item -> session requester chain, never an alias here.
-pub fn user(c: &Connection, cx: &McpCx) -> Result<String, StoreError> {
-    let owner = crate::conv::owner(c, &cx.ws)?;
+pub fn user(store: &Store, cx: &McpCx) -> Result<String, StoreError> {
+    let owner = store.read(|r| r.members().owner(&cx.ws))?;
     if owner.as_deref() != Some(cx.user.as_str()) {
         return Err(StoreError::Hook(
             "digest packets require their owner's caller identity".into(),
@@ -33,15 +31,6 @@ pub fn run(cx: &McpCx) -> Result<&str, StoreError> {
         .as_deref()
         .or(cx.session_id.as_deref())
         .ok_or_else(|| StoreError::Hook("digest requires an item or session".into()))
-}
-
-pub fn schedule(c: &Connection, ws: &str) -> Result<Option<String>, StoreError> {
-    Ok(c.query_row(
-        "SELECT value FROM settings WHERE workspace_id = ? AND key = ?",
-        params![ws, SCHEDULE],
-        |r| r.get(0),
-    )
-    .optional()?)
 }
 
 pub fn template() -> Value {

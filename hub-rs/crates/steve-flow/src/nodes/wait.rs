@@ -199,7 +199,7 @@ impl NodeKind for Wait {
                 let tz = cx
                     .flow
                     .store()
-                    .reader(|c| crate::schedules::workspace_tz(c, &ws))
+                    .read(|c| crate::schedules::workspace_tz(c, &ws))
                     .ok()
                     .and_then(|t| zone(&t).ok())
                     .unwrap_or_else(steve_runtime::tz::Zone::system);

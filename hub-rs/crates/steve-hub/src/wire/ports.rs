@@ -251,7 +251,7 @@ impl steve_modules::BotDeleted for BotHeirs {
         now: i64,
     ) -> steve_modules::ApiResult<()> {
         steve_store::channel_personas::reassign_bot(tx, ws, bot, heir, now)?;
-        steve_flow::on_bot_deleted(&tx.legacy(), ws, bot, heir, now)?;
+        steve_flow::on_bot_deleted(tx, ws, bot, heir, now)?;
         Ok(())
     }
 }

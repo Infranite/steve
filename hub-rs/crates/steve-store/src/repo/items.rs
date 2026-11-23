@@ -287,17 +287,29 @@ impl Items<'_> {
 
     /// Deletes the item and what hangs off it; sessions and decisions are kept but unlinked.
     pub fn remove(&self, id: &str) -> Result<()> {
-        self.0.write_conn(|w| {
-            let tx = w.tx()?;
-            tx.run(
-                "UPDATE sessions SET item_id = NULL, no = 0 WHERE item_id = ?",
-                [id],
+        use crate::contract::Q;
+        use sea_query::{Expr, ExprTrait, Query};
+
+        self.0.write(|w| {
+            let item = || Expr::col("item_id").eq(id);
+            w.exec(
+                Query::update()
+                    .table("sessions")
+                    .value("item_id", None::<String>)
+                    .value("no", 0_i64)
+                    .and_where(item()),
             )?;
-            tx.run(
-                "DELETE FROM artifact_roles WHERE artifact_id IN (SELECT id FROM artifacts WHERE item_id = ?)",
-                [id],
+            let artifacts = Query::select()
+                .column("id")
+                .from("artifacts")
+                .and_where(item())
+                .take();
+            w.exec(
+                Query::delete()
+                    .from_table("artifact_roles")
+                    .and_where(Expr::col("artifact_id").in_subquery(artifacts)),
             )?;
-            for t in [
+            for table in [
                 "item_tags",
                 "item_goals",
                 "timeline",
@@ -305,42 +317,41 @@ impl Items<'_> {
                 "artifacts",
                 "thread_items",
             ] {
-                tx.run(&format!("DELETE FROM {t} WHERE item_id = ?"), [id])?;
+                w.exec(Query::delete().from_table(table).and_where(item()))?;
             }
-            tx.run(
-                "DELETE FROM item_deps WHERE item_id = ? OR dep_id = ?",
-                [id, id],
+            w.exec(
+                Query::delete()
+                    .from_table("item_deps")
+                    .and_where(item().or(Expr::col("dep_id").eq(id))),
             )?;
-            tx.run(
-                "UPDATE decisions SET item_id = NULL WHERE item_id = ?",
-                [id],
+            w.exec(
+                Query::update()
+                    .table("decisions")
+                    .value("item_id", None::<String>)
+                    .and_where(item()),
             )?;
-            let ws: Option<String> = {
-                use rusqlite::OptionalExtension;
-                tx.query_row("SELECT workspace_id FROM items WHERE id = ?", [id], |r| {
-                    r.get(0)
-                })
-                .optional()?
-            };
-            tx.run("DELETE FROM items WHERE id = ?", [id])?;
-            let mut hooked = None;
-            if let (Some(hook), Some(ws)) = (self.0.item_deleted_hook(), ws.as_ref()) {
-                let t = crate::Tx::wrap(&tx);
-                hook(&t, &ws, id).map_err(crate::StoreError::Hook)?;
-                hooked = Some(t.into_effects());
-            }
-            tx.commit()?;
+            let ws: Option<String> = w.one(
+                Query::select()
+                    .column("workspace_id")
+                    .from("items")
+                    .and_where(Expr::col("id").eq(id)),
+                |row| row.get(0),
+            )?;
+            w.exec(
+                Query::delete()
+                    .from_table("items")
+                    .and_where(Expr::col("id").eq(id)),
+            )?;
             if let Some(ws) = ws {
-                w.publish(steve_types::DomainEvent::from(
+                w.emit(steve_types::DomainEvent::from(
                     steve_types::WorkEvent::Item {
                         ws: ws.clone().into(),
                         id: id.into(),
                     },
                 ));
-            }
-
-            if let Some(fx) = hooked {
-                fx.flush(self.0);
+                if let Some(hook) = self.0.item_deleted_hook() {
+                    hook(w, &ws, id).map_err(crate::StoreError::Hook)?;
+                }
             }
             Ok(())
         })

@@ -69,11 +69,93 @@ fn texts(f: &Fixture) -> Vec<String> {
 }
 
 #[test]
+fn channel_write_refusals_keep_the_notice_window_across_lifts() {
+    use steve_store::channel_write_policy as policy;
+
+    let f = open();
+    f.store
+        .with_conn(|c| {
+            c.execute_batch(
+                "INSERT INTO parties(id,workspace_id,type,name,created_by,created,updated)
+                 VALUES ('p_bot','default','bot','Bot','owner',1,1);
+                 INSERT INTO accounts(id,workspace_id,system_id,family,party_id,kind,handle,handle_display,source,created,updated)
+                 VALUES ('a_bot','default','slack','slack','p_bot','app_bot','bot','bot','connect',1,1);
+                 INSERT INTO connections(id,workspace_id,account_id,adapter,auth,created_by,created,updated)
+                 VALUES ('con','default','a_bot','ext_ws.bot','none','owner',1,1);",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let record = |chat, now| {
+        f.store
+            .write(|w| {
+                policy::record(
+                    w,
+                    policy::WriteRefusal {
+                        ws: WS,
+                        connection: "con",
+                        chat,
+                        reason: "read-only",
+                        now,
+                        memory_ms: 100,
+                    },
+                )
+            })
+            .unwrap()
+    };
+    let active = |chat, now| {
+        f.store
+            .read(|r| policy::active(r, "con", chat, now))
+            .unwrap()
+            .is_some()
+    };
+
+    assert!(record(None, 1000));
+    assert!(active("other", 1001));
+    assert!(record(Some("a"), 1001));
+    assert!(record(Some("b"), 1001));
+    assert!(
+        f.store
+            .write(|w| policy::lift_connection(w, "con", false))
+            .unwrap()
+    );
+    assert!(active("a", 1002));
+    assert!(!active("other", 1002));
+    assert!(!record(None, 1002));
+    f.store
+        .write(|w| policy::lift_after_send(w, "con", "a"))
+        .unwrap();
+    assert!(!active("a", 1003));
+    assert!(active("b", 1003));
+    assert!(!active("b", 1101));
+    assert!(record(None, 1100));
+}
+
+#[test]
+fn nested_repository_reads_keep_the_same_snapshot() {
+    let f = open();
+    f.store
+        .read(|_| -> steve_store::Result<()> {
+            assert!(texts(&f).is_empty());
+            f.store.write(|w| {
+                w.events()
+                    .add(&f.session, "text", json!({"text": "committed"}), None, 1)
+            })?;
+            f.store.read(|_| -> steve_store::Result<()> {
+                assert!(texts(&f).is_empty());
+                Ok(())
+            })
+        })
+        .unwrap();
+    assert_eq!(texts(&f), vec!["committed"]);
+}
+
+#[test]
 fn what_a_write_emits_goes_out_after_its_commit_and_never_after_its_rollback() {
     let f = open();
     let s = f.session.as_str();
     f.store
-        .write(|w| {
+        .write(|w| -> Result<(), StoreError> {
             w.emit(stats_changed("a", None));
             w.events()
                 .add(s, "text", json!({"text": "kept"}), None, 1)?;
@@ -105,7 +187,7 @@ fn a_failed_scope_rolls_back_alone_with_what_it_emitted() {
     let f = open();
     let s = f.session.as_str();
     f.store
-        .write(|w| {
+        .write(|w| -> Result<(), StoreError> {
             w.emit(stats_changed("a", None));
             let failed: Result<(), StoreError> = w.scope(|w| {
                 w.events()
@@ -162,7 +244,7 @@ fn a_write_inside_a_legacy_transaction_is_a_scope_of_it() {
             w.events()
                 .add(s, "text", json!({"text": "gone"}), None, 1)?;
             w.emit(stats_changed("a", None));
-            Ok(())
+            Ok::<_, StoreError>(())
         })?;
         assert!(
             f.seen.lock().unwrap().is_empty(),
@@ -175,8 +257,8 @@ fn a_write_inside_a_legacy_transaction_is_a_scope_of_it() {
     assert!(texts(&f).is_empty());
 
     f.store
-        .transaction(|tx| {
-            tx.write::<_, StoreError>(|w| {
+        .transaction(|tx| -> Result<(), StoreError> {
+            tx.write(|w| {
                 w.emit(stats_changed("b", None));
                 Ok(())
             })

@@ -8,6 +8,42 @@ fn parties<const N: usize>(cols: [&'static str; N]) -> SelectStatement {
     Query::select().columns(cols).from("parties").take()
 }
 
+pub fn names(r: &mut impl Read, ids: &[&str]) -> Result<Vec<(String, String)>> {
+    if ids.is_empty() {
+        return Ok(vec![]);
+    }
+    let ids = r.db().dialect().text_array(ids)?;
+    r.all(
+        parties(["id", "name"]).and_where(Expr::col("id").in_subquery(ids)),
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+}
+
+pub(crate) fn bot_ids(r: &mut impl Read, ids: &[&str]) -> Result<Vec<String>> {
+    if ids.is_empty() {
+        return Ok(vec![]);
+    }
+    let ids = r.db().dialect().text_array(ids)?;
+    r.all(
+        parties(["id"])
+            .and_where(Expr::col("id").in_subquery(ids))
+            .and_where(
+                Expr::col("type")
+                    .eq("bot")
+                    .or(Expr::col("contact_kind").eq("bot")),
+            ),
+        |row| row.get(0),
+    )
+}
+
+pub fn user_id(r: &mut impl Read, party: &str) -> Result<Option<String>> {
+    Ok(r.one(
+        parties(["user_id"]).and_where(Expr::col("id").eq(party)),
+        |row| row.get(0),
+    )?
+    .flatten())
+}
+
 impl<'a, C: Read> Parties<'a, C> {
     pub fn new(handle: &'a mut C) -> Self {
         Self(handle)

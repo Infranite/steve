@@ -145,7 +145,7 @@ impl GitHub {
         let waits = self
             .store()
             .read(|c| {
-                steve_modules::accounts::connections::may_write_source(
+                steve_modules::accounts::connections::may_write_in(
                     c,
                     ws,
                     connection,

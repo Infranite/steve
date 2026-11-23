@@ -7,10 +7,10 @@
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use steve_store::{Tx, base, now, uid};
+use steve_store::vault_items::{FieldRow, ItemFilter, ItemRow, VaultItems, VaultRow};
+use steve_store::{Accounts, GrantRows, ItemReads, Read, W, now, uid};
 use zeroize::Zeroizing;
 
-use super::repo::{self, FieldRow, ItemFilter, ItemRow, VaultRow};
 use super::templates::{
     BANK_CARD, CONNECTION_CREDENTIAL, FIELD_TYPES, SENSITIVITIES, Template, builtin,
 };
@@ -137,8 +137,8 @@ pub struct ItemOut {
     pub updated: i64,
 }
 
-fn event(tx: &Tx, ws: &str, item: &str) {
-    tx.publish(steve_types::DomainEvent::from(
+fn event(tx: &mut W<'_>, ws: &str, item: &str) {
+    tx.emit(steve_types::DomainEvent::from(
         steve_types::VaultEvent::Vault {
             id: {
                 let value: String = item.into();
@@ -221,9 +221,11 @@ fn vault_name(stored: &str, scope: &str) -> String {
 }
 
 /// The scope of a grant in words: `项目 steve`, `网站 github.com`, `没有项目的事项`.
-fn scope_label(c: &rusqlite::Connection, ws: &str, scope: &Value) -> steve_store::Result<String> {
+fn scope_label(c: &mut impl Read, ws: &str, scope: &Value) -> steve_store::Result<String> {
     if let Some(p) = scope.get("project_id").and_then(Value::as_str) {
-        let name = repo::project_name(c, ws, p)?.unwrap_or_else(|| p.to_string());
+        let name = ItemReads(c)
+            .project_name(ws, p)?
+            .unwrap_or_else(|| p.to_string());
         return Ok(steve_i18n::t!("modules.vault.scope.project", name = name));
     }
     if let Some(s) = scope.get("site").and_then(Value::as_str) {
@@ -237,20 +239,20 @@ fn scope_label(c: &rusqlite::Connection, ws: &str, scope: &Value) -> steve_store
 
 /// The output of an item, read on `c`.
 pub(crate) fn item_out(
-    c: &rusqlite::Connection,
+    c: &mut impl Read,
     item: &ItemRow,
     vault: &VaultRow,
     with_fields: bool,
 ) -> steve_store::Result<ItemOut> {
     let ws = &item.workspace_id;
     let account = match &item.account_id {
-        Some(a) => {
-            repo::account_ref(c, ws, a)?.map(|(id, display_name)| AccountRef { id, display_name })
-        }
+        Some(a) => Accounts(c)
+            .display(ws, a)?
+            .map(|(id, display_name)| AccountRef { id, display_name }),
         None => None,
     };
     let mut grants = Vec::new();
-    for g in repo::active_grants(c, ws, &item.id, now())? {
+    for g in GrantRows(c).active_for_vault(ws, &item.id, now())? {
         grants.push(GrantOut {
             scope_label: scope_label(c, ws, &g.scope)?,
             id: g.id,
@@ -261,7 +263,8 @@ pub(crate) fn item_out(
     }
     let fields = if with_fields {
         Some(
-            repo::fields(c, &item.id)?
+            VaultItems(c)
+                .fields(&item.id)?
                 .into_iter()
                 .map(|f| FieldOut {
                     value: if f.secret { None } else { f.value_plain },
@@ -298,14 +301,16 @@ pub(crate) fn item_out(
 
 /// `own_vault_item(ws, me, id)`: active, in `ws`, in a vault `user` may see; else `404 没有这个条目`.
 pub(crate) fn own_item(
-    c: &rusqlite::Connection,
+    c: &mut impl Read,
     ws: &str,
     user: &str,
     id: &str,
 ) -> VaultResult<(ItemRow, VaultRow)> {
-    let item = repo::item(c, id)?.filter(|i| i.workspace_id == ws && i.status == "active");
+    let item = VaultItems(c)
+        .item(id)?
+        .filter(|i| i.workspace_id == ws && i.status == "active");
     let pair = match item {
-        Some(i) => repo::vault(c, &i.vault_id)?.map(|v| (i, v)),
+        Some(i) => VaultItems(c).vault(&i.vault_id)?.map(|v| (i, v)),
         None => None,
     };
     match pair {
@@ -314,18 +319,17 @@ pub(crate) fn own_item(
     }
 }
 
-fn own_field(c: &rusqlite::Connection, item: &str, fid: &str) -> VaultResult<FieldRow> {
-    repo::fields(c, item)?
+fn own_field(c: &mut impl Read, item: &str, fid: &str) -> VaultResult<FieldRow> {
+    VaultItems(c)
+        .fields(item)?
         .into_iter()
         .find(|f| f.id == fid)
         .ok_or_else(|| ApiError::not_found("字段").into())
 }
 
-fn check_account(c: &rusqlite::Connection, ws: &str, id: Option<&str>) -> VaultResult<()> {
+fn check_account(c: &mut impl Read, ws: &str, id: Option<&str>) -> VaultResult<()> {
     match id {
-        Some(a) if repo::account_ref(c, ws, a)?.is_none() => {
-            Err(ApiError::not_found("账号").into())
-        }
+        Some(a) if Accounts(c).display(ws, a)?.is_none() => Err(ApiError::not_found("账号").into()),
         _ => Ok(()),
     }
 }
@@ -342,18 +346,18 @@ impl Vault {
             };
             !(has("shared", None) && has("system", None) && has("personal", Some(user)))
         };
-        let (vs, seeded) = self.store().reader(|c| {
+        let (vs, seeded) = self.read(|c| {
             Ok::<_, VaultError>((
-                repo::vaults(c, ws)?,
-                repo::templates(c, ws)?.len() >= builtin().len(),
+                VaultItems(c).vaults(ws)?,
+                VaultItems(c).templates(ws)?.len() >= builtin().len(),
             ))
         })?;
         if !missing(&vs) && seeded {
             return Ok(());
         }
-        self.store().transaction(|tx| {
-            repo::seed_templates(tx)?;
-            let vs = repo::vaults(tx, ws)?;
+        self.store().write(|tx| {
+            VaultItems(tx).seed_templates(&builtin())?;
+            let vs = VaultItems(tx).vaults(ws)?;
             if !missing(&vs) {
                 return Ok::<_, VaultError>(());
             }
@@ -372,13 +376,13 @@ impl Vault {
                 .iter()
                 .any(|v| v.scope == "personal" && v.owner_user.as_deref() == Some(user))
             {
-                repo::insert_vault(tx, &mk("个人", "personal", Some(user)))?;
+                VaultItems(tx).insert_vault(&mk("个人", "personal", Some(user)))?;
             }
             if !has("shared") {
-                repo::insert_vault(tx, &mk("共享", "shared", None))?;
+                VaultItems(tx).insert_vault(&mk("共享", "shared", None))?;
             }
             if !has("system") {
-                repo::insert_vault(tx, &mk("系统", "system", None))?;
+                VaultItems(tx).insert_vault(&mk("系统", "system", None))?;
             }
             Ok(())
         })
@@ -387,9 +391,10 @@ impl Vault {
     /// `GET /vaults`: the caller's personal vault and the shared one.
     pub fn list_vaults(&self, ws: &str, user: &str) -> VaultResult<Vec<VaultOut>> {
         self.ensure_vaults(ws, user)?;
-        self.store().reader(|c| {
-            let counts = repo::item_counts(c, ws)?;
-            let mut out: Vec<VaultOut> = repo::vaults(c, ws)?
+        self.read(|c| {
+            let counts = VaultItems(c).item_counts(ws)?;
+            let mut out: Vec<VaultOut> = VaultItems(c)
+                .vaults(ws)?
                 .into_iter()
                 .filter(|v| v.visible_to(ws, user))
                 .map(|v| VaultOut {
@@ -408,9 +413,15 @@ impl Vault {
     /// `GET /vault/templates` (without `connection_credential`).
     pub fn templates(&self, ws: &str, user: &str) -> VaultResult<Vec<Template>> {
         self.ensure_vaults(ws, user)?;
-        Ok(self
-            .store()
-            .reader(|c| repo::templates(c, ws))?
+        let order: Vec<_> = builtin().into_iter().map(|template| template.id).collect();
+        let mut templates = self.store().read(|r| VaultItems(r).templates(ws))?;
+        templates.sort_by_key(|template| {
+            order
+                .iter()
+                .position(|id| *id == template.id)
+                .unwrap_or(order.len())
+        });
+        Ok(templates
             .into_iter()
             .filter(|t| t.id != CONNECTION_CREDENTIAL)
             .map(|mut t| {
@@ -423,15 +434,17 @@ impl Vault {
     /// `GET /vault/items`: no `fields` at all in the list.
     pub fn list_items(&self, ws: &str, user: &str, f: &ItemFilter) -> VaultResult<Vec<ItemOut>> {
         self.ensure_vaults(ws, user)?;
-        self.store().reader(|c| {
+        self.read(|c| {
             if let Some(v) = &f.vault
-                && !repo::vault(c, v)?.is_some_and(|v| v.visible_to(ws, user))
+                && !VaultItems(c)
+                    .vault(v)?
+                    .is_some_and(|v| v.visible_to(ws, user))
             {
                 return Err(ApiError::not_found("保险库").into());
             }
-            let vaults = repo::vaults(c, ws)?;
+            let vaults = VaultItems(c).vaults(ws)?;
             let mut out = Vec::new();
-            for i in repo::list_items(c, ws, user, f)? {
+            for i in VaultItems(c).list(ws, user, f)? {
                 if let Some(v) = vaults.iter().find(|v| v.id == i.vault_id) {
                     out.push(item_out(c, &i, v, false)?);
                 }
@@ -442,7 +455,7 @@ impl Vault {
 
     /// `GET /vault/items/:id`.
     pub fn get_item(&self, ws: &str, user: &str, id: &str) -> VaultResult<ItemOut> {
-        self.store().reader(|c| {
+        self.read(|c| {
             let (i, v) = own_item(c, ws, user, id)?;
             Ok::<_, VaultError>(item_out(c, &i, &v, true)?)
         })
@@ -451,11 +464,13 @@ impl Vault {
     /// `POST /vault/items`.
     pub fn create_item(&self, ws: &str, user: &str, n: NewItem) -> VaultResult<ItemOut> {
         self.ensure_vaults(ws, user)?;
-        let (vault, template) = self.store().reader(|c| {
-            let v = repo::vault(c, &n.vault_id)?
+        let (vault, template) = self.read(|c| {
+            let v = VaultItems(c)
+                .vault(&n.vault_id)?
                 .filter(|v| v.visible_to(ws, user))
                 .ok_or_else(|| ApiError::not_found("保险库"))?;
-            let t = repo::template(c, ws, &n.template)?
+            let t = VaultItems(c)
+                .template(ws, &n.template)?
                 .filter(|t| t.id != CONNECTION_CREDENTIAL)
                 .ok_or_else(|| ApiError::not_found("模板"))?;
             check_account(c, ws, n.account_id.as_deref())?;
@@ -475,7 +490,7 @@ impl Vault {
         n: NewItem,
     ) -> VaultResult<String> {
         let p = self.prepare_item(ws, actor, vault, template, n)?;
-        self.store().transaction(|tx| write_prepared(tx, &p))?;
+        self.store().write(|tx| write_prepared(tx, &p))?;
         tracing::info!(ws, item = %p.item.id, template = %p.template, "vault item created");
         Ok(p.item.id.clone())
     }
@@ -574,7 +589,7 @@ impl Vault {
             c.one_of("sensitivity", s, SENSITIVITIES);
         }
         c.done()?;
-        self.store().transaction(|tx| {
+        self.store().write(|tx| {
             let (before, _) = own_item(tx, ws, user, id)?;
             let mut after = before.clone();
             if let Some(t) = &p.title {
@@ -594,18 +609,16 @@ impl Vault {
                 after.sensitivity = s.clone();
             }
             let at = now();
-            repo::update_item_meta(tx, &after, at)?;
+            VaultItems(tx).update_item_meta(&after, at)?;
             let revoked = if after.sensitivity == "high" && before.sensitivity != "high" {
-                repo::revoke_grants(tx, ws, id, at)?
+                GrantRows(tx).revoke_for_vault(ws, id, at)?
             } else {
                 0
             };
             let meta = |i: &ItemRow| {
                 json!({"title": i.title, "site": i.site, "account_id": i.account_id, "sensitivity": i.sensitivity})
             };
-            base::audit(
-                tx,
-                ws,
+            tx.audit(ws,
                 user,
                 "vault_item.patch",
                 id,
@@ -630,11 +643,12 @@ impl Vault {
             )
             .into());
         }
-        let (item, template, existing) = self.store().reader(|c| {
+        let (item, template, existing) = self.read(|c| {
             let (i, _) = own_item(c, ws, user, id)?;
-            let t = repo::template(c, ws, &i.template)?
+            let t = VaultItems(c)
+                .template(ws, &i.template)?
                 .ok_or_else(|| VaultError::internal("vault item with an unknown template"))?;
-            let fs = repo::fields(c, id)?;
+            let fs = VaultItems(c).fields(id)?;
             Ok::<_, VaultError>((i, t, fs))
         })?;
         if existing.len() >= FIELDS_MAX {
@@ -650,12 +664,11 @@ impl Vault {
         let dek = self.dek_of(&item)?;
         let sort = existing.iter().map(|x| x.sort).max().map_or(0, |s| s + 1);
         let row = sealed_field(ws, id, &template, dek.as_ref(), &f, sort, now())?;
-        self.store().transaction(|tx| {
+        self.store().write(|tx| {
             own_item(tx, ws, user, id)?;
-            repo::insert_field(tx, ws, &row)?;
-            repo::touch_item(tx, id, row.updated)?;
-            base::audit(
-                tx,
+            VaultItems(tx).insert_field(ws, &row)?;
+            VaultItems(tx).touch_item(id, row.updated)?;
+            tx.audit(
                 ws,
                 user,
                 "vault_field.add",
@@ -680,7 +693,7 @@ impl Vault {
         Check::new()
             .that("value", value.encode_utf16().count() <= VALUE_MAX)
             .done()?;
-        let (item, field) = self.store().reader(|c| {
+        let (item, field) = self.read(|c| {
             let (i, _) = own_item(c, ws, user, id)?;
             let f = own_field(c, id, fid)?;
             Ok::<_, VaultError>((i, f))
@@ -695,13 +708,12 @@ impl Vault {
         } else {
             (Some(value.to_string()), None, String::new())
         };
-        self.store().transaction(|tx| {
+        self.store().write(|tx| {
             own_item(tx, ws, user, id)?;
             own_field(tx, id, fid)?;
-            repo::set_field_value(tx, fid, plain.as_deref(), ct.as_deref(), &h, at)?;
-            repo::touch_item(tx, id, at)?;
-            base::audit(
-                tx,
+            VaultItems(tx).set_field_value(fid, plain.as_deref(), ct.as_deref(), &h, at)?;
+            VaultItems(tx).touch_item(id, at)?;
+            tx.audit(
                 ws,
                 user,
                 "vault_field.update",
@@ -716,13 +728,12 @@ impl Vault {
 
     /// `DELETE /vault/items/:id/fields/:fid`.
     pub fn delete_field(&self, ws: &str, user: &str, id: &str, fid: &str) -> VaultResult<ItemOut> {
-        self.store().transaction(|tx| {
+        self.store().write(|tx| {
             own_item(tx, ws, user, id)?;
             let f = own_field(tx, id, fid)?;
-            repo::delete_field(tx, fid)?;
-            repo::touch_item(tx, id, now())?;
-            base::audit(
-                tx,
+            VaultItems(tx).delete_field(fid)?;
+            VaultItems(tx).touch_item(id, now())?;
+            tx.audit(
                 ws,
                 user,
                 "vault_field.delete",
@@ -738,7 +749,7 @@ impl Vault {
     /// `DELETE /vault/items/:id`: data key and field values destroyed, grants revoked, title
     /// kept for the use log. Returns how many grants were revoked.
     pub fn delete_item(&self, ws: &str, user: &str, id: &str) -> VaultResult<usize> {
-        self.store().transaction(|tx| {
+        self.store().write(|tx| {
             own_item(tx, ws, user, id)?;
             destroy(tx, ws, user, id)
         })
@@ -765,7 +776,7 @@ impl Vault {
         fields: Vec<(String, Zeroizing<String>)>,
     ) -> VaultResult<String> {
         let p = self.prepare_credential(ws, actor, title, account_id, fields)?;
-        self.store().transaction(|tx| write_prepared(tx, &p))?;
+        self.store().write(|tx| write_prepared(tx, &p))?;
         tracing::info!(ws, item = %p.item.id, "vault credential created");
         Ok(p.item.id.clone())
     }
@@ -782,12 +793,14 @@ impl Vault {
         fields: Vec<(String, Zeroizing<String>)>,
     ) -> VaultResult<PreparedItem> {
         self.ensure_vaults(ws, actor)?;
-        let (vault, template) = self.store().reader(|c| {
-            let v = repo::vaults(c, ws)?
+        let (vault, template) = self.read(|c| {
+            let v = VaultItems(c)
+                .vaults(ws)?
                 .into_iter()
                 .find(|v| v.scope == "system")
                 .ok_or_else(|| VaultError::internal("no system vault"))?;
-            let t = repo::template(c, ws, CONNECTION_CREDENTIAL)?
+            let t = VaultItems(c)
+                .template(ws, CONNECTION_CREDENTIAL)?
                 .ok_or_else(|| VaultError::internal("no connection_credential template"))?;
             check_account(c, ws, account_id)?;
             Ok::<_, VaultError>((v, t))
@@ -813,8 +826,8 @@ impl Vault {
     }
 
     /// Writes a [`Self::prepare_credential`] item in `tx`; returns its id.
-    pub fn insert_prepared(&self, tx: &Tx, p: &PreparedItem) -> VaultResult<String> {
-        write_prepared(tx, p)?;
+    pub fn insert_prepared(&self, w: &mut W<'_>, p: &PreparedItem) -> VaultResult<String> {
+        write_prepared(w, p)?;
         Ok(p.item.id.clone())
     }
 
@@ -829,14 +842,14 @@ impl Vault {
     ) -> VaultResult<()> {
         let item = self
             .store()
-            .reader(|c| repo::item(c, item_id))?
+            .read(|r| VaultItems(r).item(item_id))?
             .filter(|i| {
                 i.workspace_id == ws && i.status == "active" && i.template == CONNECTION_CREDENTIAL
             })
             .ok_or_else(|| ApiError::not_found("条目"))?;
         let template = self
             .store()
-            .reader(|c| repo::template(c, ws, CONNECTION_CREDENTIAL))?
+            .read(|r| VaultItems(r).template(ws, CONNECTION_CREDENTIAL))?
             .ok_or_else(|| VaultError::internal("no connection_credential template"))?;
         let dek = self.dek_of(&item)?;
         let at = now();
@@ -861,14 +874,13 @@ impl Vault {
                 at,
             )?);
         }
-        self.store().transaction(|tx| {
-            repo::delete_fields(tx, item_id)?;
+        self.store().write(|tx| {
+            VaultItems(tx).delete_fields(item_id)?;
             for f in &rows {
-                repo::insert_field(tx, ws, f)?;
+                VaultItems(tx).insert_field(ws, f)?;
             }
-            repo::touch_item(tx, item_id, at)?;
-            base::audit(
-                tx,
+            VaultItems(tx).touch_item(item_id, at)?;
+            tx.audit(
                 ws,
                 actor,
                 "vault_item.credential",
@@ -884,14 +896,14 @@ impl Vault {
     /// visibility check (system items are never visible). Missing or already deleted is fine.
     pub fn destroy_item(
         &self,
-        tx: &Tx,
+        w: &mut W<'_>,
         ws: &str,
         actor: &str,
         item_id: &str,
     ) -> VaultResult<usize> {
-        match repo::item(tx, item_id)? {
+        match VaultItems(w).item(item_id)? {
             Some(i) if i.workspace_id == ws && i.status == "active" => {
-                destroy(tx, ws, actor, item_id)
+                destroy(w, ws, actor, item_id)
             }
             _ => Ok(0),
         }
@@ -902,7 +914,7 @@ impl Vault {
 /// wrapped data key; no `Debug`.
 pub struct PreparedItem {
     item: ItemRow,
-    rows: Vec<repo::FieldRow>,
+    rows: Vec<FieldRow>,
     kek_version: i64,
     actor: String,
     vault: String,
@@ -917,16 +929,14 @@ impl PreparedItem {
 }
 
 /// Writes a prepared item in `tx` (with its audit row and event); refuses if the key moved on since.
-fn write_prepared(tx: &Tx, p: &PreparedItem) -> VaultResult<()> {
+fn write_prepared(tx: &mut W<'_>, p: &PreparedItem) -> VaultResult<()> {
     let ws = p.item.workspace_id.as_str();
     ensure_active(tx, ws, p.kek_version)?;
-    repo::insert_item(tx, &p.item)?;
+    VaultItems(tx).insert_item(&p.item)?;
     for f in &p.rows {
-        repo::insert_field(tx, ws, f)?;
+        VaultItems(tx).insert_field(ws, f)?;
     }
-    base::audit(
-        tx,
-        ws,
+    tx.audit(ws,
         &p.actor,
         "vault_item.create",
         &p.item.id,
@@ -940,12 +950,11 @@ fn write_prepared(tx: &Tx, p: &PreparedItem) -> VaultResult<()> {
     Ok(())
 }
 
-fn destroy(tx: &Tx, ws: &str, actor: &str, id: &str) -> VaultResult<usize> {
+fn destroy(tx: &mut W<'_>, ws: &str, actor: &str, id: &str) -> VaultResult<usize> {
     let at = now();
-    let revoked = repo::revoke_grants(tx, ws, id, at)?;
-    repo::destroy_item(tx, id, at)?;
-    base::audit(
-        tx,
+    let revoked = GrantRows(tx).revoke_for_vault(ws, id, at)?;
+    VaultItems(tx).destroy_item(id, at)?;
+    tx.audit(
         ws,
         actor,
         "vault_item.delete",

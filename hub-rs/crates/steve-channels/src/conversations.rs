@@ -536,9 +536,12 @@ impl Channels {
         let block = match self.turn_source(ws, origin) {
             Ok(Some((_, plan, _))) if plan.space_id == space_id => self
                 .store()
-                .reader(|c| -> ChannelResult<String> {
-                    Ok(crate::im_context::render_for(c, &plan))
+                .read::<_, steve_store::StoreError>(|r| {
+                    Ok(self.store().reader(|c| -> ChannelResult<String> {
+                        Ok(crate::im_context::render_for(c, r, &plan))
+                    }))
                 })
+                .unwrap_or_else(|e| Err(e.into()))
                 .map(|b| format!("{b}\n\n{CONV_TOOLS_NOTE}\n\n"))
                 .unwrap_or_else(|e| {
                     tracing::warn!(origin, "identity block not built, identity unknown: {e}");
@@ -559,7 +562,7 @@ impl Channels {
     /// [`Channels::conv_research_context`] after the identity block.
     fn conv_research_card(&self, ws: &str, space_id: &str, origin: &str) -> String {
         let turn = self.store().messages().get(origin).ok().flatten();
-        let r = self.store().reader(|c| -> ChannelResult<String> {
+        let r = self.store().read(|r| self.store().reader(|c| -> ChannelResult<String> {
             let Some(space) = spaces::get(c, space_id)? else {
                 return Ok(String::new());
             };
@@ -590,18 +593,18 @@ impl Channels {
             if own {
                 return Ok(format!(
                     "{card}\n\n这次的问题来自你和 {} 的私聊（{}），只有你本人能看到，回答会发回那里。需要时直接查事项、会话、知识和代码，照实回答。{note}",
-                    personas::owner_internal_name(c, ws, &space.connection_id)?,
+                    personas::owner_internal_name(c, r, ws, &space.connection_id)?,
                     crate::spaces::display_title(c, &space)?,
                 ));
             }
-            let owner = personas::owner_name_for_space(c, ws, &space.id)?;
+            let owner = personas::owner_name_for_space(c, r, ws, &space.id)?;
             Ok(format!(
                 "{card}\n\n这次的问题来自渠道「{}」（{where_}{}）。你{who}，回答会发回那里，发出前要过披露检查：\
                  只说结论，不提其他群、其他客户、内部事项编号、文件路径和代码细节；对方这次自己提到的事项编号或说法可以照着提、用来澄清，但它不代表能说这件事的内容，内容仍只按能说的部分说；拿不准能不能说的，就当不知道，或者说会请 {owner} 来看。查不到、查询失败或没有权限时，笼统地说明即可，不说是什么权限、哪里报错。",
                 crate::spaces::display_title(c, &space)?,
                 if space.has_external { "，有外部成员" } else { "" },
             ) + &note)
-        });
+        }));
         r.unwrap_or_default()
     }
 
@@ -782,7 +785,13 @@ impl Channels {
             if plan.mode == Mode::Bot {
                 let owner = self
                     .store()
-                    .reader(|c| personas::owner_name_for_space(c, ws, &plan.space_id))
+                    .read::<_, steve_store::StoreError>(|r| {
+                        Ok(self
+                            .store()
+                            .reader(|c| personas::owner_name_for_space(c, r, ws, &plan.space_id)))
+                    })
+                    .ok()
+                    .and_then(Result::ok)
                     .unwrap_or_default();
                 let d = out
                     .deliver(
@@ -1261,7 +1270,11 @@ pub(crate) fn provider_name(c: &rusqlite::Connection, system: &str) -> String {
 }
 
 /// The badge of a conversation: where it lives.
-fn badge(c: &rusqlite::Connection, space: &crate::spaces::SpaceRow) -> ChannelResult<Value> {
+fn badge(
+    r: &mut impl steve_store::Read,
+    c: &rusqlite::Connection,
+    space: &crate::spaces::SpaceRow,
+) -> ChannelResult<Value> {
     let provider = provider_name(c, &space.system_id);
     let mode = crate::arbiter::mode_of(c, &space.workspace_id, &space.connection_id)?;
     Ok(json!({
@@ -1278,7 +1291,7 @@ fn badge(c: &rusqlite::Connection, space: &crate::spaces::SpaceRow) -> ChannelRe
         // the channel account that speaks there (its voice); `null` once disconnected
         "connection": (!space.connection_id.is_empty()).then_some(&space.connection_id),
         // opens the chat in its platform's client (“在飞书中打开”); `null` without one
-        "open_url": crate::open_link::space_url(c, space)?,
+        "open_url": crate::open_link::space_url(r, space)?,
     }))
 }
 
@@ -1393,11 +1406,11 @@ pub fn attention(
 
 /// The IM conversations the viewer may see, newest first; no silently omitted older conversations.
 pub fn list(
-    c: &rusqlite::Connection,
+    store: &steve_store::Store,
     ws: &str,
     viewer: &steve_store::base::Viewer,
 ) -> ChannelResult<Vec<Value>> {
-    Ok(list_page(c, ws, viewer, &ListQuery::default(), steve_store::now())?.conversations)
+    Ok(list_page(store, ws, viewer, &ListQuery::default(), steve_store::now())?.conversations)
 }
 
 /// The conversations of the spaces the viewer sees: every space with a message of its conversation
@@ -1407,12 +1420,13 @@ pub fn list(
 /// and its last visible channel message), `closed` and `unread` ([`crate::conv_record::unread`] at
 /// `now`).
 pub fn list_page(
-    c: &rusqlite::Connection,
+    store: &steve_store::Store,
     ws: &str,
     viewer: &steve_store::base::Viewer,
     query: &ListQuery,
     now: i64,
 ) -> ChannelResult<ListPage> {
+    store.read(|r| store.reader(|c| {
     member(c, ws, viewer)?;
     let state = match query.state.as_deref().unwrap_or("all") {
         "all" | "replied" => -1,
@@ -1518,7 +1532,7 @@ pub fn list_page(
         let Some(space) = spaces::get(c, &id)? else {
             continue;
         };
-        let mut b = badge(c, &space)?;
+        let mut b = badge(r,c, &space)?;
         b["count"] = json!(n);
         b["last"] = json!(last);
         b["last_text"] = json!(text.chars().take(80).collect::<String>());
@@ -1535,6 +1549,7 @@ pub fn list_page(
         has_more,
         next_offset: has_more.then_some(next),
     })
+    }))
 }
 
 /// The viewer may see conversation `conv` and it has something to show: a message of its
@@ -1589,59 +1604,66 @@ pub fn messages_of(
     conv: &str,
 ) -> ChannelResult<Value> {
     let id = space_of_conv(conv).ok_or_else(|| steve_modules::ApiError::not_found("对话"))?;
-    let b = ch.store().reader(|c| -> ChannelResult<Value> {
-        let space =
-            spaces::own(c, viewer, id).map_err(|_| steve_modules::ApiError::not_found("对话"))?;
-        badge(c, &space)
+    let store = ch.store();
+    let b = store.read(|r| {
+        store.reader(|c| -> ChannelResult<Value> {
+            let space = spaces::own(c, viewer, id)
+                .map_err(|_| steve_modules::ApiError::not_found("对话"))?;
+            badge(r, c, &space)
+        })
     })?;
     let msgs = ch.store().messages().list(ws, conv, 500)?;
     let mut out = Vec::with_capacity(msgs.len());
-    ch.store().reader(|c| -> ChannelResult<()> {
-        for m in msgs {
-            let mut v = serde_json::to_value(&m).map_err(steve_modules::ApiError::from)?;
-            // the composer's answer as the page needs it: not the knowledge it was written with
-            if let Some(g) = v["meta"].get_mut(CHAN_GEN).and_then(Value::as_object_mut) {
-                g.retain(|k, _| {
-                    matches!(k.as_str(), "outcome" | "needs_approval" | "why" | "model")
-                });
-            }
-            if let Some(cm) = m.meta["chan"]["message"].as_str() {
-                if let Some(r) = crate::reactions::get(c, cm)? {
-                    v["reaction"] =
-                        serde_json::to_value(r).map_err(steve_modules::ApiError::from)?;
+    store.read(|db| {
+        store.reader(|c| -> ChannelResult<()> {
+            for m in msgs {
+                let mut v = serde_json::to_value(&m).map_err(steve_modules::ApiError::from)?;
+                // the composer's answer as the page needs it: not the knowledge it was written with
+                if let Some(g) = v["meta"].get_mut(CHAN_GEN).and_then(Value::as_object_mut) {
+                    g.retain(|k, _| {
+                        matches!(k.as_str(), "outcome" | "needs_approval" | "why" | "model")
+                    });
                 }
-                // the chat message itself (cards, images, files), only from this space
-                let src = messages::get(c, cm)
-                    .ok()
-                    .flatten()
-                    .filter(|x| x.space_id == id && in_ws(c, cm, ws));
-                v["channel_message"] = match src {
-                    Some(x) => serde_json::to_value(x).map_err(steve_modules::ApiError::from)?,
-                    None => Value::Null,
-                };
-            }
-            if let Some(out_id) = m.meta["chan_out"]["message"].as_str()
-                && let Some((st, decision)) = out_state(c, ws, out_id)?
-            {
-                v["meta"]["chan_out"]["status"] = json!(st);
-                v["meta"]["chan_out"]["decision"] = json!(decision);
-                v["meta"]["chan_out"]["reason"] =
-                    if matches!(st.as_str(), "failed" | "blocked" | "unknown") {
-                        json!(crate::conv_record::out_error(c, ws, out_id)?)
-                    } else {
-                        Value::Null
+                if let Some(cm) = m.meta["chan"]["message"].as_str() {
+                    if let Some(r) = steve_store::channel_message_repo::reactions::get(db, cm)? {
+                        v["reaction"] =
+                            serde_json::to_value(r).map_err(steve_modules::ApiError::from)?;
+                    }
+                    // the chat message itself (cards, images, files), only from this space
+                    let src = messages::get(store, cm)
+                        .ok()
+                        .flatten()
+                        .filter(|x| x.space_id == id && in_ws(c, cm, ws));
+                    v["channel_message"] = match src {
+                        Some(x) => {
+                            serde_json::to_value(x).map_err(steve_modules::ApiError::from)?
+                        }
+                        None => Value::Null,
                     };
-            } else if m.meta["chan_out"]["status"] == "sent" {
-                // Older notes could say sent after generation alone, with no outbound row. Do
-                // not keep presenting that legacy assertion as a confirmed provider result.
-                v["meta"]["chan_out"]["status"] = json!("unknown");
-                v["meta"]["chan_out"]["decision"] = Value::Null;
-                v["meta"]["chan_out"]["reason"] =
-                    json!(steve_i18n::t!("channels.notice.delivery_unconfirmed"));
+                }
+                if let Some(out_id) = m.meta["chan_out"]["message"].as_str()
+                    && let Some((st, decision)) = out_state(c, ws, out_id)?
+                {
+                    v["meta"]["chan_out"]["status"] = json!(st);
+                    v["meta"]["chan_out"]["decision"] = json!(decision);
+                    v["meta"]["chan_out"]["reason"] =
+                        if matches!(st.as_str(), "failed" | "blocked" | "unknown") {
+                            json!(crate::conv_record::out_error(c, ws, out_id)?)
+                        } else {
+                            Value::Null
+                        };
+                } else if m.meta["chan_out"]["status"] == "sent" {
+                    // Older notes could say sent after generation alone, with no outbound row. Do
+                    // not keep presenting that legacy assertion as a confirmed provider result.
+                    v["meta"]["chan_out"]["status"] = json!("unknown");
+                    v["meta"]["chan_out"]["decision"] = Value::Null;
+                    v["meta"]["chan_out"]["reason"] =
+                        json!(steve_i18n::t!("channels.notice.delivery_unconfirmed"));
+                }
+                out.push(v);
             }
-            out.push(v);
-        }
-        Ok(())
+            Ok(())
+        })
     })?;
     Ok(json!({"conversation": b, "messages": out}))
 }

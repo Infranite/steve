@@ -15,7 +15,7 @@ use axum::http::{Request, header};
 use serde_json::{Value, json};
 use steve_channels::adapters::feishu::inbound::LongConnection;
 use steve_channels::adapters::feishu::ws::WsState;
-use steve_channels::adapters::feishu::{FeishuApp, at_handle, chats, send};
+use steve_channels::adapters::feishu::{FeishuApp, chats, send};
 use steve_channels::fake::feishu::{
     Chat, Endpoint, FakeFeishu, Member, UserIds, WsClientConfig, fixture, ids,
 };
@@ -654,7 +654,7 @@ async fn member_and_chat_events_over_the_long_connection() {
     let at = h
         .env
         .store()
-        .reader(|c| at_handle(c, WS, &h.con, &alice))
+        .read(|r| steve_store::accounts::feishu_mention_handle(r, WS, &h.con, &alice))
         .unwrap();
     assert_eq!(at.as_deref(), Some(ids::ALICE.open_id));
     lc.stop().await.unwrap();

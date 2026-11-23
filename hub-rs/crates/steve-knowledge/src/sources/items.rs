@@ -9,19 +9,19 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use steve_modules::hooks::ItemHooks;
 use steve_modules::{ApiError, ApiResult, Modules};
 use steve_store::base::Level;
 use steve_store::base::mems::Mem;
-use steve_store::{Item, Tx, uid};
+use steve_store::knowledge::Documents;
+use steve_store::{Item, ItemEvidence, Members, Read, W, uid};
 
 use crate::candidates::{Origin, OriginKind};
 use crate::extract::{self, MAX_INPUT, clip};
 use crate::extract_text::markdown;
 use crate::index::{self, BoxFuture, DocLoader, Loaded};
-use crate::repo::{self, DocRow, NewDoc, SourceRow};
+use crate::repo::{DocRow, NewDoc, SourceRow};
 use crate::sources;
 use crate::state::Knowledge;
 
@@ -54,55 +54,34 @@ pub struct ItemFacts {
     pub stamp: i64,
 }
 
-fn rows<T>(
-    c: &Connection,
-    sql: &str,
-    id: &str,
-    f: impl FnMut(&rusqlite::Row) -> rusqlite::Result<T>,
-) -> ApiResult<Vec<T>> {
-    Ok(c.prepare_cached(sql)?
-        .query_map([id], f)?
-        .collect::<rusqlite::Result<_>>()?)
-}
-
 /// Reads an item's facts; `None` if there is no such item.
-pub fn facts(c: &Connection, id: &str) -> ApiResult<Option<ItemFacts>> {
-    let head: Option<(String, String, Option<String>, i64)> = c
-        .prepare_cached("SELECT workspace_id, title, cwd, updated FROM items WHERE id = ?")?
-        .query_row([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
-        .optional()?;
+pub fn facts(c: &mut impl Read, id: &str) -> ApiResult<Option<ItemFacts>> {
+    let head = ItemEvidence(c).header(id)?;
     let Some((ws, title, cwd, stamp)) = head else {
         return Ok(None);
     };
-    let goals = rows(
-        c,
-        "SELECT text FROM item_goals WHERE item_id = ? ORDER BY version",
-        id,
-        |r| r.get(0),
-    )?;
-    let said: Vec<String> = rows(
-        c,
-        "SELECT text FROM timeline WHERE item_id = ? AND kind = 'me' ORDER BY id",
-        id,
-        |r| r.get(0),
-    )?
-    .into_iter()
-    // answers and reviews come from their decisions below; bare actions say nothing to remember
-    .filter(|t: &String| {
-        !t.starts_with("回答：")
-            && !t.starts_with("返工：")
-            && !matches!(
-                t.as_str(),
-                "验收通过" | "暂停" | "继续" | "放弃" | "重新打开" | "归档" | "恢复" | "撤销了决定"
-            )
-    })
-    .collect();
-    let decs: Vec<(String, String, String, String, Option<String>)> = rows(
-        c,
-        "SELECT kind, question, draft, status, result FROM decisions WHERE item_id = ? ORDER BY created, id",
-        id,
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-    )?;
+    let goals = ItemEvidence(c).goals(id)?;
+    let said: Vec<String> = ItemEvidence(c)
+        .user_text(id)?
+        .into_iter()
+        // answers and reviews come from their decisions below; bare actions say nothing to remember
+        .filter(|t: &String| {
+            !t.starts_with("回答：")
+                && !t.starts_with("返工：")
+                && !matches!(
+                    t.as_str(),
+                    "验收通过"
+                        | "暂停"
+                        | "继续"
+                        | "放弃"
+                        | "重新打开"
+                        | "归档"
+                        | "恢复"
+                        | "撤销了决定"
+                )
+        })
+        .collect();
+    let decs = ItemEvidence(c).completion_cards(id)?;
     let mut f = ItemFacts {
         id: id.into(),
         ws: ws.clone(),
@@ -113,11 +92,8 @@ pub fn facts(c: &Connection, id: &str) -> ApiResult<Option<ItemFacts>> {
         stamp,
         ..Default::default()
     };
-    for (kind, question, draft, status, result) in decs {
-        let result: Value = result
-            .as_deref()
-            .and_then(|r| serde_json::from_str(r).ok())
-            .unwrap_or(Value::Null);
+    for card in decs {
+        let result = card.result;
         let s = |k: &str| {
             result
                 .get(k)
@@ -126,14 +102,14 @@ pub fn facts(c: &Connection, id: &str) -> ApiResult<Option<ItemFacts>> {
                 .filter(|s| !s.is_empty())
                 .map(String::from)
         };
-        match kind.as_str() {
-            "ask" if status == "resolved" => {
+        match card.kind.as_str() {
+            "ask" if card.status == "resolved" => {
                 if let Some(a) = s("answer") {
-                    f.answers.push((question, a));
+                    f.answers.push((card.question, a));
                 }
             }
             "accept" => {
-                f.summary = draft;
+                f.summary = card.draft;
                 // a rework Steve sent back on its own (YOLO) is its check, not something you said
                 if s("choice").as_deref() == Some("rework")
                     && s("decided_by").as_deref() != Some("yolo")
@@ -145,29 +121,19 @@ pub fn facts(c: &Connection, id: &str) -> ApiResult<Option<ItemFacts>> {
             _ => {}
         }
     }
-    f.outputs = rows(
-        c,
-        "SELECT kind, title, location FROM artifacts WHERE item_id = ? ORDER BY created, id",
-        id,
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )?;
+    f.outputs = ItemEvidence(c).outputs(id)?;
     f.user = initiator(c, &ws, id)?;
     Ok(Some(f))
 }
 
 /// The workspace user who created the item (audit `item.create`), else the workspace owner.
-pub fn initiator(c: &Connection, ws: &str, item: &str) -> ApiResult<String> {
-    let actor: Option<String> = c
-        .prepare_cached(
-            "SELECT a.actor FROM audit a JOIN workspace_members m ON m.user_id = a.actor AND m.workspace_id = a.workspace_id
-             WHERE a.workspace_id = ? AND a.action = 'item.create' AND a.target = ? ORDER BY a.id LIMIT 1",
-        )?
-        .query_row([ws, item], |r| r.get(0))
-        .optional()?;
-    match actor {
-        Some(a) => Ok(a),
-        None => extract::owner(c, ws),
-    }
+pub fn initiator(c: &mut impl Read, ws: &str, item: &str) -> ApiResult<String> {
+    Ok(match ItemEvidence(c).creator(ws, item)? {
+        Some(actor) => actor,
+        None => Members::new(c)
+            .first(ws)?
+            .ok_or_else(|| ApiError::not_found("工作空间成员"))?,
+    })
 }
 
 /// Is `loc` a text file inside `cwd`, small enough to read? Then its text.
@@ -246,21 +212,17 @@ pub fn extract_text(f: &ItemFacts) -> String {
 }
 
 /// Writes (or rewrites) the item's document and indexes it, in one transaction. Returns its id.
-pub fn write_doc(tx: &Tx, f: &ItemFacts, text: &str, now: i64) -> ApiResult<String> {
-    let src = sources::builtin(tx, &f.ws, KIND, &f.user, now)?;
+fn write_doc(tx: &mut W<'_>, f: &ItemFacts, text: &str, now: i64) -> ApiResult<String> {
+    let src = sources::builtin_in(tx, &f.ws, KIND, &f.user, now)?;
     let title = format!("{} {}", f.id, f.title);
-    let id = match repo::doc_by_ref(tx, &src.id, &f.id)? {
+    let id = match Documents(tx).doc_by_ref(&src.id, &f.id)? {
         Some(d) => {
-            tx.prepare_cached(
-                "UPDATE kb_docs SET title = ?, size = ?, status = 'active', error = NULL, updated = ? WHERE id = ?",
-            )?
-            .execute(params![title, text.len() as i64, now, d.id])?;
+            Documents(tx).reactivate_doc(&d.id, &title, text.len() as i64, now)?;
             d.id
         }
         None => {
             let id = uid("kd");
-            repo::insert_doc(
-                tx,
+            Documents(tx).insert_doc(
                 &f.ws,
                 &NewDoc {
                     id: id.clone(),
@@ -276,8 +238,10 @@ pub fn write_doc(tx: &Tx, f: &ItemFacts, text: &str, now: i64) -> ApiResult<Stri
             id
         }
     };
-    let doc = repo::doc(tx, &id)?.ok_or_else(|| ApiError::not_found("文档"))?;
-    index::index_doc(tx, &doc, &src, &markdown(text), now, false)?;
+    let doc = Documents(tx)
+        .doc(&id)?
+        .ok_or_else(|| ApiError::not_found("文档"))?;
+    index::index_document(tx, &doc, &src, &markdown(text), now, false)?;
     Ok(id)
 }
 
@@ -285,7 +249,7 @@ pub fn write_doc(tx: &Tx, f: &ItemFacts, text: &str, now: i64) -> ApiResult<Stri
 async fn load(m: &Modules, id: &str) -> ApiResult<Option<(ItemFacts, String)>> {
     let id = id.to_string();
     m.blocking(move |m| {
-        let Some(f) = m.store.reader(|c| facts(c, &id))? else {
+        let Some(f) = crate::read_api(&m.store, |c| facts(c, &id))? else {
             return Ok(None);
         };
         let text = doc_text(&f);
@@ -304,20 +268,20 @@ pub async fn finished(m: &Modules, kb: &Knowledge, item_id: &str) -> ApiResult<V
     let mark = format!("extract:item:{}", f.id);
     let stamp = f.stamp.to_string();
     // chunking the document happens inside the write: off the runtime
-    let (f, doc, fresh) = m
+    let (f, fresh) = m
         .blocking(move |m| {
-            let (doc, fresh) = m.store.transaction(|tx| {
+            let fresh = m.store.write(|tx| {
                 let doc = write_doc(tx, &f, &text, now)?;
-                let fresh = repo::mark(tx, &f.ws, &mark)?.as_deref() != Some(stamp.as_str());
+                let fresh = Documents(tx).mark(&f.ws, &mark)?.as_deref() != Some(stamp.as_str());
                 if fresh {
-                    repo::set_mark(tx, &f.ws, &mark, &stamp, now)?;
+                    Documents(tx).set_mark(&f.ws, &mark, &stamp, now)?;
                 }
-                Ok::<_, ApiError>((doc, fresh))
+                crate::state::emit_change(tx, &f.ws, &doc);
+                Ok::<_, ApiError>(fresh)
             })?;
-            Ok((f, doc, fresh))
+            Ok((f, fresh))
         })
         .await?;
-    kb.notify(&f.ws, &doc);
     if !fresh {
         return Ok(Vec::new());
     }
@@ -340,11 +304,11 @@ pub async fn finished(m: &Modules, kb: &Knowledge, item_id: &str) -> ApiResult<V
 }
 
 /// The item was deleted: its document and index rows go.
-pub fn item_deleted(tx: &Tx, ws: &str, item_id: &str) -> ApiResult<bool> {
-    let Some(src) = repo::source_of_kind(tx, ws, KIND)? else {
+pub fn item_deleted(tx: &mut W<'_>, ws: &str, item_id: &str) -> ApiResult<bool> {
+    let Some(src) = Documents(tx).source_of_kind(ws, KIND)? else {
         return Ok(false);
     };
-    match repo::doc_by_ref(tx, &src.id, item_id)? {
+    match Documents(tx).doc_by_ref(&src.id, item_id)? {
         Some(d) => {
             index::delete_doc(tx, &d.id)?;
             Ok(true)

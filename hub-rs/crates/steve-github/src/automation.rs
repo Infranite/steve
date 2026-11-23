@@ -196,14 +196,7 @@ pub(crate) fn stage(
         raw.thread_key = Some(format!("{}:{}", repo.id, subject.number));
         raw.scope_ext_id = Some(repo.full_name.clone());
         raw.payload = serde_json::to_value(&subject)?;
-        let staged = ingest_in(
-            &tx.legacy(),
-            flow,
-            &repo.workspace_id,
-            &repo.connection_id,
-            &raw,
-            now,
-        )?;
+        let staged = ingest_in(tx, flow, &repo.workspace_id, &repo.connection_id, &raw, now)?;
         let result = match staged.outcome() {
             Ingested::Stored { id, runs } if runs.is_empty() => ("skipped", "no_run", Some(id)),
             Ingested::Stored { id, .. } => ("matched", "matched", Some(id)),
@@ -721,10 +714,9 @@ fn link_report_provenance(
     );
     // Target and draft are tied to the result, not to the expiring delivery/run.
     data.props = json!({"subject": subject, "report": report});
-    links::add(&tx.legacy(), &ws, &data)?;
+    links::Links(tx).add(&ws, &data)?;
     for (ty, id) in [("event", event), ("flow_run", input.run_id)] {
-        links::add(
-            &tx.legacy(),
+        links::Links(tx).add(
             &ws,
             &links::NewLink::new(result.clone(), "from", ObjRef::new(ty, id), "sig"),
         )?;
@@ -944,21 +936,18 @@ pub(crate) async fn comment_draft(
         // Keep model output literal on GitHub. It must not become mentions, remote images, or
         // bot commands just because the user approved sharing a report.
         let body = format!("{prefix}{}", literal_report(&report));
-        let decision = steve_store::base::decisions::open(
-            &tx.legacy(),
-            &steve_store::NewDecision {
-                workspace_id: ws.clone(),
-                kind: "approve".into(),
-                subject_type: crate::comment::COMMENT.into(),
-                subject_id: target.subject,
-                item_id: Some(item.clone()),
-                session_id: None,
-                question: q,
-                draft: Some(body),
-                options: Some(vec!["yes".into(), "no".into()]),
-                requested_by: APPROVAL_ACTOR.into(),
-            },
-        )?;
+        let decision = steve_store::DecisionRows(tx).open(&steve_store::NewDecision {
+            workspace_id: ws.clone(),
+            kind: "approve".into(),
+            subject_type: crate::comment::COMMENT.into(),
+            subject_id: target.subject,
+            item_id: Some(item.clone()),
+            session_id: None,
+            question: q,
+            draft: Some(body),
+            options: Some(vec!["yes".into(), "no".into()]),
+            requested_by: APPROVAL_ACTOR.into(),
+        })?;
         crate::events::emit(tx, ws, &decision.subject_id);
         Ok::<_, ApiError>(decision)
     })?;

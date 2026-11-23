@@ -37,9 +37,8 @@ pub mod teams;
 
 use std::sync::Arc;
 
-use rusqlite::Connection;
 use serde_json::Value;
-use steve_store::Tx;
+use steve_store::W;
 
 use crate::ApiResult;
 
@@ -58,19 +57,26 @@ pub trait PartyHooks: Send + Sync {
     fn name(&self) -> &str;
 
     /// A contact was deleted (the accounts module deletes its accounts).
-    fn on_delete(&self, tx: &Tx, ws: &str, party_id: &str) -> ApiResult<()> {
+    fn on_delete(&self, tx: &mut W<'_>, ws: &str, party_id: &str) -> ApiResult<()> {
         let _ = (tx, ws, party_id);
         Ok(())
     }
 
     /// `from` is being merged into `into`; returns what was moved, for the split.
-    fn on_merge(&self, tx: &Tx, ws: &str, from: &str, into: &str) -> ApiResult<Value> {
+    fn on_merge(&self, tx: &mut W<'_>, ws: &str, from: &str, into: &str) -> ApiResult<Value> {
         let _ = (tx, ws, from, into);
         Ok(Value::Null)
     }
 
     /// A merge is being split; `moved` is what [`PartyHooks::on_merge`] returned.
-    fn on_split(&self, tx: &Tx, ws: &str, from: &str, into: &str, moved: &Value) -> ApiResult<()> {
+    fn on_split(
+        &self,
+        tx: &mut W<'_>,
+        ws: &str,
+        from: &str,
+        into: &str,
+        moved: &Value,
+    ) -> ApiResult<()> {
         let _ = (tx, ws, from, into, moved);
         Ok(())
     }
@@ -80,14 +86,19 @@ pub trait PartyHooks: Send + Sync {
 /// names, aliases, organizations and titles, and `accounts` counts are 0.
 pub trait HandleSearch: Send + Sync {
     /// Party ids of `ws` owning an account whose handle contains `q` (case-insensitive).
-    fn parties(&self, c: &Connection, ws: &str, q: &str) -> ApiResult<Vec<String>>;
+    fn parties(&self, c: &mut steve_store::R<'_>, ws: &str, q: &str) -> ApiResult<Vec<String>>;
 
     /// Number of accounts of a party.
-    fn count(&self, c: &Connection, ws: &str, party_id: &str) -> ApiResult<i64>;
+    fn count(&self, c: &mut steve_store::R<'_>, ws: &str, party_id: &str) -> ApiResult<i64>;
 
     /// The account handles of a party as agents may see them (`sarah@acme.com`, `飞书 Sarah`), for
     /// `steve_contacts_find`. Default: none.
-    fn handles(&self, c: &Connection, ws: &str, party_id: &str) -> ApiResult<Vec<String>> {
+    fn handles(
+        &self,
+        c: &mut steve_store::R<'_>,
+        ws: &str,
+        party_id: &str,
+    ) -> ApiResult<Vec<String>> {
         let _ = (c, ws, party_id);
         Ok(Vec::new())
     }

@@ -69,9 +69,11 @@ impl Channels {
         let d = self.store().transaction(|tx| open_handoff(tx, plan))?;
         r.decision_id = Some(d);
         if !plan.muted {
-            let owner = self
-                .store()
-                .reader(|c| personas::owner_name_for_space(c, &plan.ws, &plan.space_id))?;
+            let owner = self.store().read::<_, steve_store::StoreError>(|r| {
+                Ok(self
+                    .store()
+                    .reader(|c| personas::owner_name_for_space(c, r, &plan.ws, &plan.space_id)))
+            })??;
             let text = crate::rules::handoff_ack(&owner);
             match self.responder().acknowledge(self, plan, &text).await {
                 Ok(_) => {}
@@ -159,7 +161,13 @@ impl Channels {
                 let (m, d) = self.store().transaction(|tx| {
                     let (m, d) = open_draft(tx, plan, "", now)?;
                     // the reply you write and approve answers the message
-                    crate::reactions::expect_answer(tx, &plan.message_id, &m)?;
+                    tx.write(|w| {
+                        steve_store::channel_message_repo::reactions::expect_answer(
+                            w,
+                            &plan.message_id,
+                            &m,
+                        )
+                    })?;
                     Ok::<_, crate::ChannelError>((m, d))
                 })?;
                 r.act = Act::Draft;

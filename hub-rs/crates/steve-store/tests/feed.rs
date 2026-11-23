@@ -22,21 +22,20 @@ fn env() -> T {
 }
 fn report(t: &T, ws: &str, run: &str, node: &str) {
     t.store
-        .transaction(|tx| {
-            feed::publish_report(
-                tx,
+        .write(|w| {
+            w.publish_report(&feed::RunReport {
                 ws,
-                "flow",
+                flow: "flow",
                 run,
                 node,
-                &Content {
+                content: &Content {
                     title: run.into(),
                     markdown: "body".into(),
                     ..Default::default()
                 },
-                &json!({"text":"body","digest":0}),
-                10,
-            )
+                result: &json!({"text":"body","digest":0}),
+                now: 10,
+            })
         })
         .unwrap();
 }
@@ -285,25 +284,24 @@ fn publication_is_idempotent_by_run_and_node_and_transaction_failure_rolls_back(
         .unwrap();
     let original = t
         .store
-        .reader(|c| feed::report_result(c, WS, "same-run", "a"))
+        .read(|c| steve_store::FeedReads(c).report_result(WS, "same-run", "a"))
         .unwrap()
         .unwrap();
     let (loser, inserted) = t
         .store
-        .transaction(|tx| {
-            feed::publish_report(
-                tx,
-                WS,
-                "flow",
-                "same-run",
-                "a",
-                &Content {
+        .write(|w| {
+            w.publish_report(&feed::RunReport {
+                ws: WS,
+                flow: "flow",
+                run: "same-run",
+                node: "a",
+                content: &Content {
                     markdown: "different writer".into(),
                     ..Default::default()
                 },
-                &json!({"text":"must not replace"}),
-                20,
-            )
+                result: &json!({"text":"must not replace"}),
+                now: 20,
+            })
         })
         .unwrap();
     assert!(!inserted);
@@ -318,23 +316,22 @@ fn publication_is_idempotent_by_run_and_node_and_transaction_failure_rolls_back(
             .markdown,
         "body"
     );
-    let res = t.store.transaction(|tx| -> Result<()> {
-        feed::publish_report(
-            tx,
-            WS,
-            "flow",
-            "rollback",
-            "a",
-            &Content::default(),
-            &json!({"persisted":true}),
-            1,
-        )?;
+    let res = t.store.write(|w| -> Result<()> {
+        w.publish_report(&feed::RunReport {
+            ws: WS,
+            flow: "flow",
+            run: "rollback",
+            node: "a",
+            content: &Content::default(),
+            result: &json!({"persisted":true}),
+            now: 1,
+        })?;
         Err(steve_store::StoreError::Conflict("fault injection".into()))
     });
     assert!(res.is_err());
     assert!(
         t.store
-            .reader(|c| feed::report_result(c, WS, "rollback", "a"))
+            .read(|c| steve_store::FeedReads(c).report_result(WS, "rollback", "a"))
             .unwrap()
             .is_none()
     );

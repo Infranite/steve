@@ -5,10 +5,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_modules::ApiError;
-use steve_store::Tx;
+use steve_store::base::links::Links;
+use steve_store::{
+    FlowRows, FlowTriggers, FlowWaits, ItemReads, R, Read, RunRows, TimelineRows, W,
+};
 
 use crate::cron::zone;
 use crate::exec::RunStatus;
@@ -44,22 +46,9 @@ enum StartError {
     Storage(steve_store::StoreError),
 }
 type StartResult<T> = Result<T, StartError>;
-impl From<rusqlite::Error> for StartError {
-    fn from(e: rusqlite::Error) -> Self {
-        match e {
-            rusqlite::Error::InvalidColumnType(..)
-            | rusqlite::Error::FromSqlConversionFailure(..)
-            | rusqlite::Error::IntegralValueOutOfRange(..) => Self::Row(e.into()),
-            _ => Self::Storage(e.into()),
-        }
-    }
-}
 impl From<steve_store::StoreError> for StartError {
     fn from(e: steve_store::StoreError) -> Self {
-        match e {
-            steve_store::StoreError::Sqlite(e) => e.into(),
-            _ => Self::Storage(e),
-        }
+        Self::Storage(e)
     }
 }
 impl From<crate::FlowError> for StartError {
@@ -95,52 +84,73 @@ struct FlowInfo {
     tz: Option<String>,
 }
 
-fn flow_info(c: &Connection, flow_id: &str) -> StartResult<Option<FlowInfo>> {
-    let row: Option<(String, String, i64, String, Option<String>)> = c
-        .query_row(
-            "SELECT id, workspace_id, version, graph, schedule FROM flows WHERE id = ? AND deleted = 0",
-            [flow_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-        )
-        .optional()?;
-    let Some((id, ws, version, graph, schedule)) = row else {
+fn flow_info(r: &mut impl Read, flow_id: &str) -> StartResult<Option<FlowInfo>> {
+    let Some(row) = FlowRows(r)
+        .get(flow_id)
+        .map_err(invalid_schedule)?
+        .filter(|row| !row.deleted)
+    else {
         return Ok(None);
     };
-    let schedule: Value = schedule
-        .and_then(|s| serde_json::from_str(&s).ok())
+    let schedule = FlowRows(r)
+        .schedule_config(flow_id)
+        .map_err(invalid_schedule)?
         .unwrap_or(Value::Null);
     Ok(Some(FlowInfo {
-        id,
-        ws,
-        version,
-        graph: serde_json::from_str(&graph).map_err(|e| {
-            StartError::Row(ApiError::rule(format!("Invalid stored flow graph: {e}")))
-        })?,
+        id: row.id,
+        ws: row.workspace_id,
+        version: row.version,
+        graph: row.graph,
         overlap: OverlapPolicy::from_db(schedule["overlap"].as_str()),
         budget_usd: schedule["budget_usd"].as_f64().unwrap_or(0.0),
         tz: schedule["tz"].as_str().map(String::from),
     }))
 }
 
-/// The item a run of `flow_id` made that is not closed yet, newest first (#223): one open run per
-/// schedule. Found by the run's own record or by the `from` link its item carries, so it holds
-/// across restarts; an archived or removed item counts as over.
-fn open_item(c: &Connection, ws: &str, flow_id: &str) -> StartResult<Option<String>> {
-    Ok(c.query_row(
-        "SELECT x.item FROM (
-             SELECT r.work_item_id AS item, r.started AS at FROM flow_runs r
-              WHERE r.workspace_id = ?1 AND r.flow_id = ?2 AND r.work_item_id IS NOT NULL AND r.dry_run = 0
-             UNION ALL
-             SELECT l.subject_id, r.started FROM links l JOIN flow_runs r ON r.id = l.object_id
-              WHERE l.workspace_id = ?1 AND l.subject_type = 'item' AND l.predicate = 'from'
-                AND l.object_type = 'flow_run' AND r.flow_id = ?2 AND r.dry_run = 0
-         ) x JOIN items i ON i.id = x.item AND i.workspace_id = ?1
-          WHERE coalesce(i.phase, '') <> 'closed' AND i.archived = 0
-          ORDER BY x.at DESC LIMIT 1",
-        params![ws, flow_id],
-        |r| r.get(0),
-    )
-    .optional()?)
+fn invalid_schedule(error: steve_store::StoreError) -> StartError {
+    match error {
+        steve_store::StoreError::Json(_) | steve_store::StoreError::Rejected(_) => {
+            StartError::Row(ApiError::rule(format!("Invalid schedule data: {error}")))
+        }
+        _ => StartError::Storage(error),
+    }
+}
+
+/// The newest run's open item, found through the run's result or through its source links.
+fn open_item(r: &mut impl Read, ws: &str, flow_id: &str) -> StartResult<Option<String>> {
+    const PAGE: u64 = 100;
+    let mut offset = 0;
+    loop {
+        let runs = RunRows(r).item_origins(ws, flow_id, offset, PAGE)?;
+        if runs.is_empty() {
+            return Ok(None);
+        }
+        let links = Links(r).sources(
+            ws,
+            "item",
+            "from",
+            "flow_run",
+            runs.iter().map(|(id, _)| id.as_str()),
+        )?;
+        let mut by_run = std::collections::HashMap::<String, Vec<String>>::new();
+        for (run, item, _) in links {
+            by_run.entry(run).or_default().push(item);
+        }
+        let candidates: Vec<_> = runs
+            .into_iter()
+            .flat_map(|(id, item)| {
+                item.into_iter()
+                    .chain(by_run.remove(&id).unwrap_or_default())
+            })
+            .collect();
+        for batch in candidates.chunks(500) {
+            let open = ItemReads(r).open_ids(ws, batch.iter().map(String::as_str))?;
+            if let Some(item) = batch.iter().find(|id| open.contains(*id)) {
+                return Ok(Some(item.clone()));
+            }
+        }
+        offset += PAGE;
+    }
 }
 
 /// `上一次还没结束，跳过 <time> 的这一次`: the open item's timeline line and the skipped run's label.
@@ -176,7 +186,7 @@ struct Start<'a> {
 
 /// Inserts the run row (and the trigger step), or a `skipped` row when the previous run is still
 /// going and the overlap rule says skip. Returns the run id and whether it should be driven.
-fn start(tx: &Tx, f: &FlowInfo, s: &Start, now: i64) -> StartResult<(String, bool)> {
+fn start(w: &mut W<'_>, f: &FlowInfo, s: &Start, now: i64) -> StartResult<(String, bool)> {
     let mut context =
         json!({ "at": s.at, "trigger": s.kind.as_str(), "budget_limit": f.budget_usd });
     if let (Some(ctx), Some(extra)) = (context.as_object_mut(), s.extra.as_object()) {
@@ -184,70 +194,61 @@ fn start(tx: &Tx, f: &FlowInfo, s: &Start, now: i64) -> StartResult<(String, boo
     }
     // the item the last run made is still open (#223): this one is skipped, said on that item
     if f.overlap == OverlapPolicy::Skip
-        && let Some(item) = open_item(tx, &f.ws, &f.id)?
+        && let Some(item) = open_item(w, &f.ws, &f.id)?
     {
         let label = open_item_skip_label(s.at, f.tz.as_deref());
         if let Some(ctx) = context.as_object_mut() {
             ctx.insert("open_item".into(), json!(item));
         }
-        let id = runs::insert_stored(
-            tx,
-            &NewRun {
-                ws: &f.ws,
-                flow_id: &f.id,
-                flow_version: f.version,
-                trigger_kind: s.kind.as_str(),
-                status: "skipped",
-                error: None,
-                outcome_label: &label,
-                cursor: None,
-                context: &context,
-                now,
-            },
-        )?;
-        tx.write(|w| steve_store::timeline_add_in(w, &item, "steve", "sys", &label, None))?;
-        return Ok((id, false));
-    }
-    let active = runs::active_exists(tx, &f.ws, &f.id)?;
-    if overlap_blocks(f.overlap, active.then_some("running")) {
-        let id = runs::insert_stored(
-            tx,
-            &NewRun {
-                ws: &f.ws,
-                flow_id: &f.id,
-                flow_version: f.version,
-                trigger_kind: s.kind.as_str(),
-                status: "skipped",
-                error: None,
-                outcome_label: OVERLAP_SKIP_LABEL,
-                cursor: None,
-                context: &context,
-                now,
-            },
-        )?;
-        return Ok((id, false));
-    }
-    let cursor = after_trigger(&f.graph, s.trigger_node);
-    let id = runs::insert_stored(
-        tx,
-        &NewRun {
+        let id = RunRows(w).insert(&NewRun {
             ws: &f.ws,
             flow_id: &f.id,
             flow_version: f.version,
             trigger_kind: s.kind.as_str(),
-            status: "running",
+            status: "skipped",
             error: None,
-            outcome_label: "",
-            cursor: cursor.as_deref(),
+            outcome_label: &label,
+            cursor: None,
             context: &context,
             now,
-        },
-    )?;
-    runs::add_step(
-        tx,
+        })?;
+        TimelineRows(w).add(&f.ws, &item, "steve", "sys", &label)?;
+        return Ok((id, false));
+    }
+    let active = RunRows(w).active(&f.ws, &f.id)?;
+    if overlap_blocks(f.overlap, active.then_some("running")) {
+        let id = RunRows(w).insert(&NewRun {
+            ws: &f.ws,
+            flow_id: &f.id,
+            flow_version: f.version,
+            trigger_kind: s.kind.as_str(),
+            status: "skipped",
+            error: None,
+            outcome_label: OVERLAP_SKIP_LABEL,
+            cursor: None,
+            context: &context,
+            now,
+        })?;
+        return Ok((id, false));
+    }
+    let cursor = after_trigger(&f.graph, s.trigger_node);
+    let id = RunRows(w).insert(&NewRun {
+        ws: &f.ws,
+        flow_id: &f.id,
+        flow_version: f.version,
+        trigger_kind: s.kind.as_str(),
+        status: "running",
+        error: None,
+        outcome_label: "",
+        cursor: cursor.as_deref(),
+        context: &context,
+        now,
+    })?;
+    RunRows(w).add_step(
         &f.ws,
         &id,
         &NewStep {
+            branch: None,
             node_id: s.trigger_node,
             status: "ok",
             input: &Value::Null,
@@ -260,78 +261,59 @@ fn start(tx: &Tx, f: &FlowInfo, s: &Start, now: i64) -> StartResult<(String, boo
     Ok((id, true))
 }
 
-/// A due time trigger as read before claiming.
-#[derive(Debug, Clone)]
-struct Due {
-    id: String,
-    flow_id: String,
-    node_id: String,
-    cron: String,
-    tz: String,
-    next_at: i64,
-    missed: MissedPolicy,
-}
-
-fn due(c: &Connection, now: i64) -> FlowResult<Vec<i64>> {
-    let mut st = c.prepare_cached("SELECT t.rowid FROM flow_triggers t JOIN flows f ON f.id=t.flow_id WHERE t.kind='time' AND t.enabled=1 AND f.enabled=1 AND f.deleted=0 AND t.next_at IS NOT NULL AND (typeof(t.next_at)<>'integer' OR t.next_at<=?1) ORDER BY t.next_at,t.id LIMIT ?2")?;
-    Ok(st
-        .query_map(params![now, BATCH as i64], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?)
-}
-fn load_due(tx: &Tx, rowid: i64, now: i64) -> FlowResult<Option<Due>> {
-    Ok(tx.query_row("SELECT t.id,t.flow_id,t.node_id,t.cron,t.tz,t.next_at,t.missed FROM flow_triggers t JOIN flows f ON f.id=t.flow_id WHERE t.rowid=?1 AND t.kind='time' AND t.enabled=1 AND f.enabled=1 AND f.deleted=0 AND t.next_at IS NOT NULL AND (typeof(t.next_at)<>'integer' OR t.next_at<=?2)", params![rowid,now], |r| Ok(Due {
-        id:r.get(0)?, flow_id:r.get(1)?, node_id:r.get(2)?, cron:r.get::<_,Option<String>>(3)?.unwrap_or_default(), tz:r.get::<_,Option<String>>(4)?.unwrap_or_default(), next_at:r.get(5)?, missed:MissedPolicy::from_db(r.get::<_,Option<String>>(6)?.as_deref()),
-    })).optional()?)
-}
-
 /// Claims one trigger. `None` = someone else claimed it first (or it is broken and was disabled).
-fn claim(tx: &Tx, d: &Due, now: i64) -> FlowResult<Option<(String, bool)>> {
-    let (Ok(expr), Ok(tz)) = (CronExpr::parse(&d.cron), zone(&d.tz)) else {
-        tracing::error!(trigger = %d.id, cron = %d.cron, tz = %d.tz, "unusable time trigger, disabled");
-        tx.execute("UPDATE flow_triggers SET enabled = 0 WHERE id = ?", [&d.id])?;
+fn claim(
+    w: &mut W<'_>,
+    d: &steve_store::DueTrigger,
+    now: i64,
+) -> FlowResult<Option<(String, bool)>> {
+    let cron = d.cron.as_deref().unwrap_or_default();
+    let tz = d.tz.as_deref().unwrap_or_default();
+    let (Ok(expr), Ok(tz)) = (CronExpr::parse(cron), zone(tz)) else {
+        tracing::error!(trigger = %d.id, cron, tz, "unusable time trigger, disabled");
+        FlowTriggers(w).disable(&d.id)?;
         return Ok(None);
     };
-    let plan = plan_claim(&expr, tz, d.next_at, now, d.missed);
-    let f = match flow_info(tx, &d.flow_id).map_err(crate::FlowError::from) {
+    let plan = plan_claim(
+        &expr,
+        tz,
+        d.next_at,
+        now,
+        MissedPolicy::from_db(d.missed.as_deref()),
+    );
+    let f = match flow_info(w, &d.flow_id).map_err(crate::FlowError::from) {
         Ok(Some(f)) => f,
         Ok(None) => return Ok(None),
         Err(e) if e.status() < 500 => {
             tracing::error!(trigger = %d.id, error = %e, "invalid flow; time trigger disabled");
-            tx.execute("UPDATE flow_triggers SET enabled = 0 WHERE id = ?", [&d.id])?;
+            FlowTriggers(w).disable(&d.id)?;
             return Ok(None);
         }
         Err(e) => return Err(e),
     };
-    let n = tx.execute(
-        "UPDATE flow_triggers SET next_at = ? WHERE id = ? AND next_at = ?",
-        params![plan.next_at_ms, d.id, d.next_at],
-    )?;
-    if n != 1 {
+    if !FlowTriggers(w).advance(&d.id, d.next_at, plan.next_at_ms)? {
         return Ok(None);
     }
     let started = match plan.action {
         ClaimAction::Skip { missed } => {
             let label = plan.action.label().unwrap_or_default();
             let ctx = json!({ "at": plan.at_ms, "trigger": "time", "missed": missed });
-            let id = runs::insert(
-                tx,
-                &NewRun {
-                    ws: &f.ws,
-                    flow_id: &f.id,
-                    flow_version: f.version,
-                    trigger_kind: plan.action.trigger_kind().as_str(),
-                    status: "skipped",
-                    error: None,
-                    outcome_label: &label,
-                    cursor: None,
-                    context: &ctx,
-                    now,
-                },
-            )?;
+            let id = RunRows(w).insert(&NewRun {
+                ws: &f.ws,
+                flow_id: &f.id,
+                flow_version: f.version,
+                trigger_kind: plan.action.trigger_kind().as_str(),
+                status: "skipped",
+                error: None,
+                outcome_label: &label,
+                cursor: None,
+                context: &ctx,
+                now,
+            })?;
             (id, false)
         }
         ClaimAction::CatchUp { late_ms, missed } => start(
-            tx,
+            w,
             &f,
             &Start {
                 kind: TriggerKind::CatchUp,
@@ -342,7 +324,7 @@ fn claim(tx: &Tx, d: &Due, now: i64) -> FlowResult<Option<(String, bool)>> {
             now,
         )?,
         ClaimAction::Run => start(
-            tx,
+            w,
             &f,
             &Start {
                 kind: TriggerKind::Time,
@@ -371,18 +353,21 @@ impl Claims {
 
 pub(crate) fn claim_triggers(cx: &FlowCx, now: i64) -> FlowResult<Claims> {
     let mut out = Claims::default();
-    for rowid in cx.store().reader(|c| due(c, now))? {
-        let key = crate::claim::Key::new("flow_triggers", "id", rowid);
+    let due = cx
+        .store()
+        .read(|r| FlowTriggers(r).due(now, BATCH as u64))?;
+    for locator in due {
         let result = crate::claim::row(
             cx.store(),
-            &key,
+            "flow_triggers",
             now,
-            |tx| match load_due(tx, rowid, now)? {
-                Some(d) => claim(tx, &d, now),
+            |w| FlowTriggers(w).scope_at(locator),
+            |w| match FlowTriggers(w).due_at(locator, now)? {
+                Some(row) => claim(w, &row, now),
                 None => Ok(None),
             },
-            |tx, _| {
-                tx.execute("UPDATE flow_triggers SET enabled=0 WHERE rowid=?", [rowid])?;
+            |w, _| {
+                FlowTriggers(w).disable_at(locator)?;
                 Ok(None)
             },
         );
@@ -397,28 +382,28 @@ pub(crate) fn claim_triggers(cx: &FlowCx, now: i64) -> FlowResult<Claims> {
 
 pub(crate) fn claim_retries(cx: &FlowCx, now: i64) -> FlowResult<Claims> {
     let mut out = Claims::default();
-    for rowid in cx.store().reader(|c| runs::due_retries(c, now))? {
-        let key = crate::claim::Key::new("flow_runs", "id", rowid);
-        let result = crate::claim::row(
-            cx.store(),
-            &key,
-            now,
-            |tx| {
-                let row:Option<(String,i64)>=tx.query_row("SELECT id,retry_at FROM flow_runs WHERE rowid=?1 AND status='waiting' AND retry_at IS NOT NULL AND (typeof(retry_at)<>'integer' OR retry_at<=?2)",params![rowid,now],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-                let Some((id, at)) = row else { return Ok(None) };
-                Ok(runs::claim_retry(tx, &id, at, now)?.then_some(id))
-            },
-            |tx, error| {
-                let id: String =
-                    tx.query_row("SELECT id FROM flow_runs WHERE rowid=?", [rowid], |r| {
-                        r.get(0)
-                    })?;
-                Ok(
-                    runs::fail_due(tx, &id, now, &format!("Retry claim failed: {error}"))?
-                        .then_some(id),
-                )
-            },
-        );
+    let due = cx
+        .store()
+        .read(|r| steve_store::RunRows(r).due_retries(now, BATCH as u64))?;
+    for (id, ws) in due {
+        let result = cx.store().write(|w| -> FlowResult<_> {
+            let attempted = w
+                .scope(|w| steve_store::RunRows(w).claim_retry(&id, now, super::exec::MAX_RETRIES));
+            let changed = match attempted {
+                Ok(changed) => changed,
+                Err(error) if error.is_storage_failure() => return Err(error.into()),
+                Err(error) => {
+                    let changed = steve_store::RunRows(w).fail_due(
+                        &id,
+                        now,
+                        &format!("Retry claim failed: {error}"),
+                    )?;
+                    crate::claim::record_failure(w, "flow_runs", &ws, &id, &error, now);
+                    changed
+                }
+            };
+            Ok(changed.then_some(id))
+        });
         match result {
             Ok(Some(id)) => out.ids.push(id),
             Ok(None) => {}
@@ -432,23 +417,23 @@ pub(crate) fn claim_retries(cx: &FlowCx, now: i64) -> FlowResult<Claims> {
 /// Returns the run id and whether it was started (`false` = written as skipped).
 pub fn start_manual(cx: &FlowCx, ws: &str, flow_id: &str) -> FlowResult<(String, bool)> {
     cx.store()
-        .transaction(|tx| start_manual_in(tx, ws, flow_id, cx.now()).map_err(Into::into))
+        .write(|w| start_manual_in(w, ws, flow_id, cx.now()).map_err(Into::into))
 }
 
-fn start_manual_in(tx: &Tx, ws: &str, flow_id: &str, now: i64) -> StartResult<(String, bool)> {
-    let f = flow_info(tx, flow_id)?
+fn start_manual_in(
+    w: &mut W<'_>,
+    ws: &str,
+    flow_id: &str,
+    now: i64,
+) -> StartResult<(String, bool)> {
+    let f = flow_info(w, flow_id)?
         .filter(|f| f.ws == ws)
         .ok_or_else(|| StartError::Row(ApiError::not_found("定时任务")))?;
-    let trigger: String = tx
-        .query_row(
-            "SELECT node_id FROM flow_triggers WHERE flow_id = ? AND kind = 'time' LIMIT 1",
-            [flow_id],
-            |r| r.get(0),
-        )
-        .optional()?
+    let trigger = FlowTriggers(w)
+        .time_node(flow_id)?
         .unwrap_or_else(|| "t".into());
     start(
-        tx,
+        w,
         &f,
         &Start {
             kind: TriggerKind::Manual,
@@ -462,21 +447,16 @@ fn start_manual_in(tx: &Tx, ws: &str, flow_id: &str, now: i64) -> StartResult<(S
 
 /// Schedule.updated is an existing strictly increasing edit revision, not wall-clock precision.
 /// Notification contents and ordinary run history never change this configuration identity.
-pub fn startup_revision(c: &Connection, ws: &str, id: &str) -> FlowResult<Option<Value>> {
-    let Some(s) = crate::schedules::get(c, ws, id)? else {
+pub fn startup_revision(r: &mut impl Read, ws: &str, id: &str) -> FlowResult<Option<Value>> {
+    let Some(schedule) = steve_store::Schedules(r).live(ws, id)? else {
         return Ok(None);
     };
-    let bot_revision: Option<i64> = c
-        .query_row(
-            "SELECT revision FROM bots WHERE id=? AND deleted=0",
-            [&s.spec.bot],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(Some(
-        json!({"workspace":ws,"flow":id,"flow_version":s.version,"flow_updated":s.updated,
-        "bot":s.spec.bot,"bot_revision":bot_revision}),
-    ))
+    let spec: crate::schedules::Spec = serde_json::from_value(schedule.spec)?;
+    let bot_revision = steve_store::BotRows(r).revision(&spec.bot)?;
+    Ok(Some(json!({
+        "workspace": ws, "flow": id, "flow_version": schedule.version, "flow_updated": schedule.updated,
+        "bot": spec.bot, "bot_revision": bot_revision,
+    })))
 }
 
 /// Queue-driven starts share ordinary manual execution. Recheck authorization and configuration
@@ -488,34 +468,31 @@ pub fn start_from_source(
     source: &str,
     limit: i64,
     now: i64,
-    ready: impl FnOnce(&Connection) -> FlowResult<bool>,
+    ready: impl FnOnce(&mut W<'_>) -> FlowResult<bool>,
 ) -> steve_store::Result<Option<(String, bool)>> {
-    cx.store().transaction(|tx| {
-        if !ready(tx).map_err(source_error)? {
+    cx.store().write(|w| {
+        if !ready(w).map_err(source_error)? {
             return Ok(None);
         }
-        let Some(revision) = startup_revision(tx, ws, id).map_err(source_error)? else {
+        let Some(revision) = startup_revision(w, ws, id).map_err(source_error)? else {
             return Ok(None);
         };
-        let state = runs::startup_state(tx, ws, id, source, &revision).map_err(source_error)?;
+        let state = runs::startup_state(w, ws, id, source, &revision).map_err(source_error)?;
         if state.is_some_and(|s| s.state == runs::StartupStatus::Dead) {
             return Ok(None);
         }
         // Store's nested transaction is a savepoint: no partial attempt/events survive rejection.
-        match cx
-            .store()
-            .transaction(|attempt| start_manual_in(attempt, ws, id, now))
-        {
+        match w.scope(|w| start_manual_in(w, ws, id, now)) {
             Ok((run, go)) => {
                 if go {
-                    runs::record_started(tx, &run, source, &revision, limit)
+                    runs::record_started(w, &run, source, &revision, limit)
                         .map_err(source_error)?;
                 }
                 Ok(Some((run, go)))
             }
             Err(StartError::Row(error)) => {
                 runs::record_start_rejection(
-                    tx,
+                    w,
                     &runs::FailedStart {
                         ws,
                         flow_id: id,
@@ -564,21 +541,15 @@ pub fn spawn_drive(
 /// replayed but marked failed. Returns how many.
 pub fn recover(cx: &FlowCx) -> FlowResult<usize> {
     let now = cx.now();
-    cx.store().transaction(|tx| {
-        let ids: Vec<String> = {
-            let mut st = tx.prepare(
-                "SELECT r.id FROM flow_runs r JOIN flows f ON f.id = r.flow_id WHERE f.kind = 'schedule' AND r.status = 'running'",
-            )?;
-            st.query_map([], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        };
+    cx.store().write(|w| {
+        let ids = RunRows(w).interrupted(true)?;
         for id in &ids {
-            if let Some(mut r) = runs::get(tx, id)? {
+            if let Some(mut r) = RunRows(w).get(id)? {
                 r.status = "failed".into();
                 r.error = Some(INTERRUPTED.into());
                 r.outcome_label = INTERRUPTED.into();
                 r.ended = Some(now);
-                runs::save(tx, &r)?;
+                RunRows(w).save(&r)?;
             }
         }
         Ok(ids.len())
@@ -649,11 +620,11 @@ async fn run_ready<S: steve_runtime::due::DueSource>(
 }
 fn next(
     cx: Arc<FlowCx>,
-    sql: &'static str,
+    deadline: impl FnOnce(&mut R<'_>, i64) -> steve_store::Result<Option<i64>> + Send + 'static,
 ) -> impl std::future::Future<Output = Result<Option<i64>, steve_runtime::due::DueError>> + Send {
     async move {
         let now = cx.now();
-        cx.blocking(move |s| s.reader(|c| Ok(c.query_row(sql, [now], |r| r.get(0))?)))
+        cx.blocking(move |s| Ok(s.read(|r| deadline(r, now))?))
             .await
             .map_err(|e| steve_runtime::due::DueError(e.to_string()))
     }
@@ -734,10 +705,7 @@ impl steve_runtime::due::DueSource for Triggers {
         &self,
     ) -> impl std::future::Future<Output = Result<Option<i64>, steve_runtime::due::DueError>> + Send
     {
-        next(
-            self.cx.clone(),
-            "SELECT min(CASE WHEN typeof(t.next_at)='integer' THEN t.next_at ELSE ?1 END) FROM flow_triggers t JOIN flows f ON f.id=t.flow_id WHERE t.kind='time' AND t.enabled=1 AND f.enabled=1 AND f.deleted=0 AND t.next_at IS NOT NULL",
-        )
+        next(self.cx.clone(), |r, now| FlowTriggers(r).next_deadline(now))
     }
     fn run_due(
         &self,
@@ -754,10 +722,7 @@ impl steve_runtime::due::DueSource for Waits {
         &self,
     ) -> impl std::future::Future<Output = Result<Option<i64>, steve_runtime::due::DueError>> + Send
     {
-        next(
-            self.cx.clone(),
-            "SELECT min(CASE WHEN typeof(w.until)='integer' THEN w.until ELSE ?1 END) FROM flow_waits w JOIN flow_runs r ON r.id=w.run_id WHERE r.status='waiting' AND w.until IS NOT NULL AND w.mode IN ('delay','until','event')",
-        )
+        next(self.cx.clone(), |r, now| FlowWaits(r).next_deadline(now))
     }
     fn run_due(
         &self,
@@ -779,10 +744,7 @@ impl steve_runtime::due::DueSource for Retries {
         &self,
     ) -> impl std::future::Future<Output = Result<Option<i64>, steve_runtime::due::DueError>> + Send
     {
-        next(
-            self.cx.clone(),
-            "SELECT min(CASE WHEN typeof(retry_at)='integer' THEN retry_at ELSE ?1 END) FROM flow_runs WHERE status='waiting' AND retry_at IS NOT NULL",
-        )
+        next(self.cx.clone(), |r, now| RunRows(r).next_retry(now))
     }
     fn run_due(
         &self,

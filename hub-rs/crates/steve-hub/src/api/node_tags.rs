@@ -76,9 +76,9 @@ pub async fn set_item(
 ) -> Result<Json<Value>, ApiError> {
     let s = store(&st)?;
     let ok = tokio::task::spawn_blocking(move || {
-        s.transaction(|tx| {
+        s.write(|w| {
             steve_store::nodes::set_item_tag(
-                tx,
+                w,
                 &item,
                 b.tag.as_deref().filter(|t| !t.trim().is_empty()),
             )

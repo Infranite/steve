@@ -66,7 +66,6 @@ pub use service::{
     AdapterOut, CALLBACK_PATH, Connected, ConnectionOut, ConnectionUsage, Connections,
     ConnectionsBuilder, ConnectionsConfig, DeviceOut, EXTRA_SCOPES, HealthOut, REAUTH_OPTIONS,
     SUBJECT, Usage, UsageRef, WAITING, WriteRefusal, error_location, may_write, may_write_in,
-    may_write_source,
 };
 
 use crate::Registry;

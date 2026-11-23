@@ -19,10 +19,9 @@ use async_trait::async_trait;
 use serde_json::{Map, Value, json};
 use steve_modules::Tier;
 use steve_modules::changes::first_json;
-pub use steve_store::bots::BotInfo;
 
 use super::{NodeKind, NodeOutcome, Rule, RunCx, one_of, opt_str, req_str, str_list};
-use crate::FlowResult;
+use steve_store::{BotRows, FlowSources, Read};
 
 /// The node kind's name.
 pub const KIND: &str = "bot";
@@ -46,28 +45,29 @@ const REASON_MAX: usize = 200;
 #[derive(Debug, Default, Clone, Copy)]
 pub struct BotNode;
 
-/// Configured bot, else the source's triage bot, else the main bot (`None`: the workspace has none).
+pub use steve_store::BotPrompt as BotInfo;
+
+/// Configured bot, else the source's triage bot, else the main bot.
 pub fn pick_bot(
-    c: &mut impl steve_store::Read,
+    c: &mut impl Read,
     ws: &str,
     configured: Option<&str>,
     event: &Value,
-) -> FlowResult<Option<BotInfo>> {
+) -> steve_store::Result<Option<BotInfo>> {
     let triage = match event["connection_id"].as_str() {
-        Some(conn) => steve_store::flow_repo::source_triage_bot(c, ws, conn)?,
+        Some(conn) => FlowSources(c).triage(ws, conn)?,
         None => None,
     };
-    let want = configured
+    let wanted = configured
         .map(str::trim)
-        .filter(|b| !b.is_empty())
-        .map(String::from)
-        .or(triage);
-    if let Some(w) = want
-        && let Some(b) = steve_store::bots::for_judgement(c, ws, Some(&w))?
+        .filter(|name| !name.is_empty())
+        .or(triage.as_deref());
+    if let Some(name) = wanted
+        && let Some(bot) = BotRows(c).enabled_prompt(ws, name)?
     {
-        return Ok(Some(b));
+        return Ok(Some(bot));
     }
-    Ok(steve_store::bots::for_judgement(c, ws, None)?)
+    BotRows(c).main_prompt(ws)
 }
 
 /// The branches: the configured ones, else the labels of the node's edges.

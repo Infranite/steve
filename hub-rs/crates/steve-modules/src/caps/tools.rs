@@ -18,8 +18,11 @@ use axum::Json;
 use axum::extract::{Path, State};
 use regex::Regex;
 use serde_json::{Value, json};
-use steve_store::caps::tools as repo;
-use steve_store::{base, now};
+use steve_store::caps::{
+    Assignments,
+    tools::{self as repo, ToolRows},
+};
+use steve_store::now;
 
 use super::{Capabilities, own_bot};
 use crate::vault::{VaultError, VaultResult};
@@ -54,13 +57,13 @@ static TOOL_NAME: LazyLock<Regex> =
 impl Capabilities {
     /// The Bot's core tools, pins and usage.
     pub fn bot_tools(&self, ws: &str, bot: &str) -> VaultResult<Value> {
-        self.vault.store().reader(|c| {
+        self.read(|c| {
             own_bot(c, ws, bot)?;
             let today = repo::day_of(now());
             Ok::<_, VaultError>(json!({
                 "core": CORE,
-                "pins": repo::pins(c, bot)?,
-                "usage": repo::usage(c, bot, today, USAGE_DAYS)?,
+                "pins": ToolRows(c).pins(bot)?,
+                "usage": ToolRows(c).usage(bot, today, USAGE_DAYS)?,
                 "days": USAGE_DAYS,
             }))
         })
@@ -76,7 +79,7 @@ impl Capabilities {
         target: &str,
         on: bool,
     ) -> VaultResult<Value> {
-        self.vault.store().transaction(|tx| {
+        self.vault.store().write(|tx| {
             own_bot(tx, ws, bot)?;
             if !repo::PIN_KINDS.contains(&kind) {
                 return Err(ApiError::invalid("kind").into());
@@ -90,7 +93,7 @@ impl Capabilities {
                 }
                 _ => {
                     let (entry_ws, name) = super::entry_of(tx, kind, target)?;
-                    let used = steve_store::caps::is_enabled(tx, bot, kind, target)?;
+                    let used = Assignments(tx).is_enabled(bot, kind, target)?;
                     if entry_ws != ws || (on && !used) {
                         return Err(ApiError::not_found(super::noun(kind)).into());
                     }
@@ -98,7 +101,7 @@ impl Capabilities {
                 }
             };
             if on && !CORE.contains(&target) {
-                let pins = repo::pins(tx, bot)?;
+                let pins = ToolRows(tx).pins(bot)?;
                 let known = pins.iter().any(|p| p.kind == kind && p.target == target);
                 if !known && pins.len() >= MAX_PINS {
                     return Err(ApiError::rule(steve_i18n::t!(
@@ -110,19 +113,19 @@ impl Capabilities {
             }
             // a core tool is loaded anyway: nothing to keep
             let changed =
-                !CORE.contains(&target) && repo::set_pin(tx, bot, kind, target, on, now())?;
+                !CORE.contains(&target) && ToolRows(tx).set_pin(bot, kind, target, on, now())?;
             if changed {
-                base::audit(
-                    tx,
+                tx.audit(
                     ws,
                     me,
                     if on { "bot_tool.pin" } else { "bot_tool.unpin" },
                     target,
                     &json!({"bot": bot, "kind": kind, "name": name}),
                 )?;
-                tx.publish(steve_types::DomainEvent::from(
+                let home = super::bot_workspace(tx, bot)?;
+                tx.emit(steve_types::DomainEvent::from(
                     steve_types::ConfigEvent::Bot {
-                        ws: super::bot_workspace(tx, bot)?.into(),
+                        ws: home.into(),
                         id: {
                             let value: String = bot.into();
                             steve_types::BotId::from(value)

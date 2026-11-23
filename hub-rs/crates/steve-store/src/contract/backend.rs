@@ -1,7 +1,10 @@
 //! What a database must do for the store. Everything above this module (transactions, scopes,
 //! events, repositories, SQL) is written once; a backend only runs what the core rendered.
 
-use sea_query::{Expr, Query, QueryStatementWriter, SelectStatement, SqliteQueryBuilder, Values};
+use sea_query::{
+    Expr, ExprTrait, Func, FunctionCall, Query, QueryStatementWriter, SelectStatement,
+    SqliteQueryBuilder, Value, Values,
+};
 
 use crate::{Result, StoreError};
 
@@ -13,28 +16,164 @@ pub enum Dialect {
 
 impl Dialect {
     /// The statement as this database writes it, with its values to bind.
-    pub(crate) fn render<S: QueryStatementWriter>(self, s: &S) -> (String, Values) {
-        match self {
+    pub(crate) fn render<S: QueryStatementWriter>(self, s: &S) -> Result<(String, Values)> {
+        let (sql, mut values) = match self {
             Dialect::Sqlite => s.build(SqliteQueryBuilder),
+        };
+        // sea-query binds LIMIT and OFFSET as unsigned values. Drivers only receive BIGINTs.
+        for value in &mut values.0 {
+            if let Value::BigUnsigned(n) = value {
+                let n = n
+                    .map(i64::try_from)
+                    .transpose()
+                    .map_err(|_| StoreError::Rejected("SQL parameter exceeds BIGINT".into()))?;
+                *value = Value::BigInt(n);
+            }
+        }
+        Ok((sql, values))
+    }
+
+    pub(crate) fn fulltext_match(self, table: &'static str, text: &str) -> Expr {
+        match self {
+            Dialect::Sqlite => {
+                Expr::cust_with_exprs("? MATCH ?", [Expr::col(table), Expr::value(text)])
+            }
+        }
+    }
+
+    pub(crate) fn fulltext_score(self, table: &'static str) -> FunctionCall {
+        match self {
+            Dialect::Sqlite => Func::cust("bm25").arg(Expr::col(table)),
+        }
+    }
+
+    pub(crate) fn contains(self, text: Expr, needle: Expr) -> Expr {
+        match self {
+            Self::Sqlite => Func::cust("instr")
+                .args([text, needle])
+                .gt(Expr::Constant(0_i64.into())),
+        }
+    }
+
+    pub(crate) fn knowledge_score(self) -> Expr {
+        match self {
+            Self::Sqlite => Expr::cust("bm25(kb_fts, 1.0, 2.0)"),
+        }
+    }
+
+    pub(crate) fn local_date(self, ms: Expr) -> Expr {
+        match self {
+            Dialect::Sqlite => Expr::cust_with_expr("date(? / 1000, 'unixepoch', 'localtime')", ms),
+        }
+    }
+
+    pub(crate) fn erased_blob(self, column: &'static str) -> Expr {
+        match self {
+            Self::Sqlite => Func::cust("zeroblob")
+                .arg(Func::cust("length").arg(Expr::col(column)))
+                .into(),
+        }
+    }
+
+    pub(crate) fn json_valid(self, json: Expr) -> Expr {
+        match self {
+            Dialect::Sqlite => Func::cust("json_valid").arg(json).into(),
+        }
+    }
+
+    pub(crate) fn json_field(self, json: Expr, field: &'static str) -> Expr {
+        self.json_path(json, format!("$.{field}"))
+    }
+
+    pub(crate) fn json_path(self, json: Expr, path: impl Into<String>) -> Expr {
+        match self {
+            Dialect::Sqlite => Func::cust("json_extract")
+                .arg(json)
+                .arg(Expr::Constant(path.into().into()))
+                .into(),
+        }
+    }
+
+    pub(crate) fn json_type(self, json: Expr, path: &'static str) -> Expr {
+        match self {
+            Self::Sqlite => Func::cust("json_type")
+                .arg(json)
+                .arg(Expr::Constant(path.into()))
+                .into(),
+        }
+    }
+
+    pub(crate) fn greatest(self, a: Expr, b: Expr) -> Expr {
+        match self {
+            Dialect::Sqlite => Func::cust("max").args([a, b]).into(),
+        }
+    }
+
+    pub(crate) fn least(self, a: Expr, b: Expr) -> Expr {
+        match self {
+            Self::Sqlite => Func::cust("min").args([a, b]).into(),
+        }
+    }
+
+    pub(crate) fn insertion_order(self, alias: Option<&'static str>) -> Expr {
+        match (self, alias) {
+            (Self::Sqlite, Some(alias)) => Expr::col((alias, "rowid")),
+            (Self::Sqlite, None) => Expr::col("rowid"),
+        }
+    }
+
+    pub(crate) fn invalid_integer_columns(
+        self,
+        required: &'static str,
+        optional: &[&'static str],
+    ) -> sea_query::Condition {
+        match self {
+            Self::Sqlite => {
+                let invalid = |column| self.invalid_integer(Expr::col(column));
+                optional.iter().fold(
+                    sea_query::Cond::any().add(invalid(required)),
+                    |cond, &column| {
+                        cond.add(
+                            sea_query::Cond::all()
+                                .add(Expr::col(column).is_not_null())
+                                .add(invalid(column)),
+                        )
+                    },
+                )
+            }
+        }
+    }
+
+    pub(crate) fn invalid_integer(self, value: Expr) -> Expr {
+        match self {
+            Self::Sqlite => self
+                .storage_type(value)
+                .ne(Expr::Constant("integer".into())),
+        }
+    }
+
+    pub(crate) fn storage_type(self, value: Expr) -> Expr {
+        match self {
+            Self::Sqlite => Func::cust("typeof").arg(value).into(),
+        }
+    }
+
+    pub(crate) fn null_safe_eq(self, a: Expr, b: Expr) -> Expr {
+        match self {
+            Dialect::Sqlite => Expr::cust_with_exprs("? IS ?", [a, b]),
+        }
+    }
+
+    /// Table function whose `value` column contains each element.
+    pub(crate) fn json_array_elements(self, array: Expr) -> FunctionCall {
+        match self {
+            Dialect::Sqlite => Func::cust("json_each").arg(array),
         }
     }
 
     pub(crate) fn ascii_nocase(self, expr: Expr) -> Expr {
         match self {
             Dialect::Sqlite => Expr::cust_with_expr("(? COLLATE NOCASE)", expr),
-        }
-    }
-
-    /// The database's insertion order for records with the same timestamp.
-    pub(crate) fn insertion_order(self, table: &'static str) -> Expr {
-        match self {
-            Dialect::Sqlite => Expr::col((table, "rowid")),
-        }
-    }
-
-    pub(crate) fn json_field(self, column: Expr, key: &'static str) -> Expr {
-        match self {
-            Dialect::Sqlite => Expr::cust_with_expr(format!("json_extract(?, '$.{key}')"), column),
         }
     }
 
@@ -49,12 +188,6 @@ impl Dialect {
     pub(crate) fn json_merge_patch(self, column: Expr, patch: Expr) -> Expr {
         match self {
             Dialect::Sqlite => Expr::cust_with_exprs("json_patch(?, ?)", [column, patch]),
-        }
-    }
-
-    pub(crate) fn greatest(self, a: Expr, b: Expr) -> Expr {
-        match self {
-            Dialect::Sqlite => Expr::cust_with_exprs("max(?, ?)", [a, b]),
         }
     }
 
@@ -135,6 +268,7 @@ pub enum Col<'a> {
     Int(i64),
     Real(f64),
     Text(&'a str),
+    Blob(&'a [u8]),
 }
 
 impl Row<'_> {
@@ -193,6 +327,15 @@ impl FromCol for String {
         match c {
             Col::Text(v) => Ok(v.to_owned()),
             _ => Err(wrong("text")),
+        }
+    }
+}
+
+impl FromCol for Vec<u8> {
+    fn from_col(column: Col<'_>) -> Result<Self> {
+        match column {
+            Col::Blob(bytes) => Ok(bytes.to_vec()),
+            _ => Err(wrong("a blob")),
         }
     }
 }

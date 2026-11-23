@@ -2,15 +2,14 @@
 //! `never` memories never returned, source scope changes reach the index, deleted memories leave
 //! it, old Bot memories become searchable after a sync; plus the REST shapes and error codes.
 
-use std::sync::{Arc, Mutex};
+use steve_store::testkit::knowledge as fixture;
 
 use axum::Router;
 use serde_json::{Value, json};
+use steve_knowledge::Knowledge;
 use steve_knowledge::index;
-use steve_knowledge::repo;
 use steve_knowledge::retrieve::{Purpose, Query, anchor_mems, retrieve};
 use steve_knowledge::sync;
-use steve_knowledge::{KbEvent, Knowledge};
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, caller};
 use steve_store::StoreError;
 use steve_store::base::mems::{self, NewMem};
@@ -20,21 +19,13 @@ struct Env {
     env: TestEnv,
     kb: Knowledge,
     app: Router,
-    events: Arc<Mutex<Vec<KbEvent>>>,
 }
 
 fn setup() -> Env {
     let env = TestEnv::new(|_| {});
-    let events: Arc<Mutex<Vec<KbEvent>>> = Arc::default();
-    let sink = events.clone();
-    let kb = Knowledge::new(move |e| sink.lock().unwrap().push(e));
+    let kb = Knowledge::bare();
     let app = steve_knowledge::routes(kb.clone()).with_state(env.modules.clone());
-    Env {
-        env,
-        kb,
-        app,
-        events,
-    }
+    Env { env, kb, app }
 }
 
 /// Percent-encodes a query value.
@@ -50,6 +41,22 @@ fn enc(s: &str) -> String {
 }
 
 impl Env {
+    fn knowledge_events(&self) -> Vec<(String, String)> {
+        self.env
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e.as_domain() {
+                Some(steve_types::DomainEvent::Knowledge(steve_types::KnowledgeEvent::Kb {
+                    id,
+                    ws,
+                })) => Some((id.clone(), ws.to_string())),
+                _ => None,
+            })
+            .collect()
+    }
+
     async fn as_(&self, who: &str, method: &str, path: &str, body: Option<Value>) -> (u16, Value) {
         call(
             &self.app,
@@ -125,17 +132,7 @@ async fn note_is_searchable_right_after_saving() {
     assert_eq!(ids(&e.search(ME, "acm").await), vec![id.to_string()]);
 
     // The search was recorded without text.
-    let uses: (i64, String) = e
-        .env
-        .store()
-        .reader(|c| {
-            Ok::<_, StoreError>(c.query_row(
-                "SELECT COUNT(*), MAX(hits) FROM kb_uses WHERE consumer_type = 'search' AND consumer_id = ?",
-                [ME],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?)
-        })
-        .unwrap();
+    let uses: (i64, String) = fixture::stored_search_hits(e.env.store(), ME).unwrap();
     assert_eq!(uses.0, 3);
     assert!(uses.1.contains(id) && !uses.1.contains("三月"));
 
@@ -153,12 +150,12 @@ async fn note_is_searchable_right_after_saving() {
     let revs = e
         .env
         .store()
-        .reader(|c| steve_store::base::revisions(c, WS, "kb_note", id))
+        .read(|c| steve_store::Revisions(c).count(WS, "kb_note", id))
         .unwrap();
-    assert_eq!(revs.len(), 1);
+    assert_eq!(revs, 1);
     // Only the notes get `kb` events.
-    let evs = e.events.lock().unwrap().clone();
-    assert!(evs.iter().all(|x| x.id == id && x.ws == WS) && evs.len() == 2);
+    let evs = e.knowledge_events();
+    assert!(evs.iter().all(|(doc, ws)| doc == id && ws == WS) && evs.len() == 2);
 
     // Delete: gone from the index and the API.
     let (s, _) = e.me("DELETE", &format!("/kb/docs/{id}"), None).await;
@@ -166,17 +163,7 @@ async fn note_is_searchable_right_after_saving() {
     assert!(e.search(ME, "九月").await.is_empty());
     let (s, v) = e.me("GET", &format!("/kb/docs/{id}"), None).await;
     assert_eq!((s, v["error"].as_str()), (404, Some("没有这个文档")));
-    let left: i64 = e
-        .env
-        .store()
-        .reader(|c| {
-            Ok::<_, StoreError>(c.query_row(
-                "SELECT (SELECT COUNT(*) FROM kb_chunks) + (SELECT COUNT(*) FROM kb_fts WHERE kb_fts MATCH '\"九月\"')",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .unwrap();
+    let left: i64 = fixture::search_index_rows(e.env.store()).unwrap();
     assert_eq!(left, 0);
 }
 
@@ -223,7 +210,7 @@ async fn single_user_reads_private_notes_with_workspace_and_chat_audience_bounda
     let hits = e
         .env
         .store()
-        .reader(|c| {
+        .read(|c| {
             retrieve(
                 c,
                 &Query::new(
@@ -240,17 +227,11 @@ async fn single_user_reads_private_notes_with_workspace_and_chat_audience_bounda
         vec![s]
     );
     // Alone in a workspace, everything of yours.
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute("DELETE FROM workspace_members WHERE user_id = ?", [OTHER])?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::remove_user_memberships(e.env.store(), OTHER).unwrap();
     let hits = e
         .env
         .store()
-        .reader(|c| {
+        .read(|c| {
             retrieve(
                 c,
                 &Query::new(
@@ -347,7 +328,7 @@ async fn deleted_memories_leave_the_index() {
     assert_eq!(e.search(ME, "简短").await.len(), 1);
     e.env
         .store()
-        .transaction(|tx| mems::delete(tx, &id))
+        .write(|tx| steve_store::knowledge::Memories(tx).delete(&id))
         .unwrap();
     // The event path …
     sync::on_event(
@@ -376,7 +357,7 @@ async fn deleted_memories_leave_the_index() {
     assert_eq!(e.search(ME, "咖啡").await.len(), 1);
     e.env
         .store()
-        .transaction(|tx| mems::delete(tx, &id2))
+        .write(|tx| steve_store::knowledge::Memories(tx).delete(&id2))
         .unwrap();
     sync::sweep(&e.env.modules).unwrap();
     assert!(e.search(ME, "咖啡").await.is_empty());
@@ -385,15 +366,7 @@ async fn deleted_memories_leave_the_index() {
 #[tokio::test]
 async fn memories_name_what_they_are_about_and_anchors_rank_higher() {
     let e = setup();
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "INSERT INTO parties (id, workspace_id, type, name, created_by, created, updated) VALUES ('ct_sarah', 'default', 'contact', 'Sarah Chen', 'usr_dev', 1, 1);",
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::seed_sarah(e.env.store()).unwrap();
     let (s, a) = e
         .me(
             "POST",
@@ -428,7 +401,7 @@ async fn memories_name_what_they_are_about_and_anchors_rank_higher() {
     let hits = e
         .env
         .store()
-        .reader(|c| {
+        .read(|c| {
             let mut q = Query::new(
                 &steve_knowledge::port::SqliteStore,
                 &viewer,
@@ -446,7 +419,7 @@ async fn memories_name_what_they_are_about_and_anchors_rank_higher() {
     let am = e
         .env
         .store()
-        .reader(|c| anchor_mems(c, &viewer, &anchors, 5, steve_store::now()))
+        .read(|c| anchor_mems(c, &viewer, &anchors, 5, steve_store::now()))
         .unwrap();
     assert_eq!(am.len(), 1);
     assert_eq!(am[0].obj_id, a["id"].as_str().unwrap());
@@ -455,7 +428,7 @@ async fn memories_name_what_they_are_about_and_anchors_rank_higher() {
     let am = e
         .env
         .store()
-        .reader(|c| anchor_mems(c, &other, &anchors, 5, steve_store::now()))
+        .read(|c| anchor_mems(c, &other, &anchors, 5, steve_store::now()))
         .unwrap();
     assert_eq!(am.len(), 1);
     assert_eq!(am[0].obj_id, a["id"].as_str().unwrap());
@@ -478,13 +451,14 @@ async fn source_scope_changes_reach_the_index() {
     let src_id = doc["source"]["id"].as_str().unwrap().to_string();
     e.env
         .store()
-        .transaction(|tx| {
-            tx.execute(
-                "UPDATE kb_sources SET level = 'reasoning', visibility = 'workspace' WHERE id = ?",
-                [&src_id],
-            )?;
-            let src = repo::source(tx, &src_id)?.unwrap();
-            index::rescope_source(tx, &src)
+        .write(|w| {
+            let mut source = steve_store::knowledge::Documents(w)
+                .source(&src_id)?
+                .unwrap();
+            source.level = Level::Reasoning;
+            source.visibility = Visibility::Workspace;
+            steve_store::knowledge::Documents(w).update_source(&source, steve_store::now())?;
+            index::rescope_source(w, &source)
         })
         .unwrap();
     let hits = e.search(OTHER, "值班").await;
@@ -532,30 +506,14 @@ async fn source_scope_changes_reach_the_index() {
     assert_eq!(s, 400);
 
     // Paused sources take no part in retrieval.
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute("UPDATE kb_sources SET paused = 1 WHERE id = ?", [&src_id])?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::pause_source(e.env.store(), &src_id).unwrap();
     assert!(e.search(ME, "值班").await.is_empty());
 }
 
 #[tokio::test]
 async fn old_bot_memories_become_searchable() {
     let e = setup();
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute_batch(
-                "INSERT INTO bots (id, workspace_id, name, harness, updated) VALUES ('bot_k1', 'default', '小运', 'claude', 1);
-                 INSERT OR IGNORE INTO bot_workspaces (bot_id, workspace_id, created) VALUES ('bot_k1', 'default', 1);
-                 INSERT INTO bot_memories (id, bot_id, workspace_id, text, source, created) VALUES ('mem_1', 'bot_k1', 'default', '发布前要先跑冒烟测试', 'chat', 1);",
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::seed_bot_memory(e.env.store()).unwrap();
     assert!(e.search(ME, "冒烟测试").await.is_empty());
     // What the 5-minute sweep (or the `bot` bus event) does, triggered directly.
     sync::on_event(
@@ -577,26 +535,11 @@ async fn old_bot_memories_become_searchable() {
     assert_eq!(hits[0]["label"], "小运 的记忆");
     assert_eq!(hits[0]["href"], "#/bots/bot_k1");
     // Edited and deleted in the old table: the sweep follows.
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE bot_memories SET text = '发布前要先跑回归测试' WHERE id = 'mem_1'",
-                [],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::edit_bot_memory(e.env.store()).unwrap();
     sync::sweep(&e.env.modules).unwrap();
     assert!(e.search(ME, "冒烟").await.is_empty());
     assert_eq!(e.search(ME, "回归测试").await.len(), 1);
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute("DELETE FROM bot_memories", [])?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::clear_bot_memories(e.env.store()).unwrap();
     sync::on_event(
         &e.env.modules,
         &steve_types::BusEvent::from(steve_types::DomainEvent::from(
@@ -642,16 +585,7 @@ async fn sources_list_and_doc_rules() {
 
     // Documents that follow an item cannot be deleted on their own.
     let items_src = list[2]["id"].as_str().unwrap().to_string();
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "INSERT INTO kb_docs (id, workspace_id, source_id, ref, title, created_by, created, updated) VALUES ('kd_item', 'default', ?, 'ST-12', '交付：部署脚本', 'usr_dev', 1, 1)",
-                [&items_src],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::seed_item_doc(e.env.store(), &items_src).unwrap();
     let (s, v) = e.me("DELETE", "/kb/docs/kd_item", None).await;
     assert_eq!(s, 400);
     assert_eq!(
@@ -719,30 +653,24 @@ async fn queue_worker_reindexes_documents() {
     let doc = e.note("队列", "第一版内容", json!({})).await;
     let id = doc["id"].as_str().unwrap().to_string();
     // Body changed behind the index's back (as a folder file would); the worker picks it up.
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute("UPDATE kb_docs SET body = '第二版内容' WHERE id = ?", [&id])?;
-            Ok(())
-        })
-        .unwrap();
+    fixture::edit_doc_without_indexing(e.env.store(), &id).unwrap();
     let worker = index::worker(e.env.modules.clone(), e.kb.clone()).unwrap();
     assert!(index::spawn_worker(e.env.modules.clone(), e.kb.clone()).is_none());
-    e.events.lock().unwrap().clear();
+    e.env.events.lock().unwrap().clear();
     e.kb.enqueue(&id);
     assert!(
-        e.events.lock().unwrap().is_empty(),
+        e.knowledge_events().is_empty(),
         "preparing a worker does not run it"
     );
     let handle = tokio::spawn(worker);
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while e.events.lock().unwrap().is_empty() {
+        while e.knowledge_events().is_empty() {
             tokio::task::yield_now().await;
         }
     })
     .await
     .expect("the document queued before startup is indexed");
-    assert_eq!(e.events.lock().unwrap()[0].id, id);
+    assert_eq!(e.knowledge_events()[0].0, id);
     assert_eq!(ids(&e.search(ME, "第二版").await), vec![id.clone()]);
     assert!(e.search(ME, "第一版").await.is_empty());
     handle.abort();
@@ -766,20 +694,11 @@ fn mem_rows_follow_their_memory_scope() {
                     ..Default::default()
                 },
             )?;
-            sync::sync_mem(tx, &m.id, now)?;
+            tx.write(|w| sync::sync_mem(w, &m.id, now))?;
             Ok::<_, StoreError>(m.id)
         })
         .unwrap();
-    let (vis, level): (String, String) = env
-        .store()
-        .reader(|c| {
-            Ok::<_, StoreError>(c.query_row(
-                "SELECT visibility, level FROM kb_chunks WHERE obj_type = 'mem' AND obj_id = ?",
-                [&id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?)
-        })
-        .unwrap();
+    let (vis, level): (String, String) = fixture::memory_chunk_scope(env.store(), &id).unwrap();
     assert_eq!((vis.as_str(), level.as_str()), ("workspace", "reasoning"));
 }
 
@@ -789,9 +708,8 @@ fn mem_source_label_in_the_request_language() {
     let env = TestEnv::new(|_| {});
     let shown = env
         .store()
-        .transaction(|tx| {
-            let m = mems::create(
-                tx,
+        .write(|tx| {
+            let m = steve_store::knowledge::Memories(tx).create(
                 WS,
                 &NewMem {
                     text: "周会改到周二".into(),
@@ -830,7 +748,7 @@ impl steve_knowledge::port::KnowledgeStore for Leaky {
     }
     fn search(
         &self,
-        _: &rusqlite::Connection,
+        _: &mut steve_store::R<'_>,
         _: &steve_knowledge::port::Scope,
         _: &str,
         pass: steve_knowledge::port::Pass,
@@ -873,7 +791,7 @@ async fn single_user_second_filter_admits_other_creators_but_drops_never() {
     let hits = e
         .env
         .store()
-        .reader(|c| retrieve(c, &Query::new(&Leaky, &viewer, "部署", Purpose::Search)))
+        .read(|c| retrieve(c, &Query::new(&Leaky, &viewer, "部署", Purpose::Search)))
         .unwrap();
     let mut ids: Vec<_> = hits.iter().map(|h| h.obj_id.as_str()).collect();
     ids.sort();
@@ -883,19 +801,7 @@ async fn single_user_second_filter_admits_other_creators_but_drops_never() {
 #[tokio::test]
 async fn single_user_mail_references_keep_workspace_and_viewer_free_index_boundaries() {
     let e = setup();
-    e.env.store().with_conn(|c| {
-        c.execute_batch("INSERT INTO parties (id, workspace_id, type, name, user_id, created_by, created, updated)
-            VALUES ('mail_owner', 'default', 'person', 'Mail owner', 'usr_other', 'usr_other', 1, 1);
-            INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated)
-            VALUES ('mail_owner_acc', 'default', 'test', 'other', 'mail_owner', 'personal', 'mail-owner', 'Mail owner', 'me', 1, 1);
-            INSERT INTO connections (id, workspace_id, account_id, adapter, auth, created_by, created, updated)
-            VALUES ('mail_conn', 'default', 'mail_owner_acc', 'fixture', 'none', 'usr_other', 1, 1);
-            INSERT INTO mail_threads (id, workspace_id, connection_id, thread_key, subject, visibility, created_by, last_at, created, updated)
-            VALUES ('private_mail', 'default', 'mail_conn', 'private', 'Secret mail subject', 'private', 'usr_other', 1, 1, 1),
-                   ('shared_mail', 'default', 'mail_conn', 'shared', 'Shared mail subject', 'workspace', 'usr_other', 1, 1, 1),
-                   ('foreign_mail', 'w2', 'mail_conn', 'foreign', 'Foreign mail subject', 'workspace', 'usr_other', 1, 1, 1);")?;
-        Ok(())
-    }).unwrap();
+    fixture::seed_mail_threads(e.env.store()).unwrap();
     let about = json!([{"type": "mail_thread", "id": "private_mail"}]);
     let (status, body) = e
         .me(
@@ -985,30 +891,33 @@ async fn single_user_mail_references_keep_workspace_and_viewer_free_index_bounda
 #[test]
 fn single_user_mail_reference_reads_do_not_need_membership_scopes() {
     let e = setup();
-    e.env.store().with_conn(|c| {
-        c.execute_batch("INSERT INTO parties (id, workspace_id, type, name, created_by, created, updated)
-            VALUES ('mail_party', 'default', 'person', 'Mailbox', 'usr_other', 1, 1);
-            INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated)
-            VALUES ('mail_acc', 'default', 'test', 'other', 'mail_party', 'personal', 'mail', 'Mail', 'me', 1, 1);
-            INSERT INTO connections (id, workspace_id, account_id, adapter, auth, created_by, created, updated)
-            VALUES ('scoped_mail_conn', 'default', 'mail_acc', 'fixture', 'none', 'usr_other', 1, 1);
-            INSERT INTO mail_threads (id, workspace_id, connection_id, thread_key, subject, visibility, created_by, last_at, created, updated)
-            VALUES ('team_mail', 'default', 'scoped_mail_conn', 'team', 'Team subject', 'team:team1', 'usr_other', 1, 1, 1),
-                   ('space_mail', 'default', 'scoped_mail_conn', 'space', 'Space subject', 'space:s1', 'usr_other', 1, 1, 1);")?;
-        let bare = Viewer::bare(WS, ME);
-        let scoped = Viewer {
-            scopes: vec!["team:team1".into(), "space:s1".into()],
-            ..bare.clone()
-        };
-        for id in ["team_mail", "space_mail"] {
-            let r = ObjRef::new("mail_thread", id);
-            assert!(repo::ref_exists_for(c, &bare, &r)?);
-            assert!(repo::ref_exists_for(c, &scoped, &r)?);
-            assert!(repo::ref_name_for(c, &bare, &r)?.is_some());
-            assert!(repo::ref_name_for(c, &scoped, &r)?.is_some());
-            // A viewer-free persistent index must not copy source-private subjects.
-            assert!(repo::ref_name(c, &r)?.is_none());
-        }
-        Ok(())
-    }).unwrap();
+    fixture::seed_scoped_mail_threads(e.env.store()).unwrap();
+    e.env
+        .store()
+        .read(|c| {
+            let bare = Viewer::bare(WS, ME);
+            let scoped = Viewer {
+                scopes: vec!["team:team1".into(), "space:s1".into()],
+                ..bare.clone()
+            };
+            for id in ["team_mail", "space_mail"] {
+                let r = ObjRef::new("mail_thread", id);
+                assert!(steve_store::References(c).exists(&bare, &r)?);
+                assert!(steve_store::References(c).exists(&scoped, &r)?);
+                assert!(
+                    steve_store::References(c)
+                        .in_workspace(&bare, &r)?
+                        .is_some()
+                );
+                assert!(
+                    steve_store::References(c)
+                        .in_workspace(&scoped, &r)?
+                        .is_some()
+                );
+                // A viewer-free persistent index must not copy source-private subjects.
+                assert!(steve_store::References(c).name(&r)?.is_none());
+            }
+            Ok::<_, StoreError>(())
+        })
+        .unwrap();
 }

@@ -7,8 +7,8 @@
 //! Adapter calls (`space_info`, `members`) are best effort, as in the inbound pipeline: a failure
 //! falls back to what the event says.
 
-use rusqlite::{OptionalExtension, params};
-use steve_store::Tx;
+use steve_store::channel_spaces::{members as member_repo, registration};
+use steve_store::{Read, Tx};
 
 use crate::channel::{HandleRef, MemberInfo, SpaceEvent, SpaceInfo, SpaceKind};
 use crate::inbound::{ConnFacts, facts_system, identify_with_aliases};
@@ -62,19 +62,16 @@ fn reload(tx: &Tx, id: &str) -> ChannelResult<SpaceRow> {
 
 /// Name, count and external flag from a fresh `space_info` (empty names are not written).
 fn apply_info(tx: &Tx, id: &str, info: &SpaceInfo, now: i64) -> ChannelResult<()> {
-    tx.execute(
-        "UPDATE spaces SET name = CASE WHEN ?1 <> '' THEN ?1 ELSE name END,
-            member_count = CASE WHEN ?2 > 0 THEN ?2 ELSE member_count END, has_external = ?3, updated = ?4
-          WHERE id = ?5",
-        params![
+    Ok(tx.write(|w| {
+        registration::describe(
+            w,
+            id,
             info.name.trim(),
             info.member_count,
-            info.has_external as i64,
+            info.has_external,
             now,
-            id
-        ],
-    )?;
-    Ok(())
+        )
+    })?)
 }
 
 /// Adds identified members; returns how many rows were new.
@@ -107,7 +104,7 @@ fn add_members(
             &label,
             m.role == "bot",
         ) && id.account_id != facts.account_id
-            && spaces::add_member(tx, ws, &space.id, &id.account_id, &m.role, now)?
+            && tx.write(|w| member_repo::add(w, ws, &space.id, &id.account_id, &m.role, now))?
         {
             n += 1;
         }
@@ -116,25 +113,14 @@ fn add_members(
 }
 
 /// The account of a handle already known in `ws` (people leaving are not identified anew).
-fn known_account(
-    c: &rusqlite::Connection,
-    ws: &str,
-    h: &HandleRef,
-) -> ChannelResult<Option<String>> {
+fn known_account(r: &mut impl Read, ws: &str, h: &HandleRef) -> ChannelResult<Option<String>> {
     for x in std::iter::once(&h.handle).chain(h.extra.iter()) {
         let x = x.trim();
         if x.is_empty() {
             continue;
         }
-        let a: Option<String> = c
-            .query_row(
-                "SELECT account_id FROM account_handles WHERE workspace_id = ? AND handle = ?",
-                params![ws, x],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if a.is_some() {
-            return Ok(a);
+        if let Some(account) = steve_store::accounts::by_any_handle(r, ws, x)? {
+            return Ok(Some(account));
         }
     }
     Ok(None)
@@ -215,7 +201,7 @@ impl Channels {
         let store = self.store().clone();
         let facts = self.facts(ws, conn)?;
         let existing =
-            store.reader(|c| spaces::find_as(c, ws, conn, &ext, facts.platform.as_deref()))?;
+            store.read(|r| spaces::find_as(r, ws, conn, &ext, facts.platform.as_deref()))?;
         if existing.is_none() && !matches!(ev, SpaceEvent::Joined { .. }) {
             tracing::debug!(
                 conn,
@@ -299,14 +285,20 @@ impl Channels {
         store
             .transaction(|tx| {
                 let s = existing.ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
-                let status = if archived { "archived" } else { "left" };
-                if tx.execute(
-                    "UPDATE spaces SET status = ?, updated = ? WHERE id = ? AND status <> ?",
-                    params![status, now, s.id, status],
-                )? > 0
-                {
-                    spaces::event(tx, ws, &s.id);
-                }
+                let status = if archived {
+                    registration::State::Archived
+                } else {
+                    registration::State::Left
+                };
+                tx.write(|w| -> steve_store::Result<()> {
+                    if registration::set_state(w, &s.id, status, now)? {
+                        w.emit(steve_types::ChannelsEvent::Space {
+                            id: s.id.clone().into(),
+                            ws: ws.into(),
+                        });
+                    }
+                    Ok(())
+                })?;
                 // nothing left to set up there: an open “新群” card goes away
                 crate::space_decisions::expire_for_space(
                     tx,
@@ -347,18 +339,23 @@ impl Channels {
                         // a newcomer of another organization makes it external whatever
                         // the (possibly older) read says
                         let mut i = i.clone();
-                        i.has_external |= members.iter().any(|m| m.external)
-                            || has_external == Some(true);
+                        i.has_external |=
+                            members.iter().any(|m| m.external) || has_external == Some(true);
                         apply_info(tx, &s.id, &i, now)?
                     }
                     None => {
                         // no fresh count: the provider's flag, else any external newcomer
                         let ext_now = has_external.unwrap_or(s.has_external)
                             || members.iter().any(|m| m.external);
-                        tx.execute(
-                            "UPDATE spaces SET member_count = member_count + ?, has_external = ?, updated = ? WHERE id = ?",
-                            params![n as i64, ext_now as i64, now, s.id],
-                        )?;
+                        tx.write(|w| {
+                            registration::count_members(
+                                w,
+                                &s.id,
+                                registration::MembershipChange::Add(n as i64),
+                                ext_now,
+                                now,
+                            )
+                        })?;
                     }
                 }
                 spaces::event(tx, ws, &s.id);
@@ -391,29 +388,29 @@ impl Channels {
                 let s = existing
                     .as_ref()
                     .ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
-                let mut n = 0;
-                for h in &members {
-                    if let Some(a) = known_account(tx, ws, h)?
-                        && a != facts.account_id
-                    {
-                        n += tx.execute(
-                            "DELETE FROM space_members WHERE space_id = ? AND account_id = ?",
-                            params![s.id, a],
-                        )?;
+                let n = tx.write(|w| -> ChannelResult<usize> {
+                    let mut removed = 0;
+                    for h in &members {
+                        if let Some(account) = known_account(w, ws, h)?
+                            && account != facts.account_id
+                        {
+                            removed += usize::from(member_repo::remove(w, &s.id, &account)?);
+                        }
                     }
-                }
+                    Ok(removed)
+                })?;
                 match &info {
                     Some(i) => apply_info(tx, &s.id, i, now)?,
                     None => {
-                        tx.execute(
-                            "UPDATE spaces SET member_count = max(member_count - ?, 0), has_external = ?, updated = ? WHERE id = ?",
-                            params![
-                                n as i64,
-                                has_external.unwrap_or(s.has_external) as i64,
+                        tx.write(|w| {
+                            registration::count_members(
+                                w,
+                                &s.id,
+                                registration::MembershipChange::Remove(n as i64),
+                                has_external.unwrap_or(s.has_external),
                                 now,
-                                s.id
-                            ],
-                        )?;
+                            )
+                        })?;
                     }
                 }
                 spaces::event(tx, ws, &s.id);
@@ -486,29 +483,28 @@ impl Channels {
             info.member_count
         };
         let has_external = info.has_external || members.iter().any(|m| m.external);
-        let (space, created) = spaces::locate_or_create(
-            tx,
-            &NewSpace {
-                ws,
-                system_id: &system,
-                connection_id: conn,
-                kind: info.kind,
-                external_id: ext,
-                name: &info.name,
-                member_count,
-                has_external,
-                now,
-                platform: facts.platform.as_deref(),
-            },
-        )?;
+        let (space, created) = tx.write(|w| {
+            spaces::locate_or_create(
+                w,
+                &NewSpace {
+                    ws,
+                    system_id: &system,
+                    connection_id: conn,
+                    kind: info.kind,
+                    external_id: ext,
+                    name: &info.name,
+                    member_count,
+                    has_external,
+                    now,
+                    platform: facts.platform.as_deref(),
+                },
+            )
+        })?;
         let mut rejoined = false;
         if !created {
             // added back after leaving (or a space first seen through a message): refresh it
             rejoined = space.status != "active";
-            tx.execute(
-                "UPDATE spaces SET status = 'active', updated = ? WHERE id = ?",
-                params![now, space.id],
-            )?;
+            tx.write(|w| registration::set_state(w, &space.id, registration::State::Active, now))?;
             apply_info(
                 tx,
                 &space.id,
@@ -521,7 +517,7 @@ impl Channels {
                 now,
             )?;
         }
-        spaces::add_member(tx, ws, &space.id, &facts.account_id, "bot", now)?;
+        tx.write(|w| member_repo::add(w, ws, &space.id, &facts.account_id, "bot", now))?;
         let n = add_members(tx, ws, conn, facts, &space, members, now)?;
         let space = reload(tx, &space.id)?;
         let mut decision_id = None;
@@ -566,23 +562,25 @@ impl Channels {
                 if ext.trim().is_empty() {
                     continue;
                 }
-                let (s, created) = spaces::locate_or_create(
-                    tx,
-                    &NewSpace {
-                        ws,
-                        system_id: &system,
-                        connection_id: conn,
-                        kind: info.kind,
-                        external_id: ext,
-                        name: &info.name,
-                        member_count: info.member_count,
-                        has_external: info.has_external,
-                        now,
-                        platform: facts.platform.as_deref(),
-                    },
-                )?;
+                let (s, created) = tx.write(|w| {
+                    spaces::locate_or_create(
+                        w,
+                        &NewSpace {
+                            ws,
+                            system_id: &system,
+                            connection_id: conn,
+                            kind: info.kind,
+                            external_id: ext,
+                            name: &info.name,
+                            member_count: info.member_count,
+                            has_external: info.has_external,
+                            now,
+                            platform: facts.platform.as_deref(),
+                        },
+                    )
+                })?;
                 if created {
-                    spaces::add_member(tx, ws, &s.id, &facts.account_id, "bot", now)?;
+                    tx.write(|w| member_repo::add(w, ws, &s.id, &facts.account_id, "bot", now))?;
                     n += 1;
                 }
             }

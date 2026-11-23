@@ -34,9 +34,7 @@ fn close(h: &TestEnv, ws: &str, user: &str, conv: &str, closed: bool) -> ApiResu
         .transaction(|c| conversations::set_closed(c, ws, &Viewer::bare(ws, user), conv, closed))
 }
 fn list(h: &TestEnv, ws: &str, user: &str) -> Vec<Value> {
-    h.store()
-        .reader(|c| conversations::list(c, ws, &Viewer::bare(ws, user)))
-        .unwrap()
+    conversations::list(h.store(), ws, &Viewer::bare(ws, user)).unwrap()
 }
 
 #[test]
@@ -49,9 +47,11 @@ fn closure_is_persistent_personal_reversible_and_does_not_change_history() {
     assert_eq!(list(&h, WS, ME)[0]["closed"], true);
     assert_eq!(list(&h, WS, OTHER)[0]["closed"], false);
     // Independent connection sees durable state, not process memory.
-    let c = rusqlite::Connection::open(h.dir.path().join("steve.sqlite3")).unwrap();
+    let path = h.dir.path().join("steve.sqlite3");
+    let readback = steve_store::Store::open(&path, steve_store::NoPublisher).unwrap();
+    let c = rusqlite::Connection::open(path).unwrap();
     assert_eq!(
-        conversations::list(&c, WS, &Viewer::bare(WS, ME)).unwrap()[0]["closed"],
+        conversations::list(&readback, WS, &Viewer::bare(WS, ME)).unwrap()[0]["closed"],
         true
     );
     let state: (String, String) = c.query_row("SELECT s.status, m.text FROM spaces s JOIN messages m ON m.space = 'chan:' || s.id WHERE s.id = 'shared-space'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
@@ -78,11 +78,7 @@ fn single_user_preferences_keep_workspace_and_membership_checks() {
     assert!(close(&h, WS2, ME, "chan:private-space", true).is_err());
     assert!(close(&h, WS, ME, "steve", true).is_err());
     assert!(close(&h, WS, ME, "chan:missing", true).is_err());
-    assert!(
-        h.store()
-            .reader(|c| conversations::list(c, WS, &Viewer::bare(WS2, ME)))
-            .is_err()
-    );
+    assert!(conversations::list(h.store(), WS, &Viewer::bare(WS2, ME)).is_err());
     close(&h, WS, ME, "chan:private-space", true).unwrap();
     h.store()
         .with_conn(|c| {
@@ -94,11 +90,7 @@ fn single_user_preferences_keep_workspace_and_membership_checks() {
         })
         .unwrap();
     assert!(close(&h, WS, ME, "chan:private-space", false).is_err());
-    assert!(
-        h.store()
-            .reader(|c| conversations::list(c, WS, &Viewer::bare(WS, ME)))
-            .is_err()
-    );
+    assert!(conversations::list(h.store(), WS, &Viewer::bare(WS, ME)).is_err());
 }
 
 #[test]
@@ -114,9 +106,7 @@ fn single_user_pagination_includes_shared_and_personal_conversations() {
     assert_eq!(list(&h, WS, OTHER).len(), 420);
     close(&h, WS, OTHER, "chan:shared-214", true).unwrap();
     let page = |q: ListQuery| {
-        h.store()
-            .reader(|c| conversations::list_page(c, WS, &Viewer::bare(WS, OTHER), &q, 1))
-            .unwrap()
+        conversations::list_page(h.store(), WS, &Viewer::bare(WS, OTHER), &q, 1).unwrap()
     };
     let mut all = Vec::new();
     let mut offset = 0;
@@ -211,11 +201,7 @@ fn invalid_query_is_rejected() {
             ..Default::default()
         },
     ] {
-        assert!(
-            h.store()
-                .reader(|c| conversations::list_page(c, WS, &Viewer::bare(WS, ME), &q, 1))
-                .is_err()
-        );
+        assert!(conversations::list_page(h.store(), WS, &Viewer::bare(WS, ME), &q, 1).is_err());
     }
 }
 
@@ -233,20 +219,17 @@ fn outgoing(h: &TestEnv, space: &str, id: &str, status: &str, approval: Option<(
 }
 
 fn replied(h: &TestEnv, user: &str, q: ListQuery) -> conversations::ListPage {
-    h.store()
-        .reader(|c| {
-            conversations::list_page(
-                c,
-                WS,
-                &Viewer::bare(WS, user),
-                &ListQuery {
-                    state: Some("replied".into()),
-                    ..q
-                },
-                100,
-            )
-        })
-        .unwrap()
+    conversations::list_page(
+        h.store(),
+        WS,
+        &Viewer::bare(WS, user),
+        &ListQuery {
+            state: Some("replied".into()),
+            ..q
+        },
+        100,
+    )
+    .unwrap()
 }
 
 #[test]

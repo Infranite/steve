@@ -357,7 +357,11 @@ async fn panels_list_in_order_and_actions_go_to_their_provider() {
         r.item_panel(Box::new(Gh(l))).item_panel(Box::new(Mail));
     });
     let i = item(&t);
-    let ps = panels::panels(&t.modules, WS, ME, &i.id).unwrap();
+    let ps = t
+        .store()
+        .read::<_, steve_store::StoreError>(|_| Ok(panels::panels(&t.modules, WS, ME, &i.id)))
+        .unwrap()
+        .unwrap();
     let ids: Vec<_> = ps.iter().map(|p| p.id.as_str()).collect();
     assert_eq!(ids, ["github.pr:ghp_1", "mail.thread:mt_1"]);
     assert_eq!(ps[0].title, format!("PR 与检查 {}", i.id));
@@ -459,9 +463,8 @@ impl DecisionHandler for Undo {
     fn resolve(&self, _: &Tx, cx: &DecisionCx, _: &Decision) -> ApiResult<Value> {
         Ok(json!({"choice": cx.choice}))
     }
-    fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
+    fn before_undo(&self, _: &Tx, d: &Decision) -> ApiResult<()> {
         self.0.lock().unwrap().push(d.id.clone());
-        tx.execute("UPDATE parties SET note = 'undone' WHERE 0", [])?;
         if self.1 {
             Err(ApiError::conflict("已经发出，不能撤销"))
         } else {

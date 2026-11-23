@@ -425,7 +425,7 @@ pub fn describe_rules(c: &Connection, rules: &[Rule], mode: Mode) -> String {
         .iter()
         .enumerate()
         .map(|(i, r)| {
-            let act = r.act.label();
+            let act = rules::action_label(r.act);
             match &r.when {
                 When::All if i > 0 => format!("其他{act}"),
                 When::All | When::OtherGroup => format!("{}{act}", when_text(c, &r.when, mode)),
@@ -825,7 +825,7 @@ impl DraftTarget for SpaceTarget {
     fn plan(
         &self,
         store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         p: &Prepared,
         raw: Vec<Value>,
@@ -892,7 +892,7 @@ impl DraftTarget for SpaceTarget {
                         if let Some(f) = &s.set.flow_id {
                             let why = t!(
                                 "channels.error.space_is_flow",
-                                flow = steve_flow::flows::name_of(c, f)?
+                                flow = steve_flow::flows::name_of(r, f)?
                             );
                             d.line(refused(&l_rules, s.rules_text(c, true), &why));
                             continue;
@@ -1102,14 +1102,16 @@ fn parse_space_patch(v: &Value) -> ApiResult<SpacePatch> {
 struct SpaceOp(Arc<dyn Clock>);
 
 impl ChangeOp for SpaceOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
+        let c = &w.legacy();
         parse_space_patch(&op["patch"])?.check()?;
         let s = spaces::own(c, &viewer(c, cx)?, op["space_id"].as_str().unwrap_or(""))?;
         spaces::writable(&s)?;
         Ok(())
     }
 
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = &w.legacy();
         let id = op["space_id"].as_str().unwrap_or("");
         let v = viewer(tx, cx)?;
         let s = spaces::own(tx, &v, id)?;
@@ -1134,7 +1136,14 @@ impl ChangeOp for SpaceOp {
         Ok(json!({ "fields": before, "configured": set.configured }))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = &w.legacy();
         let id = op["space_id"].as_str().unwrap_or("");
         let v = viewer(tx, cx)?;
         let now = self.0.now();
@@ -1405,13 +1414,15 @@ fn parse_persona_patch(v: &Value) -> ApiResult<PersonaPatch> {
 struct PersonaOp(Arc<dyn Clock>);
 
 impl ChangeOp for PersonaOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
+        let c = &w.legacy();
         parse_persona_patch(&op["patch"])?;
         personas::own(c, cx.ws, op["persona_id"].as_str().unwrap_or(""))?;
         Ok(())
     }
 
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = &w.legacy();
         let id = op["persona_id"].as_str().unwrap_or("");
         let p = personas::own(tx, cx.ws, id)?;
         let mut before = Map::new();
@@ -1437,7 +1448,14 @@ impl ChangeOp for PersonaOp {
         Ok(Value::Object(before))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = &w.legacy();
         personas::patch(
             tx,
             &viewer(tx, cx)?,
@@ -2009,10 +2027,9 @@ impl ChannelOp {
                             bindings::set_account_default(tx, &viewer(tx, cx)?, conn, p, now)?
                         }
                         None => {
-                            tx.execute(
-                                "DELETE FROM persona_bindings WHERE workspace_id = ? AND account_id = ? AND space_id = ''",
-                                params![ws, account],
-                            )?;
+                            tx.write(|w| {
+                                steve_store::channel_personas::bindings::clear(w, ws, &account, "")
+                            })?;
                         }
                     }
                 }
@@ -2021,10 +2038,14 @@ impl ChannelOp {
             after.insert(k.clone(), v.clone());
         }
         let version = set.revision + 1;
-        tx.execute(
-            "UPDATE channel_settings SET rules = ?, duty = ?, trigger = ?, revision = ?, updated = ? WHERE connection_id = ?",
-            params![rules.to_string(), duty, trigger.to_string(), version, now, conn],
-        )?;
+        let patch = steve_store::channel_spaces::account_settings::SettingsPatch {
+            rules: Some(&rules),
+            duty: Some(&duty),
+            trigger: Some(&trigger),
+            revision: version,
+            ..Default::default()
+        };
+        tx.write(|w| steve_store::channel_spaces::account_settings::patch(w, conn, &patch, now))?;
         base::revision(
             tx,
             ws,
@@ -2055,7 +2076,8 @@ impl ChannelOp {
 }
 
 impl ChangeOp for ChannelOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
+        let c = &w.legacy();
         let conn = op["connection_id"].as_str().unwrap_or("");
         let a = ChannelNow::load(c, &viewer(c, cx)?, conn)?;
         let p = &op["patch"];
@@ -2083,7 +2105,8 @@ impl ChangeOp for ChannelOp {
         Ok(())
     }
 
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = &w.legacy();
         let conn = op["connection_id"].as_str().unwrap_or("");
         let v = viewer(tx, cx)?;
         let a = ChannelNow::load(tx, &v, conn)?;
@@ -2106,7 +2129,14 @@ impl ChangeOp for ChannelOp {
         Ok(Value::Object(before))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = &w.legacy();
         let fields = before.as_object().cloned().unwrap_or_default();
         self.write(
             tx,

@@ -618,7 +618,13 @@ fn sender_items(c: &Connection, ws: &str, party: &str) -> ChannelResult<Vec<Stri
 
 /// Draft-as-you uses the verified account's linked user, never the workspace owner or the
 /// connection creator. The existing profile resolver owns address scope and external fallback.
-pub(crate) fn own_name(c: &Connection, ws: &str, conn: &str, space: &str) -> ChannelResult<String> {
+pub(crate) fn own_name(
+    c: &Connection,
+    r: &mut impl steve_store::Read,
+    ws: &str,
+    conn: &str,
+    space: &str,
+) -> ChannelResult<String> {
     let user: String = c
         .query_row(
             "SELECT p.user_id FROM connections c
@@ -632,12 +638,23 @@ pub(crate) fn own_name(c: &Connection, ws: &str, conn: &str, space: &str) -> Cha
         )
         .optional()?
         .ok_or_else(|| ApiError::not_found("已验证的个人账号用户"))?;
-    steve_modules::contacts::profile::address(c, ws, &user, true, None, Some(space))?
+    steve_modules::contacts::profile::address(r, ws, &user, true, None, Some(space))?
         .ok_or_else(|| ApiError::not_found("个人资料"))
 }
 
 /// Gathers the layers for answering `plan`'s message.
 pub fn gather(
+    db: &steve_store::Store,
+    store: &dyn steve_knowledge::port::KnowledgeStore,
+    plan: &Plan,
+    opts: &ComposeOpts,
+    now: i64,
+) -> ChannelResult<Layers> {
+    db.read(|r| db.reader(|c| gather_from_snapshot(r, c, store, plan, opts, now)))
+}
+
+fn gather_from_snapshot(
+    r: &mut steve_store::R<'_>,
     c: &Connection,
     store: &dyn steve_knowledge::port::KnowledgeStore,
     plan: &Plan,
@@ -648,11 +665,16 @@ pub fn gather(
     let space = spaces::get(c, &plan.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
     let set = spaces::settings(c, &space.id)?;
     let owner = match plan.mode {
-        Mode::Own => own_name(c, ws, &plan.connection_id, &plan.space_id)?,
-        Mode::Bot => personas::owner_name_in(c, ws, None, Some(&plan.space_id))?,
+        Mode::Own => own_name(c, r, ws, &plan.connection_id, &plan.space_id)?,
+        Mode::Bot => personas::owner_name_in(r, ws, None, Some(&plan.space_id))?,
     };
     let internal_name = if crate::conversations::owner_only(c, ws, &space, &plan.connection_id)? {
-        Some(personas::owner_internal_name(c, ws, &plan.connection_id)?)
+        Some(personas::owner_internal_name(
+            c,
+            r,
+            ws,
+            &plan.connection_id,
+        )?)
     } else {
         None
     };
@@ -663,7 +685,7 @@ pub fn gather(
         persona: persona_text,
         bot,
         model,
-    } = gather_identity(c, plan, opts, &space, &set, &owner)?;
+    } = gather_identity(c, r, plan, opts, &space, &set, &owner)?;
 
     // 4–5
     let account_duty = spaces::channel_settings(c, ws, &plan.connection_id)?
@@ -676,10 +698,11 @@ pub fn gather(
         lines: anchors,
         ids: anchor_ids,
         objects: objs,
-    } = gather_anchors(c, &viewer, plan, &space, internal_name, now)?;
+    } = gather_anchors(c, r, &viewer, plan, &space, internal_name, now)?;
 
     // the conversation and the message
     let talk = conversation(
+        r,
         c,
         plan,
         &space,
@@ -704,7 +727,7 @@ pub fn gather(
     };
 
     // 7: retrieval as the owner, the sender and the space as anchors
-    let found = reply_hits(c, store, &viewer, &plan.text, &recent, &objs, now)
+    let found = reply_hits(r, store, &viewer, &plan.text, &recent, &objs, now)
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let kb_semantic_down = found.semantic_down;
     let hits = found
@@ -720,7 +743,7 @@ pub fn gather(
 
     // a trigger word: who speaks as whom, where, to whom, first
     let im_context = if plan.trigger.is_some() {
-        crate::im_context::render_for(c, plan)
+        crate::im_context::render_for(c, r, plan)
     } else {
         String::new()
     };
@@ -751,7 +774,7 @@ pub fn gather(
         unreadable: context::unreadable(&plan.text, &talk.attachments, false),
         message: talk.message,
         instruction: opts.instruction.clone(),
-        now: now_text(now, &crate::im_mcp::tz_of(c, ws)),
+        now: now_text(now, &crate::im_mcp::tz_of(r, ws)),
         own: plan.mode == Mode::Own,
         addressed: crate::decide::addressed(talk.why),
         question: crate::decide::asks(&plan.text),
@@ -767,6 +790,7 @@ struct GatheredIdentity {
 
 fn gather_identity(
     c: &Connection,
+    r: &mut impl steve_store::Read,
     plan: &Plan,
     opts: &ComposeOpts,
     space: &SpaceRow,
@@ -788,7 +812,7 @@ fn gather_identity(
             };
             match p {
                 Some(p) => {
-                    let owner = personas::owner_name_in(c, ws, Some(&p.id), Some(&plan.space_id))?;
+                    let owner = personas::owner_name_in(r, ws, Some(&p.id), Some(&plan.space_id))?;
                     (persona_layer(&p, &owner), Some(p.bot_id))
                 }
                 None => (String::new(), None),
@@ -819,6 +843,7 @@ struct GatheredAnchors {
 
 fn gather_anchors(
     c: &Connection,
+    r: &mut impl steve_store::Read,
     viewer: &Viewer,
     plan: &Plan,
     space: &SpaceRow,
@@ -832,7 +857,7 @@ fn gather_anchors(
     if let Some(party) = &plan.sender_party_id {
         objs.push(ObjRef::new("party", party));
         let cards =
-            steve_modules::contacts::contact_cards(c, &viewer, std::slice::from_ref(party))?;
+            steve_modules::contacts::contact_cards(r, &viewer, std::slice::from_ref(party))?;
         if let Some(card) = cards.first() {
             anchors.push(format!("发送人（括号里是披露级别）：\n{}", card.text));
             anchor_ids.push(format!("party:{}", card.party_id));
@@ -881,7 +906,7 @@ fn gather_anchors(
         }
     }
     let space_ref = [ObjRef::new("space", &space.id)];
-    let rules = steve_knowledge::anchor_mems(c, &viewer, &space_ref, ANCHOR_MEMS, now)
+    let rules = steve_knowledge::anchor_mems(r, &viewer, &space_ref, ANCHOR_MEMS, now)
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .into_iter()
         .filter(|h| !anchor_ids.contains(&format!("{}:{}", h.obj_type, h.obj_id)))
@@ -923,6 +948,7 @@ struct Talk {
 /// ids, the stretches of talk ([`context::arrange`], `n` lines by people; more than [`HISTORY`]:
 /// every stretch), what came after, the drafts waiting, where and why.
 fn conversation(
+    r: &mut impl steve_store::Read,
     c: &Connection,
     plan: &Plan,
     space: &spaces::SpaceRow,
@@ -934,7 +960,7 @@ fn conversation(
     let names = context::owner_names(c, &mine, owner)?;
     let clock = Clock {
         now,
-        tz: crate::im_mcp::tz_of(c, &plan.ws),
+        tz: crate::im_mcp::tz_of(r, &plan.ws),
     };
     let mode = plan.mode;
     let label = |m: &Msg| context::label(&m.name, m.side, mode, owner);
@@ -968,7 +994,7 @@ fn conversation(
     };
     let replied = match replied {
         Some(r) => Some(r),
-        None => messages::replied_to(c, &space.id, &plan.message_id)?,
+        None => messages::replied_to(r, &space.id, &plan.message_id)?,
     };
     let facts = context::facts_of(c, &plan.message_id)?;
     let why = Why::of(&facts, plan.trigger.is_some());
@@ -1258,9 +1284,7 @@ impl Composer {
         opts: &ComposeOpts,
     ) -> ChannelResult<Once> {
         let now = ch.now();
-        let layers = ch
-            .store()
-            .reader(|c| gather(c, ch.knowledge_store(), plan, opts, now))?;
+        let layers = gather(ch.store(), ch.knowledge_store(), plan, opts, now)?;
         let media = crate::media_agent::prepare(ch, plan, self.media.as_deref()).await?;
         let mut p = prompt(&layers);
         if !media.text.is_empty() {

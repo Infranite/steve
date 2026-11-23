@@ -63,27 +63,35 @@ struct ListQ {
 
 async fn list(Extension(ch): Cx, who: Caller, Query(q): Query<ListQ>) -> ApiResult<Json<Value>> {
     let v = viewer(&ch, &who)?;
-    let out = ch.store().reader(|c| -> ApiResult<Vec<spaces::SpaceOut>> {
-        spaces::list(
-            c,
-            &v,
+    let store = ch.store();
+    let out = store.read(|r| -> ApiResult<Vec<spaces::SpaceOut>> {
+        steve_store::channel_spaces::rows::list(
+            r,
+            &v.ws,
             q.connection.as_deref().filter(|s| !s.is_empty()),
             q.q.as_deref(),
         )?
         .iter()
-        .map(|s| spaces::out(c, s))
+        .map(|s| spaces::out(store, s))
         .collect()
     })?;
     Ok(Json(serde_json::to_value(out)?))
 }
 
 fn space_json(ch: &Channels, v: &Viewer, id: &str, recent: bool) -> ApiResult<Value> {
-    ch.store().reader(|c| -> ApiResult<Value> {
-        let s = spaces::own(c, v, id)?;
-        let mut out = serde_json::to_value(spaces::out(c, &s)?)?;
+    let store = ch.store();
+    store.read(|r| {
+        let s = steve_store::channel_spaces::rows::get_in_workspace(r, &v.ws, id)?
+            .ok_or_else(|| ApiError::not_found("空间"))?;
+        let mut out = serde_json::to_value(spaces::out(store, &s)?)?;
         if recent {
-            out["recent"] =
-                serde_json::to_value(messages::page(c, &s.id, &v.user, None, messages::RECENT)?)?;
+            out["recent"] = serde_json::to_value(messages::page(
+                store,
+                &s.id,
+                &v.user,
+                None,
+                messages::RECENT,
+            )?)?;
         }
         Ok(out)
     })
@@ -158,48 +166,33 @@ async fn page(
     })?
     .map_or(messages::PAGE, |n| n as usize);
     let v = viewer(&ch, &who)?;
-    let rows = ch.store().reader(|c| -> ApiResult<_> {
-        let s = spaces::own(c, &v, &id)?;
-        messages::page(c, &s.id, &v.user, before, limit)
+    let store = ch.store();
+    let rows = store.read(|r| -> ApiResult<_> {
+        let s = steve_store::channel_spaces::rows::get_in_workspace(r, &v.ws, &id)?
+            .ok_or_else(|| ApiError::not_found("空间"))?;
+        messages::page(store, &s.id, &v.user, before, limit)
     })?;
     Ok(Json(json!(rows)))
 }
 
-/// `(space_id, text, reply_to, on_behalf, persona_id)` of an outbound message.
-type OutRow = (
-    String,
-    Option<String>,
-    Option<String>,
-    String,
-    Option<String>,
-);
-/// `(id, text, sender_party_id, sender_account_id, created)` of the message it answers.
-type Replied = (String, Option<String>, Option<String>, Option<String>, i64);
-
 /// Who sent a stored message, for people: the contact's name, else the account's display name.
 fn sender_name(
-    c: &rusqlite::Connection,
+    db: &mut impl steve_store::Read,
     party: Option<&str>,
     account: Option<&str>,
 ) -> ApiResult<String> {
-    use rusqlite::OptionalExtension;
-    let by_party: Option<String> = match party {
-        Some(p) => c
-            .query_row("SELECT name FROM parties WHERE id = ?", [p], |r| r.get(0))
-            .optional()?,
+    let by_party = match party {
+        Some(id) => steve_store::parties::Parties::new(db).name(id)?,
         None => None,
     };
-    let by_account: Option<String> = match account {
-        Some(a) => c
-            .query_row("SELECT display_name FROM accounts WHERE id = ?", [a], |r| {
-                r.get(0)
-            })
-            .optional()?,
+    let by_account = match account {
+        Some(id) => steve_store::accounts::display_name(db, id)?,
         None => None,
     };
+    let visible_name = |n: &String| !n.trim().is_empty() && !n.starts_with("ou_");
     Ok(by_party
-        .filter(|n| !n.trim().is_empty() && !n.starts_with("ou_"))
-        .or(by_account.filter(|n| !n.trim().is_empty() && !n.starts_with("ou_")))
+        .filter(visible_name)
+        .or(by_account.filter(visible_name))
         .unwrap_or_else(|| "某人".into()))
 }
 
@@ -207,76 +200,43 @@ fn sender_name(
 /// replies to and the three before it), where it goes and as whom, so its approval card says what
 /// you are approving.
 async fn context(Extension(ch): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
-    use rusqlite::OptionalExtension;
+    use steve_store::{channel_message_repo::approval_context as repo, channel_personas};
     let v = viewer(&ch, &who)?;
-    let out = ch.store().reader(|c| -> ApiResult<Value> {
-        let row: Option<OutRow> = c
-            .query_row(
-                "SELECT space_id, text, reply_to, on_behalf, persona_id FROM chan_messages WHERE id = ? AND direction = 'out'",
-                [&id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            )
-            .optional()?;
-        let Some((space_id, text, reply_to, on_behalf, persona_id)) = row else {
-            return Err(ApiError::not_found("消息"));
-        };
-        let s = spaces::own(c, &v, &space_id)?;
-        let space = spaces::out(c, &s)?;
-        let as_you = on_behalf == "proxy"
-            || (persona_id.is_none()
+    let store = ch.store();
+    let out = store.read(|db| store.reader(|c| -> ApiResult<Value> {
+        let draft = repo::draft(db, &id)?.ok_or_else(|| ApiError::not_found("消息"))?;
+        let s = steve_store::channel_spaces::rows::get_in_workspace(db, &v.ws, &draft.space_id)?
+            .ok_or_else(|| ApiError::not_found("空间"))?;
+        let space = spaces::out(store, &s)?;
+        let as_you = draft.on_behalf == "proxy"
+            || (draft.persona_id.is_none()
                 && spaces::identities(c, &s.id)?
                     .iter()
                     .any(|i| i.connection_id == s.connection_id && i.mode == spaces::Mode::Own));
-        let persona: Option<String> = match &persona_id {
-            Some(p) => c
-                .query_row("SELECT name FROM personas WHERE id = ?", [p], |r| r.get(0))
-                .optional()?,
+        let persona = match &draft.persona_id {
+            Some(id) => channel_personas::name(db, id)?,
             None => None,
         };
-        // the message it answers: by provider id in the same space
-        let replied: Option<Replied> = match &reply_to {
-            Some(r) => c
-                .query_row(
-                    "SELECT id, text, sender_party_id, sender_account_id, created FROM chan_messages
-                      WHERE space_id = ? AND (external_id = ? OR id = ?) ORDER BY created LIMIT 1",
-                    rusqlite::params![s.id, r, r],
-                    |x| Ok((x.get(0)?, x.get(1)?, x.get(2)?, x.get(3)?, x.get(4)?)),
-                )
-                .optional()?,
+        let replied = match draft.reply_to.as_deref() {
+            Some(reference) => repo::replied_to(db, &s.id, reference)?,
             None => None,
         };
         let mut before = Vec::new();
-        let reply = match &replied {
-            Some((rid, rtext, party, account, created)) => {
-                let mut st = c.prepare_cached(
-                    "SELECT text, sender_party_id, sender_account_id, created, direction FROM chan_messages
-                      WHERE space_id = ? AND created < ? AND id != ? AND text IS NOT NULL
-                      ORDER BY created DESC LIMIT 3",
-                )?;
-                let rows = st
-                    .query_map(rusqlite::params![s.id, created, rid], |x| {
-                        Ok((
-                            x.get::<_, Option<String>>(0)?,
-                            x.get::<_, Option<String>>(1)?,
-                            x.get::<_, Option<String>>(2)?,
-                            x.get::<_, i64>(3)?,
-                            x.get::<_, String>(4)?,
-                        ))
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                for (t, p, a, at, dir) in rows.into_iter().rev() {
-                    let name = if dir == "out" {
+        let reply = match replied {
+            Some(replied) => {
+                for msg in repo::preceding(db, &s.id, &replied, 3)?.into_iter().rev() {
+                    let name = if msg.out {
                         "Steve".to_string()
                     } else {
-                        sender_name(c, p.as_deref(), a.as_deref())?
+                        sender_name(db, msg.sender_party_id.as_deref(), msg.sender_account_id.as_deref())?
                     };
-                    before.push(json!({"sender": name, "text": t, "at": at}));
+                    before.push(json!({"sender": name, "text": msg.text, "at": msg.created}));
                 }
                 Some(json!({
-                    "id": rid,
-                    "sender": sender_name(c, party.as_deref(), account.as_deref())?,
-                    "text": rtext,
-                    "at": created,
+                    "id": replied.id,
+                    "sender": sender_name(db, replied.sender_party_id.as_deref(), replied.sender_account_id.as_deref())?,
+                    "text": replied.text,
+                    "at": replied.created,
                 }))
             }
             None => None,
@@ -290,11 +250,11 @@ async fn context(Extension(ch): Cx, who: Caller, Path(id): Path<String>) -> ApiR
             },
             "as_you": as_you,
             "persona": persona,
-            "text": text,
+            "text": draft.text,
             "reply_to": reply,
             "before": before,
         }))
-    })?;
+    }))?;
     Ok(Json(out))
 }
 

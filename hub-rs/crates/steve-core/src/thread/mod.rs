@@ -1763,7 +1763,7 @@ impl Core {
         let zone = self
             .store()
             .store()
-            .read(|r| steve_modules::zone::Zone::read_owner(r, ws))?;
+            .read(|r| steve_modules::zone::Zone::for_owner(r, ws))?;
         let today = zone.day_start(steve_store::now()).unwrap_or(0);
         let run = all.iter().filter(|i| i.status == "run").count();
         let done = all

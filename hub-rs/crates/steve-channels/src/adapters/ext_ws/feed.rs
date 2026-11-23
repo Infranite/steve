@@ -16,11 +16,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_flow::AdapterError;
 use steve_modules::ApiError;
 use steve_modules::accounts::connections::{Health, ProviderError};
+use steve_store::channel_feed::{self, DeadLetterKey};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
@@ -161,18 +161,12 @@ impl ExtWsHook {
             ..Default::default()
         };
         let hooks = self.channels.party_hooks();
-        let r = self.channels.store().transaction(|tx| {
-            let owner: Option<(String, String)> = tx
-                .query_row(
-                    "SELECT account_id, created_by FROM connections WHERE id = ? AND workspace_id = ? AND account_id IS NOT NULL",
-                    params![conn, ws],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?;
-            match owner {
-                Some((account, actor)) => steve_modules::accounts::enrich(tx, hooks, ws, &actor, &account, &e).map(Some),
-                None => Ok(None),
-            }
+        let r = self.channels.store().write(|w| {
+            let Some(owner) = steve_store::connections::owner(w, ws, conn)? else {
+                return Ok(());
+            };
+            steve_modules::accounts::enrich(w, hooks, ws, &owner.user, &owner.account, &e)?;
+            Ok::<_, ApiError>(())
         });
         if let Err(e) = r {
             tracing::warn!(conn = %conn, "ext_ws: the account's name was not updated: {e}");
@@ -399,7 +393,7 @@ impl Feed<'_> {
             .hook
             .channels
             .store()
-            .transaction(|tx| crate::write_blocks::lift_connection(tx, conn, every))
+            .write(|w| crate::write_blocks::lift_connection(w, conn, every))
         {
             Ok(true) => tracing::info!(conn, "ext_ws: writes allowed again"),
             Ok(false) => {}
@@ -723,10 +717,20 @@ impl Feed<'_> {
             return Ok(());
         }
         let rejected = msg.clone();
-        if self.hook.channels.store().reader(|c| {
-            c.query_row("SELECT EXISTS(SELECT 1 FROM chan_ext_ws_dead_letters WHERE connection_id = ? AND chat_id = ? AND source_id = ?)",
-                params![self.conn(), msg.space_ext_id, msg.source_id.as_deref().unwrap_or(&msg.external_id)], |r| r.get::<_, bool>(0)).map_err(ApiError::from)
-        }).map_err(|e| End::Lost(e.to_string()))? { return Ok(()); }
+        let key = DeadLetterKey {
+            connection: self.conn(),
+            chat: &msg.space_ext_id,
+            source: msg.source_id.as_deref().unwrap_or(&msg.external_id),
+        };
+        if self
+            .hook
+            .channels
+            .store()
+            .read(|r| channel_feed::has_dead_letter(r, key))
+            .map_err(|e| End::Lost(e.to_string()))?
+        {
+            return Ok(());
+        }
         match self.run.inbound.message(msg).await {
             Ok(_) => Ok(()),
             Err(ApiError::Internal(e)) => {
@@ -770,17 +774,28 @@ impl Feed<'_> {
     }
 
     fn retain_dead_letter(&self, chat: &str, source: &str, payload: &Value, error: &str) -> Step {
-        self.hook.channels.store().transaction(|tx| {
-            let inserted = tx.execute(
-                "INSERT OR IGNORE INTO chan_ext_ws_dead_letters
-                 (connection_id, chat_id, source_id, payload, error, created) VALUES (?, ?, ?, ?, ?, ?)",
-                params![self.conn(), chat, source, payload.to_string(), error, self.now()])?;
-            if inserted > 0 {
-                steve_store::base::audit(tx, &self.run.state.ws, "steve", "channel.dead_letter", self.conn(),
-                    &json!({"chat_id": chat, "source_id": source, "reason": "invalid_inbound"}))?;
-            }
-            Ok::<_, ApiError>(())
-        }).map_err(|e| End::Lost(format!("dead letter not stored: {e}")))?;
+        let key = DeadLetterKey {
+            connection: self.conn(),
+            chat,
+            source,
+        };
+        self.hook
+            .channels
+            .store()
+            .write(|w| {
+                if channel_feed::retain_dead_letter(w, key, payload, error, self.now())? {
+                    steve_store::audit_repo::record(
+                        w,
+                        &self.run.state.ws,
+                        "steve",
+                        "channel.dead_letter",
+                        self.conn(),
+                        &json!({"chat_id": chat, "source_id": source, "reason": "invalid_inbound"}),
+                    )?;
+                }
+                Ok::<_, ApiError>(())
+            })
+            .map_err(|e| End::Lost(format!("dead letter not stored: {e}")))?;
         tracing::warn!(
             conn = self.conn(),
             source,
@@ -794,7 +809,7 @@ impl Feed<'_> {
         self.hook
             .channels
             .store()
-            .reader(|c| crate::spaces::find(c, ws, conn, chat))
+            .read(|r| crate::spaces::find(r, ws, conn, chat))
             .map(|s| s.is_none())
             .unwrap_or(false)
     }
@@ -959,17 +974,8 @@ impl Feed<'_> {
         self.hook
             .channels
             .store()
-            .reader(|c| -> Result<Vec<String>, ApiError> {
-                let mut st = c.prepare(
-                    "SELECT DISTINCT s.external_id FROM spaces s
-                       JOIN space_identities i ON i.space_id = s.id AND i.left_at IS NULL
-                      WHERE i.connection_id = ?1 AND s.workspace_id = ?2 AND s.status = 'active'
-                      ORDER BY s.updated DESC LIMIT ?3",
-                )?;
-                let rows = st
-                    .query_map(params![conn, ws, GAP_CHATS as i64], |r| r.get(0))?
-                    .collect::<rusqlite::Result<Vec<String>>>()?;
-                Ok(rows)
+            .read(|r| {
+                steve_store::channel_spaces::recent_visible_chats(r, &ws, &conn, GAP_CHATS as u64)
             })
             .unwrap_or_default()
     }
@@ -1045,7 +1051,8 @@ impl Feed<'_> {
             .channels
             .store()
             .transaction(|tx| -> Result<(), ApiError> {
-                let label = crate::spaces::find(tx, ws, conn, chat)?
+                let label = tx
+                    .write(|w| crate::spaces::find(w, ws, conn, chat))?
                     .map(|s| crate::spaces::display_title(tx, &s))
                     .transpose()?
                     .unwrap_or_else(|| chat.to_string());
@@ -1054,8 +1061,7 @@ impl Feed<'_> {
                     fmt(from),
                     fmt(to)
                 );
-                steve_flow::digest::add(tx, ws, &text, None, None, now)
-                    .map_err(|e| ApiError::Internal(e.to_string()))?;
+                tx.write(|w| steve_store::DigestNotes(w).add(ws, &text, None, None, now))?;
                 Ok(())
             });
         tracing::warn!(conn, chat, from, to, "ext_ws: messages may be missing");

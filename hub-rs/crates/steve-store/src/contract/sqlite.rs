@@ -39,6 +39,9 @@ impl ToSql for V<'_> {
             Value::String(v) => v.as_deref().map_or(NULL, |s| {
                 ToSqlOutput::Borrowed(ValueRef::Text(s.as_bytes()))
             }),
+            Value::Bytes(v) => v
+                .as_deref()
+                .map_or(NULL, |bytes| ToSqlOutput::Borrowed(ValueRef::Blob(bytes))),
             Value::Json(v) => v.as_deref().map_or(NULL, |j| j.to_string().into()),
             other => {
                 return Err(rusqlite::Error::ToSqlConversionFailure(
@@ -61,7 +64,7 @@ pub(crate) fn col<'a>(r: &'a rusqlite::Row<'a>, i: usize) -> Result<Col<'a>> {
         ValueRef::Text(t) => {
             Col::Text(std::str::from_utf8(t).map_err(|e| StoreError::Rejected(e.to_string()))?)
         }
-        ValueRef::Blob(_) => return Err(StoreError::Rejected("column is a blob".into())),
+        ValueRef::Blob(bytes) => Col::Blob(bytes),
     })
 }
 

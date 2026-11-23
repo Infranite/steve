@@ -339,7 +339,7 @@ async fn needing_a_reply_drafts_and_asks_but_never_sends() {
     let mut run = h
         .env
         .store()
-        .reader(|c| steve_flow::runs::get(c, &run_id))
+        .read(|c| steve_flow::runs::get(c, &run_id))
         .unwrap()
         .unwrap();
     run.status = "running".into();
@@ -347,7 +347,7 @@ async fn needing_a_reply_drafts_and_asks_but_never_sends() {
     run.ended = None;
     h.env
         .store()
-        .transaction(|tx| steve_flow::runs::save(tx, &run))
+        .write(|tx| steve_flow::runs::save(tx, &run))
         .unwrap();
     steve_flow::engine::drive(&h.flow, &run_id).await.unwrap();
     assert_eq!(db::drafts(h.env.store(), WS), 1);
@@ -417,12 +417,12 @@ async fn dry_runs_do_not_draft() {
     let event = h
         .env
         .store()
-        .reader(|c| steve_flow::ingest::event_json(c, ev["id"].as_str().unwrap()))
+        .read(|c| steve_flow::ingest::event_json(c, ev["id"].as_str().unwrap()))
         .unwrap();
     let f = h
         .env
         .store()
-        .reader(|c| steve_flow::flows::get(c, &h.template_flow()))
+        .read(|c| steve_flow::flows::get(c, &h.template_flow()))
         .unwrap()
         .unwrap();
     let before = h.gateway_calls();
@@ -465,7 +465,7 @@ async fn archive_and_mark_read_run_without_approval() {
     assert!(!reg.effectful(graph.node("a").unwrap()));
     h.env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             // the template off, so only this flow runs
 
             db::disable_flow(h.env.store(), template::ORIGIN)?;

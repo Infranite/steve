@@ -9,6 +9,7 @@ use steve_modules::accounts::connections::{
 use steve_modules::testkit::{ME, WS};
 use steve_runtime::Clock;
 use steve_runtime::testkit::eventually_sync;
+use steve_store::testkit::flow as fixtures;
 use tokio::sync::Notify;
 
 #[tokio::test]
@@ -52,7 +53,7 @@ async fn poll_deadline_and_retry_table() {
     assert!(
         env.env
             .store()
-            .reader(|c| crate::sources::settings(c, WS, &id))
+            .read(|c| crate::sources::settings(c, WS, &id))
             .unwrap()
             .cursor
             .is_some()
@@ -84,49 +85,19 @@ async fn poll_eligibility_and_live_cleanup_table() {
     let a = env.connection(WS, FakeEventAdapter::ID, None, ME);
     let b = env.connection(WS, FakeEventAdapter::ID, None, ME);
     let mut poller = Poller::new(env.flow.clone());
-    env.env
-        .store()
-        .with_conn(|c| {
-            c.execute("UPDATE connections SET caps='[]' WHERE id=?", [&b])?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::set_event_capability(env.env.store(), &b, false).unwrap();
     assert_eq!(poller.tick().await, 1);
-    env.env
-        .store()
-        .with_conn(|c| {
-            c.execute("UPDATE connections SET status='paused' WHERE id=?", [&a])?;
-            c.execute(
-                "UPDATE connections SET caps='[\"events\"]' WHERE id=?",
-                [&b],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::set_connection_status(env.env.store(), &a, "paused").unwrap();
+    fixtures::set_event_capability(env.env.store(), &b, true).unwrap();
     assert_eq!(poller.tick().await, 1);
-    env.env
-        .store()
-        .with_conn(|c| {
-            c.execute("UPDATE connections SET status='ok' WHERE id=?", [&a])?;
-            c.execute("UPDATE connections SET caps='[]' WHERE id=?", [&b])?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::set_connection_status(env.env.store(), &a, "ok").unwrap();
+    fixtures::set_event_capability(env.env.store(), &b, false).unwrap();
     assert_eq!(
         poller.tick().await,
         1,
         "row omitted from the live set loses its memory deadline"
     );
-    env.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE connections SET caps='[\"events\"]' WHERE id=?",
-                [&b],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::set_event_capability(env.env.store(), &b, true).unwrap();
     assert_eq!(
         poller.tick().await,
         0,
@@ -143,16 +114,7 @@ async fn paused_source_advances_the_provider_cursor_without_backlog() {
     let id = env.connection(WS, FakeEventAdapter::ID, None, ME);
     let mut poller = Poller::new(env.flow.clone());
     assert_eq!(poller.tick().await, 1);
-    env.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE source_settings SET paused=1 WHERE connection_id=?",
-                [&id],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::pause_source(env.env.store(), &id, true).unwrap();
     fake.emit(FakeEventAdapter::event(
         "mail.new", "paused", "INBOX", "paused",
     ));
@@ -161,35 +123,17 @@ async fn paused_source_advances_the_provider_cursor_without_backlog() {
     assert_eq!(
         env.env
             .store()
-            .reader(|c| crate::sources::settings(c, WS, &id))
+            .read(|c| crate::sources::settings(c, WS, &id))
             .unwrap()
             .cursor
             .as_deref(),
         Some("1")
     );
-    env.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE source_settings SET paused=0 WHERE connection_id=?",
-                [&id],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::pause_source(env.env.store(), &id, false).unwrap();
     fake.emit(FakeEventAdapter::event("mail.new", "live", "INBOX", "live"));
     env.env.clock.advance(120_000);
     assert_eq!(poller.tick().await, 1);
-    let ids = env
-        .env
-        .store()
-        .reader(|c| -> FlowResult<Vec<String>> {
-            let mut rows = c.prepare("SELECT external_id FROM ext_events ORDER BY external_id")?;
-            Ok(rows
-                .query_map([], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?)
-        })
-        .unwrap();
+    let ids = fixtures::event_external_ids(env.env.store()).unwrap();
     assert_eq!(ids, ["live"]);
 }
 
@@ -307,7 +251,7 @@ async fn panicked_row_is_retried_and_does_not_block_other_rows() {
     assert!(
         env.env
             .store()
-            .reader(|c| crate::sources::settings(c, WS, &good))
+            .read(|c| crate::sources::settings(c, WS, &good))
             .unwrap()
             .cursor
             .is_some()
@@ -413,18 +357,7 @@ impl steve_runtime::due::contract::Fixture for PollFixture {
         id
     }
     fn done(&self) -> Vec<String> {
-        self.env
-            .env
-            .store()
-            .reader(|c| -> FlowResult<_> {
-                let mut st = c.prepare(
-                    "SELECT id FROM connections WHERE last_sync IS NOT NULL ORDER BY id",
-                )?;
-                Ok(st
-                    .query_map([], |r| r.get(0))?
-                    .collect::<rusqlite::Result<Vec<String>>>()?)
-            })
-            .unwrap()
+        fixtures::synced_connections(self.env.env.store()).unwrap()
     }
     fn dead_letters(&self) -> bool {
         false
@@ -563,13 +496,7 @@ async fn a_real_connection_commit_wakes_the_idle_poll_source() {
     assert_eq!(env.env.clock.now(), 0, "no fallback time advanced");
     assert_eq!(adapter.calls.lock().unwrap().as_slice(), [id.clone()]);
     let before = sleeps.load(Ordering::SeqCst);
-    env.env
-        .store()
-        .with_conn(|c| {
-            c.execute("UPDATE connections SET updated=updated+1 WHERE id=?", [&id])?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::touch_connection(env.env.store(), &id).unwrap();
     eventually_sync("real update only replans", || {
         sleeps.load(Ordering::SeqCst) > before
     })
@@ -632,17 +559,7 @@ async fn own_last_sync_commits_do_not_turn_the_source_into_a_hot_loop() {
         );
     }
     assert_eq!(adapter.calls.lock().unwrap().len(), 5);
-    let saved = env
-        .env
-        .store()
-        .reader(|c| -> FlowResult<i64> {
-            Ok(
-                c.query_row("SELECT last_sync FROM connections WHERE id=?", [&id], |r| {
-                    r.get(0)
-                })?,
-            )
-        })
-        .unwrap();
+    let saved = fixtures::connection_last_sync(env.env.store(), &id).unwrap();
     assert_eq!(saved, 60_000);
     running.abort();
     assert!(running.await.unwrap_err().is_cancelled());
@@ -654,13 +571,7 @@ async fn whole_source_read_errors_keep_the_fifteen_second_retry() {
     let env = FlowEnv::with_events(vec![adapter.clone()]);
     env.env.clock.set(0);
     env.connection(WS, FakeEventAdapter::ID, None, ME);
-    env.env
-        .store()
-        .with_conn(|c| {
-            c.execute_batch("ALTER TABLE connections RENAME TO offline_connections")?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::set_connections_available(env.env.store(), false).unwrap();
     let sleeps = Arc::new(AtomicUsize::new(0));
     let clock = Arc::new(ObservedClock {
         time: env.env.clock.clone(),
@@ -686,13 +597,7 @@ async fn whole_source_read_errors_keep_the_fifteen_second_retry() {
         })
         .await;
     }
-    env.env
-        .store()
-        .with_conn(|c| {
-            c.execute_batch("ALTER TABLE offline_connections RENAME TO connections")?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::set_connections_available(env.env.store(), true).unwrap();
     env.env.clock.advance(14_999);
     eventually_sync("restored source still waits its interval", || {
         env.env.clock.observed(44_999)

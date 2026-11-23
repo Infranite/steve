@@ -7,14 +7,13 @@
 //! temporary directory) and the copy migrated, so it reads the same as an upgraded Hub's; the copy is
 //! removed afterwards. Days are the workspace's (`stats.tz`); the default range is its last 30 days.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
 use steve_stats::metrics::{self, Query};
 use steve_stats::views;
-use steve_store::db;
+use steve_store::{R, Store, Workspaces, db};
 
 #[derive(Debug, Default, PartialEq)]
 struct Args {
@@ -51,23 +50,12 @@ fn args(a: &[String]) -> Result<Args> {
     Ok(out)
 }
 
-fn read_only(path: &Path) -> Result<Connection> {
-    let c = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| format!("cannot open {} read-only", path.display()))?;
-    c.pragma_update(None, "query_only", true)?;
-    Ok(c)
-}
-
 /// The snapshot of `a`, as JSON.
 fn snapshot(a: &Args) -> Result<serde_json::Value> {
     if !a.db.is_file() {
         bail!("no database at {}", a.db.display());
     }
-    let src = read_only(&a.db)?;
-    let schema = db::compat(&src)?.schema;
+    let schema = db::inspect_schema(&a.db)?.schema;
     if schema > db::SCHEMA_VERSION {
         bail!(
             "the database has schema {schema}, newer than this build's {}: use the Hub release that wrote it",
@@ -76,7 +64,7 @@ fn snapshot(a: &Args) -> Result<serde_json::Value> {
     }
     // an older schema reads as an upgraded Hub's would: from a migrated copy, never the file itself
     let mut scratch = None;
-    let c = if schema < db::SCHEMA_VERSION {
+    let path = if schema < db::SCHEMA_VERSION {
         let dir = match &a.scratch {
             Some(d) => tempfile::tempdir_in(d),
             None => tempfile::tempdir(),
@@ -89,20 +77,22 @@ fn snapshot(a: &Args) -> Result<serde_json::Value> {
             &|_| {},
             &steve_store_sqlite::backup::CancelFlag::default(),
         )?;
-        let dst = Connection::open(&copy.path)?;
-        db::migrate(&dst).context("cannot migrate the copy")?;
+        db::migrate_file(&copy.path).context("cannot migrate the copy")?;
         scratch = Some(dir);
-        dst
+        copy.path
     } else {
-        src
+        a.db.clone()
     };
+    let result = Store::read_file(&path, |r| Ok(report(r, a, schema)))?;
+    drop(scratch);
+    result
+}
+
+fn report(r: &mut R<'_>, a: &Args, schema: i64) -> Result<serde_json::Value> {
     let ws = match &a.workspace {
         Some(w) => w.clone(),
         None => {
-            let all: Vec<String> = c
-                .prepare("SELECT id FROM workspaces ORDER BY created, id")?
-                .query_map([], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?;
+            let all = Workspaces(r).ids()?;
             match all.as_slice() {
                 [one] => one.clone(),
                 [] => bail!("the database has no workspace"),
@@ -113,7 +103,7 @@ fn snapshot(a: &Args) -> Result<serde_json::Value> {
             }
         }
     };
-    let today = views::today(&c, &ws, steve_store::now())?;
+    let today = views::today(r, &ws, steve_store::now())?;
     let (from, to) = match (&a.from, &a.to) {
         (Some(f), Some(t)) => views::range("custom", Some(f), Some(t), &today),
         _ => views::range("30d", None, None, &today),
@@ -125,9 +115,7 @@ fn snapshot(a: &Args) -> Result<serde_json::Value> {
         to,
         ..Query::default()
     };
-    let s = metrics::summary(&c, &q)?.context("bad range")?;
-    drop(c);
-    drop(scratch);
+    let s = metrics::summary(r, &q)?.context("bad range")?;
     Ok(json!({
         "workspace": ws,
         "schema": schema,
@@ -155,6 +143,7 @@ pub fn main(a: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()

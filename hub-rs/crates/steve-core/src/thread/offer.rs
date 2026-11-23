@@ -156,7 +156,7 @@ impl Core {
         let zone = self
             .store()
             .store()
-            .read(|r| steve_modules::zone::workspace(r, ws))?;
+            .read(|r| steve_modules::zone::workspace_tz(r, ws))?;
         let zone = steve_runtime::tz::Zone::parse(zone.name()).expect("IANA zone");
         let line = |m: &Message| {
             let who = if m.author == "me" { "用户" } else { "Steve" };

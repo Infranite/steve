@@ -15,36 +15,80 @@
 //! share the transaction through [`W::legacy`], and a `write` inside one of their transactions
 //! joins it as a scope.
 
+pub mod account_profiles;
+pub mod account_rows;
 pub mod accounts;
+pub(crate) mod alarms;
+mod attribute_rows;
 pub mod audit;
+pub(crate) mod automation;
 mod backend;
+mod bot_rows;
 pub mod bots;
+mod catalog_rows;
+pub mod changesets;
+pub mod channel_feed;
 pub mod channel_messages;
 pub mod channel_personas;
-pub mod changesets;
+pub mod channel_positions;
+pub mod channel_sends;
+pub mod channel_spaces;
+pub mod channel_trigger_report;
+pub mod channel_write_policy;
+mod connection_rows;
 pub mod connections;
+mod contacts;
 #[cfg(feature = "testkit")]
 pub mod core_fixture;
 pub mod core_queue;
 pub mod core_usage;
 pub mod decisions;
+mod digest_notes;
+pub mod feishu_registration;
 pub mod files;
+mod flow_rows;
+mod flow_sources;
+mod flow_triggers;
+mod flow_waits;
 pub mod flows;
 pub mod github;
+mod grant_rows;
 pub mod grants;
 pub mod items;
+mod knowledge_references;
 pub mod links;
 pub mod mail;
+mod match_rules;
+mod memory_index;
+mod merge_proposals;
+pub(crate) mod message_sources;
 pub mod operations;
 pub mod parties;
+mod party_rows;
+mod passkey_rows;
+mod project_rows;
 pub mod projects;
+pub(crate) mod read_models;
+pub mod reply_basis;
+mod revisions;
+mod run_rows;
+pub mod secret_uses;
 pub mod sessions;
 pub mod settings;
+mod signal_rows;
 pub mod sources;
 mod sqlite;
+mod steward_rows;
+mod systems;
 pub mod tags;
+mod team_rows;
 pub mod thread_runs;
+mod user_rows;
+pub mod vault_items;
+pub mod vault_keys;
 pub mod vault_uses;
+mod workspace_settings;
+mod workspaces;
 pub mod yolo;
 
 use std::cell::RefCell;
@@ -56,8 +100,44 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;
 use sea_query::QueryStatementWriter;
 
+pub use account_rows::Accounts;
+pub use attribute_rows::{AttrDef, AttrValue, Attributes, NewDef, NewValue};
 pub(crate) use backend::{Backend, Dialect, Json, Row};
+pub use bot_rows::{BotPrompt, BotRef, BotRows};
+pub use catalog_rows::{DeviceIdentity, DeviceRows, PersonaIdentity, PersonaRows};
+pub use connection_rows::{ConnRow, ConnectionBrief, DirectoryConnection, HealthState};
+pub use contacts::{AccountIdentity, Contacts};
+pub use decisions::DecisionRows;
+pub use digest_notes::{DigestEntry, DigestNotes};
+pub use flow_rows::{FlowRow, FlowRows, NewFlowRow, NewTrigger, SchedulePatch};
+pub use flow_sources::{FlowSources, SourceConfig};
+pub use flow_triggers::{DueTrigger, FlowTriggers};
+pub use flow_waits::{FlowWaits, NewWait};
+pub use grant_rows::{FlowGrant, GrantRows, NewVaultGrant, VaultGrant, VaultGrantRecord};
+pub use knowledge_references::{
+    FileInfo, FileReads, ItemEvidence, MessageEvidence, References, SessionEvidence,
+};
+pub use match_rules::{MatchRule, MatchRules, PrefixConfig};
+pub use memory_index::{
+    Added as AddedMemoryIndex, Index as MemoryIndexData, IndexedRange, MemoryIndex,
+    Range as MemoryRange,
+};
+pub use merge_proposals::{ContactMerge, ContactMerges, MergeProposals, NewMergeProposal};
+pub use party_rows::{ContactQuery, NewParty, Party, PartyPatch};
+pub use passkey_rows::{PasskeyInfo, PasskeyRows};
+pub use project_rows::{ProjectRows, TagRows};
+pub use revisions::Revisions;
+pub use run_rows::{NewRun, NewStep, RunRow, RunRows, RunStep, StartupRecord};
+pub use signal_rows::{
+    NewCorrection, NewSignal, SignalFilter, SignalRow, SignalRows, SignalTriage,
+};
 pub(crate) use sqlite::Sqlite;
+pub use steward_rows::{Key as StewardKey, Steward, Stewards};
+pub use systems::{System, Systems, builtin_system_name, is_builtin_system};
+pub use team_rows::{Details as TeamDetails, MembershipRow, SyncedTeam, TeamRef, Teams};
+pub use user_rows::{AuthSessions, UserRows};
+pub use workspace_settings::{HTTP_ALLOW_PRIVATE, WorkspaceSettings};
+pub use workspaces::{Members, Workspaces};
 
 use crate::{BusEvent, Result, Store, StoreError, Tx};
 
@@ -159,6 +239,27 @@ impl Store {
         end?;
         Ok(v)
     }
+
+    /// Read a database file without starting the Hub or modifying the file.
+    pub fn read_file<T>(
+        path: &std::path::Path,
+        f: impl FnOnce(&mut R<'_>) -> Result<T>,
+    ) -> Result<T> {
+        let c = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        c.pragma_update(None, "query_only", true)?;
+        read_snapshot(&c, f)
+    }
+}
+
+fn read_snapshot<T>(c: &Connection, f: impl FnOnce(&mut R<'_>) -> Result<T>) -> Result<T> {
+    let mut db = Sqlite(c);
+    db.begin_read()?;
+    let _end = EndRead(c);
+    let out = f(&mut R { db: &mut db });
+    let end = db.batch("COMMIT");
+    let v = out?;
+    end?;
+    Ok(v)
 }
 
 struct EndRead<'c>(&'c Connection);
@@ -175,6 +276,15 @@ impl<'a> W<'a> {
     /// Published after the commit; dropped if this write, or the scope it is in, rolls back.
     pub fn emit(&mut self, e: impl Into<BusEvent>) {
         self.store.emit_event(e.into());
+    }
+
+    pub(crate) fn diagnostic(&self, event: crate::diagnostics::Record) {
+        self.store.stage_diagnostic(event);
+    }
+
+    pub(crate) fn outbox_changed(&self) {
+        let staged = self.store.try_stage_outbox();
+        debug_assert!(staged, "a contract write has an active transaction");
     }
 
     /// A nested scope (SAVEPOINT): if `f` fails, it alone is rolled back, with what it emitted,
@@ -199,10 +309,6 @@ impl<'a> W<'a> {
         exec_on(self.db, s)
     }
 
-    pub(crate) fn mark_outbox(&self) {
-        self.store.try_stage_outbox();
-    }
-
     pub(crate) fn dialect(&self) -> Dialect {
         self.db.dialect()
     }
@@ -211,7 +317,7 @@ impl<'a> W<'a> {
 /// Runs a statement on `db` (for store internals that share one between the contract and code
 /// not on it yet).
 pub(crate) fn exec_on<S: QueryStatementWriter>(db: &mut dyn Backend, s: &S) -> Result<u64> {
-    let (sql, values) = db.dialect().render(s);
+    let (sql, values) = db.dialect().render(s)?;
     db.exec(&sql, &values)
 }
 
@@ -222,15 +328,23 @@ mod sealed {
     pub trait Q {
         fn db(&mut self) -> &mut dyn Backend;
 
+        fn scan<S: QueryStatementWriter>(
+            &mut self,
+            s: &S,
+            mut visit: impl FnMut(&Row<'_>) -> Result<()>,
+        ) -> Result<()> {
+            let db = self.db();
+            let (sql, values) = db.dialect().render(s)?;
+            db.query(&sql, &values, &mut visit)
+        }
+
         fn all<S: QueryStatementWriter, T>(
             &mut self,
             s: &S,
             mut f: impl FnMut(&Row<'_>) -> Result<T>,
         ) -> Result<Vec<T>> {
-            let db = self.db();
-            let (sql, values) = db.dialect().render(s);
             let mut out = vec![];
-            db.query(&sql, &values, &mut |r| {
+            self.scan(s, |r| {
                 out.push(f(r)?);
                 Ok(())
             })?;
@@ -251,6 +365,32 @@ pub(crate) use sealed::Q;
 
 /// Both a read snapshot and the write transaction can read (the write sees its own writes).
 pub trait Read: sealed::Q {}
+
+fn next_deadline(
+    r: &mut impl Read,
+    query: &mut sea_query::SelectStatement,
+    at: sea_query::Expr,
+    now: i64,
+) -> Result<Option<i64>> {
+    use sea_query::{Expr, ExprTrait, Func};
+    let invalid = r.db().dialect().invalid_integer(at.clone());
+    let (next, malformed): (Option<i64>, i64) = r
+        .one(
+            query
+                .expr(Func::min(Expr::case(invalid.clone().not(), at)))
+                .expr(Func::count(Expr::case(
+                    invalid,
+                    Expr::Constant(1_i64.into()),
+                ))),
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?
+        .unwrap_or_default();
+    Ok(if malformed > 0 {
+        Some(next.map_or(now, |at| std::cmp::min(at, now)))
+    } else {
+        next
+    })
+}
 
 impl sealed::Q for R<'_> {
     fn db(&mut self) -> &mut dyn Backend {

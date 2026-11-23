@@ -269,19 +269,14 @@ async fn a_batch_of_day_old_messages_arriving_now_runs_nothing() {
     );
     // the space keeps its own time, and its messages say they are history
     let space = one(&h, "SELECT id FROM spaces WHERE external_id = 'G1'", &[]);
-    let page = h
-        .env
-        .store()
-        .reader(|c| {
-            steve_channels::messages::page(
-                c,
-                space.as_str().unwrap(),
-                steve_modules::testkit::ME,
-                None,
-                50,
-            )
-        })
-        .expect("page");
+    let page = steve_channels::messages::page(
+        h.env.store(),
+        space.as_str().unwrap(),
+        steve_modules::testkit::ME,
+        None,
+        50,
+    )
+    .expect("page");
     assert!(page.iter().all(|m| m.history.as_deref() == Some("late")));
     assert!(
         count(

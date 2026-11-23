@@ -40,7 +40,8 @@ async fn request(f: F, Json(body): Json<Value>) -> ApiResult<Json<Value>> {
         let owner = h
             .env
             .store()
-            .reader(|c| steve_channels::personas::owner_name(c, WS))?;
+            .read::<_, steve_store::StoreError>(|c| Ok(steve_channels::personas::owner_name(c, WS)))
+            .unwrap()?;
         let identity = format!("我是{owner}。");
         h.env.gateway.unscript(H_SAFETY);
         h.env.gateway.script(
@@ -206,9 +207,13 @@ async fn record(
     axum::extract::Query(q): axum::extract::Query<steve_channels::conv_record::RecordQuery>,
 ) -> ApiResult<Json<Value>> {
     let h = active(&f)?;
-    Ok(Json(h.env.store().reader(|c| {
-        steve_channels::conv_record::record(c, WS, &Viewer::bare(WS, ME), &conv, &q)
-    })?))
+    Ok(Json(steve_channels::conv_record::record(
+        h.env.store(),
+        WS,
+        &Viewer::bare(WS, ME),
+        &conv,
+        &q,
+    )?))
 }
 
 #[tokio::test(flavor = "multi_thread")]

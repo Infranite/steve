@@ -101,7 +101,7 @@ fn gateway_day(s: &Store) -> String {
     steve_stats::day(steve_store::now(), steve_stats::tz(zone.as_deref()))
 }
 fn coverage(s: &Store, item: &str, session: &str) -> Coverage {
-    s.reader::<_, steve_store::StoreError>(|c| {
+    s.read::<_, steve_store::StoreError>(|c| {
         let a = views::session(c, session)?.unwrap().1.usage;
         let b = views::item_detail(c, item, AT + 1000, false)?
             .unwrap()
@@ -224,7 +224,7 @@ fn same_inputs_match_after_every_durable_restart_and_one_shot_projection() {
         )
         .unwrap();
         if case.name == "independent_zero_and_cost_only_model" {
-            s.reader::<_, steve_store::StoreError>(|c| {
+            s.read::<_, steve_store::StoreError>(|c| {
                 let calls = steve_store::core_fixture::usage::usage(&s, Some("gateway")).len();
                 assert_eq!(
                     calls, 1,
@@ -251,7 +251,7 @@ fn same_inputs_match_after_every_durable_restart_and_one_shot_projection() {
             .unwrap();
         }
         let gw = s
-            .reader::<_, steve_store::StoreError>(|c| {
+            .read::<_, steve_store::StoreError>(|c| {
                 let d = gateway_day(&s);
                 Ok(metrics::summary(
                     c,
@@ -358,7 +358,7 @@ fn concurrent_calls_have_stable_separate_ownership_without_extra_request_rows() 
             });
         }
     });
-    s.reader::<_, steve_store::StoreError>(|c| {
+    s.read::<_, steve_store::StoreError>(|c| {
         let groups = steve_store::core_fixture::usage::gateway_groups(&s);
         assert_eq!(groups.len(), 4);
         for (id, rows, attempts, duration, failures) in groups {

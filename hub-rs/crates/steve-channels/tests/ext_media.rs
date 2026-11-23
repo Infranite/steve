@@ -158,7 +158,7 @@ async fn a_resource_is_fetched_through_the_view_of_the_receiving_adapter() {
     let shown = h
         .env
         .store()
-        .reader(|c| Ok::<_, steve_store::StoreError>(media::present(c, &msg)))
+        .read(|r| Ok::<_, steve_store::StoreError>(media::present(r, &msg)))
         .expect("present")
         .expect("stored");
     assert_eq!(
@@ -195,7 +195,7 @@ async fn a_resource_is_fetched_only_by_the_adapter_its_key_belongs_to() {
     let shown = h
         .env
         .store()
-        .reader(|c| Ok::<_, steve_store::StoreError>(media::present(c, &msg)))
+        .read(|r| Ok::<_, steve_store::StoreError>(media::present(r, &msg)))
         .expect("present")
         .expect("stored");
     assert!(shown.1[0].get("adapter").is_none(), "{}", shown.1);
@@ -216,7 +216,7 @@ async fn a_resource_is_fetched_only_by_the_adapter_its_key_belongs_to() {
     let shown = h
         .env
         .store()
-        .reader(|c| Ok::<_, steve_store::StoreError>(media::present(c, &msg)))
+        .read(|r| Ok::<_, steve_store::StoreError>(media::present(r, &msg)))
         .expect("present")
         .expect("stored");
     assert_eq!(shown.1[0]["unavailable"], MediaError::Disconnected.reason());

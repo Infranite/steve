@@ -4,14 +4,15 @@
 //! memories and documents), and the memory providers the 来源 tab lists.
 
 use std::collections::HashMap;
+use steve_store::knowledge::{CandidateRows, KnowledgeUses, Memories};
+use steve_store::{Read, References, SessionEvidence};
 
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_modules::{ApiResult, Caller, Modules};
 use steve_store::Result;
-use steve_store::base::mems::{self, Mem, MemFilter};
+use steve_store::base::mems::{Mem, MemFilter};
 
-use crate::repo;
+use steve_store::knowledge::Documents;
 
 /// What kind of origin a memory has, as the page names it: `you` (written by you), `conversation`
 /// (a day of the main conversation), `item` (an item's delivery or its agent), `agent` (an agent
@@ -32,32 +33,27 @@ pub fn origin_kind(m: &Mem, cand_origin: Option<&str>) -> &'static str {
 }
 
 /// The `mem_candidates` row of a memory (kept after it was answered): `(origin, origin_id, evidence)`.
-fn candidate_of(c: &Connection, id: &str) -> Result<Option<(String, String, String)>> {
-    Ok(
-        c.prepare_cached(
-            "SELECT origin, origin_id, evidence FROM mem_candidates WHERE mem_id = ?",
-        )?
-        .query_row([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-        .optional()?,
-    )
+fn candidate_of(c: &mut impl Read, id: &str) -> Result<Option<(String, String, String)>> {
+    CandidateRows(c).evidence(id)
 }
 
-/// Who wrote it, as shown: `None` for you, Steve, a bot's name, or a plugin's id.
-pub fn writer_name(c: &Connection, writer: &str) -> Result<Option<String>> {
+pub fn writer_name(c: &mut impl Read, writer: &str) -> Result<Option<String>> {
     Ok(match writer {
         "" | "me" => None,
         "steve" => Some("Steve".into()),
         w if w.starts_with("plugin:") => Some(w.trim_start_matches("plugin:").to_string()),
-        w => c
-            .prepare_cached("SELECT name FROM bots WHERE id = ?")?
-            .query_row([w], |r| r.get::<_, String>(0))
-            .optional()?
+        w => References(c)
+            .name(&steve_store::base::ObjRef::new("bot", w))?
             .or_else(|| Some(w.to_string())),
     })
 }
 
 /// The link to where a memory came from (empty when there is nothing to open).
-fn origin_href(c: &Connection, m: &Mem, cand: Option<&(String, String, String)>) -> Result<String> {
+fn origin_href(
+    c: &mut impl Read,
+    m: &Mem,
+    cand: Option<&(String, String, String)>,
+) -> Result<String> {
     let id = m.source_id.clone().unwrap_or_default();
     if let Some((origin, oid, _)) = cand {
         match origin.as_str() {
@@ -72,8 +68,9 @@ fn origin_href(c: &Connection, m: &Mem, cand: Option<&(String, String, String)>)
     Ok(match m.source_type.as_str() {
         "item" => format!("#/items/{id}"),
         "message" if id.starts_with("chat:") => {
-            match repo::source_of_kind(c, &m.workspace_id, crate::sources::chat::KIND)? {
-                Some(s) => repo::doc_by_ref(c, &s.id, &id)?
+            match Documents(c).source_of_kind(&m.workspace_id, crate::sources::chat::KIND)? {
+                Some(s) => Documents(c)
+                    .doc_by_ref(&s.id, &id)?
                     .filter(|d| d.status != "deleted")
                     .map(|d| format!("#/knowledge/doc/{}", d.id))
                     .unwrap_or_default(),
@@ -89,7 +86,7 @@ fn origin_href(c: &Connection, m: &Mem, cand: Option<&(String, String, String)>)
 /// `Mem.origin`: `{kind, type, id, label, href, writer, writer_name, evidence}`. `label` is the
 /// stored `source_label` in the request's language (“11-12 的对话”, “ST-12 交付时”, “你写的”),
 /// `evidence` the words it was based on, when it was a candidate first.
-pub fn origin(c: &Connection, m: &Mem) -> Result<Value> {
+pub fn origin(c: &mut impl Read, m: &Mem) -> Result<Value> {
     let cand = candidate_of(c, &m.id)?;
     let href = origin_href(c, m, cand.as_ref())?;
     Ok(json!({
@@ -105,24 +102,12 @@ pub fn origin(c: &Connection, m: &Mem) -> Result<Value> {
 }
 
 /// How often retrieval handed out each object of one type, and when last: `obj_id → (count, last)`.
-pub fn use_counts(c: &Connection, ws: &str, obj_type: &str) -> Result<HashMap<String, (i64, i64)>> {
-    let mut st = c.prepare_cached(
-        "SELECT json_extract(j.value, '$.obj_id'), COUNT(*), MAX(u.created)
-           FROM kb_uses u, json_each(u.hits) j
-          WHERE u.workspace_id = ? AND json_extract(j.value, '$.obj_type') = ?
-          GROUP BY 1",
-    )?;
-    let rows = st.query_map(params![ws, obj_type], |r| {
-        Ok((r.get::<_, Option<String>>(0)?, r.get(1)?, r.get(2)?))
-    })?;
-    let mut out = HashMap::new();
-    for r in rows {
-        let (id, n, last) = r?;
-        if let Some(id) = id {
-            out.insert(id, (n, last));
-        }
-    }
-    Ok(out)
+pub fn use_counts(
+    c: &mut impl Read,
+    ws: &str,
+    obj_type: &str,
+) -> Result<HashMap<String, (i64, i64)>> {
+    KnowledgeUses(c).counts(ws, obj_type)
 }
 
 /// `used: {count, last}` on a memory or document JSON.
@@ -138,16 +123,15 @@ pub fn add_used(v: &mut Value, counts: &HashMap<String, (i64, i64)>) {
 }
 
 /// Where a consumer of knowledge can be opened, and how it is named.
-fn consumer_link(c: &Connection, ctype: &str, cid: &str, query: &str) -> Result<(String, String)> {
+fn consumer_link(
+    c: &mut impl Read,
+    ctype: &str,
+    cid: &str,
+    query: &str,
+) -> Result<(String, String)> {
     Ok(match ctype {
         "session" => {
-            let label: Option<(Option<String>, Option<String>)> = c
-                .prepare_cached("SELECT item_id, bot_id FROM sessions WHERE id = ?")
-                .and_then(|mut st| {
-                    st.query_row([cid], |r| Ok((r.get(0)?, r.get(1)?)))
-                        .optional()
-                })
-                .unwrap_or(None);
+            let label = SessionEvidence(c).item_bot(cid)?;
             let item = label.and_then(|x| x.0);
             (
                 format!("#/sessions/{cid}"),
@@ -180,7 +164,7 @@ fn urlencoding(s: &str) -> String {
 /// The most recent uses of any of `objs` (`(obj_type, obj_id)`), newest first: who was given it
 /// (`consumer_type`, a link and a name), the query, the object and when.
 pub fn recent_uses(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     objs: &[(String, String)],
     limit: usize,
@@ -190,30 +174,20 @@ pub fn recent_uses(
     }
     let want: std::collections::HashSet<(&str, &str)> =
         objs.iter().map(|(t, i)| (t.as_str(), i.as_str())).collect();
-    let mut st = c.prepare_cached(
-        "SELECT u.consumer_type, u.consumer_id, u.query, u.created,
-                json_extract(j.value, '$.obj_type'), json_extract(j.value, '$.obj_id'),
-                json_extract(j.value, '$.label')
-           FROM kb_uses u, json_each(u.hits) j
-          WHERE u.workspace_id = ? AND json_extract(j.value, '$.obj_type') IN ('mem', 'chunk')
-          ORDER BY u.created DESC, u.rowid DESC",
-    )?;
-    let rows = st.query_map([ws], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, i64>(3)?,
-            r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-            r.get::<_, Option<String>>(5)?.unwrap_or_default(),
-            r.get::<_, Option<String>>(6)?.unwrap_or_default(),
-        ))
-    })?;
+    let rows = KnowledgeUses(c).recent_pieces(ws)?;
     let mut out = Vec::new();
     // one line per consumer and object: a session searched three times shows once
     let mut seen = std::collections::HashSet::new();
     for r in rows {
-        let (ctype, cid, query, created, otype, oid, label) = r?;
+        let steve_store::knowledge::UsedPiece {
+            consumer_type: ctype,
+            consumer_id: cid,
+            query,
+            created,
+            kind: otype,
+            id: oid,
+            label,
+        } = r;
         if !want.contains(&(otype.as_str(), oid.as_str()))
             || !seen.insert((cid.clone(), oid.clone()))
         {
@@ -240,8 +214,8 @@ pub fn providers(m: &Modules, kb: &crate::state::Knowledge, who: &Caller) -> Api
         include_never: true,
         ..MemFilter::default()
     };
-    let list = m.store.reader(|c| {
-        let all = mems::all(c, &viewer, &f)?;
+    let list = m.store.read(|c| {
+        let all = Memories(c).all(&viewer, &f)?;
         let mut groups: Vec<(String, String, [i64; 4], i64)> = Vec::new();
         for x in &all {
             let cand = candidate_of(c, &x.id)?;

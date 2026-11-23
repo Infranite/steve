@@ -83,64 +83,23 @@ pub enum When {
     OtherGroup,
 }
 
-/// `item.mode` of `create_item`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum ItemMode {
-    Start,
-    Propose,
-}
+pub use steve_store::channel_sends::{Act, ItemMode};
 
-impl ItemMode {
-    pub fn code(self) -> &'static str {
-        match self {
-            Self::Start => "start",
-            Self::Propose => "propose",
-        }
+/// The labels used by the Chinese signal and conversation formats.
+pub(crate) fn action_label(act: Act) -> &'static str {
+    match act {
+        Act::Reply => "直接回复",
+        Act::Draft => "起草，等你批准",
+        Act::Record => "只记录",
+        Act::CreateItem(_) => "建事项",
+        Act::Handoff => "转给你",
     }
 }
 
-/// `act`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum Act {
-    /// Reply right away (bot accounts only).
-    Reply,
-    /// Draft a reply for your approval.
-    Draft,
-    /// Only the signal of step 2.
-    Record,
-    CreateItem(ItemMode),
-    /// To you: an `ask` decision (and, when not muted, “我请 <主人称呼> 来看。”).
-    Handoff,
-}
-
-impl Act {
-    pub fn code(self) -> &'static str {
-        match self {
-            Self::Reply => "reply",
-            Self::Draft => "draft",
-            Self::Record => "record",
-            Self::CreateItem(_) => "create_item",
-            Self::Handoff => "handoff",
-        }
-    }
-
-    /// The Chinese label (the prototype's wording), for signals and logs.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Reply => "直接回复",
-            Self::Draft => "起草，等你批准",
-            Self::Record => "只记录",
-            Self::CreateItem(_) => "建事项",
-            Self::Handoff => "转给你",
-        }
-    }
-
-    /// What a muted space does instead.
-    pub fn muted(self) -> Self {
-        match self {
-            Self::Handoff => Self::Handoff,
-            _ => Self::Record,
-        }
+fn quiet_action(act: Act) -> Act {
+    match act {
+        Act::Handoff => Act::Handoff,
+        _ => Act::Record,
     }
 }
 
@@ -555,7 +514,7 @@ pub async fn evaluate(rules: &[Rule], f: &Facts, muted: bool, judge: &dyn Intent
             },
         };
         if hit {
-            let act = if muted { r.act.muted() } else { r.act };
+            let act = if muted { quiet_action(r.act) } else { r.act };
             return Verdict {
                 rule: Some(i),
                 act,
@@ -959,7 +918,7 @@ pub fn compile(rules: &[Rule], space_id: &str, muted: bool, owner: &str) -> Grap
             });
             link(&mut edges, &from, &id);
             let act = if muted {
-                rules[i].act.muted()
+                quiet_action(rules[i].act)
             } else {
                 rules[i].act
             };
@@ -993,7 +952,7 @@ pub fn compile(rules: &[Rule], space_id: &str, muted: bool, owner: &str) -> Grap
         });
         link(&mut edges, &from, &id);
         for (k, r) in rules.iter().enumerate().take(i).skip(start) {
-            let act = if muted { r.act.muted() } else { r.act };
+            let act = if muted { quiet_action(r.act) } else { r.act };
             let label = format!("规则{}", k + 1);
             push_act(&mut nodes, &mut edges, (&id, &label), k, act, muted, owner);
         }
@@ -1071,11 +1030,13 @@ pub fn to_flow(
     let s = crate::spaces::own(tx, viewer, space_id)?;
     let set = crate::spaces::settings(tx, &s.id)?;
     if let Some(f) = &set.flow_id
-        && steve_flow::flows::get(tx, f)?.is_some_and(|f| !f.deleted)
+        && tx
+            .write(|w| steve_flow::flows::get(w, f))?
+            .is_some_and(|f| !f.deleted)
     {
         return Err(ApiError::conflict(steve_i18n::t!(
             "channels.error.already_flow",
-            flow = steve_flow::flows::name_of(tx, f)?
+            flow = tx.write(|w| steve_flow::flows::name_of(w, f))?
         )));
     }
     if set.attention >= crate::spaces::Attention::Quiet {
@@ -1096,7 +1057,7 @@ pub fn to_flow(
             Mode::Bot => crate::spaces::default_bot_rules(),
         });
     let rules = load(set.rules.as_ref().unwrap_or(&account), mode);
-    let owner = crate::personas::owner_name_for_space(tx, ws, &s.id)?;
+    let owner = tx.write(|w| crate::personas::owner_name_for_space(tx, w, ws, &s.id))?;
     let graph = compile(&rules, &s.id, set.muted, &owner);
     let graph = match nodes {
         Some(reg) => steve_flow::graph::validate(&graph.to_value(), reg).map_err(ApiError::rule)?,
@@ -1108,21 +1069,23 @@ pub fn to_flow(
         steve_flow::flows::NAME_MAX - 1,
     );
     let description = format!("由「{label}」的 {} 条响应规则转成", rules.len());
-    let flow_id = steve_flow::flows::create(
-        tx,
-        ws,
-        &viewer.user,
-        &steve_flow::flows::NewFlow {
-            kind: FLOW_KIND,
-            name: &name,
-            description: &description,
-            graph: &graph,
-            origin: "me",
-            origin_label: FLOW_ORIGIN_LABEL,
-            enabled: true,
-        },
-        now,
-    )?;
+    let flow_id = tx.write(|w| {
+        steve_flow::flows::create(
+            w,
+            ws,
+            &viewer.user,
+            &steve_flow::flows::NewFlow {
+                kind: FLOW_KIND,
+                name: &name,
+                description: &description,
+                graph: &graph,
+                origin: "me",
+                origin_label: FLOW_ORIGIN_LABEL,
+                enabled: true,
+            },
+            now,
+        )
+    })?;
     set_flow(
         tx,
         viewer,
@@ -1148,12 +1111,14 @@ pub fn back_to_rules(
     let Some(f) = &set.flow_id else {
         return Ok(());
     };
-    if let Some(row) = steve_flow::flows::get(tx, f)?
+    if let Some(row) = tx.write(|w| steve_flow::flows::get(w, f))?
         && row.workspace_id == viewer.ws
         && !row.deleted
         && row.enabled
     {
-        steve_flow::flows::patch(tx, &row, &viewer.user, None, None, Some(false), now)?;
+        tx.write(|w| {
+            steve_flow::flows::patch(w, &row, &viewer.user, None, None, Some(false), now)
+        })?;
     }
     set_flow(tx, viewer, &s.id, &set, None, "space.flow_off", now)
 }

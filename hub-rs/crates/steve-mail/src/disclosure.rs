@@ -36,8 +36,8 @@ pub(crate) fn inputs(
         .and_then(|b| b["entries"].as_array())
         .cloned()
         .unwrap_or_default();
-    let (knowledge, complete) = store
-        .reader(|c| steve_knowledge::retrieve::knowledge_again(c, &d.workspace_id, &entries))?;
+    let (knowledge, complete) =
+        store.read(|c| steve_knowledge::retrieve::knowledge_again(c, &d.workspace_id, &entries))?;
     let mut draft_model = d
         .basis
         .as_ref()

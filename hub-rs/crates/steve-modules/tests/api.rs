@@ -470,7 +470,7 @@ async fn store_errors_map_to_codes() {
         (e.status(), e.to_string()),
         (404, "没有这个项目".to_string())
     );
-    let e: ApiError = rusqlite::Error::QueryReturnedNoRows.into();
+    let e: ApiError = steve_store::StoreError::Rejected("missing test row".into()).into();
     assert_eq!(e.status(), 500);
     let e = ApiError::Invalid(vec!["a".into(), "b.0".into()]);
     assert_eq!(e.to_string(), "参数不对：a、b.0");

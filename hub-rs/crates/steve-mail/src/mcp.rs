@@ -240,7 +240,7 @@ fn scope(mail: &Mail, cx: &McpCx) -> Result<(Viewer, Vec<ThreadRow>), String> {
                 .0
                 .m
                 .store
-                .reader(|c| steve_knowledge::context::item_viewer(c, &cx.ws, item))?;
+                .read(|c| steve_knowledge::context::item_viewer(c, &cx.ws, item))?;
             if v.user.is_empty() && !cx.user.is_empty() {
                 return Ok(Viewer::bare(&cx.ws, &cx.user));
             }

@@ -549,7 +549,7 @@ pub fn turn(c: &Connection, ws: &str, target: &str) -> ChannelResult<Vec<String>
 /// The turn stored inbound message `target` ends ([`burst`]): the ids and what each says (with the
 /// note on what Steve cannot read of its attachments), oldest first. The earlier messages are marked
 /// as taken by it (`turn_of`) in the same transaction, so from now on no reply of their own is
-/// opened, approved by YOLO or sent ([`stop`]); [`release_turn`] undoes it.
+/// opened, approved by YOLO or sent ([`stop`]); Releasing the turn undoes it.
 pub fn take_turn(tx: &Tx, ws: &str, target: &str) -> ChannelResult<Vec<(String, String)>> {
     let Some((t, space, _)) = said(tx, ws, target)? else {
         return Ok(Vec::new());
@@ -558,35 +558,16 @@ pub fn take_turn(tx: &Tx, ws: &str, target: &str) -> ChannelResult<Vec<(String, 
     let from = t.at - BURST_GAP_MS * BURST_MAX as i64;
     let before = lines(tx, ws, &space, from, t.at, &my)?;
     let ids = burst(&t, &before, BURST_GAP_MS);
-    let mut out = Vec::new();
-    for id in ids {
-        let (text, att): (String, Option<String>) = tx.query_row(
-            "SELECT coalesce(text, ''), attachments FROM chan_messages WHERE id = ?",
-            [&id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        if id != target {
-            tx.execute(
-                "UPDATE chan_messages SET turn_of = ? WHERE id = ?",
-                params![target, id],
-            )?;
-        }
-        let att: Value = att
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or(Value::Null);
-        out.push((id, crate::media::with_unread_note(&text, &att)));
-    }
-    Ok(out)
-}
-
-/// Undoes [`take_turn`] for `target` (its composer gave no answer): the earlier messages are their
-/// own again.
-pub fn release_turn(tx: &Tx, target: &str) -> ChannelResult<()> {
-    tx.execute(
-        "UPDATE chan_messages SET turn_of = NULL WHERE turn_of = ?",
-        [target],
-    )?;
-    Ok(())
+    let messages = tx.write(|w| steve_store::channel_message_repo::turns::claim(w, target, ids))?;
+    Ok(messages
+        .into_iter()
+        .map(|message| {
+            (
+                message.id,
+                crate::media::with_unread_note(&message.text, &message.attachments),
+            )
+        })
+        .collect())
 }
 
 /// What [`supersede`] closes.
@@ -667,14 +648,12 @@ pub fn supersede(
         if !closes(src)? {
             continue;
         }
-        crate::messages::set_status(
-            tx,
-            id,
-            "UPDATE chan_messages SET status = 'discarded' WHERE id = ? AND status = ?",
-            params![id, status],
-        )?;
-        // closed while its disclosure check still ran: the record says the check did not finish
-        crate::basis::checking_stopped(tx, id, crate::outbound::R_DEALT_FIRST)?;
+        tx.write(|w| {
+            use steve_store::channel_message_repo::delivery::{self, SentAt};
+            delivery::transition(w, id, &[status], "discarded", SentAt::Keep)?;
+            // A draft settled before its disclosure check completed.
+            crate::basis::checking_stopped(w, id, crate::outbound::R_DEALT_FIRST)
+        })?;
         if let Some(d) = base::decisions::open_for(tx, ws, SUBJECT_MESSAGE, id)? {
             closed += settle(tx, &d.id, why)? as usize;
         }

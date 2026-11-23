@@ -661,11 +661,8 @@ impl GitHub {
             item.to_string(),
         );
         let r = tokio::task::spawn_blocking(move || {
-            gh.store().write(|tx| {
-                gh.connections()
-                    .vault()
-                    .destroy_item(&tx.legacy(), &ws, &me, &item)
-            })
+            gh.store()
+                .write(|tx| gh.connections().vault().destroy_item(tx, &ws, &me, &item))
         })
         .await;
         if !matches!(r, Ok(Ok(_))) {

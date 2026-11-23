@@ -3,6 +3,8 @@ use sea_query::{Expr, ExprTrait, Order, Query};
 use crate::contract::{Json, Row};
 use crate::{Read, Result};
 
+pub mod lifecycle;
+
 pub struct Connections<'a, C>(&'a mut C);
 
 /// Connection fields that determine provider routing and ownership.
@@ -54,16 +56,25 @@ impl<'a, C: Read> Connections<'a, C> {
         )
     }
 
-    /// Every live connection the provider jobs should consider.
-    pub fn live_sources(&mut self) -> Result<Vec<ConnectionSource>> {
+    pub fn live_for_adapter(&mut self, adapter: &str) -> Result<Vec<ConnectionSource>> {
         self.0.all(
-            Query::select()
-                .columns(COLUMNS)
-                .from("connections")
-                .and_where(Expr::col("status").is_in(["ok", "error"]))
-                .order_by_columns([("created", Order::Asc), ("id", Order::Asc)]),
+            Self::live_query().and_where(Expr::col("adapter").eq(adapter)),
             source,
         )
+    }
+
+    /// Every live connection the provider jobs should consider.
+    pub fn live_sources(&mut self) -> Result<Vec<ConnectionSource>> {
+        self.0.all(&Self::live_query(), source)
+    }
+
+    fn live_query() -> sea_query::SelectStatement {
+        Query::select()
+            .columns(COLUMNS)
+            .from("connections")
+            .and_where(Expr::col("status").is_in(["ok", "error"]))
+            .order_by_columns([("created", Order::Asc), ("id", Order::Asc)])
+            .take()
     }
 }
 
@@ -108,6 +119,28 @@ pub fn installation_connections(
             )
             .order_by("created", Order::Asc),
         |r| r.get(0),
+    )
+}
+
+/// The account a connection represents and the user who connected it.
+pub struct ConnectionOwner {
+    pub account: String,
+    pub user: String,
+}
+
+pub fn owner(r: &mut impl Read, ws: &str, id: &str) -> Result<Option<ConnectionOwner>> {
+    r.one(
+        Query::select()
+            .columns(["account_id", "created_by"])
+            .from("connections")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("id").eq(id)),
+        |row| {
+            Ok(ConnectionOwner {
+                account: row.get(0)?,
+                user: row.get(1)?,
+            })
+        },
     )
 }
 
@@ -197,6 +230,61 @@ pub fn config(c: &mut impl Read, id: &str) -> Result<Option<serde_json::Value>> 
             .from("connections")
             .and_where(Expr::col("id").eq(id)),
         |r| Ok(r.get::<Json<serde_json::Value>>(0)?.0),
+    )
+}
+
+pub struct AdapterConfig {
+    pub id: String,
+    pub adapter: String,
+    pub config: serde_json::Value,
+}
+
+pub fn adapter_configs(r: &mut impl Read, ws: &str, ids: &[String]) -> Result<Vec<AdapterConfig>> {
+    if ids.is_empty() {
+        return Ok(vec![]);
+    }
+    let ids = r.db().dialect().text_array(ids)?;
+    r.all(
+        Query::select()
+            .columns(["id", "adapter", "config"])
+            .from("connections")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("id").in_subquery(ids))
+            .order_by("id", Order::Asc),
+        |row| {
+            Ok(AdapterConfig {
+                id: row.get(0)?,
+                adapter: row.get(1)?,
+                config: row.get::<Json<_>>(2)?.0,
+            })
+        },
+    )
+}
+
+pub fn healthy_configs(
+    r: &mut impl Read,
+    ws: &str,
+    adapter: &str,
+) -> Result<Vec<(String, serde_json::Value)>> {
+    r.all(
+        Query::select()
+            .columns(["id", "config"])
+            .from("connections")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("adapter").eq(adapter))
+            .and_where(Expr::col("status").eq("ok")),
+        |row| Ok((row.get(0)?, row.get::<Json<_>>(1)?.0)),
+    )
+}
+
+pub fn ids_for_adapter(r: &mut impl Read, ws: &str, adapter: &str) -> Result<Vec<String>> {
+    r.all(
+        Query::select()
+            .column("id")
+            .from("connections")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("adapter").eq(adapter)),
+        |row| row.get(0),
     )
 }
 

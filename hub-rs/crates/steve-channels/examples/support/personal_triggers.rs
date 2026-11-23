@@ -146,18 +146,14 @@ impl Fixture {
     }
 
     pub fn record(&self, space: &str) -> Value {
-        self.env
-            .store()
-            .reader(|c| {
-                conv_record::record(
-                    c,
-                    WS,
-                    &Viewer::bare(WS, ME),
-                    &steve_channels::conversations::conv_space(space),
-                    &Default::default(),
-                )
-            })
-            .unwrap()
+        conv_record::record(
+            self.env.store(),
+            WS,
+            &Viewer::bare(WS, ME),
+            &steve_channels::conversations::conv_space(space),
+            &Default::default(),
+        )
+        .unwrap()
     }
 
     pub fn sends(&self) -> usize {

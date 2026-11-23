@@ -240,7 +240,7 @@ fn one(c: &Connection, id: &str) -> ChannelResult<Row> {
 }
 
 /// One line of a thread answer: id, time, who, text, and each attachment with its index.
-fn line(c: &Connection, r: &Row, tz: chrono_tz::Tz, this: &str) -> String {
+fn line(db: &mut impl steve_store::Read, r: &Row, tz: chrono_tz::Tz, this: &str) -> String {
     let who = if r.out {
         format!("{}（Steve 发出）", r.sender)
     } else if r.sender.trim().is_empty() {
@@ -248,7 +248,7 @@ fn line(c: &Connection, r: &Row, tz: chrono_tz::Tz, this: &str) -> String {
     } else {
         r.sender.clone()
     };
-    let (text, atts) = crate::media::present(c, &r.id).unwrap_or((None, json!([])));
+    let (text, atts) = crate::media::present(db, &r.id).unwrap_or((None, json!([])));
     let mut text = if r.status == "recalled" {
         "（已撤回）".to_string()
     } else {
@@ -296,11 +296,11 @@ fn thread(ch: &Channels, scope: &Scope, args: &Value) -> ChannelResult<String> {
     let q = args["message_id"]
         .as_str()
         .ok_or_else(|| bad("message_id"))?;
-    ch.store().reader(|c| -> ChannelResult<String> {
+    ch.store().read(|db| ch.store().reader(|c| -> ChannelResult<String> {
         let level = readable(c, scope)?;
         let id = resolve(c, scope, q)?;
         let target = one(c, &id)?;
-        let tz = crate::im_mcp::tz_of(c, &scope.ws);
+        let tz = crate::im_mcp::tz_of(db, &scope.ws);
         // the root, like the replies and the quoted message, only among messages anyone saw
         let root_id =
             crate::im_context::thread_root(c, &scope.space_id, &id)?.unwrap_or(id.clone());
@@ -357,16 +357,16 @@ fn thread(ch: &Channels, scope: &Scope, args: &Value) -> ChannelResult<String> {
                 "这次的回答在场的人都会读到，只把能对他们说的写进回答。"
             }
         );
-        out.push_str(&line(c, &root, tz, &id));
+        out.push_str(&line(db, &root, tz, &id));
         if let Some(qm) = &quoted {
             out.push_str("\n被引用的消息：\n");
-            out.push_str(&line(c, qm, tz, &id));
+            out.push_str(&line(db, qm, tz, &id));
         }
         let shown_n = replies.len().min(POLICY.thread_replies);
         out.push_str(&format!("\n回复（{shown_n} 条，从早到晚）：\n"));
         let mut cut = false;
         for r in replies.iter().take(POLICY.thread_replies) {
-            let l = line(c, r, tz, &id);
+            let l = line(db, r, tz, &id);
             if out.chars().count() + l.chars().count() > POLICY.thread_answer_max {
                 cut = true;
                 break;
@@ -387,7 +387,7 @@ fn thread(ch: &Channels, scope: &Scope, args: &Value) -> ChannelResult<String> {
         out.push('\n');
         out.push_str(steve_knowledge::tools::LEVELS);
         Ok(out)
-    })
+    }))
 }
 
 async fn media(ch: &Channels, scope: &Scope, args: &Value) -> ChannelResult<Answer> {

@@ -7,9 +7,8 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rusqlite::{Connection, OptionalExtension, ToSql, params, params_from_iter};
 use serde_json::{Value, json};
-use steve_store::Tx;
+use steve_store::{Read, RunRows, SignalRows, W, WorkspaceSettings, Workspaces};
 
 use crate::{FlowCx, FlowResult};
 
@@ -38,14 +37,8 @@ pub fn keep_raw_setting() -> Value {
 
 /// The workspace's `keepRaw` in days (a JSON string or number, or the bare text; anything else →
 /// 7).
-pub fn keep_raw_days(c: &Connection, ws: &str) -> FlowResult<i64> {
-    let v: Option<String> = c
-        .query_row(
-            "SELECT value FROM settings WHERE workspace_id = ? AND key = ?",
-            params![ws, KEEP_RAW],
-            |r| r.get(0),
-        )
-        .optional()?;
+pub fn keep_raw_days(c: &mut impl Read, ws: &str) -> steve_store::Result<i64> {
+    let v = WorkspaceSettings(c).get(ws, KEEP_RAW)?;
     let days = v.and_then(|v| match serde_json::from_str::<Value>(&v) {
         Ok(Value::String(s)) => s.parse::<i64>().ok(),
         Ok(Value::Number(n)) => n.as_i64(),
@@ -73,20 +66,21 @@ pub const DELETE_BATCH: usize = 1000;
 /// [`PURGE_BATCH`] events lose their payload together with the data of the runs that handled them,
 /// then year-old rows go [`DELETE_BATCH`] at a time. Synchronous; [`run`] calls it off the runtime.
 pub fn sweep(cx: &FlowCx, now: i64) -> FlowResult<Swept> {
-    let wss: Vec<String> = cx.store().reader(|c| -> FlowResult<_> {
-        let mut st = c.prepare("SELECT id FROM workspaces")?;
-        let rows = st
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(rows)
+    let policies = cx.store().read(|r| {
+        Workspaces(r)
+            .ids()?
+            .into_iter()
+            .map(|ws| {
+                let days = keep_raw_days(r, &ws)?;
+                Ok((ws, days))
+            })
+            .collect::<steve_store::Result<Vec<_>>>()
     })?;
     let mut out = Swept::default();
-    for ws in wss {
-        let cut = now - cx.store().reader(|c| keep_raw_days(c, &ws))? * 24 * 3_600_000;
+    for (ws, days) in policies {
+        let cut = now - days * 24 * 3_600_000;
         loop {
-            let (runs, payloads) = cx
-                .store()
-                .transaction(|tx| purge_batch(tx, &ws, cut, now))?;
+            let (runs, payloads) = cx.store().write(|w| purge_batch(w, &ws, cut, now))?;
             out.runs += runs;
             out.payloads += payloads;
             if payloads < PURGE_BATCH {
@@ -95,12 +89,10 @@ pub fn sweep(cx: &FlowCx, now: i64) -> FlowResult<Swept> {
         }
     }
     loop {
-        let n = cx.store().transaction(|tx| -> FlowResult<usize> {
-            Ok(tx.execute(
-                "DELETE FROM ext_events WHERE rowid IN (SELECT rowid FROM ext_events WHERE received < ? LIMIT ?)",
-                params![now - KEEP_EVENT_MS, DELETE_BATCH as i64],
-            )?)
-        })?;
+        let n = cx
+            .store()
+            .write(|w| SignalRows(w).delete_before(now - KEEP_EVENT_MS, DELETE_BATCH as u64))?
+            as usize;
         out.events_deleted += n;
         if n < DELETE_BATCH {
             break;
@@ -112,42 +104,14 @@ pub fn sweep(cx: &FlowCx, now: i64) -> FlowResult<Swept> {
 /// Purges up to [`PURGE_BATCH`] of `ws`'s events received before `cut`: their payload, and the
 /// contexts and step data of their runs, in the caller's transaction so the three stay consistent.
 /// Returns `(runs, events)` purged.
-fn purge_batch(tx: &Tx, ws: &str, cut: i64, now: i64) -> FlowResult<(usize, usize)> {
-    let ids: Vec<String> = {
-        let mut st = tx.prepare_cached(
-            "SELECT id FROM ext_events WHERE workspace_id = ? AND received < ? AND payload_purged IS NULL LIMIT ?",
-        )?;
-        st.query_map(params![ws, cut, PURGE_BATCH as i64], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?
-    };
+fn purge_batch(w: &mut W<'_>, ws: &str, cut: i64, now: i64) -> steve_store::Result<(usize, usize)> {
+    let ids = SignalRows(w).with_payload_before(ws, cut, PURGE_BATCH as u64)?;
     if ids.is_empty() {
         return Ok((0, 0));
     }
-    let marks = vec!["?"; ids.len()].join(", ");
-    // the first parameter, then the ids
-    let with = |first: &'static dyn ToSql| -> Vec<&dyn ToSql> {
-        std::iter::once(first)
-            .chain(ids.iter().map(|i| i as &dyn ToSql))
-            .collect()
-    };
-    tx.execute(
-        &format!(
-            "UPDATE flow_run_steps SET input = ?1, output = ?1 WHERE run_id IN (
-               SELECT id FROM flow_runs WHERE event_id IN ({marks}))"
-        ),
-        params_from_iter(with(&PURGED)),
-    )?;
-    let runs = tx.execute(
-        &format!("UPDATE flow_runs SET context = ? WHERE event_id IN ({marks})"),
-        params_from_iter(with(&PURGED)),
-    )?;
-    let mut with_now: Vec<&dyn ToSql> = vec![&now];
-    with_now.extend(ids.iter().map(|i| i as &dyn ToSql));
-    let events = tx.execute(
-        &format!("UPDATE ext_events SET payload = NULL, payload_purged = ? WHERE id IN ({marks})"),
-        params_from_iter(with_now),
-    )?;
-    Ok((runs, events))
+    let runs = RunRows(w).purge_event_data(&ids, PURGED)?;
+    let events = SignalRows(w).purge_payloads(&ids, now)?;
+    Ok((runs as usize, events as usize))
 }
 
 fn report_pass(pass: FlowResult<Swept>) {
@@ -187,7 +151,7 @@ pub fn run(cx: Arc<FlowCx>) -> steve_runtime::Task {
             cx.clone()
                 .blocking(move |_| {
                     // Schedule-run retention formerly lived in the scheduler's polling loop.
-                    cx.store().transaction(|tx| crate::runs::prune(tx, now))?;
+                    cx.store().write(|tx| crate::runs::prune(tx, now))?;
                     sweep(&cx, now)
                 })
                 .await

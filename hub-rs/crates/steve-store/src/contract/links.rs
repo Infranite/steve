@@ -1,6 +1,23 @@
 use crate::{Read, Result};
 use sea_query::{Expr, ExprTrait, Order, Query};
 
+pub fn current_employers(c: &mut impl Read, ws: &str, party: &str) -> Result<Vec<String>> {
+    let end = c.db().dialect().json_field(Expr::col("props"), "to");
+    c.all(
+        Query::select()
+            .column("object_id")
+            .from("links")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("subject_type").eq("party"))
+            .and_where(Expr::col("subject_id").eq(party))
+            .and_where(Expr::col("predicate").eq("works_at"))
+            .and_where(Expr::col("object_type").eq("party"))
+            .and_where(end.is_null())
+            .order_by_columns([("created", Order::Asc), ("object_id", Order::Asc)]),
+        |row| row.get(0),
+    )
+}
+
 pub fn subject_for_object(
     c: &mut impl Read,
     ws: &str,
@@ -76,7 +93,7 @@ pub fn item_subjects(
     newest: bool,
 ) -> Result<Vec<String>> {
     let direction = if newest { Order::Desc } else { Order::Asc };
-    let tie = c.db().dialect().insertion_order("links");
+    let tie = c.db().dialect().insertion_order(Some("links"));
     c.all(
         Query::select()
             .column("subject_id")
@@ -137,5 +154,24 @@ pub fn related(
                 created: r.get(9)?,
             })
         },
+    )
+}
+
+pub fn channel_sources(
+    r: &mut impl Read,
+    ws: &str,
+    items: &[&str],
+) -> Result<Vec<(String, String)>> {
+    let ids = r.db().dialect().text_array(items)?;
+    r.all(
+        Query::select()
+            .columns(["subject_id", "object_id"])
+            .from("links")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("subject_type").eq("item"))
+            .and_where(Expr::col("subject_id").in_subquery(ids))
+            .and_where(Expr::col("predicate").eq("from"))
+            .and_where(Expr::col("object_type").eq("chan_message")),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )
 }

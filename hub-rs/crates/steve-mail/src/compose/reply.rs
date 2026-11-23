@@ -108,13 +108,7 @@ impl Mail {
         self.0.m.store.write(|tx| -> MailResult<()> {
             repo::set_optional_draft_basis(tx, &d.id, d.basis.as_ref())?;
             if !hits.is_empty() {
-                record_use(
-                    &tx.legacy(),
-                    &d.workspace_id,
-                    ("draft", &d.id),
-                    &query,
-                    &hits,
-                )?;
+                record_use(tx, &d.workspace_id, ("draft", &d.id), &query, &hits)?;
             }
             Ok(())
         })?;

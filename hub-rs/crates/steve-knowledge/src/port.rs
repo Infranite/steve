@@ -9,12 +9,11 @@
 //! store that is not available is an error for the caller, never a fall-back to another store (two
 //! stores would drift apart).
 
-use rusqlite::Connection;
-use rusqlite::types::Value as Sql;
-use steve_store::base::{Level, Viewer, Visibility, bind};
-use steve_store::{Result, StoreError};
+use steve_store::base::{Level, Viewer, Visibility};
+pub use steve_store::knowledge::Candidate;
+use steve_store::knowledge::{ChunkFilter, Chunks, Documents};
+use steve_store::{Members, R, Result, StoreError};
 
-use crate::repo;
 use crate::retrieve::{CANDIDATES, Purpose};
 use crate::seg::{fts_query, fts_query_relaxed, is_single_cjk};
 
@@ -40,16 +39,16 @@ pub struct Scope {
 impl Scope {
     /// The scope of `viewer` for `purpose`, optionally only `kinds`.
     pub fn for_viewer(
-        c: &Connection,
+        c: &mut R<'_>,
         viewer: &Viewer,
         purpose: Purpose,
         kinds: Option<&[&str]>,
     ) -> Result<Self> {
         let workspace_only = viewer.is_service()
-            || (purpose == Purpose::Chat && repo::member_count(c, &viewer.ws)? > 1);
+            || (purpose == Purpose::Chat && Members::new(c).count(&viewer.ws)? > 1);
         let mut paused_docs = Vec::new();
         let (mut paused_mems, mut paused_bot_mems) = (false, false);
-        for (id, kind) in repo::paused(c, &viewer.ws)? {
+        for (id, kind) in Documents(c).paused(&viewer.ws)? {
             match kind.as_str() {
                 "mems" => paused_mems = true,
                 "bot_mems" => paused_bot_mems = true,
@@ -84,61 +83,16 @@ impl Scope {
         visible && audience_ok && kind_ok && !paused
     }
 
-    /// The `WHERE` tail on `kb_chunks c` for [`SqliteStore`].
-    fn sql(&self) -> (String, Vec<Sql>) {
-        let vis = self.viewer.sql("c");
-        let mut sql = format!("c.workspace_id = ? AND c.level <> 'never' AND {}", vis.sql);
-        let mut p = vec![Sql::Text(self.viewer.ws.clone())];
-        p.extend(vis.params);
-        if self.workspace_only && !self.viewer.is_service() {
-            sql.push_str(" AND c.visibility = 'workspace'");
+    fn filter(&self) -> ChunkFilter<'_> {
+        ChunkFilter {
+            ws: &self.viewer.ws,
+            workspace_only: self.workspace_only || self.viewer.is_service(),
+            kinds: self.kinds.as_deref(),
+            paused_docs: &self.paused_docs,
+            paused_mems: self.paused_mems,
+            paused_bot_mems: self.paused_bot_mems,
         }
-        if let Some(kinds) = &self.kinds {
-            if kinds.is_empty() {
-                sql.push_str(" AND 0");
-            } else {
-                sql.push_str(&format!(
-                    " AND c.source_kind IN ({})",
-                    vec!["?"; kinds.len()].join(", ")
-                ));
-                p.extend(kinds.iter().map(|k| Sql::Text(k.clone())));
-            }
-        }
-        if self.paused_mems {
-            sql.push_str(" AND c.obj_type <> 'mem'");
-        }
-        if self.paused_bot_mems {
-            sql.push_str(" AND c.obj_type <> 'bot_mem'");
-        }
-        if !self.paused_docs.is_empty() {
-            sql.push_str(&format!(
-                " AND NOT (c.obj_type = 'chunk' AND c.obj_id IN (SELECT id FROM kb_docs WHERE source_id IN ({})))",
-                vec!["?"; self.paused_docs.len()].join(", ")
-            ));
-            p.extend(self.paused_docs.iter().cloned().map(Sql::Text));
-        }
-        (sql, p)
     }
-}
-
-/// One candidate a store found, before the Hub ranks it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Candidate {
-    pub obj_type: String,
-    pub obj_id: String,
-    pub seq: i64,
-    pub heading: String,
-    pub text: String,
-    pub source_kind: String,
-    pub label: String,
-    pub level: Level,
-    pub visibility: Visibility,
-    pub created_by: String,
-    pub updated: i64,
-    /// The store's score, larger = better; only compared within one [`Pass`].
-    pub base: f64,
-    pub title: Option<String>,
-    pub doc_ref: Option<String>,
 }
 
 /// Which query. Keyword matching first (precise, what the retrieval eval tunes); meaning next,
@@ -161,7 +115,7 @@ pub trait KnowledgeStore: Send + Sync {
     /// A store without a pass (no meaning, no relaxed keywords) answers it with nothing.
     fn search(
         &self,
-        c: &Connection,
+        c: &mut R<'_>,
         scope: &Scope,
         text: &str,
         pass: Pass,
@@ -179,56 +133,15 @@ pub fn unavailable(store: &str, why: impl std::fmt::Display) -> StoreError {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SqliteStore;
 
-const COLS: &str = "c.obj_type, c.obj_id, c.seq, c.heading, c.text, c.source_kind, c.label, c.level, c.visibility, c.created_by, c.updated";
-
-fn candidate(r: &rusqlite::Row, base: Option<f64>) -> rusqlite::Result<Candidate> {
-    Ok(Candidate {
-        obj_type: r.get(0)?,
-        obj_id: r.get(1)?,
-        seq: r.get(2)?,
-        heading: r.get(3)?,
-        text: r.get(4)?,
-        source_kind: r.get(5)?,
-        label: r.get(6)?,
-        level: Level::from_db(&r.get::<_, String>(7)?),
-        visibility: Visibility::from_db(&r.get::<_, String>(8)?),
-        created_by: r.get(9)?,
-        updated: r.get(10)?,
-        title: r.get(11)?,
-        doc_ref: r.get(12)?,
-        // bm25 is negative, smaller = better
-        base: match base {
-            Some(b) => b,
-            None => -r.get::<_, f64>(13)?,
-        },
-    })
-}
-
 impl SqliteStore {
-    /// One chunk, if it is inside `scope` (a store that found it elsewhere reads it back here).
     pub fn chunk_in_scope(
-        c: &Connection,
+        c: &mut R<'_>,
         scope: &Scope,
-        obj_type: &str,
-        obj_id: &str,
+        kind: &str,
+        id: &str,
         seq: i64,
     ) -> Result<Option<Candidate>> {
-        let tail = scope.sql();
-        let sql = format!(
-            "SELECT {COLS}, d.title, d.ref FROM kb_chunks c
-               LEFT JOIN kb_docs d ON c.obj_type = 'chunk' AND d.id = c.obj_id
-              WHERE c.obj_type = ? AND c.obj_id = ? AND c.seq = ? AND {} LIMIT 1",
-            tail.0
-        );
-        let mut p = vec![
-            Sql::Text(obj_type.into()),
-            Sql::Text(obj_id.into()),
-            Sql::Integer(seq),
-        ];
-        p.extend(tail.1);
-        let mut st = c.prepare_cached(&sql)?;
-        let mut rows = st.query_map(bind(p), |r| candidate(r, Some(0.0)))?;
-        Ok(rows.next().transpose()?)
+        Chunks(c).chunk_in_scope(&scope.filter(), kind, id, seq)
     }
 }
 
@@ -239,7 +152,7 @@ impl KnowledgeStore for SqliteStore {
 
     fn search(
         &self,
-        c: &Connection,
+        c: &mut R<'_>,
         scope: &Scope,
         text: &str,
         pass: Pass,
@@ -248,25 +161,14 @@ impl KnowledgeStore for SqliteStore {
         if pass == Pass::Semantic {
             return Ok(Vec::new());
         }
-        let tail = scope.sql();
-        let limit = limit.min(CANDIDATES) as i64;
+        let filter = scope.filter();
+        let limit = limit.min(CANDIDATES);
         if is_single_cjk(text) {
-            if pass == Pass::Relaxed {
-                return Ok(Vec::new());
-            }
-            let sql = format!(
-                "SELECT {COLS}, d.title, d.ref FROM kb_chunks c
-                   LEFT JOIN kb_docs d ON c.obj_type = 'chunk' AND d.id = c.obj_id
-                  WHERE ((c.obj_type IN ('mem', 'bot_mem') AND instr(c.text, ?) > 0)
-                      OR (c.obj_type = 'chunk' AND c.seq = 0 AND instr(d.title, ?) > 0))
-                    AND {} ORDER BY c.updated DESC LIMIT {limit}",
-                tail.0
-            );
-            let mut p = vec![Sql::Text(text.into()), Sql::Text(text.into())];
-            p.extend(tail.1);
-            let mut st = c.prepare_cached(&sql)?;
-            let rows = st.query_map(bind(p), |r| candidate(r, Some(1.0)))?;
-            return Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?);
+            return if pass == Pass::Relaxed {
+                Ok(Vec::new())
+            } else {
+                Chunks(c).containing(&filter, text, limit)
+            };
         }
         let expr = match pass {
             Pass::Strict => fts_query(text),
@@ -279,18 +181,7 @@ impl KnowledgeStore for SqliteStore {
         let Some(expr) = expr else {
             return Ok(Vec::new());
         };
-        let sql = format!(
-            "SELECT {COLS}, d.title, d.ref, bm25(kb_fts, 1.0, 2.0) AS r
-               FROM kb_fts JOIN kb_chunks c ON c.id = kb_fts.rowid
-               LEFT JOIN kb_docs d ON c.obj_type = 'chunk' AND d.id = c.obj_id
-              WHERE kb_fts MATCH ? AND {} ORDER BY r LIMIT {limit}",
-            tail.0
-        );
-        let mut p = vec![Sql::Text(expr)];
-        p.extend(tail.1);
-        let mut st = c.prepare_cached(&sql)?;
-        let rows = st.query_map(bind(p), |r| candidate(r, None))?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        Chunks(c).fulltext(&filter, &expr, limit)
     }
 }
 

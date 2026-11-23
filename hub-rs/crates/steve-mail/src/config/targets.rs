@@ -13,7 +13,7 @@ use serde_json::{Map, Value, json};
 use steve_modules::changes::{Candidate, ChangeOp, DraftTarget, FieldSpec, OpCx, Plan, Prepared};
 use steve_modules::{ApiError, ApiResult, Registry};
 use steve_store::base::{Change, Viewer, show};
-use steve_store::{Tx, now};
+use steve_store::now;
 use steve_store::{accounts, connections, parties};
 
 use crate::repo::{self, AccountSettings};
@@ -324,44 +324,46 @@ fn check(c: &mut impl steve_store::Read, cx: &OpCx, op: &Value) -> ApiResult<()>
 }
 
 impl ChangeOp for PatchOp {
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
-        tx.write(|tx| {
-            let id = conn_of(op);
-            check(tx, cx, op)?;
-            let before = current(tx, id)?;
-            settings::patch_tx(tx, cx.ws, cx.actor, id, &parse_patch(op)?, now()).map_err(api)?;
-            Ok(settings::fields(&before))
-        })
+    fn apply(&self, tx: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let id = conn_of(op);
+        check(tx, cx, op)?;
+        let before = current(tx, id)?;
+        settings::patch_tx(tx, cx.ws, cx.actor, id, &parse_patch(op)?, now()).map_err(api)?;
+        Ok(settings::fields(&before))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
-        tx.write(|tx| {
-            let id = conn_of(op);
-            let cur = current(tx, id)?;
-            let mut back = cur.clone();
-            if let Some(v) = before["signature"].as_str() {
-                back.signature = v.into();
-            }
-            if let Some(v) = before["duty"].as_str() {
-                back.duty = v.into();
-            }
-            if let Some(v) = before["send_delay_s"].as_i64() {
-                back.send_delay_s = v;
-            }
-            if let Some(v) = before["archive_on_done"].as_bool() {
-                back.archive_on_done = v;
-            }
-            if let Some(v) = before["sync_days"].as_i64() {
-                back.sync_days = v;
-            }
-            if let Some(v) = before["append_sent"].as_str() {
-                back.append_sent = v.into();
-            }
-            if back == cur {
-                return Ok(());
-            }
-            settings::write_tx(tx, cx.ws, cx.actor, id, &cur, &back, now()).map_err(api)
-        })
+    fn undo(
+        &self,
+        tx: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let id = conn_of(op);
+        let cur = current(tx, id)?;
+        let mut back = cur.clone();
+        if let Some(v) = before["signature"].as_str() {
+            back.signature = v.into();
+        }
+        if let Some(v) = before["duty"].as_str() {
+            back.duty = v.into();
+        }
+        if let Some(v) = before["send_delay_s"].as_i64() {
+            back.send_delay_s = v;
+        }
+        if let Some(v) = before["archive_on_done"].as_bool() {
+            back.archive_on_done = v;
+        }
+        if let Some(v) = before["sync_days"].as_i64() {
+            back.sync_days = v;
+        }
+        if let Some(v) = before["append_sent"].as_str() {
+            back.append_sent = v.into();
+        }
+        if back == cur {
+            return Ok(());
+        }
+        settings::write_tx(tx, cx.ws, cx.actor, id, &cur, &back, now()).map_err(api)
     }
 }
 

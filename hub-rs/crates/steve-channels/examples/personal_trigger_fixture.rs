@@ -81,9 +81,13 @@ async fn record(
     Query(q): Query<steve_channels::conv_record::RecordQuery>,
 ) -> steve_modules::ApiResult<Json<Value>> {
     let viewer = f.env.modules.viewer(&caller(WS, ME))?;
-    Ok(Json(f.env.store().reader(|c| {
-        steve_channels::conv_record::record(c, WS, &viewer, &conv, &q)
-    })?))
+    Ok(Json(steve_channels::conv_record::record(
+        f.env.store(),
+        WS,
+        &viewer,
+        &conv,
+        &q,
+    )?))
 }
 
 #[tokio::main]

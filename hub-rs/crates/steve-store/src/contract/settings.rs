@@ -12,6 +12,14 @@ impl<'a, C: Read> Settings<'a, C> {
 
     /// The workspace's configured zone name. The caller resolves the system default.
     pub fn timezone(&mut self, ws: &str) -> Result<Option<String>> {
+        self.text(ws, "tz")
+    }
+
+    pub fn quiet_hours(&mut self, ws: &str) -> Result<Option<String>> {
+        self.text(ws, "quiet")
+    }
+
+    fn text(&mut self, ws: &str, key: &str) -> Result<Option<String>> {
         let value = self
             .0
             .one(
@@ -19,7 +27,7 @@ impl<'a, C: Read> Settings<'a, C> {
                     .column("value")
                     .from("settings")
                     .and_where(Expr::col("workspace_id").eq(ws))
-                    .and_where(Expr::col("key").eq("tz")),
+                    .and_where(Expr::col("key").eq(key)),
                 |r| r.get::<Option<String>>(0),
             )?
             .flatten();

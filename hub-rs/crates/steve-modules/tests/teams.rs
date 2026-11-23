@@ -3,9 +3,9 @@
 //! legacy visibility metadata is retained — plus the other branches of the `/teams` routes.
 
 use std::sync::{Arc, Mutex};
+use steve_store::testkit::modules::teams as fixture;
 
 use axum::Router;
-use rusqlite::Connection;
 use serde_json::{Value, json};
 use steve_modules::contacts::{self, Ports, SpacePort, TeamSync};
 use steve_modules::testkit::{ME, TestEnv, WS, WS2, call, caller};
@@ -38,24 +38,6 @@ async fn req(
 
 fn err(msg: &str) -> Value {
     json!({ "error": msg })
-}
-
-fn count(t: &TestEnv, sql: &str) -> i64 {
-    t.store()
-        .with_conn(|c| Ok(c.query_row(sql, [], |r| r.get(0))?))
-        .expect("count")
-}
-
-fn text(t: &TestEnv, sql: &str) -> String {
-    t.store()
-        .with_conn(|c| Ok(c.query_row(sql, [], |r| r.get(0))?))
-        .expect("text")
-}
-
-fn exec(t: &TestEnv, sql: &str) {
-    t.store()
-        .with_conn(|c| Ok(c.execute_batch(sql)?))
-        .expect("exec");
 }
 
 fn id(v: &Value) -> String {
@@ -92,19 +74,6 @@ fn party_events(t: &TestEnv) -> Vec<String> {
 }
 
 /// An org-chart team as the directory sync (P6) would write it.
-fn chart_team(t: &TestEnv, id: &str, name: &str, parent: Option<&str>, members: &[&str]) {
-    let parent = parent.map_or("NULL".to_string(), |p| format!("'{p}'"));
-    let mut sql = format!(
-        "INSERT INTO parties (id, workspace_id, type, name, source, created_by, created, updated) VALUES ('{id}', 'default', 'team', '{name}', 'sync', 'usr_dev', 1, 1);
-         INSERT INTO team_details (party_id, workspace_id, kind, parent_id, sync_connection, external_id, synced) VALUES ('{id}', 'default', 'chart', {parent}, 'con_fs', 'dep_{id}', 1700000000000);"
-    );
-    for m in members {
-        sql.push_str(&format!(
-            "INSERT INTO team_members (workspace_id, team_id, contact_id, role, source, joined) VALUES ('default', '{id}', '{m}', 'member', 'sync', 1);"
-        ));
-    }
-    exec(t, &sql);
-}
 
 // ---------------------------------------------------------------- virtual teams
 
@@ -163,13 +132,7 @@ async fn create_virtual_team_and_validation() {
     assert_eq!(tm["members"][0]["source"], "manual");
     assert_eq!(tm["members"][0]["external"], false);
     assert_eq!(party_events(&t), vec![id(&tm)], "one event");
-    assert_eq!(
-        count(
-            &t,
-            "SELECT COUNT(*) FROM audit WHERE action = 'team.create'"
-        ),
-        1
-    );
+    assert_eq!(fixture::team_create_audits(t.store()).unwrap(), 1);
     // the contact page lists the team
     let (_, c) = req(&r, &me(), "GET", &format!("/contacts/{lilei}"), None).await;
     assert_eq!(
@@ -275,11 +238,8 @@ async fn create_virtual_team_and_validation() {
     .await;
     assert_eq!((s, b), (400, err("参数不对：visibility")));
     // nothing was written by the refused requests
-    assert_eq!(
-        count(&t, "SELECT COUNT(*) FROM parties WHERE type = 'team'"),
-        1
-    );
-    assert_eq!(count(&t, "SELECT COUNT(*) FROM team_members"), 3);
+    assert_eq!(fixture::team_count(t.store()).unwrap(), 1);
+    assert_eq!(fixture::membership_count(t.store()).unwrap(), 3);
 }
 
 #[tokio::test]
@@ -371,11 +331,8 @@ async fn replacing_members_writes_a_revision_and_one_event() {
         vec![tid.clone()],
         "one event for the whole list"
     );
-    let patch: Value = serde_json::from_str(&text(
-        &t,
-        &format!("SELECT patch FROM revisions WHERE object_id = '{tid}' ORDER BY id DESC LIMIT 1"),
-    ))
-    .unwrap();
+    let patch: Value =
+        serde_json::from_str(&fixture::revision_patch(t.store(), &tid).unwrap()).unwrap();
     assert_eq!(
         patch,
         json!({
@@ -383,22 +340,8 @@ async fn replacing_members_writes_a_revision_and_one_event() {
             "after": {"members": [{"contact_id": a, "role": "lead"}, {"contact_id": c, "role": "member"}]}
         })
     );
-    assert_eq!(
-        count(
-            &t,
-            &format!(
-                "SELECT version FROM revisions WHERE object_id = '{tid}' ORDER BY id DESC LIMIT 1"
-            )
-        ),
-        2
-    );
-    assert_eq!(
-        count(
-            &t,
-            "SELECT COUNT(*) FROM audit WHERE action = 'team.members'"
-        ),
-        1
-    );
+    assert_eq!(fixture::revision_version(t.store(), &tid).unwrap(), 2);
+    assert_eq!(fixture::member_audits(t.store()).unwrap(), 1);
     // the same list again changes nothing
     let (s, same) = req(
         &r,
@@ -478,10 +421,7 @@ async fn replacing_members_writes_a_revision_and_one_event() {
 async fn patch_virtual_team() {
     let t = env();
     let r = app(&t, Ports::default());
-    exec(
-        &t,
-        "INSERT INTO tags (id, workspace_id, name, cat, description, created_by, created) VALUES ('tag_a', 'default', 'A', '客户', '', 'usr_dev', 1), ('tag_w2', 'w2', 'B', '客户', '', 'usr_dev', 1);",
-    );
+    fixture::seed_cross_workspace_tags(t.store()).unwrap();
     let a = contact(&r, &me(), "甲").await;
     let tm = new_team(
         &r,
@@ -505,11 +445,8 @@ async fn patch_virtual_team() {
     assert_eq!(got["visibility"], "private");
     assert_eq!(got["revision"], 2);
     assert_eq!(party_events(&t), vec![tid.clone()]);
-    let patch: Value = serde_json::from_str(&text(
-        &t,
-        &format!("SELECT patch FROM revisions WHERE object_id = '{tid}' ORDER BY id DESC LIMIT 1"),
-    ))
-    .unwrap();
+    let patch: Value =
+        serde_json::from_str(&fixture::revision_patch(t.store(), &tid).unwrap()).unwrap();
     assert_eq!(
         patch,
         json!({
@@ -699,13 +636,7 @@ async fn dissolving_a_virtual_team() {
     )
     .await;
     assert_eq!(s, 404);
-    assert_eq!(
-        count(
-            &t,
-            "SELECT COUNT(*) FROM audit WHERE action = 'team.dissolve'"
-        ),
-        1
-    );
+    assert_eq!(fixture::dissolution_audits(t.store()).unwrap(), 1);
 }
 
 // ---------------------------------------------------------------- org-chart teams
@@ -717,10 +648,10 @@ async fn org_chart_teams_follow_the_sync() {
     let mine = me_id(&r, &me()).await;
     let a = contact(&r, &me(), "甲").await;
     let b = contact(&r, &me(), "乙").await;
-    chart_team(&t, "tm_root", "易人实验室", None, &[&mine]);
-    chart_team(&t, "tm_rd", "研发", Some("tm_root"), &[&mine, &a]);
-    chart_team(&t, "tm_steve", "Steve 组", Some("tm_rd"), &[&a, &b]);
-    chart_team(&t, "tm_infra", "基础设施组", Some("tm_rd"), &[]);
+    fixture::chart_team(t.store(), "tm_root", "易人实验室", None, &[&mine]);
+    fixture::chart_team(t.store(), "tm_rd", "研发", Some("tm_root"), &[&mine, &a]);
+    fixture::chart_team(t.store(), "tm_steve", "Steve 组", Some("tm_rd"), &[&a, &b]);
+    fixture::chart_team(t.store(), "tm_infra", "基础设施组", Some("tm_rd"), &[]);
 
     for (field, value) in [("name", json!("新名字")), ("visibility", json!("private"))] {
         let (s, e) = req(
@@ -807,10 +738,7 @@ async fn org_chart_teams_follow_the_sync() {
         json!({"connection_id": "con_fs", "label": "通讯录", "at": 1700000000000i64})
     );
     // a deleted contact or dissolved sub-team no longer counts
-    exec(
-        &t,
-        "UPDATE parties SET status = 'dissolved' WHERE id = 'tm_steve'",
-    );
+    fixture::dissolve_steve_team(t.store()).unwrap();
     let (_, rd) = req(&r, &me(), "GET", "/teams/tm_rd", None).await;
     assert_eq!(rd["headcount"], 2);
     assert_eq!(rd["children"], json!(["tm_infra"]));
@@ -822,10 +750,7 @@ async fn org_chart_teams_follow_the_sync() {
     .await;
     assert_eq!(tm["headcount"], 2);
     // a sub-team whose parent is gone starts its own tree
-    exec(
-        &t,
-        "UPDATE parties SET status = 'active' WHERE id = 'tm_steve'; UPDATE parties SET status = 'dissolved' WHERE id = 'tm_rd';",
-    );
+    fixture::swap_dissolved_teams(t.store()).unwrap();
     let (_, list) = req(&r, &me(), "GET", "/teams", None).await;
     let rows: Vec<(String, i64)> = list["chart"]
         .as_array()
@@ -892,7 +817,7 @@ async fn sync_label_and_scheduling_go_through_the_sync_port() {
     .await;
     assert_eq!((s, e), (400, err("参数不对：connection_id")));
 
-    chart_team(&t, "tm_root", "易人实验室", None, &[]);
+    fixture::chart_team(t.store(), "tm_root", "易人实验室", None, &[]);
     let (_, list) = req(&r, &me(), "GET", "/teams", None).await;
     assert_eq!(list["sync"]["label"], "飞书通讯录");
     assert!(
@@ -910,7 +835,7 @@ async fn sync_label_and_scheduling_go_through_the_sync_port() {
 struct FakeSpaces;
 
 impl SpacePort for FakeSpaces {
-    fn visible(&self, _: &Connection, viewer: &Viewer, space_id: &str) -> ApiResult<bool> {
+    fn visible(&self, _: &steve_store::Store, viewer: &Viewer, space_id: &str) -> ApiResult<bool> {
         Ok(viewer.ws == WS && space_id == "spc_1")
     }
 }
@@ -923,13 +848,18 @@ struct FakeSync {
 }
 
 impl TeamSync for FakeSync {
-    fn label(&self, _: &Connection, _: &str, connection_id: &str) -> ApiResult<Option<String>> {
+    fn label(
+        &self,
+        _: &mut steve_store::R<'_>,
+        _: &str,
+        connection_id: &str,
+    ) -> ApiResult<Option<String>> {
         Ok((connection_id == "con_fs").then(|| "飞书通讯录".to_string()))
     }
 
     fn schedule(
         &self,
-        _: &Connection,
+        _: &mut steve_store::R<'_>,
         ws: &str,
         actor: &str,
         connection_id: Option<&str>,

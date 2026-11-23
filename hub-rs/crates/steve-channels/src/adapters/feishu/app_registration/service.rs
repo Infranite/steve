@@ -8,12 +8,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_modules::accounts::connections::Connections;
 use steve_modules::vault::{VaultError, VaultResult};
 use steve_modules::{ApiError, Caller, Modules};
-use steve_store::{Tx, uid};
+use steve_store::feishu_registration::{self as repo, Registration as Row};
+use steve_store::{R, W, uid};
+
+pub use steve_store::feishu_registration::state;
 use zeroize::Zeroizing;
 
 use super::super::auth::{APP_ADAPTER, APP_SECRET};
@@ -30,20 +32,6 @@ const ITEM_TITLE: &str = "飞书应用（注册中）";
 const TICKET_TITLE: &str = "飞书应用注册确认码";
 /// Its one field.
 const TICKET_FIELD: &str = "device_code";
-
-/// The row states.
-pub mod state {
-    pub const PENDING: &str = "pending";
-    pub const SAVED: &str = "credentials_saved";
-    pub const VERIFYING: &str = "verifying";
-    pub const SUCCEEDED: &str = "succeeded";
-    pub const DENIED: &str = "denied";
-    pub const EXPIRED: &str = "expired";
-    pub const FAILED: &str = "failed";
-    pub const CANCELLED: &str = "cancelled";
-    /// Active: holds the person's single slot.
-    pub const ACTIVE: [&str; 3] = [PENDING, SAVED, VERIFYING];
-}
 
 /// Our own error kinds and texts (never the provider's).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,77 +106,13 @@ impl Kind {
     }
 }
 
-/// One row.
-#[derive(Debug, Clone)]
-struct Row {
-    id: String,
-    ws: String,
-    initiator: String,
-    _brand_requested: String,
-    brand: String,
-    switched: bool,
-    device_item: Option<String>,
-    user_code: Option<String>,
-    verification_uri_complete: Option<String>,
-    interval_s: i64,
-    expires_at: i64,
-    state: String,
-    error: Option<String>,
-    error_kind: Option<String>,
-    app_may_exist: bool,
-    client_id: Option<String>,
-    vault_item: Option<String>,
-    connection_id: Option<String>,
-    account_id: Option<String>,
+trait RegistrationView {
+    fn who(&self) -> Caller;
+    fn brand(&self) -> Brand;
+    fn out(&self) -> Value;
 }
 
-const COLS: &str = "id, workspace_id, initiator, brand_requested, brand, switched, device_item, user_code, \
-     verification_uri_complete, interval_s, expires_at, state, error, error_kind, app_may_exist, client_id, \
-     vault_item, connection_id, account_id";
-
-fn row_of(r: &rusqlite::Row) -> rusqlite::Result<Row> {
-    Ok(Row {
-        id: r.get(0)?,
-        ws: r.get(1)?,
-        initiator: r.get(2)?,
-        _brand_requested: r.get(3)?,
-        brand: r.get(4)?,
-        switched: r.get::<_, i64>(5)? != 0,
-        device_item: r.get(6)?,
-        user_code: r.get(7)?,
-        verification_uri_complete: r.get(8)?,
-        interval_s: r.get(9)?,
-        expires_at: r.get(10)?,
-        state: r.get(11)?,
-        error: r.get(12)?,
-        error_kind: r.get(13)?,
-        app_may_exist: r.get::<_, i64>(14)? != 0,
-        client_id: r.get(15)?,
-        vault_item: r.get(16)?,
-        connection_id: r.get(17)?,
-        account_id: r.get(18)?,
-    })
-}
-
-fn load(c: &rusqlite::Connection, id: &str) -> rusqlite::Result<Option<Row>> {
-    c.query_row(
-        &format!("SELECT {COLS} FROM chan_app_registrations WHERE id = ?"),
-        [id],
-        row_of,
-    )
-    .optional()
-}
-
-/// Whether `user` is (still) a member of `ws` — the real membership, not visibility.
-fn is_member(c: &rusqlite::Connection, ws: &str, user: &str) -> rusqlite::Result<bool> {
-    c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?)",
-        params![ws, user],
-        |x| x.get(0),
-    )
-}
-
-impl Row {
+impl RegistrationView for Row {
     fn who(&self) -> Caller {
         Caller {
             ws: self.ws.clone(),
@@ -286,30 +210,23 @@ impl Registrations {
         self.modules().clock.now()
     }
 
-    fn read<T>(
-        &self,
-        f: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>,
-    ) -> VaultResult<T> {
-        Ok(self
-            .modules()
-            .store
-            .with_conn(|c| Ok(f(c)?))
-            .map_err(store_err)?)
+    fn read<T>(&self, f: impl FnOnce(&mut R<'_>) -> steve_store::Result<T>) -> VaultResult<T> {
+        Ok(self.modules().store.read(f).map_err(store_err)?)
     }
 
-    fn tx<T>(&self, f: impl FnOnce(&Tx) -> VaultResult<T>) -> VaultResult<T> {
-        self.modules().store.transaction(f)
+    fn write<T>(&self, f: impl FnOnce(&mut W<'_>) -> VaultResult<T>) -> VaultResult<T> {
+        self.modules().store.write(f)
     }
 
     /// The caller's own attempt `id` (404 for anyone else's).
     fn own(&self, who: &Caller, id: &str) -> VaultResult<Row> {
-        self.read(|c| load(c, id))?
+        self.read(|c| repo::get(c, id))?
             .filter(|r| r.ws == who.ws && r.initiator == who.me)
             .ok_or_else(|| ApiError::not_found("应用注册").into())
     }
 
     /// Settles an overdue `pending` row as expired (any reader may); returns whether it did.
-    fn settle_overdue(&self, tx: &Tx, r: &Row) -> VaultResult<bool> {
+    fn settle_overdue(&self, tx: &mut W<'_>, r: &Row) -> VaultResult<bool> {
         if r.state != state::PENDING || r.expires_at > self.now() {
             return Ok(false);
         }
@@ -318,31 +235,24 @@ impl Registrations {
             return Ok(false);
         }
         self.drop_ticket(tx, &r.id)?;
-        Ok(tx.execute(
-            "UPDATE chan_app_registrations SET state = ?, error = ?, error_kind = ?, updated = ?
-              WHERE id = ? AND state = ?",
-            params![
-                state::EXPIRED,
-                Kind::Expired.text(),
-                Kind::Expired.code(),
-                self.now(),
-                r.id,
-                state::PENDING
-            ],
-        )? == 1)
+        Ok(repo::finish_pending(
+            tx,
+            &r.id,
+            state::EXPIRED,
+            (Kind::Expired.text(), Kind::Expired.code()),
+            false,
+            self.now(),
+        )?)
     }
 
     /// Destroys the row's bearer ticket (in `tx`) and forgets it.
-    fn drop_ticket(&self, tx: &Tx, id: &str) -> VaultResult<()> {
-        let Some(r) = load(tx, id)? else {
+    fn drop_ticket(&self, tx: &mut W<'_>, id: &str) -> VaultResult<()> {
+        let Some(r) = repo::get(tx, id)? else {
             return Ok(());
         };
         if let Some(item) = &r.device_item {
-            self.conns.destroy_item_tx(tx, &r.ws, &r.initiator, item)?;
-            tx.execute(
-                "UPDATE chan_app_registrations SET device_item = NULL WHERE id = ?",
-                [id],
-            )?;
+            self.conns.destroy_item(tx, &r.ws, &r.initiator, item)?;
+            repo::clear_ticket(tx, id)?;
         }
         Ok(())
     }
@@ -371,23 +281,11 @@ impl Registrations {
         }
     }
 
-    fn active_of(c: &rusqlite::Connection, who: &Caller) -> rusqlite::Result<Option<Row>> {
-        c.query_row(
-            &format!(
-                "SELECT {COLS} FROM chan_app_registrations WHERE workspace_id = ? AND initiator = ?
-                  AND state IN ('pending', 'credentials_saved', 'verifying') ORDER BY updated DESC LIMIT 1"
-            ),
-            params![who.ws, who.me],
-            row_of,
-        )
-        .optional()
-    }
-
     /// `GET current`: the caller's active attempt here, after settling an overdue one.
     pub fn current(&self, who: &Caller) -> VaultResult<Option<Value>> {
-        let r = self.read(|c| Self::active_of(c, who))?;
+        let r = self.read(|c| repo::for_initiator(c, &who.ws, &who.me))?;
         let Some(r) = r else { return Ok(None) };
-        let settled = self.tx(|tx| self.settle_overdue(tx, &r))?;
+        let settled = self.write(|tx| self.settle_overdue(tx, &r))?;
         if settled {
             return Ok(None);
         }
@@ -398,7 +296,7 @@ impl Registrations {
     /// `GET :id`.
     pub fn get(&self, who: &Caller, id: &str) -> VaultResult<Value> {
         let r = self.own(who, id)?;
-        if self.tx(|tx| self.settle_overdue(tx, &r))? {
+        if self.write(|tx| self.settle_overdue(tx, &r))? {
             return Ok(self.own(who, id)?.out());
         }
         self.ensure_running(&r);
@@ -417,7 +315,7 @@ impl Registrations {
             return Ok(v);
         }
         // preflight before anything leaves the Hub: a member here, and a vault that can seal
-        if !self.read(|c| is_member(c, &who.ws, &who.me))? {
+        if !self.read(|c| steve_store::settings::user_is_member(c, &who.ws, &who.me))? {
             return Err(ApiError::forbidden(steve_i18n::t!("channels.error.not_member")).into());
         }
         drop(
@@ -459,31 +357,27 @@ impl Registrations {
         let now = self.now();
         let id = uid("reg");
         let conns = self.conns.clone();
-        let inserted = self.tx(|tx| {
+        let inserted = self.write(|tx| {
             // a concurrent begin of the same person won the slot: answer with theirs
-            if let Some(r) = Self::active_of(tx, who)? {
+            if let Some(r) = repo::for_initiator(tx, &who.ws, &who.me)? {
                 return Ok(Err(r));
             }
             let item = conns.insert_prepared(tx, &ticket)?;
-            tx.execute(
-                "INSERT INTO chan_app_registrations (id, workspace_id, initiator, brand_requested, brand, switched,
-                   device_item, user_code, verification_uri_complete, interval_s, expires_at, state, created, updated)
-                 VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![
-                    id,
-                    who.ws,
-                    who.me,
-                    brand.code(),
-                    Brand::Feishu.code(),
-                    item,
-                    b.user_code,
-                    b.verification_uri_complete,
-                    b.interval_s,
-                    now + b.expire_s * 1000,
-                    state::PENDING,
+            repo::create(
+                tx,
+                repo::NewRegistration {
+                    id: &id,
+                    ws: &who.ws,
+                    initiator: &who.me,
+                    requested_brand: brand.code(),
+                    brand: Brand::Feishu.code(),
+                    device_item: &item,
+                    user_code: &b.user_code,
+                    page: &b.verification_uri_complete,
+                    interval_s: b.interval_s,
+                    expires_at: now + b.expire_s * 1000,
                     now,
-                    now
-                ],
+                },
             )?;
             Ok(Ok(()))
         })?;
@@ -501,24 +395,19 @@ impl Registrations {
         let r = self.own(who, id)?;
         let conns = self.conns.clone();
         let now = self.now();
-        self.tx(|tx| {
-            let Some(cur) = load(tx, &r.id)? else {
+        self.write(|tx| {
+            let Some(cur) = repo::get(tx, &r.id)? else {
                 return Ok(());
             };
             if !state::ACTIVE.contains(&cur.state.as_str()) {
                 return Ok(());
             }
             for item in [&cur.vault_item, &cur.device_item].into_iter().flatten() {
-                conns.destroy_item_tx(tx, &cur.ws, &cur.initiator, item)?;
+                conns.destroy_item(tx, &cur.ws, &cur.initiator, item)?;
             }
-            tx.execute(
-                "UPDATE chan_app_registrations SET state = ?, device_item = NULL, vault_item = NULL, app_may_exist = 1,
-                   error = NULL, error_kind = NULL, updated = ? WHERE id = ?",
-                params![state::CANCELLED, now, cur.id],
-            )?;
+            repo::cancel(tx, &cur.id, now)?;
             Ok(())
-        })
-        ?;
+        })?;
         tracing::info!(registration = %r.id, "feishu app registration cancel requested");
         Ok(self.own(who, id)?.out())
     }
@@ -539,17 +428,12 @@ impl Registrations {
     /// half-done check, a saved credential not yet checked). Returns how many it picked up.
     pub fn resume(&self) -> VaultResult<usize> {
         let now = self.now();
-        let rows: Vec<Row> = self.read(|c| {
-            let mut st = c.prepare(&format!(
-                "SELECT {COLS} FROM chan_app_registrations WHERE state IN ('pending', 'credentials_saved', 'verifying')"
-            ))?;
-            st.query_map([], row_of)?.collect()
-        })?;
+        let rows = self.read(|r| repo::active(r))?;
         let mut n = 0;
         for r in rows {
             match r.state.as_str() {
                 state::PENDING if r.expires_at <= now => {
-                    self.tx(|tx| self.settle_overdue(tx, &r))?;
+                    self.write(|tx| self.settle_overdue(tx, &r))?;
                 }
                 state::PENDING => {
                     self.spawn_poll(r.id.clone(), true);
@@ -557,14 +441,10 @@ impl Registrations {
                 }
                 state::VERIFYING => {
                     // stopped mid-check: the binding never committed (it would have said succeeded)
-                    self.tx(|tx| {
-                        tx.execute(
-                            "UPDATE chan_app_registrations SET state = ?, updated = ? WHERE id = ? AND state = ?",
-                            params![state::SAVED, now, r.id, state::VERIFYING],
-                        )?;
+                    self.write(|tx| {
+                        repo::retry_interrupted_check(tx, &r.id, now)?;
                         Ok(())
-                    })
-                    ?;
+                    })?;
                     self.spawn_verify(r.id.clone());
                     n += 1;
                 }
@@ -586,11 +466,8 @@ impl Registrations {
             // verifying with no check running (it died): check again
             state::VERIFYING if !lock(&self.running).contains(&format!("verify:{}", r.id)) => {
                 let now = self.now();
-                let reset = self.tx(|tx| {
-                    tx.execute(
-                        "UPDATE chan_app_registrations SET state = ?, updated = ? WHERE id = ? AND state = ?",
-                        params![state::SAVED, now, r.id, state::VERIFYING],
-                    )?;
+                let reset = self.write(|tx| {
+                    repo::retry_interrupted_check(tx, &r.id, now)?;
                     Ok(())
                 });
                 if reset.is_ok() {
@@ -668,21 +545,8 @@ impl Registrations {
     /// Ends a pending row in a terminal state (if it is still pending).
     fn end(&self, id: &str, st: &str, kind: Kind, may_exist: bool) -> VaultResult<()> {
         let now = self.now();
-        self.tx(|tx| {
-            let n = tx.execute(
-                "UPDATE chan_app_registrations SET state = ?, error = ?, error_kind = ?,
-                   app_may_exist = max(app_may_exist, ?), updated = ? WHERE id = ? AND state = ?",
-                params![
-                    st,
-                    kind.text(),
-                    kind.code(),
-                    may_exist as i64,
-                    now,
-                    id,
-                    state::PENDING
-                ],
-            )?;
-            if n == 1 {
+        self.write(|tx| {
+            if repo::finish_pending(tx, id, st, (kind.text(), kind.code()), may_exist, now)? {
                 self.drop_ticket(tx, id)?;
             }
             Ok(())
@@ -693,7 +557,7 @@ impl Registrations {
         let mut first = true;
         let mut slept = false;
         loop {
-            let Some(r) = self.read(|c| load(c, id))? else {
+            let Some(r) = self.read(|c| repo::get(c, id))? else {
                 return Ok(());
             };
             if r.state != state::PENDING {
@@ -748,11 +612,8 @@ impl Registrations {
 
     fn set_interval(&self, id: &str, n: i64) -> VaultResult<()> {
         let now = self.now();
-        self.tx(|tx| {
-            tx.execute(
-                "UPDATE chan_app_registrations SET interval_s = ?, updated = ? WHERE id = ? AND state = ?",
-                params![n, now, id, state::PENDING],
-            )?;
+        self.write(|tx| {
+            repo::set_interval(tx, id, n, now)?;
             Ok(())
         })
     }
@@ -769,44 +630,23 @@ impl Registrations {
             .await?;
         let (conns, now) = (self.conns.clone(), self.now());
         let me = self.clone();
-        let saved = me.tx(|tx| {
+        let saved = me.write(|tx| {
             // still pending, or ended by its deadline meanwhile (the credential was issued in time:
             // keep it); a cancel is never overridden
-            let still: bool = tx
-                .query_row(
-                    "SELECT state = ? OR (state = ? AND error_kind IN (?, ?)) FROM chan_app_registrations WHERE id = ?",
-                    params![
-                        state::PENDING,
-                        state::EXPIRED,
-                        Kind::Expired.code(),
-                        Kind::CredentialsLost.code(),
-                        r.id
-                    ],
-                    |x| x.get(0),
-                )
-                .optional()?
-                .unwrap_or(false);
+            let still = repo::can_save(
+                tx,
+                &r.id,
+                [Kind::Expired.code(), Kind::CredentialsLost.code()],
+            )?;
             if !still {
-                tx.execute(
-                    "UPDATE chan_app_registrations SET app_may_exist = 1, updated = ? WHERE id = ?",
-                    params![now, r.id],
-                )?;
+                repo::mark_app_may_exist(tx, &r.id, now)?;
                 return Ok(false);
             }
             let item = conns.insert_prepared(tx, &prepared)?;
             // kept even if the initiator left (the only copy of the secret), but never bound for them
-            let member = is_member(tx, &r.ws, &r.initiator)?;
-            let (err, kind) = if member {
-                (None, None)
-            } else {
-                (Some(Kind::MemberGone.text()), Some(Kind::MemberGone.code()))
-            };
-            tx.execute(
-                "UPDATE chan_app_registrations SET state = ?, vault_item = ?, client_id = ?,
-                   user_code = NULL, verification_uri_complete = NULL, error = ?, error_kind = ?, updated = ?
-                  WHERE id = ? AND state IN ('pending', 'expired')",
-                params![state::SAVED, item, client_id, err, kind, now, r.id],
-            )?;
+            let member = steve_store::settings::user_is_member(tx, &r.ws, &r.initiator)?;
+            let error = (!member).then(|| (Kind::MemberGone.text(), Kind::MemberGone.code()));
+            repo::save(tx, &r.id, &item, client_id, error, now)?;
             self.drop_ticket(tx, &r.id)?;
             Ok(true)
         })?;
@@ -821,20 +661,15 @@ impl Registrations {
     /// Checks the saved credential and binds a new bot connection on it.
     async fn verify(&self, id: &str) -> VaultResult<()> {
         let now = self.now();
-        let claimed = self.tx(|tx| {
-            Ok(tx.execute(
-                "UPDATE chan_app_registrations SET state = ?, error = NULL, error_kind = NULL, updated = ?
-                  WHERE id = ? AND state = ? AND vault_item IS NOT NULL",
-                params![state::VERIFYING, now, id, state::SAVED],
-            )? == 1)
-        })?;
+        let claimed = self.write(|w| Ok(repo::claim_verification(w, id, now)?))?;
         if !claimed {
             return Ok(());
         }
-        let Some(r) = self.read(|c| load(c, id))? else {
+        let Some(r) = self.read(|c| repo::get(c, id))? else {
             return Ok(());
         };
-        let member = self.read(|c| is_member(c, &r.ws, &r.initiator))?;
+        let member =
+            self.read(|c| steve_store::settings::user_is_member(c, &r.ws, &r.initiator))?;
         if !member {
             return self.back_to_saved(id, Kind::MemberGone);
         }
@@ -858,25 +693,18 @@ impl Registrations {
                 config,
                 Vec::new(),
                 None,
-                move |tx, done| {
-                    // the binding commits only for a member, and only if nobody cancelled meanwhile
-                    if !is_member(tx, &ws, &initiator)? {
+                move |w, done| {
+                    if !steve_store::settings::user_is_member(w, &ws, &initiator)? {
                         *lock(&gone_in) = true;
                         return Err(VaultError::Api(ApiError::conflict(Kind::MemberGone.text())));
                     }
-                    let n = tx.execute(
-                        "UPDATE chan_app_registrations SET state = ?, vault_item = NULL, connection_id = ?,
-                           account_id = ?, error = NULL, error_kind = NULL, updated = ? WHERE id = ? AND state = ?",
-                        params![
-                            state::SUCCEEDED,
-                            done.connection_id,
-                            done.account_id,
-                            steve_store::now(),
-                            rid,
-                            state::VERIFYING
-                        ],
-                    )?;
-                    if n != 1 {
+                    if !repo::bound(
+                        w,
+                        &rid,
+                        &done.connection_id,
+                        &done.account_id,
+                        steve_store::now(),
+                    )? {
                         return Err(VaultError::Api(ApiError::conflict("这次注册已经取消")));
                     }
                     Ok(())
@@ -905,12 +733,8 @@ impl Registrations {
     /// a cancel committed first stays cancelled).
     fn back_to_saved(&self, id: &str, kind: Kind) -> VaultResult<()> {
         let now = self.now();
-        self.tx(|tx| {
-            tx.execute(
-                "UPDATE chan_app_registrations SET state = ?, error = ?, error_kind = ?, updated = ?
-                  WHERE id = ? AND state = ?",
-                params![state::SAVED, kind.text(), kind.code(), now, id, state::VERIFYING],
-            )?;
+        self.write(|tx| {
+            repo::verification_failed(tx, id, (kind.text(), kind.code()), now)?;
             Ok(())
         })
     }

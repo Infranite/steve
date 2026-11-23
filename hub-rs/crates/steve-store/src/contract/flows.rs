@@ -98,6 +98,26 @@ pub fn outcome_label(c: &mut impl Read, ws: &str, id: &str) -> Result<Option<Str
     )
 }
 
+pub fn channel_event_connection(
+    r: &mut impl Read,
+    ws: &str,
+    event: &str,
+    space: &str,
+    message: &str,
+) -> Result<Option<String>> {
+    Ok(r.one(
+        Query::select()
+            .column("connection_id")
+            .from("ext_events")
+            .and_where(Expr::col("id").eq(event))
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("space_id").eq(space))
+            .and_where(Expr::col("message_id").eq(message)),
+        |row| row.get(0),
+    )?
+    .flatten())
+}
+
 pub fn recorded_outcome(w: &mut crate::W<'_>, id: &str, outcome: &str) -> Result<()> {
     w.exec(
         Query::update()

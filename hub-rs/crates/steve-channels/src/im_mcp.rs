@@ -65,12 +65,8 @@ pub async fn call(ch: &Channels, cx: &McpCx, name: &str, args: &Value) -> Result
 }
 
 /// The workspace's time zone.
-pub(crate) fn tz_of(c: &rusqlite::Connection, ws: &str) -> chrono_tz::Tz {
-    steve_flow::schedules::workspace_tz(c, ws)
-        .ok()
-        .and_then(|t| steve_runtime::tz::Zone::parse(&t).ok())
-        .and_then(|z| z.name().parse().ok())
-        .unwrap_or_else(steve_modules::zone::default_tz)
+pub(crate) fn tz_of(r: &mut impl steve_store::Read, ws: &str) -> chrono_tz::Tz {
+    steve_modules::zone::workspace_tz(r, ws).unwrap_or_else(|_| steve_modules::zone::default_tz())
 }
 
 /// A time argument: unix ms (or seconds), RFC 3339, or `YYYY-MM-DD[ HH:MM[:SS]]` in the
@@ -185,9 +181,11 @@ async fn read(ch: &Channels, cx: &McpCx, args: &Value) -> ChannelResult<String> 
     };
     let viewer = steve_knowledge::tools::session_viewer(ch.modules(), cx)?;
     let now = ch.now();
-    let (space, tz) = ch.store().reader(|c| -> ChannelResult<_> {
-        Ok((resolve(c, &viewer, &space_q)?, tz_of(c, &viewer.ws)))
-    })?;
+    let (space, tz) = ch.store().read::<_, steve_store::StoreError>(|r| {
+        Ok(ch.store().reader(|c| -> ChannelResult<_> {
+            Ok((resolve(c, &viewer, &space_q)?, tz_of(r, &viewer.ws)))
+        }))
+    })??;
     let time = |k: &str| -> ChannelResult<Option<i64>> {
         match args.get(k) {
             None | Some(Value::Null) => Ok(None),

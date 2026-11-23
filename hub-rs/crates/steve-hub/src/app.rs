@@ -505,7 +505,7 @@ pub async fn boot(st: &AppState) -> anyhow::Result<()> {
                     // linked when “我” is created)
                     if let Some(m) = dev.modules.clone() {
                         let r = tokio::task::spawn_blocking(move || {
-                            m.store.transaction(|tx| {
+                            m.store.write(|tx| {
                                 steve_modules::contacts::stewards::adopt_everywhere(
                                     tx, "device", "hub",
                                 )

@@ -6,13 +6,11 @@
 use std::sync::Arc;
 
 use chrono::DateTime;
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Map, Value, json};
 use steve_modules::changes::{
     Candidate, ChangeOp, DraftTarget, FieldSpec, OpCx, OpSpec, Plan, Prepared,
 };
 use steve_modules::{ApiError, ApiResult, Clock, Registry};
-use steve_store::Tx;
 use steve_store::base::{Change, Viewer, show};
 use tokio::sync::Notify;
 
@@ -30,20 +28,20 @@ const MODES: [Mode; 4] = [Mode::ItemAuto, Mode::Item, Mode::Propose, Mode::Repor
 
 pub fn register(
     r: &mut Registry,
+    late: Arc<crate::LateFlow>,
     clock: Arc<dyn Clock>,
     wake: Arc<Notify>,
-    core: Arc<dyn crate::Core>,
 ) {
     r.target(KIND, Box::new(ScheduleTarget))
         .op(
             "schedule.create",
             Box::new(CreateOp {
+                late: late.clone(),
                 clock: clock.clone(),
                 wake: wake.clone(),
-                core: core.clone(),
             }),
         )
-        .op("schedule.patch", Box::new(PatchOp { clock, wake, core }));
+        .op("schedule.patch", Box::new(PatchOp { late, clock, wake }));
 }
 
 fn missed_label(m: MissedPolicy) -> &'static str {
@@ -95,28 +93,20 @@ fn unrecognized_value(said: &str) -> String {
     steve_i18n::t!("flow.draft.unrecognized_value", value = show(said))
 }
 
-fn bot_name(c: &Connection, id: &str) -> String {
-    c.query_row("SELECT name FROM bots WHERE id = ?", [id], |r| r.get(0))
-        .unwrap_or_else(|_| id.to_string())
+fn bot_name(c: &mut impl steve_store::Read, id: &str) -> String {
+    steve_store::BotRows(c)
+        .name(id)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| id.to_owned())
 }
 
-/// A bot of the workspace by exact name or id (never a guess).
-fn find_bot(c: &Connection, ws: &str, said: &str) -> ApiResult<Option<String>> {
-    Ok(c.query_row(
-        "SELECT b.id FROM bots b JOIN bot_workspaces w ON w.bot_id = b.id AND w.workspace_id = ? WHERE b.deleted = 0 AND (b.id = ?2 OR b.name = ?2) ORDER BY b.id = ?2 DESC LIMIT 1",
-        params![ws, said.trim()],
-        |r| r.get(0),
-    )
-    .optional()?)
+fn find_bot(c: &mut impl steve_store::Read, ws: &str, said: &str) -> ApiResult<Option<String>> {
+    Ok(steve_store::BotRows(c).resolve_name(ws, said.trim())?)
 }
 
-fn main_bot(c: &Connection) -> ApiResult<Option<String>> {
-    Ok(c.query_row(
-        "SELECT id FROM bots WHERE main = 1 AND deleted = 0 ORDER BY updated LIMIT 1",
-        [],
-        |r| r.get(0),
-    )
-    .optional()?)
+fn main_bot(c: &mut impl steve_store::Read) -> ApiResult<Option<String>> {
+    Ok(steve_store::BotRows(c).main()?)
 }
 
 fn text_of(v: &Value) -> Option<String> {
@@ -137,7 +127,11 @@ fn parse_mode(s: &str) -> Option<Mode> {
 }
 
 /// [`schedules::own`], except a brief (see [`parse_mode`]): not found.
-fn own_general(c: &Connection, ws: &str, id: &str) -> ApiResult<schedules::Schedule> {
+fn own_general(
+    c: &mut impl steve_store::Read,
+    ws: &str,
+    id: &str,
+) -> ApiResult<schedules::Schedule> {
     Some(schedules::own(c, ws, id)?)
         .filter(|s| s.spec.mode != Mode::Brief)
         .ok_or_else(|| ApiError::not_found("定时任务"))
@@ -217,7 +211,7 @@ fn unrecognized() -> String {
 }
 
 fn field(
-    c: &Connection,
+    c: &mut impl steve_store::Read,
     ws: &str,
     tz: &str,
     now: i64,
@@ -276,7 +270,12 @@ fn field(
 }
 
 /// The `set` map of a `schedule.patch` op, and its preview line, for one checked field.
-fn patch_line(c: &Connection, s: &Schedule, f: &Field, set: &mut Map<String, Value>) -> Change {
+fn patch_line(
+    c: &mut impl steve_store::Read,
+    s: &Schedule,
+    f: &Field,
+    set: &mut Map<String, Value>,
+) -> Change {
     let sp = &s.spec;
     match f {
         Field::Name(n) => {
@@ -404,13 +403,12 @@ struct ScheduleTarget;
 impl DraftTarget for ScheduleTarget {
     fn prepare(
         &self,
-        store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
         viewer: &Viewer,
         id: Option<&str>,
     ) -> ApiResult<Prepared> {
-        store.reader(|c| {
-        let tz = schedules::person_tz(c, &viewer.ws, &viewer.user)?;
+        let tz = schedules::person_tz(c, &viewer.ws, Some(&viewer.user))?;
         let modes: Vec<&str> = MODES.iter().map(|m| m.label()).collect();
         let Some(id) = id else {
             return Ok(Prepared {
@@ -482,109 +480,97 @@ impl DraftTarget for ScheduleTarget {
             free_text: Some("what".into()),
             context: json!({ "tz": sp.tz }),
         })
-
-        })
     }
 
     fn plan(
         &self,
-        store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
         viewer: &Viewer,
         p: &Prepared,
         raw: Vec<Value>,
     ) -> ApiResult<Plan> {
-        store.reader(|c| {
-            let tz = p.context["tz"]
-                .as_str()
-                .unwrap_or(crate::cron::DEFAULT_TZ)
-                .to_string();
-            let now = steve_store::now();
-            let mut plan = Plan::default();
-            match &p.target_id {
-                Some(id) => {
-                    let s = own_general(c, &viewer.ws, id)?;
-                    let mut set = Map::new();
-                    for op in raw {
-                        if op["op"] != "set" {
-                            plan.changes.push(Change::new(
-                                unrecognized(),
-                                "—",
-                                show(&op.to_string()),
-                            ));
-                            continue;
-                        }
-                        let key = op["key"].as_str().unwrap_or("");
-                        match field(c, &viewer.ws, &tz, now, key, &op["value"]) {
-                            Ok(f) => plan.changes.push(patch_line(c, &s, &f, &mut set)),
-                            Err(line) => plan.changes.push(line),
-                        }
+        let tz = p.context["tz"]
+            .as_str()
+            .unwrap_or(crate::cron::DEFAULT_TZ)
+            .to_string();
+        let now = steve_store::now();
+        let mut plan = Plan::default();
+        match &p.target_id {
+            Some(id) => {
+                let s = own_general(c, &viewer.ws, id)?;
+                let mut set = Map::new();
+                for op in raw {
+                    if op["op"] != "set" {
+                        plan.changes
+                            .push(Change::new(unrecognized(), "—", show(&op.to_string())));
+                        continue;
                     }
-                    if !set.is_empty() {
-                        plan.ops
-                            .push(json!({ "op": "schedule.patch", "id": s.id, "set": set }));
+                    let key = op["key"].as_str().unwrap_or("");
+                    match field(c, &viewer.ws, &tz, now, key, &op["value"]) {
+                        Ok(f) => plan.changes.push(patch_line(c, &s, &f, &mut set)),
+                        Err(line) => plan.changes.push(line),
                     }
                 }
-                None => {
-                    for op in raw {
-                        if op["op"] != "schedule.create" {
-                            plan.changes.push(Change::new(
-                                unrecognized(),
-                                "—",
-                                show(&op.to_string()),
-                            ));
-                            continue;
-                        }
-                        let (o, lines) = plan_create(c, &viewer.ws, &tz, now, &op)?;
-                        plan.changes.extend(lines);
-                        if let Some(o) = o {
-                            plan.ops.push(o);
-                            break;
-                        }
+                if !set.is_empty() {
+                    plan.ops
+                        .push(json!({ "op": "schedule.patch", "id": s.id, "set": set }));
+                }
+            }
+            None => {
+                for op in raw {
+                    if op["op"] != "schedule.create" {
+                        plan.changes
+                            .push(Change::new(unrecognized(), "—", show(&op.to_string())));
+                        continue;
+                    }
+                    let (o, lines) = plan_create(c, &viewer.ws, &tz, now, &op)?;
+                    plan.changes.extend(lines);
+                    if let Some(o) = o {
+                        plan.ops.push(o);
+                        break;
                     }
                 }
             }
-            Ok(plan)
-        })
+        }
+        Ok(plan)
     }
 
     fn revision(
         &self,
-        store: &steve_store::Store,
-        _r: &mut steve_store::W<'_>,
+        _store: &steve_store::Store,
+        c: &mut steve_store::W<'_>,
         ws: &str,
         id: &str,
     ) -> ApiResult<Option<i64>> {
-        store.reader(|c| Ok(schedules::get(c, ws, id)?.map(|s| s.updated)))
+        Ok(schedules::get(c, ws, id)?.map(|s| s.updated))
     }
 
     fn candidates(
         &self,
-        store: &steve_store::Store,
-        _r: &mut steve_store::R<'_>,
+        _store: &steve_store::Store,
+        c: &mut steve_store::R<'_>,
         viewer: &Viewer,
     ) -> ApiResult<Vec<Candidate>> {
-        store.reader(|c| {
-            let mut out: Vec<Candidate> = schedules::list(c, &viewer.ws)?
-                .into_iter()
-                .filter(|s| s.spec.mode != Mode::Brief)
-                .map(|s| Candidate {
-                    code: format!("schedule:{}", s.id),
-                    label: format!("定时任务 {}", s.name),
-                })
-                .collect();
-            out.push(Candidate {
-                code: "schedule:new".into(),
-                label: "新建定时任务".into(),
-            });
-            Ok(out)
-        })
+        let mut out: Vec<Candidate> = schedules::list(c, &viewer.ws)?
+            .into_iter()
+            .filter(|s| s.spec.mode != Mode::Brief)
+            .map(|s| Candidate {
+                code: format!("schedule:{}", s.id),
+                label: format!("定时任务 {}", s.name),
+            })
+            .collect();
+        out.push(Candidate {
+            code: "schedule:new".into(),
+            label: "新建定时任务".into(),
+        });
+        Ok(out)
     }
 }
 
 /// The fields of a `schedule.create` op checked, with their preview lines.
 fn create_lines(
-    c: &Connection,
+    c: &mut impl steve_store::Read,
     ws: &str,
     tz: &str,
     now: i64,
@@ -622,7 +608,7 @@ fn create_lines(
 /// A checked `schedule.create` with its preview lines; no op (only the lines saying why) when
 /// something is not understood or missing.
 fn plan_create(
-    c: &Connection,
+    c: &mut impl steve_store::Read,
     ws: &str,
     tz: &str,
     now: i64,
@@ -727,23 +713,24 @@ fn plan_create(
 }
 
 struct CreateOp {
+    late: Arc<crate::LateFlow>,
     clock: Arc<dyn Clock>,
     wake: Arc<Notify>,
-    core: Arc<dyn crate::Core>,
 }
 
 impl ChangeOp for CreateOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, c: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
         let spec: Spec =
             serde_json::from_value(op["spec"].clone()).map_err(|_| ApiError::invalid("spec"))?;
         if spec.mode == Mode::Brief {
             return Err(ApiError::invalid("mode"));
         }
         schedules::check_refs(c, cx.ws, &spec)?;
-        schedules::check_can_run(self.core.as_ref(), c, cx.ws, &spec, true)
+        let flow = self.late.get()?;
+        schedules::check_can_run(flow.core.as_ref(), flow.store(), cx.ws, &spec, true)
     }
 
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, tx: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
         let spec: Spec =
             serde_json::from_value(op["spec"].clone()).map_err(|_| ApiError::invalid("spec"))?;
         let id = schedules::insert(
@@ -766,7 +753,13 @@ impl ChangeOp for CreateOp {
         Ok(json!({ "id": id }))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, _: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        tx: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        _: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
         let id = before["id"].as_str().unwrap_or("");
         if let Some(s) = schedules::get(tx, cx.ws, id)? {
             schedules::delete(tx, &s, self.clock.now())?;
@@ -776,20 +769,21 @@ impl ChangeOp for CreateOp {
 }
 
 struct PatchOp {
+    late: Arc<crate::LateFlow>,
     clock: Arc<dyn Clock>,
     wake: Arc<Notify>,
-    core: Arc<dyn crate::Core>,
 }
 
 impl ChangeOp for PatchOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn validate(&self, c: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
         let s = own_general(c, cx.ws, op["id"].as_str().unwrap_or(""))?;
         let (_, spec, enabled) = apply_set(&s, &op["set"]);
         schedules::check_refs(c, cx.ws, &spec)?;
-        schedules::check_can_run(self.core.as_ref(), c, cx.ws, &spec, enabled)
+        let flow = self.late.get()?;
+        schedules::check_can_run(flow.core.as_ref(), flow.store(), cx.ws, &spec, enabled)
     }
 
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, tx: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
         let s = own_general(tx, cx.ws, op["id"].as_str().unwrap_or(""))?;
         let (name, spec, enabled) = apply_set(&s, &op["set"]);
         let f = Fields {
@@ -802,7 +796,13 @@ impl ChangeOp for PatchOp {
         Ok(json!({ "name": s.name, "spec": s.spec, "enabled": s.enabled }))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        tx: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
         let s = schedules::own(tx, cx.ws, op["id"].as_str().unwrap_or(""))?;
         let spec: Spec = serde_json::from_value(before["spec"].clone())?;
         let name = before["name"].as_str().unwrap_or(&s.name).to_string();

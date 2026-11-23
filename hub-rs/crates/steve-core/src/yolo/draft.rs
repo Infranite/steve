@@ -14,7 +14,7 @@ use steve_modules::{ApiError, ApiResult, Registry};
 use steve_store::audit_repo::record as audit;
 use steve_store::base::{Change, Viewer};
 use steve_store::yolo::{self as repo, ITEM, PROJECT, ScopeChange, WORKSPACE};
-use steve_store::{Tx, now};
+use steve_store::{W, now};
 
 use super::scope::Forced;
 
@@ -338,28 +338,25 @@ struct SetOp {
 }
 
 impl ChangeOp for SetOp {
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
         let on = op["on"].as_bool().ok_or_else(|| ApiError::invalid("on"))?;
-        tx.write(|w| {
-            if on {
-                if let Some(forced) = self.forced {
-                    return Err(ApiError::conflict(forced.message()));
-                }
-                if repo::scope_get(w, cx.ws, WORKSPACE, cx.ws)?.is_some_and(|r| r.paused.is_some())
-                {
-                    return Err(ApiError::conflict(steve_i18n::t!("core.yolo.paused")));
-                }
+        if on {
+            if let Some(forced) = self.forced {
+                return Err(ApiError::conflict(forced.message()));
             }
-            let was = switch(w, cx.ws, cx.actor, on)?;
-            Ok(json!({ "on": was }))
-        })
+            if repo::scope_get(w, cx.ws, WORKSPACE, cx.ws)?.is_some_and(|r| r.paused.is_some()) {
+                return Err(ApiError::conflict(steve_i18n::t!("core.yolo.paused")));
+            }
+        }
+        let was = switch(w, cx.ws, cx.actor, on)?;
+        Ok(json!({ "on": was }))
     }
-    fn undo(&self, tx: &Tx, cx: &OpCx, _op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(&self, w: &mut W<'_>, cx: &OpCx, _op: &Value, before: &Value) -> ApiResult<()> {
         let on = before["on"].as_bool().unwrap_or(false);
         if on && self.forced.is_some() {
             return Ok(());
         }
-        tx.write(|w| switch(w, cx.ws, cx.actor, on).map(|_| ()))
+        switch(w, cx.ws, cx.actor, on).map(|_| ())
     }
 }
 
@@ -400,39 +397,37 @@ fn put_scope(
 }
 
 impl ChangeOp for ScopeOp {
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
         let id = op["id"].as_str().unwrap_or("");
         let ty = op["type"].as_str().unwrap_or("");
-        tx.write(|w| {
-            let (exists, noun) = match ty {
-                PROJECT => (
-                    steve_store::projects::project(w, cx.ws, id)?.is_some(),
-                    "项目",
-                ),
-                ITEM => (
-                    steve_store::item_repo::item_workspace(w, id)?.as_deref() == Some(cx.ws),
-                    "事项",
-                ),
-                _ => return Err(ApiError::invalid("type")),
-            };
-            if !exists {
-                return Err(ApiError::not_found(noun));
-            }
-            let mode = op["mode"]
-                .as_str()
-                .filter(|m| matches!(*m, "on" | "off" | "inherit"))
-                .ok_or_else(|| ApiError::invalid("mode"))?;
-            let before = scope_mode(w, cx.ws, ty, id)?;
-            put_scope(w, cx.ws, cx.actor, ty, id, mode)?;
-            Ok(json!({ "mode": before }))
-        })
+        let (exists, noun) = match ty {
+            PROJECT => (
+                steve_store::projects::project(w, cx.ws, id)?.is_some(),
+                "项目",
+            ),
+            ITEM => (
+                steve_store::item_repo::item_workspace(w, id)?.as_deref() == Some(cx.ws),
+                "事项",
+            ),
+            _ => return Err(ApiError::invalid("type")),
+        };
+        if !exists {
+            return Err(ApiError::not_found(noun));
+        }
+        let mode = op["mode"]
+            .as_str()
+            .filter(|m| matches!(*m, "on" | "off" | "inherit"))
+            .ok_or_else(|| ApiError::invalid("mode"))?;
+        let before = scope_mode(w, cx.ws, ty, id)?;
+        put_scope(w, cx.ws, cx.actor, ty, id, mode)?;
+        Ok(json!({ "mode": before }))
     }
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(&self, w: &mut W<'_>, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
         let (ty, id) = (
             op["type"].as_str().unwrap_or(""),
             op["id"].as_str().unwrap_or(""),
         );
-        tx.write(|w| match before["mode"].as_str() {
+        match before["mode"].as_str() {
             Some(mode) => put_scope(w, cx.ws, cx.actor, ty, id, mode),
             None => {
                 if repo::scope_clear(w, cx.ws, ty, id, cx.actor)? {
@@ -447,6 +442,6 @@ impl ChangeOp for ScopeOp {
                 }
                 Ok(())
             }
-        })
+        }
     }
 }

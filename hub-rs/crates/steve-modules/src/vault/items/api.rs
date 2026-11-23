@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
-use super::repo::ItemFilter;
+use super::ItemFilter;
 use super::reveal::{REVEAL_TTL_S, RevealGate, RevealTarget};
 use super::service::{ItemPatch, NewField, NewItem};
 use crate::vault::webauthn::request_host;

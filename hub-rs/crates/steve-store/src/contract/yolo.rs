@@ -246,7 +246,7 @@ fn window_query() -> SelectStatement {
 }
 
 pub fn window_current(c: &mut impl Read, ws: &str) -> Result<Option<WindowRow>> {
-    let order = c.db().dialect().insertion_order("yolo_windows");
+    let order = c.db().dialect().insertion_order(Some("yolo_windows"));
     c.one(
         window_query()
             .and_where(Expr::col("workspace_id").eq(ws))
@@ -267,7 +267,7 @@ pub fn window_get(c: &mut impl Read, id: &str) -> Result<Option<WindowRow>> {
 
 /// Windows of a workspace, newest first.
 pub fn windows(c: &mut impl Read, ws: &str, limit: u64) -> Result<Vec<WindowRow>> {
-    let order = c.db().dialect().insertion_order("yolo_windows");
+    let order = c.db().dialect().insertion_order(Some("yolo_windows"));
     c.all(
         window_query()
             .and_where(Expr::col("workspace_id").eq(ws))
@@ -414,7 +414,7 @@ fn action_query() -> SelectStatement {
 }
 
 fn ordered_actions(c: &mut impl Read, order: Order) -> SelectStatement {
-    let insertion = c.db().dialect().insertion_order("yolo_actions");
+    let insertion = c.db().dialect().insertion_order(Some("yolo_actions"));
     action_query()
         .order_by("created", order.clone())
         .order_by_expr(insertion, order)
@@ -769,7 +769,7 @@ pub fn scheduled_actions(
                 .or(Expr::col("decision_id").not_in_subquery(claimed)),
         )
         .order_by("due_at", Order::Asc)
-        .order_by_expr(dialect.insertion_order("yolo_actions"), Order::Asc)
+        .order_by_expr(dialect.insertion_order(Some("yolo_actions")), Order::Asc)
         .limit(limit);
     if let Some(through) = through {
         query.and_where(Expr::col("due_at").lte(through));

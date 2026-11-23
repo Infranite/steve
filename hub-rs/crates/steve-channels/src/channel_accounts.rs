@@ -188,11 +188,6 @@ struct ConnFacts {
     name: String,
 }
 
-/// The connection `conn` of the viewer's workspace if the viewer may see it (`404 没有这个连接`).
-pub(crate) fn can_manage(c: &Connection, viewer: &Viewer, conn: &str) -> ChannelResult<()> {
-    own_conn(c, viewer, conn).map(|_| ())
-}
-
 fn own_conn(c: &Connection, viewer: &Viewer, conn: &str) -> ChannelResult<ConnFacts> {
     let row = c
         .query_row(
@@ -666,34 +661,23 @@ pub fn patch(
     let persona_after = bindings::account_persona(tx, ws, conn)?.map(|x| x.id);
     let revision = before.revision + 1;
     let send_delay_s = p.send_delay_s.unwrap_or(before.send_delay_s);
-    tx.execute(
-        "UPDATE channel_settings SET duty = ?, rules = ?, trigger = ?, send_delay_s = ?, revision = ?, updated = ? WHERE connection_id = ?",
-        params![
-            duty,
-            rules.to_string(),
-            match mode {
-                Mode::Own => trigger.to_string(),
-                // bots keep the column's default; it is never read for them
-                Mode::Bot => before.trigger_raw(),
-            },
-            send_delay_s,
-            revision,
-            now,
-            conn
-        ],
-    )?;
-    if let Some(h) = p.card_ttl_h {
-        tx.execute(
-            "UPDATE channel_settings SET card_ttl_h = ? WHERE connection_id = ?",
-            params![h, conn],
-        )?;
-    }
-    if let Some(m) = p.late_minutes {
-        tx.execute(
-            "UPDATE channel_settings SET late_ms = ? WHERE connection_id = ?",
-            params![m * 60_000, conn],
-        )?;
-    }
+    let stored_trigger = match mode {
+        Mode::Own => trigger.clone(),
+        Mode::Bot if before.trigger.is_null() => default_trigger(),
+        Mode::Bot => before.trigger.clone(),
+    };
+    let fields_patch = steve_store::channel_spaces::account_settings::SettingsPatch {
+        duty: Some(&duty),
+        rules: Some(&rules),
+        trigger: Some(&stored_trigger),
+        send_delay_s: Some(send_delay_s),
+        revision,
+        card_ttl_h: p.card_ttl_h,
+        late_ms: p.late_minutes.map(|m| m * 60_000),
+    };
+    tx.write(|w| {
+        steve_store::channel_spaces::account_settings::patch(w, conn, &fields_patch, now)
+    })?;
     let snap = |persona: &Option<String>,
                 duty: &str,
                 rules: &Value,
@@ -730,17 +714,6 @@ pub fn patch(
         },
     ));
     Ok(())
-}
-
-impl spaces::ChannelSettings {
-    /// The stored `trigger` as text (the column is NOT NULL).
-    fn trigger_raw(&self) -> String {
-        if self.trigger.is_null() {
-            default_trigger().to_string()
-        } else {
-            self.trigger.to_string()
-        }
-    }
 }
 
 /// After `POST /channels` made a connection from a credential form: its

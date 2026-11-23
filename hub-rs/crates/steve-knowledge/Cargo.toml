@@ -36,6 +36,7 @@ ureq = { version = "=3.5.1", default-features = false, features = ["json"] }
 zip = { version = "=9.2.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [dev-dependencies]
+steve-store = { path = "../steve-store", features = ["testkit"] }
 # FakeNode, for the folder source through a Node
 steve-node-api = { path = "../steve-node-api", features = ["testkit"] }
 tempfile = "=3.27.0"

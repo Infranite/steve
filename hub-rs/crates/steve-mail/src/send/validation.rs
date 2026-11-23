@@ -38,7 +38,7 @@ impl Mail {
             }
             // Authorization may change while the model is running. A paused connection waits as it
             // did before; a revoked capability/connection cannot use the earlier permission.
-            match may_write_source(tx, &d.workspace_id, &d.connection_id, Some(SEND_CAP))? {
+            match may_write_in(tx, &d.workspace_id, &d.connection_id, Some(SEND_CAP))? {
                 Ok(()) => Ok(None),
                 Err(WriteRefusal::Later(_)) => {
                     repo::draft_transition(tx, &d.id, &["sending"], "approved", self.now())?;

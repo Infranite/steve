@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine;
-use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_knowledge::extract_text::{self, Format};
 use steve_modules::ApiError;
@@ -91,38 +90,42 @@ fn image_mime(b: &[u8]) -> Option<&'static str> {
 
 /// Validates the persistent source again, including stale queued plans and a changed space policy.
 fn indices(ch: &Channels, plan: &Plan) -> ChannelResult<Vec<usize>> {
-    ch.store().reader(|c| {
-        let row: Option<(String, Option<i64>)> = c.query_row(
-            "SELECT m.attachments,m.purged FROM chan_messages m JOIN spaces s ON s.id=m.space_id
-             WHERE m.id=?1 AND m.workspace_id=?2 AND m.space_id=?3 AND s.workspace_id=?2
-               AND m.external_id=?4 AND m.direction='in'",
-            params![plan.message_id,plan.ws,plan.space_id,plan.external_id],
-            |r| Ok((r.get(0)?,r.get(1)?)),
-        ).optional()?;
-        let Some((raw, purged)) = row else {
-            return Err(ApiError::not_found("消息"));
-        };
-        // Reuse the same safe projection as the UI and resource downloader.
-        let attachments = crate::media::present(c, &plan.message_id)
-            .map(|(_, attachments)| attachments)
-            .unwrap_or_else(|| serde_json::from_str(&raw).unwrap_or(Value::Null));
-        let found: Vec<_> = attachments
-            .as_array()
-            .into_iter()
-            .flatten()
-            .enumerate()
-            .filter(|(_, a)| matches!(a["type"].as_str(), Some("image" | "file")))
-            .map(|(n, _)| n)
-            .collect();
-        if purged.is_some() || spaces::attention(c, &plan.space_id)? == spaces::Attention::Blocked {
-            return Err(ApiError::rule("原消息已不可读取"));
-        }
-        if found.is_empty() {
-            return Ok(found);
-        }
-        let viewer = compose::viewer(c, &plan.ws, &plan.connection_id, &plan.space_id)?;
-        spaces::own(c, &viewer, &plan.space_id)?;
-        Ok(found)
+    ch.store().read(|db| {
+        ch.store().reader(|c| {
+            let row = steve_store::channel_message_repo::media::get(db, &plan.message_id)?;
+            let Some(row) = row.filter(|r| {
+                r.ws == plan.ws
+                    && r.space_id == plan.space_id
+                    && r.direction == "in"
+                    && r.external_id.as_deref() == Some(plan.external_id.as_str())
+            }) else {
+                return Err(ApiError::not_found("消息"));
+            };
+            let chat = steve_store::channel_spaces::platform_chat(db, &row.space_id)?;
+            if !chat.is_some_and(|chat| chat.ws == plan.ws) {
+                return Err(ApiError::not_found("消息"));
+            }
+            let (_, attachments) = crate::media::present_source(db, &row);
+            let found: Vec<_> = attachments
+                .as_array()
+                .into_iter()
+                .flatten()
+                .enumerate()
+                .filter(|(_, a)| matches!(a["type"].as_str(), Some("image" | "file")))
+                .map(|(n, _)| n)
+                .collect();
+            if row.purged.is_some()
+                || spaces::attention(c, &plan.space_id)? == spaces::Attention::Blocked
+            {
+                return Err(ApiError::rule("原消息已不可读取"));
+            }
+            if found.is_empty() {
+                return Ok(found);
+            }
+            let viewer = compose::viewer(c, &plan.ws, &plan.connection_id, &plan.space_id)?;
+            spaces::own(c, &viewer, &plan.space_id)?;
+            Ok(found)
+        })
     })
 }
 

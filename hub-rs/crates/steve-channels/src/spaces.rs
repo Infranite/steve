@@ -9,7 +9,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_modules::ApiError;
 use steve_store::base::{self, DecisionKind, Viewer};
-use steve_store::{NewDecision, Tx, uid};
+use steve_store::channel_spaces::{
+    account_settings::{self, SettingsPatch},
+    preferences::{self as prefs, Preference},
+    registration::{self, MAX_IDENTITIES},
+};
+use steve_store::{NewDecision, Tx};
 
 use crate::ChannelResult;
 use crate::channel::SpaceKind;
@@ -116,12 +121,7 @@ pub fn write_reply_as_you(
     v: ReplyAsYou,
     now: i64,
 ) -> ChannelResult<()> {
-    tx.execute(
-        "INSERT INTO space_prefs (space_id, workspace_id, reply_as_you, updated) VALUES (?1, ?2, ?3, ?4)
-           ON CONFLICT (space_id) DO UPDATE SET reply_as_you = excluded.reply_as_you, updated = excluded.updated",
-        params![space, ws, v.code(), now],
-    )?;
-    Ok(())
+    Ok(tx.write(|w| prefs::set(w, ws, space, Preference::ReplyAsYou(v.code()), now))?)
 }
 
 /// Whether Steve replies for you in a space (`draft` when nothing was set). Other modules read it
@@ -179,24 +179,7 @@ pub fn write_bot_notices(
     v: BotNotices,
     now: i64,
 ) -> ChannelResult<()> {
-    tx.execute(
-        "INSERT INTO space_prefs (space_id, workspace_id, bot_notices, updated) VALUES (?1, ?2, ?3, ?4)
-           ON CONFLICT (space_id) DO UPDATE SET bot_notices = excluded.bot_notices, updated = excluded.updated",
-        params![space, ws, v.code(), now],
-    )?;
-    Ok(())
-}
-
-/// What a bot's message in a space becomes (`auto` when nothing was set).
-pub fn bot_notices(c: &Connection, space: &str) -> ChannelResult<BotNotices> {
-    let v: Option<String> = c
-        .query_row(
-            "SELECT bot_notices FROM space_prefs WHERE space_id = ?",
-            [space],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(v.as_deref().and_then(BotNotices::parse).unwrap_or_default())
+    Ok(tx.write(|w| prefs::set(w, ws, space, Preference::BotNotices(v.code()), now))?)
 }
 
 /// Does your own account speak in the space: its voice (else `conn`, the identity that received the
@@ -252,12 +235,7 @@ pub fn write_attention(
     level: Attention,
     now: i64,
 ) -> ChannelResult<()> {
-    tx.execute(
-        "INSERT INTO space_prefs (space_id, workspace_id, attention, updated) VALUES (?1, ?2, ?3, ?4)
-           ON CONFLICT (space_id) DO UPDATE SET attention = excluded.attention, updated = excluded.updated",
-        params![space, ws, level.code(), now],
-    )?;
-    Ok(())
+    Ok(tx.write(|w| prefs::set(w, ws, space, Preference::Attention(level.code()), now))?)
 }
 
 /// The attention of a space (`realtime` when nothing was set). Other modules read it only here.
@@ -287,17 +265,6 @@ pub fn voice(c: &Connection, space: &str) -> ChannelResult<Option<String>> {
     .filter(|v| !v.is_empty()))
 }
 
-/// The manually chosen voice (`None` = automatic).
-pub fn chosen_voice(c: &Connection, space: &str) -> ChannelResult<Option<String>> {
-    Ok(c.query_row(
-        "SELECT voice FROM space_prefs WHERE space_id = ?",
-        [space],
-        |r| r.get(0),
-    )
-    .optional()?
-    .flatten())
-}
-
 /// Sets (or, `None`, clears to automatic) the voice of a space. `400` unless that identity sees it.
 pub fn set_voice(
     tx: &Tx,
@@ -313,12 +280,7 @@ pub fn set_voice(
             "channels.error.voice_not_here"
         )));
     }
-    tx.execute(
-        "INSERT INTO space_prefs (space_id, workspace_id, voice, updated) VALUES (?1, ?2, ?3, ?4)
-           ON CONFLICT (space_id) DO UPDATE SET voice = excluded.voice, updated = excluded.updated",
-        params![space, ws, voice, now],
-    )?;
-    Ok(())
+    Ok(tx.write(|w| prefs::set(w, ws, space, Preference::Voice(voice), now))?)
 }
 
 /// Names that look like an alert or notification group.
@@ -329,7 +291,7 @@ const ALERT_WORDS: [&str; 10] = [
 /// Why a new space looks like a bot notification group (`不提醒` is suggested in the new-space
 /// prompt, never applied by itself): a name with 告警 / 通知 / alert …, or most of its recent
 /// messages (at least 3 of the last 50) from bots.
-pub fn quiet_reason(c: &Connection, s: &SpaceRow) -> ChannelResult<Option<String>> {
+fn quiet_reason(r: &mut impl steve_store::Read, s: &SpaceRow) -> ChannelResult<Option<String>> {
     if SpaceKind::parse(&s.kind).is_some_and(|k| k == SpaceKind::Dm) {
         return Ok(None);
     }
@@ -337,16 +299,7 @@ pub fn quiet_reason(c: &Connection, s: &SpaceRow) -> ChannelResult<Option<String
     if let Some(w) = ALERT_WORDS.iter().find(|w| name.contains(*w)) {
         return Ok(Some(format!("群名里有“{w}”，像是通知群")));
     }
-    let (all, bots): (i64, i64) = c.query_row(
-        "SELECT count(*), coalesce(sum(CASE WHEN m.role = 'bot' OR a.kind IN ('bot', 'app_bot') OR p.type = 'bot' OR p.contact_kind = 'bot' THEN 1 ELSE 0 END), 0)
-           FROM (SELECT sender_account_id, sender_party_id FROM chan_messages
-                  WHERE space_id = ?1 AND direction = 'in' ORDER BY created DESC LIMIT 50) x
-           LEFT JOIN space_members m ON m.space_id = ?1 AND m.account_id = x.sender_account_id
-           LEFT JOIN accounts a ON a.id = x.sender_account_id
-           LEFT JOIN parties p ON p.id = x.sender_party_id",
-        [&s.id],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
+    let (all, bots) = steve_store::channel_message_repo::transcript::bot_share(r, &s.id, 50)?;
     if all >= 3 && bots * 10 >= all * 7 {
         return Ok(Some(format!("最近 {all} 条消息里 {bots} 条来自机器人")));
     }
@@ -454,62 +407,20 @@ pub fn ensure_channel_settings(
         Mode::Bot => default_bot_rules(),
         Mode::Own => default_self_rules(),
     };
-    tx.execute(
-        "INSERT OR IGNORE INTO channel_settings (connection_id, workspace_id, mode, rules, updated) VALUES (?, ?, ?, ?, ?)",
-        params![conn, ws, mode.code(), rules.to_string(), now],
-    )?;
+    tx.write(|w| account_settings::initialize(w, ws, conn, mode.code(), &rules, now))?;
     // first use of channels in this workspace: the default persona “Steve” (C2)
     crate::personas::ensure_default(tx, ws, now)?;
     channel_settings(tx, ws, conn)?.ok_or_else(|| ApiError::not_found("连接"))
 }
 
-/// One `spaces` row.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SpaceRow {
-    pub id: String,
-    pub workspace_id: String,
-    pub system_id: String,
-    pub connection_id: String,
-    pub kind: String,
-    pub external_id: String,
-    pub name: String,
-    pub member_count: i64,
-    pub has_external: bool,
-    pub status: String,
-    pub last_message: Option<i64>,
-    pub created: i64,
-    pub updated: i64,
-    /// The connection the space was first seen through (`spaces.connection_id`); `connection_id`
-    /// above is its voice.
-    pub via: String,
-}
-
-impl SpaceRow {
-    /// How many people the chat has, as far as anyone can tell: a one-to-one chat has one besides
-    /// Steve by definition; a group what the provider counts (0: unknown).
-    pub fn people(&self) -> i64 {
-        if self.kind == "dm" {
-            1
-        } else {
-            self.member_count
-        }
-    }
-}
+pub use steve_store::channel_spaces::rows::Space as SpaceRow;
 
 /// The installation of a connection ([`installation_key`] over its `config`; the connection itself
 /// when it is unknown or gone).
 ///
 /// [`installation_key`]: steve_modules::accounts::connections::installation_key
-pub fn installation_of(c: &Connection, conn: &str) -> ChannelResult<String> {
-    let config: Option<String> = c
-        .query_row("SELECT config FROM connections WHERE id = ?", [conn], |r| {
-            r.get(0)
-        })
-        .optional()?
-        .flatten();
-    let config: Value = config
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(Value::Null);
+pub fn installation_of(r: &mut impl steve_store::Read, conn: &str) -> ChannelResult<String> {
+    let config = steve_store::connections::lifecycle::channel_config(r, conn)?;
     Ok(steve_modules::accounts::connections::installation_key(
         conn, &config,
     ))
@@ -564,159 +475,88 @@ pub fn get(c: &Connection, id: &str) -> ChannelResult<Option<SpaceRow>> {
     .optional()?)
 }
 
-/// How many identities a space numbers ([`see`]): the bits of `chan_messages.seen_by`. A space
-/// with this many takes no identity of another installation ([`find_as`]).
-pub const MAX_IDENTITIES: i64 = 62;
-
 /// The platform `conn`'s chats belong to as far as the store knows it: what its service named
 /// (`config.platform`), else the one it had in a space it sees. The pipeline knows better
 /// (`Channels::chat_platform`, from the adapter's provider) and passes it to [`find_as`].
-pub fn platform_known(c: &Connection, conn: &str) -> ChannelResult<Option<String>> {
-    Ok(c.query_row(
-        "SELECT coalesce(
-            (SELECT json_extract(config, '$.platform') FROM connections WHERE id = ?1 AND json_valid(config)),
-            (SELECT platform FROM space_identities WHERE connection_id = ?1 AND platform IS NOT NULL LIMIT 1))",
-        [conn],
-        |r| r.get::<_, Option<String>>(0),
-    )?)
+fn platform_known(r: &mut impl steve_store::Read, conn: &str) -> ChannelResult<Option<String>> {
+    let config = steve_store::connections::lifecycle::channel_config(r, conn)?;
+    match config["platform"].as_str() {
+        Some(platform) => Ok(Some(platform.into())),
+        None => Ok(registration::learned_platform(r, conn)?),
+    }
 }
 
-/// The space of this provider chat as connection `conn` sees it ([`find_as`] with the platform
-/// the store knows for it).
-pub fn find(c: &Connection, ws: &str, conn: &str, ext_id: &str) -> ChannelResult<Option<SpaceRow>> {
-    let platform = platform_known(c, conn)?;
-    find_as(c, ws, conn, ext_id, platform.as_deref())
+/// A chat's space as seen by a connection, using its recorded platform.
+pub fn find(
+    r: &mut impl steve_store::Read,
+    ws: &str,
+    conn: &str,
+    ext_id: &str,
+) -> ChannelResult<Option<SpaceRow>> {
+    let platform = platform_known(r, conn)?;
+    find_as(r, ws, conn, ext_id, platform.as_deref())
 }
 
-/// The space of this provider chat as connection `conn` sees it: one space per chat, whichever
-/// identities see it. First a space of this chat first seen through, or seen by, a connection of
-/// the same installation (one app's bot and you through it share one); else, for a connection of a
-/// known `platform`, a space of the same platform with that external id, joined as one more
-/// identity (a bot and your account through a channel service, two people's accounts): the message
-/// is stored once and records which identities received it (`chan_messages.seen_by`).
-/// Two bots never share a space: each answers for itself there, and a space
-/// has one voice. So a bot joins only a space that no bot sees and no identity of a bot's app
-/// (your account authorized through an app is where that app's bot will be) sees.
+/// A chat first joins the workspace space for its installation. A personal account can also
+/// join a space on the same platform. A bot can join one with only independent personal
+/// identities so two bots never speak in one space.
 pub fn find_as(
-    c: &Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     conn: &str,
     ext_id: &str,
     platform: Option<&str>,
 ) -> ChannelResult<Option<SpaceRow>> {
-    let inst = installation_of(c, conn)?;
-    let mut st = c.prepare_cached(&format!(
-        "SELECT {} FROM spaces s WHERE s.workspace_id = ?1 AND s.external_id = ?2 ORDER BY s.created, s.id",
-        space_cols()
-    ))?;
-    let rows = st
-        .query_map(params![ws, ext_id], space_row)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut ids = c.prepare_cached(
-        "SELECT connection_id FROM space_identities WHERE space_id = ? ORDER BY connection_id",
-    )?;
-    for s in rows {
-        let mut seen: Vec<String> = ids
-            .query_map([&s.id], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        if !s.via.is_empty() {
-            seen.push(s.via.clone());
-        }
-        if seen.iter().any(|x| x == conn) {
-            return Ok(Some(s));
-        }
-        for x in &seen {
-            if installation_of(c, x)? == inst {
-                return Ok(Some(s));
+    use steve_store::channel_spaces::rows;
+    use steve_store::connections::lifecycle::{channel_config, personal_user};
+
+    let rows = rows::by_chat(r, ws, ext_id)?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let installation = installation_of(r, conn)?;
+    let mut candidates = Vec::new();
+    for space in rows {
+        let receivers = registration::receivers(r, &space.id)?;
+        let ids = receivers
+            .iter()
+            .map(|row| row.connection.as_str())
+            .chain(std::iter::once(space.via.as_str()).filter(|id| !id.is_empty()));
+        for id in ids {
+            if id == conn || installation_of(r, id)? == installation {
+                return Ok(Some(space));
             }
         }
+        if receivers.len() < MAX_IDENTITIES as usize
+            && platform.is_some_and(|platform| {
+                receivers
+                    .iter()
+                    .any(|row| row.platform.as_deref() == Some(platform))
+            })
+        {
+            candidates.push((space, receivers));
+        }
     }
-    let Some(platform) = platform else {
+    if candidates.is_empty() {
         return Ok(None);
-    };
-    // someone's own account, not a bot
-    let personal: bool = c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM connections c JOIN accounts a ON a.id = c.account_id
-           JOIN parties p ON p.id = a.party_id WHERE c.id = ? AND p.user_id IS NOT NULL)",
-        [conn],
-        |r| r.get(0),
-    )?;
-    let id: Option<String> = c
-        .query_row(
-            "SELECT s.id FROM spaces s WHERE s.workspace_id = ?1 AND s.external_id = ?3
-                AND EXISTS (SELECT 1 FROM space_identities pi WHERE pi.space_id = s.id AND pi.platform = ?2)
-                AND (SELECT count(*) FROM space_identities i WHERE i.space_id = s.id) < ?4
-                AND (?5 OR NOT EXISTS (SELECT 1 FROM space_identities i LEFT JOIN connections ic ON ic.id = i.connection_id
-                       WHERE i.space_id = s.id
-                         AND (i.owner_user IS NULL
-                              OR (json_valid(ic.config) AND coalesce(json_extract(ic.config, '$.app_connection'), '') <> ''))))
-              ORDER BY s.created, s.id LIMIT 1",
-            params![ws, platform, ext_id, MAX_IDENTITIES, personal],
-            |r| r.get(0),
-        )
-        .optional()?;
-    match id {
-        Some(id) => get(c, &id),
-        None => Ok(None),
     }
-}
-
-/// Records that `conn` sees the space (again): a new identity takes the next number of the space
-/// (none past [`MAX_IDENTITIES`]), and every identity keeps whose personal account it is and its
-/// `platform` current.
-pub fn see(
-    tx: &Tx,
-    ws: &str,
-    space: &str,
-    conn: &str,
-    platform: Option<&str>,
-    now: i64,
-) -> ChannelResult<bool> {
-    let owner: Option<String> = tx
-        .query_row(
-            "SELECT p.user_id FROM connections c JOIN accounts a ON a.id = c.account_id
-               JOIN parties p ON p.id = a.party_id WHERE c.id = ?",
-            [conn],
-            |r| r.get(0),
-        )
-        .optional()?
-        .flatten();
-    Ok(tx.execute(
-        "INSERT INTO space_identities (space_id, connection_id, workspace_id, joined, ordinal, owner_user, platform)
-         VALUES (?1, ?2, ?3, ?4,
-                 (SELECT CASE WHEN count(*) < ?6 THEN coalesce(max(ordinal) + 1, 0) END
-                    FROM space_identities WHERE space_id = ?1), ?5, ?7)
-           ON CONFLICT (space_id, connection_id) DO UPDATE SET left_at = NULL, owner_user = excluded.owner_user,
-               platform = coalesce(excluded.platform, platform)
-             WHERE left_at IS NOT NULL OR owner_user IS NOT excluded.owner_user
-               OR platform IS NOT coalesce(excluded.platform, platform)",
-        params![space, conn, ws, now, owner, MAX_IDENTITIES, platform],
-    )? > 0)
-}
-
-/// The bit of `conn` in space `space` (`chan_messages.seen_by`): 0 when it has no number there.
-pub fn bit(c: &Connection, space: &str, conn: &str) -> ChannelResult<i64> {
-    let ordinal: Option<i64> = c
-        .query_row(
-            "SELECT ordinal FROM space_identities WHERE space_id = ? AND connection_id = ?",
-            params![space, conn],
-            |r| r.get(0),
-        )
-        .optional()?
-        .flatten();
-    Ok(ordinal.map_or(0, |o| 1i64 << o))
-}
-
-/// Records that `conn` received (or sent) stored message `id` too: its bit joins `seen_by`.
-pub fn mark_seen(tx: &Tx, id: &str, conn: &str) -> ChannelResult<()> {
-    tx.execute(
-        "UPDATE chan_messages SET seen_by = seen_by | coalesce(
-            (SELECT 1 << i.ordinal FROM space_identities i
-              WHERE i.space_id = chan_messages.space_id AND i.connection_id = ?2), 0)
-          WHERE id = ?1",
-        params![id, conn],
-    )?;
-    Ok(())
+    let personal = personal_user(r, ws, conn)?.is_some();
+    'space: for (space, receivers) in candidates {
+        if !personal {
+            for receiver in receivers {
+                if receiver.user.is_none() {
+                    continue 'space;
+                }
+                let config = channel_config(r, &receiver.connection)?;
+                let app = &config["app_connection"];
+                if !app.is_null() && app.as_str() != Some("") {
+                    continue 'space;
+                }
+            }
+        }
+        return Ok(Some(space));
+    }
+    Ok(None)
 }
 
 /// The SQL condition “message alias `m` reached someone's own account” (`mode=self`): one of the
@@ -890,48 +730,38 @@ pub struct NewSpace<'a> {
 
 /// Finds or creates the space and, when new, its settings (`configured=0`). Returns the row and
 /// whether it was created now. Two deliveries racing for the same space create it once.
-pub fn locate_or_create(tx: &Tx, n: &NewSpace) -> ChannelResult<(SpaceRow, bool)> {
-    if let Some(s) = find_as(tx, n.ws, n.connection_id, n.external_id, n.platform)? {
-        if see(tx, n.ws, &s.id, n.connection_id, n.platform, n.now)? {
-            event(tx, n.ws, &s.id);
+pub fn locate_or_create(
+    w: &mut steve_store::W<'_>,
+    n: &NewSpace,
+) -> ChannelResult<(SpaceRow, bool)> {
+    if let Some(s) = find_as(w, n.ws, n.connection_id, n.external_id, n.platform)? {
+        if registration::see(w, n.ws, &s.id, n.connection_id, n.platform, n.now)? {
+            w.emit(steve_types::ChannelsEvent::Space {
+                ws: n.ws.into(),
+                id: s.id.clone().into(),
+            });
         }
         return Ok((s, false));
     }
-    let id = uid("spc");
-    let created = tx.execute(
-        "INSERT INTO spaces (id, workspace_id, system_id, connection_id, kind, external_id, name, member_count, has_external, created, updated)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (workspace_id, connection_id, external_id) DO NOTHING",
-        params![
-            id,
-            n.ws,
-            n.system_id,
-            n.connection_id,
-            n.kind.code(),
-            n.external_id,
-            n.name,
-            n.member_count,
-            n.has_external as i64,
-            n.now,
-            n.now
-        ],
-    )? == 1;
-    if created {
-        see(tx, n.ws, &id, n.connection_id, n.platform, n.now)?;
-        tx.execute(
-            "INSERT INTO space_settings (space_id, workspace_id, disclosure, item_defaults, updated) VALUES (?, ?, ?, ?, ?)",
-            params![
-                id,
-                n.ws,
-                default_disclosure(n.kind, n.has_external),
-                json!({"tags": [], "project_id": null, "bot_id": null}).to_string(),
-                n.now
-            ],
-        )?;
-        event(tx, n.ws, &id);
-    }
-    let s = find_as(tx, n.ws, n.connection_id, n.external_id, n.platform)?
+    let created = registration::create(
+        w,
+        &registration::Space {
+            ws: n.ws,
+            system: n.system_id,
+            connection: n.connection_id,
+            kind: n.kind.code(),
+            external: n.external_id,
+            name: n.name,
+            member_count: n.member_count,
+            has_external: n.has_external,
+            disclosure: default_disclosure(n.kind, n.has_external),
+            platform: n.platform,
+            now: n.now,
+        },
+    )?;
+    let space = find_as(w, n.ws, n.connection_id, n.external_id, n.platform)?
         .ok_or_else(|| ApiError::not_found("空间"))?;
-    Ok((s, created))
+    Ok((space, created))
 }
 
 /// Opens the “新群” decision for a space a bot account just found itself in.
@@ -963,39 +793,6 @@ pub fn open_new_space_decision(
         },
     )?;
     Ok(d.id)
-}
-
-/// Adds a member (kept if already there; a known role is not downgraded).
-pub fn add_member(
-    tx: &Tx,
-    ws: &str,
-    space: &str,
-    account: &str,
-    role: &str,
-    now: i64,
-) -> ChannelResult<bool> {
-    Ok(tx.execute(
-        "INSERT OR IGNORE INTO space_members (workspace_id, space_id, account_id, role, joined) VALUES (?, ?, ?, ?, ?)",
-        params![ws, space, account, role, now],
-    )? == 1)
-}
-
-pub fn is_member(c: &Connection, space: &str, account: &str) -> ChannelResult<bool> {
-    Ok(c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM space_members WHERE space_id = ? AND account_id = ?)",
-        params![space, account],
-        |r| r.get(0),
-    )?)
-}
-
-/// After a message: `last_message`, and `has_external` once an external sender shows up.
-pub fn touch(tx: &Tx, id: &str, at: i64, external: bool) -> ChannelResult<()> {
-    tx.execute(
-        "UPDATE spaces SET last_message = max(coalesce(last_message, 0), ?1),
-            has_external = CASE WHEN ?2 THEN 1 ELSE has_external END WHERE id = ?3",
-        params![at, external, id],
-    )?;
-    Ok(())
 }
 
 /// SSE `{type:"space", id, ws}`.
@@ -1461,7 +1258,8 @@ fn title_of(s: &SpaceRow, counterpart: Option<&Counterpart>, self_chat: bool) ->
     }
 }
 
-pub fn out(c: &Connection, s: &SpaceRow) -> ChannelResult<SpaceOut> {
+pub fn out(store: &steve_store::Store, s: &SpaceRow) -> ChannelResult<SpaceOut> {
+    store.read(|r| store.reader(|c| {
     let set = settings_or_defaults(c, s)?;
     let account = channel_settings(c, &s.workspace_id, &s.connection_id)?;
     let account_rules = account
@@ -1481,7 +1279,7 @@ pub fn out(c: &Connection, s: &SpaceRow) -> ChannelResult<SpaceOut> {
             }
         }
     }
-    let chosen = chosen_voice(c, &s.id)?;
+    let chosen = prefs::chosen_voice(r, &s.id)?;
     let voice = ids
         .iter()
         .find(|i| i.connection_id == s.connection_id)
@@ -1505,7 +1303,7 @@ pub fn out(c: &Connection, s: &SpaceRow) -> ChannelResult<SpaceOut> {
         && acts(&effective)
             .iter()
             .any(|a| matches!(a.as_str(), "reply" | "draft"))
-        && !can_send_as_you(c, &v.connection_id)?
+        && !can_send_as_you(r, &v.connection_id)?
     {
         conflicts.push(Conflict {
             key: "rules",
@@ -1537,7 +1335,7 @@ pub fn out(c: &Connection, s: &SpaceRow) -> ChannelResult<SpaceOut> {
         )?
     };
     let suggest_quiet = if !set.configured && set.attention == Attention::Realtime {
-        quiet_reason(c, s)?
+        quiet_reason(r, s)?
     } else {
         None
     };
@@ -1579,8 +1377,9 @@ pub fn out(c: &Connection, s: &SpaceRow) -> ChannelResult<SpaceOut> {
         self_chat,
         suggest_quiet,
         conflicts,
-        open_url: crate::open_link::space_url(c, s)?,
+        open_url: crate::open_link::space_url(r, s)?,
     })
+    }))
 }
 
 /// `PATCH /spaces/:id` fields.
@@ -1718,7 +1517,7 @@ pub fn patch(
             if let Some(f) = &before.flow_id {
                 return Err(ApiError::conflict(steve_i18n::t!(
                     "channels.error.space_is_flow",
-                    flow = steve_flow::flows::name_of(tx, f)?
+                    flow = tx.write(|w| steve_flow::flows::name_of(w, f))?
                 )));
             }
             let mode = crate::bindings::connection_account(tx, ws, &s.connection_id)?.1;
@@ -1767,23 +1566,18 @@ pub fn patch(
     }
     after.configured = true;
     after.revision = before.revision + 1;
-    tx.execute(
-        "UPDATE space_settings SET duty = ?, rules = ?, muted = ?, collab = ?, memory_scope = ?, disclosure = ?, item_defaults = ?,
-            configured = 1, revision = ?, updated = ? WHERE space_id = ?",
-        params![
-            after.duty,
-            after.rules.as_ref().map(Value::to_string),
-            after.muted as i64,
-            after.collab as i64,
-            after.memory_scope,
-            after.disclosure,
-            after.item_defaults.to_string(),
-            after.revision,
-            now,
-            id
-        ],
-    )?;
-    let voice_before = chosen_voice(tx, id)?;
+    let settings = prefs::Settings {
+        duty: &after.duty,
+        rules: after.rules.as_ref(),
+        muted: after.muted,
+        collab: after.collab,
+        memory_scope: &after.memory_scope,
+        disclosure: &after.disclosure,
+        item_defaults: &after.item_defaults,
+        revision: after.revision,
+    };
+    tx.write(|w| prefs::configure(w, id, &settings, now))?;
+    let voice_before = tx.write(|w| prefs::chosen_voice(w, id))?;
     if let Some(v) = &p.voice
         && *v != voice_before
     {
@@ -1818,7 +1612,7 @@ pub fn patch(
     if after.bot_notices != before.bot_notices {
         write_bot_notices(tx, ws, id, after.bot_notices, now)?;
     }
-    let voice_after = chosen_voice(tx, id)?;
+    let voice_after = tx.write(|w| prefs::chosen_voice(w, id))?;
     let snap = |x: &SpaceSettings, persona: &Option<String>, voice: &Option<String>| {
         json!({
             "persona_id": persona, "duty": x.duty, "rules": x.rules, "muted": x.muted, "attention": x.attention.code(), "reply_as_you": x.reply_as_you.code(), "bot_notices": x.bot_notices.code(), "voice": voice, "collab": x.collab, "memory_scope": x.memory_scope,
@@ -1897,10 +1691,12 @@ pub fn set_account_rules(
     crate::rules::check_refs(tx, ws, &parsed)?;
     let after = crate::rules::to_value(&parsed);
     let version = before.revision + 1;
-    tx.execute(
-        "UPDATE channel_settings SET rules = ?, revision = ?, updated = ? WHERE connection_id = ?",
-        params![after.to_string(), version, now, conn],
-    )?;
+    let patch = SettingsPatch {
+        rules: Some(&after),
+        revision: version,
+        ..Default::default()
+    };
+    tx.write(|w| account_settings::patch(w, conn, &patch, now))?;
     base::revision(
         tx,
         ws,
@@ -1930,31 +1726,29 @@ pub fn set_account_rules(
 
 /// Silences a space (the loop guard's automatic mute).
 pub fn mute(tx: &Tx, ws: &str, id: &str, now: i64) -> ChannelResult<bool> {
-    let n = tx.execute(
-        "UPDATE space_settings SET muted = 1, updated = ? WHERE space_id = ? AND muted = 0",
-        params![now, id],
-    )?;
-    if n > 0 {
-        event(tx, ws, id);
-    }
-    Ok(n > 0)
+    Ok(tx.write(|w| prefs::mute(w, ws, id, now))?)
 }
 
 /// [`steve_modules::contacts::SpacePort`]: a team's bound group must be a space the viewer sees.
 pub struct Spaces;
 
 impl steve_modules::contacts::SpacePort for Spaces {
-    fn visible(&self, c: &Connection, viewer: &Viewer, space_id: &str) -> ChannelResult<bool> {
-        visible(c, viewer, space_id)
+    fn visible(
+        &self,
+        store: &steve_store::Store,
+        viewer: &Viewer,
+        space_id: &str,
+    ) -> ChannelResult<bool> {
+        store.reader(|c| visible(c, viewer, space_id))
     }
 
     fn seen(
         &self,
-        c: &Connection,
+        store: &steve_store::Store,
         viewer: &Viewer,
         parties: &[String],
     ) -> ChannelResult<Vec<(String, steve_modules::contacts::Seen)>> {
-        crate::seen::seen(c, viewer, parties)
+        store.reader(|c| crate::seen::seen(c, viewer, parties))
     }
 }
 
@@ -1963,15 +1757,10 @@ pub const SEND_AS_USER_CAP: &str = "msg.send_as_user";
 
 /// Whether `connection` may send as you: its enabled caps include `msg.send_as_user` (the grant
 /// allows it; feishu `available_caps`). Not a provider call.
-pub fn can_send_as_you(c: &rusqlite::Connection, connection: &str) -> ChannelResult<bool> {
-    let caps: Option<String> = c
-        .query_row(
-            "SELECT caps FROM connections WHERE id = ? AND status != 'revoked'",
-            [connection],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(caps
-        .and_then(|c| serde_json::from_str::<Vec<String>>(&c).ok())
-        .is_some_and(|c| c.iter().any(|x| x == SEND_AS_USER_CAP)))
+pub fn can_send_as_you(r: &mut impl steve_store::Read, connection: &str) -> ChannelResult<bool> {
+    Ok(steve_store::connections::lifecycle::has_enabled_cap(
+        r,
+        connection,
+        SEND_AS_USER_CAP,
+    )?)
 }

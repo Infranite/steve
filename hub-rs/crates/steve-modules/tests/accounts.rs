@@ -10,6 +10,7 @@ use steve_modules::changes::{self, Origin, Plan, Prepared};
 use steve_modules::contacts::{self, PartyHooks};
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, caller};
 use steve_modules::{ApiError, Caller};
+use steve_store::testkit::modules::accounts as fixtures;
 
 fn env() -> TestEnv {
     TestEnv::new(accounts::register)
@@ -49,16 +50,33 @@ fn id(v: &Value) -> String {
     v["id"].as_str().expect("id").to_string()
 }
 
-fn scalar<T: rusqlite::types::FromSql>(t: &TestEnv, sql: &str) -> T {
+fn account(t: &TestEnv, id: &str) -> steve_store::account_rows::Account {
     t.store()
-        .with_conn(|c| Ok(c.query_row(sql, [], |r| r.get(0))?))
-        .expect("query")
+        .read(|r| steve_store::Accounts(r).get(id))
+        .unwrap()
+        .unwrap()
 }
 
-fn exec(t: &TestEnv, sql: &str) {
+fn party(t: &TestEnv, id: &str) -> steve_store::Party {
+    t.store().read(|r| r.contacts().party(id)).unwrap().unwrap()
+}
+
+fn own_org(t: &TestEnv) -> String {
     t.store()
-        .with_conn(|c| Ok(c.execute_batch(sql)?))
-        .expect("exec");
+        .read(|r| r.contacts().own_org(WS))
+        .unwrap()
+        .unwrap()
+        .id
+}
+
+fn works_at(t: &TestEnv, subject: &str, org: &str) -> usize {
+    let source = steve_store::base::ObjRef::new("party", subject);
+    t.store()
+        .read(|r| steve_store::base::links::Links(r).from(WS, &source, Some("works_at")))
+        .unwrap()
+        .into_iter()
+        .filter(|row| row.object_id == org && row.source == "infer")
+        .count()
 }
 
 fn ident(t: &TestEnv, system: &str, handle: &str, hints: &Hints) -> Result<Identified, ApiError> {
@@ -117,13 +135,7 @@ async fn exact_handle_finds_the_owner_and_follows_merges() {
     );
     // a merged owner resolves to the contact it was merged into
     let tom = id(&ok(&r, "POST", "/contacts", json!({ "name": "Tom" })).await);
-    exec(
-        &t,
-        &format!(
-            "UPDATE parties SET status = 'merged', merged_into = '{tom}' WHERE id = '{}'",
-            a.sarah
-        ),
-    );
+    fixtures::merge_marker(t.store(), &a.sarah, Some(&tom)).unwrap();
     let got = ident(&t, "gmail", "sarah@acme.com", &Hints::default()).unwrap();
     assert_eq!((got.party_id.as_str(), got.created), (tom.as_str(), false));
 }
@@ -133,7 +145,7 @@ async fn own_organization_accounts_are_ours() {
     let t = env();
     let r = app(&t);
     ok(&r, "GET", "/me/contact", Value::Null).await;
-    let org: String = scalar(&t, "SELECT id FROM parties WHERE org_kind = 'self'");
+    let org: String = own_org(&t);
     ok(&r, "POST", "/accounts", json!({ "system_id": "feishu_app", "party_id": org, "kind": "app_bot", "handle": "cli_a5f", "display_name": "值班小运" })).await;
     let got = ident(&t, "feishu_app", "cli_a5f", &Hints::default()).unwrap();
     assert!(got.is_ours && !got.created);
@@ -154,26 +166,23 @@ async fn feishu_union_id_and_open_ids() {
     };
     let first = ident(&t, "feishu", "on_union1", &hints).unwrap();
     assert!(first.created && !first.is_ours);
-    let rows: i64 = scalar(
-        &t,
-        &format!(
-            "SELECT COUNT(*) FROM account_handles WHERE account_id = '{}' AND family = 'feishu_user'",
-            first.account_id
-        ),
-    );
+    let rows = t
+        .store()
+        .read(|r| steve_store::Accounts(r).handles_of(&first.account_id))
+        .unwrap()
+        .len();
     assert_eq!(rows, 2);
-    let conn: String = scalar(
-        &t,
-        "SELECT connection_id FROM account_handles WHERE handle = 'ou_app1'",
-    );
+    let conn = t
+        .store()
+        .read(|r| steve_store::Accounts(r).handles_of(&first.account_id))
+        .unwrap()
+        .into_iter()
+        .find(|(handle, _)| handle == "ou_app1")
+        .unwrap()
+        .1
+        .unwrap();
     assert_eq!(conn, "con_app1");
-    let primary: String = scalar(
-        &t,
-        &format!(
-            "SELECT handle FROM accounts WHERE id = '{}'",
-            first.account_id
-        ),
-    );
+    let primary = account(&t, &first.account_id).handle;
     assert_eq!(primary, "on_union1");
 
     // a message under that app carries only the open_id
@@ -196,17 +205,11 @@ async fn feishu_union_id_and_open_ids() {
     let via2 = ident(&t, "feishu", "ou_app2", &Hints::default()).unwrap();
     assert_eq!(via2.account_id, first.account_id);
     // only open_id known and it was seen before through the union_id → same account; nothing new
-    let n: i64 = scalar(&t, "SELECT COUNT(*) FROM accounts");
+    let n: i64 = fixtures::account_count(t.store()).unwrap();
     assert_eq!(n, 1);
-    let kind: String = scalar(
-        &t,
-        &format!(
-            "SELECT contact_kind FROM parties WHERE id = '{}'",
-            first.party_id
-        ),
-    );
+    let kind = party(&t, &first.party_id).contact_kind.unwrap();
     assert_eq!(kind, "unconfirmed");
-    let label: String = scalar(&t, "SELECT source_label FROM accounts");
+    let label: String = account(&t, &first.account_id).source_label;
     assert_eq!(label, "Steve 开发群");
 }
 
@@ -251,13 +254,7 @@ async fn prefix_rule_excludes_public_prefixes_and_short_ones() {
     let s = ident(&t, "mail", "sc@acme.io", &Hints::default()).unwrap();
     assert_ne!(s.party_id, a.sarah, "shorter than min_len 3");
     // new unconfirmed contacts at Acme (the domain's organization)
-    let works: i64 = scalar(
-        &t,
-        &format!(
-            "SELECT COUNT(*) FROM links WHERE subject_id = '{}' AND predicate = 'works_at' AND object_id = '{}' AND source = 'infer'",
-            n.party_id, a.org
-        ),
-    );
+    let works = works_at(&t, &n.party_id, &a.org);
     assert_eq!(works, 1);
 }
 
@@ -387,16 +384,16 @@ async fn same_name_and_signature_org_gives_a_proposal() {
     assert_ne!(got.party_id, a.sarah, "never merged silently");
     let mp = got.proposal.clone().expect("proposal");
 
-    let (from, into, acc, reason, conf, status, dec): (String, String, String, String, f64, String, String) = t
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT from_id, into_id, account_id, reason, confidence, status, decision_id FROM merge_proposals WHERE id = ?",
-                [&mp],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
-            )?)
-        })
-        .unwrap();
+    let proposal = fixtures::proposal(t.store(), &mp).unwrap();
+    let (from, into, acc, reason, conf, status, dec) = (
+        proposal.from_id,
+        proposal.into_id,
+        proposal.account.unwrap(),
+        proposal.reason,
+        proposal.confidence,
+        proposal.status,
+        proposal.decision.unwrap(),
+    );
     assert_eq!(
         (from.as_str(), into.as_str(), acc.as_str()),
         (
@@ -413,7 +410,7 @@ async fn same_name_and_signature_org_gives_a_proposal() {
 
     let d = t
         .store()
-        .with_conn(|c| steve_store::base::decisions::get(c, &dec))
+        .read(|r| steve_store::DecisionRows(r).get(&dec))
         .unwrap()
         .unwrap();
     assert_eq!(d.kind, "propose");
@@ -425,13 +422,7 @@ async fn same_name_and_signature_org_gives_a_proposal() {
     assert!(d.item_id.is_none());
 
     // the new contact is unconfirmed; the account is not verified yet
-    let p: String = scalar(
-        &t,
-        &format!(
-            "SELECT contact_kind FROM parties WHERE id = '{}'",
-            got.party_id
-        ),
-    );
+    let p = party(&t, &got.party_id).contact_kind.unwrap();
     assert_eq!(p, "unconfirmed");
     let acc = ok(
         &r,
@@ -448,7 +439,7 @@ async fn same_name_and_signature_org_gives_a_proposal() {
     // seen again: the same account, no second proposal
     let again = ident(&t, "mail", "sarah.c.design@gmail.com", &hints).unwrap();
     assert_eq!((again.created, again.proposal), (false, None));
-    let n: i64 = scalar(&t, "SELECT COUNT(*) FROM merge_proposals");
+    let n: i64 = fixtures::proposal_count(t.store()).unwrap();
     assert_eq!(n, 1);
 }
 
@@ -460,12 +451,16 @@ async fn same_name_by_alias_and_domain_org() {
     // the prefix differs, the domain is Acme's, the display name is an alias
     let got = ident(&t, "mail", "s.chen@acme.io", &named("sarah")).unwrap();
     assert!(got.proposal.is_some());
-    let reason: String = scalar(&t, "SELECT reason FROM merge_proposals");
+    let reason: String = fixtures::proposal(t.store(), got.proposal.as_deref().unwrap())
+        .unwrap()
+        .reason;
     assert_eq!(
         reason,
         "sarah 的邮箱域名属于 Acme，和 Sarah Chen 同名同组织"
     );
-    let into: String = scalar(&t, "SELECT into_id FROM merge_proposals");
+    let into: String = fixtures::proposal(t.store(), got.proposal.as_deref().unwrap())
+        .unwrap()
+        .into_id;
     assert_eq!(into, a.sarah);
 }
 
@@ -485,7 +480,7 @@ async fn same_name_without_same_org_is_no_clue() {
     // a one-character name is no clue either
     let one = ident(&t, "mail", "x@acme.io", &named("S")).unwrap();
     assert!(one.proposal.is_none());
-    let n: i64 = scalar(&t, "SELECT COUNT(*) FROM merge_proposals");
+    let n: i64 = fixtures::proposal_count(t.store()).unwrap();
     assert_eq!(n, 0);
 }
 
@@ -503,27 +498,13 @@ async fn unknown_handle_creates_an_unconfirmed_contact() {
     t.take_events();
     let got = ident(&t, "mail", "Hank@Globex.io", &named("Hank Scorpio")).unwrap();
     assert!(got.created && got.proposal.is_none() && !got.is_ours);
-    let (name, kind, vis): (String, String, String) = t
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT name, contact_kind, visibility FROM parties WHERE id = ?",
-                [&got.party_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )?)
-        })
-        .unwrap();
+    let raw = party(&t, &got.party_id);
+    let (name, kind, vis) = (raw.name, raw.contact_kind.unwrap(), raw.visibility.code());
     assert_eq!(
         (name.as_str(), kind.as_str(), vis.as_str()),
         ("Hank Scorpio", "unconfirmed", "workspace")
     );
-    let works: i64 = scalar(
-        &t,
-        &format!(
-            "SELECT COUNT(*) FROM links WHERE subject_id = '{}' AND object_id = '{globex}' AND predicate = 'works_at' AND source = 'infer'",
-            got.party_id
-        ),
-    );
+    let works = works_at(&t, &got.party_id, &globex);
     assert_eq!(works, 1);
     let acc = ok(
         &r,
@@ -569,18 +550,19 @@ async fn unknown_handle_creates_an_unconfirmed_contact() {
 
     // no display name, no organization: named after the handle, no job
     let bare = ident(&t, "github", "Octocat", &Hints::default()).unwrap();
-    let name: String = scalar(
-        &t,
-        &format!("SELECT name FROM parties WHERE id = '{}'", bare.party_id),
-    );
+    let name = party(&t, &bare.party_id).name;
     assert_eq!(name, "octocat");
-    let jobs: i64 = scalar(
-        &t,
-        &format!(
-            "SELECT COUNT(*) FROM links WHERE subject_id = '{}'",
-            bare.party_id
-        ),
-    );
+    let jobs = t
+        .store()
+        .read(|r| {
+            steve_store::base::links::Links(r).from(
+                WS,
+                &steve_store::base::ObjRef::new("party", &bare.party_id),
+                None,
+            )
+        })
+        .unwrap()
+        .len();
     assert_eq!(jobs, 0);
 }
 
@@ -637,7 +619,7 @@ async fn record_list_and_get_accounts() {
         })
     )));
 
-    let org: String = scalar(&t, "SELECT id FROM parties WHERE org_kind = 'self'");
+    let org: String = own_org(&t);
     let bot = ok(&r, "POST", "/accounts", json!({ "system_id": "feishu_app", "party_id": org, "kind": "app_bot", "handle": "cli_b81" })).await;
     assert_eq!(bot["display_name"], "cli_b81", "falls back to the handle");
 
@@ -827,13 +809,12 @@ async fn handle_conflicts_are_409() {
     )
     .await;
     assert_eq!(s, 200, "{b}");
-    let n: i64 = scalar(
-        &t,
-        &format!(
-            "SELECT COUNT(*) FROM accounts WHERE party_id = '{}'",
-            a.sarah
-        ),
-    );
+    let n: i64 = t
+        .store()
+        .read::<_, steve_store::StoreError>(|r| {
+            Ok(steve_store::Accounts(r).of_party(WS, &a.sarah)?.len() as i64)
+        })
+        .unwrap();
     assert_eq!(n, 1);
 }
 
@@ -892,37 +873,11 @@ async fn cards_keep_only_the_last_four_digits() {
     let r = app(&t);
     let card = ok(&r, "POST", "/accounts", json!({ "system_id": "bank", "kind": "bank_card", "handle": "6225 8812 3456 4821", "display_name": "招商银行信用卡" })).await;
     assert_eq!(card["handle"], "•••• 4821");
-    let (h, d): (String, String) = t
-        .store()
-        .with_conn(|c| {
-            Ok(
-                c.query_row("SELECT handle, handle_display FROM accounts", [], |r| {
-                    Ok((r.get(0)?, r.get(1)?))
-                })?,
-            )
-        })
-        .unwrap();
+    let a = fixtures::sole_handle(t.store()).unwrap();
+    let (h, d) = (a.0, a.1);
     assert_eq!((h.as_str(), d.as_str()), ("card:4821:bank", "•••• 4821"));
     // the full number is nowhere in the database
-    let dump: String = t
-        .store()
-        .with_conn(|c| {
-            let mut out = String::new();
-            for table in ["accounts", "account_handles", "audit", "revisions"] {
-                let mut st = c.prepare(&format!("SELECT * FROM {table}"))?;
-                let n = st.column_count();
-                let mut rows = st.query([])?;
-                while let Some(row) = rows.next()? {
-                    for i in 0..n {
-                        if let Ok(s) = row.get::<_, String>(i) {
-                            out.push_str(&s);
-                        }
-                    }
-                }
-            }
-            Ok(out)
-        })
-        .unwrap();
+    let dump = fixtures::account_storage_text(t.store()).unwrap();
     assert!(!dump.contains("6225") && !dump.contains("88123456"));
     let (s, _) = req(
         &r,
@@ -980,10 +935,7 @@ async fn systems_are_seeded() {
     assert_eq!(gcal["plugin"], "builtin:gcal");
     assert_eq!(gcal["builtin"], true);
     // a workspace's own system shows after the built-in ones
-    exec(
-        &t,
-        "INSERT INTO systems (id, workspace_id, name, kind, family, handle_rule, created) VALUES ('jira', 'default', 'Jira', 'code', 'other', '{\"normalize\":\"lower\"}', 1)",
-    );
+    fixtures::workspace_jira(t.store()).unwrap();
     let s = ok(&r, "GET", "/systems", Value::Null).await;
     assert_eq!(s.as_array().unwrap().last().unwrap()["id"], "jira");
     let (_, b) = req(&r, &caller(WS2, ME), "GET", "/systems", None).await;
@@ -1018,28 +970,13 @@ async fn patch_moves_and_verifies() {
     assert_eq!(b["verified"], true);
     assert_eq!(b["confidence"], json!(1.0));
     assert_eq!(b["revision"], 2);
-    let (action, detail): (String, String) = t
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT action, detail FROM audit WHERE target = ? ORDER BY id DESC LIMIT 1",
-                [&got.account_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?)
-        })
-        .unwrap();
+    let (action, detail) = fixtures::last_audit(t.store(), Some(&got.account_id)).unwrap();
     assert_eq!(action, "account.move");
     assert_eq!(
         serde_json::from_str::<Value>(&detail).unwrap(),
         json!({ "from": got.party_id, "to": a.sarah })
     );
-    let patch: String = scalar(
-        &t,
-        &format!(
-            "SELECT patch FROM revisions WHERE object_type = 'account' AND object_id = '{}'",
-            got.account_id
-        ),
-    );
+    let patch: String = fixtures::account_revision(t.store(), &got.account_id).unwrap();
     let patch: Value = serde_json::from_str(&patch).unwrap();
     assert_eq!(patch["before"]["party_id"], json!(got.party_id));
     assert_eq!(patch["after"]["party_id"], json!(a.sarah));
@@ -1080,7 +1017,7 @@ async fn patch_moves_and_verifies() {
         (b["display_name"].clone(), b["revision"].clone()),
         (json!("Sarah 的私人邮箱"), json!(3))
     );
-    let action: String = scalar(&t, "SELECT action FROM audit ORDER BY id DESC LIMIT 1");
+    let action: String = fixtures::last_audit(t.store(), None).unwrap().0;
     assert_eq!(action, "account.update");
     // nothing changed: no new revision
     let b = ok(
@@ -1142,13 +1079,7 @@ async fn connected_accounts_stay_with_us() {
         json!({ "system_id": "gmail", "kind": "personal", "handle": "dev@example.test" }),
     )
     .await;
-    exec(
-        &t,
-        &format!(
-            "INSERT INTO connections (id, workspace_id, account_id, adapter, auth, caps, created_by, created, updated) VALUES ('con_1', 'default', '{}', 'gmail', 'oauth', '[\"mail.read\"]', 'usr_dev', 1, 1)",
-            id(&mine)
-        ),
-    );
+    fixtures::gmail_connection(t.store(), &id(&mine), true).unwrap();
     let got = ok(&r, "GET", &format!("/accounts/{}", id(&mine)), Value::Null).await;
     assert_eq!(
         got["connection"],
@@ -1175,19 +1106,13 @@ async fn connected_accounts_stay_with_us() {
     )
     .await;
     assert_eq!((s, e), (409, err("先断开 Steve 的接入")));
-    let n: i64 = scalar(&t, "SELECT COUNT(*) FROM accounts");
+    let n: i64 = fixtures::account_count(t.store()).unwrap();
     assert_eq!(n, 2);
 }
 
 /// A shared and a personal vault with an item each linked to `account`, plus the system vault.
 fn vault_items(t: &TestEnv, account: &str) {
-    exec(t, &format!(
-        "INSERT INTO vaults (id, workspace_id, name, scope, owner_user, created) VALUES ('vlt_s', 'default', '共享', 'shared', NULL, 1), ('vlt_p', 'default', '个人', 'personal', 'usr_other', 1), ('vlt_x', 'default', '系统', 'system', NULL, 1);
-         INSERT INTO vault_items (id, workspace_id, vault_id, template, title, account_id, sensitivity, created_by, created, updated) VALUES
-           ('vi_s', 'default', 'vlt_s', 'login', 'AWS 登录', '{account}', 'sensitive', 'usr_dev', 1, 1),
-           ('vi_p', 'default', 'vlt_p', 'login', '别人的', '{account}', 'sensitive', 'usr_other', 2, 2),
-           ('vi_x', 'default', 'vlt_x', 'connection_credential', '凭据', '{account}', 'sensitive', 'usr_dev', 3, 3);"
-    ));
+    fixtures::linked_vault_items(t.store(), account).unwrap();
 }
 
 #[tokio::test]
@@ -1217,16 +1142,13 @@ async fn delete_unlinks_vault_items() {
     )
     .await;
     assert_eq!((s, b), (200, json!({ "ok": true })));
-    let linked: i64 = scalar(
-        &t,
-        "SELECT COUNT(*) FROM vault_items WHERE account_id IS NOT NULL",
-    );
-    let items: i64 = scalar(&t, "SELECT COUNT(*) FROM vault_items");
-    let handles: i64 = scalar(&t, "SELECT COUNT(*) FROM account_handles");
+    let linked: i64 = fixtures::vault_item_count(t.store(), true).unwrap();
+    let items: i64 = fixtures::vault_item_count(t.store(), false).unwrap();
+    let handles: i64 = fixtures::handle_count(t.store()).unwrap();
     assert_eq!((linked, items, handles), (0, 3, 0));
     let (s, e) = req(&r, &me(), "GET", &format!("/accounts/{}", id(&acc)), None).await;
     assert_eq!((s, e), (404, err("没有这个账号")));
-    let action: String = scalar(&t, "SELECT action FROM audit ORDER BY id DESC LIMIT 1");
+    let action: String = fixtures::last_audit(t.store(), None).unwrap().0;
     assert_eq!(action, "account.delete");
 }
 
@@ -1269,12 +1191,9 @@ async fn deleting_a_contact_deletes_its_accounts() {
     t.take_events();
     let (s, b) = req(&r, &me(), "DELETE", &format!("/contacts/{}", a.sarah), None).await;
     assert_eq!((s, b), (200, json!({ "ok": true })));
-    let n: i64 = scalar(&t, "SELECT COUNT(*) FROM accounts");
-    let h: i64 = scalar(&t, "SELECT COUNT(*) FROM account_handles");
-    let linked: i64 = scalar(
-        &t,
-        "SELECT COUNT(*) FROM vault_items WHERE account_id IS NOT NULL",
-    );
+    let n: i64 = fixtures::account_count(t.store()).unwrap();
+    let h: i64 = fixtures::handle_count(t.store()).unwrap();
+    let linked: i64 = fixtures::vault_item_count(t.store(), true).unwrap();
     assert_eq!((n, h, linked), (0, 0, 0));
     assert!(t.take_events().contains(&steve_types::BusEvent::Domain(
         steve_types::DomainEvent::People(steve_types::PeopleEvent::Account {
@@ -1303,19 +1222,10 @@ async fn deleting_a_contact_with_a_connected_account_rolls_back() {
     let t = env();
     let r = app(&t);
     let a = acme(&r).await;
-    exec(
-        &t,
-        &format!(
-            "INSERT INTO connections (id, workspace_id, account_id, adapter, auth, created_by, created, updated) VALUES ('con_1', 'default', '{}', 'gmail', 'oauth', 'usr_dev', 1, 1)",
-            a.sarah_mail
-        ),
-    );
+    fixtures::gmail_connection(t.store(), &a.sarah_mail, false).unwrap();
     let (s, e) = req(&r, &me(), "DELETE", &format!("/contacts/{}", a.sarah), None).await;
     assert_eq!((s, e), (409, err("先断开 Steve 的接入")));
-    let st: String = scalar(
-        &t,
-        &format!("SELECT status FROM parties WHERE id = '{}'", a.sarah),
-    );
+    let st = party(&t, &a.sarah).status;
     assert_eq!(st, "active");
 }
 
@@ -1342,7 +1252,7 @@ async fn accounts_follow_a_merge_and_come_back_on_split() {
 
     let moved = t
         .store()
-        .transaction(|tx| hooks.on_merge(tx, WS, &got.party_id, &a.sarah))
+        .write(|tx| hooks.on_merge(tx, WS, &got.party_id, &a.sarah))
         .unwrap();
     assert_eq!(moved, json!({ "accounts": [got.account_id, id(&extra)] }));
     let on_sarah = ok(
@@ -1366,13 +1276,7 @@ async fn accounts_follow_a_merge_and_come_back_on_split() {
         })
     )));
     // what the merge record will hold under moved.hooks.vault
-    exec(
-        &t,
-        &format!(
-            "UPDATE parties SET status = 'merged', merged_into = '{}' WHERE id = '{}'",
-            a.sarah, got.party_id
-        ),
-    );
+    fixtures::merge_marker(t.store(), &got.party_id, Some(&a.sarah)).unwrap();
     let again = ident(&t, "mail", "sarah.c.design@gmail.com", &Hints::default()).unwrap();
     assert_eq!(again.party_id, a.sarah);
 
@@ -1385,15 +1289,9 @@ async fn accounts_follow_a_merge_and_come_back_on_split() {
         json!({ "party_id": tom }),
     )
     .await;
-    exec(
-        &t,
-        &format!(
-            "UPDATE parties SET status = 'active', merged_into = NULL WHERE id = '{}'",
-            got.party_id
-        ),
-    );
+    fixtures::merge_marker(t.store(), &got.party_id, None).unwrap();
     t.store()
-        .transaction(|tx| hooks.on_split(tx, WS, &got.party_id, &a.sarah, &moved))
+        .write(|tx| hooks.on_split(tx, WS, &got.party_id, &a.sarah, &moved))
         .unwrap();
     let back = ok(
         &r,
@@ -1426,7 +1324,7 @@ async fn accounts_follow_a_merge_and_come_back_on_split() {
     assert_eq!(on_tom[0]["id"], json!(id(&extra)));
     // an empty or foreign `moved` does nothing
     t.store()
-        .transaction(|tx| hooks.on_split(tx, WS, &got.party_id, &a.sarah, &Value::Null))
+        .write(|tx| hooks.on_split(tx, WS, &got.party_id, &a.sarah, &Value::Null))
         .unwrap();
 }
 
@@ -1475,16 +1373,9 @@ async fn account_add_applies_and_undoes() {
     );
     let res = changes::apply(&t.modules, &me(), &cs).unwrap().unwrap();
     assert_eq!(res["ok"], true);
-    let (handle, kind, source, label): (String, String, String, String) = t
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT handle, kind, source, source_label FROM accounts WHERE system_id = 'phone'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )?)
-        })
-        .unwrap();
+    let mut rows = fixtures::phone_accounts(t.store()).unwrap();
+    assert_eq!(rows.len(), 1);
+    let (handle, kind, source, label) = rows.pop().unwrap();
     assert_eq!(
         (
             handle.as_str(),
@@ -1495,10 +1386,7 @@ async fn account_add_applies_and_undoes() {
         ("+14155550123", "phone", "chat", "你说的")
     );
     changes::undo(&t.modules, &me(), &cs).unwrap().unwrap();
-    let n: i64 = scalar(
-        &t,
-        "SELECT COUNT(*) FROM accounts WHERE system_id = 'phone'",
-    );
+    let n: i64 = fixtures::phone_accounts(t.store()).unwrap().len() as i64;
     assert_eq!(n, 0);
 
     // a taken handle refuses the whole changeset

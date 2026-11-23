@@ -1117,11 +1117,7 @@ fn item_deleted_hook_runs_in_the_delete_transaction() {
     let (log, refuse) = (seen.clone(), keep.id.clone());
     assert!(s.on_item_deleted(move |tx, ws, id| {
         // the row is already gone inside the same transaction
-        let n: i64 = tx
-            .query_row("SELECT COUNT(*) FROM items WHERE id = ?", [id], |r| {
-                r.get(0)
-            })
-            .unwrap();
+        let n = usize::from(steve_store::ItemReads(tx).title(ws, id).unwrap().is_some());
         log.lock()
             .unwrap()
             .push((ws.to_string(), id.to_string(), n));

@@ -972,13 +972,19 @@ fn notice_key(text: &str, attachments: &Value) -> String {
 /// private chat with the bot and a card with an action link) under `auto`, any message under `item`,
 /// nothing under `record` ([`BotNotices`]); the same key within [`BOT_NOTICE_DEDUPE_MS`] once.
 pub fn bot_notice(
-    c: &Connection,
+    r: &mut impl steve_store::Read,
     space: &spaces::SpaceRow,
     message: &str,
     now: i64,
 ) -> ChannelResult<BotNotice> {
-    let setting = spaces::bot_notices(c, &space.id)?;
-    let (text, att, _, _) = message_text(c, message)?;
+    let setting = steve_store::channel_spaces::preferences::bot_notices(r, &space.id)?
+        .as_deref()
+        .and_then(BotNotices::parse)
+        .unwrap_or_default();
+    let source = steve_store::channel_message_repo::media::get(r, message)?
+        .ok_or_else(|| steve_modules::ApiError::not_found("消息"))?;
+    let text = source.text.unwrap_or_default();
+    let att = source.attachments;
     let key = match setting {
         BotNotices::Record => return Ok(BotNotice::Record),
         BotNotices::Auto if space.kind != "dm" => return Ok(BotNotice::Record),
@@ -991,22 +997,14 @@ pub fn bot_notice(
     if key.trim().is_empty() {
         return Ok(BotNotice::Record);
     }
-    let mut st = c.prepare_cached(
-        "SELECT coalesce(text, ''), coalesce(attachments, '[]') FROM chan_messages
-          WHERE space_id = ? AND direction = 'in' AND work_item_id IS NOT NULL AND id <> ? AND created >= ?
-          ORDER BY created DESC LIMIT 50",
-    )?;
-    let seen = st
-        .query_map(
-            params![space.id, message, now - BOT_NOTICE_DEDUPE_MS],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-        )?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-        .into_iter()
-        .any(|(t, a)| {
-            let a: Value = serde_json::from_str(&a).unwrap_or(Value::Null);
-            notice_key(&t, &a) == key
-        });
+    let seen = steve_store::channel_message_repo::transcript::bot_notice_samples(
+        r,
+        &space.id,
+        message,
+        now - BOT_NOTICE_DEDUPE_MS,
+    )?
+    .into_iter()
+    .any(|(text, attachments)| notice_key(&text, &attachments) == key);
     Ok(if seen {
         BotNotice::Seen
     } else {

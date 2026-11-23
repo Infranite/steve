@@ -90,7 +90,7 @@ fn bot_connection(h: &TestEnv, handle: &str, name: &str) -> (String, String) {
         .transaction(|tx| -> ApiResult<(String, String)> {
             ensure_seeds(tx, WS)?;
             steve_modules::contacts::service::ensure_base(tx, &caller(WS, ME))?;
-            let org = steve_modules::contacts::repo::self_org(tx, WS)?.expect("self org");
+            let org = tx.write(|w| w.contacts().own_org(WS))?.expect("self org");
             let a = arepo::insert(
                 tx,
                 WS,
@@ -966,11 +966,7 @@ async fn each_space_has_one_conversation_that_continues() {
     assert_eq!(h.fake.reactions_on("o2"), [ReactionKind::Done]);
 
     // the conversation list: three conversations with their badges
-    let list = h
-        .env
-        .store()
-        .reader(|c| conversations::list(c, WS, &Viewer::bare(WS, ME)))
-        .unwrap();
+    let list = conversations::list(h.env.store(), WS, &Viewer::bare(WS, ME)).unwrap();
     assert_eq!(list.len(), 3);
     let opsb = list.iter().find(|x| x["space"] == json!(ops)).unwrap();
     assert_eq!(opsb["name"], json!("运维群"));
@@ -1293,9 +1289,11 @@ async fn your_private_chat_with_the_bot_is_owner_only() {
     assert!(!context.contains("External name"), "{context}");
     h.env
         .store()
-        .reader(|c| {
+        .reader(|_| {
             assert_eq!(
-                steve_channels::personas::owner_name(c, WS)?,
+                h.env.store().read::<_, steve_store::StoreError>(|r| Ok(
+                    steve_channels::personas::owner_name(r, WS)
+                ))??,
                 "External name"
             );
             Ok::<_, steve_modules::ApiError>(())
@@ -2138,9 +2136,7 @@ fn record_of(
     q: &steve_channels::conv_record::RecordQuery,
 ) -> ApiResult<Value> {
     let conv = conversations::conv_space(space);
-    h.env
-        .store()
-        .reader(|c| steve_channels::conv_record::record(c, WS, &Viewer::bare(WS, user), &conv, q))
+    steve_channels::conv_record::record(h.env.store(), WS, &Viewer::bare(WS, user), &conv, q)
 }
 
 /// The handling of the received message `id` and the out state of Steve's message `id` in a record.
@@ -2346,21 +2342,17 @@ async fn the_record_shows_every_message_with_what_steve_did() {
         h.ch.now()
             .max(recs.last().unwrap()["created"].as_i64().unwrap());
     let list = |user: &str, connection: Option<&str>| {
-        h.env
-            .store()
-            .reader(|c| {
-                conversations::list_page(
-                    c,
-                    WS,
-                    &Viewer::bare(WS, user),
-                    &conversations::ListQuery {
-                        connection: connection.map(String::from),
-                        ..Default::default()
-                    },
-                    now,
-                )
-            })
-            .unwrap()
+        conversations::list_page(
+            h.env.store(),
+            WS,
+            &Viewer::bare(WS, user),
+            &conversations::ListQuery {
+                connection: connection.map(String::from),
+                ..Default::default()
+            },
+            now,
+        )
+        .unwrap()
     };
     let l = list(ME, None);
     let row = l
@@ -2470,13 +2462,14 @@ async fn single_user_reads_personal_records_without_changing_account_ownership()
         theirs.iter().all(|e| e.connection != me),
         "your account is not in their switcher"
     );
-    let l = h
-        .env
-        .store()
-        .reader(|c| {
-            conversations::list_page(c, WS, &Viewer::bare(WS, other), &Default::default(), 0)
-        })
-        .unwrap();
+    let l = conversations::list_page(
+        h.env.store(),
+        WS,
+        &Viewer::bare(WS, other),
+        &Default::default(),
+        0,
+    )
+    .unwrap();
     assert!(
         l.conversations
             .iter()
@@ -4345,7 +4338,8 @@ async fn own_identity_answer_is_a_reviewable_reply_not_a_private_meta_question()
     let owner = h
         .env
         .store()
-        .reader(|c| steve_channels::personas::owner_name(c, WS))
+        .read::<_, steve_store::StoreError>(|c| Ok(steve_channels::personas::owner_name(c, WS)))
+        .unwrap()
         .unwrap();
     let text = format!("我是{owner}。");
     h.env.gateway.unscript(H_SAFETY);

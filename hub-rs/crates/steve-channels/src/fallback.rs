@@ -17,11 +17,12 @@
 //! `source_id` or keeps its own cursor so it does not deliver a message twice. An edit's new text
 //! is not applied.
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use steve_modules::accounts::repo as accounts;
-use steve_store::Tx;
+use steve_store::channel_message_repo::ingress::{Found, SYNTHETIC_PREFIX as FP};
+use steve_store::connections::Connections;
+use steve_store::{Accounts, Read, Systems};
 
 use crate::channel::HandleRef;
 use crate::ext::PRECISION_MS;
@@ -29,8 +30,6 @@ use crate::{ChannelResult, Channels};
 
 /// The version of the content key's formula (part of every key).
 pub const KEY_VERSION: &str = "v1";
-/// The prefix of the Hub's own ids of messages without a provider id.
-const FP: &str = "fp:";
 /// How far a provider's time of a send may be from the Hub's when the provider did not say it.
 pub const SEND_SLACK_MS: i64 = 30_000;
 /// The time precision of a side that declared none.
@@ -67,28 +66,18 @@ pub fn key_of(system: &str, handle: &str, text: &str, attachments: &[Value]) -> 
 /// so every copy of a message names the same person the same way whichever handle its side
 /// reported; else the handle reported.
 pub fn key_sender(
-    c: &Connection,
+    r: &mut impl Read,
     ws: &str,
     party: Option<&str>,
     system: &str,
     reported: &HandleRef,
 ) -> ChannelResult<(String, String)> {
-    if let Some(p) = party
-        && let Some(sys) = accounts::system(c, ws, system)?
+    if let Some(party) = party
+        && let Some(system) = Systems(r).get(ws, system)?
+        && let Some(handle) =
+            Accounts(r).preferred_handle(ws, party, &system.family, &system.id, None)?
     {
-        let h: Option<String> = c
-            .query_row(
-                "SELECT h.handle FROM account_handles h JOIN accounts a ON a.id = h.account_id
-                  WHERE a.workspace_id = ?1 AND h.workspace_id = ?1 AND h.family = ?2 AND a.party_id = ?3
-                    AND h.connection_id IS NULL
-                  ORDER BY a.system_id <> ?4, h.handle <> a.handle, h.created, h.rowid LIMIT 1",
-                params![ws, sys.family, p, sys.id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(h) = h {
-            return Ok((sys.id, h));
-        }
+        return Ok((system.id, handle));
     }
     Ok((reported.system.clone(), reported.handle.trim().to_string()))
 }
@@ -105,29 +94,24 @@ pub fn key_system(ch: &Channels, adapter: &str, reported: &str) -> String {
 /// sender.
 pub fn out_key(
     ch: &Channels,
-    c: &Connection,
+    r: &mut impl Read,
     ws: &str,
     conn: &str,
     text: &str,
 ) -> ChannelResult<Option<String>> {
-    let row: Option<(String, String, String, Option<String>)> = c
-        .query_row(
-            "SELECT cn.adapter, a.system_id, a.handle, a.party_id FROM connections cn
-               JOIN accounts a ON a.id = cn.account_id WHERE cn.id = ? AND cn.workspace_id = ?",
-            params![conn, ws],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )
-        .optional()?;
-    let Some((adapter, system, handle, party)) = row else {
+    let Some(source) = Connections::new(r).source(ws, conn)? else {
         return Ok(None);
     };
-    let want = key_system(ch, &adapter, &system);
+    let Some(account) = Accounts(r).get(&source.account_id)? else {
+        return Ok(None);
+    };
+    let want = key_system(ch, &source.adapter, &account.system_id);
     let (s, h) = key_sender(
-        c,
+        r,
         ws,
-        party.as_deref(),
+        Some(&account.party_id),
         &want,
-        &HandleRef::new(system, handle),
+        &HandleRef::new(account.system_id, account.handle),
     )?;
     Ok(Some(key_of(&s, &h, text, &[])))
 }
@@ -159,33 +143,6 @@ pub fn tolerance(
         .iter()
         .map(|a| precision(a))
         .fold(precision(adapter), i64::max))
-}
-
-/// A stored message a copy was matched to.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Found {
-    pub id: String,
-    pub space_id: String,
-    /// One of Steve's sends (read back), not a received message.
-    pub out: bool,
-}
-
-/// The message connection `conn` delivered (or sent) before with delivery id `source`.
-pub fn by_source(c: &Connection, conn: &str, source: &str) -> ChannelResult<Option<Found>> {
-    Ok(c.query_row(
-        "SELECT m.id, m.space_id, m.direction = 'out' FROM chan_message_seen x
-           JOIN chan_messages m ON m.id = x.message_id
-          WHERE x.connection_id = ? AND x.source_id = ?",
-        params![conn, source],
-        |r| {
-            Ok(Found {
-                id: r.get(0)?,
-                space_id: r.get(1)?,
-                out: r.get(2)?,
-            })
-        },
-    )
-    .optional()?)
 }
 
 /// What a copy is matched by.
@@ -381,72 +338,4 @@ pub fn new_id(c: &Connection, space: &str, key: &str, created: i64) -> ChannelRe
         n += 1;
     }
     Ok(format!("{base}{n}"))
-}
-
-/// A copy with provider id `ext` arrived for message `id`: the message takes it when it has none
-/// (or only a Hub-made one), and the replies that named the Hub-made one name it instead.
-pub fn upgrade(tx: &Tx, id: &str, ext: &str) -> ChannelResult<()> {
-    if ext.is_empty() || is_fallback(ext) {
-        return Ok(());
-    }
-    let row: Option<(String, Option<String>)> = tx
-        .query_row(
-            "SELECT space_id, external_id FROM chan_messages WHERE id = ?",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    let Some((space, old)) = row else {
-        return Ok(());
-    };
-    if old.as_deref().is_some_and(|o| !is_fallback(o)) {
-        return Ok(());
-    }
-    let n = tx.execute(
-        "UPDATE OR IGNORE chan_messages SET external_id = ? WHERE id = ?",
-        params![ext, id],
-    )?;
-    if n == 1
-        && let Some(old) = old
-    {
-        tx.execute(
-            "UPDATE chan_messages SET reply_to = ? WHERE space_id = ? AND reply_to = ?",
-            params![ext, space, old],
-        )?;
-    }
-    Ok(())
-}
-
-/// Connection `conn` supplied a copy of message `id`: its delivery id is kept, and a copy without a
-/// provider id marks the message as supplied by it (so its next identical message is never taken
-/// for this one).
-pub fn supplied(
-    tx: &Tx,
-    id: &str,
-    conn: &str,
-    source: Option<&str>,
-    without_id: bool,
-) -> ChannelResult<()> {
-    if let Some(s) = source {
-        tx.execute(
-            "INSERT OR IGNORE INTO chan_message_seen (connection_id, source_id, message_id) VALUES (?, ?, ?)",
-            params![conn, s, id],
-        )?;
-    }
-    if without_id {
-        tx.execute(
-            "UPDATE chan_messages SET fallback_from = coalesce(fallback_from, ?) WHERE id = ?",
-            params![conn, id],
-        )?;
-    }
-    Ok(())
-}
-
-/// A read-back of send `id` tells its provider time: kept when the send did not say it.
-pub fn fill_created(tx: &Tx, id: &str, created: i64) -> ChannelResult<()> {
-    tx.execute(
-        "UPDATE chan_messages SET ext_created = coalesce(ext_created, ?) WHERE id = ? AND direction = 'out'",
-        params![created, id],
-    )?;
-    Ok(())
 }

@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use steve_store::testkit::modules::contact_profiles as fixture;
 
 use axum::Router;
 use serde_json::{Value, json};
@@ -19,8 +20,6 @@ use steve_modules::contacts::sync::{
 use steve_modules::contacts::{self, Ports};
 use steve_modules::testkit::{ME, TestEnv, WS, WS2, call, caller};
 use steve_modules::{ApiResult, Caller};
-
-const CONN: &str = "con_fs";
 
 fn me() -> Caller {
     caller(WS, ME)
@@ -92,31 +91,11 @@ impl Fx {
         call(&self.r, Some(&me()), method, path, body.as_ref()).await
     }
 
-    fn exec(&self, sql: &str) {
-        self.t
-            .store()
-            .with_conn(|c| Ok(c.execute_batch(sql)?))
-            .expect("exec");
-    }
-
-    fn text(&self, sql: &str) -> String {
-        self.t
-            .store()
-            .with_conn(|c| Ok(c.query_row(sql, [], |r| r.get(0))?))
-            .expect("text")
-    }
-
     async fn connect(&self) {
         tokio::spawn(self.sync.clone().run());
         let (s, _) = self.req("GET", "/me/contact", None).await;
         assert_eq!(s, 200);
-        self.exec(&format!(
-            "INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated)
-               SELECT 'acc_{CONN}', '{WS}', 'feishu_app', 'feishu_app', id, 'app_bot', 'cli_x', 'cli_x', 'connect', 1, 1
-                 FROM parties WHERE workspace_id = '{WS}' AND org_kind = 'self';
-             INSERT INTO connections (id, workspace_id, account_id, adapter, auth, caps, created_by, created, updated)
-               VALUES ('{CONN}', '{WS}', 'acc_{CONN}', 'feishu', 'credential', '[\"msg.receive\",\"directory.read\"]', 'usr_dev', 1, 1);"
-        ));
+        fixture::seed_profile_connection(self.t.store()).unwrap();
     }
 
     async fn sync_now(&self) {
@@ -136,21 +115,15 @@ impl Fx {
     }
 
     fn contact_id(&self, id: &str) -> String {
-        self.text(&format!(
-            "SELECT a.party_id FROM account_handles h JOIN accounts a ON a.id = h.account_id WHERE h.family = 'feishu_user' AND h.handle = 'on_{id}'"
-        ))
+        fixture::profile_party(self.t.store(), &format!("on_{id}")).unwrap()
     }
 
     fn account_id(&self, id: &str) -> String {
-        self.text(&format!(
-            "SELECT h.account_id FROM account_handles h WHERE h.family = 'feishu_user' AND h.handle = 'on_{id}'"
-        ))
+        fixture::profile_account(self.t.store(), &format!("on_{id}")).unwrap()
     }
 
     fn own_org(&self) -> String {
-        self.text(&format!(
-            "SELECT id FROM parties WHERE workspace_id = '{WS}' AND org_kind = 'self'"
-        ))
+        fixture::own_organization(self.t.store()).unwrap()
     }
 
     async fn contact(&self, id: &str) -> Value {
@@ -178,14 +151,14 @@ impl Fx {
     fn enrich(&self, account: &str, e: &Enrichment) -> accounts::Enriched {
         self.t
             .store()
-            .transaction(|tx| accounts::enrich(tx, &[], WS, ME, account, e))
+            .write(|tx| accounts::enrich(tx, &[], WS, ME, account, e))
             .expect("enrich")
     }
 
     fn tenant_org(&self, h: &TenantHint) -> String {
         self.t
             .store()
-            .transaction(|tx| accounts::tenant_org(tx, WS, ME, h))
+            .write(|tx| accounts::tenant_org(tx, WS, ME, h))
             .expect("tenant org")
     }
 }
@@ -229,12 +202,7 @@ async fn the_directory_sync_keeps_what_you_set() {
         )
         .await;
     assert_eq!(s, 200, "{b}");
-    fx.exec(&format!(
-        "UPDATE links SET props = json_set(props, '$.title', '首席架构师') WHERE subject_id = '{hanmeimei}' AND object_id = '{org}' AND predicate = 'works_at';
-         INSERT INTO revisions (workspace_id, object_type, object_id, version, patch, author, created)
-           VALUES ('{WS}', 'party', '{hanmeimei}', 99,
-             json('{{\"before\":{{\"job\":{{\"org_id\":\"{org}\",\"props\":{{\"title\":\"工程师\"}}}}}},\"after\":{{\"job\":{{\"org_id\":\"{org}\",\"props\":{{\"title\":\"首席架构师\"}}}}}}}}'), 'usr_dev', 1);"
-    ));
+    fixture::manual_job_title(fx.t.store(), &hanmeimei, &org).unwrap();
 
     // the directory changes every name and title
     fx.dir.set(snapshot(vec![
@@ -288,10 +256,9 @@ async fn the_directory_sync_keeps_what_you_set() {
         json!("销售总监"),
         "reopened with your title"
     );
-    let props: Value = serde_json::from_str(&fx.text(&format!(
-        "SELECT props FROM links WHERE subject_id = '{zhangwei}' AND object_id = '{org}' AND predicate = 'works_at'"
-    )))
-    .unwrap();
+    let props: Value =
+        serde_json::from_str(&fixture::job_properties(fx.t.store(), &zhangwei, &org).unwrap())
+            .unwrap();
     assert_eq!(props["manual"], json!(["title"]));
     assert_eq!(props["to"], Value::Null);
 
@@ -358,9 +325,7 @@ async fn enrichment_fills_only_what_is_empty() {
     assert_eq!(fx.name(&wangfang).await, "ou_abcdef123456");
 
     // an empty title is filled; then you set one; a later answer does not replace it
-    fx.exec(&format!(
-        "UPDATE links SET props = json_set(props, '$.title', NULL) WHERE subject_id = '{hanmeimei}' AND object_id = '{org}'"
-    ));
+    fixture::clear_job_title(fx.t.store(), &hanmeimei, &org).unwrap();
     let e = |t: &str| Enrichment {
         org_id: Some(org.clone()),
         title: Some(t.into()),
@@ -377,9 +342,7 @@ async fn enrichment_fills_only_what_is_empty() {
             .job_filled,
         "only an empty one"
     );
-    fx.exec(&format!(
-        "UPDATE links SET props = json_set(props, '$.title', NULL) WHERE subject_id = '{hanmeimei}' AND object_id = '{org}'"
-    ));
+    fixture::clear_job_title(fx.t.store(), &hanmeimei, &org).unwrap();
     fx.req(
         "PATCH",
         &format!("/contacts/{hanmeimei}/jobs/{org}"),
@@ -479,9 +442,7 @@ async fn organizations_say_where_their_name_comes_from() {
     assert_eq!(o["name_state"], "workspace");
     assert_eq!(o["name_reason"], Value::Null);
     assert_eq!(o["tenant"], json!({"key": "tk_own", "own": true}));
-    fx.exec(&format!(
-        "UPDATE connections SET config = '{{\"permissions\":[{{\"scope\":\"tenant:tenant:readonly\",\"status\":\"missing\"}}]}}' WHERE id = '{CONN}'"
-    ));
+    fixture::missing_profile_permission(fx.t.store()).unwrap();
     let (_, o) = fx.req("GET", &format!("/orgs/{own}"), None).await;
     assert_eq!(
         (o["name_reason"].clone(), o["name_scope"].clone()),
@@ -541,9 +502,7 @@ async fn the_profile_says_what_is_missing_and_lookups_are_retried() {
     );
     // a Feishu identity that looks Feishu people up (registered as the channels would)
     profile::register_lookup("feishu_app", "feishu");
-    fx.exec(&format!(
-        "UPDATE connections SET adapter = 'feishu_app', status = 'ok' WHERE id = '{CONN}'"
-    ));
+    fixture::enable_profile_adapter(fx.t.store()).unwrap();
     let p = &fx.contact(&lilei).await["profile"];
     assert_eq!(
         p["fields"]["email"],
@@ -585,7 +544,7 @@ async fn the_profile_says_what_is_missing_and_lookups_are_retried() {
     );
     let due = |now: i64| {
         fx.t.store()
-            .with_conn(|c| Ok(profile::due(c, &acc, now).unwrap()))
+            .read::<_, steve_store::StoreError>(|c| Ok(profile::due(c, &acc, now).unwrap()))
             .unwrap()
     };
     assert!(!due(3_000));
@@ -613,11 +572,15 @@ async fn the_profile_says_what_is_missing_and_lookups_are_retried() {
     // the page counts only jobs you can see
     let party =
         fx.t.store()
-            .with_conn(|c| Ok(contacts::repo::get(c, &lilei).unwrap().unwrap()))
+            .read::<_, steve_store::StoreError>(|c| {
+                Ok(contacts::repo::get(c, &lilei).unwrap().unwrap())
+            })
             .unwrap();
     let p =
         fx.t.store()
-            .with_conn(|c| Ok(profile::contact_profile(c, WS, &party, Some(&[])).unwrap()))
+            .read::<_, steve_store::StoreError>(|c| {
+                Ok(profile::contact_profile(c, WS, &party, Some(&[])).unwrap())
+            })
             .unwrap();
     assert_eq!(p.fields.org.state, "missing");
 }

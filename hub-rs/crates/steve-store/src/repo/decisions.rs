@@ -20,24 +20,23 @@ pub(crate) fn message_insert(
     space: &str,
 ) -> Result<String> {
     let id = uid("msg");
-    crate::contract::exec_on(
-        &mut crate::contract::Sqlite(c),
-        &message_statement(
-            crate::contract::Dialect::Sqlite,
-            &id,
-            ws,
-            author,
-            text,
-            item_id,
-            meta,
-            space,
-        )?,
-    )?;
+    let mut db = crate::contract::Sqlite(c);
+    let statement = message_statement(
+        crate::contract::Dialect::Sqlite,
+        &id,
+        ws,
+        author,
+        text,
+        item_id,
+        meta,
+        space,
+    );
+    crate::contract::exec_on(&mut db, &statement)?;
     Ok(id)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn message_statement(
+pub(crate) fn message_statement(
     dialect: crate::contract::Dialect,
     id: &str,
     ws: &str,
@@ -46,22 +45,20 @@ fn message_statement(
     item_id: Option<&str>,
     meta: &Value,
     space: &str,
-) -> Result<sea_query::InsertStatement> {
+) -> sea_query::InsertStatement {
     use sea_query::{Expr, ExprTrait, Func, Query};
-
-    let meta = truthy(meta).then(|| to_json(meta)).transpose()?;
-    // Keep a strictly increasing cursor within one conversation, even within one millisecond.
-    let latest = Query::select()
-        .expr(Expr::cust_with_expr("MAX(?) + 1", Expr::col("created")))
+    let last = Query::select()
+        .expr(Expr::from(Func::max(Expr::col("created"))).add(Expr::cust("1")))
         .from("messages")
         .and_where(Expr::col("workspace_id").eq(ws))
         .and_where(Expr::col("space").eq(space))
         .take();
-    let created = dialect.greatest(
+    // Created timestamps strictly increase in a conversation because they are the listing cursor.
+    let next = dialect.greatest(
         Expr::val(now()),
-        Func::coalesce([Expr::from(latest), Expr::cust("0")]).into(),
+        Func::coalesce([Expr::from(last), Expr::cust("0")]).into(),
     );
-    Ok(Query::insert()
+    Query::insert()
         .into_table("messages")
         .columns([
             "id",
@@ -80,10 +77,10 @@ fn message_statement(
             author.into(),
             text.into(),
             item_id.into(),
-            meta.into(),
-            created,
+            truthy(meta).then(|| meta.to_string()).into(),
+            next,
         ])
-        .take())
+        .take()
 }
 
 /// Add a message and publish it with the rest of the write.
@@ -97,7 +94,7 @@ pub fn append_message(
     space: &str,
 ) -> Result<String> {
     let id = uid("msg");
-    let stmt = message_statement(w.dialect(), &id, ws, author, text, item_id, meta, space)?;
+    let stmt = message_statement(w.dialect(), &id, ws, author, text, item_id, meta, space);
     w.exec(&stmt)?;
     w.emit(steve_types::DomainEvent::from(
         steve_types::WorkEvent::Message {
@@ -579,48 +576,4 @@ impl Messages<'_> {
             )
         })
     }
-}
-
-/// Settles the item's open decisions as `expired` with `result`, inside the caller's transaction
-/// (`Decisions::resolve` for each, like a finished item's “nothing left to decide”). Returns how many.
-pub fn decisions_expire_open_in(
-    w: &mut crate::W<'_>,
-    item_id: &str,
-    result: &Value,
-) -> Result<usize> {
-    use crate::contract::Q;
-    use sea_query::{Expr, ExprTrait, Order, Query};
-
-    let ids = w.all(
-        Query::select()
-            .columns(["id", "workspace_id"])
-            .from("decisions")
-            .and_where(Expr::col("item_id").eq(item_id))
-            .and_where(Expr::col("status").eq("open"))
-            .order_by("created", Order::Asc),
-        |r| Ok((r.get::<String>(0)?, r.get::<String>(1)?)),
-    )?;
-    let result = to_json(result)?;
-    for (id, ws) in &ids {
-        w.exec(
-            Query::update()
-                .table("decisions")
-                .values([
-                    ("status", "expired".into()),
-                    ("result", result.as_str().into()),
-                    ("resolved", now().into()),
-                    ("undo", None::<String>.into()),
-                ])
-                .and_where(Expr::col("id").eq(id.as_str()))
-                .and_where(Expr::col("status").eq("open")),
-        )?;
-        w.emit(steve_types::DomainEvent::from(
-            steve_types::WorkEvent::Decision {
-                ws: ws.clone().into(),
-                id: id.clone().into(),
-                item_id: Some(Some(item_id.into())),
-            },
-        ));
-    }
-    Ok(ids.len())
 }

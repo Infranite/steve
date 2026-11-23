@@ -332,7 +332,7 @@ impl GitHub {
         if r.is_err() {
             let d = self
                 .store()
-                .write(|tx| vault.destroy_item(&tx.legacy(), ws, me, &item));
+                .write(|tx| vault.destroy_item(tx, ws, me, &item));
             if d.is_err() {
                 tracing::error!("could not destroy a GitHub App credential item");
             }

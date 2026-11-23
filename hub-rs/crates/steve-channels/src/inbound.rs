@@ -39,6 +39,7 @@ use steve_flow::{ActorRef, Ingested, RawEvent};
 use steve_modules::ApiError;
 use steve_modules::accounts::{AnyHandle, ExtraHandle, Hints, Identified, identify_any};
 use steve_store::Tx;
+use steve_store::channel_message_repo::ingress;
 
 use crate::channel::{HandleRef, InboundMessage, MemberInfo, Sender, SpaceInfo, SpaceKind};
 use crate::ext::MessageIds;
@@ -421,11 +422,13 @@ impl Channels {
         let store = self.store().clone();
         let facts = self.facts(ws, conn)?;
         self.validate_inbound(&facts, &msg)?;
-        let (existing, known) = store.reader(|c| -> ChannelResult<_> {
-            Ok((
-                spaces::find_as(c, ws, conn, &msg.space_ext_id, facts.platform.as_deref())?,
-                handle_known(c, ws, &msg.sender)?,
-            ))
+        let (existing, known) = store.read(|r| {
+            store.reader(|c| -> ChannelResult<_> {
+                Ok((
+                    spaces::find_as(r, ws, conn, &msg.space_ext_id, facts.platform.as_deref())?,
+                    handle_known(c, ws, &msg.sender)?,
+                ))
+            })
         })?;
 
         // 屏蔽: nothing is processed or stored, not even the sender
@@ -664,16 +667,13 @@ impl Channels {
                     .transpose()?
                     .unwrap_or_default();
                 let text = format!("「{label}」有新消息（不提醒，只记录）");
-                let open: bool = tx.query_row(
-                    "SELECT EXISTS (SELECT 1 FROM digest_entries WHERE workspace_id = ? AND taken IS NULL AND text = ?)",
-                    params![ws, text],
-                    |r| r.get(0),
-                )?;
-                if !open {
-                    steve_flow::digest::add(tx, ws, &text, event.as_deref(), None, now)
-                        .map_err(|e| ApiError::Internal(e.to_string()))?;
-                }
-                Ok(())
+                tx.write(|w| -> ChannelResult<()> {
+                    let mut notes = steve_store::DigestNotes(w);
+                    if !notes.contains_pending(ws, &text)? {
+                        notes.add(ws, &text, event.as_deref(), None, now)?;
+                    }
+                    Ok(())
+                })
             });
             if let Err(e) = r {
                 tracing::warn!(conn, "channel inbound: digest not noted: {e}");
@@ -693,7 +693,9 @@ impl Channels {
     ) -> ChannelResult<()> {
         let store = self.store();
         // What the rules look at; the event carries it too, for flows converted from rules.
-        let rf = store.reader(|c| rule_facts(c, ws, &facts, &inbound, &msg))?;
+        let rf = store.read::<_, steve_store::StoreError>(|r| {
+            Ok(store.reader(|c| rule_facts(c, r, ws, &facts, &inbound, &msg)))
+        })??;
 
         // Step 2, second half: the signal.
         // a message without a provider id is its event by the Hub's message id
@@ -763,7 +765,7 @@ impl Channels {
             Ok(r) => {
                 if let Some(id) = r.id() {
                     let (mid, id) = (inbound.message_id.clone(), id.to_string());
-                    store.transaction(|tx| messages::set_event(tx, &mid, &id))?;
+                    store.write(|w| ingress::link_event(w, &mid, &id))?;
                 }
                 if matches!(r, Ingested::Dropped(_)) && inbound.next == Next::Handle {
                     // the source is paused or the type is off: keep the message, do not act on it
@@ -818,13 +820,15 @@ impl Channels {
         let mentions = input.identify_mentions(tx, &prepared.label)?;
         let key = {
             let want = fallback::key_system(self, &facts.adapter, &msg.sender.handle.system);
-            let (sys, handle) = fallback::key_sender(
-                tx,
-                ws,
-                identity.sender_party.as_deref(),
-                &want,
-                &msg.sender.handle,
-            )?;
+            let (sys, handle) = tx.write(|w| {
+                fallback::key_sender(
+                    w,
+                    ws,
+                    identity.sender_party.as_deref(),
+                    &want,
+                    &msg.sender.handle,
+                )
+            })?;
             fallback::key_of(&sys, &handle, &msg.text, &msg.attachments)
         };
         let first = input.find_existing_message(self, tx, space, &identity, &key)?;
@@ -929,21 +933,23 @@ impl InboundWrite<'_> {
         } = *self;
         let actor = facts.owner_user.as_deref().unwrap_or(&facts.created_by);
         // 1. the space
-        let (space, created) = spaces::locate_or_create(
-            tx,
-            &NewSpace {
-                ws,
-                system_id: &system,
-                connection_id: conn,
-                kind: info.kind,
-                external_id: &msg.space_ext_id,
-                name: &info.name,
-                member_count: info.member_count,
-                has_external: info.has_external,
-                now,
-                platform: facts.platform.as_deref(),
-            },
-        )?;
+        let (space, created) = tx.write(|w| {
+            spaces::locate_or_create(
+                w,
+                &NewSpace {
+                    ws,
+                    system_id: &system,
+                    connection_id: conn,
+                    kind: info.kind,
+                    external_id: &msg.space_ext_id,
+                    name: &info.name,
+                    member_count: info.member_count,
+                    has_external: info.has_external,
+                    now,
+                    platform: facts.platform.as_deref(),
+                },
+            )
+        })?;
         let label = if space.name.is_empty() {
             "渠道消息".to_string()
         } else {
@@ -960,7 +966,16 @@ impl InboundWrite<'_> {
             )?;
         }
         if created || filled {
-            spaces::add_member(tx, ws, &space.id, &facts.account_id, "bot", now)?;
+            tx.write(|w| {
+                steve_store::channel_spaces::members::add(
+                    w,
+                    ws,
+                    &space.id,
+                    &facts.account_id,
+                    "bot",
+                    now,
+                )
+            })?;
             for m in members {
                 if let Some(id) = identify_handle_as(
                     tx,
@@ -973,7 +988,16 @@ impl InboundWrite<'_> {
                     m.role == "bot",
                 ) && id.account_id != facts.account_id
                 {
-                    spaces::add_member(tx, ws, &space.id, &id.account_id, &m.role, now)?;
+                    tx.write(|w| {
+                        steve_store::channel_spaces::members::add(
+                            w,
+                            ws,
+                            &space.id,
+                            &id.account_id,
+                            &m.role,
+                            now,
+                        )
+                    })?;
                 }
             }
         }
@@ -1028,11 +1052,18 @@ impl InboundWrite<'_> {
             &label,
             msg.sender.is_bot,
         );
-        if let Some(s) = &sender
-            && !spaces::is_member(tx, &space.id, &s.account_id)?
-        {
+        if let Some(s) = &sender {
             let role = if msg.sender.is_bot { "bot" } else { "member" };
-            if spaces::add_member(tx, ws, &space.id, &s.account_id, role, now)? {
+            if tx.write(|w| {
+                steve_store::channel_spaces::members::add(
+                    w,
+                    ws,
+                    &space.id,
+                    &s.account_id,
+                    role,
+                    now,
+                )
+            })? {
                 spaces::event(tx, ws, &space.id);
             }
         }
@@ -1200,29 +1231,42 @@ impl InboundWrite<'_> {
         let source = msg.source_id.as_deref().filter(|s| !s.trim().is_empty());
         let mut first: Option<(String, String, &'static str)> = None;
         if let Some(src) = source
-            && let Some(f) = fallback::by_source(tx, conn, src)?
+            && let Some(f) = tx.write(|w| ingress::by_source(w, conn, src))?
         {
             if has_id {
-                fallback::upgrade(tx, &f.id, &msg.external_id)?;
+                tx.write(|w| ingress::upgrade_provider_id(w, &f.id, &msg.external_id))?;
             }
             let label = if f.out {
                 LABEL_ECHO
             } else {
-                messages::complete(
-                    tx,
-                    &f.id,
-                    msg.thread_key.as_deref(),
-                    msg.reply_to.as_deref(),
-                )?;
+                tx.write(|w| {
+                    ingress::complete(
+                        w,
+                        &f.id,
+                        msg.thread_key.as_deref(),
+                        msg.reply_to.as_deref(),
+                        None,
+                        None,
+                    )
+                })?;
                 "重复的消息"
             };
             first = Some((f.id, f.space_id, label));
         }
         if first.is_none()
             && has_id
-            && let Some(id) = messages::by_external(tx, &space.id, &msg.external_id)?
+            && let Some(id) = tx.write(|w| ingress::by_external(w, &space.id, &msg.external_id))?
         {
-            messages::complete(tx, &id, msg.thread_key.as_deref(), msg.reply_to.as_deref())?;
+            tx.write(|w| {
+                ingress::complete(
+                    w,
+                    &id,
+                    msg.thread_key.as_deref(),
+                    msg.reply_to.as_deref(),
+                    None,
+                    None,
+                )
+            })?;
             first = Some((id, space.id.clone(), "重复的消息"));
         }
         if first.is_none() {
@@ -1239,14 +1283,16 @@ impl InboundWrite<'_> {
                 &msg.external_id,
             )?
         {
-            messages::complete_from(
-                tx,
-                &id,
-                msg.thread_key.as_deref(),
-                msg.reply_to.as_deref(),
-                sender_account.as_deref(),
-                sender_party.as_deref(),
-            )?;
+            tx.write(|w| {
+                ingress::complete(
+                    w,
+                    &id,
+                    msg.thread_key.as_deref(),
+                    msg.reply_to.as_deref(),
+                    sender_account.as_deref(),
+                    sender_party.as_deref(),
+                )
+            })?;
             first = Some((id, sp, LABEL_ELSEWHERE));
         }
         self.find_own_echo(tx, space, identity, has_id, first)
@@ -1298,20 +1344,22 @@ impl InboundWrite<'_> {
         };
         if let Some(f) = found {
             if has_id {
-                fallback::upgrade(tx, &f.id, &msg.external_id)?;
+                tx.write(|w| ingress::upgrade_provider_id(w, &f.id, &msg.external_id))?;
             }
             let label = if f.out {
-                fallback::fill_created(tx, &f.id, msg.created)?;
+                tx.write(|w| ingress::fill_created(w, &f.id, msg.created))?;
                 LABEL_ECHO
             } else {
-                messages::complete_from(
-                    tx,
-                    &f.id,
-                    msg.thread_key.as_deref(),
-                    msg.reply_to.as_deref(),
-                    sender_account.as_deref(),
-                    sender_party.as_deref(),
-                )?;
+                tx.write(|w| {
+                    ingress::complete(
+                        w,
+                        &f.id,
+                        msg.thread_key.as_deref(),
+                        msg.reply_to.as_deref(),
+                        sender_account.as_deref(),
+                        sender_party.as_deref(),
+                    )
+                })?;
                 LABEL_ELSEWHERE
             };
             return Ok(Some((f.id, f.space_id, label)));
@@ -1354,25 +1402,23 @@ impl InboundWrite<'_> {
                     sender_party.as_deref(),
                 )? =>
             {
-                match messages::our_echo(
-                    tx,
-                    ws,
-                    &msg.space_ext_id,
-                    &msg.external_id,
-                    &msg.text,
-                    now - ECHO_WINDOW_MS,
-                )? {
-                    Some((id, sp)) => {
-                        if sp == space.id && has_id {
-                            tx.execute(
-                                "UPDATE chan_messages SET external_id = coalesce(external_id, ?) WHERE id = ?",
-                                params![msg.external_id, id],
-                            )?;
-                        }
-                        Some((id, sp, LABEL_ECHO))
+                tx.write(|w| -> ChannelResult<Option<ExistingMessage>> {
+                    let found = messages::our_echo(
+                        w,
+                        ws,
+                        &msg.space_ext_id,
+                        &msg.external_id,
+                        &msg.text,
+                        now - ECHO_WINDOW_MS,
+                    )?;
+                    let Some((id, stored_space)) = found else {
+                        return Ok(None);
+                    };
+                    if stored_space == space.id && has_id {
+                        ingress::fill_echo_id(w, &id, &msg.external_id)?;
                     }
-                    None => None,
-                }
+                    Ok(Some((id, stored_space, LABEL_ECHO)))
+                })?
             }
             None => None,
         })
@@ -1415,9 +1461,10 @@ impl InboundWrite<'_> {
         let has_id = !msg.external_id.is_empty();
         let source = msg.source_id.as_deref().filter(|s| !s.trim().is_empty());
         if let Some((id, _, _)) = &first {
-            fallback::supplied(tx, id, conn, source, !has_id)?;
-            // one message, one more identity that received it
-            spaces::mark_seen(tx, id, conn)?;
+            tx.write(|w| {
+                ingress::supplied(w, id, conn, source, !has_id)?;
+                ingress::mark_seen(w, id, conn)
+            })?;
             if mode == Mode::Own
                 && !*bot_author
                 && history.is_none()
@@ -1425,14 +1472,16 @@ impl InboundWrite<'_> {
                     .as_ref()
                     .is_some_and(|(_, _, label)| *label != LABEL_ECHO)
             {
-                crate::arbiter::receipt(
-                    tx,
-                    conn,
-                    id,
-                    trigger_account,
-                    trigger_party.as_deref(),
-                    *trigger_self,
-                )?;
+                tx.write(|w| {
+                    ingress::trigger_receipt(
+                        w,
+                        conn,
+                        id,
+                        trigger_account,
+                        trigger_party.as_deref(),
+                        *trigger_self,
+                    )
+                })?;
             }
         }
         if let Some((id, space_id, label)) = first {
@@ -1506,39 +1555,43 @@ impl InboundWrite<'_> {
         } else {
             fallback::new_id(tx, &space.id, &key, msg.created)?
         };
-        let Some(message_id) = messages::insert_inbound(
-            tx,
-            &messages::NewInbound {
-                ws,
-                space_id: &space.id,
-                external_id: &external_id,
-                thread_key: msg.thread_key.as_deref(),
-                reply_to: msg.reply_to.as_deref(),
-                sender_account_id: sender_account.as_deref(),
-                sender_party_id: sender_party.as_deref(),
-                text: &msg.text,
-                attachments: &attachments,
-                mentions: &mentions,
-                created: msg.created,
-                content_key: Some(&key),
-                fallback_from: (!has_id).then_some(conn),
-                history: history.map(History::code),
-                seen_by: spaces::bit(tx, &space.id, conn)?,
-            },
-        )?
-        else {
-            return Err(ApiError::conflict("这条消息已经记下了"));
-        };
-        fallback::supplied(tx, &message_id, conn, source, false)?;
+        let message_id = tx.write(|w| -> ChannelResult<String> {
+            let seen_by = steve_store::channel_spaces::identity_bit(w, &space.id, conn)?;
+            let id = ingress::insert(
+                w,
+                &ingress::NewInbound {
+                    ws,
+                    space_id: &space.id,
+                    external_id: &external_id,
+                    thread_key: msg.thread_key.as_deref(),
+                    reply_to: msg.reply_to.as_deref(),
+                    sender_account_id: sender_account.as_deref(),
+                    sender_party_id: sender_party.as_deref(),
+                    text: &msg.text,
+                    attachments: &attachments,
+                    mentions: &mentions,
+                    created: msg.created,
+                    content_key: Some(&key),
+                    fallback_from: (!has_id).then_some(conn),
+                    history: history.map(History::code),
+                    seen_by,
+                },
+            )?
+            .ok_or_else(|| ApiError::conflict("这条消息已经记下了"))?;
+            ingress::supplied(w, &id, conn, source, false)?;
+            Ok(id)
+        })?;
         if mode == Mode::Own && !*bot_author && history.is_none() {
-            crate::arbiter::receipt(
-                tx,
-                conn,
-                &message_id,
-                trigger_account,
-                trigger_party.as_deref(),
-                *trigger_self,
-            )?;
+            tx.write(|w| {
+                ingress::trigger_receipt(
+                    w,
+                    conn,
+                    &message_id,
+                    trigger_account,
+                    trigger_party.as_deref(),
+                    *trigger_self,
+                )
+            })?;
         }
         if history.is_none() && !msg.sender.is_bot {
             crate::pipeline::observe_reply(
@@ -1557,7 +1610,7 @@ impl InboundWrite<'_> {
         } else {
             msg.created.max(now)
         };
-        spaces::touch(tx, &space.id, at, msg.sender.external)?;
+        tx.write(|w| steve_store::channel_spaces::touch(w, &space.id, at, msg.sender.external))?;
         if let Some(h) = history {
             count_history(tx, conn, h, now)?;
         }
@@ -1740,16 +1793,13 @@ fn only_history(tx: &Tx, space: &str) -> ChannelResult<bool> {
 /// Counts one message only recorded as history on the connection's settings (the account page
 /// shows them).
 fn count_history(tx: &Tx, conn: &str, h: History, now: i64) -> ChannelResult<()> {
-    let col = match h {
-        History::Before | History::Backfill => "history_before",
-        History::Late => "history_late",
+    use steve_store::channel_spaces::account_settings::{self, HistoryArrival};
+
+    let arrival = match h {
+        History::Before | History::Backfill => HistoryArrival::Before,
+        History::Late => HistoryArrival::Late,
     };
-    tx.execute(
-        &format!(
-            "UPDATE channel_settings SET {col} = {col} + 1, history_at = ? WHERE connection_id = ?"
-        ),
-        params![now, conn],
-    )?;
+    tx.write(|w| account_settings::count_history(w, conn, arrival, now))?;
     tracing::info!(
         conn,
         history = h.code(),
@@ -1790,7 +1840,7 @@ fn suggest_me(
     sender: &Sender,
 ) -> ChannelResult<()> {
     let user = facts.owner_user.as_deref().unwrap_or(&facts.created_by);
-    let Some(me) = steve_modules::contacts::repo::me_of(tx, ws, user)? else {
+    let Some(me) = tx.write(|w| w.contacts().me(ws, user))? else {
         return Ok(());
     };
     let handles: Vec<&str> = std::iter::once(&sender.handle)
@@ -1845,6 +1895,7 @@ fn also(main: &str, msg: &InboundMessage) -> Vec<String> {
 /// The facts the rules' conditions look at (after step 1–2's writes).
 fn rule_facts(
     c: &rusqlite::Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     conn: &ConnFacts,
     inbound: &Inbound,
@@ -1892,7 +1943,7 @@ fn rule_facts(
         weekday: 0,
         minute: 0,
     };
-    let tz = steve_flow::schedules::workspace_tz(c, ws)?;
+    let tz = steve_modules::zone::workspace_tz(r, ws).map(|zone| zone.name().to_string())?;
     f.set_time(msg.created, &tz);
     Ok(f)
 }
@@ -1962,7 +2013,7 @@ struct RuleRouting {
 }
 
 /// Is the space's flow there to take its messages (not deleted, enabled)?
-fn live_flow(c: &rusqlite::Connection, ws: &str, id: &str) -> ChannelResult<bool> {
+fn live_flow(c: &mut impl steve_store::Read, ws: &str, id: &str) -> steve_store::Result<bool> {
     Ok(steve_flow::flows::get(c, id)?
         .is_some_and(|f| f.workspace_id == ws && !f.deleted && f.enabled))
 }
@@ -2248,7 +2299,7 @@ impl Channels {
         let ws = &plan.ws;
         // 5. the space's flow
         if let Some(flow_id) = &set.flow_id
-            && store.reader(|c| live_flow(c, ws, flow_id))?
+            && store.read(|c| live_flow(c, ws, flow_id))?
         {
             let mut r = Response::skipped("由流程处理");
             r.by = respond::By::Flow {
@@ -2260,8 +2311,8 @@ impl Channels {
         // 6. the rules: the space's, else the voice's account's
         let rules = rules::load(set.rules.as_ref().unwrap_or(&account_rules), mode);
         let context: Vec<ContextLine> = store
-            .reader(|c| {
-                messages::context_before(c, &space.id, &inbound.message_id, rules::INTENT_CONTEXT)
+            .read(|r| {
+                messages::context_before(r, &space.id, &inbound.message_id, rules::INTENT_CONTEXT)
             })?
             .into_iter()
             .map(|(who, text)| ContextLine { who, text })
@@ -2303,22 +2354,24 @@ impl Channels {
         inbound: &Inbound,
     ) -> ChannelResult<Option<Response>> {
         let now = self.now();
-        let found = self.store().reader(|c| -> ChannelResult<_> {
-            let (_, mode) = crate::bindings::connection_account(c, ws, conn)?;
-            if mode != Mode::Own {
-                return Ok(None);
-            }
-            let space =
-                spaces::get(c, &inbound.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
-            if spaces::reply_as_you(c, &space.id)? == spaces::ReplyAsYou::Off {
-                return Ok(None);
-            }
-            Ok(Some(crate::decide::bot_notice(
-                c,
-                &space,
-                &inbound.message_id,
-                now,
-            )?))
+        let found = self.store().read(|r| {
+            self.store().reader(|c| -> ChannelResult<_> {
+                let (_, mode) = crate::bindings::connection_account(c, ws, conn)?;
+                if mode != Mode::Own {
+                    return Ok(None);
+                }
+                let space = steve_store::channel_spaces::rows::get(r, &inbound.space_id)?
+                    .ok_or_else(|| ApiError::not_found("空间"))?;
+                if spaces::reply_as_you(c, &space.id)? == spaces::ReplyAsYou::Off {
+                    return Ok(None);
+                }
+                Ok(Some(crate::decide::bot_notice(
+                    r,
+                    &space,
+                    &inbound.message_id,
+                    now,
+                )?))
+            })
         })?;
         match found {
             None | Some(crate::decide::BotNotice::Record) => Ok(None),

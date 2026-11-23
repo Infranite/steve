@@ -131,11 +131,7 @@ impl H {
         let s = self.get(&format!("/spaces/{space}")).await;
         let m = self.get(&format!("/spaces/{space}/messages")).await;
         let viewer = Viewer::bare(WS, ME);
-        let list = self
-            .env
-            .store()
-            .reader(|c| conversations::list(c, WS, &viewer))
-            .expect("list");
+        let list = conversations::list(self.env.store(), WS, &viewer).expect("list");
         let row = list
             .iter()
             .find(|r| r["space_id"] == json!(space))
@@ -185,10 +181,7 @@ impl H {
         ids: &[String],
     ) -> std::collections::HashMap<String, String> {
         let viewer = Viewer::bare(WS, who);
-        self.env
-            .store()
-            .reader(|c| open_link::message_urls(c, &viewer, ids))
-            .expect("links")
+        open_link::message_urls(self.env.store(), &viewer, ids).expect("links")
     }
 }
 

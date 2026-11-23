@@ -17,7 +17,7 @@ use mail_builder::MessageBuilder;
 use mail_builder::headers::address::Address;
 use serde::Serialize;
 use serde_json::{Value, json};
-use steve_modules::accounts::connections::{WriteRefusal, may_write_source};
+use steve_modules::accounts::connections::{WriteRefusal, may_write_in};
 use steve_modules::contacts::people_repo;
 use steve_modules::decisions::{DecisionCx, DecisionHandler, choice_result};
 use steve_modules::outbound::Verdict;
@@ -528,7 +528,7 @@ impl Mail {
                 return Ok(Err(SendOutcome::Skipped));
             }
             // the connection as it is now, not as it was when you approved
-            match may_write_source(tx, &d.workspace_id, &d.connection_id, Some(SEND_CAP))? {
+            match may_write_in(tx, &d.workspace_id, &d.connection_id, Some(SEND_CAP))? {
                 Ok(()) => {}
                 Err(WriteRefusal::Later(_)) => return Ok(Err(SendOutcome::Skipped)),
                 Err(WriteRefusal::Never(why)) => {

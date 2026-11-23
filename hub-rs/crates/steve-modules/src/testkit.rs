@@ -134,13 +134,13 @@ impl TestEnv {
         .expect("open store");
         store.ensure_workspace().expect("workspace");
         store
-            .with_conn(|c| {
-                c.execute_batch(
-                    "INSERT INTO workspaces (id, name, created) VALUES ('w2', '另一个', 1);
-                     INSERT INTO users (id, workspace_id, subject, name, role, created) VALUES ('usr_dev', 'default', 'dev', 'Dev', 'owner', 1), ('usr_other', 'default', 'other', 'Other', 'member', 1);
-                     INSERT INTO workspace_members (workspace_id, user_id, role, created) VALUES ('default', 'usr_dev', 'owner', 1), ('w2', 'usr_dev', 'owner', 1), ('default', 'usr_other', 'member', 1);",
-                )?;
-                Ok(())
+            .write(|w| {
+                steve_store::Workspaces(w).insert(WS2, "另一个", 1)?;
+                steve_store::UserRows(w).insert(ME, WS, "dev", "Dev", "owner", 1)?;
+                steve_store::UserRows(w).insert(OTHER, WS, "other", "Other", "member", 1)?;
+                w.members().add(WS, ME, "owner", 1)?;
+                w.members().add(WS2, ME, "owner", 1)?;
+                w.members().add(WS, OTHER, "member", 1)
             })
             .expect("seed");
         let gateway = FakeGateway::new();

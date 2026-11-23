@@ -236,11 +236,23 @@ fn seed_item(s: &Store) -> String {
         .id
 }
 fn snapshot(s: &Store, item: &str) -> Value {
+    let (summary, detail) = s
+        .read::<_, steve_store::StoreError>(|c| {
+            let day = steve_stats::day(steve_store::now(), None);
+            let query = steve_stats::metrics::Query {
+                workspace_id: "default".into(),
+                from: day.clone(),
+                to: day,
+                ..Default::default()
+            };
+            let summary = steve_stats::metrics::summary(c, &query)?.unwrap();
+            let detail = steve_stats::views::item_detail(c, item, steve_store::now(), false)?
+                .unwrap()
+                .1;
+            Ok((summary, detail))
+        })
+        .unwrap();
     s.reader::<_,StoreError>(|c| {
-        let day=steve_stats::day(steve_store::now(),None);
-        let query=steve_stats::metrics::Query{workspace_id:"default".into(),from:day.clone(),to:day,..Default::default()};
-        let summary=steve_stats::metrics::summary(c,&query)?.unwrap();
-        let detail=steve_stats::views::item_detail(c,item,steve_store::now(),false)?.unwrap().1;
         let applied:i64=c.query_row("SELECT COUNT(*) FROM gateway_usage_reports WHERE json_extract(payload,'$.tokens.input') IS NOT NULL",[],|r|r.get(0))?;
         let ledger:i64=c.query_row("SELECT COUNT(*) FROM usage_records",[],|r|r.get(0))?;
         Ok(json!({"applied_token_usage":applied,"ledger_rows":ledger,"item":detail.usage,"summary":summary.usage}))

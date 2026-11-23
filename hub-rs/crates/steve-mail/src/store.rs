@@ -195,8 +195,13 @@ impl StoreSink<'_> {
                 local_day(
                     date,
                     steve_runtime::tz::Zone::parse(
-                        steve_modules::zone::Zone::read(tx, &self.mailbox.ws, &self.mailbox.owner)?
-                            .name()
+                        steve_modules::zone::Zone::for_user(
+                            tx,
+                            &self.mailbox.ws,
+                            Some(&self.mailbox.owner)
+                        )?
+                        .tz
+                        .name()
                     )
                     .expect("IANA zone")
                 )
@@ -513,8 +518,9 @@ impl StoreSink<'_> {
         let org = if domain.is_empty() {
             None
         } else {
-            self.store.reader(|c| {
-                people::domain_owner(c, &mb.ws, &domain)
+            self.store.read(|c| {
+                steve_store::Contacts::new(c)
+                    .domain_owner(&mb.ws, &domain)
                     .map(|id| id.and_then(|o| people::get(c, &o).ok().flatten()))
             })?
         };
@@ -525,7 +531,7 @@ impl StoreSink<'_> {
         let group_key = match &org {
             Some(o) => self
                 .store
-                .reader(|c| people::domains(c, &mb.ws, &o.id))?
+                .read(|c| steve_store::Contacts::new(c).domains(&mb.ws, &o.id))?
                 .into_iter()
                 .next()
                 .unwrap_or_else(|| domain.clone()),

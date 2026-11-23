@@ -22,14 +22,23 @@ pub mod calendar;
 pub mod caps;
 pub mod compact;
 mod contract;
+pub use contract::{
+    Accounts, AuthSessions, ConnRow, ConnectionBrief, HealthState, MatchRule, MatchRules, NewParty,
+    NewVaultGrant, Party, PartyPatch, PasskeyInfo, PasskeyRows, PrefixConfig, System, Systems,
+    UserRows, VaultGrant, VaultGrantRecord, account_profiles, account_rows, builtin_system_name,
+    is_builtin_system, secret_uses, vault_items, vault_keys,
+};
 pub mod db;
 pub mod diagnostics;
+pub mod digest;
 mod event_payload;
 mod ingest;
+pub mod knowledge;
 pub mod maintenance;
 pub mod outbox;
 mod repo;
 pub mod seeded;
+pub mod statistics;
 mod tx;
 mod types;
 pub mod workflow_gate;
@@ -43,21 +52,56 @@ use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
 pub use bus::{FnPublisher, NoPublisher, Publisher};
+pub use contract::alarms::{Alarm, Alarms, NewAlarm};
 pub use contract::audit as audit_repo;
+pub use contract::automation::{ScheduleRow, Schedules};
+pub use contract::changesets as changeset_repo;
+pub use contract::channel_feed;
 pub use contract::channel_messages as channel_message_repo;
 pub use contract::channel_personas;
-pub use contract::changesets as changeset_repo;
+pub use contract::channel_positions;
+pub use contract::channel_sends;
+pub use contract::channel_spaces;
+pub use contract::channel_trigger_report;
+pub use contract::channel_write_policy;
 #[cfg(feature = "testkit")]
 pub use contract::core_fixture;
 pub use contract::core_queue;
 pub use contract::core_usage;
+pub use contract::feishu_registration;
+pub use contract::message_sources::{
+    Attachment, ChannelMessage, ChannelSources, Connections, MailMessage, MailSources,
+    MessageSelection,
+};
 pub use contract::operations::{self as operation_repo, ItemOperation};
+pub use contract::read_models::{
+    AttentionReads, FeedReads, ItemEventFields, ItemHead, ItemReads, NotificationPolicies,
+    QuietPolicy, TimelineRows, TimezoneSettings,
+};
+pub use contract::reply_basis;
 pub use contract::tags as tag_repo;
 pub use contract::thread_runs;
 pub use contract::vault_uses as vault_use_repo;
 pub use contract::yolo;
 pub use contract::{
-    R, Read, W, accounts, bots, connections, decisions as decision_repo, files as file_repo,
+    AccountIdentity, AddedMemoryIndex, BotPrompt, BotRef, BotRows, Contacts, DecisionRows,
+    DigestEntry, DigestNotes, DueTrigger, FileInfo, FileReads, FlowGrant, FlowRow, FlowRows,
+    FlowSources, FlowTriggers, FlowWaits, GrantRows, HTTP_ALLOW_PRIVATE, IndexedRange,
+    ItemEvidence, Members, MemoryIndex, MemoryIndexData, MemoryRange, MessageEvidence,
+    NewCorrection, NewFlowRow, NewRun, NewSignal, NewStep, NewTrigger, NewWait, ProjectRows, R,
+    Read, References, Revisions, RunRow, RunRows, RunStep, SchedulePatch, SessionEvidence,
+    SignalFilter, SignalRow, SignalRows, SignalTriage, SourceConfig, StartupRecord, TagRows, W,
+    WorkspaceSettings, Workspaces,
+};
+pub use contract::{AttrDef, AttrValue, Attributes, ContactQuery, NewDef, NewValue};
+pub use contract::{
+    ContactMerge, ContactMerges, DirectoryConnection, MergeProposals, NewMergeProposal,
+};
+pub use contract::{DeviceIdentity, DeviceRows, PersonaIdentity, PersonaRows};
+pub use contract::{MembershipRow, SyncedTeam, TeamDetails, TeamRef, Teams};
+pub use contract::{Steward, StewardKey, Stewards};
+pub use contract::{
+    accounts, bots, connections, decisions as decision_repo, files as file_repo,
     flows as flow_repo, github, grants, items as item_repo, links as link_repo, mail, parties,
     projects, sessions as session_repo, settings, sources,
 };
@@ -155,7 +199,8 @@ impl StoreError {
 }
 
 /// Runs inside the transaction that deletes an item: `(tx, workspace_id, item_id)`.
-pub type ItemDeletedHook = dyn Fn(&Tx, &str, &str) -> std::result::Result<(), String> + Send + Sync;
+pub type ItemDeletedHook =
+    dyn Fn(&mut W<'_>, &str, &str) -> std::result::Result<(), String> + Send + Sync;
 
 pub type Result<T, E = StoreError> = std::result::Result<T, E>;
 
@@ -318,7 +363,7 @@ impl Store {
     /// in the same transaction as the delete. Set once; `false` if already set.
     pub fn on_item_deleted(
         &self,
-        f: impl Fn(&Tx, &str, &str) -> std::result::Result<(), String> + Send + Sync + 'static,
+        f: impl Fn(&mut W<'_>, &str, &str) -> std::result::Result<(), String> + Send + Sync + 'static,
     ) -> bool {
         self.inner.item_deleted.set(Box::new(f)).is_ok()
     }
@@ -496,12 +541,7 @@ impl Store {
     }
 
     pub(crate) fn read_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
-        if let Some(c) = self.active_conn() {
-            return f(c);
-        }
-        let c = self.inner.readers.get()?;
-        instrumentation::store_acquired();
-        f(&c)
+        self.reader(f)
     }
 
     /// Refreshes the query planner's statistics where they went stale (`PRAGMA optimize`, bounded), on
@@ -975,3 +1015,6 @@ pub mod retention {
         }
     }
 }
+
+#[cfg(feature = "testkit")]
+pub mod testkit;

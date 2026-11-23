@@ -12,7 +12,6 @@
 //!
 //! Register with `steve_channels::space_decisions::register(&mut registry)`.
 
-use rusqlite::params;
 use serde_json::{Value, json};
 use steve_modules::decisions::{DecisionCx, DecisionHandler};
 use steve_modules::{ApiError, ApiResult, Registry};
@@ -63,13 +62,20 @@ fn set_flags(
     }
     let now = steve_store::now();
     let revision = before.revision + 1;
-    tx.execute(
-        "UPDATE space_settings SET muted = ?, configured = ?, revision = ?, updated = ? WHERE space_id = ?",
-        params![to.muted as i64, to.configured as i64, revision, now, space],
-    )?;
-    if was.attention != to.attention {
-        spaces::write_attention(tx, ws, space, to.attention, now)?;
-    }
+    tx.write(|w| {
+        use steve_store::channel_spaces::preferences::{self, Preference};
+        preferences::set_flags(w, space, to.muted, to.configured, revision, now)?;
+        if was.attention != to.attention {
+            preferences::set(
+                w,
+                ws,
+                space,
+                Preference::Attention(to.attention.code()),
+                now,
+            )?;
+        }
+        Ok::<_, steve_store::StoreError>(())
+    })?;
     let mut fields = Vec::new();
     if was.muted != to.muted {
         fields.push("muted");

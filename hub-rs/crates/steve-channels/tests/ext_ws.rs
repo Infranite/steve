@@ -235,12 +235,11 @@ impl H {
     }
 
     fn cursor(&self, id: &str) -> Option<Value> {
-        self.rows(
-            "SELECT token FROM chan_cursors WHERE connection_id = ? AND container = ?",
-            &[id, ext_ws::CURSOR],
-        )
-        .first()
-        .and_then(|r| r[0].as_str().and_then(|t| serde_json::from_str(t).ok()))
+        self.ch
+            .store()
+            .read(|r| steve_store::channel_positions::external_token(r, id, ext_ws::CURSOR))
+            .expect("feed cursor")
+            .and_then(|token| serde_json::from_str(&token).ok())
     }
 
     /// The fake's subscriptions so far.
@@ -1654,9 +1653,9 @@ async fn connector_rich_message_keeps_only_reference_metadata() {
     let presented = h
         .env
         .store()
-        .reader(|c| {
+        .read(|r| {
             Ok::<_, steve_modules::ApiError>(
-                steve_channels::media::present(c, rows[0][0].as_str().unwrap()).unwrap(),
+                steve_channels::media::present(r, rows[0][0].as_str().unwrap()).unwrap(),
             )
         })
         .unwrap();
@@ -2049,7 +2048,7 @@ async fn a_read_only_connection_gives_one_notice_and_lifts_when_writes_are_allow
     assert!(
         h.env
             .store()
-            .reader(|c| write_blocks::active(c, &id, &space, h.ch.now()))
+            .read(|r| write_blocks::active(r, &id, &space, h.ch.now()))
             .unwrap()
             .is_some()
     );
@@ -2063,7 +2062,7 @@ async fn a_read_only_connection_gives_one_notice_and_lifts_when_writes_are_allow
     eventually_sync("lifted", || {
         h.env
             .store()
-            .reader(|c| write_blocks::active(c, &id, &space, h.ch.now()))
+            .read(|r| write_blocks::active(r, &id, &space, h.ch.now()))
             .unwrap()
             .is_none()
     })

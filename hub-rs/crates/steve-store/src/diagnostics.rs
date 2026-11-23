@@ -729,6 +729,37 @@ pub(crate) fn active_until(c: &Connection) -> Result<i64> {
     )?)
 }
 
+pub struct ItemFailure {
+    pub seq: i64,
+    pub session: Option<String>,
+    pub kind: String,
+}
+
+pub fn latest_item_failure(
+    r: &mut impl crate::Read,
+    item: &str,
+    after: i64,
+) -> crate::Result<Option<ItemFailure>> {
+    use sea_query::{Expr, ExprTrait, Order, Query};
+    r.one(
+        Query::select()
+            .columns(["seq", "session_id", "kind"])
+            .from("diagnostic_events")
+            .and_where(Expr::col("item_id").eq(item))
+            .and_where(Expr::col("severity").eq("error"))
+            .and_where(Expr::col("seq").gt(after))
+            .order_by("seq", Order::Desc)
+            .limit(1),
+        |row| {
+            Ok(ItemFailure {
+                seq: row.get(0)?,
+                session: row.get(1)?,
+                kind: row.get(2)?,
+            })
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

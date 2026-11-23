@@ -65,7 +65,8 @@ async fn list(Extension(a): Cx, who: Caller) -> ApiResult<Json<Value>> {
 }
 
 fn account_json(ch: &Channels, v: &Viewer, id: &str, with_spaces: bool) -> ApiResult<Value> {
-    ch.store().reader(|c| -> ApiResult<Value> {
+    let store = ch.store();
+    store.read(|_| store.reader(|c| -> ApiResult<Value> {
         let acc = accounts::out(ch, c, v, id)?;
         let mut out = serde_json::to_value(acc)?;
         if with_spaces {
@@ -73,7 +74,7 @@ fn account_json(ch: &Channels, v: &Viewer, id: &str, with_spaces: bool) -> ApiRe
                 .iter()
                 .map(|s| -> ApiResult<Value> {
                     let set = spaces::settings(c, &s.id)?;
-                    let full = spaces::out(c, s)?;
+                    let full = spaces::out(store, s)?;
                     Ok(json!({
                         "id": s.id, "kind": s.kind, "name": s.name, "title": full.title, "self_chat": full.self_chat,
                         "attention": set.attention, "member_count": full.member_count,
@@ -87,7 +88,7 @@ fn account_json(ch: &Channels, v: &Viewer, id: &str, with_spaces: bool) -> ApiRe
             out["spaces"] = Value::Array(list);
         }
         Ok(out)
-    })
+    }))
 }
 
 async fn detail(Extension(a): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
@@ -239,8 +240,6 @@ async fn members_page(
     let limit =
         num(q.limit, "limit", |n| (1..=members::PAGE_MAX).contains(&n))?.unwrap_or(members::PAGE);
     let v = viewer(&a.ch, &who)?;
-    let page =
-        a.ch.store()
-            .reader(|c| members::page(c, &v, &id, offset, limit))?;
+    let page = members::page(a.ch.store(), &v, &id, offset, limit)?;
     Ok(Json(serde_json::to_value(page)?))
 }

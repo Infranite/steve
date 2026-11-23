@@ -294,14 +294,19 @@ fn intent(p: &Policy, key: &str, body: &str, topic: Topic) -> DeliveryIntent {
 }
 
 /// Validates E1's chosen DM, not an arbitrary reachable group or a service-owned party.
-fn self_route(c: &Connection, who: &Caller, i: &DeliveryIntent) -> ChannelResult<()> {
+fn self_route(
+    c: &Connection,
+    r: &mut impl steve_store::Read,
+    who: &Caller,
+    i: &DeliveryIntent,
+) -> ChannelResult<()> {
     let p = i
         .party_id
         .as_deref()
         .ok_or_else(|| ApiError::invalid("notification needs your user-linked party"))?;
     self_party(c, who, p)?;
     let viewer = steve_store::base::Viewer::load(c, &who.ws, &who.me)?;
-    let t = crate::pipeline::route(c, &viewer, i)?;
+    let t = crate::pipeline::route(c, r, &viewer, i)?;
     self_dm(c, who, p, &t.space_id)
 }
 
@@ -333,11 +338,12 @@ pub struct Target {
 /// Read only the caller's linked parties and their recorded DM membership. In particular, do not
 /// infer a counterpart from message history, cached member_count, ownership or a sole member.
 pub fn targets(ch: &Channels, who: &Caller) -> ChannelResult<Vec<Target>> {
-    ch.store().reader(|c| {
-        require_person(c, who)?;
-        let viewer = steve_store::base::Viewer::load(c, &who.ws, &who.me)?;
-        let mut st = c.prepare_cached(
-            "SELECT DISTINCT p.id,s.id,p.name,s.name,s.system_id
+    ch.store().read::<_, steve_store::StoreError>(|r| {
+        Ok(ch.store().reader(|c| {
+            require_person(c, who)?;
+            let viewer = steve_store::base::Viewer::load(c, &who.ws, &who.me)?;
+            let mut st = c.prepare_cached(
+                "SELECT DISTINCT p.id,s.id,p.name,s.name,s.system_id
              FROM parties p JOIN accounts a ON a.party_id=p.id AND a.workspace_id=p.workspace_id
              JOIN space_members m ON m.account_id=a.id AND m.workspace_id=p.workspace_id
              JOIN spaces s ON s.id=m.space_id AND s.workspace_id=p.workspace_id
@@ -345,50 +351,51 @@ pub fn targets(ch: &Channels, who: &Caller) -> ChannelResult<Vec<Target>> {
                AND coalesce(p.contact_kind,'')<>'bot' AND p.type<>'bot'
                AND a.status='active' AND a.kind NOT IN ('bot','app_bot') AND s.kind='dm'
              ORDER BY p.id,s.id",
-        )?;
-        let candidates = st
-            .query_map(params![who.ws, who.me], |r| {
-                Ok(Target {
-                    party_id: r.get(0)?,
-                    space_id: r.get(1)?,
-                    party_name: r.get(2)?,
-                    space_name: r.get(3)?,
-                    channel: r.get(4)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut targets = Vec::new();
-        for target in candidates {
-            let p = Policy {
-                party_id: Some(target.party_id.clone()),
-                space_id: Some(target.space_id.clone()),
-                ..Policy::default()
-            };
-            // Pin the explicit bot route through E1's live visibility/account/identity checks.
-            // Internal failures must not masquerade as an empty picker.
-            let route = self_party(c, who, &target.party_id)
-                .and_then(|_| {
-                    crate::pipeline::route(
-                        c,
-                        &viewer,
-                        &intent(&p, "validation", "validation", Topic::ItemDone),
-                    )
-                })
-                .and_then(|route| {
-                    self_dm(c, who, &target.party_id, &route.space_id)?;
-                    Ok(route)
-                });
-            let route = match route {
-                Ok(route) => route,
-                Err(e @ ApiError::Internal(_)) => return Err(e),
-                Err(_) => continue,
-            };
-            // E1 selects the effective voice, which need not be spaces.connection_id. A bot-mode
-            // override cannot turn someone's self account (or a disabled account) into a bot.
-            // The sender may be implicit in a provider's roster; every recorded member must still
-            // resolve to an active, same-workspace self account or that exact sending bot account.
-            let valid: bool = c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM connections cn
+            )?;
+            let candidates = st
+                .query_map(params![who.ws, who.me], |r| {
+                    Ok(Target {
+                        party_id: r.get(0)?,
+                        space_id: r.get(1)?,
+                        party_name: r.get(2)?,
+                        space_name: r.get(3)?,
+                        channel: r.get(4)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut targets = Vec::new();
+            for target in candidates {
+                let p = Policy {
+                    party_id: Some(target.party_id.clone()),
+                    space_id: Some(target.space_id.clone()),
+                    ..Policy::default()
+                };
+                // Pin the explicit bot route through E1's live visibility/account/identity checks.
+                // Internal failures must not masquerade as an empty picker.
+                let route = self_party(c, who, &target.party_id)
+                    .and_then(|_| {
+                        crate::pipeline::route(
+                            c,
+                            r,
+                            &viewer,
+                            &intent(&p, "validation", "validation", Topic::ItemDone),
+                        )
+                    })
+                    .and_then(|route| {
+                        self_dm(c, who, &target.party_id, &route.space_id)?;
+                        Ok(route)
+                    });
+                let route = match route {
+                    Ok(route) => route,
+                    Err(e @ ApiError::Internal(_)) => return Err(e),
+                    Err(_) => continue,
+                };
+                // E1 selects the effective voice, which need not be spaces.connection_id. A bot-mode
+                // override cannot turn someone's self account (or a disabled account) into a bot.
+                // The sender may be implicit in a provider's roster; every recorded member must still
+                // resolve to an active, same-workspace self account or that exact sending bot account.
+                let valid: bool = c.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM connections cn
                  JOIN accounts bot ON bot.id=cn.account_id AND bot.workspace_id=cn.workspace_id
                  JOIN parties bp ON bp.id=bot.party_id AND bp.workspace_id=cn.workspace_id
                  WHERE cn.id=?1 AND cn.workspace_id=?2 AND bot.status='active'
@@ -398,20 +405,21 @@ pub fn targets(ch: &Channels, who: &Caller) -> ChannelResult<Vec<Target>> {
                      WHERE sm.space_id=?4 AND (sm.workspace_id<>?2 OR a.id IS NULL
                        OR a.workspace_id<>?2 OR a.status<>'active'
                        OR (a.id<>bot.id AND (a.party_id<>?3 OR a.kind IN ('bot','app_bot'))))))",
-                params![
-                    route.connection_id,
-                    who.ws,
-                    target.party_id,
-                    target.space_id
-                ],
-                |r| r.get(0),
-            )?;
-            if valid {
-                targets.push(target);
+                    params![
+                        route.connection_id,
+                        who.ws,
+                        target.party_id,
+                        target.space_id
+                    ],
+                    |r| r.get(0),
+                )?;
+                if valid {
+                    targets.push(target);
+                }
             }
-        }
-        Ok(targets)
-    })
+            Ok(targets)
+        }))
+    })?
 }
 
 pub fn get_policy(ch: &Channels, who: &Caller) -> ChannelResult<Policy> {
@@ -427,7 +435,7 @@ pub fn put_policy(ch: &Channels, who: &Caller, p: &Policy) -> ChannelResult<()> 
         if p.enabled {
             if let Some(party)=&p.party_id { self_party(tx,who,party)?; }
             // what is sent goes to a private chat with yourself and the bot: under digest only the one you chose
-            if p.mode==Mode::Now || (p.mode==Mode::Digest && p.space_id.is_some()) { self_route(tx,who,&intent(p,"validation","validation",Topic::ItemDone))?; }
+            if p.mode==Mode::Now || (p.mode==Mode::Digest && p.space_id.is_some()) { tx.write(|w| self_route(tx,w,who,&intent(p,"validation","validation",Topic::ItemDone)))?; }
         }
         let now=ch.now();
         tx.execute("INSERT INTO notification_policies(workspace_id,user_id,enabled,mode,party_id,space_id,timezone,quiet_start,quiet_end,starred_in_quiet,consented_at,consent_since_seq,updated)
@@ -518,11 +526,19 @@ pub fn own_delivery(c: &Connection, ws: &str, user: &str) -> ChannelResult<(Mode
     })
 }
 
+pub fn brief_delivery(
+    w: &mut steve_store::W<'_>,
+    ws: &str,
+    user: &str,
+) -> ChannelResult<(Mode, &'static str)> {
+    own_delivery(&w.legacy(), ws, user)
+}
+
 /// [`insert`] for a module with its own notification topic (steve-digest's morning brief): one inbox row,
 /// and by trigger its feed entry, for `user` about `ev`; nothing when they already have one for it.
 #[allow(clippy::too_many_arguments)]
 pub fn record(
-    tx: &Tx,
+    w: &mut steve_store::W<'_>,
     ws: &str,
     user: &str,
     ev: &Event,
@@ -535,7 +551,7 @@ pub fn record(
         ws: ws.into(),
         me: user.into(),
     };
-    insert(tx, &who, ev, mode, body, state, topic)
+    insert(&w.legacy(), &who, ev, mode, body, state, topic)
 }
 
 /// One inbox row (and, by trigger, its feed entry) for `who` about event `ev`.
@@ -668,6 +684,7 @@ impl Consumer for AlarmIntake {
 /// Reserved keys cannot be used by a caller to create an untracked notification.
 pub(crate) fn verify_intent(
     c: &Connection,
+    r: &mut impl steve_store::Read,
     who: &Caller,
     i: &DeliveryIntent,
     now: i64,
@@ -691,7 +708,7 @@ pub(crate) fn verify_intent(
     {
         return Err(ApiError::Unauthenticated);
     }
-    self_route(c, who, i)
+    self_route(c, r, who, i)
 }
 
 /// Queue checks the immutable destination, not a freshly resolved personal preference.

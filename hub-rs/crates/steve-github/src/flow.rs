@@ -146,8 +146,7 @@ impl Action for GhItemLink {
         }
         if let Some(e) = ev["id"].as_str() {
             let r = cx.flow.store().write(|tx| {
-                links::add(
-                    &tx.legacy(),
+                links::Links(tx).add(
                     &ws,
                     &NewLink::new(
                         ObjRef::new("item", &item),
@@ -290,7 +289,7 @@ impl GitHub {
                 return Ok(None);
             }
             let id = flows::create(
-                &tx.legacy(),
+                tx,
                 ws,
                 actor,
                 &NewFlow {

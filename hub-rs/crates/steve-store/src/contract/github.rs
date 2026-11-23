@@ -153,7 +153,7 @@ impl<'a, C: Read> Deliveries<'a, C> {
 
     /// Deliveries due now, oldest first.
     pub fn received_deliveries(&mut self, now: i64, limit: u64) -> Result<Vec<DeliveryInput>> {
-        let order = self.0.db().dialect().insertion_order("d");
+        let order = self.0.db().dialect().insertion_order(Some("d"));
         self.0.all(
             due_deliveries(now)
                 .columns([

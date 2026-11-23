@@ -73,7 +73,7 @@ pub(super) async fn execute_node(
     };
     let status = cx
         .blocking(move |s| {
-            s.transaction(|tx| {
+            s.write(|tx| {
                 let _held = held;
                 write.commit(tx, &run_id_owned)
             })
@@ -175,13 +175,13 @@ async fn unapproved_effect(
     let grant = kind.grant(&node.config);
     let now = cx.now();
     let ok = match &grant {
-        Some(g) => cx.store().reader(|c| granted(c, &run, g, now))?,
+        Some(g) => cx.store().read(|c| granted(c, &run, g, now))?,
         None => false,
     };
     let step = if ok {
         step_of(graph, node, kind.run(rcx, &node.config, &input).await)
     } else {
-        let flow_name = cx.store().reader(|c| flows::name_of(c, &run.flow_id))?;
+        let flow_name = cx.store().read(|c| flows::name_of(c, &run.flow_id))?;
         rcx.effects.outcome = Some("need".into());
         rcx.effects.label = Some(format!("等你批准：{}", node.name()));
         let note = kind.gate_note(&rcx, &node.config);

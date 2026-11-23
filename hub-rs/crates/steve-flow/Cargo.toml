@@ -5,6 +5,9 @@ version.workspace = true
 publish.workspace = true
 description = "Signals, automation flows and schedules"
 
+[features]
+testkit = ["steve-store/testkit"]
+
 [dependencies]
 steve-types = { path = "../steve-types" }
 steve-runtime = { path = "../steve-runtime" }
@@ -20,7 +23,6 @@ chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
 regex = "=1.13.1"
 reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "rustls-tls-native-roots"] }
 rquickjs = "=0.14.0"
-rusqlite = { version = "=0.40.2", features = ["bundled"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 thiserror = "=2.0.21"
@@ -30,6 +32,8 @@ url = "=2.5.8"
 zeroize = "=1.9.1"
 
 [dev-dependencies]
+steve-flow = { path = ".", features = ["testkit"] }
+steve-store = { path = "../steve-store", features = ["testkit"] }
 chrono-tz = "=0.10.4"
 steve-runtime = { path = "../steve-runtime", features = ["due-contract", "testkit"] }
 tempfile = "=3.27.0"

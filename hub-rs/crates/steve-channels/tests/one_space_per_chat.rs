@@ -209,9 +209,7 @@ fn seen(h: &H) -> Vec<(String, i64)> {
 
 fn page_as(h: &H, space: &str, user: &str) -> Vec<String> {
     let (space, user) = (space.to_string(), user.to_string());
-    h.env
-        .store()
-        .reader(move |c| messages::page(c, &space, &user, None, 50))
+    messages::page(h.env.store(), &space, &user, None, 50)
         .expect("page")
         .into_iter()
         .rev()
@@ -267,11 +265,11 @@ async fn the_bot_and_your_account_through_a_service_share_one_space_and_one_copy
     let before_reads = seen(&h);
     h.env
         .store()
-        .reader(|c| -> steve_modules::ApiResult<()> {
-            let page = messages::page_before(c, &spaces[0], "someone_else", None, 50)?;
+        .read(|_| -> steve_modules::ApiResult<()> {
+            let page = messages::page_before(h.env.store(), &spaces[0], "someone_else", None, 50)?;
             assert_eq!(page.len(), 2);
             let older = messages::page_before(
-                c,
+                h.env.store(),
                 &spaces[0],
                 "someone_else",
                 Some((page[0].created, &page[0].id)),

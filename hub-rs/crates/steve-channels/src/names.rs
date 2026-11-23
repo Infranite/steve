@@ -233,11 +233,11 @@ impl Names {
 pub const MAX_PROFILE_CHECKS: usize = 200;
 
 /// Does the person still miss an organization, a job title or an email (contacts `profile`)?
-fn incomplete(c: &Connection, ws: &str, party: &str) -> ChannelResult<bool> {
-    let Some(p) = steve_modules::contacts::repo::get(c, party)? else {
+fn incomplete(r: &mut impl steve_store::Read, ws: &str, party: &str) -> ChannelResult<bool> {
+    let Some(p) = steve_store::Contacts::new(r).party(party)? else {
         return Ok(false);
     };
-    let f = steve_modules::contacts::profile::contact_profile(c, ws, &p, None)?.fields;
+    let f = steve_modules::contacts::profile::contact_profile(r, ws, &p, None)?.fields;
     Ok([f.org, f.title, f.email]
         .iter()
         .any(|x| x.state == "missing"))
@@ -248,56 +248,54 @@ fn incomplete(c: &Connection, ws: &str, party: &str) -> ChannelResult<bool> {
 /// ([`steve_modules::contacts::profile::due`]) — a missing
 /// organization, title or email (at most [`MAX_PROFILE_CHECKS`]).
 fn candidates(
-    c: &Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     now: i64,
     lookups: &[String],
 ) -> ChannelResult<Vec<Candidate>> {
-    let mut st = c.prepare(
-        "SELECT a.id, a.party_id, p.created_by, a.system_id, a.handle, a.display_name, p.name, p.contact_kind
-           FROM accounts a JOIN parties p ON p.id = a.party_id
-          WHERE a.workspace_id = ? AND a.status = 'active' AND p.type = 'contact' AND p.status = 'active'
-            AND p.user_id IS NULL AND coalesce(p.contact_kind, '') <> 'bot'
-            AND a.kind NOT IN ('bot', 'app_bot')
-          ORDER BY a.created, a.id",
-    )?;
-    let rows = st
-        .query_map(params![ws], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, String>(4)?,
-                r.get::<_, String>(5)?,
-                r.get::<_, String>(6)?,
-                r.get::<_, Option<String>>(7)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let accounts = steve_store::Accounts(r).identification_candidates(ws)?;
+    let parties: Vec<_> = accounts.iter().map(|a| a.party_id.as_str()).collect();
+    let parties = steve_store::Contacts::new(r).by_ids(&parties)?;
     let mut out = Vec::new();
     let mut checks = 0;
-    for (acc, party, actor, system, handle, display, pname, kind) in rows {
+    for account in accounts {
+        let Some(party) = parties.get(&account.party_id).filter(|p| {
+            p.kind == "contact"
+                && p.status == "active"
+                && p.user_id.is_none()
+                && p.contact_kind.as_deref() != Some("bot")
+        }) else {
+            continue;
+        };
+        let (acc, actor, system, handle, display, pname, kind) = (
+            account.id,
+            party.created_by.clone(),
+            account.system_id,
+            account.handle,
+            account.display_name,
+            &party.name,
+            &party.contact_kind,
+        );
         let raw = |n: &str| looks_like_handle(n) || n.trim() == handle;
         let account_named = !raw(&display);
-        let party_named = !raw(&pname);
+        let party_named = !raw(pname);
         let unconfirmed = kind.as_deref() == Some("unconfirmed");
         if account_named && party_named && !unconfirmed {
             if !lookups.contains(&system)
                 || checks >= MAX_PROFILE_CHECKS
-                || !steve_modules::contacts::profile::due(c, &acc, now)?
-                || !incomplete(c, ws, &party)?
+                || !steve_modules::contacts::profile::due(r, &acc, now)?
+                || !incomplete(r, ws, &party.id)?
             {
                 continue;
             }
             checks += 1;
         }
         let mut h = HandleRef::new(system, handle);
-        for (x, _) in accounts::repo::handles_of(c, &acc)? {
+        for (x, _) in steve_store::Accounts(r).handles_of(&acc)? {
             h = h.with_extra(x);
         }
         out.push(Candidate {
-            retry: steve_modules::contacts::profile::retry_due(c, &acc, now)?,
+            retry: steve_modules::contacts::profile::retry_due(r, &acc, now)?,
             account_id: acc,
             actor,
             handle: h,
@@ -553,11 +551,15 @@ fn identities(c: &Connection, ws: &str, adapters: &[String]) -> ChannelResult<Ve
 }
 
 /// The installation key of a connection (one of `ids`, else [`crate::spaces::installation_of`]).
-fn installation_of(ids: &[Identity], c: &Connection, conn: &str) -> ChannelResult<String> {
+fn installation_of(
+    ids: &[Identity],
+    r: &mut impl steve_store::Read,
+    conn: &str,
+) -> ChannelResult<String> {
     if let Some(i) = ids.iter().find(|i| i.id == conn) {
         return Ok(i.installation.clone());
     }
-    crate::spaces::installation_of(c, conn)
+    crate::spaces::installation_of(r, conn)
 }
 
 /// The identities of one installation: yours first, then the bot.
@@ -706,14 +708,18 @@ impl Channels {
         use steve_modules::contacts::profile::{self as prof, Gap};
         let contact = crate::adapters::feishu::profiles::CONTACT_SCOPE;
         self.store().transaction(|tx| -> ChannelResult<()> {
-            let Some(party) = accounts::repo::get(tx, &cand.account_id)?.and_then(|a| {
-                steve_modules::contacts::repo::get(tx, &a.party_id)
-                    .ok()
-                    .flatten()
-            }) else {
+            let Some(party) = tx.write(|w| {
+                let row = steve_store::Accounts(w).get(&cand.account_id)?;
+                row.map(|row| w.contacts().party(&row.party_id))
+                    .transpose()
+                    .map(Option::flatten)
+            })?
+            else {
                 return Ok(());
             };
-            let f = prof::contact_profile(tx, ws, &party, None)?.fields;
+            let f = tx
+                .write(|w| prof::contact_profile(w, ws, &party, None))?
+                .fields;
             let external = p
                 .and_then(|p| p.tenant_key.as_ref())
                 .is_some_and(|k| !ev.own_keys.is_empty() && !ev.own_keys.contains(k));
@@ -836,7 +842,7 @@ impl Channels {
         let hooks = self.party_hooks();
         let r = self
             .store()
-            .transaction(|tx| accounts::enrich(tx, hooks, ws, &cand.actor, &cand.account_id, e));
+            .write(|tx| accounts::enrich(tx, hooks, ws, &cand.actor, &cand.account_id, e));
         match r {
             Ok(r) => {
                 rep.renamed += r.renamed as usize;
@@ -856,7 +862,9 @@ impl Channels {
     fn count_nameless(&self, ws: &str) -> ChannelResult<usize> {
         let now = self.now();
         let lookups = self.profile_systems();
-        let cands = self.store().reader(|c| candidates(c, ws, now, &lookups))?;
+        let cands = self
+            .store()
+            .read::<_, steve_store::StoreError>(|r| Ok(candidates(r, ws, now, &lookups)))??;
         Ok(cands.iter().filter(|c| !c.named).count())
     }
 }

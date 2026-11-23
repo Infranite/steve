@@ -1,4 +1,4 @@
-use sea_query::{Expr, ExprTrait, Func, JoinType, OnConflict, Order, Query};
+use sea_query::{Expr, ExprTrait, Func, JoinType, LikeExpr, OnConflict, Order, Query};
 
 use crate::{Read, Result, W};
 
@@ -125,6 +125,61 @@ pub(crate) fn display_handle(c: &mut impl Read, id: &str) -> Result<Option<Strin
     )
 }
 
+pub fn display_name(c: &mut impl Read, id: &str) -> Result<Option<String>> {
+    c.one(
+        Query::select()
+            .column("display_name")
+            .from("accounts")
+            .and_where(Expr::col("id").eq(id)),
+        |row| row.get(0),
+    )
+}
+
+pub fn names_and_handles(r: &mut impl Read, ids: &[&str]) -> Result<Vec<(String, String)>> {
+    if ids.is_empty() {
+        return Ok(vec![]);
+    }
+    let ids = r.db().dialect().text_array(ids)?;
+    r.all(
+        Query::select()
+            .columns(["id", "display_name", "handle_display"])
+            .from("accounts")
+            .and_where(Expr::col("id").in_subquery(ids)),
+        |row| {
+            let name: String = row.get(1)?;
+            Ok((
+                row.get(0)?,
+                if name.is_empty() { row.get(2)? } else { name },
+            ))
+        },
+    )
+}
+
+pub(crate) fn bot_ids(r: &mut impl Read, ids: &[&str]) -> Result<Vec<String>> {
+    if ids.is_empty() {
+        return Ok(vec![]);
+    }
+    let ids = r.db().dialect().text_array(ids)?;
+    r.all(
+        Query::select()
+            .column("id")
+            .from("accounts")
+            .and_where(Expr::col("id").in_subquery(ids))
+            .and_where(Expr::col("kind").is_in(["bot", "app_bot"])),
+        |row| row.get(0),
+    )
+}
+
+pub fn system_handle(c: &mut impl Read, id: &str) -> Result<Option<(String, String)>> {
+    c.one(
+        Query::select()
+            .columns(["system_id", "handle"])
+            .from("accounts")
+            .and_where(Expr::col("id").eq(id)),
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+}
+
 pub fn email_handles(c: &mut impl Read, ws: &str, party: &str) -> Result<Vec<String>> {
     c.all(
         Query::select()
@@ -157,6 +212,18 @@ pub fn by_email(c: &mut impl Read, ws: &str, handle: &str) -> Result<Option<Stri
     )
 }
 
+pub fn by_any_handle(c: &mut impl Read, ws: &str, handle: &str) -> Result<Option<String>> {
+    c.one(
+        Query::select()
+            .column("account_id")
+            .from("account_handles")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("handle").eq(handle))
+            .limit(1),
+        |row| row.get(0),
+    )
+}
+
 pub fn owned_party(c: &mut impl Read, ws: &str, id: &str) -> Result<Option<String>> {
     c.one(
         Query::select()
@@ -166,4 +233,46 @@ pub fn owned_party(c: &mut impl Read, ws: &str, id: &str) -> Result<Option<Strin
             .and_where(Expr::col("workspace_id").eq(ws)),
         |r| r.get(0),
     )
+}
+
+/// The earliest Open ID learned for a Feishu account.
+pub fn feishu_open_id(r: &mut impl Read, account: &str) -> Result<Option<String>> {
+    r.one(
+        feishu_handles(account)
+            .order_by("created", Order::Asc)
+            .limit(1),
+        |row| row.get(0),
+    )
+}
+
+/// Prefer the Open ID the sending connection learned for this account.
+pub fn feishu_mention_handle(
+    r: &mut impl Read,
+    ws: &str,
+    connection: &str,
+    account: &str,
+) -> Result<Option<String>> {
+    r.one(
+        feishu_handles(account)
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .order_by_expr(
+                Expr::case(Expr::col("connection_id").eq(connection), 2_i64)
+                    .case(Expr::col("connection_id").is_null(), 0_i64)
+                    .finally(1_i64)
+                    .into(),
+                Order::Desc,
+            )
+            .order_by("created", Order::Asc)
+            .limit(1),
+        |row| row.get(0),
+    )
+}
+
+fn feishu_handles(account: &str) -> sea_query::SelectStatement {
+    Query::select()
+        .column("handle")
+        .from("account_handles")
+        .and_where(Expr::col("account_id").eq(account))
+        .and_where(Expr::col("handle").like(LikeExpr::new(r"ou\_%").escape('\\')))
+        .take()
 }

@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use steve_stats::metrics::{self, Daily, Query, bounds, summary};
 use steve_stats::views::{self, Bucket, Metric, Series};
 use steve_stats::{refresh, tz};
+use steve_store::testkit::stats::{cube, seed_hourly};
 use steve_store::{
     ModelUsage, NewBot, NewMark, NewUsage, NoPublisher, Store, Tokens, TurnBegin, TurnFinish, WS,
 };
@@ -120,17 +121,7 @@ fn store() -> (tempfile::TempDir, Store) {
         (4, hi - 1, Some(hi)),
         (5, hi, None),
     ];
-    let mut sql = String::from(
-        "INSERT INTO settings (workspace_id, key, value, updated) VALUES ('default', 'stats.tz', '\"Asia/Shanghai\"', 0);
-         INSERT INTO sessions (id, workspace_id, bot_id, harness, cwd, status, created, updated) VALUES ('s1', 'default', 'dev', 'claude-code', '/tmp', 'idle', 0, 0);\n",
-    );
-    for (no, created, done) in items {
-        let status = if done.is_some() { "done" } else { "run" };
-        sql.push_str(&format!(
-            "INSERT INTO items (id, workspace_id, no, title, status, stage, bot_id, created, updated) VALUES ('ST-{no}', 'default', {no}, 't{no}', '{status}', '执行', 'dev', {created}, {created});\n"
-        ));
-    }
-    s.with_conn(|c| Ok(c.execute_batch(&sql)?)).expect("seed");
+    seed_hourly(&s, items).expect("seed");
     for (no, created, done) in items {
         let mark = |ts: i64, from: Option<&str>, to: &str| {
             s.stats()
@@ -175,7 +166,7 @@ fn store() -> (tempfile::TempDir, Store) {
 }
 
 fn hourly(s: &Store, day: &str, metric: Metric, group: &str, now: i64) -> Series {
-    s.with_conn(|c| views::series(c, &q(day), metric, group, Bucket::Hour { now }))
+    s.read(|c| views::series(c, &q(day), metric, group, Bucket::Hour { now }))
         .expect("series")
 }
 
@@ -247,15 +238,13 @@ fn hours_add_up_to_the_day() {
     let (_, hi) = edges();
     let later = hi + HOUR; // the whole day is past
     let sm = s
-        .with_conn(|c| summary(c, &q(DAY)))
+        .read(|c| summary(c, &q(DAY)))
         .expect("summary")
         .expect("day");
 
     // the same measures, by hour, as the cube has for the day
-    let cube = s.with_conn(|c| metrics::daily(c, &q(DAY))).expect("daily");
-    let hours = s
-        .with_conn(|c| metrics::hourly(c, &q(DAY)))
-        .expect("hourly");
+    let cube = s.read(|c| metrics::daily(c, &q(DAY))).expect("daily");
+    let hours = s.read(|c| metrics::hourly(c, &q(DAY))).expect("hourly");
     assert!(hours.iter().all(|d| d.day.starts_with("2026-11-05T")));
     assert_eq!(totals(hours), totals(cube));
 
@@ -301,7 +290,7 @@ fn hours_add_up_to_the_day() {
     // each hour's drill-down is exactly the items of its bar
     let ids = |only: &str, hour: Option<u32>| -> Vec<String> {
         let mut v: Vec<String> = s
-            .with_conn(|c| views::items(c, &q(DAY), "est", Some(only), hour, 100, 0))
+            .read(|c| views::items(c, &q(DAY), "est", Some(only), hour, 100, 0))
             .expect("items")
             .rows
             .into_iter()
@@ -391,50 +380,6 @@ fn the_edges_of_the_day_stay_on_their_side() {
     );
 }
 
-/// `(day, source, purpose, harness, model, bot, turns, turn_ms, interrupted, calls, input)` of a cell.
-type CubeRow = (
-    String,
-    String,
-    String,
-    String,
-    String,
-    String,
-    i64,
-    i64,
-    i64,
-    i64,
-    i64,
-);
-
-/// `stat_daily` as the live writer left it, one [`CubeRow`] per cell.
-fn cube(s: &Store) -> Vec<CubeRow> {
-    s.with_conn(|c| {
-        let mut st = c.prepare(
-            "SELECT day, source, purpose, harness, model, bot_id, turns, turn_ms, interrupted, calls, input FROM stat_daily
-              WHERE workspace_id = 'default' ORDER BY day, source, purpose, harness, model, bot_id, project_id",
-        )?;
-        let rows = st
-            .query_map([], |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                    r.get(7)?,
-                    r.get(8)?,
-                    r.get(9)?,
-                    r.get(10)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows)
-    })
-    .expect("cube")
-}
-
 #[test]
 fn a_rebuild_books_every_turn_where_the_live_writer_did() {
     let (_d, s) = store();
@@ -483,7 +428,7 @@ fn a_rebuild_books_every_turn_where_the_live_writer_did() {
     s.stats()
         .interrupt_open(lo + 3 * HOUR + MIN, |_, ts| steve_stats::day(ts, zone()))
         .expect("interrupt");
-    let live = cube(&s);
+    let live = cube(&s).expect("cube");
     assert!(
         live.iter()
             .any(|r| r.1 == "agent" && r.4.is_empty() && r.8 == 1),
@@ -493,13 +438,14 @@ fn a_rebuild_books_every_turn_where_the_live_writer_did() {
         live.iter()
             .any(|r| r.1 == "agent" && r.2 == "turn" && r.4 == "claude-sonnet-5" && r.6 == 1)
     );
-    s.with_conn(|c| refresh::rebuild_in(c, WS))
-        .expect("rebuild");
-    assert_eq!(cube(&s), live, "the rebuild moved turns to other models");
+    s.write(|w| refresh::rebuild_in(w, WS)).expect("rebuild");
+    assert_eq!(
+        cube(&s).expect("cube"),
+        live,
+        "the rebuild moved turns to other models"
+    );
     // and the hours of the day add up to the same cells
-    let hours = s
-        .with_conn(|c| metrics::hourly(c, &q(DAY)))
-        .expect("hourly");
+    let hours = s.read(|c| metrics::hourly(c, &q(DAY))).expect("hourly");
     let turns_by_model = |model: &str| -> i64 {
         hours
             .iter()

@@ -223,27 +223,6 @@ pub struct Command {
     pub from_self: bool,
 }
 
-/// Record a live human message received on a personal connection. The adapter's `mine` assertion
-/// and owner aliases are scoped to that connection; neither workspace ownership nor another
-/// member's self connection is proof of authorship here. Never change a receipt on redelivery.
-pub(crate) fn receipt(
-    c: &Connection,
-    conn: &str,
-    message: &str,
-    account: Option<&str>,
-    party: Option<&str>,
-    from_self: bool,
-) -> ChannelResult<()> {
-    c.execute(
-        "INSERT INTO chan_trigger_receipts(message_id,connection_id,sender_account_id,sender_party_id,from_self)
-         SELECT ?1,?2,?3,?4,?5 WHERE EXISTS (
-           SELECT 1 FROM chan_messages WHERE id=?1 AND direction='in' AND history IS NULL)
-         ON CONFLICT(message_id,connection_id) DO NOTHING",
-        rusqlite::params![message, conn, account, party, from_self],
-    )?;
-    Ok(())
-}
-
 /// Built-in automation markers and the receiving account's extra prefixes. Mentions do not hide
 /// a prefix; this check also applies to follow-ups without a trigger word and at send time.
 pub fn automated(text: &str, mentions: &[String], trigger: &crate::rules::Trigger) -> bool {

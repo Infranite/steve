@@ -181,7 +181,7 @@ fn addr_list(v: &Value) -> Vec<AddrOut> {
 
 fn current_org(store: &steve_store::Store, viewer: &Viewer, party: &str) -> Option<String> {
     store
-        .reader(|c| steve_modules::contacts::service::jobs(c, viewer, party))
+        .read(|c| steve_modules::contacts::service::jobs_in(c, viewer, party))
         .ok()?
         .into_iter()
         .find(|j| j.to.is_none())

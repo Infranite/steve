@@ -1670,7 +1670,7 @@ pub(crate) mod tests {
         assert!(matches!(called, ToolResult::Completed { .. }), "{called:?}");
         assert!(
             store
-                .reader(|c| steve_store::caps::tools::pins(c, "management_bot"))
+                .read(|c| steve_store::caps::tools::ToolRows(c).pins("management_bot"))
                 .unwrap()
                 .is_empty()
         );

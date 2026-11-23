@@ -18,20 +18,19 @@ use std::collections::{BTreeSet, HashMap};
 
 use serde::Serialize;
 use serde_json::{Map, Value, json};
-use steve_store::Tx;
-use steve_store::base::links::{self, LinkKey, NewLink};
-use steve_store::base::{self, Viewer};
+use steve_store::base::Viewer;
+use steve_store::base::links::{LinkKey, Links, NewLink};
+use steve_store::{Accounts, SyncedTeam, Teams, W};
 
-use super::super::repo::{self as prepo, NewParty, Party, PartyPatch};
-use super::super::service::{ensure_self_org, event, pref, revise, this_month};
-use super::super::teams::repo::{self as trepo, Details};
+use super::super::repo::{NewParty, Party, PartyPatch};
+use super::super::service::{ensure_self_org_in, pref, revise_in, this_month};
 use super::DirConnection;
 use super::adapter::{DirUser, Snapshot};
-use super::repo::{self, SyncedTeam};
-use crate::accounts::repo::{self as arepo, System};
-use crate::accounts::service::{self as asvc, Record, current_party};
-use crate::accounts::{ExtraHandle, Hints, identify};
+use crate::accounts::service::{self as asvc, Record};
+use crate::accounts::{ExtraHandle, Hints, identify::identify_handle};
 use crate::{ApiError, ApiResult};
+use steve_store::System;
+use steve_store::TeamDetails as Details;
 
 /// `400` when a snapshot is empty but the connection has synced teams before.
 pub const EMPTY_SNAPSHOT: &str = "通讯录是空的，这次没有同步（可能是通讯录权限范围被收回了）";
@@ -115,7 +114,7 @@ fn clean(s: &Snapshot) -> Snapshot {
 
 /// Applies `snapshot` of `conn` whose people are handles of `system_id`.
 pub fn apply(
-    tx: &Tx,
+    tx: &mut W<'_>,
     conn: &DirConnection,
     system_id: &str,
     snapshot: &Snapshot,
@@ -124,16 +123,16 @@ pub fn apply(
     let ws = conn.workspace_id.as_str();
     let actor = conn.owner.as_str();
     let snap = clean(snapshot);
-    let existing = repo::chart_teams(tx, ws, &conn.id)?;
+    let existing = Teams(tx).chart(ws, &conn.id)?;
     if snap.departments.is_empty()
         && snap.users.is_empty()
         && existing.iter().any(|t| t.party.status == "active")
     {
         return Err(ApiError::rule(EMPTY_SNAPSHOT));
     }
-    asvc::ensure_seeds(tx, ws)?;
+    asvc::seed(tx, ws)?;
     let system = asvc::own_system(tx, ws, system_id)?;
-    let own = ensure_self_org(tx, ws, actor)?;
+    let own = ensure_self_org_in(tx, ws, actor)?;
     let mut r = SyncReport::default();
     let mut touched: BTreeSet<String> = BTreeSet::new();
 
@@ -218,11 +217,11 @@ pub fn apply(
     }
 
     for id in &touched {
-        event(tx, ws, id);
+        tx.emit(asvc::party_changed(ws, id));
     }
     let mut detail = serde_json::to_value(&r)?;
     detail["connection"] = json!(conn.id);
-    base::audit(tx, ws, actor, "team.sync", &conn.id, &detail)?;
+    tx.audit(ws, actor, "team.sync", &conn.id, &detail)?;
     Ok(r)
 }
 
@@ -232,7 +231,7 @@ struct SyncChanges<'a> {
 }
 
 fn sync_members(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     snap: &Snapshot,
     team_of: &HashMap<String, String>,
@@ -274,7 +273,7 @@ fn sync_members(
 
 /// Revises a known team when its name changes or its department returns.
 fn refresh_team(
-    tx: &Tx,
+    tx: &mut W<'_>,
     actor: &str,
     t: &SyncedTeam,
     name: &str,
@@ -296,7 +295,7 @@ fn refresh_team(
         r.restored += 1;
     }
     if !after.is_empty() {
-        revise(
+        revise_in(
             tx,
             &t.party,
             &patch,
@@ -313,7 +312,7 @@ fn refresh_team(
 /// team id, and the teams dissolved now.
 #[allow(clippy::too_many_arguments)]
 fn teams(
-    tx: &Tx,
+    tx: &mut W<'_>,
     conn: &DirConnection,
     own: &Party,
     snap: &Snapshot,
@@ -340,9 +339,8 @@ fn teams(
                 let mut p = NewParty::new("team", &name, actor);
                 p.source = "sync".into();
                 p.source_ref = Some(d.id.clone());
-                let p = prepo::insert(tx, ws, &p)?;
-                trepo::details_insert(
-                    tx,
+                let p = tx.contacts().insert(ws, &p)?;
+                Teams(tx).insert_details(
                     ws,
                     &p.id,
                     &Details {
@@ -372,19 +370,19 @@ fn teams(
             .find(|t| t.party.id == *team)
             .and_then(|t| t.parent_id.as_ref());
         if parent != old {
-            repo::set_parent(tx, team, parent.map(String::as_str))?;
+            Teams(tx).set_parent(team, parent.map(String::as_str))?;
             if existing.iter().any(|t| t.party.id == *team) {
                 r.moved += 1;
             }
             touched.insert(team.clone());
         }
-        repo::set_synced(tx, team, now)?;
+        Teams(tx).set_synced(team, now)?;
     }
     for t in existing
         .iter()
         .filter(|t| t.party.status == "active" && !team_of.values().any(|v| *v == t.party.id))
     {
-        revise(
+        revise_in(
             tx,
             &t.party,
             &PartyPatch {
@@ -403,30 +401,34 @@ fn teams(
 }
 
 /// The contact already behind a directory person (by any of their handles), if it is active.
-fn known(tx: &Tx, ws: &str, system: &System, u: &DirUser) -> ApiResult<Option<Party>> {
+fn known(tx: &mut W<'_>, ws: &str, system: &System, u: &DirUser) -> ApiResult<Option<Party>> {
     for h in std::iter::once(&u.id).chain(u.extra_ids.iter()) {
-        if let Some(a) = arepo::by_handle(tx, ws, &system.family, h.trim())?
-            && let Some(acc) = arepo::get(tx, &a)?
+        if let Some(a) = Accounts(tx).by_handle(ws, &system.family, h.trim())?
+            && let Some(acc) = Accounts(tx).get(&a)?
         {
-            return Ok(current_party(tx, &acc.party_id)?.filter(|p| p.status == "active"));
+            return Ok(tx
+                .contacts()
+                .current_party(&acc.party_id)?
+                .filter(|p| p.status == "active"));
         }
     }
     Ok(None)
 }
 
 /// The one active contact owning one of these emails, if exactly one does.
-fn by_email(tx: &Tx, ws: &str, emails: &[String]) -> ApiResult<Option<Party>> {
+fn by_email(tx: &mut W<'_>, ws: &str, emails: &[String]) -> ApiResult<Option<Party>> {
     let mail = asvc::own_system(tx, ws, "mail")?;
     let mut found: Option<Party> = None;
     for e in emails {
         let Some(h) = asvc::normalize(&mail, e) else {
             continue;
         };
-        let Some(a) = arepo::by_handle(tx, ws, &mail.family, &h.handle)? else {
+        let Some(a) = Accounts(tx).by_handle(ws, &mail.family, &h.handle)? else {
             continue;
         };
-        let Some(p) = arepo::get(tx, &a)?
-            .map(|acc| current_party(tx, &acc.party_id))
+        let Some(p) = Accounts(tx)
+            .get(&a)?
+            .map(|acc| tx.contacts().current_party(&acc.party_id))
             .transpose()?
             .flatten()
             .filter(|p| p.status == "active" && p.kind == "contact")
@@ -443,7 +445,7 @@ fn by_email(tx: &Tx, ws: &str, emails: &[String]) -> ApiResult<Option<Party>> {
 
 /// Finds or creates the contact of a directory person; `None` for the own organization's accounts.
 fn directory_account(
-    tx: &Tx,
+    tx: &mut W<'_>,
     conn: &DirConnection,
     system: &System,
     u: &DirUser,
@@ -461,8 +463,8 @@ fn directory_account(
     let party_id = match party_id {
         // the directory account joins the contact its email belongs to
         Some(pid) => {
-            let viewer = Viewer::load(tx, ws, actor)?;
-            let a = asvc::record_tx(
+            let viewer = Viewer::bare(ws, actor);
+            let a = asvc::record(
                 tx,
                 &viewer,
                 actor,
@@ -479,8 +481,7 @@ fn directory_account(
                 },
             )?;
             for x in &extra {
-                arepo::add_handle(
-                    tx,
+                Accounts(tx).add_handle(
                     ws,
                     &system.family,
                     &x.handle,
@@ -498,11 +499,11 @@ fn directory_account(
                 source_label: Some(label.into()),
                 ..Default::default()
             };
-            let got = identify(tx, ws, actor, &system.id, &u.id, &hints)?;
+            let got = identify_handle(tx, ws, actor, &system.id, &u.id, &hints)?;
             if got.is_ours {
                 return Ok(None);
             }
-            let p = prepo::get(tx, &got.party_id)?;
+            let p = tx.contacts().party(&got.party_id)?;
             new = got.created
                 && p.as_ref().is_some_and(|p| {
                     p.source == "identify" && p.contact_kind.as_deref() == Some("unconfirmed")
@@ -514,7 +515,7 @@ fn directory_account(
 }
 
 fn person(
-    tx: &Tx,
+    tx: &mut W<'_>,
     conn: &DirConnection,
     system: &System,
     u: &DirUser,
@@ -538,11 +539,15 @@ fn person(
     let Some((party_id, new)) = directory_account(tx, conn, system, u, label, &name, extra)? else {
         return Ok(None);
     };
-    let Some(p) = prepo::get(tx, &party_id)?.filter(|p| p.status == "active") else {
+    let Some(p) = tx
+        .contacts()
+        .party(&party_id)?
+        .filter(|p| p.status == "active")
+    else {
         return Ok(None);
     };
     if new {
-        repo::set_source(tx, &p.id, "sync", &u.id)?;
+        tx.contacts().mark_directory_source(&p.id, "sync", &u.id)?;
         r.contacts += 1;
         touched.insert(p.id.clone());
     }
@@ -551,7 +556,7 @@ fn person(
     let (mut before, mut after) = (Map::new(), Map::new());
     if p.contact_kind.as_deref() == Some("unconfirmed") {
         if !new {
-            repo::set_source(tx, &p.id, "sync", &u.id)?;
+            tx.contacts().mark_directory_source(&p.id, "sync", &u.id)?;
         }
         before.insert("kind".into(), json!("unconfirmed"));
         after.insert("kind".into(), json!("real"));
@@ -577,9 +582,9 @@ fn person(
     if !after.is_empty() {
         after.insert("source".into(), json!("sync"));
         if new {
-            prepo::update(tx, &p.id, &patch, None)?;
+            tx.contacts().update(&p.id, &patch, None)?;
         } else {
-            revise(
+            revise_in(
                 tx,
                 &p,
                 &patch,
@@ -593,15 +598,18 @@ fn person(
     // emails become mail accounts of the contact unless someone already has them
     if !u.emails.is_empty() {
         let mail = asvc::own_system(tx, ws, "mail")?;
-        let viewer = Viewer::load(tx, ws, actor)?;
+        let viewer = Viewer::bare(ws, actor);
         for e in &u.emails {
             let Some(h) = asvc::normalize(&mail, e) else {
                 continue;
             };
-            if arepo::by_handle(tx, ws, &mail.family, &h.handle)?.is_some() {
+            if Accounts(tx)
+                .by_handle(ws, &mail.family, &h.handle)?
+                .is_some()
+            {
                 continue;
             }
-            asvc::record_tx(
+            asvc::record(
                 tx,
                 &viewer,
                 actor,
@@ -638,7 +646,7 @@ fn is_open(l: &steve_store::Link) -> bool {
 /// The synced job at the own organization: created, updated (title, department) or reopened after a
 /// return. A job you entered yourself is left as it is. Returns whether something changed.
 fn open_job(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     contact: &str,
     org: &str,
@@ -646,11 +654,11 @@ fn open_job(
     dept: Option<&str>,
 ) -> ApiResult<bool> {
     let key = job_key(contact, org);
-    match links::get(tx, ws, &key)? {
+    match Links(tx).get(ws, &key)? {
         None => {
             let mut l = NewLink::new(key.subject, "works_at", key.object, "sync");
             l.props = json!({ "title": title, "dept": dept, "from": this_month(), "to": null });
-            Ok(links::add(tx, ws, &l)?)
+            Ok(Links(tx).add(ws, &l)?)
         }
         Some(l) if l.source != "sync" => Ok(false),
         Some(l) if is_open(&l) => {
@@ -670,7 +678,7 @@ fn open_job(
             if props == l.props {
                 return Ok(false);
             }
-            Ok(links::set_props(tx, ws, &key, &props)?)
+            Ok(Links(tx).set_props(ws, &key, &props)?)
         }
         Some(l) => {
             let mut history = l
@@ -698,22 +706,22 @@ fn open_job(
             if !manual.is_empty() {
                 props["manual"] = json!(manual);
             }
-            Ok(links::set_props(tx, ws, &key, &props)?)
+            Ok(Links(tx).set_props(ws, &key, &props)?)
         }
     }
 }
 
 /// Closes the synced job at the own organization (`to` = this month). Returns whether it was open.
-fn close_job(tx: &Tx, ws: &str, contact: &str, org: &str) -> ApiResult<bool> {
+fn close_job(tx: &mut W<'_>, ws: &str, contact: &str, org: &str) -> ApiResult<bool> {
     let key = job_key(contact, org);
-    match links::get(tx, ws, &key)? {
+    match Links(tx).get(ws, &key)? {
         Some(l) if l.source == "sync" && is_open(&l) => {
             let mut props = l.props.clone();
             if !props.is_object() {
                 props = json!({});
             }
             props["to"] = json!(this_month());
-            Ok(links::set_props(tx, ws, &key, &props)?)
+            Ok(Links(tx).set_props(ws, &key, &props)?)
         }
         _ => Ok(false),
     }
@@ -721,23 +729,23 @@ fn close_job(tx: &Tx, ws: &str, contact: &str, org: &str) -> ApiResult<bool> {
 
 /// Makes a team's member rows exactly `want` (`source = sync`). Returns whether a row changed.
 fn members(
-    tx: &Tx,
+    tx: &mut W<'_>,
     ws: &str,
     team: &str,
     want: &[(String, &str)],
     r: &mut SyncReport,
 ) -> ApiResult<bool> {
-    let have = repo::member_rows(tx, ws, team)?;
+    let have = Teams(tx).members(ws, team)?;
     let mut changed = false;
     for (c, role, _) in &have {
         match want.iter().find(|(w, _)| w == c) {
             None => {
-                trepo::member_remove(tx, ws, team, c)?;
+                Teams(tx).remove_member(ws, team, c)?;
                 r.removed += 1;
                 changed = true;
             }
             Some((_, w)) if w != role => {
-                trepo::member_role(tx, ws, team, c, w)?;
+                Teams(tx).set_member_role(ws, team, c, w)?;
                 changed = true;
             }
             Some(_) => {}
@@ -745,7 +753,7 @@ fn members(
     }
     for (c, role) in want {
         if !have.iter().any(|(h, _, _)| h == c) {
-            trepo::member_add(tx, ws, team, c, role, "sync")?;
+            Teams(tx).add_member(ws, team, c, role, "sync")?;
             r.added += 1;
             changed = true;
         }
@@ -755,17 +763,16 @@ fn members(
 
 /// Makes the synced `reports_to` links of `contact` exactly `lead` (links you added stay). Returns
 /// whether a link changed.
-fn reports_to(tx: &Tx, ws: &str, contact: &str, lead: Option<&str>) -> ApiResult<bool> {
+fn reports_to(tx: &mut W<'_>, ws: &str, contact: &str, lead: Option<&str>) -> ApiResult<bool> {
     let mut changed = false;
     let mut have_lead = false;
-    for l in links::from(tx, ws, &pref(contact), Some("reports_to"))? {
+    for l in Links(tx).from(ws, &pref(contact), Some("reports_to"))? {
         if Some(l.object_id.as_str()) == lead {
             have_lead = true;
             continue;
         }
         if l.source == "sync" {
-            links::remove(
-                tx,
+            Links(tx).remove(
                 ws,
                 &LinkKey {
                     subject: pref(contact),
@@ -778,7 +785,7 @@ fn reports_to(tx: &Tx, ws: &str, contact: &str, lead: Option<&str>) -> ApiResult
     }
     if let (Some(lead), false) = (lead, have_lead) {
         let l = NewLink::new(pref(contact), "reports_to", pref(lead), "sync");
-        changed |= links::add(tx, ws, &l)?;
+        changed |= Links(tx).add(ws, &l)?;
     }
     Ok(changed)
 }

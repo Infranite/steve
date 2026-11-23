@@ -22,7 +22,7 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Value, json};
 
-use crate::{Result, Tx};
+use crate::{Result, Tx, now};
 
 /// Who can see an object. Stored and sent as its code: `workspace`, `private`, `team:<id>`, `space:<id>`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -310,6 +310,32 @@ pub fn audit(
     let audit = crate::contract::audit::record_statement(ws, actor, action, target, detail)?;
     crate::contract::exec_on(&mut crate::contract::Sqlite(tx), &audit)?;
     Ok(())
+}
+
+impl crate::W<'_> {
+    pub fn audit(
+        &mut self,
+        ws: &str,
+        actor: &str,
+        action: &str,
+        target: &str,
+        detail: &Value,
+    ) -> Result<()> {
+        self.exec(
+            sea_query::Query::insert()
+                .into_table("audit")
+                .columns(["workspace_id", "ts", "actor", "action", "target", "detail"])
+                .values_panic([
+                    ws.into(),
+                    now().into(),
+                    actor.into(),
+                    action.into(),
+                    target.into(),
+                    detail.to_string().into(),
+                ]),
+        )?;
+        Ok(())
+    }
 }
 
 /// A message written with the rest of the transaction (`Messages::add` on `tx`). Returns the id.

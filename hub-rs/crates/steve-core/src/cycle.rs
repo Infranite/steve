@@ -1352,7 +1352,7 @@ impl Tx<'_> {
                 steve_store::item_repo::set_closed_plan(tx, &id, plan)?;
             }
             /* nothing productive runs any more: what was still open for this item is moot */
-            steve_store::decisions_expire_open_in(tx, &id, &json!({"closed": outcome}))?;
+            steve_store::decision_repo::expire_open_for_item(tx, &id, &json!({"closed": outcome}))?;
             steve_store::outbox::append(
                 tx,
                 &ws,

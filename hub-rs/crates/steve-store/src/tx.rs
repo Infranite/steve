@@ -240,18 +240,6 @@ impl Tx<'_> {
 }
 
 impl<'a> Tx<'a> {
-    /// Wraps a transaction the store already opened (for hooks inside a repository write).
-    pub(crate) fn wrap(c: &'a Connection) -> Self {
-        Tx {
-            c,
-            store: None,
-            events: RefCell::new(Vec::new()),
-            diagnostics: RefCell::new(Vec::new()),
-            diagnostic_until: Cell::new(0),
-            outbox: Cell::new(false),
-        }
-    }
-
     pub(crate) fn bound(c: &'a Connection, store: &'a Store) -> Self {
         Tx {
             c,
@@ -261,16 +249,6 @@ impl<'a> Tx<'a> {
             diagnostic_until: Cell::new(0),
             outbox: Cell::new(false),
         }
-    }
-
-    /// Detaches side effects collected on a wrapped `Tx` so `tx` can commit before flushing them.
-    pub(crate) fn into_effects(self) -> WrappedEffects {
-        WrappedEffects(Staged {
-            events: self.events.into_inner(),
-            diagnostics: self.diagnostics.into_inner(),
-            diagnostic_until: self.diagnostic_until.get(),
-            outbox: self.outbox.get(),
-        })
     }
 }
 
@@ -546,36 +524,5 @@ impl Store {
         let c = self.inner.readers.get().map_err(StoreError::from)?;
         crate::instrumentation::store_acquired();
         f(&c)
-    }
-}
-
-pub(crate) struct WrappedEffects(Staged);
-
-impl WrappedEffects {
-    pub(crate) fn flush(self, store: &Store) {
-        let s = self.0;
-        if s.diagnostic_until > 0 {
-            store.stage_diagnostic_until(s.diagnostic_until);
-        }
-        for d in s.diagnostics {
-            store.stage_diagnostic(d);
-        }
-        let mut immediate = Vec::new();
-        for e in s.events {
-            if let Err(e) = store.try_stage_event(e) {
-                immediate.push(e);
-            }
-        }
-        if !immediate.is_empty() {
-            store.inner.bus.publish_batch(immediate);
-        }
-        // Wrapped repository effects flush only after their transaction commits. Nested
-        // effects wait for the outer write, which owns its notification.
-        if store.active_conn().is_none() {
-            store.notify_committed();
-        }
-        if s.outbox && !store.try_stage_outbox() {
-            store.inner.outbox_wake.notify_one();
-        }
     }
 }

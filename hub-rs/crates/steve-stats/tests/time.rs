@@ -6,6 +6,7 @@
 use steve_stats::metrics::{Query, bounds, summary};
 use steve_stats::views::{self, Bucket, Metric, Series};
 use steve_stats::{refresh, tz};
+use steve_store::testkit::stats::{Card, seed_time};
 use steve_store::{NoPublisher, Store, TurnBegin, TurnFinish, WS};
 
 const MIN: i64 = 60_000;
@@ -49,43 +50,16 @@ fn turn(s: &Store, started: i64, ended: i64) {
         .expect("finish");
 }
 
-/// (id, item, kind, created, resolved, decided by YOLO)
-type Card<'a> = (&'a str, Option<&'a str>, &'a str, i64, Option<i64>, bool);
-
 fn store(cards: &[Card]) -> (tempfile::TempDir, Store) {
     let dir = tempfile::tempdir().expect("tmp");
     let s = Store::open(dir.path().join("steve.sqlite3"), NoPublisher).expect("open");
     s.ensure_workspace().expect("ws");
-    let mut sql = String::from(
-        "INSERT INTO settings (workspace_id, key, value, updated) VALUES ('default', 'stats.tz', '\"Asia/Shanghai\"', 0);
-         INSERT INTO sessions (id, workspace_id, harness, cwd, status, created, updated) VALUES ('s1', 'default', 'claude-code', '/tmp', 'idle', 0, 0);
-         INSERT INTO items (id, workspace_id, no, title, status, stage, created, updated) VALUES ('ST-1', 'default', 1, 't1', 'run', '执行', 0, 0);
-         INSERT INTO items (id, workspace_id, no, title, status, stage, created, updated) VALUES ('ST-2', 'default', 2, 't2', 'run', '执行', 0, 0);\n",
-    );
-    for (id, item, kind, created, resolved, yolo) in cards {
-        let item = item.map_or("NULL".into(), |i| format!("'{i}'"));
-        let resolved = resolved.map_or("NULL".into(), |r| r.to_string());
-        let status = if resolved == "NULL" {
-            "open"
-        } else {
-            "resolved"
-        };
-        let result = if *yolo {
-            "'{\"decided_by\":\"yolo\"}'"
-        } else {
-            "NULL"
-        };
-        sql.push_str(&format!(
-            "INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, item_id, question, status, result, requested_by, created, resolved)
-             VALUES ('{id}', 'default', '{kind}', 'item', 'x', {item}, '?', '{status}', {result}, 'dev', {created}, {resolved});\n"
-        ));
-    }
-    s.with_conn(|c| Ok(c.execute_batch(&sql)?)).expect("seed");
+    seed_time(&s, cards).expect("seed");
     (dir, s)
 }
 
 fn series(s: &Store, q: &Query, m: Metric, bucket: Bucket) -> Series {
-    s.with_conn(|c| views::series(c, q, m, "none", bucket))
+    s.read(|c| views::series(c, q, m, "none", bucket))
         .expect("series")
 }
 
@@ -108,7 +82,7 @@ fn agent_time_per_day_adds_up_to_the_summary() {
         [Some(0.0), Some((65 * MIN) as f64), Some((30 * MIN) as f64)]
     );
     let sm = s
-        .with_conn(|c| summary(c, &range))
+        .read(|c| summary(c, &range))
         .expect("summary")
         .expect("range");
     assert_eq!(

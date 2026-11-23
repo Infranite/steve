@@ -14,7 +14,7 @@ use steve_modules::changes::{
 };
 use steve_modules::{ApiError, ApiResult, Registry};
 use steve_store::base::{self, Change, Viewer, show};
-use steve_store::{Tx, uid};
+use steve_store::uid;
 
 use crate::accept::Slot;
 use crate::repos::{RepoPatch, Settings, check_project, patch_repo_tx, repo_snapshot};
@@ -512,61 +512,63 @@ fn now_of(slot: &Slot) -> i64 {
 struct RepoPatchOp(Slot);
 
 impl ChangeOp for RepoPatchOp {
-    fn apply(&self, outer: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
-        outer.write(|tx| {
-            let p = RepoPatch::parse_with(op, &["op", "id"])?;
-            let id = op["id"].as_str().unwrap_or("");
-            let before = repo_snapshot(&own_repo(tx, cx.ws, id)?);
-            patch_repo_tx(tx, cx.ws, cx.actor, id, &p, now_of(&self.0))?;
-            crate::events::emit(tx, cx.ws, id);
-            Ok(before)
-        })
+    fn apply(&self, tx: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let p = RepoPatch::parse_with(op, &["op", "id"])?;
+        let id = op["id"].as_str().unwrap_or("");
+        let before = repo_snapshot(&own_repo(tx, cx.ws, id)?);
+        patch_repo_tx(tx, cx.ws, cx.actor, id, &p, now_of(&self.0))?;
+        crate::events::emit(tx, cx.ws, id);
+        Ok(before)
     }
 
-    fn undo(&self, outer: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
-        outer.write(|tx| {
-            let id = op["id"].as_str().unwrap_or("");
-            let mut r = own_repo(tx, cx.ws, id)?;
-            let was = repo_snapshot(&r);
-            let project = before["project_id"].as_str().map(String::from);
-            if let Some(p) = &project {
-                check_project(tx, cx.ws, p, Some(&r.id))?;
-            }
-            r.project_id = project;
-            r.settings = before["settings"].clone();
-            if !r.settings.is_object() {
-                r.settings = json!({});
-            }
-            if let Some(e) = before["enabled"].as_bool() {
-                r.enabled = e;
-            }
-            let after = repo_snapshot(&r);
-            if after != was {
-                r.revision += 1;
-                r.updated = now_of(&self.0);
-                steve_store::github::update_repo(tx, &r)?;
-                base::revision(
-                    &tx.legacy(),
-                    cx.ws,
-                    "gh_repo",
-                    &r.id,
-                    r.revision,
-                    &was,
-                    &after,
-                    cx.actor,
-                )?;
-                base::audit(
-                    &tx.legacy(),
-                    cx.ws,
-                    cx.actor,
-                    "github.repo_patch",
-                    &r.id,
-                    &json!({"undo": true}),
-                )?;
-                crate::events::emit(tx, cx.ws, id);
-            }
-            Ok(())
-        })
+    fn undo(
+        &self,
+        tx: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let id = op["id"].as_str().unwrap_or("");
+        let mut r = own_repo(tx, cx.ws, id)?;
+        let was = repo_snapshot(&r);
+        let project = before["project_id"].as_str().map(String::from);
+        if let Some(p) = &project {
+            check_project(tx, cx.ws, p, Some(&r.id))?;
+        }
+        r.project_id = project;
+        r.settings = before["settings"].clone();
+        if !r.settings.is_object() {
+            r.settings = json!({});
+        }
+        if let Some(e) = before["enabled"].as_bool() {
+            r.enabled = e;
+        }
+        let after = repo_snapshot(&r);
+        if after != was {
+            r.revision += 1;
+            r.updated = now_of(&self.0);
+            steve_store::github::update_repo(tx, &r)?;
+            base::revision(
+                &tx.legacy(),
+                cx.ws,
+                "gh_repo",
+                &r.id,
+                r.revision,
+                &was,
+                &after,
+                cx.actor,
+            )?;
+            base::audit(
+                &tx.legacy(),
+                cx.ws,
+                cx.actor,
+                "github.repo_patch",
+                &r.id,
+                &json!({"undo": true}),
+            )?;
+            crate::events::emit(tx, cx.ws, id);
+        }
+        Ok(())
     }
 }
 
@@ -595,58 +597,60 @@ fn grant_args(op: &Value) -> ApiResult<GrantArgs<'_>> {
 }
 
 impl ChangeOp for GrantOp {
-    fn apply(&self, outer: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
-        outer.write(|tx| {
-            let a = grant_args(op)?;
-            own_repo(tx, cx.ws, a.repo)?;
-            if find_bot(tx, cx.ws, a.bot)?.as_deref() != Some(a.bot) {
-                return Err(ApiError::not_found("Bot"));
-            }
-            let now = now_of(&self.0);
-            let id = uid("gr");
-            steve_store::grants::insert_comment_grant(
-                tx,
-                &id,
-                cx.ws,
-                a.bot,
-                a.repo,
-                now + a.hours * HOUR_MS,
-                cx.actor,
-                None,
-                now,
-            )?;
+    fn apply(&self, tx: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let a = grant_args(op)?;
+        own_repo(tx, cx.ws, a.repo)?;
+        if find_bot(tx, cx.ws, a.bot)?.as_deref() != Some(a.bot) {
+            return Err(ApiError::not_found("Bot"));
+        }
+        let now = now_of(&self.0);
+        let id = uid("gr");
+        steve_store::grants::insert_comment_grant(
+            tx,
+            &id,
+            cx.ws,
+            a.bot,
+            a.repo,
+            now + a.hours * HOUR_MS,
+            cx.actor,
+            None,
+            now,
+        )?;
+        base::audit(
+            &tx.legacy(),
+            cx.ws,
+            cx.actor,
+            "grant.add",
+            a.repo,
+            &json!({"grant": id, "capability": COMMENT_CAP, "bot": a.bot, "hours": a.hours,
+                "changeset": cx.changeset_id}),
+        )?;
+        crate::events::emit(tx, cx.ws, a.repo);
+        Ok(json!({ "grant": id }))
+    }
+
+    fn undo(
+        &self,
+        tx: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let Some(id) = before["grant"].as_str() else {
+            return Ok(());
+        };
+        let n = steve_store::grants::revoke(tx, cx.ws, id, now_of(&self.0))?;
+        if n > 0 {
             base::audit(
                 &tx.legacy(),
                 cx.ws,
                 cx.actor,
-                "grant.add",
-                a.repo,
-                &json!({"grant": id, "capability": COMMENT_CAP, "bot": a.bot, "hours": a.hours,
-                    "changeset": cx.changeset_id}),
+                "grant.revoke",
+                op["repo"].as_str().unwrap_or(""),
+                &json!({"grant": id, "capability": COMMENT_CAP, "undo": true}),
             )?;
-            crate::events::emit(tx, cx.ws, a.repo);
-            Ok(json!({ "grant": id }))
-        })
-    }
-
-    fn undo(&self, outer: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
-        outer.write(|tx| {
-            let Some(id) = before["grant"].as_str() else {
-                return Ok(());
-            };
-            let n = steve_store::grants::revoke(tx, cx.ws, id, now_of(&self.0))?;
-            if n > 0 {
-                base::audit(
-                    &tx.legacy(),
-                    cx.ws,
-                    cx.actor,
-                    "grant.revoke",
-                    op["repo"].as_str().unwrap_or(""),
-                    &json!({"grant": id, "capability": COMMENT_CAP, "undo": true}),
-                )?;
-            }
-            Ok(())
-        })
+        }
+        Ok(())
     }
 }
 

@@ -20,7 +20,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_modules::vault::inject::{self, RunSpec};
 
@@ -144,14 +143,9 @@ fn render_command(cx: &RunCx<'_>, tpl: &str, input: &Value) -> String {
 }
 
 /// The project's directory, canonicalized: an unarchived project of `ws` on this Hub.
-fn project_dir(c: &rusqlite::Connection, ws: &str, id: &str) -> Option<PathBuf> {
-    let path: Option<String> = c
-        .query_row(
-            "SELECT path FROM projects WHERE id = ? AND workspace_id = ? AND archived = 0 AND device_id = 'hub'",
-            params![id, ws],
-            |r| r.get(0),
-        )
-        .optional()
+fn project_dir(c: &mut impl steve_store::Read, ws: &str, id: &str) -> Option<PathBuf> {
+    let path = steve_store::ProjectRows(c)
+        .local_path(ws, id)
         .ok()
         .flatten();
     let p = Path::new(&path?).canonicalize().ok()?;
@@ -247,7 +241,7 @@ impl NodeKind for Cmd {
         let Ok(Some(dir)) = cx
             .flow
             .store()
-            .reader(|c| Ok::<_, crate::FlowError>(project_dir(c, &ws, &project)))
+            .read::<_, steve_store::StoreError>(|c| Ok(project_dir(c, &ws, &project)))
         else {
             return NodeOutcome::Fail(NO_PROJECT.into());
         };

@@ -271,8 +271,7 @@ async fn chan_message_links(st: &AppState, ws: &str, me: &str, v: &mut Value) {
     }
     let viewer = steve_store::base::Viewer::bare(ws, me);
     let links = tokio::task::spawn_blocking(move || {
-        m.store
-            .reader(|c| steve_channels::open_link::message_urls(c, &viewer, &ids))
+        steve_channels::open_link::message_urls(&m.store, &viewer, &ids)
     })
     .await;
     let links = match links {

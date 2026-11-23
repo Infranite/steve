@@ -130,19 +130,24 @@ fn role_of(intro: &str) -> String {
 }
 
 /// The external owner name, never the private nickname used when talking to the owner.
-pub fn owner_name(c: &Connection, ws: &str) -> ChannelResult<String> {
-    owner_name_in(c, ws, None, None)
+pub fn owner_name(r: &mut impl steve_store::Read, ws: &str) -> ChannelResult<String> {
+    owner_name_in(r, ws, None, None)
 }
 
 /// External acknowledgments and handoffs use the same effective persona/space scope as drafts.
-pub fn owner_name_for_space(c: &Connection, ws: &str, space: &str) -> ChannelResult<String> {
+pub fn owner_name_for_space(
+    c: &Connection,
+    r: &mut impl steve_store::Read,
+    ws: &str,
+    space: &str,
+) -> ChannelResult<String> {
     let persona = crate::spaces::get(c, space)?
         .filter(|s| s.workspace_id == ws)
         .map(|s| bindings::effective(c, &s))
         .transpose()?
         .flatten();
     owner_name_in(
-        c,
+        r,
         ws,
         persona.as_ref().map(|e| e.persona.id.as_str()),
         Some(space),
@@ -150,45 +155,45 @@ pub fn owner_name_for_space(c: &Connection, ws: &str, space: &str) -> ChannelRes
 }
 
 pub fn owner_name_in(
-    c: &Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     persona: Option<&str>,
     space: Option<&str>,
 ) -> ChannelResult<String> {
-    owner_address(c, ws, true, persona, space)
+    owner_address(r, ws, true, persona, space)
 }
 
 /// Only for a conversation already verified to contain the owner alone.
-pub fn owner_internal_name(c: &Connection, ws: &str, connection: &str) -> ChannelResult<String> {
+pub fn owner_internal_name(
+    c: &Connection,
+    r: &mut impl steve_store::Read,
+    ws: &str,
+    connection: &str,
+) -> ChannelResult<String> {
     let user = crate::compose::owner_user(c, ws, connection)?;
     Ok(
-        steve_modules::contacts::profile::address(c, ws, &user, false, None, None)?
+        steve_modules::contacts::profile::address(r, ws, &user, false, None, None)?
             .unwrap_or_else(|| "你".into()),
     )
 }
 
 fn owner_address(
-    c: &Connection,
+    r: &mut impl steve_store::Read,
     ws: &str,
     external: bool,
     persona: Option<&str>,
     space: Option<&str>,
 ) -> ChannelResult<String> {
-    let user: Option<(String, String)> = c
-        .query_row(
-            "SELECT u.id, u.name FROM workspace_members m JOIN users u ON u.id = m.user_id
-         WHERE m.workspace_id = ?1 ORDER BY (m.role = 'owner') DESC, m.created, u.id LIMIT 1",
-            [ws],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    match user {
-        Some((id, name)) => Ok(steve_modules::contacts::profile::address(
-            c, ws, &id, external, persona, space,
-        )?
-        .unwrap_or(name)),
-        None => Ok("你".into()),
-    }
+    let Some(id) = steve_store::Members::new(r).first(ws)? else {
+        return Ok("你".into());
+    };
+    let name = steve_store::UserRows(r)
+        .name(&id)?
+        .unwrap_or_else(|| "你".into());
+    Ok(
+        steve_modules::contacts::profile::address(r, ws, &id, external, persona, space)?
+            .unwrap_or(name),
+    )
 }
 
 pub fn get(c: &Connection, id: &str) -> ChannelResult<Option<PersonaRow>> {
@@ -269,7 +274,7 @@ pub fn ensure_default(tx: &Tx, ws: &str, now: i64) -> ChannelResult<Option<Perso
             now
         ],
     )?;
-    steve_modules::contacts::stewards::adopt(tx, ws, "persona", &id, None, "seed")?;
+    tx.write(|w| steve_modules::contacts::stewards::adopt(w, ws, "persona", &id, None, "seed"))?;
     event(tx, ws, &id);
     get(tx, &id)
 }
@@ -374,7 +379,9 @@ pub fn create(tx: &Tx, viewer: &Viewer, n: &NewPersona, now: i64) -> ChannelResu
     )?;
     let p = own(tx, ws, &id)?;
     // the person who creates a persona is its 负责人
-    steve_modules::contacts::stewards::adopt(tx, ws, "persona", &id, Some(&viewer.user), "seed")?;
+    tx.write(|w| {
+        steve_modules::contacts::stewards::adopt(w, ws, "persona", &id, Some(&viewer.user), "seed")
+    })?;
     base::revision(
         tx,
         ws,
@@ -484,12 +491,7 @@ pub fn patch(
     Ok(after)
 }
 
-/// What a deletion moved: account defaults switched to the default persona, space bindings dropped.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-pub struct Moved {
-    pub accounts: usize,
-    pub spaces: usize,
-}
+pub use steve_store::channel_personas::bindings::Moved;
 
 /// Deletes a persona: the default one cannot be deleted; accounts using it as their default
 /// switch to the default persona, spaces bound to it go back to following their account;
@@ -503,7 +505,9 @@ pub fn delete(tx: &Tx, viewer: &Viewer, id: &str, now: i64) -> ChannelResult<Mov
         )));
     }
     let fallback = ensure_default(tx, ws, now)?.ok_or_else(|| ApiError::not_found("对外身份"))?;
-    let moved = bindings::release(tx, ws, id, &fallback.id, now)?;
+    let moved = tx.write(|w| {
+        steve_store::channel_personas::bindings::release(w, ws, id, &fallback.id, now)
+    })?;
     tx.execute(
         "UPDATE personas SET deleted = 1, revision = revision + 1, updated = ? WHERE id = ?",
         params![now, id],
@@ -597,8 +601,13 @@ pub(crate) fn sent(v: Option<String>, field: &str) -> Option<String> {
     v.map(|v| seeded::stored(&v, keys).unwrap_or(v))
 }
 
-pub fn out(c: &Connection, viewer: &Viewer, p: &PersonaRow) -> ChannelResult<PersonaOut> {
-    let owner = owner_name_in(c, &p.workspace_id, Some(&p.id), None)?;
+pub fn out(
+    c: &Connection,
+    r: &mut impl steve_store::Read,
+    viewer: &Viewer,
+    p: &PersonaRow,
+) -> ChannelResult<PersonaOut> {
+    let owner = owner_name_in(r, &p.workspace_id, Some(&p.id), None)?;
     Ok(PersonaOut {
         id: p.id.clone(),
         name: p.name.clone(),

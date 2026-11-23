@@ -112,7 +112,7 @@ impl Channels {
                             |r| r.get(0),
                         )
                         .optional()?;
-                    if crate::write_blocks::active(tx, conn, space.as_deref().unwrap_or(""), now)?
+                    if tx.write(|w| crate::write_blocks::active(w, conn, space.as_deref().unwrap_or(""), now))?
                         .is_some()
                     {
                         return Ok(());

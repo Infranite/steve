@@ -64,8 +64,8 @@ fn fixtures() -> [&'static [u8]; 3] {
 fn search(h: &H, user: &str, text: &str) -> Vec<steve_knowledge::Hit> {
     h.env
         .store()
-        .reader(|c| {
-            let viewer = Viewer::load(c, WS, user)?;
+        .read(|c| {
+            let viewer = Viewer::bare(WS, user);
             let q = Query::new(
                 &steve_knowledge::port::SqliteStore,
                 &viewer,

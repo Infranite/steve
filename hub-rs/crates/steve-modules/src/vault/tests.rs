@@ -5,13 +5,14 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use steve_store::vault_keys::{ACTIVE, RETIRING, VaultKey, VaultKeys};
 
 use axum::Router;
 use axum::body::Body as HttpBody;
 use axum::http::Request;
-use rusqlite::params;
 use serde_json::Value;
 use steve_store::now;
+use steve_store::testkit::vault as fixtures;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -20,9 +21,6 @@ use super::keystore::{FileKeyStore, KeyStore, KeyStoreError, account_name};
 use super::secret::Kek;
 use super::*;
 use crate::testkit::{ME, TestEnv, WS, WS2, caller};
-
-/// Until M0 lands migration 005: the draft tables, after a stub `accounts` (vault_items references it).
-const DRAFT: &str = include_str!("../../docs/v1-schema-draft.sql");
 
 /// A file key store whose reads can be made to fail like a locked keychain.
 struct Lockable {
@@ -60,17 +58,7 @@ struct Env {
 
 fn setup() -> Env {
     let env = TestEnv::new(|_| {});
-    env.store()
-        .with_conn(|c| {
-            c.execute_batch("CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY);")?;
-            c.execute_batch(DRAFT)?;
-            c.execute(
-                "INSERT INTO vaults (id, workspace_id, name, scope, created) VALUES ('vlt_s', ?, '共享', 'shared', 1), ('vlt_sys', ?, '系统', 'system', 1)",
-                [WS, WS],
-            )?;
-            Ok(())
-        })
-        .expect("schema");
+    fixtures::seed_rotation_vaults(env.store(), WS).expect("schema");
     let keydir = tempfile::tempdir().expect("tmp");
     let ks = Arc::new(Lockable {
         inner: FileKeyStore::open(keydir.path()).expect("keys"),
@@ -99,17 +87,20 @@ impl Env {
         let ct = seal_field(&key.dek, WS, &item, &field, secret.as_bytes()).expect("seal");
         self.env
             .store()
-            .transaction(|tx| {
-                ensure_active(tx, WS, key.kek_version)?;
-                tx.execute(
-                    "INSERT INTO vault_items (id, workspace_id, vault_id, template, title, sensitivity, dek_wrapped, kek_version, created_by, created, updated)
-                     VALUES (?, ?, 'vlt_s', 'login', 'GitHub', 'sensitive', ?, ?, ?, ?, ?)",
-                    params![item, WS, key.wrapped, key.kek_version, ME, now(), now()],
-                )?;
-                tx.execute(
-                    "INSERT INTO vault_fields (id, workspace_id, item_id, label, type, secret, value_ct, updated)
-                     VALUES (?, ?, ?, '密码', 'password', 1, ?, ?)",
-                    params![field, WS, item, ct, now()],
+            .write(|w| {
+                ensure_active(w, WS, key.kek_version)?;
+                fixtures::seed_encrypted_field(
+                    w,
+                    &fixtures::EncryptedField {
+                        ws: WS,
+                        actor: ME,
+                        item: &item,
+                        field: &field,
+                        wrapped: &key.wrapped,
+                        version: key.kek_version,
+                        ciphertext: &ct,
+                        at: now(),
+                    },
                 )?;
                 Ok::<_, VaultError>(())
             })
@@ -119,26 +110,17 @@ impl Env {
 
     /// Decrypts a field like reveal/finish will.
     fn read(&self, v: &Vault, item: &str, field: &str) -> VaultResult<String> {
-        let (wrapped, ver, ct): (Vec<u8>, i64, Vec<u8>) = self
-            .env
-            .store()
-            .with_conn(|c| {
-                Ok(c.query_row(
-                    "SELECT i.dek_wrapped, i.kek_version, f.value_ct FROM vault_items i JOIN vault_fields f ON f.item_id = i.id WHERE i.id = ? AND f.id = ?",
-                    [item, field],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )?)
-            })
-            .expect("row");
+        let (wrapped, ver, ct): (Vec<u8>, i64, Vec<u8>) =
+            fixtures::encrypted_field(self.env.store(), item, field).expect("row");
         let dek = v.item_key(WS, item, &wrapped, ver)?;
         let p = open_field(&dek, WS, item, field, &ct)?;
         Ok(String::from_utf8(p.expose().to_vec()).expect("utf-8"))
     }
 
-    fn key_rows(&self) -> Vec<repo::KeyRow> {
+    fn key_rows(&self) -> Vec<VaultKey> {
         self.env
             .store()
-            .reader(|c| repo::keys(c, WS))
+            .read(|r| VaultKeys(r).keys(WS))
             .expect("keys")
     }
 }
@@ -166,17 +148,7 @@ fn init_then_status_then_409() {
     assert_eq!(rows[0].fingerprint.len(), 16);
     // the other workspace is separate
     assert!(!e.vault.status(WS2).expect("status").initialized);
-    let audit: i64 = e
-        .env
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT COUNT(*) FROM audit WHERE action = 'vault.init' AND workspace_id = ?",
-                [WS],
-                |r| r.get(0),
-            )?)
-        })
-        .expect("audit");
+    let audit: i64 = fixtures::init_audit_count(e.env.store(), WS).expect("audit");
     assert_eq!(audit, 1);
 }
 
@@ -203,21 +175,8 @@ fn unlogged_credential_reads_write_nothing_until_logged() {
         Some("没有这个条目")
     );
     let item = shared.clone();
-    e.env
-        .store()
-        .with_conn(|c| {
-            Ok(c.execute(
-                "UPDATE vault_items SET vault_id = 'vlt_sys' WHERE id = ?",
-                [&item],
-            )?)
-        })
-        .expect("move to system");
-    let uses = || -> i64 {
-        e.env
-            .store()
-            .with_conn(|c| Ok(c.query_row("SELECT count(*) FROM secret_uses", [], |r| r.get(0))?))
-            .expect("count")
-    };
+    fixtures::make_system_item(e.env.store(), &item).expect("move to system");
+    let uses = || -> i64 { fixtures::use_count(e.env.store(), None, None, None).expect("count") };
     let seen = e
         .vault
         .with_credential_unlogged(WS, &item, |c| c.text("密码") == Some("hunter2"))
@@ -314,27 +273,9 @@ fn moved_ciphertext_does_not_open() {
     let (a, fa) = e.item(&e.vault, "alpha");
     let (b, fb) = e.item(&e.vault, "bravo");
     // copy b's field ciphertext into a's field row, and b's wrapped DEK onto a
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE vault_fields SET value_ct = (SELECT value_ct FROM vault_fields WHERE id = ?) WHERE id = ?",
-                [&fb, &fa],
-            )?;
-            Ok(())
-        })
-        .expect("swap");
+    fixtures::copy_field_ciphertext(e.env.store(), &fb, &fa).expect("swap");
     assert!(e.read(&e.vault, &a, &fa).is_err());
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE vault_items SET dek_wrapped = (SELECT dek_wrapped FROM vault_items WHERE id = ?) WHERE id = ?",
-                [&b, &a],
-            )?;
-            Ok(())
-        })
-        .expect("swap dek");
+    fixtures::copy_wrapped_key(e.env.store(), &b, &a).expect("swap dek");
     assert!(e.read(&e.vault, &a, &fa).is_err());
     assert_eq!(e.read(&e.vault, &b, &fb).expect("b intact"), "bravo");
 }
@@ -363,22 +304,12 @@ fn rotation_rewraps_everything_and_retires_the_old_key() {
     let s = e.vault.status(WS).expect("status");
     assert!(!s.rotating);
     assert_eq!(s.kek_version, Some(2));
-    let on_v1: i64 = e
-        .env
-        .store()
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT count(*) FROM vault_items WHERE kek_version = 1",
-                [],
-                |r| r.get(0),
-            )?)
-        })
-        .expect("count");
+    let on_v1: i64 = fixtures::items_with_key_version(e.env.store(), 1).expect("count");
     assert_eq!(on_v1, 0);
     let r2 = e
         .env
         .store()
-        .transaction(|tx| ensure_active(tx, WS, stale.kek_version));
+        .write(|w| ensure_active(w, WS, stale.kek_version));
     assert_eq!(r2.err(), Some(VaultError::Rotating));
     let (late, late_f) = e.item(&e.vault, "late");
 
@@ -419,16 +350,7 @@ fn rotation_changes_nothing_when_an_item_does_not_open() {
     e.vault.init(WS, ME).expect("init");
     let (good, gf) = e.item(&e.vault, "good");
     let (bad, _) = e.item(&e.vault, "bad");
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE vault_items SET dek_wrapped = zeroblob(72) WHERE id = ?",
-                [&bad],
-            )?;
-            Ok(())
-        })
-        .expect("corrupt");
+    fixtures::corrupt_wrapped_key(e.env.store(), &bad).expect("corrupt");
     let err = e.vault.rotate_now(WS, ME).expect_err("refused");
     assert!(err.to_string().contains("1 个条目"), "{err}");
     // the whole transaction rolled back, and the new key left the key store again
@@ -439,16 +361,7 @@ fn rotation_changes_nothing_when_an_item_does_not_open() {
     assert!(e.ks.get(&account_name(WS, 1)).expect("get").is_some());
     assert_eq!(e.read(&e.restart(), &good, &gf).expect("good"), "good");
     // destroying the bad item (V2's delete clears dek_wrapped) lets it rotate
-    e.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "UPDATE vault_items SET dek_wrapped = NULL WHERE id = ?",
-                [&bad],
-            )?;
-            Ok(())
-        })
-        .expect("destroy");
+    fixtures::clear_wrapped_key(e.env.store(), &bad).expect("destroy");
     assert_eq!(e.vault.rotate_now(WS, ME).expect("rotate").version, 2);
     assert_eq!(e.read(&e.restart(), &good, &gf).expect("good"), "good");
 }
@@ -467,9 +380,9 @@ fn tidy_keys_finishes_a_rotation_an_earlier_hub_left_retiring() {
     let fp = super::crypto::fingerprint(&k2);
     e.env
         .store()
-        .transaction(|tx| {
-            repo::set_key_status(tx, WS, 1, repo::RETIRING, None)?;
-            repo::insert_key(tx, WS, 2, &account_name(WS, 2), &fp, repo::ACTIVE, now())?;
+        .write(|w| {
+            VaultKeys(w).set_status(WS, 1, RETIRING, None)?;
+            VaultKeys(w).insert(WS, 2, &account_name(WS, 2), &fp, ACTIVE, now())?;
             Ok::<_, VaultError>(())
         })
         .expect("leave it retiring");

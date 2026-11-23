@@ -189,3 +189,294 @@ pub fn restore(tx: &Tx, ws: &str, moved: &[MovedLink]) -> Result<usize> {
     }
     Ok(n)
 }
+
+/// Semantic links within a read snapshot or write transaction.
+pub struct Links<'a, C>(pub &'a mut C);
+
+use crate::contract::Json;
+use crate::{Read, W};
+use sea_query::{Expr, ExprTrait, OnConflict, Order, Query};
+
+const KEY: [&str; 6] = [
+    "workspace_id",
+    "subject_type",
+    "subject_id",
+    "predicate",
+    "object_type",
+    "object_id",
+];
+
+fn key_filter(ws: &str, key: &LinkKey) -> Expr {
+    Expr::col("workspace_id")
+        .eq(ws)
+        .and(Expr::col("subject_type").eq(key.subject.kind.as_str()))
+        .and(Expr::col("subject_id").eq(key.subject.id.as_str()))
+        .and(Expr::col("predicate").eq(key.predicate.as_str()))
+        .and(Expr::col("object_type").eq(key.object.kind.as_str()))
+        .and(Expr::col("object_id").eq(key.object.id.as_str()))
+}
+
+impl<C: Read> Links<'_, C> {
+    /// Subjects of links to a bounded batch of objects, keyed by object id.
+    pub fn sources<'a>(
+        &mut self,
+        ws: &str,
+        subject_kind: &str,
+        predicate: &str,
+        object_kind: &str,
+        ids: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Vec<(String, String, i64)>> {
+        self.0.all(
+            Query::select()
+                .columns(["object_id", "subject_id", "created"])
+                .from("links")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("subject_type").eq(subject_kind))
+                .and_where(Expr::col("predicate").eq(predicate))
+                .and_where(Expr::col("object_type").eq(object_kind))
+                .and_where(Expr::col("object_id").is_in(ids))
+                .order_by("subject_id", Order::Asc),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+    }
+
+    pub fn destinations(
+        &mut self,
+        ws: &str,
+        subject: &ObjRef,
+        predicate: &str,
+        kind: &str,
+    ) -> Result<Vec<String>> {
+        let tie = self.0.db().dialect().insertion_order(None);
+        self.0.all(
+            Query::select()
+                .column("object_id")
+                .from("links")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("subject_type").eq(subject.kind.as_str()))
+                .and_where(Expr::col("subject_id").eq(subject.id.as_str()))
+                .and_where(Expr::col("predicate").eq(predicate))
+                .and_where(Expr::col("object_type").eq(kind))
+                .order_by("created", Order::Asc)
+                .order_by_expr(tie, Order::Asc),
+            |row| row.get(0),
+        )
+    }
+
+    pub fn item_links_to(
+        &mut self,
+        ws: &str,
+        parties: &[String],
+        roles: &[&str],
+    ) -> Result<Vec<Link>> {
+        if parties.is_empty() || roles.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.0.all(
+            Query::select()
+                .from("links")
+                .columns(KEY)
+                .columns(["props", "source", "confidence", "created"])
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("subject_type").eq("item"))
+                .and_where(Expr::col("object_type").eq("party"))
+                .and_where(Expr::col("predicate").is_in(roles.iter().copied()))
+                .and_where(Expr::col("object_id").is_in(parties.iter().map(String::as_str)))
+                .order_by("created", Order::Desc)
+                .order_by("subject_id", Order::Asc)
+                .order_by("predicate", Order::Asc),
+            decode_link,
+        )
+    }
+
+    pub fn get(&mut self, ws: &str, key: &LinkKey) -> Result<Option<Link>> {
+        self.0.one(
+            Query::select()
+                .from("links")
+                .columns(KEY)
+                .columns(["props", "source", "confidence", "created"])
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("subject_type").eq(&key.subject.kind))
+                .and_where(Expr::col("subject_id").eq(&key.subject.id))
+                .and_where(Expr::col("predicate").eq(&key.predicate))
+                .and_where(Expr::col("object_type").eq(&key.object.kind))
+                .and_where(Expr::col("object_id").eq(&key.object.id)),
+            decode_link,
+        )
+    }
+
+    pub fn from(&mut self, ws: &str, subject: &ObjRef, pred: Option<&str>) -> Result<Vec<Link>> {
+        self.list(ws, subject, pred, true)
+    }
+
+    pub fn to(&mut self, ws: &str, object: &ObjRef, pred: Option<&str>) -> Result<Vec<Link>> {
+        self.list(ws, object, pred, false)
+    }
+
+    fn list(
+        &mut self,
+        ws: &str,
+        endpoint: &ObjRef,
+        pred: Option<&str>,
+        from: bool,
+    ) -> Result<Vec<Link>> {
+        let ((kind, id), (other_kind, other_id)) = if from {
+            (("subject_type", "subject_id"), ("object_type", "object_id"))
+        } else {
+            (("object_type", "object_id"), ("subject_type", "subject_id"))
+        };
+        let mut query = Query::select();
+        query
+            .from("links")
+            .columns(KEY)
+            .columns(["props", "source", "confidence", "created"])
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col(kind).eq(endpoint.kind.as_str()))
+            .and_where(Expr::col(id).eq(endpoint.id.as_str()))
+            .order_by("created", Order::Asc)
+            .order_by("predicate", Order::Asc)
+            .order_by(other_kind, Order::Asc)
+            .order_by(other_id, Order::Asc);
+        if let Some(pred) = pred {
+            query.and_where(Expr::col("predicate").eq(pred));
+        }
+        self.0.all(&query, decode_link)
+    }
+}
+
+fn decode_link(r: &crate::contract::Row<'_>) -> Result<Link> {
+    Ok(Link {
+        workspace_id: r.get(0)?,
+        subject_type: r.get(1)?,
+        subject_id: r.get(2)?,
+        predicate: r.get(3)?,
+        object_type: r.get(4)?,
+        object_id: r.get(5)?,
+        props: r.get::<Json<_>>(6)?.0,
+        source: r.get(7)?,
+        confidence: r.get(8)?,
+        created: r.get(9)?,
+    })
+}
+
+impl Links<'_, W<'_>> {
+    pub fn add(&mut self, ws: &str, row: &NewLink) -> Result<bool> {
+        self.insert(
+            ws,
+            &row.subject,
+            &row.predicate,
+            &row.object,
+            &row.props,
+            &row.source,
+            row.confidence,
+            now(),
+        )
+    }
+
+    fn insert(
+        &mut self,
+        ws: &str,
+        subject: &ObjRef,
+        predicate: &str,
+        object: &ObjRef,
+        props: &Value,
+        source: &str,
+        confidence: f64,
+        created: i64,
+    ) -> Result<bool> {
+        Ok(self.0.exec(
+            Query::insert()
+                .into_table("links")
+                .columns(
+                    KEY.into_iter()
+                        .chain(["props", "source", "confidence", "created"]),
+                )
+                .values_panic([
+                    ws.into(),
+                    subject.kind.as_str().into(),
+                    subject.id.as_str().into(),
+                    predicate.into(),
+                    object.kind.as_str().into(),
+                    object.id.as_str().into(),
+                    props.to_string().into(),
+                    source.into(),
+                    confidence.into(),
+                    created.into(),
+                ])
+                .on_conflict(OnConflict::columns(KEY).do_nothing().to_owned()),
+        )? != 0)
+    }
+
+    pub fn set_props(&mut self, ws: &str, key: &LinkKey, props: &Value) -> Result<bool> {
+        Ok(self.0.exec(
+            Query::update()
+                .table("links")
+                .value("props", props.to_string())
+                .and_where(key_filter(ws, key)),
+        )? != 0)
+    }
+
+    pub fn remove(&mut self, ws: &str, key: &LinkKey) -> Result<bool> {
+        Ok(self.0.exec(
+            Query::delete()
+                .from_table("links")
+                .and_where(key_filter(ws, key)),
+        )? != 0)
+    }
+
+    pub fn insert_preserved(&mut self, ws: &str, key: &LinkKey, row: &Link) -> Result<bool> {
+        self.insert(
+            ws,
+            &key.subject,
+            &key.predicate,
+            &key.object,
+            &row.props,
+            &row.source,
+            row.confidence,
+            row.created,
+        )
+    }
+
+    pub fn retarget(&mut self, ws: &str, from: &ObjRef, into: &ObjRef) -> Result<Vec<MovedLink>> {
+        let mut rows = self.from(ws, from, None)?;
+        rows.extend(self.to(ws, from, None)?);
+        let mut moved = Vec::new();
+        for row in rows {
+            let before = LinkKey {
+                subject: ObjRef::new(&row.subject_type, &row.subject_id),
+                predicate: row.predicate.clone(),
+                object: ObjRef::new(&row.object_type, &row.object_id),
+            };
+            if !self.remove(ws, &before)? {
+                continue;
+            }
+            let swap = |target: &ObjRef| {
+                if target == from {
+                    into.clone()
+                } else {
+                    target.clone()
+                }
+            };
+            let after = LinkKey {
+                subject: swap(&before.subject),
+                predicate: before.predicate.clone(),
+                object: swap(&before.object),
+            };
+            if self.insert_preserved(ws, &after, &row)? {
+                moved.push(MovedLink { before, after });
+            }
+        }
+        Ok(moved)
+    }
+
+    pub fn restore(&mut self, ws: &str, moved: &[MovedLink]) -> Result<()> {
+        for m in moved {
+            let Some(row) = self.get(ws, &m.after)? else {
+                continue;
+            };
+            self.remove(ws, &m.after)?;
+            self.insert_preserved(ws, &m.before, &row)?;
+        }
+        Ok(())
+    }
+}

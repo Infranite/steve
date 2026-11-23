@@ -478,6 +478,12 @@ pub fn migrate(c: &Connection) -> Result<()> {
     migrate_observed(c, None)
 }
 
+/// Apply pending migrations to an existing offline database, such as a scratch backup copy.
+pub fn migrate_file(path: &Path) -> Result<()> {
+    let c = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    migrate(&c)
+}
+
 /// Actual SQLite execution progress, including inside a single long backfill statement. This is
 /// optional and carries no filesystem or installer dependency. `complete` means the transaction
 /// committed, not that the candidate is healthy. A failed migration never reports completion.

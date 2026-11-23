@@ -7,6 +7,8 @@ use serde_json::{Value, json};
 use crate::contract::{Json, Row};
 use crate::{Read, Result, W};
 
+pub mod bindings;
+
 /// What a persona tells about itself. A field omitted from the policy is visible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -40,6 +42,16 @@ impl Default for Reveal {
     fn default() -> Self {
         Self::ALL
     }
+}
+
+pub fn name(r: &mut impl Read, id: &str) -> Result<Option<String>> {
+    r.one(
+        Query::select()
+            .column("name")
+            .from("personas")
+            .and_where(Expr::col("id").eq(id)),
+        |row| row.get(0),
+    )
 }
 
 struct BotPersona {

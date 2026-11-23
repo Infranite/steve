@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use steve_modules::ApiError;
 
 use crate::nodes::action::{self, ActionOutcome};
-use crate::runs::{self, NewStep, RunRow};
+use crate::runs::{NewStep, RunRow};
 use crate::{FlowCx, FlowError};
 
 /// A report whose model call failed is retried once, this much later.
@@ -78,12 +78,12 @@ pub trait RunExecutor: Send + Sync {
     /// through `resume_event`, which a crash in between loses.
     fn wake_in(
         &self,
-        tx: &steve_store::Tx,
+        w: &mut steve_store::W<'_>,
         run_id: &str,
         node_id: &str,
         event: &Value,
     ) -> Result<Option<bool>, FlowError> {
-        let _ = (tx, run_id, node_id, event);
+        let _ = (w, run_id, node_id, event);
         Ok(None)
     }
 }
@@ -91,26 +91,6 @@ pub trait RunExecutor: Send + Sync {
 /// Executor for the two-node schedule graph.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LinearExecutor;
-
-/// The graph of the version a run started on (later edits do not change running runs).
-fn graph_of(c: &rusqlite::Connection, run: &RunRow) -> Result<Value, FlowError> {
-    let g: Option<String> = c
-        .query_row(
-            "SELECT graph FROM flow_versions WHERE flow_id = ? AND version = ?",
-            rusqlite::params![run.flow_id, run.flow_version],
-            |r| r.get(0),
-        )
-        .ok();
-    let g = match g {
-        Some(g) => g,
-        None => c.query_row(
-            "SELECT graph FROM flows WHERE id = ?",
-            [&run.flow_id],
-            |r| r.get(0),
-        )?,
-    };
-    Ok(serde_json::from_str(&g)?)
-}
 
 fn label_with_prefix(run: &RunRow, label: &str) -> String {
     let prefix = run
@@ -186,12 +166,14 @@ impl RunExecutor for LinearExecutor {
                 let store = &cx.modules.store;
 
                 let run = store
-                    .reader(|c| runs::get(c, run_id))?
+                    .read(|r| steve_store::RunRows(r).get(run_id))?
                     .ok_or_else(|| ApiError::not_found("运行"))?;
                 if run.status != "running" {
                     return Ok(RunStatus::parse(&run.status));
                 }
-                let graph = store.reader(|c| graph_of(c, &run))?;
+                let graph = store
+                    .read(|r| steve_store::FlowRows(r).graph(&run.flow_id, run.flow_version))?
+                    .ok_or_else(|| ApiError::not_found("流程"))?;
                 let node = run.cursor.as_deref().and_then(|cur| {
                     graph["nodes"]
                         .as_array()?
@@ -226,16 +208,17 @@ impl RunExecutor for LinearExecutor {
                     .to_string();
                 let input = json!({ "at": run.at() });
                 let now = cx.now();
-                let status = store.transaction(|tx| -> Result<RunStatus, FlowError> {
-                    let mut r =
-                        runs::get(tx, run_id)?.ok_or_else(|| ApiError::not_found("运行"))?;
+                let status = store.write(|tx| -> Result<RunStatus, FlowError> {
+                    let mut r = steve_store::RunRows(tx)
+                        .get(run_id)?
+                        .ok_or_else(|| ApiError::not_found("运行"))?;
                     let (step_status, output, error) = apply_linear_result(&mut r, &outcome, now);
                     if !node_id.is_empty() {
-                        runs::add_step(
-                            tx,
+                        steve_store::RunRows(tx).add_step(
                             &r.workspace_id,
                             run_id,
                             &NewStep {
+                                branch: None,
                                 node_id: &node_id,
                                 status: step_status,
                                 input: &input,
@@ -246,7 +229,7 @@ impl RunExecutor for LinearExecutor {
                             },
                         )?;
                     }
-                    runs::save(tx, &r)?;
+                    steve_store::RunRows(tx).save(&r)?;
                     Ok(RunStatus::parse(&r.status))
                 })?;
                 if status == RunStatus::Waiting {

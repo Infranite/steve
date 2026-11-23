@@ -1,16 +1,17 @@
 //! Test-only fault injection after the first actual Vault release; no production injection seam.
-use rusqlite::params;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::sync::{Arc, Mutex};
 use steve_flow::corrections::{self, Action, Scope};
 use steve_flow::exec::RunStatus;
 use steve_flow::{
-    FlowResult, NodeKind, engine, flows, graph::Graph, nodes::http::Http, runs, testkit::FlowEnv,
+    FlowResult, NodeKind, engine, flows, graph::Graph, nodes::http::Http, testkit::FlowEnv,
 };
 use steve_modules::{
     testkit::{ME, WS, caller},
     vault::{Vault, items::NewItem, keystore::FileKeyStore},
 };
+use steve_store::testkit::flow as fixtures;
+use steve_store::{DecisionRows, FlowWaits, RunRows};
 
 struct SecretsFixture {
     _keys: tempfile::TempDir,
@@ -58,11 +59,55 @@ fn open(f: &SecretsFixture, grant: bool) -> String {
     let graph=Graph::from_value(&json!({"nodes":[{"id":"t","kind":"trigger","config":{"source":"manual"}},
         {"id":"h","kind":"http","title":"Use two items","config":{"url":"https://example.invalid/never-sent","headers":{
             "X-First":format!("{{{{secrets.{}.token}}}}",f.first),"X-Second":format!("{{{{secrets.{}.token}}}}",f.second)}}}],"edges":[{"from":"t","to":"h"}]})).unwrap();
-    f.e.env.store().transaction(|tx|->FlowResult<_>{
-        let id=flows::create(tx,WS,ME,&flows::NewFlow{kind:"flow",name:"TS5 secrets",description:"",graph:&graph,origin:"me",origin_label:"",enabled:false},1)?;
-        if grant {for item in [&f.first,&f.second]{tx.execute("INSERT INTO grants(id,workspace_id,subject_type,subject_id,capability,resource_type,resource_id,scope,until,created_by,created) VALUES (?,?,'flow',?,'secret.use','vault_item',?,json_object('flow_version',1),? ,?,1)",params![steve_store::uid("gr"),WS,id,item,i64::MAX,ME])?;}}
-        let flow=flows::own(tx,WS,&id)?;engine::open_run(tx,&flow,"manual",json!({"steps":{}}),None,false,None,0,1)
-    }).unwrap()
+    f.e.env
+        .store()
+        .write(|w| -> FlowResult<_> {
+            let id = flows::create(
+                w,
+                WS,
+                ME,
+                &flows::NewFlow {
+                    kind: "flow",
+                    name: "TS5 secrets",
+                    description: "",
+                    graph: &graph,
+                    origin: "me",
+                    origin_label: "",
+                    enabled: false,
+                },
+                1,
+            )?;
+            if grant {
+                for item in [&f.first, &f.second] {
+                    fixtures::flow_grant_in(
+                        w,
+                        fixtures::FlowGrantFixture {
+                            id: &steve_store::uid("gr"),
+                            ws: WS,
+                            flow: &id,
+                            capability: "secret.use",
+                            resource_type: "vault_item",
+                            resource: item,
+                            until: i64::MAX,
+                            actor: ME,
+                        },
+                    )?;
+                }
+            }
+            let flow = flows::own(w, WS, &id)?;
+            engine::open_run(
+                w,
+                &flow,
+                "manual",
+                json!({"steps": {}}),
+                None,
+                false,
+                None,
+                0,
+                1,
+            )
+        })
+        .unwrap()
 }
 
 #[tokio::test]
@@ -70,10 +115,13 @@ async fn partial_secret_release_is_finished_as_failed_when_the_second_release_ch
     for fault in ["needs-approval", "error"] {
         let f = fixture(false);
         let run = open(&f, true);
-        f.e.env.store().with_conn(|c|{
-            let mutation=if fault=="needs-approval" {format!("UPDATE grants SET revoked=1 WHERE resource_id='{}';",f.second)}else{format!("UPDATE vault_items SET status='deleted' WHERE id='{}';",f.second)};
-            c.execute_batch(&format!("CREATE TRIGGER ts5_second_release_fault AFTER INSERT ON secret_uses WHEN NEW.item_id='{}' BEGIN {mutation} END",f.first))?;Ok(())
-        }).unwrap();
+        fixtures::secret_release_fault(
+            f.e.env.store(),
+            &f.first,
+            &f.second,
+            fault == "needs-approval",
+        )
+        .unwrap();
         assert_eq!(
             engine::drive(&f.e.flow, &run).await.unwrap(),
             RunStatus::Failed
@@ -81,38 +129,24 @@ async fn partial_secret_release_is_finished_as_failed_when_the_second_release_ch
         let row =
             f.e.env
                 .store()
-                .reader(|c| runs::get(c, &run))
+                .read(|r| steve_store::RunRows(r).get(&run))
                 .unwrap()
                 .unwrap();
-        let uses: Vec<(String, String, Option<i64>, Option<String>)> =
-            f.e.env
-                .store()
-                .reader(|c| {
-                    Ok::<_, steve_store::StoreError>(
-                        c.prepare(
-                            "SELECT item_id,status,finished,run_id FROM secret_uses ORDER BY rowid",
-                        )?
-                        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
-                        .collect::<rusqlite::Result<_>>()?,
-                    )
-                })
-                .unwrap();
+        let uses = fixtures::secret_use_results(f.e.env.store()).unwrap();
         assert_eq!(uses.len(), 1);
         assert_eq!(uses[0].0, f.first);
         assert_eq!(uses[0].1, "failed");
         assert!(uses[0].2.is_some());
         assert_eq!(uses[0].3.as_deref(), Some(run.as_str()));
-        let (status, error): (String, Option<String>) =
+        let step =
             f.e.env
                 .store()
-                .reader(|c| {
-                    Ok::<_, steve_store::StoreError>(c.query_row(
-                        "SELECT status,error FROM flow_run_steps WHERE run_id=? AND node_id='h'",
-                        [&run],
-                        |r| Ok((r.get(0)?, r.get(1)?)),
-                    )?)
-                })
+                .read(|r| RunRows(r).steps(&run))
+                .unwrap()
+                .into_iter()
+                .find(|step| step.node_id == "h")
                 .unwrap();
+        let (status, error) = (step.status, step.error);
         assert_eq!(status, "failed");
         assert_eq!(row.error, error);
         if fault == "needs-approval" {
@@ -135,10 +169,15 @@ async fn a_mixed_grantable_and_high_pair_clears_the_persistent_grant_offer() {
             engine::drive(&f.e.flow, &run).await.unwrap(),
             RunStatus::Waiting
         );
-        let (matcher,options):(String,String)=f.e.env.store().reader(|c|Ok::<_,steve_store::StoreError>(c.query_row(
-            "SELECT w.match,d.options FROM flow_waits w JOIN decisions d ON d.id=w.decision_id WHERE w.run_id=? AND w.node_id='h'",[&run],|r|Ok((r.get(0)?,r.get(1)?)))?)).unwrap();
-        let matcher: Value = serde_json::from_str(&matcher).unwrap();
-        let options: Vec<String> = serde_json::from_str(&options).unwrap();
+        let (matcher, options) =
+            f.e.env
+                .store()
+                .read::<_, steve_store::StoreError>(|r| {
+                    let wait = FlowWaits(r).get(&run, "h")?.unwrap();
+                    let decision = DecisionRows(r).get(&wait.decision.unwrap())?.unwrap();
+                    Ok((wait.matcher, decision.options))
+                })
+                .unwrap();
         assert_eq!(options.contains(&engine::GATE_ALWAYS.to_string()), !high);
         if high {
             assert!(
@@ -149,14 +188,7 @@ async fn a_mixed_grantable_and_high_pair_clears_the_persistent_grant_offer() {
             assert_eq!(matcher["grants"].as_array().unwrap().len(), 2);
         }
         assert_eq!(
-            f.e.env
-                .store()
-                .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(
-                    "SELECT count(*) FROM secret_uses",
-                    [],
-                    |r| r.get::<_, i64>(0)
-                )?))
-                .unwrap(),
+            fixtures::secret_use_results(f.e.env.store()).unwrap().len(),
             0
         );
     }
@@ -167,10 +199,33 @@ async fn correction_ops_remain_flow_then_rule_and_change_cards_keep_stored_text(
     for existing in [false, true] {
         for action in [Action::Ignore, Action::Remind] {
             let e = FlowEnv::new();
-            e.env.store().transaction(|tx|->FlowResult<()>{
-            let target=if existing {let g=Graph::starter("manual");Some(flows::create(tx,WS,ME,&flows::NewFlow{kind:"flow",name:"Original",description:"",graph:&g,origin:"me",origin_label:"",enabled:false},1)?)}else{None};
-            tx.execute("INSERT INTO ext_events(id,workspace_id,source,type,dedupe_key,group_key,summary,occurred,received,outcome,flow_id) VALUES('ts5-event',?,'mail','mail.new','ts5','ts5-group','Fixture summary',1,1,'recorded',?)",params![WS,target])?;Ok(())
-        }).unwrap();
+            e.env
+                .store()
+                .write(|w| -> FlowResult<()> {
+                    let target = if existing {
+                        let g = Graph::starter("manual");
+                        Some(flows::create(
+                            w,
+                            WS,
+                            ME,
+                            &flows::NewFlow {
+                                kind: "flow",
+                                name: "Original",
+                                description: "",
+                                graph: &g,
+                                origin: "me",
+                                origin_label: "",
+                                enabled: false,
+                            },
+                            1,
+                        )?)
+                    } else {
+                        None
+                    };
+                    fixtures::correction_signal(w, WS, target.as_deref())?;
+                    Ok(())
+                })
+                .unwrap();
             let corrected =
                 corrections::correct(&e.flow, &caller(WS, ME), "ts5-event", action, Scope::Group)
                     .await
@@ -178,11 +233,9 @@ async fn correction_ops_remain_flow_then_rule_and_change_cards_keep_stored_text(
             let cs = e
                 .env
                 .store()
-                .reader(|c| {
-                    steve_store::base::changesets::get(
-                        c,
-                        corrected.changeset_id.as_deref().unwrap(),
-                    )
+                .read(|r| {
+                    steve_store::base::changesets::ChangeSets(r)
+                        .get(corrected.changeset_id.as_deref().unwrap())
                 })
                 .unwrap()
                 .unwrap();

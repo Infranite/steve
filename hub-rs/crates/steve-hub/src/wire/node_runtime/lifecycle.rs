@@ -172,7 +172,7 @@ impl NodeRuntime {
             let mut open = open.clone();
             open.env = super::super::node_env::for_session(tx, self.node_id.as_str(), &b.session)?;
             // and its skills
-            open.skills = super::super::bot_skills::for_session(tx, &b.session)?;
+            open.skills = tx.write(|w| super::super::bot_skills::for_session(w, &b.session))?;
             if self.principal_state.load(Ordering::Relaxed) {
                 open.state = super::super::principal::harness_state_in(
                     tx,
@@ -279,7 +279,7 @@ impl NodeRuntime {
         open.resume = resume_of_in(tx, session)?;
         // the variables as they are now: a removed or changed one does not come back
         open.env = super::super::node_env::for_session(tx, self.node_id.as_str(), session)?;
-        open.skills = super::super::bot_skills::for_session(tx, session)?;
+        open.skills = tx.write(|w| super::super::bot_skills::for_session(w, session))?;
         let op = uid(&format!("op_open_{session}"));
         let (req, digest) = command(&op, open)?;
         rt::insert_command_in(

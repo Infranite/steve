@@ -18,11 +18,11 @@ use std::sync::LazyLock;
 use axum::Json;
 use axum::extract::{Path, State};
 use regex::Regex;
-use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use steve_store::caps::skills::{self as repo, Skill};
-use steve_store::{base, now, uid};
+use steve_store::caps::Assignments;
+use steve_store::caps::skills::{Skill, Skills};
+use steve_store::{Read, now, uid};
 
 use super::Capabilities;
 use crate::vault::VaultResult;
@@ -101,8 +101,9 @@ pub(super) async fn remove_h(
     Ok(Json(json!({ "ok": true })))
 }
 
-fn skill_of(c: &Connection, ws: &str, sid: &str) -> ApiResult<Skill> {
-    repo::get(c, sid)?
+fn skill_of(c: &mut impl Read, ws: &str, sid: &str) -> ApiResult<Skill> {
+    Skills(c)
+        .get(sid)?
         .filter(|s| s.workspace_id == ws)
         .ok_or_else(|| ApiError::not_found("技能"))
 }
@@ -130,7 +131,7 @@ fn check(s: &Skill) -> ApiResult<()> {
     c.done()
 }
 
-fn out_with_users(c: &Connection, s: &Skill) -> ApiResult<Value> {
+fn out_with_users(c: &mut impl Read, s: &Skill) -> ApiResult<Value> {
     let mut v = out(s);
     v["bots"] = super::users(c, "skill", &s.id)?;
     Ok(v)
@@ -139,20 +140,20 @@ fn out_with_users(c: &Connection, s: &Skill) -> ApiResult<Value> {
 /// Room in `bot`'s switched-on skills for `entry` switched on, its body `content` when given (else
 /// as stored): `Err` when they would hold more than [`MAX_TOTAL`].
 pub(crate) fn room_for(
-    c: &Connection,
+    c: &mut impl Read,
     bot: &str,
     entry: &str,
     content: Option<usize>,
 ) -> ApiResult<()> {
     let mut total = 0;
-    for (s, on) in repo::of_bot(c, bot)? {
+    for (s, on) in Skills(c).of_bot(bot)? {
         if on && s.id != entry {
             total += s.content.len();
         }
     }
     let own = match content {
         Some(n) => n,
-        None => repo::get(c, entry)?.map_or(0, |s| s.content.len()),
+        None => Skills(c).get(entry)?.map_or(0, |s| s.content.len()),
     };
     if total + own > MAX_TOTAL {
         return Err(ApiError::rule(steve_i18n::t!(
@@ -165,8 +166,9 @@ pub(crate) fn room_for(
 
 impl Capabilities {
     pub fn skills_list(&self, ws: &str) -> ApiResult<Vec<Value>> {
-        self.vault.store().reader(|c| {
-            repo::list(c, ws)?
+        self.read(|c| {
+            Skills(c)
+                .list(ws)?
                 .iter()
                 .map(|s| out_with_users(c, s))
                 .collect()
@@ -194,16 +196,16 @@ impl Capabilities {
     }
 
     pub fn skill_update(&self, ws: &str, me: &str, sid: &str, b: SkillIn) -> ApiResult<Value> {
-        let old = self.vault.store().reader(|c| skill_of(c, ws, sid))?;
+        let old = self.read(|c| skill_of(c, ws, sid))?;
         self.skill_save(ws, me, old, b, false)
     }
 
     pub fn skill_delete(&self, ws: &str, me: &str, sid: &str) -> ApiResult<()> {
-        self.vault.store().transaction(|tx| {
+        self.vault.store().write(|tx| {
             let old = skill_of(tx, ws, sid)?;
             super::publish_users(tx, "skill", sid)?;
-            repo::delete(tx, sid)?;
-            base::audit(tx, ws, me, "skill.delete", sid, &json!({"name": old.name}))?;
+            Skills(tx).delete(sid)?;
+            tx.audit(ws, me, "skill.delete", sid, &json!({"name": old.name}))?;
             Ok(())
         })
     }
@@ -230,20 +232,20 @@ impl Capabilities {
         }
         check(&s)?;
         s.updated = now();
-        self.vault.store().transaction(|tx| {
-            if fresh && repo::list(tx, ws)?.len() >= super::MAX_LIBRARY {
+        self.vault.store().write(|tx| {
+            if fresh && Skills(tx).list(ws)?.len() >= super::MAX_LIBRARY {
                 return Err(ApiError::rule(steve_i18n::t!(
                     "modules.caps.library_full",
                     max = super::MAX_LIBRARY
                 )));
             }
-            if repo::name_taken(tx, ws, &s.name, Some(&s.id))? {
+            if Skills(tx).name_taken(ws, &s.name, Some(&s.id))? {
                 return Err(ApiError::conflict(steve_i18n::t!(
                     "modules.caps.skill_name_taken",
                     name = s.name
                 )));
             }
-            for a in steve_store::caps::of_entry(tx, "skill", &s.id)? {
+            for a in Assignments(tx).of_entry("skill", &s.id)? {
                 if super::clashes(tx, &a.bot_id, "skill", &s.id, &s.name)? {
                     return Err(ApiError::conflict(steve_i18n::t!(
                         "modules.caps.name_used",
@@ -256,12 +258,11 @@ impl Capabilities {
                 }
             }
             if fresh {
-                repo::insert(tx, &s)?;
+                Skills(tx).insert(&s)?;
             } else {
-                repo::update(tx, &s)?;
+                Skills(tx).update(&s)?;
             }
-            base::audit(
-                tx,
+            tx.audit(
                 ws,
                 me,
                 if fresh {

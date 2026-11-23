@@ -3,17 +3,17 @@
 
 use std::time::Instant;
 
-use rusqlite::Connection;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use steve_modules::{ApiError, ApiResult, Caller, Check, Modules};
-use steve_store::StoreError;
-use steve_store::base::mems::{self, Mem, MemFilter, NewMem};
-use steve_store::base::{self, Level, ObjRef, Viewer, Visibility};
+use steve_store::base::mems::{Mem, MemFilter, NewMem};
+use steve_store::base::{Level, ObjRef, Viewer, Visibility};
+use steve_store::knowledge::{Documents, Memories};
+use steve_store::{Read, References, StoreError};
 
 use crate::index;
 use crate::notes::{self, NewNote};
-use crate::repo::{self, DocFilter, DocRow, SourceRow};
+use crate::repo::{DocFilter, DocRow, SourceRow};
 use crate::retrieve::{self, Purpose, Query};
 use crate::sources;
 use crate::state::Knowledge;
@@ -34,12 +34,12 @@ fn nullable<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
 
 /// Creates the built-in sources on a workspace's first knowledge request.
 pub fn prepare(m: &Modules, who: &Caller) -> ApiResult<()> {
-    if m.store.reader(|c| sources::has_builtin(c, &who.ws))? {
+    if m.store.read(|c| sources::has_builtin(c, &who.ws))? {
         return Ok(());
     }
     let now = m.clock.now();
     m.store
-        .transaction(|tx| sources::ensure_builtin(tx, &who.ws, &who.me, now))?;
+        .write(|w| sources::ensure_builtin(w, &who.ws, &who.me, now))?;
     Ok(())
 }
 
@@ -56,9 +56,9 @@ fn ref_noun(kind: &str) -> &'static str {
 }
 
 /// Every `about` object must exist in the workspace (`404 没有这个<名词>`).
-fn check_about(c: &Connection, viewer: &Viewer, about: &[ObjRef]) -> ApiResult<()> {
+fn check_about(c: &mut impl Read, viewer: &Viewer, about: &[ObjRef]) -> ApiResult<()> {
     for a in about {
-        if !repo::ref_exists_for(c, viewer, a)? {
+        if !References(c).exists(viewer, a)? {
             return Err(ApiError::not_found(ref_noun(&a.kind)));
         }
     }
@@ -94,7 +94,7 @@ pub fn search(m: &Modules, kb: &Knowledge, who: &Caller, p: SearchParams) -> Api
         .map(|k| k.split(',').map(|s| s.trim().to_string()).collect());
     let viewer = m.viewer(who)?;
     let now = m.clock.now();
-    let found = m.store.reader(|c| {
+    let found = m.store.read(|c| {
         let kinds_ref: Option<Vec<&str>> = kinds
             .as_ref()
             .map(|v| v.iter().map(String::as_str).collect());
@@ -106,7 +106,7 @@ pub fn search(m: &Modules, kb: &Knowledge, who: &Caller, p: SearchParams) -> Api
     })?;
     let hits = found.hits;
     m.store
-        .transaction(|tx| retrieve::record_use(tx, &who.ws, ("search", &who.me), &q, &hits))?;
+        .write(|tx| retrieve::record_use(tx, &who.ws, ("search", &who.me), &q, &hits))?;
     Ok(json!({
         "hits": hits,
         "took_ms": started.elapsed().as_millis() as u64,
@@ -119,8 +119,9 @@ pub fn search(m: &Modules, kb: &Knowledge, who: &Caller, p: SearchParams) -> Api
 /// `GET /kb/sources`.
 pub fn list_sources(m: &Modules, who: &Caller) -> ApiResult<Value> {
     prepare(m, who)?;
-    Ok(m.store.reader(|c| {
-        let list = repo::sources(c, &who.ws)?
+    Ok(m.store.read(|c| {
+        let list = Documents(c)
+            .sources(&who.ws)?
             .iter()
             .map(|s| sources::source_json(c, s))
             .collect::<Result<Vec<_>, StoreError>>()?;
@@ -132,14 +133,14 @@ pub fn list_sources(m: &Modules, who: &Caller) -> ApiResult<Value> {
 
 /// `own_doc(ws, me, id)`: exists, not deleted, in the caller's workspace, visible to them.
 pub fn own_doc(
-    c: &Connection,
+    c: &mut impl Read,
     viewer: &Viewer,
     id: &str,
     noun: &str,
 ) -> ApiResult<(DocRow, SourceRow)> {
-    let found = match repo::doc(c, id)? {
+    let found = match Documents(c).doc(id)? {
         Some(d) if d.workspace_id == viewer.ws && d.status != "deleted" => {
-            repo::source(c, &d.source_id)?.map(|s| (d, s))
+            Documents(c).source(&d.source_id)?.map(|s| (d, s))
         }
         _ => None,
     };
@@ -166,7 +167,7 @@ pub fn doc_brief(d: &DocRow, s: &SourceRow) -> Value {
 }
 
 /// `Doc`: the brief plus body (notes only), about, tags, preview, uses, error.
-pub fn doc_json(c: &Connection, viewer: &Viewer, d: &DocRow, s: &SourceRow) -> ApiResult<Value> {
+pub fn doc_json(c: &mut impl Read, viewer: &Viewer, d: &DocRow, s: &SourceRow) -> ApiResult<Value> {
     let mut v = doc_json_bare(c, viewer, d, s)?;
     add_uses(c, &mut v, &d.workspace_id, &d.id)?;
     Ok(v)
@@ -174,16 +175,23 @@ pub fn doc_json(c: &Connection, viewer: &Viewer, d: &DocRow, s: &SourceRow) -> A
 
 /// `doc_json` without `uses`. Counting uses scans the retrieval log, so the write paths build
 /// this inside the transaction and add the count after commit, on a reader.
-fn doc_json_bare(c: &Connection, viewer: &Viewer, d: &DocRow, s: &SourceRow) -> ApiResult<Value> {
+fn doc_json_bare(
+    c: &mut impl Read,
+    viewer: &Viewer,
+    d: &DocRow,
+    s: &SourceRow,
+) -> ApiResult<Value> {
     let mut v = doc_brief(d, s);
-    let about = repo::doc_about(c, &d.id)?
+    let about = Documents(c)
+        .doc_about(&d.id)?
         .into_iter()
         .map(|a| {
-            let name = repo::ref_name_for(c, viewer, &a)?.unwrap_or_default();
+            let name = References(c).in_workspace(viewer, &a)?.unwrap_or_default();
             Ok(json!({"type": a.kind, "id": a.id, "name": name}))
         })
         .collect::<Result<Vec<_>, StoreError>>()?;
-    let preview: Vec<Value> = repo::doc_chunks(c, &d.id, 50)?
+    let preview: Vec<Value> = Documents(c)
+        .doc_chunks(&d.id, 50)?
         .into_iter()
         .map(|(seq, heading, text)| json!({"seq": seq, "heading": heading, "text": text}))
         .collect();
@@ -200,8 +208,8 @@ fn doc_json_bare(c: &Connection, viewer: &Viewer, d: &DocRow, s: &SourceRow) -> 
     Ok(v)
 }
 
-fn add_uses(c: &Connection, v: &mut Value, ws: &str, id: &str) -> ApiResult<()> {
-    let n = repo::uses_of(c, ws, id)?;
+fn add_uses(c: &mut impl Read, v: &mut Value, ws: &str, id: &str) -> ApiResult<()> {
+    let n = Documents(c).uses_of(ws, id)?;
     if let Some(o) = v.as_object_mut() {
         o.insert("uses".into(), json!(n));
     }
@@ -215,7 +223,7 @@ fn with_uses(m: &Modules, ws: &str, mut v: Value) -> ApiResult<Value> {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    m.store.reader(|c| add_uses(c, &mut v, ws, &id))?;
+    crate::read_api(&m.store, |c| add_uses(c, &mut v, ws, &id))?;
     Ok(v)
 }
 
@@ -243,19 +251,19 @@ pub fn list_docs(m: &Modules, who: &Caller, p: DocsParams) -> ApiResult<Value> {
     };
     prepare(m, who)?;
     let viewer = m.viewer(who)?;
-    Ok(m.store.reader(|c| {
+    Ok(m.store.read(|c| {
         let f = DocFilter {
             source: p.source.filter(|s| !s.is_empty()),
             q: p.q,
             before,
             limit,
         };
-        let docs = repo::docs_visible(c, &viewer, &f)?;
+        let docs = Documents(c).docs_visible(&viewer, &f)?;
         let mut out = Vec::with_capacity(docs.len());
         let mut cache: Vec<SourceRow> = Vec::new();
         for d in &docs {
             if !cache.iter().any(|s| s.id == d.source_id)
-                && let Some(s) = repo::source(c, &d.source_id)?
+                && let Some(s) = Documents(c).source(&d.source_id)?
             {
                 cache.push(s);
             }
@@ -270,7 +278,7 @@ pub fn list_docs(m: &Modules, who: &Caller, p: DocsParams) -> ApiResult<Value> {
 /// `GET /kb/docs/:id`.
 pub fn get_doc(m: &Modules, who: &Caller, id: &str) -> ApiResult<Value> {
     let viewer = m.viewer(who)?;
-    m.store.reader(|c| {
+    crate::read_api(&m.store, |c| {
         let (d, s) = own_doc(c, &viewer, id, NOUN_DOC)?;
         doc_json(c, &viewer, &d, &s)
     })
@@ -287,33 +295,26 @@ pub struct DocPatch {
 }
 
 /// `PATCH /kb/docs/:id`: own scope (`null` = follow the source again) and `about`.
-pub fn patch_doc(
-    m: &Modules,
-    kb: &Knowledge,
-    who: &Caller,
-    id: &str,
-    b: DocPatch,
-) -> ApiResult<Value> {
+pub fn patch_doc(m: &Modules, who: &Caller, id: &str, b: DocPatch) -> ApiResult<Value> {
     Check::new()
         .that("about", b.about.as_ref().is_none_or(|a| a.len() <= 20))
         .done()?;
     let viewer = m.viewer(who)?;
     let now = m.clock.now();
-    let out = m.store.transaction(|tx| {
+    let out = m.store.write(|tx| {
         let (d, s) = own_doc(tx, &viewer, id, NOUN_DOC)?;
         if let Some(about) = &b.about {
             check_about(tx, &viewer, about)?;
-            repo::set_doc_about(tx, &who.ws, &d.id, about)?;
+            Documents(tx).set_doc_about(&who.ws, &d.id, about)?;
         }
         let vis = b.visibility.clone().unwrap_or(d.visibility.clone());
         let level = b.level.unwrap_or(d.level);
         if vis != d.visibility || level != d.level {
-            repo::set_doc_scope(tx, &d.id, vis.as_ref(), level, now)?;
+            Documents(tx).set_doc_scope(&d.id, vis.as_ref(), level, now)?;
             let eff_vis = vis.clone().unwrap_or_else(|| s.visibility.clone());
             index::rescope(tx, "chunk", &d.id, &eff_vis, level.unwrap_or(s.level))?;
         }
-        base::audit(
-            tx,
+        tx.audit(
             &who.ws,
             &who.me,
             "kb_doc.patch",
@@ -321,25 +322,28 @@ pub fn patch_doc(
             &json!({"visibility": vis, "level": level, "about": b.about.as_ref().map(Vec::len)}),
         )?;
         let (d, s) = own_doc_any(tx, &d.id)?;
+        crate::state::emit_change(tx, &who.ws, &d.id);
         doc_json_bare(tx, &viewer, &d, &s)
     })?;
-    let out = with_uses(m, &who.ws, out)?;
-    kb.notify(&who.ws, id);
-    Ok(out)
+    with_uses(m, &who.ws, out)
 }
 
 /// The row again after a write, without the visibility check (the caller may have narrowed it).
-fn own_doc_any(c: &Connection, id: &str) -> ApiResult<(DocRow, SourceRow)> {
-    let d = repo::doc(c, id)?.ok_or_else(|| ApiError::not_found(NOUN_DOC))?;
-    let s = repo::source(c, &d.source_id)?.ok_or_else(|| ApiError::not_found(NOUN_DOC))?;
+fn own_doc_any(c: &mut impl Read, id: &str) -> ApiResult<(DocRow, SourceRow)> {
+    let d = Documents(c)
+        .doc(id)?
+        .ok_or_else(|| ApiError::not_found(NOUN_DOC))?;
+    let s = Documents(c)
+        .source(&d.source_id)?
+        .ok_or_else(|| ApiError::not_found(NOUN_DOC))?;
     Ok((d, s))
 }
 
 /// `DELETE /kb/docs/:id`: notes are deleted, files leave the knowledge base; folder, item and chat
 /// documents follow their origin and cannot be deleted here.
-pub fn delete_doc(m: &Modules, kb: &Knowledge, who: &Caller, id: &str) -> ApiResult<Value> {
+pub fn delete_doc(m: &Modules, who: &Caller, id: &str) -> ApiResult<Value> {
     let viewer = m.viewer(who)?;
-    m.store.transaction(|tx| {
+    m.store.write(|tx| {
         let (d, s) = own_doc(tx, &viewer, id, NOUN_DOC)?;
         match s.kind.as_str() {
             "notes" | "files" => {}
@@ -362,10 +366,10 @@ pub fn delete_doc(m: &Modules, kb: &Knowledge, who: &Caller, id: &str) -> ApiRes
         } else {
             "kb_doc.remove"
         };
-        base::audit(tx, &who.ws, &who.me, action, &d.id, &json!({}))?;
+        tx.audit(&who.ws, &who.me, action, &d.id, &json!({}))?;
+        crate::state::emit_change(tx, &who.ws, id);
         Ok::<_, ApiError>(())
     })?;
-    kb.notify(&who.ws, id);
     Ok(json!({"ok": true}))
 }
 
@@ -385,7 +389,7 @@ pub struct NoteBody {
 }
 
 /// `POST /kb/notes`.
-pub fn create_note(m: &Modules, kb: &Knowledge, who: &Caller, b: NoteBody) -> ApiResult<Value> {
+pub fn create_note(m: &Modules, who: &Caller, b: NoteBody) -> ApiResult<Value> {
     Check::new()
         .len("title", b.title.trim(), 1, 120)
         .len("body", &b.body, 0, 200_000)
@@ -393,7 +397,7 @@ pub fn create_note(m: &Modules, kb: &Knowledge, who: &Caller, b: NoteBody) -> Ap
         .done()?;
     let viewer = m.viewer(who)?;
     let now = m.clock.now();
-    let out = m.store.transaction(|tx| {
+    let out = m.store.write(|tx| {
         check_about(tx, &viewer, &b.about)?;
         let id = notes::create(
             tx,
@@ -409,13 +413,10 @@ pub fn create_note(m: &Modules, kb: &Knowledge, who: &Caller, b: NoteBody) -> Ap
             now,
         )?;
         let (d, s) = own_doc_any(tx, &id)?;
+        crate::state::emit_change(tx, &who.ws, &d.id);
         doc_json_bare(tx, &viewer, &d, &s)
     })?;
-    let out = with_uses(m, &who.ws, out)?;
-    if let Some(id) = out.get("id").and_then(Value::as_str) {
-        kb.notify(&who.ws, id);
-    }
-    Ok(out)
+    with_uses(m, &who.ws, out)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -427,13 +428,7 @@ pub struct NotePut {
 }
 
 /// `PUT /kb/notes/:id`.
-pub fn update_note(
-    m: &Modules,
-    kb: &Knowledge,
-    who: &Caller,
-    id: &str,
-    b: NotePut,
-) -> ApiResult<Value> {
+pub fn update_note(m: &Modules, who: &Caller, id: &str, b: NotePut) -> ApiResult<Value> {
     let title = b.title.as_deref().map(str::trim);
     Check::new()
         .opt_len("title", title, 1, 120)
@@ -441,18 +436,17 @@ pub fn update_note(
         .done()?;
     let viewer = m.viewer(who)?;
     let now = m.clock.now();
-    let out = m.store.transaction(|tx| {
+    let out = m.store.write(|tx| {
         let (d, s) = own_doc(tx, &viewer, id, NOUN_NOTE)?;
         if s.kind != "notes" {
             return Err(ApiError::not_found(NOUN_NOTE));
         }
         notes::update(tx, &d, &who.me, title, b.body.as_deref(), now)?;
         let (d, s) = own_doc_any(tx, id)?;
+        crate::state::emit_change(tx, &who.ws, &d.id);
         doc_json_bare(tx, &viewer, &d, &s)
     })?;
-    let out = with_uses(m, &who.ws, out)?;
-    kb.notify(&who.ws, id);
-    Ok(out)
+    with_uses(m, &who.ws, out)
 }
 
 // ---- memories
@@ -460,23 +454,23 @@ pub fn update_note(
 /// `Mem`, with `source_type`, the name of every `about` object (like `Doc.about`; an unknown object
 /// has an empty name) and `origin`: where it came from, with a link ([`crate::provenance::origin`]). A fixed stored `source_label`
 /// (“你写的”) comes in the request's language.
-pub fn mem_json(c: &Connection, m: &Mem) -> Value {
+pub fn mem_json(c: &mut impl Read, m: &Mem) -> Value {
     mem_json_with(c, None, m)
 }
 
 /// Display historical/shared references with the reader's source visibility, not the writer's.
-pub fn mem_json_for(c: &Connection, viewer: &Viewer, m: &Mem) -> Value {
+pub fn mem_json_for(c: &mut impl Read, viewer: &Viewer, m: &Mem) -> Value {
     mem_json_with(c, Some(viewer), m)
 }
 
-fn mem_json_with(c: &Connection, viewer: Option<&Viewer>, m: &Mem) -> Value {
+fn mem_json_with(c: &mut impl Read, viewer: Option<&Viewer>, m: &Mem) -> Value {
     let about: Vec<Value> = m
         .about
         .iter()
         .map(|a| {
             let name = match viewer {
-                Some(v) => repo::ref_name_for(c, v, a),
-                None => repo::ref_name(c, a),
+                Some(v) => References(c).in_workspace(v, a),
+                None => References(c).name(a),
             }
             .ok()
             .flatten()
@@ -511,12 +505,12 @@ pub fn list_mems(m: &Modules, who: &Caller, p: MemsParams) -> ApiResult<Value> {
         include_never: true,
         limit: 0,
     };
-    let (list, names) = m.store.reader(|c| {
+    let (list, names) = m.store.read(|c| {
         let list = match (&p.about_type, &p.about_id) {
             (Some(t), Some(i)) if !t.is_empty() && !i.is_empty() => {
-                mems::about(c, &viewer, &ObjRef::new(t, i), &f)?
+                Memories(c).about(&viewer, &ObjRef::new(t, i), &f)?
             }
-            _ => mems::all(c, &viewer, &f)?,
+            _ => Memories(c).all(&viewer, &f)?,
         };
         let used = crate::provenance::use_counts(c, &who.ws, "mem")?;
         let shown: Vec<Value> = list
@@ -575,10 +569,9 @@ pub fn create_mem(m: &Modules, who: &Caller, b: MemBody) -> ApiResult<Value> {
     prepare(m, who)?;
     let viewer = m.viewer(who)?;
     let now = m.clock.now();
-    let mem = m.store.transaction(|tx| {
+    let mem = m.store.write(|tx| {
         check_about(tx, &viewer, &b.about)?;
-        let mem = mems::create(
-            tx,
+        let mem = Memories(tx).create(
             &who.ws,
             &NewMem {
                 kind,
@@ -594,8 +587,7 @@ pub fn create_mem(m: &Modules, who: &Caller, b: MemBody) -> ApiResult<Value> {
             },
         )?;
         sync::sync_mem(tx, &mem.id, now)?;
-        base::audit(
-            tx,
+        tx.audit(
             &who.ws,
             &who.me,
             "mem.create",
@@ -605,5 +597,5 @@ pub fn create_mem(m: &Modules, who: &Caller, b: MemBody) -> ApiResult<Value> {
         Ok::<_, ApiError>(mem)
     })?;
     Ok(m.store
-        .reader(|c| Ok::<_, StoreError>(mem_json_for(c, &viewer, &mem)))?)
+        .read(|c| Ok::<_, StoreError>(mem_json_for(c, &viewer, &mem)))?)
 }

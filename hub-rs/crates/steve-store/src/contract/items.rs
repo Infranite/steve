@@ -318,3 +318,19 @@ pub fn set_closed_plan(w: &mut W<'_>, item: &str, plan: Vec<crate::PlanStep>) ->
     )?;
     Ok(())
 }
+
+pub(crate) fn progress_of_open_items(r: &mut impl Read) -> Result<Vec<(String, String, String)>> {
+    r.all(
+        Query::select()
+            .columns(["workspace_id", "id", "now"])
+            .from("items")
+            .and_where(Expr::col("status").is_not_in(["done", "drop"])),
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get::<Option<String>>(2)?.unwrap_or_default(),
+            ))
+        },
+    )
+}

@@ -88,8 +88,8 @@ impl Channels {
     async fn guard(&self, plan: &Plan) -> Guard {
         let context = self
             .store()
-            .reader(|c| {
-                crate::messages::context_before(c, &plan.space_id, &plan.message_id, GUARD_CONTEXT)
+            .read(|r| {
+                crate::messages::context_before(r, &plan.space_id, &plan.message_id, GUARD_CONTEXT)
             })
             .unwrap_or_default();
         let mut p = String::from(GUARD);
@@ -124,7 +124,12 @@ impl Channels {
     async fn decline(&self, plan: &Plan, guard: &Guard) -> ChannelResult<crate::respond::Response> {
         let owner = self
             .store()
-            .reader(|c| crate::personas::owner_name_for_space(c, &plan.ws, &plan.space_id))
+            .read::<_, steve_store::StoreError>(|r| {
+                Ok(self.store().reader(|c| {
+                    crate::personas::owner_name_for_space(c, r, &plan.ws, &plan.space_id)
+                }))
+            })
+            .unwrap_or_else(|e| Err(e.into()))
             .unwrap_or_default();
         let owner = if owner.trim().is_empty() {
             "我".to_string()

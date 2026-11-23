@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use steve_store::Store;
 use steve_store::base::Viewer;
 
 use crate::conversations::{MAIN_CONV, NO_REPLY, conv_space, out_state, shown_space};
@@ -386,6 +387,7 @@ fn event_of(c: &Connection, ws: &str, id: &str) -> ChannelResult<Option<Event>> 
 /// `handling` of received message `m`: `{state, label, reason, error, item, decision, main_turn}`;
 /// `decision` is an open one waiting for you, `main_turn` its turn in your web conversation.
 fn received(
+    r: &mut impl steve_store::Read,
     c: &Connection,
     ws: &str,
     m: &messages::ChanMessage,
@@ -395,7 +397,7 @@ fn received(
         Some(e) => event_of(c, ws, e)?,
         None => None,
     };
-    let reaction = crate::reactions::get(c, &m.id)?;
+    let reaction = steve_store::channel_message_repo::reactions::get(r, &m.id)?;
     let main_turn = t.main_turn_of.get(&m.id);
     let turn = t.turn_of.get(&m.id).or(main_turn);
     // The turn/outbound relation is persisted even when reactions fail or a draft is held. A
@@ -475,56 +477,60 @@ fn received(
 /// `GET /conversations/:space/record`: a page of the space's record, oldest first, and the cursor of
 /// the page before it (`next`, `null` at the start).
 pub fn record(
-    c: &Connection,
+    store: &Store,
     ws: &str,
     viewer: &Viewer,
     conv: &str,
     q: &RecordQuery,
 ) -> ChannelResult<Value> {
-    let space = shown_space(c, ws, viewer, conv)?;
-    let limit = q.limit.unwrap_or(RECORD_PAGE);
-    if !(1..=RECORD_MAX).contains(&limit) {
-        return Err(steve_modules::ApiError::invalid("limit"));
-    }
-    let cursor = match (q.before, q.before_id.as_deref()) {
-        (Some(at), Some(id)) => Some((at, id)),
-        (None, None) => None,
-        _ => return Err(steve_modules::ApiError::invalid("before")),
-    };
-    let mut page = messages::page_before(c, space, &viewer.user, cursor, limit + 1)?;
-    let has_more = page.len() > limit;
-    page.truncate(limit);
-    page.reverse();
-    let t = turns(c, ws, space)?;
-    let mut out = Vec::with_capacity(page.len());
-    for m in &page {
-        let mut v = serde_json::to_value(m).map_err(steve_modules::ApiError::from)?;
-        if m.direction == "in" {
-            v["turn"] = json!(t.turn_of.get(&m.id));
-            v["handling"] = received(c, ws, m, &t)?;
-        } else {
-            v["turn"] = json!(t.said_by.get(&m.id));
-            let (status, mut decision) =
-                out_state(c, ws, &m.id)?.unwrap_or_else(|| (m.status.clone(), None));
-            let error = if matches!(status.as_str(), "failed" | "blocked" | "unknown") {
-                if decision.is_none() {
-                    decision = open_fail(c, ws, &m.id)?;
+    store.read(|r| {
+        store.reader(|c| {
+            let space = shown_space(c, ws, viewer, conv)?;
+            let limit = q.limit.unwrap_or(RECORD_PAGE);
+            if !(1..=RECORD_MAX).contains(&limit) {
+                return Err(steve_modules::ApiError::invalid("limit"));
+            }
+            let cursor = match (q.before, q.before_id.as_deref()) {
+                (Some(at), Some(id)) => Some((at, id)),
+                (None, None) => None,
+                _ => return Err(steve_modules::ApiError::invalid("before")),
+            };
+            let mut page = messages::page_before(store, space, &viewer.user, cursor, limit + 1)?;
+            let has_more = page.len() > limit;
+            page.truncate(limit);
+            page.reverse();
+            let t = turns(c, ws, space)?;
+            let mut out = Vec::with_capacity(page.len());
+            for m in &page {
+                let mut v = serde_json::to_value(m).map_err(steve_modules::ApiError::from)?;
+                if m.direction == "in" {
+                    v["turn"] = json!(t.turn_of.get(&m.id));
+                    v["handling"] = received(r, c, ws, m, &t)?;
+                } else {
+                    v["turn"] = json!(t.said_by.get(&m.id));
+                    let (status, mut decision) =
+                        out_state(c, ws, &m.id)?.unwrap_or_else(|| (m.status.clone(), None));
+                    let error = if matches!(status.as_str(), "failed" | "blocked" | "unknown") {
+                        if decision.is_none() {
+                            decision = open_fail(c, ws, &m.id)?;
+                        }
+                        out_error(c, ws, &m.id)?
+                    } else {
+                        None
+                    };
+                    v["out"] = json!({"status": status, "decision": decision, "error": error});
                 }
-                out_error(c, ws, &m.id)?
+                out.push(v);
+            }
+            let next = if has_more {
+                page.first()
+                    .map(|m| json!({"before": m.created, "before_id": m.id}))
             } else {
                 None
             };
-            v["out"] = json!({"status": status, "decision": decision, "error": error});
-        }
-        out.push(v);
-    }
-    let next = if has_more {
-        page.first()
-            .map(|m| json!({"before": m.created, "before_id": m.id}))
-    } else {
-        None
-    };
-    Ok(json!({"records": out, "has_more": has_more, "next": next}))
+            Ok(json!({"records": out, "has_more": has_more, "next": next}))
+        })
+    })
 }
 
 /// `POST /conversations/:space/read`: the viewer was shown the conversation up to `at` (never

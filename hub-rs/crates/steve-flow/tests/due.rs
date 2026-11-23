@@ -1,7 +1,6 @@
 //! The four real table-backed sources share the runtime contract. Terminal invalid state maps to
 //! the domain's existing disabled trigger, failed run, or cancelled alarm, rather than a new queue.
 use async_trait::async_trait;
-use rusqlite::{Connection, params};
 use serde_json::json;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -20,6 +19,8 @@ use steve_runtime::due::{
     contract::{Fixture, check},
     due_loop,
 };
+use steve_store::testkit::flow::{due as fixtures, signal_settlement};
+use steve_store::{Alarms as AlarmRows, FlowRows, RunRows};
 
 const NOW: i64 = 1_794_963_600_000;
 const DAY: i64 = 86_400_000;
@@ -37,13 +38,19 @@ impl AlarmSource for AlarmLines {
     fn family(&self) -> &'static str {
         "contract"
     }
-    fn plan(&self, _: &Connection, _: &str, id: &str, _: i64) -> FlowResult<Vec<Want>> {
+    fn plan(&self, _: &mut steve_store::W<'_>, _: &str, id: &str, _: i64) -> FlowResult<Vec<Want>> {
         if id == "source_error" {
             return Err(ApiError::Internal("planner unavailable".into()));
         }
         Ok(vec![])
     }
-    fn line(&self, _: &Connection, _: &str, id: &str, _: &str) -> FlowResult<Option<AlarmLine>> {
+    fn line(
+        &self,
+        _: &mut steve_store::W<'_>,
+        _: &str,
+        id: &str,
+        _: &str,
+    ) -> FlowResult<Option<AlarmLine>> {
         if id.starts_with("poison") {
             return Err(ApiError::rule("invalid subject"));
         }
@@ -61,27 +68,18 @@ fn environment() -> (TestEnv, Arc<FlowCx>) {
 }
 fn environment_for(exec: Arc<dyn RunExecutor>) -> (TestEnv, Arc<FlowCx>) {
     let core = Arc::new(FakeCore::default());
-    let fault_store = Arc::new(std::sync::OnceLock::new());
     let setup = FlowSetup::new(core.clone())
         .alarm_source(Arc::new(AlarmLines))
-        .alarm_source(Arc::new(Faults {
-            store: fault_store.clone(),
-        }));
+        .alarm_source(Arc::new(Faults));
     let env = TestEnv::new(|r| setup.register(r));
     env.clock.set(NOW);
     *core.store.lock().unwrap() = Some(env.store().clone());
-    env.store().with_conn(|c| {c.execute_batch("CREATE TABLE claim_faults(kind TEXT PRIMARY KEY); INSERT INTO claim_faults VALUES('plan'),('line');")?;Ok(())}).unwrap();
-    fault_store.set(env.store().clone()).ok().unwrap();
+    fixtures::seed_claim_faults(env.store()).unwrap();
     let cx = setup.build(env.modules.clone(), exec);
     (env, cx)
 }
 
-#[derive(Clone, Copy)]
-enum Kind {
-    Trigger,
-    Wait,
-    Retry,
-}
+use fixtures::DueKind as Kind;
 enum Inner {
     Trigger(Triggers),
     Wait(Waits),
@@ -151,22 +149,7 @@ impl Runs {
         }
     }
     fn state(&self, id: &str, done: bool) -> bool {
-        self.env
-            .store()
-            .reader(|c| {
-                let sql = match (self.kind, done) {
-                    (Kind::Trigger, true) => {
-                        "SELECT EXISTS(SELECT 1 FROM flow_runs WHERE flow_id=?1)"
-                    }
-                    (Kind::Trigger, false) => "SELECT enabled=0 FROM flow_triggers WHERE id=?1",
-                    (_, true) => {
-                        "SELECT status='running' AND retry_at IS NULL FROM flow_runs WHERE id=?1"
-                    }
-                    (_, false) => "SELECT status='failed' FROM flow_runs WHERE id=?1",
-                };
-                Ok::<_, steve_store::StoreError>(c.query_row(sql, [id], |r| r.get(0))?)
-            })
-            .unwrap()
+        fixtures::due_row_state(self.env.store(), self.kind, id, done).unwrap()
     }
     fn ids(&self, done: bool) -> Vec<String> {
         self.rows
@@ -189,23 +172,7 @@ impl Fixture for Runs {
     fn add(&self, at: i64, poison: bool) -> String {
         let mut rows = self.rows.lock().unwrap();
         let id = format!("{}{}", if poison { "poison" } else { "ok" }, rows.len());
-        self.env.store().transaction(|tx| -> FlowResult<()> {
-            let graph = json!({"nodes":[{"id":"t","kind":"trigger","config":{"source":"time","cron":"0 0 * * *","tz":"UTC"}}],"edges":[]});
-            tx.execute("INSERT INTO flows(id,workspace_id,name,kind,enabled,version,graph,origin,schedule,created_by,created,updated) VALUES(?1,?2,?1,'schedule',1,1,?3,'me','{\"overlap\":\"run\"}',?4,1,1)", params![id, WS, graph.to_string(), ME])?;
-            match self.kind {
-                Kind::Trigger => {
-                    let cron = if poison { "invalid" } else { "0 0 * * *" };
-                    tx.execute("INSERT INTO flow_triggers(id,workspace_id,flow_id,node_id,kind,cron,tz,next_at,missed,enabled) VALUES(?1,?2,?1,'t','time',?3,'UTC',?4,'catch_up_once',1)", params![id, WS, cron, at])?;
-                }
-                Kind::Wait | Kind::Retry => {
-                    tx.execute("INSERT INTO flow_runs(id,workspace_id,flow_id,flow_version,trigger_kind,status,cursor,context,retry_at,attempts,started) VALUES(?1,?2,?1,1,'manual','waiting',?3,'{}',?4,?5,1)", params![id, WS, if poison { "wrong" } else { "w" }, if matches!(self.kind,Kind::Retry) { Some(at) } else { None }, if poison { 2 } else { 1 }])?;
-                    if matches!(self.kind,Kind::Wait) {
-                        tx.execute("INSERT INTO flow_waits(run_id,node_id,workspace_id,mode,until,created) VALUES(?1,'w',?2,'delay',?3,1)", params![id, WS, at])?;
-                    }
-                }
-            }
-            Ok(())
-        }).unwrap();
+        fixtures::seed_due_row(self.env.store(), self.kind, WS, ME, &id, at, poison).unwrap();
         rows.push((id.clone(), poison));
         id
     }
@@ -242,16 +209,7 @@ impl Alarms {
         }
     }
     fn ids(&self, state: &str) -> Vec<String> {
-        self.env
-            .store()
-            .reader(|c| {
-                let mut q = c.prepare("SELECT id FROM time_alarms WHERE state=? ORDER BY id")?;
-                Ok::<_, steve_store::StoreError>(
-                    q.query_map([state], |r| r.get(0))?
-                        .collect::<Result<Vec<_>, _>>()?,
-                )
-            })
-            .unwrap()
+        fixtures::alarm_ids(self.env.store(), state).unwrap()
     }
 }
 impl Fixture for Alarms {
@@ -265,9 +223,7 @@ impl Fixture for Alarms {
     fn add(&self, at: i64, poison: bool) -> String {
         let mut rows = self.rows.lock().unwrap();
         let id = format!("{}{}", if poison { "poison" } else { "ok" }, rows.len());
-        self.env.store().transaction(|tx|->FlowResult<()> {
-            tx.execute("INSERT INTO time_alarms(id,workspace_id,owner_user,kind,subject,planned_for,fire_at,created,updated) VALUES(?1,?2,?3,'todo',?4,?5,?5,1,1)",params![id,WS,ME,format!("contract:{id}"),at])?;Ok(())
-        }).unwrap();
+        fixtures::seed_due_alarm(self.env.store(), WS, ME, &id, at).unwrap();
         rows.push(id.clone());
         id
     }
@@ -301,30 +257,14 @@ async fn held_alarms_do_not_take_the_due_batch_limit_and_staleness_still_expires
     let f = Alarms::new();
     for _ in 0..steve_flow::alarms::BATCH + 10 {
         let id = f.add(NOW - 1, false);
-        f.env
-            .store()
-            .with_conn(|c| {
-                Ok(c.execute(
-                    "UPDATE time_alarms SET hold_until=?2 WHERE id=?1",
-                    params![id, NOW + DAY],
-                )?)
-            })
-            .unwrap();
+        fixtures::hold_due_alarm(f.env.store(), &id, NOW + DAY).unwrap();
     }
     let due = f.add(NOW, false);
     f.source.run_due(NOW).await.unwrap();
     assert_eq!(f.done(), vec![due]);
     assert_eq!(f.source.next_due().await.unwrap(), Some(NOW + DAY));
     let stale = f.rows.lock().unwrap()[0].clone();
-    f.env
-        .store()
-        .with_conn(|c| {
-            Ok(c.execute(
-                "UPDATE time_alarms SET stale_at=?2 WHERE id=?1",
-                params![stale, NOW + 1],
-            )?)
-        })
-        .unwrap();
+    fixtures::expire_due_alarm(f.env.store(), &stale, NOW + 1).unwrap();
     assert_eq!(f.source.next_due().await.unwrap(), Some(NOW + 1));
     f.source.run_due(NOW + 1).await.unwrap();
     assert_eq!(f.ids("stale"), vec![stale]);
@@ -396,9 +336,14 @@ impl AlarmSource for TodoSource {
     fn family(&self) -> &'static str {
         "todo"
     }
-    fn plan(&self, c: &Connection, ws: &str, id: &str, _: i64) -> FlowResult<Vec<Want>> {
-        use rusqlite::OptionalExtension;
-        let row:Option<(String,i64)>=c.query_row("SELECT owner,remind_at FROM todos WHERE workspace_id=?1 AND id=?2 AND state='open' AND remind_at IS NOT NULL",params![ws,id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+    fn plan(
+        &self,
+        c: &mut steve_store::W<'_>,
+        ws: &str,
+        id: &str,
+        _: i64,
+    ) -> FlowResult<Vec<Want>> {
+        let row = fixtures::todo_reminder(c, ws, id)?;
         Ok(row
             .into_iter()
             .map(|(owner, at)| Want {
@@ -410,7 +355,13 @@ impl AlarmSource for TodoSource {
             })
             .collect())
     }
-    fn line(&self, _: &Connection, _: &str, id: &str, _: &str) -> FlowResult<Option<AlarmLine>> {
+    fn line(
+        &self,
+        _: &mut steve_store::W<'_>,
+        _: &str,
+        id: &str,
+        _: &str,
+    ) -> FlowResult<Option<AlarmLine>> {
         Ok(Some(AlarmLine {
             subject: format!("todo:{id}"),
             text: id.into(),
@@ -421,7 +372,11 @@ impl AlarmSource for TodoSource {
     }
 }
 fn planned(env: &TestEnv, at: i64) -> bool {
-    env.store().reader(|c| Ok::<_,steve_store::StoreError>(c.query_row("SELECT EXISTS(SELECT 1 FROM time_alarms WHERE subject='todo:change' AND state='planned' AND fire_at=?)",[at],|r|r.get(0))?)).unwrap()
+    env.store()
+        .read(|r| AlarmRows(r).of_subject(WS, "todo:change"))
+        .unwrap()
+        .into_iter()
+        .any(|a| a.fire_at == at && a.state == "planned")
 }
 #[tokio::test]
 async fn committed_todo_changes_replan_within_one_second_without_advancing_the_clock() {
@@ -433,10 +388,7 @@ async fn committed_todo_changes_replan_within_one_second_without_advancing_the_c
     let task = steve_runtime::spawn("flow.alarms", AlarmClock::new(cx).run());
     until(|| env.clock.observed(NOW)).await;
     for at in [NOW + DAY, NOW + DAY + 37] {
-        env.store().transaction(|t|->FlowResult<()> {
-            t.execute("INSERT INTO todos(id,workspace_id,owner,text,state,source,writer,created,updated,remind_at) VALUES('change',?1,?2,'remind','open','you',?2,?3,?3,?4) ON CONFLICT(id) DO UPDATE SET remind_at=?4,updated=?3",params![WS,ME,NOW,at])?;
-            Ok(())
-        }).unwrap();
+        fixtures::set_todo_reminder(env.store(), WS, ME, NOW, at).unwrap();
         until(|| planned(&env, at)).await;
         assert!(
             env.clock.now() - NOW < 1_000,
@@ -456,28 +408,20 @@ async fn committed_policy_or_timezone_changes_recheck_existing_holds_immediately
     for table in ["notification_policies", "settings"] {
         let f = Alarms::new();
         let id = f.add(NOW, false);
-        f.env
-            .store()
-            .with_conn(|c| {
-                Ok(c.execute(
-                    "UPDATE time_alarms SET hold_until=?1,updated=?2 WHERE id=?3",
-                    params![NOW + DAY, NOW, id],
-                )?)
-            })
-            .unwrap();
+        fixtures::hold_due_alarm_with_timestamp(f.env.store(), &id, NOW + DAY, NOW).unwrap();
         let task = steve_runtime::spawn("flow.alarms", AlarmClock::new(f.cx.clone()).run());
         until(|| f.env.clock.observed(NOW)).await;
         assert!(f.done().is_empty());
         // No DomainEvent and no manual Notify; equal updated timestamps deliberately
         // cannot satisfy CHANGED_POLICY's greater-than fallback predicate.
-        f.env.store().transaction(|tx| -> FlowResult<()> {
-            if table == "notification_policies" {
-                tx.execute("INSERT INTO notification_policies(workspace_id,user_id,enabled,mode,timezone,consented_at,consent_since_seq,updated) VALUES(?1,?2,0,'now','UTC',1,0,?3)", params![WS,ME,NOW])?;
-            } else {
-                tx.execute("INSERT INTO settings(workspace_id,key,value,updated) VALUES(?1,'tz','\"UTC\"',?2) ON CONFLICT(workspace_id,key) DO UPDATE SET value=excluded.value,updated=excluded.updated", params![WS,NOW])?;
-            }
-            Ok(())
-        }).unwrap();
+        fixtures::change_alarm_policy_or_timezone(
+            f.env.store(),
+            WS,
+            ME,
+            NOW,
+            table == "notification_policies",
+        )
+        .unwrap();
         until(|| f.done().contains(&id)).await;
         assert_eq!(
             f.env.clock.now(),
@@ -493,21 +437,11 @@ async fn committed_policy_or_timezone_changes_recheck_existing_holds_immediately
 async fn a_missed_policy_wake_is_found_by_the_sixty_second_fallback() {
     let f = Alarms::new();
     let id = f.add(NOW, false);
-    f.env
-        .store()
-        .with_conn(|c| {
-            Ok(c.execute(
-                "UPDATE time_alarms SET hold_until=? WHERE id=?",
-                params![NOW + DAY, id],
-            )?)
-        })
-        .unwrap();
+    fixtures::hold_due_alarm(f.env.store(), &id, NOW + DAY).unwrap();
     let task = steve_runtime::spawn("flow.alarms", AlarmClock::new(f.cx.clone()).run());
     until(|| f.env.clock.observed(NOW)).await;
     // An independent Store connection has no in-process subscription. The old hold is a day away.
-    let external = rusqlite::Connection::open(f.env.store().path()).unwrap();
-    external.execute(
-        "INSERT INTO notification_policies(workspace_id,user_id,enabled,mode,timezone,consented_at,consent_since_seq,updated) VALUES(?1,?2,0,'now','UTC',1,0,?3)",params![WS,ME,NOW+1]).unwrap();
+    fixtures::disable_notifications_outside_store(f.env.store(), WS, ME, NOW + 1).unwrap();
     f.env
         .clock
         .advance(steve_runtime::due::FALLBACK.as_millis() as i64);
@@ -521,8 +455,10 @@ async fn a_missed_policy_wake_is_found_by_the_sixty_second_fallback() {
 async fn one_planning_source_error_does_not_rollback_healthy_fired_alarms() {
     let f = Alarms::new();
     let id = f.add(NOW, false);
-    f.env.store().with_conn(|c|Ok(c.execute(
-        "INSERT INTO time_alarm_dirty(workspace_id,subject) VALUES(?,'contract:source_error')",[WS])?)).unwrap();
+    f.env
+        .store()
+        .write(|w| AlarmRows(w).mark(WS, "contract:source_error"))
+        .unwrap();
     f.source.run_due(NOW).await.unwrap();
     assert_eq!(
         f.source.next_due().await.unwrap(),
@@ -533,15 +469,7 @@ async fn one_planning_source_error_does_not_rollback_healthy_fired_alarms() {
         f.done().contains(&id),
         "the healthy event and fired state committed"
     );
-    f.env
-        .store()
-        .with_conn(|c| {
-            Ok(c.execute(
-                "DELETE FROM time_alarm_dirty WHERE subject='contract:source_error'",
-                [],
-            )?)
-        })
-        .unwrap();
+    fixtures::clear_failed_alarm_request(f.env.store()).unwrap();
     f.source.run_due(NOW).await.unwrap();
     assert_eq!(
         f.source.next_due().await.unwrap(),
@@ -550,21 +478,17 @@ async fn one_planning_source_error_does_not_rollback_healthy_fired_alarms() {
     );
 }
 
-struct Faults {
-    store: Arc<std::sync::OnceLock<steve_store::Store>>,
-}
+struct Faults;
+
 impl Faults {
-    fn fail(&self, c: &Connection, kind: &str) -> FlowResult<()> {
-        c.execute("INSERT INTO claim_leaks(kind) VALUES(?)", [kind])?;
-        self.store
-            .get()
-            .unwrap()
-            .publish(steve_types::DomainEvent::from(
-                steve_types::AutomationEvent::Signal {
-                    id: "row-leak".into(),
-                    ws: WS.into(),
-                },
-            ));
+    fn fail(&self, w: &mut steve_store::W<'_>, kind: &str) -> FlowResult<()> {
+        fixtures::record_claim_leak(w, kind)?;
+        w.emit(steve_types::DomainEvent::from(
+            steve_types::AutomationEvent::Signal {
+                id: "row-leak".into(),
+                ws: WS.into(),
+            },
+        ));
         Err(ApiError::Internal(format!("persistent {kind} failure")))
     }
 }
@@ -572,27 +496,29 @@ impl AlarmSource for Faults {
     fn family(&self) -> &'static str {
         "todo"
     }
-    fn plan(&self, c: &Connection, ws: &str, id: &str, now: i64) -> FlowResult<Vec<Want>> {
+    fn plan(
+        &self,
+        c: &mut steve_store::W<'_>,
+        ws: &str,
+        id: &str,
+        now: i64,
+    ) -> FlowResult<Vec<Want>> {
         if id == "plan" {
-            if c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM claim_faults WHERE kind='plan')",
-                [],
-                |r| r.get::<_, bool>(0),
-            )? {
+            if fixtures::claim_fault(c, "plan")? {
                 self.fail(c, "plan")?;
             }
             return TodoSource.plan(c, ws, id, now);
         }
         Ok(vec![])
     }
-    fn line(&self, c: &Connection, _: &str, id: &str, _: &str) -> FlowResult<Option<AlarmLine>> {
-        if id == "line"
-            && c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM claim_faults WHERE kind='line')",
-                [],
-                |r| r.get::<_, bool>(0),
-            )?
-        {
+    fn line(
+        &self,
+        c: &mut steve_store::W<'_>,
+        _: &str,
+        id: &str,
+        _: &str,
+    ) -> FlowResult<Option<AlarmLine>> {
+        if id == "line" && fixtures::claim_fault(c, "line")? {
             self.fail(c, "line")?;
         }
         Ok(Some(AlarmLine {
@@ -605,16 +531,7 @@ impl AlarmSource for Faults {
     }
 }
 fn no_leaks(env: &TestEnv) {
-    assert_eq!(
-        env.store()
-            .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(
-                "SELECT count(*) FROM claim_leaks",
-                [],
-                |r| r.get::<_, i64>(0)
-            )?))
-            .unwrap(),
-        0
-    );
+    assert_eq!(fixtures::claim_leaks(env.store()).unwrap(), 0);
     assert!(!env.take_events().iter().any(|e|matches!(e.as_domain(),Some(steve_types::DomainEvent::Automation(steve_types::AutomationEvent::Signal{id,..})) if id.to_string()=="row-leak")),"rolled-back row events must not escape the Store savepoint");
 }
 #[tokio::test]
@@ -623,22 +540,7 @@ async fn internal_claim_failures_end_only_the_bad_row_without_delaying_other_dea
         let f = Runs::new(kind);
         let bad = f.add(NOW, false);
         let good = f.add(NOW + 37, false);
-        let trigger = match kind {
-            Kind::Trigger => format!(
-                "CREATE TRIGGER fail_claim BEFORE UPDATE OF next_at ON flow_triggers WHEN OLD.id='{bad}' BEGIN SELECT RAISE(ABORT,'persistent claim failure'); END;"
-            ),
-            _ => format!(
-                "CREATE TRIGGER fail_claim BEFORE UPDATE OF status ON flow_runs WHEN OLD.id='{bad}' AND NEW.status='running' BEGIN SELECT RAISE(ABORT,'persistent claim failure'); END;"
-            ),
-        };
-        f.env
-            .store()
-            .with_conn(|c| {
-                c.execute_batch(&trigger)?;
-                c.execute("UPDATE flow_triggers SET missed='skip'", [])?;
-                Ok(())
-            })
-            .unwrap();
+        fixtures::reject_due_claim(f.env.store(), kind, &bad).unwrap();
         f.source.run_due(NOW).await.unwrap();
         assert!(f.state(&bad, false));
         assert_eq!(f.source.next_due().await.unwrap(), Some(NOW + 37));
@@ -654,24 +556,14 @@ async fn internal_claim_failures_end_only_the_bad_row_without_delaying_other_dea
             assert_eq!(
                 f.env
                     .store()
-                    .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(
-                        "SELECT started FROM flow_runs WHERE flow_id=?",
-                        [&good],
-                        |r| r.get::<_, i64>(0)
-                    )?))
+                    .read(|r| RunRows(r).latest_start(WS, &good))
+                    .unwrap()
                     .unwrap(),
                 NOW + 37
             );
         }
         assert_eq!(
-            f.env
-                .store()
-                .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(
-                    "SELECT count(*) FROM audit WHERE action='flow.claim_failed' AND target=?",
-                    [&bad],
-                    |r| r.get::<_, i64>(0)
-                )?))
-                .unwrap(),
+            fixtures::claim_failure_count(f.env.store(), &bad).unwrap(),
             1,
             "terminal failure is durable and not attempted again"
         );
@@ -688,17 +580,7 @@ async fn internal_claim_failures_end_only_the_bad_row_without_delaying_other_dea
 async fn a_poison_alarm_line_rolls_back_only_its_row_and_not_the_ready_batch() {
     let f = Alarms::new();
     let bad = f.add(NOW - 1, false);
-    f.env
-        .store()
-        .with_conn(|c| {
-            c.execute_batch("CREATE TABLE claim_leaks(kind TEXT)")?;
-            c.execute(
-                "UPDATE time_alarms SET subject='todo:line' WHERE id=?",
-                [&bad],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::seed_alarm_line_failure(f.env.store(), &bad).unwrap();
     for _ in 0..BATCH {
         f.add(NOW, false);
     }
@@ -726,14 +608,7 @@ async fn a_poison_alarm_line_rolls_back_only_its_row_and_not_the_ready_batch() {
 async fn broken_dirty_planning_does_not_mask_alarm_deadlines_and_a_subject_edit_can_retry() {
     let f = Alarms::new();
     let good = f.add(NOW + 37, false);
-    f.env
-        .store()
-        .with_conn(|c| {
-            c.execute_batch("CREATE TABLE claim_leaks(kind TEXT)")?;
-            c.execute("INSERT INTO todos(id,workspace_id,owner,text,state,source,writer,created,updated,remind_at) VALUES('plan',?1,?2,'retry planning','open','you',?2,?3,?3,?3)",params![WS,ME,NOW])?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::seed_alarm_plan_failure(f.env.store(), WS, ME, NOW).unwrap();
     f.env.take_events();
     f.source.run_due(NOW).await.unwrap();
     no_leaks(&f.env);
@@ -743,27 +618,21 @@ async fn broken_dirty_planning_does_not_mask_alarm_deadlines_and_a_subject_edit_
     assert!(f.done().contains(&good));
     no_leaks(&f.env);
     assert_eq!(f.source.next_due().await.unwrap(), None);
-    assert_eq!(f.env.store().reader(|c|Ok::<_,steve_store::StoreError>(c.query_row("SELECT count(*) FROM audit WHERE action='flow.claim_failed' AND target='todo:plan'",[],|r|r.get::<_,i64>(0))?)).unwrap(),1);
+    assert_eq!(
+        fixtures::claim_failure_count(f.env.store(), "todo:plan").unwrap(),
+        1
+    );
     // The actual migrated subject trigger requests planning again after the fault is repaired.
-    f.env
-        .store()
-        .with_conn(|c| {
-            c.execute("DELETE FROM claim_faults WHERE kind='plan'", [])?;
-            c.execute("UPDATE todos SET remind_at=? WHERE id='plan'", [NOW + DAY])?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::repair_alarm_plan(f.env.store(), NOW + DAY).unwrap();
     assert_eq!(f.source.next_due().await.unwrap(), Some(f.env.clock.now()));
     f.source.run_due(f.env.clock.now()).await.unwrap();
     assert_eq!(
         f.env
             .store()
-            .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(
-                "SELECT state FROM time_alarms WHERE subject='todo:plan'",
-                [],
-                |r| r.get::<_, String>(0)
-            )?))
-            .unwrap(),
+            .read(|r| AlarmRows(r).of_subject(WS, "todo:plan"))
+            .unwrap()
+            .remove(0)
+            .state,
         "planned"
     );
     f.env.clock.set(NOW + DAY);
@@ -771,12 +640,10 @@ async fn broken_dirty_planning_does_not_mask_alarm_deadlines_and_a_subject_edit_
     assert_eq!(
         f.env
             .store()
-            .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(
-                "SELECT state FROM time_alarms WHERE subject='todo:plan'",
-                [],
-                |r| r.get::<_, String>(0)
-            )?))
-            .unwrap(),
+            .read(|r| AlarmRows(r).of_subject(WS, "todo:plan"))
+            .unwrap()
+            .remove(0)
+            .state,
         "fired"
     );
 }
@@ -796,34 +663,11 @@ async fn failed_wait_completion_settles_its_signal_once_through_the_engine() {
     let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let f = Runs::with_executor(Kind::Wait, Arc::new(Finished(finished.clone())));
     let bad = f.add(NOW, true);
-    f.env.store().with_conn(|c|{
-        c.execute("INSERT INTO ext_events(id,workspace_id,source,type,dedupe_key,occurred,received,summary) VALUES('settle-event',?,'manual','manual','settle-event',?2,?2,'test')",params![WS,NOW])?;
-        c.execute("UPDATE flow_runs SET event_id='settle-event' WHERE id=?",[&bad])?;
-        c.execute_batch("CREATE TABLE settle_counts(n INTEGER); CREATE TRIGGER count_settle AFTER UPDATE ON ext_events WHEN NEW.id='settle-event' BEGIN INSERT INTO settle_counts(n) VALUES(1); END;")?;Ok(())
-    }).unwrap();
+    fixtures::track_signal_settlement(f.env.store(), WS, &bad, NOW).unwrap();
     f.source.run_due(NOW).await.unwrap();
     until(|| finished.load(Ordering::SeqCst)).await;
-    assert!(
-        f.env
-            .store()
-            .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(
-                "SELECT outcome='failed' FROM ext_events WHERE id='settle-event'",
-                [],
-                |r| r.get::<_, bool>(0)
-            )?))
-            .unwrap()
-    );
-    assert_eq!(
-        f.env
-            .store()
-            .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(
-                "SELECT count(*) FROM settle_counts",
-                [],
-                |r| r.get::<_, i64>(0)
-            )?))
-            .unwrap(),
-        1
-    );
+    assert!(signal_settlement(f.env.store(), "settle-event").unwrap().0 == "failed");
+    assert_eq!(fixtures::settle_count(f.env.store()).unwrap(), 1);
 }
 
 #[tokio::test]
@@ -848,16 +692,7 @@ async fn committed_alarm_deadline_changes_wake_without_advancing_the_clock() {
     let id = f.add(NOW + DAY, false);
     let task = steve_runtime::spawn("flow.alarms", AlarmClock::new(f.cx.clone()).run());
     until(|| f.env.clock.observed(NOW)).await;
-    f.env
-        .store()
-        .transaction(|tx| -> FlowResult<()> {
-            tx.execute(
-                "UPDATE time_alarms SET fire_at=?1 WHERE id=?2",
-                params![NOW, id],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fixtures::reschedule_due_alarm(f.env.store(), &id, NOW).unwrap();
     until(|| f.done().contains(&id)).await;
     assert_eq!(
         f.env.clock.now(),
@@ -904,22 +739,8 @@ async fn alarm_hold_commits_do_not_self_wake_into_repeated_due_rounds() {
         clock.clone(),
     );
     let cx = setup.build(modules, Arc::new(Claimed));
-    env.store().transaction(|tx| -> FlowResult<()> {
-        tx.execute("INSERT INTO notification_policies(workspace_id,user_id,enabled,mode,timezone,quiet_start,quiet_end,consented_at,consent_since_seq,updated) VALUES(?1,?2,1,'now','UTC',0,120,1,0,?3)",params![WS,ME,NOW])?;
-        tx.execute("INSERT INTO time_alarms(id,workspace_id,owner_user,kind,subject,planned_for,fire_at,created,updated) VALUES('held',?1,?2,'todo','contract:held',?3,?3,?3,?3)", params![WS,ME,NOW])?;
-        Ok(())
-    }).unwrap();
-    let state = || {
-        env.store()
-            .reader(|c| {
-                Ok::<_, steve_store::StoreError>(c.query_row(
-                    "SELECT state,hold_until FROM time_alarms WHERE id='held'",
-                    [],
-                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?)),
-                )?)
-            })
-            .unwrap()
-    };
+    fixtures::seed_quiet_alarm(env.store(), WS, ME, NOW).unwrap();
+    let state = || fixtures::alarm_state(env.store(), "held").unwrap();
     let task = steve_runtime::spawn("flow.alarms", AlarmClock::new(cx).run());
     until(|| state().1.is_some()).await;
     until(|| env.clock.observed(NOW)).await;
@@ -966,12 +787,18 @@ impl AlarmSource for SchedulePlans {
     fn family(&self) -> &'static str {
         "brief"
     }
-    fn plan(&self, c: &Connection, ws: &str, id: &str, _: i64) -> FlowResult<Vec<Want>> {
-        let (enabled, deleted) = c.query_row(
-            "SELECT enabled,deleted FROM flows WHERE workspace_id=?1 AND id=?2",
-            params![ws, id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
+    fn plan(
+        &self,
+        c: &mut steve_store::W<'_>,
+        ws: &str,
+        id: &str,
+        _: i64,
+    ) -> FlowResult<Vec<Want>> {
+        let row = FlowRows(c)
+            .get(id)?
+            .filter(|row| row.workspace_id == ws)
+            .unwrap();
+        let (enabled, deleted) = (row.enabled, row.deleted);
         self.observed.lock().unwrap().push((
             enabled,
             deleted,
@@ -979,7 +806,13 @@ impl AlarmSource for SchedulePlans {
         ));
         Ok(vec![])
     }
-    fn line(&self, _: &Connection, _: &str, _: &str, _: &str) -> FlowResult<Option<AlarmLine>> {
+    fn line(
+        &self,
+        _: &mut steve_store::W<'_>,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> FlowResult<Option<AlarmLine>> {
         Ok(None)
     }
 }
@@ -1024,11 +857,25 @@ async fn committed_schedule_patch_and_delete_wake_planning_without_clearing_unre
         overlap: Default::default(),
         budget_usd: 0.0,
     };
-    let id = env.store().transaction(|tx| -> FlowResult<_> {
-        let id = steve_flow::schedules::insert(tx,WS,ME,&Fields{name:"brief",spec:&spec,enabled:true},&Origin::default(),NOW)?;
-        tx.execute("INSERT INTO time_alarms(id,workspace_id,owner_user,kind,subject,planned_for,fire_at,hold_until,created,updated) VALUES('schedule-hold',?1,?2,'todo','contract:held',?3,?3,?4,?3,?3)",params![WS,ME,NOW,NOW+DAY])?;
-        Ok(id)
-    }).unwrap();
+    let id = env
+        .store()
+        .write(|w| -> FlowResult<_> {
+            let id = steve_flow::schedules::insert(
+                w,
+                WS,
+                ME,
+                &Fields {
+                    name: "brief",
+                    spec: &spec,
+                    enabled: true,
+                },
+                &Origin::default(),
+                NOW,
+            )?;
+            fixtures::seed_schedule_hold(w, WS, ME, NOW, NOW + DAY)?;
+            Ok(id)
+        })
+        .unwrap();
     let task = steve_runtime::spawn("flow.alarms", AlarmClock::new(cx.clone()).run());
     until(|| !plans.observed.lock().unwrap().is_empty()).await;
     until(|| clock.waits.load(Ordering::SeqCst) > 0).await;
@@ -1067,16 +914,8 @@ async fn committed_schedule_patch_and_delete_wake_planning_without_clearing_unre
         // A later sleep is prepared only after this actual replan/claim/replan round
         // finishes. This avoids asserting while a manual recheck could still fire the hold.
         until(|| clock.waits.load(Ordering::SeqCst) > at_plan).await;
-        let held: (String, Option<i64>) = env
-            .store()
-            .reader(|c| {
-                Ok::<_, steve_store::StoreError>(c.query_row(
-                    "SELECT state,hold_until FROM time_alarms WHERE id='schedule-hold'",
-                    [],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )?)
-            })
-            .unwrap();
+        let held: (String, Option<i64>) =
+            fixtures::alarm_state(env.store(), "schedule-hold").unwrap();
         assert_eq!(
             held,
             ("planned".into(), Some(NOW + DAY)),

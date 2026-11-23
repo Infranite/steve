@@ -28,10 +28,12 @@ pub(crate) fn routes() -> Router<Modules> {
 }
 
 fn persona_json(ch: &Channels, v: &Viewer, id: &str) -> ApiResult<Value> {
-    ch.store().reader(|c| -> ApiResult<Value> {
-        let p = personas::own(c, &v.ws, id)?;
-        Ok(serde_json::to_value(personas::out(c, v, &p)?)?)
-    })
+    ch.store().read::<_, steve_store::StoreError>(|r| {
+        Ok(ch.store().reader(|c| -> ApiResult<Value> {
+            let p = personas::own(c, &v.ws, id)?;
+            Ok(serde_json::to_value(personas::out(c, r, v, &p)?)?)
+        }))
+    })?
 }
 
 async fn list(Extension(ch): Cx, who: Caller) -> ApiResult<Json<Value>> {
@@ -43,7 +45,7 @@ async fn list(Extension(ch): Cx, who: Caller) -> ApiResult<Json<Value>> {
             personas::ensure_default(tx, &v.ws, now)?;
             personas::list(tx, &v.ws)?
                 .iter()
-                .map(|p| personas::out(tx, &v, p))
+                .map(|p| tx.write(|w| personas::out(tx, w, &v, p)))
                 .collect()
         })?;
     Ok(Json(serde_json::to_value(out)?))

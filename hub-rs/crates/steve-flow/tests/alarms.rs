@@ -5,7 +5,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use rusqlite::{Connection, params};
 use serde_json::Value;
 use steve_flow::FlowResult;
 use steve_flow::alarms::{
@@ -13,7 +12,7 @@ use steve_flow::alarms::{
     TODO_DUE, Want,
 };
 use steve_modules::testkit::TestEnv;
-use steve_store::Store;
+use steve_store::{Alarms, Store};
 
 const WS: &str = "default";
 const ME: &str = "usr_dev";
@@ -47,7 +46,7 @@ impl AlarmSource for Scripted {
     fn family(&self) -> &'static str {
         "thing"
     }
-    fn plan(&self, _: &Connection, _: &str, id: &str, _: i64) -> FlowResult<Vec<Want>> {
+    fn plan(&self, _: &mut steve_store::W<'_>, _: &str, id: &str, _: i64) -> FlowResult<Vec<Want>> {
         Ok(self
             .0
             .wants
@@ -57,7 +56,13 @@ impl AlarmSource for Scripted {
             .cloned()
             .unwrap_or_default())
     }
-    fn line(&self, _: &Connection, _: &str, id: &str, _: &str) -> FlowResult<Option<AlarmLine>> {
+    fn line(
+        &self,
+        _: &mut steve_store::W<'_>,
+        _: &str,
+        id: &str,
+        _: &str,
+    ) -> FlowResult<Option<AlarmLine>> {
         Ok(self.0.text.lock().unwrap().get(id).map(|t| AlarmLine {
             subject: format!("thing:{id}"),
             text: t.clone(),
@@ -103,20 +108,14 @@ impl Env {
     /// Marks `thing:<id>` changed and plans it (what the triggers and the clock's round do).
     fn changed(&self, id: &str, now: i64) -> usize {
         self.store
-            .with_conn(|c| {
-                c.execute(
-                    "INSERT INTO time_alarm_dirty (workspace_id, subject) VALUES (?, ?) ON CONFLICT DO NOTHING",
-                    params![WS, format!("thing:{id}")],
-                )?;
-                Ok(())
-            })
+            .write(|w| Alarms(w).mark(WS, &format!("thing:{id}")))
             .unwrap();
         alarms::replan_dirty(&self.store, &self.sources, now).unwrap()
     }
 
     fn rows(&self, id: &str) -> Vec<(String, i64, i64, String)> {
         self.store
-            .reader(|c| alarms::of_subject(c, WS, &format!("thing:{id}")))
+            .read(|c| alarms::of_subject(c, WS, &format!("thing:{id}")))
             .unwrap()
             .into_iter()
             .map(|v| {
@@ -131,19 +130,7 @@ impl Env {
     }
 
     fn events(&self, topic: &str) -> Vec<AlarmFired> {
-        self.store
-            .reader(|c| {
-                let mut st =
-                    c.prepare("SELECT payload FROM outbox_events WHERE topic = ? ORDER BY seq")?;
-                let v = st
-                    .query_map([topic], |r| r.get::<_, String>(0))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok::<_, steve_store::StoreError>(v)
-            })
-            .unwrap()
-            .into_iter()
-            .map(|p| serde_json::from_str(&p).unwrap())
-            .collect()
+        steve_store::testkit::flow::outbox_payloads(&self.store, topic).unwrap()
     }
 
     fn claim(&self, now: i64) -> alarms::Claimed {
@@ -152,16 +139,15 @@ impl Env {
 
     /// `ME` hears notifications now, in Shanghai, quiet 22:00–08:00.
     fn quiet_policy(&self) {
-        self.store
-            .with_conn(|c| {
-                c.execute(
-                    "INSERT INTO notification_policies (workspace_id, user_id, enabled, mode, timezone, quiet_start, quiet_end, consented_at, consent_since_seq, updated)
-                     VALUES (?, ?, 1, 'now', 'Asia/Shanghai', 1320, 480, 1, 0, 1)",
-                    params![WS, ME],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        steve_store::testkit::digest::notification_policy(
+            &self.store,
+            WS,
+            ME,
+            true,
+            "Asia/Shanghai",
+            Some((1320, 480)),
+        )
+        .unwrap();
     }
 }
 
@@ -226,7 +212,7 @@ fn an_alarm_fires_exactly_once_and_never_again() {
     assert_eq!(e.claim(at - 2 * MIN), alarms::Claimed::default());
     assert_eq!(
         e.store
-            .reader(|c| alarms::next_alarm_at(c, at - 2 * MIN))
+            .read(|c| alarms::next_alarm_at(c, at - 2 * MIN))
             .unwrap(),
         Some(at),
         "the source reports this stored deadline"
@@ -241,7 +227,7 @@ fn an_alarm_fires_exactly_once_and_never_again() {
     assert!(!ev[0].late);
     let rows = e
         .store
-        .reader(|c| alarms::of_subject(c, WS, "thing:a"))
+        .read(|c| alarms::of_subject(c, WS, "thing:a"))
         .unwrap();
     assert_eq!(rows[0]["state"], "fired");
     assert_eq!(rows[0]["run_ref"], Value::String(c.events[0].clone()));
@@ -253,7 +239,7 @@ fn an_alarm_fires_exactly_once_and_never_again() {
     assert_eq!(e.events(TODO_DUE).len(), 1);
     assert_eq!(
         e.store
-            .reader(|c| alarms::next_alarm_at(c, at + 2 * MIN))
+            .read(|c| alarms::next_alarm_at(c, at + 2 * MIN))
             .unwrap(),
         None
     );
@@ -340,12 +326,12 @@ fn quiet_hours_postpone_a_reminder_and_merge_what_waited() {
     assert_eq!((c.fired, c.held), (0, 1));
     let rows = e
         .store
-        .reader(|c| alarms::of_subject(c, WS, "thing:a"))
+        .read(|c| alarms::of_subject(c, WS, "thing:a"))
         .unwrap();
     assert_eq!(rows[0]["hold_until"], end);
     // the next round: the other one, then the held one at the end of the quiet hours
     assert_eq!(
-        e.store.reader(|c| alarms::next_alarm_at(c, night)).unwrap(),
+        e.store.read(|c| alarms::next_alarm_at(c, night)).unwrap(),
         Some(dawn)
     );
     assert_eq!(
@@ -353,14 +339,16 @@ fn quiet_hours_postpone_a_reminder_and_merge_what_waited() {
         1,
         "an existing future hold is not read again"
     );
-    let held: i64 = e
+    let held = e
         .store
-        .reader(|c| {
-            Ok::<_, steve_store::StoreError>(c.query_row(
-                "SELECT count(*) FROM time_alarms WHERE state='planned' AND hold_until=?",
-                [end],
-                |r| r.get(0),
-            )?)
+        .read::<_, steve_store::StoreError>(|r| {
+            let mut a = Alarms(r);
+            let (first, second) = (a.of_subject(WS, "thing:a")?, a.of_subject(WS, "thing:b")?);
+            Ok(first
+                .into_iter()
+                .chain(second)
+                .filter(|alarm| alarm.state == "planned" && alarm.hold_until == Some(end))
+                .count())
         })
         .unwrap();
     assert_eq!(held, 2, "both reminders remain held until quiet hours end");
@@ -398,7 +386,7 @@ fn a_subject_gone_when_its_alarm_fires_is_cancelled_and_a_lead_time_change_reset
     // a reconcile reports what it did
     let r = e
         .store
-        .transaction(|tx| {
+        .write(|tx| {
             alarms::reconcile(
                 tx,
                 WS,
@@ -417,7 +405,7 @@ fn a_subject_gone_when_its_alarm_fires_is_cancelled_and_a_lead_time_change_reset
     );
     let r = e
         .store
-        .transaction(|tx| alarms::reconcile(tx, WS, "thing:z", &[want(ME, "snooze", at)], T0))
+        .write(|tx| alarms::reconcile(tx, WS, "thing:z", &[want(ME, "snooze", at)], T0))
         .unwrap();
     assert_eq!(r.cancelled, 1);
 }

@@ -55,59 +55,63 @@ fn setup() -> T {
 fn a_session_gets_the_entries_its_bot_has_switched_on() {
     let t = setup();
     t.store
-        .transaction(|tx| {
-            mcp::insert(tx, &server("bmcp_a", "files", "stdio"))?;
-            mcp::insert(tx, &server("bmcp_b", "remote", "http"))?;
-            mcp::insert(tx, &server("bmcp_c", "unused", "sse"))?;
-            skills::insert(tx, &skill("bskill_a", "review"))?;
-            skills::insert(tx, &skill("bskill_b", "drafts"))?;
-            caps::set(tx, "dev", "mcp", "bmcp_a", true, 1)?;
-            caps::set(tx, "dev", "mcp", "bmcp_b", false, 1)?;
-            caps::set(tx, "doc", "mcp", "bmcp_b", true, 1)?;
-            caps::set(tx, "dev", "skill", "bskill_a", true, 1)?;
-            caps::set(tx, "dev", "skill", "bskill_b", false, 1)?;
+        .write(|tx| {
+            mcp::Servers(tx).insert(&server("bmcp_a", "files", "stdio"))?;
+            mcp::Servers(tx).insert(&server("bmcp_b", "remote", "http"))?;
+            mcp::Servers(tx).insert(&server("bmcp_c", "unused", "sse"))?;
+            skills::Skills(tx).insert(&skill("bskill_a", "review"))?;
+            skills::Skills(tx).insert(&skill("bskill_b", "drafts"))?;
+            caps::Assignments(tx).set("dev", "mcp", "bmcp_a", true, 1)?;
+            caps::Assignments(tx).set("dev", "mcp", "bmcp_b", false, 1)?;
+            caps::Assignments(tx).set("doc", "mcp", "bmcp_b", true, 1)?;
+            caps::Assignments(tx).set("dev", "skill", "bskill_a", true, 1)?;
+            caps::Assignments(tx).set("dev", "skill", "bskill_b", false, 1)?;
             Ok::<_, steve_store::StoreError>(())
         })
         .unwrap();
     t.store
-        .with_conn(|c| {
-            let got: Vec<String> = mcp::enabled_for_session(c, "s_dev")?
+        .read::<_, steve_store::StoreError>(|c| {
+            let got: Vec<String> = mcp::Servers(c)
+                .enabled_for_session("s_dev")?
                 .into_iter()
                 .map(|s| s.name)
                 .collect();
             assert_eq!(got, ["files"]);
-            assert!(mcp::enabled_for_session(c, "s_none")?.is_empty());
-            let got: Vec<String> = skills::enabled_for_session(c, "s_dev")?
+            assert!(mcp::Servers(c).enabled_for_session("s_none")?.is_empty());
+            let got: Vec<String> = skills::Skills(c)
+                .enabled_for_session("s_dev")?
                 .into_iter()
                 .map(|s| s.name)
                 .collect();
             assert_eq!(got, ["review"]);
-            let used: Vec<String> = caps::of_entry(c, "mcp", "bmcp_b")?
+            let used: Vec<String> = caps::Assignments(c)
+                .of_entry("mcp", "bmcp_b")?
                 .into_iter()
                 .map(|a| a.bot_id)
                 .collect();
             assert_eq!(used, ["dev", "doc"]);
-            assert!(mcp::name_taken(c, "default", "FILES", None)?);
-            assert!(!mcp::name_taken(c, "default", "files", Some("bmcp_a"))?);
+            assert!(mcp::Servers(c).name_taken("default", "FILES", None)?);
+            assert!(!mcp::Servers(c).name_taken("default", "files", Some("bmcp_a"))?);
             Ok(())
         })
         .unwrap();
     // switching on, and deleting an entry takes it from every Bot
     t.store
-        .transaction(|tx| {
-            caps::set(tx, "dev", "mcp", "bmcp_b", true, 2)?;
-            mcp::delete(tx, "bmcp_a")?;
+        .write(|tx| {
+            caps::Assignments(tx).set("dev", "mcp", "bmcp_b", true, 2)?;
+            mcp::Servers(tx).delete("bmcp_a")?;
             Ok::<_, steve_store::StoreError>(())
         })
         .unwrap();
     t.store
-        .with_conn(|c| {
-            let got: Vec<String> = mcp::enabled_for_session(c, "s_dev")?
+        .read::<_, steve_store::StoreError>(|c| {
+            let got: Vec<String> = mcp::Servers(c)
+                .enabled_for_session("s_dev")?
                 .into_iter()
                 .map(|s| s.name)
                 .collect();
             assert_eq!(got, ["remote"]);
-            assert!(caps::of_entry(c, "mcp", "bmcp_a")?.is_empty());
+            assert!(caps::Assignments(c).of_entry("mcp", "bmcp_a")?.is_empty());
             Ok(())
         })
         .unwrap();
@@ -129,7 +133,7 @@ fn a_secret_value_never_reaches_the_row() {
             secret: true,
         },
     ];
-    t.store.transaction(|tx| mcp::insert(tx, &s)).unwrap();
+    t.store.write(|tx| mcp::Servers(tx).insert(&s)).unwrap();
     let raw: String = t
         .store
         .with_conn(|c| {
@@ -143,7 +147,7 @@ fn a_secret_value_never_reaches_the_row() {
     assert!(!raw.contains("ghp_leak"), "{raw}");
     let back = t
         .store
-        .with_conn(|c| mcp::get(c, "bmcp_1"))
+        .read(|c| mcp::Servers(c).get("bmcp_1"))
         .unwrap()
         .unwrap();
     assert_eq!(back.secret_labels(), ["env:TOKEN"]);
@@ -151,7 +155,9 @@ fn a_secret_value_never_reaches_the_row() {
 
 #[test]
 fn the_per_bot_rows_of_62_and_63_move_into_the_library() {
-    let c = Connection::open_in_memory().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("caps.sqlite3");
+    let c = Connection::open(&file).unwrap();
     c.execute_batch(
         "CREATE TABLE schema_version(v INTEGER NOT NULL); INSERT INTO schema_version VALUES(64);",
     )
@@ -171,22 +177,23 @@ fn the_per_bot_rows_of_62_and_63_move_into_the_library() {
     .unwrap();
     db::migrate(&c).unwrap();
     assert_eq!(db::compat(&c).unwrap().schema, db::SCHEMA_VERSION);
-    let s = mcp::get(&c, "bmcp_1").unwrap().unwrap();
-    assert_eq!(
-        (s.name.as_str(), s.credential_item.as_deref()),
-        ("files", Some("vi_1"))
-    );
-    assert_eq!(s.secret_labels(), ["env:TOKEN"]);
-    // the second "files" of the workspace is renamed, and keeps its switch for its Bot
-    assert_eq!(mcp::get(&c, "bmcp_2").unwrap().unwrap().name, "Files-2");
-    let a = caps::get(&c, "doc", "mcp", "bmcp_2").unwrap().unwrap();
-    assert!(!a.enabled);
-    assert!(caps::is_enabled(&c, "dev", "mcp", "bmcp_1").unwrap());
-    assert!(caps::is_enabled(&c, "dev", "skill", "bskill_1").unwrap());
-    assert_eq!(
-        skills::get(&c, "bskill_1").unwrap().unwrap().content,
-        "body"
-    );
+    steve_store::Store::read_file(&file, |r| {
+        let s = mcp::Servers(r).get("bmcp_1")?.unwrap();
+        assert_eq!(
+            (s.name.as_str(), s.credential_item.as_deref()),
+            ("files", Some("vi_1"))
+        );
+        assert_eq!(s.secret_labels(), ["env:TOKEN"]);
+        // the second "files" of the workspace is renamed, and keeps its switch for its Bot
+        assert_eq!(mcp::Servers(r).get("bmcp_2")?.unwrap().name, "Files-2");
+        let a = caps::Assignments(r).get("doc", "mcp", "bmcp_2")?.unwrap();
+        assert!(!a.enabled);
+        assert!(caps::Assignments(r).is_enabled("dev", "mcp", "bmcp_1")?);
+        assert!(caps::Assignments(r).is_enabled("dev", "skill", "bskill_1")?);
+        assert_eq!(skills::Skills(r).get("bskill_1")?.unwrap().content, "body");
+        Ok(())
+    })
+    .unwrap();
     let old: i64 = c
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('bot_mcp_servers', 'bot_skills')",
@@ -204,58 +211,54 @@ fn pins_follow_their_entries_and_usage_sums_by_tool() {
     use caps::tools;
     let t = setup();
     t.store
-        .transaction(|tx| {
-            mcp::insert(tx, &server("bmcp_a", "files", "stdio"))?;
-            caps::set(tx, "dev", "mcp", "bmcp_a", true, 1)?;
-            assert!(tools::set_pin(tx, "dev", "mcp", "bmcp_a", true, 2)?);
+        .write(|tx| {
+            mcp::Servers(tx).insert(&server("bmcp_a", "files", "stdio"))?;
+            caps::Assignments(tx).set("dev", "mcp", "bmcp_a", true, 1)?;
+            assert!(tools::ToolRows(tx).set_pin("dev", "mcp", "bmcp_a", true, 2)?);
             assert!(
-                !tools::set_pin(tx, "dev", "mcp", "bmcp_a", true, 3)?,
+                !tools::ToolRows(tx).set_pin("dev", "mcp", "bmcp_a", true, 3)?,
                 "once"
             );
-            assert!(tools::set_pin(
-                tx,
-                "dev",
-                "tool",
-                "steve_workflow",
-                true,
-                4
-            )?);
-            assert!(tools::set_pin(tx, "doc", "mcp", "bmcp_a", true, 5)?);
-            let kinds: Vec<String> = tools::pins(tx, "dev")?
+            assert!(tools::ToolRows(tx).set_pin("dev", "tool", "steve_workflow", true, 4)?);
+            assert!(tools::ToolRows(tx).set_pin("doc", "mcp", "bmcp_a", true, 5)?);
+            let kinds: Vec<String> = tools::ToolRows(tx)
+                .pins("dev")?
                 .into_iter()
                 .map(|p| p.kind)
                 .collect();
             assert_eq!(kinds, ["mcp", "tool"]);
-            caps::remove(tx, "dev", "mcp", "bmcp_a")?;
+            caps::Assignments(tx).remove("dev", "mcp", "bmcp_a")?;
             assert_eq!(
-                tools::pins(tx, "dev")?.len(),
+                tools::ToolRows(tx).pins("dev")?.len(),
                 1,
                 "taken off the Bot: unpinned"
             );
-            mcp::delete(tx, "bmcp_a")?;
-            assert!(tools::pins(tx, "doc")?.is_empty(), "the entry is gone");
+            mcp::Servers(tx).delete("bmcp_a")?;
+            assert!(
+                tools::ToolRows(tx).pins("doc")?.is_empty(),
+                "the entry is gone"
+            );
 
             let today = tools::day_of(1_700_000_000_000);
-            tools::record(tx, "dev", today - 100, &["old"], 1, 0)?;
-            tools::record(
-                tx,
+            tools::ToolRows(tx).record("dev", today - 100, &["old"], 1, 0)?;
+            tools::ToolRows(tx).record(
                 "dev",
                 today - 3,
                 &["steve_workflow", "files__read"],
                 1,
                 0,
             )?;
-            tools::record(tx, "dev", today, &["steve_workflow"], 0, 1)?;
-            tools::record(tx, "dev", today, &["steve_workflow"], 0, 1)?;
-            tools::record(tx, "doc", today, &["steve_workflow"], 0, 1)?;
-            let u = tools::usage(tx, "dev", today, 30)?;
+            tools::ToolRows(tx).record("dev", today, &["steve_workflow"], 0, 1)?;
+            tools::ToolRows(tx).record("dev", today, &["steve_workflow"], 0, 1)?;
+            tools::ToolRows(tx).record("doc", today, &["steve_workflow"], 0, 1)?;
+            let u = tools::ToolRows(tx).usage("dev", today, 30)?;
             assert_eq!(
                 u.iter()
                     .map(|x| (x.tool.as_str(), x.searched, x.called))
                     .collect::<Vec<_>>(),
                 [("steve_workflow", 1, 2), ("files__read", 1, 0)]
             );
-            let old: i64 = tx.query_row(
+            let old: i64 = tx.legacy().query_row(
                 "SELECT COUNT(*) FROM tool_usage WHERE tool = 'old'",
                 [],
                 |r| r.get(0),

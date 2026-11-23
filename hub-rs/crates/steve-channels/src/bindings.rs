@@ -10,9 +10,10 @@ use serde::Serialize;
 use steve_modules::ApiError;
 use steve_store::Tx;
 use steve_store::base::Viewer;
+use steve_store::channel_personas::bindings as repo;
 
 use crate::ChannelResult;
-use crate::personas::{self, Moved, PersonaRow, UsedAccount, UsedBy, UsedSpace};
+use crate::personas::{self, PersonaRow, UsedAccount, UsedBy, UsedSpace};
 use crate::spaces::{self, Mode, SpaceRow};
 
 /// `400` for a persona on an account of your own (PATCH /channels and PATCH /spaces).
@@ -167,25 +168,25 @@ pub fn space_binding(c: &Connection, space: &SpaceRow) -> ChannelResult<Option<S
 pub fn set_space(tx: &Tx, space: &SpaceRow, persona: Option<&str>, now: i64) -> ChannelResult<()> {
     let ws = &space.workspace_id;
     let (account, mode) = connection_account(tx, ws, &space.connection_id)?;
-    match persona {
-        Some(p) => {
-            if mode == Mode::Own {
-                return Err(ApiError::rule(steve_i18n::t!(
-                    "channels.error.self_no_persona"
-                )));
-            }
-            personas::own(tx, ws, p)?;
-            upsert(tx, ws, &account, &space.id, p, now)?;
+    if let Some(persona) = persona {
+        if mode == Mode::Own {
+            return Err(ApiError::rule(steve_i18n::t!(
+                "channels.error.self_no_persona"
+            )));
         }
-        None => {
-            tx.execute(
-                "DELETE FROM persona_bindings WHERE workspace_id = ? AND account_id = ? AND space_id = ?",
-                params![ws, account, space.id],
-            )?;
-        }
+        personas::own(tx, ws, persona)?;
     }
-    spaces::event(tx, ws, &space.id);
-    Ok(())
+    tx.write(|w| {
+        match persona {
+            Some(persona) => repo::bind(w, ws, &account, &space.id, persona, now)?,
+            None => repo::clear(w, ws, &account, &space.id)?,
+        }
+        w.emit(steve_types::ChannelsEvent::Space {
+            id: space.id.clone().into(),
+            ws: ws.clone().into(),
+        });
+        Ok(())
+    })
 }
 
 /// Sets a bot account's default persona (`POST /channels`, `PATCH /channels/:id` with
@@ -207,77 +208,14 @@ pub fn set_account_default(
     }
     personas::own(tx, ws, persona)?;
     personas::ensure_default(tx, ws, now)?;
-    upsert(tx, ws, &account, "", persona, now)?;
-    tx.publish(steve_types::DomainEvent::from(
-        steve_types::ChannelsEvent::Channel {
+    tx.write(|w| {
+        repo::bind(w, ws, &account, "", persona, now)?;
+        w.emit(steve_types::ChannelsEvent::Channel {
             id: conn.into(),
             ws: ws.clone().into(),
-        },
-    ));
-    Ok(())
-}
-
-fn upsert(
-    tx: &Tx,
-    ws: &str,
-    account: &str,
-    space: &str,
-    persona: &str,
-    now: i64,
-) -> ChannelResult<()> {
-    tx.execute(
-        "INSERT INTO persona_bindings (workspace_id, account_id, space_id, persona_id, created) VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT (workspace_id, account_id, space_id) DO UPDATE SET persona_id = excluded.persona_id, created = excluded.created",
-        params![ws, account, space, persona, now],
-    )?;
-    Ok(())
-}
-
-/// A persona is going away: account defaults on it move to `fallback`, space bindings on it are
-/// dropped (back to following the account). Publishes `channel` / `space` for what moved.
-pub(crate) fn release(
-    tx: &Tx,
-    ws: &str,
-    persona: &str,
-    fallback: &str,
-    now: i64,
-) -> ChannelResult<Moved> {
-    let mut st = tx.prepare_cached(
-        "SELECT b.space_id, coalesce(c.id, '') FROM persona_bindings b LEFT JOIN connections c ON c.account_id = b.account_id
-          WHERE b.workspace_id = ? AND b.persona_id = ? ORDER BY b.space_id",
-    )?;
-    let rows = st
-        .query_map(params![ws, persona], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(st);
-    let mut moved = Moved::default();
-    for (space, conn) in rows {
-        if space.is_empty() {
-            moved.accounts += 1;
-            if !conn.is_empty() {
-                tx.publish(steve_types::DomainEvent::from(
-                    steve_types::ChannelsEvent::Channel {
-                        id: conn.into(),
-                        ws: ws.into(),
-                    },
-                ));
-            }
-        } else {
-            moved.spaces += 1;
-            spaces::event(tx, ws, &space);
-        }
-    }
-    tx.execute(
-        "UPDATE persona_bindings SET persona_id = ?, created = ? WHERE workspace_id = ? AND persona_id = ? AND space_id = ''",
-        params![fallback, now, ws, persona],
-    )?;
-    tx.execute(
-        "DELETE FROM persona_bindings WHERE workspace_id = ? AND persona_id = ? AND space_id <> ''",
-        params![ws, persona],
-    )?;
-    Ok(moved)
+        });
+        Ok(())
+    })
 }
 
 /// `Persona.used_by`: bot accounts whose default it is (for the default persona also those with

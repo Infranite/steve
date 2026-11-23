@@ -10,8 +10,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rusqlite::{Connection, OptionalExtension, params};
-use serde_json::{Value, json};
+use steve_store::Read;
+use steve_store::channel_trigger_report::{self as report, History as Said, OpenItem as Open};
 
 use crate::deliver::{Auth, OutRequest, Purpose};
 use crate::outbound::Outbox;
@@ -24,125 +24,24 @@ pub const PROGRESS_EVERY_MS: i64 = 30 * 60_000;
 /// The least time before the same failure is said again.
 pub const ERROR_REPEAT_MS: i64 = 30 * 60_000;
 
-/// An open item handed off from a trigger word.
-#[derive(Debug, Clone, PartialEq)]
-struct Open {
-    ws: String,
-    item: String,
-    /// The chat message it came from.
-    message: String,
-    /// What it is doing now (`items.now`).
-    now: String,
-}
-
-/// What was said of an item last.
-#[derive(Debug, Clone, Default, PartialEq)]
-struct Said {
-    /// The last failure looked at (`diagnostic_events.seq`).
-    diag_seq: i64,
-    error: String,
-    error_at: i64,
-    now: String,
-    at: i64,
-}
-
-impl Said {
-    fn from(v: &Value) -> Self {
-        Self {
-            diag_seq: v["diag_seq"].as_i64().unwrap_or(0),
-            error: v["error"].as_str().unwrap_or("").to_string(),
-            error_at: v["error_at"].as_i64().unwrap_or(0),
-            now: v["now"].as_str().unwrap_or("").to_string(),
-            at: v["at"].as_i64().unwrap_or(0),
-        }
-    }
-
-    fn to_value(&self) -> Value {
-        json!({"diag_seq": self.diag_seq, "error": self.error, "error_at": self.error_at, "now": self.now, "at": self.at})
-    }
-}
-
-fn key(item: &str) -> String {
-    format!("trigger.report.{item}")
-}
-
-/// Open items made from a chat message whose trigger word was answered as you.
-fn open_items(c: &Connection) -> ChannelResult<Vec<Open>> {
-    let mut st = c.prepare(
-        "SELECT i.workspace_id, i.id, l.object_id, coalesce(i.now, '') FROM items i
-           JOIN links l ON l.workspace_id = i.workspace_id AND l.subject_type = 'item' AND l.subject_id = i.id
-                       AND l.predicate = 'from' AND l.object_type = 'chan_message'
-          WHERE i.status NOT IN ('done', 'drop')
-            AND EXISTS (SELECT 1 FROM messages t WHERE t.workspace_id = i.workspace_id
-                          AND json_extract(t.meta, '$.chan.message') = l.object_id
-                          AND json_extract(t.meta, '$.chan.command') = 1
-                          AND json_extract(t.meta, '$.chan.mode') = 'self')",
-    )?;
-    let rows = st
-        .query_map([], |r| {
-            Ok(Open {
-                ws: r.get(0)?,
-                item: r.get(1)?,
-                message: r.get(2)?,
-                now: r.get(3)?,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
-}
-
-fn said(c: &Connection, ws: &str, item: &str) -> ChannelResult<Option<Said>> {
-    let v: Option<String> = c
-        .query_row(
-            "SELECT value FROM settings WHERE workspace_id = ? AND key = ?",
-            params![ws, key(item)],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(v.and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .map(|v| Said::from(&v)))
-}
-
-fn keep(c: &Connection, ws: &str, item: &str, s: &Said, now: i64) -> ChannelResult<()> {
-    c.execute(
-        "INSERT INTO settings (workspace_id, key, value, updated) VALUES (?1, ?2, ?3, ?4)
-           ON CONFLICT (workspace_id, key) DO UPDATE SET value = excluded.value, updated = excluded.updated",
-        params![ws, key(item), s.to_value().to_string(), now],
-    )?;
-    Ok(())
-}
-
-/// The newest failure of the item after `after`: `(seq, what went wrong)`, the reason as its
-/// session said it (`events`, kind `system`), else the failure's kind.
-fn failure(c: &Connection, item: &str, after: i64) -> ChannelResult<Option<(i64, String)>> {
-    let f: Option<(i64, Option<String>, String)> = c
-        .query_row(
-            "SELECT seq, session_id, kind FROM diagnostic_events
-              WHERE item_id = ? AND severity = 'error' AND seq > ? ORDER BY seq DESC LIMIT 1",
-            params![item, after],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?;
-    let Some((seq, session, kind)) = f else {
+/// The newest failure after `after`, as the session explained it.
+fn failure(
+    r: &mut impl Read,
+    item: &str,
+    after: i64,
+) -> steve_store::Result<Option<(i64, String)>> {
+    let Some(failure) = steve_store::diagnostics::latest_item_failure(r, item, after)? else {
         return Ok(None);
     };
-    let reason: Option<String> = match &session {
-        Some(s) => c
-            .query_row(
-                "SELECT json_extract(data, '$.text') FROM events WHERE session_id = ? AND kind = 'system'
-                  ORDER BY seq DESC LIMIT 1",
-                [s],
-                |r| r.get(0),
-            )
-            .optional()?
-            .flatten(),
+    let reason = match failure.session {
+        Some(session) => steve_store::session_repo::latest_system_text(r, &session)?,
         None => None,
     };
     let reason = reason
         .map(|r| r.trim().trim_end_matches('。').to_string())
         .filter(|r| !r.is_empty())
-        .unwrap_or_else(|| format!("执行出错（{kind}）"));
-    Ok(Some((seq, reason)))
+        .unwrap_or_else(|| format!("执行出错（{}）", failure.kind));
+    Ok(Some((failure.seq, reason)))
 }
 
 /// What to say of `o` now, given what was said last; the new record either way.
@@ -182,17 +81,16 @@ fn next(
 /// One look at every open item handed off from a trigger word.
 pub async fn sweep(ch: &Channels, outbox: &Outbox) -> ChannelResult<usize> {
     let now = ch.now();
-    let open = ch.store().reader(open_items)?;
+    let open = ch.store().read(|r| report::open_items(r))?;
     let mut n = 0;
     for o in open {
-        let (say, s) = ch.store().reader(|c| -> ChannelResult<_> {
-            let last = said(c, &o.ws, &o.item)?;
-            let after = last.as_ref().map_or(0, |l| l.diag_seq);
-            let fail = failure(c, &o.item, after)?;
-            Ok(next(&o, last, fail, now))
+        let say = ch.store().write(|w| -> ChannelResult<_> {
+            let last = report::history(w, &o.ws, &o.item)?;
+            let fail = failure(w, &o.item, last.as_ref().map_or(0, |l| l.diag_seq))?;
+            let (say, state) = next(&o, last, fail, now);
+            report::keep(w, &o.ws, &o.item, &state, now)?;
+            Ok(say)
         })?;
-        ch.store()
-            .transaction(|tx| keep(tx, &o.ws, &o.item, &s, now))?;
         let Some(text) = say else { continue };
         let plan = ch
             .store()

@@ -12,11 +12,11 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use rusqlite::types::Value as Sql;
-use rusqlite::{Connection, params};
 use serde::Serialize;
 use serde_json::{Value, json};
-use steve_store::{StoreError, base::Viewer};
+use steve_store::base::{ObjRef, Viewer, links::Links};
+use steve_store::digest::{Matters, Segments};
+use steve_store::{ChannelSources, ItemReads, MailSources, MemoryIndex, Read, StoreError};
 
 use crate::conv::ConvRef;
 use crate::facts::Built;
@@ -82,7 +82,7 @@ impl Acc {
     }
 }
 
-fn matter(c: &Connection, ws: &str, id: &str) -> Result<Option<(String, String, String)>> {
+fn matter(c: &mut impl Read, ws: &str, id: &str) -> Result<Option<(String, String, String)>> {
     crate::matter::resolve(c, ws, id)
 }
 
@@ -122,7 +122,7 @@ fn match_expr(terms: &[String]) -> Option<String> {
 
 /// The candidates of a built window of `conv`.
 pub fn find(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     conv: &ConvRef,
     b: &Built,
@@ -141,78 +141,52 @@ pub fn find(
 }
 
 fn add_thread_candidates(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     conv: &ConvRef,
     b: &Built,
     acc: &mut Acc,
 ) -> Result<()> {
     let key = conv.key();
-    // same reply chain or topic: segments of this conversation sharing a chain
-    if !b.chains.is_empty() {
-        let mut st = c.prepare_cached(
-            "SELECT DISTINCT s.matter_id FROM digest_segments s, json_each(s.chains) j
-              WHERE s.workspace_id = ? AND s.conv = ? AND s.matter_id IS NOT NULL AND j.value = ?",
-        )?;
-        for ch in b.chains.keys() {
-            let ids: Vec<String> = st
-                .query_map(params![ws, key, ch], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?;
-            for id in ids {
-                if let Some((id, t, s)) = matter(c, ws, &id)? {
-                    acc.add("matter", &id, &t, Some(s), "same_thread", 3.0);
-                }
+    for chain in b.chains.keys() {
+        for id in Segments::new(c).matters_by_chains(ws, &key, [chain.as_str()])? {
+            if let Some((id, t, s)) = matter(c, ws, &id)? {
+                acc.add("matter", &id, &t, Some(s), "same_thread", 3.0);
             }
         }
     }
-    // the messages replied to outside the window: the segments holding them
     let replied: HashSet<String> = b.facts["messages"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|m| m["reply_to"].as_str().map(str::to_string))
         .collect();
-    if !replied.is_empty() {
-        let mut at_of = c.prepare_cached(match conv.kind.as_str() {
-            "mail_thread" => "SELECT date FROM mail_messages WHERE id = ?",
-            _ => "SELECT created FROM chan_messages WHERE id = ?",
-        })?;
-        let mut seg = c.prepare_cached(
-            "SELECT matter_id FROM digest_segments WHERE workspace_id = ? AND conv = ? AND matter_id IS NOT NULL
-               AND (first_at, first_id) <= (?3, ?4) AND (last_at, last_id) >= (?3, ?4)",
-        )?;
-        for r in &replied {
-            let at: Option<i64> = at_of.query_row([r], |x| x.get(0)).ok();
-            if let Some(at) = at {
-                let ids: Vec<String> = seg
-                    .query_map(params![ws, key, at, r], |x| x.get(0))?
-                    .collect::<rusqlite::Result<_>>()?;
-                for id in ids {
-                    if let Some((id, t, s)) = matter(c, ws, &id)? {
-                        acc.add("matter", &id, &t, Some(s), "same_thread", 2.0);
-                    }
-                }
+    let replied: Vec<_> = replied.into_iter().collect();
+    let locations = match conv.kind.as_str() {
+        "space" => ChannelSources(c).message_locations(ws, &conv.id, &replied)?,
+        "mail_thread" => MailSources(c).message_locations(ws, &conv.id, &replied)?,
+        _ => Vec::new(),
+    };
+    for (message, at) in locations {
+        for id in Segments::new(c).matters_at(ws, &key, at, &message)? {
+            if let Some((id, t, s)) = matter(c, ws, &id)? {
+                acc.add("matter", &id, &t, Some(s), "same_thread", 2.0);
             }
         }
     }
     Ok(())
 }
 
-fn add_referenced_candidates(c: &Connection, ws: &str, b: &Built, acc: &mut Acc) -> Result<()> {
+fn add_referenced_candidates(c: &mut impl Read, ws: &str, b: &Built, acc: &mut Acc) -> Result<()> {
     // referenced items and the matters linked to them
     for no in &b.items {
-        let title: String = c
-            .prepare_cached("SELECT title FROM items WHERE workspace_id = ? AND id = ?")?
-            .query_row(params![ws, no], |r| r.get(0))
-            .unwrap_or_default();
+        let title = ItemReads(c).title(ws, no)?.unwrap_or_default();
         acc.add("item", no, &title, None, "referenced", 3.0);
-        let ids: Vec<String> = c
-            .prepare_cached(
-                "SELECT subject_id FROM links WHERE workspace_id = ? AND subject_type = 'matter' AND object_type = 'item' AND object_id = ?",
-            )?
-            .query_map(params![ws, no], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        for id in ids {
+        for link in Links(c).to(ws, &ObjRef::new("item", no), None)? {
+            if link.subject_type != "matter" {
+                continue;
+            }
+            let id = link.subject_id;
             if let Some((id, t, s)) = matter(c, ws, &id)? {
                 acc.add("matter", &id, &t, Some(s), "referenced", 2.0);
             }
@@ -222,7 +196,7 @@ fn add_referenced_candidates(c: &Connection, ws: &str, b: &Built, acc: &mut Acc)
 }
 
 fn add_people_candidates(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     b: &Built,
     first_at: i64,
@@ -241,27 +215,12 @@ fn add_people_candidates(
         } else {
             2
         };
-        let mut overlap: HashMap<String, usize> = HashMap::new();
-        let mut st = c.prepare_cached(
-            "SELECT mp.matter_id FROM matter_parties mp JOIN matters m ON m.id = mp.matter_id
-              WHERE m.workspace_id = ? AND mp.party_id = ? AND m.state = 'open' AND coalesce(m.last_at, m.updated) BETWEEN ? AND ?",
+        let overlap = Matters(c).recent_overlap(
+            ws,
+            &people,
+            first_at.saturating_sub(NEAR_MS),
+            first_at.saturating_add(NEAR_MS),
         )?;
-        for p in &people {
-            let ids: Vec<String> = st
-                .query_map(
-                    params![
-                        ws,
-                        p,
-                        first_at.saturating_sub(NEAR_MS),
-                        first_at.saturating_add(NEAR_MS)
-                    ],
-                    |r| r.get(0),
-                )?
-                .collect::<rusqlite::Result<_>>()?;
-            for id in ids {
-                *overlap.entry(id).or_default() += 1;
-            }
-        }
         for (id, n) in overlap {
             if n >= need
                 && let Some((id, t, s)) = matter(c, ws, &id)?
@@ -281,7 +240,7 @@ fn add_people_candidates(
 }
 
 fn add_fulltext_candidates(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     in_window: &[&crate::facts::Line],
     now: i64,
@@ -294,15 +253,7 @@ fn add_fulltext_candidates(
         .collect::<Vec<_>>()
         .join("\n");
     if let Some(expr) = match_expr(&salient(&text)) {
-        let rows: Vec<(String, f64)> = c
-            .prepare_cached(
-                "SELECT r.matter_id, bm25(matters_fts) AS s FROM matters_fts JOIN matters_fts_rows r ON r.row = matters_fts.rowid
-                  JOIN matters m ON m.id = r.matter_id
-                  WHERE matters_fts MATCH ? AND m.workspace_id = ? AND m.state IN ('open', 'done') ORDER BY s LIMIT 6",
-            )?
-            .query_map(params![expr, ws], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<rusqlite::Result<_>>()?;
-        for (id, s) in rows {
+        for (id, s) in Matters(c).search(ws, &expr, &["open", "done"], MAX_EACH)? {
             if let Some((id, t, st)) = matter(c, ws, &id)? {
                 acc.add(
                     "matter",
@@ -340,33 +291,21 @@ fn rank_candidates(acc: Acc) -> Vec<Candidate> {
 }
 
 fn add_memory_candidates(
-    c: &Connection,
+    c: &mut impl Read,
     ws: &str,
     expr: String,
     now: i64,
     acc: &mut Acc,
 ) -> Result<()> {
     let viewer = crate::conv::owner_viewer(c, ws)?.unwrap_or_else(|| Viewer::bare(ws, ""));
-    let scope = viewer.sql("m");
-    let mut parameters = vec![Sql::Text(expr), Sql::Text(ws.into()), Sql::Integer(now)];
-    parameters.extend(scope.params);
-    let rows: Vec<(String, String, String, f64)> = c
-        .prepare_cached(&format!(
-            "SELECT m.id, m.text, m.status, bm25(kb_fts) AS s FROM kb_fts JOIN kb_chunks k ON k.id = kb_fts.rowid
-               JOIN mems m ON m.id = k.obj_id
-              WHERE kb_fts MATCH ? AND k.obj_type = 'mem' AND m.workspace_id = ? AND m.status IN ('confirmed', 'candidate') AND m.level <> 'never' AND (m.valid_until IS NULL OR m.valid_until > ?) AND {}
-              ORDER BY s LIMIT 6", scope.sql
-        ))?
-        .query_map(rusqlite::params_from_iter(parameters), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    for (id, text, status, s) in rows {
+    for (memory, score) in MemoryIndex::new(c).search(&viewer, &expr, now, MAX_EACH as u64)? {
         acc.add(
             "mem",
-            &id,
-            &crate::cut(&text, 120),
-            Some(status),
+            &memory.id,
+            &crate::cut(&memory.text, 120),
+            Some(memory.status),
             "fulltext",
-            (-s).clamp(0.0, 10.0) / 10.0,
+            (-score).clamp(0.0, 10.0) / 10.0,
         );
     }
     Ok(())

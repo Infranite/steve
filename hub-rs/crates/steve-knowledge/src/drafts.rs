@@ -24,9 +24,10 @@ use steve_modules::changes::{
 };
 use steve_modules::contacts::repo::{self as people, ContactQuery, Party};
 use steve_modules::{ApiError, ApiResult, Caller, Check, Registry};
-use steve_store::base::mems::{self, NewMem};
-use steve_store::base::{self, Change, Level, ObjRef, Viewer, Visibility, show};
-use steve_store::{Tx, now};
+use steve_store::base::mems::NewMem;
+use steve_store::base::{Change, Level, ObjRef, Viewer, Visibility, show};
+use steve_store::knowledge::{Documents, Memories};
+use steve_store::{Read, References, W, now};
 
 use crate::index;
 use crate::notes::{self, NewNote};
@@ -70,8 +71,8 @@ pub fn register(r: &mut Registry, kb: Knowledge) {
         .op(OP_SOURCE_PATCH, Box::new(SourcePatchOp(kb.clone())))
         .op(OP_SOURCE_CREATE, Box::new(SourceCreateOp(kb.clone())))
         .op(OP_MEM_ADD, Box::new(MemAddOp))
-        .op(OP_NOTE_CREATE, Box::new(NoteCreateOp(kb.clone())))
-        .op(OP_DOC_PATCH, Box::new(DocPatchOp(kb)));
+        .op(OP_NOTE_CREATE, Box::new(NoteCreateOp))
+        .op(OP_DOC_PATCH, Box::new(DocPatchOp));
 }
 
 // ---------------------------------------------------------------- labels and parsing
@@ -198,8 +199,9 @@ fn named(p: &Party, n: &str) -> bool {
     same(&p.name, n) || p.aliases.iter().any(|a| same(a, n))
 }
 
-fn teams(c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Party>> {
-    Ok(steve_modules::contacts::teams::repo::teams(c, viewer)?
+fn teams(c: &mut impl steve_store::Read, viewer: &Viewer) -> ApiResult<Vec<Party>> {
+    Ok(steve_store::Teams(c)
+        .list(viewer)?
         .into_iter()
         .map(|(p, _)| p)
         .collect())
@@ -246,7 +248,12 @@ fn vis_text(c: &Connection, v: &Visibility) -> String {
 }
 
 /// A visibility by code, label or exact team name; `None` = not recognized (never guessed).
-fn parse_vis(c: &Connection, viewer: &Viewer, s: &str) -> ApiResult<Option<Visibility>> {
+fn parse_vis(
+    c: &Connection,
+    r: &mut impl steve_store::Read,
+    viewer: &Viewer,
+    s: &str,
+) -> ApiResult<Option<Visibility>> {
     let s = s.trim();
     match s {
         "只有我" | "仅我" | "我" | "只我" | "私有" | "自己" | "private" => {
@@ -263,7 +270,7 @@ fn parse_vis(c: &Connection, viewer: &Viewer, s: &str) -> ApiResult<Option<Visib
     let n = s
         .trim_start_matches("团队")
         .trim_matches(|ch| ch == '「' || ch == '」' || ch == ' ');
-    let found: Vec<Party> = teams(c, viewer)?
+    let found: Vec<Party> = teams(r, viewer)?
         .into_iter()
         .filter(|t| named(t, n))
         .collect();
@@ -346,119 +353,145 @@ fn source_href(id: &str) -> String {
 }
 
 impl DraftTarget for SourceTarget {
-    fn prepare(&self, c: &Connection, viewer: &Viewer, id: Option<&str>) -> ApiResult<Prepared> {
-        let id = match id {
-            None | Some("new") => return Ok(create_prepared()),
-            Some(id) => id,
-        };
-        let s = folder::own_source(c, &caller_of(viewer), id)?;
-        let mut vis_values = vec![PRIVATE.to_string(), WORKSPACE.to_string()];
-        vis_values.extend(teams(c, viewer)?.into_iter().map(|t| t.name));
-        let levels: Vec<&str> = LEVELS.iter().map(|(_, l)| *l).collect();
-        let mut fields = vec![
-            FieldSpec::new("name", "名字", "text", json!(s.name)),
-            FieldSpec::new("paused", "状态", "enum", json!(paused_label(s.paused)))
-                .values(&[SYNCING, PAUSED]),
-            FieldSpec {
-                values: Some(vis_values),
-                ..FieldSpec::new(
-                    "visibility",
-                    "新文档的可见范围（只有我 / 工作空间 / 团队名）",
+    fn prepare(
+        &self,
+        store: &steve_store::Store,
+        r: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+        id: Option<&str>,
+    ) -> ApiResult<Prepared> {
+        store.reader(|c| {
+            let id = match id {
+                None | Some("new") => return Ok(create_prepared()),
+                Some(id) => id,
+            };
+            let s = folder::own_source(c, &caller_of(viewer), id)?;
+            let mut vis_values = vec![PRIVATE.to_string(), WORKSPACE.to_string()];
+            vis_values.extend(teams(r, viewer)?.into_iter().map(|t| t.name));
+            let levels: Vec<&str> = LEVELS.iter().map(|(_, l)| *l).collect();
+            let mut fields = vec![
+                FieldSpec::new("name", "名字", "text", json!(s.name)),
+                FieldSpec::new("paused", "状态", "enum", json!(paused_label(s.paused)))
+                    .values(&[SYNCING, PAUSED]),
+                FieldSpec {
+                    values: Some(vis_values),
+                    ..FieldSpec::new(
+                        "visibility",
+                        "新文档的可见范围（只有我 / 工作空间 / 团队名）",
+                        "enum",
+                        json!(vis_label(c, &s.visibility)),
+                    )
+                },
+                FieldSpec::new(
+                    "level",
+                    "新文档的披露级别",
                     "enum",
-                    json!(vis_label(c, &s.visibility)),
+                    json!(level_label(s.level)),
                 )
-            },
-            FieldSpec::new(
-                "level",
-                "新文档的披露级别",
-                "enum",
-                json!(level_label(s.level)),
-            )
-            .values(&levels),
-        ];
-        if s.kind == "folder" {
-            for (key, label) in [("include", "包含（glob）"), ("exclude", "排除（glob）")] {
-                let cur = s.config.get(key).cloned().unwrap_or(json!([]));
-                fields.push(FieldSpec::new(key, label, "list", cur));
+                .values(&levels),
+            ];
+            if s.kind == "folder" {
+                for (key, label) in [("include", "包含（glob）"), ("exclude", "排除（glob）")]
+                {
+                    let cur = s.config.get(key).cloned().unwrap_or(json!([]));
+                    fields.push(FieldSpec::new(key, label, "list", cur));
+                }
             }
-        }
-        Ok(Prepared {
-            target_id: Some(s.id.clone()),
-            revision: Some(s.revision),
-            title: steve_i18n::t!("knowledge.draft.source_title", name = s.name),
-            href: source_href(&s.id),
-            subject: format!("the knowledge source \"{}\"", s.name),
-            fields,
-            ops: vec![],
-            free_text: None,
-            context: Value::Null,
+            Ok(Prepared {
+                target_id: Some(s.id.clone()),
+                revision: Some(s.revision),
+                title: steve_i18n::t!("knowledge.draft.source_title", name = s.name),
+                href: source_href(&s.id),
+                subject: format!("the knowledge source \"{}\"", s.name),
+                fields,
+                ops: vec![],
+                free_text: None,
+                context: Value::Null,
+            })
         })
     }
 
     fn plan(
         &self,
-        c: &Connection,
+        store: &steve_store::Store,
+        r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         p: &Prepared,
         raw: Vec<Value>,
     ) -> ApiResult<Plan> {
-        let Some(id) = &p.target_id else {
-            return plan_ops(&self.0, c, viewer, raw, &["kb_source.create"]);
-        };
-        let s = folder::own_source(c, &caller_of(viewer), id)?;
-        let mut plan = Plan::default();
-        let mut patch = SourcePatch::default();
-        for op in raw {
-            let pairs: Vec<(String, Value)> = match op_name(&op).as_str() {
-                "set" => vec![(
-                    op.get("key")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                    op.get("value").cloned().unwrap_or(Value::Null),
-                )],
-                "kb_source.patch" => op
-                    .as_object()
-                    .map(|o| {
-                        o.iter()
-                            .filter(|(k, _)| !matches!(k.as_str(), "op" | "id"))
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                _ => {
-                    plan.changes
-                        .push(Change::new(unrecognized(), "—", show(&op.to_string())));
-                    continue;
-                }
+        store.reader(|c| {
+            let Some(id) = &p.target_id else {
+                return plan_ops(&self.0, c, r, viewer, raw, &["kb_source.create"]);
             };
-            for (key, v) in pairs {
-                if let Some(line) = patch_field(c, viewer, &s, &key, &v, &mut patch)? {
-                    plan.changes.push(line);
+            let s = folder::own_source(c, &caller_of(viewer), id)?;
+            let mut plan = Plan::default();
+            let mut patch = SourcePatch::default();
+            for op in raw {
+                let pairs: Vec<(String, Value)> = match op_name(&op).as_str() {
+                    "set" => vec![(
+                        op.get("key")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        op.get("value").cloned().unwrap_or(Value::Null),
+                    )],
+                    "kb_source.patch" => op
+                        .as_object()
+                        .map(|o| {
+                            o.iter()
+                                .filter(|(k, _)| !matches!(k.as_str(), "op" | "id"))
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    _ => {
+                        plan.changes
+                            .push(Change::new(unrecognized(), "—", show(&op.to_string())));
+                        continue;
+                    }
+                };
+                for (key, v) in pairs {
+                    if let Some(line) = patch_field(c, r, viewer, &s, &key, &v, &mut patch)? {
+                        plan.changes.push(line);
+                    }
                 }
             }
-        }
-        if patch != SourcePatch::default() {
-            plan.ops
-                .push(json!({ "op": OP_SOURCE_PATCH, "id": s.id, "patch": patch }));
-        }
-        Ok(plan)
+            if patch != SourcePatch::default() {
+                plan.ops
+                    .push(json!({ "op": OP_SOURCE_PATCH, "id": s.id, "patch": patch }));
+            }
+            Ok(plan)
+        })
     }
 
-    fn revision(&self, c: &Connection, ws: &str, id: &str) -> ApiResult<Option<i64>> {
+    fn revision(
+        &self,
+        _store: &steve_store::Store,
+        w: &mut steve_store::W<'_>,
+        ws: &str,
+        id: &str,
+    ) -> ApiResult<Option<i64>> {
+        let c = &w.legacy();
         Ok(repo::source(c, id)?
             .filter(|s| s.workspace_id == ws)
             .map(|s| s.revision))
     }
 
-    fn candidates(&self, c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Candidate>> {
-        Ok(visible_sources(c, viewer)?
-            .into_iter()
-            .map(|s| Candidate {
-                code: format!("kb_source:{}", s.id),
-                label: format!("知识来源 {}", s.name),
-            })
-            .collect())
+    fn candidates(
+        &self,
+        store: &steve_store::Store,
+        _r: &mut steve_store::R<'_>,
+        viewer: &Viewer,
+    ) -> ApiResult<Vec<Candidate>> {
+        store.reader(|c| {
+            Ok(visible_sources(c, viewer)?
+                .into_iter()
+                .map(|s| Candidate {
+                    code: format!("kb_source:{}", s.id),
+                    label: format!("知识来源 {}", s.name),
+                })
+                .collect())
+        })
     }
 }
 
@@ -466,6 +499,7 @@ impl DraftTarget for SourceTarget {
 /// when the value is what it already is).
 fn patch_field(
     c: &Connection,
+    r: &mut impl steve_store::Read,
     viewer: &Viewer,
     s: &SourceRow,
     key: &str,
@@ -509,7 +543,7 @@ fn patch_field(
             ))
         }
         "visibility" => {
-            let Some(vis) = parse_vis(c, viewer, &raw)? else {
+            let Some(vis) = parse_vis(c, r, viewer, &raw)? else {
                 return Ok(Some(unknown(Field::Visibility, &raw)));
             };
             if vis == s.visibility {
@@ -584,36 +618,46 @@ fn patch_args(op: &Value) -> ApiResult<(String, SourcePatch)> {
 }
 
 impl ChangeOp for SourcePatchOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = &w.legacy();
         let (id, patch) = patch_args(op)?;
         folder::check_patch(&patch)?;
         let who = cx_caller(cx);
-        let old = folder::own_source(c, &who, &id)?;
-        if folder::owner_refuses(c, &who, &old, &patch)? {
-            return Err(ApiError::forbidden(folder::owner_only()));
-        }
-        folder::check_patch_include(self.0.folder_policy(), &old, &patch)
-    }
-
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
-        let (id, patch) = patch_args(op)?;
-        let p = folder::patch_tx(tx, &cx_caller(cx), &id, &patch, now())?;
+        let p = tx.write(|w| -> ApiResult<_> {
+            let old = folder::own_source_in(w, &who, &id)?;
+            if folder::owner_refuses_in(w, &who, &old, &patch)? {
+                return Err(ApiError::forbidden(folder::owner_only()));
+            }
+            folder::check_patch_include(self.0.folder_policy(), &old, &patch)?;
+            let p = folder::patch_tx(w, &who, &id, &patch, now())?;
+            crate::state::emit_change(w, cx.ws, &id);
+            Ok(p)
+        })?;
         if p.rescan {
             self.0.request_scan(&id);
         }
-        self.0.notify(cx.ws, &id);
         Ok(serde_json::to_value(SourcePatch::restoring(&p.old))?)
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = &w.legacy();
         let (id, _) = patch_args(op)?;
         let back: SourcePatch =
             serde_json::from_value(before.clone()).map_err(|_| ApiError::invalid("before"))?;
-        let p = folder::patch_tx(tx, &cx_caller(cx), &id, &back, now())?;
+        let p = tx.write(|w| -> ApiResult<_> {
+            let p = folder::patch_tx(w, &cx_caller(cx), &id, &back, now())?;
+            crate::state::emit_change(w, cx.ws, &id);
+            Ok(p)
+        })?;
         if p.rescan {
             self.0.request_scan(&id);
         }
-        self.0.notify(cx.ws, &id);
         Ok(())
     }
 }
@@ -653,7 +697,13 @@ struct KnowledgeTarget(Knowledge);
 const KNOWLEDGE_OPS: [&str; 4] = ["mem.add", "note.create", "doc.patch", "kb_source.create"];
 
 impl DraftTarget for KnowledgeTarget {
-    fn prepare(&self, _: &Connection, _: &Viewer, id: Option<&str>) -> ApiResult<Prepared> {
+    fn prepare(
+        &self,
+        _store: &steve_store::Store,
+        _: &mut steve_store::R<'_>,
+        _: &Viewer,
+        id: Option<&str>,
+    ) -> ApiResult<Prepared> {
         if !matches!(id, None | Some("new")) {
             return Err(ApiError::not_found("知识库"));
         }
@@ -693,19 +743,31 @@ impl DraftTarget for KnowledgeTarget {
 
     fn plan(
         &self,
-        c: &Connection,
+        store: &steve_store::Store,
+        r: &mut steve_store::R<'_>,
         viewer: &Viewer,
         _: &Prepared,
         raw: Vec<Value>,
     ) -> ApiResult<Plan> {
-        plan_ops(&self.0, c, viewer, raw, &KNOWLEDGE_OPS)
+        store.reader(|c| plan_ops(&self.0, c, r, viewer, raw, &KNOWLEDGE_OPS))
     }
 
-    fn revision(&self, _: &Connection, _: &str, _: &str) -> ApiResult<Option<i64>> {
+    fn revision(
+        &self,
+        _store: &steve_store::Store,
+        _: &mut steve_store::W<'_>,
+        _: &str,
+        _: &str,
+    ) -> ApiResult<Option<i64>> {
         Ok(None)
     }
 
-    fn candidates(&self, _: &Connection, _: &Viewer) -> ApiResult<Vec<Candidate>> {
+    fn candidates(
+        &self,
+        _store: &steve_store::Store,
+        _: &mut steve_store::R<'_>,
+        _: &Viewer,
+    ) -> ApiResult<Vec<Candidate>> {
         Ok(vec![Candidate {
             code: "knowledge:new".into(),
             label: "记一条记忆或笔记".into(),
@@ -717,6 +779,7 @@ impl DraftTarget for KnowledgeTarget {
 fn plan_ops(
     kb: &Knowledge,
     c: &Connection,
+    r: &mut impl steve_store::Read,
     viewer: &Viewer,
     raw: Vec<Value>,
     allowed: &[&str],
@@ -730,10 +793,10 @@ fn plan_ops(
             continue;
         }
         let (stored, lines) = match name.as_str() {
-            "kb_source.create" => plan_create(kb, c, viewer, &op)?,
-            "mem.add" => plan_mem(c, viewer, &op)?,
-            "note.create" => plan_note(c, viewer, &op)?,
-            "doc.patch" => plan_doc(c, viewer, &op)?,
+            "kb_source.create" => plan_create(kb, c, r, viewer, &op)?,
+            "mem.add" => plan_mem(c, r, viewer, &op)?,
+            "note.create" => plan_note(c, r, viewer, &op)?,
+            "doc.patch" => plan_doc(c, r, viewer, &op)?,
             _ => (None, vec![]),
         };
         plan.changes.extend(lines);
@@ -749,14 +812,19 @@ type Scope = (Option<Visibility>, Option<Level>);
 type Abouts = Vec<(ObjRef, String)>;
 
 /// Optional `visibility` / `level` of a raw op: `Err(line)` when said but not recognized.
-fn scope_of(c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Result<Scope, Change>> {
+fn scope_of(
+    c: &Connection,
+    r: &mut impl steve_store::Read,
+    viewer: &Viewer,
+    op: &Value,
+) -> ApiResult<Result<Scope, Change>> {
     let vis = match op
         .get("visibility")
         .and_then(text_of)
         .filter(|s| !s.is_empty())
     {
         None => None,
-        Some(s) => match parse_vis(c, viewer, &s)? {
+        Some(s) => match parse_vis(c, r, viewer, &s)? {
             Some(v) => Some(v),
             None => return Ok(Err(unknown(Field::Visibility, &s))),
         },
@@ -791,7 +859,13 @@ fn folder_name(path: &std::path::Path) -> String {
 }
 
 /// `kb_source.create`: the path is checked now; a refusal is the only line, with no op.
-fn plan_create(kb: &Knowledge, c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> {
+fn plan_create(
+    kb: &Knowledge,
+    c: &Connection,
+    r: &mut impl steve_store::Read,
+    viewer: &Viewer,
+    op: &Value,
+) -> ApiResult<Planned> {
     let said = op.get("path").and_then(text_of).unwrap_or_default();
     if said.is_empty() {
         return Ok((
@@ -821,7 +895,7 @@ fn plan_create(kb: &Knowledge, c: &Connection, viewer: &Viewer, op: &Value) -> A
     if let Some(why) = folder::overlap_reason(c, &viewer.ws, &path)? {
         return refused(why);
     }
-    let (vis, level) = match scope_of(c, viewer, op)? {
+    let (vis, level) = match scope_of(c, r, viewer, op)? {
         Ok(x) => x,
         Err(line) => return Ok((None, vec![line])),
     };
@@ -870,6 +944,7 @@ fn plan_create(kb: &Knowledge, c: &Connection, viewer: &Viewer, op: &Value) -> A
 /// (exact name). Returns the references and a line per name that did not resolve to exactly one.
 fn resolve_about(
     c: &Connection,
+    r: &mut impl steve_store::Read,
     viewer: &Viewer,
     names: &[String],
 ) -> ApiResult<(Abouts, Vec<Change>)> {
@@ -882,7 +957,7 @@ fn resolve_about(
         }
         let mut found: Vec<(ObjRef, String)> = Vec::new();
         if n == "我" || n.eq_ignore_ascii_case("me") {
-            if let Some(me) = people::me_of(c, &viewer.ws, &viewer.user)? {
+            if let Some(me) = people::me_of(r, &viewer.ws, &viewer.user)? {
                 found.push((ObjRef::new("party", &me.id), me.name));
             }
         } else {
@@ -891,10 +966,10 @@ fn resolve_about(
                 limit: 500,
                 ..Default::default()
             };
-            let parties = people::contacts(c, viewer, &q)?
+            let parties = people::contacts(r, viewer, &q)?
                 .into_iter()
-                .chain(people::orgs(c, viewer)?)
-                .chain(teams(c, viewer)?);
+                .chain(people::orgs(r, viewer)?)
+                .chain(teams(r, viewer)?);
             for p in parties.filter(|p| named(p, n)) {
                 if !found.iter().any(|(r, _)| r.id == p.id) {
                     found.push((ObjRef::new("party", &p.id), p.name));
@@ -951,7 +1026,12 @@ fn unclear() -> String {
 }
 
 /// `mem.add`: one line “新记忆 — <text> · <种类> · <级别> · <范围> · 关于 …”.
-fn plan_mem(c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> {
+fn plan_mem(
+    c: &Connection,
+    r: &mut impl steve_store::Read,
+    viewer: &Viewer,
+    op: &Value,
+) -> ApiResult<Planned> {
     let text = op.get("text").and_then(text_of).unwrap_or_default();
     if !(1..=2000).contains(&text.chars().count()) {
         return Ok((
@@ -972,12 +1052,12 @@ fn plan_mem(c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> {
             None => return Ok((None, vec![unknown(Field::Kind, &kind_said)])),
         }
     };
-    let (vis, level) = match scope_of(c, viewer, op)? {
+    let (vis, level) = match scope_of(c, r, viewer, op)? {
         Ok(x) => x,
         Err(line) => return Ok((None, vec![line])),
     };
     let names = op.get("about").and_then(list_of).unwrap_or_default();
-    let (about, mut lines) = resolve_about(c, viewer, &names)?;
+    let (about, mut lines) = resolve_about(c, r, viewer, &names)?;
     let about = about.into_iter().take(10).collect::<Vec<_>>();
     let vis = vis.unwrap_or(Visibility::Private);
     let level = level.unwrap_or(Level::Conclusion);
@@ -1021,7 +1101,12 @@ fn plan_mem(c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> {
 }
 
 /// `note.create`: one line “新建笔记 — <title>”.
-fn plan_note(c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> {
+fn plan_note(
+    c: &Connection,
+    r: &mut impl steve_store::Read,
+    viewer: &Viewer,
+    op: &Value,
+) -> ApiResult<Planned> {
     let body = op.get("body").and_then(text_of).unwrap_or_default();
     let title = op
         .get("title")
@@ -1046,7 +1131,7 @@ fn plan_note(c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> 
             )],
         ));
     }
-    let (vis, level) = match scope_of(c, viewer, op)? {
+    let (vis, level) = match scope_of(c, r, viewer, op)? {
         Ok(x) => x,
         Err(line) => return Ok((None, vec![line])),
     };
@@ -1075,7 +1160,12 @@ fn is_follow(s: &str) -> bool {
 }
 
 /// `doc.patch`: the document by exact title among those the viewer sees; one line per field.
-fn plan_doc(c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> {
+fn plan_doc(
+    c: &Connection,
+    r: &mut impl steve_store::Read,
+    viewer: &Viewer,
+    op: &Value,
+) -> ApiResult<Planned> {
     let title = op
         .get("doc")
         .or_else(|| op.get("title"))
@@ -1134,7 +1224,7 @@ fn plan_doc(c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> {
         let new = if is_follow(&said) {
             Some(None)
         } else {
-            parse_vis(c, viewer, &said)?.map(Some)
+            parse_vis(c, r, viewer, &said)?.map(Some)
         };
         match new {
             None => lines.push(unknown(Field::Visibility, &said)),
@@ -1207,36 +1297,41 @@ fn source_body(op: &Value) -> ApiResult<SourceBody> {
 }
 
 impl ChangeOp for SourceCreateOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
-        let f = folder::check_new(self.0.folder_policy(), &source_body(op)?)?;
-        if let Some(why) = folder::overlap_reason(c, cx.ws, &f.path)? {
-            return Err(ApiError::rule(folder::refusal(&why)));
-        }
-        Ok(())
-    }
-
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = &w.legacy();
         let f = folder::check_new(self.0.folder_policy(), &source_body(op)?)?;
         let at = now();
-        sources::ensure_builtin(tx, cx.ws, cx.actor, at)?;
-        let s = folder::insert_folder(tx, cx.ws, cx.actor, &f, at)?;
+        let s = tx.write(|w| -> ApiResult<_> {
+            sources::ensure_builtin(w, cx.ws, cx.actor, at)?;
+            let s = folder::insert_folder(w, cx.ws, cx.actor, &f, at)?;
+            crate::state::emit_change(w, cx.ws, &s.id);
+            Ok(s)
+        })?;
         cx.bind("source", json!(s.id));
         self.0.request_scan(&s.id);
-        self.0.notify(cx.ws, &s.id);
         Ok(json!({ "id": s.id }))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, _: &Value, before: &Value) -> ApiResult<()> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        _: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = &w.legacy();
         let id = before["id"].as_str().unwrap_or("");
-        if let Some(s) = repo::source(tx, id)?.filter(|s| s.workspace_id == cx.ws) {
-            let owner = Caller {
-                ws: cx.ws.into(),
-                me: s.created_by.clone(),
-            };
-            folder::delete_tx(tx, &owner, id)?;
-            self.0.notify(cx.ws, id);
-        }
-        Ok(())
+        tx.write(|w| {
+            if let Some(s) = Documents(w).source(id)?.filter(|s| s.workspace_id == cx.ws) {
+                let owner = Caller {
+                    ws: cx.ws.into(),
+                    me: s.created_by,
+                };
+                folder::delete_tx(w, &owner, id)?;
+                crate::state::emit_change(w, cx.ws, id);
+            }
+            Ok(())
+        })
     }
 }
 
@@ -1252,9 +1347,9 @@ fn scope_arg<T: serde::de::DeserializeOwned>(op: &Value, key: &str) -> ApiResult
 /// `kb.mem.add {kind, text, level, visibility, about:[{type,id}]}`: confirmed (the user said it).
 struct MemAddOp;
 
-fn check_about(c: &Connection, cx: &OpCx, about: &[ObjRef]) -> ApiResult<()> {
+fn check_about(c: &mut impl Read, cx: &OpCx, about: &[ObjRef]) -> ApiResult<()> {
     for a in about {
-        if !repo::ref_exists(c, cx.ws, cx.actor, a)? {
+        if !References(c).exists(&Viewer::bare(cx.ws, cx.actor), a)? {
             return Err(ApiError::not_found(if a.kind == "bot" {
                 "Bot"
             } else if a.kind == "project" {
@@ -1294,129 +1389,143 @@ fn mem_args(op: &Value) -> ApiResult<MemArgs> {
 }
 
 impl ChangeOp for MemAddOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = &w.legacy();
         let a = mem_args(op)?;
-        if !repo::scope_exists(c, cx.ws, &a.visibility)? {
-            return Err(ApiError::not_found("团队"));
-        }
-        check_about(c, cx, &a.about)
-    }
-
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
-        let a = mem_args(op)?;
-        let at = now();
-        sources::ensure_builtin(tx, cx.ws, cx.actor, at)?;
-        let m = mems::create(
-            tx,
-            cx.ws,
-            &NewMem {
-                kind: a.kind.clone(),
-                text: a.text,
-                source_type: "me".into(),
-                source_label: "你说的".into(),
-                visibility: a.visibility,
-                level: a.level,
-                status: "confirmed".into(),
-                writer: "me".into(),
-                created_by: cx.actor.into(),
-                about: a.about,
-                ..Default::default()
-            },
-        )?;
-        sync::sync_mem(tx, &m.id, at)?;
-        base::audit(
-            tx,
-            cx.ws,
-            cx.actor,
-            "mem.create",
-            &m.id,
-            &json!({ "kind": a.kind, "changeset": cx.changeset_id }),
-        )?;
+        let m = tx.write(|w| -> ApiResult<_> {
+            if !References(w).scope_exists(cx.ws, &a.visibility)? {
+                return Err(ApiError::not_found("团队"));
+            }
+            check_about(w, cx, &a.about)?;
+            let at = now();
+            sources::ensure_builtin(w, cx.ws, cx.actor, at)?;
+            let m = Memories(w).create(
+                cx.ws,
+                &NewMem {
+                    kind: a.kind.clone(),
+                    text: a.text,
+                    source_type: "me".into(),
+                    source_label: "你说的".into(),
+                    visibility: a.visibility,
+                    level: a.level,
+                    status: "confirmed".into(),
+                    writer: "me".into(),
+                    created_by: cx.actor.into(),
+                    about: a.about,
+                    ..Default::default()
+                },
+            )?;
+            sync::sync_mem(w, &m.id, at)?;
+            w.audit(
+                cx.ws,
+                cx.actor,
+                "mem.create",
+                &m.id,
+                &json!({ "kind": a.kind, "changeset": cx.changeset_id }),
+            )?;
+            Ok(m)
+        })?;
         cx.bind("mem", json!(m.id));
         Ok(json!({ "id": m.id }))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, _: &Value, before: &Value) -> ApiResult<()> {
-        if let Some(id) = before["id"].as_str() {
-            mems::delete(tx, id)?;
-            sync::sync_mem(tx, id, now())?;
-            base::audit(
-                tx,
-                cx.ws,
-                cx.actor,
-                "mem.delete",
-                id,
-                &json!({ "undo": cx.changeset_id }),
-            )?;
-        }
-        Ok(())
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        _: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = &w.legacy();
+        tx.write(|w| {
+            if let Some(id) = before["id"].as_str() {
+                Memories(w).delete(id)?;
+                sync::sync_mem(w, id, now())?;
+                w.audit(
+                    cx.ws,
+                    cx.actor,
+                    "mem.delete",
+                    id,
+                    &json!({ "undo": cx.changeset_id }),
+                )?;
+            }
+            Ok(())
+        })
     }
 }
 
 /// `kb.note.create {title, body, visibility?, level?}`.
-struct NoteCreateOp(Knowledge);
+struct NoteCreateOp;
 
 impl ChangeOp for NoteCreateOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = &w.legacy();
         let title = op["title"].as_str().unwrap_or("").trim();
         let body = op["body"].as_str().unwrap_or("");
         Check::new()
             .len("title", title, 1, 120)
             .len("body", body, 0, 200_000)
             .done()?;
-        if let Some(v) = scope_arg::<Visibility>(op, "visibility")?
-            && !repo::scope_exists(c, cx.ws, &v)?
-        {
-            return Err(ApiError::not_found("团队"));
-        }
-        scope_arg::<Level>(op, "level")?;
-        Ok(())
-    }
-
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
-        let id = notes::create(
-            tx,
-            cx.ws,
-            cx.actor,
-            &NewNote {
-                title: op["title"].as_str().unwrap_or("").trim().to_string(),
-                body: op["body"].as_str().unwrap_or("").to_string(),
-                visibility: scope_arg(op, "visibility")?,
-                level: scope_arg(op, "level")?,
-                about: vec![],
-            },
-            now(),
-        )?;
+        let visibility = scope_arg::<Visibility>(op, "visibility")?;
+        let id = tx.write(|w| -> ApiResult<_> {
+            if let Some(v) = &visibility
+                && !References(w).scope_exists(cx.ws, v)?
+            {
+                return Err(ApiError::not_found("团队"));
+            }
+            let id = notes::create(
+                w,
+                cx.ws,
+                cx.actor,
+                &NewNote {
+                    title: title.into(),
+                    body: body.into(),
+                    visibility,
+                    level: scope_arg(op, "level")?,
+                    about: vec![],
+                },
+                now(),
+            )?;
+            crate::state::emit_change(w, cx.ws, &id);
+            Ok(id)
+        })?;
         cx.bind("note", json!(id));
-        self.0.notify(cx.ws, &id);
         Ok(json!({ "id": id }))
     }
 
-    fn undo(&self, tx: &Tx, cx: &OpCx, _: &Value, before: &Value) -> ApiResult<()> {
-        if let Some(id) = before["id"].as_str()
-            && repo::doc(tx, id)?.is_some()
-        {
-            index::delete_doc(tx, id)?;
-            base::audit(
-                tx,
-                cx.ws,
-                cx.actor,
-                "kb_note.delete",
-                id,
-                &json!({ "undo": cx.changeset_id }),
-            )?;
-            self.0.notify(cx.ws, id);
-        }
-        Ok(())
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        _: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = &w.legacy();
+        tx.write(|w| {
+            if let Some(id) = before["id"].as_str()
+                && Documents(w).doc(id)?.is_some()
+            {
+                index::delete_doc(w, id)?;
+                w.audit(
+                    cx.ws,
+                    cx.actor,
+                    "kb_note.delete",
+                    id,
+                    &json!({ "undo": cx.changeset_id }),
+                )?;
+                crate::state::emit_change(w, cx.ws, id);
+            }
+            Ok(())
+        })
     }
 }
 
 /// `kb.doc.patch {doc, set:{visibility?: code|null, level?: code|null}}` (`null` = follow the source).
-struct DocPatchOp(Knowledge);
+struct DocPatchOp;
 
 /// Sets a document's own scope and rewrites its index rows; returns the scope it had.
-fn set_doc_scope(tx: &Tx, cx: &OpCx, doc_id: &str, set: &Value) -> ApiResult<Value> {
-    let viewer = Viewer::load(tx, cx.ws, cx.actor)?;
+fn set_doc_scope(tx: &mut W<'_>, cx: &OpCx, doc_id: &str, set: &Value) -> ApiResult<Value> {
+    let viewer = Viewer::bare(cx.ws, cx.actor);
     let (d, s) = own_doc(tx, &viewer, doc_id, "文档")?;
     let vis: Option<Visibility> = match set.get("visibility") {
         None => d.visibility.clone(),
@@ -1427,46 +1536,48 @@ fn set_doc_scope(tx: &Tx, cx: &OpCx, doc_id: &str, set: &Value) -> ApiResult<Val
         Some(v) => scope_arg(&json!({ "v": v }), "v")?,
     };
     if let Some(v) = &vis
-        && !repo::scope_exists(tx, cx.ws, v)?
+        && !References(tx).scope_exists(cx.ws, v)?
     {
         return Err(ApiError::not_found("团队"));
     }
     let before = json!({ "visibility": d.visibility, "level": d.level });
     if vis != d.visibility || level != d.level {
-        repo::set_doc_scope(tx, &d.id, vis.as_ref(), level, now())?;
+        Documents(tx).set_doc_scope(&d.id, vis.as_ref(), level, now())?;
         let eff = vis.clone().unwrap_or_else(|| s.visibility.clone());
         index::rescope(tx, "chunk", &d.id, &eff, level.unwrap_or(s.level))?;
     }
-    base::audit(
-        tx,
+    tx.audit(
         cx.ws,
         cx.actor,
         "kb_doc.patch",
         &d.id,
         &json!({ "visibility": vis, "level": level, "changeset": cx.changeset_id }),
     )?;
+    crate::state::emit_change(tx, cx.ws, doc_id);
     Ok(before)
 }
 
 impl ChangeOp for DocPatchOp {
-    fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
-        let viewer = Viewer::load(c, cx.ws, cx.actor)?;
-        own_doc(c, &viewer, op["doc"].as_str().unwrap_or(""), "文档").map(|_| ())
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+        let tx = &w.legacy();
+        let id = op["doc"].as_str().unwrap_or("");
+        tx.write(|w| set_doc_scope(w, cx, id, &op["set"]))
     }
 
-    fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
+    fn undo(
+        &self,
+        w: &mut steve_store::W<'_>,
+        cx: &OpCx,
+        op: &Value,
+        before: &Value,
+    ) -> ApiResult<()> {
+        let tx = &w.legacy();
         let id = op["doc"].as_str().unwrap_or("");
-        let before = set_doc_scope(tx, cx, id, &op["set"])?;
-        self.0.notify(cx.ws, id);
-        Ok(before)
-    }
-
-    fn undo(&self, tx: &Tx, cx: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
-        let id = op["doc"].as_str().unwrap_or("");
-        if repo::doc(tx, id)?.is_some() {
-            set_doc_scope(tx, cx, id, before)?;
-            self.0.notify(cx.ws, id);
-        }
-        Ok(())
+        tx.write(|w| {
+            if Documents(w).doc(id)?.is_some() {
+                set_doc_scope(w, cx, id, before)?;
+            }
+            Ok(())
+        })
     }
 }

@@ -39,7 +39,7 @@ use steve_channels::{
 use steve_flow::AdapterError;
 use steve_flow::graph::{Graph, Node};
 use steve_flow::nodes::action::Action;
-use steve_flow::runs::{self, NewRun};
+use steve_flow::runs::NewRun;
 use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowCx, FlowSetup, LinearExecutor, NodeOutcome, RunCx};
 use steve_modules::accounts::connections::ConnCx;
@@ -84,7 +84,7 @@ fn bot_connection(h: &TestEnv, handle: &str, name: &str) -> String {
         .transaction(|tx| -> ApiResult<String> {
             ensure_seeds(tx, WS)?;
             steve_modules::contacts::service::ensure_base(tx, &caller(WS, ME))?;
-            let org = steve_modules::contacts::repo::self_org(tx, WS)?.expect("self org");
+            let org = tx.write(|w| w.contacts().own_org(WS))?.expect("self org");
             let a = arepo::insert(
                 tx,
                 WS,
@@ -500,7 +500,7 @@ async fn a_bot_reply_rule_sends_with_signature_basis_and_audit() {
     let basis = h
         .env
         .store()
-        .reader(|c| steve_channels::basis::of_message(c, WS, &id))
+        .read(|r| steve_channels::basis::of_message(r, WS, &id))
         .unwrap()
         .expect("basis");
     assert_eq!(basis.verdict, "pass");
@@ -513,10 +513,7 @@ async fn a_bot_reply_rule_sends_with_signature_basis_and_audit() {
         1
     );
     // the space page sees the basis
-    let msg = h
-        .env
-        .store()
-        .reader(|c| steve_channels::messages::get(c, &id))
+    let msg = steve_channels::messages::get(h.env.store(), &id)
         .unwrap()
         .unwrap();
     assert_eq!(msg.basis["verdict"], "pass");
@@ -774,7 +771,7 @@ async fn another_groups_customer_is_flagged_and_rewritten() {
     let b = h
         .env
         .store()
-        .reader(|c| steve_channels::basis::of_message(c, WS, &message_id))
+        .read(|r| steve_channels::basis::of_message(r, WS, &message_id))
         .unwrap()
         .unwrap();
     assert_eq!(b.verdict, "rewritten");
@@ -932,7 +929,7 @@ async fn a_failed_rewrite_becomes_a_draft_even_with_a_grant() {
     let b = h
         .env
         .store()
-        .reader(|c| steve_channels::basis::of_message(c, WS, &message_id))
+        .read(|r| steve_channels::basis::of_message(r, WS, &message_id))
         .unwrap()
         .unwrap();
     assert_eq!(b.verdict, "drafted");
@@ -968,7 +965,7 @@ async fn the_check_model_sees_the_whole_reply_and_its_failure_is_not_a_pass() {
     let b = h
         .env
         .store()
-        .reader(|c| steve_channels::basis::of_message(c, WS, &message_id))
+        .read(|r| steve_channels::basis::of_message(r, WS, &message_id))
         .unwrap()
         .unwrap();
     assert_eq!(b.verdict, "unchecked");
@@ -1654,27 +1651,24 @@ fn insert_run(h: &H, context: Value) -> steve_flow::runs::RunRow {
     let id = h
         .env
         .store()
-        .transaction(|tx| {
-            runs::insert(
-                tx,
-                &NewRun {
-                    ws: WS,
-                    flow_id: "flw_test",
-                    flow_version: 1,
-                    trigger_kind: "event",
-                    status: "running",
-                    error: None,
-                    outcome_label: "",
-                    cursor: Some("a"),
-                    context: &context,
-                    now: 1,
-                },
-            )
+        .write(|tx| {
+            steve_store::RunRows(tx).insert(&NewRun {
+                ws: WS,
+                flow_id: "flw_test",
+                flow_version: 1,
+                trigger_kind: "event",
+                status: "running",
+                error: None,
+                outcome_label: "",
+                cursor: Some("a"),
+                context: &context,
+                now: 1,
+            })
         })
         .expect("run");
     h.env
         .store()
-        .reader(|c| runs::get(c, &id))
+        .read(|r| steve_store::RunRows(r).get(&id))
         .unwrap()
         .unwrap()
 }
@@ -2121,7 +2115,9 @@ async fn what_went_out_as_you_is_recalled_as_you_whatever_the_voice_is_now() {
     h.env
         .store()
         .transaction(|tx| -> ApiResult<()> {
-            spaces::see(tx, WS, &space, &h.oncall, None, now)?;
+            tx.write(|w| {
+                steve_store::channel_spaces::registration::see(w, WS, &space, &h.oncall, None, now)
+            })?;
             spaces::set_voice(tx, WS, &space, Some(&h.oncall), now)?;
             Ok(())
         })
@@ -2564,9 +2560,9 @@ async fn attention_quiet_and_blocked_against_trigger_words() {
     let n = sent(&h).len();
     h.env
         .store()
-        .transaction(|tx| {
+        .write(|w| {
             steve_channels::write_blocks::record(
-                tx,
+                w,
                 WS,
                 &me,
                 &sp,
@@ -2940,7 +2936,8 @@ async fn a_reply_meant_for_you_becomes_a_question_in_your_inbox() {
     let owner = h
         .env
         .store()
-        .reader(|c| steve_channels::personas::owner_name(c, WS))
+        .read::<_, steve_store::StoreError>(|c| Ok(steve_channels::personas::owner_name(c, WS)))
+        .unwrap()
         .expect("owner");
     h.env.gateway.script(
         H_SAFETY,
@@ -3713,7 +3710,7 @@ async fn a_draft_is_not_rewritten_until_you_ask() {
     let b = h
         .env
         .store()
-        .reader(|c| steve_channels::basis::of_message(c, WS, &message_id))
+        .read(|r| steve_channels::basis::of_message(r, WS, &message_id))
         .unwrap()
         .unwrap();
     assert_eq!(b.verdict, "rewritten");
@@ -3784,7 +3781,7 @@ async fn under_yolo_a_flagged_draft_is_rewritten_first() {
     let b = h
         .env
         .store()
-        .reader(|c| steve_channels::basis::of_message(c, WS, &message_id))
+        .read(|r| steve_channels::basis::of_message(r, WS, &message_id))
         .unwrap()
         .unwrap();
     assert_eq!(b.verdict, "rewritten", "YOLO may approve it");
@@ -4190,7 +4187,7 @@ async fn a_rewrite_is_checked_against_the_retrieved_knowledge_too() {
     let basis = |h: &H| {
         h.env
             .store()
-            .reader(|c| steve_channels::basis::of_message(c, WS, &message_id))
+            .read(|r| steve_channels::basis::of_message(r, WS, &message_id))
             .unwrap()
             .unwrap()
     };
@@ -4577,7 +4574,16 @@ async fn output_pipeline_real_source_reply_uses_existing_outbox_and_stable_ledge
     h.env
         .store()
         .transaction(|tx| -> ApiResult<()> {
-            spaces::see(tx, WS, &src.space_id, &h.me, None, h.ch.now())?;
+            tx.write(|w| {
+                steve_store::channel_spaces::registration::see(
+                    w,
+                    WS,
+                    &src.space_id,
+                    &h.me,
+                    None,
+                    h.ch.now(),
+                )
+            })?;
             spaces::set_voice(tx, WS, &src.space_id, Some(&h.me), h.ch.now())?;
             Ok(())
         })
@@ -6391,7 +6397,7 @@ async fn recovery_discard_and_inbound_replay_never_revive_old_messages() {
     *h.fake.block_send.lock().unwrap() = None;
     h.env
         .store()
-        .transaction(|tx| steve_channels::write_blocks::lift_connection(tx, &h.oncall, true))
+        .write(|w| steve_channels::write_blocks::lift_connection(w, &h.oncall, true))
         .unwrap();
     h.env
         .clock
@@ -6682,7 +6688,7 @@ async fn recovery_undo_of_unknown_discard_preserves_uncertainty_and_the_original
 fn basis_of(h: &H, message_id: &str) -> steve_channels::basis::BasisOut {
     h.env
         .store()
-        .reader(|c| steve_channels::basis::of_message(c, WS, message_id))
+        .read(|r| steve_channels::basis::of_message(r, WS, message_id))
         .unwrap()
         .unwrap()
 }
@@ -7473,7 +7479,7 @@ async fn durable_send_deadlines_keep_direct_claim_strict_boundaries() {
     );
     f.h.env
         .store()
-        .transaction(|tx| steve_channels::send_state::keep(tx, "contract-direct", &Auth::None))
+        .write(|w| steve_channels::send_state::keep(w, "contract-direct", &Auth::None))
         .unwrap();
     assert_eq!(
         f.source.next_due().await.unwrap(),
@@ -7627,7 +7633,7 @@ async fn queue_uses_the_latest_of_multiple_notification_deadlines() {
                 if direct {
                     tx.execute("UPDATE chan_messages SET decision_id=NULL, created=?2, sent=NULL WHERE id=?1",
                         rusqlite::params![id,now-steve_channels::outbound::UNCLAIMED_MS-1])?;
-                    steve_channels::send_state::keep(tx, &id, &Auth::None)?;
+                    tx.write(|w| steve_channels::send_state::keep(w, &id, &Auth::None))?;
                 }
                 Ok(())
             }).unwrap();

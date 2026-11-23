@@ -402,10 +402,7 @@ impl Declare<'_> {
                 "handle system {id} without a label"
             )));
         }
-        if steve_modules::accounts::repo::BUILTIN_SYSTEMS
-            .iter()
-            .any(|b| b.0 == id)
-        {
+        if steve_store::is_builtin_system(id) {
             return Err(ExtensionError::new(format!(
                 "handle system {id} is one of the Hub's own"
             )));
@@ -425,10 +422,8 @@ impl Declare<'_> {
     fn check_systems(&self) -> Result<(), ExtensionError> {
         for d in self.decls.values() {
             let s = d.handle_system.as_str();
-            let known = steve_modules::accounts::repo::BUILTIN_SYSTEMS
-                .iter()
-                .any(|b| b.0 == s)
-                || self.systems.iter().any(|(x, _, _)| x == s);
+            let known =
+                steve_store::is_builtin_system(s) || self.systems.iter().any(|(x, _, _)| x == s);
             if !known {
                 let owner = self.owners.get(&d.adapter).cloned().unwrap_or_default();
                 return Err(ExtensionError::new(format!(

@@ -11,17 +11,16 @@ use std::time::Duration;
 
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::contacts::memory::{MAX_OPEN_CONFIRMS, confirm_question, record_name};
-use steve_modules::contacts::people_repo::open_mem_confirms;
 use steve_modules::decisions::{self, DecisionCx, DecisionHandler};
 use steve_modules::{ApiError, ApiResult, Body, Caller, Check, Modules};
-use steve_store::base::mems::{self, Mem, MemPatch, NewMem};
-use steve_store::base::{self, Level, ObjRef, Viewer, Visibility};
-use steve_store::{Decision, Tx};
+use steve_store::base::mems::{Mem, MemPatch, NewMem};
+use steve_store::base::{Level, ObjRef, Viewer, Visibility};
+use steve_store::knowledge::{CandidateInfo, CandidateOrigin, CandidateRows, Memories};
+use steve_store::{Decision, DecisionRows, Read, Tx, W, Workspaces};
 
 use crate::extract::Names;
 use crate::service::{mem_json_for, prepare};
@@ -165,13 +164,12 @@ fn cut(s: &str, n: usize) -> String {
 /// Writes a candidate: the private `mems` row, its `about` rows, its `mem_candidates` row and, while
 /// fewer than 20 memory decisions are open in the workspace, a `confirm` decision. Publishes `mm`
 /// (and `decision`). Returns the memory.
-pub fn propose(tx: &Tx, o: &Origin, c: &NewCandidate) -> ApiResult<Mem> {
+pub fn propose_in(tx: &mut W<'_>, o: &Origin, c: &NewCandidate) -> ApiResult<Mem> {
     let source_id = match o.kind {
         OriginKind::Tool => o.item_id.clone().or_else(|| o.session_id.clone()),
         _ => Some(o.id.clone()).filter(|s| !s.is_empty()),
     };
-    let mem = mems::create(
-        tx,
+    let mem = Memories(tx).create(
         &o.ws,
         &NewMem {
             kind: c.kind.clone(),
@@ -189,49 +187,46 @@ pub fn propose(tx: &Tx, o: &Origin, c: &NewCandidate) -> ApiResult<Mem> {
         },
     )?;
     let evidence = cut(&c.evidence, EVIDENCE_MAX);
-    tx.prepare_cached(
-        "INSERT OR REPLACE INTO mem_candidates (mem_id, workspace_id, origin, origin_id, origin_label, evidence, supersedes, created)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-    )?
-    .execute(params![
-        mem.id,
-        o.ws,
-        o.kind.code(),
-        o.id,
-        o.label,
-        evidence,
-        c.supersedes,
-        mem.created
-    ])?;
+    CandidateRows(tx).record(
+        &o.ws,
+        &mem.id,
+        CandidateOrigin {
+            kind: o.kind.code(),
+            id: &o.id,
+            label: &o.label,
+            evidence: &evidence,
+            supersedes: c.supersedes.as_deref(),
+            created: mem.created,
+        },
+    )?;
     let mut mem = mem;
     let auto = c.owner_said && c.supersedes.is_none();
-    if auto || open_mem_confirms(tx, &o.ws)? < MAX_OPEN_CONFIRMS {
+    if auto || DecisionRows(tx).open_confirmations(&o.ws, SUBJECT)? < MAX_OPEN_CONFIRMS {
         mem = open_candidate_confirmation(tx, o, c, &mem, &evidence)?;
     }
     if auto {
         // you said so yourself: kept now, the card settled as yours, undoable like your own yes
         answer(tx, &o.ws, "steve", &mem.id, "yes", "")?;
         if let Some(d) = mem.decision_id.as_deref() {
-            base::decisions::settle(
-                tx,
+            DecisionRows(tx).settle(
                 d,
                 &json!({"choice": "yes", "auto": "owner_said"}),
                 "resolved",
                 &json!({"auto": true}),
             )?;
         }
-        base::audit(
-            tx,
+        tx.audit(
             &o.ws,
             "steve",
             "mm.auto_confirm",
             &mem.id,
             &json!({"origin": o.kind.code(), "origin_id": o.id}),
         )?;
-        mem = mems::get(tx, &mem.id)?.ok_or_else(|| ApiError::not_found(NOUN))?;
+        mem = Memories(tx)
+            .get(&mem.id)?
+            .ok_or_else(|| ApiError::not_found(NOUN))?;
     }
-    base::audit(
-        tx,
+    tx.audit(
         &o.ws,
         &o.writer,
         "mm.propose",
@@ -242,7 +237,7 @@ pub fn propose(tx: &Tx, o: &Origin, c: &NewCandidate) -> ApiResult<Mem> {
 }
 
 fn open_candidate_confirmation(
-    tx: &Tx,
+    tx: &mut W<'_>,
     o: &Origin,
     c: &NewCandidate,
     mem: &Mem,
@@ -259,7 +254,7 @@ fn open_candidate_confirmation(
         draft.push_str(&format!("\n原话：{evidence}"));
     }
     if let Some(id) = c.supersedes.as_deref()
-        && let Some(old) = mems::get(tx, id)?
+        && let Some(old) = Memories(tx).get(id)?
     {
         draft.push_str(&format!("\n会替换：{}", old.text));
     }
@@ -272,16 +267,16 @@ fn open_candidate_confirmation(
     );
     nd.draft = Some(draft);
     nd.session_id = o.session_id.clone();
-    let d = base::decisions::open(tx, &nd)?;
-    mems::patch(
-        tx,
-        &mem.id,
-        &MemPatch {
-            decision_id: Some(Some(d.id)),
-            ..Default::default()
-        },
-    )?
-    .ok_or_else(|| ApiError::not_found(NOUN))
+    let d = DecisionRows(tx).open(&nd)?;
+    Memories(tx)
+        .patch(
+            &mem.id,
+            &MemPatch {
+                decision_id: Some(Some(d.id)),
+                ..Default::default()
+            },
+        )?
+        .ok_or_else(|| ApiError::not_found(NOUN))
 }
 
 /// Line heads of the confirm card's draft; the 待确认 list reads them back.
@@ -299,13 +294,11 @@ fn kind_name(kind: &str) -> &'static str {
 }
 
 /// `(why, scope)` written on a candidate's decision (empty without one, or from before ST-41).
-fn reasons(c: &Connection, decision: Option<&str>) -> ApiResult<(String, String)> {
+fn reasons(c: &mut impl Read, decision: Option<&str>) -> ApiResult<(String, String)> {
     let Some(d) = decision else {
         return Ok(Default::default());
     };
-    let draft = base::decisions::get(c, d)?
-        .map(|d| d.draft)
-        .unwrap_or_default();
+    let draft = DecisionRows(c).get(d)?.map(|d| d.draft).unwrap_or_default();
     let line = |head: &str| {
         draft
             .lines()
@@ -317,21 +310,13 @@ fn reasons(c: &Connection, decision: Option<&str>) -> ApiResult<(String, String)
 }
 
 /// A `mem_candidates` row: `(origin, origin_label, evidence, supersedes)`.
-type CandidateRow = (String, String, String, Option<String>);
-
-fn candidate_row(c: &Connection, mem_id: &str) -> ApiResult<Option<CandidateRow>> {
-    Ok(c.prepare_cached(
-        "SELECT origin, origin_label, evidence, supersedes FROM mem_candidates WHERE mem_id = ?",
-    )?
-    .query_row([mem_id], |r| {
-        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-    })
-    .optional()?)
+fn candidate_row(c: &mut impl Read, id: &str) -> ApiResult<Option<CandidateInfo>> {
+    Ok(CandidateRows(c).info(id)?)
 }
 
 /// The candidate memory `id` of `ws`, still waiting for an answer.
-fn pending(c: &Connection, ws: &str, id: &str) -> ApiResult<Mem> {
-    match mems::get(c, id)? {
+fn pending(c: &mut impl Read, ws: &str, id: &str) -> ApiResult<Mem> {
+    match Memories(c).get(id)? {
         Some(m) if m.workspace_id == ws && m.status == "candidate" => Ok(m),
         Some(m) if m.workspace_id == ws => Err(ApiError::conflict(steve_i18n::t!(
             "knowledge.mem.already_handled"
@@ -343,7 +328,14 @@ fn pending(c: &Connection, ws: &str, id: &str) -> ApiResult<Mem> {
 /// Answers a candidate: `yes` confirms it (with the edited wording `text`, if any) and makes the memory
 /// it supersedes `stale`; `no` deletes it with its candidate row. Re-indexes what changed.
 /// The decision itself is the caller's to settle.
-pub fn answer(tx: &Tx, ws: &str, actor: &str, id: &str, choice: &str, text: &str) -> ApiResult<()> {
+pub fn answer(
+    tx: &mut W<'_>,
+    ws: &str,
+    actor: &str,
+    id: &str,
+    choice: &str,
+    text: &str,
+) -> ApiResult<()> {
     let mem = pending(tx, ws, id)?;
     let now = steve_store::now();
     match choice {
@@ -352,8 +344,7 @@ pub fn answer(tx: &Tx, ws: &str, actor: &str, id: &str, choice: &str, text: &str
             if text.chars().count() > 2000 {
                 return Err(ApiError::invalid("text"));
             }
-            mems::patch(
-                tx,
+            Memories(tx).patch(
                 &mem.id,
                 &MemPatch {
                     text: (!text.is_empty()).then(|| text.to_string()),
@@ -363,14 +354,13 @@ pub fn answer(tx: &Tx, ws: &str, actor: &str, id: &str, choice: &str, text: &str
             )?;
             sync::sync_mem(tx, &mem.id, now)?;
             for old in replaced(tx, &mem.id)? {
-                let Some(o) = mems::get(tx, &old)? else {
+                let Some(o) = Memories(tx).get(&old)? else {
                     continue;
                 };
                 if o.workspace_id != ws || o.status != "confirmed" {
                     continue;
                 }
-                mems::patch(
-                    tx,
+                Memories(tx).patch(
                     &o.id,
                     &MemPatch {
                         status: Some("stale".into()),
@@ -379,8 +369,7 @@ pub fn answer(tx: &Tx, ws: &str, actor: &str, id: &str, choice: &str, text: &str
                 )?;
                 sync::sync_mem(tx, &o.id, now)?;
             }
-            base::audit(
-                tx,
+            tx.audit(
                 ws,
                 actor,
                 "mm.confirm",
@@ -389,13 +378,10 @@ pub fn answer(tx: &Tx, ws: &str, actor: &str, id: &str, choice: &str, text: &str
             )?;
         }
         "no" => {
-            tx.prepare_cached("DELETE FROM mem_candidates WHERE mem_id = ?")?
-                .execute([&mem.id])?;
-            tx.prepare_cached("DELETE FROM mem_supersedes WHERE mem_id = ?")?
-                .execute([&mem.id])?;
-            mems::delete(tx, &mem.id)?;
+            CandidateRows(tx).remove(&mem.id)?;
+            Memories(tx).delete(&mem.id)?;
             sync::sync_mem(tx, &mem.id, now)?;
-            base::audit(tx, ws, actor, "mm.reject", &mem.id, &json!({}))?;
+            tx.audit(ws, actor, "mm.reject", &mem.id, &json!({}))?;
         }
         _ => return Err(ApiError::invalid("choice")),
     }
@@ -404,15 +390,12 @@ pub fn answer(tx: &Tx, ws: &str, actor: &str, id: &str, choice: &str, text: &str
 
 /// The confirmed memories a candidate replaces once confirmed: its `supersedes`, and every memory a
 /// merge names (`mem_supersedes`).
-fn replaced(c: &Connection, id: &str) -> ApiResult<Vec<String>> {
+fn replaced(c: &mut impl Read, id: &str) -> ApiResult<Vec<String>> {
     let mut out: Vec<String> = candidate_row(c, id)?
         .and_then(|r| r.3)
         .into_iter()
         .collect();
-    let more: Vec<String> = c
-        .prepare_cached("SELECT old_id FROM mem_supersedes WHERE mem_id = ? ORDER BY rowid")?
-        .query_map([id], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+    let more = CandidateRows(c).supersedes(id)?;
     for x in more {
         if !out.contains(&x) {
             out.push(x);
@@ -428,60 +411,64 @@ pub struct MemDecisions;
 
 impl DecisionHandler for MemDecisions {
     fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
-        answer(tx, cx.ws, cx.actor, &d.subject_id, cx.choice, cx.text)?;
+        tx.write(|w| answer(w, cx.ws, cx.actor, &d.subject_id, cx.choice, cx.text))?;
         Ok(decisions::choice_result(cx))
     }
 
     /// Undoing a `yes` puts the candidate back and restores the memory it replaced; a `no` deleted
     /// the memory, so it cannot be undone.
     fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
-        if d.result.get("choice").and_then(Value::as_str) != Some("yes") {
-            return Err(ApiError::rule(steve_i18n::t!(
-                "knowledge.mem.deleted_no_undo"
-            )));
-        }
-        let Some(mem) = mems::get(tx, &d.subject_id)? else {
-            return Err(ApiError::rule(steve_i18n::t!(
-                "knowledge.mem.deleted_no_undo"
-            )));
-        };
-        let now = steve_store::now();
-        mems::patch(
-            tx,
-            &mem.id,
-            &MemPatch {
-                status: Some("candidate".into()),
-                ..Default::default()
-            },
-        )?;
-        sync::sync_mem(tx, &mem.id, now)?;
-        for old in replaced(tx, &mem.id)? {
-            if !mems::get(tx, &old)?.is_some_and(|o| o.status == "stale") {
-                continue;
-            }
-            mems::patch(
-                tx,
-                &old,
-                &MemPatch {
-                    status: Some("confirmed".into()),
-                    ..Default::default()
-                },
-            )?;
-            sync::sync_mem(tx, &old, now)?;
-        }
-        Ok(())
+        tx.write(|w| undo_confirmation(w, d))
     }
 
     fn expire(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
-        stale_candidate(tx, &d.subject_id)
+        tx.write(|w| stale_candidate(w, &d.subject_id))
     }
 }
 
+fn undo_confirmation(tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
+    if d.result.get("choice").and_then(Value::as_str) != Some("yes") {
+        return Err(ApiError::rule(steve_i18n::t!(
+            "knowledge.mem.deleted_no_undo"
+        )));
+    }
+    let Some(mem) = Memories(tx).get(&d.subject_id)? else {
+        return Err(ApiError::rule(steve_i18n::t!(
+            "knowledge.mem.deleted_no_undo"
+        )));
+    };
+    let now = steve_store::now();
+    Memories(tx).patch(
+        &mem.id,
+        &MemPatch {
+            status: Some("candidate".into()),
+            ..Default::default()
+        },
+    )?;
+    sync::sync_mem(tx, &mem.id, now)?;
+    for old in replaced(tx, &mem.id)? {
+        if !Memories(tx).get(&old)?.is_some_and(|o| o.status == "stale") {
+            continue;
+        }
+        Memories(tx).patch(
+            &old,
+            &MemPatch {
+                status: Some("confirmed".into()),
+                ..Default::default()
+            },
+        )?;
+        sync::sync_mem(tx, &old, now)?;
+    }
+    Ok(())
+}
+
 /// An unanswered candidate becomes `stale` (the 30-day rule); anything else is left alone.
-fn stale_candidate(tx: &Tx, id: &str) -> ApiResult<()> {
-    if mems::get(tx, id)?.is_some_and(|m| m.status == "candidate") {
-        mems::patch(
-            tx,
+fn stale_candidate(tx: &mut W<'_>, id: &str) -> ApiResult<()> {
+    if Memories(tx)
+        .get(id)?
+        .is_some_and(|m| m.status == "candidate")
+    {
+        Memories(tx).patch(
             id,
             &MemPatch {
                 status: Some("stale".into()),
@@ -538,35 +525,23 @@ async fn resolve_route(
 pub fn list(m: &Modules, who: &Caller) -> ApiResult<Value> {
     prepare(m, who)?;
     let viewer = m.viewer(who)?;
-    m.store
-        .reader(|c| Ok(Value::Array(candidates_of(c, &viewer)?)))
+    crate::read_api(&m.store, |c| Ok(Value::Array(candidates_of(c, &viewer)?)))
 }
 
-fn candidates_of(c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Value>> {
-    let scope = viewer.sql("m");
-    let sql = format!(
-        "SELECT m.id FROM mem_candidates k JOIN mems m ON m.id = k.mem_id
-         WHERE k.workspace_id = ? AND m.workspace_id = ? AND m.status = 'candidate' AND {}
-         ORDER BY k.created DESC, m.created DESC, m.id",
-        scope.sql
-    );
-    let mut p: Vec<rusqlite::types::Value> =
-        vec![viewer.ws.clone().into(), viewer.ws.clone().into()];
-    p.extend(scope.params);
-    let ids: Vec<String> = c
-        .prepare(&sql)?
-        .query_map(rusqlite::params_from_iter(p), |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+fn candidates_of(c: &mut impl Read, viewer: &Viewer) -> ApiResult<Vec<Value>> {
+    let ids = CandidateRows(c).pending(viewer)?;
     let mut out = Vec::with_capacity(ids.len());
     for id in ids {
-        let Some(mem) = mems::get(c, &id)? else {
+        let Some(mem) = Memories(c).get(&id)? else {
             continue;
         };
         let Some((origin, label, evidence, sup)) = candidate_row(c, &id)? else {
             continue;
         };
         let supersedes = match sup {
-            Some(s) => mems::visible(c, viewer, &s)?.map(|o| mem_json_for(c, viewer, &o)),
+            Some(s) => Memories(c)
+                .visible(viewer, &s)?
+                .map(|o| mem_json_for(c, viewer, &o)),
             None => None,
         };
         let (why, scope) = reasons(c, mem.decision_id.as_deref())?;
@@ -604,10 +579,14 @@ pub fn resolve_many(m: &Modules, who: &Caller, b: &ResolveBody) -> ApiResult<Val
         .one_of("choice", &b.choice, &["yes", "no"])
         .done()?;
     let viewer = m.viewer(who)?;
-    let found: Vec<Mem> = m.store.reader(|c| {
+    let found: Vec<Mem> = crate::read_api(&m.store, |c| {
         b.ids
             .iter()
-            .map(|id| mems::visible(c, &viewer, id)?.ok_or_else(|| ApiError::not_found(NOUN)))
+            .map(|id| {
+                Memories(c)
+                    .visible(&viewer, id)?
+                    .ok_or_else(|| ApiError::not_found(NOUN))
+            })
             .collect::<ApiResult<Vec<_>>>()
     })?;
     let mut done = 0;
@@ -618,7 +597,7 @@ pub fn resolve_many(m: &Modules, who: &Caller, b: &ResolveBody) -> ApiResult<Val
         let open = match &mem.decision_id {
             Some(d) => m
                 .store
-                .reader(|c| base::decisions::get(c, d))?
+                .read(|c| DecisionRows(c).get(d))?
                 .filter(|d| d.status == "open")
                 .map(|d| d.id),
             None => None,
@@ -631,11 +610,10 @@ pub fn resolve_many(m: &Modules, who: &Caller, b: &ResolveBody) -> ApiResult<Val
             continue;
         }
         // No open decision (or no handler registered): answer directly, settling any decision too.
-        m.store.transaction(|tx| {
+        m.store.write(|tx| {
             answer(tx, &who.ws, &who.me, &mem.id, &b.choice, "")?;
             if let Some(d) = &mem.decision_id {
-                base::decisions::settle(
-                    tx,
+                DecisionRows(tx).settle(
                     d,
                     &json!({"choice": b.choice}),
                     "resolved",
@@ -656,25 +634,13 @@ pub fn resolve_many(m: &Modules, who: &Caller, b: &ResolveBody) -> ApiResult<Val
 pub fn expired(m: &Modules, who: &Caller) -> ApiResult<Value> {
     prepare(m, who)?;
     let viewer = m.viewer(who)?;
-    m.store.reader(|c| {
-        let scope = viewer.sql("m");
-        let sql = format!(
-            "SELECT m.id, max(a.ts) FROM mems m JOIN mem_candidates k ON k.mem_id = m.id
-               JOIN audit a ON a.workspace_id = m.workspace_id AND a.target = m.id AND a.action = 'mm.expire'
-              WHERE m.workspace_id = ? AND m.status = 'stale' AND {}
-                AND NOT EXISTS (SELECT 1 FROM audit b WHERE b.target = m.id AND b.action = 'mm.confirm' AND b.id > a.id)
-              GROUP BY m.id ORDER BY max(a.ts) DESC LIMIT 50",
-            scope.sql
-        );
-        let mut p: Vec<rusqlite::types::Value> = vec![viewer.ws.clone().into()];
-        p.extend(scope.params);
-        let rows: Vec<(String, i64)> = c
-            .prepare(&sql)?
-            .query_map(rusqlite::params_from_iter(p), |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<rusqlite::Result<_>>()?;
+    crate::read_api(&m.store, |c| {
+        let rows = CandidateRows(c).expired(&viewer, 50)?;
         let mut out = Vec::with_capacity(rows.len());
         for (id, at) in rows {
-            let (Some(mem), Some((_, label, evidence, _))) = (mems::get(c, &id)?, candidate_row(c, &id)?) else {
+            let (Some(mem), Some((_, label, evidence, _))) =
+                (Memories(c).get(&id)?, candidate_row(c, &id)?)
+            else {
                 continue;
             };
             out.push(json!({ "mem": mem_json_for(c, &viewer, &mem), "origin_label": crate::sources::label_shown(&label), "evidence": evidence, "expired": at }));
@@ -691,8 +657,8 @@ pub fn restore(m: &Modules, who: &Caller, id: &str) -> ApiResult<Value> {
     let ok = listed
         .as_array()
         .is_some_and(|xs| xs.iter().any(|x| x["mem"]["id"] == id));
-    m.store.transaction(|tx| {
-        if mems::visible(tx, &viewer, id)?.is_none() {
+    m.store.write(|tx| {
+        if Memories(tx).visible(&viewer, id)?.is_none() {
             return Err(ApiError::not_found(NOUN));
         }
         if !ok {
@@ -701,17 +667,15 @@ pub fn restore(m: &Modules, who: &Caller, id: &str) -> ApiResult<Value> {
             )));
         }
         let now = steve_store::now();
-        mems::patch(
-            tx,
+        Memories(tx).patch(
             id,
             &MemPatch {
                 status: Some("candidate".into()),
                 ..Default::default()
             },
         )?;
-        tx.prepare_cached("UPDATE mem_candidates SET created = ? WHERE mem_id = ?")?
-            .execute(params![now, id])?;
-        base::audit(tx, &who.ws, &who.me, "mm.restore", id, &json!({}))?;
+        CandidateRows(tx).restore(id, now)?;
+        tx.audit(&who.ws, &who.me, "mm.restore", id, &json!({}))?;
         Ok(json!({"ok": true}))
     })
 }
@@ -719,25 +683,20 @@ pub fn restore(m: &Modules, who: &Caller, id: &str) -> ApiResult<Value> {
 /// `kb.candidates_expire`: candidates older than 30 days at `now` become `stale`, their open
 /// decisions `expired`. Returns how many.
 pub fn expire(m: &Modules, now: i64) -> ApiResult<usize> {
-    let wss: Vec<String> = m.store.reader(|c| {
-        Ok::<_, ApiError>(
-            c.prepare("SELECT id FROM workspaces ORDER BY id")?
-                .query_map([], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<String>>>()?,
-        )
-    })?;
+    let mut wss = m.store.read(|c| Workspaces(c).ids())?;
+    wss.sort();
     let mut n = 0;
     for ws in wss {
         let old = m
             .store
-            .reader(|c| mems::candidates_before(c, &ws, now - EXPIRE_AFTER_MS))?;
+            .read(|c| Memories(c).candidates_before(&ws, now - EXPIRE_AFTER_MS))?;
         for (id, dec) in old {
             if let Some(d) = dec {
                 decisions::expire(m, &d)?;
             }
-            m.store.transaction(|tx| {
+            m.store.write(|tx| {
                 stale_candidate(tx, &id)?;
-                base::audit(tx, &ws, "steve", "mm.expire", &id, &json!({}))?;
+                tx.audit(&ws, "steve", "mm.expire", &id, &json!({}))?;
                 Ok::<_, ApiError>(())
             })?;
             n += 1;
@@ -852,7 +811,7 @@ pub fn remember(m: &Modules, cx: &McpCx, args: &Value) -> Result<String, String>
         session_id: cx.session_id.clone(),
     };
     m.store
-        .transaction(|tx| {
+        .write(|tx| {
             let about = match about {
                 None => Vec::new(),
                 Some(a) => {
@@ -867,7 +826,7 @@ pub fn remember(m: &Modules, cx: &McpCx, args: &Value) -> Result<String, String>
                     }
                 }
             };
-            propose(
+            propose_in(
                 tx,
                 &origin,
                 &NewCandidate {

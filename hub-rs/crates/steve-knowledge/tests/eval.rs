@@ -11,12 +11,12 @@ use std::time::Instant;
 use serde_json::json;
 use steve_knowledge::eval::{evaluate, load_cases, load_corpus};
 use steve_knowledge::index::{self, ChunkMeta};
-use steve_knowledge::repo::{self, NewDoc};
 use steve_knowledge::retrieve::{Purpose, Query, retrieve};
 use steve_knowledge::{sources, sync};
 use steve_modules::testkit::{ME, TestEnv, WS};
-use steve_store::base::mems::{self, NewMem};
+use steve_store::base::mems::NewMem;
 use steve_store::base::{Level, Viewer, Visibility};
+use steve_store::knowledge::{Documents, Memories, NewDoc};
 use steve_store::{StoreError, uid};
 
 fn eval_dir() -> PathBuf {
@@ -34,11 +34,10 @@ fn retrieve_on_eval_corpus() {
     let mut mem_refs: HashMap<String, String> = HashMap::new();
     let chunks = env
         .store()
-        .transaction(|tx| {
+        .write(|tx| {
             sources::ensure_builtin(tx, WS, ME, now)?;
             let folder = uid("ks");
-            repo::insert_source(
-                tx,
+            Documents(tx).insert_source(
                 &folder,
                 WS,
                 "folder",
@@ -52,8 +51,7 @@ fn retrieve_on_eval_corpus() {
             let mut n = 0;
             for d in &docs {
                 if d.source_kind == "mems" {
-                    let m = mems::create(
-                        tx,
+                    let m = Memories(tx).create(
                         WS,
                         &NewMem {
                             text: d.chunks[0].text.clone(),
@@ -67,13 +65,12 @@ fn retrieve_on_eval_corpus() {
                     continue;
                 }
                 let src = match d.source_kind.as_str() {
-                    "folder" => repo::source(tx, &folder)?,
-                    k => repo::source_of_kind(tx, WS, k)?,
+                    "folder" => Documents(tx).source(&folder)?,
+                    k => Documents(tx).source_of_kind(WS, k)?,
                 }
                 .expect("source");
                 let id = uid("kd");
-                repo::insert_doc(
-                    tx,
+                Documents(tx).insert_doc(
                     WS,
                     &NewDoc {
                         id: id.clone(),
@@ -115,10 +112,18 @@ fn retrieve_on_eval_corpus() {
 
     let refs: HashMap<String, String> = env
         .store()
-        .reader(|c| {
-            let mut st = c.prepare("SELECT id, ref FROM kb_docs")?;
-            let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
-            Ok::<_, StoreError>(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+        .read(|c| {
+            let sources = Documents(c).sources(WS)?;
+            let mut out = HashMap::new();
+            for source in sources {
+                out.extend(
+                    Documents(c)
+                        .docs_of_source(&source.id)?
+                        .into_iter()
+                        .map(|d| (d.id, d.r#ref)),
+                );
+            }
+            Ok::<_, StoreError>(out)
         })
         .unwrap();
     let viewer = Viewer::bare(WS, ME);
@@ -127,7 +132,7 @@ fn retrieve_on_eval_corpus() {
         let t = Instant::now();
         let hits = env
             .store()
-            .reader(|c| {
+            .read(|c| {
                 let mut query = Query::new(
                     &steve_knowledge::port::SqliteStore,
                     &viewer,
