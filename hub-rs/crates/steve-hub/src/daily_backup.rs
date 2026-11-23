@@ -146,6 +146,7 @@ pub async fn run(home: PathBuf, db: PathBuf, store: steve_store::Store, on: bool
 mod tests {
     use super::*;
     use std::{fs, os::unix::fs::PermissionsExt};
+    use steve_store::{NoPublisher, Store, testkit::hub::backup as fixture};
     const NOT_COPIED: &str = "keychain-pass";
 
     /// Only the owner reads what the copies hold.
@@ -157,9 +158,8 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let db = t.path().join("data/steve.sqlite3");
         fs::create_dir_all(t.path().join("data/files/a")).unwrap();
-        let c = rusqlite::Connection::open(&db).unwrap();
-        c.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES ('kept');")
-            .unwrap();
+        let store = Store::open(&db, NoPublisher).unwrap();
+        fixture::seed(&store).unwrap();
         (t, db)
     }
 
@@ -218,9 +218,7 @@ mod tests {
                 .to_string_lossy()
                 .starts_with("daily-")
         );
-        let c = rusqlite::Connection::open(&m.database).unwrap();
-        let x: String = c.query_row("SELECT x FROM t", [], |r| r.get(0)).unwrap();
-        assert_eq!(x, "kept");
+        assert_eq!(Store::read_file(&m.database, fixture::kept).unwrap(), 1);
         let files = m.files.expect("files");
         assert_eq!(files, m.database.parent().unwrap().join("files.tar"));
         assert_eq!(
@@ -265,26 +263,16 @@ mod tests {
             mpsc,
         };
         let (t, db) = home();
-        let c = rusqlite::Connection::open(&db).unwrap();
-        let mode: String = c
-            .query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(mode, "wal");
-        // some thousand pages: more than a few pieces
-        c.execute_batch(
-            "BEGIN;
-             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 4000)
-             INSERT INTO t SELECT zeroblob(4000) FROM n;
-             COMMIT;",
-        )
-        .unwrap();
+        let store = Store::open(&db, NoPublisher).unwrap();
+        // Some thousand pages: more than a couple of backup steps.
+        fixture::fill(&store).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let writer = std::thread::spawn({
             let stop = stop.clone();
             move || {
                 let mut written = 0u32;
                 while !stop.load(Ordering::Relaxed) {
-                    c.execute("INSERT INTO t VALUES ('more')", []).unwrap();
+                    fixture::append(&store).unwrap();
                     written += 1;
                 }
                 written
@@ -300,11 +288,7 @@ mod tests {
         let written = writer.join().unwrap();
         let m = made.expect("the copy did not end beside a writer").unwrap();
         assert!(written > 0, "nothing was written meanwhile");
-        let copy = rusqlite::Connection::open(&m.database).unwrap();
-        let kept: i64 = copy
-            .query_row("SELECT count(*) FROM t WHERE x = 'kept'", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(kept, 1);
+        assert_eq!(Store::read_file(&m.database, fixture::kept).unwrap(), 1);
     }
 
     #[test]
@@ -322,10 +306,7 @@ mod tests {
     fn a_home_with_nothing_but_the_database_has_no_tar() {
         let t = tempfile::tempdir().unwrap();
         let db = t.path().join("steve.sqlite3");
-        rusqlite::Connection::open(&db)
-            .unwrap()
-            .execute_batch("CREATE TABLE t(x);")
-            .unwrap();
+        steve_store::db::testkit::set_schema(&db, 1, None).unwrap();
         let m = make(t.path(), &db, "20260102").unwrap();
         assert_eq!(m.files, None);
         assert!(m.database.exists());
