@@ -988,15 +988,6 @@ impl Tx<'_> {
     }
 
     pub(crate) fn workflow_item_action(&mut self, item: &str, action: ItemAction) -> Result<()> {
-        if action == ItemAction::Finish {
-            let blockers = self.workflow_blockers(item, true)?;
-            if !blockers.is_empty() {
-                return Err(conflict(format!(
-                    "协作尚未完成，不能关闭主事项：{}",
-                    blockers.join("；")
-                )));
-            }
-        }
         let Some(g) = self.db().store().workflows().get(item)? else {
             return Ok(());
         };

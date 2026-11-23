@@ -59,6 +59,11 @@ pub struct Delivered {
     pub decision: String,
 }
 
+fn finish_owner(core: &crate::Core, id: &str) -> crate::Result<crate::repo::Item> {
+    let item = core.tx().item(id)?;
+    core.lifecycle_command(id, "finish", item.cycle, item.revision, None, None, "me")
+}
+
 impl Kit {
     pub fn project_with_release(&self) -> String {
         let script = self.home().join("release.sh");
@@ -217,7 +222,7 @@ impl Kit {
 
     /// The user marks the item done (the human acceptance of a completion request).
     pub fn finish(&self, item: &str) -> crate::Result<crate::repo::Item> {
-        self.core.item_action(item, crate::ItemAction::Finish, "me")
+        finish_owner(&self.core, item)
     }
 
     pub fn phase(&self, item: &str) -> String {

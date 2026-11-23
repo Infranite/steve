@@ -863,6 +863,59 @@ pub struct LifecycleWrite {
     pub now: Option<String>,
 }
 
+/// Checks the owner's precondition under the same write lock as the cycle commit.
+pub fn require_item_revision_in(
+    w: &mut crate::W<'_>,
+    id: &str,
+    cycle: i64,
+    revision: i64,
+) -> Result<()> {
+    let matches: bool = w.conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM items WHERE id=? AND cycle=? AND revision=? AND phase<>'closed')",
+        params![id, cycle, revision],
+        |r| r.get(0),
+    )?;
+    if !matches {
+        return Err(crate::StoreError::Conflict("item revision changed".into()));
+    }
+    Ok(())
+}
+
+/// Retires undispatched work with a finished cycle. Keep the person's queued text and files in
+/// dispatch history, and leave already submitted work to its original receipt.
+pub fn finish_item_dispatch_in(w: &mut crate::W<'_>, id: &str, cycle: i64) -> Result<()> {
+    let sessions = all(
+        w.conn,
+        "SELECT id FROM sessions WHERE item_id=?",
+        [id],
+        |r| r.get::<_, String>(0),
+    )?;
+    let at = now();
+    for session in sessions {
+        w.conn.execute(
+            "INSERT INTO session_dispatch (id,session_id,text,via,created,files,state,updated)
+             SELECT id,session_id,text,via,created,files,'cancelled',? FROM queued
+             WHERE session_id=? AND via NOT IN ('steve','resumed:steve')
+             ON CONFLICT(id) DO UPDATE SET state='cancelled',updated=excluded.updated
+             WHERE session_dispatch.state='claimed'",
+            params![at, session],
+        )?;
+        super::sessions::discard_queue_in(w, &session)?;
+        w.conn
+            .execute("DELETE FROM session_resume WHERE session_id=?", [&session])?;
+    }
+    w.conn.execute(
+        "DELETE FROM item_dependency_waits WHERE item_id=? AND cycle=? AND state='waiting'",
+        params![id, cycle],
+    )?;
+    w.conn.execute(
+        "UPDATE item_operations SET status='waived', required=0, updated=?
+         WHERE item_id=? AND cycle=? AND status='pending'",
+        params![at, id, cycle],
+    )?;
+    Ok(())
+}
+
 /// Writes one lifecycle step of `id` inside the caller's transaction (stats mark a status change as
 /// [`Items::patch`] does). Returns the item as written.
 pub fn lifecycle_write_in(

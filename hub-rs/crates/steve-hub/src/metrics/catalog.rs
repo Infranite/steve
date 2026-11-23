@@ -16,6 +16,11 @@ pub(super) const LONG: &[&str] = &["steve_node_link_uptime_seconds", "steve_mode
 
 pub(super) fn describe() {
     describe_histogram!(
+        "steve_item_owner_finish_seconds",
+        Seconds,
+        "Time to commit an owner's explicit item finish."
+    );
+    describe_histogram!(
         "steve_bot_selection_seconds",
         Seconds,
         "Time to assess and rank one Bot dispatch request."

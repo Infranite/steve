@@ -99,10 +99,6 @@ pub enum SupplementMode {
 pub enum ItemAction {
     Pause,
     Resume,
-    /// The user marks the item done themselves (no acceptance, no release).
-    Finish,
-    /// Undo the last `Finish`, restoring the item as it was.
-    Unfinish,
     Drop,
     Reopen,
     Archive,
@@ -113,8 +109,6 @@ impl ItemAction {
         Some(match s {
             "pause" => ItemAction::Pause,
             "resume" => ItemAction::Resume,
-            "finish" => ItemAction::Finish,
-            "unfinish" => ItemAction::Unfinish,
             "drop" => ItemAction::Drop,
             "reopen" => ItemAction::Reopen,
             "archive" => ItemAction::Archive,
@@ -126,8 +120,6 @@ impl ItemAction {
         match self {
             ItemAction::Pause => "pause",
             ItemAction::Resume => "resume",
-            ItemAction::Finish => "finish",
-            ItemAction::Unfinish => "unfinish",
             ItemAction::Drop => "drop",
             ItemAction::Reopen => "reopen",
             ItemAction::Archive => "archive",
@@ -138,22 +130,12 @@ impl ItemAction {
         match self {
             ItemAction::Pause => "暂停",
             ItemAction::Resume => "继续",
-            ItemAction::Finish => "标记完成",
-            ItemAction::Unfinish => "撤销了标记完成",
             ItemAction::Drop => "放弃",
             ItemAction::Reopen => "重新打开",
             ItemAction::Archive => "归档",
             ItemAction::Unarchive => "恢复",
         }
     }
-}
-
-/// A completion the user asked for themselves, kept (in memory) so the toast can withdraw it while the
-/// close has not committed yet.
-#[derive(Debug, Clone)]
-pub(crate) struct MarkedDone {
-    /// a turn was running and got cancelled
-    busy: bool,
 }
 
 /// Result of a fork: `{"session": id}` or `{"item": id}`.
@@ -641,6 +623,9 @@ impl Core {
     ) -> Result<Item> {
         let mut t = self.tx();
         let i = t.item(item)?;
+        if command == "finish" {
+            return t.finish_by_owner(&i, expected_cycle, expected_revision, actor);
+        }
         if i.cycle != expected_cycle || i.revision != expected_revision {
             return Err(crate::cycle::conflict(steve_i18n::t!(
                 "core.item.stale",
@@ -4273,85 +4258,6 @@ impl Tx<'_> {
                 }
                 self.db()
                     .item_patch(id, patch![status: "pause", now: "你暂停了"])?;
-            }
-            ItemAction::Finish => {
-                if i.is_finished() {
-                    return Err(steve_modules::ApiError::conflict(steve_i18n::t!(
-                        "core.item.ended"
-                    ))
-                    .into());
-                }
-                if crate::cycle::stopping(&i) {
-                    return Err(crate::cycle::conflict(steve_i18n::t!("core.item.ending")));
-                }
-                let busy = s.as_ref().is_some_and(|s| self.busy(&s.id));
-                self.st.marked_done.insert(id.into(), MarkedDone { busy });
-                self.db()
-                    .timeline_add(id, actor, "me", action.label(), None)?;
-                /* your Finish wins: what Steve still had queued for the agent (a continue, a
-                 * follow-up about the release) is not run, and does not void it (#347) */
-                let dropped = self.drop_steve_queued(id)?;
-                if dropped > 0 {
-                    self.db().timeline_add(
-                        id,
-                        "steve",
-                        "sys",
-                        &format!("你标记了完成，Steve 排队给 Bot 的 {dropped} 条消息不再发送"),
-                        None,
-                    )?;
-                }
-                /* you are the acceptor; the running turn is stopped (outside the lock) and the close
-                 * waits until it has */
-                if let Some(turn) = s
-                    .as_ref()
-                    .filter(|s| s.status != "ended")
-                    .and_then(|s| self.rt().running(&s.id))
-                {
-                    self.st.cancels.push((turn, id.into()));
-                }
-                self.lc_request_complete(
-                    id,
-                    actor,
-                    crate::cycle::Policy::Human,
-                    true,
-                    crate::proof::MARKED,
-                    None,
-                    vec![crate::proof::MARKED.into()],
-                )?;
-                return Ok(self.db().item(id)?.unwrap_or(i));
-            }
-            ItemAction::Unfinish => {
-                if i.is_finished() {
-                    self.st.marked_done.remove(id);
-                    return Err(crate::cycle::conflict(steve_i18n::t!(
-                        "core.item.ended_new_cycle"
-                    )));
-                }
-                let m = self
-                    .st
-                    .marked_done
-                    .get(id)
-                    .filter(|_| i.phase == crate::cycle::CLOSING)
-                    .cloned()
-                    .ok_or_else(|| {
-                        steve_modules::ApiError::conflict(steve_i18n::t!(
-                            "core.item.unfinish_only_marked"
-                        ))
-                    })?;
-                self.st.marked_done.remove(id);
-                self.lc_invalidate(id, crate::cycle::void::UNDONE, "你撤销了标记完成")?;
-                self.db()
-                    .timeline_add(id, actor, "me", action.label(), None)?;
-                settle(self.db(), id)?;
-                /* a turn cut off by the finish picks up where it was */
-                let back = self.item(id)?;
-                if m.busy && back.status == "run" {
-                    match s.as_ref().filter(|s| s.status != "ended") {
-                        Some(s) => self.prompt(&s.id, "继续这个事项。", "me"),
-                        None => self.start_or_fail(id, None, None)?,
-                    }
-                }
-                return Ok(back);
             }
             ItemAction::Drop => {
                 self.db()

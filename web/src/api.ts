@@ -353,6 +353,8 @@ export const api = {
   /* one send per key: the same key again (a second click, a retry) is answered `again` and sends nothing */
   annSend: (id: string, ids: string[], key: string) => post<{ ok: boolean; again: boolean; pending?: boolean; sent: number; timeline_id?: number | null; warning?: string }>(`/items/${encodeURIComponent(id)}/annotations/send`, { ids, key }),
   newItem: (p: { goal: string; bot?: string; team?: string; project?: string | null; mode?: "start" | "propose"; client_id?: string; required_specialties?: string[] }) => post<{ id: string }>("/items", p),
+  finishItem: (id: string, cycle: number, revision: number) =>
+    post(`/items/${id}/lifecycle`, { command: "finish", expected_cycle: cycle, expected_revision: revision }),
   itemAction: (id: string, action: string) => post(`/items/${id}/actions`, { action }), bulk: (ids: string[], op: string) => post<{ n: number }>("/items/bulk", { ids, op }),
   goal: (id: string, text: string) => post(`/items/${id}/goal`, { text }),
   patchItem: (id: string, p: Partial<{ title: string; priority: string; due: string | null; star: boolean; accept_mode: string; project_id: string | null; tags: string[] }>) => patch(`/items/${id}`, p),

@@ -58,6 +58,7 @@ pub struct ItemView {
     pub stage: String,
     pub phase: String,
     pub cycle: i64,
+    pub revision: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub bot_id: Option<BotId>,

@@ -26,7 +26,7 @@ fn child(k: &Kit, parent: &str) -> String {
 
 #[test]
 fn completed_and_abandoned_parents_retire_children_without_claiming_their_success() {
-    for action in [ItemAction::Finish, ItemAction::Drop] {
+    for finish in [true, false] {
         let k = Kit::with(|c| c.dynamic_workflows = false);
         let parent = k.item("run", "执行", None);
         let open = child(&k, &parent);
@@ -36,9 +36,7 @@ fn completed_and_abandoned_parents_retire_children_without_claiming_their_succes
             .lc_stop(&failed, FAIL, "workflow", "review failed", None)
             .unwrap();
         let success = child(&k, &parent);
-        k.core
-            .item_action(&success, ItemAction::Finish, "me")
-            .unwrap();
+        k.finish(&success).unwrap();
         let cancelled = child(&k, &parent);
         k.core
             .tx()
@@ -57,7 +55,12 @@ fn completed_and_abandoned_parents_retire_children_without_claiming_their_succes
         let sid = k.session(&open, "idle");
         k.decision(&open, Some(&sid), "ask", "item", &["yes"]);
         k.db().queue_add(&sid, "stale start", "steve", &[]).unwrap();
-        k.core.item_action(&parent, action, "me").unwrap();
+        if finish {
+            k.finish(&parent).unwrap();
+            k.pump_outbox();
+        } else {
+            k.core.item_action(&parent, ItemAction::Drop, "me").unwrap();
+        }
         for id in [&open, &failed] {
             let i = k.db().item(id).unwrap().unwrap();
             assert_eq!(i.phase, "closed");

@@ -82,8 +82,7 @@ fn a_failing_finish_leaves_nothing_behind() {
     assert!(k.finish(&id).is_err());
     assert_eq!(status(&k, &id), "run", "the status change rolled back");
     assert_eq!(k.phase(&id), "active", "the lifecycle rolled back");
-    // your own “标记完成” line stays (it happened); nothing of the close was written
-    assert_eq!(k.timeline_texts(&id).len(), before + 1);
+    assert_eq!(k.timeline_texts(&id).len(), before);
     assert!(
         !k.timeline_texts(&id)
             .iter()
@@ -143,14 +142,11 @@ fn work_tidy_retries_while_a_session_is_busy() {
     let s = k.session(&id, "idle");
     k.rt.st().turning.insert(s.clone());
     k.finish(&id).unwrap();
-    // the close itself waits for the turn: no fact, nothing to tidy yet
-    assert_eq!(k.phase(&id), "closing");
-    assert_eq!(k.pump_outbox().done, 0);
+    assert_eq!(k.phase(&id), "closed");
+    assert_eq!(k.pump_outbox().retried, 1);
     assert!(wt.exists(), "nothing touched while busy");
     k.rt.st().turning.remove(&s);
-    k.core.lifecycle_tick().unwrap();
-    assert_eq!(k.phase(&id), "closed", "closed once the turn ended");
-    let p = k.pump_outbox();
+    let p = k.pump_outbox_at(steve_store::now() + 60_000);
     assert_eq!(p.done, 1);
     assert!(!wt.exists(), "given back once the session is idle");
 }

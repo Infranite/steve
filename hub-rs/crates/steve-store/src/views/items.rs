@@ -146,6 +146,7 @@ fn row(r: &Row<'_>) -> Result<ItemView> {
         stage: r.get(5)?,
         phase,
         cycle: r.get(7)?,
+        revision,
         bot_id: r.get::<Option<String>>(9)?.map(Into::into),
         project_id: r.get::<Option<String>>(10)?.map(Into::into),
         parent,

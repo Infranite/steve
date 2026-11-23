@@ -1317,10 +1317,10 @@ export function setSt(id: string, s: Item["st"]) {
   const i = it(id), action = s === "pause" ? "pause" : s === "drop" ? "drop" : closedSt(i.st) ? "reopen" : "resume"
   void itemCall(id, api.itemAction(id, action), t(({ pause: "core:toast.paused", drop: "core:toast.dropped", reopen: "core:toast.reopened", resume: "core:toast.resumed" } as const)[action]))
 }
-/** mark done right away; the toast can take it back (the Hub restores the item as it was) */
 export async function markDone(id: string) {
-  const r = await itemCall(id, api.itemAction(id, "finish")); if (!r) return
-  toast(t("core:toast.markedDone", { id }), { action: { label: t("core:toast.undo"), onClick: () => void itemCall(id, api.itemAction(id, "unfinish"), t("core:toast.backToBefore", { id })) } })
+  const item = itemView(id)
+  if (!item) return
+  await itemCall(id, api.finishItem(id, item.cycle, item.revision), t("core:toast.markedDone", { id }))
 }
 export function star(id: string) { void itemCall(id, api.patchItem(id, { star: !it(id).star })) }
 export function setAcc(id: string, v: string) { void itemCall(id, api.patchItem(id, { accept_mode: accKey(v) })) }

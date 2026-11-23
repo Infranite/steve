@@ -101,7 +101,6 @@ fn disabling_preserves_graph_blocks_cached_actions_and_allows_explicit_takeover(
     assert_eq!(view["enabled"], false);
     assert_eq!(view["execution_ready"], false);
     assert!(!view["blockers"].as_array().unwrap().is_empty());
-    assert!(off.item_action(&parent, ItemAction::Finish, "me").is_err());
     off.workflow_change(
         &parent,
         json!({"action":"pause","expected_revision":before.revision,"reason":"take over"}),
@@ -149,7 +148,6 @@ fn disabled_workflows_do_not_waive_unsettled_execution_or_revision_checks() {
     }
     assert!(!graph(&k, &parent).single_session());
     assert!(graph(&k, &parent).paused);
-    assert!(off.item_action(&parent, ItemAction::Finish, "me").is_err());
 }
 
 #[test]
@@ -189,7 +187,6 @@ fn disabling_allows_inflight_results_to_settle_without_starting_successors() {
     off.lifecycle_tick().unwrap();
     assert_eq!(unit(&k, &parent, "review").status, "pending");
     assert_eq!(k.rt.st().created.len(), 2);
-    assert!(off.item_action(&parent, ItemAction::Finish, "me").is_err());
 }
 
 #[test]
@@ -1211,11 +1208,6 @@ fn persisted_pause_intent_is_reconciled_after_losing_in_memory_cancels() {
     let gate = k.rt.stop_gate.write().unwrap();
     restarted.lifecycle_tick().unwrap();
     assert!(k.rt.st().cancelled.is_empty());
-    assert!(
-        restarted
-            .item_action(&parent, ItemAction::Finish, "me")
-            .is_err()
-    );
     drop(gate);
     steve_runtime::testkit::eventually_blocking(
         "Every persisted pause request reaches its original runtime turn.",
@@ -1232,11 +1224,6 @@ fn persisted_pause_intent_is_reconciled_after_losing_in_memory_cancels() {
     );
     // A cancellation request is still not proof that either execution has stopped.
     assert_eq!(k.rt.st().turning.len(), 2);
-    assert!(
-        restarted
-            .item_action(&parent, ItemAction::Finish, "me")
-            .is_err()
-    );
 }
 
 #[tokio::test]

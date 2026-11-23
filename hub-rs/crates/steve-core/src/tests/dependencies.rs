@@ -6,6 +6,60 @@ use crate::testkit::Kit;
 use crate::{Core, CoreConfig, ItemAction, patch};
 
 #[test]
+fn owner_finish_closes_paused_items_even_after_a_dropped_prerequisite_left_a_wait() {
+    for stale_wait in [false, true] {
+        let k = Kit::new();
+        let (item, dep, session) = setup(&k);
+        if stale_wait {
+            wait(&k, &session, &[&dep], "automatic");
+            k.core.item_action(&dep, ItemAction::Drop, "me").unwrap();
+            k.db().dep_remove(&item, &dep).unwrap();
+            assert_eq!(
+                k.db()
+                    .store()
+                    .dependency_waits()
+                    .get(&item)
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                "waiting"
+            );
+        }
+        k.core.item_action(&item, ItemAction::Pause, "me").unwrap();
+        assert_eq!(k.status(&item).0, "pause");
+        let before = k.core.tx().item(&item).unwrap();
+        let finish = |core: &Core| {
+            core.lifecycle_command(
+                &item,
+                "finish",
+                before.cycle,
+                before.revision,
+                None,
+                None,
+                "me",
+            )
+            .unwrap()
+        };
+        let closed = finish(&k.core);
+        assert_eq!(closed.phase, "closed");
+        assert_eq!(closed.outcome.as_deref(), Some("completed"));
+        assert_eq!(closed.acceptance.as_deref(), Some("owner"));
+        assert!(
+            k.db()
+                .store()
+                .dependency_waits()
+                .get(&item)
+                .unwrap()
+                .is_none()
+        );
+        let reopened = k.reopened();
+        reopened.lifecycle_tick().unwrap();
+        assert_eq!(finish(&reopened).revision, closed.revision);
+        assert_eq!(k.db().store().items().cycles(&item).unwrap().len(), 1);
+    }
+}
+
+#[test]
 fn creation_saves_prerequisites_before_admission_and_starts_once_after_restart() {
     let k = Kit::new();
     let first = k.item("run", "执行", None);
@@ -113,7 +167,7 @@ fn creation_obeys_disabled_continuation_when_completion_calls_back_directly() {
             ..Default::default()
         })
         .unwrap();
-    k.core.item_action(&dep, ItemAction::Finish, "me").unwrap();
+    k.finish(&dep).unwrap();
     k.core.lifecycle_tick().unwrap();
     assert_eq!(k.status(&item.id).0, "block");
     assert!(k.db().sessions_of_item(&item.id).unwrap().is_empty());
@@ -285,7 +339,6 @@ fn item_page_registers_the_existing_dependency_without_running_a_turn() {
         "waiting"
     );
     assert!(k.db().queued(&s.id).unwrap().is_empty());
-    assert!(k.core.item_action(&item, ItemAction::Finish, "me").is_err());
     // A saved policy does not bypass missing collaboration isolation.
     assert!(k.rt.check_workflow_execution(&item).is_err());
     complete(&k, &dep);
@@ -339,7 +392,6 @@ fn busy_turn_yields_to_block_without_watchdog_or_early_delivery() {
             .to_string()
             .contains("不能请求发布")
     );
-    assert!(k.core.item_action(&item, ItemAction::Finish, "me").is_err());
     assert!(
         steve_store::core_fixture::try_item(
             k.db().store(),

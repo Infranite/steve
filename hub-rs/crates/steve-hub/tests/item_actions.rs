@@ -245,6 +245,13 @@ async fn act(e: &Env, iid: &str, action: &str) -> (u16, Value) {
     .await
 }
 
+async fn finish(e: &Env, iid: &str) -> (u16, Value) {
+    let before = lifecycle(e, iid).await;
+    command(e, iid, json!({
+        "command": "finish", "expected_cycle": before["cycle"], "expected_revision": before["revision"]
+    })).await
+}
+
 async fn item_of(e: &Env, sid: &str) -> String {
     e.session(sid).await["item_id"]
         .as_str()
@@ -304,7 +311,7 @@ async fn creation_blocks_before_opening_a_session_and_completion_starts_it_once(
             .iter()
             .all(|d| d["status"] != "open")
     );
-    let (status, result) = act(&e, dep, "finish").await;
+    let (status, result) = finish(&e, dep).await;
     assert_eq!(status, 200, "{result}");
     eventually(
         "Finishing the dependency starts the dependent item session.",
@@ -401,7 +408,7 @@ async fn closing_a_parent_archives_a_historical_failed_child_over_http() {
         .unwrap()
         .unwrap();
     steve_store::testkit::hub::hub_fixtures::set_items_phase_closed(&store, &child.id).unwrap();
-    let (status, result) = act(&e, &parent.id, "finish").await;
+    let (status, result) = finish(&e, &parent.id).await;
     assert_eq!(status, 200, "{result}");
     let (status, read) = e
         .call("GET", &format!("/api/items/{}", child.id), None)
@@ -431,10 +438,10 @@ async fn pause_finish_drop_and_new_cycles() {
     let iid = item_of(&e, &sid).await;
     assert_eq!(lifecycle(&e, &iid).await["phase"], "active");
 
-    // mark done in the middle of a turn: the request returns at once, the turn is stopped outside the
-    // lock, and the close commits once it stopped
-    let (s, v) = act(&e, &iid, "finish").await;
+    // The response is already closed while stopping the running turn is durable follow-up work.
+    let (s, v) = finish(&e, &iid).await;
     assert_eq!(s, 200, "{v}");
+    assert_eq!(v["item"]["lifecycle"]["phase"], "closed");
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
             "Finishing the item cancels its running session; the running turn is cancelled: {} {}",
@@ -446,16 +453,6 @@ async fn pause_finish_drop_and_new_cycles() {
         e.session(&sid).await["busy"] == false
     })
     .await;
-    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
-        format!(
-            "The finished item closes once its runtime turn has stopped; closed once the turn stopped: {}",
-            lifecycle(&e, &iid).await
-        )
-    });
-    eventually(diagnostic, || async {
-        lifecycle(&e, &iid).await["phase"] == "closed"
-    })
-    .await;
     let l = lifecycle(&e, &iid).await;
     assert_eq!(
         (
@@ -463,14 +460,11 @@ async fn pause_finish_drop_and_new_cycles() {
             l["acceptance"].as_str(),
             l["cycle"].as_i64()
         ),
-        (Some("completed"), Some("human"), Some(1)),
+        (Some("completed"), Some("owner"), Some(1)),
         "{l}"
     );
     let (_, v) = e.call("GET", &format!("/api/items/{iid}"), None).await;
-    assert_eq!(
-        (v["status"].as_str(), v["now"].as_str()),
-        (Some("done"), Some("你标记了完成"))
-    );
+    assert_eq!(v["status"], "done");
     assert_eq!(v["cycles"].as_array().map(Vec::len), Some(1), "{v}");
     // the derived state rides along read-only (#327)
     assert_eq!(
@@ -488,11 +482,8 @@ async fn pause_finish_drop_and_new_cycles() {
         .expect("item in state");
     assert_eq!(row["phase"], "closed", "{row}");
 
-    // a closed cycle: no second finish, no undo, no resume, no message, no supplement
-    for a in ["finish", "unfinish", "resume"] {
-        let (s, v) = act(&e, &iid, a).await;
-        assert_eq!(s, 409, "{a} on a closed item: {v}");
-    }
+    assert_eq!(finish(&e, &iid).await.0, 409);
+    assert_eq!(act(&e, &iid, "resume").await.0, 409);
     let (s, v) = e
         .call(
             "POST",
@@ -589,7 +580,7 @@ async fn pause_finish_drop_and_new_cycles() {
         (Some("closed"), Some("cancelled")),
         "{l}"
     );
-    let (s, v) = act(&e, &iid, "finish").await;
+    let (s, v) = finish(&e, &iid).await;
     assert_eq!(s, 409, "a dropped item can't be marked done: {v}");
 
     // reopen is a new cycle with a goal from the same rules; the earlier cycles stay as they closed

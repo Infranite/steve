@@ -61,8 +61,6 @@ pub mod void {
     pub const REWORK: &str = "rework";
     /// You said it was done after all: accepted again.
     pub const REACCEPT: &str = "reaccept";
-    /// You undid marking it done.
-    pub const UNDONE: &str = "undone";
 }
 
 pub const READY: &str = "ready";
@@ -131,6 +129,7 @@ pub enum Policy {
     Human,
     Automatic,
     Waived,
+    Owner,
 }
 
 impl Policy {
@@ -139,6 +138,7 @@ impl Policy {
             Policy::Human => "human",
             Policy::Automatic => "automatic",
             Policy::Waived => "waived",
+            Policy::Owner => "owner",
         }
     }
 }
@@ -1172,7 +1172,7 @@ impl Tx<'_> {
         if !g.clear() {
             return Ok(false);
         }
-        self.lc_commit(&i, &c)
+        self.commit_cycle(&i, &c, None)
     }
 
     fn lc_closed_plan(&self, i: &Item, c: &Closing) -> Result<ClosedPlan> {
@@ -1246,7 +1246,7 @@ impl Tx<'_> {
         })
     }
 
-    fn lc_closed_effects(
+    pub(crate) fn lc_closed_effects(
         &mut self,
         i: &Item,
         outcome: &str,
@@ -1317,19 +1317,71 @@ impl Tx<'_> {
         Ok(())
     }
 
-    fn lc_commit(&mut self, i: &Item, c: &Closing) -> Result<bool> {
+    pub(crate) fn finish_by_owner(
+        &mut self,
+        item: &Item,
+        expected_cycle: i64,
+        expected_revision: i64,
+        actor: &str,
+    ) -> Result<Item> {
+        if item.cycle == expected_cycle
+            && item.revision.checked_sub(1) == Some(expected_revision)
+            && item.phase == CLOSED
+            && item.acceptance.as_deref() == Some(Policy::Owner.as_str())
+        {
+            return Ok(item.clone());
+        }
+        if item.cycle != expected_cycle || item.revision != expected_revision {
+            return Err(conflict(steve_i18n::t!(
+                "core.item.stale",
+                cycle = item.cycle,
+                revision = item.revision
+            )));
+        }
+        if item.phase == CLOSED {
+            return Err(conflict(closed_msg()));
+        }
+        let started = std::time::Instant::now();
+        let close = Closing {
+            kind: COMPLETE.into(),
+            reason: "owner_finished".into(),
+            policy: Policy::Owner.as_str().into(),
+            ..Closing::default()
+        };
+        self.commit_cycle(item, &close, Some(actor))?;
+        metrics::histogram!("steve_item_owner_finish_seconds")
+            .record(started.elapsed().as_secs_f64());
+        self.item(&item.id)
+    }
+
+    fn commit_cycle(&mut self, i: &Item, c: &Closing, owner: Option<&str>) -> Result<bool> {
         let ClosedPlan {
             outcome,
             acceptance,
             plan,
             reason,
             closed,
-            w,
+            mut w,
             note,
         } = self.lc_closed_plan(i, c)?;
         let (ws, id) = (i.workspace_id.clone(), i.id.clone());
-        let (cycle, rev) = (i.cycle, i.revision);
+        let cycle = i.cycle;
+        let rev = i.revision + i64::from(owner.is_some());
+        w.revision = rev;
         let committed = self.db().store().write(|tx| -> Result<bool> {
+            if let Some(actor) = owner {
+                steve_store::require_item_revision_in(tx, &id, cycle, i.revision)?;
+                steve_store::finish_item_dispatch_in(tx, &id, cycle)?;
+                tx.audit(
+                    &ws,
+                    actor,
+                    "item.lifecycle.finish",
+                    &id,
+                    &json!({
+                        "cycle": cycle, "revision": rev,
+                    }),
+                )?;
+            }
             /* a cycle closes once: a repeated or concurrent commit changes nothing */
             if !steve_store::item_cycle_add_in(
                 tx,
@@ -1388,7 +1440,9 @@ impl Tx<'_> {
         if !committed {
             return Ok(false);
         }
-        self.lc_closed_effects(i, outcome, &acceptance, &reason)?;
+        if owner.is_none() {
+            self.lc_closed_effects(i, outcome, &acceptance, &reason)?;
+        }
         Ok(true)
     }
 

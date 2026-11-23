@@ -1622,11 +1622,6 @@ fn a_queued_steve_message_and_your_finish_complete_the_item() {
     assert_eq!(i.outcome.as_deref(), Some("completed"));
     let t = k.timeline_texts(&x.id);
     assert!(!t.iter().any(|l| l.contains("收到新的消息")), "{t:?}");
-    assert!(
-        t.iter()
-            .any(|l| l == "你标记了完成，Steve 排队给 Bot 的 1 条消息不再发送"),
-        "{t:?}"
-    );
     assert!(k.db().queued(&x.session).unwrap().is_empty());
 }
 

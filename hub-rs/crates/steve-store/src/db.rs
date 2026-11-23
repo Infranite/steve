@@ -256,6 +256,7 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/120.sql"),
     // 121: ordinary Node errors, intent identity, stall evidence, and scoped review findings.
     include_str!("../migrations/121.sql"),
+    include_str!("../migrations/122.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).
@@ -647,6 +648,29 @@ fn add_reasoning_effort(c: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn ensure_item_lifecycle(c: &Connection) -> Result<()> {
+    /* 027's item columns: once, where there are items without them (a module-only schema has no items) */
+    let items: bool = c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'items')",
+        [],
+        |r| r.get(0),
+    )?;
+    if items {
+        let phase: bool = c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('items') WHERE name = 'phase')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !phase {
+            c.execute_batch(ITEM_LIFECYCLE)?;
+        }
+        c.execute_batch(
+            "CREATE INDEX IF NOT EXISTS items_closing ON items(phase) WHERE phase = 'closing'",
+        )?;
+    }
+    Ok(())
+}
+
 /// The migrations after `cur` and the version row, in one transaction. IMMEDIATE: another process
 /// (the upgrade supervisor) may open the same file, and the write lock is taken up front, where the
 /// busy timeout applies, instead of at the first write.
@@ -661,27 +685,12 @@ fn run_pending(c: &Connection, cur: i64, progress: Option<&MigrationTracker<'_>>
             // before adding Bot specialties so fresh and upgraded databases have the same order.
             add_reasoning_effort(&tx)?;
         }
+        if i == 121 {
+            ensure_item_lifecycle(&tx)?;
+        }
         tx.execute_batch(m)?;
     }
-    /* 027's item columns: once, where there are items without them (a module-only schema has no items) */
-    let items: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'items')",
-        [],
-        |r| r.get(0),
-    )?;
-    if items {
-        let phase: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('items') WHERE name = 'phase')",
-            [],
-            |r| r.get(0),
-        )?;
-        if !phase {
-            tx.execute_batch(ITEM_LIFECYCLE)?;
-        }
-        tx.execute_batch(
-            "CREATE INDEX IF NOT EXISTS items_closing ON items(phase) WHERE phase = 'closing'",
-        )?;
-    }
+    ensure_item_lifecycle(&tx)?;
     let broken: Vec<String> = if cur == SCHEMA_VERSION {
         Vec::new()
     } else {

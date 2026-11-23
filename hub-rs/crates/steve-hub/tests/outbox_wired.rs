@@ -208,13 +208,12 @@ async fn finishing_through_the_api_runs_an_item_flow_once_through_the_outbox() {
     let (s, v) = e
         .call(
             "POST",
-            "/api/items/ST-90/actions",
-            Some(json!({"action": "finish"})),
+            "/api/items/ST-90/lifecycle",
+            Some(json!({"command": "finish", "expected_cycle": 1, "expected_revision": 0})),
         )
         .await;
     assert_eq!(s, 200, "{v}");
-    // the request returns at once; with the modules' hooks wired the close commits once they answered
-    assert_eq!(v["phase"], "closing", "{v}");
+    assert_eq!(v["item"]["phase"], "closed", "{v}");
     eventually_sync(
         "The outbox completion closes the delivered work item.",
         || outbox_checks::items_count_st_90_closed_done(&e.db).unwrap() == 1,
@@ -515,8 +514,8 @@ async fn real_completion_notification_reaches_e1_and_existing_c6_fake_adapter() 
     let (s, v) = e
         .call(
             "POST",
-            "/api/items/ST-91/actions",
-            Some(json!({"action":"finish"})),
+            "/api/items/ST-91/lifecycle",
+            Some(json!({"command": "finish", "expected_cycle": 1, "expected_revision": 0})),
         )
         .await;
     assert_eq!(s, 200, "{v}");

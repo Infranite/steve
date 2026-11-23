@@ -314,16 +314,7 @@ pub async fn actions(
     let mut k = Check::object(&v);
     let action = k.enum_(
         "action",
-        &[
-            "pause",
-            "resume",
-            "finish",
-            "unfinish",
-            "drop",
-            "reopen",
-            "archive",
-            "unarchive",
-        ],
+        &["pause", "resume", "drop", "reopen", "archive", "unarchive"],
     );
     k.finish()?;
     ok(Value::Object(
@@ -744,7 +735,10 @@ pub async fn lifecycle(
     own_item(&st, &c.ws, &id).await?;
     let v = body(&b)?;
     let mut k = Check::object(&v);
-    let command = k.enum_("command", &["accept", "cancel", "fail", "new_cycle"]);
+    let command = k.enum_(
+        "command",
+        &["accept", "finish", "cancel", "fail", "new_cycle"],
+    );
     let int = |min: f64| Num {
         int: true,
         min: Some(min),
@@ -756,6 +750,12 @@ pub async fn lifecycle(
     let reason = k.opt_str("reason", Str::ANY);
     let goal = k.opt_str("goal", Str::ANY);
     k.finish()?;
+    if command == "finish" && c.user.get("role").and_then(Value::as_str) != Some("owner") {
+        return Err(ApiError::Json(
+            403,
+            steve_i18n::t!("hub.item.finish_owner_only"),
+        ));
+    }
     match st
         .domain
         .lifecycle_command(&id, &command, cycle, revision, reason, goal, &c.me)

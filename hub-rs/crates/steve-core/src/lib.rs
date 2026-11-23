@@ -142,7 +142,6 @@ pub(crate) struct State {
     /// Item hook calls collected in this critical section, run once the lock is gone.
     hooks: Vec<modules::HookEvent>,
     /// Items the user marked done, with what to restore if they undo it from the toast.
-    marked_done: HashMap<String, orchestrator::MarkedDone>,
     /// Turns to stop once the lock is gone `(turn, item)`: a cancel can call back into the core
     /// (the gateway-retry wait ends with a turn end), so a lifecycle stop never cancels under the lock.
     /// The turn is frozen when the stop is asked for, so a turn started meanwhile is left alone.
