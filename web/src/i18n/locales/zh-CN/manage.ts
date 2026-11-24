@@ -1,6 +1,7 @@
 /* zh-CN strings for the "manage" namespace: the source text, byte-identical to the UI. Conventions: web/src/i18n/index.ts */
 export default {
   dispatch: {
+    chooseBot: "选择 Bot",
     recover: { bots: "查看 Bot 和 Team 设置", devices: "检查执行 Node" },
     requiredSpecialties: "必需专长",
     specialtyPlaceholder: "可选，用逗号分隔",
@@ -82,6 +83,10 @@ export default {
   list: {
     sub: "Steve 调用的能力。日常不用管它们，Steve 会选合适的 Bot；这里是管理入口。",
     newBot: "新建 Bot",
+    joinedTeams: "所属 Team",
+    noTeams: "未加入 Team",
+    teamsLoading: "正在加载 Team…",
+    teamsLoadFailed: "Team 加载失败",
     main: "主 Bot",
     filterAll: "全部",
     filterOn: "启用",

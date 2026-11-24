@@ -467,69 +467,6 @@ async fn a_request_that_changes_nothing_says_how_it_is_set() {
     assert!(ms[1].meta.get("proposal").is_none());
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn module_settings_are_drafted_from_the_conversation() {
-    let k = Kit::new();
-    steve_store::core_fixture::thread::owner(k.db().store(), WS, "usr_dev", "dev", "Dev");
-    let mut r = steve_modules::Registry::new();
-    crate::yolo::draft::register(&mut r, None);
-    let m = steve_modules::Modules::new(k.db().store().clone(), k.core.module_gateway(), r);
-    k.core.attach_modules(m.clone());
-    k.gw.set(|p, _| {
-        if p.starts_with("You are the router") {
-            Ok(r#"{"kind":"config","title":"x"}"#.into())
-        } else if p.starts_with("Which Steve configuration") {
-            assert!(p.contains("yolo:default — YOLO 模式"));
-            Ok(r#"{"targets":["yolo:default"]}"#.into())
-        } else if p.starts_with("You configure YOLO mode") {
-            Ok(r#"{"ops":[{"op":"yolo.set","on":true}]}"#.into())
-        } else {
-            Err(msg("unexpected prompt"))
-        }
-    });
-    k.core
-        .say_as(WS, Some("usr_dev"), "开 YOLO", &[], &[])
-        .unwrap();
-    let ms = settle(&k, 2).await;
-    assert_eq!(
-        ms[1].text, "这是配置改动，我起草好了，确认后应用到「YOLO 模式」：",
-        "{:?}",
-        ms[1]
-    );
-    let p = &ms[1].meta["proposal"];
-    assert_eq!(p["target"], json!({"kind": "yolo", "id": "default"}));
-    assert_eq!(p["changes"][0]["to"], "开");
-    let caller = steve_modules::Caller {
-        ws: WS.into(),
-        me: "usr_dev".into(),
-    };
-    let id = p["id"].as_str().unwrap();
-    steve_modules::changes::apply(&m, &caller, id)
-        .unwrap()
-        .unwrap();
-    k.core.mark_proposal(WS, id, Some("applied"));
-    let msg = k.db().message(&ms[1].id).unwrap().unwrap();
-    assert_eq!(msg.meta["cfg_state"][id], "applied");
-    /* without a known user the modules are not offered */
-    k.gw.set(|p, _| {
-        if p.starts_with("You are the router") {
-            Ok(r#"{"kind":"config","title":"x"}"#.into())
-        } else if p.starts_with("Which Steve configuration") {
-            assert!(!p.contains("yolo:"));
-            Ok(r#"{"targets":["yolo:default"]}"#.into())
-        } else {
-            Ok(r#"{"changes":[]}"#.into())
-        }
-    });
-    k.core.say(WS, "关 YOLO", &[]).unwrap();
-    let ms = settle(&k, 4).await;
-    assert!(
-        ms[3].text.starts_with("我没看出要改「设置 · 通用」"),
-        "{}",
-        ms[3].text
-    );
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn stop_suppresses_the_reply() {
     let k = Kit::new();

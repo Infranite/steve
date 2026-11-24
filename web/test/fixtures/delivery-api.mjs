@@ -87,7 +87,6 @@ export async function deliveryFixture() {
     })
     if (path === "/api/views") return json(res, { rev: 1, views: [], missing: [] })
     if (path === "/api/plugins/themes") return json(res, { themes: [] })
-    if (path === "/api/yolo" || path === "/api/yolo/actions") return json(res, { windows: [], on: false, mode: "off", scopes: [], counts: {} })
     if (path === "/api/stream") { res.writeHead(200, { "content-type": "text/event-stream" }); res.write(": keepalive\n\n"); streams.add(res); req.on("close", () => streams.delete(res)); return }
     if (path === "/api/items/ST-100") return json(res, { ...item, goalsList: [], timeline: [], decisions: [], dependents: [], annotations: [], artifacts: [
       { id: "artifact-md", kind: "file", title: longName, location: null, delivery_id: "md", created },

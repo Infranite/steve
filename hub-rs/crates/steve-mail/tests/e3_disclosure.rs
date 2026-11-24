@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use serde_json::json;
 use steve_channels::disclosure::{CHECK_HEAD, Disclosure};
+use steve_mail::SendOutcome;
 use steve_mail::compose::QuickDraft;
 use steve_mail::drafts::{DraftPatch, NewDraft, RcptIn};
-use steve_mail::{DraftHooks, SendOutcome};
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::decisions::dispatch;
 use steve_modules::outbound::{Audience, CheckCx, CheckResult, KnowledgeUse, OutboundCheck};
@@ -22,13 +22,6 @@ use support::*;
 const PASS_CHECK: &str = r#"{"verdict":"pass","spans":[]}"#;
 const COMPOSE: &str = r#"{"body":"原来的正文","reply_all":false,"needs_attention":false,"why":"回复问题","cites":[]}"#;
 
-struct Yolo(bool);
-impl DraftHooks for Yolo {
-    fn yolo_on(&self, _: &str, _: Option<&str>) -> bool {
-        self.0
-    }
-}
-
 struct NoModelProof;
 #[async_trait::async_trait]
 impl OutboundCheck for NoModelProof {
@@ -39,11 +32,10 @@ impl OutboundCheck for NoModelProof {
     }
 }
 
-async fn real(yolo: bool) -> H {
+async fn real() -> H {
     let check = Disclosure::with_models(vec!["reviewer".into()]);
     let h = setup_with(Opts {
         check: Some(Arc::new(check.clone())),
-        hooks: Some(Arc::new(Yolo(yolo))),
         ..Default::default()
     })
     .await;
@@ -97,11 +89,11 @@ fn prompts(h: &H) -> Vec<String> {
         .collect()
 }
 
-fn approve(h: &H, id: &str, edit: &str, yolo: bool) {
+fn approve(h: &H, id: &str, edit: &str) {
     let d = row(h, id);
     dispatch(
         &h.env.modules,
-        &caller(WS, if yolo { "yolo" } else { ME }),
+        &caller(WS, ME),
         d.decision_id.as_deref().unwrap(),
         "send",
         edit,
@@ -120,63 +112,57 @@ async fn direct(h: &H, body: &str) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn compose_approval_and_edited_approval_check_the_wire_body_with_yolo_on_or_off() {
-    for yolo in [false, true] {
-        for edit in ["", "编辑后要发送的正文"] {
-            let h = real(yolo).await;
-            let (_, thread) = thread(&h).await;
-            h.env.gateway.reply(COMPOSE);
-            let d = h
-                .mail
-                .quick_draft(
-                    &me(),
-                    QuickDraft {
-                        thread_id: thread,
-                        ..Default::default()
-                    },
-                )
-                .await
-                .unwrap();
-            assert_eq!(
-                prompts(&h).len(),
-                usize::from(yolo),
-                "only previews depend on YOLO"
-            );
-            // Even a successful explicit preview is never permission to reuse it at send time.
-            h.mail.check_draft(&me(), &d.id).await.unwrap();
-            let before = prompts(&h).len();
-            approve(&h, &d.id, edit, yolo);
-            assert!(matches!(
-                h.mail.execute(&d.id).await.unwrap(),
-                SendOutcome::Sent { .. }
-            ));
-            assert_eq!(prompts(&h).len(), before + 1);
-            let sent = h.smtp.sent();
-            let parsed = mail_parser::MessageParser::default()
-                .parse(&sent[0].data)
-                .unwrap();
-            let body = parsed.body_text(0).unwrap();
-            let expected = if edit.is_empty() {
-                "原来的正文"
-            } else {
-                edit
-            };
-            assert!(body.contains(expected), "{body}");
-            assert_eq!(body.starts_with("[AI] "), yolo);
-            let prompt = prompts(&h).pop().unwrap();
-            assert!(prompt.contains(expected), "{prompt}");
-            assert_eq!(prompt.contains("[AI] "), yolo, "check the final mark too");
-            let basis = row(&h, &d.id).basis.unwrap();
-            assert_eq!(basis["verdict"], "pass");
-            assert_eq!(basis["check_model"], "reviewer");
-            assert!(!basis["checked_content_hash"].as_str().unwrap().is_empty());
-        }
+async fn compose_approval_and_edited_approval_check_the_wire_body_at_send_time() {
+    for edit in ["", "编辑后要发送的正文"] {
+        let h = real().await;
+        let (_, thread) = thread(&h).await;
+        h.env.gateway.reply(COMPOSE);
+        let d = h
+            .mail
+            .quick_draft(
+                &me(),
+                QuickDraft {
+                    thread_id: thread,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(prompts(&h).is_empty(), "only local checks before preview");
+        // Even a successful explicit preview is never permission to reuse it at send time.
+        h.mail.check_draft(&me(), &d.id).await.unwrap();
+        let before = prompts(&h).len();
+        approve(&h, &d.id, edit);
+        assert!(matches!(
+            h.mail.execute(&d.id).await.unwrap(),
+            SendOutcome::Sent { .. }
+        ));
+        assert_eq!(prompts(&h).len(), before + 1);
+        let sent = h.smtp.sent();
+        let parsed = mail_parser::MessageParser::default()
+            .parse(&sent[0].data)
+            .unwrap();
+        let body = parsed.body_text(0).unwrap();
+        let expected = if edit.is_empty() {
+            "原来的正文"
+        } else {
+            edit
+        };
+        assert!(body.contains(expected), "{body}");
+        assert!(!body.starts_with("[AI] "));
+        let prompt = prompts(&h).pop().unwrap();
+        assert!(prompt.contains(expected), "{prompt}");
+        assert!(!prompt.contains("[AI] "));
+        let basis = row(&h, &d.id).basis.unwrap();
+        assert_eq!(basis["verdict"], "pass");
+        assert_eq!(basis["check_model"], "reviewer");
+        assert!(!basis["checked_content_hash"].as_str().unwrap().is_empty());
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn direct_send_checks_edited_to_cc_bcc_and_body_and_never_sends_twice() {
-    let h = real(false).await;
+    let h = real().await;
     let conn = h.connect().await;
     let d = h.mail.create_draft(&me(), new_draft(&conn, "old")).unwrap();
     h.mail
@@ -231,7 +217,7 @@ async fn direct_send_checks_edited_to_cc_bcc_and_body_and_never_sends_twice() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mcp_draft_and_revision_use_the_same_final_send_check() {
-    let h = real(false).await;
+    let h = real().await;
     let (_, thread) = thread(&h).await;
     db::link_agent_thread(h.env.store(), &thread).unwrap();
     let cx = McpCx {
@@ -248,7 +234,7 @@ async fn mcp_draft_and_revision_use_the_same_final_send_check() {
     }
     assert!(prompts(&h).is_empty());
     let id = db::item_drafts(h.env.store(), "ST-1").remove(0);
-    approve(&h, &id, "MCP final owner edit", false);
+    approve(&h, &id, "MCP final owner edit");
     assert!(matches!(
         h.mail.execute(&id).await.unwrap(),
         SendOutcome::Sent { .. }
@@ -281,7 +267,7 @@ async fn model_failure_unreadable_leak_and_missing_second_model_all_hold_mail() 
             })
             .await
         } else {
-            real(false).await
+            real().await
         };
         let id = direct(&h, "final body").await;
         match case {
@@ -336,7 +322,7 @@ fn retry(h: &H, id: &str) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_passing_preview_cannot_bypass_a_failed_final_check_and_retry_checks_again() {
-    let h = real(false).await;
+    let h = real().await;
     let conn = h.connect().await;
     let d = h
         .mail
@@ -373,7 +359,7 @@ async fn a_passing_preview_cannot_bypass_a_failed_final_check_and_retry_checks_a
 #[tokio::test(flavor = "multi_thread")]
 async fn rules_and_missing_knowledge_stay_blocked_even_after_repeated_checks_and_retries() {
     for missing in [false, true] {
-        let h = real(false).await;
+        let h = real().await;
         let id = direct(&h, "预算为 420万元").await;
         source(&h, &id);
         if missing {

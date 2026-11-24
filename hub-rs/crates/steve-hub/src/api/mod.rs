@@ -2,6 +2,7 @@
 //! Every request runs in one workspace (header `x-steve-ws` or cookie `steve_ws`, checked against membership).
 
 mod annotations;
+pub(crate) mod approval;
 pub(crate) mod attention;
 mod avatar;
 mod bot_dispatch;
@@ -28,7 +29,6 @@ pub mod stats;
 pub mod stream;
 mod updates;
 mod views;
-pub mod yolo;
 
 use std::sync::Arc;
 

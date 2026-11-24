@@ -98,6 +98,7 @@
   "hub.nodes.install_no_ssh": "The Hub's machine cannot make an SSH key (it needs OpenSSH's ssh and ssh-keygen): %{error}",
   "hub.nodes.install_bad_address": "That is not a tailcat address: paste the tc… address tailcat serve printed on the target",
   "hub.nodes.install_no_route": "A new Node could not reach this Hub: turn on Connect over tailcat first, or give the Hub an HTTPS address (STEVE_PUBLIC_URL)",
+  "hub.nodes.install_macos_admin": "A macOS Node needs local administrator approval for its boot service. On the Mac, run Steve setup with a pairing code, then run steve node enable-boot as that account.",
   "hub.nodes.install_unsupported": "No release for the target's platform: %{platform} (Apple silicon macOS and x86_64 Linux are supported)",
   "hub.nodes.install_dev_build": "This Hub is a development build (%{version}) with no release to install; install the Node on the target by hand",
   "hub.nodes.install_not_paired": "The install ran, but the Node did not pair",

@@ -606,7 +606,7 @@ impl Mail {
         let p = tokio::task::spawn_blocking(move || m.draft_prepare(&c2, &a2))
             .await
             .map_err(|e| format!("task failed: {e}"))??;
-        let skip_model = !self.preview_model_now(&cx.ws, cx.item_id.as_deref());
+        let skip_model = true; // drafts are reviewed explicitly; sends still run the full check
         let check = drafts::local_only(
             outbound::check(
                 &self.0.m,

@@ -398,19 +398,10 @@ fn a_degraded_release_says_it_stayed_and_is_not_handed_back() {
 }
 
 #[test]
-fn a_rollback_result_is_noted_on_the_item_and_marks_its_undo() {
+fn a_rollback_result_is_noted_on_the_item_without_reopening_it() {
     let k = Kit::new();
     let i = k.item("done", "完成", None);
     std::fs::create_dir_all(k.home().join("releases")).unwrap();
-    steve_store::core_fixture::rollback_yolo_action(k.db().store(), WS, &i, "ya_1");
-    let undone = |k: &Kit| {
-        k.db()
-            .store()
-            .read(|r| steve_store::yolo::action_get(r, "ya_1"))
-            .unwrap()
-            .unwrap()
-            .undone
-    };
     let note = |k: &Kit| {
         k.db()
             .timeline(&i)
@@ -422,7 +413,7 @@ fn a_rollback_result_is_noted_on_the_item_and_marks_its_undo() {
     let file = k.home().join("releases/rollback.json");
     std::fs::write(
         &file,
-        json!({"ok": false, "version": "v3", "prev": "v4", "item": i, "action": "ya_1",
+        json!({"ok": false, "version": "v3", "prev": "v4", "item": i,
         "error": "不能回滚到 v3：它只认识到 schema v25，数据库（v26）需要至少 v26；当前版本保留"})
         .to_string(),
     )
@@ -440,11 +431,10 @@ fn a_rollback_result_is_noted_on_the_item_and_marks_its_undo() {
             .iter()
             .any(|n| n.contains("回滚到 v3 没有成功"))
     );
-    assert_eq!(undone(&k), None, "a failed rollback undid nothing");
     assert_eq!(k.item_label(&i), "done", "the item is not reopened");
     std::fs::write(
         &file,
-        json!({"ok": true, "version": "v3", "prev": "v4", "item": i, "action": "ya_1"}).to_string(),
+        json!({"ok": true, "version": "v3", "prev": "v4", "item": i}).to_string(),
     )
     .unwrap();
     k.core.report_release().unwrap();
@@ -453,7 +443,6 @@ fn a_rollback_result_is_noted_on_the_item_and_marks_its_undo() {
         "{:?}",
         note(&k)
     );
-    assert!(undone(&k).is_some(), "the undo went through");
     assert_eq!(k.item_label(&i), "done");
     let n = note(&k).len();
     k.core.report_release().unwrap();

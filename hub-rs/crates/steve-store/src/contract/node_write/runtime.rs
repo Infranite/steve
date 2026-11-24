@@ -914,6 +914,7 @@ pub struct NewPermission<'a> {
     pub permission: &'a str,
     pub request: &'a Value,
     pub expires_at: i64,
+    pub resolver: &'a str,
 }
 
 /// Inserts the request as `waiting`. False: this Node's attempt already has a request of that id.
@@ -923,9 +924,9 @@ pub fn insert_permission_in(
     now: i64,
 ) -> Result<bool> {
     Ok(tx.execute(
-        "INSERT INTO runtime_permissions(decision_id,node_id,session_id,attempt_id,permission_id,request,expires_at,state,created,updated)
-           VALUES (?,?,?,?,?,?,?,'waiting',?,?) ON CONFLICT(node_id,attempt_id,permission_id) DO NOTHING",
-        params![p.decision, p.node, p.session, p.attempt, p.permission, to_json(p.request)?, p.expires_at, now, now],
+        "INSERT INTO runtime_permissions(decision_id,node_id,session_id,attempt_id,permission_id,request,expires_at,state,created,updated,resolver)
+           VALUES (?,?,?,?,?,?,?,'waiting',?,?,?) ON CONFLICT(node_id,attempt_id,permission_id) DO NOTHING",
+        params![p.decision, p.node, p.session, p.attempt, p.permission, to_json(p.request)?, p.expires_at, now, now, p.resolver],
     )? == 1)
 }
 

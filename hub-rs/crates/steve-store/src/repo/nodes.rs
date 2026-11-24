@@ -30,7 +30,7 @@ pub struct NodeRow {
     /// `auto` | `notify` | `off`, as its owner set it; `None`: the Hub's default
     /// ([`upgrade_default`]).
     pub upgrade_policy: Option<String>,
-    /// What its machine is, as it last said (`node.host`, JSON; [`set_host`]).
+    /// What its machine is, as it last said (`node.host`, JSON).
     #[serde(skip)]
     pub host: Option<String>,
     /// How its latest link reached the Hub (JSON; [`set_link`]).
@@ -650,25 +650,6 @@ pub fn begin_link(
         paused: state == "paused",
         previous_incarnation,
     }))
-}
-
-/// The Node was there at `now` (its link just closed): its owner is told.
-pub fn touch(tx: &mut W<'_>, node_id: &str, now: i64) -> Result<()> {
-    let n = tx.conn.execute(
-        "UPDATE nodes SET last_seen=? WHERE node_id=?",
-        params![now, node_id],
-    )?;
-    told(tx, node_id, n).map(|_| ())
-}
-
-/// What the Node's machine is (`node.host`, JSON), as it just said; its owner is told when it
-/// differs from what was kept.
-pub fn set_host(tx: &mut W<'_>, node_id: &str, host: &str) -> Result<bool> {
-    let n = tx.conn.execute(
-        "UPDATE nodes SET host=?2 WHERE node_id=?1 AND host IS NOT ?2",
-        params![node_id, host],
-    )?;
-    told(tx, node_id, n)
 }
 
 pub(crate) fn get_on(c: &Connection, node_id: &str) -> Result<Option<NodeRow>> {

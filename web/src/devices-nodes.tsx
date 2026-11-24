@@ -26,7 +26,6 @@ const GIB = 2 ** 30
 export const hostIcon = (k: HostKind) => (k === "mac" ? <LaptopIcon /> : k === "linux" ? <ServerIcon /> : <MonitorIcon />)
 export const nodeHref = (id: string) => "#/devices/nodes/" + encodeURIComponent(id)
 /** a short reason a Node went offline: the first part of its last connection error */
-export const linkReason = (v: NodeView) => (v.linkError ? v.linkError.error.split(":")[0] : "")
 
 /** what its agents are doing, from the sessions the Hub tracks on it: none, or how many and how many at work */
 export function agentsLine(v: NodeView): { n: number; working: number } {

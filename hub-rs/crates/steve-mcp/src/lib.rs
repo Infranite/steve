@@ -77,7 +77,7 @@ pub struct FileDeliveryArgs {
     pub interactive: Option<bool>,
 }
 
-/// What the agent leans towards on a `steve_ask` (both optional; YOLO may pick `recommended`).
+/// What the agent leans towards on a `steve_ask` (both optional; shown on the owner's question card).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AskHint {
     pub recommended: Option<String>,

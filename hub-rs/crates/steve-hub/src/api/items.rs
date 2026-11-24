@@ -192,7 +192,7 @@ pub async fn get_one(
     let workflow = st.domain.workflow_get(&id).await?;
     let dependency_wait = dependency_shown(st.domain.dependency_get(&id).await?);
     let dispatch = super::bot_dispatch::store(&st).and_then(|s| {
-        super::bot_dispatch::item_dispatch(s, &id)
+        super::bot_dispatch::item_dispatch(s, &id, &c.ws)
             .inspect_err(|e| tracing::warn!(item = %id, "item dispatch detail unavailable: {e}"))
             .ok()
     });

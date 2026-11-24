@@ -9,8 +9,8 @@ use steve_store::testkit::hub::node_fixtures as fixtures;
 
 use steve_hub::wire::acp_stats;
 use steve_hub::wire::node_runtime::{
-    AttemptFacts, Binding, ConfigChange, Configured, NodeDomain, NodeRuntime, Planned, Release,
-    Sink,
+    ApprovalTarget, AttemptFacts, Binding, ConfigChange, Configured, NodeDomain, NodeRuntime,
+    Planned, Release, Sink,
 };
 use steve_node_api::testkit::{FakeNode, Scripted, build};
 use steve_node_api::*;
@@ -23,8 +23,7 @@ struct Ends(
     Mutex<Vec<(String, String, Option<String>)>>,
     Mutex<Vec<String>>,
     Mutex<Vec<AttemptFacts>>,
-    /// Cards handed to YOLO (`permission_asked`).
-    Mutex<Vec<String>>,
+    Mutex<Option<steve_harness_spec::NativeApprovalFallback>>,
     /// The store the attempts' statistics rows go to, as the wired Hub books them.
     std::sync::OnceLock<Store>,
     /// The attempt each turn end named, in the order of `.0`.
@@ -35,6 +34,15 @@ struct Ends(
 );
 
 impl NodeDomain for Ends {
+    fn approval(&self, _: &str) -> steve_store::Result<Option<ApprovalTarget>> {
+        Ok(self.3.lock().unwrap().map(|native| ApprovalTarget {
+            mode: PermissionMode::Auto,
+            policy: steve_types::ApprovalMode::HarnessAuto,
+            native: Some(native),
+            native_id: Some("fixture-auto".into()),
+        }))
+    }
+
     fn turn_ended(&self, session: &str, attempt: Option<&str>, stop: &str, error: Option<String>) {
         self.0
             .lock()
@@ -74,9 +82,6 @@ impl NodeDomain for Ends {
             self.7.store(true, std::sync::atomic::Ordering::SeqCst);
             std::thread::sleep(Duration::from_millis(5));
         }
-    }
-    fn permission_asked(&self, _: &str, decision: &str, _: &PermissionRequest) {
-        self.3.lock().unwrap().push(decision.into());
     }
 }
 
@@ -1903,24 +1908,28 @@ async fn a_handoff_before_the_old_open_is_sent_never_opens_the_ended_session() {
 async fn a_command_that_waited_past_its_window_goes_issued_again() {
     let h = hub();
     h.rt.bind(&on_the_item(S)).unwrap();
-    h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    eventually_sync("active", || h.phase() == "active").await;
-    h.hand_off();
+    let exec = h.running("hello").await;
+    let release = h.hand_off();
+    let prepare = format!("prepare:{S2}:r0");
     let past = steve_store::now() - 1;
-    steve_store::testkit::hub::node_planning::expire_command_window(
-        &h.store,
-        &format!("prepare:{S2}:r0"),
-        past,
-    )
-    .unwrap();
-    h.node.set_now(steve_store::now());
-    let exec = h.attempts()[0].clone();
+    steve_store::testkit::hub::node_planning::expire_command_window(&h.store, &prepare, past)
+        .unwrap();
+    let accept_before =
+        || node_checks::command_accept_before_by_operation(&h.store, &prepare).unwrap();
+    assert_eq!(accept_before(), past);
+    h.node.set_now(past + 1);
     h.node.finish(&exec, build::done()).await.unwrap();
-    eventually_sync("the successor's turn", || h.count("start_turn") == 2).await;
-    let issued: i64 =
-        node_checks::command_accept_before_by_operation(&h.store, &format!("prepare:{}:r0", S2))
-            .unwrap();
-    assert!(issued > past);
+    let successor = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "the successor's turn (release: {}, prepare: {}, phase: {}, commands: {:?})",
+            h.state_of(&release),
+            h.state_of(&prepare),
+            h.phase_of(S2),
+            h.methods()
+        )
+    });
+    eventually_sync(successor, || h.count("start_turn") == 2).await;
+    assert!(accept_before() > past);
 }
 
 /// B4: a release receipt that is not the session's last release's (an earlier one, come late)
@@ -1994,8 +2003,7 @@ async fn a_parked_session_queues_and_goes_once_the_node_is_back() {
 }
 
 /// 断线或重启后不重跑: a Hub that restarts and gets the same permission request again makes no
-/// second card and hands it to YOLO no more than once (for the card the Node still waits for, once
-/// reconciled: its tool input lived in memory only), and nothing answers the Node on its own.
+/// second card and nothing answers the Node on its own.
 #[tokio::test]
 async fn a_replayed_permission_after_a_restart_is_neither_a_new_card_nor_answered() {
     let h = hub();
@@ -2007,7 +2015,7 @@ async fn a_replayed_permission_after_a_restart_is_neither_a_new_card_nor_answere
         .ask_permission(perm("p1", exec.clone(), "kill 4242"))
         .await
         .unwrap();
-    eventually_sync("card", || h.ends.3.lock().unwrap().len() == 1).await;
+    eventually_sync("card", || h.cards().len() == 1).await;
     let replay = h.seen.seen.lock().unwrap().clone();
 
     // a second Hub process on the same ledger
@@ -2020,7 +2028,6 @@ async fn a_replayed_permission_after_a_restart_is_neither_a_new_card_nor_answere
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(ends.3.lock().unwrap().is_empty());
     assert_eq!(
         node_checks::decision_count_by_subject_type(&h.store, "tool_call").unwrap(),
         1
@@ -2132,7 +2139,6 @@ async fn a_request_already_past_expires_at_is_closed_at_once() {
     eventually_sync("card", || h.cards().len() == 1).await;
     let d = h.cards()[0].clone();
     eventually_sync("expired", || h.status(&d) == "expired").await;
-    assert!(h.ends.3.lock().unwrap().is_empty(), "never offered to YOLO");
     assert_eq!(
         h.commands("resolve_permission"),
         1,
@@ -2152,10 +2158,6 @@ async fn a_refused_answer_is_not_an_answer() {
         .unwrap();
     eventually_sync("card", || h.cards().len() == 1).await;
     let d = h.cards()[0].clone();
-    eventually_sync("handed to YOLO", || {
-        h.ends.3.lock().unwrap().as_slice() == std::slice::from_ref(&d)
-    })
-    .await;
     // the Node's clock is past the request's expiry
     h.node.set_now(steve_store::now() + 120_000);
     assert!(h.rt.answer_permission(&d, Some("allow_once")).unwrap());
@@ -2686,7 +2688,7 @@ async fn a_refused_change_reads_as_refused_with_the_nodes_reason() {
     assert_eq!(node_checks::mode_refusal_code(&h.store).unwrap(), None);
 }
 
-/// A restart restores the pending approval without redispatching it.
+/// Reconnect keeps a card the Node still waits for; it never answers it on its own.
 #[tokio::test]
 async fn a_card_the_node_still_waits_for_stays_open_after_a_restart() {
     let mut h = hub();
@@ -2696,11 +2698,10 @@ async fn a_card_the_node_still_waits_for_stays_open_after_a_restart() {
         .ask_permission(perm("p1", exec.clone(), "cargo build"))
         .await
         .unwrap();
-    eventually_sync("card", || h.ends.3.lock().unwrap().len() == 1).await;
+    eventually_sync("card", || h.cards().len() == 1).await;
     let d = h.cards()[0].clone();
     h.restart(Duration::ZERO).await;
     eventually_sync("reconciled", || h.rt.is_reconciled()).await;
-    assert_eq!(h.ends.3.lock().unwrap().as_slice(), [d.clone()]);
     assert_eq!(h.cards(), std::slice::from_ref(&d), "no second card");
     assert_eq!(h.status(&d), "open");
     assert!(!h.methods().contains(&"resolve_permission"));
@@ -4746,4 +4747,62 @@ async fn startup_preflight_uses_the_actual_node_offer_and_preserves_defaults() {
     h.rt.retry_open(S, &default).unwrap();
     eventually_sync("default starts", || h.count("start_turn") == 1).await;
     assert_eq!(h.count("open_session"), 1);
+}
+
+#[tokio::test]
+async fn native_fallback_never_allows_and_only_the_declared_owner_route_asks() {
+    use steve_harness_spec::NativeApprovalFallback;
+    use steve_store::statistics::{ReportScope, approval};
+    for fallback in [
+        NativeApprovalFallback::AskOwner,
+        NativeApprovalFallback::Reject,
+    ] {
+        let h = hub();
+        *h.ends.3.lock().unwrap() = Some(fallback);
+        h.bind();
+        h.ready().await;
+        assert_eq!(
+            h.rt.mode_state(S).unwrap().unwrap().applied.as_deref(),
+            Some("auto")
+        );
+        let exec = h.running("hello").await;
+        h.node
+            .ask_permission(perm("native-fallback", exec, "write fixture"))
+            .await
+            .unwrap();
+        eventually_sync("permission recorded", || h.cards().len() == 1).await;
+        let d = &h.cards()[0];
+        let result = if fallback == NativeApprovalFallback::Reject {
+            eventually_sync("native fallback rejected", || h.perm_state(d) == "applied").await;
+            assert_eq!(h.status(d), "expired", "never waits for the owner");
+            assert_eq!(h.commands("resolve_permission"), 1);
+            let operation =
+                node_checks::command_operation_id_by_method(&h.store, "resolve_permission")
+                    .unwrap();
+            let choice = node_checks::command_decision_by_operation(&h.store, &operation).unwrap();
+            assert_eq!(choice, "reject");
+            "rejected"
+        } else {
+            assert_eq!(h.status(d), "open");
+            assert_eq!(h.commands("resolve_permission"), 0);
+            "pending"
+        };
+        let stats = h
+            .store
+            .read(|r| {
+                approval::report(
+                    r,
+                    ReportScope {
+                        ws: "default",
+                        lo: 0,
+                        hi: i64::MAX,
+                        project: None,
+                        bot: None,
+                    },
+                )
+            })
+            .unwrap();
+        assert_eq!((stats.sessions, stats.turns, stats.permissions), (1, 1, 1));
+        assert_eq!(stats.permissions_by_resolver["harness_native"][result], 1);
+    }
 }

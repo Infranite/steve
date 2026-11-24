@@ -324,9 +324,69 @@ impl NodeRuntime {
         Ok(true)
     }
 
+    /// Reconcile an owner edit immediately; also checked at idle/open so an offline Node or a
+    /// crash between the edit and this call cannot lose the policy.
+    pub(crate) fn sync_approval(&self, session: &str) -> Result<(), StoreError> {
+        self.write(|tx| {
+            let Some(binding) = self
+                .store
+                .read(|r| node_sessions::phase(r, session, None))?
+            else {
+                return Ok(());
+            };
+            if binding.name == "ready"
+                && binding.active_attempt.is_none()
+                && self.may_plan()
+                && !self.is_holding()
+                && !self.store.read(|r| node_sessions::unfinished(r, session))?
+            {
+                self.approval_desired(session, true)?;
+                self.boundary_in(tx, session)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn approval_desired(&self, session: &str, explicit_edit: bool) -> Result<(), StoreError> {
+        let Some(target) = self.domain.approval(session)? else {
+            return Ok(());
+        };
+        let open = self.open_of(session)?;
+        let prior = desired_in(&self.store, session)?;
+        if prior
+            .as_ref()
+            .map(|d| d.policy.permissions)
+            .unwrap_or(open.policy.permissions)
+            == target.mode
+        {
+            return Ok(());
+        }
+        // Do not repeat a refused widening on every idle boundary. Disabling always narrows,
+        // and a later explicit policy edit can retry a refused widening .
+        let fact = self
+            .store
+            .read(|r| rt::session_modes(r, self.node_id.as_str(), session))?;
+        if !explicit_edit && target.mode == PermissionMode::Auto && fact.is_some_and(|m| m.refused)
+        {
+            return Ok(());
+        }
+        let mut next = prior.unwrap_or(Desired {
+            choice: open.choice,
+            policy: open.policy,
+            refreshes: 0,
+            expected: None,
+        });
+        next.policy.permissions = target.mode;
+        next.policy.revision = idv(uid("pol"))?;
+        next.refreshes = 0;
+        next.expected = None;
+        set_desired_in(&self.store, session, Some(&next))
+    }
+
     /// At an idle boundary of a ready session: a desired config goes before any turn. True: the
     /// session is configuring now (or let go to carry a narrowing), no turn may be planned.
     pub(super) fn boundary_in(&self, tx: &mut W<'_>, session: &str) -> Result<bool, StoreError> {
+        self.approval_desired(session, false)?;
         if desired_in(&self.store, session)?.is_none() {
             return Ok(false);
         }
@@ -346,6 +406,7 @@ impl NodeRuntime {
         session: &str,
         open: &mut OpenSession,
     ) -> Result<(), StoreError> {
+        self.approval_desired(session, false)?;
         if let Some(d) = desired_in(&self.store, session)? {
             open.choice = d.choice;
             open.policy = d.policy;

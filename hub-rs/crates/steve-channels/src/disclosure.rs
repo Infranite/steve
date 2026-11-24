@@ -69,7 +69,7 @@ pub const ENV_CHECK: &str = "STEVE_MODELS_CHECK";
 pub const ENV_FAST: &str = "STEVE_MODELS_FAST";
 /// The check model's time limit when the text waits on it.
 pub const TIMEOUT: Duration = Duration::from_secs(20);
-/// … when nothing waits on it ([`CheckCx::patient`]), per try.
+/// The check model's time limit for a draft that awaits approval ([`CheckCx::patient`]).
 pub const PATIENT_TIMEOUT: Duration = Duration::from_secs(60);
 /// A name shorter than this (in characters) is too common to count as a disclosure.
 const MIN_NAME: usize = 2;

@@ -1,240 +1,179 @@
--- Explicit owner completion is final even when prerequisites were left open.
-DROP TRIGGER item_dependencies_completion_gate;
-CREATE TRIGGER item_dependencies_completion_gate
-BEFORE UPDATE OF phase,outcome,status,cycle ON items
-WHEN NEW.phase='closed' AND NEW.outcome='completed' AND NEW.acceptance IS NOT 'owner'
- AND (EXISTS (
-  SELECT 1 FROM item_deps d LEFT JOIN items p ON p.id=d.dep_id
-  WHERE d.item_id=NEW.id AND
-   (p.id IS NULL OR p.status<>'done' OR p.phase<>'closed' OR p.outcome IS NOT 'completed')
- ) OR EXISTS (
-  SELECT 1 FROM item_dependency_waits w
-  WHERE w.item_id=NEW.id AND w.cycle=NEW.cycle AND w.state='waiting'
- ))
-BEGIN
- SELECT RAISE(ABORT,'prerequisite items are not completed');
-END;
+-- Ordinary Node RPC errors now use the shared contract. Convert retained receipts in place.
+-- The old after_reconcile hint never proves that the operation can be resent.
+CREATE TEMP TABLE ordinary_rpc_errors (table_name TEXT, column_name TEXT, id INTEGER, path TEXT, value TEXT);
+INSERT INTO ordinary_rpc_errors
+ SELECT 'node_commands', 'receipt', rowid, '$.payload', json_extract(receipt,'$.payload')
+ FROM node_commands WHERE json_type(receipt,'$.payload.retry')='text';
+INSERT INTO ordinary_rpc_errors
+ SELECT 'node_commands', 'receipt', rowid, '$.payload.state.error', json_extract(receipt,'$.payload.state.error')
+ FROM node_commands WHERE json_type(receipt,'$.payload.state.error.retry')='text';
+INSERT INTO ordinary_rpc_errors
+ SELECT 'node_commands', 'receipt', rowid, '$.payload.state.result.error', json_extract(receipt,'$.payload.state.result.error')
+ FROM node_commands WHERE json_type(receipt,'$.payload.state.result.error.retry')='text';
+INSERT INTO ordinary_rpc_errors
+ SELECT 'node_commands', 'receipt', rowid, '$.last_error', json_extract(receipt,'$.last_error')
+ FROM node_commands WHERE json_type(receipt,'$.last_error.retry')='text';
+INSERT INTO ordinary_rpc_errors
+ SELECT 'runtime_attempts', 'receipt', rowid, '$.state.error', json_extract(receipt,'$.state.error')
+ FROM runtime_attempts WHERE json_type(receipt,'$.state.error.retry')='text';
+INSERT INTO ordinary_rpc_errors
+ SELECT 'runtime_attempts', 'receipt', rowid, '$.state.result.error', json_extract(receipt,'$.state.result.error')
+ FROM runtime_attempts WHERE json_type(receipt,'$.state.result.error.retry')='text';
+INSERT INTO ordinary_rpc_errors
+ SELECT 'runtime_attempts', 'completion', rowid, '$.error', json_extract(completion,'$.error')
+ FROM runtime_attempts WHERE json_type(completion,'$.error.retry')='text';
+INSERT INTO ordinary_rpc_errors
+ SELECT 'runtime_job_attempts', 'receipt', rowid, '$.state.error', json_extract(receipt,'$.state.error')
+ FROM runtime_job_attempts WHERE json_type(receipt,'$.state.error.retry')='text';
+INSERT INTO ordinary_rpc_errors
+ SELECT 'runtime_job_attempts', 'receipt', rowid, '$.state.result.error', json_extract(receipt,'$.state.result.error')
+ FROM runtime_job_attempts WHERE json_type(receipt,'$.state.result.error.retry')='text';
+INSERT INTO ordinary_rpc_errors
+ SELECT 'runtime_job_attempts', 'completion', rowid, '$.error', json_extract(completion,'$.error')
+ FROM runtime_job_attempts WHERE json_type(completion,'$.error.retry')='text';
 
--- These projections were used only by the model completion judge and the dry-run sweep.
-DROP TABLE item_would_do;
-DROP TABLE item_judgements;
-DROP TABLE item_judge_candidates;
-DROP TABLE item_waits;
-DROP TABLE work_policy;
+UPDATE ordinary_rpc_errors SET value=json_object(
+ 'code', CASE json_extract(value,'$.code')
+   WHEN 'offline' THEN 'unavailable' WHEN 'denied' THEN 'forbidden'
+   WHEN 'expired' THEN 'stale' WHEN 'downgrade' THEN 'invalid'
+   WHEN 'busy' THEN 'busy' WHEN 'unsupported' THEN 'unsupported'
+   WHEN 'stale' THEN 'stale' WHEN 'conflict' THEN 'conflict'
+   WHEN 'exhausted' THEN 'exhausted' WHEN 'invalid' THEN 'invalid'
+   WHEN 'outcome_unknown' THEN 'outcome_unknown' WHEN 'gap' THEN 'gap'
+   ELSE 'internal' END,
+ 'retry', CASE WHEN json_extract(value,'$.retry')='same_operation'
+   AND json_extract(value,'$.code') NOT IN ('outcome_unknown','gap')
+   AND (path='$.payload' OR path='$.last_error')
+   THEN json_object('kind','later','after_ms',NULL) ELSE json_object('kind','never') END,
+ 'reason', CASE json_extract(value,'$.code') WHEN 'downgrade' THEN 'node.downgrade' END,
+ 'params', json_patch(
+   CASE WHEN json_extract(value,'$.operation') IS NULL THEN '{}' ELSE
+     json_object('operation',json_extract(value,'$.operation')) END,
+   CASE WHEN json_extract(value,'$.state') IS NULL THEN '{}' ELSE
+     json_object('state',json_extract(value,'$.state')) END),
+ 'safe_detail', COALESCE(json_extract(value,'$.safe_detail'),''));
+CREATE INDEX ordinary_rpc_error_source ON ordinary_rpc_errors(table_name,column_name,path,id);
+UPDATE node_commands SET receipt=json_set(receipt,'$.payload',json(e.value))
+ FROM ordinary_rpc_errors e
+ WHERE e.table_name='node_commands' AND e.column_name='receipt'
+   AND e.path='$.payload' AND e.id=node_commands.rowid;
+UPDATE node_commands SET receipt=json_set(receipt,'$.payload.state.error',json(e.value))
+ FROM ordinary_rpc_errors e
+ WHERE e.table_name='node_commands' AND e.column_name='receipt'
+   AND e.path='$.payload.state.error' AND e.id=node_commands.rowid;
+UPDATE node_commands SET receipt=json_set(receipt,'$.payload.state.result.error',json(e.value))
+ FROM ordinary_rpc_errors e
+ WHERE e.table_name='node_commands' AND e.column_name='receipt'
+   AND e.path='$.payload.state.result.error' AND e.id=node_commands.rowid;
+UPDATE node_commands SET receipt=json_set(receipt,'$.last_error',json(e.value))
+ FROM ordinary_rpc_errors e
+ WHERE e.table_name='node_commands' AND e.column_name='receipt'
+   AND e.path='$.last_error' AND e.id=node_commands.rowid;
+UPDATE runtime_attempts SET receipt=json_set(receipt,'$.state.error',json(e.value))
+ FROM ordinary_rpc_errors e
+ WHERE e.table_name='runtime_attempts' AND e.column_name='receipt'
+   AND e.path='$.state.error' AND e.id=runtime_attempts.rowid;
+UPDATE runtime_attempts SET receipt=json_set(receipt,'$.state.result.error',json(e.value))
+ FROM ordinary_rpc_errors e
+ WHERE e.table_name='runtime_attempts' AND e.column_name='receipt'
+   AND e.path='$.state.result.error' AND e.id=runtime_attempts.rowid;
+UPDATE runtime_attempts SET completion=json_set(completion,'$.error',json(e.value))
+ FROM ordinary_rpc_errors e
+ WHERE e.table_name='runtime_attempts' AND e.column_name='completion'
+   AND e.path='$.error' AND e.id=runtime_attempts.rowid;
+UPDATE runtime_job_attempts SET receipt=json_set(receipt,'$.state.error',json(e.value))
+ FROM ordinary_rpc_errors e
+ WHERE e.table_name='runtime_job_attempts' AND e.column_name='receipt'
+   AND e.path='$.state.error' AND e.id=runtime_job_attempts.rowid;
+UPDATE runtime_job_attempts SET receipt=json_set(receipt,'$.state.result.error',json(e.value))
+ FROM ordinary_rpc_errors e
+ WHERE e.table_name='runtime_job_attempts' AND e.column_name='receipt'
+   AND e.path='$.state.result.error' AND e.id=runtime_job_attempts.rowid;
+UPDATE runtime_job_attempts SET completion=json_set(completion,'$.error',json(e.value))
+ FROM ordinary_rpc_errors e
+ WHERE e.table_name='runtime_job_attempts' AND e.column_name='completion'
+   AND e.path='$.error' AND e.id=runtime_job_attempts.rowid;
 
--- A migrated association keeps its identity and observed head. It cannot authorize closure.
-CREATE TABLE item_delivery_refs (
- item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
- cycle INTEGER NOT NULL,
- scope INTEGER NOT NULL,
- repository TEXT NOT NULL,
- number INTEGER NOT NULL CHECK(number>0),
- target TEXT NOT NULL,
- head TEXT NOT NULL,
- base TEXT,
- required INTEGER NOT NULL CHECK(required IN (0,1) AND (required=0 OR base IS NOT NULL)),
- PRIMARY KEY(item_id,cycle,scope,repository,number)
+DROP TABLE ordinary_rpc_errors;
+
+UPDATE runtime_sessions AS s SET mode_refusal_code=p.refusal_code
+ FROM runtime_mode_projection p WHERE p.session_id=s.session_id;
+
+-- Older commands cannot be replayed into a replaced Node journal.
+-- The lease generation makes the never-leased case safe even for rows predating maybe_sent.
+UPDATE node_commands SET state='rejected', lease_owner=NULL, lease_until=NULL, revision=revision+1,
+ receipt=json_object('success',json('false'),'payload',json_object(
+   'code','stale','retry',json_object('kind','never'),
+   'reason','node.protocol_changed','safe_detail','Node protocol changed before dispatch'))
+ WHERE state='pending' AND maybe_sent=0 AND lease_generation=0 AND receipt IS NULL;
+
+INSERT OR IGNORE INTO realtime_output_attempts
+ (attempt_id,session_id,workspace_id,project_id,bot_id,node_id,started,ended,baseline,stop_evidence,not_started)
+ SELECT a.attempt_id,s.id,s.workspace_id,i.project_id,s.bot_id,a.node_id,a.created,
+        MAX(a.created,c.updated),0,'unsent',1
+ FROM runtime_attempts a JOIN runtime_turns t USING(turn_id)
+ JOIN sessions s ON s.id=t.session_id
+ LEFT JOIN items i ON i.id=s.item_id AND i.workspace_id=s.workspace_id
+ JOIN node_commands c ON c.operation_id=a.operation_id AND c.node_id=a.node_id
+   AND c.target_attempt=a.attempt_id AND c.method='start_turn'
+ WHERE s.readonly=0 AND c.state='rejected'
+   AND json_extract(c.receipt,'$.payload.reason')='node.protocol_changed';
+
+UPDATE node_commands SET state='unknown', maybe_sent=1,
+ lease_owner=NULL, lease_until=NULL, revision=revision+1,
+ receipt=json_set(COALESCE(receipt,'{}'),'$.success',json('false'),'$.payload',json_object(
+   'operation',operation_id,'state',json_object('state','unknown','reason','node_protocol_changed')))
+ WHERE state IN ('pending','accepted','active');
+UPDATE runtime_attempts SET state='unknown', revision=revision+1 WHERE state <> 'finished';
+UPDATE runtime_job_attempts SET state='unknown', revision=revision+1 WHERE state <> 'finished';
+UPDATE runtime_sessions AS s SET sending_mode=p.sending_mode, mode_problem=p.problem
+ FROM runtime_mode_projection p WHERE p.session_id=s.session_id;
+
+ALTER TABLE node_commands ADD COLUMN intent_purpose TEXT;
+ALTER TABLE node_commands ADD COLUMN intent_subject TEXT;
+ALTER TABLE node_commands ADD COLUMN intent_revision INTEGER CHECK(intent_revision>=0);
+
+-- Preserve command and receipt identity across the upgrade. A command whose old subject cannot
+-- be determined stays non-replayable and supplies no positive evidence.
+WITH subjects AS (
+ SELECT c.rowid AS id,
+   CASE c.method WHEN 'open_session' THEN 'open' WHEN 'release_session' THEN 'release'
+     WHEN 'configure_session' THEN 'configure' WHEN 'start_turn' THEN 'start_turn'
+     WHEN 'prepare_workspace' THEN 'prepare' WHEN 'tidy_workspace' THEN 'tidy' END AS purpose,
+   CASE c.method
+     WHEN 'start_turn' THEN json_extract(c.request,'$.body.turn')
+     WHEN 'tidy_workspace' THEN length(c.node_id)||':'||c.node_id||':'||
+                    length(c.workspace_id)||':'||c.workspace_id
+     WHEN 'prepare_workspace' THEN (SELECT session_id FROM node_commands o
+                     WHERE o.dependency_operation=c.operation_id AND o.method='open_session'
+                     ORDER BY o.created,o.rowid LIMIT 1)
+     ELSE c.session_id END AS subject
+ FROM node_commands c
+), numbered AS (
+ SELECT id,purpose,subject,
+   row_number() OVER(PARTITION BY purpose,subject ORDER BY id)-1 AS revision
+ FROM subjects WHERE purpose IS NOT NULL AND subject IS NOT NULL
+)
+UPDATE node_commands AS c SET intent_purpose=n.purpose, intent_subject=n.subject,
+ intent_revision=n.revision FROM numbered n WHERE c.rowid=n.id;
+CREATE UNIQUE INDEX node_commands_intent ON node_commands(intent_purpose,intent_subject,intent_revision)
+ WHERE intent_purpose IS NOT NULL;
+
+CREATE TABLE runtime_turn_progress (
+ turn_id TEXT PRIMARY KEY REFERENCES runtime_turns(turn_id) ON DELETE CASCADE,
+ summary TEXT NOT NULL,
+ decision_id TEXT UNIQUE REFERENCES decisions(id),
+ stalled_attempt TEXT UNIQUE REFERENCES runtime_attempts(attempt_id),
+ CHECK ((decision_id IS NULL) = (stalled_attempt IS NULL))
 );
-CREATE TABLE item_delivery_proofs (
- item_id TEXT NOT NULL,
- cycle INTEGER NOT NULL,
- scope INTEGER NOT NULL,
- revision INTEGER NOT NULL,
- repository TEXT NOT NULL,
- number INTEGER NOT NULL,
- target_head TEXT NOT NULL CHECK (length(target_head) IN (40,64) AND target_head NOT GLOB '*[^0-9a-f]*'),
- PRIMARY KEY(item_id,cycle,scope,revision,repository,number,target_head),
- FOREIGN KEY(item_id,cycle,scope,repository,number)
-  REFERENCES item_delivery_refs(item_id,cycle,scope,repository,number) ON DELETE CASCADE
+
+ALTER TABLE workflow_units ADD COLUMN verified_output TEXT;
+ALTER TABLE workflow_units ADD COLUMN inputs TEXT;
+CREATE TABLE workflow_review_findings (
+ workflow_id TEXT NOT NULL REFERENCES workflows(item_id) ON DELETE CASCADE,
+ fingerprint TEXT NOT NULL,
+ scope TEXT NOT NULL,
+ findings TEXT NOT NULL,
+ applied_revision INTEGER,
+ PRIMARY KEY(workflow_id,fingerprint)
 );
-INSERT INTO item_delivery_refs(item_id,cycle,scope,repository,number,target,head,base,required)
- SELECT i.id,i.cycle,COALESCE((SELECT MAX(version) FROM item_goals WHERE item_id=i.id),0),
-  p.repo_id,p.number,p.base_ref,p.head_sha,NULL,0
- FROM gh_prs p JOIN items i ON i.id=p.item_id AND i.workspace_id=p.workspace_id
- WHERE p.number>0 AND length(p.head_sha) IN (40,64) AND p.head_sha NOT GLOB '*[^0-9a-f]*'
- ON CONFLICT DO NOTHING;
-DROP TABLE item_delivery_facts;
-
--- The old direct Finish recorded an explicit human acceptance without an acceptance card.
--- Preserve that fact, including when a pause or a wait prevented the old commit.
-CREATE TEMP TABLE item_owner_finishes AS
- SELECT id,cycle,revision,COALESCE(json_extract(closing,'$.at'),updated) AS closed
- FROM items WHERE phase='closing' AND json_extract(closing,'$.kind')='complete'
-  AND json_extract(closing,'$.reason')='你标记了完成'
-  AND json_extract(closing,'$.policy')='human'
-  AND json_extract(closing,'$.accepted')=1 AND json_extract(closing,'$.decision') IS NULL;
-INSERT INTO item_cycles(item_id,cycle,revision,outcome,acceptance,reason,closed,source)
- SELECT id,cycle,revision,'completed','owner','owner_finished',closed,'migrated' FROM item_owner_finishes WHERE true
- ON CONFLICT(item_id,cycle) DO NOTHING;
-UPDATE items SET phase='closed',status='done',outcome='completed',acceptance='owner',
- closed_reason='owner_finished',closed_at=(SELECT closed FROM item_owner_finishes f WHERE f.id=items.id),closing=NULL
- WHERE id IN (SELECT id FROM item_owner_finishes);
-UPDATE items SET acceptance='owner',closed_reason='owner_finished'
- WHERE phase='closed' AND outcome='completed' AND closed_reason='你标记了完成' AND acceptance='human';
-UPDATE item_cycles SET acceptance='owner',reason='owner_finished'
- WHERE outcome='completed' AND reason='你标记了完成' AND acceptance='human';
-
-INSERT INTO session_dispatch (id,session_id,text,via,created,files,state,updated)
- SELECT q.id,q.session_id,q.text,q.via,q.created,q.files,'cancelled',f.closed
- FROM queued q JOIN sessions s ON s.id=q.session_id JOIN item_owner_finishes f ON f.id=s.item_id
- WHERE q.via NOT IN ('steve','resumed:steve')
- ON CONFLICT(id) DO NOTHING;
-DELETE FROM queued WHERE session_id IN (
- SELECT s.id FROM sessions s JOIN item_owner_finishes f ON f.id=s.item_id
-);
-DELETE FROM session_resume WHERE session_id IN (
- SELECT s.id FROM sessions s JOIN item_owner_finishes f ON f.id=s.item_id
-);
-DELETE FROM item_dependency_waits WHERE state='waiting' AND EXISTS (
- SELECT 1 FROM item_owner_finishes f WHERE f.id=item_dependency_waits.item_id AND f.cycle=item_dependency_waits.cycle
-);
-
--- The old automatic request did not pin a manifest or a current default-branch proof.
--- Retain its facts and exclude unstarted wrap-up from recovery.
-CREATE TEMP TABLE item_discarded_closings AS
- SELECT id,cycle,revision,updated FROM items
- WHERE phase='closing' AND json_extract(closing,'$.kind')='complete';
-UPDATE decisions SET status='expired',resolved=(
- SELECT updated FROM items i WHERE i.id=decisions.item_id
-),result='{"superseded":"item_lifecycle_migrated"}'
- WHERE status='open' AND (
-  (subject_type IN ('gh_pr_open','gh_pr_merge') AND requested_by='steve')
-  OR item_id IN (SELECT id FROM item_owner_finishes)
-  OR (item_id IN (SELECT id FROM item_discarded_closings)
-   AND (kind='accept' OR subject_type IN ('release','pr_awaiting_merge','gh_pr_open','gh_pr_merge')))
- );
-DELETE FROM item_operations WHERE kind='hooks.accepted';
-UPDATE item_operations SET required=0,status=CASE WHEN status='pending' THEN 'waived' ELSE status END
- WHERE EXISTS (
-  SELECT 1 FROM item_owner_finishes f WHERE f.id=item_operations.item_id AND f.cycle=item_operations.cycle
- ) OR EXISTS (
-  SELECT 1 FROM item_discarded_closings d WHERE d.id=item_operations.item_id
-   AND d.cycle=item_operations.cycle AND d.revision=item_operations.revision
- );
--- Bind still eligible explicit PR operations to their original item scope.
-ALTER TABLE gh_effects ADD COLUMN item_cycle INTEGER;
-ALTER TABLE gh_effects ADD COLUMN item_scope INTEGER;
-UPDATE gh_effects SET (item_cycle,item_scope)=(
- SELECT i.cycle,COALESCE((SELECT MAX(version) FROM item_goals WHERE item_id=i.id),0)
- FROM decisions d JOIN items i ON i.id=d.item_id
- WHERE d.id=gh_effects.decision_id AND i.phase<>'closed'
-   AND gh_effects.created >= COALESCE((SELECT MAX(closed) FROM item_cycles
-      WHERE item_id=i.id AND cycle<i.cycle),0)
-   AND gh_effects.created >= COALESCE((SELECT MAX(created) FROM item_goals WHERE item_id=i.id),0)
-) WHERE kind IN ('open','merge') AND state IN ('pending','running','unknown');
-UPDATE gh_effects SET state=CASE WHEN state='pending' THEN 'failed' ELSE state END,
- next_at=NULL,last_error='item lifecycle migrated'
- WHERE state IN ('pending','unknown') AND kind IN ('open','merge')
-  AND decision_id IN (SELECT id FROM decisions
-   WHERE (subject_type IN ('gh_pr_open','gh_pr_merge') AND requested_by='steve')
-    OR item_id IN (SELECT id FROM item_owner_finishes UNION SELECT id FROM item_discarded_closings));
-UPDATE gh_repos SET settings=json_remove(settings,'$.after_accept','$.finish_on','$.draft_pr');
--- Old outbox completions were missing the cycle and accepted head. Preserve other effects.
-UPDATE outbox_events SET payload=json_remove(payload,'$.finish')
- WHERE topic='github.after' AND json_type(payload,'$.finish')='array';
-DELETE FROM queued WHERE via IN ('steve','resumed:steve') AND session_id IN (
- SELECT s.id FROM sessions s JOIN item_discarded_closings d ON d.id=s.item_id
-);
-UPDATE items SET phase='active',revision=revision+1,closing=NULL
- WHERE id IN (SELECT id FROM item_discarded_closings);
-UPDATE items SET closing=json_set(json_remove(closing,'$.policy'),'$.scope_revision',
- COALESCE((SELECT MAX(version) FROM item_goals WHERE item_id=items.id),0))
- WHERE phase='closing' AND json_extract(closing,'$.kind') IN ('cancel','fail');
-DROP TABLE item_owner_finishes;
-DROP TABLE item_discarded_closings;
-
--- The phase owns execution state. Retain the fact that a cycle was paused only
--- after resolving its old closing request and deciding its terminal outcome.
-UPDATE items SET phase='paused' WHERE phase IN ('ready','active') AND status='pause';
-
--- Workspace-managed dependency holds and registered waits use the same cycle
--- record. A workspace hold can exist before a session is allocated.
-DROP TRIGGER item_dependencies_completion_gate;
-ALTER TABLE item_dependency_waits RENAME TO previous_item_dependency_waits;
-CREATE TABLE item_dependency_waits (
- item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
- cycle INTEGER NOT NULL,
- session_id TEXT REFERENCES sessions(id),
- resume TEXT NOT NULL CHECK(resume IN ('automatic','notify','workspace')),
- reason TEXT NOT NULL,
- state TEXT NOT NULL CHECK(state IN ('waiting','started','notified')),
- created INTEGER NOT NULL,
- updated INTEGER NOT NULL,
- PRIMARY KEY(item_id,cycle)
-);
-INSERT INTO item_dependency_waits SELECT * FROM previous_item_dependency_waits;
-DROP TABLE previous_item_dependency_waits;
-INSERT INTO item_dependency_waits(item_id,cycle,session_id,resume,reason,state,created,updated)
- SELECT i.id,i.cycle,NULL,'workspace','','waiting',i.created,i.updated
- FROM items i WHERE i.status='block' AND i.phase IN ('ready','active')
- ON CONFLICT(item_id,cycle) DO UPDATE SET state='waiting'
-  WHERE item_dependency_waits.state<>'waiting';
-
-ALTER TABLE items ADD COLUMN cas_revision INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE item_cycles ADD COLUMN owner_revision INTEGER;
-ALTER TABLE items DROP COLUMN status;
-ALTER TABLE items DROP COLUMN stage;
-ALTER TABLE items DROP COLUMN now;
-CREATE TRIGGER item_dependencies_completion_gate
-BEFORE UPDATE OF phase,outcome,cycle ON items
-WHEN NEW.phase='closed' AND NEW.outcome='completed' AND NEW.acceptance IS NOT 'owner'
- AND (EXISTS (
-  SELECT 1 FROM item_deps d LEFT JOIN items p ON p.id=d.dep_id
-  WHERE d.item_id=NEW.id AND (p.phase IS NOT 'closed' OR p.outcome IS NOT 'completed')
- ) OR EXISTS (
-  SELECT 1 FROM item_dependency_waits w
-  WHERE w.item_id=NEW.id AND w.cycle=NEW.cycle AND w.state='waiting'
- ))
-BEGIN
- SELECT RAISE(ABORT,'prerequisite items are not completed');
-END;
-
--- Command CAS advances with the item's durable changes and accepted inputs.
--- The preexisting revision still identifies a frozen delivery within a cycle.
-CREATE TRIGGER item_cas_update AFTER UPDATE ON items
- WHEN NEW.cas_revision=OLD.cas_revision
-BEGIN
- UPDATE items SET cas_revision=cas_revision+1 WHERE id=NEW.id;
-END;
-CREATE TRIGGER item_cas_goal AFTER INSERT ON item_goals
-BEGIN
- UPDATE items SET cas_revision=cas_revision+1 WHERE id=NEW.item_id;
-END;
-CREATE TRIGGER item_cas_input AFTER INSERT ON timeline
- WHEN NEW.kind IN ('me','progress','supplement')
-BEGIN
- UPDATE items SET cas_revision=cas_revision+1 WHERE id=NEW.item_id;
-END;
-CREATE TRIGGER item_cas_dependency_add AFTER INSERT ON item_deps
-BEGIN
- UPDATE items SET cas_revision=cas_revision+1 WHERE id=NEW.item_id;
-END;
-CREATE TRIGGER item_cas_dependency_remove AFTER DELETE ON item_deps
-BEGIN
- UPDATE items SET cas_revision=cas_revision+1 WHERE id=OLD.item_id;
-END;
-UPDATE decisions SET undo=json_remove(undo,'$.status','$.stage','$.now')
- WHERE item_id IS NOT NULL AND json_valid(undo);
-
--- An executable release remains a separate configured action.
-UPDATE projects SET release=CASE
- WHEN json_extract(release,'$.kind')='script'
-  AND LENGTH(TRIM(COALESCE(json_extract(release,'$.cmd'),'')))>0
- THEN json_remove(release,'$.done_when') ELSE NULL END
- WHERE json_valid(release) AND json_type(release,'$.done_when') IS NOT NULL;
--- Old branch and tag checks neither authorize nor block a new delivery.
-UPDATE item_operations SET required=0,status=CASE WHEN status IN ('pending','running') THEN 'waived' ELSE status END
- WHERE kind IN ('release.build','deploy') OR (kind='release' AND json_valid(evidence) AND json_type(evidence,'$.rule') IS NOT NULL);
-
--- Preserve history in the same lifecycle codes emitted by new transitions.
-UPDATE item_marks SET
- from_v=CASE from_v WHEN 'run' THEN 'active' WHEN 'block' THEN 'active' WHEN 'wait' THEN 'active'
-  WHEN 'prop' THEN 'ready' WHEN 'ship' THEN 'closing' WHEN 'pause' THEN 'paused'
-  WHEN 'done' THEN 'completed' WHEN 'drop' THEN 'cancelled' WHEN 'fail' THEN 'failed' ELSE from_v END,
- to_v=CASE to_v WHEN 'run' THEN 'active' WHEN 'block' THEN 'active' WHEN 'wait' THEN 'active'
-  WHEN 'prop' THEN 'ready' WHEN 'ship' THEN 'closing' WHEN 'pause' THEN 'paused'
-  WHEN 'done' THEN 'completed' WHEN 'drop' THEN 'cancelled' WHEN 'fail' THEN 'failed' ELSE to_v END
- WHERE kind='status';
-
--- Only drafts created against a recorded item version can attest to its delivery.
-ALTER TABLE mail_drafts ADD COLUMN delivery_version TEXT;

@@ -1,5 +1,5 @@
 import { getItems } from "@/store"
-/* 统计页的“现在”（stats v2）：一行细的状态（进行中 · 等你 · 失败或受阻，旁边是 YOLO 运行状态），以及页面共用的下钻明细。
+/* 统计页的“现在”（stats v2）：一行细的状态（进行中 · 等你 · 失败或受阻），以及页面共用的下钻明细。
  * “现在”的数字取自事项列表本身，下钻列表用同一个筛选，数字和列表天然一致；
  * “区间”的下钻（每天的产出里点一天）用 `only=done|created` 取同一批事项（steve-stats views::items）。
  * 单日范围（今天）按小时（ST-43）：点一个小时，下钻用 `hour` 取那个小时里完成或新建的事项，和柱子同一个区间。 */
@@ -41,7 +41,7 @@ const statusLabel = (k: StatusKey) => (k === "run" ? t("stats:overview.status.ru
 const statusEmpty = (k: StatusKey) => (k === "run" ? t("stats:overview.statusEmpty.run") : k === "wait" ? t("stats:overview.statusEmpty.wait") : k === "block" ? t("stats:overview.statusEmpty.block") : t("stats:overview.statusEmpty.pause"))
 
 /** “现在”: what runs, waits for you or failed right now (the item list itself, so a count and its list always agree),
- *  a slim line above the key numbers; each count opens its list. The YOLO run state rides on the same line. */
+ *  a slim line above the key numbers; each count opens its list. */
 export function NowLine({ f, drill, setDrill, children }: { f: Filter; drill: Drill | null; setDrill: (d: Drill | null) => void; children?: ReactNode }) {
   const t = useT()
   const now = nowSets(f)

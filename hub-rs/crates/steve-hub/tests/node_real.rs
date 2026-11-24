@@ -20,7 +20,7 @@
 //! 2. a Steve tool call (read-only) goes through ToolService, with its row in the host journal;
 //! 3. a Bash permission card answered allow_once runs; a second one rejected does not;
 //! 4. a cancel mid-turn ends the turn;
-//! 5. a permission-mode change at idle (YOLO on: `default` → `acceptEdits`) is configured on the
+//! 5. a permission-mode change at idle (YOLO on: `default` → `auto`) is configured on the
 //!    Node and the next edit asks nothing; the Bot's model and effort reach the harness with the
 //!    open. Pending: a model/effort change at idle, which has no Hub trigger yet (see the case);
 //! 6. a release (the Hub stopped at idle) then a reopen continues the same conversation;
@@ -29,12 +29,7 @@
 //!    next message runs;
 //! 9. an upgrade drain waits for a Node turn (its Bash card open, then its command running), a
 //!    message sent meanwhile waits, and lifting the drain sends it;
-//! 10. YOLO answers a Node session's cards from the Node's facts: `sleep` in the Node's worktree,
-//!     `kill` of a process the harness started (the request's `own_pids`), and leaves `kill` of
-//!     any other process to the user.
-//!
-//! Three checks of the harness itself run on the scripted agent and are not ignored: the test
-//! project is a Node root from the first turn, case 5's configure path, and a Bot in `auto` mode.
+//! The local fake-adapter cases use an isolated home and no model calls.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -226,6 +221,7 @@ fn spawn(h: &Home) -> Hub {
         .env("STEVE_FORBID_REAL_HOSTS", "1")
         .env("STEVE_VERSION", VERSION)
         .env("STEVE_WEB_DIR", &h.web)
+        .env("STEVE_HARNESS_MANIFEST", h.steve().join("harness.json"))
         .env_remove("STEVE_NODE")
         .env("STEVE_NODE_MODE", "local")
         .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")
@@ -233,7 +229,6 @@ fn spawn(h: &Home) -> Hub {
         .env("STEVE_TAKEOVER_CONTINUES", "0")
         .env_remove("STEVE_NODE_TURN_LIMIT_MS")
         .env_remove("STEVE_NO_RESUME")
-        .env_remove("STEVE_YOLO")
         .env_remove("STEVE_UPGRADE_ID")
         .env_remove("CODEX_HOME")
         .env_remove("STEVE_KB_STORE")
@@ -573,20 +568,6 @@ impl Real {
         .unwrap()
     }
 
-    /// Switches YOLO on for the workspace. An item in its own worktree already runs in
-    /// `acceptEdits` without YOLO (#38), so this changes no harness mode.
-    async fn yolo_on(&self) {
-        self.c.ok("PUT", "/api/yolo", json!({"on": true})).await;
-    }
-
-    /// Switches full access on for the workspace: the session's harness mode becomes
-    /// `bypassPermissions`, a Hub path to `set_mode`, hence to the Node's `configure_session`.
-    async fn full_on(&self) {
-        self.c
-            .ok("PUT", "/api/yolo", json!({"mode": "full", "confirm": true}))
-            .await;
-    }
-
     /// Waits for the session's permission mode to be configured on the Node, failing with the log.
     async fn configure_over(&self, sid: &str, permissions: &str) {
         let diagnostic = steve_runtime::testkit::on_timeout(|| async {
@@ -805,44 +786,95 @@ async fn the_test_project_is_a_node_root_from_the_first_turn() {
     );
 }
 
-/// Case 5's plumbing, on the scripted agent: full access switched on at idle reaches the Node
-/// session as a `configure_session` to `full_access`, and the next turn runs.
+/// Owner policy changes reach an idle Node and leave the next turn runnable.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_mode_change_at_idle_configures_the_node_session() {
-    let r = Real::start_on(Home::fake()).await;
-    let sid = r.item("A7 配置 @say first-A7").await;
+    let r = Real::start_as(Home::fake(), "default").await;
+    let sid = r.item("A7 mode @say first-A7").await;
     r.turn_over(&sid, 1, "first turn").await;
-    assert_eq!(r.configured(&sid, "full_access"), 0);
-    r.full_on().await;
-    r.configure_over(&sid, "full_access").await;
+    let mode_url = format!("/api/approval-policy/sessions/{sid}");
+    r.c.ok(
+        "PUT",
+        "/api/approval-policy",
+        json!({"mode":"harness_auto","revision":0}),
+    )
+    .await;
+    r.configure_over(&sid, "auto").await;
+    let applied = r.c.ok("GET", &mode_url, Value::Null).await;
+    assert_eq!(applied["status"], "on", "{applied}");
+    assert_eq!(applied["applied"], "auto", "{applied}");
+    assert_eq!(applied["native_id"], "auto", "{applied}");
     let seq = r.seq(&sid);
-    r.c.say(&sid, "A7 配置之后 @say second-A7").await;
-    r.turn_over(&sid, 2, "after the configure").await;
-    assert!(r.said(&sid, seq, "second-A7") > 0, "the next turn ran");
+    r.c.say(&sid, "A7 mode @say second-A7").await;
+    r.turn_over(&sid, 2, "after configure").await;
+    assert!(r.said(&sid, seq, "second-A7") > 0);
+    let stats = r.c.ok("GET", "/api/stats/summary", Value::Null).await;
+    assert_eq!(stats["human"]["approval"]["sessions"], 1, "{stats}");
+    assert_eq!(stats["human"]["approval"]["turns"], 1, "{stats}");
+    r.c.ok(
+        "PUT",
+        "/api/approval-policy",
+        json!({"mode":"ask_owner","revision":1}),
+    )
+    .await;
+    r.configure_over(&sid, "ask").await;
+    let applied = r.c.ok("GET", &mode_url, Value::Null).await;
+    assert_eq!(applied["status"], "off", "{applied}");
+    assert_eq!(applied["applied"], "ask", "{applied}");
+    let log = std::fs::read_to_string(r.h.fake.as_ref().unwrap()).unwrap();
+    let sent_modes: Vec<_> = log
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|m| m["method"] == "session/set_mode")
+        .filter_map(|m| m["params"]["modeId"].as_str().map(str::to_owned))
+        .collect();
+    assert!(
+        sent_modes.ends_with(&["auto".into(), "default".into()]),
+        "{sent_modes:?}"
+    );
+
+    r.c.ok("POST", &format!("/api/sessions/{sid}/end"), Value::Null)
+        .await;
+    let ended = r.c.ok("GET", &mode_url, Value::Null).await;
+    assert_eq!(ended["status"], "off", "{ended}");
+    assert_eq!(ended["native_id"], "auto", "{ended}");
+    assert!(ended["target"].is_null(), "{ended}");
 }
 
-/// B1a, on the scripted agent: a Bot in `auto` runs on the Node in auto,
-/// and YOLO's set_mode reaches it both ways: full access, then back to the Bot's `auto`.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_auto_bot_runs_on_the_node_and_yolo_sets_auto_back() {
-    let r = Real::start_as(Home::fake(), "auto").await;
-    let sid = r.item("A7 自动 @say first-auto").await;
-    r.turn_over(&sid, 1, "first turn").await;
-    assert_eq!(
-        node_process::command_count_open_session_finished(&r.h.db_path(), &sid).unwrap(),
-        1,
-        "opened in auto; log:\n{}",
-        hub_log(&r.h)
-    );
-    r.c.ok("PUT", "/api/yolo", json!({"mode": "full", "confirm": true}))
+async fn an_adapter_without_native_auto_reports_unsupported_and_keeps_asking() {
+    let home = Home::fake();
+    std::fs::create_dir_all(home.steve()).unwrap();
+    std::fs::write(
+        home.steve().join("harness.json"),
+        json!({"adapters":{"claude-code":{
+            "command": concat!(env!("CARGO_MANIFEST_DIR"), "/../steve-acp/tests/fake-acp.js"),
+            "properties":{"modes":{"auto":""}},
+        }}})
+        .to_string(),
+    )
+    .unwrap();
+    let r = Real::start_on(home).await;
+    r.c.ok(
+        "PUT",
+        "/api/approval-policy",
+        json!({"mode":"harness_auto","revision":0}),
+    )
+    .await;
+    let sid = r.item("Ask-only adapter @say first").await;
+    r.turn_over(&sid, 1, "first turn without a native mode")
         .await;
-    r.configure_over(&sid, "full_access").await;
-    r.c.ok("PUT", "/api/yolo", json!({"mode": "off"})).await;
-    r.configure_over(&sid, "auto").await;
-    let seq = r.seq(&sid);
-    r.c.say(&sid, "A7 自动之后 @say second-auto").await;
-    r.turn_over(&sid, 2, "back in auto").await;
-    assert!(r.said(&sid, seq, "second-auto") > 0, "the next turn ran");
+    let mode =
+        r.c.ok(
+            "GET",
+            &format!("/api/approval-policy/sessions/{sid}"),
+            Value::Null,
+        )
+        .await;
+    assert_eq!(mode["status"], "unsupported", "{mode}");
+    assert_eq!(mode["target"], "ask", "{mode}");
+    assert_eq!(mode["applied"], "ask", "{mode}");
+    assert!(mode["native_id"].is_null(), "{mode}");
 }
 
 /// 1. A hello turn is stored as steve.v1, with its usage and cost.
@@ -1022,7 +1054,7 @@ async fn a_cancel_mid_turn_ends_it() {
 }
 
 /// 5. A change at idle applies: the session opens in `acceptEdits` (its own worktree, #38); the
-/// permission mode switched at idle (full access) is configured on the Node, and the next turn
+/// permission mode switched at idle (native auto) is configured on the Node, and the next turn
 /// writes a file with no card. The Bot's model and effort reach the harness with the open (claude
 /// answers with that model).
 ///
@@ -1046,10 +1078,7 @@ async fn a_change_at_idle_applies_and_the_bots_model_reaches_the_harness() {
     eprintln!("case 5: open {open}");
     assert!(open.contains(&model()), "the open carries the model");
     assert!(open.contains(&effort()), "the open carries the effort");
-    assert!(
-        open.contains("\"accept_edits\""),
-        "opened accepting edits in its own worktree"
-    );
+    assert!(open.contains("\"ask\""), "opened in AskOwner");
     let models = transcript_models(&cwd(&r, &sid).display().to_string());
     eprintln!("case 5: transcript models {models:?}");
     assert!(
@@ -1059,8 +1088,13 @@ async fn a_change_at_idle_applies_and_the_bots_model_reaches_the_harness() {
     );
 
     // at idle: the mode change goes to the Node now, not with a later open
-    r.full_on().await;
-    r.configure_over(&sid, "full_access").await;
+    r.c.ok(
+        "PUT",
+        "/api/approval-policy",
+        json!({"mode":"harness_auto","revision":0}),
+    )
+    .await;
+    r.configure_over(&sid, "auto").await;
     let opens = node_process::command_count_open_session(&r.h.db_path()).unwrap();
     assert_eq!(opens, 1, "configured in place, not reopened");
     let mark = token("A7EDIT");
@@ -1072,8 +1106,8 @@ async fn a_change_at_idle_applies_and_the_bots_model_reaches_the_harness() {
         ),
     )
     .await;
-    r.turn_over(&sid, 2, "edit under full access").await;
-    assert_eq!(r.cards(&sid), 0, "full access: the edit asked nothing");
+    r.turn_over(&sid, 2, "edit under native auto").await;
+    assert_eq!(r.cards(&sid), 0, "native auto: the edit asked nothing");
     assert_eq!(
         std::fs::read_to_string(cwd(&r, &sid).join("a7-edit-5.txt"))
             .unwrap_or_default()
@@ -1325,153 +1359,4 @@ async fn an_upgrade_drain_waits_for_a_node_turn() {
         r.said(&sid, seq, &pong) > 0,
         "the queued message went once lifted"
     );
-}
-
-/// YOLO's word on the latest permission card of `sid` created since `since` (ms): (card, status,
-/// outcome, rule, reason, card question).
-fn yolo_word(r: &Real, sid: &str, since: i64) -> Option<[String; 6]> {
-    node_process::latest_permission_verdict(&r.h.db_path(), sid, since).unwrap()
-}
-
-/// The pid of the process whose whole command line is `cmd`, if one runs.
-fn pid_of(cmd: &str) -> Option<u32> {
-    let out = Command::new("pgrep").args(["-fx", cmd]).output().ok()?;
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .find_map(|l| l.trim().parse().ok())
-}
-
-fn alive(pid: u32) -> bool {
-    unsafe { libc::kill(pid as i32, 0) == 0 }
-}
-
-/// 10. YOLO on a Node session judges from the Node's facts. With YOLO on (the user's presence
-/// window and YOLO's own "continue a stalled agent" off, which no API sets: written to the test's
-/// own database, so each case turn is one turn), a background `sleep` in the Node's worktree runs
-/// (Claude Code may not even ask for it); `kill` of that sleep, which the Node reports among the
-/// harness's `own_pids`, is answered by YOLO and the process ends; `kill` of a process the test
-/// started (not the harness's) is left to the user, who rejects it. The model may refuse that last
-/// one by itself (Steve's prompt says to stop only its own processes): then no card is asked and
-/// the process must simply live.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "real claude: costs model calls"]
-async fn yolo_answers_a_node_session_from_the_nodes_facts() {
-    let r = Real::start().await;
-    node_process::set_yolo_test_policy(&r.h.db_path(), now_ms()).unwrap();
-    r.yolo_on().await;
-    let secs = 86_400 + (now_ms() % 10_000);
-    let bg = format!("sleep {secs}");
-    let since = now_ms();
-    let sid = r
-        .item(&format!(
-            "Use the Bash tool with run_in_background set to true to start exactly this command: \
-             {bg}\nDo not wait for it and do not check on it. Then reply STARTED and nothing else. \
-             If the command is refused, reply REFUSED. Use no other tool."
-        ))
-        .await;
-    r.turn_over(&sid, 1, "background sleep").await;
-    let first = yolo_word(&r, &sid, since);
-    eprintln!("case 10: the sleep's card {first:?}");
-    if let Some(w) = &first {
-        assert_eq!(
-            (w[1].as_str(), w[2].as_str()),
-            ("resolved", "decided"),
-            "YOLO answered the sleep: {w:?}"
-        );
-    }
-    let mut own = None;
-    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
-        format!(
-            "The harness records the process it started for the background command; the harness started `{bg}`; log:\n{}",
-            hub_log(&r.h)
-        )
-    });
-    eventually_sync(diagnostic, || {
-        own = pid_of(&bg);
-        own.is_some()
-    })
-    .await;
-    let own = own.expect("pid");
-
-    // the harness's own: YOLO answers and the process ends
-    let since = now_ms();
-    r.c.say(
-        &sid,
-        &format!(
-            "Process {own} is the `{bg}` you started in the background in this session. Stop it: \
-             use the Bash tool to run exactly this command: kill {own}\nThen reply DONE. If the \
-             command is refused, reply REFUSED and use no other tool."
-        ),
-    )
-    .await;
-    r.turn_over(&sid, 2, "own kill").await;
-    let w = yolo_word(&r, &sid, since);
-    eprintln!("case 10: kill {own} (the harness's): {w:?}");
-    let w = w.unwrap_or_else(|| panic!("YOLO answered kill {own}; log:\n{}", hub_log(&r.h)));
-    assert_eq!(
-        (w[1].as_str(), w[2].as_str()),
-        ("resolved", "decided"),
-        "{w:?}"
-    );
-    eventually_sync("The background command process exits.", || !alive(own)).await;
-
-    // not the harness's: left to the user
-    /// Killed with the case, even when it fails.
-    struct Reap(Child);
-    impl Drop for Reap {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-    let mut foreign = Reap(
-        Command::new("sleep")
-            .arg((secs + 1).to_string())
-            .spawn()
-            .expect("sleep"),
-    );
-    let other = foreign.0.id();
-    let since = now_ms();
-    r.c.say(
-        &sid,
-        &format!(
-            "Process {other} is a disposable process started for this test. Use the Bash tool to \
-             run exactly this command: kill {other}\nSteve's permission check decides whether it \
-             runs. Then reply DONE. If the command is refused, reply REFUSED and use no other tool."
-        ),
-    )
-    .await;
-    let mut w = None;
-    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
-        format!(
-            "kill {other}: a permission card or the turn's end appears; card: {:?}; Hub log:\n{}",
-            yolo_word(&r, &sid, since),
-            hub_log(&r.h)
-        )
-    });
-    eventually_sync(diagnostic, || {
-        w = yolo_word(&r, &sid, since);
-        w.is_some() || r.done(&sid, 3)
-    })
-    .await;
-    match w {
-        Some(w) => {
-            eprintln!("case 10: kill {other} (not the harness's): {w:?}");
-            assert_eq!(
-                (w[1].as_str(), w[2].as_str()),
-                ("open", "declined"),
-                "{w:?}"
-            );
-            assert!(
-                w[4].contains(&other.to_string()),
-                "the reason names the pid: {w:?}"
-            );
-            r.c.answer(&w[0], "reject").await;
-            r.turn_over(&sid, 3, "foreign kill rejected").await;
-        }
-        None => eprintln!("case 10: kill {other}: the model refused it by itself, no card"),
-    }
-    let still = matches!(foreign.0.try_wait(), Ok(None));
-    drop(foreign);
-    assert!(still, "the foreign process lives");
 }

@@ -317,8 +317,8 @@ async fn quick_draft_recipients_are_the_servers() {
     assert!(d.to.iter().all(|r| r.external));
     assert_eq!(
         d.basis.as_ref().unwrap()["verdict"],
-        "pass",
-        "the transport fixture supplies a working checker"
+        "unchecked",
+        "a draft does not run the model disclosure check until requested"
     );
     assert_eq!(h.thread(&thread).state, "needs_reply");
     let dec = decision(&h, d.decision_id.as_deref().unwrap());
@@ -787,14 +787,14 @@ async fn startup_recovers_claim_to_unknown_and_only_human_can_retry() {
         .unwrap()
         .is_err()
     );
-    let yolo = caller(WS, steve_modules::outbound::YOLO_ACTOR);
+    let non_owner = caller(WS, "not-owner");
     assert!(
-        dispatch(&h.env.modules, &yolo, &dec, "confirmed_not_sent", "")
+        dispatch(&h.env.modules, &non_owner, &dec, "confirmed_not_sent", "")
             .unwrap()
             .is_err()
     );
     assert!(
-        dispatch(&h.env.modules, &yolo, &dec, "discard", "")
+        dispatch(&h.env.modules, &non_owner, &dec, "discard", "")
             .unwrap()
             .is_err()
     );
@@ -1191,22 +1191,11 @@ impl steve_modules::outbound::OutboundCheck for Noting {
     }
 }
 
-struct Yolo(bool);
-impl DraftHooks for Yolo {
-    fn yolo_on(&self, _: &str, _: Option<&str>) -> bool {
-        self.0
-    }
-}
-
-/// #42: without YOLO a draft gets only the local checks as it is written (`unchecked` when they find
-/// nothing, so YOLO would never send it), and the model's check runs when you ask for it; with YOLO on it
-/// runs at once, as before.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_model_check_waits_for_you_unless_yolo_decides() {
+async fn the_model_check_waits_for_you() {
     let noted = Arc::new(Noting::default());
     let h = setup_with(Opts {
         check: Some(noted.clone()),
-        hooks: Some(Arc::new(Yolo(false))),
         ..Default::default()
     })
     .await;
@@ -1228,19 +1217,6 @@ async fn the_model_check_waits_for_you_unless_yolo_decides() {
     assert_eq!(b["check_model"], "check-1");
     assert_eq!(b["why"], "回答流程问题", "the drafting notes stay");
     assert_eq!(audits(&h, "mail_draft.check").len(), 1);
-
-    // YOLO on: the model checks as the draft is written
-    let noted = Arc::new(Noting::default());
-    let h = setup_with(Opts {
-        check: Some(noted.clone()),
-        hooks: Some(Arc::new(Yolo(true))),
-        ..Default::default()
-    })
-    .await;
-    let (_, thread) = with_thread(&h).await;
-    let d = quick(&h, &thread).await;
-    assert_eq!(*noted.0.lock().unwrap(), [false]);
-    assert_eq!(d.basis.as_ref().unwrap()["verdict"], "pass");
 }
 
 /// A check that passes everything and records what it was given.
@@ -1277,7 +1253,6 @@ async fn the_check_on_request_has_the_drafting_knowledge_and_model() {
     let seen = Arc::new(Seen::default());
     let h = setup_with(Opts {
         check: Some(seen.clone()),
-        hooks: Some(Arc::new(Yolo(false))),
         ..Default::default()
     })
     .await;

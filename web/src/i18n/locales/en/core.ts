@@ -196,12 +196,33 @@ export default {
     tagDeleted_other: "Deleted tag “{{name}}” and removed it from {{count}} items",
     tagMerged: "Merged “{{from}}” into “{{into}}”",
   },
-  yolo: {
-    off: "Off. Every decision waits for you",
-    on: "YOLO is on",
-    full: "Full YOLO is on",
-    resumed: "YOLO resumed",
-    leftToYou: "This card is left to you",
+  approval: {
+    "title": "Native approval (YOLO)",
+    "description": "Supported harnesses review their own tools. Agent questions and Steve’s external actions still need their usual authorization.",
+    "on": "Native approval: on",
+    "off": "Native approval: off",
+    "unsupported": "Native approval: unsupported by this harness",
+    "applied": "Applied: {{mode}}",
+    "pending": "Pending: {{mode}}",
+    "unreported": "not reported",
+    "refused": "Change refused",
+    "stats": "Native approval",
+    "sessions": "Sessions with native approval turns",
+    "turns": "Native approval turns",
+    "permissions": "Permissions received by Steve",
+    "questions": "Agent questions",
+    "resolver": {
+      "ask_owner": "Ask owner",
+      "harness_native": "Harness native"
+    },
+    "result": {
+      "pending": "Pending",
+      "expired": "Expired",
+      "refused": "Refused",
+      "allowed": "Allowed",
+      "rejected": "Rejected",
+      "unknown": "Unknown"
+    }
   },
 
   /* ── ui.tsx ── */

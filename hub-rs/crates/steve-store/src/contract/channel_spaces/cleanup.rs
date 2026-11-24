@@ -1,7 +1,7 @@
 //! The storage operations for a confirmed channel cleanup.
 
 use sea_query::{Expr, ExprTrait, Query, SelectStatement};
-use steve_types::{AutonomyEvent, WorkEvent};
+use steve_types::WorkEvent;
 
 use crate::contract::Q;
 use crate::{Result, W};
@@ -66,20 +66,6 @@ fn retire_decisions(w: &mut W<'_>, workspace: &str, decisions: &[String]) -> Res
         return Ok(());
     }
     let ids = w.db().dialect().text_array(decisions)?;
-    let actions: Vec<String> = w.all(
-        Query::select()
-            .column("id")
-            .from("yolo_actions")
-            .and_where(Expr::col("decision_id").in_subquery(ids.clone())),
-        |row| row.get(0),
-    )?;
-    w.exec(
-        Query::update()
-            .table("yolo_actions")
-            .value("decision_id", None::<String>)
-            .value("undo", None::<String>)
-            .and_where(Expr::col("decision_id").in_subquery(ids.clone())),
-    )?;
     for table in ["chan_messages", "ext_events"] {
         w.exec(
             Query::update()
@@ -89,13 +75,6 @@ fn retire_decisions(w: &mut W<'_>, workspace: &str, decisions: &[String]) -> Res
         )?;
     }
     remove_rows(w, "decisions", "id", &ids)?;
-    for id in actions {
-        w.emit(AutonomyEvent::YoloAction {
-            id: id.into(),
-            decision_id: None,
-            ws: workspace.into(),
-        });
-    }
     for id in decisions {
         w.emit(WorkEvent::Decision {
             id: id.as_str().into(),

@@ -62,7 +62,9 @@ impl Harness {
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
         .collect();
-        let offered = if p.native_execution {
+        let offered = if p.native_execution
+            || p.permission_policy == steve_harness_spec::PermissionPolicy::FullAccessOnly
+        {
             vec![PermissionMode::FullAccess]
         } else {
             p.modes
@@ -158,19 +160,28 @@ impl Harness {
         self.modes.as_ref().is_none_or(|m| m.contains(&mode))
     }
 
-    /// Default `perm_mode` key for a new bot on this harness: Ask when offered, else Auto,
-    /// AcceptEdits, FullAccess, or Plan.
+    /// Bot settings can choose Ask or Plan. A native-only adapter has its own explicit
+    /// admission mode, separate from the workspace's native approval switch.
+    pub fn offers_bot_mode(&self, mode: PermissionMode) -> bool {
+        match mode {
+            PermissionMode::Ask | PermissionMode::Plan => self.offers_mode(mode),
+            PermissionMode::FullAccess => {
+                self.modes.as_deref() == Some(&[PermissionMode::FullAccess])
+            }
+            _ => false,
+        }
+    }
+
+    /// Default `perm_mode` key for a new bot on this harness.
     pub fn default_perm_mode(&self) -> &'static str {
-        const ORDER: [(PermissionMode, &str); 5] = [
+        const ORDER: [(PermissionMode, &str); 3] = [
             (PermissionMode::Ask, "default"),
-            (PermissionMode::Auto, "auto"),
-            (PermissionMode::AcceptEdits, "acceptEdits"),
-            (PermissionMode::FullAccess, "bypassPermissions"),
             (PermissionMode::Plan, "plan"),
+            (PermissionMode::FullAccess, "bypassPermissions"),
         ];
         ORDER
             .iter()
-            .find(|(m, _)| self.offers_mode(*m))
+            .find(|(m, _)| self.offers_bot_mode(*m))
             .map_or("default", |(_, k)| *k)
     }
 }

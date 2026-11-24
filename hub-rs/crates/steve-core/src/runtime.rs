@@ -72,20 +72,6 @@ pub enum Answered {
     Gone,
 }
 
-/// What [`AgentRuntime::set_mode`] did with a permission mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Configured {
-    /// The live session has it (or had it already).
-    Applied,
-    /// It is on its way, or waits for the session's next idle boundary.
-    Pending,
-    /// No adapter runs for the session: its next start applies the mode anyway.
-    NotRunning,
-    /// The backend cannot express the mode for this session (a Node path without it): unchanged,
-    /// and asking again would not help.
-    Unsupported,
-}
-
 /// Where a session's permission mode stands on its backend ([`AgentRuntime::mode_state`]): what
 /// its harness was confirmed to run in, what waits or is on its way, and what was refused. Mode
 /// names are Steve's (`plan`, `ask`, `accept_edits`, `auto`, `full_access`).
@@ -251,12 +237,6 @@ pub trait AgentRuntime: Send + Sync {
     fn same_turn(&self, a: &Running, b: &Running) -> bool {
         a == b
     }
-    /// Switch a live session's permission mode (`session/set_mode`). Errors when the change could
-    /// not be taken this time (a store error, say): nothing changed, and asking again may work.
-    fn set_mode(&self, session_id: &str, mode: &str) -> Result<Configured> {
-        let _ = (session_id, mode);
-        Ok(Configured::NotRunning)
-    }
     /// The session runs on a Node that has no link now: why, as far as is known (shown on what
     /// waits for it). `None`: it is linked, or runs elsewhere.
     fn node_offline(&self, session_id: &str) -> Option<String> {
@@ -267,12 +247,6 @@ pub trait AgentRuntime: Send + Sync {
     /// tell, or nothing runs it).
     fn mode_state(&self, session_id: &str) -> Option<ModeState> {
         let _ = session_id;
-        None
-    }
-    /// The Steve name of harness mode `mode` (`bypassPermissions` → `full_access`), as this
-    /// runtime's backends map it; `None`: none of them can express it.
-    fn mode_name(&self, mode: &str) -> Option<String> {
-        let _ = mode;
         None
     }
     /// The session's last attempt has an outcome nobody can tell yet (reconciliation decides).

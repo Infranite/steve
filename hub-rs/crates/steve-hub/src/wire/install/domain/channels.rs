@@ -64,7 +64,6 @@ install! { install(reg, cx) [conns, declared, directory, flow, kstore, late, mod
         .reactor(outbox.clone())
         // IM spaces converse through steve-core's thread (channels §2.12)
         .thread(Arc::new(crate::wire::chan::CoreThread(core.clone())))
-        .yolo(Arc::new(crate::wire::chan::ChanYolo(core.clone())))
         .build();
     channels.set_knowledge_store(kstore.clone());
     late.set(&channels);

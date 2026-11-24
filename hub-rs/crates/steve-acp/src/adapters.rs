@@ -486,7 +486,17 @@ pub async fn probe(cfg: &crate::AcpConfig, id: &str, cwd: &Path, timeout: Durati
         Ok(r) => Probe::from_initialize(&r),
         Err(e) => {
             conn.kill();
-            return Probe::failed(ProbeStatus::InitializeFailed, e.message);
+            let auth = e.auth_required();
+            let mut p = Probe::failed(
+                ProbeStatus::InitializeFailed,
+                if auth {
+                    "adapter requires authentication".into()
+                } else {
+                    e.message
+                },
+            );
+            p.session_auth_required = auth;
+            return p;
         }
     };
     if cfg.adapter_properties(id).require_mcp_http && !p.mcp_http {
@@ -517,9 +527,12 @@ pub async fn probe(cfg: &crate::AcpConfig, id: &str, cwd: &Path, timeout: Durati
         }
         Err(e) => {
             // ACP AuthenticationRequired (rather than guess from translated error messages).
-            p.session_auth_required =
-                e.data.as_ref().and_then(|d| d["code"].as_i64()) == Some(-32000);
-            p.session_error = Some(e.message);
+            p.session_auth_required = e.auth_required();
+            p.session_error = Some(if p.session_auth_required {
+                "adapter requires authentication".into()
+            } else {
+                e.message
+            });
         }
     }
     conn.kill();
@@ -777,6 +790,53 @@ mod tests {
             codex_home: dir.join("codex"),
             user_home: dir.to_path_buf(),
             version: "t".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_probe_recognizes_only_the_acp_error_code_in_either_phase() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = cfg(dir.path());
+        let cmd = dir.path().join("fixture-probe");
+        c.adapters.insert("fixture".into(), cmd.clone());
+        use std::os::unix::fs::PermissionsExt;
+        for (stage, code, auth) in [
+            ("initialize", -32000, true),
+            ("session", -32000, true),
+            ("session", -32603, false),
+        ] {
+            // Requests use sequential ids on each fresh connection.
+            let error_id = if stage == "initialize" { 1 } else { 2 };
+            let init = json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}});
+            let error = json!({"jsonrpc":"2.0","id":error_id,"error":{"code":code,"message":"fixture-private-error"}});
+            let read = "IFS= read -r line";
+            let first = if error_id == 2 {
+                format!("{read} && printf '%s\\n' '{init}'\n")
+            } else {
+                String::new()
+            };
+            std::fs::write(
+                &cmd,
+                format!("#!/bin/sh\n{first}{read} && printf '%s\\n' '{error}'\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&cmd, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let p = probe(&c, "fixture", dir.path(), Duration::from_secs(3)).await;
+            assert_eq!(
+                p.status,
+                if error_id == 1 {
+                    ProbeStatus::InitializeFailed
+                } else {
+                    ProbeStatus::Ready
+                }
+            );
+            assert_eq!(p.session_auth_required, auth);
+            if auth {
+                assert_eq!(
+                    p.session_error.or(p.error).as_deref(),
+                    Some("adapter requires authentication")
+                );
+            }
         }
     }
 

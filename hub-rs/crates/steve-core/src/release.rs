@@ -56,7 +56,7 @@ pub struct DrainStatus {
 }
 
 impl Core {
-    /// A release is running or the Hub holds new turns for one (YOLO waits with release cards).
+    /// A release is running or the Hub holds new turns for one.
     pub fn release_busy(&self) -> bool {
         let t = self.tx();
         t.st.releasing.is_some() || t.holding()
@@ -74,59 +74,6 @@ impl Core {
     }
     pub fn hold_status(&self) -> Option<HoldStatus> {
         self.tx().hold_status()
-    }
-
-    /// `release.sh --rollback <target>` for the release of `item` (YOLO's undo); returns the log path.
-    /// `action`: the YOLO undo that asked for it, marked undone once the rollback went through
-    /// (`report_release` reads `releases/rollback.json`).
-    pub fn rollback_release(&self, item: &str, target: &str, action: &str) -> Result<String> {
-        if let Some(why) = self.rollback_refusal(target) {
-            return Err(crate::error::msg(steve_i18n::t!(
-                "core.release.rollback_refused",
-                target = target,
-                why = why
-            )));
-        }
-        self.tx().start_rollback(item, target, action)
-    }
-
-    /// Why the installed release `target` can't run on this Hub's database, if it can't. The rule of
-    /// ops/schema_gate.py, which `release.sh --rollback` applies again: the database records the oldest
-    /// schema a Hub must know (`steve_store::Store::schema_compat`), the release's `release.json` the schema its Hub
-    /// knows (`schema.target`). A release that doesn't say is refused. Asked before a rollback is offered
-    /// or started, so a refused one is neither shown as possible nor counted as undone.
-    pub fn rollback_refusal(&self, target: &str) -> Option<String> {
-        if target.is_empty() || target.contains('/') || target.starts_with('.') {
-            return Some(steve_i18n::t!("core.release.not_installed"));
-        }
-        let manifest = self
-            .config()
-            .home
-            .join("releases")
-            .join(target)
-            .join("release.json");
-        let knows = std::fs::read(&manifest)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-            .and_then(|m| m.pointer("/schema/target").and_then(Value::as_i64));
-        let db = match self.store().store().schema_compat() {
-            Ok(c) => c,
-            Err(e) => return Some(steve_i18n::t!("core.release.schema_unreadable", error = e)),
-        };
-        match knows {
-            _ if db.min_reader == 0 => None,
-            None => Some(steve_i18n::t!(
-                "core.release.schema_unknown",
-                schema = db.schema
-            )),
-            Some(k) if k < db.min_reader => Some(steve_i18n::t!(
-                "core.release.schema_too_old",
-                knows = k,
-                schema = db.schema,
-                min = db.min_reader
-            )),
-            Some(_) => None,
-        }
     }
 
     /// Read `releases/last.json` and `releases/rollback.json` and report each final result once (boot, file
@@ -555,107 +502,6 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// Rolls the user's Steve back to `target` with the project's release script
-    /// (`release.sh --rollback <target>`): same lock, drain and restart as a release. Used to undo a
-    /// release YOLO approved; returns the log path.
-    pub(crate) fn start_rollback(
-        &mut self,
-        item_id: &str,
-        target: &str,
-        action: &str,
-    ) -> Result<String> {
-        if self.db().store().maintenance() {
-            return Err(crate::error::msg(steve_i18n::t!(
-                "core.release.maintenance"
-            )));
-        }
-        let item = self.item(item_id)?;
-        let p = self.db().project(item.project_id.as_deref())?;
-        if let Some(device) = p
-            .as_ref()
-            .map(|p| p.device_id.as_str())
-            .filter(|d| *d != HUB_DEVICE)
-        {
-            return Err(crate::error::msg(steve_i18n::t!(
-                "core.release.remote_rollback",
-                device = device
-            )));
-        }
-        let script = p
-            .as_ref()
-            .and_then(|p| p.release.as_ref())
-            .map(|r| r.cmd.clone());
-        let Some((p, script)) = p.zip(script).filter(|(_, s)| Path::new(s).exists()) else {
-            return Err(crate::error::msg(steve_i18n::t!(
-                "core.release.no_script_rollback"
-            )));
-        };
-        if let Some(r) = &self.st.releasing {
-            return Err(crate::error::msg(steve_i18n::t!(
-                "core.release.busy_rollback",
-                item = r.item
-            )));
-        }
-        let logs = self.cfg().home.join("logs");
-        std::fs::create_dir_all(&logs)?;
-        let log = logs.join(format!("rollback-{}.log", now()));
-        let out = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log)?;
-        let tok = token();
-        let mut cmd = std::process::Command::new("/bin/zsh");
-        for key in [
-            "STEVE_UPGRADE_CONTROL_TOKEN",
-            "STEVE_SUPERVISOR_PID",
-            "STEVE_UPGRADE_ID",
-        ] {
-            cmd.env_remove(key);
-        }
-        cmd.args([script.as_str(), "--rollback", target, item_id, action])
-            .stdin(std::process::Stdio::null())
-            .stdout(out.try_clone()?)
-            .stderr(out)
-            .env("STEVE_REPO", &p.path)
-            .env("STEVE_HOME", &self.cfg().home)
-            .env("STEVE_PORT", self.cfg().port.to_string())
-            .env("STEVE_DRAIN_TOKEN", &tok);
-        std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
-        self.st.release_generation += 1;
-        let generation = self.st.release_generation;
-        let mut child = cmd.spawn().map_err(|e| {
-            crate::error::msg(steve_i18n::t!(
-                "core.release.rollback_not_started",
-                error = e
-            ))
-        })?;
-        self.st.releasing = Some(Releasing {
-            token: tok,
-            item: item_id.into(),
-            operation: None,
-            generation,
-            hold_since: None,
-        });
-        #[cfg(test)]
-        let pid = test_spawned::add(&self.cfg().home, child.id());
-        let core = self.c.clone();
-        crate::detach(move || {
-            let _ = child.wait();
-            #[cfg(test)]
-            test_spawned::remove(pid);
-            core.release_done(generation);
-        });
-        let log = log.to_string_lossy().to_string();
-        self.db().timeline_add(
-            item_id,
-            "steve",
-            "sys",
-            &format!("撤销 YOLO 批准的发布：回滚到 {target}，日志 {log}"),
-            None,
-        )?;
-        Ok(log)
-    }
-
     pub(crate) fn drain(&mut self, tok: &str, start: bool) -> Result<Option<DrainStatus>> {
         let Some(r) = self.st.releasing.clone() else {
             return Ok(None);
@@ -764,7 +610,7 @@ impl Tx<'_> {
     }
 
     /// `releases/rollback.json` (ops/release.sh `--rollback`), once: noted on the item it undid and as a
-    /// notification; when it went through, the YOLO undo that asked for it becomes undone. A rollback is
+    /// notification. A rollback is
     /// never the item's release: nothing about the item's state changes.
     pub(crate) fn report_rollback(&mut self) -> Result<()> {
         let f = self.cfg().home.join("releases/rollback.json");
@@ -801,11 +647,6 @@ impl Tx<'_> {
             .flatten();
         if let Some(i) = &item {
             self.db().timeline_add(&i.id, "steve", "sys", &text, None)?;
-        }
-        if ok && !s("action").is_empty() {
-            self.db()
-                .store()
-                .write(|w| steve_store::yolo::stamp_undone(w, s("action"), now()))?;
         }
         let ws = item
             .as_ref()

@@ -5,7 +5,6 @@ pub mod runtime;
 pub mod thread;
 pub mod usage;
 pub mod work;
-pub mod yolo;
 
 use sea_query::{Expr, ExprTrait, Query};
 use serde_json::Value;
@@ -257,41 +256,6 @@ pub fn resume_workflow_deliveries(store: &Store) {
         .write_locked(|c| {
             c.execute_batch("DROP TRIGGER fail_workflow_delivery")?;
             Ok(())
-        })
-        .unwrap();
-}
-
-pub fn rollback_yolo_action(store: &Store, ws: &str, item: &str, id: &str) {
-    store
-        .write(|w| {
-            w.exec(
-                Query::insert()
-                    .into_table("yolo_actions")
-                    .columns([
-                        "id",
-                        "workspace_id",
-                        "item_id",
-                        "kind",
-                        "subject_type",
-                        "rule",
-                        "outcome",
-                        "reason",
-                        "undo",
-                        "created",
-                    ])
-                    .values_panic([
-                        id.into(),
-                        ws.into(),
-                        item.into(),
-                        "approve".into(),
-                        "release".into(),
-                        "release.self".into(),
-                        "decided".into(),
-                        "".into(),
-                        r#"{"kind":"rollback"}"#.into(),
-                        1_i64.into(),
-                    ]),
-            )
         })
         .unwrap();
 }
