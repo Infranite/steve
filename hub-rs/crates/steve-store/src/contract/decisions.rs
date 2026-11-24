@@ -1,8 +1,8 @@
-use sea_query::{Expr, ExprTrait, Func, Order, Query};
+use sea_query::{Expr, ExprTrait, Func, OnConflict, Order, Query};
 use serde_json::Value;
-use steve_types::{DomainEvent, WorkEvent};
+use steve_types::{DecisionStatus, DomainEvent, WorkEvent};
 
-use super::{Json, Row};
+use super::{Json, Q, Row};
 use crate::{Decision, NewDecision, Read, Result, W, now, uid};
 
 /// A choice acknowledged by the Hub. Any external operation has its own receipt.
@@ -50,20 +50,40 @@ pub enum DecisionChange {
 }
 
 impl DecisionChange {
-    fn states(self) -> (&'static str, &'static str, &'static str) {
-        match self {
-            Self::Resolve => ("open", "resolved", "resolved"),
-            Self::Dismiss => ("open", "dismissed", "dismissed"),
-            Self::Expire => ("open", "expired", "expired"),
-            Self::Supersede => ("open", "superseded", "superseded"),
-            Self::Reopen => ("resolved", "open", "reopened"),
+    fn next(self, current: DecisionStatus) -> Option<(DecisionStatus, &'static str)> {
+        use DecisionChange::*;
+        use DecisionStatus::{Dismissed, Expired, Open, Resolved, Superseded};
+        match current {
+            Open => match self {
+                Resolve => Some((Resolved, "resolved")),
+                Dismiss => Some((Dismissed, "dismissed")),
+                Expire => Some((Expired, "expired")),
+                Supersede => Some((Superseded, "superseded")),
+                Reopen => None,
+            },
+            Resolved | Dismissed => (self == Reopen).then_some((Open, "reopened")),
+            Expired | Superseded => None,
         }
     }
 }
 
-pub(crate) fn undo_until(status: &str, resolved: Option<i64>, undo: &Value) -> Option<i64> {
+pub(crate) fn decode_status(row: &Row<'_>, col: usize) -> Result<DecisionStatus> {
+    row.get::<String>(col)?
+        .parse()
+        .map_err(|_| crate::StoreError::Storage("invalid decision status".into()))
+}
+
+pub(crate) fn undo_until(
+    status: DecisionStatus,
+    resolved: Option<i64>,
+    undo: &Value,
+) -> Option<i64> {
     resolved
-        .filter(|at| *at > 0 && matches!(status, "resolved" | "dismissed") && crate::truthy(undo))
+        .filter(|at| {
+            *at > 0
+                && matches!(status, DecisionStatus::Resolved | DecisionStatus::Dismissed)
+                && crate::truthy(undo)
+        })
         .map(|at| at + 24 * 3_600_000)
 }
 
@@ -83,7 +103,7 @@ pub fn delivery_summary(c: &mut impl Read, item: &str) -> Result<Option<String>>
     )
 }
 
-const COLUMNS: [&str; 17] = [
+const COLUMNS: [&str; 19] = [
     "id",
     "workspace_id",
     "kind",
@@ -101,11 +121,19 @@ const COLUMNS: [&str; 17] = [
     "resolved",
     "undo",
     "revision",
+    "source_revision",
+    "question_template",
 ];
 fn decode(r: &Row<'_>) -> Result<Decision> {
     Ok(Decision {
         id: r.get(0)?,
         revision: r.get(16)?,
+        source_revision: r
+            .get::<Option<Json<crate::DecisionSource>>>(17)?
+            .map(|key| key.0),
+        question_template: r
+            .get::<Option<Json<steve_types::DecisionPrompt>>>(18)?
+            .map(|key| key.0),
         workspace_id: r.get(1)?,
         kind: r.get(2)?,
         subject_type: r.get(3)?,
@@ -115,7 +143,7 @@ fn decode(r: &Row<'_>) -> Result<Decision> {
         question: r.get(7)?,
         draft: r.get(8)?,
         options: r.get::<Json<Vec<String>>>(9)?.0,
-        status: r.get(10)?,
+        status: decode_status(r, 10)?,
         result: r
             .get::<Option<Json<serde_json::Value>>>(11)?
             .map_or(serde_json::Value::Null, |value| value.0),
@@ -209,50 +237,93 @@ impl DecisionRows<'_, W<'_>> {
     }
 
     pub fn open(&mut self, d: &NewDecision) -> Result<Decision> {
+        self.open_in(d).map(|(decision, _)| decision)
+    }
+
+    /// Open a decision and tell producers whether this command inserted the row.
+    pub fn open_in(&mut self, d: &NewDecision) -> Result<(Decision, bool)> {
+        let source = d.source.as_ref().map(serde_json::to_string).transpose()?;
+        let template = d
+            .question_template
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         let started = std::time::Instant::now();
         let id = uid("dec");
         let options = serde_json::to_string(d.options.as_deref().unwrap_or_default())?;
-        self.0.exec(
-            Query::insert()
-                .into_table("decisions")
-                .columns([
-                    "id",
+        let mut insert = Query::insert();
+        insert
+            .into_table("decisions")
+            .columns([
+                "id",
+                "workspace_id",
+                "kind",
+                "subject_type",
+                "subject_id",
+                "item_id",
+                "session_id",
+                "question",
+                "draft",
+                "options",
+                "status",
+                "requested_by",
+                "created",
+                "source_revision",
+                "question_template",
+            ])
+            .values_panic([
+                id.as_str().into(),
+                d.workspace_id.as_str().into(),
+                d.kind.as_str().into(),
+                d.subject_type.as_str().into(),
+                d.subject_id.as_str().into(),
+                d.item_id.as_deref().into(),
+                d.session_id.as_deref().into(),
+                d.question.as_str().into(),
+                d.draft.as_deref().unwrap_or_default().into(),
+                options.into(),
+                "open".into(),
+                d.requested_by.as_str().into(),
+                now().into(),
+                source.as_deref().into(),
+                template.as_deref().into(),
+            ]);
+        if source.is_some() {
+            insert.on_conflict(
+                OnConflict::columns([
                     "workspace_id",
-                    "kind",
                     "subject_type",
                     "subject_id",
-                    "item_id",
-                    "session_id",
-                    "question",
-                    "draft",
-                    "options",
-                    "status",
-                    "requested_by",
-                    "created",
+                    "kind",
+                    "source_revision",
                 ])
-                .values_panic([
-                    id.as_str().into(),
-                    d.workspace_id.as_str().into(),
-                    d.kind.as_str().into(),
-                    d.subject_type.as_str().into(),
-                    d.subject_id.as_str().into(),
-                    d.item_id.as_deref().into(),
-                    d.session_id.as_deref().into(),
-                    d.question.as_str().into(),
-                    d.draft.as_deref().unwrap_or_default().into(),
-                    options.into(),
-                    "open".into(),
-                    d.requested_by.as_str().into(),
-                    now().into(),
-                ]),
-        )?;
+                .do_nothing()
+                .to_owned(),
+            );
+        }
+        if self.0.exec(&insert)? == 0 {
+            let existing = self.0.one(
+                Query::select()
+                    .columns(COLUMNS)
+                    .from("decisions")
+                    .and_where(Expr::col("workspace_id").eq(d.workspace_id.as_str()))
+                    .and_where(Expr::col("subject_type").eq(d.subject_type.as_str()))
+                    .and_where(Expr::col("subject_id").eq(d.subject_id.as_str()))
+                    .and_where(Expr::col("kind").eq(d.kind.as_str()))
+                    .and_where(Expr::col("source_revision").eq(source.as_deref())),
+                decode,
+            )?;
+            let existing = crate::repo::must(existing)?;
+            metrics::counter!("steve_decision_duplicate_prompts_total").increment(1);
+            return Ok((existing, false));
+        }
         let d = crate::repo::must(self.get(&id)?)?;
         emit(self.0, &d);
         self.0
             .diagnostic(crate::diagnostics::decision_event(&d, "created", None));
         metrics::histogram!("steve_decision_transition_seconds", "operation" => "created")
             .record(started.elapsed());
-        Ok(d)
+        Ok((d, true))
     }
 
     /// Writes the card shown to the user in the same transaction as the checked draft.
@@ -324,16 +395,14 @@ impl DecisionRows<'_, W<'_>> {
         undo: &Value,
     ) -> Result<bool> {
         let started = std::time::Instant::now();
-        let (from, to, operation) = change.states();
-        let reopening = change == DecisionChange::Reopen;
-        let allowed = decision.status == from || (reopening && decision.status == "dismissed");
-        if !allowed {
+        let Some((to, operation)) = change.next(decision.status) else {
             return Ok(false);
-        }
+        };
+        let reopening = to == DecisionStatus::Open;
         let n = self.0.exec(
             Query::update()
                 .table("decisions")
-                .value("status", to)
+                .value("status", to.as_str())
                 .value("result", (!result.is_null()).then(|| result.to_string()))
                 .value("resolved", (!reopening).then(now))
                 .value("undo", crate::types::truthy(undo).then(|| undo.to_string()))
@@ -361,13 +430,37 @@ impl DecisionRows<'_, W<'_>> {
             self.0.diagnostic(crate::diagnostics::decision_event(
                 &d,
                 operation,
-                Some(&decision.status),
+                Some(decision.status.as_str()),
             ));
             emit(self.0, &d);
             metrics::histogram!("steve_decision_transition_seconds", "operation" => operation)
                 .record(started.elapsed());
         }
         Ok(n > 0)
+    }
+
+    /// Settle an answer, retain the receipt, and write its audit in the same savepoint.
+    pub fn resolve_choice(
+        &mut self,
+        decision: &Decision,
+        actor: &str,
+        action: &str,
+        answer: &str,
+        result: &Value,
+        undo: &Value,
+    ) -> Result<bool> {
+        if !self.apply(decision, DecisionChange::Resolve, result, undo)? {
+            return Ok(false);
+        }
+        self.record_choice(decision, actor, action, answer)?;
+        self.0.audit(
+            &decision.workspace_id,
+            actor,
+            "decision.resolve",
+            &decision.id,
+            &serde_json::json!({"revision": decision.revision, "choice": action}),
+        )?;
+        Ok(true)
     }
 
     pub fn record_choice(
@@ -580,7 +673,10 @@ pub fn open_mail_draft_ids(c: &mut impl Read) -> Result<Vec<String>> {
 pub fn reopen(w: &mut W<'_>, id: &str) -> Result<()> {
     let mut decisions = DecisionRows(w);
     if let Some(decision) = decisions.get(id)?
-        && matches!(decision.status.as_str(), "resolved" | "dismissed")
+        && matches!(
+            decision.status,
+            DecisionStatus::Resolved | DecisionStatus::Dismissed
+        )
     {
         decisions.reopen(&decision, &Value::Null)?;
     }
@@ -694,7 +790,7 @@ pub fn record_via(
     let Some(d) = get(w, id)?.filter(|d| {
         d.workspace_id == ws
             && d.revision == revision
-            && d.status == "resolved"
+            && d.status == DecisionStatus::Resolved
             && d.result.get("via").is_none()
     }) else {
         return Ok(());

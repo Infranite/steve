@@ -17,7 +17,7 @@ const newer = "刚刚同步的第二版正式稿。\n请以此稿为准。"
 const local = "我尚未提交的修改。\n需要保留并对照。"
 
 function scenario(name) {
-  let decision = { id: "dc_reply", ws: "ws_fixture", kind: "approve", subject_type: "chan_message", subject_id: "cm_reply", item_id: null, session_id: null, question: "审批渠道回复", draft: initial, options: ["yes", "no", "to_item"], status: "open", result: null, requested_by: "steve", created: 1, resolved: null, undo_until: null, space_id: null, tier: "decide", folded: null }
+  let decision = { id: "dc_reply", ws: "ws_fixture", kind: "approve", subject_type: "chan_message", subject_id: "cm_reply", item_id: null, session_id: null, question: { kind: "raw", text: "审批渠道回复" }, draft: initial, options: ["yes", "no", "to_item"], status: "open", result: null, requested_by: "steve", created: 1, resolved: null, undo_until: null, space_id: null, tier: "decide", folded: null }
   let rev = 1
   let failNext = false
   const pages = [], errors = [], writes = [], events = []

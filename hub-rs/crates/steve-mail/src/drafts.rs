@@ -510,6 +510,8 @@ pub fn open_approval(
         draft: Some(decision_text(d)),
         options: Some(APPROVE_OPTIONS.map(String::from).to_vec()),
         requested_by: requested_by.into(),
+        question_template: None,
+        source: None,
     })?;
     repo::set_draft_decision(tx, &d.id, Some(&dec.id), &d.content_hash)?;
     repo::draft_transition(tx, &d.id, &["draft", "pending", "failed"], "pending", now)?;

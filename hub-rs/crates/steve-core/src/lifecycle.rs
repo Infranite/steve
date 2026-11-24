@@ -44,22 +44,29 @@ pub fn supersede_where(
     pick: impl Fn(&steve_store::Decision) -> bool,
     why: &str,
 ) -> Result<usize> {
-    let xs: Vec<_> = db
-        .decisions_of_item(item)?
-        .into_iter()
-        .filter(|d| d.status == "open" && pick(d))
-        .collect();
-    for d in &xs {
-        db.decision_resolve(&d.id, json!({"superseded": why}), "expired", None)?;
-    }
-    if !xs.is_empty() {
-        db.timeline_add(
-            item,
-            "steve",
-            "sys",
-            &format!("{} 件待处理已失效：{why}", xs.len()),
-            None,
-        )?;
-    }
-    Ok(xs.len())
+    db.store().write(|w| {
+        let mut count = 0;
+        for decision in steve_store::decision_repo::open_item_decisions(w, item)? {
+            if pick(&decision)
+                && steve_store::DecisionRows(w).apply(
+                    &decision,
+                    steve_store::decision_repo::DecisionChange::Expire,
+                    &json!({"superseded": why}),
+                    &serde_json::Value::Null,
+                )?
+            {
+                count += 1;
+            }
+        }
+        if count > 0 {
+            db.timeline_add(
+                item,
+                "steve",
+                "sys",
+                &format!("{count} 件待处理已失效：{why}"),
+                None,
+            )?;
+        }
+        Ok(count)
+    })
 }

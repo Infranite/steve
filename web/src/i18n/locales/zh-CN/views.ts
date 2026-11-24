@@ -1,5 +1,10 @@
 /* zh-CN strings for the "views" namespace: the source text, byte-identical to the UI. Conventions: web/src/i18n/index.ts */
 export default {
+  decision: {
+    turnRepeatedFailure: "同一工具操作连续累计失败五次，Steve 已请求停止。",
+    turnNoProgress: "可观察的执行时间累计十五分钟仍无可核实的进展，Steve 已请求停止。",
+    mergePullRequest: "合并 PR #{{number}}（{{repo}}）？",
+  },
   feed: {
     viewItem: "查看事项",
     selectionLimit: "每次最多选择 100 条。全部已读会保留新到内容为未读。",

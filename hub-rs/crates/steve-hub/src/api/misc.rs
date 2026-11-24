@@ -197,7 +197,7 @@ pub async fn summary(
         .decision
         .unwrap_or_default()
         .iter()
-        .filter(|d| d.status == "open")
+        .filter(|d| d.status == steve_types::DecisionStatus::Open)
         .count();
     conditional_json(
         &headers,

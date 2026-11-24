@@ -324,7 +324,7 @@ impl Engine {
             .yolo()
             .store()
             .read(|c| repo::actions_of_decision(c, id))?;
-        if d.status != "open" {
+        if d.status != steve_types::DecisionStatus::Open {
             // the user (or something else) answered first: what was scheduled is moot
             for a in prior.iter().filter(|a| a.outcome == "scheduled") {
                 self.yolo()
@@ -500,7 +500,7 @@ impl Engine {
             /* the card was answered: a failure recording it trips B5 at once, as a failure
             answering it does (only errors before anything was answered wait for a repeat) */
             Ok(after) => {
-                let settled = if after.status == "expired" {
+                let settled = if after.status == steve_types::DecisionStatus::Expired {
                     // the handler closed the card instead (e.g. you already answered the chat yourself)
                     let why = after.result["superseded"]
                         .as_str()
@@ -587,7 +587,7 @@ impl Engine {
             return Ok(None);
         };
         let d = self.core().store().decision(&id).map_err(ce)?;
-        let Some(d) = d.filter(|d| d.status == "open") else {
+        let Some(d) = d.filter(|d| d.status == steve_types::DecisionStatus::Open) else {
             self.yolo()
                 .finish(&a.id, "cancelled", Some("你已经处理了这张卡"))?;
             return Ok(Some(self.reread(&a.id)?));

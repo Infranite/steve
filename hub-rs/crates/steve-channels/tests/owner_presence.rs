@@ -502,7 +502,7 @@ async fn yolo_never_approves_what_you_answered_yourself() {
     you_said_elsewhere(&h, "D_LI", 5);
     h.env.clock.advance(10_000);
     let d = yolo(&h, &card, "yes").expect("answered");
-    assert_eq!(d.status, "expired");
+    assert_eq!(d.status, steve_types::DecisionStatus::Expired);
     assert_eq!(d.result["superseded"], BY_YOU);
     assert_eq!(status(&h, &draft), "discarded");
     assert_eq!(h.outbox.send_due(&h.ch).await, 0);
@@ -538,7 +538,7 @@ async fn yolo_never_retries_what_you_answered_yourself() {
     you_said_elsewhere(&h, "D_LI", 1);
     h.env.clock.advance(5_000);
     let d = yolo(&h, &fail, "retry").expect("answered");
-    assert_eq!(d.status, "expired");
+    assert_eq!(d.status, steve_types::DecisionStatus::Expired);
     assert_eq!(d.result["superseded"], BY_YOU);
     assert_eq!(status(&h, &draft), "discarded");
     assert_eq!(h.outbox.send_due(&h.ch).await, 0);
@@ -552,7 +552,7 @@ async fn a_yolo_approved_reply_is_not_sent_once_you_answered() {
     let h = setup().await;
     let (draft, card) = drafted(&h, "l1").await;
     let d = yolo(&h, &card, "yes").expect("approved");
-    assert_eq!(d.status, "resolved");
+    assert_eq!(d.status, steve_types::DecisionStatus::Resolved);
     assert_eq!(status(&h, &draft), "pending");
     // you answer before the queue picks it up
     you_said_elsewhere(&h, "D_LI", 1);
@@ -585,7 +585,7 @@ async fn your_answer_that_reached_the_hub_after_the_draft_opened_stops_yolo() {
     you_said_elsewhere(&h, "D_LI", -2);
     h.env.clock.advance(600_000);
     let d = yolo(&h, &card, "yes").expect("answered");
-    assert_eq!(d.status, "expired");
+    assert_eq!(d.status, steve_types::DecisionStatus::Expired);
     assert_eq!(d.result["superseded"], BY_YOU);
     assert_eq!(status(&h, &draft), "discarded");
     assert!(h.fake.sent.lock().unwrap().is_empty());
@@ -596,7 +596,10 @@ async fn your_answer_that_reached_the_hub_after_the_draft_opened_stops_yolo() {
 async fn your_late_answer_stops_a_yolo_approved_reply_before_it_is_sent() {
     let h = setup().await;
     let (draft, card) = drafted(&h, "l1").await;
-    assert_eq!(yolo(&h, &card, "yes").expect("approved").status, "resolved");
+    assert_eq!(
+        yolo(&h, &card, "yes").expect("approved").status,
+        steve_types::DecisionStatus::Resolved
+    );
     // your answer, written before YOLO approved, is stored only now
     you_said_elsewhere(&h, "D_LI", -1);
     h.env.clock.advance(11_000);
@@ -614,7 +617,7 @@ async fn your_answer_stamped_ahead_of_the_hubs_clock_still_counts() {
     let (draft, card) = drafted(&h, "l1").await;
     you_said_elsewhere(&h, "D_LI", 8);
     let d = yolo(&h, &card, "yes").expect("answered");
-    assert_eq!(d.status, "expired");
+    assert_eq!(d.status, steve_types::DecisionStatus::Expired);
     assert_eq!(d.result["superseded"], BY_YOU);
     assert_eq!(status(&h, &draft), "discarded");
 }
@@ -664,7 +667,10 @@ async fn in_a_busy_group_answering_one_person_leaves_the_others_draft() {
     .unwrap()
     .into();
     h.env.clock.advance(10_000);
-    assert_eq!(yolo(&h, &card, "yes").expect("approved").status, "resolved");
+    assert_eq!(
+        yolo(&h, &card, "yes").expect("approved").status,
+        steve_types::DecisionStatus::Resolved
+    );
     assert_eq!(status(&h, &han_draft), "pending");
 }
 
@@ -924,7 +930,10 @@ async fn an_automatic_reply_on_your_account_is_not_you() {
     assert_eq!(decision(&h, &card).0, "open");
     h.env.clock.advance(5_000);
     checked(&h).await;
-    assert_eq!(yolo(&h, &card, "yes").expect("answered").status, "resolved");
+    assert_eq!(
+        yolo(&h, &card, "yes").expect("answered").status,
+        steve_types::DecisionStatus::Resolved
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1009,7 +1018,7 @@ async fn a_message_already_answered_in_your_name_stays_out_of_the_next_turn() {
     checked(&h).await;
     assert_eq!(
         yolo(&h, &card1, "yes").expect("approved").status,
-        "resolved"
+        steve_types::DecisionStatus::Resolved
     );
     h.env.clock.advance(11_000);
     assert_eq!(h.outbox.send_due(&h.ch).await, 1);
@@ -1060,7 +1069,7 @@ async fn yolo_never_approves_a_draft_a_later_turn_took_while_it_drafts() {
     .unwrap();
     assert!(second.out_message_id.is_some());
     let d = got.lock().unwrap().take().expect("ran").expect("answered");
-    assert_eq!(d.status, "expired");
+    assert_eq!(d.status, steve_types::DecisionStatus::Expired);
     assert_eq!(d.result["superseded"], BY_LATER);
     assert_eq!(status(&h, &draft1), "discarded");
     assert_eq!(drafts(&h), 1);
@@ -1106,7 +1115,7 @@ async fn the_setting_holds_drafts_made_before_it_changed() {
     let (draft2, card2) = drafted(&h, "l2").await;
     assert_eq!(
         yolo(&h, &card2, "yes").expect("approved").status,
-        "resolved"
+        steve_types::DecisionStatus::Resolved
     );
     // set to 只记录 behind the page's back (nothing closed on the way): YOLO approves nothing more
     // and what it approved is not sent
@@ -1116,7 +1125,7 @@ async fn the_setting_holds_drafts_made_before_it_changed() {
         .write(|tx| spaces::write_reply_as_you(tx, WS, &space, spaces::ReplyAsYou::Record, now))
         .expect("set");
     let d = yolo(&h, &card1, "yes").expect("answered");
-    assert_eq!(d.status, "expired");
+    assert_eq!(d.status, steve_types::DecisionStatus::Expired);
     assert_eq!(d.result["superseded"], presence::BY_SETTING);
     assert_eq!(status(&h, &draft1), "discarded");
     h.env.clock.advance(11_000);

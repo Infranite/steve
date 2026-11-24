@@ -577,6 +577,8 @@ fn yolo_reads_an_items_branch_on_its_node_as_the_hubs_git_would() {
             draft: Some("改好了".into()),
             options: Some(vec!["pass".into(), "rework".into()]),
             requested_by: "dev".into(),
+            question_template: None,
+            source: None,
         })
         .unwrap();
     let look = || {

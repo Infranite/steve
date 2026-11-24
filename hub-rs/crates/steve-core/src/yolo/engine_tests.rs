@@ -91,6 +91,8 @@ impl T {
                 draft: Some(draft.into()),
                 options: Some(opts.iter().map(|s| s.to_string()).collect()),
                 requested_by: "dev".into(),
+                question_template: None,
+                source: None,
             })
             .unwrap()
             .id
@@ -189,7 +191,7 @@ fn an_admitted_yolo_worker_can_finish_its_model_call_during_maintenance() {
         } else {
             assert_eq!(t.engine.kick(&d).unwrap().outcome, "decided");
         }
-        assert_eq!(t.decision(&d).status, "resolved");
+        assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Resolved);
         assert_eq!(t.kit.gw.calls.lock().unwrap().len(), 1);
         assert!(store.activities().is_empty());
         assert!(
@@ -230,7 +232,7 @@ fn a_tool_call_inside_the_worktree_is_allowed_once_and_recorded() {
         vec![(d.clone(), Some("once".to_string()))]
     );
     let dd = t.decision(&d);
-    assert_eq!(dd.status, "resolved");
+    assert_eq!(dd.status, steve_types::DecisionStatus::Resolved);
     assert_eq!(dd.result["optionId"], "once");
     assert_eq!(dd.result["decided_by"], "yolo");
     assert_eq!(dd.result["yolo_action"], a.id.as_str());
@@ -269,7 +271,7 @@ fn a_delete_outside_the_worktree_stays_for_the_user() {
         .expect("declined is recorded");
     assert_eq!(a.outcome, "declined");
     assert!(a.reason.starts_with("硬限制"), "{}", a.reason);
-    assert_eq!(t.decision(&d).status, "open");
+    assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Open);
     assert!(t.kit.rt.st().answered.is_empty());
     // recorded once
     assert!(t.engine.consider(&d).unwrap().is_none());
@@ -403,7 +405,7 @@ fn your_delivered_choice_is_human_acceptance_even_with_yolo() {
             .decisions_of_item(&item)
             .unwrap()
             .into_iter()
-            .find(|d| d.status == "open" && d.kind == "fail")
+            .find(|d| d.status == steve_types::DecisionStatus::Open && d.kind == "fail")
             .unwrap();
         let note = "已查看 PR，CI 全部通过";
         t.kit
@@ -467,7 +469,7 @@ fn yolo_cannot_choose_delivered_in_place_of_the_owner() {
         &["continue", "delivered", "look"],
     );
     assert!(t.kit.core.resolve(&d, "delivered", "", "yolo").is_err());
-    assert_eq!(t.decision(&d).status, "open");
+    assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Open);
     assert_ne!(t.kit.phase(&item), "closed");
 }
 
@@ -484,7 +486,7 @@ fn your_delivered_choice_cancels_a_scheduled_auto_continue() {
         .decisions_of_item(&item)
         .unwrap()
         .into_iter()
-        .find(|d| d.status == "open" && d.kind == "fail")
+        .find(|d| d.status == steve_types::DecisionStatus::Open && d.kind == "fail")
         .unwrap();
     assert_eq!(
         t.engine.consider(&fail.id).unwrap().unwrap().outcome,
@@ -520,7 +522,7 @@ fn the_policy_setting_narrows_what_yolo_does() {
         (a.outcome.as_str(), a.rule.as_str()),
         ("declined", "accept.off")
     );
-    assert_eq!(t.decision(&d).status, "open");
+    assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Open);
 }
 
 #[test]
@@ -544,7 +546,7 @@ fn a_failed_session_continues_with_back_off_and_after_three_tries_stays_for_you(
                 .iter()
                 .all(|x| x.decision_id.as_deref() != Some(d.as_str()))
         );
-        assert_eq!(t.decision(&d).status, "open");
+        assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Open);
         t.clock.advance(wait + 1);
         let done = t.engine.tick();
         let x = done
@@ -567,7 +569,7 @@ fn a_failed_session_continues_with_back_off_and_after_three_tries_stays_for_you(
         (a.outcome.as_str(), a.rule.as_str()),
         ("declined", "continue.stuck")
     );
-    assert_eq!(t.decision(&d).status, "open");
+    assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Open);
     let l = t.yolo.layers(WS, Some(&item)).unwrap();
     assert_eq!(l.item, Some(Mode::Off), "the item leaves YOLO");
     assert!(!t.yolo.effective(WS, Some(&item)).unwrap().on);
@@ -600,7 +602,7 @@ fn provider_stream_interruption_exhausted_card_is_not_automatically_continued_by
     );
     t.clock.advance(3_600_000);
     assert!(t.engine.tick().is_empty());
-    assert_eq!(t.decision(&d).status, "open");
+    assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Open);
     assert!(t.kit.rt.prompts_of(&sid).is_empty());
 }
 
@@ -624,7 +626,7 @@ fn provider_capacity_exhausted_card_is_not_automatically_continued_by_yolo() {
     );
     t.clock.advance(3_600_000);
     assert!(t.engine.tick().is_empty());
-    assert_eq!(t.decision(&d).status, "open");
+    assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Open);
     assert!(t.kit.rt.prompts_of(&sid).is_empty());
 }
 
@@ -719,7 +721,7 @@ fn you_being_around_makes_yolo_wait() {
         &["pass", "rework"],
     );
     assert!(t.engine.consider(&d).unwrap().is_none(), "waits for you");
-    assert_eq!(t.decision(&d).status, "open");
+    assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Open);
     t.clock.advance(181_000);
     let done = t.engine.tick();
     assert!(
@@ -883,11 +885,11 @@ fn undoing_one_rule_on_two_items_in_an_hour_trips_the_breaker() {
         );
         t.engine.consider(&d).unwrap().unwrap();
         t.kit.core.undo_decision(&d, "me").unwrap();
-        assert_eq!(t.decision(&d).status, "open");
+        assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Open);
         // the undo is noticed; the card stays yours
         assert!(t.engine.consider(&d).unwrap().is_none());
         assert!(t.actions(&d)[0].undone.is_some());
-        assert_eq!(t.decision(&d).status, "open");
+        assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Open);
         if n == 0 {
             assert!(t.paused().is_none());
         }
@@ -1006,7 +1008,7 @@ fn a_recheck_that_says_not_now_or_no_does_not_trip_b5() {
     );
     assert!(t.paused().is_none());
     assert!(t.actions(&d).is_empty());
-    assert_eq!(t.decision(&d).status, "open");
+    assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Open);
     // a card the recheck leaves to you is recorded as declined
     let (item, sid, _) = t.item();
     let d = t.card(
@@ -1026,7 +1028,7 @@ fn a_recheck_that_says_not_now_or_no_does_not_trip_b5() {
         .unwrap();
     assert_eq!(a.outcome, "declined");
     assert!(t.paused().is_none());
-    assert_eq!(t.decision(&d).status, "open");
+    assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Open);
 }
 
 #[test]
@@ -1050,7 +1052,7 @@ fn a_recheck_with_another_answer_trips_b5() {
             .is_none()
     );
     assert_eq!(t.paused().expect("paused")["code"], "B5");
-    assert_eq!(t.decision(&d).status, "open");
+    assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Open);
 }
 
 #[test]
@@ -1190,7 +1192,7 @@ fn a_node_worktree_is_the_items_own_directory_when_the_node_says_so() {
     let d = t.permission(&item, &sid, node_edit(&file, None));
     let a = t.engine.consider(&d).unwrap();
     assert!(a.as_ref().is_none_or(|a| a.outcome != "decided"), "{a:?}");
-    assert_eq!(t.decision(&d).status, "open");
+    assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Open);
 }
 
 #[test]
@@ -1206,7 +1208,7 @@ fn a_node_session_kills_only_what_the_node_says_its_harness_started() {
     let d = t.permission(&item, &sid, node_exec(&format!("kill {pid}"), &dir, vec![]));
     let a = t.engine.consider(&d).unwrap();
     assert!(a.as_ref().is_none_or(|a| a.outcome != "decided"), "{a:?}");
-    assert_eq!(t.decision(&d).status, "open");
+    assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Open);
     // reported by the Node: its own
     let d = t.permission(
         &item,
@@ -1503,6 +1505,8 @@ fn a_failed_send_counts_yolos_earlier_retries() {
                 draft: Some("hi".into()),
                 options: Some(vec!["retry".into(), "discard".into()]),
                 requested_by: "steve".into(),
+                question_template: None,
+                source: None,
             })
             .unwrap()
             .id

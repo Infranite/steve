@@ -1412,7 +1412,7 @@ fn expiring_an_unapplied_answer_preserves_a_recorded_choice() {
         assert!(!expire_unapplied(tx, &open.id, &expired)?);
         assert!(!expire_unapplied(tx, &answered.id, &expired)?);
         let answered = DecisionRows(tx).get(&answered.id)?.unwrap();
-        assert_eq!(answered.status, "resolved");
+        assert_eq!(answered.status, steve_types::DecisionStatus::Resolved);
         assert_eq!(answered.result, answer);
         assert!(choice_receipt(tx, &answered.id, answered.revision)?.is_some());
         Ok(())
@@ -1446,7 +1446,7 @@ fn decision_revisions_reject_stale_transitions() {
             assert!(cards.apply(&open, terminal, &Value::Null, &Value::Null)?);
             assert!(!cards.apply(&open, DecisionChange::Expire, &Value::Null, &Value::Null)?);
             let settled = cards.get(&open.id)?.unwrap();
-            assert_ne!(settled.status, "open");
+            assert_ne!(settled.status, steve_types::DecisionStatus::Open);
 
             if terminal == DecisionChange::Resolve {
                 cards.record_choice(&settled, "owner", "yes", "")?;
@@ -1477,4 +1477,48 @@ fn decision_revisions_reject_stale_transitions() {
         Ok(())
     })
     .unwrap();
+}
+
+#[test]
+fn replaying_a_decision_creation_keeps_its_original_state() {
+    use steve_store::decision_repo::DecisionChange;
+    let t = with_steve();
+    let mut spec = NewDecision {
+        workspace_id: WS.into(),
+        kind: "approve".into(),
+        subject_type: "tool_call".into(),
+        subject_id: "request-1".into(),
+        question_template: None,
+        source: Some(DecisionSource::Permission {
+            node: "node-1".into(),
+            attempt: "attempt-1".into(),
+        }),
+        ..Default::default()
+    };
+    t.store
+        .write::<_, StoreError>(|w| {
+            let mut rows = DecisionRows(w);
+            let (first, opened) = rows.open_in(&spec)?;
+            assert!(opened);
+            assert!(rows.apply(
+                &first,
+                DecisionChange::Resolve,
+                &json!({"choice":"yes"}),
+                &Value::Null
+            )?);
+            let (replay, opened) = rows.open_in(&spec)?;
+            assert!(!opened);
+            assert_eq!(replay.id, first.id);
+            assert_eq!(replay.status, steve_types::DecisionStatus::Resolved);
+            spec.source = Some(DecisionSource::Permission {
+                node: "node-1".into(),
+                attempt: "attempt-2".into(),
+            });
+            let (next, opened) = rows.open_in(&spec)?;
+            assert!(opened);
+            assert_ne!(first.id, next.id);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(t.events.take().len(), 3);
 }

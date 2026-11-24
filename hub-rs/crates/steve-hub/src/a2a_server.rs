@@ -136,7 +136,9 @@ fn task_of(store: &steve_store::Store, ws: &str, id: &str) -> Result<Value, Stri
         .decisions()
         .of_item(&i.id)
         .map_err(|e| e.to_string())?;
-    let open = decisions.iter().any(|d| d.status == "open");
+    let open = decisions
+        .iter()
+        .any(|d| d.status == steve_types::DecisionStatus::Open);
     let started = !store
         .sessions()
         .of_item(&i.id)

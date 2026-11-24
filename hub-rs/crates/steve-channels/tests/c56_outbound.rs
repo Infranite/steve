@@ -1279,6 +1279,8 @@ async fn a_finished_item_answers_in_its_thread_as_a_draft() {
                 draft: Some("修好了告警脚本的阈值\n\n检查：✓ 单测".into()),
                 options: Some(vec!["pass".into(), "rework".into()]),
                 requested_by: "ops".into(),
+                question_template: None,
+                source: None,
             })
         })
         .unwrap();
@@ -5131,7 +5133,7 @@ async fn wait_review(h: &H, original: &str, previous: &str) -> (String, String) 
                 .unwrap()
                 .unwrap();
             assert_eq!(d.kind, "approve");
-            assert_eq!(d.status, "open");
+            assert_eq!(d.status, steve_types::DecisionStatus::Open);
             assert_eq!(d.result["recovery_review"], true);
             result = Some((message.into(), decision));
             true

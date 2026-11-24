@@ -183,7 +183,11 @@ async fn undo_within_the_delay_sends_nothing() {
     assert_eq!(d.status, "pending");
     assert_eq!(d.send_at, None);
     let dec = decision(&h, d.decision_id.as_deref().unwrap());
-    assert_eq!(dec.status, "open", "the approval is open again");
+    assert_eq!(
+        dec.status,
+        steve_types::DecisionStatus::Open,
+        "the approval is open again"
+    );
     h.env.clock.advance(60_000);
     assert!(h.mail.send_due().await.unwrap().is_empty());
     assert!(h.smtp.sent().is_empty(), "nothing went out");
@@ -252,12 +256,19 @@ async fn edited_before_approval_answers_409_and_reopens() {
         .unwrap_err();
     assert_eq!(e, ApiError::conflict(MSG_EDITED));
     assert_eq!(e.status(), 409);
-    assert_eq!(decision(&h, &dec).status, "open", "rolled back, still open");
+    assert_eq!(
+        decision(&h, &dec).status,
+        steve_types::DecisionStatus::Open,
+        "rolled back, still open"
+    );
     assert_eq!(draft(&h, &d.id).status, "pending");
 
     // the queue reopens it with the current version
     assert_eq!(h.mail.refresh_stale().unwrap(), 1);
-    assert_eq!(decision(&h, &dec).status, "expired");
+    assert_eq!(
+        decision(&h, &dec).status,
+        steve_types::DecisionStatus::Expired
+    );
     let row = draft(&h, &d.id);
     let new_dec = row.decision_id.clone().unwrap();
     assert_ne!(new_dec, dec);
@@ -662,7 +673,7 @@ async fn rest_routes() {
     assert_eq!(row.status, "discarded");
     assert_eq!(
         decision(&h, row.decision_id.as_deref().unwrap()).status,
-        "expired"
+        steve_types::DecisionStatus::Expired
     );
 
     // the bot drafts
@@ -705,7 +716,7 @@ async fn rest_routes() {
 /// core's rule that it is resolved and carries an undo).
 fn undo_decision(h: &H, id: &str) -> Result<steve_store::Decision, ApiError> {
     steve_modules::decisions::undo(&h.env.modules, id, ME, |d| {
-        d.status == "resolved" && !d.undo.is_null()
+        d.status == steve_types::DecisionStatus::Resolved && !d.undo.is_null()
     })
     .expect("a mail decision")
 }
@@ -732,7 +743,7 @@ async fn undoing_the_approval_decision_within_the_delay_returns_the_draft_to_pen
     assert_eq!(draft(&h, &d.id).status, "pending");
     assert_eq!(draft(&h, &d.id).send_at, None);
     let back = decision(&h, &dec);
-    assert_eq!(back.status, "open");
+    assert_eq!(back.status, steve_types::DecisionStatus::Open);
     assert!(back.undo.is_null());
     assert_eq!(audits(&h, "decision.undo").len(), 1);
     h.env.clock.advance(60_000);
@@ -749,7 +760,10 @@ async fn undoing_the_approval_decision_within_the_delay_returns_the_draft_to_pen
     let e = undo_decision(&h, &dec).unwrap_err();
     assert_eq!(e, ApiError::conflict(MSG_ALREADY_SENT));
     assert_eq!(e.status(), 409);
-    assert_eq!(decision(&h, &dec).status, "resolved");
+    assert_eq!(
+        decision(&h, &dec).status,
+        steve_types::DecisionStatus::Resolved
+    );
     assert_eq!(draft(&h, &d.id).status, "sent");
     assert_eq!(audits(&h, "decision.undo").len(), 1);
 }
@@ -1083,7 +1097,10 @@ async fn dismissed_unknown_card_is_recreated_even_without_item_or_thread() {
     assert!(h.mail.send_due().await.unwrap().is_empty());
     let reopened = draft(&h, &d.id).decision_id.unwrap();
     assert_ne!(reopened, old);
-    assert_eq!(decision(&h, &reopened).status, "open");
+    assert_eq!(
+        decision(&h, &reopened).status,
+        steve_types::DecisionStatus::Open
+    );
     assert_eq!(
         decision(&h, &reopened).options,
         ["confirmed_not_sent", "discard"]

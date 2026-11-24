@@ -109,7 +109,7 @@ fn stall_cards(k: &Kit, item: &str) -> usize {
         .decisions_of_item(item)
         .unwrap()
         .iter()
-        .filter(|d| d.status == "open" && d.subject_type == STALL)
+        .filter(|d| d.status == steve_types::DecisionStatus::Open && d.subject_type == STALL)
         .count()
 }
 
@@ -161,16 +161,22 @@ fn a_stop_card_from_before_recovery_expires_while_the_graph_is_running() {
     assert!(!k.open_kinds(&parent).is_empty());
 
     assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
-    assert_eq!(k.db().decision(&old).unwrap().unwrap().status, "expired");
+    assert_eq!(
+        k.db().decision(&old).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Expired
+    );
     assert_eq!(k.item_label(&parent), "run");
 
     let old = k.decision(&parent, Some(&coord), "fail", STALL, &["continue", "look"]);
     let real_question = k.decision(&parent, Some(&coord), "ask", "item", &["answer"]);
     assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
-    assert_eq!(k.db().decision(&old).unwrap().unwrap().status, "expired");
+    assert_eq!(
+        k.db().decision(&old).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Expired
+    );
     assert_eq!(
         k.db().decision(&real_question).unwrap().unwrap().status,
-        "open"
+        steve_types::DecisionStatus::Open
     );
     assert!(
         !k.open_kinds(&parent).is_empty(),
@@ -181,12 +187,18 @@ fn a_stop_card_from_before_recovery_expires_while_the_graph_is_running() {
     let unknown_effect = k.decision(&parent, Some(&coord), "fail", "item", &["release_retry"]);
     let release = k.decision(&parent, Some(&coord), "fail", "item", &["release_live"]);
     assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
-    assert_eq!(k.db().decision(&old).unwrap().unwrap().status, "expired");
+    assert_eq!(
+        k.db().decision(&old).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Expired
+    );
     assert_eq!(
         k.db().decision(&unknown_effect).unwrap().unwrap().status,
-        "open"
+        steve_types::DecisionStatus::Open
     );
-    assert_eq!(k.db().decision(&release).unwrap().unwrap().status, "open");
+    assert_eq!(
+        k.db().decision(&release).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Open
+    );
 }
 
 /// A paused graph is your stop: nothing continues the coordinator or opens a card for it.
@@ -465,7 +477,7 @@ fn a_unit_working_again_clears_the_parents_stop_card() {
         .decisions_of_item(&parent)
         .unwrap()
         .iter()
-        .filter(|d| d.status == "open")
+        .filter(|d| d.status == steve_types::DecisionStatus::Open)
         .for_each(|d| {
             k.db()
                 .decision_resolve(&d.id, json!({}), "resolved", None)
@@ -608,7 +620,7 @@ fn open_ids(k: &Kit, item: &str) -> Vec<String> {
         .decisions_of_item(item)
         .unwrap()
         .into_iter()
-        .filter(|d| d.status == "open")
+        .filter(|d| d.status == steve_types::DecisionStatus::Open)
         .map(|d| d.id)
         .collect()
 }
@@ -961,7 +973,7 @@ fn a_late_old_turn_end_does_not_undo_your_stop_but_your_message_does() {
         .decisions_of_item(&i)
         .unwrap()
         .into_iter()
-        .find(|d| d.status == "open")
+        .find(|d| d.status == steve_types::DecisionStatus::Open)
         .unwrap();
     assert!(card.question.contains("你中断了这一回合"));
 

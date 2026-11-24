@@ -108,7 +108,7 @@ fn manual_delivery_marks_its_accept_card() {
         .decisions_of_item(&x.id)
         .unwrap()
         .into_iter()
-        .find(|d| d.kind == "accept" && d.status == "open")
+        .find(|d| d.kind == "accept" && d.status == steve_types::DecisionStatus::Open)
         .unwrap();
     assert_eq!(
         of_kind(&k, &x.id, "deliver"),

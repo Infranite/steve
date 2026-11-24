@@ -1633,6 +1633,8 @@ fn the_preview_reads_no_checkout() {
         let sub = subject_from_row(
             &crate::repo::Decision {
                 revision: 1,
+                source_revision: None,
+                question_template: None,
                 id: "dc".into(),
                 workspace_id: "ws".into(),
                 kind: "approve".into(),
@@ -1643,7 +1645,7 @@ fn the_preview_reads_no_checkout() {
                 question: format!("允许执行：{s}"),
                 draft: raw.to_string(),
                 options: codex_opts(),
-                status: "open".into(),
+                status: steve_types::DecisionStatus::Open,
                 result: Value::Null,
                 requested_by: "agent".into(),
                 created: 0,

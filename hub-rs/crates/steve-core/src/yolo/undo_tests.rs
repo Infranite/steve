@@ -81,7 +81,7 @@ fn undoing_a_decision_reopens_it_and_counts_for_b3() {
     let (item, _, d, a) = accepted(&t);
     let row = t.engine.undo(WS, ME, &a, None).unwrap();
     assert!(row.undone.is_some());
-    assert_eq!(t.decision(&d).status, "open");
+    assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Open);
     assert!(
         t.kit
             .timeline_texts(&item)
@@ -266,7 +266,7 @@ fn now_and_cancel_during_the_cool_down() {
     assert_eq!(a.outcome, "scheduled");
     let done = t.engine.run_now(WS, &a.id).unwrap();
     assert_eq!(done.outcome, "decided");
-    assert_eq!(t.decision(&d).status, "resolved");
+    assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Resolved);
 
     let (item, sid, _) = t.item();
     let d = t.card(
@@ -287,7 +287,7 @@ fn now_and_cancel_during_the_cool_down() {
         t.engine.consider(&d).unwrap().is_none(),
         "the card stays yours this window"
     );
-    assert_eq!(t.decision(&d).status, "open");
+    assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Open);
     assert!(t.engine.cancel(WS, &a.id).is_err());
 }
 

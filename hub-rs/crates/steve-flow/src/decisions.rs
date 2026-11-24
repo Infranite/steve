@@ -141,7 +141,7 @@ pub(crate) async fn committed(cx: &FlowCx, decision_id: &str) -> bool {
         .await
         .ok()
         .flatten()
-        .is_some_and(|d| d.status == "resolved")
+        .is_some_and(|d| d.status == steve_types::DecisionStatus::Resolved)
 }
 
 /// Runs one follow-up after its decision committed.

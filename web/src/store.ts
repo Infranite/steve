@@ -16,6 +16,7 @@ import { cue } from "./bus"
 import { newClientId } from "./composer-draft"
 import { elapsed, pastTime, span } from "./i18n/format"
 import i18n, { lang, t } from "./i18n"
+import { decisionText } from "./i18n/decision"
 import type { StateUpdate, RFile, PlanStep, RHold, RQueued, SuggestChoice, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
 import type { Cite } from "./api/knowledge"
 import { yoloApi, type RYolo } from "./api/yolo"
@@ -337,7 +338,7 @@ let waitsByView = new WeakMap<DecisionView, Wait>()
 function waitOf(d: DecisionView): Wait {
   const cached = waitsByView.get(d)
   if (cached) return cached
-  const w: Wait = { type: d.kind as Wait["type"], q: d.question, draft: d.draft, opts: d.kind === "ask" ? d.options : undefined, since: since(d.created), decision: d.id, subject: d.subject_type, subjectId: d.subject_id, session: d.session_id, options: d.options, by: d.requested_by, get busy() { return agentBusy(d) }, tier: d.tier, folded: d.folded ?? undefined, space: d.space_id ?? undefined,
+  const w: Wait = { type: d.kind as Wait["type"], get q() { return decisionText(d.question) }, draft: d.draft, opts: d.kind === "ask" ? d.options : undefined, since: since(d.created), decision: d.id, subject: d.subject_type, subjectId: d.subject_id, session: d.session_id, options: d.options, by: d.requested_by, get busy() { return agentBusy(d) }, tier: d.tier, folded: d.folded ?? undefined, space: d.space_id ?? undefined,
     recovery: d.subject_type === "chan_message" && d.kind === "fail" ? resultOf(d).recovery : undefined }
   waitsByView.set(d, w)
   return w
@@ -1255,7 +1256,7 @@ export function done(): Done[] {
   const xs = settled()
   let out = doneLists.get(xs)
   if (!out) {
-    out = xs.map((d) => { const r = resultOf(d); return { id: d.item_id ?? "", type: d.kind as Wait["type"], q: d.question, choice: choiceLabel(d), tm: tm(d.resolved), at: d.resolved ?? 0, decision: d.id, revision: d.revision, canUndo: (d.undo_until ?? 0) > Date.now(), rel: relOf(d),
+    out = xs.map((d) => { const r = resultOf(d); return { id: d.item_id ?? "", type: d.kind as Wait["type"], get q() { return decisionText(d.question) }, choice: choiceLabel(d), tm: tm(d.resolved), at: d.resolved ?? 0, decision: d.id, revision: d.revision, canUndo: (d.undo_until ?? 0) > Date.now(), rel: relOf(d),
       how: r.dismissed ? "dismissed" : ["expired", "superseded"].includes(d.status) ? "expired" : "chose", yolo: r.decided_by === "yolo" ? String(r.yolo_reason ?? "") : undefined,
       via: typeof r.via?.name === "string" ? r.via.name : undefined } satisfies Done })
     doneLists.set(xs, out)

@@ -1,6 +1,8 @@
 //! Decision views. Hot: `status = 'open'`.
 use sea_query::{Alias, Expr, ExprTrait, IntoColumnRef, JoinType, Order, Query, SelectStatement};
-use steve_types::{DecisionTier, DecisionView, FoldReason, Millis, RawJson};
+use steve_types::{
+    DecisionPrompt, DecisionStatus, DecisionTier, DecisionView, FoldReason, Millis, RawJson, Said,
+};
 
 use super::{CHUNK, decision_chat};
 use crate::contract::{Json, Row};
@@ -29,6 +31,7 @@ mod schema {
         Resolved,
         Undo,
         Revision,
+        QuestionTemplate,
     }
 
     #[derive(Iden, Clone, Copy)]
@@ -63,13 +66,16 @@ fn tier(
     let draft = chat && d.kind == "approve";
     if chat && (d.kind == "fail" || starred || recovery) {
         (DecisionTier::Decide, None)
-    } else if matches!(d.status.as_str(), "expired" | "superseded") {
+    } else if matches!(
+        d.status,
+        DecisionStatus::Expired | DecisionStatus::Superseded
+    ) {
         (DecisionTier::Folded, Some(FoldReason::Expired))
     } else if replied {
         (DecisionTier::Folded, Some(FoldReason::Replied))
     } else if draft && unsendable {
         (DecisionTier::Folded, Some(FoldReason::Unsendable))
-    } else if draft && d.status == "open" {
+    } else if draft && d.status == DecisionStatus::Open {
         (DecisionTier::Draft, None)
     } else {
         (DecisionTier::Decide, None)
@@ -145,6 +151,7 @@ fn select() -> SelectStatement {
          OR m.decision_id <> decisions.id",
     ))
     .column((D::Table, D::Revision))
+    .column((D::Table, D::QuestionTemplate))
     .from(D::Table)
     .join_as(
         JoinType::LeftJoin,
@@ -177,7 +184,7 @@ struct Candidate {
 }
 
 fn candidate(r: &Row<'_>) -> Result<Candidate> {
-    let status: String = r.get(10)?;
+    let status = crate::decision_repo::decode_status(r, 10)?;
     let resolved: Option<i64> = r.get(14)?;
     // JSON written by the store; a value that is not JSON reads as nothing rather than failing
     // every view of the workspace
@@ -187,7 +194,7 @@ fn candidate(r: &Row<'_>) -> Result<Candidate> {
         .as_deref()
         .and_then(|value| serde_json::from_str(value).ok())
         .unwrap_or_default();
-    let undo_until = crate::decision_repo::undo_until(&status, resolved, &undo);
+    let undo_until = crate::decision_repo::undo_until(status, resolved, &undo);
     let options: Option<Json<Vec<String>>> = r.get(9).ok();
     let (kind, subject_type): (String, String) = (r.get(2)?, r.get(3)?);
     let recovery = subject_type == ABOUT_CHAT_MESSAGE
@@ -209,7 +216,10 @@ fn candidate(r: &Row<'_>) -> Result<Candidate> {
         subject_id: r.get(4)?,
         item_id: r.get::<Option<String>>(5)?.map(Into::into),
         session_id: r.get::<Option<String>>(6)?.map(Into::into),
-        question: r.get(7)?,
+        question: match r.get::<Option<Json<DecisionPrompt>>>(20)? {
+            Some(Json(template)) => Said::Key { template },
+            None => Said::Raw { text: r.get(7)? },
+        },
         draft: r.get(8)?,
         options: options.map(|o| o.0).unwrap_or_default(),
         result: result.and_then(|s| RawJson::from_str(&s).ok()),
@@ -237,7 +247,7 @@ impl<C: Read> DecisionViews<'_, C> {
             .iter()
             .filter(|r| {
                 let d = &r.view;
-                d.status == "open"
+                d.status == DecisionStatus::Open
                     && d.subject_type == ABOUT_CHAT_MESSAGE
                     && d.kind != "fail"
                     && !r.starred

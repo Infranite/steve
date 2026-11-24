@@ -504,7 +504,7 @@ pub fn nudge(w: &mut W<'_>, decision: &str, text: &str) -> ChannelResult<bool> {
     let mut decisions = DecisionRows(w);
     let Some(card) = decisions
         .get(decision)?
-        .filter(|card| card.status == "open")
+        .filter(|card| card.status == steve_types::DecisionStatus::Open)
     else {
         return Ok(false);
     };
@@ -734,6 +734,8 @@ pub fn open_card(w: &mut W<'_>, plan: &Plan, card: &Card) -> ChannelResult<Strin
         draft: (!draft.is_empty()).then(|| draft.to_string()),
         options: Some(options),
         requested_by: "steve".into(),
+        question_template: None,
+        source: None,
     })?;
     repo::outbound::link_decision(w, &plan.message_id, &d.id)?;
     repo::emit(w, &plan.ws, &plan.space_id, &plan.message_id);

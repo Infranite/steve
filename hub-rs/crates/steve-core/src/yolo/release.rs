@@ -120,7 +120,7 @@ impl Engine {
             .filter(|d| {
                 d.kind == "approve"
                     && d.subject_type == "release"
-                    && d.status == "resolved"
+                    && d.status == steve_types::DecisionStatus::Resolved
                     && d.result.get("approved").and_then(Value::as_bool) == Some(true)
             })
             .collect())

@@ -772,6 +772,8 @@ impl Mail {
             draft: Some(drafts::decision_text(d)),
             options: Some(UNKNOWN_OPTIONS.map(String::from).to_vec()),
             requested_by: "steve".into(),
+            question_template: None,
+            source: None,
         })?;
         repo::set_draft_decision(tx, &d.id, Some(&decision.id), &d.content_hash)?;
         Ok(())
@@ -843,6 +845,8 @@ impl Mail {
                 draft: Some(drafts::decision_text(d)),
                 options: Some(FAIL_OPTIONS.map(String::from).to_vec()),
                 requested_by: "steve".into(),
+                question_template: None,
+                source: None,
             })?;
             tx.audit(
                 &d.workspace_id,

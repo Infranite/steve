@@ -115,6 +115,17 @@ impl Store {
     }
 }
 
+/// The source revision of a replayable decision. The same request ID may be reused
+/// in a different attempt, so its execution identity is part of its key.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DecisionSource {
+    Permission { node: String, attempt: String },
+    TurnStall { attempt: String },
+    Record,
+    Revision { revision: String },
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct NewDecision {
     pub workspace_id: String,
@@ -125,9 +136,13 @@ pub struct NewDecision {
     pub item_id: Option<String>,
     pub session_id: Option<String>,
     pub question: String,
+    #[serde(default)]
+    pub question_template: Option<steve_types::DecisionPrompt>,
     pub draft: Option<String>,
     pub options: Option<Vec<String>>,
     pub requested_by: String,
+    #[serde(default)]
+    pub source: Option<DecisionSource>,
 }
 
 pub struct Decisions<'a>(&'a Store);

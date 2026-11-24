@@ -191,7 +191,10 @@ async fn a_dismissed_decision_reaches_the_page_as_a_patch() {
     // the snapshot has it (as written, no translation), and answers 304 while nothing changes
     let (etag, snap) = e.snapshot().await;
     assert_eq!(ids(&snap), [id.as_str()]);
-    assert_eq!(snap["views"]["decision"][0]["question"], "继续吗？");
+    assert_eq!(
+        snap["views"]["decision"][0]["question"],
+        serde_json::json!({"kind":"raw","text":"继续吗？"})
+    );
     assert_eq!(snap["views"]["decision"][0]["tier"], "decide");
     let cursor = snap["cursor"].as_str().unwrap().to_string();
     let r = e

@@ -591,6 +591,8 @@ pub fn open_new_space_decision(
         draft: None,
         options: Some(NEW_SPACE_OPTIONS.map(String::from).to_vec()),
         requested_by: "steve".into(),
+        question_template: None,
+        source: None,
     })?;
     Ok(d.id)
 }

@@ -206,7 +206,7 @@ async fn direct_send_checks_edited_to_cc_bcc_and_body_and_never_sends_twice() {
     )
     .unwrap()
     .unwrap();
-    assert_eq!(replay.status, "resolved");
+    assert_eq!(replay.status, steve_types::DecisionStatus::Resolved);
     h.env.clock.advance(10_000);
     let (a, b) = tokio::join!(h.mail.execute(&d.id), h.mail.execute(&d.id));
     assert!(matches!(a.unwrap(), SendOutcome::Sent { .. }));

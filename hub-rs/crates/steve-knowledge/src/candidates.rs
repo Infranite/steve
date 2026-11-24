@@ -7,8 +7,6 @@
 //! owner's own words in their conversation say to keep it (“记住…”, “以后…”) and it replaces nothing,
 //! Steve's at once (settled as a `yes` the owner can undo). An expired candidate can be restored.
 
-use std::time::Duration;
-
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -20,7 +18,7 @@ use steve_modules::{ApiError, ApiResult, Body, Caller, Check, Modules};
 use steve_store::base::mems::{Mem, MemPatch, NewMem};
 use steve_store::base::{Level, ObjRef, Viewer, Visibility};
 use steve_store::knowledge::{CandidateInfo, CandidateOrigin, CandidateRows, Memories};
-use steve_store::{Decision, DecisionRows, Read, W, Workspaces};
+use steve_store::{Decision, DecisionRows, Read, W};
 
 use crate::extract::Names;
 use crate::service::{mem_json_for, prepare};
@@ -33,8 +31,6 @@ pub const SUBJECT: &str = "mem";
 pub const MAX_PER_ORIGIN: usize = 3;
 /// Unanswered candidates expire after this long.
 pub const EXPIRE_AFTER_MS: i64 = 30 * 24 * 3600 * 1000;
-/// How often the expiry job runs.
-pub const EXPIRE_EVERY: Duration = Duration::from_secs(3600);
 /// Quotes are cut to this many characters (`mem_candidates.evidence`).
 pub const EVIDENCE_MAX: usize = 300;
 const NOUN: &str = "记忆";
@@ -267,6 +263,7 @@ fn open_candidate_confirmation(
     );
     nd.draft = Some(draft);
     nd.session_id = o.session_id.clone();
+    nd.source = Some(steve_store::DecisionSource::Record);
     let d = DecisionRows(tx).open(&nd)?;
     Memories(tx)
         .patch(
@@ -659,12 +656,13 @@ pub fn restore(m: &Modules, who: &Caller, id: &str) -> ApiResult<Value> {
                 d.workspace_id == who.ws
                     && d.subject_type == SUBJECT
                     && d.subject_id == mem.id
-                    && d.status == "expired"
+                    && d.status == steve_types::DecisionStatus::Expired
             });
         let decision_id = if let Some(d) = previous {
             let mut spec = decisions::confirm(&who.ws, SUBJECT, id, &d.question, &d.requested_by);
             spec.draft = Some(d.draft);
             spec.session_id = d.session_id;
+            spec.source = Some(steve_store::DecisionSource::Revision { revision: d.id });
             Some(DecisionRows(tx).open(&spec)?.id)
         } else {
             None
@@ -684,52 +682,26 @@ pub fn restore(m: &Modules, who: &Caller, id: &str) -> ApiResult<Value> {
     })
 }
 
-/// `kb.candidates_expire`: candidates older than 30 days at `now` become `stale`, their open
-/// decisions `expired`. Returns how many.
-pub fn expire(m: &Modules, now: i64) -> ApiResult<usize> {
-    let mut wss = m.store.read(|c| Workspaces(c).ids())?;
-    wss.sort();
-    let mut n = 0;
-    for ws in wss {
-        let old = m
-            .store
-            .read(|c| Memories(c).candidates_before(&ws, now - EXPIRE_AFTER_MS))?;
-        for (id, dec) in old {
-            m.store.write(|tx| {
-                if let Some(d) = dec {
-                    decisions::expire(m, &d)?;
-                } else {
-                    stale_candidate(tx, &id)?;
-                }
-                tx.audit(&ws, "steve", "mm.expire", &id, &json!({}))?;
-                Ok::<_, ApiError>(())
-            })?;
-            n += 1;
-        }
-    }
-    Ok(n)
+/// The first candidate deadline, including candidates without a confirmation card.
+pub fn next_expiry(r: &mut impl Read) -> steve_store::Result<Option<i64>> {
+    Ok(Memories(r)
+        .first_candidate_at()?
+        .map(|at| at + EXPIRE_AFTER_MS))
 }
 
-/// Starts the hourly expiry job.
-pub async fn expire_job(m: Modules) {
-    steve_runtime::every(
-        "kb.candidates_expire",
-        m.clock.clone(),
-        EXPIRE_EVERY,
-        steve_runtime::FirstRun::Immediate,
-        move || {
-            let m = m.clone();
-            async move {
-                let now = m.clock.now();
-                match m.blocking(move |m| expire(m, now)).await {
-                    Ok(0) => {}
-                    Ok(n) => tracing::info!("kb.candidates_expire: {n} expired"),
-                    Err(e) => tracing::warn!("kb.candidates_expire: {e}"),
-                }
+/// Settle a bounded transaction batch of candidates that have reached their deadline.
+pub fn expire(m: &Modules, now: i64) -> ApiResult<usize> {
+    m.store.write(|tx| {
+        let due = Memories(tx).due_candidates(now - EXPIRE_AFTER_MS, 64)?;
+        for (id, ws, decision) in &due {
+            if let Some(id) = decision {
+                decisions::expire(m, id)?;
             }
-        },
-    )
-    .await;
+            stale_candidate(tx, id)?;
+            tx.audit(ws, "steve", "mm.expire", id, &json!({}))?;
+        }
+        Ok(due.len())
+    })
 }
 
 // ---------------------------------------------------------------- steve_remember

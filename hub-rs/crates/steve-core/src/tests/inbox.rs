@@ -273,7 +273,10 @@ fn boot_expires_open_tool_permissions() {
     let s = k.session(&i, "idle");
     let p = k.decision(&i, Some(&s), "approve", "tool_call", &["a|允许|allow_once"]);
     k.core.recover().unwrap();
-    assert_eq!(k.db().decision(&p).unwrap().unwrap().status, "expired");
+    assert_eq!(
+        k.db().decision(&p).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Expired
+    );
     assert!(k.open_kinds(&i).is_empty());
     assert!(
         k.db()

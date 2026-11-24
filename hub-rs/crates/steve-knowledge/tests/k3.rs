@@ -213,7 +213,7 @@ async fn item_completion_yields_at_most_three_filtered_candidates() {
         let d = e.decision(m.decision_id.as_deref().unwrap());
         assert_eq!(d.kind, "confirm");
         assert_eq!(d.subject_type, "mem");
-        assert_eq!(d.status, "open");
+        assert_eq!(d.status, steve_types::DecisionStatus::Open);
         let what = if m.kind == "fact" {
             "知识条目"
         } else {
@@ -418,7 +418,7 @@ async fn confirming_with_supersedes_makes_the_old_memory_stale() {
     )
     .unwrap()
     .unwrap();
-    assert_eq!(d.status, "resolved");
+    assert_eq!(d.status, steve_types::DecisionStatus::Resolved);
     assert_eq!(
         d.result,
         json!({"choice": "yes", "text": "Sarah 喜欢五行以内的邮件"})
@@ -512,7 +512,7 @@ async fn batch_confirm_keeps_decisions_consistent() {
         assert_eq!(e.mem(&m.id).unwrap().status, "confirmed");
         if let Some(d) = &m.decision_id {
             let d = e.decision(d);
-            assert_eq!(d.status, "resolved");
+            assert_eq!(d.status, steve_types::DecisionStatus::Resolved);
             assert_eq!(d.result, json!({"choice": "yes"}));
         }
     }
@@ -538,7 +538,7 @@ async fn candidates_expire_after_thirty_days() {
         assert_eq!(e.mem(&x.id).unwrap().status, "stale");
         assert_eq!(
             e.decision(x.decision_id.as_deref().unwrap()).status,
-            "expired"
+            steve_types::DecisionStatus::Expired
         );
     }
     assert_eq!(e.mem(&fresh[0].id).unwrap().status, "candidate");
@@ -636,7 +636,7 @@ async fn chat_days_are_documents_and_extracted_once() {
     assert_eq!(notices.len(), 1);
     assert!(notices[0].contains("周五下午不安排部署"), "{notices:?}");
     decisions::undo(m, &d.id, ME, |d| {
-        d.status == "resolved" && !d.undo.is_null()
+        d.status == steve_types::DecisionStatus::Resolved && !d.undo.is_null()
     })
     .expect("ours")
     .expect("undone");
@@ -701,7 +701,7 @@ async fn replacing_a_memory_still_asks_even_when_you_said_so() {
     assert_eq!(made.0.status, "candidate");
     assert_eq!(
         e.decision(made.0.decision_id.as_deref().unwrap()).status,
-        "open"
+        steve_types::DecisionStatus::Open
     );
     assert_eq!(e.mem(&old.id).unwrap().status, "confirmed");
     assert_eq!(made.1.status, "confirmed");
@@ -726,7 +726,7 @@ async fn an_expired_candidate_can_be_restored() {
     assert_ne!(restored.decision_id, x.decision_id);
     assert_eq!(
         e.decision(x.decision_id.as_deref().unwrap()).status,
-        "expired"
+        steve_types::DecisionStatus::Expired
     );
     let (_, list) = e.me("GET", "/kb/candidates", None).await;
     assert_eq!(list[0]["mem"]["id"], x.id.as_str());

@@ -94,6 +94,8 @@ pub fn confirm(
         draft: None,
         options: Some(CONFIRM_OPTIONS.map(String::from).to_vec()),
         requested_by: requested_by.into(),
+        question_template: None,
+        source: None,
     }
 }
 
@@ -146,7 +148,7 @@ pub fn dismiss_drafts(m: &Modules, caller: &Caller, ids: &[String]) -> ApiResult
         let views = w.decision_views().of(&caller.ws, ids)?;
         let mut dismissed = Vec::new();
         for v in views {
-            if v.status != "open"
+            if v.status != steve_types::DecisionStatus::Open
                 || v.subject_type != ABOUT_CHAT_MESSAGE
                 || v.kind != "approve"
                 || v.tier != DecisionTier::Draft
@@ -209,7 +211,7 @@ pub fn replay(
     if revision != decision.revision {
         return Err(already_handled());
     }
-    if decision.status == "open" {
+    if decision.status == steve_types::DecisionStatus::Open {
         return Ok(false);
     }
     if choice_receipt(r, &decision.id, revision)?
@@ -228,17 +230,9 @@ pub fn complete_answer(
     undo: &Value,
 ) -> ApiResult<Decision> {
     let mut rows = DecisionRows(w);
-    if !rows.apply(d, DecisionChange::Resolve, result, undo)? {
+    if !rows.resolve_choice(d, cx.actor, cx.choice, cx.text, result, undo)? {
         return Err(already_handled());
     }
-    rows.record_choice(d, cx.actor, cx.choice, cx.text)?;
-    w.audit(
-        cx.ws,
-        cx.actor,
-        "decision.resolve",
-        &d.id,
-        &json!({ "revision": d.revision, "choice": cx.choice }),
-    )?;
     DecisionRows(w)
         .get(&d.id)?
         .ok_or_else(|| ApiError::not_found("决定"))
@@ -327,7 +321,10 @@ fn reverse(
 /// whether it was open.
 pub fn expire(m: &Modules, id: &str) -> ApiResult<bool> {
     m.store.write(|w| {
-        let Some(d) = DecisionRows(w).get(id)?.filter(|d| d.status == "open") else {
+        let Some(d) = DecisionRows(w)
+            .get(id)?
+            .filter(|d| d.status == steve_types::DecisionStatus::Open)
+        else {
             return Ok(false);
         };
         let handler = m
@@ -345,12 +342,5 @@ fn expire_in(w: &mut W<'_>, d: &Decision, result: &Value) -> ApiResult<()> {
     if !DecisionRows(w).apply(d, DecisionChange::Expire, result, &Value::Null)? {
         return Err(already_handled());
     }
-    w.audit(
-        &d.workspace_id,
-        "steve",
-        "decision.expire",
-        &d.id,
-        &json!({}),
-    )?;
     Ok(())
 }

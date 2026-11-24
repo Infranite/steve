@@ -348,6 +348,7 @@ pub fn propose(w: &mut W<'_>, viewer: &Viewer, p: &Proposal) -> ApiResult<Mem> {
         );
         nd.draft = Some(format!("来源：{}", p.origin_label));
         nd.session_id = p.session_id.clone();
+        nd.source = Some(steve_store::DecisionSource::Record);
         let d = DecisionRows(w).open(&nd)?;
         mem = Memories(w)
             .patch(

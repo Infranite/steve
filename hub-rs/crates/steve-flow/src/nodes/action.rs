@@ -879,6 +879,8 @@ impl Action for Notify {
             draft: None,
             options: Some(NOTIFY_OPTIONS.map(String::from).to_vec()),
             requested_by: "steve".into(),
+            question_template: None,
+            source: None,
         };
         let opened = cx
             .flow

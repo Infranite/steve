@@ -613,6 +613,8 @@ fn open_approval(
         draft: Some(text.to_string()),
         options: Some(options),
         requested_by: "steve".into(),
+        question_template: None,
+        source: None,
     })?;
     message_repo::link_decision(w, id, &d.id)?;
     if review {
@@ -671,6 +673,8 @@ fn open_fail(
         draft: Some(row.text.clone()),
         options: Some(options.iter().map(|s| s.to_string()).collect()),
         requested_by: "steve".into(),
+        question_template: None,
+        source: None,
     })?;
     channel_message_repo::outbound::link_decision(w, &row.id, &d.id)?;
     Ok(d.id)
@@ -1029,7 +1033,7 @@ async fn check_later(
         };
         if !steve_store::DecisionRows(w)
             .get(d)?
-            .is_some_and(|card| card.status == "open")
+            .is_some_and(|card| card.status == steve_types::DecisionStatus::Open)
         {
             return Ok(());
         }
@@ -1100,7 +1104,8 @@ async fn rewrite_draft(
             };
             let d = steve_store::decision_repo::get(r, decision_id)?;
             let chosen = d.as_ref().is_some_and(|d| {
-                d.status == "resolved" && d.result["choice"].as_str() == Some(REWRITE)
+                d.status == steve_types::DecisionStatus::Resolved
+                    && d.result["choice"].as_str() == Some(REWRITE)
             });
             if row.status != "draft" || row.decision_id.as_deref() != Some(decision_id) || !chosen {
                 return Ok(None);
@@ -1159,9 +1164,9 @@ async fn rewrite_draft(
         {
             return Ok(());
         }
-        if !steve_store::decision_repo::get(w, decision_id)?
-            .is_some_and(|d| d.status == "resolved" && d.result["choice"] == REWRITE)
-        {
+        if !steve_store::decision_repo::get(w, decision_id)?.is_some_and(|d| {
+            d.status == steve_types::DecisionStatus::Resolved && d.result["choice"] == REWRITE
+        }) {
             return Ok(());
         }
         let mut row = row.clone();
@@ -1272,9 +1277,9 @@ fn rewrite_failed(ch: &Channels, message_id: &str, decision_id: &str) -> Channel
         if row.status != "draft" || row.decision_id.as_deref() != Some(decision_id) {
             return Ok(());
         }
-        if !steve_store::decision_repo::get(w, decision_id)?
-            .is_some_and(|d| d.status == "resolved" && d.result["choice"] == REWRITE)
-        {
+        if !steve_store::decision_repo::get(w, decision_id)?.is_some_and(|d| {
+            d.status == steve_types::DecisionStatus::Resolved && d.result["choice"] == REWRITE
+        }) {
             return Ok(());
         }
         let name = steve_store::channel_spaces::rows::get(w, &row.space_id)?
@@ -1635,7 +1640,7 @@ pub fn verify(
                 d.workspace_id == row.ws
                     && d.subject_type == SUBJECT_MESSAGE
                     && d.subject_id == row.id
-                    && d.status == "resolved"
+                    && d.status == steve_types::DecisionStatus::Resolved
                     && row.decision_id.as_deref() == Some(d.id.as_str())
                     && ((d.kind == "approve" && choice == "yes") || (d.kind == "fail" && choice == "retry"))
                     // Also fence approvals scheduled by older YOLO engines before this fix.
@@ -3157,19 +3162,18 @@ impl Outbox {
     /// The candidates are found in SQL (an account on your own account with a lifetime set, past it,
     /// neither starred nor a commitment), [`EXPIRY_PAGE`] at a time after
     /// [`Outbox::expiry_cursor`]: a card left open (its space's voice is a bot after all) is passed
-    /// over, not looked at again on every tick. The checks run on a reader; only what closes is
-    /// written. Returns how many closed.
-    fn expire_stale(&self, ch: &Channels) -> ChannelResult<usize> {
-        let now = ch.now();
+    /// over until the next scan. Eligibility and settlement share the write. Returns whether
+    /// the current scan has another page.
+    pub fn expire_stale(&self, ch: &Channels, now: i64) -> ChannelResult<bool> {
         let after = lock(&self.expiry_cursor).clone();
         let commitment = format!(
             "{}{}",
             crate::decide::WHY_HEAD,
             crate::decide::Reason::Commitment.label()
         );
-        let (page, due) = ch.store().read(|r| -> ChannelResult<_> {
+        let (cursor, discarded) = ch.store().write(|w| -> ChannelResult<_> {
             let page = queue_repo::stale_cards(
-                r,
+                w,
                 &queue_repo::Expiry {
                     now,
                     starred: crate::decide::STARRED,
@@ -3179,55 +3183,47 @@ impl Outbox {
                     limit: EXPIRY_PAGE as i64,
                 },
             )?;
-            let mut due = Vec::new();
+            let mut discarded = Vec::new();
             for card in &page {
                 let yours = match card.kind.as_str() {
-                    "ask" => spaces::speaks_as_you(r, &card.ws, &card.space, None)?,
-                    _ => crate::presence::answered_message(r, &card.ws, &card.subject)?.is_some(),
+                    "ask" => spaces::speaks_as_you(w, &card.ws, &card.space, None)?,
+                    _ => crate::presence::answered_message(w, &card.ws, &card.subject)?.is_some(),
                 };
-                if yours {
-                    due.push(card.clone());
+                if !yours {
+                    continue;
                 }
-            }
-            Ok((page, due))
-        })?;
-        *lock(&self.expiry_cursor) = if page.len() < EXPIRY_PAGE {
-            None
-        } else {
-            page.last().map(|c| (c.created, c.id.clone()))
-        };
-        if due.is_empty() {
-            return Ok(0);
-        }
-        let mut closed = 0;
-        let mut discarded = Vec::new();
-        ch.store().write(|w| -> ChannelResult<()> {
-            for card in &due {
                 if card.kind == "approve" {
                     if !set_status(w, &card.subject, &["draft"], DISCARDED)? {
                         continue;
                     }
                     discarded.push(card.subject.clone());
                 }
-                if crate::presence::settle(w, &card.id, crate::decide::BY_EXPIRY)? {
-                    closed += 1;
-                    steve_store::audit_repo::record(
-                        w,
-                        &card.ws,
-                        "steve",
-                        "chan_message.expired",
-                        &card.subject,
-                        &json!({"decision": card.id, "why": crate::decide::BY_EXPIRY}),
-                    )?;
-                    channel_message_repo::emit(w, &card.ws, &card.space, &card.subject);
+                if !crate::presence::settle(w, &card.id, crate::decide::BY_EXPIRY)? {
+                    return Err(ApiError::conflict("the decision changed"));
                 }
+                steve_store::audit_repo::record(
+                    w,
+                    &card.ws,
+                    "steve",
+                    "chan_message.expired",
+                    &card.subject,
+                    &json!({"decision": card.id, "why": crate::decide::BY_EXPIRY}),
+                )?;
+                channel_message_repo::emit(w, &card.ws, &card.space, &card.subject);
             }
-            Ok(())
+            let cursor = if page.len() < EXPIRY_PAGE {
+                None
+            } else {
+                page.last().map(|c| (c.created, c.id.clone()))
+            };
+            Ok((cursor, discarded))
         })?;
+        let more = cursor.is_some();
+        *lock(&self.expiry_cursor) = cursor;
         for m in discarded {
             self.link.push(After::Discarded { message_id: m });
         }
-        Ok(closed)
+        Ok(more)
     }
 
     /// The queue (`channels.retry` and the approvals' delay): approved or retried messages whose
@@ -3248,7 +3244,7 @@ impl Outbox {
         sent + self.settle_unknown(ch, ch.now()).await
     }
 
-    // Conversions, expiry's cursor and draft checks are maintenance, not send deadlines.
+    // Conversions and draft checks are maintenance, not send deadlines.
     async fn maintain(&self, ch: &Channels) {
         self.bind(ch);
         for a in self.link.take() {
@@ -3257,10 +3253,6 @@ impl Outbox {
             }
         }
         self.convert_due(ch).await;
-        // cards about your own account that waited longer than the account allows close
-        if let Err(e) = self.expire_stale(ch) {
-            tracing::warn!("stale cards: {e}");
-        }
         self.queue_instructed_drafts(ch);
         self.queue_chosen_drafts(ch);
         self.queue_disclosure_checks(ch);
@@ -3455,7 +3447,7 @@ impl Outbox {
                 ch.store().write(|w| -> ChannelResult<()> {
                     if steve_store::DecisionRows(w)
                         .get(&decision)?
-                        .is_some_and(|d| d.status == "resolved")
+                        .is_some_and(|d| d.status == steve_types::DecisionStatus::Resolved)
                     {
                         set_decision_result_field(w, &decision, "item", item)?;
                     }
@@ -4099,7 +4091,8 @@ fn approved_by_you(r: &mut impl steve_store::Read, auth: &Auth) -> ChannelResult
         return Ok(false);
     };
     Ok(steve_store::decision_repo::get(r, id)?.is_some_and(|d| {
-        d.status == "resolved" && d.result["decided_by"].as_str() != Some(b1::YOLO_ACTOR)
+        d.status == steve_types::DecisionStatus::Resolved
+            && d.result["decided_by"].as_str() != Some(b1::YOLO_ACTOR)
     }))
 }
 

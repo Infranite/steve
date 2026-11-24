@@ -54,7 +54,7 @@ impl Engine {
             .and_then(|id| self.core().store().decision(id).ok().flatten());
         let ok = match kind.as_str() {
             "decision" => d.as_ref().is_some_and(|d| {
-                d.status == "resolved"
+                d.status == steve_types::DecisionStatus::Resolved
                     && d.resolved.is_some_and(|r| self.yolo().now() - r <= DAY_MS)
             }),
             // only a rollback the database allows: release.sh would refuse the rest

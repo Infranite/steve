@@ -101,7 +101,10 @@ CREATE TABLE decisions (
     created BIGINT NOT NULL,
     resolved BIGINT,
     undo TEXT,
-    revision BIGINT NOT NULL DEFAULT 1
+    revision BIGINT NOT NULL DEFAULT 1,
+    source_revision TEXT,
+    question_template TEXT CHECK (question_template IS NULL OR question = ''),
+    UNIQUE (workspace_id, subject_type, subject_id, kind, source_revision)
 );
 CREATE TABLE decision_choice_receipts (
     decision_id TEXT NOT NULL REFERENCES decisions(id) ON DELETE CASCADE,

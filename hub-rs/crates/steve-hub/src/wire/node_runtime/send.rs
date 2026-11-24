@@ -753,6 +753,8 @@ impl NodeRuntime {
                     subject_id: scope.bot.unwrap_or_default(), item_id: scope.item.clone(), session_id: Some(session.into()),
                     question: question.clone(), draft: Some("自动重试已停止。请先修正 Bot 的模型或思考强度，再点击重试；你修改执行器后，重试会创建新会话。".into()),
                     options: Some(vec!["retry".into()]), requested_by: "steve".into(),
+                    question_template: None,
+                    source: None,
                 })?;
             }
             if let Some(item) = scope.item {

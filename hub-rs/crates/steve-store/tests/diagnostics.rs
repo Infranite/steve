@@ -553,7 +553,10 @@ fn card_transitions_record_only_committed_changes_without_copying_card_content()
     );
     assert!(!page.to_string().contains("private question body"));
     assert!(!page.to_string().contains("private answer body"));
-    assert_eq!(s.decisions().get(&d.id).unwrap().unwrap().status, "open");
+    assert_eq!(
+        s.decisions().get(&d.id).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Open
+    );
 
     // Refuse diagnostic persistence on the worker's writer connection, without
     // breaking the business table or requiring a full disk to reproduce the failure.
@@ -585,7 +588,10 @@ fn card_transitions_record_only_committed_changes_without_copying_card_content()
     assert!(after_failure["gaps"].as_array().unwrap().iter().any(|gap| {
         gap["reason"] == "diagnostic_queue_or_write_loss" && gap["scope"] == "instance"
     }));
-    assert_eq!(s.decisions().get(&next.id).unwrap().unwrap().status, "open");
+    assert_eq!(
+        s.decisions().get(&next.id).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Open
+    );
     assert!(
         !after_failure
             .to_string()

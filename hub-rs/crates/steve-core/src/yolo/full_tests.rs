@@ -85,7 +85,7 @@ fn full_access_answers_ordinary_work_the_harness_still_asks_for() {
     assert_eq!(look(&t, &d), ("decided".into(), "tool.full".into()));
     assert_eq!(answered(&t, &d), 1);
     let dd = t.decision(&d);
-    assert_eq!(dd.status, "resolved");
+    assert_eq!(dd.status, steve_types::DecisionStatus::Resolved);
     assert_eq!(
         dd.result["optionId"], "once",
         "allow_once, never allow_always"
@@ -145,7 +145,11 @@ fn full_access_keeps_steve_data_and_what_it_promises() {
         let what = input.raw.to_string();
         let d = t.permission(&item, &sid, input);
         assert_eq!(look(&t, &d), ("declined".into(), rule.into()), "{what}");
-        assert_eq!(t.decision(&d).status, "open", "{what}");
+        assert_eq!(
+            t.decision(&d).status,
+            steve_types::DecisionStatus::Open,
+            "{what}"
+        );
         assert_eq!(answered(&t, &d), 0, "{what}");
     }
     let d = t.card(
@@ -193,11 +197,11 @@ fn switching_to_full_while_a_request_waits_answers_it_once() {
     set(&t, true, true);
     let acts = t.engine.kick_waiting_tools(WS);
     assert_eq!(acts.len(), 2, "{acts:?}");
-    assert_eq!(t.decision(&d).status, "resolved");
+    assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Resolved);
     assert_eq!(answered(&t, &d), 1);
     assert_eq!(
         t.decision(&steve).status,
-        "open",
+        steve_types::DecisionStatus::Open,
         "Steve's data stays yours"
     );
     assert_eq!(answered(&t, &steve), 0);
@@ -367,7 +371,7 @@ fn switching_from_off_to_full_answers_the_waiting_tool_request_only() {
     assert_eq!(t.decision(&waiting).result["optionId"], "once");
     for d in [&business, &unbound] {
         assert_eq!(look(&t, d).0, "none", "{d}: older than the window");
-        assert_eq!(t.decision(d).status, "open");
+        assert_eq!(t.decision(d).status, steve_types::DecisionStatus::Open);
         assert!(t.actions(d).is_empty());
     }
     // the user's own reject is the only answer the runner got; the expired card got none

@@ -27,7 +27,7 @@ impl AgentRuntime for Inactive {
     fn release(&self, _: &str) -> Result<Released> {
         Ok(Released::Gone)
     }
-    fn answer_permission(&self, _: &str, _: Option<&str>) -> Result<Answered> {
+    fn answer_permission(&self, _: steve_core::PermissionAnswer<'_>) -> Result<Answered> {
         panic!("outbound recovery must not answer a tool permission")
     }
     fn hold(&self, _: bool) {}

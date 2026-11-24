@@ -591,6 +591,8 @@ fn open_pr(
         } else {
             cx.bot_id.clone()
         },
+        question_template: None,
+        source: None,
     };
     let opened = gh
         .store()

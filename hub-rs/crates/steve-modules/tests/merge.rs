@@ -509,7 +509,7 @@ fn resolve(t: &TestEnv, d: &str, choice: &str) -> Result<Decision, steve_modules
 /// What steve-core's `undoDecision` runs for a module decision.
 fn undo(t: &TestEnv, d: &str) -> Result<(), steve_modules::ApiError> {
     decisions::undo(&t.modules, d, ME, |d| {
-        d.status == "resolved" && !d.undo.is_null()
+        d.status == steve_types::DecisionStatus::Resolved && !d.undo.is_null()
     })
     .expect("ours")
     .map(drop)
@@ -558,7 +558,7 @@ async fn proposal_merge_through_the_decision_and_undo() {
     );
 
     let got = resolve(&t, &d, "merge").unwrap();
-    assert_eq!(got.status, "resolved");
+    assert_eq!(got.status, steve_types::DecisionStatus::Resolved);
     assert!(got.result["merge_id"].as_str().unwrap().starts_with("mg_"));
     assert_eq!(fixture::proposal_status(t.store(), &mp).unwrap(), "merged");
     assert_eq!(fixture::sender_party(t.store()).unwrap(), sarah);
@@ -570,7 +570,7 @@ async fn proposal_merge_through_the_decision_and_undo() {
     assert_eq!(fixture::proposal_status(t.store(), &mp).unwrap(), "open");
     assert_eq!(fixture::party_status(t.store(), &from).unwrap(), "active");
     assert_eq!(fixture::sender_party(t.store()).unwrap(), from);
-    assert_eq!(decision(&t, &d).status, "open");
+    assert_eq!(decision(&t, &d).status, steve_types::DecisionStatus::Open);
 }
 
 #[tokio::test]

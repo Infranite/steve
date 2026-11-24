@@ -909,26 +909,21 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             Backend::Unbound => Ok(Released::Gone),
         }
     }
-    /// A Node session's answer is a queued command ([`steve_core::Answered::Pending`]); a store
-    /// error is returned, so the card stays open and the Node keeps waiting for a real answer.
-    /// That holds for the lookups that pick the backend too.
     fn answer_permission(
         &self,
-        decision_id: &str,
-        option_id: Option<&str>,
+        answer: steve_core::PermissionAnswer<'_>,
     ) -> steve_core::Result<steve_core::Answered> {
         use steve_core::Answered;
-        let Some(sid) = super::node_runtime::decision_session(&self.store, decision_id)? else {
+        let Some(sid) = super::node_runtime::decision_session(&self.store, answer.decision_id)?
+        else {
             return Ok(Answered::Gone);
         };
         match self.route_strict(&sid)? {
-            Backend::Node(n) => Ok(if n.answer_permission(decision_id, option_id)? {
-                Answered::Pending
+            Backend::Node(n) => Ok(if n.answer_permission(answer)? {
+                Answered::Committed
             } else {
                 Answered::Gone
             }),
-            // parked: its Node is not enabled here, nobody can take the answer now; unbound:
-            // the harness that asked is gone
             Backend::Parked | Backend::Unbound => Ok(Answered::Gone),
         }
     }
@@ -2190,12 +2185,18 @@ mod routed_tests {
         steve_store::testkit::hub::workflow_cases::seed_open_permission(&rt.store).unwrap();
         // readable, bound to no Node: the harness that asked is gone
         assert_eq!(
-            rt.answer_permission("d1", Some("allow")).unwrap(),
+            rt.answer_permission(steve_core::PermissionAnswer::resolve(
+                "d1", 1, "owner", "allow", ""
+            ))
+            .unwrap(),
             Answered::Gone
         );
         steve_store::testkit::hub::mutations::remove_runtime_sessions(&rt.store).unwrap();
         assert!(
-            rt.answer_permission("d1", Some("allow")).is_err(),
+            rt.answer_permission(steve_core::PermissionAnswer::resolve(
+                "d1", 1, "owner", "allow", ""
+            ))
+            .is_err(),
             "binding unreadable"
         );
         // a mode switch reads the binding strictly too: an error keeps it pending for the next
@@ -2206,7 +2207,10 @@ mod routed_tests {
         );
         steve_store::testkit::hub::mutations::remove_decisions(&rt.store).unwrap();
         assert!(
-            rt.answer_permission("d1", Some("allow")).is_err(),
+            rt.answer_permission(steve_core::PermissionAnswer::resolve(
+                "d1", 1, "owner", "allow", ""
+            ))
+            .is_err(),
             "card unreadable"
         );
     }

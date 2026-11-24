@@ -337,7 +337,7 @@ impl Tx<'_> {
             .find(|d| {
                 d.kind == "approve"
                     && d.subject_type == "release"
-                    && d.status == "resolved"
+                    && d.status == steve_types::DecisionStatus::Resolved
                     && d.result.get("approved").is_some_and(truthy)
                     && d.result
                         .get("outcome")

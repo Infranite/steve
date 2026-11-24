@@ -314,6 +314,8 @@ impl GitHub {
             } else {
                 cx.bot_id.clone()
             },
+            question_template: None,
+            source: None,
         };
         self.store()
             .write(|tx| {

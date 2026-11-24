@@ -587,7 +587,10 @@ fn approvals_and_permissions() {
     let p2 = k.decision(&i.id, Some(&s.id), "approve", "tool_call", &[]);
     k.core.resolve(&p2, "deny", "", "me").unwrap();
     assert_eq!(k.rt.st().answered.last().unwrap(), &(p2.clone(), None));
-    assert_eq!(k.db().decision(&p2).unwrap().unwrap().status, "expired");
+    assert_eq!(
+        k.db().decision(&p2).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Expired
+    );
     assert!(
         k.rt.prompts_of(&s.id)
             .last()
@@ -627,22 +630,34 @@ fn a_permission_answer_follows_the_runtime_outcome() {
     let p = k.decision(&i.id, Some(&s.id), "approve", "tool_call", &opts);
     k.rt.st().answer_error = true;
     assert!(k.core.resolve(&p, "ok", "", "me").is_err());
-    assert_eq!(k.db().decision(&p).unwrap().unwrap().status, "open");
+    assert_eq!(
+        k.db().decision(&p).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Open
+    );
     assert!(
         k.core.dismiss_decision(&p, "me").is_err(),
         "a dismiss that cannot deny keeps the card"
     );
-    assert_eq!(k.db().decision(&p).unwrap().unwrap().status, "open");
+    assert_eq!(
+        k.db().decision(&p).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Open
+    );
     assert_eq!(expired(&k), 0);
 
     k.rt.st().answer_error = false;
     k.rt.st().pending_permissions.insert(p.clone());
     k.core.resolve(&p, "no", "", "me").unwrap();
-    assert_eq!(k.db().decision(&p).unwrap().unwrap().status, "resolved");
+    assert_eq!(
+        k.db().decision(&p).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Resolved
+    );
 
     let p = k.decision(&i.id, Some(&s.id), "approve", "tool_call", &opts);
     k.core.resolve(&p, "ok", "", "me").unwrap();
-    assert_eq!(k.db().decision(&p).unwrap().unwrap().status, "expired");
+    assert_eq!(
+        k.db().decision(&p).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Expired
+    );
     assert_eq!(expired(&k), 1, "a gone request is today's expired path");
 }
 
@@ -1940,7 +1955,10 @@ fn startup_blocker_survives_queued_input_and_cannot_be_continued_by_yolo() {
         .add(&sid, "initial task", "steve", &[])
         .unwrap();
     crate::lifecycle::supersede(k.db(), &i, &["fail"], "background queue").unwrap();
-    assert_eq!(k.db().decision(&card.id).unwrap().unwrap().status, "open");
+    assert_eq!(
+        k.db().decision(&card.id).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Open
+    );
     assert!(!k.open_kinds(&i).is_empty());
     assert!(
         k.core
@@ -1961,7 +1979,7 @@ fn startup_blocker_survives_queued_input_and_cannot_be_continued_by_yolo() {
     assert!(k.db().queued(&sid).unwrap().is_empty());
     assert_eq!(
         k.db().decision(&card.id).unwrap().unwrap().status,
-        "expired"
+        steve_types::DecisionStatus::Expired
     );
 }
 

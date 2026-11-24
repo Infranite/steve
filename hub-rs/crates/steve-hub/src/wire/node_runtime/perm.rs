@@ -7,7 +7,10 @@ use super::{
     intent::{Advance, next_revision},
     *,
 };
-use steve_store::runtime::PermissionRow;
+use steve_core::{PermissionAction, PermissionAnswer};
+use steve_store::decision_repo::DecisionChange;
+use steve_store::{DecisionRows, runtime::PermissionRow};
+use steve_types::DecisionStatus;
 
 /// How a card closed by time reads.
 const EXPIRED: &str = "审批已过期";
@@ -44,31 +47,30 @@ impl NodeRuntime {
                     tracing::warn!(permission = %resolution.id, "resolution for another action");
                     return Ok(None);
                 }
-                // expired or refused: the Node confirms the Hub's own reject, the card stays as it
-                // is. Applied already: the answer's receipt came before this event, and the card
-                // is resolved now.
-                let moved = match row.state.as_str() {
-                    "waiting" | "answering" => node_write::permission_cas_in(
+                // A Node event corroborates an answer already recorded by the Hub.
+                if row.state == "answering" {
+                    node_write::permission_cas_in(
                         tx,
                         &row.decision,
                         row.revision,
                         "applied",
                         None,
                         now(),
-                    )?,
-                    "applied" => true,
-                    _ => false,
-                };
-                if moved {
-                    let chose = match resolution.decision {
-                        PermissionDecision::AllowOnce => Some(ALLOW),
-                        PermissionDecision::Reject => None,
-                    };
-                    steve_store::DecisionRows(tx).settle(
+                    )?;
+                } else if row.state == "waiting" {
+                    // The Node closed the request before the Hub recorded a choice.
+                    node_write::permission_cas_in(
+                        tx,
                         &row.decision,
-                        &json!({ "optionId": chose }),
-                        "resolved",
-                        &serde_json::Value::Null,
+                        row.revision,
+                        "expired",
+                        None,
+                        now(),
+                    )?;
+                    steve_store::decision_repo::expire_unapplied(
+                        tx,
+                        &row.decision,
+                        &json!({ "expired": true, "reason": "closed_by_node" }),
                     )?;
                 }
                 Ok(None)
@@ -99,12 +101,6 @@ impl NodeRuntime {
             return Ok(None);
         };
         let attempt = request.execution.attempt().as_str();
-        if node_write::permission_in(tx, self.node_id.as_str(), attempt, request.id.as_str())?
-            .is_some()
-        {
-            metrics::counter!("steve_decision_duplicate_prompts_total").increment(1);
-            return Ok(None);
-        }
         // an attempt this Hub planned on this Node, of that very session (whatever the body says)
         let planned = self.store.read(|r| {
             node_turns::planning::planned_here(r, self.node_id.as_str(), &session, attempt)
@@ -124,7 +120,7 @@ impl NodeRuntime {
                 PermissionDecision::Reject => format!("{REJECT}|拒绝|reject_once"),
             })
             .collect();
-        let d = steve_store::DecisionRows(tx).open(&steve_store::NewDecision {
+        let (d, opened) = steve_store::DecisionRows(tx).open_in(&steve_store::NewDecision {
             workspace_id: scope.workspace,
             kind: "approve".into(),
             subject_type: "tool_call".into(),
@@ -141,7 +137,15 @@ impl NodeRuntime {
             ),
             options: Some(options),
             requested_by: scope.bot.unwrap_or_else(|| "agent".into()),
+            question_template: None,
+            source: Some(steve_store::DecisionSource::Permission {
+                node: self.node_id.to_string(),
+                attempt: attempt.into(),
+            }),
         })?;
+        if !opened {
+            return Ok(None);
+        }
         event_in(
             tx,
             &session,
@@ -164,7 +168,7 @@ impl NodeRuntime {
         if request.expires_at.0 <= now() {
             // already past its time when it came in: closed at once, never offered to YOLO
             if let Some(row) = node_write::permission_of_decision_in(tx, &d.id)? {
-                self.expire_card_in(tx, &row, EXPIRED)?;
+                Self::expire_card_in(tx, &row, EXPIRED)?;
             }
             return Ok(None);
         }
@@ -178,7 +182,6 @@ impl NodeRuntime {
     /// The one answer command of a card (keyed on the card, so a request id the Node uses again in
     /// another attempt gets its own), bound to the very request: its attempt and action digest.
     fn answer_command_in(
-        &self,
         tx: &mut W<'_>,
         row: &PermissionRow,
         choice: PermissionDecision,
@@ -187,6 +190,10 @@ impl NodeRuntime {
         if let Some(op) = &row.answer_operation {
             return Ok(op.clone());
         }
+        let revision = DecisionRows(tx)
+            .get(&row.decision)?
+            .ok_or_else(|| conflict("missing permission decision"))?
+            .revision;
         let key = next_revision(
             tx,
             Intent::Answer(row.decision.clone().into()),
@@ -199,7 +206,7 @@ impl NodeRuntime {
                 id: request.id.clone(),
                 execution: request.execution.clone(),
                 action_digest: request.digest.clone(),
-                decision_revision: idv(derived_id("d", &row.decision))?,
+                decision_revision: idv(derived_id("d", &format!("{}:{revision}", row.decision)))?,
                 decision: choice,
             },
         )?;
@@ -208,34 +215,31 @@ impl NodeRuntime {
             &key,
             &rt::NewCommand {
                 operation: &op,
-                node: self.node_id.as_str(),
+                node: &row.node,
                 method: "resolve_permission",
                 request: &req,
                 digest: &digest,
                 target_attempt: Some(&row.attempt),
                 dependency: None,
             },
-            self.clock.now(),
+            now(),
         )?;
         Ok(op)
     }
 
     /// A waiting card whose time is up: expired, and the Node (if its attempt still runs) is told
     /// to reject the request. True: a command was queued.
-    fn expire_card_in(
-        &self,
-        tx: &mut W<'_>,
-        row: &PermissionRow,
-        why: &str,
-    ) -> Result<bool, StoreError> {
+    fn expire_card_in(tx: &mut W<'_>, row: &PermissionRow, why: &str) -> Result<bool, StoreError> {
         if row.state != "waiting" {
             return Ok(false);
         }
-        let running = self
-            .attempt_row(&row.attempt)?
-            .is_some_and(|a| a.state != "finished");
+        let running = node_turns::attempt(tx, &row.attempt)?.is_some_and(|a| a.state != "finished");
         let op = if running {
-            Some(self.answer_command_in(tx, row, PermissionDecision::Reject)?)
+            Some(Self::answer_command_in(
+                tx,
+                row,
+                PermissionDecision::Reject,
+            )?)
         } else {
             None
         };
@@ -331,48 +335,43 @@ impl NodeRuntime {
         Ok(())
     }
 
-    /// Closes the cards whose `expires_at` has come (Hub clock). True: a reject was queued.
-    pub(super) fn expire_due(&self) -> bool {
-        let r = self.write(|tx| {
-            let mut queued = false;
-            for row in node_write::due_permissions_in(tx, self.node_id.as_str(), now(), SWEEP)? {
-                queued |= self.expire_card_in(tx, &row, EXPIRED)?;
-            }
-            Ok(queued)
-        });
-        match r {
-            Ok(q) => {
-                if q {
-                    self.wake_send.notify_one();
+    /// Each due permission closes with its rejection intent in the same write.
+    pub fn expire_permissions(store: &Store, at: i64) -> Result<(), StoreError> {
+        let due = store.read(|r| node_write::due_permission_ids(r, at, SWEEP))?;
+        let mut failure = None;
+        for id in due {
+            let result = store.write(|w| {
+                if let Some(row) = node_write::permission_of_decision_in(w, &id)?
+                    && row.expires_at <= at
+                {
+                    Self::expire_card_in(w, &row, EXPIRED)?;
                 }
-                q
-            }
-            Err(e) => {
-                tracing::error!("expire permission cards: {e}");
-                false
+                Ok::<_, StoreError>(())
+            });
+            if let Err(e) = result {
+                failure = Some(e);
             }
         }
+        failure.map_or(Ok(()), Err)
     }
 
     /// The answer to a permission card of a Node session, as a command to the Node bound to the
     /// very request (its attempt, its action digest). `false`: the request is no longer waiting
     /// (answered, expired, or its attempt is over).
-    pub fn answer_permission(
-        &self,
-        decision: &str,
-        option: Option<&str>,
-    ) -> Result<bool, StoreError> {
+    pub fn answer_permission(&self, answer: PermissionAnswer<'_>) -> Result<bool, StoreError> {
+        let decision = answer.decision_id;
         self.running()?;
         let (answered, queued) = self.write(|tx| {
             let Some(row) = node_write::permission_of_decision_in(tx, decision)? else {
                 return Ok((false, false));
             };
-            let card = self
-                .store
-                .decisions()
+            let card = DecisionRows(tx)
                 .get(decision)?
                 .ok_or_else(|| StoreError::Rejected(format!("missing decision {decision}")))?;
-            if card.status != "open" || row.state != "waiting" {
+            if card.revision != answer.revision {
+                return Err(conflict("the decision changed while answering it"));
+            }
+            if card.status != steve_types::DecisionStatus::Open || row.state != "waiting" {
                 return Ok((false, false));
             }
             if let Some(why) = self
@@ -381,20 +380,22 @@ impl NodeRuntime {
             {
                 // A pause/cancel/replan can precede a late human or YOLO answer. Commit the
                 // expired card and a rejection together; never grant the old attempt new access.
-                return Ok((false, self.expire_card_in(tx, &row, &why)?));
+                return Ok((false, Self::expire_card_in(tx, &row, &why)?));
             }
             if row.expires_at <= now() {
                 // too late: closed now (committed), not answered
-                return Ok((false, self.expire_card_in(tx, &row, EXPIRED)?));
+                return Ok((false, Self::expire_card_in(tx, &row, EXPIRED)?));
             }
             let request: PermissionRequest = serde_json::from_value(row.request.clone())?;
-            let choice = match option {
-                Some(ALLOW) if request.choices.contains(&PermissionDecision::AllowOnce) => {
-                    PermissionDecision::AllowOnce
-                }
-                _ => PermissionDecision::Reject,
+            let choice = match answer.option() {
+                Some(ALLOW) => PermissionDecision::AllowOnce,
+                None => PermissionDecision::Reject,
+                Some(_) => return Err(conflict("invalid permission option")),
             };
-            let op = self.answer_command_in(tx, &row, choice)?;
+            if !request.choices.contains(&choice) {
+                return Err(conflict("permission did not offer this option"));
+            }
+            let op = Self::answer_command_in(tx, &row, choice)?;
             if !node_write::permission_cas_in(
                 tx,
                 &row.decision,
@@ -404,6 +405,38 @@ impl NodeRuntime {
                 now(),
             )? {
                 return Err(conflict("the permission changed while answering it"));
+            }
+            let mut rows = DecisionRows(tx);
+            let changed = match answer.action {
+                PermissionAction::Resolve { choice, text } => rows.resolve_choice(
+                    &card,
+                    answer.actor,
+                    choice,
+                    text,
+                    &json!({"optionId": answer.option(), "operation_id": op}),
+                    &Value::Null,
+                )?,
+                PermissionAction::Dismiss => {
+                    let changed = rows.apply(
+                        &card,
+                        DecisionChange::Dismiss,
+                        &json!({"dismissed": true, "operation_id": op}),
+                        &Value::Null,
+                    )?;
+                    if changed {
+                        tx.audit(
+                            &card.workspace_id,
+                            answer.actor,
+                            "decision.dismiss",
+                            decision,
+                            &json!({"revision": card.revision}),
+                        )?;
+                    }
+                    changed
+                }
+            };
+            if !changed {
+                return Err(conflict("the decision changed while answering it"));
             }
             Ok((true, true))
         })?;

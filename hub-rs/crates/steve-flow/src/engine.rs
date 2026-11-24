@@ -489,6 +489,8 @@ fn gate_wait(
             draft: Some(draft),
             options: Some(gate_options(!grants.is_empty())),
             requested_by: "steve".into(),
+            question_template: None,
+            source: None,
         }),
         output: json!({ "waiting": "approval" }),
     }
@@ -815,6 +817,8 @@ pub fn recover(cx: &FlowCx) -> FlowResult<Vec<String>> {
                     draft: None,
                     options: Some(vec![RETRY.into(), DROP.into()]),
                     requested_by: "steve".into(),
+                    question_template: None,
+                    source: None,
                 },
             )?;
             r.status = "failed".into();

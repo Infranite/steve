@@ -343,7 +343,9 @@ impl AgentRuntime for FakeRuntime {
             .cloned()
             .unwrap_or(Released::Gone))
     }
-    fn answer_permission(&self, decision: &str, option: Option<&str>) -> Result<Answered> {
+    fn answer_permission(&self, answer: crate::PermissionAnswer<'_>) -> Result<Answered> {
+        let decision = answer.decision_id;
+        let option = answer.option();
         let mut st = self.st();
         if st.answer_error {
             return Err(msg("store unavailable"));
@@ -627,7 +629,7 @@ impl Kit {
             .decisions_of_item(item)
             .unwrap()
             .into_iter()
-            .filter(|d| d.status == "open")
+            .filter(|d| d.status == steve_types::DecisionStatus::Open)
             .map(|d| d.kind)
             .collect()
     }

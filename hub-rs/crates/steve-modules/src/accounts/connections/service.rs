@@ -2358,6 +2358,8 @@ impl Connections {
             draft: None,
             options: Some(REAUTH_OPTIONS.map(String::from).to_vec()),
             requested_by: "steve".into(),
+            question_template: None,
+            source: None,
         })?;
         Ok(())
     }

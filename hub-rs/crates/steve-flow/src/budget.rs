@@ -99,6 +99,8 @@ fn account(cx: &FlowCx, session_id: &str) -> FlowResult<Option<(String, String, 
                     draft: None,
                     options: Some(vec![CONTINUE_ONCE.into(), STOP.into()]),
                     requested_by: "steve".into(),
+                    question_template: None,
+                    source: None,
                 })?;
                 run.context[ASKED] = json!(limit);
                 opened = Some((ws.clone(), item.clone(), d.id));

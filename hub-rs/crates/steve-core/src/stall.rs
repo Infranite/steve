@@ -158,7 +158,7 @@ impl Tx<'_> {
             .db()
             .decisions_of_item(&item)?
             .into_iter()
-            .filter(|d| d.status == "open" && d.subject_type == STALL)
+            .filter(|d| d.status == steve_types::DecisionStatus::Open && d.subject_type == STALL)
             .collect();
         for d in &open {
             self.db().decision_resolve(

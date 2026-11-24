@@ -831,6 +831,8 @@ fn from_the_stored_row_a_cut_draft_counts_as_truncated() {
     let pl = place();
     let d = crate::repo::Decision {
         revision: 1,
+        source_revision: None,
+        question_template: None,
         id: "dc".into(),
         workspace_id: WS.into(),
         kind: "approve".into(),
@@ -841,7 +843,7 @@ fn from_the_stored_row_a_cut_draft_counts_as_truncated() {
         question: "允许执行：Bash".into(),
         draft: format!("{{\n \"command\": \"echo {}", "a".repeat(2100))[..2000].to_string(),
         options: TOOL_OPTIONS.map(String::from).to_vec(),
-        status: "open".into(),
+        status: steve_types::DecisionStatus::Open,
         result: Value::Null,
         requested_by: "agent".into(),
         created: 0,

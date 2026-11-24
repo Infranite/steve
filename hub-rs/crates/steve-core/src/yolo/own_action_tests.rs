@@ -39,7 +39,7 @@ fn an_option_claiming_you_confirmed_is_never_submitted() {
         "{a:?}"
     );
     assert!(a.reason.starts_with("硬限制"), "{}", a.reason);
-    assert_eq!(t.decision(&d).status, "open");
+    assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Open);
     assert!(t.kit.rt.prompts_of(&sid).is_empty(), "nothing submitted");
 
     // the same card with an ordinary option is answered with that option
@@ -111,7 +111,7 @@ fn a_long_reply_after_a_request_to_scan_is_still_yours() {
         .decisions_of_item(&item)
         .unwrap()
         .into_iter()
-        .find(|d| d.status == "open" && d.kind == "fail")
+        .find(|d| d.status == steve_types::DecisionStatus::Open && d.kind == "fail")
         .expect("the turn end left a card")
         .id;
     let a = t.engine.consider(&d).unwrap().unwrap();
@@ -125,7 +125,7 @@ fn a_long_reply_after_a_request_to_scan_is_still_yours() {
         1,
         "YOLO did not continue it"
     );
-    assert_eq!(t.decision(&d).status, "open");
+    assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Open);
 
     // the same length of text with nothing asked of you is continued as usual
     let (item, sid, _) = t.item();
@@ -140,7 +140,7 @@ fn a_long_reply_after_a_request_to_scan_is_still_yours() {
         .decisions_of_item(&item)
         .unwrap()
         .into_iter()
-        .find(|d| d.status == "open" && d.kind == "fail")
+        .find(|d| d.status == steve_types::DecisionStatus::Open && d.kind == "fail")
         .unwrap()
         .id;
     let a = t.engine.consider(&d).unwrap().unwrap();
@@ -173,7 +173,7 @@ fn an_english_request_to_log_in_is_yours() {
             .decisions_of_item(&item)
             .unwrap()
             .into_iter()
-            .find(|d| d.status == "open" && d.kind == "fail")
+            .find(|d| d.status == steve_types::DecisionStatus::Open && d.kind == "fail")
             .expect("the turn end left a card")
             .id;
         let a = t.engine.consider(&d).unwrap().unwrap();
@@ -236,7 +236,7 @@ fn a_design_question_about_codes_is_answered_as_usual() {
         .decisions_of_item(&item)
         .unwrap()
         .into_iter()
-        .find(|d| d.status == "open" && d.kind == "fail")
+        .find(|d| d.status == steve_types::DecisionStatus::Open && d.kind == "fail")
         .expect("a question is yours at the turn end")
         .id;
     let r = reply("answer", "用 120 秒", None, 0.9);
@@ -262,7 +262,7 @@ fn a_design_question_about_codes_is_answered_as_usual() {
         .decisions_of_item(&item)
         .unwrap()
         .into_iter()
-        .find(|d| d.status == "open" && d.kind == "fail")
+        .find(|d| d.status == steve_types::DecisionStatus::Open && d.kind == "fail")
         .expect("Steve does not continue here (no continues configured)")
         .id;
     let a = t.engine.consider(&d).unwrap().unwrap();
@@ -313,7 +313,7 @@ fn a_turn_you_stopped_is_not_continued_by_yolo() {
         .decisions_of_item(&item)
         .unwrap()
         .into_iter()
-        .find(|d| d.status == "open")
+        .find(|d| d.status == steve_types::DecisionStatus::Open)
         .unwrap()
         .id;
     let a = t.engine.consider(&d).unwrap().unwrap();
@@ -332,7 +332,7 @@ fn turn_end_card(t: &super::engine_tests::T, item: &str) -> String {
         .decisions_of_item(item)
         .unwrap()
         .into_iter()
-        .find(|d| d.status == "open" && d.kind == "fail")
+        .find(|d| d.status == steve_types::DecisionStatus::Open && d.kind == "fail")
         .expect("the turn end left a card")
         .id
 }
@@ -360,7 +360,7 @@ fn a_code_to_type_or_a_passkey_is_yours_in_yolo() {
             "{said}: {a:?}"
         );
         assert_eq!(t.kit.rt.prompts_of(&sid).len(), 1, "{said}: not continued");
-        assert_eq!(t.decision(&d).status, "open");
+        assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Open);
 
         // asked on a card
         let (item, sid, _) = t.item();
@@ -467,7 +467,7 @@ fn replay_after_restart_must_preserve_stop() {
         "{r:?}"
     );
     assert_eq!(t.kit.rt.prompts_of(&sid).len(), 1, "not continued");
-    assert_eq!(t.decision(&d).status, "open");
+    assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Open);
     // your own message: another turn, whose end is an ordinary stop that YOLO continues
     core.session_message(&sid, "接着做", false, &[]).unwrap();
     assert_eq!(t.kit.rt.prompts_of(&sid).len(), 2);
@@ -481,7 +481,7 @@ fn replay_after_restart_must_preserve_stop() {
         .decisions_of_item(&item)
         .unwrap()
         .into_iter()
-        .find(|x| x.status == "open" && x.kind == "fail" && x.id != d)
+        .find(|x| x.status == steve_types::DecisionStatus::Open && x.kind == "fail" && x.id != d)
         .expect("a card for the new stop")
         .id;
     // you were here a moment ago (your message): YOLO waits until you are away (the fake clock

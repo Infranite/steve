@@ -96,7 +96,7 @@ fn open_fail(t: &T, item: &str) -> Option<String> {
         .decisions_of_item(item)
         .unwrap()
         .into_iter()
-        .find(|d| d.kind == "fail" && d.status == "open")
+        .find(|d| d.kind == "fail" && d.status == steve_types::DecisionStatus::Open)
         .map(|d| d.id)
 }
 
@@ -171,7 +171,7 @@ fn nothing_is_approved_while_a_release_runs() {
     let rows = t.actions(&d);
     assert_eq!(rows[0].outcome, "scheduled");
     assert!(rows[0].due_at.unwrap() > t.yolo.now());
-    assert_eq!(t.decision(&d).status, "open");
+    assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Open);
     t.kit
         .core
         .tx()
@@ -231,7 +231,11 @@ fn a_degraded_release_is_not_handed_back_to_the_bot() {
         prompts,
         "nothing sent to the bot"
     );
-    assert_eq!(t.decision(&f).status, "open", "the card waits for you");
+    assert_eq!(
+        t.decision(&f).status,
+        steve_types::DecisionStatus::Open,
+        "the card waits for you"
+    );
 }
 
 #[test]
@@ -414,7 +418,7 @@ fn spacing_waits_and_rebase_returns_leave_the_card_with_you() {
     // too soon: the card waits for the gap, nothing is left to you
     assert!(t.engine.consider(&d).unwrap().is_none());
     assert!(t.actions(&d).is_empty());
-    assert_eq!(t.decision(&d).status, "open");
+    assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Open);
     // the gap passed: the release is scheduled like any other
     t.clock.advance(10 * 60_000);
     let x = t.engine.consider(&d).unwrap().unwrap();

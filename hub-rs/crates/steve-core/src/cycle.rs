@@ -519,6 +519,16 @@ impl Tx<'_> {
         mode: ClosePolicy,
         evidence: Option<&str>,
     ) -> Result<()> {
+        self.accept_delivery_in(item_id, mode, evidence, |_, _| Ok(()))
+    }
+
+    pub(crate) fn accept_delivery_in(
+        &mut self,
+        item_id: &str,
+        mode: ClosePolicy,
+        evidence: Option<&str>,
+        extra: impl FnOnce(&mut steve_store::W<'_>, &Item) -> Result<()>,
+    ) -> Result<()> {
         let i = self.item(item_id)?;
         let Some(mut c) = i
             .closing
@@ -530,7 +540,7 @@ impl Tx<'_> {
             )));
         };
         if c.accepted {
-            return Ok(());
+            return self.db().store().write(|w| extra(w, &i));
         }
         c.accepted = true;
         c.policy = Some(mode);
@@ -538,7 +548,7 @@ impl Tx<'_> {
             c.evidence.push(e.into());
         }
         let w = Self::base(&i);
-        self.change_cycle(&i, w, CycleChange::Close(c), "验收通过", |_, _| Ok(()))?;
+        self.change_cycle(&i, w, CycleChange::Close(c), "验收通过", extra)?;
         self.evaluate_cycle_close(item_id)?;
         Ok(())
     }
@@ -904,7 +914,7 @@ impl Tx<'_> {
              * pull request waiting for your yes to merge is the release above (merged on the host
              * without it, the item still closes) */
             g.decision = self.db().decisions_of_item(&i.id)?.iter().any(|d| {
-                d.status == "open"
+                d.status == steve_types::DecisionStatus::Open
                     && d.created > c.at
                     && (d.kind == "ask" || (d.kind == "approve" && d.subject_type != "tool_call"))
             });
@@ -1592,7 +1602,7 @@ pub(crate) fn lifecycle_view(t: &Tx, i: &Item) -> Result<Value> {
     };
     if i.phase != CLOSED {
         for d in t.db().decisions_of_item(&i.id)? {
-            if d.status != "open" {
+            if d.status != steve_types::DecisionStatus::Open {
                 continue;
             }
             let (kind, label) = decision_blocker(&d);

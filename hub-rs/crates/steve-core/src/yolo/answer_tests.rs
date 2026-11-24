@@ -89,7 +89,7 @@ fn an_objection_or_low_confidence_without_recommendation_stays_with_you() {
         ("declined", "ask.unsure")
     );
     assert_eq!(a.reason, "YOLO 没替你答：要看用户的偏好");
-    assert_eq!(t.decision(&d).status, "open");
+    assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Open);
 
     // low confidence and no recommendation
     let (item, sid, _) = t.item();
@@ -125,7 +125,7 @@ fn an_objection_or_low_confidence_without_recommendation_stays_with_you() {
         (a.outcome.as_str(), a.rule.as_str()),
         ("declined", "ask.unsure")
     );
-    assert_eq!(t.decision(&d).status, "open");
+    assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Open);
     assert_eq!(t.kit.rt.prompts_of(&sid).len(), before);
 
     // no usable reply: ambiguous, stays with you even with a recommendation
@@ -134,7 +134,7 @@ fn an_objection_or_low_confidence_without_recommendation_stays_with_you() {
     let d = t.card(&item, &sid, "ask", "question", "改名吗？", "推荐：A", &OPTS);
     let a = t.engine.consider(&d).unwrap().unwrap();
     assert_eq!(a.outcome, "declined");
-    assert_eq!(t.decision(&d).status, "open");
+    assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Open);
 }
 
 #[test]
@@ -164,7 +164,7 @@ fn a_question_about_pushing_never_reaches_the_model() {
     let d = t.card(&item, &sid, "ask", "question", "接下来怎么办？", "", &[]);
     let a = t.engine.consider(&d).unwrap().unwrap();
     assert_eq!(a.outcome, "declined");
-    assert_eq!(t.decision(&d).status, "open");
+    assert_eq!(t.decision(&d).status, steve_types::DecisionStatus::Open);
 }
 
 #[test]

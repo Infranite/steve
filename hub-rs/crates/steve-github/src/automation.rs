@@ -818,7 +818,7 @@ fn publication(c: &mut impl steve_store::Read, ws: &str, item: &str) -> ApiResul
             "declined"
         } else if let Some(e) = &effect {
             e.state.as_str()
-        } else if d.status == "open" {
+        } else if d.status == steve_types::DecisionStatus::Open {
             if local_target(c, ws, &subject)?.is_some() {
                 "approval"
             } else {
@@ -947,6 +947,8 @@ pub(crate) async fn comment_draft(
             draft: Some(body),
             options: Some(vec!["yes".into(), "no".into()]),
             requested_by: APPROVAL_ACTOR.into(),
+            question_template: None,
+            source: None,
         })?;
         crate::events::emit(tx, ws, &decision.subject_id);
         Ok::<_, ApiError>(decision)

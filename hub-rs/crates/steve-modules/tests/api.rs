@@ -470,7 +470,7 @@ async fn confirm_decisions_dispatch_to_the_module() {
     assert!(!decisions::expire(&t.modules, &d3.id).unwrap());
     assert_eq!(
         t.store().decisions().get(&d3.id).unwrap().unwrap().status,
-        "expired"
+        steve_types::DecisionStatus::Expired
     );
     assert_eq!(
         t.store()

@@ -491,7 +491,11 @@ impl Engine {
             .decisions_of_item(item)
             .map_err(ce)?
             .iter()
-            .any(|x| x.kind == "accept" && x.status == "resolved" && x.result["choice"] == "pass"))
+            .any(|x| {
+                x.kind == "accept"
+                    && x.status == steve_types::DecisionStatus::Resolved
+                    && x.result["choice"] == "pass"
+            }))
     }
 
     /// The tool request comes from a session that runs with full access (完全放开) now: the item's
@@ -783,6 +787,8 @@ mod checkout_tests {
                     draft: Some("full draft".into()),
                     options: Some(vec!["retry".into(), "rewrite".into(), "discard".into()]),
                     requested_by: "steve".into(),
+                    question_template: None,
+                    source: None,
                 })
             })
             .unwrap();
@@ -845,6 +851,8 @@ mod recovery_review_tests {
                     draft: Some("edited body".into()),
                     options: Some(vec!["yes".into(), "no".into()]),
                     requested_by: "steve".into(),
+                    question_template: None,
+                    source: None,
                 })?;
                 steve_store::core_fixture::decision(
                     kit.db().store(),

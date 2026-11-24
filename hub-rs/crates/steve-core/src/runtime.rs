@@ -60,11 +60,56 @@ impl Flushed {
     }
 }
 
+/// A permission answer is tied to the version of the card the caller acted on.
+#[derive(Clone, Copy)]
+pub struct PermissionAnswer<'a> {
+    pub decision_id: &'a str,
+    pub revision: i64,
+    pub actor: &'a str,
+    pub action: PermissionAction<'a>,
+}
+
+#[derive(Clone, Copy)]
+pub enum PermissionAction<'a> {
+    Resolve { choice: &'a str, text: &'a str },
+    Dismiss,
+}
+
+impl<'a> PermissionAnswer<'a> {
+    pub fn resolve(
+        decision_id: &'a str,
+        revision: i64,
+        actor: &'a str,
+        choice: &'a str,
+        text: &'a str,
+    ) -> Self {
+        Self {
+            decision_id,
+            revision,
+            actor,
+            action: PermissionAction::Resolve { choice, text },
+        }
+    }
+
+    pub fn option(self) -> Option<&'a str> {
+        match self.action {
+            PermissionAction::Resolve {
+                choice: "reject" | "deny",
+                ..
+            }
+            | PermissionAction::Dismiss => None,
+            PermissionAction::Resolve { choice, .. } => Some(choice),
+        }
+    }
+}
+
 /// What [`AgentRuntime::answer_permission`] did with an answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Answered {
     /// The adapter that asked has it.
     Applied,
+    /// The Hub committed the card and its answer command together.
+    Committed,
     /// It is on its way to the Node that asked (a queued answer command); the Node's receipt later
     /// marks it applied, or closes the card unapplied.
     Pending,
@@ -238,7 +283,7 @@ pub trait AgentRuntime: Send + Sync {
     }
     /// Answer a pending tool permission (`None` = cancelled). Errors when the backend cannot tell
     /// (its store failed): the answer was not taken and the card stays open.
-    fn answer_permission(&self, decision_id: &str, option_id: Option<&str>) -> Result<Answered>;
+    fn answer_permission(&self, answer: PermissionAnswer<'_>) -> Result<Answered>;
     /// Release hand-off: while holding, no new turn starts and prompts queue (they survive a restart).
     fn hold(&self, on: bool);
     fn is_holding(&self) -> bool;

@@ -607,14 +607,17 @@ pub(crate) async fn request_merge(
             subject_id: id.clone(),
             item_id: pr.item_id,
             session_id: None,
-            question: steve_i18n::t!(
-                "github.pr.approve_merge",
-                number = pr.number,
-                repo = repo.full_name
-            ),
-            draft: Some(body.head),
+            question: String::new(),
+            draft: Some(body.head.clone()),
             options: Some(OPTIONS.map(String::from).to_vec()),
             requested_by: who.me.clone(),
+            question_template: Some(steve_types::DecisionPrompt::MergePullRequest {
+                number: pr.number,
+                repo: repo.full_name,
+            }),
+            source: Some(steve_store::DecisionSource::Revision {
+                revision: body.head,
+            }),
         })?;
         Ok(axum::Json(decision.id))
     })
@@ -673,6 +676,8 @@ mod tests {
     fn decision(draft: &str, result: Value) -> Decision {
         Decision {
             revision: 1,
+            source_revision: None,
+            question_template: None,
             id: "dec_1".into(),
             workspace_id: "default".into(),
             kind: "approve".into(),
@@ -683,7 +688,7 @@ mod tests {
             question: String::new(),
             draft: draft.into(),
             options: OPTIONS.map(String::from).to_vec(),
-            status: "resolved".into(),
+            status: steve_types::DecisionStatus::Resolved,
             result,
             requested_by: "owner".into(),
             created: 0,

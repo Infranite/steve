@@ -743,7 +743,7 @@ impl Core {
                         .map(|id| t.db().decision(id))
                         .transpose()?
                         .flatten()
-                        .filter(|d| d.status == "open");
+                        .filter(|d| d.status == steve_types::DecisionStatus::Open);
                     match card {
                         Some(d) => {
                             t.resolve_at(&d.id, d.revision, "pass", "", actor)?;
@@ -1633,10 +1633,11 @@ impl Tx<'_> {
             /* one card per trouble: the same one still open is not asked again; an older stop card gives way
              * to the new one (a card about an effect nobody knows stays, it waits on you) */
             let open = self.db().decisions_of_item(item_id)?;
-            if open
-                .iter()
-                .any(|d| d.status == "open" && d.kind == "fail" && d.question == why)
-            {
+            if open.iter().any(|d| {
+                d.status == steve_types::DecisionStatus::Open
+                    && d.kind == "fail"
+                    && d.question == why
+            }) {
                 return Ok(());
             }
             crate::lifecycle::supersede_where(
@@ -1771,6 +1772,8 @@ impl Tx<'_> {
                 options: Some(options.to_vec()),
                 draft: draft.clone(),
                 requested_by: Self::by(s),
+                question_template: None,
+                source: None,
             })?;
             self.mark(&s.id, Mark::Asked);
             return Ok(());
@@ -1801,6 +1804,8 @@ impl Tx<'_> {
                 options: Some(options.to_vec()),
                 draft,
                 requested_by: Self::by(s),
+                question_template: None,
+                source: None,
             })?;
             flow_quiet(
                 &db,
@@ -1836,6 +1841,8 @@ impl Tx<'_> {
                 draft: Some(detail.into()),
                 options: Some(vec!["yes".into(), "no".into()]),
                 requested_by: Self::by(s),
+                question_template: None,
+                source: None,
             })?;
             self.mark(&s.id, Mark::Approval);
             return Ok(());
@@ -1855,6 +1862,8 @@ impl Tx<'_> {
                 draft: Some(detail.into()),
                 options: Some(vec!["yes".into(), "no".into()]),
                 requested_by: Self::by(s),
+                question_template: None,
+                source: None,
             })?;
             flow_quiet(
                 &db,
@@ -2076,6 +2085,8 @@ impl Tx<'_> {
                 draft: Some("选择「按方案实现」会继续当前事项；选择「只保留设计」会完成本次设计；也可以要求修改设计。".into()),
                 options: Some(vec![IMPLEMENT_DESIGN.into(), "只保留设计".into(), "修改设计".into()]),
                 requested_by: Self::by(s),
+                question_template: None,
+                source: None,
             })?;
             flow_quiet(
                 self.db(),
@@ -2168,6 +2179,8 @@ impl Tx<'_> {
             )),
             options: Some(vec!["pass".into(), "rework".into()]),
             requested_by: Self::by(s),
+            question_template: None,
+            source: None,
         })?;
         self.mark_deliver(&item.workspace_id, item_id, &Self::by(s), Some(&d.id)); // stats (ST3)
         self.request_delivery_close(
@@ -2236,6 +2249,8 @@ impl Tx<'_> {
             draft: Some(format!("{summary}\n\n只改了前端时不重启，切到新前端后刷新页面即可；改到 Hub 时 Steve 会重启一次，大约一分钟。检查不通过会自动回到当前版本。")),
             options: Some(vec!["yes".into(), "no".into()]),
             requested_by: Self::by(s),
+            question_template: None,
+            source: None,
         })?;
         self.mark(&s.id, Mark::Approval);
         Ok(())
@@ -2806,7 +2821,7 @@ impl Tx<'_> {
                 .db()
                 .decisions_of_item(item_id)?
                 .iter()
-                .any(|d| d.status == "open")
+                .any(|d| d.status == steve_types::DecisionStatus::Open)
         {
             return Ok(());
         }
@@ -2985,6 +3000,13 @@ impl Tx<'_> {
         {
             return Ok(d);
         }
+        if d.subject_type == "tool_call" {
+            return self.settle_permission(
+                &d,
+                crate::PermissionAction::Resolve { choice, text },
+                actor,
+            );
+        }
         if d.subject_type == steve_types::orchestration::TURN_STALL {
             if actor == YOLO_ACTOR || !matches!(choice, "continue" | "drop") {
                 return Err(msg(steve_i18n::t!("core.decision.stall_owner")));
@@ -3155,11 +3177,33 @@ impl Tx<'_> {
             ("accept", _) if choice == "pass" => {
                 let i = iid()?;
                 let before = self.item(&i)?;
-                let undo = json!({"plan": before.plan});
-                settle(json!({"choice": choice}), "resolved", Some(undo))?;
-                self.answer_line(&i, actor, "验收通过", None)?;
+                let db = self.db().clone();
+                let record = |w: &mut steve_store::W<'_>, _: &Item| {
+                    settle_answer(
+                        w,
+                        &d,
+                        &cx,
+                        json!({"choice": choice}),
+                        "resolved",
+                        Some(json!({"plan": before.plan})),
+                    )?;
+                    let (by, kind, text) = if actor == YOLO_ACTOR {
+                        ("steve", "sys", "YOLO：验收通过")
+                    } else {
+                        (actor, "me", "验收通过")
+                    };
+                    db.timeline_add(&i, by, kind, text, None)?;
+                    Ok(())
+                };
                 if before.phase == crate::cycle::CLOSING {
-                    self.accept_delivery(&i, crate::cycle::ClosePolicy::Human, Some("你验收通过"))?;
+                    self.accept_delivery_in(
+                        &i,
+                        crate::cycle::ClosePolicy::Human,
+                        Some("你验收通过"),
+                        record,
+                    )?;
+                } else {
+                    store.write(|w| record(w, &before))?;
                 }
                 return reget(self);
             }
@@ -3239,17 +3283,6 @@ impl Tx<'_> {
                     } else {
                         self.send(&to, &format!("用户的回答：{answer}"))?;
                     }
-                }
-            }
-            ("approve", "tool_call") => {
-                let opt = (choice != "deny").then_some(choice);
-                /* answer first: resolve() only touches open decisions, so marking it resolved first would hide the expiry;
-                 * an error leaves the card open for another try */
-                if self.rt().answer_permission(id, opt)? != Answered::Gone {
-                    settle(json!({"optionId": opt}), "resolved", None)?;
-                } else {
-                    settle(json!({"expired": true}), "expired", None)?;
-                    self.send(&to, "你之前请求权限的那次工具调用已经失效（会话被重启过）。如果还需要，请重新执行。")?;
                 }
             }
             ("approve", "release") => {
@@ -3478,18 +3511,6 @@ impl Tx<'_> {
             (_, "delivery_batch" | "mq_target" | "mq_batch" | "mq_train") => {
                 settle(json!({"choice": choice, "obsolete": true}), "expired", None)?;
             }
-            ("approve", "tool_call") => {
-                let opt = (choice != "deny").then_some(choice);
-                if self.rt().answer_permission(id, opt)? != Answered::Gone {
-                    settle(json!({"optionId": opt}), "resolved", None)?;
-                } else {
-                    settle(json!({"expired": true}), "expired", None)?;
-                    send(
-                        self,
-                        "你之前请求权限的那次工具调用已经失效（会话被重启过）。如果还需要，请重新执行。",
-                    )?;
-                }
-            }
             ("ask", _) if actor == YOLO_ACTOR => {
                 let answer = or(choice, text);
                 settle(json!({"answer": answer}), "resolved", None)?;
@@ -3667,7 +3688,7 @@ impl Tx<'_> {
                 .db()
                 .decisions_of_item(&dep_id)?
                 .into_iter()
-                .filter(|o| o.status == "open" && o.kind == "propose")
+                .filter(|o| o.status == steve_types::DecisionStatus::Open && o.kind == "propose")
             {
                 self.db().decision_resolve(
                     &o.id,
@@ -3688,25 +3709,109 @@ impl Tx<'_> {
         Ok(())
     }
 
+    fn settle_permission(
+        &mut self,
+        d: &Decision,
+        action: crate::PermissionAction<'_>,
+        actor: &str,
+    ) -> Result<Decision> {
+        use crate::{PermissionAction, PermissionAnswer};
+        use steve_store::decision_repo::DecisionChange;
+        let id = &d.id;
+        let answer = PermissionAnswer {
+            decision_id: id,
+            revision: d.revision,
+            actor,
+            action,
+        };
+        let outcome = self.rt().answer_permission(answer)?;
+        let store = self.db().store().clone();
+        if outcome != Answered::Committed {
+            store.write::<_, CoreError>(|w| {
+                let mut rows = steve_store::DecisionRows(w);
+                match (outcome, action) {
+                    (Answered::Gone, _) => {
+                        rows.apply(
+                            d,
+                            DecisionChange::Expire,
+                            &json!({"expired": true}),
+                            &Value::Null,
+                        )?;
+                    }
+                    (_, PermissionAction::Resolve { choice, text }) => {
+                        rows.resolve_choice(
+                            d,
+                            actor,
+                            choice,
+                            text,
+                            &json!({"optionId": answer.option()}),
+                            &Value::Null,
+                        )?;
+                    }
+                    (_, PermissionAction::Dismiss) => {
+                        if rows.apply(
+                            d,
+                            DecisionChange::Dismiss,
+                            &json!({"dismissed": true}),
+                            &Value::Null,
+                        )? {
+                            w.audit(
+                                &d.workspace_id,
+                                actor,
+                                "decision.dismiss",
+                                id,
+                                &json!({"revision": d.revision}),
+                            )?;
+                        }
+                    }
+                }
+                Ok(())
+            })?;
+        }
+        if outcome == Answered::Gone && matches!(action, PermissionAction::Resolve { .. }) {
+            let live = d.session_id.clone().filter(|sid| {
+                self.db()
+                    .session(sid)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|s| s.status != "ended")
+            });
+            let to = To::Decision {
+                live,
+                item: d.item_id.clone(),
+            };
+            self.send(
+                &to,
+                "你之前请求权限的那次工具调用已经失效（会话被重启过）。如果还需要，请重新执行。",
+            )?;
+        }
+        self.db()
+            .decision(id)?
+            .ok_or_else(|| msg(steve_i18n::t!("core.decision.handled")))
+    }
+
     /// Take a card out of 待处理 without answering it: nothing is sent to the agent. Undoable like other
     /// decisions, except a tool permission — dismissing that denies the call.
     fn dismiss_decision_at(&mut self, id: &str, revision: i64, actor: &str) -> Result<Decision> {
         let d = self
             .db()
             .decision(id)?
-            .filter(|d| d.status == "open" && d.revision == revision)
+            .filter(|d| d.status == steve_types::DecisionStatus::Open && d.revision == revision)
             .ok_or_else(|| msg(steve_i18n::t!("core.decision.handled")))?;
         if d.subject_type == steve_store::SESSION_START_FAILURE {
             return Err(msg(
                 "请修正配置后重试，或重新指派、结束事项；启动失败卡需要保留。",
             ));
         }
-        let is_tool_perm = d.kind == "approve" && d.subject_type == "tool_call";
-        if is_tool_perm {
-            self.rt().answer_permission(id, None)?;
+        if d.subject_type == "tool_call" {
+            return self.settle_permission(&d, crate::PermissionAction::Dismiss, actor);
         }
         let db = self.db().clone();
-        db.store().write::<_, crate::CoreError>(|_w| {
+        db.store().write::<_, crate::CoreError>(|w| {
+            let d = steve_store::DecisionRows(w)
+                .get(id)?
+                .filter(|d| d.status == steve_types::DecisionStatus::Open && d.revision == revision)
+                .ok_or_else(|| msg(steve_i18n::t!("core.decision.handled")))?;
             db.audit(actor, "decision.dismiss", id, &json!({}), &d.workspace_id)?;
             let i = match &d.item_id {
                 Some(i) => db.item(i)?,
@@ -3728,18 +3833,26 @@ impl Tx<'_> {
                     .db()
                     .decisions_of_item(&i.id)?
                     .iter()
-                    .any(|x| x.status == "open" && x.id != id);
+                    .any(|x| x.status == steve_types::DecisionStatus::Open && x.id != id);
                 /* nothing left to wait for and nothing running: park it, so 继续 picks it up again */
                 if !open && !busy && i.phase.can_run() {
                     self.pause_item(&i.id)?;
                     revision = Some(self.item(&i.id)?.cas_revision);
                 }
             }
-            let undo = (!is_tool_perm && d.item_id.is_some())
+            let undo = d.item_id.is_some()
                 .then(|| serde_json::to_value(PauseUndo { revision }))
                 .transpose()?;
-            db.decision_resolve(id, json!({"dismissed": true}), "dismissed", undo)?;
-            db.decision(id)?
+            let mut rows = steve_store::DecisionRows(w);
+            if !rows.apply(
+                &d,
+                steve_store::decision_repo::DecisionChange::Dismiss,
+                &json!({"dismissed": true}),
+                &undo.unwrap_or(Value::Null),
+            )? {
+                return Err(msg(steve_i18n::t!("core.decision.handled")));
+            }
+            rows.get(id)?
                 .ok_or_else(|| msg(steve_i18n::t!("core.decision.handled")))
         })
     }
@@ -3997,7 +4110,7 @@ impl Tx<'_> {
             .db()
             .decisions_of_item(id)?
             .into_iter()
-            .filter(|d| d.status == "open" && d.session_id.is_some())
+            .filter(|d| d.status == steve_types::DecisionStatus::Open && d.session_id.is_some())
         {
             self.db()
                 .decision_resolve(&d.id, json!({"reassigned": true}), "expired", None)?;
@@ -4499,7 +4612,7 @@ impl Tx<'_> {
                 .db()
                 .decisions_of_item(&i.id)?
                 .iter()
-                .any(|d| d.status == "open"))
+                .any(|d| d.status == steve_types::DecisionStatus::Open))
     }
 
     pub(crate) fn recover(&mut self) -> Result<()> {
@@ -4658,7 +4771,7 @@ pub fn design_pending(store: &steve_store::Store, item: &Item) -> Result<bool> {
         .unwrap_or(1);
     let approved = store.decisions().of_item(&item.id)?.iter().any(|d| {
         d.subject_type == DESIGN_DECISION
-            && d.status == "resolved"
+            && d.status == steve_types::DecisionStatus::Resolved
             && d.result.get("answer").and_then(Value::as_str) == Some(IMPLEMENT_DESIGN)
             && serde_json::from_str::<Value>(&d.subject_id)
                 .ok()

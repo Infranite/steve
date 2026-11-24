@@ -940,7 +940,9 @@ impl ChangeOp for SetOp {
             s.created = b.created;
             // a proposal confirmed by hand: its card is settled too
             if let Some(d) = b.decision_id.as_deref().filter(|_| b.status == "proposed")
-                && DecisionRows(tx).get(d)?.is_some_and(|d| d.status == "open")
+                && DecisionRows(tx)
+                    .get(d)?
+                    .is_some_and(|d| d.status == steve_types::DecisionStatus::Open)
             {
                 DecisionRows(tx).settle(
                     d,

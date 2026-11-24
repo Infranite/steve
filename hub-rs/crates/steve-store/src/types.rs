@@ -571,21 +571,24 @@ pub struct Decision {
     pub item_id: Option<String>,
     pub session_id: Option<String>,
     pub question: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question_template: Option<steve_types::DecisionPrompt>,
     pub draft: String,
     pub options: Vec<String>,
-    /// `open` | `resolved` | `dismissed` | `expired` | `superseded`
-    pub status: String,
+    pub status: steve_types::DecisionStatus,
     pub result: Value,
     pub requested_by: String,
     pub created: i64,
     pub resolved: Option<i64>,
     pub undo: Value,
     pub revision: i64,
+    #[serde(skip_serializing)]
+    pub source_revision: Option<crate::DecisionSource>,
 }
 
 impl Decision {
     pub fn undo_until(&self) -> Option<i64> {
-        crate::decision_repo::undo_until(&self.status, self.resolved, &self.undo)
+        crate::decision_repo::undo_until(self.status, self.resolved, &self.undo)
     }
 
     pub(crate) fn from_row(r: &Row) -> rusqlite::Result<Self> {
@@ -598,15 +601,23 @@ impl Decision {
             item_id: r.get("item_id")?,
             session_id: r.get("session_id")?,
             question: r.get("question")?,
+            question_template: json_col(r, "question_template", None)?,
             draft: r.get("draft")?,
             options: json_col(r, "options", Vec::new())?,
-            status: r.get("status")?,
+            status: r.get::<_, String>("status")?.parse().map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    r.as_ref().column_index("status").unwrap_or(0),
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            })?,
             result: json_col(r, "result", Value::Null)?,
             requested_by: r.get("requested_by")?,
             created: r.get("created")?,
             resolved: r.get("resolved")?,
             undo: json_col(r, "undo", Value::Null)?,
             revision: r.get("revision")?,
+            source_revision: json_col(r, "source_revision", None)?,
         })
     }
 }

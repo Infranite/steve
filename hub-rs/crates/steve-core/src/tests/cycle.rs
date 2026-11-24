@@ -200,7 +200,7 @@ fn an_unknown_effect_of_an_older_revision_holds_the_close_until_you_check_it() {
         .decisions_of_item(&x.id)
         .unwrap()
         .into_iter()
-        .find(|d| d.status == "open" && d.kind == "fail")
+        .find(|d| d.status == steve_types::DecisionStatus::Open && d.kind == "fail")
         .unwrap();
     k.core.resolve(&card.id, "release_live", "", "me").unwrap();
     assert_eq!(k.phase(&x.id), "closed");
@@ -241,7 +241,7 @@ fn a_cancel_waits_for_an_unknown_effect_and_keeps_the_card_that_asks() {
         .decisions_of_item(&x.id)
         .unwrap()
         .into_iter()
-        .filter(|d| d.status == "open")
+        .filter(|d| d.status == steve_types::DecisionStatus::Open)
         .map(|d| d.kind)
         .collect();
     assert_eq!(open, ["fail"], "the acceptance goes, the check stays");
@@ -250,7 +250,7 @@ fn a_cancel_waits_for_an_unknown_effect_and_keeps_the_card_that_asks() {
         .decisions_of_item(&x.id)
         .unwrap()
         .into_iter()
-        .find(|d| d.status == "open")
+        .find(|d| d.status == steve_types::DecisionStatus::Open)
         .unwrap();
     // not live after all: settled as failed, the cancel commits, nobody is asked to publish
     k.core.resolve(&card.id, "release_retry", "", "me").unwrap();
@@ -371,7 +371,7 @@ fn commands_check_the_version_and_the_phase() {
     );
     assert_eq!(
         k.db().decision(&x.decision).unwrap().unwrap().status,
-        "resolved",
+        steve_types::DecisionStatus::Resolved,
         "accepting through the command answers the card"
     );
     // closed: accept / cancel / fail are conflicts, sends are refused

@@ -19,7 +19,10 @@ fn superseding_expires_questions_and_failure_cards_and_runs_again() {
         supersede(k.db(), &i, &["ask", "fail"], "你直接补充了信息").unwrap(),
         2
     );
-    assert_eq!(k.db().decision(&a).unwrap().unwrap().status, "expired");
+    assert_eq!(
+        k.db().decision(&a).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Expired
+    );
     assert_eq!(
         k.db().decision(&f).unwrap().unwrap().result,
         json!({"superseded": "你直接补充了信息"})
@@ -39,7 +42,10 @@ fn other_kinds_stay_open_and_the_item_keeps_waiting() {
     ask(&k, &i, "ask");
     let acc = ask(&k, &i, "accept");
     supersede(k.db(), &i, &["ask", "fail"], "x").unwrap();
-    assert_eq!(k.db().decision(&acc).unwrap().unwrap().status, "open");
+    assert_eq!(
+        k.db().decision(&acc).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Open
+    );
 }
 
 #[test]
@@ -60,7 +66,10 @@ fn bot_tools_supersede_what_they_move_past() {
     let s = k.db().session(&sid).unwrap().unwrap();
     let f = ask(&k, &i, "fail");
     k.core.tool_update(&s, "在做", &[]).unwrap();
-    assert_eq!(k.db().decision(&f).unwrap().unwrap().status, "expired");
+    assert_eq!(
+        k.db().decision(&f).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Expired
+    );
     k.core.tool_ask(&s, "q1", &[]).unwrap();
     k.core.tool_ask(&s, "q2", &[]).unwrap();
     assert_eq!(k.open_kinds(&i), vec!["ask"]);

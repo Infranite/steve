@@ -65,8 +65,8 @@ pub use orchestrator::{
     CreateItem, DecisionCommand, Forked, ItemAction, SendNow, SupplementMode, design_pending,
 };
 pub use runtime::{
-    AgentRuntime, Answered, Check, Configured, Flushed, McpEndpoint, ModeState, Output, Prompted,
-    Released, Running, Stop, TurnEnd,
+    AgentRuntime, Answered, Check, Configured, Flushed, McpEndpoint, ModeState, Output,
+    PermissionAction, PermissionAnswer, Prompted, Released, Running, Stop, TurnEnd,
 };
 
 use repo::Db;
