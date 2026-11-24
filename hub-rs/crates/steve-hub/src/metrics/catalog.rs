@@ -38,6 +38,11 @@ pub(super) fn describe() {
         "Agent question cards created for the owner."
     );
     describe_histogram!(
+        "steve_item_owner_finish_seconds",
+        Seconds,
+        "Time to commit an owner's explicit item finish."
+    );
+    describe_histogram!(
         "steve_bot_selection_seconds",
         Seconds,
         "Time to assess and rank one Bot dispatch request."
@@ -46,6 +51,31 @@ pub(super) fn describe() {
         "steve_bot_selection_blocked_total",
         Count,
         "Requests with no eligible placement. Counted once for each distinct reason. Label: reason."
+    );
+    describe_counter!(
+        "steve_item_automatic_delivery_total",
+        Count,
+        "Automatic delivery checks. Label: result (verified or unverified)."
+    );
+    describe_counter!(
+        "steve_item_stale_delivery_total",
+        Count,
+        "Delivery verification rejected because its item cycle or scope changed."
+    );
+    describe_histogram!(
+        "steve_decision_transition_seconds",
+        Seconds,
+        "Time spent applying a decision transition in the store. Label: operation."
+    );
+    describe_counter!(
+        "steve_decision_duplicate_prompts_total",
+        Count,
+        "Repeated permission requests suppressed by their existing attempt and request identity."
+    );
+    describe_gauge!(
+        "steve_decision_open",
+        Count,
+        "Open decisions in the Hub projection. Label: tier (decide, draft, or folded)."
     );
     // HTTP (metrics::http, the outermost layer)
     describe_counter!(

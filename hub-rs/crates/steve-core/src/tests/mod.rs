@@ -5,12 +5,11 @@ mod changes;
 mod conversations;
 mod cycle;
 mod dependencies;
-mod derive;
 mod flows;
 mod holds;
 mod i18n;
 mod inbox;
-mod judge;
+mod item_delivery;
 mod kinds;
 mod lifecycle;
 mod models;
@@ -21,7 +20,6 @@ mod node_git;
 mod onboard;
 mod outbox;
 mod parent_closure;
-mod pull;
 mod queued;
 mod refused;
 mod release_cleanup;
@@ -31,7 +29,6 @@ mod routing;
 mod stall;
 mod stats_marks;
 mod supersede;
-mod sweep;
 mod takeover;
 mod thread;
 mod turn_receipts;
@@ -59,13 +56,25 @@ pub struct Delivered {
     pub decision: String,
 }
 
+fn finish_owner(core: &crate::Core, id: &str) -> crate::Result<crate::repo::Item> {
+    let item = core.tx().item(id)?;
+    core.lifecycle_command(
+        id,
+        "finish",
+        item.cycle,
+        item.cas_revision,
+        None,
+        None,
+        "me",
+    )
+}
+
 impl Kit {
     pub fn project_with_release(&self) -> String {
         let script = self.home().join("release.sh");
         let rel = Release {
             kind: "script".into(),
             cmd: script.to_string_lossy().into(),
-            done_when: None,
         };
         match self
             .db()
@@ -103,7 +112,7 @@ impl Kit {
         ]
     }
 
-    pub fn item(&self, status: &str, stage: &str, project: Option<&str>) -> String {
+    pub fn item(&self, status: &str, _stage: &str, project: Option<&str>) -> String {
         let id = self
             .db()
             .item_create(
@@ -114,8 +123,11 @@ impl Kit {
                     goal: "g".into(),
                     bot_id: "dev".into(),
                     project_id: project.map(String::from),
-                    status: Some(status.into()),
-                    stage: Some(stage.into()),
+                    phase: Some(match status {
+                        "pause" => steve_types::ItemPhase::Paused,
+                        "prop" | "propose" => steve_types::ItemPhase::Ready,
+                        _ => steve_types::ItemPhase::Active,
+                    }),
                     ..Default::default()
                 },
             )
@@ -198,10 +210,10 @@ impl Kit {
         // delivered = a completion request waiting for this acceptance, as `steve_deliver` leaves it
         self.core
             .tx()
-            .lc_request_complete(
+            .request_delivery_close(
                 &id,
                 "dev",
-                crate::cycle::Policy::Human,
+                crate::cycle::ClosePolicy::Human,
                 false,
                 "交付，等你验收",
                 Some(decision.clone()),
@@ -217,16 +229,51 @@ impl Kit {
 
     /// The user marks the item done (the human acceptance of a completion request).
     pub fn finish(&self, item: &str) -> crate::Result<crate::repo::Item> {
-        self.core.item_action(item, crate::ItemAction::Finish, "me")
+        finish_owner(&self.core, item)
+    }
+
+    pub fn new_cycle(&self, item: &str) -> crate::Result<crate::repo::Item> {
+        let i = self.db().item(item)?.unwrap();
+        self.core
+            .lifecycle_command(item, "new_cycle", i.cycle, i.cas_revision, None, None, "me")
     }
 
     pub fn phase(&self, item: &str) -> String {
-        self.db().item(item).unwrap().unwrap().phase
+        self.db().item(item).unwrap().unwrap().phase.as_str().into()
     }
 
-    pub fn status(&self, item: &str) -> (String, String, String) {
-        let i = self.db().item(item).unwrap().unwrap();
-        (i.status, i.stage, i.now)
+    pub fn item_label(&self, item: &str) -> &'static str {
+        let state = self.db().item(item).unwrap().unwrap();
+        if state.is_closed() {
+            return match state.outcome.as_deref() {
+                Some("completed") => "done",
+                Some("failed") => "fail",
+                _ => "drop",
+            };
+        }
+        if state.is_paused() {
+            return "pause";
+        }
+        if self
+            .db()
+            .store()
+            .dependency_waits()
+            .get(item)
+            .unwrap()
+            .is_some_and(|w| w.state == "waiting")
+        {
+            return "block";
+        }
+        if self
+            .db()
+            .decisions_of_item(item)
+            .unwrap()
+            .iter()
+            .any(|d| d.status == steve_types::DecisionStatus::Open)
+        {
+            return "wait";
+        }
+        "run"
     }
 
     pub fn user_texts(&self, sid: &str) -> Vec<String> {
@@ -244,7 +291,7 @@ impl Kit {
             .decisions_of_item(item)
             .unwrap()
             .into_iter()
-            .filter(|d| d.kind == "fail" && d.status == "open")
+            .filter(|d| d.kind == "fail" && d.status == steve_types::DecisionStatus::Open)
             .map(|d| d.question)
             .collect()
     }

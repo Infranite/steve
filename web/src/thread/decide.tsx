@@ -18,7 +18,7 @@ import { MessageOpenInFeishu } from "@/channels/open-in-app"
 import { SendRecovery } from "@/channels/send-recovery"
 import { t as tr, useT } from "@/i18n"
 import { FLOW_SUBJECTS, hasOptionIds, isModuleCard, isPeopleDecision, WITH_WORDS, WORDS_OPTIONS } from "@/decision-options"
-import { acceptChoosesRelease, botName, channelAnswer, decide, dismiss, FAIL_CHOICE, optionLabel, decideCards, PR_AWAITING_MERGE, setSt, SNOOZE_KEYS, snooze, snoozeLabel, st, WT, type Item, type Wait } from "@/store"
+import { botName, channelAnswer, decide, dismiss, FAIL_CHOICE, optionLabel, decideCards, GITHUB_PR_MERGE, actOnItem, SNOOZE_KEYS, snooze, snoozeLabel, st, WT, type Item, type Wait } from "@/store"
 import { permissionCommand } from "@/ui"
 import { AlarmClockIcon, BanIcon, BellOffIcon, EllipsisIcon } from "lucide-react"
 import { useRef, useState, type ReactNode } from "react"
@@ -34,7 +34,7 @@ const toolOptions = (w: Wait) => {
   const opts = w.options.map((o) => { const [id, name, kind] = o.split("|"); return { id, name, kind } })
   return { always: opts.find((o) => o.kind === "allow_always"), once: opts.find((o) => o.kind === "allow_once") }
 }
-const kindLabel = (w: Wait) => (w.subject === "tool_call" ? tr("core:wait.tool") : w.subject === "release" ? tr("core:wait.release") : w.subject === PR_AWAITING_MERGE ? tr("core:wait.prMerge") : WT[w.type])
+const kindLabel = (w: Wait) => (w.subject === "tool_call" ? tr("core:wait.tool") : w.subject === "release" ? tr("core:wait.release") : w.subject === GITHUB_PR_MERGE ? tr("core:wait.prMerge") : WT[w.type])
 export const busyOf = (w: Wait) => st.pendingActions.has("decision:" + w.decision) || st.submittedChannelDecisions.has(w.decision) || st.inactiveChannelDecisions.has(w.decision) || !!channelAnswer(w)
 
 /** the card's labels in the UI language ("later" folds the card here; above the composer it reads Hide, next to the Hub's remind-me-later) */
@@ -69,7 +69,7 @@ export function CardTools({ i, w }: { i: Item; w: Wait }) {
       <DropdownMenuContent align="end" className="min-w-52">
         {w.subject !== "session_start" && !(w.subject === "mail_draft" && w.options.includes("confirmed_not_sent")) && <DropdownMenuItem disabled={busy} onClick={() => void dismiss(i.id, w.decision)} data-dismiss={i.id}><BellOffIcon />{t(w.subject === "tool_call" ? "core:card.dismissTool" : "core:card.dismiss")}</DropdownMenuItem>}
         {i.id && <><DropdownMenuSeparator />
-        <DropdownMenuItem variant="destructive" disabled={busy} onClick={() => setSt(i.id, "drop")} data-drop-item={i.id}><BanIcon />{t("core:card.dropItem")}</DropdownMenuItem></>}
+        <DropdownMenuItem variant="destructive" disabled={busy} onClick={() => actOnItem(i.id, "drop")} data-drop-item={i.id}><BanIcon />{t("core:card.dropItem")}</DropdownMenuItem></>}
       </DropdownMenuContent>
     </DropdownMenu>
   </span>
@@ -189,13 +189,10 @@ export function mapDecision(i: Item, w: Wait, where: "inline" | "composer", show
     d: { ...base, detail: <Detail w={w} extra={<ChannelResult w={w} />} />, options: [], own: false }, answer: () => {},
   }
   if (w.type === "accept") {
-    const release = acceptChoosesRelease(i)
-    const rows = release
-      ? [opt("pass-release", tr("core:card.passRelease"), { "data-pass": "", "data-pass-release": "" }), opt("pass-no-release", tr("core:card.passNoRelease"), { "data-pass-no-release": "" })]
-      : [opt("pass", tr("core:card.pass"), { "data-pass": "" })]
+    const rows = [opt("pass", tr("core:card.pass"), { "data-pass": "" })]
     return {
       d: { ...base, options: rows, own: { placeholder: tr("core:card.reworkPlaceholder", { bot: botName(i.b) }), send: tr("core:card.sendRework"), attrs: { "data-rework": "" } } },
-      answer: (a) => pick(a, { pass: () => act("pass"), "pass-release": () => act("pass", "release"), "pass-no-release": () => act("pass", "no-release") }, (x) => act("rework", x)),
+      answer: (a) => pick(a, { pass: () => act("pass") }, (x) => act("rework", x)),
     }
   }
   if (w.type === "approve") {
@@ -203,7 +200,7 @@ export function mapDecision(i: Item, w: Wait, where: "inline" | "composer", show
       d: { ...base, detail: <Detail w={w} reply extra={<ChannelReply key={w.decision} i={i} w={w} />} />, options: [], own: false },
       answer: () => {},
     }
-    const rows = [opt("yes", tr(w.subject === "release" ? "core:card.approveRelease" : w.subject === PR_AWAITING_MERGE ? "core:card.approveMerge" : "core:card.approve"), { "data-approve": "" }),
+    const rows = [opt("yes", tr(w.subject === "release" ? "core:card.approveRelease" : w.subject === GITHUB_PR_MERGE ? "core:card.approveMerge" : "core:card.approve"), { "data-approve": "" }),
       ...(w.subject === "chan_message" && w.options.includes("rewrite") ? [opt("rewrite", tr("core:card.rewriteFirst"), { "data-rewrite": "" })] : [])]
     /* rejecting is the field: its button sends with or without a reason */
     return {

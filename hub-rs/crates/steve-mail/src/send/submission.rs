@@ -35,7 +35,10 @@ impl Mail {
                 // hangs, fails, or this task is cancelled. It is outside SEND_TIMEOUT.
                 attempt.completed = true;
                 if let Some(item) = &d.item_id {
-                    self.0.link.hooks().sent(&d.workspace_id, item, &d.subject);
+                    self.0
+                        .link
+                        .hooks()
+                        .sent(&d.workspace_id, item, &d.subject, d.delivery_version);
                 }
                 match tokio::time::timeout(
                     COPY_TIMEOUT,

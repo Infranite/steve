@@ -6,7 +6,7 @@ use steve_node_api::WorkspaceRef;
 pub fn seed_item_session(store: &Store, c: &str) -> Result<()> {
     store.write(|tx| {
         tx.conn.execute_batch(&format!(
-                "INSERT INTO items(id,workspace_id,no,title,status,stage,cwd,created,updated) VALUES ('i1','default',1,'t','run','执行','{c}',1,1);
+                "INSERT INTO items(id, workspace_id, no, title, phase, cwd, created, updated) VALUES ('i1','default',1,'t','active','{c}',1,1);
                  INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','{c}','active',1,1);",
             ))?;
         Ok(())
@@ -16,7 +16,7 @@ pub fn seed_item_session(store: &Store, c: &str) -> Result<()> {
 pub fn seed_session_item_and_knowledge(store: &Store, c: &str, k: &str) -> Result<()> {
     store.write(|tx| {
         tx.conn.execute_batch(&format!(
-                "INSERT INTO items(id,workspace_id,no,title,status,stage,cwd,created,updated) VALUES ('i1','default',1,'t','run','执行','{c}',1,1),('i2','default',2,'t','run','执行',NULL,1,1);
+                "INSERT INTO items(id, workspace_id, no, title, phase, cwd, created, updated) VALUES ('i1','default',1,'t','active','{c}',1,1),('i2','default',2,'t','active',NULL,1,1);
                  INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','{c}','active',1,1),('s2','default','i1','claude-code','','active',2,2);
                  INSERT INTO kb_sources(id,workspace_id,kind,name,config,created_by,created,updated) VALUES ('k1','default','folder','wiki','{{\"path\":\"{k}\"}}','u',1,1),('k2','default','notes','n','{{}}','u',1,1);",
             ))?;
@@ -27,7 +27,7 @@ pub fn seed_session_item_and_knowledge(store: &Store, c: &str, k: &str) -> Resul
 pub fn seed_directory_project_item(store: &Store, c: &str) -> Result<()> {
     store.write(|tx| {
         tx.conn.execute_batch(&format!(
-                "INSERT INTO items(id,workspace_id,no,title,status,stage,cwd,project_id,created,updated) VALUES ('i9','default',9,'t','run','执行','{c}','p9',1,1);
+                "INSERT INTO items(id, workspace_id, no, title, phase, cwd, project_id, created, updated) VALUES ('i9','default',9,'t','active','{c}','p9',1,1);
                  INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s9','default','i9','claude-code','{c}','active',1,1);",
             ))?;
         Ok(())
@@ -77,7 +77,7 @@ pub fn record_existing_prepare(
 pub fn seed_remote_item(store: &Store, c: &str) -> Result<()> {
     store.write(|tx| {
         tx.conn.execute_batch(&format!(
-                "INSERT INTO items(id,workspace_id,no,title,status,stage,cwd,created,updated) VALUES ('i1','default',1,'t','run','执行','{c}',1,1);
+                "INSERT INTO items(id, workspace_id, no, title, phase, cwd, created, updated) VALUES ('i1','default',1,'t','active','{c}',1,1);
                  INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','{c}','active',1,1);
                  INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u','default','sub_u','u','owner',1),('m','default','sub_m','m','member',1);
                  INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1);
@@ -104,7 +104,7 @@ pub fn seed_permission_modes(store: &Store, bots: &[Option<&str>]) -> Result<()>
         };
         for ro in [0, 1] {
             sql += &format!(
-                    "INSERT INTO items(id,workspace_id,no,title,status,stage,bot_id,created,updated) VALUES ('i{n}_{ro}','default',{no},'t','run','执行',{bot_id},1,1);
+                    "INSERT INTO items(id, workspace_id, no, title, phase, bot_id, created, updated) VALUES ('i{n}_{ro}','default',{no},'t','active',{bot_id},1,1);
                      INSERT INTO sessions(id,workspace_id,item_id,bot_id,harness,cwd,status,readonly,created,updated) VALUES ('s{n}_{ro}','default','i{n}_{ro}',{bot_id},'claude-code','','active',{ro},1,1);",
                     no = n * 2 + ro + 1
                 );
@@ -118,8 +118,8 @@ pub fn seed_permission_modes(store: &Store, bots: &[Option<&str>]) -> Result<()>
 
 pub fn seed_item_and_active_session(store: &Store, item: &str, session: &str) -> Result<()> {
     store.write(|tx| {
-        tx.conn.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated)
-            SELECT ?,'default',COALESCE(MAX(no)+1,1),'t','run','执行',1,1
+        tx.conn.execute("INSERT INTO items(id,workspace_id,no,title,phase,created,updated)
+            SELECT ?,'default',COALESCE(MAX(no)+1,1),'t','active',1,1
             FROM items WHERE workspace_id='default'", [item])?;
         tx.conn.execute("INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES (?,'default',?,'claude-code','.','active',1,1)", [session, item])?;
         Ok(())

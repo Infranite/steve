@@ -46,28 +46,20 @@ pub const REPO_HOOK_EVENTS: [&str; 9] = [
 /// The repo settings, with defaults.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
-    /// `ask_pr|open_pr|none`. `open_pr`: accepting the item opens its draft PR without asking, for a
-    /// private repository whose item's worktree is on this machine (anything else still asks).
-    pub after_accept: String,
-    /// `accepted|merged`.
-    pub finish_on: String,
     /// `squash|merge|rebase`.
     pub merge_method: String,
     pub delete_branch: bool,
     /// `supplement|signal`.
     pub ci_fail: String,
-    pub draft_pr: bool,
     pub pr_review: bool,
     pub issue_triage: bool,
 }
 
-const ENUMS: [(&str, &[&str]); 4] = [
-    ("after_accept", &["ask_pr", "open_pr", "none"]),
-    ("finish_on", &["accepted", "merged"]),
+const ENUMS: [(&str, &[&str]); 2] = [
     ("merge_method", &["squash", "merge", "rebase"]),
     ("ci_fail", &["supplement", "signal"]),
 ];
-const BOOLS: [&str; 4] = ["delete_branch", "draft_pr", "pr_review", "issue_triage"];
+const BOOLS: [&str; 3] = ["delete_branch", "pr_review", "issue_triage"];
 
 impl Settings {
     /// From `gh_repos.settings`; missing or odd values take the default.
@@ -84,12 +76,9 @@ impl Settings {
                 .to_string()
         };
         Self {
-            after_accept: e("after_accept", "ask_pr"),
-            finish_on: e("finish_on", "accepted"),
             merge_method: e("merge_method", "squash"),
             delete_branch: v["delete_branch"].as_bool().unwrap_or(true),
             ci_fail: e("ci_fail", "supplement"),
-            draft_pr: v["draft_pr"].as_bool().unwrap_or(false),
             pr_review: v["pr_review"].as_bool().unwrap_or(false),
             issue_triage: v["issue_triage"].as_bool().unwrap_or(false),
         }
@@ -97,9 +86,8 @@ impl Settings {
 
     pub fn to_json(&self) -> Value {
         json!({
-            "after_accept": self.after_accept, "finish_on": self.finish_on,
             "merge_method": self.merge_method, "delete_branch": self.delete_branch,
-            "ci_fail": self.ci_fail, "draft_pr": self.draft_pr,
+            "ci_fail": self.ci_fail,
             "pr_review": self.pr_review, "issue_triage": self.issue_triage,
         })
     }
@@ -1008,6 +996,11 @@ pub fn routes(gh: GitHub) -> Router<Modules> {
         )
         .route("/github/repos/{id}/sync", post(sync_now))
         .route("/github/prs", get(prs))
+        .route("/github/prs/{id}/merge", post(crate::accept::request_merge))
+        .route(
+            "/github/items/{id}/delivery",
+            axum::routing::put(crate::delivery::declare),
+        )
         .route("/github/issues", get(issues))
         .route("/github/deliveries", get(deliveries))
         .route(
@@ -1156,28 +1149,5 @@ mod tests {
         assert_eq!(parse_remote("https://gitlab.com/a/b.git"), None);
         assert_eq!(parse_remote("https://github.com/a"), None);
         assert_eq!(parse_remote("https://github.com/a/b/c"), None);
-    }
-
-    #[test]
-    fn settings_defaults_and_patch() {
-        let d = Settings::of(&json!({}));
-        assert_eq!(
-            d.to_json(),
-            json!({"after_accept":"ask_pr","finish_on":"accepted","merge_method":"squash",
-                   "delete_branch":true,"ci_fail":"supplement","draft_pr":false,"pr_review":false,"issue_triage":false})
-        );
-        let m = json!({"finish_on": "merged", "draft_pr": true});
-        let p = Settings::patched(&json!({}), m.as_object().unwrap()).unwrap();
-        assert_eq!(p["finish_on"], "merged");
-        assert_eq!(p["draft_pr"], true);
-        let bad = json!({"finish_on": "never", "delete_branch": "yes", "x": 1});
-        assert_eq!(
-            Settings::patched(&json!({}), bad.as_object().unwrap()),
-            Err(ApiError::Invalid(vec![
-                "settings.finish_on".into(),
-                "settings.delete_branch".into(),
-                "settings.x".into()
-            ]))
-        );
     }
 }

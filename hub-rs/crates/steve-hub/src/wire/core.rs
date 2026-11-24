@@ -703,6 +703,21 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             Err(e) => Err(CoreError::Msg(e.to_string())),
         }
     }
+    fn stage_decision_prompt(
+        &self,
+        w: &mut steve_store::W<'_>,
+        session_id: &str,
+        text: &str,
+    ) -> steve_core::Result<()> {
+        if let Some(why) = steve_store::workflow_gate::session_blocker(w, session_id)? {
+            return Err(CoreError::Msg(why));
+        }
+        if steve_store::node_sessions::principal_state(w, session_id)?.is_none() {
+            return Err(CoreError::Msg(self.refused(session_id)));
+        }
+        super::node_runtime::queue_in(w, session_id, text, "steve", &[], steve_store::now())?;
+        Ok(())
+    }
     fn running(&self, session_id: &str) -> Option<steve_core::Running> {
         match self.route(session_id) {
             Backend::Node(n) => match n.active_attempt(session_id) {
@@ -764,26 +779,21 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             Backend::Unbound => Ok(Released::Gone),
         }
     }
-    /// A Node session's answer is a queued command ([`steve_core::Answered::Pending`]); a store
-    /// error is returned, so the card stays open and the Node keeps waiting for a real answer.
-    /// That holds for the lookups that pick the backend too.
     fn answer_permission(
         &self,
-        decision_id: &str,
-        option_id: Option<&str>,
+        answer: steve_core::PermissionAnswer<'_>,
     ) -> steve_core::Result<steve_core::Answered> {
         use steve_core::Answered;
-        let Some(sid) = super::node_runtime::decision_session(&self.store, decision_id)? else {
+        let Some(sid) = super::node_runtime::decision_session(&self.store, answer.decision_id)?
+        else {
             return Ok(Answered::Gone);
         };
         match self.route_strict(&sid)? {
-            Backend::Node(n) => Ok(if n.answer_permission(decision_id, option_id)? {
-                Answered::Pending
+            Backend::Node(n) => Ok(if n.answer_permission(answer)? {
+                Answered::Committed
             } else {
                 Answered::Gone
             }),
-            // parked: its Node is not enabled here, nobody can take the answer now; unbound:
-            // the harness that asked is gone
             Backend::Parked | Backend::Unbound => Ok(Answered::Gone),
         }
     }
@@ -1041,11 +1051,6 @@ impl Domain for CoreDomain {
         self.jobs.start("core.stalls", || {
             steve_runtime::spawn("core.stalls", self.core.clone().run_stall_watch())
         });
-        // the completion judge in shadow (#335): its own watch, so its model calls never hold up
-        // the stall, build and pull request checks
-        self.jobs.start("core.judge", || {
-            steve_runtime::spawn("core.judge", self.core.clone().run_judge_watch())
-        });
     }
 
     async fn create_item(&self, p: CreateItem) -> Result<Obj, crate::error::ApiError> {
@@ -1181,10 +1186,6 @@ impl Domain for CoreDomain {
     async fn lifecycle_view(&self, id: &str) -> BResult<Option<Value>> {
         let (c, id) = (self.core.clone(), id.to_string());
         blocking(move || c.lifecycle_view(&id).map(Some)).await
-    }
-    async fn derived_state(&self, id: &str) -> BResult<Option<Value>> {
-        let (c, id) = (self.core.clone(), id.to_string());
-        blocking(move || c.derived_state(&id)).await
     }
     async fn diagnostic_snapshot(&self, id: &str) -> BResult<Value> {
         let (c, id) = (self.core.clone(), id.to_string());
@@ -1350,23 +1351,15 @@ impl Domain for CoreDomain {
         to_obj(blocking(move || c.fork(&ws, &sid, seq, &goal, as_session, &actor)).await?)
     }
 
-    async fn resolve(&self, id: &str, choice: &str, text: &str, actor: &str) -> BResult<Obj> {
-        let (c, id, choice, text, actor) = (
-            self.core.clone(),
-            id.to_string(),
-            choice.to_string(),
-            text.to_string(),
-            actor.to_string(),
-        );
-        to_obj(blocking(move || c.resolve(&id, &choice, &text, &actor)).await?)
-    }
-    async fn undo_decision(&self, id: &str, actor: &str) -> BResult<Obj> {
-        let (c, id, actor) = (self.core.clone(), id.to_string(), actor.to_string());
-        to_obj(blocking(move || c.undo_decision(&id, &actor)).await?)
-    }
-    async fn dismiss_decision(&self, id: &str, actor: &str) -> BResult<Obj> {
-        let (c, id, actor) = (self.core.clone(), id.to_string(), actor.to_string());
-        to_obj(blocking(move || c.dismiss_decision(&id, &actor)).await?)
+    async fn settle_decision(
+        &self,
+        caller: steve_modules::Caller,
+        id: String,
+        revision: Option<i64>,
+        command: steve_core::DecisionCommand,
+    ) -> BResult<Obj> {
+        let core = self.core.clone();
+        to_obj(blocking(move || core.decision_command(&caller, &id, revision, command)).await?)
     }
     async fn drain(&self, token: &str, start: bool) -> BResult<Option<Obj>> {
         let (c, token) = (self.core.clone(), token.to_string());
@@ -2030,17 +2023,26 @@ mod routed_tests {
         steve_store::testkit::hub::workflow_cases::seed_open_permission(&rt.store).unwrap();
         // readable, bound to no Node: the harness that asked is gone
         assert_eq!(
-            rt.answer_permission("d1", Some("allow")).unwrap(),
+            rt.answer_permission(steve_core::PermissionAnswer::resolve(
+                "d1", 1, "owner", "allow", ""
+            ))
+            .unwrap(),
             Answered::Gone
         );
         steve_store::testkit::hub::mutations::remove_runtime_sessions(&rt.store).unwrap();
         assert!(
-            rt.answer_permission("d1", Some("allow")).is_err(),
+            rt.answer_permission(steve_core::PermissionAnswer::resolve(
+                "d1", 1, "owner", "allow", ""
+            ))
+            .is_err(),
             "binding unreadable"
         );
         steve_store::testkit::hub::mutations::remove_decisions(&rt.store).unwrap();
         assert!(
-            rt.answer_permission("d1", Some("allow")).is_err(),
+            rt.answer_permission(steve_core::PermissionAnswer::resolve(
+                "d1", 1, "owner", "allow", ""
+            ))
+            .is_err(),
             "card unreadable"
         );
     }

@@ -714,7 +714,7 @@ async fn a_module_decision_is_undone_through_the_route() {
         )
         .await;
     assert_eq!(s, 200, "{d}");
-    assert_eq!(d["undo"], json!({ "module": "attr_def" }));
+    assert_eq!(d["undo"], json!({ "operation": "domain" }));
     assert_eq!(def(), "active");
     let (s, d) = c
         .call("POST", "/api/decisions/dec_undo/undo", None, None)

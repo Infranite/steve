@@ -1385,12 +1385,10 @@ fn mentioned_items(
         };
         let goal = db.goal(&i.id).unwrap_or_default();
         out.push_str(&format!(
-            "{} {}\n状态：{} · {}\n现在：{}\n目标：{}\n",
+            "{} {}\n状态：{}\n目标：{}\n",
             i.id,
             i.title,
-            i.status,
-            i.stage,
-            i.now,
+            i.outcome.as_deref().unwrap_or_else(|| i.phase.as_str()),
             js_head(&goal, 300)
         ));
         if !i.plan.is_empty() {

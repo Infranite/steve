@@ -77,7 +77,7 @@ fn published_v49_upgrades_and_reopens_with_existing_data_and_new_gates() {
             // Items created by the old build receive the completion gate too.
             assert!(
                 c.execute(
-                    "UPDATE items SET status='done',phase='closed',outcome='completed' WHERE id='parent'",
+                    "UPDATE items SET phase='closed',outcome='completed' WHERE id='parent'",
                     [],
                 )
                 .is_err()
@@ -103,16 +103,19 @@ fn published_v49_upgrades_and_reopens_with_existing_data_and_new_gates() {
             assert_eq!(count(c, "SELECT count(*) FROM workflows"), 1);
             assert_eq!(count(c, "SELECT count(*) FROM workflow_units"), 1);
             assert_eq!(
-                count(c, "SELECT count(*) FROM item_dependency_waits WHERE state='waiting'"),
+                count(
+                    c,
+                    "SELECT count(*) FROM item_dependency_waits WHERE state='waiting'"
+                ),
                 1
             );
             c.execute(
-                "UPDATE items SET status='done',phase='closed',outcome='completed' WHERE id='prerequisite'",
+                "UPDATE items SET phase='closed',outcome='completed' WHERE id='prerequisite'",
                 [],
             )?;
             assert!(
                 c.execute(
-                    "UPDATE items SET status='done',phase='closed',outcome='completed' WHERE id='parent'",
+                    "UPDATE items SET phase='closed',outcome='completed' WHERE id='parent'",
                     [],
                 )
                 .is_err(),
@@ -124,7 +127,7 @@ fn published_v49_upgrades_and_reopens_with_existing_data_and_new_gates() {
             )?;
             assert_eq!(
                 c.execute(
-                    "UPDATE items SET status='done',phase='closed',outcome='completed' WHERE id='parent'",
+                    "UPDATE items SET phase='closed',outcome='completed' WHERE id='parent'",
                     [],
                 )?,
                 1

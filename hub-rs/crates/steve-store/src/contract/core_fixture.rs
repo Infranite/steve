@@ -14,8 +14,7 @@ use crate::{Result, Store};
 
 pub enum ItemState<'a> {
     Phase(&'a str),
-    Finished { status: &'a str, outcome: &'a str },
-    Closed { status: &'a str },
+    Closed { outcome: &'a str },
     ClosedAtUpdate { outcome: &'a str },
     Failed,
     Cycle(i64),
@@ -44,11 +43,7 @@ pub fn try_item(store: &Store, id: &str, state: ItemState<'_>) -> Result<()> {
     update.table("items").and_where(Expr::col("id").eq(id));
     match state {
         Phase(phase) => update.value("phase", phase),
-        Finished { status, outcome } => update
-            .value("phase", "closed")
-            .value("status", status)
-            .value("outcome", outcome),
-        Closed { status } => update.value("phase", "closed").value("status", status),
+        Closed { outcome } => update.value("phase", "closed").value("outcome", outcome),
         ClosedAtUpdate { outcome } => update
             .value("phase", "closed")
             .value("outcome", outcome)
@@ -59,11 +54,10 @@ pub fn try_item(store: &Store, id: &str, state: ItemState<'_>) -> Result<()> {
         ResumeCycle => update
             .value("phase", "active")
             .value("outcome", None::<String>)
-            .value("status", "run")
             .value("cycle", Expr::col("cycle").add(1_i64)),
         BumpCycle => update.value("cycle", Expr::col("cycle").add(1_i64)),
         RunningNextCycle => update
-            .value("status", "run")
+            .value("phase", "active")
             .value("cycle", Expr::col("cycle").add(1_i64)),
         Closing(json) => update.value("closing", json),
         Parent(json) => update.value("parent", json),

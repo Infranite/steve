@@ -87,11 +87,6 @@ fn str_field(o: &Obj, k: &str) -> Option<String> {
 }
 
 impl Repo for StoreBackend {
-    fn item_closeout(&self, id: &str) -> BResult<Option<steve_core::pull::Closeout>> {
-        self.0
-            .read(|r| s::state_batches::item_closeout(r, id, s::views::closeout_from_evidence))
-            .map_err(err)
-    }
     fn bot_extras(&self) -> BResult<Option<BotExtras>> {
         let extras = self
             .0
@@ -574,9 +569,6 @@ impl Repo for StoreBackend {
         obj(self.0.files().create(&n).map_err(err)?)
     }
 
-    fn decision_get(&self, id: &str) -> BResult<Option<Obj>> {
-        opt(self.0.decisions().get(id).map_err(err)?)
-    }
     fn decisions_of_item(&self, item: &str) -> BResult<Vec<Obj>> {
         objs(self.0.decisions().of_item(item).map_err(err)?)
     }

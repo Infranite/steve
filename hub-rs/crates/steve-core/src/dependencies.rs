@@ -53,7 +53,12 @@ impl Tx<'_> {
             let (title, now) = self
                 .db()
                 .item(&dep)?
-                .map(|i| (i.title, i.now))
+                .map(|i| {
+                    (
+                        i.title,
+                        i.outcome.unwrap_or_else(|| i.phase.as_str().into()),
+                    )
+                })
                 .unwrap_or_default();
             summary.push(format!("{dep}「{title}」：{now}"));
         }
@@ -189,12 +194,10 @@ impl Tx<'_> {
                 "协作工作仍在执行或停止尚未确认，请先暂停工作图并确认停止后再登记前置等待",
             ));
         }
-        if self
-            .db()
-            .decisions_of_item(&item.id)?
-            .iter()
-            .any(|d| d.status == "open" && !matches!(d.kind.as_str(), "ask" | "fail"))
-        {
+        if self.db().decisions_of_item(&item.id)?.iter().any(|d| {
+            d.status == steve_types::DecisionStatus::Open
+                && !matches!(d.kind.as_str(), "ask" | "fail")
+        }) {
             return Ok(Some("事项还有验收或授权待处理，不能改为前置等待"));
         }
         Ok(None)
@@ -202,15 +205,10 @@ impl Tx<'_> {
     pub(crate) fn dependency_view(&self, id: &str) -> Result<Value> {
         let item = self.item(id)?;
         let wait = self.db().store().dependency_waits().get(id)?;
-        let historical_wait =
-            item.status == "block" && wait.as_ref().is_some_and(|w| w.state != "waiting");
-        let configured = if historical_wait {
-            "workspace"
-        } else {
-            wait.as_ref()
-                .map(|w| w.resume.as_str())
-                .unwrap_or("workspace")
-        };
+        let configured = wait
+            .as_ref()
+            .map(|w| w.resume.as_str())
+            .unwrap_or("workspace");
         let requested_auto = match configured {
             "automatic" => true,
             "notify" => false,
@@ -225,10 +223,8 @@ impl Tx<'_> {
         let mut dependencies = vec![];
         for dep in self.db().deps_of(id)? {
             let p = self.db().item(&dep)?;
-            dependencies.push(
-                json!({"id":dep,"status":p.as_ref().map(|i|i.status.as_str()),
-                "phase":p.as_ref().map(|i|i.phase.as_str())}),
-            );
+            dependencies.push(json!({"id":dep,"phase":p.as_ref().map(|i|i.phase),
+                "outcome":p.as_ref().and_then(|i|i.outcome.as_deref())}));
         }
         let busy = match self.active_session(id)? {
             Some(s) => self.busy(&s.id) || self.rt().uncertain(&s.id),
@@ -243,7 +239,7 @@ impl Tx<'_> {
             self.dependency_registration_blocker(&item, session.as_ref())?
         };
         Ok(json!({
-            "item_id":id,"status":item.status,"phase":item.phase,"cycle":item.cycle,
+            "item_id":id,"phase":item.phase,"cycle":item.cycle,
             "dependencies":dependencies,"open_dependencies":deps_open(self.db(),id)?,
             "resume_mode":if automatic {"automatic"} else {"notify"},
             "resume_source":if fallback {"fallback"} else if configured=="workspace" {"workspace"} else {"item"},
@@ -276,32 +272,10 @@ impl Tx<'_> {
         }
         for ws in self.db().workspace_ids()? {
             for i in self.db().items_all(&ws)? {
-                // Startup can be interrupted after its status changes but before a first session
-                // is committed. Persisted edges still own admission: recover that sessionless
-                // item through the same gate, never through the stalled-agent question path.
-                if matches!(i.phase.as_str(), ACTIVE | crate::cycle::READY)
-                    && !i.archived
-                    && i.status == "run"
-                    && !self.db().deps_of(&i.id)?.is_empty()
-                    && self.db().sessions_of_item(&i.id)?.is_empty()
-                {
-                    self.db()
-                        .item_patch(&i.id, crate::patch![status:"block",now:"等待前置事项完成"])?;
-                    self.check_blocked(&i.id)?;
+                if !i.phase.can_run() || i.archived {
                     continue;
                 }
-                if matches!(i.phase.as_str(), ACTIVE | crate::cycle::READY)
-                    && !i.archived
-                    && i.status != "pause"
-                    && self.dependency_waiting(&i.id)?
-                    && i.status != "block"
-                {
-                    self.db().item_patch(&i.id, crate::patch![status:"block"])?;
-                }
-                if matches!(i.phase.as_str(), ACTIVE | crate::cycle::READY)
-                    && (i.status == "block"
-                        || (i.status != "pause" && self.dependency_waiting(&i.id)?))
-                {
+                if self.dependency_waiting(&i.id)? {
                     self.check_blocked(&i.id)?;
                 }
             }
@@ -348,12 +322,16 @@ impl Tx<'_> {
         let Some(wait) = self.db().store().dependency_waits().get(id)? else {
             return Ok(false);
         };
-        if wait.state != "waiting" {
+        let Some(registration) = wait
+            .session_id
+            .as_deref()
+            .filter(|_| wait.state == "waiting")
+        else {
             return Ok(false);
-        }
+        };
         if self.holding() || self.cfg().no_resume {
             self.diagnostic_session(
-                &wait.session_id,
+                registration,
                 None,
                 "dependency.resume_evaluated",
                 if self.cfg().no_resume {
@@ -391,10 +369,10 @@ impl Tx<'_> {
             .db()
             .decisions_of_item(id)?
             .iter()
-            .any(|d| d.status == "open")
+            .any(|d| d.status == steve_types::DecisionStatus::Open)
         {
             self.diagnostic_session(
-                &wait.session_id,
+                registration,
                 None,
                 "dependency.resume_evaluated",
                 "open_decision",

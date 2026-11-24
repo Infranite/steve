@@ -67,10 +67,10 @@ pub fn item_deps_created_i1_dep(store: &Store) -> Result<i64> {
     })
 }
 
-pub fn items_now_i1(store: &Store) -> Result<String> {
+pub fn item_progress(store: &Store) -> Result<String> {
     store.sqlite_read(|db| {
         Ok(db.query_row(
-            "SELECT now FROM items WHERE id='i1'",
+            "SELECT COALESCE((SELECT text FROM timeline WHERE item_id='i1' AND kind='progress' ORDER BY id DESC LIMIT 1),'')",
             rusqlite::params![],
             |r| r.get(0),
         )?)
@@ -93,7 +93,7 @@ pub fn seed_files(store: &Store, key1: &str) -> Result<()> {
 
 pub fn seed_items_and_item_deps(store: &Store) -> Result<()> {
     store.write(|tx| {
-        tx.conn.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('dep','default',2,'prerequisite','run','执行',1,1)", rusqlite::params![])?;
+        tx.conn.execute("INSERT INTO items(id, workspace_id, no, title, phase, created, updated) VALUES ('dep','default',2,'prerequisite','active',1,1)", rusqlite::params![])?;
         tx.conn.execute("INSERT INTO item_deps(item_id,dep_id,created) VALUES('i1','dep',123)", rusqlite::params![])?;
         Ok(())
     })
@@ -101,7 +101,7 @@ pub fn seed_items_and_item_deps(store: &Store) -> Result<()> {
 
 pub fn seed_items_and_sessions(store: &Store, row2_key1: &str) -> Result<()> {
     store.write(|tx| {
-        tx.conn.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES ('i1','default',1,'test','run','执行',1,1)", rusqlite::params![])?;
+        tx.conn.execute("INSERT INTO items(id, workspace_id, no, title, phase, created, updated) VALUES ('i1','default',1,'test','active',1,1)", rusqlite::params![])?;
         tx.conn.execute("INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES (?,'default','i1','claude-code','','active',1,1)", rusqlite::params![row2_key1])?;
         Ok(())
     })
@@ -109,7 +109,7 @@ pub fn seed_items_and_sessions(store: &Store, row2_key1: &str) -> Result<()> {
 
 pub fn seed_items_and_sessions_for_turn_ended(store: &Store) -> Result<()> {
     store.write(|tx| {
-        tx.conn.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES ('i1','default',1,'test','run','执行',1,1)", rusqlite::params![])?;
+        tx.conn.execute("INSERT INTO items(id, workspace_id, no, title, phase, created, updated) VALUES ('i1','default',1,'test','active',1,1)", rusqlite::params![])?;
         tx.conn.execute("INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','','active',1,1)", rusqlite::params![])?;
         Ok(())
     })
@@ -117,7 +117,7 @@ pub fn seed_items_and_sessions_for_turn_ended(store: &Store) -> Result<()> {
 
 pub fn seed_items_and_set_sessions_item_id_i1(store: &Store) -> Result<()> {
     store.write(|tx| {
-        tx.conn.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES ('i1','default',1,'test','run','执行',1,1)", rusqlite::params![])?;
+        tx.conn.execute("INSERT INTO items(id, workspace_id, no, title, phase, created, updated) VALUES ('i1','default',1,'test','active',1,1)", rusqlite::params![])?;
         tx.conn.execute("UPDATE sessions SET item_id='i1' WHERE id='s1'", rusqlite::params![])?;
         tx.conn.execute("INSERT INTO decisions(id,workspace_id,item_id,session_id,kind,subject_type,subject_id,question,status,requested_by,created) VALUES ('d1','default','i1','s1','ask','item','i1','input','open','steve',1)", rusqlite::params![])?;
         Ok(())
@@ -142,7 +142,7 @@ pub fn seed_nodes_and_sessions(store: &Store) -> Result<()> {
 pub fn seed_projects_and_items(store: &Store, key1: &str) -> Result<()> {
     store.write(|tx| {
         tx.conn.execute("INSERT INTO projects(id,workspace_id,name,path,kind,worktree,created,updated) VALUES('p1','default','later',?,'dir',0,1,1)", rusqlite::params![key1])?;
-        tx.conn.execute_batch("INSERT INTO items(id,workspace_id,no,title,status,stage,project_id,created,updated) VALUES ('i1','default',1,'t','run','执行','p1',1,1),('i2','default',2,'t','run','执行',NULL,1,1);
+        tx.conn.execute_batch("INSERT INTO items(id, workspace_id, no, title, phase, project_id, created, updated) VALUES ('i1','default',1,'t','active','p1',1,1),('i2','default',2,'t','active',NULL,1,1);
                 INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','','active',1,1),('s2','default','i2','claude-code','','active',1,1);")?;
         Ok(())
     })
@@ -294,7 +294,7 @@ pub fn seed_prerequisite_and_manager(store: &Store) -> Result<()> {
     store.write(|tx| {
         tx.conn.execute("UPDATE items SET bot_id='manager' WHERE id='i1'", rusqlite::params![])?;
         tx.conn.execute("UPDATE sessions SET bot_id='manager' WHERE id='s1'", rusqlite::params![])?;
-        tx.conn.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('dep','default',2,'prerequisite','run','执行',1,1)", rusqlite::params![])?;
+        tx.conn.execute("INSERT INTO items(id, workspace_id, no, title, phase, created, updated) VALUES ('dep','default',2,'prerequisite','active',1,1)", rusqlite::params![])?;
         Ok(())
     })
 }
@@ -649,7 +649,7 @@ pub fn seed_principal_session(store: &Store, node_owner: &str) -> Result<()> {
         tx.conn.execute_batch(&format!("INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES ('u','default','u','u','owner',1);
                      INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','u','owner',1);
                      INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n1','{node_owner}','n1',zeroblob(32),'f1','active',1);
-                     INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated,requested_by) VALUES ('i1','default',1,'t','run','执行',1,1,'u');
+                     INSERT INTO items(id, workspace_id, no, title, phase, created, updated, requested_by) VALUES ('i1','default',1,'t','active',1,1,'u');
                      UPDATE sessions SET item_id='i1', bot_id='dev' WHERE id='s1';"))?;
         Ok(())
     })
@@ -791,9 +791,9 @@ pub fn block_tools_for_prerequisite(store: &Store, blocked: bool) -> Result<()> 
     store.write(|tx| {
         tx.conn.execute(
             if blocked {
-                "UPDATE items SET status='block' WHERE id='i1'"
+                "INSERT INTO item_dependency_waits(item_id,cycle,session_id,resume,reason,state,created,updated) VALUES('i1',1,NULL,'workspace','','waiting',1,1)"
             } else {
-                "UPDATE items SET status='run',source='[\"item\",\"workflow\"]' WHERE id='i1'"
+                "UPDATE items SET phase='active',source='[\"item\",\"workflow\"]' WHERE id='i1'"
             },
             [],
         )?;
@@ -1008,7 +1008,7 @@ pub fn seed_active_session(w: &mut crate::W<'_>, session: &str) -> Result<()> {
 
 pub fn seed_retry_blocker(store: &Store, state: &str) -> Result<()> {
     store.write(|tx| {
-        tx.conn.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES ('i1','default',1,'test','run','执行',1,1)", [])?;
+        tx.conn.execute("INSERT INTO items(id, workspace_id, no, title, phase, created, updated) VALUES ('i1','default',1,'test','active',1,1)", [])?;
         tx.conn.execute("UPDATE sessions SET item_id='i1' WHERE id='s1'", [])?;
         match state {
             "closing" => { tx.conn.execute("UPDATE items SET phase='closing' WHERE id='i1'", [])?; }

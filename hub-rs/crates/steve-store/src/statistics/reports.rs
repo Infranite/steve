@@ -101,7 +101,7 @@ impl<C: Read> ItemHistory<'_, C> {
             .and_where(Expr::col(("i", "workspace_id")).eq(scope.ws))
             .and_where(Expr::col(("i", "kind")).eq("task"))
             .and_where(Expr::col(("i", "archived")).eq(0_i64))
-            .and_where(Expr::col(("i", "status")).is_in(states.iter().copied()));
+            .and_where(Expr::col(("i", "phase")).is_in(states.iter().copied()));
         dimensions(&mut q, "i", scope);
         Ok(self.0.one(&q, |r| r.get(0))?.unwrap_or_default())
     }

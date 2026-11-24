@@ -12,10 +12,9 @@ use std::time::Duration;
 use serde_json::json;
 
 use crate::error::Result;
-use crate::lifecycle::settle;
 use crate::repo::NewDecision;
+use crate::turn_wait::{CoordinatorAttention, stopped};
 use crate::util::{js_head, now};
-use crate::work::{NODE_WAIT, Work, stopped};
 use crate::{Core, Tx};
 
 /// How long an item may sit in `run` with nothing going on before it gets the card.
@@ -35,8 +34,7 @@ impl Core {
         self.tx().expire_stall(session_id)
     }
 
-    /// Every 30 s. Runs forever. The completion judge has its own watch
-    /// ([`Core::run_judge_watch`]): its model calls never hold up these checks.
+    /// Checks for stalled sessions every 30 seconds.
     pub async fn run_stall_watch(self) {
         self.stall_watch(CHECK_EVERY).await;
     }
@@ -61,28 +59,6 @@ impl Core {
                         Err(e) => tracing::error!("stall check task {e}"),
                         Ok(Ok(_)) => {}
                     }
-                    /* the Release builds Steve follows (network calls, outside the lock) */
-                    let c = this.clone();
-                    match tokio::task::spawn_blocking(move || c.check_builds()).await {
-                        Ok(Err(e)) => tracing::warn!("build check {e}"),
-                        Err(e) => tracing::warn!("build check task {e}"),
-                        Ok(Ok(_)) => {}
-                    }
-                    /* the pull requests of accepted items (network calls, outside the lock) */
-                    let c = this.clone();
-                    match tokio::task::spawn_blocking(move || c.check_prs()).await {
-                        Ok(Err(e)) => tracing::warn!("pull request check {e}"),
-                        Err(e) => tracing::warn!("pull request check task {e}"),
-                        Ok(Ok(_)) => {}
-                    }
-                    /* every open item: what the sweep would do, recorded and not carried out (#334). Last,
-                     * so it sees what the passes above just did */
-                    let c = this.clone();
-                    match tokio::task::spawn_blocking(move || c.sweep()).await {
-                        Ok(Err(e)) => tracing::warn!("sweep {e}"),
-                        Err(e) => tracing::warn!("sweep task {e}"),
-                        Ok(Ok(_)) => {}
-                    }
                 }
             },
         )
@@ -93,7 +69,7 @@ impl Core {
 impl Tx<'_> {
     pub(crate) fn check_stalls(&mut self, at: i64) -> Result<Vec<String>> {
         // cards the work has moved past go first, holds or not (crate::work)
-        self.work_tidy()?;
+        self.expire_obsolete_turn_cards()?;
         // a release in flight explains an idle item (and no turn may start anyway)
         if self.holding() || self.st.releasing.is_some() {
             return Ok(vec![]);
@@ -110,22 +86,11 @@ impl Tx<'_> {
                 let Some(s) = self.active_session(&i.id)? else {
                     continue;
                 };
-                /* a unit's session belongs to its graph: the graph resumes it or reports it; a
-                 * look at the remote under way answers this stop (a lost one is looked at again) */
-                if self.workflow_child(&i)? || self.probing(&i.id, now()) {
+                /* a unit's session belongs to its graph: the graph resumes it or reports it; its coordinator handles follow-up */
+                if self.workflow_child(&i)? {
                     continue;
                 }
-                /* the item's work, not the session alone: a coordinator idle while its graph runs,
-                 * queues, waits for you or is paused has not stopped */
-                let work = self.work(&i)?;
-                /* input waiting on a Node that has no link says so, and stops once it links */
-                if let Some(t) = work.text()
-                    && (t.starts_with(NODE_WAIT) || i.now.starts_with(NODE_WAIT))
-                    && i.now != t
-                {
-                    self.db().item_patch(&i.id, crate::patch![now: t])?;
-                }
-                if work.waiting() {
+                if self.turn_has_wait(&i, true)? {
                     continue;
                 }
                 let last = self.db().last_event_ts(&s.id)?.unwrap_or(0).max(s.updated);
@@ -136,45 +101,56 @@ impl Tx<'_> {
                 /* your Stop comes first: a failure the coordinator was told of and you then stopped
                  * is shown with its reason, and is yours to go on with (no continue spent) */
                 let (cause, yours) = stopped(self.db().store().sessions().stop(&s.id)?.as_ref());
-                let (why, yours) = match &work {
-                    Work::Failed(why) if yours => (format!("{why}；{cause}"), true),
-                    Work::Failed(why) => (why.clone(), false),
-                    /* the agent's own pause: it is not continued over it, you are asked */
-                    Work::Halted(why) => (why.clone(), true),
-                    _ => (cause, yours),
+                let attention = self.coordinator_attention(&i.id)?;
+                let failed = matches!(attention, Some(CoordinatorAttention::Failed(_)));
+                let (why, yours) = match attention {
+                    Some(CoordinatorAttention::Failed(why)) if yours => {
+                        (format!("{why}；{cause}"), true)
+                    }
+                    Some(CoordinatorAttention::Failed(why)) => (why, false),
+                    Some(CoordinatorAttention::PausedByAgent(why)) => (why, true),
+                    None => (cause, yours),
                 };
                 let mut question = format!("它停下了：{}", js_head(&why, 200));
                 /* Steve looks first, unless it was you who stopped it */
                 if !yours {
-                    let stop = match work {
-                        Work::Failed(_) => crate::takeover::Stop::Workflow {
+                    let stop = if failed {
+                        crate::takeover::Stop::Workflow {
                             why: question.clone(),
-                        },
-                        _ => crate::takeover::Stop::Idle {
+                        }
+                    } else {
+                        crate::takeover::Stop::Idle {
                             why: question.clone(),
-                        },
+                        }
                     };
                     match self.takeover(&i.id, &s.id, stop)? {
                         Some(q) => question = q,
                         None => continue,
                     }
                 }
-                let d = self.db().decision_create(NewDecision {
-                    workspace_id: i.workspace_id.clone(),
-                    kind: "fail".into(),
-                    subject_type: STALL.into(),
-                    subject_id: i.id.clone(),
-                    item_id: Some(i.id.clone()),
-                    session_id: Some(s.id.clone()),
-                    question: question.clone(),
-                    options: Some(vec!["continue".into(), "look".into(), "drop".into()]),
-                    requested_by: "steve".into(),
-                    ..Default::default()
+                let (d, opened) = self.db().store().write(|w| {
+                    steve_store::DecisionRows(w).open_in(&NewDecision {
+                        workspace_id: i.workspace_id.clone(),
+                        kind: "fail".into(),
+                        subject_type: STALL.into(),
+                        subject_id: i.id.clone(),
+                        item_id: Some(i.id.clone()),
+                        session_id: Some(s.id.clone()),
+                        question: question.clone(),
+                        options: Some(vec!["continue".into(), "look".into(), "drop".into()]),
+                        requested_by: "steve".into(),
+                        source: Some(steve_store::DecisionSource::Revision {
+                            revision: format!("stall:{}:{}:{last}", i.cycle, s.id),
+                        }),
+                        ..Default::default()
+                    })
                 })?;
+                if !opened {
+                    continue;
+                }
                 self.mark_fail(&i.workspace_id, &i.id, &question, &d.id); // stats (ST3)
                 self.db()
                     .timeline_add(&i.id, "steve", "sys", &question, Some(&s.id))?;
-                settle(self.db(), &i.id)?;
                 out.push(i.id);
             }
         }
@@ -190,18 +166,15 @@ impl Tx<'_> {
             .db()
             .decisions_of_item(&item)?
             .into_iter()
-            .filter(|d| d.status == "open" && d.subject_type == STALL)
+            .filter(|d| d.status == steve_types::DecisionStatus::Open && d.subject_type == STALL)
             .collect();
         for d in &open {
             self.db().decision_resolve(
                 &d.id,
                 json!({"superseded": "它又开始工作了"}),
-                "expired",
+                steve_store::decision_repo::DecisionChange::Expire,
                 None,
             )?;
-        }
-        if !open.is_empty() {
-            settle(self.db(), &item)?;
         }
         /* a unit at work again: the coordinator's card about a stop (its own, or a unit's failure)
          * no longer describes the parent either */

@@ -130,7 +130,7 @@ pub fn allow_watermark(store: &Store) -> Result<()> {
 
 pub fn seed_attribution(store: &Store) -> Result<()> {
     store.write(|w| w.db().batch("INSERT INTO projects(id,workspace_id,name,path,created,updated) VALUES ('p1','default','one','.',1,1),('p2','default','two','.',1,1);
-            INSERT INTO items(id,workspace_id,no,title,status,stage,project_id,created,updated) VALUES ('i1','default',1,'one','进行中','执行','p1',1,1),('i2','default',2,'two','进行中','执行','p2',1,1);
+            INSERT INTO items(id, workspace_id, no, title, phase, project_id, created, updated) VALUES ('i1','default',1,'one','active','p1',1,1),('i2','default',2,'two','active','p2',1,1);
             UPDATE sessions SET item_id='i1',bot_id='b1' WHERE id='s';
             INSERT INTO sessions(id,workspace_id,item_id,bot_id,harness,cwd,status,created,updated) VALUES ('s2','default','i2','b2','custom','.','running',1,1);
             INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,active_attempt,updated) VALUES ('s2','n','{}','s2','r','active','a2',1);

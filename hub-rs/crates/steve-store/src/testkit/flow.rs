@@ -52,13 +52,13 @@ pub fn create_item(store: &Store, req: FixtureItem<'_>) -> Result<String> {
                 let id = format!("ST-{no}");
                 let now = crate::now();
                 c.execute(
-                    "INSERT INTO items (id, workspace_id, no, title, status, stage, bot_id, accept_mode, project_id, source, requested_by, created, updated) VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO items(id, workspace_id, no, title, phase, bot_id, accept_mode, project_id, source, requested_by, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
                         id,
                         req.ws,
                         no,
                         req.title,
-                        if req.propose { "wait" } else { "run" },
+                        if req.propose { "ready" } else { "active" },
                         req.bot,
                         if req.accept_auto { Some("auto") } else { None },
                         req.project,
@@ -75,9 +75,12 @@ pub fn create_item(store: &Store, req: FixtureItem<'_>) -> Result<String> {
             })
 }
 
-pub fn set_item_status(store: &Store, item: &str, status: &str) -> Result<()> {
+pub fn set_item_phase(store: &Store, item: &str, phase: steve_types::ItemPhase) -> Result<()> {
     store.write_locked(|c| {
-        c.execute("UPDATE items SET status = ? WHERE id = ?", (status, item))?;
+        c.execute(
+            "UPDATE items SET phase = ? WHERE id = ?",
+            (phase.as_str(), item),
+        )?;
         Ok(())
     })
 }
@@ -211,9 +214,15 @@ pub fn fixture_item(
     status: &str,
 ) -> Result<()> {
     store.write_locked(|c| {
+        let (phase, outcome) = match status {
+            "done" => ("closed", Some("completed")),
+            "drop" => ("closed", Some("cancelled")),
+            "pause" | "paused" => ("paused", None),
+            _ => ("active", None),
+        };
         c.execute(
-            "INSERT INTO items (id, workspace_id, no, title, status, stage, bot_id, created, updated) VALUES (?, ?, ?, ?, ?, '', 'steve', 1, 1)",
-            params![id, ws, no, title, status],
+            "INSERT INTO items(id, workspace_id, no, title, phase, outcome, bot_id, created, updated) VALUES (?, ?, ?, ?, ?, ?, 'steve', 1, 1)",
+            params![id, ws, no, title, phase, outcome],
         )?;
         Ok(())
     })
@@ -889,7 +898,7 @@ pub fn trigger_next_at(store: &Store, flow: &str) -> Result<Option<i64>> {
 pub fn close_item(store: &Store, id: &str) -> Result<()> {
     store.write_locked(|c| {
         c.execute(
-            "UPDATE items SET phase = 'closed', status = 'done' WHERE id = ?",
+            "UPDATE items SET phase = 'closed', outcome = 'completed' WHERE id = ?",
             [id],
         )?;
         Ok(())

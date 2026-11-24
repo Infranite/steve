@@ -53,7 +53,7 @@ use steve_modules::vault::keystore::FileKeyStore;
 use steve_modules::{ApiError, ApiResult};
 use steve_store::base::links::{self, NewLink};
 use steve_store::base::mems::{self, NewMem};
-use steve_store::base::{self, Level, ObjRef, Viewer, Visibility};
+use steve_store::base::{Level, ObjRef, Viewer, Visibility};
 use steve_store::{NewDecision, uid};
 use tempfile::TempDir;
 
@@ -1247,21 +1247,20 @@ async fn a_finished_item_answers_in_its_thread_as_a_draft() {
     h.env
         .store()
         .write(|tx| {
-            base::decisions::open(
-                tx,
-                &NewDecision {
-                    workspace_id: WS.into(),
-                    kind: "accept".into(),
-                    subject_type: "item".into(),
-                    subject_id: "ST-1".into(),
-                    item_id: Some("ST-1".into()),
-                    session_id: None,
-                    question: "做完了，请验收".into(),
-                    draft: Some("修好了告警脚本的阈值\n\n检查：✓ 单测".into()),
-                    options: Some(vec!["pass".into(), "rework".into()]),
-                    requested_by: "ops".into(),
-                },
-            )
+            steve_store::DecisionRows(tx).open(&NewDecision {
+                workspace_id: WS.into(),
+                kind: "accept".into(),
+                subject_type: "item".into(),
+                subject_id: "ST-1".into(),
+                item_id: Some("ST-1".into()),
+                session_id: None,
+                question: "做完了，请验收".into(),
+                draft: Some("修好了告警脚本的阈值\n\n检查：✓ 单测".into()),
+                options: Some(vec!["pass".into(), "rework".into()]),
+                requested_by: "ops".into(),
+                question_template: None,
+                source: None,
+            })
         })
         .unwrap();
     let item = h.env.store().items().get("ST-1").unwrap().unwrap();
@@ -1297,7 +1296,8 @@ async fn a_finished_item_answers_in_its_thread_as_a_draft() {
 
     // dropped items say nothing; items not from a chat neither
     let mut dropped = item.clone();
-    dropped.status = "drop".into();
+    dropped.phase = steve_types::ItemPhase::Closed;
+    dropped.outcome = Some("cancelled".into());
     assert_eq!(
         h.outbox.on_item_finished(&h.ch, &dropped).await.unwrap(),
         None
@@ -5019,7 +5019,7 @@ async fn wait_review(h: &H, original: &str, previous: &str) -> (String, String) 
                 .unwrap()
                 .unwrap();
             assert_eq!(d.kind, "approve");
-            assert_eq!(d.status, "open");
+            assert_eq!(d.status, steve_types::DecisionStatus::Open);
             assert_eq!(d.result["recovery_review"], true);
             result = Some((message.into(), decision));
             true
@@ -5058,8 +5058,8 @@ async fn recovery_review_survives_edits_failed_rewrites_cooling_and_cold_restart
             } else {
                 ""
             };
-            decide(&h, &fail, "rewrite", edited).unwrap();
-            assert!(decide(&h, &fail, "rewrite", edited).is_err());
+            let resolved = decide(&h, &fail, "rewrite", edited).unwrap();
+            assert_eq!(decide(&h, &fail, "rewrite", edited).unwrap(), resolved);
             // The rewrite request itself is recovered by a new queue, not a retained task.
             let queue = cold_outbox(&h);
             queue.send_due(&h.ch).await;
@@ -5095,7 +5095,7 @@ async fn recovery_review_survives_edits_failed_rewrites_cooling_and_cold_restart
                 usize::from(mode == "model" || mode == "model_failure")
             );
             let attempts = h.fake.send_calls.lock().unwrap().len();
-            assert_eq!(card.status, "open");
+            assert_eq!(card.status, steve_types::DecisionStatus::Open);
             h.env.clock.advance(3_600_000);
             queue.send_due(&h.ch).await;
             h.env.clock.advance(3_600_000);
@@ -5107,7 +5107,7 @@ async fn recovery_review_survives_edits_failed_rewrites_cooling_and_cold_restart
             let yes = decide(&h, &approve, "yes", "").unwrap();
             assert_eq!(yes.result["recovery_review"], true);
             assert!(yes.result.get("decided_by").is_none());
-            assert!(decide(&h, &approve, "yes", "").is_err());
+            assert_eq!(decide(&h, &approve, "yes", "").unwrap(), yes);
             h.env.clock.advance(11_000);
             tokio::join!(queue.send_due(&h.ch), h.outbox.send_due(&h.ch));
             queue.send_due(&h.ch).await;
@@ -5340,11 +5340,8 @@ async fn refused(h: &H, id: &str, text: &str) -> (String, String) {
 }
 
 async fn recovered_draft(h: &H, old: &str, decision: &str, edit: &str) -> (String, String) {
-    decide(h, decision, "rewrite", edit).unwrap();
-    assert!(
-        decide(h, decision, "rewrite", edit).is_err(),
-        "duplicate answer cannot create a second rewrite"
-    );
+    let resolved = decide(h, decision, "rewrite", edit).unwrap();
+    assert_eq!(decide(h, decision, "rewrite", edit).unwrap(), resolved);
     h.outbox.send_due(&h.ch).await;
     let mut result = None;
     steve_runtime::testkit::eventually_sync("recovery produces a replacement review draft", || {
@@ -5397,7 +5394,10 @@ async fn recovery_target_refusal_keeps_full_body_retries_visibly_and_dedupes() {
         again, d,
         "manual retry failure remains visible during the 24h window"
     );
-    assert!(decide(&h, &d, "retry", "").is_err());
+    assert_eq!(
+        decide(&h, &d, "retry", "").unwrap().result["choice"],
+        "retry"
+    );
     *h.fake.block_target_send.lock().unwrap() = None;
     decide(&h, &again, "retry", "").unwrap();
     tokio::join!(h.outbox.send_due(&h.ch), h.outbox.send_due(&h.ch));

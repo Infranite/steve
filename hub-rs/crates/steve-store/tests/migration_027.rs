@@ -47,13 +47,12 @@ type Row = (
     Option<String>,
     Option<String>,
     Option<i64>,
-    String,
 );
 
 fn items(c: &Connection) -> Vec<Row> {
     let mut st = c
         .prepare(
-            "SELECT id, phase, cycle, revision, outcome, acceptance, closed_at, status FROM items ORDER BY no",
+            "SELECT id, phase, cycle, revision, outcome, acceptance, closed_at FROM items ORDER BY no",
         )
         .unwrap();
     st.query_map([], |r| {
@@ -65,7 +64,6 @@ fn items(c: &Connection) -> Vec<Row> {
             r.get(4)?,
             r.get(5)?,
             r.get(6)?,
-            r.get(7)?,
         ))
     })
     .unwrap()
@@ -97,7 +95,6 @@ fn old_items_become_what_they_were_without_any_event() {
                 Some(s("completed")),
                 None,
                 Some(10),
-                s("done")
             ),
             (
                 s("it_drop"),
@@ -107,30 +104,11 @@ fn old_items_become_what_they_were_without_any_event() {
                 Some(s("cancelled")),
                 None,
                 Some(20),
-                s("drop")
             ),
-            (s("it_run"), s("active"), 1, 0, None, None, None, s("run")),
-            (s("it_wait"), s("active"), 1, 0, None, None, None, s("wait")),
-            (
-                s("it_propose"),
-                s("ready"),
-                1,
-                0,
-                None,
-                None,
-                None,
-                s("propose")
-            ),
-            (
-                s("it_pause"),
-                s("active"),
-                1,
-                0,
-                None,
-                None,
-                None,
-                s("pause")
-            ),
+            (s("it_run"), s("active"), 1, 0, None, None, None),
+            (s("it_wait"), s("active"), 1, 0, None, None, None),
+            (s("it_propose"), s("ready"), 1, 0, None, None, None,),
+            (s("it_pause"), s("paused"), 1, 0, None, None, None,),
         ]
     );
     // the closed ones have their cycle on record, marked migrated, acceptance not invented

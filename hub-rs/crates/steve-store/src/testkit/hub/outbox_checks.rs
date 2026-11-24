@@ -32,7 +32,7 @@ scalar!(
     "SELECT COUNT(*) FROM flow_runs WHERE status=?1"
 );
 
-scalar!(items_count_st_90_closed_done() -> i64, "SELECT COUNT(*) FROM items WHERE id='ST-90' AND phase='closed' AND status='done'");
+scalar!(items_count_st_90_closed_done() -> i64, "SELECT COUNT(*) FROM items WHERE id='ST-90' AND phase='closed' AND outcome='completed'");
 
 scalar!(notification_policies_count() -> i64, "SELECT COUNT(*) FROM notification_policies");
 
@@ -76,7 +76,7 @@ scalar!(
 scalar!(workspaces_id() -> String, "SELECT id FROM workspaces LIMIT 1");
 
 pub fn seed_finish_item(path: &Path, bot: &str) -> Result<()> {
-    super::api::writable(path)?.execute("INSERT INTO items (id, workspace_id, no, title, status, stage, bot_id, created, updated) VALUES ('ST-90', 'default', 90, '写周报', 'run', '执行', ?, 1, 1)", [bot])?;
+    super::api::writable(path)?.execute("INSERT INTO items(id, workspace_id, no, title, phase, bot_id, created, updated) VALUES ('ST-90', 'default', 90, '写周报', 'active', ?, 1, 1)", [bot])?;
     Ok(())
 }
 
@@ -126,7 +126,7 @@ pub fn seed_chat_space(path: &Path, connection: &str) -> Result<()> {
 }
 
 pub fn seed_notification_item(path: &Path, bot: &str) -> Result<()> {
-    super::api::writable(path)?.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,bot_id,created,updated) VALUES('ST-91','default',91,'Real completion notification','run','执行',?,1,1)", [bot])?;
+    super::api::writable(path)?.execute("INSERT INTO items(id, workspace_id, no, title, phase, bot_id, created, updated) VALUES ('ST-91','default',91,'Real completion notification','active',?,1,1)", [bot])?;
     Ok(())
 }
 

@@ -61,12 +61,9 @@ function Repo({ r: r0, reload }: { r: GhRepo; reload: () => void }) {
             <Row title={t("github:repo.project")} sub={t("github:repo.projectSub")}>
               <Select align="end" testId="gh-repo-project" value={r.project?.id ?? "none"} onChange={(v) => void save({ project_id: v === "none" ? null : v })}
                 options={[{ v: "none", l: t("github:repo.noLink") }, ...st.projects.filter((p) => !p.archived || p.id === r.project?.id).map((p) => ({ v: p.id, l: p.name }))]} /></Row>
-            <Row title={t("github:repo.afterAccept")} sub={s.after_accept === "open_pr" ? <span className="flex flex-col gap-0.5" data-gh-open-pr-sub><span>{t("github:repo.openPrSub")}</span>{r.connection.kind === "pat" && <span>{t("github:repo.openPrPat", { account: r.connection.account })}</span>}</span> : t("github:repo.afterAcceptSub")}><Select align="end" testId="gh-after-accept" value={s.after_accept} onChange={(v) => set("after_accept")(v as GhSettings["after_accept"])} options={[{ v: "ask_pr", l: t("github:repo.askPr") }, ...(r.private || s.after_accept === "open_pr" ? [{ v: "open_pr", l: t("github:repo.openPr") }] : []), { v: "none", l: t("github:repo.noPr") }]} /></Row>
-            <Row title={t("github:repo.finishOn")} sub={s.finish_on === "merged" ? t("github:repo.finishMergedSub") : t("github:repo.finishAcceptedSub")}><Select align="end" testId="gh-finish-on" value={s.finish_on} onChange={(v) => set("finish_on")(v as GhSettings["finish_on"])} options={[{ v: "accepted", l: t("github:repo.finishAccepted") }, { v: "merged", l: t("github:repo.finishMerged") }]} /></Row>
             <Row title={t("github:repo.mergeMethod")}><Segmented size="sm" value={s.merge_method} onChange={set("merge_method")} options={[["squash", "Squash"], ["merge", "Merge"], ["rebase", "Rebase"]] as const} /></Row>
             <Row title={t("github:repo.deleteBranch")} sub={t("github:repo.deleteBranchSub")}><Switch checked={s.delete_branch} onCheckedChange={set("delete_branch")} aria-label={t("github:repo.deleteBranch")} data-gh-delete-branch /></Row>
             <Row title={t("github:repo.ciFail")} sub={t("github:repo.ciFailSub")}><Select align="end" testId="gh-ci-fail" value={s.ci_fail} onChange={(v) => set("ci_fail")(v as GhSettings["ci_fail"])} options={[{ v: "supplement", l: t("github:repo.ciSupplement") }, { v: "signal", l: t("github:repo.ciSignal") }]} /></Row>
-            <Row title={t("github:repo.draftPr")}><Switch checked={s.draft_pr} onCheckedChange={set("draft_pr")} aria-label={t("github:repo.draftPr")} data-gh-draft-pr /></Row>
             <Row title={t("github:repo.enabled")} sub={r.enabled ? t("github:repo.enabledSub") : t("github:repo.disabledSub")}><Switch checked={r.enabled} onCheckedChange={(v) => void save({ enabled: v })} aria-label={t("github:repo.enabled")} data-gh-enabled /></Row>
           </Group>
         </section>
@@ -156,6 +153,10 @@ function Prs({ repo }: { repo: string }) {
             <ItemLink item={p.item} />
             <span className="tabular-nums">{tm(p.updated)}</span>
           </Meta>}>
+          {st.owner && p.state === "open" && !p.draft && p.checks_state === "success" && p.mergeable === "clean" && p.review_state !== "changes_requested" &&
+            <Button size="sm" variant="ghost" onClick={() => void gh.requestMerge(p.id, p.head_sha).then(
+              () => toast(t("github:pr.mergeRequested")), (e) => toast(errMsg(e)),
+            )}>{t("github:pr.requestMerge")}</Button>}
           <Ext href={p.url} label={t("github:pr.open", { number: p.number })} />
         </Row>)
     }} />

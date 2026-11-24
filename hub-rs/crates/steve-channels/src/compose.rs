@@ -553,7 +553,7 @@ fn sender_items(
         steve_store::item_repo::raised_open(r, ws, party, ITEMS as u64)?
             .into_iter()
             .map(|item| {
-                let mut line = format!("- {} · {} · {}", item.id, item.title, item.status);
+                let mut line = format!("- {} · {} · {}", item.id, item.title, item.phase);
                 if !item.current.trim().is_empty() {
                     line.push_str(&format!(" · 现在：{}", cut(&item.current, 120)));
                 }

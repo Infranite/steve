@@ -709,7 +709,8 @@ async fn restart_expires_waiting_requests_and_cleans_temp_dirs() {
         .read(|r| DecisionRows(r).get(&d.id))
         .unwrap()
         .unwrap()
-        .status;
+        .status
+        .to_string();
     assert_eq!(ds, "expired");
     let msgs = sink.wait(1).await;
     assert!(msgs[0].contains("在 Steve 重启时失效了"), "{}", msgs[0]);
@@ -763,7 +764,7 @@ async fn no_value_reaches_the_database() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn hourly_cleanup_expires_day_old_requests_and_year_old_rows() {
+async fn expiry_and_retention_close_day_old_requests_and_prune_year_old_rows() {
     let e = Env::new();
     let item = e.token_item();
     e.tool(mcp::USE, use_args(&item, "true")).await.unwrap();
@@ -772,6 +773,7 @@ async fn hourly_cleanup_expires_day_old_requests_and_year_old_rows() {
     let old = e.last_use();
     let day = 86_400_000_i64;
     fixtures::seed_use_retention(e.env.store(), WS, &item, BOT, &old, day).unwrap();
+    e.uses.expire_due(steve_store::now()).unwrap();
     e.uses.hourly().await.unwrap();
     let st = |id: &str| -> String { e.use_row(id).status };
     assert_eq!(st(&old), "expired");

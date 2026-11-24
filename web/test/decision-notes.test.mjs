@@ -3,8 +3,8 @@ import { test } from "node:test"
 import { promptNeedle, withDecisionNotes } from "../src/decision-notes.ts"
 
 const line = (text, ts = 1000) => ({ id: 1, ts, kind: "me", text })
-const rel = (approved, text, resolved = 1000, subject_id = "steve/st-27") => ({ kind: "approve", subject_type: "release", subject_id, question: "发布？", resolved, result: { approved, text } })
-const act = (approved, text, question = "推送到 main", resolved = 1000) => ({ kind: "approve", subject_type: "action", subject_id: "x", question, resolved, result: { approved, text } })
+const rel = (approved, text, resolved = 1000, subject_id = "steve/st-27") => ({ kind: "approve", subject_type: "release", subject_id, question: { kind: "raw", text: "发布？" }, resolved, result: { approved, text } })
+const act = (approved, text, question = "推送到 main", resolved = 1000) => ({ kind: "approve", subject_type: "action", subject_id: "x", question: { kind: "raw", text: question }, resolved, result: { approved, text } })
 
 test("a line written with its note is shown as written, and the agent's prompt is found by the note", () => {
   const t = [line("不发布 steve/st-27：走 PR 合并，不用你发布")]

@@ -23,23 +23,6 @@ macro_rules! patch {
     }};
 }
 
-/// Status shorthands of repo.ts call sites.
-pub trait ItemExt {
-    /// closed or paused: nothing runs by itself.
-    fn is_settled(&self) -> bool;
-    /// closed (any outcome).
-    fn is_finished(&self) -> bool;
-}
-impl ItemExt for Item {
-    fn is_settled(&self) -> bool {
-        self.is_finished() || self.status == "pause"
-    }
-    /// The lifecycle's phase decides, not the legacy `status`.
-    fn is_finished(&self) -> bool {
-        self.phase == crate::cycle::CLOSED
-    }
-}
-
 pub trait BotExt {
     /// "Steve" for the main bot, "<name> Bot" for the others (timeline texts).
     fn display(&self) -> String;
@@ -420,7 +403,7 @@ impl Db {
     /// [`Db::final_reply`] of one attempt: the events up to `until` (its end; `None`: the session's
     /// last) and from `since` (its first event, a seq) on — a later attempt's words, or an earlier
     /// one's (a retry of the same turn), are never this attempt's. With `own` (the seqs confirmed to
-    /// be the attempt's, [`steve_store::item_facts::ItemFacts::attempt_events`]), only those words
+    /// be the attempt's), only those words
     /// are read, and any assistant text of the range that is not among them makes the reply not
     /// known (`None`): whose words they are cannot be told.
     pub fn final_reply_of(
@@ -596,13 +579,13 @@ impl Db {
         &self,
         id: &str,
         result: Value,
-        status: &str,
-        undo: Option<Value>,
+        change: steve_store::decision_repo::DecisionChange,
+        undo: Option<steve_store::DecisionUndo>,
     ) -> Result<Option<Decision>> {
         Ok(self
             .s
             .decisions()
-            .resolve(id, &result, status, &undo.unwrap_or(Value::Null))?)
+            .resolve(id, &result, change, undo.as_ref())?)
     }
     /// Replace the result of a settled decision (an approved release's outcome).
     pub fn decision_set_result(&self, id: &str, result: &Value) -> Result<()> {

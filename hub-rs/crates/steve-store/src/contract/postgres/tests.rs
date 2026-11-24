@@ -211,8 +211,8 @@ fn postgres_contract() -> Result<()> {
         assert!(DecisionRows(w).settle(
             &decision.id,
             &json!({"choice":"yes"}),
-            "resolved",
-            &json!(null)
+            crate::decision_repo::DecisionChange::Resolve,
+            None
         )?);
         assert!(policy::record(
             w,

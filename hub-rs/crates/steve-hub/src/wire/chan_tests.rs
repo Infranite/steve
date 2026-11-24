@@ -149,8 +149,7 @@ impl AgentRuntime for NoSessions {
     }
     fn answer_permission(
         &self,
-        _decision: &str,
-        _option: Option<&str>,
+        _answer: steve_core::PermissionAnswer<'_>,
     ) -> steve_core::Result<Answered> {
         Ok(Answered::Gone)
     }

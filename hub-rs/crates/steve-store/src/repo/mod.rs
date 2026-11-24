@@ -13,7 +13,6 @@ mod dependency_waits;
 pub mod feed;
 mod files;
 pub mod gateway_ledger;
-pub mod item_facts;
 mod items;
 pub use crate::contract::node_jobs::sqlite as jobs;
 pub mod kinds;
@@ -24,7 +23,6 @@ mod stats;
 mod thread;
 mod usage_ledger;
 pub mod workflows;
-pub mod would_do;
 
 pub use self::annotations::*;
 pub use self::bots::*;

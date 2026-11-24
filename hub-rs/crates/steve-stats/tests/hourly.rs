@@ -137,9 +137,9 @@ fn store() -> (tempfile::TempDir, Store) {
                 })
                 .expect("mark");
         };
-        mark(created, None, "run");
+        mark(created, None, "active");
         if let Some(d) = done {
-            mark(d, Some("run"), "done");
+            mark(d, Some("active"), "completed");
         }
     }
     let t = |input: Option<i64>, output: Option<i64>, cache_read: Option<i64>| Tokens {

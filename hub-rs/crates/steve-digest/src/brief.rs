@@ -59,7 +59,7 @@ pub const SINCE_DEFAULT_MS: i64 = 24 * 3_600_000;
 /// How long a brief's material is kept (as long as a notification's body).
 pub const KEEP_MS: i64 = 30 * 86_400_000;
 /// Item statuses that count as stuck: it failed or was paused, and waits for someone.
-pub const STUCK: [&str; 2] = ["fail", "pause"];
+pub const STUCK: [&str; 2] = ["failed", "paused"];
 /// Brief times planned ahead: a Hub down for up to this many of them still sends the day's brief when
 /// it comes back (late, so the push window decides), the days before it being dropped.
 pub const PLAN_AHEAD: usize = 7;
@@ -595,8 +595,8 @@ fn render_items(out: &mut String, a: &Agenda) {
         ));
         for i in a.stuck.iter().take(SECTION_MAX) {
             let status = match i.status.as_str() {
-                "fail" => steve_i18n::t!("digest.brief.status_fail"),
-                "pause" => steve_i18n::t!("digest.brief.status_pause"),
+                "failed" => steve_i18n::t!("digest.brief.status_fail"),
+                "paused" => steve_i18n::t!("digest.brief.status_pause"),
                 other => other.to_string(),
             };
             out.push_str(&format!("\n- {} {} · {status}", i.id, i.title));

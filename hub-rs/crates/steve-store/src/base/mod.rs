@@ -6,7 +6,6 @@
 //! handle are published after the commit.
 
 pub mod changesets;
-pub mod decisions;
 pub mod links;
 pub mod mems;
 pub mod tags;

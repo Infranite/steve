@@ -7,8 +7,6 @@ import { useItemDetail, useNotices, useSessionQueue } from "@/store"
 import { getItem, getItems, getSession } from "@/store"
 import { itemDisplayStatus } from "@/item-workflow-relation"
 import { AgentDetailPanel, hasAgentTree, History, Notices, ROOT_STATUS, TeamSteps, useAgentTree, useSelectedNode, WorkflowButtons } from "@/agent-tree-view"
-import { CloseoutSummary } from "@/item-closeout"
-import { Card } from "@/components/ui/card"
 import { itemState, type ItemState } from "@/item-state"
 import { clip } from "@/thread/topics"
 import { BlockedPlacement, BotProposalCard, DispatchDetails, PlacementWhy, NO_TEAM, useBotTeams } from "@/bot-dispatch"
@@ -40,7 +38,7 @@ import { ItemPeopleProp } from "@/people/item-people"
 import { QueuedComment, queuedComments, queueNote, QueueStrip } from "@/queue"
 import { homeTilde, NativeIdLine } from "@/resume"
 import { ItemStatsRows } from "@/stats/drill"
-import { ACC, accKey, closedSt, setDesignGate, accOf, active, addDep, archive, closeRel, deleteItem, depsOpen, doFork, importSessions, it, itemThread, link, loadLocalSessions, markDone, newItem, patchItem, reassign, rmDep, runtimeName, saveGoal, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, st, stageOf, star, supp, tag, tagCatLabel, tagDesc, tagLabel, threadFollow, tm, toast, type Item, type PlanRound, type Reply } from "@/store"
+import { ACC, accKey, closedSt, setDesignGate, accOf, active, addDep, archive, closeRel, deleteItem, depsOpen, doFork, importSessions, it, itemThread, link, loadLocalSessions, markDone, newItem, patchItem, reassign, rmDep, runtimeName, saveGoal, setAcc, actOnItem, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, st, star, startItemCycle, supp, tag, tagCatLabel, tagDesc, tagLabel, threadFollow, tm, toast, type Item, type PlanRound, type Reply } from "@/store"
 import { BotAvatar, BotName, closeSheet, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, Row, SectionLabel, Segmented, Status, StatusDot, Tags, ThemeSwitch, Chevron, Panel, Section, Tile } from "@/ui"
 import { Composer, type ComposerHandle } from "@/composer"
 import { DecisionCard } from "@/thread/decision-card"
@@ -55,9 +53,6 @@ export { ChoiceCards,ItemRowExport,Select } from "@/view-shared"
 const RelationGraph = lazyView(() => import("@/graph").then((m) => ({ default: m.RelationGraph })))
 const GraphLegend = lazyView(() => import("@/graph").then((m) => ({ default: m.GraphLegend })))
 
-/* stage values come from stageOf() in the store; STAGE_LABEL gives each one's translation key */
-export const STAGES = ["接收", "分流", "定义", "规划", "准备", "执行", "交付与验收", "收尾"] as const
-const STAGE_LABEL = { 接收: "views:stage.intake", 分流: "views:stage.triage", 定义: "views:stage.define", 规划: "views:stage.plan", 准备: "views:stage.prepare", 执行: "views:stage.execute", 交付与验收: "views:stage.deliver", 收尾: "views:stage.wrapUp" } as const
 /* priority is stored as these Chinese values; only its labels are translated (due presets: dueLabel in view-shared; acceptance modes: ACC in the store) */
 const PRI_LABEL = { 高: "views:item.priHigh", 中: "views:item.priMid", 低: "views:item.priLow" } as const
 /** the label of a stored value, or the value itself when it is not one of ours (a due date the Hub wrote, say) */
@@ -370,20 +365,20 @@ export function ItemView({ id }: { id: string }) {
   /* always-visible quick actions beside the title: one outlined (mark done), the pause beside it quiet; dropping the
    * item is in the ⋯ menu behind a confirmation. Labels fold into icons on narrow screens */
   const over = closedSt(i.st)
-  const [pl, PI, pa] = over ? [t("views:item.reopen"), RotateCcwIcon, () => setSt(i.id, "run")] as const
-    : i.st === "pause" ? [t("views:item.resume"), PlayIcon, () => setSt(i.id, "run")] as const
-    : [t("views:item.pause"), PauseIcon, () => setSt(i.id, "pause")] as const
+  const [pl, PI, pa] = over ? [t("views:item.reopen"), RotateCcwIcon, () => startItemCycle(i.id)] as const
+    : i.st === "pause" ? [t("views:item.resume"), PlayIcon, () => actOnItem(i.id, "resume")] as const
+    : [t("views:item.pause"), PauseIcon, () => actOnItem(i.id, "pause")] as const
   const quick = (
     <div className="flex items-center gap-1.5" data-quick-actions>
       <Button variant="ghost" size="sm" className="text-muted-foreground max-sm:w-8 max-sm:px-0" aria-label={pl} title={pl} disabled={i.st === "prop"} onClick={pa} data-quick="pause"><PI /><span className="max-sm:sr-only">{pl}</span></Button>
-      <Button variant="outline" size="sm" className="max-sm:w-8 max-sm:px-0" aria-label={t("views:item.markDone")} title={t("views:item.markDone")} disabled={over || doneBusy} onClick={() => { setDoneBusy(true); void markDone(i.id).finally(() => setDoneBusy(false)) }} data-quick="done"><CircleCheckIcon /><span className="max-sm:sr-only">{t("views:item.markDone")}</span></Button>
+      <Button variant="outline" size="sm" className="max-sm:w-8 max-sm:px-0" aria-label={t("views:item.markDone")} title={t("views:item.markDone")} disabled={over || !st.owner || doneBusy} onClick={() => { setDoneBusy(true); void markDone(i.id).finally(() => setDoneBusy(false)) }} data-quick="done"><CircleCheckIcon /><span className="max-sm:sr-only">{t("views:item.markDone")}</span></Button>
     </div>
   )
   const tree = hasAgentTree(at)
   const state = rootState!
   /* the now card with nothing under its headline (finished, say): one centred line in a smaller card */
   const compact = !i.waits.length && state.move === "none"
-  const centered = compact && !i.workflow && !state.detail && state.kind !== "idle" && !i.rel && !i.dependencyWait && !i.closeout
+  const centered = compact && !i.workflow && !state.detail && state.kind !== "idle" && !i.rel && !i.dependencyWait
   const goal = <>
           {/* 1 — goal reads as the description of the title */}
           <section data-goal className="-mt-3">
@@ -436,7 +431,7 @@ export function ItemView({ id }: { id: string }) {
       <AlertDialog open={confirmDrop} onOpenChange={setConfirmDrop}>
         <AlertDialogContent size="sm" data-drop-popover>
           <AlertDialogHeader><AlertDialogTitle>{t("views:item.dropTitle", { id: i.id })}</AlertDialogTitle><AlertDialogDescription>{t("views:item.dropDesc")}</AlertDialogDescription></AlertDialogHeader>
-          <AlertDialogFooter><AlertDialogCancel>{t("common:action.cancel")}</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => { setSt(i.id, "drop"); setConfirmDrop(false) }} data-drop-confirm>{t("views:item.drop")}</AlertDialogAction></AlertDialogFooter>
+          <AlertDialogFooter><AlertDialogCancel>{t("common:action.cancel")}</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => { actOnItem(i.id, "drop"); setConfirmDrop(false) }} data-drop-confirm>{t("views:item.drop")}</AlertDialogAction></AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
       <AlertDialog open={confirmDel} onOpenChange={setConfirmDel}>
@@ -468,7 +463,6 @@ export function ItemView({ id }: { id: string }) {
               </div>
               {i.workflow && <div className="max-sm:basis-full max-sm:pl-10"><WorkflowButtons at={at} /></div>}
             </div>
-            {i.closeout && <CloseoutSummary value={i.closeout} className="mt-3 pl-10" />}
             {(i.dispatch || i.placement) && <DispatchDetails dispatch={i.dispatch} placement={i.placement} unassigned={!i.b} />}
             {at.dialogs}
             {i.waits.length > 0 && <div className="mt-5 flex flex-col gap-3">{i.waits.map((w) => <DecisionCard key={w.decision} i={i} w={w} showItem={false} />)}</div>}
@@ -484,10 +478,6 @@ export function ItemView({ id }: { id: string }) {
             </div>
             {dtab === "动态" && (
               <div key="activity" className="anim-in flex flex-col" data-worklog>
-                {i.closeout && <Card size="sm" className="mb-4 gap-1.5 p-3" data-closeout-timeline>
-                  <h3 className="type-label text-tertiary">{t("views:closeout.timeline")}</h3>
-                  <CloseoutSummary value={i.closeout} />
-                </Card>}
                 {byDay(foldProcess(feed, (x) => x.e[0] === "sys" && !queued.byComment.has(x.n))).map(([day, gs]) => <Fragment key={day}>
                   {day && <h3 className="mb-1 mt-5 type-label text-tertiary first:mt-0" data-day>{day}</h3>}
                   {gs.map((g) => Array.isArray(g)
@@ -502,10 +492,6 @@ export function ItemView({ id }: { id: string }) {
         <aside className="flex min-w-0 flex-col gap-8" data-item-side>
           {(i.plan || i.rounds.length > 0 || i.workflow) && <section data-progress>
             <h3 className="mb-2 type-label text-tertiary">{t("views:itemState.progress")}</h3>
-            <div className="flex flex-wrap items-center gap-x-1 gap-y-1 type-callout" data-stage={stageOf(i)}>
-              {STAGES.slice(2).map((g, n, arr) => { const cur = STAGES.indexOf(stageOf(i) as any), me = STAGES.indexOf(g); return (
-                <span key={g} className="inline-flex items-center gap-1"><span className={cn(me === cur ? "font-medium text-foreground" : me < cur ? "text-muted-foreground" : "text-tertiary")}>{t(STAGE_LABEL[g])}</span>{n < arr.length - 1 && <ChevronRightIcon className="size-3 text-tertiary" />}</span>) })}
-            </div>
             {(i.plan || i.rounds.length > 0) && <Plan i={i} />}
             {i.workflow && <History workflow={i.workflow} />}
           </section>}

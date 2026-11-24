@@ -91,18 +91,31 @@ fn uses() -> SelectStatement {
 }
 
 impl<C: Read> SecretUses<'_, C> {
+    pub fn first_pending_at(&mut self) -> Result<Option<i64>> {
+        self.0.one(
+            Query::select()
+                .column("created")
+                .from("secret_uses")
+                .and_where(Expr::col("status").eq("pending"))
+                .order_by("created", Order::Asc)
+                .limit(1),
+            |r| r.get(0),
+        )
+    }
+
     pub fn get(&mut self, id: &str) -> Result<Option<UseRecord>> {
         self.0
             .one(uses().and_where(Expr::col(("u", "id")).eq(id)), use_row)
     }
 
-    pub fn in_status(&mut self, status: &str, before: i64) -> Result<Vec<UseRecord>> {
+    pub fn in_status(&mut self, status: &str, before: i64, limit: u64) -> Result<Vec<UseRecord>> {
         self.0.all(
             uses()
                 .and_where(Expr::col(("u", "status")).eq(status))
-                .and_where(Expr::col(("u", "created")).lt(before))
+                .and_where(Expr::col(("u", "created")).lte(before))
                 .order_by(("u", "created"), Order::Asc)
-                .order_by(("u", "id"), Order::Asc),
+                .order_by(("u", "id"), Order::Asc)
+                .limit(limit),
             use_row,
         )
     }

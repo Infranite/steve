@@ -23,6 +23,14 @@ struct Receipt {
 }
 
 impl Tx<'_> {
+    /// Goal version that was visible when a turn produced its result.
+    pub(crate) fn scope_revision(&self, item: &str) -> Result<i64> {
+        Ok(self
+            .db()
+            .store()
+            .read(|r| steve_store::item_delivery::scope(r, item))?)
+    }
+
     /// Only call after validation. Failed saves roll back both the receipt and business writes,
     /// including their notifications; their in-memory mark must not survive the rollback either.
     pub(crate) fn with_turn_receipt(
@@ -39,11 +47,11 @@ impl Tx<'_> {
         let store = self.db().store().clone();
         let result = store.write(|w| {
             let i = self.item(item_id)?;
-            let facts = store.item_facts();
+            let facts = store.sessions();
             let mut attempt = self.rt().running(&s.id).map(|r| r.attempt);
             let turn = match attempt.as_deref() {
                 Some(a) => facts.turn_of_attempt(a)?,
-                None => facts.latest_turn(&s.id)?.map(|t| t.turn_id),
+                None => facts.latest_turn(&s.id)?,
             };
             if attempt.is_none() && turn.is_none() {
                 attempt = store.sessions().stop(&s.id)?.and_then(|k| k.attempt);
@@ -55,14 +63,14 @@ impl Tx<'_> {
                 input: w.events().latest_input_seq(&s.id)?.unwrap_or_default(),
                 turn,
                 attempt,
-                revision: i.revision,
+                revision: i.delivery_revision,
                 asked: false,
             };
             save(self)?;
             let mark = self.st.pending.get(&s.id).map(|(m, _)| *m);
             if matches!(mark, Some(Mark::Delivered | Mark::Asked)) {
                 receipt.asked = mark == Some(Mark::Asked);
-                receipt.revision = self.item(item_id)?.revision;
+                receipt.revision = self.item(item_id)?.delivery_revision;
                 w.events().add_local(
                     &s.id,
                     RECEIPT,
@@ -106,18 +114,15 @@ impl Tx<'_> {
         };
         if r.item != item.id
             || r.cycle != item.cycle
-            || r.revision != item.revision
+            || r.revision != item.delivery_revision
             || r.scope != self.scope_revision(&item.id)?
             || r.input != input
         {
             return Ok(None);
         }
-        let facts = self.db().store().item_facts();
+        let facts = self.db().store().sessions();
         let latest = facts.latest_turn(&s.id)?;
-        if latest
-            .as_ref()
-            .is_some_and(|t| r.turn.as_ref() != Some(&t.turn_id))
-        {
+        if latest.as_ref().is_some_and(|t| r.turn.as_ref() != Some(t)) {
             return Ok(None);
         }
         if latest.is_none()
@@ -158,13 +163,15 @@ impl Tx<'_> {
         }
         if r.asked {
             let open = self.db().decisions_of_item(&item.id)?.iter().any(|d| {
-                d.status == "open" && d.kind == "ask" && d.session_id.as_deref() == Some(&s.id)
+                d.status == steve_types::DecisionStatus::Open
+                    && d.kind == "ask"
+                    && d.session_id.as_deref() == Some(&s.id)
             });
             return Ok(open.then_some(Mark::Asked));
         }
         let valid = item.phase == crate::cycle::CLOSING
             && item.closing.as_ref().is_some_and(|c| {
-                c["kind"] == crate::cycle::COMPLETE && c["frozen_revision"] == r.revision
+                c.kind == steve_types::CloseKind::Complete && c.frozen_revision == r.revision
             });
         Ok(valid.then_some(Mark::Delivered))
     }
@@ -173,7 +180,7 @@ impl Tx<'_> {
     /// release cards keep their own recovery paths. Runs after a restart as well as during work.
     pub(crate) fn receipts_tidy(&self) -> Result<usize> {
         let mut n = 0;
-        for id in self.db().store().item_facts().open_task_items()? {
+        for id in self.db().store().items().working_ids()? {
             let item = self.item(&id)?;
             let Some(s) = self.active_session(&id)? else {
                 continue;

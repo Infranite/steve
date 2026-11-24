@@ -2,7 +2,6 @@ import { getItems } from "@/store"
 /* The items board, on affectUI's Agent Inbox, with Steve's own data: every item's one state (item-state.ts via
  * itemDisplayState) decides its column the way the items page counts and filters it (item-lanes.ts).
  * Plan counts are projected with the list. The plan text is loaded when the item is opened. */
-import { CloseoutSummary } from "@/item-closeout"
 import { AgentInbox, type AgentTask } from "@/components/affect/agent-inbox"
 import { isWorkflowChild, itemDisplayState, partitionSubtasks } from "@/item-workflow-relation"
 import { besideState, laneOf } from "@/item-lanes"
@@ -24,9 +23,8 @@ export function ItemsBoard({ xs, cap }: { xs: Item[]; cap: number }) {
     const said = t(`views:itemState.${s.kind}`)
     // the line under the title: what it is on, without the state the pill beside it already says
     const desc = besideState(stepOf(i, ""), said)
-    const details = (i.closeout || i.project || i.due || i.tags?.length || sub) ? (
+    const details = (i.project || i.due || i.tags?.length || sub) ? (
       <div className="flex flex-col gap-1.5">
-        {i.closeout && <CloseoutSummary value={i.closeout} compact />}
         {sub && <span className="type-footnote text-muted-foreground" data-board-subtasks={i.id}>{sub.live.length > 0 ? t("views:items.subtasksLive", { live: sub.live.length, done: sub.doneCount }) : t("views:items.subtasksDone", { count: sub.doneCount || sub.total })}</span>}
         {(i.project || i.due) && <Meta>{i.project && <ProjectChip id={i.project} plain />}{i.due && <span>{t("views:items.due", { due: dueLabel(i.due) })}</span>}</Meta>}
         {!!i.tags?.length && <Tags ids={i.tags} />}

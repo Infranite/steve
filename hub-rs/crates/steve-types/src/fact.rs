@@ -47,7 +47,6 @@ pub enum DurableFact {
     #[serde(rename = "github.after")]
     GithubAfter {
         connection: ConnectionId,
-        finish: Vec<(ItemId, String)>,
         signals: Vec<RawJson>,
         #[serde(default)]
         supplements: Vec<PrSupplement>,
@@ -218,7 +217,6 @@ impl DurableFact {
         #[derive(Deserialize)]
         struct Fields {
             connection: ConnectionId,
-            finish: Vec<(ItemId, String)>,
             signals: Vec<RawJson>,
             #[serde(default)]
             supplements: Vec<PrSupplement>,
@@ -226,7 +224,6 @@ impl DurableFact {
         let f: Payload<Fields> = serde_json::from_str(text)?;
         Ok(Self::GithubAfter {
             connection: f.payload.connection,
-            finish: f.payload.finish,
             signals: f.payload.signals,
             supplements: f.payload.supplements,
         })

@@ -1,5 +1,10 @@
 /* English strings for the "views" namespace: the same keys as ../zh-CN/views.ts. Conventions: web/src/i18n/index.ts */
 export default {
+  decision: {
+    turnRepeatedFailure: "The same tool action failed five times. Steve requested a stop.",
+    turnNoProgress: "There was no verified progress for fifteen minutes of observable work. Steve requested a stop.",
+    mergePullRequest: "Merge PR #{{number}} ({{repo}})?",
+  },
   feed: {
     viewItem: "View item",
     selectionLimit: "Select up to 100 at a time. Mark all read leaves new arrivals unread.",
@@ -42,13 +47,6 @@ export default {
     "markRead": "Mark read"
 },
   debug: {
-    judge: "Judge (shadow): {{state}}", judgeOld: "of an earlier turn", judgeWaits: "Not judged yet: {{why}}; looked at again {{time}}", judgeFailures: "{{n}} failed tries: {{error}}", judgeVerdictLine: "Verdict: {{verdict}} · would: {{would}} (not done)",
-    judgeState: { pending: "waiting to be judged", judging: "being judged", judged: "judged", superseded: "superseded by a newer turn", failed: "gave up after failures" },
-    judgeVerdict: { done: "done", not_done: "not done", waiting: "waiting", needs_you: "needs you", unknown: "can't tell" },
-    judgeIndependent: { yes: "another model than the worker's", no: "the worker's own model", unknown: "independence unknown" },
-    shadow: "Derived state (shadow)", shadowHint: "Computed from the item's facts. Nothing acts on it yet.", shadowLane: "{{lane}} · row {{row}}", shadowNext: "Next step: {{step}}", shadowNoNext: "No next step", shadowPredicates: "Reviewable {{review}} · Mergeable {{merge}} · Closable {{close}}", shadowSettled: "Settled: {{settled}}", yes: "yes", no: "no",
-    wouldDo: "What the sweep would do", wouldDoHint: "Observe-only: recorded, not carried out. Today's stall watch still acts.", wouldWake: "Wake the agent", wouldCard: "Card for you", wouldRemind: "Remind you", wouldDue: "due now", wouldAt: "due {{time}}", wouldNothing: "Nothing to do", wouldCleared: "cleared {{time}}", wouldOpen: "open",
-    settledEvaluable: "evaluable", settledBusy: "known busy", settledUnknown: "unknown", laneNeedsYou: "Needs you", laneRunning: "Running", laneDone: "Done",
     open: "Debug", title: "{{item}} · Debug", description: "Inspect blockers and execution evidence. New items capture decision details for their first 30 minutes.",
     current: "Current state", stateUnavailable: "The current state can't be read right now.", refresh: "Refresh", loading: "Loading…",
     itemState: "Item state: {{status}}", revision: "Cycle {{cycle}} · Goal revision {{revision}}", observed: "Observed at {{time}}",
@@ -91,24 +89,6 @@ export default {
     progress: "Progress", details: "Details", moreProps: "More details",
     process_one: "{{count}} process note",
     process_other: "{{count}} process notes",
-  },
-  closeout: {
-    timeline: "Current PR closeout",
-    status: {
-      syncing: "Waiting for GitHub to sync", sync_failed: "GitHub sync interrupted · showing last known results",
-      no_pr: "Waiting for the agent to open a PR", waiting_checks: "Closing out · waiting for GitHub CI", checks_failed: "GitHub checks failed",
-      conflict: "Conflicts with the default branch", behind: "Branch must be brought up to date", draft: "PR is still a draft",
-      head: "PR head does not match the accepted result", uncommitted: "Accepted result has uncommitted changes", accepted_unknown: "Can't verify the accepted commit",
-      closed: "PR closed without merging", waiting_github: "Waiting for GitHub to determine mergeability", waiting_result: "Verifying the accepted result",
-      ready: "Waiting for Steve to verify and merge", merge_retry: "Merge failed · waiting for Steve to retry", merge_method: "No permitted merge method worked",
-      awaiting_approval: "Waiting for your merge approval", manual_merge: "Automatic merge declined · over to you", merged: "PR merged",
-    },
-    owner: { steve: "Steve", agent: "Agent", user: "You", none: "None" },
-    nextOwner: "Next: {{owner}}", lastSync: "Last successful sync: {{time}}", neverSynced: "No successful sync yet",
-    checks: "{{passed}} passed · {{pending}} queued/running · {{failed}} failed · {{other}} other",
-    noChecks: "GitHub has not reported any checks", unknownChecks: "No check snapshot for this commit",
-    failures: "Failed checks: {{names}}", lastFailures: "Failed checks at last sync: {{names}}",
-    syncError: "Sync failure: {{reason}}", mergeError: "Merge failure: {{reason}}",
   },
   /* the item page's agent tree: who started whom */
   agentTree: {
@@ -427,16 +407,6 @@ export default {
     propDesignGate: "Design confirmation",
     designGateHint: "You confirm the design when it's delivered, then decide whether to implement it. YOLO won't answer for you",
     designGateOwnerOnly: "Only the owner can switch this",
-  },
-  stage: {
-    intake: "Intake",
-    triage: "Triage",
-    define: "Define",
-    plan: "Plan",
-    prepare: "Prepare",
-    execute: "Execute",
-    deliver: "Deliver & review",
-    wrapUp: "Wrap up",
   },
   sessions: {
     title: "Conversations",

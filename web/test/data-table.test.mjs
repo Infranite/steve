@@ -3,10 +3,10 @@ import { test } from "node:test"
 
 const t = await import("../src/data/table.ts")
 
-const dec = (id, status = "open", q = "q") => ({ id, ws: "w", kind: "ask", subject_type: "test", subject_id: id, item_id: null, session_id: null, question: q, draft: "", options: [], status, result: null, requested_by: "steve", created: 1, resolved: null, undo_until: null })
+const dec = (id, status = "open", q = "q") => ({ id, ws: "w", kind: "ask", subject_type: "test", subject_id: id, item_id: null, session_id: null, question: { kind: "raw", text: q }, draft: "", options: [], status, result: null, requested_by: "steve", created: 1, resolved: null, undo_until: null })
 const up = (v) => ({ type: "decision", op: "upsert", id: v.id, view: v })
 const rm = (id) => ({ type: "decision", op: "remove", id })
-const ids = (table) => t.viewsOf(table, "decision").map((d) => `${d.id}:${d.status}:${d.question}`).sort()
+const ids = (table) => t.viewsOf(table, "decision").map((d) => `${d.id}:${d.status}:${d.question.text}`).sort()
 
 test("a snapshot's stale view arriving later in an older frame is dropped", () => {
   // X left the hot set at rev 90; the snapshot at rev 100 does not hold it; a replayed frame of rev 85 still has it open

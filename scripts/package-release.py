@@ -56,8 +56,8 @@ def restic(target, out):
 
 
 def copy_staged_restic(source, out):
-    # The official build job pins the upstream bytes before signing on macOS. Preserve
-    # that exact signed executable in both archives; do not download it again here.
+    # The official build job pins the upstream bytes once before packaging. Preserve
+    # that exact verified executable in both archives; do not download it again here.
     for name, mode in (("restic", 0o755), ("restic.LICENSE", 0o644)):
         path = source / name
         if path.is_symlink() or not path.is_file() or not path.stat().st_size:

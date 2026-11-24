@@ -330,7 +330,7 @@ fn open_parent(c: &Connection, parent: &str) -> Result<Item> {
         Item::from_row,
     )?
     .ok_or(StoreError::NotFound("没有这个事项"))?;
-    if item.phase == "closed" || item.archived {
+    if item.phase == steve_types::ItemPhase::Closed || item.archived {
         return Err(conflict("事项已结束，不能调整协作工作"));
     }
     if item.kind != "task" {
@@ -568,7 +568,7 @@ fn archive_cycle_unit(tx: &Connection, parent: &str, unit: &WorkUnit) -> Result<
 pub fn claim_in(w: &mut W<'_>, parent: &str, id: &str) -> Result<WorkUnit> {
     let tx = w.conn;
     let item = open_parent(tx, parent)?;
-    if item.phase == "closing" {
+    if item.phase == steve_types::ItemPhase::Closing {
         return Err(conflict("事项正在关闭，需要先恢复执行才能调度工作"));
     }
     let graph = must_graph(tx, parent)?;
@@ -655,8 +655,7 @@ pub fn claim_in(w: &mut W<'_>, parent: &str, id: &str) -> Result<WorkUnit> {
                 "no",
                 "kind",
                 "title",
-                "status",
-                "stage",
+                "phase",
                 "bot_id",
                 "project_id",
                 "source",
@@ -671,8 +670,7 @@ pub fn claim_in(w: &mut W<'_>, parent: &str, id: &str) -> Result<WorkUnit> {
                 no.into(),
                 "task".into(),
                 unit.spec.title.as_str().into(),
-                "run".into(),
-                "执行".into(),
+                "active".into(),
                 unit.spec.bot_id.as_str().into(),
                 item.project_id.as_deref().into(),
                 to_json(&("协作工作", "workflow"))?.into(),
@@ -686,17 +684,7 @@ pub fn claim_in(w: &mut W<'_>, parent: &str, id: &str) -> Result<WorkUnit> {
     add_goal(w, &child, 1, &unit.spec.goal, t)?;
     w.capture_created(&item.workspace_id, &child, t);
     reserve(w, parent, id, &child)?;
-    super::stats::mark_in(
-        tx,
-        &crate::NewMark {
-            workspace_id: item.workspace_id.clone(),
-            item_id: child.clone(),
-            ts: t,
-            kind: "status".into(),
-            to_v: Some("run".into()),
-            ..Default::default()
-        },
-    )?;
+    super::items::mark_phase_change(tx, &item.workspace_id, &child, t, None, "active")?;
     w.emit(steve_types::WorkEvent::Item {
         ws: item.workspace_id.clone().into(),
         id: child.clone().into(),
@@ -1295,7 +1283,7 @@ impl Workflows<'_> {
         self.0.write(|w| {
             let tx = w.conn;
             let item = open_parent(tx,parent)?;
-            if item.phase == "closing" {
+            if item.phase == steve_types::ItemPhase::Closing {
                 return Err(conflict("事项正在关闭，需要先恢复执行才能启动会话"));
             }
             let graph = must_graph(tx,parent)?;

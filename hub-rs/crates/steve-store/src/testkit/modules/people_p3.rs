@@ -5,11 +5,7 @@ pub fn seed_items_and_bots(store: &Store) -> Result<()> {
     execute(store, "INSERT INTO bots (id, workspace_id, name, harness, updated) VALUES ('bot_dev', 'default', 'Dev Bot', 'claude', 1), ('bot_off', 'default', 'Off Bot', 'claude', 1);
          UPDATE bots SET enabled = 0 WHERE id = 'bot_off';
          INSERT INTO bot_workspaces (bot_id, workspace_id, created) VALUES ('bot_dev', 'default', 1), ('bot_off', 'default', 1);
-         INSERT INTO items (id, workspace_id, no, kind, title, status, stage, created, updated) VALUES
-           ('ST-1', 'default', 1, 'task', '报价单', 'run', '定义', 1, 1),
-           ('ST-2', 'default', 2, 'task', '交付', 'run', '定义', 2, 2),
-           ('ST-3', 'default', 3, 'task', '旧事', 'done', '完成', 3, 3),
-           ('W2-1', 'w2', 1, 'task', '别处', 'run', '定义', 4, 4);
+         INSERT INTO items(id, workspace_id, no, kind, title, phase, created, updated, outcome) VALUES ('ST-1', 'default', 1, 'task', '报价单', 'active', 1, 1, NULL),('ST-2', 'default', 2, 'task', '交付', 'active', 2, 2, NULL),('ST-3', 'default', 3, 'task', '旧事', 'closed', 3, 3, 'completed'),('W2-1', 'w2', 1, 'task', '别处', 'active', 4, 4, NULL);
          UPDATE items SET archived = 1 WHERE id = 'ST-3';")
 }
 

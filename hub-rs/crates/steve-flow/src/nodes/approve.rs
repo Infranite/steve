@@ -104,6 +104,8 @@ impl NodeKind for Approve {
                 draft,
                 options: Some(opts.clone()),
                 requested_by: "steve".into(),
+                question_template: None,
+                source: None,
             }),
             output: json!({ "waiting": "decision", "options": opts }),
         }))

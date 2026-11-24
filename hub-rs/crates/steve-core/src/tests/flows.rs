@@ -35,10 +35,7 @@ fn create_item_starts_a_session_in_a_scratch_dir_with_the_protocol() {
     let k = Kit::new();
     let i = new_item(&k, "写一首诗");
     assert_eq!(i.id, "ST-1");
-    assert_eq!(
-        (i.status.as_str(), i.stage.as_str(), i.now.as_str()),
-        ("run", "执行", "正在开始")
-    );
+    assert_eq!(i.phase, steve_types::ItemPhase::Active);
     assert_eq!(i.bot_id.as_deref(), Some("steve"));
     let scratch = k.core.config().scratch.join("ST-1");
     assert!(scratch.is_dir());
@@ -236,7 +233,6 @@ fn a_git_project_gets_a_worktree_on_the_item_branch() {
     let rel = crate::repo::Release {
         kind: "script".into(),
         cmd: "/x".into(),
-        done_when: None,
     };
     let p = k
         .db()
@@ -269,7 +265,9 @@ fn a_git_project_gets_a_worktree_on_the_item_branch() {
     assert!(prompt.contains(
         "(git worktree on branch steve/st-1; commit your work there, do not touch main)."
     ));
-    assert!(prompt.contains("- steve_publish: only when the item changed code (commits on your branch), after the user has accepted"));
+    assert!(
+        prompt.contains("- steve_publish: when the user explicitly wants these commits released")
+    );
 }
 
 #[test]
@@ -302,7 +300,6 @@ fn a_missing_project_dir_is_a_fail_card() {
         k.open_fails(&i.id),
         vec!["开不了会话：项目目录不存在：/nonexistent/steve-test"]
     );
-    assert_eq!(i.status, "wait");
     /* steve's own item: no "tosteve" option */
     let d = k.db().decisions_of_item(&i.id).unwrap().pop().unwrap();
     assert_eq!(d.options, vec!["continue", "delivered", "look"]);
@@ -321,10 +318,7 @@ fn propose_mode_waits_for_a_yes() {
             ..Default::default()
         })
         .unwrap();
-    assert_eq!(
-        (i.status.as_str(), i.stage.as_str(), i.now.as_str()),
-        ("wait", "规划", "等你确认后开始")
-    );
+    assert_eq!(i.phase, steve_types::ItemPhase::Ready);
     assert!(k.db().sessions_of_item(&i.id).unwrap().is_empty());
     let d = k.db().decisions_of_item(&i.id).unwrap().pop().unwrap();
     assert_eq!(
@@ -332,12 +326,12 @@ fn propose_mode_waits_for_a_yes() {
         ("propose", "先给你方案：按这个方向做？", "方案")
     );
     k.core.resolve(&d.id, "yes", "", "me").unwrap();
-    assert_eq!(k.status(&i.id).0, "run");
+    assert_eq!(k.item_label(&i.id), "run");
     only_session(&k, &i.id);
 }
 
 #[test]
-fn propose_no_drops_and_can_be_undone() {
+fn declining_a_proposal_closes_that_cycle() {
     let k = Kit::new();
     let i = k
         .core
@@ -350,24 +344,12 @@ fn propose_no_drops_and_can_be_undone() {
         })
         .unwrap();
     let d = k.db().decisions_of_item(&i.id).unwrap().pop().unwrap();
-    k.core.resolve(&d.id, "no", "", "me").unwrap();
-    assert_eq!(
-        k.status(&i.id),
-        ("drop".into(), "规划".into(), "你认为不需要".into())
-    );
-    k.core.undo_decision(&d.id, "me").unwrap();
-    assert_eq!(
-        k.status(&i.id),
-        ("wait".into(), "规划".into(), "等你确认后开始".into())
-    );
-    assert!(k.core.resolve(&d.id, "no", "", "me").is_ok(), "reopened");
-    assert_eq!(
-        k.core
-            .resolve(&d.id, "no", "", "me")
-            .unwrap_err()
-            .to_string(),
-        "这个决定已经处理过了"
-    );
+    let first = k.core.resolve(&d.id, "no", "", "me").unwrap();
+    assert_eq!(k.item_label(&i.id), "drop");
+    assert!(k.core.undo_decision(&d.id, "me").is_err());
+    assert_eq!(k.db().item(&i.id).unwrap().unwrap().cycle, 1);
+    assert_eq!(k.core.resolve(&d.id, "no", "", "me").unwrap(), first);
+    assert!(k.core.resolve(&d.id, "yes", "", "me").is_err());
 }
 
 #[test]
@@ -433,22 +415,16 @@ fn ask_then_answer_continues_the_session() {
     k.core
         .tool_ask(&s, "用哪个？", &["A".into(), "B".into()])
         .unwrap();
-    assert_eq!(
-        k.status(&i.id),
-        ("wait".into(), "执行".into(), "在等你回答".into())
-    );
+    assert_eq!(k.open_kinds(&i.id), vec!["ask"]);
     k.rt.end_turn(&k.core, &s.id, "end_turn", None);
     assert_eq!(
-        k.status(&i.id).0,
-        "wait",
-        "a question ends the turn without a fail card"
+        k.open_kinds(&i.id),
+        vec!["ask"],
+        "the question survives turn end"
     );
     let d = k.db().decisions_of_item(&i.id).unwrap().pop().unwrap();
     k.core.resolve(&d.id, "A", "", "me").unwrap();
-    assert_eq!(
-        k.status(&i.id),
-        ("run".into(), "执行".into(), "收到回答，继续".into())
-    );
+    assert_eq!(k.item_label(&i.id), "run");
     assert_eq!(k.rt.prompts_of(&s.id).last().unwrap(), "用户的回答：A");
     assert_eq!(
         k.db().decision(&d.id).unwrap().unwrap().result,
@@ -480,7 +456,7 @@ fn turn_ends_without_a_tool_call_raise_a_fail_card() {
         k.open_fails(&i.id),
         vec!["Agent 停下来了，没有交付也没有提问：我觉得做完了"]
     );
-    assert_eq!(k.status(&i.id).0, "wait");
+    assert!(!k.open_kinds(&i.id).is_empty());
     let d = k.db().decisions_of_item(&i.id).unwrap().pop().unwrap();
     k.core.resolve(&d.id, "continue", "", "me").unwrap();
     assert_eq!(
@@ -492,7 +468,7 @@ fn turn_ends_without_a_tool_call_raise_a_fail_card() {
     let d = k.db().decisions_of_item(&i.id).unwrap().pop().unwrap();
     k.core.resolve(&d.id, "delivered", "", "me").unwrap();
     let done = k.db().item(&i.id).unwrap().unwrap();
-    assert_eq!(done.phase, "closed");
+    assert_eq!(done.phase.as_str(), "closed");
     assert_eq!(done.outcome.as_deref(), Some("completed"));
     assert_eq!(done.acceptance.as_deref(), Some("human"));
     assert!(k.open_kinds(&i.id).is_empty());
@@ -508,7 +484,6 @@ fn a_cancelled_turn_only_notes_it() {
     let i = new_item(&k, "g");
     let s = only_session(&k, &i.id);
     k.rt.end_turn(&k.core, &s.id, "cancelled", None);
-    assert_eq!(k.status(&i.id).2, "你中断了这一回合");
     assert!(k.open_kinds(&i.id).is_empty());
 }
 
@@ -547,12 +522,9 @@ fn fail_look_pauses_and_tosteve_reassigns() {
     let d = k.db().decisions_of_item(&i.id).unwrap().pop().unwrap();
     assert_eq!(d.options, vec!["continue", "delivered", "look", "tosteve"]);
     k.core.resolve(&d.id, "look", "", "me").unwrap();
-    assert_eq!(
-        k.status(&i.id),
-        ("pause".into(), "执行".into(), "你在查看，已暂停".into())
-    );
+    assert_eq!(k.item_label(&i.id), "pause");
     k.core.undo_decision(&d.id, "me").unwrap();
-    assert_eq!(k.status(&i.id).0, "wait");
+    assert!(!k.open_kinds(&i.id).is_empty());
     k.core.resolve(&d.id, "tosteve", "", "me").unwrap();
     let it = k.db().item(&i.id).unwrap().unwrap();
     assert_eq!(it.bot_id.as_deref(), Some("steve"));
@@ -615,7 +587,10 @@ fn approvals_and_permissions() {
     let p2 = k.decision(&i.id, Some(&s.id), "approve", "tool_call", &[]);
     k.core.resolve(&p2, "deny", "", "me").unwrap();
     assert_eq!(k.rt.st().answered.last().unwrap(), &(p2.clone(), None));
-    assert_eq!(k.db().decision(&p2).unwrap().unwrap().status, "expired");
+    assert_eq!(
+        k.db().decision(&p2).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Expired
+    );
     assert!(
         k.rt.prompts_of(&s.id)
             .last()
@@ -645,13 +620,6 @@ fn a_permission_answer_follows_the_runtime_outcome() {
     let p = k.decision(&i.id, Some(&s.id), "approve", "tool_call", &opts);
     k.rt.st().pending_permissions.insert(p.clone());
     k.core.resolve(&p, "ok", "", "me").unwrap();
-    assert_eq!(
-        k.db().decision(&p).unwrap().unwrap().status,
-        "open",
-        "a queued answer is not a Node receipt"
-    );
-    k.rt.st().permissions.insert(p.clone());
-    k.core.resolve(&p, "ok", "", "me").unwrap();
     let d = k.db().decision(&p).unwrap().unwrap();
     assert_eq!(
         (d.status.as_str(), d.result),
@@ -662,22 +630,34 @@ fn a_permission_answer_follows_the_runtime_outcome() {
     let p = k.decision(&i.id, Some(&s.id), "approve", "tool_call", &opts);
     k.rt.st().answer_error = true;
     assert!(k.core.resolve(&p, "ok", "", "me").is_err());
-    assert_eq!(k.db().decision(&p).unwrap().unwrap().status, "open");
+    assert_eq!(
+        k.db().decision(&p).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Open
+    );
     assert!(
         k.core.dismiss_decision(&p, "me").is_err(),
         "a dismiss that cannot deny keeps the card"
     );
-    assert_eq!(k.db().decision(&p).unwrap().unwrap().status, "open");
+    assert_eq!(
+        k.db().decision(&p).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Open
+    );
     assert_eq!(expired(&k), 0);
 
     k.rt.st().answer_error = false;
-    k.rt.st().permissions.insert(p.clone());
+    k.rt.st().pending_permissions.insert(p.clone());
     k.core.resolve(&p, "no", "", "me").unwrap();
-    assert_eq!(k.db().decision(&p).unwrap().unwrap().status, "resolved");
+    assert_eq!(
+        k.db().decision(&p).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Resolved
+    );
 
     let p = k.decision(&i.id, Some(&s.id), "approve", "tool_call", &opts);
     k.core.resolve(&p, "ok", "", "me").unwrap();
-    assert_eq!(k.db().decision(&p).unwrap().unwrap().status, "expired");
+    assert_eq!(
+        k.db().decision(&p).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Expired
+    );
     assert_eq!(expired(&k), 1, "a gone request is today's expired path");
 }
 
@@ -702,24 +682,15 @@ fn deliver_records_outputs_and_rework_goes_back() {
         )
         .unwrap();
     k.rt.end_turn(&k.core, &s.id, "end_turn", None);
-    assert_eq!(
-        k.status(&i.id),
-        (
-            "wait".into(),
-            "交付与验收".into(),
-            "交付了，等你验收".into()
-        )
-    );
+    assert_eq!(k.phase(&i.id), "closing");
+    assert_eq!(k.open_kinds(&i.id), vec!["accept"]);
     let d = k.db().decisions_of_item(&i.id).unwrap().pop().unwrap();
     assert_eq!(
         (d.question.as_str(), d.draft.as_str()),
         ("做完了，请验收", "做好了")
     );
     k.core.resolve(&d.id, "rework", "", "me").unwrap();
-    assert_eq!(
-        k.status(&i.id),
-        ("run".into(), "执行".into(), "按你的意见返工".into())
-    );
+    assert_eq!(k.item_label(&i.id), "run");
     assert_eq!(
         k.rt.prompts_of(&s.id).last().unwrap(),
         "验收没有通过，返工意见：请再检查一遍\n改完再用 steve_deliver 交付。"
@@ -776,7 +747,6 @@ fn publish_needs_a_release_action() {
     let d = k.db().decisions_of_item(&x.id).unwrap().pop().unwrap();
     assert_eq!(d.question, "发布新版本（P · 分支 steve/x）");
     assert!(d.draft.starts_with("新功能\n\n只改了前端时不重启"));
-    assert_eq!(k.status(&x.id).2, "等你批准发布");
 }
 
 fn itemless_session(k: &Kit, status: &str) -> crate::repo::Session {
@@ -1052,7 +1022,6 @@ fn a_late_end_of_an_earlier_turn_keeps_the_running_turns_mark() {
     k.core.on_turn_end(end_of(&s.id, &a1, "end_turn")).unwrap();
     assert!(k.open_fails(&i.id).is_empty(), "a1's end judged nothing");
     assert_eq!(k.open_kinds(&i.id), vec!["approve"]);
-    assert_eq!(k.status(&i.id).2, "在等你批准");
     // a2's own end still finds its approval: no stall card
     k.rt.end_turn(&k.core, &s.id, "end_turn", None);
     assert!(k.open_fails(&i.id).is_empty());
@@ -1124,15 +1093,10 @@ fn item_actions() {
     let i = new_item(&k, "g");
     let s = only_session(&k, &i.id);
     let it = k.core.item_action(&i.id, ItemAction::Pause, "me").unwrap();
-    assert_eq!((it.status.as_str(), it.now.as_str()), ("pause", "你暂停了"));
+    assert!(it.is_paused());
     k.rt.end_turn(&k.core, &s.id, "cancelled", None);
-    assert_eq!(
-        k.status(&i.id).2,
-        "你暂停了",
-        "a paused item ignores the turn end"
-    );
     k.core.item_action(&i.id, ItemAction::Resume, "me").unwrap();
-    assert_eq!(k.status(&i.id).0, "run");
+    assert_eq!(k.item_label(&i.id), "run");
     assert_eq!(k.rt.prompts_of(&s.id).last().unwrap(), "继续这个事项。");
     k.core
         .item_action(&i.id, ItemAction::Archive, "me")
@@ -1152,7 +1116,7 @@ fn item_actions() {
     assert_eq!(k.db().session(&s.id).unwrap().unwrap().status, "ended");
     assert!(k.rt.st().released.contains(&s.id));
     // reopening a closed item is an explicit new cycle, waiting for what to do
-    k.core.item_action(&i.id, ItemAction::Reopen, "me").unwrap();
+    k.new_cycle(&i.id).unwrap();
     assert_eq!(k.phase(&i.id), "ready");
     assert_eq!(k.db().item(&i.id).unwrap().unwrap().cycle, 2);
     assert_eq!(last_session(&k, &i.id).no, 1, "nothing starts by itself");
@@ -1167,7 +1131,7 @@ fn item_actions() {
         "the ended session is not reused"
     );
     let tl = k.timeline_texts(&i.id);
-    for t in ["暂停", "继续", "归档", "恢复", "放弃", "重新打开"] {
+    for t in ["暂停", "继续", "归档", "恢复", "放弃", "开始第 2 个周期"] {
         assert!(tl.contains(&t.to_string()), "{t}");
     }
 }
@@ -1181,7 +1145,7 @@ fn resume_with_an_open_question_waits_on_it() {
     k.core.item_action(&i.id, ItemAction::Pause, "me").unwrap();
     let n = k.rt.prompts_of(&s.id).len();
     k.core.item_action(&i.id, ItemAction::Resume, "me").unwrap();
-    assert_eq!(k.status(&i.id).0, "wait");
+    assert!(!k.open_kinds(&i.id).is_empty());
     assert_eq!(
         k.rt.prompts_of(&s.id).len(),
         n,
@@ -1426,16 +1390,12 @@ fn dependencies_block_and_start_when_done() {
         .decision_resolve(
             &k.db().decisions_of_item(&b.id).unwrap()[0].id,
             json!({}),
-            "resolved",
+            steve_store::decision_repo::DecisionChange::Resolve,
             None,
         )
         .unwrap();
-    k.db().item_patch(&b.id, patch![status: "run"]).unwrap();
     k.core.add_dep(&b.id, &a.id).unwrap();
-    assert_eq!(
-        k.status(&b.id),
-        ("block".into(), "规划".into(), "等待前置事项完成".into())
-    );
+    assert_eq!(k.item_label(&b.id), "block");
     assert_eq!(
         k.core.add_dep(&a.id, &b.id).unwrap_err().to_string(),
         "会形成循环依赖，没有添加"
@@ -1449,12 +1409,12 @@ fn dependencies_block_and_start_when_done() {
     let acc = k.db().decisions_of_item(&a.id).unwrap().pop().unwrap();
     k.core.resolve(&acc.id, "pass", "", "me").unwrap();
     // the close waits for the turn that delivered
-    assert_eq!(k.status(&b.id).0, "block");
+    assert_eq!(k.item_label(&b.id), "block");
     k.rt.end_turn(&k.core, &sa.id, "end_turn", None);
-    assert_eq!(k.status(&b.id).0, "run");
+    assert_eq!(k.item_label(&b.id), "run");
     let sb = only_session(&k, &b.id);
     assert!(k.rt.prompts_of(&sb.id)[0].ends_with(&format!(
-        "Hub 已核对前置事项都已完成：\n{}「标题」：已验收\n现在开始这个事项。前置状态由 Hub 管理，无需为核对进度读取其他事项或请求扩大读取范围。",
+        "Hub 已核对前置事项都已完成：\n{}「标题」：completed\n现在开始这个事项。前置状态由 Hub 管理，无需为核对进度读取其他事项或请求扩大读取范围。",
         a.id
     )));
     assert!(
@@ -1469,7 +1429,7 @@ fn removing_the_last_open_dependency_unblocks() {
     let a = k.item("run", "执行", None);
     let b = k.item("run", "执行", None);
     k.core.add_dep(&b, &a).unwrap();
-    assert_eq!(k.status(&b).0, "block");
+    assert_eq!(k.item_label(&b), "block");
     k.db()
         .settings_set(
             WS,
@@ -1481,21 +1441,18 @@ fn removing_the_last_open_dependency_unblocks() {
         )
         .unwrap();
     k.core.rm_dep(&b, &a).unwrap();
-    assert_eq!(
-        k.status(&b),
-        ("wait".into(), "执行".into(), "前置完成，等你开始".into())
-    );
+    assert_eq!(k.item_label(&b), "wait");
     assert_eq!(k.open_kinds(&b), vec!["propose"]);
     /* a dependency does not override your pause; an explicit resume restores its wait */
     let c = k.item("pause", "执行", None);
     k.core.add_dep(&c, &a).unwrap();
     assert_eq!(
-        k.status(&c).0,
+        k.item_label(&c),
         "pause",
         "adding a prerequisite preserves an explicit pause"
     );
     k.core.item_action(&c, ItemAction::Resume, "me").unwrap();
-    assert_eq!(k.status(&c).0, "block");
+    assert_eq!(k.item_label(&c), "block");
 }
 
 #[test]
@@ -1716,16 +1673,7 @@ fn seed_registers_steves_own_repo_once() {
     let k = Kit::with(|c| c.steve_repo = r.clone());
     let ps = k.db().projects(WS).unwrap();
     assert_eq!(ps.len(), 1);
-    // landed through pull requests and released by the repository's ops/cut-release.py, never ops/release.sh here
-    let rel = ps[0].release.as_ref().unwrap();
-    assert_eq!(
-        (
-            rel.kind.as_str(),
-            rel.cmd.as_str(),
-            rel.done_when.as_deref()
-        ),
-        ("script", "", Some(crate::upstream::DONE_TAG))
-    );
+    assert!(ps[0].release.is_none());
     assert_eq!(
         k.db()
             .bot("dev")
@@ -2006,10 +1954,12 @@ fn startup_blocker_survives_queued_input() {
         .queued()
         .add(&sid, "initial task", "steve", &[])
         .unwrap();
-    crate::lifecycle::settle(k.db(), &i).unwrap();
     crate::lifecycle::supersede(k.db(), &i, &["fail"], "background queue").unwrap();
-    assert_eq!(k.db().decision(&card.id).unwrap().unwrap().status, "open");
-    assert_eq!(k.status(&i).0, "wait");
+    assert_eq!(
+        k.db().decision(&card.id).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Open
+    );
+    assert!(!k.open_kinds(&i).is_empty());
     k.db().session_patch(&sid, patch![status:"ended"]).unwrap();
     let before = k.db().store().sessions().stop(&sid).unwrap();
     k.core
@@ -2024,7 +1974,7 @@ fn startup_blocker_survives_queued_input() {
     assert!(k.db().queued(&sid).unwrap().is_empty());
     assert_eq!(
         k.db().decision(&card.id).unwrap().unwrap().status,
-        "expired"
+        steve_types::DecisionStatus::Expired
     );
 }
 

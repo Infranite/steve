@@ -1,3 +1,4 @@
+import * as decisionText from "../src/i18n/decision.ts"
 import { isCancelledError, QueryClient, timeoutManager } from "@tanstack/react-query"
 import assert from "node:assert/strict"
 import { test } from "node:test"
@@ -91,6 +92,7 @@ function harness(local = { getItem: () => "1" }) {
       if (id === "./stream-cursor") return streamCursor
       if (id === "./live-utils" || id === "../live-utils") return live
       if (id === "./decision-notes") return notes
+      if (id === "./i18n/decision") return decisionText
       if (id === "./decision-options") return decisionOptions
       if (id === "./feed-order") return feed
       if (id === "./i18n/format") return format
@@ -101,7 +103,7 @@ function harness(local = { getItem: () => "1" }) {
       if (id === "./bus") return { cue: (x) => cues.push(x) }
       if (id === "./components/ui/toaster" || id === "../components/ui/toaster") return { toast: (x) => notices.push(x) }
       if (id === "@tanstack/react-query") return { isCancelledError }
-      if (id === "react") return {}
+      if (id === "react") return { useSyncExternalStore: (subscribe, read) => ({ subscribe, read }) }
       throw new Error(id)
     }, window: {}, document: { querySelector: () => null }, localStorage: local, location: {},
     setTimeout: (f, ms) => { const timer = { f, ms }; timers.push(timer); return timer }, clearTimeout: (timer) => { if (timer) timer.cancelled = true },
@@ -168,10 +170,10 @@ test("switching kind preserves ordinary legacy tags and does not mistake one for
   const h = harness(), s = h.store, sent = []
   h.api.patchItem = async (id, patch) => { sent.push([id, Array.from(patch.tags)]) }
   s.st.tags = [{ id: "legacy", name: "旧标签", cat: "类型" }, { id: "doc", name: "doc", cat: "类型" }, { id: "bug", name: "bug", cat: "类型" }]
-  h.patch("item", { id: "ST-1", tags: ["legacy", "doc"] })
+  h.patch("item", { id: "ST-1", state: { kind: "active" }, cycle: 1, revision: 0, delivery: [], tags: ["legacy", "doc"] })
   s.setKind("ST-1", "bug")
   assert.deepEqual(sent, [["ST-1", ["bug", "legacy"]]])
-  h.patch("item", { id: "ST-1", tags: ["legacy", "bug"] })
+  h.patch("item", { id: "ST-1", state: { kind: "active" }, cycle: 1, revision: 0, delivery: [], tags: ["legacy", "bug"] })
   s.setKind("ST-1", "bug")
   assert.equal(sent.length, 1, "the real current kind is a no-op")
 })
@@ -209,7 +211,7 @@ test("legacy tag editing preserves its current category without offering type fo
 
 test("stream patches preserve unrelated sessions, bots, items and thread references", async () => {
   const h = harness(), s = h.store
-  h.snapshot.item = [{ id: "ST-1", status: "run" }]
+  h.snapshot.item = [{ id: "ST-1", state: { kind: "active" }, cycle: 1, revision: 0, delivery: [] }]
   s.start(); await flush(); await h.open("a"); await h.open("b")
   const before = { b: s.getSession("b"), bots: s.st.bots, item: s.getItem("ST-1"), version: s.st.ver }
   h.event({ type: "event", session_id: "a", seq: 1, kind: "text", data: { role: "assistant", text: "hello" } })
@@ -232,12 +234,12 @@ test("item references never focus this request or the next one", async () => {
 test("only an open explicit focus or quote directs a message to an item", async () => {
   const h = harness(), s = h.store, sent = []
   h.api.say = async (...args) => { sent.push(args) }
-  h.patch("item", { id: "ST-1", status: "run" }); h.patch("item", { id: "ST-2", status: "done" })
+  h.patch("item", { id: "ST-1", state: { kind: "active" }, cycle: 1, revision: 0, delivery: [] }); h.patch("item", { id: "ST-2", state: { kind: "closed", outcome: "finished", by: "owner" }, cycle: 1, revision: 1, delivery: [] })
   s.st.focus = { item: "ST-1", until: Date.now() + 60_000 }
   await s.chatSend("记得覆盖跨日统计")
   assert.equal(sent.at(-1)[3].item, "ST-1")
   assert.equal(s.focusItem(), "ST-1")
-  h.patch("item", { id: "ST-1", status: "done" })
+  h.patch("item", { id: "ST-1", state: { kind: "closed", outcome: "finished", by: "owner" }, cycle: 1, revision: 1, delivery: [] })
   assert.equal(s.focusItem(), null)
   await s.chatSend("修复另一个页面")
   assert.equal(sent.at(-1)[3].item, undefined)
@@ -294,6 +296,44 @@ test("chat drafts paint successive chunks before any stored reply arrives", asyn
   draft(h, "question", "第一段，第二段"); await h.tick(0)
   assert.equal(h.chat.chatLive().draft.text, "第一段，第二段")
   assert.equal(c.states, 1)
+})
+
+test("draft text publishes at a low cadence, but a stored reply takes precedence immediately", async () => {
+  const h = harness()
+  h.store.start(); await flush()
+  h.event({ type: "steve.thinking", on: true })
+  const { subscribe, read } = h.chat.useChatLive((s) => s.draft?.text)
+  const painted = []
+  const off = subscribe(() => painted.push(read()))
+  draft(h, "question", "a")
+  draft(h, "question", "ab")
+  assert.equal(h.chat.chatLive().draft.text, "ab", "ingests updates for the matching persisted reply")
+  assert.equal(read(), undefined)
+  await h.tick(0)
+  assert.deepEqual(painted, ["ab"])
+  draft(h, "question", "abc")
+  draft(h, "question", "abcd")
+  await h.tick(0)
+  assert.deepEqual(painted, ["ab"])
+  await h.tick(h.chat.REPLY_BATCH_MS)
+  assert.deepEqual(painted, ["ab", "abcd"])
+  draft(h, "question", "abcde")
+  deliverMessage(h, chatMessage("answer", "steve", "question"))
+  assert.deepEqual(painted, ["ab", "abcd", undefined])
+  await h.tick(h.chat.REPLY_BATCH_MS)
+  assert.deepEqual(painted, ["ab", "abcd", undefined], "no stale batch resurrects the draft")
+  off()
+})
+
+test("an unpainted draft cannot publish into another workspace", async () => {
+  const h = harness()
+  h.store.start(); await flush()
+  draft(h, "question", "old workspace")
+  await h.tick(0)
+  draft(h, "question", "unpainted old workspace body")
+  await h.store.switchWorkspace("other")
+  await h.tick(h.chat.REPLY_BATCH_MS)
+  assert.equal(h.chat.useChatLive((s) => s.draft).read(), null)
 })
 
 test("unrelated Steve messages keep the live draft; only its own reply replaces it", async () => {
@@ -505,7 +545,7 @@ test("old workspace event pages cannot populate the new workspace", async () => 
 
 test("session and decision actions guard duplicates and report no early success", async () => {
   const h = harness(), s = h.store, send = defer(), decision = defer(); let sends = 0, decisions = 0
-  h.snapshot.decision = [{ id: "d", ws: "ws", kind: "accept", session_id: "a", subject_type: "item", question: "ok?", options: [], status: "open", created: 1 }]
+  h.snapshot.decision = [{ id: "d", ws: "ws", kind: "accept", session_id: "a", subject_type: "item", question: { kind: "raw", text: "ok?" }, options: [], status: "open", created: 1 }]
   s.start(); await flush()
   h.api.sessionSay = (_id, _text, mode) => { assert.equal(mode, "排队"); sends++; return send.promise }
   const sending = s.sessSend("a", "hello", "queue"); assert.equal(s.st.pendingActions.has("session:a"), true)
@@ -557,7 +597,7 @@ test("acceptance modes round-trip through their Hub keys in en", async () => {
   await i18n.default.changeLanguage("en")
   try {
     const h = harness(), s = h.store, sent = []
-    h.snapshot.item = [{ id: "ST-1", title: "x", status: "wait", accept_mode: "auto", deps: [], source: [], tags: [], plan: [], sessionIds: [], timeline: [], created: 1, updated: 2 }]
+    h.snapshot.item = [{ id: "ST-1", title: "x", state: { kind: "active" }, cycle: 1, revision: 0, delivery: [], accept_mode: "auto", deps: [], source: [], tags: [], plan: [], sessionIds: [], timeline: [], created: 1, updated: 2 }]
     h.api.patchItem = async (id, p) => { sent.push([id, p]); return {} }
     s.start(); await flush()
     const i = s.getItem("ST-1")
@@ -686,14 +726,14 @@ test("defaultHarness, permModes, defaultPermMode and makeBot adapt across hetero
 test("decision patches change the cards and their item without reading /api/shell again", async () => {
   const h = harness(), s = h.store
   let reads = 0; const read = h.api.shell; h.api.shell = async () => { reads++; return read() }
-  h.snapshot.item = [{ id: "ST-1", no: 1, title: "x", status: "wait", plan: [], sessionIds: [], tags: [], deps: [], source: ["你", "web"], created: 1, updated: 1, goal: "g" }]
-  h.snapshot.decision = [{ id: "d1", ws: "ws", kind: "ask", item_id: "ST-1", session_id: null, subject_type: "item", subject_id: "ST-1", question: "ok?", draft: "", options: [], status: "open", created: 1, tier: "decide" }]
+  h.snapshot.item = [{ id: "ST-1", no: 1, title: "x", state: { kind: "active" }, cycle: 1, revision: 0, delivery: [], plan: [], sessionIds: [], tags: [], deps: [], source: ["你", "web"], created: 1, updated: 1, goal: "g" }]
+  h.snapshot.decision = [{ id: "d1", ws: "ws", kind: "ask", item_id: "ST-1", session_id: null, subject_type: "item", subject_id: "ST-1", question: { kind: "raw", text: "ok?" }, draft: "", options: [], status: "open", created: 1, tier: "decide" }]
   s.start(); await flush()
   assert.deepEqual(Array.from(s.pendingCards(), (c) => c.w.decision), ["d1"])
   assert.equal(s.decideCards().length, 1)
   assert.equal(s.it("ST-1").waits.length, 1)
   const before = reads, ver = s.st.ver, item = s.it("ST-1")
-  h.event({ type: "patch", ws: "ws", rev: 5, ops: [{ type: "decision", op: "upsert", id: "d1", view: { ...h.snapshot.decision[0], status: "resolved" } }, { type: "decision", op: "upsert", id: "d2", view: { ...h.snapshot.decision[0], id: "d2", item_id: null, question: "new?", subject_type: "chan_message", kind: "approve", tier: "draft", space_id: "sp" } }] })
+  h.event({ type: "patch", ws: "ws", rev: 5, ops: [{ type: "decision", op: "upsert", id: "d1", view: { ...h.snapshot.decision[0], status: "resolved" } }, { type: "decision", op: "upsert", id: "d2", view: { ...h.snapshot.decision[0], id: "d2", item_id: null, question: { kind: "raw", text: "new?" }, subject_type: "chan_message", kind: "approve", tier: "draft", space_id: "sp" } }] })
   await h.tick(1000)
   assert.equal(reads, before, "no /api/shell read for a decision")
   assert.ok(s.st.ver > ver)

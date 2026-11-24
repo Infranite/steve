@@ -11,7 +11,7 @@ export type ResearchEvent = ResearchCall & {
 }
 
 export function researchEvent(previous: LiveRun | null, e: ResearchEvent): LiveRun {
-  const l: LiveRun = previous?.run === e.run && previous.mid === e.mid ? previous : { mid: e.mid, run: e.run, tools: [] }
+  const l: LiveRun = previous?.run === e.run && previous.mid === e.mid ? { ...previous } : { mid: e.mid, run: e.run, tools: [] }
   const call = { call: e.call, name: e.name, brief: e.brief, kind: e.kind }
   l.startedAt = e.started_at ?? l.startedAt
   // A frame with no usable timestamp cannot tell how much time passed.
@@ -26,7 +26,7 @@ export function researchEvent(previous: LiveRun | null, e: ResearchEvent): LiveR
   }
   if (!e.running) {
     const last = e.call == null ? undefined : l.tools.findLast(t => t.call === e.call)
-    if (!last || last.ok !== e.ok) l.tools.push({ ...call, ok: e.ok })
+    if (!last || last.ok !== e.ok) l.tools = [...l.tools, { ...call, ok: e.ok }]
   }
   return l
 }

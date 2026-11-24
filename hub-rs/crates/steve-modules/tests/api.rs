@@ -9,12 +9,12 @@ use axum::extract::{Path, State};
 use axum::routing::{patch, post};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use steve_modules::decisions::{self, DecisionCx, DecisionHandler};
+use steve_modules::decisions::{self, DecisionCx, DecisionHandler, DecisionOutcome};
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, call_raw, caller};
 use steve_modules::{ApiError, ApiResult, Body, Caller, Check, Modules, Registry, own};
 use steve_store::Decision;
 use steve_store::base::mems::{self, MemPatch, NewMem};
-use steve_store::base::{self, Level, ObjRef, Visibility};
+use steve_store::base::{Level, ObjRef, Visibility};
 
 #[derive(Deserialize)]
 struct NewNote {
@@ -107,7 +107,7 @@ fn router(m: Modules) -> Router {
 /// A memory candidate confirmed with a `confirm` decision (what P3/P4 will register for `mem`).
 struct MemConfirm;
 impl DecisionHandler for MemConfirm {
-    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<DecisionOutcome> {
         match cx.choice {
             "yes" => {
                 steve_store::knowledge::Memories(tx).patch(
@@ -122,7 +122,12 @@ impl DecisionHandler for MemConfirm {
                 steve_store::knowledge::Memories(tx).delete(&d.subject_id)?;
             }
         }
-        Ok(decisions::choice_result(cx))
+        if cx.text == "inject handler failure" {
+            return Err(ApiError::conflict(
+                "injected failure after updating the memory",
+            ));
+        }
+        Ok(decisions::choice_result(cx).into())
     }
     fn expire(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
         steve_store::knowledge::Memories(tx).patch(
@@ -331,10 +336,13 @@ fn candidate(t: &TestEnv) -> (String, Decision) {
                     ..Default::default()
                 },
             )?;
-            let d = base::decisions::open(
-                tx,
-                &decisions::confirm(WS, "mem", &m.id, "记住：喜欢简短的邮件？", "steve"),
-            )?;
+            let d = steve_store::DecisionRows(tx).open(&decisions::confirm(
+                WS,
+                "mem",
+                &m.id,
+                "记住：喜欢简短的邮件？",
+                "steve",
+            ))?;
             mems::patch(
                 tx,
                 &m.id,
@@ -384,6 +392,26 @@ async fn confirm_decisions_dispatch_to_the_module() {
             .unwrap_err(),
         ApiError::not_found("决定")
     );
+    let failed = decisions::resolve(
+        &t.modules,
+        &me,
+        &d.id,
+        d.revision,
+        "yes",
+        "inject handler failure",
+    )
+    .unwrap_err();
+    assert_eq!(failed.status(), 409);
+    assert_eq!(t.store().decisions().get(&d.id).unwrap().unwrap(), d);
+    assert_eq!(
+        t.store()
+            .read(|r| mems::get(r, &mid))
+            .unwrap()
+            .unwrap()
+            .status,
+        "candidate"
+    );
+    assert!(t.take_events().is_empty());
     let done = decisions::dispatch(&t.modules, &me, &d.id, "yes", "")
         .unwrap()
         .unwrap();
@@ -399,6 +427,20 @@ async fn confirm_decisions_dispatch_to_the_module() {
             .status,
         "confirmed"
     );
+    t.take_events();
+    for _ in 0..1_000 {
+        assert_eq!(
+            decisions::resolve(&t.modules, &me, &d.id, d.revision, "yes", "").unwrap(),
+            done
+        );
+        assert_eq!(
+            decisions::resolve(&t.modules, &me, &d.id, d.revision, "no", "")
+                .unwrap_err()
+                .status(),
+            409
+        );
+    }
+    assert!(t.take_events().is_empty());
     let again = decisions::dispatch(&t.modules, &me, &d.id, "no", "")
         .unwrap()
         .unwrap_err();
@@ -428,7 +470,7 @@ async fn confirm_decisions_dispatch_to_the_module() {
     assert!(!decisions::expire(&t.modules, &d3.id).unwrap());
     assert_eq!(
         t.store().decisions().get(&d3.id).unwrap().unwrap().status,
-        "expired"
+        steve_types::DecisionStatus::Expired
     );
     assert_eq!(
         t.store()

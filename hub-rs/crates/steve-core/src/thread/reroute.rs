@@ -145,13 +145,13 @@ impl Core {
             }
             return self.research_again(ws, &om, Some(&reply.id), None);
         };
-        if item.status == "done" {
+        if item.is_completed() {
             return Err(CoreError::Status(
                 409,
                 steve_i18n::t!("core.thread.accepted_no_chat"),
             ));
         }
-        if item.status == "drop" {
+        if item.is_closed() {
             return Ok(Handled {
                 message_id: reply.id.clone(),
                 item: Some(item),
@@ -164,7 +164,7 @@ impl Core {
             .store()
             .decisions_of_item(&item.id)?
             .into_iter()
-            .rfind(|d| d.kind == "accept" && d.status == "open");
+            .rfind(|d| d.kind == "accept" && d.status == steve_types::DecisionStatus::Open);
         if let Some(d) = delivered {
             let id = self.store().message_add_in(
                 ws,

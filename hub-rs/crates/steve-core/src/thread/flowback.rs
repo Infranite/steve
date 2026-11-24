@@ -24,14 +24,14 @@ use crate::util::{js_head, now};
 use serde_json::{Map, Value, json};
 
 /// Kinds that go back even when the user turned following off.
-const ALWAYS: [&str; 4] = ["ask", "deliver", "fail", "pr_approve"];
+const ALWAYS: [&str; 3] = ["ask", "deliver", "fail"];
 /// The card counts as far up once this many messages are below it.
 pub const FAR: usize = 3;
 
 /// What happened to the item.
 #[derive(Debug, Clone, Default)]
 pub struct Update<'a> {
-    /// ask | reply | deliver | done | drop | fail | release | build | pr_approve | pr_checks_failed | pr_merged
+    /// ask | reply | deliver | done | drop | fail | release | build
     pub kind: &'a str,
     pub text: String,
     /// the decision to answer here (ask, approval, fail, acceptance)
@@ -45,13 +45,7 @@ pub struct Update<'a> {
 impl Update<'_> {
     /// The user has to do something: answer, approve, accept, or decide what to do about a failure.
     fn needs_you(&self) -> bool {
-        matches!(self.kind, "ask" | "fail" | "pr_approve")
-            || (self.kind == "deliver" && self.decision.is_some())
-    }
-
-    /// A PR milestone bumps the living card but must not clear a pending decision or its delivery.
-    fn pr_milestone(&self) -> bool {
-        matches!(self.kind, "pr_checks_failed" | "pr_merged")
+        matches!(self.kind, "ask" | "fail") || (self.kind == "deliver" && self.decision.is_some())
     }
 }
 
@@ -79,13 +73,6 @@ fn merged(c: Option<&Value>, item: &str, u: &Update<'_>, at: i64) -> Value {
     let mut c = c.cloned().unwrap_or_else(|| json!({}));
     c["item"] = json!(item);
     c["at"] = json!(at);
-    if u.pr_milestone() {
-        c["pr_event"] = json!({"kind": u.kind, "text": u.text, "at": at});
-        if c["state"].is_null() {
-            c["state"] = json!("run");
-        }
-        return c;
-    }
     c["state"] = json!(u.kind);
     match u.kind {
         "deliver" => {
@@ -101,7 +88,7 @@ fn merged(c: Option<&Value>, item: &str, u: &Update<'_>, at: i64) -> Value {
         _ => {}
     }
     /* the line of what is going on now (a question, a failure); a later event clears it */
-    if matches!(u.kind, "ask" | "fail" | "pr_approve") {
+    if matches!(u.kind, "ask" | "fail") {
         c["text"] = json!(u.text);
     } else if let Some(o) = c.as_object_mut() {
         o.remove("text");
@@ -153,11 +140,7 @@ fn headline(item: &str, card: &Value) -> String {
             "{item} 交付了：{}",
             card["delivery"]["text"].as_str().unwrap_or("")
         ),
-        "ask" | "fail" | "pr_approve" => s("text").to_string(),
-        "done" if card["pr_event"]["kind"] == "pr_merged" => card["pr_event"]["text"]
-            .as_str()
-            .unwrap_or(item)
-            .to_string(),
+        "ask" | "fail" => s("text").to_string(),
         "build" => card["build"]["text"].as_str().unwrap_or(item).to_string(),
         _ => item.to_string(),
     }
@@ -193,12 +176,8 @@ pub fn flow(db: &Db, item: &str, u: Update<'_>) -> Result<Option<String>> {
     let below = h.map_or(usize::MAX, |i| visible.len() - 1 - i);
     let card = merged(h.and_then(|i| card_of(&visible[i])), item, &u, at);
     /* an answer to a question is worth reading where the user is now, like the user's input */
-    let urgent = u.needs_you() || u.pr_milestone() || (u.kind == "deliver" && u.full);
-    let text = if u.pr_milestone() {
-        u.text.clone()
-    } else {
-        headline(item, &card)
-    };
+    let urgent = u.needs_you() || (u.kind == "deliver" && u.full);
+    let text = headline(item, &card);
     if let Some(i) = h
         && !(urgent && below >= FAR)
     {

@@ -31,7 +31,7 @@ pub use research::{
 use crate::Core;
 use crate::error::Result;
 use crate::gateway::{self, FocusItem, Route, RouteCtx, Said};
-use crate::repo::{FileRef, ItemExt, Message};
+use crate::repo::{FileRef, Message};
 use crate::util::{js_head, now};
 use regex::Regex;
 use serde_json::{Map, Value, json};
@@ -956,7 +956,7 @@ impl Core {
         Ok(match target {
             Some(id) => db
                 .item(&id)?
-                .is_some_and(|i| i.workspace_id == ws && !i.is_finished()),
+                .is_some_and(|i| i.workspace_id == ws && !i.is_closed()),
             None => false,
         })
     }
@@ -1171,7 +1171,7 @@ impl Core {
     fn forward_open(&self, item: &str, text: &str, files: &[FileRef], mid: &str) -> Result<bool> {
         match self.forward(item, text, files, mid) {
             Ok(()) => Ok(true),
-            Err(_) if self.store().item(item)?.is_some_and(|i| i.is_finished()) => Ok(false),
+            Err(_) if self.store().item(item)?.is_some_and(|i| i.is_closed()) => Ok(false),
             Err(e) => Err(e),
         }
     }
@@ -1215,7 +1215,7 @@ impl Core {
             } else {
                 items
                     .iter()
-                    .filter(|i| i.is_finished())
+                    .filter(|i| i.is_closed())
                     .map(|i| i.id.clone())
                     .collect()
             },
@@ -1250,7 +1250,7 @@ impl Core {
             let Some(i) = items.iter().find(|i| i.id == t.item_id) else {
                 continue;
             };
-            if i.is_finished() || i.updated < since {
+            if i.is_closed() || i.updated < since {
                 continue;
             }
             let origin = self
@@ -1263,7 +1263,7 @@ impl Core {
                 FocusItem {
                     id: i.id.clone(),
                     title: i.title.clone(),
-                    status: i.status.clone(),
+                    status: i.outcome.clone().unwrap_or_else(|| i.phase.as_str().into()),
                     origin,
                 },
             ));
@@ -1744,10 +1744,13 @@ impl Core {
             .store()
             .read(|r| steve_modules::zone::Zone::for_owner(r, ws))?;
         let today = zone.day_start(steve_store::now()).unwrap_or(0);
-        let run = all.iter().filter(|i| i.status == "run").count();
+        let run = all
+            .iter()
+            .filter(|i| i.phase == crate::cycle::ACTIVE)
+            .count();
         let done = all
             .iter()
-            .filter(|i| i.status == "done" && i.updated >= today)
+            .filter(|i| i.is_completed() && i.updated >= today)
             .count();
         Ok(format!(
             "现在：{} 件等你，{run} 件在进行，今天完成 {done} 件。",

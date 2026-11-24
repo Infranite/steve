@@ -329,7 +329,7 @@ async fn create(x: &Extra, o: &Outside, args: &Value) -> Result<String, String> 
         item.id,
         item.title,
         item.bot_id.as_deref().unwrap_or("Steve"),
-        item.status
+        item.phase.as_str()
     ))
 }
 

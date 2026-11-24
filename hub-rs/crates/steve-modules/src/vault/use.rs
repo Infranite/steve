@@ -44,7 +44,7 @@ use super::inject::{
 };
 use super::items::templates::BANK_CARD;
 use super::{Vault, VaultError, VaultResult};
-use crate::decisions::{DecisionCx, DecisionHandler, choice_result};
+use crate::decisions::{DecisionCx, DecisionHandler, DecisionOutcome, choice_result};
 use crate::{ApiError, ApiResult};
 use steve_store::secret_uses::{SecretUses as UseRows, UseRecord};
 use steve_store::vault_items::{FieldRow, ItemFilter, ItemRow};
@@ -423,6 +423,14 @@ fn pending_row(
     }
 }
 
+struct ExpiredUse {
+    use_id: String,
+    ws: String,
+    item: Option<String>,
+    session: Option<String>,
+    text: String,
+}
+
 enum Job {
     Run(String),
     Denied(String),
@@ -552,64 +560,74 @@ impl SecretUses {
         });
     }
 
-    /// The hourly part of `vault.cleanup`: temp directories older than 15 minutes, requests
-    /// unanswered for a day, use rows older than a year.
+    /// Scratch and log retention are independent of approval deadlines.
     pub async fn hourly(&self) -> VaultResult<()> {
-        let me = self.clone();
-        let notes = self
-            .0
+        let home = self.0.home.clone();
+        self.0
             .vault
             .blocking(move |v| {
-                inject::cleanup(&me.0.home, Some(SCRATCH_AGE));
-                let notes = me.expire_waiting(now() - PENDING_MS, false)?;
+                inject::cleanup(&home, Some(SCRATCH_AGE));
                 v.store().write(|tx| {
-                    Ok::<_, VaultError>(UseRows(tx).delete_before(now() - RETENTION_MS)?)
-                })?;
-                Ok(notes)
+                    UseRows(tx).delete_before(now() - RETENTION_MS)?;
+                    Ok::<_, VaultError>(())
+                })
             })
-            .await?;
-        self.notify(notes);
+            .await
+    }
+
+    pub fn next_expiry(r: &mut impl steve_store::Read) -> steve_store::Result<Option<i64>> {
+        Ok(UseRows(r).first_pending_at()?.map(|at| at + PENDING_MS))
+    }
+
+    pub fn expire_due(&self, at: i64) -> VaultResult<()> {
+        let expired = self.expire_waiting(at - PENDING_MS, false)?;
+        self.notify(expired);
         Ok(())
     }
 
-    fn notify(&self, notes: Vec<(String, Option<String>, Option<String>, String)>) {
+    fn notify(&self, notes: Vec<ExpiredUse>) {
         if notes.is_empty() {
             return;
         }
+        {
+            let mut pending = lock(&self.0.pending);
+            for note in &notes {
+                pending.remove(&note.use_id);
+            }
+        }
         let sink = self.0.sink.clone();
         tokio::spawn(async move {
-            for (ws, item, session, text) in notes {
-                sink.send(&ws, item.as_deref(), session.as_deref(), &text)
-                    .await;
+            for note in notes {
+                sink.send(
+                    &note.ws,
+                    note.item.as_deref(),
+                    note.session.as_deref(),
+                    &note.text,
+                )
+                .await;
             }
         });
     }
 
-    /// Expires `pending` uses created before `before` (and their open decisions); at startup also
-    /// fails `running` ones. Returns the messages for their sessions.
-    #[allow(clippy::type_complexity)]
-    fn expire_waiting(
-        &self,
-        before: i64,
-        startup: bool,
-    ) -> VaultResult<Vec<(String, Option<String>, Option<String>, String)>> {
+    /// Invalidate uncommitted in-memory requests on restart, or close those that have timed out.
+    fn expire_waiting(&self, before: i64, startup: bool) -> VaultResult<Vec<ExpiredUse>> {
         let store = self.0.vault.store();
         store.write(|tx| {
             let at = now();
             let mut notes = Vec::new();
             if startup {
-                for u in UseRows(tx).in_status("running", i64::MAX)? {
+                for u in UseRows(tx).in_status("running", i64::MAX, u64::MAX / 2)? {
                     UseRows(tx).transition(&u.id, "running", "failed", None, None, Some(at))?;
                     tx.audit(&u.workspace_id, "steve", "vault.use_failed", &u.item_id, &json!({"use": u.id, "reason": "restart"}))?;
                     publish(tx, &u);
                 }
             }
-            for u in UseRows(tx).in_status("pending", before)? {
+            let limit = if startup { i64::MAX as u64 } else { 64 };
+            for u in UseRows(tx).in_status("pending", before, limit)? {
                 UseRows(tx).transition(&u.id, "pending", "expired", None, None, Some(at))?;
                 if let Some(d) = &u.decision_id {
-                    DecisionRows(tx).settle(d, &json!({"expired": true}), "expired", &Value::Null)?;
+                    steve_store::decision_repo::expire_unapplied(tx, d, &json!({"expired": true}))?;
                 }
-                lock(&self.0.pending).remove(&u.id);
                 tx.audit(&u.workspace_id, "steve", "vault.use_expired", &u.item_id, &json!({"use": u.id}))?;
                 publish(tx, &u);
                 let title = VaultItems(tx).item(&u.item_id)?.map(|i| i.title).unwrap_or_default();
@@ -618,7 +636,9 @@ impl SecretUses {
                 } else {
                     format!("用户一天内没有处理使用「{title}」的请求，请求已失效。需要的话请重新调用 steve_secret_use，或者换一种做法。")
                 };
-                notes.push((u.workspace_id.clone(), u.work_item_id.clone(), u.session_id.clone(), text));
+                notes.push(ExpiredUse {
+                    use_id: u.id, ws: u.workspace_id, item: u.work_item_id, session: u.session_id, text,
+                });
             }
             Ok(notes)
         })
@@ -777,6 +797,8 @@ impl SecretUses {
                 draft: Some(draft.clone()),
                 options: Some(options.clone()),
                 requested_by: cx.bot_id.clone(),
+                question_template: None,
+                source: Some(steve_store::DecisionSource::Record),
             })?;
             UseRows(tx).set_decision(&use_id, &d.id)?;
             tx.audit(
@@ -972,7 +994,7 @@ fn publish(tx: &mut W<'_>, u: &UseRecord) {
 pub struct UseDecisions(SecretUses);
 
 impl DecisionHandler for UseDecisions {
-    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<DecisionOutcome> {
         let inner = &self.0.0;
         let u = UseRows(tx)
             .get(&d.subject_id)?
@@ -1040,7 +1062,7 @@ impl DecisionHandler for UseDecisions {
         publish(tx, &u);
         // runs after the commit: the job waits for the write lock and re-reads the row
         let _ = inner.jobs.send(job);
-        Ok(result)
+        Ok(result.into())
     }
 
     fn before_undo(&self, _: &mut W<'_>, _: &Decision) -> ApiResult<()> {

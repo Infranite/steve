@@ -5,6 +5,7 @@
 import { QueryClient, useInfiniteQuery } from "@tanstack/react-query"
 import { useEffect, useSyncExternalStore } from "react"
 import { api, revOf } from "@/api"
+import { decisionText } from "@/i18n/decision"
 import type { DecisionView, Envelope, ItemView, MessageView, PageOf, Patch, SessionView, ViewKind } from "@/gen"
 import { EMPTY, HOT, mergePatch, mergeSnapshot, mergeViews, viewOf, viewsOf, type Table } from "./table"
 
@@ -262,12 +263,12 @@ export const useEnded = (enabled: boolean) => useHistory("session", enabled, api
 export const useOpenDecisions = () => useSyncExternalStore(onViews, openDecisions)
 
 type Blocker = { kind: string; question?: string; op_kind?: string; tag?: string | null }
-const blockerOrder = ["failure", "unknown_effect", "permission", "acceptance", "approval", "question", "dependency", "paused", "operation", "turn"]
+const blockerOrder = ["failure", "unknown_effect", "permission", "acceptance", "approval", "question", "dependency", "paused", "delivery", "operation", "turn"]
 function blockerOf(d: DecisionView): Blocker {
   const kind = d.kind === "accept" ? "acceptance" : d.kind === "fail" ? "failure"
     : d.subject_type === "tool_call" && d.kind === "approve" ? "permission"
     : d.kind === "approve" || d.kind === "propose" ? "approval" : "question"
-  return { kind, question: d.question.slice(0, 60) }
+  return { kind, question: decisionText(d.question).slice(0, 60) }
 }
 
 function workOf(id: string) {
@@ -281,12 +282,14 @@ function workOf(id: string) {
     !best || s.no > best.no || (s.no === best.no && s.created > best.created) ? s : best, undefined)
   const decisions = decisionsForItem(id)
   const blockers: Blocker[] = []
-  const waiting = new Set(item?.closing?.waiting)
-  if (item && item.phase !== "closed") {
+  const closing = item?.state.kind === "closing" ? item.state : undefined
+  const waiting = new Set<string>(closing?.waits)
+  if (item && item.state.kind !== "closed") {
     blockers.push(...decisions.map(blockerOf), ...(item.op_blockers ?? []))
-    if (item.status === "block" && item.deps?.some((d) => itemView(d)?.status !== "done")) blockers.push({ kind: "dependency" })
-    if (item.status === "pause") blockers.push({ kind: "paused" })
-    if (item.closing && turn) { waiting.add("turn"); blockers.push({ kind: "turn" }) }
+    if (item.waits?.includes("prerequisite")) blockers.push({ kind: "dependency" })
+    if (item.state.kind === "paused") blockers.push({ kind: "paused" })
+    if (closing && turn) { waiting.add("turn"); blockers.push({ kind: "turn" }) }
+    if (waiting.has("delivery")) blockers.push({ kind: "delivery" })
     if (waiting.has("operation") && !blockers.some((b) => b.kind === "operation")) blockers.push({ kind: "operation" })
   }
   blockers.sort((a, b) => blockerOrder.indexOf(a.kind) - blockerOrder.indexOf(b.kind))

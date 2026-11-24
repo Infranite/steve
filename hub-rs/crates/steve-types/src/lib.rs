@@ -22,6 +22,11 @@
 //! (including `NodeStop`), never in `params` or parsed safe detail. Each fact takes exactly one
 //! route: a typed protocol field or an error reason, never parallel representations in both.
 
+mod item_delivery;
+pub use item_delivery::{
+    ClosePolicy, CloseRequest, DeliveryBaseline, DeliveryProof, DeliveryRef, DeliveryVersion,
+    PullProof,
+};
 pub mod automation;
 pub mod autonomy;
 pub mod backup;
@@ -57,12 +62,11 @@ pub use id::*;
 pub use placement::*;
 pub use raw::RawJson;
 pub use stream::StreamControl;
-mod closeout;
-pub use closeout::{Closeout, PullChecks, PullSnapshot};
 pub use view::{
-    ById, DecisionTier, DecisionView, FoldReason, ItemClosing, ItemParent, ItemSnooze, ItemView,
-    ItemWorkflow, MessageView, Op, OperationBlocker, PageOf, Patch, PatchOp, PatchTag, SessionView,
-    SessionWaiting, Snapshot, SnapshotViews, View, ViewKind,
+    ById, CloseKind, ClosedBy, DecisionPrompt, DecisionStatus, DecisionTier, DecisionView,
+    FoldReason, ItemOutcome, ItemParent, ItemPhase, ItemSnooze, ItemState, ItemView, ItemWait,
+    ItemWorkflow, MessageView, Op, OperationBlocker, PageOf, Patch, PatchOp, PatchTag, Said,
+    SessionView, SessionWaiting, Snapshot, SnapshotViews, View, ViewKind,
 };
 
 #[cfg(test)]

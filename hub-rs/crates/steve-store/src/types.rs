@@ -110,16 +110,7 @@ pub struct Avatar {
 pub struct Release {
     pub kind: String,
     pub cmd: String,
-    /// What counts as finished for an accepted result, instead of a release by `cmd` on this machine:
-    /// `merge` (its commits are on the remote default branch) or `tag` (merged, and a pushed tag
-    /// contains them). A build the tag triggers is followed on its own and never holds the close.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub done_when: Option<String>,
 }
-
-/// [`Release::done_when`] values.
-pub const DONE_MERGE: &str = "merge";
-pub const DONE_TAG: &str = "tag";
 
 pub(crate) fn default_source() -> (String, String) {
     ("对话".into(), "chat".into())
@@ -338,14 +329,11 @@ pub struct Item {
     /// `task` or `chat`
     pub kind: String,
     pub title: String,
-    pub status: String,
-    pub stage: String,
     pub bot_id: Option<String>,
     pub project_dir: Option<String>,
     pub cwd: Option<String>,
     pub branch: Option<String>,
     pub plan: Vec<PlanStep>,
-    pub now: String,
     pub accept_mode: Option<String>,
     pub priority: String,
     pub archived: bool,
@@ -360,23 +348,34 @@ pub struct Item {
     /// The design gate (migration 090): a delivery waits for the owner to confirm the design before
     /// any implementation. Off by default; written only by `Items::set_design_gate`.
     pub design_gate: bool,
-    /// The lifecycle (migration 027): `ready` | `active` | `closing` | `closed`. Written only by the
-    /// core's lifecycle ([`crate::lifecycle_write_in`]); `status` is its legacy projection.
-    pub phase: String,
+    pub phase: steve_types::ItemPhase,
     pub cycle: i64,
     /// The result revision within the cycle (0: nothing delivered yet).
-    pub revision: i64,
+    pub delivery_revision: i64,
+    pub cas_revision: i64,
     /// `completed` | `failed` | `cancelled` | `superseded` once closed.
     pub outcome: Option<String>,
     /// `human` | `automatic` | `waived` once closed completed (`None` for migrated history).
     pub acceptance: Option<String>,
     /// The closing intent while `phase = closing`.
-    pub closing: Option<serde_json::Value>,
+    pub closing: Option<steve_types::CloseRequest>,
     pub closed_at: Option<i64>,
     pub closed_reason: Option<String>,
 }
 
 impl Item {
+    pub fn is_closed(&self) -> bool {
+        self.phase == steve_types::ItemPhase::Closed
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.phase == steve_types::ItemPhase::Paused
+    }
+
+    pub fn is_completed(&self) -> bool {
+        self.is_closed() && self.outcome.as_deref() == Some("completed")
+    }
+
     pub(crate) fn from_row(r: &Row) -> rusqlite::Result<Self> {
         Ok(Self {
             id: r.get("id")?,
@@ -384,14 +383,11 @@ impl Item {
             no: r.get("no")?,
             kind: r.get("kind")?,
             title: r.get("title")?,
-            status: r.get("status")?,
-            stage: r.get("stage")?,
             bot_id: r.get("bot_id")?,
             project_dir: r.get("project_dir")?,
             cwd: r.get("cwd")?,
             branch: r.get("branch")?,
             plan: json_col(r, "plan", Vec::new())?,
-            now: r.get("now")?,
             accept_mode: r.get("accept_mode")?,
             priority: r.get("priority")?,
             archived: bool_col(r, "archived")?,
@@ -404,9 +400,16 @@ impl Item {
             source: json_col(r, "source", default_source())?,
             parent: json_col(r, "parent", None)?,
             design_gate: bool_col(r, "design_gate")?,
-            phase: r.get("phase")?,
+            phase: r.get::<_, String>("phase")?.parse().map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    r.as_ref().column_index("phase").unwrap_or_default(),
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
             cycle: r.get("cycle")?,
-            revision: r.get("revision")?,
+            delivery_revision: r.get("revision")?,
+            cas_revision: r.get("cas_revision")?,
             outcome: r.get("outcome")?,
             acceptance: r.get("acceptance")?,
             closing: json_col(r, "closing", None)?,
@@ -557,6 +560,16 @@ impl Queued {
 }
 
 /// `rowDec`.
+/// The inverse operation recorded at settlement. Domain handlers recheck whether it is safe
+/// when the owner asks to undo.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub enum DecisionUndo {
+    Domain,
+    RestorePlan { plan: Vec<PlanStep> },
+    Resume { revision: Option<i64> },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Decision {
     pub id: String,
@@ -568,18 +581,26 @@ pub struct Decision {
     pub item_id: Option<String>,
     pub session_id: Option<String>,
     pub question: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question_template: Option<steve_types::DecisionPrompt>,
     pub draft: String,
     pub options: Vec<String>,
-    /// `open` | `resolved` | `expired`
-    pub status: String,
+    pub status: steve_types::DecisionStatus,
     pub result: Value,
     pub requested_by: String,
     pub created: i64,
     pub resolved: Option<i64>,
-    pub undo: Value,
+    pub undo: Option<DecisionUndo>,
+    pub revision: i64,
+    #[serde(skip_serializing)]
+    pub source_revision: Option<crate::DecisionSource>,
 }
 
 impl Decision {
+    pub fn undo_until(&self) -> Option<i64> {
+        crate::decision_repo::undo_until(self.status, self.resolved, self.undo.as_ref())
+    }
+
     pub(crate) fn from_row(r: &Row) -> rusqlite::Result<Self> {
         Ok(Self {
             id: r.get("id")?,
@@ -590,14 +611,23 @@ impl Decision {
             item_id: r.get("item_id")?,
             session_id: r.get("session_id")?,
             question: r.get("question")?,
+            question_template: json_col(r, "question_template", None)?,
             draft: r.get("draft")?,
             options: json_col(r, "options", Vec::new())?,
-            status: r.get("status")?,
+            status: r.get::<_, String>("status")?.parse().map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    r.as_ref().column_index("status").unwrap_or(0),
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            })?,
             result: json_col(r, "result", Value::Null)?,
             requested_by: r.get("requested_by")?,
             created: r.get("created")?,
             resolved: r.get("resolved")?,
-            undo: json_col(r, "undo", Value::Null)?,
+            undo: json_col(r, "undo", None)?,
+            revision: r.get("revision")?,
+            source_revision: json_col(r, "source_revision", None)?,
         })
     }
 }

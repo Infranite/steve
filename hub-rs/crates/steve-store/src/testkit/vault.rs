@@ -345,8 +345,7 @@ pub fn seed_use_context(store: &Store, ctx: &UseContext<'_>) -> Result<()> {
             params![ctx.project, ctx.ws, ctx.workdir],
         )?;
         conn.execute(
-            "INSERT INTO items (id, workspace_id, no, title, status, stage, bot_id, project_id, created, updated)
-             VALUES (?, ?, 1, '推送分支', 'run', '执行', ?, ?, 1, 1)",
+            "INSERT INTO items(id, workspace_id, no, title, phase, bot_id, project_id, created, updated) VALUES (?, ?, 1, '推送分支', 'active', ?, ?, 1, 1)",
             params![ctx.item, ctx.ws, ctx.bot, ctx.project],
         )?;
         conn.execute(

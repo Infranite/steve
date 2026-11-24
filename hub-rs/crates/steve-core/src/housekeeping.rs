@@ -6,7 +6,6 @@
 
 use crate::error::Result;
 use crate::patch;
-use crate::repo::ItemExt;
 use crate::util::now;
 use crate::{Core, Tx};
 use std::time::Duration;
@@ -57,7 +56,7 @@ impl Core {
             let before = now() - days * 24 * 3_600_000;
             let mut archived: Vec<String> = vec![];
             for i in t.db().items_all(&ws)? {
-                if !i.is_finished() {
+                if !i.is_closed() {
                     continue;
                 }
                 if days != 0 && !i.archived && i.updated < before {
@@ -131,7 +130,7 @@ fn item_due(t: &Tx, i: &steve_store::Item) -> Result<bool> {
     else {
         return Ok(false);
     };
-    Ok(i.archived && i.is_finished() && i.updated < now() - keep)
+    Ok(i.archived && i.is_closed() && i.updated < now() - keep)
 }
 
 /// Whether session `sid` is still due for compaction: not running, and its item still due.

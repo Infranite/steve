@@ -21,36 +21,6 @@ export type DebugCoverage = {
   loss_count_stable?: boolean
   refresh_required?: boolean
 }
-/** The derived state (shadow): computed from the item's facts, not acted on. */
-export type DebugDerivedState = {
-  row: number
-  code: string
-  lane: "needs_you" | "running" | "done"
-  owner: "you" | "hub" | "agent" | "nobody"
-  label: string
-  detail?: string
-  next_step: { type: string; kind?: string; id?: string; at?: number; decision_id?: string; session_id?: string; action?: string } | null
-  next_at: number | null
-  settled: "evaluable" | "busy" | "unknown"
-  reviewable: { holds: boolean; missing: string[] }
-  mergeable: { holds: boolean; missing: string[] }
-  closable: { holds: boolean; missing: string[]; by?: string; after?: number }
-  /** What the sweep would do (observe-only: its execution switches are off). */
-  would_do?: DebugWouldDo
-  /** The completion judge's newest candidate of the cycle and its verdict (shadow: never acted on). */
-  judge?: DebugJudge | null
-}
-export type DebugWouldDoAction = "wake" | "card" | "remind"
-export type DebugWouldDo = {
-  current: { action: DebugWouldDoAction; reason: string; label: string; detail?: string; due_at: number; due: boolean; executes: boolean } | null
-  log: { id: string; action: DebugWouldDoAction; reason: string; label: string; detail?: string | null; due_at: number; first_seen: number; cleared_at: number | null; episodes: number; executed: boolean }[]
-  execute: Record<DebugWouldDoAction, boolean>
-}
-export type DebugJudge = {
-  candidate: { id: string; state: "pending" | "judging" | "judged" | "superseded" | "failed"; settled?: "evaluable" | "busy" | "unknown" | null; why?: string | null; failures: number; last_error?: string | null; next_check: number }
-  current: boolean
-  judgement?: { verdict: "done" | "not_done" | "waiting" | "needs_you" | "unknown"; would?: string | null; decided_by?: string | null; harness?: string | null; model?: string | null; independent?: "yes" | "no" | "unknown" | null; reason?: string | null } | null
-}
 export type DebugSnapshot = {
   observed_at: number
   item: { id: string; status: string; phase: string; cycle: number; revision: number }
@@ -62,7 +32,6 @@ export type DebugSnapshot = {
     lifecycle?: { phase?: string; blockers?: { kind: string; label: string }[]; closing?: { waiting?: unknown[] } | null } | null
     dependencies?: { open_dependencies?: string[]; resume_mode?: string; resume_source?: string; resume_enabled?: boolean; resume_blocker?: string | null } | null
     lane?: { state?: string; summary?: string; advice?: string } | null
-    derived_state?: DebugDerivedState | null
     changed_during_read?: boolean
   }
   can_capture: boolean

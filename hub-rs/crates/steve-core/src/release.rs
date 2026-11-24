@@ -8,13 +8,11 @@
 //! only a project on the Hub's device (`projects.device_id = "hub"`) can release or roll back. A project on a
 //! remote Node is refused before anything runs; an in-process Node dies with the Hub, so it can't host it either.
 
-use crate::cycle::{Closing, OP_RELEASE, fingerprint_head};
 use crate::error::Result;
 use crate::gateway::{jstr, truthy};
 use crate::git::{self, Rebase};
 use crate::occupancy::Hold;
 use crate::orchestrator::To;
-use crate::patch;
 use crate::repo::{Decision, Item, WS};
 use crate::util::{now, token};
 use crate::{Core, Releasing, Tx};
@@ -235,7 +233,7 @@ impl Tx<'_> {
     /// What a rebase before a release means: on any problem the agent is sent back and nothing is
     /// released (`false`).
     fn rebase_outcome(&mut self, item_id: &str, branch: &str, to: &To, r: Rebase) -> Result<bool> {
-        let (m, note, now_text, reason) = match r {
+        let (m, note, reason) = match r {
             Rebase::Ok { moved } => {
                 if moved {
                     self.db().timeline_add(
@@ -252,37 +250,24 @@ impl Tx<'_> {
                 let m = format!(
                     "工作区有未提交的改动（{d}），没有发布。先把改动提交到 {branch}，再用 steve_publish 请求发布。"
                 );
-                (
-                    m.clone(),
-                    m,
-                    "发布前要先处理分支",
-                    format!("工作区有未提交的改动（{d}）"),
-                )
+                (m.clone(), m, format!("工作区有未提交的改动（{d}）"))
             }
             Rebase::Conflict(d) => (
                 format!(
                     "发布前要把 {branch} rebase 到最新的 main，自动 rebase 有冲突（{d}），已经撤销，没有发布。请在工作区里执行 git rebase main，解决冲突，重新跑类型检查和测试并提交，然后再用 steve_publish 请求发布。不要强推，也不要改 main。"
                 ),
                 format!("rebase 到 main 有冲突，已撤销，交回给它处理：{d}"),
-                "要先 rebase 解决冲突",
                 format!("rebase 到 main 有冲突（{d}）"),
             ),
             Rebase::Error(d) => {
                 let m = format!(
                     "发布前 rebase 到 main 失败（{d}），没有发布。请检查分支 {branch} 的状态，处理后再用 steve_publish 请求发布。"
                 );
-                (
-                    m.clone(),
-                    m,
-                    "发布前要先处理分支",
-                    format!("rebase 到 main 失败（{d}）"),
-                )
+                (m.clone(), m, format!("rebase 到 main 失败（{d}）"))
             }
         };
         self.db()
             .timeline_add(item_id, "steve", "sys", &note, None)?;
-        self.db()
-            .item_patch(item_id, patch![stage: "收尾", now: now_text])?;
         self.not_released(item_id, &reason, "已交回给它处理")?;
         self.send(to, &m)?;
         Ok(false)
@@ -299,7 +284,7 @@ impl Tx<'_> {
             .find(|d| {
                 d.kind == "approve"
                     && d.subject_type == "release"
-                    && d.status == "resolved"
+                    && d.status == steve_types::DecisionStatus::Resolved
                     && d.result.get("approved").is_some_and(truthy)
                     && d.result
                         .get("outcome")
@@ -318,6 +303,16 @@ impl Tx<'_> {
         let Some(d) = self.open_release(item_id)? else {
             return Ok(());
         };
+        self.record_release_outcome(d, item_id, outcome, extra)
+    }
+
+    fn record_release_outcome(
+        &mut self,
+        d: Decision,
+        item_id: &str,
+        outcome: &str,
+        extra: Value,
+    ) -> Result<()> {
         let mut r = match d.result {
             Value::Object(o) => o,
             _ => Map::new(),
@@ -353,32 +348,7 @@ impl Tx<'_> {
 
     /// The release could not start at all (no script, another one running): nothing changed, a fail card asks what next.
     fn refuse_release(&mut self, item_id: &str, reason: &str, why: &str) -> Result<()> {
-        self.db()
-            .item_patch(item_id, patch![stage: "收尾", now: "没有发布"])?;
         self.not_released(item_id, reason, "等你决定怎么处理")?;
-        self.fail(item_id, why)
-    }
-
-    /// A release that started but ended without going live: reopen the item with a fail card.
-    pub(crate) fn release_failed(
-        &mut self,
-        item_id: &str,
-        now_text: &str,
-        why: &str,
-        extra: Value,
-    ) -> Result<()> {
-        self.release_outcome(item_id, "failed", extra)?;
-        let i = self.item(item_id)?;
-        if i.phase == crate::cycle::CLOSED {
-            /* a release after the cycle closed is a fact of its own: the cycle stays as it closed */
-            return Ok(());
-        }
-        /* the requirement is still open: a fail card asks what next (retry, rework, give up) */
-        if let Some(op) = self.lc_open_op(item_id, crate::cycle::OP_RELEASE)? {
-            self.lc_op_set(&op.id, "pending", json!({"last_failure": why}))?;
-        }
-        self.db()
-            .item_patch(item_id, patch![stage: "收尾", now: now_text])?;
         self.fail(item_id, why)
     }
 
@@ -391,6 +361,19 @@ impl Tx<'_> {
         let Some(item) = self.db().item(item_id)? else {
             return Ok(());
         };
+        let Some(approval) = self
+            .open_release(item_id)?
+            .filter(|approval| approval.subject_id == branch)
+        else {
+            return Ok(());
+        };
+        if item.is_closed() || crate::cycle::stopping(&item) {
+            return self.release_outcome(
+                item_id,
+                "not_released",
+                json!({"reason": "item_cycle_closed"}),
+            );
+        }
         let p = self.db().project(item.project_id.as_deref())?;
         /* before the script lookup: its path names a file on the other device, not on this one */
         if let Some(device) = p
@@ -454,9 +437,23 @@ impl Tx<'_> {
         std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
         self.st.release_generation += 1;
         let generation = self.st.release_generation;
+        let (operation, fresh) = self.record_item_operation(
+            &item,
+            crate::cycle::OP_RELEASE,
+            Some(&approval.id),
+            false,
+            "running",
+            "发布",
+            json!({"log": log.to_string_lossy(), "branch": branch, "scope": self.scope_revision(item_id)?}),
+        )?;
+        if !fresh {
+            return Ok(());
+        }
+        cmd.env("STEVE_RELEASE_OPERATION", &operation.id);
         self.st.releasing = Some(Releasing {
             token: tok,
             item: item_id.into(),
+            operation: Some(operation.id.clone()),
             generation,
             hold_since: None,
         });
@@ -478,6 +475,7 @@ impl Tx<'_> {
                 tracing::error!("release spawn {e}");
                 self.st.releasing = None;
                 let reason = format!("发布脚本没有启动（{e}）");
+                self.settle_item_operation(&operation.id, "failed", json!({"reason": reason}))?;
                 self.release_outcome(item_id, "not_released", json!({"reason": reason}))?;
                 let ws = item.workspace_id.clone();
                 crate::notify::notify(
@@ -490,21 +488,10 @@ impl Tx<'_> {
                     }),
                     Some(item_id),
                 )?;
-                self.db()
-                    .item_patch(item_id, patch![stage: "收尾", now: "没有发布"])?;
                 return self.fail(item_id, &format!("{reason}，没有发布"));
             }
         }
         self.release_outcome(item_id, RELEASING, json!({"log": log.to_string_lossy()}))?;
-        if let Some(op) = self.lc_open_op(item_id, crate::cycle::OP_RELEASE)? {
-            self.lc_op_set(
-                &op.id,
-                "running",
-                json!({"log": log.to_string_lossy(), "branch": branch}),
-            )?;
-        }
-        self.db()
-            .item_patch(item_id, patch![stage: "收尾", now: "正在发布"])?;
         self.db().timeline_add(
             item_id,
             "steve",
@@ -764,147 +751,80 @@ impl Tx<'_> {
         };
         let version = r.get("version").filter(|v| truthy(v)).map(jstr);
         let ok = r.get("ok").is_some_and(truthy);
-        /* one attempt per result, keyed by the result and the release it answers (the item's newest approved
-         * release card): a result reported again (a crash between the database and the file) is recognised and
-         * told nobody twice, while a later release that leaves an identical file is still its own attempt */
-        let card = match &item {
-            Some(i) => self
-                .db()
-                .decisions_of_item(&i.id)?
-                .into_iter()
-                .rev()
-                .find(|d| {
-                    d.kind == "approve"
-                        && d.subject_type == "release"
-                        && d.result.get("approved").is_some_and(truthy)
-                })
-                .map(|d| d.id),
-            None => None,
-        };
-        let effect = format!(
-            "{}:{}:{}:{}",
-            card.unwrap_or_default(),
-            version.clone().unwrap_or_default(),
-            r.get("at").map(jstr).unwrap_or_default(),
-            kind
-        );
-        let mut fresh = true;
-        if let Some(i) = &item {
-            let status = if abandoned {
-                "unknown"
+        let mut fresh = item.is_none();
+        if let Some(i) = &item
+            && let Some(operation) = r.get("operation").and_then(Value::as_str)
+            && let Some((op, approval)) = self.running_release(operation, &i.id)?
+        {
+            let current = self.release_is_current(i, &op)?;
+            let (state, outcome, mut result) = if abandoned {
+                ("unknown", "unknown", json!({"reason": NO_RESULT}))
             } else if ok {
-                "succeeded"
+                ("succeeded", "released", json!({"prev": r.get("prev")}))
             } else {
-                "failed"
+                (
+                    "failed",
+                    "failed",
+                    json!({
+                        "reason": or("error", "健康检查没有通过"),
+                        "note": back,
+                        "hub_ok": r.get("hub_ok").is_some_and(truthy),
+                        "web_ok": r.get("web_ok").is_some_and(truthy),
+                        "degraded": degraded,
+                    }),
+                )
             };
-            let (_, new) = self.lc_op_add(
-                i,
-                crate::cycle::OP_RELEASE,
-                Some(&format!("attempt:{effect}")),
-                false,
-                status,
-                "发布",
-                json!({"version": version, "kind": kind, "commit": r.get("commit"), "prev": r.get("prev"),
-                       "error": r.get("error"), "log": r.get("log")}),
-            )?;
-            fresh = new;
-        }
-        if let (Some(i), true) = (&item, fresh) {
-            let required = self.lc_open_op(&i.id, crate::cycle::OP_RELEASE)?;
-            if ok {
-                self.db().timeline_add(&i.id, "steve", "sys", &text, None)?;
-                /* `prev`: what a rollback of this release goes back to */
-                let prev = r.get("prev").filter(|v| truthy(v)).map(jstr);
-                self.release_outcome(
-                    &i.id,
-                    "released",
-                    json!({"version": version, "kind": kind, "prev": prev}),
-                )?;
-                crate::thread::flowback::flow_quiet(
-                    self.db(),
-                    &i.id,
-                    crate::thread::flowback::Update {
-                        kind: "release",
-                        text: version.clone().unwrap_or_default(),
-                        ..Default::default()
-                    },
-                );
-                /* a release is evidence for the closing gate, never a close by itself */
-                if let Some(op) = required {
-                    let head = crate::cycle::closing_of(i)
-                        .and_then(|c| c.fingerprint)
-                        .map(|f| crate::cycle::fingerprint_head(&f).to_string());
-                    let attempt = steve_store::ItemOperation {
-                        evidence: json!({"commit": r.get("commit")}),
-                        ..op.clone()
-                    };
-                    match self.release_holds(i, &attempt, head.as_deref()) {
-                        Some(true) => {
-                            self.lc_op_set(
-                                &op.id,
-                                "succeeded",
-                                json!({"version": version, "commit": r.get("commit"), "kind": kind}),
-                            )?;
-                        }
-                        Some(false) => {
-                            self.lc_op_set(
-                                &op.id,
-                                "pending",
-                                json!({"last_failure": "发布的版本不包含验收的结果"}),
-                            )?;
-                            self.fail(&i.id, "发布的版本不包含验收的结果，需要重新发布")?;
-                        }
-                        None => {
-                            /* its Node says once its facts are here (`node_git`) */
-                            self.st.git_proofs.entry(i.id.clone()).or_default().push(
-                                crate::node_git::PendingProof {
-                                    op: op.id.clone(),
-                                    head: head.clone().unwrap_or_default(),
-                                    commit: attempt.evidence["commit"]
-                                        .as_str()
-                                        .unwrap_or_default()
-                                        .into(),
-                                    version: json!(version),
-                                    kind: json!(kind),
-                                },
-                            );
-                            self.git_gather(i);
-                        }
+            result["version"] = json!(version);
+            result["kind"] = json!(kind);
+            let store = self.db().store().clone();
+            fresh = store.write(|w| -> Result<bool> {
+                if !steve_store::operation_repo::set(
+                    w,
+                    &op.id,
+                    state,
+                    &json!({"version": version, "kind": kind, "commit": r.get("commit"),
+                        "prev": r.get("prev"), "error": r.get("error"), "log": r.get("log")}),
+                )? {
+                    return Ok(false);
+                }
+                let approval_id = approval.id.clone();
+                self.record_release_outcome(approval, &i.id, outcome, result)?;
+                if ok {
+                    self.db().timeline_add(&i.id, "steve", "sys", &text, None)?;
+                    if current {
+                        crate::thread::flowback::flow_quiet(
+                            self.db(),
+                            &i.id,
+                            crate::thread::flowback::Update {
+                                kind: "release",
+                                text: version.clone().unwrap_or_default(),
+                                ..Default::default()
+                            },
+                        );
+                    }
+                } else if current {
+                    if abandoned {
+                        self.release_unknown_for(
+                            &i.id,
+                            &text,
+                            Some(steve_store::DecisionSource::Revision {
+                                revision: format!("release_unknown:{approval_id}"),
+                            }),
+                        )?;
+                    } else {
+                        self.fail_with_source(
+                            &i.id,
+                            &text,
+                            Some(steve_store::DecisionSource::Revision {
+                                revision: format!("release_fail:{approval_id}"),
+                            }),
+                        )?;
                     }
                 }
-            } else if abandoned {
-                /* nobody knows what is live: not a failure, a result to check */
-                self.release_outcome(
-                    &i.id,
-                    "unknown",
-                    json!({"reason": NO_RESULT, "version": version, "kind": kind}),
-                )?;
-                if let Some(op) = required {
-                    self.lc_op_set(&op.id, "unknown", json!({"note": NO_RESULT}))?;
-                }
-                if i.phase != crate::cycle::CLOSED {
-                    self.release_unknown(&i.id, &text)?;
-                }
-            } else {
-                let hub_only = kind == "hub+web" && r.get("hub_ok").is_some_and(truthy);
-                let extra = json!({
-                    "reason": or("error", "健康检查没有通过"),
-                    "note": back,
-                    "version": version,
-                    "kind": kind,
-                    "hub_ok": r.get("hub_ok").is_some_and(truthy),
-                    "web_ok": r.get("web_ok").is_some_and(truthy),
-                    "degraded": degraded,
-                });
-                let now_text = if degraded {
-                    "发布失败，新版本降级运行"
-                } else if hub_only {
-                    "Hub 已发布，前端发布失败"
-                } else {
-                    "发布失败"
-                };
-                self.release_failed(&i.id, now_text, &text, extra)?;
-            }
+                Ok(true)
+            })?;
+        } else if item.is_some() {
+            metrics::counter!("steve_item_stale_delivery_total").increment(1);
         }
         if fresh {
             let ws = item
@@ -931,18 +851,72 @@ impl Tx<'_> {
 }
 
 impl Tx<'_> {
-    /// The release script of `item` exited and nothing reported a result for it.
-    fn unreported(&mut self, item: &str) -> Result<()> {
-        let pending = self
-            .open_release(item)?
-            .is_some_and(|d| d.result.get("outcome").and_then(Value::as_str) == Some(RELEASING));
-        if !pending {
+    fn running_release(
+        &self,
+        operation: &str,
+        item: &str,
+    ) -> Result<Option<(steve_store::ItemOperation, Decision)>> {
+        let Some(op) = self
+            .db()
+            .store()
+            .items()
+            .operation(operation)?
+            .filter(|op| {
+                op.item_id == item && op.kind == crate::cycle::OP_RELEASE && op.status == "running"
+            })
+        else {
+            return Ok(None);
+        };
+        let Some(approval) = op.effect_id.as_deref() else {
+            return Ok(None);
+        };
+        let Some(approval) = self
+            .db()
+            .decision(approval)?
+            .filter(|d| d.item_id.as_deref() == Some(item) && d.subject_type == "release")
+        else {
+            return Ok(None);
+        };
+        Ok(Some((op, approval)))
+    }
+
+    fn release_is_current(
+        &self,
+        item: &Item,
+        operation: &steve_store::ItemOperation,
+    ) -> Result<bool> {
+        Ok(!item.is_closed()
+            && operation.cycle == item.cycle
+            && operation.revision == item.delivery_revision
+            && operation.evidence.get("scope").and_then(Value::as_i64)
+                == Some(self.scope_revision(&item.id)?))
+    }
+
+    /// The process we started exited without reporting its operation.
+    fn unreported(&mut self, item: &str, operation: &str) -> Result<()> {
+        let Some((op, approval)) = self.running_release(operation, item)? else {
             return Ok(());
-        }
+        };
+        let i = self.item(item)?;
         let why = format!("{NO_RESULT}，不知道有没有发布；请看发布日志");
-        let ws = self.item(item)?.workspace_id;
-        crate::notify::notify(self.db(), &ws, "release", "fail", &why, Some(item))?;
-        self.release_failed(item, "发布失败", &why, json!({"reason": NO_RESULT}))
+        let current = self.release_is_current(&i, &op)?;
+        let store = self.db().store().clone();
+        store.write(|w| {
+            steve_store::operation_repo::set(w, &op.id, "failed", &json!({"reason": NO_RESULT}))?;
+            self.record_release_outcome(approval, item, "failed", json!({"reason": NO_RESULT}))?;
+            if current {
+                self.fail(item, &why)?;
+            }
+            crate::notify::notify(
+                self.db(),
+                &i.workspace_id,
+                "release",
+                "fail",
+                &why,
+                Some(item),
+            )?;
+            Ok(())
+        })
     }
 }
 
@@ -1020,197 +994,39 @@ impl Core {
             .as_ref()
             .is_some_and(|r| r.generation == generation)
         {
-            let item = t.st.releasing.take().map(|r| r.item);
+            let release = t.st.releasing.take();
             if let Err(e) = t.end_hold() {
                 tracing::error!("end hold {e}");
             }
             /* its result may have just been written: report it now rather than on the next poll; a script that
              * ended without one must not leave the item "正在发布" for ever */
-            if let Some(item) = item
-                && let Err(e) = t.report_release().and_then(|()| t.unreported(&item))
-            {
+            if let Err(e) = t.report_release().and_then(|()| {
+                if let Some(release) = release
+                    && let Some(operation) = release.operation
+                {
+                    t.unreported(&release.item, &operation)?;
+                }
+                Ok(())
+            }) {
                 tracing::error!("release done {e}");
             }
         }
     }
 }
 
-/// Does a succeeded release `op` (its `evidence.commit`) contain the frozen `head`? Without a frozen
-/// head (no worktree) any release of the cycle counts; without a commit to compare, none does.
-pub(crate) fn release_contains(
-    i: &Item,
-    op: &steve_store::ItemOperation,
-    head: Option<&str>,
-) -> bool {
-    let Some(head) = head.filter(|h| !h.is_empty()) else {
-        return true;
-    };
-    let Some(commit) = op.evidence["commit"].as_str().filter(|c| !c.is_empty()) else {
-        return false;
-    };
-    if commit.starts_with(head) || head.starts_with(commit) {
-        return true;
-    }
-    let Some(cwd) = i.cwd.as_deref().filter(|c| Path::new(c).exists()) else {
-        return false;
-    };
-    crate::git::command()
-        .args(["-C", cwd, "merge-base", "--is-ancestor", head, commit])
-        .output()
-        .is_ok_and(|o| o.status.success())
-}
-
 impl Tx<'_> {
-    /// [`release_contains`] for the item where its git is: on a Node as its facts say (`None`:
-    /// they don't say yet).
-    pub(crate) fn release_holds(
-        &self,
-        i: &Item,
-        op: &steve_store::ItemOperation,
-        head: Option<&str>,
-    ) -> Option<bool> {
-        if !self.git_on_node(&i.id) {
-            return Some(release_contains(i, op, head));
-        }
-        let Some(head) = head.filter(|h| !h.is_empty()) else {
-            return Some(true);
-        };
-        let Some(commit) = op.evidence["commit"].as_str().filter(|c| !c.is_empty()) else {
-            return Some(false);
-        };
-        if commit.starts_with(head) || head.starts_with(commit) {
-            return Some(true);
-        }
-        self.git_contains(&i.id, head, commit)
-    }
-
-    /// The release adapter of the closing gate. A release project: the accepted result must be live. Satisfied by a release of this cycle whose
-    /// commit contains the frozen `HEAD` (the agent may have released it already); otherwise a pending
-    /// requirement, and the agent is asked to publish. A branch with nothing to release is not proof of
-    /// a deployment: without such a release it stays a requirement you can waive. Once you said no to
-    /// releasing in this cycle (and nothing since said yes), every later result of it is waived too:
-    /// your no holds for the cycle, not just for the revision it was asked about.
-    pub(crate) fn release_requirement(&mut self, i: &Item, c: &Closing) -> Result<()> {
-        if !self.release_pending(i)? {
-            return Ok(());
-        }
-        /* the project's own completion rule (merged, tagged) stands for the release on this machine */
-        if let Some(rule) = self.done_rule(i)? {
-            return self.contract_requirement(i, &rule);
-        }
-        /* on a Node: what it shipped and what there is to ship are its facts; none yet holds this
-         * until they are here (the gathering checks the closing again) */
-        if self.git_on_node(&i.id) && !matches!(self.git_take(i), Some(Ok(_))) {
-            return Ok(());
-        }
-        let head = c.fingerprint.as_deref().map(fingerprint_head);
-        let proof = self
-            .db()
-            .store()
-            .items()
-            .operations(&i.id, i.cycle)?
-            .into_iter()
-            .find(|o| {
-                o.kind == OP_RELEASE
-                    && o.status == "succeeded"
-                    && self.release_holds(i, o, head) == Some(true)
-            });
-        let key = format!("{}:{}:{}", OP_RELEASE, i.cycle, i.revision);
-        match proof {
-            Some(p) => {
-                self.lc_op_add(
-                    i,
-                    OP_RELEASE,
-                    Some(&key),
-                    true,
-                    "succeeded",
-                    "发布上线",
-                    json!({"proof": p.id, "version": p.evidence["version"], "note": "本周期已经发布过包含这个结果的版本"}),
-                )?;
-            }
-            None => {
-                let declined = self.release_declined(i)?;
-                let (op, new) = self.lc_op_add(
-                    i,
-                    OP_RELEASE,
-                    Some(&key),
-                    true,
-                    "pending",
-                    "发布上线",
-                    json!({}),
-                )?;
-                if let Some(reason) = declined {
-                    if op.status == "pending" {
-                        /* set here, not through lc_op_set: the gate that called this checks right after */
-                        let mut e = json!({"note": "你选择不发布"});
-                        if !reason.is_empty() {
-                            e["reason"] = json!(reason);
-                        }
-                        self.db().store().write(|tx| {
-                            steve_store::operation_repo::set(tx, &op.id, "waived", &e)
-                        })?;
-                        self.db().timeline_add(
-                            &i.id,
-                            "steve",
-                            "sys",
-                            "你选择了不发布，发布这一步不再等",
-                            None,
-                        )?;
-                    }
-                    return Ok(());
-                }
-                if new {
-                    if self.nothing_to_release(i)? {
-                        self.release_unproven(&i.id)?;
-                    } else if !self.release_with_accept(i, c)? {
-                        self.await_release_for(&i.id)?;
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Your last word on releasing in the item's current cycle, when it was no: the reason you gave (may
-    /// be empty). A release card you declined or a check you answered with "no release needed"; a later
-    /// approval, or asking for the release again, takes it back.
-    pub(crate) fn release_declined(&self, i: &Item) -> Result<Option<String>> {
-        let since = self
-            .db()
-            .store()
-            .items()
-            .cycles(&i.id)?
-            .iter()
-            .filter(|c| c.cycle < i.cycle)
-            .map(|c| c.closed)
-            .max()
-            .unwrap_or(0);
-        let last = self
-            .db()
-            .decisions_of_item(&i.id)?
-            .into_iter()
-            .filter(|d| d.status == "resolved" && d.created >= since)
-            .filter_map(|d| {
-                let no = match (d.kind.as_str(), d.subject_type.as_str()) {
-                    ("approve", "release") => d.result["approved"] == false,
-                    ("fail", _) => match d.result["choice"].as_str() {
-                        Some("release_waive") => true,
-                        Some("release_retry") => false,
-                        _ => return None,
-                    },
-                    _ => return None,
-                };
-                let reason = d.result["text"].as_str().unwrap_or("").trim().to_string();
-                Some((d.resolved.unwrap_or(d.created), no, reason))
-            })
-            .max_by_key(|(at, _, _)| *at);
-        Ok(last.filter(|(_, no, _)| *no).map(|(_, _, r)| r))
-    }
-
     /// A release whose result nobody knows: the requirement waits for you to check, nothing retries it.
-    pub(crate) fn release_unknown(&mut self, item_id: &str, text: &str) -> Result<()> {
+    pub(crate) fn release_unknown_for(
+        &mut self,
+        item_id: &str,
+        text: &str,
+        source: Option<steve_store::DecisionSource>,
+    ) -> Result<()> {
         let i = self.item(item_id)?;
         crate::lifecycle::supersede(self.db(), item_id, &["fail"], "发布结果未知")?;
+        let source = source.unwrap_or_else(|| steve_store::DecisionSource::Revision {
+            revision: format!("release_unknown:{}:{}", i.cycle, crate::util::sha(text)),
+        });
         self.db().decision_create(crate::repo::NewDecision {
             workspace_id: i.workspace_id.clone(),
             kind: "fail".into(),
@@ -1224,106 +1040,10 @@ impl Tx<'_> {
                 "look".into(),
             ]),
             requested_by: "steve".into(),
+            source: Some(source),
             ..Default::default()
         })?;
-        self.db()
-            .item_patch(item_id, patch![now: "发布结果未知，等你核对"])?;
         Ok(())
-    }
-
-    /// 验收并发布: the acceptance that is being recorded asked for the release too, so the Hub
-    /// rebases and starts it now — approved by whoever accepted, for the result as it was accepted
-    /// (the frozen fingerprint, kept on the release decision). `false` leaves it to the agent's own
-    /// release request (a separate card): the branch moved since, another release is running, the
-    /// worktree is on a Node or on another device, or this acceptance did not ask.
-    fn release_with_accept(&mut self, i: &Item, c: &Closing) -> Result<bool> {
-        let Some((_, who)) = self
-            .st
-            .release_with_accept
-            .clone()
-            .filter(|(item, _)| *item == i.id)
-        else {
-            return Ok(false);
-        };
-        let Some(branch) = i.branch.clone().filter(|b| !b.is_empty()) else {
-            return Ok(false);
-        };
-        let Some(p) = self.db().project(i.project_id.as_deref())? else {
-            return Ok(false);
-        };
-        if p.device_id != HUB_DEVICE || self.git_on_node(&i.id) || self.st.releasing.is_some() {
-            return Ok(false);
-        }
-        /* the result accepted is the one released: nothing moved since it was frozen */
-        let Some(frozen) = c.fingerprint.clone() else {
-            return Ok(false);
-        };
-        if crate::cycle::result_moved(
-            crate::cycle::fingerprint(i.cwd.as_deref()).as_deref(),
-            Some(&frozen),
-        ) {
-            return Ok(false);
-        }
-        let d = self.db().decision_create(crate::repo::NewDecision {
-            workspace_id: i.workspace_id.clone(),
-            kind: "approve".into(),
-            subject_type: "release".into(),
-            subject_id: branch.clone(),
-            item_id: Some(i.id.clone()),
-            session_id: self.active_session(&i.id)?.map(|s| s.id),
-            question: format!("发布新版本（{} · 分支 {branch}）", p.name),
-            draft: Some("验收时一起批准的发布。".into()),
-            options: Some(vec!["yes".into(), "no".into()]),
-            requested_by: "steve".into(),
-        })?;
-        self.db().decision_resolve(
-            &d.id,
-            json!({"approved": true, "text": "", "with_accept": true, "fingerprint": frozen}),
-            "resolved",
-            None,
-        )?;
-        self.db()
-            .timeline_add(&i.id, &who, "me", &format!("验收并发布 {branch}"), None)?;
-        let to = match self.active_session(&i.id)?.filter(|s| s.status != "ended") {
-            Some(s) => To::Session(s.id),
-            None => To::Decision {
-                live: None,
-                item: Some(i.id.clone()),
-            },
-        };
-        self.db()
-            .item_patch(&i.id, patch![stage: "收尾", now: "正在发布"])?;
-        if !self.rebase_for_release(&i.id, &branch, &to)? {
-            return Ok(true);
-        }
-        self.start_release(&branch, &i.id)?;
-        /* told with its next message, and only once the release really runs: a rebase that
-        stopped or a refused start sends the agent back to steve_publish instead */
-        if let (To::Session(sid), true) = (
-            &to,
-            self.st.releasing.as_ref().is_some_and(|r| r.item == i.id),
-        ) {
-            self.c.steve_note(
-                sid,
-                &format!("（Steve）用户验收通过并批准了发布，Steve 已经开始发布 {branch}，不用再用 steve_publish 请求。"),
-            );
-        }
-        Ok(true)
-    }
-
-    /// Asks the agent of the item to publish (the required release of an accepted result); its
-    /// session in error, a card for you instead.
-    pub(crate) fn await_release_for(&mut self, item_id: &str) -> Result<()> {
-        let Some(to) = self.steve_to(item_id)? else {
-            /* its session is in error: a message would only wait in its queue (#347) */
-            self.db()
-                .item_patch(item_id, patch![stage: "收尾", now: "等待发布"])?;
-            return self.fail(
-                item_id,
-                "验收通过了，还差发布；Bot 的会话出错停下了，Steve 没有给它排消息。让它继续，或者确认不需要发布。",
-            );
-        };
-        self.await_release(item_id, &to)
     }
 }
 

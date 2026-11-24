@@ -17,7 +17,7 @@ use axum::body::Body;
 use axum::http::{Request, header};
 use serde_json::{Value, json};
 use steve_github::fake::{FakeGitHub, defaults};
-use steve_github::{GitHub, GitHubEnv, RecordingCore, accept, comment, manifest, mcp, repos};
+use steve_github::{GitHub, GitHubEnv, accept, comment, manifest, mcp, repos};
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::testkit::{ME, TestEnv, WS, call, caller};
@@ -176,7 +176,6 @@ async fn setup() -> H {
         std::sync::Arc::new(steve_runtime::cache::Caches::new(Default::default())),
     );
     slot.expect("slot").bind(&gh);
-    gh.set_core(RecordingCore::new(env.store().clone()));
     let sink = Arc::new(Sink::default());
     gh.set_session_sink(sink.clone());
     let api = manifest::routes(gh.clone())
@@ -253,7 +252,7 @@ fn item(h: &H, no: i64, project: Option<&str>, branch: Option<&str>) -> String {
     let cwd = h.work.path().display().to_string();
     exec(
         h,
-        Seed::ItemsIdWorkspaceIdNoTitleStatusStage,
+        Seed::InsertBranchItem,
         &[&id, &WS, &no, &cwd, &branch, &project],
     );
     id
@@ -659,7 +658,7 @@ async fn the_panel_matches_section_7_and_reruns_failed_checks() {
     h.gh.poll_repo(repo.as_str().expect("repo"))
         .await
         .expect("poll");
-    exec(&h, Seed::ItemsStatusWaitId, &[&id]);
+    exec(&h, Seed::SetItemActive, &[&id]);
     let ps = h
         .env
         .modules
@@ -669,7 +668,7 @@ async fn the_panel_matches_section_7_and_reruns_failed_checks() {
         })
         .await
         .expect("panels");
-    assert_eq!(ps[0].foot.as_deref(), Some("2 项检查通过 · 等你验收后合并"));
+    assert_eq!(ps[0].foot.as_deref(), Some("2 项检查通过"));
     assert_eq!(
         ps[0]
             .actions
@@ -733,7 +732,7 @@ async fn an_agent_asks_for_a_draft_pr_and_hears_back() {
         told[0]
     );
     // the item is not finished: this was before acceptance
-    assert_eq!(q(&h, Inspect::ItemsStatus, &[&id]), json!("run"));
+    assert_eq!(q(&h, Inspect::ItemPhase, &[&id]), json!("active"));
     // now there is an open PR from the branch
     let e = tool(&h, &c, mcp::OPEN_PR, json!({"title": "again", "body": ""}))
         .await

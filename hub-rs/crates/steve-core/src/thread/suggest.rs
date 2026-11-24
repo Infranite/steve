@@ -8,7 +8,7 @@ use super::{decide::Decision, lock, meta_of};
 use crate::Core;
 use crate::error::{CoreError, Result};
 use crate::gateway::Route;
-use crate::repo::{FileRef, Item, ItemExt};
+use crate::repo::{FileRef, Item};
 use crate::util::now;
 use serde_json::{Value, json};
 
@@ -56,7 +56,7 @@ pub(crate) fn card(r: &Route, d: &Decision, item: Option<&Item>) -> (String, Val
             .project
             .clone()
             .or_else(|| item.and_then(|i| i.project_id.clone()));
-        if item.is_some_and(|i| i.is_finished()) {
+        if item.is_some_and(|i| i.is_closed()) {
             return closed_card(
                 &name,
                 json!({"id": "new", "label": "单独建项", "title": title, "goal": goal,

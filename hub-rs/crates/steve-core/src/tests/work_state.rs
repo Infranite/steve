@@ -97,12 +97,6 @@ fn change(k: &Kit, parent: &str, action: &str, id: Option<&str>) {
         .unwrap();
 }
 
-fn work(k: &Kit, item: &str) -> (&'static str, Option<String>) {
-    let t = k.core.tx();
-    let w = t.work(&t.item(item).unwrap()).unwrap();
-    (w.code(), w.text().map(String::from))
-}
-
 fn steve_lines(k: &Kit, item: &str) -> Vec<String> {
     k.timeline_texts(item)
         .into_iter()
@@ -115,7 +109,7 @@ fn stall_cards(k: &Kit, item: &str) -> usize {
         .decisions_of_item(item)
         .unwrap()
         .iter()
-        .filter(|d| d.status == "open" && d.subject_type == STALL)
+        .filter(|d| d.status == steve_types::DecisionStatus::Open && d.subject_type == STALL)
         .count()
 }
 
@@ -136,7 +130,6 @@ fn an_idle_coordinator_while_units_run_for_minutes_is_waiting() {
     let parent = planned(&k, &["a", "b"]);
     let coord = k.session(&parent, "idle");
     assert_eq!(k.rt.st().turning.len(), 2, "both units run");
-    assert_eq!(work(&k, &parent).0, "running");
 
     assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
     assert!(k.rt.prompts_of(&coord).is_empty(), "not continued");
@@ -157,10 +150,6 @@ fn an_idle_coordinator_while_units_run_for_minutes_is_waiting() {
     );
     assert!(steve_lines(&k, &parent).is_empty(), "no budget spent");
     assert!(k.open_fails(&parent).is_empty());
-    assert_eq!(k.status(&parent).2, "协作执行中：a、b");
-    let snap = k.core.diagnostic_snapshot(&parent).unwrap();
-    assert_eq!(snap["work"]["state"], "running");
-    assert_eq!(snap["work"]["why"], "协作执行中：a、b");
 }
 
 #[test]
@@ -169,35 +158,47 @@ fn a_stop_card_from_before_recovery_expires_while_the_graph_is_running() {
     let parent = planned(&k, &["a"]);
     let coord = k.session(&parent, "idle");
     let old = k.decision(&parent, Some(&coord), "fail", STALL, &["continue", "look"]);
-    crate::lifecycle::settle(k.db(), &parent).unwrap();
-    assert_eq!(k.status(&parent).0, "wait");
+    assert!(!k.open_kinds(&parent).is_empty());
 
     assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
-    assert_eq!(k.db().decision(&old).unwrap().unwrap().status, "expired");
-    assert_eq!(k.status(&parent).0, "run");
-    assert_eq!(k.status(&parent).2, "协作执行中：a");
+    assert_eq!(
+        k.db().decision(&old).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Expired
+    );
+    assert_eq!(k.item_label(&parent), "run");
 
     let old = k.decision(&parent, Some(&coord), "fail", STALL, &["continue", "look"]);
     let real_question = k.decision(&parent, Some(&coord), "ask", "item", &["answer"]);
-    crate::lifecycle::settle(k.db(), &parent).unwrap();
     assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
-    assert_eq!(k.db().decision(&old).unwrap().unwrap().status, "expired");
+    assert_eq!(
+        k.db().decision(&old).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Expired
+    );
     assert_eq!(
         k.db().decision(&real_question).unwrap().unwrap().status,
-        "open"
+        steve_types::DecisionStatus::Open
     );
-    assert_eq!(k.status(&parent).0, "wait", "the real question still waits");
+    assert!(
+        !k.open_kinds(&parent).is_empty(),
+        "the real question still waits"
+    );
 
     let old = k.decision(&parent, Some(&coord), "fail", STALL, &["continue", "look"]);
     let unknown_effect = k.decision(&parent, Some(&coord), "fail", "item", &["release_retry"]);
     let release = k.decision(&parent, Some(&coord), "fail", "item", &["release_live"]);
     assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
-    assert_eq!(k.db().decision(&old).unwrap().unwrap().status, "expired");
+    assert_eq!(
+        k.db().decision(&old).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Expired
+    );
     assert_eq!(
         k.db().decision(&unknown_effect).unwrap().unwrap().status,
-        "open"
+        steve_types::DecisionStatus::Open
     );
-    assert_eq!(k.db().decision(&release).unwrap().unwrap().status, "open");
+    assert_eq!(
+        k.db().decision(&release).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Open
+    );
 }
 
 /// A paused graph is your stop: nothing continues the coordinator or opens a card for it.
@@ -207,13 +208,11 @@ fn a_paused_graph_is_not_a_stop() {
     let parent = planned(&k, &["a"]);
     let coord = k.session(&parent, "idle");
     change(&k, &parent, "pause", None);
-    assert_eq!(work(&k, &parent), ("paused", Some("协作已暂停".into())));
     assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
     coordinator_turn(&k, &coord, "已暂停。");
     assert_eq!(k.rt.prompts_of(&coord).len(), 1);
     assert!(steve_lines(&k, &parent).is_empty());
     assert!(k.open_fails(&parent).is_empty());
-    assert_eq!(k.status(&parent).2, "协作已暂停");
 }
 
 /// ST-5, ST-10, ST-27: the coordinator paused its own graph and asked nothing. That waits for you:
@@ -239,13 +238,6 @@ fn a_graph_its_coordinator_paused_without_asking_waits_for_you() {
             "dev",
         )
         .unwrap();
-    assert_eq!(
-        work(&k, &parent),
-        (
-            "paused_by_agent",
-            Some("协作已暂停，等你决定：评审单元被上游拒绝".into())
-        )
-    );
     // a graph paused before its turn ended (or before this Hub): the watch asks you
     assert_eq!(
         k.core.tx().check_stalls(later()).unwrap(),
@@ -254,13 +246,12 @@ fn a_graph_its_coordinator_paused_without_asking_waits_for_you() {
     assert!(k.rt.prompts_of(&coord).is_empty(), "not continued");
     assert!(steve_lines(&k, &parent).is_empty(), "no budget spent");
     assert_eq!(stall_cards(&k, &parent), 1);
-    assert_eq!(k.status(&parent).0, "wait");
-    assert_eq!(work(&k, &parent).0, "waiting_user");
+    assert!(!k.open_kinds(&parent).is_empty());
     // you resume it: the card no longer applies
     change(&k, &parent, "resume", None);
     assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
     assert_eq!(stall_cards(&k, &parent), 0);
-    assert_eq!(k.status(&parent).0, "run");
+    assert_eq!(k.item_label(&parent), "run");
 
     // paused in a turn that then ends: the card comes with the turn end
     k.rt.prompt(&coord, "看看进度", "me", &[]).unwrap();
@@ -287,7 +278,7 @@ fn a_graph_its_coordinator_paused_without_asking_waits_for_you() {
         cards,
         vec!["协作已暂停，等你决定：需要你确认范围".to_string()]
     );
-    assert_eq!(k.status(&parent).0, "wait");
+    assert!(!k.open_kinds(&parent).is_empty());
 }
 
 /// A pause stops the units' turns; when the graph is resumed before the stopped turn's end comes
@@ -304,7 +295,6 @@ fn a_turn_the_pause_stopped_is_no_failure_after_a_quick_resume() {
     let a = unit(&k, &parent, "a");
     assert_eq!((a.status.as_str(), a.reason), ("running", None));
     assert_eq!(k.rt.prompts_of(&sid).len(), before + 1, "resumed in place");
-    assert_eq!(work(&k, &parent).0, "running");
     assert!(k.open_fails(&parent).is_empty());
 
     // a turn you stop yourself, with no pause, is the unit's failure as before
@@ -330,33 +320,23 @@ fn queued_units_are_waited_for() {
         .unwrap();
     assert_eq!(unit(&k, &parent, "a").status, "pending");
     k.rt.end_turn(&k.core, &coord, "end_turn", None);
-    assert_eq!(k.status(&parent).2, "协作排队中：a、b、review 等 4 项");
     assert!(steve_lines(&k, &parent).is_empty());
     k.core.tx().set_hold(crate::occupancy::Hold::Release, false);
-    assert_eq!(work(&k, &parent).0, "queued");
     assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
     assert!(k.open_fails(&parent).is_empty());
 }
 
-/// Units that cannot start here are a real failure, with the reason why, not a quiet wait.
 #[test]
 fn units_that_cannot_start_say_why() {
     let k = kit(0);
     k.rt.st().workflow_execution_ready = false;
-    let parent = k.item("run", "执行", None);
-    k.core
-        .workflow_change(
-            &parent,
-            json!({"action":"plan","reason":"拆分","expected_revision":0,
-                "units":graph_of(&["a"]),"max_parallel":1,"max_attempts":3}),
-            "me",
-        )
-        .unwrap();
-    let (code, why) = work(&k, &parent);
-    assert_eq!(code, "failed");
+    let parent = planned(&k, &["a"]);
+    let coord = k.session(&parent, "idle");
+    coordinator_turn(&k, &coord, "看一下");
+    let cards = k.open_fails(&parent);
     assert!(
-        why.unwrap()
-            .starts_with("协作工作无法开始：测试运行器未启用隔离协作执行")
+        cards.iter().any(|card| card.contains("协作工作无法开始")),
+        "{cards:?}"
     );
 }
 
@@ -459,8 +439,6 @@ fn a_registered_dependency_wait_is_not_a_stall() {
             json!({"action":"wait","deps":[dep],"reason":"等前置验收","resume":"automatic"}),
         )
         .unwrap();
-    k.db().item_patch(&item, patch![status: "run"]).unwrap();
-    assert_eq!(work(&k, &item).0, "dependency_wait");
     assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
     assert!(k.rt.prompts_of(&sid).is_empty());
     assert!(k.open_fails(&item).is_empty());
@@ -478,14 +456,14 @@ fn a_unit_working_again_clears_the_parents_stop_card() {
     let coord = k.session(&parent, "idle");
     k.core.tx().check_stalls(later()).unwrap();
     assert_eq!(stall_cards(&k, &parent), 1);
-    assert_eq!(k.status(&parent).0, "wait");
+    assert!(!k.open_kinds(&parent).is_empty());
     change(&k, &parent, "retry", Some("a"));
     let retried = unit(&k, &parent, "a").session_id.unwrap();
     assert_ne!(retried, old);
     k.core.expire_stall(&retried).unwrap();
     assert_eq!(stall_cards(&k, &parent), 0);
     assert!(k.open_fails(&parent).is_empty());
-    assert_eq!(k.status(&parent).0, "run");
+    assert_eq!(k.item_label(&parent), "run");
     assert!(
         k.timeline_texts(&parent)
             .iter()
@@ -499,10 +477,15 @@ fn a_unit_working_again_clears_the_parents_stop_card() {
         .decisions_of_item(&parent)
         .unwrap()
         .iter()
-        .filter(|d| d.status == "open")
+        .filter(|d| d.status == steve_types::DecisionStatus::Open)
         .for_each(|d| {
             k.db()
-                .decision_resolve(&d.id, json!({}), "resolved", None)
+                .decision_resolve(
+                    &d.id,
+                    json!({}),
+                    steve_store::decision_repo::DecisionChange::Resolve,
+                    None,
+                )
                 .unwrap();
         });
 
@@ -549,28 +532,15 @@ fn an_agent_waiting_for_your_own_action_is_not_continued() {
 /// 2026-11-12: the Node could not link for hours and input waited with only "queued" to show. What
 /// waits on it says the Node is not linked and why, and stops saying so once it links.
 #[test]
-fn input_waiting_on_an_unlinked_node_says_why() {
+fn queued_input_is_left_for_its_session_when_the_node_is_offline() {
     let k = kit(2);
     let i = k.item("run", "执行", None);
     let s = k.session(&i, "idle");
     k.db().queue_add(&s, "继续", "me", &[]).unwrap();
-    assert_eq!(work(&k, &i), ("queued", Some("有排队输入等待发送".into())));
-    k.rt.st().node_offline =
-        Some("internal: control message hello is 69214 bytes, over the 65536 limit".into());
-    let (code, why) = work(&k, &i);
-    assert_eq!(code, "queued");
-    assert_eq!(
-        why.as_deref(),
-        Some(
-            "等待 Node 连接：internal: control message hello is 69214 bytes, over the 65536 limit"
-        )
-    );
+    k.rt.st().node_offline = Some("offline".into());
     assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
-    assert_eq!(k.status(&i).2, why.unwrap());
-    assert!(k.open_fails(&i).is_empty(), "a wait, not a stop");
-    k.rt.st().node_offline = None;
-    assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
-    assert_eq!(k.status(&i).2, "有排队输入等待发送");
+    assert!(k.open_fails(&i).is_empty());
+    assert_eq!(k.db().queued(&s).unwrap().len(), 1);
 }
 
 /// ST-1/2/3: a 429 that says the quota is back in hours. Continuing at once fails within a second
@@ -590,10 +560,7 @@ fn a_quota_that_is_back_later_is_waited_for_not_continued() {
     assert_eq!(k.rt.prompts_of(&s).len(), 1, "not continued at once");
     assert!(steve_lines(&k, &i).is_empty(), "no continue spent");
     assert!(k.open_fails(&i).is_empty(), "no card");
-    let (code, why) = work(&k, &i);
-    assert_eq!(code, "quota_wait");
-    assert!(why.unwrap().starts_with("模型配额用完，"));
-    assert!(k.status(&i).2.starts_with("模型配额用完，"));
+
     // the watch leaves it while the quota is out
     assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
     assert_eq!(k.rt.prompts_of(&s).len(), 1);
@@ -604,7 +571,6 @@ fn a_quota_that_is_back_later_is_waited_for_not_continued() {
     assert_eq!(prompts.len(), 2);
     assert!(prompts[1].contains("配额已恢复"), "{}", prompts[1]);
     assert!(steve_lines(&k, &i).is_empty());
-    assert_eq!(work(&k, &i).0, "running");
 
     // a quota with no time stays an ordinary error: continued within the budget
     k.rt.end_turn(
@@ -630,7 +596,6 @@ fn an_open_stop_card_does_not_hold_back_a_continue() {
         &["continue", "look", "drop"],
         "它停下了：会话空闲",
     );
-    assert_eq!(work(&k, &i).0, "waiting_user");
     k.core.tx().takeover_invalidated(&i, "计划已更新").unwrap();
     let p = k.rt.prompts_of(&s);
     assert_eq!(p.len(), 1, "continued");
@@ -660,7 +625,7 @@ fn open_ids(k: &Kit, item: &str) -> Vec<String> {
         .decisions_of_item(item)
         .unwrap()
         .into_iter()
-        .filter(|d| d.status == "open")
+        .filter(|d| d.status == steve_types::DecisionStatus::Open)
         .map(|d| d.id)
         .collect()
 }
@@ -696,22 +661,17 @@ fn old_stop_cards_of_a_parent_whose_units_run_expire_after_a_restart() {
         &["continue", "delivered", "look"],
         "Agent 停下来了，没有交付也没有提问",
     );
-    crate::lifecycle::settle(k.db(), &parent).unwrap();
-    assert_eq!(k.status(&parent).0, "wait");
-    assert_eq!(
-        work(&k, &parent),
-        ("running", Some("协作执行中：a、b".into()))
-    );
+    assert!(!k.open_kinds(&parent).is_empty());
 
     let core = restarted(&k);
     assert!(core.tx().check_stalls(later()).unwrap().is_empty());
     assert!(open_ids(&k, &parent).is_empty(), "both stop cards expired");
-    assert_eq!(k.status(&parent).0, "run");
+    assert_eq!(k.item_label(&parent), "run");
     assert!(k.rt.prompts_of(&coord).is_empty(), "not continued");
     assert!(
         k.timeline_texts(&parent)
             .iter()
-            .any(|t| t == "2 件待处理已失效：协作执行中：a、b")
+            .any(|t| t == "2 件待处理已失效：协作工作在等待或执行中")
     );
 }
 
@@ -744,14 +704,12 @@ fn real_user_cards_of_a_parent_survive_the_tidy() {
         &["release_live", "release_waive", "look"],
         "是否已上线",
     );
-    assert_eq!(work(&k, &parent).0, "waiting_user");
     k.core.tx().check_stalls(later()).unwrap();
     let open = open_ids(&k, &parent);
     assert!(!open.contains(&stop));
     for id in [&ask, &unknown, &release] {
         assert!(open.contains(id), "{id} stays");
     }
-    assert_eq!(work(&k, &parent).0, "waiting_user");
     assert!(k.rt.prompts_of(&coord).is_empty());
 }
 
@@ -771,7 +729,6 @@ fn old_stop_cards_of_a_parent_with_queued_units_expire_during_a_hold() {
     );
     assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
     assert!(open_ids(&k, &parent).is_empty());
-    assert_eq!(work(&k, &parent).0, "queued");
 }
 
 fn deliver(k: &Kit, parent: &str, id: &str) {
@@ -816,14 +773,17 @@ fn a_failed_units_leftover_cards_do_not_keep_its_item_waiting() {
         .unwrap()
         .unwrap();
     k.decision(&child, Some(&rs.id), "ask", "item", &["A", "B"]);
-    crate::lifecycle::settle(k.db(), &child).unwrap();
-    assert_eq!(k.status(&child).0, "wait");
+    assert!(!k.open_kinds(&child).is_empty());
     k.core
         .tool_workflow(&rs, json!({"action":"fail","reason":"缺少关键回归"}))
         .unwrap();
     assert_eq!(unit(&k, &parent, "review").status, "failed");
     assert!(open_ids(&k, &child).is_empty(), "the question is moot");
-    assert_ne!(k.status(&child).0, "wait");
+    assert!(
+        k.open_kinds(&child)
+            .iter()
+            .all(|kind| kind != "ask" && kind != "fail")
+    );
     k.rt.end_turn(&k.core, &rs.id, "end_turn", None);
 
     // a stall card the old watch left on the failed unit's item
@@ -834,10 +794,13 @@ fn a_failed_units_leftover_cards_do_not_keep_its_item_waiting() {
         &["continue", "look", "drop"],
         "它停下了：旧卡",
     );
-    crate::lifecycle::settle(k.db(), &child).unwrap();
     k.core.tx().check_stalls(later()).unwrap();
     assert!(open_ids(&k, &child).is_empty());
-    assert_ne!(k.status(&child).0, "wait");
+    assert!(
+        k.open_kinds(&child)
+            .iter()
+            .all(|kind| kind != "ask" && kind != "fail")
+    );
 }
 
 /// ST-25 #2 at the turn end: a request to scan at the start of a long final reply, streamed in many
@@ -946,7 +909,7 @@ fn your_stop_after_a_failure_notice_is_yours() {
         "{cards:?}"
     );
     let snap = k.core.diagnostic_snapshot(&parent).unwrap();
-    assert_eq!(snap["work"]["last_stop"]["yours"], true, "{snap}");
+    assert_eq!(snap["last_stop"]["yours"], true, "{snap}");
     // a voided delivery does not continue it either: the card stays yours
     k.core
         .tx()
@@ -1002,7 +965,7 @@ fn a_late_old_turn_end_does_not_undo_your_stop_but_your_message_does() {
         })
         .unwrap();
     let kept = k.db().store().sessions().stop(&s).unwrap().unwrap();
-    assert!(crate::work::yours(&kept), "{kept:?}");
+    assert!(crate::turn_wait::yours(&kept), "{kept:?}");
     assert_eq!(k.rt.prompts_of(&s).len(), 1, "not continued");
     let core = restarted(&k);
     assert_eq!(
@@ -1015,7 +978,7 @@ fn a_late_old_turn_end_does_not_undo_your_stop_but_your_message_does() {
         .decisions_of_item(&i)
         .unwrap()
         .into_iter()
-        .find(|d| d.status == "open")
+        .find(|d| d.status == steve_types::DecisionStatus::Open)
         .unwrap();
     assert!(card.question.contains("你中断了这一回合"));
 
@@ -1025,7 +988,7 @@ fn a_late_old_turn_end_does_not_undo_your_stop_but_your_message_does() {
     k.rt.say(&s, "改了一半");
     k.rt.end_turn(&core, &s, "end_turn", None);
     let kept = k.db().store().sessions().stop(&s).unwrap().unwrap();
-    assert!(!crate::work::yours(&kept), "{kept:?}");
+    assert!(!crate::turn_wait::yours(&kept), "{kept:?}");
     assert_eq!(k.rt.prompts_of(&s).len(), 3, "continued by Steve");
     assert_eq!(steve_lines(&k, &i).len(), 1);
 }
@@ -1068,7 +1031,6 @@ fn a_late_end_of_the_paused_turn_does_not_swallow_your_stop_of_the_next() {
     let a = unit(&k, &parent, "a");
     assert_eq!(a.status, "failed", "{a:?}");
     assert_eq!(k.rt.prompts_of(&sid).len(), prompts, "not resumed");
-    assert_eq!(work(&k, &parent).0, "failed");
 }
 
 /// ST-25 #6: a failed, retried while paused (pending, attempt 1 of the old 3), then the same graph is
@@ -1076,7 +1038,7 @@ fn a_late_end_of_the_paused_turn_does_not_swallow_your_stop_of_the_next() {
 /// (review, then integrate) are a failure the coordinator hears of, not queued work forever.
 #[test]
 fn a_unit_out_of_attempts_holds_its_successors_as_failed() {
-    for (attempts, want) in [(1, "failed"), (2, "running")] {
+    for attempts in [1, 2] {
         let k = kit(2);
         let parent = planned(&k, &["a"]);
         let a = unit(&k, &parent, "a");
@@ -1108,13 +1070,7 @@ fn a_unit_out_of_attempts_holds_its_successors_as_failed() {
             )
             .unwrap();
         change(&k, &parent, "resume", None);
-        let (state, why) = work(&k, &parent);
-        assert_eq!(state, want, "max_attempts {attempts}: {why:?}");
         if attempts == 1 {
-            assert_eq!(
-                why.as_deref(),
-                Some("协作工作未通过：a 尝试次数已用完；受阻：review、integrate")
-            );
             assert_eq!(unit(&k, &parent, "a").status, "pending");
             // the coordinator hears of it once idle, it is not left waiting
             let coord = k.session(&parent, "idle");
@@ -1236,7 +1192,6 @@ fn a_late_end_of_an_old_attempt_does_not_finish_the_new_one() {
     assert_eq!(k.phase(&new_child), "active");
     assert_eq!(unit(&k, &parent, "a").status, "running");
     assert_eq!(k.rt.prompts_of(&coord).len(), told, "no stale update");
-    assert_eq!(work(&k, &parent).0, "running");
 }
 
 /// The runtime finished the session's turn but its end is not told yet (held up on the way).
@@ -1321,7 +1276,7 @@ fn a_replayed_end_after_a_restart_keeps_your_stop() {
     core.session_message(&s, "接着做", false, &[]).unwrap();
     k.rt.say(&s, "改了一半");
     k.rt.end_turn(&core, &s, "end_turn", None);
-    assert!(!crate::work::held(
+    assert!(!crate::turn_wait::held(
         &core.store().store().sessions().stop(&s).unwrap().unwrap()
     ));
     assert_eq!(k.rt.prompts_of(&s).len(), 3, "continued by Steve");
@@ -1398,7 +1353,7 @@ fn a_newer_turns_end_after_your_message_is_not_your_stop() {
     k.rt.say(&s, "改了一半");
     k.rt.end_turn(&k.core, &s, "end_turn", None);
     let kept = k.db().store().sessions().stop(&s).unwrap().unwrap();
-    assert!(!crate::work::held(&kept), "{kept:?}");
+    assert!(!crate::turn_wait::held(&kept), "{kept:?}");
     assert_eq!(k.rt.prompts_of(&s).len(), 3, "continued by Steve");
 }
 
@@ -1527,7 +1482,6 @@ fn late_failed_end_before_retired_tidy_preserves_failed_outcome() {
         assert_eq!((new.status.as_str(), new.attempt), ("running", 2));
         assert_eq!(k.phase(new.item_id.as_deref().unwrap()), "active");
         assert_eq!(k.rt.prompts_of(&coord).len(), told, "no stale update");
-        assert_eq!(work(&k, &parent).0, "running");
     }
 }
 

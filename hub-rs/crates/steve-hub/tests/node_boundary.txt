@@ -79,10 +79,10 @@ Fs	steve-install/src/common.rs	7
 Fs	steve-install/src/publish.rs	7
 Fs	steve-install/src/release.rs	10
 Fs	steve-install/src/service.rs	22
-Fs	steve-install/src/service/boot.rs	6
+Fs	steve-install/src/service/boot.rs	8
 Fs	steve-install/src/setup.rs	13
 Fs	steve-install/src/setup/reconfigure.rs	7
-Fs	steve-install/src/signing.rs	19
+Fs	steve-install/src/signing.rs	34
 Fs	steve-knowledge/src/eval.rs	3
 Fs	steve-knowledge/src/sources/files.rs	1
 Fs	steve-knowledge/src/sources/folder.rs	1
@@ -109,9 +109,7 @@ Spawn	steve-acp/src/rpc.rs	1
 Spawn	steve-confine/src/lib.rs	2
 Spawn	steve-confine/src/probe.rs	1
 Spawn	steve-core/src/git.rs	1
-Spawn	steve-core/src/pull.rs	1
 Spawn	steve-core/src/release.rs	1
-Spawn	steve-core/src/takeover.rs	1
 Spawn	steve-core/src/workspace.rs	1
 Spawn	steve-github/src/push.rs	1
 Spawn	steve-github/src/repos.rs	1
@@ -133,7 +131,7 @@ Spawn	steve-install/src/service/boot.rs	2
 Spawn	steve-install/src/service/file_access.rs	1
 Spawn	steve-install/src/setup.rs	1
 Spawn	steve-install/src/setup/reconfigure.rs	1
-Spawn	steve-install/src/signing.rs	8
+Spawn	steve-install/src/signing.rs	19
 Spawn	steve-keyhelper/src/mac.rs	2
 Spawn	steve-modules/src/net.rs	1
 Spawn	steve-modules/src/vault/inject.rs	1

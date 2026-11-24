@@ -1,7 +1,7 @@
 /** GitHub installations, repositories, and their activity. */
 import { modReq as req, qs as q } from "@/api"
 
-export type GhSettings = { after_accept: "ask_pr" | "open_pr" | "none"; finish_on: "accepted" | "merged"; merge_method: "squash" | "merge" | "rebase"; delete_branch: boolean; ci_fail: "supplement" | "signal"; draft_pr: boolean; pr_review?: boolean; issue_triage?: boolean }
+export type GhSettings = { merge_method: "squash" | "merge" | "rebase"; delete_branch: boolean; ci_fail: "supplement" | "signal"; pr_review?: boolean; issue_triage?: boolean }
 export type GhConnection = { id: string; kind: "app" | "pat"; account: string; status: string }
 export type GhRepo = {
   id: string; full_name: string; private: boolean; default_branch: string; connection: { id: string; kind: "app" | "pat"; account: string }
@@ -36,6 +36,7 @@ export const gh = {
   patch: (id: string, p: { project_id?: string | null; settings?: Partial<GhSettings>; enabled?: boolean }) => req<GhRepo>("PATCH", "/github/repos/" + encodeURIComponent(id), p),
   unlink: (id: string) => req<{ ok: true }>("DELETE", "/github/repos/" + encodeURIComponent(id)),
   sync: (id: string) => req<unknown>("POST", `/github/repos/${encodeURIComponent(id)}/sync`, {}),
+  requestMerge: (id: string, head: string) => req<string>("POST", `/github/prs/${encodeURIComponent(id)}/merge`, { head }),
   prs: (repo: string, state: "open" | "all") => req<GhPr[]>("GET", "/github/prs" + q({ repo, state })),
   issues: (repo: string, state: "open" | "all") => req<GhIssue[]>("GET", "/github/issues" + q({ repo, state })),
   deliveries: (repo: string, limit = 50, automation?: "only") => req<GhDelivery[]>("GET", "/github/deliveries" + q({ repo, limit, automation })),

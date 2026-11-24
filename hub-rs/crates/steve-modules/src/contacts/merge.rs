@@ -32,7 +32,7 @@ use steve_store::{
 use super::repo::{self, AttrDef, AttrValue, PARTY, Party, PartyPatch};
 use super::service::{self as svc, ContactBrief};
 use super::{PartyHooks, Ports};
-use crate::decisions::{self, DecisionCx, DecisionHandler};
+use crate::decisions::{self, DecisionCx, DecisionHandler, DecisionOutcome};
 use crate::{ApiError, ApiResult, Body, Caller, Modules, Registry};
 
 fn pref(id: &str) -> ObjRef {
@@ -290,7 +290,7 @@ pub fn merge_tx(
         created: now(),
         split: None,
     })?;
-    settle_proposals(tx, ws, &from.id, &into.id)?;
+    settle_proposals(tx, ws, actor, &from.id, &into.id)?;
     tx.audit(
         ws,
         actor,
@@ -309,16 +309,36 @@ pub fn merge_tx(
 
 /// After `from` is merged: the open proposal of this very pair becomes `merged` (its card resolved with
 /// `merge`), other open proposals involving `from` are moot and expire.
-fn settle_proposals(tx: &mut W<'_>, ws: &str, from: &str, into: &str) -> ApiResult<()> {
+fn settle_proposals(
+    tx: &mut W<'_>,
+    ws: &str,
+    actor: &str,
+    from: &str,
+    into: &str,
+) -> ApiResult<()> {
     for p in MergeProposals(tx).involving(ws, from)? {
-        let (status, d_status, result) = if p.from == from && p.into == into {
-            ("merged", "resolved", json!({"choice":"merge"}))
-        } else {
-            ("expired", "expired", json!({"expired":true}))
-        };
-        MergeProposals(tx).set_status(&p.id, status)?;
-        if let Some(d) = p.decision {
-            DecisionRows(tx).settle(&d, &result, d_status, &Value::Null)?;
+        let same = p.from == from && p.into == into;
+        MergeProposals(tx).set_status(&p.id, if same { "merged" } else { "expired" })?;
+        if let Some(id) = p.decision
+            && let Some(d) = DecisionRows(tx).get(&id)?
+        {
+            if same {
+                DecisionRows(tx).resolve_choice(
+                    &d,
+                    actor,
+                    "merge",
+                    "",
+                    &json!({"choice":"merge"}),
+                    None,
+                )?;
+            } else {
+                DecisionRows(tx).apply(
+                    &d,
+                    steve_store::decision_repo::DecisionChange::Expire,
+                    &json!({"expired":true}),
+                    None,
+                )?;
+            }
         }
     }
     Ok(())
@@ -789,7 +809,7 @@ fn proposal(tx: &mut W<'_>, id: &str) -> ApiResult<Option<(String, String, Strin
 }
 
 impl DecisionHandler for PartyMerge {
-    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<DecisionOutcome> {
         let (ws, from, into, status) = proposal(tx, &d.subject_id)?
             .filter(|p| p.0 == cx.ws)
             .ok_or_else(|| ApiError::not_found("合并提议"))?;
@@ -809,7 +829,7 @@ impl DecisionHandler for PartyMerge {
             }
             _ => set_proposal(tx, &d.subject_id, "rejected")?,
         }
-        Ok(result)
+        Ok(result.into())
     }
 
     fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
@@ -845,7 +865,7 @@ fn value_snapshot(v: &AttrValue) -> Value {
 pub struct AttrValueConfirm;
 
 impl DecisionHandler for AttrValueConfirm {
-    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<DecisionOutcome> {
         let v = Attributes(tx)
             .value(&d.subject_id)?
             .filter(|v| v.workspace_id == cx.ws)
@@ -862,7 +882,7 @@ impl DecisionHandler for AttrValueConfirm {
         }
         tx.contacts().touch(&v.party_id)?;
         tx.emit(crate::accounts::service::party_changed(cx.ws, &v.party_id));
-        Ok(result)
+        Ok(result.into())
     }
 
     fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {
@@ -949,7 +969,7 @@ fn def_snapshot(x: &AttrDef) -> Value {
 pub struct AttrDefConfirm;
 
 impl DecisionHandler for AttrDefConfirm {
-    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<DecisionOutcome> {
         let x = Attributes(tx)
             .definition(&d.subject_id)?
             .filter(|x| x.workspace_id == cx.ws)
@@ -961,7 +981,7 @@ impl DecisionHandler for AttrDefConfirm {
             Attributes(tx).delete_definition(&x.id)?;
             result["def"] = def_snapshot(&x);
         }
-        Ok(result)
+        Ok(result.into())
     }
 
     fn before_undo(&self, tx: &mut W<'_>, d: &Decision) -> ApiResult<()> {

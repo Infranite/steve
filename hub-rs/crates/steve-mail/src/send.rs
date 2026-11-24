@@ -21,7 +21,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use steve_modules::accounts::connections::{WriteRefusal, may_write_in};
 use steve_modules::contacts::people_repo;
-use steve_modules::decisions::{DecisionCx, DecisionHandler, choice_result};
+use steve_modules::decisions::{DecisionCx, DecisionHandler, DecisionOutcome, choice_result};
 use steve_modules::outbound::Verdict;
 use steve_modules::outbound::{legacy_automatic_decision, strip_ai_prefix};
 use steve_modules::{ApiError, ApiResult, Clock, SystemClock};
@@ -62,9 +62,15 @@ pub trait DraftHooks: Send + Sync {
     fn rejected(&self, ws: &str, session_id: &str, item_id: Option<&str>, message: &str) {
         let _ = (ws, session_id, item_id, message);
     }
-    /// The mail of an item went out: `finish(item, "邮件已发出")` when its acceptance is “草稿即交付”.
-    fn sent(&self, ws: &str, item_id: &str, subject: &str) {
-        let _ = (ws, item_id, subject);
+    /// The provider accepted the approved draft for this item version.
+    fn sent(
+        &self,
+        ws: &str,
+        item_id: &str,
+        subject: &str,
+        version: Option<steve_types::DeliveryVersion>,
+    ) {
+        let _ = (ws, item_id, subject, version);
     }
     /// `steve_mail_draft` opened an approval for a session's draft: the session now waits for the
     /// user like after `steve_request_approval` (pending = approval, item “在等你批准”).
@@ -283,7 +289,7 @@ impl MailDraftHandler {
 }
 
 impl DecisionHandler for MailDraftHandler {
-    fn resolve(&self, w: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, w: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<DecisionOutcome> {
         let result = match d.kind.as_str() {
             "approve" => self.approve(w, cx, d),
             "fail" => self.failed(w, cx, d),
@@ -293,7 +299,7 @@ impl DecisionHandler for MailDraftHandler {
         if let Some(draft) = repo::draft(w, &d.subject_id)? {
             drafts::emit_draft(w, &draft);
         }
-        Ok(result)
+        Ok(result.into())
     }
 
     /// Undo before the delay is over puts the draft back to `pending`; afterwards `409 邮件已经发出，不能撤回`.
@@ -729,6 +735,13 @@ impl Mail {
     }
 
     fn open_unknown_decision(&self, tx: &mut steve_store::W<'_>, d: &DraftRow) -> MailResult<()> {
+        let settled = steve_store::decision_repo::settled_count(
+            tx,
+            &d.workspace_id,
+            SUBJECT_TYPE,
+            &d.id,
+            "fail",
+        )?;
         let decision = steve_store::DecisionRows(tx).open(&NewDecision {
             workspace_id: d.workspace_id.clone(),
             kind: "fail".into(),
@@ -743,6 +756,11 @@ impl Mail {
             draft: Some(drafts::decision_text(d)),
             options: Some(UNKNOWN_OPTIONS.map(String::from).to_vec()),
             requested_by: "steve".into(),
+            question_template: None,
+            source: Some(steve_store::DecisionSource::MailDraft {
+                previous: d.decision_id.clone(),
+                content_hash: format!("unknown:{}:{settled}", d.content_hash),
+            }),
         })?;
         repo::set_draft_decision(tx, &d.id, Some(&decision.id), &d.content_hash)?;
         Ok(())
@@ -803,6 +821,13 @@ impl Mail {
             }
             repo::set_draft_error(tx, &d.id, Some(error))?;
             drafts::expire_open(tx, &d.workspace_id, &d.id)?;
+            let settled = steve_store::decision_repo::settled_count(
+                tx,
+                &d.workspace_id,
+                SUBJECT_TYPE,
+                &d.id,
+                "fail",
+            )?;
             steve_store::DecisionRows(tx).open(&NewDecision {
                 workspace_id: d.workspace_id.clone(),
                 kind: "fail".into(),
@@ -814,6 +839,11 @@ impl Mail {
                 draft: Some(drafts::decision_text(d)),
                 options: Some(FAIL_OPTIONS.map(String::from).to_vec()),
                 requested_by: "steve".into(),
+                question_template: None,
+                source: Some(steve_store::DecisionSource::MailDraft {
+                    previous: d.decision_id.clone(),
+                    content_hash: format!("fail:{}:{settled}", d.content_hash),
+                }),
             })?;
             tx.audit(
                 &d.workspace_id,

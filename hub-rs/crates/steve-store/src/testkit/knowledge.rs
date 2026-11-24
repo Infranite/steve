@@ -49,8 +49,7 @@ pub fn seed_delivery(s: &Store) -> Result<()> {
                 "INSERT INTO parties (id, workspace_id, type, name, aliases, created_by, created, updated) VALUES
                    ('ct_sarah', 'default', 'contact', 'Sarah Chen', '[\"Sarah\"]', 'usr_dev', 1, 1),
                    ('org_acme', 'default', 'org', 'Acme', '[]', 'usr_dev', 1, 1);
-                 INSERT INTO items (id, workspace_id, no, title, status, stage, cwd, created, updated)
-                   VALUES ('ST-12', 'default', 12, '给 Acme 写续签邮件', 'done', '完成', NULL, 1, 100);
+                 INSERT INTO items(id, workspace_id, no, title, phase, cwd, created, updated, outcome) VALUES ('ST-12', 'default', 12, '给 Acme 写续签邮件', 'closed', NULL, 1, 100, 'completed');
                  INSERT INTO item_goals (item_id, version, text, created) VALUES
                    ('ST-12', 1, '给 Acme 写续签邮件', 1), ('ST-12', 2, '给 Acme 写续签邮件，抄送 Sarah', 2);
                  INSERT INTO timeline (item_id, ts, actor, kind, text) VALUES
@@ -151,7 +150,7 @@ pub fn seed_prompt_item(
     s
             .write_locked(|c| {
                 c.execute(
-                    "INSERT INTO items (id, workspace_id, no, kind, title, status, stage, created, updated, requested_by) VALUES (?, ?, (SELECT COUNT(*) + 1 FROM items), 'task', ?, 'run', '执行', 1, 1, ?)",
+                    "INSERT INTO items(id, workspace_id, no, kind, title, phase, created, updated, requested_by) VALUES (?, ?, (SELECT COUNT(*) + 1 FROM items), 'task', ?, 'active', 1, 1, ?)",
                     params![id, ws, title, by],
                 )?;
                 c.execute(
@@ -355,8 +354,7 @@ pub fn seed_steward_subjects(s: &Store) -> Result<()> {
                 "INSERT INTO parties (id, workspace_id, type, name, aliases, created_by, created, updated) VALUES
                    ('ct_sarah', 'default', 'contact', 'Sarah Chen', '[\"Sarah\"]', 'usr_dev', 1, 1),
                    ('org_acme', 'default', 'org', 'Acme', '[]', 'usr_dev', 1, 1);
-                 INSERT INTO items (id, workspace_id, no, title, status, stage, cwd, created, updated)
-                   VALUES ('ST-12', 'default', 12, '整理知识', 'running', '进行中', NULL, 1, 100);",
+                 INSERT INTO items(id, workspace_id, no, title, phase, cwd, created, updated) VALUES ('ST-12', 'default', 12, '整理知识', 'active', NULL, 1, 100);",
             )?;
             Ok(())
         })

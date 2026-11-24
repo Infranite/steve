@@ -365,7 +365,7 @@ fn a_workspace_binding_conflict_retires_the_session_before_continue() {
         .decisions_of_item(&i.id)
         .unwrap()
         .into_iter()
-        .find(|d| d.kind == "fail" && d.status == "open")
+        .find(|d| d.kind == "fail" && d.status == steve_types::DecisionStatus::Open)
         .unwrap();
     k.core.resolve(&d.id, "continue", "", "me").unwrap();
     let sessions = k.db().sessions_of_item(&i.id).unwrap();
