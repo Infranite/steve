@@ -1,7 +1,7 @@
 import { getItem } from "@/store"
 /* 团队: the 团队 tab of #/contacts, #/teams/:id, the new-team dialog (prototype people.tsx TeamsTab, TeamRow, TeamView, NewTeamDialog) */
 import { useEffect, useState } from "react"
-import { itemDisplayStatus } from "@/item-workflow-relation"
+import { itemDisplayStatus } from "@/store"
 import { ChevronRightIcon, PlusIcon, RefreshCwIcon, XIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"

@@ -51,7 +51,6 @@ mod turn_receipts;
 mod turn_wait;
 pub mod upstream;
 pub mod util;
-pub mod workflow;
 pub mod workspace;
 mod worktrees;
 

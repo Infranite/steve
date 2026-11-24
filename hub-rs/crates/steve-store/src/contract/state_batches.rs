@@ -18,12 +18,6 @@ pub struct ItemExtras {
     pub open: Vec<String>,
     /// Queued rows of the last non-ended session.
     pub queued: usize,
-    /// Graph identity and pause flag, plus failed children only when the graph matches the item cycle.
-    pub workflow_paused: Option<bool>,
-    pub workflow_cycle: Option<i64>,
-    pub workflow_failed: Vec<String>,
-    pub workflow_attempt: Option<i64>,
-    pub workflow_superseded: bool,
 }
 
 #[derive(Serialize)]

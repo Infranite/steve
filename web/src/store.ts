@@ -25,6 +25,7 @@ import type { SendRecoveryInfo } from "./api/channels"
 import type { DecisionTier, DecisionView, FoldReason, ItemView, MessageView, PlacementExplanation, SessionView, SessionWaiting, ViewKind } from "./gen"
 import { applyPatch, decisionsForItem, decisionsForSession, decisionView, loadViews, onCatalog, onViews, messageView, messageViews, openDecisions, resetViews, settle, settled, viewsCursor, itemView, itemViews, sessionView, sessionViews, sessionsForItem, qc, scopeKey, readViews, readItemSessions, table, itemWork } from "./data/sync"
 import { chatLive, updateChat } from "./data/live"
+import { itemDisplayStatusOf, itemState } from "./item-state"
 
 /* ───────── view types (from the prototype) ───────── */
 export type Sess = { id: string; n: number; item: string | null; b: string | null; h?: string; harness?: string; nativeId?: string | null; cwd?: string; m?: string; reasoningEffort?: string | null; contextKnown?: boolean; /** the context in tokens, as the harness reported it: used and the window's size */ ctxUsed?: number; ctxSize?: number; st: "run" | "wait" | "idle" | "ended"; title: string; dur: string; ctx: number; src: string; up: string; /** status updated (ms), not execution activity */ at?: number; from?: string | null; fork?: { s: string; at: number }; queue: RQueued[]; ro?: boolean; device: string; node?: string; queued: number; busy: boolean; /** its next turn waits for room on its device */ room?: SessionWaiting | null
@@ -55,12 +56,6 @@ export type Item = {
   due?: string; pri?: "高" | "中" | "低"; arch?: boolean; snooze?: string; snoozeUntil?: number; tags?: string[]; branch: string | null; cwd: string | null; projNext?: boolean; detail: boolean; dependents: string[]; created: number; updated: number
   /** the last approved release of this item and what became of it */
   rel?: Rel
-  workflowPaused?: boolean
-  workflowCycle?: number
-  workflowFailed?: string[]
-  workflowAttempt?: number
-  workflowSuperseded?: boolean
-  workflow?: RItemDetail["workflow"]
   dependencyWait?: RItemDetail["dependency_wait"]
   dispatch?: RItemDetail["dispatch"]
   placement?: PlacementExplanation
@@ -284,7 +279,7 @@ const hash = (s: string) => { let h = 2166136261; for (const ch of s) { h ^= ch.
 export const defaultColor = (name: string) => AVATAR_COLORS[hash(name) % AVATAR_COLORS.length][0]
 
 /** what Steve's own tools are called; one Steve has no word for goes by its name */
-export const STEVE_TOOL: Record<string, string> = live(["steve_contacts","steve_github_read","steve_mail_read","steve_matters","steve_tools_search","steve_tool_call","steve_person_holdings","steve_digest_batch","steve_digest_read","steve_digest_chunk","steve_digest_finish","steve_digest_control","steve_digest_report","steve_matters_search","steve_matter_read","steve_todo_list","steve_todo_add","steve_todo_update","steve_todo_complete", "steve_update", "steve_ask", "steve_request_approval", "steve_deliver", "steve_deliver_file", "steve_publish", "steve_lane_status", "steve_workflow", "steve_item_read", "steve_items_search", "steve_item_dependencies", "steve_knowledge_search", "steve_knowledge_read", "steve_knowledge_get", "steve_debug", "steve_devices", "steve_reply_source", "steve_event_get", "steve_sessions_list", "steve_remember", "steve_memory_list", "steve_memory_tidy", "steve_note", "steve_whois", "steve_contacts_find", "steve_contacts_search", "steve_contact_get", "steve_contacts_remember", "steve_im_read", "steve_mail_thread", "steve_mail_attachment", "steve_mail_draft", "steve_mail_send", "steve_github_status", "steve_github_ci_log", "steve_github_comment", "steve_github_open_pr", "steve_secret_list", "steve_secret_use", "steve_steward_propose", "steve_upgrade"] as const, (k) => t(`core:steveTool.${k}`))
+export const STEVE_TOOL: Record<string, string> = live(["steve_contacts","steve_github_read","steve_mail_read","steve_matters","steve_tools_search","steve_tool_call","steve_person_holdings","steve_digest_batch","steve_digest_read","steve_digest_chunk","steve_digest_finish","steve_digest_control","steve_digest_report","steve_matters_search","steve_matter_read","steve_todo_list","steve_todo_add","steve_todo_update","steve_todo_complete", "steve_update", "steve_ask", "steve_request_approval", "steve_deliver", "steve_deliver_file", "steve_publish", "steve_lane_status", "steve_item_read", "steve_items_search", "steve_item_dependencies", "steve_knowledge_search", "steve_knowledge_read", "steve_knowledge_get", "steve_debug", "steve_devices", "steve_reply_source", "steve_event_get", "steve_sessions_list", "steve_remember", "steve_memory_list", "steve_memory_tidy", "steve_note", "steve_whois", "steve_contacts_find", "steve_contacts_search", "steve_contact_get", "steve_contacts_remember", "steve_im_read", "steve_mail_thread", "steve_mail_attachment", "steve_mail_draft", "steve_mail_send", "steve_github_status", "steve_github_ci_log", "steve_github_comment", "steve_github_open_pr", "steve_secret_list", "steve_secret_use", "steve_steward_propose", "steve_upgrade"] as const, (k) => t(`core:steveTool.${k}`))
 /** Unfolded device evidence; the general conversation view intentionally has coarser states. */
 export const deviceWorkEvidence = () => ({ loaded: !!viewsCursor(), sessions: sessionViews(), decisions: openDecisions() })
 export function deviceDecision(id: string) {
@@ -557,10 +552,8 @@ function mapItem(i: ItemView, det?: RItemDetail): Item {
   })
   return {
     id: i.id, t: i.title, b: i.bot_id ?? "", get st() { return itemStatus(i) }, phase: i.state.kind, cycle: i.cycle, deps: i.deps ?? [], src: det?.source ?? [i.source, i.source], get ws() { return st.projects.find((p) => p.id === i.project_id)?.name ?? "—" }, project: i.project_id ?? null, get up() { return tm(i.updated) }, star: !!i.star, get acc() { return ACC[i.accept_mode ?? "inherit"] ?? ACC.inherit }, designGate: !!i.design_gate,
-    workflowPaused: i.workflow?.paused ?? undefined, workflowCycle: i.workflow?.cycle ?? undefined, workflowFailed: i.workflow?.failed, workflowAttempt: i.workflow?.attempt ?? undefined, workflowSuperseded: i.workflow?.superseded,
     goals: det?.goalsList.map((g) => g.text) ?? [], progress: det?.timeline.findLast((entry) => entry.kind === "progress")?.text ?? "", plan: det?.plan.length ? steps(det.plan) : undefined, planDone: i.plan_done, planTotal: i.plan_total,
     rounds: (det?.planRounds ?? []).map((r) => ({ n: r.round, steps: steps(r.steps), end: r.end, at: tm(r.created) })),
-    workflow: det?.workflow,
     dependencyWait: det?.dependency_wait,
     dispatch: det?.dispatch,
     placement: i.placement,
@@ -1464,8 +1457,11 @@ export function mergeTag(from: string, into: string) { const a = tagName(from); 
 /* ───────── settings ───────── */
 export function setSetting(p: Record<string, string>, msg = t("common:state.saved")) { void shellCall(api.settings(p), msg) }
 
+export const itemDisplayState = (item: Item) => itemState(item, itemRunning(item.id))
+export const itemDisplayStatus = (item: Item): Item["st"] => itemDisplayStatusOf(itemDisplayState(item))
+
 /* ───────── relation graph model ───────── */
-export type GNode = { id: string; k: "item" | "sess" | "proj" | "work" | "missing"; title: string; st: string; n?: number; b?: string | null; project?: string | null; itemId?: string | null; group?: string; arch?: boolean; sourceAt?: number }
+export type GNode = { id: string; k: "item" | "sess" | "proj" | "missing"; title: string; st: string; n?: number; b?: string | null; project?: string | null; itemId?: string | null; group?: string; arch?: boolean; sourceAt?: number }
 export type GEdge = [string, string, string]
 /** Dependency and provenance are different questions. Do not infer handoffs from session order. */
 export function gRelation(mode: "blocking" | "lineage", focus?: string | null) {
@@ -1479,19 +1475,6 @@ export function gRelation(mode: "blocking" | "lineage", focus?: string | null) {
   if (mode === "blocking") {
     for (const i of getItems()) {
       for (const dep of i.deps ?? []) E.push([N[dep] ? dep : missing(dep), i.id, "dependency"])
-      const workflow = i.workflow
-      if (!workflow) continue
-      const keyOf = (id: string) => {
-        const unit = workflow.units.find((u) => u.id === id)
-        return unit ? `work:${i.id}:${id}` : missing(id)
-      }
-      for (const unit of workflow.units) {
-        const key = keyOf(unit.id)
-        N[key] = { id: key, k: "work", title: unit.title, st: unit.status, b: unit.bot_id, project: i.project, itemId: unit.item_id, group: i.id }
-        E.push([i.id, key, "contains"])
-        if (unit.item_id) E.push([key, N[unit.item_id] ? unit.item_id : missing(unit.item_id), "contains"])
-        for (const dep of unit.depends_on) E.push([keyOf(dep), key, "dependency"])
-      }
     }
   } else {
     if (focus && getSession(focus)) {

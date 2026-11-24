@@ -34,7 +34,7 @@ export function turnSpans(evs: any[], at: number[], items: TrailItem[], t0: numb
     const running = live && e[5] === 1, failed = e[8] === 1
     /* settled: the update that settled it; never settled (a turn cut off) or started and settled in one update: until the next step began */
     const end = running ? undefined : e[13] && e[13] > at[j] ? rel(e[13]) : Math.max(start, rel(next) || start)
-    /* the detail says what the steps say: Steve's verb and its subject ("读取 workflows.rs", "读事项") */
+    /* the detail says what the steps say: Steve's verb and its subject ("读取 cycle.rs", "读事项") */
     const verb = s ? s.verb[running ? 0 : 1] : "", what = [verb, s?.subj && s.subj !== verb ? s.subj : ""].filter(Boolean).join(" ")
     return { id: "e" + j, kind: e[9] === "Task" || e[9] === "Agent" ? "subagent" : "tool", name: c?.name || String(e[2] ?? ""), icon: c?.icon, detail: what ? clip(what, 80) : undefined,
       status: running ? "running" : failed ? "failed" : "done", start, end,

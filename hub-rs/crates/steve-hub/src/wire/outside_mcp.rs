@@ -147,7 +147,7 @@ pub fn listed() -> Vec<Value> {
         v.push(json!({
             "name": d.name,
             "description": d.description.replace(
-                "Steve's own (items, work graph, knowledge, memories, contacts, secrets, GitHub, mail, chats, devices, diagnostics), the MCP servers and remote agents your Bot uses",
+                "Steve's own (items, knowledge, memories, contacts, secrets, GitHub, mail, chats, devices, diagnostics), the MCP servers and remote agents your Bot uses",
                 "Steve's tools for a client outside Steve (items, sessions, knowledge, memories)",
             ),
             "inputSchema": d.input_schema,
@@ -508,7 +508,6 @@ mod tests {
             "steve_deliver",
             "steve_ask",
             "steve_secret_use",
-            "steve_workflow",
             "steve_memory_tidy",
         ] {
             assert!(!allows(n), "{n}");

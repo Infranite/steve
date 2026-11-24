@@ -264,8 +264,10 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/124.sql"),
     // 125: durable daily aggregates for low-cardinality telemetry counters.
     include_str!("../migrations/125.sql"),
-    // 126: per-Bot ordered fallback execution surfaces for automatic handoff.
+    // 126: remove retired dynamic work-graph tables and steve_workflow tool pins.
     include_str!("../migrations/126.sql"),
+    // 127: per-Bot ordered fallback execution surfaces for automatic handoff.
+    include_str!("../migrations/127.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

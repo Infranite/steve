@@ -128,7 +128,6 @@ fn bindings_match() {
         MessageView,
         ItemParent,
         ItemSnooze,
-        ItemWorkflow,
         ItemState,
         CloseKind,
         ItemOutcome,

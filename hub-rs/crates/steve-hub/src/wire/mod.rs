@@ -58,6 +58,21 @@ use crate::backend::{Backend, BackendError, Domain};
 use crate::bus::Bus;
 use crate::config::Config;
 
+/// Localize a persisted item-gate blocker at the Hub edge.
+pub(crate) fn item_gate_reason(b: steve_store::item_gate::GateBlocker) -> String {
+    match b {
+        steve_store::item_gate::GateBlocker::ItemPaused => {
+            steve_i18n::t!("hub.item_gate.item_paused")
+        }
+        steve_store::item_gate::GateBlocker::DependencyWait => {
+            steve_i18n::t!("hub.item_gate.dependency_wait")
+        }
+        steve_store::item_gate::GateBlocker::OpenPrerequisite => {
+            steve_i18n::t!("hub.item_gate.open_prerequisite")
+        }
+    }
+}
+
 /// Everything the binary needs from the sibling crates.
 pub struct Wired {
     pub backend: Arc<dyn Backend>,
@@ -121,15 +136,9 @@ fn core_config(cfg: &Config, vars: &Vars) -> steve_core::CoreConfig {
     c.default_models = cfg.default_models.clone().into_iter().collect();
     c.steve_repo = cfg.steve_repo.clone();
     c.no_resume = cfg.diagnostic();
-    c.dynamic_workflows = cfg.dynamic_workflows;
     c.debug_route = cfg.debug_route;
     c.disk = cfg.disk;
     c.version = cfg.version.clone();
-    // Each root item tree has its own collaboration budget; Node capacity is separate.
-    c.max_workflow_parallel = vars("STEVE_WORKFLOW_MAX_PARALLEL")
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(4);
     c.commit = crate::build_identity().map(|(_, commit)| commit.to_owned());
     if let Some(n) = cfg.takeover_continues {
         c.takeover_continues = n;
@@ -829,5 +838,3 @@ mod tests {
 mod chan_tests;
 #[cfg(test)]
 mod decisions_acceptance;
-#[cfg(test)]
-mod workflow_tests;
