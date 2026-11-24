@@ -719,14 +719,14 @@ const TOOL_KINDS: [&str; 3] = ["fact", "preference", "rule"];
 pub fn remember_tool() -> Value {
     json!({
         "name": REMEMBER,
-        "description": "Save something that will matter beyond this task: a rule or preference the user explicitly says applies from now on, or a verified fact reusable in other work. Task requirements, progress, decisions and results stay in the item. It becomes a candidate the user confirms.",
+        "description": "Save personal knowledge that will matter beyond this task: a preference or rule the user explicitly says applies from now on, or a verified fact about a person, organization or project (`about` is required for kind=fact). Do not save task records, one-off debugging conclusions or repository engineering details here. It becomes a candidate the user confirms.",
         "inputSchema": {
             "$schema": "http://json-schema.org/draft-07/schema#",
             "type": "object",
             "properties": {
                 "text": { "type": "string" },
                 "kind": { "type": "string", "enum": TOOL_KINDS },
-                "about": { "type": "string", "description": "a person, organization, project or bot, by exact name or id" }
+                "about": { "type": "string", "description": "a person, organization, team or project, by exact name or id (required when kind is fact)" }
             },
             "required": ["text", "kind"]
         }
@@ -794,11 +794,23 @@ pub fn remember(m: &Modules, cx: &McpCx, args: &Value) -> Result<String, String>
     m.store
         .write(|tx| {
             let about = match about {
-                None => Vec::new(),
+                None => {
+                    if kind == "fact" {
+                        return Err(ApiError::rule(
+                            "A fact must name the person, organization, team or project it is about (pass `about`).",
+                        ));
+                    }
+                    Vec::new()
+                }
                 Some(a) => {
                     let names = Names::load(tx, &viewer, None)?;
-                    match names.resolve(a) {
-                        Some(r) => vec![r],
+                    match names.resolve_entity(a) {
+                        Some((r, ent)) if kind != "fact" || ent.is_fact_subject() => vec![r],
+                        Some(_) => {
+                            return Err(ApiError::rule(format!(
+                                "A fact must be about a person, organization, team or project, not \"{a}\"."
+                            )));
+                        }
                         None => {
                             return Err(ApiError::rule(format!(
                                 "No person, organization, project or bot is called \"{a}\". Pass the exact name or id."

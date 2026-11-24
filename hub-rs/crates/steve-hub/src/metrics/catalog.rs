@@ -591,4 +591,25 @@ pub(super) fn describe() {
         Count,
         "Figures that could not be collected. Labels: source."
     );
+    // Knowledge extraction, project AGENTS.md proposals, and steward trigger gating
+    describe_counter!(
+        "steve_knowledge_extract_produced_total",
+        Count,
+        "Knowledge items produced by extraction. Labels: kind (fact, preference, rule, event, agents_proposal)."
+    );
+    describe_counter!(
+        "steve_knowledge_extract_dropped_total",
+        Count,
+        "Extraction outputs dropped by deterministic validation. Labels: reason (duplicate, shape, no_evidence, one_off, restates_goal, missing_about, unresolved_about, cap_reached)."
+    );
+    describe_counter!(
+        "steve_knowledge_proposals_total",
+        Count,
+        "Project AGENTS.md proposals lifecycle events. Labels: action (created, accepted, dismissed)."
+    );
+    describe_counter!(
+        "steve_knowledge_steward_runs_total",
+        Count,
+        "Knowledge steward schedule trigger evaluations. Labels: outcome (triggered, skipped), reason (threshold, manual, nothing_to_tidy, below_threshold)."
+    );
 }

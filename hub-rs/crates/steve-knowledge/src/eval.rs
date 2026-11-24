@@ -28,7 +28,7 @@ pub struct Doc {
     /// Path relative to the corpus root, or `mem:<id>` for memories.
     pub r#ref: String,
     pub title: String,
-    /// Source kind it stands in for: `notes`, `folder`, `items`, `mems`.
+    /// Source kind it stands in for: `notes`, `folder`, `files`, `mems`.
     pub source_kind: String,
     pub chunks: Vec<Chunk>,
 }
@@ -42,7 +42,7 @@ struct MemLine {
 }
 
 /// Corpus subdirectory → the source kind it simulates.
-const DIRS: [(&str, &str); 3] = [("notes", "notes"), ("wiki", "folder"), ("items", "items")];
+const DIRS: [(&str, &str); 3] = [("notes", "notes"), ("wiki", "folder"), ("items", "files")];
 
 /// Loads `<dir>/{notes,wiki,items}/*.md` and `<dir>/mems.jsonl`.
 ///

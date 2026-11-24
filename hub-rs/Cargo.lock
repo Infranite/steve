@@ -6004,6 +6004,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "html2text",
+ "metrics",
  "pdf-extract",
  "pulldown-cmark",
  "quick-xml 0.42.0",

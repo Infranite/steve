@@ -248,17 +248,6 @@ pub fn clear_bot_memories(s: &Store) -> Result<()> {
     })
 }
 
-pub fn seed_item_doc(s: &Store, source: &str) -> Result<()> {
-    s
-        .write_locked(|c| {
-            c.execute(
-                "INSERT INTO kb_docs (id, workspace_id, source_id, ref, title, created_by, created, updated) VALUES ('kd_item', 'default', ?, 'ST-12', '交付：部署脚本', 'usr_dev', 1, 1)",
-                [source],
-            )?;
-            Ok(())
-        })
-}
-
 pub fn edit_doc_without_indexing(s: &Store, doc: &str) -> Result<()> {
     s.write_locked(|c| {
         c.execute("UPDATE kb_docs SET body = '第二版内容' WHERE id = ?", [doc])?;

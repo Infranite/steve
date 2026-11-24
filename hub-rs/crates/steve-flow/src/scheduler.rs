@@ -18,6 +18,7 @@ use crate::policy::{
     ClaimAction, MissedPolicy, OVERLAP_SKIP_LABEL, OverlapPolicy, TriggerKind, overlap_blocks,
     plan_claim,
 };
+use crate::ports::{ScheduleGate, ScheduleGuard};
 use crate::runs::{self, NewRun, NewStep};
 use crate::{FlowCx, FlowResult};
 use steve_runtime::schedule::CronExpr;
@@ -185,8 +186,15 @@ struct Start<'a> {
 }
 
 /// Inserts the run row (and the trigger step), or a `skipped` row when the previous run is still
-/// going and the overlap rule says skip. Returns the run id and whether it should be driven.
-fn start(w: &mut W<'_>, f: &FlowInfo, s: &Start, now: i64) -> StartResult<(String, bool)> {
+/// going and the overlap rule says skip, or when a registered [`ScheduleGuard`] declines to run.
+/// Returns the run id and whether it should be driven.
+fn start(
+    w: &mut W<'_>,
+    f: &FlowInfo,
+    s: &Start,
+    now: i64,
+    guards: &[Arc<dyn ScheduleGuard>],
+) -> StartResult<(String, bool)> {
     let mut context =
         json!({ "at": s.at, "trigger": s.kind.as_str(), "budget_limit": f.budget_usd });
     if let (Some(ctx), Some(extra)) = (context.as_object_mut(), s.extra.as_object()) {
@@ -231,6 +239,26 @@ fn start(w: &mut W<'_>, f: &FlowInfo, s: &Start, now: i64) -> StartResult<(Strin
         })?;
         return Ok((id, false));
     }
+    for guard in guards {
+        if let ScheduleGate::Skip { label, reason } = guard.check(w, &f.ws, &f.id, s.kind, now)? {
+            if let Some(ctx) = context.as_object_mut() {
+                ctx.insert("skip_reason".into(), json!(reason));
+            }
+            let id = RunRows(w).insert(&NewRun {
+                ws: &f.ws,
+                flow_id: &f.id,
+                flow_version: f.version,
+                trigger_kind: s.kind.as_str(),
+                status: "skipped",
+                error: None,
+                outcome_label: &label,
+                cursor: None,
+                context: &context,
+                now,
+            })?;
+            return Ok((id, false));
+        }
+    }
     let cursor = after_trigger(&f.graph, s.trigger_node);
     let id = RunRows(w).insert(&NewRun {
         ws: &f.ws,
@@ -266,6 +294,7 @@ fn claim(
     w: &mut W<'_>,
     d: &steve_store::DueTrigger,
     now: i64,
+    guards: &[Arc<dyn ScheduleGuard>],
 ) -> FlowResult<Option<(String, bool)>> {
     let cron = d.cron.as_deref().unwrap_or_default();
     let tz = d.tz.as_deref().unwrap_or_default();
@@ -322,6 +351,7 @@ fn claim(
                 trigger_node: &d.node_id,
             },
             now,
+            guards,
         )?,
         ClaimAction::Run => start(
             w,
@@ -333,6 +363,7 @@ fn claim(
                 trigger_node: &d.node_id,
             },
             now,
+            guards,
         )?,
     };
     Ok(Some(started))
@@ -363,7 +394,7 @@ pub(crate) fn claim_triggers(cx: &FlowCx, now: i64) -> FlowResult<Claims> {
             now,
             |w| FlowTriggers(w).scope_at(locator),
             |w| match FlowTriggers(w).due_at(locator, now)? {
-                Some(row) => claim(w, &row, now),
+                Some(row) => claim(w, &row, now, &cx.schedule_guards),
                 None => Ok(None),
             },
             |w, _| {
@@ -416,8 +447,9 @@ pub(crate) fn claim_retries(cx: &FlowCx, now: i64) -> FlowResult<Claims> {
 /// `POST /schedules/:id/run`: a manual run now. Leaves `next_at` alone; the overlap rule applies.
 /// Returns the run id and whether it was started (`false` = written as skipped).
 pub fn start_manual(cx: &FlowCx, ws: &str, flow_id: &str) -> FlowResult<(String, bool)> {
-    cx.store()
-        .write(|w| start_manual_in(w, ws, flow_id, cx.now()).map_err(Into::into))
+    cx.store().write(|w| {
+        start_manual_in(w, ws, flow_id, cx.now(), &cx.schedule_guards).map_err(Into::into)
+    })
 }
 
 fn start_manual_in(
@@ -425,6 +457,7 @@ fn start_manual_in(
     ws: &str,
     flow_id: &str,
     now: i64,
+    guards: &[Arc<dyn ScheduleGuard>],
 ) -> StartResult<(String, bool)> {
     let f = flow_info(w, flow_id)?
         .filter(|f| f.ws == ws)
@@ -442,6 +475,7 @@ fn start_manual_in(
             trigger_node: &trigger,
         },
         now,
+        guards,
     )
 }
 
@@ -482,7 +516,7 @@ pub fn start_from_source(
             return Ok(None);
         }
         // Store's nested transaction is a savepoint: no partial attempt/events survive rejection.
-        match w.scope(|w| start_manual_in(w, ws, id, now)) {
+        match w.scope(|w| start_manual_in(w, ws, id, now, &cx.schedule_guards)) {
             Ok((run, go)) => {
                 if go {
                     runs::record_started(w, &run, source, &revision, limit)

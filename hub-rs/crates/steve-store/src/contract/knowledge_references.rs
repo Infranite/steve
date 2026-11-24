@@ -149,6 +149,17 @@ impl<C: Read> References<'_, C> {
         )
     }
 
+    pub fn party_kind(&mut self, ws: &str, id: &str) -> Result<Option<String>> {
+        self.0.one(
+            Query::select()
+                .column("type")
+                .from("parties")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("id").eq(id)),
+            |r| r.get(0),
+        )
+    }
+
     pub fn bot_names(&mut self, ids: &[&str]) -> Result<std::collections::HashMap<String, String>> {
         let mut out = std::collections::HashMap::new();
         for chunk in ids.chunks(500) {
@@ -220,6 +231,15 @@ impl<C: Read> ItemEvidence<'_, C> {
             by_id("items", id).columns(["workspace_id", "title", "cwd", "updated"]),
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
+    }
+
+    pub fn project_id(&mut self, id: &str) -> Result<Option<String>> {
+        Ok(self
+            .0
+            .one(by_id("items", id).column("project_id"), |r| {
+                r.get::<Option<String>>(0)
+            })?
+            .flatten())
     }
 
     pub fn goals(&mut self, id: &str) -> Result<Vec<String>> {

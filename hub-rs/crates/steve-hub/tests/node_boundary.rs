@@ -254,8 +254,6 @@ const RATIONALE: &[Entry] = &[
         "the README read for the describe input"),
     e(Fs, "steve-core/src/orchestrator.rs", Later("the queue's cwd check from the Node"),
         "the write probe in a session's cwd"),
-    e(Fs, "steve-knowledge/src/sources/items.rs", Later("item outputs read through the Node"),
-        "the text of an item's outputs in its cwd"),
     e(Spawn, "steve-github/src/repos.rs", Later("a project's remote from Node git facts"),
         "`git remote get-url` of a project"),
     e(Spawn, "steve-core/src/workspace.rs", Later("E14 disk housekeeping (D13)"),

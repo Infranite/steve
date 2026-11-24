@@ -174,6 +174,25 @@ CREATE TABLE kb_marks (
     value TEXT NOT NULL, updated BIGINT NOT NULL, PRIMARY KEY (workspace_id, name)
 );
 
+CREATE TABLE project_proposals (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    project_id TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'agents_md',
+    text TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    evidence TEXT NOT NULL DEFAULT '',
+    origin_kind TEXT NOT NULL DEFAULT '',
+    origin_id TEXT,
+    origin_label TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    decision_id TEXT,
+    writer TEXT NOT NULL DEFAULT 'steve',
+    created_by TEXT NOT NULL DEFAULT '',
+    created BIGINT NOT NULL,
+    updated BIGINT NOT NULL
+);
+
 CREATE TABLE mail_account_settings (
     connection_id TEXT PRIMARY KEY REFERENCES connections(id), workspace_id TEXT NOT NULL,
     signature TEXT NOT NULL DEFAULT '',

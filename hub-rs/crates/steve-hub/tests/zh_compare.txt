@@ -656,8 +656,6 @@ steve-knowledge/src/extract.rs	"这类"	1
 steve-knowledge/src/extract.rs	"通常"	1
 steve-knowledge/src/sources.rs	"Bot 记忆"	2
 steve-knowledge/src/sources.rs	"上传的文件"	2
-steve-knowledge/src/sources.rs	"主线对话"	2
-steve-knowledge/src/sources.rs	"事项交付"	2
 steve-knowledge/src/sources.rs	"我的笔记"	2
 steve-knowledge/src/sources.rs	"记忆"	2
 steve-knowledge/src/sources/items.rs	"回答："	1

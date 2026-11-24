@@ -20,7 +20,7 @@ use steve_store::channel_message_repo::outbound::{self as chan_out, NewMessage};
 use steve_store::channel_spaces::registration::{self as space_reg, Space as NewSpace};
 use steve_store::decision_repo::{DecisionChange, choice_receipt};
 use steve_store::github::{PrRow, RepoRow, insert_repo, upsert_pr};
-use steve_store::knowledge::Memories;
+use steve_store::knowledge::{Memories, NewProjectProposal, ProjectProposals};
 use steve_store::mail::{DraftRow, insert_draft};
 use steve_store::secret_uses::SecretUses as UseRows;
 use steve_store::{
@@ -1427,6 +1427,85 @@ async fn every_registered_decision_subject_has_success_and_refusal_contract() {
                 .unwrap()
                 .status,
             "denied"
+        );
+    }
+
+    // 17. agents_proposal (module)
+    {
+        covered_modules.insert("agents_proposal".into());
+        let project = store
+            .projects()
+            .create(
+                ws,
+                &steve_store::NewProject {
+                    name: "Accept Project".into(),
+                    kind: "code".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let prop = store
+            .write(|tx| {
+                ProjectProposals(tx).create(
+                    ws,
+                    &NewProjectProposal {
+                        project_id: &project.id,
+                        kind: "agents_md",
+                        text: "Run cargo check before handoff",
+                        reason: "Avoid warnings",
+                        evidence: "Always run cargo check",
+                        origin_kind: "item",
+                        origin_id: Some(&item_id),
+                        origin_label: "item delivery",
+                        writer: "steve",
+                        created_by: "owner",
+                    },
+                )
+            })
+            .unwrap();
+        let d = open_with_dedupe(
+            store,
+            NewDecision {
+                workspace_id: ws.into(),
+                kind: "confirm".into(),
+                subject_type: "agents_proposal".into(),
+                subject_id: prop.id.clone(),
+                question: "Add AGENTS.md rule?".into(),
+                options: Some(vec!["yes".into(), "no".into()]),
+                requested_by: "steve".into(),
+                source: Some(DecisionSource::Record),
+                ..Default::default()
+            },
+        );
+        store
+            .write(|tx| ProjectProposals(tx).set_decision_id(&prop.id, Some(&d.id)))
+            .unwrap();
+        assert_refused_cleanly(
+            &h.w,
+            store,
+            &owner,
+            &d.id,
+            d.revision,
+            "bogus",
+            "",
+            "agents_proposal invalid",
+        );
+        assert_success_replay_and_conflict(
+            &h.w,
+            store,
+            &owner,
+            &d.id,
+            "yes",
+            "no",
+            "agents_proposal",
+        );
+        assert_eq!(
+            store
+                .read(|r| ProjectProposals(r).get(&prop.id))
+                .unwrap()
+                .unwrap()
+                .status,
+            "accepted"
         );
     }
 

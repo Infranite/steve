@@ -236,13 +236,13 @@ pub struct Tools {
     pub outbox: Arc<steve_channels::Outbox>,
 }
 
-/// The knowledge state: `{type:"kb"}` events on the bus, and loaders for uploads, item and chat documents (notes and folders are built in).
+/// The knowledge state: `{type:"kb"}` events on the bus, and loaders for uploads and mail threads
+/// (notes and folders are built in).
 pub(crate) fn knowledge(
     steve_home: &Path,
     data_dir: &Path,
     bus: &crate::bus::Bus,
 ) -> steve_knowledge::Knowledge {
-    use steve_knowledge::sources::{chat::ChatLoader, items::ItemsLoader};
     let kb_bus = bus.clone();
     let kb = steve_knowledge::Knowledge::with_loaders(
         move |e: steve_knowledge::KbEvent| {
@@ -258,8 +258,6 @@ pub(crate) fn knowledge(
             // loader is asked first (it accepts only thread documents)
             Arc::new(steve_mail::knowledge::ThreadLoader),
             Arc::new(steve_knowledge::FilesLoader::new(data_dir)),
-            Arc::new(ItemsLoader),
-            Arc::new(ChatLoader),
         ],
     );
     kb.set_folder_policy(steve_knowledge::FolderPolicy::new(

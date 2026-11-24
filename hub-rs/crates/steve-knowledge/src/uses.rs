@@ -53,9 +53,7 @@ pub fn current(c: &mut impl Read, viewer: &Viewer, h: &UseHit) -> Result<Option<
     };
     let steve_store::knowledge::Candidate {
         label,
-        source_kind,
         title,
-        doc_ref: r#ref,
         heading,
         ..
     } = row;
@@ -71,10 +69,6 @@ pub fn current(c: &mut impl Read, viewer: &Viewer, h: &UseHit) -> Result<Option<
                 bot.map_or_else(|| "#/bots".into(), |b| format!("#/bots/{b}")),
             )
         }
-        _ if source_kind == "items" => (
-            title.unwrap_or_default(),
-            format!("#/items/{}", r#ref.as_deref().unwrap_or(&h.obj_id)),
-        ),
         _ => (
             title.unwrap_or_default(),
             format!("#/knowledge/doc/{}?seq={}", h.obj_id, h.seq),

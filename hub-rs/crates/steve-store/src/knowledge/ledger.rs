@@ -249,6 +249,53 @@ impl<C: Read> MemoryChanges<'_, C> {
             change_row,
         )
     }
+
+    /// Unresolved `flag` conflicts created after `since`.
+    pub fn open_flags_since(&mut self, ws: &str, since: i64) -> Result<usize> {
+        let n: i64 = self
+            .0
+            .one(
+                workspace(ws)
+                    .expr(Func::count(Expr::col("id")))
+                    .and_where(Expr::col("op").eq("flag"))
+                    .and_where(Expr::col("state").eq("open"))
+                    .and_where(Expr::col("created").gt(since)),
+                |r| r.get(0),
+            )?
+            .unwrap_or(0);
+        Ok(usize::try_from(n).unwrap_or(0))
+    }
+
+    /// Start time of the newest non-skipped run of `flow_id`.
+    pub fn last_steward_run_at(&mut self, ws: &str, flow_id: &str) -> Result<Option<i64>> {
+        self.0.one(
+            Query::select()
+                .column("started")
+                .from("flow_runs")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("flow_id").eq(flow_id))
+                .and_where(Expr::col("status").ne("skipped"))
+                .order_by("started", Order::Desc)
+                .limit(1),
+            |r| r.get(0),
+        )
+    }
+
+    /// Number of skipped runs recorded for `flow_id`.
+    pub fn skipped_steward_runs(&mut self, ws: &str, flow_id: &str) -> Result<i64> {
+        Ok(self
+            .0
+            .one(
+                Query::select()
+                    .expr(Func::count(Expr::col("id")))
+                    .from("flow_runs")
+                    .and_where(Expr::col("workspace_id").eq(ws))
+                    .and_where(Expr::col("flow_id").eq(flow_id))
+                    .and_where(Expr::col("status").eq("skipped")),
+                |r| r.get(0),
+            )?
+            .unwrap_or(0))
+    }
 }
 
 impl MemoryChanges<'_, W<'_>> {
