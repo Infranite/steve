@@ -265,7 +265,7 @@ export default {
   },
   newSpace: {
     current: "Using “{{persona}}” with the account's default rules",
-    suggest: "{{reason}}. Consider setting it to Quiet: still recorded and searchable, but no inbox entries, drafts or notifications.",
+    suggest: "{{reason}}. Consider setting it to Quiet: still recorded and searchable, but no Decisions cards, drafts or notifications.",
     legend: "Quiet: record only, don't bother you. Block: don't process or store new messages. Record only: Steve doesn't speak here.",
     block: "Block",
     quiet: "Quiet",
@@ -466,7 +466,7 @@ export default {
     steveHere: "Steve here",
     role: "Role",
     roleOff: "You set it to “{{attention}}”: response rules here are paused",
-    mutedSub: "Doesn't speak or draft; hand-offs still go to your inbox (silent)",
+    mutedSub: "Doesn't speak or draft; hand-offs still go to Decisions (silent)",
     replyAsYou: "Reply for you",
     replyAsYouSaved: "Saved: reply for you is {{level}}",
     botNotices: "Bot notices",
@@ -531,6 +531,6 @@ export default {
     historyLateHint: "Arrived long after it was written: only recorded, Steve did not act on it",
     historyBackfillHint: "Read back after the connection was interrupted: only recorded, Steve did not act on it",
     madeItem: "Created item {{id}}",
-    approve: "Approve in the inbox",
+    approve: "Approve in Decisions",
   },
 }

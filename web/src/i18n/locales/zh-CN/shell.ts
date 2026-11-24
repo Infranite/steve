@@ -55,7 +55,7 @@ export default {
     waitingHead_other: "等你 · {{count}}",
     sessionTitle: "会话 {{title}}",
     permission: "权限",
-    moreWaiting_other: "还有 {{count}} 件，去待处理",
+    moreWaiting_other: "还有 {{count}} 件，去待我决定",
     noticesUnread_other: "通知 · {{count}} 条未读",
     similarMore_other: "同类还有 {{count}} 条",
     similarHide: "收起同类",
@@ -296,10 +296,10 @@ export default {
   cmd: {
     page: {
       chat: "对话",
-      inbox: "待处理",
+      inbox: "待我决定",
       calendar: "日历",
-      todos: "待办",
-      goals: "待办 · 目标",
+      todos: "我的待办",
+      goals: "我的待办 · 目标",
       items: "事项",
       projects: "项目",
       sessions: "会话",
