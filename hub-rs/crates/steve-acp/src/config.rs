@@ -304,11 +304,20 @@ impl AcpConfig {
         &self,
         harness: &str,
     ) -> Result<(std::path::PathBuf, Vec<std::ffi::OsString>), String> {
+        self.adapter_command_for_mode(harness, None)
+    }
+
+    /// [`Self::adapter_command`] with any per-mode launch flags (`mode_args`) appended for `mode`.
+    pub fn adapter_command_for_mode(
+        &self,
+        harness: &str,
+        mode: Option<steve_node_api::PermissionMode>,
+    ) -> Result<(std::path::PathBuf, Vec<std::ffi::OsString>), String> {
         let cmd = self
             .adapters
             .get(harness)
             .ok_or_else(|| format!("no adapter for harness {harness}"))?;
-        let extra = self.launch_args(harness);
+        let extra = self.launch_args(harness, mode);
         Ok(if is_node_script(cmd) {
             (
                 self.node.clone(),
