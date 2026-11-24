@@ -1019,3 +1019,115 @@ pub fn seed_retry_blocker(store: &Store, state: &str) -> Result<()> {
         Ok(())
     })
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRuntimeSnapshot {
+    pub session_status: String,
+    pub binding_phase: String,
+    pub active_attempt: Option<String>,
+    pub turns: Vec<String>,
+    pub attempts: Vec<String>,
+    pub start_commands: Vec<(String, i64, bool)>,
+    pub dispatches: Vec<(String, String)>,
+    pub queued: i64,
+    pub transcript: Vec<(String, i64)>,
+    pub folded_text: String,
+    pub duplicate_node_events: i64,
+    pub faulted_streams: i64,
+}
+
+pub fn session_runtime_snapshot(store: &Store, session: &str) -> Result<SessionRuntimeSnapshot> {
+    store.sqlite_read(|db| {
+        let session_status: String =
+            db.query_row("SELECT status FROM sessions WHERE id=?1", [session], |r| {
+                r.get(0)
+            })?;
+        let (binding_phase, active_attempt): (String, Option<String>) = db.query_row(
+            "SELECT phase, active_attempt FROM runtime_sessions WHERE session_id=?1",
+            [session],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let turns = {
+            let mut st = db.prepare(
+                "SELECT state FROM runtime_turns WHERE session_id=?1 ORDER BY created, rowid",
+            )?;
+            st.query_map([session], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?
+        };
+        let attempts = {
+            let mut st = db.prepare(
+                "SELECT a.state FROM runtime_attempts a
+                   JOIN runtime_turns t ON t.turn_id=a.turn_id
+                  WHERE t.session_id=?1 ORDER BY a.created, a.rowid",
+            )?;
+            st.query_map([session], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?
+        };
+        let start_commands = {
+            let mut st = db.prepare(
+                "SELECT state, lease_generation, maybe_sent FROM node_commands
+                  WHERE method='start_turn' AND session_id=?1 ORDER BY created, rowid",
+            )?;
+            st.query_map([session], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let dispatches = {
+            let mut st = db.prepare(
+                "SELECT text, state FROM session_dispatch
+                  WHERE session_id=?1 AND backend='node' ORDER BY created, rowid",
+            )?;
+            st.query_map([session], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let queued: i64 = db.query_row(
+            "SELECT COUNT(*) FROM queued WHERE session_id=?1",
+            [session],
+            |r| r.get(0),
+        )?;
+        let transcript = {
+            let mut st = db.prepare(
+                "SELECT kind, COUNT(*) FROM events
+                  WHERE session_id=?1 AND kind IN ('user','text','turn_end')
+                  GROUP BY kind ORDER BY kind",
+            )?;
+            st.query_map([session], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let folded_text: String = db.query_row(
+            "SELECT COALESCE(group_concat(json_extract(data,'$.text'),''), '')
+               FROM (SELECT data FROM events WHERE session_id=?1 AND kind='text' ORDER BY seq)",
+            [session],
+            |r| r.get(0),
+        )?;
+        let duplicate_node_events: i64 = db.query_row(
+            "SELECT COUNT(*) FROM (
+               SELECT 1 FROM events WHERE source_node IS NOT NULL
+                GROUP BY source_node, source_stream, source_epoch, source_seq
+               HAVING COUNT(*)>1
+             )",
+            [],
+            |r| r.get(0),
+        )?;
+        let faulted_streams: i64 = db.query_row(
+            "SELECT COUNT(*) FROM node_streams WHERE fault IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(SessionRuntimeSnapshot {
+            session_status,
+            binding_phase,
+            active_attempt,
+            turns,
+            attempts,
+            start_commands,
+            dispatches,
+            queued,
+            transcript,
+            folded_text,
+            duplicate_node_events,
+            faulted_streams,
+        })
+    })
+}

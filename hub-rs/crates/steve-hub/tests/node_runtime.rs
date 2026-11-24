@@ -4896,3 +4896,6 @@ async fn native_fallback_never_allows_and_only_the_declared_owner_route_asks() {
         assert_eq!(stats.permissions_by_resolver["harness_native"][result], 1);
     }
 }
+
+#[path = "node_runtime/restart_matrix.rs"]
+mod restart_matrix;
