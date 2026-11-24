@@ -251,3 +251,233 @@ pub struct VitalsTokens {
     pub per_minute: i64,
     pub today: i64,
 }
+
+/// How a harness component binary was installed on a Node, determined from its resolved path.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum ComponentInstallSource {
+    SteveManaged,
+    HomebrewCask,
+    HomebrewFormula,
+    NpmGlobal,
+    Standalone,
+    #[default]
+    External,
+}
+
+/// Official upgrade mechanism resolved for a component on a Node.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum UpgradeMethod {
+    SteveManaged,
+    HomebrewCask,
+    HomebrewFormula,
+    NpmGlobal,
+    SelfUpdate,
+    #[default]
+    Unsupported,
+}
+
+/// Version comparison state of one harness component on a Node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum ComponentUpdateState {
+    Unchecked,
+    Current,
+    Available,
+    /// Official self-updater is supported, but the harness provides no separate check-only registry.
+    CheckOnUpgrade,
+    CheckFailed,
+    Unsupported,
+    NotInstalled,
+}
+
+/// How a per-harness auto-upgrade override relates to the Node-level default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum HarnessAutoUpgradeMode {
+    Inherit,
+    On,
+    Off,
+}
+
+/// Hub-owned automatic harness upgrade settings for one Node (owner-only, default off).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct HarnessAutoUpgradePolicy {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Harness id -> explicit override; absent inherits `enabled`.
+    #[serde(default)]
+    pub harnesses: std::collections::BTreeMap<String, bool>,
+}
+
+impl HarnessAutoUpgradePolicy {
+    /// Effective auto-upgrade setting for `harness`.
+    pub fn effective(&self, harness: &str) -> bool {
+        self.harnesses.get(harness).copied().unwrap_or(self.enabled)
+    }
+
+    /// Apply a mode change for one harness (`Inherit` removes its explicit override).
+    pub fn set_harness_mode(&mut self, harness: String, mode: HarnessAutoUpgradeMode) {
+        match mode {
+            HarnessAutoUpgradeMode::Inherit => {
+                self.harnesses.remove(&harness);
+            }
+            HarnessAutoUpgradeMode::On => {
+                self.harnesses.insert(harness, true);
+            }
+            HarnessAutoUpgradeMode::Off => {
+                self.harnesses.insert(harness, false);
+            }
+        }
+    }
+}
+
+/// Request body for `PUT /api/node-harness-updates/{node}/auto-upgrade`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct SetHarnessAutoUpgrade {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub harness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub mode: Option<HarnessAutoUpgradeMode>,
+}
+
+/// Who triggered a harness upgrade run on the Hub.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum HarnessUpgradeTrigger {
+    #[default]
+    Manual,
+    Auto,
+}
+
+/// Safe error attached to a finished harness upgrade receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct HarnessUpgradeError {
+    pub code: String,
+    pub safe_detail: String,
+}
+
+/// Observed state of a harness upgrade operation receipt over HTTP.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum HarnessUpgradeReceiptState {
+    Accepted,
+    Running,
+    Waiting,
+    Unknown {
+        reason: String,
+    },
+    Finished {
+        outcome: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
+        error: Option<HarnessUpgradeError>,
+    },
+}
+
+/// Operation receipt for one harness upgrade, mirrored from `steve_node_api::Receipt`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct HarnessUpgradeReceipt {
+    pub operation: String,
+    pub state: HarnessUpgradeReceiptState,
+}
+
+/// HTTP view of one harness component's update state on a Node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct HarnessComponentUpdateView {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub package: Option<String>,
+    pub managed: bool,
+    #[serde(default)]
+    pub source: ComponentInstallSource,
+    #[serde(default)]
+    pub upgrade_method: UpgradeMethod,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub upgrade_command: Option<String>,
+    #[serde(default)]
+    pub can_upgrade: bool,
+    pub state: ComponentUpdateState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub installed: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub latest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub checked: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub reason: Option<String>,
+}
+
+/// HTTP view of one harness's update state on a Node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct HarnessUpdateView {
+    pub harness: String,
+    pub name: String,
+    pub components: Vec<HarnessComponentUpdateView>,
+    pub can_upgrade: bool,
+    #[serde(default)]
+    pub active_sessions: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub operation: Option<HarnessUpgradeReceipt>,
+}
+
+/// HTTP view of a Node's harness update report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct HarnessUpdateReportView {
+    pub node: String,
+    pub checking: bool,
+    pub harnesses: Vec<HarnessUpdateView>,
+}
+
+/// Response body of `GET /api/node-harness-updates/{node}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct HarnessUpdatesResponse {
+    pub report: Option<HarnessUpdateReportView>,
+    pub at: i64,
+    pub runs: std::collections::BTreeMap<String, HarnessUpgradeReceipt>,
+    #[serde(default)]
+    pub retryable_unknown: Vec<String>,
+    #[serde(default)]
+    pub auto_upgrade: HarnessAutoUpgradePolicy,
+    pub error: Option<String>,
+    pub code: Option<String>,
+}
+
+/// Response body of `POST /api/node-harness-updates/{node}/{harness}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct UpgradeHarnessResponse {
+    pub receipt: HarnessUpgradeReceipt,
+}

@@ -67,6 +67,11 @@ impl Inventory {
             caches,
         }
     }
+
+    pub fn invalidate(&self, node: &str) {
+        let tag = steve_runtime::cache::Tag::of("node-inventory", node);
+        self.caches.invalidate(std::slice::from_ref(&tag));
+    }
 }
 
 struct Target {

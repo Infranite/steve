@@ -1968,7 +1968,7 @@ impl LocalNode {
                 emit_all(&self.0, t, d.events)?;
             }
             if matches!(method, "install_harness" | "upgrade_harness")
-                && !receipt.state.is_finished()
+                && matches!(receipt.state, Observed::Accepted | Observed::Running)
             {
                 *maintenance = Some(
                     serde_json::to_value(&c.body).map_err(internal)?["harness"]
@@ -4208,17 +4208,7 @@ impl Discovery for LocalNode {
     async fn harness_updates(&self, fresh: bool) -> ApiResult<HarnessUpdateReport> {
         self.start_adapter_updates();
         harness_updates::Updates::schedule(self, fresh);
-        let mut report = self.0.harness_updates.report(&self.0)?;
-        for h in &mut report.harnesses {
-            if h.can_upgrade {
-                let req = adapter_setup::requirements(&self.0.cfg.acp, &h.harness).await;
-                if let Some(e) = req.node_error.or(req.npm_error) {
-                    h.can_upgrade = false;
-                    h.reason = Some(e);
-                }
-            }
-        }
-        Ok(report)
+        self.0.harness_updates.report(&self.0).await
     }
     async fn upgrade_harness(&self, c: Command<UpgradeHarness>) -> ApiResult<Receipt> {
         self.upgrade_components(c).await

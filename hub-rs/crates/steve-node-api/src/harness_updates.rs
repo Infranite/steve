@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+pub use steve_types::devices::{ComponentInstallSource, ComponentUpdateState, UpgradeMethod};
 
 use crate::{NodeId, Receipt, Timestamp};
 
@@ -21,6 +22,9 @@ pub struct HarnessUpdateInfo {
     pub name: String,
     pub components: Vec<HarnessComponentUpdate>,
     pub can_upgrade: bool,
+    /// Active sessions currently running on this Node using this harness.
+    #[serde(default)]
+    pub active_sessions: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// Last explicit maintenance receipt, including failure/unknown, from the Node's journal.
@@ -35,6 +39,14 @@ pub struct HarnessComponentUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package: Option<String>,
     pub managed: bool,
+    #[serde(default)]
+    pub source: ComponentInstallSource,
+    #[serde(default)]
+    pub upgrade_method: UpgradeMethod,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upgrade_command: Option<String>,
+    #[serde(default)]
+    pub can_upgrade: bool,
     pub state: ComponentUpdateState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installed: Option<String>,
@@ -46,21 +58,14 @@ pub struct HarnessComponentUpdate {
     pub reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ComponentUpdateState {
-    Unchecked,
-    Current,
-    Available,
-    CheckFailed,
-    Unsupported,
-    NotInstalled,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpgradeHarness {
     pub harness: String,
     /// Component id → exact version from this Node's check; never npm package specifications.
+    #[serde(default)]
     pub versions: BTreeMap<String, String>,
+    /// Component ids whose verified official self-updater runs without a pre-checked registry version.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub self_update: Vec<String>,
 }
