@@ -2,7 +2,7 @@
 import assert from "node:assert/strict"
 import { fileURLToPath } from "node:url"
 import { createServer } from "vite"
-import { deliveryFixture } from "./fixtures/delivery-api.mjs"
+import { deliveryFixture } from "./fixtures/delivery-api.ts"
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
 const fixture = await deliveryFixture()
 const root = fileURLToPath(new URL("..", import.meta.url))

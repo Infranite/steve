@@ -1,4 +1,4 @@
-import { seedItems, seedSessions } from "./view-data"
+import { fixtureBot, fixtureItem, fixtureSess, seedItems, seedSessions } from "./view-data"
 /* ⌘K (the affectUI Command Menu over Steve's data) and 设置 · 操作记录 (the affectUI Activity list over the audit
  * trail), with a seeded store; the Hub's searches and the audit trail come from the test's routes. */
 import { createRoot } from "react-dom/client"
@@ -10,14 +10,14 @@ import { CommandPalette } from "../../src/command-palette"
 import { AuditSettingsPane } from "../../src/audit-settings"
 
 document.documentElement.classList.toggle("dark", location.search.includes("dark"))
-const item = (id: string, t: string, s: Item["st"], updated: number) => ({ id, t, b: "dev", st: s, src: ["", ""], ws: "default", project: null, up: "", acc: "inherit", goals: [], now: "", rounds: [], waits: [], ss: [], tl: [], outs: [], anns: [], q: [], qs: null, branch: null, cwd: null, detail: false, dependents: [], created: 0, updated }) as unknown as Item
-const sess = (id: string, n: number, title: string, itemId: string | null, at: number) => ({ id, n, item: itemId, b: "dev", st: "idle", title, dur: "", ctx: 0, src: "", up: "", at, ev: [], seqs: [], ts: [], queue: [], device: "hub", loaded: false, busy: false }) as unknown as Sess
+const item = (id: string, t: string, s: Item["st"], updated: number): Item => fixtureItem({ id, t, st: s, updated })
+const sess = (id: string, n: number, title: string, itemId: string | null, at: number): Sess => fixtureSess({ id, n, item: itemId, title, at })
 st.ready = true
 st.owner = true
 seedItems([item("ST-7", "改登录页", "run", 1), item("ST-8", "修复协作卡片误报", "done", 2), item("ST-9", "整理发布说明", "wait", 3)])
-const sessionRows = { ses_a: sess("ses_a", 1, "排查登录跳转", "ST-7", 2), ses_b: sess("ses_b", 2, "写测试", "ST-9", 1) }
+const sessionRows: Record<string, Sess> = { ses_a: sess("ses_a", 1, "排查登录跳转", "ST-7", 2), ses_b: sess("ses_b", 2, "写测试", "ST-9", 1) }
 seedSessions(sessionRows)
-st.bots = { steve: { n: "Steve", role: "主助手", main: true } as any, dev: { n: "开发", role: "写代码" } as any }
+st.bots = { steve: fixtureBot({ id: "steve", n: "Steve", role: "主助手", main: true }), dev: fixtureBot({ id: "dev", n: "开发", role: "写代码" }) }
 
 function App() {
   useStore()
@@ -28,9 +28,7 @@ function App() {
 }
 /* what the test does to the store and the conversation: a session renamed in place as a stream does it, and a chat
  * view that starts listening for jumps only now */
-Object.assign(window, {
-  renameSession: (id: string, title: string) => { seedSessions({ [id]: { ...sessionRows[id as keyof typeof sessionRows], title } }); emit() },
-  listenJump: () => new Promise((res) => { const off = onJump((j) => { off(); res(j) }); setTimeout(() => { off(); res(null) }, 1000) }),
-})
+window.renameSession = (id: string, title: string) => { seedSessions({ [id]: { ...sessionRows[id], title } }); emit() }
+window.listenJump = () => new Promise((res) => { const off = onJump((j) => { off(); res(j) }); setTimeout(() => { off(); res(null) }, 1000) })
 window.addEventListener("hashchange", () => { const r = document.querySelector("[data-route]"); if (r) r.textContent = location.hash })
 createRoot(document.getElementById("root")!).render(<App />)

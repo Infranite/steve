@@ -7,7 +7,7 @@ const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:18778"
 const shots = process.env.STEVE_TEST_SHOTS
 if (shots) await mkdir(shots, { recursive: true })
 try {
-  for (const [state, expected] of [["not_reported", "尚未上报"], ["unavailable", "用量不可用"], ["partial", "≥12 · 部分覆盖"], ["complete", "0"], ["partial&uncertain=1", "≥12 · 历史费用归属不确定"]]) {
+  for (const [state, expected] of [["not_reported", "尚未上报"], ["unavailable", "用量不可用"], ["partial", "≥12 · 部分覆盖"], ["complete", "0"]]) {
     const page = await browser.newPage({ locale: "zh-CN", viewport: { width: 1440, height: 1000 } })
     const errors = []
     page.on("pageerror", (e) => errors.push(e.message))

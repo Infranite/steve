@@ -1,16 +1,17 @@
 import { seedMessages } from "./view-data"
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
+import type { ConversationMessage } from "../../src/api"
 import { ChatView } from "../../src/chat-view"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
-import { st, msgOf, useStore, type Bot } from "../../src/store"
+import { st, useStore, type Bot } from "../../src/store"
 
 /* 对话里的配置改动卡片：一句话起草多处，其中一处已应用（状态来自消息的 cfg_state） */
 document.documentElement.classList.toggle("dark", matchMedia("(prefers-color-scheme: dark)").matches)
 const now = Date.now()
 const quiet = { id: "chg_quiet", title: "设置 · 通知", target: { kind: "settings", id: "notify" }, href: "#/settings/notify", changes: [{ label: "免打扰", from: "23:00 – 08:00", to: "22:00 – 09:00" }, { label: "每天汇报", from: "08:30", to: "09:00" }] }
 const dev = { id: "chg_dev", title: "Steve 开发 Bot 的设置", target: { kind: "bot", id: "dev" }, href: "#/bots/dev", changes: [{ label: "思考强度", from: "默认", to: "high" }, { label: "交付验收", from: "跟随全局", to: "自动验收" }] }
-const raw = (id: string, text: string, meta: any) => ({ id, workspace_id: "default", author: "steve", text, item_id: null, created: now, meta, space: "steve" }) as any
+const raw = (id: string, text: string, meta: Record<string, unknown>): ConversationMessage => ({ id, author: "steve", text, item_id: null, created: now, meta })
 const steve: Bot = { id: "steve", main: true, n: "Steve", a: "", role: "你的助手", pers: "", pro: 1, h: "Codex", harness: "codex", m: "", model: null, on: true, acc: "manual", ws: "", project: null, perm: "", permMode: "auto", rule: "", prompt: null, routines: [], hue: "", color: "#8b9eac", round: 60, skin: null, workspaces: [] }
 st.bots = { steve }
 seedMessages([

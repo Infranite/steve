@@ -2,6 +2,7 @@
 import assert from "node:assert/strict"
 import http from "node:http"
 import { readFile, mkdir, writeFile } from "node:fs/promises"
+import { emptySnapshot } from "./fixtures/wire-views.ts"
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
 const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:19614"
 const apiPort = Number(process.env.STEVE_TEST_API_PORT || 19615)
@@ -31,7 +32,7 @@ const server = http.createServer(async (req, res) => {
     if (p === "/auth/hello") data = { name: "steve", version: "fixture", api: 2, login: { token: false, oidc: false } }
     else if (p === "/api/shell") {
       data = { version: "fixture", web_version: "fixture", owner: false, workspace: ws, workspaces: [ws], bots: [], allBots: [], projects: [], tags: [], settings: { onboard: "1" } }
-    } else if (p === "/api/snapshot") data = { epoch: "fixture", rev: 1, cursor: "fixture:1", views: {} }
+    } else if (p === "/api/snapshot") data = emptySnapshot()
     else if (p === "/api/summary") data = { thinking: false, hold: null }
     else if (p === "/api/devices") data = { devices: [device] }
     else if (p === "/api/runtimes") {
