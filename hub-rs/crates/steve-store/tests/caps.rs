@@ -220,7 +220,7 @@ fn pins_follow_their_entries_and_usage_sums_by_tool() {
                 !tools::ToolRows(tx).set_pin("dev", "mcp", "bmcp_a", true, 3)?,
                 "once"
             );
-            assert!(tools::ToolRows(tx).set_pin("dev", "tool", "steve_workflow", true, 4)?);
+            assert!(tools::ToolRows(tx).set_pin("dev", "tool", "steve_item_read", true, 4)?);
             assert!(tools::ToolRows(tx).set_pin("doc", "mcp", "bmcp_a", true, 5)?);
             let kinds: Vec<String> = tools::ToolRows(tx)
                 .pins("dev")?
@@ -245,19 +245,19 @@ fn pins_follow_their_entries_and_usage_sums_by_tool() {
             tools::ToolRows(tx).record(
                 "dev",
                 today - 3,
-                &["steve_workflow", "files__read"],
+                &["steve_item_read", "files__read"],
                 1,
                 0,
             )?;
-            tools::ToolRows(tx).record("dev", today, &["steve_workflow"], 0, 1)?;
-            tools::ToolRows(tx).record("dev", today, &["steve_workflow"], 0, 1)?;
-            tools::ToolRows(tx).record("doc", today, &["steve_workflow"], 0, 1)?;
+            tools::ToolRows(tx).record("dev", today, &["steve_item_read"], 0, 1)?;
+            tools::ToolRows(tx).record("dev", today, &["steve_item_read"], 0, 1)?;
+            tools::ToolRows(tx).record("doc", today, &["steve_item_read"], 0, 1)?;
             let u = tools::ToolRows(tx).usage("dev", today, 30)?;
             assert_eq!(
                 u.iter()
                     .map(|x| (x.tool.as_str(), x.searched, x.called))
                     .collect::<Vec<_>>(),
-                [("steve_workflow", 1, 2), ("files__read", 1, 0)]
+                [("steve_item_read", 1, 2), ("files__read", 1, 0)]
             );
             Ok::<_, steve_store::StoreError>(())
         })

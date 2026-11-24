@@ -123,7 +123,6 @@ fn removed_and_malformed_variables_fail_the_preflight() {
         ("STEVE_IDLE_RELEASE_MS", "NaN"),
         ("STEVE_DISK_FLOOR_GB", "unknown"),
         ("STEVE_BACKUP", "of"),
-        ("STEVE_DYNAMIC_WORKFLOWS", "yes"),
     ] {
         let (code, r, tmp) = check(&[(name, value)]);
         assert_eq!(code, 2, "{name}: {r}");

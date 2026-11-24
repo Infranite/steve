@@ -1,5 +1,5 @@
 //! `steve-hub --stats-snapshot --db <file> [--workspace <id>] [--from <day> --to <day>]`: the
-//! statistics' workflow section, the quality figures and the throughput of one database file, printed as
+//! statistics' delivery section, the quality figures and the throughput of one database file, printed as
 //! JSON, without a Hub (#242). It is how a baseline is taken from a copy of an installation's database.
 //!
 //! The file is only read (opened read-only, `query_only`). One with an older schema than this build is
@@ -120,7 +120,7 @@ fn report(r: &mut R<'_>, a: &Args, schema: i64) -> Result<serde_json::Value> {
         "workspace": ws,
         "schema": schema,
         "range": {"from": s.from, "to": s.to, "tz": s.tz},
-        "workflow": s.workflow,
+        "delivery": s.delivery,
         "quality": s.quality,
         "throughput": s.throughput,
     }))
@@ -188,8 +188,7 @@ mod tests {
         .unwrap();
         assert_eq!(v["workspace"], "w");
         assert_eq!(v["schema"], 91);
-        assert_eq!(v["workflow"]["invalidations"]["plan"], 1);
-        assert_eq!(v["quality"]["unit_retries"], 0);
+        assert_eq!(v["delivery"]["invalidations"]["plan"], 1);
         assert_eq!(
             std::fs::read(&path).unwrap(),
             before,

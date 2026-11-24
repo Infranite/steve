@@ -6,7 +6,7 @@ import { getItems, getSessions, getSession } from "@/store"
  * the conversation the Hub finds, and contacts / teams (where the contacts module is). Keyboard first: ↑ ↓, Tab
  * between groups, ↵ runs, Esc clears and then closes. */
 import { useEffect, useState, type ReactNode } from "react"
-import { BookOpenIcon, BotIcon, Building2Icon, CalendarIcon, ListChecksIcon, TargetIcon, ChartNoAxesColumnIcon, ContactRoundIcon, FolderIcon, GitPullRequestIcon, HistoryIcon, InboxIcon, KeyRoundIcon, ListTodoIcon, LockIcon, MessageCircleIcon, MessagesSquareIcon, MoonIcon, PlugIcon, PlusIcon, QrCodeIcon, RadioIcon, ServerIcon, SettingsIcon, SquareTerminalIcon, SunIcon, UsersRoundIcon, WorkflowIcon, BlocksIcon, UploadIcon } from "lucide-react"
+import { BookOpenIcon, BotIcon, Building2Icon, CalendarIcon, ListChecksIcon, TargetIcon, ChartNoAxesColumnIcon, ContactRoundIcon, FolderIcon, GitPullRequestIcon, HistoryIcon, InboxIcon, KeyRoundIcon, ListTodoIcon, LockIcon, MailIcon, MessageCircleIcon, MessagesSquareIcon, MoonIcon, NewspaperIcon, PlugIcon, PlusIcon, QrCodeIcon, RadioIcon, ServerIcon, SettingsIcon, SquareTerminalIcon, SunIcon, UsersRoundIcon, WorkflowIcon, BlocksIcon, UploadIcon } from "lucide-react"
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog"
 import { CommandMenu as Menu, type CommandGroup } from "@/components/affect/command-menu-clean"
 import { api } from "@/api"
@@ -78,7 +78,38 @@ export function CommandPalette() {
     row("a:hubs", t("shell:cmd.switchHub"), <ServerIcon />, () => openSheet("hubs"), { data: { "data-cmd-switch-hub": "" } }),
     row("a:theme", dark ? t("shell:cmd.toLight") : t("shell:cmd.toDark"), dark ? <SunIcon /> : <MoonIcon />, () => setTheme(dark ? "light" : "dark"), { keywords: t("shell:cmd.themeWords") }),
   ] }
-  const pageList: [string, string, typeof SettingsIcon][] = [["", t("shell:cmd.page.chat"), MessageCircleIcon], ["feed", t("core:nav.feed"), BookOpenIcon], ["inbox", t("shell:cmd.page.inbox"), InboxIcon], ["calendar", t("shell:cmd.page.calendar"), CalendarIcon], ["todos", t("shell:cmd.page.todos"), ListChecksIcon], ["todos?view=goals", t("shell:cmd.page.goals"), TargetIcon], ["items", t("shell:cmd.page.items"), ListTodoIcon], ["projects", t("shell:cmd.page.projects"), FolderIcon], ["sessions", t("shell:cmd.page.sessions"), SquareTerminalIcon], ["stats", t("shell:cmd.page.stats"), ChartNoAxesColumnIcon], ["publications", t("pages:delivery.mine"), UploadIcon], ["signals", t("shell:cmd.page.signals"), RadioIcon], ["auto", t("shell:cmd.page.auto"), WorkflowIcon], ["integrations", t("shell:cmd.page.integrations"), PlugIcon], ["channels", t("shell:cmd.page.channels"), MessagesSquareIcon], ["contacts", t("shell:cmd.page.contacts"), ContactRoundIcon], ["knowledge", t("shell:cmd.page.knowledge"), BookOpenIcon], ["github", "GitHub", GitPullRequestIcon], ["accounts", t("shell:cmd.page.accounts"), KeyRoundIcon], ["vault", t("shell:cmd.page.vault"), LockIcon], ["bots", "Bot", BotIcon], ["capabilities", t("shell:cmd.page.capabilities"), BlocksIcon], ["devices", t("shell:cmd.page.devices"), ServerIcon], ["settings/general", t("shell:cmd.page.settings"), SettingsIcon], ["devices/hub", t("devices:cmd.hub"), ServerIcon], ["devices/clients", t("devices:cmd.clients"), KeyRoundIcon], ["settings/tags", t("shell:cmd.page.settingsTags"), SettingsIcon], ["settings/workspace", t("shell:cmd.page.settingsSpace"), SettingsIcon], ...(st.owner ? [["settings/audit", t("shell:cmd.page.settingsAudit"), HistoryIcon] as [string, string, typeof SettingsIcon]] : [])]
+  const pageList: [string, string, typeof SettingsIcon][] = [
+    ["", t("shell:cmd.page.chat"), MessageCircleIcon],
+    ["inbox", t("shell:cmd.page.inbox"), InboxIcon],
+    ["items", t("shell:cmd.page.items"), ListTodoIcon],
+    ["projects", t("shell:cmd.page.projects"), FolderIcon],
+    ["calendar", t("shell:cmd.page.calendar"), CalendarIcon],
+    ["todos", t("shell:cmd.page.todos"), ListChecksIcon],
+    ["todos?view=goals", t("shell:cmd.page.goals"), TargetIcon],
+    ["feed", t("core:nav.feed"), NewspaperIcon],
+    ["channels", t("shell:cmd.page.channels"), MessagesSquareIcon],
+    ["mail", t("core:nav.mail"), MailIcon],
+    ["contacts", t("shell:cmd.page.contacts"), ContactRoundIcon],
+    ["knowledge", t("shell:cmd.page.knowledge"), BookOpenIcon],
+    ["integrations", t("shell:cmd.page.integrations"), PlugIcon],
+    ["github", "GitHub", GitPullRequestIcon],
+    ["bots", "Bot", BotIcon],
+    ["sessions", t("shell:cmd.page.sessions"), SquareTerminalIcon],
+    ["auto", t("shell:cmd.page.auto"), WorkflowIcon],
+    ["capabilities", t("shell:cmd.page.capabilities"), BlocksIcon],
+    ["signals", t("shell:cmd.page.signals"), RadioIcon],
+    ["stats", t("shell:cmd.page.stats"), ChartNoAxesColumnIcon],
+    ["publications", t("pages:delivery.mine"), UploadIcon],
+    ["accounts", t("shell:cmd.page.accounts"), KeyRoundIcon],
+    ["vault", t("shell:cmd.page.vault"), LockIcon],
+    ["devices", t("shell:cmd.page.devices"), ServerIcon],
+    ["settings/general", t("shell:cmd.page.settings"), SettingsIcon],
+    ["devices/hub", t("devices:cmd.hub"), ServerIcon],
+    ["devices/clients", t("devices:cmd.clients"), KeyRoundIcon],
+    ["settings/tags", t("shell:cmd.page.settingsTags"), SettingsIcon],
+    ["settings/workspace", t("shell:cmd.page.settingsSpace"), SettingsIcon],
+    ...(st.owner ? [["settings/audit", t("shell:cmd.page.settingsAudit"), HistoryIcon] as [string, string, typeof SettingsIcon]] : []),
+  ]
   const pages: CommandGroup = { id: "pages", label: t("shell:cmd.pages"), commands: pageList.map(([h, l, I]) => row("p:" + h, l, <I />, () => go("#/" + h), { data: { "data-cmd-page": h } })) }
   const items: CommandGroup = { id: "items", label: t("shell:cmd.page.items"), commands: ranked(getItems(), q).map((i) => row("i:" + i.id, i.t, <StatusDot s={i.st} />, () => go("#/items/" + i.id), { hint: i.id, mono: true, data: { "data-cmd-item": i.id } })) }
   const sessions: CommandGroup = { id: "sessions", label: t("shell:cmd.page.sessions"), commands: [...new Map([...getSessions(), ...[...found.sessions].flatMap((id) => getSession(id) ?? [])].map((s) => [s.id, s])).values()].sort((a, b) => (b.at ?? 0) - (a.at ?? 0)).map((s) => row("s:" + s.id, s.title, <SquareTerminalIcon />, () => go("#/sessions/" + s.id), { hint: s.item ? `${s.item} · #${s.n}` : undefined, mono: true, keywords: s.item ?? "", always: found.sessions.has(s.id), ...(found.sessions.has(s.id) && !local(s, q) && { hint: [s.item, t("shell:cmd.inTranscript")].filter(Boolean).join(" · "), mono: false }), data: { "data-cmd-session": s.id } })) }

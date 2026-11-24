@@ -74,17 +74,6 @@ pub fn node_command_count(store: &Store) -> i64 {
         .unwrap()
 }
 
-pub fn active_workflow_session(store: &Store, session: &str, at: i64) {
-    store.write::<_, StoreError>(|tx| {
-        tx.conn.execute("INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created,last_seen) VALUES ('n','me','node',zeroblob(32),'fingerprint','active',?1,?1)", [at])?;
-        tx.conn.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,active_attempt,updated) VALUES (?1,'n','{}',?1,'r','active','a_current',?2)", params![session, at])?;
-        tx.conn.execute("INSERT INTO runtime_turns(turn_id,session_id,state,active_attempt,created,updated) VALUES ('t_current',?1,'running','a_current',?2,?2)", params![session, at])?;
-        tx.conn.execute("INSERT INTO runtime_attempts(attempt_id,turn_id,ordinal,node_id,operation_id,execution,spec,digest,state,created,updated) VALUES ('a_current','t_current',0,'n','op','{}','{}','digest','running',?1,?1)", [at])?;
-        tx.conn.execute("INSERT INTO node_streams(node_id,stream,epoch,applied,session_id) VALUES ('n','stream','epoch',10,?1)", [session])?;
-        Ok(())
-    }).unwrap();
-}
-
 pub fn mark_activity(store: &Store, received: i64) {
     store
         .write_locked(|c| {

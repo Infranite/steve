@@ -708,7 +708,7 @@ impl NodeRuntime {
             }) = &c.error
             && let Some(delay) = RETRY_DELAYS_MS.get(ordinal as usize)
             && config::desired_in(&self.store, session)?.is_none()
-            && self.workflow_blocker_in(session)?.is_none()
+            && self.item_blocker_in(session)?.is_none()
             && self
                 .store
                 .read(|r| node_turns::retry::allowed(r, session))?

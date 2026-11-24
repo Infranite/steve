@@ -238,28 +238,6 @@ pub fn reject_tool_receipts(store: &Store) {
     }).unwrap();
 }
 
-pub fn skip_workflow_goal_version(store: &Store, item: &str) {
-    store
-        .write(|w| {
-            w.exec(
-                Query::update()
-                    .table("workflows")
-                    .value("goal_version", Expr::col("goal_version").sub(1_i64))
-                    .and_where(Expr::col("item_id").eq(item)),
-            )
-        })
-        .unwrap();
-}
-
-pub fn resume_workflow_deliveries(store: &Store) {
-    store
-        .write_locked(|c| {
-            c.execute_batch("DROP TRIGGER fail_workflow_delivery")?;
-            Ok(())
-        })
-        .unwrap();
-}
-
 pub fn completed_hooks(store: &Store, id: &str, item: &str, at: i64) {
     store
         .write(|w| {

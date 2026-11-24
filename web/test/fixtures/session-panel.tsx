@@ -40,8 +40,8 @@ const item = (id: string, title: string, st: Item["st"], extra: Partial<SeedItem
 })
 const items = codex ? [] : [
   item("ST-1", "重设计协作区", "run"),
-  item("ST-2", "核实数据契约", "done", { parent: { item: "ST-1" }, src: ["协作工作", "workflow"] }),
-  item("ST-3", "设计三层结构", "run", { parent: { item: "ST-1" }, src: ["协作工作", "workflow"], deps: ["ST-2"] }),
+  item("ST-2", "核实数据契约", "done", { parent: { item: "ST-1" } }),
+  item("ST-3", "设计三层结构", "run", { parent: { item: "ST-1" }, deps: ["ST-2"] }),
 ]
 const state: Shell = fixtureShell({
   bots: [fixtureRawBot({ id: "dev", name: "开发" })],
