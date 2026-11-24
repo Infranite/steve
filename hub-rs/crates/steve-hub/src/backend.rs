@@ -769,6 +769,27 @@ pub trait Domain: Send + Sync + 'static {
     async fn reassign(&self, id: &str, bot: &str, actor: &str) -> BResult<Obj> {
         todo_backend!("reassign")
     }
+    /// Hand off an item into a fresh session (default: same Bot switching execution surface for
+    /// this item only; explicit Bot switch or optional Bot default update when requested).
+    async fn handoff_item(
+        &self,
+        id: &str,
+        target: steve_core::HandoffTarget,
+        actor: &str,
+    ) -> Result<Value, crate::error::ApiError> {
+        let _ = (id, target, actor);
+        Err(BackendError::msg("not implemented: handoff_item").into())
+    }
+    /// Hand off from a specific item session into a fresh session.
+    async fn handoff_session(
+        &self,
+        session: &str,
+        target: steve_core::HandoffTarget,
+        actor: &str,
+    ) -> Result<Value, crate::error::ApiError> {
+        let _ = (session, target, actor);
+        Err(BackendError::msg("not implemented: handoff_session").into())
+    }
     async fn add_dep(&self, id: &str, dep: &str) -> BResult<()> {
         todo_backend!("add_dep")
     }

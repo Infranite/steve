@@ -389,18 +389,35 @@ impl RoutedRuntime {
 
     /// Admission before preparing a worktree or interrupting another session for a handoff.
     pub(super) fn check_dispatch(&self, item_id: &str, bot: &str) -> Result<()> {
+        self.check_dispatch_choice(item_id, bot, None)
+    }
+
+    /// Admission for an explicit [`HarnessChoice`] (e.g. a handoff switching harness or model).
+    pub(super) fn check_dispatch_choice(
+        &self,
+        item_id: &str,
+        bot: &str,
+        choice_override: Option<&HarnessChoice>,
+    ) -> Result<()> {
         let item = self
             .store
             .items()
             .get(item_id)?
             .ok_or(StoreError::NotFound("Item"))?;
         let routes = self.item_routes(&item, bot)?;
-        let choice = self.bot_choice(&item.workspace_id, &routes.bot);
+        let default_choice;
+        let choice = match choice_override {
+            Some(c) => c,
+            None => {
+                default_choice = self.bot_choice(&item.workspace_id, &routes.bot);
+                &default_choice
+            }
+        };
         let target = Target {
             item: &item,
             session: None,
             project: routes.project.as_ref(),
-            choice: &choice,
+            choice,
             mode: &routes.bot.perm_mode,
         };
         let mut rejected = Vec::new();
@@ -414,8 +431,14 @@ impl RoutedRuntime {
     }
 
     /// Bind a new item session. The item selects its Bot only once, and a handoff names its Bot
-    /// explicitly. The admitted Bot's current grants and Node constraints are checked again here.
-    pub(super) fn bind_dispatch(&self, session: &str, after: Option<&str>) -> Result<bool> {
+    /// explicitly (or selects via W3.1 placement). The admitted Bot's current grants and Node
+    /// constraints are checked again here.
+    pub(super) fn bind_dispatch(
+        &self,
+        session: &str,
+        after: Option<&str>,
+        explanation: Option<&PlacementExplanation>,
+    ) -> Result<bool> {
         let Some(s) = self.store.sessions().get(session)? else {
             return Ok(true);
         };
@@ -427,7 +450,7 @@ impl RoutedRuntime {
             .items()
             .get(item_id)?
             .ok_or(StoreError::NotFound("Item"))?;
-        let error = match self.bind_item_session(&item, &s, after) {
+        let error = match self.bind_item_session(&item, &s, after, explanation) {
             Ok(()) => return Ok(true),
             Err(CoreError::Placement(error)) => error,
             Err(other) => return Err(other),
@@ -446,6 +469,7 @@ impl RoutedRuntime {
         item: &steve_store::Item,
         s: &steve_store::Session,
         after: Option<&str>,
+        explanation: Option<&PlacementExplanation>,
     ) -> Result<()> {
         let session = s.id.as_str();
         let bot = s.bot_id.as_deref().unwrap_or("steve");
@@ -497,7 +521,7 @@ impl RoutedRuntime {
                 rejected.push(Reason::BindFailed);
                 continue;
             }
-            let receipt = routes.placement(node, *priority, &choice, &rejected);
+            let receipt = routes.placement(node, *priority, &choice, &rejected, explanation);
             match rt.bind_after_scoped(&plan, after, &receipt) {
                 Ok(()) => return Ok(()),
                 Err(e) => tracing::info!(session, node, "scoped binding refused: {e}"),
@@ -548,12 +572,16 @@ impl Routes {
         priority: usize,
         choice: &HarnessChoice,
         rejected: &[Reason],
+        override_explanation: Option<&PlacementExplanation>,
     ) -> BotPlacement {
-        let mut explanation = self
-            .initial
-            .as_ref()
-            .filter(|p| p.explanation.bot.as_str() == self.bot.id)
-            .map(|p| p.explanation.clone())
+        let mut explanation = override_explanation
+            .cloned()
+            .or_else(|| {
+                self.initial
+                    .as_ref()
+                    .filter(|p| p.explanation.bot.as_str() == self.bot.id)
+                    .map(|p| p.explanation.clone())
+            })
             .unwrap_or_else(|| PlacementExplanation {
                 bot: self.bot.id.clone().into(),
                 reason: PlacementReason::ExistingAssignment,

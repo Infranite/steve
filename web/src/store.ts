@@ -1265,6 +1265,35 @@ export async function qSendNow(sid: string, qid: string) {
 }
 export function saveGoal(id: string, v: string) { const i = it(id); if (!v || v === i.goals[i.goals.length - 1]) return; void itemCall(id, api.goal(id, v), t("core:toast.goalUpdated")) }
 export function reassign(id: string, k: string) { if (k === it(id).b) return; void itemCall(id, api.reassign(id, k), t("core:toast.handedTo", { bot: botName(k) })) }
+export async function handoff(
+  where: { item: string; session?: string },
+  choice: { bot?: string; harness?: string; model?: string; effort?: string; make_bot_default?: boolean },
+  blocked?: (error: BotPlacementError) => void,
+): Promise<string | undefined> {
+  try {
+    const r = where.session
+      ? await api.handoffSession(where.session, choice)
+      : await api.handoffItem(where.item, choice)
+    if (r.bot_default_updated) {
+      const { bot, previous } = r.bot_default_updated
+      toast(t("core:toast.handedOffAndSavedDefault", { bot: botName(bot) }), {
+        action: {
+          label: t("core:toast.undo"),
+          onClick: () => void call(api.patchBot(bot, { harness: previous.harness, model: previous.model, reasoning_effort: previous.reasoning_effort }), t("core:toast.undone")),
+        },
+      })
+    } else {
+      toast(t("core:toast.handedOff"))
+    }
+    await settle(r, "session", [r.session])
+    await qc.invalidateQueries({ queryKey: detailKey(where.item) })
+    return r.session
+  } catch (error) {
+    if (error instanceof BotPlacementError && blocked) blocked(error)
+    else fail(error)
+    return undefined
+  }
+}
 export function actOnItem(id: string, action: "pause" | "resume" | "drop") {
   void itemCall(id, api.itemAction(id, action), t(({ pause: "core:toast.paused", drop: "core:toast.dropped", resume: "core:toast.resumed" } as const)[action]))
 }

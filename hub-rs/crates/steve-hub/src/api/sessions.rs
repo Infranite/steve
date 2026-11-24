@@ -208,6 +208,19 @@ pub async fn continue_new(
     ok(json!({ "session": ns }))
 }
 
+/// `POST /sessions/{id}/handoff`: hand off an item session to a fresh session (same or different
+/// Bot, harness, and/or model) carrying deterministic working memory through W3.1 placement.
+pub async fn handoff(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+    b: Bytes,
+) -> ApiResult {
+    own_session(&st, &c.ws, &id).await?;
+    let target = super::items::parse_handoff_body(&b)?;
+    ok(st.domain.handoff_session(&id, target, &c.me).await?)
+}
+
 pub async fn patch_one(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
@@ -562,6 +575,7 @@ pub(crate) fn routes() -> axum::Router<super::AppState> {
         .route("/sessions/{id}/cancel", post(sessions::cancel))
         .route("/sessions/{id}/end", post(sessions::end))
         .route("/sessions/{id}/continue", post(sessions::continue_new))
+        .route("/sessions/{id}/handoff", post(sessions::handoff))
         .route("/sessions/{id}/fork", post(sessions::fork))
         .route("/sessions/{id}/link", post(sessions::link))
         .route("/sessions/{id}/queued", get(sessions::queued_list))

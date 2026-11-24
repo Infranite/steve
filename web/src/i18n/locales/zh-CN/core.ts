@@ -165,6 +165,8 @@ export default {
     cannotSendYet: "暂时发不出去，排在最前面",
     goalUpdated: "目标已更新",
     handedTo: "已交给 {{bot}}",
+    handedOff: "已带工作记忆交接至新会话",
+    handedOffAndSavedDefault: "已交接至新会话，并更新了 {{bot}} 的默认执行面",
     paused: "已暂停",
     dropped: "已放弃",
     reopened: "已重新打开",

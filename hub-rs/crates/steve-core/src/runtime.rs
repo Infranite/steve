@@ -165,12 +165,34 @@ pub trait AgentRuntime: Send + Sync {
         let _ = (item_id, bot_id, harness);
         Ok(())
     }
+    /// Like [`Self::can_run`], checking an explicit [`steve_node_api::HarnessChoice`] (e.g. a
+    /// handoff overriding harness or model) against the Bot's authorized Nodes before ending an
+    /// existing session. Defaults to [`Self::can_run`].
+    fn can_run_choice(
+        &self,
+        item_id: &str,
+        bot_id: &str,
+        choice: &steve_node_api::HarnessChoice,
+    ) -> Result<()> {
+        self.can_run(item_id, bot_id, &choice.harness)
+    }
     /// A session was just created (before its first prompt): the runtime may fix its backend now.
     /// Only new sessions are ever bound here; existing ones keep the backend they have. `after`: it
     /// takes over from a session whose release is still on its way ([`Released::Pending`]); its
     /// harness does not start before that release is done (two harnesses never share a worktree).
     fn created(&self, session_id: &str, after: Option<&str>) {
         let _ = (session_id, after);
+    }
+    /// Like [`Self::created`], carrying the W3.1 [`steve_types::PlacementExplanation`] recorded by
+    /// placement selection when a session switches Bot, harness, or model.
+    fn created_with_placement(
+        &self,
+        session_id: &str,
+        after: Option<&str>,
+        explanation: Option<&steve_types::PlacementExplanation>,
+    ) {
+        let _ = explanation;
+        self.created(session_id, after);
     }
     /// Why nothing can run `session_id` (stored text, zh-CN), asked once [`Self::created`] had its
     /// say: no backend takes it, and there is no in-process runner to fall back on (B7). The core

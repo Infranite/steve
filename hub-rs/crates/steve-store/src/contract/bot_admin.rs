@@ -134,6 +134,24 @@ pub fn wrong_node(
     Ok(r.one(&q, |_| Ok(()))?.is_some())
 }
 
+/// The execution Node an item's non-readonly Steve sessions are already bound to, if any.
+pub fn bound_node(r: &mut impl Read, item: &str) -> Result<Option<String>> {
+    let mut q = Query::select();
+    q.column(("r", "node_id"))
+        .from_as("sessions", "s")
+        .join_as(
+            JoinType::InnerJoin,
+            "runtime_sessions",
+            "r",
+            Expr::col(("r", "session_id")).eq(Expr::col(("s", "id"))),
+        )
+        .and_where(Expr::col(("s", "item_id")).eq(item))
+        .and_where(Expr::col(("s", "readonly")).eq(false))
+        .and_where(Expr::col(("s", "source")).eq("Steve"))
+        .limit(1);
+    r.one(&q, |row| row.get(0))
+}
+
 pub fn harness_nodes(
     r: &mut impl Read,
     bot: Option<&str>,

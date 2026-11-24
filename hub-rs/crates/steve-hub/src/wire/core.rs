@@ -478,6 +478,14 @@ impl steve_core::AgentRuntime for RoutedRuntime {
     fn can_run(&self, item_id: &str, bot_id: &str, _harness: &str) -> steve_core::Result<()> {
         self.check_dispatch(item_id, bot_id)
     }
+    fn can_run_choice(
+        &self,
+        item_id: &str,
+        bot_id: &str,
+        choice: &steve_node_api::HarnessChoice,
+    ) -> steve_core::Result<()> {
+        self.check_dispatch_choice(item_id, bot_id, Some(choice))
+    }
     fn check_workflow_execution(&self, item_id: &str) -> steve_core::Result<()> {
         if !self
             .host
@@ -615,13 +623,21 @@ impl steve_core::AgentRuntime for RoutedRuntime {
     /// planned. Otherwise it is bound nowhere, and [`Self::refusal`] says why. `after` (a
     /// predecessor's release on its way): it opens only once that is done.
     fn created(&self, session_id: &str, after: Option<&str>) {
+        self.created_with_placement(session_id, after, None);
+    }
+    fn created_with_placement(
+        &self,
+        session_id: &str,
+        after: Option<&str>,
+        explanation: Option<&steve_types::PlacementExplanation>,
+    ) {
         // Workflow coordinates ordinary Node sessions. Confirm its authority before any binding
         // or preparation; no Hub execution fallback is available.
         if let Err(e) = self.check_workflow_session(session_id) {
             tracing::warn!(session_id, "协作运行未就绪：{e}");
             return;
         }
-        match self.bind_dispatch(session_id, after) {
+        match self.bind_dispatch(session_id, after, explanation) {
             Ok(true) => return,
             // a session of no item
             Ok(false) => {}
@@ -1238,6 +1254,66 @@ impl Domain for CoreDomain {
             actor.to_string(),
         );
         to_obj(blocking(move || c.reassign(&id, &bot, &actor)).await?)
+    }
+    async fn handoff_item(
+        &self,
+        id: &str,
+        target: steve_core::HandoffTarget,
+        actor: &str,
+    ) -> Result<Value, crate::error::ApiError> {
+        let (c, id, actor) = (self.core.clone(), id.to_string(), actor.to_string());
+        let result =
+            tokio::task::spawn_blocking(crate::metrics::carry(steve_i18n::carry(move || {
+                c.handoff_item(&id, target, &actor)
+                    .map(|out| {
+                        let mut body = json!({ "session": out.session.id });
+                        if let Some(updated) = out.bot_default_updated {
+                            body["bot_default_updated"] =
+                                serde_json::to_value(updated).unwrap_or(Value::Null);
+                        }
+                        body
+                    })
+                    .map_err(|error| match error {
+                        CoreError::Placement(blocked) => crate::error::ApiError::Placement {
+                            blocked,
+                            proposal: None,
+                        },
+                        other => cerr(other).into(),
+                    })
+            })))
+            .await
+            .map_err(|e| BackendError::msg(format!("task failed: {e}")))?;
+        result
+    }
+    async fn handoff_session(
+        &self,
+        session: &str,
+        target: steve_core::HandoffTarget,
+        actor: &str,
+    ) -> Result<Value, crate::error::ApiError> {
+        let (c, sid, actor) = (self.core.clone(), session.to_string(), actor.to_string());
+        let result =
+            tokio::task::spawn_blocking(crate::metrics::carry(steve_i18n::carry(move || {
+                c.handoff_session(&sid, target, &actor)
+                    .map(|out| {
+                        let mut body = json!({ "session": out.session.id });
+                        if let Some(updated) = out.bot_default_updated {
+                            body["bot_default_updated"] =
+                                serde_json::to_value(updated).unwrap_or(Value::Null);
+                        }
+                        body
+                    })
+                    .map_err(|error| match error {
+                        CoreError::Placement(blocked) => crate::error::ApiError::Placement {
+                            blocked,
+                            proposal: None,
+                        },
+                        other => cerr(other).into(),
+                    })
+            })))
+            .await
+            .map_err(|e| BackendError::msg(format!("task failed: {e}")))?;
+        result
     }
     async fn add_dep(&self, id: &str, dep: &str) -> BResult<()> {
         let (c, id, dep) = (self.core.clone(), id.to_string(), dep.to_string());

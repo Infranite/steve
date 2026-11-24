@@ -18,6 +18,12 @@ pub(crate) const RULE_VERSION: u32 = 1;
 pub(crate) struct DispatchRequest<'a> {
     pub workspace: &'a str,
     pub bot: Option<&'a str>,
+    /// Optional runtime/harness override (for handoff switching); `None` uses each Bot's configured harness.
+    pub harness: Option<&'a str>,
+    /// Optional model override (for handoff model switching); `None` uses Bot/workspace default for the chosen runtime.
+    pub model: Option<&'a str>,
+    /// Optional reasoning effort override (for handoff execution-surface switching).
+    pub effort: Option<&'a str>,
     pub team: Option<&'a Team>,
     pub project: &'a Option<Option<String>>,
     pub goal: &'a str,
@@ -127,10 +133,10 @@ pub(crate) fn select(
     db: &Db,
     rt: &dyn AgentRuntime,
     request: DispatchRequest<'_>,
-    model: impl Fn(&Bot) -> Option<String>,
+    default_model: impl Fn(&str) -> Option<String>,
 ) -> Result<(BotPlacement, Option<Project>)> {
     let started = Instant::now();
-    let result = select_inner(db, rt, request, model);
+    let result = select_inner(db, rt, request, default_model);
     metrics::histogram!("steve_bot_selection_seconds").record(started.elapsed().as_secs_f64());
     if let Err(CoreError::Placement(blocked)) = &result {
         let reasons = blocked
@@ -153,7 +159,7 @@ fn select_inner(
     db: &Db,
     rt: &dyn AgentRuntime,
     req: DispatchRequest<'_>,
-    model: impl Fn(&Bot) -> Option<String>,
+    default_model: impl Fn(&str) -> Option<String>,
 ) -> Result<(BotPlacement, Option<Project>)> {
     let mut bots = db.bots(req.workspace)?;
     bots.sort_unstable_by(|a, b| a.id.cmp(&b.id));
@@ -177,10 +183,13 @@ fn select_inner(
     let mut rejected = Vec::new();
     for bot in bots.into_iter().filter(|b| match req.bot {
         Some(id) => id == b.id,
-        None => req.team.is_none_or(|t| t.member(&b.id).is_some()),
+        None => {
+            req.team.is_none_or(|t| t.member(&b.id).is_some())
+                && req.harness.is_none_or(|rt_id| rt_id == b.harness.as_str())
+        }
     }) {
         let id = bot.id.clone();
-        let evaluated = candidate(db, rt, &req, bot, &task, &mandatory, &model)?;
+        let evaluated = candidate(db, rt, &req, bot, &task, &mandatory, &default_model)?;
         match evaluated {
             Ok(candidate) => eligible.push(candidate),
             Err(reasons) => rejected.extend(reasons.into_iter().map(|reason| PlacementBlocker {
@@ -259,7 +268,7 @@ fn candidate(
     bot: Bot,
     task: &[String],
     mandatory: &[Vec<String>],
-    model: &impl Fn(&Bot) -> Option<String>,
+    default_model: &impl Fn(&str) -> Option<String>,
 ) -> Result<std::result::Result<Candidate, Vec<Rejection>>> {
     if req.team.is_some_and(|t| t.member(&bot.id).is_none()) {
         return Ok(Err(vec![Rejection::OutsideTeam]));
@@ -292,10 +301,23 @@ fn candidate(
     let Scope::Nodes(nodes) = scope else {
         return Ok(Err(vec![Rejection::OutsideTeam]));
     };
+    let same_runtime = req
+        .harness
+        .is_none_or(|rt_id| rt_id == bot.harness.as_str());
+    let runtime_id = req.harness.unwrap_or(&bot.harness);
+    let model = req
+        .model
+        .map(str::to_owned)
+        .or_else(|| same_runtime.then(|| bot.model.clone()).flatten())
+        .or_else(|| default_model(runtime_id));
+    let effort = req
+        .effort
+        .map(str::to_owned)
+        .or_else(|| same_runtime.then(|| bot.reasoning_effort.clone()).flatten());
     let choice = HarnessChoice {
-        harness: bot.harness.clone(),
-        model: model(&bot),
-        effort: bot.reasoning_effort.clone(),
+        harness: runtime_id.to_string(),
+        model,
+        effort,
     };
     let mut skipped = Vec::new();
     for (priority, node) in nodes

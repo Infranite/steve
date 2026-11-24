@@ -256,6 +256,17 @@ pub fn initial(r: &mut impl Read, item: &str) -> Result<Option<BotPlacement>> {
     )
 }
 
+pub fn for_session(r: &mut impl Read, session: &str) -> Result<Option<BotPlacement>> {
+    r.one(
+        Query::select()
+            .column("fact")
+            .from("bot_placements")
+            .and_where(Expr::col("session_id").eq(session))
+            .and_where(Expr::col("fact").is_not_null()),
+        |row| Ok(row.get::<Json<BotPlacement>>(0)?.0),
+    )
+}
+
 pub fn refusal(r: &mut impl Read, session: &str) -> Result<Option<PlacementBlocked>> {
     r.one(
         Query::select()

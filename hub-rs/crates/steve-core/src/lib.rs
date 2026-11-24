@@ -61,6 +61,10 @@ mod testkit;
 mod tests;
 
 pub use config::CoreConfig;
+pub use context_handoff::{
+    BotDefaultSnapshot, BotDefaultUpdated, HandoffOutcome, HandoffReason, HandoffTarget,
+    parse_budget_handoff_target,
+};
 pub use error::{CoreError, Result};
 pub use gateway::{ModelGateway, OneModel, SharedGateway, SingleModelGateway, Tier};
 pub use orchestrator::{CreateItem, Forked, ItemAction, SendNow, SupplementMode, design_pending};
@@ -140,6 +144,8 @@ pub(crate) struct State {
     /// Items handing over to a new session while the old one's release is on its way: the
     /// release (`Released::Pending`) the item's next session waits for, taken when it starts.
     handoffs: HashMap<String, String>,
+    /// Sessions created by handoff waiting to record their first-turn outcome metric.
+    handoff_outcomes: HashMap<String, &'static str>,
     /// Git facts of items on a Node, gathered off the lock (`node_git`).
     git: node_git::Slots,
     /// Critical sections entered so far (facts taken in one may be read again in the same one).

@@ -362,6 +362,8 @@ export const api = {
   deleteItem: (id: string) => del(`/items/${id}`),
   supplement: (id: string, text: string, mode: "auto" | "steer" | "new", files: string[] = []) => post(`/items/${id}/supplement`, { text, mode, files }), deliver: (id: string) => post(`/items/${id}/deliver`),
   reassign: (id: string, bot: string) => post(`/items/${id}/reassign`, { bot }),
+  handoffItem: (id: string, p: { bot?: string; harness?: string; model?: string; effort?: string; make_bot_default?: boolean }) =>
+    post<{ session: string; bot_default_updated?: { bot: string; previous: { harness: string; model: string | null; reasoning_effort: string | null } } }>(`/items/${id}/handoff`, p),
   dependencyWait: (id: string) => get<DependencyWait>(`/items/${id}/dependency-wait`),
   saveDependencyWait: (id: string, body: { expected_cycle: number; resume: DependencyWait["resume_override"]; reason: string }) => post<DependencyWait>(`/items/${id}/dependency-wait`, body),
   addDep: (id: string, dep: string) => post(`/items/${id}/deps`, { dep }), rmDep: (id: string, dep: string) => del(`/items/${id}/deps/${dep}`),
@@ -372,7 +374,7 @@ export const api = {
     req<RTranscriptPage>("GET", `/sessions/${encodeURIComponent(id)}/events?after=${after}${through == null ? "" : "&through=" + through}`, undefined, undefined, signal),
   transcriptMarks: (id: string) => get<{ marks: number[] }>(`/sessions/${encodeURIComponent(id)}/events/marks`),
   searchSessions: (q: string) => get<string[]>(`/sessions/search?q=${encodeURIComponent(q)}`),
-  sessionSay: (id: string, text: string, mode: "插话" | "排队", files: string[] = []) => post(`/sessions/${id}/messages`, { text, mode, files }), cancel: (id: string) => post(`/sessions/${id}/cancel`), endSession: (id: string) => post(`/sessions/${id}/end`), continueSession: (id: string) => post<{ session: string }>(`/sessions/${id}/continue`),
+  sessionSay: (id: string, text: string, mode: "插话" | "排队", files: string[] = []) => post(`/sessions/${id}/messages`, { text, mode, files }), cancel: (id: string) => post(`/sessions/${id}/cancel`), endSession: (id: string) => post(`/sessions/${id}/end`), continueSession: (id: string) => post<{ session: string }>(`/sessions/${id}/continue`), handoffSession: (id: string, p: { bot?: string; harness?: string; model?: string; effort?: string; make_bot_default?: boolean }) => post<{ session: string; bot_default_updated?: { bot: string; previous: { harness: string; model: string | null; reasoning_effort: string | null } } }>(`/sessions/${id}/handoff`, p),
   renameSession: (id: string, title: string) => patch(`/sessions/${id}`, { title }), removeSession: (id: string) => del(`/sessions/${id}`), dropQueued: (id: string) => del("/queued/" + id),
   queued: (sid: string) => get<RQueued[]>(`/sessions/${sid}/queued`), resumeInfo: (sid: string) => get<RResume>(`/sessions/${sid}/resume`),
   queuedEdit: (sid: string, qid: string, text: string) => patch<RQueued>(`/sessions/${sid}/queued/${qid}`, { text }),

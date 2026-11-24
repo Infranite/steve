@@ -31,6 +31,7 @@ const HUB_FAKE_ACP_PY: &str = r#"#!/usr/bin/env python3
 import json, os, select, sys, time
 
 ctrl_dir = os.environ["FAKE_CTX_CTRL"]
+adapter_kind = os.environ.get("FAKE_ADAPTER_KIND", "primary")
 log_path = os.path.join(ctrl_dir, "acp.log")
 
 def log(obj):
@@ -40,6 +41,7 @@ def log(obj):
 
 log({
     "spawn": {
+        "adapter": adapter_kind,
         "argv": sys.argv[1:],
         "cwd": os.getcwd(),
         "env": {
@@ -80,6 +82,7 @@ def wait_file(path, timeout_s=10.0):
     return False
 
 sid = ""
+active_model = "alt-model-1" if adapter_kind == "alt-harness" else "fake-model"
 for raw in sys.stdin:
     if not raw.strip():
         continue
@@ -90,12 +93,26 @@ for raw in sys.stdin:
     if method == "initialize":
         send({"id": mid, "result": {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}}})
     elif method == "session/new":
-        sid = f"fake-hub-{os.getpid()}"
+        sid = f"fake-{adapter_kind}-{os.getpid()}"
+        models = (
+            {
+                "currentModelId": "alt-model-1",
+                "availableModels": [
+                    {"modelId": "alt-model-1", "name": "Alt Model 1"},
+                    {"modelId": "alt-model-2", "name": "Alt Model 2"},
+                ],
+            }
+            if adapter_kind == "alt-harness"
+            else {"currentModelId": "fake-model", "availableModels": []}
+        )
         send({"id": mid, "result": {
             "sessionId": sid,
             "modes": {"currentModeId": "default", "availableModes": [{"id": "default", "name": "default"}]},
-            "models": {"currentModelId": "fake-model", "availableModels": []},
+            "models": models,
         }})
+    elif method == "session/set_model":
+        active_model = msg["params"]["modelId"]
+        send({"id": mid, "result": {}})
     elif method == "session/prompt":
         text = "\n".join(p.get("text", "") for p in msg["params"]["prompt"])
         if "HUB:NATIVE" in text:
@@ -107,6 +124,59 @@ for raw in sys.stdin:
             send({"id": mid, "result": {
                 "stopReason": "end_turn",
                 "usage": {"inputTokens": 1000, "outputTokens": 200, "cachedReadTokens": 500, "cachedWriteTokens": 50, "totalTokens": 1750},
+            }})
+        elif "HUB:MANUAL" in text and "主人手动将事项交接" not in text:
+            with open(os.path.join(os.getcwd(), "manual1.txt"), "w", encoding="utf-8") as f:
+                f.write("m1")
+            update(sid, {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "t-m1",
+                "kind": "execute",
+                "status": "pending",
+                "title": "step1.sh",
+                "rawInput": {"command": "sh step1.sh"},
+                "_meta": {"claudeCode": {"toolName": "Bash"}},
+            })
+            update(sid, {"sessionUpdate": "tool_call_update", "toolCallId": "t-m1", "status": "completed"})
+            update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Manual step 1 done"}})
+            update(sid, {"sessionUpdate": "usage_update", "used": 2000, "size": 10000})
+            send({"id": mid, "result": {
+                "stopReason": "end_turn",
+                "usage": {"inputTokens": 500, "outputTokens": 100, "cachedReadTokens": 0, "cachedWriteTokens": 0, "totalTokens": 600},
+            }})
+        elif "HUB:MANUAL" in text and adapter_kind != "alt-harness":
+            with open(os.path.join(ctrl_dir, "m2.prompt"), "w", encoding="utf-8") as f:
+                f.write(text)
+            m1 = open(os.path.join(os.getcwd(), "manual1.txt"), "r", encoding="utf-8").read()
+            with open(os.path.join(os.getcwd(), "manual2.txt"), "w", encoding="utf-8") as f:
+                f.write(m1 + "+m2")
+            update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Manual step 2 done on primary"}})
+            update(sid, {"sessionUpdate": "usage_update", "used": 1500, "size": 10000})
+            send({"id": mid, "result": {
+                "stopReason": "end_turn",
+                "usage": {"inputTokens": 300, "outputTokens": 60, "cachedReadTokens": 0, "cachedWriteTokens": 0, "totalTokens": 360},
+            }})
+        elif "HUB:MANUAL" in text and adapter_kind == "alt-harness":
+            with open(os.path.join(ctrl_dir, "m3.prompt"), "w", encoding="utf-8") as f:
+                f.write(text)
+            with open(os.path.join(ctrl_dir, "m3.meta"), "w", encoding="utf-8") as f:
+                f.write(json.dumps({"adapter": adapter_kind, "model": active_model, "cwd": os.getcwd()}))
+            m2 = open(os.path.join(os.getcwd(), "manual2.txt"), "r", encoding="utf-8").read()
+            with open(os.path.join(os.getcwd(), "manual3.txt"), "w", encoding="utf-8") as f:
+                f.write(m2 + "+m3")
+            update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Manual step 3 done on alt"}})
+            update(sid, {"sessionUpdate": "usage_update", "used": 1100, "size": 20000})
+            send({"id": mid, "result": {
+                "stopReason": "end_turn",
+                "usage": {"inputTokens": 250, "outputTokens": 50, "cachedReadTokens": 40, "cachedWriteTokens": 0, "totalTokens": 340},
+            }})
+        elif "HUB:LOOP" in text:
+            update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "loop progress"}})
+            update(sid, {"sessionUpdate": "usage_update", "used": 8600, "size": 10000})
+            cancelled = wait_for_cancel(5.0)
+            send({"id": mid, "result": {
+                "stopReason": "cancelled" if cancelled else "end_turn",
+                "usage": {"inputTokens": 300, "outputTokens": 50, "cachedReadTokens": 0, "cachedWriteTokens": 0, "totalTokens": 350},
             }})
         elif "HUB:HANDOFF" in text and "工作记忆" not in text:
             # Session #1 of handoff test: do real workspace work + tool call + progress, wait for
@@ -134,10 +204,12 @@ for raw in sys.stdin:
                 "stopReason": "cancelled" if cancelled else "end_turn",
                 "usage": {"inputTokens": 600, "outputTokens": 120, "cachedReadTokens": 300, "cachedWriteTokens": 0, "totalTokens": 1020},
             }})
-        elif "HUB:HANDOFF" in text or "工作记忆" in text:
+        elif "HUB:HANDOFF" in text:
             # Session #2 of handoff test: verify part1.txt survived in workspace, write prompt & part2.txt.
             with open(os.path.join(ctrl_dir, "s2.prompt"), "w", encoding="utf-8") as f:
                 f.write(text)
+            with open(os.path.join(ctrl_dir, "s2.meta"), "w", encoding="utf-8") as f:
+                f.write(json.dumps({"adapter": adapter_kind, "model": active_model}))
             part1 = open(os.path.join(os.getcwd(), "part1.txt"), "r", encoding="utf-8").read()
             with open(os.path.join(os.getcwd(), "part2.txt"), "w", encoding="utf-8") as f:
                 f.write(part1 + "+step2-ok")
@@ -148,14 +220,6 @@ for raw in sys.stdin:
             send({"id": mid, "result": {
                 "stopReason": "end_turn",
                 "usage": {"inputTokens": 400, "outputTokens": 80, "cachedReadTokens": 100, "cachedWriteTokens": 0, "totalTokens": 580},
-            }})
-        elif "HUB:LOOP" in text:
-            update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "loop progress"}})
-            update(sid, {"sessionUpdate": "usage_update", "used": 8600, "size": 10000})
-            cancelled = wait_for_cancel(5.0)
-            send({"id": mid, "result": {
-                "stopReason": "cancelled" if cancelled else "end_turn",
-                "usage": {"inputTokens": 300, "outputTokens": 50, "cachedReadTokens": 0, "cachedWriteTokens": 0, "totalTokens": 350},
             }})
         else:
             send({"id": mid, "result": {"stopReason": "end_turn"}})
@@ -189,13 +253,26 @@ impl HubEnv {
         std::fs::write(
             &adapter,
             format!(
-                "#!/bin/sh\nexport FAKE_CTX_CTRL='{}'\nexec python3 '{}' \"$@\"\n",
+                "#!/bin/sh\nexport FAKE_CTX_CTRL='{}'\nexport FAKE_ADAPTER_KIND='primary'\nexec python3 '{}' \"$@\"\n",
                 ctrl.display(),
                 script.display()
             ),
         )
         .expect("write adapter");
         std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+
+        let alt_adapter = h.join("alt-adapter.sh");
+        std::fs::write(
+            &alt_adapter,
+            format!(
+                "#!/bin/sh\nexport FAKE_CTX_CTRL='{}'\nexport FAKE_ADAPTER_KIND='alt-harness'\nexec python3 '{}' \"$@\"\n",
+                ctrl.display(),
+                script.display()
+            ),
+        )
+        .expect("write alt adapter");
+        std::fs::set_permissions(&alt_adapter, std::fs::Permissions::from_mode(0o700))
+            .expect("chmod");
 
         let steve_home = h.join("steve");
         std::fs::create_dir_all(&steve_home).expect("steve_home");
@@ -224,6 +301,15 @@ impl HubEnv {
                         "properties": {
                             "nested_sandbox": false,
                             "context_limit": 10000,
+                            "context_budget_pct": 80
+                        }
+                    },
+                    "alt-harness": {
+                        "command": alt_adapter.display().to_string(),
+                        "name": "Alt Harness",
+                        "properties": {
+                            "nested_sandbox": false,
+                            "context_limit": 20000,
                             "context_budget_pct": 80
                         }
                     },
@@ -351,16 +437,42 @@ impl HubEnv {
         )
     }
 
-    async fn create_bot(&self, name: &str, harness: &str) -> String {
-        let (s, v) = self
-            .call(
-                "POST",
-                "/api/bots",
-                Some(json!({ "name": name, "harness": harness, "perm_mode": "default" })),
-            )
-            .await;
+    async fn create_bot_with_model(
+        &self,
+        name: &str,
+        harness: &str,
+        model: Option<&str>,
+    ) -> String {
+        let mut body = json!({ "name": name, "harness": harness, "perm_mode": "default" });
+        if let Some(m) = model {
+            body["model"] = json!(m);
+        }
+        let (s, v) = self.call("POST", "/api/bots", Some(body)).await;
         assert_eq!(s, 200, "create bot failed: {v}");
         v["id"].as_str().expect("bot id").to_string()
+    }
+
+    async fn create_bot(&self, name: &str, harness: &str) -> String {
+        self.create_bot_with_model(name, harness, None).await
+    }
+
+    async fn session_views(&self, item_id: &str) -> Vec<Value> {
+        let (s, v) = self
+            .call(
+                "GET",
+                &format!("/api/views?kind=session&items={item_id}"),
+                None,
+            )
+            .await;
+        assert_eq!(s, 200, "session views failed: {v}");
+        v["views"].as_array().cloned().unwrap_or_default()
+    }
+
+    async fn refresh_local_capabilities(&self) {
+        let (s, v) = self
+            .call("GET", "/api/node-harnesses/local?fresh=1", None)
+            .await;
+        assert_eq!(s, 200, "refresh local node harnesses failed: {v}");
     }
 
     async fn create_item(&self, bot: &str, title: &str, goal: &str) -> (String, String) {
@@ -674,6 +786,26 @@ async fn non_native_budget_cutoff_hands_off_with_working_memory_and_exact_usage(
         "usage across handoff sessions must sum cleanly with zero double-counting"
     );
 
+    // Verify explicit handoff timeline entry and W3.1 placement record on session #2.
+    let timeline = e.store.timeline().list(&iid).unwrap();
+    assert!(
+        timeline.iter().any(|t| {
+            t.text.contains(
+                "从 BudgetTester Bot（Budget Bot · fake-model）交接给 BudgetTester Bot（Budget Bot），原因：上下文预算",
+            )
+        }),
+        "missing explicit same-harness handoff timeline entry: {timeline:?}"
+    );
+    let views = e.session_views(&iid).await;
+    let s2_view = views
+        .iter()
+        .find(|v| v["id"] == s2.as_str())
+        .expect("s2 view");
+    assert_eq!(s2_view["placement"]["bot"], bot);
+    assert_eq!(s2_view["placement"]["reason"], "handoff_context_budget");
+    assert!(s2_prompt.contains("[目标与验收]"), "{s2_prompt}");
+    assert!(s2_prompt.contains("[工作区与分支]"), "{s2_prompt}");
+
     // Verify handoff diagnostic & Prometheus metrics.
     eventually("handoff compaction diagnostic recorded", || async {
         !e.debug_events(&iid, "context.compacted").await.is_empty()
@@ -687,7 +819,9 @@ async fn non_native_budget_cutoff_hands_off_with_working_memory_and_exact_usage(
 
     let prom = steve_hub::metrics::render().expect("metrics installed");
     assert!(
-        prom.contains(r#"steve_turn_context_compactions_total{harness="budget-bot",mode="handoff",reason="budget_reached"} 1"#),
+        prom.contains(
+            r#"steve_turn_context_compactions_total{harness="budget-bot",mode="handoff",reason="budget_reached"}"#
+        ),
         "missing handoff compaction counter:\n{prom}"
     );
     assert!(
@@ -738,4 +872,305 @@ async fn consecutive_context_budget_handoffs_stop_at_configured_limit() {
         .find(|d| d.status == "open" && d.kind == "fail")
         .expect("fail card");
     assert!(fail.question.contains("2"), "{}", fail.question);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cross_harness_auto_budget_handoff_keeps_same_bot_and_records_w31_placement() {
+    let e = HubEnv::start(&[("STEVE_TURN_CONTEXT_HANDOFF_LIMIT", "2")]).await;
+    e.refresh_local_capabilities().await;
+    let bot_a = e.create_bot("PrimaryBot", "budget-bot").await;
+
+    // Configure workspace auto-handoff rule: when hitting budget, switch THIS item's execution
+    // surface to alt-harness/alt-model-2 (keeping the SAME Bot and NOT changing Bot defaults).
+    let (ps, pv) = e
+        .call(
+            "PATCH",
+            "/api/settings",
+            Some(json!({ "contextBudgetTarget": "harness:alt-harness/alt-model-2" })),
+        )
+        .await;
+    assert_eq!(ps, 200, "patch contextBudgetTarget failed: {pv}");
+
+    // Invalid targets (unknown harness or bot:<id>) must be rejected with 400.
+    for bad in ["harness:no-such-harness", "bot:steve"] {
+        let (bad_s, _) = e
+            .call(
+                "PATCH",
+                "/api/settings",
+                Some(json!({ "contextBudgetTarget": bad })),
+            )
+            .await;
+        assert_eq!(bad_s, 400, "expected 400 for {bad}");
+    }
+
+    let (iid, s1) = e
+        .create_item(&bot_a, "Cross-harness auto handoff", "HUB:HANDOFF")
+        .await;
+    eventually("session #1 reached checkpoint", || async {
+        e.ctrl.join("s1.ready").exists()
+    })
+    .await;
+    std::fs::write(e.ctrl.join("s1.proceed"), "go").unwrap();
+
+    eventually(
+        on_timeout(|| async {
+            format!(
+                "waiting for cross-harness session #2 to finish; sessions={:?}",
+                e.store.sessions().of_item(&iid)
+            )
+        }),
+        || async {
+            let sessions = e.store.sessions().of_item(&iid).unwrap_or_default();
+            if sessions.len() < 2 {
+                return false;
+            }
+            let s2_id = &sessions[1].id;
+            fixtures::acp_turns(&e.db, s2_id)
+                .map(|t| t.len() == 1 && t[0].0.is_some())
+                .unwrap_or(false)
+        },
+    )
+    .await;
+
+    let mut sessions = e.store.sessions().of_item(&iid).unwrap();
+    sessions.sort_by_key(|s| s.no);
+    assert_eq!(sessions.len(), 2, "{sessions:?}");
+    assert_eq!(sessions[0].id, s1);
+    assert_eq!(sessions[0].harness, "budget-bot");
+    assert_eq!(sessions[0].status, "ended");
+
+    let s2 = &sessions[1];
+    assert_eq!(s2.harness, "alt-harness");
+    assert_eq!(s2.model.as_deref(), Some("alt-model-2"));
+    assert_eq!(
+        s2.bot_id.as_deref(),
+        Some(bot_a.as_str()),
+        "auto handoff must keep the SAME Bot and switch only its execution surface"
+    );
+    // Bot's stored default config MUST NOT be mutated by an automatic item handoff.
+    let stored_bot = e.store.bots().get(&bot_a).unwrap().unwrap();
+    assert_eq!(stored_bot.harness, "budget-bot");
+    assert_eq!(stored_bot.model, None);
+
+    // Verify second fake ACP adapter process actually executed session #2 with alt-model-2.
+    let meta: Value =
+        serde_json::from_str(&std::fs::read_to_string(e.ctrl.join("s2.meta")).unwrap()).unwrap();
+    assert_eq!(meta["adapter"], "alt-harness");
+    assert_eq!(meta["model"], "alt-model-2");
+
+    // Verify work continuity across distinct harnesses (part1.txt written by budget-bot -> read by alt-harness).
+    let s2_cwd = PathBuf::from(
+        std::fs::read_to_string(e.ctrl.join("s2.cwd"))
+            .unwrap()
+            .trim(),
+    );
+    assert_eq!(
+        std::fs::read_to_string(s2_cwd.join("part2.txt")).unwrap(),
+        "step1-ok+step2-ok"
+    );
+    let s2_prompt = std::fs::read_to_string(e.ctrl.join("s2.prompt")).unwrap();
+    assert!(s2_prompt.contains("工作记忆"), "{s2_prompt}");
+    assert!(
+        s2_prompt.contains("Finished step 1, moving to step 2"),
+        "{s2_prompt}"
+    );
+
+    // Verify explicit timeline handoff event and visible W3.1 placement record.
+    let timeline = e.store.timeline().list(&iid).unwrap();
+    assert!(
+        timeline.iter().any(|t| {
+            t.text.contains(
+                "从 PrimaryBot Bot（Budget Bot · fake-model）交接给 PrimaryBot Bot（Alt Harness · alt-model-2），原因：上下文预算",
+            )
+        }),
+        "missing cross-harness handoff timeline entry: {timeline:?}"
+    );
+    let views = e.session_views(&iid).await;
+    let s2_view = views
+        .iter()
+        .find(|v| v["id"] == s2.id.as_str())
+        .expect("s2 view");
+    assert_eq!(s2_view["placement"]["bot"], bot_a);
+    assert_eq!(s2_view["placement"]["reason"], "handoff_context_budget");
+
+    // Verify handoff observability metrics.
+    let prom = steve_hub::metrics::render().expect("metrics installed");
+    assert!(
+        prom.contains(
+            r#"steve_handoffs_total{reason="context_budget",from_harness="budget-bot",to_harness="alt-harness",switched_bot="false"}"#
+        ),
+        "missing handoff counter:\n{prom}"
+    );
+    assert!(
+        prom.contains(r#"steve_handoff_package_bytes_count{reason="context_budget"}"#),
+        "missing handoff package size histogram:\n{prom}"
+    );
+    assert!(
+        prom.contains(
+            r#"steve_handoff_outcomes_total{reason="context_budget",outcome="succeeded"}"#
+        ),
+        "missing handoff outcome counter:\n{prom}"
+    );
+
+    // Verify per-session usage separation with zero double-counting.
+    let u1 = sum_tokens(&fixtures::acp_usage(&e.db, &s1).unwrap());
+    let u2 = sum_tokens(&fixtures::acp_usage(&e.db, &s2.id).unwrap());
+    assert_eq!(u1, (600, 120, 300, 0));
+    assert_eq!(u2, (400, 80, 100, 0));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manual_handoff_same_and_cross_harness_preserves_work_and_blocks_invalid_target() {
+    let e = HubEnv::start(&[]).await;
+    e.refresh_local_capabilities().await;
+    let bot = e.create_bot("ManualBot", "budget-bot").await;
+    let (iid, s1) = e
+        .create_item(&bot, "Manual handoff flow", "HUB:MANUAL")
+        .await;
+
+    eventually("session #1 completed", || async {
+        fixtures::acp_turns(&e.db, &s1)
+            .map(|t| t.len() == 1 && t[0].0.is_some())
+            .unwrap_or(false)
+    })
+    .await;
+
+    // 1. Invalid target harness must be refused via W3.1 placement (409) BEFORE ending session #1.
+    let (bad_s, bad_v) = e
+        .call(
+            "POST",
+            &format!("/api/items/{iid}/handoff"),
+            Some(json!({ "harness": "missing-harness" })),
+        )
+        .await;
+    assert_eq!(bad_s, 409, "expected 409 placement refusal: {bad_v}");
+    assert_eq!(bad_v["placement"]["reason"], "harness", "{bad_v}");
+    assert_eq!(e.store.sessions().of_item(&iid).unwrap().len(), 1);
+    assert_ne!(
+        e.store.sessions().get(&s1).unwrap().unwrap().status,
+        "ended"
+    );
+
+    // Also reject an unsupported model advertised by alt-harness before ending session #1.
+    let (bad_m, bad_mv) = e
+        .call(
+            "POST",
+            &format!("/api/items/{iid}/handoff"),
+            Some(json!({ "harness": "alt-harness", "model": "nonexistent-model" })),
+        )
+        .await;
+    assert_eq!(bad_m, 409, "expected 409 model refusal: {bad_mv}");
+    assert_eq!(bad_mv["placement"]["reason"], "model", "{bad_mv}");
+    assert_eq!(e.store.sessions().of_item(&iid).unwrap().len(), 1);
+
+    // 2. Manual same-harness handoff from item endpoint (default empty target).
+    let (hs2, hv2) = e
+        .call(
+            "POST",
+            &format!("/api/items/{iid}/handoff"),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(hs2, 200, "manual same-harness handoff failed: {hv2}");
+    let s2 = hv2["session"].as_str().expect("s2 id").to_string();
+    eventually("session #2 completed", || async {
+        fixtures::acp_turns(&e.db, &s2)
+            .map(|t| t.len() == 1 && t[0].0.is_some())
+            .unwrap_or(false)
+    })
+    .await;
+
+    let m2_prompt = std::fs::read_to_string(e.ctrl.join("m2.prompt")).expect("m2 prompt");
+    assert!(m2_prompt.contains("工作记忆"), "{m2_prompt}");
+    assert!(m2_prompt.contains("[ok] Bash"), "{m2_prompt}");
+    assert!(m2_prompt.contains("Manual step 1 done"), "{m2_prompt}");
+
+    // 3. Manual cross-harness + explicit model handoff from session endpoint with
+    // `make_bot_default: true` ("以后这个 Bot 都用这个"), verifying reversible default snapshot.
+    let (hs3, hv3) = e
+        .call(
+            "POST",
+            &format!("/api/sessions/{s2}/handoff"),
+            Some(json!({
+                "harness": "alt-harness",
+                "model": "alt-model-2",
+                "make_bot_default": true
+            })),
+        )
+        .await;
+    assert_eq!(hs3, 200, "manual cross-harness handoff failed: {hv3}");
+    let s3 = hv3["session"].as_str().expect("s3 id").to_string();
+    assert_eq!(hv3["bot_default_updated"]["bot"], bot);
+    assert_eq!(
+        hv3["bot_default_updated"]["previous"]["harness"],
+        "budget-bot"
+    );
+    let updated_bot = e.store.bots().get(&bot).unwrap().unwrap();
+    assert_eq!(updated_bot.harness, "alt-harness");
+    assert_eq!(updated_bot.model.as_deref(), Some("alt-model-2"));
+
+    eventually("session #3 completed", || async {
+        fixtures::acp_turns(&e.db, &s3)
+            .map(|t| t.len() == 1 && t[0].0.is_some())
+            .unwrap_or(false)
+    })
+    .await;
+
+    let m3_prompt = std::fs::read_to_string(e.ctrl.join("m3.prompt")).expect("m3 prompt");
+    assert!(
+        m3_prompt.contains("Manual step 2 done on primary"),
+        "{m3_prompt}"
+    );
+    let m3_meta: Value =
+        serde_json::from_str(&std::fs::read_to_string(e.ctrl.join("m3.meta")).unwrap()).unwrap();
+    assert_eq!(m3_meta["adapter"], "alt-harness");
+    assert_eq!(m3_meta["model"], "alt-model-2");
+    let m3_cwd = PathBuf::from(m3_meta["cwd"].as_str().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(m3_cwd.join("manual3.txt")).unwrap(),
+        "m1+m2+m3",
+        "work across manual same-harness and cross-harness handoffs must be preserved"
+    );
+
+    // Verify explicit timeline entries & W3.1 placement visibility across all 3 sessions.
+    let timeline = e.store.timeline().list(&iid).unwrap();
+    assert!(
+        timeline.iter().any(|t| {
+            t.text.contains(
+                "从 ManualBot Bot（Budget Bot · fake-model）交接给 ManualBot Bot（Budget Bot），原因：主人手动",
+            )
+        }),
+        "missing manual same-harness timeline entry: {timeline:?}"
+    );
+    assert!(
+        timeline.iter().any(|t| {
+            t.text.contains(
+                "从 ManualBot Bot（Budget Bot · fake-model）交接给 ManualBot Bot（Alt Harness · alt-model-2），原因：主人手动",
+            )
+        }),
+        "missing manual cross-harness timeline entry: {timeline:?}"
+    );
+    let views = e.session_views(&iid).await;
+    let s3_view = views
+        .iter()
+        .find(|v| v["id"] == s3.as_str())
+        .expect("s3 view");
+    assert_eq!(s3_view["harness"], "alt-harness");
+    assert_eq!(s3_view["model"], "alt-model-2");
+    assert_eq!(s3_view["placement"]["bot"], bot);
+    assert_eq!(s3_view["placement"]["reason"], "handoff_owner_request");
+
+    // Verify token usage is separated per session with zero double-counting.
+    assert_eq!(
+        sum_tokens(&fixtures::acp_usage(&e.db, &s1).unwrap()),
+        (500, 100, 0, 0)
+    );
+    assert_eq!(
+        sum_tokens(&fixtures::acp_usage(&e.db, &s2).unwrap()),
+        (300, 60, 0, 0)
+    );
+    assert_eq!(
+        sum_tokens(&fixtures::acp_usage(&e.db, &s3).unwrap()),
+        (250, 50, 40, 0)
+    );
 }

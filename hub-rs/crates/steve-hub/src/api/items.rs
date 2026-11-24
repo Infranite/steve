@@ -608,6 +608,39 @@ pub async fn reassign(
     ok(Value::Object(st.domain.reassign(&id, &bot, &c.me).await?))
 }
 
+pub async fn handoff(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+    b: Bytes,
+) -> ApiResult {
+    own_item(&st, &c.ws, &id).await?;
+    let target = parse_handoff_body(&b)?;
+    ok(st.domain.handoff_item(&id, target, &c.me).await?)
+}
+
+pub(super) fn parse_handoff_body(b: &Bytes) -> Result<steve_core::HandoffTarget, ApiError> {
+    if b.iter().all(|c| c.is_ascii_whitespace()) {
+        return Ok(steve_core::HandoffTarget::default());
+    }
+    let v = body(b)?;
+    let mut k = Check::object(&v);
+    let bot = k.opt_nullable_str("bot", Str::len(0, 128)).flatten();
+    let harness = k.opt_nullable_str("harness", Str::len(0, 64)).flatten();
+    let model = k.opt_nullable_str("model", Str::len(0, 200)).flatten();
+    let effort = k.opt_nullable_str("effort", Str::len(0, 32)).flatten();
+    let make_bot_default = k.opt_bool("make_bot_default").unwrap_or(false);
+    k.finish()?;
+    let clean = |s: Option<String>| s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    Ok(steve_core::HandoffTarget {
+        bot: clean(bot),
+        harness: clean(harness),
+        model: clean(model),
+        effort: clean(effort),
+        make_bot_default,
+    })
+}
+
 pub async fn add_dep(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
@@ -817,6 +850,7 @@ pub(crate) fn routes() -> axum::Router<super::AppState> {
         .route("/items/{id}/supplement", post(items::supplement))
         .route("/items/{id}/deliver", post(items::deliver))
         .route("/items/{id}/reassign", post(items::reassign))
+        .route("/items/{id}/handoff", post(items::handoff))
         .route("/items/{id}/deps", post(items::add_dep))
         .route("/items/{id}/deps/{dep}", delete(items::rm_dep))
         .route("/items/{id}/snooze", post(items::snooze))

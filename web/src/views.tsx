@@ -31,14 +31,15 @@ import { draftKey, newClientId } from "@/composer-draft"
 import { GitHubMoreRow } from "@/github/index"
 import { HubMore } from "@/hub-ui"
 import { lazyView } from "@/lazy"
-import { RuntimeAvailability, RuntimePermissionNotice, RuntimeSetupLink } from "@/runtime-access"
+import { ModelPicker } from "@/model-picker"
+import { RuntimeAvailability, RuntimePermissionNotice, RuntimeSelect, RuntimeSetupLink } from "@/runtime-access"
 import { AnnRefs } from "@/annotate"
 import { OutDialog, OutList, type OutOpen } from "@/item-outputs"
 import { ItemPeopleProp } from "@/people/item-people"
 import { QueuedComment, queuedComments, queueNote, QueueStrip } from "@/queue"
 import { homeTilde, NativeIdLine } from "@/resume"
 import { ItemStatsRows } from "@/stats/drill"
-import { ACC, accKey, closedSt, setDesignGate, accOf, active, addDep, archive, closeRel, deleteItem, depsOpen, doFork, importSessions, it, itemThread, link, loadLocalSessions, markDone, newItem, patchItem, reassign, rmDep, runtimeName, saveGoal, setAcc, actOnItem, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, st, star, startItemCycle, supp, tag, tagCatLabel, tagDesc, tagLabel, threadFollow, tm, toast, type Item, type PlanRound, type Reply } from "@/store"
+import { ACC, accKey, closedSt, setDesignGate, accOf, active, addDep, archive, closeRel, defaultHarness, deleteItem, depsOpen, doFork, handoff, importSessions, it, itemThread, link, loadLocalSessions, markDone, newItem, patchItem, reassign, rmDep, runtimeName, saveGoal, setAcc, actOnItem, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, st, star, startItemCycle, supp, tag, tagCatLabel, tagDesc, tagLabel, threadFollow, tm, toast, type Item, type PlanRound, type Reply } from "@/store"
 import { BotAvatar, BotName, closeSheet, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, Row, SectionLabel, Segmented, Status, StatusDot, Tags, ThemeSwitch, Chevron, Panel, Section, Tile } from "@/ui"
 import { Composer, type ComposerHandle } from "@/composer"
 import { DecisionCard } from "@/thread/decision-card"
@@ -47,7 +48,7 @@ import { ChoiceCards, dueLabel, ProjectChip, Select } from "@/view-shared"
 import { cn } from "cn"
 import { t as tr, useT } from "@/i18n"
 import { dayHeading, hm as clock, num } from "@/i18n/format"
-import { ArchiveIcon, BanIcon, BookOpenIcon, BotIcon, CalendarIcon, ChartNoAxesColumnIcon, CheckIcon, ChevronRightIcon, CircleAlertIcon, CircleCheckIcon, CircleDashedIcon, CircleHelpIcon, ContactRoundIcon, CopyIcon, FolderIcon, GitPullRequestIcon, HourglassIcon, KeyRoundIcon, LinkIcon, ListIcon, LoaderCircleIcon, LockIcon, MailIcon, MessageSquareIcon, MessagesSquareIcon, MinusIcon, MoreHorizontalIcon, PauseIcon, PlayIcon, PlugIcon, PlusIcon, RadioIcon, RotateCcwIcon, SettingsIcon, SquareTerminalIcon, StarIcon, TrashIcon, UserRoundIcon, XIcon, ZapIcon, BlocksIcon, UploadIcon, NewspaperIcon, WorkflowIcon } from "lucide-react"
+import { ArchiveIcon, ArrowRightLeftIcon, BanIcon, BookOpenIcon, BotIcon, CalendarIcon, ChartNoAxesColumnIcon, CheckIcon, ChevronRightIcon, CircleAlertIcon, CircleCheckIcon, CircleDashedIcon, CircleHelpIcon, ContactRoundIcon, CopyIcon, FolderIcon, GitPullRequestIcon, HourglassIcon, KeyRoundIcon, LinkIcon, ListIcon, LoaderCircleIcon, LockIcon, MailIcon, MessageSquareIcon, MessagesSquareIcon, MinusIcon, MoreHorizontalIcon, PauseIcon, PlayIcon, PlugIcon, PlusIcon, RadioIcon, RotateCcwIcon, SettingsIcon, SquareTerminalIcon, StarIcon, TrashIcon, UserRoundIcon, XIcon, ZapIcon, BlocksIcon, UploadIcon, NewspaperIcon, WorkflowIcon } from "lucide-react"
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react"
 export { ChoiceCards,ItemRowExport,Select } from "@/view-shared"
 const RelationGraph = lazyView(() => import("@/graph").then((m) => ({ default: m.RelationGraph })))
@@ -69,6 +70,71 @@ function Modal({ open, title, desc, children, footer, wide }: { open: boolean; t
         {footer && <DialogFooter className="gap-2">{footer}</DialogFooter>}
       </DialogContent>
     </Dialog>
+  )
+}
+export function HandoffDialog({ item, session }: { item: string; session?: string }) {
+  const t = useT()
+  const i = getItem(item)
+  const prev = (session ? getSession(session) : undefined) ?? (i ? active(i) ?? getSession(i.ss[i.ss.length - 1] ?? "") : undefined)
+  const curBot = prev?.b ?? i?.b ?? "steve"
+  const curHarness = prev?.harness ?? st.bots[curBot]?.harness ?? defaultHarness()
+  const enabledBots = Object.keys(st.bots).filter((k) => st.bots[k].on)
+  const [mode, setMode] = useState<"same" | "harness" | "bot">("same")
+  const [bot, setBot] = useState(() => enabledBots.find((k) => k !== curBot) ?? curBot)
+  const [harness, setHarness] = useState(curHarness)
+  const [model, setModel] = useState("")
+  const [makeDefault, setMakeDefault] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [placementError, setPlacementError] = useState<BotPlacementError>()
+  useEffect(() => setPlacementError(undefined), [mode, bot, harness, model, makeDefault])
+  if (!i) return null
+  const activeHarness = mode === "bot" ? (st.bots[bot]?.harness ?? curHarness) : mode === "harness" ? harness : curHarness
+  const canSubmit = !busy && (mode === "same" || (mode === "harness" ? !!harness : !!st.bots[bot]))
+  const showDefaultCheck = mode === "harness" || (mode === "same" && !!model)
+  const submit = async () => {
+    setPlacementError(undefined)
+    setBusy(true)
+    const choice = mode === "same"
+      ? { ...(model ? { model } : {}), ...(showDefaultCheck && makeDefault ? { make_bot_default: true } : {}) }
+      : mode === "harness"
+        ? { harness, ...(model ? { model } : {}), ...(makeDefault ? { make_bot_default: true } : {}) }
+        : { bot, ...(model ? { model } : {}) }
+    const next = await handoff({ item, session }, choice, setPlacementError)
+    setBusy(false)
+    if (next) {
+      closeSheet()
+      if (session) go("#/sessions/" + next)
+    }
+  }
+  return (
+    <Modal open title={t("views:handoff.title")} desc={t("views:handoff.desc")}
+      footer={<><Button variant="outline" onClick={closeSheet}>{t("common:action.cancel")}</Button><Button data-testid="handoff-go" disabled={!canSubmit} onClick={() => void submit()}>{busy && <Spinner className="size-3.5" />}{t("views:handoff.go")}</Button></>}>
+      <FieldGroup className="gap-4">
+        {prev && <div className="rounded-lg bg-muted px-3.5 py-2.5 type-footnote text-muted-foreground" data-handoff-from>
+          {t("views:handoff.current", { n: prev.n, harness: runtimeName(prev.harness ?? "") ?? prev.harness ?? prev.h ?? "", model: prev.m ? ` · ${prev.m}` : "" })}
+        </div>}
+        <Field><FieldLabel>{t("views:handoff.mode")}</FieldLabel>
+          <ChoiceCards value={mode} onChange={(v) => { setMode(v); setModel(""); setMakeDefault(false) }} cols={1} options={[
+            { v: "same", t: t("views:handoff.same"), d: t("views:handoff.sameDesc") },
+            { v: "harness", t: t("views:handoff.harness"), d: t("views:handoff.harnessDesc") },
+            ...(enabledBots.length > 1 ? [{ v: "bot" as const, t: t("views:handoff.bot"), d: t("views:handoff.botDesc") }] : []),
+          ]} /></Field>
+        {mode === "harness" && <Field><FieldLabel>{t("views:handoff.chooseHarness")}</FieldLabel>
+          <RuntimeSelect testId="handoff-harness" value={harness} onChange={(h) => { setHarness(h); setModel("") }} />
+          {harness && <RuntimeAvailability harness={harness} />}</Field>}
+        {mode === "bot" && <Field><FieldLabel>{t("views:handoff.chooseBot")}</FieldLabel>
+          <SetSelect wide testId="handoff-bot" label={t("views:handoff.chooseBot")} value={bot} onChange={(k) => { setBot(k); setModel("") }}
+            options={enabledBots.map((k) => ({ v: k, l: `${st.bots[k].n} · ${runtimeName(st.bots[k].harness) ?? st.bots[k].harness}` }))} /></Field>}
+        {activeHarness && <Field><FieldLabel>{t("views:handoff.chooseModel")}</FieldLabel>
+          <ModelPicker field testId="handoff-model" harness={activeHarness} value={model} onChange={setModel} allowDefault defaultLabel={t("views:handoff.modelDefault")} /></Field>}
+        {showDefaultCheck && <label className="flex cursor-pointer items-start gap-2.5 type-callout" data-handoff-make-default>
+          <Checkbox checked={makeDefault} onCheckedChange={(v) => setMakeDefault(!!v)} className="mt-0.5" />
+          <span className="min-w-0 flex-1"><span className="block">{t("views:handoff.makeBotDefault", { bot: st.bots[curBot]?.n ?? curBot })}</span>
+            <span className="block type-footnote text-muted-foreground">{t("views:handoff.makeBotDefaultDesc")}</span></span>
+        </label>}
+        {placementError && <BlockedPlacement blocked={placementError.blocked} />}
+      </FieldGroup>
+    </Modal>
   )
 }
 export function ForkDialog({ k, at }: { k: string; at?: number }) {
@@ -353,6 +419,7 @@ export function ItemView({ id }: { id: string }) {
         <DropdownMenuItem onClick={() => setTitleEdit(true)}>{t("views:item.rename")}</DropdownMenuItem>
         <DropdownMenuItem onClick={() => openSheet("graph", { k: id })}>{t("views:item.viewGraph")}</DropdownMenuItem>
         <DropdownMenuItem onClick={() => setDebugOpen(true)} data-item-debug>{t("views:debug.open")}</DropdownMenuItem>
+        <DropdownMenuItem onClick={() => openSheet("handoff", { item: i.id })} disabled={closedSt(i.st) || !i.ss.length} data-item-handoff><ArrowRightLeftIcon />{t("views:item.handoff")}</DropdownMenuItem>
         <DropdownMenuItem onClick={() => { const k = i.ss[i.ss.length - 1]; openSheet("fork", { k }) }} disabled={!i.ss.length}>{t("views:item.fork")}</DropdownMenuItem>
         <DropdownMenuItem onClick={() => { navigator.clipboard?.writeText(location.href).catch(() => {}); toast(t("views:item.linkCopied")) }}><LinkIcon />{t("views:item.copyLink")}</DropdownMenuItem>
         <DropdownMenuSeparator />
@@ -370,6 +437,7 @@ export function ItemView({ id }: { id: string }) {
     : [t("views:item.pause"), PauseIcon, () => actOnItem(i.id, "pause")] as const
   const quick = (
     <div className="flex items-center gap-1.5" data-quick-actions>
+      {!over && i.ss.length > 0 && <Button variant="ghost" size="sm" className="text-muted-foreground max-sm:w-8 max-sm:px-0" aria-label={t("views:item.handoff")} title={t("views:item.handoff")} onClick={() => openSheet("handoff", { item: i.id })} data-quick="handoff"><ArrowRightLeftIcon /><span className="max-sm:sr-only">{t("views:item.handoff")}</span></Button>}
       <Button variant="ghost" size="sm" className="text-muted-foreground max-sm:w-8 max-sm:px-0" aria-label={pl} title={pl} disabled={i.st === "prop"} onClick={pa} data-quick="pause"><PI /><span className="max-sm:sr-only">{pl}</span></Button>
       <Button variant="outline" size="sm" className="max-sm:w-8 max-sm:px-0" aria-label={t("views:item.markDone")} title={t("views:item.markDone")} disabled={over || !st.owner || doneBusy} onClick={() => { setDoneBusy(true); void markDone(i.id).finally(() => setDoneBusy(false)) }} data-quick="done"><CircleCheckIcon /><span className="max-sm:sr-only">{t("views:item.markDone")}</span></Button>
     </div>

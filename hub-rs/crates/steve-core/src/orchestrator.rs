@@ -466,6 +466,25 @@ impl Core {
     pub fn reassign(&self, id: &str, bot: &str, actor: &str) -> Result<Item> {
         self.tx().reassign(id, bot, actor)
     }
+    /// Hand off an item to a fresh session (default: same Bot switching execution surface for this
+    /// item only; Bot switch only when explicitly requested).
+    pub fn handoff_item(
+        &self,
+        item_id: &str,
+        target: crate::HandoffTarget,
+        actor: &str,
+    ) -> Result<crate::HandoffOutcome> {
+        self.tx().handoff_item(item_id, target, actor)
+    }
+    /// Hand off an item starting from a specific session.
+    pub fn handoff_session(
+        &self,
+        session_id: &str,
+        target: crate::HandoffTarget,
+        actor: &str,
+    ) -> Result<crate::HandoffOutcome> {
+        self.tx().handoff_session(session_id, target, actor)
+    }
     /// A message typed into a session: `插话` interrupts a running turn, `排队` waits behind it.
     pub fn session_message(
         &self,
@@ -806,6 +825,15 @@ pub(crate) fn goal_line(source: &(String, String), goal: &str) -> String {
         );
     }
     format!("Goal (from the user): {goal}")
+}
+
+pub(crate) struct SessionStart<'a> {
+    pub opening: Option<&'a str>,
+    pub bot: Option<&'a str>,
+    pub choice: Option<steve_node_api::HarnessChoice>,
+    pub placement: Option<steve_types::PlacementExplanation>,
+    pub pre_timeline: Option<(&'a str, String)>,
+    pub files: &'a [FileRef],
 }
 
 impl Tx<'_> {
@@ -1178,6 +1206,9 @@ impl Tx<'_> {
                 crate::placement::DispatchRequest {
                     workspace: ws,
                     bot: n.bot.as_deref().filter(|b| !b.is_empty()),
+                    harness: None,
+                    model: None,
+                    effort: None,
                     team: team.as_ref(),
                     project: &n.project,
                     goal: &n.goal,
@@ -1186,7 +1217,7 @@ impl Tx<'_> {
                     node: n.node.as_deref(),
                     required_nodes: required_nodes.as_deref(),
                 },
-                |bot| bot.model.clone().or_else(|| self.c.models().agent_model(ws, &bot.harness)),
+                |rt_id| self.c.models().agent_model(ws, rt_id),
             );
             let (placement, bot, project, blocked) = match selected {
                 Ok((placement, project)) => {
@@ -1354,6 +1385,24 @@ impl Tx<'_> {
         bot_override: Option<&str>,
         files: &[FileRef],
     ) -> Result<Session> {
+        self.start_session_with(
+            item_id,
+            SessionStart {
+                opening,
+                bot: bot_override,
+                choice: None,
+                placement: None,
+                pre_timeline: None,
+                files,
+            },
+        )
+    }
+
+    pub(crate) fn start_session_with(
+        &mut self,
+        item_id: &str,
+        start: SessionStart<'_>,
+    ) -> Result<Session> {
         if self.dependency_waiting(item_id)? || !deps_open(self.db(), item_id)?.is_empty() {
             return Err(crate::cycle::conflict(
                 "事项仍在等待前置完成，不能新开执行会话",
@@ -1369,7 +1418,7 @@ impl Tx<'_> {
             self.rt().check_workflow_execution(item_id)?;
         }
         let item = self.item(item_id)?;
-        let want = bot_override.or(item.bot_id.as_deref());
+        let want = start.bot.or(item.bot_id.as_deref());
         let bot = match want {
             Some(id) => self.db().bot(id)?.ok_or_else(|| {
                 crate::CoreError::Placement(steve_types::PlacementBlocked {
@@ -1386,13 +1435,27 @@ impl Tx<'_> {
                 self.db().main_bot()?
             }
         };
-        self.rt().can_run(item_id, &bot.id, &bot.harness)?;
+        let choice = start.choice.unwrap_or_else(|| {
+            let model = bot.model.clone().or_else(|| {
+                self.c
+                    .models()
+                    .agent_model(&item.workspace_id, &bot.harness)
+            });
+            // Preserve the user's choice for target-Node preflight. Silently dropping an effort
+            // masks an invalid Bot configuration and can run work with unintended settings.
+            steve_node_api::HarnessChoice {
+                harness: bot.harness.clone(),
+                model,
+                effort: bot.reasoning_effort.clone(),
+            }
+        });
+        self.rt().can_run_choice(item_id, &bot.id, &choice)?;
         /* taken first: a start that fails leaves nothing behind for a later one */
         let after = self.st.handoffs.remove(item_id);
         self.require_open_item(item_id)?;
         /* preparing the worktree is the cycle's first actual work */
         self.start_item_work(item_id)?;
-        if let Some(b) = bot_override {
+        if let Some(b) = start.bot {
             self.db().item_patch(item_id, patch![bot_id: b])?;
         }
         let item = self.item(item_id)?;
@@ -1416,21 +1479,13 @@ impl Tx<'_> {
             patch![cwd: cwd.as_str(), branch: branch.as_deref()],
         )?;
         let tok = token();
-        let model = bot.model.clone().or_else(|| {
-            self.c
-                .models()
-                .agent_model(&item.workspace_id, &bot.harness)
-        });
-        // Preserve the user's choice for target-Node preflight. Silently dropping an effort
-        // masks an invalid Bot configuration and can run work with unintended settings.
-        let reasoning_effort = bot.reasoning_effort.clone();
         let s = self.db().session_create(&NewSession {
             workspace_id: item.workspace_id.clone(),
             item_id: Some(item_id.into()),
             bot_id: Some(bot.id.clone()),
-            harness: bot.harness.clone(),
-            model,
-            reasoning_effort,
+            harness: choice.harness,
+            model: choice.model,
+            reasoning_effort: choice.effort,
             cwd,
             title: item.title.clone(),
             token: tok.clone(),
@@ -1443,7 +1498,8 @@ impl Tx<'_> {
         if core_makes {
             self.unplan_on_err(&item, &s.id, self.prepare_cwd(&item))?;
         }
-        self.rt().created(&s.id, after.as_deref());
+        self.rt()
+            .created_with_placement(&s.id, after.as_deref(), start.placement.as_ref());
         if let Some(why) = self.rt().refusal(&s.id) {
             /* nothing would ever run it: it ends now, said in it and on the item, rather than wait */
             self.db().session_patch(&s.id, patch![status: "ended"])?;
@@ -1456,6 +1512,10 @@ impl Tx<'_> {
             /* not bound where the worktree is made after all: made here, as without it */
             self.unplan_on_err(&item, &s.id, self.prepare_cwd(&item))?;
         }
+        if let Some((actor, line)) = start.pre_timeline {
+            self.db()
+                .timeline_add(item_id, actor, "sys", &line, Some(&s.id))?;
+        }
         self.db().timeline_add(
             item_id,
             "steve",
@@ -1465,11 +1525,11 @@ impl Tx<'_> {
         )?;
         let it = self.item(item_id)?;
         let head = self.protocol(&it, &bot, &s)?;
-        let text = match opening.filter(|o| !o.is_empty()) {
+        let text = match start.opening.filter(|o| !o.is_empty()) {
             Some(o) => format!("{head}\n\n{o}"),
             None => head,
         };
-        self.rt().prompt(&s.id, &text, "steve", files)?;
+        self.rt().prompt(&s.id, &text, "steve", start.files)?;
         let hash = crate::util::sha(&self.protocol_body(&it, &bot, &s, false)?);
         self.db()
             .event_add(&s.id, "system", json!({"steve_protocol_hash": hash}))?;
@@ -2476,11 +2536,20 @@ impl Tx<'_> {
             return Ok(());
         }
         if t.stop_reason == steve_node_api::CONTEXT_BUDGET {
+            self.record_handoff_turn_outcome(&session.id, "handoff");
             if asked_yours || receipt.is_some() {
                 return Ok(());
             }
             return self.continue_after_context_budget(&item, &session, t.attempt.as_deref());
         }
+        let handoff_outcome = if error.is_some() || graph_failed.is_some() {
+            "failed"
+        } else if t.stop_reason == "cancelled" {
+            "cancelled"
+        } else {
+            "succeeded"
+        };
+        self.record_handoff_turn_outcome(&session.id, handoff_outcome);
         let why = match error {
             Some(e) => {
                 let _ = self

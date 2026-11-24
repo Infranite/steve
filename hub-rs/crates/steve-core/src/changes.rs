@@ -25,6 +25,7 @@ pub static SETTINGS: LazyLock<Value> = LazyLock::new(|| {
         { "key": "accDefault", "label": "默认验收方式", "values": ["manual", "auto"], "def": "auto", "live": true, "labels": { "manual": "需要你验收", "auto": "自动验收" } },
         { "key": "depsAfter", "label": "前置完成后", "values": ["自动开始", "提醒我开始"], "def": "自动开始", "live": true },
         { "key": "contextBudget", "label": "回合上下文预算", "values": ["default", "100000", "250000", "400000", "600000", "800000"], "def": "default", "live": true, "labels": { "default": "默认", "100000": "100k", "250000": "250k", "400000": "400k", "600000": "600k", "800000": "800k" } },
+        { "key": "contextBudgetTarget", "label": "预算到达时交接目标", "values": ["same"], "def": "same", "live": true, "labels": { "same": "同 Bot 同执行器" } },
         { "key": "handoff", "label": "交接阈值", "values": ["0", "70", "80", "90"], "def": "0", "live": true, "labels": { "0": "不换会话", "70": "70%", "80": "80%", "90": "90%" } },
         { "key": "archDays", "label": "完成后自动归档", "values": ["7", "30", "90", "0"], "def": "30", "live": true, "labels": { "7": "7 天", "30": "30 天", "90": "90 天", "0": "不自动归档" } },
       ],
@@ -67,6 +68,9 @@ fn all_specs() -> Vec<&'static Value> {
 
 /// Is `v` an allowed value of setting `k`? (`PATCH /api/settings` validation)
 pub fn setting_allowed(k: &str, v: &str) -> bool {
+    if k == crate::context_handoff::CONTEXT_BUDGET_TARGET_SETTING {
+        return crate::parse_budget_handoff_target(v).is_some();
+    }
     all_specs().iter().any(|s| {
         s["key"] == k
             && s["values"]
@@ -2499,13 +2503,22 @@ mod tests {
         assert_eq!(d["accDefault"], "auto");
         assert_eq!(d["archDays"], "30");
         assert_eq!(d["contextBudget"], "default");
-        assert_eq!(d.len(), 15);
+        assert_eq!(d["contextBudgetTarget"], "same");
+        assert_eq!(d.len(), 16);
         assert_eq!(d["tz"], "system");
         assert!(setting_allowed("tz", "UTC") && !setting_allowed("tz", "Mars/Base"));
         assert!(
             setting_allowed("contextBudget", "default")
                 && setting_allowed("contextBudget", "400000")
                 && !setting_allowed("contextBudget", "999")
+        );
+        assert!(
+            setting_allowed("contextBudgetTarget", "same")
+                && setting_allowed("contextBudgetTarget", "harness:codex")
+                && setting_allowed("contextBudgetTarget", "harness:codex/gpt-5.4")
+                && setting_allowed("contextBudgetTarget", "harness:codex/gpt-5.4@high")
+                && !setting_allowed("contextBudgetTarget", "bot:dev")
+                && !setting_allowed("contextBudgetTarget", "invalid")
         );
         assert!(
             setting_allowed("handoff", "70")

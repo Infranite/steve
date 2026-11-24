@@ -149,6 +149,8 @@ export default {
     cannotSendYet: "Can't send yet, it's first in line",
     goalUpdated: "Goal updated",
     handedTo: "Handed to {{bot}}",
+    handedOff: "Handed off to a new conversation with working memory",
+    handedOffAndSavedDefault: "Handed off and updated {{bot}}'s default execution surface",
     paused: "Paused",
     dropped: "Dropped",
     reopened: "Reopened",

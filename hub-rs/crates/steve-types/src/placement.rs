@@ -52,6 +52,10 @@ pub enum PlacementReason {
     StableOrder,
     SteveFallback,
     ExistingAssignment,
+    HandoffContextBudget,
+    HandoffQuotaExhausted,
+    HandoffProviderError,
+    HandoffOwnerRequest,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
