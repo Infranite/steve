@@ -19,7 +19,7 @@ use steve_node_api::{HarnessChoice, ToolPhase, ToolView};
 use steve_types::{BotPlacement, PlacementBlocked, PlacementReason, PlacementRejection};
 
 use crate::Tx;
-use crate::error::{CoreError, Result, msg};
+use crate::error::{CoreError, HandoffError, Result, msg};
 use crate::orchestrator::SessionStart;
 use crate::repo::{Bot, BotExt, Decision, FileRef, Item, NewDecision, Session};
 use crate::thread::flowback::{Update, flow_quiet};
@@ -725,7 +725,7 @@ impl Tx<'_> {
                 sessions
                     .into_iter()
                     .find(|s| s.readonly == 0 && s.source == "Steve")
-                    .ok_or_else(|| msg("当前事项还没有可交接的会话"))?
+                    .ok_or(CoreError::Handoff(HandoffError::NoEligibleSession))?
             }
         };
         let outcome = self.execute_handoff(
@@ -754,12 +754,12 @@ impl Tx<'_> {
             .session(session_id)?
             .ok_or_else(|| msg(steve_i18n::t!("core.conversation.not_found")))?;
         if prev.readonly != 0 || prev.source != "Steve" {
-            return Err(msg("只读或外部导入的会话不能交接"));
+            return Err(CoreError::Handoff(HandoffError::ReadonlySession));
         }
         let item_id = prev
             .item_id
             .clone()
-            .ok_or_else(|| msg("只有关联事项的会话才能交接"))?;
+            .ok_or(CoreError::Handoff(HandoffError::SessionNotBoundToItem))?;
         let item = self.item(&item_id)?;
         self.require_open_item(&item_id)?;
         let outcome = self.execute_handoff(
@@ -799,7 +799,7 @@ impl Tx<'_> {
         let target = raw_target.normalized();
         // Automatic handoffs never switch Bot; only OwnerRequest (or Phase 2 coordinator card) may.
         if target.bot.is_some() && !matches!(reason, HandoffReason::OwnerRequest) {
-            return Err(msg("自动交接不更换 Bot，只切换当前 Bot 的执行面"));
+            return Err(CoreError::Handoff(HandoffError::AutoBotSwitchForbidden));
         }
 
         let (next_bot, choice, placement) =
@@ -1402,5 +1402,36 @@ mod tests {
             format_surface_actor("Dev", "Codex", Some("  ")),
             "Dev（Codex）"
         );
+    }
+
+    #[test]
+    fn handoff_errors_expose_ascii_codes_without_localized_sentences() {
+        for (err, code, status) in [
+            (
+                HandoffError::NoEligibleSession,
+                "handoff.no_eligible_session",
+                409,
+            ),
+            (
+                HandoffError::ReadonlySession,
+                "handoff.readonly_session",
+                409,
+            ),
+            (
+                HandoffError::SessionNotBoundToItem,
+                "handoff.session_not_bound_to_item",
+                409,
+            ),
+            (
+                HandoffError::AutoBotSwitchForbidden,
+                "handoff.auto_bot_switch_forbidden",
+                400,
+            ),
+        ] {
+            let text = CoreError::Handoff(err).to_string();
+            assert_eq!(text, code);
+            assert!(text.is_ascii());
+            assert_eq!(err.http_status(), status);
+        }
     }
 }

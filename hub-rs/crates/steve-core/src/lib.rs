@@ -65,7 +65,7 @@ pub use context_handoff::{
     BotDefaultSnapshot, BotDefaultUpdated, HANDOFF_UNAVAILABLE_SUBJECT, HandoffOutcome,
     HandoffReason, HandoffTarget,
 };
-pub use error::{CoreError, Result};
+pub use error::{CoreError, HandoffError, Result};
 pub use gateway::{ModelGateway, OneModel, SharedGateway, SingleModelGateway, Tier};
 pub use orchestrator::{
     CreateItem, DecisionCommand, Forked, ItemAction, SendNow, SupplementMode, design_pending,

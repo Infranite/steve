@@ -344,5 +344,9 @@
   "hub.models.invalid_selection": "Invalid model selection.",
   "hub.node.workspace_conflict": "The workspace preparation changed. The previous directory and history are retained. Choose Continue to create a new session in the current project.",
   "hub.node.workspace_conflict_question": "Could not start the session: The workspace preparation changed. The previous directory and history are retained. Choose Continue to create a new session in the current project.",
-  "hub.preflight.harness_not_ready": "%{harness} is not installed, not ready or not signed in on any device, so it cannot run now. Install it or sign it in on the device itself (Steve uses the harness's own sign-in there), then check the Devices page."
+  "hub.preflight.harness_not_ready": "%{harness} is not installed, not ready or not signed in on any device, so it cannot run now. Install it or sign it in on the device itself (Steve uses the harness's own sign-in there), then check the Devices page.",
+  "hub.handoff.no_eligible_session": "This item has no session eligible for handoff yet",
+  "hub.handoff.readonly_session": "Read-only or externally imported sessions cannot be handed off",
+  "hub.handoff.session_not_bound_to_item": "Only sessions linked to an item can be handed off",
+  "hub.handoff.auto_bot_switch_forbidden": "Automatic handoff does not switch Bots; it only switches the current Bot's execution surface"
 }

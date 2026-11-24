@@ -20,6 +20,23 @@ use steve_store::Store;
 
 use crate::backend::{BResult, BackendError, CreateItem, Domain, NewTag, Obj, Route, Tier};
 
+fn handoff_error_text(error: steve_core::HandoffError) -> String {
+    match error {
+        steve_core::HandoffError::NoEligibleSession => {
+            steve_i18n::t!("hub.handoff.no_eligible_session")
+        }
+        steve_core::HandoffError::ReadonlySession => {
+            steve_i18n::t!("hub.handoff.readonly_session")
+        }
+        steve_core::HandoffError::SessionNotBoundToItem => {
+            steve_i18n::t!("hub.handoff.session_not_bound_to_item")
+        }
+        steve_core::HandoffError::AutoBotSwitchForbidden => {
+            steve_i18n::t!("hub.handoff.auto_bot_switch_forbidden")
+        }
+    }
+}
+
 fn cerr(e: CoreError) -> BackendError {
     match e {
         // a module's refusal keeps its status (`409 邮件已经发出，不能撤回`); its internal errors stay generic
@@ -34,6 +51,10 @@ fn cerr(e: CoreError) -> BackendError {
             },
         },
         CoreError::Status(status, message) => BackendError { status, message },
+        CoreError::Handoff(error) => BackendError {
+            status: error.http_status(),
+            message: handoff_error_text(error),
+        },
         CoreError::Placement(blocked) => BackendError {
             status: 409,
             message: super::bot_dispatch::text(blocked.reason),
@@ -2270,6 +2291,47 @@ mod routed_tests {
                 panic!("{case:?}: a message to it ran");
             }
             assert!(!bound(&rt), "{case:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn handoff_errors_localize_in_zh_and_en() {
+        let cases = [
+            (
+                steve_core::HandoffError::NoEligibleSession,
+                409,
+                "当前事项还没有可交接的会话",
+                "This item has no session eligible for handoff yet",
+            ),
+            (
+                steve_core::HandoffError::ReadonlySession,
+                409,
+                "只读或外部导入的会话不能交接",
+                "Read-only or externally imported sessions cannot be handed off",
+            ),
+            (
+                steve_core::HandoffError::SessionNotBoundToItem,
+                409,
+                "只有关联事项的会话才能交接",
+                "Only sessions linked to an item can be handed off",
+            ),
+            (
+                steve_core::HandoffError::AutoBotSwitchForbidden,
+                400,
+                "自动交接不更换 Bot，只切换当前 Bot 的执行面",
+                "Automatic handoff does not switch Bots; it only switches the current Bot's execution surface",
+            ),
+        ];
+        for (err, status, zh, en) in cases {
+            let got_zh = super::cerr(steve_core::CoreError::Handoff(err));
+            assert_eq!(got_zh.status, status);
+            assert_eq!(got_zh.message, zh);
+            let got_en = steve_i18n::scope(steve_i18n::EN, async {
+                super::cerr(steve_core::CoreError::Handoff(err))
+            })
+            .await;
+            assert_eq!(got_en.status, status);
+            assert_eq!(got_en.message, en);
         }
     }
 }

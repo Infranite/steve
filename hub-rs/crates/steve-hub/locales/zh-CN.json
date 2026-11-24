@@ -344,5 +344,9 @@
   "hub.models.invalid_selection": "模型选择参数不正确。",
   "hub.node.workspace_conflict": "工作区的准备方式已改变，旧目录和记录已保留。点“继续”将在当前项目创建新会话。",
   "hub.node.workspace_conflict_question": "开不了会话：工作区的准备方式已改变，旧目录和记录已保留。点“继续”将在当前项目创建新会话。",
-  "hub.preflight.harness_not_ready": "%{harness} 在所有设备上都还没装好、没就绪或没登录，现在不能运行。请在设备上安装它，或在那台设备上让它自己登录（Steve 用的就是 harness 在那台设备上的登录），再到「设备」页面查看。"
+  "hub.preflight.harness_not_ready": "%{harness} 在所有设备上都还没装好、没就绪或没登录，现在不能运行。请在设备上安装它，或在那台设备上让它自己登录（Steve 用的就是 harness 在那台设备上的登录），再到「设备」页面查看。",
+  "hub.handoff.no_eligible_session": "当前事项还没有可交接的会话",
+  "hub.handoff.readonly_session": "只读或外部导入的会话不能交接",
+  "hub.handoff.session_not_bound_to_item": "只有关联事项的会话才能交接",
+  "hub.handoff.auto_bot_switch_forbidden": "自动交接不更换 Bot，只切换当前 Bot 的执行面"
 }
