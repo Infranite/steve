@@ -6,7 +6,7 @@
 //! per entity, the copy with the larger `rev`.
 
 use crate::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 fn default_session_source(value: &str) -> bool {
     value == "Steve"
@@ -54,10 +54,11 @@ pub struct ItemView {
     pub ws: WorkspaceId,
     pub no: i64,
     pub title: String,
-    pub status: String,
-    pub stage: String,
-    pub phase: String,
+    pub state: ItemState,
     pub cycle: i64,
+    pub revision: i64,
+    pub delivery_revision: i64,
+    pub delivery: Vec<DeliveryRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub bot_id: Option<BotId>,
@@ -102,13 +103,10 @@ pub struct ItemView {
     pub deps: Vec<ItemId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
-    pub closeout: Option<Closeout>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
     pub workflow: Option<ItemWorkflow>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
-    pub closing: Option<ItemClosing>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(test, ts(as = "Option<Vec<ItemWait>>", optional))]
+    pub waits: Vec<ItemWait>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(test, ts(as = "Option<Vec<OperationBlocker>>", optional))]
     pub op_blockers: Vec<OperationBlocker>,
@@ -160,11 +158,96 @@ pub struct ItemWorkflow {
     pub superseded: bool,
 }
 
+/// The discriminator stored for an item cycle. The close request and outcome are its payload.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Deserialize,
+    Serialize,
+    strum::AsRefStr,
+    strum::EnumString,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum ItemPhase {
+    #[default]
+    Ready,
+    Active,
+    Paused,
+    Closing,
+    Closed,
+}
+
+impl ItemPhase {
+    pub fn as_str(&self) -> &str {
+        self.as_ref()
+    }
+
+    pub fn can_run(self) -> bool {
+        match self {
+            Self::Ready | Self::Active => true,
+            Self::Paused | Self::Closing | Self::Closed => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 #[cfg_attr(test, derive(ts_rs::TS))]
-pub struct ItemClosing {
-    pub kind: String,
-    pub waiting: Vec<String>,
+pub enum ItemState {
+    Ready,
+    Active,
+    Paused,
+    Closing {
+        request: CloseKind,
+        waits: Vec<ItemWait>,
+    },
+    Closed {
+        outcome: ItemOutcome,
+        by: ClosedBy,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum CloseKind {
+    #[default]
+    Complete,
+    Cancel,
+    Fail,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum ItemOutcome {
+    Finished,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum ClosedBy {
+    Owner,
+    Acceptance,
+    Rule,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum ItemWait {
+    Prerequisite,
+    Delivery,
+    Operation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -263,11 +346,10 @@ pub struct DecisionView {
     pub subject_id: String,
     pub item_id: Option<ItemId>,
     pub session_id: Option<SessionId>,
-    pub question: String,
+    pub question: Said,
     pub draft: String,
     pub options: Vec<String>,
-    /// `open` | `resolved` | `expired`
-    pub status: String,
+    pub status: DecisionStatus,
     /// What it was settled with, as recorded.
     pub result: Option<RawJson>,
     pub requested_by: String,
@@ -281,6 +363,62 @@ pub struct DecisionView {
     pub tier: DecisionTier,
     /// Why it is folded away (`tier` = `folded`).
     pub folded: Option<FoldReason>,
+    #[cfg_attr(test, ts(type = "number"))]
+    pub revision: i64,
+}
+
+/// The text shown on a decision card.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum Said {
+    Raw { text: String },
+    Key { template: DecisionPrompt },
+}
+
+/// Machine-authored prompts carry their arguments separately from the UI text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum DecisionPrompt {
+    TurnRepeatedFailure,
+    TurnNoProgress,
+    MergePullRequest {
+        #[cfg_attr(test, ts(type = "number"))]
+        number: i64,
+        repo: String,
+    },
+}
+
+/// The current state of a decision. An answer receipt survives reopening.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize, strum::EnumString)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum DecisionStatus {
+    Open,
+    Resolved,
+    Dismissed,
+    Expired,
+    Superseded,
+}
+
+impl DecisionStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Resolved => "resolved",
+            Self::Dismissed => "dismissed",
+            Self::Expired => "expired",
+            Self::Superseded => "superseded",
+        }
+    }
+}
+
+impl std::fmt::Display for DecisionStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// The tiers of 待处理, decided by the Hub in a fixed order of rules: an approved send that failed

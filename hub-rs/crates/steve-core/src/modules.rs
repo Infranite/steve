@@ -5,8 +5,7 @@
 //! Hooks are async and the core's lifecycle runs synchronously under its state lock, so a critical
 //! section only records what happened ([`HookEvent`]); when the section ends ([`Tx`]'s `Drop`) the
 //! events go to one worker task per core, which calls the hooks in order, after the writes are
-//! committed and without the lock. An acceptance that would finish the item asks the hooks first when
-//! any are registered: the finish then happens in the worker, unless a hook takes over the wrap-up.
+//! committed and without the lock.
 
 use crate::error::Result;
 use crate::gateway::SharedGateway;
@@ -21,14 +20,6 @@ use tokio::sync::mpsc;
 #[derive(Debug, Clone)]
 pub(crate) enum HookEvent {
     Created(Item),
-    /// The acceptance was decided: the hooks are asked whether one takes over the wrap-up. `op` is the
-    /// required operation (`hooks.accepted`) of the cycle that records the answer: `running` while a
-    /// module owns the wrap-up (it reports through `Core::module_done`), `succeeded` when none does —
-    /// the closing gate waits for it either way, and a restart asks again while it is `pending`.
-    Accepted {
-        item: Item,
-        op: String,
-    },
     Finished(Item),
     Dropped(Item),
 }
@@ -138,26 +129,6 @@ impl Core {
             HookEvent::Created(i) => hooks.created(&i).await,
             HookEvent::Finished(i) => hooks.finished(&i).await,
             HookEvent::Dropped(i) => hooks.dropped(&i).await,
-            HookEvent::Accepted { item, op } => {
-                let took = hooks.accepted(&item).await.is_some();
-                let core = self.clone();
-                let id = item.id.clone();
-                let done = tokio::task::spawn_blocking(move || {
-                    let (status, note) = if took {
-                        ("running", "由收尾模块接手")
-                    } else {
-                        ("succeeded", "没有模块接手收尾")
-                    };
-                    core.tx()
-                        .lc_op_set(&op, status, serde_json::json!({ "note": note }))
-                })
-                .await;
-                match done {
-                    Ok(Ok(_)) => {}
-                    Ok(Err(e)) => tracing::error!("acceptance hooks of {id}: {e}"),
-                    Err(e) => tracing::error!("acceptance hooks of {id}: {e}"),
-                }
-            }
         }
     }
 }
@@ -170,9 +141,7 @@ fn worker(rt: &tokio::runtime::Handle, inner: Weak<Inner>) -> mpsc::UnboundedSen
             let Some(inner) = inner.upgrade() else {
                 return;
             };
-            /* each event in its own task: a hook that panics loses its own call, never the worker. An
-             * acceptance consultation that dies leaves its operation pending (not confirmed); the close
-             * waits for it and the next boot asks again. */
+            // A hook that panics loses its call. The worker still delivers the next committed event.
             let core = Core(inner);
             let run = tokio::spawn(async move { core.run_hook(e).await });
             if let Err(err) = run.await {
@@ -207,26 +176,21 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// `undoDecision` of a decision whose `subject_type` a module handles: the module's `before_undo`,
-    /// the reopen and the audit in one transaction ([`steve_modules::decisions::undo`]); a refusal rolls
-    /// it back and comes out as [`crate::CoreError::Module`] with its own status. Returns the decision as
-    /// it was, or `None` when no module handles it (core undoes it itself).
-    pub(crate) fn module_undo(
-        &self,
-        d: &Decision,
-        actor: &str,
-        undoable: impl FnOnce(&Decision) -> bool,
-    ) -> Result<Option<Decision>> {
-        let Some(m) = self.c.modules() else {
-            return Ok(None);
+    pub(crate) fn module_undo(&self, d: &Decision, actor: &str) -> Result<bool> {
+        let Some(m) = self
+            .c
+            .modules()
+            .filter(|m| m.registry.handles_decision(&d.subject_type))
+        else {
+            return Ok(false);
         };
-        if !m.registry.handles_decision(&d.subject_type) {
-            return Ok(None);
-        }
-        match steve_modules::decisions::undo(m, &d.id, actor, undoable) {
-            Some(r) => Ok(Some(r?)),
-            None => Ok(None),
-        }
+        let caller = steve_modules::Caller {
+            ws: d.workspace_id.clone(),
+            me: actor.into(),
+        };
+        m.store
+            .write(|w| steve_modules::decisions::undo_in(m, w, &caller, d))?;
+        Ok(true)
     }
 }
 
@@ -249,7 +213,7 @@ impl Drop for Tx<'_> {
                     }
                 }
                 for item in items {
-                    if let Err(e) = core.tx().lc_try_close(&item) {
+                    if let Err(e) = core.tx().evaluate_cycle_close(&item) {
                         tracing::warn!(item, "closing after cancel: {e}");
                     }
                 }

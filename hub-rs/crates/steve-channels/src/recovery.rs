@@ -204,7 +204,7 @@ pub fn propose(ch: &Channels, who: &Caller, message: &str) -> ApiResult<changes:
         let d = decision
             .filter(|d| {
                 message.status == "failed"
-                    && d.status == "open"
+                    && d.status == steve_types::DecisionStatus::Open
                     && d.result["recovery"]["kind"] == "missing_permission"
                     && d.result["recovery"]["authorization_kind"] == "managed"
             })

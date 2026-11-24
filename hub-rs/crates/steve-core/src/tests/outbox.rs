@@ -11,7 +11,7 @@ fn events(k: &Kit, item: &str) -> Vec<steve_store::core_fixture::work::DoneEvent
 }
 
 fn status(k: &Kit, item: &str) -> String {
-    k.db().item(item).unwrap().unwrap().status
+    k.item_label(item).into()
 }
 
 #[test]
@@ -43,14 +43,11 @@ fn a_cycle_closes_once_and_a_new_cycle_emits_its_own_fact() {
         "no second fact for the same cycle"
     );
     // a write of the derived status cannot reopen it any more
-    assert!(
-        k.db()
-            .item_patch(&id, crate::patch![status: "run"])
-            .is_err()
-    );
+    assert_eq!(k.phase(&id), "closed");
     // only an explicit new cycle does; its close is a new fact, keyed by its cycle
+    let expected = k.db().item(&id).unwrap().unwrap().cas_revision;
     k.core
-        .lifecycle_command(&id, "new_cycle", 1, 1, None, None, "me")
+        .lifecycle_command(&id, "new_cycle", 1, expected, None, None, "me")
         .unwrap();
     k.finish(&id).unwrap();
     let evs = events(&k, &id);
@@ -80,10 +77,9 @@ fn a_failing_finish_leaves_nothing_behind() {
     // fault injection: the outbox insert fails, after the patch, note and expiry ran in the same transaction
     steve_store::core_fixture::work::set_outbox_available(k.db().store(), false);
     assert!(k.finish(&id).is_err());
-    assert_eq!(status(&k, &id), "run", "the status change rolled back");
+    assert_eq!(k.phase(&id), "active", "the close rolled back");
     assert_eq!(k.phase(&id), "active", "the lifecycle rolled back");
-    // your own “标记完成” line stays (it happened); nothing of the close was written
-    assert_eq!(k.timeline_texts(&id).len(), before + 1);
+    assert_eq!(k.timeline_texts(&id).len(), before);
     assert!(
         !k.timeline_texts(&id)
             .iter()
@@ -91,7 +87,11 @@ fn a_failing_finish_leaves_nothing_behind() {
         "the note rolled back"
     );
     let open = k.db().decision(&d).unwrap().unwrap().status;
-    assert_eq!(open, "open", "the expiry rolled back");
+    assert_eq!(
+        open,
+        steve_types::DecisionStatus::Open,
+        "the expiry rolled back"
+    );
     // repaired: the finish goes through with everything
     steve_store::core_fixture::work::set_outbox_available(k.db().store(), true);
     k.finish(&id).unwrap();
@@ -143,14 +143,11 @@ fn work_tidy_retries_while_a_session_is_busy() {
     let s = k.session(&id, "idle");
     k.rt.st().turning.insert(s.clone());
     k.finish(&id).unwrap();
-    // the close itself waits for the turn: no fact, nothing to tidy yet
-    assert_eq!(k.phase(&id), "closing");
-    assert_eq!(k.pump_outbox().done, 0);
+    assert_eq!(k.phase(&id), "closed");
+    assert_eq!(k.pump_outbox().retried, 1);
     assert!(wt.exists(), "nothing touched while busy");
     k.rt.st().turning.remove(&s);
-    k.core.lifecycle_tick().unwrap();
-    assert_eq!(k.phase(&id), "closed", "closed once the turn ended");
-    let p = k.pump_outbox();
+    let p = k.pump_outbox_at(steve_store::now() + 60_000);
     assert_eq!(p.done, 1);
     assert!(!wt.exists(), "given back once the session is idle");
 }

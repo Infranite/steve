@@ -19,14 +19,12 @@ pub mod changes;
 pub mod config;
 pub mod cycle;
 mod dependencies;
-pub mod derive;
 mod diagnostics;
 pub mod error;
 pub mod gateway;
 pub mod git;
 pub mod harnesses;
 pub mod housekeeping;
-pub mod judge;
 pub mod kinds;
 pub mod lifecycle;
 mod marks;
@@ -35,28 +33,23 @@ mod modules;
 pub mod node_git;
 pub mod notice_line;
 pub mod notify;
-pub mod now_line;
 mod occupancy;
 mod orchestrator;
 pub mod outbox_work;
 mod placement;
 pub mod proof;
-pub mod pull;
 mod quota;
 pub mod release;
 pub mod repo;
 pub mod runtime;
 pub mod stall;
-mod state_view;
 pub mod stats;
-pub mod sweep;
 pub mod takeover;
 pub mod thread;
 mod turn_receipts;
+mod turn_wait;
 pub mod upstream;
 pub mod util;
-mod work;
-pub mod work_policy;
 pub mod workflow;
 pub mod workspace;
 mod worktrees;
@@ -69,10 +62,12 @@ mod tests;
 pub use config::CoreConfig;
 pub use error::{CoreError, Result};
 pub use gateway::{ModelGateway, OneModel, SharedGateway, SingleModelGateway, Tier};
-pub use orchestrator::{CreateItem, Forked, ItemAction, SendNow, SupplementMode, design_pending};
+pub use orchestrator::{
+    CreateItem, DecisionCommand, Forked, ItemAction, SendNow, SupplementMode, design_pending,
+};
 pub use runtime::{
-    AgentRuntime, Answered, Check, Flushed, McpEndpoint, ModeState, Output, Prompted, Released,
-    Running, Stop, TurnEnd,
+    AgentRuntime, Answered, Check, Flushed, McpEndpoint, ModeState, Output, PermissionAction,
+    PermissionAnswer, Prompted, Released, Running, Stop, TurnEnd,
 };
 
 use repo::Db;
@@ -115,6 +110,7 @@ pub(crate) enum Mark {
 pub(crate) struct Releasing {
     token: String,
     item: String,
+    operation: Option<String>,
     /// Bumped per release so a stale hold timer does nothing.
     generation: u64,
     /// When the drain began holding new turns (ms).
@@ -131,33 +127,15 @@ pub(crate) struct State {
     quota_waits: HashMap<String, quota::QuotaWait>,
     releasing: Option<Releasing>,
     release_generation: u64,
-    /// An acceptance answered with 验收并发布 `(item, who)`: its release requirement starts the
-    /// release right away instead of asking the agent (`release.rs` `release_with_accept`).
-    release_with_accept: Option<(String, String)>,
     drafts: HashMap<String, changes::Proposal>,
     applied: HashMap<String, changes::Applied>,
     /// Item hook calls collected in this critical section, run once the lock is gone.
     hooks: Vec<modules::HookEvent>,
     /// Items the user marked done, with what to restore if they undo it from the toast.
-    marked_done: HashMap<String, orchestrator::MarkedDone>,
     /// Turns to stop once the lock is gone `(turn, item)`: a cancel can call back into the core
     /// (the gateway-retry wait ends with a turn end), so a lifecycle stop never cancels under the lock.
     /// The turn is frozen when the stop is asked for, so a turn started meanwhile is left alone.
     cancels: Vec<(runtime::Running, String)>,
-    /// Items whose completion rule is being checked against the remote now (`takeover`).
-    probing: HashMap<String, takeover::Looking>,
-    /// Numbers the looks in `probing`, so a look that comes back is told from a newer one.
-    probe_seq: u64,
-    /// The last completion probe of each item.
-    probed: HashMap<String, takeover::Probed>,
-    /// Followed builds: when each was last looked at.
-    build_checked: HashMap<String, i64>,
-    /// When each followed pull request was last looked at (`pull`), by its operation.
-    pr_checked: HashMap<String, i64>,
-    /// Closings whose worktree moved while the pull request they are followed on was open: since
-    /// when each waits for the host to say whether it merged before the result is void (`pull`), by
-    /// the release operation.
-    pr_verify: HashMap<String, i64>,
     /// Why new turns wait now (`occupancy`).
     holds: std::collections::BTreeSet<occupancy::Hold>,
     /// Items handing over to a new session while the old one's release is on its way: the
@@ -165,8 +143,6 @@ pub(crate) struct State {
     handoffs: HashMap<String, String>,
     /// Git facts of items on a Node, gathered off the lock (`node_git`).
     git: node_git::Slots,
-    /// Release reports waiting for an item's facts to prove what they shipped (`node_git`).
-    git_proofs: HashMap<String, Vec<node_git::PendingProof>>,
     /// Critical sections entered so far (facts taken in one may be read again in the same one).
     tx_seq: u64,
     /// The periodic closing check is running: what it asks of a Node is no new event, so it
@@ -174,7 +150,7 @@ pub(crate) struct State {
     git_polling: bool,
     /// The periodic closing check is running: it fingerprints a worktree only when nothing else
     /// holds the closing (`cycle.rs`).
-    lc_ticking: bool,
+    evaluating_closing_cycles: bool,
 }
 
 /// One critical section: the core plus the held state lock.
@@ -245,7 +221,7 @@ impl Core {
     /// backend may also retire what holds the session ([`AgentRuntime::user_stop`]).
     pub fn cancel_turn(&self, session_id: &str) -> Result<bool> {
         /* your Stop is kept before it goes out (its turn end may come after a restart): how that
-         * turn ends is yours to go on with, never Steve's to continue (`crate::work::stopped`) */
+         * turn ends is yours to go on with, never Steve's to continue (`crate::turn_wait::stopped`) */
         let sessions = self.0.store.store().sessions();
         let asked = self.0.runtime.running(session_id).map(|r| r.attempt);
         sessions.stop_asked(session_id, Some(asked.as_deref().unwrap_or("")))?;
@@ -269,9 +245,6 @@ impl Core {
     }
     pub(crate) fn gw(&self) -> &dyn ModelGateway {
         &*self.0.gateway
-    }
-    pub(crate) fn gw_arc(&self) -> Arc<dyn ModelGateway> {
-        self.0.gateway.clone()
     }
 
     /// Enter the critical section.

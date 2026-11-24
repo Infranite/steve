@@ -181,7 +181,7 @@ pub fn default_workspace_member(path: &Path) -> Result<String> {
 
 pub fn seed_connector_session(path: &Path, user: &str, hash: &str) -> Result<()> {
     let db = super::api::writable(path)?;
-    db.execute("INSERT INTO items (id,workspace_id,no,title,status,stage,bot_id,requested_by,created,updated) VALUES ('connector-item','default',9001,'connector fixture','active','working','steve',?1,1,1)", [user])?;
+    db.execute("INSERT INTO items(id, workspace_id, no, title, phase, bot_id, requested_by, created, updated) VALUES ('connector-item','default',9001,'connector fixture','active','steve',?1,1,1)", [user])?;
     db.execute("INSERT INTO audit (workspace_id,ts,actor,action,target) VALUES ('default',1,?1,'item.create','connector-item')", [user])?;
     db.execute("INSERT INTO sessions (id,workspace_id,item_id,bot_id,harness,cwd,status,token_hash,created,updated) VALUES ('connector-session','default','connector-item','steve','claude-code','/nonexistent','idle',?1,1,1)", [hash])?;
     Ok(())

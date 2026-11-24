@@ -245,6 +245,13 @@ async fn act(e: &Env, iid: &str, action: &str) -> (u16, Value) {
     .await
 }
 
+async fn finish(e: &Env, iid: &str) -> (u16, Value) {
+    let before = lifecycle(e, iid).await;
+    command(e, iid, json!({
+        "command": "finish", "expected_cycle": before["cycle"], "expected_revision": before["revision"]
+    })).await
+}
+
 async fn item_of(e: &Env, sid: &str) -> String {
     e.session(sid).await["item_id"]
         .as_str()
@@ -283,7 +290,7 @@ async fn creation_blocks_before_opening_a_session_and_completion_starts_it_once(
         "goal":"dependent @sleep 20000", "title":"dependent", "bot":bot, "project":null, "deps":[dep]
     }))).await;
     assert_eq!(status, 200, "{item}");
-    assert_eq!(item["status"], "block", "{item}");
+    assert_eq!(item["phase"], "ready", "{item}");
     let id = item["id"].as_str().unwrap();
     let (_, sessions) = e
         .call("GET", &format!("/api/views?kind=session&items={id}"), None)
@@ -297,6 +304,7 @@ async fn creation_blocks_before_opening_a_session_and_completion_starts_it_once(
     );
     let (_, detail) = e.call("GET", &format!("/api/items/{id}"), None).await;
     assert_eq!(detail["dependency_wait"]["open_dependencies"], json!([dep]));
+    assert_eq!(detail["dependency_wait"]["waiting"], true);
     assert!(
         detail["decisions"]
             .as_array()
@@ -304,7 +312,7 @@ async fn creation_blocks_before_opening_a_session_and_completion_starts_it_once(
             .iter()
             .all(|d| d["status"] != "open")
     );
-    let (status, result) = act(&e, dep, "finish").await;
+    let (status, result) = finish(&e, dep).await;
     assert_eq!(status, 200, "{result}");
     eventually(
         "Finishing the dependency starts the dependent item session.",
@@ -401,7 +409,7 @@ async fn closing_a_parent_archives_a_historical_failed_child_over_http() {
         .unwrap()
         .unwrap();
     steve_store::testkit::hub::hub_fixtures::set_items_phase_closed(&store, &child.id).unwrap();
-    let (status, result) = act(&e, &parent.id, "finish").await;
+    let (status, result) = finish(&e, &parent.id).await;
     assert_eq!(status, 200, "{result}");
     let (status, read) = e
         .call("GET", &format!("/api/items/{}", child.id), None)
@@ -409,12 +417,11 @@ async fn closing_a_parent_archives_a_historical_failed_child_over_http() {
     assert_eq!(status, 200, "{read}");
     assert_eq!(read["archived"], true, "{read}");
     assert_eq!(read["outcome"], "failed");
-    assert!(
-        read["now"]
+    assert!(read["timeline"].as_array().unwrap().iter().any(|line| {
+        line["text"]
             .as_str()
-            .unwrap()
-            .contains(&format!("随父事项 {} 结束", parent.id))
-    );
+            .is_some_and(|text| text.contains(&format!("随父事项 {} 结束", parent.id)))
+    }));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -431,10 +438,10 @@ async fn pause_finish_drop_and_new_cycles() {
     let iid = item_of(&e, &sid).await;
     assert_eq!(lifecycle(&e, &iid).await["phase"], "active");
 
-    // mark done in the middle of a turn: the request returns at once, the turn is stopped outside the
-    // lock, and the close commits once it stopped
-    let (s, v) = act(&e, &iid, "finish").await;
+    // The response is already closed while stopping the running turn is durable follow-up work.
+    let (s, v) = finish(&e, &iid).await;
     assert_eq!(s, 200, "{v}");
+    assert_eq!(v["item"]["lifecycle"]["phase"], "closed");
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
             "Finishing the item cancels its running session; the running turn is cancelled: {} {}",
@@ -446,16 +453,6 @@ async fn pause_finish_drop_and_new_cycles() {
         e.session(&sid).await["busy"] == false
     })
     .await;
-    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
-        format!(
-            "The finished item closes once its runtime turn has stopped; closed once the turn stopped: {}",
-            lifecycle(&e, &iid).await
-        )
-    });
-    eventually(diagnostic, || async {
-        lifecycle(&e, &iid).await["phase"] == "closed"
-    })
-    .await;
     let l = lifecycle(&e, &iid).await;
     assert_eq!(
         (
@@ -463,22 +460,12 @@ async fn pause_finish_drop_and_new_cycles() {
             l["acceptance"].as_str(),
             l["cycle"].as_i64()
         ),
-        (Some("completed"), Some("human"), Some(1)),
+        (Some("completed"), Some("owner"), Some(1)),
         "{l}"
     );
     let (_, v) = e.call("GET", &format!("/api/items/{iid}"), None).await;
-    assert_eq!(
-        (v["status"].as_str(), v["now"].as_str()),
-        (Some("done"), Some("你标记了完成"))
-    );
+    assert_eq!(v["outcome"], "completed");
     assert_eq!(v["cycles"].as_array().map(Vec::len), Some(1), "{v}");
-    // the derived state rides along read-only (#327)
-    assert_eq!(
-        v["derived_state"]["lane"].as_str(),
-        Some("done"),
-        "{}",
-        v["derived_state"]
-    );
     let (_, state) = e
         .call("GET", &format!("/api/views?kind=item&ids={iid}"), None)
         .await;
@@ -486,13 +473,10 @@ async fn pause_finish_drop_and_new_cycles() {
         .as_array()
         .and_then(|xs| xs.iter().find(|x| x["id"] == iid.as_str()))
         .expect("item in state");
-    assert_eq!(row["phase"], "closed", "{row}");
+    assert_eq!(row["state"]["kind"], "closed", "{row}");
 
-    // a closed cycle: no second finish, no undo, no resume, no message, no supplement
-    for a in ["finish", "unfinish", "resume"] {
-        let (s, v) = act(&e, &iid, a).await;
-        assert_eq!(s, 409, "{a} on a closed item: {v}");
-    }
+    assert_eq!(finish(&e, &iid).await.0, 409);
+    assert_eq!(act(&e, &iid, "resume").await.0, 409);
     let (s, v) = e
         .call(
             "POST",
@@ -536,7 +520,7 @@ async fn pause_finish_drop_and_new_cycles() {
         (
             l["phase"].as_str(),
             l["cycle"].as_i64(),
-            l["revision"].as_i64()
+            l["delivery_revision"].as_i64()
         ),
         (Some("ready"), Some(2), Some(0)),
         "{v}"
@@ -545,31 +529,32 @@ async fn pause_finish_drop_and_new_cycles() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(e.prompts_in(Some(&agent)).1, n);
 
-    // pause and resume keep the phase
+    // Pause and resume transition the item phase.
     let (s, v) = act(&e, &iid, "pause").await;
-    assert_eq!((s, v["status"].as_str()), (200, Some("pause")), "{v}");
+    assert_eq!((s, v["phase"].as_str()), (200, Some("paused")), "{v}");
     let (s, _) = act(&e, &iid, "resume").await;
     assert_eq!(s, 200);
     // no timing here: a rejected or phase-keeping command leaves it ready at once; the whole lifecycle
     // is printed if not, to see what moved it
     let l = lifecycle(&e, &iid).await;
-    assert_eq!(l["phase"], "ready", "{l}");
+    assert_eq!(l["phase"], "active", "{l}");
 
     // fail needs a reason; drop is a cancel: nothing runs, it closes at once
     let (s, v) = command(
         &e,
         &iid,
-        json!({"command": "fail", "expected_cycle": 2, "expected_revision": 0}),
+        json!({"command": "fail", "expected_cycle": 2, "expected_revision": l["revision"]}),
     )
     .await;
     assert_eq!(s, 400, "{v}");
     let l = lifecycle(&e, &iid).await;
-    assert_eq!(l["phase"], "ready", "{l}");
+    assert_eq!(l["phase"], "active", "{l}");
     let (s, v) = act(&e, &iid, "drop").await;
     /* dropped at once, or (a turn still winding down under load) closing as a cancel */
     assert_eq!(s, 200, "{v}");
     assert!(
-        v["status"] == "drop" || (v["phase"] == "closing" && v["closing"]["kind"] == "cancel"),
+        v["outcome"] == "cancelled"
+            || (v["phase"] == "closing" && v["closing"]["kind"] == "cancel"),
         "{v}"
     );
     // it closes once nothing of it runs (a turn still winding down under load is waited for)
@@ -589,14 +574,14 @@ async fn pause_finish_drop_and_new_cycles() {
         (Some("closed"), Some("cancelled")),
         "{l}"
     );
-    let (s, v) = act(&e, &iid, "finish").await;
+    let (s, v) = finish(&e, &iid).await;
     assert_eq!(s, 409, "a dropped item can't be marked done: {v}");
 
     // reopen is a new cycle with a goal from the same rules; the earlier cycles stay as they closed
     let (s, v) = command(
         &e,
         &iid,
-        json!({"command": "new_cycle", "expected_cycle": 2, "expected_revision": 0, "goal": "再做一次"}),
+        json!({"command": "new_cycle", "expected_cycle": 2, "expected_revision": l["revision"], "goal": "再做一次"}),
     )
     .await;
     assert_eq!(s, 200, "{v}");
@@ -882,141 +867,6 @@ fn rand_suffix() -> String {
     )
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_failing_derived_state_never_breaks_the_item_page() {
-    let e = start().await;
-    let sid = item(&e, "@say ready").await;
-    eventually("the setup turn is settled", || async {
-        e.session(&sid).await["busy"] == false
-    })
-    .await;
-    let iid = item_of(&e, &sid).await;
-    let (s, v) = e.call("GET", &format!("/api/items/{iid}"), None).await;
-    assert_eq!(s, 200, "{v}");
-    assert!(
-        v["derived_state"].is_object(),
-        "the derived state rides along: {v}"
-    );
-    // the shadow state cannot be computed (a table it reads is gone): the page leaves it out
-    steve_store::testkit::hub::api::remove_work_policy(&e.db).unwrap();
-    let (s, v) = e.call("GET", &format!("/api/items/{iid}"), None).await;
-    assert_eq!(s, 200, "the item page stays up: {v}");
-    assert!(v.get("derived_state").is_none(), "{v}");
-    assert_eq!(v["id"], iid.as_str(), "{v}");
-    assert!(v["lifecycle"].is_object(), "{v}");
-}
-
-/// A project's completion rule (`done_when`) is set through the API: only that part of its release
-/// settings (the command stays as set up), only to `merge` or `tag` (or cleared), and only where a
-/// release is set up at all.
-#[tokio::test]
-async fn a_projects_completion_rule_is_set_through_the_api() {
-    let e = start().await;
-    let dir = e._home.path().join("proj-done-when");
-    std::fs::create_dir_all(&dir).unwrap();
-    let (s, p) = e
-        .call(
-            "POST",
-            "/api/projects",
-            Some(json!({"name": "rel", "path": dir})),
-        )
-        .await;
-    assert_eq!(s, 200, "{p}");
-    let pid = p["id"].as_str().unwrap().to_string();
-    let path = format!("/api/projects/{pid}");
-    let patch = |v: Value| e.call("PATCH", &path, Some(v));
-    // no release set up: nothing to say when it is finished
-    let (s, v) = patch(json!({"done_when": "tag"})).await;
-    assert_eq!(s, 400, "{v}");
-    let store = steve_store::Store::open(
-        e._home.path().join("steve/data/steve.sqlite3"),
-        steve_store::NoPublisher,
-    )
-    .unwrap();
-    store
-        .projects()
-        .patch(
-            &pid,
-            &steve_store::ProjectPatch {
-                release: Some(Some(steve_store::Release {
-                    kind: "script".into(),
-                    cmd: "/bin/true".into(),
-                    done_when: None,
-                })),
-                ..Default::default()
-            },
-            "test",
-        )
-        .unwrap();
-    let (s, v) = patch(json!({"done_when": "tag"})).await;
-    assert_eq!(s, 200, "{v}");
-    let rel = store
-        .projects()
-        .get(&pid)
-        .unwrap()
-        .unwrap()
-        .release
-        .unwrap();
-    assert_eq!(
-        (rel.cmd.as_str(), rel.done_when.as_deref()),
-        ("/bin/true", Some("tag"))
-    );
-    let (s, _) = patch(json!({"done_when": "deployed"})).await;
-    assert_eq!(s, 400, "only merge or tag");
-    let (s, _) = patch(json!({"done_when": null})).await;
-    assert_eq!(s, 200);
-    let rel = store
-        .projects()
-        .get(&pid)
-        .unwrap()
-        .unwrap()
-        .release
-        .unwrap();
-    assert_eq!((rel.cmd.as_str(), rel.done_when), ("/bin/true", None));
-}
-
-#[tokio::test]
-async fn git_project_without_script_can_configure_done_when_on_create_and_patch() {
-    let e = start().await;
-    let dir = e._home.path().join("git-done-when");
-    std::fs::create_dir_all(dir.join(".git")).unwrap();
-    let (s, p) = e
-        .call(
-            "POST",
-            "/api/projects",
-            Some(json!({"name": "git-rel", "path": dir, "done_when": "merge"})),
-        )
-        .await;
-    assert_eq!(s, 200, "{p}");
-    assert_eq!(p["release"]["done_when"], "merge");
-    let pid = p["id"].as_str().unwrap().to_string();
-    let path = format!("/api/projects/{pid}");
-
-    // Clearing done_when when cmd is empty resets release to null (local acceptance only).
-    let (s, v) = e.call("PATCH", &path, Some(json!({"release": null}))).await;
-    assert_eq!(s, 200, "{v}");
-    assert!(v["release"].is_null(), "{v}");
-
-    // Setting done_when via either `release` object or `done_when` works even when release was null.
-    let (s, v) = e
-        .call(
-            "PATCH",
-            &path,
-            Some(json!({"release": {"kind": "script", "cmd": "", "done_when": "tag"}})),
-        )
-        .await;
-    assert_eq!(s, 200, "{v}");
-    assert_eq!(v["release"]["done_when"], "tag");
-
-    let (s, v) = e
-        .call("PATCH", &path, Some(json!({"done_when": null})))
-        .await;
-    assert_eq!(s, 200, "{v}");
-    assert!(v["release"].is_null(), "{v}");
-}
-
-/// Q1: the design gate is off on a new item; only the instance's owner switches it, through its own
-/// route. The item's general patch does not carry it, and a member is refused.
 #[tokio::test(flavor = "multi_thread")]
 async fn only_the_owner_switches_the_design_gate() {
     let e = start().await;

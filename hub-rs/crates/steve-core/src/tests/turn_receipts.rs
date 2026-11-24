@@ -59,7 +59,8 @@ fn provider_failure_after_receipt(stop: &str) {
                 .decisions_of_item(&id)
                 .unwrap()
                 .iter()
-                .filter(|d| d.status == "open" && d.kind == if deliver { "accept" } else { "ask" })
+                .filter(|d| d.status == steve_types::DecisionStatus::Open
+                    && d.kind == if deliver { "accept" } else { "ask" })
                 .count(),
             1
         );
@@ -121,7 +122,7 @@ fn a_persisted_question_survives_restart_before_turn_end_and_replay() {
             .decisions_of_item(&id)
             .unwrap()
             .iter()
-            .filter(|d| d.status == "open")
+            .filter(|d| d.status == steve_types::DecisionStatus::Open)
             .count(),
         1
     );
@@ -153,16 +154,13 @@ fn delivery_and_end_in_either_order_keep_only_the_acceptance_after_restart() {
         core.check_stalls().unwrap();
         assert!(k.open_fails(&id).is_empty());
         let item = core.store().item(&id).unwrap().unwrap();
-        assert_eq!(
-            (item.phase.as_str(), item.now.as_str()),
-            ("closing", "交付了，等你验收")
-        );
+        assert_eq!(item.phase, steve_types::ItemPhase::Closing);
         assert_eq!(
             k.db()
                 .decisions_of_item(&id)
                 .unwrap()
                 .iter()
-                .filter(|d| d.kind == "accept" && d.status == "open")
+                .filter(|d| d.kind == "accept" && d.status == steve_types::DecisionStatus::Open)
                 .count(),
             1
         );
@@ -194,7 +192,7 @@ fn accepted_delivery_waiting_on_pr_closeout_is_not_idle_after_restart() {
     // A deterministic pending closeout gate; no Git host or publishing action runs here.
     k.core
         .tx()
-        .lc_op_add(
+        .record_item_operation(
             &i,
             "fixture.pr",
             None,
@@ -209,7 +207,7 @@ fn accepted_delivery_waiting_on_pr_closeout_is_not_idle_after_restart() {
         .decisions_of_item(&id)
         .unwrap()
         .into_iter()
-        .find(|d| d.kind == "accept" && d.status == "open")
+        .find(|d| d.kind == "accept" && d.status == steve_types::DecisionStatus::Open)
         .unwrap();
     k.core.resolve(&accept.id, "pass", "", "me").unwrap();
     let a = detach(&k, &s);
@@ -217,10 +215,10 @@ fn accepted_delivery_waiting_on_pr_closeout_is_not_idle_after_restart() {
     end(&core, &s, &a);
     core.check_stalls().unwrap();
     let i = core.store().item(&id).unwrap().unwrap();
-    assert_eq!(i.phase, "closing");
-    assert_eq!(i.now, "已验收，正在结束");
+    assert_eq!(i.phase.as_str(), "closing");
+    assert_eq!(i.phase, steve_types::ItemPhase::Closing);
     // The accepted-state line and the pending closeout gate are separate public fields.
-    let view = core.tx().lc_view(&i).unwrap();
+    let view = crate::cycle::lifecycle_view(&core.tx(), &i).unwrap();
     assert_eq!(view["closing"]["accepted"], true);
     assert!(
         view["closing"]["waiting"]
@@ -245,7 +243,7 @@ fn accepted_delivery_waiting_on_pr_closeout_is_not_idle_after_restart() {
             .iter()
             .any(|o| o.kind == "fixture.pr" && o.status == "pending" && o.label == "等待 PR 检查")
     );
-    assert_eq!(core.tx().work_to_continue(&i).unwrap().code(), "queued");
+    assert!(core.tx().turn_has_wait(&i, false).unwrap());
     assert!(k.open_fails(&id).is_empty());
 }
 
@@ -455,7 +453,7 @@ fn restart_tidy_expires_only_no_receipt_cards_and_preserves_real_errors() {
             .decisions_of_item(&id)
             .unwrap()
             .iter()
-            .filter(|d| d.kind == "ask" && d.status == "open")
+            .filter(|d| d.kind == "ask" && d.status == steve_types::DecisionStatus::Open)
             .count(),
         1
     );
@@ -492,5 +490,5 @@ fn failed_automatic_acceptance_does_not_dispatch_an_uncommitted_hook() {
     // Observe the dispatch boundary while locked, before Drop could send acceptance to a module.
     assert!(tx.st.hooks.is_empty());
     assert!(tx.st.cancels.is_empty());
-    assert_eq!(tx.item(&id).unwrap().phase, "active");
+    assert_eq!(tx.item(&id).unwrap().phase.as_str(), "active");
 }

@@ -95,7 +95,7 @@ pub struct SummaryFacts {
     pub devices_total: usize,
 }
 
-pub type ItemExtras = steve_store::state_batches::ItemExtras<steve_core::pull::Closeout>;
+pub type ItemExtras = steve_store::state_batches::ItemExtras;
 
 /// Per-bot extras of `botOut` and `allBots` for one workspace.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -112,9 +112,6 @@ pub struct BotExtras {
 /// shows which ones are still missing.
 #[allow(unused_variables)]
 pub trait Repo {
-    fn item_closeout(&self, id: &str) -> BResult<Option<steve_core::pull::Closeout>> {
-        Ok(None)
-    }
     fn bot_extras(&self) -> BResult<Option<BotExtras>> {
         Ok(None)
     }
@@ -491,9 +488,6 @@ pub trait Repo {
     }
 
     // ── decisions, messages, devices ──
-    fn decision_get(&self, id: &str) -> BResult<Option<Obj>> {
-        todo_backend!("decision_get")
-    }
     fn decisions_of_item(&self, item: &str) -> BResult<Vec<Obj>> {
         todo_backend!("decisions_of_item")
     }
@@ -751,11 +745,6 @@ pub trait Domain: Send + Sync + 'static {
     async fn lifecycle_view(&self, id: &str) -> BResult<Option<Value>> {
         Ok(None)
     }
-    /// The derived state of one item; `None` without a domain
-    /// that derives it, or for a conversation item. Read-only.
-    async fn derived_state(&self, id: &str) -> BResult<Option<Value>> {
-        Ok(None)
-    }
     /// Read-only diagnostic projection; authorization is performed by the caller.
     async fn diagnostic_snapshot(&self, id: &str) -> BResult<Value> {
         todo_backend!("diagnostic_snapshot")
@@ -840,15 +829,14 @@ pub trait Domain: Send + Sync + 'static {
     }
 
     // ── decisions ──
-    async fn resolve(&self, id: &str, choice: &str, text: &str, actor: &str) -> BResult<Obj> {
-        todo_backend!("resolve")
-    }
-    async fn undo_decision(&self, id: &str, actor: &str) -> BResult<Obj> {
-        todo_backend!("undo_decision")
-    }
-    /// orchestrator `dismissDecision` (withdraw an open decision).
-    async fn dismiss_decision(&self, id: &str, actor: &str) -> BResult<Obj> {
-        todo_backend!("dismiss_decision")
+    async fn settle_decision(
+        &self,
+        caller: steve_modules::Caller,
+        id: String,
+        revision: Option<i64>,
+        command: steve_core::DecisionCommand,
+    ) -> BResult<Obj> {
+        todo_backend!("settle_decision")
     }
 
     // ── release hand-off and housekeeping ──

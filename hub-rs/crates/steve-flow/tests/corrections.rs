@@ -195,7 +195,7 @@ async fn corrections_stack_and_scope_one_uses_the_thread() {
     let open = fixtures::decisions_for(e.env.store(), "signal", &m3)
         .unwrap()
         .iter()
-        .filter(|d| d.status == "open")
+        .filter(|d| d.status == steve_types::DecisionStatus::Open)
         .count();
     assert_eq!(open, 1);
 }

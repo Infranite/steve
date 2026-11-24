@@ -361,9 +361,11 @@ pub struct EffectRow {
     pub next_at: Option<i64>,
     pub last_error: Option<String>,
     pub result: Value,
+    pub item_cycle: Option<i64>,
+    pub item_scope: Option<i64>,
 }
 
-const EFFECT_COLS: [&str; 9] = [
+const EFFECT_COLS: [&str; 11] = [
     "id",
     "workspace_id",
     "decision_id",
@@ -373,6 +375,8 @@ const EFFECT_COLS: [&str; 9] = [
     "next_at",
     "last_error",
     "result",
+    "item_cycle",
+    "item_scope",
 ];
 
 fn effect_row(r: &Row<'_>) -> Result<EffectRow> {
@@ -386,6 +390,8 @@ fn effect_row(r: &Row<'_>) -> Result<EffectRow> {
         next_at: r.get(6)?,
         last_error: r.get(7)?,
         result: serde_json::from_str(&r.get::<String>(8)?).unwrap_or(Value::Null),
+        item_cycle: r.get(9)?,
+        item_scope: r.get(10)?,
     })
 }
 
@@ -484,18 +490,6 @@ pub fn update_repo(c: &mut W<'_>, r: &RepoRow) -> Result<()> {
             .value("revision", r.revision)
             .value("updated", r.updated)
             .and_where(Expr::col("id").eq(r.id.as_str())),
-    )?;
-    Ok(())
-}
-
-/// Records the repo's visibility as GitHub last said it.
-pub fn set_private(c: &mut W<'_>, id: &str, private: bool, now: i64) -> Result<()> {
-    c.exec(
-        Query::update()
-            .table("gh_repos")
-            .value("private", private as i64)
-            .value("updated", now)
-            .and_where(Expr::col("id").eq(id)),
     )?;
     Ok(())
 }
@@ -967,6 +961,15 @@ pub fn issues_of_item(c: &mut impl Read, ws: &str, item: &str) -> Result<Vec<Iss
 
 /// A pending effect for `decision`, once (an answer given twice is still one write).
 pub fn insert_effect(c: &mut W<'_>, ws: &str, decision: &str, kind: &str, now: i64) -> Result<()> {
+    let item = crate::decision_repo::get(c, decision)?.and_then(|d| d.item_id);
+    let scope = match item.as_deref().filter(|_| matches!(kind, "open" | "merge")) {
+        Some(item) => Some((
+            crate::item_repo::open_cycle(c, ws, item)?
+                .ok_or_else(|| crate::StoreError::Conflict("item cycle is closed".into()))?,
+            crate::item_delivery::scope(c, item)?,
+        )),
+        None => None,
+    };
     c.exec(
         Query::insert()
             .into_table("gh_effects")
@@ -979,6 +982,8 @@ pub fn insert_effect(c: &mut W<'_>, ws: &str, decision: &str, kind: &str, now: i
                 "next_at",
                 "created",
                 "updated",
+                "item_cycle",
+                "item_scope",
             ])
             .values_panic([
                 Expr::val(crate::uid("ghe")),
@@ -989,6 +994,8 @@ pub fn insert_effect(c: &mut W<'_>, ws: &str, decision: &str, kind: &str, now: i
                 Expr::val(now),
                 Expr::val(now),
                 Expr::val(now),
+                Expr::val(scope.map(|(cycle, _)| cycle)),
+                Expr::val(scope.map(|(_, scope)| scope)),
             ])
             .on_conflict(OnConflict::columns(["decision_id"]).do_nothing().to_owned()),
     )?;

@@ -3,10 +3,11 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use steve_store::{Store, Views};
-use steve_types::{Op, PageOf, PatchOp, Rev, SnapshotViews, View, ViewKind};
+use steve_types::{DecisionTier, Op, PageOf, PatchOp, Rev, SnapshotViews, View, ViewKind};
 use tokio::sync::{mpsc, oneshot};
 
 use super::kinds::{self, meters};
@@ -431,6 +432,7 @@ impl Run {
     }
 
     pub(super) fn gauges(&self) {
+        let mut tiers = [0; 3];
         for k in ViewKind::ALL {
             let (mut n, mut bytes) = (0usize, 0usize);
             for w in self.ws.values() {
@@ -438,12 +440,28 @@ impl Run {
                     if *kind == k {
                         n += 1;
                         bytes += e.bytes;
+                        if let View::Decision(d) = &e.view {
+                            let tier = match d.tier {
+                                DecisionTier::Decide => 0,
+                                DecisionTier::Draft => 1,
+                                DecisionTier::Folded => 2,
+                            };
+                            tiers[tier] += 1;
+                        }
                     }
                 }
             }
             let m = meters(k);
             m.entities.set(n as f64);
             m.bytes.set(bytes as f64);
+        }
+        static DECISION_TIERS: OnceLock<[metrics::Gauge; 3]> = OnceLock::new();
+        let gauges = DECISION_TIERS.get_or_init(|| {
+            ["decide", "draft", "folded"]
+                .map(|tier| metrics::gauge!("steve_decision_open", "tier" => tier))
+        });
+        for (n, gauge) in tiers.into_iter().zip(gauges) {
+            gauge.set(n as f64);
         }
     }
 }

@@ -543,7 +543,7 @@ pub fn set_state(
         return Err(StoreError::Hook("invalid todo state or handoff".into()));
     }
     if let Some(item) = item {
-        if ItemReads(tx).status(ws, item)?.is_none() {
+        if ItemReads(tx).item_outcome_or_phase(ws, item)?.is_none() {
             return Err(StoreError::Hook("unknown todo handoff item".into()));
         }
         if Todos(tx)
@@ -645,7 +645,7 @@ pub fn link_item(tx: &mut W<'_>, ws: &str, goal: &str, item: &str, on: bool) -> 
     {
         return Err(bad("not_goal"));
     }
-    if ItemReads(tx).status(ws, item)?.is_none() {
+    if ItemReads(tx).item_outcome_or_phase(ws, item)?.is_none() {
         return Err(bad("item"));
     }
     let (s, o) = (ObjRef::new("item", item), ObjRef::new("todo", goal));
@@ -686,10 +686,10 @@ pub fn linked_items(c: &mut impl Read, ws: &str, goal: &str) -> Result<Vec<Strin
 
 /// What an item's status counts as in a goal's progress.
 fn item_state(c: &mut impl Read, ws: &str, item: &str) -> Result<Option<&'static str>> {
-    let status = ItemReads(c).status(ws, item)?;
+    let status = ItemReads(c).item_outcome_or_phase(ws, item)?;
     Ok(status.map(|s| match s.as_str() {
-        "done" => "done",
-        "drop" => "dropped",
+        "completed" => "done",
+        "cancelled" => "dropped",
         _ => "open",
     }))
 }

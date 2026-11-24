@@ -1209,7 +1209,12 @@ async fn outside_mcp_creation_persists_prerequisites_without_starting_a_session(
         .into_iter()
         .find(|i| i.title == "MCP dependent")
         .unwrap();
-    assert_eq!(item.status, "block");
+    assert!(
+        st.dependency_waits()
+            .get(&item.id)
+            .unwrap()
+            .is_some_and(|wait| wait.state == "waiting")
+    );
     assert_eq!(st.deps().of(&item.id).unwrap(), [dep.id]);
     assert!(st.sessions().of_item(&item.id).unwrap().is_empty());
     assert!(
@@ -1217,7 +1222,7 @@ async fn outside_mcp_creation_persists_prerequisites_without_starting_a_session(
             .of_item(&item.id)
             .unwrap()
             .iter()
-            .all(|d| d.status != "open")
+            .all(|d| d.status != steve_types::DecisionStatus::Open)
     );
 }
 

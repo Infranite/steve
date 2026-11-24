@@ -316,7 +316,7 @@ async fn work_from_a_chat_becomes_an_item_only_when_the_host_allows_it() {
         .of_item(&id)
         .unwrap()
         .into_iter()
-        .filter(|d| d.kind == "propose" && d.status == "open")
+        .filter(|d| d.kind == "propose" && d.status == steve_types::DecisionStatus::Open)
         .collect();
     assert_eq!(open.len(), 1, "a card asks you first");
     // your yes, however much was said since, starts it with what it would have started with: the

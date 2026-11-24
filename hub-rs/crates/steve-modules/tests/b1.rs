@@ -7,8 +7,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use steve_modules::context::{ChatCtx, ChatDone, Cite, PromptContext};
-use steve_modules::decisions::{DecisionCx, DecisionHandler};
-use steve_modules::hooks::{ItemHooks, Takeover};
+use steve_modules::decisions::{DecisionCx, DecisionHandler, DecisionOutcome};
+use steve_modules::hooks::ItemHooks;
 use steve_modules::outbound::{
     self, Audience, CheckCx, CheckResult, KnowledgeUse, OutboundCheck, Verdict,
 };
@@ -62,7 +62,6 @@ fn item(t: &TestEnv) -> Item {
 
 struct Hook {
     name: &'static str,
-    take: bool,
     log: Log,
 }
 
@@ -77,13 +76,6 @@ impl ItemHooks for Hook {
             .unwrap()
             .push(format!("{} created {}", self.name, i.id));
     }
-    async fn on_accepted(&self, _: &Item) -> Option<Takeover> {
-        self.log
-            .lock()
-            .unwrap()
-            .push(format!("{} accepted", self.name));
-        self.take.then_some(Takeover { by: self.name })
-    }
     async fn on_finished(&self, _: &Item) {
         self.log
             .lock()
@@ -93,27 +85,25 @@ impl ItemHooks for Hook {
     // on_dropped: default no-op
 }
 
-fn hook(name: &'static str, take: bool, log: &Log) -> Box<Hook> {
+fn hook(name: &'static str, log: &Log) -> Box<Hook> {
     Box::new(Hook {
         name,
-        take,
         log: log.clone(),
     })
 }
 
 #[tokio::test]
-async fn item_hooks_run_in_order_and_only_the_first_takeover_counts() {
+async fn item_observers_run_in_order() {
     let log = Log::default();
     let l = log.clone();
     let t = TestEnv::new(move |r| {
-        r.item_hooks(hook("a", false, &l))
-            .item_hooks(hook("b", true, &l))
-            .item_hooks(hook("c", true, &l));
+        r.item_hooks(hook("a", &l))
+            .item_hooks(hook("b", &l))
+            .item_hooks(hook("c", &l));
     });
     let i = item(&t);
     let hooks = t.modules.registry.hooks();
     hooks.created(&i).await;
-    assert_eq!(hooks.accepted(&i).await, Some(Takeover { by: "b" }));
     hooks.finished(&i).await;
     hooks.dropped(&i).await;
     assert_eq!(
@@ -122,8 +112,6 @@ async fn item_hooks_run_in_order_and_only_the_first_takeover_counts() {
             format!("a created {}", i.id),
             format!("b created {}", i.id),
             format!("c created {}", i.id),
-            "a accepted".into(),
-            "b accepted".into(), // c is never asked
             "a finished".into(),
             "b finished".into(),
             "c finished".into(),
@@ -138,7 +126,6 @@ async fn nothing_registered_is_a_no_op() {
     let r = &t.modules.registry;
     assert!(r.hooks().is_empty());
     r.hooks().created(&i).await;
-    assert_eq!(r.hooks().accepted(&i).await, None);
     r.hooks().finished(&i).await;
     r.hooks().dropped(&i).await;
     assert_eq!(r.contexts().session(t.store(), WS, &i), "");
@@ -182,8 +169,7 @@ async fn nothing_registered_is_a_no_op() {
 fn hooks_with_the_same_name_panic() {
     let log = Log::default();
     let mut r = Registry::new();
-    r.item_hooks(hook("a", false, &log))
-        .item_hooks(hook("a", false, &log));
+    r.item_hooks(hook("a", &log)).item_hooks(hook("a", &log));
 }
 
 struct Ctx(&'static str);
@@ -460,8 +446,8 @@ async fn the_registered_outbound_check_is_used() {
 struct Undo(Log, bool);
 
 impl DecisionHandler for Undo {
-    fn resolve(&self, _: &mut W<'_>, cx: &DecisionCx, _: &Decision) -> ApiResult<Value> {
-        Ok(json!({"choice": cx.choice}))
+    fn resolve(&self, _: &mut W<'_>, cx: &DecisionCx, _: &Decision) -> ApiResult<DecisionOutcome> {
+        Ok(json!({"choice": cx.choice}).into())
     }
     fn before_undo(&self, _: &mut W<'_>, d: &Decision) -> ApiResult<()> {
         self.0.lock().unwrap().push(d.id.clone());

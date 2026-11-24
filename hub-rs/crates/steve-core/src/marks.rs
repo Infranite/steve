@@ -97,22 +97,6 @@ impl Tx<'_> {
         );
     }
 
-    /// `pr` ([`crate::pull::MARK_PR`]): a pull request left to you to merge (`awaiting`) or merged
-    /// (`merged`), with the review its change had in `detail.review` (`graph`, `you`, `none`).
-    pub(crate) fn mark_pr(&self, ws: &str, item_id: &str, to: &str, detail: Value) {
-        self.stats_mark(
-            ws,
-            item_id,
-            NewMark {
-                kind: crate::pull::MARK_PR.into(),
-                to_v: Some(to.into()),
-                actor: "steve".into(),
-                detail,
-                ..Default::default()
-            },
-        );
-    }
-
     /// `invalidate`: a closing was void; the reason code ([`crate::cycle::void`]), its text in `detail.why`.
     pub(crate) fn mark_invalidate(&self, ws: &str, item_id: &str, code: &str, why: &str) {
         self.stats_mark(
@@ -138,22 +122,6 @@ impl Tx<'_> {
                 to_v: Some(code.into()),
                 actor: actor.into(),
                 detail: json!({ "why": why }),
-                ..Default::default()
-            },
-        );
-    }
-
-    /// `merge`: the item's pull request was seen merged (its address in `ref`).
-    pub(crate) fn mark_merge(&self, ws: &str, item_id: &str, url: &str, number: u64) {
-        self.stats_mark(
-            ws,
-            item_id,
-            NewMark {
-                kind: "merge".into(),
-                to_v: Some("merged".into()),
-                actor: "steve".into(),
-                r#ref: Some(url.into()),
-                detail: json!({ "pr": number }),
                 ..Default::default()
             },
         );

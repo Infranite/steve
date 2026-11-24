@@ -149,7 +149,7 @@ pub(crate) fn decision_event(d: &crate::Decision, operation: &str, from: Option<
         reason_code: format!("decision_{operation}"),
         details: Details {
             from_state: from.map(str::to_owned),
-            to_state: Some(d.status.clone()),
+            to_state: Some(d.status.to_string()),
             ..Default::default()
         },
         ..Default::default()
@@ -414,8 +414,8 @@ impl Diagnostics<'_> {
         self.snapshot(|tx, counters| {
             own(tx, ws, item)?;
             let at = now();
-            let item_view = tx.query_row("SELECT id,status,phase,cycle,revision FROM items WHERE id=?",[item],|r| {
-                Ok(json!({"id":r.get::<_,String>(0)?,"status":r.get::<_,String>(1)?,"phase":r.get::<_,String>(2)?,"cycle":r.get::<_,i64>(3)?,"revision":r.get::<_,i64>(4)?}))
+            let item_view = tx.query_row("SELECT id,phase,cycle,cas_revision,revision FROM items WHERE id=?",[item],|r| {
+                Ok(json!({"id":r.get::<_,String>(0)?,"phase":r.get::<_,String>(1)?,"cycle":r.get::<_,i64>(2)?,"revision":r.get::<_,i64>(3)?,"delivery_revision":r.get::<_,i64>(4)?}))
             })?;
             let mut st = tx.prepare("SELECT id,status,harness,created,updated FROM sessions WHERE item_id=? AND workspace_id=? ORDER BY no DESC,created DESC LIMIT 100")?;
             let sessions = st.query_map(params![item,ws],|r| Ok(json!({"id":r.get::<_,String>(0)?,"status":r.get::<_,String>(1)?,"harness":r.get::<_,String>(2)?,"created":r.get::<_,i64>(3)?,"updated":r.get::<_,i64>(4)?})))?.collect::<std::result::Result<Vec<_>,_>>()?;
@@ -773,7 +773,7 @@ mod tests {
             let c = Connection::open_in_memory().unwrap();
             crate::db::migrate(&c).unwrap();
             c.pragma_update(None, "foreign_keys", false).unwrap();
-            c.execute_batch("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('i','default',1,'I','run','',0,0);").unwrap();
+            c.execute_batch("INSERT INTO items(id, workspace_id, no, title, phase, created, updated) VALUES ('i','default',1,'I','active',0,0);").unwrap();
             c.execute(
                 "INSERT INTO diagnostic_item_stats(item_id,bytes) VALUES('i',?)",
                 [if global { 0 } else { MAX_ITEM_BYTES }],
@@ -854,7 +854,7 @@ mod tests {
         let c = Connection::open_in_memory().unwrap();
         crate::db::migrate(&c).unwrap();
         c.pragma_update(None, "foreign_keys", false).unwrap();
-        c.execute_batch("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('i','default',1,'I','run','',0,0);").unwrap();
+        c.execute_batch("INSERT INTO items(id, workspace_id, no, title, phase, created, updated) VALUES ('i','default',1,'I','active',0,0);").unwrap();
         let insert = |item: &str| {
             c.execute("INSERT INTO diagnostic_events(workspace_id,item_id,at,kind,reason_code,severity,detail,data,bytes)
                 VALUES('default',?,0,'event','old','info',0,'{}',4096)",[item]).unwrap();

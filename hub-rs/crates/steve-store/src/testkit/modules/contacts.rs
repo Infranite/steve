@@ -62,7 +62,7 @@ pub fn seed_unconfirmed_sender(store: &Store) -> Result<()> {
 }
 
 pub fn seed_contact_relations(store: &Store, cid: &str) -> Result<()> {
-    execute(store, &format!("INSERT INTO items (id, workspace_id, no, title, status, stage, created, updated) VALUES ('ST-1', 'default', 1, 't', 'open', 'new', 1, 1);
+    execute(store, &format!("INSERT INTO items(id, workspace_id, no, title, phase, created, updated) VALUES ('ST-1', 'default', 1, 't', 'active', 1, 1);
              INSERT INTO links (workspace_id, subject_type, subject_id, predicate, object_type, object_id, source, created) VALUES ('default', 'item', 'ST-1', 'related', 'party', '{cid}', 'manual', 1);
              INSERT INTO parties (id, workspace_id, type, name, created_by, created, updated) VALUES ('tm_1', 'default', 'team', 'T', 'usr_dev', 1, 1);
              INSERT INTO team_details (party_id, workspace_id, kind) VALUES ('tm_1', 'default', 'virtual');

@@ -769,6 +769,8 @@ fn propose(
         draft: Some(reason.into()),
         options: Some(vec!["merge".into(), "not_same".into()]),
         requested_by: "steve".into(),
+        question_template: None,
+        source: Some(steve_store::DecisionSource::Record),
     })?;
     MergeProposals(w).set_decision(&id, &d.id)?;
     Ok(Some(id))

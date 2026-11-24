@@ -637,7 +637,7 @@ async fn provider_refusals_share_one_turn_and_finish_with_one_service_card() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|d| d["question"] == question)
+            .any(|d| d["question"]["text"] == question)
     );
 }
 

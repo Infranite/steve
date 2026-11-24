@@ -33,7 +33,10 @@ fn item(s: &Store, title: &str, status: &str, source: (&str, &str)) -> String {
                 title: title.into(),
                 goal: title.into(),
                 bot_id: "steve".into(),
-                status: Some(status.into()),
+                phase: Some(match status {
+                    "pause" => steve_types::ItemPhase::Paused,
+                    _ => steve_types::ItemPhase::Active,
+                }),
                 source: Some((source.0.into(), source.1.into())),
                 ..Default::default()
             },

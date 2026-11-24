@@ -53,7 +53,7 @@ HUB_IMPL="" PREV_IMPL="" BACKUP="" SCHEMA_BEFORE="" SCHEMA_AFTER=""
 
 # ── results: last.json (what the Hub reports to the item), web/last.json, history.jsonl ──
 last() { # ok error [pending] [degraded]
-  print -r -- "{\"ok\":$1,\"pending\":${3:-false},\"degraded\":${4:-false},\"kind\":$(js ${KIND:-hub}),\"version\":$(js "$VER"),\"prev\":$(js "$([[ $KIND == web ]] && print -r -- $WEB_PREV || print -r -- $PREV)"),\"web_prev\":$(js "$WEB_PREV"),\"hub_ok\":$(jbool $HUB_OK),\"web_ok\":$(jbool $WEB_OK),\"item\":$(js "$ITEM"),\"branch\":$(js "$BRANCH"),\"commit\":$(js "$COMMIT"),\"error\":$(js "$2"),\"log\":$(js "$LOG"),\"at\":$EPOCHSECONDS}" >$REL/last.json
+  print -r -- "{\"ok\":$1,\"pending\":${3:-false},\"degraded\":${4:-false},\"kind\":$(js ${KIND:-hub}),\"version\":$(js "$VER"),\"prev\":$(js "$([[ $KIND == web ]] && print -r -- $WEB_PREV || print -r -- $PREV)"),\"web_prev\":$(js "$WEB_PREV"),\"hub_ok\":$(jbool $HUB_OK),\"web_ok\":$(jbool $WEB_OK),\"item\":$(js "$ITEM"),\"operation\":$(js "${STEVE_RELEASE_OPERATION:-}"),\"branch\":$(js "$BRANCH"),\"commit\":$(js "$COMMIT"),\"error\":$(js "$2"),\"log\":$(js "$LOG"),\"at\":$EPOCHSECONDS}" >$REL/last.json
 }
 history() { # kind ok error rolled_back started prev files...   (DEGRADED=true: the failed release stays)
   local kind=$1 ok=$2 err=$3 rb=$4 t=$5 prev=$6 hx=""; shift 6

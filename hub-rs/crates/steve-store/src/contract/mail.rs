@@ -303,9 +303,10 @@ pub struct DraftRow {
     pub created: i64,
     pub updated: i64,
     pub sent: Option<i64>,
+    pub delivery_version: Option<steve_types::DeliveryVersion>,
 }
 
-const DRAFT_COLS: [&str; 26] = [
+const DRAFT_COLS: [&str; 27] = [
     "id",
     "workspace_id",
     "connection_id",
@@ -332,6 +333,7 @@ const DRAFT_COLS: [&str; 26] = [
     "created",
     "updated",
     "sent",
+    "delivery_version",
 ];
 
 fn rcpts(s: Option<String>) -> Vec<Rcpt> {
@@ -372,6 +374,10 @@ fn draft_row(r: &Row<'_>) -> Result<DraftRow> {
         created: r.get(23)?,
         updated: r.get(24)?,
         sent: r.get(25)?,
+        delivery_version: r
+            .get::<Option<String>>(26)?
+            .map(|v| serde_json::from_str(&v))
+            .transpose()?,
     })
 }
 
@@ -992,6 +998,11 @@ pub fn insert_draft(tx: &mut W<'_>, d: &DraftRow) -> Result<()> {
                 Expr::val(d.created),
                 Expr::val(d.updated),
                 Expr::val(d.sent),
+                Expr::val(
+                    d.delivery_version
+                        .map(|v| serde_json::to_string(&v))
+                        .transpose()?,
+                ),
             ]),
     )?;
     Ok(())
@@ -1013,6 +1024,12 @@ pub fn update_draft_content(tx: &mut W<'_>, d: &DraftRow, now: i64) -> Result<()
             .value("files", to_json(&d.files))
             .value("content_hash", d.content_hash.as_str())
             .value("basis", d.basis.as_ref().map(Value::to_string))
+            .value(
+                "delivery_version",
+                d.delivery_version
+                    .map(|v| serde_json::to_string(&v))
+                    .transpose()?,
+            )
             .value("updated", now)
             .and_where(Expr::col("id").eq(d.id.as_str())),
     )?;

@@ -236,6 +236,7 @@ struct Gathered {
     author: String,
     connection_id: String,
     thread_subject: String,
+    delivery_version: Option<steve_types::DeliveryVersion>,
 }
 
 impl Mail {
@@ -325,6 +326,10 @@ impl Mail {
                 author,
                 connection_id: thread.connection_id.clone(),
                 thread_subject: thread.subject.clone(),
+                delivery_version: match &q.item_id {
+                    Some(item) => steve_store::item_delivery::open_version(c, &who.ws, item)?,
+                    None => None,
+                },
             })
         })
     }

@@ -43,7 +43,7 @@
 //! operator's cases; see the constants. They are provisional: one day of cases.
 
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::json;
 use steve_store::{Read, W, channel_message_repo::presence as repo};
 
 use crate::ChannelResult;
@@ -564,8 +564,8 @@ pub fn settle(tx: &mut W<'_>, decision: &str, why: &str) -> ChannelResult<bool> 
     Ok(steve_store::DecisionRows(tx).settle(
         decision,
         &json!({ "superseded": why }),
-        "expired",
-        &Value::Null,
+        steve_store::decision_repo::DecisionChange::Expire,
+        None,
     )?)
 }
 

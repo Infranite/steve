@@ -108,6 +108,27 @@ pub struct Sessions<'a>(&'a Store);
 const SESSION: &str = "SELECT * FROM sessions WHERE id = ?";
 
 impl Sessions<'_> {
+    /// The newest logical turn, even if its current attempt already settled.
+    pub fn latest_turn(&self, session: &str) -> Result<Option<String>> {
+        self.0.read_conn(|c| one(
+            c,
+            "SELECT turn_id FROM runtime_turns WHERE session_id=? ORDER BY created DESC,rowid DESC LIMIT 1",
+            [session],
+            |r| r.get(0),
+        ))
+    }
+
+    pub fn turn_of_attempt(&self, attempt: &str) -> Result<Option<String>> {
+        self.0.read_conn(|c| {
+            one(
+                c,
+                "SELECT turn_id FROM runtime_attempts WHERE attempt_id=?",
+                [attempt],
+                |r| r.get(0),
+            )
+        })
+    }
+
     pub fn get(&self, id: &str) -> Result<Option<Session>> {
         self.0
             .read_conn(|c| one(c, SESSION, [id], Session::from_row))
@@ -256,8 +277,8 @@ impl Sessions<'_> {
                 }))?;
             }
             let cards = self.0.read_conn(|c| all(c, "SELECT * FROM decisions WHERE session_id=?", [id], crate::Decision::from_row))?;
-            for d in cards.into_iter().filter(|d| d.status == "open" && d.subject_type == crate::SESSION_START_FAILURE) {
-                self.0.decisions().resolve(&d.id, &serde_json::json!({"superseded":"会话已结束"}), "expired", &Value::Null)?;
+            for d in cards.into_iter().filter(|d| d.status == steve_types::DecisionStatus::Open && d.subject_type == crate::SESSION_START_FAILURE) {
+                self.0.decisions().resolve(&d.id, &serde_json::json!({"superseded":"会话已结束"}), crate::decision_repo::DecisionChange::Expire, None)?;
             }
             Ok(())
         })

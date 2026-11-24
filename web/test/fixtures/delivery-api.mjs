@@ -54,8 +54,8 @@ export async function deliveryFixture() {
     source: ["chat", "chat"], parent: null, created, updated: created, goal: "Stable delivery", goals: 1, tags: [], deps: [], sessionIds: [], open: [], queued: 0, live: false }
   const shell = { version: "fixture", web_version: "fixture", workspace, workspaces: [workspace, otherWorkspace],
     bots: [], allBots: [], projects: [], tags: [], settings: {}, notifySeen: created }
-  const itemView = { id: item.id, ws: workspace.id, no: item.no, title: item.title, status: item.status,
-    phase: "closed", stage: "", cycle: 1, priority: "中", star: false, archived: false, design_gate: false,
+  const itemView = { id: item.id, ws: workspace.id, no: item.no, title: item.title,
+    state: { kind: "closed", outcome: "finished", by: "owner" }, cycle: 1, revision: 1, delivery_revision: 0, delivery: [], waits: [], priority: "中", star: false, archived: false, design_gate: false,
     source: "chat", created, updated: created, goals: 1, tags: [], deps: [], plan_total: 0, plan_done: 0,
     op_blockers: [], active_operations: 0, detail_stamp: 0, has_branch: false }
   const json = (res, value, status = 200) => { res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(value)) }

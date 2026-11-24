@@ -1,19 +1,7 @@
-//! Item lifecycle hooks (B1): modules react to items being created, accepted, finished or dropped
-//! without steve-core knowing them. steve-core calls [`ItemHookList`] at four places (integrator):
-//! `createItem` → [`ItemHookList::created`]; `resolve(accept, pass)` before `finish` →
-//! [`ItemHookList::accepted`]; after `finish` → [`ItemHookList::finished`]; after `drop` →
-//! [`ItemHookList::dropped`]. With nothing registered every call is a no-op.
+//! Module observers for committed item creation, completion and cancellation.
 
 use async_trait::async_trait;
 use steve_store::Item;
-
-/// "I take over the wrap-up": returned from [`ItemHooks::on_accepted`] when a module finishes the item
-/// itself later (GitHub: ask to open a PR first). steve-core then skips its `finish`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Takeover {
-    /// The hook that took over ([`ItemHooks::name`]), for the log.
-    pub by: &'static str,
-}
 
 /// One module's reactions. Every method defaults to doing nothing. Hooks run after the item's own write
 /// has been committed and must not fail the lifecycle step: they log their errors themselves. Long work
@@ -27,12 +15,6 @@ pub trait ItemHooks: Send + Sync {
         let _ = item;
     }
 
-    /// The user accepted the delivery. `Some` = this hook finishes the item itself.
-    async fn on_accepted(&self, item: &Item) -> Option<Takeover> {
-        let _ = item;
-        None
-    }
-
     async fn on_finished(&self, item: &Item) {
         let _ = item;
     }
@@ -43,7 +25,7 @@ pub trait ItemHooks: Send + Sync {
 }
 
 /// Runs one observer: a panic is logged and stops only that hook's call, never the others or the
-/// lifecycle step it observes. (Acceptance is no observer: a consultation that dies is not an answer.)
+/// lifecycle step it observes.
 async fn observe(hook: &str, point: &str, f: impl std::future::Future<Output = ()>) {
     let mut f = std::pin::pin!(f);
     let r = std::future::poll_fn(|cx| {
@@ -81,18 +63,6 @@ impl ItemHookList {
         for h in &self.0 {
             observe(h.name(), "created", h.on_created(item)).await;
         }
-    }
-
-    /// Asks the hooks in order and stops at the first that takes over; later hooks are not asked
-    /// (only one module can own the wrap-up). `None` = steve-core finishes as before.
-    pub async fn accepted(&self, item: &Item) -> Option<Takeover> {
-        for h in &self.0 {
-            if let Some(t) = h.on_accepted(item).await {
-                tracing::info!(item = %item.id, by = t.by, "wrap-up taken over");
-                return Some(t);
-            }
-        }
-        None
     }
 
     pub async fn finished(&self, item: &Item) {

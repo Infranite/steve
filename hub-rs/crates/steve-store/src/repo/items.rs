@@ -1,5 +1,7 @@
 //! Items with their goals, dependencies, timeline and artifacts.
 
+use steve_types::ItemPhase;
+
 use super::Cached;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -26,7 +28,7 @@ impl Store {
     }
 }
 
-/// `items.create` input. Defaults: kind `task`, status `run`, stage `定义`, source `["对话","chat"]`.
+/// Fields supplied when creating an item.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct NewItem {
     pub title: String,
@@ -35,8 +37,7 @@ pub struct NewItem {
     pub bot_id: String,
     pub project_id: Option<String>,
     pub kind: Option<String>,
-    pub status: Option<String>,
-    pub stage: Option<String>,
+    pub phase: Option<ItemPhase>,
     pub source: Option<(String, String)>,
     pub parent: Option<Parent>,
     /// Written in the same transaction; for a task item they must hold exactly one category
@@ -49,17 +50,11 @@ pub struct NewItem {
     pub requested_by: Option<String>,
 }
 
-/// Patchable item fields. Deserializable so a stored decision `undo` (`{status, now, stage}`) can be applied.
+/// Editable item metadata. Cycle changes use the lifecycle repository.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 pub struct ItemPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stage: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub now: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<Vec<PlanStep>>,
     #[serde(
@@ -117,6 +112,16 @@ pub struct Items<'a>(&'a Store);
 const ITEM: &str = "SELECT * FROM items WHERE id = ?";
 
 impl Items<'_> {
+    /// Open items whose active execution may have left a delivery or question receipt.
+    pub fn working_ids(&self) -> Result<Vec<String>> {
+        self.0.read_conn(|c| all(
+            c,
+            "SELECT id FROM items WHERE kind='task' AND phase IN ('active','closing') AND archived=0 ORDER BY rowid",
+            [],
+            |r| r.get(0),
+        ))
+    }
+
     /// Direct descendants only, including archived/failed attempts. Parent links are scoped to
     /// the same workspace, including for old data that predates validation of those links.
     pub fn children(&self, parent: &str) -> Result<Vec<Item>> {
@@ -191,15 +196,14 @@ impl Items<'_> {
             };
             let parent = p.parent.as_ref().map(to_json).transpose()?;
             tx.run(
-                "INSERT INTO items (id, workspace_id, no, kind, title, status, stage, bot_id, project_id, source, parent, created, updated, requested_by) VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO items (id, workspace_id, no, kind, title, phase, bot_id, project_id, source, parent, created, updated, requested_by) VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?)",
                 params![
                     id,
                     ws,
                     no,
                     kind,
                     p.title,
-                    p.status.as_deref().unwrap_or("run"),
-                    p.stage.as_deref().unwrap_or("定义"),
+                    p.phase.unwrap_or_default().as_str(),
                     p.bot_id,
                     p.project_id,
                     source,
@@ -216,7 +220,7 @@ impl Items<'_> {
                     tx, ws, &id, &super::kinds::expected_deliveries(&p.title, &p.goal),
                 )?;
                 // stats: the item's first status
-                status_mark(tx, ws, &id, t, None, p.status.as_deref().unwrap_or("run"))?;
+                mark_phase_change(tx, ws, &id, t, None, p.phase.unwrap_or_default().as_str())?;
             }
             let until = crate::diagnostics::capture_created(tx, ws, &id, t);
             transaction.commit()?;
@@ -696,7 +700,7 @@ pub fn artifact_add_in(
 }
 
 /// The `item_marks` row for a status change; the actor is unknown at this layer (`""`).
-pub(super) fn status_mark(
+pub(super) fn mark_phase_change(
     c: &rusqlite::Connection,
     ws: &str,
     item: &str,
@@ -749,9 +753,6 @@ fn patch_on(c: &rusqlite::Connection, id: &str, p: &ItemPatch) -> Result<bool> {
     };
     let mut s = Sets::default();
     s.val("title", p.title.clone())
-        .val("status", p.status.clone())
-        .val("stage", p.stage.clone())
-        .val("now", p.now.clone())
         .val("plan", plan)
         .null("cwd", p.cwd.clone())
         .null("branch", p.branch.clone())
@@ -766,43 +767,11 @@ fn patch_on(c: &rusqlite::Connection, id: &str, p: &ItemPatch) -> Result<bool> {
     if s.is_empty() {
         return Ok(false);
     }
-    // the lifecycle owns the terminal statuses and what a closed item is: nobody patches those
-    if let Some(st) = p.status.as_deref() {
-        if matches!(st, "done" | "drop" | "fail") {
-            return Err(crate::StoreError::Conflict(steve_i18n::t!(
-                "store.item.end_by_lifecycle",
-                status = st
-            )));
-        }
-        let phase: Option<String> = one(c, "SELECT phase FROM items WHERE id = ?", [id], |r| {
-            r.get(0)
-        })?;
-        if phase.as_deref() == Some("closed") {
-            return Err(crate::StoreError::Conflict(steve_i18n::t!(
-                "store.item.closed"
-            )));
-        }
-    }
-    let before: Option<(String, String, String)> = match &p.status {
-        Some(_) => one(
-            c,
-            "SELECT workspace_id, kind, status FROM items WHERE id = ?",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?,
-        None => None,
-    };
     let t = now();
     c.run(
         &format!("UPDATE items SET {}, updated = ? WHERE id = ?", s.sql()),
         rusqlite::params_from_iter(s.params([t.into(), id.to_string().into()])),
     )?;
-    if let (Some((ws, kind, old)), Some(new)) = (before, p.status.as_deref())
-        && kind == "task"
-        && old != new
-    {
-        status_mark(c, &ws, id, t, Some(&old), new)?;
-    }
     Ok(true)
 }
 
@@ -846,22 +815,86 @@ fn timeline_add(
     Ok(())
 }
 
-/// What the core's lifecycle writes in one step: the phase and its fields, and the legacy projection
-/// (`status`, `stage`, `now`) that follows from them. The only writer of these columns.
+/// The persisted result of an item cycle transition.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct LifecycleWrite {
-    pub phase: String,
+    pub phase: ItemPhase,
     pub cycle: i64,
-    pub revision: i64,
+    pub delivery_revision: i64,
     pub outcome: Option<String>,
     pub acceptance: Option<String>,
-    pub closing: Option<serde_json::Value>,
+    pub closing: Option<steve_types::CloseRequest>,
     pub closed_at: Option<i64>,
     pub closed_reason: Option<String>,
-    /// Legacy projection; `None` leaves the column as it is.
-    pub status: Option<String>,
-    pub stage: Option<String>,
-    pub now: Option<String>,
+}
+
+/// Checks the owner's precondition under the same write lock as the cycle commit.
+pub fn require_item_revision_in(
+    w: &mut crate::W<'_>,
+    id: &str,
+    cycle: i64,
+    revision: i64,
+    phase: ItemPhase,
+) -> Result<()> {
+    let matches: bool = w.conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM items WHERE id=? AND cycle=? AND cas_revision=? AND phase=?)",
+        params![id, cycle, revision, phase.as_str()],
+        |r| r.get(0),
+    )?;
+    if !matches {
+        return Err(crate::StoreError::Conflict("item revision changed".into()));
+    }
+    Ok(())
+}
+
+/// Retires undispatched work with a finished cycle. Keep the person's queued text and files in
+/// dispatch history, and leave already submitted work to its original receipt.
+pub fn finish_item_dispatch_in(w: &mut crate::W<'_>, id: &str, cycle: i64) -> Result<()> {
+    let sessions = all(
+        w.conn,
+        "SELECT id FROM sessions WHERE item_id=?",
+        [id],
+        |r| r.get::<_, String>(0),
+    )?;
+    let at = now();
+    for session in sessions {
+        w.conn.execute(
+            "INSERT INTO session_dispatch (id,session_id,text,via,created,files,state,updated)
+             SELECT id,session_id,text,via,created,files,'cancelled',? FROM queued
+             WHERE session_id=? AND via NOT IN ('steve','resumed:steve')
+             ON CONFLICT(id) DO UPDATE SET state='cancelled',updated=excluded.updated
+             WHERE session_dispatch.state='claimed'",
+            params![at, session],
+        )?;
+        super::sessions::discard_queue_in(w, &session)?;
+        w.conn
+            .execute("DELETE FROM session_resume WHERE session_id=?", [&session])?;
+    }
+    w.conn.execute(
+        "DELETE FROM item_dependency_waits WHERE item_id=? AND cycle=? AND state='waiting'",
+        params![id, cycle],
+    )?;
+    w.conn.execute(
+        "UPDATE item_operations SET status='waived', required=0, updated=?
+         WHERE item_id=? AND cycle=? AND status='pending'",
+        params![at, id, cycle],
+    )?;
+    w.conn.execute(
+        "UPDATE runtime_attempts SET cancel_requested=1,revision=revision+1,updated=?
+         WHERE state<>'finished' AND cancel_requested=0 AND turn_id IN (
+          SELECT t.turn_id FROM runtime_turns t JOIN sessions s ON s.id=t.session_id
+          WHERE s.item_id=?
+         )",
+        params![at, id],
+    )?;
+    w.conn.execute(
+        "UPDATE gh_effects SET state=CASE WHEN state='pending' THEN 'failed' ELSE state END,
+         next_at=NULL,last_error='item cycle closed',updated=?
+         WHERE state IN ('pending','unknown') AND kind IN ('open','merge')
+           AND decision_id IN (SELECT id FROM decisions WHERE item_id=?)",
+        params![at, id],
+    )?;
+    Ok(())
 }
 
 /// Writes one lifecycle step of `id` inside the caller's transaction (stats mark a status change as
@@ -874,14 +907,14 @@ pub fn lifecycle_write_in(
     use crate::contract::Q;
     use sea_query::{Expr, ExprTrait, Query};
 
-    let before: Option<(String, String, String)> = w.one(
+    let before: Option<(String, String, String, Option<String>)> = w.one(
         Query::select()
-            .columns(["workspace_id", "kind", "status"])
+            .columns(["workspace_id", "kind", "phase", "outcome"])
             .from("items")
             .and_where(Expr::col("id").eq(id)),
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
-    let Some((ws, kind, old_status)) = before else {
+    let Some((ws, kind, old_phase, old_outcome)) = before else {
         return Ok(None);
     };
     let closing = step.closing.as_ref().map(to_json).transpose()?;
@@ -892,7 +925,7 @@ pub fn lifecycle_write_in(
         .values([
             ("phase", step.phase.as_str().into()),
             ("cycle", step.cycle.into()),
-            ("revision", step.revision.into()),
+            ("revision", step.delivery_revision.into()),
             ("outcome", step.outcome.as_deref().into()),
             ("acceptance", step.acceptance.as_deref().into()),
             ("closing", closing.into()),
@@ -901,21 +934,14 @@ pub fn lifecycle_write_in(
             ("updated", at.into()),
         ])
         .and_where(Expr::col("id").eq(id));
-    for (column, value) in [
-        ("status", &step.status),
-        ("stage", &step.stage),
-        ("now", &step.now),
-    ] {
-        if let Some(value) = value {
-            update.value(column, value.as_str());
-        }
-    }
     w.exec(&update)?;
-    if let Some(new_status) = step.status.as_deref()
-        && kind == "task"
-        && old_status != new_status
-    {
-        status_mark(w.conn, &ws, id, at, Some(&old_status), new_status)?;
+    let before = old_outcome.as_deref().unwrap_or(&old_phase);
+    let after = step
+        .outcome
+        .as_deref()
+        .unwrap_or_else(|| step.phase.as_str());
+    if kind == "task" && before != after {
+        mark_phase_change(w.conn, &ws, id, at, Some(before), after)?;
     }
     w.emit(steve_types::DomainEvent::from(
         steve_types::WorkEvent::Item {
@@ -937,6 +963,7 @@ pub fn item_cycle_add_in(
     acceptance: Option<&str>,
     reason: Option<&str>,
     closed: i64,
+    owner_revision: Option<i64>,
 ) -> Result<bool> {
     use sea_query::{OnConflict, Query};
 
@@ -952,6 +979,7 @@ pub fn item_cycle_add_in(
                 "reason",
                 "closed",
                 "source",
+                "owner_revision",
             ])
             .values_panic([
                 item_id.into(),
@@ -962,6 +990,7 @@ pub fn item_cycle_add_in(
                 reason.into(),
                 closed.into(),
                 "live".into(),
+                owner_revision.into(),
             ])
             .on_conflict(
                 OnConflict::columns(["item_id", "cycle"])
@@ -985,6 +1014,14 @@ pub struct ItemCycle {
 }
 
 impl Items<'_> {
+    pub fn owner_finish_recorded(&self, item: &str, cycle: i64, revision: i64) -> Result<bool> {
+        self.0.read_conn(|c| c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM item_cycles WHERE item_id=? AND cycle=? AND owner_revision=?)",
+            params![item, cycle, revision],
+            |row| row.get(0),
+        ).map_err(Into::into))
+    }
+
     /// The ended cycles of an item, oldest first.
     pub fn cycles(&self, id: &str) -> Result<Vec<ItemCycle>> {
         self.0.read_conn(|c| {

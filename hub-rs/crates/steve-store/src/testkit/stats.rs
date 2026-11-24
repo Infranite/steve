@@ -11,8 +11,7 @@ pub fn seed_active(s: &Store) -> Result<()> {
 pub fn seed_events(s: &Store, m: impl Fn(i64) -> i64) -> Result<()> {
     let sql = format!(
         "INSERT INTO projects (id, workspace_id, name, path, created, updated) VALUES ('p1', 'default', 'one', '/tmp/p1', 0, 0), ('p2', 'default', 'two', '/tmp/p2', 0, 0);
-         INSERT INTO items (id, workspace_id, no, title, status, stage, created, updated, project_id) VALUES
-           ('ST-1', 'default', 1, 'one', 'done', '执行', {c}, {c}, 'p1'), ('ST-2', 'default', 2, 'two', 'run', '执行', {c}, {c}, 'p2');
+         INSERT INTO items(id, workspace_id, no, title, phase, created, updated, project_id, outcome) VALUES ('ST-1', 'default', 1, 'one', 'closed', {c}, {c}, 'p1', 'completed'),('ST-2', 'default', 2, 'two', 'active', {c}, {c}, 'p2', NULL);
          INSERT INTO agent_turns (id, workspace_id, session_id, item_id, project_id, harness, started, ended, stop_reason, transient, tools, tool_errors) VALUES
            ('tn_1', 'default', 's1', 'ST-1', 'p1', 'claude-code', {t1}, {t1e}, 'end_turn', 0, 3, 0),
            ('tn_2', 'default', 's2', 'ST-2', 'p2', 'claude-code', {t2}, {t2e}, 'error', 0, 1, 1),
@@ -23,7 +22,7 @@ pub fn seed_events(s: &Store, m: impl Fn(i64) -> i64) -> Result<()> {
            ('d1', 'default', 'approve', 'item', 'ST-1', 'ST-1', 'q', 'resolved', '{{\"decided_by\":\"yolo\"}}', 'dev', {d1}, {d1r}),
            ('d2', 'default', 'fail', 'item', 'ST-2', 'ST-2', 'q', 'open', NULL, 'dev', {d2}, NULL);
          INSERT INTO item_marks (workspace_id, item_id, ts, kind, from_v, to_v, actor) VALUES
-           ('default', 'ST-1', {k1}, 'status', 'run', 'done', 'usr_1'),
+           ('default', 'ST-1', {k1}, 'status', 'active', 'completed', 'usr_1'),
            ('default', 'ST-2', {k2}, 'release', NULL, 'rolled_back', 'steve');",
         c = m(0),
         t1 = m(5),
@@ -47,8 +46,8 @@ pub fn seed_time(s: &Store, cards: &[Card<'_>]) -> Result<()> {
     let mut sql = String::from(
         "INSERT INTO settings (workspace_id, key, value, updated) VALUES ('default', 'stats.tz', '\"Asia/Shanghai\"', 0);
          INSERT INTO sessions (id, workspace_id, harness, cwd, status, created, updated) VALUES ('s1', 'default', 'claude-code', '/tmp', 'idle', 0, 0);
-         INSERT INTO items (id, workspace_id, no, title, status, stage, created, updated) VALUES ('ST-1', 'default', 1, 't1', 'run', '执行', 0, 0);
-         INSERT INTO items (id, workspace_id, no, title, status, stage, created, updated) VALUES ('ST-2', 'default', 2, 't2', 'run', '执行', 0, 0);\n",
+         INSERT INTO items(id, workspace_id, no, title, phase, created, updated) VALUES ('ST-1', 'default', 1, 't1', 'active', 0, 0);
+         INSERT INTO items(id, workspace_id, no, title, phase, created, updated) VALUES ('ST-2', 'default', 2, 't2', 'active', 0, 0);\n",
     );
     for (id, item, kind, created, resolved, yolo) in cards {
         let item = item.map_or("NULL".into(), |i| format!("'{i}'"));
@@ -85,8 +84,7 @@ pub fn seed_workflow(s: &Store, m: impl Fn(i64) -> i64, long_turn_ms: i64) -> Re
         (5, r#"["对话","chat"]"#),
     ] {
         sql.push_str(&format!(
-            "INSERT INTO items (id, workspace_id, no, title, status, stage, bot_id, source, created, updated)
-             VALUES ('ST-{no}', 'default', {no}, 't', 'done', '执行', 'dev', '{source}', {t}, {t});\n",
+            "INSERT INTO items(id, workspace_id, no, title, phase, bot_id, source, created, updated, outcome) VALUES ('ST-{no}', 'default', {no}, 't', 'closed', 'dev', '{source}', {t}, {t}, 'completed');\n",
             t = m(0)
         ));
     }
@@ -169,9 +167,13 @@ pub fn seed_hourly(s: &Store, items: [(i64, i64, Option<i64>); 5]) -> Result<()>
          INSERT INTO sessions (id, workspace_id, bot_id, harness, cwd, status, created, updated) VALUES ('s1', 'default', 'dev', 'claude-code', '/tmp', 'idle', 0, 0);\n",
     );
     for (no, created, done) in items {
-        let status = if done.is_some() { "done" } else { "run" };
+        let (phase, outcome) = if done.is_some() {
+            ("closed", "'completed'")
+        } else {
+            ("active", "NULL")
+        };
         sql.push_str(&format!(
-            "INSERT INTO items (id, workspace_id, no, title, status, stage, bot_id, created, updated) VALUES ('ST-{no}', 'default', {no}, 't{no}', '{status}', '执行', 'dev', {created}, {created});\n"
+            "INSERT INTO items(id, workspace_id, no, title, phase, outcome, bot_id, created, updated) VALUES ('ST-{no}', 'default', {no}, 't{no}', '{phase}', {outcome}, 'dev', {created}, {created});\n"
         ));
     }
     s.write_locked(|c| Ok(c.execute_batch(&sql)?))
@@ -236,24 +238,24 @@ INSERT INTO usage_records (workspace_id, ts, day, source, purpose, harness, mode
   ('default', 1793497500000, '2026-11-01', 'agent', 'turn', 'claude-code', 'claude-opus-5-5', 's3', 'ST-3', 'dev', NULL, 1, 1),
   ('default', 1793509500000, '2026-11-01', 'agent', 'turn', 'claude-code', 'claude-opus-5-5', 's5', 'ST-5', 'dev', 0.25, 1, 1);
 INSERT INTO item_marks (workspace_id, item_id, ts, kind, from_v, to_v, actor, ref, detail) VALUES
-  ('default', 'ST-1', 1793491200000, 'status', NULL, 'run', '', NULL, '{}'),
+  ('default', 'ST-1', 1793491200000, 'status', NULL, 'active', '', NULL, '{}'),
   ('default', 'ST-1', 1793491560000, 'fail', NULL, 'error', 'steve', 'f1', '{"why":"会话出错：boom"}'),
   ('default', 'ST-1', 1793491800000, 'deliver', NULL, 'manual', 'dev', 'a1', '{}'),
-  ('default', 'ST-1', 1793492400000, 'status', 'run', 'done', 'usr_1', NULL, '{}'),
-  ('default', 'ST-2', 1793493000000, 'status', NULL, 'run', '', NULL, '{}'),
+  ('default', 'ST-1', 1793492400000, 'status', 'active', 'completed', 'usr_1', NULL, '{}'),
+  ('default', 'ST-2', 1793493000000, 'status', NULL, 'active', '', NULL, '{}'),
   ('default', 'ST-2', 1793493600000, 'deliver', NULL, 'manual', 'dev', 'b1', '{}'),
   ('default', 'ST-2', 1793494800000, 'deliver', NULL, 'manual', 'dev', 'b2', '{}'),
   ('default', 'ST-2', 1793495700000, 'fail', NULL, 'release', 'steve', 'f2', '{"why":"发布  失败，已回到 v1：健康检查没有通过"}'),
   ('default', 'ST-2', 1793495700000, 'release', NULL, 'rolled_back', 'steve', 'r1', '{}'),
-  ('default', 'ST-2', 1793496300000, 'status', 'run', 'done', 'steve', NULL, '{}'),
+  ('default', 'ST-2', 1793496300000, 'status', 'active', 'completed', 'steve', NULL, '{}'),
   ('default', 'ST-2', 1793496300000, 'release', NULL, 'released', 'steve', 'r2', '{}'),
-  ('default', 'ST-3', 1793497200000, 'status', NULL, 'run', '', NULL, '{}'),
+  ('default', 'ST-3', 1793497200000, 'status', NULL, 'active', '', NULL, '{}'),
   ('default', 'ST-3', 1793497500000, 'deliver', NULL, 'auto', 'dev', NULL, '{}'),
-  ('default', 'ST-3', 1793497501000, 'status', 'run', 'done', 'steve', NULL, '{}'),
-  ('default', 'ST-4', 1793503200000, 'status', NULL, 'run', '', NULL, '{}'),
-  ('default', 'ST-4', 1793503260000, 'status', 'run', 'pause', 'usr_1', NULL, '{}'),
-  ('default', 'ST-4', 1793503320000, 'status', 'pause', 'drop', 'usr_1', NULL, '{}'),
-  ('default', 'ST-5', 1793509200000, 'status', NULL, 'run', '', NULL, '{}'),
+  ('default', 'ST-3', 1793497501000, 'status', 'active', 'completed', 'steve', NULL, '{}'),
+  ('default', 'ST-4', 1793503200000, 'status', NULL, 'active', '', NULL, '{}'),
+  ('default', 'ST-4', 1793503260000, 'status', 'active', 'paused', 'usr_1', NULL, '{}'),
+  ('default', 'ST-4', 1793503320000, 'status', 'paused', 'cancelled', 'usr_1', NULL, '{}'),
+  ('default', 'ST-5', 1793509200000, 'status', NULL, 'active', '', NULL, '{}'),
   ('default', 'ST-5', 1793509800000, 'fail', NULL, 'stall', 'steve', 'f5', '{"why":"它停下了：会话空闲"}');
 "#;
 
@@ -261,9 +263,15 @@ pub fn seed_fixture(s: &Store, m: impl Fn(i64) -> i64) -> Result<()> {
     let mut sql = String::from(
         "INSERT INTO settings (workspace_id, key, value, updated) VALUES ('default', 'stats.tz', '\"UTC\"', 0);\n",
     );
-    let item = |sql: &mut String, no: i64, status: &str, created: i64, updated: i64| {
+    let item = |sql: &mut String, no: i64, outcome: Option<&str>, created: i64, updated: i64| {
+        let phase = if outcome.is_some() {
+            "closed"
+        } else {
+            "active"
+        };
+        let outcome = outcome.map_or_else(|| "NULL".into(), |value| format!("'{value}'"));
         sql.push_str(&format!(
-            "INSERT INTO items (id, workspace_id, no, title, status, stage, bot_id, created, updated) VALUES ('ST-{no}', 'default', {no}, 't{no}', '{status}', '执行', 'dev', {created}, {updated});\n"
+            "INSERT INTO items(id, workspace_id, no, title, phase, outcome, bot_id, created, updated) VALUES ('ST-{no}', 'default', {no}, 't{no}', '{phase}', {outcome}, 'dev', {created}, {updated});\n"
         ));
     };
     let session = |sql: &mut String, id: &str, item: &str, cost: &str, updated: i64| {
@@ -305,7 +313,7 @@ pub fn seed_fixture(s: &Store, m: impl Fn(i64) -> i64) -> Result<()> {
     };
 
     // ST-1: one turn with a failed tool call, an ask and a fail card overlapping it, delivered and passed.
-    item(&mut sql, 1, "done", m(0), m(25));
+    item(&mut sql, 1, Some("completed"), m(0), m(25));
     session(&mut sql, "s1", "ST-1", "1.5", m(20));
     ev(&mut sql, "s1", m(1), "user", r#"{"text":"go"}"#);
     ev(
@@ -370,7 +378,7 @@ pub fn seed_fixture(s: &Store, m: impl Fn(i64) -> i64) -> Result<()> {
     );
 
     // ST-2: a rework, a gateway retry, a release that rolled back, then one that went out.
-    item(&mut sql, 2, "done", m(30), m(86));
+    item(&mut sql, 2, Some("completed"), m(30), m(86));
     session(&mut sql, "s2", "ST-2", "2.0", m(85));
     ev(&mut sql, "s2", m(31), "user", r#"{"text":"go"}"#);
     ev(
@@ -481,7 +489,7 @@ pub fn seed_fixture(s: &Store, m: impl Fn(i64) -> i64) -> Result<()> {
     );
 
     // ST-3: accepted by itself.
-    item(&mut sql, 3, "done", m(100), m(106));
+    item(&mut sql, 3, Some("completed"), m(100), m(106));
     session(&mut sql, "s3", "ST-3", "NULL", m(105));
     ev(&mut sql, "s3", m(101), "user", r#"{"text":"go"}"#);
     ev(
@@ -502,7 +510,7 @@ pub fn seed_fixture(s: &Store, m: impl Fn(i64) -> i64) -> Result<()> {
     );
 
     // ST-4: paused, then dropped.
-    item(&mut sql, 4, "drop", m(200), m(202));
+    item(&mut sql, 4, Some("cancelled"), m(200), m(202));
     sql.push_str(&format!(
         "INSERT INTO audit (workspace_id, ts, actor, action, target) VALUES ('default', {}, 'usr_1', 'item.pause', 'ST-4'), ('default', {}, 'usr_1', 'item.drop', 'ST-4');\n",
         m(201),
@@ -510,7 +518,7 @@ pub fn seed_fixture(s: &Store, m: impl Fn(i64) -> i64) -> Result<()> {
     ));
 
     // ST-5: still running, a turn the Hub never saw end, and a stall card.
-    item(&mut sql, 5, "run", m(300), m(310));
+    item(&mut sql, 5, None, m(300), m(310));
     session(&mut sql, "s5", "ST-5", "0.25", m(305));
     ev(&mut sql, "s5", m(301), "user", r#"{"text":"go"}"#);
     dec(
@@ -602,7 +610,7 @@ pub fn seed_tree_chain(s: &Store, depth: i64) -> Result<()> {
     let chain = (6..=6 + depth + 1)
         .map(|no| {
             format!(
-                "INSERT INTO items (id, workspace_id, no, title, status, stage, bot_id, created, updated, parent) VALUES ('ST-{no}', 'default', {no}, 't', 'run', '执行', 'dev', 0, 0, '{{\"item\":\"ST-{}\"}}');",
+                "INSERT INTO items(id, workspace_id, no, title, phase, bot_id, created, updated, parent) VALUES ('ST-{no}', 'default', {no}, 't', 'active', 'dev', 0, 0, '{{\"item\":\"ST-{}\"}}');",
                 no - 1
             )
         })

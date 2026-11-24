@@ -32,6 +32,17 @@ pub fn approval(r: &mut impl Read, ws: &str, id: &str) -> Result<Option<Approval
     )
 }
 
+pub fn decision_id(r: &mut impl Read, id: &str) -> Result<Option<String>> {
+    Ok(r.one(
+        Query::select()
+            .column("decision_id")
+            .from("chan_messages")
+            .and_where(Expr::col("id").eq(id)),
+        |row| row.get::<Option<String>>(0),
+    )?
+    .flatten())
+}
+
 pub struct NewMessage<'a> {
     pub id: &'a str,
     pub ws: &'a str,

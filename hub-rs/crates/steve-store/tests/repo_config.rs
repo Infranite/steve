@@ -568,7 +568,6 @@ fn projects() {
     let rel = Release {
         kind: "script".into(),
         cmd: "/x/release.sh".into(),
-        done_when: None,
     };
     let np = NewProject {
         name: "steve".into(),

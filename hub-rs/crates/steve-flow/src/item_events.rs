@@ -84,7 +84,11 @@ fn build(
     let snap = steve_work_api::ItemDone {
         item_id: item.into(),
         title: fields.title,
-        status: fields.status,
+        status: match what {
+            ItemEvent::Done => "done",
+            ItemEvent::Dropped => "drop",
+        }
+        .into(),
         bot_id: fields.bot_id,
         project_id: fields.project_id,
         source: fields.source,

@@ -82,13 +82,16 @@ impl steve_mail::DraftHooks for MailDraftHooks {
             });
         }
     }
-    fn sent(&self, _ws: &str, item_id: &str, _subject: &str) {
-        let (c, id) = (self.0.clone(), item_id.to_string());
+    fn sent(
+        &self,
+        ws: &str,
+        item_id: &str,
+        _subject: &str,
+        version: Option<steve_types::DeliveryVersion>,
+    ) {
+        let (c, ws, id) = (self.0.clone(), ws.to_string(), item_id.to_string());
         let run = move || {
-            // “草稿即交付”: only an item that is still open is finished by its mail
-            // the mail going out is the item's result: a completion request with it as the evidence
-            // (the lifecycle ignores it for a closed item and still waits for the item's turns)
-            if let Err(e) = c.module_complete(&id, "邮件已发出") {
+            if let Err(e) = c.module_complete(&ws, &id, version, "mail.sent") {
                 tracing::warn!(item = %id, "mail sent, completion: {e}");
             }
         };
@@ -106,47 +109,18 @@ impl steve_mail::DraftHooks for MailDraftHooks {
 
 // ---------------------------------------------------------------- items
 
-/// G3: the wrap-up of an item through GitHub.
+/// Applies verified GitHub delivery to its current item cycle.
 pub struct GhItems(pub Core);
 
 #[async_trait]
 impl steve_github::core::ItemCore for GhItems {
-    async fn progress(
-        &self,
-        _ws: &str,
-        item_id: &str,
-        stage: &str,
-        now: &str,
-    ) -> Result<(), String> {
-        let (c, id, stage, now) = (
-            self.0.clone(),
-            item_id.to_string(),
-            stage.to_string(),
-            now.to_string(),
-        );
+    async fn delivery_verified(&self, proof: steve_types::DeliveryProof) -> Result<(), String> {
+        let core = self.0.clone();
         blocking(move || {
-            let p = steve_store::ItemPatch {
-                stage: Some(stage),
-                now: Some(now),
-                ..Default::default()
-            };
-            c.store()
-                .store()
-                .items()
-                .patch(&id, &p)
-                .map(|_| ())
-                .map_err(|e| e.to_string())
+            core.delivery_verified(&proof)
+                .map_err(|error| error.to_string())
         })
         .await
-    }
-    async fn finish(&self, _ws: &str, item_id: &str, now: &str) -> Result<(), String> {
-        let (c, id, now) = (self.0.clone(), item_id.to_string(), now.to_string());
-        // the module's wrap-up of an accepted result is done (never a close by itself)
-        blocking(move || c.module_done(&id, &now).map_err(|e| e.to_string())).await
-    }
-    async fn fail(&self, _ws: &str, item_id: &str, why: &str) -> Result<(), String> {
-        let (c, id, why) = (self.0.clone(), item_id.to_string(), why.to_string());
-        blocking(move || c.fail_item(&id, &why).map_err(|e| e.to_string())).await
     }
 }
 

@@ -95,17 +95,14 @@ fn claim_retry(t: &T, parent: &str, id: &str) -> Result<WorkUnit> {
             w,
             &child,
             &LifecycleWrite {
-                phase: "ready".into(),
+                phase: steve_types::ItemPhase::Ready,
                 cycle: item.cycle + 1,
-                revision: item.revision,
+                delivery_revision: item.delivery_revision,
                 outcome: item.outcome,
                 acceptance: item.acceptance,
                 closing: item.closing,
                 closed_at: item.closed_at,
                 closed_reason: item.closed_reason,
-                status: None,
-                stage: None,
-                now: None,
             },
         )?;
         claim_in(w, parent, id)
@@ -436,7 +433,7 @@ fn independent_work_runs_in_parallel_dependencies_and_final_gate_wait() {
     // Child success alone does not mutate or close the parent item's lifecycle.
     assert_eq!(
         t.store.items().get(&parent).unwrap().unwrap().phase,
-        "active"
+        steve_types::ItemPhase::Ready
     );
     let child = t
         .store
@@ -886,7 +883,7 @@ fn migration_applies_once_on_v40_and_leaves_existing_items_unchanged() {
     for m in &db::MIGRATIONS[..40] {
         c.execute_batch(m).unwrap();
     }
-    c.execute_batch("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('old','default',1,'旧事项','run','执行',1,1);").unwrap();
+    c.execute_batch("INSERT INTO items(id, workspace_id, no, title, status, stage, created, updated) VALUES ('old','default',1,'旧事项','run','Work',1,1);").unwrap();
     db::migrate(&c).unwrap();
     db::migrate(&c).unwrap();
     assert_eq!(db::compat(&c).unwrap().schema, db::SCHEMA_VERSION);
@@ -1042,9 +1039,9 @@ fn unit_delivery_artifacts_and_child_checkpoint_commit_or_roll_back_together() {
                 tx,
                 child,
                 &LifecycleWrite {
-                    phase: "closing".into(),
+                    phase: steve_types::ItemPhase::Closing,
                     cycle: before.cycle,
-                    revision: before.revision,
+                    delivery_revision: before.delivery_revision,
                     ..Default::default()
                 },
             )?;
@@ -1057,7 +1054,7 @@ fn unit_delivery_artifacts_and_child_checkpoint_commit_or_roll_back_together() {
     );
     assert_eq!(
         t.store.items().get(child).unwrap().unwrap().phase,
-        "closing"
+        steve_types::ItemPhase::Closing
     );
     assert_eq!(t.store.artifacts().list(child).unwrap().len(), 1);
     assert_eq!(t.store.artifacts().roles(child).unwrap().len(), 1);

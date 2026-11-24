@@ -379,10 +379,7 @@ pub fn ts5_mail(store: &Store, at: i64) -> Result<()> {
 
 pub fn goal_items(store: &Store) -> Result<()> {
     store.write_locked(|c| {
-        c.execute_batch("INSERT INTO items (id, workspace_id, no, kind, title, status, stage, created, updated) VALUES
-                    ('ST-1', 'default', 1, 'task', 'draft the outline', 'run', '执行', 1, 1),
-                    ('ST-2', 'default', 2, 'task', 'collect numbers', 'done', '完成', 1, 1),
-                    ('ST-3', 'default', 3, 'task', 'old idea', 'drop', '完成', 1, 1);")?;
+        c.execute_batch("INSERT INTO items(id, workspace_id, no, kind, title, phase, created, updated, outcome) VALUES ('ST-1', 'default', 1, 'task', 'draft the outline', 'active', 1, 1, NULL),('ST-2', 'default', 2, 'task', 'collect numbers', 'closed', 1, 1, 'completed'),('ST-3', 'default', 3, 'task', 'old idea', 'closed', 1, 1, 'cancelled');")?;
         Ok(())
     })
 }
@@ -494,10 +491,7 @@ pub fn brief_runs(store: &Store, id: &str) -> Result<Vec<(String, String, String
 
 pub fn brief_items(store: &Store, ws: &str, owner: &str, other: &str) -> Result<()> {
     store.write(|tx| {
-        tx.conn.execute("INSERT INTO items (id, workspace_id, no, title, status, stage, requested_by, created, updated) VALUES
-            ('ST-1', ?1, 1, '迁移脚本', 'run', '', ?2, 1, 1),
-            ('ST-2', ?1, 2, '导出报表', 'fail', '', ?2, 1, 1),
-            ('ST-3', ?1, 3, '别人的事项', 'fail', '', ?3, 1, 1)", params![ws,owner,other])?;
+        tx.conn.execute("INSERT INTO items(id, workspace_id, no, title, phase, requested_by, created, updated, outcome) VALUES ('ST-1', ?1, 1, '迁移脚本', 'active', ?2, 1, 1, NULL),('ST-2', ?1, 2, '导出报表', 'closed', ?2, 1, 1, 'failed'),('ST-3', ?1, 3, '别人的事项', 'closed', ?3, 1, 1, 'failed')", params![ws,owner,other])?;
         tx.conn.execute("INSERT INTO decisions (id, workspace_id, item_id, kind, subject_type, subject_id, question, status, requested_by, created)
             VALUES ('dec_1', ?, 'ST-2', 'ask', 'item', 'ST-2', '怎么办', 'open', 'steve', 1)", [ws])?;
         Ok(())

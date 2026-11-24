@@ -6,8 +6,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::{all, one, to_json};
-use crate::types::truthy;
 use crate::{Decision, Message, Result, Store, now, uid};
+use crate::{DecisionRows, truthy};
 
 /// One row in `messages`; the caller publishes its event. Returns the id.
 pub(crate) fn message_insert(
@@ -115,6 +115,40 @@ impl Store {
     }
 }
 
+/// The source revision of a replayable decision. The same request ID may be reused
+/// in a different attempt, so its execution identity is part of its key.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DecisionSource {
+    Permission {
+        node: String,
+        attempt: String,
+    },
+    TurnStall {
+        attempt: String,
+    },
+    TurnInput {
+        attempt: String,
+        prompt: String,
+    },
+    FlowStep {
+        started_at: i64,
+        retry: i64,
+    },
+    Delivery {
+        cycle: i64,
+        revision: i64,
+    },
+    MailDraft {
+        previous: Option<String>,
+        content_hash: String,
+    },
+    Record,
+    Revision {
+        revision: String,
+    },
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct NewDecision {
     pub workspace_id: String,
@@ -125,137 +159,18 @@ pub struct NewDecision {
     pub item_id: Option<String>,
     pub session_id: Option<String>,
     pub question: String,
+    #[serde(default)]
+    pub question_template: Option<steve_types::DecisionPrompt>,
     pub draft: Option<String>,
     pub options: Option<Vec<String>>,
     pub requested_by: String,
+    #[serde(default)]
+    pub source: Option<DecisionSource>,
 }
 
 pub struct Decisions<'a>(&'a Store);
 
 const DECISION: &str = "SELECT * FROM decisions WHERE id = ?";
-
-fn insert(c: &rusqlite::Connection, p: &NewDecision) -> Result<Decision> {
-    let id = uid("dec");
-    c.run(
-        "INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, item_id, session_id, question, draft, options, status, requested_by, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)",
-        params![
-            id,
-            p.workspace_id,
-            p.kind,
-            p.subject_type,
-            p.subject_id,
-            p.item_id,
-            p.session_id,
-            p.question,
-            p.draft.as_deref().unwrap_or(""),
-            to_json(&p.options.clone().unwrap_or_default())?,
-            p.requested_by,
-            now()
-        ],
-    )?;
-    one(c, DECISION, [&id], Decision::from_row)?
-        .ok_or_else(|| crate::StoreError::Conflict("decision vanished".into()))
-}
-
-/// [`Decisions::create`] inside the caller's transaction; published after the commit.
-pub fn decision_create_in(tx: &mut crate::W<'_>, p: &NewDecision) -> Result<Decision> {
-    let d = insert(tx.conn, p)?;
-    tx.diagnostic(crate::diagnostics::decision_event(&d, "created", None));
-    tx.emit(steve_types::DomainEvent::from(
-        steve_types::WorkEvent::Decision {
-            ws: d.workspace_id.clone().into(),
-            id: d.id.clone().into(),
-            item_id: {
-                let value: Option<Option<String>> = Some(p.item_id.clone());
-                value.map(|value| value.map(Into::into))
-            },
-        },
-    ));
-    Ok(d)
-}
-
-/// [`Decisions::resolve`] inside the caller's transaction: settles it if it is open. `true`: it was.
-pub fn decision_resolve_in(
-    tx: &mut crate::W<'_>,
-    id: &str,
-    result: &Value,
-    status: &str,
-) -> Result<bool> {
-    let n = tx.conn.execute(
-        "UPDATE decisions SET status = ?, result = ?, resolved = ? WHERE id = ? AND status = 'open'",
-        params![status, to_json(result)?, now(), id],
-    )?;
-    let item: Option<Option<String>> = tx
-        .conn
-        .query_row("SELECT item_id FROM decisions WHERE id = ?", [id], |r| {
-            r.get(0)
-        })
-        .ok();
-    if let Some(ws) = crate::repo::one(
-        tx.conn,
-        "SELECT workspace_id FROM decisions WHERE id = ?",
-        [id],
-        |r| r.get::<_, String>(0),
-    )? {
-        tx.emit(steve_types::DomainEvent::from(
-            steve_types::WorkEvent::Decision {
-                ws: ws.into(),
-                id: id.into(),
-                item_id: {
-                    let value: Option<Option<String>> = item;
-                    value.map(|value| value.map(Into::into))
-                },
-            },
-        ));
-    }
-    if n > 0
-        && let Ok(Some(d)) = one(tx.conn, DECISION, [id], Decision::from_row)
-    {
-        tx.diagnostic(crate::diagnostics::decision_event(
-            &d,
-            "resolved",
-            Some("open"),
-        ));
-    }
-    Ok(n > 0)
-}
-
-/// A card whose answer was never applied (the Node refused it, or the request ended first) is
-/// expired, even if it was already marked resolved: it never claims an answer that did not happen.
-pub fn decision_expire_unapplied_in(
-    tx: &mut crate::W<'_>,
-    id: &str,
-    result: &Value,
-) -> Result<bool> {
-    let n = tx.conn.execute(
-        "UPDATE decisions SET status = 'expired', result = ?, resolved = ? WHERE id = ? AND status IN ('open','resolved')",
-        params![to_json(result)?, now(), id],
-    )?;
-    let item: Option<Option<String>> = tx
-        .conn
-        .query_row("SELECT item_id FROM decisions WHERE id = ?", [id], |r| {
-            r.get(0)
-        })
-        .ok();
-    if let Some(ws) = crate::repo::one(
-        tx.conn,
-        "SELECT workspace_id FROM decisions WHERE id = ?",
-        [id],
-        |r| r.get::<_, String>(0),
-    )? {
-        tx.emit(steve_types::DomainEvent::from(
-            steve_types::WorkEvent::Decision {
-                ws: ws.into(),
-                id: id.into(),
-                item_id: {
-                    let value: Option<Option<String>> = item;
-                    value.map(|value| value.map(Into::into))
-                },
-            },
-        ));
-    }
-    Ok(n > 0)
-}
 
 fn changed(w: &crate::WriteConn, id: &str) -> Result<Option<Decision>> {
     let d = one(w.c, DECISION, [id], Decision::from_row)?;
@@ -272,27 +187,6 @@ fn changed(w: &crate::WriteConn, id: &str) -> Result<Option<Decision>> {
 }
 
 impl Decisions<'_> {
-    /// Records the client attribution and publishes the resulting view change in the same commit.
-    pub fn note_via(&self, ws: &str, id: &str, via: &Value) -> Result<()> {
-        self.0.write_conn(|tx| {
-            let row = tx.c.run(
-                "UPDATE decisions SET result = json_set(coalesce(result, '{}'), '$.via', json(?))
-                 WHERE workspace_id = ? AND id = ? AND status <> 'open'",
-                params![via.to_string(), ws, id],
-            )?;
-            if row > 0 {
-                tx.publish(steve_types::DomainEvent::from(
-                    steve_types::WorkEvent::Decision {
-                        ws: ws.into(),
-                        id: id.into(),
-                        item_id: None,
-                    },
-                ));
-            }
-            Ok(())
-        })
-    }
-
     /// Open decisions, oldest first.
     pub fn open(&self, ws: &str) -> Result<Vec<Decision>> {
         self.0.read_conn(|c| all(c, "SELECT * FROM decisions WHERE workspace_id = ? AND status = 'open' ORDER BY created", [ws], Decision::from_row))
@@ -327,54 +221,21 @@ impl Decisions<'_> {
     }
 
     pub fn create(&self, p: &NewDecision) -> Result<Option<Decision>> {
-        let result = self.0.write_conn(|w| {
-            let d = insert(w.c, p)?;
-            w.publish(steve_types::DomainEvent::from(
-                steve_types::WorkEvent::Decision {
-                    ws: d.workspace_id.clone().into(),
-                    id: d.id.clone().into(),
-                    item_id: {
-                        let value: Option<Option<String>> = Some(p.item_id.clone());
-                        value.map(|value| value.map(Into::into))
-                    },
-                },
-            ));
-            Ok(Some(d))
-        })?;
-        if let Some(d) = &result {
-            self.0
-                .stage_diagnostic(crate::diagnostics::decision_event(d, "created", None));
-        }
-        Ok(result)
+        self.0.write(|w| DecisionRows(w).open(p).map(Some))
     }
 
-    /// Settles an open decision (still publishes for an existing closed row). `status` is `resolved`
-    /// or `expired`; `undo` (the item fields to restore) is stored only if truthy, as in TS.
     pub fn resolve(
         &self,
         id: &str,
         result: &Value,
-        status: &str,
-        undo: &Value,
+        change: crate::decision_repo::DecisionChange,
+        undo: Option<&crate::DecisionUndo>,
     ) -> Result<Option<Decision>> {
-        let (result, changed_rows) = self.0.write_conn(|w| {
-            let undo = if truthy(undo) { Some(to_json(undo)?) } else { None };
-            let n = w.c.run(
-                "UPDATE decisions SET status = ?, result = ?, resolved = ?, undo = ? WHERE id = ? AND status = 'open'",
-                params![status, to_json(result)?, now(), undo, id],
-            )?;
-            Ok((changed(w, id)?, n))
-        })?;
-        if changed_rows > 0
-            && let Some(d) = &result
-        {
-            self.0.stage_diagnostic(crate::diagnostics::decision_event(
-                d,
-                "resolved",
-                Some("open"),
-            ));
-        }
-        Ok(result)
+        self.0.write(|w| {
+            let mut rows = DecisionRows(w);
+            rows.settle(id, result, change, undo)?;
+            rows.get(id)
+        })
     }
 
     /// Replaces the result of a decision already settled, e.g. what became of an approved release after it was
@@ -401,23 +262,11 @@ impl Decisions<'_> {
         })
     }
 
-    /// Back to open, clearing result, resolved time and undo.
     pub fn reopen(&self, id: &str) -> Result<Option<Decision>> {
-        let (result, before) = self.0.write_conn(|w| {
-            let before = one(w.c, DECISION, [id], Decision::from_row).ok().flatten();
-            w.c.run("UPDATE decisions SET status = 'open', result = NULL, resolved = NULL, undo = NULL WHERE id = ?", [id])?;
-            Ok((changed(w, id)?, before.map(|d| d.status)))
-        })?;
-        if before.as_deref().is_some_and(|status| status != "open")
-            && let Some(d) = &result
-        {
-            self.0.stage_diagnostic(crate::diagnostics::decision_event(
-                d,
-                "reopened",
-                before.as_deref(),
-            ));
-        }
-        Ok(result)
+        self.0.write(|w| {
+            crate::decision_repo::reopen(w, id)?;
+            DecisionRows(w).get(id)
+        })
     }
 }
 
@@ -585,38 +434,4 @@ impl Messages<'_> {
             )
         })
     }
-}
-
-/// Settles the item's open decisions as `expired` with `result`, inside the caller's transaction
-/// (`Decisions::resolve` for each, like a finished item's “nothing left to decide”). Returns how many.
-pub fn decisions_expire_open_in(
-    tx: &mut crate::W<'_>,
-    item_id: &str,
-    result: &Value,
-) -> Result<usize> {
-    let ids: Vec<(String, String)> = {
-        let mut st = tx.conn.prepare_cached(
-            "SELECT id, workspace_id FROM decisions WHERE item_id = ? AND status = 'open' ORDER BY created",
-        )?;
-        st.query_map([item_id], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<rusqlite::Result<_>>()?
-    };
-    let result = to_json(result)?;
-    for (id, ws) in &ids {
-        tx.conn.run(
-            "UPDATE decisions SET status = 'expired', result = ?, resolved = ?, undo = NULL WHERE id = ? AND status = 'open'",
-            params![result, now(), id],
-        )?;
-        tx.emit(steve_types::DomainEvent::from(
-            steve_types::WorkEvent::Decision {
-                ws: ws.clone().into(),
-                id: id.clone().into(),
-                item_id: {
-                    let value: Option<Option<String>> = Some(Some(item_id.into()));
-                    value.map(|value| value.map(Into::into))
-                },
-            },
-        ));
-    }
-    Ok(ids.len())
 }

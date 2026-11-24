@@ -12,10 +12,11 @@ use crate::{Item, NewDecision, Result, Store, StoreError, now};
 pub struct DependencyWait {
     pub item_id: String,
     pub cycle: i64,
-    pub session_id: String,
+    pub session_id: Option<String>,
     pub resume: String,
     pub reason: String,
     pub state: String,
+    pub updated: i64,
 }
 
 pub struct DependencyWaits<'a>(&'a Store);
@@ -39,6 +40,7 @@ fn get(c: &rusqlite::Connection, item: &str) -> Result<Option<DependencyWait>> {
                 resume: r.get("resume")?,
                 reason: r.get("reason")?,
                 state: r.get("state")?,
+                updated: r.get("updated")?,
             })
         },
     )
@@ -51,9 +53,6 @@ fn refuse(message: &str) -> StoreError {
 /// Ordinary UI/API dependency edits retain a cycle's explicit policy. An old completed wait must
 /// not swallow a later unblock or leave a stale "start now" decision while a new prerequisite runs.
 pub(super) fn rearm_in(tx: &mut crate::W<'_>, item: &str) -> Result<()> {
-    let Some(wait) = get(tx.conn, item)? else {
-        return Ok(());
-    };
     let Some(i) = one(
         tx.conn,
         "SELECT * FROM items WHERE id=?",
@@ -65,15 +64,17 @@ pub(super) fn rearm_in(tx: &mut crate::W<'_>, item: &str) -> Result<()> {
     };
     let open:bool=tx.conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM item_deps d LEFT JOIN items p ON p.id=d.dep_id WHERE d.item_id=?
-         AND (p.id IS NULL OR p.status<>'done' OR p.phase<>'closed' OR p.outcome IS NOT 'completed'))",
+         AND (p.id IS NULL OR p.phase<>'closed' OR p.outcome IS NOT 'completed'))",
         [item],|r|r.get(0))?;
-    if i.phase != "active" || i.archived || !open {
+    if i.is_closed() || i.archived || !open {
         return Ok(());
     }
     let at = now();
     tx.conn.execute(
-        "UPDATE item_dependency_waits SET state='waiting',updated=? WHERE item_id=? AND cycle=?",
-        params![at, item, wait.cycle],
+        "INSERT INTO item_dependency_waits(item_id,cycle,session_id,resume,reason,state,created,updated)
+         VALUES(?,?,NULL,'workspace','','waiting',?,?)
+         ON CONFLICT(item_id,cycle) DO UPDATE SET state='waiting',updated=excluded.updated",
+        params![item, i.cycle, at, at],
     )?;
     for id in all(
         tx.conn,
@@ -82,14 +83,12 @@ pub(super) fn rearm_in(tx: &mut crate::W<'_>, item: &str) -> Result<()> {
         [item],
         |r| r.get::<_, String>(0),
     )? {
-        crate::decision_resolve_in(tx, &id, &json!({"superseded":"前置事项已变化"}), "expired")?;
-    }
-    if i.status != "pause" {
-        tx.conn.execute(
-            "UPDATE items SET status='block',now='前置事项已变化，继续等待',updated=? WHERE id=?",
-            params![at, item],
+        crate::DecisionRows(tx).settle(
+            &id,
+            &json!({"superseded":"前置事项已变化"}),
+            crate::decision_repo::DecisionChange::Expire,
+            None,
         )?;
-        super::items::status_mark(tx.conn, &i.workspace_id, item, at, Some(&i.status), "block")?;
     }
     Ok(())
 }
@@ -97,6 +96,41 @@ pub(super) fn rearm_in(tx: &mut crate::W<'_>, item: &str) -> Result<()> {
 impl DependencyWaits<'_> {
     pub fn get(&self, item: &str) -> Result<Option<DependencyWait>> {
         self.0.read_conn(|c| get(c, item))
+    }
+
+    pub fn arm(&self, item: &str) -> Result<()> {
+        self.0.write(|w| rearm_in(w, item))
+    }
+
+    pub fn take_workspace_wait(
+        &self,
+        item: &str,
+        cycle: i64,
+        automatic: bool,
+    ) -> Result<Option<i64>> {
+        self.0.write(|w| {
+            let Some(wait) = get(w.conn, item)?
+                .filter(|wait| wait.cycle == cycle && wait.state == "waiting" && wait.session_id.is_none())
+            else {
+                return Ok(None);
+            };
+            let updated = w.conn.execute(
+                "UPDATE item_dependency_waits SET state=?,updated=?
+                 WHERE item_id=? AND cycle=? AND state='waiting' AND session_id IS NULL
+                   AND EXISTS(SELECT 1 FROM items i WHERE i.id=item_dependency_waits.item_id
+                     AND i.cycle=item_dependency_waits.cycle AND i.archived=0 AND i.phase IN ('ready','active'))
+                   AND NOT EXISTS(SELECT 1 FROM item_deps d LEFT JOIN items p ON p.id=d.dep_id
+                     WHERE d.item_id=item_dependency_waits.item_id
+                     AND (p.phase IS NOT 'closed' OR p.outcome IS NOT 'completed'))",
+                params![
+                    if automatic { "started" } else { "notified" },
+                    now(),
+                    item,
+                    cycle
+                ],
+            )?;
+            Ok((updated == 1).then_some(wait.updated))
+        })
     }
 
     /// The caller authenticates the session and its disclosure scope. Validate the database again
@@ -113,7 +147,7 @@ impl DependencyWaits<'_> {
             let tx = w.conn;
             let i = one(tx, "SELECT * FROM items WHERE id=?", [item], Item::from_row)?
                 .ok_or_else(|| refuse("没有这个事项"))?;
-            if i.phase != "active" || i.archived {
+            if i.phase != steve_types::ItemPhase::Active || i.archived {
                 return Err(refuse("事项正在结束或已结束，不能登记等待"));
             }
             let child:bool=tx.query_row(
@@ -172,9 +206,9 @@ impl DependencyWaits<'_> {
             }
             let has_open: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM item_deps d LEFT JOIN items p ON p.id=d.dep_id
-                 WHERE d.item_id=? AND (p.id IS NULL OR p.status<>'done' OR p.phase<>'closed' OR p.outcome IS NOT 'completed'))",
+                 WHERE d.item_id=? AND (p.id IS NULL OR p.phase<>'closed' OR p.outcome IS NOT 'completed'))",
                 [item], |r|r.get(0))?;
-            if !added && get(tx,item)?.is_some_and(|w| w.session_id==session && w.resume==resume && w.reason==reason
+            if !added && get(tx,item)?.is_some_and(|w| w.session_id.as_deref()==Some(session) && w.resume==resume && w.reason==reason
                 && (w.state=="waiting" || !has_open)) {
                 return Ok(false);
             }
@@ -185,11 +219,8 @@ impl DependencyWaits<'_> {
                         resume=excluded.resume,reason=excluded.reason,state='waiting',updated=excluded.updated",
                        params![item,i.cycle,session,resume,reason,at,at])?;
             for id in all(tx, "SELECT id FROM decisions WHERE item_id=? AND status='open' AND kind IN ('ask','fail')", [item], |r| r.get::<_,String>(0))? {
-                crate::DecisionRows(w).settle(&id, &json!({"superseded":"已登记前置等待"}), "expired", &serde_json::Value::Null)?;
+                crate::DecisionRows(w).settle(&id, &json!({"superseded":"已登记前置等待"}), crate::decision_repo::DecisionChange::Expire, None)?;
             }
-            let text = format!("等待前置事项：{reason}");
-            tx.execute("UPDATE items SET status='block',now=?,updated=? WHERE id=?", params![text,at,item])?;
-            super::items::status_mark(tx,&i.workspace_id,item,at,Some(&i.status),"block")?;
             crate::item_repo::store_timeline(w,item,"steve","sys",&format!("登记前置等待（{resume}）：{reason}"),Some(session),None,crate::now())?;
             w.emit(steve_types::DomainEvent::from(
                 steve_types::WorkEvent::Item {
@@ -208,16 +239,16 @@ impl DependencyWaits<'_> {
             let tx = w.conn;
             let Some(wait) = get(tx,item)?.filter(|w| w.state=="waiting") else { return Ok(false); };
             let eligible: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM items i WHERE i.id=? AND i.status='block' AND i.phase='active'
+                "SELECT EXISTS(SELECT 1 FROM items i WHERE i.id=? AND i.phase IN ('ready','active')
                  AND i.archived=0 AND NOT EXISTS(SELECT 1 FROM decisions WHERE item_id=i.id AND status='open')
                  AND NOT EXISTS(SELECT 1 FROM item_deps d LEFT JOIN items p ON p.id=d.dep_id
-                 WHERE d.item_id=i.id AND (p.id IS NULL OR p.status<>'done' OR p.phase<>'closed' OR p.outcome IS NOT 'completed')))",
+                 WHERE d.item_id=i.id AND (p.id IS NULL OR p.phase<>'closed' OR p.outcome IS NOT 'completed')))",
                 [item], |r| r.get(0))?;
             if !eligible { return Ok(false); }
             let i = one(tx,"SELECT * FROM items WHERE id=?",[item],Item::from_row)?.unwrap();
             let at = now();
-            let (state,status,note) = if automatic { ("started","run","前置事项都已完成，Steve 自动开始") }
-                                    else { ("notified","wait","前置事项都已完成，等你开始") };
+            let (state,note) = if automatic { ("started","前置事项都已完成，Steve 自动开始") }
+                                    else { ("notified","前置事项都已完成，等你开始") };
             if automatic {
                 let live: bool = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM sessions s WHERE s.id=? AND s.item_id=? AND s.bot_id IS ?
@@ -244,13 +275,15 @@ impl DependencyWaits<'_> {
                 crate::DecisionRows(w).open(&NewDecision {
                     workspace_id:i.workspace_id.clone(),kind:"propose".into(),subject_type:"item".into(),
                     subject_id:item.into(),item_id:Some(item.into()),question:"前置事项都已完成，现在开始？".into(),
-                    options:Some(vec!["yes".into(),"no".into()]),requested_by:"steve".into(),..Default::default()
+                    options:Some(vec!["yes".into(),"no".into()]),requested_by:"steve".into(),
+                    source: Some(crate::DecisionSource::Revision {
+                        revision: format!("deps:{}:{}", wait.cycle, wait.updated),
+                    }),
+                    ..Default::default()
                 })?;
             }
             tx.execute("UPDATE item_dependency_waits SET state=?,updated=? WHERE item_id=? AND cycle=?",
                        params![state,at,item,wait.cycle])?;
-            tx.execute("UPDATE items SET status=?,now=?,updated=? WHERE id=?",params![status,note,at,item])?;
-            super::items::status_mark(tx,&i.workspace_id,item,at,Some("block"),status)?;
             crate::item_repo::store_timeline(w,item,"steve","sys",note,None,None,crate::now())?;
             w.emit(steve_types::DomainEvent::from(
                 steve_types::WorkEvent::Item {

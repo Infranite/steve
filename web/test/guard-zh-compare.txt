@@ -66,20 +66,12 @@ src/version.tsx	"拒绝"	1
 src/view-shared.tsx	"高"	1
 src/views.tsx	"下周一"	1
 src/views.tsx	"中"	1
-src/views.tsx	"交付与验收"	3
 src/views.tsx	"产出"	1
 src/views.tsx	"今天 18:00"	1
 src/views.tsx	"低"	1
-src/views.tsx	"准备"	3
-src/views.tsx	"分流"	3
 src/views.tsx	"动态"	1
 src/views.tsx	"周五"	1
-src/views.tsx	"定义"	3
-src/views.tsx	"执行"	3
-src/views.tsx	"接收"	3
-src/views.tsx	"收尾"	3
 src/views.tsx	"无"	3
 src/views.tsx	"明天"	1
-src/views.tsx	"规划"	3
 src/views.tsx	"高"	1
 src/views.tsx	"（附件）"	1

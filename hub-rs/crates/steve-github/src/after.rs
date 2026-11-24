@@ -1,9 +1,4 @@
-//! `github.after`: what follows a committed state change and has to survive a crash: the signals
-//! for steve-flow and the items to finish (a PR merged with `finish_on=merged`). Emitted in the
-//! transaction that changed the state, delivered after the commit at least once. A repetition is
-//! harmless: steve-flow answers a signal's `(connection, external_id)` with the event it has, and a
-//! finished item is not finished again. Before, they went out in memory after the commit, and a
-//! delivery processed again finds no change left to derive them from.
+//! Durable signals and PR supplements produced by GitHub synchronization.
 
 use std::sync::Arc;
 
@@ -21,8 +16,6 @@ pub const VERSION: i64 = 1;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct After {
     connection: String,
-    /// `(item, the item's “now”)`.
-    finish: Vec<(String, String)>,
     signals: Vec<SignalEvent>,
     /// After the signals: comments and reviews for the items of their PRs (absent before 2026-11-09).
     #[serde(default)]
@@ -38,7 +31,7 @@ pub struct PrSupplement {
     pub text: String,
 }
 
-/// Moves `fx`'s items to finish and signals into the outbox, in `tx` (the transaction that changed
+/// Moves signals and supplements into the outbox, in `tx` (the transaction that changed
 /// what they follow). Nothing when there are none.
 pub(crate) fn emit(
     tx: &mut steve_store::W<'_>,
@@ -49,12 +42,11 @@ pub(crate) fn emit(
     for id in &fx.gh {
         crate::events::emit(tx, ws, id);
     }
-    if fx.finish.is_empty() && fx.signals.is_empty() && fx.supplements.is_empty() {
+    if fx.signals.is_empty() && fx.supplements.is_empty() {
         return Ok(());
     }
     let a = After {
         connection: connection.into(),
-        finish: std::mem::take(&mut fx.finish),
         signals: std::mem::take(&mut fx.signals),
         supplements: std::mem::take(&mut fx.supplements),
     };
@@ -96,7 +88,7 @@ impl Consumer for GitHubAfter {
         Since::Start
     }
 
-    /// Items first, then the signals in order, as after the commit before. Async: the dispatcher
+    /// Delivers signals before supplements. The dispatcher
     /// runs consumers on a blocking thread of the Hub's runtime.
     fn effect(&self, ev: &Event) -> Result<(), ConsumeError> {
         let a = after(ev)?;
@@ -104,9 +96,6 @@ impl Consumer for GitHubAfter {
             .map_err(|_| ConsumeError::Retry("没有运行时".into()))?;
         rt.block_on(async {
             let ws = ev.workspace_id.as_str();
-            for (item, now) in &a.finish {
-                self.gh.finish_item_checked(ws, item, now).await?;
-            }
             let sink = self.gh.sink();
             for s in a.signals {
                 sink.ingest(ws, &a.connection, s).await?;
@@ -121,11 +110,7 @@ impl Consumer for GitHubAfter {
 
     fn apply(&self, _w: &mut steve_store::W<'_>, ev: &Event) -> Result<Applied, ConsumeError> {
         let a = after(ev)?;
-        Ok(Applied::noted(format!(
-            "{} 个事项，{} 个信号",
-            a.finish.len(),
-            a.signals.len()
-        )))
+        Ok(Applied::noted(format!("{} 个信号", a.signals.len())))
     }
 }
 

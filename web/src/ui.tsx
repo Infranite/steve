@@ -603,7 +603,7 @@ export function ItemRef({ id }: { id: string }) {
       <ItemMedia variant="icon" className="rounded-lg bg-muted text-muted-foreground"><ListTodoIcon className="size-4" strokeWidth={1.5} /></ItemMedia>
       <ItemContent className="min-w-0 gap-0.5">
         <ItemTitle className="w-full min-w-0 type-body"><span className="min-w-0 truncate">{i.t}</span></ItemTitle>
-        <ItemDescription className="truncate type-footnote"><span className="font-mono tabular-nums">{i.id}</span> · {botName(i.b)} · {i.now}</ItemDescription>
+        <ItemDescription className="truncate type-footnote"><span className="font-mono tabular-nums">{i.id}</span> · {botName(i.b)} · {i.progress}</ItemDescription>
       </ItemContent>
       <ItemActions><Status s={itemDisplayStatus(i)} /></ItemActions>
     </UIItem>

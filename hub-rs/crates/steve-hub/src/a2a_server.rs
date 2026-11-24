@@ -108,10 +108,10 @@ fn rpc_err(id: &Value, code: i64, message: impl Into<String>) -> Response {
 /// The A2A state of an item: waiting for the user is `input-required` only while a question,
 /// approval or acceptance is open for it; before its first session it is `submitted`.
 fn state_of(i: &steve_store::Item, open_decision: bool, started: bool) -> &'static str {
-    match (i.status.as_str(), i.outcome.as_deref()) {
-        ("done", _) => "completed",
-        ("drop", _) => "canceled",
-        (_, Some("failed")) => "failed",
+    match (i.phase, i.outcome.as_deref()) {
+        (steve_types::ItemPhase::Closed, Some("completed")) => "completed",
+        (steve_types::ItemPhase::Closed, Some("failed")) => "failed",
+        (steve_types::ItemPhase::Closed, _) => "canceled",
         _ if open_decision => "input-required",
         _ if !started => "submitted",
         _ => "working",
@@ -136,7 +136,9 @@ fn task_of(store: &steve_store::Store, ws: &str, id: &str) -> Result<Value, Stri
         .decisions()
         .of_item(&i.id)
         .map_err(|e| e.to_string())?;
-    let open = decisions.iter().any(|d| d.status == "open");
+    let open = decisions
+        .iter()
+        .any(|d| d.status == steve_types::DecisionStatus::Open);
     let started = !store
         .sessions()
         .of_item(&i.id)

@@ -189,12 +189,6 @@ pub async fn get_one(
 ) -> ApiResult {
     own_item(&st, &c.ws, &id).await?;
     let lifecycle = st.domain.lifecycle_view(&id).await?;
-    // the derived state next to today's (#327): shown, not acted on, and never in the way of the item
-    // page: when it cannot be computed it is left out and the reason logged
-    let derived = st.domain.derived_state(&id).await.unwrap_or_else(|e| {
-        tracing::warn!(item = %id, error = %e, "item detail: derived state unavailable");
-        None
-    });
     let workflow = st.domain.workflow_get(&id).await?;
     let dependency_wait = dependency_shown(st.domain.dependency_get(&id).await?);
     let dispatch = super::bot_dispatch::store(&st).and_then(|s| {
@@ -205,23 +199,15 @@ pub async fn get_one(
     st.read(move |r| {
         let i = own(r.item_get(&id)?, &c.ws, Noun::Item)?;
         let mut out = summary(r, i)?;
-        let mut text = r
+        let text = r
             .item_text(&c.ws, &id)?
             .ok_or_else(|| ApiError::not_found(Noun::Item.missing()))?;
-        if let Some(Value::String(now)) = text.get_mut("now")
-            && let std::borrow::Cow::Owned(shown) = steve_core::now_line::shown(now)
-        {
-            *now = shown;
-        }
         out.extend(text);
         if let Some(dispatch) = dispatch {
             out.insert("dispatch".into(), dispatch);
         }
         if let Some(l) = lifecycle {
             out.insert("lifecycle".into(), l);
-        }
-        if let Some(v) = derived {
-            out.insert("derived_state".into(), v);
         }
         out.insert("workflow".into(), workflow);
         out.insert("dependency_wait".into(), dependency_wait);
@@ -314,16 +300,7 @@ pub async fn actions(
     let mut k = Check::object(&v);
     let action = k.enum_(
         "action",
-        &[
-            "pause",
-            "resume",
-            "finish",
-            "unfinish",
-            "drop",
-            "reopen",
-            "archive",
-            "unarchive",
-        ],
+        &["pause", "resume", "drop", "archive", "unarchive"],
     );
     k.finish()?;
     ok(Value::Object(
@@ -744,7 +721,10 @@ pub async fn lifecycle(
     own_item(&st, &c.ws, &id).await?;
     let v = body(&b)?;
     let mut k = Check::object(&v);
-    let command = k.enum_("command", &["accept", "cancel", "fail", "new_cycle"]);
+    let command = k.enum_(
+        "command",
+        &["accept", "finish", "cancel", "fail", "new_cycle"],
+    );
     let int = |min: f64| Num {
         int: true,
         min: Some(min),
@@ -756,6 +736,12 @@ pub async fn lifecycle(
     let reason = k.opt_str("reason", Str::ANY);
     let goal = k.opt_str("goal", Str::ANY);
     k.finish()?;
+    if command == "finish" && c.user.get("role").and_then(Value::as_str) != Some("owner") {
+        return Err(ApiError::Json(
+            403,
+            steve_i18n::t!("hub.item.finish_owner_only"),
+        ));
+    }
     match st
         .domain
         .lifecycle_command(&id, &command, cycle, revision, reason, goal, &c.me)

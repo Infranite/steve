@@ -143,8 +143,6 @@ export default {
     sendRework: "Send back",
     rework: "Rework…",
     pass: "Accept",
-    passRelease: "Accept and release",
-    passNoRelease: "Accept, don't release yet",
   },
   composer: {
     reply: "Replying: “{{text}}”",

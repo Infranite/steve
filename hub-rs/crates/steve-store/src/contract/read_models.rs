@@ -9,7 +9,6 @@ pub struct TimezoneSettings<'a, C>(pub &'a mut C);
 
 pub struct ItemEventFields {
     pub title: String,
-    pub status: String,
     pub bot_id: Option<String>,
     pub project_id: Option<String>,
     pub source: serde_json::Value,
@@ -114,7 +113,7 @@ impl<C: Read> ItemReads<'_, C> {
                         .from("items")
                         .and_where(Expr::col("workspace_id").eq(ws))
                         .and_where(Expr::col("archived").eq(0_i64))
-                        .and_where(Expr::col("status").is_not_in(["done", "drop"]))
+                        .and_where(Expr::col("phase").ne("closed"))
                         .and_where(Expr::col("id").is_in(batch.iter().map(String::as_str)))
                         .limit(1),
                     |_| Ok(()),
@@ -235,10 +234,10 @@ impl<C: Read> TimezoneSettings<'_, C> {
 }
 
 impl<C: Read> ItemReads<'_, C> {
-    pub fn status(&mut self, ws: &str, id: &str) -> Result<Option<String>> {
+    pub fn item_outcome_or_phase(&mut self, ws: &str, id: &str) -> Result<Option<String>> {
         self.0.one(
             Query::select()
-                .column("status")
+                .expr(Expr::cust("COALESCE(outcome, phase)"))
                 .from("items")
                 .and_where(Expr::col("workspace_id").eq(ws))
                 .and_where(Expr::col("id").eq(id)),
@@ -275,7 +274,6 @@ impl<C: Read> ItemReads<'_, C> {
             Query::select()
                 .columns([
                     "title",
-                    "status",
                     "bot_id",
                     "project_id",
                     "source",
@@ -288,14 +286,13 @@ impl<C: Read> ItemReads<'_, C> {
             |row| {
                 Ok(ItemEventFields {
                     title: row.get(0)?,
-                    status: row.get(1)?,
-                    bot_id: row.get(2)?,
-                    project_id: row.get(3)?,
+                    bot_id: row.get(1)?,
+                    project_id: row.get(2)?,
                     source: row
-                        .get::<Option<super::Json<_>>>(4)?
+                        .get::<Option<super::Json<_>>>(3)?
                         .map_or(serde_json::Value::Null, |json| json.0),
-                    cycle: row.get(5)?,
-                    revision: row.get(6)?,
+                    cycle: row.get(4)?,
+                    revision: row.get(5)?,
                 })
             },
         )
@@ -309,7 +306,8 @@ impl<C: Read> ItemReads<'_, C> {
     ) -> Result<Vec<(String, String, String)>> {
         self.0.all(
             Query::select()
-                .columns(["id", "title", "now"])
+                .columns(["id", "title"])
+                .expr(Expr::cust("COALESCE((SELECT text FROM timeline WHERE item_id=items.id AND kind='progress' ORDER BY id DESC LIMIT 1), '')"))
                 .from("items")
                 .and_where(Expr::col("workspace_id").eq(ws))
                 .and_where(Expr::col("updated").gt(since))
@@ -474,7 +472,7 @@ impl<C: Read> ItemReads<'_, C> {
             .one(
                 requested(ws, user)
                     .expr(Expr::col("id").count())
-                    .and_where(Expr::col("status").eq("run"))
+                    .and_where(Expr::col("phase").eq("active"))
                     .and_where(Expr::col("archived").eq(0_i64)),
                 |r| r.get::<i64>(0),
             )?
@@ -487,7 +485,11 @@ impl<C: Read> ItemReads<'_, C> {
             .one(
                 requested(ws, user)
                     .expr(Expr::col("id").count())
-                    .and_where(Expr::col("status").eq("done"))
+                    .and_where(
+                        Expr::col("phase")
+                            .eq("closed")
+                            .and(Expr::col("outcome").eq("completed")),
+                    )
                     .and_where(
                         sea_query::Func::coalesce([Expr::col("closed_at"), Expr::col("updated")])
                             .gte(since),
@@ -509,8 +511,12 @@ impl<C: Read> ItemReads<'_, C> {
         }
         self.0.all(
             requested(ws, user)
-                .columns(["id", "title", "status"])
-                .and_where(Expr::col("status").is_in(states.iter().copied()))
+                .columns(["id", "title"])
+                .expr(Expr::cust("COALESCE(outcome, phase)"))
+                .and_where(
+                    Expr::cust("CASE WHEN phase='closed' THEN outcome ELSE phase END")
+                        .is_in(states.iter().copied()),
+                )
                 .and_where(Expr::col("archived").eq(0_i64))
                 .order_by("updated", sea_query::Order::Desc)
                 .limit(limit),

@@ -41,7 +41,16 @@ fn assert_chain(k: &Kit, item: &str) -> Vec<String> {
         assert_ne!(m.1, m.2, "{st:?}");
         prev = m.2.clone();
     }
-    assert_eq!(prev.as_deref(), Some(k.status(item).0.as_str()));
+    let current = k.db().item(item).unwrap().unwrap();
+    assert_eq!(
+        prev.as_deref(),
+        Some(
+            current
+                .outcome
+                .as_deref()
+                .unwrap_or_else(|| current.phase.as_str())
+        )
+    );
     st.into_iter().filter_map(|m| m.2).collect()
 }
 
@@ -50,33 +59,30 @@ fn every_status_change_leaves_one_mark() {
     let k = Kit::new();
     let i = k.item("run", "执行", None);
     k.session(&i, "idle");
-    assert_eq!(assert_chain(&k, &i), ["run"]);
+    assert_eq!(assert_chain(&k, &i), ["active"]);
     // a patch that does not change the status leaves nothing
-    k.db()
-        .item_patch(&i, patch![status: "run", now: "x"])
-        .unwrap();
-    k.db().item_patch(&i, patch![now: "y"]).unwrap();
-    assert_eq!(assert_chain(&k, &i), ["run"]);
+    k.db().item_patch(&i, patch![title: "y"]).unwrap();
+    assert_eq!(assert_chain(&k, &i), ["active"]);
     k.core.item_action(&i, ItemAction::Pause, "me").unwrap();
     k.core.item_action(&i, ItemAction::Resume, "me").unwrap();
     k.core.item_action(&i, ItemAction::Drop, "me").unwrap();
     // the resumed turn is stopped; the cancel commits when it ended
     let sid = k.db().sessions_of_item(&i).unwrap()[0].id.clone();
     k.rt.end_turn(&k.core, &sid, "cancelled", None);
-    assert_eq!(k.status(&i).0, "drop");
-    k.core.item_action(&i, ItemAction::Reopen, "me").unwrap();
+    assert_eq!(k.item_label(&i), "drop");
+    k.new_cycle(&i).unwrap();
     let chain = assert_chain(&k, &i);
-    assert_eq!(chain.first().map(String::as_str), Some("run"));
-    assert!(chain.contains(&"pause".to_string()), "{chain:?}");
-    assert!(chain.contains(&"drop".to_string()), "{chain:?}");
+    assert_eq!(chain.first().map(String::as_str), Some("active"));
+    assert!(chain.contains(&"paused".to_string()), "{chain:?}");
+    assert!(chain.contains(&"cancelled".to_string()), "{chain:?}");
 
     // accepting finishes the item: one more mark, to done
     let x = k.delivered(false);
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-    assert_eq!(k.status(&x.id).0, "done");
+    assert_eq!(k.item_label(&x.id), "done");
     assert_eq!(
         assert_chain(&k, &x.id).last().map(String::as_str),
-        Some("done")
+        Some("completed")
     );
 
     // a dependency released: wait → run
@@ -93,7 +99,12 @@ fn manual_delivery_marks_its_accept_card() {
     k.manual_acceptance();
     let x = k.delivered(false);
     k.db()
-        .decision_resolve(&x.decision, json!({"choice": "skip"}), "resolved", None)
+        .decision_resolve(
+            &x.decision,
+            json!({"choice": "skip"}),
+            steve_store::decision_repo::DecisionChange::Resolve,
+            None,
+        )
         .unwrap();
     let s = k.db().session(&x.session).unwrap().unwrap();
     k.core.tool_deliver(&s, "ok", &[], &[], &[]).unwrap();
@@ -102,7 +113,7 @@ fn manual_delivery_marks_its_accept_card() {
         .decisions_of_item(&x.id)
         .unwrap()
         .into_iter()
-        .find(|d| d.kind == "accept" && d.status == "open")
+        .find(|d| d.kind == "accept" && d.status == steve_types::DecisionStatus::Open)
         .unwrap();
     assert_eq!(
         of_kind(&k, &x.id, "deliver"),
@@ -115,7 +126,12 @@ fn auto_delivery_is_marked_auto() {
     let k = Kit::new();
     let x = k.delivered(false);
     k.db()
-        .decision_resolve(&x.decision, json!({"choice": "skip"}), "resolved", None)
+        .decision_resolve(
+            &x.decision,
+            json!({"choice": "skip"}),
+            steve_store::decision_repo::DecisionChange::Resolve,
+            None,
+        )
         .unwrap();
     k.db()
         .settings_set(WS, json!({"accDefault": "auto"}).as_object().unwrap(), "me")
@@ -131,7 +147,7 @@ fn auto_delivery_is_marked_auto() {
     assert_eq!(of_kind(&k, &x.id, "deliver"), [(Some("auto".into()), None)]);
     assert_eq!(
         assert_chain(&k, &x.id).last().map(String::as_str),
-        Some("done")
+        Some("completed")
     );
 }
 
@@ -182,7 +198,12 @@ fn approved(k: &Kit) -> (String, String) {
     let s = k.session(&i, "idle");
     let d = k.decision(&i, Some(&s), "approve", "release", &["yes", "no"]);
     k.db()
-        .decision_resolve(&d, json!({"approved": true, "text": ""}), "resolved", None)
+        .decision_resolve(
+            &d,
+            json!({"approved": true, "text": ""}),
+            steve_store::decision_repo::DecisionChange::Resolve,
+            None,
+        )
         .unwrap();
     (i, d)
 }
@@ -237,10 +258,25 @@ fn a_reported_release_marks_released_without_finishing_the_item() {
         .tx()
         .release_outcome(&i, "releasing", json!({}))
         .unwrap();
+    let item = k.db().item(&i).unwrap().unwrap();
+    let (operation, _) = k
+        .core
+        .tx()
+        .record_item_operation(
+            &item,
+            crate::cycle::OP_RELEASE,
+            Some(&d),
+            false,
+            "running",
+            "Release",
+            json!({"scope": 1}),
+        )
+        .unwrap();
     std::fs::create_dir_all(k.home().join("releases")).unwrap();
     std::fs::write(
         k.home().join("releases/last.json"),
-        json!({"ok": true, "kind": "hub", "version": "v9", "item": i}).to_string(),
+        json!({"ok": true, "kind": "hub", "version": "v9", "item": i, "operation": operation.id})
+            .to_string(),
     )
     .unwrap();
     k.core.report_release().unwrap();
@@ -251,7 +287,7 @@ fn a_reported_release_marks_released_without_finishing_the_item() {
     // a release is a fact about the item, never its completion
     assert_ne!(
         assert_chain(&k, &i).last().map(String::as_str),
-        Some("done")
+        Some("completed")
     );
 }
 
@@ -274,7 +310,12 @@ fn a_refused_delivery_is_marked_with_its_reason() {
     let k = Kit::new();
     let x = k.delivered(false);
     k.db()
-        .decision_resolve(&x.decision, json!({"choice": "skip"}), "resolved", None)
+        .decision_resolve(
+            &x.decision,
+            json!({"choice": "skip"}),
+            steve_store::decision_repo::DecisionChange::Resolve,
+            None,
+        )
         .unwrap();
     let s = k.db().session(&x.session).unwrap().unwrap();
     let odd = Check {

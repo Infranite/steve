@@ -2,11 +2,11 @@ use crate::contract::Q;
 use crate::{Read, Result, W};
 use sea_query::{Expr, ExprTrait, Order, Query};
 
-/// `(title, status)` of an item in a workspace.
+/// `(title, phase)` of an item in a workspace.
 pub fn item_brief(c: &mut impl Read, ws: &str, id: &str) -> Result<Option<(String, String)>> {
     c.one(
         Query::select()
-            .columns(["title", "status"])
+            .columns(["title", "phase"])
             .from("items")
             .and_where(Expr::col("id").eq(id))
             .and_where(Expr::col("workspace_id").eq(ws)),
@@ -34,21 +34,26 @@ pub fn item_for_branch(
     )
 }
 
-/// `status` of an item in a workspace.
-pub fn item_status(c: &mut impl Read, ws: &str, id: &str) -> Result<Option<String>> {
+pub fn open_cycle(c: &mut impl Read, ws: &str, item: &str) -> Result<Option<i64>> {
     c.one(
         Query::select()
-            .columns(["status"])
+            .column("cycle")
             .from("items")
-            .and_where(Expr::col("id").eq(id))
-            .and_where(Expr::col("workspace_id").eq(ws)),
-        |r| r.get(0),
+            .and_where(Expr::col("id").eq(item))
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("phase").ne("closed")),
+        |row| row.get(0),
     )
 }
 
 /// A timeline line `steve sys <text>` (what the TS Hub writes for system notes).
 pub fn add_timeline(c: &mut W<'_>, item: &str, text: &str, now: i64) -> Result<()> {
     store_timeline(c, item, "steve", "sys", text, None, None, now)
+}
+
+/// A progress report supplied by the item executor.
+pub fn add_progress(w: &mut W<'_>, item: &str, actor: &str, text: &str, at: i64) -> Result<()> {
+    store_timeline(w, item, actor, "progress", text, None, None, at)
 }
 
 pub(crate) fn store_timeline(
@@ -166,7 +171,6 @@ pub fn running_tasks(c: &mut impl Read, ws: &str) -> Result<Vec<String>> {
             .from("items")
             .and_where(Expr::col("workspace_id").eq(ws))
             .and_where(Expr::col("kind").eq("task"))
-            .and_where(Expr::col("status").eq("run"))
             .and_where(Expr::col("archived").eq(0_i64))
             .and_where(Expr::col("phase").eq("active"))
             .order_by("updated", Order::Desc),
@@ -203,29 +207,17 @@ pub fn existing_ids(
         .collect())
 }
 
-pub fn set_progress(w: &mut W<'_>, id: &str, status: &str, stage: &str, now: &str) -> Result<()> {
-    w.exec(
-        Query::update()
-            .table("items")
-            .value("status", status)
-            .value("stage", stage)
-            .value("now", now)
-            .and_where(Expr::col("id").eq(id)),
-    )?;
-    Ok(())
-}
-
 #[derive(Clone)]
 pub struct LinkedItem {
     pub id: String,
     pub title: String,
-    pub status: String,
+    pub phase: String,
     pub archived: bool,
 }
 
 impl LinkedItem {
     pub fn is_open(&self) -> bool {
-        !self.archived && !matches!(self.status.as_str(), "done" | "drop")
+        !self.archived && self.phase != "closed"
     }
 }
 
@@ -233,7 +225,7 @@ pub fn linked_items(c: &mut impl Read, ws: &str, ids: &[String]) -> Result<Vec<L
     let selected = c.db().dialect().text_array(ids)?;
     let rows = c.all(
         Query::select()
-            .columns(["id", "title", "status", "archived"])
+            .columns(["id", "title", "phase", "archived"])
             .from("items")
             .and_where(Expr::col("workspace_id").eq(ws))
             .and_where(Expr::col("id").in_subquery(selected)),
@@ -241,7 +233,7 @@ pub fn linked_items(c: &mut impl Read, ws: &str, ids: &[String]) -> Result<Vec<L
             Ok(LinkedItem {
                 id: r.get(0)?,
                 title: r.get(1)?,
-                status: r.get(2)?,
+                phase: r.get(2)?,
                 archived: r.get::<i64>(3)? != 0,
             })
         },
@@ -257,11 +249,11 @@ pub fn open_items(c: &mut impl Read, ids: &[String]) -> Result<Vec<(String, Stri
     let selected = c.db().dialect().text_array(ids)?;
     let rows = c.all(
         Query::select()
-            .columns(["id", "title", "status"])
+            .columns(["id", "title", "phase"])
             .from("items")
             .and_where(Expr::col("id").in_subquery(selected))
             .and_where(Expr::col("archived").eq(0_i64))
-            .and_where(Expr::col("status").is_not_in(["done", "drop"])),
+            .and_where(Expr::col("phase").ne("closed")),
         |r| {
             Ok((
                 r.get::<String>(0)?,
@@ -327,9 +319,10 @@ pub fn set_closed_plan(w: &mut W<'_>, item: &str, plan: Vec<crate::PlanStep>) ->
 pub(crate) fn progress_of_open_items(r: &mut impl Read) -> Result<Vec<(String, String, String)>> {
     r.all(
         Query::select()
-            .columns(["workspace_id", "id", "now"])
+            .columns(["workspace_id", "id"])
+            .expr(Expr::cust("(SELECT text FROM timeline WHERE item_id=items.id AND kind='progress' ORDER BY id DESC LIMIT 1)"))
             .from("items")
-            .and_where(Expr::col("status").is_not_in(["done", "drop"])),
+            .and_where(Expr::col("phase").ne("closed")),
         |row| {
             Ok((
                 row.get(0)?,
@@ -343,7 +336,7 @@ pub(crate) fn progress_of_open_items(r: &mut impl Read) -> Result<Vec<(String, S
 pub struct RaisedItem {
     pub id: String,
     pub title: String,
-    pub status: String,
+    pub phase: String,
     pub current: String,
 }
 
@@ -355,8 +348,9 @@ pub fn raised_open(
 ) -> Result<Vec<RaisedItem>> {
     r.all(
         Query::select()
-            .columns([("i", "id"), ("i", "title"), ("i", "status"), ("i", "now")])
+            .columns([("i", "id"), ("i", "title"), ("i", "phase")])
             .from_as("items", "i")
+            .expr(Expr::cust("(SELECT text FROM timeline WHERE item_id=i.id AND kind='progress' ORDER BY id DESC LIMIT 1)"))
             .join_as(
                 sea_query::JoinType::InnerJoin,
                 "links",
@@ -370,7 +364,7 @@ pub fn raised_open(
             .and_where(Expr::col(("l", "predicate")).eq("raised_by"))
             .and_where(Expr::col(("l", "object_type")).eq("party"))
             .and_where(Expr::col(("l", "object_id")).eq(party))
-            .and_where(Expr::col(("i", "status")).is_not_in(["done", "drop"]))
+            .and_where(Expr::col(("i", "phase")).ne("closed"))
             .and_where(Expr::col(("i", "archived")).eq(0_i64))
             .order_by(("i", "updated"), sea_query::Order::Desc)
             .limit(limit),
@@ -378,8 +372,8 @@ pub fn raised_open(
             Ok(RaisedItem {
                 id: row.get(0)?,
                 title: row.get(1)?,
-                status: row.get(2)?,
-                current: row.get(3)?,
+                phase: row.get(2)?,
+                current: row.get::<Option<String>>(3)?.unwrap_or_default(),
             })
         },
     )
@@ -415,7 +409,7 @@ pub fn dependency_management(r: &mut impl Read, item: Option<&str>) -> Result<bo
     r.db().query(
         "SELECT EXISTS(
                     SELECT 1 FROM items i WHERE i.id=?1 AND i.phase='active'
-                    AND i.status IN ('run','block') AND i.archived=0
+                    AND i.archived=0
                     AND COALESCE(json_extract(i.source,'$[1]'),'')<>'workflow'
                     AND NOT EXISTS(SELECT 1 FROM workflow_units u WHERE u.item_id=i.id)
                     AND NOT EXISTS(SELECT 1 FROM workflow_attempts a WHERE a.item_id=i.id)
@@ -424,8 +418,7 @@ pub fn dependency_management(r: &mut impl Read, item: Option<&str>) -> Result<bo
                         EXISTS(SELECT 1 FROM item_dependency_waits dw
                             WHERE dw.item_id=i.id AND dw.cycle=i.cycle AND dw.state='waiting')
                         OR EXISTS(SELECT 1 FROM item_deps d LEFT JOIN items dep ON dep.id=d.dep_id
-                            WHERE d.item_id=i.id AND (dep.id IS NULL OR dep.status<>'done'
-                                OR dep.phase<>'closed' OR dep.outcome IS NOT 'completed'))
+                            WHERE d.item_id=i.id AND (dep.id IS NULL OR dep.phase<>'closed' OR dep.outcome IS NOT 'completed'))
                     )
                 )",
         &sea_query::Values(vec![item.into()]),

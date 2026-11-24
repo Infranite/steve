@@ -17,7 +17,7 @@ const newer = "刚刚同步的第二版正式稿。\n请以此稿为准。"
 const local = "我尚未提交的修改。\n需要保留并对照。"
 
 function scenario(name) {
-  let decision = { id: "dc_reply", ws: "ws_fixture", kind: "approve", subject_type: "chan_message", subject_id: "cm_reply", item_id: null, session_id: null, question: "审批渠道回复", draft: initial, options: ["yes", "no", "to_item"], status: "open", result: null, requested_by: "steve", created: 1, resolved: null, undo_until: null, space_id: null, tier: "decide", folded: null }
+  let decision = { id: "dc_reply", ws: "ws_fixture", kind: "approve", subject_type: "chan_message", subject_id: "cm_reply", item_id: null, session_id: null, question: { kind: "raw", text: "审批渠道回复" }, draft: initial, options: ["yes", "no", "to_item"], status: "open", result: null, requested_by: "steve", created: 1, resolved: null, undo_until: null, space_id: null, tier: "decide", folded: null, revision: 1 }
   let rev = 1
   let failNext = false
   const pages = [], errors = [], writes = [], events = []
@@ -107,7 +107,7 @@ try {
   await idle.shot(p, "editor")
   await p.locator("[data-reply-send]").evaluate((b) => { b.click(); b.click() })
   await sent(p)
-  eq(idle.writes.map((w) => w.body), [{ choice: "yes", text: updated }], "double click posts exactly the newest reviewed text once")
+  eq(idle.writes.map((w) => w.body), [{ revision: 1, choice: "yes", text: updated }], "double click posts exactly the newest reviewed text once")
   await idle.close()
 
   const peer = scenario("other-client-approval-undo")
@@ -127,9 +127,9 @@ try {
   await first.locator("[data-reply-send]").click()
   await sent(first)
   eq(peer.writes.map(({ client, path, body }) => ({ client, path, body })), [
-    { client: 2, path: "/api/decisions/dc_reply", body: { choice: "yes", text: updated } },
+    { client: 2, path: "/api/decisions/dc_reply", body: { revision: 1, choice: "yes", text: updated } },
     { client: 2, path: "/api/decisions/dc_reply/undo", body: {} },
-    { client: 1, path: "/api/decisions/dc_reply", body: { choice: "yes", text: updated } },
+    { client: 1, path: "/api/decisions/dc_reply", body: { revision: 1, choice: "yes", text: updated } },
   ], "both browser clients and the undo helper post the intended payloads")
   await peer.close()
 
@@ -153,7 +153,7 @@ try {
       eq(await page.locator("[data-reply-conflict]").count(), 0, "cancel returns to the latest formal draft")
       await page.locator("[data-reply-send]").click()
       await sent(page)
-      eq(x.writes[0].body, { choice: "yes" }, "approval after cancel uses the formal draft without stale edits")
+      eq(x.writes[0].body, { revision: 1, choice: "yes" }, "approval after cancel uses the formal draft without stale edits")
     } else {
       await page.locator(`[data-reply-${resolution}]`).click()
       eq(await page.locator("[data-reply-conflict]").count(), 0, "the chosen resolution clears conflict")
@@ -174,7 +174,7 @@ try {
       eq(await page.locator("[data-reply-result]").count(), 0, "failure never claims a send")
       await page.locator("[data-reply-send]").evaluate((b) => { b.click(); b.click() })
       await sent(page)
-      eq(x.writes.map((w) => w.body), [{ choice: "yes", text: final }, { choice: "yes", text: final }], "failed attempt and single retry both use the explicitly chosen text")
+      eq(x.writes.map((w) => w.body), [{ revision: 1, choice: "yes", text: final }, { revision: 1, choice: "yes", text: final }], "failed attempt and single retry both use the explicitly chosen text")
       eq(x.writes.map((w) => w.status), [503, 200])
     }
     await x.close()
@@ -196,7 +196,7 @@ try {
   await multi.shot(page, "independent-editors")
   await cards.last().locator("[data-reply-send]").evaluate((b) => { b.click(); b.click() })
   await sent(page)
-  eq(multi.writes.map((w) => w.body), [{ choice: "yes", text: updated }], "only the current reviewed view posts")
+  eq(multi.writes.map((w) => w.body), [{ revision: 1, choice: "yes", text: updated }], "only the current reviewed view posts")
   await multi.close()
 
   for (const resolution of ["use-latest", "keep-edits"]) {
@@ -211,7 +211,7 @@ try {
     await p.locator(`[data-reply-${resolution}]`).click()
     await p.locator("[data-reply-send]").click()
     await sent(p)
-    eq(x.writes[0].body, { choice: "yes", text: resolution === "use-latest" ? updated : local })
+    eq(x.writes[0].body, { revision: 1, choice: "yes", text: resolution === "use-latest" ? updated : local })
     await x.close()
   }
 } finally {

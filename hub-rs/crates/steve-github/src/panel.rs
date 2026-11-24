@@ -78,13 +78,8 @@ fn badges(pr: &PrRow) -> Vec<String> {
     b
 }
 
-/// `3 项检查通过 · 等你验收后合并`.
-fn foot(
-    c: &mut impl steve_store::Read,
-    pr: &PrRow,
-    checks: &[&CheckRow],
-    item_status: Option<&str>,
-) -> ApiResult<String> {
+/// Check and pull-request status.
+fn foot(c: &mut impl steve_store::Read, pr: &PrRow, checks: &[&CheckRow]) -> ApiResult<String> {
     let n = |s: &str| checks.iter().filter(|k| check_state(k) == s).count();
     let (fail, pending, ok) = (n("fail"), n("pending"), n("ok") + n("skipped"));
     let mut parts = Vec::new();
@@ -107,9 +102,6 @@ fn foot(
         {
             parts.push(steve_i18n::t!("github.panel.wait_merge"))
         }
-        _ if green && item_status == Some("wait") => {
-            parts.push(steve_i18n::t!("github.panel.wait_accept"))
-        }
         _ => {}
     }
     Ok(parts.join(" · "))
@@ -124,10 +116,6 @@ pub fn pr_panel(
 ) -> ApiResult<Panel> {
     let rows = steve_store::github::checks_for_sha(c, &repo.id, &pr.head_sha)?;
     let checks = latest_checks(&rows);
-    let item_status = match &pr.item_id {
-        Some(i) => steve_store::item_repo::item_status(c, &pr.workspace_id, i)?,
-        None => None,
-    };
     let mut updated = pr.updated;
     let rows_out = checks
         .iter()
@@ -169,7 +157,7 @@ pub fn pr_panel(
             badges: badges(pr),
         }),
         rows: rows_out,
-        foot: Some(foot(c, pr, &checks, item_status.as_deref())?),
+        foot: Some(foot(c, pr, &checks)?),
         actions,
         updated,
     })
