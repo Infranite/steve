@@ -480,7 +480,12 @@ fn a_unit_working_again_clears_the_parents_stop_card() {
         .filter(|d| d.status == steve_types::DecisionStatus::Open)
         .for_each(|d| {
             k.db()
-                .decision_resolve(&d.id, json!({}), "resolved", None)
+                .decision_resolve(
+                    &d.id,
+                    json!({}),
+                    steve_store::decision_repo::DecisionChange::Resolve,
+                    None,
+                )
                 .unwrap();
         });
 

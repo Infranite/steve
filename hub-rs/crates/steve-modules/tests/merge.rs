@@ -509,7 +509,7 @@ fn resolve(t: &TestEnv, d: &str, choice: &str) -> Result<Decision, steve_modules
 /// What steve-core's `undoDecision` runs for a module decision.
 fn undo(t: &TestEnv, d: &str) -> Result<(), steve_modules::ApiError> {
     decisions::undo(&t.modules, d, ME, |d| {
-        d.status == steve_types::DecisionStatus::Resolved && !d.undo.is_null()
+        d.status == steve_types::DecisionStatus::Resolved && d.undo.is_some()
     })
     .expect("ours")
     .map(drop)

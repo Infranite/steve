@@ -843,14 +843,14 @@ fn confirm_decisions_without_an_item() {
     assert!(tx(s, |tx| steve_store::DecisionRows(tx).settle(
         &d.id,
         &json!({"choice": "yes"}),
-        "resolved",
-        &serde_json::Value::Null
+        steve_store::decision_repo::DecisionChange::Resolve,
+        None
     )));
     assert!(!tx(s, |tx| steve_store::DecisionRows(tx).settle(
         &d.id,
         &json!({}),
-        "resolved",
-        &serde_json::Value::Null
+        steve_store::decision_repo::DecisionChange::Resolve,
+        None
     )));
     let d = s.decisions().get(&d.id).unwrap().unwrap();
     assert_eq!(

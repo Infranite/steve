@@ -603,7 +603,7 @@ fn a_late_release_result_is_recorded_on_its_original_approval() {
         .decision_resolve(
             &second.id,
             json!({"approved": true, "outcome": "releasing"}),
-            "resolved",
+            steve_store::decision_repo::DecisionChange::Resolve,
             None,
         )
         .unwrap();

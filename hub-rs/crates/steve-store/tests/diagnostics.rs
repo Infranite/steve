@@ -526,12 +526,17 @@ fn card_transitions_record_only_committed_changes_without_copying_card_content()
         .resolve(
             &d.id,
             &json!({"answer":"private answer body"}),
-            "resolved",
-            &Value::Null,
+            steve_store::decision_repo::DecisionChange::Resolve,
+            None,
         )
         .unwrap();
     s.decisions()
-        .resolve(&d.id, &json!({}), "resolved", &Value::Null)
+        .resolve(
+            &d.id,
+            &json!({}),
+            steve_store::decision_repo::DecisionChange::Resolve,
+            None,
+        )
         .unwrap();
     s.decisions().reopen(&d.id).unwrap();
     s.decisions().reopen(&d.id).unwrap();

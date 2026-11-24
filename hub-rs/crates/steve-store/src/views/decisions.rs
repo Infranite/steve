@@ -189,12 +189,10 @@ fn candidate(r: &Row<'_>) -> Result<Candidate> {
     // JSON written by the store; a value that is not JSON reads as nothing rather than failing
     // every view of the workspace
     let result: Option<String> = r.get(11)?;
-    let undo: Option<String> = r.get(15)?;
-    let undo = undo
-        .as_deref()
-        .and_then(|value| serde_json::from_str(value).ok())
-        .unwrap_or_default();
-    let undo_until = crate::decision_repo::undo_until(status, resolved, &undo);
+    let undo = r
+        .get::<Option<Json<crate::DecisionUndo>>>(15)?
+        .map(|undo| undo.0);
+    let undo_until = crate::decision_repo::undo_until(status, resolved, undo.as_ref());
     let options: Option<Json<Vec<String>>> = r.get(9).ok();
     let (kind, subject_type): (String, String) = (r.get(2)?, r.get(3)?);
     let recovery = subject_type == ABOUT_CHAT_MESSAGE

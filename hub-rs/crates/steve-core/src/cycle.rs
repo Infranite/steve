@@ -666,8 +666,8 @@ impl Tx<'_> {
                 steve_store::DecisionRows(tx).settle(
                     &d.id,
                     &json!({"superseded": why}),
-                    "expired",
-                    &Value::Null,
+                    steve_store::decision_repo::DecisionChange::Expire,
+                    None,
                 )?;
             }
             steve_store::item_repo::append_system_note(tx, item_id, &format!("收尾作废：{why}"))?;

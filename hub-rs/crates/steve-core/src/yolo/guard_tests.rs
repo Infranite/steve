@@ -1650,7 +1650,7 @@ fn the_preview_reads_no_checkout() {
                 requested_by: "agent".into(),
                 created: 0,
                 resolved: None,
-                undo: Value::Null,
+                undo: None,
             },
             Some(pl.cwd.clone()),
             None,

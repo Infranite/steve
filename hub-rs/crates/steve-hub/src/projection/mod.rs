@@ -310,7 +310,12 @@ mod tests {
                     let id = &ids[pick % ids.len()];
                     f.store
                         .decisions()
-                        .resolve(id, &json!({"answer": step}), "resolved", &json!({"x": 1}))
+                        .resolve(
+                            id,
+                            &json!({"answer": step}),
+                            steve_store::decision_repo::DecisionChange::Resolve,
+                            Some(&steve_store::DecisionUndo::Domain),
+                        )
                         .unwrap();
                 }
                 1 | 2 if !ids.is_empty() => {
@@ -504,7 +509,12 @@ mod tests {
         );
         f.store
             .decisions()
-            .resolve(&id, &json!({"answer": "ok"}), "resolved", &Value::Null)
+            .resolve(
+                &id,
+                &json!({"answer": "ok"}),
+                steve_store::decision_repo::DecisionChange::Resolve,
+                None,
+            )
             .unwrap();
         let snap = f.p.snapshot("default").await.unwrap();
         assert!(snap.views.decision.unwrap().is_empty());

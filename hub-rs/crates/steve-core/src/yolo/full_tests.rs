@@ -343,7 +343,7 @@ fn switching_from_off_to_full_answers_the_waiting_tool_request_only() {
         .decision_resolve(
             &expired,
             json!({"superseded": "这一轮已经结束"}),
-            "expired",
+            steve_store::decision_repo::DecisionChange::Expire,
             None,
         )
         .unwrap();

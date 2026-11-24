@@ -196,7 +196,12 @@ fn auto_accept_holds_failed_or_unfinished_delivery_and_closes_clean_or_baseline(
     let k = Kit::new();
     let x = k.delivered(false);
     k.db()
-        .decision_resolve(&x.decision, json!({"choice": "skip"}), "resolved", None)
+        .decision_resolve(
+            &x.decision,
+            json!({"choice": "skip"}),
+            steve_store::decision_repo::DecisionChange::Resolve,
+            None,
+        )
         .unwrap();
     k.db()
         .settings_set(

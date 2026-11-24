@@ -164,7 +164,7 @@ impl Tx<'_> {
             self.db().decision_resolve(
                 &d.id,
                 json!({"superseded": "它又开始工作了"}),
-                "expired",
+                steve_store::decision_repo::DecisionChange::Expire,
                 None,
             )?;
         }

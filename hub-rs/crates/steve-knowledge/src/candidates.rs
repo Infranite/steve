@@ -203,12 +203,16 @@ pub fn propose_in(tx: &mut W<'_>, o: &Origin, c: &NewCandidate) -> ApiResult<Mem
     if auto {
         // you said so yourself: kept now, the card settled as yours, undoable like your own yes
         answer(tx, &o.ws, "steve", &mem.id, "yes", "")?;
-        if let Some(d) = mem.decision_id.as_deref() {
-            DecisionRows(tx).settle(
-                d,
+        if let Some(id) = mem.decision_id.as_deref()
+            && let Some(d) = DecisionRows(tx).get(id)?
+        {
+            DecisionRows(tx).resolve_choice(
+                &d,
+                &o.user,
+                "yes",
+                "",
                 &json!({"choice": "yes", "auto": "owner_said"}),
-                "resolved",
-                &json!({"auto": true}),
+                Some(&steve_store::DecisionUndo::Domain),
             )?;
         }
         tx.audit(

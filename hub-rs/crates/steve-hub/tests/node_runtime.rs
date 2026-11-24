@@ -4703,8 +4703,8 @@ async fn startup_failure_holds_the_queue_and_keeps_the_previous_answer() {
         .resolve(
             &card,
             &serde_json::json!({"choice":"retry"}),
-            "resolved",
-            &serde_json::Value::Null,
+            steve_store::decision_repo::DecisionChange::Resolve,
+            None,
         )
         .unwrap();
     h.node.refuse_next(

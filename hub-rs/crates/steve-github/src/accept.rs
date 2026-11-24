@@ -596,8 +596,8 @@ pub(crate) async fn request_merge(
             steve_store::DecisionRows(tx).settle(
                 &existing.id,
                 &json!({"reason": "pull_request_head_changed"}),
-                "expired",
-                &Value::Null,
+                steve_store::decision_repo::DecisionChange::Expire,
+                None,
             )?;
         }
         let decision = steve_store::DecisionRows(tx).open(&NewDecision {
@@ -693,7 +693,7 @@ mod tests {
             requested_by: "owner".into(),
             created: 0,
             resolved: None,
-            undo: Value::Null,
+            undo: None,
         }
     }
 

@@ -166,7 +166,7 @@ fn rollback_is_offered_only_for_the_newest_release() {
         );
         t.kit
             .db()
-            .decision_resolve(&d, json!({"approved": true, "outcome": "released", "prev": "v1", "version": "v2", "decided_by": "yolo"}), "resolved", None)
+            .decision_resolve(&d, json!({"approved": true, "outcome": "released", "prev": "v1", "version": "v2", "decided_by": "yolo"}), steve_store::decision_repo::DecisionChange::Resolve, None)
             .unwrap();
         let a = t
             .yolo

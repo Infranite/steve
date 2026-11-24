@@ -939,16 +939,16 @@ impl ChangeOp for SetOp {
         if let Some(b) = &before {
             s.created = b.created;
             // a proposal confirmed by hand: its card is settled too
-            if let Some(d) = b.decision_id.as_deref().filter(|_| b.status == "proposed")
-                && DecisionRows(tx)
-                    .get(d)?
-                    .is_some_and(|d| d.status == steve_types::DecisionStatus::Open)
+            if let Some(id) = b.decision_id.as_deref().filter(|_| b.status == "proposed")
+                && let Some(d) = DecisionRows(tx).get(id)?
             {
-                DecisionRows(tx).settle(
-                    d,
+                DecisionRows(tx).resolve_choice(
+                    &d,
+                    cx.actor,
+                    "yes",
+                    "",
                     &json!({ "choice": "yes", "manual": true }),
-                    "resolved",
-                    &Value::Null,
+                    None,
                 )?;
             }
         }

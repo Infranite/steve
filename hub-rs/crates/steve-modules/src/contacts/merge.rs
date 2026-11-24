@@ -290,7 +290,7 @@ pub fn merge_tx(
         created: now(),
         split: None,
     })?;
-    settle_proposals(tx, ws, &from.id, &into.id)?;
+    settle_proposals(tx, ws, actor, &from.id, &into.id)?;
     tx.audit(
         ws,
         actor,
@@ -309,16 +309,36 @@ pub fn merge_tx(
 
 /// After `from` is merged: the open proposal of this very pair becomes `merged` (its card resolved with
 /// `merge`), other open proposals involving `from` are moot and expire.
-fn settle_proposals(tx: &mut W<'_>, ws: &str, from: &str, into: &str) -> ApiResult<()> {
+fn settle_proposals(
+    tx: &mut W<'_>,
+    ws: &str,
+    actor: &str,
+    from: &str,
+    into: &str,
+) -> ApiResult<()> {
     for p in MergeProposals(tx).involving(ws, from)? {
-        let (status, d_status, result) = if p.from == from && p.into == into {
-            ("merged", "resolved", json!({"choice":"merge"}))
-        } else {
-            ("expired", "expired", json!({"expired":true}))
-        };
-        MergeProposals(tx).set_status(&p.id, status)?;
-        if let Some(d) = p.decision {
-            DecisionRows(tx).settle(&d, &result, d_status, &Value::Null)?;
+        let same = p.from == from && p.into == into;
+        MergeProposals(tx).set_status(&p.id, if same { "merged" } else { "expired" })?;
+        if let Some(id) = p.decision
+            && let Some(d) = DecisionRows(tx).get(&id)?
+        {
+            if same {
+                DecisionRows(tx).resolve_choice(
+                    &d,
+                    actor,
+                    "merge",
+                    "",
+                    &json!({"choice":"merge"}),
+                    None,
+                )?;
+            } else {
+                DecisionRows(tx).apply(
+                    &d,
+                    steve_store::decision_repo::DecisionChange::Expire,
+                    &json!({"expired":true}),
+                    None,
+                )?;
+            }
         }
     }
     Ok(())

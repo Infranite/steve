@@ -99,7 +99,12 @@ fn manual_delivery_marks_its_accept_card() {
     k.manual_acceptance();
     let x = k.delivered(false);
     k.db()
-        .decision_resolve(&x.decision, json!({"choice": "skip"}), "resolved", None)
+        .decision_resolve(
+            &x.decision,
+            json!({"choice": "skip"}),
+            steve_store::decision_repo::DecisionChange::Resolve,
+            None,
+        )
         .unwrap();
     let s = k.db().session(&x.session).unwrap().unwrap();
     k.core.tool_deliver(&s, "ok", &[], &[], &[]).unwrap();
@@ -121,7 +126,12 @@ fn auto_delivery_is_marked_auto() {
     let k = Kit::new();
     let x = k.delivered(false);
     k.db()
-        .decision_resolve(&x.decision, json!({"choice": "skip"}), "resolved", None)
+        .decision_resolve(
+            &x.decision,
+            json!({"choice": "skip"}),
+            steve_store::decision_repo::DecisionChange::Resolve,
+            None,
+        )
         .unwrap();
     k.db()
         .settings_set(WS, json!({"accDefault": "auto"}).as_object().unwrap(), "me")
@@ -188,7 +198,12 @@ fn approved(k: &Kit) -> (String, String) {
     let s = k.session(&i, "idle");
     let d = k.decision(&i, Some(&s), "approve", "release", &["yes", "no"]);
     k.db()
-        .decision_resolve(&d, json!({"approved": true, "text": ""}), "resolved", None)
+        .decision_resolve(
+            &d,
+            json!({"approved": true, "text": ""}),
+            steve_store::decision_repo::DecisionChange::Resolve,
+            None,
+        )
         .unwrap();
     (i, d)
 }
@@ -295,7 +310,12 @@ fn a_refused_delivery_is_marked_with_its_reason() {
     let k = Kit::new();
     let x = k.delivered(false);
     k.db()
-        .decision_resolve(&x.decision, json!({"choice": "skip"}), "resolved", None)
+        .decision_resolve(
+            &x.decision,
+            json!({"choice": "skip"}),
+            steve_store::decision_repo::DecisionChange::Resolve,
+            None,
+        )
         .unwrap();
     let s = k.db().session(&x.session).unwrap().unwrap();
     let odd = Check {

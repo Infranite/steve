@@ -237,8 +237,8 @@ impl NodeRuntime {
             } else if steve_store::DecisionRows(tx).settle(
                 &d,
                 &json!({"superseded": "Node 已不再等待这个授权"}),
-                "expired",
-                &serde_json::Value::Null,
+                steve_store::decision_repo::DecisionChange::Expire,
+                None,
             )? {
                 *changed += 1;
             }

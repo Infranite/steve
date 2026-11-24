@@ -1407,22 +1407,30 @@ fn mark_composed(w: &mut steve_store::W<'_>, id: &str, what: &str) -> ChannelRes
 /// account's delay, undoable within it. Returns when it goes out.
 fn approve_draft(
     w: &mut steve_store::W<'_>,
-    ws: &str,
+    cx: &DecisionCx<'_>,
     m: &str,
     dd: &str,
     text: &str,
     card: &str,
     now: i64,
 ) -> ApiResult<i64> {
-    let row = own_out(w, ws, m)?;
+    let row = own_out(w, cx.ws, m)?;
     let send_at = now + send_delay_ms(w, &row)?;
     delivery_repo::transition(w, m, &["draft"], "pending", SentAt::Clear)?;
-    steve_store::DecisionRows(w).settle(
-        dd,
+    let mut decisions = steve_store::DecisionRows(w);
+    let approval = decisions
+        .get(dd)?
+        .ok_or_else(|| ApiError::not_found("decision"))?;
+    if !decisions.resolve_choice(
+        &approval,
+        cx.actor,
+        "yes",
+        text,
         &json!({"choice": "yes", "hash": text_hash(text), "send_at": send_at, "from_card": card}),
-        "resolved",
-        &steve_modules::decisions::undo_marker(SUBJECT_MESSAGE),
-    )?;
+        Some(&steve_store::DecisionUndo::Domain),
+    )? {
+        return Err(ApiError::conflict(steve_i18n::t!("channels.error.handled")));
+    }
     Ok(send_at)
 }
 
@@ -1506,7 +1514,13 @@ async fn send_chosen(
                 rows.edit_card(&dd, Some(&question), None, None)?;
             }
         } else {
-            approve_draft(w, ws, &m, &dd, text, decision, now)?;
+            let cx = DecisionCx {
+                ws,
+                actor: by,
+                choice: "yes",
+                text,
+            };
+            approve_draft(w, &cx, &m, &dd, text, decision, now)?;
         }
         let mut result = card.result;
         if result.is_null() {
@@ -4055,7 +4069,7 @@ fn fail_orphaned_message(w: &mut steve_store::W<'_>, row: &OutRow) -> ChannelRes
             &d,
             steve_store::decision_repo::DecisionChange::Dismiss,
             &json!({"dismissed": true, "why": "connection_gone"}),
-            &Value::Null,
+            None,
         )?;
     }
     steve_store::audit_repo::record(
@@ -4401,7 +4415,7 @@ impl MessageDecisions {
     ) -> ApiResult<(String, String, i64)> {
         let (m, dd) = respond::open_draft(w, plan, text, now)?;
         steve_store::channel_message_repo::reactions::expect_answer(w, &plan.message_id, &m)?;
-        let send_at = approve_draft(w, cx.ws, &m, &dd, text, card, now)?;
+        let send_at = approve_draft(w, cx, &m, &dd, text, card, now)?;
         steve_store::audit_repo::record(
             w,
             cx.ws,

@@ -741,8 +741,8 @@ impl NodeRuntime {
                     steve_store::DecisionRows(w).settle(
                         &d.id,
                         &json!({"superseded":"已保留当前会话启动失败的原因和重试入口"}),
-                        "expired",
-                        &Value::Null,
+                        steve_store::decision_repo::DecisionChange::Expire,
+                        None,
                     )?;
                 }
             }

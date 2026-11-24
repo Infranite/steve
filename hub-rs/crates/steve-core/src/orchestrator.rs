@@ -18,13 +18,14 @@ use crate::thread::flowback::{Update, flow_quiet, recover_quiet};
 use crate::util::{js_head, js_len, js_tail, now, or, token};
 use crate::{Core, Mark, Tx};
 use serde::Serialize;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use steve_modules::outbound::YOLO_ACTOR;
 use steve_modules::outbound::{UNTRUSTED_CLOSE, UNTRUSTED_OPEN, quote_untrusted};
-use steve_store::{Ingest, bots, file_repo, seeded};
+use steve_store::decision_repo::DecisionChange;
+use steve_store::{DecisionUndo, Ingest, bots, file_repo, seeded};
 
 const PRO: [&str; 3] = ["只在必要时", "适中", "积极"];
 const INTERRUPTED: &str = "Hub 重启时这个会话正在运行，这一回合被中断了";
@@ -184,50 +185,20 @@ fn cwd_usable(dir: &Path) -> bool {
     }
 }
 
-/// Reopen a card without changing a pause the owner requested afterward.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct PauseUndo {
-    #[serde(rename = "resume_at_revision")]
-    revision: Option<i64>,
-}
-
 fn settle_answer(
     w: &mut steve_store::W<'_>,
     decision: &Decision,
     cx: &steve_modules::decisions::DecisionCx<'_>,
     result: Value,
-    status: &str,
-    undo: Option<Value>,
+    change: DecisionChange,
+    undo: Option<DecisionUndo>,
 ) -> Result<()> {
-    use steve_store::decision_repo::DecisionChange;
-    if status == "expired" {
-        steve_store::DecisionRows(w).apply(
-            decision,
-            DecisionChange::Expire,
-            &result,
-            &Value::Null,
-        )?;
-        return Ok(());
+    if change == DecisionChange::Resolve {
+        steve_modules::decisions::complete_answer(w, decision, cx, &result, undo.as_ref())?;
+    } else if !steve_store::DecisionRows(w).apply(decision, change, &result, None)? {
+        return Err(msg(steve_i18n::t!("core.decision.handled")));
     }
-    steve_modules::decisions::complete_answer(
-        w,
-        decision,
-        cx,
-        &result,
-        &undo.unwrap_or(Value::Null),
-    )?;
     Ok(())
-}
-
-/// An item patch from a stored undo record (`{plan}`).
-fn undo_patch(u: &Value) -> Map<String, Value> {
-    let mut p = Map::new();
-    for k in ["plan"] {
-        if let Some(v) = u.get(k).filter(|v| !v.is_null()) {
-            p.insert(k.into(), v.clone());
-        }
-    }
-    p
 }
 
 /// The bot that develops Steve itself, as `seed` makes it beside Steve's own source (a `NewBot` as JSON).
@@ -1757,70 +1728,17 @@ impl Tx<'_> {
         recommended: Option<&str>,
         why: Option<&str>,
     ) -> Result<()> {
-        /* the agent's leaning shows on the card (and YOLO may take it): `推荐：…\n理由：…` */
         let draft = crate::yolo::answer::hint_draft(recommended, why);
-        let Some(item) = s.item_id.as_deref() else {
-            /* a session without an item (forked, imported and continued, or its item was deleted) still gets an answerable card */
-            self.db().decision_create(NewDecision {
-                workspace_id: s.workspace_id.clone(),
-                kind: "ask".into(),
-                subject_type: "question".into(),
-                subject_id: s.id.clone(),
-                item_id: None,
-                session_id: Some(s.id.clone()),
-                question: question.into(),
-                options: Some(options.to_vec()),
-                draft: draft.clone(),
-                requested_by: Self::by(s),
-                question_template: None,
-                source: None,
-            })?;
-            self.mark(&s.id, Mark::Asked);
-            return Ok(());
+        let mut spec = NewDecision {
+            kind: "ask".into(),
+            subject_type: "question".into(),
+            question: question.into(),
+            draft,
+            options: Some(options.to_vec()),
+            ..Default::default()
         };
-        self.with_turn_receipt(s, |tx| tx.save_ask(s, item, question, options, draft))
-    }
-
-    fn save_ask(
-        &mut self,
-        s: &Session,
-        item: &str,
-        question: &str,
-        options: &[String],
-        draft: Option<String>,
-    ) -> Result<()> {
-        let db = self.db().clone();
-        db.store().write::<_, crate::CoreError>(|_w| {
-            self.dependency_question_guard(item)?;
-            supersede(&db, item, &["ask", "fail"], "Bot 提了新的问题")?;
-            let d = db.decision_create(NewDecision {
-                workspace_id: s.workspace_id.clone(),
-                kind: "ask".into(),
-                subject_type: "question".into(),
-                subject_id: s.id.clone(),
-                item_id: Some(item.into()),
-                session_id: Some(s.id.clone()),
-                question: question.into(),
-                options: Some(options.to_vec()),
-                draft,
-                requested_by: Self::by(s),
-                question_template: None,
-                source: None,
-            })?;
-            flow_quiet(
-                &db,
-                item,
-                Update {
-                    kind: "ask",
-                    text: question.into(),
-                    decision: Some(d.id),
-                    ..Default::default()
-                },
-            );
-            Ok(())
-        })?;
-        self.mark(&s.id, Mark::Asked);
-        Ok(())
+        self.scope_owner_prompt(s, &mut spec)?;
+        self.with_turn_receipt(s, |tx| tx.open_owner_prompt(s, spec, Mark::Asked))
     }
 
     pub(crate) fn tool_request_approval(
@@ -1829,55 +1747,81 @@ impl Tx<'_> {
         action: &str,
         detail: &str,
     ) -> Result<()> {
-        let Some(item) = s.item_id.as_deref() else {
-            self.db().decision_create(NewDecision {
-                workspace_id: s.workspace_id.clone(),
-                kind: "approve".into(),
-                subject_type: "action".into(),
-                subject_id: s.id.clone(),
-                item_id: None,
-                session_id: Some(s.id.clone()),
-                question: action.into(),
-                draft: Some(detail.into()),
-                options: Some(vec!["yes".into(), "no".into()]),
-                requested_by: Self::by(s),
-                question_template: None,
-                source: None,
-            })?;
-            self.mark(&s.id, Mark::Approval);
-            return Ok(());
+        let mut spec = NewDecision {
+            kind: "approve".into(),
+            subject_type: "action".into(),
+            question: action.into(),
+            draft: Some(detail.into()),
+            options: Some(vec!["yes".into(), "no".into()]),
+            ..Default::default()
         };
+        self.scope_owner_prompt(s, &mut spec)?;
+        self.open_owner_prompt(s, spec, Mark::Approval)
+    }
+
+    fn scope_owner_prompt(&self, s: &Session, spec: &mut NewDecision) -> Result<()> {
+        spec.workspace_id.clone_from(&s.workspace_id);
+        spec.subject_id.clone_from(&s.id);
+        spec.item_id.clone_from(&s.item_id);
+        spec.session_id = Some(s.id.clone());
+        spec.requested_by = Self::by(s);
+        if let Some(turn) = self.rt().running(&s.id) {
+            let prompt = serde_json::to_string(&(&spec.question, &spec.draft, &spec.options))?;
+            spec.source = Some(steve_store::DecisionSource::TurnInput {
+                attempt: turn.attempt,
+                prompt: crate::util::sha(&prompt),
+            });
+        }
+        Ok(())
+    }
+
+    fn open_owner_prompt(&mut self, s: &Session, spec: NewDecision, mark: Mark) -> Result<()> {
         let db = self.db().clone();
-        db.store().write::<_, crate::CoreError>(|_w| {
-            self.dependency_question_guard(item)?;
-            supersede(&db, item, &["ask", "fail"], "Bot 继续往下做了")?;
-            let d = db.decision_create(NewDecision {
-                workspace_id: s.workspace_id.clone(),
-                kind: "approve".into(),
-                subject_type: "action".into(),
-                subject_id: s.id.clone(),
-                item_id: Some(item.into()),
-                session_id: Some(s.id.clone()),
-                question: action.into(),
-                draft: Some(detail.into()),
-                options: Some(vec!["yes".into(), "no".into()]),
-                requested_by: Self::by(s),
-                question_template: None,
-                source: None,
-            })?;
-            flow_quiet(
-                &db,
-                item,
-                Update {
-                    kind: "ask",
-                    text: format!("要你批准：{action}"),
-                    decision: Some(d.id),
-                    ..Default::default()
-                },
-            );
-            Ok(())
+        let opened = db.store().write::<_, CoreError>(|w| {
+            if let Some(item) = s.item_id.as_deref() {
+                self.dependency_question_guard(item)?;
+            }
+            let (d, opened) = steve_store::DecisionRows(w).open_in(&spec)?;
+            if !opened {
+                return Ok(false);
+            }
+            if let Some(item) = s.item_id.as_deref() {
+                let asking = mark == Mark::Asked;
+                let why = if asking {
+                    "Bot 提了新的问题"
+                } else {
+                    "Bot 继续往下做了"
+                };
+                crate::lifecycle::supersede_where(
+                    &db,
+                    item,
+                    |old| {
+                        old.id != d.id
+                            && old.subject_type != steve_store::SESSION_START_FAILURE
+                            && matches!(old.kind.as_str(), "ask" | "fail")
+                    },
+                    why,
+                )?;
+                flow_quiet(
+                    &db,
+                    item,
+                    Update {
+                        kind: "ask",
+                        text: if asking {
+                            d.question
+                        } else {
+                            format!("要你批准：{}", d.question)
+                        },
+                        decision: Some(d.id),
+                        ..Default::default()
+                    },
+                );
+            }
+            Ok(true)
         })?;
-        self.mark(&s.id, Mark::Approval);
+        if opened {
+            self.mark(&s.id, mark);
+        }
         Ok(())
     }
 
@@ -3088,14 +3032,14 @@ impl Tx<'_> {
                     // Node roots from another thread, so it must follow the store commit.
                     self.rt().can_run(&i, &bot.id, &selection.harness)?;
                     db.store().write::<_, crate::CoreError>(|_w| {
-                        settle(json!({"choice":"retry"}), "resolved", None)?;
+                        settle(json!({"choice":"retry"}), DecisionChange::Resolve, None)?;
                         self.hand_off(&i, &session.id)
                     })?;
                     self.start_or_fail(&i, None, None)?;
                     return reget(self);
                 }
                 db.store().write::<_, crate::CoreError>(|_w| {
-                    settle(json!({"choice":"retry"}), "resolved", None)?;
+                    settle(json!({"choice":"retry"}), DecisionChange::Resolve, None)?;
                     self.rt().retry_session(&session.id, &selection)?;
                     if self.db().queued(&session.id)?.is_empty() {
                         self.rt().prompt(
@@ -3138,7 +3082,11 @@ impl Tx<'_> {
                     ));
                 }
                 verify_design_file(self.db().store(), &self.cfg().home, &i, location)?;
-                settle(json!({"answer": choice, "text": text}), "resolved", None)?;
+                settle(
+                    json!({"answer": choice, "text": text}),
+                    DecisionChange::Resolve,
+                    None,
+                )?;
                 let detail = if text.trim().is_empty() {
                     String::new()
                 } else {
@@ -3184,8 +3132,10 @@ impl Tx<'_> {
                         &d,
                         &cx,
                         json!({"choice": choice}),
-                        "resolved",
-                        Some(json!({"plan": before.plan})),
+                        DecisionChange::Resolve,
+                        Some(DecisionUndo::RestorePlan {
+                            plan: before.plan.clone(),
+                        }),
                     )?;
                     let (by, kind, text) = if actor == YOLO_ACTOR {
                         ("steve", "sys", "YOLO：验收通过")
@@ -3209,7 +3159,11 @@ impl Tx<'_> {
             }
             ("accept", _) => {
                 let i = iid()?;
-                settle(json!({"choice": "rework", "text": text}), "resolved", None)?;
+                settle(
+                    json!({"choice": "rework", "text": text}),
+                    DecisionChange::Resolve,
+                    None,
+                )?;
                 tl(self, &i, &format!("返工：{text}"))?;
                 self.invalidate_delivery(&i, crate::cycle::void::REWORK, "验收没有通过，返工")?;
                 self.send(
@@ -3230,7 +3184,7 @@ impl Tx<'_> {
                     or(text, choice)
                 }
                 .to_string();
-                settle(json!({"answer": answer}), "resolved", None)?;
+                settle(json!({"answer": answer}), DecisionChange::Resolve, None)?;
                 if yolo {
                     self.db().timeline_add(
                         &i,
@@ -3288,7 +3242,11 @@ impl Tx<'_> {
             ("approve", "release") => {
                 let i = iid()?;
                 let yes = choice == "yes";
-                settle(json!({"approved": yes, "text": text}), "resolved", None)?;
+                settle(
+                    json!({"approved": yes, "text": text}),
+                    DecisionChange::Resolve,
+                    None,
+                )?;
                 /* the note goes into the conversation exactly when it goes to the agent: with a "no" */
                 tl(
                     self,
@@ -3310,7 +3268,11 @@ impl Tx<'_> {
             ("approve", _) => {
                 let i = iid()?;
                 let yes = choice == "yes";
-                settle(json!({"approved": yes, "text": text}), "resolved", None)?;
+                settle(
+                    json!({"approved": yes, "text": text}),
+                    DecisionChange::Resolve,
+                    None,
+                )?;
                 /* the conversation line is the agent's message minus its framing, note included */
                 let said = match (yes, text) {
                     (_, "") => d.question.clone(),
@@ -3333,7 +3295,7 @@ impl Tx<'_> {
                 let i = iid()?;
                 let before = self.item(&i)?;
                 if choice == "yes" {
-                    settle(json!({"choice": choice}), "resolved", None)?;
+                    settle(json!({"choice": choice}), DecisionChange::Resolve, None)?;
                     self.answer_line(&i, actor, "同意开始", None)?;
                     match self.active_session(&i)? {
                         Some(a) => self.prompt(&a.id, "用户同意了，开始做。", "steve"),
@@ -3346,7 +3308,7 @@ impl Tx<'_> {
                         },
                     }
                 } else {
-                    settle(json!({"choice": choice}), "resolved", None)?;
+                    settle(json!({"choice": choice}), DecisionChange::Resolve, None)?;
                     self.answer_line(&i, actor, "不需要", None)?;
                     self.request_cycle_stop(
                         &i,
@@ -3362,7 +3324,11 @@ impl Tx<'_> {
                 let i = iid()?;
                 match choice {
                     "continue" => {
-                        settle(json!({"choice": choice, "text": text}), "resolved", None)?;
+                        settle(
+                            json!({"choice": choice, "text": text}),
+                            DecisionChange::Resolve,
+                            None,
+                        )?;
                         recover_quiet(self.db(), &i);
                         if actor == YOLO_ACTOR {
                             self.answer_line(&i, actor, "让它继续", sid.as_deref())?;
@@ -3381,7 +3347,11 @@ impl Tx<'_> {
                                 "确认已交付必须由你决定，自动验收不能代选",
                             ));
                         }
-                        settle(json!({"choice": choice, "text": text}), "resolved", None)?;
+                        settle(
+                            json!({"choice": choice, "text": text}),
+                            DecisionChange::Resolve,
+                            None,
+                        )?;
                         // The owner's explicit choice is the acceptance (#434). A second
                         // card with no agent checks lets YOLO overrule it and restart the loop.
                         let line = if text.trim().is_empty() {
@@ -3407,7 +3377,7 @@ impl Tx<'_> {
                     }
                     /* a release whose result nobody knew, checked by you */
                     "release_live" | "release_retry" | "release_waive" => {
-                        settle(json!({"choice": choice}), "resolved", None)?;
+                        settle(json!({"choice": choice}), DecisionChange::Resolve, None)?;
                         let line = match choice {
                             "release_live" => "核对过：已经上线",
                             "release_retry" => "需要重新发布",
@@ -3437,28 +3407,36 @@ impl Tx<'_> {
                         let revision = (!was_paused).then_some(self.item(&i)?.cas_revision);
                         settle(
                             json!({"choice": choice}),
-                            "resolved",
-                            Some(serde_json::to_value(PauseUndo { revision })?),
+                            DecisionChange::Resolve,
+                            Some(DecisionUndo::Resume { revision }),
                         )?;
                     }
                     "tosteve" => {
-                        settle(json!({"choice": choice}), "resolved", None)?;
+                        settle(json!({"choice": choice}), DecisionChange::Resolve, None)?;
                         recover_quiet(self.db(), &i);
                         self.reassign(&i, "steve", actor)?;
                     }
                     // the stall card (crate::stall): give the item up
                     "drop" => {
-                        settle(json!({"choice": choice}), "resolved", None)?;
+                        settle(json!({"choice": choice}), DecisionChange::Resolve, None)?;
                         self.item_action(&i, ItemAction::Drop, actor)?;
                         return reget(self);
                     }
                     _ => {
-                        settle(json!({"choice": choice, "text": text}), "resolved", None)?;
+                        settle(
+                            json!({"choice": choice, "text": text}),
+                            DecisionChange::Resolve,
+                            None,
+                        )?;
                     }
                 }
             }
             _ => {
-                settle(json!({"choice": choice, "text": text}), "resolved", None)?;
+                settle(
+                    json!({"choice": choice, "text": text}),
+                    DecisionChange::Resolve,
+                    None,
+                )?;
             }
         }
         reget(self)
@@ -3509,17 +3487,21 @@ impl Tx<'_> {
         match (d.kind.as_str(), d.subject_type.as_str()) {
             /* a card of the merge lane or the merge queue, both gone: answering it does nothing more */
             (_, "delivery_batch" | "mq_target" | "mq_batch" | "mq_train") => {
-                settle(json!({"choice": choice, "obsolete": true}), "expired", None)?;
+                settle(
+                    json!({"choice": choice, "obsolete": true}),
+                    DecisionChange::Expire,
+                    None,
+                )?;
             }
             ("ask", _) if actor == YOLO_ACTOR => {
                 let answer = or(choice, text);
-                settle(json!({"answer": answer}), "resolved", None)?;
+                settle(json!({"answer": answer}), DecisionChange::Resolve, None)?;
                 note(&format!("YOLO 代答：{}", js_head(answer, 200)))?;
                 send(self, if text.is_empty() { answer } else { text })?;
             }
             ("ask", _) => {
                 let answer = or(text, choice);
-                settle(json!({"answer": answer}), "resolved", None)?;
+                settle(json!({"answer": answer}), DecisionChange::Resolve, None)?;
                 note(&format!("你回答了：{}", js_head(answer, 200)))?;
                 send(self, &format!("用户的回答：{answer}"))?;
             }
@@ -3531,7 +3513,7 @@ impl Tx<'_> {
                     r["outcome"] = json!("not_released");
                     r["reason"] = json!("会话没有关联的事项");
                 }
-                settle(r, "resolved", None)?;
+                settle(r, DecisionChange::Resolve, None)?;
                 let m = if yes {
                     "这个会话没有关联的事项（或事项已删除），Steve 不能发布。需要发布的话，先把会话关联到事项。".to_string()
                 } else {
@@ -3541,7 +3523,11 @@ impl Tx<'_> {
             }
             ("approve", _) => {
                 let yes = choice == "yes";
-                settle(json!({"approved": yes, "text": text}), "resolved", None)?;
+                settle(
+                    json!({"approved": yes, "text": text}),
+                    DecisionChange::Resolve,
+                    None,
+                )?;
                 note(&format!(
                     "{}{}",
                     if yes {
@@ -3563,19 +3549,27 @@ impl Tx<'_> {
                 send(self, &m)?;
             }
             ("accept", _) if choice == "pass" => {
-                settle(json!({"choice": "pass"}), "resolved", None)?;
+                settle(json!({"choice": "pass"}), DecisionChange::Resolve, None)?;
                 note("你验收通过了")?;
                 send(self, "验收通过。")?;
             }
             ("accept", _) => {
-                settle(json!({"choice": "rework", "text": text}), "resolved", None)?;
+                settle(
+                    json!({"choice": "rework", "text": text}),
+                    DecisionChange::Resolve,
+                    None,
+                )?;
                 send(
                     self,
                     &format!("验收没有通过，返工意见：{}", or(text, "请再检查一遍")),
                 )?;
             }
             ("fail", _) => {
-                settle(json!({"choice": choice, "text": text}), "resolved", None)?;
+                settle(
+                    json!({"choice": choice, "text": text}),
+                    DecisionChange::Resolve,
+                    None,
+                )?;
                 if choice == "continue" {
                     send(self, or(text, "请继续。"))?;
                 } else if let (true, Some(s)) = (choice == "look", &s) {
@@ -3583,7 +3577,11 @@ impl Tx<'_> {
                 }
             }
             _ => {
-                settle(json!({"choice": choice, "text": text}), "resolved", None)?;
+                settle(
+                    json!({"choice": choice, "text": text}),
+                    DecisionChange::Resolve,
+                    None,
+                )?;
             }
         }
         db.decision(id)?
@@ -3610,27 +3608,38 @@ impl Tx<'_> {
             {
                 self.withdraw_acceptance(i)?;
             }
-            if self.module_undo(&d, actor)? {
-                /* the module reopened it with its own side undone; the item follows as for core decisions */
-                if let Some(i) = &d.item_id {
-                    let p = undo_patch(&d.undo);
-                    if !p.is_empty() {
-                        self.db().item_patch(i, p)?;
+            match d.undo.as_ref() {
+                Some(DecisionUndo::Domain) if self.module_undo(&d, actor)? => {}
+                Some(DecisionUndo::Resume { revision }) => {
+                    if let Some(i) = &d.item_id {
+                        let current = self.item(i)?;
+                        if *revision == Some(current.cas_revision) {
+                            self.resume_item(&current)?;
+                        }
                     }
+                    self.db().decision_reopen(id)?;
+                    self.db().audit(
+                        actor,
+                        "decision.undo",
+                        id,
+                        &json!({"revision": revision}),
+                        &d.workspace_id,
+                    )?;
                 }
-            } else {
-                if let Some(i) = &d.item_id {
-                    let current = self.item(i)?;
-                    if let Ok(undo) = serde_json::from_value::<PauseUndo>(d.undo.clone())
-                        && undo.revision == Some(current.cas_revision)
-                    {
-                        self.resume_item(&current)?;
+                Some(DecisionUndo::RestorePlan { plan }) => {
+                    if let Some(i) = &d.item_id {
+                        self.db().item_patch(i, patch![plan: plan])?;
                     }
-                    self.db().item_patch(i, undo_patch(&d.undo))?;
+                    self.db().decision_reopen(id)?;
+                    self.db().audit(
+                        actor,
+                        "decision.undo",
+                        id,
+                        &json!({"revision": d.revision}),
+                        &d.workspace_id,
+                    )?;
                 }
-                self.db().decision_reopen(id)?;
-                self.db()
-                    .audit(actor, "decision.undo", id, &json!({}), &d.workspace_id)?;
+                _ => return Err(msg(steve_i18n::t!("core.decision.not_undoable"))),
             }
             if let Some(i) = &d.item_id {
                 self.db().timeline_add(i, actor, "me", "撤销了决定", None)?;
@@ -3693,7 +3702,7 @@ impl Tx<'_> {
                 self.db().decision_resolve(
                     &o.id,
                     json!({"superseded": "前置事项的验收被撤销"}),
-                    "expired",
+                    DecisionChange::Expire,
                     None,
                 )?;
             }
@@ -3716,7 +3725,6 @@ impl Tx<'_> {
         actor: &str,
     ) -> Result<Decision> {
         use crate::{PermissionAction, PermissionAnswer};
-        use steve_store::decision_repo::DecisionChange;
         let id = &d.id;
         let answer = PermissionAnswer {
             decision_id: id,
@@ -3731,12 +3739,7 @@ impl Tx<'_> {
                 let mut rows = steve_store::DecisionRows(w);
                 match (outcome, action) {
                     (Answered::Gone, _) => {
-                        rows.apply(
-                            d,
-                            DecisionChange::Expire,
-                            &json!({"expired": true}),
-                            &Value::Null,
-                        )?;
+                        rows.apply(d, DecisionChange::Expire, &json!({"expired": true}), None)?;
                     }
                     (_, PermissionAction::Resolve { choice, text }) => {
                         rows.resolve_choice(
@@ -3745,7 +3748,7 @@ impl Tx<'_> {
                             choice,
                             text,
                             &json!({"optionId": answer.option()}),
-                            &Value::Null,
+                            None,
                         )?;
                     }
                     (_, PermissionAction::Dismiss) => {
@@ -3753,7 +3756,7 @@ impl Tx<'_> {
                             d,
                             DecisionChange::Dismiss,
                             &json!({"dismissed": true}),
-                            &Value::Null,
+                            None,
                         )? {
                             w.audit(
                                 &d.workspace_id,
@@ -3840,15 +3843,13 @@ impl Tx<'_> {
                     revision = Some(self.item(&i.id)?.cas_revision);
                 }
             }
-            let undo = d.item_id.is_some()
-                .then(|| serde_json::to_value(PauseUndo { revision }))
-                .transpose()?;
+            let undo = d.item_id.is_some().then_some(DecisionUndo::Resume { revision });
             let mut rows = steve_store::DecisionRows(w);
             if !rows.apply(
                 &d,
-                steve_store::decision_repo::DecisionChange::Dismiss,
+                DecisionChange::Dismiss,
                 &json!({"dismissed": true}),
-                &undo.unwrap_or(Value::Null),
+                undo.as_ref(),
             )? {
                 return Err(msg(steve_i18n::t!("core.decision.handled")));
             }
@@ -4112,8 +4113,12 @@ impl Tx<'_> {
             .into_iter()
             .filter(|d| d.status == steve_types::DecisionStatus::Open && d.session_id.is_some())
         {
-            self.db()
-                .decision_resolve(&d.id, json!({"reassigned": true}), "expired", None)?;
+            self.db().decision_resolve(
+                &d.id,
+                json!({"reassigned": true}),
+                DecisionChange::Expire,
+                None,
+            )?;
         }
         self.db()
             .timeline_add(id, actor, "sys", &format!("换成 {}", b.display()), None)?;
@@ -4631,8 +4636,12 @@ impl Tx<'_> {
                     /* a Node's card outlives the Hub: the Node expires it, or the attempt goes on */
                 } else if d.kind == "approve" && d.subject_type == "tool_call" {
                     /* a tool permission dies with the adapter that asked; the resumed turn asks again if it still needs it */
-                    self.db()
-                        .decision_resolve(&d.id, json!({"expired": true}), "expired", None)?;
+                    self.db().decision_resolve(
+                        &d.id,
+                        json!({"expired": true}),
+                        DecisionChange::Expire,
+                        None,
+                    )?;
                     if let Some(sid) = &d.session_id {
                         self.db().event_add(sid, "system", json!({"text": "Hub 重启，原工具授权请求已失效。尚未授权的操作不会自动获准；继续时必须重新请求授权。", "approval_expired": d.id}))?;
                     }
@@ -4667,8 +4676,12 @@ impl Tx<'_> {
                     } else {
                         "dropped"
                     };
-                    self.db()
-                        .decision_resolve(&d.id, json!({why: true}), "expired", None)?;
+                    self.db().decision_resolve(
+                        &d.id,
+                        json!({why: true}),
+                        DecisionChange::Expire,
+                        None,
+                    )?;
                 }
             }
         }

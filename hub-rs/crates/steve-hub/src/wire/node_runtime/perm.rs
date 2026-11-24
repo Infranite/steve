@@ -256,8 +256,8 @@ impl NodeRuntime {
         steve_store::DecisionRows(tx).settle(
             &row.decision,
             &json!({ "superseded": why }),
-            "expired",
-            &serde_json::Value::Null,
+            DecisionChange::Expire,
+            None,
         )?;
         Ok(op.is_some())
     }
@@ -284,8 +284,8 @@ impl NodeRuntime {
             steve_store::DecisionRows(tx).settle(
                 &row.decision,
                 &json!({ "superseded": why }),
-                "expired",
-                &serde_json::Value::Null,
+                DecisionChange::Expire,
+                None,
             )?;
         }
         Ok(())
@@ -371,7 +371,7 @@ impl NodeRuntime {
             if card.revision != answer.revision {
                 return Err(conflict("the decision changed while answering it"));
             }
-            if card.status != steve_types::DecisionStatus::Open || row.state != "waiting" {
+            if card.status != DecisionStatus::Open || row.state != "waiting" {
                 return Ok((false, false));
             }
             if let Some(why) = self
@@ -414,14 +414,14 @@ impl NodeRuntime {
                     choice,
                     text,
                     &json!({"optionId": answer.option(), "operation_id": op}),
-                    &Value::Null,
+                    None,
                 )?,
                 PermissionAction::Dismiss => {
                     let changed = rows.apply(
                         &card,
                         DecisionChange::Dismiss,
                         &json!({"dismissed": true, "operation_id": op}),
-                        &Value::Null,
+                        None,
                     )?;
                     if changed {
                         tx.audit(

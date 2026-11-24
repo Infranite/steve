@@ -122,6 +122,8 @@ impl Store {
 pub enum DecisionSource {
     Permission { node: String, attempt: String },
     TurnStall { attempt: String },
+    TurnInput { attempt: String, prompt: String },
+    FlowStep { started_at: i64, retry: i64 },
     Record,
     Revision { revision: String },
 }
@@ -205,12 +207,12 @@ impl Decisions<'_> {
         &self,
         id: &str,
         result: &Value,
-        status: &str,
-        undo: &Value,
+        change: crate::decision_repo::DecisionChange,
+        undo: Option<&crate::DecisionUndo>,
     ) -> Result<Option<Decision>> {
         self.0.write(|w| {
             let mut rows = DecisionRows(w);
-            rows.settle(id, result, status, undo)?;
+            rows.settle(id, result, change, undo)?;
             rows.get(id)
         })
     }

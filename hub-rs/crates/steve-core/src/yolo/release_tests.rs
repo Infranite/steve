@@ -67,7 +67,12 @@ fn releasing_item(t: &T, project: &str) -> (String, String, String) {
     );
     t.kit
         .db()
-        .decision_resolve(&acc, json!({"choice": "pass"}), "resolved", None)
+        .decision_resolve(
+            &acc,
+            json!({"choice": "pass"}),
+            steve_store::decision_repo::DecisionChange::Resolve,
+            None,
+        )
         .unwrap();
     let d = t.card(
         &item,

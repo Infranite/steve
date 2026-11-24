@@ -153,8 +153,8 @@ fn real_work_producers_keep_scope_through_mutation_and_deletion() {
             DecisionRows(tx).settle(
                 &decision.id,
                 &json!("yes"),
-                "resolved",
-                &serde_json::Value::Null,
+                steve_store::decision_repo::DecisionChange::Resolve,
+                None,
             )?;
             s.messages()
                 .patch_text_meta(&message, "revised", &json!({"done": true}))?;

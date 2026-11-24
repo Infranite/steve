@@ -529,8 +529,8 @@ pub fn expire_open(tx: &mut steve_store::W<'_>, ws: &str, draft: &str) -> MailRe
         steve_store::DecisionRows(tx).settle(
             &id,
             &json!({"expired": true}),
-            "expired",
-            &Value::Null,
+            steve_store::decision_repo::DecisionChange::Expire,
+            None,
         )?;
     }
     Ok(())

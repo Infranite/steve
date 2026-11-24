@@ -630,13 +630,13 @@ async fn chat_days_are_documents_and_extracted_once() {
         (d.status.as_str(), d.result["choice"].as_str()),
         ("resolved", Some("yes"))
     );
-    assert!(!d.undo.is_null());
+    assert!(d.undo.is_some());
     assert_eq!(e.open_confirms(), 0);
     let notices = fixture::notice_text(e.env.store()).unwrap();
     assert_eq!(notices.len(), 1);
     assert!(notices[0].contains("周五下午不安排部署"), "{notices:?}");
     decisions::undo(m, &d.id, ME, |d| {
-        d.status == steve_types::DecisionStatus::Resolved && !d.undo.is_null()
+        d.status == steve_types::DecisionStatus::Resolved && d.undo.is_some()
     })
     .expect("ours")
     .expect("undone");

@@ -8,7 +8,7 @@
 //! (`origin = tool`) and at most 20 open memory decisions per workspace.
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 use steve_store::base::mems::{Mem, MemFilter, MemPatch, NewMem};
 use steve_store::base::{Level, ObjRef, Viewer, Visibility};
 use steve_store::knowledge::{CandidateOrigin, CandidateRows, Memories};
@@ -198,12 +198,18 @@ pub fn patch(m: &Modules, who: &Caller, id: &str, b: MemPatchBody) -> ApiResult<
             } else {
                 "no"
             };
-            settle_decision(
-                w,
-                &old,
-                json!({ "choice": choice, "by": "edit" }),
-                "resolved",
-            )?;
+            if let Some(id) = &old.decision_id
+                && let Some(d) = DecisionRows(w).get(id)?
+            {
+                DecisionRows(w).resolve_choice(
+                    &d,
+                    &who.me,
+                    choice,
+                    "",
+                    &json!({ "choice": choice, "by": "edit" }),
+                    None,
+                )?;
+            }
             CandidateRows(w).remove(&old.id)?;
         }
         let mut changed: Vec<&str> = Vec::new();
@@ -229,21 +235,15 @@ pub fn patch(m: &Modules, who: &Caller, id: &str, b: MemPatchBody) -> ApiResult<
     Ok(MemOut::from(&mem))
 }
 
-/// Settles the memory's open decision, if it has one.
-fn settle_decision(w: &mut W<'_>, mem: &Mem, result: Value, status: &str) -> ApiResult<()> {
-    if let Some(d) = &mem.decision_id {
-        DecisionRows(w).settle(d, &result, status, &Value::Null)?;
-    }
-    Ok(())
-}
-
 /// Deletes a memory with what hangs off it: its candidate row and its open decision (expired, so the
 /// card leaves the inbox). Returns whether it existed.
 pub fn delete_in(w: &mut W<'_>, id: &str) -> ApiResult<bool> {
     let Some(old) = Memories(w).get(id)? else {
         return Ok(false);
     };
-    settle_decision(w, &old, json!({ "deleted": true }), "expired")?;
+    if let Some(id) = &old.decision_id {
+        steve_store::decision_repo::expire_unapplied(w, id, &json!({ "deleted": true }))?;
+    }
     CandidateRows(w).remove(id)?;
     Ok(Memories(w).delete(id)?)
 }

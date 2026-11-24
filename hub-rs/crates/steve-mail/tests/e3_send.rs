@@ -716,7 +716,7 @@ async fn rest_routes() {
 /// core's rule that it is resolved and carries an undo).
 fn undo_decision(h: &H, id: &str) -> Result<steve_store::Decision, ApiError> {
     steve_modules::decisions::undo(&h.env.modules, id, ME, |d| {
-        d.status == steve_types::DecisionStatus::Resolved && !d.undo.is_null()
+        d.status == steve_types::DecisionStatus::Resolved && d.undo.is_some()
     })
     .expect("a mail decision")
 }
@@ -734,7 +734,7 @@ async fn undoing_the_approval_decision_within_the_delay_returns_the_draft_to_pen
     let dec = d.decision_id.clone().unwrap();
     assert_eq!(
         decision(&h, &dec).undo,
-        json!({ "module": steve_mail::drafts::SUBJECT_TYPE }),
+        Some(steve_store::DecisionUndo::Domain),
         "the approval is undoable"
     );
 
@@ -744,7 +744,7 @@ async fn undoing_the_approval_decision_within_the_delay_returns_the_draft_to_pen
     assert_eq!(draft(&h, &d.id).send_at, None);
     let back = decision(&h, &dec);
     assert_eq!(back.status, steve_types::DecisionStatus::Open);
-    assert!(back.undo.is_null());
+    assert!(back.undo.is_none());
     assert_eq!(audits(&h, "decision.undo").len(), 1);
     h.env.clock.advance(60_000);
     assert!(h.mail.send_due().await.unwrap().is_empty());
@@ -1088,12 +1088,12 @@ async fn dismissed_unknown_card_is_recreated_even_without_item_or_thread() {
             steve_store::DecisionRows(tx).settle(
                 &old,
                 &json!({"dismissed": true}),
-                "resolved",
-                &Value::Null,
+                steve_store::decision_repo::DecisionChange::Resolve,
+                None,
             )
         })
         .unwrap();
-    assert!(decision(&h, &old).undo.is_null());
+    assert!(decision(&h, &old).undo.is_none());
     assert!(h.mail.send_due().await.unwrap().is_empty());
     let reopened = draft(&h, &d.id).decision_id.unwrap();
     assert_ne!(reopened, old);

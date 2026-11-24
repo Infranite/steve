@@ -1390,7 +1390,7 @@ fn dependencies_block_and_start_when_done() {
         .decision_resolve(
             &k.db().decisions_of_item(&b.id).unwrap()[0].id,
             json!({}),
-            "resolved",
+            steve_store::decision_repo::DecisionChange::Resolve,
             None,
         )
         .unwrap();

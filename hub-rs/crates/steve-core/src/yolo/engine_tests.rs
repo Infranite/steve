@@ -1230,7 +1230,12 @@ fn an_expired_node_card_is_never_answered() {
     let d = t.permission(&item, &sid, node_edit(&file, Some(dir.clone())));
     t.kit
         .db()
-        .decision_resolve(&d, json!({"superseded": "这一轮已经结束"}), "expired", None)
+        .decision_resolve(
+            &d,
+            json!({"superseded": "这一轮已经结束"}),
+            steve_store::decision_repo::DecisionChange::Expire,
+            None,
+        )
         .unwrap();
     assert!(t.engine.consider(&d).unwrap().is_none());
     assert!(t.kit.rt.st().answered.is_empty());

@@ -848,7 +848,7 @@ fn from_the_stored_row_a_cut_draft_counts_as_truncated() {
         requested_by: "agent".into(),
         created: 0,
         resolved: None,
-        undo: Value::Null,
+        undo: None,
     };
     let f = facts_of(&d, subject_from_row(&d, Some(pl.cwd.clone()), None, None));
     assert_eq!(judge(&f, &Policy::widest(), &pl.env).rule(), "tool.guard");

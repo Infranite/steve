@@ -86,8 +86,8 @@ pub(super) fn rearm_in(tx: &mut crate::W<'_>, item: &str) -> Result<()> {
         crate::DecisionRows(tx).settle(
             &id,
             &json!({"superseded":"前置事项已变化"}),
-            "expired",
-            &serde_json::Value::Null,
+            crate::decision_repo::DecisionChange::Expire,
+            None,
         )?;
     }
     Ok(())
@@ -208,7 +208,7 @@ impl DependencyWaits<'_> {
                         resume=excluded.resume,reason=excluded.reason,state='waiting',updated=excluded.updated",
                        params![item,i.cycle,session,resume,reason,at,at])?;
             for id in all(tx, "SELECT id FROM decisions WHERE item_id=? AND status='open' AND kind IN ('ask','fail')", [item], |r| r.get::<_,String>(0))? {
-                crate::DecisionRows(w).settle(&id, &json!({"superseded":"已登记前置等待"}), "expired", &serde_json::Value::Null)?;
+                crate::DecisionRows(w).settle(&id, &json!({"superseded":"已登记前置等待"}), crate::decision_repo::DecisionChange::Expire, None)?;
             }
             crate::item_repo::store_timeline(w,item,"steve","sys",&format!("登记前置等待（{resume}）：{reason}"),Some(session),None,crate::now())?;
             w.emit(steve_types::DomainEvent::from(

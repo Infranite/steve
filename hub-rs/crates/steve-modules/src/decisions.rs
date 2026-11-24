@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use steve_store::base::{CONFIRM_OPTIONS, DecisionKind};
 use steve_store::decision_repo::{DecisionChange, choice_receipt};
 use steve_store::views::{ABOUT_CHAT_MESSAGE, Views};
-use steve_store::{Decision, DecisionRows, NewDecision, W};
+use steve_store::{Decision, DecisionRows, DecisionUndo, NewDecision, W};
 use steve_types::DecisionTier;
 
 use crate::{ApiError, ApiResult, Caller, Modules};
@@ -189,7 +189,7 @@ fn answer(
     };
     match handler.resolve(w, &cx, d)? {
         DecisionOutcome::Resolved(result) => {
-            complete_answer(w, d, &cx, &result, &undo_marker(&d.subject_type))
+            complete_answer(w, d, &cx, &result, Some(&DecisionUndo::Domain))
         }
         DecisionOutcome::Expired(result) => {
             expire_in(w, d, &result)?;
@@ -227,7 +227,7 @@ pub fn complete_answer(
     d: &Decision,
     cx: &DecisionCx<'_>,
     result: &Value,
-    undo: &Value,
+    undo: Option<&DecisionUndo>,
 ) -> ApiResult<Decision> {
     let mut rows = DecisionRows(w);
     if !rows.resolve_choice(d, cx.actor, cx.choice, cx.text, result, undo)? {
@@ -240,14 +240,6 @@ pub fn complete_answer(
 
 fn already_handled() -> ApiError {
     ApiError::conflict(steve_i18n::t!("modules.decision.already_handled"))
-}
-
-/// The `undo` stored on a decision a module settled. Core only undoes decisions with a truthy `undo`
-/// (and the web shows 撤销 only for them); core's own records are item patches, a module's undo is its
-/// handler's [`DecisionHandler::before_undo`], so the marker just names the module side. Its keys are
-/// none of the item columns, so core's item patch from it is empty.
-pub fn undo_marker(subject_type: &str) -> Value {
-    json!({ "module": subject_type })
 }
 
 /// `undoDecision` for a decision whose `subject_type` a module registered. `None` = not ours.
@@ -304,6 +296,11 @@ fn reverse(
     actor: &str,
     handler: &dyn DecisionHandler,
 ) -> ApiResult<()> {
+    if d.undo != Some(DecisionUndo::Domain) {
+        return Err(ApiError::rule(steve_i18n::t!(
+            "modules.decision.not_undoable"
+        )));
+    }
     handler.before_undo(w, d)?;
     let metadata = handler.reopen_result(d);
     DecisionRows(w).reopen(d, &metadata)?;
@@ -339,7 +336,7 @@ pub fn expire(m: &Modules, id: &str) -> ApiResult<bool> {
 }
 
 fn expire_in(w: &mut W<'_>, d: &Decision, result: &Value) -> ApiResult<()> {
-    if !DecisionRows(w).apply(d, DecisionChange::Expire, result, &Value::Null)? {
+    if !DecisionRows(w).apply(d, DecisionChange::Expire, result, None)? {
         return Err(already_handled());
     }
     Ok(())

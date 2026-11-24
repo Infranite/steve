@@ -187,7 +187,7 @@ pub fn expire_for_space(
     Ok(steve_store::DecisionRows(w).settle(
         &d.id,
         &json!({"expired": true, "reason": reason}),
-        "expired",
-        &Value::Null,
+        steve_store::decision_repo::DecisionChange::Expire,
+        None,
     )?)
 }

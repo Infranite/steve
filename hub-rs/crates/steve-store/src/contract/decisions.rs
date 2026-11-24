@@ -3,7 +3,7 @@ use serde_json::Value;
 use steve_types::{DecisionStatus, DomainEvent, WorkEvent};
 
 use super::{Json, Q, Row};
-use crate::{Decision, NewDecision, Read, Result, W, now, uid};
+use crate::{Decision, DecisionUndo, NewDecision, Read, Result, W, now, uid};
 
 /// A choice acknowledged by the Hub. Any external operation has its own receipt.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
@@ -76,13 +76,13 @@ pub(crate) fn decode_status(row: &Row<'_>, col: usize) -> Result<DecisionStatus>
 pub(crate) fn undo_until(
     status: DecisionStatus,
     resolved: Option<i64>,
-    undo: &Value,
+    undo: Option<&DecisionUndo>,
 ) -> Option<i64> {
     resolved
         .filter(|at| {
             *at > 0
                 && matches!(status, DecisionStatus::Resolved | DecisionStatus::Dismissed)
-                && crate::truthy(undo)
+                && undo.is_some()
         })
         .map(|at| at + 24 * 3_600_000)
 }
@@ -151,8 +151,8 @@ fn decode(r: &Row<'_>) -> Result<Decision> {
         created: r.get(13)?,
         resolved: r.get(14)?,
         undo: r
-            .get::<Option<Json<serde_json::Value>>>(15)?
-            .map_or(serde_json::Value::Null, |value| value.0),
+            .get::<Option<Json<DecisionUndo>>>(15)?
+            .map(|value| value.0),
     })
 }
 
@@ -392,7 +392,7 @@ impl DecisionRows<'_, W<'_>> {
         decision: &Decision,
         change: DecisionChange,
         result: &Value,
-        undo: &Value,
+        undo: Option<&DecisionUndo>,
     ) -> Result<bool> {
         let started = std::time::Instant::now();
         let Some((to, operation)) = change.next(decision.status) else {
@@ -405,7 +405,7 @@ impl DecisionRows<'_, W<'_>> {
                 .value("status", to.as_str())
                 .value("result", (!result.is_null()).then(|| result.to_string()))
                 .value("resolved", (!reopening).then(now))
-                .value("undo", crate::types::truthy(undo).then(|| undo.to_string()))
+                .value("undo", undo.map(serde_json::to_string).transpose()?)
                 .value("revision", decision.revision + i64::from(reopening))
                 .and_where(Expr::col("id").eq(decision.id.as_str()))
                 .and_where(Expr::col("revision").eq(decision.revision))
@@ -447,7 +447,7 @@ impl DecisionRows<'_, W<'_>> {
         action: &str,
         answer: &str,
         result: &Value,
-        undo: &Value,
+        undo: Option<&DecisionUndo>,
     ) -> Result<bool> {
         if !self.apply(decision, DecisionChange::Resolve, result, undo)? {
             return Ok(false);
@@ -500,18 +500,13 @@ impl DecisionRows<'_, W<'_>> {
         })
     }
 
-    pub fn settle(&mut self, id: &str, result: &Value, status: &str, undo: &Value) -> Result<bool> {
-        let change = match status {
-            "resolved" => DecisionChange::Resolve,
-            "dismissed" => DecisionChange::Dismiss,
-            "expired" => DecisionChange::Expire,
-            "superseded" => DecisionChange::Supersede,
-            _ => {
-                return Err(crate::StoreError::Conflict(
-                    "invalid decision transition".into(),
-                ));
-            }
-        };
+    pub fn settle(
+        &mut self,
+        id: &str,
+        result: &Value,
+        change: DecisionChange,
+        undo: Option<&DecisionUndo>,
+    ) -> Result<bool> {
         let Some(decision) = self.get(id)? else {
             return Ok(false);
         };
@@ -519,7 +514,7 @@ impl DecisionRows<'_, W<'_>> {
     }
 
     pub fn reopen(&mut self, decision: &Decision, metadata: &Value) -> Result<()> {
-        if !self.apply(decision, DecisionChange::Reopen, metadata, &Value::Null)? {
+        if !self.apply(decision, DecisionChange::Reopen, metadata, None)? {
             return Err(crate::StoreError::Conflict("decision changed".into()));
         }
         Ok(())
@@ -760,12 +755,8 @@ pub fn open_item_decisions(c: &mut impl Read, item: &str) -> Result<Vec<Decision
 pub fn expire_open_for_item(w: &mut crate::W<'_>, item_id: &str, result: &Value) -> Result<usize> {
     let mut count = 0;
     for decision in open_item_decisions(w, item_id)? {
-        count += usize::from(DecisionRows(w).apply(
-            &decision,
-            DecisionChange::Expire,
-            result,
-            &Value::Null,
-        )?);
+        count +=
+            usize::from(DecisionRows(w).apply(&decision, DecisionChange::Expire, result, None)?);
     }
     Ok(count)
 }
@@ -836,5 +827,10 @@ pub(crate) fn open_for_session_or_item(
 /// An unanswered request has gone out of scope. An already recorded choice remains
 /// a fact; the Node's separate ledger records whether it applied that choice.
 pub fn expire_unapplied(w: &mut W<'_>, id: &str, result: &Value) -> Result<bool> {
-    DecisionRows(w).settle(id, result, "expired", &Value::Null)
+    DecisionRows(w).settle(
+        id,
+        result,
+        crate::decision_repo::DecisionChange::Expire,
+        None,
+    )
 }

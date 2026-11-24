@@ -93,12 +93,12 @@ async fn a_merge_answered_through_dispatch_is_split_by_undo_decision() {
     let r = decisions::dispatch(&m, &me(), &d, "merge", "")
         .expect("ours")
         .unwrap();
-    assert_eq!(r.undo, json!({ "module": "party_merge" }));
+    assert_eq!(r.undo, Some(steve_store::DecisionUndo::Domain));
     assert_eq!(party(), sarah);
 
     let back = k.core.undo_decision(&d, ME).unwrap();
     assert_eq!(back.status, steve_types::DecisionStatus::Open);
-    assert_eq!(back.undo, serde_json::Value::Null);
+    assert_eq!(back.undo, None);
     assert_eq!(decision(&k, &d).status, steve_types::DecisionStatus::Open);
     assert_eq!(
         steve_store::core_fixture::work::merge_proposal(store, &mp).1,
@@ -181,7 +181,7 @@ fn a_refused_module_undo_leaves_the_decision_answered() {
     let after = decision(&k, &d);
     assert_eq!(after.status, steve_types::DecisionStatus::Resolved);
     assert_eq!(after.result, json!({ "choice": "yes" }));
-    assert_eq!(after.undo, json!({ "module": "x_thing" }));
+    assert_eq!(after.undo, Some(steve_store::DecisionUndo::Domain));
     assert_eq!(
         steve_store::core_fixture::work::audit_count(
             k.db().store(),

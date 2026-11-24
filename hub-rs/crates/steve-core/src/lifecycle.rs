@@ -52,7 +52,7 @@ pub fn supersede_where(
                     &decision,
                     steve_store::decision_repo::DecisionChange::Expire,
                     &json!({"superseded": why}),
-                    &serde_json::Value::Null,
+                    None,
                 )?
             {
                 count += 1;

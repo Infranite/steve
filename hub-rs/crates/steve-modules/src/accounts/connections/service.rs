@@ -1378,7 +1378,7 @@ impl Connections {
         result: Value,
     ) -> VaultResult<()> {
         if let Some(d) = DecisionRows(tx).open_for(ws, SUBJECT, id)? {
-            DecisionRows(tx).settle(&d.id, &result, "resolved", &Value::Null)?;
+            DecisionRows(tx).resolve_choice(&d, "steve", "reauth", "", &result, None)?;
         }
         Ok(())
     }

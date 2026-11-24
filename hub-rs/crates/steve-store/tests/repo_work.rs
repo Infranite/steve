@@ -897,15 +897,20 @@ fn decisions() {
     );
     assert_eq!(s.decisions().open(WS).unwrap().len(), 1);
 
-    let undo = json!({"status": "wait", "now": "交付了，等你验收", "stage": "交付与验收"});
+    let undo = steve_store::DecisionUndo::Resume { revision: Some(1) };
     let r = s
         .decisions()
-        .resolve(&d.id, &json!({"choice": "pass"}), "resolved", &undo)
+        .resolve(
+            &d.id,
+            &json!({"choice": "pass"}),
+            steve_store::decision_repo::DecisionChange::Resolve,
+            Some(&undo),
+        )
         .unwrap()
         .unwrap();
     assert_eq!(
         (r.status.as_str(), r.result.clone(), r.undo.clone()),
-        ("resolved", json!({"choice": "pass"}), undo.clone())
+        ("resolved", json!({"choice": "pass"}), Some(undo))
     );
     assert!(r.resolved.is_some());
     // A second settlement leaves the original answer and event intact.
@@ -914,8 +919,8 @@ fn decisions() {
         .resolve(
             &d.id,
             &json!({"choice": "continue"}),
-            "resolved",
-            &Value::Null,
+            steve_store::decision_repo::DecisionChange::Resolve,
+            None,
         )
         .unwrap()
         .unwrap();
@@ -933,18 +938,20 @@ fn decisions() {
             back.resolved,
             back.undo.clone()
         ),
-        ("open", Value::Null, None, Value::Null)
+        ("open", Value::Null, None, None)
     );
     // a falsy undo is stored as NULL
     let e = s
         .decisions()
-        .resolve(&d.id, &json!({"expired": true}), "expired", &json!(false))
+        .resolve(
+            &d.id,
+            &json!({"expired": true}),
+            steve_store::decision_repo::DecisionChange::Expire,
+            None,
+        )
         .unwrap()
         .unwrap();
-    assert_eq!(
-        (e.status.as_str(), e.undo.clone()),
-        ("expired", Value::Null)
-    );
+    assert_eq!((e.status.as_str(), e.undo.clone()), ("expired", None));
     s.fixture_write(|c| {
         Ok(assert_eq!(
             count(c, "SELECT count(*) FROM decisions WHERE undo IS NULL"),
@@ -980,7 +987,12 @@ fn decisions() {
 
     use steve_store::views::{DecisionPage, Views};
     s.decisions()
-        .resolve(&free.id, &Value::Null, "resolved", &Value::Null)
+        .resolve(
+            &free.id,
+            &Value::Null,
+            steve_store::decision_repo::DecisionChange::Resolve,
+            None,
+        )
         .unwrap()
         .unwrap();
     s.write(|tx| -> Result<()> {
@@ -1401,12 +1413,7 @@ fn expiring_an_unapplied_answer_preserves_a_recorded_choice() {
         let answered = DecisionRows(tx).open(&nd)?;
         let answer = json!({"optionId": "allow_once"});
         DecisionRows(tx).record_choice(&answered, "owner", "allow_once", "")?;
-        assert!(DecisionRows(tx).apply(
-            &answered,
-            DecisionChange::Resolve,
-            &answer,
-            &Value::Null
-        )?);
+        assert!(DecisionRows(tx).apply(&answered, DecisionChange::Resolve, &answer, None)?);
         let expired = json!({"expired": true});
         assert!(expire_unapplied(tx, &open.id, &expired)?);
         assert!(!expire_unapplied(tx, &open.id, &expired)?);
@@ -1443,8 +1450,8 @@ fn decision_revisions_reject_stale_transitions() {
                 2 => DecisionChange::Expire,
                 _ => DecisionChange::Supersede,
             };
-            assert!(cards.apply(&open, terminal, &Value::Null, &Value::Null)?);
-            assert!(!cards.apply(&open, DecisionChange::Expire, &Value::Null, &Value::Null)?);
+            assert!(cards.apply(&open, terminal, &Value::Null, None)?);
+            assert!(!cards.apply(&open, DecisionChange::Expire, &Value::Null, None)?);
             let settled = cards.get(&open.id)?.unwrap();
             assert_ne!(settled.status, steve_types::DecisionStatus::Open);
 
@@ -1453,16 +1460,11 @@ fn decision_revisions_reject_stale_transitions() {
             }
             let can_reopen = matches!(terminal, DecisionChange::Resolve | DecisionChange::Dismiss);
             assert_eq!(
-                cards.apply(&settled, DecisionChange::Reopen, &Value::Null, &Value::Null)?,
+                cards.apply(&settled, DecisionChange::Reopen, &Value::Null, None)?,
                 can_reopen,
             );
             if can_reopen {
-                assert!(!cards.apply(
-                    &open,
-                    DecisionChange::Supersede,
-                    &Value::Null,
-                    &Value::Null
-                )?);
+                assert!(!cards.apply(&open, DecisionChange::Supersede, &Value::Null, None)?);
                 let reopened = cards.get(&open.id)?.unwrap();
                 assert_eq!(
                     (reopened.status.as_str(), reopened.revision),
@@ -1504,7 +1506,7 @@ fn replaying_a_decision_creation_keeps_its_original_state() {
                 &first,
                 DecisionChange::Resolve,
                 &json!({"choice":"yes"}),
-                &Value::Null
+                None
             )?);
             let (replay, opened) = rows.open_in(&spec)?;
             assert!(!opened);

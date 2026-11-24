@@ -560,6 +560,16 @@ impl Queued {
 }
 
 /// `rowDec`.
+/// The inverse operation recorded at settlement. Domain handlers recheck whether it is safe
+/// when the owner asks to undo.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub enum DecisionUndo {
+    Domain,
+    RestorePlan { plan: Vec<PlanStep> },
+    Resume { revision: Option<i64> },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Decision {
     pub id: String,
@@ -580,7 +590,7 @@ pub struct Decision {
     pub requested_by: String,
     pub created: i64,
     pub resolved: Option<i64>,
-    pub undo: Value,
+    pub undo: Option<DecisionUndo>,
     pub revision: i64,
     #[serde(skip_serializing)]
     pub source_revision: Option<crate::DecisionSource>,
@@ -588,7 +598,7 @@ pub struct Decision {
 
 impl Decision {
     pub fn undo_until(&self) -> Option<i64> {
-        crate::decision_repo::undo_until(self.status, self.resolved, &self.undo)
+        crate::decision_repo::undo_until(self.status, self.resolved, self.undo.as_ref())
     }
 
     pub(crate) fn from_row(r: &Row) -> rusqlite::Result<Self> {
@@ -615,7 +625,7 @@ impl Decision {
             requested_by: r.get("requested_by")?,
             created: r.get("created")?,
             resolved: r.get("resolved")?,
-            undo: json_col(r, "undo", Value::Null)?,
+            undo: json_col(r, "undo", None)?,
             revision: r.get("revision")?,
             source_revision: json_col(r, "source_revision", None)?,
         })
