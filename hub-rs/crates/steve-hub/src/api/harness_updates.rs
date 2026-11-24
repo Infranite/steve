@@ -145,7 +145,7 @@ fn report_view(report: &na::HarnessUpdateReport) -> HarnessUpdateReportView {
                     .collect(),
                 can_upgrade: h.can_upgrade,
                 active_sessions: h.active_sessions,
-                reason: h.reason.clone(),
+                blocked_reason: h.blocked_reason,
                 operation: h.operation.as_ref().map(receipt_view),
             })
             .collect(),
@@ -1189,7 +1189,7 @@ mod tests {
                     ],
                     can_upgrade: true,
                     active_sessions: 0,
-                    reason: None,
+                    blocked_reason: None,
                     operation: None,
                 },
                 na::HarnessUpdateInfo {
@@ -1203,7 +1203,7 @@ mod tests {
                     )],
                     can_upgrade: true,
                     active_sessions: 2,
-                    reason: None,
+                    blocked_reason: None,
                     operation: None,
                 },
                 na::HarnessUpdateInfo {
@@ -1217,7 +1217,7 @@ mod tests {
                     )],
                     can_upgrade: true,
                     active_sessions: 0,
-                    reason: None,
+                    blocked_reason: None,
                     operation: None,
                 },
                 na::HarnessUpdateInfo {
@@ -1231,7 +1231,7 @@ mod tests {
                     )],
                     can_upgrade: true,
                     active_sessions: 0,
-                    reason: None,
+                    blocked_reason: None,
                     operation: None,
                 },
             ],

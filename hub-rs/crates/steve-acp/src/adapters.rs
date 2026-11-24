@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use steve_node_api::{ComponentInstallSource, PermissionMode, UpgradeMethod};
+use steve_node_api::{
+    ComponentInstallSource, ComponentUpdateReason, PermissionMode, UpgradeMethod,
+};
 
 #[cfg(test)]
 use steve_harness_spec::{AdapterEntry, builtin_packages};
@@ -224,42 +226,6 @@ pub struct InstallEvidence<'a> {
     pub writable: bool,
 }
 
-/// Deterministic classification of why a component cannot be upgraded one-click.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ExternalReason {
-    PackageManagerUnsupported(&'static str),
-    ReadOnlyPath,
-    HomebrewUnverified,
-    UnverifiedUpgrader,
-    CustomInstallPath,
-}
-
-impl ExternalReason {
-    pub fn message(&self) -> String {
-        match self {
-            Self::PackageManagerUnsupported(pm) => format!(
-                "One-click upgrade is not supported for {pm} installations; upgrade with {pm} on the Node"
-            ),
-            Self::ReadOnlyPath => {
-                "Installation directory is not writable by this Node user; upgrade with the original installer on the Node"
-                    .into()
-            }
-            Self::HomebrewUnverified => {
-                "Homebrew upgrade is not verified for this harness; upgrade manually with brew on the Node"
-                    .into()
-            }
-            Self::UnverifiedUpgrader => {
-                "No verified official one-click upgrade command for this installation; update it with its original installer on the Node"
-                    .into()
-            }
-            Self::CustomInstallPath => {
-                "Custom or system-wrapped installation path is not eligible for one-click upgrade; update it with its original installer on the Node"
-                    .into()
-            }
-        }
-    }
-}
-
 /// Resolved install origin for one component binary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DetectedInstall {
@@ -280,7 +246,7 @@ pub enum DetectedInstall {
         executable: PathBuf,
     },
     External {
-        reason: ExternalReason,
+        reason: ComponentUpdateReason,
     },
 }
 
@@ -438,12 +404,16 @@ fn npm_global_prefix(
 }
 
 /// Deterministically classify how `component` was installed and derive its official upgrade action,
-/// if any. Returns `(detected_install, optional_action, optional_unsupported_reason)`.
+/// if any. Returns `(detected_install, optional_action, optional_typed_reason)`.
 pub fn resolve_component_upgrade(
     harness_id: &str,
     component: &UpdateComponent,
     evidence: &InstallEvidence<'_>,
-) -> (DetectedInstall, Option<UpgradeAction>, Option<String>) {
+) -> (
+    DetectedInstall,
+    Option<UpgradeAction>,
+    Option<ComponentUpdateReason>,
+) {
     let spec = harness_upgrade_spec(harness_id);
 
     // 1. Steve's own managed npm prefix always takes precedence.
@@ -471,7 +441,7 @@ pub fn resolve_component_upgrade(
         return (
             DetectedInstall::HomebrewCask { cask },
             None,
-            Some(ExternalReason::HomebrewUnverified.message()),
+            Some(ComponentUpdateReason::HomebrewUnverified),
         );
     }
     if let Some(formula) = homebrew_token(evidence.real_path, "Cellar")
@@ -489,7 +459,7 @@ pub fn resolve_component_upgrade(
         return (
             DetectedInstall::HomebrewFormula { formula },
             None,
-            Some(ExternalReason::HomebrewUnverified.message()),
+            Some(ComponentUpdateReason::HomebrewUnverified),
         );
     }
 
@@ -497,9 +467,16 @@ pub fn resolve_component_upgrade(
     if let Some(pm) = unsupported_package_manager(evidence.real_path)
         .or_else(|| unsupported_package_manager(evidence.original_path))
     {
-        let reason = ExternalReason::PackageManagerUnsupported(pm);
-        let msg = reason.message();
-        return (DetectedInstall::External { reason }, None, Some(msg));
+        let reason = ComponentUpdateReason::PackageManagerUnsupported {
+            manager: pm.to_string(),
+        };
+        return (
+            DetectedInstall::External {
+                reason: reason.clone(),
+            },
+            None,
+            Some(reason),
+        );
     }
 
     // 4. Global npm installation (`<prefix>/lib/node_modules/<package>` or `npm root -g`).
@@ -512,7 +489,7 @@ pub fn resolve_component_upgrade(
             return (
                 DetectedInstall::NpmGlobal { prefix, package },
                 None,
-                Some(ExternalReason::ReadOnlyPath.message()),
+                Some(ComponentUpdateReason::ReadOnlyPath),
             );
         }
         return (
@@ -554,7 +531,7 @@ pub fn resolve_component_upgrade(
                     return (
                         DetectedInstall::Standalone { executable },
                         None,
-                        Some(ExternalReason::ReadOnlyPath.message()),
+                        Some(ComponentUpdateReason::ReadOnlyPath),
                     );
                 }
                 return (
@@ -571,21 +548,26 @@ pub fn resolve_component_upgrade(
             return (
                 DetectedInstall::Standalone { executable },
                 None,
-                Some(ExternalReason::UnverifiedUpgrader.message()),
+                Some(ComponentUpdateReason::UnverifiedUpgrader),
             );
         }
     }
 
     // 6. System-managed wrapper, custom prefix, or read-only location.
     let reason = if !evidence.writable {
-        ExternalReason::ReadOnlyPath
+        ComponentUpdateReason::ReadOnlyPath
     } else if component.is_cli && spec.self_update.is_none() {
-        ExternalReason::UnverifiedUpgrader
+        ComponentUpdateReason::UnverifiedUpgrader
     } else {
-        ExternalReason::CustomInstallPath
+        ComponentUpdateReason::CustomInstallPath
     };
-    let msg = reason.message();
-    (DetectedInstall::External { reason }, None, Some(msg))
+    (
+        DetectedInstall::External {
+            reason: reason.clone(),
+        },
+        None,
+        Some(reason),
+    )
 }
 
 /// Official npm sources for CLI and ACP components. Name-specific knowledge stays in this
@@ -2321,7 +2303,7 @@ mod upgrade_spec_tests {
         );
         assert_eq!(src.source(), ComponentInstallSource::NpmGlobal);
         assert!(act.is_none());
-        assert!(reason.unwrap().contains("not writable"));
+        assert_eq!(reason, Some(ComponentUpdateReason::ReadOnlyPath));
 
         // 5. Pi custom system wrapper (/usr/local/bin/pi) is NOT upgradable; pi managed install IS
         let (src, act, reason) = resolve_component_upgrade(
@@ -2339,7 +2321,7 @@ mod upgrade_spec_tests {
         );
         assert_eq!(src.source(), ComponentInstallSource::External);
         assert!(act.is_none());
-        assert!(reason.is_some());
+        assert_eq!(reason, Some(ComponentUpdateReason::ReadOnlyPath));
 
         let (src, act, _) = resolve_component_upgrade(
             "pi",
@@ -2386,7 +2368,11 @@ mod upgrade_spec_tests {
             );
             assert_eq!(src.source(), ComponentInstallSource::External, "{path}");
             assert!(act.is_none(), "{path}");
-            assert!(reason.unwrap().contains(pm), "{path}");
+            assert_eq!(
+                reason,
+                Some(ComponentUpdateReason::PackageManagerUnsupported { manager: pm.into() }),
+                "{path}"
+            );
         }
 
         // 7. Separate ACP adapter does NOT inherit CLI self_update

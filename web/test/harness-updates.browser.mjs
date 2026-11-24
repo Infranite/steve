@@ -107,7 +107,7 @@ const report = (id, version) => ({
             can_upgrade: false,
             state: "unsupported",
             latest: "1.4.0",
-            reason: "Installed under a root-owned custom wrapper; upgrade manually on the host",
+            reason: { code: "custom_install_path" },
           }),
         ],
       },
@@ -183,7 +183,7 @@ await page.route("**/*", async (route) => {
           stale: false,
           refreshing: false,
           checked_at: Date.now(),
-          harnesses: [{ id: "fixture", name: "Fixture Runtime", available: true, version: id === "local" ? "1.0.0" : "1.5.0", adapter_version: "1.0.0", models: [id + "/model"] }],
+          harnesses: [{ id: "fixture", name: "Fixture Runtime", available: true, version: id === "local" ? "1.0.0" : "1.5.0", adapter_version: id === "local" ? "1.0.0" : "1.5.0", models: [id + "/model"] }],
         },
       ])),
     }
@@ -213,14 +213,15 @@ const open = async (id, tab = "harness") => {
 const reread = () => page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")))
 
 try {
-  // 1. Node identity isolation
+  // 1. Node identity isolation + single unified card per harness (no duplicate cards!)
   await open("local")
   assert.match(await panel().innerText(), /1\.0\.0/)
+  assert.equal(await page.locator('[data-node-harness-id="fixture"]').count(), 1, "each harness appears in one unified card")
   await open("remote")
   assert.match(await panel().innerText(), /1\.5\.0/)
   assert.doesNotMatch(await panel().innerText(), /1\.0\.0/)
   assert.match(await panel().innerText(), /Homebrew Cask/)
-  assert.match(await panel().innerText(), /Installed under a root-owned custom wrapper/)
+  assert.match(await panel().locator("[data-harness-update=readonly_ext] [data-component-unsupported]").innerText(), /自定义路径或系统包装脚本/)
   assert.equal(await panel().locator("[data-harness-upgrade=readonly_ext]").count(), 0, "unsupported external wrapper has no upgrade button")
 
   // 2. External Homebrew Cask + managed ACP upgrade submits BOTH targets & guards duplicate clicks

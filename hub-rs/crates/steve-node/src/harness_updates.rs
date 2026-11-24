@@ -42,7 +42,7 @@ struct Check {
     latest: Option<String>,
     installed: Option<String>,
     at: i64,
-    error: Option<String>,
+    error: Option<ComponentUpdateReason>,
 }
 
 #[derive(Default)]
@@ -89,7 +89,7 @@ struct ResolvedComponent {
     symlink_escape: bool,
     detected: DetectedInstall,
     action: Option<UpgradeAction>,
-    unsupported_reason: Option<String>,
+    unsupported_reason: Option<ComponentUpdateReason>,
 }
 
 #[derive(Clone)]
@@ -239,20 +239,18 @@ fn resolve_component(cfg: &AcpConfig, id: &str, c: &UpdateComponent) -> Resolved
             managed: false,
             symlink_escape: false,
             detected: DetectedInstall::External {
-                reason: adapters::ExternalReason::CustomInstallPath,
+                reason: ComponentUpdateReason::NotInstalled,
             },
             action: None,
-            unsupported_reason: Some(
-                "Component is not installed; installation is a separate explicit action".into(),
-            ),
+            unsupported_reason: Some(ComponentUpdateReason::NotInstalled),
         };
     };
     let symlink_escape = !custom && cfg.managed_adapter(id) && has_managed_symlink_escape(cfg, c);
     if custom || symlink_escape {
         let reason = if custom {
-            "Custom manifest command; update it on the Node with its original installer".into()
+            ComponentUpdateReason::CustomManifest
         } else {
-            "The selected component is external, missing or symlinked outside the managed prefix; manage it on the Node".into()
+            ComponentUpdateReason::SymlinkEscape
         };
         return ResolvedComponent {
             package: c.package,
@@ -260,7 +258,7 @@ fn resolve_component(cfg: &AcpConfig, id: &str, c: &UpdateComponent) -> Resolved
             managed: false,
             symlink_escape,
             detected: DetectedInstall::External {
-                reason: adapters::ExternalReason::CustomInstallPath,
+                reason: reason.clone(),
             },
             action: None,
             unsupported_reason: Some(reason),
@@ -431,17 +429,14 @@ impl SubprocessError {
     }
 }
 
-fn brew_latest(brew: &Path, kind: BrewKind, token: &str) -> Result<String, String> {
+fn brew_latest(brew: &Path, kind: BrewKind, token: &str) -> Result<String, ComponentUpdateReason> {
     let args: Vec<&str> = match kind {
         BrewKind::Cask => vec!["info", "--json=v2", "--cask", token],
         BrewKind::Formula => vec!["info", "--json=v2", token],
     };
-    let out =
-        run_subprocess_observed(brew, &args, BREW_INFO_TIMEOUT, |_| Ok(())).map_err(|_| {
-            "Cannot query Homebrew; check brew and network configuration on this Node".to_string()
-        })?;
-    parse_brew_latest_json(kind, &out)
-        .ok_or_else(|| "Homebrew metadata did not contain a parseable version".to_string())
+    let out = run_subprocess_observed(brew, &args, BREW_INFO_TIMEOUT, |_| Ok(()))
+        .map_err(|_| ComponentUpdateReason::BrewInfoFailed)?;
+    parse_brew_latest_json(kind, &out).ok_or(ComponentUpdateReason::BrewVersionMissing)
 }
 
 fn parse_brew_latest_json(kind: BrewKind, raw_json: &str) -> Option<String> {
@@ -462,12 +457,11 @@ impl Updates {
     pub(crate) fn schedule(node: &LocalNode, fresh: bool) {
         let this = &node.0.harness_updates;
         if !fresh
-            && (managed::UpdatePolicy::from_env() == managed::UpdatePolicy::Off
-                || this
-                    .finished
-                    .lock()
-                    .unwrap()
-                    .is_some_and(|t| now() - t < CHECK_FRESHNESS_MS))
+            && this
+                .finished
+                .lock()
+                .unwrap()
+                .is_some_and(|t| now() - t < CHECK_FRESHNESS_MS)
         {
             return;
         }
@@ -552,13 +546,13 @@ impl Updates {
             Ok((t.active_sessions_by_harness()?, receipts))
         })?;
         let hard_blocked = if !inner.cfg.ceiling.exec {
-            Some("This Node's execution policy denies component upgrades".to_string())
+            Some(HarnessUpgradeBlockReason::ExecDenied)
         } else if inner.node_upgrade_pending() {
-            Some("A Node release upgrade is in progress; finish it first".into())
+            Some(HarnessUpgradeBlockReason::NodeUpgradeInProgress)
         } else if inner.retiring.load(Ordering::SeqCst) {
-            Some("This Node is being removed".into())
+            Some(HarnessUpgradeBlockReason::NodeRemoving)
         } else if maintenance.is_some() {
-            Some("Installation or upgrade is running; wait for its receipt".into())
+            Some(HarnessUpgradeBlockReason::MaintenanceBusy)
         } else {
             None
         };
@@ -585,9 +579,15 @@ impl Updates {
             } else {
                 None
             };
-            let managed_req_err = managed_req
-                .as_ref()
-                .and_then(|r| r.node_error.clone().or_else(|| r.npm_error.clone()));
+            let managed_req_reason = managed_req.as_ref().and_then(|r| {
+                if r.npm_error.is_some() {
+                    Some(ComponentUpdateReason::ToolMissing { tool: "npm".into() })
+                } else if r.node_error.is_some() {
+                    Some(ComponentUpdateReason::NodeRuntimeIncompatible)
+                } else {
+                    None
+                }
+            });
 
             let mut components = Vec::with_capacity(resolved_list.len());
             for (c, r) in &resolved_list {
@@ -598,14 +598,16 @@ impl Updates {
                         .flatten()
                 });
                 let latest = check.and_then(|v| v.latest.clone());
-                let action_tool_error = match &r.action {
-                    Some(a) if a.needs_managed_prefix() => managed_req_err.clone(),
-                    Some(a) if a.needs_npm() && !has_npm => Some(
-                        "npm is missing; install npm beside Node.js or add it to the Node service PATH".into(),
-                    ),
-                    Some(a) if a.needs_brew() && !has_brew => Some(
-                        "brew is missing; install Homebrew or add it to the Node service PATH".into(),
-                    ),
+                let action_tool_reason = match &r.action {
+                    Some(a) if a.needs_managed_prefix() => managed_req_reason.clone(),
+                    Some(a) if a.needs_npm() && !has_npm => {
+                        Some(ComponentUpdateReason::ToolMissing { tool: "npm".into() })
+                    }
+                    Some(a) if a.needs_brew() && !has_brew => {
+                        Some(ComponentUpdateReason::ToolMissing {
+                            tool: "brew".into(),
+                        })
+                    }
                     _ => None,
                 };
                 let is_self_check_only = matches!(r.action, Some(UpgradeAction::SelfUpdate { .. }))
@@ -643,14 +645,14 @@ impl Updates {
                 };
                 let comp_can_upgrade = r.present
                     && r.action.is_some()
-                    && action_tool_error.is_none()
+                    && action_tool_reason.is_none()
                     && !matches!(
                         state,
                         ComponentUpdateState::NotInstalled | ComponentUpdateState::Unsupported
                     );
                 let reason = check
                     .and_then(|v| v.error.clone())
-                    .or(action_tool_error)
+                    .or(action_tool_reason)
                     .or_else(|| r.unsupported_reason.clone());
                 components.push(HarnessComponentUpdate {
                     id: c.id.into(),
@@ -686,17 +688,15 @@ impl Updates {
                 )
             });
             let harness_sessions = active_sessions.get(id).copied().unwrap_or(0);
-            let reason = hard_blocked.clone().or_else(|| {
-                (op_in_flight)
-                    .then(|| "An upgrade for this harness is already queued or running".into())
-            });
+            let blocked_reason = hard_blocked
+                .or_else(|| op_in_flight.then_some(HarnessUpgradeBlockReason::AlreadyRunning));
             harnesses.push(HarnessUpdateInfo {
                 harness: id.clone(),
                 name: cfg.adapter_spec(id).name,
                 components,
                 can_upgrade: has_upgradable_target && hard_blocked.is_none() && !op_in_flight,
                 active_sessions: harness_sessions,
-                reason,
+                blocked_reason,
                 operation: op,
             });
         }
@@ -713,16 +713,15 @@ async fn query_latest(
     resolved: &ResolvedComponent,
     npm: Option<PathBuf>,
     brew: Option<PathBuf>,
-) -> (Option<String>, Option<String>) {
+) -> (Option<String>, Option<ComponentUpdateReason>) {
     match &resolved.detected {
         DetectedInstall::HomebrewCask { cask } => {
             let Some(brew) = brew else {
                 return (
                     None,
-                    Some(
-                        "brew is missing; install Homebrew or add it to the Node service PATH"
-                            .into(),
-                    ),
+                    Some(ComponentUpdateReason::ToolMissing {
+                        tool: "brew".into(),
+                    }),
                 );
             };
             let cask = cask.clone();
@@ -731,17 +730,16 @@ async fn query_latest(
             {
                 Ok(Ok(v)) => (Some(v), None),
                 Ok(Err(e)) => (None, Some(e)),
-                Err(_) => (None, Some("Homebrew lookup interrupted".into())),
+                Err(_) => (None, Some(ComponentUpdateReason::BrewInfoFailed)),
             }
         }
         DetectedInstall::HomebrewFormula { formula } => {
             let Some(brew) = brew else {
                 return (
                     None,
-                    Some(
-                        "brew is missing; install Homebrew or add it to the Node service PATH"
-                            .into(),
-                    ),
+                    Some(ComponentUpdateReason::ToolMissing {
+                        tool: "brew".into(),
+                    }),
                 );
             };
             let formula = formula.clone();
@@ -752,7 +750,7 @@ async fn query_latest(
             {
                 Ok(Ok(v)) => (Some(v), None),
                 Ok(Err(e)) => (None, Some(e)),
-                Err(_) => (None, Some("Homebrew lookup interrupted".into())),
+                Err(_) => (None, Some(ComponentUpdateReason::BrewInfoFailed)),
             }
         }
         _ => match (npm, resolved.package) {
@@ -762,10 +760,9 @@ async fn query_latest(
                     .ok()
                     .and_then(Result::ok)
                     .and_then(|v| version(&v));
-                let err = latest.is_none().then(|| {
-                    "Cannot query the npm registry; check npm and network configuration on this Node"
-                        .into()
-                });
+                let err = latest
+                    .is_none()
+                    .then_some(ComponentUpdateReason::NpmRegistryFailed);
                 (latest, err)
             }
             (None, Some(_)) => {
@@ -775,7 +772,7 @@ async fn query_latest(
                 } else {
                     (
                         None,
-                        Some("Cannot query the npm registry; check npm and network configuration on this Node".into()),
+                        Some(ComponentUpdateReason::ToolMissing { tool: "npm".into() }),
                     )
                 }
             }
@@ -1095,10 +1092,10 @@ async fn build_upgrade_plan(inner: &Inner, c: &Command<UpgradeHarness>) -> ApiRe
             };
             return Err(Error::new(
                 code,
-                resolved.unsupported_reason.unwrap_or_else(|| {
-                    "The selected component is external, missing or overridden; manage it on the Node"
-                        .into()
-                }),
+                resolved
+                    .unsupported_reason
+                    .as_ref()
+                    .map_or("custom_install_path", ComponentUpdateReason::code),
             ));
         };
         let installed = executable_version(cfg, spec).await.ok_or_else(|| {

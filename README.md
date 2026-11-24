@@ -422,7 +422,6 @@ For an existing Hub that completed managed setup, run `steve setup --reconfigure
 | `STEVE_TAILCAT`, `STEVE_TAILCAT_PORT` | Remote Nodes over tailcat (optional, turned on in Devices): the `tailcat` program when it is not on `PATH`, and the loopback port its Node-only listener uses (default: Hub port + 2) |
 | `STEVE_NODE_INSTALLERS` | A local directory with the release's `steve-installer.json` and installer archives, for remote Node installs from a Hub without access to GitHub |
 | `STEVE_ADAPTER_*`, `STEVE_DEFAULT_MODEL_*` | Override a built-in harness's ACP adapter path (`STEVE_ADAPTER_CLAUDE`, `STEVE_ADAPTER_CODEX`, `STEVE_ADAPTER_GEMINI`, …) or default model (`STEVE_DEFAULT_MODEL_CLAUDE`, …); full table in [Harness setup](docs/deployment.md#harness-setup) |
-| `STEVE_ADAPTER_UPDATES` | What a Node does about newer releases of the ACP adapters Steve installed: `auto` (default: checks daily and upgrades when no session runs), `check` (shows them only), `off` |
 | `STEVE_NODE_HANDOFF_MIN` | Minutes a device may be offline while messages wait for its session before Steve continues the item in a new session elsewhere (default 30; `0` never) |
 | `STEVE_NODE_PROXY_PEERS` | Optional exact IPs of TLS-terminating proxies for remote Node ingress; default is loopback only |
 

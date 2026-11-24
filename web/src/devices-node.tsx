@@ -41,7 +41,6 @@ import { NodeUpgradeHistory, NodeVersion, UpgradeSteps } from "@/devices-upgrade
 import { RunningCard, deviceGroups } from "@/devices-work"
 import { TakeWork } from "@/devices-config"
 import { NodeContext } from "@/devices-context"
-import { NodeHarnessUpdates } from "@/devices-harness-updates"
 import { LeaveCard, RemoveDialog } from "@/devices-remove-dialog"
 import { NodeHarnesses } from "@/devices-harnesses"
 import { NodeActionControls, useNodeActions, type NodeActions } from "@/devices-node-actions"
@@ -456,7 +455,6 @@ function HarnessNodeTab({
       <NodeHarnesses v={v} actions={actions}>
         {v.local && <RuntimeSetupPanel>{v.device?.can_configure && !st.down && <AddHarness />}</RuntimeSetupPanel>}
       </NodeHarnesses>
-      <NodeHarnessUpdates v={v} state={actions.harnessUpdates} />
     </>
   )
 }

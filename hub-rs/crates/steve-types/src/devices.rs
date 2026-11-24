@@ -399,6 +399,72 @@ pub struct HarnessUpgradeReceipt {
     pub state: HarnessUpgradeReceiptState,
 }
 
+/// Strongly-typed, i18n-keyed reason explaining why a component cannot be upgraded or failed to check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum ComponentUpdateReason {
+    /// Component binary is not installed on this Node.
+    NotInstalled,
+    /// Harness is configured via a custom manifest command.
+    CustomManifest,
+    /// Managed prefix or package escapes `<home>/adapters` via a symlink.
+    SymlinkEscape,
+    /// Installed through a package manager without a verified Node upgrader (e.g. `pnpm`, `yarn`, `bun`, `uv`, `nix`).
+    PackageManagerUnsupported { manager: String },
+    /// Installation path or prefix is not writable by the Node service user.
+    ReadOnlyPath,
+    /// Homebrew upgrade has not been verified for this harness.
+    HomebrewUnverified,
+    /// No verified official one-click upgrade command for this installation.
+    UnverifiedUpgrader,
+    /// Custom or system-wrapped external install path (e.g. root-owned wrapper).
+    CustomInstallPath,
+    /// Required tool is missing on the Node service PATH (`npm`, `brew`).
+    ToolMissing { tool: String },
+    /// Node.js runtime prerequisite failed for managed npm packages.
+    NodeRuntimeIncompatible,
+    /// Querying the npm registry failed.
+    NpmRegistryFailed,
+    /// Querying Homebrew metadata failed.
+    BrewInfoFailed,
+    /// Homebrew metadata did not contain a parseable version.
+    BrewVersionMissing,
+}
+
+impl ComponentUpdateReason {
+    /// Stable snake_case code string for telemetry and error detail payloads.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NotInstalled => "not_installed",
+            Self::CustomManifest => "custom_manifest",
+            Self::SymlinkEscape => "symlink_escape",
+            Self::PackageManagerUnsupported { .. } => "package_manager_unsupported",
+            Self::ReadOnlyPath => "read_only_path",
+            Self::HomebrewUnverified => "homebrew_unverified",
+            Self::UnverifiedUpgrader => "unverified_upgrader",
+            Self::CustomInstallPath => "custom_install_path",
+            Self::ToolMissing { .. } => "tool_missing",
+            Self::NodeRuntimeIncompatible => "node_runtime_incompatible",
+            Self::NpmRegistryFailed => "npm_registry_failed",
+            Self::BrewInfoFailed => "brew_info_failed",
+            Self::BrewVersionMissing => "brew_version_missing",
+        }
+    }
+}
+
+/// Strongly-typed, i18n-keyed reason explaining why upgrades are currently blocked on a harness or Node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessUpgradeBlockReason {
+    ExecDenied,
+    NodeUpgradeInProgress,
+    NodeRemoving,
+    MaintenanceBusy,
+    AlreadyRunning,
+}
+
 /// HTTP view of one harness component's update state on a Node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -430,7 +496,7 @@ pub struct HarnessComponentUpdateView {
     pub checked: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
-    pub reason: Option<String>,
+    pub reason: Option<ComponentUpdateReason>,
 }
 
 /// HTTP view of one harness's update state on a Node.
@@ -445,7 +511,7 @@ pub struct HarnessUpdateView {
     pub active_sessions: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
-    pub reason: Option<String>,
+    pub blocked_reason: Option<HarnessUpgradeBlockReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub operation: Option<HarnessUpgradeReceipt>,

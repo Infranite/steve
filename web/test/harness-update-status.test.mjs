@@ -2,9 +2,11 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import {
   availableUpgradableHarnesses,
+  componentReasonI18n,
   effectiveAutoUpgrade,
   hasUpgradeAction,
   isAutoUpgradeOverridden,
+  mergeNodeHarnesses,
   receiptStatus,
   selfUpdateTargets,
   supportsAutoUpgrade,
@@ -103,4 +105,53 @@ test("availableUpgradableHarnesses lists idle or queued-eligible updates and exc
     code: null,
   }
   assert.deepEqual(availableUpgradableHarnesses(data).map((h) => h.harness), ["ready"])
+})
+
+test("componentReasonI18n maps every typed reason code and mergeNodeHarnesses unifies probe and update entries", () => {
+  assert.deepEqual(componentReasonI18n({ code: "custom_install_path" }), {
+    key: "devices:harnessUpdates.componentReason.custom_install_path",
+  })
+  assert.deepEqual(componentReasonI18n({ code: "package_manager_unsupported", manager: "uv" }), {
+    key: "devices:harnessUpdates.componentReason.package_manager_unsupported",
+    params: { manager: "uv" },
+  })
+  assert.deepEqual(componentReasonI18n({ code: "tool_missing", tool: "brew" }), {
+    key: "devices:harnessUpdates.componentReason.tool_missing",
+    params: { tool: "brew" },
+  })
+
+  const merged = mergeNodeHarnesses(
+    {
+      state: "reported",
+      checked_at: 1,
+      attempted_at: 1,
+      stale: false,
+      refreshing: false,
+      error: null,
+      harnesses: [
+        { id: "h1", name: "Harness One", available: true, version: "1.0.0", adapter_version: "0.9.0", degraded_reason: null, models: ["m1"], error: null, setup: null },
+      ],
+    },
+    {
+      report: {
+        node: "n-1",
+        checking: false,
+        harnesses: [
+          { harness: "h1", name: "Harness One", can_upgrade: true, active_sessions: 0, components: [comp({ id: "cli", state: "available", latest: "2.0.0" })] },
+          { harness: "h2", name: "Installed Only In Updates", can_upgrade: false, active_sessions: 0, components: [comp({ id: "cli", state: "unsupported", can_upgrade: false })] },
+          { harness: "h3", name: "Uninstalled", can_upgrade: false, active_sessions: 0, components: [comp({ id: "cli", state: "not_installed", installed: undefined, can_upgrade: false })] },
+        ],
+      },
+      at: 2,
+      runs: {},
+      retryable_unknown: [],
+      auto_upgrade: { enabled: false, harnesses: {} },
+      error: null,
+      code: null,
+    },
+  )
+  assert.deepEqual(merged.shown.map((x) => x.id), ["h1", "h2"])
+  assert.equal(merged.shown[0].probe?.models[0], "m1")
+  assert.equal(merged.shown[0].update?.harness, "h1")
+  assert.deepEqual(merged.other.map((x) => x.id), ["h3"])
 })

@@ -44,6 +44,7 @@ impl Lease {
     pub(crate) fn optional_prefix(&self) -> Option<Arc<managed::PrefixLock>> {
         self.prefix.clone()
     }
+    #[cfg(test)]
     pub(crate) fn reserve(inner: &Arc<Inner>, id: &str) -> Option<Self> {
         let mut busy = inner.adapter_maintenance.lock().unwrap();
         if busy.is_some()

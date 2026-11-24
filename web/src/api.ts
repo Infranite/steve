@@ -107,8 +107,6 @@ export type RRuntime = {
     }[]
     can_install: boolean; reason?: string | null; help?: string | null; error?: string | null
   }
-  /** an adapter Steve installed and keeps up to date: its last check (`policy`: STEVE_ADAPTER_UPDATES) */
-  update?: { policy: "auto" | "check" | "off"; installed?: string | null; latest?: string | null; checked?: number | null; error?: string | null; pending?: boolean } | null
 }
 /** Read-only report from one particular Node, never the Hub's merged model catalogue. */
 export type RNodeHarness = {

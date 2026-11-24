@@ -1,8 +1,6 @@
 /* The devices pages (devices*.tsx, device-model.ts): the Hub, its Nodes and the clients signed in to it, in one place */
 export default {
   harnessUpdates: {
-    title: "CLI and ACP updates",
-    sub: "Check and upgrade managed and externally installed CLIs on this Node with their official upgraders. Providers and sign-in stay on the device.",
     check: "Check for updates",
     checking: "Checking component versions on this device…",
     observed: "Device read at {{at}}",
@@ -13,8 +11,6 @@ export default {
     oldNode: "This Node does not support component updates yet. Upgrade it in the version card first, or update Steve Node on that device with its original installer.",
     unavailable: "Unable to read or submit updates. Read the details and retry.",
     stale: "Showing the last report. Receipt checks continue when the connection returns.",
-    loading: "Reading updates from this device…",
-    empty: "This device has not reported any components to check.",
     external: "One-click upgrade is not supported for this install path. Upgrade it on the Node with its original installer.",
     other: "{{count}} uninstalled runtimes",
     wrongNode: "The update report belongs to another Node. Refresh and retry.",
@@ -44,6 +40,29 @@ export default {
     autoOverrideOff: "Overridden off for this harness",
     autoUnsupported: "Auto-upgrade is unavailable for this harness",
     autoReset: "Follow Node",
+    versionsLabel: "Components & updates",
+    componentReason: {
+      not_installed: "Component is not installed on this Node.",
+      custom_manifest: "Configured via a custom manifest command; upgrade it manually on this Node.",
+      symlink_escape: "Installed component is symlinked outside Steve's managed prefix; upgrade it on this Node.",
+      package_manager_unsupported: "Installed via {{manager}}, which does not support one-click upgrades; update it with {{manager}} on this Node.",
+      read_only_path: "Installation path is not writable by the Node service user; upgrade it manually on this Node.",
+      homebrew_unverified: "Homebrew one-click upgrade has not been verified for this harness; update it with brew on this Node.",
+      unverified_upgrader: "No verified official one-click upgrade command for this installation; update it with its original installer on this Node.",
+      custom_install_path: "Installed via a custom path or system wrapper; upgrade it manually on the Node host.",
+      tool_missing: "{{tool}} is not available on this Node's service PATH; install it or update PATH first.",
+      node_runtime_incompatible: "This Node's Node.js runtime does not satisfy the package version requirement.",
+      npm_registry_failed: "Unable to query the npm registry; check npm and network access on this Node.",
+      brew_info_failed: "Unable to query Homebrew metadata; check brew and network access on this Node.",
+      brew_version_missing: "Homebrew metadata did not include a recognizable version number.",
+    },
+    blockReason: {
+      exec_denied: "This Node's execution policy disables component upgrades.",
+      node_upgrade_in_progress: "A Node release upgrade is in progress; finish it before upgrading harnesses.",
+      node_removing: "This Node is being removed.",
+      maintenance_busy: "Another installation or upgrade is currently running on this Node.",
+      already_running: "An upgrade for this harness is already queued or running.",
+    },
     badge: {
       waiting: "Queued",
       running: "Upgrading",

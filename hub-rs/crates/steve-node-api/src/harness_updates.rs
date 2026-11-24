@@ -4,7 +4,10 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-pub use steve_types::devices::{ComponentInstallSource, ComponentUpdateState, UpgradeMethod};
+pub use steve_types::devices::{
+    ComponentInstallSource, ComponentUpdateReason, ComponentUpdateState, HarnessUpgradeBlockReason,
+    UpgradeMethod,
+};
 
 use crate::{NodeId, Receipt, Timestamp};
 
@@ -26,7 +29,7 @@ pub struct HarnessUpdateInfo {
     #[serde(default)]
     pub active_sessions: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
+    pub blocked_reason: Option<HarnessUpgradeBlockReason>,
     /// Last explicit maintenance receipt, including failure/unknown, from the Node's journal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation: Option<Receipt>,
@@ -55,7 +58,7 @@ pub struct HarnessComponentUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checked: Option<Timestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
+    pub reason: Option<ComponentUpdateReason>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

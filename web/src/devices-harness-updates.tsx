@@ -1,19 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { DownloadIcon, RefreshCwIcon } from "lucide-react"
+import { DownloadIcon } from "lucide-react"
 import { api } from "@/api"
-import { IntegrationRow, IntegrationSection, IntegrationSettings } from "@/components/affect/integration-settings-clean"
+import { IntegrationRow, IntegrationSection } from "@/components/affect/integration-settings-clean"
 import { Badge } from "@/components/affect/badge-clean"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Switch } from "@/components/ui/switch"
-import { HarnessMark } from "@/components/harness-mark"
-import { DCard } from "@/devices-ui"
 import { useDevices } from "@/devices-data"
 import { useT } from "@/i18n"
-import { monthDayTime } from "@/i18n/format"
 import { st, useStore } from "@/store"
 import {
   availableUpgradableHarnesses,
+  componentReasonI18n,
   effectiveAutoUpgrade,
   hasUpgradeAction,
   isAutoUpgradeOverridden,
@@ -32,9 +30,9 @@ import type { NodeView } from "@/device-model"
 /** Cache by Node id only; every receipt, installed version, and auto-upgrade policy comes from that target's API. */
 const cache = new Map<string, HarnessUpdates>()
 
-const DEFAULT_AUTO_POLICY: HarnessAutoUpgradePolicy = { enabled: false, harnesses: {} }
+export const DEFAULT_AUTO_POLICY: HarnessAutoUpgradePolicy = { enabled: false, harnesses: {} }
 
-/** Shared state and actions for Node harness updates, used by both the Harness tab and Overview's "Needs your attention". */
+/** Shared state and actions for Node harness updates, used by both the unified Harness tab and Overview's "Needs your attention". */
 export function useNodeHarnessUpdates(v: NodeView) {
   useStore()
   const t = useT(), { refreshHarnesses } = useDevices()
@@ -239,124 +237,34 @@ export function useNodeHarnessUpdates(v: NodeView) {
 
 export type NodeHarnessUpdatesState = ReturnType<typeof useNodeHarnessUpdates>
 
-export function NodeHarnessUpdates({ v, state }: { v: NodeView; state: NodeHarnessUpdatesState }) {
+/** Node-level auto-upgrade master toggle, displayed at the top of the Harness tab. */
+export function NodeAutoUpgradeBar({ state }: { state: NodeHarnessUpdatesState }) {
   useStore()
   const t = useT()
-  if (v.state === "revoked") return null
-
-  const { data, busy, error, message, requesting, savingAuto, unavailable, reload, upgrade, setNodeAutoUpgrade, setHarnessAutoUpgrade } = state
-  const policy = data?.auto_upgrade ?? DEFAULT_AUTO_POLICY
-  const harnesses = data?.report?.harnesses ?? []
-  const shown = harnesses.filter(
-    (h) => h.components.some((c) => c.state !== "not_installed" || !!c.installed) || !!h.operation || !!data?.runs[h.harness],
-  )
-  const other = harnesses.filter((h) => !shown.includes(h))
-
+  if (!st.owner) return null
+  const policy = state.data?.auto_upgrade ?? DEFAULT_AUTO_POLICY
   return (
-    <DCard icon={<DownloadIcon />} title={t("devices:harnessUpdates.title")} sub={t("devices:harnessUpdates.sub")} data-harness-updates={v.id}>
-      <div className="flex flex-col gap-3 px-3 pb-3">
-        <div className="flex flex-wrap items-center justify-between gap-2 px-2">
-          <span className="type-footnote text-muted-foreground" role="status">
-            {data?.report?.checking
-              ? t("devices:harnessUpdates.checking")
-              : data?.at
-                ? t("devices:harnessUpdates.observed", { at: monthDayTime(data.at) })
-                : ""}
-          </span>
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={!st.owner || !v.linked || busy || !!data?.report?.checking || !!requesting}
-            onClick={() => void reload(true)}
-            data-harness-update-check
-          >
-            {busy || data?.report?.checking ? <Spinner /> : <RefreshCwIcon />}
-            {t("devices:harnessUpdates.check")}
-          </Button>
-        </div>
-
-        {st.owner && (
-          <div
-            className="flex items-center justify-between gap-3 rounded-xl border border-border/60 bg-muted/35 px-3.5 py-2.5"
-            data-harness-auto-upgrade-card
-          >
-            <div className="min-w-0">
-              <div className="type-callout font-medium text-foreground">{t("devices:harnessUpdates.autoNodeTitle")}</div>
-              <p className="type-footnote text-muted-foreground">{t("devices:harnessUpdates.autoNodeSub")}</p>
-            </div>
-            <Switch
-              checked={policy.enabled}
-              disabled={!st.owner || !data || unavailable || savingAuto !== null}
-              onCheckedChange={(checked) => void setNodeAutoUpgrade(checked)}
-              aria-label={t("devices:harnessUpdates.autoNodeTitle")}
-              data-harness-auto-upgrade-node
-            />
-          </div>
-        )}
-
-        {!st.owner && <p className="px-2 type-footnote text-muted-foreground">{t("devices:harnessUpdates.owner")}</p>}
-
-        {(unavailable || message) && (
-          <div className="px-2 type-footnote text-attention" role="alert" data-harness-update-error>
-            <p>{t(data?.code === "unsupported" ? "devices:harnessUpdates.oldNode" : "devices:harnessUpdates.unavailable")}</p>
-            {data?.report && <p>{t("devices:harnessUpdates.stale")}</p>}
-            <details className="mt-1">
-              <summary className="cursor-pointer">{t("devices:harnessUpdates.details")}</summary>
-              <p className="break-words whitespace-pre-wrap">{message || error || data?.error}</p>
-            </details>
-          </div>
-        )}
-
-        {!harnesses.length && st.owner && !unavailable && (
-          <p className="px-2 type-footnote text-muted-foreground">
-            {t(busy ? "devices:harnessUpdates.loading" : "devices:harnessUpdates.empty")}
-          </p>
-        )}
-
-        {shown.map((h) => (
-          <UpdateCard
-            key={h.harness}
-            h={h}
-            policy={policy}
-            receipt={data?.runs[h.harness] ?? h.operation}
-            requesting={requesting === h.harness || requesting === "__all__"}
-            savingAuto={savingAuto !== null}
-            disabled={!st.owner || !v.linked || v.state !== "active" || unavailable || !!requesting}
-            canEditAuto={st.owner && !!data && !unavailable}
-            retry={!!data?.retryable_unknown?.includes(h.harness)}
-            upgrade={(retry) => void upgrade(h, retry)}
-            onAutoMode={(mode) => void setHarnessAutoUpgrade(h.harness, mode)}
-          />
-        ))}
-
-        {!!other.length && (
-          <details className="px-2 type-footnote text-muted-foreground" data-harness-update-other>
-            <summary className="cursor-pointer">{t("devices:harnessUpdates.other", { count: other.length })}</summary>
-            <div className="mt-3 flex flex-col gap-3">
-              {other.map((h) => (
-                <UpdateCard
-                  key={h.harness}
-                  h={h}
-                  policy={policy}
-                  receipt={data?.runs[h.harness] ?? h.operation}
-                  disabled
-                  canEditAuto={false}
-                  requesting={false}
-                  savingAuto={false}
-                  retry={false}
-                  upgrade={() => {}}
-                  onAutoMode={() => {}}
-                />
-              ))}
-            </div>
-          </details>
-        )}
+    <div
+      className="flex items-center justify-between gap-3 rounded-xl border border-border/60 bg-muted/35 px-3.5 py-2.5"
+      data-harness-auto-upgrade-card
+    >
+      <div className="min-w-0">
+        <div className="type-callout font-medium text-foreground">{t("devices:harnessUpdates.autoNodeTitle")}</div>
+        <p className="type-footnote text-muted-foreground">{t("devices:harnessUpdates.autoNodeSub")}</p>
       </div>
-    </DCard>
+      <Switch
+        checked={policy.enabled}
+        disabled={!st.owner || !state.data || state.unavailable || state.savingAuto !== null}
+        onCheckedChange={(checked) => void state.setNodeAutoUpgrade(checked)}
+        aria-label={t("devices:harnessUpdates.autoNodeTitle")}
+        data-harness-auto-upgrade-node
+      />
+    </div>
   )
 }
 
-function UpdateCard({
+/** Component version list, one-click upgrade controls, visible error alert, and per-harness auto-upgrade override. */
+export function HarnessUpgradeSections({
   h,
   policy,
   receipt,
@@ -397,21 +305,6 @@ function UpdateCard({
         ? receipt.state.error?.safe_detail
         : null
 
-  const badge =
-    status === "waiting" ? (
-      <Badge tone="info" dot live>{t("devices:harnessUpdates.badge.waiting")}</Badge>
-    ) : status === "running" ? (
-      <Badge tone="info" dot live>{t("devices:harnessUpdates.badge.running")}</Badge>
-    ) : available ? (
-      <Badge tone="warning">{t("devices:harnessUpdates.available")}</Badge>
-    ) : selfOnly ? (
-      <Badge tone="neutral">{t("devices:harnessUpdates.badge.checkOnUpgrade")}</Badge>
-    ) : undefined
-
-  const metaParts: string[] = []
-  if (activeSessions > 0) metaParts.push(t("devices:harnessUpdates.activeSessionsMeta", { count: activeSessions }))
-  if (autoSupported && autoEffective) metaParts.push(t("devices:harnessUpdates.autoEnabledMeta"))
-
   const buttonLabel = requesting
     ? t("devices:harnessUpdates.requesting")
     : status === "waiting"
@@ -432,122 +325,113 @@ function UpdateCard({
       ? t(autoEffective ? "devices:harnessUpdates.autoOverrideOn" : "devices:harnessUpdates.autoOverrideOff")
       : t(autoEffective ? "devices:harnessUpdates.autoInheritOn" : "devices:harnessUpdates.autoInheritOff")
 
-  return (
-    <IntegrationSettings
-      name={h.name}
-      logo={<HarnessMark harness={h.harness} className="size-5" />}
-      badge={badge}
-      meta={metaParts.length ? metaParts.join(" · ") : undefined}
-      data-harness-update={h.harness}
-    >
-      <IntegrationSection>
-        <ul className="flex flex-col gap-3 type-footnote">
-          {h.components.map((c) => (
-            <li key={c.id} data-harness-update-component={c.id}>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="font-medium">{c.name}</span>
-                <Badge
-                  tone={
-                    c.state === "available" || c.state === "check_failed"
-                      ? "warning"
-                      : c.state === "current"
-                        ? "success"
-                        : c.state === "check_on_upgrade"
-                          ? "info"
-                          : "neutral"
-                  }
-                >
-                  {t(`devices:harnessUpdates.state.${c.state}`)}
-                </Badge>
-                {c.state !== "not_installed" && (
-                  <Badge tone="neutral" data-component-source={c.source}>
-                    {t(`devices:harnessUpdates.source.${c.source}`)}
-                  </Badge>
-                )}
-              </div>
-              <p className="mt-1 font-mono text-muted-foreground">
-                {c.installed ?? "—"}
-                {c.latest && c.latest !== c.installed ? " → " + c.latest : ""}
-              </p>
-              {c.upgrade_method === "unsupported" && c.state !== "not_installed" && (
-                <p className="mt-1 text-muted-foreground" data-component-unsupported>
-                  {c.reason || t("devices:harnessUpdates.external")}
-                </p>
-              )}
-              {c.state === "check_on_upgrade" && (
-                <p className="mt-1 text-muted-foreground">{t("devices:harnessUpdates.checkOnUpgradeNote")}</p>
-              )}
-              {(c.upgrade_command || c.reason || c.package || c.checked) && (
-                <details className="mt-1 text-muted-foreground">
-                  <summary className="cursor-pointer">{t("devices:harnessUpdates.details")}</summary>
-                  {c.upgrade_command && (
-                    <p className="break-all font-mono" data-component-command>
-                      {t("devices:harnessUpdates.command", { cmd: c.upgrade_command })}
-                    </p>
-                  )}
-                  {c.package && <p className="break-all font-mono">{c.package}</p>}
-                  {c.checked && <p>{t("devices:harnessUpdates.checked", { at: monthDayTime(c.checked) })}</p>}
-                  {c.reason && <p className="break-words whitespace-pre-wrap">{c.reason}</p>}
-                </details>
-              )}
-            </li>
-          ))}
-        </ul>
-      </IntegrationSection>
+  const formatComponentReason = (reason: NonNullable<(typeof h.components)[number]["reason"]>) => {
+    const mapped = componentReasonI18n(reason)
+    return t(mapped.key as "devices:harnessUpdates.external", mapped.params)
+  }
 
-      {(canAction || receipt || requesting) && (
-        <IntegrationSection>
-          {activeSessions > 0 && canAction && status !== "waiting" && status !== "running" && (
-            <p className="mb-2 type-footnote text-attention" data-harness-active-sessions={activeSessions}>
-              {t("devices:harnessUpdates.activeSessionsNotice", { count: activeSessions })}
-            </p>
-          )}
-          <div className="flex flex-wrap items-center gap-2">
-            {canAction && (
-              <Button
-                size="sm"
-                disabled={disabled || !h.can_upgrade || status === "running" || status === "waiting" || (status === "unknown" && !retry)}
-                onClick={() => upgrade(status === "unknown")}
-                data-harness-upgrade={h.harness}
-              >
-                {requesting || status === "running" || status === "waiting" ? <Spinner /> : <DownloadIcon />}
-                {buttonLabel}
-              </Button>
+  return (
+    <>
+      <IntegrationSection label={t("devices:harnessUpdates.versionsLabel")}>
+        <ul className="flex flex-col gap-2.5 type-footnote">
+          {h.components.map((c) => {
+            const reasonText = c.reason ? formatComponentReason(c.reason) : null
+            return (
+              <li key={c.id} data-harness-update-component={c.id}>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium text-foreground">{c.name}</span>
+                  <span className="font-mono text-muted-foreground">
+                    {c.installed ?? "—"}
+                    {c.latest && c.latest !== c.installed ? " → " + c.latest : ""}
+                  </span>
+                  <Badge
+                    tone={
+                      c.state === "available" || c.state === "check_failed"
+                        ? "warning"
+                        : c.state === "current"
+                          ? "success"
+                          : c.state === "check_on_upgrade"
+                            ? "info"
+                            : "neutral"
+                    }
+                  >
+                    {t(`devices:harnessUpdates.state.${c.state}`)}
+                  </Badge>
+                  {c.state !== "not_installed" && (
+                    <Badge tone="neutral" data-component-source={c.source}>
+                      {t(`devices:harnessUpdates.source.${c.source}`)}
+                    </Badge>
+                  )}
+                </div>
+                {c.upgrade_method === "unsupported" && c.state !== "not_installed" && (
+                  <p className="mt-1 text-muted-foreground" data-component-unsupported>
+                    {reasonText || t("devices:harnessUpdates.external")}
+                  </p>
+                )}
+                {c.state === "check_failed" && reasonText && (
+                  <p className="mt-1 text-attention" data-component-check-failed>
+                    {reasonText}
+                  </p>
+                )}
+                {c.state === "check_on_upgrade" && (
+                  <p className="mt-1 text-muted-foreground">{t("devices:harnessUpdates.checkOnUpgradeNote")}</p>
+                )}
+              </li>
+            )
+          })}
+        </ul>
+
+        {(canAction || receipt || requesting || h.blocked_reason) && (
+          <div className="mt-3 flex flex-col gap-2">
+            {activeSessions > 0 && canAction && status !== "waiting" && status !== "running" && (
+              <p className="type-footnote text-attention" data-harness-active-sessions={activeSessions}>
+                {t("devices:harnessUpdates.activeSessionsNotice", { count: activeSessions })}
+              </p>
             )}
-            {status && (
-              <span
-                role="status"
-                className={status === "failed" || status === "unknown" ? "type-footnote text-attention" : "type-footnote text-muted-foreground"}
-                data-harness-upgrade-result={status}
+            {h.blocked_reason && status !== "waiting" && status !== "running" && (
+              <p className="type-footnote text-muted-foreground" data-harness-blocked-reason={h.blocked_reason}>
+                {t(`devices:harnessUpdates.blockReason.${h.blocked_reason}`)}
+              </p>
+            )}
+            <div className="flex flex-wrap items-center gap-2">
+              {canAction && (
+                <Button
+                  size="sm"
+                  disabled={disabled || !h.can_upgrade || status === "running" || status === "waiting" || (status === "unknown" && !retry)}
+                  onClick={() => upgrade(status === "unknown")}
+                  data-harness-upgrade={h.harness}
+                >
+                  {requesting || status === "running" || status === "waiting" ? <Spinner /> : <DownloadIcon />}
+                  {buttonLabel}
+                </Button>
+              )}
+              {status && (
+                <span
+                  role="status"
+                  className={status === "failed" || status === "unknown" ? "type-footnote text-attention" : "type-footnote text-muted-foreground"}
+                  data-harness-upgrade-result={status}
+                >
+                  {t(`devices:harnessUpdates.result.${status}`)}
+                </span>
+              )}
+            </div>
+            {status === "unknown" && (
+              <p className="type-footnote text-muted-foreground">
+                {t(retry ? "devices:harnessUpdates.unknownRetry" : "devices:harnessUpdates.unknown")}
+              </p>
+            )}
+            {(status === "failed" || status === "unknown") && detail && (
+              <p
+                className="rounded-lg bg-attention/10 px-2.5 py-1.5 type-footnote text-attention break-words whitespace-pre-wrap"
+                role="alert"
+                data-harness-upgrade-detail
               >
-                {t(`devices:harnessUpdates.result.${status}`)}
-              </span>
+                {detail}
+              </p>
             )}
           </div>
-          {status === "unknown" && (
-            <p className="mt-2 type-footnote text-muted-foreground">
-              {t(retry ? "devices:harnessUpdates.unknownRetry" : "devices:harnessUpdates.unknown")}
-            </p>
-          )}
-          {(status === "failed" || status === "unknown") && detail && (
-            <p
-              className="mt-2 rounded-lg bg-attention/10 px-2.5 py-1.5 type-footnote text-attention break-words whitespace-pre-wrap"
-              role="alert"
-              data-harness-upgrade-detail
-            >
-              {detail}
-            </p>
-          )}
-          {(h.reason || receipt) && (
-            <details className="mt-2 type-footnote text-muted-foreground">
-              <summary className="cursor-pointer">{t("devices:harnessUpdates.details")}</summary>
-              {h.reason && <p className="break-words whitespace-pre-wrap">{h.reason}</p>}
-              {receipt && <p className="break-all font-mono" data-harness-upgrade-operation>{receipt.operation}</p>}
-              {detail && <p className="break-words whitespace-pre-wrap">{detail}</p>}
-            </details>
-          )}
-        </IntegrationSection>
-      )}
+        )}
+      </IntegrationSection>
 
       {canEditAuto && (
         <IntegrationSection>
@@ -574,6 +458,6 @@ function UpdateCard({
           </IntegrationRow>
         </IntegrationSection>
       )}
-    </IntegrationSettings>
+    </>
   )
 }

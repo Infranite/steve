@@ -1,8 +1,6 @@
 /* The devices pages (devices*.tsx, device-model.ts): the Hub, its Nodes and the clients signed in to it, in one place */
 export default {
   harnessUpdates: {
-    title: "CLI 与 ACP 更新",
-    sub: "在此 Node 检查并调用官方升级方式更新受管及外部 CLI；provider 与登录凭据仍由设备自行管理。",
     check: "检查新版本",
     checking: "正在查询此设备的组件版本…",
     observed: "设备信息读取于 {{at}}",
@@ -13,8 +11,6 @@ export default {
     oldNode: "此 Node 尚不支持组件更新。请先在设备版本卡升级 Node；无法远程升级时，在该设备使用原安装方式更新 Steve Node。",
     unavailable: "暂时无法读取或提交更新，请查看详情后重试。",
     stale: "以下是上次读取的数据，连接恢复后会继续查询结果。",
-    loading: "正在读取此设备的更新信息…",
-    empty: "此设备没有报告可检查的组件。",
     external: "当前安装方式不支持一键升级；请在 Node 上使用原安装方式更新。",
     other: "{{count}} 个未安装的运行环境",
     wrongNode: "更新信息与目标 Node 不一致，请刷新。",
@@ -42,6 +38,29 @@ export default {
     autoOverrideOff: "已单独设为关闭（覆盖 Node 默认）",
     autoUnsupported: "此 Harness 不支持自动检测并自动升级",
     autoReset: "恢复跟随 Node",
+    versionsLabel: "组件版本与升级",
+    componentReason: {
+      not_installed: "该组件尚未在此 Node 安装。",
+      custom_manifest: "该 Harness 由自定义清单配置，请在 Node 宿主机手动更新。",
+      symlink_escape: "组件路径通过符号链接指向 Steve 受管目录之外，请在 Node 宿主机更新。",
+      package_manager_unsupported: "当前通过 {{manager}} 安装，暂不支持一键升级，请在 Node 上使用 {{manager}} 更新。",
+      read_only_path: "当前安装目录对 Node 服务用户只读，请在 Node 宿主机使用原安装方式更新。",
+      homebrew_unverified: "该 Harness 的 Homebrew 一键升级尚未核实，请在 Node 上使用 brew 手动更新。",
+      unverified_upgrader: "该安装方式尚无经核实的官方一键升级命令，请在 Node 上使用原安装方式更新。",
+      custom_install_path: "当前为自定义路径或系统包装脚本，不支持一键升级，请在 Node 宿主机使用原安装方式更新。",
+      tool_missing: "此 Node 的服务 PATH 中未找到 {{tool}}，请先安装或补全 PATH。",
+      node_runtime_incompatible: "此 Node 的 Node.js 版本不满足该受管组件的运行要求。",
+      npm_registry_failed: "无法查询 npm 仓库，请检查此 Node 的 npm 与网络配置。",
+      brew_info_failed: "无法查询 Homebrew 元数据，请检查此 Node 的 brew 与网络配置。",
+      brew_version_missing: "Homebrew 返回信息中未包含可识别的版本号。",
+    },
+    blockReason: {
+      exec_denied: "此 Node 的执行策略禁止组件升级。",
+      node_upgrade_in_progress: "此 Node 正在进行版本升级，请等待完成后再升级 Harness。",
+      node_removing: "此 Node 正在被移除。",
+      maintenance_busy: "此 Node 上有其他安装或升级操作正在进行。",
+      already_running: "该 Harness 已有升级任务正在排队或运行中。",
+    },
     badge: {
       waiting: "排队等待空闲",
       running: "升级中",

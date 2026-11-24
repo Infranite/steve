@@ -110,6 +110,8 @@ fn bindings_match() {
         devices::ComponentInstallSource,
         devices::UpgradeMethod,
         devices::ComponentUpdateState,
+        devices::ComponentUpdateReason,
+        devices::HarnessUpgradeBlockReason,
         devices::HarnessAutoUpgradeMode,
         devices::HarnessAutoUpgradePolicy,
         devices::SetHarnessAutoUpgrade,
