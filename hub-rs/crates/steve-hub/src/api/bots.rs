@@ -161,6 +161,41 @@ fn bot_in(v: &Value, create: bool, harnesses: &[String]) -> Result<Obj, ApiError
         c.opt_nullable_str("device", Str::ANY).map(|x| json!(x)),
     );
     put("enabled", c.opt_bool("enabled").map(Value::from));
+    if let Some(raw_fs) = c.raw("fallback_surfaces") {
+        let Some(arr) = raw_fs.as_array() else {
+            return Err(ApiError::Invalid(vec!["fallback_surfaces".into()]));
+        };
+        if arr.len() > 8 {
+            return Err(ApiError::Invalid(vec!["fallback_surfaces".into()]));
+        }
+        let mut parsed: Vec<steve_store::ExecutionSurface> = Vec::with_capacity(arr.len());
+        for (idx, item) in arr.iter().enumerate() {
+            let mut sub = Check::at(item, format!("fallback_surfaces.{idx}."));
+            let h = sub.enum_("harness", &allowed);
+            let m = sub
+                .opt_nullable_str("model", Str::len(0, 200))
+                .flatten()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            let e = sub
+                .opt_nullable_str("reasoning_effort", Str::pattern("^[A-Za-z0-9_.:-]{1,64}$"))
+                .flatten()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            c.absorb(sub);
+            if !h.is_empty() {
+                let surface = steve_store::ExecutionSurface {
+                    harness: h,
+                    model: m,
+                    reasoning_effort: e,
+                };
+                if !parsed.contains(&surface) {
+                    parsed.push(surface);
+                }
+            }
+        }
+        put("fallback_surfaces", Some(json!(parsed)));
+    }
     c.finish()?;
     // a seeded text the page showed in its reader's language and sent back unchanged stays the seed
     seeded::store(&mut p, seeded::BOT);
@@ -458,6 +493,10 @@ pub async fn duplicate(
         b.insert("name".into(), json!(name));
         b.insert("enabled".into(), json!(false));
         b.insert("main".into(), json!(false));
+        b.insert(
+            "fallback_surfaces".into(),
+            json!(r.bot_fallback_surfaces(&id)?),
+        );
         steve_core::models::validate_bot_patch(None, &b, &harnesses)
             .map_err(ApiError::bad_request)?;
         let n = r.bot_create(&c.ws, &b, &c.me)?;
@@ -611,6 +650,26 @@ mod tests {
         assert_eq!(
             bot_in(&json!({"harness": "unknown"}), false, &ids()).unwrap_err(),
             ApiError::Invalid(vec!["harness".into()])
+        );
+        let p = bot_in(
+            &json!({"fallback_surfaces": [
+                {"harness": "codex", "model": "gpt-5.4", "reasoning_effort": "high"},
+                {"harness": "codex", "model": "gpt-5.4", "reasoning_effort": "high"},
+                {"harness": "mine", "model": null}
+            ]}),
+            false,
+            &ids(),
+        )
+        .expect("fallback surfaces ok");
+        assert_eq!(p["fallback_surfaces"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            bot_in(
+                &json!({"fallback_surfaces": [{"harness": "unknown"}]}),
+                false,
+                &ids(),
+            )
+            .unwrap_err(),
+            ApiError::Invalid(vec!["fallback_surfaces.0.harness".into()])
         );
     }
 

@@ -32,7 +32,10 @@ pub fn supersede(db: &Store, item: &str, kinds: &[&str], why: &str) -> Result<us
 /// gives way when there is news. A card about an effect nobody knows, or about a release, waits on you.
 pub fn stop_card(d: &steve_store::Decision) -> bool {
     d.kind == "fail"
-        && matches!(d.subject_type.as_str(), "item" | crate::stall::STALL)
+        && matches!(
+            d.subject_type.as_str(),
+            "item" | crate::stall::STALL | crate::context_handoff::HANDOFF_UNAVAILABLE_SUBJECT
+        )
         && !crate::cycle::unknown_effect_card(d)
         && !d.options.iter().any(|o| o.starts_with("release_"))
 }

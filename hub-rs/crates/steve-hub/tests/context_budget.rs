@@ -83,6 +83,7 @@ def wait_file(path, timeout_s=10.0):
 
 sid = ""
 active_model = "alt-model-1" if adapter_kind == "alt-harness" else "fake-model"
+session_scenario = ""
 for raw in sys.stdin:
     if not raw.strip():
         continue
@@ -94,6 +95,7 @@ for raw in sys.stdin:
         send({"id": mid, "result": {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}}})
     elif method == "session/new":
         sid = f"fake-{adapter_kind}-{os.getpid()}"
+        session_scenario = ""
         models = (
             {
                 "currentModelId": "alt-model-1",
@@ -115,6 +117,10 @@ for raw in sys.stdin:
         send({"id": mid, "result": {}})
     elif method == "session/prompt":
         text = "\n".join(p.get("text", "") for p in msg["params"]["prompt"])
+        for tag in ("HUB:PROV_SWITCH", "HUB:ALL_DOWN", "HUB:QUOTA_NEAR", "HUB:QUOTA_FAR"):
+            if tag in text:
+                session_scenario = tag
+                break
         if "HUB:NATIVE" in text:
             update(sid, {"sessionUpdate": "usage_update", "used": 85000, "size": 100000})
             update(sid, {"sessionUpdate": "tool_call", "toolCallId": "cmp-1", "kind": "think", "status": "pending", "title": "compact", "_meta": {"claudeCode": {"toolName": "compact"}}})
@@ -177,6 +183,63 @@ for raw in sys.stdin:
             send({"id": mid, "result": {
                 "stopReason": "cancelled" if cancelled else "end_turn",
                 "usage": {"inputTokens": 300, "outputTokens": 50, "cachedReadTokens": 0, "cachedWriteTokens": 0, "totalTokens": 350},
+            }})
+        elif "HUB:QUOTA_NEAR" in text:
+            update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "near quota hit"}})
+            send({"id": mid, "error": {"code": -32000, "message": "API Error: 429 · upstream account quota exhausted; try again in 5m"}})
+        elif "HUB:QUOTA_FAR" in text and adapter_kind != "alt-harness":
+            with open(os.path.join(os.getcwd(), "quota1.txt"), "w", encoding="utf-8") as f:
+                f.write("q1")
+            update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "quota1 done before 429"}})
+            send({"id": mid, "error": {"code": -32000, "message": "API Error: 429 · upstream account quota exhausted; try again in 3h"}})
+        elif "HUB:QUOTA_FAR" in text and adapter_kind == "alt-harness":
+            with open(os.path.join(ctrl_dir, "quota.prompt"), "w", encoding="utf-8") as f:
+                f.write(text)
+            with open(os.path.join(ctrl_dir, "quota.meta"), "w", encoding="utf-8") as f:
+                f.write(json.dumps({"adapter": adapter_kind, "model": active_model, "cwd": os.getcwd()}))
+            q1 = open(os.path.join(os.getcwd(), "quota1.txt"), "r", encoding="utf-8").read()
+            with open(os.path.join(os.getcwd(), "quota2.txt"), "w", encoding="utf-8") as f:
+                f.write(q1 + "+q2")
+            update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "quota fallback completed"}})
+            send({"id": mid, "result": {
+                "stopReason": "end_turn",
+                "usage": {"inputTokens": 200, "outputTokens": 40, "cachedReadTokens": 20, "cachedWriteTokens": 0, "totalTokens": 260},
+            }})
+        elif ("HUB:PROV_SWITCH" in text or session_scenario == "HUB:PROV_SWITCH") and adapter_kind != "alt-harness":
+            with open(os.path.join(os.getcwd(), "prov1.txt"), "w", encoding="utf-8") as f:
+                f.write("p1")
+            update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "prov primary failed"}})
+            send({"id": mid, "error": {"code": -32000, "message": "upstream provider error: gateway rejected request"}})
+        elif ("HUB:PROV_SWITCH" in text or session_scenario == "HUB:PROV_SWITCH") and adapter_kind == "alt-harness":
+            with open(os.path.join(ctrl_dir, "prov.prompt"), "w", encoding="utf-8") as f:
+                f.write(text)
+            with open(os.path.join(ctrl_dir, "prov.meta"), "w", encoding="utf-8") as f:
+                f.write(json.dumps({"adapter": adapter_kind, "model": active_model, "cwd": os.getcwd()}))
+            p1 = open(os.path.join(os.getcwd(), "prov1.txt"), "r", encoding="utf-8").read()
+            with open(os.path.join(os.getcwd(), "prov2.txt"), "w", encoding="utf-8") as f:
+                f.write(p1 + "+p2")
+            update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "prov fallback completed"}})
+            send({"id": mid, "result": {
+                "stopReason": "end_turn",
+                "usage": {"inputTokens": 180, "outputTokens": 35, "cachedReadTokens": 10, "cachedWriteTokens": 0, "totalTokens": 225},
+            }})
+        elif ("HUB:ALL_DOWN" in text or session_scenario == "HUB:ALL_DOWN") and "PeerBot" not in text:
+            with open(os.path.join(os.getcwd(), "all1.txt"), "w", encoding="utf-8") as f:
+                f.write("a1")
+            update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": f"all_down fail on {adapter_kind}"}})
+            send({"id": mid, "error": {"code": -32000, "message": f"upstream provider failure on {adapter_kind}"}})
+        elif ("HUB:ALL_DOWN" in text or session_scenario == "HUB:ALL_DOWN") and "PeerBot" in text:
+            with open(os.path.join(ctrl_dir, "peer.prompt"), "w", encoding="utf-8") as f:
+                f.write(text)
+            a1 = open(os.path.join(os.getcwd(), "all1.txt"), "r", encoding="utf-8").read()
+            with open(os.path.join(os.getcwd(), "all2.txt"), "w", encoding="utf-8") as f:
+                f.write(a1 + "+peer")
+            with open(os.path.join(ctrl_dir, "peer.cwd"), "w", encoding="utf-8") as f:
+                f.write(os.getcwd())
+            update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "peer bot finished"}})
+            send({"id": mid, "result": {
+                "stopReason": "end_turn",
+                "usage": {"inputTokens": 150, "outputTokens": 30, "cachedReadTokens": 0, "cachedWriteTokens": 0, "totalTokens": 180},
             }})
         elif "HUB:HANDOFF" in text and "工作记忆" not in text:
             # Session #1 of handoff test: do real workspace work + tool call + progress, wait for
@@ -1173,4 +1236,345 @@ async fn manual_handoff_same_and_cross_harness_preserves_work_and_blocks_invalid
         sum_tokens(&fixtures::acp_usage(&e.db, &s3).unwrap()),
         (250, 50, 40, 0)
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn quota_exhausted_waits_when_near_and_auto_handoffs_fallback_when_far() {
+    let e = HubEnv::start(&[]).await;
+    e.refresh_local_capabilities().await;
+    let bot = e.create_bot("QuotaBot", "budget-bot").await;
+
+    // Configure Bot's ordered fallback execution surface via PATCH /api/bots/{id}.
+    let (ps, pv) = e
+        .call(
+            "PATCH",
+            &format!("/api/bots/{bot}"),
+            Some(json!({
+                "fallback_surfaces": [
+                    { "harness": "alt-harness", "model": "alt-model-2" }
+                ]
+            })),
+        )
+        .await;
+    assert_eq!(ps, 200, "patch fallback_surfaces failed: {pv}");
+    let stored_fs = e.store.bots().fallback_surfaces(&bot).unwrap();
+    assert_eq!(stored_fs.len(), 1);
+    assert_eq!(stored_fs[0].harness, "alt-harness");
+    assert_eq!(stored_fs[0].model.as_deref(), Some("alt-model-2"));
+
+    // 1. Near recovery (5m <= default 10m quotaWaitMinutes): wait on current surface, no switch, no card.
+    let (iid_near, s_near) = e.create_item(&bot, "Near quota", "HUB:QUOTA_NEAR").await;
+    eventually("near quota wait recorded on timeline", || async {
+        e.store
+            .timeline()
+            .list(&iid_near)
+            .unwrap_or_default()
+            .iter()
+            .any(|t| t.text.contains("模型配额用完"))
+    })
+    .await;
+    assert_eq!(
+        e.store.sessions().of_item(&iid_near).unwrap().len(),
+        1,
+        "near quota recovery must wait rather than switch surface"
+    );
+    assert!(
+        e.store
+            .decisions()
+            .of_item(&iid_near)
+            .unwrap()
+            .iter()
+            .all(|d| d.status != "open"),
+        "near quota wait must not open a decision card"
+    );
+    assert_eq!(
+        e.store.sessions().get(&s_near).unwrap().unwrap().harness,
+        "budget-bot"
+    );
+
+    // 2. Far recovery (3h > 10m threshold): automatically hand off to ordered fallback surface on the SAME Bot.
+    let (iid_far, s1) = e.create_item(&bot, "Far quota", "HUB:QUOTA_FAR").await;
+    eventually(
+        on_timeout(|| async {
+            format!(
+                "waiting for quota fallback session #2; sessions={:?}, timeline={:?}",
+                e.store.sessions().of_item(&iid_far),
+                e.store.timeline().list(&iid_far),
+            )
+        }),
+        || async {
+            let sessions = e.store.sessions().of_item(&iid_far).unwrap_or_default();
+            if sessions.len() < 2 {
+                return false;
+            }
+            fixtures::acp_turns(&e.db, &sessions[1].id)
+                .map(|t| t.len() == 1 && t[0].0.is_some())
+                .unwrap_or(false)
+        },
+    )
+    .await;
+
+    let mut sessions = e.store.sessions().of_item(&iid_far).unwrap();
+    sessions.sort_by_key(|s| s.no);
+    assert_eq!(sessions.len(), 2, "{sessions:?}");
+    assert_eq!(sessions[0].id, s1);
+    assert_eq!(sessions[0].status, "ended");
+    let s2 = &sessions[1];
+    assert_eq!(s2.bot_id.as_deref(), Some(bot.as_str()));
+    assert_eq!(s2.harness, "alt-harness");
+    assert_eq!(s2.model.as_deref(), Some("alt-model-2"));
+
+    // Bot default config must remain unchanged.
+    let bot_after = e.store.bots().get(&bot).unwrap().unwrap();
+    assert_eq!(bot_after.harness, "budget-bot");
+    assert_eq!(bot_after.model, None);
+
+    // Work preserved across harness switch.
+    let meta: Value =
+        serde_json::from_str(&std::fs::read_to_string(e.ctrl.join("quota.meta")).unwrap()).unwrap();
+    assert_eq!(meta["adapter"], "alt-harness");
+    assert_eq!(meta["model"], "alt-model-2");
+    let cwd = PathBuf::from(meta["cwd"].as_str().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(cwd.join("quota2.txt")).unwrap(),
+        "q1+q2"
+    );
+    let q_prompt = std::fs::read_to_string(e.ctrl.join("quota.prompt")).unwrap();
+    assert!(q_prompt.contains("quota1 done before 429"), "{q_prompt}");
+
+    // Explicit timeline event & W3.1 placement reason.
+    let timeline = e.store.timeline().list(&iid_far).unwrap();
+    assert!(
+        timeline.iter().any(|t| {
+            t.text.contains(
+                "从 QuotaBot Bot（Budget Bot · fake-model）交接给 QuotaBot Bot（Alt Harness · alt-model-2），原因：额度不足，预计 ",
+            ) && t.text.contains("恢复")
+        }),
+        "missing quota handoff timeline entry: {timeline:?}"
+    );
+    let views = e.session_views(&iid_far).await;
+    let s2_view = views
+        .iter()
+        .find(|v| v["id"] == s2.id.as_str())
+        .expect("s2 view");
+    assert_eq!(s2_view["placement"]["bot"], bot);
+    assert_eq!(s2_view["placement"]["reason"], "handoff_quota_exhausted");
+
+    let prom = steve_hub::metrics::render().expect("metrics installed");
+    assert!(
+        prom.contains(
+            r#"steve_handoffs_total{reason="quota_exhausted",from_harness="budget-bot",to_harness="alt-harness",switched_bot="false"}"#
+        ),
+        "missing quota handoff metric:\n{prom}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_error_switches_fallback_surface_and_escalates_card_when_all_unavailable() {
+    let e = HubEnv::start(&[
+        ("STEVE_TAKEOVER_CONTINUES", "2"),
+        ("STEVE_PROVIDER_ERROR_HANDOFF_THRESHOLD", "2"),
+    ])
+    .await;
+    e.refresh_local_capabilities().await;
+    let bot = e.create_bot("ErrBot", "budget-bot").await;
+    let peer = e.create_bot("PeerBot", "alt-harness").await;
+    let (ps, pv) = e
+        .call(
+            "PATCH",
+            &format!("/api/bots/{bot}"),
+            Some(json!({
+                "fallback_surfaces": [
+                    { "harness": "alt-harness", "model": "alt-model-2" }
+                ]
+            })),
+        )
+        .await;
+    assert_eq!(ps, 200, "patch fallback_surfaces failed: {pv}");
+
+    // 1. Consecutive provider errors on primary surface reach threshold (2) -> switch to fallback surface on SAME Bot.
+    let (iid1, _) = e
+        .create_item(&bot, "Provider error switch", "HUB:PROV_SWITCH")
+        .await;
+    eventually(
+        on_timeout(|| async {
+            format!(
+                "waiting for provider-error fallback session #2; sessions={:?}, timeline={:?}",
+                e.store.sessions().of_item(&iid1),
+                e.store.timeline().list(&iid1),
+            )
+        }),
+        || async {
+            let sessions = e.store.sessions().of_item(&iid1).unwrap_or_default();
+            if sessions.len() < 2 {
+                return false;
+            }
+            fixtures::acp_turns(&e.db, &sessions[1].id)
+                .map(|t| t.len() == 1 && t[0].0.is_some())
+                .unwrap_or(false)
+        },
+    )
+    .await;
+
+    let mut sessions = e.store.sessions().of_item(&iid1).unwrap();
+    sessions.sort_by_key(|s| s.no);
+    assert_eq!(sessions.len(), 2, "{sessions:?}");
+    assert_eq!(sessions[1].bot_id.as_deref(), Some(bot.as_str()));
+    assert_eq!(sessions[1].harness, "alt-harness");
+    assert_eq!(sessions[1].model.as_deref(), Some("alt-model-2"));
+    let prov_meta: Value =
+        serde_json::from_str(&std::fs::read_to_string(e.ctrl.join("prov.meta")).unwrap()).unwrap();
+    let prov_cwd = PathBuf::from(prov_meta["cwd"].as_str().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(prov_cwd.join("prov2.txt")).unwrap(),
+        "p1+p2"
+    );
+    let tl1 = e.store.timeline().list(&iid1).unwrap();
+    assert!(
+        tl1.iter().any(|t| {
+            t.text.contains(
+                "从 ErrBot Bot（Budget Bot · fake-model）交接给 ErrBot Bot（Alt Harness · alt-model-2），原因：上游持续故障",
+            )
+        }),
+        "missing provider-error handoff timeline entry: {tl1:?}"
+    );
+    let views1 = e.session_views(&iid1).await;
+    let s2_view = views1
+        .iter()
+        .find(|v| v["id"] == sessions[1].id.as_str())
+        .expect("s2 view");
+    assert_eq!(s2_view["placement"]["bot"], bot);
+    assert_eq!(s2_view["placement"]["reason"], "handoff_provider_error");
+
+    // 2. When ALL execution surfaces of ErrBot fail, Steve MUST NOT auto-switch Bot:
+    // it opens a coordinator card asking the owner; choosing bot:<PeerBot> hands off cleanly with working memory.
+    // Use a fresh bot so cooldown from case #1 doesn't mask testing primary->fallback->card.
+    let bot2 = e.create_bot("ExhaustBot", "budget-bot").await;
+    let (ps2, pv2) = e
+        .call(
+            "PATCH",
+            &format!("/api/bots/{bot2}"),
+            Some(json!({
+                "fallback_surfaces": [
+                    { "harness": "alt-harness", "model": "alt-model-2" }
+                ]
+            })),
+        )
+        .await;
+    assert_eq!(ps2, 200, "patch bot2 fallback_surfaces failed: {pv2}");
+
+    let (iid2, _) = e
+        .create_item(&bot2, "All surfaces down", "HUB:ALL_DOWN")
+        .await;
+    eventually(
+        on_timeout(|| async {
+            format!(
+                "waiting for coordinator handoff_unavailable card; decisions={:?}, sessions={:?}",
+                e.store.decisions().of_item(&iid2),
+                e.store.sessions().of_item(&iid2),
+            )
+        }),
+        || async {
+            e.store
+                .decisions()
+                .of_item(&iid2)
+                .unwrap_or_default()
+                .iter()
+                .any(|d| {
+                    d.status == "open"
+                        && d.kind == "fail"
+                        && d.subject_type == steve_core::HANDOFF_UNAVAILABLE_SUBJECT
+                })
+        },
+    )
+    .await;
+
+    // Must NOT have auto-switched Bot!
+    let item_before = e.store.items().get(&iid2).unwrap().unwrap();
+    assert_eq!(
+        item_before.bot_id.as_deref(),
+        Some(bot2.as_str()),
+        "Steve must NEVER auto-switch Bot when all execution surfaces are unavailable"
+    );
+    let card = e
+        .store
+        .decisions()
+        .of_item(&iid2)
+        .unwrap()
+        .into_iter()
+        .find(|d| {
+            d.status == "open"
+                && d.kind == "fail"
+                && d.subject_type == steve_core::HANDOFF_UNAVAILABLE_SUBJECT
+        })
+        .expect("coordinator card");
+    let peer_choice = format!("bot:{peer}");
+    assert!(
+        card.options.contains(&peer_choice),
+        "coordinator card must offer PeerBot: {:?}",
+        card.options
+    );
+    assert!(
+        card.options.contains(&"tosteve".to_string()),
+        "coordinator card must offer tosteve: {:?}",
+        card.options
+    );
+
+    // Owner explicitly picks PeerBot on the coordinator card -> full working-memory handoff.
+    let (rs, rv) = e
+        .call(
+            "POST",
+            &format!("/api/decisions/{}", card.id),
+            Some(json!({ "choice": peer_choice })),
+        )
+        .await;
+    assert_eq!(rs, 200, "resolve coordinator card failed: {rv}");
+
+    eventually(
+        on_timeout(|| async {
+            format!(
+                "waiting for PeerBot session to finish; sessions={:?}",
+                e.store.sessions().of_item(&iid2),
+            )
+        }),
+        || async {
+            let sessions = e.store.sessions().of_item(&iid2).unwrap_or_default();
+            sessions
+                .iter()
+                .find(|s| s.bot_id.as_deref() == Some(peer.as_str()))
+                .and_then(|s| fixtures::acp_turns(&e.db, &s.id).ok())
+                .is_some_and(|t| t.len() == 1 && t[0].0.is_some())
+        },
+    )
+    .await;
+
+    let item_after = e.store.items().get(&iid2).unwrap().unwrap();
+    assert_eq!(item_after.bot_id.as_deref(), Some(peer.as_str()));
+    let peer_prompt = std::fs::read_to_string(e.ctrl.join("peer.prompt")).unwrap();
+    assert!(peer_prompt.contains("工作记忆"), "{peer_prompt}");
+    let peer_cwd = PathBuf::from(
+        std::fs::read_to_string(e.ctrl.join("peer.cwd"))
+            .unwrap()
+            .trim(),
+    );
+    assert_eq!(
+        std::fs::read_to_string(peer_cwd.join("all2.txt")).unwrap(),
+        "a1+peer",
+        "work must carry over when owner switches Bot via coordinator card"
+    );
+    let peer_session = e
+        .store
+        .sessions()
+        .of_item(&iid2)
+        .unwrap()
+        .into_iter()
+        .find(|s| s.bot_id.as_deref() == Some(peer.as_str()))
+        .expect("peer session");
+    let views2 = e.session_views(&iid2).await;
+    let peer_view = views2
+        .iter()
+        .find(|v| v["id"] == peer_session.id.as_str())
+        .expect("peer view");
+    assert_eq!(peer_view["placement"]["bot"], peer);
+    assert_eq!(peer_view["placement"]["reason"], "handoff_owner_request");
 }

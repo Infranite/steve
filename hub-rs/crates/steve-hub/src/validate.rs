@@ -162,7 +162,7 @@ impl<'a> Check<'a> {
         Self::at(v, String::new())
     }
 
-    fn at(v: &'a Value, prefix: String) -> Self {
+    pub fn at(v: &'a Value, prefix: String) -> Self {
         match v.as_object() {
             Some(o) => Check {
                 obj: Some(o),

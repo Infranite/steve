@@ -26,6 +26,8 @@ pub static SETTINGS: LazyLock<Value> = LazyLock::new(|| {
         { "key": "depsAfter", "label": "前置完成后", "values": ["自动开始", "提醒我开始"], "def": "自动开始", "live": true },
         { "key": "contextBudget", "label": "回合上下文预算", "values": ["default", "100000", "250000", "400000", "600000", "800000"], "def": "default", "live": true, "labels": { "default": "默认", "100000": "100k", "250000": "250k", "400000": "400k", "600000": "600k", "800000": "800k" } },
         { "key": "contextBudgetTarget", "label": "预算到达时交接目标", "values": ["same"], "def": "same", "live": true, "labels": { "same": "同 Bot 同执行器" } },
+        { "key": "quotaAutoHandoff", "label": "额度不足自动交接", "values": ["on", "off"], "def": "on", "live": true, "labels": { "on": "开", "off": "关" } },
+        { "key": "quotaWaitMinutes", "label": "额度恢复等待阈值", "values": ["0", "5", "10", "15", "30"], "def": "10", "live": true, "labels": { "0": "不等待", "5": "5 分钟", "10": "10 分钟", "15": "15 分钟", "30": "30 分钟" } },
         { "key": "handoff", "label": "交接阈值", "values": ["0", "70", "80", "90"], "def": "0", "live": true, "labels": { "0": "不换会话", "70": "70%", "80": "80%", "90": "90%" } },
         { "key": "archDays", "label": "完成后自动归档", "values": ["7", "30", "90", "0"], "def": "30", "live": true, "labels": { "7": "7 天", "30": "30 天", "90": "90 天", "0": "不自动归档" } },
       ],
@@ -2504,7 +2506,9 @@ mod tests {
         assert_eq!(d["archDays"], "30");
         assert_eq!(d["contextBudget"], "default");
         assert_eq!(d["contextBudgetTarget"], "same");
-        assert_eq!(d.len(), 16);
+        assert_eq!(d["quotaAutoHandoff"], "on");
+        assert_eq!(d["quotaWaitMinutes"], "10");
+        assert_eq!(d.len(), 18);
         assert_eq!(d["tz"], "system");
         assert!(setting_allowed("tz", "UTC") && !setting_allowed("tz", "Mars/Base"));
         assert!(

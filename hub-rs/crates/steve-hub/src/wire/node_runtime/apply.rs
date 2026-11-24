@@ -745,9 +745,14 @@ impl NodeRuntime {
         c: &Completion,
     ) -> Result<Option<End>, StoreError> {
         let (ordinal, cancelled) = self.store.read(|r| node_turns::retry_state(r, turn))?;
+        let quota_reset = c
+            .error
+            .as_ref()
+            .is_some_and(|e| steve_core::has_quota_reset(&said(e), self.clock.now()));
         if c.outcome == Outcome::Failed
             && !c.acted
             && !cancelled
+            && !quota_reset
             && let Some(Error {
                 retry: Retry::Later { after_ms },
                 ..

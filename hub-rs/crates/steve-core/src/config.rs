@@ -10,6 +10,8 @@ use std::time::Duration;
 pub const TAKEOVER_SAME_REFUSALS: u32 = 2;
 /// Default cap on consecutive context-budget session handoffs before handing back to the owner.
 pub const CONTEXT_HANDOFF_LIMIT: u32 = 3;
+/// Default consecutive provider/execution failures on the same surface before switching fallback.
+pub const PROVIDER_ERROR_HANDOFF_THRESHOLD: u32 = 2;
 
 #[derive(Debug, Clone)]
 pub struct CoreConfig {
@@ -52,6 +54,8 @@ pub struct CoreConfig {
     pub takeover_same_refusals: u32,
     /// Consecutive context-budget session handoffs allowed without user intervention (`0`: disabled).
     pub context_handoff_limit: u32,
+    /// Consecutive execution errors on one surface before auto-handoff to a Bot fallback (`0`: disabled).
+    pub provider_error_handoff_threshold: u32,
     /// `STEVE_GH`: the GitHub CLI that follows Release builds.
     pub gh: PathBuf,
     /// The version this Hub runs (`dev` when unknown): what an item whose goal asks for its result to
@@ -121,6 +125,7 @@ impl CoreConfig {
             takeover_continues: 2,
             takeover_same_refusals: TAKEOVER_SAME_REFUSALS,
             context_handoff_limit: CONTEXT_HANDOFF_LIMIT,
+            provider_error_handoff_threshold: PROVIDER_ERROR_HANDOFF_THRESHOLD,
             gh: gh_cli(),
             version: "dev".into(),
             commit: None,

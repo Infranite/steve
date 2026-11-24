@@ -2550,6 +2550,9 @@ impl Tx<'_> {
             "succeeded"
         };
         self.record_handoff_turn_outcome(&session.id, handoff_outcome);
+        if error.is_none() && graph_failed.is_none() && t.stop_reason != "cancelled" {
+            self.clear_surface_failures(item_id);
+        }
         let why = match error {
             Some(e) => {
                 let _ = self
@@ -2572,11 +2575,36 @@ impl Tx<'_> {
                         ..Default::default()
                     });
                 let why = format!("会话出错：{e}");
-                /* a quota that says when it is back: wait for then, nothing spent */
-                if t.stop_reason == "error"
-                    && let Some(until) = crate::quota::reset_at(e, crate::util::now())
+                /* Quota / rate-limit: wait when recovery is within workspace threshold, otherwise
+                 * switch to this Bot's next eligible fallback execution surface (or open the
+                 * coordinator card if auto-handoff is off or all surfaces are unavailable). */
+                if (t.stop_reason == "error"
+                    || t.stop_reason == crate::runtime::MODEL_SERVICE_UNAVAILABLE)
+                    && crate::quota::is_quota_error(e)
+                    && self.handle_quota_exhausted(
+                        &item,
+                        &session,
+                        e,
+                        crate::quota::reset_at(e, crate::util::now()),
+                        t.attempt.as_deref(),
+                    )?
                 {
-                    return self.quota_wait(item_id, &session.id, until, e);
+                    return Ok(());
+                }
+                /* Repeated provider/execution failures on the same surface: once the threshold is
+                 * reached, switch to this Bot's next fallback surface (or open the coordinator card
+                 * when all configured surfaces are unavailable). */
+                if (t.stop_reason == "error"
+                    || crate::runtime::is_model_service_failure(&t.stop_reason))
+                    && self.handle_provider_error(
+                        &item,
+                        &session,
+                        &t.stop_reason,
+                        e,
+                        t.attempt.as_deref(),
+                    )?
+                {
+                    return Ok(());
                 }
                 /* the harness failed and the turn is known to have ended: the agent gets another go
                  * first, told to check before redoing anything (2026-11-09). So does a turn its Node's
@@ -3328,6 +3356,7 @@ impl Tx<'_> {
                             None,
                         )?;
                         recover_quiet(self.db(), &i);
+                        self.clear_surface_failures(&i);
                         self.send(
                             &to,
                             or(
@@ -3335,6 +3364,9 @@ impl Tx<'_> {
                                 "请继续。完成后用 steve_deliver 交付；需要决定时用 steve_ask。",
                             ),
                         )?;
+                    }
+                    "wait" => {
+                        self.resolve_handoff_unavailable_wait(id, &i, &d, actor)?;
                     }
                     "delivered" => {
                         self.db().decision_resolve(
@@ -3408,14 +3440,23 @@ impl Tx<'_> {
                         )?;
                     }
                     "tosteve" => {
-                        self.db().decision_resolve(
-                            id,
-                            json!({"choice": choice}),
-                            "resolved",
-                            None,
-                        )?;
-                        recover_quiet(self.db(), &i);
-                        self.reassign(&i, "steve", actor)?;
+                        if d.subject_type == crate::context_handoff::HANDOFF_UNAVAILABLE_SUBJECT {
+                            self.resolve_handoff_to_bot(id, &i, "steve", choice, actor)?;
+                        } else {
+                            self.db().decision_resolve(
+                                id,
+                                json!({"choice": choice}),
+                                "resolved",
+                                None,
+                            )?;
+                            recover_quiet(self.db(), &i);
+                            self.clear_surface_failures(&i);
+                            self.reassign(&i, "steve", actor)?;
+                        }
+                    }
+                    c if c.starts_with("bot:") => {
+                        let target_bot = &c[4..];
+                        self.resolve_handoff_to_bot(id, &i, target_bot, choice, actor)?;
                     }
                     // the stall card (crate::stall): give the item up
                     "drop" => {

@@ -8,7 +8,7 @@ import { HubData } from "@/backup-settings"
 import { OutboxDead } from "@/outbox-settings"
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react"
 import { cn } from "cn"
-import { ChevronRightIcon, PlusIcon, LayoutTemplateIcon, FilePlusIcon, MoreHorizontalIcon, CopyIcon, TrashIcon, SparklesIcon, SlidersHorizontalIcon, ListChecksIcon, TagIcon, BellIcon, SunMoonIcon, DatabaseIcon, InfoIcon, PencilIcon, CheckIcon, LayersIcon, FolderIcon, BotIcon, ListTodoIcon, ClockIcon, EyeIcon, HandIcon, FilePenIcon, ZapIcon, ShieldOffIcon, ShieldAlertIcon, UserCheckIcon, CheckCheckIcon } from "lucide-react"
+import { ChevronRightIcon, PlusIcon, LayoutTemplateIcon, FilePlusIcon, MoreHorizontalIcon, CopyIcon, TrashIcon, SparklesIcon, SlidersHorizontalIcon, ListChecksIcon, TagIcon, BellIcon, SunMoonIcon, DatabaseIcon, InfoIcon, PencilIcon, CheckIcon, LayersIcon, FolderIcon, BotIcon, ListTodoIcon, ClockIcon, EyeIcon, HandIcon, FilePenIcon, ZapIcon, ShieldOffIcon, ShieldAlertIcon, UserCheckIcon, CheckCheckIcon, ArrowUpIcon, ArrowDownIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -26,7 +26,7 @@ import { MemoryPanel, type Memory } from "@/components/affect/memory-panel"
 import { AutonomyChoice } from "@/components/affect/agent-permissions"
 import {
   st, botName, PRO, ACC, PERM, harnessEfforts, permModes, runtimeName, defaultHarness, saveBot, makeBot, draftBot, deleteBot, dupBot, addMem, editMem, delMem, setBotWorkspaces, tag, tagLabel, tagDesc, tagUses, TAG_CATS, KIND_CAT, DOMAIN_CATS, isKind, kindTags, makeTag, saveTag, deleteTag, mergeTag, setTags, it,
-  setSetting, toast, emit, closedSt,
+  setSetting, toast, emit, closedSt, type ExecutionSurface,
 } from "@/store"
 import { api } from "@/api"
 import { go, Page, BotAvatar, KindTag, Row, Segmented, Meta, Empty, openSheet, closeSheet, ThemeSwitch, LanguageSwitch, useRoute, Panel, Card, Section, Lead, Pill, Tile, Chevron, Loading, LIFT, Blank, Strip, EASE } from "@/ui"
@@ -243,6 +243,59 @@ export function editBot(k: string) { botTab = "设置"; lastBot = k; go("#/bots/
 const BOT_TABS = [["概览", "tabOverview"], ["设置", "tabSettings"], ["能力", "tabCaps"], ["系统提示词", "tabPrompt"], ["记忆", "tabMemory"], ["对外身份", "tabPersona"], ["定时与流程", "tabSchedule"]] as const
 const EFFORT_KEYS = ["none", "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const
 const isEffortKey = (v: string): v is (typeof EFFORT_KEYS)[number] => (EFFORT_KEYS as readonly string[]).includes(v)
+function FallbackSurfacesEditor({ value, onChange }: { value: ExecutionSurface[]; onChange: (next: ExecutionSurface[]) => void }) {
+  const t = useT()
+  const runtimes = useRuntimes()
+  const updateAt = (idx: number, patch: Partial<ExecutionSurface>) =>
+    onChange(value.map((s, n) => (n === idx ? { ...s, ...patch } : s)))
+  const move = (idx: number, delta: -1 | 1) => {
+    const to = idx + delta
+    if (to < 0 || to >= value.length) return
+    const next = [...value]
+    ;[next[idx], next[to]] = [next[to], next[idx]]
+    onChange(next)
+  }
+  const add = () => {
+    if (value.length >= 8) return
+    const pick = runtimes.find((r) => r.ok)?.id ?? runtimes[0]?.id ?? defaultHarness()
+    if (!pick) return
+    onChange([...value, { harness: pick, model: null, reasoning_effort: null }])
+  }
+  return (
+    <F label={t("manage:form.fallbackSurfaces")} hint={t("manage:form.fallbackSurfacesHint")}>
+      <div className="flex flex-col gap-2" data-bot-fallbacks>
+        {value.length === 0 && <div className="type-footnote text-muted-foreground">{t("manage:form.fallbackSurfacesEmpty")}</div>}
+        {value.map((s, idx) => {
+          const efforts = harnessEfforts(s.harness)
+          const eff = s.reasoning_effort ?? ""
+          return (
+            <div key={idx} className="flex flex-col gap-2 rounded-lg border border-border/70 p-3" data-bot-fallback-row={idx}>
+              <div className="flex items-center justify-between gap-2">
+                <span className="type-footnote font-medium text-muted-foreground">#{idx + 1}</span>
+                <div className="flex items-center gap-1">
+                  <Button type="button" size="icon-xs" variant="ghost" disabled={idx === 0} aria-label={t("manage:form.fallbackSurfaceMoveUp")} onClick={() => move(idx, -1)}><ArrowUpIcon className="size-3.5" /></Button>
+                  <Button type="button" size="icon-xs" variant="ghost" disabled={idx === value.length - 1} aria-label={t("manage:form.fallbackSurfaceMoveDown")} onClick={() => move(idx, 1)}><ArrowDownIcon className="size-3.5" /></Button>
+                  <Button type="button" size="icon-xs" variant="ghost" aria-label={t("manage:form.fallbackSurfaceRemove")} onClick={() => onChange(value.filter((_, n) => n !== idx))} data-bot-fallback-remove={idx}><TrashIcon className="size-3.5" /></Button>
+                </div>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <RuntimeSelect testId={`bot-fallback-harness-${idx}`} value={s.harness} onChange={(h) => updateAt(idx, { harness: h, model: null, reasoning_effort: null })} />
+                <ModelPicker field testId={`bot-fallback-model-${idx}`} harness={s.harness} value={s.model ?? ""} allowDefault onChange={(m) => updateAt(idx, { model: m || null })} />
+                {efforts.length > 0 && (
+                  <SetSelect wide testId={`bot-fallback-effort-${idx}`} label={t("manage:form.effort")} value={eff || "default"} onChange={(v) => updateAt(idx, { reasoning_effort: v === "default" ? null : v })}
+                    options={[{ v: "default", l: t("manage:effort.default") }, ...efforts.map((v) => ({ v, l: isEffortKey(v) ? t(`manage:effort.${v}`) : v })), ...(eff && !efforts.includes(eff) ? [{ v: eff, l: isEffortKey(eff) ? t(`manage:effort.${eff}`) : eff }] : [])]} />
+                )}
+              </div>
+            </div>
+          )
+        })}
+        {value.length < 8 && (
+          <div><Button type="button" size="sm" variant="outline" onClick={add} data-bot-fallback-add><PlusIcon className="size-3.5" />{t("manage:form.fallbackSurfacesAdd")}</Button></div>
+        )}
+      </div>
+    </F>
+  )
+}
 export function BotView({ k }: { k: string }) {
   const t = useT()
   const [, f] = useState(0); const r = () => f((x) => x + 1)
@@ -251,7 +304,7 @@ export function BotView({ k }: { k: string }) {
   if (lastBot !== k) { lastBot = k; if (botTab !== "设置") botTab = "概览" }
   const runtimes = useRuntimes(!!b)
   if (!b) return <Page title="Bot" back={["#/bots", "Bot"]}><Empty title={t("manage:detail.missing")} sub={t("manage:detail.missingSub")} /></Page>
-  const fm = form && form.k === k ? form : { k, n: b.n, role: b.role, specialties: b.specialties?.join("\n") ?? "", pers: b.pers, pro: PRO[b.pro], rule: b.rule, acc: b.acc, harness: b.harness, model: b.model ?? "", color: b.color, round: b.round, skin: b.skin, project: b.project ?? "none", permMode: b.permMode, ws: b.workspaces }
+  const fm = form && form.k === k ? form : { k, n: b.n, role: b.role, specialties: b.specialties?.join("\n") ?? "", pers: b.pers, pro: PRO[b.pro], rule: b.rule, acc: b.acc, harness: b.harness, model: b.model ?? "", fallbackSurfaces: b.fallbackSurfaces ?? [], color: b.color, round: b.round, skin: b.skin, project: b.project ?? "none", permMode: b.permMode, ws: b.workspaces }
   const allowedEfforts = harnessEfforts(fm.harness)
   const rawEffort = fm.reasoningEffort ?? b.reasoningEffort ?? ""
   const effort = rawEffort && (!runtimes.some(x => x.id === fm.harness) || allowedEfforts.includes(rawEffort)) ? rawEffort : ""
@@ -305,6 +358,7 @@ export function BotView({ k }: { k: string }) {
               <F label={t("manage:form.effort")} hint={b.main ? t("manage:form.effortHintMain") : t("manage:form.effortHint")}><SetSelect wide testId="bot-effort" label={t("manage:form.effort")} value={effort || "default"} onChange={(v) => set({ reasoningEffort: v === "default" ? "" : v })} options={[{ v: "default", l: t("manage:effort.default") }, ...allowedEfforts.map((v) => ({ v, l: isEffortKey(v) ? t(`manage:effort.${v}`) : v })), ...(effort && !allowedEfforts.includes(effort) ? [{ v: effort, l: isEffortKey(effort) ? t(`manage:effort.${effort}`) : effort }] : [])]} /></F>
             </div>
             <RuntimeAvailability harness={fm.harness} />
+            <FallbackSurfacesEditor value={fm.fallbackSurfaces ?? []} onChange={(fallbackSurfaces) => set({ fallbackSurfaces })} />
             {b.main && <SteveJudges harness={fm.harness} model={fm.model ?? ""} />}
             <F label={t("manage:form.project")} hint={t("manage:form.projectHint")}><SetSelect wide testId="bot-project" label={t("manage:form.project")} value={fm.project} onChange={(v) => set({ project: v })} options={[{ v: "none", l: t("manage:form.projectInfer") }, ...st.projects.map((p) => ({ v: p.id, l: p.name }))]} /></F>
             {!b.main && <F label={t("manage:form.workspaces")} hint={t("manage:form.workspacesHint")}>
@@ -312,7 +366,7 @@ export function BotView({ k }: { k: string }) {
           </Card></Section>
           {!b.main && <ExecutionNodes key={`${st.workspace?.id}:${k}`} bot={k} />}
           <div className="flex gap-2"><Button data-save-bot disabled={!modeSupported || !specialtiesValid} onClick={async () => {
-            await saveBot(k, { n: fm.n.trim() || b.n, role: fm.role, specialties, pers: fm.pers, pro: PRO.indexOf(fm.pro), rule: fm.rule, acc: fm.acc, harness: fm.harness, model: fm.model || null, reasoningEffort: effort || null, color: fm.color, round: fm.round, skin: fm.skin, project: fm.project === "none" ? null : fm.project, permMode: fm.permMode })
+            await saveBot(k, { n: fm.n.trim() || b.n, role: fm.role, specialties, pers: fm.pers, pro: PRO.indexOf(fm.pro), rule: fm.rule, acc: fm.acc, harness: fm.harness, model: fm.model || null, reasoningEffort: effort || null, fallbackSurfaces: fm.fallbackSurfaces ?? [], color: fm.color, round: fm.round, skin: fm.skin, project: fm.project === "none" ? null : fm.project, permMode: fm.permMode })
             if (!b.main && JSON.stringify([...fm.ws].sort()) !== JSON.stringify([...b.workspaces].sort())) setBotWorkspaces(k, fm.ws)
             setForm(null); botTab = "概览"; r() }}>{t("common:action.save")}</Button><Button variant="ghost" onClick={() => { setForm(null); botTab = "概览"; r() }}>{t("common:action.cancel")}</Button></div>
         </FieldGroup>
@@ -491,6 +545,8 @@ function Pane({ id }: { id: string }) {
     <Section label={t("manage:items.sessions")}><Panel>
       <Row title={t("manage:items.contextBudget")} sub={t("manage:items.contextBudgetSub")}><Sel label={t("manage:items.contextBudget")} testId="context-budget" v={c.contextBudget ?? "default"} o={[["default", t("manage:items.contextBudgetDefault")], ["100000", "100k"], ["250000", "250k"], ["400000", "400k"], ["600000", "600k"], ["800000", "800k"]]} on={(v) => setSetting({ contextBudget: v })} /></Row>
       <BudgetHandoffTargetRows value={c.contextBudgetTarget ?? "same"} />
+      <Row title={t("manage:items.quotaAutoHandoff")} sub={t("manage:items.quotaAutoHandoffSub")}><Sel label={t("manage:items.quotaAutoHandoff")} testId="quota-auto-handoff" v={c.quotaAutoHandoff ?? "on"} o={[["on", t("manage:items.quotaAutoHandoffOn")], ["off", t("manage:items.quotaAutoHandoffOff")]]} on={(v) => setSetting({ quotaAutoHandoff: v })} /></Row>
+      <Row title={t("manage:items.quotaWaitMinutes")} sub={t("manage:items.quotaWaitMinutesSub")}><Sel label={t("manage:items.quotaWaitMinutes")} testId="quota-wait-minutes" v={c.quotaWaitMinutes ?? "10"} o={[["0", t("manage:items.quotaWaitMinutesOff")], ...[5, 10, 15, 30].map((m): [string, string] => [String(m), t("manage:items.quotaWaitMinutesMin", { minutes: m })])]} on={(v) => setSetting({ quotaWaitMinutes: v })} /></Row>
       <Row title={t("manage:items.handoff")} sub={t("manage:items.handoffSub")}><Sel label={t("manage:items.handoff")} testId="handoff" v={c.handoff ?? "0"} o={[["0", t("manage:items.handoffOff")], ["70", "70%"], ["80", "80%"], ["90", "90%"]]} on={(v) => setSetting({ handoff: v })} /></Row></Panel></Section>
   </div>
   if (id === "notify") return st.workspace ? <NotificationSettingsPane key={`${currentHub()}:${st.workspace.id}`} workspace={st.workspace.id} /> : null

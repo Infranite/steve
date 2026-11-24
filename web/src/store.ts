@@ -11,7 +11,7 @@ import { toast as notify, type ToastOptions } from "./components/ui/toaster"
 import { promptNeedle, withDecisionNotes } from "./decision-notes"
 import { OPTION_IDS, optionKey } from "./decision-options"
 import { blockSlots, type FeedRow } from "./feed-order"
-import { api, setPageWorkspace, stream, Unauthenticated, BotPlacementError, type Shell, type ConversationMessage, type RItemDetail, type RBot, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice, type RRuntime, type RDevice, type DecisionAnswer } from "./api"
+import { api, setPageWorkspace, stream, Unauthenticated, BotPlacementError, type Shell, type ConversationMessage, type RItemDetail, type RBot, type RExecutionSurface, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice, type RRuntime, type RDevice, type DecisionAnswer } from "./api"
 import { cue } from "./bus"
 import { newClientId } from "./composer-draft"
 import { elapsed, pastTime, span } from "./i18n/format"
@@ -65,7 +65,8 @@ export type Item = {
   placement?: PlacementExplanation
 }
 export type Tag = { id: string; name: string; cat: string; desc: string; by: "Steve" | "你"; created: string }
-export type Bot = { id: string; main?: boolean; n: string; a: string; role: string; specialties?: string[]; pers: string; pro: number; h: string; harness: string; m: string; model: string | null; on: boolean; acc: string; ws: string; project: string | null; perm: string; permMode: string; rule: string; prompt: string | null
+export type ExecutionSurface = RExecutionSurface
+export type Bot = { id: string; main?: boolean; n: string; a: string; role: string; specialties?: string[]; pers: string; pro: number; h: string; harness: string; m: string; model: string | null; fallbackSurfaces?: ExecutionSurface[]; on: boolean; acc: string; ws: string; project: string | null; perm: string; permMode: string; rule: string; prompt: string | null
   reasoningEffort?: string | null; routines: { t: string; d: string; m: string; on: boolean; last: string }[]; hue: string; color: string; round: number; skin: string | null; dev?: string; workspaces: string[] }
 export type Draft = { mid: string; thought: string; text: string; /** when the reasoning began, and when the answer's text did (the reasoning is over) */ t0: number; t1?: number }
 export type Msg = { id?: string; clientId?: string; k: "me" | "steve" | "thinking" | "digest"; t?: string; item?: string; fresh?: boolean; chat?: string; files?: RFile[]; cfgs?: any[]; created?: number; steps?: Steps; notice?: { kind: string; level: string; ref?: string; closed?: boolean }; cites?: Cite[]
@@ -271,7 +272,7 @@ const sessionCall = <T,>(id: string, p: Promise<T>, ok?: string) => viewCall("se
 /* ───────── mapping ───────── */
 function botOf(b: RBot): Bot {
   const proj = shell()?.projects.find((p) => p.id === b.default_project)
-  return { id: b.id, main: b.main, n: b.name, a: b.name[0] ?? "B", role: b.role, specialties: b.specialties ?? [], pers: b.persona, pro: b.proactive, h: harnessLabel(b.harness), harness: b.harness, m: b.model ?? t("core:defaultModel"), model: b.model, reasoningEffort: b.reasoning_effort,
+  return { id: b.id, main: b.main, n: b.name, a: b.name[0] ?? "B", role: b.role, specialties: b.specialties ?? [], pers: b.persona, pro: b.proactive, h: harnessLabel(b.harness), harness: b.harness, m: b.model ?? t("core:defaultModel"), model: b.model, reasoningEffort: b.reasoning_effort, fallbackSurfaces: b.fallback_surfaces ?? [],
     on: b.enabled, acc: ACC[b.accept_mode] ?? ACC.inherit, ws: proj?.name ?? t("core:projectByItem"), project: b.default_project, perm: PERM[b.perm_mode] ?? b.perm_mode, permMode: b.perm_mode, rule: b.rules, prompt: b.prompt,
     routines: [], hue: b.avatar.color ?? "#8e8e93", color: b.avatar.color ?? defaultColor(b.name), round: b.avatar.round ?? 60, skin: b.avatar.skin ?? null, dev: b.device ?? undefined, workspaces: b.workspaces }
 }
@@ -451,13 +452,16 @@ function choiceLabel(d: DecisionView) {
   if (d.kind === "propose") return r.choice === "yes" ? t("core:choice.proposeYes") : t("core:choice.proposeNo")
   if (MODULE_CHOICE_SUBJECTS.has(d.subject_type)) return MODULE_CHOICE[r.choice] ?? String(r.choice ?? t("core:choice.handled"))
   if (d.subject_type === "session_start" && r.choice === "retry") return t("core:card.retrySession")
-  if (d.kind === "fail") return FAIL_CHOICE[r.choice] ?? r.choice
+  if (d.kind === "fail") {
+    if (typeof r.choice === "string" && r.choice.startsWith("bot:")) return t("core:fail.handoffBot", { bot: botName(r.choice.slice(4)) })
+    return FAIL_CHOICE[r.choice] ?? r.choice
+  }
   if (d.subject_type === "tool_call") return r.optionId ? t("core:choice.allow") : t("core:choice.deny")
   if (d.subject_type === "release") return r.approved ? t("core:choice.release") : t("core:choice.noRelease")
   return r.approved ? t("core:choice.approve") : t("core:choice.deny")
 }
 /** the choices on a card about something that went wrong, by the Hub's choice id */
-export const FAIL_CHOICE: Record<string, string> = live(["continue", "delivered", "look", "tosteve", "drop", "release_waive", "release_retry", "retry", "release_live"] as const, (k) => t(`core:fail.${k}`))
+export const FAIL_CHOICE: Record<string, string> = live(["wait", "continue", "delivered", "look", "tosteve", "drop", "release_waive", "release_retry", "retry", "release_live"] as const, (k) => t(`core:fail.${k}`))
 /* ── which agent turn answered a comment in the work log ──
  * a comment (timeline kind "me") becomes a user prompt in one of the item's sessions: "补充信息：…", "用户的回答：…", a merged queue…
  * the first unclaimed prompt sent at or after the comment that contains its text is the one; the reply is that turn */
@@ -1368,10 +1372,11 @@ async function changeBotMemory(k: string, action: Promise<unknown>, message?: st
     await qc.invalidateQueries({ queryKey })
   } catch (e) { fail(e) }
 }
-export async function saveBot(k: string, p: { n?: string; role?: string; specialties?: string[]; pers?: string; pro?: number; rule?: string; acc?: string; harness?: string; model?: string | null; reasoningEffort?: string | null; permMode?: string; project?: string | null; color?: string; round?: number; skin?: string | null; prompt?: string | null; on?: boolean; dev?: string | null }, msg = t("core:toast.botSaved")) {
+export async function saveBot(k: string, p: { n?: string; role?: string; specialties?: string[]; pers?: string; pro?: number; rule?: string; acc?: string; harness?: string; model?: string | null; reasoningEffort?: string | null; fallbackSurfaces?: ExecutionSurface[]; permMode?: string; project?: string | null; color?: string; round?: number; skin?: string | null; prompt?: string | null; on?: boolean; dev?: string | null }, msg = t("core:toast.botSaved")) {
   const b = st.bots[k]
   const q: Partial<RBot> = {}
   if (p.reasoningEffort !== undefined) q.reasoning_effort = p.reasoningEffort
+  if (p.fallbackSurfaces !== undefined) q.fallback_surfaces = p.fallbackSurfaces
   if (p.specialties !== undefined) q.specialties = p.specialties
   if (p.n !== undefined) q.name = p.n; if (p.role !== undefined) q.role = p.role; if (p.pers !== undefined) q.persona = p.pers; if (p.pro !== undefined) q.proactive = p.pro; if (p.rule !== undefined) q.rules = p.rule
   if (p.acc !== undefined) q.accept_mode = accKey(p.acc); if (p.harness !== undefined) q.harness = p.harness; if (p.model !== undefined) q.model = p.model; if (p.permMode !== undefined) q.perm_mode = p.permMode

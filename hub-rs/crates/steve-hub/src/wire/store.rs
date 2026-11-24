@@ -100,9 +100,21 @@ impl Repo for StoreBackend {
                 Ok((bot, values))
             })
             .collect::<BResult<_>>()?;
+        let fallback_surfaces = extras
+            .fallback_surfaces
+            .into_iter()
+            .map(|(bot, surfaces)| {
+                let values = surfaces
+                    .into_iter()
+                    .map(|s| serde_json::to_value(s).map_err(|e| BackendError::msg(e.to_string())))
+                    .collect::<BResult<_>>()?;
+                Ok((bot, values))
+            })
+            .collect::<BResult<_>>()?;
         Ok(Some(BotExtras {
             workspaces: extras.workspaces,
             mcp,
+            fallback_surfaces,
         }))
     }
 
@@ -240,6 +252,17 @@ impl Repo for StoreBackend {
             .map(mcp_value)
             .collect()
     }
+    fn bot_fallback_surfaces(&self, id: &str) -> BResult<Vec<Value>> {
+        self.0
+            .bots()
+            .fallback_surfaces(id)
+            .map_err(err)?
+            .into_iter()
+            .map(|surface| {
+                serde_json::to_value(surface).map_err(|e| BackendError::msg(e.to_string()))
+            })
+            .collect()
+    }
     fn bot_in_workspace(&self, id: &str, ws: &str) -> BResult<bool> {
         self.0.bots().in_workspace(id, ws).map_err(err)
     }
@@ -269,6 +292,10 @@ impl Repo for StoreBackend {
                 .transpose()
                 .map_err(|e| BackendError::msg(e.to_string()))?,
             default_project: str_field(f, "default_project"),
+            fallback_surfaces: get("fallback_surfaces")
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| BackendError::msg(e.to_string()))?,
         };
         self.0
             .bots()

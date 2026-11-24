@@ -840,6 +840,10 @@ pub(crate) fn bot_out(r: &dyn Repo, mut b: Obj, ws: &str) -> BResult<Obj> {
     b.insert("workspaces".into(), json!(r.bot_workspaces(&id)?));
     b.insert("memories".into(), json!(r.memories_count(&id, ws)?));
     b.insert("mcp_servers".into(), json!(r.bot_mcp_servers(&id)?));
+    b.insert(
+        "fallback_surfaces".into(),
+        json!(r.bot_fallback_surfaces(&id)?),
+    );
     Ok(b)
 }
 
@@ -864,6 +868,11 @@ pub(crate) fn bots_out(r: &dyn Repo, ws: &str) -> BResult<(Vec<Obj>, Vec<Value>)
             None => r.bot_mcp_servers(&id)?,
         };
         b.insert("mcp_servers".into(), json!(mcp));
+        let fallbacks = match &x {
+            Some(x) => x.fallback_surfaces.get(&id).cloned().unwrap_or_default(),
+            None => r.bot_fallback_surfaces(&id)?,
+        };
+        b.insert("fallback_surfaces".into(), json!(fallbacks));
         bots.push(b);
     }
     let mut all = vec![];

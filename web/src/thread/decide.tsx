@@ -24,7 +24,7 @@ import { AlarmClockIcon, BanIcon, BellOffIcon, EllipsisIcon } from "lucide-react
 import { useRef, useState, type ReactNode } from "react"
 
 /** the order of a failure card's choices; "continue" is the own-words field (a note to go on with) */
-const FAIL_ORDER = ["retry", "release_live", "release_retry", "release_waive", "delivered", "tosteve", "drop", "look", "continue"]
+const FAIL_ORDER = ["wait", "retry", "release_live", "release_retry", "release_waive", "delivered", "tosteve", "drop", "look", "continue"]
 
 /** a decision whose subject draws its own body (Steve's card keeps it); a tool call is an Approval Card */
 export const hasOwnBody = (w: Wait) => FLOW_SUBJECTS.includes(w.subject) || isPeopleDecision(w) || w.subject === "mail_draft" || isModuleCard(w.subject)
@@ -224,10 +224,19 @@ export function mapDecision(i: Item, w: Wait, where: "inline" | "composer", show
     answer: (a) => typeof a === "object" && a.option && act(a.option),
   }
   if (w.type === "fail") {
-    const os = w.options.filter((o) => FAIL_ORDER.includes(o)).sort((a, b) => FAIL_ORDER.indexOf(a) - FAIL_ORDER.indexOf(b))
-    const go = os.includes("continue")
+    const botOpts = w.options.filter((o) => o.startsWith("bot:"))
+    const known = w.options.filter((o) => FAIL_ORDER.includes(o)).sort((a, b) => FAIL_ORDER.indexOf(a) - FAIL_ORDER.indexOf(b))
+    const go = known.includes("continue")
+    const beforeTosteve = known.filter((o) => o !== "continue" && FAIL_ORDER.indexOf(o) < FAIL_ORDER.indexOf("tosteve"))
+    const fromTosteve = known.filter((o) => o !== "continue" && FAIL_ORDER.indexOf(o) >= FAIL_ORDER.indexOf("tosteve"))
+    const ordered = [...beforeTosteve, ...botOpts, ...fromTosteve]
+    const labelFor = (o: string) => o.startsWith("bot:")
+      ? tr("core:fail.handoffBot", { bot: botName(o.slice(4)) })
+      : w.subject === "session_start" && o === "retry"
+        ? tr("core:card.retrySession")
+        : FAIL_CHOICE[o]
     return {
-      d: { ...base, options: os.filter((o) => o !== "continue").map((o) => opt(o, w.subject === "session_start" && o === "retry" ? tr("core:card.retrySession") : FAIL_CHOICE[o], { "data-fail": o })), own: go ? { placeholder: tr("core:card.nextPlaceholder"), send: FAIL_CHOICE.continue, required: false, attrs: { "data-fail-note": "" }, sendAttrs: { "data-fail": "continue" } } : false },
+      d: { ...base, options: ordered.map((o) => opt(o, labelFor(o), { "data-fail": o })), own: go ? { placeholder: tr("core:card.nextPlaceholder"), send: FAIL_CHOICE.continue, required: false, attrs: { "data-fail-note": "" }, sendAttrs: { "data-fail": "continue" } } : false },
       answer: (a) => { if (typeof a !== "object") return; if (a.option) act(a.option); else if (go) act("continue", a.text) },
     }
   }

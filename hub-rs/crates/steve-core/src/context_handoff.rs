@@ -11,7 +11,7 @@
 //! - Switching to another Bot happens ONLY on explicit owner choice (or Phase 2 coordinator card).
 //! - Handoff package is harness-agnostic and assembled deterministically from durable records.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -21,7 +21,8 @@ use steve_types::{BotPlacement, PlacementBlocked, PlacementReason, PlacementReje
 use crate::Tx;
 use crate::error::{CoreError, Result, msg};
 use crate::orchestrator::SessionStart;
-use crate::repo::{Bot, BotExt, FileRef, Item, Session};
+use crate::repo::{Bot, BotExt, Decision, FileRef, Item, NewDecision, Session};
+use crate::thread::flowback::{Update, flow_quiet};
 use crate::util::js_head;
 
 const MAX_PLAN_STEPS: usize = 20;
@@ -30,12 +31,52 @@ const MAX_REFUSALS: usize = 3;
 const MAX_TOOLS: usize = 8;
 const MAX_WAITS: usize = 5;
 const LAST_PROGRESS_CHARS: usize = 800;
+const DEFAULT_QUOTA_COOLDOWN_MS: i64 = 15 * 60_000;
+const DEFAULT_PROVIDER_COOLDOWN_MS: i64 = 5 * 60_000;
+const MAX_COORDINATOR_BOT_OPTIONS: usize = 5;
 
 /// Workspace setting key for automatic context-budget handoff execution surface (`"same"`,
 /// `"harness:<id>"`, `"harness:<id>/<model>"`, or `"harness:<id>/<model>@<effort>"`).
 /// Automatic context-budget handoff never switches Bot; it only switches the current Bot's
 /// execution surface for the item.
 pub const CONTEXT_BUDGET_TARGET_SETTING: &str = "contextBudgetTarget";
+/// Workspace setting: whether `QuotaExhausted` automatically switches to the Bot's next fallback
+/// execution surface (`"on"` default / `"off"` = ask owner card only).
+pub const QUOTA_AUTO_HANDOFF_SETTING: &str = "quotaAutoHandoff";
+/// Workspace setting: if quota recovery is within this many minutes, wait instead of switching (`"10"` default).
+pub const QUOTA_WAIT_MINUTES_SETTING: &str = "quotaWaitMinutes";
+/// Decision `subject_type` for the coordinator card opened when all execution surfaces of the
+/// current Bot are unavailable (never auto-switches Bot).
+pub const HANDOFF_UNAVAILABLE_SUBJECT: &str = "handoff_unavailable";
+
+/// Key identifying an execution surface for cooldown and consecutive-failure tracking.
+pub(crate) type SurfaceKey = (String, Option<String>);
+
+/// Per-item consecutive error count on the active surface plus surfaces already failed during the
+/// current outage streak (guarantees each Bot candidate is tried at most once before escalating).
+#[derive(Debug, Default, Clone)]
+pub(crate) struct SurfaceFailureState {
+    pub last_surface: Option<SurfaceKey>,
+    pub consecutive_errors: u32,
+    pub failed_surfaces: HashSet<SurfaceKey>,
+}
+
+/// Metadata kept for open `handoff_unavailable` coordinator decision cards so choosing `"wait"`
+/// immediately arms `quota_wait`.
+#[derive(Debug, Clone)]
+pub(crate) struct HandoffCardMeta {
+    pub session_id: String,
+    pub reset_at: Option<i64>,
+    pub error: String,
+}
+
+/// Outcome of attempting to switch to the next ordered fallback execution surface on the same Bot.
+#[derive(Debug)]
+pub(crate) enum FallbackTry {
+    Switched,
+    NoFallbacksConfigured,
+    AllUnavailable,
+}
 
 /// Target specification for an item/session handoff.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -243,6 +284,434 @@ fn format_surface_actor(bot_name: &str, harness_display: &str, model: Option<&st
 }
 
 impl Tx<'_> {
+    /// Clear per-item consecutive surface error streaks and failed-surface memory after a healthy
+    /// turn or manual owner intervention.
+    pub(crate) fn clear_surface_failures(&mut self, item_id: &str) {
+        self.st.surface_errors.remove(item_id);
+    }
+
+    fn session_surface_key(&self, prev: &Session) -> Result<SurfaceKey> {
+        let placed = self
+            .db()
+            .store()
+            .read(|r| steve_store::bot_dispatch::for_session(r, &prev.id))?;
+        Ok((prev.harness.clone(), placed.and_then(|p| p.model)))
+    }
+
+    /// Walk the current Bot's ordered execution-surface candidates (`[primary, ...fallback_surfaces]`)
+    /// and hand off to the first online, eligible, non-cooled-down surface via W3.1 placement,
+    /// keeping the SAME Bot and leaving Bot defaults unchanged.
+    pub(crate) fn try_next_fallback_surface(
+        &mut self,
+        item: &Item,
+        prev: &Session,
+        reason: HandoffReason,
+        attempt: Option<&str>,
+    ) -> Result<FallbackTry> {
+        let cur_bot_id = prev
+            .bot_id
+            .as_deref()
+            .or(item.bot_id.as_deref())
+            .unwrap_or("steve");
+        let Some(bot) = self.db().bot(cur_bot_id)? else {
+            return Ok(FallbackTry::NoFallbacksConfigured);
+        };
+        let candidates = self.db().store().bots().execution_surfaces(&bot)?;
+        if candidates.len() <= 1 {
+            return Ok(FallbackTry::NoFallbacksConfigured);
+        }
+
+        let cur_key = self.session_surface_key(prev)?;
+        let now = crate::util::now();
+        {
+            let streak = self.st.surface_errors.entry(item.id.clone()).or_default();
+            streak.failed_surfaces.insert(cur_key.clone());
+        }
+
+        for surface in candidates {
+            let cand_key: SurfaceKey = (surface.harness.clone(), surface.model.clone());
+            if cand_key == cur_key {
+                continue;
+            }
+            if self
+                .st
+                .surface_errors
+                .get(&item.id)
+                .is_some_and(|st| st.failed_surfaces.contains(&cand_key))
+            {
+                continue;
+            }
+            if self
+                .st
+                .surface_cooldowns
+                .get(&cand_key)
+                .is_some_and(|until| *until > now)
+            {
+                continue;
+            }
+            let target = HandoffTarget {
+                bot: None,
+                harness: Some(surface.harness),
+                model: surface.model,
+                effort: surface.reasoning_effort,
+                make_bot_default: false,
+            };
+            match self.execute_handoff(item, prev, &target, reason, "steve", attempt) {
+                Ok(_outcome) => {
+                    let streak = self.st.surface_errors.entry(item.id.clone()).or_default();
+                    streak.last_surface = Some(cand_key);
+                    streak.consecutive_errors = 0;
+                    return Ok(FallbackTry::Switched);
+                }
+                Err(err) => {
+                    tracing::info!(
+                        item = %item.id,
+                        bot = %cur_bot_id,
+                        reason = reason.code(),
+                        error = %err,
+                        "fallback execution surface ineligible; trying next candidate"
+                    );
+                }
+            }
+        }
+        Ok(FallbackTry::AllUnavailable)
+    }
+
+    /// Deterministic handler for quota / rate-limit failures (`HANDOFF.md` §2):
+    /// 1. If recovery time is known and within workspace `quotaWaitMinutes`, wait on current surface.
+    /// 2. Else if `quotaAutoHandoff` is `"on"`, switch to the Bot's next eligible execution surface.
+    /// 3. If auto-handoff is `"off"` or all surfaces are unavailable, open the coordinator card
+    ///    (never auto-switching Bot).
+    ///
+    /// Returns `Ok(true)` when handled; `Ok(false)` only for a bare transient 429 with no reset
+    /// time, no hard-quota wording, and no available fallback (falls back to ordinary retry).
+    pub(crate) fn handle_quota_exhausted(
+        &mut self,
+        item: &Item,
+        session: &Session,
+        error: &str,
+        reset_at: Option<i64>,
+        attempt: Option<&str>,
+    ) -> Result<bool> {
+        let now = crate::util::now();
+        let cur_key = self.session_surface_key(session)?;
+        self.st
+            .surface_cooldowns
+            .insert(cur_key, reset_at.unwrap_or(now + DEFAULT_QUOTA_COOLDOWN_MS));
+
+        let auto_handoff =
+            self.db()
+                .setting(&item.workspace_id, QUOTA_AUTO_HANDOFF_SETTING, "on")?
+                != "off";
+        let wait_minutes: i64 = self
+            .db()
+            .setting(&item.workspace_id, QUOTA_WAIT_MINUTES_SETTING, "10")?
+            .parse()
+            .unwrap_or(10);
+
+        if let Some(until) = reset_at
+            && wait_minutes > 0
+            && until - now <= wait_minutes * 60_000
+        {
+            self.quota_wait(&item.id, &session.id, until, error)?;
+            return Ok(true);
+        }
+
+        let reason = HandoffReason::QuotaExhausted { reset_at };
+        if auto_handoff {
+            match self.try_next_fallback_surface(item, session, reason, attempt)? {
+                FallbackTry::Switched => return Ok(true),
+                FallbackTry::AllUnavailable | FallbackTry::NoFallbacksConfigured => {
+                    if reset_at.is_none() && !crate::quota::is_hard_quota_error(error) {
+                        return Ok(false);
+                    }
+                    self.open_surfaces_unavailable_card(item, session, reason, error)?;
+                    return Ok(true);
+                }
+            }
+        }
+
+        if reset_at.is_some() || crate::quota::is_hard_quota_error(error) {
+            self.open_surfaces_unavailable_card(item, session, reason, error)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Deterministic handler for repeated provider/execution failures on the same surface:
+    /// - `MODEL_SERVICE_UNAVAILABLE` / `MODEL_STREAM_INTERRUPTED` (Node/Gateway already retried):
+    ///   treated as reaching the consecutive-failure threshold immediately.
+    /// - Generic `"error"` stops: counts consecutive failures on the same surface up to
+    ///   `provider_error_handoff_threshold` (default 2).
+    /// When the threshold is reached, tries the Bot's next fallback surface; if the Bot has
+    /// configured fallbacks and ALL are unavailable, opens the coordinator card (never auto-switching
+    /// Bot). Single-surface Bots fall through to the standard failure card.
+    pub(crate) fn handle_provider_error(
+        &mut self,
+        item: &Item,
+        session: &Session,
+        stop_reason: &str,
+        error: &str,
+        attempt: Option<&str>,
+    ) -> Result<bool> {
+        let threshold = self.cfg().provider_error_handoff_threshold;
+        if threshold == 0 {
+            return Ok(false);
+        }
+        let immediate = crate::runtime::is_model_service_failure(stop_reason);
+        let cur_key = self.session_surface_key(session)?;
+        let reached = {
+            let streak = self.st.surface_errors.entry(item.id.clone()).or_default();
+            if immediate {
+                streak.last_surface = Some(cur_key.clone());
+                streak.consecutive_errors = threshold;
+            } else if streak.last_surface.as_ref() == Some(&cur_key) {
+                streak.consecutive_errors = streak.consecutive_errors.saturating_add(1);
+            } else {
+                streak.last_surface = Some(cur_key.clone());
+                streak.consecutive_errors = 1;
+            }
+            streak.consecutive_errors >= threshold
+        };
+        if !reached {
+            return Ok(false);
+        }
+
+        self.st
+            .surface_cooldowns
+            .insert(cur_key, crate::util::now() + DEFAULT_PROVIDER_COOLDOWN_MS);
+        match self.try_next_fallback_surface(
+            item,
+            session,
+            HandoffReason::ProviderError,
+            attempt,
+        )? {
+            FallbackTry::Switched => Ok(true),
+            FallbackTry::AllUnavailable => {
+                self.open_surfaces_unavailable_card(
+                    item,
+                    session,
+                    HandoffReason::ProviderError,
+                    error,
+                )?;
+                Ok(true)
+            }
+            FallbackTry::NoFallbacksConfigured => Ok(false),
+        }
+    }
+
+    /// Coordinator card opened when all execution surfaces of the current Bot are unavailable
+    /// (or `quotaAutoHandoff` is off). Never switches Bot automatically; lets the owner choose
+    /// another Bot, wait for recovery, hand off to Steve, pause, or drop.
+    pub(crate) fn open_surfaces_unavailable_card(
+        &mut self,
+        item: &Item,
+        session: &Session,
+        reason: HandoffReason,
+        error: &str,
+    ) -> Result<()> {
+        let cur_bot_id = session
+            .bot_id
+            .as_deref()
+            .or(item.bot_id.as_deref())
+            .unwrap_or("steve")
+            .to_string();
+        let cur_bot_name = self
+            .db()
+            .bot(&cur_bot_id)?
+            .map(|b| b.display())
+            .unwrap_or_else(|| cur_bot_id.clone());
+        let zone = self
+            .db()
+            .store()
+            .read(|r| steve_modules::zone::workspace_tz(r, &item.workspace_id))
+            .ok()
+            .and_then(|z| steve_runtime::tz::Zone::parse(z.name()).ok())
+            .unwrap_or_else(steve_runtime::tz::Zone::system);
+        let reason_text = reason.timeline_reason(zone, crate::util::now());
+        let why = format!(
+            "当前 {cur_bot_name} 的所有执行面都暂时不可用（{reason_text}）：{}。请决定如何继续。",
+            js_head(error, 200)
+        );
+        let reset_at = match reason {
+            HandoffReason::QuotaExhausted { reset_at } => reset_at,
+            _ => None,
+        };
+
+        let db = self.db().clone();
+        let created = db.store().write::<_, CoreError>(|_w| {
+            let i = self.item(&item.id)?;
+            if i.is_closed() {
+                return Ok(None);
+            }
+            let open = self.db().decisions_of_item(&item.id)?;
+            if open.iter().any(|d| {
+                d.status == "open"
+                    && d.kind == "fail"
+                    && d.subject_type == HANDOFF_UNAVAILABLE_SUBJECT
+                    && d.question == why
+            }) {
+                return Ok(None);
+            }
+            crate::lifecycle::supersede_where(
+                self.db(),
+                &item.id,
+                crate::lifecycle::stop_card,
+                "有了新的情况",
+            )?;
+
+            let mut opts: Vec<String> = Vec::new();
+            if reset_at.is_some() {
+                opts.push("wait".into());
+            }
+            let mut peers: Vec<Bot> = self
+                .db()
+                .bots(&i.workspace_id)?
+                .into_iter()
+                .filter(|b| b.enabled && b.id != cur_bot_id && b.id != "steve")
+                .collect();
+            peers.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+            for peer in peers.into_iter().take(MAX_COORDINATOR_BOT_OPTIONS) {
+                opts.push(format!("bot:{}", peer.id));
+            }
+            if cur_bot_id != "steve" {
+                opts.push("tosteve".into());
+            }
+            opts.push("look".into());
+            opts.push("drop".into());
+
+            let d = self.db().decision_create(NewDecision {
+                workspace_id: i.workspace_id.clone(),
+                kind: "fail".into(),
+                subject_type: HANDOFF_UNAVAILABLE_SUBJECT.into(),
+                subject_id: item.id.clone(),
+                item_id: Some(item.id.clone()),
+                session_id: Some(session.id.clone()),
+                question: why.clone(),
+                options: Some(opts),
+                requested_by: "steve".into(),
+                ..Default::default()
+            })?;
+            self.mark_fail(&i.workspace_id, &item.id, &why, &d.id);
+            self.db()
+                .timeline_add(&item.id, "steve", "sys", &why, Some(&session.id))?;
+            flow_quiet(
+                self.db(),
+                &item.id,
+                Update {
+                    kind: "fail",
+                    text: format!("{} 卡住了：{why}", item.id),
+                    decision: Some(d.id.clone()),
+                    ..Default::default()
+                },
+            );
+            Ok(Some(d.id))
+        })?;
+        if let Some(decision_id) = created {
+            self.st.handoff_cards.insert(
+                decision_id,
+                HandoffCardMeta {
+                    session_id: session.id.clone(),
+                    reset_at,
+                    error: error.to_string(),
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// Resolve the `"wait"` option on a `handoff_unavailable` coordinator card: arms `quota_wait`
+    /// when a future recovery time is known, otherwise pauses the item cleanly.
+    pub(crate) fn resolve_handoff_unavailable_wait(
+        &mut self,
+        decision_id: &str,
+        item_id: &str,
+        d: &Decision,
+        actor: &str,
+    ) -> Result<()> {
+        self.db()
+            .decision_resolve(decision_id, json!({"choice": "wait"}), "resolved", None)?;
+        self.clear_surface_failures(item_id);
+        let meta = self.st.handoff_cards.remove(decision_id);
+        let now = crate::util::now();
+        let sid = meta
+            .as_ref()
+            .map(|m| m.session_id.clone())
+            .or_else(|| d.session_id.clone());
+        let reset_at = meta
+            .as_ref()
+            .and_then(|m| m.reset_at)
+            .or_else(|| crate::quota::reset_at(&d.question, now));
+        let err_text = meta
+            .as_ref()
+            .map(|m| m.error.clone())
+            .unwrap_or_else(|| d.question.clone());
+        if let (Some(sid), Some(until)) = (sid, reset_at)
+            && until > now
+        {
+            self.quota_wait(item_id, &sid, until, &err_text)?;
+        } else {
+            self.pause_item(item_id)?;
+            self.db().timeline_add(
+                item_id,
+                actor,
+                "sys",
+                "已暂停，等你确认恢复后继续",
+                d.session_id.as_deref(),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Resolve a `"bot:<id>"` or `"tosteve"` choice on a `handoff_unavailable` coordinator card by
+    /// executing a full working-memory handoff to `target_bot` BEFORE marking the card resolved, so
+    /// a blocked target leaves the card open for the owner.
+    pub(crate) fn resolve_handoff_to_bot(
+        &mut self,
+        decision_id: &str,
+        item_id: &str,
+        target_bot: &str,
+        choice: &str,
+        actor: &str,
+    ) -> Result<()> {
+        let item = self.item(item_id)?;
+        let prev = match self.active_session(item_id)? {
+            Some(s) => Some(s),
+            None => {
+                let mut sessions = self.db().sessions_of_item(item_id)?;
+                sessions.sort_by(|a, b| b.no.cmp(&a.no).then_with(|| b.created.cmp(&a.created)));
+                sessions
+                    .into_iter()
+                    .find(|s| s.readonly == 0 && s.source == "Steve")
+            }
+        };
+        if let Some(prev) = prev {
+            self.execute_handoff(
+                &item,
+                &prev,
+                &HandoffTarget {
+                    bot: Some(target_bot.to_string()),
+                    ..Default::default()
+                },
+                HandoffReason::OwnerRequest,
+                actor,
+                None,
+            )?;
+            self.db()
+                .decision_resolve(decision_id, json!({"choice": choice}), "resolved", None)?;
+            crate::lifecycle::supersede(self.db(), item_id, &["fail"], "已手动交接新会话")?;
+            crate::thread::flowback::recover_quiet(self.db(), item_id);
+        } else {
+            self.db()
+                .decision_resolve(decision_id, json!({"choice": choice}), "resolved", None)?;
+            crate::thread::flowback::recover_quiet(self.db(), item_id);
+            self.reassign(item_id, target_bot, actor)?;
+        }
+        self.st.handoff_cards.remove(decision_id);
+        self.clear_surface_failures(item_id);
+        Ok(())
+    }
+
     /// Record the outcome of the first turn of a session created via handoff.
     pub(crate) fn record_handoff_turn_outcome(&mut self, sid: &str, outcome: &'static str) {
         if let Some(reason) = self.st.handoff_outcomes.remove(sid) {
@@ -363,6 +832,7 @@ impl Tx<'_> {
         )?;
         crate::lifecycle::supersede(self.db(), &item.id, &["fail"], "已手动交接新会话")?;
         crate::thread::flowback::recover_quiet(self.db(), &item.id);
+        self.clear_surface_failures(&item.id);
         Ok(outcome)
     }
 
@@ -396,6 +866,7 @@ impl Tx<'_> {
         )?;
         crate::lifecycle::supersede(self.db(), &item.id, &["fail"], "已手动交接新会话")?;
         crate::thread::flowback::recover_quiet(self.db(), &item.id);
+        self.clear_surface_failures(&item.id);
         Ok(outcome)
     }
 

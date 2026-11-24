@@ -305,6 +305,8 @@ pub struct Config {
     pub turn_context_budget_tokens: Option<u64>,
     /// `STEVE_TURN_CONTEXT_HANDOFF_LIMIT`: max consecutive context-budget handoffs per item (`None`: core default).
     pub turn_context_handoff_limit: Option<u32>,
+    /// `STEVE_PROVIDER_ERROR_HANDOFF_THRESHOLD`: consecutive errors on one surface before switching fallback (`None`: core default).
+    pub provider_error_handoff_threshold: Option<u32>,
     /// `STEVE_DISK_FLOOR_GB`, `STEVE_DISK_LOW_GB`, `STEVE_WORKTREE_IDLE_HOURS` (task workspaces).
     pub disk: steve_core::workspace::DiskPolicy,
     /// `STEVE_GH`: the GitHub CLI that follows Release builds (`None`: looked up by the core).
@@ -877,6 +879,10 @@ impl Config {
             turn_context_budget_pct: percent(&get, "STEVE_TURN_CONTEXT_BUDGET_PCT")?,
             turn_context_budget_tokens: positive_u64(&get, "STEVE_TURN_CONTEXT_BUDGET_TOKENS")?,
             turn_context_handoff_limit: count(&get, "STEVE_TURN_CONTEXT_HANDOFF_LIMIT")?,
+            provider_error_handoff_threshold: count(
+                &get,
+                "STEVE_PROVIDER_ERROR_HANDOFF_THRESHOLD",
+            )?,
             disk,
             gh: get("STEVE_GH").filter(|v| !v.is_empty()).map(PathBuf::from),
             claude_executable: env("CLAUDE_CODE_EXECUTABLE", "/opt/homebrew/bin/claude"),

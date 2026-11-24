@@ -81,7 +81,7 @@ export default {
     noRelease: "Don't release",
     approve: "Approve",
   },
-  fail: { retry: "Retry release", continue: "Let it continue", delivered: "It's actually done", look: "I'll take a look", tosteve: "Hand to Steve", drop: "Drop", release_waive: "No release needed", release_retry: "Needs a release", release_live: "Already live" },
+  fail: { wait: "Wait for recovery", handoffBot: "Hand off to {{bot}}", retry: "Retry release", continue: "Let it continue", delivered: "It's actually done", look: "I'll take a look", tosteve: "Hand to Steve", drop: "Drop", release_waive: "No release needed", release_retry: "Needs a release", release_live: "Already live" },
   snooze: {
     hour: "In 1 hour",
     tonight: "Tonight at 20:00",
@@ -100,7 +100,7 @@ export default {
     party_merge: { merge: "Merged; you can split them again on the contact page", not_same: "Noted: not the same person" },
     release: { no: "Release not approved" },
     chan_message: { yes: "Approved, will be sent shortly", no: "Not sent, this one is closed", rewrite: "Rewriting it; you'll see it again", send_draft: "Checked first; sent shortly if nothing may leak, otherwise shown to you again", instruct: "OK, drafting it your way; you'll see it first", verbatim: "Approved, your words go out shortly", to_item: "Making it an item", done: "OK, leaving this one", retry: "Sending it again", discard: "Not sent, this one is closed", sent: "Marked as sent" },
-    any: { pass: "Accepted, item done", rework: "Sent back for rework", yes: "Confirmed", no: "Handled", continue: "Let it continue", delivered: "Delivery confirmed and accepted", look: "Paused, waiting for you", tosteve: "Handed to Steve", drop: "Dropped", deny: "Denied" },
+    any: { wait: "Waiting for quota recovery", pass: "Accepted, item done", rework: "Sent back for rework", yes: "Confirmed", no: "Handled", continue: "Let it continue", delivered: "Delivery confirmed and accepted", look: "Paused, waiting for you", tosteve: "Handed to Steve", drop: "Dropped", deny: "Denied" },
     confirmYes: "Confirmed",
     confirmNo: "Noted: not right",
     toldBot: "Told {{bot}}",

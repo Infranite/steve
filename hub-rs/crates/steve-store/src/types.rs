@@ -210,6 +210,16 @@ impl Project {
     }
 }
 
+/// One execution surface (`harness + model + reasoning_effort`) a Bot can run on.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ExecutionSurface {
+    pub harness: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+}
+
 /// `rowBot`: `project_dir`, `worktree`, `deleted` are dropped; `workspace_id` is the legacy owner.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Bot {

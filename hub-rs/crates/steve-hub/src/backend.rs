@@ -104,6 +104,8 @@ pub struct BotExtras {
     pub workspaces: std::collections::HashMap<String, Vec<String>>,
     /// bot id → its own MCP servers ([`Repo::bot_mcp_servers`])
     pub mcp: std::collections::HashMap<String, Vec<Value>>,
+    /// bot id → ordered fallback execution surfaces ([`Repo::bot_fallback_surfaces`])
+    pub fallback_surfaces: std::collections::HashMap<String, Vec<Value>>,
 }
 
 /// Storage operations, one per repo.ts function the API layer calls. Writes publish their bus events
@@ -225,6 +227,9 @@ pub trait Repo {
     }
     /// The Bot's own MCP servers as its view shows them: `{id, name, transport, enabled}` by name.
     fn bot_mcp_servers(&self, id: &str) -> BResult<Vec<Value>> {
+        Ok(vec![])
+    }
+    fn bot_fallback_surfaces(&self, id: &str) -> BResult<Vec<Value>> {
         Ok(vec![])
     }
     /// Membership, deleted bots included.

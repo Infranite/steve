@@ -38,6 +38,7 @@ pub struct McpSummary {
 pub struct BotExtras {
     pub workspaces: HashMap<String, Vec<String>>,
     pub mcp: HashMap<String, Vec<McpSummary>>,
+    pub fallback_surfaces: HashMap<String, Vec<crate::ExecutionSurface>>,
 }
 
 fn scan_mcp(
@@ -109,6 +110,25 @@ pub fn bot_extras(r: &mut impl Read) -> Result<BotExtras> {
     scan_mcp(r, None, |bot, server| {
         extras.mcp.entry(bot).or_default().push(server)
     })?;
+    r.scan(
+        Query::select()
+            .columns(["bot_id", "harness", "model", "reasoning_effort"])
+            .from("bot_fallback_surfaces")
+            .order_by("bot_id", Order::Asc)
+            .order_by("ordinal", Order::Asc),
+        |row| {
+            extras
+                .fallback_surfaces
+                .entry(row.get(0)?)
+                .or_default()
+                .push(crate::ExecutionSurface {
+                    harness: row.get(1)?,
+                    model: row.get(2)?,
+                    reasoning_effort: row.get(3)?,
+                });
+            Ok(())
+        },
+    )?;
     Ok(extras)
 }
 

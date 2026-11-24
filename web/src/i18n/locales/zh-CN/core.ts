@@ -95,7 +95,7 @@ export default {
     approve: "批准",
   },
   /* the buttons of a card about something that went wrong; also what was chosen on one */
-  fail: { retry: "重试发布", continue: "让它继续", delivered: "它其实做完了", look: "我来看看", tosteve: "换成 Steve", drop: "放弃", release_waive: "不需要发布", release_retry: "需要发布", release_live: "已经上线" },
+  fail: { wait: "等恢复", handoffBot: "交给 {{bot}} 接手", retry: "重试发布", continue: "让它继续", delivered: "它其实做完了", look: "我来看看", tosteve: "换成 Steve", drop: "放弃", release_waive: "不需要发布", release_retry: "需要发布", release_live: "已经上线" },
   snooze: {
     hour: "1 小时后",
     tonight: "今晚 20:00",
@@ -116,7 +116,7 @@ export default {
     party_merge: { merge: "已合并，可以在联系人页拆回", not_same: "已记下：不是同一个人" },
     release: { no: "没有批准发布" },
     chan_message: { yes: "已批准，稍后发出", no: "不发出，这条已关闭", rewrite: "改写好后会再给你看", send_draft: "先查有没有不该说的，没问题就稍后发出；有问题会再给你看", instruct: "好，按你说的起草，写好后给你看", verbatim: "已批准，稍后按原文发出", to_item: "正在转成事项", done: "好，这条不用管", retry: "正在重新发送", discard: "不发了，这条已关闭", sent: "已记为发出" },
-    any: { pass: "已验收，事项完成", rework: "已发回返工", yes: "已确认", no: "已处理", continue: "已让它继续", delivered: "已确认交付并验收", look: "已暂停，等你处理", tosteve: "已交给 Steve", drop: "已放弃", deny: "已拒绝" },
+    any: { wait: "已安排等待配额恢复", pass: "已验收，事项完成", rework: "已发回返工", yes: "已确认", no: "已处理", continue: "已让它继续", delivered: "已确认交付并验收", look: "已暂停，等你处理", tosteve: "已交给 Steve", drop: "已放弃", deny: "已拒绝" },
     confirmYes: "已确认",
     confirmNo: "已记下：不对",
     toldBot: "已告诉 {{bot}}",

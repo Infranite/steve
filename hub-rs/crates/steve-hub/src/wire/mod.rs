@@ -140,6 +140,9 @@ fn core_config(cfg: &Config, vars: &Vars) -> steve_core::CoreConfig {
     if let Some(n) = cfg.turn_context_handoff_limit {
         c.context_handoff_limit = n;
     }
+    if let Some(n) = cfg.provider_error_handoff_threshold {
+        c.provider_error_handoff_threshold = n;
+    }
     if let Some(g) = &cfg.gh {
         c.gh = g.clone();
     }

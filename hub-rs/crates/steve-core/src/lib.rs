@@ -62,12 +62,13 @@ mod tests;
 
 pub use config::CoreConfig;
 pub use context_handoff::{
-    BotDefaultSnapshot, BotDefaultUpdated, HandoffOutcome, HandoffReason, HandoffTarget,
-    parse_budget_handoff_target,
+    BotDefaultSnapshot, BotDefaultUpdated, HANDOFF_UNAVAILABLE_SUBJECT, HandoffOutcome,
+    HandoffReason, HandoffTarget, parse_budget_handoff_target,
 };
 pub use error::{CoreError, Result};
 pub use gateway::{ModelGateway, OneModel, SharedGateway, SingleModelGateway, Tier};
 pub use orchestrator::{CreateItem, Forked, ItemAction, SendNow, SupplementMode, design_pending};
+pub use quota::has_quota_reset;
 pub use runtime::{
     AgentRuntime, Answered, Check, Flushed, McpEndpoint, ModeState, Output, Prompted, Released,
     Running, Stop, TurnEnd,
@@ -146,6 +147,12 @@ pub(crate) struct State {
     handoffs: HashMap<String, String>,
     /// Sessions created by handoff waiting to record their first-turn outcome metric.
     handoff_outcomes: HashMap<String, &'static str>,
+    /// Execution surfaces currently known to be quota-exhausted or failing `(harness, model) -> until_ms`.
+    surface_cooldowns: HashMap<context_handoff::SurfaceKey, i64>,
+    /// Per-item consecutive surface error streaks and surfaces already failed during this outage.
+    surface_errors: HashMap<String, context_handoff::SurfaceFailureState>,
+    /// Metadata for open coordinator surface-unavailable cards (`decision_id -> meta`).
+    handoff_cards: HashMap<String, context_handoff::HandoffCardMeta>,
     /// Git facts of items on a Node, gathered off the lock (`node_git`).
     git: node_git::Slots,
     /// Critical sections entered so far (facts taken in one may be read again in the same one).
