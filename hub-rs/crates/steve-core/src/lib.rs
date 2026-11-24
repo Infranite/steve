@@ -63,7 +63,7 @@ mod tests;
 pub use config::CoreConfig;
 pub use context_handoff::{
     BotDefaultSnapshot, BotDefaultUpdated, HANDOFF_UNAVAILABLE_SUBJECT, HandoffOutcome,
-    HandoffReason, HandoffTarget, parse_budget_handoff_target,
+    HandoffReason, HandoffTarget,
 };
 pub use error::{CoreError, Result};
 pub use gateway::{ModelGateway, OneModel, SharedGateway, SingleModelGateway, Tier};

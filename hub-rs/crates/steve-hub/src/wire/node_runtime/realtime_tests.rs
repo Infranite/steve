@@ -125,7 +125,6 @@ fn stopped() -> EventBody {
             continuation: None,
             transient: false,
             acted: false,
-            context_peak: None,
             job: None,
         },
     }
@@ -283,7 +282,6 @@ fn realtime_normalized_text_is_persisted_and_final_usage_never_spikes() {
                 continuation: None,
                 transient: false,
                 acted: false,
-                context_peak: None,
                 job: None,
             },
         },
@@ -328,7 +326,6 @@ fn realtime_replay_overlap_and_reopen_do_not_duplicate() {
                 continuation: None,
                 transient: false,
                 acted: false,
-                context_peak: None,
                 job: None,
             },
         },

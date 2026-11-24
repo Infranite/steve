@@ -278,7 +278,6 @@ async fn workflow_pause_holds_node_fact_followups_until_explicit_resume() {
                 continuation: None,
                 transient: true,
                 acted: false,
-                context_peak: None,
                 job: None,
             },
         )
@@ -337,7 +336,6 @@ async fn a_settle_drained_before_its_commit_still_ends_its_row() {
         continuation: None,
         transient: false,
         acted: false,
-        context_peak: None,
         job: None,
     };
     rt.write(|tx| {
@@ -551,7 +549,6 @@ async fn device_pause_keeps_existing_attempt_and_retry_then_holds_followup_until
                 continuation: None,
                 transient: true,
                 acted: false,
-                context_peak: None,
                 job: None,
             },
         )
@@ -620,7 +617,6 @@ async fn device_pause_keeps_existing_attempt_and_retry_then_holds_followup_until
                 continuation: None,
                 transient: false,
                 acted: false,
-                context_peak: None,
                 job: None,
             },
         )

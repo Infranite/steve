@@ -7,7 +7,6 @@ export const REASONS = {
   "node.tool_refused": { code: "internal", params: [] },
   "node.workspace_binding_conflict": { code: "conflict", params: [] },
   "node_stop.adapter_exited": { code: "unavailable", params: [] },
-  "node_stop.context_budget": { code: "exhausted", params: [] },
   "node_stop.deadline": { code: "stale", params: [] },
   "node_stop.frame_too_large": { code: "exhausted", params: [] },
   "node_stop.harness_gone": { code: "unavailable", params: [] },

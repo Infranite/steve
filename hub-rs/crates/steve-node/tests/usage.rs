@@ -178,7 +178,6 @@ impl Fixture {
                     }),
                     artifact_view: None,
                     skills: vec![],
-                    context_budget: None,
                 },
             ))
             .await

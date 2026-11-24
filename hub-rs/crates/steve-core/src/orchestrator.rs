@@ -2584,7 +2584,6 @@ impl Tx<'_> {
          * A question you asked it there (not an instruction) is answered on purpose, not continued */
         let mut answered_you = false;
         if t.stop_reason != "cancelled"
-            && t.stop_reason != steve_node_api::CONTEXT_BUDGET
             && let Some(f) = self.c.forwarded_take(item_id)
         {
             answered_you = f.asked;
@@ -2708,22 +2707,13 @@ impl Tx<'_> {
             );
             return Ok(());
         }
-        if t.stop_reason == steve_node_api::CONTEXT_BUDGET {
-            self.record_handoff_turn_outcome(&session.id, "handoff");
-            if asked_yours || receipt.is_some() {
-                return Ok(());
-            }
-            return self.continue_after_context_budget(&item, &session, t.attempt.as_deref());
-        }
         let handoff_outcome = if error.is_some() || graph_failed.is_some() {
             "failed"
-        } else if t.stop_reason == "cancelled" {
-            "cancelled"
         } else {
             "succeeded"
         };
         self.record_handoff_turn_outcome(&session.id, handoff_outcome);
-        if error.is_none() && graph_failed.is_none() && t.stop_reason != "cancelled" {
+        if error.is_none() && graph_failed.is_none() {
             self.clear_surface_failures(item_id);
         }
         let why = match error {

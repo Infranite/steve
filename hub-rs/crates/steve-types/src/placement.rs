@@ -52,7 +52,6 @@ pub enum PlacementReason {
     StableOrder,
     SteveFallback,
     ExistingAssignment,
-    HandoffContextBudget,
     HandoffQuotaExhausted,
     HandoffProviderError,
     HandoffOwnerRequest,

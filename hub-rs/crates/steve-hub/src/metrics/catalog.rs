@@ -544,14 +544,19 @@ pub(super) fn describe() {
         "Peak prompt context tokens observed during an agent turn. Labels: harness."
     );
     describe_counter!(
-        "steve_turn_context_compactions_total",
+        "steve_handoffs_total",
         Count,
-        "Turn context compactions and handoffs. Labels: harness, mode (native, handoff), reason (native_compaction, budget_reached, handoff_threshold)."
+        "Session handoffs executed. Labels: reason (quota_exhausted, provider_error, owner_request), from_harness, to_harness, switched_bot."
     );
     describe_counter!(
-        "steve_turn_context_saved_tokens_total",
+        "steve_handoff_outcomes_total",
         Count,
-        "Estimated prompt context tokens reclaimed by native compaction or session handoff. Labels: harness, mode (native, handoff)."
+        "First-turn outcomes of sessions created via handoff. Labels: reason, outcome."
+    );
+    describe_histogram!(
+        "steve_handoff_package_bytes",
+        Bytes,
+        "Serialized size of the working-memory opening prompt sent on session handoff. Labels: reason."
     );
     // This process (sampled when read)
     describe_gauge!(

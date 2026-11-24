@@ -11,6 +11,8 @@ const RETRY_DELAYS_MS: [i64; 3] = [20_000, 60_000, 120_000];
 
 /// How many message roles the coordinator keeps in memory before it starts over.
 const ROLES_KEPT: usize = 4096;
+/// Upper bound on tracked in-flight attempt peak context observations.
+const CONTEXT_PEAKS_KEPT: usize = 4096;
 
 /// What one attempt did, as its statistics row counts it.
 #[derive(Debug, Clone, Default)]
@@ -24,6 +26,8 @@ pub struct AttemptFacts {
     pub model: Option<String>,
     /// The attempt's share of the harness's own dollar figure, if it reported one.
     pub cost: Option<f64>,
+    /// Peak observed prompt context tokens during this attempt (read-only observation).
+    pub context_peak: Option<u64>,
 }
 
 /// What an attempt did so far, kept as its events are applied ([`steve_store::Attempts`]): by
@@ -204,28 +208,6 @@ impl NodeRuntime {
                     )
                     .record(elapsed_ms as f64 / 1000.0);
                 }
-                Tell::ContextCompacted {
-                    harness,
-                    mode,
-                    reason,
-                    saved_tokens,
-                } => {
-                    metrics::counter!(
-                        "steve_turn_context_compactions_total",
-                        "harness" => harness.clone(),
-                        "mode" => mode.as_str(),
-                        "reason" => reason.as_str(),
-                    )
-                    .increment(1);
-                    if saved_tokens > 0 {
-                        metrics::counter!(
-                            "steve_turn_context_saved_tokens_total",
-                            "harness" => harness,
-                            "mode" => mode.as_str(),
-                        )
-                        .increment(saved_tokens);
-                    }
-                }
             }
         }
     }
@@ -259,6 +241,7 @@ impl NodeRuntime {
                 at,
                 measure,
             } => {
+                self.context_peaks.lock().unwrap().remove(&attempt);
                 if let Some(m) = measure {
                     m.record();
                 }
@@ -400,7 +383,8 @@ impl NodeRuntime {
                 if let Some(node_turns::Attempt { state, .. }) = self.attempt_row(a)?
                     && state != "finished"
                 {
-                    let facts = take_facts(w, a)?;
+                    let mut facts = take_facts(w, a)?;
+                    facts.context_peak = self.context_peaks.lock().unwrap().get(a).copied();
                     let measure = super::super::acp_stats::try_node_attempt_finished(
                         &self.store,
                         &session,
@@ -418,56 +402,6 @@ impl NodeRuntime {
                         measure,
                     });
                 }
-            }
-            (
-                EventBody::ContextCompacted {
-                    mode,
-                    reason,
-                    before_tokens,
-                    after_tokens,
-                    limit_tokens,
-                },
-                attempt,
-            ) if *mode == CompactionMode::Native => {
-                // Handoff compactions are recorded by Core once the handoff session commits, so
-                // neither mode is ever double-counted.
-                let saved_tokens = before_tokens.saturating_sub(*after_tokens);
-                let harness = self
-                    .store
-                    .sessions()
-                    .get(&session)?
-                    .map(|s| s.harness)
-                    .unwrap_or_default();
-                let mut staged = self.staged.lock().unwrap();
-                if !harness.is_empty() {
-                    staged.push(Tell::ContextCompacted {
-                        harness,
-                        mode: *mode,
-                        reason: *reason,
-                        saved_tokens,
-                    });
-                }
-                staged.push(Tell::Diagnostic(Box::new(
-                    steve_store::diagnostics::Record {
-                        session_id: Some(session),
-                        attempt_id: attempt.map(str::to_owned),
-                        cause_id: Some(ev.id.to_string()),
-                        kind: "context.compacted".into(),
-                        reason_code: reason.as_str().into(),
-                        severity: steve_store::diagnostics::Severity::Info,
-                        details: steve_store::diagnostics::Details {
-                            context_before: Some(*before_tokens),
-                            context_after: Some(*after_tokens),
-                            context_saved: Some(saved_tokens),
-                            limit: *limit_tokens,
-                            source_at: Some(ev.at.0),
-                            source_node: Some(self.node_id.to_string()),
-                            source_epoch: Some(ev.cursor.epoch.to_string()),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    },
-                )));
             }
             _ => {}
         }
@@ -518,6 +452,16 @@ impl NodeRuntime {
             }
             if let Some(d) = delta {
                 kept.cost = Some(kept.cost.unwrap_or(0.0) + d);
+            }
+            if let Some(used) = report.context_used.filter(|&n| n > 0) {
+                let mut peaks = self.context_peaks.lock().unwrap();
+                if peaks.len() >= CONTEXT_PEAKS_KEPT && !peaks.contains_key(a) {
+                    peaks.clear();
+                }
+                peaks
+                    .entry(a.to_owned())
+                    .and_modify(|p| *p = (*p).max(used))
+                    .or_insert(used);
             }
             w.attempts().keep_facts(a, &kept)?;
         }
@@ -789,32 +733,24 @@ impl NodeRuntime {
             }
         }
         self.turn_over_in(tx, session, turn, c)?;
-        let context_budget = c.stop_reason == CONTEXT_BUDGET
-            || c.error.as_ref().and_then(NodeStop::of) == Some(NodeStop::ContextBudget);
-        // what is queued meanwhile goes next; only when nothing does is the turn over for the item.
-        // When the turn stopped for context budget, leave queued messages for the handoff session
-        // instead of starting another turn on the over-budget session.
-        if !context_budget && self.plan_after_in(tx, session)? == Planned::Created {
+        // what is queued meanwhile goes next; only when nothing does is the turn over for the item
+        if self.plan_after_in(tx, session)? == Planned::Created {
             return Ok(None);
         }
         // a session the business side ended is let go once its last turn is over (the release it
         // asked for while the turn ran waited for this)
         self.release_if_ended_in(tx, session)?;
-        let stop = if context_budget {
-            CONTEXT_BUDGET.to_owned()
-        } else {
-            match &c.error {
-                Some(Error {
-                    code: Code::Unavailable,
-                    retry: Retry::Later { .. },
-                    ..
-                }) if c.outcome == Outcome::Failed => {
-                    steve_core::runtime::MODEL_SERVICE_UNAVAILABLE.to_owned()
-                }
-                _ => c.stop_reason.clone(),
+        self.status_in(session, settled_status(&c.stop_reason))?;
+        let stop = match &c.error {
+            Some(Error {
+                code: Code::Unavailable,
+                retry: Retry::Later { .. },
+                ..
+            }) if c.outcome == Outcome::Failed => {
+                steve_core::runtime::MODEL_SERVICE_UNAVAILABLE.to_owned()
             }
+            _ => c.stop_reason.clone(),
         };
-        self.status_in(session, settled_status(&stop))?;
         Ok(Some(End {
             session: session.to_string(),
             attempt: Some(self.last_attempt_in(turn)?),

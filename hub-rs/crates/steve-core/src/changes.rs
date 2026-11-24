@@ -13,37 +13,37 @@ use std::time::Duration;
 
 /// `GET /api/settings/schema`, verbatim (key order preserved).
 pub static SETTINGS: LazyLock<Value> = LazyLock::new(|| {
-    json!({
-      "general": [
-        { "key": "lang", "label": "语言", "values": ["简体中文", "English"], "def": "简体中文", "live": false },
-        { "key": "home", "label": "打开时进入", "values": ["对话", "待处理", "事项"], "def": "对话", "live": true },
-        { "key": "awayH", "label": "离开期间汇报", "values": ["2", "4", "8", "0"], "def": "4", "live": true, "labels": { "2": "2 小时", "4": "4 小时", "8": "8 小时", "0": "不汇报" } },
-        // the workspace time zone of schedules (steve-flow), as steve-hub's settings.rs serves it
-        { "key": "tz", "label": "时区", "values": ["system", "Asia/Taipei", "Asia/Shanghai", "Asia/Tokyo", "UTC", "Europe/London", "America/Los_Angeles", "America/New_York"], "def": "system", "live": true, "labels": {"system": "跟随系统"} },
-      ],
-      "items": [
-        { "key": "accDefault", "label": "默认验收方式", "values": ["manual", "auto"], "def": "auto", "live": true, "labels": { "manual": "需要你验收", "auto": "自动验收" } },
-        { "key": "depsAfter", "label": "前置完成后", "values": ["自动开始", "提醒我开始"], "def": "自动开始", "live": true },
-        { "key": "contextBudget", "label": "回合上下文预算", "values": ["default", "100000", "250000", "400000", "600000", "800000"], "def": "default", "live": true, "labels": { "default": "默认", "100000": "100k", "250000": "250k", "400000": "400k", "600000": "600k", "800000": "800k" } },
-        { "key": "contextBudgetTarget", "label": "预算到达时交接目标", "values": ["same"], "def": "same", "live": true, "labels": { "same": "同 Bot 同执行器" } },
-        { "key": "quotaAutoHandoff", "label": "额度不足自动交接", "values": ["on", "off"], "def": "on", "live": true, "labels": { "on": "开", "off": "关" } },
-        { "key": "quotaWaitMinutes", "label": "额度恢复等待阈值", "values": ["0", "5", "10", "15", "30"], "def": "10", "live": true, "labels": { "0": "不等待", "5": "5 分钟", "10": "10 分钟", "15": "15 分钟", "30": "30 分钟" } },
-        { "key": "handoff", "label": "交接阈值", "values": ["0", "70", "80", "90"], "def": "0", "live": true, "labels": { "0": "不换会话", "70": "70%", "80": "80%", "90": "90%" } },
-        { "key": "archDays", "label": "完成后自动归档", "values": ["7", "30", "90", "0"], "def": "30", "live": true, "labels": { "7": "7 天", "30": "30 天", "90": "90 天", "0": "不自动归档" } },
-      ],
-      "notify": [
-        { "key": "quiet", "label": "免打扰", "values": ["23:00 – 08:00", "22:00 – 09:00", "关闭"], "def": "23:00 – 08:00", "live": false },
-      ],
-      "look": [
-        { "key": "fontSize", "label": "字号", "values": ["标准", "大"], "def": "标准", "live": true },
-        { "key": "reduceMotion", "label": "减弱动态效果", "values": ["开", "关"], "def": "关", "live": true },
-      ],
-      "data": [
-        { "key": "keepSess", "label": "会话记录保留", "values": ["90 天", "1 年", "永久"], "def": "永久", "live": true },
-        // signals (S1 `steve_flow::retention::keep_raw_setting`) and mail (E1 `keepMail`), as steve-hub's settings.rs serves them
-        { "key": "keepRaw", "label": "事件与消息原文保留", "values": ["7", "30", "90"], "def": "7", "live": true, "labels": { "7": "7 天", "30": "30 天", "90": "90 天" } },
-        { "key": "keepMail", "label": "本地邮件正文保留", "values": ["30", "90", "365"], "def": "90", "live": true, "labels": { "30": "30 天", "90": "90 天", "365": "1 年" } },
-      ],
+    steve_i18n::stored(|| {
+        json!({
+          "general": [
+            { "key": "lang", "label": "语言", "values": ["简体中文", "English"], "def": "简体中文", "live": false },
+            { "key": "home", "label": "打开时进入", "values": ["对话", "待处理", "事项"], "def": "对话", "live": true },
+            { "key": "awayH", "label": "离开期间汇报", "values": ["2", "4", "8", "0"], "def": "4", "live": true, "labels": { "2": "2 小时", "4": "4 小时", "8": "8 小时", "0": "不汇报" } },
+            // the workspace time zone of schedules (steve-flow), as steve-hub's settings.rs serves it
+            { "key": "tz", "label": "时区", "values": ["system", "Asia/Taipei", "Asia/Shanghai", "Asia/Tokyo", "UTC", "Europe/London", "America/Los_Angeles", "America/New_York"], "def": "system", "live": true, "labels": {"system": "跟随系统"} },
+          ],
+          "items": [
+            { "key": "accDefault", "label": "默认验收方式", "values": ["manual", "auto"], "def": "auto", "live": true, "labels": { "manual": "需要你验收", "auto": "自动验收" } },
+            { "key": "depsAfter", "label": "前置完成后", "values": ["自动开始", "提醒我开始"], "def": "自动开始", "live": true },
+            { "key": "quotaAutoHandoff", "label": steve_i18n::t!("core.draft.setting.quotaAutoHandoff"), "values": ["on", "off"], "def": "on", "live": true, "labels": { "on": steve_i18n::t!("core.draft.value.on"), "off": steve_i18n::t!("core.draft.value.off") } },
+            { "key": "quotaWaitMinutes", "label": steve_i18n::t!("core.draft.setting.quotaWaitMinutes"), "values": ["0", "5", "10", "15", "30"], "def": "10", "live": true, "labels": { "0": steve_i18n::t!("core.draft.value.no_wait"), "5": steve_i18n::t!("core.draft.value.minutes", n = 5), "10": steve_i18n::t!("core.draft.value.minutes", n = 10), "15": steve_i18n::t!("core.draft.value.minutes", n = 15), "30": steve_i18n::t!("core.draft.value.minutes", n = 30) } },
+            { "key": "handoff", "label": "交接阈值", "values": ["0", "70", "80", "90"], "def": "0", "live": true, "labels": { "0": "不换会话", "70": "70%", "80": "80%", "90": "90%" } },
+            { "key": "archDays", "label": "完成后自动归档", "values": ["7", "30", "90", "0"], "def": "30", "live": true, "labels": { "7": "7 天", "30": "30 天", "90": "90 天", "0": "不自动归档" } },
+          ],
+          "notify": [
+            { "key": "quiet", "label": "免打扰", "values": ["23:00 – 08:00", "22:00 – 09:00", "关闭"], "def": "23:00 – 08:00", "live": false },
+          ],
+          "look": [
+            { "key": "fontSize", "label": "字号", "values": ["标准", "大"], "def": "标准", "live": true },
+            { "key": "reduceMotion", "label": "减弱动态效果", "values": ["开", "关"], "def": "关", "live": true },
+          ],
+          "data": [
+            { "key": "keepSess", "label": "会话记录保留", "values": ["90 天", "1 年", "永久"], "def": "永久", "live": true },
+            // signals (S1 `steve_flow::retention::keep_raw_setting`) and mail (E1 `keepMail`), as steve-hub's settings.rs serves them
+            { "key": "keepRaw", "label": "事件与消息原文保留", "values": ["7", "30", "90"], "def": "7", "live": true, "labels": { "7": "7 天", "30": "30 天", "90": "90 天" } },
+            { "key": "keepMail", "label": "本地邮件正文保留", "values": ["30", "90", "365"], "def": "90", "live": true, "labels": { "30": "30 天", "90": "90 天", "365": "1 年" } },
+          ],
+        })
     })
 });
 
@@ -70,9 +70,6 @@ fn all_specs() -> Vec<&'static Value> {
 
 /// Is `v` an allowed value of setting `k`? (`PATCH /api/settings` validation)
 pub fn setting_allowed(k: &str, v: &str) -> bool {
-    if k == crate::context_handoff::CONTEXT_BUDGET_TARGET_SETTING {
-        return crate::parse_budget_handoff_target(v).is_some();
-    }
     all_specs().iter().any(|s| {
         s["key"] == k
             && s["values"]
@@ -656,7 +653,8 @@ fn setting_label_shown(key: &str) -> Option<String> {
         "tz" => steve_i18n::t!("core.draft.setting.tz"),
         "accDefault" => steve_i18n::t!("core.draft.setting.accDefault"),
         "depsAfter" => steve_i18n::t!("core.draft.setting.depsAfter"),
-        "contextBudget" => steve_i18n::t!("core.draft.setting.contextBudget"),
+        "quotaAutoHandoff" => steve_i18n::t!("core.draft.setting.quotaAutoHandoff"),
+        "quotaWaitMinutes" => steve_i18n::t!("core.draft.setting.quotaWaitMinutes"),
         "handoff" => steve_i18n::t!("core.draft.setting.handoff"),
         "archDays" => steve_i18n::t!("core.draft.setting.archDays"),
         "quiet" => steve_i18n::t!("core.draft.setting.quiet"),
@@ -1102,6 +1100,29 @@ fn project_fields(p: &crate::repo::Project, bs: &[Bot]) -> Vec<FieldSpec> {
     ]
 }
 
+/// Translate settings whose stored values are ASCII codes directly via `steve-i18n`, without
+/// routing through Chinese schema labels.
+fn setting_code_value_shown(key: &str, v: &Value) -> Option<String> {
+    let s = v.as_str()?;
+    match (key, s) {
+        ("quotaAutoHandoff", "on") => Some(steve_i18n::t!("core.draft.value.on")),
+        ("quotaAutoHandoff", "off") => Some(steve_i18n::t!("core.draft.value.off")),
+        ("quotaWaitMinutes", "0") => Some(steve_i18n::t!("core.draft.value.no_wait")),
+        ("quotaWaitMinutes", n) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => {
+            Some(steve_i18n::t!("core.draft.value.minutes", n = n))
+        }
+        _ => None,
+    }
+}
+
+/// A setting's value as a card shows it, in the request's language.
+fn setting_value_shown(specs: &[Value], key: &str, v: &Value) -> String {
+    if let Some(shown) = setting_code_value_shown(key, v) {
+        return shown;
+    }
+    value_shown("settings", key, show(&setting_shown(specs, key, v)))
+}
+
 /// A setting's value as the user sees it (`archDays` “30” → “30 天”).
 fn setting_shown(specs: &[Value], k: &str, v: &Value) -> Value {
     specs
@@ -1305,11 +1326,7 @@ impl Core {
                                 &short_label(&f.label),
                                 &harnesses,
                             ),
-                            value_shown(
-                                "settings",
-                                &f.key,
-                                show(&setting_shown(&specs, &f.key, &f.current)),
-                            ),
+                            setting_value_shown(&specs, &f.key, &f.current),
                         )
                     })
                     .collect();
@@ -1611,16 +1628,8 @@ impl Core {
                             &plain_label(&f.label),
                             &harnesses,
                         ),
-                        from: value_shown(
-                            "settings",
-                            &k,
-                            show(&setting_shown(&specs, &k, &f.current)),
-                        ),
-                        to: value_shown(
-                            "settings",
-                            &k,
-                            show(&setting_shown(&specs, &k, &json!(v))),
-                        ),
+                        from: setting_value_shown(&specs, &k, &f.current),
+                        to: setting_value_shown(&specs, &k, &json!(v)),
                     });
                     patch.insert(k, json!(v));
                 }
@@ -2504,25 +2513,20 @@ mod tests {
         let d = setting_defaults();
         assert_eq!(d["accDefault"], "auto");
         assert_eq!(d["archDays"], "30");
-        assert_eq!(d["contextBudget"], "default");
-        assert_eq!(d["contextBudgetTarget"], "same");
         assert_eq!(d["quotaAutoHandoff"], "on");
         assert_eq!(d["quotaWaitMinutes"], "10");
-        assert_eq!(d.len(), 18);
+        assert_eq!(d.len(), 16);
         assert_eq!(d["tz"], "system");
         assert!(setting_allowed("tz", "UTC") && !setting_allowed("tz", "Mars/Base"));
         assert!(
-            setting_allowed("contextBudget", "default")
-                && setting_allowed("contextBudget", "400000")
-                && !setting_allowed("contextBudget", "999")
+            setting_allowed("quotaAutoHandoff", "on")
+                && setting_allowed("quotaAutoHandoff", "off")
+                && !setting_allowed("quotaAutoHandoff", "maybe")
         );
         assert!(
-            setting_allowed("contextBudgetTarget", "same")
-                && setting_allowed("contextBudgetTarget", "harness:codex")
-                && setting_allowed("contextBudgetTarget", "harness:codex/gpt-5.4")
-                && setting_allowed("contextBudgetTarget", "harness:codex/gpt-5.4@high")
-                && !setting_allowed("contextBudgetTarget", "bot:dev")
-                && !setting_allowed("contextBudgetTarget", "invalid")
+            setting_allowed("quotaWaitMinutes", "0")
+                && setting_allowed("quotaWaitMinutes", "15")
+                && !setting_allowed("quotaWaitMinutes", "7")
         );
         assert!(
             setting_allowed("handoff", "70")

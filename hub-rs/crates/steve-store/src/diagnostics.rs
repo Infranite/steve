@@ -110,8 +110,6 @@ pub struct Details {
     pub context_before: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_after: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub context_saved: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

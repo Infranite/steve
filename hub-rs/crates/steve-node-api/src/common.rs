@@ -192,9 +192,6 @@ pub struct Completion {
     /// a failed one too (`JobEnd::Failed`, the error above); `None` for turns and think jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job: Option<crate::run::JobReport>,
-    /// Peak observed main-loop context usage in tokens during this attempt, when reported.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_peak: Option<u64>,
 }
 
 /// The answer to a command: it was accepted (or had already been) and where it stands. Not

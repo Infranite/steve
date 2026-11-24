@@ -151,7 +151,6 @@ pub(crate) fn host(
     runtime.set_principal_state(super::principal_state(vars));
     runtime.set_idle_release(cfg.idle_release_ms as i64);
     runtime.set_cost_caps(super::cost_caps(vars));
-    runtime.set_context_budget(cfg.turn_context_budget());
     if let Some(ms) = super::turn_limit(vars) {
         runtime.set_turn_limit(ms);
     }

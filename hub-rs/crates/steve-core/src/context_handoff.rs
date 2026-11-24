@@ -1,6 +1,6 @@
-//! Deterministic working-memory handoff for context-budget rollover, workspace `handoff`
-//! threshold transitions, and manual owner handoffs (same Bot switching execution surface for this
-//! item only, or explicit Bot switch).
+//! Deterministic working-memory handoff for quota exhaustion, sustained provider errors, workspace
+//! `handoff` supplement threshold transitions, and manual owner handoffs (same Bot switching
+//! execution surface for this item only, or explicit Bot switch).
 //!
 //! Design invariants (HANDOFF.md):
 //! - Handoff reason is a strong-typed enum determined deterministically (never by a model).
@@ -35,11 +35,6 @@ const DEFAULT_QUOTA_COOLDOWN_MS: i64 = 15 * 60_000;
 const DEFAULT_PROVIDER_COOLDOWN_MS: i64 = 5 * 60_000;
 const MAX_COORDINATOR_BOT_OPTIONS: usize = 5;
 
-/// Workspace setting key for automatic context-budget handoff execution surface (`"same"`,
-/// `"harness:<id>"`, `"harness:<id>/<model>"`, or `"harness:<id>/<model>@<effort>"`).
-/// Automatic context-budget handoff never switches Bot; it only switches the current Bot's
-/// execution surface for the item.
-pub const CONTEXT_BUDGET_TARGET_SETTING: &str = "contextBudgetTarget";
 /// Workspace setting: whether `QuotaExhausted` automatically switches to the Bot's next fallback
 /// execution surface (`"on"` default / `"off"` = ask owner card only).
 pub const QUOTA_AUTO_HANDOFF_SETTING: &str = "quotaAutoHandoff";
@@ -152,7 +147,6 @@ pub struct HandoffOutcome {
 /// only at the timeline/event boundary).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandoffReason {
-    ContextBudget,
     QuotaExhausted { reset_at: Option<i64> },
     ProviderError,
     OwnerRequest,
@@ -161,7 +155,6 @@ pub enum HandoffReason {
 impl HandoffReason {
     pub const fn code(self) -> &'static str {
         match self {
-            Self::ContextBudget => "context_budget",
             Self::QuotaExhausted { .. } => "quota_exhausted",
             Self::ProviderError => "provider_error",
             Self::OwnerRequest => "owner_request",
@@ -170,7 +163,6 @@ impl HandoffReason {
 
     pub const fn placement_reason(self) -> PlacementReason {
         match self {
-            Self::ContextBudget => PlacementReason::HandoffContextBudget,
             Self::QuotaExhausted { .. } => PlacementReason::HandoffQuotaExhausted,
             Self::ProviderError => PlacementReason::HandoffProviderError,
             Self::OwnerRequest => PlacementReason::HandoffOwnerRequest,
@@ -179,7 +171,6 @@ impl HandoffReason {
 
     fn timeline_reason(self, zone: steve_runtime::tz::Zone, now: i64) -> String {
         match self {
-            Self::ContextBudget => "上下文预算".to_string(),
             Self::QuotaExhausted { reset_at: Some(at) } => {
                 let w = crate::quota::when(at, now, zone);
                 if w.is_empty() {
@@ -195,74 +186,8 @@ impl HandoffReason {
     }
 }
 
-/// Parse the workspace `contextBudgetTarget` setting into a [`HandoffTarget`] execution surface.
-///
-/// Supported forms (execution surface only — never switches Bot automatically):
-/// - `""` or `"same"` -> same Bot, same execution surface, fresh session
-/// - `"harness:<harness_id>"` -> switch current Bot's execution surface to `<harness_id>`
-/// - `"harness:<harness_id>/<model_id>"` -> switch to `<harness_id>` + `<model_id>`
-/// - `"harness:<harness_id>/<model_id>@<effort>"` -> switch to `<harness_id>` + `<model_id>` + `<effort>`
-pub fn parse_budget_handoff_target(raw: &str) -> Option<HandoffTarget> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed == "same" {
-        return Some(HandoffTarget::default());
-    }
-    let rest = trimmed.strip_prefix("harness:")?;
-    let (rt_id, model, effort) = match rest.split_once('/') {
-        Some((h, tail)) => {
-            let (m, eff) = match tail.rsplit_once('@') {
-                Some((m, e)) => {
-                    let e = e.trim();
-                    if e.is_empty() || e.len() > 32 || !valid_effort_id(e) {
-                        return None;
-                    }
-                    (m.trim(), Some(e.to_owned()))
-                }
-                None => (tail.trim(), None),
-            };
-            if m.is_empty() || m.len() > 200 || m.chars().any(char::is_control) {
-                return None;
-            }
-            (h.trim(), Some(m.to_owned()), eff)
-        }
-        None => match rest.rsplit_once('@') {
-            Some((h, e)) => {
-                let e = e.trim();
-                if e.is_empty() || e.len() > 32 || !valid_effort_id(e) {
-                    return None;
-                }
-                (h.trim(), None, Some(e.to_owned()))
-            }
-            None => (rest.trim(), None, None),
-        },
-    };
-    if !valid_runtime_id(rt_id) {
-        return None;
-    }
-    Some(HandoffTarget {
-        bot: None,
-        harness: Some(rt_id.to_owned()),
-        model,
-        effort,
-        make_bot_default: false,
-    })
-}
-
-fn valid_runtime_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 64
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-}
-
-fn valid_effort_id(id: &str) -> bool {
-    id.bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-}
-
-/// Conservative deterministic token estimate for an opening prompt (used only for saved-token
-/// telemetry; never drives control flow).
+/// Conservative deterministic token estimate for an opening prompt (used only for handoff
+/// diagnostic telemetry; never drives control flow).
 pub(crate) fn estimate_prompt_tokens(text: &str) -> u64 {
     let mut ascii = 0u64;
     let mut non_ascii = 0u64;
@@ -743,43 +668,6 @@ impl Tx<'_> {
         }
     }
 
-    /// Handle a turn that the Node stopped deterministically at its context budget
-    /// (`stop_reason == steve_node_api::CONTEXT_BUDGET`).
-    pub(crate) fn continue_after_context_budget(
-        &mut self,
-        item: &Item,
-        session: &Session,
-        attempt: Option<&str>,
-    ) -> Result<()> {
-        let limit = self.cfg().context_handoff_limit;
-        let prior = self.consecutive_context_handoffs(&item.id, &session.id)?;
-        if prior >= limit {
-            let why = if limit == 0 {
-                "会话达到上下文预算上限，已按配置停止自动续跑，请决定如何继续。".to_string()
-            } else {
-                format!("已连续因上下文预算上限交接续跑 {prior} 次仍未完成，请介入检查后再继续。")
-            };
-            return self.fail(&item.id, &why);
-        }
-
-        let raw_target =
-            self.db()
-                .setting(&item.workspace_id, CONTEXT_BUDGET_TARGET_SETTING, "same")?;
-        let target = parse_budget_handoff_target(&raw_target).unwrap_or_default();
-
-        match self.execute_handoff(
-            item,
-            session,
-            &target,
-            HandoffReason::ContextBudget,
-            "steve",
-            attempt,
-        ) {
-            Ok(_) => Ok(()),
-            Err(e) => self.fail(&item.id, &format!("达到上下文预算，无法交接新会话：{e}")),
-        }
-    }
-
     /// Perform workspace-threshold (`handoff` setting) session rollover when the user supplements
     /// an idle session that has reached the configured context percentage.
     pub(crate) fn handoff_on_supplement(
@@ -817,7 +705,6 @@ impl Tx<'_> {
             None,
         )?;
         self.start_session_files(&item.id, Some(&opening), None, files)?;
-        self.record_handoff_compaction(item, session, None, "handoff_threshold", &opening);
         Ok(())
     }
 
@@ -949,7 +836,6 @@ impl Tx<'_> {
             reason.timeline_reason(zone, crate::util::now())
         );
 
-        let pct = context_pct(prev);
         let used = prev.used.and_then(|u| u64::try_from(u).ok()).unwrap_or(0);
 
         let last = self.last_agent_text(&prev.id)?;
@@ -995,13 +881,8 @@ impl Tx<'_> {
             .filter(|t| !t.trim().is_empty())
             .collect();
 
-        let mut opening = format_handoff_opening(
-            &working_memory,
-            reason,
-            pct,
-            used,
-            js_head(&last, LAST_PROGRESS_CHARS),
-        );
+        let mut opening =
+            format_handoff_opening(&working_memory, reason, js_head(&last, LAST_PROGRESS_CHARS));
         if !queued_texts.is_empty() {
             opening.push_str("\n\n[待处理消息]\n");
             opening.push_str(&queued_texts.join("\n\n"));
@@ -1128,10 +1009,6 @@ impl Tx<'_> {
                 },
                 ..Default::default()
             });
-
-        if matches!(reason, HandoffReason::ContextBudget) {
-            self.record_handoff_compaction(item, prev, attempt, "budget_reached", &opening);
-        }
 
         Ok(HandoffOutcome {
             session: next_session,
@@ -1272,58 +1149,6 @@ impl Tx<'_> {
             effort: placement.reasoning_effort.clone(),
         };
         Ok((bot, choice, placement))
-    }
-
-    /// Count consecutive prior ended sessions of `item_id` that ended with `CONTEXT_BUDGET`
-    /// since the user's last action (message, manual intervention, or resolved decision).
-    fn consecutive_context_handoffs(&self, item_id: &str, current_sid: &str) -> Result<u32> {
-        let last_user = self
-            .db()
-            .timeline(item_id)?
-            .iter()
-            .filter(|e| e.kind == "me" || (e.kind == "sys" && e.actor != "steve"))
-            .map(|e| e.ts)
-            .max()
-            .unwrap_or(0);
-        let last_dec = self
-            .db()
-            .decisions_of_item(item_id)?
-            .iter()
-            .filter(|d| {
-                d.status == steve_types::DecisionStatus::Resolved
-                    && d.result["decided_by"] != "yolo"
-            })
-            .filter_map(|d| d.resolved)
-            .max()
-            .unwrap_or(0);
-        let since = last_user.max(last_dec);
-
-        let mut sessions = self.db().sessions_of_item(item_id)?;
-        sessions.sort_by(|a, b| b.no.cmp(&a.no).then_with(|| b.created.cmp(&a.created)));
-
-        let store_sessions = self.db().store().sessions();
-        let mut count = 0u32;
-        for s in sessions {
-            if s.id == current_sid {
-                continue;
-            }
-            if s.status != "ended" {
-                continue;
-            }
-            let stop = store_sessions.stop(&s.id)?;
-            let ended_at = stop.as_ref().and_then(|st| st.ended).unwrap_or(s.updated);
-            if ended_at <= since {
-                break;
-            }
-            if stop.as_ref().and_then(|st| st.stop_reason.as_deref())
-                == Some(steve_node_api::CONTEXT_BUDGET)
-            {
-                count += 1;
-            } else {
-                break;
-            }
-        }
-        Ok(count)
     }
 
     /// Deterministically extract a harness-agnostic handoff package from durable item & session
@@ -1536,78 +1361,9 @@ impl Tx<'_> {
         }
         Ok(finished)
     }
-
-    fn record_handoff_compaction(
-        &self,
-        item: &Item,
-        session: &Session,
-        attempt: Option<&str>,
-        reason: &'static str,
-        opening: &str,
-    ) {
-        let before = session
-            .used
-            .and_then(|u| u64::try_from(u).ok())
-            .unwrap_or(0);
-        let after = estimate_prompt_tokens(opening);
-        let saved = before.saturating_sub(after);
-        let limit = session.size.and_then(|z| u64::try_from(z).ok());
-
-        metrics::counter!(
-            "steve_turn_context_compactions_total",
-            "harness" => session.harness.clone(),
-            "mode" => "handoff",
-            "reason" => reason,
-        )
-        .increment(1);
-        if saved > 0 {
-            metrics::counter!(
-                "steve_turn_context_saved_tokens_total",
-                "harness" => session.harness.clone(),
-                "mode" => "handoff",
-            )
-            .increment(saved);
-        }
-
-        let _ = self
-            .db()
-            .store()
-            .diagnostics()
-            .record(steve_store::diagnostics::Record {
-                workspace_id: item.workspace_id.clone(),
-                item_id: Some(item.id.clone()),
-                session_id: Some(session.id.clone()),
-                attempt_id: attempt.map(str::to_owned),
-                kind: "context.compacted".into(),
-                reason_code: reason.into(),
-                severity: steve_store::diagnostics::Severity::Info,
-                details: steve_store::diagnostics::Details {
-                    item_cycle: Some(item.cycle),
-                    item_revision: Some(item.delivery_revision),
-                    context_before: Some(before),
-                    context_after: Some(after),
-                    context_saved: Some(saved),
-                    limit,
-                    ..Default::default()
-                },
-                ..Default::default()
-            });
-    }
 }
 
-fn context_pct(session: &Session) -> Option<i64> {
-    let used = session.used.filter(|u| *u > 0)?;
-    let size = session.size.filter(|z| *z > 0)?;
-    Some((used as f64 / size as f64 * 100.0).round() as i64)
-}
-
-fn format_handoff_opening(
-    working_memory: &str,
-    reason: HandoffReason,
-    pct: Option<i64>,
-    used: u64,
-    last: &str,
-) -> String {
+fn format_handoff_opening(working_memory: &str, reason: HandoffReason, last: &str) -> String {
     let tail = if last.is_empty() {
         String::new()
     } else {
@@ -1623,12 +1379,6 @@ fn format_handoff_opening(
         HandoffReason::ProviderError => {
             format!("交接：上一个执行面因上游持续故障切换至此新会话继续。{tail}")
         }
-        HandoffReason::ContextBudget => match pct {
-            Some(p) => format!("交接：上一个会话的上下文用到了 {p}%。它的最后进展：{last}"),
-            None => format!(
-                "交接：上一个会话的上下文已达预算上限（{used} tokens）。它的最后进展：{last}"
-            ),
-        },
     };
     if working_memory.is_empty() {
         head
@@ -1640,54 +1390,6 @@ fn format_handoff_opening(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parses_budget_handoff_target_surface_variants() {
-        assert_eq!(
-            parse_budget_handoff_target("same"),
-            Some(HandoffTarget::default())
-        );
-        assert_eq!(
-            parse_budget_handoff_target(""),
-            Some(HandoffTarget::default())
-        );
-        assert_eq!(
-            parse_budget_handoff_target("harness:codex"),
-            Some(HandoffTarget {
-                bot: None,
-                harness: Some("codex".into()),
-                model: None,
-                effort: None,
-                make_bot_default: false,
-            })
-        );
-        assert_eq!(
-            parse_budget_handoff_target("harness:openrouter/anthropic/claude-sonnet-4"),
-            Some(HandoffTarget {
-                bot: None,
-                harness: Some("openrouter".into()),
-                model: Some("anthropic/claude-sonnet-4".into()),
-                effort: None,
-                make_bot_default: false,
-            })
-        );
-        assert_eq!(
-            parse_budget_handoff_target("harness:codex/gpt-5.4@high"),
-            Some(HandoffTarget {
-                bot: None,
-                harness: Some("codex".into()),
-                model: Some("gpt-5.4".into()),
-                effort: Some("high".into()),
-                make_bot_default: false,
-            })
-        );
-        // Automatic budget handoff never accepts bot:<id> (does not switch Bot automatically).
-        assert_eq!(parse_budget_handoff_target("bot:dev"), None);
-        assert_eq!(parse_budget_handoff_target("harness:"), None);
-        assert_eq!(parse_budget_handoff_target("harness:codex/"), None);
-        assert_eq!(parse_budget_handoff_target("harness:codex/gpt-5.4@"), None);
-        assert_eq!(parse_budget_handoff_target("invalid"), None);
-    }
 
     #[test]
     fn formats_surface_actor_with_optional_model() {

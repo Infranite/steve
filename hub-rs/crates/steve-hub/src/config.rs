@@ -299,12 +299,6 @@ pub struct Config {
     /// `STEVE_TAKEOVER_SAME_REFUSALS`: how many refusals of a delivery in a row for the same reason
     /// hand the item to the user instead of another continue; 0: never (`None`: the core's default).
     pub takeover_same_refusals: Option<u32>,
-    /// `STEVE_TURN_CONTEXT_BUDGET_PCT`: optional global turn context budget percentage (1..=99).
-    pub turn_context_budget_pct: Option<u8>,
-    /// `STEVE_TURN_CONTEXT_BUDGET_TOKENS`: optional global turn context budget cap in tokens (> 0).
-    pub turn_context_budget_tokens: Option<u64>,
-    /// `STEVE_TURN_CONTEXT_HANDOFF_LIMIT`: max consecutive context-budget handoffs per item (`None`: core default).
-    pub turn_context_handoff_limit: Option<u32>,
     /// `STEVE_PROVIDER_ERROR_HANDOFF_THRESHOLD`: consecutive errors on one surface before switching fallback (`None`: core default).
     pub provider_error_handoff_threshold: Option<u32>,
     /// `STEVE_DISK_FLOOR_GB`, `STEVE_DISK_LOW_GB`, `STEVE_WORKTREE_IDLE_HOURS` (task workspaces).
@@ -500,38 +494,6 @@ fn count(
                 var,
                 msg: "expected an unsigned 32-bit integer".into(),
             })
-        })
-        .transpose()
-}
-
-fn percent(
-    get: &impl Fn(&str) -> Option<String>,
-    var: &'static str,
-) -> Result<Option<u8>, ConfigError> {
-    get(var)
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| match s.trim().parse::<u8>() {
-            Ok(p) if (1..=99).contains(&p) => Ok(p),
-            _ => Err(ConfigError::Invalid {
-                var,
-                msg: "expected an integer percentage from 1 to 99".into(),
-            }),
-        })
-        .transpose()
-}
-
-fn positive_u64(
-    get: &impl Fn(&str) -> Option<String>,
-    var: &'static str,
-) -> Result<Option<u64>, ConfigError> {
-    get(var)
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| match s.trim().parse::<u64>() {
-            Ok(n) if n > 0 => Ok(n),
-            _ => Err(ConfigError::Invalid {
-                var,
-                msg: "expected a positive integer".into(),
-            }),
         })
         .transpose()
 }
@@ -876,9 +838,6 @@ impl Config {
             backup,
             takeover_continues: count(&get, "STEVE_TAKEOVER_CONTINUES")?,
             takeover_same_refusals: count(&get, "STEVE_TAKEOVER_SAME_REFUSALS")?,
-            turn_context_budget_pct: percent(&get, "STEVE_TURN_CONTEXT_BUDGET_PCT")?,
-            turn_context_budget_tokens: positive_u64(&get, "STEVE_TURN_CONTEXT_BUDGET_TOKENS")?,
-            turn_context_handoff_limit: count(&get, "STEVE_TURN_CONTEXT_HANDOFF_LIMIT")?,
             provider_error_handoff_threshold: count(
                 &get,
                 "STEVE_PROVIDER_ERROR_HANDOFF_THRESHOLD",
@@ -960,14 +919,6 @@ impl Config {
     /// run on.
     pub fn harness_ids(&self) -> Vec<String> {
         self.adapters.keys().cloned().collect()
-    }
-
-    /// Global default turn context budget derived from Hub environment settings.
-    pub fn turn_context_budget(&self) -> steve_node_api::ContextBudget {
-        steve_node_api::ContextBudget {
-            ratio_pct: self.turn_context_budget_pct,
-            max_tokens: self.turn_context_budget_tokens,
-        }
     }
 
     /// The `last.json` the release script writes (ops/release.sh).

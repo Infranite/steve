@@ -264,7 +264,6 @@ impl NodeRuntime {
                     max_output_bytes: u64::MAX,
                     max_tokens: None,
                     max_cost: None,
-                    context_budget: self.session_context_budget(session)?,
                 },
                 continuation: None,
             },
@@ -551,7 +550,6 @@ impl NodeRuntime {
             continuation: None,
             transient: false,
             acted: false,
-            context_peak: None,
             job: None,
         };
         self.settle_in(tx, session, attempt, &completion)?;

@@ -7,7 +7,6 @@ export default {
   "node.tool_refused": "The Node refused the tool call.",
   "node.workspace_binding_conflict": "This resource is already bound to a different workspace.",
   "node_stop.adapter_exited": "The adapter exited while starting.",
-  "node_stop.context_budget": "The Node stopped the turn at its context budget for handoff.",
   "node_stop.deadline": "The Node stopped the run when it reached its time limit.",
   "node_stop.frame_too_large": "The Node stopped the run after the harness sent a message larger than 16 MiB.",
   "node_stop.harness_gone": "The harness process exited.",

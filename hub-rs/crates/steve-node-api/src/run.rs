@@ -144,45 +144,6 @@ pub struct Money {
     pub currency: String,
 }
 
-/// Context window budget for a session or turn, decided by the Hub from workspace settings and
-/// installation configuration. Harnesses with declared native compaction receive their launch
-/// threshold from it; harnesses without native compaction are deterministically ended with
-/// [`crate::NodeStop::ContextBudget`] once observed context reaches the budget.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct ContextBudget {
-    /// Target fraction of the effective context window in percent (`1..=99`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ratio_pct: Option<u8>,
-    /// Absolute context token ceiling (`> 0`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u64>,
-}
-
-impl ContextBudget {
-    pub fn is_empty(self) -> bool {
-        self.ratio_pct.is_none() && self.max_tokens.is_none()
-    }
-
-    pub fn check(self) -> crate::common::ApiResult<()> {
-        use crate::common::{Code, Error};
-        if let Some(pct) = self.ratio_pct
-            && !(1..=99).contains(&pct)
-        {
-            return Err(Error::new(
-                Code::Invalid,
-                "context budget ratio_pct must be between 1 and 99",
-            ));
-        }
-        if self.max_tokens == Some(0) {
-            return Err(Error::new(
-                Code::Invalid,
-                "context budget max_tokens must be greater than zero",
-            ));
-        }
-        Ok(())
-    }
-}
-
 /// Limits the Node enforces. `deadline` stays fixed across resends; `offline_until` is how long the
 /// work may go on while the Hub cannot be reached (the lease).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,8 +155,6 @@ pub struct Limits {
     pub max_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_cost: Option<Money>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_budget: Option<ContextBudget>,
 }
 
 /// One attempt with one model.
@@ -239,10 +198,6 @@ pub struct OpenSession {
     /// adapter that reads none and when the session has no state directory of its own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<Skill>,
-    /// Context budget configured for this session, applied at open to harnesses that declare a
-    /// configurable native compaction mechanism.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_budget: Option<ContextBudget>,
 }
 
 /// One skill: written as `<name>/SKILL.md`, its front matter `name` and `description`, then

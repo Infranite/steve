@@ -117,53 +117,6 @@ pub enum EventBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         details: Option<DiagnosticDetails>,
     },
-    /// Deterministic observation of a harness native compaction or a Steve context-budget handoff.
-    ContextCompacted {
-        mode: CompactionMode,
-        reason: CompactionReason,
-        before_tokens: u64,
-        after_tokens: u64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        limit_tokens: Option<u64>,
-    },
-}
-
-/// How context growth was mitigated for a turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CompactionMode {
-    /// The harness compacted its own conversation context natively.
-    Native,
-    /// Steve ended the turn deterministically to hand off into a fresh session.
-    Handoff,
-}
-
-impl CompactionMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Native => "native",
-            Self::Handoff => "handoff",
-        }
-    }
-}
-
-/// Why context compaction or handoff occurred.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CompactionReason {
-    /// The harness performed native context compaction (explicit compact tool or sustained drop).
-    NativeCompaction,
-    /// Observed context reached the deterministic turn budget on a harness without native compaction.
-    BudgetReached,
-}
-
-impl CompactionReason {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::NativeCompaction => "native_compaction",
-            Self::BudgetReached => "budget_reached",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

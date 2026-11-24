@@ -1009,7 +1009,6 @@ impl FakeNode {
                         transient: false,
                         acted: false,
                         job: report,
-                        context_peak: None,
                     };
                     Some((exec.clone(), completion))
                 })
@@ -1521,7 +1520,6 @@ impl ExecutionControl for FakeNode {
                 transient: false,
                 acted: true,
                 job: None,
-                context_peak: None,
             };
             if let Some(a) = st.inbox.get_mut(&target) {
                 a.receipt.state = Observed::Finished {
@@ -2596,7 +2594,6 @@ pub mod build {
             state: Default::default(),
             artifact_view: None,
             skills: vec![],
-            context_budget: None,
         }
     }
 
@@ -2607,7 +2604,6 @@ pub mod build {
             max_output_bytes: 1 << 20,
             max_tokens: None,
             max_cost: None,
-            context_budget: None,
         }
     }
 
@@ -2706,7 +2702,6 @@ pub mod build {
             transient: false,
             acted: false,
             job: None,
-            context_peak: None,
         }
     }
 

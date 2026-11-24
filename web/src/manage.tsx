@@ -483,36 +483,6 @@ function BotSchedules({ k }: { k: string }) {
       : <Blank>{t("manage:detail.scheduleNone")}</Blank>}
   </Section>
 }
-function BudgetHandoffTargetRows({ value }: { value: string }) {
-  const t = useT()
-  const runtimes = useRuntimes()
-  const raw = value || "same"
-  const isHarness = raw.startsWith("harness:")
-  const rest = isHarness ? raw.slice("harness:".length) : ""
-  const slash = rest.indexOf("/")
-  const activeHarness = isHarness ? (slash >= 0 ? rest.slice(0, slash) : rest.split("@")[0]) : ""
-  const activeModel = isHarness && slash >= 0 ? rest.slice(slash + 1).split("@")[0] : ""
-  const selectVal = isHarness ? `harness:${activeHarness}` : "same"
-  const opts: [string, string][] = [
-    ["same", t("manage:items.contextBudgetTargetSame")],
-    ...runtimes.map((r): [string, string] => [
-      `harness:${r.id}`,
-      t("manage:items.contextBudgetTargetHarness", { harness: r.name }),
-    ]),
-  ]
-  if (selectVal && !opts.some(([v]) => v === selectVal)) opts.push([selectVal, selectVal])
-  return <>
-    <Row title={t("manage:items.contextBudgetTarget")} sub={t("manage:items.contextBudgetTargetSub")}>
-      <Sel label={t("manage:items.contextBudgetTarget")} testId="context-budget-target" v={selectVal} o={opts} on={(v) => setSetting({ contextBudgetTarget: v })} />
-    </Row>
-    {isHarness && activeHarness && (
-      <Row title={t("manage:items.contextBudgetTargetModel")} sub={t("manage:items.contextBudgetTargetModelSub")}>
-        <ModelPicker field testId="context-budget-target-model" harness={activeHarness} value={activeModel} allowDefault
-          onChange={(m) => setSetting({ contextBudgetTarget: m ? `harness:${activeHarness}/${m}` : `harness:${activeHarness}` })} />
-      </Row>
-    )}
-  </>
-}
 function Pane({ id }: { id: string }) {
   const t = useT()
   const c = st.settings
@@ -543,8 +513,6 @@ function Pane({ id }: { id: string }) {
       {/* the personal agent config default is the Hub's (a Node serves every workspace): set on Devices · Hub */}
       <Row title={t("manage:items.ownerContext")} sub={t("manage:items.ownerContextSub")}><Button size="sm" variant="outline" onClick={() => go("#/devices/hub")} data-owner-context-link>{t("manage:items.ownerContextOpen")}</Button></Row></Panel>
     <Section label={t("manage:items.sessions")}><Panel>
-      <Row title={t("manage:items.contextBudget")} sub={t("manage:items.contextBudgetSub")}><Sel label={t("manage:items.contextBudget")} testId="context-budget" v={c.contextBudget ?? "default"} o={[["default", t("manage:items.contextBudgetDefault")], ["100000", "100k"], ["250000", "250k"], ["400000", "400k"], ["600000", "600k"], ["800000", "800k"]]} on={(v) => setSetting({ contextBudget: v })} /></Row>
-      <BudgetHandoffTargetRows value={c.contextBudgetTarget ?? "same"} />
       <Row title={t("manage:items.quotaAutoHandoff")} sub={t("manage:items.quotaAutoHandoffSub")}><Sel label={t("manage:items.quotaAutoHandoff")} testId="quota-auto-handoff" v={c.quotaAutoHandoff ?? "on"} o={[["on", t("manage:items.quotaAutoHandoffOn")], ["off", t("manage:items.quotaAutoHandoffOff")]]} on={(v) => setSetting({ quotaAutoHandoff: v })} /></Row>
       <Row title={t("manage:items.quotaWaitMinutes")} sub={t("manage:items.quotaWaitMinutesSub")}><Sel label={t("manage:items.quotaWaitMinutes")} testId="quota-wait-minutes" v={c.quotaWaitMinutes ?? "10"} o={[["0", t("manage:items.quotaWaitMinutesOff")], ...[5, 10, 15, 30].map((m): [string, string] => [String(m), t("manage:items.quotaWaitMinutesMin", { minutes: m })])]} on={(v) => setSetting({ quotaWaitMinutes: v })} /></Row>
       <Row title={t("manage:items.handoff")} sub={t("manage:items.handoffSub")}><Sel label={t("manage:items.handoff")} testId="handoff" v={c.handoff ?? "0"} o={[["0", t("manage:items.handoffOff")], ["70", "70%"], ["80", "80%"], ["90", "90%"]]} on={(v) => setSetting({ handoff: v })} /></Row></Panel></Section>

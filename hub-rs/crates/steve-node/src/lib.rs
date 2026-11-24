@@ -22,7 +22,6 @@ use steve_confine as confine;
 mod space;
 
 mod bot_skills;
-mod context_budget;
 mod exec;
 #[cfg(target_os = "macos")]
 mod file_access;
@@ -2034,9 +2033,6 @@ impl LocalNode {
                 "this node cannot stop a harness at a token or cost limit",
             ));
         }
-        if let Some(budget) = l.context_budget {
-            budget.check()?;
-        }
         if l.deadline.0 <= now() {
             return Err(Error::new(Code::Stale, "deadline already passed"));
         }
@@ -2506,9 +2502,6 @@ impl SessionExecutor for LocalNode {
             let o = &c.body;
             self.check_harness(&o.choice.harness)?;
             self.check_harness_policy(&o.choice.harness, &o.policy)?;
-            if let Some(budget) = o.context_budget {
-                budget.check()?;
-            }
             Skill::check_all(&o.skills)?;
             let w = t
                 .workspace(&o.workspace.id)?
@@ -2930,7 +2923,6 @@ impl ExecutionControl for LocalNode {
                         continuation: None,
                         transient: false,
                         acted: true,
-                        context_peak: None,
                         job: research.then(|| JobReport {
                             end: JobEnd::Stopped,
                             turns: 0,

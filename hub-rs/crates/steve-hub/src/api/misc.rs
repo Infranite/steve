@@ -846,38 +846,6 @@ pub async fn settings_patch(
     let mut values = Obj::new();
     for (key, val) in &p {
         let s = crate::js::string(val);
-        if key == "contextBudgetTarget" {
-            let Some(target) = steve_core::parse_budget_handoff_target(&s) else {
-                return Err(ApiError::bad_request(steve_i18n::t!(
-                    "hub.settings.bad_key",
-                    key = key
-                )));
-            };
-            if let Some(rt_id) = target.harness.as_deref() {
-                let known = st
-                    .domain
-                    .harnesses(false)
-                    .await?
-                    .iter()
-                    .any(|h| h.id == rt_id);
-                if !known {
-                    return Err(ApiError::bad_request(steve_i18n::t!(
-                        "hub.settings.bad_key",
-                        key = key
-                    )));
-                }
-                let normalized = match (target.model.as_deref(), target.effort.as_deref()) {
-                    (Some(m), Some(e)) => format!("harness:{rt_id}/{m}@{e}"),
-                    (Some(m), None) => format!("harness:{rt_id}/{m}"),
-                    (None, Some(e)) => format!("harness:{rt_id}@{e}"),
-                    (None, None) => format!("harness:{rt_id}"),
-                };
-                values.insert(key.clone(), json!(normalized));
-            } else {
-                values.insert(key.clone(), json!("same"));
-            }
-            continue;
-        }
         match specs.iter().find(|x| &x.key == key) {
             Some(spec) if spec.values.contains(&s) => {
                 values.insert(key.clone(), json!(s));

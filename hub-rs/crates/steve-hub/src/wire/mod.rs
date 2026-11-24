@@ -137,9 +137,6 @@ fn core_config(cfg: &Config, vars: &Vars) -> steve_core::CoreConfig {
     if let Some(n) = cfg.takeover_same_refusals {
         c.takeover_same_refusals = n;
     }
-    if let Some(n) = cfg.turn_context_handoff_limit {
-        c.context_handoff_limit = n;
-    }
     if let Some(n) = cfg.provider_error_handoff_threshold {
         c.provider_error_handoff_threshold = n;
     }
@@ -257,7 +254,6 @@ fn open_in_process_node(
     // an idle session's harness goes after STEVE_IDLE_RELEASE_MS (10 min)
     runtime.set_idle_release(cfg.idle_release_ms as i64);
     runtime.set_cost_caps(cost_caps(vars));
-    runtime.set_context_budget(cfg.turn_context_budget());
     // an attempt's deadline (default 6 h); the end-to-end tests shorten it to see a card expire
     if let Some(ms) = turn_limit(vars) {
         runtime.set_turn_limit(ms);
@@ -444,7 +440,6 @@ fn remote_nodes(
     fleet.set_idle_release(cfg.idle_release_ms as i64);
     fleet.set_principal_state(principal_state(vars));
     fleet.set_cost_caps(cost_caps(vars));
-    fleet.set_context_budget(cfg.turn_context_budget());
     let svc = crate::nodes::from_vars(store, fleet, |k| vars(k));
     if let Some(svc) = &svc {
         // a Hub that cannot keep a key still runs; its welcomes go unsigned and say so in the log

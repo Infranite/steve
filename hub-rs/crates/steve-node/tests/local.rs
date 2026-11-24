@@ -241,7 +241,6 @@ fn open_body(session: &str) -> OpenSession {
         state: Default::default(),
         artifact_view: None,
         skills: vec![],
-        context_budget: None,
     }
 }
 

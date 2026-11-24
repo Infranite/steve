@@ -629,7 +629,6 @@ impl NodeRuntime {
                             continuation: None,
                             transient: false,
                             acted: false,
-                            context_peak: None,
                             job: None,
                         },
                     );
@@ -687,7 +686,6 @@ impl NodeRuntime {
                 continuation: None,
                 transient: false,
                 acted: false,
-                context_peak: None,
                 job: None,
             };
             self.turn_over_in(tx, s, &turn, &c)?;
@@ -822,7 +820,6 @@ impl NodeRuntime {
             continuation: None,
             transient: false,
             acted: false,
-            context_peak: None,
             job: None,
         };
         node_write::attempt_cas_in(

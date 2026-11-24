@@ -32,6 +32,8 @@ async fn describe_in_english() {
         [
             ("Default acceptance", "Accepted automatically"),
             ("When prerequisites finish", "Start automatically"),
+            ("Auto-handoff on quota exhaustion", "On"),
+            ("Quota recovery wait threshold", "10 minutes"),
             ("Handoff threshold", "Never"),
             ("Archive automatically after finishing", "30 days"),
             ("Item number prefix", "ST"),
@@ -41,11 +43,43 @@ async fn describe_in_english() {
     let e = en(|| k.core.describe(WS, &target("nope", None)).unwrap_err()).await;
     assert_eq!(e.to_string(), "No such setting");
     // the same in zh-CN, as before
-    let (title, _, _) = k
+    let (title, _, now) = k
         .core
         .describe(WS, &target("settings", Some("items")))
         .unwrap();
     assert_eq!(title, "设置 · 事项与验收");
+    assert_eq!(
+        now,
+        [
+            ("默认验收方式", "自动验收"),
+            ("前置完成后", "自动开始"),
+            ("额度不足自动交接", "开"),
+            ("额度恢复等待阈值", "10 分钟"),
+            ("交接阈值", "不换会话"),
+            ("完成后自动归档", "30 天"),
+            ("事项编号前缀", "ST"),
+        ]
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+    );
+    // Non-default values of the quota handoff settings translate cleanly in both locales.
+    let mut overrides = serde_json::Map::new();
+    overrides.insert("quotaAutoHandoff".into(), json!("off"));
+    overrides.insert("quotaWaitMinutes".into(), json!("0"));
+    k.db().settings_set(WS, &overrides, "me").unwrap();
+    let (_, _, en_over) = en(|| {
+        k.core
+            .describe(WS, &target("settings", Some("items")))
+            .unwrap()
+    })
+    .await;
+    assert!(en_over.contains(&("Auto-handoff on quota exhaustion".into(), "Off".into())));
+    assert!(en_over.contains(&("Quota recovery wait threshold".into(), "Don't wait".into())));
+    let (_, _, zh_over) = k
+        .core
+        .describe(WS, &target("settings", Some("items")))
+        .unwrap();
+    assert!(zh_over.contains(&("额度不足自动交接".into(), "关".into())));
+    assert!(zh_over.contains(&("额度恢复等待阈值".into(), "不等待".into())));
 }
 
 #[tokio::test]

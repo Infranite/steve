@@ -66,7 +66,6 @@ impl NodeRuntime {
             state: None,
             artifact_view: None,
             skills: vec![],
-            context_budget: None,
         };
         let fresh = self.write(|tx| {
             if self.ended_in(&b.session)? {
@@ -151,7 +150,6 @@ impl NodeRuntime {
             )?;
             // and its skills
             open.skills = super::super::bot_skills::for_session(tx, &b.session)?;
-            open.context_budget = self.session_context_budget(&b.session)?;
             if self.principal_state.load(Ordering::Relaxed) {
                 open.state = super::super::principal::harness_state_in(
                     &self.store,
@@ -258,7 +256,6 @@ impl NodeRuntime {
         open.env =
             super::super::node_env::for_session(&self.store, self.node_id.as_str(), session)?;
         open.skills = super::super::bot_skills::for_session(tx, session)?;
-        open.context_budget = self.session_context_budget(session)?;
         let op = key.op().to_string();
         let (req, digest) = command(&op, open)?;
         rt::insert_intent_in(

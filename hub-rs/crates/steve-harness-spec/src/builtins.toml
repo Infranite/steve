@@ -43,9 +43,6 @@ skills = "skills"
 resume_cli = "claude --resume {id}"
 fork_cli = "claude --resume {id} --fork-session"
 outer_sandbox_args = []
-context_limit = 200000
-context_budget_pct = 80
-native_compaction = {"kind" = "env_percent", "var" = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "window_var" = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"}
 [[adapters.components]]
 id = "adapter"
 name = "Claude Code"
@@ -94,9 +91,6 @@ skills = "skills"
 resume_cli = "codex resume {id}"
 fork_cli = "codex fork {id}"
 outer_sandbox_args = []
-context_limit = 258400
-context_budget_pct = 80
-native_compaction = {"kind" = "cli_args", "args" = ["-c", "model_auto_compact_token_limit={tokens}"]}
 [[adapters.components]]
 id = "adapter"
 name = "Codex"
@@ -142,9 +136,6 @@ fast_models = []
 skills = "skills"
 resume_cli = "pi --resume {id}"
 outer_sandbox_args = []
-context_limit = 200000
-context_budget_pct = 80
-native_compaction = {"kind" = "builtin"}
 [[adapters.components]]
 id = "pi"
 name = "Pi SDK"
@@ -197,9 +188,6 @@ model_fallback = false
 fast_models = ["flash-lite", "flash"]
 resume_cli = "gemini --resume {id}"
 outer_sandbox_args = []
-context_limit = 200000
-context_budget_pct = 80
-native_compaction = {"kind" = "builtin"}
 [[adapters.components]]
 id = "adapter"
 name = "Gemini CLI"
@@ -244,9 +232,6 @@ model_fallback = false
 fast_models = ["haiku", "flash", "mini"]
 resume_cli = "copilot --resume={id}"
 outer_sandbox_args = ["--no-sandbox"]
-context_limit = 200000
-context_budget_pct = 80
-native_compaction = {"kind" = "builtin"}
 [[adapters.components]]
 id = "adapter"
 name = "GitHub Copilot CLI"
@@ -292,9 +277,6 @@ fast_models = ["haiku", "mini", "flash", "nano", "lite"]
 resume_cli = "opencode -s {id}"
 fork_cli = "opencode -s {id} --fork"
 outer_sandbox_args = []
-context_limit = 200000
-context_budget_pct = 80
-native_compaction = {"kind" = "builtin"}
 [[adapters.components]]
 id = "adapter"
 name = "OpenCode"
@@ -339,9 +321,6 @@ model_fallback = false
 fast_models = ["flash", "turbo", "mini", "haiku", "lite"]
 resume_cli = "qwen --resume {id}"
 outer_sandbox_args = []
-context_limit = 256000
-context_budget_pct = 80
-native_compaction = {"kind" = "builtin"}
 [[adapters.components]]
 id = "adapter"
 name = "Qwen Code"
@@ -387,9 +366,6 @@ model_fallback = false
 fast_models = ["haiku", "mini", "flash", "nano", "lite"]
 resume_cli = "goose session --resume --session-id {id}"
 outer_sandbox_args = []
-context_limit = 200000
-context_budget_pct = 80
-native_compaction = {"kind" = "env_ratio", "var" = "GOOSE_AUTO_COMPACT_THRESHOLD"}
 [[adapters.components]]
 id = "adapter"
 name = "goose"
@@ -434,9 +410,6 @@ model_fallback = false
 fast_models = []
 resume_cli = "kimi --session {id}"
 outer_sandbox_args = []
-context_limit = 256000
-context_budget_pct = 80
-native_compaction = {"kind" = "builtin"}
 [[adapters.components]]
 id = "adapter"
 name = "Kimi Code"
@@ -481,8 +454,6 @@ model_fallback = false
 fast_models = []
 resume_cli = "grok --resume {id}"
 outer_sandbox_args = []
-context_limit = 256000
-context_budget_pct = 80
 [[adapters.components]]
 id = "adapter"
 name = "Grok Build"
@@ -527,9 +498,6 @@ model_fallback = false
 fast_models = ["haiku", "mini", "flash", "nano", "lite", "small", "free"]
 resume_cli = "kilo --session {id}"
 outer_sandbox_args = []
-context_limit = 200000
-context_budget_pct = 80
-native_compaction = {"kind" = "builtin"}
 [[adapters.components]]
 id = "adapter"
 name = "Kilo Code"
@@ -574,9 +542,6 @@ model_fallback = false
 fast_models = ["haiku", "luna", "flash", "mini"]
 resume_cli = "droid --resume {id}"
 outer_sandbox_args = []
-context_limit = 200000
-context_budget_pct = 80
-native_compaction = {"kind" = "builtin"}
 [[adapters.components]]
 id = "adapter"
 name = "Factory Droid"
@@ -621,8 +586,6 @@ model_fallback = false
 fast_models = ["flash", "fast"]
 resume_cli = "codebuddy --resume {id}"
 outer_sandbox_args = []
-context_limit = 200000
-context_budget_pct = 80
 [[adapters.components]]
 id = "adapter"
 name = "CodeBuddy Code"
@@ -666,9 +629,6 @@ model_fallback = false
 fast_models = ["composer", "flash", "mini", "nano", "haiku", "luna"]
 resume_cli = "cursor-agent --resume {id}"
 outer_sandbox_args = []
-context_limit = 200000
-context_budget_pct = 80
-native_compaction = {"kind" = "builtin"}
 
 [[adapters]]
 id = "kiro"
@@ -705,8 +665,6 @@ model_fallback = false
 fast_models = ["haiku", "luna", "qwen"]
 resume_cli = "kiro-cli chat --resume-id {id}"
 outer_sandbox_args = []
-context_limit = 200000
-context_budget_pct = 80
 
 [[adapters]]
 id = "mistral-vibe"
@@ -744,9 +702,6 @@ model_fallback = false
 fast_models = ["small", "ministral", "codestral", "flash", "mini", "haiku"]
 resume_cli = "vibe --resume {id}"
 outer_sandbox_args = []
-context_limit = 200000
-context_budget_pct = 80
-native_compaction = {"kind" = "builtin"}
 
 [[adapters]]
 id = "qoder"
@@ -783,8 +738,6 @@ model_fallback = false
 fast_models = ["flash", "turbo", "mini", "lite", "haiku", "small"]
 resume_cli = "qodercli --resume {id}"
 outer_sandbox_args = []
-context_limit = 200000
-context_budget_pct = 80
 
 [[adapters]]
 id = "antigravity"
@@ -823,6 +776,3 @@ model_fallback = false
 fast_models = ["flash-lite", "flash"]
 resume_cli = "agy --resume {id}"
 outer_sandbox_args = []
-context_limit = 200000
-context_budget_pct = 80
-native_compaction = {"kind" = "builtin"}

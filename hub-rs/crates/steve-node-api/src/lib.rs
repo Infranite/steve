@@ -51,7 +51,7 @@ pub use workspace::*;
 
 /// Exact ordinary wire contract. Every wire-format change increments this in the same commit.
 /// A different value permits only the independent, permanent upgrade protocol.
-pub const PROTOCOL: u32 = 14;
+pub const PROTOCOL: u32 = 13;
 
 /// Why an execution a Node held is `unknown` after the Node restarted (its process, the harness
 /// with it, is gone): what the Hub gives up and continues on its own (B6), unlike other unknowns.
@@ -59,9 +59,6 @@ pub const RESTARTED: &str = "the node restarted while it ran";
 /// The `stop_reason` of a turn given up because its Node restarted, its harness provably gone:
 /// the agent is continued once, told to check first.
 pub const NODE_RESTARTED: &str = "node_restarted";
-/// The `stop_reason` of a turn ended deterministically by its Node because a harness without
-/// declared native compaction reached its context budget: the Hub hands off to a fresh session.
-pub const CONTEXT_BUDGET: &str = "context_budget";
 /// The code of the [`EventBody::Diagnostic`] for an attempt whose session's harness was given
 /// Steve's tools and never listed them: its agent ran without them.
 pub const STEVE_TOOLS_MISSING: &str = "steve_tools_missing";
