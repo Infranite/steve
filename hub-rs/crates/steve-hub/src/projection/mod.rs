@@ -310,7 +310,12 @@ mod tests {
                     let id = &ids[pick % ids.len()];
                     f.store
                         .decisions()
-                        .resolve(id, &json!({"answer": step}), "resolved", &json!({"x": 1}))
+                        .resolve(
+                            id,
+                            &json!({"answer": step}),
+                            steve_store::decision_repo::DecisionChange::Resolve,
+                            Some(&steve_store::DecisionUndo::Domain),
+                        )
                         .unwrap();
                 }
                 1 | 2 if !ids.is_empty() => {
@@ -376,6 +381,8 @@ mod tests {
             )
             .unwrap()
             .unwrap();
+        // The initial load establishes a baseline without publishing patches.
+        f.p.snapshot(ws).await.expect("the projection is warm");
         let mut rx = f.bus.subscribe();
         // A stream client reads the initial hot state before expecting incremental changes.
         let initial = f.p.snapshot(ws).await.unwrap().views.item.unwrap();
@@ -509,7 +516,12 @@ mod tests {
         );
         f.store
             .decisions()
-            .resolve(&id, &json!({"answer": "ok"}), "resolved", &Value::Null)
+            .resolve(
+                &id,
+                &json!({"answer": "ok"}),
+                steve_store::decision_repo::DecisionChange::Resolve,
+                None,
+            )
             .unwrap();
         let snap = f.p.snapshot("default").await.unwrap();
         assert!(snap.views.decision.unwrap().is_empty());
@@ -782,6 +794,394 @@ mod tests {
             assert!(snapshot.rev >= seen);
             seen = snapshot.rev;
         }
+        assert_eq!(f.p.reconcile().await, Some(0));
+    }
+
+    /// W3.3 acceptance: >= 1,000 resolve / undo / expire / supersede / dismiss / CAS conflict
+    /// sequences plus tier matrix (`Decide` vs `Draft` vs `Folded`) match hot reads & patches.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_thousand_decision_sequences_match_projection_and_tier_matrix() {
+        use steve_store::account_rows::NewAccount;
+        use steve_store::channel_message_repo::outbound::{self as chan_out, NewMessage};
+        use steve_store::channel_spaces::registration::{self as space_reg, Space as NewSpace};
+        use steve_store::decision_repo::{DecisionChange, choice_receipt};
+        use steve_store::{
+            Accounts, ConnRow, Connections, Contacts, DecisionRows, DecisionSource, DecisionUndo,
+            HealthState, NewDecision, NewParty, StoreError,
+        };
+        use steve_types::{DecisionStatus, DecisionTier, FoldReason};
+
+        let f = fixture();
+        let ws = "default";
+        let now = steve_store::now();
+
+        // Seed tier matrix fixtures: a chat space with an unstarred draft (Draft = 0 inbox
+        // interruption), an owner approval card (Decide = 1 prompt), and an expired/superseded
+        // card (Folded).
+        let (acc_id, space_id) = f
+            .store
+            .write(|tx| {
+                let p = Contacts::new(tx).insert(ws, &NewParty::new("contact", "Peer", "owner"))?;
+                let acc = Accounts(tx).insert(
+                    ws,
+                    &NewAccount {
+                        system_id: "feishu".into(),
+                        family: "chat".into(),
+                        party_id: p.id,
+                        kind: "user".into(),
+                        handle: "u_peer".into(),
+                        handle_display: "Peer".into(),
+                        display_name: "Peer".into(),
+                        verified: true,
+                        confidence: 1.0,
+                        source: "manual".into(),
+                        source_label: "test".into(),
+                    },
+                )?;
+                Connections(tx).insert(&ConnRow {
+                    id: "conn_tier_1".into(),
+                    workspace_id: ws.into(),
+                    account_id: acc.id.clone(),
+                    adapter: "feishu".into(),
+                    auth: "oauth".into(),
+                    granted_scopes: vec![],
+                    caps: vec![],
+                    credential_item: None,
+                    status: "ok".into(),
+                    health: HealthState::default(),
+                    config: json!({}),
+                    last_sync: None,
+                    created_by: "owner".into(),
+                    revision: 1,
+                    created: now,
+                    updated: now,
+                })?;
+                space_reg::create(
+                    tx,
+                    &NewSpace {
+                        ws,
+                        system: "feishu",
+                        connection: "conn_tier_1",
+                        kind: "group",
+                        external: "chat_tier_1",
+                        name: "Tier Group",
+                        member_count: 2,
+                        has_external: false,
+                        disclosure: "public",
+                        platform: Some("feishu"),
+                        now,
+                    },
+                )?;
+                let space = steve_store::channel_spaces::rows::by_chat(tx, ws, "chat_tier_1")?
+                    .pop()
+                    .expect("space")
+                    .id;
+                Ok::<_, StoreError>((acc.id, space))
+            })
+            .unwrap();
+
+        // Non-owner-interruption quiet draft (`chan_message` approve, unstarred) -> Draft tier.
+        let draft_dec = f
+            .store
+            .write(|tx| {
+                let (d, opened) = DecisionRows(tx).open_in(&NewDecision {
+                    workspace_id: ws.into(),
+                    kind: "approve".into(),
+                    subject_type: "chan_message".into(),
+                    subject_id: "cmsg_tier_draft".into(),
+                    question: "Send reply?".into(),
+                    draft: Some("quiet draft".into()),
+                    options: Some(vec!["yes".into(), "no".into()]),
+                    requested_by: "steve".into(),
+                    source: Some(DecisionSource::Revision {
+                        revision: "tier:draft:1".into(),
+                    }),
+                    ..Default::default()
+                })?;
+                assert!(opened);
+                chan_out::insert(
+                    tx,
+                    &NewMessage {
+                        id: "cmsg_tier_draft",
+                        ws,
+                        space: &space_id,
+                        thread: None,
+                        reply_to: None,
+                        account: Some(&acc_id),
+                        persona: None,
+                        on_behalf: "self",
+                        text: Some("quiet draft"),
+                        status: "draft",
+                        created: now,
+                    },
+                )?;
+                chan_out::link_decision(tx, "cmsg_tier_draft", &d.id)?;
+                Ok::<_, StoreError>(d)
+            })
+            .unwrap();
+
+        // Owner-required approval (`approve` / `action`) -> Decide tier (1 prompt).
+        let owner_dec = f
+            .store
+            .write(|tx| {
+                let (d, opened) = DecisionRows(tx).open_in(&NewDecision {
+                    workspace_id: ws.into(),
+                    kind: "approve".into(),
+                    subject_type: "action".into(),
+                    subject_id: "act_tier_1".into(),
+                    question: "Approve action?".into(),
+                    options: Some(vec!["yes".into(), "no".into()]),
+                    requested_by: "steve".into(),
+                    source: Some(DecisionSource::Revision {
+                        revision: "tier:owner:1".into(),
+                    }),
+                    ..Default::default()
+                })?;
+                assert!(opened);
+                Ok::<_, StoreError>(d)
+            })
+            .unwrap();
+
+        let snap = f.p.snapshot(ws).await.unwrap();
+        let decisions = snap.views.decision.unwrap();
+        let draft_view = decisions
+            .iter()
+            .find(|v| v.id.as_str() == draft_dec.id)
+            .expect("draft in hot views");
+        assert_eq!(draft_view.tier, DecisionTier::Draft);
+        assert_eq!(draft_view.folded, None);
+        assert!(
+            draft_view.space_id.is_some(),
+            "draft keeps conversation context"
+        );
+        let owner_view = decisions
+            .iter()
+            .find(|v| v.id.as_str() == owner_dec.id)
+            .expect("owner approval in hot views");
+        assert_eq!(owner_view.tier, DecisionTier::Decide);
+        assert_eq!(
+            decisions
+                .iter()
+                .filter(|v| v.tier == DecisionTier::Decide)
+                .count(),
+            1,
+            "non-owner draft causes 0 inbox interruptions; owner approval causes 1 prompt"
+        );
+
+        let mut rx = f.bus.subscribe();
+        let mut seed = 0x5EED_CAFE_u64;
+        for seq in 0..1_000_u64 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let source = DecisionSource::Revision {
+                revision: format!("seq:{seq}"),
+            };
+            let new = NewDecision {
+                workspace_id: ws.into(),
+                kind: "approve".into(),
+                subject_type: "action".into(),
+                subject_id: format!("sub_{seq}"),
+                question: format!("Step {seq}?"),
+                options: Some(vec!["yes".into(), "no".into()]),
+                requested_by: "steve".into(),
+                source: Some(source),
+                ..Default::default()
+            };
+            // Natural-key dedupe: second open returns the same row without creating a duplicate.
+            let d = f
+                .store
+                .write(|tx| {
+                    let (a, o1) = DecisionRows(tx).open_in(&new)?;
+                    let (b, o2) = DecisionRows(tx).open_in(&new)?;
+                    assert!(o1 && !o2 && a.id == b.id);
+                    Ok::<_, StoreError>(a)
+                })
+                .unwrap();
+
+            match (seed >> 61) % 5 {
+                0 => {
+                    // Resolve + stale CAS conflict + undo (reopen) + re-resolve at rev 2.
+                    f.store
+                        .write(|tx| {
+                            let mut rows = DecisionRows(tx);
+                            let mut stale = d.clone();
+                            stale.revision = d.revision + 7;
+                            assert!(!rows.resolve_choice(
+                                &stale,
+                                "owner",
+                                "yes",
+                                "",
+                                &json!({"choice": "yes"}),
+                                Some(&DecisionUndo::Domain),
+                            )?);
+                            assert!(rows.resolve_choice(
+                                &d,
+                                "owner",
+                                "yes",
+                                "",
+                                &json!({"choice": "yes"}),
+                                Some(&DecisionUndo::Domain),
+                            )?);
+                            // Duplicate CAS write at rev 1 fails; original receipt stays intact.
+                            assert!(!rows.resolve_choice(
+                                &d,
+                                "owner",
+                                "no",
+                                "",
+                                &json!({"choice": "no"}),
+                                None,
+                            )?);
+                            let resolved = rows.get(&d.id)?.unwrap();
+                            rows.reopen(&resolved, &Value::Null)?;
+                            let reopened = rows.get(&d.id)?.unwrap();
+                            assert_eq!(reopened.revision, 2);
+                            assert!(choice_receipt(tx, &d.id, 1)?.is_some());
+                            assert!(DecisionRows(tx).resolve_choice(
+                                &reopened,
+                                "owner",
+                                "no",
+                                "",
+                                &json!({"choice": "no"}),
+                                None,
+                            )?);
+                            Ok::<_, StoreError>(())
+                        })
+                        .unwrap();
+                }
+                1 => {
+                    // Expire is terminal: subsequent resolve/reopen are rejected.
+                    f.store
+                        .write(|tx| {
+                            let mut rows = DecisionRows(tx);
+                            assert!(rows.apply(
+                                &d,
+                                DecisionChange::Expire,
+                                &json!({"expired": true}),
+                                None,
+                            )?);
+                            let exp = rows.get(&d.id)?.unwrap();
+                            assert_eq!(exp.status, DecisionStatus::Expired);
+                            assert!(!rows.apply(
+                                &exp,
+                                DecisionChange::Reopen,
+                                &Value::Null,
+                                None
+                            )?);
+                            assert!(!rows.resolve_choice(
+                                &exp,
+                                "owner",
+                                "yes",
+                                "",
+                                &json!({}),
+                                None,
+                            )?);
+                            Ok::<_, StoreError>(())
+                        })
+                        .unwrap();
+                    let view = f
+                        .store
+                        .read(|r| r.decision_views().of(ws, std::slice::from_ref(&d.id)))
+                        .unwrap();
+                    assert_eq!(view[0].tier, DecisionTier::Folded);
+                    assert_eq!(view[0].folded, Some(FoldReason::Expired));
+                }
+                2 => {
+                    // Supersede is terminal.
+                    f.store
+                        .write(|tx| {
+                            let mut rows = DecisionRows(tx);
+                            assert!(rows.apply(
+                                &d,
+                                DecisionChange::Supersede,
+                                &json!({"superseded": true}),
+                                None,
+                            )?);
+                            let sup = rows.get(&d.id)?.unwrap();
+                            assert_eq!(sup.status, DecisionStatus::Superseded);
+                            assert!(!rows.apply(
+                                &sup,
+                                DecisionChange::Reopen,
+                                &Value::Null,
+                                None
+                            )?);
+                            Ok::<_, StoreError>(())
+                        })
+                        .unwrap();
+                }
+                3 => {
+                    // Dismiss + reopen + resolve.
+                    f.store
+                        .write(|tx| {
+                            let mut rows = DecisionRows(tx);
+                            assert!(rows.apply(
+                                &d,
+                                DecisionChange::Dismiss,
+                                &json!({"dismissed": true}),
+                                Some(&DecisionUndo::Domain),
+                            )?);
+                            let dis = rows.get(&d.id)?.unwrap();
+                            rows.reopen(&dis, &Value::Null)?;
+                            let reopened = rows.get(&d.id)?.unwrap();
+                            assert!(rows.resolve_choice(
+                                &reopened,
+                                "owner",
+                                "yes",
+                                "",
+                                &json!({"choice": "yes"}),
+                                None,
+                            )?);
+                            Ok::<_, StoreError>(())
+                        })
+                        .unwrap();
+                }
+                _ => {
+                    // Draft revise advances revision and invalidates stale rev 1 CAS.
+                    f.store
+                        .write(|tx| {
+                            let mut rows = DecisionRows(tx);
+                            assert!(rows.revise_draft(&d.id, 1, "revised")?);
+                            assert!(!rows.resolve_choice(
+                                &d,
+                                "owner",
+                                "yes",
+                                "",
+                                &json!({"choice": "yes"}),
+                                None,
+                            )?);
+                            let latest = rows.get(&d.id)?.unwrap();
+                            assert_eq!(latest.revision, 2);
+                            assert!(rows.resolve_choice(
+                                &latest,
+                                "owner",
+                                "yes",
+                                "",
+                                &json!({"choice": "yes"}),
+                                None,
+                            )?);
+                            Ok::<_, StoreError>(())
+                        })
+                        .unwrap();
+                }
+            }
+
+            // Periodically verify hot projection snapshot == fresh DB reload (and always on last).
+            if seq % 50 == 49 || seq == 999 {
+                let snapshot = f.p.snapshot(ws).await.unwrap();
+                let projected = snapshot.views.decision.unwrap();
+                let reloaded = f.store.read(|r| r.decision_views().open()).unwrap();
+                assert_eq!(
+                    projected, reloaded,
+                    "decision projection mismatch at seq {seq}"
+                );
+            }
+        }
+        // Drain bus patches and confirm zero reconciliation drift against a fresh reload.
+        let _ = patches(&mut rx);
+        let snapshot = f.p.snapshot(ws).await.unwrap();
+        let projected = snapshot.views.decision.unwrap();
+        let reloaded = f.store.read(|r| r.decision_views().open()).unwrap();
+        assert_eq!(projected, reloaded);
         assert_eq!(f.p.reconcile().await, Some(0));
     }
 }

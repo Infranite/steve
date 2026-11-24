@@ -47,7 +47,7 @@ export function harnessKind(h?: string | null): MarkKind {
   const x = (h ?? "").toLowerCase()
   if (/claude/.test(x)) return "anthropic"
   if (/codex|openai/.test(x)) return "openai"
-  if (/gemini/.test(x)) return "google"
+  if (/gemini|antigravity/.test(x)) return "google"
   if (/copilot/.test(x)) return "github"
   if (/cursor/.test(x)) return "anysphere"
   if (/kimi|moonshot/.test(x)) return "moonshot"

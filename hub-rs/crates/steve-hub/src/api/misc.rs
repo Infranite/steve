@@ -197,7 +197,7 @@ pub async fn summary(
         .decision
         .unwrap_or_default()
         .iter()
-        .filter(|d| d.status == "open")
+        .filter(|d| d.status == steve_types::DecisionStatus::Open)
         .count();
     conditional_json(
         &headers,
@@ -643,28 +643,32 @@ pub async fn item_thread_follow(
 
 // ── decisions ──
 
-async fn require_approval_owner(st: &AppState, c: &Ctx, d: &Obj) -> Result<(), ApiError> {
-    if matches!(
-        d.get("subject_type").and_then(Value::as_str),
-        Some("question" | "tool_call" | steve_types::orchestration::TURN_STALL)
-    ) && let Some(modules) = &st.modules
-    {
-        let db = modules.store.clone();
-        let (ws, me) = (c.ws.clone(), c.me.clone());
-        let allowed = tokio::task::spawn_blocking(move || {
-            db.read(|r| steve_store::approval::owner(r, &ws, &me))
+fn decision_revision(body: &Value) -> Result<Option<i64>, ApiError> {
+    body.get("revision")
+        .map(|revision| {
+            revision
+                .as_i64()
+                .filter(|revision| *revision > 0)
+                .ok_or_else(|| ApiError::Invalid(vec!["revision".into()]))
         })
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))?
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-        if !allowed {
-            return Err(ApiError::Json(
-                403,
-                "only the workspace owner can answer this card".into(),
-            ));
-        }
-    }
-    Ok(())
+        .transpose()
+}
+
+async fn settle_decision(
+    st: &AppState,
+    c: &Ctx,
+    id: String,
+    revision: Option<i64>,
+    command: steve_core::DecisionCommand,
+) -> Result<Obj, ApiError> {
+    let caller = steve_modules::Caller {
+        ws: c.ws.clone(),
+        me: c.me.clone(),
+    };
+    Ok(st
+        .domain
+        .settle_decision(caller, id, revision, command)
+        .await?)
 }
 
 pub async fn decision_resolve(
@@ -673,50 +677,17 @@ pub async fn decision_resolve(
     Path(id): Path<String>,
     b: Bytes,
 ) -> ApiResult {
-    let (i, ws) = (id.clone(), c.ws.clone());
-    let d = st
-        .read(move |r| Ok(own(r.decision_get(&i)?, &ws, Noun::Decision)?))
-        .await?;
-    require_approval_owner(&st, &c, &d).await?;
     let v = body(&b)?;
+    let revision = decision_revision(&v)?;
     let mut k = Check::object(&v);
     let choice = k.str("choice", Str::ANY);
-    let text = k.opt_str("text", Str::ANY);
+    let text = k.opt_str("text", Str::ANY).unwrap_or_default();
     k.finish()?;
-    // decisions a module opened go to that module's handler
-    if let Some(m) = st.modules.clone() {
-        let (caller, id2, ch, tx) = (
-            steve_modules::Caller {
-                ws: c.ws.clone(),
-                me: c.me.clone(),
-            },
-            id.clone(),
-            choice.clone(),
-            text.clone().unwrap_or_default(),
-        );
-        let r = tokio::task::spawn_blocking(crate::metrics::carry(steve_i18n::carry(move || {
-            steve_modules::decisions::dispatch(&m, &caller, &id2, &ch, &tx)
-        })))
-        .await
-        .ok()
-        .flatten();
-        if let Some(r) = r {
-            if r.is_ok() {
-                crate::access::note_via(&st, &id, &c);
-            }
-            return Ok(match r {
-                Ok(d) => super::ok(
-                    serde_json::to_value(d).map_err(|e| ApiError::internal(e.to_string()))?,
-                )?,
-                Err(e) => e.into_response(),
-            });
-        }
+    let command = steve_core::DecisionCommand::Resolve { choice, text };
+    let done = settle_decision(&st, &c, id.clone(), revision, command).await?;
+    if let Some(revision) = done.get("revision").and_then(Value::as_i64) {
+        crate::access::note_via(&st, &id, revision, &c);
     }
-    let done = st
-        .domain
-        .resolve(&id, &choice, text.as_deref().unwrap_or(""), &c.me)
-        .await?;
-    crate::access::note_via(&st, &id, &c);
     ok(Value::Object(done))
 }
 
@@ -724,53 +695,30 @@ pub async fn decision_dismiss(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
     Path(id): Path<String>,
+    b: Bytes,
 ) -> ApiResult {
-    let (i, ws) = (id.clone(), c.ws.clone());
-    let d = st
-        .read(move |r| Ok(own(r.decision_get(&i)?, &ws, Noun::Decision)?))
-        .await?;
-    require_approval_owner(&st, &c, &d).await?;
-    // a reply waiting for your approval that no longer needs handling is not sent: its draft is
-    // discarded like 不发出, so the conversation it belongs to stops waiting (and undo puts it back)
-    let field = |k: &str| d.get(k).and_then(Value::as_str);
-    if field("subject_type") == Some(steve_channels::respond::SUBJECT_MESSAGE)
-        && field("kind") == Some("approve")
-        && let Some(m) = st.modules.clone()
-    {
-        let (caller, id2) = (
-            steve_modules::Caller {
-                ws: c.ws.clone(),
-                me: c.me.clone(),
-            },
-            id.clone(),
-        );
-        let r = tokio::task::spawn_blocking(crate::metrics::carry(steve_i18n::carry(move || {
-            steve_modules::decisions::dispatch(&m, &caller, &id2, "no", "")
-        })))
-        .await
-        .ok()
-        .flatten();
-        if let Some(r) = r {
-            return Ok(match r {
-                Ok(d) => super::ok(
-                    serde_json::to_value(d).map_err(|e| ApiError::internal(e.to_string()))?,
-                )?,
-                Err(e) => e.into_response(),
-            });
-        }
-    }
-    ok(Value::Object(st.domain.dismiss_decision(&id, &c.me).await?))
+    let revision = if b.is_empty() {
+        None
+    } else {
+        decision_revision(&body(&b)?)?
+    };
+    let d = settle_decision(&st, &c, id, revision, steve_core::DecisionCommand::Dismiss).await?;
+    ok(Value::Object(d))
 }
 
 pub async fn decision_undo(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
     Path(id): Path<String>,
+    b: Bytes,
 ) -> ApiResult {
-    let (i, ws) = (id.clone(), c.ws.clone());
-    st.read(move |r| Ok(own(r.decision_get(&i)?, &ws, Noun::Decision)?))
-        .await?;
-    ok(Value::Object(st.domain.undo_decision(&id, &c.me).await?))
+    let revision = if b.is_empty() {
+        None
+    } else {
+        decision_revision(&body(&b)?)?
+    };
+    let d = settle_decision(&st, &c, id, revision, steve_core::DecisionCommand::Undo).await?;
+    ok(Value::Object(d))
 }
 
 // ── tags ──

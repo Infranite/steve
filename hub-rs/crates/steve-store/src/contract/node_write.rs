@@ -138,13 +138,29 @@ pub fn permission_cas_in(
     runtime::permission_cas_in(w.conn, decision, revision, state, answer_operation, now)
 }
 
-pub fn due_permissions_in(
-    w: &mut W<'_>,
-    node: &str,
-    now: i64,
-    limit: i64,
-) -> Result<Vec<PermissionRow>> {
-    runtime::due_permissions_in(w.conn, node, now, limit)
+pub fn next_permission_expiry(r: &mut impl crate::Read) -> Result<Option<i64>> {
+    let next = permissions_by_expiry().column("expires_at").limit(1).take();
+    r.one(&next, |r| r.get(0))
+}
+
+pub fn due_permission_ids(r: &mut impl crate::Read, at: i64, limit: i64) -> Result<Vec<String>> {
+    use sea_query::{Expr, ExprTrait};
+    let due = permissions_by_expiry()
+        .column("decision_id")
+        .and_where(Expr::col("expires_at").lte(at))
+        .limit(limit as u64)
+        .take();
+    r.all(&due, |r| r.get(0))
+}
+
+fn permissions_by_expiry() -> sea_query::SelectStatement {
+    use sea_query::{Expr, ExprTrait, Order, Query};
+    Query::select()
+        .from("runtime_permissions")
+        .and_where(Expr::col("state").eq("waiting"))
+        .order_by("expires_at", Order::Asc)
+        .order_by("decision_id", Order::Asc)
+        .take()
 }
 
 pub fn permissions_of_attempt_in(w: &mut W<'_>, attempt: &str) -> Result<Vec<PermissionRow>> {

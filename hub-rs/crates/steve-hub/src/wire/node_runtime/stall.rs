@@ -238,10 +238,10 @@ impl NodeRuntime {
             return Ok(());
         };
         let scope = node_sessions::startup::scope(w, &a.session)?;
-        let question = steve_i18n::stored(|| match evidence.reason {
-            StallReason::RepeatedFailure => steve_i18n::t!("hub.node.stall.repeated_failure"),
-            StallReason::NoProgress => steve_i18n::t!("hub.node.stall.no_progress"),
-        });
+        let template = match evidence.reason {
+            StallReason::RepeatedFailure => steve_types::DecisionPrompt::TurnRepeatedFailure,
+            StallReason::NoProgress => steve_types::DecisionPrompt::TurnNoProgress,
+        };
         let card = steve_store::DecisionRows(w).open(&steve_store::NewDecision {
             workspace_id: scope.workspace,
             kind: "fail".into(),
@@ -249,9 +249,12 @@ impl NodeRuntime {
             subject_id: a.turn.clone(),
             item_id: scope.item,
             session_id: Some(a.session.clone()),
-            question,
             options: Some(vec!["continue".into(), "drop".into()]),
             requested_by: "steve".into(),
+            question_template: Some(template),
+            source: Some(steve_store::DecisionSource::TurnStall {
+                attempt: a.attempt.clone(),
+            }),
             ..Default::default()
         })?;
         stall::bind_decision(w, &a.turn, &a.attempt, &card.id)?;

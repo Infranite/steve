@@ -87,7 +87,11 @@ fn a_failing_finish_leaves_nothing_behind() {
         "the note rolled back"
     );
     let open = k.db().decision(&d).unwrap().unwrap().status;
-    assert_eq!(open, "open", "the expiry rolled back");
+    assert_eq!(
+        open,
+        steve_types::DecisionStatus::Open,
+        "the expiry rolled back"
+    );
     // repaired: the finish goes through with everything
     steve_store::core_fixture::work::set_outbox_available(k.db().store(), true);
     k.finish(&id).unwrap();

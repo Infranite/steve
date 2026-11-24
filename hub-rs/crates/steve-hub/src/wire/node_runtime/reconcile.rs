@@ -234,11 +234,11 @@ impl NodeRuntime {
                     self.close_in(tx, &row, "Node 已不再等待这个授权")?;
                     *changed += 1;
                 }
-            } else if steve_store::decision_repo::settle_permission(
-                tx,
+            } else if steve_store::DecisionRows(tx).settle(
                 &d,
                 &json!({"superseded": "Node 已不再等待这个授权"}),
-                "expired",
+                steve_store::decision_repo::DecisionChange::Expire,
+                None,
             )? {
                 *changed += 1;
             }

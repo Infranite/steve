@@ -489,6 +489,8 @@ fn gate_wait(
             draft: Some(draft),
             options: Some(gate_options(!grants.is_empty())),
             requested_by: "steve".into(),
+            question_template: None,
+            source: None,
         }),
         output: json!({ "waiting": "approval" }),
     }
@@ -801,6 +803,8 @@ pub fn recover(cx: &FlowCx) -> FlowResult<Vec<String>> {
             }
             let node_name = node.map(|n| n.name().to_string()).unwrap_or_default();
             let flow_name = FlowRows(w).identity(&r.flow_id)?.map_or_else(String::new, |(name, _)| name);
+            let cursor = r.cursor.as_deref().unwrap_or("");
+            let reruns = r.context["reruns"][cursor].as_u64().unwrap_or(0);
             let d = DecisionRows(w).open(
                 &NewDecision {
                     workspace_id: r.workspace_id.clone(),
@@ -815,6 +819,10 @@ pub fn recover(cx: &FlowCx) -> FlowResult<Vec<String>> {
                     draft: None,
                     options: Some(vec![RETRY.into(), DROP.into()]),
                     requested_by: "steve".into(),
+                    question_template: None,
+                    source: Some(steve_store::DecisionSource::Revision {
+                        revision: format!("recover:{cursor}:{reruns}"),
+                    }),
                 },
             )?;
             r.status = "failed".into();

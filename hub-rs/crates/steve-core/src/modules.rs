@@ -176,26 +176,21 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// `undoDecision` of a decision whose `subject_type` a module handles: the module's `before_undo`,
-    /// the reopen and the audit in one transaction ([`steve_modules::decisions::undo`]); a refusal rolls
-    /// it back and comes out as [`crate::CoreError::Module`] with its own status. Returns the decision as
-    /// it was, or `None` when no module handles it (core undoes it itself).
-    pub(crate) fn module_undo(
-        &self,
-        d: &Decision,
-        actor: &str,
-        undoable: impl FnOnce(&Decision) -> bool,
-    ) -> Result<Option<Decision>> {
-        let Some(m) = self.c.modules() else {
-            return Ok(None);
+    pub(crate) fn module_undo(&self, d: &Decision, actor: &str) -> Result<bool> {
+        let Some(m) = self
+            .c
+            .modules()
+            .filter(|m| m.registry.handles_decision(&d.subject_type))
+        else {
+            return Ok(false);
         };
-        if !m.registry.handles_decision(&d.subject_type) {
-            return Ok(None);
-        }
-        match steve_modules::decisions::undo(m, &d.id, actor, undoable) {
-            Some(r) => Ok(Some(r?)),
-            None => Ok(None),
-        }
+        let caller = steve_modules::Caller {
+            ws: d.workspace_id.clone(),
+            me: actor.into(),
+        };
+        m.store
+            .write(|w| steve_modules::decisions::undo_in(m, w, &caller, d))?;
+        Ok(true)
     }
 }
 

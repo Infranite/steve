@@ -84,6 +84,7 @@ def wait_file(path, timeout_s=10.0):
 sid = ""
 active_model = "alt-model-1" if adapter_kind == "alt-harness" else "fake-model"
 session_scenario = ""
+session_is_peer = False
 for raw in sys.stdin:
     if not raw.strip():
         continue
@@ -96,6 +97,7 @@ for raw in sys.stdin:
     elif method == "session/new":
         sid = f"fake-{adapter_kind}-{os.getpid()}"
         session_scenario = ""
+        session_is_peer = False
         models = (
             {
                 "currentModelId": "alt-model-1",
@@ -121,6 +123,8 @@ for raw in sys.stdin:
             if tag in text:
                 session_scenario = tag
                 break
+        if "PeerBot" in text:
+            session_is_peer = True
         if "HUB:NATIVE" in text:
             update(sid, {"sessionUpdate": "usage_update", "used": 85000, "size": 100000})
             update(sid, {"sessionUpdate": "tool_call", "toolCallId": "cmp-1", "kind": "think", "status": "pending", "title": "compact", "_meta": {"claudeCode": {"toolName": "compact"}}})
@@ -211,8 +215,10 @@ for raw in sys.stdin:
             update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "prov primary failed"}})
             send({"id": mid, "error": {"code": -32000, "message": "upstream provider error: gateway rejected request"}})
         elif ("HUB:PROV_SWITCH" in text or session_scenario == "HUB:PROV_SWITCH") and adapter_kind == "alt-harness":
-            with open(os.path.join(ctrl_dir, "prov.prompt"), "w", encoding="utf-8") as f:
-                f.write(text)
+            prov_prompt = os.path.join(ctrl_dir, "prov.prompt")
+            if not os.path.exists(prov_prompt):
+                with open(prov_prompt, "w", encoding="utf-8") as f:
+                    f.write(text)
             with open(os.path.join(ctrl_dir, "prov.meta"), "w", encoding="utf-8") as f:
                 f.write(json.dumps({"adapter": adapter_kind, "model": active_model, "cwd": os.getcwd()}))
             p1 = open(os.path.join(os.getcwd(), "prov1.txt"), "r", encoding="utf-8").read()
@@ -223,14 +229,16 @@ for raw in sys.stdin:
                 "stopReason": "end_turn",
                 "usage": {"inputTokens": 180, "outputTokens": 35, "cachedReadTokens": 10, "cachedWriteTokens": 0, "totalTokens": 225},
             }})
-        elif ("HUB:ALL_DOWN" in text or session_scenario == "HUB:ALL_DOWN") and "PeerBot" not in text:
+        elif ("HUB:ALL_DOWN" in text or session_scenario == "HUB:ALL_DOWN") and not session_is_peer:
             with open(os.path.join(os.getcwd(), "all1.txt"), "w", encoding="utf-8") as f:
                 f.write("a1")
             update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": f"all_down fail on {adapter_kind}"}})
             send({"id": mid, "error": {"code": -32000, "message": f"upstream provider failure on {adapter_kind}"}})
-        elif ("HUB:ALL_DOWN" in text or session_scenario == "HUB:ALL_DOWN") and "PeerBot" in text:
-            with open(os.path.join(ctrl_dir, "peer.prompt"), "w", encoding="utf-8") as f:
-                f.write(text)
+        elif ("HUB:ALL_DOWN" in text or session_scenario == "HUB:ALL_DOWN") and session_is_peer:
+            peer_prompt = os.path.join(ctrl_dir, "peer.prompt")
+            if not os.path.exists(peer_prompt):
+                with open(peer_prompt, "w", encoding="utf-8") as f:
+                    f.write(text)
             a1 = open(os.path.join(os.getcwd(), "all1.txt"), "r", encoding="utf-8").read()
             with open(os.path.join(os.getcwd(), "all2.txt"), "w", encoding="utf-8") as f:
                 f.write(a1 + "+peer")
@@ -747,6 +755,7 @@ async fn non_native_budget_cutoff_hands_off_with_working_memory_and_exact_usage(
             draft: None,
             options: Some(vec!["JSON".into(), "YAML".into()]),
             requested_by: "agent".into(),
+            ..Default::default()
         })
         .unwrap()
         .expect("decision");
@@ -755,8 +764,8 @@ async fn non_native_budget_cutoff_hands_off_with_working_memory_and_exact_usage(
         .resolve(
             &dec.id,
             &json!({"answer": "JSON"}),
-            "resolved",
-            &Value::Null,
+            steve_store::decision_repo::DecisionChange::Resolve,
+            None,
         )
         .unwrap();
     let (status, queued_resp) = e
@@ -915,7 +924,7 @@ async fn consecutive_context_budget_handoffs_stop_at_configured_limit() {
                 .of_item(&iid)
                 .unwrap_or_default()
                 .iter()
-                .any(|d| d.status == "open" && d.kind == "fail")
+                .any(|d| d.status == steve_types::DecisionStatus::Open && d.kind == "fail")
         },
     )
     .await;
@@ -932,7 +941,7 @@ async fn consecutive_context_budget_handoffs_stop_at_configured_limit() {
         .of_item(&iid)
         .unwrap()
         .into_iter()
-        .find(|d| d.status == "open" && d.kind == "fail")
+        .find(|d| d.status == steve_types::DecisionStatus::Open && d.kind == "fail")
         .expect("fail card");
     assert!(fail.question.contains("2"), "{}", fail.question);
 }
@@ -1284,7 +1293,7 @@ async fn quota_exhausted_waits_when_near_and_auto_handoffs_fallback_when_far() {
             .of_item(&iid_near)
             .unwrap()
             .iter()
-            .all(|d| d.status != "open"),
+            .all(|d| d.status != steve_types::DecisionStatus::Open),
         "near quota wait must not open a decision card"
     );
     assert_eq!(
@@ -1308,7 +1317,7 @@ async fn quota_exhausted_waits_when_near_and_auto_handoffs_fallback_when_far() {
                 return false;
             }
             fixtures::acp_turns(&e.db, &sessions[1].id)
-                .map(|t| t.len() == 1 && t[0].0.is_some())
+                .map(|t| !t.is_empty() && t[0].0.is_some())
                 .unwrap_or(false)
         },
     )
@@ -1410,7 +1419,7 @@ async fn provider_error_switches_fallback_surface_and_escalates_card_when_all_un
                 return false;
             }
             fixtures::acp_turns(&e.db, &sessions[1].id)
-                .map(|t| t.len() == 1 && t[0].0.is_some())
+                .map(|t| !t.is_empty() && t[0].0.is_some())
                 .unwrap_or(false)
         },
     )
@@ -1481,7 +1490,7 @@ async fn provider_error_switches_fallback_surface_and_escalates_card_when_all_un
                 .unwrap_or_default()
                 .iter()
                 .any(|d| {
-                    d.status == "open"
+                    d.status == steve_types::DecisionStatus::Open
                         && d.kind == "fail"
                         && d.subject_type == steve_core::HANDOFF_UNAVAILABLE_SUBJECT
                 })
@@ -1503,7 +1512,7 @@ async fn provider_error_switches_fallback_surface_and_escalates_card_when_all_un
         .unwrap()
         .into_iter()
         .find(|d| {
-            d.status == "open"
+            d.status == steve_types::DecisionStatus::Open
                 && d.kind == "fail"
                 && d.subject_type == steve_core::HANDOFF_UNAVAILABLE_SUBJECT
         })
@@ -1543,7 +1552,7 @@ async fn provider_error_switches_fallback_surface_and_escalates_card_when_all_un
                 .iter()
                 .find(|s| s.bot_id.as_deref() == Some(peer.as_str()))
                 .and_then(|s| fixtures::acp_turns(&e.db, &s.id).ok())
-                .is_some_and(|t| t.len() == 1 && t[0].0.is_some())
+                .is_some_and(|t| !t.is_empty() && t[0].0.is_some())
         },
     )
     .await;

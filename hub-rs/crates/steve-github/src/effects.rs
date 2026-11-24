@@ -213,12 +213,14 @@ impl GitHub {
             .store()
             .read(|c| steve_store::decision_repo::get(c, &e.decision_id).map_err(ApiError::from));
         let ran = match d {
-            Ok(Some(d)) if d.status == "resolved" => match e.kind.as_str() {
-                OPEN => self.open_pr(&d, e, reconcile).await,
-                MERGE => self.merge_pr(&d, reconcile).await,
-                COMMENT => self.comment_answered(&d, reconcile).await,
-                k => Ran::Failed(format!("不认识的 GitHub 动作 {k}")),
-            },
+            Ok(Some(d)) if d.status == steve_types::DecisionStatus::Resolved => {
+                match e.kind.as_str() {
+                    OPEN => self.open_pr(&d, e, reconcile).await,
+                    MERGE => self.merge_pr(&d, reconcile).await,
+                    COMMENT => self.comment_answered(&d, reconcile).await,
+                    k => Ran::Failed(format!("不认识的 GitHub 动作 {k}")),
+                }
+            }
             Ok(_) => Ran::Failed("这个决定不再是批准状态".into()),
             Err(err) => Ran::Unknown(err.to_string()),
         };

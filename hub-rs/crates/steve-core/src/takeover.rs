@@ -126,11 +126,10 @@ impl Tx<'_> {
         if s.status == "error" {
             return self.fail(item_id, why);
         }
-        let waiting = self
-            .db()
-            .decisions_of_item(item_id)?
-            .iter()
-            .any(|d| d.status == "open" && matches!(d.kind.as_str(), "approve" | "ask"));
+        let waiting = self.db().decisions_of_item(item_id)?.iter().any(|d| {
+            d.status == steve_types::DecisionStatus::Open
+                && matches!(d.kind.as_str(), "approve" | "ask")
+        });
         if waiting || self.busy(&s.id) || !self.db().queued(&s.id)?.is_empty() {
             self.c.steve_note(&s.id, &text);
             return Ok(());
@@ -147,7 +146,10 @@ impl Tx<'_> {
             .db()
             .decisions_of_item(item_id)?
             .iter()
-            .filter(|d| d.status == "resolved" && d.result["decided_by"] != "yolo")
+            .filter(|d| {
+                d.status == steve_types::DecisionStatus::Resolved
+                    && d.result["decided_by"] != "yolo"
+            })
             .filter_map(|d| d.resolved)
             .max()
             .unwrap_or(0))

@@ -365,7 +365,7 @@ fn open_decision(e: &FlowEnv, kind: &str, subject: &str) -> Option<steve_store::
     fixtures::decisions_for(e.env.store(), kind, subject)
         .unwrap()
         .into_iter()
-        .find(|d| d.status == "open")
+        .find(|d| d.status == steve_types::DecisionStatus::Open)
 }
 
 async fn answer(e: &FlowEnv, id: &str, choice: &str) {

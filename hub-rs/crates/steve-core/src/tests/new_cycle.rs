@@ -32,7 +32,7 @@ fn open_cards(k: &Kit, item: &str) -> usize {
         .decisions_of_item(item)
         .unwrap()
         .iter()
-        .filter(|d| d.status == "open")
+        .filter(|d| d.status == steve_types::DecisionStatus::Open)
         .count()
 }
 
@@ -103,7 +103,7 @@ fn only_an_open_card_makes_the_new_cycle_wait_on_you_and_answering_it_runs_again
         .decisions_of_item(&id)
         .unwrap()
         .into_iter()
-        .find(|d| d.status == "open")
+        .find(|d| d.status == steve_types::DecisionStatus::Open)
         .unwrap();
     k.core.resolve(&d.id, "yes", "", "me").unwrap();
     assert_eq!(k.item_label(&id), "run");

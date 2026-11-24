@@ -9,7 +9,6 @@ use steve_modules::accounts::{self, Hints, identify};
 use steve_modules::contacts::{self, merge};
 use steve_modules::testkit::{ME, TestEnv, WS, WS2, call, caller};
 use steve_modules::{Caller, Registry, decisions};
-use steve_store::base::decisions as bd;
 use steve_store::testkit::modules::merge as fixture;
 use steve_store::{Decision, NewDecision};
 
@@ -510,7 +509,7 @@ fn resolve(t: &TestEnv, d: &str, choice: &str) -> Result<Decision, steve_modules
 /// What steve-core's `undoDecision` runs for a module decision.
 fn undo(t: &TestEnv, d: &str) -> Result<(), steve_modules::ApiError> {
     decisions::undo(&t.modules, d, ME, |d| {
-        d.status == "resolved" && !d.undo.is_null()
+        d.status == steve_types::DecisionStatus::Resolved && d.undo.is_some()
     })
     .expect("ours")
     .map(drop)
@@ -559,19 +558,19 @@ async fn proposal_merge_through_the_decision_and_undo() {
     );
 
     let got = resolve(&t, &d, "merge").unwrap();
-    assert_eq!(got.status, "resolved");
+    assert_eq!(got.status, steve_types::DecisionStatus::Resolved);
     assert!(got.result["merge_id"].as_str().unwrap().starts_with("mg_"));
     assert_eq!(fixture::proposal_status(t.store(), &mp).unwrap(), "merged");
     assert_eq!(fixture::sender_party(t.store()).unwrap(), sarah);
     let (_, pending) = req(&r, &me(), "GET", "/merges", None).await;
     assert_eq!(pending["proposals"], json!([]));
-    assert!(resolve(&t, &d, "merge").is_err(), "already handled");
+    assert_eq!(resolve(&t, &d, "merge").unwrap(), got);
 
     undo(&t, &d).unwrap();
     assert_eq!(fixture::proposal_status(t.store(), &mp).unwrap(), "open");
     assert_eq!(fixture::party_status(t.store(), &from).unwrap(), "active");
     assert_eq!(fixture::sender_party(t.store()).unwrap(), from);
-    assert_eq!(decision(&t, &d).status, "open");
+    assert_eq!(decision(&t, &d).status, steve_types::DecisionStatus::Open);
 }
 
 #[tokio::test]
@@ -662,7 +661,7 @@ async fn manual_merge_settles_the_open_proposal() {
 fn open_confirm(t: &TestEnv, subject_type: &str, subject_id: &str) -> String {
     let n: NewDecision = decisions::confirm(WS, subject_type, subject_id, "确认？", "steve");
     t.store()
-        .write(|tx| Ok::<_, steve_store::StoreError>(bd::open(tx, &n)?.id))
+        .write(|tx| Ok::<_, steve_store::StoreError>(steve_store::DecisionRows(tx).open(&n)?.id))
         .unwrap()
 }
 

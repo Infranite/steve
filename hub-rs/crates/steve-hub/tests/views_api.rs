@@ -178,7 +178,7 @@ async fn a_dismissed_decision_reaches_the_page_as_a_patch() {
         .create(&steve_store::NewDecision {
             workspace_id: "default".into(),
             kind: "ask".into(),
-            subject_type: "test".into(),
+            subject_type: "question".into(),
             subject_id: "s".into(),
             question: "继续吗？".into(),
             requested_by: "steve".into(),
@@ -191,7 +191,10 @@ async fn a_dismissed_decision_reaches_the_page_as_a_patch() {
     // the snapshot has it (as written, no translation), and answers 304 while nothing changes
     let (etag, snap) = e.snapshot().await;
     assert_eq!(ids(&snap), [id.as_str()]);
-    assert_eq!(snap["views"]["decision"][0]["question"], "继续吗？");
+    assert_eq!(
+        snap["views"]["decision"][0]["question"],
+        serde_json::json!({"kind":"raw","text":"继续吗？"})
+    );
     assert_eq!(snap["views"]["decision"][0]["tier"], "decide");
     let cursor = snap["cursor"].as_str().unwrap().to_string();
     let r = e
@@ -247,7 +250,7 @@ async fn a_dismissed_decision_reaches_the_page_as_a_patch() {
         })
         .expect("the patch for the dismissal");
     assert_eq!(op["op"], "upsert");
-    assert_eq!(op["view"]["status"], "resolved");
+    assert_eq!(op["view"]["status"], "dismissed");
     assert!(
         arrived.saturating_duration_since(answered) <= Duration::from_millis(200),
         "patch came {:?} after the answer",
@@ -273,7 +276,7 @@ async fn a_dismissed_decision_reaches_the_page_as_a_patch() {
         .json()
         .await
         .unwrap();
-    assert_eq!(r["views"][0]["status"], "resolved");
+    assert_eq!(r["views"][0]["status"], "dismissed");
     assert_eq!(r["missing"], serde_json::json!(["nope"]));
     let r: Value = e
         .get("/api/views/page?kind=decision&status=settled&since=0")

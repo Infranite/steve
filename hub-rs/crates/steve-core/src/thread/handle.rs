@@ -514,7 +514,7 @@ impl Core {
             .store()
             .decisions_of_item(id)?
             .into_iter()
-            .rfind(|d| d.kind == "accept" && d.status == "open")
+            .rfind(|d| d.kind == "accept" && d.status == steve_types::DecisionStatus::Open)
         {
             let first = d.draft.split("\n\n").next().unwrap_or("");
             s.push_str(&format!("\n\n已经交付，等你验收：{}", js_head(first, 600)));

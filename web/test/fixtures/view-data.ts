@@ -12,9 +12,9 @@ export function decisionFixture(w: Wait): DecisionView {
   return {
     id: w.decision, ws: "default", kind: w.type, subject_type: w.subject,
     subject_id: w.subjectId ?? "", item_id: null, session_id: w.session,
-    question: w.q, draft: w.draft ?? "", options: w.options, status: "open", requested_by: w.by,
+    question: { kind: "raw", text: w.q }, draft: w.draft ?? "", options: w.options, status: "open", requested_by: w.by,
     created: 1, result: w.recovery ? { recovery: w.recovery } : null,
-    resolved: null, undo_until: null, space_id: w.space ?? null, tier: w.tier ?? "decide", folded: w.folded ?? null,
+    resolved: null, undo_until: null, space_id: w.space ?? null, tier: w.tier ?? "decide", folded: w.folded ?? null, revision: 1,
   }
 }
 
@@ -61,9 +61,9 @@ export function seedItems(items: (Pick<Item, "id" | "t" | "st" | "b"> & Partial<
       ops.push({ type: "decision", op: "upsert", id, view: {
         id, ws: "default", kind: w.type ?? "ask", item_id: i.id, session_id: w.session ?? null,
         subject_type: w.subject ?? "item", subject_id: w.subjectId ?? i.id,
-        question: w.q ?? "", draft: w.draft ?? "", options: w.options ?? [],
+        question: { kind: "raw", text: w.q ?? "" }, draft: w.draft ?? "", options: w.options ?? [],
         status: "open", requested_by: w.by ?? i.b, created: 0, result: null,
-        resolved: null, undo_until: null, space_id: null, tier: w.tier ?? "decide", folded: null,
+        resolved: null, undo_until: null, space_id: null, tier: w.tier ?? "decide", folded: null, revision: 1,
       } })
     }
     if (i.workflow || i.outs?.length) {

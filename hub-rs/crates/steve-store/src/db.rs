@@ -260,8 +260,10 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/122.sql"),
     // 123: item lifecycle and delivery cutover.
     include_str!("../migrations/123.sql"),
-    // 124: per-Bot ordered fallback execution surfaces for automatic handoff.
+    // 124: decision revisions, choice receipts, natural keys, prompt templates, and typed undo.
     include_str!("../migrations/124.sql"),
+    // 125: per-Bot ordered fallback execution surfaces for automatic handoff.
+    include_str!("../migrations/125.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

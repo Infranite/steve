@@ -493,9 +493,6 @@ pub trait Repo {
     }
 
     // ── decisions, messages, devices ──
-    fn decision_get(&self, id: &str) -> BResult<Option<Obj>> {
-        todo_backend!("decision_get")
-    }
     fn decisions_of_item(&self, item: &str) -> BResult<Vec<Obj>> {
         todo_backend!("decisions_of_item")
     }
@@ -858,15 +855,14 @@ pub trait Domain: Send + Sync + 'static {
     }
 
     // ── decisions ──
-    async fn resolve(&self, id: &str, choice: &str, text: &str, actor: &str) -> BResult<Obj> {
-        todo_backend!("resolve")
-    }
-    async fn undo_decision(&self, id: &str, actor: &str) -> BResult<Obj> {
-        todo_backend!("undo_decision")
-    }
-    /// orchestrator `dismissDecision` (withdraw an open decision).
-    async fn dismiss_decision(&self, id: &str, actor: &str) -> BResult<Obj> {
-        todo_backend!("dismiss_decision")
+    async fn settle_decision(
+        &self,
+        caller: steve_modules::Caller,
+        id: String,
+        revision: Option<i64>,
+        command: steve_core::DecisionCommand,
+    ) -> BResult<Obj> {
+        todo_backend!("settle_decision")
     }
 
     // ── release hand-off and housekeeping ──

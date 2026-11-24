@@ -78,7 +78,7 @@ pub use node_jobs::{
     News, NodePrint, RESEARCH_GRANT, ResearchAttempt, ResearchFile, ResearchJobRun,
 };
 pub use plan::{Planned, park};
-pub(crate) use plan::{deliver_mid_turn, mid_turn_note};
+pub(crate) use plan::{deliver_mid_turn, mid_turn_note, queue_in};
 pub use receive::Sink;
 pub use workspace::WorkspaceFact;
 
@@ -568,8 +568,7 @@ impl NodeRuntime {
             }
         });
 
-        // cards that fell due and configures refused while the Hub was down
-        self.expire_due();
+        // configures refused while the Hub was down
         self.settle_configuring();
         // each worker holds the runtime only while it works, never while it waits: dropping the
         // last handle ends both. Nothing is sent before the Hub has reconciled with the Node.
@@ -644,7 +643,7 @@ impl NodeRuntime {
     }
 
     /// What the upkeep worker does: pending usage in the durable gateway inbox, what committed transactions tell the business side,
-    /// cards past due, turn progress and idle sessions. True: more gateway usage may wait.
+    /// turn progress and idle sessions. True: more gateway usage may wait.
     fn upkeep(&self, idle: bool) -> bool {
         let more = match self.store.stats().gateway_apply_local(LOCAL_RUN) {
             Ok(n) => n > 0,
@@ -654,7 +653,6 @@ impl NodeRuntime {
             }
         };
         self.tell_later();
-        self.expire_due();
         if let Err(e) = self.observe_turns() {
             tracing::warn!("node {}: progress observation: {e}", self.node_id);
         }

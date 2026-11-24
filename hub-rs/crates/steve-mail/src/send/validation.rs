@@ -18,7 +18,7 @@ impl Mail {
             let decision = steve_store::decision_repo::get(tx, &approval.id)?;
             let unchanged = current.as_ref() == Some(stored)
                 && decision.as_ref().is_some_and(|a| {
-                    a.status == "resolved" && a.result == approval.result
+                    a.status == steve_types::DecisionStatus::Resolved && a.result == approval.result
                 })
                 && crate::disclosure::inputs(tx, d)? == *inputs;
             if !unchanged {

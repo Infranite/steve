@@ -34,15 +34,17 @@ impl Default for ModeMap {
 impl ModeMap {
     /// What is asked of the adapter for `mode`: its id, and for Plan the Ask id as a stand-in.
     pub fn choice(&self, mode: PermissionMode) -> ModeChoice {
-        self.choice_with(mode, false, None)
+        self.choice_with(mode, false, None, None)
     }
 
-    /// [`Self::choice`] with adapter-level mode properties (`blind_set_mode`, `mode_meta`).
+    /// [`Self::choice`] with adapter-level mode properties (`blind_set_mode`, `mode_meta`,
+    /// `mode_args`).
     pub fn choice_with(
         &self,
         mode: PermissionMode,
         blind: bool,
         mode_meta: Option<&BTreeMap<String, Value>>,
+        mode_args: Option<&BTreeMap<String, Vec<String>>>,
     ) -> ModeChoice {
         let narrow = matches!(mode, PermissionMode::Plan | PermissionMode::Ask);
         let key = match mode {
@@ -53,6 +55,10 @@ impl ModeMap {
             PermissionMode::FullAccess => "full_access",
         };
         let meta = mode_meta.and_then(|m| m.get(key)).cloned();
+        let launch_args = mode_args
+            .and_then(|m| m.get(key))
+            .cloned()
+            .unwrap_or_default();
         ModeChoice {
             requested: key,
             id: self.id(mode).to_owned(),
@@ -60,6 +66,7 @@ impl ModeMap {
             narrow,
             blind,
             meta,
+            launch_args,
             native_execution: false,
         }
     }
@@ -67,15 +74,17 @@ impl ModeMap {
     /// Steve's modes an adapter offering `ids` can be set to (as [`Self::choice`] resolves them);
     /// `None` (it reports no modes): Plan and Ask only.
     pub fn offered(&self, ids: Option<&[String]>) -> Vec<PermissionMode> {
-        self.offered_with(ids, false, None)
+        self.offered_with(ids, false, None, None)
     }
 
-    /// [`Self::offered`] with adapter-level mode properties (`blind_set_mode`, `mode_meta`).
+    /// [`Self::offered`] with adapter-level mode properties (`blind_set_mode`, `mode_meta`,
+    /// `mode_args`).
     pub fn offered_with(
         &self,
         ids: Option<&[String]>,
         blind: bool,
         mode_meta: Option<&BTreeMap<String, Value>>,
+        mode_args: Option<&BTreeMap<String, Vec<String>>>,
     ) -> Vec<PermissionMode> {
         [
             PermissionMode::Plan,
@@ -85,7 +94,11 @@ impl ModeMap {
             PermissionMode::FullAccess,
         ]
         .into_iter()
-        .filter(|m| self.choice_with(*m, blind, mode_meta).resolve(ids).is_ok())
+        .filter(|m| {
+            self.choice_with(*m, blind, mode_meta, mode_args)
+                .resolve(ids)
+                .is_ok()
+        })
         .collect()
     }
 
@@ -104,9 +117,13 @@ impl ModeMap {
 /// A harness's own directory (path model §4.5.1).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateDir {
-    /// The variable that moves it (empty when `xdg` alone moves the harness's state).
+    /// The variable that moves it (empty when `xdg` or `arg` moves the harness's state).
     #[serde(default)]
     pub env: String,
+    /// CLI flag that moves the harness's state directory when it takes a flag rather than an
+    /// environment variable (for example `--gemini-dir`). Passed as `[arg, <dir>]` on launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arg: Option<String>,
     /// Where it is under the user's home when the variable is not set.
     pub default: String,
     /// What of the Node owner's own directory the owner's state starts with (their own settings,
@@ -301,6 +318,14 @@ impl StateDir {
         }
         env
     }
+
+    /// CLI arguments that move this harness's state into `dir`.
+    pub fn isolation_args(&self, dir: &Path) -> Vec<OsString> {
+        match self.arg.as_deref().filter(|s| !s.is_empty()) {
+            Some(flag) => vec![flag.into(), dir.as_os_str().to_owned()],
+            None => vec![],
+        }
+    }
 }
 fn is_false(b: &bool) -> bool {
     !*b
@@ -444,6 +469,15 @@ macro_rules! apply_property {
                 $p.mode_meta.remove(k);
             } else {
                 $p.mode_meta.insert(k.clone(), v.clone());
+            }
+        }
+    };
+    ($s:ident, $p:ident, mode_args, mode_args) => {
+        for (k, v) in &$s.mode_args {
+            if v.is_empty() {
+                $p.mode_args.remove(k);
+            } else {
+                $p.mode_args.insert(k.clone(), v.clone());
             }
         }
     };
@@ -667,6 +701,9 @@ adapter_properties! {
     /// Per-Steve-mode (`plan`, `ask`, `accept_edits`, `auto`, `full_access`) `_meta` sent on
     /// `session/new|load` (for adapters whose higher autonomy modes are session `_meta` flags).
     mode_meta: BTreeMap<String, Value> = BTreeMap::new() => BTreeMap<String, Value>, "BTreeMap::is_empty", mode_meta;
+    /// Per-Steve-mode (`plan`, `ask`, `accept_edits`, `auto`, `full_access`) CLI flags appended on
+    /// launch (for adapters whose full-access override is a CLI flag rather than an ACP mode id).
+    mode_args: BTreeMap<String, Vec<String>> = BTreeMap::new() => BTreeMap<String, Vec<String>>, "BTreeMap::is_empty", mode_args;
     /// The variable that receives the configured harness executable (`claude_executable`).
     executable_env: Option<String> = None => Option<String>, "Option::is_none", optional_string;
 
@@ -820,6 +857,8 @@ pub struct ModeChoice {
     pub blind: bool,
     /// `_meta` sent on `session/new|load` for this mode (`mode_meta`).
     pub meta: Option<Value>,
+    /// Extra CLI arguments appended on launch for this mode (`mode_args`).
+    pub launch_args: Vec<String>,
     /// Native tool execution has no harness approval modes. It must be explicitly selected.
     pub native_execution: bool,
 }
@@ -847,6 +886,7 @@ impl ModeChoice {
             };
         }
         let non_empty = |s: &str| (!s.is_empty()).then(|| s.to_owned());
+        let has_override = self.meta.is_some() || !self.launch_args.is_empty();
         match available {
             None => {
                 if self.blind {
@@ -859,7 +899,7 @@ impl ModeChoice {
                 }
                 let has_mapping =
                     !self.id.is_empty() || self.fallback.as_deref().is_some_and(|f| !f.is_empty());
-                if self.meta.is_some() || (self.narrow && has_mapping) {
+                if has_override || (self.narrow && has_mapping) {
                     Ok(None)
                 } else {
                     Err(format!("unsupported: permission mode {}", self.label()))
@@ -868,7 +908,7 @@ impl ModeChoice {
             Some(ids) if !self.id.is_empty() && ids.contains(&self.id) => Ok(Some(self.id.clone())),
             Some(ids) => match &self.fallback {
                 Some(f) if !f.is_empty() && ids.contains(f) => Ok(Some(f.clone())),
-                _ if self.meta.is_some() => Ok(None),
+                _ if has_override => Ok(None),
                 _ => Err(format!(
                     "unsupported: permission mode {} (the adapter offers {})",
                     self.label(),

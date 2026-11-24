@@ -2,8 +2,10 @@
  * the Hub writes the note into the conversation line with the choice ("不发布 steve/st-27：先别发", "拒绝：推送。原因：太早"),
  * the same words the agent was sent. Lines written before that carry only the choice; the note is still in the decision's
  * result, so it is read from there: the release or approve decision this line answered, resolved together with it. */
+import type { Said } from "./gen/Said.ts"
+
 type Line = { ts: number; kind: string; text: string }
-type Decision = { kind: string; subject_type: string; subject_id: string; question: string; resolved: number | null; result: any }
+type Decision = { kind: string; subject_type: string; subject_id: string; question: Said; resolved: number | null; result: any }
 
 /** a line and the decision behind it are written in the same call; anything further apart is another decision */
 const SAME_CALL_MS = 5000
@@ -22,7 +24,7 @@ export function withDecisionNotes<T extends Line>(timeline: T[], decisions: Deci
     const ap = /^(批准|拒绝)：(.*)$/s.exec(t.text)
     if (ap) {
       const yes = ap[1] === "批准"
-      const d = answered.find((d) => d.subject_type !== "release" && d.result.approved === yes && d.question === ap[2] && near(d))
+      const d = answered.find((d) => d.subject_type !== "release" && d.result.approved === yes && d.question.kind === "raw" && d.question.text === ap[2] && near(d))
       return d ? { ...t, text: `${t.text}${yes ? "。补充：" : "。原因："}${d.result.text.trim()}` } : t
     }
     return t

@@ -163,7 +163,9 @@ impl Tx<'_> {
         }
         if r.asked {
             let open = self.db().decisions_of_item(&item.id)?.iter().any(|d| {
-                d.status == "open" && d.kind == "ask" && d.session_id.as_deref() == Some(&s.id)
+                d.status == steve_types::DecisionStatus::Open
+                    && d.kind == "ask"
+                    && d.session_id.as_deref() == Some(&s.id)
             });
             return Ok(open.then_some(Mark::Asked));
         }

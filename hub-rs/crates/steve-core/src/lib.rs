@@ -67,11 +67,13 @@ pub use context_handoff::{
 };
 pub use error::{CoreError, Result};
 pub use gateway::{ModelGateway, OneModel, SharedGateway, SingleModelGateway, Tier};
-pub use orchestrator::{CreateItem, Forked, ItemAction, SendNow, SupplementMode, design_pending};
+pub use orchestrator::{
+    CreateItem, DecisionCommand, Forked, ItemAction, SendNow, SupplementMode, design_pending,
+};
 pub use quota::has_quota_reset;
 pub use runtime::{
-    AgentRuntime, Answered, Check, Flushed, McpEndpoint, ModeState, Output, Prompted, Released,
-    Running, Stop, TurnEnd,
+    AgentRuntime, Answered, Check, Flushed, McpEndpoint, ModeState, Output, PermissionAction,
+    PermissionAnswer, Prompted, Released, Running, Stop, TurnEnd,
 };
 
 use repo::Db;

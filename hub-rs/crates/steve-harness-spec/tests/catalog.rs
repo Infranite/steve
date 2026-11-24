@@ -140,7 +140,7 @@ fn every_builtin_catalog_key_is_known() {
             .unwrap();
         let properties = &adapter["properties"];
         known_keys(properties, &PROPERTY_KEYS, &format!("{id}.properties"));
-        for field in ["modes", "mode_meta"] {
+        for field in ["modes", "mode_meta", "mode_args"] {
             if let Some(value) = properties.get(field) {
                 known_keys(
                     value,
@@ -154,6 +154,7 @@ fn every_builtin_catalog_key_is_known() {
                 state,
                 &[
                     "env",
+                    "arg",
                     "default",
                     "import",
                     "context",
@@ -223,6 +224,7 @@ fn only_declared_native_approval_modes_are_offered() {
         ("codex", "agent"),
         ("goose", "smart_approve"),
         ("mistral-vibe", "smart-approve"),
+        ("antigravity", "auto"),
     ];
     for builtin in builtins() {
         let want = native.iter().find(|(id, _)| *id == builtin.id);
@@ -236,7 +238,9 @@ fn only_declared_native_approval_modes_are_offered() {
         if let Some((_, id)) = want {
             use steve_node_api::PermissionMode;
             let offered = [id.to_string(), props.modes.full_access.clone()];
-            let choice = props.modes.choice_with(PermissionMode::Auto, false, None);
+            let choice = props
+                .modes
+                .choice_with(PermissionMode::Auto, false, None, None);
             assert!(choice.resolve(Some(&offered)).is_ok(), "{id}");
             assert_eq!(props.modes.id(PermissionMode::Auto), *id);
             assert!(choice.resolve(Some(&offered[1..])).is_err());

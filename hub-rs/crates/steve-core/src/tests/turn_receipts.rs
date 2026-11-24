@@ -59,7 +59,8 @@ fn provider_failure_after_receipt(stop: &str) {
                 .decisions_of_item(&id)
                 .unwrap()
                 .iter()
-                .filter(|d| d.status == "open" && d.kind == if deliver { "accept" } else { "ask" })
+                .filter(|d| d.status == steve_types::DecisionStatus::Open
+                    && d.kind == if deliver { "accept" } else { "ask" })
                 .count(),
             1
         );
@@ -121,7 +122,7 @@ fn a_persisted_question_survives_restart_before_turn_end_and_replay() {
             .decisions_of_item(&id)
             .unwrap()
             .iter()
-            .filter(|d| d.status == "open")
+            .filter(|d| d.status == steve_types::DecisionStatus::Open)
             .count(),
         1
     );
@@ -159,7 +160,7 @@ fn delivery_and_end_in_either_order_keep_only_the_acceptance_after_restart() {
                 .decisions_of_item(&id)
                 .unwrap()
                 .iter()
-                .filter(|d| d.kind == "accept" && d.status == "open")
+                .filter(|d| d.kind == "accept" && d.status == steve_types::DecisionStatus::Open)
                 .count(),
             1
         );
@@ -206,7 +207,7 @@ fn accepted_delivery_waiting_on_pr_closeout_is_not_idle_after_restart() {
         .decisions_of_item(&id)
         .unwrap()
         .into_iter()
-        .find(|d| d.kind == "accept" && d.status == "open")
+        .find(|d| d.kind == "accept" && d.status == steve_types::DecisionStatus::Open)
         .unwrap();
     k.core.resolve(&accept.id, "pass", "", "me").unwrap();
     let a = detach(&k, &s);
@@ -452,7 +453,7 @@ fn restart_tidy_expires_only_no_receipt_cards_and_preserves_real_errors() {
             .decisions_of_item(&id)
             .unwrap()
             .iter()
-            .filter(|d| d.kind == "ask" && d.status == "open")
+            .filter(|d| d.kind == "ask" && d.status == steve_types::DecisionStatus::Open)
             .count(),
         1
     );

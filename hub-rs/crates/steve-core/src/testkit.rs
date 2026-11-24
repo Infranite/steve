@@ -11,6 +11,7 @@ use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
+use steve_store::Ingest;
 
 #[derive(Default)]
 pub struct FakeState {
@@ -40,6 +41,8 @@ pub struct FakeState {
     pub pending_permissions: HashSet<String>,
     /// Every answer fails (the backend's store, say).
     pub answer_error: bool,
+    /// A decision's input queue refuses the write.
+    pub decision_prompt_error: bool,
     /// The user's stop fails: the backend cannot tell whether it reached the turn (its Node
     /// unreachable, say). Recorded in `stopped`, nothing is cancelled.
     pub user_stop_error: bool,
@@ -248,6 +251,46 @@ impl AgentRuntime for FakeRuntime {
         self.run(&mut st, sid, &[(text.into(), via.into())]);
         Ok(Prompted::Sent)
     }
+    fn stage_decision_prompt(
+        &self,
+        w: &mut steve_store::W<'_>,
+        sid: &str,
+        text: &str,
+    ) -> Result<()> {
+        if let Some(why) = steve_store::workflow_gate::session_blocker(w, sid)? {
+            return Err(msg(why));
+        }
+        if steve_store::node_sessions::ended(w, sid)? {
+            return Err(msg("已结束的会话不能接收新消息，请使用当前会话。"));
+        }
+        let (err, queued, holding) = {
+            let st = self.st();
+            (
+                st.decision_prompt_error,
+                st.turning.contains(sid) || st.holding,
+                st.holding && !st.turning.contains(sid),
+            )
+        };
+        if err {
+            return Err(msg("input queue refused"));
+        }
+        let at = steve_store::now();
+        if holding {
+            steve_store::node_sessions::set_status(w, sid, "idle", at)?;
+        }
+        steve_store::node_sessions::queue(w, &steve_store::uid("q"), sid, text, "steve", &[], at)?;
+        if queued {
+            w.events().add(
+                sid,
+                "queued",
+                json!({"text": text, "via": "steve"}),
+                None,
+                at,
+            )?;
+        }
+        steve_store::node_sessions::changed_event(w, sid)?;
+        Ok(())
+    }
     fn running(&self, sid: &str) -> Option<Running> {
         self.st().attempts.get(sid).map(|a| Running {
             session: sid.into(),
@@ -338,7 +381,9 @@ impl AgentRuntime for FakeRuntime {
             .cloned()
             .unwrap_or(Released::Gone))
     }
-    fn answer_permission(&self, decision: &str, option: Option<&str>) -> Result<Answered> {
+    fn answer_permission(&self, answer: crate::PermissionAnswer<'_>) -> Result<Answered> {
+        let decision = answer.decision_id;
+        let option = answer.option();
         let mut st = self.st();
         if st.answer_error {
             return Err(msg("store unavailable"));
@@ -598,7 +643,7 @@ impl Kit {
             .decisions_of_item(item)
             .unwrap()
             .into_iter()
-            .filter(|d| d.status == "open")
+            .filter(|d| d.status == steve_types::DecisionStatus::Open)
             .map(|d| d.kind)
             .collect()
     }

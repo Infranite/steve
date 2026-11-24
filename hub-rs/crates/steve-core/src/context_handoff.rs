@@ -546,7 +546,7 @@ impl Tx<'_> {
             }
             let open = self.db().decisions_of_item(&item.id)?;
             if open.iter().any(|d| {
-                d.status == "open"
+                d.status == steve_types::DecisionStatus::Open
                     && d.kind == "fail"
                     && d.subject_type == HANDOFF_UNAVAILABLE_SUBJECT
                     && d.question == why
@@ -624,15 +624,17 @@ impl Tx<'_> {
     /// when a future recovery time is known, otherwise pauses the item cleanly.
     pub(crate) fn resolve_handoff_unavailable_wait(
         &mut self,
-        decision_id: &str,
-        item_id: &str,
         d: &Decision,
+        cx: &steve_modules::decisions::DecisionCx<'_>,
+        item_id: &str,
         actor: &str,
     ) -> Result<()> {
-        self.db()
-            .decision_resolve(decision_id, json!({"choice": "wait"}), "resolved", None)?;
+        self.db().store().write::<_, CoreError>(|w| {
+            steve_modules::decisions::complete_answer(w, d, cx, &json!({"choice": "wait"}), None)?;
+            Ok(())
+        })?;
         self.clear_surface_failures(item_id);
-        let meta = self.st.handoff_cards.remove(decision_id);
+        let meta = self.st.handoff_cards.remove(&d.id);
         let now = crate::util::now();
         let sid = meta
             .as_ref()
@@ -668,7 +670,8 @@ impl Tx<'_> {
     /// a blocked target leaves the card open for the owner.
     pub(crate) fn resolve_handoff_to_bot(
         &mut self,
-        decision_id: &str,
+        d: &Decision,
+        cx: &steve_modules::decisions::DecisionCx<'_>,
         item_id: &str,
         target_bot: &str,
         choice: &str,
@@ -697,17 +700,33 @@ impl Tx<'_> {
                 actor,
                 None,
             )?;
-            self.db()
-                .decision_resolve(decision_id, json!({"choice": choice}), "resolved", None)?;
+            self.db().store().write::<_, CoreError>(|w| {
+                steve_modules::decisions::complete_answer(
+                    w,
+                    d,
+                    cx,
+                    &json!({"choice": choice}),
+                    None,
+                )?;
+                Ok(())
+            })?;
             crate::lifecycle::supersede(self.db(), item_id, &["fail"], "已手动交接新会话")?;
             crate::thread::flowback::recover_quiet(self.db(), item_id);
         } else {
-            self.db()
-                .decision_resolve(decision_id, json!({"choice": choice}), "resolved", None)?;
+            self.db().store().write::<_, CoreError>(|w| {
+                steve_modules::decisions::complete_answer(
+                    w,
+                    d,
+                    cx,
+                    &json!({"choice": choice}),
+                    None,
+                )?;
+                Ok(())
+            })?;
             crate::thread::flowback::recover_quiet(self.db(), item_id);
             self.reassign(item_id, target_bot, actor)?;
         }
-        self.st.handoff_cards.remove(decision_id);
+        self.st.handoff_cards.remove(&d.id);
         self.clear_surface_failures(item_id);
         Ok(())
     }
@@ -945,16 +964,22 @@ impl Tx<'_> {
         }
 
         // Expire open decisions tied to the ended session before snapshotting open waits.
+        // Leave `handoff_unavailable` coordinator cards open so the resolving call settles them
+        // with its explicit choice receipt (and manual handoffs supersede them cleanly afterward).
         for d in self
             .db()
             .decisions_of_item(&item.id)?
             .into_iter()
-            .filter(|d| d.status == "open" && d.session_id.as_deref() == Some(prev.id.as_str()))
+            .filter(|d| {
+                d.status == steve_types::DecisionStatus::Open
+                    && d.session_id.as_deref() == Some(prev.id.as_str())
+                    && d.subject_type != HANDOFF_UNAVAILABLE_SUBJECT
+            })
         {
             self.db().decision_resolve(
                 &d.id,
                 json!({"superseded": "会话已交接"}),
-                "expired",
+                steve_store::decision_repo::DecisionChange::Expire,
                 None,
             )?;
         }
@@ -1264,7 +1289,10 @@ impl Tx<'_> {
             .db()
             .decisions_of_item(item_id)?
             .iter()
-            .filter(|d| d.status == "resolved" && d.result["decided_by"] != "yolo")
+            .filter(|d| {
+                d.status == steve_types::DecisionStatus::Resolved
+                    && d.result["decided_by"] != "yolo"
+            })
             .filter_map(|d| d.resolved)
             .max()
             .unwrap_or(0);
@@ -1367,7 +1395,8 @@ impl Tx<'_> {
         let mut resolved: Vec<_> = all_decisions
             .iter()
             .filter(|d| {
-                d.status == "resolved" && matches!(d.kind.as_str(), "ask" | "accept" | "propose")
+                d.status == steve_types::DecisionStatus::Resolved
+                    && matches!(d.kind.as_str(), "ask" | "accept" | "propose")
             })
             .collect();
         if resolved.len() > MAX_DECISIONS {
@@ -1412,7 +1441,10 @@ impl Tx<'_> {
         if !compact_only {
             let open_waits: Vec<_> = all_decisions
                 .iter()
-                .filter(|d| d.status == "open")
+                .filter(|d| {
+                    d.status == steve_types::DecisionStatus::Open
+                        && d.subject_type != HANDOFF_UNAVAILABLE_SUBJECT
+                })
                 .take(MAX_WAITS)
                 .collect();
             if !open_waits.is_empty() {

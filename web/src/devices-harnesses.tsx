@@ -11,15 +11,21 @@ import type { NodeView } from "@/device-model"
 import { useDevices } from "@/devices-data"
 import { DCard } from "@/devices-ui"
 import { harnessState, harnessSummary } from "@/node-harness-model"
+import type { NodeActions } from "@/devices-node-actions"
+
+type HarnessActionSlice = Pick<NodeActions, "harnessBusy" | "harnessError" | "probeHarnesses">
 
 /** All data and refreshes belong to v.id. Local maintenance remains explicitly local. */
-export function NodeHarnesses({ v, children }: { v: NodeView; children?: ReactNode }) {
+export function NodeHarnesses({ v, actions, children }: { v: NodeView; actions?: HarnessActionSlice; children?: ReactNode }) {
   const t = useT(), { harnesses, harnessesError, refreshHarnesses } = useDevices()
-  const r = harnesses?.[v.id], [busy, setBusy] = useState(false), [error, setError] = useState("")
+  const r = harnesses?.[v.id], [ownBusy, setOwnBusy] = useState(false), [ownError, setOwnError] = useState("")
+  const busy = actions ? actions.harnessBusy : ownBusy
+  const error = actions ? actions.harnessError : ownError
   const stale = !v.linked || !!r?.stale || !!harnessesError || r?.state !== "reported"
   const refresh = async () => {
-    setBusy(true); setError("")
-    try { await refreshHarnesses(v.id) } catch (e) { setError((e as Error).message) } finally { setBusy(false) }
+    if (actions) { await actions.probeHarnesses(); return }
+    setOwnBusy(true); setOwnError("")
+    try { await refreshHarnesses(v.id) } catch (e) { setOwnError((e as Error).message) } finally { setOwnBusy(false) }
   }
   return <DCard icon={<CpuIcon />} title={t("devices:harness.title")} sub={harnessSummary(v, r)} data-node-harnesses={v.id}
     action={<Button size="sm" variant="ghost" disabled={busy || !v.linked || v.state === "pending" || v.state === "revoked"} onClick={() => void refresh()} data-node-harness-refresh>{busy || r?.refreshing ? <Spinner /> : <RefreshCwIcon />}{t("devices:harness.refresh")}</Button>}>

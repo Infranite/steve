@@ -257,7 +257,16 @@ async fn a_local_node_runs_a_whole_turn_through_the_link() {
     })
     .await;
     let d: String = node_checks::decision_id_by_subject_type(&h.store, "tool_call").unwrap();
-    assert!(rt.answer_permission(&d, Some("allow_once")).unwrap());
+    assert!(
+        rt.answer_permission(steve_core::PermissionAnswer::resolve(
+            &d,
+            1,
+            "owner",
+            "allow_once",
+            ""
+        ))
+        .unwrap()
+    );
     // one of Steve's tools, called by the harness on the Node's MCP endpoint
     let log = std::fs::read_to_string(&n.log).unwrap();
     let new = log

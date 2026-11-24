@@ -62,7 +62,7 @@ const open = async (rows, lang = "zh-CN", width = 375) => {
   page.setDefaultTimeout(12000)
   f.errors = []; page.on("pageerror", e => f.errors.push(e.message))
   await page.addInitScript(lang => { localStorage.setItem("steve-lang", lang); localStorage.setItem("steve-onboarded", "1") }, lang)
-  await page.goto(base + "/#/devices/nodes/local")
+  await page.goto(base + "/#/devices/nodes/local/harness")
   await page.locator("[data-panel=runtimes]").waitFor()
   f.page = page
   return f

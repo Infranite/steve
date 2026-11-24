@@ -16,6 +16,7 @@ import { cue } from "./bus"
 import { newClientId } from "./composer-draft"
 import { elapsed, pastTime, span } from "./i18n/format"
 import i18n, { t } from "./i18n"
+import { decisionText } from "./i18n/decision"
 import type { StateUpdate, RFile, PlanStep, RHold, RQueued, SuggestChoice, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
 import type { Cite } from "./api/knowledge"
 import { applyLook } from "./lib/motion"
@@ -33,7 +34,7 @@ export type Wait = { type: "approve" | "ask" | "accept" | "propose" | "fail" | "
   recovery?: SendRecoveryInfo
   /** where it goes in 待处理 (the Hub's rules): only `decide` counts and reminds; drafts are one row per conversation */
   tier: DecisionTier; folded?: FoldReason; space?: string }
-export type Done = { id: string; type: Wait["type"]; q: string; choice: string; tm: string; at: number; decision: string; canUndo: boolean; undone?: boolean; how: "chose" | "dismissed" | "expired"; rel?: Rel
+export type Done = { id: string; type: Wait["type"]; q: string; choice: string; tm: string; at: number; decision: string; revision: number; canUndo: boolean; undone?: boolean; how: "chose" | "dismissed" | "expired"; rel?: Rel
   /** Historical reason when the retired automatic resolver made this decision. */
   yolo?: string
   /** the client it was answered from (A4c `result.via`), when it was one signed in with a token */
@@ -338,7 +339,7 @@ let waitsByView = new WeakMap<DecisionView, Wait>()
 function waitOf(d: DecisionView): Wait {
   const cached = waitsByView.get(d)
   if (cached) return cached
-  const w: Wait = { type: d.kind as Wait["type"], q: d.question, draft: d.draft, opts: d.kind === "ask" ? d.options : undefined, since: since(d.created), decision: d.id, subject: d.subject_type, subjectId: d.subject_id, session: d.session_id, options: d.options, by: d.requested_by, get busy() { return agentBusy(d) }, tier: d.tier, folded: d.folded ?? undefined, space: d.space_id ?? undefined,
+  const w: Wait = { type: d.kind as Wait["type"], get q() { return decisionText(d.question) }, draft: d.draft, opts: d.kind === "ask" ? d.options : undefined, since: since(d.created), decision: d.id, subject: d.subject_type, subjectId: d.subject_id, session: d.session_id, options: d.options, by: d.requested_by, get busy() { return agentBusy(d) }, tier: d.tier, folded: d.folded ?? undefined, space: d.space_id ?? undefined,
     recovery: d.subject_type === "chan_message" && d.kind === "fail" ? resultOf(d).recovery : undefined }
   waitsByView.set(d, w)
   return w
@@ -1158,9 +1159,9 @@ export async function dismissDrafts(ids: string[]) {
 export async function editReplyDraft(id: string, previous: string, text: string) {
   return !!await decisionCall(api.editReplyDraft(id, previous, text).then((r) => settle(r, "decision", [id])))
 }
-const answer = (id: string, c: string, text?: string) => api.decide(id, c, text).then((r) => settle(r, "decision", [id]) as Promise<DecisionAnswer>)
-const dismissed = (id: string) => api.dismiss(id).then((r) => settle(r, "decision", [id]))
-const undone = (id: string) => api.undo(id).then((r) => settle(r, "decision", [id]))
+const answer = (id: string, c: string, text?: string) => api.decide(id, c, text, decisionView(id)?.revision).then((r) => settle(r, "decision", [id]) as Promise<DecisionAnswer>)
+const dismissed = (id: string, revision: number) => api.dismiss(id, revision).then((r) => settle(r, "decision", [id]))
+const undone = (id: string, revision: number) => api.undo(id, revision).then((r) => settle(r, "decision", [id]))
 export async function decide(id: string, c: string, text?: string, decision?: string) {
   const { i, w } = cardOf(id, decision); if (!w) return
   const accepted = channelAnswer(w); if (accepted) return accepted
@@ -1208,12 +1209,13 @@ export async function discardOut(decision: string) {
  *  undoable from the toast or from 已处理, except a tool permission, which this denies */
 export async function dismiss(id: string, decision?: string) {
   const { w } = cardOf(id, decision); if (!w) return
-  const d = await decisionCall(dismissed(w.decision))
-  if (d) toast(t(w.subject === "tool_call" ? "core:toast.dismissedTool" : w.subject === "chan_message" && w.type === "approve" ? "core:toast.dismissedReply" : "core:toast.dismissed"), w.subject === "tool_call" ? undefined : { action: { label: t("core:toast.undo"), onClick: () => void decisionCall(undone(w.decision), id ? t("core:toast.backToPending", { id }) : t("core:toast.backToPendingIt")) } })
+  const view = decisionView(w.decision); if (!view) return
+  const d = await decisionCall(dismissed(w.decision, view.revision))
+  if (d) toast(t(w.subject === "tool_call" ? "core:toast.dismissedTool" : w.subject === "chan_message" && w.type === "approve" ? "core:toast.dismissedReply" : "core:toast.dismissed"), w.subject === "tool_call" ? undefined : { action: { label: t("core:toast.undo"), onClick: () => void decisionCall(undone(w.decision, d.revision), id ? t("core:toast.backToPending", { id }) : t("core:toast.backToPendingIt")) } })
 }
 export function undoDecision(decision: string) {
   const d = done().find((x) => x.decision === decision); if (!d?.canUndo) return
-  void decisionCall(undone(d.decision), d.id ? t("core:toast.undoneToPending", { id: d.id }) : t("core:toast.backToPendingIt"))
+  void decisionCall(undone(d.decision, d.revision), d.id ? t("core:toast.undoneToPending", { id: d.id }) : t("core:toast.backToPendingIt"))
 }
 /** 已处理: the decisions about items settled in the last days, newest first */
 const doneLists = new WeakMap<DecisionView[], Done[]>()
@@ -1221,8 +1223,8 @@ export function done(): Done[] {
   const xs = settled()
   let out = doneLists.get(xs)
   if (!out) {
-    out = xs.map((d) => { const r = resultOf(d); return { id: d.item_id ?? "", type: d.kind as Wait["type"], q: d.question, choice: choiceLabel(d), tm: tm(d.resolved), at: d.resolved ?? 0, decision: d.id, canUndo: (d.undo_until ?? 0) > Date.now(), rel: relOf(d),
-      how: r.dismissed ? "dismissed" : d.status === "expired" ? "expired" : "chose", yolo: r.decided_by === "yolo" ? String(r.yolo_reason ?? "") : undefined,
+    out = xs.map((d) => { const r = resultOf(d); return { id: d.item_id ?? "", type: d.kind as Wait["type"], get q() { return decisionText(d.question) }, choice: choiceLabel(d), tm: tm(d.resolved), at: d.resolved ?? 0, decision: d.id, revision: d.revision, canUndo: (d.undo_until ?? 0) > Date.now(), rel: relOf(d),
+      how: r.dismissed ? "dismissed" : ["expired", "superseded"].includes(d.status) ? "expired" : "chose", yolo: r.decided_by === "yolo" ? String(r.yolo_reason ?? "") : undefined,
       via: typeof r.via?.name === "string" ? r.via.name : undefined } satisfies Done })
     doneLists.set(xs, out)
   }

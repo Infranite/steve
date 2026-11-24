@@ -418,7 +418,7 @@ async fn same_name_and_signature_org_gives_a_proposal() {
     assert_eq!(d.subject_id, mp);
     assert_eq!(d.question, "sarah.c.design@gmail.com 可能是 Sarah Chen");
     assert_eq!(d.options, vec!["merge".to_string(), "not_same".to_string()]);
-    assert_eq!(d.status, "open");
+    assert_eq!(d.status, steve_types::DecisionStatus::Open);
     assert!(d.item_id.is_none());
 
     // the new contact is unconfirmed; the account is not verified yet

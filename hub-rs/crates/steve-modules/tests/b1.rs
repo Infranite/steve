@@ -7,7 +7,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use steve_modules::context::{ChatCtx, ChatDone, Cite, PromptContext};
-use steve_modules::decisions::{DecisionCx, DecisionHandler};
+use steve_modules::decisions::{DecisionCx, DecisionHandler, DecisionOutcome};
 use steve_modules::hooks::ItemHooks;
 use steve_modules::outbound::{
     self, Audience, CheckCx, CheckResult, KnowledgeUse, OutboundCheck, Verdict,
@@ -446,8 +446,8 @@ async fn the_registered_outbound_check_is_used() {
 struct Undo(Log, bool);
 
 impl DecisionHandler for Undo {
-    fn resolve(&self, _: &mut W<'_>, cx: &DecisionCx, _: &Decision) -> ApiResult<Value> {
-        Ok(json!({"choice": cx.choice}))
+    fn resolve(&self, _: &mut W<'_>, cx: &DecisionCx, _: &Decision) -> ApiResult<DecisionOutcome> {
+        Ok(json!({"choice": cx.choice}).into())
     }
     fn before_undo(&self, _: &mut W<'_>, d: &Decision) -> ApiResult<()> {
         self.0.lock().unwrap().push(d.id.clone());
