@@ -21,7 +21,7 @@ import { useTitle, type Colors, type Nav } from "./parts"
 function Line({ label, children, href, k, open }: { label: string; children: ReactNode; href?: string; k: string; open: string }) {
   return (
     <div className="flex min-h-10 items-start gap-3 border-t py-2 first:border-t-0" data-cal-sum={k}>
-      <span className="w-10 shrink-0 pt-px type-footnote text-muted-foreground">{label}</span>
+      <span className="w-14 shrink-0 pt-px type-footnote text-muted-foreground">{label}</span>
       <div className="min-w-0 flex-1 type-callout">{children}</div>
       {href && <a href={href} className="shrink-0 rounded-md px-1.5 py-0.5 type-footnote text-muted-foreground hover:bg-accent hover:text-foreground" data-cal-sum-open={k}>{open}</a>}
     </div>

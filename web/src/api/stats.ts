@@ -1,6 +1,8 @@
 /** Estimated costs and activity statistics. */
 import { modReq as req, qs } from "@/api"
 import type { TreeStat } from "@/agent-tree"
+import type { NavUsage, NavUsageItem, NavUsageRange } from "@/gen"
+export type { NavUsage, NavUsageItem, NavUsageRange }
 
 export type RangeKind = "today" | "7d" | "30d" | "custom"
 /** `hour` (0–23): one local hour of a one-day range — the drill-down of an hourly bar (items, usage) */
@@ -114,6 +116,7 @@ export type EventQuery = { lo?: number; hi?: number; a?: number; b?: number; kin
 export const statsSeed: { next: Filter | null } = { next: null }
 
 export const stats = {
+  nav: (range: NavUsageRange = "7d") => req<NavUsage>("GET", "/stats/nav" + qs({ range })),
   summary: (x: Filter) => req<Summary>("GET", "/stats/summary" + f(x)),
   /** `hourly`: per local hour (only for a one-day range) */
   series: (x: Filter, metric: Metric, group: Group, hourly = false) => req<Series>("GET", "/stats/series" + and({ ...x, hour: undefined }, { metric, group, bucket: hourly ? "hour" : undefined })),

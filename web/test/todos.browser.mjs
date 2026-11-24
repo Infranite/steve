@@ -109,11 +109,11 @@ try {
     await page.locator('[data-todo-group="overdue"]').waitFor()
     assert.deepEqual(await page.locator("[data-todo-group]").evaluateAll((xs) => xs.map((x) => x.getAttribute("data-todo-group"))), ["overdue", "today", "week", "none", "handed"])
     if (width === 1440) {
-      assert.deepEqual(await page.locator('[data-sidebar-nav] [data-sidebar="group"]').first().locator("[data-nav]").evaluateAll((xs) => xs.map((x) => x.getAttribute("data-nav"))), ["chat", "feed", "inbox", "calendar", "todos", "items", "projects"])
+      assert.deepEqual(await page.locator('[data-sidebar-nav] [data-sidebar="group"]').first().locator("[data-nav]").evaluateAll((xs) => xs.map((x) => x.getAttribute("data-nav"))), ["chat", "inbox", "items", "projects"])
       assert.equal(await page.locator('[data-nav-count="todos"]').innerText(), "3", "overdue and due today, in gray")
       assert.equal(await page.locator('[data-nav="todos"]').getAttribute("aria-current"), "page")
     } else {
-      assert.deepEqual(await page.locator("[data-mobile-tabs] a").evaluateAll((xs) => xs.map((x) => x.getAttribute("data-tab"))), ["chat", "inbox", "calendar", "todos", "items"])
+      assert.deepEqual(await page.locator("[data-mobile-tabs] a").evaluateAll((xs) => xs.map((x) => x.getAttribute("data-tab"))), ["chat", "inbox", "items", "calendar", "todos"])
       assert.equal(await page.locator('[data-tab="todos"]').getAttribute("aria-current"), "page")
       await page.locator("[data-mine]").waitFor()
     }

@@ -2,7 +2,7 @@
  * Its head is the workspace (Steve's mark, the workspace's name, its menu) with the button that folds the sidebar to a
  * rail of icons; under it the Hub, the running-status pill and search as a field with ⌘K; then the nav
  * groups; at the bottom the signed-in account (affectUI Profile Menu), the theme and the versions. A phone has no
- * sidebar: the tab bar at the bottom (对话 · 待处理 · 日历 · 待办 · 事项), and 我的 for the rest, behind the avatar at the
+ * sidebar: the tab bar at the bottom (对话 · 待我决定 · 事项 · 日历 · 我的待办), and 我的 for the rest, behind the avatar at the
  * top left of each top-level page (mine.tsx). */
 import { useEffect, useState } from "react"
 import { cn } from "cn"
@@ -12,6 +12,7 @@ import { nativeBridge } from "@/hub"
 import { nativeHubChrome } from "@/native-shell"
 import { HubSwitcher } from "@/hub-ui"
 import { useT } from "@/i18n"
+import { MOBILE_TAB_KEYS, SIDEBAR_NAV, SIDEBAR_SCROLL_GROUPS, type SidebarNavKey } from "@/nav"
 import { RunningNowPill } from "@/running-pill"
 import { LOADED_WEB_VERSION, decisionBadgeCount, st, useStoreSelector } from "@/store"
 import { Initials, useMe } from "@/mine"
@@ -31,30 +32,27 @@ import {
   ListChecksIcon, MessageCircleIcon, MessagesSquareIcon, MonitorIcon, MoonIcon, PanelLeftIcon, PlugIcon, RadioIcon, SearchIcon, ServerIcon, SettingsIcon, SquareTerminalIcon,
   SunIcon, UserRoundIcon, WorkflowIcon, BlocksIcon, NewspaperIcon } from "lucide-react"
 
-type NavGroup = "primary" | "connect" | "automate"
-const NAV_GROUPS: NavGroup[] = ["primary", "connect", "automate"]
-/* the main group stays at seven: who waits for whom (待处理 for you, 待办 your own, 事项 a Bot's) between the conversation
- * and the projects; 会话 and 统计 are about the Bots and sit with them */
-const NAV: { h: string; l: "chat" | "feed" | "inbox" | "calendar" | "todos" | "items" | "projects" | "sessions" | "stats" | "integrations" | "channels" | "mail" | "contacts" | "knowledge" | "bots" | "capabilities" | "auto" | "signals"; I: any; group: NavGroup }[] = [
-  { h: "", l: "chat", I: MessageCircleIcon, group: "primary" },
-  { h: "feed", l: "feed", I: NewspaperIcon, group: "primary" },
-  { h: "inbox", l: "inbox", I: InboxIcon, group: "primary" },
-  { h: "calendar", l: "calendar", I: CalendarIcon, group: "primary" },
-  { h: "todos", l: "todos", I: ListChecksIcon, group: "primary" },
-  { h: "items", l: "items", I: ListTodoIcon, group: "primary" },
-  { h: "projects", l: "projects", I: FolderIcon, group: "primary" },
-  { h: "integrations", l: "integrations", I: PlugIcon, group: "connect" },
-  { h: "channels", l: "channels", I: MessagesSquareIcon, group: "connect" },
-  { h: "mail", l: "mail", I: MailIcon, group: "connect" },
-  { h: "contacts", l: "contacts", I: ContactRoundIcon, group: "connect" },
-  { h: "knowledge", l: "knowledge", I: BookOpenIcon, group: "connect" },
-  { h: "bots", l: "bots", I: BotIcon, group: "automate" },
-  { h: "sessions", l: "sessions", I: SquareTerminalIcon, group: "automate" },
-  { h: "capabilities", l: "capabilities", I: BlocksIcon, group: "automate" },
-  { h: "auto", l: "auto", I: WorkflowIcon, group: "automate" },
-  { h: "signals", l: "signals", I: RadioIcon, group: "automate" },
-  { h: "stats", l: "stats", I: ChartNoAxesColumnIcon, group: "automate" },
-]
+const NAV_ICON: Record<SidebarNavKey, any> = {
+  chat: MessageCircleIcon,
+  inbox: InboxIcon,
+  items: ListTodoIcon,
+  projects: FolderIcon,
+  calendar: CalendarIcon,
+  todos: ListChecksIcon,
+  feed: NewspaperIcon,
+  channels: MessagesSquareIcon,
+  mail: MailIcon,
+  contacts: ContactRoundIcon,
+  knowledge: BookOpenIcon,
+  integrations: PlugIcon,
+  bots: BotIcon,
+  sessions: SquareTerminalIcon,
+  auto: WorkflowIcon,
+  capabilities: BlocksIcon,
+  signals: RadioIcon,
+  stats: ChartNoAxesColumnIcon,
+}
+const NAV = SIDEBAR_NAV.map((x) => ({ ...x, I: NAV_ICON[x.l] }))
 /** a sidebar row, App Shell's: 30px, the name in the body colour, the open one on a quiet fill with its icon in indigo */
 const ROW = "h-[30px] gap-2 rounded-lg px-1.5! type-callout text-foreground/80 hover:text-foreground data-active:font-medium data-active:text-foreground data-active:[&>svg]:text-primary"
 
@@ -172,14 +170,17 @@ export function Sidebar({ route: full }: { route: string }) {
       {/* a short window gives the groups less room than they need: they scroll between header and footer. The edge
        *  with more beyond it fades and the footer keeps a hairline, so the lower groups read as scrolled, not cut off */}
       <SidebarContent ref={nav} className="gap-0 [scrollbar-width:thin]! data-[more~=end]:mask-b-from-[calc(100%-2rem)] data-[more~=start]:mask-t-from-[calc(100%-2rem)]" data-sidebar-nav data-more={more}>
-        {NAV_GROUPS.map((group) => <SidebarGroup key={group} className="px-2 py-1">
-          {group !== "primary" && <SidebarGroupLabel className="h-7 px-1.5 type-footnote font-medium text-tertiary">{t(`core:navGroup.${group}`)}</SidebarGroupLabel>}
+        {SIDEBAR_SCROLL_GROUPS.map((group) => <SidebarGroup key={group} data-nav-group={group} className={cn("px-2", group === "primary" ? "pt-1 pb-0.5" : "py-0.5")}>
+          {group !== "primary" && <SidebarGroupLabel className="h-6 px-1.5 type-footnote font-medium text-tertiary">{t(`core:navGroup.${group}`)}</SidebarGroupLabel>}
           <SidebarGroupContent><SidebarMenu className="gap-px">{NAV.filter((x) => x.group === group).map((x) => item(x.h, t(`core:nav.${x.l}`), x.I, (route === x.h && !(x.h === "contacts" && meOn)) || (x.h === "contacts" && (route === "orgs" || route === "teams"))))}</SidebarMenu></SidebarGroupContent>
         </SidebarGroup>)}
       </SidebarContent>
-      {/* the foot: the account (its menu holds 我, devices, accounts, settings) beside the theme, and the versions under
-       *  it – short, so the nav groups above keep their room on a laptop screen */}
+      {/* the foot: pinned low-frequency Stats always in view, then the account (我, devices, accounts, settings)
+       *  beside the theme, and the versions under it */}
       <SidebarFooter className="gap-0.5 border-t border-sidebar-border px-2 pt-1.5 pb-2">
+        <SidebarMenu className="gap-px" data-sidebar-footer-nav>
+          {NAV.filter((x) => x.group === "more").map((x) => item(x.h, t(`core:nav.${x.l}`), x.I, route === x.h))}
+        </SidebarMenu>
         <SidebarMenu className="flex-row items-center gap-0.5 group-data-[collapsible=icon]:flex-col">
           <Account route={route} meOn={meOn} />
           <ThemeCycle className="group-data-[collapsible=icon]:hidden" />
@@ -202,20 +203,23 @@ export function HubUpdateNotice() {
     <span className="size-1.5 shrink-0 rounded-full bg-attention" aria-hidden />{t("core:sidebar.hubUpdate", { version: update.version })}
   </a>
 }
-/** a phone's tab bar: 对话, 待处理 with its count, 日历, 待办, 事项. 我的 (every other place) is the avatar at the top left
+/** a phone's tab bar: 对话, 待我决定 with its count, 事项, 日历, 我的待办. 我的 (every other place) is the avatar at the top left
  *  of a top-level page; while one of its places is open, no tab is marked */
 export function MobileTabs({ route: full }: { route: string }) {
   const tr = useT()
   const route = full.split("?")[0]
   const n = useStoreSelector(decisionBadgeCount)
-  const tabs = [{ h: "", l: tr("core:nav.chat"), I: MessageCircleIcon }, { h: "inbox", l: tr("core:nav.inbox"), I: InboxIcon, b: n }, { h: "calendar", l: tr("core:nav.calendar"), I: CalendarIcon }, { h: "todos", l: tr("core:nav.todos"), I: ListChecksIcon }, { h: "items", l: tr("core:nav.items"), I: ListTodoIcon }]
+  const tabs = MOBILE_TAB_KEYS.map((k) => {
+    const entry = SIDEBAR_NAV.find((x) => x.l === k)!
+    return { h: entry.h, l: tr(`core:nav.${k}`), I: NAV_ICON[k], b: k === "inbox" ? n : 0 }
+  })
   return (
     <nav aria-label={tr("core:sidebar.tabs")} className="fixed inset-x-0 bottom-0 z-40 flex h-15 border-t border-sidebar-border bg-sidebar/95 pb-[env(safe-area-inset-bottom)] backdrop-blur-2xl backdrop-saturate-180 md:hidden" data-mobile-tabs>
       {tabs.map((t) => {
         const on = route === t.h
         return (
-          <a key={t.h} href={"#/" + t.h} data-tab={t.h || "chat"} aria-current={on ? "page" : undefined} className={cn("relative flex flex-1 flex-col items-center justify-center gap-0.5 type-label transition-[color,transform] duration-120 active:scale-95", on ? "text-primary" : "text-muted-foreground")}>
-            <t.I className="size-5.5" strokeWidth={on ? 1.9 : 1.5} />{t.l}
+          <a key={t.h} href={"#/" + t.h} data-tab={t.h || "chat"} aria-current={on ? "page" : undefined} className={cn("relative flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 px-0.5 type-label transition-[color,transform] duration-120 active:scale-95", on ? "text-primary" : "text-muted-foreground")}>
+            <t.I className="size-5.5 shrink-0" strokeWidth={on ? 1.9 : 1.5} /><span className="max-w-full truncate">{t.l}</span>
             {t.b ? <span className="absolute left-1/2 top-1.5 ml-2 flex h-4 min-w-4 items-center justify-center rounded-full bg-attention px-1 type-label leading-none font-semibold tabular-nums text-white ring-2 ring-sidebar">{t.b}</span> : null}
           </a>
         )

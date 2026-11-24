@@ -78,7 +78,7 @@ export default {
     request: "Request",
     toolArgs: "Tool arguments",
     title: "Permission request",
-    goInbox: "Go to pending approvals →",
+    goInbox: "Go to Decisions to approve →",
     status: {
       history: "Past request",
       open: "Awaiting approval",
