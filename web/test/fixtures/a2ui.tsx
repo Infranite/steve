@@ -1,13 +1,13 @@
 import { updateChat } from "../../src/data/live"
-import { seedMessages } from "./view-data"
+import { fixtureRawBot, fixtureShell, seedMessages } from "./view-data"
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { Toaster } from "@/components/ui/toaster"
-import { api, type A2uiSubmit, type ConversationMessage, type Shell } from "../../src/api"
+import { api, type A2uiRecord, type A2uiSubmit, type ConversationMessage } from "../../src/api"
 import { ChatView } from "../../src/chat-view"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
 import { TooltipProvider } from "../../src/components/ui/tooltip"
-import { refresh, st, emit, useStore } from "../../src/store"
+import { refresh, emit, useStore } from "../../src/store"
 
 /* ST-46: the conversation with tables and A2UI interfaces, fed through the store as the Hub sends it. The Hub is played
  * here and keeps what it was sent in localStorage, so a reload sees what was submitted. `?stream`: a reply still being
@@ -107,26 +107,27 @@ if (location.search.includes("reset")) localStorage.clear()
 const hub = load(); save(hub)
 Object.assign(window, { fixtureHub: { load, save } })
 
-const state = () => ({ version: "test", web_version: "test", workspace: { id: "default", name: "默认", description: "", item_prefix: "ST", sort: 0, created: 0 }, workspaces: [], items: [], decisions: [], recent: [], allBots: [],
-  bots: [{ id: "steve", name: "Steve", role: "你的助手", main: true, harness: "claude-code", model: null, rules: "", persona: "", proactive: 1, accept_mode: "manual", perm_mode: "auto", avatar: {}, default_project: null, prompt: null, device: null, enabled: true, revision: 1, updated: 0, workspaces: ["default"], memories: 0 }],
-  projects: [], tags: [], tagUses: {}, thread: load().thread, settings: {}, sessions: [], devices: [], runtimes: [] }) as unknown as Shell
+const state = () => fixtureShell({
+  bots: [fixtureRawBot({ id: "steve", name: "Steve", role: "你的助手", main: true })],
+})
 api.shell = async () => state()
 api.a2ui = async (id: string, a: A2uiSubmit) => {
   const s = load(); s.calls++; save(s)
   await new Promise((r) => setTimeout(r, 300))
   if (s.fail) throw new Error("Hub 暂时连不上")
   const m = s.thread.find((x) => x.id === id)!, key = `${a.block}:${a.surfaceId}`
-  m.meta.a2ui ??= {}
-  const had = (m.meta.a2ui as Record<string, any>)[key]
-  if (had) { save(s); return { already: true, message_id: had.message, action: had } }
-  const mid = `act${s.calls}`, rec = { name: a.name, label: a.label, sourceComponentId: a.sourceComponentId, context: a.context, data: a.data, at: Date.now(), message: mid }
-  ;(m.meta.a2ui as Record<string, any>)[key] = rec
+  const records: Record<string, A2uiRecord> = (m.meta.a2ui ??= {})
+  const had = records[key]
+  if (had) { save(s); seedMessages(s.thread); return { already: true, message_id: had.message, action: had } }
+  const mid = `act${s.calls}`, rec: A2uiRecord = { name: a.name, label: a.label, sourceComponentId: a.sourceComponentId, context: a.context, data: a.data, at: Date.now(), message: mid }
+  records[key] = rec
   s.thread.push(msg(mid, "me", `[A2UI action] 提交「${a.label}」\n${JSON.stringify({ version: V, action: a })}`, 10 + s.calls, { a2ui_action: { ...rec, data: undefined, ref: id } }))
   save(s)
+  seedMessages(s.thread)
   return { already: false, message_id: mid, action: rec }
 }
 await refresh()
-seedMessages(state().thread)
+seedMessages(load().thread)
 if (location.search.includes("stream")) {
   updateChat({ thinking: true, phase: "answer", draft: { t0: Date.now(), mid: "q2", thought: "", text: "我画个图：\n\n```a2ui\n" + trend.split("\n").slice(0, 2).join("\n") } })
   emit()
