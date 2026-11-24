@@ -271,6 +271,7 @@ const RATIONALE: &[Entry] = &[
     e(Spawn, "steve-hub/src/system.rs", Hub, "host facts (sw_vers, sysctl, uname, hostname)"),
     e(Fs, "steve-hub/src/nodes/mod.rs", Hub, "the Hub's own identity key directory"),
     e(Spawn, "steve-hub/src/wire/local_service.rs", Hub, "starting the Hub's own Node in a process of its own (B1)"),
+    e(Spawn, "steve-hub/src/workflow_step.rs", Hub, "isolated rquickjs workflow step subprocess (`steve-hub --workflow-step`), never a task harness"),
     e(Fs, "steve-hub/src/wire/local_service.rs", Hub, "the service Node's key, link file, pid file and log in its home (B1)"),
     e(Fs, "steve-hub/src/wire/host_node.rs", Hub, "the roots file the service Node reads (B1)"),
     e(Spawn, "steve-hub/src/nodes/tailcat.rs", Hub, "tailcat genkey and serve: the Hub's own tunnel for remote Nodes"),

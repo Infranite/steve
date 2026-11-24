@@ -47,6 +47,7 @@ pub mod system;
 pub mod validate;
 pub mod web;
 pub mod wire;
+pub mod workflow_step;
 
 pub mod upgrades;
 

@@ -117,6 +117,7 @@ Spawn	steve-hub/src/upgrades/cli.rs	1
 Spawn	steve-hub/src/upgrades/runner.rs	2
 Spawn	steve-hub/src/upgrades/supervisor.rs	2
 Spawn	steve-hub/src/wire/local_service.rs	2
+Spawn	steve-hub/src/workflow_step.rs	1
 Spawn	steve-i18n/src/lib.rs	1
 Spawn	steve-install/src/common.rs	1
 Spawn	steve-install/src/release.rs	3
