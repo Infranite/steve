@@ -129,6 +129,14 @@ impl NodeRuntime {
                 PermissionDecision::Reject => format!("{REJECT}|拒绝|reject_once"),
             })
             .collect();
+        let opened_at = now();
+        let wait = steve_types::WaitContract::new(
+            steve_types::WaitOwner::Owner,
+            steve_types::Millis(opened_at.min(request.expires_at.0)),
+            steve_types::Millis(request.expires_at.0),
+            steve_types::WaitTimeoutAction::Close,
+        )
+        .ok();
         let (d, opened) = steve_store::DecisionRows(tx).open_in(&steve_store::NewDecision {
             workspace_id: scope.workspace,
             kind: "approve".into(),
@@ -151,6 +159,7 @@ impl NodeRuntime {
                 node: self.node_id.to_string(),
                 attempt: attempt.into(),
             }),
+            wait,
         })?;
         if !opened {
             return Ok(None);

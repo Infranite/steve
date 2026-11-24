@@ -799,6 +799,13 @@ impl SecretUses {
                 requested_by: cx.bot_id.clone(),
                 question_template: None,
                 source: Some(steve_store::DecisionSource::Record),
+                wait: steve_types::WaitContract::bounded(
+                    steve_types::WaitOwner::Owner,
+                    row.created,
+                    PENDING_MS,
+                    steve_types::WaitTimeoutAction::Close,
+                )
+                .ok(),
             })?;
             UseRows(tx).set_decision(&use_id, &d.id)?;
             tx.audit(

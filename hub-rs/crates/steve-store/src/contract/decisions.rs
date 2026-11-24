@@ -103,7 +103,7 @@ pub fn delivery_summary(c: &mut impl Read, item: &str) -> Result<Option<String>>
     )
 }
 
-const COLUMNS: [&str; 19] = [
+const COLUMNS: [&str; 23] = [
     "id",
     "workspace_id",
     "kind",
@@ -123,8 +123,13 @@ const COLUMNS: [&str; 19] = [
     "revision",
     "source_revision",
     "question_template",
+    "wait_owner",
+    "wait_started_at",
+    "wait_deadline",
+    "wait_on_timeout",
 ];
 fn decode(r: &Row<'_>) -> Result<Decision> {
+    let wait = crate::wait_repo::decode_contract(r.get(19)?, r.get(20)?, r.get(21)?, r.get(22)?)?;
     Ok(Decision {
         id: r.get(0)?,
         revision: r.get(16)?,
@@ -153,6 +158,7 @@ fn decode(r: &Row<'_>) -> Result<Decision> {
         undo: r
             .get::<Option<Json<DecisionUndo>>>(15)?
             .map(|value| value.0),
+        wait,
     })
 }
 
@@ -275,6 +281,9 @@ impl DecisionRows<'_, W<'_>> {
             .transpose()?;
         let started = std::time::Instant::now();
         let id = uid("dec");
+        let created = now();
+        let wait = crate::wait_repo::default_decision_contract(self.0, d, created)?;
+        let wait_owner = wait.owner.to_code();
         let options = serde_json::to_string(d.options.as_deref().unwrap_or_default())?;
         let mut insert = Query::insert();
         insert
@@ -295,6 +304,10 @@ impl DecisionRows<'_, W<'_>> {
                 "created",
                 "source_revision",
                 "question_template",
+                "wait_owner",
+                "wait_started_at",
+                "wait_deadline",
+                "wait_on_timeout",
             ])
             .values_panic([
                 id.as_str().into(),
@@ -309,9 +322,13 @@ impl DecisionRows<'_, W<'_>> {
                 options.into(),
                 "open".into(),
                 d.requested_by.as_str().into(),
-                now().into(),
+                created.into(),
                 source.as_deref().into(),
                 template.as_deref().into(),
+                wait_owner.as_str().into(),
+                wait.started_at.0.into(),
+                wait.deadline.0.into(),
+                wait.on_timeout.as_str().into(),
             ]);
         if source.is_some() {
             insert.on_conflict(
@@ -424,18 +441,28 @@ impl DecisionRows<'_, W<'_>> {
             return Ok(false);
         };
         let reopening = to == DecisionStatus::Open;
-        let n = self.0.exec(
-            Query::update()
-                .table("decisions")
-                .value("status", to.as_str())
-                .value("result", (!result.is_null()).then(|| result.to_string()))
-                .value("resolved", (!reopening).then(now))
-                .value("undo", undo.map(serde_json::to_string).transpose()?)
-                .value("revision", decision.revision + i64::from(reopening))
-                .and_where(Expr::col("id").eq(decision.id.as_str()))
-                .and_where(Expr::col("revision").eq(decision.revision))
-                .and_where(Expr::col("status").eq(decision.status.as_str())),
-        )?;
+        let at = now();
+        let mut update = Query::update();
+        update
+            .table("decisions")
+            .value("status", to.as_str())
+            .value("result", (!result.is_null()).then(|| result.to_string()))
+            .value("resolved", (!reopening).then_some(at))
+            .value("undo", undo.map(serde_json::to_string).transpose()?)
+            .value("revision", decision.revision + i64::from(reopening))
+            .and_where(Expr::col("id").eq(decision.id.as_str()))
+            .and_where(Expr::col("revision").eq(decision.revision))
+            .and_where(Expr::col("status").eq(decision.status.as_str()));
+        if reopening {
+            let span = std::cmp::max(
+                decision.wait.deadline.0 - decision.wait.started_at.0,
+                steve_types::wait::WAIT_LIMIT_MIN_MS,
+            );
+            update
+                .value("wait_started_at", at)
+                .value("wait_deadline", at.saturating_add(span));
+        }
+        let n = self.0.exec(&update)?;
         if n > 0 {
             if matches!(change, DecisionChange::Expire | DecisionChange::Supersede) {
                 let action = if change == DecisionChange::Expire {

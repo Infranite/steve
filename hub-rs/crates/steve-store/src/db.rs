@@ -266,6 +266,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/125.sql"),
     // 126: remove retired dynamic work-graph tables and steve_workflow tool pins.
     include_str!("../migrations/126.sql"),
+    // 127: unified WaitContract columns, bounds, and due indexes across durable wait tables.
+    include_str!("../migrations/127.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

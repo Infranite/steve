@@ -4,6 +4,16 @@ export default {
     turnRepeatedFailure: "The same tool action failed five times. Steve requested a stop.",
     turnNoProgress: "There was no verified progress for fifteen minutes of observable work. Steve requested a stop.",
     mergePullRequest: "Merge PR #{{number}} ({{repo}})?",
+    waitTimeout: "{{kind}} timed out ({{subject}}). Choose how to proceed.",
+    waitKind: {
+      dependency: "Prerequisite wait",
+      decision: "Decision wait",
+      channel_draft: "Channel draft",
+      item_operation: "Item operation",
+      external_effect: "External action",
+      mail_draft: "Mail draft",
+      flow_wait: "Automation wait",
+    },
   },
   feed: {
     viewItem: "View item",

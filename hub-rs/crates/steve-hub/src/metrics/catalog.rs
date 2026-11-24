@@ -73,6 +73,16 @@ pub(super) fn describe() {
         Count,
         "Open decisions in the Hub projection. Label: tier (decide, draft, or folded)."
     );
+    describe_counter!(
+        "steve_wait_timeouts_total",
+        Count,
+        "Durable waits settled by the unified WaitContract due sweep. Labels: kind, action."
+    );
+    describe_histogram!(
+        "steve_wait_sweep_duration_seconds",
+        Seconds,
+        "Duration of one unified WaitContract due sweep."
+    );
     // HTTP (metrics::http, the outermost layer)
     describe_counter!(
         "steve_http_requests_total",

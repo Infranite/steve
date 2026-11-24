@@ -1021,6 +1021,7 @@ async fn every_registered_decision_subject_has_success_and_refusal_contract() {
                         updated: now,
                         sent: None,
                         delivery_version: None,
+                        wait: None,
                     },
                 )
             })

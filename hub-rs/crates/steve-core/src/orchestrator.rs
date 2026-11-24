@@ -2079,6 +2079,7 @@ impl Tx<'_> {
                 requested_by: Self::by(s),
                 question_template: None,
                 source: Some(source),
+                wait: None,
             })?;
             flow_quiet(
                 self.db(),
@@ -2176,6 +2177,7 @@ impl Tx<'_> {
                 cycle: item.cycle,
                 revision: self.item(item_id)?.delivery_revision + 1,
             }),
+            wait: None,
         })?;
         self.mark_deliver(&item.workspace_id, item_id, &Self::by(s), Some(&d.id)); // stats (ST3)
         self.request_delivery_close(
@@ -2255,6 +2257,7 @@ impl Tx<'_> {
             requested_by: Self::by(s),
             question_template: None,
             source: Some(source),
+            wait: None,
         })?;
         self.mark(&s.id, Mark::Approval);
         Ok(())

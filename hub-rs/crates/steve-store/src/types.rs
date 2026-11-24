@@ -594,6 +594,7 @@ pub struct Decision {
     pub revision: i64,
     #[serde(skip_serializing)]
     pub source_revision: Option<crate::DecisionSource>,
+    pub wait: steve_types::WaitContract,
 }
 
 impl Decision {
@@ -628,6 +629,7 @@ impl Decision {
             undo: json_col(r, "undo", None)?,
             revision: r.get("revision")?,
             source_revision: json_col(r, "source_revision", None)?,
+            wait: crate::wait_repo::decode_contract_rusqlite(r)?,
         })
     }
 }

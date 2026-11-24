@@ -166,6 +166,10 @@ pub struct NewDecision {
     pub requested_by: String,
     #[serde(default)]
     pub source: Option<DecisionSource>,
+    /// Optional explicit wait contract; when omitted, [`crate::DecisionRows::open_in`] derives a
+    /// bounded contract from the workspace's named wait settings.
+    #[serde(default)]
+    pub wait: Option<steve_types::WaitContract>,
 }
 
 pub struct Decisions<'a>(&'a Store);

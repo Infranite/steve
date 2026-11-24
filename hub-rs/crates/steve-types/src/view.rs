@@ -104,6 +104,9 @@ pub struct ItemView {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(test, ts(as = "Option<Vec<ItemWait>>", optional))]
     pub waits: Vec<ItemWait>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub prerequisite_wait: Option<WaitContract>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(test, ts(as = "Option<Vec<OperationBlocker>>", optional))]
     pub op_blockers: Vec<OperationBlocker>,
@@ -239,6 +242,9 @@ pub struct OperationBlocker {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub wait: Option<WaitContract>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -346,6 +352,9 @@ pub struct DecisionView {
     pub folded: Option<FoldReason>,
     #[cfg_attr(test, ts(type = "number"))]
     pub revision: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub wait: Option<WaitContract>,
 }
 
 /// The text shown on a decision card.
@@ -368,6 +377,10 @@ pub enum DecisionPrompt {
         #[cfg_attr(test, ts(type = "number"))]
         number: i64,
         repo: String,
+    },
+    WaitTimeout {
+        wait_kind: WaitKind,
+        subject: String,
     },
 }
 

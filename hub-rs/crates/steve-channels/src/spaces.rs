@@ -602,6 +602,7 @@ pub fn open_new_space_decision(
         source: Some(steve_store::DecisionSource::Revision {
             revision: format!("space:{settled}"),
         }),
+        wait: None,
     })?;
     Ok(d.id)
 }

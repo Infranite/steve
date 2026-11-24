@@ -10,6 +10,7 @@ import type { RawJson } from "./RawJson";
 import type { Said } from "./Said";
 import type { SessionId } from "./SessionId";
 import type { SpaceId } from "./SpaceId";
+import type { WaitContract } from "./WaitContract";
 import type { WorkspaceId } from "./WorkspaceId";
 
 /**
@@ -39,4 +40,4 @@ tier: DecisionTier,
 /**
  * Why it is folded away (`tier` = `folded`).
  */
-folded: FoldReason | null, revision: number, };
+folded: FoldReason | null, revision: number, wait?: WaitContract, };
