@@ -41,7 +41,8 @@ impl Extension for FeishuBot {
         };
         let registrations =
             feishu::app_registration::Registrations::new(s.connections.clone(), bases);
-        let api_routes = feishu::app_registration::routes(registrations.clone());
+        let api_routes = feishu::app_registration::routes(registrations.clone())
+            .with_state(s.channels.modules().clone());
         // app registrations a stop interrupted: polled until their own deadline, checks resumed
         let resume = Job::new("feishu.registrations", async move {
             match registrations.resume() {
@@ -97,7 +98,8 @@ impl Extension for FeishuSelf {
             s.connections.clone(),
             user.clone(),
         ))
-        .merge(feishu::user_routes(s.connections.clone()));
+        .merge(feishu::user_routes(s.connections.clone()))
+        .with_state(s.channels.modules().clone());
         Ok(Mounted::default().routes(api_routes).lifecycle(
             feishu::auth::USER_ADAPTER,
             Arc::new(feishu::SelfPollHook::new(s.channels.clone(), user)),
