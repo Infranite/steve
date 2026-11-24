@@ -565,6 +565,23 @@ fn decode_notice(r: &Row<'_>) -> Result<ThreadNotice> {
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
 
+fn next_message_created(w: &mut W<'_>, ws: &str, space: &str, at: i64) -> Result<i64> {
+    let last: Option<i64> = w
+        .one(
+            Query::select()
+                .expr(Expr::cust("MAX(created)"))
+                .from("messages")
+                .and_where(Expr::col("workspace_id").eq(ws))
+                .and_where(Expr::col("space").eq(space)),
+            |r| r.get(0),
+        )?
+        .flatten();
+    Ok(match last {
+        Some(max_created) => std::cmp::max(at, max_created + 1),
+        None => at,
+    })
+}
+
 fn insert_message(
     w: &mut W<'_>,
     ws: &str,
@@ -576,6 +593,7 @@ fn insert_message(
     at: i64,
 ) -> Result<String> {
     let id = uid("msg");
+    let created = next_message_created(w, ws, space, at)?;
     let meta_str = truthy(meta)
         .then(|| serde_json::to_string(meta))
         .transpose()?;
@@ -599,7 +617,7 @@ fn insert_message(
                 author.into(),
                 text.into(),
                 item_id.into(),
-                at.into(),
+                created.into(),
                 meta_str.as_deref().into(),
             ]),
     )?;
@@ -1008,6 +1026,40 @@ pub fn claim_head(
     )?;
     if updated == 0 {
         return Ok(None);
+    }
+    // A message that waited behind an earlier turn (`reply_revision == 0`) leaves the held strip
+    // and enters the timeline after the previous turn's reply, keeping chronological order and
+    // letting `history_before` / `resume_for` see what Steve just answered.
+    if head.reply_revision == 0
+        && let Some(origin_created) = w.one(
+            Query::select()
+                .column("created")
+                .from("messages")
+                .and_where(Expr::col("id").eq(&head.origin_message_id))
+                .and_where(Expr::col("workspace_id").eq(ws)),
+            |r| r.get::<i64>(0),
+        )?
+        && let Some(max_other) = w
+            .one(
+                Query::select()
+                    .expr(Expr::cust("MAX(created)"))
+                    .from("messages")
+                    .and_where(Expr::col("workspace_id").eq(ws))
+                    .and_where(Expr::col("space").eq(space))
+                    .and_where(Expr::col("id").ne(&head.origin_message_id)),
+                |r| r.get::<Option<i64>>(0),
+            )?
+            .flatten()
+        && max_other >= origin_created
+    {
+        let released_at = std::cmp::max(at, max_other + 1);
+        w.exec(
+            Query::update()
+                .table("messages")
+                .value("created", released_at)
+                .and_where(Expr::col("id").eq(&head.origin_message_id))
+                .and_where(Expr::col("workspace_id").eq(ws)),
+        )?;
     }
     w.emit(DomainEvent::from(WorkEvent::Message {
         id: head.origin_message_id.clone().into(),

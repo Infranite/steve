@@ -81,6 +81,7 @@ async fn boot_on(
         ("STEVE_ADAPTER_CLAUDE", "/usr/bin/false".into()),
         ("STEVE_ADAPTER_CODEX", "/usr/bin/false".into()),
         ("STEVE_ADAPTER_PI", "/usr/bin/false".into()),
+        ("STEVE_NODE_MODE", "local".into()),
         ("STEVE_NODE_LISTEN", "0".into()),
         (
             "STEVE_WEB_DIR",
@@ -1391,4 +1392,98 @@ async fn w34_thread_replay_hub() {
     }
 
     report.finish(18);
+}
+
+#[tokio::test]
+async fn failing_thread_recovery_is_reported_and_hub_still_serves_in_process() {
+    let e = Env::start().await;
+    let home_path = e.home_path.clone();
+    let db_path = home_path.join("steve/data/steve.sqlite3");
+    let cookie = e.owner_cookie.clone();
+    let _home = e._home;
+    e.jobs.stop().await;
+    drop(e.app);
+    drop(e.projection);
+    drop(e.store);
+
+    steve_store::testkit::hub::node_process::break_thread_recovery(&db_path).unwrap();
+
+    let port: u16 = 18701;
+    let mut vars: HashMap<String, String> = HashMap::new();
+    for (k, v) in [
+        ("HOME", home_path.display().to_string()),
+        ("STEVE_HOME", home_path.join("steve").display().to_string()),
+        ("STEVE_PORT", port.to_string()),
+        ("STEVE_HOST", "127.0.0.1".into()),
+        ("STEVE_PUBLIC_URL", format!("http://127.0.0.1:{port}")),
+        ("STEVE_DEV_LOGIN", "1".into()),
+        ("STEVE_REPO", "/nonexistent".into()),
+        ("STEVE_VAULT_KEYSTORE", "file".into()),
+        ("STEVE_FORBID_REAL_HOSTS", "1".into()),
+        ("STEVE_NO_RESUME", "0".into()),
+        ("STEVE_BACKUP", "off".into()),
+        ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),
+        ("STEVE_ADAPTER_CLAUDE", "/usr/bin/false".into()),
+        ("STEVE_ADAPTER_CODEX", "/usr/bin/false".into()),
+        ("STEVE_ADAPTER_PI", "/usr/bin/false".into()),
+        ("STEVE_NODE_MODE", "local".into()),
+        ("STEVE_NODE_LISTEN", "0".into()),
+        (
+            "STEVE_WEB_DIR",
+            home_path.join("no-web").display().to_string(),
+        ),
+    ] {
+        vars.insert(k.into(), v);
+    }
+    let vars = Arc::new(vars);
+    let get = {
+        let vars = vars.clone();
+        move |k: &str| vars.get(k).cloned()
+    };
+    let cfg = Arc::new(Config::from_vars(&get).expect("config"));
+    let bus = Bus::new(Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
+    let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
+    let st = AppState::new(cfg.clone(), w.backend, w.domain, bus)
+        .with_modules(w.modules)
+        .with_oidc(w.oidc.clone());
+    steve_hub::app::boot(&st)
+        .await
+        .expect("boot must not abort on broken thread recovery");
+    st.domain
+        .ready()
+        .await
+        .expect("ready records failure without aborting");
+    let jobs = st.jobs.clone();
+    let app = steve_hub::app::app(st, w.auth, w.mcp, w.module_routes, w.root_routes);
+
+    let health_resp = send_oneshot(
+        &app,
+        Request::builder()
+            .method("GET")
+            .uri("/healthz")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(health_resp.status().as_u16(), 200);
+    let health_bytes = health_resp.into_body().collect().await.unwrap().to_bytes();
+    let health: Value = serde_json::from_slice(&health_bytes).unwrap();
+    assert_eq!(health["ok"], true, "{health}");
+    assert_eq!(health["recovery"]["state"], "failed", "{health}");
+
+    let shell_resp = send_oneshot(
+        &app,
+        Request::builder()
+            .method("GET")
+            .uri("/api/shell")
+            .header("cookie", &cookie)
+            .header("x-steve-ws", WS)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(shell_resp.status().as_u16(), 200);
+    jobs.stop().await;
 }

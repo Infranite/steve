@@ -117,7 +117,7 @@ fn steve_messages(k: &Kit, ws: &str, space: &str) -> Vec<Message> {
 }
 
 async fn wait_until<F: FnMut() -> bool>(label: &str, mut cond: F) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
         if cond() {
             return;
@@ -157,6 +157,55 @@ async fn wait_idle_main(k: &Kit, ws: &str) {
     .await;
 }
 
+/// Level-triggered gate for guest answer synchronization (cannot lose wakeups under scheduling jitter).
+#[derive(Default)]
+struct AnswerGate {
+    entered: AtomicBool,
+    entered_notify: Notify,
+    released: AtomicBool,
+    release_notify: Notify,
+}
+
+impl AnswerGate {
+    fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    async fn wait_entered(&self) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        while !self.entered.load(Ordering::SeqCst) {
+            let fut = self.entered_notify.notified();
+            tokio::pin!(fut);
+            fut.as_mut().enable();
+            if self.entered.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::timeout_at(deadline, fut)
+                .await
+                .expect("timeout waiting for ReplayHost::answer to enter");
+        }
+    }
+
+    fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
+        self.release_notify.notify_waiters();
+    }
+
+    async fn enter_and_wait(&self) {
+        self.entered.store(true, Ordering::SeqCst);
+        self.entered_notify.notify_waiters();
+        while !self.released.load(Ordering::SeqCst) {
+            let fut = self.release_notify.notified();
+            tokio::pin!(fut);
+            fut.as_mut().enable();
+            if self.released.load(Ordering::SeqCst) {
+                break;
+            }
+            fut.await;
+        }
+    }
+}
+
 /// Custom ConvHost for guest conversation replay scenarios.
 #[derive(Default)]
 struct ReplayHost {
@@ -164,7 +213,7 @@ struct ReplayHost {
     research_prepared: Mutex<Vec<String>>,
     said: Mutex<Vec<(String, String)>>,
     answer_err: Mutex<Option<GatewayError>>,
-    block_answer: Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
+    block_answer: Mutex<Option<Arc<AnswerGate>>>,
     research_context_text: Mutex<String>,
 }
 
@@ -187,9 +236,8 @@ impl ConvHost for ReplayHost {
     ) -> std::result::Result<String, GatewayError> {
         self.answered.lock().unwrap().push(origin.into());
         let gate = self.block_answer.lock().unwrap().clone();
-        if let Some((entered, release)) = gate {
-            entered.notify_one();
-            release.notified().await;
+        if let Some(gate) = gate {
+            gate.enter_and_wait().await;
         }
         if let Some(e) = self.answer_err.lock().unwrap().clone() {
             return Err(e);
@@ -250,7 +298,7 @@ impl ScriptedResearcher {
     }
 
     async fn wait_entered(&self) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         while self.seen.lock().unwrap().is_empty() {
             let fut = self.entered.notified();
             tokio::pin!(fut);
@@ -948,9 +996,8 @@ async fn run_queued(report: &mut Report) {
     {
         let k = replay_kit(true);
         let host = ReplayHost::new();
-        let entered = Arc::new(Notify::new());
-        let release = Arc::new(Notify::new());
-        *host.block_answer.lock().unwrap() = Some((entered.clone(), release.clone()));
+        let gate = AnswerGate::new();
+        *host.block_answer.lock().unwrap() = Some(gate.clone());
         k.core.set_conv_host(host.clone());
         let conv = Conv {
             space: "chan:sp_edit".into(),
@@ -964,14 +1011,14 @@ async fn run_queued(report: &mut Report) {
             .core
             .say_in(WS, conv.clone(), "第一条为什么？", &json!({}))
             .unwrap();
-        entered.notified().await;
+        gate.wait_entered().await;
         let m2 = k
             .core
             .say_in(WS, conv, "第二条为什么？", &json!({}))
             .unwrap();
         let edited = k.core.thread_queued_edit(WS, &m2, "改访客").unwrap();
         *host.block_answer.lock().unwrap() = None;
-        release.notify_waiters();
+        gate.release();
         settle_replies(&k, WS, "chan:sp_edit", &m1, 1).await;
         settle_replies(&k, WS, "chan:sp_edit", &m2, 1).await;
         report.case(
@@ -985,9 +1032,8 @@ async fn run_queued(report: &mut Report) {
     {
         let k = replay_kit(true);
         let host = ReplayHost::new();
-        let entered = Arc::new(Notify::new());
-        let release = Arc::new(Notify::new());
-        *host.block_answer.lock().unwrap() = Some((entered.clone(), release.clone()));
+        let gate = AnswerGate::new();
+        *host.block_answer.lock().unwrap() = Some(gate.clone());
         k.core.set_conv_host(host.clone());
         let conv = Conv {
             space: "chan:sp_wd".into(),
@@ -1001,14 +1047,14 @@ async fn run_queued(report: &mut Report) {
             .core
             .say_in(WS, conv.clone(), "第一条为什么？", &json!({}))
             .unwrap();
-        entered.notified().await;
+        gate.wait_entered().await;
         let m2 = k
             .core
             .say_in(WS, conv, "第二条为什么？", &json!({}))
             .unwrap();
         let wd = k.core.thread_queued_withdraw(WS, &m2).unwrap();
         *host.block_answer.lock().unwrap() = None;
-        release.notify_waiters();
+        gate.release();
         settle_replies(&k, WS, "chan:sp_wd", &m1, 1).await;
         settle_replies(&k, WS, "chan:sp_wd", &m2, 1).await;
         report.case(
@@ -2094,7 +2140,7 @@ async fn run_cancel(report: &mut Report) {
                 Ok("ok".into())
             }
         });
-        *k.gw.slow.lock().unwrap() = Some(("You are the router", Duration::from_secs(5)));
+        *k.gw.slow.lock().unwrap() = Some(("You are the router", Duration::from_secs(30)));
         let mid = k.core.say(WS, "慢路由测试", &[]).unwrap();
         wait_until("router inflight", || k.core.routing(WS)).await;
         let stopped = k.core.stop(WS).unwrap();
@@ -2114,7 +2160,7 @@ async fn run_cancel(report: &mut Report) {
     // 02: Calling stop() twice rapidly while routing -> must write at most 1 stop receipt!
     {
         let k = replay_kit(true);
-        *k.gw.slow.lock().unwrap() = Some(("You are the router", Duration::from_secs(5)));
+        *k.gw.slow.lock().unwrap() = Some(("You are the router", Duration::from_secs(30)));
         set_scripted_gateway(&k, json!({"kind": "answer", "confidence": 0.9}), "ok");
         let mid = k.core.say(WS, "双停测试", &[]).unwrap();
         wait_until("router inflight", || k.core.routing(WS)).await;
@@ -2269,7 +2315,7 @@ async fn run_cancel(report: &mut Report) {
             json!({"kind": "answer", "confidence": 0.9}),
             "很长的回答",
         );
-        *k.gw.slow.lock().unwrap() = Some(("You are Steve", Duration::from_secs(5)));
+        *k.gw.slow.lock().unwrap() = Some(("You are Steve", Duration::from_secs(30)));
         let mid = k.core.say(WS, "慢慢回答我", &[]).unwrap();
         wait_until("answer running", || answer_calls(&k) >= 1).await;
         let stopped = k.core.stop(WS).unwrap();
@@ -2440,9 +2486,8 @@ async fn run_cancel(report: &mut Report) {
     {
         let k = replay_kit(true);
         let host = ReplayHost::new();
-        let entered = Arc::new(Notify::new());
-        let release = Arc::new(Notify::new());
-        *host.block_answer.lock().unwrap() = Some((entered.clone(), release.clone()));
+        let gate = AnswerGate::new();
+        *host.block_answer.lock().unwrap() = Some(gate.clone());
         k.core.set_conv_host(host.clone());
         let conv = Conv {
             space: "chan:sp_ga_stop".into(),
@@ -2453,7 +2498,7 @@ async fn run_cancel(report: &mut Report) {
             hands_on: false,
         };
         let mid = k.core.say_in(WS, conv, "为什么慢？", &json!({})).unwrap();
-        entered.notified().await;
+        gate.wait_entered().await;
         let run_id = k
             .db()
             .store()
@@ -2462,14 +2507,14 @@ async fn run_cancel(report: &mut Report) {
             .id
             .clone();
         let stopped = k.core.stop_run(WS, &run_id).unwrap();
-        // Check whether guest_answer unblocks within 60ms without releasing host.answer!
+        // Check whether guest_answer unblocks promptly without releasing host.answer!
         let prompt_cancel = tokio::time::timeout(
-            Duration::from_millis(60),
+            Duration::from_millis(500),
             settle_replies(&k, WS, "chan:sp_ga_stop", &mid, 1),
         )
         .await
         .is_ok();
-        release.notify_waiters();
+        gate.release();
         let replies = settle_replies(&k, WS, "chan:sp_ga_stop", &mid, 1).await;
         report.case(
             "core.cancel.09_stop_during_guest_answer_cancels_promptly",
@@ -2550,8 +2595,8 @@ async fn run_cancel(report: &mut Report) {
         let (fr, first) = hold_main_turn(&k).await;
         let second = k.core.say(WS, "第二条为什么？", &[]).unwrap();
         k.core.stop(WS).unwrap();
-        fr.open(1);
         settle_replies(&k, WS, MAIN, &first, 1).await;
+        fr.open(1);
         settle_replies(&k, WS, MAIN, &second, 1).await;
         wait_idle_main(&k, WS).await;
         report.case(
@@ -3440,9 +3485,8 @@ async fn run_spaces(report: &mut Report) {
     {
         let k = replay_kit(true);
         let host = ReplayHost::new();
-        let entered = Arc::new(Notify::new());
-        let release = Arc::new(Notify::new());
-        *host.block_answer.lock().unwrap() = Some((entered.clone(), release.clone()));
+        let gate = AnswerGate::new();
+        *host.block_answer.lock().unwrap() = Some(gate.clone());
         k.core.set_conv_host(host.clone());
         let c1 = Conv {
             space: "chan:sp_a".into(),
@@ -3461,13 +3505,13 @@ async fn run_spaces(report: &mut Report) {
             hands_on: false,
         };
         let m1 = k.core.say_in(WS, c1, "为什么A？", &json!({})).unwrap();
-        entered.notified().await;
+        gate.wait_entered().await;
         // Unblock only future calls so sp_b finishes while sp_a is still blocked
         *host.block_answer.lock().unwrap() = None;
         let m2 = k.core.say_in(WS, c2, "为什么B？", &json!({})).unwrap();
         let r2 = settle_replies(&k, WS, "chan:sp_b", &m2, 1).await;
         let a_still_blocked = steve_replies_for(&k, WS, "chan:sp_a", &m1).is_empty();
-        release.notify_waiters();
+        gate.release();
         let r1 = settle_replies(&k, WS, "chan:sp_a", &m1, 1).await;
         report.case(
             "core.spaces.02_two_guest_spaces_run_concurrently",

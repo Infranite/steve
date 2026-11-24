@@ -687,3 +687,179 @@ fn receipt_dispatch_contract_enforces_real_refs() {
     };
     assert_eq!(receipt.dispatch_ref_id, None);
 }
+
+#[test]
+fn claiming_a_held_message_places_it_after_the_preceding_reply() {
+    let t = with_steve();
+    let s = &t.store;
+    let submit = |key: &str, text: &str| {
+        let SubmitOutcome::Accepted { message_id, .. } = s
+            .write(|w| {
+                thread::submit_message(
+                    w,
+                    &SubmitInput {
+                        ws: WS,
+                        space: "steve",
+                        actor_key: "u1",
+                        submit_key: key,
+                        payload_digest: key,
+                        text,
+                        item_id: None,
+                        meta: &serde_json::Value::Null,
+                        user_id: Some("u1"),
+                        project_id: None,
+                        conv_json: None,
+                        to_item: None,
+                        to_reply_to: None,
+                        file_ids: &[],
+                        files_json: None,
+                        mentions_json: None,
+                        enqueue_task: true,
+                        validate_refs: false,
+                    },
+                )
+            })
+            .unwrap()
+        else {
+            panic!("expected accepted");
+        };
+        message_id
+    };
+
+    let m1 = submit("k_hold_1", "慢慢说");
+    let t1 = s
+        .write(|w| thread::claim_head(w, WS, "steve", "lease_1", 100))
+        .unwrap()
+        .unwrap();
+    let m2 = submit("k_hold_2", "排队一");
+    let m3 = submit("k_hold_3", "排队二");
+    assert_eq!(
+        s.write(|w| thread::edit_queued(w, WS, &m2, "排队一改过", "k_hold_2_ed"))
+            .unwrap(),
+        EditQueuedOutcome::Updated
+    );
+    assert!(matches!(
+        s.write(|w| thread::withdraw_queued(w, WS, &m3)).unwrap(),
+        WithdrawOutcome::Withdrawn { .. }
+    ));
+
+    // Preceding turn stops and writes its reply; m2 is still queued.
+    let stop_meta = json!({"origin": m1, "stopped": true});
+    let committed = s
+        .write(|w| {
+            thread::commit_reply(
+                w,
+                &CommitReplyInput {
+                    task_id: &t1.id,
+                    lease_token: "lease_1",
+                    expected_generation: t1.generation,
+                    allow_cancelled_stop: true,
+                    outcome: "stopped",
+                    reply_text: Some("好，停下了。要我换个方式就直接说。"),
+                    existing_reply_id: None,
+                    reply_item_id: None,
+                    reply_meta: &stop_meta,
+                    error_code: None,
+                    route_kind: "answer",
+                    model_kind: "answer",
+                    route_guard: None,
+                    route_model: None,
+                    route_confidence: None,
+                    route_signals: &[],
+                    route_fallback: false,
+                    route_ms: 0,
+                    route_outcome: None,
+                    item_id: None,
+                    dispatch: ReceiptDispatch::NoDispatch,
+                    delivery_ref_id: None,
+                    model_call_id: None,
+                    user_id: Some("u1"),
+                    project_id: None,
+                    answer_model: None,
+                    harness: None,
+                    harness_session: None,
+                    tools: 0,
+                    turns: 0,
+                    first_text_ms: None,
+                    error_detail: None,
+                    record_attention_commit: false,
+                },
+            )
+        })
+        .unwrap();
+    assert!(matches!(committed, CommitOutcome::Committed { .. }));
+
+    // Claiming the held message advances its created timestamp strictly after the stop reply,
+    // and its reply follows strictly after it.
+    let t2 = s
+        .write(|w| thread::claim_head(w, WS, "steve", "lease_2", 100))
+        .unwrap()
+        .unwrap();
+    assert_eq!(t2.origin_message_id, m2);
+    let reply_meta = json!({"origin": m2});
+    let committed2 = s
+        .write(|w| {
+            thread::commit_reply(
+                w,
+                &CommitReplyInput {
+                    task_id: &t2.id,
+                    lease_token: "lease_2",
+                    expected_generation: t2.generation,
+                    allow_cancelled_stop: false,
+                    outcome: "answered",
+                    reply_text: Some("评论是纯文本。"),
+                    existing_reply_id: None,
+                    reply_item_id: None,
+                    reply_meta: &reply_meta,
+                    error_code: None,
+                    route_kind: "answer",
+                    model_kind: "answer",
+                    route_guard: None,
+                    route_model: None,
+                    route_confidence: None,
+                    route_signals: &[],
+                    route_fallback: false,
+                    route_ms: 0,
+                    route_outcome: None,
+                    item_id: None,
+                    dispatch: ReceiptDispatch::NoDispatch,
+                    delivery_ref_id: None,
+                    model_call_id: None,
+                    user_id: Some("u1"),
+                    project_id: None,
+                    answer_model: None,
+                    harness: None,
+                    harness_session: None,
+                    tools: 0,
+                    turns: 0,
+                    first_text_ms: None,
+                    error_detail: None,
+                    record_attention_commit: false,
+                },
+            )
+        })
+        .unwrap();
+    assert!(matches!(committed2, CommitOutcome::Committed { .. }));
+
+    let (views, _) = s
+        .read(|r| {
+            r.message_views().history(
+                WS,
+                &steve_store::views::Page {
+                    before: None,
+                    limit: 20,
+                },
+            )
+        })
+        .unwrap();
+    let texts: Vec<&str> = views.iter().rev().map(|v| v.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        [
+            "慢慢说",
+            "好，停下了。要我换个方式就直接说。",
+            "排队一改过",
+            "评论是纯文本。",
+        ]
+    );
+}

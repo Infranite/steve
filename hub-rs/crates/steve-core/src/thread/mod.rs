@@ -738,9 +738,22 @@ impl Core {
                 continue;
             };
 
-            let _activity = self.store().store().activity("thread_task").await;
             let stop = Stop::default();
             lock(&self.0.thread.stops).insert(task.id.clone(), stop.clone());
+            // Sync durable cancel state in case `stop` / `stop_run` committed in the window
+            // between `claim_head` and `stops.insert`.
+            if task.cancel_requested_at.is_some()
+                || self
+                    .store()
+                    .store()
+                    .read(|r| thread::task_by_id(r, &task.id))
+                    .ok()
+                    .flatten()
+                    .is_some_and(|t| t.cancel_requested_at.is_some())
+            {
+                stop.stop();
+            }
+            let _activity = self.store().store().activity("thread_task").await;
             let c = self.clone();
             let t_clone = task.clone();
             let l_clone = lease.clone();

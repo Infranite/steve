@@ -188,6 +188,25 @@ impl Core {
                 Some(&e.to_string()),
             );
         }
+        // If `stop` / `stop_run` committed right before `set_task_token` or a non-stop
+        // `commit_reply`, that commit returned `Fenced` while leaving this task `claimed` under
+        // our lease with `cancel_requested_at != NULL`. Settle it cleanly as `stopped` so the
+        // space head never stays stuck in `claimed`.
+        let still_claimed_cancelled = self
+            .store()
+            .store()
+            .read(|r| thread::task_by_id(r, &task.id))
+            .ok()
+            .flatten()
+            .is_some_and(|cur| {
+                cur.status == "claimed"
+                    && cur.lease_token.as_deref() == Some(lease)
+                    && cur.generation == task.generation
+                    && cur.cancel_requested_at.is_some()
+            });
+        if still_claimed_cancelled {
+            let _ = self.commit_stopped(task, lease, &steps, t0, &RouteInfo::default());
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

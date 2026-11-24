@@ -912,6 +912,9 @@ pub struct CoreDomain {
     pub nodes: Option<Arc<crate::nodes::NodeService>>,
     /// The connections' runs (long connections, pollers): stopped with the Hub.
     pub lifecycle: Option<steve_channels::lifecycle::ConnectionRuntime>,
+    /// Set when `thread_recover` failed at boot so `ready` retries and reports failure on `/healthz`
+    /// instead of aborting startup before the Hub serves or the Node reconciles.
+    pub thread_recover_failed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// How long the Hub's shutdown waits for the local Node to stop its harnesses.
@@ -929,12 +932,19 @@ impl Domain for CoreDomain {
     }
     async fn recover(&self) -> BResult<()> {
         let c = self.core.clone();
+        let recover_failed = self.thread_recover_failed.clone();
         blocking(move || {
             // before anything resumes: turns left open were cut by the restart
             super::acp_stats::interrupt_open(c.store().store(), steve_store::now());
             c.recover()?;
-            /* research runs cut off by the restart */
-            c.thread_recover()
+            // Main-conversation recovery trouble is reported on `/healthz` (`recovery`), never a
+            // reason to abort Hub startup or hold back Node reconciliation.
+            if let Err(e) = c.thread_recover() {
+                tracing::error!("thread recovery at boot: {e}");
+                recover_failed.store(true, std::sync::atomic::Ordering::SeqCst);
+                crate::recovery::failed(&e.to_string());
+            }
+            Ok(())
         })
         .await
     }
@@ -990,8 +1000,13 @@ impl Domain for CoreDomain {
     /// (`recovery`), and its durable intent stays for the next boot.
     async fn ready(&self) -> BResult<()> {
         let c = self.core.clone();
+        let recover_failed = self.thread_recover_failed.clone();
         let r = blocking(move || {
             c.ready();
+            if recover_failed.load(std::sync::atomic::Ordering::SeqCst) {
+                c.thread_recover()?;
+                recover_failed.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
             c.thread_ready()
         })
         .await;
