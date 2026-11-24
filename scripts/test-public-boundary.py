@@ -70,11 +70,13 @@ class PublicBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             paths = ["docs/design.md", "docs/ST-9/prototype.html", "hub-rs/README.md", "web/DESIGN.md",
-                     "README.md", "docs/deployment.md", "docs/releases/unreleased/ST-9.md", "docs/assets/logo.svg",
+                     "docs/releases/draft.md",
+                     "README.md", "docs/deployment.md", "docs/releases/0.11.0.md", "docs/assets/logo.svg",
                      "hub-rs/crates/a/tests/fixtures/x/README.md"]
             found = boundary.scan(root, paths)
             self.assertEqual(sorted(x["path"] for x in found if x["rule"] == "process-document"),
-                             ["docs/ST-9/prototype.html", "docs/design.md", "hub-rs/README.md", "web/DESIGN.md"])
+                             ["docs/ST-9/prototype.html", "docs/design.md", "docs/releases/draft.md",
+                              "hub-rs/README.md", "web/DESIGN.md"])
             self.assertTrue(boundary.unexcusable("process-document"))
 
     def test_regex_literal_is_not_a_personal_home(self):

@@ -67,8 +67,12 @@ impl Harness {
         {
             vec![PermissionMode::FullAccess]
         } else {
-            p.modes
-                .offered_with(Some(&ids), p.blind_set_mode, Some(&p.mode_meta))
+            p.modes.offered_with(
+                Some(&ids),
+                p.blind_set_mode,
+                Some(&p.mode_meta),
+                Some(&p.mode_args),
+            )
         };
         Harness {
             id: id.to_string(),

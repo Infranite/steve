@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { mkdirSync } from 'node:fs'
 import { capsHub, mcpServer } from './caps-mock.mjs'
+import { emptySnapshot } from './fixtures/wire-views.ts'
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright')
 const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE })
 const base = process.env.STEVE_TEST_WEB || 'http://127.0.0.1:5195'
@@ -47,7 +48,7 @@ const run = async ({ width, height, scheme }) => {
     if (await hub.handle(route, method, p)) return
     if (p === '/api/runtimes') data = state().runtimes
     else if (p === '/api/shell') data = state()
-    else if (p === '/api/snapshot') data = { epoch: 'fixture', rev: 1, cursor: 'fixture:1', views: { item: [], session: [], decision: [] } }
+    else if (p === '/api/snapshot') data = emptySnapshot()
     else if (p === '/api/summary') data = { ws: 'default', workspace_name: '默认', thinking: false, hold: null }
     else if (p === '/api/yolo') data = { on: false, active: false, forced_off: null, forced_reason: null, paused: null, window: null, scopes: [], counts: { decided: 0, declined: 0, scheduled: 0 } }
     else if (p === '/api/bot-teams' && method === 'GET') {

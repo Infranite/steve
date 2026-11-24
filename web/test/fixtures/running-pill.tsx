@@ -1,4 +1,4 @@
-import { seedItems } from "./view-data"
+import { fixtureItem, fixtureWait, seedItems } from "./view-data"
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { SidebarInset, SidebarProvider } from "../../src/components/ui/sidebar"
@@ -11,8 +11,8 @@ document.documentElement.classList.toggle("dark", matchMedia("(prefers-color-sch
  * ?none: nothing open, so a phone's header has no pill. */
 const now = Date.now()
 const dev: Bot = { id: "dev", n: "Steve 开发", a: "", role: "", pers: "", pro: 1, h: "Codex", harness: "codex", m: "", model: null, on: true, acc: "manual", ws: "", project: null, perm: "", permMode: "auto", rule: "", prompt: null, routines: [], hue: "", color: "#8b9eac", round: 60, skin: null, workspaces: [] }
-const item = (id: string, t: string, x: Partial<Item>): Item => ({ id, t, b: "dev", st: "run", phase: "active", src: ["", ""], ws: "", project: null, up: "02:03", acc: "", goals: [], progress: "", rounds: [], waits: [], ss: [], tl: [], outs: [], anns: [], q: [], qs: null, branch: null, cwd: null, detail: false, dependents: [], created: now, updated: now, ...x })
-const ask: Wait = { type: "ask", q: "迁移要在白天还是晚上做？", since: "3 分钟", decision: "d-1", subject: "action", session: null, options: ["白天", "晚上"], by: "dev" }
+const item = (id: string, t: string, x: Partial<Item>): Item => fixtureItem({ id, t, phase: "active", ws: "", up: "02:03", acc: "", created: now, updated: now, ...x })
+const ask: Wait = fixtureWait({ type: "ask", q: "迁移要在白天还是晚上做？", since: "3 分钟", decision: "d-1", subject: "action", options: ["白天", "晚上"] })
 st.ready = true
 st.version = "0.2.53"
 st.bots = { dev }

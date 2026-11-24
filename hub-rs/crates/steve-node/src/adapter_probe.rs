@@ -151,3 +151,110 @@ pub(crate) fn apply(cfg: &AcpConfig, h: &mut HarnessCapability, p: Option<&Probe
     }
     h.adapter = Some(info(cfg, &h.name, p));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use steve_node_api::PermissionMode;
+
+    fn cfg_with_antigravity(dir: &Path, bin: std::path::PathBuf) -> AcpConfig {
+        AcpConfig {
+            adapters: HashMap::from([("antigravity".into(), bin)]),
+            declared: HashMap::new(),
+            node: "node".into(),
+            claude_executable: "/usr/bin/false".into(),
+            steve_home: dir.join("steve"),
+            codex_home: dir.join("codex"),
+            user_home: dir.to_path_buf(),
+            version: "test".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn node_probe_reports_antigravity_missing_and_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let probes = AdapterProbes::default();
+
+        // Missing binary: AdapterMissing
+        let missing_cfg = cfg_with_antigravity(dir.path(), dir.path().join("no-such-agy"));
+        let got = probes.get(&missing_cfg, dir.path(), true).await;
+        let info_missing = info(&missing_cfg, "antigravity", &got["antigravity"]);
+        assert_eq!(info_missing.status, AdapterStatus::AdapterMissing);
+        assert_eq!(info_missing.title, "Antigravity CLI");
+        assert!(info_missing.builtin);
+        assert_eq!(
+            info_missing.resume_command.as_deref(),
+            Some("agy --resume {id}")
+        );
+
+        // Installed ACP binary: Ready with modes, models, efforts
+        let fake = dir.path().join("agy");
+        std::fs::write(
+            &fake,
+            r#"#!/usr/bin/env node
+const rl = require("readline").createInterface({ input: process.stdin });
+const send = (o) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...o }) + "\n");
+rl.on("line", (line) => {
+  const m = JSON.parse(line);
+  if (m.method === "initialize") {
+    send({ id: m.id, result: {
+      protocolVersion: 1,
+      agentInfo: { name: "Antigravity ACP Server", version: "1.5.16" },
+      agentCapabilities: { loadSession: true, promptCapabilities: { image: true, embeddedContext: true }, sessionCapabilities: { list: {} } },
+      authMethods: [{ id: "oauth-personal", name: "Log in with Google" }]
+    }});
+  } else if (m.method === "session/new") {
+    send({ id: m.id, result: {
+      sessionId: "s1",
+      modes: { currentModeId: "default", availableModes: [{ id: "default" }, { id: "accept-edits" }, { id: "auto" }, { id: "plan" }] },
+      configOptions: [
+        { id: "model", category: "model", type: "select", currentValue: "gemini-4-neon", options: [{ value: "gemini-4-neon", name: "Gemini 4 Neon" }, { value: "gemini-3.8-flash", name: "Gemini 3.8 Flash" }] },
+        { id: "thought_level", category: "thought_level", type: "select", currentValue: "high", options: [{ value: "low" }, { value: "high" }] }
+      ]
+    }});
+  }
+});
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let ready_cfg = cfg_with_antigravity(dir.path(), fake);
+        let got = probes.get(&ready_cfg, dir.path(), true).await;
+        let mut cap = HarnessCapability {
+            name: "antigravity".into(),
+            version: String::new(),
+            sessions: true,
+            jobs: true,
+            models: vec![],
+            resume: false,
+            cancel: true,
+            permissions: true,
+            images: false,
+            read_attached: false,
+            enforcement: vec![],
+            adapter: None,
+            setup: None,
+        };
+        apply(&ready_cfg, &mut cap, got.get("antigravity"));
+        assert!(cap.images && cap.resume);
+        assert_eq!(cap.version, "1.5.16");
+        assert_eq!(cap.models, ["gemini-4-neon", "gemini-3.8-flash"]);
+        let ad = cap.adapter.expect("adapter info");
+        assert_eq!(ad.status, AdapterStatus::Ready);
+        let offer = ad.session.expect("session offer");
+        assert_eq!(
+            offer.modes,
+            vec![
+                PermissionMode::Plan,
+                PermissionMode::Ask,
+                PermissionMode::AcceptEdits,
+                PermissionMode::Auto,
+                PermissionMode::FullAccess,
+            ]
+        );
+        assert_eq!(offer.default_model.as_deref(), Some("gemini-4-neon"));
+        assert_eq!(offer.efforts, ["low", "high"]);
+    }
+}
