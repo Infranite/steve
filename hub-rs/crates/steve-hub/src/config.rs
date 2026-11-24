@@ -289,8 +289,6 @@ pub struct Config {
     pub dev_login: bool,
     /// Normal operation or a diagnostic copy (`STEVE_NO_RESUME=1`).
     pub mode: RuntimeMode,
-    /// Opt in to dynamic collaboration (`STEVE_DYNAMIC_WORKFLOWS=1`, default off).
-    pub dynamic_workflows: bool,
     /// The daily copy under `<home>/backups` (`STEVE_BACKUP=off` turns it off): see `daily_backup`.
     pub backup: bool,
     /// `STEVE_TAKEOVER_CONTINUES`: how often Steve continues a stopped agent before the user hears of it
@@ -832,7 +830,6 @@ impl Config {
             } else {
                 RuntimeMode::Normal
             },
-            dynamic_workflows: steve_auth::flag(&get, "STEVE_DYNAMIC_WORKFLOWS")?,
             backup,
             takeover_continues: count(&get, "STEVE_TAKEOVER_CONTINUES")?,
             takeover_same_refusals: count(&get, "STEVE_TAKEOVER_SAME_REFUSALS")?,
@@ -1021,13 +1018,6 @@ mod tests {
                 }
             ));
         }
-    }
-
-    #[test]
-    fn dynamic_workflows_require_explicit_one() {
-        assert!(!cfg(&[]).dynamic_workflows);
-        assert!(!cfg(&[("STEVE_DYNAMIC_WORKFLOWS", "0")]).dynamic_workflows);
-        assert!(cfg(&[("STEVE_DYNAMIC_WORKFLOWS", "1")]).dynamic_workflows);
     }
 
     #[test]

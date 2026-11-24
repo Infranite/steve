@@ -291,17 +291,6 @@ export function SysRow({ text, className }: { text: string; className?: string }
     </div>
   )
 }
-/** Recent work for the collaboration call tree. */
-export function sessionWork(k: string) {
-  const s = getSession(k), data = getTranscript(k)
-  if (!s || !data) return []
-  return data.turns.flatMap((turn) => turn.rows.filter((g) => g.t === "work").map((g) => {
-    const live = s.st === "run" && turn === data.turns.at(-1) && g === turn.rows.at(-1) && !g.end
-    return { prompt: g.prompt, evs: g.evs, at: g.at ?? [], items: trailOf(g.evs, g.at ?? [], g.t1, live),
-      t0: g.t0 || (g.at ?? []).find(Boolean) || 0, t1: g.t1, live, cancelled: g.end === "cancelled" }
-  }))
-}
-
 const EMPTY_SEGS: Seg[] = []
 function transcriptRowHeight(row: Seg) {
   if (row.t === "sys") return String(row.evs[0][1] ?? "").length <= 40 ? 36 : 60

@@ -236,7 +236,7 @@ async fn adapter_exit_evidence_follows_commit_and_replay_without_claiming_the_cu
 /// A Node fact starts follow-ups inside the coordinator, without the public runtime router.
 /// The durable pause must hold that path too, while preserving its queued input for resume.
 #[tokio::test]
-async fn workflow_pause_holds_node_fact_followups_until_explicit_resume() {
+async fn item_pause_holds_node_fact_followups_until_explicit_resume() {
     let h = super::super::node_tools::tests::fixture(vec![]).await;
     until("first turn reached Node", || {
         h._node
@@ -245,29 +245,14 @@ async fn workflow_pause_holds_node_fact_followups_until_explicit_resume() {
             .any(|(method, _)| *method == "start_turn")
     })
     .await;
-    steve_store::testkit::hub::mutations::seed_items_for_workflow_pause_holds_node_fact_followups_until_explicit_resume(&h.store).unwrap();
-    h.store
-        .bots()
-        .seed(
-            "dev",
-            false,
-            &steve_store::NewBot {
-                name: "dev".into(),
-                harness: "fixture".into(),
-                ..Default::default()
-            },
-            "default",
-        )
-        .unwrap();
-    steve_store::testkit::hub::mutations::update_items_bot_id_dev_id_i1(&h.store).unwrap();
     h._rt.prompt("s1", "排队补充", "user", &[]).unwrap();
-    steve_store::testkit::hub::node_fixtures::set_workflows_paused(&h.store).unwrap();
+    steve_store::testkit::hub::mutations::update_items_status_pause_id_i1(&h.store).unwrap();
     h._node
         .finish(
             &h.exec,
             Completion {
                 // A transient failure can beat the pause's cancellation command. Neither its
-                // automatic retry nor the queued follow-up may start while the graph is paused.
+                // automatic retry nor the queued follow-up may start while the item is paused.
                 outcome: Outcome::Failed,
                 stop_reason: "error".into(),
                 error: Some(Error::later(
@@ -291,7 +276,7 @@ async fn workflow_pause_holds_node_fact_followups_until_explicit_resume() {
         || steve_store::testkit::hub::node_fixtures::attempt_and_queue_counts(&h.store).unwrap();
     assert_eq!(counts(), (1, 1));
     assert_eq!(h._rt.flush("s1", None).unwrap(), Planned::Held);
-    steve_store::testkit::hub::node_fixtures::resume_workflow(&h.store).unwrap();
+    steve_store::testkit::hub::mutations::update_items_status_run_id_i1(&h.store).unwrap();
     assert_eq!(h._rt.flush("s1", None).unwrap(), Planned::Created);
     assert_eq!(counts(), (2, 0));
 }

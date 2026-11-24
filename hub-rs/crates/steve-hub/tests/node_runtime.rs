@@ -709,52 +709,6 @@ async fn a_permission_is_a_card_and_its_answer_goes_to_the_very_request() {
 }
 
 #[tokio::test]
-async fn workflow_pause_cancel_and_replan_expire_late_permission_allows() {
-    for change in fixtures::WORKFLOW_PERMISSION_CHANGES {
-        let h = hub();
-        h.bind();
-        h.rt.prompt(S, "hello", "user", &[]).unwrap();
-        eventually_sync("started", || h.methods().contains(&"start_turn")).await;
-        steve_store::testkit::hub::mutations::seed_items_item_id_child_id_s1(&h.store).unwrap();
-        h.node
-            .ask_permission(perm("p1", h.attempts()[0].clone(), "git push"))
-            .await
-            .unwrap();
-        eventually_sync("permission card", || {
-            node_checks::decision_count_by_status(&h.store, "open").unwrap() == 1
-        })
-        .await;
-        let decision: String = node_checks::decision_id_by_status(&h.store, "open").unwrap();
-        fixtures::change_workflow_permission(&h.store, change).unwrap();
-        assert!(
-            !h.rt
-                .answer_permission(steve_core::PermissionAnswer::resolve(
-                    &decision,
-                    1,
-                    "owner",
-                    "allow_once",
-                    ""
-                ))
-                .unwrap(),
-            "{change:?}",
-        );
-        assert_eq!(h.perm_state(&decision), "expired");
-        assert_eq!(
-            node_checks::decision_status_by_subject_type(&h.store, "tool_call").unwrap(),
-            "expired",
-        );
-        eventually_sync("rejection reached Node", || {
-            h.methods().contains(&"resolve_permission")
-        })
-        .await;
-        let request: String =
-            node_checks::command_request_by_method(&h.store, "resolve_permission").unwrap();
-        let command: Command<PermissionResolution> = serde_json::from_str(&request).unwrap();
-        assert_eq!(command.body.decision, PermissionDecision::Reject);
-    }
-}
-
-#[tokio::test]
 async fn a_card_expires_with_its_attempt() {
     let h = hub();
     h.bind();
@@ -4896,3 +4850,6 @@ async fn native_fallback_never_allows_and_only_the_declared_owner_route_asks() {
         assert_eq!(stats.permissions_by_resolver["harness_native"][result], 1);
     }
 }
+
+#[path = "node_runtime/restart_matrix.rs"]
+mod restart_matrix;

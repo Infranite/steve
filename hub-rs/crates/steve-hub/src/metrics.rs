@@ -248,8 +248,40 @@ pub(crate) const WEB_PAGES: [&str; 7] = [
     "chat", "items", "item", "sessions", "session", "inbox", "other",
 ];
 
+/// Bounded menu item keys accepted for `steve_web_nav_opens_total` (`POST /api/system/web-perf`).
+pub(crate) const WEB_NAV_ITEMS: &[&str] = &[
+    "chat",
+    "inbox",
+    "items",
+    "projects",
+    "calendar",
+    "todos",
+    "feed",
+    "channels",
+    "mail",
+    "contacts",
+    "knowledge",
+    "integrations",
+    "bots",
+    "sessions",
+    "auto",
+    "capabilities",
+    "signals",
+    "stats",
+    "me",
+    "devices",
+    "accounts",
+    "vault",
+    "settings",
+    "publications",
+    "github",
+];
+
 /// What a web client measured on `page` since its last report (`POST /api/system/web-perf`): its
-/// long tasks, the latency of each interaction and of merging each patch frame, in seconds.
+/// long tasks, the latency of each interaction and of merging each patch frame, in seconds, plus
+/// menu item open counts (`steve_web_nav_opens_total`). Returns the bounded nav opens recorded so
+/// the caller can also aggregate them by workspace local day in `telemetry_daily`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn web_report(
     page: &str,
     long_tasks: &[f64],
@@ -258,7 +290,8 @@ pub(crate) fn web_report(
     snapshots: &[f64],
     transcripts: &[f64],
     dom_nodes: Option<u64>,
-) {
+    nav_opens: &BTreeMap<String, u32>,
+) -> Vec<(&'static str, u32)> {
     let page = WEB_PAGES
         .into_iter()
         .find(|p| *p == page)
@@ -280,6 +313,18 @@ pub(crate) fn web_report(
         let h = metrics::histogram!(name, "page" => page);
         xs.iter().for_each(|s| h.record(*s));
     }
+    let mut accepted = Vec::new();
+    for (item, &count) in nav_opens {
+        if count == 0 {
+            continue;
+        }
+        if let Some(&known) = WEB_NAV_ITEMS.iter().find(|k| **k == item.as_str()) {
+            metrics::counter!("steve_web_nav_opens_total", "item" => known)
+                .increment(u64::from(count));
+            accepted.push((known, count));
+        }
+    }
+    accepted
 }
 
 /// This process's use of the machine, sampled when somebody reads the metrics.
@@ -1207,37 +1252,51 @@ mod tests {
     fn web_reports_record_their_samples_and_refuse_out_of_bounds_ones() {
         let recorder = recorder();
         let handle = recorder.handle();
-        let post = |b: String| crate::api::misc::system_web_perf(axum::body::Bytes::from(b));
+        let post =
+            |b: &str| crate::api::misc::record_web_perf(&axum::body::Bytes::from(b.to_string()));
         metrics::with_local_recorder(&recorder, || {
-            runtime().block_on(async {
-                assert!(
-                    post(
-                        r#"{"page":"inbox","long_tasks":[120,60000],"interactions":[250],"patch_apply":[3],"transcript_open":[50]}"#
-                            .into()
-                    )
-                        .await
-                        .is_ok()
-                );
-                let many = format!(r#"{{"long_tasks":[{}]}}"#, vec!["1"; 501].join(","));
-                for bad in [
-                    r#"{"long_tasks":[-1]}"#,
-                    r#"{"interactions":[60001]}"#,
-                    r#"{"long_tasks":"x"}"#,
-                    &many,
-                ] {
-                    assert!(post(bad.to_string()).await.is_err(), "{bad}");
-                }
-            })
+            let first = post(
+                r#"{"page":"inbox","long_tasks":[120,60000],"interactions":[250],"patch_apply":[3],"transcript_open":[50],"nav_opens":{"inbox":2,"chat":5,"unknown_page":9}}"#,
+            )
+            .expect("first report");
+            assert_eq!(first, vec![("chat", 5), ("inbox", 2)]);
+            let second = post(r#"{"nav_opens":{"inbox":1,"todos":3}}"#).expect("second report");
+            assert_eq!(second, vec![("inbox", 1), ("todos", 3)]);
+            let many = format!(r#"{{"long_tasks":[{}]}}"#, vec!["1"; 501].join(","));
+            let many_nav = format!(
+                r#"{{"nav_opens":{{{}}}}}"#,
+                (0..65)
+                    .map(|i| format!(r#""k{i}":1"#))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+            for bad in [
+                r#"{"long_tasks":[-1]}"#,
+                r#"{"interactions":[60001]}"#,
+                r#"{"long_tasks":"x"}"#,
+                r#"{"nav_opens":{"chat":10001}}"#,
+                &many,
+                &many_nav,
+            ] {
+                assert!(post(bad).is_err(), "{bad}");
+            }
         });
         let text = handle.render();
         for line in [
-            "steve_web_reports_total 1",
+            "steve_web_reports_total 2",
             "steve_web_long_task_seconds_count{page=\"inbox\"} 2",
             "steve_web_interaction_seconds_sum{page=\"inbox\"} 0.25",
             "steve_web_patch_apply_seconds_count{page=\"inbox\"} 1",
             "steve_web_transcript_open_seconds_count{page=\"inbox\"} 1",
+            "steve_web_nav_opens_total{item=\"chat\"} 5",
+            "steve_web_nav_opens_total{item=\"inbox\"} 3",
+            "steve_web_nav_opens_total{item=\"todos\"} 3",
         ] {
             assert!(text.lines().any(|l| l == line), "{line} in {text}");
         }
+        assert!(
+            !text.contains("unknown_page"),
+            "unknown nav keys are never exported as labels: {text}"
+        );
     }
 }

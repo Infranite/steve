@@ -110,11 +110,6 @@ impl Tx<'_> {
         {
             return Err(conflict("只有事项当前负责人和有效会话可以操作前置等待"));
         }
-        if self.workflow_child(&item)? {
-            return Err(conflict(
-                "工作单元不能修改事项依赖，请向主事项负责人报告阻塞",
-            ));
-        }
         let action = args["action"].as_str().unwrap_or("get");
         match action {
             "get" => self.dependency_view(id),
@@ -170,9 +165,6 @@ impl Tx<'_> {
         if item.phase != ACTIVE || item.archived {
             return Ok(Some("事项已结束或正在结束，不能登记前置等待"));
         }
-        if self.workflow_child(item)? {
-            return Ok(Some("请由主事项负责人管理前置等待"));
-        }
         let bot = item
             .bot_id
             .as_deref()
@@ -186,13 +178,6 @@ impl Tx<'_> {
                 .bot_in_workspace(item.bot_id.as_deref().unwrap_or(""), &item.workspace_id)?
         {
             return Ok(Some("没有当前负责人可续跑的有效会话"));
-        }
-        if let Some(graph) = self.db().store().workflows().get(&item.id)?
-            && self.workflow_unsettled(&graph.units)?.is_some()
-        {
-            return Ok(Some(
-                "协作工作仍在执行或停止尚未确认，请先暂停工作图并确认停止后再登记前置等待",
-            ));
         }
         if self.db().decisions_of_item(&item.id)?.iter().any(|d| {
             d.status == steve_types::DecisionStatus::Open
@@ -264,6 +249,22 @@ impl Tx<'_> {
             .dependency_waits()
             .get(id)?
             .is_some_and(|w| w.state == "waiting"))
+    }
+
+    /// Prerequisite blockers that prevent completing or delivering an item.
+    pub(crate) fn dependency_blockers(&self, item: &str) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        let deps = deps_open(self.db(), item)?;
+        if !deps.is_empty() {
+            out.push(steve_i18n::t!(
+                "core.blocker.deps_open",
+                deps = deps.join(&steve_i18n::t!("core.blocker.list_sep"))
+            ));
+        }
+        if self.dependency_waiting(item)? {
+            out.push(steve_i18n::t!("core.blocker.dep_wait"));
+        }
+        Ok(out)
     }
 
     pub(crate) fn dependency_tick(&mut self) -> Result<()> {

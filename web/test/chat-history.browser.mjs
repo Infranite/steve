@@ -3,13 +3,13 @@
  * come in above without moving what you read; the reading position and the draft survive a reload. */
 import assert from "node:assert/strict"
 import { mkdir } from "node:fs/promises"
-import { created, older, text } from "./fixtures/chat-history-data.ts"
+import { olderMessagePage, olderMessages } from "./fixtures/chat-history-data.ts"
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
 const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE } : {}) })
 const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:5197"
 const shots = process.env.STEVE_TEST_SHOTS
 if (shots) await mkdir(shots, { recursive: true })
-const hub = Array.from({ length: older }, (_, i) => ({ id: "o" + i, author: i % 2 ? "steve" : "me", text: text(i), item_id: i === 51 ? "ST-7" : null, meta: null, created: created(i) }))
+const hub = olderMessages()
 const errors = []
 const near = (a, b, d = 4) => a !== null && Math.abs(a - b) <= d
 try {
@@ -25,9 +25,7 @@ try {
       if (u.pathname === "/api/views/page" && u.searchParams.get("kind") === "message") {
         if (holdOlder) await holdOlder
         const before = Number(u.searchParams.get("before")?.split(":")[0] ?? Infinity)
-        const all = hub.filter(m => m.created < before).reverse(), views = all.slice(0, 100)
-        const last = views.at(-1)
-        return route.fulfill({ json: { rev: 0, views, next: all.length > views.length ? `${last.created}:${last.id}` : null } })
+        return route.fulfill({ json: olderMessagePage(hub, before) })
       }
       if (u.pathname === "/api/thread/search") {
         const q = (u.searchParams.get("q") ?? "").toLowerCase()

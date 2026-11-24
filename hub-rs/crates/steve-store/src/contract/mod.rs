@@ -294,12 +294,6 @@ impl<'a> W<'a> {
         self.store.emit_event(e.into());
     }
 
-    pub(crate) fn capture_created(&self, ws: &str, item: &str, created: i64) {
-        if let Some(until) = crate::diagnostics::capture_created(self.conn, ws, item, created) {
-            self.store.stage_diagnostic_until(until);
-        }
-    }
-
     pub(crate) fn diagnostic(&self, event: crate::diagnostics::Record) {
         self.store.stage_diagnostic(event);
     }

@@ -58,6 +58,8 @@ const LITERALS: &[&str] = &[
     "\"vibe-acp\"",
     "\"qoder\"",
     "\"qodercli\"",
+    "\"antigravity\"",
+    "\"agy\"",
 ];
 
 /// Code that branches on a harness by name.
