@@ -793,7 +793,15 @@ pub fn decisions_of_draft(store: &Store, id: &str) -> Result<Vec<crate::Decision
             .query_map([id], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         ids.iter()
-            .map(|id| crate::base::decisions::get(c, id).map(Option::unwrap))
+            .map(|id| {
+                crate::repo::one(
+                    c,
+                    "SELECT * FROM decisions WHERE id = ?",
+                    [id],
+                    crate::Decision::from_row,
+                )
+                .map(Option::unwrap)
+            })
             .collect()
     })
 }

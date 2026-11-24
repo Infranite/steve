@@ -1,3 +1,4 @@
+import * as decisionText from "../src/i18n/decision.ts"
 import { isCancelledError, QueryClient, timeoutManager } from "@tanstack/react-query"
 import assert from "node:assert/strict"
 import { test } from "node:test"
@@ -91,6 +92,7 @@ function harness(local = { getItem: () => "1" }) {
       if (id === "./stream-cursor") return streamCursor
       if (id === "./live-utils" || id === "../live-utils") return live
       if (id === "./decision-notes") return notes
+      if (id === "./i18n/decision") return decisionText
       if (id === "./decision-options") return decisionOptions
       if (id === "./feed-order") return feed
       if (id === "./i18n/format") return format
@@ -543,7 +545,7 @@ test("old workspace event pages cannot populate the new workspace", async () => 
 
 test("session and decision actions guard duplicates and report no early success", async () => {
   const h = harness(), s = h.store, send = defer(), decision = defer(); let sends = 0, decisions = 0
-  h.snapshot.decision = [{ id: "d", ws: "ws", kind: "accept", session_id: "a", subject_type: "item", question: "ok?", options: [], status: "open", created: 1 }]
+  h.snapshot.decision = [{ id: "d", ws: "ws", kind: "accept", session_id: "a", subject_type: "item", question: { kind: "raw", text: "ok?" }, options: [], status: "open", created: 1 }]
   s.start(); await flush()
   h.api.sessionSay = (_id, _text, mode) => { assert.equal(mode, "排队"); sends++; return send.promise }
   const sending = s.sessSend("a", "hello", "queue"); assert.equal(s.st.pendingActions.has("session:a"), true)
@@ -725,13 +727,13 @@ test("decision patches change the cards and their item without reading /api/shel
   const h = harness(), s = h.store
   let reads = 0; const read = h.api.shell; h.api.shell = async () => { reads++; return read() }
   h.snapshot.item = [{ id: "ST-1", no: 1, title: "x", state: { kind: "active" }, cycle: 1, revision: 0, delivery: [], plan: [], sessionIds: [], tags: [], deps: [], source: ["你", "web"], created: 1, updated: 1, goal: "g" }]
-  h.snapshot.decision = [{ id: "d1", ws: "ws", kind: "ask", item_id: "ST-1", session_id: null, subject_type: "item", subject_id: "ST-1", question: "ok?", draft: "", options: [], status: "open", created: 1, tier: "decide" }]
+  h.snapshot.decision = [{ id: "d1", ws: "ws", kind: "ask", item_id: "ST-1", session_id: null, subject_type: "item", subject_id: "ST-1", question: { kind: "raw", text: "ok?" }, draft: "", options: [], status: "open", created: 1, tier: "decide" }]
   s.start(); await flush()
   assert.deepEqual(Array.from(s.pendingCards(), (c) => c.w.decision), ["d1"])
   assert.equal(s.decideCards().length, 1)
   assert.equal(s.it("ST-1").waits.length, 1)
   const before = reads, ver = s.st.ver, item = s.it("ST-1")
-  h.event({ type: "patch", ws: "ws", rev: 5, ops: [{ type: "decision", op: "upsert", id: "d1", view: { ...h.snapshot.decision[0], status: "resolved" } }, { type: "decision", op: "upsert", id: "d2", view: { ...h.snapshot.decision[0], id: "d2", item_id: null, question: "new?", subject_type: "chan_message", kind: "approve", tier: "draft", space_id: "sp" } }] })
+  h.event({ type: "patch", ws: "ws", rev: 5, ops: [{ type: "decision", op: "upsert", id: "d1", view: { ...h.snapshot.decision[0], status: "resolved" } }, { type: "decision", op: "upsert", id: "d2", view: { ...h.snapshot.decision[0], id: "d2", item_id: null, question: { kind: "raw", text: "new?" }, subject_type: "chan_message", kind: "approve", tier: "draft", space_id: "sp" } }] })
   await h.tick(1000)
   assert.equal(reads, before, "no /api/shell read for a decision")
   assert.ok(s.st.ver > ver)

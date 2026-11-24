@@ -5,6 +5,7 @@
 import { QueryClient, useInfiniteQuery } from "@tanstack/react-query"
 import { useEffect, useSyncExternalStore } from "react"
 import { api, revOf } from "@/api"
+import { decisionText } from "@/i18n/decision"
 import type { DecisionView, Envelope, ItemView, MessageView, PageOf, Patch, SessionView, ViewKind } from "@/gen"
 import { EMPTY, HOT, mergePatch, mergeSnapshot, mergeViews, viewOf, viewsOf, type Table } from "./table"
 
@@ -267,7 +268,7 @@ function blockerOf(d: DecisionView): Blocker {
   const kind = d.kind === "accept" ? "acceptance" : d.kind === "fail" ? "failure"
     : d.subject_type === "tool_call" && d.kind === "approve" ? "permission"
     : d.kind === "approve" || d.kind === "propose" ? "approval" : "question"
-  return { kind, question: d.question.slice(0, 60) }
+  return { kind, question: decisionText(d.question).slice(0, 60) }
 }
 
 function workOf(id: string) {

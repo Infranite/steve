@@ -284,7 +284,7 @@ impl Tx<'_> {
             .find(|d| {
                 d.kind == "approve"
                     && d.subject_type == "release"
-                    && d.status == "resolved"
+                    && d.status == steve_types::DecisionStatus::Resolved
                     && d.result.get("approved").is_some_and(truthy)
                     && d.result
                         .get("outcome")
@@ -787,6 +787,7 @@ impl Tx<'_> {
                 )? {
                     return Ok(false);
                 }
+                let approval_id = approval.id.clone();
                 self.record_release_outcome(approval, &i.id, outcome, result)?;
                 if ok {
                     self.db().timeline_add(&i.id, "steve", "sys", &text, None)?;
@@ -803,9 +804,21 @@ impl Tx<'_> {
                     }
                 } else if current {
                     if abandoned {
-                        self.release_unknown(&i.id, &text)?;
+                        self.release_unknown_for(
+                            &i.id,
+                            &text,
+                            Some(steve_store::DecisionSource::Revision {
+                                revision: format!("release_unknown:{approval_id}"),
+                            }),
+                        )?;
                     } else {
-                        self.fail(&i.id, &text)?;
+                        self.fail_with_source(
+                            &i.id,
+                            &text,
+                            Some(steve_store::DecisionSource::Revision {
+                                revision: format!("release_fail:{approval_id}"),
+                            }),
+                        )?;
                     }
                 }
                 Ok(true)
@@ -1003,9 +1016,17 @@ impl Core {
 
 impl Tx<'_> {
     /// A release whose result nobody knows: the requirement waits for you to check, nothing retries it.
-    pub(crate) fn release_unknown(&mut self, item_id: &str, text: &str) -> Result<()> {
+    pub(crate) fn release_unknown_for(
+        &mut self,
+        item_id: &str,
+        text: &str,
+        source: Option<steve_store::DecisionSource>,
+    ) -> Result<()> {
         let i = self.item(item_id)?;
         crate::lifecycle::supersede(self.db(), item_id, &["fail"], "发布结果未知")?;
+        let source = source.unwrap_or_else(|| steve_store::DecisionSource::Revision {
+            revision: format!("release_unknown:{}:{}", i.cycle, crate::util::sha(text)),
+        });
         self.db().decision_create(crate::repo::NewDecision {
             workspace_id: i.workspace_id.clone(),
             kind: "fail".into(),
@@ -1019,6 +1040,7 @@ impl Tx<'_> {
                 "look".into(),
             ]),
             requested_by: "steve".into(),
+            source: Some(source),
             ..Default::default()
         })?;
         Ok(())

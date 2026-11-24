@@ -453,6 +453,8 @@ fn secret_gate(
             draft: Some(draft),
             options: Some(crate::engine::gate_options(!grants.is_empty())),
             requested_by: "steve".into(),
+            question_template: None,
+            source: None,
         }),
         output: json!({ "waiting": "approval" }),
     }

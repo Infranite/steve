@@ -215,6 +215,9 @@ impl NodeRuntime {
                 crate::metrics::once!(counter "steve_approval_auto_turns_total").increment(1)
             }
             After::PermissionIngress { resolver, outcome } => {
+                if outcome != "owner_decision" {
+                    self.wake_send.notify_one();
+                }
                 metrics::counter!("steve_approval_requests_total", "resolver" => resolver, "outcome" => outcome).increment(1);
             }
             After::Started {

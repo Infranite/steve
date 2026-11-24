@@ -126,7 +126,7 @@ impl Tx<'_> {
             return Ok(true);
         }
         let cards = self.db().decisions_of_item(&item.id)?;
-        let open = |d: &&steve_store::Decision| d.status == "open";
+        let open = |d: &&steve_store::Decision| d.status == steve_types::DecisionStatus::Open;
         if cards.iter().filter(open).any(|d| !stop_card(d)) || self.quota_waiting(&item.id) {
             return Ok(true);
         }
@@ -136,7 +136,10 @@ impl Tx<'_> {
         {
             return Ok(true);
         }
-        Ok(include_stop_cards && cards.iter().any(|d| d.status == "open"))
+        Ok(include_stop_cards
+            && cards
+                .iter()
+                .any(|d| d.status == steve_types::DecisionStatus::Open))
     }
 
     /// Failed required units and an agent's own pause need an explicit response.
@@ -211,7 +214,7 @@ impl Tx<'_> {
                         .db()
                         .decisions_of_item(child)?
                         .iter()
-                        .any(|d| d.status == "open"),
+                        .any(|d| d.status == steve_types::DecisionStatus::Open),
                     None => false,
                 };
                 let occupied = open || self.unit_turn(u)?;

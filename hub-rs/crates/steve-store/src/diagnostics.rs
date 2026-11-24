@@ -149,7 +149,7 @@ pub(crate) fn decision_event(d: &crate::Decision, operation: &str, from: Option<
         reason_code: format!("decision_{operation}"),
         details: Details {
             from_state: from.map(str::to_owned),
-            to_state: Some(d.status.clone()),
+            to_state: Some(d.status.to_string()),
             ..Default::default()
         },
         ..Default::default()

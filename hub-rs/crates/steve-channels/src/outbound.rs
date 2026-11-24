@@ -47,7 +47,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use steve_flow::AdapterError;
 use steve_modules::accounts::connections::{BlockScope, ProviderError, WriteRefusal, may_write_in};
-use steve_modules::decisions::{DecisionCx, DecisionHandler, choice_result};
+use steve_modules::decisions::{DecisionCx, DecisionHandler, DecisionOutcome, choice_result};
 use steve_modules::hooks::ItemHooks;
 use steve_modules::outbound::{self as b1, Audience, CheckCx, CheckResult, KnowledgeUse, Verdict};
 use steve_modules::{ApiError, ApiResult, Clock, SystemClock, Tier};
@@ -612,6 +612,14 @@ fn open_approval(
         draft: Some(text.to_string()),
         options: Some(options),
         requested_by: "steve".into(),
+        question_template: None,
+        source: Some(steve_store::DecisionSource::Revision {
+            revision: format!(
+                "draft:{}:{}",
+                row.decision_id.as_deref().unwrap_or("initial"),
+                text_hash(text)
+            ),
+        }),
     })?;
     message_repo::link_decision(w, id, &d.id)?;
     if review {
@@ -659,6 +667,13 @@ fn open_fail(
     question: String,
     options: &[&str],
 ) -> ChannelResult<String> {
+    let source = steve_store::DecisionSource::Revision {
+        revision: format!(
+            "fail:{}:{}",
+            row.decision_id.as_deref().unwrap_or("initial"),
+            text_hash(&question)
+        ),
+    };
     let d = steve_store::DecisionRows(w).open(&NewDecision {
         workspace_id: row.ws.clone(),
         kind: DecisionKind::Fail.code().into(),
@@ -670,6 +685,8 @@ fn open_fail(
         draft: Some(row.text.clone()),
         options: Some(options.iter().map(|s| s.to_string()).collect()),
         requested_by: "steve".into(),
+        question_template: None,
+        source: Some(source),
     })?;
     channel_message_repo::outbound::link_decision(w, &row.id, &d.id)?;
     Ok(d.id)
@@ -995,7 +1012,7 @@ async fn check_later(ch: &Channels, message_id: &str) -> ChannelResult<()> {
         };
         if !steve_store::DecisionRows(w)
             .get(d)?
-            .is_some_and(|card| card.status == "open")
+            .is_some_and(|card| card.status == steve_types::DecisionStatus::Open)
         {
             return Ok(());
         }
@@ -1058,7 +1075,8 @@ async fn rewrite_draft(
             };
             let d = steve_store::decision_repo::get(r, decision_id)?;
             let chosen = d.as_ref().is_some_and(|d| {
-                d.status == "resolved" && d.result["choice"].as_str() == Some(REWRITE)
+                d.status == steve_types::DecisionStatus::Resolved
+                    && d.result["choice"].as_str() == Some(REWRITE)
             });
             if row.status != "draft" || row.decision_id.as_deref() != Some(decision_id) || !chosen {
                 return Ok(None);
@@ -1117,9 +1135,9 @@ async fn rewrite_draft(
         {
             return Ok(());
         }
-        if !steve_store::decision_repo::get(w, decision_id)?
-            .is_some_and(|d| d.status == "resolved" && d.result["choice"] == REWRITE)
-        {
+        if !steve_store::decision_repo::get(w, decision_id)?.is_some_and(|d| {
+            d.status == steve_types::DecisionStatus::Resolved && d.result["choice"] == REWRITE
+        }) {
             return Ok(());
         }
         let mut row = row.clone();
@@ -1230,9 +1248,9 @@ fn rewrite_failed(ch: &Channels, message_id: &str, decision_id: &str) -> Channel
         if row.status != "draft" || row.decision_id.as_deref() != Some(decision_id) {
             return Ok(());
         }
-        if !steve_store::decision_repo::get(w, decision_id)?
-            .is_some_and(|d| d.status == "resolved" && d.result["choice"] == REWRITE)
-        {
+        if !steve_store::decision_repo::get(w, decision_id)?.is_some_and(|d| {
+            d.status == steve_types::DecisionStatus::Resolved && d.result["choice"] == REWRITE
+        }) {
             return Ok(());
         }
         let name = steve_store::channel_spaces::rows::get(w, &row.space_id)?
@@ -1360,22 +1378,30 @@ fn mark_composed(w: &mut steve_store::W<'_>, id: &str, what: &str) -> ChannelRes
 /// account's delay, undoable within it. Returns when it goes out.
 fn approve_draft(
     w: &mut steve_store::W<'_>,
-    ws: &str,
+    cx: &DecisionCx<'_>,
     m: &str,
     dd: &str,
     text: &str,
     card: &str,
     now: i64,
 ) -> ApiResult<i64> {
-    let row = own_out(w, ws, m)?;
+    let row = own_out(w, cx.ws, m)?;
     let send_at = now + send_delay_ms(w, &row)?;
     delivery_repo::transition(w, m, &["draft"], "pending", SentAt::Clear)?;
-    steve_store::DecisionRows(w).settle(
-        dd,
+    let mut decisions = steve_store::DecisionRows(w);
+    let approval = decisions
+        .get(dd)?
+        .ok_or_else(|| ApiError::not_found("decision"))?;
+    if !decisions.resolve_choice(
+        &approval,
+        cx.actor,
+        "yes",
+        text,
         &json!({"choice": "yes", "hash": text_hash(text), "send_at": send_at, "from_card": card}),
-        "resolved",
-        &steve_modules::decisions::undo_marker(SUBJECT_MESSAGE),
-    )?;
+        Some(&steve_store::DecisionUndo::Domain),
+    )? {
+        return Err(ApiError::conflict(steve_i18n::t!("channels.error.handled")));
+    }
     Ok(send_at)
 }
 
@@ -1459,7 +1485,13 @@ async fn send_chosen(
                 rows.edit_card(&dd, Some(&question), None, None)?;
             }
         } else {
-            approve_draft(w, ws, &m, &dd, text, decision, now)?;
+            let cx = DecisionCx {
+                ws,
+                actor: by,
+                choice: "yes",
+                text,
+            };
+            approve_draft(w, &cx, &m, &dd, text, decision, now)?;
         }
         let mut result = card.result;
         if result.is_null() {
@@ -1593,7 +1625,7 @@ pub fn verify(
                 d.workspace_id == row.ws
                     && d.subject_type == SUBJECT_MESSAGE
                     && d.subject_id == row.id
-                    && d.status == "resolved"
+                    && d.status == steve_types::DecisionStatus::Resolved
                     && row.decision_id.as_deref() == Some(d.id.as_str())
                     && ((d.kind == "approve" && choice == "yes") || (d.kind == "fail" && choice == "retry"))
                     // Also fence approvals scheduled by older YOLO engines before this fix.
@@ -1819,7 +1851,7 @@ fn claim_permission(
     let live = steve_store::channel_spaces::rows::original_route(w, &row.space_id)?
         .is_some_and(|route| route.space_status != "left" && route.connection_status != "revoked");
     if !live {
-        fail_orphaned_message(w, &row, now)?;
+        fail_orphaned_message(w, &row)?;
         return Ok(Some(SendOutcome::Skipped));
     }
     // you answered yourself since, the sender's later message took it into its turn, or the
@@ -3106,19 +3138,18 @@ impl Outbox {
     /// The candidates are found in SQL (an account on your own account with a lifetime set, past it,
     /// neither starred nor a commitment), [`EXPIRY_PAGE`] at a time after
     /// [`Outbox::expiry_cursor`]: a card left open (its space's voice is a bot after all) is passed
-    /// over, not looked at again on every tick. The checks run on a reader; only what closes is
-    /// written. Returns how many closed.
-    fn expire_stale(&self, ch: &Channels) -> ChannelResult<usize> {
-        let now = ch.now();
+    /// over until the next scan. Eligibility and settlement share the write. Returns whether
+    /// the current scan has another page.
+    pub fn expire_stale(&self, ch: &Channels, now: i64) -> ChannelResult<bool> {
         let after = lock(&self.expiry_cursor).clone();
         let commitment = format!(
             "{}{}",
             crate::decide::WHY_HEAD,
             crate::decide::Reason::Commitment.label()
         );
-        let (page, due) = ch.store().read(|r| -> ChannelResult<_> {
+        let (cursor, discarded) = ch.store().write(|w| -> ChannelResult<_> {
             let page = queue_repo::stale_cards(
-                r,
+                w,
                 &queue_repo::Expiry {
                     now,
                     starred: crate::decide::STARRED,
@@ -3128,55 +3159,47 @@ impl Outbox {
                     limit: EXPIRY_PAGE as i64,
                 },
             )?;
-            let mut due = Vec::new();
+            let mut discarded = Vec::new();
             for card in &page {
                 let yours = match card.kind.as_str() {
-                    "ask" => spaces::speaks_as_you(r, &card.ws, &card.space, None)?,
-                    _ => crate::presence::answered_message(r, &card.ws, &card.subject)?.is_some(),
+                    "ask" => spaces::speaks_as_you(w, &card.ws, &card.space, None)?,
+                    _ => crate::presence::answered_message(w, &card.ws, &card.subject)?.is_some(),
                 };
-                if yours {
-                    due.push(card.clone());
+                if !yours {
+                    continue;
                 }
-            }
-            Ok((page, due))
-        })?;
-        *lock(&self.expiry_cursor) = if page.len() < EXPIRY_PAGE {
-            None
-        } else {
-            page.last().map(|c| (c.created, c.id.clone()))
-        };
-        if due.is_empty() {
-            return Ok(0);
-        }
-        let mut closed = 0;
-        let mut discarded = Vec::new();
-        ch.store().write(|w| -> ChannelResult<()> {
-            for card in &due {
                 if card.kind == "approve" {
                     if !set_status(w, &card.subject, &["draft"], DISCARDED)? {
                         continue;
                     }
                     discarded.push(card.subject.clone());
                 }
-                if crate::presence::settle(w, &card.id, crate::decide::BY_EXPIRY)? {
-                    closed += 1;
-                    steve_store::audit_repo::record(
-                        w,
-                        &card.ws,
-                        "steve",
-                        "chan_message.expired",
-                        &card.subject,
-                        &json!({"decision": card.id, "why": crate::decide::BY_EXPIRY}),
-                    )?;
-                    channel_message_repo::emit(w, &card.ws, &card.space, &card.subject);
+                if !crate::presence::settle(w, &card.id, crate::decide::BY_EXPIRY)? {
+                    return Err(ApiError::conflict("the decision changed"));
                 }
+                steve_store::audit_repo::record(
+                    w,
+                    &card.ws,
+                    "steve",
+                    "chan_message.expired",
+                    &card.subject,
+                    &json!({"decision": card.id, "why": crate::decide::BY_EXPIRY}),
+                )?;
+                channel_message_repo::emit(w, &card.ws, &card.space, &card.subject);
             }
-            Ok(())
+            let cursor = if page.len() < EXPIRY_PAGE {
+                None
+            } else {
+                page.last().map(|c| (c.created, c.id.clone()))
+            };
+            Ok((cursor, discarded))
         })?;
+        let more = cursor.is_some();
+        *lock(&self.expiry_cursor) = cursor;
         for m in discarded {
             self.link.push(After::Discarded { message_id: m });
         }
-        Ok(closed)
+        Ok(more)
     }
 
     /// The queue (`channels.retry` and the approvals' delay): approved or retried messages whose
@@ -3197,7 +3220,7 @@ impl Outbox {
         sent + self.settle_unknown(ch, ch.now()).await
     }
 
-    // Conversions, expiry's cursor and draft checks are maintenance, not send deadlines.
+    // Conversions and draft checks are maintenance, not send deadlines.
     async fn maintain(&self, ch: &Channels) {
         self.bind(ch);
         for a in self.link.take() {
@@ -3206,10 +3229,6 @@ impl Outbox {
             }
         }
         self.convert_due(ch).await;
-        // cards about your own account that waited longer than the account allows close
-        if let Err(e) = self.expire_stale(ch) {
-            tracing::warn!("stale cards: {e}");
-        }
         self.queue_instructed_drafts(ch);
         self.queue_chosen_drafts(ch);
         self.queue_disclosure_checks(ch);
@@ -3399,7 +3418,7 @@ impl Outbox {
                 ch.store().write(|w| -> ChannelResult<()> {
                     if steve_store::DecisionRows(w)
                         .get(&decision)?
-                        .is_some_and(|d| d.status == "resolved")
+                        .is_some_and(|d| d.status == steve_types::DecisionStatus::Resolved)
                     {
                         set_decision_result_field(w, &decision, "item", item)?;
                     }
@@ -3971,21 +3990,20 @@ impl ItemHooks for ReturnToSource {
 // ---------------------------------------------------------------- not said in your name any more
 
 /// Drops a message in your name that is not to be said any more ([`crate::presence::stop_out`]):
-/// discarded from `from`, its open card (and `decision` when given, the one being answered)
-/// superseded, audit `chan_message.superseded`.
+/// Discard the message and close outstanding cards. The decision currently being answered
+/// is closed by its settlement transaction.
 fn drop_for_you(
     w: &mut steve_store::W<'_>,
     row: &OutRow,
     from: &[&str],
-    decision: Option<&str>,
+    answering: Option<&str>,
     stop: &crate::presence::Stop,
 ) -> ChannelResult<()> {
     set_status(w, &row.id, from, DISCARDED)?;
     send_state::forget(w, &row.id)?;
-    if let Some(d) = decision {
-        crate::presence::settle(w, d, stop.why())?;
-    }
-    if let Some(d) = steve_store::DecisionRows(w).open_for(&row.ws, SUBJECT_MESSAGE, &row.id)? {
+    if let Some(d) = steve_store::DecisionRows(w).open_for(&row.ws, SUBJECT_MESSAGE, &row.id)?
+        && Some(d.id.as_str()) != answering
+    {
         crate::presence::settle(w, &d.id, stop.why())?;
     }
     steve_store::audit_repo::record(
@@ -4000,11 +4018,16 @@ fn drop_for_you(
     Ok(())
 }
 
-fn fail_orphaned_message(w: &mut steve_store::W<'_>, row: &OutRow, now: i64) -> ChannelResult<()> {
+fn fail_orphaned_message(w: &mut steve_store::W<'_>, row: &OutRow) -> ChannelResult<()> {
     delivery_repo::transition(w, &row.id, &[], "failed", SentAt::Clear)?;
     let mut decisions = steve_store::DecisionRows(w);
     if let Some(d) = decisions.open_for(&row.ws, SUBJECT_MESSAGE, &row.id)? {
-        decisions.close_orphaned(&d.id, now)?;
+        decisions.apply(
+            &d,
+            steve_store::decision_repo::DecisionChange::Dismiss,
+            &json!({"dismissed": true, "why": "connection_gone"}),
+            None,
+        )?;
     }
     steve_store::audit_repo::record(
         w,
@@ -4038,8 +4061,10 @@ fn approved_by_you(r: &mut impl steve_store::Read, auth: &Auth) -> ChannelResult
     let Auth::Decision { id } = auth else {
         return Ok(false);
     };
-    Ok(steve_store::decision_repo::get(r, id)?
-        .is_some_and(|d| d.status == "resolved" && !b1::legacy_automatic_decision(&d.result)))
+    Ok(steve_store::decision_repo::get(r, id)?.is_some_and(|d| {
+        d.status == steve_types::DecisionStatus::Resolved
+            && !b1::legacy_automatic_decision(&d.result)
+    }))
 }
 
 // ---------------------------------------------------------------- decisions
@@ -4055,7 +4080,7 @@ impl MessageDecisions {
         w: &mut steve_store::W<'_>,
         cx: &DecisionCx,
         d: &Decision,
-    ) -> ApiResult<Value> {
+    ) -> ApiResult<DecisionOutcome> {
         let now = self.0.now();
         let row = own_out(w, cx.ws, &d.subject_id)?;
         if row.status != "draft" || row.decision_id.as_deref() != Some(d.id.as_str()) {
@@ -4139,7 +4164,7 @@ impl MessageDecisions {
             _ => return Err(ApiError::invalid("choice")),
         }
         channel_message_repo::emit(w, cx.ws, &row.space_id, &row.id);
-        Ok(result)
+        Ok(result.into())
     }
 
     fn failed(
@@ -4147,7 +4172,7 @@ impl MessageDecisions {
         w: &mut steve_store::W<'_>,
         cx: &DecisionCx,
         d: &Decision,
-    ) -> ApiResult<Value> {
+    ) -> ApiResult<DecisionOutcome> {
         let now = self.0.now();
         let row = own_out(w, cx.ws, &d.subject_id)?;
         if row.decision_id.as_deref() != Some(d.id.as_str()) {
@@ -4216,7 +4241,7 @@ impl MessageDecisions {
             &json!({"decision": d.id}),
         )?;
         channel_message_repo::emit(w, cx.ws, &row.space_id, &row.id);
-        Ok(result)
+        Ok(result.into())
     }
 
     fn handoff(
@@ -4306,7 +4331,7 @@ impl MessageDecisions {
     ) -> ApiResult<(String, String, i64)> {
         let (m, dd) = respond::open_draft(w, plan, text, now)?;
         steve_store::channel_message_repo::reactions::expect_answer(w, &plan.message_id, &m)?;
-        let send_at = approve_draft(w, cx.ws, &m, &dd, text, card, now)?;
+        let send_at = approve_draft(w, cx, &m, &dd, text, card, now)?;
         steve_store::audit_repo::record(
             w,
             cx.ws,
@@ -4338,11 +4363,11 @@ impl DecisionHandler for MessageDecisions {
         }
     }
 
-    fn resolve(&self, w: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
+    fn resolve(&self, w: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<DecisionOutcome> {
         match d.kind.as_str() {
             "approve" => self.approve(w, cx, d),
             "fail" => self.failed(w, cx, d),
-            "ask" => self.handoff(w, cx, d),
+            "ask" => self.handoff(w, cx, d).map(Into::into),
             _ => Err(ApiError::rule(steve_i18n::t!(
                 "channels.error.unknown_decision"
             ))),

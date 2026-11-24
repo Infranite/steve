@@ -1222,7 +1222,7 @@ async fn outside_mcp_creation_persists_prerequisites_without_starting_a_session(
             .of_item(&item.id)
             .unwrap()
             .iter()
-            .all(|d| d.status != "open")
+            .all(|d| d.status != steve_types::DecisionStatus::Open)
     );
 }
 

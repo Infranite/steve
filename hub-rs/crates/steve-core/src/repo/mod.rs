@@ -579,13 +579,13 @@ impl Db {
         &self,
         id: &str,
         result: Value,
-        status: &str,
-        undo: Option<Value>,
+        change: steve_store::decision_repo::DecisionChange,
+        undo: Option<steve_store::DecisionUndo>,
     ) -> Result<Option<Decision>> {
         Ok(self
             .s
             .decisions()
-            .resolve(id, &result, status, &undo.unwrap_or(Value::Null))?)
+            .resolve(id, &result, change, undo.as_ref())?)
     }
     /// Replace the result of a settled decision (an approved release's outcome).
     pub fn decision_set_result(&self, id: &str, result: &Value) -> Result<()> {

@@ -37,7 +37,7 @@ install! { routes(reg, _cx) [kb, mut module_routes] => [kb, module_routes] {
 }}
 
 install! { start(reg, _cx) [mut jobs, kb, modules] => [jobs, kb, modules] {
-    // Register the index worker, memory sweeper, folder scans, expiry and chat documents.
+    // Register the index worker, memory sweeper, folder scans and chat documents.
     let index = steve_knowledge::index::worker(modules.clone(), kb.clone());
     jobs.push(Job::new("kb.index", async move {
         if let Some(index) = index { index.await; }
@@ -49,10 +49,6 @@ install! { start(reg, _cx) [mut jobs, kb, modules] => [jobs, kb, modules] {
     {
         let (modules, kb) = (modules.clone(), kb.clone());
         jobs.push(Job::new("kb.scans", steve_knowledge::scan_job(modules,kb)));
-    }
-    {
-        let modules = modules.clone();
-        jobs.push(Job::new("kb.expire", steve_knowledge::candidates::expire_job(modules)));
     }
     {
         let (modules, kb) = (modules.clone(), kb.clone());

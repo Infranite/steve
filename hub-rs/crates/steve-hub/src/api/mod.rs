@@ -677,7 +677,6 @@ pub(crate) fn str_of(o: &Obj, k: &str) -> String {
 pub(crate) enum Noun {
     Item,
     Session,
-    Decision,
     Tag,
     Memory,
     File,
@@ -691,7 +690,6 @@ impl Noun {
         match self {
             Noun::Item => steve_i18n::t!("hub.not_found.item"),
             Noun::Session => steve_i18n::t!("hub.not_found.session"),
-            Noun::Decision => steve_i18n::t!("hub.not_found.decision"),
             Noun::Tag => steve_i18n::t!("hub.not_found.tag"),
             Noun::Memory => steve_i18n::t!("hub.not_found.memory"),
             Noun::File => steve_i18n::t!("hub.not_found.file"),

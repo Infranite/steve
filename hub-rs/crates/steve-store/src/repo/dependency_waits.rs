@@ -83,7 +83,12 @@ pub(super) fn rearm_in(tx: &mut crate::W<'_>, item: &str) -> Result<()> {
         [item],
         |r| r.get::<_, String>(0),
     )? {
-        crate::decision_resolve_in(tx, &id, &json!({"superseded":"前置事项已变化"}), "expired")?;
+        crate::DecisionRows(tx).settle(
+            &id,
+            &json!({"superseded":"前置事项已变化"}),
+            crate::decision_repo::DecisionChange::Expire,
+            None,
+        )?;
     }
     Ok(())
 }
@@ -97,9 +102,19 @@ impl DependencyWaits<'_> {
         self.0.write(|w| rearm_in(w, item))
     }
 
-    pub fn take_workspace_wait(&self, item: &str, cycle: i64, automatic: bool) -> Result<bool> {
+    pub fn take_workspace_wait(
+        &self,
+        item: &str,
+        cycle: i64,
+        automatic: bool,
+    ) -> Result<Option<i64>> {
         self.0.write(|w| {
-            Ok(w.conn.execute(
+            let Some(wait) = get(w.conn, item)?
+                .filter(|wait| wait.cycle == cycle && wait.state == "waiting" && wait.session_id.is_none())
+            else {
+                return Ok(None);
+            };
+            let updated = w.conn.execute(
                 "UPDATE item_dependency_waits SET state=?,updated=?
                  WHERE item_id=? AND cycle=? AND state='waiting' AND session_id IS NULL
                    AND EXISTS(SELECT 1 FROM items i WHERE i.id=item_dependency_waits.item_id
@@ -113,7 +128,8 @@ impl DependencyWaits<'_> {
                     item,
                     cycle
                 ],
-            )? == 1)
+            )?;
+            Ok((updated == 1).then_some(wait.updated))
         })
     }
 
@@ -203,7 +219,7 @@ impl DependencyWaits<'_> {
                         resume=excluded.resume,reason=excluded.reason,state='waiting',updated=excluded.updated",
                        params![item,i.cycle,session,resume,reason,at,at])?;
             for id in all(tx, "SELECT id FROM decisions WHERE item_id=? AND status='open' AND kind IN ('ask','fail')", [item], |r| r.get::<_,String>(0))? {
-                crate::DecisionRows(w).settle(&id, &json!({"superseded":"已登记前置等待"}), "expired", &serde_json::Value::Null)?;
+                crate::DecisionRows(w).settle(&id, &json!({"superseded":"已登记前置等待"}), crate::decision_repo::DecisionChange::Expire, None)?;
             }
             crate::item_repo::store_timeline(w,item,"steve","sys",&format!("登记前置等待（{resume}）：{reason}"),Some(session),None,crate::now())?;
             w.emit(steve_types::DomainEvent::from(
@@ -259,7 +275,11 @@ impl DependencyWaits<'_> {
                 crate::DecisionRows(w).open(&NewDecision {
                     workspace_id:i.workspace_id.clone(),kind:"propose".into(),subject_type:"item".into(),
                     subject_id:item.into(),item_id:Some(item.into()),question:"前置事项都已完成，现在开始？".into(),
-                    options:Some(vec!["yes".into(),"no".into()]),requested_by:"steve".into(),..Default::default()
+                    options:Some(vec!["yes".into(),"no".into()]),requested_by:"steve".into(),
+                    source: Some(crate::DecisionSource::Revision {
+                        revision: format!("deps:{}:{}", wait.cycle, wait.updated),
+                    }),
+                    ..Default::default()
                 })?;
             }
             tx.execute("UPDATE item_dependency_waits SET state=?,updated=? WHERE item_id=? AND cycle=?",

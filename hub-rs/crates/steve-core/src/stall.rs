@@ -128,18 +128,26 @@ impl Tx<'_> {
                         None => continue,
                     }
                 }
-                let d = self.db().decision_create(NewDecision {
-                    workspace_id: i.workspace_id.clone(),
-                    kind: "fail".into(),
-                    subject_type: STALL.into(),
-                    subject_id: i.id.clone(),
-                    item_id: Some(i.id.clone()),
-                    session_id: Some(s.id.clone()),
-                    question: question.clone(),
-                    options: Some(vec!["continue".into(), "look".into(), "drop".into()]),
-                    requested_by: "steve".into(),
-                    ..Default::default()
+                let (d, opened) = self.db().store().write(|w| {
+                    steve_store::DecisionRows(w).open_in(&NewDecision {
+                        workspace_id: i.workspace_id.clone(),
+                        kind: "fail".into(),
+                        subject_type: STALL.into(),
+                        subject_id: i.id.clone(),
+                        item_id: Some(i.id.clone()),
+                        session_id: Some(s.id.clone()),
+                        question: question.clone(),
+                        options: Some(vec!["continue".into(), "look".into(), "drop".into()]),
+                        requested_by: "steve".into(),
+                        source: Some(steve_store::DecisionSource::Revision {
+                            revision: format!("stall:{}:{}:{last}", i.cycle, s.id),
+                        }),
+                        ..Default::default()
+                    })
                 })?;
+                if !opened {
+                    continue;
+                }
                 self.mark_fail(&i.workspace_id, &i.id, &question, &d.id); // stats (ST3)
                 self.db()
                     .timeline_add(&i.id, "steve", "sys", &question, Some(&s.id))?;
@@ -158,13 +166,13 @@ impl Tx<'_> {
             .db()
             .decisions_of_item(&item)?
             .into_iter()
-            .filter(|d| d.status == "open" && d.subject_type == STALL)
+            .filter(|d| d.status == steve_types::DecisionStatus::Open && d.subject_type == STALL)
             .collect();
         for d in &open {
             self.db().decision_resolve(
                 &d.id,
                 json!({"superseded": "它又开始工作了"}),
-                "expired",
+                steve_store::decision_repo::DecisionChange::Expire,
                 None,
             )?;
         }

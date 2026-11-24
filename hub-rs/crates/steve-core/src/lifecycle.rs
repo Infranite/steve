@@ -44,64 +44,29 @@ pub fn supersede_where(
     pick: impl Fn(&steve_store::Decision) -> bool,
     why: &str,
 ) -> Result<usize> {
-    let xs: Vec<_> = db
-        .decisions_of_item(item)?
-        .into_iter()
-        .filter(|d| d.status == "open" && pick(d))
-        .collect();
-    for d in &xs {
-        db.decision_resolve(&d.id, json!({"superseded": why}), "expired", None)?;
-    }
-    if !xs.is_empty() {
-        db.timeline_add(
-            item,
-            "steve",
-            "sys",
-            &format!("{} 件待处理已失效：{why}", xs.len()),
-            None,
-        )?;
-    }
-    Ok(xs.len())
-}
-
-/// Cards left from before these rules: a question or failure older than a delivery or approval request has been moved past.
-pub fn tidy(db: &Store, item: &str) -> Result<usize> {
-    let open: Vec<_> = db
-        .decisions_of_item(item)?
-        .into_iter()
-        .filter(|d| d.status == "open")
-        .collect();
-    let later = open
-        .iter()
-        .filter(|d| d.kind == "accept" || d.kind == "approve")
-        .map(|d| d.created)
-        .max()
-        .unwrap_or(0)
-        .max(0);
-    let stale: Vec<_> = open
-        .iter()
-        .filter(|d| {
-            d.subject_type != steve_store::SESSION_START_FAILURE
-                && (d.kind == "ask" || d.kind == "fail")
-                && d.created < later
-        })
-        .collect();
-    for d in &stale {
-        db.decision_resolve(
-            &d.id,
-            json!({"superseded": "Bot 后来已经交付或请求批准"}),
-            "expired",
-            None,
-        )?;
-    }
-    if !stale.is_empty() {
-        db.timeline_add(
-            item,
-            "steve",
-            "sys",
-            &format!("{} 件待处理已失效：Bot 后来已经交付或请求批准", stale.len()),
-            None,
-        )?;
-    }
-    Ok(stale.len())
+    db.store().write(|w| {
+        let mut count = 0;
+        for decision in steve_store::decision_repo::open_item_decisions(w, item)? {
+            if pick(&decision)
+                && steve_store::DecisionRows(w).apply(
+                    &decision,
+                    steve_store::decision_repo::DecisionChange::Expire,
+                    &json!({"superseded": why}),
+                    None,
+                )?
+            {
+                count += 1;
+            }
+        }
+        if count > 0 {
+            db.timeline_add(
+                item,
+                "steve",
+                "sys",
+                &format!("{count} 件待处理已失效：{why}"),
+                None,
+            )?;
+        }
+        Ok(count)
+    })
 }

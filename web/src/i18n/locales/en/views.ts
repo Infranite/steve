@@ -1,5 +1,10 @@
 /* English strings for the "views" namespace: the same keys as ../zh-CN/views.ts. Conventions: web/src/i18n/index.ts */
 export default {
+  decision: {
+    turnRepeatedFailure: "The same tool action failed five times. Steve requested a stop.",
+    turnNoProgress: "There was no verified progress for fifteen minutes of observable work. Steve requested a stop.",
+    mergePullRequest: "Merge PR #{{number}} ({{repo}})?",
+  },
   feed: {
     viewItem: "View item",
     selectionLimit: "Select up to 100 at a time. Mark all read leaves new arrivals unread.",

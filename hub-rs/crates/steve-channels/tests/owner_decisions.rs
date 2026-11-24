@@ -741,7 +741,7 @@ async fn cards_close_after_the_lifetime_you_set_but_never_a_commitment_or_a_star
 
     // no lifetime set: a day later, everything still waits for you
     h.env.clock.advance(24 * 3_600_000);
-    h.outbox.send_due(&h.ch).await;
+    h.outbox.expire_stale(&h.ch, h.ch.now()).unwrap();
     for (n, d) in [&fact, &commitment, &approval, &starred]
         .into_iter()
         .enumerate()
@@ -750,10 +750,10 @@ async fn cards_close_after_the_lifetime_you_set_but_never_a_commitment_or_a_star
     }
     // a lifetime of 30 hours: not yet; past it, the question and the draft close
     lifetime(&h, Some(30));
-    h.outbox.send_due(&h.ch).await;
+    h.outbox.expire_stale(&h.ch, h.ch.now()).unwrap();
     assert_eq!(card(&h, &fact).0, "open");
     h.env.clock.advance(7 * 3_600_000);
-    h.outbox.send_due(&h.ch).await;
+    h.outbox.expire_stale(&h.ch, h.ch.now()).unwrap();
     for d in [&fact, &approval] {
         let (st, _, _, _, result) = card(&h, d);
         assert_eq!(
@@ -797,7 +797,7 @@ async fn cards_on_a_bots_account_never_hold_up_the_sweep() {
         .decision_id
         .expect("a card");
     h.env.clock.advance(2 * 3_600_000);
-    h.outbox.send_due(&h.ch).await;
+    h.outbox.expire_stale(&h.ch, h.ch.now()).unwrap();
     assert_eq!(card(&h, &fact).0, "expired");
     assert_eq!(
         inspect::decisions::decision_count_by_id_dbm_and_open(h.env.store()).unwrap()[0],

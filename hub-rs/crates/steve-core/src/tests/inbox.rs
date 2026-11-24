@@ -22,6 +22,90 @@ fn count(k: &Kit) -> usize {
     k.db().items(WS).unwrap().len()
 }
 
+#[test]
+fn session_decisions_commit_the_input_and_choice_together() {
+    use crate::DecisionCommand;
+    use steve_store::{core_fixture::work::audit_count, decision_repo::choice_receipt};
+    use steve_types::DecisionStatus;
+
+    for (kind, subject, choice) in [("ask", "question", "answer"), ("approve", "action", "yes")] {
+        let k = Kit::new();
+        let item = k.item("run", "confirm", None);
+        let sid = k.session(&item, "idle");
+        let id = k.decision(&item, Some(&sid), kind, subject, &[choice]);
+        let store = k.db().store();
+        store
+            .write(|w| {
+                steve_store::UserRows(w).insert("me", WS, "sub_me", "Owner", "owner", 1)?;
+                steve_store::UserRows(w).insert(
+                    "member",
+                    WS,
+                    "sub_member",
+                    "Member",
+                    "member",
+                    2,
+                )?;
+                w.members().add(WS, "me", "owner", 1)?;
+                w.members().add(WS, "member", "member", 2)
+            })
+            .unwrap();
+        let owner = steve_modules::Caller {
+            ws: WS.into(),
+            me: "me".into(),
+        };
+        let member = steve_modules::Caller {
+            ws: WS.into(),
+            me: "member".into(),
+        };
+        let outsider = steve_modules::Caller {
+            ws: "elsewhere".into(),
+            me: "me".into(),
+        };
+        let resolve = |caller: &steve_modules::Caller, choice: &str| {
+            k.core.decision_command(
+                caller,
+                &id,
+                Some(1),
+                DecisionCommand::Resolve {
+                    choice: choice.into(),
+                    text: "go on".into(),
+                },
+            )
+        };
+        let audit = || audit_count(store, &["decision.resolve"], Some(&id));
+
+        assert!(resolve(&outsider, choice).is_err());
+        if subject == "question" {
+            assert!(matches!(
+                resolve(&member, choice),
+                Err(crate::CoreError::Status(403, _))
+            ));
+        }
+        let before = k.timeline_texts(&item);
+        k.rt.st().decision_prompt_error = true;
+        assert!(resolve(&owner, choice).is_err());
+        assert_eq!(
+            store.decisions().get(&id).unwrap().unwrap().status,
+            DecisionStatus::Open
+        );
+        assert_eq!(k.timeline_texts(&item), before);
+        assert_eq!(audit(), 0);
+        assert!(store.read(|r| choice_receipt(r, &id, 1)).unwrap().is_none());
+
+        k.rt.st().decision_prompt_error = false;
+        assert_eq!(
+            resolve(&owner, choice).unwrap().status,
+            DecisionStatus::Resolved
+        );
+        assert_eq!(
+            resolve(&owner, choice).unwrap().status,
+            DecisionStatus::Resolved
+        );
+        assert_eq!(audit(), 1);
+        assert_eq!(k.rt.prompts_of(&sid).len(), 1);
+    }
+}
+
 #[tokio::test]
 async fn promoting_the_same_answer_twice_at_once_makes_one_item() {
     let k = Kit::new();
@@ -212,28 +296,6 @@ fn on_boot_reminders_left_on_finished_or_dropped_items_are_cleared() {
 }
 
 #[test]
-fn on_boot_a_question_older_than_a_delivery_expires() {
-    let k = Kit::new();
-    let (i, question) = waiting(&k, "ask");
-    let acc = k.decision(&i, None, "accept", "item", &["pass", "rework"]);
-    steve_store::core_fixture::decision(
-        k.db().store(),
-        &acc,
-        steve_store::core_fixture::DecisionState::CreatedAfter(&question),
-    );
-    k.core.recover().unwrap();
-    let open: Vec<String> = k
-        .db()
-        .decisions_of_item(&i)
-        .unwrap()
-        .into_iter()
-        .filter(|d| d.status == "open")
-        .map(|d| d.id)
-        .collect();
-    assert_eq!(open, vec![acc]);
-}
-
-#[test]
 fn a_turn_cut_off_by_a_restart_that_nothing_continues_shows_one_card() {
     let k = Kit::new();
     let i = k.item("run", "执行", None);
@@ -295,7 +357,10 @@ fn boot_expires_open_tool_permissions() {
     let s = k.session(&i, "idle");
     let p = k.decision(&i, Some(&s), "approve", "tool_call", &["a|允许|allow_once"]);
     k.core.recover().unwrap();
-    assert_eq!(k.db().decision(&p).unwrap().unwrap().status, "expired");
+    assert_eq!(
+        k.db().decision(&p).unwrap().unwrap().status,
+        steve_types::DecisionStatus::Expired
+    );
     assert!(k.open_kinds(&i).is_empty());
     assert!(
         k.db()

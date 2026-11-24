@@ -196,7 +196,12 @@ fn auto_accept_holds_failed_or_unfinished_delivery_and_closes_clean_or_baseline(
     let k = Kit::new();
     let x = k.delivered(false);
     k.db()
-        .decision_resolve(&x.decision, json!({"choice": "skip"}), "resolved", None)
+        .decision_resolve(
+            &x.decision,
+            json!({"choice": "skip"}),
+            steve_store::decision_repo::DecisionChange::Resolve,
+            None,
+        )
         .unwrap();
     k.db()
         .settings_set(
@@ -275,7 +280,10 @@ fn design_delivery_waits_for_the_users_implementation_decision() {
         .decisions_of_item(&item)
         .unwrap()
         .into_iter()
-        .find(|d| d.status == "open" && d.subject_type == "design_implementation")
+        .find(|d| {
+            d.status == steve_types::DecisionStatus::Open
+                && d.subject_type == "design_implementation"
+        })
         .unwrap();
     assert!(!k.open_kinds(&item).is_empty());
     k.core
@@ -339,7 +347,10 @@ fn gated_delivery_passes_over_an_unverifiable_link_to_the_design_file() {
         .decisions_of_item(&item)
         .unwrap()
         .into_iter()
-        .find(|d| d.status == "open" && d.subject_type == "design_implementation")
+        .find(|d| {
+            d.status == steve_types::DecisionStatus::Open
+                && d.subject_type == "design_implementation"
+        })
         .unwrap();
     assert!(
         decision.subject_id.contains(&path),
@@ -365,7 +376,10 @@ fn confirming_design_starts_implementation_without_reasking_the_design_question(
         .decisions_of_item(&item)
         .unwrap()
         .into_iter()
-        .find(|d| d.status == "open" && d.subject_type == "design_implementation")
+        .find(|d| {
+            d.status == steve_types::DecisionStatus::Open
+                && d.subject_type == "design_implementation"
+        })
         .unwrap();
     k.core
         .resolve(&decision.id, "按方案实现", "优先做手机布局", "me")
@@ -381,7 +395,8 @@ fn confirming_design_starts_implementation_without_reasking_the_design_question(
             .decisions_of_item(&item)
             .unwrap()
             .iter()
-            .all(|d| d.status != "open" || d.subject_type != "design_implementation")
+            .all(|d| d.status != steve_types::DecisionStatus::Open
+                || d.subject_type != "design_implementation")
     );
     /* the switch still on, the implementation delivered next goes to ordinary acceptance: the design
      * is not asked about again */
@@ -415,7 +430,10 @@ fn a_new_goal_after_the_approval_is_gated_again() {
             .decisions_of_item(&item)
             .unwrap()
             .into_iter()
-            .find(|d| d.status == "open" && d.subject_type == "design_implementation")
+            .find(|d| {
+                d.status == steve_types::DecisionStatus::Open
+                    && d.subject_type == "design_implementation"
+            })
     };
     let report = design_report(&k, &item, "完整方案");
     k.core
@@ -451,7 +469,10 @@ fn changed_design_file_cannot_reuse_the_old_approval() {
         .decisions_of_item(&item)
         .unwrap()
         .into_iter()
-        .find(|d| d.status == "open" && d.subject_type == "design_implementation")
+        .find(|d| {
+            d.status == steve_types::DecisionStatus::Open
+                && d.subject_type == "design_implementation"
+        })
         .unwrap();
     std::fs::write(path, "已改动的设计").unwrap();
     assert!(
@@ -517,7 +538,10 @@ fn delivery_url_design_approval_checks_the_exact_record_and_bytes() {
             .decisions_of_item(&item)
             .unwrap()
             .into_iter()
-            .find(|d| d.status == "open" && d.subject_type == "design_implementation")
+            .find(|d| {
+                d.status == steve_types::DecisionStatus::Open
+                    && d.subject_type == "design_implementation"
+            })
             .unwrap();
         if tamper {
             std::fs::write(&path, b"modified design").unwrap();
@@ -599,7 +623,8 @@ fn a_received_openable_file_delivery_counts_as_the_design_file() {
                     .decisions_of_item(&item)
                     .unwrap()
                     .iter()
-                    .any(|d| d.status == "open" && d.subject_type == "design_implementation"),
+                    .any(|d| d.status == steve_types::DecisionStatus::Open
+                        && d.subject_type == "design_implementation"),
                 "{name}"
             );
         }
@@ -650,7 +675,7 @@ fn a_delivery_with_open_steps_shows_them_left_open() {
         .decisions_of_item(&x.id)
         .unwrap()
         .into_iter()
-        .find(|d| d.kind == "accept" && d.status == "open")
+        .find(|d| d.kind == "accept" && d.status == steve_types::DecisionStatus::Open)
         .unwrap();
     assert!(
         card.draft.contains("没做完的计划步骤：a；b"),
