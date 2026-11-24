@@ -56,6 +56,7 @@
   "modules.vault.key_missing": "保险箱暂时打不开：钥匙串里没有主密钥，请用恢复码恢复",
   "modules.vault.denied": "保险箱暂时打不开：钥匙串没有授权这个版本的 Steve 读取主密钥（发布时没有用固定签名）",
   "modules.vault.stale_login": "请重新登录后再登记",
+  "modules.vault.no_execution_node": "当前会话没有可用的执行 Node，机密注入命令不能在 Hub 进程内运行",
   "modules.changes.stale": "这份草稿已经失效，请重新说一次",
   "modules.changes.not_undoable": "这次改动已经不能撤销了",
   "modules.decision.already_handled": "这个决定已经处理过了",

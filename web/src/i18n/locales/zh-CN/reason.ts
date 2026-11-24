@@ -22,4 +22,5 @@ export default {
   "node_stop.output_limit": "输出已达到上限，Node 已停止运行。",
   "node_stop.research_budget": "研究已达到回合数或工具调用次数上限。",
   "node_stop.stopped_by_node": "Node 已停止运行。",
+  "vault.execution_node_unavailable": "当前会话没有可用的执行 Node，机密注入命令不能在 Hub 进程内运行。",
 } as const

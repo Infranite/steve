@@ -22,5 +22,6 @@ export const REASONS = {
   "node_stop.output_limit": { code: "exhausted", params: [] },
   "node_stop.research_budget": { code: "exhausted", params: [] },
   "node_stop.stopped_by_node": { code: "internal", params: [] },
+  "vault.execution_node_unavailable": { code: "unavailable", params: [] },
 } as const
 export type KnownReason = keyof typeof REASONS

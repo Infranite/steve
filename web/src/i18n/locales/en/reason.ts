@@ -22,4 +22,5 @@ export default {
   "node_stop.output_limit": "The Node stopped the run when it reached its output limit.",
   "node_stop.research_budget": "The research run reached its turn or tool call limit.",
   "node_stop.stopped_by_node": "The Node stopped the run.",
+  "vault.execution_node_unavailable": "No execution Node is available for this session; secret-injected commands cannot run on the Hub.",
 } as const
