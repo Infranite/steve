@@ -106,6 +106,10 @@ try {
           : p.only === "done" && p.range === "custom" ? [itemRow(21, "done")] : p.only === "done" ? Array.from({ length: sum(done) }, (_, i) => (i === 0 ? { ...itemRow(20, "done"), tokens: 7_400_000, est: 0.004, unpriced_tokens: 7_390_000 } : i === 1 ? { ...itemRow(21, "done"), unpriced_tokens: 50_000 } : itemRow(20 + i, "done"))) : p.only === "created" ? [itemRow(30, "run"), itemRow(31, "wait")] : [itemRow(1, "run"), itemRow(8, "done")]
         data = { rows, total: rows.length, next: null }
       } else if (u.pathname === "/api/stats/events") data = eventsFixture(p)
+      else if (u.pathname === "/api/stats/nav") {
+        const r = p.range || "7d"
+        data = { range: r, from: r === "all" ? "2026-10-01" : r === "30d" ? "2026-10-20" : "2026-11-12", to: "2026-11-18", total: 35, items: [{ item: "chat", opens: 16 }, { item: "inbox", opens: 11 }, { item: "items", opens: 5 }, { item: "todos", opens: 3 }] }
+      }
       else return route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "fixture" }) })
       await route.fulfill({ contentType: "application/json", body: JSON.stringify(data) })
     })

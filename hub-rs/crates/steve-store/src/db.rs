@@ -262,8 +262,10 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/123.sql"),
     // 124: decision revisions, choice receipts, natural keys, prompt templates, and typed undo.
     include_str!("../migrations/124.sql"),
-    // 125: remove retired dynamic work-graph tables and steve_workflow tool pins.
+    // 125: durable daily aggregates for low-cardinality telemetry counters.
     include_str!("../migrations/125.sql"),
+    // 126: remove retired dynamic work-graph tables and steve_workflow tool pins.
+    include_str!("../migrations/126.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).
