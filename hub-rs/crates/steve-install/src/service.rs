@@ -52,6 +52,7 @@ pub struct Service {
     config_uid: u32,
     runner: Runner,
     boot_registrar: BootRegistrar,
+    node_signer: Arc<dyn boot::NodeSigner>,
 }
 
 /// An existing Hub installation that may have its configuration edited without
@@ -570,6 +571,7 @@ impl Service {
             config_uid: if boot { 0 } else { unsafe { libc::getuid() } },
             runner,
             boot_registrar: Arc::new(boot::execute_register),
+            node_signer: Arc::new(boot::LocalNodeSigner(crate::signing::Tools::default())),
         })
     }
 
@@ -1345,6 +1347,137 @@ mod tests {
         legacy: BTreeMap<String, PathBuf>,
         legacy_programs: BTreeMap<String, PathBuf>,
         node_signatures: BTreeMap<PathBuf, String>,
+        cert_sha1: Option<String>,
+        signing_failure: bool,
+    }
+
+    struct FakeNodeSigner(Arc<Mutex<Manager>>);
+
+    impl boot::NodeSigner for FakeNodeSigner {
+        fn ensure_identity(
+            &self,
+            home: &Path,
+            label: &str,
+        ) -> Result<crate::signing::NodeSigningIdentity> {
+            let identity_path = crate::signing::node_signing_identity_path(home);
+            let keychain_path = crate::signing::node_signing_keychain(home);
+            let pass_path = crate::signing::node_signing_password_path(home);
+            let present = [
+                exists(&identity_path),
+                exists(&keychain_path),
+                exists(&pass_path),
+            ];
+            if present.iter().all(|v| *v) {
+                return self.load_identity(home, label);
+            }
+            ensure!(
+                present.iter().all(|v| !*v),
+                "incomplete Node signing identity"
+            );
+            let sha1 = self
+                .0
+                .lock()
+                .unwrap()
+                .cert_sha1
+                .clone()
+                .unwrap_or_else(|| "11".repeat(20));
+            crate::signing::private_dir(&home.join("signing"))?;
+            crate::signing::private_dir(&home.join("secrets"))?;
+            crate::signing::private_dir(&home.join(crate::signing::NODE_KEYSTORE_DIR))?;
+            atomic(&keychain_path, b"fake-keychain")?;
+            atomic(
+                &pass_path,
+                data_encoding::BASE64.encode(&[0x42; 32]).as_bytes(),
+            )?;
+            let identity = crate::signing::NodeSigningIdentity {
+                label: label.to_owned(),
+                cli_identifier: crate::signing::NODE_CLI_IDENTIFIER.to_owned(),
+                node_identifier: crate::signing::NODE_RUNTIME_IDENTIFIER.to_owned(),
+                certificate_name: crate::signing::NODE_CERTIFICATE_NAME.to_owned(),
+                certificate_sha1: sha1,
+            };
+            crate::signing::exclusive_json(&identity_path, &serde_json::to_value(&identity)?)?;
+            Ok(identity)
+        }
+
+        fn load_identity(
+            &self,
+            home: &Path,
+            label: &str,
+        ) -> Result<crate::signing::NodeSigningIdentity> {
+            crate::signing::load_node_identity(home, label)
+        }
+
+        fn sign_binary(
+            &self,
+            home: &Path,
+            binary: &Path,
+            identity: &crate::signing::NodeSigningIdentity,
+            identifier: &str,
+        ) -> Result<()> {
+            let req =
+                crate::signing::self_signed_requirement(identifier, &identity.certificate_sha1);
+            if self.verify_binary(binary, &req).is_ok() {
+                return Ok(());
+            }
+            ensure!(
+                !self.0.lock().unwrap().signing_failure,
+                "fake local signing failure"
+            );
+            crate::signing::owned_file(binary)?;
+            crate::signing::load_node_identity(home, &identity.label)?;
+            self.0
+                .lock()
+                .unwrap()
+                .node_signatures
+                .insert(binary.to_owned(), req);
+            Ok(())
+        }
+
+        fn verify_binary(&self, binary: &Path, requirement: &str) -> Result<()> {
+            ensure!(
+                self.0
+                    .lock()
+                    .unwrap()
+                    .node_signatures
+                    .get(binary)
+                    .map(String::as_str)
+                    == Some(requirement),
+                "candidate executable must satisfy the installation's designated requirement"
+            );
+            Ok(())
+        }
+
+        fn stage_runner(
+            &self,
+            home: &Path,
+            source: &Path,
+            destination_dir: &Path,
+            identity: &crate::signing::NodeSigningIdentity,
+        ) -> Result<PathBuf> {
+            directory(destination_dir)?;
+            let staged = destination_dir.join(format!(
+                ".node-boot-runner.sign-{}",
+                Uuid::new_v4().simple()
+            ));
+            atomic_mode(&staged, &fs::read(source)?, 0o700)?;
+            if let Err(err) = self.sign_binary(home, &staged, identity, &identity.cli_identifier) {
+                let _ = fs::remove_file(&staged);
+                return Err(err);
+            }
+            Ok(staged)
+        }
+
+        fn commit_runner(&self, staged: &Path, destination: &Path) -> Result<()> {
+            let parent = destination.parent().context("runner has no parent")?;
+            fs::rename(staged, destination)?;
+            File::open(parent)?.sync_all()?;
+            let mut m = self.0.lock().unwrap();
+            if let Some(sig) = m.node_signatures.remove(staged) {
+                m.node_signatures.insert(destination.to_owned(), sig);
+            }
+            Ok(())
+        }
     }
 
     impl Manager {
@@ -1373,17 +1506,6 @@ mod tests {
             } else if args[0] == "/usr/bin/id" {
                 assert_eq!(args, &["/usr/bin/id", "-un"]);
                 result.stdout = "fixture-node\n".into();
-            } else if args[0] == "/usr/bin/codesign" {
-                let requirement = self.node_signatures.get(Path::new(args.last().unwrap()));
-                match (args[1].as_str(), requirement) {
-                    ("--display", Some(requirement)) => {
-                        result.stderr = format!(
-                            "Authority=Developer ID Application: Fixture\ndesignated => {requirement}\n"
-                        );
-                    }
-                    ("--verify", Some(requirement)) if args.get(4) == Some(requirement) => {}
-                    _ => result.code = 1,
-                }
             } else if args.starts_with(&["/usr/bin/sudo".into(), "/bin/rm".into()]) {
                 assert_eq!(Path::new(&args[3]), self.config);
                 fs::remove_file(&self.config)?;
@@ -1538,7 +1660,7 @@ mod tests {
                 json_bytes(&manifest).unwrap(),
             )
             .unwrap();
-            for name in ["steve-hub", "steve-node"] {
+            for name in ["steve", "steve-hub", "steve-node"] {
                 let binary = path.join("bin").join(name);
                 fs::write(&binary, b"fake native binary").unwrap();
                 fs::set_permissions(binary, fs::Permissions::from_mode(0o755)).unwrap();
@@ -1603,6 +1725,7 @@ mod tests {
                 m.running = true;
                 Ok(())
             });
+            service.node_signer = Arc::new(FakeNodeSigner(manager.clone()));
             manager.lock().unwrap().config = service.config.clone();
             (service, manager)
         }
@@ -2288,18 +2411,32 @@ printf 'headless fixture ran\n'
     fn boot_supervisor_reaps_the_old_child_and_the_next_launch_reads_the_new_receipt() {
         let f = Fixture::new();
         let (mut s, manager) = f.service(System::Darwin, "node");
-        let requirement = "identifier \"io.github.infranite.steve.node\" and anchor apple generic";
-        manager.lock().unwrap().node_signatures.extend([
-            (f.release.join("bin/steve-node"), requirement.into()),
-            (f.next.join("bin/steve-node"), "identifier \"other\"".into()),
-        ]);
+        let sha1 = "22".repeat(20);
+        manager.lock().unwrap().cert_sha1 = Some(sha1.clone());
+        let requirement =
+            crate::signing::self_signed_requirement(crate::signing::NODE_RUNTIME_IDENTIFIER, &sha1);
+        let cli_requirement =
+            crate::signing::self_signed_requirement(crate::signing::NODE_CLI_IDENTIFIER, &sha1);
         s.dispatch("install", Some(&f.release), 0).unwrap();
         s.dispatch("enable-boot", None, 0).unwrap();
-        let cli = "identifier \"io.github.infranite.steve.cli\" and anchor apple generic";
-        manager.lock().unwrap().node_signatures.extend([
-            (f.home.join(boot::RUNNER), cli.into()),
-            (f.next.join("bin/steve"), cli.into()),
-        ]);
+        assert_eq!(s.record["code_requirement"], requirement);
+        assert_eq!(
+            manager
+                .lock()
+                .unwrap()
+                .node_signatures
+                .get(&f.home.join(boot::RUNNER)),
+            Some(&cli_requirement)
+        );
+        // An unsigned candidate or one signed by another certificate fails verification.
+        assert!(s.verify_boot_upgrade(&f.next).is_err());
+        manager.lock().unwrap().node_signatures.insert(
+            f.next.join("bin/steve-node"),
+            crate::signing::self_signed_requirement(
+                crate::signing::NODE_RUNTIME_IDENTIFIER,
+                &"99".repeat(20),
+            ),
+        );
         assert!(s.verify_boot_upgrade(&f.next).is_err());
         let supervisor = fs::read(f.home.join(boot::RUNNER)).unwrap();
         let definition = fs::read(&s.config).unwrap();
@@ -2344,14 +2481,15 @@ cd "${0%/*}"
                 ensure!(Instant::now() < until, "old runtime did not start");
                 std::thread::sleep(Duration::from_millis(10));
             }
+            // A failed local sign leaves the receipt and running release unchanged.
+            manager.lock().unwrap().signing_failure = true;
             assert!(s.dispatch("update", Some(&f.next), 0).is_err());
             assert_eq!(s.record["boot_release"], text(&f.release)?);
             assert_eq!(s.record["code_requirement"], requirement);
-            manager
-                .lock()
-                .unwrap()
-                .node_signatures
-                .insert(f.next.join("bin/steve-node"), requirement.into());
+            manager.lock().unwrap().signing_failure = false;
+
+            // Signing the candidate with the same local self-signed identity satisfies both requirements.
+            s.prepare_boot_upgrade(&f.next)?;
             s.verify_boot_upgrade(&f.next)?;
             s.dispatch("update", Some(&f.next), 0)?;
             done_rx.recv_timeout(Duration::from_secs(5))??;
@@ -2363,6 +2501,22 @@ cd "${0%/*}"
         assert_eq!(fs::read(f.home.join(boot::RUNNER)).unwrap(), supervisor);
         assert_eq!(fs::read(&s.config).unwrap(), definition);
         assert_eq!(s.record["code_requirement"], requirement);
+        assert_eq!(
+            manager
+                .lock()
+                .unwrap()
+                .node_signatures
+                .get(&f.next.join("bin/steve-node")),
+            Some(&requirement)
+        );
+        assert_eq!(
+            manager
+                .lock()
+                .unwrap()
+                .node_signatures
+                .get(&f.next.join("bin/steve")),
+            Some(&cli_requirement)
+        );
         assert!(f.release.join("bin/stopped").exists());
         assert!(
             !manager
@@ -2378,6 +2532,207 @@ cd "${0%/*}"
             "next\n"
         );
         f.preserved();
+    }
+
+    #[test]
+    fn first_upgrade_from_adhoc_boot_node_creates_local_identity_and_signs_supervisor() {
+        let f = Fixture::new();
+        let third = Fixture::bundle(&f.root, "0.2.2", "c");
+        let (mut s, manager) = f.service(System::Darwin, "node");
+        let (_, info) = s.bundle(&f.release).unwrap();
+        // Simulate a pre-0.10.1 ad-hoc boot Node: daemon installed, unsigned runner, null code_requirement.
+        fs::create_dir_all(s.config.parent().unwrap()).unwrap();
+        fs::write(&s.config, s.boot_definition("fixture-node").unwrap()).unwrap();
+        directory(&f.home.join("services")).unwrap();
+        atomic_mode(&f.home.join(boot::RUNNER), b"adhoc-supervisor", 0o700).unwrap();
+        atomic(
+            &s.record_path,
+            &json_bytes(&json!({
+                "component": "node", "label": s.label, "boot_release": f.release,
+                "build": info, "previous": null, "code_requirement": null
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        s.record = object(&s.record_path).unwrap();
+
+        // First update to this version creates the local identity, signs release + supervisor, pins requirement.
+        s.dispatch("update", Some(&f.next), 0).unwrap();
+        let identity = crate::signing::load_node_identity(&f.home, &s.label).unwrap();
+        assert_eq!(s.record["code_requirement"], identity.node_requirement());
+        assert_eq!(
+            manager
+                .lock()
+                .unwrap()
+                .node_signatures
+                .get(&f.home.join(boot::RUNNER)),
+            Some(&identity.cli_requirement())
+        );
+        let signed_supervisor = fs::read(f.home.join(boot::RUNNER)).unwrap();
+        assert_eq!(
+            signed_supervisor,
+            fs::read(f.next.join("bin/steve")).unwrap()
+        );
+
+        // Subsequent update reuses the same local identity and leaves the already-signed supervisor in place.
+        s.dispatch("update", Some(&third), 0).unwrap();
+        assert_eq!(s.record["code_requirement"], identity.node_requirement());
+        assert_eq!(
+            crate::signing::load_node_identity(&f.home, &s.label).unwrap(),
+            identity
+        );
+        assert_eq!(
+            fs::read(f.home.join(boot::RUNNER)).unwrap(),
+            signed_supervisor
+        );
+        f.preserved();
+    }
+
+    #[test]
+    fn mac_boot_service_end_to_end_with_local_node_signer_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let home = root.join("node-home");
+        fs::create_dir_all(home.join("node")).unwrap();
+        fs::write(home.join("node/node.json"), r#"{"node_id":"test"}"#).unwrap();
+        fs::write(home.join("node/identity.key"), "private identity").unwrap();
+        let v1 = Fixture::bundle(&root, "0.10.1", "a");
+        let v2 = Fixture::bundle(&root, "0.10.2", "b");
+        let state = root.join("state");
+        fs::create_dir(&state).unwrap();
+        let sha1 = "abcdef0123456789abcdef0123456789abcdef01";
+        let sha1_colon = "AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01";
+        let openssl = root.join("openssl");
+        crate::signing::tests::executable(
+            &openssl,
+            &format!(
+                r#"#!/bin/sh
+set -eu
+case "$1" in
+  req)
+    keyout=''; out=''; shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in -keyout) keyout="$2"; shift 2;; -out) out="$2"; shift 2;; *) shift;; esac
+    done
+    printf 'KEY' > "$keyout"; printf 'CERT' > "$out" ;;
+  x509) printf 'SHA1 Fingerprint={sha1_colon}\n' ;;
+  pkcs12)
+    [ -n "${{P12:-}}" ] || exit 11
+    out=''; shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in -out) out="$2"; shift 2;; *) shift;; esac
+    done
+    printf 'P12' > "$out" ;;
+  *) exit 99 ;;
+esac
+"#
+            ),
+        );
+        let security = root.join("security");
+        crate::signing::tests::executable(
+            &security,
+            &format!(
+                r#"#!/bin/sh
+set -eu
+if [ "$1" = "-i" ]; then
+  line=$(cat)
+  cmd=$(printf '%s' "$line" | awk '{{print $1}}')
+  case "$cmd" in
+    create-keychain)
+      kc=$(printf '%s' "$line" | sed -n 's/^create-keychain -p [^ ]* "\(.*\)"$/\1/p')
+      umask 077; printf 'kc' > "$kc" ;;
+    unlock-keychain) printf '1' > '{state}/unlocked' ;;
+    import|set-key-partition-list) [ -f '{state}/unlocked' ] || exit 22 ;;
+    *) exit 23 ;;
+  esac
+  exit 0
+fi
+case "$1" in
+  set-keychain-settings) ;;
+  lock-keychain) rm -f '{state}/unlocked' ;;
+  delete-keychain) rm -f "$2" ;;
+  find-identity) printf '  1) %s "Steve Node"\n' "$(printf '%s' '{sha1}' | tr 'a-f' 'A-F')" ;;
+  *) exit 24 ;;
+esac
+"#,
+                state = state.display()
+            ),
+        );
+        let codesign = root.join("codesign");
+        crate::signing::tests::executable(
+            &codesign,
+            &format!(
+                r#"#!/bin/sh
+set -eu
+case "$1" in
+  --force)
+    [ -f '{state}/unlocked' ] || exit 31
+    req=''; target=''; shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in -r) req="$2"; shift 2;; --sign|--identifier|--keychain) shift 2;; *) target="$1"; shift;; esac
+    done
+    printf '\n#FAKE_SIG:%s\n' "${{req#=}}" >> "$target" ;;
+  --display)
+    line=$(grep -a '^#FAKE_SIG:' "$3" | tail -n 1 || true)
+    [ -n "$line" ] || exit 33
+    printf '%s\n' "${{line#\#FAKE_SIG:}}" ;;
+  --verify)
+    want="${{4#=}}"
+    line=$(grep -a '^#FAKE_SIG:' "$5" | tail -n 1 || true)
+    [ -n "$line" ] || exit 34
+    [ "${{line#\#FAKE_SIG:designated => }}" = "$want" ] || exit 35 ;;
+  *) exit 39 ;;
+esac
+"#,
+                state = state.display()
+            ),
+        );
+
+        let manager = Arc::new(Mutex::new(Manager::default()));
+        let other = manager.clone();
+        let mut s = Service::with_runner(
+            "node",
+            &home,
+            Some("test.local.selfsign"),
+            System::Darwin,
+            &root,
+            Arc::new(move |args| other.lock().unwrap().run(args)),
+        )
+        .unwrap();
+        s.config = root.join("Library/LaunchDaemons/test.local.selfsign.plist");
+        s.config_uid = unsafe { libc::getuid() };
+        let boot_manager = manager.clone();
+        s.boot_registrar = Arc::new(move |args, finish| {
+            finish()?;
+            let mut m = boot_manager.lock().unwrap();
+            fs::create_dir_all(m.config.parent().unwrap())?;
+            fs::write(&m.config, &args[5])?;
+            m.loaded = true;
+            m.running = true;
+            Ok(())
+        });
+        s.node_signer = Arc::new(boot::LocalNodeSigner(crate::signing::Tools {
+            codesign,
+            security,
+            openssl,
+            shell: "/bin/sh".into(),
+        }));
+        manager.lock().unwrap().config = s.config.clone();
+
+        s.dispatch("install", Some(&v1), 0).unwrap();
+        s.dispatch("enable-boot", None, 0).unwrap();
+        let expected_node_req =
+            crate::signing::self_signed_requirement(crate::signing::NODE_RUNTIME_IDENTIFIER, sha1);
+        assert_eq!(s.record["code_requirement"], expected_node_req);
+        assert!(!state.join("unlocked").exists());
+        assert!(s.verify_boot_upgrade(&v2).is_err());
+
+        s.prepare_boot_upgrade(&v2).unwrap();
+        s.verify_boot_upgrade(&v2).unwrap();
+        s.dispatch("update", Some(&v2), 0).unwrap();
+        assert_eq!(s.record["boot_release"], text(&v2).unwrap());
+        assert_eq!(s.record["code_requirement"], expected_node_req);
+        assert!(!state.join("unlocked").exists());
     }
 
     #[test]

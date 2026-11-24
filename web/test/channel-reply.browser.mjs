@@ -12,7 +12,7 @@ let assertions = 0
 const eq = (actual, expected, message) => { assert.deepEqual(actual, expected, message); assertions++ }
 const ok = (value, message) => { assert.ok(value, message); assertions++ }
 const context = (id) => ({ space: { id: id === "cm_next" ? "sp_next" : "sp_product", name: id === "cm_next" ? "另一个聊天" : "产品讨论群", kind: "group", external: true }, as_you: id === "cm_next", persona: id === "cm_next" ? null : "值班助手", text: "正式草稿", reply_to: { id: "cm_in", sender: "陈同学", text: "你是谁啊？\n我想了解你的职责。", at: 1 }, before: [{ sender: "林同学", text: "欢迎新同学。", at: 0 }] })
-const openDecision = { id: "dc_reply", ws: "ws_fixture", kind: "approve", subject_type: "chan_message", subject_id: "cm_reply", item_id: null, session_id: null, question: "以值班助手回复「产品讨论群」的消息", draft: "我是值班助手。", options: ["yes", "no"], status: "open", result: null, requested_by: "steve", created: 1, resolved: null, undo_until: null, space_id: null, tier: "decide", folded: null }
+const openDecision = { id: "dc_reply", ws: "ws_fixture", kind: "approve", subject_type: "chan_message", subject_id: "cm_reply", item_id: null, session_id: null, question: { kind: "raw", text: "以值班助手回复「产品讨论群」的消息" }, draft: "我是值班助手。", options: ["yes", "no"], status: "open", result: null, requested_by: "steve", created: 1, resolved: null, undo_until: null, space_id: null, tier: "decide", folded: null, revision: 1 }
 
 async function open(kind, { width = 1280, lang = "zh-CN", dark = true, fail = false, refreshFails = true, missingContext = false, delayedContext = false, staleRead = false } = {}) {
   const page = await browser.newPage({ locale: lang, viewport: { width, height: 1000 } })
@@ -31,8 +31,8 @@ async function open(kind, { width = 1280, lang = "zh-CN", dark = true, fail = fa
       calls.push({ path: u.pathname, body })
       await new Promise((resolve) => { release = resolve })
       const failed = failNext; failNext = false
-      receipts.push({ scenario: kind, width, lang, request: calls.at(-1), response: failed ? { status: 503, error: "fixture: channel unavailable" } : { status: 200, result: { choice: body.choice, send_at: body.choice === "yes" ? 2000 : undefined } } })
-      return failed ? route.fulfill({ status: 503, json: { error: "fixture: channel unavailable" } }) : route.fulfill({ headers: { "x-steve-rev": String(++rev) }, json: { id: "dc_reply", status: "resolved", result: { choice: body.choice, ...(body.choice === "yes" ? { send_at: 2000 } : {}) } } })
+      receipts.push({ scenario: kind, width, lang, request: calls.at(-1), response: failed ? { status: 503, error: "fixture: channel unavailable" } : { status: 200, result: { revision: 1, choice: body.choice, send_at: body.choice === "yes" ? 2000 : undefined } } })
+      return failed ? route.fulfill({ status: 503, json: { error: "fixture: channel unavailable" } }) : route.fulfill({ headers: { "x-steve-rev": String(++rev) }, json: { id: "dc_reply", status: "resolved", result: { revision: 1, choice: body.choice, ...(body.choice === "yes" ? { send_at: 2000 } : {}) } } })
     }
     if (u.pathname.endsWith("/context")) {
       const id = u.pathname.split("/")[3]
@@ -85,7 +85,7 @@ try {
     ok(await p.locator("[data-reply-send]").isDisabled(), "send disabled in flight")
     ok(await p.locator("[data-reply-choice='no']").isDisabled(), "other actions disabled in flight")
     await x.shot(`submitting-${width}-${lang}`)
-    eq(x.calls[0].body, { choice: "yes" }, "original approval uses yes without replacing text")
+    eq(x.calls[0].body, { revision: 1, choice: "yes" }, "original approval uses yes without replacing text")
     x.release()
     await p.locator("[data-reply-result='yes']").waitFor()
     ok((await p.locator("[data-reply-result]").textContent()).includes(lang === "en" ? "waiting" : "等待"), "approval stays queued, never sent")
@@ -104,7 +104,7 @@ try {
   await editor.fill("我是项目答疑助手。\n我可以帮你整理问题。")
   await edit.page.locator("[data-reply-send]").click()
   await edit.started()
-  eq(edit.calls[0].body, { choice: "yes", text: "我是项目答疑助手。\n我可以帮你整理问题。" }, "edited body accompanies yes")
+  eq(edit.calls[0].body, { revision: 1, choice: "yes", text: "我是项目答疑助手。\n我可以帮你整理问题。" }, "edited body accompanies yes")
   edit.release()
   await edit.page.locator("[data-reply-error]").waitFor()
   eq(await editor.inputValue(), "我是项目答疑助手。\n我可以帮你整理问题。", "failed submission preserves edits")
@@ -121,7 +121,7 @@ try {
     const x = await open("draft")
     await x.page.locator(`[data-reply-choice='${choice}']`).click()
     await x.started()
-    eq(x.calls[0].body, { choice }, "actual option id is submitted")
+    eq(x.calls[0].body, { revision: 1, choice }, "actual option id is submitted")
     x.release()
     await x.page.locator(`[data-reply-result='${choice}']`).waitFor()
     await x.close()
@@ -136,7 +136,7 @@ try {
     await x.page.locator("[data-option-words='instruct']").fill(text)
     await x.page.locator(`[data-option='${choice}']`).click()
     await x.started()
-    eq(x.calls[0].body, { choice, text }, "handoff submits the chosen drafting action and words")
+    eq(x.calls[0].body, { revision: 1, choice, text }, "handoff submits the chosen drafting action and words")
     x.release()
     await x.shot(`handoff-${choice}`)
     await x.close()
@@ -158,7 +158,7 @@ try {
   await empty.page.locator("[data-reply-editor]").fill("手填的正式回复")
   await empty.page.locator("[data-reply-send]").click()
   await empty.started()
-  eq(empty.calls[0].body, { choice: "yes", text: "手填的正式回复" })
+  eq(empty.calls[0].body, { revision: 1, choice: "yes", text: "手填的正式回复" })
   empty.release()
   await empty.page.locator("[data-reply-result='yes']").waitFor()
   await empty.close()
@@ -219,7 +219,7 @@ try {
     if (kind === "tool") { eq(await x.page.locator("[data-deny]").count(), 1); await x.page.locator("[data-allow]").click() }
     if (kind === "failed") { eq(await x.page.locator("[data-fail='discard']").count(), 1); await x.page.locator("[data-fail='retry']").click() }
     await x.started()
-    eq(x.calls[0].body, kind === "plain" ? { choice: "no", text: "不允许这项操作" } : { choice: kind === "tool" ? "once" : "retry" }, "other card types keep their original actions")
+    eq(x.calls[0].body, kind === "plain" ? { revision: 1, choice: "no", text: "不允许这项操作" } : { revision: 1, choice: kind === "tool" ? "once" : "retry" }, "other card types keep their original actions")
     x.release()
     if (kind === "failed") {
       await x.page.waitForFunction(() => window.__steve.pendingActions.size === 0)

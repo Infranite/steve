@@ -276,6 +276,10 @@ fn pin_normalization_and_same_hub_only_resume_table() {
     let saved = format!("sha256:{}", "aB".repeat(32));
     for scenario in ["explicit", "same-hub", "other-hub"] {
         let f = Fixture::new("node");
+        if cfg!(target_os = "macos") {
+            // An incomplete signing stub stops before invoking real macOS signing/keychain tools.
+            private(&f.home.join("signing/identity.json"), b"{}");
+        }
         let old = if scenario == "other-hub" {
             "https://old.example"
         } else {

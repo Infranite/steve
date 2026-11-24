@@ -262,7 +262,15 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
     const el = scroller.current
     if (el) el.scrollTop = el.scrollHeight
   }
-  const bottom = () => { preserving.current = null; stuck.current = true; held.current = false; towardLatest.current = false; setUnread(false); setBack(null); scrollToEnd() }
+  const bottom = () => {
+    const jump = !stuck.current && virtual.current?.scrollElement ? virtual.current : null
+    preserving.current = null
+    stuck.current = true; held.current = false; towardLatest.current = false
+    setUnread(false); setBack(null)
+    // Let the virtualizer supersede a history scroll and settle the newly mounted tail.
+    if (jump) jump.scrollToEnd()
+    else scrollToEnd()
+  }
   /** the first message showing at the top of the list, and how far below the top it starts */
   const anchorNow = (): Anchor | null => {
     const el = scroller.current; if (!el) return null
@@ -286,24 +294,28 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
     else if (list.some((m) => m.created && m.created > leftAt.current && m.k !== "thinking")) setUnread(true)
   }, [list.length, list.at(-1)?.id])
   const preserveAnchor = (anchor: Anchor) => {
-    const index = entryIndex.current.findIndex((row) => row.id === anchor.id)
-    if (index < 0) { bottom(); return }
+    if (preserving.current === anchor) return
     preserving.current = anchor
     const selector = `[data-msg="${CSS.escape(anchor.id)}"]`
     const settleAt = performance.now() + 150
-    let aligned = 0, frames = 0
+    let index = -1, aligned = 0, frames = 0
     const position = () => {
       const el = scroller.current, list = virtual.current
       if (preserving.current !== anchor || !el || !list) return
-      const row = el.querySelector<HTMLElement>(selector)
-      if (row) {
-        const delta = row.getBoundingClientRect().top - el.getBoundingClientRect().top - anchor.offset
-        if (Math.abs(delta) <= 1) aligned++
-        else { aligned = 0; list.scrollToOffset(el.scrollTop + delta) }
-      } else {
-        aligned = 0
-        list.scrollToIndex(index, { align: "start" })
+      // A page prepend can move this key while the previous layout is settling.
+      if (entryIndex.current[index]?.id !== anchor.id) {
+        index = entryIndex.current.findIndex((row) => row.id === anchor.id)
+        if (index < 0) { bottom(); return }
       }
+      const row = el.querySelector<HTMLElement>(selector)
+      const item = row && list.getVirtualItems().find((item) => item.index === index)
+      // The outer row's DOM position can lag a new virtual range. Measure only
+      // the message's local offset (e.g. after a date divider) inside that row.
+      const offset = row && item ? item.start + row.offsetTop - anchor.offset : list.getOffsetForIndex(index, "start")?.[0]
+      const moved = offset !== undefined && Math.abs(el.scrollTop - offset) > 1
+      if (moved) list.scrollToOffset(offset)
+      const landed = item && row && !moved && Math.abs(row.getBoundingClientRect().top - el.getBoundingClientRect().top - anchor.offset) <= 1
+      aligned = landed ? aligned + 1 : 0
       if ((aligned < 3 || performance.now() < settleAt) && ++frames < 30) requestAnimationFrame(position)
       else preserving.current = null
     }
@@ -418,7 +430,14 @@ export const ChatView = memo(function ChatView({ conv }: { conv?: string }) {
     if (conv) return
     const el = scroller.current; if (!el) return
     let t: any
-    const save = () => { if (!restored.current || restoring.current) return; const a = stuck.current ? null : anchorNow(); savePos(posKey, a ? { bottom: false, ...a } : { bottom: true }) }
+    const save = () => {
+      if (!restored.current || restoring.current) return
+      if (stuck.current) savePos(posKey, { bottom: true })
+      else {
+        const a = preserving.current ?? anchorNow()
+        if (a) savePos(posKey, { bottom: false, ...a })
+      }
+    }
     const later = () => { clearTimeout(t); t = setTimeout(save, 300) }
     el.addEventListener("scroll", later, { passive: true }); window.addEventListener("pagehide", save)
     return () => { clearTimeout(t); save(); el.removeEventListener("scroll", later); window.removeEventListener("pagehide", save) }
