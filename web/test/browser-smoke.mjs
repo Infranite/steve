@@ -27,7 +27,7 @@ const run = (name) => new Promise((resolve) => {
   child.on("close", (code) => { clearTimeout(timer); resolve({ name, ok: code === 0, s: ((Date.now() - start) / 1000).toFixed(1), out }) })
 })
 
-SMOKE.push("harness-updates", "markdown-highlight")
+SMOKE.push("harness-updates", "markdown-highlight", "person-avatar")
 
 const failed = []
 try {

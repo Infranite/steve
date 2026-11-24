@@ -350,7 +350,7 @@ pub async fn goal(
     let mut k = Check::object(&v);
     let text = k.str("text", Str::min(1));
     k.finish()?;
-    st.domain.revise_goal(&id, &text).await?;
+    st.domain.revise_goal(&id, &text, &c.me).await?;
     ok_true()
 }
 
@@ -580,7 +580,7 @@ pub async fn supplement(
     let files = super::files::file_ids(&mut k);
     k.finish()?;
     let refs = super::files::refs(&st, &c.ws, files).await?;
-    st.domain.supplement(&id, &text, &mode, refs).await?;
+    st.domain.supplement(&id, &text, &mode, refs, &c.me).await?;
     ok_true()
 }
 
@@ -620,7 +620,7 @@ pub async fn add_dep(
     let dep = k.str("dep", Str::ANY);
     k.finish()?;
     own_item(&st, &c.ws, &dep).await?;
-    st.domain.add_dep(&id, &dep).await?;
+    st.domain.add_dep(&id, &dep, &c.me).await?;
     ok_true()
 }
 
@@ -630,7 +630,7 @@ pub async fn rm_dep(
     Path((id, dep)): Path<(String, String)>,
 ) -> ApiResult {
     own_item(&st, &c.ws, &id).await?;
-    st.domain.rm_dep(&id, &dep).await?;
+    st.domain.rm_dep(&id, &dep, &c.me).await?;
     ok_true()
 }
 

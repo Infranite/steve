@@ -126,7 +126,7 @@ fn adding_a_prerequisite_to_a_running_item_blocks_questions_and_followups() {
                 .unwrap();
         }
         let gate = k.rt.stop_gate.write().unwrap();
-        k.core.add_dep(&item, &dep).unwrap();
+        k.core.add_dep(&item, &dep, "me").unwrap();
         assert_eq!(k.item_label(&item), "block");
         assert!(k.open_kinds(&item).is_empty());
         assert!(
@@ -291,7 +291,7 @@ fn item_page_registers_the_existing_dependency_without_running_a_turn() {
     let k = Kit::new();
     let (item, dep, s) = setup(&k);
     k.rt.end_turn(&k.core, &s.id, "end_turn", None);
-    k.core.add_dep(&item, &dep).unwrap();
+    k.core.add_dep(&item, &dep, "me").unwrap();
     let initial = k.core.dependency_get(&item).unwrap();
     assert_eq!(initial["waiting"], true);
     assert_eq!(initial["resume_source"], "workspace");
@@ -958,7 +958,7 @@ fn ordinary_dependency_added_after_wakeup_rearms_the_saved_policy() {
         wait(&k, &s, &[&dep], mode);
         k.rt.end_turn(&k.core, &s.id, "end_turn", None);
         let next = k.item("run", "执行", None);
-        k.core.add_dep(&item, &next).unwrap();
+        k.core.add_dep(&item, &next, "me").unwrap();
         assert_eq!(k.item_label(&item), "block");
         assert!(k.open_kinds(&item).is_empty());
         assert!(k.core.tx().dependency_waiting(&item).unwrap());

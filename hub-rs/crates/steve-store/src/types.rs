@@ -594,6 +594,7 @@ pub struct Decision {
     pub revision: i64,
     #[serde(skip_serializing)]
     pub source_revision: Option<crate::DecisionSource>,
+    pub resolved_by: Option<String>,
 }
 
 impl Decision {
@@ -628,6 +629,7 @@ impl Decision {
             undo: json_col(r, "undo", None)?,
             revision: r.get("revision")?,
             source_revision: json_col(r, "source_revision", None)?,
+            resolved_by: r.get("resolved_by")?,
         })
     }
 }

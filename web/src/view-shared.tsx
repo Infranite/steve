@@ -9,7 +9,8 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { SelectContent, SelectItem, SelectTrigger, SelectValue, Select as UISelect } from "@/components/ui/select"
 import { botName, closedSt, closeRel, depsOpen, isKind, kindOf, st, tag, tagLabel, WACT, waitLine, type Item } from "@/store"
 import { itemDisplayStatus, workflowRelation, workflowRelationText } from "@/item-workflow-relation"
-import { BotAvatar, go, ItemNo, Meta, RelNote, StatusDot } from "@/ui"
+import { go, ItemNo, Meta, RelNote, StatusDot } from "@/ui"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { cn } from "cn"
 import { FolderIcon, GitBranchIcon, StarIcon } from "lucide-react"
 import { memo, type ReactNode } from "react"
@@ -86,7 +87,7 @@ export const ItemRow = memo(function ItemRow({ i, pick, proj = true, bot = true,
       {(!closed || planOpen) && <PlanBar i={i} warn={closed} />}
       {executions.length > 0 && <SessionIdentity session={executions[0]} compact />}
       {executions.length > 1 && <span title={executions.map((s) => [botName(s.b), s.h ?? t("core:unknownHarness"), s.m ?? t("core:unknownModel")].join(" · ")).join("\n")}>+{executions.length - 1}</span>}
-      {!executions.length && bot && i.b && <span title={botName(i.b)} className="hidden sm:inline-flex"><BotAvatar k={i.b} size={18} /></span>}
+      {!executions.length && bot && i.b && <ActorAvatar actorId={i.b} size={18} className="hidden sm:inline-flex" />}
       <span className="min-w-11 whitespace-nowrap text-right tabular-nums text-tertiary">{i.up}</span>
     </span>
   )

@@ -183,7 +183,7 @@ impl steve_flow::Core for FlowCore {
                 Some(i) if i.workspace_id == ws => {}
                 _ => return Err(crate::api::Noun::Item.missing()),
             }
-            c.supplement(&id, &text, mode, &[])
+            c.supplement(&id, &text, mode, &[], "steve")
                 .map_err(|e| e.to_string())
         })
         .await

@@ -493,7 +493,9 @@ fn queued_messages_run_before_the_turn_end_counts() {
     let i = new_item(&k, "g");
     let s = only_session(&k, &i.id);
     assert_eq!(
-        k.core.session_message(&s.id, "还有", false, &[]).unwrap(),
+        k.core
+            .session_message(&s.id, "还有", false, &[], "me")
+            .unwrap(),
         crate::Prompted::Queued
     );
     k.rt.end_turn(&k.core, &s.id, "end_turn", None);
@@ -873,13 +875,13 @@ fn supplement_modes_and_the_handoff_threshold() {
     let s = only_session(&k, &i.id);
     /* steer interrupts a running turn */
     k.core
-        .supplement(&i.id, "改方向", SupplementMode::Steer, &[])
+        .supplement(&i.id, "改方向", SupplementMode::Steer, &[], "me")
         .unwrap();
     assert_eq!(k.rt.st().cancelled.last().unwrap(), &s.id);
     k.rt.end_turn(&k.core, &s.id, "cancelled", None);
     /* new: a fresh session */
     k.core
-        .supplement(&i.id, "另起", SupplementMode::New, &[])
+        .supplement(&i.id, "另起", SupplementMode::New, &[], "me")
         .unwrap();
     let s2 = last_session(&k, &i.id);
     assert!(k.rt.prompts_of(&s2.id)[0].ends_with(&format!(
@@ -893,7 +895,7 @@ fn supplement_modes_and_the_handoff_threshold() {
         .unwrap();
     k.rt.say(&s2.id, "进展到一半");
     k.core
-        .supplement(&i.id, "继续", SupplementMode::Auto, &[])
+        .supplement(&i.id, "继续", SupplementMode::Auto, &[], "me")
         .unwrap();
     assert_eq!(k.db().session(&s2.id).unwrap().unwrap().status, "ended");
     let s3 = last_session(&k, &i.id);
@@ -918,7 +920,7 @@ fn supplement_modes_and_the_handoff_threshold() {
         .session_patch(&s3.id, patch![used: 85, size: 100])
         .unwrap();
     k.core
-        .supplement(&i.id, "再来", SupplementMode::Auto, &[])
+        .supplement(&i.id, "再来", SupplementMode::Auto, &[], "me")
         .unwrap();
     assert_eq!(k.rt.prompts_of(&s3.id).last().unwrap(), "补充信息：再来");
     /* a supplement supersedes stale questions */
@@ -926,7 +928,7 @@ fn supplement_modes_and_the_handoff_threshold() {
     let s3row = k.db().session(&s3.id).unwrap().unwrap();
     k.core.tool_ask(&s3row, "q", &[]).unwrap();
     k.core
-        .supplement(&i.id, "直接说", SupplementMode::Auto, &[])
+        .supplement(&i.id, "直接说", SupplementMode::Auto, &[], "me")
         .unwrap();
     assert!(k.open_kinds(&i.id).is_empty());
 }
@@ -936,8 +938,12 @@ fn deliver_queued_sends_the_queue_now_or_keeps_it_while_busy() {
     let k = Kit::new();
     let i = new_item(&k, "g");
     let s = only_session(&k, &i.id);
-    k.core.session_message(&s.id, "一", false, &[]).unwrap();
-    k.core.session_message(&s.id, "二", false, &[]).unwrap();
+    k.core
+        .session_message(&s.id, "一", false, &[], "me")
+        .unwrap();
+    k.core
+        .session_message(&s.id, "二", false, &[], "me")
+        .unwrap();
     k.core.deliver_queued(&i.id).unwrap();
     assert_eq!(
         k.db().queued(&s.id).unwrap().len(),
@@ -956,7 +962,9 @@ fn a_deferred_stop_reaches_only_the_turn_it_was_asked_for() {
     let i = new_item(&k, "g");
     let s = only_session(&k, &i.id);
     let a1 = k.rt.st().attempts[&s.id].clone();
-    k.core.session_message(&s.id, "下一条", false, &[]).unwrap();
+    k.core
+        .session_message(&s.id, "下一条", false, &[], "me")
+        .unwrap();
     // the stop is queued for a1; its worker only runs once a1 ended and the queued a2 started
     let gate = k.rt.stop_gate.write().unwrap();
     k.core.item_action(&i.id, ItemAction::Drop, "me").unwrap();
@@ -992,7 +1000,9 @@ fn next_turn_before_the_end_is_told(k: &Kit, sid: &str) -> (String, String) {
         st.attempts.remove(sid).unwrap()
     };
     assert_eq!(
-        k.core.session_message(sid, "下一条", false, &[]).unwrap(),
+        k.core
+            .session_message(sid, "下一条", false, &[], "me")
+            .unwrap(),
         crate::Prompted::Sent
     );
     let a2 = k.rt.st().attempts[sid].clone();
@@ -1061,7 +1071,7 @@ fn a_mark_made_before_a_follow_up_counts_for_the_end_of_the_chain() {
         .unwrap();
     assert_eq!(
         k.core
-            .session_message(&s.id, "顺便看看测试", false, &[])
+            .session_message(&s.id, "顺便看看测试", false, &[], "me")
             .unwrap(),
         crate::Prompted::Queued
     );
@@ -1122,7 +1132,7 @@ fn item_actions() {
     assert_eq!(last_session(&k, &i.id).no, 1, "nothing starts by itself");
     // your next message starts the cycle, in a new session
     k.core
-        .supplement(&i.id, "接着做", crate::SupplementMode::Auto, &[])
+        .supplement(&i.id, "接着做", crate::SupplementMode::Auto, &[], "me")
         .unwrap();
     assert_eq!(k.phase(&i.id), "active");
     assert_eq!(
@@ -1159,7 +1169,7 @@ fn goals_small_and_big_changes() {
     let i = new_item(&k, "写一个脚本");
     let s = only_session(&k, &i.id);
     k.rt.end_turn(&k.core, &s.id, "cancelled", None);
-    k.core.revise_goal(&i.id, "写一个脚本吧").unwrap();
+    k.core.revise_goal(&i.id, "写一个脚本吧", "me").unwrap();
     let prompts = k.rt.prompts_of(&s.id);
     let updated = prompts.last().unwrap();
     assert!(updated.contains("写一个脚本吧"));
@@ -1172,7 +1182,7 @@ fn goals_small_and_big_changes() {
     /* a much bigger goal goes to the same session too: it judges what to redo (2026-11-09) */
     k.rt.end_turn(&k.core, &s.id, "cancelled", None);
     k.core
-        .revise_goal(&i.id, "写一个脚本，并且部署到三台机器上")
+        .revise_goal(&i.id, "写一个脚本，并且部署到三台机器上", "me")
         .unwrap();
     assert_ne!(k.db().session(&s.id).unwrap().unwrap().status, "ended");
     assert_eq!(last_session(&k, &i.id).id, s.id);
@@ -1209,7 +1219,7 @@ fn a_handoff_names_the_release_its_successor_waits_for() {
         .session_patch(&s.id, patch![used: 85, size: 100])
         .unwrap();
     k.core
-        .supplement(&i.id, "继续", SupplementMode::Auto, &[])
+        .supplement(&i.id, "继续", SupplementMode::Auto, &[], "me")
         .unwrap();
     let s2 = last_session(&k, &i.id);
     assert_ne!(s2.id, s.id);
@@ -1223,7 +1233,7 @@ fn a_handoff_names_the_release_its_successor_waits_for() {
         .session_patch(&s2.id, patch![used: 85, size: 100])
         .unwrap();
     k.core
-        .supplement(&i.id, "继续", SupplementMode::Auto, &[])
+        .supplement(&i.id, "继续", SupplementMode::Auto, &[], "me")
         .unwrap();
     let s3 = last_session(&k, &i.id);
     assert_eq!(s3.no, 3);
@@ -1291,7 +1301,9 @@ fn session_messages_and_ending() {
     let k = Kit::new();
     let i = new_item(&k, "g");
     let s = only_session(&k, &i.id);
-    k.core.session_message(&s.id, "插一句", true, &[]).unwrap();
+    k.core
+        .session_message(&s.id, "插一句", true, &[], "me")
+        .unwrap();
     assert_eq!(k.rt.st().cancelled.last().unwrap(), &s.id);
     k.rt.end_turn(&k.core, &s.id, "cancelled", None);
     k.core.end_session(&s.id).unwrap();
@@ -1302,11 +1314,17 @@ fn session_messages_and_ending() {
     );
     k.rt.st().turning.clear();
     assert_eq!(
-        k.core.session_message(&s.id, "回来", false, &[]).unwrap(),
+        k.core
+            .session_message(&s.id, "回来", false, &[], "me")
+            .unwrap(),
         crate::Prompted::Sent
     );
     assert_ne!(k.db().session(&s.id).unwrap().unwrap().status, "ended");
-    assert!(k.core.session_message("ses_none", "x", false, &[]).is_err());
+    assert!(
+        k.core
+            .session_message("ses_none", "x", false, &[], "me")
+            .is_err()
+    );
 }
 
 #[test]
@@ -1329,7 +1347,9 @@ fn fork_into_an_item_or_a_session_with_the_transcript() {
     k.rt.say(&s.id, "我先看");
     k.rt.say(&s.id, "看完了");
     k.rt.end_turn(&k.core, &s.id, "cancelled", None);
-    k.core.session_message(&s.id, "然后呢", false, &[]).unwrap();
+    k.core
+        .session_message(&s.id, "然后呢", false, &[], "me")
+        .unwrap();
     let seq = k.db().events_after(&s.id, 0).unwrap().last().unwrap().seq;
     k.rt.say(&s.id, "之后的不算");
     let f = k
@@ -1394,14 +1414,14 @@ fn dependencies_block_and_start_when_done() {
             None,
         )
         .unwrap();
-    k.core.add_dep(&b.id, &a.id).unwrap();
+    k.core.add_dep(&b.id, &a.id, "me").unwrap();
     assert_eq!(k.item_label(&b.id), "block");
     assert_eq!(
-        k.core.add_dep(&a.id, &b.id).unwrap_err().to_string(),
+        k.core.add_dep(&a.id, &b.id, "me").unwrap_err().to_string(),
         "会形成循环依赖，没有添加"
     );
-    k.core.add_dep(&b.id, &b.id).unwrap();
-    k.core.add_dep(&b.id, &a.id).unwrap();
+    k.core.add_dep(&b.id, &b.id, "me").unwrap();
+    k.core.add_dep(&b.id, &a.id, "me").unwrap();
     assert_eq!(k.db().deps_of(&b.id).unwrap(), vec![a.id.clone()]);
     /* finishing the prerequisite starts the dependent with a summary */
     let sa = only_session(&k, &a.id);
@@ -1428,7 +1448,7 @@ fn removing_the_last_open_dependency_unblocks() {
     let k = Kit::new();
     let a = k.item("run", "执行", None);
     let b = k.item("run", "执行", None);
-    k.core.add_dep(&b, &a).unwrap();
+    k.core.add_dep(&b, &a, "me").unwrap();
     assert_eq!(k.item_label(&b), "block");
     k.db()
         .settings_set(
@@ -1440,12 +1460,12 @@ fn removing_the_last_open_dependency_unblocks() {
             "me",
         )
         .unwrap();
-    k.core.rm_dep(&b, &a).unwrap();
+    k.core.rm_dep(&b, &a, "me").unwrap();
     assert_eq!(k.item_label(&b), "wait");
     assert_eq!(k.open_kinds(&b), vec!["propose"]);
     /* a dependency does not override your pause; an explicit resume restores its wait */
     let c = k.item("pause", "执行", None);
-    k.core.add_dep(&c, &a).unwrap();
+    k.core.add_dep(&c, &a, "me").unwrap();
     assert_eq!(
         k.item_label(&c),
         "pause",
@@ -1723,10 +1743,10 @@ fn queued_attachments_wait_with_their_message_and_merge_on_delivery() {
     let a = k.file("a.txt", "text/plain; charset=utf-8", b"a");
     let b = k.file("b.png", "image/png", b"\x89PNG b");
     k.core
-        .session_message(&s.id, "一", false, std::slice::from_ref(&a))
+        .session_message(&s.id, "一", false, std::slice::from_ref(&a), "me")
         .unwrap();
     k.core
-        .session_message(&s.id, "二", false, std::slice::from_ref(&b))
+        .session_message(&s.id, "二", false, std::slice::from_ref(&b), "me")
         .unwrap();
     let q = k.db().queued(&s.id).unwrap();
     assert_eq!(
@@ -1878,7 +1898,7 @@ fn an_existing_session_refreshes_changed_protocol_once_without_replacing_its_his
         .unwrap();
     k.rt.end_turn(&k.core, &session.id, "cancelled", None);
     k.core
-        .session_message(&session.id, "继续原任务", false, &[])
+        .session_message(&session.id, "继续原任务", false, &[], "me")
         .unwrap();
     let prompts = k.rt.prompts_of(&session.id);
     let last = prompts.last().unwrap();
@@ -1889,7 +1909,7 @@ fn an_existing_session_refreshes_changed_protocol_once_without_replacing_its_his
     assert_eq!(k.db().sessions_of_item(&i.id).unwrap().len(), 1);
     k.rt.end_turn(&k.core, &session.id, "cancelled", None);
     k.core
-        .session_message(&session.id, "继续", false, &[])
+        .session_message(&session.id, "继续", false, &[], "me")
         .unwrap();
     assert_eq!(k.rt.prompts_of(&session.id).last().unwrap(), "继续");
 }
@@ -1903,13 +1923,17 @@ fn withdrawing_a_queued_refresh_does_not_mark_the_protocol_delivered() {
         .event_add(&s.id, "system", json!({"steve_protocol_hash": "old"}))
         .unwrap();
     assert_eq!(
-        k.core.session_message(&s.id, "排队", false, &[]).unwrap(),
+        k.core
+            .session_message(&s.id, "排队", false, &[], "me")
+            .unwrap(),
         crate::Prompted::Queued
     );
     let queued = k.db().queued(&s.id).unwrap();
-    k.core.queued_remove(&s.id, &queued[0].id).unwrap();
+    k.core.queued_remove(&s.id, &queued[0].id, "me").unwrap();
     k.rt.end_turn(&k.core, &s.id, "cancelled", None);
-    k.core.session_message(&s.id, "继续", false, &[]).unwrap();
+    k.core
+        .session_message(&s.id, "继续", false, &[], "me")
+        .unwrap();
     assert!(
         k.rt.prompts_of(&s.id)
             .last()

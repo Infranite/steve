@@ -155,6 +155,18 @@ pub trait Repo {
     fn user_by_session(&self, token: &str) -> BResult<Option<Obj>> {
         todo_backend!("user_by_session")
     }
+    /// Workspace members with their unified person identities (display name + avatar).
+    fn member_identities(&self, ws: &str) -> BResult<Vec<steve_types::MemberIdentity>> {
+        Ok(Vec::new())
+    }
+    /// One workspace member's unified person identity.
+    fn member_identity(
+        &self,
+        ws: &str,
+        user: &str,
+    ) -> BResult<Option<steve_types::MemberIdentity>> {
+        Ok(None)
+    }
     fn audit(
         &self,
         actor: &str,
@@ -753,11 +765,18 @@ pub trait Domain: Send + Sync + 'static {
     async fn lifecycle_tick(&self) -> BResult<usize> {
         Ok(0)
     }
-    async fn revise_goal(&self, id: &str, text: &str) -> BResult<()> {
+    async fn revise_goal(&self, id: &str, text: &str, actor: &str) -> BResult<()> {
         todo_backend!("revise_goal")
     }
     /// `files`: FileRefs (`{id, name, mime, size}`) of the current workspace, already checked.
-    async fn supplement(&self, id: &str, text: &str, mode: &str, files: Vec<Value>) -> BResult<()> {
+    async fn supplement(
+        &self,
+        id: &str,
+        text: &str,
+        mode: &str,
+        files: Vec<Value>,
+        actor: &str,
+    ) -> BResult<()> {
         todo_backend!("supplement")
     }
     async fn deliver_queued(&self, id: &str) -> BResult<()> {
@@ -766,10 +785,10 @@ pub trait Domain: Send + Sync + 'static {
     async fn reassign(&self, id: &str, bot: &str, actor: &str) -> BResult<Obj> {
         todo_backend!("reassign")
     }
-    async fn add_dep(&self, id: &str, dep: &str) -> BResult<()> {
+    async fn add_dep(&self, id: &str, dep: &str, actor: &str) -> BResult<()> {
         todo_backend!("add_dep")
     }
-    async fn rm_dep(&self, id: &str, dep: &str) -> BResult<()> {
+    async fn rm_dep(&self, id: &str, dep: &str, actor: &str) -> BResult<()> {
         todo_backend!("rm_dep")
     }
 
@@ -781,6 +800,7 @@ pub trait Domain: Send + Sync + 'static {
         text: &str,
         mode: &str,
         files: Vec<Value>,
+        actor: &str,
     ) -> BResult<String> {
         todo_backend!("session_message")
     }
@@ -788,11 +808,11 @@ pub trait Domain: Send + Sync + 'static {
         todo_backend!("cancel")
     }
     /// Edit a row still in the session's queue; the row after. 409 once a turn took it.
-    async fn queued_edit(&self, session: &str, id: &str, text: &str) -> BResult<Obj> {
+    async fn queued_edit(&self, session: &str, id: &str, text: &str, actor: &str) -> BResult<Obj> {
         todo_backend!("queued_edit")
     }
     /// Withdraw a row from the session's queue; the row as it was. 409 once a turn took it.
-    async fn queued_remove(&self, session: &str, id: &str) -> BResult<Obj> {
+    async fn queued_remove(&self, session: &str, id: &str, actor: &str) -> BResult<Obj> {
         todo_backend!("queued_remove")
     }
     /// `{result: "interrupted" | "sent" | "waiting", reason?}`. 409 once a turn took it.

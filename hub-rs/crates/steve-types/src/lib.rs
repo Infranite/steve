@@ -78,7 +78,7 @@ pub use config::{ConfigEvent, ConfigReason};
 pub use devices::DevicesEvent;
 pub use integrations::IntegrationsEvent;
 pub use knowledge::KnowledgeEvent;
-pub use people::PeopleEvent;
+pub use people::{AvatarRef, MemberIdentity, PeopleEvent};
 pub use stats::StatsEvent;
 pub use vault::VaultEvent;
 pub use work::WorkEvent;

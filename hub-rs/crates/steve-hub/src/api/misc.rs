@@ -30,7 +30,23 @@ pub async fn me(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> Api
     let web_version = crate::web::web_version(&st.cfg);
     st.read(move |r| {
         let ws = super::workspaces_out(r.workspaces_of_user(&c.me)?);
-        ok(json!({ "user": c.user, "version": version, "web_version": web_version, "workspaces": objs(ws), "workspace": c.ws, "client": c.client }))
+        let person = r.member_identity(&c.ws, &c.me)?;
+        let mut user = c.user;
+        if let Some(ref p) = person {
+            user.insert("login".into(), json!(p.login));
+            user.insert("name".into(), json!(p.name));
+            if let Some(ref pid) = p.party_id {
+                user.insert("party_id".into(), json!(pid));
+            }
+            user.insert(
+                "avatar".into(),
+                serde_json::to_value(&p.avatar).unwrap_or(Value::Null),
+            );
+            if let Some(ref sub) = p.subtitle {
+                user.insert("subtitle".into(), json!(sub));
+            }
+        }
+        ok(json!({ "user": user, "person": person, "version": version, "web_version": web_version, "workspaces": objs(ws), "workspace": c.ws, "client": c.client }))
     })
     .await
 }
@@ -75,7 +91,8 @@ struct Shell {
     #[serde(skip_serializing_if = "Option::is_none")]
     update: Option<UpdateNotice>,
     owner: bool,
-    me: Obj,
+    me: Option<steve_types::MemberIdentity>,
+    members: Vec<steve_types::MemberIdentity>,
     workspace: Option<Obj>,
     workspaces: Vec<Obj>,
     bots: Vec<Obj>,
@@ -121,6 +138,12 @@ pub async fn shell(
         }
         let mut settings = crate::settings::defaults();
         settings.extend(r.settings_all(ws)?);
+        let members = r.member_identities(ws)?;
+        let me = members
+            .iter()
+            .find(|m| m.user_id.as_str() == c.me)
+            .cloned()
+            .or(r.member_identity(ws, &c.me)?);
         conditional_json(
             &headers,
             &Shell {
@@ -128,7 +151,8 @@ pub async fn shell(
                 web_version,
                 update,
                 owner,
-                me: c.user,
+                me,
+                members,
                 workspace,
                 workspaces: super::workspaces_out(r.workspaces_of_user(&c.me)?),
                 bots,

@@ -1203,6 +1203,7 @@ pub async fn overview(
 ) -> Result<axum::response::Response, crate::error::ApiError> {
     let store = store_of(&st)?;
     let me = c.me.clone();
+    let ws = c.ws.clone();
     let all = q.all.as_deref() == Some("1") && is_owner(&c);
     let (tokens, clients, users) = tokio::task::spawn_blocking(move || {
         let tokens = store.access().tokens(Some(&me))?;
@@ -1211,9 +1212,9 @@ pub async fn overview(
         if all {
             for c in &clients {
                 if !users.contains_key(&c.user_id)
-                    && let Some(u) = store.users().get(&c.user_id)?
+                    && let Some(name) = store.users().display_name(&ws, &c.user_id)?
                 {
-                    users.insert(c.user_id.clone(), json!(u.name));
+                    users.insert(c.user_id.clone(), json!(name));
                 }
             }
         }

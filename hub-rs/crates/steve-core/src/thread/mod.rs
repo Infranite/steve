@@ -1153,7 +1153,13 @@ impl Core {
         files: &[FileRef],
         mid: &str,
     ) -> Result<()> {
-        self.supplement(item, text, crate::orchestrator::SupplementMode::Auto, files)?;
+        self.supplement(
+            item,
+            text,
+            crate::orchestrator::SupplementMode::Auto,
+            files,
+            "me",
+        )?;
         let asked = decide::pure_question(text);
         lock(&self.0.thread.forwarded).insert(
             item.into(),

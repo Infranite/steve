@@ -1222,19 +1222,36 @@ impl Domain for CoreDomain {
         let c = self.core.clone();
         blocking(move || c.lifecycle_tick()).await
     }
-    async fn revise_goal(&self, id: &str, text: &str) -> BResult<()> {
-        let (c, id, text) = (self.core.clone(), id.to_string(), text.to_string());
-        blocking(move || c.revise_goal(&id, &text)).await
+    async fn revise_goal(&self, id: &str, text: &str, actor: &str) -> BResult<()> {
+        let (c, id, text, actor) = (
+            self.core.clone(),
+            id.to_string(),
+            text.to_string(),
+            actor.to_string(),
+        );
+        blocking(move || c.revise_goal(&id, &text, &actor)).await
     }
-    async fn supplement(&self, id: &str, text: &str, mode: &str, files: Vec<Value>) -> BResult<()> {
+    async fn supplement(
+        &self,
+        id: &str,
+        text: &str,
+        mode: &str,
+        files: Vec<Value>,
+        actor: &str,
+    ) -> BResult<()> {
         let m = match mode {
             "steer" => SupplementMode::Steer,
             "new" => SupplementMode::New,
             _ => SupplementMode::Auto,
         };
         let files = refs(files)?;
-        let (c, id, text) = (self.core.clone(), id.to_string(), text.to_string());
-        blocking(move || c.supplement(&id, &text, m, &files)).await
+        let (c, id, text, actor) = (
+            self.core.clone(),
+            id.to_string(),
+            text.to_string(),
+            actor.to_string(),
+        );
+        blocking(move || c.supplement(&id, &text, m, &files, &actor)).await
     }
     async fn deliver_queued(&self, id: &str) -> BResult<()> {
         let (c, id) = (self.core.clone(), id.to_string());
@@ -1249,13 +1266,23 @@ impl Domain for CoreDomain {
         );
         to_obj(blocking(move || c.reassign(&id, &bot, &actor)).await?)
     }
-    async fn add_dep(&self, id: &str, dep: &str) -> BResult<()> {
-        let (c, id, dep) = (self.core.clone(), id.to_string(), dep.to_string());
-        blocking(move || c.add_dep(&id, &dep)).await
+    async fn add_dep(&self, id: &str, dep: &str, actor: &str) -> BResult<()> {
+        let (c, id, dep, actor) = (
+            self.core.clone(),
+            id.to_string(),
+            dep.to_string(),
+            actor.to_string(),
+        );
+        blocking(move || c.add_dep(&id, &dep, &actor)).await
     }
-    async fn rm_dep(&self, id: &str, dep: &str) -> BResult<()> {
-        let (c, id, dep) = (self.core.clone(), id.to_string(), dep.to_string());
-        blocking(move || c.rm_dep(&id, &dep)).await
+    async fn rm_dep(&self, id: &str, dep: &str, actor: &str) -> BResult<()> {
+        let (c, id, dep, actor) = (
+            self.core.clone(),
+            id.to_string(),
+            dep.to_string(),
+            actor.to_string(),
+        );
+        blocking(move || c.rm_dep(&id, &dep, &actor)).await
     }
 
     async fn session_message(
@@ -1264,12 +1291,18 @@ impl Domain for CoreDomain {
         text: &str,
         mode: &str,
         files: Vec<Value>,
+        actor: &str,
     ) -> BResult<String> {
         let files = refs(files)?;
         let interrupt = mode == "插话";
-        let (c, sid, text) = (self.core.clone(), session.to_string(), text.to_string());
+        let (c, sid, text, actor) = (
+            self.core.clone(),
+            session.to_string(),
+            text.to_string(),
+            actor.to_string(),
+        );
         Ok(
-            blocking(move || c.session_message(&sid, &text, interrupt, &files))
+            blocking(move || c.session_message(&sid, &text, interrupt, &files, &actor))
                 .await?
                 .as_str()
                 .to_string(),
@@ -1290,18 +1323,24 @@ impl Domain for CoreDomain {
             .map_err(|e| BackendError::msg(format!("task failed: {e}")))?;
         serde_json::to_value(h).map_err(|e| BackendError::msg(e.to_string()))
     }
-    async fn queued_edit(&self, session: &str, id: &str, text: &str) -> BResult<Obj> {
-        let (c, sid, id, text) = (
+    async fn queued_edit(&self, session: &str, id: &str, text: &str, actor: &str) -> BResult<Obj> {
+        let (c, sid, id, text, actor) = (
             self.core.clone(),
             session.to_string(),
             id.to_string(),
             text.to_string(),
+            actor.to_string(),
         );
-        to_obj(blocking(move || c.queued_edit(&sid, &id, &text)).await?)
+        to_obj(blocking(move || c.queued_edit(&sid, &id, &text, &actor)).await?)
     }
-    async fn queued_remove(&self, session: &str, id: &str) -> BResult<Obj> {
-        let (c, sid, id) = (self.core.clone(), session.to_string(), id.to_string());
-        to_obj(blocking(move || c.queued_remove(&sid, &id)).await?)
+    async fn queued_remove(&self, session: &str, id: &str, actor: &str) -> BResult<Obj> {
+        let (c, sid, id, actor) = (
+            self.core.clone(),
+            session.to_string(),
+            id.to_string(),
+            actor.to_string(),
+        );
+        to_obj(blocking(move || c.queued_remove(&sid, &id, &actor)).await?)
     }
     async fn queued_send_now(&self, session: &str, id: &str) -> BResult<Obj> {
         let (c, sid, id) = (self.core.clone(), session.to_string(), id.to_string());

@@ -39,7 +39,9 @@ import { QueuedComment, queuedComments, queueNote, QueueStrip } from "@/queue"
 import { homeTilde, NativeIdLine } from "@/resume"
 import { ItemStatsRows } from "@/stats/drill"
 import { ACC, accKey, closedSt, setDesignGate, accOf, active, addDep, archive, closeRel, deleteItem, depsOpen, doFork, importSessions, it, itemThread, link, loadLocalSessions, markDone, newItem, patchItem, reassign, rmDep, runtimeName, saveGoal, setAcc, actOnItem, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, st, star, startItemCycle, supp, tag, tagCatLabel, tagDesc, tagLabel, threadFollow, tm, toast, type Item, type PlanRound, type Reply } from "@/store"
-import { BotAvatar, BotName, closeSheet, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, Row, SectionLabel, Segmented, Status, StatusDot, Tags, ThemeSwitch, Chevron, Panel, Section, Tile } from "@/ui"
+import { BotName, closeSheet, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, Row, SectionLabel, Segmented, Status, StatusDot, Tags, ThemeSwitch, Chevron, Panel, Section, Tile } from "@/ui"
+import { disambiguateActors, formatActorName, resolveActor } from "@/actor"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { Composer, type ComposerHandle } from "@/composer"
 import { DecisionCard } from "@/thread/decision-card"
 import { ReplyBlock, SessionBlock } from "@/thread/transcript"
@@ -47,7 +49,7 @@ import { ChoiceCards, dueLabel, ProjectChip, Select } from "@/view-shared"
 import { cn } from "cn"
 import { t as tr, useT } from "@/i18n"
 import { dayHeading, hm as clock, num } from "@/i18n/format"
-import { ArchiveIcon, BanIcon, BookOpenIcon, BotIcon, CalendarIcon, ChartNoAxesColumnIcon, CheckIcon, ChevronRightIcon, CircleAlertIcon, CircleCheckIcon, CircleDashedIcon, CircleHelpIcon, ContactRoundIcon, CopyIcon, FolderIcon, GitPullRequestIcon, HourglassIcon, KeyRoundIcon, LinkIcon, ListIcon, LoaderCircleIcon, LockIcon, MailIcon, MessageSquareIcon, MessagesSquareIcon, MinusIcon, MoreHorizontalIcon, PauseIcon, PlayIcon, PlugIcon, PlusIcon, RadioIcon, RotateCcwIcon, SettingsIcon, SquareTerminalIcon, StarIcon, TrashIcon, UserRoundIcon, XIcon, ZapIcon, BlocksIcon, UploadIcon, NewspaperIcon, WorkflowIcon } from "lucide-react"
+import { ArchiveIcon, BanIcon, BookOpenIcon, BotIcon, CalendarIcon, ChartNoAxesColumnIcon, CheckIcon, ChevronRightIcon, CircleAlertIcon, CircleCheckIcon, CircleDashedIcon, CircleHelpIcon, ContactRoundIcon, CopyIcon, FolderIcon, GitPullRequestIcon, HourglassIcon, KeyRoundIcon, LinkIcon, ListIcon, LoaderCircleIcon, LockIcon, MailIcon, MessageSquareIcon, MessagesSquareIcon, MinusIcon, MoreHorizontalIcon, PauseIcon, PlayIcon, PlugIcon, PlusIcon, RadioIcon, RotateCcwIcon, SettingsIcon, SquareTerminalIcon, StarIcon, TrashIcon, XIcon, ZapIcon, BlocksIcon, UploadIcon, NewspaperIcon, WorkflowIcon } from "lucide-react"
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react"
 export { ChoiceCards,ItemRowExport,Select } from "@/view-shared"
 const RelationGraph = lazyView(() => import("@/graph").then((m) => ({ default: m.RelationGraph })))
@@ -399,22 +401,44 @@ export function ItemView({ id }: { id: string }) {
           </section>
   </>
   const replies: Reply[] = i.tl.flatMap((e) => e[0] === "reply" && e[1] ? [e[1]] : [])
+  const actorCtx = { me: st.me, members: st.members, bots: st.bots, systemName: t("common:actor.kind.system") }
+  const actorOf = (e: any[]) => resolveActor(
+    typeof e[9] === "string" && e[9] ? e[9] : e[0] === "me" ? "me" : "system",
+    actorCtx,
+  )
+  const timelineDisambig = disambiguateActors([
+    ...st.members.map((m) => { const a = resolveActor(m.user_id, actorCtx); return { key: a.id ?? m.user_id, name: a.name, subtitle: a.subtitle, fallbackId: m.user_id } }),
+    ...i.tl.filter((e) => e[0] === "me" || e[0] === "sys").map((e) => {
+      const a = actorOf(e)
+      return { key: a.id ?? a.name, name: a.name, subtitle: a.subtitle, fallbackId: a.id }
+    }),
+  ])
+  const shownName = (a: ReturnType<typeof actorOf>) => formatActorName(a.name, timelineDisambig.get(a.id ?? a.name), (n, extra) => t("common:actor.disambiguated", { name: n, extra }))
   const entry = ({ e, n }: { e: any[]; n: number }) => {
     if (e[0] === "sess") return <SessionBlock key={e[1]} k={e[1]} defaultOpen={false} replies={replies} />
     if (e[0] === "reply") return <ReplyBlock key={"reply:" + e[1].s + ":" + e[1].turn} r={e[1]} />
+    const actor = actorOf(e)
+    const extra = timelineDisambig.get(actor.id ?? actor.name)
     const q = e[0] === "me" && queued.byComment.get(n)
     if (q) return (
-      <div key={n} className="flex items-start gap-2 py-1.5" data-comment><span className="mt-px flex size-5 shrink-0 items-center justify-center rounded-full bg-blue/10 text-blue" title={t("views:item.me")} aria-label={t("views:item.me")}><UserRoundIcon className="size-3" strokeWidth={2.25} /></span>
+      <div key={n} className="flex items-start gap-2 py-1.5" data-comment><ActorAvatar actor={actor} disambiguator={extra} size={20} className="mt-0.5" />
         <QueuedComment sid={i.qs!} q={q} prefix="补充信息：" composer={itemComposer} note={qNote} starting={qSess?.starting} at={e[2]} body={(t) => <div className="type-body"><Markdown text={t} /></div>} /></div>
     )
     /* notes sent from an output show what they mark and open the output there */
     const notes = e[0] === "me" && e[7] != null ? i.anns.filter((x) => x.timeline_id === e[7]) : []
     if (e[0] === "me") return (
-      <div key={n} className="flex items-start gap-2 py-1.5" data-comment><span className="mt-px flex size-5 shrink-0 items-center justify-center rounded-full bg-blue/10 text-blue" title={t("views:item.me")} aria-label={t("views:item.me")}><UserRoundIcon className="size-3" strokeWidth={2.25} /></span>
+      <div key={n} className="flex items-start gap-2 py-1.5" data-comment><ActorAvatar actor={actor} disambiguator={extra} size={20} className="mt-0.5" />
         <div className="min-w-0 flex-1">{notes.length ? <div data-comment-notes><div className="type-body">{t("views:item.notes", { count: notes.length })}</div><AnnRefs item={i.id} anns={notes} outs={i.outs} open={(o, ann) => setPreview({ o, focus: ann })} /></div>
-          : (e[1] !== "（附件）" || !e[5]?.length) && <div className="type-body"><Markdown text={e[1]} /></div>}<Files files={e[5]} className="my-1" /><div className="type-footnote tabular-nums text-tertiary">{when(e)}{e[3] && getSession(e[3]) ? ` · ${t("views:item.deliveredTo", { n: getSession(e[3])!.n })}` : ""}{e[6] === "thread" && <a href="#/" className="ml-1.5 rounded-md bg-muted px-1.5 hover:text-foreground" data-from-thread>{t("views:item.fromThread")}</a>}</div></div></div>
+          : (e[1] !== "（附件）" || !e[5]?.length) && <div className="type-body"><Markdown text={e[1]} /></div>}<Files files={e[5]} className="my-1" /><div className="type-footnote tabular-nums text-tertiary"><span className="font-medium text-muted-foreground" data-timeline-actor>{shownName(actor)}</span> · {when(e)}{e[3] && getSession(e[3]) ? ` · ${t("views:item.deliveredTo", { n: getSession(e[3])!.n })}` : ""}{e[6] === "thread" && <a href="#/" className="ml-1.5 rounded-md bg-muted px-1.5 hover:text-foreground" data-from-thread>{t("views:item.fromThread")}</a>}</div></div></div>
     )
-    return <div key={n} className="flex items-center gap-2 py-1 type-footnote text-muted-foreground"><span className="flex size-5 shrink-0 items-center justify-center"><span className="size-1 rounded-full bg-tertiary" /></span><span className="min-w-0 truncate" title={String(e[1] ?? "")}>{clip(String(e[1] ?? ""), 240)}</span><span className="shrink-0 tabular-nums text-tertiary">{when(e)}</span></div>
+    return (
+      <div key={n} className="flex items-center gap-2 py-1 type-footnote text-muted-foreground" data-timeline-sys>
+        <ActorAvatar actor={actor} disambiguator={extra} size={18} />
+        {actor.kind !== "system" && <span className="shrink-0 font-medium text-foreground/80" data-timeline-actor>{shownName(actor)}</span>}
+        <span className="min-w-0 truncate" title={String(e[1] ?? "")}>{clip(String(e[1] ?? ""), 240)}</span>
+        <span className="shrink-0 tabular-nums text-tertiary">{when(e)}</span>
+      </div>
+    )
   }
   return (
     <Page small title={titleEdit ? <Input autoFocus defaultValue={i.t} className="h-9 rounded-lg type-title" data-title-input
@@ -558,7 +582,7 @@ export const PLUGIN_ICON: Record<string, any> = { mail: MailIcon, calendar: Cale
 /** 我: the user's own contact (称呼、时区、语言) */
 function MeRow() {
   const t = useT()
-  return <Panel><Row icon={<Tile I={UserRoundIcon} />} title={t("views:more.me")} sub={t("views:more.meSub")} onClick={() => go("#/contacts/me")} data-more-me><Chevron /></Row></Panel>
+  return <Panel><Row icon={<ActorAvatar actorId="me" size={32} tooltip={false} />} title={st.me?.name || t("views:more.me")} sub={t("views:more.meSub")} onClick={() => go("#/contacts/me")} data-more-me><Chevron /></Row></Panel>
 }
 export function MoreView() {
   const t = useT()
@@ -572,7 +596,7 @@ export function MoreView() {
     <Page title={t("views:more.title")} max={640}>
       <div className="flex flex-col gap-8">
         <MeRow />
-        <Panel><Row icon={<BotAvatar k="steve" size={44} />} className="py-3" title={<span className="type-headline">{st.bots.steve?.n ?? "Steve"}</span>} sub={t("views:more.steveSub")} onClick={() => go("#/bots/steve")}><Chevron /></Row></Panel>
+        <Panel><Row icon={<ActorAvatar actorId="steve" size={44} />} className="py-3" title={<span className="type-headline">{st.bots.steve?.n ?? "Steve"}</span>} sub={t("views:more.steveSub")} onClick={() => go("#/bots/steve")}><Chevron /></Row></Panel>
         {groups.map((group) => <Section key={group.name} label={group.name}><Panel>{group.rows.map(([h, title, s, I]) => (
           <Row key={h} icon={<Tile I={I} />} title={title} sub={s} onClick={() => go("#/" + h)}><Chevron /></Row>
         ))}</Panel></Section>)}

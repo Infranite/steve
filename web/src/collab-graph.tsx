@@ -20,7 +20,7 @@ import { useT } from "@/i18n"
 import { longDur, monthDayTime } from "@/i18n/format"
 import { cn } from "@/lib/utils"
 import { botName } from "@/store"
-import { BotAvatar } from "@/ui"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { sessionWork } from "@/thread/transcript"
 import { directDeps, teamLanes, type AgentNode } from "@/agent-tree"
 import { AgentDetail, costOf, stepViews, sumCost, type AgentTreeState, type StepView } from "@/agent-tree-view"
@@ -138,7 +138,7 @@ function StepNode({ data }: NodeProps<Node<CardData>>) {
       picked && "ring-2 ring-blue")} data-step-node={c.id} data-step-state={c.state} data-step-tries={c.tries || undefined} data-step-picked={picked || undefined}>
       <Handle type="target" position={down ? Position.Top : Position.Left} className="!size-1 !min-h-0 !min-w-0 !border-0 !bg-transparent" />
       <div className="flex min-w-0 items-center gap-2">
-        {c.mark ? <span className="grid size-[22px] shrink-0 place-items-center rounded-md bg-muted type-label text-muted-foreground">{c.mark}</span> : <BotAvatar k={c.bot} size={22} />}
+        {c.mark ? <span className="grid size-[22px] shrink-0 place-items-center rounded-md bg-muted type-label text-muted-foreground">{c.mark}</span> : <ActorAvatar actorId={c.bot} size={22} />}
         <span className="min-w-0 flex-1 truncate type-footnote font-medium text-foreground">{c.botLabel}</span>
       </div>
       <p className={cn("line-clamp-2 min-h-8 break-words text-[12px] leading-4", c.state === "notStarted" ? "text-muted-foreground" : "text-foreground/85")} title={c.title}>{c.title}</p>

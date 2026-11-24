@@ -29,7 +29,8 @@ import {
   setSetting, toast, emit, closedSt,
 } from "@/store"
 import { api } from "@/api"
-import { go, Page, BotAvatar, KindTag, Row, Segmented, Meta, Empty, openSheet, closeSheet, ThemeSwitch, LanguageSwitch, useRoute, Panel, Card, Section, Lead, Pill, Tile, Chevron, Loading, LIFT, Blank, Strip, EASE } from "@/ui"
+import { go, Page, KindTag, Row, Segmented, Meta, Empty, openSheet, closeSheet, ThemeSwitch, LanguageSwitch, useRoute, Panel, Card, Section, Lead, Pill, Tile, Chevron, Loading, LIFT, Blank, Strip, EASE } from "@/ui"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { PersonasSection } from "@/channels/persona"
 import { OwnerChip } from "@/people/owner-chip"
 import { Select } from "@/view-shared"
@@ -113,7 +114,7 @@ function BotCard({ k, teams, title, sub, meta, action, off, size = 36, as }: { k
   const joined = teams.value?.teams.filter(team => team.members.some(member => member.bot === k)) ?? []
   return (
     <ACard as={as} interactive className="anim-in" data-bot-card={k} data-off={off || undefined}>
-      <CardHeader icon={<BotAvatar k={k} size={size} className={cn("transition-[opacity,filter]", EASE, off && "opacity-40 grayscale")} />} action={action}
+      <CardHeader icon={<ActorAvatar actorId={k} size={size} className={cn("transition-[opacity,filter]", EASE, off && "opacity-40 grayscale")} />} action={action}
         title={<button type="button" onClick={() => go("#/bots/" + k)} data-bot-row={k}>{title}</button>}
         description={<span className="line-clamp-2">{sub || t("manage:detail.noRole")}</span>} />
       <Meta>{meta.filter(Boolean).map((x, i) => <span key={i}>{x}</span>)}</Meta>
@@ -440,7 +441,7 @@ function Pane({ id }: { id: string }) {
   if (id === "models") return <ModelsSettingsPane />
   if (id === "plugins") return <PluginsSettingsPane />
   if (id === "general") return <div className="flex flex-col gap-8">
-    <Section label={t("manage:general.assistant")}><Panel><Row icon={<BotAvatar k="steve" size={36} />} title={st.bots.steve?.n} sub={t("manage:general.assistantSub")} onClick={() => go("#/bots/steve")}><Chevron /></Row></Panel></Section>
+    <Section label={t("manage:general.assistant")}><Panel><Row icon={<ActorAvatar actorId="steve" size={36} />} title={st.bots.steve?.n} sub={t("manage:general.assistantSub")} onClick={() => go("#/bots/steve")}><Chevron /></Row></Panel></Section>
     <Panel>
       <Row title={t("manage:general.home")} sub={t("manage:general.homeSub")}><Sel label={t("manage:general.home")} testId="home" v={c.home} o={[["对话", t("manage:general.homeChat")], ["待处理", t("manage:general.homeInbox")], ["事项", t("manage:general.homeItems")]]} on={(v) => setSetting({ home: v })} /></Row>
       <Row title={t("manage:general.away")} sub={t("manage:general.awaySub")}><Sel label={t("manage:general.away")} testId="away" v={c.awayH} o={[...[2, 4, 8].map((h): [string, string] => [String(h), t("common:dur.hours", { count: h })]), ["0", t("manage:general.awayNever")]]} on={(v) => setSetting({ awayH: v })} /></Row>

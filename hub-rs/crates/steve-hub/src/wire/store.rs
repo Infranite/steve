@@ -146,6 +146,16 @@ impl Repo for StoreBackend {
     fn user_by_session(&self, token: &str) -> BResult<Option<Obj>> {
         opt(self.0.auth_sessions().user(token).map_err(err)?)
     }
+    fn member_identities(&self, ws: &str) -> BResult<Vec<steve_types::MemberIdentity>> {
+        self.0.users().member_identities(ws).map_err(err)
+    }
+    fn member_identity(
+        &self,
+        ws: &str,
+        user: &str,
+    ) -> BResult<Option<steve_types::MemberIdentity>> {
+        self.0.users().member_identity(ws, user).map_err(err)
+    }
     fn audit(
         &self,
         actor: &str,

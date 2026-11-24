@@ -103,7 +103,7 @@ pub fn delivery_summary(c: &mut impl Read, item: &str) -> Result<Option<String>>
     )
 }
 
-const COLUMNS: [&str; 19] = [
+const COLUMNS: [&str; 20] = [
     "id",
     "workspace_id",
     "kind",
@@ -123,6 +123,7 @@ const COLUMNS: [&str; 19] = [
     "revision",
     "source_revision",
     "question_template",
+    "resolved_by",
 ];
 fn decode(r: &Row<'_>) -> Result<Decision> {
     Ok(Decision {
@@ -153,6 +154,7 @@ fn decode(r: &Row<'_>) -> Result<Decision> {
         undo: r
             .get::<Option<Json<DecisionUndo>>>(15)?
             .map(|value| value.0),
+        resolved_by: r.get(19)?,
     })
 }
 
@@ -419,11 +421,27 @@ impl DecisionRows<'_, W<'_>> {
         result: &Value,
         undo: Option<&DecisionUndo>,
     ) -> Result<bool> {
+        self.apply_by(decision, change, result, undo, None)
+    }
+
+    /// Persist a state transition and record the settling actor (`resolved_by`) when applicable.
+    pub fn apply_by(
+        &mut self,
+        decision: &Decision,
+        change: DecisionChange,
+        result: &Value,
+        undo: Option<&DecisionUndo>,
+        resolved_by: Option<&str>,
+    ) -> Result<bool> {
         let started = std::time::Instant::now();
         let Some((to, operation)) = change.next(decision.status) else {
             return Ok(false);
         };
         let reopening = to == DecisionStatus::Open;
+        let actor = (!reopening)
+            .then_some(resolved_by)
+            .flatten()
+            .map(str::to_owned);
         let n = self.0.exec(
             Query::update()
                 .table("decisions")
@@ -431,6 +449,7 @@ impl DecisionRows<'_, W<'_>> {
                 .value("result", (!result.is_null()).then(|| result.to_string()))
                 .value("resolved", (!reopening).then(now))
                 .value("undo", undo.map(serde_json::to_string).transpose()?)
+                .value("resolved_by", actor)
                 .value("revision", decision.revision + i64::from(reopening))
                 .and_where(Expr::col("id").eq(decision.id.as_str()))
                 .and_where(Expr::col("revision").eq(decision.revision))
@@ -474,7 +493,7 @@ impl DecisionRows<'_, W<'_>> {
         result: &Value,
         undo: Option<&DecisionUndo>,
     ) -> Result<bool> {
-        if !self.apply(decision, DecisionChange::Resolve, result, undo)? {
+        if !self.apply_by(decision, DecisionChange::Resolve, result, undo, Some(actor))? {
             return Ok(false);
         }
         self.record_choice(decision, actor, action, answer)?;

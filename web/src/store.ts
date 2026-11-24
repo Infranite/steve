@@ -22,7 +22,7 @@ import type { Cite } from "./api/knowledge"
 import { applyLook } from "./lib/motion"
 import { permissionModes, canConfigurePermission } from "./runtime-status"
 import type { SendRecoveryInfo } from "./api/channels"
-import type { DecisionTier, DecisionView, FoldReason, ItemView, MessageView, PlacementExplanation, SessionView, SessionWaiting, ViewKind } from "./gen"
+import type { DecisionTier, DecisionView, FoldReason, ItemView, MemberIdentity, MessageView, PlacementExplanation, SessionView, SessionWaiting, ViewKind } from "./gen"
 import { applyPatch, decisionsForItem, decisionsForSession, decisionView, loadViews, onCatalog, onViews, messageView, messageViews, openDecisions, resetViews, settle, settled, viewsCursor, itemView, itemViews, sessionView, sessionViews, sessionsForItem, qc, scopeKey, readViews, readItemSessions, table, itemWork } from "./data/sync"
 import { chatLive, updateChat } from "./data/live"
 
@@ -35,6 +35,8 @@ export type Wait = { type: "approve" | "ask" | "accept" | "propose" | "fail" | "
   /** where it goes in 待处理 (the Hub's rules): only `decide` counts and reminds; drafts are one row per conversation */
   tier: DecisionTier; folded?: FoldReason; space?: string }
 export type Done = { id: string; type: Wait["type"]; q: string; choice: string; tm: string; at: number; decision: string; revision: number; canUndo: boolean; undone?: boolean; how: "chose" | "dismissed" | "expired"; rel?: Rel
+  /** Actor who settled the decision (a user id, "yolo", or undefined for system/expired). */
+  resolvedBy?: string
   /** Historical reason when the retired automatic resolver made this decision. */
   yolo?: string
   /** the client it was answered from (A4c `result.via`), when it was one signed in with a token */
@@ -182,6 +184,7 @@ export const st = {
   /* the live stream has been broken for a while: what is on screen may be old, and nothing sent will arrive */
   down: false, version: "", webVersion: "", update: null as StateUpdate | null,
   modules: null as Shell["modules"] | null,
+  me: null as MemberIdentity | null, members: [] as MemberIdentity[],
   workspace: null as Shell["workspace"] | null, workspaces: [] as Shell["workspaces"],
   bots: {} as Record<string, Bot>, allBots: [] as Shell["allBots"], projects: [] as Project[],
   tags: [] as Tag[],
@@ -544,9 +547,10 @@ function mapItem(i: ItemView, det?: RItemDetail): Item {
   const after = new Map(blockSlots(rows).flatMap((at, k) => at < 0 ? [] : [[at, k] as const])), tl: any[] = []
   lines.forEach((t, n) => {
     const sid = started(t)
-    /* [8] is the moment itself, for the page's day headings */
+    /* [8] is the moment itself, for the page's day headings; [9] is the Hub actor id */
     const row: any[] = sid ? ["sys", i18n.t("core:sessionStarted"), tm(t.ts)] : t.kind === "me" ? ["me", t.text, tm(t.ts), t.session_id ?? undefined, replies.get(t.id), t.files, t.via, t.id] : ["sys", t.text, tm(t.ts)]
     row[8] = t.ts
+    row[9] = t.actor
     tl.push(row)
     const k = after.get(n); if (k == null) return
     const sk = started(lines[k]); tl.push(sk ? ["sess", sk] : ["reply", replies.get(lines[k].id)])
@@ -630,6 +634,8 @@ export function proposalOf(p: Proposal, state: "draft" | "applied" | "dropped" =
 
 function applyShell(s: Shell) {
   st.version = s.version; st.webVersion = s.web_version ?? ""; st.update = s.update ?? null; announceUpdate(st.update); st.workspace = s.workspace; st.workspaces = s.workspaces; st.prefix = s.workspace.item_prefix; st.projects = s.projects
+  st.me = s.me ?? null
+  st.members = s.members ?? []
   waitsByView = new WeakMap(); orphansByView = new WeakMap()
   st.bots = Object.fromEntries(s.bots.map((b) => [b.id, botOf(b)])); st.allBots = s.allBots
   st.tags = s.tags.map((t) => ({ id: t.id, name: t.name, cat: t.cat, desc: t.description, by: t.created_by === "你" ? "你" : "Steve", created: tm(t.created) }))
@@ -795,6 +801,12 @@ function onHub(e: HubEvent) {
   }
   /* Only pages displaying clients subscribe to their presence. */
   if (e.type === "client") return
+  if (e.type === "party" && st.me) {
+    const pid = "id" in e ? e.id : undefined
+    if (!st.me.party_id || !pid || st.me.party_id === pid || st.members.some((m) => m.party_id === pid)) {
+      void refresh()
+    }
+  }
   if (moduleTypes.has(e.type)) return
   e = e as HubEvent
   if (e.type === "workspace" || e.type === "bot" || e.type === "project" || e.type === "tag" || e.type === "settings") {
@@ -991,6 +1003,47 @@ export const snoozed = () => getItems().filter((i) => !!i.wait && !!i.snooze)
 export const active = (i: Item) => i.qs ? getSession(i.qs) : undefined
 export const sidOf = (s: Sess) => s.id
 export const accOf = (i: Item) => (i.acc !== ACC.inherit ? i.acc : st.bots[i.b] && st.bots[i.b].acc !== ACC.inherit ? st.bots[i.b].acc : st.cfg.accDefault)
+export function notePersonIdentity(c: { id?: string; name?: string; avatar?: unknown; is_me?: boolean }) {
+  let changed = false
+  const av = c.avatar && typeof c.avatar === "object" ? (c.avatar as MemberIdentity["avatar"]) : undefined
+  if (st.me && (c.is_me || (c.id && st.me.party_id === c.id))) {
+    const next: MemberIdentity = {
+      ...st.me,
+      party_id: c.id ?? st.me.party_id,
+      name: c.name?.trim() ? c.name : st.me.name,
+      avatar: av ?? st.me.avatar,
+    }
+    if (next.name !== st.me.name || next.party_id !== st.me.party_id || JSON.stringify(next.avatar) !== JSON.stringify(st.me.avatar)) {
+      st.me = next
+      changed = true
+    }
+  }
+  if (c.id && st.members.length) {
+    let hit = false
+    const nextMembers = st.members.map((m) => {
+      if (m.party_id !== c.id && !(c.is_me && st.me && m.user_id === st.me.user_id)) return m
+      const next: MemberIdentity = {
+        ...m,
+        party_id: c.id ?? m.party_id,
+        name: c.name?.trim() ? c.name : m.name,
+        avatar: av ?? m.avatar,
+      }
+      if (next.name !== m.name || next.party_id !== m.party_id || JSON.stringify(next.avatar) !== JSON.stringify(m.avatar)) {
+        hit = true
+        return next
+      }
+      return m
+    })
+    if (hit) { st.members = nextMembers; changed = true }
+  }
+  if (changed) emit()
+}
+
+export function clearStoreMe() {
+  st.me = null
+  st.members = []
+}
+
 export const botName = (k: string | null) => (!k ? "" : st.bots[k] ? (st.bots[k].main ? st.bots[k].n : st.bots[k].n + " Bot") : k === "agent" ? "Agent" : k)
 export const hm = (s: Sess) => t("core:harnessModel", { harness: s.h ?? t("core:unknownHarness"), model: s.m ?? t("core:unknownModel") })
 export const isThinking = () => chatLive().thinking
@@ -1219,8 +1272,9 @@ export function done(): Done[] {
   const xs = settled()
   let out = doneLists.get(xs)
   if (!out) {
-    out = xs.map((d) => { const r = resultOf(d); return { id: d.item_id ?? "", type: d.kind as Wait["type"], get q() { return decisionText(d.question) }, choice: choiceLabel(d), tm: tm(d.resolved), at: d.resolved ?? 0, decision: d.id, revision: d.revision, canUndo: (d.undo_until ?? 0) > Date.now(), rel: relOf(d),
-      how: r.dismissed ? "dismissed" : ["expired", "superseded"].includes(d.status) ? "expired" : "chose", yolo: r.decided_by === "yolo" ? String(r.yolo_reason ?? "") : undefined,
+    out = xs.map((d) => { const r = resultOf(d); const resolvedBy = d.resolved_by ?? (typeof r.decided_by === "string" ? r.decided_by : undefined); return { id: d.item_id ?? "", type: d.kind as Wait["type"], get q() { return decisionText(d.question) }, choice: choiceLabel(d), tm: tm(d.resolved), at: d.resolved ?? 0, decision: d.id, revision: d.revision, canUndo: (d.undo_until ?? 0) > Date.now(), rel: relOf(d),
+      resolvedBy,
+      how: r.dismissed ? "dismissed" : ["expired", "superseded"].includes(d.status) ? "expired" : "chose", yolo: resolvedBy === "yolo" || r.decided_by === "yolo" ? String(r.yolo_reason ?? "") : undefined,
       via: typeof r.via?.name === "string" ? r.via.name : undefined } satisfies Done })
     doneLists.set(xs, out)
   }

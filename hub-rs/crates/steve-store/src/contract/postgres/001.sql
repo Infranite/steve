@@ -104,6 +104,7 @@ CREATE TABLE decisions (
     revision BIGINT NOT NULL DEFAULT 1,
     source_revision TEXT,
     question_template TEXT CHECK (question_template IS NULL OR question = ''),
+    resolved_by TEXT,
     UNIQUE (workspace_id, subject_type, subject_id, kind, source_revision)
 );
 CREATE TABLE decision_choice_receipts (

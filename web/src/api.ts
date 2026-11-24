@@ -1,6 +1,6 @@
 import type { MessageView } from "@/gen"
 import type { Code, Reason, Params, NodeOffline, HarnessDegradedReason, FileAccessReport } from "./gen"
-import type { BusEvent, Envelope, StreamControl, ById, DecisionView, PageOf, Snapshot, ItemView, SessionView, OptionalModules, BotProposal, PlacementBlocked } from "./gen"
+import type { BusEvent, Envelope, StreamControl, ById, DecisionView, PageOf, Snapshot, ItemView, SessionView, OptionalModules, BotProposal, PlacementBlocked, MemberIdentity } from "./gen"
 /* Hub API: raw shapes (as the Hub's store returns them) and calls. store.ts maps them onto the view model. */
 import { lang, t } from "@/i18n"
 import { reasonText } from "./i18n/reason.ts"
@@ -129,7 +129,9 @@ export type LocalSession = { key: string; harness: string; title: string; cwd: s
 export type StateUpdate = { version: string; owner: boolean }
 export type Shell = {
   modules: OptionalModules
-  version: string; web_version: string; /** the user is the instance's owner */ owner?: boolean; update?: StateUpdate | null; workspace: RWorkspace; workspaces: RWorkspace[]; bots: RBot[]; allBots: { id: string; name: string; workspaces: string[] }[]
+  version: string; web_version: string; /** the user is the instance's owner */ owner?: boolean; update?: StateUpdate | null
+  me?: MemberIdentity | null; members?: MemberIdentity[]
+  workspace: RWorkspace; workspaces: RWorkspace[]; bots: RBot[]; allBots: { id: string; name: string; workspaces: string[] }[]
   projects: RProject[]; tags: RTag[]; settings: Record<string, string>
   harnessNames?: Record<string, string>
   notifySeen?: number

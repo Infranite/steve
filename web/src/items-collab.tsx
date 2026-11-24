@@ -12,7 +12,8 @@ import { clockDur } from "@/i18n/format"
 import { itemState } from "@/item-state"
 import { fmtUsd } from "@/stats/format"
 import { botName, closedSt, loadItem, type Item } from "@/store"
-import { BotAvatar, go } from "@/ui"
+import { go } from "@/ui"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { buildAgentTree, isOver, rollup, type AgentNode, type AgentStatus, type TreeItem, type TreeStat } from "@/agent-tree"
 import { model, ROOT_STATUS } from "@/agent-tree-view"
 
@@ -62,7 +63,7 @@ export function ItemsFleet({ xs }: { xs: Item[] }) {
       const needs = n.decisions > 0 && !isOver(n.status)
       const child = n.item ? getItem(n.item) : undefined
       return {
-        id: `${i.id}:${n.key}`, name: n.bot ? botName(n.bot) : t("views:agentTree.noBot"), model: model(n.bot) || undefined, avatar: <BotAvatar k={n.bot} size={20} />,
+        id: `${i.id}:${n.key}`, name: n.bot ? botName(n.bot) : t("views:agentTree.noBot"), model: model(n.bot) || undefined, avatar: <ActorAvatar actorId={n.bot} size={20} />,
         task: n.title, status: needs ? "waiting" : FLEET[n.status], statusText: t(`views:agentTree.status.${needs ? "asking" : n.status}`), cost: own || undefined, time: worked ? clockDur(worked) : "",
         ask: needs ? child?.waits[0]?.q ?? t("views:agentTree.row.needsYouBare") : undefined, error: n.status === "failed" ? n.reason ?? undefined : undefined,
         attrs: { "data-fleet-step": n.key, "data-fleet-item": n.item },
@@ -73,7 +74,7 @@ export function ItemsFleet({ xs }: { xs: Item[] }) {
     /* the branch's total is everything under the item (earlier rounds and forks too); the steps show their own part */
     const rest = total ? total.est - children.reduce((n, c) => n + (c.cost ?? 0), 0) : coord?.est
     return {
-      id: i.id, name: i.t, model: `${i.id} · ${botName(i.b)}`, avatar: <BotAvatar k={i.b} size={20} />, task: i.progress || i.goals.at(-1) || "",
+      id: i.id, name: i.t, model: `${i.id} · ${botName(i.b)}`, avatar: <ActorAvatar actorId={i.b} size={20} />, task: i.progress || i.goals.at(-1) || "",
       status, statusText: t(`views:itemState.${state.kind}`), cost: rest && rest > 0 ? rest : undefined, time: coord?.agent_ms ? clockDur(coord.agent_ms) : "",
       children, attrs: { "data-fleet-main": i.id },
     }

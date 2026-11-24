@@ -32,6 +32,7 @@ mod schema {
         Undo,
         Revision,
         QuestionTemplate,
+        ResolvedBy,
     }
 
     #[derive(Iden, Clone, Copy)]
@@ -152,6 +153,7 @@ fn select() -> SelectStatement {
     ))
     .column((D::Table, D::Revision))
     .column((D::Table, D::QuestionTemplate))
+    .column((D::Table, D::ResolvedBy))
     .from(D::Table)
     .join_as(
         JoinType::LeftJoin,
@@ -222,6 +224,7 @@ fn candidate(r: &Row<'_>) -> Result<Candidate> {
         options: options.map(|o| o.0).unwrap_or_default(),
         result: result.and_then(|s| RawJson::from_str(&s).ok()),
         requested_by: r.get(12)?,
+        resolved_by: r.get(21)?,
         created: Millis(r.get(13)?),
         resolved: resolved.map(Millis),
         undo_until: undo_until.map(Millis),

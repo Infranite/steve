@@ -265,8 +265,14 @@ pub async fn call(x: &Extra, o: &Outside, name: &str, args: &Value) -> Result<St
                     .map_err(|e| e.to_string())?
                     .filter(|i| i.workspace_id == ws)
                     .ok_or_else(|| format!("No item {id} in this workspace."))?;
-                core.supplement(&item.id, &text, steve_core::SupplementMode::Auto, &[])
-                    .map_err(|e| e.to_string())?;
+                core.supplement(
+                    &item.id,
+                    &text,
+                    steve_core::SupplementMode::Auto,
+                    &[],
+                    "steve",
+                )
+                .map_err(|e| e.to_string())?;
                 Ok(format!("Added to {} «{}».", item.id, item.title))
             })
             .await

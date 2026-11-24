@@ -109,6 +109,8 @@ fn bindings_match() {
         devices::VitalsTokens,
         ChannelsEvent,
         PeopleEvent,
+        AvatarRef,
+        MemberIdentity,
         VaultEvent,
         AutomationEvent,
         AutonomyEvent,

@@ -440,11 +440,11 @@ impl Core {
         result
     }
 
-    pub fn add_dep(&self, item: &str, dep: &str) -> Result<()> {
-        self.tx().add_dep(item, dep)
+    pub fn add_dep(&self, item: &str, dep: &str, actor: &str) -> Result<()> {
+        self.tx().add_dep(item, dep, actor)
     }
-    pub fn rm_dep(&self, item: &str, dep: &str) -> Result<()> {
-        self.tx().rm_dep(item, dep)
+    pub fn rm_dep(&self, item: &str, dep: &str, actor: &str) -> Result<()> {
+        self.tx().rm_dep(item, dep, actor)
     }
     pub fn decision_command(
         &self,
@@ -583,8 +583,9 @@ impl Core {
         text: &str,
         mode: SupplementMode,
         files: &[FileRef],
+        actor: &str,
     ) -> Result<()> {
-        self.tx().supplement(item, text, mode, files)
+        self.tx().supplement(item, text, mode, files, actor)
     }
     pub fn deliver_queued(&self, item: &str) -> Result<()> {
         self.tx().deliver_queued(item)
@@ -592,8 +593,8 @@ impl Core {
     pub fn item_action(&self, id: &str, action: ItemAction, actor: &str) -> Result<Item> {
         self.tx().item_action(id, action, actor)
     }
-    pub fn revise_goal(&self, id: &str, text: &str) -> Result<()> {
-        self.tx().revise_goal(id, text)
+    pub fn revise_goal(&self, id: &str, text: &str, actor: &str) -> Result<()> {
+        self.tx().revise_goal(id, text, actor)
     }
     pub fn reassign(&self, id: &str, bot: &str, actor: &str) -> Result<Item> {
         self.tx().reassign(id, bot, actor)
@@ -605,19 +606,26 @@ impl Core {
         text: &str,
         interrupt: bool,
         files: &[FileRef],
+        actor: &str,
     ) -> Result<Prompted> {
         self.tx()
-            .session_message(session_id, text, interrupt, files)
+            .session_message(session_id, text, interrupt, files, actor)
     }
     /// Change the text of a message still waiting in a session's queue (409 once a turn took it).
     /// For Node sessions too: a claimed row has left `queued` (runtime::claim_in), so this is the 409.
-    pub fn queued_edit(&self, session_id: &str, queued_id: &str, text: &str) -> Result<Queued> {
-        self.tx().queued_edit(session_id, queued_id, text)
+    pub fn queued_edit(
+        &self,
+        session_id: &str,
+        queued_id: &str,
+        text: &str,
+        actor: &str,
+    ) -> Result<Queued> {
+        self.tx().queued_edit(session_id, queued_id, text, actor)
     }
     /// Take a message back out of a session's queue (409 once a turn took it); returns it.
     /// For Node sessions too: a claimed row has left `queued` (runtime::claim_in), so this is the 409.
-    pub fn queued_remove(&self, session_id: &str, queued_id: &str) -> Result<Queued> {
-        self.tx().queued_remove(session_id, queued_id)
+    pub fn queued_remove(&self, session_id: &str, queued_id: &str, actor: &str) -> Result<Queued> {
+        self.tx().queued_remove(session_id, queued_id, actor)
     }
     /// Send a queued message now: it moves to the head of the queue and the running turn is
     /// interrupted (like 中断), so the queue in order is the next turn; an idle session starts it
@@ -2971,7 +2979,7 @@ impl Tx<'_> {
         Ok(false)
     }
 
-    pub(crate) fn add_dep(&mut self, item_id: &str, dep: &str) -> Result<()> {
+    pub(crate) fn add_dep(&mut self, item_id: &str, dep: &str, actor: &str) -> Result<()> {
         let db = self.db().clone();
         db.store().write::<_, crate::CoreError>(|_w| {
             if item_id == dep || db.deps_of(item_id)?.iter().any(|d| d == dep) {
@@ -2981,7 +2989,7 @@ impl Tx<'_> {
                 return Err(msg(steve_i18n::t!("core.item.dep_cycle")));
             }
             db.dep_add(item_id, dep)?;
-            db.timeline_add(item_id, "me", "sys", &format!("添加前置事项 {dep}"), None)?;
+            db.timeline_add(item_id, actor, "sys", &format!("添加前置事项 {dep}"), None)?;
             let i = self.item(item_id)?;
             if !deps_open(&db, item_id)?.is_empty() && i.phase.can_run() && !i.archived {
                 crate::lifecycle::supersede_where(
@@ -3003,11 +3011,11 @@ impl Tx<'_> {
         })
     }
 
-    pub(crate) fn rm_dep(&mut self, item_id: &str, dep: &str) -> Result<()> {
+    pub(crate) fn rm_dep(&mut self, item_id: &str, dep: &str, actor: &str) -> Result<()> {
         let db = self.db().clone();
         db.store().write::<_, crate::CoreError>(|_w| {
             db.dep_remove(item_id, dep)?;
-            db.timeline_add(item_id, "me", "sys", &format!("移除前置事项 {dep}"), None)?;
+            db.timeline_add(item_id, actor, "sys", &format!("移除前置事项 {dep}"), None)?;
             Ok(())
         })?;
         self.check_blocked(item_id)
@@ -4162,11 +4170,12 @@ impl Tx<'_> {
                         )?;
                     }
                     (_, PermissionAction::Dismiss) => {
-                        if rows.apply(
+                        if rows.apply_by(
                             d,
                             DecisionChange::Dismiss,
                             &json!({"dismissed": true}),
                             None,
+                            Some(actor),
                         )? {
                             w.audit(
                                 &d.workspace_id,
@@ -4255,11 +4264,12 @@ impl Tx<'_> {
             }
             let undo = d.item_id.is_some().then_some(DecisionUndo::Resume { revision });
             let mut rows = steve_store::DecisionRows(w);
-            if !rows.apply(
+            if !rows.apply_by(
                 &d,
                 DecisionChange::Dismiss,
                 &json!({"dismissed": true}),
                 undo.as_ref(),
+                Some(actor),
             )? {
                 return Err(msg(steve_i18n::t!("core.decision.handled")));
             }
@@ -4291,12 +4301,13 @@ impl Tx<'_> {
         text: &str,
         mode: SupplementMode,
         files: &[FileRef],
+        actor: &str,
     ) -> Result<()> {
         self.require_open_item(item_id)?;
         let s = self.active_session(item_id)?;
         self.db().timeline_add_files(
             item_id,
-            "me",
+            actor,
             "me",
             text,
             s.as_ref().map(|s| s.id.as_str()),
@@ -4473,12 +4484,12 @@ impl Tx<'_> {
         Ok(self.db().item(id)?.unwrap_or(i))
     }
 
-    pub(crate) fn revise_goal(&mut self, id: &str, text: &str) -> Result<()> {
+    pub(crate) fn revise_goal(&mut self, id: &str, text: &str, actor: &str) -> Result<()> {
         let db = self.db().clone();
         let v = db.store().write::<_, crate::CoreError>(|_w| {
             self.require_open_item(id)?;
             let v = db.add_goal(id, text)?;
-            db.timeline_add(id, "me", "sys", &format!("目标更新为 v{v}"), None)?;
+            db.timeline_add(id, actor, "sys", &format!("目标更新为 v{v}"), None)?;
             Ok(v)
         })?;
         let Some(s) = self.active_session(id)? else {
@@ -4561,6 +4572,7 @@ impl Tx<'_> {
         text: &str,
         interrupt: bool,
         files: &[FileRef],
+        actor: &str,
     ) -> Result<Prompted> {
         let s = self
             .db()
@@ -4569,7 +4581,7 @@ impl Tx<'_> {
         if let Some(i) = s.item_id.as_deref() {
             self.require_open_item(i)?;
             self.db()
-                .timeline_add_files(i, "me", "me", text, Some(&s.id), files)?;
+                .timeline_add_files(i, actor, "me", text, Some(&s.id), files)?;
             supersede(self.db(), i, &["ask", "fail"], "你直接在会话里发了消息")?;
             recover_quiet(self.db(), i);
             self.reactivate(Some(i))?;
@@ -4583,7 +4595,13 @@ impl Tx<'_> {
         self.rt_prompt(sid, text, "me", files)
     }
 
-    pub(crate) fn queued_edit(&mut self, sid: &str, qid: &str, text: &str) -> Result<Queued> {
+    pub(crate) fn queued_edit(
+        &mut self,
+        sid: &str,
+        qid: &str,
+        text: &str,
+        actor: &str,
+    ) -> Result<Queued> {
         let s = self
             .db()
             .session(sid)?
@@ -4600,7 +4618,7 @@ impl Tx<'_> {
         if let Some(i) = s.item_id.as_deref() {
             self.db().timeline_add(
                 i,
-                "me",
+                actor,
                 "sys",
                 &format!("修改了排队的消息：{}", js_head(text, 200)),
                 Some(sid),
@@ -4609,7 +4627,7 @@ impl Tx<'_> {
         Ok(after)
     }
 
-    pub(crate) fn queued_remove(&mut self, sid: &str, qid: &str) -> Result<Queued> {
+    pub(crate) fn queued_remove(&mut self, sid: &str, qid: &str, actor: &str) -> Result<Queued> {
         let s = self
             .db()
             .session(sid)?
@@ -4620,7 +4638,7 @@ impl Tx<'_> {
         if let Some(i) = s.item_id.as_deref() {
             self.db().timeline_add(
                 i,
-                "me",
+                actor,
                 "sys",
                 &format!("撤回了排队的消息：{}", js_head(&q.text, 200)),
                 Some(sid),

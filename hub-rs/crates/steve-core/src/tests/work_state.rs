@@ -983,7 +983,8 @@ fn a_late_old_turn_end_does_not_undo_your_stop_but_your_message_does() {
     assert!(card.question.contains("你中断了这一回合"));
 
     // your own message: a new turn; it ends without delivering, and Steve continues it
-    core.session_message(&s, "接着做", false, &[]).unwrap();
+    core.session_message(&s, "接着做", false, &[], "me")
+        .unwrap();
     assert_eq!(k.rt.prompts_of(&s).len(), 2);
     k.rt.say(&s, "改了一半");
     k.rt.end_turn(&core, &s, "end_turn", None);
@@ -1273,7 +1274,8 @@ fn a_replayed_end_after_a_restart_keeps_your_stop() {
     assert_eq!(k.rt.prompts_of(&s).len(), 1, "not continued");
     assert!(steve_lines(&k, &i).is_empty());
 
-    core.session_message(&s, "接着做", false, &[]).unwrap();
+    core.session_message(&s, "接着做", false, &[], "me")
+        .unwrap();
     k.rt.say(&s, "改了一半");
     k.rt.end_turn(&core, &s, "end_turn", None);
     assert!(!crate::turn_wait::held(
@@ -1293,7 +1295,9 @@ fn old_end_must_not_consume_new_stop_request() {
     k.rt.prompt(&s, "做事", "me", &[]).unwrap();
     let a = k.rt.running(&s).unwrap().attempt;
     over_untold(&k, &s);
-    k.core.session_message(&s, "换个做法", false, &[]).unwrap();
+    k.core
+        .session_message(&s, "换个做法", false, &[], "me")
+        .unwrap();
     let b = k.rt.running(&s).expect("B runs").attempt;
     assert_ne!(a, b);
     assert!(k.core.cancel_turn(&s).unwrap());
@@ -1349,7 +1353,9 @@ fn a_newer_turns_end_after_your_message_is_not_your_stop() {
     k.rt.prompt(&s, "做事", "me", &[]).unwrap();
     assert!(k.core.cancel_turn(&s).unwrap());
     over_untold(&k, &s);
-    k.core.session_message(&s, "接着做", false, &[]).unwrap();
+    k.core
+        .session_message(&s, "接着做", false, &[], "me")
+        .unwrap();
     k.rt.say(&s, "改了一半");
     k.rt.end_turn(&k.core, &s, "end_turn", None);
     let kept = k.db().store().sessions().stop(&s).unwrap().unwrap();

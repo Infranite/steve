@@ -22,7 +22,7 @@ import { clockDur, longDur } from "@/i18n/format"
 import { cn } from "@/lib/utils"
 import { fmtN, fmtUsd } from "@/stats/format"
 import { botName, loadItem, st } from "@/store"
-import { BotAvatar } from "@/ui"
+import { ActorAvatar } from "@/components/actor-avatar"
 import { Markdown } from "@/components/markdown"
 import { OutDialog, type OutOpen } from "@/item-outputs"
 import { orderedUnits, stopPending, type Workflow } from "@/workflow"
@@ -285,7 +285,7 @@ export function TeamSteps({ at, selected, onSelect, actions }: { at: AgentTreeSt
     const n = x.node, cost = x.cost?.known ? costOf(x.cost, t) : null, tries = x.row.tries.length
     return {
       id: n.key, name: n.title, approach: [n.bot ? botName(n.bot) : t("views:agentTree.noBot"), model(n.bot)].filter(Boolean).join(" · "),
-      icon: <BotAvatar k={n.bot} size={20} />, status: x.look, progress: x.progress, step: x.line, note: x.line,
+      icon: <ActorAvatar actorId={n.bot} size={20} />, status: x.look, progress: x.progress, step: x.line, note: x.line,
       figures: [x.row.ms > 0 ? <span title={t("views:agentTree.worked", { time: clockDur(x.row.ms) })}>{longDur(x.row.ms)}</span> : "", cost ? <span title={cost.hint}>{cost.text}</span> : ""],
       action: action(x),
       attrs: { "data-agent-node": n.key, "data-agent-step": n.key, "data-agent-kind": n.kind, "data-agent-status": n.status, "data-agent-look": x.look, "data-agent-tries": tries || undefined, "data-agent-from": n.kind === "fork" ? lanes.parent.get(n.key) : undefined },
@@ -419,7 +419,7 @@ export function AgentDetail({ at, node, onClose }: { at: AgentTreeState; node: A
   })() : ""
   return <div className="flex min-w-0 flex-col gap-4" data-agent-detail={node.key}>
     <div className="flex items-start gap-2.5">
-      <BotAvatar k={node.bot} size={36} />
+      <ActorAvatar actorId={node.bot} size={36} />
       <div className="min-w-0 flex-1">
         <div className="truncate type-headline">{node.bot ? botName(node.bot) : t("views:agentTree.noBot")}</div>
         <div className="truncate type-footnote text-muted-foreground">{model(node.bot)}</div>

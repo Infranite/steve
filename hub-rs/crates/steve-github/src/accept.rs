@@ -694,6 +694,7 @@ mod tests {
             created: 0,
             resolved: None,
             undo: None,
+            resolved_by: None,
         }
     }
 

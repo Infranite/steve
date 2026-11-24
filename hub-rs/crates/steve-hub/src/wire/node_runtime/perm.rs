@@ -454,11 +454,12 @@ impl NodeRuntime {
                     None,
                 )?,
                 PermissionAction::Dismiss => {
-                    let changed = rows.apply(
+                    let changed = rows.apply_by(
                         &card,
                         DecisionChange::Dismiss,
                         &json!({"dismissed": true, "operation_id": op}),
                         None,
+                        Some(answer.actor),
                     )?;
                     if changed {
                         tx.audit(

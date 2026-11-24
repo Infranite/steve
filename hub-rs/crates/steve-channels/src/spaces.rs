@@ -961,6 +961,7 @@ pub struct Counterpart {
     pub party_id: Option<String>,
     pub name: String,
     pub is_bot: bool,
+    pub avatar: Value,
 }
 
 /// What the page calls a chat with yourself.
@@ -999,12 +1000,17 @@ pub fn dm_party(
             || party
                 .as_ref()
                 .is_some_and(|p| p.kind == "bot" || p.contact_kind.as_deref() == Some("bot"));
+        let avatar = party
+            .as_ref()
+            .map(|p| p.avatar.clone())
+            .unwrap_or_else(|| Value::Object(Default::default()));
         return Ok((
             Some(Counterpart {
                 account_id: account.id,
                 party_id: Some(account.party_id),
                 name,
                 is_bot: bot,
+                avatar,
             }),
             false,
         ));
