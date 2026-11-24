@@ -1,1 +1,0 @@
-The Hub's queued-turn tests now wait for the Node's start event and receipt to be committed before finishing a fake attempt, so CI reliably checks that a queued message starts a new turn and the item hears one completion.
