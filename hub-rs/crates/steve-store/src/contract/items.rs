@@ -141,7 +141,7 @@ pub fn item_workspace(c: &mut impl Read, id: &str) -> Result<Option<String>> {
     )
 }
 
-pub(crate) fn requested_by(r: &mut impl Read, item: &str) -> Result<Option<String>> {
+pub fn requested_by(r: &mut impl Read, item: &str) -> Result<Option<String>> {
     Ok(r.one(
         Query::select()
             .column("requested_by")

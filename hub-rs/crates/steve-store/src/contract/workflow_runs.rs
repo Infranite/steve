@@ -194,6 +194,15 @@ pub struct WfScriptVersion {
     pub created_at: i64,
 }
 
+/// Verifiable Git tree/commit output fingerprint captured when a workflow child delivers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WfGitFingerprint {
+    pub head: String,
+    pub tree: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WfCall {
     pub id: String,
@@ -211,6 +220,9 @@ pub struct WfCall {
     pub status: WfCallStatus,
     pub result_json: Option<String>,
     pub artifact_ids_json: Option<String>,
+    pub git_head: Option<String>,
+    pub git_tree: Option<String>,
+    pub git_cwd: Option<String>,
     pub settled_at_revision: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -234,6 +246,9 @@ pub struct WfCallAttempt {
     pub closing_delivery_revision: Option<i64>,
     pub candidate_result_json: Option<String>,
     pub candidate_artifact_ids_json: Option<String>,
+    pub candidate_git_head: Option<String>,
+    pub candidate_git_tree: Option<String>,
+    pub candidate_git_cwd: Option<String>,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
     pub created_at: i64,
@@ -353,7 +368,7 @@ const RUN_COLS: [&str; 15] = [
     "updated_at",
 ];
 
-const CALL_COLS: [&str; 18] = [
+const CALL_COLS: [&str; 21] = [
     "id",
     "run_id",
     "workspace_id",
@@ -369,12 +384,15 @@ const CALL_COLS: [&str; 18] = [
     "status",
     "result_json",
     "artifact_ids_json",
+    "git_head",
+    "git_tree",
+    "git_cwd",
     "settled_at_revision",
     "created_at",
     "updated_at",
 ];
 
-const ATTEMPT_COLS: [&str; 20] = [
+const ATTEMPT_COLS: [&str; 23] = [
     "id",
     "call_id",
     "run_id",
@@ -391,6 +409,9 @@ const ATTEMPT_COLS: [&str; 20] = [
     "closing_delivery_revision",
     "candidate_result_json",
     "candidate_artifact_ids_json",
+    "candidate_git_head",
+    "candidate_git_tree",
+    "candidate_git_cwd",
     "error_code",
     "error_message",
     "created_at",
@@ -434,9 +455,12 @@ fn decode_call(r: &Row<'_>) -> Result<WfCall> {
         status: r.get::<String>(12)?.parse()?,
         result_json: r.get(13)?,
         artifact_ids_json: r.get(14)?,
-        settled_at_revision: r.get(15)?,
-        created_at: r.get(16)?,
-        updated_at: r.get(17)?,
+        git_head: r.get(15)?,
+        git_tree: r.get(16)?,
+        git_cwd: r.get(17)?,
+        settled_at_revision: r.get(18)?,
+        created_at: r.get(19)?,
+        updated_at: r.get(20)?,
     })
 }
 
@@ -458,10 +482,13 @@ fn decode_attempt(r: &Row<'_>) -> Result<WfCallAttempt> {
         closing_delivery_revision: r.get(13)?,
         candidate_result_json: r.get(14)?,
         candidate_artifact_ids_json: r.get(15)?,
-        error_code: r.get(16)?,
-        error_message: r.get(17)?,
-        created_at: r.get(18)?,
-        settled_at: r.get(19)?,
+        candidate_git_head: r.get(16)?,
+        candidate_git_tree: r.get(17)?,
+        candidate_git_cwd: r.get(18)?,
+        error_code: r.get(19)?,
+        error_message: r.get(20)?,
+        created_at: r.get(21)?,
+        settled_at: r.get(22)?,
     })
 }
 
@@ -742,6 +769,49 @@ impl<C: Read> WorkflowRuns<'_, C> {
                 .order_by("attempt_no", Order::Asc),
             decode_attempt,
         )
+    }
+
+    pub fn list_active_attempts_for_run(&mut self, run_id: &str) -> Result<Vec<WfCallAttempt>> {
+        self.0.all(
+            Query::select()
+                .columns(ATTEMPT_COLS)
+                .from("wf_call_attempts")
+                .and_where(Expr::col("run_id").eq(run_id))
+                .and_where(Expr::col("status").is_in([
+                    WfAttemptStatus::Blocked.as_str(),
+                    WfAttemptStatus::Dispatched.as_str(),
+                    WfAttemptStatus::Closing.as_str(),
+                ]))
+                .order_by("created_at", Order::Asc)
+                .order_by("attempt_no", Order::Asc),
+            decode_attempt,
+        )
+    }
+
+    pub fn blocked_attempt_for_run(&mut self, run_id: &str) -> Result<Option<WfCallAttempt>> {
+        self.0.one(
+            Query::select()
+                .columns(ATTEMPT_COLS)
+                .from("wf_call_attempts")
+                .and_where(Expr::col("run_id").eq(run_id))
+                .and_where(Expr::col("status").eq(WfAttemptStatus::Blocked.as_str()))
+                .order_by("created_at", Order::Asc)
+                .limit(1),
+            decode_attempt,
+        )
+    }
+
+    pub fn child_attempt_and_call(
+        &mut self,
+        child_item_id: &str,
+    ) -> Result<Option<(WfCallAttempt, WfCall)>> {
+        let Some(attempt) = self.attempt_by_child_item(child_item_id)? else {
+            return Ok(None);
+        };
+        let Some(call) = self.get_call(&attempt.call_id)? else {
+            return Ok(None);
+        };
+        Ok(Some((attempt, call)))
     }
 
     pub fn list_attempts_for_call(&mut self, call_id: &str) -> Result<Vec<WfCallAttempt>> {
@@ -1404,6 +1474,22 @@ impl WorkflowRuns<'_, W<'_>> {
         Ok(())
     }
 
+    pub fn bump_run_revision(&mut self, run_id: &str) -> Result<i64> {
+        let run = self
+            .get_run(run_id)?
+            .ok_or(StoreError::NotFound("wf_run"))?;
+        let next_rev = run.run_revision + 1;
+        let ts = now();
+        self.0.exec(
+            Query::update()
+                .table("wf_runs")
+                .values([("run_revision", next_rev.into()), ("updated_at", ts.into())])
+                .and_where(Expr::col("id").eq(run_id)),
+        )?;
+        emit_run_changed(self.0, &run.workspace_id, run_id, &run.parent_item_id);
+        Ok(next_rev)
+    }
+
     pub fn create_attempt(&mut self, new: &NewWfAttempt<'_>) -> Result<WfCallAttempt> {
         let id = uid("wfa");
         let ts = now();
@@ -1541,14 +1627,91 @@ impl WorkflowRuns<'_, W<'_>> {
         Ok(child_to_stop)
     }
 
+    /// Invalidates a previously completed call whose output fingerprint failed verification before
+    /// cross-version lazy hydration. Preserves the prior attempt row for cycle budget `COUNT(*)`
+    /// while clearing its `succeeded` status so a fresh attempt can succeed under
+    /// `wf_call_attempts_one_succeeded`.
+    pub fn invalidate_call_for_rerun(
+        &mut self,
+        call_id: &str,
+        reason_code: &str,
+        reason_detail: &str,
+    ) -> Result<()> {
+        let call = self
+            .get_call(call_id)?
+            .ok_or(StoreError::NotFound("wf_call"))?;
+        let run = self
+            .get_run(&call.run_id)?
+            .ok_or(StoreError::NotFound("wf_run"))?;
+        let ts = now();
+        self.0.exec(
+            Query::update()
+                .table("wf_call_attempts")
+                .values([
+                    ("status", WfAttemptStatus::Cancelled.as_str().into()),
+                    ("error_code", Some(reason_code.to_owned()).into()),
+                    ("error_message", Some(reason_detail.to_owned()).into()),
+                    ("settled_at", Some(ts).into()),
+                ])
+                .and_where(Expr::col("call_id").eq(call_id))
+                .and_where(Expr::col("status").eq(WfAttemptStatus::Succeeded.as_str())),
+        )?;
+        self.0.exec(
+            Query::update()
+                .table("wf_calls")
+                .values([
+                    ("status", WfCallStatus::Queued.as_str().into()),
+                    ("result_json", Option::<String>::None.into()),
+                    ("artifact_ids_json", Option::<String>::None.into()),
+                    ("git_head", Option::<String>::None.into()),
+                    ("git_tree", Option::<String>::None.into()),
+                    ("git_cwd", Option::<String>::None.into()),
+                    ("settled_at_revision", Option::<i64>::None.into()),
+                    ("updated_at", ts.into()),
+                ])
+                .and_where(Expr::col("id").eq(call_id)),
+        )?;
+        self.0.exec(
+            Query::update()
+                .table("wf_runs")
+                .values([
+                    ("run_revision", (run.run_revision + 1).into()),
+                    ("updated_at", ts.into()),
+                ])
+                .and_where(Expr::col("id").eq(run.id.as_str())),
+        )?;
+        emit_run_changed(self.0, &run.workspace_id, &run.id, &run.parent_item_id);
+        Ok(())
+    }
+
     /// Phase 1 of atomic W3.2 delivery settlement (called inside `cycle::request_delivery_close_in`
-    /// `extra` closure): binds `candidate_result_json` to `closing_delivery_revision = item.delivery_revision`.
+    /// `extra` closure): binds `candidate_result_json` (and optional Git tree/commit fingerprint)
+    /// to `closing_delivery_revision = item.delivery_revision`.
     pub fn stage_attempt_closing(
         &mut self,
         child_item_id: &str,
         closing_delivery_revision: i64,
         candidate_result_json: &str,
         candidate_artifact_ids_json: &str,
+    ) -> Result<()> {
+        self.stage_attempt_closing_with_git(
+            child_item_id,
+            closing_delivery_revision,
+            candidate_result_json,
+            candidate_artifact_ids_json,
+            None,
+        )
+    }
+
+    /// Phase 1 of atomic W3.2 delivery settlement with optional verifiable Git `HEAD` + `tree`
+    /// output fingerprint captured at delivery time.
+    pub fn stage_attempt_closing_with_git(
+        &mut self,
+        child_item_id: &str,
+        closing_delivery_revision: i64,
+        candidate_result_json: &str,
+        candidate_artifact_ids_json: &str,
+        git_fp: Option<&WfGitFingerprint>,
     ) -> Result<()> {
         let Some(attempt) = self.attempt_by_child_item(child_item_id)? else {
             return Err(StoreError::NotFound("wf_call_attempt"));
@@ -1579,6 +1742,18 @@ impl WorkflowRuns<'_, W<'_>> {
                     (
                         "candidate_artifact_ids_json",
                         Some(candidate_artifact_ids_json.to_owned()).into(),
+                    ),
+                    (
+                        "candidate_git_head",
+                        git_fp.map(|fp| fp.head.clone()).into(),
+                    ),
+                    (
+                        "candidate_git_tree",
+                        git_fp.map(|fp| fp.tree.clone()).into(),
+                    ),
+                    (
+                        "candidate_git_cwd",
+                        git_fp.and_then(|fp| fp.cwd.clone()).into(),
                     ),
                 ])
                 .and_where(Expr::col("id").eq(attempt.id.as_str())),
@@ -1650,6 +1825,9 @@ impl WorkflowRuns<'_, W<'_>> {
                             ("status", WfCallStatus::Completed.as_str().into()),
                             ("result_json", Some(result_json).into()),
                             ("artifact_ids_json", Some(artifact_ids_json).into()),
+                            ("git_head", attempt.candidate_git_head.clone().into()),
+                            ("git_tree", attempt.candidate_git_tree.clone().into()),
+                            ("git_cwd", attempt.candidate_git_cwd.clone().into()),
                             ("settled_at_revision", Some(next_rev).into()),
                             ("updated_at", ts.into()),
                         ])

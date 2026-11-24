@@ -7,7 +7,7 @@ use common::fresh;
 use steve_store::StoreError;
 use steve_store::workflow_runs::{
     NewWfAttempt, NewWfCall, ReviewGateFailure, ReviewGateVerdict, WfAttemptStatus, WfCallStatus,
-    WfRunStatus, WorkflowRuns,
+    WfGitFingerprint, WfRunStatus, WorkflowRuns,
 };
 
 #[test]
@@ -386,5 +386,137 @@ fn review_gate_enforces_all_four_hard_rules_and_cycle_budget_persists_across_scr
             .unwrap()
             .status,
         WfCallStatus::Completed
+    );
+}
+
+#[test]
+fn git_fingerprint_promotes_on_finalize_and_invalidation_preserves_budget_while_allowing_rerun() {
+    let t = fresh();
+    let (run_id, call_id) = t
+        .store
+        .write(|w| {
+            let run = WorkflowRuns(w).create_run("ws1", "parent-git", 1, 1, "v1", "sha1", None)?;
+            let (call, _) = WorkflowRuns(w).ensure_call(&NewWfCall {
+                run_id: &run.id,
+                workspace_id: "ws1",
+                identity_hash: "git-hash-1",
+                phase: Some("impl"),
+                title: Some("Implement"),
+                prompt: "edit repo",
+                options_canonical_json: "{}",
+                schema_json: None,
+                occurrence: 0,
+                is_review: false,
+                mutex_key: None,
+            })?;
+            WorkflowRuns(w).create_attempt(&NewWfAttempt {
+                call_id: &call.id,
+                run_id: &run.id,
+                parent_item_id: "parent-git",
+                parent_cycle: 1,
+                attempt_no: 1,
+                child_item_id: Some("child-git-1"),
+                bot_id: Some("bot-dev"),
+                placement_id: None,
+                harness: None,
+                model: None,
+                status: WfAttemptStatus::Dispatched,
+                dispatched_at_revision: 1,
+                error_code: None,
+                error_message: None,
+            })?;
+            let fp = WfGitFingerprint {
+                head: "1111111111111111111111111111111111111111".into(),
+                tree: "2222222222222222222222222222222222222222".into(),
+                cwd: Some("/tmp/fake-wt".into()),
+            };
+            WorkflowRuns(w).stage_attempt_closing_with_git(
+                "child-git-1",
+                1,
+                r#"{"ok":true}"#,
+                "[]",
+                Some(&fp),
+            )?;
+            WorkflowRuns(w).finalize_attempt("child-git-1", 1, "completed", None, None)?;
+            Ok::<_, StoreError>((run.id, call.id))
+        })
+        .unwrap();
+
+    let call = t
+        .store
+        .read(|r| WorkflowRuns(r).get_call(&call_id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        call.git_head.as_deref(),
+        Some("1111111111111111111111111111111111111111")
+    );
+    assert_eq!(
+        call.git_tree.as_deref(),
+        Some("2222222222222222222222222222222222222222")
+    );
+    assert_eq!(call.git_cwd.as_deref(), Some("/tmp/fake-wt"));
+
+    // Invalidate due to Git tree mismatch: attempt 1 remains counted for cycle budget,
+    // call returns to Queued, and attempt 2 can now succeed under wf_call_attempts_one_succeeded.
+    t.store
+        .write(|w| {
+            WorkflowRuns(w).invalidate_call_for_rerun(
+                &call_id,
+                "git_fingerprint_mismatch",
+                "tree changed",
+            )?;
+            WorkflowRuns(w).create_attempt(&NewWfAttempt {
+                call_id: &call_id,
+                run_id: &run_id,
+                parent_item_id: "parent-git",
+                parent_cycle: 1,
+                attempt_no: 2,
+                child_item_id: Some("child-git-2"),
+                bot_id: Some("bot-dev"),
+                placement_id: None,
+                harness: None,
+                model: None,
+                status: WfAttemptStatus::Dispatched,
+                dispatched_at_revision: 3,
+                error_code: None,
+                error_message: None,
+            })?;
+            let fp2 = WfGitFingerprint {
+                head: "3333333333333333333333333333333333333333".into(),
+                tree: "4444444444444444444444444444444444444444".into(),
+                cwd: Some("/tmp/fake-wt-2".into()),
+            };
+            WorkflowRuns(w).stage_attempt_closing_with_git(
+                "child-git-2",
+                1,
+                r#"{"ok":true,"attempt":2}"#,
+                "[]",
+                Some(&fp2),
+            )?;
+            WorkflowRuns(w).finalize_attempt("child-git-2", 1, "completed", None, None)?;
+            Ok::<_, StoreError>(())
+        })
+        .unwrap();
+
+    assert_eq!(
+        t.store
+            .read(|r| WorkflowRuns(r).count_cycle_attempts("parent-git", 1))
+            .unwrap(),
+        2
+    );
+    let call2 = t
+        .store
+        .read(|r| WorkflowRuns(r).get_call(&call_id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(call2.status, WfCallStatus::Completed);
+    assert_eq!(
+        call2.git_head.as_deref(),
+        Some("3333333333333333333333333333333333333333")
+    );
+    assert_eq!(
+        call2.git_tree.as_deref(),
+        Some("4444444444444444444444444444444444444444")
     );
 }
