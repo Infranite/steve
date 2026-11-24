@@ -17,7 +17,7 @@ The full test suite runs in CI, not on your machine: locally, run the checks of 
 
 ```sh
 python3 scripts/test-public-boundary.py
-python3 scripts/check-public-boundary.py --strict
+python3 scripts/check-public-boundary.py
 python3 ops/test-cut-release.py
 cargo test --locked --manifest-path hub-rs/Cargo.toml -p steve-install
 python3 packaging/homebrew/test-sync.py
@@ -63,7 +63,7 @@ A push to `main` or a pull request that changed only `docs/releases/` (the relea
 
 Official GitHub cache actions restore Rust dependencies under a key made of the platform, the toolchain, the lockfile, every manifest and the workflow file: everything that decides how dependencies are built. Workspace packages are cleaned both after restoring and before saving a cache, so they are always rebuilt from the current checkout. Pull requests only read caches, and one whose key has no cache yet starts from `main`'s newest cache for its platform; only trusted main pushes write them. A push to `main` saves a cache only when its key has none, built from nothing, so there is one cache per dependency set rather than one per push. The release build uses no cache and always compiles from nothing: GitHub's cache scope does not let a tag read another tag's cache, so a cache saved there was never read. The release workflow builds the web assets once alongside native Linux/macOS builds, then packages and verifies each target on its native platform; publication still waits for both complete bundles.
 
-- **No process documents.** Design notes, plans, proposals, specs, reviews, prototypes and runbooks are the maintainers' own thinking and are kept outside the repository. What a user or operator needs goes into the README, `docs/deployment.md` or the release notes; what a reader of the code needs goes into its comments. `python3 scripts/check-public-boundary.py --strict` (run by CI) rejects any other Markdown file, and anything under `docs/` other than `deployment.md`, `releases/<X.Y.Z>.md` and `assets/`; only explicitly allowlisted test fixture directories are exempt from the process-document path rule, and they are still scanned for private identifiers and proposal headers. Maintainers can provide private personal-identifier rules outside the repository via `--rules`, `STEVE_PUBLIC_BOUNDARY_RULES`, or `STEVE_PUBLIC_BOUNDARY_PATTERNS`.
+- **No process documents.** Design notes, plans, proposals, specs, reviews, prototypes and runbooks are the maintainers' own thinking and are kept outside the repository. What a user or operator needs goes into the README, `docs/deployment.md` or the release notes; what a reader of the code needs goes into its comments. `python3 scripts/check-public-boundary.py` (run by CI) rejects any other Markdown file, and anything under `docs/` other than `deployment.md`, `releases/<X.Y.Z>.md` and `assets/`; only explicitly allowlisted test fixture directories are exempt from the process-document path rule, and they are still scanned for private identifiers and proposal headers. Maintainers can provide private personal-identifier rules outside the repository via `--rules`, `STEVE_PUBLIC_BOUNDARY_RULES`, or `STEVE_PUBLIC_BOUNDARY_PATTERNS`.
 
 ## Changes and releases
 

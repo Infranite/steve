@@ -265,7 +265,7 @@ class PublicBoundaryTests(unittest.TestCase):
                 )
             )
             res = subprocess.run(
-                [sys.executable, str(SCRIPT), "--root", str(root), "--strict", "--rules", str(rules_file)],
+                [sys.executable, str(SCRIPT), "--root", str(root), "--rules", str(rules_file)],
                 capture_output=True,
                 text=True,
                 env=_clean_env(),
@@ -282,7 +282,7 @@ class PublicBoundaryTests(unittest.TestCase):
 
             # 2) Inline JSON rules via STEVE_PUBLIC_BOUNDARY_PATTERNS env var + STEVE_PUBLIC_BOUNDARY_RULES
             env_res = subprocess.run(
-                [sys.executable, str(SCRIPT), "--root", str(root), "--strict"],
+                [sys.executable, str(SCRIPT), "--root", str(root)],
                 capture_output=True,
                 text=True,
                 env=_clean_env(

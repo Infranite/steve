@@ -398,11 +398,6 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument(
-        "--strict",
-        action="store_true",
-        help="strict mode is always enforced; flag kept for CLI compatibility",
-    )
-    parser.add_argument(
         "--rules",
         action="append",
         default=[],
