@@ -299,7 +299,8 @@ impl GitHub {
         } else if !cleared {
             question.push_str("（披露检查没跑完）");
         }
-        let d = NewDecision {
+        let digest = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(body.as_bytes()));
+        let mut d = NewDecision {
             workspace_id: ws.clone(),
             kind: DecisionKind::Approve.code().into(),
             subject_type: COMMENT.into(),
@@ -317,8 +318,19 @@ impl GitHub {
             question_template: None,
             source: None,
         };
+        let session_ref = cx.session_id.as_deref().unwrap_or("");
         self.store()
             .write(|tx| {
+                let settled = steve_store::decision_repo::settled_count(
+                    tx,
+                    &ws,
+                    COMMENT,
+                    &t.subject,
+                    DecisionKind::Approve.code(),
+                )?;
+                d.source = Some(steve_store::DecisionSource::Revision {
+                    revision: format!("comment:{session_ref}:{digest}:{settled}"),
+                });
                 steve_store::DecisionRows(tx)
                     .open(&d)
                     .map_err(ApiError::from)

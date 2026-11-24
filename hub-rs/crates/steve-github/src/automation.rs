@@ -936,6 +936,7 @@ pub(crate) async fn comment_draft(
         // Keep model output literal on GitHub. It must not become mentions, remote images, or
         // bot commands just because the user approved sharing a report.
         let body = format!("{prefix}{}", literal_report(&report));
+        let digest = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(body.as_bytes()));
         let decision = steve_store::DecisionRows(tx).open(&steve_store::NewDecision {
             workspace_id: ws.clone(),
             kind: "approve".into(),
@@ -948,7 +949,9 @@ pub(crate) async fn comment_draft(
             options: Some(vec!["yes".into(), "no".into()]),
             requested_by: APPROVAL_ACTOR.into(),
             question_template: None,
-            source: None,
+            source: Some(steve_store::DecisionSource::Revision {
+                revision: format!("automation:{item}:{digest}"),
+            }),
         })?;
         crate::events::emit(tx, ws, &decision.subject_id);
         Ok::<_, ApiError>(decision)

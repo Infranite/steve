@@ -137,6 +137,7 @@ impl DecisionHandler for FlowRunDecisions {
     fn resolve(&self, tx: &mut W<'_>, cx: &DecisionCx, d: &Decision) -> ApiResult<DecisionOutcome> {
         let mut run = steve_store::RunRows(tx)
             .get(&d.subject_id)?
+            .filter(|r| r.workspace_id == cx.ws)
             .ok_or_else(|| ApiError::not_found("运行"))?;
         match cx.choice {
             CONTINUE_ONCE => {

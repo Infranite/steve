@@ -102,9 +102,19 @@ impl DependencyWaits<'_> {
         self.0.write(|w| rearm_in(w, item))
     }
 
-    pub fn take_workspace_wait(&self, item: &str, cycle: i64, automatic: bool) -> Result<bool> {
+    pub fn take_workspace_wait(
+        &self,
+        item: &str,
+        cycle: i64,
+        automatic: bool,
+    ) -> Result<Option<i64>> {
         self.0.write(|w| {
-            Ok(w.conn.execute(
+            let Some(wait) = get(w.conn, item)?
+                .filter(|wait| wait.cycle == cycle && wait.state == "waiting" && wait.session_id.is_none())
+            else {
+                return Ok(None);
+            };
+            let updated = w.conn.execute(
                 "UPDATE item_dependency_waits SET state=?,updated=?
                  WHERE item_id=? AND cycle=? AND state='waiting' AND session_id IS NULL
                    AND EXISTS(SELECT 1 FROM items i WHERE i.id=item_dependency_waits.item_id
@@ -118,7 +128,8 @@ impl DependencyWaits<'_> {
                     item,
                     cycle
                 ],
-            )? == 1)
+            )?;
+            Ok((updated == 1).then_some(wait.updated))
         })
     }
 
@@ -264,7 +275,11 @@ impl DependencyWaits<'_> {
                 crate::DecisionRows(w).open(&NewDecision {
                     workspace_id:i.workspace_id.clone(),kind:"propose".into(),subject_type:"item".into(),
                     subject_id:item.into(),item_id:Some(item.into()),question:"前置事项都已完成，现在开始？".into(),
-                    options:Some(vec!["yes".into(),"no".into()]),requested_by:"steve".into(),..Default::default()
+                    options:Some(vec!["yes".into(),"no".into()]),requested_by:"steve".into(),
+                    source: Some(crate::DecisionSource::Revision {
+                        revision: format!("deps:{}:{}", wait.cycle, wait.updated),
+                    }),
+                    ..Default::default()
                 })?;
             }
             tx.execute("UPDATE item_dependency_waits SET state=?,updated=? WHERE item_id=? AND cycle=?",

@@ -457,6 +457,36 @@ impl Tx<'_> {
         evidence: Vec<String>,
         extra: impl FnOnce(&mut steve_store::W<'_>, &Item) -> Result<()>,
     ) -> Result<Item> {
+        self.request_delivery_close_with_void(
+            item_id,
+            by,
+            policy,
+            accepted,
+            reason,
+            decision,
+            evidence,
+            void::REDELIVER,
+            "有新的交付，上一次交付作废",
+            extra,
+        )
+    }
+
+    /// Commits a frozen completion intent (and optional `extra`) in one write transaction,
+    /// replacing any existing completion closing with `(void_code, void_why)`, then evaluates close.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn request_delivery_close_with_void(
+        &mut self,
+        item_id: &str,
+        by: &str,
+        policy: ClosePolicy,
+        accepted: bool,
+        reason: &str,
+        decision: Option<String>,
+        evidence: Vec<String>,
+        void_code: &str,
+        void_why: &str,
+        extra: impl FnOnce(&mut steve_store::W<'_>, &Item) -> Result<()>,
+    ) -> Result<Item> {
         let i = self.item(item_id)?;
         match i.phase {
             CLOSED => return Err(conflict(closed_msg())),
@@ -467,14 +497,10 @@ impl Tx<'_> {
                 {
                     return Err(conflict(steve_i18n::t!("core.item.ending_no_complete")));
                 }
-                /* a new delivery replaces the one waiting: its acceptance and operations go with it */
-                self.invalidate_delivery(item_id, void::REDELIVER, "有新的交付，上一次交付作废")?;
             }
             READY | ACTIVE => {}
             PAUSED => return Err(conflict(steve_i18n::t!("core.item.ending"))),
         }
-        let i = self.item(item_id)?;
-        let rev = i.delivery_revision + 1;
         /* on a Node: the facts gathered for this delivery, or taken once they come */
         let (print, print_pending) = if self.git_on_node(&i.id) {
             match self.git_take(&i) {
@@ -484,30 +510,41 @@ impl Tx<'_> {
         } else {
             (fingerprint(i.cwd.as_deref()), false)
         };
-        let c = CloseRequest {
-            kind: CloseKind::Complete,
-            reason: reason.into(),
-            by: by.into(),
-            at: crate::util::now(),
-            frozen_revision: rev,
-            scope_revision: self.scope_revision(item_id)?,
-            workflow_revision: self
-                .db()
-                .store()
-                .workflows()
-                .get(item_id)?
-                .map(|g| g.revision),
-            fingerprint: print,
-            print_pending,
-            policy: Some(policy),
-            accepted,
-            decision,
-            evidence,
-            rule: None,
-        };
-        let mut w = Self::base(&i);
-        w.delivery_revision = rev;
-        self.change_cycle(&i, w, CycleChange::Close(c), reason, extra)?;
+        let store = self.db().store().clone();
+        store.write::<_, CoreError>(|_w| {
+            let i = self.item(item_id)?;
+            if i.phase == CLOSING {
+                /* a new delivery replaces the one waiting: its acceptance and operations go with it */
+                self.invalidate_delivery(item_id, void_code, void_why)?;
+            }
+            let i = self.item(item_id)?;
+            let rev = i.delivery_revision + 1;
+            let c = CloseRequest {
+                kind: CloseKind::Complete,
+                reason: reason.into(),
+                by: by.into(),
+                at: crate::util::now(),
+                frozen_revision: rev,
+                scope_revision: self.scope_revision(item_id)?,
+                workflow_revision: self
+                    .db()
+                    .store()
+                    .workflows()
+                    .get(item_id)?
+                    .map(|g| g.revision),
+                fingerprint: print,
+                print_pending,
+                policy: Some(policy),
+                accepted,
+                decision,
+                evidence,
+                rule: None,
+            };
+            let mut w = Self::base(&i);
+            w.delivery_revision = rev;
+            self.change_cycle(&i, w, CycleChange::Close(c), reason, extra)?;
+            Ok(())
+        })?;
         self.evaluate_cycle_close(item_id)?;
         self.item(item_id)
     }
@@ -611,36 +648,6 @@ impl Tx<'_> {
         Ok(changed)
     }
 
-    /// You checked the effects of `kind` whose result nobody knew (all of this cycle, any revision, but
-    /// `except`, which the caller settles itself): they become `status` (`succeeded`, `failed` or `waived`).
-    /// The gate is checked again.
-    pub(crate) fn reconcile_item_operations(
-        &mut self,
-        item_id: &str,
-        kind: &str,
-        status: &str,
-        note: &str,
-        except: Option<&str>,
-    ) -> Result<usize> {
-        let i = self.item(item_id)?;
-        let mut n = 0;
-        for o in self.db().store().items().operations(item_id, i.cycle)? {
-            if o.kind == kind
-                && o.status == "unknown"
-                && except != Some(o.id.as_str())
-                && self.db().store().write(|tx| {
-                    steve_store::operation_repo::set(tx, &o.id, status, &json!({"checked": note}))
-                })?
-            {
-                n += 1;
-            }
-        }
-        if n > 0 {
-            self.evaluate_cycle_close(item_id)?;
-        }
-        Ok(n)
-    }
-
     /// The frozen result is void (rework, new input, a new result): back to `active`, the acceptance
     /// card expires. `false` when nothing was waiting to close.
     /// `code` is one of [`void`], recorded with `why` on the `invalidate` mark.
@@ -704,13 +711,31 @@ impl Tx<'_> {
         reason: &str,
         rule: Option<&str>,
     ) -> Result<Item> {
+        let cancels = self.stage_cycle_stop_in(item_id, kind, by, reason, rule, |_, _| Ok(()))?;
+        self.st.cancels.extend(cancels);
+        self.evaluate_cycle_close(item_id)?;
+        self.item(item_id)
+    }
+
+    /// Commits a cancel/fail closing intent (and optional `extra`) in one write transaction and
+    /// returns the running turns to cancel after commit.
+    pub(crate) fn stage_cycle_stop_in(
+        &mut self,
+        item_id: &str,
+        kind: CloseKind,
+        by: &str,
+        reason: &str,
+        rule: Option<&str>,
+        extra: impl FnOnce(&mut steve_store::W<'_>, &Item) -> Result<()>,
+    ) -> Result<Vec<(crate::runtime::Running, String)>> {
         let i = self.item(item_id)?;
         if i.phase == CLOSED {
             return Err(conflict(closed_msg()));
         }
         if let Some(c) = i.closing.clone().filter(|c| c.kind != CloseKind::Complete) {
             if c.kind == kind {
-                return Ok(i);
+                self.db().store().write(|tx| extra(tx, &i))?;
+                return Ok(vec![]);
             }
             return Err(conflict(steve_i18n::t!("core.item.already_ending")));
         }
@@ -731,25 +756,27 @@ impl Tx<'_> {
             rule: rule.map(String::from),
         };
         let w = Self::base(&i);
-        self.change_cycle(&i, w, CycleChange::Close(c), reason, |_, _| Ok(()))?;
-        /* the acceptance or approval cards of the work being stopped no longer apply */
-        /* the acceptance, question and failure cards of the work being stopped no longer apply, except a card
-         * asking you to check an effect nobody knows: the stop waits on that one */
-        crate::lifecycle::supersede_where(
-            self.db(),
-            item_id,
-            |d| (matches!(d.kind.as_str(), "accept" | "ask" | "fail") && !unknown_effect_card(d)),
-            reason,
-        )?;
+        self.change_cycle(&i, w, CycleChange::Close(c), reason, |tx, item| {
+            extra(tx, item)?;
+            /* the acceptance, question and failure cards of the work being stopped no longer apply, except a card
+             * asking you to check an effect nobody knows: the stop waits on that one */
+            crate::lifecycle::supersede_where(
+                self.db(),
+                item_id,
+                |d| matches!(d.kind.as_str(), "accept" | "ask" | "fail") && !unknown_effect_card(d),
+                reason,
+            )?;
+            Ok(())
+        })?;
+        let mut cancels = vec![];
         for s in self.db().sessions_of_item(item_id)? {
             if s.status != "ended"
                 && let Some(turn) = self.rt().running(&s.id)
             {
-                self.st.cancels.push((turn, item_id.into()));
+                cancels.push((turn, item_id.into()));
             }
         }
-        self.evaluate_cycle_close(item_id)?;
-        self.item(item_id)
+        Ok(cancels)
     }
 
     /// An explicit new cycle of a closed item: `cycle + 1`, revision 0, `ready`; the cycle before stays

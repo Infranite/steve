@@ -758,6 +758,13 @@ impl Mail {
     }
 
     fn open_unknown_decision(&self, tx: &mut steve_store::W<'_>, d: &DraftRow) -> MailResult<()> {
+        let settled = steve_store::decision_repo::settled_count(
+            tx,
+            &d.workspace_id,
+            SUBJECT_TYPE,
+            &d.id,
+            "fail",
+        )?;
         let decision = steve_store::DecisionRows(tx).open(&NewDecision {
             workspace_id: d.workspace_id.clone(),
             kind: "fail".into(),
@@ -773,7 +780,10 @@ impl Mail {
             options: Some(UNKNOWN_OPTIONS.map(String::from).to_vec()),
             requested_by: "steve".into(),
             question_template: None,
-            source: None,
+            source: Some(steve_store::DecisionSource::MailDraft {
+                previous: d.decision_id.clone(),
+                content_hash: format!("unknown:{}:{settled}", d.content_hash),
+            }),
         })?;
         repo::set_draft_decision(tx, &d.id, Some(&decision.id), &d.content_hash)?;
         Ok(())
@@ -834,6 +844,13 @@ impl Mail {
             }
             repo::set_draft_error(tx, &d.id, Some(error))?;
             drafts::expire_open(tx, &d.workspace_id, &d.id)?;
+            let settled = steve_store::decision_repo::settled_count(
+                tx,
+                &d.workspace_id,
+                SUBJECT_TYPE,
+                &d.id,
+                "fail",
+            )?;
             steve_store::DecisionRows(tx).open(&NewDecision {
                 workspace_id: d.workspace_id.clone(),
                 kind: "fail".into(),
@@ -846,7 +863,10 @@ impl Mail {
                 options: Some(FAIL_OPTIONS.map(String::from).to_vec()),
                 requested_by: "steve".into(),
                 question_template: None,
-                source: None,
+                source: Some(steve_store::DecisionSource::MailDraft {
+                    previous: d.decision_id.clone(),
+                    content_hash: format!("fail:{}:{settled}", d.content_hash),
+                }),
             })?;
             tx.audit(
                 &d.workspace_id,

@@ -166,6 +166,31 @@ pub fn get(c: &mut impl Read, id: &str) -> Result<Option<Decision>> {
     )
 }
 
+/// Number of already-settled decisions for `(ws, subject_type, subject_id, kind)`.
+/// Used by producers whose subject can legitimately open a new card after an earlier one settled
+/// (e.g., re-added space, repeated reauth, re-asked PR/comment, retried send) so duplicate
+/// replays while a card is open collide on the same natural key without blocking later occurrences.
+pub fn settled_count(
+    c: &mut impl Read,
+    ws: &str,
+    subject_type: &str,
+    subject_id: &str,
+    kind: &str,
+) -> Result<i64> {
+    Ok(c.one(
+        Query::select()
+            .expr(Func::count(Expr::col("id")))
+            .from("decisions")
+            .and_where(Expr::col("workspace_id").eq(ws))
+            .and_where(Expr::col("subject_type").eq(subject_type))
+            .and_where(Expr::col("subject_id").eq(subject_id))
+            .and_where(Expr::col("kind").eq(kind))
+            .and_where(Expr::col("status").ne("open")),
+        |r| r.get(0),
+    )?
+    .unwrap_or(0))
+}
+
 impl<C: Read> DecisionRows<'_, C> {
     pub fn get(&mut self, id: &str) -> Result<Option<Decision>> {
         get(self.0, id)

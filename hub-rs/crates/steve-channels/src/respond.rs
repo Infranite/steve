@@ -306,7 +306,9 @@ pub(crate) fn open_draft_as(
         options: Some(draft_options(t.source_message_id.is_some())),
         requested_by: "steve".into(),
         question_template: None,
-        source: None,
+        source: Some(steve_store::DecisionSource::Revision {
+            revision: format!("draft:initial:{}", crate::outbound::text_hash(text)),
+        }),
     })?;
     repo::outbound::link_decision(w, &id, &d.id)?;
     retire_previous_drafts(w, &t.ws, &t.space_id, &d.id)?;

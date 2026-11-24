@@ -133,6 +133,26 @@ impl ItemAction {
     }
 }
 
+enum ConversationWake {
+    None,
+    Flush(String),
+    Start(String),
+}
+
+fn write_answer_line(
+    db: &crate::repo::Db,
+    item: &str,
+    actor: &str,
+    text: &str,
+    sid: Option<&str>,
+) -> Result<()> {
+    if actor == YOLO_ACTOR {
+        db.timeline_add(item, "steve", "sys", &format!("YOLO：{text}"), sid)
+    } else {
+        db.timeline_add(item, actor, "me", text, sid)
+    }
+}
+
 /// Result of a fork: `{"session": id}` or `{"item": id}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum Forked {
@@ -1387,6 +1407,9 @@ impl Tx<'_> {
                 draft: Some(n.goal.clone()),
                 options: Some(vec!["yes".into(), "no".into()]),
                 requested_by: "steve".into(),
+                source: Some(steve_store::DecisionSource::Revision {
+                    revision: format!("create:{}", item.cycle),
+                }),
                 ..Default::default()
             })?;
         } else {
@@ -1533,7 +1556,13 @@ impl Tx<'_> {
             self.db().session_patch(&s.id, patch![status: "ended"])?;
             self.db()
                 .event_add(&s.id, "system", json!({"text": why, "refused": true}))?;
-            self.fail(item_id, &why)?;
+            self.fail_with_source(
+                item_id,
+                &why,
+                Some(steve_store::DecisionSource::Revision {
+                    revision: format!("session_refused:{}", s.id),
+                }),
+            )?;
             return Err(msg(why));
         }
         if planned && !core_makes && !self.rt().makes_workspace(&s.id) {
@@ -1595,8 +1624,17 @@ impl Tx<'_> {
     }
 
     pub(crate) fn fail(&mut self, item_id: &str, why: &str) -> Result<()> {
+        self.fail_with_source(item_id, why, None)
+    }
+
+    pub(crate) fn fail_with_source(
+        &mut self,
+        item_id: &str,
+        why: &str,
+        source: Option<steve_store::DecisionSource>,
+    ) -> Result<()> {
         let db = self.db().clone();
-        db.store().write::<_, crate::CoreError>(|_w| {
+        db.store().write::<_, crate::CoreError>(|w| {
             let i = self.item(item_id)?;
             if i.is_closed() {
                 return Ok(());
@@ -1611,17 +1649,11 @@ impl Tx<'_> {
             }) {
                 return Ok(());
             }
-            crate::lifecycle::supersede_where(
-                self.db(),
-                item_id,
-                crate::lifecycle::stop_card,
-                "有了新的情况",
-            )?;
             let mut opts: Vec<String> = vec!["continue".into(), "delivered".into(), "look".into()];
             if i.bot_id.as_deref() != Some("steve") {
                 opts.push("tosteve".into());
             }
-            let d = self.db().decision_create(NewDecision {
+            let (d, opened) = steve_store::DecisionRows(w).open_in(&NewDecision {
                 workspace_id: i.workspace_id.clone(),
                 kind: "fail".into(),
                 subject_type: "item".into(),
@@ -1630,8 +1662,18 @@ impl Tx<'_> {
                 question: why.into(),
                 options: Some(opts),
                 requested_by: "steve".into(),
+                source,
                 ..Default::default()
             })?;
+            if !opened {
+                return Ok(());
+            }
+            crate::lifecycle::supersede_where(
+                self.db(),
+                item_id,
+                |old| old.id != d.id && crate::lifecycle::stop_card(old),
+                "有了新的情况",
+            )?;
             self.mark_fail(&i.workspace_id, item_id, why, &d.id); // stats (ST3)
             self.db().timeline_add(item_id, "steve", "sys", why, None)?;
             flow_quiet(
@@ -2018,6 +2060,20 @@ impl Tx<'_> {
             Some(&s.id),
         )?;
         if let Some((report, goal_version)) = design_report {
+            let source = match self.rt().running(&s.id) {
+                Some(turn) => steve_store::DecisionSource::TurnInput {
+                    attempt: turn.attempt,
+                    prompt: crate::util::sha(&report),
+                },
+                None => steve_store::DecisionSource::Revision {
+                    revision: format!(
+                        "design:{}:{}:{}",
+                        item.cycle,
+                        goal_version,
+                        crate::util::sha(&report)
+                    ),
+                },
+            };
             let d = self.db().decision_create(NewDecision {
                 workspace_id: item.workspace_id.clone(),
                 kind: "ask".into(),
@@ -2030,7 +2086,7 @@ impl Tx<'_> {
                 options: Some(vec![IMPLEMENT_DESIGN.into(), "只保留设计".into(), "修改设计".into()]),
                 requested_by: Self::by(s),
                 question_template: None,
-                source: None,
+                source: Some(source),
             })?;
             flow_quiet(
                 self.db(),
@@ -2185,6 +2241,20 @@ impl Tx<'_> {
         if self.nothing_to_release(&item)? {
             return Err(msg(format!("{NOTHING_TO_RELEASE}，不用发布。")));
         }
+        let source = match self.rt().running(&s.id) {
+            Some(turn) => steve_store::DecisionSource::TurnInput {
+                attempt: turn.attempt,
+                prompt: crate::util::sha(&format!("{branch}\0{summary}")),
+            },
+            None => steve_store::DecisionSource::Revision {
+                revision: format!(
+                    "release:{}:{}:{}",
+                    item.cycle,
+                    s.id,
+                    crate::util::sha(summary)
+                ),
+            },
+        };
         self.db().decision_create(NewDecision {
             workspace_id: s.workspace_id.clone(),
             kind: "approve".into(),
@@ -2197,7 +2267,7 @@ impl Tx<'_> {
             options: Some(vec!["yes".into(), "no".into()]),
             requested_by: Self::by(s),
             question_template: None,
-            source: None,
+            source: Some(source),
         })?;
         self.mark(&s.id, Mark::Approval);
         Ok(())
@@ -2779,14 +2849,14 @@ impl Tx<'_> {
             .db()
             .setting(&i.workspace_id, "depsAfter", "自动开始")?
             == "自动开始";
-        if !self
+        let Some(wait_updated) = self
             .db()
             .store()
             .dependency_waits()
             .take_workspace_wait(item_id, i.cycle, auto)?
-        {
+        else {
             return Ok(());
-        }
+        };
         let note = if auto {
             "前置事项都已完成，Steve 自动开始"
         } else {
@@ -2805,6 +2875,9 @@ impl Tx<'_> {
                 draft: Some(self.db().goal(item_id)?),
                 options: Some(vec!["yes".into(), "no".into()]),
                 requested_by: "steve".into(),
+                source: Some(steve_store::DecisionSource::Revision {
+                    revision: format!("deps:{}:{wait_updated}", i.cycle),
+                }),
                 ..Default::default()
             })?;
             return Ok(());
@@ -2905,6 +2978,40 @@ impl Tx<'_> {
         Ok(())
     }
 
+    fn stage_conversation_reply(
+        &self,
+        w: &mut steve_store::W<'_>,
+        to: &To,
+        prompt: &str,
+    ) -> Result<ConversationWake> {
+        let To::Decision { live, item } = to;
+        if let Some(item) = item {
+            supersede(self.db(), item, &["ask", "fail"], "你已经回复，会话继续")?;
+            recover_quiet(self.db(), item);
+        }
+        if let Some(session) = live {
+            self.rt().stage_decision_prompt(w, session, prompt)?;
+            return Ok(ConversationWake::Flush(session.clone()));
+        }
+        Ok(match item {
+            Some(item) => ConversationWake::Start(item.clone()),
+            None => ConversationWake::None,
+        })
+    }
+
+    fn wake_conversation(&mut self, wake: ConversationWake, prompt: &str) -> Result<()> {
+        match wake {
+            ConversationWake::None => {}
+            ConversationWake::Flush(session) => {
+                let _ = self.rt().flush(&session, None);
+            }
+            ConversationWake::Start(item) => {
+                self.start_or_fail(&item, Some(prompt), None)?;
+            }
+        }
+        Ok(())
+    }
+
     fn settle_conversation_answer(
         &mut self,
         d: &Decision,
@@ -2916,7 +3023,7 @@ impl Tx<'_> {
     ) -> Result<()> {
         let To::Decision { live, item } = to;
         let store = self.db().store().clone();
-        let should_send = store.write::<_, CoreError>(|w| {
+        let wake = store.write::<_, CoreError>(|w| {
             if let Some(steve_store::DecisionSource::TurnInput { attempt, .. }) = &d.source_revision
                 && let Some(session) = &d.session_id
                 && let Some(turn) = store.sessions().turn_of_attempt(attempt)?
@@ -2931,7 +3038,7 @@ impl Tx<'_> {
                     DecisionChange::Expire,
                     None,
                 )?;
-                return Ok(false);
+                return Ok(ConversationWake::None);
             }
             settle_answer(w, d, cx, result, DecisionChange::Resolve, None)?;
             if let Some(item) = item {
@@ -2944,19 +3051,9 @@ impl Tx<'_> {
                     )?;
                 }
             }
-            if let Some(session) = live {
-                if let Some(item) = item {
-                    supersede(self.db(), item, &["ask", "fail"], "你已经回复，会话继续")?;
-                    recover_quiet(self.db(), item);
-                }
-                self.rt().stage_decision_prompt(w, session, prompt)?;
-            }
-            Ok(live.is_none())
+            self.stage_conversation_reply(w, to, prompt)
         })?;
-        if should_send {
-            self.send(to, prompt)?;
-        }
-        Ok(())
+        self.wake_conversation(wake, prompt)
     }
 
     fn record_conversation_answer(
@@ -2983,12 +3080,7 @@ impl Tx<'_> {
         text: &str,
         sid: Option<&str>,
     ) -> Result<()> {
-        if actor == YOLO_ACTOR {
-            self.db()
-                .timeline_add(item, "steve", "sys", &format!("YOLO：{text}"), sid)
-        } else {
-            self.db().timeline_add(item, actor, "me", text, sid)
-        }
+        write_answer_line(self.db(), item, actor, text, sid)
     }
 
     fn resolve_at(
@@ -3120,26 +3212,47 @@ impl Tx<'_> {
                     // identity immutable and use the ordinary handoff. Starting may refresh
                     // Node roots from another thread, so it must follow the store commit.
                     self.rt().can_run(&i, &bot.id, &selection.harness)?;
-                    db.store().write::<_, crate::CoreError>(|_w| {
-                        settle(json!({"choice":"retry"}), DecisionChange::Resolve, None)?;
-                        self.hand_off(&i, &session.id)
+                    db.store().write::<_, crate::CoreError>(|w| {
+                        settle_answer(
+                            w,
+                            &d,
+                            &cx,
+                            json!({"choice":"retry"}),
+                            DecisionChange::Resolve,
+                            None,
+                        )?;
+                        self.db()
+                            .session_patch(&session.id, patch![status: "ended"])
                     })?;
+                    if let Some(Released::Pending(op)) = self.release_logged(&session.id) {
+                        self.st.handoffs.insert(i.clone(), op);
+                    }
                     self.start_or_fail(&i, None, None)?;
                     return reget(self);
                 }
-                db.store().write::<_, crate::CoreError>(|_w| {
-                    settle(json!({"choice":"retry"}), DecisionChange::Resolve, None)?;
+                let staged = db.store().write::<_, crate::CoreError>(|w| {
+                    settle_answer(
+                        w,
+                        &d,
+                        &cx,
+                        json!({"choice":"retry"}),
+                        DecisionChange::Resolve,
+                        None,
+                    )?;
                     self.rt().retry_session(&session.id, &selection)?;
-                    if self.db().queued(&session.id)?.is_empty() {
-                        self.rt().prompt(
+                    let empty = self.db().queued(&session.id)?.is_empty();
+                    if empty {
+                        self.rt().stage_decision_prompt(
+                            w,
                             &session.id,
                             "配置已修正，请继续处理这个事项。",
-                            "steve",
-                            &[],
                         )?;
                     }
-                    Ok(())
+                    Ok(empty)
                 })?;
+                if staged {
+                    let _ = self.rt().flush(&session.id, None);
+                }
                 return reget(self);
             }
             ("ask", DESIGN_DECISION) => {
@@ -3171,24 +3284,38 @@ impl Tx<'_> {
                     ));
                 }
                 verify_design_file(self.db().store(), &self.cfg().home, &i, location)?;
-                settle(
-                    json!({"answer": choice, "text": text}),
-                    DecisionChange::Resolve,
-                    None,
-                )?;
                 let detail = if text.trim().is_empty() {
                     String::new()
                 } else {
                     format!("；补充：{text}")
                 };
-                tl(self, &i, &format!("设计决定：{choice}{detail}"))?;
+                let line = format!("设计决定：{choice}{detail}");
                 match choice {
                     IMPLEMENT_DESIGN => {
-                        self.db().add_goal(&i, &format!("按用户确认的设计报告实现并验证。已确认方案文件：{location}。实现范围以此方案为准，发布仍按正常流程。"))?;
-                        self.send(&to, &format!("用户已确认设计，并要求按方案实现。先阅读本事项的交付正文及设计产出，然后实现、验证并再次交付。{detail}"))?;
+                        let prompt = format!(
+                            "用户已确认设计，并要求按方案实现。先阅读本事项的交付正文及设计产出，然后实现、验证并再次交付。{detail}"
+                        );
+                        let wake = store.write::<_, CoreError>(|w| {
+                            settle_answer(
+                                w,
+                                &d,
+                                &cx,
+                                json!({"answer": choice, "text": text}),
+                                DecisionChange::Resolve,
+                                None,
+                            )?;
+                            tl(self, &i, &line)?;
+                            self.db().add_goal(
+                                &i,
+                                &format!("按用户确认的设计报告实现并验证。已确认方案文件：{location}。实现范围以此方案为准，发布仍按正常流程。"),
+                            )?;
+                            self.stage_conversation_reply(w, &to, &prompt)
+                        })?;
+                        self.wake_conversation(wake, &prompt)?;
                     }
                     "只保留设计" => {
-                        self.request_delivery_close(
+                        let db = self.db().clone();
+                        self.request_delivery_close_in(
                             &i,
                             actor,
                             crate::cycle::ClosePolicy::Human,
@@ -3196,16 +3323,37 @@ impl Tx<'_> {
                             "你确认只交付设计，暂不实现",
                             None,
                             vec!["用户已查看设计并决定暂不实现".into()],
+                            |w, _| {
+                                settle_answer(
+                                    w,
+                                    &d,
+                                    &cx,
+                                    json!({"answer": choice, "text": text}),
+                                    DecisionChange::Resolve,
+                                    None,
+                                )?;
+                                write_answer_line(&db, &i, actor, &line, sid.as_deref())
+                            },
                         )?;
                     }
                     "修改设计" => {
-                        self.send(
-                            &to,
-                            &format!(
-                                "用户要求修改设计：{}。改好后重新用 steve_deliver 交付完整方案。",
-                                or(text, "请复核设计方案")
-                            ),
-                        )?;
+                        let prompt = format!(
+                            "用户要求修改设计：{}。改好后重新用 steve_deliver 交付完整方案。",
+                            or(text, "请复核设计方案")
+                        );
+                        let wake = store.write::<_, CoreError>(|w| {
+                            settle_answer(
+                                w,
+                                &d,
+                                &cx,
+                                json!({"answer": choice, "text": text}),
+                                DecisionChange::Resolve,
+                                None,
+                            )?;
+                            tl(self, &i, &line)?;
+                            self.stage_conversation_reply(w, &to, &prompt)
+                        })?;
+                        self.wake_conversation(wake, &prompt)?;
                     }
                     _ => unreachable!(),
                 }
@@ -3290,26 +3438,41 @@ impl Tx<'_> {
                     format!("用户的回答：{answer}")
                 };
                 if let Some(p) = attach {
-                    settle(json!({"answer": answer}), DecisionChange::Resolve, None)?;
-                    self.record_conversation_answer(&i, &d, actor, &line)?;
-                    self.db().item_patch(
-                        &i,
-                        patch![project_id: p.id.as_str(), cwd: Value::Null, branch: Value::Null],
-                    )?;
-                    self.db().timeline_add(
-                        &i,
-                        "steve",
-                        "sys",
-                        &format!("关联到项目 {}，开新会话", p.name),
-                        None,
-                    )?;
                     let last = match &s {
-                        Some(s) => {
-                            self.hand_off(&i, &s.id)?;
-                            js_head(&self.last_agent_text(&s.id)?, 600).to_string()
-                        }
+                        Some(s) => js_head(&self.last_agent_text(&s.id)?, 600).to_string(),
                         None => String::new(),
                     };
+                    store.write::<_, CoreError>(|w| {
+                        settle_answer(
+                            w,
+                            &d,
+                            &cx,
+                            json!({"answer": answer}),
+                            DecisionChange::Resolve,
+                            None,
+                        )?;
+                        self.record_conversation_answer(&i, &d, actor, &line)?;
+                        self.db().item_patch(
+                            &i,
+                            patch![project_id: p.id.as_str(), cwd: Value::Null, branch: Value::Null],
+                        )?;
+                        self.db().timeline_add(
+                            &i,
+                            "steve",
+                            "sys",
+                            &format!("关联到项目 {}，开新会话", p.name),
+                            None,
+                        )?;
+                        if let Some(s) = &s {
+                            self.db().session_patch(&s.id, patch![status: "ended"])?;
+                        }
+                        Ok(())
+                    })?;
+                    if let Some(s) = &s
+                        && let Some(Released::Pending(op)) = self.release_logged(&s.id)
+                    {
+                        self.st.handoffs.insert(i.clone(), op);
+                    }
                     let who = if yolo {
                         "Steve（YOLO，代用户）"
                     } else {
@@ -3331,7 +3494,9 @@ impl Tx<'_> {
             ("approve", "release") => {
                 let i = iid()?;
                 let yes = choice == "yes";
-                store.write::<_, CoreError>(|w| {
+                let reject_msg =
+                    (!yes && !text.is_empty()).then(|| format!("用户没有批准发布：{text}。"));
+                let wake = store.write::<_, CoreError>(|w| {
                     settle_answer(
                         w,
                         &d,
@@ -3348,14 +3513,18 @@ impl Tx<'_> {
                             (false, "") => format!("不发布 {}", d.subject_id),
                             (false, t) => format!("不发布 {}：{t}", d.subject_id),
                         },
-                    )
+                    )?;
+                    match reject_msg.as_deref() {
+                        Some(m) => self.stage_conversation_reply(w, &to, m),
+                        None => Ok(ConversationWake::None),
+                    }
                 })?;
                 if yes {
                     if self.rebase_for_release(&i, &d.subject_id, &to)? {
                         self.start_release(&d.subject_id, &i)?;
                     }
-                } else if !text.is_empty() {
-                    self.send(&to, &format!("用户没有批准发布：{text}。"))?;
+                } else if let Some(m) = reject_msg.as_deref() {
+                    self.wake_conversation(wake, m)?;
                 }
             }
             ("approve", _) => {
@@ -3384,10 +3553,28 @@ impl Tx<'_> {
                 let i = iid()?;
                 let before = self.item(&i)?;
                 if choice == "yes" {
-                    settle(json!({"choice": choice}), DecisionChange::Resolve, None)?;
-                    self.answer_line(&i, actor, "同意开始", None)?;
-                    match self.active_session(&i)? {
-                        Some(a) => self.prompt(&a.id, "用户同意了，开始做。", "steve"),
+                    let flush_sid = store.write::<_, CoreError>(|w| {
+                        settle_answer(
+                            w,
+                            &d,
+                            &cx,
+                            json!({"choice": choice}),
+                            DecisionChange::Resolve,
+                            None,
+                        )?;
+                        self.answer_line(&i, actor, "同意开始", None)?;
+                        if let Some(a) = self.active_session(&i)? {
+                            self.rt()
+                                .stage_decision_prompt(w, &a.id, "用户同意了，开始做。")?;
+                            Ok(Some(a.id))
+                        } else {
+                            Ok(None)
+                        }
+                    })?;
+                    match flush_sid {
+                        Some(sid) => {
+                            let _ = self.rt().flush(&sid, None);
+                        }
                         // from a conversation: with what it would have started with right away
                         None => match self.c.thread_start(&before)? {
                             Some((opening, files)) => {
@@ -3397,15 +3584,27 @@ impl Tx<'_> {
                         },
                     }
                 } else {
-                    settle(json!({"choice": choice}), DecisionChange::Resolve, None)?;
-                    self.answer_line(&i, actor, "不需要", None)?;
-                    self.request_cycle_stop(
+                    let db = self.db().clone();
+                    let cancels = self.stage_cycle_stop_in(
                         &i,
                         crate::cycle::CloseKind::Cancel,
                         actor,
                         "你认为不需要",
                         None,
+                        |w, _| {
+                            settle_answer(
+                                w,
+                                &d,
+                                &cx,
+                                json!({"choice": choice}),
+                                DecisionChange::Resolve,
+                                None,
+                            )?;
+                            write_answer_line(&db, &i, actor, "不需要", None)
+                        },
                     )?;
+                    self.st.cancels.extend(cancels);
+                    self.evaluate_cycle_close(&i)?;
                 }
                 return reget(self);
             }
@@ -3413,22 +3612,26 @@ impl Tx<'_> {
                 let i = iid()?;
                 match choice {
                     "continue" => {
-                        settle(
-                            json!({"choice": choice, "text": text}),
-                            DecisionChange::Resolve,
-                            None,
-                        )?;
-                        recover_quiet(self.db(), &i);
-                        if actor == YOLO_ACTOR {
-                            self.answer_line(&i, actor, "让它继续", sid.as_deref())?;
-                        }
-                        self.send(
-                            &to,
-                            or(
-                                text,
-                                "请继续。完成后用 steve_deliver 交付；需要决定时用 steve_ask。",
-                            ),
-                        )?;
+                        let prompt = or(
+                            text,
+                            "请继续。完成后用 steve_deliver 交付；需要决定时用 steve_ask。",
+                        );
+                        let wake = store.write::<_, CoreError>(|w| {
+                            settle_answer(
+                                w,
+                                &d,
+                                &cx,
+                                json!({"choice": choice, "text": text}),
+                                DecisionChange::Resolve,
+                                None,
+                            )?;
+                            recover_quiet(self.db(), &i);
+                            if actor == YOLO_ACTOR {
+                                self.answer_line(&i, actor, "让它继续", sid.as_deref())?;
+                            }
+                            self.stage_conversation_reply(w, &to, prompt)
+                        })?;
+                        self.wake_conversation(wake, prompt)?;
                     }
                     "delivered" => {
                         if actor == YOLO_ACTOR {
@@ -3436,11 +3639,6 @@ impl Tx<'_> {
                                 "确认已交付必须由你决定，自动验收不能代选",
                             ));
                         }
-                        settle(
-                            json!({"choice": choice, "text": text}),
-                            DecisionChange::Resolve,
-                            None,
-                        )?;
                         // The owner's explicit choice is the acceptance (#434). A second
                         // card with no agent checks lets YOLO overrule it and restart the loop.
                         let line = if text.trim().is_empty() {
@@ -3448,67 +3646,194 @@ impl Tx<'_> {
                         } else {
                             format!("你确认已交付并验收通过：{text}")
                         };
-                        tl(self, &i, &line)?;
-                        self.invalidate_delivery(
-                            &i,
-                            crate::cycle::void::REACCEPT,
-                            "你确认已交付并验收通过",
-                        )?;
-                        self.request_delivery_close(
+                        let db = self.db().clone();
+                        self.request_delivery_close_with_void(
                             &i,
                             actor,
                             crate::cycle::ClosePolicy::Human,
                             true,
                             "你确认已交付并验收通过",
                             None,
-                            vec![line],
+                            vec![line.clone()],
+                            crate::cycle::void::REACCEPT,
+                            "你确认已交付并验收通过",
+                            |w, _| {
+                                settle_answer(
+                                    w,
+                                    &d,
+                                    &cx,
+                                    json!({"choice": choice, "text": text}),
+                                    DecisionChange::Resolve,
+                                    None,
+                                )?;
+                                write_answer_line(&db, &i, actor, &line, sid.as_deref())
+                            },
                         )?;
                     }
                     /* a release whose result nobody knew, checked by you */
                     "release_live" | "release_retry" | "release_waive" => {
-                        settle(json!({"choice": choice}), DecisionChange::Resolve, None)?;
                         let line = match choice {
                             "release_live" => "核对过：已经上线",
                             "release_retry" => "需要重新发布",
                             _ => "不需要发布",
                         };
-                        self.answer_line(&i, actor, line, sid.as_deref())?;
                         /* every release of this cycle whose result nobody knew is settled by your check */
                         let checked = match choice {
                             "release_live" => "succeeded",
                             "release_retry" => "failed",
                             _ => "waived",
                         };
-                        self.reconcile_item_operations(
-                            &i,
-                            crate::cycle::OP_RELEASE,
-                            checked,
-                            line,
-                            None,
-                        )?;
+                        let reconciled = store.write::<_, CoreError>(|w| {
+                            settle_answer(
+                                w,
+                                &d,
+                                &cx,
+                                json!({"choice": choice}),
+                                DecisionChange::Resolve,
+                                None,
+                            )?;
+                            self.answer_line(&i, actor, line, sid.as_deref())?;
+                            let item = self.item(&i)?;
+                            let mut n = 0;
+                            for o in self.db().store().items().operations(&i, item.cycle)? {
+                                if o.kind == crate::cycle::OP_RELEASE
+                                    && o.status == "unknown"
+                                    && steve_store::operation_repo::set(
+                                        w,
+                                        &o.id,
+                                        checked,
+                                        &json!({"checked": line}),
+                                    )?
+                                {
+                                    n += 1;
+                                }
+                            }
+                            Ok(n)
+                        })?;
+                        if reconciled > 0 {
+                            self.evaluate_cycle_close(&i)?;
+                        }
                     }
                     "look" => {
-                        let was_paused = self.item(&i)?.is_paused();
+                        store.write::<_, CoreError>(|w| {
+                            let was_paused = self.item(&i)?.is_paused();
+                            self.pause_item(&i)?;
+                            let revision = (!was_paused).then_some(self.item(&i)?.cas_revision);
+                            settle_answer(
+                                w,
+                                &d,
+                                &cx,
+                                json!({"choice": choice}),
+                                DecisionChange::Resolve,
+                                Some(DecisionUndo::Resume { revision }),
+                            )
+                        })?;
                         if let Some(sid) = &sid {
                             self.stop_now(sid);
                         }
-                        self.pause_item(&i)?;
-                        let revision = (!was_paused).then_some(self.item(&i)?.cas_revision);
-                        settle(
-                            json!({"choice": choice}),
-                            DecisionChange::Resolve,
-                            Some(DecisionUndo::Resume { revision }),
-                        )?;
                     }
                     "tosteve" => {
-                        settle(json!({"choice": choice}), DecisionChange::Resolve, None)?;
-                        recover_quiet(self.db(), &i);
-                        self.reassign(&i, "steve", actor)?;
+                        let item = self.item(&i)?;
+                        let reassign = if item.bot_id.as_deref() == Some("steve") {
+                            None
+                        } else {
+                            let b = match self.db().bot("steve")? {
+                                Some(b)
+                                    if self
+                                        .db()
+                                        .bot_in_workspace("steve", &item.workspace_id)? =>
+                                {
+                                    b
+                                }
+                                _ => return Err(msg(steve_i18n::t!("core.bot.not_in_workspace"))),
+                            };
+                            self.rt().can_run(&i, &b.id, &b.harness)?;
+                            let active = self.active_session(&i)?;
+                            let handoff = match &active {
+                                Some(s) => js_head(&self.last_agent_text(&s.id)?, 800).to_string(),
+                                None => String::new(),
+                            };
+                            Some((b, active, handoff))
+                        };
+                        store.write::<_, CoreError>(|w| {
+                            settle_answer(
+                                w,
+                                &d,
+                                &cx,
+                                json!({"choice": choice}),
+                                DecisionChange::Resolve,
+                                None,
+                            )?;
+                            recover_quiet(self.db(), &i);
+                            if let Some((b, active, _)) = &reassign {
+                                if let Some(s) = active {
+                                    self.db().session_patch(&s.id, patch![status: "ended"])?;
+                                }
+                                for o in self.db().decisions_of_item(&i)?.into_iter().filter(|o| {
+                                    o.status == steve_types::DecisionStatus::Open
+                                        && o.session_id.is_some()
+                                }) {
+                                    steve_store::DecisionRows(w).apply(
+                                        &o,
+                                        DecisionChange::Expire,
+                                        &json!({"reassigned": true}),
+                                        None,
+                                    )?;
+                                }
+                                self.db().timeline_add(
+                                    &i,
+                                    actor,
+                                    "sys",
+                                    &format!("换成 {}", b.display()),
+                                    None,
+                                )?;
+                            }
+                            Ok(())
+                        })?;
+                        if let Some((_, active, handoff)) = reassign {
+                            if let Some(s) = &active {
+                                self.stop_now(&s.id);
+                                if let Some(Released::Pending(op)) = self.release_logged(&s.id) {
+                                    self.st.handoffs.insert(i.clone(), op);
+                                }
+                            }
+                            let prev = if handoff.is_empty() {
+                                String::new()
+                            } else {
+                                format!("上一位的最后进展：{handoff}")
+                            };
+                            self.start_or_fail(
+                                &i,
+                                Some(&format!("这个事项从别的 Bot 交接给你。{prev}")),
+                                Some("steve"),
+                            )?;
+                        }
                     }
                     // the stall card (crate::stall): give the item up
                     "drop" => {
-                        settle(json!({"choice": choice}), DecisionChange::Resolve, None)?;
-                        self.item_action(&i, ItemAction::Drop, actor)?;
+                        let db = self.db().clone();
+                        let cancels = self.stage_cycle_stop_in(
+                            &i,
+                            crate::cycle::CloseKind::Cancel,
+                            actor,
+                            "你放弃了",
+                            None,
+                            |w, item| {
+                                settle_answer(
+                                    w,
+                                    &d,
+                                    &cx,
+                                    json!({"choice": choice}),
+                                    DecisionChange::Resolve,
+                                    None,
+                                )?;
+                                db.audit(actor, "item.drop", &i, &json!({}), &item.workspace_id)?;
+                                db.timeline_add(&i, actor, "me", ItemAction::Drop.label(), None)
+                            },
+                        )?;
+                        self.workflow_item_action(&i, ItemAction::Drop)?;
+                        self.st.cancels.extend(cancels);
+                        self.evaluate_cycle_close(&i)?;
                         return reget(self);
                     }
                     _ => {
@@ -3548,24 +3873,6 @@ impl Tx<'_> {
             ..
         } = *cx;
         let db = self.db().clone();
-        let settle = |result, status, undo| {
-            db.store()
-                .write::<_, CoreError>(|w| settle_answer(w, d, cx, result, status, undo))
-        };
-        let send = |t: &Tx, m: &str| -> Result<()> {
-            let Some(s) = &s else { return Ok(()) };
-            if s.status == "ended" {
-                t.db().session_patch(&s.id, patch![status: "idle"])?;
-            }
-            t.prompt(&s.id, m, "steve");
-            Ok(())
-        };
-        let note = |m: &str| -> Result<()> {
-            if let Some(s) = &s {
-                db.event_add(&s.id, "system", json!({"text": m}))?;
-            }
-            Ok(())
-        };
         let with = |x: &str, pre: &str| {
             if text.is_empty() {
                 String::new()
@@ -3573,26 +3880,37 @@ impl Tx<'_> {
                 format!("{pre}{x}")
             }
         };
-        match (d.kind.as_str(), d.subject_type.as_str()) {
+        let (result, change, note_msg, prompt_msg, stop_session) = match (
+            d.kind.as_str(),
+            d.subject_type.as_str(),
+        ) {
             /* a card of the merge lane or the merge queue, both gone: answering it does nothing more */
-            (_, "delivery_batch" | "mq_target" | "mq_batch" | "mq_train") => {
-                settle(
-                    json!({"choice": choice, "obsolete": true}),
-                    DecisionChange::Expire,
-                    None,
-                )?;
-            }
+            (_, "delivery_batch" | "mq_target" | "mq_batch" | "mq_train") => (
+                json!({"choice": choice, "obsolete": true}),
+                DecisionChange::Expire,
+                None,
+                None,
+                false,
+            ),
             ("ask", _) if actor == YOLO_ACTOR => {
                 let answer = or(choice, text);
-                settle(json!({"answer": answer}), DecisionChange::Resolve, None)?;
-                note(&format!("YOLO 代答：{}", js_head(answer, 200)))?;
-                send(self, if text.is_empty() { answer } else { text })?;
+                (
+                    json!({"answer": answer}),
+                    DecisionChange::Resolve,
+                    Some(format!("YOLO 代答：{}", js_head(answer, 200))),
+                    Some(if text.is_empty() { answer } else { text }.to_string()),
+                    false,
+                )
             }
             ("ask", _) => {
                 let answer = or(text, choice);
-                settle(json!({"answer": answer}), DecisionChange::Resolve, None)?;
-                note(&format!("你回答了：{}", js_head(answer, 200)))?;
-                send(self, &format!("用户的回答：{answer}"))?;
+                (
+                    json!({"answer": answer}),
+                    DecisionChange::Resolve,
+                    Some(format!("你回答了：{}", js_head(answer, 200))),
+                    Some(format!("用户的回答：{answer}")),
+                    false,
+                )
             }
             ("approve", "release") => {
                 /* a release belongs to an item's project; without the item there is nothing Steve can publish */
@@ -3602,22 +3920,16 @@ impl Tx<'_> {
                     r["outcome"] = json!("not_released");
                     r["reason"] = json!("会话没有关联的事项");
                 }
-                settle(r, DecisionChange::Resolve, None)?;
                 let m = if yes {
                     "这个会话没有关联的事项（或事项已删除），Steve 不能发布。需要发布的话，先把会话关联到事项。".to_string()
                 } else {
                     format!("用户没有批准发布{}。", with(text, "："))
                 };
-                send(self, &m)?;
+                (r, DecisionChange::Resolve, None, Some(m), false)
             }
             ("approve", _) => {
                 let yes = choice == "yes";
-                settle(
-                    json!({"approved": yes, "text": text}),
-                    DecisionChange::Resolve,
-                    None,
-                )?;
-                note(&format!(
+                let note = format!(
                     "{}{}",
                     if yes {
                         "你批准了："
@@ -3625,7 +3937,7 @@ impl Tx<'_> {
                         "你拒绝了："
                     },
                     d.question
-                ))?;
+                );
                 let m = if yes {
                     format!("用户批准了：{}{}", d.question, with(text, "。补充："))
                 } else {
@@ -3635,43 +3947,66 @@ impl Tx<'_> {
                         with(text, "。原因：")
                     )
                 };
-                send(self, &m)?;
-            }
-            ("accept", _) if choice == "pass" => {
-                settle(json!({"choice": "pass"}), DecisionChange::Resolve, None)?;
-                note("你验收通过了")?;
-                send(self, "验收通过。")?;
-            }
-            ("accept", _) => {
-                settle(
-                    json!({"choice": "rework", "text": text}),
+                (
+                    json!({"approved": yes, "text": text}),
                     DecisionChange::Resolve,
-                    None,
-                )?;
-                send(
-                    self,
-                    &format!("验收没有通过，返工意见：{}", or(text, "请再检查一遍")),
-                )?;
+                    Some(note),
+                    Some(m),
+                    false,
+                )
             }
-            ("fail", _) => {
-                settle(
-                    json!({"choice": choice, "text": text}),
-                    DecisionChange::Resolve,
-                    None,
-                )?;
-                if choice == "continue" {
-                    send(self, or(text, "请继续。"))?;
-                } else if let (true, Some(s)) = (choice == "look", &s) {
-                    self.stop_now(&s.id);
+            ("accept", _) if choice == "pass" => (
+                json!({"choice": "pass"}),
+                DecisionChange::Resolve,
+                Some("你验收通过了".into()),
+                Some("验收通过。".into()),
+                false,
+            ),
+            ("accept", _) => (
+                json!({"choice": "rework", "text": text}),
+                DecisionChange::Resolve,
+                None,
+                Some(format!(
+                    "验收没有通过，返工意见：{}",
+                    or(text, "请再检查一遍")
+                )),
+                false,
+            ),
+            ("fail", _) => (
+                json!({"choice": choice, "text": text}),
+                DecisionChange::Resolve,
+                None,
+                (choice == "continue").then(|| or(text, "请继续。").to_string()),
+                choice == "look",
+            ),
+            _ => (
+                json!({"choice": choice, "text": text}),
+                DecisionChange::Resolve,
+                None,
+                None,
+                false,
+            ),
+        };
+        let flush_sid = db.store().write::<_, CoreError>(|w| {
+            settle_answer(w, d, cx, result, change, None)?;
+            if let Some(s) = &s {
+                if let Some(m) = note_msg.as_deref() {
+                    db.event_add(&s.id, "system", json!({"text": m}))?;
+                }
+                if let Some(m) = prompt_msg.as_deref() {
+                    if s.status == "ended" {
+                        self.db().session_patch(&s.id, patch![status: "idle"])?;
+                    }
+                    self.rt().stage_decision_prompt(w, &s.id, m)?;
+                    return Ok(Some(s.id.clone()));
                 }
             }
-            _ => {
-                settle(
-                    json!({"choice": choice, "text": text}),
-                    DecisionChange::Resolve,
-                    None,
-                )?;
-            }
+            Ok(None)
+        })?;
+        if let Some(sid) = flush_sid {
+            let _ = self.rt().flush(&sid, None);
+        } else if stop_session && let Some(s) = &s {
+            self.stop_now(&s.id);
         }
         db.decision(id)?
             .ok_or_else(|| msg(steve_i18n::t!("core.decision.handled")))
@@ -4814,7 +5149,13 @@ impl Tx<'_> {
         self.db()
             .event_add(&s.id, "system", json!({"text": text}))?;
         if let (Some(i), true) = (&item, fail) {
-            self.fail(&i.id, INTERRUPTED)?;
+            self.fail_with_source(
+                &i.id,
+                INTERRUPTED,
+                Some(steve_store::DecisionSource::Revision {
+                    revision: format!("interrupted:{}:{}", s.id, s.updated),
+                }),
+            )?;
         }
         Ok(())
     }

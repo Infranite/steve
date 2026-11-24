@@ -1236,6 +1236,12 @@ pub fn propose(
     if !basis.is_empty() {
         d.draft = Some(basis.chars().take(500).collect());
     }
+    d.source = Some(match source_ref {
+        Some(reference) => steve_store::DecisionSource::Revision {
+            revision: format!("steward:{reference}"),
+        },
+        None => steve_store::DecisionSource::Record,
+    });
     let d = DecisionRows(tx).open(&d)?;
     let mut s = Steward::new(ws, &k.object_type, &k.object_id, &k.person_id, role, "chat");
     s.status = "proposed".into();

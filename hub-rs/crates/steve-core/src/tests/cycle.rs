@@ -183,7 +183,7 @@ fn an_unknown_effect_of_an_older_revision_holds_the_close_until_you_check_it() {
         .unwrap();
     k.core
         .tx()
-        .release_unknown(&x.id, "发布脚本没有结果")
+        .release_unknown_for(&x.id, "发布脚本没有结果", None)
         .unwrap();
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
     assert_eq!(
@@ -230,7 +230,7 @@ fn a_cancel_waits_for_an_unknown_effect_and_keeps_the_card_that_asks() {
         .unwrap();
     k.core
         .tx()
-        .release_unknown(&x.id, "发布脚本没有结果")
+        .release_unknown_for(&x.id, "发布脚本没有结果", None)
         .unwrap();
     k.core
         .item_action(&x.id, crate::ItemAction::Drop, "me")

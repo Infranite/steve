@@ -614,7 +614,13 @@ fn open_approval(
         options: Some(options),
         requested_by: "steve".into(),
         question_template: None,
-        source: None,
+        source: Some(steve_store::DecisionSource::Revision {
+            revision: format!(
+                "draft:{}:{}",
+                row.decision_id.as_deref().unwrap_or("initial"),
+                text_hash(text)
+            ),
+        }),
     })?;
     message_repo::link_decision(w, id, &d.id)?;
     if review {
@@ -662,6 +668,13 @@ fn open_fail(
     question: String,
     options: &[&str],
 ) -> ChannelResult<String> {
+    let source = steve_store::DecisionSource::Revision {
+        revision: format!(
+            "fail:{}:{}",
+            row.decision_id.as_deref().unwrap_or("initial"),
+            text_hash(&question)
+        ),
+    };
     let d = steve_store::DecisionRows(w).open(&NewDecision {
         workspace_id: row.ws.clone(),
         kind: DecisionKind::Fail.code().into(),
@@ -674,7 +687,7 @@ fn open_fail(
         options: Some(options.iter().map(|s| s.to_string()).collect()),
         requested_by: "steve".into(),
         question_template: None,
-        source: None,
+        source: Some(source),
     })?;
     channel_message_repo::outbound::link_decision(w, &row.id, &d.id)?;
     Ok(d.id)

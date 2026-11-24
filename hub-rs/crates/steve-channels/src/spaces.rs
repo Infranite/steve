@@ -573,6 +573,13 @@ pub fn open_new_space_decision(
     space: &SpaceRow,
     account_name: &str,
 ) -> ChannelResult<String> {
+    let settled = steve_store::decision_repo::settled_count(
+        w,
+        ws,
+        SUBJECT_SPACE,
+        &space.id,
+        DecisionKind::Ask.code(),
+    )?;
     let mut decisions = steve_store::DecisionRows(w);
     if let Some(d) = decisions.open_for(ws, SUBJECT_SPACE, &space.id)? {
         return Ok(d.id);
@@ -592,7 +599,9 @@ pub fn open_new_space_decision(
         options: Some(NEW_SPACE_OPTIONS.map(String::from).to_vec()),
         requested_by: "steve".into(),
         question_template: None,
-        source: None,
+        source: Some(steve_store::DecisionSource::Revision {
+            revision: format!("space:{settled}"),
+        }),
     })?;
     Ok(d.id)
 }

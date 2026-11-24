@@ -2347,6 +2347,13 @@ impl Connections {
             Some(p) => p.reauth_question(&account),
             None => format!("{account} 的授权过期了"),
         };
+        let settled = steve_store::decision_repo::settled_count(
+            tx,
+            &r.workspace_id,
+            SUBJECT,
+            &r.id,
+            DecisionKind::Fail.code(),
+        )?;
         DecisionRows(tx).open(&NewDecision {
             workspace_id: r.workspace_id.clone(),
             kind: DecisionKind::Fail.code().into(),
@@ -2359,7 +2366,9 @@ impl Connections {
             options: Some(REAUTH_OPTIONS.map(String::from).to_vec()),
             requested_by: "steve".into(),
             question_template: None,
-            source: None,
+            source: Some(steve_store::DecisionSource::Revision {
+                revision: format!("reauth:{settled}"),
+            }),
         })?;
         Ok(())
     }

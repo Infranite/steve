@@ -102,16 +102,13 @@ impl NodeRuntime {
         };
         let attempt = request.execution.attempt().as_str();
         // an attempt this Hub planned on this Node, of that very session (whatever the body says)
-        let planned = self.store.read(|r| {
-            node_turns::planning::planned_here(r, self.node_id.as_str(), &session, attempt)
-        })?;
+        let planned =
+            node_turns::planning::planned_here(tx, self.node_id.as_str(), &session, attempt)?;
         if !planned {
             tracing::warn!(permission = %request.id, attempt, "request of an attempt the Hub never planned on this Node");
             return Ok(None);
         }
-        let scope = self
-            .store
-            .read(|r| node_sessions::startup::scope(r, &session))?;
+        let scope = node_sessions::startup::scope(tx, &session)?;
         let options: Vec<String> = request
             .choices
             .iter()
@@ -374,10 +371,7 @@ impl NodeRuntime {
             if card.status != DecisionStatus::Open || row.state != "waiting" {
                 return Ok((false, false));
             }
-            if let Some(why) = self
-                .store
-                .read(|c| steve_store::workflow_gate::session_blocker(c, &row.session))?
-            {
+            if let Some(why) = steve_store::workflow_gate::session_blocker(tx, &row.session)? {
                 // A pause/cancel/replan can precede a late human or YOLO answer. Commit the
                 // expired card and a rejection together; never grant the old attempt new access.
                 return Ok((false, Self::expire_card_in(tx, &row, &why)?));

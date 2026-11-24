@@ -576,7 +576,11 @@ fn open_pr(
     }
     let body = body.trim();
     let ws = cx.ws.clone();
-    let d = NewDecision {
+    let draft_text = format!("{title}\n\n{body}");
+    let digest = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(
+        draft_text.as_bytes(),
+    ));
+    let mut d = NewDecision {
         workspace_id: ws.clone(),
         kind: DecisionKind::Approve.code().into(),
         subject_type: PR_OPEN.into(),
@@ -584,7 +588,7 @@ fn open_pr(
         item_id: Some(l.item.id.clone()),
         session_id: cx.session_id.clone(),
         question: accept::agent_question(&r.full_name, &title, draft),
-        draft: Some(format!("{title}\n\n{body}")),
+        draft: Some(draft_text),
         options: Some(OPTIONS.map(String::from).to_vec()),
         requested_by: if cx.bot_id.is_empty() {
             "bot".into()
@@ -611,6 +615,16 @@ fn open_pr(
                         .to_string(),
                 ));
             }
+            let settled = steve_store::decision_repo::settled_count(
+                tx,
+                &ws,
+                PR_OPEN,
+                &l.item.id,
+                DecisionKind::Approve.code(),
+            )?;
+            d.source = Some(steve_store::DecisionSource::Revision {
+                revision: format!("pr_open:{}:{branch}:{digest}:{settled}", l.item.cycle),
+            });
             steve_store::DecisionRows(tx).open(&d)?;
             Ok::<_, ApiError>(Ok(()))
         })

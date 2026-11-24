@@ -723,6 +723,7 @@ pub fn open_card(w: &mut W<'_>, plan: &Plan, card: &Card) -> ChannelResult<Strin
     } else {
         HANDOFF_OPTIONS.map(String::from).to_vec()
     };
+    let previous = repo::outbound::decision_id(w, &plan.message_id)?;
     let d = DecisionRows(w).open(&NewDecision {
         workspace_id: plan.ws.clone(),
         kind: DecisionKind::Ask.code().into(),
@@ -735,7 +736,13 @@ pub fn open_card(w: &mut W<'_>, plan: &Plan, card: &Card) -> ChannelResult<Strin
         options: Some(options),
         requested_by: "steve".into(),
         question_template: None,
-        source: None,
+        source: Some(steve_store::DecisionSource::Revision {
+            revision: format!(
+                "ask:{}:{}",
+                previous.as_deref().unwrap_or("initial"),
+                card.reason.code()
+            ),
+        }),
     })?;
     repo::outbound::link_decision(w, &plan.message_id, &d.id)?;
     repo::emit(w, &plan.ws, &plan.space_id, &plan.message_id);

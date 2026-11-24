@@ -13,6 +13,7 @@ use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
+use steve_store::Ingest;
 
 #[derive(Default)]
 pub struct FakeState {
@@ -257,14 +258,42 @@ impl AgentRuntime for FakeRuntime {
     }
     fn stage_decision_prompt(
         &self,
-        _: &mut steve_store::W<'_>,
+        w: &mut steve_store::W<'_>,
         sid: &str,
         text: &str,
     ) -> Result<()> {
-        if self.st().decision_prompt_error {
+        if let Some(why) = steve_store::workflow_gate::session_blocker(w, sid)? {
+            return Err(msg(why));
+        }
+        if steve_store::node_sessions::ended(w, sid)? {
+            return Err(msg("已结束的会话不能接收新消息，请使用当前会话。"));
+        }
+        let (err, queued, holding) = {
+            let st = self.st();
+            (
+                st.decision_prompt_error,
+                st.turning.contains(sid) || st.holding,
+                st.holding && !st.turning.contains(sid),
+            )
+        };
+        if err {
             return Err(msg("input queue refused"));
         }
-        self.prompt(sid, text, "steve", &[])?;
+        let at = steve_store::now();
+        if holding {
+            steve_store::node_sessions::set_status(w, sid, "idle", at)?;
+        }
+        steve_store::node_sessions::queue(w, &steve_store::uid("q"), sid, text, "steve", &[], at)?;
+        if queued {
+            w.events().add(
+                sid,
+                "queued",
+                json!({"text": text, "via": "steve"}),
+                None,
+                at,
+            )?;
+        }
+        steve_store::node_sessions::changed_event(w, sid)?;
         Ok(())
     }
     fn running(&self, sid: &str) -> Option<Running> {
