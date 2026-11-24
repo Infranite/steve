@@ -417,6 +417,10 @@ mod tests {
             command(&h, "goose", "id", "/w").as_deref(),
             Some("cd /w && goose session --resume --session-id id")
         );
+        assert_eq!(
+            command(&h, "antigravity", "id", "/w").as_deref(),
+            Some("cd /w && agy --resume id")
+        );
         assert_eq!(command(&h, "unknown-harness", "id", "/w"), None);
         let other = Homes {
             codex_home: "/srv/codex's".into(),

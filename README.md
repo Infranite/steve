@@ -26,7 +26,7 @@ English · [简体中文](README.zh-CN.md)
 
 Coding agents are good at the work itself. Run more than two or three of them and the bookkeeping falls apart: a dozen terminal tabs, context lost between sessions, permission prompts nobody answered, and no record of what was actually delivered or whether the checks passed.
 
-Steve sits above Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, OpenCode, Cursor and ten other ACP coding CLIs and keeps that record. It is one Rust binary on your own machine, with a SQLite database and an encrypted vault. You talk to it in a single chat. For each message it decides whether to answer directly, research your code and documents read-only, open a tracked item, or pass the message on to work already in progress. Items go to bots, and each item runs in its own git worktree.
+Steve sits above Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, OpenCode, Cursor, Antigravity CLI and eleven other ACP coding CLIs and keeps that record. It is one Rust binary on your own machine, with a SQLite database and an encrypted vault. You talk to it in a single chat. For each message it decides whether to answer directly, research your code and documents read-only, open a tracked item, or pass the message on to work already in progress. Items go to bots, and each item runs in its own git worktree.
 
 | | 😵 Agents in terminal tabs | ✨ With Steve |
 |---|---|---|
@@ -143,7 +143,7 @@ Each task has a private, persistent `<home>/workspaces/<item>/outputs` directory
 
 ### 🤖 Bots
 
-A bot is a harness (17 built-in ACP coding CLIs, plus any custom ACP adapter in `harness.json`) plus a model and thinking effort, a role, a persona, rules, a permission mode, an acceptance mode and a default project. Describe one in a sentence and Steve drafts it. `@Bot` hands work to that bot. Reassigning an item stops the old session and passes on the last progress. A bot can serve several workspaces with a different duty in each, and only sees the data of the one it is working in.
+A bot is a harness (18 built-in ACP coding CLIs, plus any custom ACP adapter in `harness.json`) plus a model and thinking effort, a role, a persona, rules, a permission mode, an acceptance mode and a default project. Describe one in a sentence and Steve drafts it. `@Bot` hands work to that bot. Reassigning an item stops the old session and passes on the last progress. A bot can serve several workspaces with a different duty in each, and only sees the data of the one it is working in.
 
 **Execution Nodes and Bot Teams:** Inspect a worker Bot’s compatibility on paired Nodes, then explicitly bind the Nodes it may use. Workspace Teams reuse existing Bots with optional narrower Node lists; choose a workspace default or override it for one new item. The item shows its placement or blocker, and active sessions stay where they started. See [Bot execution Nodes and Teams](docs/deployment.md#bot-execution-nodes-and-teams).
 
@@ -349,7 +349,7 @@ Homebrew verifies and installs the published native binaries; no Python runtime,
 | **Homebrew install** | Homebrew; no Python runtime dependency. Apple Silicon macOS, or Linux x86_64 with glibc 2.35+. Homebrew's own OS support policy also applies. |
 | **Source build** | Git, stable Rust/Cargo, Node.js 24 LTS with npm |
 | **Run** | Apple Silicon macOS 14+, or Linux x86_64 with glibc 2.35+ (Ubuntu 22.04+, Debian 12+). Windows isn't supported. |
-| **Agent execution** | Any of the 17 built-in ACP coding CLIs (or a custom ACP adapter in `harness.json`) and authentication on the executing Node |
+| **Agent execution** | Any of the 18 built-in ACP coding CLIs (or a custom ACP adapter in `harness.json`) and authentication on the executing Node |
 
 ### 1. Build from source *(development)*
 
@@ -363,7 +363,7 @@ cargo build --locked --manifest-path hub-rs/Cargo.toml -p steve-hub
 
 ### 2. Install the adapters
 
-Steve talks to harnesses over ACP. Thirteen of the 17 built-in harnesses (`claude-code`, `codex`, `pi`, `gemini`, `github-copilot-cli`, `opencode`, `qwen-code`, `goose`, `kimi-code`, `grok-build`, `kilo`, `factory-droid`, `codebuddy-code`) can be installed and kept up to date with npm under the home's `adapters` directory; four (`cursor`, `kiro`, `mistral-vibe`, `qoder`) are discovered on `PATH` from their own installers. `steve setup` offers the npm-managed ones and pre-ticks those whose CLI is already on `PATH`; for a development Hub, install the ones you use the same way:
+Steve talks to harnesses over ACP. Thirteen of the 18 built-in harnesses (`claude-code`, `codex`, `pi`, `gemini`, `github-copilot-cli`, `opencode`, `qwen-code`, `goose`, `kimi-code`, `grok-build`, `kilo`, `factory-droid`, `codebuddy-code`) can be installed and kept up to date with npm under the home's `adapters` directory; five (`cursor`, `kiro`, `mistral-vibe`, `qoder`, `antigravity`) are discovered on `PATH` from their own installers. `steve setup` offers the npm-managed ones and pre-ticks those whose CLI is already on `PATH`; for a development Hub, install the ones you use the same way:
 
 ```sh
 STEVE_HOME="$HOME/.steve-dev" hub-rs/target/debug/steve-hub --adapters install claude-code codex
