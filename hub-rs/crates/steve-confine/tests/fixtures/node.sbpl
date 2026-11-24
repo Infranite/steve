@@ -45,6 +45,8 @@
 (deny file-read* file-write* (literal "/fixture/user/.qoder-cn") (subpath "/fixture/user/.qoder-cn"))
 (deny file-read* file-write* (literal "/fixture/user/Library/Application Support/Qoder") (subpath "/fixture/user/Library/Application Support/Qoder"))
 (deny file-read* file-write* (literal "/fixture/user/.config/Qoder") (subpath "/fixture/user/.config/Qoder"))
+(deny file-read* file-write* (literal "/fixture/user/.gemini/antigravity-cli") (subpath "/fixture/user/.gemini/antigravity-cli"))
+(deny file-read* file-write* (literal "/fixture/user/.gemini/config") (subpath "/fixture/user/.gemini/config"))
 (deny file-read* file-write* (literal "/fixture/user/.claude.json") (subpath "/fixture/user/.claude.json"))
 (deny file-read* file-write* (literal "/fixture/user/.qoder.json") (subpath "/fixture/user/.qoder.json"))
 (deny file-read* file-write*
