@@ -498,11 +498,16 @@ pub fn open_approval(
     now: i64,
 ) -> MailResult<String> {
     let hash = content_hash(d);
-    if d.content_hash == hash
-        && let Some(id) = &d.decision_id
+    if let Some(id) = &d.decision_id
         && let Some(current) = steve_store::DecisionRows(tx).get(id)?
+        && current.workspace_id == d.workspace_id
+        && current.subject_type == SUBJECT_TYPE
+        && current.subject_id == d.id
         && current.status == steve_types::DecisionStatus::Open
-        && current.kind == "approve"
+        && matches!(
+            current.source_revision.as_ref(),
+            Some(steve_store::DecisionSource::MailDraft { content_hash, .. }) if *content_hash == hash
+        )
     {
         return Ok(current.id);
     }

@@ -3480,6 +3480,7 @@ async fn a_turn_sets_the_session_running_then_idle_and_keeps_the_harness_id() {
     eventually_sync("harness id", || h.acp_id().is_some()).await;
     assert_eq!(h.acp_id().as_deref(), Some(resume.as_str()));
     let exec = h.attempts()[0].clone();
+    h.wait_for_start(&exec).await;
     h.node.finish(&exec, build::done()).await.unwrap();
     eventually_sync("turn end", || h.ends().len() == 1).await;
     assert_eq!(h.session_status(), "idle");
@@ -3489,13 +3490,13 @@ async fn a_turn_sets_the_session_running_then_idle_and_keeps_the_harness_id() {
     eventually_sync("second running", || h.attempts().len() == 2).await;
     eventually_sync("running again", || h.session_status() == "running").await;
     h.rt.prompt(S, "three", "user", &[]).unwrap();
-    eventually_sync("second started", || h.count("start_turn") == 2).await;
     let second = h.attempts()[1].clone();
+    h.wait_for_start(&second).await;
     h.node.finish(&second, build::done()).await.unwrap();
     eventually_sync("third planned", || h.attempts().len() == 3).await;
     assert_eq!(h.session_status(), "running", "a turn follows");
-    eventually_sync("third started", || h.count("start_turn") == 3).await;
     let third = h.attempts()[2].clone();
+    h.wait_for_start(&third).await;
     h.node.finish(&third, build::done()).await.unwrap();
     eventually_sync("idle", || h.session_status() == "idle").await;
 }

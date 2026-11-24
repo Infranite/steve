@@ -293,7 +293,10 @@ fn row_types_follow_column_order() {
         })
         .unwrap()
         .unwrap();
-    assert_eq!(keys(&dec), cols("decisions"));
+    assert_eq!(
+        keys(&dec),
+        without("decisions", &["source_revision", "question_template"])
+    );
     let mid = s
         .messages()
         .add(WS, "me", "hi", None, &serde_json::Value::Null, "steve")

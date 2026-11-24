@@ -381,6 +381,8 @@ mod tests {
             )
             .unwrap()
             .unwrap();
+        // The initial load establishes a baseline without publishing patches.
+        f.p.snapshot(ws).await.expect("the projection is warm");
         let mut rx = f.bus.subscribe();
         let mut random = 7_u64;
         for sequence in 0..1_000 {
