@@ -1082,7 +1082,7 @@ impl Core {
                     route_ms: info.ms,
                     route_outcome: None,
                     item_id: None,
-                    dispatch_ref_id: None,
+                    dispatch: steve_store::ReceiptDispatch::NoDispatch,
                     delivery_ref_id: None,
                     model_call_id: None,
                     user_id: task.user_id.as_deref(),

@@ -177,6 +177,25 @@ pub struct ReplyReceipt {
     pub committed_at: i64,
 }
 
+/// Explicit dispatch linkage for a reply receipt. Callers cannot silently omit a dispatch ref
+/// via `Option::None`; they must state `NoDispatch` or pass the durable `thread_dispatch_refs.id`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiptDispatch<'a> {
+    /// The reply performed no item dispatch (`create_item` / `append_item`).
+    NoDispatch,
+    /// The reply performed an item dispatch backed by `thread_dispatch_refs.id`.
+    Dispatched(&'a str),
+}
+
+impl<'a> ReceiptDispatch<'a> {
+    pub fn as_deref(self) -> Option<&'a str> {
+        match self {
+            Self::NoDispatch => None,
+            Self::Dispatched(id) => Some(id),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CommitReplyInput<'a> {
     pub task_id: &'a str,
@@ -199,7 +218,7 @@ pub struct CommitReplyInput<'a> {
     pub route_ms: i64,
     pub route_outcome: Option<&'a str>,
     pub item_id: Option<&'a str>,
-    pub dispatch_ref_id: Option<&'a str>,
+    pub dispatch: ReceiptDispatch<'a>,
     pub delivery_ref_id: Option<&'a str>,
     pub model_call_id: Option<&'a str>,
     pub user_id: Option<&'a str>,
@@ -1394,6 +1413,13 @@ pub fn commit_reply(w: &mut W<'_>, input: &CommitReplyInput<'_>) -> Result<Commi
         return Ok(CommitOutcome::Fenced);
     }
 
+    let dispatch_ref_id = validate_receipt_dispatch(
+        w,
+        Some(&task.workspace_id),
+        input.outcome == "handed_off",
+        input.dispatch,
+    )?;
+
     let at = now();
     let receipt_id = uid("rcpt");
     let reply_message_id = if let Some(text) = input.reply_text {
@@ -1481,7 +1507,7 @@ pub fn commit_reply(w: &mut W<'_>, input: &CommitReplyInput<'_>) -> Result<Commi
                 input.route_ms.into(),
                 input.route_outcome.into(),
                 input.item_id.into(),
-                input.dispatch_ref_id.into(),
+                dispatch_ref_id.into(),
                 input.delivery_ref_id.into(),
                 input.model_call_id.into(),
                 input.user_id.into(),
@@ -1742,13 +1768,51 @@ pub fn last_resumable_receipt(
     )
 }
 
+fn validate_receipt_dispatch<'a>(
+    r: &mut impl Read,
+    ws: Option<&str>,
+    require_dispatch: bool,
+    dispatch: ReceiptDispatch<'a>,
+) -> Result<Option<&'a str>> {
+    match dispatch {
+        ReceiptDispatch::NoDispatch => {
+            if require_dispatch {
+                return Err(StoreError::Rejected(
+                    "handed_off reply receipt requires a dispatch ref".into(),
+                ));
+            }
+            Ok(None)
+        }
+        ReceiptDispatch::Dispatched(id) => {
+            if id.is_empty() {
+                return Err(StoreError::Rejected("dispatch_ref_id is empty".into()));
+            }
+            let mut q = Query::select();
+            q.column("id")
+                .from("thread_dispatch_refs")
+                .and_where(Expr::col("id").eq(id));
+            if let Some(ws) = ws {
+                q.and_where(Expr::col("workspace_id").eq(ws));
+            }
+            if r.one(&q, |_| Ok(()))?.is_none() {
+                return Err(StoreError::Rejected(format!(
+                    "dispatch_ref_id {id} does not exist"
+                )));
+            }
+            Ok(Some(id))
+        }
+    }
+}
+
 pub fn update_receipt_override(
     w: &mut W<'_>,
     origin_message_id: &str,
     to: &str,
     item_id: Option<&str>,
+    dispatch: ReceiptDispatch<'_>,
     at: i64,
 ) -> Result<bool> {
+    let dispatch_ref_id = validate_receipt_dispatch(w, None, false, dispatch)?;
     let mut q = Query::update();
     q.table("thread_reply_receipts")
         .value("route_override", to)
@@ -1761,6 +1825,12 @@ pub fn update_receipt_override(
             Expr::cust_with_values("COALESCE(?, item_id)", [item]),
         );
     }
+    if let Some(disp) = dispatch_ref_id {
+        q.value(
+            "dispatch_ref_id",
+            Expr::cust_with_values("COALESCE(?, dispatch_ref_id)", [disp]),
+        );
+    }
     Ok(w.exec(&q)? > 0)
 }
 
@@ -1769,7 +1839,9 @@ pub fn update_receipt_outcome(
     origin_message_id: &str,
     outcome: &str,
     item_id: Option<&str>,
+    dispatch: ReceiptDispatch<'_>,
 ) -> Result<()> {
+    let dispatch_ref_id = validate_receipt_dispatch(w, None, false, dispatch)?;
     let mut q = Query::update();
     q.table("thread_reply_receipts")
         .value("route_outcome", outcome)
@@ -1778,6 +1850,12 @@ pub fn update_receipt_outcome(
         q.value(
             "item_id",
             Expr::cust_with_values("COALESCE(?, item_id)", [item]),
+        );
+    }
+    if let Some(disp) = dispatch_ref_id {
+        q.value(
+            "dispatch_ref_id",
+            Expr::cust_with_values("COALESCE(?, dispatch_ref_id)", [disp]),
         );
     }
     w.exec(&q)?;
@@ -1903,6 +1981,16 @@ pub fn record_dispatch(
     Ok(())
 }
 
+pub fn dispatch_by_id(r: &mut impl Read, id: &str) -> Result<Option<DispatchRef>> {
+    r.one(
+        Query::select()
+            .columns(DISPATCH_COLS)
+            .from("thread_dispatch_refs")
+            .and_where(Expr::col("id").eq(id)),
+        decode_dispatch,
+    )
+}
+
 pub fn dispatch_by_origin(
     r: &mut impl Read,
     ws: &str,
@@ -1954,6 +2042,38 @@ pub fn set_dispatch_reply(w: &mut W<'_>, item_id: &str, reply_message_id: &str) 
             .value("updated", now())
             .and_where(Expr::col("target_item_id").eq(item_id))
             .and_where(Expr::col("effect_kind").eq("create_item")),
+    )?;
+    Ok(())
+}
+
+pub fn set_dispatch_reply_by_id(
+    w: &mut W<'_>,
+    dispatch_id: &str,
+    reply_message_id: &str,
+) -> Result<()> {
+    w.exec(
+        Query::update()
+            .table("thread_dispatch_refs")
+            .value("reply_message_id", reply_message_id)
+            .value("updated", now())
+            .and_where(Expr::col("id").eq(dispatch_id)),
+    )?;
+    Ok(())
+}
+
+pub fn set_dispatch_reply_if_origin(
+    w: &mut W<'_>,
+    dispatch_id: &str,
+    origin_message_id: &str,
+    reply_message_id: &str,
+) -> Result<()> {
+    w.exec(
+        Query::update()
+            .table("thread_dispatch_refs")
+            .value("reply_message_id", reply_message_id)
+            .value("updated", now())
+            .and_where(Expr::col("id").eq(dispatch_id))
+            .and_where(Expr::col("origin_message_id").eq(origin_message_id)),
     )?;
     Ok(())
 }

@@ -93,8 +93,8 @@ pub use contract::tags as tag_repo;
 pub use contract::thread;
 pub use contract::thread::{
     CommitOutcome, CommitReplyInput, DeliveryRefClaim, DeliveryRefRow, DispatchClaim, DispatchRef,
-    EditQueuedOutcome, NewRevisionTask, RecoveredTask, ReplyReceipt, StopTaskOutcome, SubmitInput,
-    SubmitOutcome, ThreadNotice, ThreadTask, WithdrawOutcome,
+    EditQueuedOutcome, NewRevisionTask, ReceiptDispatch, RecoveredTask, ReplyReceipt,
+    StopTaskOutcome, SubmitInput, SubmitOutcome, ThreadNotice, ThreadTask, WithdrawOutcome,
 };
 pub use contract::vault_uses as vault_use_repo;
 pub use contract::{

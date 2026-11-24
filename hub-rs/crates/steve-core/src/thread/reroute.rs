@@ -11,7 +11,7 @@ use crate::orchestrator::ItemAction;
 use crate::repo::{FileRef, Item, Message};
 use crate::util::now;
 use serde_json::{Value, json};
-use steve_store::{NewRevisionTask, thread};
+use steve_store::{NewRevisionTask, ReceiptDispatch, thread};
 
 /// Where a correction sends a message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,13 +91,22 @@ impl Core {
                         };
                         self.suggest(ws, &r.id, choice, by)
                     }
-                    Some(r) if r.item_id.is_some() => Ok(Handled {
-                        message_id: r.id.clone(),
-                        item: self
+                    Some(r) if r.item_id.is_some() => {
+                        let item = self
                             .store()
-                            .item(r.item_id.as_deref().unwrap_or_default())?,
-                        already: true,
-                    }),
+                            .item(r.item_id.as_deref().unwrap_or_default())?;
+                        let dispatch_ref_id = self.existing_dispatch_id(
+                            ws,
+                            &origin,
+                            item.as_ref().map(|i| i.id.as_str()),
+                        )?;
+                        Ok(Handled {
+                            message_id: r.id.clone(),
+                            item,
+                            already: true,
+                            dispatch_ref_id,
+                        })
+                    }
                     Some(r)
                         if r.meta.get("chat").is_some_and(gateway::truthy)
                             || r.meta.get("promoted").is_some() =>
@@ -111,6 +120,8 @@ impl Core {
                                 })?
                                 .is_some_and(|d| d.state == "applied");
                         let item = self.promote(ws, &r.id, by).await?;
+                        let dispatch_ref_id =
+                            self.existing_dispatch_id(ws, &origin, Some(&item.id))?;
                         let id = self
                             .conv_messages(ws, &r.space)?
                             .into_iter()
@@ -121,6 +132,7 @@ impl Core {
                             message_id: id,
                             item: Some(item),
                             already: existing_before,
+                            dispatch_ref_id,
                         })
                     }
                     _ => self.user_message_to_item(ws, &origin, by).await,
@@ -152,6 +164,7 @@ impl Core {
                     message_id: reply.id.clone(),
                     item: None,
                     already: true,
+                    dispatch_ref_id: None,
                 });
             }
             return self.research_again(ws, &om, Some(&reply.id), None, by);
@@ -167,10 +180,18 @@ impl Core {
                 message_id: reply.id.clone(),
                 item: Some(item),
                 already: true,
+                dispatch_ref_id: None,
             });
         }
         self.store().store().write(|w| {
-            thread::update_receipt_override(w, origin, "to_inline", Some(&item.id), now())
+            thread::update_receipt_override(
+                w,
+                origin,
+                "to_inline",
+                Some(&item.id),
+                ReceiptDispatch::NoDispatch,
+                now(),
+            )
         })?;
         let delivered = self
             .store()
@@ -194,6 +215,7 @@ impl Core {
                 message_id: id,
                 item: Some(item),
                 already: false,
+                dispatch_ref_id: None,
             });
         }
         let dropped = self.item_action(&item.id, ItemAction::Drop, "me")?;
@@ -243,7 +265,14 @@ impl Core {
         let conv_json = serde_json::to_string(&conv)?;
         self.store().store().write(|w| {
             if reply_to.is_none() {
-                thread::update_receipt_override(w, &om.id, "to_inline", None, now())?;
+                thread::update_receipt_override(
+                    w,
+                    &om.id,
+                    "to_inline",
+                    None,
+                    ReceiptDispatch::NoDispatch,
+                    now(),
+                )?;
             }
             thread::enqueue_revision(
                 w,
@@ -273,6 +302,7 @@ impl Core {
             message_id: reply_to.unwrap_or(&om.id).into(),
             item: None,
             already: false,
+            dispatch_ref_id: None,
         })
     }
 
@@ -284,9 +314,16 @@ impl Core {
             .ok_or_else(|| CoreError::Status(404, steve_i18n::t!("core.item.not_found")))?;
         let om = self.store().message(origin)?.ok_or_else(not_found)?;
         self.fence_origin(ws, origin, "reroute")?;
-        self.forward(&it.id, &om.text, &files_of(&om, "files"), origin)?;
+        let disp_id = self.forward(&it.id, &om.text, &files_of(&om, "files"), origin)?;
         self.store().store().write(|w| {
-            thread::update_receipt_override(w, origin, "to_supplement", Some(&it.id), now())
+            thread::update_receipt_override(
+                w,
+                origin,
+                "to_supplement",
+                Some(&it.id),
+                ReceiptDispatch::Dispatched(&disp_id),
+                now(),
+            )
         })?;
         let id = self.store().message_add_in(
             ws,
@@ -296,11 +333,15 @@ impl Core {
             Some(&it.id),
             &json!({"origin": origin}),
         )?;
+        self.store()
+            .store()
+            .write(|w| thread::set_dispatch_reply_by_id(w, &disp_id, &id))?;
         super::flowback::adopt_quiet(self.store(), &it.id, &id);
         Ok(Handled {
             message_id: id,
             item: Some(it),
             already: false,
+            dispatch_ref_id: Some(disp_id),
         })
     }
 
@@ -323,12 +364,13 @@ impl Core {
                 message_id: existing.reply_message_id.unwrap_or_else(|| origin.into()),
                 item: Some(item),
                 already: true,
+                dispatch_ref_id: Some(existing.id),
             });
         }
         let history = self.history_before(ws, origin)?;
         let r = self.route(ws, &om.text, &history, true).await?;
         let _one = lock(&self.0.thread.acting);
-        let (item, already, _) = self.thread_item_once(ThreadItem {
+        let (item, already, disp_id) = self.thread_item_once(ThreadItem {
             ws,
             origin,
             title: r.title.clone(),
@@ -347,10 +389,18 @@ impl Core {
                 message_id: origin.into(),
                 item: Some(item),
                 already: true,
+                dispatch_ref_id: Some(disp_id),
             });
         }
         self.store().store().write(|w| {
-            thread::update_receipt_override(w, origin, "to_item", Some(&item.id), now())
+            thread::update_receipt_override(
+                w,
+                origin,
+                "to_item",
+                Some(&item.id),
+                ReceiptDispatch::Dispatched(&disp_id),
+                now(),
+            )
         })?;
         let text = format!(
             "好，做成事项 {} 交给 {} 了。",
@@ -362,6 +412,7 @@ impl Core {
             message_id: id,
             item: Some(item),
             already: false,
+            dispatch_ref_id: Some(disp_id),
         })
     }
 
@@ -531,7 +582,14 @@ impl Core {
         self.store()
             .message_patch_meta(&m.id, &Value::Object(meta))?;
         self.store().store().write(|w| {
-            thread::update_receipt_override(w, &origin, "to_item", Some(&item.id), now())
+            thread::update_receipt_override(
+                w,
+                &origin,
+                "to_item",
+                Some(&item.id),
+                ReceiptDispatch::Dispatched(&disp.id),
+                now(),
+            )
         })?;
         let mut route = route_step(&r, None, t1 - t0);
         route["kind"] = json!("item");

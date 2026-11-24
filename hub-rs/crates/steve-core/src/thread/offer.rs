@@ -12,7 +12,7 @@ use regex::Regex;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::sync::LazyLock;
-use steve_store::{DispatchClaim, thread};
+use steve_store::{DispatchClaim, ReceiptDispatch, thread};
 
 /// The result of a click on an offer, a suggestion card or a correction.
 #[derive(Debug, Clone, Serialize)]
@@ -24,6 +24,9 @@ pub struct Handled {
     /// it was handled before: nothing changed now (the API answers 409 with this result)
     #[serde(skip)]
     pub already: bool,
+    /// Durable `thread_dispatch_refs.id` when this action created or appended to an item.
+    #[serde(skip)]
+    pub dispatch_ref_id: Option<String>,
 }
 
 /// A short reply that confirms Steve's last proposal.
@@ -407,13 +410,17 @@ impl Core {
             ));
         };
         if o["state"] != "open" {
+            let origin = self.origin_of(ws, &m)?;
             let item = o["item"]
                 .as_str()
                 .and_then(|i| self.store().item(i).ok().flatten());
+            let dispatch_ref_id =
+                self.existing_dispatch_id(ws, &origin, item.as_ref().map(|i| i.id.as_str()))?;
             return Ok(Handled {
                 message_id: msg_id.into(),
                 item,
                 already: true,
+                dispatch_ref_id,
             });
         }
         let origin = self.origin_of(ws, &m)?;
@@ -422,13 +429,20 @@ impl Core {
             meta["offer"]["state"] = json!("dismissed");
             self.store()
                 .message_patch_meta(msg_id, &Value::Object(meta))?;
-            self.store()
-                .store()
-                .write(|w| thread::update_receipt_outcome(w, &origin, "offer_dismissed", None))?;
+            self.store().store().write(|w| {
+                thread::update_receipt_outcome(
+                    w,
+                    &origin,
+                    "offer_dismissed",
+                    None,
+                    ReceiptDispatch::NoDispatch,
+                )
+            })?;
             return Ok(Handled {
                 message_id: msg_id.into(),
                 item: None,
                 already: false,
+                dispatch_ref_id: None,
             });
         }
         let from_question = self
@@ -443,7 +457,7 @@ impl Core {
                     .map(|x| x.text)
                     .unwrap_or_default(),
             );
-        let (item, already, _) = self.thread_item_once(ThreadItem {
+        let (item, already, disp_id) = self.thread_item_once(ThreadItem {
             ws,
             origin: &origin,
             title: crate::gateway::jstr(&o["title"]),
@@ -473,11 +487,18 @@ impl Core {
                 message_id: msg_id.into(),
                 item: Some(item),
                 already: true,
+                dispatch_ref_id: Some(disp_id),
             });
         }
-        self.store()
-            .store()
-            .write(|w| thread::update_receipt_outcome(w, &origin, "offer_taken", Some(&item.id)))?;
+        self.store().store().write(|w| {
+            thread::update_receipt_outcome(
+                w,
+                &origin,
+                "offer_taken",
+                Some(&item.id),
+                ReceiptDispatch::Dispatched(&disp_id),
+            )
+        })?;
         let text = format!(
             "好，做成事项 {} 交给 {} 了，对话内容作为上下文带入。",
             item.id,
@@ -494,6 +515,7 @@ impl Core {
             message_id: id,
             item: Some(item),
             already: false,
+            dispatch_ref_id: Some(disp_id),
         })
     }
 

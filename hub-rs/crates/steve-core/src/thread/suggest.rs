@@ -9,7 +9,7 @@ use crate::gateway::Route;
 use crate::repo::{FileRef, Item};
 use crate::util::now;
 use serde_json::{Value, json};
-use steve_store::{NewRevisionTask, thread};
+use steve_store::{NewRevisionTask, ReceiptDispatch, thread};
 
 /// After this long an unanswered card is `expired`.
 const EXPIRES: i64 = 24 * 3600 * 1000;
@@ -108,9 +108,15 @@ impl Core {
                 self.store()
                     .message_patch_meta(&m.id, &Value::Object(meta))?;
                 if let Some(o) = m.meta.get("origin").and_then(Value::as_str) {
-                    self.store()
-                        .store()
-                        .write(|w| thread::update_receipt_outcome(w, o, "suggest_expired", None))?;
+                    self.store().store().write(|w| {
+                        thread::update_receipt_outcome(
+                            w,
+                            o,
+                            "suggest_expired",
+                            None,
+                            ReceiptDispatch::NoDispatch,
+                        )
+                    })?;
                 }
             }
         }
@@ -145,13 +151,17 @@ impl Core {
             ));
         };
         if !matches!(card["state"].as_str(), Some("open" | "expired")) {
+            let origin = self.origin_of(ws, &m)?;
             let item = card["item"]
                 .as_str()
                 .and_then(|i| self.store().item(i).ok().flatten());
+            let dispatch_ref_id =
+                self.existing_dispatch_id(ws, &origin, item.as_ref().map(|i| i.id.as_str()))?;
             return Ok(Handled {
                 message_id: card["answer"].as_str().unwrap_or(msg_id).into(),
                 item,
                 already: true,
+                dispatch_ref_id,
             });
         }
         let origin = self.origin_of(ws, &m)?;
@@ -250,7 +260,13 @@ impl Core {
                     read_task_intent_key: None,
                 },
             )?;
-            thread::update_receipt_outcome(w, &origin, "suggest_here", None)?;
+            thread::update_receipt_outcome(
+                w,
+                &origin,
+                "suggest_here",
+                None,
+                ReceiptDispatch::NoDispatch,
+            )?;
             Ok::<_, steve_store::StoreError>(())
         })?;
         self.store()
@@ -260,6 +276,7 @@ impl Core {
             message_id: msg_id.into(),
             item: None,
             already: false,
+            dispatch_ref_id: None,
         })
     }
 
@@ -278,7 +295,7 @@ impl Core {
             files,
             mut meta,
         } = suggestion;
-        if !self.forward_open(target, &om.text, &files, &origin)? {
+        let Some(disp_id) = self.forward_open(target, &om.text, &files, &origin)? else {
             let work = card["choices"]
                 .as_array()
                 .and_then(|cs| cs.iter().find(|c| c["id"] == "new"))
@@ -290,21 +307,34 @@ impl Core {
                 .store()
                 .messages()
                 .patch_text_meta(msg_id, &q, &Value::Object(meta))?;
-            self.store()
-                .store()
-                .write(|w| thread::update_receipt_outcome(w, &origin, "suggest_closed", None))?;
+            self.store().store().write(|w| {
+                thread::update_receipt_outcome(
+                    w,
+                    &origin,
+                    "suggest_closed",
+                    None,
+                    ReceiptDispatch::NoDispatch,
+                )
+            })?;
             return Ok(Handled {
                 message_id: msg_id.into(),
                 item: None,
                 already: false,
+                dispatch_ref_id: None,
             });
-        }
+        };
         meta["suggest"]["item"] = json!(target);
         self.store()
             .message_patch_meta(msg_id, &Value::Object(meta))?;
-        self.store()
-            .store()
-            .write(|w| thread::update_receipt_outcome(w, &origin, "suggest_item", Some(target)))?;
+        self.store().store().write(|w| {
+            thread::update_receipt_outcome(
+                w,
+                &origin,
+                "suggest_item",
+                Some(target),
+                ReceiptDispatch::Dispatched(&disp_id),
+            )
+        })?;
         let id = self.store().message_add_in(
             ws,
             &m.space,
@@ -313,11 +343,15 @@ impl Core {
             Some(target),
             &json!({"origin": origin, "reply_to": msg_id}),
         )?;
+        self.store()
+            .store()
+            .write(|w| thread::set_dispatch_reply_by_id(w, &disp_id, &id))?;
         super::flowback::adopt_quiet(self.store(), target, &id);
         Ok(Handled {
             message_id: id,
             item: self.store().item(target)?,
             already: false,
+            dispatch_ref_id: Some(disp_id),
         })
     }
 
@@ -337,7 +371,7 @@ impl Core {
             mut meta,
         } = suggestion;
         let s = |k: &str| pick[k].as_str().map(String::from);
-        let (item, already, _) = self.thread_item_once(ThreadItem {
+        let (item, already, disp_id) = self.thread_item_once(ThreadItem {
             ws,
             origin: &origin,
             title: s("title").unwrap_or_else(|| crate::util::js_head(&om.text, 24).into()),
@@ -366,10 +400,17 @@ impl Core {
                 message_id: msg_id.into(),
                 item: Some(item),
                 already: true,
+                dispatch_ref_id: Some(disp_id),
             });
         }
         self.store().store().write(|w| {
-            thread::update_receipt_outcome(w, &origin, "suggest_item", Some(&item.id))
+            thread::update_receipt_outcome(
+                w,
+                &origin,
+                "suggest_item",
+                Some(&item.id),
+                ReceiptDispatch::Dispatched(&disp_id),
+            )
         })?;
         let text = format!("好，建了 {}，交给 {} 了。", item.id, self.bot_name(&item));
         let id = self.announce(
@@ -383,6 +424,7 @@ impl Core {
             message_id: id,
             item: Some(item),
             already: false,
+            dispatch_ref_id: Some(disp_id),
         })
     }
 }

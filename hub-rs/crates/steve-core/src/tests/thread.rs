@@ -955,3 +955,205 @@ async fn a_question_that_needs_tools_says_to_make_it_an_item() {
     assert_eq!(ms[1].text, crate::thread::handoff::NEEDS_TOOLS_ANSWER);
     assert_eq!(ms[1].meta["error"], true);
 }
+
+#[tokio::test]
+async fn receipts_record_dispatch_refs_for_create_append_and_plain_replies() {
+    let k = Kit::new();
+
+    // 1. Item creation receipt (`create_item`): dispatch_ref_id points to the new create_item ref.
+    let create_origin = k.core.say(WS, "@Steve 修一下登录", &[]).unwrap();
+    let ms = settle(&k, 2).await;
+    let created_item_id = ms[1].item_id.clone().expect("created item id");
+    let create_rcpt = k
+        .db()
+        .store()
+        .read(|r| steve_store::thread::receipt_by_origin(r, &create_origin))
+        .unwrap()
+        .expect("create receipt");
+    assert_eq!(create_rcpt.outcome, "handed_off");
+    assert_eq!(
+        create_rcpt.item_id.as_deref(),
+        Some(created_item_id.as_str())
+    );
+    let create_disp_id = create_rcpt
+        .dispatch_ref_id
+        .clone()
+        .expect("create receipt must carry dispatch_ref_id");
+    let create_disp = k
+        .db()
+        .store()
+        .read(|r| steve_store::thread::dispatch_by_id(r, &create_disp_id))
+        .unwrap()
+        .expect("create dispatch ref");
+    assert_eq!(create_disp.effect_kind, "create_item");
+    assert_eq!(create_disp.state, "applied");
+    assert_eq!(create_disp.origin_message_id, create_origin);
+    assert_eq!(
+        create_disp.target_item_id.as_deref(),
+        Some(created_item_id.as_str())
+    );
+    assert_eq!(
+        create_disp.reply_message_id.as_deref(),
+        create_rcpt.reply_message_id.as_deref()
+    );
+
+    // 2a. Explicit SayTo append receipt (`append_item`): links its own append_item ref without
+    //     overwriting the original create_item ref's reply_message_id.
+    let append_origin = k
+        .core
+        .say_to(
+            WS,
+            None,
+            "记得补上单测",
+            &[],
+            &[],
+            crate::thread::SayTo {
+                item: Some(created_item_id.clone()),
+                reply_to: None,
+            },
+        )
+        .unwrap();
+    let ms = settle(&k, 4).await;
+    assert_eq!(ms[3].text, format!("已作为补充送到 {created_item_id}。"));
+    let append_rcpt = k
+        .db()
+        .store()
+        .read(|r| steve_store::thread::receipt_by_origin(r, &append_origin))
+        .unwrap()
+        .expect("append receipt");
+    assert_eq!(append_rcpt.outcome, "handed_off");
+    assert_eq!(
+        append_rcpt.item_id.as_deref(),
+        Some(created_item_id.as_str())
+    );
+    let append_disp_id = append_rcpt
+        .dispatch_ref_id
+        .clone()
+        .expect("append receipt must carry dispatch_ref_id");
+    assert_ne!(append_disp_id, create_disp_id);
+    let append_disp = k
+        .db()
+        .store()
+        .read(|r| steve_store::thread::dispatch_by_id(r, &append_disp_id))
+        .unwrap()
+        .expect("append dispatch ref");
+    assert_eq!(append_disp.effect_kind, "append_item");
+    assert_eq!(append_disp.state, "applied");
+    assert_eq!(append_disp.origin_message_id, append_origin);
+    assert_eq!(
+        append_disp.target_item_id.as_deref(),
+        Some(created_item_id.as_str())
+    );
+    assert_eq!(
+        append_disp.reply_message_id.as_deref(),
+        append_rcpt.reply_message_id.as_deref()
+    );
+    let create_disp_after = k
+        .db()
+        .store()
+        .read(|r| steve_store::thread::dispatch_by_id(r, &create_disp_id))
+        .unwrap()
+        .expect("create dispatch ref preserved");
+    assert_eq!(
+        create_disp_after.reply_message_id, create_disp.reply_message_id,
+        "append reply must not overwrite create_item dispatch reply_message_id"
+    );
+
+    // 2b. Routed supplement receipt also carries a real append_item dispatch_ref_id.
+    router(
+        &k,
+        json!({
+            "kind": "supplement",
+            "item": created_item_id,
+            "confidence": 0.95,
+            "signals": ["followup"],
+            "title": "补充"
+        }),
+        "",
+    );
+    let routed_supp_origin = k.core.say(WS, "另外把超时日志也打印出来", &[]).unwrap();
+    settle(&k, 6).await;
+    let routed_supp_rcpt = k
+        .db()
+        .store()
+        .read(|r| steve_store::thread::receipt_by_origin(r, &routed_supp_origin))
+        .unwrap()
+        .expect("routed supplement receipt");
+    assert_eq!(routed_supp_rcpt.outcome, "handed_off");
+    let routed_supp_disp_id = routed_supp_rcpt
+        .dispatch_ref_id
+        .clone()
+        .expect("routed supplement receipt must carry dispatch_ref_id");
+    let routed_supp_disp = k
+        .db()
+        .store()
+        .read(|r| steve_store::thread::dispatch_by_id(r, &routed_supp_disp_id))
+        .unwrap()
+        .expect("routed supplement dispatch ref");
+    assert_eq!(routed_supp_disp.effect_kind, "append_item");
+    assert_eq!(routed_supp_disp.origin_message_id, routed_supp_origin);
+    assert_eq!(
+        routed_supp_disp.target_item_id.as_deref(),
+        Some(created_item_id.as_str())
+    );
+
+    // 3. Plain reply receipt (`NoDispatch`): dispatch_ref_id is NULL and no dispatch ref exists.
+    router(&k, json!({"kind": "answer", "title": "闲聊"}), "今天挺暖和");
+    let plain_origin = k.core.say(WS, "聊聊今天的天气", &[]).unwrap();
+    let ms = settle(&k, 8).await;
+    let plain_reply_id = ms[7].id.clone();
+    let plain_rcpt = k
+        .db()
+        .store()
+        .read(|r| steve_store::thread::receipt_by_origin(r, &plain_origin))
+        .unwrap()
+        .expect("plain receipt");
+    assert_eq!(plain_rcpt.outcome, "answered");
+    assert_eq!(plain_rcpt.item_id, None);
+    assert_eq!(plain_rcpt.dispatch_ref_id, None);
+    assert!(
+        k.db()
+            .store()
+            .read(|r| steve_store::thread::dispatch_by_origin(r, WS, &plain_origin, "create_item"))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        k.db()
+            .store()
+            .read(|r| steve_store::thread::dispatch_by_origin(r, WS, &plain_origin, "append_item"))
+            .unwrap()
+            .is_none()
+    );
+
+    // 4. Promoting that plain reply later updates its receipt with the real create_item dispatch_ref_id.
+    router(
+        &k,
+        json!({"kind": "answer", "title": "天气记录", "goal": "记录天气", "bot": "steve"}),
+        "",
+    );
+    let promoted = k.core.promote(WS, &plain_reply_id, None).await.unwrap();
+    let promoted_rcpt = k
+        .db()
+        .store()
+        .read(|r| steve_store::thread::receipt_by_origin(r, &plain_origin))
+        .unwrap()
+        .expect("promoted receipt");
+    assert_eq!(promoted_rcpt.route_override.as_deref(), Some("to_item"));
+    assert_eq!(promoted_rcpt.item_id.as_deref(), Some(promoted.id.as_str()));
+    let promoted_disp_id = promoted_rcpt
+        .dispatch_ref_id
+        .expect("promoted receipt must backfill dispatch_ref_id");
+    let promoted_disp = k
+        .db()
+        .store()
+        .read(|r| steve_store::thread::dispatch_by_id(r, &promoted_disp_id))
+        .unwrap()
+        .expect("promoted dispatch ref");
+    assert_eq!(promoted_disp.effect_kind, "create_item");
+    assert_eq!(promoted_disp.origin_message_id, plain_origin);
+    assert_eq!(
+        promoted_disp.target_item_id.as_deref(),
+        Some(promoted.id.as_str())
+    );
+}

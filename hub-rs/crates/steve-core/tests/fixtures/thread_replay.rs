@@ -3034,7 +3034,7 @@ async fn run_restart(report: &mut Report) {
                         route_ms: 1,
                         route_outcome: None,
                         item_id: None,
-                        dispatch_ref_id: None,
+                        dispatch: steve_store::ReceiptDispatch::NoDispatch,
                         delivery_ref_id: None,
                         model_call_id: None,
                         user_id: None,

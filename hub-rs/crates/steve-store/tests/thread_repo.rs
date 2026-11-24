@@ -282,7 +282,7 @@ fn claim_head_serial_fenced_commit_and_boot_recovery() {
                     route_ms: 10,
                     route_outcome: None,
                     item_id: None,
-                    dispatch_ref_id: None,
+                    dispatch: ReceiptDispatch::NoDispatch,
                     delivery_ref_id: None,
                     model_call_id: None,
                     user_id: Some("u1"),
@@ -327,7 +327,7 @@ fn claim_head_serial_fenced_commit_and_boot_recovery() {
                     route_ms: 12,
                     route_outcome: None,
                     item_id: None,
-                    dispatch_ref_id: None,
+                    dispatch: ReceiptDispatch::NoDispatch,
                     delivery_ref_id: None,
                     model_call_id: None,
                     user_id: Some("u1"),
@@ -345,20 +345,48 @@ fn claim_head_serial_fenced_commit_and_boot_recovery() {
         })
         .unwrap();
     assert!(matches!(committed, CommitOutcome::Committed { .. }));
+    let it = item(s, "转成事项");
+    let DispatchClaim::Claimed(d_ov) = s
+        .write(|w| thread::claim_dispatch(w, WS, &mids[0], "create_item", false, 19))
+        .unwrap()
+    else {
+        panic!("expected claimed dispatch");
+    };
+    s.write(|w| thread::settle_dispatch(w, &d_ov.id, "applied", Some(&it), None, 19))
+        .unwrap();
     assert!(
-        s.write(|w| thread::update_receipt_override(w, &mids[0], "to_item", Some("ST-1"), 20))
-            .unwrap()
+        s.write(|w| {
+            thread::update_receipt_override(
+                w,
+                &mids[0],
+                "to_item",
+                Some(&it),
+                ReceiptDispatch::Dispatched(&d_ov.id),
+                20,
+            )
+        })
+        .unwrap()
     );
     assert!(
-        !s.write(|w| thread::update_receipt_override(w, &mids[0], "to_inline", None, 21))
-            .unwrap()
+        !s.write(|w| {
+            thread::update_receipt_override(
+                w,
+                &mids[0],
+                "to_inline",
+                None,
+                ReceiptDispatch::NoDispatch,
+                21,
+            )
+        })
+        .unwrap()
     );
     let rcpt = s
         .read(|r| thread::receipt_by_origin(r, &mids[0]))
         .unwrap()
         .unwrap();
     assert_eq!(rcpt.route_override.as_deref(), Some("to_item"));
-    assert_eq!(rcpt.item_id.as_deref(), Some("ST-1"));
+    assert_eq!(rcpt.item_id.as_deref(), Some(it.as_str()));
+    assert_eq!(rcpt.dispatch_ref_id.as_deref(), Some(d_ov.id.as_str()));
 
     // Claim t2, simulate crash -> recovery settles t2 as 'unknown' and leaves t3 'queued'.
     let t2 = s
@@ -469,4 +497,193 @@ fn dispatch_delivery_and_notice_contracts() {
         .unwrap();
     let meta: serde_json::Value = serde_json::to_value(&view[0].meta).unwrap();
     assert_eq!(meta["notice"]["closed"], json!(true));
+}
+
+#[test]
+fn receipt_dispatch_contract_enforces_real_refs() {
+    let t = with_steve();
+    let s = &t.store;
+    let it = item(s, "已有事项");
+
+    let submit_and_claim = |key: &str, text: &str, lease: &str| {
+        let SubmitOutcome::Accepted { message_id, .. } = s
+            .write(|w| {
+                thread::submit_message(
+                    w,
+                    &SubmitInput {
+                        ws: WS,
+                        space: thread::MAIN_SPACE,
+                        actor_key: "u1",
+                        submit_key: key,
+                        payload_digest: key,
+                        text,
+                        item_id: None,
+                        meta: &json!({}),
+                        user_id: Some("u1"),
+                        project_id: None,
+                        conv_json: None,
+                        to_item: None,
+                        to_reply_to: None,
+                        file_ids: &[],
+                        files_json: None,
+                        mentions_json: None,
+                        enqueue_task: true,
+                        validate_refs: false,
+                    },
+                )
+            })
+            .unwrap()
+        else {
+            panic!("expected accepted");
+        };
+        let task = s
+            .write(|w| thread::claim_head(w, WS, thread::MAIN_SPACE, lease, 10))
+            .unwrap()
+            .expect("claimed");
+        (message_id, task)
+    };
+
+    // 1. Handed-off create_item receipt: NoDispatch and nonexistent refs are rejected; real ref commits.
+    let (m_create, t_create) = submit_and_claim("k_create", "建个事项", "l_create");
+    let commit_with = |task: &ThreadTask,
+                       lease: &str,
+                       outcome: &str,
+                       route_kind: &str,
+                       item_id: Option<&str>,
+                       dispatch: ReceiptDispatch<'_>| {
+        s.write(|w| {
+            thread::commit_reply(
+                w,
+                &CommitReplyInput {
+                    task_id: &task.id,
+                    lease_token: lease,
+                    expected_generation: task.generation,
+                    allow_cancelled_stop: false,
+                    outcome,
+                    reply_text: Some("ok"),
+                    existing_reply_id: None,
+                    reply_item_id: item_id,
+                    reply_meta: &json!({}),
+                    error_code: None,
+                    route_kind,
+                    model_kind: route_kind,
+                    route_guard: None,
+                    route_model: None,
+                    route_confidence: Some(1.0),
+                    route_signals: &[],
+                    route_fallback: false,
+                    route_ms: 1,
+                    route_outcome: None,
+                    item_id,
+                    dispatch,
+                    delivery_ref_id: None,
+                    model_call_id: None,
+                    user_id: Some("u1"),
+                    project_id: None,
+                    answer_model: None,
+                    harness: None,
+                    harness_session: None,
+                    tools: 0,
+                    turns: 0,
+                    first_text_ms: None,
+                    error_detail: None,
+                    record_attention_commit: false,
+                },
+            )
+        })
+    };
+
+    assert!(matches!(
+        commit_with(
+            &t_create,
+            "l_create",
+            "handed_off",
+            "item",
+            Some(&it),
+            ReceiptDispatch::NoDispatch,
+        ),
+        Err(StoreError::Rejected(_))
+    ));
+    assert!(matches!(
+        commit_with(
+            &t_create,
+            "l_create",
+            "handed_off",
+            "item",
+            Some(&it),
+            ReceiptDispatch::Dispatched("disp_missing"),
+        ),
+        Err(StoreError::Rejected(_))
+    ));
+    let DispatchClaim::Claimed(d_create) = s
+        .write(|w| thread::claim_dispatch(w, WS, &m_create, "create_item", false, 11))
+        .unwrap()
+    else {
+        panic!("expected claimed create_item");
+    };
+    s.write(|w| thread::settle_dispatch(w, &d_create.id, "applied", Some(&it), None, 12))
+        .unwrap();
+    let CommitOutcome::Committed { receipt, .. } = commit_with(
+        &t_create,
+        "l_create",
+        "handed_off",
+        "item",
+        Some(&it),
+        ReceiptDispatch::Dispatched(&d_create.id),
+    )
+    .unwrap() else {
+        panic!("expected committed create receipt");
+    };
+    assert_eq!(
+        receipt.dispatch_ref_id.as_deref(),
+        Some(d_create.id.as_str())
+    );
+
+    // 2. Handed-off append_item receipt links its durable append_item dispatch ref.
+    let (m_append, t_append) = submit_and_claim("k_append", "补充一下", "l_append");
+    let DispatchClaim::Claimed(d_append) = s
+        .write(|w| thread::claim_dispatch(w, WS, &m_append, "append_item", false, 13))
+        .unwrap()
+    else {
+        panic!("expected claimed append_item");
+    };
+    s.write(|w| thread::settle_dispatch(w, &d_append.id, "applied", Some(&it), None, 14))
+        .unwrap();
+    let CommitOutcome::Committed { receipt, .. } = commit_with(
+        &t_append,
+        "l_append",
+        "handed_off",
+        "supplement",
+        Some(&it),
+        ReceiptDispatch::Dispatched(&d_append.id),
+    )
+    .unwrap() else {
+        panic!("expected committed append receipt");
+    };
+    assert_eq!(
+        receipt.dispatch_ref_id.as_deref(),
+        Some(d_append.id.as_str())
+    );
+    assert_eq!(
+        s.read(|r| thread::dispatch_by_id(r, &d_append.id))
+            .unwrap()
+            .unwrap()
+            .effect_kind,
+        "append_item"
+    );
+
+    // 3. Plain reply receipt uses explicit NoDispatch and leaves dispatch_ref_id NULL.
+    let (_m_plain, t_plain) = submit_and_claim("k_plain", "你好", "l_plain");
+    let CommitOutcome::Committed { receipt, .. } = commit_with(
+        &t_plain,
+        "l_plain",
+        "answered",
+        "answer",
+        None,
+        ReceiptDispatch::NoDispatch,
+    )
+    .unwrap() else {
+        panic!("expected committed plain receipt");
+    };
+    assert_eq!(receipt.dispatch_ref_id, None);
 }

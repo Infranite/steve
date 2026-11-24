@@ -781,7 +781,7 @@ impl Core {
                             route_ms: 0,
                             route_outcome: None,
                             item_id: None,
-                            dispatch_ref_id: None,
+                            dispatch: steve_store::ReceiptDispatch::NoDispatch,
                             delivery_ref_id: None,
                             model_call_id: None,
                             user_id: task.user_id.as_deref(),
@@ -818,29 +818,79 @@ impl Core {
         Ok(())
     }
 
-    /// Send a conversation message to an item; durable `thread_forwarded` remembers it until the turn ends.
+    /// Resolve an existing durable dispatch ref for `(ws, origin)` (falling back to the item's
+    /// `create_item` dispatch ref when an already-handled branch only carries an item).
+    pub(crate) fn existing_dispatch_id(
+        &self,
+        ws: &str,
+        origin: &str,
+        item_id: Option<&str>,
+    ) -> Result<Option<String>> {
+        Ok(self
+            .store()
+            .store()
+            .read(|r| -> steve_store::Result<Option<String>> {
+                if let Some(d) = thread::dispatch_by_origin(r, ws, origin, "create_item")? {
+                    return Ok(Some(d.id));
+                }
+                if let Some(d) = thread::dispatch_by_origin(r, ws, origin, "append_item")? {
+                    return Ok(Some(d.id));
+                }
+                if let Some(iid) = item_id
+                    && let Some(d) = thread::dispatch_by_item(r, iid)?
+                {
+                    return Ok(Some(d.id));
+                }
+                Ok(None)
+            })?)
+    }
+
+    /// Send a conversation message to an item; records a durable `append_item` dispatch ref
+    /// (at most one per `(ws, origin)`) and `thread_forwarded` until the turn ends.
+    /// Returns the durable `thread_dispatch_refs.id`.
     pub(crate) fn forward(
         &self,
         item: &str,
         text: &str,
         files: &[FileRef],
         mid: &str,
-    ) -> Result<()> {
-        self.supplement(item, text, crate::orchestrator::SupplementMode::Auto, files)?;
+    ) -> Result<String> {
         let ws = self
             .store()
             .item(item)?
             .map(|i| i.workspace_id)
             .unwrap_or_else(|| crate::repo::WS.to_string());
-        let asked = if decide::pure_question(text) {
-            "1"
-        } else {
-            "0"
-        };
-        self.store()
+        let from_question = decide::pure_question(text);
+        let claim = self
             .store()
-            .write(|w| thread::set_forwarded(w, item, &ws, mid, asked, now()))?;
-        Ok(())
+            .store()
+            .write(|w| thread::claim_dispatch(w, &ws, mid, "append_item", from_question, now()))?;
+        let disp = match claim {
+            steve_store::DispatchClaim::Existing(existing) => {
+                if existing.state == "applied" && existing.target_item_id.as_deref() == Some(item) {
+                    return Ok(existing.id);
+                }
+                existing
+            }
+            steve_store::DispatchClaim::Claimed(d) => d,
+        };
+        if let Err(e) =
+            self.supplement(item, text, crate::orchestrator::SupplementMode::Auto, files)
+        {
+            let _ = self
+                .store()
+                .store()
+                .write(|w| thread::settle_dispatch(w, &disp.id, "rejected", None, None, now()));
+            return Err(e);
+        }
+        let asked = if from_question { "1" } else { "0" };
+        let at = now();
+        self.store().store().write(|w| {
+            thread::settle_dispatch(w, &disp.id, "applied", Some(item), None, at)?;
+            thread::set_forwarded(w, item, &ws, mid, asked, at)?;
+            Ok::<_, steve_store::StoreError>(())
+        })?;
+        Ok(disp.id)
     }
 
     pub(crate) fn forward_open(
@@ -849,10 +899,10 @@ impl Core {
         text: &str,
         files: &[FileRef],
         mid: &str,
-    ) -> Result<bool> {
+    ) -> Result<Option<String>> {
         match self.forward(item, text, files, mid) {
-            Ok(()) => Ok(true),
-            Err(_) if self.store().item(item)?.is_some_and(|i| i.is_closed()) => Ok(false),
+            Ok(disp_id) => Ok(Some(disp_id)),
+            Err(_) if self.store().item(item)?.is_some_and(|i| i.is_closed()) => Ok(None),
             Err(e) => Err(e),
         }
     }

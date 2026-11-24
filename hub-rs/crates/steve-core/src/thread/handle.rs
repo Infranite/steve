@@ -16,7 +16,7 @@ use regex::Regex;
 use serde_json::{Map, Value, json};
 use std::sync::{LazyLock, Mutex};
 use steve_modules::contacts::item_people::Mention;
-use steve_store::{CommitOutcome, CommitReplyInput, ThreadTask, thread};
+use steve_store::{CommitOutcome, CommitReplyInput, ReceiptDispatch, ThreadTask, thread};
 
 /// “别建事项，直接在这告诉我”: a spoken correction back into the conversation.
 pub(super) static TO_INLINE: LazyLock<Regex> = LazyLock::new(|| {
@@ -117,6 +117,7 @@ impl Core {
                         },
                         None,
                         None,
+                        ReceiptDispatch::NoDispatch,
                         Some("corrupt_task"),
                         Some("corrupt or mismatched conv_json"),
                     );
@@ -182,12 +183,14 @@ impl Core {
                 },
                 None,
                 None,
+                ReceiptDispatch::NoDispatch,
                 Some("task_error"),
                 Some(&e.to_string()),
             );
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn commit_simple(
         &self,
         task: &ThreadTask,
@@ -200,6 +203,7 @@ impl Core {
         route: &RouteInfo,
         route_outcome: Option<&str>,
         item_id: Option<&str>,
+        dispatch: ReceiptDispatch<'_>,
         error_code: Option<&str>,
         error_detail: Option<&str>,
     ) -> Result<CommitOutcome> {
@@ -227,7 +231,7 @@ impl Core {
                     route_ms: route.ms,
                     route_outcome,
                     item_id,
-                    dispatch_ref_id: None,
+                    dispatch,
                     delivery_ref_id: None,
                     model_call_id: None,
                     user_id: task.user_id.as_deref(),
@@ -248,11 +252,12 @@ impl Core {
             ..
         } = committed
         {
+            if let ReceiptDispatch::Dispatched(disp_id) = dispatch {
+                let _ = self.store().store().write(|w| {
+                    thread::set_dispatch_reply_if_origin(w, disp_id, &task.origin_message_id, id)
+                });
+            }
             if let Some(item) = reply_item_id {
-                let _ = self
-                    .store()
-                    .store()
-                    .write(|w| thread::set_dispatch_reply(w, item, id));
                 super::flowback::adopt_quiet(self.store(), item, id);
             }
             self.said(&task.workspace_id, &task.space, id);
@@ -284,6 +289,7 @@ impl Core {
             route,
             None,
             None,
+            ReceiptDispatch::NoDispatch,
             None,
             None,
         )?;
@@ -324,6 +330,7 @@ impl Core {
                 &RouteInfo::default(),
                 None,
                 None,
+                ReceiptDispatch::NoDispatch,
                 Some("origin_missing"),
                 None,
             )?;
@@ -400,6 +407,7 @@ impl Core {
                 &route,
                 None,
                 None,
+                ReceiptDispatch::NoDispatch,
                 None,
                 None,
             )?;
@@ -439,6 +447,7 @@ impl Core {
                     &route,
                     None,
                     Some(&id),
+                    ReceiptDispatch::NoDispatch,
                     None,
                     None,
                 )?;
@@ -450,11 +459,11 @@ impl Core {
                 "supplement",
                 json!({"item": id, "files": files.len()}),
             );
-            if Steps::end(
+            if let Some(disp_id) = Steps::end(
                 steps,
                 i,
                 self.forward_open(&id, text, &files, mid),
-                |sent| json!({"sent": sent}),
+                |disp| json!({"sent": disp.is_some()}),
             )? {
                 let route = RouteInfo {
                     kind: "supplement".into(),
@@ -476,6 +485,7 @@ impl Core {
                     &route,
                     None,
                     Some(&id),
+                    ReceiptDispatch::Dispatched(&disp_id),
                     None,
                     None,
                 )?;
@@ -547,6 +557,10 @@ impl Core {
             && let Some(offer_msg) = self.open_offer_before(ws, mid)?
         {
             let h = self.offer_as(ws, &offer_msg.id, true, conv.start, user)?;
+            let (outcome, dispatch) = match h.dispatch_ref_id.as_deref() {
+                Some(id) => ("handed_off", ReceiptDispatch::Dispatched(id)),
+                None => ("answered", ReceiptDispatch::NoDispatch),
+            };
             let _ = self.store().store().write(|w| {
                 thread::commit_reply(
                     w,
@@ -555,7 +569,7 @@ impl Core {
                         lease_token: lease,
                         expected_generation: task.generation,
                         allow_cancelled_stop: false,
-                        outcome: "handed_off",
+                        outcome,
                         reply_text: None,
                         existing_reply_id: (!h.message_id.is_empty())
                             .then_some(h.message_id.as_str()),
@@ -572,7 +586,7 @@ impl Core {
                         route_ms: 0,
                         route_outcome: Some("offer_taken"),
                         item_id: h.item.as_ref().map(|i| i.id.as_str()),
-                        dispatch_ref_id: None,
+                        dispatch,
                         delivery_ref_id: None,
                         model_call_id: None,
                         user_id: task.user_id.as_deref(),
@@ -801,6 +815,7 @@ impl Core {
                     &info,
                     None,
                     None,
+                    ReceiptDispatch::NoDispatch,
                     None,
                     None,
                 )?;
@@ -828,6 +843,7 @@ impl Core {
                     &info,
                     None,
                     None,
+                    ReceiptDispatch::NoDispatch,
                     None,
                     None,
                 )?;
@@ -841,11 +857,11 @@ impl Core {
                     "supplement",
                     json!({"item": id, "files": files.len()}),
                 );
-                if Steps::end(
+                if let Some(disp_id) = Steps::end(
                     steps,
                     i,
                     self.forward_open(&id, text, &files, mid),
-                    |sent| json!({"sent": sent}),
+                    |disp| json!({"sent": disp.is_some()}),
                 )? {
                     let meta = json!({"origin": mid, "steps": lock(steps).json(now() - t0)});
                     let ack = format!("已作为补充送到 {id}。");
@@ -860,6 +876,7 @@ impl Core {
                         &info,
                         None,
                         Some(&id),
+                        ReceiptDispatch::Dispatched(&disp_id),
                         None,
                         None,
                     )?;
@@ -883,6 +900,7 @@ impl Core {
                         &info,
                         None,
                         None,
+                        ReceiptDispatch::NoDispatch,
                         None,
                         None,
                     )?;
@@ -905,6 +923,7 @@ impl Core {
                     &info,
                     None,
                     Some(&id),
+                    ReceiptDispatch::NoDispatch,
                     None,
                     None,
                 )?;
@@ -949,7 +968,7 @@ impl Core {
             start: conv.start,
             by: task.user_id.clone(),
         }) {
-            Ok((item, already, _)) => {
+            Ok((item, already, disp_id)) => {
                 if already {
                     self.commit_simple(
                         task,
@@ -962,6 +981,7 @@ impl Core {
                         info,
                         Some(handoff::NEEDS_TOOLS_OUTCOME),
                         Some(&item.id),
+                        ReceiptDispatch::Dispatched(&disp_id),
                         None,
                         None,
                     )?;
@@ -991,6 +1011,7 @@ impl Core {
                     info,
                     Some(handoff::NEEDS_TOOLS_OUTCOME),
                     Some(&item.id),
+                    ReceiptDispatch::Dispatched(&disp_id),
                     None,
                     None,
                 )?;
@@ -1016,6 +1037,7 @@ impl Core {
                     info,
                     None,
                     None,
+                    ReceiptDispatch::NoDispatch,
                     Some("handoff_failed"),
                     Some(&e.to_string()),
                 )?;
@@ -1076,6 +1098,7 @@ impl Core {
             info,
             None,
             None,
+            ReceiptDispatch::NoDispatch,
             None,
             None,
         )?;
@@ -1165,6 +1188,7 @@ impl Core {
                     info,
                     None,
                     Some(&item_id),
+                    ReceiptDispatch::NoDispatch,
                     None,
                     None,
                 )?;
@@ -1185,18 +1209,23 @@ impl Core {
                     .await?;
                 let item = h.item.map(|i| i.id);
                 let reply_text = item.as_ref().map(|i| format!("好，已经做成 {i}。"));
+                let (outcome, dispatch) = match h.dispatch_ref_id.as_deref() {
+                    Some(id) => ("handed_off", ReceiptDispatch::Dispatched(id)),
+                    None => ("answered", ReceiptDispatch::NoDispatch),
+                };
                 let meta = json!({"origin": mid, "steps": lock(steps).json(now() - t0)});
                 self.commit_simple(
                     task,
                     lease,
                     false,
-                    "handed_off",
+                    outcome,
                     reply_text.as_deref(),
                     item.as_deref(),
                     meta,
                     info,
                     None,
                     item.as_deref(),
+                    dispatch,
                     None,
                     None,
                 )?;
@@ -1215,6 +1244,7 @@ impl Core {
             info,
             None,
             None,
+            ReceiptDispatch::NoDispatch,
             None,
             None,
         )?;
@@ -1284,7 +1314,7 @@ impl Core {
             start,
             by: user.map(String::from),
         });
-        let (item, already, _) = Steps::end(
+        let (item, already, disp_id) = Steps::end(
             steps,
             i,
             res,
@@ -1302,6 +1332,7 @@ impl Core {
                 info,
                 None,
                 Some(&item.id),
+                ReceiptDispatch::Dispatched(&disp_id),
                 None,
                 None,
             )?;
@@ -1346,6 +1377,7 @@ impl Core {
             info,
             None,
             Some(&item.id),
+            ReceiptDispatch::Dispatched(&disp_id),
             None,
             None,
         )?;
