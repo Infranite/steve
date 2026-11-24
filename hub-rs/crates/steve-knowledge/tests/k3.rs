@@ -159,17 +159,17 @@ impl Env {
 
 fn item_json(extra: Value) -> String {
     let mut items = vec![
-        json!({"kind":"preference","text":"Sarah 喜欢简短的邮件，不超过五行","about":["Sarah Chen"],"level":"conclusion","evidence":"Sarah 一直喜欢简短的邮件，别超过五行","basis":"explicit","dup_of":null,"conflicts":null,"why":"以后写信用","scope":"给 Sarah 写邮件时"}),
-        json!({"kind":"rule","text":"给 Acme 的邮件一律用英文","about":["Acme"],"level":"public","evidence":["Acme 的邮件一律用英文"],"basis":"explicit","dup_of":null,"conflicts":null}),
-        json!({"kind":"fact","text":"重复的一条","about":["Acme"],"evidence":"五行以内","dup_of":"mm_whatever"}),
-        json!({"kind":"preference","text":"用户希望续签邮件抄送 Sarah","about":[],"evidence":"给 Acme 写续签邮件，抄送 Sarah","basis":"explicit"}),
-        json!({"kind":"fact","text":"没有原话的一条","about":["Acme"]}),
-        json!({"kind":"fact","text":"没有关于对象的孤立事实","about":[],"evidence":"五行以内"}),
-        json!({"kind":"fact","text":"王五负责 Acme 的采购","about":["王五"],"evidence":"五行以内"}),
-        json!({"kind":"fact","text":"关于 Sarah 和王五","about":["Sarah","王五"],"level":"reasoning","evidence":"写好了续签邮件草稿"}),
+        json!({"kind":"preference","scope":"person","text":"Sarah 喜欢简短的邮件，不超过五行","about":["Sarah Chen"],"level":"conclusion","evidence":"Sarah 一直喜欢简短的邮件，别超过五行","basis":"explicit","dup_of":null,"conflicts":null,"why":"以后写信用","when":"给 Sarah 写邮件时"}),
+        json!({"kind":"rule","scope":"organization","text":"给 Acme 的邮件一律用英文","about":["Acme"],"level":"public","evidence":["Acme 的邮件一律用英文"],"basis":"explicit","dup_of":null,"conflicts":null}),
+        json!({"kind":"fact","scope":"organization","text":"重复的一条","about":["Acme"],"evidence":"五行以内","dup_of":"mm_whatever"}),
+        json!({"kind":"preference","scope":"person","text":"用户希望续签邮件抄送 Sarah","about":[],"evidence":"给 Acme 写续签邮件，抄送 Sarah","basis":"explicit"}),
+        json!({"kind":"fact","scope":"organization","text":"没有原话的一条","about":["Acme"]}),
+        json!({"kind":"fact","scope":"organization","text":"没有关于对象的孤立事实","about":[],"evidence":"五行以内"}),
+        json!({"kind":"fact","scope":"person","text":"王五负责 Acme 的采购","about":["王五"],"evidence":"五行以内"}),
+        json!({"kind":"fact","scope":"person","text":"关于 Sarah 和王五","about":["Sarah","王五"],"level":"reasoning","evidence":"写好了续签邮件草稿"}),
     ];
     for i in 0..5 {
-        items.push(json!({"kind":"fact","text":format!("额外的第 {i} 条"),"about":["Acme"],"evidence":"五行以内"}));
+        items.push(json!({"kind":"fact","scope":"organization","text":format!("额外的第 {i} 条"),"about":["Acme"],"evidence":"五行以内"}));
     }
     if let Value::Array(x) = extra {
         items.splice(0..0, x);
@@ -388,9 +388,9 @@ async fn confirming_with_supersedes_makes_the_old_memory_stale() {
     let old_id = old["id"].as_str().unwrap().to_string();
     e.env.gateway.script(
         PROMPT_HEAD,
-        json!({"items": [{"kind": "preference", "text": "Sarah 喜欢简短的邮件", "about": ["Sarah Chen"],
+        json!({"items": [{"kind": "preference", "scope": "person", "text": "Sarah 喜欢简短的邮件", "about": ["Sarah Chen"],
             "evidence": "Sarah 一直喜欢简短的邮件，别超过五行", "dup_of": null, "conflicts": old_id},
-            {"kind": "fact", "text": "冲突对象不存在", "about": ["Acme"], "evidence": "五行以内", "conflicts": "mm_nope"}]})
+            {"kind": "fact", "scope": "organization", "text": "冲突对象不存在", "about": ["Acme"], "evidence": "五行以内", "conflicts": "mm_nope"}]})
         .to_string(),
     );
     let got = items::finished(&e.env.modules, &e.kb, "ST-12")
@@ -646,7 +646,7 @@ async fn chat_days_are_records_and_extracted_once() {
 
     e.env.gateway.script(
         PROMPT_HEAD,
-        r#"{"items":[{"kind":"rule","text":"周五下午不安排部署","about":[],"evidence":"以后周五下午不安排部署"}]}"#,
+        r#"{"items":[{"kind":"rule","scope":"person","text":"周五下午不安排部署","about":[],"evidence":"以后周五下午不安排部署"}]}"#,
     );
     let got = chat::extract_day(m, &e.kb, WS, "2026-10-31").await.unwrap();
     assert_eq!(got.len(), 1);
@@ -815,7 +815,7 @@ async fn chat_failed_extraction_retries_and_catches_up_only_seven_days() {
     assert!(!marked("2026-11-09"));
     e.env.gateway.script(
         PROMPT_HEAD,
-        r#"{"items":[{"kind":"rule","text":"周五不部署","evidence":"以后周五不部署"}]}"#,
+        r#"{"items":[{"kind":"rule","scope":"person","text":"周五不部署","evidence":"以后周五不部署"}]}"#,
     );
     chat::tick(&e.env.modules, &e.kb, clock.now())
         .await

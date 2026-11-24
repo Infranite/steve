@@ -98,8 +98,8 @@ pub use contract::{
     DigestEntry, DigestNotes, DueTrigger, FileInfo, FileReads, FlowGrant, FlowRow, FlowRows,
     FlowSources, FlowTriggers, FlowWaits, GrantRows, HTTP_ALLOW_PRIVATE, IndexedRange,
     ItemEvidence, Members, MemoryIndex, MemoryIndexData, MemoryRange, MessageEvidence,
-    NewCorrection, NewFlowRow, NewRun, NewSignal, NewStep, NewTrigger, NewWait, ProjectRows, R,
-    Read, References, ReplyBot, Revisions, RunRow, RunRows, RunStep, SchedulePatch,
+    NewCorrection, NewFlowRow, NewRun, NewSignal, NewStep, NewTrigger, NewWait, ProjectRef,
+    ProjectRows, R, Read, References, ReplyBot, Revisions, RunRow, RunRows, RunStep, SchedulePatch,
     SessionEvidence, SignalFilter, SignalRow, SignalRows, SignalTriage, SourceConfig,
     StartupRecord, TagRows, W, WorkspaceSettings, Workspaces,
 };

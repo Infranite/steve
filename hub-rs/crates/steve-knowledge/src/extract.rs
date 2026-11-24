@@ -62,7 +62,10 @@ pub enum EntityKind {
     Person,
     Org,
     Team,
-    Project,
+    /// Workspace project; `has_repo` is true when bound to a git repository (`projects.kind == "git"`).
+    Project {
+        has_repo: bool,
+    },
     Bot,
 }
 
@@ -70,6 +73,47 @@ impl EntityKind {
     /// Whether this entity can serve as the required subject of a `fact` memory.
     pub fn is_fact_subject(self) -> bool {
         !matches!(self, Self::Bot)
+    }
+}
+
+/// Strongly-typed knowledge scope emitted by the extraction model.
+/// Deterministic server routing uses this enum rather than text or keyword heuristics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtractScope {
+    Person,
+    Organization,
+    Project,
+    Codebase,
+}
+
+impl ExtractScope {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "person" => Some(Self::Person),
+            "organization" => Some(Self::Organization),
+            "project" => Some(Self::Project),
+            "codebase" => Some(Self::Codebase),
+            _ => None,
+        }
+    }
+
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Person => "person",
+            Self::Organization => "organization",
+            Self::Project => "project",
+            Self::Codebase => "codebase",
+        }
+    }
+
+    /// Whether a resolved entity satisfies the target type required by this scope.
+    pub fn matches(self, entity: EntityKind) -> bool {
+        match self {
+            Self::Person => entity == EntityKind::Person,
+            Self::Organization => matches!(entity, EntityKind::Org | EntityKind::Team),
+            Self::Project => matches!(entity, EntityKind::Project { .. }),
+            Self::Codebase => matches!(entity, EntityKind::Project { has_repo: true }),
+        }
     }
 }
 
@@ -107,12 +151,19 @@ impl Names {
                 n.keys.push((a.trim().to_lowercase(), r.clone(), entity));
             }
         }
-        for (id, name) in References(c).projects(&viewer.ws)? {
+        for p in References(c).projects(&viewer.ws)? {
+            let label = if p.has_repo {
+                "项目（代码仓库）"
+            } else {
+                "项目"
+            };
             n.add(
-                &name,
-                "项目",
-                &ObjRef::new("project", &id),
-                EntityKind::Project,
+                &p.name,
+                label,
+                &ObjRef::new("project", &p.id),
+                EntityKind::Project {
+                    has_repo: p.has_repo,
+                },
             );
         }
         for (id, name) in References(c).bots(&viewer.ws)? {
@@ -126,6 +177,15 @@ impl Names {
             .push((name.to_string(), label, r.clone(), entity));
         self.keys
             .push((name.trim().to_lowercase(), r.clone(), entity));
+    }
+
+    /// True if `id` is a workspace project bound to a git repository.
+    pub fn is_repo_project(&self, id: &str) -> bool {
+        self.entries.iter().any(|(_, _, r, kind)| {
+            r.kind == "project"
+                && r.id == id
+                && matches!(kind, EntityKind::Project { has_repo: true })
+        })
     }
 
     /// Resolves `name` to `(ObjRef, EntityKind)`: an id of a listed object, or the single object
@@ -222,13 +282,18 @@ pub fn prompt(label: &str, text: &str, similar: &[Similar], names: &Names, task:
 1. 事项记录：这次要做什么、改哪里、进度、交付了什么、怎么验收，以及一次性的要求、批准、指令和一次性排查结论。它们已经保存在事项和执行记录里，不要输出。\n\
 2. 会话记录：这次聊了什么、做了哪些决定。对话原文已经保存、可以检索，不要输出。\n\
 3. 偏好与规则（kind = preference 或 rule）：主人明确表达、以后在别的事情上也适用的稳定偏好或长期规则。必须满足其一：原话明确说了长期适用（“以后”“后续”“每次”“总是”“一律”“这类”“不要再”“之前说过”之类），basis 填 explicit；或原文里不同场合至少两次表达了同一倾向，basis 填 repeated，evidence 列出这两处原话。只凭一次具体反馈不能推断成偏好：“这个页面的按钮太挤了，改宽松点”是这件事的修改要求，不是“用户偏好宽松的界面”。\n\
-4. 关于人、组织或项目的事实（kind = fact）：关于主人世界里某个人、组织、团队或项目的稳定事实、关系、角色或长期承诺，以后会被反复用到。about 必须填写下面列表里已有的联系人、组织、团队或项目名字，没有明确对象的 fact 会被直接丢弃。basis 填 verified。不要把代码仓库的工程实现细节、构建/测试命令或排障过程写成 fact。\n\
-5. 项目 AGENTS.md 提议（kind = agents_proposal）：仅当原文总结了某个代码仓库长期适用的工程约定、架构约束、测试/发布规范或踩坑教训（适合写进该仓库的 AGENTS.md，供后续改该仓库的 Agent 遵守）时输出。它不会进入个人记忆，而是作为项目提议请主人确认；about 填对应项目名（若来源已属于某项目可留空），basis 填 verified。{event_line}\n\n\
+4. 关于人、组织或项目的事实（kind = fact）：关于主人世界里某个人、组织、团队或项目的稳定事实、关系、角色或长期承诺，以后会被反复用到。about 必须填写下面列表里已有的联系人、组织、团队或项目名字，没有明确对象的 fact 会被直接丢弃。basis 填 verified。不要把代码仓库的工程实现细节、构建/测试命令或排障过程写成个人记忆。\n\
+5. 项目 AGENTS.md 提议（kind = agents_proposal，scope = codebase）：仅当原文总结了某个代码仓库长期适用的工程约定、架构约束、实现机制、测试/发布规范或踩坑教训（适合写进该仓库的 AGENTS.md，供后续改该仓库的 Agent 遵守）时输出。它不会进入个人记忆，而是路由为对应代码仓库项目的 AGENTS.md 提议请主人确认；about 填对应代码仓库项目名（若来源已属于该仓库项目可留空），basis 填 verified。{event_line}\n\n\
+每条输出都必须标注强类型 scope（只能取以下四个值之一，服务端完全按 scope 确定性路由）：\n\
+- person：关于某个人（含主人自己的偏好/规则，或某个联系人）\n\
+- organization：关于某个组织或团队\n\
+- project：关于某个项目的业务背景、目标或非代码事实\n\
+- codebase：关于某个代码仓库的工程实现/架构/构建/测试/发布结论（仅能落到标注了“代码仓库”的项目，走 AGENTS.md 提议）\n\n\
 复述事项目标、换个说法总结需求、把功能需求写成“用户希望……”，都不要输出。没有符合的就返回 {{\"items\":[]}}，这是常见的正常结果；宁可少，不要凑数，最多 {MAX_PER_ORIGIN} 条。\n\n\
 可识别的名字（about 只能用这些名字，认不出就留空，不要猜）：\n{names}\n\n\
 已有的长期记忆和知识（含待确认的；和某条重复就在 dup_of 填它的 id；和已确认的某条冲突、应该替换它就在 conflicts 填它的 id）：\n{similar}\n\n\
 原文：\n<<<\n{text}\n>>>\n\n\
-只返回 JSON：{{\"items\":[{{\"kind\":\"preference|rule|fact|{KIND_PROPOSAL}{event_kind}\",\"text\":\"一句话，写成以后可以直接照做或引用的规则、偏好、事实或 AGENTS.md 建议\",\"scope\":\"适用范围：在什么场景下用\",\"why\":\"为什么值得长期保留：以后在什么场景会用到\",\"basis\":\"explicit|repeated|verified\",\"evidence\":[\"原文摘录，逐字照抄\"],\"about\":[\"名字\"],\"level\":\"public|conclusion|reasoning|never\",\"dup_of\":null,\"conflicts\":null}}]}}",
+只返回 JSON：{{\"items\":[{{\"kind\":\"preference|rule|fact|{KIND_PROPOSAL}{event_kind}\",\"scope\":\"person|organization|project|codebase\",\"text\":\"一句话，写成以后可以直接照做或引用的规则、偏好、事实或 AGENTS.md 建议\",\"when\":\"适用场景：在什么场景下用\",\"why\":\"为什么值得长期保留：以后在什么场景会用到\",\"basis\":\"explicit|repeated|verified\",\"evidence\":[\"原文摘录，逐字照抄\"],\"about\":[\"名字\"],\"level\":\"public|conclusion|reasoning|never\",\"dup_of\":null,\"conflicts\":null}}]}}",
         if task.events { "和第 6 类" } else { "" }
     )
 }
@@ -237,6 +302,10 @@ pub fn prompt(label: &str, text: &str, similar: &[Similar], names: &Names, task:
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Raw {
     pub kind: String,
+    /// Strongly-typed routing scope (`person` | `organization` | `project` | `codebase`).
+    pub scope: Option<ExtractScope>,
+    /// True when the model emitted a non-empty `scope` outside [`ExtractScope`].
+    pub invalid_scope: bool,
     pub text: String,
     pub about: Vec<String>,
     pub level: Option<Level>,
@@ -244,8 +313,8 @@ pub struct Raw {
     pub evidence: Vec<String>,
     /// `explicit` | `repeated` | `verified`, or empty.
     pub basis: String,
-    /// Where it applies.
-    pub scope: String,
+    /// Where it applies (human-readable hint shown on 待确认).
+    pub when: String,
     /// Why it is worth keeping.
     pub why: String,
     pub dup_of: Option<String>,
@@ -285,20 +354,31 @@ pub fn parse(out: &str) -> Vec<Raw> {
     items
         .iter()
         .filter(|x| x.is_object())
-        .map(|x| Raw {
-            kind: opt_str(x.get("kind")).unwrap_or_default(),
-            text: opt_str(x.get("text")).unwrap_or_default(),
-            about: str_list(x.get("about")),
-            level: x
-                .get("level")
-                .and_then(Value::as_str)
-                .and_then(Level::parse),
-            evidence: str_list(x.get("evidence")),
-            basis: opt_str(x.get("basis")).unwrap_or_default(),
-            scope: opt_str(x.get("scope")).unwrap_or_default(),
-            why: opt_str(x.get("why")).unwrap_or_default(),
-            dup_of: opt_str(x.get("dup_of")),
-            conflicts: opt_str(x.get("conflicts")),
+        .map(|x| {
+            let (scope, invalid_scope) = match opt_str(x.get("scope")).as_deref() {
+                None => (None, false),
+                Some(s) => match ExtractScope::parse(s) {
+                    Some(parsed) => (Some(parsed), false),
+                    None => (None, true),
+                },
+            };
+            Raw {
+                kind: opt_str(x.get("kind")).unwrap_or_default(),
+                scope,
+                invalid_scope,
+                text: opt_str(x.get("text")).unwrap_or_default(),
+                about: str_list(x.get("about")),
+                level: x
+                    .get("level")
+                    .and_then(Value::as_str)
+                    .and_then(Level::parse),
+                evidence: str_list(x.get("evidence")),
+                basis: opt_str(x.get("basis")).unwrap_or_default(),
+                when: opt_str(x.get("when")).unwrap_or_default(),
+                why: opt_str(x.get("why")).unwrap_or_default(),
+                dup_of: opt_str(x.get("dup_of")),
+                conflicts: opt_str(x.get("conflicts")),
+            }
         })
         .collect()
 }
@@ -342,113 +422,6 @@ pub const LASTING: [&str; 33] = [
     "from now on",
     "going forward",
 ];
-
-/// ASCII markers of codebase engineering instructions / implementation details (kept strictly ASCII
-/// to stay language-neutral and separate from personal facts).
-const CODE_SUBSTRINGS: &[&str] = &[
-    "`",
-    "::",
-    "src/",
-    "crates/",
-    "hub-rs/",
-    "web/src",
-    "migrations/",
-    "api/",
-    "agents.md",
-    "claude.md",
-    "cargo.toml",
-    "package.json",
-    "retry-after",
-    "github actions",
-    "github release",
-    "cargo ",
-    "npm ",
-    "pnpm ",
-    "yarn ",
-    "git ",
-];
-
-const CODE_WORDS: &[&str] = &[
-    "crate",
-    "worktree",
-    "rebase",
-    "nextest",
-    "clippy",
-    "rustfmt",
-    "textarea",
-    "sqlite",
-    "sqlite3",
-    "postgres",
-    "fts5",
-    "axum",
-    "tokio",
-    "serde",
-    "vitest",
-    "playwright",
-    "eslint",
-    "pytest",
-    "dockerfile",
-    "graphql",
-    "grpc",
-    "endpoint",
-    "lockfile",
-    "deadlock",
-    "stdout",
-    "stderr",
-    "ci",
-    "pr",
-];
-
-const CODE_EXTENSIONS: &[&str] = &[".rs", ".ts", ".tsx", ".sql", ".toml", ".mjs", ".py", ".go"];
-
-fn has_ascii_word(hay: &str, word: &str) -> bool {
-    let bytes = hay.as_bytes();
-    let w = word.as_bytes();
-    let mut start = 0;
-    while let Some(pos) = hay[start..].find(word) {
-        let i = start + pos;
-        let end = i + w.len();
-        let left_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
-        let right_ok = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
-        if left_ok && right_ok {
-            return true;
-        }
-        start = i + 1;
-    }
-    false
-}
-
-fn has_extension(hay: &str, ext: &str) -> bool {
-    let bytes = hay.as_bytes();
-    let mut start = 0;
-    while let Some(pos) = hay[start..].find(ext) {
-        let i = start + pos;
-        let end = i + ext.len();
-        let left_ok = i > 0
-            && (bytes[i - 1].is_ascii_alphanumeric()
-                || bytes[i - 1] == b'_'
-                || bytes[i - 1] == b'-');
-        let right_ok = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
-        if left_ok && right_ok {
-            return true;
-        }
-        start = i + 1;
-    }
-    false
-}
-
-/// Deterministic check: does a `fact` describe codebase engineering details rather than personal
-/// knowledge about people, organizations or projects?
-pub fn is_codebase_engineering(text: &str, scope: &str) -> bool {
-    let combined = format!(
-        "{} {}",
-        text.to_ascii_lowercase(),
-        scope.to_ascii_lowercase()
-    );
-    CODE_SUBSTRINGS.iter().any(|s| combined.contains(s))
-        || CODE_EXTENSIONS.iter().any(|e| has_extension(&combined, e))
-        || CODE_WORDS.iter().any(|w| has_ascii_word(&combined, w))
-}
 
 /// Text reduced to what comparisons look at: letters and digits, lowercased.
 fn norm(s: &str) -> String {
@@ -510,15 +483,18 @@ pub enum Dropped {
     Duplicate,
     /// Not a kind this origin proposes, or no usable text.
     Shape,
+    /// Missing, unrecognized or contradictory `scope` (must be `person|organization|project|codebase`).
+    InvalidScope,
     /// No quote, or a quote that is not in the text.
     NoEvidence,
     /// A preference or rule from one plain request: no word that it lasts, not said twice.
     OneOff,
     /// It restates the item's goal.
     RestatesGoal,
-    /// A `fact` or `agents_proposal` without any `about` target.
+    /// Missing required `about` target for the declared scope.
     MissingAbout,
-    /// `about` named objects that did not resolve to an eligible existing entity.
+    /// `about` named objects that did not resolve to an eligible existing entity for the declared scope
+    /// (e.g. unknown name, wrong entity type, or non-repository project for `codebase`).
     UnresolvedAbout,
     /// Origin output cap [`MAX_PER_ORIGIN`] was already reached.
     CapReached,
@@ -529,6 +505,7 @@ impl Dropped {
         match self {
             Self::Duplicate => "duplicate",
             Self::Shape => "shape",
+            Self::InvalidScope => "invalid_scope",
             Self::NoEvidence => "no_evidence",
             Self::OneOff => "one_off",
             Self::RestatesGoal => "restates_goal",
@@ -555,6 +532,15 @@ pub fn check(r: &Raw, source: &str, task: Task, known: &[String]) -> Result<Vec<
     if !kinds.contains(&r.kind.as_str()) {
         return Err(Dropped::Shape);
     }
+    if r.invalid_scope {
+        return Err(Dropped::InvalidScope);
+    }
+    let Some(scope) = r.scope else {
+        return Err(Dropped::InvalidScope);
+    };
+    if r.kind == KIND_PROPOSAL && scope != ExtractScope::Codebase {
+        return Err(Dropped::InvalidScope);
+    }
     let n = r.text.chars().count();
     if n == 0 || n > 2000 {
         return Err(Dropped::Shape);
@@ -573,7 +559,7 @@ pub fn check(r: &Raw, source: &str, task: Task, known: &[String]) -> Result<Vec<
         return Err(Dropped::NoEvidence);
     }
     let says_lasting = quotes.iter().any(|q| lasting(q));
-    if matches!(r.kind.as_str(), "preference" | "rule") {
+    if scope != ExtractScope::Codebase && matches!(r.kind.as_str(), "preference" | "rule") {
         let distinct = {
             let mut q: Vec<String> = quotes.iter().map(|q| norm(q)).collect();
             q.sort();
@@ -592,7 +578,7 @@ pub fn check(r: &Raw, source: &str, task: Task, known: &[String]) -> Result<Vec<
             }
         }
     }
-    if r.kind != KIND_PROPOSAL
+    if scope != ExtractScope::Codebase
         && r.conflicts.is_none()
         && known.iter().any(|k| near_duplicate(&r.text, k))
     {
@@ -622,12 +608,14 @@ fn kind_metric(kind: &str) -> &'static str {
 }
 
 /// Applies all deterministic server rules over the model's items:
-/// - [`check`] validates kind, text length, quotes, lasting signal, goal restatement, and duplicates.
+/// - [`check`] validates kind, strongly-typed [`ExtractScope`], text length, quotes, lasting signal,
+///   goal restatement, and duplicates.
 /// - `about` names resolve strictly against existing workspace entities (never guessed).
-/// - `fact` MUST attach to an existing person, organization, team, or project; missing or unresolved
-///   `about` is dropped and counted.
-/// - `agents_proposal` (or a `fact` containing codebase engineering details) routes to a project
-///   `AGENTS.md` proposal instead of personal memory; if no project resolves, it is dropped.
+/// - `scope = codebase` routes deterministically to a project `AGENTS.md` proposal and MUST resolve
+///   to a repository-bound project (`projects.kind == "git"` with path), else dropped and counted.
+/// - `scope ∈ {person, organization, project}` MUST resolve to an existing entity matching that
+///   scope (with empty-`about` `person` preferences/rules attaching to the owner `"我"` when present);
+///   mismatched or unresolved entities are dropped and counted.
 /// - At most [`MAX_PER_ORIGIN`] total outputs (candidates + proposals) are kept.
 #[allow(clippy::too_many_arguments)]
 pub fn select(
@@ -653,6 +641,7 @@ pub fn select(
                 continue;
             }
         };
+        let scope = r.scope.expect("validated by check");
         let mut resolved: Vec<(ObjRef, EntityKind)> = Vec::new();
         for name in &r.about {
             if let Some((x, kind)) = names.resolve_entity(name)
@@ -666,18 +655,21 @@ pub fn select(
             continue;
         }
 
-        let target_project = resolved
-            .iter()
-            .find(|(_, k)| *k == EntityKind::Project)
-            .map(|(r, _)| r.id.clone())
-            .or_else(|| task.project.filter(|p| !p.is_empty()).map(String::from));
-
-        let route_to_proposal = r.kind == KIND_PROPOSAL
-            || (r.kind == "fact" && is_codebase_engineering(&r.text, &r.scope));
-
-        if route_to_proposal {
-            let Some(project_id) = target_project else {
-                let why = if r.about.is_empty() {
+        if scope == ExtractScope::Codebase {
+            let repo_project = resolved
+                .iter()
+                .find(|(_, k)| scope.matches(*k))
+                .map(|(r, _)| r.id.clone())
+                .or_else(|| {
+                    r.about
+                        .is_empty()
+                        .then_some(task.project)
+                        .flatten()
+                        .filter(|pid| names.is_repo_project(pid))
+                        .map(String::from)
+                });
+            let Some(project_id) = repo_project else {
+                let why = if r.about.is_empty() && task.project.is_none() {
                     Dropped::MissingAbout
                 } else {
                     Dropped::UnresolvedAbout
@@ -707,43 +699,30 @@ pub fn select(
             continue;
         }
 
-        if r.kind == "fact" {
-            let subject_about: Vec<ObjRef> = resolved
-                .iter()
+        let has_matching = resolved.iter().any(|(_, k)| scope.matches(*k));
+        let about = if has_matching {
+            resolved
+                .into_iter()
                 .filter(|(_, k)| k.is_fact_subject())
-                .map(|(r, _)| r.clone())
-                .collect();
-            if subject_about.is_empty() {
-                let why = if r.about.is_empty() {
-                    Dropped::MissingAbout
-                } else {
-                    Dropped::UnresolvedAbout
-                };
-                record_drop(&mut out, why, &r.text);
-                continue;
-            }
-            if out
-                .candidates
-                .iter()
-                .any(|c| near_duplicate(&c.text, &r.text))
-            {
-                record_drop(&mut out, Dropped::Duplicate, &r.text);
-                continue;
-            }
-            out.candidates.push(NewCandidate {
-                kind: r.kind,
-                text: r.text,
-                about: subject_about,
-                level: r.level.unwrap_or(default_level).max(default_level),
-                evidence: quotes.join(" / "),
-                supersedes: r.conflicts.filter(|id| valid_conflict(id)),
-                why: r.why,
-                scope: r.scope,
-                owner_said: false,
-            });
-            record_produced("fact");
+                .map(|(r, _)| r)
+                .collect()
+        } else if scope == ExtractScope::Person
+            && r.about.is_empty()
+            && matches!(r.kind.as_str(), "preference" | "rule")
+        {
+            names
+                .resolve_entity("我")
+                .map(|(r, _)| vec![r])
+                .unwrap_or_default()
+        } else {
+            let why = if r.about.is_empty() {
+                Dropped::MissingAbout
+            } else {
+                Dropped::UnresolvedAbout
+            };
+            record_drop(&mut out, why, &r.text);
             continue;
-        }
+        };
 
         if out
             .candidates
@@ -757,12 +736,12 @@ pub fn select(
         out.candidates.push(NewCandidate {
             kind: r.kind,
             text: r.text,
-            about: resolved.into_iter().map(|(r, _)| r).collect(),
+            about,
             level: r.level.unwrap_or(default_level).max(default_level),
             evidence: quotes.join(" / "),
             supersedes: r.conflicts.filter(|id| valid_conflict(id)),
             why: r.why,
-            scope: r.scope,
+            scope: r.when,
             owner_said: false,
         });
         record_produced(metric_kind);
@@ -1065,9 +1044,15 @@ mod tests {
         );
         n.add(
             "Steve",
-            "项目",
+            "项目（代码仓库）",
             &ObjRef::new("project", "prj_steve"),
-            EntityKind::Project,
+            EntityKind::Project { has_repo: true },
+        );
+        n.add(
+            "NotesDir",
+            "项目",
+            &ObjRef::new("project", "prj_notes"),
+            EntityKind::Project { has_repo: false },
         );
         n.add(
             "HelperBot",
@@ -1087,6 +1072,8 @@ mod tests {
         );
         assert_eq!(n.resolve(" Sarah "), Some(ObjRef::new("party", "ct_1")));
         assert_eq!(n.resolve("org_1"), Some(ObjRef::new("party", "org_1")));
+        assert!(n.is_repo_project("prj_steve"));
+        assert!(!n.is_repo_project("prj_notes"));
         assert_eq!(n.resolve("Sarah C"), None);
         assert_eq!(n.resolve("李雷"), None, "two people of that name: no guess");
         assert_eq!(n.resolve(""), None);
@@ -1094,23 +1081,37 @@ mod tests {
 
     #[test]
     fn parses_fenced_answers_and_ignores_garbage() {
-        let out = "好的：\n```json\n{\"items\":[{\"kind\":\"fact\",\"text\":\" A \",\"about\":\"Acme\",\"level\":\"reasoning\",\"dup_of\":\"\",\"conflicts\":null}]}\n```";
+        let out = "好的：\n```json\n{\"items\":[{\"kind\":\"fact\",\"scope\":\"organization\",\"text\":\" A \",\"about\":\"Acme\",\"level\":\"reasoning\",\"dup_of\":\"\",\"conflicts\":null}]}\n```";
         let r = parse(out);
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].text, "A");
+        assert_eq!(r[0].scope, Some(ExtractScope::Organization));
+        assert!(!r[0].invalid_scope);
         assert_eq!(r[0].about, vec!["Acme".to_string()]);
         assert_eq!(r[0].level, Some(Level::Reasoning));
         assert_eq!(r[0].dup_of, None);
         assert!(r[0].evidence.is_empty());
         let r = parse(
-            r#"{"items":[{"kind":"rule","text":"T","evidence":["甲"," 乙 "],"basis":"repeated","scope":"写邮件时","why":"以后写信用"},{"kind":"fact","text":"U","evidence":"丙"}]}"#,
+            r#"{"items":[{"kind":"rule","scope":"person","text":"T","evidence":["甲"," 乙 "],"basis":"repeated","when":"写邮件时","why":"以后写信用"},{"kind":"fact","scope":"bogus","text":"U","evidence":"丙"}]}"#,
         );
         assert_eq!(r[0].evidence, vec!["甲".to_string(), "乙".to_string()]);
         assert_eq!(
-            (r[0].basis.as_str(), r[0].scope.as_str(), r[0].why.as_str()),
-            ("repeated", "写邮件时", "以后写信用")
+            (
+                r[0].scope,
+                r[0].basis.as_str(),
+                r[0].when.as_str(),
+                r[0].why.as_str()
+            ),
+            (
+                Some(ExtractScope::Person),
+                "repeated",
+                "写邮件时",
+                "以后写信用"
+            )
         );
         assert_eq!(r[1].evidence, vec!["丙".to_string()]);
+        assert_eq!(r[1].scope, None);
+        assert!(r[1].invalid_scope);
         assert!(
             parse(r#"{"items":[]}"#).is_empty(),
             "none is a normal answer"
@@ -1123,6 +1124,7 @@ mod tests {
     fn raw(text: &str) -> Raw {
         Raw {
             kind: "fact".into(),
+            scope: Some(ExtractScope::Organization),
             text: text.into(),
             about: vec!["Acme".into()],
             evidence: vec![text.into()],
@@ -1141,7 +1143,7 @@ mod tests {
     }
 
     #[test]
-    fn select_enforces_about_for_facts_and_caps_total() {
+    fn select_enforces_scope_and_entity_matching_and_caps_total() {
         let n = names();
         let mut items = vec![
             Raw {
@@ -1149,14 +1151,30 @@ mod tests {
                 ..raw("重复的")
             },
             Raw {
+                scope: None,
+                ..raw("缺少 scope 的条目")
+            },
+            Raw {
+                scope: None,
+                invalid_scope: true,
+                ..raw("非法 scope 的条目")
+            },
+            Raw {
                 about: vec![],
                 ..raw("没有关于对象的事实")
             },
             Raw {
+                scope: Some(ExtractScope::Person),
                 about: vec!["王五".into()],
                 ..raw("认不出的人")
             },
             Raw {
+                scope: Some(ExtractScope::Person),
+                about: vec!["Acme".into()],
+                ..raw("scope 写 person 却只指了组织")
+            },
+            Raw {
+                scope: Some(ExtractScope::Organization),
                 about: vec!["HelperBot".into()],
                 ..raw("只挂到 Bot 的事实不合法")
             },
@@ -1210,47 +1228,53 @@ mod tests {
         assert_eq!(got.candidates[1].text, "更严的级别");
         assert_eq!(got.candidates[1].level, Level::Never);
         assert_eq!(got.candidates[1].supersedes, None);
+        assert!(got.dropped.contains(&Dropped::InvalidScope));
         assert!(got.dropped.contains(&Dropped::MissingAbout));
         assert!(got.dropped.contains(&Dropped::UnresolvedAbout));
         assert!(got.dropped.contains(&Dropped::CapReached));
         assert!(got.candidates.iter().all(|c| {
             c.text != "重复的"
+                && c.text != "缺少 scope 的条目"
+                && c.text != "非法 scope 的条目"
                 && c.text != "没有关于对象的事实"
                 && c.text != "认不出的人"
+                && c.text != "scope 写 person 却只指了组织"
                 && c.text != "只挂到 Bot 的事实不合法"
                 && c.kind != "event"
         }));
     }
 
     #[test]
-    fn engineering_conclusions_route_to_project_agents_proposals() {
+    fn codebase_scope_routes_deterministically_to_repo_bound_project_proposals() {
         let n = names();
         let items = vec![
-            // Explicit agents_proposal using task.project fallback
-            Raw {
-                kind: KIND_PROPOSAL.into(),
-                text: "改完 Rust 代码后运行 cargo check --workspace --all-targets 验证".into(),
-                about: vec![],
-                evidence: vec![
-                    "改完 Rust 代码后运行 cargo check --workspace --all-targets 验证".into(),
-                ],
-                basis: "verified".into(),
-                why: "避免遗漏编译警告".into(),
-                ..Default::default()
-            },
-            // Model mislabeled as `fact`, but contains code engineering cues → rerouted to proposal
+            // Chinese engineering conclusion with `scope = codebase` (even with `kind = "fact"`):
+            // routed deterministically without any keyword heuristic.
             Raw {
                 kind: "fact".into(),
-                text: "输入框 textarea 重构时不要破坏 IME 组合输入事件".into(),
+                scope: Some(ExtractScope::Codebase),
+                text: "输入框由原生 textarea 绘制光标".into(),
                 about: vec!["Steve".into()],
-                evidence: vec!["输入框 textarea 重构时不要破坏 IME 组合输入事件".into()],
+                evidence: vec!["输入框由原生 textarea 绘制光标".into()],
                 basis: "verified".into(),
-                why: "历史回归经验".into(),
+                why: "避免自绘光标导致输入法偏移".into(),
+                ..Default::default()
+            },
+            // Pure-Chinese engineering conclusion with zero ASCII words using `task.project` fallback
+            Raw {
+                kind: KIND_PROPOSAL.into(),
+                scope: Some(ExtractScope::Codebase),
+                text: "消息列表在流式输出期间保持底部锚定，不要整段重排历史".into(),
+                about: vec![],
+                evidence: vec!["消息列表在流式输出期间保持底部锚定，不要整段重排历史".into()],
+                basis: "verified".into(),
+                why: "防止长对话滚动抖动".into(),
                 ..Default::default()
             },
             // Normal fact about a person → stays as personal memory candidate
             Raw {
                 kind: "fact".into(),
+                scope: Some(ExtractScope::Person),
                 text: "Sarah Chen 在 Acme 负责年度商务合作与采购".into(),
                 about: vec!["Sarah Chen".into(), "Acme".into()],
                 evidence: vec!["Sarah Chen 在 Acme 负责年度商务合作与采购".into()],
@@ -1279,32 +1303,118 @@ mod tests {
             "Sarah Chen 在 Acme 负责年度商务合作与采购"
         );
         assert_eq!(got.proposals.len(), 2);
+        assert_eq!(got.proposals[0].text, "输入框由原生 textarea 绘制光标");
         assert!(got.proposals.iter().all(|p| p.project_id == "prj_steve"));
         assert!(got.proposals.iter().all(|p| p.kind == KIND_AGENTS_MD));
 
-        // Without task.project, an engineering fact attached only to a person is dropped (never a memory).
-        let no_proj_item = vec![Raw {
-            kind: "fact".into(),
-            text: "迁移脚本必须写入 migrations/LOCK 并保持 sqlite 兼容".into(),
-            about: vec!["Sarah Chen".into()],
-            evidence: vec!["迁移脚本必须写入 migrations/LOCK 并保持 sqlite 兼容".into()],
-            basis: "verified".into(),
-            ..Default::default()
-        }];
-        let src2 = source(&no_proj_item);
+        // Codebase targeting a plain directory project (no git repo) is dropped & counted.
+        let non_repo = vec![
+            Raw {
+                kind: KIND_PROPOSAL.into(),
+                scope: Some(ExtractScope::Codebase),
+                text: "普通目录项目没有代码仓库".into(),
+                about: vec!["NotesDir".into()],
+                evidence: vec!["普通目录项目没有代码仓库".into()],
+                basis: "verified".into(),
+                ..Default::default()
+            },
+            // Fallback task.project is also rejected if that project has no repo.
+            Raw {
+                kind: KIND_PROPOSAL.into(),
+                scope: Some(ExtractScope::Codebase),
+                text: "从无仓库项目回退也应被拒绝".into(),
+                about: vec![],
+                evidence: vec!["从无仓库项目回退也应被拒绝".into()],
+                basis: "verified".into(),
+                ..Default::default()
+            },
+            // Codebase targeting only a person with no repo project -> dropped, never memory.
+            Raw {
+                kind: "fact".into(),
+                scope: Some(ExtractScope::Codebase),
+                text: "只挂到联系人不能落成代码库提议".into(),
+                about: vec!["Sarah Chen".into()],
+                evidence: vec!["只挂到联系人不能落成代码库提议".into()],
+                basis: "verified".into(),
+                ..Default::default()
+            },
+        ];
+        let src2 = source(&non_repo);
         let got2 = select(
-            no_proj_item,
+            non_repo,
             &n,
             Level::Conclusion,
             &src2,
-            Task::default(),
+            Task {
+                goals: &[],
+                events: false,
+                project: Some("prj_notes"),
+            },
             &[],
             &[],
             |_| false,
         );
         assert!(got2.candidates.is_empty());
         assert!(got2.proposals.is_empty());
-        assert_eq!(got2.dropped, vec![Dropped::UnresolvedAbout]);
+        assert_eq!(
+            got2.dropped,
+            vec![
+                Dropped::UnresolvedAbout,
+                Dropped::UnresolvedAbout,
+                Dropped::UnresolvedAbout,
+            ]
+        );
+
+        // Codebase with empty `about` and no `task.project` -> MissingAbout.
+        let missing = vec![Raw {
+            kind: KIND_PROPOSAL.into(),
+            scope: Some(ExtractScope::Codebase),
+            text: "未指明代码仓库项目".into(),
+            about: vec![],
+            evidence: vec!["未指明代码仓库项目".into()],
+            basis: "verified".into(),
+            ..Default::default()
+        }];
+        let src3 = source(&missing);
+        let got3 = select(
+            missing,
+            &n,
+            Level::Conclusion,
+            &src3,
+            Task::default(),
+            &[],
+            &[],
+            |_| false,
+        );
+        assert!(got3.proposals.is_empty());
+        assert_eq!(got3.dropped, vec![Dropped::MissingAbout]);
+
+        // Plain directory project IS valid for `scope = project` (non-codebase project fact).
+        let dir_fact = vec![Raw {
+            kind: "fact".into(),
+            scope: Some(ExtractScope::Project),
+            text: "NotesDir 用来整理季度复盘资料".into(),
+            about: vec!["NotesDir".into()],
+            evidence: vec!["NotesDir 用来整理季度复盘资料".into()],
+            basis: "verified".into(),
+            ..Default::default()
+        }];
+        let src4 = source(&dir_fact);
+        let got4 = select(
+            dir_fact,
+            &n,
+            Level::Conclusion,
+            &src4,
+            Task::default(),
+            &[],
+            &[],
+            |_| false,
+        );
+        assert_eq!(got4.candidates.len(), 1);
+        assert_eq!(
+            got4.candidates[0].about,
+            vec![ObjRef::new("project", "prj_notes")]
+        );
     }
 
     #[test]
@@ -1312,6 +1422,7 @@ mod tests {
         let n = names();
         let items = vec![Raw {
             kind: KIND_PROPOSAL.into(),
+            scope: Some(ExtractScope::Codebase),
             text: "修改 Rust 代码前先跑 cargo nextest 确认基线。".into(),
             about: vec!["Steve".into()],
             evidence: vec!["修改 Rust 代码前先跑 cargo nextest 确认基线。".into()],
@@ -1526,6 +1637,11 @@ mod tests {
                 .collect();
             let r = Raw {
                 kind: c.kind.into(),
+                scope: Some(if c.kind == "fact" {
+                    ExtractScope::Organization
+                } else {
+                    ExtractScope::Person
+                }),
                 text: c.text.into(),
                 evidence: c.evidence.split('\u{1f}').map(String::from).collect(),
                 basis: c.basis.into(),

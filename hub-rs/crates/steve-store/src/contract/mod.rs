@@ -124,7 +124,7 @@ pub use flow_triggers::{DueTrigger, FlowTriggers};
 pub use flow_waits::{FlowWaits, NewWait};
 pub use grant_rows::{FlowGrant, GrantRows, NewVaultGrant, VaultGrant, VaultGrantRecord};
 pub use knowledge_references::{
-    FileInfo, FileReads, ItemEvidence, MessageEvidence, References, SessionEvidence,
+    FileInfo, FileReads, ItemEvidence, MessageEvidence, ProjectRef, References, SessionEvidence,
 };
 pub use match_rules::{MatchRule, MatchRules, PrefixConfig};
 pub use memory_index::{

@@ -69,18 +69,43 @@ async fn extraction_enforces_about_and_routes_engineering_to_agents_proposals() 
             },
         )
         .unwrap();
+    let _dir_project = e
+        .env
+        .store()
+        .projects()
+        .create(
+            WS,
+            &NewProject {
+                name: "notes_dir".into(),
+                kind: "dir".into(),
+                path: "/docs/notes".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
-    // Script model output with:
-    // - fact with missing `about` (dropped)
-    // - fact with unresolved `about` (dropped)
-    // - one-off restatement of item goal (dropped)
-    // - explicit `agents_proposal` about project `steve` (routed to project_proposals)
-    // - mislabeled `fact` with codebase engineering cues about `steve` (rerouted to project_proposals)
-    // - valid `fact` anchored to existing org `Acme` (kept as knowledge candidate)
+    // Script model output with strongly-typed `scope`:
+    // - missing `scope` (dropped as invalid_scope)
+    // - `organization` fact with empty `about` (dropped as missing_about)
+    // - `person` fact with unresolved `about` (dropped as unresolved_about)
+    // - `person` fact whose `about` resolves only to an org, not a person (dropped as unresolved_about)
+    // - one-off restatement of item goal (dropped as one_off)
+    // - `codebase` targeting a plain dir project without a git repo (dropped as unresolved_about)
+    // - explicit `agents_proposal` with `scope: "codebase"` about git project `steve` (routed to project_proposals)
+    // - Chinese codebase conclusion (`kind: "fact"`, `scope: "codebase"`) about `steve` (routed deterministically to project_proposals)
+    // - valid `organization` fact anchored to existing org `Acme` (kept as knowledge candidate)
     let reply = json!({
         "items": [
             {
                 "kind": "fact",
+                "text": "缺 scope 的条目会被丢弃",
+                "about": ["Acme"],
+                "evidence": "五行以内",
+                "basis": "verified"
+            },
+            {
+                "kind": "fact",
+                "scope": "organization",
                 "text": "没有主语的孤立事实",
                 "about": [],
                 "evidence": "五行以内",
@@ -88,13 +113,23 @@ async fn extraction_enforces_about_and_routes_engineering_to_agents_proposals() 
             },
             {
                 "kind": "fact",
+                "scope": "person",
                 "text": "王五负责未知业务",
                 "about": ["王五"],
                 "evidence": "五行以内",
                 "basis": "verified"
             },
             {
+                "kind": "fact",
+                "scope": "person",
+                "text": "类型不匹配：写 person 却只指了组织",
+                "about": ["Acme"],
+                "evidence": "五行以内",
+                "basis": "verified"
+            },
+            {
                 "kind": "preference",
+                "scope": "person",
                 "text": "用户希望给 Acme 写续签邮件并抄送 Sarah",
                 "about": [],
                 "evidence": "给 Acme 写续签邮件，抄送 Sarah",
@@ -102,22 +137,33 @@ async fn extraction_enforces_about_and_routes_engineering_to_agents_proposals() 
             },
             {
                 "kind": KIND_PROPOSAL,
-                "text": "修改 steve 后端后统一执行 cargo check --workspace --all-targets",
+                "scope": "codebase",
+                "text": "普通目录项目没有代码仓库，不能接 codebase 提议",
+                "about": ["notes_dir"],
+                "evidence": "五行以内",
+                "basis": "verified"
+            },
+            {
+                "kind": KIND_PROPOSAL,
+                "scope": "codebase",
+                "text": "输入框由原生 textarea 绘制光标",
                 "about": ["steve"],
                 "evidence": "写好了续签邮件草稿",
                 "basis": "verified",
-                "why": "避免带警告合入主分支"
+                "why": "避免重复实现光标叠加层"
             },
             {
                 "kind": "fact",
-                "text": "steve 仓库的 migration 必须登记到 migrations/LOCK 保持 sqlite 兼容",
+                "scope": "codebase",
+                "text": "消息列表在流式输出时保持滚动锚定，不要每次重排整段历史",
                 "about": ["steve"],
                 "evidence": "五行以内",
                 "basis": "verified",
-                "why": "迁移锁一致性要求"
+                "why": "避免长对话抖动"
             },
             {
                 "kind": "fact",
+                "scope": "organization",
                 "text": "Acme 的邮件往来统一使用英文",
                 "about": ["Acme"],
                 "evidence": "Acme 的邮件一律用英文",
